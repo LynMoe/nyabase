@@ -15,7 +15,6 @@ import {
   OperationKind,
 } from '@nyabase/common';
 import { DataDirectoryEntity } from '../entities/data-directory.entity.js';
-import { DataDirRuntimeObservationEntity } from '../entities/data-dir-runtime-observation.entity.js';
 import { DataDiskEntity } from '../entities/data-disk.entity.js';
 import { OperationStepEntity } from '../entities/operation-step.entity.js';
 import { QuotaDesiredEntity } from '../entities/quota-desired.entity.js';
@@ -26,6 +25,7 @@ import { runSerializedTransaction } from '../database/serialized-transaction.js'
 import { classifyRetry, errorMessage } from './operation-retry-policy.js';
 import { OperationOrchestratorService } from './operation-orchestrator.service.js';
 import { ResourceLockService } from './resource-lock.service.js';
+import { DataDirReconcilerService } from '../datadirs/data-dir-reconciler.service.js';
 
 const WORKER_INTERVAL_MS = 1_000;
 const TASK_LOCK_MS = 30_000;
@@ -53,8 +53,7 @@ export class ReconcileTaskWorkerService implements OnModuleInit, OnModuleDestroy
     private quotaDesiredRepo: Repository<QuotaDesiredEntity>,
     @InjectRepository(DataDirectoryEntity)
     private dataDirsRepo: Repository<DataDirectoryEntity>,
-    @InjectRepository(DataDirRuntimeObservationEntity)
-    private dataDirObservationsRepo: Repository<DataDirRuntimeObservationEntity>,
+    private dataDirReconciler: DataDirReconcilerService,
   ) {}
 
   onModuleInit(): void {
@@ -287,49 +286,10 @@ export class ReconcileTaskWorkerService implements OnModuleInit, OnModuleDestroy
   }
 
   private async reconcileDataDirTask(task: ReconcileTaskEntity): Promise<void> {
-    const expected = await this.loadExpectedDataDirs(task.serverId);
-    const reported = await this.loadLatestDataDirObservations(task.serverId);
-
-    const reportedKeys = new Set(reported.map((row) => this.dataDirKey(row.sourceKind, row.sourceId, row.name)));
-    const expectedKeys = new Set(expected.map((row) => this.dataDirKey(row.sourceKind, row.sourceId, row.name)));
-    const orphans = reported.filter((row) => !expectedKeys.has(this.dataDirKey(row.sourceKind, row.sourceId, row.name)));
-    const missing = expected.filter((row) => !reportedKeys.has(this.dataDirKey(row.sourceKind, row.sourceId, row.name)));
-
-    await Promise.all([
-      ...reported.map((row) =>
-        this.dataDirObservationsRepo.update(row.id, {
-          issueKind: expectedKeys.has(this.dataDirKey(row.sourceKind, row.sourceId, row.name)) ? null : 'orphan',
-        }),
-      ),
-      ...missing.map(async (dir) => {
-        const now = new Date();
-        await this.dataDirObservationsRepo.save(this.dataDirObservationsRepo.create({
-          id: uuidv4(),
-          serverId: task.serverId,
-          dataDirId: dir.dataDirId,
-          sourceKind: dir.sourceKind,
-          sourceId: dir.sourceId,
-          name: dir.name,
-          hostPath: dir.hostPath,
-          userId: dir.userId,
-          reportSeq: await this.nextDataDirReportSeq(task.serverId),
-          present: false,
-          issueKind: 'missing',
-          firstSeenAt: now,
-          lastSeenAt: now,
-          missingSince: now,
-          stale: false,
-          lastError: null,
-        }));
-      }),
-    ]);
+    await this.dataDirReconciler.reconcile(task.serverId);
 
     await this.markTaskSucceeded(task, {
-      reason: 'data_dir_observations_reconciled',
-      expected: expected.length,
-      reported: reported.length,
-      orphans: orphans.length,
-      missing: missing.length,
+      reason: 'data_dir_state_cache_reconciled',
     });
   }
 
@@ -562,39 +522,6 @@ export class ReconcileTaskWorkerService implements OnModuleInit, OnModuleDestroy
     }
 
     return results;
-  }
-
-  private async loadLatestDataDirObservations(serverId: string): Promise<DataDirRuntimeObservationEntity[]> {
-    const rows = await this.dataDirObservationsRepo.find({
-      where: { serverId },
-      order: {
-        sourceKind: 'ASC',
-        sourceId: 'ASC',
-        name: 'ASC',
-        reportSeq: 'DESC',
-        lastSeenAt: 'DESC',
-      },
-    });
-    const latest = new Map<string, DataDirRuntimeObservationEntity>();
-    for (const row of rows) {
-      if (!row.present || row.stale) continue;
-      const key = this.dataDirKey(row.sourceKind, row.sourceId, row.name);
-      if (!latest.has(key)) latest.set(key, row);
-    }
-    return [...latest.values()];
-  }
-
-  private async nextDataDirReportSeq(serverId: string): Promise<number> {
-    const raw = await this.dataDirObservationsRepo
-      .createQueryBuilder('observation')
-      .select('MAX(observation.reportSeq)', 'max')
-      .where('observation.serverId = :serverId', { serverId })
-      .getRawOne<{ max: number | string | null }>();
-    return Number(raw?.max ?? 0) + 1;
-  }
-
-  private dataDirKey(sourceKind: string, sourceId: string, name: string): string {
-    return `${sourceKind}|${sourceId}|${name}`;
   }
 
   private numberOrNull(value: unknown): number | null {

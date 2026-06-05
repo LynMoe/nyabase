@@ -7,11 +7,6 @@ interface VmRangeResult {
   values: [number, string][];
 }
 
-interface VmInstantResult {
-  metric: Record<string, string>;
-  value: [number, string];
-}
-
 @Injectable()
 export class MetricsQueryService {
   private readonly vmUrl: string;

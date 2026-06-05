@@ -118,7 +118,7 @@ export class AgentApplication {
       }
     }, 5_000);
 
-    setInterval(() => void this.sendStateReport(), 60_000);
+    setInterval(() => void this.sendStateReport(), 15_000);
     setInterval(() => void this.sendDataDirReport(), 60_000);
     setInterval(() => void this.collectAndSendMetrics(), this.config.metricsIntervalMs);
     setInterval(() => void this.sendDockerDaemonStatus(), 30_000);

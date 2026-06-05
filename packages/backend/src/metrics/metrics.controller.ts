@@ -1,7 +1,6 @@
 import {
   Controller, Get, Param, Query, UseGuards,
   NotFoundException,
-  Optional,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
@@ -10,8 +9,6 @@ import { CurrentUser } from '../auth/decorators/current-user.decorator.js';
 import { AccessResolverService } from '../access/access-resolver.service.js';
 import { UsersService } from '../users/users.service.js';
 import { ContainerEntity } from '../entities/container.entity.js';
-import { RuntimeContainerEntity } from '../entities/runtime-container.entity.js';
-import { DataDiskRuntimeObservationEntity } from '../entities/data-disk-runtime-observation.entity.js';
 import { UserEntity } from '../entities/user.entity.js';
 import {
   HostMetricsDto, GpuMetricsDto, UserMetricsDto, ContainerMetricsDto,
@@ -19,6 +16,7 @@ import {
   UserMetrics, ContainerMetrics, type MetricSeries,
 } from '@nyabase/common';
 import { MetricsQueryService, emptySeries, parseRange } from './metrics-query.service.js';
+import { AgentGateway } from '../gateway/agent-gateway.js';
 
 interface ContainerMetricIdentity {
   containerId: string;
@@ -41,13 +39,9 @@ export class MetricsController {
     private readonly metricsQuery: MetricsQueryService,
     private readonly accessResolver: AccessResolverService,
     private readonly usersService: UsersService,
-    @InjectRepository(DataDiskRuntimeObservationEntity)
-    private readonly diskObservationsRepo: Repository<DataDiskRuntimeObservationEntity>,
     @InjectRepository(ContainerEntity)
     private readonly containersRepo: Repository<ContainerEntity>,
-    @Optional()
-    @InjectRepository(RuntimeContainerEntity)
-    private readonly runtimeContainersRepo?: Repository<RuntimeContainerEntity>,
+    private readonly agentGateway: AgentGateway,
   ) {}
 
   // ---------------------------------------------------------------------------
@@ -98,7 +92,7 @@ export class MetricsController {
         ),
       ]);
 
-    const diskInfos = await this.latestDiskObservations(serverId);
+    const diskInfos = this.agentGateway.stateCache.get(serverId)?.disks ?? [];
     const disks: HostDiskCapacity[] = diskInfos.map((d) => ({
       diskId: d.diskId,
       mountPoint: d.mountPoint,
@@ -362,24 +356,22 @@ export class MetricsController {
 
   private async containerIdentityMap(serverId: string): Promise<Map<string, ContainerMetricIdentity>> {
     const result = new Map<string, ContainerMetricIdentity>();
-    const [desiredContainers, runtimeRows] = await Promise.all([
-      this.containersRepo.find({ where: { serverId } }),
-      this.runtimeContainersRepo?.find({ where: { serverId } }) ?? Promise.resolve([]),
-    ]);
+    const desiredContainers = await this.containersRepo.find({ where: { serverId } });
     const desiredById = new Map(desiredContainers.map((container) => [container.id, container]));
 
     for (const container of desiredContainers) {
       result.set(container.id, { containerId: container.id, name: container.name, ownerId: container.ownerId });
     }
 
-    for (const runtime of runtimeRows) {
-      const container = runtime.containerId ? desiredById.get(runtime.containerId) : undefined;
-      const ownerId = runtime.ownerId ?? container?.ownerId ?? '';
-      const name = container?.name ?? runtime.containerId ?? runtime.runtimeId.slice(0, 12);
-      const info = { containerId: runtime.runtimeId.slice(0, 12), name, ownerId };
-      result.set(runtime.runtimeId, info);
-      result.set(runtime.runtimeId.slice(0, 12), info);
-      if (runtime.containerId) result.set(runtime.containerId, info);
+    for (const runtime of this.agentGateway.stateCache.get(serverId)?.containers.values() ?? []) {
+      const desiredId = runtime.labels?.['nyabase.containerId'] ?? runtime.labels?.['nyabase.container_id'];
+      const container = desiredId ? desiredById.get(desiredId) : undefined;
+      const ownerId = container?.ownerId ?? runtime.spec.ownerId ?? '';
+      const name = container?.name ?? runtime.spec.name ?? runtime.spec.runtimeId.slice(0, 12);
+      const info = { containerId: desiredId ?? runtime.spec.runtimeId.slice(0, 12), name, ownerId };
+      result.set(runtime.spec.runtimeId, info);
+      result.set(runtime.spec.runtimeId.slice(0, 12), info);
+      if (desiredId) result.set(desiredId, info);
     }
 
     return result;
@@ -586,15 +578,4 @@ export class MetricsController {
     return `,user_id=~"${userId}|${numericId}"`;
   }
 
-  private async latestDiskObservations(serverId: string): Promise<DataDiskRuntimeObservationEntity[]> {
-    const rows = await this.diskObservationsRepo.find({
-      where: { serverId },
-      order: { diskId: 'ASC', reportSeq: 'DESC', lastSeenAt: 'DESC' },
-    });
-    const latest = new Map<string, DataDiskRuntimeObservationEntity>();
-    for (const row of rows) {
-      if (!latest.has(row.diskId)) latest.set(row.diskId, row);
-    }
-    return [...latest.values()];
-  }
 }

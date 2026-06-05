@@ -9,6 +9,7 @@ interface PendingRpc {
 }
 
 export class AgentSession {
+  readonly id: string = uuidv4();
   readonly serverId: string;
   readonly ws: WebSocket;
   private pending: Map<string, PendingRpc> = new Map();

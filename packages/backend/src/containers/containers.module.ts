@@ -14,14 +14,9 @@ import { RuntimeOrphanEntity } from '../entities/runtime-orphan.entity.js';
 import { UserEntity } from '../entities/user.entity.js';
 import { ImageEntity } from '../entities/image.entity.js';
 import { GpuAllocationEntity } from '../entities/gpu-allocation.entity.js';
-import { RuntimeContainerEntity } from '../entities/runtime-container.entity.js';
-import { RuntimeContainerStatEntity } from '../entities/runtime-container-stat.entity.js';
 import { ContainerLifecycleEntity } from '../entities/container-lifecycle.entity.js';
 import { ContainerDesiredSpecEntity } from '../entities/container-desired-spec.entity.js';
-import { ContainerRuntimeObservationEntity } from '../entities/container-runtime-observation.entity.js';
 import { OperationEntity } from '../entities/operation.entity.js';
-import { QuotaRuntimeObservationEntity } from '../entities/quota-runtime-observation.entity.js';
-import { RuntimeGpuInventoryEntity } from '../entities/runtime-gpu-inventory.entity.js';
 import { DataDiskEntity } from '../entities/data-disk.entity.js';
 import { RemoteFsMountEntity } from '../entities/remote-fs-mount.entity.js';
 import { RemoteFsServerAssignmentEntity } from '../entities/remote-fs-server-assignment.entity.js';
@@ -42,14 +37,9 @@ import { AgentGatewayModule } from '../gateway/agent-gateway.module.js';
       UserEntity,
       ImageEntity,
       GpuAllocationEntity,
-      RuntimeContainerEntity,
-      RuntimeContainerStatEntity,
       ContainerLifecycleEntity,
       ContainerDesiredSpecEntity,
-      ContainerRuntimeObservationEntity,
-      QuotaRuntimeObservationEntity,
       OperationEntity,
-      RuntimeGpuInventoryEntity,
       DataDiskEntity,
       RemoteFsMountEntity,
       RemoteFsServerAssignmentEntity,

@@ -1,5 +1,15 @@
 import { Column, Entity, Index, PrimaryColumn } from 'typeorm';
-import { ContainerPhase } from '@nyabase/common';
+import { ContainerPhase, ContainerPowerIntent, OperationKind } from '@nyabase/common';
+
+export interface RuntimeConfirmationLock {
+  operationId: string;
+  kind: OperationKind;
+  startedAt: string;
+  deadlineAt: string;
+  expectedRuntimeId?: string;
+  expectedGeneration?: number;
+  expectedPowerIntent?: ContainerPowerIntent;
+}
 
 @Entity('container_lifecycle')
 export class ContainerLifecycleEntity {
@@ -17,6 +27,9 @@ export class ContainerLifecycleEntity {
   @Index()
   @Column({ name: 'active_operation_id', type: 'text', nullable: true })
   activeOperationId: string | null;
+
+  @Column({ name: 'runtime_confirmation', type: 'simple-json', nullable: true })
+  runtimeConfirmation: RuntimeConfirmationLock | null;
 
   @Column({ name: 'last_transition_at', type: 'datetime' })
   lastTransitionAt: Date;

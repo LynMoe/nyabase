@@ -52,8 +52,8 @@ export class UsersController {
       const valid = await this.authService.verifyPassword(targetUser.passwordHash, dto.currentPassword);
       if (!valid) throw new UnauthorizedException('Current password is incorrect');
     }
-    const { currentPassword: _, ...updateDto } = dto;
-    const user = await this.usersService.updateUser(id, updateDto);
+    delete (dto as Record<string, unknown>).currentPassword;
+    const user = await this.usersService.updateUser(id, dto);
     return this.usersService.toDto(user);
   }
 

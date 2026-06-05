@@ -11,11 +11,7 @@ import { randomBytes, createHash } from 'crypto';
 import { ServerEntity } from '../entities/server.entity.js';
 import { DataDiskEntity } from '../entities/data-disk.entity.js';
 import { DataDirectoryEntity } from '../entities/data-directory.entity.js';
-import { DataDiskRuntimeObservationEntity } from '../entities/data-disk-runtime-observation.entity.js';
 import { ContainerMountEntity } from '../entities/container-mount.entity.js';
-import { QuotaRuntimeObservationEntity } from '../entities/quota-runtime-observation.entity.js';
-import { RuntimeGpuInventoryEntity } from '../entities/runtime-gpu-inventory.entity.js';
-import { DockerDaemonRuntimeObservationEntity } from '../entities/docker-daemon-runtime-observation.entity.js';
 import {
   AgentCommandKind,
   ServerStatus,
@@ -26,6 +22,7 @@ import {
   OperationKind,
   OperationStatus,
   type DockerDaemonStatus,
+  type DiskInfo,
   type ServerDto,
 } from '@nyabase/common';
 import { AgentGateway } from '../gateway/agent-gateway.js';
@@ -44,16 +41,8 @@ export class ServersService {
     private dataDisksRepo: Repository<DataDiskEntity>,
     @InjectRepository(DataDirectoryEntity)
     private dataDirectoriesRepo: Repository<DataDirectoryEntity>,
-    @InjectRepository(DataDiskRuntimeObservationEntity)
-    private diskObservationsRepo: Repository<DataDiskRuntimeObservationEntity>,
     @InjectRepository(ContainerMountEntity)
     private containerMountsRepo: Repository<ContainerMountEntity>,
-    @InjectRepository(QuotaRuntimeObservationEntity)
-    private quotaObservationsRepo: Repository<QuotaRuntimeObservationEntity>,
-    @InjectRepository(RuntimeGpuInventoryEntity)
-    private gpuInventoryRepo: Repository<RuntimeGpuInventoryEntity>,
-    @InjectRepository(DockerDaemonRuntimeObservationEntity)
-    private dockerDaemonObservationsRepo: Repository<DockerDaemonRuntimeObservationEntity>,
     private agentGateway: AgentGateway,
     private accessResolver: AccessResolverService,
     private usersService: UsersService,
@@ -225,7 +214,7 @@ export class ServersService {
 
   async listDiskDtos(serverId: string): Promise<DataDiskDto[]> {
     const disks = await this.listDisks(serverId);
-    const latest = await this.latestDiskObservationMap(serverId);
+    const latest = new Map((this.agentGateway.stateCache.get(serverId)?.disks ?? []).map((disk) => [disk.diskId, disk]));
     return disks.map((disk) => this.toDiskDto(disk, latest.get(disk.id)));
   }
 
@@ -251,6 +240,7 @@ export class ServersService {
     if (!this.agentGateway.isOnline(serverId)) {
       throw new BadRequestException('Agent is offline, cannot validate disk');
     }
+    this.assertRuntimeReady(serverId);
     const check = await rpcWithErrorMapping(() =>
       this.agentGateway.rpc<CheckDiskResult>(serverId, 'checkDisk', { mountPoint }),
     );
@@ -330,6 +320,7 @@ export class ServersService {
     if (!this.agentGateway.isOnline(serverId)) {
       throw new BadRequestException('Agent is offline, cannot run self-check');
     }
+    this.assertRuntimeReady(serverId);
     return rpcWithErrorMapping(() =>
       this.agentGateway.rpc<SelfCheckResult>(serverId, 'selfCheck', {}),
     );
@@ -339,21 +330,6 @@ export class ServersService {
     if (status.serverId !== serverId) {
       throw new BadRequestException('Docker daemon status serverId mismatch');
     }
-    await this.dockerDaemonObservationsRepo.upsert(this.dockerDaemonObservationsRepo.create({
-      serverId,
-      state: status.state,
-      unitFileInSync: status.unitFileInSync,
-      enabled: status.enabled,
-      active: status.active,
-      pid: status.pid,
-      dockerRoot: status.dockerRoot,
-      socketPath: status.socketPath,
-      serverVersion: status.serverVersion,
-      storageDriver: status.storageDriver,
-      lastError: status.lastError,
-      checkedAt: new Date(status.checkedAt),
-      observedAt: new Date(),
-    }), ['serverId']);
     this.agentGateway.stateCache.updateDockerDaemonStatus(serverId, status);
     return status;
   }
@@ -415,56 +391,23 @@ export class ServersService {
 
   async getDiskDto(serverId: string, diskId: string): Promise<DataDiskDto> {
     const disk = await this.findDisk(serverId, diskId);
-    const observation = await this.latestDiskObservation(serverId, disk.id);
+    const observation = this.agentGateway.stateCache.get(serverId)?.disks.find((row) => row.diskId === disk.id) ?? null;
     return this.toDiskDto(disk, observation);
   }
 
   async getUserQuota(serverId: string, userId: string): Promise<{ usedBytes: number; limitBytes: number }> {
     await this.findById(serverId);
-    const [numericMap, grant] = await Promise.all([
-      this.usersService.getNumericIdsByUserIds([userId]),
-      this.accessResolver.resolveServer(userId, serverId),
-    ]);
-    const numericUserId = numericMap.get(userId);
-    const latest = numericUserId == null
-      ? null
-      : await this.quotaObservationsRepo.findOne({
-        where: { serverId, numericUserId },
-        order: { reportSeq: 'DESC', lastSeenAt: 'DESC' },
-      });
+    const grant = await this.accessResolver.resolveServer(userId, serverId);
+    const latest = this.agentGateway.stateCache.get(serverId)?.xfsProjects.find((row) => row.userId === userId) ?? null;
     return {
       usedBytes: latest?.usedBytes ?? 0,
       limitBytes: grant?.diskBytes ?? 0,
     };
   }
 
-  private async latestDiskObservationMap(
-    serverId: string,
-  ): Promise<Map<string, DataDiskRuntimeObservationEntity>> {
-    const rows = await this.diskObservationsRepo.find({
-      where: { serverId },
-      order: { diskId: 'ASC', reportSeq: 'DESC', lastSeenAt: 'DESC' },
-    });
-    const latest = new Map<string, DataDiskRuntimeObservationEntity>();
-    for (const row of rows) {
-      if (!latest.has(row.diskId)) latest.set(row.diskId, row);
-    }
-    return latest;
-  }
-
-  private async latestDiskObservation(
-    serverId: string,
-    diskId: string,
-  ): Promise<DataDiskRuntimeObservationEntity | null> {
-    return this.diskObservationsRepo.findOne({
-      where: { serverId, diskId },
-      order: { reportSeq: 'DESC', lastSeenAt: 'DESC' },
-    });
-  }
-
   private toDiskDto(
     disk: DataDiskEntity,
-    observation: DataDiskRuntimeObservationEntity | null | undefined,
+    observation: DiskInfo | null | undefined,
   ): DataDiskDto {
     return {
       diskId: disk.id,
@@ -477,11 +420,8 @@ export class ServersService {
   }
 
   private async toDto(server: ServerEntity): Promise<ServerDto> {
-    const [disks, gpus, dockerDaemonRow] = await Promise.all([
-      this.listDiskDtos(server.id),
-      this.gpuInventoryRepo.find({ where: { serverId: server.id }, order: { gpuIndex: 'ASC' } }),
-      this.dockerDaemonObservationsRepo.findOne({ where: { serverId: server.id } }),
-    ]);
+    const snap = this.agentGateway.stateCache.get(server.id);
+    const disks = await this.listDiskDtos(server.id);
     return {
       id: server.id,
       name: server.name,
@@ -491,40 +431,31 @@ export class ServersService {
       isGpuServer: server.isGpuServer,
       status: server.status,
       lastSeenAt: server.lastSeenAt?.toISOString() ?? null,
+      runtimeReady: snap?.runtimeReady === true,
+      runtimeObservedAt: snap?.lastUpdated ? new Date(snap.lastUpdated).toISOString() : null,
       defaultCpuMillis: server.defaultCpuMillis,
       defaultMemBytes: server.defaultMemBytes,
       defaultDiskBytes: server.defaultDiskBytes,
       defaultGpuMode: server.defaultGpuMode,
       defaultGpuIndices: server.defaultGpuIndices,
       disks,
-      gpus: gpus.map((gpu) => ({
-        index: gpu.gpuIndex,
-        uuid: gpu.uuid,
-        model: gpu.model,
-        totalMemMiB: gpu.totalMemMib,
-      })),
-      agentVersion: this.agentGateway.stateCache.get(server.id)?.agentVersion,
+      gpus: snap?.gpus ?? [],
+      agentVersion: snap?.agentVersion,
       dockerRoot: server.dockerRoot,
       dockerSocket: server.dockerSocket,
-      dockerDaemon: this.agentGateway.stateCache.get(server.id)?.dockerDaemon
-        ?? (dockerDaemonRow ? this.dockerDaemonStatusFromRow(dockerDaemonRow) : null),
+      dockerDaemon: snap?.dockerDaemon ?? null,
     };
   }
 
-  private dockerDaemonStatusFromRow(row: DockerDaemonRuntimeObservationEntity): DockerDaemonStatus {
-    return {
-      serverId: row.serverId,
-      state: row.state,
-      unitFileInSync: row.unitFileInSync,
-      enabled: row.enabled,
-      active: row.active,
-      pid: row.pid,
-      dockerRoot: row.dockerRoot,
-      socketPath: row.socketPath,
-      serverVersion: row.serverVersion,
-      storageDriver: row.storageDriver,
-      lastError: row.lastError,
-      checkedAt: row.checkedAt.getTime(),
-    };
+  private assertRuntimeReady(serverId: string): void {
+    const availability = this.agentGateway.stateCache.getRuntimeBlockReason(serverId);
+    if (!availability.enabled) {
+      throw new ConflictException({
+        statusCode: 409,
+        code: 'agent_state_unready',
+        reason: 'agent_state_unready',
+        message: availability.message,
+      });
+    }
   }
 }

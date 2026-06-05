@@ -9,7 +9,8 @@ describe('ContainerActionPolicyService V2', () => {
     const actions = policy.forContainer({
       phase: ContainerPhase.Active,
       runtimeStatus: ContainerStatus.Running,
-      runtimeStale: false,
+      runtimeReady: true,
+      runtimeDrift: [],
       activeOperationId: 'op-a',
     });
     expect(Object.values(actions).every((a) => !a.enabled && a.reason === 'operation_in_progress')).toBe(true);
@@ -19,7 +20,8 @@ describe('ContainerActionPolicyService V2', () => {
     const actions = policy.forContainer({
       phase: ContainerPhase.Active,
       runtimeStatus: ContainerStatus.Running,
-      runtimeStale: false,
+      runtimeReady: true,
+      runtimeDrift: [],
       activeOperationId: null,
     });
     expect(actions.start.enabled).toBe(false);
@@ -30,11 +32,32 @@ describe('ContainerActionPolicyService V2', () => {
     expect(actions.delete.enabled).toBe(true);
   });
 
+  it('blocks mutating actions while runtime confirmation is pending but keeps running read actions available', () => {
+    const actions = policy.forContainer({
+      phase: ContainerPhase.Active,
+      runtimeStatus: ContainerStatus.Running,
+      runtimeReady: true,
+      runtimeDrift: [],
+      activeOperationId: null,
+      runtimeConfirmationPending: true,
+    });
+    expect(actions.start.reason).toBe('runtime_confirmation_pending');
+    expect(actions.stop.reason).toBe('runtime_confirmation_pending');
+    expect(actions.restart.reason).toBe('runtime_confirmation_pending');
+    expect(actions.delete.reason).toBe('runtime_confirmation_pending');
+    expect(actions.updateMounts.reason).toBe('runtime_confirmation_pending');
+    expect(actions.enableSsh.reason).toBe('runtime_confirmation_pending');
+    expect(actions.reconcileSsh.reason).toBe('runtime_confirmation_pending');
+    expect(actions.stats.enabled).toBe(true);
+    expect(actions.console.enabled).toBe(true);
+  });
+
   it('allows deletion but blocks runtime actions for failed containers', () => {
     const actions = policy.forContainer({
       phase: ContainerPhase.Failed,
       runtimeStatus: ContainerStatus.Unknown,
-      runtimeStale: true,
+      runtimeReady: true,
+      runtimeDrift: [],
       activeOperationId: null,
     });
     expect(actions.delete.enabled).toBe(true);

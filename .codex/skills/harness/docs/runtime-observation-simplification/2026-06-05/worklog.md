@@ -1,0 +1,29 @@
+# Worklog
+
+- Removed runtime/observation entities from `DB_ENTITIES` and deleted obsolete runtime entity/service files.
+- Reworked `AgentGateway` to update only `StateCache`; hello creates unready snapshots, full reports mark ready, incremental/event updates are ignored before readiness.
+- Added `StateCache` runtime readiness helpers and container lookup by nyabase labels.
+- Reworked container view/action policy/stats to use desired DB plus state-cache snapshots.
+- Added API/outbox runtime-ready gating with `agent_state_unready`.
+- Reworked server, datadir, remote-fs, metrics, lifecycle, and reconcile paths away from runtime observation repositories.
+- Rebuilt `@nyabase/common` dist because backend typecheck resolves common through `packages/common/dist`.
+- Verification:
+  - `pnpm --filter @nyabase/backend exec tsc --noEmit`
+  - `pnpm --filter @nyabase/backend test -- --run src/gateway/__tests__/state-cache.test.ts src/containers/__tests__/container-action-policy-v2.test.ts src/gateway/__tests__/agent-gateway-state-report.test.ts`
+  - `rg "RuntimeContainerEntity|ContainerRuntimeObservationEntity|DataDirRuntimeObservationEntity|DataDiskRuntimeObservationEntity|QuotaRuntimeObservationEntity|RemoteFsRuntimeObservationEntity|DockerDaemonRuntimeObservationEntity" packages/backend/src -n` returned no matches.
+  - `rg "runtime_containers|container_runtime_observations|data_dir_runtime_observations|data_disk_runtime_observations|quota_runtime_observations|remote_fs_runtime_observations|docker_daemon_runtime_observations" packages/backend/src -n` returned no matches.
+  - `find packages/common/src \( -name '*.js' -o -name '*.js.map' -o -name '*.d.ts' -o -name '*.d.ts.map' \) -print | sort` returned empty.
+- Full final verification after clean DB rebuild and visual fixture fix:
+  - Backed up and reset `test/runtime/db/nyabase-test.db`, re-registered/redeployed fixed agents, and verified CPU/GPU server DTOs report `runtimeReady: true`.
+  - `bash scripts/check.sh --with-visual` passed: common build, repo typecheck, lint 0 errors/7 remaining existing warnings, unit tests common 54/backend 91/agent 81, visual 35/35.
+  - `pnpm build` passed for common/backend/agent.
+  - `pnpm build:frontend` passed.
+  - `pnpm test:functional` passed: 25 passed, 0 failed, 0 skipped.
+  - Live SQLite schema probe returned `{ "tableCount": 29, "oldRuntimeTables": [] }`.
+  - Runtime entity/table `rg` checks over `packages/backend/src packages/common/src packages/agent/src` returned no matches.
+  - `find packages/common/src \( -name '*.js' -o -name '*.js.map' -o -name '*.d.ts' -o -name '*.d.ts.map' \) -print | sort` returned empty.
+- Visual fix:
+  - `packages/frontend/e2e/management-routes.spec.ts` now mocks user-plane `/servers` and `/servers/:id/disks`, matching data-dir/container pages that use user-visible server APIs.
+  - Updated five management-route screenshots after inspecting actual renders; the prior failures were stale/partial mock baselines, not layout breakage.
+- Noise cleanup:
+  - Removed unused imports/parameters in touched backend files, reducing lint warnings from 12 to 7 without changing behavior.

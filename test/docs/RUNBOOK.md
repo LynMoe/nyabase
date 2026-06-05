@@ -70,31 +70,36 @@ Run a quick readiness check:
 bash test/scripts/run-live-suite.sh smoke
 ```
 
-Create the multi-user fixture and run the continuation matrix:
+Run the full real API suite:
 
 ```bash
-bash test/scripts/run-live-suite.sh admin-setup
-bash test/scripts/run-live-suite.sh continuation
+bash test/scripts/run-live-suite.sh api
 ```
 
-Run persona specs after `admin-setup`:
+The suite uses only the shared backend API. Admin first ensures persistent
+servers, disks, images, users, groups, quotas, image grants, server grants, and
+mount-source grants. It then starts separate persona Node processes that log in
+as ordinary users and exercise profile, SSH key, API token, access summary,
+mount source, data directory, container lifecycle, operation polling, metrics,
+and isolation endpoints.
+
+Persistent fixture resources are reused across runs:
+
+- `test/runtime/live-api/fixture.json`
+- `test/runtime/live-api/*.env`
+
+Runtime containers and per-run data directories are cleaned by default. Set
+`NYABASE_LIVE_API_KEEP_CONTAINERS=1` only when debugging a failed container.
+
+Legacy red-team specs remain available for targeted debugging:
 
 ```bash
-bash test/scripts/run-live-suite.sh personas
+bash test/scripts/run-live-suite.sh legacy-admin-setup
+bash test/scripts/run-live-suite.sh legacy-redteam
 ```
 
-Run mount-source tests:
-
-```bash
-node test/scripts/create-mount-fixture.mjs
-bash test/scripts/run-live-suite.sh mounts
-```
-
-Run Dropbear SSH live runtime:
-
-```bash
-bash test/scripts/run-live-suite.sh dropbear
-```
+The frontend Playwright e2e specs under `packages/frontend/e2e/` are mocked UI
+or visual checks. They must not be treated as product API functional coverage.
 
 ## Logs And Runtime Files
 
@@ -107,6 +112,8 @@ bash test/scripts/run-live-suite.sh dropbear
 | Fixed DB | `test/runtime/db/nyabase-test.db` |
 | Server metadata | `test/runtime/agents/servers.json` |
 | Raw agent tokens | `test/runtime/agents/agent-secrets.json` |
+| Live API fixture | `test/runtime/live-api/fixture.json` |
+| Latest live API report env | `test/runtime/live-api/current.env` |
 | Multi-user state | `test/runtime/murt/current.env` |
 | Mount fixture state | `test/runtime/mount/current.env` |
 

@@ -7,6 +7,13 @@ import type { ServerSnapshot } from '../state-cache.js';
 function makeSnap(serverId: string): ServerSnapshot {
   return {
     serverId,
+    runtimeReady: true,
+    sessionId: 'session-a',
+    helloAt: Date.now(),
+    lastFullReportAt: Date.now(),
+    lastFullReportReceivedAt: Date.now(),
+    lastIncrementalReportAt: null,
+    lastIncrementalReportReceivedAt: null,
     agentVersion: '1.0',
     hostname: 'test-host',
     cpuCores: 4,

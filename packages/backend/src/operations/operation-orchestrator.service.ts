@@ -7,20 +7,16 @@ import {
   AgentCommandStatus,
   ContainerPhase,
   ContainerPowerIntent,
-  ContainerStatus,
   HookKind,
   HookStatus,
   OperationKind,
   OperationStatus,
-  type ContainerSshServerState,
   type OperationProgressPayload,
 } from '@nyabase/common';
 import { AgentCommandOutboxEntity } from '../entities/agent-command-outbox.entity.js';
 import { ContainerEntity } from '../entities/container.entity.js';
 import { ContainerDesiredSpecEntity } from '../entities/container-desired-spec.entity.js';
 import { ContainerLifecycleEntity } from '../entities/container-lifecycle.entity.js';
-import { ContainerRuntimeObservationEntity } from '../entities/container-runtime-observation.entity.js';
-import { RuntimeContainerEntity } from '../entities/runtime-container.entity.js';
 import { ContainerMountEntity } from '../entities/container-mount.entity.js';
 import { DataDirectoryEntity } from '../entities/data-directory.entity.js';
 import { DataDiskEntity } from '../entities/data-disk.entity.js';
@@ -34,6 +30,8 @@ import { RemoteFsMountEntity } from '../entities/remote-fs-mount.entity.js';
 import { RemoteFsServerAssignmentEntity } from '../entities/remote-fs-server-assignment.entity.js';
 import { runSerializedTransaction } from '../database/serialized-transaction.js';
 import { errorMessage } from './operation-retry-policy.js';
+
+const RUNTIME_CONFIRMATION_TIMEOUT_MS = 45_000;
 
 export interface DispatchAgentCommandPersistContext {
   operationId: string;
@@ -433,24 +431,23 @@ export class OperationOrchestratorService {
         await this.applyContainerCreateSuccess(manager, operation, result);
         break;
       case OperationKind.ContainerStart:
-        await this.applyContainerPowerSuccess(manager, operation, command, ContainerPowerIntent.Running);
+        await this.applyContainerPowerSuccess(manager, operation, ContainerPowerIntent.Running);
         break;
       case OperationKind.ContainerStop:
-        await this.applyContainerPowerSuccess(manager, operation, command, ContainerPowerIntent.Stopped);
+        await this.applyContainerPowerSuccess(manager, operation, ContainerPowerIntent.Stopped);
         break;
       case OperationKind.ContainerRestart:
-        await this.applyContainerPowerSuccess(manager, operation, command, ContainerPowerIntent.Running);
+        await this.applyContainerPowerSuccess(manager, operation, ContainerPowerIntent.Running);
         break;
       case OperationKind.ContainerDelete:
         await this.applyContainerDeleteSuccess(manager, operation);
         break;
       case OperationKind.ContainerUpdateMounts:
-        await this.applyContainerUpdateSuccess(manager, operation, command);
+        await this.applyContainerUpdateSuccess(manager, operation);
         break;
       case OperationKind.ContainerEnableSsh:
       case OperationKind.ContainerReconcileSsh:
-        await this.applyContainerUpdateSuccess(manager, operation, command);
-        await this.applyContainerSshObservationSuccess(manager, operation, command, result);
+        await this.applyContainerUpdateSuccess(manager, operation);
         break;
       case OperationKind.DataDirDelete:
         await manager.delete(DataDirectoryEntity, operation.resourceId);
@@ -518,30 +515,16 @@ export class OperationOrchestratorService {
     operation: OperationEntity,
     result: unknown,
   ): Promise<void> {
+    const now = new Date();
     const runtimeId = this.resultString(result, 'runtimeId');
-    const ip = this.resultString(result, 'ip');
-    if (runtimeId) {
-      await manager.upsert(RuntimeContainerEntity, manager.create(RuntimeContainerEntity, {
-        id: `${operation.serverId}:${runtimeId}`,
-        serverId: operation.serverId,
-        runtimeId,
-        containerId: operation.resourceId,
-        ownerId: operation.requestedBy,
-        ownerNumericId: null,
-        status: ContainerStatus.Running,
-        specGenerationSeen: null,
-        ip: ip ?? null,
-        labelsJson: { 'nyabase.containerId': operation.resourceId },
-        firstSeenAt: new Date(),
-        lastSeenAt: new Date(),
-        stale: false,
-      }), ['serverId', 'runtimeId']);
-    }
     await manager.update(ContainerLifecycleEntity, operation.resourceId, {
       phase: ContainerPhase.Active,
       boundRuntimeId: runtimeId ?? null,
       activeOperationId: null,
-      lastTransitionAt: new Date(),
+      runtimeConfirmation: this.runtimeConfirmation(operation, now, {
+        expectedRuntimeId: runtimeId ?? undefined,
+      }),
+      lastTransitionAt: now,
       failureReason: null,
       failureCode: null,
     });
@@ -550,7 +533,6 @@ export class OperationOrchestratorService {
   private async applyContainerPowerSuccess(
     manager: EntityManager,
     operation: OperationEntity,
-    command: AgentCommandOutboxEntity,
     intent: ContainerPowerIntent,
   ): Promise<void> {
     const now = new Date();
@@ -561,119 +543,29 @@ export class OperationOrchestratorService {
     await manager.update(ContainerLifecycleEntity, operation.resourceId, {
       phase: ContainerPhase.Active,
       activeOperationId: null,
+      runtimeConfirmation: this.runtimeConfirmation(operation, now, {
+        expectedPowerIntent: intent,
+      }),
       lastTransitionAt: now,
       failureReason: null,
       failureCode: null,
-    });
-    await this.refreshRuntimeAfterSuccessfulCommand(manager, operation, command, {
-      status: intent === ContainerPowerIntent.Running
-        ? ContainerStatus.Running
-        : ContainerStatus.Exited,
-      observedAt: now,
     });
   }
 
   private async applyContainerUpdateSuccess(
     manager: EntityManager,
     operation: OperationEntity,
-    command: AgentCommandOutboxEntity,
   ): Promise<void> {
     const now = new Date();
+    const confirmation = await this.runtimeUpdateConfirmation(manager, operation, now);
     await manager.update(ContainerLifecycleEntity, operation.resourceId, {
       phase: ContainerPhase.Active,
       activeOperationId: null,
+      runtimeConfirmation: confirmation,
       lastTransitionAt: now,
       failureReason: null,
       failureCode: null,
     });
-    await this.refreshRuntimeAfterSuccessfulCommand(manager, operation, command, {
-      observedAt: now,
-    });
-  }
-
-  private async refreshRuntimeAfterSuccessfulCommand(
-    manager: EntityManager,
-    operation: OperationEntity,
-    command: AgentCommandOutboxEntity,
-    update: { status?: ContainerStatus; observedAt: Date },
-  ): Promise<void> {
-    const payload = this.recordValue(command.payload);
-    const runtimeId = this.nonEmptyString(payload?.runtimeId);
-    const criteria = runtimeId
-      ? { serverId: operation.serverId, runtimeId }
-      : { containerId: operation.resourceId };
-
-    await manager.update(RuntimeContainerEntity, criteria, {
-      ...(update.status ? { status: update.status } : {}),
-      stale: false,
-      lastSeenAt: update.observedAt,
-    });
-  }
-
-  private async applyContainerSshObservationSuccess(
-    manager: EntityManager,
-    operation: OperationEntity,
-    command: AgentCommandOutboxEntity,
-    result: unknown,
-  ): Promise<void> {
-    const sshServer = this.sshServerState(result);
-    if (!sshServer) return;
-
-    const now = new Date();
-    const payload = this.recordValue(command.payload);
-    const runtimeId = this.nonEmptyString(payload?.runtimeId);
-    if (!runtimeId) return;
-
-    const runtime = await manager.findOne(RuntimeContainerEntity, {
-      where: { serverId: operation.serverId, runtimeId },
-      order: { lastSeenAt: 'DESC' },
-    });
-    const existing = await manager.findOne(ContainerRuntimeObservationEntity, {
-      where: {
-        serverId: operation.serverId,
-        dockerId: runtimeId,
-        stale: false,
-      },
-      order: { lastSeenAt: 'DESC' },
-    });
-
-    await manager.upsert(ContainerRuntimeObservationEntity, manager.create(ContainerRuntimeObservationEntity, {
-      id: existing?.id ?? `${operation.serverId}:${runtimeId}:latest`,
-      serverId: operation.serverId,
-      containerId: operation.resourceId,
-      dockerId: runtimeId,
-      reportSeq: existing?.reportSeq ?? 0,
-      status: runtime?.status ?? existing?.status ?? ContainerStatus.Running,
-      stats: existing?.stats ?? null,
-      sshServer,
-      labels: existing?.labels ?? runtime?.labelsJson ?? {},
-      labelsValid: existing?.labelsValid ?? true,
-      specGenerationSeen: existing?.specGenerationSeen ?? runtime?.specGenerationSeen ?? null,
-      firstSeenAt: existing?.firstSeenAt ?? runtime?.firstSeenAt ?? now,
-      lastSeenAt: now,
-      missingSince: null,
-      stale: false,
-    }), ['id']);
-  }
-
-  private sshServerState(value: unknown): ContainerSshServerState | null {
-    const record = this.recordValue(value);
-    if (!record) return null;
-    if (record.enabled !== true) return null;
-    if (record.user !== 'root') return null;
-    if (record.port !== 22) return null;
-    const status = this.nonEmptyString(record.status);
-    if (!status || !['disabled', 'container_stopped', 'running', 'error', 'unknown'].includes(status)) return null;
-    return {
-      enabled: true,
-      status: status as ContainerSshServerState['status'],
-      user: 'root',
-      port: 22,
-      ...(typeof record.pid === 'number' && Number.isInteger(record.pid) && record.pid > 0 ? { pid: record.pid } : {}),
-      ...(typeof record.keyHash === 'string' ? { keyHash: record.keyHash } : {}),
-      ...(typeof record.lastReconciledAt === 'number' ? { lastReconciledAt: record.lastReconciledAt } : {}),
-      ...(typeof record.lastError === 'string' ? { lastError: record.lastError } : {}),
-    };
   }
 
   private async applyContainerFailure(
@@ -685,6 +577,7 @@ export class OperationOrchestratorService {
     await manager.update(ContainerLifecycleEntity, operation.resourceId, {
       phase,
       activeOperationId: null,
+      runtimeConfirmation: null,
       lastTransitionAt: new Date(),
       failureReason: errorMessage(error),
       failureCode: 'operation_failed',
@@ -698,6 +591,7 @@ export class OperationOrchestratorService {
     await manager.update(ContainerLifecycleEntity, operation.resourceId, {
       phase: ContainerPhase.Deleted,
       activeOperationId: null,
+      runtimeConfirmation: null,
       lastTransitionAt: new Date(),
       failureReason: null,
       failureCode: null,
@@ -708,10 +602,6 @@ export class OperationOrchestratorService {
     await manager.update(ContainerDesiredSpecEntity, { containerId: operation.resourceId }, {
       powerIntent: ContainerPowerIntent.Stopped,
       updatedAt: new Date(),
-    });
-    await manager.update(RuntimeContainerEntity, { containerId: operation.resourceId }, {
-      stale: true,
-      lastSeenAt: new Date(),
     });
     await manager.delete(ContainerMountEntity, { containerId: operation.resourceId });
     await manager.delete(GpuAllocationEntity, { containerId: operation.resourceId });
@@ -852,6 +742,40 @@ export class OperationOrchestratorService {
     const record = this.recordValue(result);
     const value = record?.[key];
     return typeof value === 'string' && value.trim() !== '' ? value : null;
+  }
+
+  private runtimeConfirmation(
+    operation: OperationEntity,
+    now: Date,
+    expected: {
+      expectedRuntimeId?: string;
+      expectedGeneration?: number;
+      expectedPowerIntent?: ContainerPowerIntent;
+    } = {},
+  ): ContainerLifecycleEntity['runtimeConfirmation'] {
+    return {
+      operationId: operation.id,
+      kind: operation.kind,
+      startedAt: now.toISOString(),
+      deadlineAt: new Date(now.getTime() + RUNTIME_CONFIRMATION_TIMEOUT_MS).toISOString(),
+      ...expected,
+    };
+  }
+
+  private async runtimeUpdateConfirmation(
+    manager: EntityManager,
+    operation: OperationEntity,
+    now: Date,
+  ): Promise<ContainerLifecycleEntity['runtimeConfirmation']> {
+    if (operation.kind !== OperationKind.ContainerUpdateMounts) {
+      return this.runtimeConfirmation(operation, now);
+    }
+    const desired = await manager.findOneBy(ContainerDesiredSpecEntity, {
+      containerId: operation.resourceId,
+    });
+    return this.runtimeConfirmation(operation, now, {
+      expectedGeneration: desired?.generation,
+    });
   }
 
   private nonEmptyString(value: unknown): string | null {

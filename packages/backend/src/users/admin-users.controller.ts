@@ -61,8 +61,8 @@ export class AdminUsersController {
   @RequireCaps(Capability.ManageUsers)
   async updateUser(@Param('id') id: string, @Body() body: unknown) {
     const dto = zUpdateUserRequest.parse(body);
-    const { currentPassword: _, ...updateDto } = dto;
-    const user = await this.usersService.updateUser(id, updateDto);
+    delete (dto as Record<string, unknown>).currentPassword;
+    const user = await this.usersService.updateUser(id, dto);
     return this.usersService.toDto(user);
   }
 

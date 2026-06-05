@@ -47,22 +47,27 @@ describe('LifecycleHookRegistryService SSH key sync', () => {
       { containerId: 'container-stopped', phase: ContainerPhase.Active, activeOperationId: null, boundRuntimeId: 'runtime-stopped' },
       { containerId: 'container-busy', phase: ContainerPhase.Active, activeOperationId: 'op-busy', boundRuntimeId: 'runtime-busy' },
     ]);
-    const runtimeRepo = makeRepo([
-      { containerId: 'container-a', status: ContainerStatus.Running, stale: false, lastSeenAt: new Date() },
-      { containerId: 'container-stopped', status: ContainerStatus.Exited, stale: false, lastSeenAt: new Date() },
-      { containerId: 'container-busy', status: ContainerStatus.Running, stale: false, lastSeenAt: new Date() },
-    ]);
     const sshKeysRepo = makeRepo([
       { keyText: 'ssh-ed25519 AAAA key-a' },
       { keyText: 'ssh-ed25519 BBBB key-b' },
     ]);
+    const agentGateway = {
+      stateCache: {
+        getContainerByContainerId: vi.fn((_serverId: string, containerId: string) => {
+          if (containerId === 'container-a') return { status: ContainerStatus.Running };
+          if (containerId === 'container-stopped') return { status: ContainerStatus.Exited };
+          if (containerId === 'container-busy') return { status: ContainerStatus.Running };
+          return undefined;
+        }),
+      },
+    };
     const service = new LifecycleHookRegistryService(
       orchestrator as never,
       containersRepo as never,
       desiredRepo as never,
       lifecycleRepo as never,
-      runtimeRepo as never,
       sshKeysRepo as never,
+      agentGateway as never,
     );
 
     await service.enqueueUserSshKeyChange('user-a');

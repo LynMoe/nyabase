@@ -1,11 +1,14 @@
 import { Injectable } from '@nestjs/common';
-import { ActionAvailability, ContainerAction, ContainerPhase, ContainerStatus } from '@nyabase/common';
+import { ActionAvailability, ContainerAction, ContainerPhase, ContainerStatus, RuntimeDriftKind, type RuntimeDriftDto } from '@nyabase/common';
 
 export interface ContainerActionPolicyInput {
   phase: ContainerPhase;
   runtimeStatus: ContainerStatus | null;
-  runtimeStale: boolean;
+  runtimeReady: boolean;
+  runtimeDrift: RuntimeDriftDto[];
   activeOperationId: string | null;
+  runtimeConfirmationPending?: boolean;
+  runtimeConfirmationExpired?: boolean;
 }
 
 @Injectable()
@@ -36,6 +39,23 @@ export class ContainerActionPolicyService {
     if (input.activeOperationId) {
       return this.allDisabled('operation_in_progress', `Operation ${input.activeOperationId} is still running`);
     }
+    if (!input.runtimeReady) {
+      return this.allDisabled('agent_state_unready', 'Agent runtime state is not ready; wait for the first full state report');
+    }
+    if (input.runtimeConfirmationPending) {
+      const running = input.runtimeStatus === ContainerStatus.Running;
+      return {
+        start: this.disabled('runtime_confirmation_pending', '上一个操作已完成，正在等待 agent 上报运行态确认'),
+        stop: this.disabled('runtime_confirmation_pending', '上一个操作已完成，正在等待 agent 上报运行态确认'),
+        restart: this.disabled('runtime_confirmation_pending', '上一个操作已完成，正在等待 agent 上报运行态确认'),
+        delete: this.disabled('runtime_confirmation_pending', '上一个操作已完成，正在等待 agent 上报运行态确认'),
+        stats: running ? this.enabled() : this.disabled('phase_not_active', 'Container is not running'),
+        console: running ? this.enabled() : this.disabled('phase_not_active', 'Container is not running'),
+        updateMounts: this.disabled('runtime_confirmation_pending', '上一个操作已完成，正在等待 agent 上报运行态确认'),
+        enableSsh: this.disabled('runtime_confirmation_pending', '上一个操作已完成，正在等待 agent 上报运行态确认'),
+        reconcileSsh: this.disabled('runtime_confirmation_pending', '上一个操作已完成，正在等待 agent 上报运行态确认'),
+      };
+    }
     if (input.phase === ContainerPhase.Deleted || input.phase === ContainerPhase.Deleting) {
       return this.allDisabled('phase_not_active', 'Container is being deleted or already deleted');
     }
@@ -48,10 +68,18 @@ export class ContainerActionPolicyService {
         delete: this.enabled(),
       };
     }
-    if (input.runtimeStale) {
+    const hasRuntimeDrift = !input.runtimeConfirmationExpired && input.runtimeDrift.some((drift) =>
+      drift.kind === RuntimeDriftKind.RuntimeMissing
+      || drift.kind === RuntimeDriftKind.RuntimeUnbound
+      || drift.kind === RuntimeDriftKind.RuntimeIdMismatch
+      || drift.kind === RuntimeDriftKind.SpecGenerationStale
+      || drift.kind === RuntimeDriftKind.PowerIntentMismatch,
+    );
+    if (hasRuntimeDrift) {
       return {
-        ...this.allDisabled('runtime_stale', 'Runtime observation is stale'),
+        ...this.allDisabled('runtime_missing', 'Runtime state does not match desired state'),
         delete: this.enabled(),
+        reconcileSsh: this.enabled(),
       };
     }
     const running = input.runtimeStatus === ContainerStatus.Running;

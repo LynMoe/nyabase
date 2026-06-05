@@ -538,9 +538,7 @@ bash test/scripts/reset-local.sh
 node test/scripts/register-agents.mjs
 bash test/scripts/deploy-agents.sh
 bash test/scripts/run-live-suite.sh smoke
-bash test/scripts/run-live-suite.sh admin-setup
-bash test/scripts/run-live-suite.sh personas
-bash test/scripts/run-live-suite.sh continuation
+bash test/scripts/run-live-suite.sh api
 find packages/common/src \( -name '*.js' -o -name '*.js.map' -o -name '*.d.ts' -o -name '*.d.ts.map' \) -print | sort
 ```
 

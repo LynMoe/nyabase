@@ -49,8 +49,8 @@ import { ExecSessionRegistry } from './exec-session-registry.js';
 import { LogChunkTracker } from './log-chunk-tracker.js';
 import { PullProgressTracker } from './pull-progress-tracker.js';
 import { UsersService } from '../users/users.service.js';
-import { ContainerRuntimeObservationWriter } from './container-runtime-observation-writer.service.js';
 import { OperationOrchestratorService } from '../operations/operation-orchestrator.service.js';
+import { DataDirReconcilerService } from '../datadirs/data-dir-reconciler.service.js';
 
 const DIRECT_RPC_KINDS = new Set<string>([
   'execStream',
@@ -95,11 +95,14 @@ export class AgentGateway implements OnModuleInit, OnModuleDestroy {
     private serversRepo: Repository<ServerEntity>,
     private metricsWriter: MetricsWriter,
     private execSessionRegistry: ExecSessionRegistry,
+    @Inject(forwardRef(() => UsersService))
     private usersService: UsersService,
-    private containerRuntimeObservationWriter: ContainerRuntimeObservationWriter,
     @Optional()
     @Inject(forwardRef(() => OperationOrchestratorService))
     private operationOrchestrator?: OperationOrchestratorService,
+    @Optional()
+    @Inject(forwardRef(() => DataDirReconcilerService))
+    private dataDirReconciler?: DataDirReconcilerService,
   ) {}
 
   onModuleInit() {
@@ -156,6 +159,7 @@ export class AgentGateway implements OnModuleInit, OnModuleDestroy {
     const session = new AgentSession(server.id, ws);
     this.sessions.set(server.id, session);
     this.logger.log(`Agent connected: server=${server.name} (${server.id})`);
+    this.stateCache.set(server.id, this.emptySnapshot(server.id, session.id, Date.now()));
 
     ws.on('message', (raw) => this.handleMessage(session, server, raw.toString()));
     ws.on('close', () => this.handleDisconnect(session, server));
@@ -173,6 +177,7 @@ export class AgentGateway implements OnModuleInit, OnModuleDestroy {
     if (this.sessions.get(server.id) !== session) return;
 
     this.sessions.delete(server.id);
+    this.stateCache.delete(server.id);
     this.logChunkTracker.clearServer(server.id, this.execSessionRegistry);
     this.pullProgressTracker.clearServer(server.id);
     await this.serversRepo.update(server.id, { status: ServerStatus.Offline, lastSeenAt: new Date() });
@@ -230,7 +235,7 @@ export class AgentGateway implements OnModuleInit, OnModuleDestroy {
             break;
           }
           this.stateCache.updateDataDirs(server.id, report.dirs);
-          await this.containerRuntimeObservationWriter.persistDataDirReport(server.id, report);
+          await this.dataDirReconciler?.reconcile(server.id);
           break;
         }
         case 'pullProgress': {
@@ -245,7 +250,6 @@ export class AgentGateway implements OnModuleInit, OnModuleDestroy {
         case 'remoteFsMountStatus': {
           const status = zRemoteFsMountStatus.parse(msg.payload) as RemoteFsMountStatus;
           this.stateCache.updateRemoteFsMountStatus(server.id, status);
-          await this.containerRuntimeObservationWriter.persistRemoteFsMountStatus(server.id, status);
           break;
         }
         case 'dockerDaemonStatus': {
@@ -256,7 +260,6 @@ export class AgentGateway implements OnModuleInit, OnModuleDestroy {
               break;
             }
             this.stateCache.updateDockerDaemonStatus(server.id, parsed.data);
-            await this.containerRuntimeObservationWriter.persistDockerDaemonStatus(server.id, parsed.data);
           } else {
             this.logger.warn(`Invalid dockerDaemonStatus from ${server.id}: ${parsed.error.message}`);
           }
@@ -298,6 +301,14 @@ export class AgentGateway implements OnModuleInit, OnModuleDestroy {
     // cleared before the fresh stateReport arrives.
     const snap: ServerSnapshot = {
       serverId: server.id,
+      runtimeReady: false,
+      sessionId: this.sessions.get(server.id)?.id ?? '',
+      helloAt: Date.now(),
+      lastFullReportAt: null,
+      lastFullReportReceivedAt: null,
+      lastIncrementalReportAt: null,
+      lastIncrementalReportReceivedAt: null,
+      lastUpdated: Date.now(),
       agentVersion: payload.agentVersion,
       hostname: payload.hostname,
       cpuCores: payload.cpuCores,
@@ -311,11 +322,8 @@ export class AgentGateway implements OnModuleInit, OnModuleDestroy {
       dataDirIssues: { orphans: [], missing: [] },
       remoteFsMounts: [],
       dockerDaemon: null,
-      lastUpdated: Date.now(),
     };
     this.stateCache.set(server.id, snap);
-
-    await this.containerRuntimeObservationWriter.persistHello(server.id, payload);
   }
 
   private async onHeartbeat(server: ServerEntity, _payload: HeartbeatPayload): Promise<void> {
@@ -325,24 +333,13 @@ export class AgentGateway implements OnModuleInit, OnModuleDestroy {
   private async onStateReport(server: ServerEntity, payload: StateReportPayload): Promise<void> {
     let snap = this.stateCache.get(server.id);
     if (!snap) {
-      snap = {
-        serverId: server.id,
-        agentVersion: '',
-        hostname: '',
-        cpuCores: 0,
-        totalMemBytes: 0,
-        containers: new Map(),
-        disks: [],
-        gpus: [],
-        xfsProjects: [],
-        localImages: [],
-        dataDirs: [],
-        dataDirIssues: { orphans: [], missing: [] },
-        remoteFsMounts: [],
-        dockerDaemon: null,
-        lastUpdated: Date.now(),
-      };
+      snap = this.emptySnapshot(server.id, this.sessions.get(server.id)?.id ?? '', Date.now());
       this.stateCache.set(server.id, snap);
+    }
+
+    if (payload.incremental && !snap.runtimeReady) {
+      this.logger.warn(`[StateReport] Ignoring incremental report before first full report for server ${server.id}`);
+      return;
     }
 
     if (!payload.incremental) {
@@ -369,16 +366,22 @@ export class AgentGateway implements OnModuleInit, OnModuleDestroy {
     snap.disks = payload.disks;
     // Sync remote FS mount statuses from stateReport (fill in any that weren't sent as individual events)
     if (payload.remoteFsMounts) {
-      for (const status of payload.remoteFsMounts) {
-        this.stateCache.updateRemoteFsMountStatus(server.id, status);
+      if (payload.incremental) {
+        for (const status of payload.remoteFsMounts) {
+          this.stateCache.updateRemoteFsMountStatus(server.id, status);
+        }
+      } else {
+        snap.remoteFsMounts = payload.remoteFsMounts;
       }
     }
     snap.lastUpdated = Date.now();
-
-    try {
-      await this.containerRuntimeObservationWriter.persistStateReport(server.id, payload);
-    } catch (err) {
-      this.logger.warn(`Failed to persist stateReport observations for ${server.id}: ${err}`);
+    if (payload.incremental) {
+      snap.lastIncrementalReportAt = payload.observedAt ?? snap.lastUpdated;
+      snap.lastIncrementalReportReceivedAt = snap.lastUpdated;
+    } else {
+      snap.runtimeReady = true;
+      snap.lastFullReportAt = payload.observedAt ?? snap.lastUpdated;
+      snap.lastFullReportReceivedAt = snap.lastUpdated;
     }
   }
 
@@ -388,7 +391,6 @@ export class AgentGateway implements OnModuleInit, OnModuleDestroy {
 
   private async onContainerEvent(server: ServerEntity, payload: ContainerEventPayload): Promise<void> {
     this.stateCache.applyContainerEvent(server.id, payload.runtimeId, payload.action);
-    await this.containerRuntimeObservationWriter.persistContainerEvent(server.id, payload.runtimeId, payload.action);
   }
 
   private async onOperationProgress(payload: OperationProgressPayload): Promise<void> {
@@ -450,5 +452,32 @@ export class AgentGateway implements OnModuleInit, OnModuleDestroy {
     cb: (chunk: LogChunkPayload) => void,
   ): () => void {
     return this.logChunkTracker.onLogChunk(sessionId, serverId, cb);
+  }
+
+  private emptySnapshot(serverId: string, sessionId: string, now: number): ServerSnapshot {
+    return {
+      serverId,
+      runtimeReady: false,
+      sessionId,
+      helloAt: null,
+      lastFullReportAt: null,
+      lastFullReportReceivedAt: null,
+      lastIncrementalReportAt: null,
+      lastIncrementalReportReceivedAt: null,
+      lastUpdated: now,
+      agentVersion: '',
+      hostname: '',
+      cpuCores: 0,
+      totalMemBytes: 0,
+      containers: new Map(),
+      disks: [],
+      gpus: [],
+      xfsProjects: [],
+      localImages: [],
+      dataDirs: [],
+      dataDirIssues: { orphans: [], missing: [] },
+      remoteFsMounts: [],
+      dockerDaemon: null,
+    };
   }
 }

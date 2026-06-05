@@ -1,0 +1,13 @@
+# Worklog
+- Ran root typecheck: common/backend/agent/frontend passed.
+- Ran backend focused tests: container operation, action policy, operation orchestrator runtime confirmation, outbox worker passed (4 files, 8 tests).
+- Built common/backend/agent via `pnpm build` and frontend production bundle via `pnpm --filter @nyabase/frontend build`.
+- Restarted backend against `/root/nyabase/test/runtime/db/nyabase-test.db` with current built code; verified frontend 5173 and backend 3001 reachable.
+- Test DB initially lacked `container_lifecycle.runtime_confirmation`; added column via SQLite ALTER to match new migration before live testing.
+- Ran live smoke: pass, report `test/runtime/live-api/runs/20260605t174645-ecf9e9/report.json`.
+- Ran full live API once; it failed in gamma delete because pending confirmation correctly rejected immediate delete. Updated `test/scripts/run-live-api-suite.mjs` to wait until delete action is enabled before cleanup.
+- Cleaned the failed gamma container; expired confirmation was visible in DTO, delete was allowed after expiration, and lock cleared after delete.
+- Re-ran full live API: pass=11 fail=0 blocked=0, report `test/runtime/live-api/runs/20260605t175517-f1f023/report.json`.
+- Ran a targeted API probe: create produced pending runtimeConfirmation and disabled delete; restart produced pending runtimeConfirmation and immediate delete returned 403 with the expected message; after confirmation/timeout wait, delete succeeded and cleaned the probe container.
+- Verified cleanup: live-api alpha/beta/gamma and confirm-probe containers from final runs are deleted and runtime_confirmation is empty.
+- Verified no generated artifacts under `packages/common/src`.

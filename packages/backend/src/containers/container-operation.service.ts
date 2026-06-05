@@ -19,7 +19,6 @@ import { ContainerLifecycleEntity } from '../entities/container-lifecycle.entity
 import { GpuAllocationEntity } from '../entities/gpu-allocation.entity.js';
 import { OperationEntity } from '../entities/operation.entity.js';
 import { OperationStepEntity } from '../entities/operation-step.entity.js';
-import { RuntimeContainerEntity } from '../entities/runtime-container.entity.js';
 import { runSerializedTransaction } from '../database/serialized-transaction.js';
 
 export interface ContainerOperationRequest {
@@ -157,6 +156,7 @@ export class ContainerOperationService {
       await manager.update(ContainerLifecycleEntity, containerId, {
         phase: ContainerPhase.Deleted,
         activeOperationId: null,
+        runtimeConfirmation: null,
         lastTransitionAt: now,
         failureReason: null,
         failureCode: null,
@@ -167,10 +167,6 @@ export class ContainerOperationService {
       await manager.update(ContainerDesiredSpecEntity, { containerId }, {
         powerIntent: ContainerPowerIntent.Stopped,
         updatedAt: now,
-      });
-      await manager.update(RuntimeContainerEntity, { containerId }, {
-        stale: true,
-        lastSeenAt: now,
       });
       await manager.delete(ContainerMountEntity, { containerId });
       await manager.delete(GpuAllocationEntity, { containerId });

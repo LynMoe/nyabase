@@ -1,5 +1,5 @@
 import { Link } from '@tanstack/react-router';
-import { AlertTriangle, Play, Square, RotateCw, Trash2, Terminal } from 'lucide-react';
+import { AlertTriangle, Loader2, Play, Square, RotateCw, Trash2, Terminal } from 'lucide-react';
 import { ContainerPhase, ContainerStatus } from '@nyabase/common';
 import type { ContainerAction, ContainerView } from '@nyabase/common';
 import { Badge } from '../ui/badge.js';
@@ -43,8 +43,17 @@ export function ContainerRow({
 }) {
   const running = c.runtime.status === ContainerStatus.Running;
   const showRuntimeStatus = c.runtime.bound && c.runtime.status !== ContainerStatus.Unknown;
-  const statusLabel = showRuntimeStatus ? (c.runtime.status ?? ContainerStatus.Unknown) : PHASE_LABEL[c.phase];
-  const statusVariant = showRuntimeStatus
+  const confirmation = c.runtimeConfirmation;
+  const statusLabel = confirmation?.status === 'pending'
+    ? '确认中'
+    : confirmation?.status === 'expired'
+    ? '确认超时'
+    : showRuntimeStatus
+    ? (c.runtime.status ?? ContainerStatus.Unknown)
+    : PHASE_LABEL[c.phase];
+  const statusVariant = confirmation
+    ? 'warning'
+    : showRuntimeStatus
     ? STATUS_VARIANT[String(c.runtime.status)] ?? 'outline'
     : c.phase === ContainerPhase.Active
     ? 'success'
@@ -77,7 +86,10 @@ export function ContainerRow({
           ) : (
             <span className="font-medium text-sm">{c.name}</span>
           )}
-          <Badge variant={statusVariant}>{statusLabel}</Badge>
+          <Badge variant={statusVariant} title={confirmation?.message}>
+            {confirmation?.status === 'pending' && <Loader2 className="mr-1 h-3 w-3 animate-spin" />}
+            {statusLabel}
+          </Badge>
           {failureInfo && (
             <TooltipProvider>
               <Tooltip>

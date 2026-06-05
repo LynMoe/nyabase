@@ -75,7 +75,7 @@ describe('XfsQuotaManager fail-closed command handling', () => {
   });
 
   it('rejects when xfs_quota command execution fails', async () => {
-    mockExecFile((cmd, args) => {
+    mockExecFile((cmd, _args) => {
       expect(cmd).toBe('xfs_quota');
       return {
         error: Object.assign(new Error('xfs_quota failed'), {

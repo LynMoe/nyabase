@@ -13,7 +13,7 @@
     "lint": "eslint packages/common/src packages/backend/src packages/agent/src packages/frontend/src",
     "typecheck": "pnpm --filter @nyabase/common typecheck && pnpm --filter @nyabase/backend typecheck && pnpm --filter @nyabase/agent typecheck && pnpm --filter @nyabase/frontend typecheck",
     "test:unit": "pnpm --filter @nyabase/common test && pnpm --filter @nyabase/backend test && pnpm --filter @nyabase/agent test",
-    "test:functional": "bash test/scripts/run-functional.sh",
+    "test:functional": "node test/scripts/run-live-api-suite.mjs",
     "test": "pnpm typecheck && pnpm test:unit",
     "dev:reset": "bash scripts/dev.sh reset",
     "dev:stop": "bash scripts/dev.sh stop",

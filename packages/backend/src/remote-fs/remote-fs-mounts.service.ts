@@ -9,13 +9,13 @@ import { In, Repository } from 'typeorm';
 import { v4 as uuidv4 } from 'uuid';
 import { RemoteFsMountEntity } from '../entities/remote-fs-mount.entity.js';
 import { RemoteFsServerAssignmentEntity } from '../entities/remote-fs-server-assignment.entity.js';
-import { RemoteFsRuntimeObservationEntity } from '../entities/remote-fs-runtime-observation.entity.js';
 import { ContainerMountEntity } from '../entities/container-mount.entity.js';
 import { DataDirectoryEntity } from '../entities/data-directory.entity.js';
 import { AuditService } from '../audit/audit.service.js';
 import { AgentCommandKind, AuditAction, OperationKind, RemoteFsMountStatus, RemoteFsParams, zRemoteFsParams } from '@nyabase/common';
 import { AccessResolverService } from '../access/access-resolver.service.js';
 import { OperationsService } from '../operations/operations.service.js';
+import { AgentGateway } from '../gateway/agent-gateway.js';
 
 /** Forbidden hostMountPoint prefixes */
 const FORBIDDEN_PREFIXES = ['/', '/etc', '/var/run', '/proc', '/sys', '/dev'];
@@ -37,8 +37,6 @@ export class RemoteFsMountsService {
     private mountsRepo: Repository<RemoteFsMountEntity>,
     @InjectRepository(RemoteFsServerAssignmentEntity)
     private assignmentsRepo: Repository<RemoteFsServerAssignmentEntity>,
-    @InjectRepository(RemoteFsRuntimeObservationEntity)
-    private observationsRepo: Repository<RemoteFsRuntimeObservationEntity>,
     @InjectRepository(ContainerMountEntity)
     private containerMountsRepo: Repository<ContainerMountEntity>,
     @InjectRepository(DataDirectoryEntity)
@@ -46,6 +44,7 @@ export class RemoteFsMountsService {
     private auditService: AuditService,
     private accessResolver: AccessResolverService,
     private operationsService: OperationsService,
+    private agentGateway: AgentGateway,
   ) {}
 
   async list(serverId?: string): Promise<RemoteFsMountEntity[]> {
@@ -175,7 +174,7 @@ export class RemoteFsMountsService {
   }
 
   async remove(actorId: string, id: string): Promise<{ ok: true; operationIds: string[] }> {
-    const mount = await this.findById(id);
+    await this.findById(id);
 
     const inUse = await this.containerMountsRepo.findOne({
       where: { sourceKind: 'remote', sourceId: id },
@@ -291,22 +290,9 @@ export class RemoteFsMountsService {
   async getMountStatuses(mountId: string, serverIds: string[]): Promise<Record<string, RemoteFsMountStatus>> {
     const result: Record<string, RemoteFsMountStatus> = {};
     for (const serverId of serverIds) {
-      const status = await this.observationsRepo.findOne({
-        where: { serverId, remoteFsMountId: mountId },
-        order: { reportSeq: 'DESC', lastSeenAt: 'DESC' },
-      });
+      const status = this.agentGateway.stateCache.getRemoteFsMountStatus(serverId, mountId);
       if (!status) continue;
-      result[serverId] = {
-        id: status.remoteFsMountId,
-        hostMountPoint: status.hostMountPoint,
-        status: status.status === 'mounted' || status.status === 'mounting'
-          ? status.status
-          : 'error',
-        ...(status.error ? { error: status.error } : {}),
-        lastCheckedAt: status.lastSeenAt.getTime(),
-        ...(status.totalBytes != null ? { totalBytes: status.totalBytes } : {}),
-        ...(status.usedBytes != null ? { usedBytes: status.usedBytes } : {}),
-      };
+      result[serverId] = status;
     }
     return result;
   }

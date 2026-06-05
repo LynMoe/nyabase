@@ -1,4 +1,4 @@
-import { Controller, Get, Optional, Param, Query, UseGuards } from '@nestjs/common';
+import { Controller, Get, Param, Query, UseGuards } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Capability, ContainerMetricsDto, GpuMetricsDto, HostMetricsDto, UserMetricsDto } from '@nyabase/common';
 import { Repository } from 'typeorm';
@@ -8,12 +8,11 @@ import { RequireCaps } from '../auth/decorators/require-caps.decorator.js';
 import { CapabilitiesGuard } from '../auth/guards/capabilities.guard.js';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard.js';
 import { ContainerEntity } from '../entities/container.entity.js';
-import { DataDiskRuntimeObservationEntity } from '../entities/data-disk-runtime-observation.entity.js';
-import { RuntimeContainerEntity } from '../entities/runtime-container.entity.js';
 import { UserEntity } from '../entities/user.entity.js';
 import { UsersService } from '../users/users.service.js';
 import { MetricsController } from './metrics.controller.js';
 import { MetricsQueryService } from './metrics-query.service.js';
+import { AgentGateway } from '../gateway/agent-gateway.js';
 
 @Controller('admin/metrics')
 @UseGuards(JwtAuthGuard, CapabilitiesGuard)
@@ -23,15 +22,11 @@ export class AdminMetricsController extends MetricsController {
     metricsQuery: MetricsQueryService,
     accessResolver: AccessResolverService,
     usersService: UsersService,
-    @InjectRepository(DataDiskRuntimeObservationEntity)
-    diskObservationsRepo: Repository<DataDiskRuntimeObservationEntity>,
     @InjectRepository(ContainerEntity)
     containersRepo: Repository<ContainerEntity>,
-    @Optional()
-    @InjectRepository(RuntimeContainerEntity)
-    runtimeContainersRepo?: Repository<RuntimeContainerEntity>,
+    agentGateway: AgentGateway,
   ) {
-    super(metricsQuery, accessResolver, usersService, diskObservationsRepo, containersRepo, runtimeContainersRepo);
+    super(metricsQuery, accessResolver, usersService, containersRepo, agentGateway);
   }
 
   @Get('servers/:id/host')

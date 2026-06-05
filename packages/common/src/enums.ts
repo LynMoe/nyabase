@@ -114,9 +114,13 @@ export enum HookKind {
 }
 
 export enum RuntimeDriftKind {
+  AgentStateUnready = 'agent_state_unready',
   RuntimeMissing = 'runtime_missing',
+  RuntimeUnbound = 'runtime_unbound',
+  RuntimeIdMismatch = 'runtime_id_mismatch',
   DesiredMissing = 'desired_missing',
   SpecGenerationMismatch = 'spec_generation_mismatch',
+  SpecGenerationStale = 'spec_generation_stale',
   PowerIntentMismatch = 'power_intent_mismatch',
   MountMismatch = 'mount_mismatch',
   SshMismatch = 'ssh_mismatch',

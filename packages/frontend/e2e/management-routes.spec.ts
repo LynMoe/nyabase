@@ -393,9 +393,9 @@ async function mockApi(page: Page): Promise<void> {
     const url = new URL(route.request().url());
     const path = url.pathname.replace(/^\/api/, '');
 
-    if (path === '/admin/servers') return json(route, servers);
-    if (path === '/admin/servers/srv-gpu/disks') return json(route, gpuServer.disks);
-    if (path === '/admin/servers/srv-cpu/disks') return json(route, []);
+    if (path === '/admin/servers' || path === '/servers') return json(route, servers);
+    if (path === '/admin/servers/srv-gpu/disks' || path === '/servers/srv-gpu/disks') return json(route, gpuServer.disks);
+    if (path === '/admin/servers/srv-cpu/disks' || path === '/servers/srv-cpu/disks') return json(route, []);
     if (path === '/admin/images') return json(route, images);
     if (path === '/admin/users') return json(route, users);
     if (path === '/users/user-admin/ssh-keys') {

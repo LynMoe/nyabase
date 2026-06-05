@@ -23,7 +23,6 @@ describe('withTimeout', () => {
     // Indirect check: run many fast ops in series — if timers leaked, vitest
     // would hold the event loop open at the end of the test file.
     for (let i = 0; i < 50; i++) {
-      // eslint-disable-next-line no-await-in-loop
       await withTimeout(Promise.resolve(i), 1_000, `op-${i}`);
     }
     expect(true).toBe(true);

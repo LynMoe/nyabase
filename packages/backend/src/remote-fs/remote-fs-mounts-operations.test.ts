@@ -10,7 +10,6 @@ import { DataSource, Repository } from 'typeorm';
 import { ContainerMountEntity } from '../entities/container-mount.entity.js';
 import { DataDirectoryEntity } from '../entities/data-directory.entity.js';
 import { RemoteFsMountEntity } from '../entities/remote-fs-mount.entity.js';
-import { RemoteFsRuntimeObservationEntity } from '../entities/remote-fs-runtime-observation.entity.js';
 import { RemoteFsServerAssignmentEntity } from '../entities/remote-fs-server-assignment.entity.js';
 import { RemoteFsMountsService } from './remote-fs-mounts.service.js';
 
@@ -31,7 +30,6 @@ describe('RemoteFsMountsService durable operation dispatch', () => {
         ContainerMountEntity,
         DataDirectoryEntity,
         RemoteFsMountEntity,
-        RemoteFsRuntimeObservationEntity,
         RemoteFsServerAssignmentEntity,
       ],
       synchronize: true,
@@ -51,12 +49,12 @@ describe('RemoteFsMountsService durable operation dispatch', () => {
     service = new RemoteFsMountsService(
       mountsRepo,
       assignmentsRepo,
-      dataSource.getRepository(RemoteFsRuntimeObservationEntity),
       dataSource.getRepository(ContainerMountEntity),
       dataSource.getRepository(DataDirectoryEntity),
       auditService as never,
       accessResolver as never,
       operationsService as never,
+      { stateCache: { getRemoteFsMountStatus: vi.fn() } } as never,
     );
     await mountsRepo.save(mountsRepo.create({
       id: 'remote-a',

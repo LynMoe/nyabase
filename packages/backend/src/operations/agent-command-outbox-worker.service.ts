@@ -10,12 +10,10 @@ import {
   AgentCommandKind,
   AgentCommandStatus,
   HookStatus,
-  OperationKind,
   OperationStatus,
   type AgentCommandEnvelope,
 } from '@nyabase/common';
 import { AgentCommandOutboxEntity } from '../entities/agent-command-outbox.entity.js';
-import { ContainerEntity } from '../entities/container.entity.js';
 import { OperationEntity } from '../entities/operation.entity.js';
 import { OperationStepEntity } from '../entities/operation-step.entity.js';
 import { ReconcileTaskEntity } from '../entities/reconcile-task.entity.js';
@@ -27,6 +25,7 @@ import { ResourceLockService, type AcquiredResourceLock } from './resource-lock.
 
 const WORKER_INTERVAL_MS = 1_000;
 const AGENT_COMMAND_ACK_TIMEOUT_MS = 60_000;
+const AGENT_STATE_UNREADY_ERROR = 'Agent runtime state is not ready';
 const COMMAND_LEASE_MS = AGENT_COMMAND_ACK_TIMEOUT_MS + 15_000;
 const RESOURCE_LOCK_MS = AGENT_COMMAND_ACK_TIMEOUT_MS + 15_000;
 const AGENT_COMMAND_KINDS = new Set<string>(Object.values(AgentCommandKind));
@@ -135,6 +134,21 @@ export class AgentCommandOutboxWorkerService implements OnModuleInit, OnModuleDe
           await this.releaseForRetry(
             leased,
             'Agent offline',
+            new Date(Date.now() + 2_000),
+            AgentCommandStatus.WaitingAgent,
+            OperationStatus.WaitingAgent,
+            HookStatus.WaitingAgent,
+          );
+        } finally {
+          await this.resourceLocks.release(lock);
+        }
+        return true;
+      }
+      if (!this.agentGateway.stateCache.isRuntimeReady(leased.serverId)) {
+        try {
+          await this.releaseForRetry(
+            leased,
+            AGENT_STATE_UNREADY_ERROR,
             new Date(Date.now() + 2_000),
             AgentCommandStatus.WaitingAgent,
             OperationStatus.WaitingAgent,
@@ -336,7 +350,8 @@ export class AgentCommandOutboxWorkerService implements OnModuleInit, OnModuleDe
   ): Promise<void> {
     const decision = classifyRetry(error, command.attempts + 1);
     if (decision.retry && decision.nextAttemptAt) {
-      const waitingAgent = errorMessage(error).toLowerCase().includes('offline');
+      const message = errorMessage(error).toLowerCase();
+      const waitingAgent = message.includes('offline') || message.includes('runtime state is not ready');
       await this.releaseForRetry(
         command,
         error,

@@ -80,29 +80,23 @@ bash test/scripts/run-live-suite.sh smoke
 
 Result: `OK`; `admin login OK`.
 
-```bash
-bash test/scripts/run-live-suite.sh admin-setup
-```
-
-Result: 1 file passed, 1 test passed; wrote `test/runtime/murt/current.env`.
+The current live API flow replaces the old `admin-setup` / `personas` /
+`continuation` split with one persistent-fixture suite:
 
 ```bash
-bash test/scripts/run-live-suite.sh personas
+bash test/scripts/run-live-suite.sh api
 ```
-
-Result: 6 files passed, 6 tests passed.
 
 Covered persona flows:
 
-- epsilon no-access denial surface
-- gamma/delta isolation by containerId-only route
-- gamma GPU persona create/metrics non-leak path
-- delta CPU/optional-GPU create/delete via operation actions
-- beta serialized mutations through operation polling
-- alpha active CPU lifecycle, backend actions, stats/power/delete operations, GPU denial
+- admin ensures persistent images, users, groups, quotas, data sources, and grants
+- alpha/beta ordinary user data dir and CPU container lifecycle
+- gamma GPU container and scoped metrics path
+- delta no-access denial surface
+- operation polling, stats, exec-session, SSH actions, audit, and metrics
 
 ```bash
-bash test/scripts/run-live-suite.sh continuation
+bash test/scripts/run-live-suite.sh smoke
 ```
 
 Result: 1 file passed, 1 test passed.

@@ -30,8 +30,6 @@ import {
   type OperationRefResponse,
   type OperationSummaryDto,
   type HookSummaryDto,
-  type RuntimeDriftDto,
-  type RuntimeStalenessDto,
 } from '@nyabase/common';
 
 declare const process: {
@@ -625,20 +623,10 @@ describe('Control-plane REST protocol exports', () => {
       lastError: null,
       updatedAt: new Date(0).toISOString(),
     };
-    const drift: RuntimeDriftDto = {
-      kind: RuntimeDriftKind.SpecGenerationMismatch,
-      desired: 2,
-      observed: 1,
-    };
-    const staleness: RuntimeStalenessDto = {
-      stale: true,
-      observedAt: null,
-      lastReportSeq: null,
-      missingSince: null,
-    };
     expect(operationRef.status).toBe(OperationStatus.Queued);
     expect(operation.kind).toBe(OperationKind.ContainerCreate);
     expect(hook.hook).toBe(HookKind.Mounts);
+    expect(RuntimeDriftKind.SpecGenerationMismatch).toBe('spec_generation_mismatch');
     expect(AgentCommandStatus.Pending).toBe('pending');
     expect(zEnvelope.parse({ ts: 1, kind: 'hello', payload: {} }).kind).toBe('hello');
     expect(ContainerStatus.Running).toBe('running');

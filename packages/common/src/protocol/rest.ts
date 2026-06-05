@@ -174,6 +174,8 @@ export interface ServerDto {
   isGpuServer: boolean;
   status: ServerStatus;
   lastSeenAt: string | null;
+  runtimeReady: boolean;
+  runtimeObservedAt: string | null;
   /** Default resource limits applied when a grant leaves fields null */
   defaultCpuMillis: number;
   defaultMemBytes: number;
@@ -290,7 +292,9 @@ export type ActionBlockedReason =
   | 'container_unbound'
   | 'phase_not_active'
   | 'operation_in_progress'
+  | 'runtime_confirmation_pending'
   | 'agent_offline'
+  | 'agent_state_unready'
   | 'runtime_missing'
   | 'runtime_stale'
   | 'permission_denied'
@@ -309,10 +313,10 @@ export interface ActionAvailability {
 export interface ContainerRuntimeView {
   bound: boolean;
   runtimeId: string | null;
-  status: ContainerStatus | null;
+  status: ContainerStatus;
   ip?: string | null;
   observedAt: string | null;
-  stale: boolean;
+  stale?: boolean;
   drift: RuntimeDriftDto[];
 }
 
@@ -332,6 +336,14 @@ export interface ContainerMountView {
   containerPath: string;
 }
 
+export interface RuntimeConfirmationView {
+  status: 'pending' | 'expired';
+  operationId: string;
+  kind: OperationKind;
+  deadlineAt: string;
+  message: string;
+}
+
 export interface ContainerView {
   id: string;
   serverId: string;
@@ -345,6 +357,7 @@ export interface ContainerView {
   failureCode?: string | null;
   failureReason?: string | null;
   powerIntent: ContainerPowerIntent;
+  runtimeReady: boolean;
   runtime: ContainerRuntimeView;
   activeOperation: OperationSummaryDto | null;
   resources: {
@@ -355,6 +368,7 @@ export interface ContainerView {
   };
   ssh: ContainerSshView;
   mounts: ContainerMountView[];
+  runtimeConfirmation?: RuntimeConfirmationView | null;
   actions: Record<ContainerAction, ActionAvailability>;
 }
 

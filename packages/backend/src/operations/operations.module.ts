@@ -7,9 +7,7 @@ import { ContainerEntity } from '../entities/container.entity.js';
 import { ContainerDesiredSpecEntity } from '../entities/container-desired-spec.entity.js';
 import { ContainerLifecycleEntity } from '../entities/container-lifecycle.entity.js';
 import { ContainerMountEntity } from '../entities/container-mount.entity.js';
-import { ContainerRuntimeObservationEntity } from '../entities/container-runtime-observation.entity.js';
 import { DataDirectoryEntity } from '../entities/data-directory.entity.js';
-import { DataDirRuntimeObservationEntity } from '../entities/data-dir-runtime-observation.entity.js';
 import { DataDiskEntity } from '../entities/data-disk.entity.js';
 import { OperationEntity } from '../entities/operation.entity.js';
 import { OperationStepEntity } from '../entities/operation-step.entity.js';
@@ -17,10 +15,10 @@ import { QuotaDesiredEntity } from '../entities/quota-desired.entity.js';
 import { ReconcileTaskEntity } from '../entities/reconcile-task.entity.js';
 import { RemoteFsMountEntity } from '../entities/remote-fs-mount.entity.js';
 import { RemoteFsServerAssignmentEntity } from '../entities/remote-fs-server-assignment.entity.js';
-import { RuntimeContainerEntity } from '../entities/runtime-container.entity.js';
 import { ResourceLockEntity } from '../entities/resource-lock.entity.js';
 import { SshPublicKeyEntity } from '../entities/ssh-public-key.entity.js';
 import { AgentGatewayModule } from '../gateway/agent-gateway.module.js';
+import { DataDirsModule } from '../datadirs/datadirs.module.js';
 import { AgentCommandOutboxWorkerService } from './agent-command-outbox-worker.service.js';
 import { LifecycleHookRegistryService } from './lifecycle-hook-registry.service.js';
 import { AdminOperationsController } from './admin-operations.controller.js';
@@ -41,20 +39,18 @@ import { ResourceLockService } from './resource-lock.service.js';
       ContainerEntity,
       ContainerDesiredSpecEntity,
       ContainerLifecycleEntity,
-      ContainerRuntimeObservationEntity,
       ContainerMountEntity,
       DataDiskEntity,
       RemoteFsMountEntity,
       RemoteFsServerAssignmentEntity,
-      RuntimeContainerEntity,
       SshPublicKeyEntity,
       QuotaDesiredEntity,
       DataDirectoryEntity,
-      DataDirRuntimeObservationEntity,
     ]),
     AuthModule,
     AccessModule,
     forwardRef(() => AgentGatewayModule),
+    forwardRef(() => DataDirsModule),
   ],
   providers: [
     OperationsService,

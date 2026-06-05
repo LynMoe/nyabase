@@ -9,12 +9,13 @@ configuration, scripts, specs, runtime metadata, and the shared test database.
 | --- | --- |
 | `test/docs/` | Human-facing test process docs. |
 | `test/config/` | Fixed shared-instance env and agent definitions. |
-| `test/scripts/` | Startup, reset, agent deployment, fixture, and suite scripts. |
+| `test/scripts/` | Startup, reset, agent deployment, persistent fixture, and live API suite scripts. |
 | `test/specs/live/` | Live Vitest specs that exercise the shared instance. |
 | `test/runtime/db/` | SQLite DB for the shared local backend. |
 | `test/runtime/agents/` | Generated server metadata, tokens, and agent YAML. |
 | `test/runtime/logs/` | `nohup` logs and PID files for local backend/frontend. |
-| `test/runtime/murt/`, `test/runtime/murtc/`, `test/runtime/mount/`, `test/runtime/dropbear/` | Generated live-test fixtures and reports. |
+| `test/runtime/live-api/` | Persistent live API fixture, persona credentials, and per-run reports. |
+| `test/runtime/murt/`, `test/runtime/murtc/`, `test/runtime/mount/`, `test/runtime/dropbear/` | Legacy generated live-test fixtures and reports. |
 
 ## Fixed Instance
 
@@ -51,7 +52,7 @@ and stored under `test/runtime/`.
 bash test/scripts/reset-local.sh
 node test/scripts/register-agents.mjs
 bash test/scripts/deploy-agents.sh
-bash test/scripts/run-live-suite.sh smoke
+bash test/scripts/run-live-suite.sh api
 ```
 
 Use `bash test/scripts/start-local.sh` when the DB should be preserved. Use
@@ -61,12 +62,16 @@ Use `bash test/scripts/start-local.sh` when the DB should be preserved. Use
 
 - Unit/static gate: `bash scripts/check.sh`
 - Visual gate: `bash scripts/check-visual.sh`
-- Product API functional script: `pnpm test:functional`
-- Live multi-user fixture: `bash test/scripts/run-live-suite.sh admin-setup`
-- Live continuation matrix: `bash test/scripts/run-live-suite.sh continuation`
-- Live persona matrix after admin setup: `bash test/scripts/run-live-suite.sh personas`
-- Live mount-source matrix: `node test/scripts/create-mount-fixture.mjs && bash test/scripts/run-live-suite.sh mounts`
-- Live Dropbear SSH runtime: `bash test/scripts/run-live-suite.sh dropbear`
+- Product API functional suite: `pnpm test:functional`
+- Live API suite with persistent fixtures: `bash test/scripts/run-live-suite.sh api`
+- Live smoke only: `bash test/scripts/run-live-suite.sh smoke`
+- Legacy red-team specs for targeted debugging: `bash test/scripts/run-live-suite.sh legacy-admin-setup` and `bash test/scripts/run-live-suite.sh legacy-redteam`
+
+The live API suite is not a mock. It logs into the shared backend, uses admin
+APIs to ensure persistent servers, images, data sources, users, groups, grants,
+and quotas, then launches separate persona Node processes that operate through
+ordinary user APIs. Containers and per-run directories are cleaned by default;
+common images, users, groups, data sources, and grants are reused across runs.
 
 Runtime artifacts, generated credentials, and raw agent tokens stay in
 `test/runtime/` and are ignored by Git.

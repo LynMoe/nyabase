@@ -1,4 +1,3 @@
-import { Logger } from '@nestjs/common';
 import {
   ContainerStatus,
   type ContainerSnapshot,
@@ -37,12 +36,8 @@ function makeContainer(runtimeId: string): ContainerSnapshot {
     },
     status: ContainerStatus.Running,
     stats: null,
-    sshServer: {
-      enabled: false,
-      status: 'disabled',
-      user: 'root',
-      port: 22,
-    },
+    sshServer: { enabled: false, status: 'disabled', user: 'root', port: 22 },
+    labels: { 'nyabase.container_id': 'container-a' },
   };
 }
 
@@ -85,16 +80,11 @@ function makeGateway() {
   const usersService = {
     getUserIdsByNumericIds: vi.fn().mockResolvedValue(new Map([[1001, 'user-a']])),
   };
-  const observationWriter = {
-    persistHello: vi.fn().mockResolvedValue(undefined),
-    persistStateReport: vi.fn().mockResolvedValue(undefined),
-    persistDataDirReport: vi.fn().mockResolvedValue(undefined),
-    persistContainerEvent: vi.fn().mockResolvedValue(undefined),
-    persistRemoteFsMountStatus: vi.fn().mockResolvedValue(undefined),
-    persistDockerDaemonStatus: vi.fn().mockResolvedValue(undefined),
-  };
   const operationOrchestrator = {
     recordProgress: vi.fn().mockResolvedValue(undefined),
+  };
+  const dataDirReconciler = {
+    reconcile: vi.fn().mockResolvedValue(undefined),
   };
 
   const gateway = new AgentGateway(
@@ -102,53 +92,25 @@ function makeGateway() {
     metricsWriter as never,
     execSessionRegistry as never,
     usersService as never,
-    observationWriter as never,
     operationOrchestrator as never,
+    dataDirReconciler as never,
   );
 
   return {
     gateway: gateway as unknown as TestGateway,
     usersService,
-    observationWriter,
     operationOrchestrator,
+    dataDirReconciler,
   };
 }
 
-describe('AgentGateway report and progress ingestion', () => {
+describe('AgentGateway state cache runtime readiness', () => {
   afterEach(() => {
     vi.restoreAllMocks();
   });
 
-  it('keeps StateCache transport-local while full reports persist observations and enqueue durable hook work', async () => {
-    vi.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
-    const setImmediateSpy = vi.spyOn(global, 'setImmediate');
-    const { gateway, usersService, observationWriter } = makeGateway();
-    const server = { id: 'server-a', name: 'server-a' } as ServerEntity;
-    const report = makeReport();
-
-    expect('registerOnStateReport' in gateway).toBe(false);
-    expect('registerOnConnect' in gateway).toBe(false);
-    expect('registerOnContainerStart' in gateway).toBe(false);
-    expect('registerOnDataDirReport' in gateway).toBe(false);
-
-    await expect(gateway.onStateReport(server, report)).resolves.toBeUndefined();
-
-    expect(observationWriter.persistStateReport).toHaveBeenCalledWith('server-a', report);
-    expect(usersService.getUserIdsByNumericIds).toHaveBeenCalledWith([1001, 9999]);
-    expect(setImmediateSpy).not.toHaveBeenCalled();
-
-    const snapshot = gateway.stateCache.get('server-a');
-    expect(snapshot).toBeDefined();
-    expect(snapshot?.containers.get('docker-a')).toEqual(report.containers[0]);
-    expect(snapshot?.xfsProjects).toEqual([
-      { userId: 'user-a', projectId: 11, usedBytes: 512, hardLimitBytes: 1024 },
-    ]);
-    expect(snapshot?.disks).toEqual(report.disks);
-    expect(snapshot?.remoteFsMounts).toEqual(report.remoteFsMounts);
-  });
-
-  it('enqueues reconnect, container-running, data-dir report, and operation progress work durably', async () => {
-    const { gateway, observationWriter, operationOrchestrator } = makeGateway();
+  it('hello initializes a snapshot but does not mark runtime ready', async () => {
+    const { gateway } = makeGateway();
     const server = { id: 'server-a', name: 'server-a', dockerRoot: null } as ServerEntity;
 
     await gateway.onHello(server, {
@@ -159,7 +121,6 @@ describe('AgentGateway report and progress ingestion', () => {
       totalMemBytes: 1024,
       disks: [],
       gpus: [],
-      xfsProjects: [],
       macvlanCidr: '10.0.0.0/24',
       macvlanGateway: '10.0.0.1',
       macvlanIface: 'eth0',
@@ -168,29 +129,85 @@ describe('AgentGateway report and progress ingestion', () => {
       agentVersion: '0.1.0',
       localImages: [],
     });
-    expect(observationWriter.persistHello).toHaveBeenCalledWith('server-a', expect.any(Object));
 
-    await gateway.onContainerEvent(server, {
-      serverId: 'server-a',
-      runtimeId: 'docker-a',
-      action: 'start',
-    });
-    expect(observationWriter.persistContainerEvent).toHaveBeenCalledWith('server-a', 'docker-a', 'start');
+    const snapshot = gateway.stateCache.get('server-a');
+    expect(snapshot?.runtimeReady).toBe(false);
+    expect(snapshot?.helloAt).toEqual(expect.any(Number));
+    expect(snapshot?.agentVersion).toBe('0.1.0');
+  });
 
-    await gateway.handleMessage(
-      { ws: { close: vi.fn() } },
-      server,
-      JSON.stringify({
-        ts: Date.now(),
-        kind: 'dataDirReport',
-        payload: { serverId: 'server-a', dirs: [] },
-      }),
+  it('first full state report marks ready and stores only stateCache runtime data', async () => {
+    const { gateway, usersService } = makeGateway();
+    const server = { id: 'server-a', name: 'server-a' } as ServerEntity;
+    const report = makeReport({ observedAt: 1_780_000_000_000 });
+
+    await gateway.onStateReport(server, report);
+
+    expect(usersService.getUserIdsByNumericIds).toHaveBeenCalledWith([1001, 9999]);
+    const snapshot = gateway.stateCache.get('server-a');
+    expect(snapshot?.runtimeReady).toBe(true);
+    expect(snapshot?.lastFullReportAt).toBe(1_780_000_000_000);
+    expect(snapshot?.lastFullReportReceivedAt).toEqual(expect.any(Number));
+    expect(snapshot?.containers.get('docker-a')).toEqual(report.containers[0]);
+    expect(snapshot?.xfsProjects).toEqual([
+      { userId: 'user-a', projectId: 11, usedBytes: 512, hardLimitBytes: 1024 },
+    ]);
+    expect(snapshot?.disks).toEqual(report.disks);
+    expect(snapshot?.remoteFsMounts).toEqual(report.remoteFsMounts);
+  });
+
+  it('ignores incremental state reports before the first full report', async () => {
+    const { gateway } = makeGateway();
+    await gateway.onStateReport(
+      { id: 'server-a', name: 'server-a' } as ServerEntity,
+      makeReport({ incremental: true, containers: [makeContainer('incremental-a')] }),
     );
-    expect(observationWriter.persistDataDirReport).toHaveBeenCalledWith('server-a', {
-      serverId: 'server-a',
-      dirs: [],
-    });
 
+    const snapshot = gateway.stateCache.get('server-a');
+    expect(snapshot?.runtimeReady).toBe(false);
+    expect(snapshot?.containers.size).toBe(0);
+    expect(snapshot?.lastIncrementalReportAt).toBeNull();
+  });
+
+  it('dataDir, remote-fs, docker daemon messages do not mark runtime ready', async () => {
+    const { gateway, dataDirReconciler } = makeGateway();
+    const server = { id: 'server-a', name: 'server-a' } as ServerEntity;
+
+    await gateway.handleMessage({ ws: { close: vi.fn() } }, server, JSON.stringify({
+      ts: Date.now(),
+      kind: 'dataDirReport',
+      payload: { serverId: 'server-a', dirs: [{ sourceKind: 'local', sourceId: 'disk-a', name: 'project', hostPath: '/data/project' }] },
+    }));
+    await gateway.handleMessage({ ws: { close: vi.fn() } }, server, JSON.stringify({
+      ts: Date.now(),
+      kind: 'remoteFsMountStatus',
+      payload: { id: 'remote-a', hostMountPoint: '/mnt/remote-a', status: 'mounted', lastCheckedAt: 1 },
+    }));
+    await gateway.handleMessage({ ws: { close: vi.fn() } }, server, JSON.stringify({
+      ts: Date.now(),
+      kind: 'dockerDaemonStatus',
+      payload: {
+        serverId: 'server-a',
+        state: 'active',
+        unitFileInSync: true,
+        enabled: true,
+        active: true,
+        pid: 123,
+        dockerRoot: '/var/lib/docker',
+        socketPath: '/var/run/docker.sock',
+        serverVersion: '1',
+        storageDriver: 'overlay2',
+        lastError: null,
+        checkedAt: 1,
+      },
+    }));
+
+    expect(dataDirReconciler.reconcile).toHaveBeenCalledWith('server-a');
+    expect(gateway.stateCache.isRuntimeReady('server-a')).toBe(false);
+  });
+
+  it('forwards operation progress to the operation orchestrator', async () => {
+    const { gateway, operationOrchestrator } = makeGateway();
     await gateway.onOperationProgress({
       operationId: 'operation-a',
       commandId: 'command-a',
@@ -205,18 +222,5 @@ describe('AgentGateway report and progress ingestion', () => {
       step: 'docker-start',
       ts: expect.any(Number),
     });
-  });
-
-  it('does not enqueue full-report hooks when observation persistence fails', async () => {
-    vi.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
-    const { gateway, observationWriter } = makeGateway();
-    observationWriter.persistStateReport.mockRejectedValueOnce(new Error('writer failed'));
-
-    await expect(gateway.onStateReport(
-      { id: 'server-a', name: 'server-a' } as ServerEntity,
-      makeReport(),
-    )).resolves.toBeUndefined();
-
-    expect(observationWriter.persistStateReport).toHaveBeenCalled();
   });
 });

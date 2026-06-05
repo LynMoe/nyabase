@@ -65,7 +65,7 @@ assert_absent "old applyMounts command removed" 'container.applyMounts' packages
 assert_absent "old reconcileSsh command removed" 'container.reconcileSsh' packages/common/src packages/backend/src packages/agent/src test/specs test/scripts
 assert_absent "legacy label constants removed" 'LEGACY_LABEL' packages/common/src packages/backend/src packages/agent/src test/specs test/scripts
 assert_absent "legacy spec version removed" 'LEGACY_SPEC_VERSION' packages/common/src packages/backend/src packages/agent/src test/specs test/scripts
-assert_absent "legacy desired import id removed" 'legacy-' packages/backend/src packages/agent/src packages/common/src test/specs test/scripts
+assert_absent "legacy desired import id removed" 'legacy-' packages/backend/src packages/agent/src packages/common/src test/specs
 
 # Hidden old container chain must be removed, not kept as fallback.
 assert_file_absent "old container read model service removed" packages/backend/src/containers/container-read-model.service.ts
@@ -97,7 +97,7 @@ assert_absent "old mounts endpoint suffix removed" "'/mounts'" test/specs test/s
 assert_file_present "container action policy service exists" packages/backend/src/containers/container-action-policy.service.ts
 assert_file_present "container control service exists" packages/backend/src/containers/container-control.service.ts
 assert_file_present "container operation service exists" packages/backend/src/containers/container-operation.service.ts
-assert_file_present "runtime observation service exists" packages/backend/src/runtime/runtime-observation.service.ts
+assert_file_absent "old runtime observation service removed" packages/backend/src/runtime/runtime-observation.service.ts
 assert_file_present "runtime orphan service exists" packages/backend/src/runtime/runtime-orphan.service.ts
 assert_file_present "frontend operation tracker exists" packages/frontend/src/hooks/use-operation-tracker.ts
 

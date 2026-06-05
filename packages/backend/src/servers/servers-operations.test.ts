@@ -37,6 +37,10 @@ function makeService() {
   const agentGateway = {
     isOnline: vi.fn().mockReturnValue(true),
     rpc: vi.fn().mockResolvedValue({ exists: true, isXfs: true, fsType: 'xfs' }),
+    stateCache: {
+      getRuntimeBlockReason: vi.fn().mockReturnValue({ enabled: true }),
+      get: vi.fn().mockReturnValue({ disks: [], gpus: [], dockerDaemon: null, runtimeReady: true, lastUpdated: Date.now() }),
+    },
   };
   const accessResolver = {
     invalidateAll: vi.fn(),
@@ -59,11 +63,7 @@ function makeService() {
     serversRepo as never,
     dataDisksRepo as never,
     dataDirectoriesRepo as never,
-    { findOne: vi.fn().mockResolvedValue(null), find: vi.fn().mockResolvedValue([]) } as never,
     { findOne: vi.fn().mockResolvedValue(null) } as never,
-    { findOne: vi.fn().mockResolvedValue(null) } as never,
-    { find: vi.fn().mockResolvedValue([]) } as never,
-    { findOne: vi.fn().mockResolvedValue(null), upsert: vi.fn(), create: vi.fn((input) => input) } as never,
     agentGateway as never,
     accessResolver as never,
     usersService as never,

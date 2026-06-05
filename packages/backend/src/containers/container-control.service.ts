@@ -14,8 +14,10 @@ import {
   CreateContainerRequest,
   OperationKind,
   OperationRefResponse,
+  RuntimeDriftKind,
   type ExecSessionRequest,
   type ContainerMountSpec,
+  type ContainerSnapshot,
 } from '@nyabase/common';
 import { AccessResolverService } from '../access/access-resolver.service.js';
 import { ContainerDesiredSpecEntity } from '../entities/container-desired-spec.entity.js';
@@ -24,16 +26,12 @@ import { ContainerLifecycleEntity } from '../entities/container-lifecycle.entity
 import { GpuAllocationEntity } from '../entities/gpu-allocation.entity.js';
 import { ImageEntity } from '../entities/image.entity.js';
 import { OperationEntity } from '../entities/operation.entity.js';
-import { RuntimeContainerEntity } from '../entities/runtime-container.entity.js';
-import { RuntimeGpuInventoryEntity } from '../entities/runtime-gpu-inventory.entity.js';
 import { ServerEntity } from '../entities/server.entity.js';
 import { UserEntity } from '../entities/user.entity.js';
 import { DataDiskEntity } from '../entities/data-disk.entity.js';
 import { RemoteFsMountEntity } from '../entities/remote-fs-mount.entity.js';
 import { RemoteFsServerAssignmentEntity } from '../entities/remote-fs-server-assignment.entity.js';
 import { SshPublicKeyEntity } from '../entities/ssh-public-key.entity.js';
-import { ContainerRuntimeObservationEntity } from '../entities/container-runtime-observation.entity.js';
-import { RuntimeContainerStatEntity } from '../entities/runtime-container-stat.entity.js';
 import { ContainerActionPolicyService } from './container-action-policy.service.js';
 import { ContainerOperationService } from './container-operation.service.js';
 import { runSerializedTransaction } from '../database/serialized-transaction.js';
@@ -44,6 +42,13 @@ import { ExecSessionRegistry } from '../gateway/exec-session-registry.js';
 type MountInput = NonNullable<CreateContainerRequest['dataDirs']>[number];
 
 type NormalizedMount = MountInput & { id: string };
+
+type RuntimeConfirmationStatus = {
+  status: 'pending' | 'confirmed' | 'expired';
+  view: NonNullable<ContainerView['runtimeConfirmation']> | null;
+};
+
+const RUNTIME_CONFIRMATION_MESSAGE = '上一个操作已完成，正在等待 agent 上报运行态确认';
 
 @Injectable()
 export class ContainerControlService {
@@ -58,8 +63,6 @@ export class ContainerControlService {
     private desiredRepo: Repository<ContainerDesiredSpecEntity>,
     @InjectRepository(ContainerLifecycleEntity)
     private lifecycleRepo: Repository<ContainerLifecycleEntity>,
-    @InjectRepository(RuntimeContainerEntity)
-    private runtimeRepo: Repository<RuntimeContainerEntity>,
     @InjectRepository(OperationEntity)
     private operationsRepo: Repository<OperationEntity>,
     @InjectRepository(ImageEntity)
@@ -70,8 +73,6 @@ export class ContainerControlService {
     private usersRepo: Repository<UserEntity>,
     @InjectRepository(GpuAllocationEntity)
     private gpuAllocationsRepo: Repository<GpuAllocationEntity>,
-    @InjectRepository(RuntimeGpuInventoryEntity)
-    private gpuInventoryRepo: Repository<RuntimeGpuInventoryEntity>,
     @InjectRepository(DataDiskEntity)
     private dataDisksRepo: Repository<DataDiskEntity>,
     @InjectRepository(RemoteFsMountEntity)
@@ -80,8 +81,6 @@ export class ContainerControlService {
     private remoteFsAssignmentsRepo: Repository<RemoteFsServerAssignmentEntity>,
     @InjectRepository(SshPublicKeyEntity)
     private sshKeysRepo: Repository<SshPublicKeyEntity>,
-    @InjectRepository(ContainerRuntimeObservationEntity)
-    private runtimeObservationRepo: Repository<ContainerRuntimeObservationEntity>,
     private agentGateway: AgentGateway,
     private execSessionRegistry: ExecSessionRegistry,
   ) {}
@@ -128,6 +127,7 @@ export class ContainerControlService {
     if (!image.isActive) throw new ForbiddenException('Image is inactive');
     if (!user?.numericId) throw new ForbiddenException('User numeric ID is required for container runtime operations');
     if (!server) throw new NotFoundException('Server not found');
+    this.assertRuntimeReady(request.serverId);
 
     const effectiveGrant = grant ?? {
       cpuMillis: 0,
@@ -210,6 +210,7 @@ export class ContainerControlService {
         phase: ContainerPhase.Provisioning,
         boundRuntimeId: null,
         activeOperationId: null,
+        runtimeConfirmation: null,
         lastTransitionAt: now,
         failureReason: null,
         failureCode: null,
@@ -277,22 +278,23 @@ export class ContainerControlService {
   ): Promise<OperationRefResponse> {
     const desired = await this.desiredRepo.findOneByOrFail({ containerId: container.id });
     const lifecycle = await this.lifecycleRepo.findOneByOrFail({ containerId: container.id });
-    const runtime = await this.runtimeRepo.findOne({ where: { containerId: container.id }, order: { lastSeenAt: 'DESC' } });
     const view = await this.toView(
       container,
       desired,
       lifecycle,
-      runtime,
-      null,
       await this.serverNameMap([container.serverId]),
       await this.imageNameMap([container.imageId]),
     );
     const availability = view.actions[action];
-    if (!availability.enabled) throw new ForbiddenException(availability.message ?? availability.reason ?? 'Action unavailable');
+    if (!availability.enabled) {
+      if (availability.reason === 'agent_state_unready') this.assertRuntimeReady(container.serverId);
+      throw new ForbiddenException(availability.message ?? availability.reason ?? 'Action unavailable');
+    }
 
-    if (action === 'updateMounts') return this.updateMounts(container, desired, lifecycle, runtime, requestedBy, accessUserId, body);
-    if (action === 'enableSsh') return this.applySsh(container, desired, lifecycle, runtime, requestedBy, true, body ?? { action });
-    if (action === 'reconcileSsh') return this.applySsh(container, desired, lifecycle, runtime, requestedBy, false, body ?? { action });
+    if (action !== 'delete' || lifecycle.boundRuntimeId) this.assertRuntimeReady(container.serverId);
+    if (action === 'updateMounts') return this.updateMounts(container, desired, lifecycle, requestedBy, accessUserId, body);
+    if (action === 'enableSsh') return this.applySsh(container, desired, lifecycle, requestedBy, true, body ?? { action });
+    if (action === 'reconcileSsh') return this.applySsh(container, desired, lifecycle, requestedBy, false, body ?? { action });
     if (action === 'delete' && !lifecycle.boundRuntimeId) {
       return this.operations.completeLocalContainerDelete(container.id, requestedBy);
     }
@@ -330,6 +332,11 @@ export class ContainerControlService {
       payload: actionPayload,
       phase,
       powerIntent,
+      beforeSave: async (manager) => {
+        await manager.update(ContainerLifecycleEntity, container.id, {
+          runtimeConfirmation: null,
+        });
+      },
     });
   }
 
@@ -361,13 +368,10 @@ export class ContainerControlService {
   ): Promise<{ sessionId: string }> {
     const desired = await this.desiredRepo.findOneByOrFail({ containerId: container.id });
     const lifecycle = await this.lifecycleRepo.findOneByOrFail({ containerId: container.id });
-    const runtime = await this.runtimeRepo.findOne({ where: { containerId: container.id }, order: { lastSeenAt: 'DESC' } });
     const view = await this.toView(
       container,
       desired,
       lifecycle,
-      runtime,
-      null,
       await this.serverNameMap([container.serverId]),
       await this.imageNameMap([container.imageId]),
     );
@@ -417,28 +421,19 @@ export class ContainerControlService {
     }
 
     if (view.runtime.runtimeId) {
-      const stat = await this.dataSource.getRepository(RuntimeContainerStatEntity).findOneBy({
-        runtimeContainerId: `${view.serverId}:${view.runtime.runtimeId}`,
-      });
-      if (stat) {
-        return {
-          containerId: view.id,
-          stats: stat.statsJson as ContainerStatsResponse['stats'],
-          ts: stat.observedAt.getTime(),
-          lastObservedAt: stat.observedAt.toISOString(),
-        };
-      }
+      const snapshot = this.agentGateway.stateCache.getContainerByContainerId(view.serverId, view.id);
+      const observedAt = this.agentGateway.stateCache.get(view.serverId)?.lastUpdated ?? Date.now();
+      return {
+        containerId: view.id,
+        stats: snapshot?.stats ?? null,
+        ts: observedAt,
+        lastObservedAt: new Date(observedAt).toISOString(),
+      };
     }
-
-    const observation = await this.runtimeObservationRepo.findOne({
-      where: { containerId: view.id, stale: false },
-      order: { lastSeenAt: 'DESC', reportSeq: 'DESC' },
-    });
     return {
       containerId: view.id,
-      stats: observation?.stats ?? null,
-      ts: observation?.lastSeenAt.getTime() ?? Date.now(),
-      lastObservedAt: observation?.lastSeenAt.toISOString(),
+      stats: null,
+      ts: Date.now(),
     };
   }
 
@@ -450,7 +445,6 @@ export class ContainerControlService {
     container: ContainerEntity,
     desired: ContainerDesiredSpecEntity,
     lifecycle: ContainerLifecycleEntity,
-    _runtime: RuntimeContainerEntity | null,
     requestedBy: string,
     accessUserId: string,
     body: unknown,
@@ -483,6 +477,9 @@ export class ContainerControlService {
       },
       phase: ContainerPhase.Updating,
       beforeSave: async (manager, operationId) => {
+        await manager.update(ContainerLifecycleEntity, container.id, {
+          runtimeConfirmation: null,
+        });
         await manager.update(ContainerDesiredSpecEntity, { containerId: container.id }, {
           mountsJson: mounts,
           generation: () => 'generation + 1',
@@ -497,7 +494,6 @@ export class ContainerControlService {
     container: ContainerEntity,
     desired: ContainerDesiredSpecEntity,
     lifecycle: ContainerLifecycleEntity,
-    _runtime: RuntimeContainerEntity | null,
     userId: string,
     enable: boolean,
     request: unknown,
@@ -520,38 +516,37 @@ export class ContainerControlService {
       phase: ContainerPhase.Updating,
       beforeSave: enable
         ? async (manager) => {
+          await manager.update(ContainerLifecycleEntity, container.id, {
+            runtimeConfirmation: null,
+          });
           await manager.update(ContainerDesiredSpecEntity, { containerId: container.id }, {
             sshEnabled: true,
             updatedAt: new Date(),
           });
         }
-        : undefined,
+        : async (manager) => {
+          await manager.update(ContainerLifecycleEntity, container.id, {
+            runtimeConfirmation: null,
+          });
+        },
     });
   }
 
   private async viewsFor(containers: ContainerEntity[]): Promise<ContainerView[]> {
     if (containers.length === 0) return [];
     const ids = containers.map((c) => c.id);
-    const [desiredRows, lifecycleRows, runtimeRows, servers, images, observationRows] = await Promise.all([
+    const [desiredRows, lifecycleRows, servers, images] = await Promise.all([
       this.desiredRepo.find({ where: { containerId: In(ids) } }),
       this.lifecycleRepo.find({ where: { containerId: In(ids) } }),
-      this.runtimeRepo.find({ where: { containerId: In(ids) }, order: { lastSeenAt: 'DESC' } }),
       this.serverNameMap([...new Set(containers.map((c) => c.serverId))]),
       this.imageNameMap([...new Set(containers.map((c) => c.imageId))]),
-      this.runtimeObservationRepo.find({ where: { containerId: In(ids), stale: false }, order: { lastSeenAt: 'DESC' } }),
     ]);
     const desired = new Map(desiredRows.map((d) => [d.containerId, d]));
     const lifecycle = new Map(lifecycleRows.map((l) => [l.containerId, l]));
-    const runtime = new Map<string, RuntimeContainerEntity>();
-    for (const row of runtimeRows) if (row.containerId && !runtime.has(row.containerId)) runtime.set(row.containerId, row);
-    const observations = new Map<string, ContainerRuntimeObservationEntity>();
-    for (const row of observationRows) if (row.containerId && !observations.has(row.containerId)) observations.set(row.containerId, row);
     return Promise.all(containers.filter((c) => !c.deletedAt).map((c) => this.toView(
       c,
       desired.get(c.id) ?? null,
       lifecycle.get(c.id) ?? null,
-      runtime.get(c.id) ?? null,
-      observations.get(c.id) ?? null,
       servers,
       images,
     )));
@@ -561,8 +556,6 @@ export class ContainerControlService {
     c: ContainerEntity,
     desired: ContainerDesiredSpecEntity | null,
     lifecycle: ContainerLifecycleEntity | null,
-    runtime: RuntimeContainerEntity | null,
-    observation: ContainerRuntimeObservationEntity | null,
     serverNames: Map<string, string>,
     imageNames: Map<string, string>,
   ): Promise<ContainerView> {
@@ -570,10 +563,15 @@ export class ContainerControlService {
       ? await this.operationsRepo.findOneBy({ id: lifecycle.activeOperationId })
       : null;
     const phase = lifecycle?.phase ?? ContainerPhase.Failed;
-    const runtimeStatus = runtime?.status ?? observation?.status ?? ContainerStatus.Unknown;
-    const runtimeIp = this.nonEmptyString(runtime?.ip)
-      ?? this.nonEmptyString(observation?.labels?.ip)
-      ?? null;
+    const runtimeReady = this.agentGateway.stateCache.isRuntimeReady(c.serverId);
+    const serverSnap = this.agentGateway.stateCache.get(c.serverId);
+    const snapshot = runtimeReady ? this.agentGateway.stateCache.getContainerByContainerId(c.serverId, c.id) : undefined;
+    const runtimeId = lifecycle?.boundRuntimeId ?? snapshot?.spec.runtimeId ?? null;
+    const runtimeStatus = snapshot?.status ?? ContainerStatus.Unknown;
+    const runtimeIp = this.nonEmptyString(snapshot?.spec.ip) ?? null;
+    const drift = this.runtimeDrift(desired, lifecycle, snapshot, runtimeReady);
+    const runtimeConfirmation = this.runtimeConfirmationStatus(lifecycle, snapshot, serverSnap?.lastFullReportReceivedAt ?? null);
+    this.clearResolvedRuntimeConfirmation(c.id, lifecycle, runtimeConfirmation.status);
     return {
       id: c.id,
       serverId: c.serverId,
@@ -587,14 +585,14 @@ export class ContainerControlService {
       failureCode: lifecycle?.failureCode ?? null,
       failureReason: lifecycle?.failureReason ?? null,
       powerIntent: desired?.powerIntent ?? ContainerPowerIntent.Stopped,
+      runtimeReady,
       runtime: {
-        bound: Boolean(lifecycle?.boundRuntimeId),
-        runtimeId: lifecycle?.boundRuntimeId ?? runtime?.runtimeId ?? null,
+        bound: Boolean(lifecycle?.boundRuntimeId || snapshot),
+        runtimeId,
         status: runtimeStatus,
         ip: runtimeIp,
-        observedAt: (runtime?.lastSeenAt ?? observation?.lastSeenAt)?.toISOString() ?? null,
-        stale: runtime?.stale ?? observation?.stale ?? true,
-        drift: [],
+        observedAt: snapshot ? new Date(serverSnap?.lastUpdated ?? Date.now()).toISOString() : null,
+        drift,
       },
       activeOperation: activeOperation ? {
         id: activeOperation.id,
@@ -615,14 +613,111 @@ export class ContainerControlService {
         diskBytes: desired?.diskBytes ?? 0,
         gpuIndices: desired?.gpuIndices ?? [],
       },
-      ssh: observation?.sshServer ?? { enabled: desired?.sshEnabled ?? false, status: desired?.sshEnabled ? 'unknown' : 'disabled', user: 'root', port: 22 },
+      ssh: snapshot?.sshServer ?? { enabled: desired?.sshEnabled ?? false, status: desired?.sshEnabled ? 'unknown' : 'disabled', user: 'root', port: 22 },
       mounts: this.mountsFromDesired(desired),
-      actions: this.actions.forContainer({ phase, runtimeStatus, runtimeStale: runtime?.stale ?? observation?.stale ?? true, activeOperationId: lifecycle?.activeOperationId ?? null }),
+      runtimeConfirmation: runtimeConfirmation.view,
+      actions: this.actions.forContainer({
+        phase,
+        runtimeReady,
+        runtimeStatus,
+        runtimeDrift: drift,
+        activeOperationId: lifecycle?.activeOperationId ?? null,
+        runtimeConfirmationPending: runtimeConfirmation.status === 'pending',
+        runtimeConfirmationExpired: runtimeConfirmation.status === 'expired',
+      }),
     };
   }
 
   private nonEmptyString(value: unknown): string | null {
     return typeof value === 'string' && value.trim() !== '' ? value : null;
+  }
+
+  private clearResolvedRuntimeConfirmation(
+    containerId: string,
+    lifecycle: ContainerLifecycleEntity | null,
+    status: RuntimeConfirmationStatus['status'],
+  ): void {
+    if (!lifecycle?.runtimeConfirmation || status === 'pending') return;
+    void this.lifecycleRepo.update(containerId, { runtimeConfirmation: null }).catch(() => undefined);
+  }
+
+  private runtimeConfirmationStatus(
+    lifecycle: ContainerLifecycleEntity | null,
+    snapshot: ContainerSnapshot | undefined,
+    lastFullReportAt: number | null,
+  ): RuntimeConfirmationStatus {
+    const lock = lifecycle?.runtimeConfirmation;
+    if (!lock) return { status: 'confirmed', view: null };
+
+    if (this.runtimeConfirmationSatisfied(lock, snapshot, lastFullReportAt)) {
+      return { status: 'confirmed', view: null };
+    }
+
+    const deadlineMs = Date.parse(lock.deadlineAt);
+    const now = Date.now();
+    if (Number.isFinite(deadlineMs) && deadlineMs <= now) {
+      return {
+        status: 'expired',
+        view: {
+          status: 'expired',
+          operationId: lock.operationId,
+          kind: lock.kind,
+          deadlineAt: lock.deadlineAt,
+          message: '运行态确认超时，可重试或修复操作',
+        },
+      };
+    }
+
+    return {
+      status: 'pending',
+      view: {
+        status: 'pending',
+        operationId: lock.operationId,
+        kind: lock.kind,
+        deadlineAt: lock.deadlineAt,
+        message: RUNTIME_CONFIRMATION_MESSAGE,
+      },
+    };
+  }
+
+  private runtimeConfirmationSatisfied(
+    lock: NonNullable<ContainerLifecycleEntity['runtimeConfirmation']>,
+    snapshot: ContainerSnapshot | undefined,
+    lastFullReportAt: number | null,
+  ): boolean {
+    const startedAtMs = Date.parse(lock.startedAt);
+    if (!lastFullReportAt || !Number.isFinite(startedAtMs) || lastFullReportAt < startedAtMs) return false;
+
+    switch (lock.kind) {
+      case OperationKind.ContainerCreate:
+        return Boolean(snapshot && (!lock.expectedRuntimeId || snapshot.spec.runtimeId === lock.expectedRuntimeId));
+      case OperationKind.ContainerStart:
+      case OperationKind.ContainerStop:
+      case OperationKind.ContainerRestart:
+        return this.snapshotMatchesPowerIntent(snapshot, lock.expectedPowerIntent);
+      case OperationKind.ContainerUpdateMounts: {
+        const observedGeneration = this.numberOrNull(
+          snapshot?.labels?.['nyabase.specGeneration'] ?? snapshot?.labels?.['nyabase.spec_generation'],
+        );
+        return observedGeneration !== null
+          && typeof lock.expectedGeneration === 'number'
+          && observedGeneration >= lock.expectedGeneration;
+      }
+      case OperationKind.ContainerEnableSsh:
+      case OperationKind.ContainerReconcileSsh:
+        return snapshot?.sshServer.enabled === true && snapshot.sshServer.status !== 'disabled';
+      default:
+        return false;
+    }
+  }
+
+  private snapshotMatchesPowerIntent(
+    snapshot: ContainerSnapshot | undefined,
+    intent: ContainerPowerIntent | undefined,
+  ): boolean {
+    if (!snapshot || !intent) return false;
+    if (intent === ContainerPowerIntent.Running) return snapshot.status === ContainerStatus.Running;
+    return snapshot.status === ContainerStatus.Exited || snapshot.status === ContainerStatus.Dead;
   }
 
   private mountsFromDesired(desired: ContainerDesiredSpecEntity | null): ContainerView['mounts'] {
@@ -771,11 +866,75 @@ export class ContainerControlService {
   }
 
   private async knownGpuIndices(serverId: string, serverDefaultIndices: number[], assigned: number[], manager?: EntityManager): Promise<number[]> {
-    const inventory = manager
-      ? await manager.find(RuntimeGpuInventoryEntity, { where: { serverId } })
-      : await this.gpuInventoryRepo.find({ where: { serverId } });
-    const fromInventory = inventory.map((gpu) => gpu.gpuIndex);
+    void manager;
+    const fromInventory = this.agentGateway.stateCache.get(serverId)?.gpus.map((gpu) => gpu.index) ?? [];
     return [...new Set([...fromInventory, ...serverDefaultIndices, ...assigned])].sort((a, b) => a - b);
+  }
+
+  private assertRuntimeReady(serverId: string): void {
+    const availability = this.agentGateway.stateCache.getRuntimeBlockReason(serverId);
+    if (!availability.enabled) {
+      throw new ConflictException({
+        statusCode: 409,
+        code: 'agent_state_unready',
+        reason: 'agent_state_unready',
+        message: availability.message,
+      });
+    }
+  }
+
+  private runtimeDrift(
+    desired: ContainerDesiredSpecEntity | null,
+    lifecycle: ContainerLifecycleEntity | null,
+    snapshot: ContainerSnapshot | undefined,
+    runtimeReady: boolean,
+  ): ContainerView['runtime']['drift'] {
+    const drift: ContainerView['runtime']['drift'] = [];
+    if (!runtimeReady) {
+      drift.push({ kind: RuntimeDriftKind.AgentStateUnready, message: 'Agent runtime state is not ready' });
+      return drift;
+    }
+    if (!lifecycle?.boundRuntimeId && !snapshot) {
+      drift.push({ kind: RuntimeDriftKind.RuntimeUnbound, message: 'Container has no bound runtime' });
+    }
+    if (desired && lifecycle?.phase === ContainerPhase.Active && !snapshot) {
+      drift.push({ kind: RuntimeDriftKind.RuntimeMissing, message: 'Runtime container is missing from agent state' });
+    }
+    if (lifecycle?.boundRuntimeId && snapshot?.spec.runtimeId && lifecycle.boundRuntimeId !== snapshot.spec.runtimeId) {
+      drift.push({
+        kind: RuntimeDriftKind.RuntimeIdMismatch,
+        desired: lifecycle.boundRuntimeId,
+        observed: snapshot.spec.runtimeId,
+      });
+    }
+    if (desired && snapshot) {
+      const wantsRunning = desired.powerIntent === ContainerPowerIntent.Running;
+      const isRunning = snapshot.status === ContainerStatus.Running;
+      const isStopped = snapshot.status === ContainerStatus.Exited || snapshot.status === ContainerStatus.Dead;
+      if ((wantsRunning && !isRunning) || (!wantsRunning && !isStopped)) {
+        drift.push({
+          kind: RuntimeDriftKind.PowerIntentMismatch,
+          desired: desired.powerIntent,
+          observed: snapshot.status,
+        });
+      }
+      const observedGeneration = this.numberOrNull(snapshot.labels?.['nyabase.specGeneration'] ?? snapshot.labels?.['nyabase.spec_generation']);
+      if (observedGeneration !== null && observedGeneration < desired.generation) {
+        drift.push({
+          kind: RuntimeDriftKind.SpecGenerationStale,
+          desired: desired.generation,
+          observed: observedGeneration,
+        });
+      }
+    }
+    return drift;
+  }
+
+  private numberOrNull(value: unknown): number | null {
+    if (typeof value === 'number' && Number.isSafeInteger(value)) return value;
+    if (typeof value !== 'string' || value.trim() === '') return null;
+    const parsed = Number(value);
+    return Number.isSafeInteger(parsed) ? parsed : null;
   }
 
   private async assertCanRead(userId: string, c: ContainerEntity): Promise<void> {

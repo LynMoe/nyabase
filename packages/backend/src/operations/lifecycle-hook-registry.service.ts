@@ -11,9 +11,9 @@ import {
 import { ContainerDesiredSpecEntity } from '../entities/container-desired-spec.entity.js';
 import { ContainerEntity } from '../entities/container.entity.js';
 import { ContainerLifecycleEntity } from '../entities/container-lifecycle.entity.js';
-import { RuntimeContainerEntity } from '../entities/runtime-container.entity.js';
 import { SshPublicKeyEntity } from '../entities/ssh-public-key.entity.js';
 import { OperationOrchestratorService } from './operation-orchestrator.service.js';
+import { AgentGateway } from '../gateway/agent-gateway.js';
 
 export interface LifecycleHookTaskInput {
   hook: HookKind;
@@ -41,10 +41,9 @@ export class LifecycleHookRegistryService {
     private desiredRepo: Repository<ContainerDesiredSpecEntity>,
     @InjectRepository(ContainerLifecycleEntity)
     private lifecycleRepo: Repository<ContainerLifecycleEntity>,
-    @InjectRepository(RuntimeContainerEntity)
-    private runtimeRepo: Repository<RuntimeContainerEntity>,
     @InjectRepository(SshPublicKeyEntity)
     private sshKeysRepo: Repository<SshPublicKeyEntity>,
+    private agentGateway: AgentGateway,
   ) {}
 
   enqueue(input: LifecycleHookTaskInput) {
@@ -77,18 +76,13 @@ export class LifecycleHookRegistryService {
     if (containers.length === 0) return;
 
     const containerIds = containers.map((container) => container.id);
-    const [desiredRows, lifecycleRows, runtimeRows, keys] = await Promise.all([
+    const [desiredRows, lifecycleRows, keys] = await Promise.all([
       this.desiredRepo.find({ where: { containerId: In(containerIds), sshEnabled: true } }),
       this.lifecycleRepo.find({ where: { containerId: In(containerIds) } }),
-      this.runtimeRepo.find({ where: { containerId: In(containerIds), stale: false }, order: { lastSeenAt: 'DESC' } }),
       this.sshKeysRepo.find({ where: { userId } }),
     ]);
     const desiredByContainer = new Map(desiredRows.map((desired) => [desired.containerId, desired]));
     const lifecycleByContainer = new Map(lifecycleRows.map((lifecycle) => [lifecycle.containerId, lifecycle]));
-    const runtimeByContainer = new Map<string, RuntimeContainerEntity>();
-    for (const row of runtimeRows) {
-      if (row.containerId && !runtimeByContainer.has(row.containerId)) runtimeByContainer.set(row.containerId, row);
-    }
     const publicKeys = keys.map((key) => key.keyText);
 
     for (const container of containers) {
@@ -96,8 +90,8 @@ export class LifecycleHookRegistryService {
       if (!desired?.sshEnabled) continue;
       const lifecycle = lifecycleByContainer.get(container.id);
       if (!lifecycle || lifecycle.phase !== ContainerPhase.Active || lifecycle.activeOperationId || !lifecycle.boundRuntimeId) continue;
-      const runtime = runtimeByContainer.get(container.id);
-      if (!runtime || runtime.status !== ContainerStatus.Running || runtime.stale) continue;
+      const runtime = this.agentGateway.stateCache.getContainerByContainerId(container.serverId, container.id);
+      if (!runtime || runtime.status !== ContainerStatus.Running) continue;
 
       try {
         await this.orchestrator.createAgentCommand({

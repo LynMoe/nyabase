@@ -8,18 +8,18 @@ import { AuthModule } from '../auth/auth.module.js';
 import { AccessModule } from '../access/access.module.js';
 import { UsersModule } from '../users/users.module.js';
 import { ContainerEntity } from '../entities/container.entity.js';
-import { DataDiskRuntimeObservationEntity } from '../entities/data-disk-runtime-observation.entity.js';
-import { RuntimeContainerEntity } from '../entities/runtime-container.entity.js';
+import { AgentGatewayModule } from '../gateway/agent-gateway.module.js';
 
 @Module({
   imports: [
-    TypeOrmModule.forFeature([ContainerEntity, RuntimeContainerEntity, DataDiskRuntimeObservationEntity]),
+    TypeOrmModule.forFeature([ContainerEntity]),
     AuthModule,
     AccessModule,
     // forwardRef breaks the AgentGateway → Users → Groups → AgentGateway →
     // Metrics → Users module-evaluation cycle (UsersModule is still being
     // defined when this file is loaded transitively).
     forwardRef(() => UsersModule),
+    forwardRef(() => AgentGatewayModule),
   ],
   providers: [MetricsWriter, MetricsQueryService],
   controllers: [MetricsController, AdminMetricsController],

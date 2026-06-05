@@ -2,7 +2,7 @@ import { Link, getRouteApi } from '@tanstack/react-router';
 import { useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { AlertTriangle, ArrowLeft, BarChart2, ChevronDown, Info, Loader2, Power, Terminal, Trash2 } from 'lucide-react';
-import { ContainerStatus, type ContainerAction, type ContainerMetrics, type ContainerMetricsDto, type ContainerView, type OperationRefResponse } from '@nyabase/common';
+import { ContainerPhase, ContainerStatus, type ContainerAction, type ContainerMetrics, type ContainerMetricsDto, type ContainerView, type OperationRefResponse } from '@nyabase/common';
 import { api } from '../lib/api.js';
 import { Badge } from '../components/ui/badge.js';
 import { Button } from '../components/ui/button.js';
@@ -60,6 +60,16 @@ const OPERATION_STATE_LABELS: Record<string, string> = {
   'container.reconcile_ssh': 'reconciling SSH',
 };
 
+const PHASE_LABELS: Record<ContainerPhase, string> = {
+  [ContainerPhase.Provisioning]: '初始化',
+  [ContainerPhase.Active]: '就绪',
+  [ContainerPhase.Updating]: '更新中',
+  [ContainerPhase.Deleting]: '删除中',
+  [ContainerPhase.Deleted]: '已删除',
+  [ContainerPhase.Failed]: '失败',
+  [ContainerPhase.Orphaned]: '孤儿运行态',
+};
+
 export default function ContainerDetailPage() {
   const { containerId } = routeApi.useParams();
   const { tab: initialTab } = routeApi.useSearch();
@@ -100,7 +110,20 @@ export default function ContainerDetailPage() {
 
   const running = c.runtime.status === ContainerStatus.Running;
   const canManageContainer = user?.id === c.ownerId;
-  const runtimeLabel = c.runtime.bound ? (c.runtime.status ?? ContainerStatus.Unknown) : 'unbound';
+  const confirmation = c.runtimeConfirmation;
+  const runtimeLabel = confirmation?.status === 'pending'
+    ? '确认中'
+    : confirmation?.status === 'expired'
+    ? '确认超时'
+    : c.runtime.bound
+    ? (c.runtime.status ?? ContainerStatus.Unknown)
+    : 'unbound';
+  const runtimeBadgeVariant = confirmation ? 'warning' : running ? 'success' : 'secondary';
+  const containerStateLabel = confirmation?.status === 'pending'
+    ? '确认中'
+    : confirmation?.status === 'expired'
+    ? '确认超时'
+    : PHASE_LABELS[c.phase] ?? c.phase;
   const ip = c.runtime.ip ?? '等待运行态';
   const sshLabel = c.ssh.status === 'running' ? '可用' : c.ssh.enabled ? c.ssh.status : '未启用';
   const operationState = c.activeOperation
@@ -135,7 +158,10 @@ export default function ContainerDetailPage() {
           <div>
             <div className="flex items-center gap-2">
               <h1 className="text-2xl font-bold text-foreground">{c.name}</h1>
-              <Badge variant={running ? 'success' : 'secondary'}>{runtimeLabel}</Badge>
+              <Badge variant={runtimeBadgeVariant} title={confirmation?.message}>
+                {confirmation?.status === 'pending' && <Loader2 className="mr-1 h-3 w-3 animate-spin" />}
+                {runtimeLabel}
+              </Badge>
             </div>
           </div>
         </div>
@@ -192,7 +218,7 @@ export default function ContainerDetailPage() {
               <div className="flex items-center justify-between gap-3 py-1.5 text-sm border-b border-border/50 last:border-0">
                 <span className="text-muted-foreground">容器状态</span>
                 <div className="flex min-w-0 items-center justify-end gap-2">
-                  <span className="text-foreground font-medium text-right truncate">{c.phase}</span>
+                  <span className="text-foreground font-medium text-right truncate" title={confirmation?.message}>{containerStateLabel}</span>
                   {operationState && (
                     <TooltipProvider>
                       <Tooltip>

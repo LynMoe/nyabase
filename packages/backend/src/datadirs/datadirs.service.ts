@@ -9,8 +9,6 @@ import { v4 as uuidv4 } from 'uuid';
 import { DataDirectoryEntity } from '../entities/data-directory.entity.js';
 import { DataDiskEntity } from '../entities/data-disk.entity.js';
 import { ContainerMountEntity } from '../entities/container-mount.entity.js';
-import { ContainerRuntimeObservationEntity } from '../entities/container-runtime-observation.entity.js';
-import { RuntimeContainerEntity } from '../entities/runtime-container.entity.js';
 import { RemoteFsMountEntity } from '../entities/remote-fs-mount.entity.js';
 import { RemoteFsServerAssignmentEntity } from '../entities/remote-fs-server-assignment.entity.js';
 import { ServersService } from '../servers/servers.service.js';
@@ -18,6 +16,7 @@ import { UsersService } from '../users/users.service.js';
 import { AuditService } from '../audit/audit.service.js';
 import { OperationsService } from '../operations/operations.service.js';
 import { AgentCommandKind, AuditAction, ContainerStatus, DataDirDto, OperationKind } from '@nyabase/common';
+import { AgentGateway } from '../gateway/agent-gateway.js';
 
 function collectDbErrorChain(error: unknown): Record<string, unknown>[] {
   const chain: Record<string, unknown>[] = [];
@@ -92,10 +91,6 @@ export class DataDirsService {
     private dataDisksRepo: Repository<DataDiskEntity>,
     @InjectRepository(ContainerMountEntity)
     private containerMountsRepo: Repository<ContainerMountEntity>,
-    @InjectRepository(ContainerRuntimeObservationEntity)
-    private observationsRepo: Repository<ContainerRuntimeObservationEntity>,
-    @InjectRepository(RuntimeContainerEntity)
-    private runtimeContainersRepo: Repository<RuntimeContainerEntity>,
     @InjectRepository(RemoteFsMountEntity)
     private remoteFsMountsRepo: Repository<RemoteFsMountEntity>,
     @InjectRepository(RemoteFsServerAssignmentEntity)
@@ -104,6 +99,7 @@ export class DataDirsService {
     private usersService: UsersService,
     private auditService: AuditService,
     private operationsService: OperationsService,
+    private agentGateway: AgentGateway,
   ) {}
 
   /** Compute the host path for a directory (single-layer layout: {mountPoint}/{name}) */
@@ -282,28 +278,8 @@ export class DataDirsService {
     });
     if (mounts.length === 0) return;
 
-    const liveRuntime = await this.runtimeContainersRepo.findOne({
-      where: mounts.map((mount) => ({
-        serverId: mount.serverId,
-        containerId: mount.containerId,
-        status: ContainerStatus.Running,
-        stale: false,
-      })),
-      order: { lastSeenAt: 'DESC' },
-    });
-    if (liveRuntime) {
-      throw new ConflictException(`Data directory "${dirName}" is mounted by a running container`);
-    }
-
-    const latest = await Promise.all(
-      mounts
-        .map((mount) => this.observationsRepo.findOne({
-          where: { serverId: mount.serverId, containerId: mount.containerId },
-          order: { reportSeq: 'DESC', lastSeenAt: 'DESC' },
-        })),
-    );
-    const inUse = latest.some((observation) =>
-      observation && !observation.stale && observation.status === ContainerStatus.Running,
+    const inUse = mounts.some((mount) =>
+      this.agentGateway.stateCache.getContainerByContainerId(mount.serverId, mount.containerId)?.status === ContainerStatus.Running,
     );
 
     if (inUse) {

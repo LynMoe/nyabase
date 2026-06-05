@@ -1,10 +1,9 @@
-import { Injectable, Logger, OnModuleDestroy } from '@nestjs/common';
+import { Inject, Injectable, Logger, OnModuleDestroy, forwardRef } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { MetricPoint } from '@nyabase/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { In, Repository } from 'typeorm';
 import { ContainerEntity } from '../entities/container.entity.js';
-import { RuntimeContainerEntity } from '../entities/runtime-container.entity.js';
 import { UsersService } from '../users/users.service.js';
 
 /** A single batch enqueued by an agent. */
@@ -58,9 +57,8 @@ export class MetricsWriter implements OnModuleDestroy {
 
   constructor(
     private config: ConfigService,
+    @Inject(forwardRef(() => UsersService))
     private usersService: UsersService,
-    @InjectRepository(RuntimeContainerEntity)
-    private runtimeContainersRepo: Repository<RuntimeContainerEntity>,
     @InjectRepository(ContainerEntity)
     private containersRepo: Repository<ContainerEntity>,
   ) {
@@ -191,32 +189,13 @@ export class MetricsWriter implements OnModuleDestroy {
   }
 
   private async resolveOwnersByRuntimeIds(serverId: string, containerIds: string[]): Promise<Map<string, string>> {
-    const rows = await this.runtimeContainersRepo.find({
-      where: [
-        { serverId, runtimeId: In(containerIds) },
-        { serverId, containerId: In(containerIds) },
-      ],
-    });
-    const desiredIds = [...new Set([
-      ...containerIds,
-      ...rows.map((row) => row.containerId).filter((id): id is string => !!id),
-    ])];
-    const containers = desiredIds.length > 0
-      ? await this.containersRepo.findBy({ id: In(desiredIds) })
+    const containers = containerIds.length > 0
+      ? await this.containersRepo.findBy({ id: In(containerIds) })
       : [];
-    const ownerByDesiredId = new Map(containers.map((container) => [container.id, container.ownerId]));
     const result = new Map<string, string>();
 
     for (const container of containers) {
       result.set(container.id, container.ownerId);
-    }
-
-    for (const row of rows) {
-      const ownerId = row.ownerId ?? (row.containerId ? ownerByDesiredId.get(row.containerId) : undefined);
-      if (!ownerId) continue;
-      result.set(row.runtimeId, ownerId);
-      result.set(row.runtimeId.slice(0, 12), ownerId);
-      if (row.containerId) result.set(row.containerId, ownerId);
     }
     return result;
   }

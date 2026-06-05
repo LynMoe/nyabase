@@ -3,7 +3,6 @@ import type { ConfigService } from '@nestjs/config';
 import type { Repository } from 'typeorm';
 import { MetricsWriter } from './metrics-writer.js';
 import type { UsersService } from '../users/users.service.js';
-import type { RuntimeContainerEntity } from '../entities/runtime-container.entity.js';
 import type { ContainerEntity } from '../entities/container.entity.js';
 
 describe('MetricsWriter identity labels', () => {
@@ -20,15 +19,6 @@ describe('MetricsWriter identity labels', () => {
       {
         getUserIdsByNumericIds: vi.fn().mockResolvedValue(new Map([[1001, 'user-a']])),
       } as unknown as UsersService,
-      {
-        find: vi.fn().mockResolvedValue([
-          {
-            runtimeId: 'runtime-a-full-id',
-            containerId: 'container-a',
-            ownerId: null,
-          },
-        ]),
-      } as unknown as Repository<RuntimeContainerEntity>,
       {
         findBy: vi.fn().mockResolvedValue([
           { id: 'container-a', ownerId: 'user-a' },

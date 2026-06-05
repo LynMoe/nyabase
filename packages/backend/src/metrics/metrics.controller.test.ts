@@ -92,10 +92,10 @@ describe('MetricsController.userMetrics', () => {
         { id: 'container-a', serverId: 'srv-1', ownerId: 'user-1', name: 'own-work' },
         { id: 'container-b', serverId: 'srv-1', ownerId: 'other-user', name: 'other-work' },
       ],
-      [
-        { runtimeId: 'aaaabbbbcccc0000000000000000000000000000000000000000000000000000', containerId: 'container-a', ownerId: null },
-        { runtimeId: 'ddddffffeeee0000000000000000000000000000000000000000000000000000', containerId: 'container-b', ownerId: null },
-      ],
+      runtimeContainers([
+        { runtimeId: 'aaaabbbbcccc0000000000000000000000000000000000000000000000000000', containerId: 'container-a' },
+        { runtimeId: 'ddddffffeeee0000000000000000000000000000000000000000000000000000', containerId: 'container-b' },
+      ]),
     );
 
     const result = await controller.userMetrics('srv-1', { id: 'user-1' } as UserEntity, '1h');
@@ -148,10 +148,10 @@ describe('MetricsController.userMetrics', () => {
         { id: 'container-a', serverId: 'srv-1', ownerId: 'user-1', name: 'own-work' },
         { id: 'container-b', serverId: 'srv-1', ownerId: 'other-user', name: 'other-work' },
       ],
-      [
-        { runtimeId: 'aaaabbbbcccc0000000000000000000000000000000000000000000000000000', containerId: 'container-a', ownerId: null },
-        { runtimeId: 'ddddffffeeee0000000000000000000000000000000000000000000000000000', containerId: 'container-b', ownerId: null },
-      ],
+      runtimeContainers([
+        { runtimeId: 'aaaabbbbcccc0000000000000000000000000000000000000000000000000000', containerId: 'container-a' },
+        { runtimeId: 'ddddffffeeee0000000000000000000000000000000000000000000000000000', containerId: 'container-b' },
+      ]),
     );
 
     const result = await controller.userMetrics('srv-1', { id: 'user-1' } as UserEntity, '1h');
@@ -194,10 +194,10 @@ describe('AdminMetricsController.userMetrics', () => {
         { id: 'container-a', serverId: 'srv-1', ownerId: 'user-1', name: 'own-work' },
         { id: 'container-b', serverId: 'srv-1', ownerId: 'other-user', name: 'other-work' },
       ],
-      [
-        { runtimeId: 'aaaabbbbcccc0000000000000000000000000000000000000000000000000000', containerId: 'container-a', ownerId: null },
-        { runtimeId: 'ddddffffeeee0000000000000000000000000000000000000000000000000000', containerId: 'container-b', ownerId: null },
-      ],
+      runtimeContainers([
+        { runtimeId: 'aaaabbbbcccc0000000000000000000000000000000000000000000000000000', containerId: 'container-a' },
+        { runtimeId: 'ddddffffeeee0000000000000000000000000000000000000000000000000000', containerId: 'container-b' },
+      ]),
     );
 
     const result = await controller.adminUserMetrics('srv-1', { id: 'user-1' } as UserEntity, '1h');
@@ -250,10 +250,10 @@ describe('MetricsController.containerMetrics', () => {
         { id: 'container-a', serverId: 'srv-1', ownerId: 'user-1', name: 'own-work' },
         { id: 'container-b', serverId: 'srv-1', ownerId: 'other-user', name: 'other-work' },
       ],
-      [
-        { runtimeId: ownFullRuntimeId, containerId: 'container-a', ownerId: null },
-        { runtimeId: 'ddddffffeeee0000000000000000000000000000000000000000000000000000', containerId: 'container-b', ownerId: null },
-      ],
+      runtimeContainers([
+        { runtimeId: ownFullRuntimeId, containerId: 'container-a' },
+        { runtimeId: 'ddddffffeeee0000000000000000000000000000000000000000000000000000', containerId: 'container-b' },
+      ]),
     );
 
     const result = await controller.containerMetrics('srv-1', { id: 'user-1' } as UserEntity, '1h');
@@ -266,7 +266,7 @@ describe('MetricsController.containerMetrics', () => {
     }
     expect(result.containers).toEqual([
       expect.objectContaining({
-        containerId: 'aaaabbbbcccc',
+        containerId: 'container-a',
         name: 'own-work',
         ownerId: 'user-1',
         cpu: ownCpu,
@@ -312,15 +312,14 @@ function makeController(
   } as unknown as AccessResolverService,
   usersService: UsersService = {} as unknown as UsersService,
   containers: Array<Record<string, unknown>> = [],
-  runtimeContainers: Array<Record<string, unknown>> = [],
+  runtimeSnapshots = new Map(),
 ): MetricsController {
   return new MetricsController(
     metricsQuery,
     accessResolver,
     usersService,
-    { find: vi.fn().mockResolvedValue([]) } as never,
     { find: vi.fn().mockResolvedValue(containers) } as never,
-    { find: vi.fn().mockResolvedValue(runtimeContainers) } as never,
+    { stateCache: { get: vi.fn().mockReturnValue({ disks: [], containers: runtimeSnapshots }) } } as never,
   );
 }
 
@@ -328,15 +327,14 @@ function makeAdminController(
   metricsQuery: MetricsQueryService,
   usersService: UsersService = {} as unknown as UsersService,
   containers: Array<Record<string, unknown>> = [],
-  runtimeContainers: Array<Record<string, unknown>> = [],
+  runtimeSnapshots = new Map(),
 ): AdminMetricsController {
   return new AdminMetricsController(
     metricsQuery,
     {} as unknown as AccessResolverService,
     usersService,
-    { find: vi.fn().mockResolvedValue([]) } as never,
     { find: vi.fn().mockResolvedValue(containers) } as never,
-    { find: vi.fn().mockResolvedValue(runtimeContainers) } as never,
+    { stateCache: { get: vi.fn().mockReturnValue({ disks: [], containers: runtimeSnapshots }) } } as never,
   );
 }
 
@@ -350,4 +348,25 @@ function defaultUsersService(): UsersService {
 
 function series(step: number, points: Array<[number, number]>): MetricSeries {
   return { step, points: points.map(([t, v]) => ({ t, v })) };
+}
+
+function runtimeContainers(rows: Array<{ runtimeId: string; containerId: string }>) {
+  return new Map(rows.map((row) => [row.runtimeId, {
+    spec: {
+      runtimeId: row.runtimeId,
+      name: row.containerId,
+      ownerId: '',
+      imageId: 'image-a',
+      cpuMillis: 1000,
+      memBytes: 1024,
+      gpuIndices: [],
+      ip: '10.0.0.2',
+      serverId: 'srv-1',
+      sshServerEnabled: false,
+      dataDirs: [],
+      createdAt: '2026-06-05T00:00:00.000Z',
+      specVersion: '1',
+    },
+    labels: { 'nyabase.container_id': row.containerId },
+  }]));
 }

@@ -1,4 +1,5 @@
 import {
+  ActionAvailability,
   ContainerSnapshot,
   DataDirEntry,
   DataDirIssueDto,
@@ -10,6 +11,8 @@ import {
   RemoteFsMountStatus,
   DockerDaemonStatus,
 } from '@nyabase/common';
+
+const AGENT_STATE_UNREADY_MESSAGE = 'Agent runtime state is not ready; wait for the first full state report';
 
 /**
  * UUID-resolved version of an XFS project usage entry.
@@ -25,6 +28,14 @@ export interface XfsProjectUsageResolved {
 
 export interface ServerSnapshot {
   serverId: string;
+  runtimeReady: boolean;
+  sessionId: string;
+  helloAt: number | null;
+  lastFullReportAt: number | null;
+  lastFullReportReceivedAt: number | null;
+  lastIncrementalReportAt: number | null;
+  lastIncrementalReportReceivedAt: number | null;
+  lastUpdated: number;
   agentVersion: string;
   hostname: string;
   cpuCores: number;
@@ -43,7 +54,6 @@ export interface ServerSnapshot {
   remoteFsMounts: RemoteFsMountStatus[];
   /** Live docker daemon status reported by agent */
   dockerDaemon: DockerDaemonStatus | null;
-  lastUpdated: number;
 }
 
 export class StateCache {
@@ -51,6 +61,27 @@ export class StateCache {
 
   get(serverId: string): ServerSnapshot | undefined {
     return this.snapshots.get(serverId);
+  }
+
+  isRuntimeReady(serverId: string): boolean {
+    return this.snapshots.get(serverId)?.runtimeReady === true;
+  }
+
+  requireRuntimeReady(serverId: string): ServerSnapshot {
+    const snap = this.snapshots.get(serverId);
+    if (!snap?.runtimeReady) {
+      throw new Error(AGENT_STATE_UNREADY_MESSAGE);
+    }
+    return snap;
+  }
+
+  getRuntimeBlockReason(serverId: string): ActionAvailability {
+    if (this.isRuntimeReady(serverId)) return { enabled: true };
+    return {
+      enabled: false,
+      reason: 'agent_state_unready',
+      message: AGENT_STATE_UNREADY_MESSAGE,
+    };
   }
 
   set(serverId: string, snapshot: ServerSnapshot) {
@@ -67,6 +98,18 @@ export class StateCache {
 
   getContainer(serverId: string, dockerId: string): ContainerSnapshot | undefined {
     return this.snapshots.get(serverId)?.containers.get(dockerId);
+  }
+
+  getContainerByContainerId(serverId: string, containerId: string): ContainerSnapshot | undefined {
+    const snap = this.snapshots.get(serverId);
+    if (!snap) return undefined;
+    for (const container of snap.containers.values()) {
+      const labels = container.labels ?? {};
+      if (labels['nyabase.containerId'] === containerId || labels['nyabase.container_id'] === containerId) {
+        return container;
+      }
+    }
+    return undefined;
   }
 
   /** Get all containers across all servers, optionally filtered by ownerId */
@@ -138,7 +181,7 @@ export class StateCache {
 
   updateContainerStats(serverId: string, dockerId: string, stats: ContainerStatsSummary) {
     const snap = this.snapshots.get(serverId);
-    if (!snap) return;
+    if (!snap?.runtimeReady) return;
     const container = snap.containers.get(dockerId);
     if (!container) return;
     container.stats = stats;
@@ -212,7 +255,7 @@ export class StateCache {
 
   updateRemoteFsMountStatus(serverId: string, status: RemoteFsMountStatus) {
     const snap = this.snapshots.get(serverId);
-    if (!snap) return;
+    if (!snap?.runtimeReady) return;
     const idx = snap.remoteFsMounts.findIndex((m) => m.id === status.id);
     if (idx >= 0) snap.remoteFsMounts[idx] = status;
     else snap.remoteFsMounts.push(status);
