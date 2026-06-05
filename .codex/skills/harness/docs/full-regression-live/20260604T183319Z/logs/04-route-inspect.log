@@ -1,0 +1,175 @@
+=== containers controller ===
+import {
+  Body,
+  Controller,
+  ForbiddenException,
+  Get,
+  Param,
+  Post,
+  Query,
+  UseGuards,
+} from '@nestjs/common';
+import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard.js';
+import { CapabilitiesGuard } from '../auth/guards/capabilities.guard.js';
+import { CurrentUser } from '../auth/decorators/current-user.decorator.js';
+import { UserEntity } from '../entities/user.entity.js';
+import { zCreateContainerRequest, zExecSessionRequest, type ContainerAction } from '@nyabase/common';
+import { z } from 'zod';
+import { ContainerControlService } from './container-control.service.js';
+
+const zMountInput = z.object({
+  sourceKind: z.enum(['local', 'remote']),
+  sourceId: z.string(),
+  dirName: z.string().min(1).max(64),
+  containerPath: z.string().startsWith('/'),
+  createIfMissing: z.boolean().optional(),
+});
+const zUpdateMounts = z.array(zMountInput);
+
+@Controller('v2/containers')
+@UseGuards(JwtAuthGuard, CapabilitiesGuard)
+export class ContainersController {
+  constructor(private containerControl: ContainerControlService) {}
+
+  @Get()
+  async list(
+    @CurrentUser() user: UserEntity,
+    @Query('serverId') serverId?: string,
+    @Query('ownOnly') ownOnly?: string,
+  ) {
+    return this.containerControl.list(user.id, { serverId, ownOnly: ownOnly === 'true' });
+  }
+
+  @Post()
+  async create(@CurrentUser() user: UserEntity, @Body() body: unknown) {
+    const request = zCreateContainerRequest.parse(body);
+    return this.containerControl.create(user.id, request);
+  }
+
+  @Get(':containerId')
+  async get(@Param('containerId') containerId: string, @CurrentUser() user: UserEntity) {
+    return this.containerControl.get(containerId, user.id);
+  }
+
+  @Post(':containerId/actions/start')
+  async start(@Param('containerId') containerId: string, @CurrentUser() user: UserEntity) {
+    return this.containerControl.action(containerId, 'start', user.id);
+  }
+
+  @Post(':containerId/actions/stop')
+  async stop(@Param('containerId') containerId: string, @CurrentUser() user: UserEntity) {
+    return this.containerControl.action(containerId, 'stop', user.id);
+  }
+
+  @Post(':containerId/actions/restart')
+  async restart(@Param('containerId') containerId: string, @CurrentUser() user: UserEntity) {
+    return this.containerControl.action(containerId, 'restart', user.id);
+  }
+
+  @Post(':containerId/actions/delete')
+  async delete(@Param('containerId') containerId: string, @CurrentUser() user: UserEntity) {
+    return this.containerControl.action(containerId, 'delete', user.id);
+  }
+
+  @Post(':containerId/actions/update-mounts')
+  async updateMounts(
+    @Param('containerId') containerId: string,
+    @Body() body: unknown,
+    @CurrentUser() user: UserEntity,
+  ) {
+    zUpdateMounts.parse(body);
+    return this.containerControl.action(containerId, 'updateMounts', user.id, body);
+  }
+
+  @Post(':containerId/actions/enable-ssh')
+  async enableSsh(@Param('containerId') containerId: string, @CurrentUser() user: UserEntity) {
+    return this.containerControl.action(containerId, 'enableSsh', user.id);
+  }
+
+  @Post(':containerId/actions/reconcile-ssh')
+  async reconcileSsh(@Param('containerId') containerId: string, @CurrentUser() user: UserEntity) {
+    return this.containerControl.action(containerId, 'reconcileSsh', user.id);
+  }
+
+  @Get(':containerId/stats')
+  async stats(@Param('containerId') containerId: string, @CurrentUser() user: UserEntity) {
+    const view = await this.containerControl.get(containerId, user.id);
+    if (!view.actions.stats.enabled) throw new ForbiddenException(view.actions.stats.message ?? view.actions.stats.reason ?? 'Stats unavailable');
+    return { containerId, stats: null, ts: Date.now(), action: view.actions.stats };
+  }
+
+  @Post(':containerId/exec-sessions')
+  async execSession(
+    @Param('containerId') containerId: string,
+    @Body() body: unknown,
+    @CurrentUser() user: UserEntity,
+  ) {
+    zExecSessionRequest.parse(body);
+    const view = await this.containerControl.get(containerId, user.id);
+    if (!view.actions.console.enabled) throw new ForbiddenException(view.actions.console.message ?? view.actions.console.reason ?? 'Console unavailable');
+    throw new ForbiddenException('V2 console runtime adapter is not implemented yet');
+  }
+}
+=== operations controller ===
+import { Controller, Get, Param, UseGuards } from '@nestjs/common';
+import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard.js';
+import { CapabilitiesGuard } from '../auth/guards/capabilities.guard.js';
+import { CurrentUser } from '../auth/decorators/current-user.decorator.js';
+import { UserEntity } from '../entities/user.entity.js';
+import { OperationsService } from './operations.service.js';
+
+@Controller('operations')
+@UseGuards(JwtAuthGuard, CapabilitiesGuard)
+export class OperationsController {
+  constructor(private operationsService: OperationsService) {}
+
+  @Get(':operationId')
+  async get(
+    @Param('operationId') operationId: string,
+    @CurrentUser() user: UserEntity,
+  ) {
+    return this.operationsService.getOperationForUser(user.id, operationId);
+  }
+}
+=== frontend api containers refs ===
+packages/frontend/src/hooks/use-container-actions.ts:37:      const res = await api.post<OperationRefResponse>(`/v2/containers/${containerId}/actions/${action}`);
+packages/frontend/src/hooks/use-container-actions.ts:47:      void qc.invalidateQueries({ queryKey: ['containers'] });
+packages/frontend/src/hooks/use-operation-tracker.ts:26:      void qc.invalidateQueries({ queryKey: ['containers'] });
+packages/frontend/src/pages/container-detail-page.tsx:11:import { MountsCard } from '../components/containers/mounts-card.js';
+packages/frontend/src/pages/container-detail-page.tsx:15:const routeApi = getRouteApi('/containers/$containerId');
+packages/frontend/src/pages/container-detail-page.tsx:33:    queryFn: () => api.get<ContainerView>(`/v2/containers/${containerId}`),
+packages/frontend/src/pages/container-detail-page.tsx:38:    mutationFn: (action: ContainerAction) => api.post<OperationRefResponse>(`/v2/containers/${containerId}/actions/${action}`),
+packages/frontend/src/pages/container-detail-page.tsx:43:      void qc.invalidateQueries({ queryKey: ['containers'] });
+packages/frontend/src/pages/container-detail-page.tsx:59:          <Link to="/containers"><Button variant="outline" size="icon" className="h-8 w-8"><ArrowLeft className="h-4 w-4" /></Button></Link>
+packages/frontend/src/pages/manage-containers-page.tsx:13:import { ContainerRow } from '../components/containers/container-row.js';
+packages/frontend/src/pages/manage-containers-page.tsx:21:  const { data: containers = [], isLoading, isFetching, refetch } = useQuery({
+packages/frontend/src/pages/manage-containers-page.tsx:22:    queryKey: ['containers', 'all'],
+packages/frontend/src/pages/manage-containers-page.tsx:23:    queryFn: () => api.get<ContainerView[]>('/v2/containers'),
+packages/frontend/src/pages/manage-containers-page.tsx:27:  const grouped = containers.reduce<Map<string, { ownerName: string; items: ContainerView[] }>>(
+packages/frontend/src/pages/manage-containers-page.tsx:45:            全局共 {containers.length} 个容器，{groups.length} 位用户
+packages/frontend/src/pages/manage-containers-page.tsx:55:      ) : containers.length === 0 ? (
+packages/frontend/src/pages/data-dirs-page.tsx:25:  const { data: containers = [] } = useQuery({
+packages/frontend/src/pages/data-dirs-page.tsx:26:    queryKey: ['containers', 'own'],
+packages/frontend/src/pages/data-dirs-page.tsx:27:    queryFn: () => api.get<ContainerView[]>('/v2/containers?ownOnly=true'),
+packages/frontend/src/pages/data-dirs-page.tsx:116:            qc.invalidateQueries({ queryKey: ['containers', 'own'] });
+packages/frontend/src/pages/data-dirs-page.tsx:146:                      containers={containers}
+packages/frontend/src/pages/data-dirs-page.tsx:184:                          containers={containers}
+packages/frontend/src/pages/data-dirs-page.tsx:214:  icon, label, description, dirs, containers, onDelete, onNew,
+packages/frontend/src/pages/data-dirs-page.tsx:220:  containers: ContainerView[];
+packages/frontend/src/pages/data-dirs-page.tsx:247:            const usingContainers = containers.filter(
+packages/frontend/src/pages/dashboard-page.tsx:52:// Containers dimension tab — always only the current user's containers
+packages/frontend/src/pages/dashboard-page.tsx:57:    queryKey: ['metrics-containers', serverId, range],
+packages/frontend/src/pages/dashboard-page.tsx:58:    queryFn: () => api.get<ContainerMetricsDto>(`/metrics/servers/${serverId}/containers?range=${range}`),
+packages/frontend/src/pages/dashboard-page.tsx:65:  if (isError || !data || data.containers.length === 0) return <EmptyChart title="容器资源" />;
+packages/frontend/src/pages/dashboard-page.tsx:67:  const entries = (key: keyof ContainerMetricsDto['containers'][0]) =>
+packages/frontend/src/pages/dashboard-page.tsx:68:    data.containers.map((c) => ({
+packages/frontend/src/pages/dashboard-page.tsx:96:  const [activeTab, setActiveTab] = useState<'users' | 'containers'>('users');
+packages/frontend/src/pages/dashboard-page.tsx:161:            {(['users', 'containers'] as const).map((tab) => (
+packages/frontend/src/components/layout/app-layout.tsx:17:  { to: '/containers', icon: Container, label: '容器' },
+packages/frontend/src/components/layout/app-layout.tsx:24:  { to: '/manage/containers', icon: Layers, label: '容器管理', cap: Capability.ManageContainersAny },
+packages/frontend/src/components/containers/create-container-dialog.tsx:105:      return api.post<OperationRefResponse>('/v2/containers', {
+packages/frontend/src/components/containers/create-container-dialog.tsx:121:      qc.invalidateQueries({ queryKey: ['containers'] });
+packages/frontend/src/components/containers/mounts-card.tsx:39:    queryFn: () => api.get<ContainerView>(`/v2/containers/${containerId}`).then((c) => c.mounts),
+packages/frontend/src/components/containers/mounts-card.tsx:55:      api.post(`/v2/containers/${containerId}/actions/update-mounts`, newList),
+packages/frontend/src/components/containers/container-row.tsx:50:            to="/containers/$containerId"
+packages/frontend/src/components/containers/container-row.tsx:108:            <Link to="/containers/$containerId" params={{ containerId: c.id }} search={{ tab: 'console' }}>

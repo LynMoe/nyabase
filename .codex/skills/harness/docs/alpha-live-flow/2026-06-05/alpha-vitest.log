@@ -1,0 +1,12 @@
+## 2026-06-05T22:03:52+08:00 Alpha live spec run
+Command: source test/config/local.env; source test/runtime/murt/current.env; pnpm exec vitest run test/specs/live/multi-user-redteam-alpha.spec.ts --reporter=verbose
+
+ RUN  v4.1.5 /root/nyabase
+
+ ✓ test/specs/live/multi-user-redteam-alpha.spec.ts > V2 alpha persona live flow > creates active CPU container, waits actions, exercises stats/power/delete operations, and denies GPU 5213ms
+
+ Test Files  1 passed (1)
+      Tests  1 passed (1)
+   Start at  22:03:52
+   Duration  5.35s (transform 35ms, setup 0ms, import 44ms, tests 5.21s, environment 0ms)
+

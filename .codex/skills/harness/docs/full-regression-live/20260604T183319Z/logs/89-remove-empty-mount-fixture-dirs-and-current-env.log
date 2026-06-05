@@ -1,0 +1,3 @@
+== remove exact-prefix empty mount directories ==
+== remove stale local current.env (fixtures cleaned) ==
+removed test/runtime/mount/current.env

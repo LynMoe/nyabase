@@ -1,0 +1,34 @@
+
+ RUN  v4.1.5 /root/nyabase
+
+ × test/specs/live/dropbear-live-runtime.spec.ts > live Dropbear user-state runtime on CPU agent > proves non-admin SSH enablement, isolation, repair, key sync, lifecycle, and cleanup 158093ms
+   → expected SSH key login success for a-secondary to 10.8.109.2: expected null to be truthy
+
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 1 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  test/specs/live/dropbear-live-runtime.spec.ts > live Dropbear user-state runtime on CPU agent > proves non-admin SSH enablement, isolation, repair, key sync, lifecycle, and cleanup
+AssertionError: expected SSH key login success for a-secondary to 10.8.109.2: expected null to be truthy
+
+- Expected:
+true
+
++ Received:
+null
+
+ ❯ waitForSshLoginSuccess test/specs/live/dropbear-live-runtime.spec.ts:803:81
+    801|     return result.exitCode === 0 && result.stdout.includes(marker) ? r…
+    802|   }, 60_000, 2_000);
+    803|   expect(attempt, `expected SSH key login success for ${key.label} to …
+       |                                                                                 ^
+    804|   report.sshAttempts.push(attempt!);
+    805| }
+ ❯ test/specs/live/dropbear-live-runtime.spec.ts:455:7
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/1]⎯
+
+
+ Test Files  1 failed (1)
+      Tests  1 failed (1)
+   Start at  04:46:44
+   Duration  158.28s (transform 70ms, setup 0ms, import 83ms, tests 158.09s, environment 0ms)
+

@@ -1,0 +1,41 @@
+PASS old route params removed
+PASS old frontend route removed
+PASS old TanStack serverId+containerId route file removed
+PASS old applySpec command removed
+PASS old setPower command removed
+PASS old applyMounts command removed
+PASS old reconcileSsh command removed
+PASS legacy label constants removed
+PASS legacy spec version removed
+PASS legacy desired import id removed
+PASS old container read model service removed
+PASS old container mounts command-coupling service removed
+PASS old container ssh sync hook service removed
+PASS old direct start method removed
+PASS old direct stop method removed
+PASS old direct restart method removed
+PASS old direct delete method removed
+PASS old transient docker id resolver removed
+PASS old list visibility wait helper removed
+PASS old REST container API path removed from frontend/tests
+PASS old double-quoted REST container API path removed from frontend/tests
+PASS old template REST container API path removed from frontend/tests
+PASS frontend/test Docker ID identity inference removed
+PASS frontend lifecycle docker binding inference removed
+PASS backend ContainerEntity docker id query removed
+PASS backend ContainerEntity sshEnabled query removed
+PASS public/test spec docker id removed
+PASS frontend metrics docker id removed
+PASS old direct delete route usage removed
+PASS old direct delete routePath usage removed
+PASS old exec endpoint suffix removed
+PASS old mounts endpoint suffix removed
+PASS container action policy service exists
+PASS container control service exists
+PASS container operation service exists
+PASS runtime observation service exists
+PASS runtime orphan service exists
+PASS frontend operation tracker exists
+PASS common source artifact guard
+
+Control-plane redesign conformance check passed.

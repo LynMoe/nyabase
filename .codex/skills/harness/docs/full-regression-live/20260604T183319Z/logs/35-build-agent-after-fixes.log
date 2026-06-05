@@ -1,0 +1,27 @@
+=== Building mount-helper (Rust) ===
+Built musl static binary: target/x86_64-unknown-linux-musl/release/nyabase-mount-helper
+
+=== Building @nyabase/common ===
+
+> @nyabase/common@0.1.0 build /root/nyabase/packages/common
+> tsc -p tsconfig.json && tsc -p tsconfig.esm.json
+
+
+=== Bundling agent (esbuild → CJS) ===
+Injecting agent version: 0.1.0
+
+  ../../dist/agent-bundle/agent.cjs  1.2mb ⚠️
+
+⚡ Done in 42ms
+
+=== Compiling Node.js binary (node22-linux-x64) ===
+> pkg@6.19.0
+(node:3047170) [DEP0040] DeprecationWarning: The `punycode` module is deprecated. Please use a userland alternative instead.
+(Use `node --trace-deprecation ...` to show where the warning was created)
+> compression: GZip
+
+=== Done ===
+Agent: /root/nyabase/dist/nyabase-agent  (73M)
+
+Usage on target machine:
+  nyabase-agent --config /etc/nyabase/agent.yaml

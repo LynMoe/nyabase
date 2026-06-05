@@ -1,0 +1,152 @@
+=== old route/API patterns broad ===
+packages/frontend/e2e/.test-results/operation-states-operation-9e45e-nding-and-failed-operations-chromium/error-context.md:179:  199 |     await page.goto('/containers/srv-gpu/op-failed-container');
+packages/frontend/e2e/.test-results/container-canonical-visibi-65a80-ut-admin-management-context-chromium/error-context.md:140:  159 |         && url.pathname === '/api/containers/srv-gpu/ctr-lin-run';
+packages/frontend/e2e/.test-results/container-canonical-visibi-65a80-ut-admin-management-context-chromium/error-context.md:145:  164 |     expect(detailUrl.pathname).toBe('/api/containers/srv-gpu/ctr-lin-run');
+packages/frontend/e2e/.test-results/container-canonical-visibi-65a80-ut-admin-management-context-chromium/error-context.md:146:  165 |     expect(detailUrl.pathname).not.toContain(userRunningContainer.spec.dockerId);
+packages/frontend/e2e/.test-results/container-canonical-visibi-65a80-ut-admin-management-context-chromium/error-context.md:148:  167 |     expect(containerRequests.some((entry) => entry.includes(userRunningContainer.spec.dockerId))).toBe(false);
+packages/frontend/e2e/.test-results/container-canonical-visibi-65a80-ut-admin-management-context-chromium/error-context.md:175:  193 |         && url.pathname === '/api/containers/srv-gpu/ctr-lin-start/start';
+packages/frontend/e2e/.test-results/container-canonical-visibi-65a80-ut-admin-management-context-chromium/error-context.md:180:  198 |     expect(startUrl.pathname).toBe('/api/containers/srv-gpu/ctr-lin-start/start');
+packages/frontend/e2e/.test-results/container-canonical-visibi-65a80-ut-admin-management-context-chromium/error-context.md:181:  199 |     expect(startUrl.pathname).not.toContain(userStartableContainer.spec.dockerId);
+packages/frontend/e2e/.test-results/container-canonical-visibi-65a80-ut-admin-management-context-chromium/error-context.md:183:  201 |     expect(containerRequests.some((entry) => entry.includes(userStartableContainer.spec.dockerId))).toBe(false);
+packages/frontend/e2e/.test-results/container-canonical-visibi-65a80-ut-admin-management-context-chromium/error-context.md:224:  242 |     if (path === '/containers/srv-gpu/ctr-lin-start/start' && method === 'POST') {
+packages/frontend/e2e/.test-results/container-canonical-visibi-65a80-ut-admin-management-context-chromium/error-context.md:229:  247 |     const container = allContainers.find((c) => path === `/containers/${c.serverId}/${c.containerId}`);
+packages/frontend/e2e/.test-results/container-canonical-visibi-65a80-ut-admin-management-context-chromium/error-context.md:232:  250 |     const statsContainer = allContainers.find((c) => path === `/containers/${c.serverId}/${c.containerId}/stats`);
+packages/frontend/e2e/.test-results/container-canonical-visibi-65a80-ut-admin-management-context-chromium/error-context.md:235:  253 |         dockerId: statsContainer.spec.dockerId,
+packages/frontend/e2e/.test-results/operation-states-operation-3a410-ation-failure-after-refresh-chromium/error-context.md:161:  199 |     await page.goto('/containers/srv-gpu/op-failed-container');
+packages/frontend/e2e/.test-results/operation-states-operation-bddf0--operation-feedback-visible-chromium/error-context.md:136:  199 |     await page.goto('/containers/srv-gpu/op-failed-container');
+packages/frontend/e2e/.test-results/container-canonical-visibi-0c879-nd-durable-pending-controls-chromium/error-context.md:181:  159 |         && url.pathname === '/api/containers/srv-gpu/ctr-lin-run';
+packages/frontend/e2e/.test-results/container-canonical-visibi-0c879-nd-durable-pending-controls-chromium/error-context.md:186:  164 |     expect(detailUrl.pathname).toBe('/api/containers/srv-gpu/ctr-lin-run');
+packages/frontend/e2e/.test-results/container-canonical-visibi-0c879-nd-durable-pending-controls-chromium/error-context.md:187:  165 |     expect(detailUrl.pathname).not.toContain(userRunningContainer.spec.dockerId);
+packages/frontend/e2e/.test-results/container-canonical-visibi-0c879-nd-durable-pending-controls-chromium/error-context.md:189:  167 |     expect(containerRequests.some((entry) => entry.includes(userRunningContainer.spec.dockerId))).toBe(false);
+packages/frontend/e2e/.test-results/container-canonical-visibi-0c879-nd-durable-pending-controls-chromium/error-context.md:215:  193 |         && url.pathname === '/api/containers/srv-gpu/ctr-lin-start/start';
+packages/frontend/e2e/.test-results/container-canonical-visibi-0c879-nd-durable-pending-controls-chromium/error-context.md:220:  198 |     expect(startUrl.pathname).toBe('/api/containers/srv-gpu/ctr-lin-start/start');
+packages/frontend/e2e/.test-results/container-canonical-visibi-0c879-nd-durable-pending-controls-chromium/error-context.md:221:  199 |     expect(startUrl.pathname).not.toContain(userStartableContainer.spec.dockerId);
+packages/frontend/e2e/.test-results/container-canonical-visibi-0c879-nd-durable-pending-controls-chromium/error-context.md:223:  201 |     expect(containerRequests.some((entry) => entry.includes(userStartableContainer.spec.dockerId))).toBe(false);
+packages/frontend/e2e/.test-results/container-canonical-visibi-0c879-nd-durable-pending-controls-chromium/error-context.md:264:  242 |     if (path === '/containers/srv-gpu/ctr-lin-start/start' && method === 'POST') {
+packages/frontend/e2e/management-routes.spec.ts:441:          dockerId: container.spec.dockerId,
+packages/frontend/e2e/management-routes.spec.ts:442:          name: container.spec.name,
+packages/frontend/e2e/ssh-ux.spec.ts:138:    await page.goto(`/containers/srv-gpu/${enabledDockerId}`);
+packages/frontend/e2e/ssh-ux.spec.ts:151:    await page.goto(`/containers/srv-gpu/${disabledDockerId}`);
+packages/frontend/e2e/ssh-ux.spec.ts:165:    await page.goto(`/containers/srv-gpu/${enabledDockerId}?tab=console`);
+packages/frontend/e2e/ssh-ux.spec.ts:209:    if (path === `/containers/srv-gpu/${enabledDockerId}`) return json(route, sshEnabledContainer);
+packages/frontend/e2e/ssh-ux.spec.ts:210:    if (path === `/containers/srv-gpu/${disabledDockerId}`) return json(route, sshDisabledContainer);
+packages/frontend/e2e/ssh-ux.spec.ts:211:    if (path === `/containers/srv-gpu/${enabledDockerId}/stats`) return json(route, containerStats(enabledDockerId));
+packages/frontend/e2e/ssh-ux.spec.ts:212:    if (path === `/containers/srv-gpu/${disabledDockerId}/stats`) return json(route, containerStats(disabledDockerId));
+packages/frontend/e2e/ssh-ux.spec.ts:213:    if (path === `/containers/srv-gpu/${enabledDockerId}/mounts`) return json(route, []);
+packages/frontend/e2e/ssh-ux.spec.ts:214:    if (path === `/containers/srv-gpu/${disabledDockerId}/mounts`) return json(route, []);
+packages/frontend/e2e/operation-states.spec.ts:199:    await page.goto('/containers/srv-gpu/op-failed-container');
+packages/frontend/e2e/operation-states.spec.ts:330:    if (path === '/containers/srv-gpu/op-pending-container') return json(route, pendingContainer);
+packages/frontend/e2e/operation-states.spec.ts:331:    if (path === '/containers/srv-gpu/op-failed-container') return json(route, failedContainer);
+packages/frontend/e2e/container-canonical-visibility.spec.ts:159:        && url.pathname === '/api/containers/srv-gpu/ctr-lin-run';
+packages/frontend/e2e/container-canonical-visibility.spec.ts:164:    expect(detailUrl.pathname).toBe('/api/containers/srv-gpu/ctr-lin-run');
+packages/frontend/e2e/container-canonical-visibility.spec.ts:165:    expect(detailUrl.pathname).not.toContain(userRunningContainer.spec.dockerId);
+packages/frontend/e2e/container-canonical-visibility.spec.ts:167:    expect(containerRequests.some((entry) => entry.includes(userRunningContainer.spec.dockerId))).toBe(false);
+packages/frontend/e2e/container-canonical-visibility.spec.ts:193:        && url.pathname === '/api/containers/srv-gpu/ctr-lin-start/start';
+packages/frontend/e2e/container-canonical-visibility.spec.ts:198:    expect(startUrl.pathname).toBe('/api/containers/srv-gpu/ctr-lin-start/start');
+packages/frontend/e2e/container-canonical-visibility.spec.ts:199:    expect(startUrl.pathname).not.toContain(userStartableContainer.spec.dockerId);
+packages/frontend/e2e/container-canonical-visibility.spec.ts:201:    expect(containerRequests.some((entry) => entry.includes(userStartableContainer.spec.dockerId))).toBe(false);
+packages/frontend/e2e/container-canonical-visibility.spec.ts:242:    if (path === '/containers/srv-gpu/ctr-lin-start/start' && method === 'POST') {
+packages/frontend/e2e/container-canonical-visibility.spec.ts:247:    const container = allContainers.find((c) => path === `/containers/${c.serverId}/${c.containerId}`);
+packages/frontend/e2e/container-canonical-visibility.spec.ts:250:    const statsContainer = allContainers.find((c) => path === `/containers/${c.serverId}/${c.containerId}/stats`);
+packages/frontend/e2e/container-canonical-visibility.spec.ts:253:        dockerId: statsContainer.spec.dockerId,
+packages/frontend/e2e/container-canonical-visibility.spec.ts:282:    id: input.containerId,
+packages/frontend/e2e/container-canonical-visibility.spec.ts:283:    containerId: input.containerId,
+packages/frontend/e2e/container-canonical-visibility.spec.ts:308:      containerId: input.containerId,
+packages/frontend/e2e/gpu-metrics.spec.ts:91:    await page.goto('/containers/srv-gpu/0123456789ab');
+packages/frontend/e2e/gpu-metrics.spec.ts:146:    if (path === '/containers/srv-gpu/0123456789ab') return json(route, container);
+packages/frontend/e2e/gpu-metrics.spec.ts:147:    if (path === '/containers/srv-gpu/0123456789ab/stats') {
+packages/frontend/e2e/gpu-metrics.spec.ts:167:    if (path === '/containers/srv-gpu/0123456789ab/mounts') return json(route, []);
+packages/frontend/e2e/ROUTES.md:24:| `/containers/:serverId/:containerId` authenticated overview GPU memory | `e2e/gpu-metrics.spec.ts` | `e2e/__screenshots__/chromium/gpu-metrics.spec.ts/container-gpu-memory.png` | covered | Mocked authenticated state and API fixtures verify positive per-GPU memory rows render. |
+packages/frontend/e2e/ROUTES.md:25:| `/containers/:serverId/:containerId` terminal operation failure | `e2e/operation-states.spec.ts` | `e2e/__screenshots__/chromium/operation-states.spec.ts/container-detail-operation-failure.png` | covered | Mocked durable operation summary verifies the detail page renders failed terminal operation status and error copy after refresh. |
+packages/frontend/e2e/ROUTES.md:26:| `/containers/:serverId/:containerId` SSH enabled overview | `e2e/ssh-ux.spec.ts` | `e2e/__screenshots__/chromium/ssh-ux.spec.ts/container-detail-ssh-enabled.png` | covered | Mocked SSH-enabled container verifies `ssh root@<ip>`, running Dropbear status, and manual repair action. |
+packages/frontend/e2e/ROUTES.md:27:| `/containers/:serverId/:containerId` SSH disabled overview | `e2e/ssh-ux.spec.ts` | `e2e/__screenshots__/chromium/ssh-ux.spec.ts/container-detail-ssh-disabled.png` | covered | Mocked SSH-disabled container verifies the one-way enable action and absence of disable/toggle-off controls. |
+packages/frontend/e2e/ROUTES.md:28:| `/containers/:serverId/:containerId?tab=console` console toolbar | `e2e/ssh-ux.spec.ts` | `e2e/__screenshots__/chromium/ssh-ux.spec.ts/container-console-toolbar-ip.png` | covered | Mocked running container verifies the console toolbar displays the container IP instead of legacy SSH user hints. |
+packages/frontend/e2e/persona-routes.spec.ts:478:          dockerId: normalContainer.spec.dockerId,
+packages/frontend/e2e/persona-routes.spec.ts:479:          name: normalContainer.spec.name,
+packages/frontend/src/routeTree.gen.ts:20:import { Route as ContainersIndexRouteImport } from './routes/containers/index'
+packages/frontend/src/routeTree.gen.ts:26:import { Route as ManageContainersIndexRouteImport } from './routes/manage/containers/index'
+packages/frontend/src/routeTree.gen.ts:69:  id: '/containers/',
+packages/frontend/src/routeTree.gen.ts:70:  path: '/containers/',
+packages/frontend/src/routeTree.gen.ts:99:  id: '/manage/containers/',
+packages/frontend/src/routeTree.gen.ts:100:  path: '/manage/containers/',
+packages/frontend/src/routeTree.gen.ts:112:  '/containers/': typeof ContainersIndexRoute
+packages/frontend/src/routeTree.gen.ts:118:  '/manage/containers/': typeof ManageContainersIndexRoute
+packages/frontend/src/routeTree.gen.ts:147:  '/containers/': typeof ContainersIndexRoute
+packages/frontend/src/routeTree.gen.ts:153:  '/manage/containers/': typeof ManageContainersIndexRoute
+packages/frontend/src/routeTree.gen.ts:166:    | '/containers/'
+packages/frontend/src/routeTree.gen.ts:172:    | '/manage/containers/'
+packages/frontend/src/routeTree.gen.ts:200:    | '/containers/'
+packages/frontend/src/routeTree.gen.ts:206:    | '/manage/containers/'
+packages/frontend/src/routeTree.gen.ts:286:    '/containers/': {
+packages/frontend/src/routeTree.gen.ts:287:      id: '/containers/'
+packages/frontend/src/routeTree.gen.ts:289:      fullPath: '/containers/'
+packages/frontend/src/routeTree.gen.ts:328:    '/manage/containers/': {
+packages/frontend/src/routeTree.gen.ts:329:      id: '/manage/containers/'
+packages/frontend/src/routeTree.gen.ts:331:      fullPath: '/manage/containers/'
+packages/frontend/src/routes/manage/containers/index.tsx:3:export const Route = createFileRoute('/manage/containers/')({
+packages/frontend/src/routes/containers/index.tsx:20:import { ContainerRow } from '../../components/containers/container-row.js';
+packages/frontend/src/routes/containers/index.tsx:21:import { CreateContainerDialog } from '../../components/containers/create-container-dialog.js';
+packages/frontend/src/routes/containers/index.tsx:242:export const Route = createFileRoute('/containers/')({ component: ContainersPage });
+packages/frontend/src/pages/container-detail-page.tsx:11:import { MountsCard } from '../components/containers/mounts-card.js';
+packages/frontend/src/pages/manage-containers-page.tsx:13:import { ContainerRow } from '../components/containers/container-row.js';
+packages/frontend/src/pages/dashboard-page.tsx:69:      key: c.containerId,
+packages/frontend/src/pages/dashboard-page.tsx:70:      label: c.name || c.containerId,
+packages/backend/src/operations/operation-orchestrator.service.ts:514:        labelsJson: { 'nyabase.containerId': operation.resourceId },
+packages/backend/src/datadirs/datadirs.service.ts:284:          where: { serverId: mount.serverId, containerId: mount.containerId },
+packages/backend/src/metrics/metrics.controller.ts:291:      if (!runtime.containerId) continue;
+packages/backend/src/metrics/metrics.controller.ts:292:      const container = desiredById.get(runtime.containerId);
+packages/backend/src/app.module.ts:10:import { ContainersModule } from './containers/containers.module.js';
+packages/backend/src/runtime/runtime-observation.service.test.ts:51:          labels: { 'nyabase.containerId': 'container-a', 'nyabase.ownerId': 'user-a' },
+packages/backend/src/runtime/runtime-observation.service.test.ts:90:            labels: { 'nyabase.containerId': 'missing-container' },
+packages/backend/src/runtime/runtime-orphan.service.ts:49:    const value = labels['nyabase.containerId'] ?? labels['nyabase.container_id'];
+packages/backend/src/containers/__tests__/container-control-create-v2.test.ts:66:      expect(typeof (command.payload as { containerId?: unknown }).containerId).toBe('string');
+packages/backend/src/containers/container-operation.service.ts:52:      idempotencyKey: `${input.kind}:${input.containerId}:${operationId}`,
+packages/backend/src/containers/container-operation.service.ts:55:      resourceId: input.containerId,
+packages/backend/src/containers/container-operation.service.ts:86:      resourceKey: `container:${input.containerId}`,
+packages/backend/src/containers/container-operation.service.ts:88:      idempotencyKey: `${input.commandKind}:${input.containerId}:${operationId}`,
+packages/backend/src/containers/container-operation.service.ts:104:    await manager.update(ContainerLifecycleEntity, input.containerId, {
+packages/backend/src/containers/container-operation.service.ts:112:      await manager.update(ContainerDesiredSpecEntity, { containerId: input.containerId }, {
+packages/backend/src/containers/container-operation.service.ts:124:      const container = await manager.findOneByOrFail(ContainerEntity, { id: input.containerId });
+packages/backend/src/containers/container-control.service.ts:241:    const desired = new Map(desiredRows.map((d) => [d.containerId, d]));
+packages/backend/src/containers/container-control.service.ts:242:    const lifecycle = new Map(lifecycleRows.map((l) => [l.containerId, l]));
+packages/backend/src/containers/container-control.service.ts:244:    for (const row of runtimeRows) if (row.containerId && !runtime.has(row.containerId)) runtime.set(row.containerId, row);
+test/specs/live/multi-user-redteam-mount-sources.spec.ts:261:        containerId: shortId(alphaOne.containerId),
+test/specs/live/multi-user-redteam-mount-sources.spec.ts:283:      record('dynamic patch initial mounts empty', delta, emptyMounts, '200 empty mount list', { containerId: shortId(patchContainer.containerId) });
+test/specs/live/multi-user-redteam-mount-sources.spec.ts:297:      record('dynamic patch final mounts empty', delta, removedMounts, '200 empty after remove', { containerId: shortId(patchContainer.containerId) });
+test/specs/live/multi-user-redteam-mount-sources.spec.ts:504:  record(step, actor, result, '200/201', { containerId: shortId(container.containerId), count: mounts.length });
+test/specs/live/multi-user-redteam-mount-sources.spec.ts:507:  record(`${step} readback`, actor, list, '200', { containerId: shortId(container.containerId), count: Array.isArray(list.body) ? list.body.length : -1 });
+test/specs/live/multi-user-redteam-mount-sources.spec.ts:522:    containerId: shortId(container.containerId),
+test/specs/live/multi-user-redteam-mount-sources.spec.ts:537:    containerId: shortId(container.containerId),
+test/specs/live/multi-user-redteam-mount-sources.spec.ts:551:  record('open exec session', actor, exec, '201/200 sessionId', { containerId: shortId(container.containerId) });
+test/specs/live/multi-user-redteam-mount-sources.spec.ts:613:    containerId: shortId(container.containerId),
+test/specs/live/multi-user-redteam-mount-sources.spec.ts:618:  removeCreatedContainer(container.containerId);
+test/specs/live/multi-user-redteam-mount-sources.spec.ts:624:  return request<{ ok: true; operationId: string; status: string }>('POST', `/v2/containers/${container.containerId}/actions/delete`, actor.token);
+test/specs/live/multi-user-redteam-mount-sources.spec.ts:656:      if ([200, 204, 403, 404].includes(result.status)) removeCreatedContainer(container.containerId);
+test/specs/live/multi-user-redteam-mount-sources.spec.ts:721:  throw new Error(`Timed out waiting for container deletion ${shortId(container.containerId)}`);
+test/specs/live/multi-user-redteam-mount-sources.spec.ts:790:    ...report.created.containers.map((container) => `- container ${container.actor} ${container.name} server=${container.serverId} container=${shortId(container.containerId)}`),
+test/specs/live/multi-user-redteam-mount-sources.spec.ts:795:    ...report.deleted.containers.map((container) => `- container ${container.actor} ${container.name} server=${container.serverId} container=${shortId(container.containerId)}`),
+test/specs/live/multi-user-redteam-mount-sources.spec.ts:824:  return container.containerId ?? container.id;
+test/specs/live/multi-user-redteam-mount-sources.spec.ts:828:  return `/v2/containers/${container.containerId}`;
+test/specs/live/multi-user-redteam-mount-sources.spec.ts:836:    containerId: container.containerId,
+test/specs/live/multi-user-redteam-mount-sources.spec.ts:845:  const index = createdContainers.findIndex((container) => container.containerId === containerId);
+test/specs/live/dropbear-live-runtime.spec.ts:379:        containerId: shortId(disabled.containerId),
+test/specs/live/dropbear-live-runtime.spec.ts:392:          containerId: shortId(disabled.containerId),
+test/specs/live/dropbear-live-runtime.spec.ts:410:        containerId: shortId(disabled.containerId),
+test/specs/live/dropbear-live-runtime.spec.ts:421:            containerId: shortId(disabled.containerId),
+test/specs/live/dropbear-live-runtime.spec.ts:440:        containerId: shortId(disabled.containerId),
+test/specs/live/dropbear-live-runtime.spec.ts:447:        removeCreatedContainer(createdContainers, container.containerId);
+test/specs/live/dropbear-live-runtime.spec.ts:720:    containerId: shortId(container.containerId),
+test/specs/live/dropbear-live-runtime.spec.ts:734:    containerId: shortId(container.containerId),
+test/specs/live/dropbear-live-runtime.spec.ts:885:      ids: { userAId: actorA.user.id, userBId: actorB.user.id, containerId: shortId(container.containerId) },
+test/specs/live/dropbear-live-runtime.spec.ts:926:    containerId: shortId(container.containerId),
+test/specs/live/dropbear-live-runtime.spec.ts:1013:  const operation = await requestContainerDeleteOperation(actor.token, container.containerId);
+test/specs/live/dropbear-live-runtime.spec.ts:1016:  record(`delete ${container.purpose} container via V2 operation`, actor, 'POST', `/v2/containers/${shortId(container.containerId)}/actions/delete`, 201, {
+test/specs/live/dropbear-live-runtime.spec.ts:1017:    containerId: shortId(container.containerId),
+test/specs/live/dropbear-live-runtime.spec.ts:1023:    return containers.some((item) => canonicalContainerId(item) === container.containerId) ? null : true;
+test/specs/live/dropbear-live-runtime.spec.ts:1194:      report.cleanup.push(`container cleanup skipped no User A token ${container.name}:${shortId(container.containerId)}`);
+test/specs/live/dropbear-live-runtime.spec.ts:1200:      report.cleanup.push(`deleted container ${container.name}:${shortId(container.containerId)} with User A credentials`);
+test/specs/live/dropbear-live-runtime.spec.ts:1202:      report.cleanup.push(`container cleanup failed ${container.name}:${shortId(container.containerId)} ${describeError(error)}`);
+test/specs/live/dropbear-live-runtime.spec.ts:1511:  return container.containerId ?? container.id;
+test/specs/live/dropbear-live-runtime.spec.ts:1519:  return containerPathFromIds(container.serverId, container.containerId, suffix);
+test/specs/live/dropbear-live-runtime.spec.ts:1523:  return containerPathFromIds(container.serverId, shortId(container.containerId), suffix);
+test/specs/live/dropbear-live-runtime.spec.ts:1527:  const index = containers.findIndex((item) => item.containerId === containerId);

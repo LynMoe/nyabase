@@ -1,0 +1,47 @@
+{
+  "prefixes": [
+    "mount-20260604t213521z-74a393"
+  ],
+  "containers": [],
+  "dataDirs": [],
+  "remoteMounts": [
+    {
+      "prefix": "mount-20260604t213521z-74a393",
+      "id": "eff5944b-9cae-4c69-b474-3675bddc53cd",
+      "name": "mount-20260604t213521z-74a393-nfs",
+      "status": 200,
+      "operationIds": [
+        "a7e45792-4400-4929-9807-1cf23f2a35d3"
+      ]
+    }
+  ],
+  "images": [
+    {
+      "prefix": "mount-20260604t213521z-74a393",
+      "id": "65e49d4f-06de-4944-956a-fb17233da0a3",
+      "name": "mount-20260604t213521z-74a393-alpine",
+      "status": 204
+    }
+  ],
+  "users": [
+    {
+      "prefix": "mount-20260604t213521z-74a393",
+      "id": "3bffed11-0d88-401c-8f84-cf1790633a2a",
+      "username": "mount-20260604t213521z-74a393-alphalocal",
+      "status": 204
+    },
+    {
+      "prefix": "mount-20260604t213521z-74a393",
+      "id": "bfb63b9f-8387-4d59-bdb6-7619b2348e0c",
+      "username": "mount-20260604t213521z-74a393-betaremote",
+      "status": 204
+    },
+    {
+      "prefix": "mount-20260604t213521z-74a393",
+      "id": "a225e2e5-80d0-4118-be40-3a036e5a6f29",
+      "username": "mount-20260604t213521z-74a393-deltaboth",
+      "status": 204
+    }
+  ],
+  "errors": []
+}

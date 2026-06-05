@@ -1,0 +1,21 @@
+Stopped local nyabase backend/frontend test processes.
+Starting VictoriaMetrics on 127.0.0.1:8428...
+Building common/backend...
+
+> @nyabase/common@0.1.0 build /root/nyabase/packages/common
+> tsc -p tsconfig.json && tsc -p tsconfig.esm.json
+
+
+> @nyabase/backend@0.1.0 build /root/nyabase/packages/backend
+> tsc -p tsconfig.json
+
+Stopped local nyabase backend/frontend test processes.
+Starting backend on port 3001 with DB /root/nyabase/test/runtime/db/nyabase-test.db...
+Waiting for backend...
+Starting frontend on port 5173...
+Waiting for frontend...
+Frontend: http://localhost:5173
+Backend:  http://localhost:3001/api
+Admin:    admin / admin123
+DB:       /root/nyabase/test/runtime/db/nyabase-test.db
+Logs:     /root/nyabase/test/runtime/logs/backend.log /root/nyabase/test/runtime/logs/frontend.log

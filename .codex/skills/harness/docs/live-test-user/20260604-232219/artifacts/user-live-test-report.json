@@ -1,0 +1,547 @@
+{
+  "runId": "ult-20260604152403-902297",
+  "apiBase": "http://localhost:3001/api",
+  "startedAt": "2026-06-04T15:24:03.309Z",
+  "commands": [],
+  "endpoints": [
+    {
+      "method": "POST",
+      "path": "/auth/login",
+      "status": 200,
+      "ok": true
+    },
+    {
+      "method": "GET",
+      "path": "/auth/me",
+      "status": 200,
+      "ok": true
+    },
+    {
+      "method": "GET",
+      "path": "/servers",
+      "status": 200,
+      "ok": true
+    },
+    {
+      "method": "GET",
+      "path": "/images",
+      "status": 200,
+      "ok": true
+    },
+    {
+      "method": "POST",
+      "path": "/users",
+      "status": 201,
+      "ok": true
+    },
+    {
+      "method": "POST",
+      "path": "/users/067b4dd3-3d10-42b0-86f0-0dd289e16811/server-grants/1b9c08fa-32e1-4943-8dc5-d83772cd52f9",
+      "status": 201,
+      "ok": true
+    },
+    {
+      "method": "POST",
+      "path": "/users/067b4dd3-3d10-42b0-86f0-0dd289e16811/image-grants",
+      "status": 201,
+      "ok": true
+    },
+    {
+      "method": "POST",
+      "path": "/auth/login",
+      "status": 200,
+      "ok": true
+    },
+    {
+      "method": "GET",
+      "path": "/auth/me",
+      "status": 200,
+      "ok": true
+    },
+    {
+      "method": "GET",
+      "path": "/me/access",
+      "status": 200,
+      "ok": true
+    },
+    {
+      "method": "GET",
+      "path": "/servers",
+      "status": 200,
+      "ok": true
+    },
+    {
+      "method": "GET",
+      "path": "/images",
+      "status": 200,
+      "ok": true
+    },
+    {
+      "method": "POST",
+      "path": "/containers",
+      "status": 201,
+      "ok": true
+    },
+    {
+      "method": "GET",
+      "path": "/containers?serverId=1b9c08fa-32e1-4943-8dc5-d83772cd52f9&ownOnly=true",
+      "status": 200,
+      "ok": true
+    },
+    {
+      "method": "GET",
+      "path": "/containers/1b9c08fa-32e1-4943-8dc5-d83772cd52f9/8b016495-e7b5-48ef-b18e-939d72da93a8",
+      "status": 200,
+      "ok": true
+    },
+    {
+      "method": "POST",
+      "path": "/containers/1b9c08fa-32e1-4943-8dc5-d83772cd52f9/8b016495-e7b5-48ef-b18e-939d72da93a8/stop",
+      "status": 409,
+      "ok": false
+    },
+    {
+      "method": "GET",
+      "path": "/containers/1b9c08fa-32e1-4943-8dc5-d83772cd52f9/8b016495-e7b5-48ef-b18e-939d72da93a8",
+      "status": 200,
+      "ok": true
+    },
+    {
+      "method": "POST",
+      "path": "/containers/1b9c08fa-32e1-4943-8dc5-d83772cd52f9/8b016495-e7b5-48ef-b18e-939d72da93a8/start",
+      "status": 201,
+      "ok": true
+    },
+    {
+      "method": "GET",
+      "path": "/containers/1b9c08fa-32e1-4943-8dc5-d83772cd52f9/8b016495-e7b5-48ef-b18e-939d72da93a8",
+      "status": 200,
+      "ok": true
+    },
+    {
+      "method": "POST",
+      "path": "/containers/1b9c08fa-32e1-4943-8dc5-d83772cd52f9/8b016495-e7b5-48ef-b18e-939d72da93a8/restart",
+      "status": 201,
+      "ok": true
+    },
+    {
+      "method": "GET",
+      "path": "/containers/1b9c08fa-32e1-4943-8dc5-d83772cd52f9/8b016495-e7b5-48ef-b18e-939d72da93a8",
+      "status": 200,
+      "ok": true
+    },
+    {
+      "method": "DELETE",
+      "path": "/containers/1b9c08fa-32e1-4943-8dc5-d83772cd52f9/8b016495-e7b5-48ef-b18e-939d72da93a8",
+      "status": 409,
+      "ok": false
+    },
+    {
+      "method": "GET",
+      "path": "/containers/1b9c08fa-32e1-4943-8dc5-d83772cd52f9/8b016495-e7b5-48ef-b18e-939d72da93a8",
+      "status": 200,
+      "ok": true
+    },
+    {
+      "method": "GET",
+      "path": "/containers/1b9c08fa-32e1-4943-8dc5-d83772cd52f9/8b016495-e7b5-48ef-b18e-939d72da93a8",
+      "status": 200,
+      "ok": true
+    },
+    {
+      "method": "GET",
+      "path": "/containers/1b9c08fa-32e1-4943-8dc5-d83772cd52f9/8b016495-e7b5-48ef-b18e-939d72da93a8",
+      "status": 200,
+      "ok": true
+    },
+    {
+      "method": "GET",
+      "path": "/containers/1b9c08fa-32e1-4943-8dc5-d83772cd52f9/8b016495-e7b5-48ef-b18e-939d72da93a8",
+      "status": 200,
+      "ok": true
+    },
+    {
+      "method": "GET",
+      "path": "/containers/1b9c08fa-32e1-4943-8dc5-d83772cd52f9/8b016495-e7b5-48ef-b18e-939d72da93a8",
+      "status": 200,
+      "ok": true
+    },
+    {
+      "method": "GET",
+      "path": "/containers/1b9c08fa-32e1-4943-8dc5-d83772cd52f9/8b016495-e7b5-48ef-b18e-939d72da93a8",
+      "status": 200,
+      "ok": true
+    },
+    {
+      "method": "GET",
+      "path": "/containers/1b9c08fa-32e1-4943-8dc5-d83772cd52f9/8b016495-e7b5-48ef-b18e-939d72da93a8",
+      "status": 200,
+      "ok": true
+    },
+    {
+      "method": "GET",
+      "path": "/containers/1b9c08fa-32e1-4943-8dc5-d83772cd52f9/8b016495-e7b5-48ef-b18e-939d72da93a8",
+      "status": 200,
+      "ok": true
+    },
+    {
+      "method": "GET",
+      "path": "/containers/1b9c08fa-32e1-4943-8dc5-d83772cd52f9/8b016495-e7b5-48ef-b18e-939d72da93a8",
+      "status": 200,
+      "ok": true
+    },
+    {
+      "method": "GET",
+      "path": "/containers/1b9c08fa-32e1-4943-8dc5-d83772cd52f9/8b016495-e7b5-48ef-b18e-939d72da93a8",
+      "status": 200,
+      "ok": true
+    },
+    {
+      "method": "GET",
+      "path": "/containers/1b9c08fa-32e1-4943-8dc5-d83772cd52f9/8b016495-e7b5-48ef-b18e-939d72da93a8",
+      "status": 200,
+      "ok": true
+    },
+    {
+      "method": "GET",
+      "path": "/containers/1b9c08fa-32e1-4943-8dc5-d83772cd52f9/8b016495-e7b5-48ef-b18e-939d72da93a8",
+      "status": 200,
+      "ok": true
+    },
+    {
+      "method": "GET",
+      "path": "/containers/1b9c08fa-32e1-4943-8dc5-d83772cd52f9/8b016495-e7b5-48ef-b18e-939d72da93a8",
+      "status": 200,
+      "ok": true
+    },
+    {
+      "method": "GET",
+      "path": "/containers/1b9c08fa-32e1-4943-8dc5-d83772cd52f9/8b016495-e7b5-48ef-b18e-939d72da93a8",
+      "status": 200,
+      "ok": true
+    },
+    {
+      "method": "GET",
+      "path": "/containers/1b9c08fa-32e1-4943-8dc5-d83772cd52f9/8b016495-e7b5-48ef-b18e-939d72da93a8",
+      "status": 200,
+      "ok": true
+    },
+    {
+      "method": "GET",
+      "path": "/containers/1b9c08fa-32e1-4943-8dc5-d83772cd52f9/8b016495-e7b5-48ef-b18e-939d72da93a8",
+      "status": 200,
+      "ok": true
+    },
+    {
+      "method": "GET",
+      "path": "/containers/1b9c08fa-32e1-4943-8dc5-d83772cd52f9/8b016495-e7b5-48ef-b18e-939d72da93a8",
+      "status": 200,
+      "ok": true
+    },
+    {
+      "method": "GET",
+      "path": "/containers/1b9c08fa-32e1-4943-8dc5-d83772cd52f9/8b016495-e7b5-48ef-b18e-939d72da93a8",
+      "status": 200,
+      "ok": true
+    },
+    {
+      "method": "GET",
+      "path": "/containers/1b9c08fa-32e1-4943-8dc5-d83772cd52f9/8b016495-e7b5-48ef-b18e-939d72da93a8",
+      "status": 200,
+      "ok": true
+    },
+    {
+      "method": "GET",
+      "path": "/containers/1b9c08fa-32e1-4943-8dc5-d83772cd52f9/8b016495-e7b5-48ef-b18e-939d72da93a8",
+      "status": 200,
+      "ok": true
+    },
+    {
+      "method": "GET",
+      "path": "/containers/1b9c08fa-32e1-4943-8dc5-d83772cd52f9/8b016495-e7b5-48ef-b18e-939d72da93a8",
+      "status": 200,
+      "ok": true
+    },
+    {
+      "method": "GET",
+      "path": "/containers/1b9c08fa-32e1-4943-8dc5-d83772cd52f9/8b016495-e7b5-48ef-b18e-939d72da93a8",
+      "status": 200,
+      "ok": true
+    },
+    {
+      "method": "GET",
+      "path": "/containers/1b9c08fa-32e1-4943-8dc5-d83772cd52f9/8b016495-e7b5-48ef-b18e-939d72da93a8",
+      "status": 200,
+      "ok": true
+    },
+    {
+      "method": "GET",
+      "path": "/containers/1b9c08fa-32e1-4943-8dc5-d83772cd52f9/8b016495-e7b5-48ef-b18e-939d72da93a8",
+      "status": 200,
+      "ok": true
+    },
+    {
+      "method": "GET",
+      "path": "/containers?serverId=1b9c08fa-32e1-4943-8dc5-d83772cd52f9&ownOnly=true",
+      "status": 200,
+      "ok": true
+    },
+    {
+      "method": "DELETE",
+      "path": "/containers/1b9c08fa-32e1-4943-8dc5-d83772cd52f9/8b016495-e7b5-48ef-b18e-939d72da93a8",
+      "status": 200,
+      "ok": true
+    },
+    {
+      "method": "DELETE",
+      "path": "/users/067b4dd3-3d10-42b0-86f0-0dd289e16811",
+      "status": 204,
+      "ok": true
+    }
+  ],
+  "resources": {
+    "adminUserId": "ffc82de9-1e90-4a3c-9a9c-b4e259bb983f",
+    "serverId": "1b9c08fa-32e1-4943-8dc5-d83772cd52f9",
+    "imageId": "d66f3dac-e5bf-4ef6-837e-2454ee8951d8",
+    "userId": "067b4dd3-3d10-42b0-86f0-0dd289e16811",
+    "username": "ult-20260604152403-902297-user",
+    "password": "Pwd-ult-20260604152403-902297-123!",
+    "createOperationId": "4b12af89-f334-4ea2-a1ab-db9780f84ba8",
+    "containerId": "8b016495-e7b5-48ef-b18e-939d72da93a8",
+    "dockerId": "",
+    "startOperationId": "a477a9b5-8488-4d1e-af0b-14e201ca5816",
+    "restartOperationId": "9469e7df-25d7-40b6-8032-a366ee0f29fc"
+  },
+  "steps": [
+    {
+      "ts": "2026-06-04T15:24:03.309Z",
+      "name": "preflight root",
+      "apiBase": "http://localhost:3001/api"
+    },
+    {
+      "ts": "2026-06-04T15:24:03.446Z",
+      "name": "admin login for fixture",
+      "status": 200,
+      "userId": "ffc82de9-1e90-4a3c-9a9c-b4e259bb983f"
+    },
+    {
+      "ts": "2026-06-04T15:24:03.449Z",
+      "name": "admin me",
+      "username": "admin",
+      "caps": [
+        "manage_users",
+        "manage_groups",
+        "manage_servers",
+        "manage_images",
+        "manage_grants",
+        "manage_containers_any",
+        "view_audit",
+        "view_metrics_all"
+      ]
+    },
+    {
+      "ts": "2026-06-04T15:24:03.451Z",
+      "name": "server selected",
+      "serverId": "1b9c08fa-32e1-4943-8dc5-d83772cd52f9",
+      "serverName": "nyabase-test-cpu",
+      "status": "online",
+      "isGpu": false
+    },
+    {
+      "ts": "2026-06-04T15:24:03.452Z",
+      "name": "image selected",
+      "imageId": "d66f3dac-e5bf-4ef6-837e-2454ee8951d8",
+      "imageName": "murt-20260604t152317z-382edb-cpu-a",
+      "imageRef": "ubuntu:24.04"
+    },
+    {
+      "ts": "2026-06-04T15:24:03.559Z",
+      "name": "ordinary user created",
+      "userId": "067b4dd3-3d10-42b0-86f0-0dd289e16811",
+      "username": "ult-20260604152403-902297-user"
+    },
+    {
+      "ts": "2026-06-04T15:24:03.568Z",
+      "name": "server grant attempt",
+      "status": 201,
+      "body": {
+        "id": "b403ecee-0502-4237-9609-20de9f615647",
+        "scope": "user",
+        "scopeId": "067b4dd3-3d10-42b0-86f0-0dd289e16811",
+        "serverId": "1b9c08fa-32e1-4943-8dc5-d83772cd52f9",
+        "cpuMillis": 500,
+        "memBytes": 268435456,
+        "diskBytes": 536870912,
+        "gpuMode": "none",
+        "gpuIndices": [],
+        "createdAt": "2026-06-04T15:24:03.000Z",
+        "updatedAt": "2026-06-04T15:24:03.000Z"
+      }
+    },
+    {
+      "ts": "2026-06-04T15:24:03.571Z",
+      "name": "image grant attempt",
+      "status": 201,
+      "body": {
+        "id": "dde8086f-401b-484d-b7bd-8cc39fa4f6a7",
+        "scope": "user",
+        "scopeId": "067b4dd3-3d10-42b0-86f0-0dd289e16811",
+        "imageId": "d66f3dac-e5bf-4ef6-837e-2454ee8951d8",
+        "serverId": "1b9c08fa-32e1-4943-8dc5-d83772cd52f9",
+        "createdAt": "2026-06-04T15:24:03.000Z"
+      }
+    },
+    {
+      "ts": "2026-06-04T15:24:03.681Z",
+      "name": "ordinary user login",
+      "status": 200,
+      "userId": "067b4dd3-3d10-42b0-86f0-0dd289e16811",
+      "username": "ult-20260604152403-902297-user",
+      "caps": []
+    },
+    {
+      "ts": "2026-06-04T15:24:03.685Z",
+      "name": "ordinary user access",
+      "status": 200,
+      "body": {
+        "servers": [
+          {
+            "serverId": "1b9c08fa-32e1-4943-8dc5-d83772cd52f9",
+            "cpuMillis": 500,
+            "memBytes": 268435456,
+            "diskBytes": 536870912,
+            "gpuMode": "none",
+            "gpuIndices": [],
+            "allowedImageIds": [
+              "d66f3dac-e5bf-4ef6-837e-2454ee8951d8"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "ts": "2026-06-04T15:24:03.686Z",
+      "name": "ordinary user servers",
+      "status": 200,
+      "count": 1
+    },
+    {
+      "ts": "2026-06-04T15:24:03.687Z",
+      "name": "ordinary user images",
+      "status": 200,
+      "count": 1
+    },
+    {
+      "ts": "2026-06-04T15:24:03.696Z",
+      "name": "container create requested",
+      "status": 201,
+      "body": {
+        "ok": true,
+        "operationId": "4b12af89-f334-4ea2-a1ab-db9780f84ba8",
+        "status": "queued"
+      }
+    },
+    {
+      "ts": "2026-06-04T15:24:03.700Z",
+      "name": "container visible to owner",
+      "containerId": "8b016495-e7b5-48ef-b18e-939d72da93a8",
+      "dockerId": "",
+      "status": "unknown",
+      "ownerId": "067b4dd3-3d10-42b0-86f0-0dd289e16811"
+    },
+    {
+      "ts": "2026-06-04T15:24:03.702Z",
+      "name": "container detail",
+      "status": 200,
+      "containerStatus": "unknown"
+    },
+    {
+      "ts": "2026-06-04T15:24:03.707Z",
+      "name": "container stop requested",
+      "status": 409,
+      "body": {
+        "message": "Container has not been bound to Docker yet",
+        "error": "Conflict",
+        "statusCode": 409
+      }
+    },
+    {
+      "ts": "2026-06-04T15:24:11.712Z",
+      "name": "container stop observed",
+      "status": 200,
+      "containerStatus": "unknown",
+      "dockerId": "bdd47339cc5651abec9f850540c489042ff8076fbbfada1d30aa9156de66776e"
+    },
+    {
+      "ts": "2026-06-04T15:24:11.723Z",
+      "name": "container start requested",
+      "status": 201,
+      "body": {
+        "ok": true,
+        "operationId": "a477a9b5-8488-4d1e-af0b-14e201ca5816",
+        "status": "queued"
+      }
+    },
+    {
+      "ts": "2026-06-04T15:24:19.733Z",
+      "name": "container start observed",
+      "status": 200,
+      "containerStatus": "unknown",
+      "dockerId": "bdd47339cc5651abec9f850540c489042ff8076fbbfada1d30aa9156de66776e"
+    },
+    {
+      "ts": "2026-06-04T15:24:19.743Z",
+      "name": "container restart requested",
+      "status": 201,
+      "body": {
+        "ok": true,
+        "operationId": "9469e7df-25d7-40b6-8032-a366ee0f29fc",
+        "status": "queued"
+      }
+    },
+    {
+      "ts": "2026-06-04T15:24:27.752Z",
+      "name": "container restart observed",
+      "status": 200,
+      "containerStatus": "unknown",
+      "dockerId": "bdd47339cc5651abec9f850540c489042ff8076fbbfada1d30aa9156de66776e"
+    },
+    {
+      "ts": "2026-06-04T15:24:27.754Z",
+      "name": "container delete requested",
+      "status": 409,
+      "body": {
+        "message": "Another operation is already in progress for this resource",
+        "error": "Conflict",
+        "statusCode": 409
+      }
+    },
+    {
+      "ts": "2026-06-04T15:26:27.913Z",
+      "name": "container residual check",
+      "status": 200,
+      "residualCount": 1
+    }
+  ],
+  "failures": [
+    {
+      "ts": "2026-06-04T15:26:27.906Z",
+      "step": "wait delete gone",
+      "error": "Error: timeout after 120000ms; last=false\n    at waitFor (file:///root/nyabase/.codex/skills/harness/docs/live-test-user/20260604-232219/artifacts/user-live-test.mjs:32:9)\n    at async file:///root/nyabase/.codex/skills/harness/docs/live-test-user/20260604-232219/artifacts/user-live-test.mjs:115:3",
+      "rootCause": "product-or-infra"
+    }
+  ],
+  "cleanup": [
+    {
+      "type": "container",
+      "id": "8b016495-e7b5-48ef-b18e-939d72da93a8",
+      "status": 200
+    },
+    {
+      "type": "user",
+      "id": "067b4dd3-3d10-42b0-86f0-0dd289e16811",
+      "status": 204
+    }
+  ],
+  "finishedAt": "2026-06-04T15:26:27.929Z"
+}

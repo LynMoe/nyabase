@@ -1,0 +1,6 @@
+started=2026-06-04T18:47:19.065Z
+backend_login=200
+servers=2 online=2
+images_active=9
+containers=6 phases={"failed":6}
+common_source_artifacts=0

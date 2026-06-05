@@ -1,0 +1,15 @@
+screenshots
+- ../../.codex/skills/harness/docs/full-regression-live/20260604T183319Z/artifacts/ordinary-user-20260604T183319Z/ui/01-login-page.png
+- ../../.codex/skills/harness/docs/full-regression-live/20260604T183319Z/artifacts/ordinary-user-20260604T183319Z/ui/02-after-login-dashboard.png
+- ../../.codex/skills/harness/docs/full-regression-live/20260604T183319Z/artifacts/ordinary-user-20260604T183319Z/ui/03-profile.png
+- ../../.codex/skills/harness/docs/full-regression-live/20260604T183319Z/artifacts/ordinary-user-20260604T183319Z/ui/04-admin-users-denied.png
+- ../../.codex/skills/harness/docs/full-regression-live/20260604T183319Z/artifacts/ordinary-user-20260604T183319Z/ui/05-containers-page.png
+- ../../.codex/skills/harness/docs/full-regression-live/20260604T183319Z/artifacts/ordinary-user-20260604T183319Z/ui/06-create-dialog.png
+login-page-loaded {"ts":"2026-06-04T18:45:52.956Z","name":"login-page-loaded","url":"http://localhost:5173/login","title":"nyabase"}
+logged-in {"ts":"2026-06-04T18:45:53.197Z","name":"logged-in","url":"http://localhost:5173/","username":"murt-20260604t183830z-bcdeeb-alpha"}
+nav-after-login {"ts":"2026-06-04T18:45:53.200Z","name":"nav-after-login","hasAdminUsers":true,"hasGroups":false,"hasAudit":false,"text":"nyabase\n\nMURT alpha\n\n<username>\n\n用户中心\n监控大屏\n容器\n数据目录\n跟随系统\n退出登录"}
+profile-loaded {"ts":"2026-06-04T18:45:53.937Z","name":"profile-loaded","url":"http://localhost:5173/profile","hasUsername":true,"hasPasswordPanel":true,"hasSshPanel":true}
+admin-users-denied {"ts":"2026-06-04T18:45:54.559Z","name":"admin-users-denied","url":"http://localhost:5173/users","deniedText":"无权访问\n\n当前账号没有访问该页面的权限。","navUsersVisible":false}
+containers-page-loaded {"ts":"2026-06-04T18:45:55.215Z","name":"containers-page-loaded","url":"http://localhost:5173/containers","hasCpuServer":true,"hasGpuServer":false,"hasNewButton":true}
+create-dialog-open {"ts":"2026-06-04T18:45:56.315Z","name":"create-dialog-open","hasCpuGrant":true,"hasGpuGrant":false,"hasGrantedImage":true,"serverOptions":[{"text":"选择服务器","disabled":false,"value":""},{"text":"nyabase-test-cpu","disabled":false,"value":"d7c6b76e-359f-47bd-81af-ea9f7e2223f2"}]}
+ui-probe-status {"ts":"2026-06-04T18:45:56.372Z","name":"ui-probe-status","status":"pass"}

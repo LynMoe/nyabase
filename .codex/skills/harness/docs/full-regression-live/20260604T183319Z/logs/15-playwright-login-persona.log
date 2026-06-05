@@ -1,0 +1,70 @@
+
+Running 9 tests using 1 worker
+
+[1A[2K(node:3018342) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+
+
+[1A[2K(node:3018342) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+
+
+[1A[2K[1/9] [chromium] › e2e/login.spec.ts:4:3 › public access › login page matches the visual baseline
+[1A[2K[2/9] [chromium] › e2e/login.spec.ts:14:3 › public access › home redirects unauthenticated users to login
+[1A[2K[3/9] [chromium] › e2e/persona-routes.spec.ts:301:3 › admin persona route coverage › groups route shows management inventory and capabilities
+[1A[2K[4/9] [chromium] › e2e/persona-routes.spec.ts:320:3 › admin persona route coverage › users route still renders management UI for admins
+[1A[2K[5/9] [chromium] › e2e/persona-routes.spec.ts:329:3 › admin persona route coverage › audit route shows lifecycle operation records with operation ids
+[1A[2K[6/9] [chromium] › e2e/persona-routes.spec.ts:351:3 › normal user persona route coverage › dashboard shows own metrics without admin navigation
+[1A[2K[7/9] [chromium] › e2e/persona-routes.spec.ts:363:3 › normal user persona route coverage › data directories shows own directories without admin navigation
+[1A[2K  1) [chromium] › e2e/persona-routes.spec.ts:363:3 › normal user persona route coverage › data directories shows own directories without admin navigation 
+
+    Error: [2mexpect([22m[31mlocator[39m[2m).[22mtoHaveCount[2m([22m[32mexpected[39m[2m)[22m failed
+
+    Locator:  getByText('lin-notebook')
+    Expected: [32m2[39m
+    Received: [31m0[39m
+    Timeout:  5000ms
+
+    Call log:
+    [2m  - Expect "toHaveCount" with timeout 5000ms[22m
+    [2m  - waiting for getByText('lin-notebook')[22m
+    [2m    14 × locator resolved to 0 elements[22m
+    [2m       - unexpected value "0"[22m
+
+
+      372 |     await expect(page.getByText('Lin Data SSD')).toBeVisible();
+      373 |     await expect(page.getByText('lin-scratch')).toBeVisible();
+    > 374 |     await expect(page.getByText('lin-notebook')).toHaveCount(2);
+          |                                                  ^
+      375 |     await expect(requests).toContain('GET /api/containers?ownOnly=true');
+      376 |     await expect(page).toHaveScreenshot('normal-data-dirs-own-resources.png', { fullPage: true });
+      377 |   });
+        at /root/nyabase/packages/frontend/e2e/persona-routes.spec.ts:374:50
+
+    Error Context: e2e/.test-results/persona-routes-normal-user-cd550-es-without-admin-navigation-chromium/error-context.md
+
+    attachment #2: trace (application/zip) ─────────────────────────────────────────────────────────
+    e2e/.test-results/persona-routes-normal-user-cd550-es-without-admin-navigation-chromium/trace.zip
+    Usage:
+
+        pnpm exec playwright show-trace e2e/.test-results/persona-routes-normal-user-cd550-es-without-admin-navigation-chromium/trace.zip
+
+    ────────────────────────────────────────────────────────────────────────────────────────────────
+
+
+[1A[2K(node:3018703) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+
+
+[1A[2K(node:3018703) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+
+
+[1A[2K[8/9] [chromium] › e2e/persona-routes.spec.ts:379:3 › normal user persona route coverage › profile shows own account center without admin navigation
+[1A[2K[9/9] [chromium] › e2e/persona-routes.spec.ts:393:3 › normal user persona route coverage › direct users route shows denied state without loading user management for ordinary users
+[1A[2K  1 failed
+    [chromium] › e2e/persona-routes.spec.ts:363:3 › normal user persona route coverage › data directories shows own directories without admin navigation 
+  8 passed (16.2s)
+undefined
+/root/nyabase/packages/frontend:
+ ERR_PNPM_RECURSIVE_EXEC_FIRST_FAIL  Command failed with exit code 1: playwright test login.spec.ts persona-routes.spec.ts --reporter=line

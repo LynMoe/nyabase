@@ -1,0 +1,101 @@
+ok POST /auth/login 200 admin login
+ok GET /auth/me 200 admin /auth/me
+ok GET /users 200 admin list users
+ok GET /groups 200 admin list groups
+ok GET /servers 200 admin list servers
+ok GET /images 200 admin list images
+ok GET /v2/containers 200 admin global containers
+ok GET /audit?limit=3 200 admin audit accessible
+ok GET /servers/all-disks 200 admin all-disks accessible
+ok GET /system/remote-fs-mounts 200 admin remote-fs accessible
+ok GET /admin/data-dirs/issues 200 admin data-dir issues accessible
+ok POST /users 201 admin create user
+ok POST /groups 201 admin create group
+ok POST /groups/d2fb36f3-c9f3-44c9-ad60-024ab859f3de/members 201 admin add group member
+ok GET /groups/d2fb36f3-c9f3-44c9-ad60-024ab859f3de/members 200 admin list group members
+ok POST /images 201 admin create image
+ok POST /groups/d2fb36f3-c9f3-44c9-ad60-024ab859f3de/server-grants/d7c6b76e-359f-47bd-81af-ea9f7e2223f2 201 admin group server grant upsert
+ok GET /groups/d2fb36f3-c9f3-44c9-ad60-024ab859f3de/server-grants 200 admin group server grants list
+ok POST /groups/d2fb36f3-c9f3-44c9-ad60-024ab859f3de/image-grants 201 admin group image grant add
+ok GET /groups/d2fb36f3-c9f3-44c9-ad60-024ab859f3de/image-grants 200 admin group image grants list
+ok GET /users/c5a28a78-183b-489d-9b6e-654223bf0f28/effective-access 200 admin user effective access after group grants
+ok GET /users/c5a28a78-183b-489d-9b6e-654223bf0f28/server-grants 200 admin list direct user server grants initially empty
+ok POST /users/c5a28a78-183b-489d-9b6e-654223bf0f28/server-grants/d7c6b76e-359f-47bd-81af-ea9f7e2223f2 201 admin direct user server grant override
+ok GET /users/c5a28a78-183b-489d-9b6e-654223bf0f28/effective-access 200 admin user effective access after direct override
+ok DELETE /users/c5a28a78-183b-489d-9b6e-654223bf0f28/server-grants/d7c6b76e-359f-47bd-81af-ea9f7e2223f2 204 admin delete direct user server grant override
+ok GET /users/c5a28a78-183b-489d-9b6e-654223bf0f28/effective-access 200 admin user effective access after direct grant deletion
+ok POST /auth/login 200 created normal user login
+ok GET /auth/me 200 created user /auth/me
+ok GET /me/access 200 created user /me/access
+ok GET /servers 200 created user list accessible servers
+ok GET /images?activeOnly=true 200 created user list accessible images
+ok GET /servers/d7c6b76e-359f-47bd-81af-ea9f7e2223f2/quota 200 created user server quota
+ok GET /users 403 created user denied /users
+ok GET /groups 403 created user denied /groups
+ok GET /audit?limit=1 403 created user denied /audit
+ok GET /admin/data-dirs/issues 403 created user denied admin data issues
+ok POST /v2/containers 403 created user over-quota container create rejected
+ok POST /v2/containers 201 admin create small container
+ok GET /operations/08126c6f-ac31-42e2-9f05-364e4addf836 200 admin container create operation:get-operation
+ok GET /operations/08126c6f-ac31-42e2-9f05-364e4addf836 200 admin container create operation:get-operation
+ok GET /v2/containers/75fb2c79-cd65-4f0b-9c40-7797252a126e 200 wait created container running/controllable:get-container
+ok POST /v2/containers/75fb2c79-cd65-4f0b-9c40-7797252a126e/actions/stop 201 admin stop container
+ok GET /operations/750f3408-e54b-40ae-85a7-0ce2f4368874 200 admin stop container operation:get-operation
+ok GET /operations/750f3408-e54b-40ae-85a7-0ce2f4368874 200 admin stop container operation:get-operation
+ok GET /operations/750f3408-e54b-40ae-85a7-0ce2f4368874 200 admin stop container operation:get-operation
+ok GET /operations/750f3408-e54b-40ae-85a7-0ce2f4368874 200 admin stop container operation:get-operation
+ok GET /operations/750f3408-e54b-40ae-85a7-0ce2f4368874 200 admin stop container operation:get-operation
+ok GET /operations/750f3408-e54b-40ae-85a7-0ce2f4368874 200 admin stop container operation:get-operation
+ok GET /operations/750f3408-e54b-40ae-85a7-0ce2f4368874 200 admin stop container operation:get-operation
+ok GET /operations/750f3408-e54b-40ae-85a7-0ce2f4368874 200 admin stop container operation:get-operation
+ok GET /v2/containers/75fb2c79-cd65-4f0b-9c40-7797252a126e 200 wait stopped container start-control:get-container
+ok GET /v2/containers/75fb2c79-cd65-4f0b-9c40-7797252a126e 200 wait stopped container start-control:get-container
+ok GET /v2/containers/75fb2c79-cd65-4f0b-9c40-7797252a126e 200 wait stopped container start-control:get-container
+ok GET /v2/containers/75fb2c79-cd65-4f0b-9c40-7797252a126e 200 wait stopped container start-control:get-container
+ok GET /v2/containers/75fb2c79-cd65-4f0b-9c40-7797252a126e 200 wait stopped container start-control:get-container
+ok GET /v2/containers/75fb2c79-cd65-4f0b-9c40-7797252a126e 200 wait stopped container start-control:get-container
+ok GET /v2/containers/75fb2c79-cd65-4f0b-9c40-7797252a126e 200 wait stopped container start-control:get-container
+ok GET /v2/containers/75fb2c79-cd65-4f0b-9c40-7797252a126e 200 wait stopped container start-control:get-container
+ok GET /v2/containers/75fb2c79-cd65-4f0b-9c40-7797252a126e 200 wait stopped container start-control:get-container
+ok GET /v2/containers/75fb2c79-cd65-4f0b-9c40-7797252a126e 200 wait stopped container start-control:get-container
+ok GET /v2/containers/75fb2c79-cd65-4f0b-9c40-7797252a126e 200 wait stopped container start-control:get-container
+ok GET /v2/containers/75fb2c79-cd65-4f0b-9c40-7797252a126e 200 wait stopped container start-control:get-container
+ok GET /v2/containers/75fb2c79-cd65-4f0b-9c40-7797252a126e 200 wait stopped container start-control:get-container
+ok POST /v2/containers/75fb2c79-cd65-4f0b-9c40-7797252a126e/actions/start 201 admin start container
+ok GET /operations/d3958c30-7d30-4b72-af3b-04f0434c5401 200 admin start container operation:get-operation
+ok GET /operations/d3958c30-7d30-4b72-af3b-04f0434c5401 200 admin start container operation:get-operation
+ok GET /v2/containers/75fb2c79-cd65-4f0b-9c40-7797252a126e 200 wait restarted container running:get-container
+ok GET /v2/containers/75fb2c79-cd65-4f0b-9c40-7797252a126e 200 wait restarted container running:get-container
+ok GET /v2/containers/75fb2c79-cd65-4f0b-9c40-7797252a126e 200 wait restarted container running:get-container
+ok GET /v2/containers/75fb2c79-cd65-4f0b-9c40-7797252a126e 200 wait restarted container running:get-container
+ok GET /v2/containers/75fb2c79-cd65-4f0b-9c40-7797252a126e 200 wait restarted container running:get-container
+ok GET /v2/containers/75fb2c79-cd65-4f0b-9c40-7797252a126e 200 wait restarted container running:get-container
+ok GET /v2/containers/75fb2c79-cd65-4f0b-9c40-7797252a126e 200 wait restarted container running:get-container
+ok GET /v2/containers/75fb2c79-cd65-4f0b-9c40-7797252a126e 200 wait restarted container running:get-container
+ok GET /v2/containers/75fb2c79-cd65-4f0b-9c40-7797252a126e 200 wait restarted container running:get-container
+ok GET /v2/containers/75fb2c79-cd65-4f0b-9c40-7797252a126e 200 wait restarted container running:get-container
+ok GET /v2/containers/75fb2c79-cd65-4f0b-9c40-7797252a126e 200 wait restarted container running:get-container
+ok GET /v2/containers/75fb2c79-cd65-4f0b-9c40-7797252a126e 200 wait restarted container running:get-container
+ok GET /v2/containers/75fb2c79-cd65-4f0b-9c40-7797252a126e 200 wait restarted container running:get-container
+ok GET /v2/containers/75fb2c79-cd65-4f0b-9c40-7797252a126e 200 wait restarted container running:get-container
+ok GET /v2/containers/75fb2c79-cd65-4f0b-9c40-7797252a126e 200 wait restarted container running:get-container
+ok GET /v2/containers/75fb2c79-cd65-4f0b-9c40-7797252a126e 200 wait restarted container running:get-container
+ok GET /v2/containers/75fb2c79-cd65-4f0b-9c40-7797252a126e 200 wait restarted container running:get-container
+ok GET /v2/containers/75fb2c79-cd65-4f0b-9c40-7797252a126e 200 wait restarted container running:get-container
+ok GET /v2/containers/75fb2c79-cd65-4f0b-9c40-7797252a126e 200 wait restarted container running:get-container
+ok GET /v2/containers/75fb2c79-cd65-4f0b-9c40-7797252a126e 200 wait restarted container running:get-container
+ok GET /v2/containers/75fb2c79-cd65-4f0b-9c40-7797252a126e 200 wait restarted container running:get-container
+ok GET /v2/containers/75fb2c79-cd65-4f0b-9c40-7797252a126e 200 admin get container before delete
+ok POST /v2/containers/75fb2c79-cd65-4f0b-9c40-7797252a126e/actions/delete 201 admin delete container
+ok GET /operations/534c83c8-7d5f-49fd-a86e-a62154ed4c42 200 admin delete container operation:get-operation
+ok GET /operations/534c83c8-7d5f-49fd-a86e-a62154ed4c42 200 admin delete container operation:get-operation
+ok GET /v2/containers/75fb2c79-cd65-4f0b-9c40-7797252a126e 404 wait deleted container hidden:get-container
+ok GET /v2/containers/75fb2c79-cd65-4f0b-9c40-7797252a126e 404 cleanup get container
+ok POST /users/c5a28a78-183b-489d-9b6e-654223bf0f28/server-grants/d7c6b76e-359f-47bd-81af-ea9f7e2223f2 201 cleanup zero quota direct grant
+ok DELETE /groups/d2fb36f3-c9f3-44c9-ad60-024ab859f3de/image-grants/fc17be8f-4423-4289-803b-9ec31bae29aa/d7c6b76e-359f-47bd-81af-ea9f7e2223f2 204 cleanup delete group image grant
+ok DELETE /groups/d2fb36f3-c9f3-44c9-ad60-024ab859f3de/server-grants/d7c6b76e-359f-47bd-81af-ea9f7e2223f2 204 cleanup delete group server grant
+ok DELETE /users/c5a28a78-183b-489d-9b6e-654223bf0f28/server-grants/d7c6b76e-359f-47bd-81af-ea9f7e2223f2 204 cleanup delete direct user server grant
+ok DELETE /groups/d2fb36f3-c9f3-44c9-ad60-024ab859f3de/members/c5a28a78-183b-489d-9b6e-654223bf0f28 204 cleanup remove group member
+ok DELETE /groups/d2fb36f3-c9f3-44c9-ad60-024ab859f3de 204 cleanup delete group
+ok DELETE /images/fc17be8f-4423-4289-803b-9ec31bae29aa 204 cleanup delete image
+ok DELETE /users/c5a28a78-183b-489d-9b6e-654223bf0f28 204 cleanup delete user

@@ -1,0 +1,37 @@
+
+ RUN  v4.1.5 /root/nyabase
+
+ ✓ test/specs/live/multi-user-redteam-epsilon.spec.ts > V2 epsilon no-access live flow > denies unauthorised container and admin surfaces 326ms
+ ✓ test/specs/live/multi-user-redteam-gamma.spec.ts > V2 gamma GPU persona live flow > creates GPU container when GPU fixture exists and verifies metrics path is non-leaking 9237ms
+ × test/specs/live/multi-user-redteam-delta.spec.ts > V2 delta persona live flow > creates CPU and optional GPU containers, then deletes via operation actions 11231ms
+   → operation 8e3b2790-75bf-4bc0-a982-756b34fa073c failed: (HTTP code 403) unexpected - failed to set up container networking: Address already in use : expected 'failed' to be 'succeeded' // Object.is equality
+ ✓ test/specs/live/multi-user-redteam-gamma-delta-attack.spec.ts > V2 gamma/delta isolation live flow > prevents delta from mutating gamma container by containerId-only route 11381ms
+ ✓ test/specs/live/multi-user-redteam-beta.spec.ts > V2 beta persona live flow > creates beta container and serializes mutations through operation polling 81650ms
+ ✓ test/specs/live/multi-user-redteam-alpha.spec.ts > V2 alpha persona live flow > creates active CPU container, waits actions, exercises stats/power/delete operations, and denies GPU 94562ms
+
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 1 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  test/specs/live/multi-user-redteam-delta.spec.ts > V2 delta persona live flow > creates CPU and optional GPU containers, then deletes via operation actions
+AssertionError: operation 8e3b2790-75bf-4bc0-a982-756b34fa073c failed: (HTTP code 403) unexpected - failed to set up container networking: Address already in use : expected 'failed' to be 'succeeded' // Object.is equality
+
+Expected: "succeeded"
+Received: "failed"
+
+ ❯ waitOperationSucceeded test/specs/live/v2-live-helpers.ts:84:87
+     82|     last = res.body;
+     83|     if (['succeeded', 'failed', 'cancelled'].includes(last.status)) {
+     84|       expect(last.status, `operation ${operationId} failed: ${last.las…
+       |                                                                                       ^
+     85|       return last;
+     86|     }
+ ❯ createContainerActive test/specs/live/v2-live-helpers.ts:126:14
+ ❯ test/specs/live/multi-user-redteam-delta.spec.ts:13:19
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/1]⎯
+
+
+ Test Files  1 failed | 5 passed (6)
+      Tests  1 failed | 5 passed (6)
+   Start at  09:14:21
+   Duration  94.71s (transform 236ms, setup 0ms, import 299ms, tests 208.39s, environment 0ms)
+

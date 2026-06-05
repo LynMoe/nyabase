@@ -1,0 +1,200 @@
+{
+  "frontend": "http://localhost:5173",
+  "statePath": "/root/nyabase/test/runtime/murt/20260604t183830z-bcdeeb/state.json",
+  "username": "murt-20260604t183830z-bcdeeb-alpha",
+  "startedAt": "2026-06-04T18:48:29.273Z",
+  "routes": [
+    {
+      "route": "/users",
+      "finalUrl": "http://localhost:5173/users",
+      "denied": true,
+      "redirected": false,
+      "hasAdminAction": true,
+      "mainText": "无权访问\n\n当前账号没有访问该页面的权限。",
+      "adminNavVisible": {
+        "servers": false,
+        "images": false,
+        "manageContainers": false,
+        "users": false,
+        "groups": false,
+        "audit": false
+      },
+      "screenshot": "../../.codex/skills/harness/docs/full-regression-live/20260604T183319Z/artifacts/ordinary-user-20260604T183319Z/ui-admin-routes/admin-route-users.png"
+    },
+    {
+      "route": "/servers",
+      "finalUrl": "http://localhost:5173/",
+      "denied": false,
+      "redirected": true,
+      "hasAdminAction": false,
+      "mainText": "nyabase-test-cpu\nonline\n1 小时\n6 小时\n24 小时\n用户维度\n容器维度\n\nCPU 用量（核心数）\n\n暂无数据\n\n内存用量\n\n暂无数据\n\n磁盘 IO（读 + 写）\n\n暂无数据\n\n网络 IO（收 + 发）\n\n暂无数据\n\n磁盘占用空间\n\n暂无数据",
+      "adminNavVisible": {
+        "servers": false,
+        "images": false,
+        "manageContainers": false,
+        "users": false,
+        "groups": false,
+        "audit": false
+      },
+      "screenshot": "../../.codex/skills/harness/docs/full-regression-live/20260604T183319Z/artifacts/ordinary-user-20260604T183319Z/ui-admin-routes/admin-route-servers.png"
+    },
+    {
+      "route": "/images",
+      "finalUrl": "http://localhost:5173/images",
+      "denied": false,
+      "redirected": false,
+      "hasAdminAction": true,
+      "mainText": "容器镜像\n\n1 个预置镜像\n\n添加镜像\nmurt-20260604t183830z-bcdeeb-cpu-a\n启用\n\nubuntu:24.04\n\n展开详情\n编辑\n删除\n默认用户: root\nUID: 0\nShell: /bin/bash\nCMD: sleep 3600\nmurt-20260604t183830z-bcdeeb disposable red-team setup image cpu-a",
+      "adminNavVisible": {
+        "servers": false,
+        "images": false,
+        "manageContainers": false,
+        "users": false,
+        "groups": false,
+        "audit": false
+      },
+      "screenshot": "../../.codex/skills/harness/docs/full-regression-live/20260604T183319Z/artifacts/ordinary-user-20260604T183319Z/ui-admin-routes/admin-route-images.png"
+    },
+    {
+      "route": "/groups",
+      "finalUrl": "http://localhost:5173/groups",
+      "denied": false,
+      "redirected": false,
+      "hasAdminAction": true,
+      "mainText": "用户组管理\n\n通过用户组统一分配服务器/镜像权限\n\n新建用户组",
+      "adminNavVisible": {
+        "servers": false,
+        "images": false,
+        "manageContainers": false,
+        "users": false,
+        "groups": false,
+        "audit": false
+      },
+      "screenshot": "../../.codex/skills/harness/docs/full-regression-live/20260604T183319Z/artifacts/ordinary-user-20260604T183319Z/ui-admin-routes/admin-route-groups.png"
+    },
+    {
+      "route": "/audit",
+      "finalUrl": "http://localhost:5173/audit",
+      "denied": false,
+      "redirected": false,
+      "hasAdminAction": true,
+      "mainText": "审计日志\n\n0 条记录\n\n暂无审计记录",
+      "adminNavVisible": {
+        "servers": false,
+        "images": false,
+        "manageContainers": false,
+        "users": false,
+        "groups": false,
+        "audit": false
+      },
+      "screenshot": "../../.codex/skills/harness/docs/full-regression-live/20260604T183319Z/artifacts/ordinary-user-20260604T183319Z/ui-admin-routes/admin-route-audit.png"
+    },
+    {
+      "route": "/manage/containers",
+      "finalUrl": "http://localhost:5173/manage/containers",
+      "denied": false,
+      "redirected": false,
+      "hasAdminAction": true,
+      "mainText": "容器管理\n\n全局共 0 个容器，0 位用户\n\n暂无任何容器",
+      "adminNavVisible": {
+        "servers": false,
+        "images": false,
+        "manageContainers": false,
+        "users": false,
+        "groups": false,
+        "audit": false
+      },
+      "screenshot": "../../.codex/skills/harness/docs/full-regression-live/20260604T183319Z/artifacts/ordinary-user-20260604T183319Z/ui-admin-routes/admin-route-manage_containers.png"
+    },
+    {
+      "route": "/manage/remote-fs",
+      "finalUrl": "http://localhost:5173/manage/remote-fs",
+      "denied": false,
+      "redirected": false,
+      "hasAdminAction": true,
+      "mainText": "远程文件系统\n\n0 个挂载\n\n新建挂载\n全部(0)\nNFS(0)\nCephFS(0)\n暂无挂载",
+      "adminNavVisible": {
+        "servers": false,
+        "images": false,
+        "manageContainers": false,
+        "users": false,
+        "groups": false,
+        "audit": false
+      },
+      "screenshot": "../../.codex/skills/harness/docs/full-regression-live/20260604T183319Z/artifacts/ordinary-user-20260604T183319Z/ui-admin-routes/admin-route-manage_remote-fs.png"
+    }
+  ],
+  "apiResponses": [
+    {
+      "ts": "2026-06-04T18:48:30.151Z",
+      "url": "http://localhost:5173/api/auth/login",
+      "status": 200
+    },
+    {
+      "ts": "2026-06-04T18:48:31.711Z",
+      "url": "http://localhost:5173/api/servers",
+      "status": 200
+    },
+    {
+      "ts": "2026-06-04T18:48:31.734Z",
+      "url": "http://localhost:5173/api/metrics/servers/d7c6b76e-359f-47bd-81af-ea9f7e2223f2/users?range=1h",
+      "status": 200
+    },
+    {
+      "ts": "2026-06-04T18:48:33.293Z",
+      "url": "http://localhost:5173/api/images",
+      "status": 200
+    },
+    {
+      "ts": "2026-06-04T18:48:34.765Z",
+      "url": "http://localhost:5173/api/groups",
+      "status": 403
+    },
+    {
+      "ts": "2026-06-04T18:48:34.765Z",
+      "url": "http://localhost:5173/api/servers",
+      "status": 200
+    },
+    {
+      "ts": "2026-06-04T18:48:34.769Z",
+      "url": "http://localhost:5173/api/images",
+      "status": 200
+    },
+    {
+      "ts": "2026-06-04T18:48:35.770Z",
+      "url": "http://localhost:5173/api/groups",
+      "status": 403
+    },
+    {
+      "ts": "2026-06-04T18:48:36.224Z",
+      "url": "http://localhost:5173/api/audit?limit=200",
+      "status": 403
+    },
+    {
+      "ts": "2026-06-04T18:48:37.230Z",
+      "url": "http://localhost:5173/api/audit?limit=200",
+      "status": 403
+    },
+    {
+      "ts": "2026-06-04T18:48:37.679Z",
+      "url": "http://localhost:5173/api/v2/containers",
+      "status": 200
+    },
+    {
+      "ts": "2026-06-04T18:48:39.167Z",
+      "url": "http://localhost:5173/api/servers",
+      "status": 200
+    },
+    {
+      "ts": "2026-06-04T18:48:39.167Z",
+      "url": "http://localhost:5173/api/system/remote-fs-mounts",
+      "status": 403
+    },
+    {
+      "ts": "2026-06-04T18:48:40.174Z",
+      "url": "http://localhost:5173/api/system/remote-fs-mounts",
+      "status": 403
+    }
+  ],
+  "finishedAt": "2026-06-04T18:48:40.562Z"
+}

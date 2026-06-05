@@ -1,0 +1,482 @@
+{
+  "runPrefix": "quota-ssh-20260604094305",
+  "apiBase": "http://localhost:5173/api",
+  "handoffUsers": {
+    "alpha": {
+      "username": "admintest-20260604t093408-alpha",
+      "userId": "fdb2a9c6-a3f5-407a-af36-b6072bd8f903"
+    },
+    "beta": {
+      "username": "admintest-20260604t093408-beta",
+      "userId": "be32921a-b857-4880-9486-fd47cc04e6cd"
+    }
+  },
+  "resources": {
+    "alphaUserId": "fdb2a9c6-a3f5-407a-af36-b6072bd8f903",
+    "betaUserId": "be32921a-b857-4880-9486-fd47cc04e6cd",
+    "serverId": "5336594b-4f9a-4cef-b389-3ef9aa1eca78",
+    "imageId": "59f6b47d-5b38-41b6-aff9-12193a4eeae5",
+    "betaInitialContainerIds": [],
+    "observedAdminSshContainers": [
+      {
+        "serverId": "db1112fe-1c55-4314-9511-6d8510c523c2",
+        "containerId": "98646d5d-35cd-4409-a06c-402a96551a37",
+        "name": "testgpu",
+        "status": "running",
+        "sshStatus": "running"
+      },
+      {
+        "serverId": "05cea385-d6ca-490a-a126-e00d0ae23b70",
+        "containerId": "c4c4682c-1cd1-4580-b0b5-930c0dc54f5c",
+        "name": "test",
+        "status": "running",
+        "sshStatus": "running"
+      }
+    ]
+  },
+  "cleanup": {
+    "betaSshKeyDeleted": true,
+    "betaSshKeyId": null,
+    "betaBogusSshKeyDeleted": true,
+    "betaBogusSshKeyId": null
+  },
+  "entries": [
+    {
+      "name": "admin login",
+      "actor": "admin",
+      "method": "POST",
+      "path": "/auth/login",
+      "status": 200,
+      "expected": "200",
+      "classification": "pass",
+      "bodySummary": {
+        "userId": "75f36ff6-307d-4bec-a0da-dc476ff7b462",
+        "username": "admin",
+        "capabilities": [
+          "manage_users",
+          "manage_groups",
+          "manage_servers",
+          "manage_images",
+          "manage_grants",
+          "manage_containers_any",
+          "view_audit",
+          "view_metrics_all"
+        ]
+      }
+    },
+    {
+      "name": "alpha login",
+      "actor": "alpha",
+      "method": "POST",
+      "path": "/auth/login",
+      "status": 200,
+      "expected": "200",
+      "classification": "pass",
+      "bodySummary": {
+        "userId": "fdb2a9c6-a3f5-407a-af36-b6072bd8f903",
+        "username": "admintest-20260604t093408-alpha",
+        "capabilities": [
+          "view_audit",
+          "view_metrics_all"
+        ]
+      }
+    },
+    {
+      "name": "beta login",
+      "actor": "beta",
+      "method": "POST",
+      "path": "/auth/login",
+      "status": 200,
+      "expected": "200",
+      "classification": "pass",
+      "bodySummary": {
+        "userId": "be32921a-b857-4880-9486-fd47cc04e6cd",
+        "username": "admintest-20260604t093408-beta",
+        "capabilities": []
+      }
+    },
+    {
+      "name": "alpha /auth/me includes handoff capabilities",
+      "actor": "alpha",
+      "method": "GET",
+      "path": "/auth/me",
+      "status": 200,
+      "expected": "200 with view caps",
+      "classification": "pass"
+    },
+    {
+      "name": "beta /auth/me has no management capabilities",
+      "actor": "beta",
+      "method": "GET",
+      "path": "/auth/me",
+      "status": 200,
+      "expected": "200 without management caps",
+      "classification": "pass"
+    },
+    {
+      "name": "alpha quota/image grant visibility",
+      "actor": "alpha",
+      "method": "GET",
+      "path": "/me/access",
+      "status": 200,
+      "expected": "200 group grant visible",
+      "classification": "pass",
+      "bodySummary": {
+        "servers": [
+          {
+            "serverId": "5336594b-4f9a-4cef-b389-3ef9aa1eca78",
+            "cpuMillis": 250,
+            "memBytes": 134217728,
+            "diskBytes": 67108864,
+            "gpuMode": "none",
+            "gpuIndices": [],
+            "allowedImageIds": [
+              "59f6b47d-5b38-41b6-aff9-12193a4eeae5"
+            ]
+          },
+          {
+            "serverId": "05cea385-d6ca-490a-a126-e00d0ae23b70",
+            "cpuMillis": 500,
+            "memBytes": 268435456,
+            "diskBytes": 536870912,
+            "gpuMode": "none",
+            "gpuIndices": [],
+            "allowedImageIds": [
+              "e6c7a01f-4431-4ac4-885e-bcf6ab755c60"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "beta quota/image grant visibility",
+      "actor": "beta",
+      "method": "GET",
+      "path": "/me/access",
+      "status": 200,
+      "expected": "200 direct grant visible",
+      "classification": "pass",
+      "bodySummary": {
+        "servers": [
+          {
+            "serverId": "05cea385-d6ca-490a-a126-e00d0ae23b70",
+            "cpuMillis": 500,
+            "memBytes": 268435456,
+            "diskBytes": 536870912,
+            "gpuMode": "none",
+            "gpuIndices": [],
+            "allowedImageIds": [
+              "e6c7a01f-4431-4ac4-885e-bcf6ab755c60"
+            ]
+          },
+          {
+            "serverId": "5336594b-4f9a-4cef-b389-3ef9aa1eca78",
+            "cpuMillis": 500,
+            "memBytes": 268435456,
+            "diskBytes": 134217728,
+            "gpuMode": "none",
+            "gpuIndices": [],
+            "allowedImageIds": [
+              "59f6b47d-5b38-41b6-aff9-12193a4eeae5"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "beta initial container list",
+      "actor": "beta",
+      "method": "GET",
+      "path": "/containers",
+      "status": 200,
+      "expected": "200, used as no-create baseline",
+      "classification": "pass",
+      "bodySummary": {
+        "count": 0
+      }
+    },
+    {
+      "name": "beta SSH key list before add",
+      "actor": "beta",
+      "method": "GET",
+      "path": "/users/be32921a-b857-4880-9486-fd47cc04e6cd/ssh-keys",
+      "status": 200,
+      "expected": "200",
+      "classification": "pass"
+    },
+    {
+      "name": "beta SSH key add self",
+      "actor": "beta",
+      "method": "POST",
+      "path": "/users/be32921a-b857-4880-9486-fd47cc04e6cd/ssh-keys",
+      "status": 201,
+      "expected": "201",
+      "classification": "pass",
+      "bodySummary": {
+        "id": "6825f74a-2a56-4cea-b038-a2d7f1350632",
+        "name": "quota-ssh-20260604094305-beta-key"
+      }
+    },
+    {
+      "name": "beta SSH key list after add",
+      "actor": "beta",
+      "method": "GET",
+      "path": "/users/be32921a-b857-4880-9486-fd47cc04e6cd/ssh-keys",
+      "status": 200,
+      "expected": "200 includes created key",
+      "classification": "pass",
+      "bodySummary": {
+        "count": 1,
+        "containsCreatedKey": true
+      }
+    },
+    {
+      "name": "beta cannot list alpha SSH keys",
+      "actor": "beta",
+      "method": "GET",
+      "path": "/users/fdb2a9c6-a3f5-407a-af36-b6072bd8f903/ssh-keys",
+      "status": 403,
+      "expected": "403",
+      "classification": "pass"
+    },
+    {
+      "name": "beta cannot add alpha SSH key",
+      "actor": "beta",
+      "method": "POST",
+      "path": "/users/fdb2a9c6-a3f5-407a-af36-b6072bd8f903/ssh-keys",
+      "status": 403,
+      "expected": "403",
+      "classification": "pass"
+    },
+    {
+      "name": "beta cannot delete alpha SSH key",
+      "actor": "beta",
+      "method": "DELETE",
+      "path": "/users/fdb2a9c6-a3f5-407a-af36-b6072bd8f903/ssh-keys/00000000-0000-0000-0000-000000000001",
+      "status": 403,
+      "expected": "403",
+      "classification": "pass"
+    },
+    {
+      "name": "beta SSH key delete self",
+      "actor": "beta",
+      "method": "DELETE",
+      "path": "/users/be32921a-b857-4880-9486-fd47cc04e6cd/ssh-keys/6825f74a-2a56-4cea-b038-a2d7f1350632",
+      "status": 204,
+      "expected": "204",
+      "classification": "pass"
+    },
+    {
+      "name": "beta SSH key list after delete",
+      "actor": "beta",
+      "method": "GET",
+      "path": "/users/be32921a-b857-4880-9486-fd47cc04e6cd/ssh-keys",
+      "status": 200,
+      "expected": "200 created key absent",
+      "classification": "pass",
+      "bodySummary": {
+        "count": 0
+      }
+    },
+    {
+      "name": "beta invalid SSH key rejected",
+      "actor": "beta",
+      "method": "POST",
+      "path": "/users/be32921a-b857-4880-9486-fd47cc04e6cd/ssh-keys",
+      "status": 201,
+      "expected": "400 invalid public key should be rejected",
+      "classification": "fail-product",
+      "bodySummary": {
+        "acceptedKeyId": "800edd1a-9ace-4bb3-a4d6-3f40bc38b323",
+        "acceptedKeyText": "not-an-ssh-public-key",
+        "message": {}
+      }
+    },
+    {
+      "name": "beta invalid SSH key persisted in list",
+      "actor": "beta",
+      "method": "GET",
+      "path": "/users/be32921a-b857-4880-9486-fd47cc04e6cd/ssh-keys",
+      "status": 200,
+      "expected": "should not be present after rejected add",
+      "classification": "pass",
+      "bodySummary": {
+        "containsBogus": true
+      }
+    },
+    {
+      "name": "beta user quota endpoint",
+      "actor": "beta",
+      "method": "GET",
+      "path": "/servers/5336594b-4f9a-4cef-b389-3ef9aa1eca78/quota",
+      "status": 200,
+      "expected": "200 with runtime usedBytes and grant limitBytes",
+      "classification": "pass",
+      "bodySummary": {
+        "usedBytes": 0,
+        "limitBytes": 134217728
+      }
+    },
+    {
+      "name": "alpha user quota endpoint",
+      "actor": "alpha",
+      "method": "GET",
+      "path": "/servers/5336594b-4f9a-4cef-b389-3ef9aa1eca78/quota",
+      "status": 200,
+      "expected": "200 group grant disk limit visible",
+      "classification": "pass",
+      "bodySummary": {
+        "usedBytes": 0,
+        "limitBytes": 67108864
+      }
+    },
+    {
+      "name": "beta server disk runtime observation endpoint",
+      "actor": "beta",
+      "method": "GET",
+      "path": "/servers/5336594b-4f9a-4cef-b389-3ef9aa1eca78/disks",
+      "status": 200,
+      "expected": "200; may be empty when agent/server has no disk observation",
+      "classification": "pass",
+      "bodySummary": {
+        "count": 0,
+        "pquotaValues": []
+      }
+    },
+    {
+      "name": "beta cannot read quota for ungranted/fake server",
+      "actor": "beta",
+      "method": "GET",
+      "path": "/servers/00000000-0000-0000-0000-000000000099/quota",
+      "status": 404,
+      "expected": "404",
+      "classification": "pass"
+    },
+    {
+      "name": "beta CPU quota overrun rejected",
+      "actor": "beta",
+      "method": "POST",
+      "path": "/containers",
+      "status": 400,
+      "expected": "400 CPU quota exceeded",
+      "classification": "pass",
+      "bodySummary": {
+        "statusCode": 400,
+        "message": "CPU quota exceeded",
+        "error": "Bad Request"
+      }
+    },
+    {
+      "name": "beta memory quota overrun rejected",
+      "actor": "beta",
+      "method": "POST",
+      "path": "/containers",
+      "status": 400,
+      "expected": "400 Memory quota exceeded",
+      "classification": "pass",
+      "bodySummary": {
+        "statusCode": 400,
+        "message": "Memory quota exceeded",
+        "error": "Bad Request"
+      }
+    },
+    {
+      "name": "beta container list unchanged after overrun denials",
+      "actor": "beta",
+      "method": "GET",
+      "path": "/containers",
+      "status": 200,
+      "expected": "200 no lane-created containers",
+      "classification": "pass",
+      "bodySummary": {
+        "count": 0,
+        "laneNames": []
+      }
+    },
+    {
+      "name": "admin container list for SSH availability observation",
+      "actor": "admin",
+      "method": "GET",
+      "path": "/containers",
+      "status": 200,
+      "expected": "200",
+      "classification": "pass",
+      "bodySummary": {
+        "count": 4
+      }
+    },
+    {
+      "name": "observed existing container SSH state",
+      "actor": "admin",
+      "method": "GET",
+      "path": "/containers",
+      "status": 200,
+      "expected": "read-only observation",
+      "classification": "pass",
+      "bodySummary": {
+        "sshContainerCount": 2,
+        "observed": [
+          {
+            "serverId": "db1112fe-1c55-4314-9511-6d8510c523c2",
+            "containerId": "98646d5d-35cd-4409-a06c-402a96551a37",
+            "name": "testgpu",
+            "status": "running",
+            "sshStatus": "running"
+          },
+          {
+            "serverId": "05cea385-d6ca-490a-a126-e00d0ae23b70",
+            "containerId": "c4c4682c-1cd1-4580-b0b5-930c0dc54f5c",
+            "name": "test",
+            "status": "running",
+            "sshStatus": "running"
+          }
+        ]
+      }
+    },
+    {
+      "name": "beta cannot enable SSH on admin container",
+      "actor": "beta",
+      "method": "POST",
+      "path": "/containers/db1112fe-1c55-4314-9511-6d8510c523c2/98646d5d-35cd-4409-a06c-402a96551a37/ssh/enable",
+      "status": 403,
+      "expected": "403 or 404",
+      "classification": "pass"
+    },
+    {
+      "name": "beta cannot reconcile SSH on admin container",
+      "actor": "beta",
+      "method": "POST",
+      "path": "/containers/db1112fe-1c55-4314-9511-6d8510c523c2/98646d5d-35cd-4409-a06c-402a96551a37/ssh/reconcile",
+      "status": 403,
+      "expected": "403 or 404",
+      "classification": "pass"
+    },
+    {
+      "name": "beta own container SSH enable availability",
+      "actor": "beta",
+      "method": "GET",
+      "path": "/containers",
+      "status": 200,
+      "expected": "200; no beta-owned container available in this environment",
+      "classification": "pass",
+      "bodySummary": {
+        "count": 0,
+        "note": "Granted server was offline during lane run, so safe under-quota container creation was not attempted."
+      }
+    },
+    {
+      "name": "afterAll beta bogus SSH key cleanup",
+      "actor": "beta",
+      "method": "DELETE",
+      "path": "/users/be32921a-b857-4880-9486-fd47cc04e6cd/ssh-keys/800edd1a-9ace-4bb3-a4d6-3f40bc38b323",
+      "status": 204,
+      "expected": "204 or 404",
+      "classification": "pass"
+    }
+  ],
+  "notes": [
+    "No product source was modified.",
+    "No under-quota container was created because the handoff server was offline and successful create would persist desired state until an agent binds dockerId.",
+    "The observed container SSH disable action is not exposed by the current API; enable and reconcile routes were covered for authorization."
+  ]
+}

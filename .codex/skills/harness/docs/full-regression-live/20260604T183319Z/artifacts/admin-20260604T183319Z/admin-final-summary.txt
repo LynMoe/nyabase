@@ -1,0 +1,7 @@
+generatedAt=2026-06-04T19:08:45Z
+checks=30/30
+probeCount=101
+cleanupZeroActive=True
+rawFailures=1 (superseded cleanup SQL proof typo)
+finalFailures=0
+residuals=quota_desired,runtime_containers_history

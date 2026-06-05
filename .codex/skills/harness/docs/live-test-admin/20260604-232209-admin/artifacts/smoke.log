@@ -1,0 +1,2 @@
+$ bash test/scripts/run-live-suite.sh smoke
+OKadmin login OK

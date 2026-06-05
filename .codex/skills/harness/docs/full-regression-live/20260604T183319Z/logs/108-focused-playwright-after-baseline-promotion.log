@@ -1,0 +1,20 @@
+
+Running 8 tests using 1 worker
+
+[1A[2K(node:3101911) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+
+
+[1A[2K(node:3101911) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+
+
+[1A[2K[1/8] [chromium] › e2e/container-canonical-visibility.spec.ts:135:3 › canonical container operation visibility › admin manage containers shows all owners and durable pending controls
+[1A[2K[2/8] [chromium] › e2e/container-canonical-visibility.spec.ts:168:3 › canonical container operation visibility › normal user containers show own operations without admin management context
+[1A[2K[3/8] [chromium] › e2e/operation-states.spec.ts:161:3 › operation state visual coverage › containers list renders refreshed pending and failed operations
+[1A[2K[4/8] [chromium] › e2e/operation-states.spec.ts:173:3 › operation state visual coverage › container detail renders terminal operation failure after refresh
+[1A[2K[5/8] [chromium] › e2e/operation-states.spec.ts:183:3 › operation state visual coverage › create container flow keeps queued operation feedback visible
+[1A[2K[6/8] [chromium] › e2e/operation-states.spec.ts:201:3 › operation state visual coverage › data directory delete flow shows queued operation reference
+[1A[2K[7/8] [chromium] › e2e/operation-states.spec.ts:216:3 › operation state visual coverage › remote filesystem assignment disables controls while queuing and shows operation reference
+[1A[2K[8/8] [chromium] › e2e/operation-states.spec.ts:231:3 › operation state visual coverage › server data disk apply disables submit while queuing and shows operation reference
+[1A[2K  8 passed (11.7s)

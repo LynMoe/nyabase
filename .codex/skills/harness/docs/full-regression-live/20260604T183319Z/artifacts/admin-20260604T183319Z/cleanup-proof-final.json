@@ -1,0 +1,152 @@
+{
+  "checkedAt": "2026-06-04T19:06:51.486Z",
+  "requestedPrefix": "frlive-admin-20260604T183319Z-",
+  "resourcePrefix": "frlive-admin-20260604t183319z-",
+  "prefixZeroProof": {
+    "users": [],
+    "groups": [],
+    "images": [],
+    "activeContainers": []
+  },
+  "createdIdRows": {
+    "users": [],
+    "groups": [],
+    "images": [],
+    "containers": [
+      {
+        "id": "75fb2c79-cd65-4f0b-9c40-7797252a126e",
+        "name": "frlive-admin-20260604t183319z-ctr-eb3187",
+        "deletedAt": "2026-06-04 19:03:01.853",
+        "phase": "deleted",
+        "boundRuntimeId": "6fc1fa8f5cc715aacaa6492f8f6d6a732f6cfa765ac7fe71d6522f9ff3163703",
+        "activeOperationId": null
+      }
+    ],
+    "runtimeContainers": [
+      {
+        "id": "d7c6b76e-359f-47bd-81af-ea9f7e2223f2:6fc1fa8f5cc715aacaa6492f8f6d6a732f6cfa765ac7fe71d6522f9ff3163703",
+        "serverId": "d7c6b76e-359f-47bd-81af-ea9f7e2223f2",
+        "runtimeId": "6fc1fa8f5cc715aacaa6492f8f6d6a732f6cfa765ac7fe71d6522f9ff3163703",
+        "containerId": "75fb2c79-cd65-4f0b-9c40-7797252a126e",
+        "status": "running",
+        "stale": 1,
+        "lastSeenAt": "2026-06-04 19:03:01.853"
+      }
+    ],
+    "serverGrants": [],
+    "imageGrants": [],
+    "groupMembers": [],
+    "quotaDesired": [
+      {
+        "id": "9555ee55-c0a5-4ab8-a8ae-b6d527b3a67b",
+        "serverId": "d7c6b76e-359f-47bd-81af-ea9f7e2223f2",
+        "userId": "c5a28a78-183b-489d-9b6e-654223bf0f28",
+        "numericUserId": 17,
+        "limitBytes": "0",
+        "generation": 5
+      }
+    ],
+    "operations": [
+      {
+        "id": "08126c6f-ac31-42e2-9f05-364e4addf836",
+        "kind": "container.create",
+        "status": "succeeded",
+        "resourceId": "75fb2c79-cd65-4f0b-9c40-7797252a126e",
+        "serverId": "d7c6b76e-359f-47bd-81af-ea9f7e2223f2",
+        "lastError": null
+      },
+      {
+        "id": "750f3408-e54b-40ae-85a7-0ce2f4368874",
+        "kind": "container.stop",
+        "status": "succeeded",
+        "resourceId": "75fb2c79-cd65-4f0b-9c40-7797252a126e",
+        "serverId": "d7c6b76e-359f-47bd-81af-ea9f7e2223f2",
+        "lastError": null
+      },
+      {
+        "id": "d3958c30-7d30-4b72-af3b-04f0434c5401",
+        "kind": "container.start",
+        "status": "succeeded",
+        "resourceId": "75fb2c79-cd65-4f0b-9c40-7797252a126e",
+        "serverId": "d7c6b76e-359f-47bd-81af-ea9f7e2223f2",
+        "lastError": null
+      },
+      {
+        "id": "534c83c8-7d5f-49fd-a86e-a62154ed4c42",
+        "kind": "container.delete",
+        "status": "succeeded",
+        "resourceId": "75fb2c79-cd65-4f0b-9c40-7797252a126e",
+        "serverId": "d7c6b76e-359f-47bd-81af-ea9f7e2223f2",
+        "lastError": null
+      }
+    ],
+    "outbox": [
+      {
+        "id": "a981dc0a-d207-49eb-adbc-3f7b8055a8cb",
+        "operationId": "08126c6f-ac31-42e2-9f05-364e4addf836",
+        "serverId": "d7c6b76e-359f-47bd-81af-ea9f7e2223f2",
+        "commandKind": "runtime.container.create",
+        "status": "succeeded",
+        "lastError": null
+      },
+      {
+        "id": "b39ef1f8-bd8f-41ef-bbde-73a69774ff5f",
+        "operationId": "750f3408-e54b-40ae-85a7-0ce2f4368874",
+        "serverId": "d7c6b76e-359f-47bd-81af-ea9f7e2223f2",
+        "commandKind": "runtime.container.power",
+        "status": "succeeded",
+        "lastError": null
+      },
+      {
+        "id": "3c9a3d13-0f32-4f15-9a3d-4fa27b19886b",
+        "operationId": "d3958c30-7d30-4b72-af3b-04f0434c5401",
+        "serverId": "d7c6b76e-359f-47bd-81af-ea9f7e2223f2",
+        "commandKind": "runtime.container.power",
+        "status": "succeeded",
+        "lastError": null
+      },
+      {
+        "id": "e82f8dcf-a90f-43a9-a48c-05ccd0d8e4df",
+        "operationId": "534c83c8-7d5f-49fd-a86e-a62154ed4c42",
+        "serverId": "d7c6b76e-359f-47bd-81af-ea9f7e2223f2",
+        "commandKind": "runtime.container.delete",
+        "status": "succeeded",
+        "lastError": null
+      }
+    ]
+  },
+  "zeroActive": true,
+  "residuals": [
+    {
+      "type": "quota_desired",
+      "classification": "cleanup-blocked",
+      "note": "No public API deletes quota_desired; residual is zero-limit after cleanup.",
+      "rows": [
+        {
+          "id": "9555ee55-c0a5-4ab8-a8ae-b6d527b3a67b",
+          "serverId": "d7c6b76e-359f-47bd-81af-ea9f7e2223f2",
+          "userId": "c5a28a78-183b-489d-9b6e-654223bf0f28",
+          "numericUserId": 17,
+          "limitBytes": "0",
+          "generation": 5
+        }
+      ]
+    },
+    {
+      "type": "runtime_containers_history",
+      "classification": "expected-historical-row",
+      "note": "Runtime observation remains as stale history after successful delete.",
+      "rows": [
+        {
+          "id": "d7c6b76e-359f-47bd-81af-ea9f7e2223f2:6fc1fa8f5cc715aacaa6492f8f6d6a732f6cfa765ac7fe71d6522f9ff3163703",
+          "serverId": "d7c6b76e-359f-47bd-81af-ea9f7e2223f2",
+          "runtimeId": "6fc1fa8f5cc715aacaa6492f8f6d6a732f6cfa765ac7fe71d6522f9ff3163703",
+          "containerId": "75fb2c79-cd65-4f0b-9c40-7797252a126e",
+          "status": "running",
+          "stale": 1,
+          "lastSeenAt": "2026-06-04 19:03:01.853"
+        }
+      ]
+    }
+  ]
+}

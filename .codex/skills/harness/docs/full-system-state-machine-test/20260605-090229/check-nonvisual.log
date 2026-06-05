@@ -1,0 +1,111 @@
+
+> @nyabase/common@0.1.0 build /root/nyabase/packages/common
+> tsc -p tsconfig.json && tsc -p tsconfig.esm.json
+
+
+> nyabase@ typecheck /root/nyabase
+> pnpm --filter @nyabase/common typecheck && pnpm --filter @nyabase/backend typecheck && pnpm --filter @nyabase/agent typecheck && pnpm --filter @nyabase/frontend typecheck
+
+
+> @nyabase/common@0.1.0 typecheck /root/nyabase/packages/common
+> tsc --noEmit
+
+
+> @nyabase/backend@0.1.0 typecheck /root/nyabase/packages/backend
+> tsc --noEmit
+
+
+> @nyabase/agent@0.1.0 typecheck /root/nyabase/packages/agent
+> tsc --noEmit
+
+
+> @nyabase/frontend@0.1.0 typecheck /root/nyabase/packages/frontend
+> tsc --noEmit
+
+
+> nyabase@ lint /root/nyabase
+> eslint packages/common/src packages/backend/src packages/agent/src packages/frontend/src
+
+
+/root/nyabase/packages/agent/src/docker/docker-client.test.ts
+  26:7  warning  Unused eslint-disable directive (no problems were reported from 'no-await-in-loop')
+
+/root/nyabase/packages/agent/src/quota/xfs-quota.test.ts
+  78:24  warning  'args' is defined but never used. Allowed unused args must match /^_/u  @typescript-eslint/no-unused-vars
+
+/root/nyabase/packages/backend/src/gateway/agent-gateway.ts
+  19:3  warning  'Envelope' is defined but never used            @typescript-eslint/no-unused-vars
+  42:3  warning  'DockerDaemonStatus' is defined but never used  @typescript-eslint/no-unused-vars
+
+/root/nyabase/packages/backend/src/gateway/container-runtime-observation-writer.service.ts
+  5:3  warning  'ContainerStatus' is defined but never used  @typescript-eslint/no-unused-vars
+
+/root/nyabase/packages/backend/src/metrics/metrics-query.service.ts
+  10:11  warning  'VmInstantResult' is defined but never used  @typescript-eslint/no-unused-vars
+
+/root/nyabase/packages/backend/src/operations/agent-command-outbox-worker.service.ts
+  13:3   warning  'OperationKind' is defined but never used    @typescript-eslint/no-unused-vars
+  18:10  warning  'ContainerEntity' is defined but never used  @typescript-eslint/no-unused-vars
+
+/root/nyabase/packages/backend/src/remote-fs/remote-fs-mounts.service.ts
+  175:11  warning  'mount' is assigned a value but never used  @typescript-eslint/no-unused-vars
+
+/root/nyabase/packages/backend/src/users/users.controller.ts
+  86:30  warning  '_' is assigned a value but never used  @typescript-eslint/no-unused-vars
+
+/root/nyabase/packages/common/src/__tests__/protocol.test.ts
+  522:11  warning  'drift' is assigned a value but never used      @typescript-eslint/no-unused-vars
+  527:11  warning  'staleness' is assigned a value but never used  @typescript-eslint/no-unused-vars
+
+/root/nyabase/packages/frontend/src/components/error-boundary.tsx
+  29:5  warning  Unused eslint-disable directive (no problems were reported from 'no-console')
+
+✖ 13 problems (0 errors, 13 warnings)
+  0 errors and 2 warnings potentially fixable with the `--fix` option.
+
+
+> nyabase@ test:unit /root/nyabase
+> pnpm --filter @nyabase/common test && pnpm --filter @nyabase/backend test && pnpm --filter @nyabase/agent test
+
+
+> @nyabase/common@0.1.0 test /root/nyabase/packages/common
+> vitest run
+
+
+ RUN  v4.1.5 /root/nyabase/packages/common
+
+
+ Test Files  3 passed (3)
+      Tests  49 passed (49)
+   Start at  09:08:02
+   Duration  247ms (transform 264ms, setup 0ms, import 334ms, tests 29ms, environment 0ms)
+
+
+> @nyabase/backend@0.1.0 test /root/nyabase/packages/backend
+> vitest run
+
+
+ RUN  v4.1.5 /root/nyabase/packages/backend
+
+[Nest] 3137090  - 06/05/2026, 9:08:03 AM    WARN [UsersService] SSH key change hook enqueue failed for user-a: queue unavailable
+[Nest] 3137089  - 06/05/2026, 9:08:04 AM     LOG [AgentGateway] Hello from server-a: host-a, 0 GPUs, agentVersion=0.1.0
+[Nest] 3137089  - 06/05/2026, 9:08:04 AM     LOG [AgentGateway] Freezing dockerRoot for server-a: /var/lib/docker (socket: /var/run/docker.sock)
+
+ Test Files  23 passed (23)
+      Tests  113 passed (113)
+   Start at  09:08:03
+   Duration  808ms (transform 4.04s, setup 636ms, import 9.78s, tests 559ms, environment 2ms)
+
+
+> @nyabase/agent@0.1.0 test /root/nyabase/packages/agent
+> vitest run
+
+
+ RUN  v4.1.5 /root/nyabase/packages/agent
+
+
+ Test Files  5 passed (5)
+      Tests  73 passed (73)
+   Start at  09:08:04
+   Duration  391ms (transform 797ms, setup 0ms, import 1.03s, tests 108ms, environment 0ms)
+

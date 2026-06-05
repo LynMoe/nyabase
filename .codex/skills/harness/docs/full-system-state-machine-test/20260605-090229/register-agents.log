@@ -1,0 +1,5 @@
+Registered 2 agents.
+cpu: c5134298-fda7-4369-ab51-e0c7065d7058 (nyabase-test-cpu)
+gpu: 88ff8efa-2fbd-4e16-b189-2ab949d26ade (nyabase-test-gpu)
+Metadata: /root/nyabase/test/runtime/agents/servers.json
+Secrets:  /root/nyabase/test/runtime/agents/agent-secrets.json

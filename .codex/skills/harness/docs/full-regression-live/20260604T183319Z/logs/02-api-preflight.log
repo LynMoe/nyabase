@@ -1,0 +1,17 @@
+=== captured ===
+2026-06-04T18:35:45Z
+=== sqlite via backend node_modules ===
+dbPath /root/nyabase/test/runtime/db/nyabase-test.db
+agent_command_outbox=106
+quota_desired=12
+=== backend fd db proof ===
+pid=2996829
+/proc/2996829/fd/20 -> /root/nyabase/test/runtime/db/nyabase-test.db
+=== admin api ===
+login status 200
+/auth/me 200 {"id":"75dcc623-dced-4f00-8afc-639239d47067","username":"admin","displayName":"Administrator","status":"active","createdAt":"2026-06-04T17:36:39.000Z","capabilities":["manage_users","manage_groups","manage_servers","manage_images","manage_grants","manage_containers_any","view_audit","view_metrics_all"],"groups":[{"id":"b6359f64-873e-4c67-8a11-7ee3ca424375","name":"Administrators","priority":1000,"isSystem":true}]}
+/servers 200 {"len":2,"rows":[{"id":"d7c6b76e-359f-47bd-81af-ea9f7e2223f2","name":"nyabase-test-cpu","status":"online","isGpuServer":false},{"id":"a8694107-56c4-4a78-93f4-4ea90eddc580","name":"nyabase-test-gpu","status":"online","isGpuServer":true}]}
+/containers 404 {"message":"Cannot GET /api/containers","error":"Not Found","statusCode":404}
+/operations 404 {"message":"Cannot GET /api/operations","error":"Not Found","statusCode":404}
+/images 200 {"len":8,"rows":[{"id":"dafce0f8-a6d6-4e17-be01-18d0cc0f75b8","name":"murt-20260604t173726z-d76585-cpu-a"},{"id":"175cd67e-764c-4a00-a384-ba545a4561d4","name":"murt-20260604t173726z-d76585-cpu-b-same-ref"},{"id":"64f8680b-f3ee-4bf7-be16-9e3550def951","name":"murt-20260604t173726z-d76585-inactive"},{"id":"1fd0812b-564d-42aa-98f7-de1a49a1dbeb","name":"murt-20260604t173726z-d76585-gpu-a"},{"id":"5f22d59e-ef33-4840-a347-f793a20dc121","name":"murt-20260604t174938z-e260e0-cpu-a"}]}
+/users 200 {"len":11,"rows":[{"id":"75dcc623-dced-4f00-8afc-639239d47067","name":"admin","status":"active"},{"id":"f98394eb-7d70-4784-8586-d848c2f4f9dd","name":"murt-20260604t173726z-d76585-alpha","status":"active"},{"id":"b4f77b5c-70e8-41da-8120-0a7097364dd2","name":"murt-20260604t173726z-d76585-beta","status":"active"},{"id":"ff65eb7c-d31d-4673-9340-cbba8e6d2d47","name":"murt-20260604t173726z-d76585-gamma","status":"active"},{"id":"0cb2bdde-bc27-42f7-ac1b-6e993eb183cb","name":"murt-20260604t173726z-d76585-delta","status":"active"}]}

@@ -1,0 +1,10 @@
+
+ RUN  v4.1.5 /root/nyabase
+
+ ✓ test/specs/live/dropbear-live-runtime.spec.ts > live Dropbear user-state runtime on CPU agent > proves non-admin SSH enablement, isolation, repair, key sync, lifecycle, and cleanup 123175ms
+
+ Test Files  1 passed (1)
+      Tests  1 passed (1)
+   Start at  09:21:00
+   Duration  123.35s (transform 71ms, setup 0ms, import 85ms, tests 123.18s, environment 0ms)
+

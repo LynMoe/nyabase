@@ -1,0 +1,10 @@
+
+ RUN  v4.1.5 /root/nyabase
+
+ ✓ test/specs/live/multi-user-redteam-mount-sources.spec.ts > multi-user red-team mount sources runtime matrix > verifies user-scoped mount source, data-dir, container mount, dynamic patch, and cleanup behavior 26442ms
+
+ Test Files  1 passed (1)
+      Tests  1 passed (1)
+   Start at  13:32:33
+   Duration  26.61s (transform 57ms, setup 0ms, import 69ms, tests 26.44s, environment 0ms)
+

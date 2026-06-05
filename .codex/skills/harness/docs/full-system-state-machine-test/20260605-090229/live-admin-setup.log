@@ -1,0 +1,11 @@
+
+ RUN  v4.1.5 /root/nyabase
+
+ ✓ test/specs/live/multi-user-redteam-admin-setup.spec.ts > multi-user red-team admin fixture setup > creates admin-only live fixtures and non-secret setup manifest 1460ms
+
+ Test Files  1 passed (1)
+      Tests  1 passed (1)
+   Start at  09:13:50
+   Duration  1.61s (transform 47ms, setup 0ms, import 58ms, tests 1.46s, environment 0ms)
+
+Wrote test/runtime/murt/current.env

@@ -1,0 +1,29 @@
+# Worklog
+
+- 2026-06-05T04:00:22Z: Started high-risk permission/API split. Execution mode: lead as implementer; independent self-review and focused tests planned.
+- 2026-06-05T12:12:35+08:00: Implemented split user/admin planes across backend controllers and frontend API calls.
+- Removed user-plane resource authorization bypasses from AccessResolver, containers, servers, images, data-dirs, and metrics.
+- Added admin controllers for servers, images, containers, mount sources, data dirs, users, and moved groups/user grants under admin paths.
+- Updated tests to assert admin capabilities do not synthesize user-plane resource access.
+- Verification: bash scripts/check.sh passed; common src artifact guard returned empty.
+- 2026-06-05T12:27:57+08:00: Lead self-review follow-up completed.
+- Added `admin/operations/:operationId`; user-plane operations now only expose requester-owned operations.
+- Added admin SSH key list/delete endpoints for management cleanup instead of using user self-service SSH routes with admin tokens.
+- Migrated remaining management setup/probe scripts and frontend e2e mocks from historical user/system paths to `/admin/*`.
+- Removed frontend container detail `ManageContainersAny` bypass from user-plane detail actions; admin actions use management pages/hooks.
+- Verification: backend/frontend typecheck passed; focused backend permission tests passed (5 files, 25 tests); `bash scripts/check.sh` passed (lint warnings only); frontend build passed; historical path/static permission searches returned no actionable residues; common src artifact guard returned empty.
+- 2026-06-05T12:32:29+08:00: Removed legacy `ownOnly` container-list compatibility path.
+- User plane `/v2/containers` now implicitly means requester-owned containers; frontend no longer sends `?ownOnly=true`.
+- Backend container controller/service no longer accepts or models `ownOnly`; management enumeration remains `/admin/v2/containers`.
+- Updated frontend e2e/live specs/docs from `/v2/containers?ownOnly=true` to `/v2/containers`; removed stale backend dist test artifact containing old `ownOnly` text.
+- Verification: backend/frontend typecheck passed; focused container backend tests passed (2 files, 10 tests); frontend build passed; `ownOnly` static search across packages/test/scripts/dist returned empty; local backend/frontend restarted.
+- 2026-06-05T12:38:55+08:00: Split metrics user/admin planes.
+- Added `/admin/metrics/*` routes guarded by `ViewMetricsAll`; server management detail charts use `/admin/metrics`.
+- User-plane `/metrics/*` now remains limited to explicitly accessible servers and current user labels even for users with `ViewMetricsAll`; raw query endpoints inject current user only on user plane, with full raw query under `/admin/metrics/query*`.
+- Fixed dashboard stale `localStorage` server selection so user dashboard will not request metrics for a server absent from user-plane `/servers`.
+- Verification: backend/frontend typecheck passed; metrics focused test passed (1 file, 4 tests); frontend build passed; local backend/frontend restarted; `/admin/metrics/servers/<id>/users` returned 200 while user-plane `/metrics/servers/<id>/users` without server grant returned expected 404.
+- 2026-06-05T12:50:56+08:00: Fixed frontend data-layer cache pollution between user and admin planes.
+- Root cause: React Query reused naked resource keys such as `['servers']` for both `/servers` and `/admin/servers`; after a user-plane empty server response, management pages could reuse fresh empty cache for up to 30s and skip the admin request.
+- Added centralized `queryKeys` helper and migrated server/image/user/group/container/data-dir/mount-source keys to explicit `admin` or `user` planes; container operations now invalidate only the matching plane.
+- Runtime proof: logged in as admin, visited `/containers` first to populate user-plane `/api/servers` as empty, then visited `/servers`; frontend still requested `/api/admin/servers` and rendered `2 台已注册` with no empty state.
+- Verification: backend/frontend typecheck passed; frontend build passed; static search found no naked resource query keys, no `ownOnly`, no `system/remote-fs-mounts`; common src artifact guard returned empty; local services restarted.

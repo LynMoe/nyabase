@@ -1,0 +1,40 @@
+==exports==
+/data/nyabase-test-nfs-export
+		10.8.96.0/24(sync,wdelay,hide,no_subtree_check,sec=sys,rw,secure,no_root_squash,no_all_squash)
+==mounts==
+TARGET                                              SOURCE                                   FSTYPE OPTIONS
+/mnt/nyabase-test/mount-20260604t184130z-8d01c8-nfs 10.8.96.91:/data/nyabase-test-nfs-export nfs4   rw,relatime,vers=4.2,rsize=1048576,wsize=1048576,namlen=255,hard,proto=tcp,timeo=600,retrans=2,sec=sys,clientaddr=10.8.96.91,local_lock=none,addr=10.8.96.91
+/mnt/remote-fs/ca8cd667-ef51-4ad9-b305-73088764ebfb 10.8.96.90:/data                         nfs4   rw,relatime,vers=4.2,rsize=1048576,wsize=1048576,namlen=255,hard,proto=tcp,timeo=600,retrans=2,sec=sys,clientaddr=10.8.96.91,local_lock=none,addr=10.8.96.90
+==old-agent-procs==
+==test-mount==
+mounted-probe
+total 4
+drwxrwxrwx 2 root root   36 Jun  5 05:15 .
+drwxr-xr-x 6 root root 4096 Jun  5 05:15 ..
+-rw-r--r-- 1 root root    0 Jun  5 05:15 probe-20260604T211508Z
+==mounts-after==
+TARGET                                              SOURCE                                   FSTYPE OPTIONS
+/mnt/nyabase-test/mount-20260604t184130z-8d01c8-nfs 10.8.96.91:/data/nyabase-test-nfs-export nfs4   rw,relatime,vers=4.2,rsize=1048576,wsize=1048576,namlen=255,hard,proto=tcp,timeo=600,retrans=2,sec=sys,clientaddr=10.8.96.91,local_lock=none,addr=10.8.96.91
+/mnt/remote-fs/ca8cd667-ef51-4ad9-b305-73088764ebfb 10.8.96.90:/data                         nfs4   rw,relatime,vers=4.2,rsize=1048576,wsize=1048576,namlen=255,hard,proto=tcp,timeo=600,retrans=2,sec=sys,clientaddr=10.8.96.91,local_lock=none,addr=10.8.96.90
+==agent-status-tail==
+● nyabase-agent.service - nyabase Agent
+     Loaded: loaded (/etc/systemd/system/nyabase-agent.service; enabled; preset: enabled)
+     Active: active (running) since Fri 2026-06-05 04:44:13 CST; 30min ago
+ Invocation: 25b0513d5f8f4500af77a58ff9685728
+   Main PID: 2610168 (nyabase-agent)
+      Tasks: 10 (limit: 19167)
+     Memory: 44.4M (peak: 49.2M)
+        CPU: 4.385s
+     CGroup: /system.slice/nyabase-agent.service
+             └─2610168 /usr/local/bin/nyabase-agent --config /etc/nyabase/agent.yaml
+
+Jun 05 04:44:32 nyabase-test-1 nyabase-agent[2610168]:     at async j_.handle (/snapshot/agent-bundle/agent.cjs)
+Jun 05 04:44:32 nyabase-test-1 nyabase-agent[2610168]:     at async t.<anonymous> (/snapshot/agent-bundle/agent.cjs)
+Jun 05 04:53:58 nyabase-test-1 nyabase-agent[2610168]: [WS] Disconnected: 1006
+Jun 05 04:53:58 nyabase-test-1 nyabase-agent[2610168]: [Agent] Disconnected from backend
+Jun 05 04:53:59 nyabase-test-1 nyabase-agent[2610168]: [WS] Connecting to ws://10.8.96.92:3001/ws/agent...
+Jun 05 04:53:59 nyabase-test-1 nyabase-agent[2610168]: [WS] Error: connect ECONNREFUSED 10.8.96.92:3001
+Jun 05 04:53:59 nyabase-test-1 nyabase-agent[2610168]: [WS] Disconnected: 1006
+Jun 05 04:53:59 nyabase-test-1 nyabase-agent[2610168]: [Agent] Disconnected from backend
+Jun 05 04:54:01 nyabase-test-1 nyabase-agent[2610168]: [WS] Connecting to ws://10.8.96.92:3001/ws/agent...
+Jun 05 04:54:01 nyabase-test-1 nyabase-agent[2610168]: [WS] Connected

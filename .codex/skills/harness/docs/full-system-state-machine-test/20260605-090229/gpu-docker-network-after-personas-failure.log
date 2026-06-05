@@ -1,0 +1,53 @@
+[
+    {
+        "Name": "nyabase_net",
+        "Id": "64e95a825067e61904f60bb9539ce9ca9f917ae8aa926e7d93563f6025794ef1",
+        "Created": "2026-06-01T23:27:21.415230683Z",
+        "Scope": "local",
+        "Driver": "macvlan",
+        "EnableIPv4": true,
+        "EnableIPv6": false,
+        "IPAM": {
+            "Driver": "default",
+            "Options": null,
+            "Config": [
+                {
+                    "Subnet": "10.8.0.0/16",
+                    "IPRange": "",
+                    "Gateway": "10.8.0.1"
+                }
+            ]
+        },
+        "Internal": false,
+        "Attachable": false,
+        "Ingress": false,
+        "ConfigFrom": {
+            "Network": ""
+        },
+        "ConfigOnly": false,
+        "Options": {
+            "parent": "bond0"
+        },
+        "Labels": {},
+        "Containers": {},
+        "Status": {
+            "IPAM": {
+                "Subnets": {
+                    "10.8.0.0/16": {
+                        "IPsInUse": 3,
+                        "DynamicIPsAvailable": 65533
+                    }
+                }
+            }
+        }
+    }
+]
+
+{"Command":"\"sleep 3600\"","CreatedAt":"2026-06-04 17:33:22 +0000 UTC","ID":"c403e36e3561","Image":"ubuntu:24.04","Labels":"nyabase.container_id=96c5a392-1d6c-48ff-a7e4-e005ebfa6592,nyabase.managed=true,nyabase.server_id=2a47c184-a901-41b7-91f1-e1277240597c,nyabase.spec_generation=3,org.opencontainers.image.version=24.04","LocalVolumes":"0","Mounts":"","Names":"nyabase-7929780d-murt-20260604t173424z-af67e0-gamma-v2","Networks":"nyabase_net","Platform":null,"Ports":"","RunningFor":"8 hours ago","Size":"17kB (virtual 78.2MB)","State":"exited","Status":"Exited (137) 8 hours ago"}
+{"Command":"\"sleep 3600\"","CreatedAt":"2026-06-04 17:25:04 +0000 UTC","ID":"b90e81cca3f0","Image":"ubuntu:24.04","Labels":"nyabase.container_id=65d8ea8f-0ba4-4e50-b2a4-621b4c24a713,nyabase.managed=true,nyabase.server_id=1eaaed90-af67-4adf-818a-d9124887bc96,nyabase.spec_generation=3,org.opencontainers.image.version=24.04","LocalVolumes":"0","Mounts":"","Names":"nyabase-33e7b5f6-murt-20260604t171809z-58cdf9-gamma-delta-attack-gpu-target","Networks":"nyabase_net","Platform":null,"Ports":"","RunningFor":"8 hours ago","Size":"17kB (virtual 78.2MB)","State":"exited","Status":"Exited (137) 8 hours ago"}
+{"Command":"\"sleep 3600\"","CreatedAt":"2026-06-04 17:25:01 +0000 UTC","ID":"9ca3fc4bd5db","Image":"ubuntu:24.04","Labels":"nyabase.container_id=6a855f49-a77b-4176-a194-537da4eaab1c,nyabase.managed=true,nyabase.server_id=1eaaed90-af67-4adf-818a-d9124887bc96,nyabase.spec_generation=3,org.opencontainers.image.version=24.04","LocalVolumes":"0","Mounts":"","Names":"nyabase-33e7b5f6-murt-20260604t171809z-58cdf9-gamma-bad-count","Networks":"nyabase_net","Platform":null,"Ports":"","RunningFor":"8 hours ago","Size":"0B (virtual 78.1MB)","State":"exited","Status":"Exited (137) 8 hours ago"}
+{"Command":"\"sleep 3600\"","CreatedAt":"2026-06-04 16:57:08 +0000 UTC","ID":"82c2b9a153dd","Image":"ubuntu:24.04","Labels":"nyabase.container_id=2f6ce779-1e7f-4d44-be1c-c77e904ce635,nyabase.managed=true,nyabase.server_id=4f54ab69-89ad-4cc1-a343-b046f34f967e,nyabase.spec_generation=3,org.opencontainers.image.version=24.04","LocalVolumes":"0","Mounts":"","Names":"nyabase-8bdaf202-murt-20260604t165239z-bab05b-gamma-delta-attack-gpu-target","Networks":"nyabase_net","Platform":null,"Ports":"","RunningFor":"8 hours ago","Size":"17kB (virtual 78.2MB)","State":"exited","Status":"Exited (137) 8 hours ago"}
+{"Command":"\"sleep 3600\"","CreatedAt":"2026-06-04 16:51:40 +0000 UTC","ID":"19a0c92d9499","Image":"ubuntu:24.04","Labels":"nyabase.container_id=a4917eed-014b-417b-bdb1-ebb5292ed7b9,nyabase.managed=true,nyabase.server_id=4f54ab69-89ad-4cc1-a343-b046f34f967e,nyabase.spec_generation=3,org.opencontainers.image.version=24.04","LocalVolumes":"0","Mounts":"","Names":"nyabase-8bdaf202-murt-20260604t165239z-bab05b-gamma-bad-count","Networks":"nyabase_net","Platform":null,"Ports":"","RunningFor":"8 hours ago","Size":"0B (virtual 78.1MB)","State":"exited","Status":"Exited (137) 8 hours ago"}
+{"Command":"\"sleep 3600\"","CreatedAt":"2026-06-04 16:45:51 +0000 UTC","ID":"e1dcf7b1d6df","Image":"ubuntu:24.04","Labels":"nyabase.container_id=90b956ff-b0a3-4597-b74e-d6194acb129c,nyabase.managed=true,nyabase.server_id=81213a55-be0f-49d5-af31-f9126f30c293,nyabase.spec_generation=3,org.opencontainers.image.version=24.04","LocalVolumes":"0","Mounts":"","Names":"nyabase-0399a60f-murt-20260604t164649z-c7d3e4-gamma-bad-index","Networks":"nyabase_net","Platform":null,"Ports":"","RunningFor":"9 hours ago","Size":"17kB (virtual 78.2MB)","State":"exited","Status":"Exited (137) 8 hours ago"}
+{"Command":"\"sleep 3600\"","CreatedAt":"2026-06-04 16:45:47 +0000 UTC","ID":"223c7f554366","Image":"ubuntu:24.04","Labels":"nyabase.container_id=beaf4df7-4f7a-470a-8419-578e7ad37a1b,nyabase.managed=true,nyabase.server_id=81213a55-be0f-49d5-af31-f9126f30c293,nyabase.spec_generation=3,org.opencontainers.image.version=24.04","LocalVolumes":"0","Mounts":"","Names":"nyabase-0399a60f-murt-20260604t164649z-c7d3e4-gamma-delta-attack-gpu-target","Networks":"nyabase_net","Platform":null,"Ports":"","RunningFor":"9 hours ago","Size":"17kB (virtual 78.2MB)","State":"exited","Status":"Exited (137) 8 hours ago"}
+{"Command":"\"tail -f /dev/null\"","CreatedAt":"2026-06-04 09:22:24 +0000 UTC","ID":"b0015b72befa","Image":"ubuntu:24.04","Labels":"nyabase.container_id=98646d5d-35cd-4409-a06c-402a96551a37,nyabase.managed=true,nyabase.server_id=db1112fe-1c55-4314-9511-6d8510c523c2,nyabase.spec_generation=3,org.opencontainers.image.version=24.04","LocalVolumes":"0","Mounts":"","Names":"nyabase-75f36ff6-testgpu","Networks":"nyabase_net","Platform":null,"Ports":"","RunningFor":"16 hours ago","Size":"63.5MB (virtual 142MB)","State":"exited","Status":"Exited (137) 12 hours ago"}

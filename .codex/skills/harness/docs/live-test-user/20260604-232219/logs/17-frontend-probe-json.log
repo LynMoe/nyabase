@@ -1,0 +1,116 @@
+{
+  "runId": "ultui-20260604152738-147a4b",
+  "resources": {
+    "serverId": "1b9c08fa-32e1-4943-8dc5-d83772cd52f9",
+    "imageId": "d66f3dac-e5bf-4ef6-837e-2454ee8951d8",
+    "username": "ultui-20260604152738-147a4b-user",
+    "password": "Pwd-ultui-20260604152738-147a4b-123!",
+    "userId": "5850917c-0536-4633-91a4-74767bc727fd"
+  },
+  "steps": [
+    {
+      "kind": "api",
+      "method": "POST",
+      "path": "/auth/login",
+      "status": 200
+    },
+    {
+      "kind": "api",
+      "method": "GET",
+      "path": "/servers",
+      "status": 200
+    },
+    {
+      "kind": "api",
+      "method": "GET",
+      "path": "/images",
+      "status": 200
+    },
+    {
+      "kind": "api",
+      "method": "POST",
+      "path": "/users",
+      "status": 201
+    },
+    {
+      "kind": "api",
+      "method": "POST",
+      "path": "/users/5850917c-0536-4633-91a4-74767bc727fd/server-grants/1b9c08fa-32e1-4943-8dc5-d83772cd52f9",
+      "status": 201
+    },
+    {
+      "kind": "api",
+      "method": "POST",
+      "path": "/users/5850917c-0536-4633-91a4-74767bc727fd/image-grants",
+      "status": 201
+    },
+    {
+      "kind": "console",
+      "type": "debug",
+      "text": "[vite] connecting..."
+    },
+    {
+      "kind": "console",
+      "type": "debug",
+      "text": "[vite] connected."
+    },
+    {
+      "kind": "console",
+      "type": "info",
+      "text": "%cDownload the React DevTools for a better development experience: https://react.dev/link/react-devtools font-weight:bold"
+    },
+    {
+      "kind": "requestfailed",
+      "url": "http://localhost:5173/api/auth/login",
+      "failure": "net::ERR_ABORTED"
+    },
+    {
+      "kind": "console",
+      "type": "debug",
+      "text": "[vite] connecting..."
+    },
+    {
+      "kind": "console",
+      "type": "debug",
+      "text": "[vite] connected."
+    },
+    {
+      "kind": "console",
+      "type": "info",
+      "text": "%cDownload the React DevTools for a better development experience: https://react.dev/link/react-devtools font-weight:bold"
+    },
+    {
+      "kind": "console",
+      "type": "error",
+      "text": "Failed to load resource: the server responded with a status of 401 (Unauthorized)"
+    },
+    {
+      "kind": "console",
+      "type": "error",
+      "text": "Failed to load resource: the server responded with a status of 401 (Unauthorized)"
+    },
+    {
+      "kind": "console",
+      "type": "error",
+      "text": "Failed to load resource: the server responded with a status of 401 (Unauthorized)"
+    },
+    {
+      "kind": "console",
+      "type": "error",
+      "text": "Failed to load resource: the server responded with a status of 401 (Unauthorized)"
+    },
+    {
+      "kind": "ui",
+      "url": "http://localhost:5173/login",
+      "title": "nyabase",
+      "bodyText": "nyabase\n\n开发容器管理平台\n\n用户名\n密码\n登录"
+    },
+    {
+      "kind": "api",
+      "method": "DELETE",
+      "path": "/users/5850917c-0536-4633-91a4-74767bc727fd",
+      "status": 204
+    }
+  ],
+  "failures": []
+}

@@ -1,0 +1,61 @@
+{
+  "timestamp": "2026-06-04T18:50:11.124Z",
+  "prefix": "frlive-user-20260604t183319z-",
+  "containers": [
+    {
+      "id": "6a253551-0c47-41c4-b957-efccd5ec0422",
+      "name": "frlive-user-20260604t183319z-alpha-cpu-mpzugakp",
+      "ownerId": "2c65d7e2-e53b-466d-a1b5-406c5febc3ab",
+      "serverId": "d7c6b76e-359f-47bd-81af-ea9f7e2223f2",
+      "deletedAt": "2026-06-04 18:43:55.154",
+      "createdAt": "2026-06-04 18:43:53"
+    },
+    {
+      "id": "8f8c29d5-b5fd-4fa8-8a4a-38b86d7a12bf",
+      "name": "frlive-user-20260604t183319z-gamma-gpucount-mpzuklzc",
+      "ownerId": "d54b5b5c-3609-42b1-a6bd-4f0b9d6276d0",
+      "serverId": "a8694107-56c4-4a78-93f4-4ea90eddc580",
+      "deletedAt": "2026-06-04 18:47:17.320",
+      "createdAt": "2026-06-04 18:47:14"
+    }
+  ],
+  "activeContainers": [],
+  "operations": [
+    {
+      "id": "feb3e508-e68a-4250-8851-74a1c489ed38",
+      "kind": "container.create",
+      "status": "succeeded",
+      "resourceId": "6a253551-0c47-41c4-b957-efccd5ec0422",
+      "lastError": null,
+      "createdAt": "2026-06-04 18:43:53",
+      "completedAt": "2026-06-04 18:43:54.355"
+    },
+    {
+      "id": "bd0bf2fe-b513-4e23-bd43-357e360b3cb0",
+      "kind": "container.delete",
+      "status": "succeeded",
+      "resourceId": "6a253551-0c47-41c4-b957-efccd5ec0422",
+      "lastError": null,
+      "createdAt": "2026-06-04 18:43:54",
+      "completedAt": "2026-06-04 18:43:55.153"
+    },
+    {
+      "id": "649e2175-8d34-4afb-becf-07b2a1bfc0a6",
+      "kind": "container.create",
+      "status": "succeeded",
+      "resourceId": "8f8c29d5-b5fd-4fa8-8a4a-38b86d7a12bf",
+      "lastError": null,
+      "createdAt": "2026-06-04 18:47:14",
+      "completedAt": "2026-06-04 18:47:15.526"
+    },
+    {
+      "id": "85114170-4dcd-4b28-a7b8-8cb551b424f6",
+      "kind": "container.delete",
+      "status": "succeeded",
+      "resourceId": "8f8c29d5-b5fd-4fa8-8a4a-38b86d7a12bf",
+      "lastError": null,
+      "createdAt": "2026-06-04 18:47:16",
+      "completedAt": "2026-06-04 18:47:17.319"
+    }
+  ]
+}

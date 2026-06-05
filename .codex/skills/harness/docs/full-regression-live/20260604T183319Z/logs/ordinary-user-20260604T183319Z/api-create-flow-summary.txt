@@ -1,0 +1,14 @@
+status pass-created-active-cleaned name frlive-user-20260604t183319z-alpha-cpu-mpzugakp container 6a253551-0c47-41c4-b957-efccd5ec0422 cleanup {"attempted":true,"deleted":true,"residuals":[]} error 
+login-alpha 200 
+get-effective-access 200 
+list-granted-servers 200 
+list-granted-active-images 200 
+create-container 201 queued
+wait-create-operation 200 succeeded
+wait-container-active 200 active
+list-own-after-create 200 
+quota-over-cpu-denial 403 CPU quota exceeded
+delete-container 201 queued
+wait-delete-operation 200 succeeded
+wait-container-deleted 404 Container not found
+list-own-after-cleanup 200 

@@ -1,0 +1,269 @@
+import { useState } from 'react';
+import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
+import { api } from '../../lib/api.js';
+import { Button } from '../ui/button.js';
+import { Input } from '../ui/input.js';
+import { Label } from '../ui/label.js';
+import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from '../ui/dialog.js';
+import {
+  AlertDialog, AlertDialogContent, AlertDialogHeader, AlertDialogTitle,
+  AlertDialogDescription, AlertDialogFooter, AlertDialogCancel, AlertDialogAction,
+} from '../ui/alert-dialog.js';
+import { toast } from '../../hooks/use-toast.js';
+import { queryKeys } from '../../lib/query-keys.js';
+import { FolderOpen, Network, Plus, X } from 'lucide-react';
+import type { ContainerMountView, DataDirDto, MountSourceDto, ContainerView } from '@nyabase/common';
+
+type MountInput = {
+  sourceKind: 'local' | 'remote';
+  sourceId: string;
+  dirName: string;
+  containerPath: string;
+  createIfMissing?: boolean;
+};
+
+export function MountsCard({
+  serverId,
+  containerId,
+  isRunning,
+}: {
+  serverId: string;
+  containerId: string;
+  isRunning: boolean;
+}) {
+  const qc = useQueryClient();
+  const [addOpen, setAddOpen] = useState(false);
+  const [pendingRemoveIndex, setPendingRemoveIndex] = useState<number | null>(null);
+
+  const { data: mounts = [] } = useQuery<ContainerMountView[]>({
+    queryKey: ['container-mounts', containerId],
+    queryFn: () => api.get<ContainerView>(`/v2/containers/${containerId}`).then((c) => c.mounts),
+  });
+
+  const { data: serverDirs = [] } = useQuery<DataDirDto[]>({
+    queryKey: queryKeys.dataDirs.byServer('user', serverId),
+    queryFn: () => api.get<DataDirDto[]>(`/data-dirs?serverId=${serverId}`),
+    enabled: addOpen,
+  });
+
+  const { data: mountSources = [] } = useQuery<MountSourceDto[]>({
+    queryKey: queryKeys.mountSources.byServer('user', serverId),
+    queryFn: () => api.get<MountSourceDto[]>(`/mount-sources?serverId=${serverId}`),
+  });
+
+  const patchMounts = useMutation({
+    mutationFn: (newList: MountInput[]) =>
+      api.post(`/v2/containers/${containerId}/actions/update-mounts`, newList),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['container-mounts', containerId] });
+      qc.invalidateQueries({ queryKey: queryKeys.containers.detail('user', containerId) });
+      toast({ title: isRunning ? '挂载更新已排队' : '挂载已保存（下次启动同步）' });
+    },
+    onError: (e) => toast({ title: '操作失败', description: e.message, variant: 'destructive' }),
+  });
+
+  const confirmRemove = () => {
+    if (pendingRemoveIndex === null) return;
+    const newList = mounts
+      .filter((_, i) => i !== pendingRemoveIndex)
+      .map((m): MountInput => ({
+        sourceKind: m.sourceKind,
+        sourceId: m.sourceId,
+        dirName: m.dirName,
+        containerPath: m.containerPath,
+      }));
+    patchMounts.mutate(newList);
+    setPendingRemoveIndex(null);
+  };
+
+  const handleAdd = (entry: MountInput) => {
+    const newList: MountInput[] = [
+      ...mounts.map((m): MountInput => ({
+        sourceKind: m.sourceKind,
+        sourceId: m.sourceId,
+        dirName: m.dirName,
+        containerPath: m.containerPath,
+      })),
+      entry,
+    ];
+    patchMounts.mutate(newList);
+    setAddOpen(false);
+  };
+
+  const sourceMap = new Map(mountSources.map((s) => [`${s.kind}:${s.id}`, s]));
+  const mountedSourceKeys = new Set(
+    mounts.map((m) => `${m.sourceKind}:${m.sourceId}:${m.dirName}`),
+  );
+
+  const pendingMount = pendingRemoveIndex !== null ? mounts[pendingRemoveIndex] : null;
+
+  return (
+    <div className="bg-card rounded-xl border border-border p-4">
+      <div className="flex items-center justify-between mb-3">
+        <h3 className="text-sm font-semibold text-foreground/90">数据目录挂载</h3>
+        <Button size="sm" variant="outline" className="h-7 text-xs" onClick={() => setAddOpen(true)}>
+          <Plus className="h-3 w-3 mr-1" />添加
+        </Button>
+      </div>
+
+      {mounts.length === 0 ? (
+        <p className="text-xs text-muted-foreground/70 italic">暂无挂载</p>
+      ) : (
+        <div className="space-y-2">
+          {mounts.map((m, i) => {
+            const src = sourceMap.get(`${m.sourceKind}:${m.sourceId}`);
+            return (
+              <div key={m.id}
+                className="flex items-center justify-between gap-3 rounded-lg border border-border bg-muted/50 px-3 py-2">
+                <div className="flex items-center gap-2.5 min-w-0">
+                  {m.sourceKind === 'remote'
+                    ? <Network className="h-3.5 w-3.5 text-primary shrink-0" />
+                    : <FolderOpen className="h-3.5 w-3.5 text-muted-foreground shrink-0" />}
+                  <div className="min-w-0">
+                    <div className="text-xs font-medium text-foreground/90 truncate">
+                      {src ? `${src.label} / ` : ''}{m.dirName}
+                    </div>
+                    <div className="text-xs text-muted-foreground/70 font-mono truncate">{m.containerPath}</div>
+                  </div>
+                </div>
+                <Button size="icon" variant="ghost" className="h-7 w-7 text-red-400 hover:text-red-600 shrink-0"
+                  disabled={patchMounts.isPending}
+                  onClick={() => setPendingRemoveIndex(i)}>
+                  <X className="h-3.5 w-3.5" />
+                </Button>
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      <AlertDialog open={pendingRemoveIndex !== null} onOpenChange={(v) => { if (!v) setPendingRemoveIndex(null); }}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>移除挂载</AlertDialogTitle>
+            <AlertDialogDescription>
+              确定要移除目录 &ldquo;{pendingMount?.dirName}&rdquo; 的挂载（容器路径：{pendingMount?.containerPath}）？
+              {isRunning ? '即时生效。' : '下次启动时生效。'}
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>取消</AlertDialogCancel>
+            <AlertDialogAction
+              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+              onClick={confirmRemove}
+            >
+              移除
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      <AddMountDialog
+        open={addOpen}
+        onClose={() => setAddOpen(false)}
+        onConfirm={handleAdd}
+        serverDirs={serverDirs}
+        mountSources={mountSources}
+        mountedSourceKeys={mountedSourceKeys}
+        isPending={patchMounts.isPending}
+      />
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Add mount dialog
+// ---------------------------------------------------------------------------
+
+function AddMountDialog({ open, onClose, onConfirm, serverDirs, mountSources, mountedSourceKeys, isPending }: {
+  open: boolean;
+  onClose: () => void;
+  onConfirm: (entry: MountInput) => void;
+  serverDirs: DataDirDto[];
+  mountSources: MountSourceDto[];
+  mountedSourceKeys: Set<string>;
+  isPending: boolean;
+}) {
+  const [dataDirPick, setDataDirPick] = useState('');
+  const [containerPath, setContainerPath] = useState('');
+
+  const sourceMap = new Map(mountSources.map((s) => [`${s.kind}:${s.id}`, s]));
+  const dataDirKey = (d: DataDirDto) => `${d.sourceKind}:${d.sourceId}:${d.name}`;
+  const uniqueDirs = serverDirs.filter(
+    (d, i) => serverDirs.findIndex((x) => dataDirKey(x) === dataDirKey(d)) === i,
+  );
+  const formatLabel = (d: DataDirDto) => {
+    const src = sourceMap.get(`${d.sourceKind}:${d.sourceId}`);
+    return src ? `${src.label} / ${d.name}` : `${d.sourceKind === 'local' ? '本地' : '远程'} / ${d.name}`;
+  };
+
+  const selectedDir = dataDirPick !== '' ? uniqueDirs[parseInt(dataDirPick, 10)] : undefined;
+  const alreadyMounted = selectedDir ? mountedSourceKeys.has(dataDirKey(selectedDir)) : false;
+  const canConfirm = !!selectedDir && !alreadyMounted && containerPath.trim().length > 0;
+
+  const reset = () => { setDataDirPick(''); setContainerPath(''); };
+
+  const handleConfirm = () => {
+    if (!selectedDir || !containerPath.trim()) return;
+    onConfirm({
+      sourceKind: selectedDir.sourceKind,
+      sourceId: selectedDir.sourceId,
+      dirName: selectedDir.name,
+      containerPath: containerPath.trim(),
+      createIfMissing: false,
+    });
+    reset();
+  };
+
+  const handleClose = () => { reset(); onClose(); };
+
+  return (
+    <Dialog open={open} onOpenChange={(v) => !v && handleClose()}>
+      <DialogContent className="max-w-sm">
+        <DialogHeader><DialogTitle>添加数据目录挂载</DialogTitle></DialogHeader>
+        <div className="space-y-4">
+          {uniqueDirs.length === 0 ? (
+            <p className="text-sm text-muted-foreground/70">暂无已注册的数据目录，请先在「数据目录」页面创建。</p>
+          ) : (
+            <>
+              <div className="space-y-1.5">
+                <Label className="text-sm">数据目录</Label>
+                <select
+                  className="flex h-9 w-full rounded-md border border-input bg-background px-2 text-sm"
+                  value={dataDirPick}
+                  onChange={(e) => setDataDirPick(e.target.value)}
+                >
+                  <option value="">选择数据目录</option>
+                  {uniqueDirs.map((d, i) => {
+                    const mounted = mountedSourceKeys.has(dataDirKey(d));
+                    return (
+                      <option key={dataDirKey(d)} value={String(i)} disabled={mounted}>
+                        {formatLabel(d)}{mounted ? '（已挂载）' : ''}
+                      </option>
+                    );
+                  })}
+                </select>
+              </div>
+              <div className="space-y-1.5">
+                <Label className="text-sm">容器内路径</Label>
+                <Input
+                  placeholder="/home/user/data"
+                  value={containerPath}
+                  onChange={(e) => setContainerPath(e.target.value)}
+                  onKeyDown={(e) => e.key === 'Enter' && canConfirm && handleConfirm()}
+                />
+                <p className="text-xs text-muted-foreground/70">路径不存在时自动创建</p>
+              </div>
+            </>
+          )}
+        </div>
+        <DialogFooter>
+          <Button variant="outline" onClick={handleClose}>取消</Button>
+          <Button onClick={handleConfirm} disabled={!canConfirm || isPending}>
+            {isPending ? '添加中...' : '确认添加'}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}

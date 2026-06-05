@@ -1,0 +1,18 @@
+=== mount env ===
+NYABASE_MOUNT_LOCAL_MOUNTPOINT=/data/nyabase-docker
+NYABASE_MOUNT_NFS_SERVER=10.8.96.91
+NYABASE_MOUNT_NFS_EXPORT=/data/nyabase-test-nfs-export
+=== remote cpu nfs inspect ===
+host=nyabase-test-1
+uid=0(root) gid=0(root) groups=0(root)
+path
+ls: cannot access '/data/nyabase-test-nfs-export': No such file or directory
+drwxr-xr-x 3 root root 4096 Jun  5 02:41 /mnt/nyabase-test
+exports
+services
+inactive
+inactive
+ports
+LISTEN 0      4096         0.0.0.0:111       0.0.0.0:*    users:(("rpcbind",pid=102347,fd=4),("systemd",pid=1,fd=167))
+LISTEN 0      4096            [::]:111          [::]:*    users:(("rpcbind",pid=102347,fd=6),("systemd",pid=1,fd=169))
+mount try

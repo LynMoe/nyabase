@@ -1,0 +1,218 @@
+{
+  "runId": "ult-20260604152346-81b437",
+  "apiBase": "http://localhost:3001/api",
+  "startedAt": "2026-06-04T15:23:46.098Z",
+  "commands": [],
+  "endpoints": [
+    {
+      "method": "POST",
+      "path": "/auth/login",
+      "status": 200,
+      "ok": true
+    },
+    {
+      "method": "GET",
+      "path": "/auth/me",
+      "status": 200,
+      "ok": true
+    },
+    {
+      "method": "GET",
+      "path": "/servers",
+      "status": 200,
+      "ok": true
+    },
+    {
+      "method": "GET",
+      "path": "/images",
+      "status": 200,
+      "ok": true
+    },
+    {
+      "method": "POST",
+      "path": "/users",
+      "status": 201,
+      "ok": true
+    },
+    {
+      "method": "POST",
+      "path": "/users/d356ab08-4104-4e1e-a0e4-a0733ffca9d3/server-grants/1b9c08fa-32e1-4943-8dc5-d83772cd52f9",
+      "status": 201,
+      "ok": true
+    },
+    {
+      "method": "POST",
+      "path": "/users/d356ab08-4104-4e1e-a0e4-a0733ffca9d3/image-grants",
+      "status": 400,
+      "ok": false
+    },
+    {
+      "method": "POST",
+      "path": "/auth/login",
+      "status": 200,
+      "ok": true
+    },
+    {
+      "method": "GET",
+      "path": "/auth/me",
+      "status": 200,
+      "ok": true
+    },
+    {
+      "method": "GET",
+      "path": "/me/access",
+      "status": 200,
+      "ok": true
+    },
+    {
+      "method": "GET",
+      "path": "/servers",
+      "status": 200,
+      "ok": true
+    },
+    {
+      "method": "GET",
+      "path": "/images",
+      "status": 200,
+      "ok": true
+    },
+    {
+      "method": "POST",
+      "path": "/containers",
+      "status": 403,
+      "ok": false
+    }
+  ],
+  "resources": {
+    "adminUserId": "ffc82de9-1e90-4a3c-9a9c-b4e259bb983f",
+    "serverId": "1b9c08fa-32e1-4943-8dc5-d83772cd52f9",
+    "imageId": "d66f3dac-e5bf-4ef6-837e-2454ee8951d8",
+    "userId": "d356ab08-4104-4e1e-a0e4-a0733ffca9d3",
+    "username": "ult-20260604152346-81b437-user",
+    "password": "Pwd-ult-20260604152346-81b437-123!"
+  },
+  "steps": [
+    {
+      "ts": "2026-06-04T15:23:46.098Z",
+      "name": "preflight root",
+      "apiBase": "http://localhost:3001/api"
+    },
+    {
+      "ts": "2026-06-04T15:23:46.236Z",
+      "name": "admin login for fixture",
+      "status": 200,
+      "userId": "ffc82de9-1e90-4a3c-9a9c-b4e259bb983f"
+    },
+    {
+      "ts": "2026-06-04T15:23:46.238Z",
+      "name": "admin me",
+      "username": "admin",
+      "caps": [
+        "manage_users",
+        "manage_groups",
+        "manage_servers",
+        "manage_images",
+        "manage_grants",
+        "manage_containers_any",
+        "view_audit",
+        "view_metrics_all"
+      ]
+    },
+    {
+      "ts": "2026-06-04T15:23:46.240Z",
+      "name": "server selected",
+      "serverId": "1b9c08fa-32e1-4943-8dc5-d83772cd52f9",
+      "serverName": "nyabase-test-cpu",
+      "status": "online",
+      "isGpu": false
+    },
+    {
+      "ts": "2026-06-04T15:23:46.242Z",
+      "name": "image selected",
+      "imageId": "d66f3dac-e5bf-4ef6-837e-2454ee8951d8",
+      "imageName": "murt-20260604t152317z-382edb-cpu-a",
+      "imageRef": "ubuntu:24.04"
+    },
+    {
+      "ts": "2026-06-04T15:23:46.352Z",
+      "name": "ordinary user created",
+      "userId": "d356ab08-4104-4e1e-a0e4-a0733ffca9d3",
+      "username": "ult-20260604152346-81b437-user"
+    },
+    {
+      "ts": "2026-06-04T15:23:46.362Z",
+      "name": "server grant attempt",
+      "status": 201,
+      "body": {
+        "id": "6045fc88-8fa7-4ec9-9082-a42a5dd27aa4",
+        "scope": "user",
+        "scopeId": "d356ab08-4104-4e1e-a0e4-a0733ffca9d3",
+        "serverId": "1b9c08fa-32e1-4943-8dc5-d83772cd52f9",
+        "cpuMillis": 500,
+        "memBytes": 268435456,
+        "diskBytes": 536870912,
+        "gpuMode": "none",
+        "gpuIndices": [],
+        "createdAt": "2026-06-04T15:23:46.000Z",
+        "updatedAt": "2026-06-04T15:23:46.000Z"
+      }
+    },
+    {
+      "ts": "2026-06-04T15:23:46.364Z",
+      "name": "image grant attempt",
+      "status": 400,
+      "body": {
+        "statusCode": 400,
+        "message": "serverId: Required"
+      }
+    },
+    {
+      "ts": "2026-06-04T15:23:46.469Z",
+      "name": "ordinary user login",
+      "status": 200,
+      "userId": "d356ab08-4104-4e1e-a0e4-a0733ffca9d3",
+      "username": "ult-20260604152346-81b437-user",
+      "caps": []
+    },
+    {
+      "ts": "2026-06-04T15:23:46.473Z",
+      "name": "ordinary user access",
+      "status": 200,
+      "body": {
+        "servers": [
+          {
+            "serverId": "1b9c08fa-32e1-4943-8dc5-d83772cd52f9",
+            "cpuMillis": 500,
+            "memBytes": 268435456,
+            "diskBytes": 536870912,
+            "gpuMode": "none",
+            "gpuIndices": [],
+            "allowedImageIds": []
+          }
+        ]
+      }
+    },
+    {
+      "ts": "2026-06-04T15:23:46.474Z",
+      "name": "ordinary user servers",
+      "status": 200,
+      "count": 1
+    },
+    {
+      "ts": "2026-06-04T15:23:46.475Z",
+      "name": "ordinary user images",
+      "status": 200,
+      "count": 0
+    }
+  ],
+  "failures": [
+    {
+      "ts": "2026-06-04T15:23:46.479Z",
+      "step": "main",
+      "error": "Error: POST /containers expected 201/200/202 got 403: {\"message\":\"Image not authorized on this server\",\"error\":\"Forbidden\",\"statusCode\":403}\n    at ok (file:///root/nyabase/.codex/skills/harness/docs/live-test-user/20260604-232219/artifacts/user-live-test.mjs:23:43)\n    at process.processTicksAndRejections (node:internal/process/task_queues:103:5)\n    at async file:///root/nyabase/.codex/skills/harness/docs/live-test-user/20260604-232219/artifacts/user-live-test.mjs:87:18",
+      "rootCause": "infra-or-product"
+    }
+  ],
+  "cleanup": [],
+  "finishedAt": "2026-06-04T15:23:46.479Z"
+}

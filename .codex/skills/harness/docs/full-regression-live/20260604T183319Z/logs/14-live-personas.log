@@ -1,0 +1,15 @@
+
+ RUN  v4.1.5 /root/nyabase
+
+ ✓ test/specs/live/multi-user-redteam-epsilon.spec.ts > V2 epsilon no-access live flow > denies unauthorised container and admin surfaces 256ms
+ ✓ test/specs/live/multi-user-redteam-gamma-delta-attack.spec.ts > V2 gamma/delta isolation live flow > prevents delta from mutating gamma container by containerId-only route 7292ms
+ ✓ test/specs/live/multi-user-redteam-gamma.spec.ts > V2 gamma GPU persona live flow > creates GPU container when GPU fixture exists and verifies metrics path is non-leaking 9280ms
+ ✓ test/specs/live/multi-user-redteam-delta.spec.ts > V2 delta persona live flow > creates CPU and optional GPU containers, then deletes via operation actions 18235ms
+ ✓ test/specs/live/multi-user-redteam-beta.spec.ts > V2 beta persona live flow > creates beta container and serializes mutations through operation polling 81444ms
+ ✓ test/specs/live/multi-user-redteam-alpha.spec.ts > V2 alpha persona live flow > creates active CPU container, waits actions, exercises stats/power/delete operations, and denies GPU 151789ms
+
+ Test Files  6 passed (6)
+      Tests  6 passed (6)
+   Start at  02:38:40
+   Duration  151.94s (transform 234ms, setup 0ms, import 293ms, tests 268.30s, environment 0ms)
+

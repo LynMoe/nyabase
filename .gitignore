@@ -1,0 +1,22 @@
+node_modules/
+dist/
+dist-esm/
+target/
+.env
+.env.local
+*.env
+*.tsbuildinfo
+**/.tanstack/tmp/
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+
+packages/frontend/e2e/.test-results/
+packages/frontend/e2e/.html-report/
+
+# Prevent tsc build artifacts from leaking into src/
+packages/common/src/**/*.js
+packages/common/src/**/*.js.map
+packages/common/src/**/*.d.ts
+packages/common/src/**/*.d.ts.map

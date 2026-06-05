@@ -1,0 +1,57 @@
+# ─────────────────────────────────────────────────────────────────
+# Stage 1 – builder: install all deps and compile every package
+# ─────────────────────────────────────────────────────────────────
+FROM node:22-slim AS builder
+WORKDIR /app
+
+# Build tools required for native modules (better-sqlite3, argon2)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        python3 make g++ \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN npm install -g pnpm@9.15.0 --no-update-notifier
+
+# ── Restore dependencies (cached until manifests or lockfile change) ──
+COPY package.json pnpm-workspace.yaml pnpm-lock.yaml ./
+COPY packages/common/package.json   packages/common/
+COPY packages/backend/package.json  packages/backend/
+COPY packages/frontend/package.json packages/frontend/
+COPY packages/agent/package.json    packages/agent/
+RUN pnpm install --frozen-lockfile
+
+# ── Compile all packages in dependency order ──
+COPY tsconfig.base.json ./
+COPY packages/common    packages/common
+COPY packages/backend   packages/backend
+COPY packages/frontend  packages/frontend
+RUN pnpm --filter @nyabase/common   build && \
+    pnpm --filter @nyabase/frontend build && \
+    pnpm --filter @nyabase/backend  build
+
+# Create a self-contained production deployment:
+# resolves workspace deps and retains only production node_modules
+# (native .node binaries are copied from the already-installed store)
+RUN pnpm --filter @nyabase/backend deploy --prod /deploy
+
+# ─────────────────────────────────────────────────────────────────
+# Stage 2 – runner: minimal production image (~no build tools)
+# ─────────────────────────────────────────────────────────────────
+FROM node:22-slim AS runner
+WORKDIR /app
+
+# Production node_modules with compiled native binaries
+COPY --from=builder /deploy .
+
+# pnpm deploy respects .gitignore and therefore omits dist/ directories;
+# overlay the compiled TypeScript output explicitly.
+COPY --from=builder /app/packages/backend/dist          ./dist
+COPY --from=builder /app/packages/common/dist           ./node_modules/@nyabase/common/dist
+
+# Bundle the Vite-compiled frontend; NestJS serves it as static assets
+# at process.cwd()/public (→ /app/public) with SPA fallback.
+COPY --from=builder /app/packages/frontend/dist         ./public
+
+ENV NODE_ENV=production
+EXPOSE 3001
+
+CMD ["node", "dist/main.js"]

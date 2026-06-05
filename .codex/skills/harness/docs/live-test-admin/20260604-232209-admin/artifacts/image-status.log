@@ -1,0 +1,98 @@
+{
+  "cpuA": {
+    "imageId": "1108d8a3-dfb0-48fa-8d6a-4411d3040723",
+    "name": "murt-adminlane-20260604t152325z-cpu-a",
+    "status": {
+      "status": 200,
+      "ok": true,
+      "body": [
+        {
+          "serverId": "1b9c08fa-32e1-4943-8dc5-d83772cd52f9",
+          "serverName": "nyabase-test-cpu",
+          "hostname": "nyabase-test-cpu",
+          "online": true,
+          "present": false
+        },
+        {
+          "serverId": "343488f6-2689-488a-8bf8-8c02caf25989",
+          "serverName": "nyabase-test-gpu",
+          "hostname": "nyabase-test-gpu",
+          "online": true,
+          "present": false
+        }
+      ]
+    }
+  },
+  "cpuB": {
+    "imageId": "088e0e01-188e-43f8-8248-15ca1c707ccc",
+    "name": "murt-adminlane-20260604t152325z-cpu-b-same-ref",
+    "status": {
+      "status": 200,
+      "ok": true,
+      "body": [
+        {
+          "serverId": "1b9c08fa-32e1-4943-8dc5-d83772cd52f9",
+          "serverName": "nyabase-test-cpu",
+          "hostname": "nyabase-test-cpu",
+          "online": true,
+          "present": false
+        },
+        {
+          "serverId": "343488f6-2689-488a-8bf8-8c02caf25989",
+          "serverName": "nyabase-test-gpu",
+          "hostname": "nyabase-test-gpu",
+          "online": true,
+          "present": false
+        }
+      ]
+    }
+  },
+  "inactive": {
+    "imageId": "cd581249-b745-49f1-8dc6-3f9e8154f2e2",
+    "name": "murt-adminlane-20260604t152325z-inactive",
+    "status": {
+      "status": 200,
+      "ok": true,
+      "body": [
+        {
+          "serverId": "1b9c08fa-32e1-4943-8dc5-d83772cd52f9",
+          "serverName": "nyabase-test-cpu",
+          "hostname": "nyabase-test-cpu",
+          "online": true,
+          "present": false
+        },
+        {
+          "serverId": "343488f6-2689-488a-8bf8-8c02caf25989",
+          "serverName": "nyabase-test-gpu",
+          "hostname": "nyabase-test-gpu",
+          "online": true,
+          "present": false
+        }
+      ]
+    }
+  },
+  "gpuA": {
+    "imageId": "175e174d-ff66-4976-98cf-e442d71472bf",
+    "name": "murt-adminlane-20260604t152325z-gpu-a",
+    "status": {
+      "status": 200,
+      "ok": true,
+      "body": [
+        {
+          "serverId": "1b9c08fa-32e1-4943-8dc5-d83772cd52f9",
+          "serverName": "nyabase-test-cpu",
+          "hostname": "nyabase-test-cpu",
+          "online": true,
+          "present": false
+        },
+        {
+          "serverId": "343488f6-2689-488a-8bf8-8c02caf25989",
+          "serverName": "nyabase-test-gpu",
+          "hostname": "nyabase-test-gpu",
+          "online": true,
+          "present": false
+        }
+      ]
+    }
+  }
+}

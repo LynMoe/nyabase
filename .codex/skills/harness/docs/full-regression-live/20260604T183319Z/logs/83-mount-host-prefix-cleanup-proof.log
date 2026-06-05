@@ -1,0 +1,10 @@
+prefix=mount-20260604t211944z-ef3a4f
+== product DB containers ==
+Error: in prepare, no such column: c.deletedAt
+  select c.id,c.name,c.deletedAt,l.phase,l.boundRuntimeId from containers c left
+                     ^--- error here
+== product DB data dirs ==
+== remote Docker exact prefix ==
+== remote local data dirs exact prefix ==
+== remote nfs export dirs exact prefix ==
+== remote host mounts exact prefix ==

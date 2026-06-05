@@ -1,0 +1,100 @@
+# Runtime Fingerprint
+date=2026-06-04T23:22:43+08:00
+cwd=/root/nyabase
+git_head=
+git_status=
+--- env file ---
+NODE_ENV=development
+PORT=3001
+
+# Single shared live-test SQLite database.
+DB_DRIVER=sqlite
+DB_PATH=test/runtime/db/nyabase-test.db
+DB_SYNC=true
+DB_MIGRATIONS_RUN=false
+
+JWT_SECRET=dev-secret-change-me
+
+VICTORIA_METRICS_URL=http://127.0.0.1:8428
+
+# Allow frontend dev server cross-origin requests
+CORS_ORIGIN=http://localhost:5173
+
+# Initial admin password (only used on first boot when no admin exists)
+ADMIN_INIT_PASSWORD=admin123
+
+ADMIN_USERNAME=admin
+NYABASE_BACKEND_URL=http://localhost:3001
+NYABASE_FRONTEND_URL=http://localhost:5173
+NYABASE_AGENT_BACKEND_URL=ws://10.8.96.92:3001/ws/agent
+
+# Mount-source fixture defaults. Override only when the test host layout changes.
+NYABASE_MOUNT_LOCAL_MOUNTPOINT=/data/nyabase-docker
+NYABASE_MOUNT_NFS_SERVER=10.8.96.91
+NYABASE_MOUNT_NFS_EXPORT=/data/nyabase-test-nfs-export
+--- agents config ---
+{
+  "backendHost": "10.8.96.92",
+  "backendWsUrl": "ws://10.8.96.92:3001/ws/agent",
+  "agents": [
+    {
+      "key": "cpu",
+      "name": "nyabase-test-cpu",
+      "ssh": "root@10.8.96.91",
+      "sudo": false,
+      "isGpuServer": false,
+      "parentIface": "eth0",
+      "serverIpCidr": "10.8.109.0/24",
+      "gateway": "10.8.0.1",
+      "reservedIps": ["10.8.96.91"],
+      "macvlanCidr": "10.8.0.0/16",
+      "macvlanGateway": "10.8.0.1",
+      "dockerRoot": "/data/nyabase-docker",
+      "defaultCpuMillis": 1000,
+      "defaultMemBytes": 1073741824,
+      "defaultDiskBytes": 2147483648,
+      "defaultGpuMode": "none",
+      "defaultGpuIndices": []
+    },
+    {
+      "key": "gpu",
+      "name": "nyabase-test-gpu",
+      "ssh": "lyn@10.8.1.12",
+      "sudo": true,
+      "isGpuServer": true,
+      "parentIface": "bond0",
+      "serverIpCidr": "10.8.110.0/24",
+      "gateway": "10.8.0.1",
+      "reservedIps": ["10.8.1.12"],
+      "macvlanCidr": "10.8.0.0/16",
+      "macvlanGateway": "10.8.0.1",
+      "dockerRoot": "/data0/nbTest/nyabase-docker-pquota",
+      "defaultCpuMillis": 1000,
+      "defaultMemBytes": 1073741824,
+      "defaultDiskBytes": 2147483648,
+      "defaultGpuMode": "indices",
+      "defaultGpuIndices": [0, 1]
+    }
+  ]
+}
+--- pids ---
+test/runtime/logs/backend.pid 2934288 2934288       1 -   node -r tsconfig-paths/register dist/main.js
+test/runtime/logs/frontend.pid 2934372 2934372       1 -   node /usr/bin/pnpm exec vite --port 5173 --host 0.0.0.0 --strictPort
+--- ports ---
+State  Recv-Q Send-Q Local Address:Port Peer Address:PortProcess                                   
+LISTEN 0      511          0.0.0.0:5173      0.0.0.0:*    users:(("node",pid=2934387,fd=22))       
+LISTEN 0      4096       127.0.0.1:8428      0.0.0.0:*    users:(("docker-proxy",pid=2839407,fd=8))
+LISTEN 0      511                *:3001            *:*    users:(("node",pid=2934288,fd=22))       
+--- db files ---
+total 792
+-rw-r--r-- 1 root root 811008 Jun  4 23:22 nyabase-test.db
+--- runtime tree ---
+test/runtime/db/nyabase-test.db 811008 2026-06-04T23:22:40.4140445210
+test/runtime/local-services.json 422 2026-06-04T23:22:32.7298516600
+test/runtime/logs/backend.log 19687 2026-06-04T23:22:31.2978157180
+test/runtime/logs/backend.pid 8 2026-06-04T23:22:30.5977981480
+test/runtime/logs/frontend.log 192 2026-06-04T23:22:32.4098436270
+test/runtime/logs/frontend.pid 8 2026-06-04T23:22:31.6418243510
+test/runtime/logs/smoke-auth.out 43 2026-06-04T23:22:40.2300399040
+test/runtime/logs/smoke-frontend.html 611 2026-06-04T23:22:40.2420402040
+--- common artifact guard ---

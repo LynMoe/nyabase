@@ -1,0 +1,855 @@
+{
+  "runId": "20260604093841",
+  "prefix": "ou20260604093841",
+  "frontend": "http://localhost:5173",
+  "api": "http://localhost:5173/api",
+  "startedAt": "2026-06-04T09:38:41.334Z",
+  "finishedAt": "2026-06-04T09:38:45.073Z",
+  "counts": {
+    "passed": 15,
+    "failed": 4,
+    "skipped": 0
+  },
+  "created": {
+    "users": [
+      {
+        "id": "d50b6c6f-7259-422b-8f8d-e00bf91bdb89",
+        "username": "ou20260604093841a",
+        "password": "ou20260604093841A123!"
+      },
+      {
+        "id": "4de1a395-f3b3-4205-a50e-e539db8cd056",
+        "username": "ou20260604093841b",
+        "password": "ou20260604093841B123!"
+      }
+    ],
+    "sshKeys": [
+      {
+        "userId": "d50b6c6f-7259-422b-8f8d-e00bf91bdb89",
+        "keyId": "6ce6d6f1-0311-45d5-8b41-2cccb28f878d",
+        "name": "ou20260604093841-invalid",
+        "invalid": true
+      },
+      {
+        "userId": "d50b6c6f-7259-422b-8f8d-e00bf91bdb89",
+        "keyId": "6c8577ef-7375-4648-b3ed-9bfd1d484790",
+        "name": "ou20260604093841-user-a-key"
+      }
+    ],
+    "apiTokens": [
+      {
+        "userId": "d50b6c6f-7259-422b-8f8d-e00bf91bdb89",
+        "tokenId": "edbdca8b-8011-422f-990f-d372b3086355",
+        "name": "ou20260604093841-api-token"
+      }
+    ],
+    "containers": [
+      {
+        "actor": "userA",
+        "serverId": "05cea385-d6ca-490a-a126-e00d0ae23b70",
+        "containerId": "5e1c4503-d766-47f4-960f-7c067a694899",
+        "name": "ou20260604093841a"
+      },
+      {
+        "actor": "userB",
+        "serverId": "db1112fe-1c55-4314-9511-6d8510c523c2",
+        "containerId": "ce8d4533-3d6c-477c-bd0b-1909db358933",
+        "name": "ou20260604093841b"
+      }
+    ]
+  },
+  "deleted": {
+    "users": [
+      {
+        "id": "d50b6c6f-7259-422b-8f8d-e00bf91bdb89",
+        "username": "ou20260604093841a"
+      },
+      {
+        "id": "4de1a395-f3b3-4205-a50e-e539db8cd056",
+        "username": "ou20260604093841b"
+      }
+    ],
+    "sshKeys": [
+      {
+        "userId": "d50b6c6f-7259-422b-8f8d-e00bf91bdb89",
+        "keyId": "6ce6d6f1-0311-45d5-8b41-2cccb28f878d",
+        "invalid": true
+      },
+      {
+        "userId": "d50b6c6f-7259-422b-8f8d-e00bf91bdb89",
+        "keyId": "6c8577ef-7375-4648-b3ed-9bfd1d484790"
+      }
+    ],
+    "apiTokens": [
+      {
+        "userId": "d50b6c6f-7259-422b-8f8d-e00bf91bdb89",
+        "tokenId": "edbdca8b-8011-422f-990f-d372b3086355"
+      }
+    ],
+    "containers": []
+  },
+  "screenshots": [
+    "/root/nyabase/.codex/skills/harness/docs/multi-user-functional-test/20260604T092833Z/ordinary-user-profile.png",
+    "/root/nyabase/.codex/skills/harness/docs/multi-user-functional-test/20260604T092833Z/ordinary-user-users-page-denied.png"
+  ],
+  "steps": [
+    {
+      "name": "admin setup login",
+      "result": "pass",
+      "detail": {
+        "status": 200,
+        "adminUserId": "75f36ff6-307d-4bec-a0da-dc476ff7b462",
+        "adminCaps": [
+          "manage_users",
+          "manage_groups",
+          "manage_servers",
+          "manage_images",
+          "manage_grants",
+          "manage_containers_any",
+          "view_audit",
+          "view_metrics_all"
+        ]
+      },
+      "at": "2026-06-04T09:38:41.461Z"
+    },
+    {
+      "name": "setup inventory selected",
+      "result": "pass",
+      "detail": {
+        "servers": [
+          {
+            "id": "05cea385-d6ca-490a-a126-e00d0ae23b70",
+            "name": "nyabase-cpu-batch-20260601T163636Z",
+            "status": "online"
+          },
+          {
+            "id": "db1112fe-1c55-4314-9511-6d8510c523c2",
+            "name": "nyabase-gpu-batch-20260601T163636Z",
+            "status": "online"
+          }
+        ],
+        "images": [
+          {
+            "id": "e6c7a01f-4431-4ac4-885e-bcf6ab755c60",
+            "name": "Ubuntu 24.04",
+            "isActive": true
+          },
+          {
+            "id": "890ef43a-21bf-404d-82d8-7f4424ac3d67",
+            "name": "ubuntu-test",
+            "isActive": true
+          },
+          {
+            "id": "39c49b91-c36a-4660-80db-4d7c426555a2",
+            "name": "admintest-20260604t093308-image",
+            "isActive": true
+          },
+          {
+            "id": "59f6b47d-5b38-41b6-aff9-12193a4eeae5",
+            "name": "admintest-20260604t093408-image",
+            "isActive": true
+          }
+        ],
+        "selected": {
+          "userA": {
+            "serverId": "05cea385-d6ca-490a-a126-e00d0ae23b70",
+            "imageId": "e6c7a01f-4431-4ac4-885e-bcf6ab755c60"
+          },
+          "userB": {
+            "serverId": "db1112fe-1c55-4314-9511-6d8510c523c2",
+            "imageId": "890ef43a-21bf-404d-82d8-7f4424ac3d67"
+          }
+        }
+      },
+      "at": "2026-06-04T09:38:41.467Z"
+    },
+    {
+      "name": "create user ou20260604093841a",
+      "result": "pass",
+      "detail": {
+        "status": 201,
+        "id": "d50b6c6f-7259-422b-8f8d-e00bf91bdb89",
+        "username": "ou20260604093841a",
+        "groups": [
+          "Users"
+        ]
+      },
+      "at": "2026-06-04T09:38:41.573Z"
+    },
+    {
+      "name": "create user ou20260604093841b",
+      "result": "pass",
+      "detail": {
+        "status": 201,
+        "id": "4de1a395-f3b3-4205-a50e-e539db8cd056",
+        "username": "ou20260604093841b",
+        "groups": [
+          "Users"
+        ]
+      },
+      "at": "2026-06-04T09:38:41.675Z"
+    },
+    {
+      "name": "grant access d50b6c6f-7259-422b-8f8d-e00bf91bdb89",
+      "result": "pass",
+      "detail": {
+        "serverGrantStatus": 201,
+        "imageGrantStatus": 201,
+        "userId": "d50b6c6f-7259-422b-8f8d-e00bf91bdb89",
+        "serverId": "05cea385-d6ca-490a-a126-e00d0ae23b70",
+        "imageId": "e6c7a01f-4431-4ac4-885e-bcf6ab755c60",
+        "quota": {
+          "cpuMillis": 750,
+          "memBytes": 268435456,
+          "diskBytes": 1073741824,
+          "gpuMode": "none",
+          "gpuIndices": []
+        }
+      },
+      "at": "2026-06-04T09:38:41.686Z"
+    },
+    {
+      "name": "grant access 4de1a395-f3b3-4205-a50e-e539db8cd056",
+      "result": "pass",
+      "detail": {
+        "serverGrantStatus": 201,
+        "imageGrantStatus": 201,
+        "userId": "4de1a395-f3b3-4205-a50e-e539db8cd056",
+        "serverId": "db1112fe-1c55-4314-9511-6d8510c523c2",
+        "imageId": "890ef43a-21bf-404d-82d8-7f4424ac3d67",
+        "quota": {
+          "cpuMillis": 500,
+          "memBytes": 201326592,
+          "diskBytes": 1073741824,
+          "gpuMode": "none",
+          "gpuIndices": []
+        }
+      },
+      "at": "2026-06-04T09:38:41.696Z"
+    },
+    {
+      "name": "user A identity and ordinary capabilities",
+      "result": "pass",
+      "detail": {
+        "loginStatus": 200,
+        "meStatus": 200,
+        "userId": "d50b6c6f-7259-422b-8f8d-e00bf91bdb89",
+        "username": "ou20260604093841a",
+        "capabilities": [],
+        "groups": [
+          "Users"
+        ]
+      },
+      "at": "2026-06-04T09:38:41.898Z"
+    },
+    {
+      "name": "user B identity and ordinary capabilities",
+      "result": "pass",
+      "detail": {
+        "loginStatus": 200,
+        "meStatus": 200,
+        "userId": "4de1a395-f3b3-4205-a50e-e539db8cd056",
+        "username": "ou20260604093841b",
+        "capabilities": [],
+        "groups": [
+          "Users"
+        ]
+      },
+      "at": "2026-06-04T09:38:41.899Z"
+    },
+    {
+      "name": "invalid SSH key accepted at profile user API",
+      "result": "fail",
+      "detail": {
+        "method": "POST",
+        "path": "/users/d50b6c6f-7259-422b-8f8d-e00bf91bdb89/ssh-keys",
+        "expected": "400 Bad Request for malformed public key text",
+        "actual": "201",
+        "body": {
+          "id": "6ce6d6f1-0311-45d5-8b41-2cccb28f878d",
+          "userId": "d50b6c6f-7259-422b-8f8d-e00bf91bdb89",
+          "name": "ou20260604093841-invalid",
+          "keyText": "not-an-ssh-public-key",
+          "createdAt": "2026-06-04T09:38:42.412Z"
+        }
+      },
+      "at": "2026-06-04T09:38:42.413Z"
+    },
+    {
+      "name": "self-service profile, password, API token, and SSH key operations",
+      "result": "pass",
+      "detail": {
+        "noCurrentPasswordStatus": 400,
+        "wrongCurrentPasswordStatus": 401,
+        "statusMutationResult": "active",
+        "passwordChangeStatus": 200,
+        "invalidSshStatus": 201,
+        "addSshStatus": 201,
+        "listSshCount": 1,
+        "crossUserSshStatuses": {
+          "list": 403,
+          "post": 403,
+          "delete": 403
+        },
+        "apiTokenStatuses": {
+          "create": 201,
+          "use": 200,
+          "delete": 204,
+          "afterDelete": 401
+        }
+      },
+      "at": "2026-06-04T09:38:42.436Z"
+    },
+    {
+      "name": "admin-lane handoff beta ordinary direct-grant session",
+      "result": "pass",
+      "detail": {
+        "credentialSource": ".codex/skills/harness/docs/multi-user-functional-test/20260604T092833Z/admin-lane.md",
+        "username": "admintest-20260604t093408-beta",
+        "userId": "be32921a-b857-4880-9486-fd47cc04e6cd",
+        "capabilities": [],
+        "access": {
+          "servers": [
+            {
+              "serverId": "5336594b-4f9a-4cef-b389-3ef9aa1eca78",
+              "cpuMillis": 500,
+              "memBytes": 268435456,
+              "diskBytes": 134217728,
+              "gpuMode": "none",
+              "gpuIndices": [],
+              "allowedImageIds": [
+                "59f6b47d-5b38-41b6-aff9-12193a4eeae5"
+              ]
+            }
+          ]
+        },
+        "serverIds": [
+          "5336594b-4f9a-4cef-b389-3ef9aa1eca78"
+        ],
+        "imageIds": [
+          "59f6b47d-5b38-41b6-aff9-12193a4eeae5"
+        ],
+        "denialStatuses": {
+          "users": 403,
+          "groups": 403,
+          "audit": 403
+        }
+      },
+      "at": "2026-06-04T09:38:42.550Z"
+    },
+    {
+      "name": "ordinary user denied admin pages/APIs and cross-user APIs",
+      "result": "pass",
+      "detail": {
+        "endpointStatuses": [
+          {
+            "method": "GET",
+            "path": "/users",
+            "status": 403
+          },
+          {
+            "method": "GET",
+            "path": "/users/4de1a395-f3b3-4205-a50e-e539db8cd056",
+            "status": 403
+          },
+          {
+            "method": "POST",
+            "path": "/users",
+            "status": 403
+          },
+          {
+            "method": "DELETE",
+            "path": "/users/4de1a395-f3b3-4205-a50e-e539db8cd056",
+            "status": 403
+          },
+          {
+            "method": "GET",
+            "path": "/groups",
+            "status": 403
+          },
+          {
+            "method": "POST",
+            "path": "/groups",
+            "status": 403
+          },
+          {
+            "method": "GET",
+            "path": "/users/d50b6c6f-7259-422b-8f8d-e00bf91bdb89/effective-access",
+            "status": 403
+          },
+          {
+            "method": "GET",
+            "path": "/users/d50b6c6f-7259-422b-8f8d-e00bf91bdb89/server-grants",
+            "status": 403
+          },
+          {
+            "method": "POST",
+            "path": "/users/d50b6c6f-7259-422b-8f8d-e00bf91bdb89/server-grants/db1112fe-1c55-4314-9511-6d8510c523c2",
+            "status": 403
+          },
+          {
+            "method": "GET",
+            "path": "/users/d50b6c6f-7259-422b-8f8d-e00bf91bdb89/image-grants",
+            "status": 403
+          },
+          {
+            "method": "POST",
+            "path": "/users/d50b6c6f-7259-422b-8f8d-e00bf91bdb89/image-grants",
+            "status": 403
+          },
+          {
+            "method": "GET",
+            "path": "/servers/all-disks",
+            "status": 403
+          },
+          {
+            "method": "POST",
+            "path": "/servers",
+            "status": 403
+          },
+          {
+            "method": "POST",
+            "path": "/servers/05cea385-d6ca-490a-a126-e00d0ae23b70/regenerate-token",
+            "status": 403
+          },
+          {
+            "method": "PATCH",
+            "path": "/servers/05cea385-d6ca-490a-a126-e00d0ae23b70",
+            "status": 403
+          },
+          {
+            "method": "POST",
+            "path": "/servers/05cea385-d6ca-490a-a126-e00d0ae23b70/disks",
+            "status": 403
+          },
+          {
+            "method": "GET",
+            "path": "/images/e6c7a01f-4431-4ac4-885e-bcf6ab755c60/status",
+            "status": 403
+          },
+          {
+            "method": "POST",
+            "path": "/images",
+            "status": 403
+          },
+          {
+            "method": "PATCH",
+            "path": "/images/e6c7a01f-4431-4ac4-885e-bcf6ab755c60",
+            "status": 403
+          },
+          {
+            "method": "DELETE",
+            "path": "/images/e6c7a01f-4431-4ac4-885e-bcf6ab755c60",
+            "status": 403
+          },
+          {
+            "method": "GET",
+            "path": "/audit?limit=10",
+            "status": 403
+          },
+          {
+            "method": "GET",
+            "path": "/metrics/servers/db1112fe-1c55-4314-9511-6d8510c523c2/users?range=1h",
+            "status": 404
+          },
+          {
+            "method": "GET",
+            "path": "/metrics/servers/db1112fe-1c55-4314-9511-6d8510c523c2/containers?range=1h",
+            "status": 404
+          }
+        ],
+        "crossUserStatuses": {
+          "getUserB": 403,
+          "patchUserB": 403,
+          "deleteSelf": 403
+        }
+      },
+      "at": "2026-06-04T09:38:42.595Z"
+    },
+    {
+      "name": "user A cannot read ungranted server detail",
+      "result": "pass",
+      "detail": {
+        "status": 404,
+        "path": "/servers/db1112fe-1c55-4314-9511-6d8510c523c2"
+      },
+      "at": "2026-06-04T09:38:42.603Z"
+    },
+    {
+      "name": "user A can read ungranted image detail",
+      "result": "fail",
+      "detail": {
+        "method": "GET",
+        "path": "/images/890ef43a-21bf-404d-82d8-7f4424ac3d67",
+        "expected": "403 Forbidden for image not present in user /images list or effective access",
+        "actual": "200",
+        "body": {
+          "id": "890ef43a-21bf-404d-82d8-7f4424ac3d67",
+          "name": "ubuntu-test",
+          "dockerImage": "ubuntu:22.04",
+          "defaultUser": "root",
+          "defaultShell": "/bin/bash",
+          "defaultUid": 0,
+          "description": null,
+          "entrypoint": "sleep",
+          "cmd": "infinity",
+          "isActive": true,
+          "createdAt": "2026-05-16T11:58:45.000Z",
+          "updatedAt": "2026-05-16T13:42:51.000Z"
+        }
+      },
+      "at": "2026-06-04T09:38:42.605Z"
+    },
+    {
+      "name": "user A cannot create on user B resource slice",
+      "result": "pass",
+      "detail": {
+        "status": 403,
+        "body": {
+          "message": "No access to this server",
+          "error": "Forbidden",
+          "statusCode": 403
+        }
+      },
+      "at": "2026-06-04T09:38:42.608Z"
+    },
+    {
+      "name": "per-user server/image/access visibility",
+      "result": "pass",
+      "detail": {
+        "userA": {
+          "access": {
+            "servers": [
+              {
+                "serverId": "05cea385-d6ca-490a-a126-e00d0ae23b70",
+                "cpuMillis": 750,
+                "memBytes": 268435456,
+                "diskBytes": 1073741824,
+                "gpuMode": "none",
+                "gpuIndices": [],
+                "allowedImageIds": [
+                  "e6c7a01f-4431-4ac4-885e-bcf6ab755c60"
+                ]
+              }
+            ]
+          },
+          "serverIds": [
+            "05cea385-d6ca-490a-a126-e00d0ae23b70"
+          ],
+          "imageIds": [
+            "e6c7a01f-4431-4ac4-885e-bcf6ab755c60"
+          ],
+          "ungrantedServerStatus": 404,
+          "ungrantedImageStatus": 200,
+          "createUngrantedStatus": 403
+        },
+        "userB": {
+          "access": {
+            "servers": [
+              {
+                "serverId": "db1112fe-1c55-4314-9511-6d8510c523c2",
+                "cpuMillis": 500,
+                "memBytes": 201326592,
+                "diskBytes": 1073741824,
+                "gpuMode": "none",
+                "gpuIndices": [],
+                "allowedImageIds": [
+                  "890ef43a-21bf-404d-82d8-7f4424ac3d67"
+                ]
+              }
+            ]
+          },
+          "serverIds": [
+            "db1112fe-1c55-4314-9511-6d8510c523c2"
+          ],
+          "imageIds": [
+            "890ef43a-21bf-404d-82d8-7f4424ac3d67"
+          ]
+        }
+      },
+      "at": "2026-06-04T09:38:42.608Z"
+    },
+    {
+      "name": "per-user container visibility and cross-user container denial",
+      "result": "pass",
+      "detail": {
+        "createStatuses": {
+          "userA": 201,
+          "userB": 201
+        },
+        "created": [
+          {
+            "actor": "userA",
+            "container": {
+              "id": "5e1c4503-d766-47f4-960f-7c067a694899",
+              "containerId": "5e1c4503-d766-47f4-960f-7c067a694899",
+              "serverId": "05cea385-d6ca-490a-a126-e00d0ae23b70",
+              "ownerId": "d50b6c6f-7259-422b-8f8d-e00bf91bdb89",
+              "name": "ou20260604093841a",
+              "imageId": "e6c7a01f-4431-4ac4-885e-bcf6ab755c60",
+              "status": "unknown",
+              "lifecycle": {
+                "containerId": "5e1c4503-d766-47f4-960f-7c067a694899",
+                "dockerId": null,
+                "phase": "creating",
+                "powerIntent": "running",
+                "specGeneration": 1,
+                "observedSpecGeneration": null,
+                "stale": true,
+                "drift": [
+                  {
+                    "kind": "runtime_missing"
+                  }
+                ]
+              }
+            }
+          },
+          {
+            "actor": "userB",
+            "container": {
+              "id": "ce8d4533-3d6c-477c-bd0b-1909db358933",
+              "containerId": "ce8d4533-3d6c-477c-bd0b-1909db358933",
+              "serverId": "db1112fe-1c55-4314-9511-6d8510c523c2",
+              "ownerId": "4de1a395-f3b3-4205-a50e-e539db8cd056",
+              "name": "ou20260604093841b",
+              "imageId": "890ef43a-21bf-404d-82d8-7f4424ac3d67",
+              "status": "unknown",
+              "lifecycle": {
+                "containerId": "ce8d4533-3d6c-477c-bd0b-1909db358933",
+                "dockerId": null,
+                "phase": "creating",
+                "powerIntent": "running",
+                "specGeneration": 1,
+                "observedSpecGeneration": null,
+                "stale": true,
+                "drift": [
+                  {
+                    "kind": "runtime_missing"
+                  }
+                ]
+              }
+            }
+          }
+        ],
+        "userAOwnContainerSummaries": [
+          {
+            "id": "5e1c4503-d766-47f4-960f-7c067a694899",
+            "containerId": "5e1c4503-d766-47f4-960f-7c067a694899",
+            "serverId": "05cea385-d6ca-490a-a126-e00d0ae23b70",
+            "ownerId": "d50b6c6f-7259-422b-8f8d-e00bf91bdb89",
+            "name": "ou20260604093841a",
+            "imageId": "e6c7a01f-4431-4ac4-885e-bcf6ab755c60",
+            "status": "unknown",
+            "lifecycle": {
+              "containerId": "5e1c4503-d766-47f4-960f-7c067a694899",
+              "dockerId": null,
+              "phase": "creating",
+              "powerIntent": "running",
+              "specGeneration": 1,
+              "observedSpecGeneration": null,
+              "stale": true,
+              "drift": [
+                {
+                  "kind": "runtime_missing"
+                }
+              ]
+            }
+          }
+        ],
+        "userBOwnContainerSummaries": [
+          {
+            "id": "ce8d4533-3d6c-477c-bd0b-1909db358933",
+            "containerId": "ce8d4533-3d6c-477c-bd0b-1909db358933",
+            "serverId": "db1112fe-1c55-4314-9511-6d8510c523c2",
+            "ownerId": "4de1a395-f3b3-4205-a50e-e539db8cd056",
+            "name": "ou20260604093841b",
+            "imageId": "890ef43a-21bf-404d-82d8-7f4424ac3d67",
+            "status": "unknown",
+            "lifecycle": {
+              "containerId": "ce8d4533-3d6c-477c-bd0b-1909db358933",
+              "dockerId": null,
+              "phase": "creating",
+              "powerIntent": "running",
+              "specGeneration": 1,
+              "observedSpecGeneration": null,
+              "stale": true,
+              "drift": [
+                {
+                  "kind": "runtime_missing"
+                }
+              ]
+            }
+          }
+        ],
+        "crossAccessStatuses": {
+          "userAContainerFromB": {
+            "get": 403,
+            "delete": 403
+          },
+          "userBContainerFromA": {
+            "get": 403,
+            "delete": 403
+          }
+        }
+      },
+      "at": "2026-06-04T09:38:42.654Z"
+    },
+    {
+      "name": "ordinary user can see user creation UI on /users direct URL",
+      "result": "fail",
+      "detail": {
+        "usersPageText": "nyabase\n\nou20260604093841 user A updated\n\nou20260604093841a\n\n用户中心\n监控大屏\n容器\n数据目录\n跟随系统\n退出登录\n用户管理\n\n0 个账号\n\n添加用户\n用户名\t显示名\t用户组\t状态\t创建时间\t"
+      },
+      "at": "2026-06-04T09:38:45.018Z"
+    },
+    {
+      "name": "harness failure",
+      "result": "fail",
+      "detail": {
+        "error": {
+          "name": "Error",
+          "message": "ordinary user can see user creation UI on /users direct URL",
+          "stack": "Error: ordinary user can see user creation UI on /users direct URL\n    at expect (file:///root/nyabase/.codex/skills/harness/docs/multi-user-functional-test/20260604T092833Z/ordinary-user-lane.spec.mjs:854:11)\n    at verifyFrontendOrdinaryUser (file:///root/nyabase/.codex/skills/harness/docs/multi-user-functional-test/20260604T092833Z/ordinary-user-lane.spec.mjs:721:5)\n    at async main (file:///root/nyabase/.codex/skills/harness/docs/multi-user-functional-test/20260604T092833Z/ordinary-user-lane.spec.mjs:148:5)"
+        }
+      },
+      "at": "2026-06-04T09:38:45.074Z"
+    }
+  ],
+  "findings": [
+    {
+      "title": "invalid SSH key accepted at profile user API",
+      "observed": "POST /users/d50b6c6f-7259-422b-8f8d-e00bf91bdb89/ssh-keys returned 201 and persisted keyText \"not-an-ssh-public-key\".",
+      "expected": "Malformed SSH public keys should be rejected before persistence.",
+      "impact": "Users can save unusable or arbitrary strings as SSH keys; container SSH sync may receive invalid authorized_keys material.",
+      "reproduction": [
+        "Login as ordinary user ou20260604093841a.",
+        "POST /api/users/d50b6c6f-7259-422b-8f8d-e00bf91bdb89/ssh-keys with {\"name\":\"ou20260604093841-invalid\",\"keyText\":\"not-an-ssh-public-key\"}.",
+        "Observe 201 with a persisted SSH-key record instead of 400."
+      ],
+      "evidence": {
+        "method": "POST",
+        "path": "/users/d50b6c6f-7259-422b-8f8d-e00bf91bdb89/ssh-keys",
+        "expected": "400 Bad Request for malformed public key text",
+        "actual": "201",
+        "body": {
+          "id": "6ce6d6f1-0311-45d5-8b41-2cccb28f878d",
+          "userId": "d50b6c6f-7259-422b-8f8d-e00bf91bdb89",
+          "name": "ou20260604093841-invalid",
+          "keyText": "not-an-ssh-public-key",
+          "createdAt": "2026-06-04T09:38:42.412Z"
+        }
+      }
+    },
+    {
+      "title": "user A can read ungranted image detail",
+      "observed": "GET /images/890ef43a-21bf-404d-82d8-7f4424ac3d67 returned 200 with full image metadata, while /images for the same user did not include that image.",
+      "expected": "Image detail authorization should be at least as restrictive as /images list and effective access.",
+      "impact": "Ordinary users can inspect image metadata outside their visible/usable grant set.",
+      "reproduction": [
+        "Login as ordinary user ou20260604093841a.",
+        "Confirm GET /api/images only includes e6c7a01f-4431-4ac4-885e-bcf6ab755c60.",
+        "GET /api/images/890ef43a-21bf-404d-82d8-7f4424ac3d67.",
+        "Observe 200 with image metadata instead of 403."
+      ],
+      "evidence": {
+        "method": "GET",
+        "path": "/images/890ef43a-21bf-404d-82d8-7f4424ac3d67",
+        "expected": "403 Forbidden for image not present in user /images list or effective access",
+        "actual": "200",
+        "body": {
+          "id": "890ef43a-21bf-404d-82d8-7f4424ac3d67",
+          "name": "ubuntu-test",
+          "dockerImage": "ubuntu:22.04",
+          "defaultUser": "root",
+          "defaultShell": "/bin/bash",
+          "defaultUid": 0,
+          "description": null,
+          "entrypoint": "sleep",
+          "cmd": "infinity",
+          "isActive": true,
+          "createdAt": "2026-05-16T11:58:45.000Z",
+          "updatedAt": "2026-05-16T13:42:51.000Z"
+        }
+      }
+    },
+    {
+      "title": "ordinary user can see user creation UI on /users direct URL",
+      "observed": {
+        "usersPageText": "nyabase\n\nou20260604093841 user A updated\n\nou20260604093841a\n\n用户中心\n监控大屏\n容器\n数据目录\n跟随系统\n退出登录\n用户管理\n\n0 个账号\n\n添加用户\n用户名\t显示名\t用户组\t状态\t创建时间\t"
+      },
+      "expected": "Condition should hold for ordinary-user isolation and self-service behavior.",
+      "impact": "Potential product authorization or self-service regression.",
+      "evidence": {
+        "usersPageText": "nyabase\n\nou20260604093841 user A updated\n\nou20260604093841a\n\n用户中心\n监控大屏\n容器\n数据目录\n跟随系统\n退出登录\n用户管理\n\n0 个账号\n\n添加用户\n用户名\t显示名\t用户组\t状态\t创建时间\t"
+      }
+    }
+  ],
+  "cleanup": [
+    {
+      "kind": "container",
+      "id": "ce8d4533-3d6c-477c-bd0b-1909db358933",
+      "name": "ou20260604093841b",
+      "status": 409,
+      "body": {
+        "message": "Container has not been bound to Docker yet",
+        "error": "Conflict",
+        "statusCode": 409
+      }
+    },
+    {
+      "kind": "container",
+      "id": "5e1c4503-d766-47f4-960f-7c067a694899",
+      "name": "ou20260604093841a",
+      "status": 409,
+      "body": {
+        "message": "Container has not been bound to Docker yet",
+        "error": "Conflict",
+        "statusCode": 409
+      }
+    },
+    {
+      "kind": "user",
+      "id": "d50b6c6f-7259-422b-8f8d-e00bf91bdb89",
+      "username": "ou20260604093841a",
+      "status": 204
+    },
+    {
+      "kind": "user",
+      "id": "4de1a395-f3b3-4205-a50e-e539db8cd056",
+      "username": "ou20260604093841b",
+      "status": 204
+    },
+    {
+      "kind": "container",
+      "id": "ce8d4533-3d6c-477c-bd0b-1909db358933",
+      "name": "ou20260604093841b",
+      "status": 401,
+      "body": {
+        "message": "Unauthorized",
+        "statusCode": 401
+      }
+    },
+    {
+      "kind": "container",
+      "id": "5e1c4503-d766-47f4-960f-7c067a694899",
+      "name": "ou20260604093841a",
+      "status": 401,
+      "body": {
+        "message": "Unauthorized",
+        "statusCode": 401
+      }
+    },
+    {
+      "kind": "user",
+      "id": "d50b6c6f-7259-422b-8f8d-e00bf91bdb89",
+      "username": "ou20260604093841a",
+      "status": 404
+    },
+    {
+      "kind": "user",
+      "id": "4de1a395-f3b3-4205-a50e-e539db8cd056",
+      "username": "ou20260604093841b",
+      "status": 404
+    }
+  ]
+}

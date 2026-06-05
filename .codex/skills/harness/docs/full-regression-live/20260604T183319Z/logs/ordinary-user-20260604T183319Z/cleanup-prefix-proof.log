@@ -1,0 +1,18 @@
+{
+  "prefix": "frlive-user-20260604t183319z-",
+  "totalContainerRows": 2,
+  "activeContainerRows": 0,
+  "operations": 4,
+  "containers": [
+    {
+      "id": "6a253551-0c47-41c4-b957-efccd5ec0422",
+      "name": "frlive-user-20260604t183319z-alpha-cpu-mpzugakp",
+      "deletedAt": "2026-06-04 18:43:55.154"
+    },
+    {
+      "id": "8f8c29d5-b5fd-4fa8-8a4a-38b86d7a12bf",
+      "name": "frlive-user-20260604t183319z-gamma-gpucount-mpzuklzc",
+      "deletedAt": "2026-06-04 18:47:17.320"
+    }
+  ]
+}

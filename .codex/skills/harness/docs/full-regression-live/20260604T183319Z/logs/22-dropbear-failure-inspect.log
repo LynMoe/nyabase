@@ -1,0 +1,389 @@
+=== dropbear runtime files ===
+2026-06-05 02:46:51.3995804790 test/runtime/dropbear/20260604t184441z-5fdfdd/dropbear-live-report.redacted.json
+2026-06-05 02:46:51.3995804790 test/runtime/dropbear/20260604t184441z-5fdfdd/dropbear-live-report.redacted.md
+=== dropbear reports grep ===
+test/runtime/dropbear/20260604t184441z-5fdfdd/dropbear-live-report.redacted.md:1:# Dropbear Live Runtime Report
+test/runtime/dropbear/20260604t184441z-5fdfdd/dropbear-live-report.redacted.md:32:- container cleanup failed dropbear-live-20260604t184441z-5fdfdd-enabled:1da58d43-b4c POST /v2/containers/1da58d43-b4c2-4d3f-86b4-ae0470c4a6e2 status=404 body={"message":"Cannot POST /api/v2/containers/1da58d43-b4c2-4d3f-86b4-ae0470c4a6e2","error":"Not Found","statusCode":404}
+test/runtime/dropbear/20260604t184441z-5fdfdd/dropbear-live-report.redacted.md:64:- live Dropbear user-state runtime on CPU agent: expected SSH running state for create-time enabled container: expected null to be truthy (product)
+test/runtime/dropbear/20260604t184441z-5fdfdd/dropbear-live-report.redacted.json:10:    "failed": 1,
+test/runtime/dropbear/20260604t184441z-5fdfdd/dropbear-live-report.redacted.json:42:  "sshKeys": [
+test/runtime/dropbear/20260604t184441z-5fdfdd/dropbear-live-report.redacted.json:151:      "path": "/users/0b181d6e-d41e-4b58-98ec-2ded05e36e66/ssh-keys",
+test/runtime/dropbear/20260604t184441z-5fdfdd/dropbear-live-report.redacted.json:169:        "sshServerEnabled": true
+test/runtime/dropbear/20260604t184441z-5fdfdd/dropbear-live-report.redacted.json:173:  "sshAttempts": [],
+test/runtime/dropbear/20260604t184441z-5fdfdd/dropbear-live-report.redacted.json:181:    "container cleanup failed dropbear-live-20260604t184441z-5fdfdd-enabled:1da58d43-b4c POST /v2/containers/1da58d43-b4c2-4d3f-86b4-ae0470c4a6e2 status=404 body={\"message\":\"Cannot POST /api/v2/containers/1da58d43-b4c2-4d3f-86b4-ae0470c4a6e2\",\"error\":\"Not Found\",\"statusCode\":404}",
+test/runtime/dropbear/20260604t184441z-5fdfdd/dropbear-live-report.redacted.json:205:        "sshKeys": 0
+test/runtime/dropbear/20260604t184441z-5fdfdd/dropbear-live-report.redacted.json:213:        "sshKeys": []
+test/runtime/dropbear/20260604t184441z-5fdfdd/dropbear-live-report.redacted.json:223:        "sshKeys": 0
+test/runtime/dropbear/20260604t184441z-5fdfdd/dropbear-live-report.redacted.json:231:        "sshKeys": []
+test/runtime/dropbear/20260604t184441z-5fdfdd/dropbear-live-report.redacted.json:241:        "sshKeys": 0
+test/runtime/dropbear/20260604t184441z-5fdfdd/dropbear-live-report.redacted.json:249:        "sshKeys": []
+test/runtime/dropbear/20260604t184441z-5fdfdd/dropbear-live-report.redacted.json:259:        "sshKeys": 0
+test/runtime/dropbear/20260604t184441z-5fdfdd/dropbear-live-report.redacted.json:267:        "sshKeys": []
+test/runtime/dropbear/20260604t184441z-5fdfdd/dropbear-live-report.redacted.json:277:        "sshKeys": 0
+test/runtime/dropbear/20260604t184441z-5fdfdd/dropbear-live-report.redacted.json:285:        "sshKeys": []
+test/runtime/dropbear/20260604t184441z-5fdfdd/dropbear-live-report.redacted.json:295:        "sshKeys": 0
+test/runtime/dropbear/20260604t184441z-5fdfdd/dropbear-live-report.redacted.json:303:        "sshKeys": []
+test/runtime/dropbear/20260604t184441z-5fdfdd/dropbear-live-report.redacted.json:313:      "test": "live Dropbear user-state runtime on CPU agent",
+test/runtime/dropbear/20260604t184441z-5fdfdd/dropbear-live-report.redacted.json:314:      "cause": "expected SSH running state for create-time enabled container: expected null to be truthy",
+=== backend logs tail ===
+[Nest] 2996829  - 06/05/2026, 2:25:58 AM    WARN [AgentGateway] [StateReport] Unknown numericUserId 16 from server d7c6b76e-359f-47bd-81af-ea9f7e2223f2 — skipping
+[Nest] 2996829  - 06/05/2026, 2:25:58 AM    WARN [AgentGateway] [StateReport] Unknown numericUserId 18 from server d7c6b76e-359f-47bd-81af-ea9f7e2223f2 — skipping
+[Nest] 2996829  - 06/05/2026, 2:25:58 AM    WARN [AgentGateway] [StateReport] Unknown numericUserId 19 from server d7c6b76e-359f-47bd-81af-ea9f7e2223f2 — skipping
+[Nest] 2996829  - 06/05/2026, 2:25:58 AM    WARN [AgentGateway] [StateReport] Unknown numericUserId 21 from server d7c6b76e-359f-47bd-81af-ea9f7e2223f2 — skipping
+[Nest] 2996829  - 06/05/2026, 2:26:12 AM    WARN [AgentGateway] [StateReport] Unknown numericUserId 13 from server a8694107-56c4-4a78-93f4-4ea90eddc580 — skipping
+[Nest] 2996829  - 06/05/2026, 2:26:12 AM    WARN [AgentGateway] [StateReport] Unknown numericUserId 14 from server a8694107-56c4-4a78-93f4-4ea90eddc580 — skipping
+[Nest] 2996829  - 06/05/2026, 2:26:12 AM    WARN [AgentGateway] [StateReport] Unknown numericUserId 16 from server a8694107-56c4-4a78-93f4-4ea90eddc580 — skipping
+[Nest] 2996829  - 06/05/2026, 2:26:12 AM    WARN [AgentGateway] [StateReport] Unknown numericUserId 20 from server a8694107-56c4-4a78-93f4-4ea90eddc580 — skipping
+[Nest] 2996829  - 06/05/2026, 2:26:12 AM    WARN [AgentGateway] [StateReport] Unknown numericUserId 21 from server a8694107-56c4-4a78-93f4-4ea90eddc580 — skipping
+[Nest] 2996829  - 06/05/2026, 2:26:58 AM    WARN [AgentGateway] [StateReport] Unknown numericUserId 12 from server d7c6b76e-359f-47bd-81af-ea9f7e2223f2 — skipping
+[Nest] 2996829  - 06/05/2026, 2:26:58 AM    WARN [AgentGateway] [StateReport] Unknown numericUserId 13 from server d7c6b76e-359f-47bd-81af-ea9f7e2223f2 — skipping
+[Nest] 2996829  - 06/05/2026, 2:26:58 AM    WARN [AgentGateway] [StateReport] Unknown numericUserId 15 from server d7c6b76e-359f-47bd-81af-ea9f7e2223f2 — skipping
+[Nest] 2996829  - 06/05/2026, 2:26:58 AM    WARN [AgentGateway] [StateReport] Unknown numericUserId 16 from server d7c6b76e-359f-47bd-81af-ea9f7e2223f2 — skipping
+[Nest] 2996829  - 06/05/2026, 2:26:58 AM    WARN [AgentGateway] [StateReport] Unknown numericUserId 18 from server d7c6b76e-359f-47bd-81af-ea9f7e2223f2 — skipping
+[Nest] 2996829  - 06/05/2026, 2:26:58 AM    WARN [AgentGateway] [StateReport] Unknown numericUserId 19 from server d7c6b76e-359f-47bd-81af-ea9f7e2223f2 — skipping
+[Nest] 2996829  - 06/05/2026, 2:26:58 AM    WARN [AgentGateway] [StateReport] Unknown numericUserId 21 from server d7c6b76e-359f-47bd-81af-ea9f7e2223f2 — skipping
+[Nest] 2996829  - 06/05/2026, 2:27:12 AM    WARN [AgentGateway] [StateReport] Unknown numericUserId 13 from server a8694107-56c4-4a78-93f4-4ea90eddc580 — skipping
+[Nest] 2996829  - 06/05/2026, 2:27:12 AM    WARN [AgentGateway] [StateReport] Unknown numericUserId 14 from server a8694107-56c4-4a78-93f4-4ea90eddc580 — skipping
+[Nest] 2996829  - 06/05/2026, 2:27:12 AM    WARN [AgentGateway] [StateReport] Unknown numericUserId 16 from server a8694107-56c4-4a78-93f4-4ea90eddc580 — skipping
+[Nest] 2996829  - 06/05/2026, 2:27:12 AM    WARN [AgentGateway] [StateReport] Unknown numericUserId 20 from server a8694107-56c4-4a78-93f4-4ea90eddc580 — skipping
+[Nest] 2996829  - 06/05/2026, 2:27:12 AM    WARN [AgentGateway] [StateReport] Unknown numericUserId 21 from server a8694107-56c4-4a78-93f4-4ea90eddc580 — skipping
+[Nest] 2996829  - 06/05/2026, 2:27:58 AM    WARN [AgentGateway] [StateReport] Unknown numericUserId 12 from server d7c6b76e-359f-47bd-81af-ea9f7e2223f2 — skipping
+[Nest] 2996829  - 06/05/2026, 2:27:58 AM    WARN [AgentGateway] [StateReport] Unknown numericUserId 13 from server d7c6b76e-359f-47bd-81af-ea9f7e2223f2 — skipping
+[Nest] 2996829  - 06/05/2026, 2:27:58 AM    WARN [AgentGateway] [StateReport] Unknown numericUserId 15 from server d7c6b76e-359f-47bd-81af-ea9f7e2223f2 — skipping
+[Nest] 2996829  - 06/05/2026, 2:27:58 AM    WARN [AgentGateway] [StateReport] Unknown numericUserId 16 from server d7c6b76e-359f-47bd-81af-ea9f7e2223f2 — skipping
+[Nest] 2996829  - 06/05/2026, 2:27:58 AM    WARN [AgentGateway] [StateReport] Unknown numericUserId 18 from server d7c6b76e-359f-47bd-81af-ea9f7e2223f2 — skipping
+[Nest] 2996829  - 06/05/2026, 2:27:58 AM    WARN [AgentGateway] [StateReport] Unknown numericUserId 19 from server d7c6b76e-359f-47bd-81af-ea9f7e2223f2 — skipping
+[Nest] 2996829  - 06/05/2026, 2:27:58 AM    WARN [AgentGateway] [StateReport] Unknown numericUserId 21 from server d7c6b76e-359f-47bd-81af-ea9f7e2223f2 — skipping
+[Nest] 2996829  - 06/05/2026, 2:28:12 AM    WARN [AgentGateway] [StateReport] Unknown numericUserId 13 from server a8694107-56c4-4a78-93f4-4ea90eddc580 — skipping
+[Nest] 2996829  - 06/05/2026, 2:28:12 AM    WARN [AgentGateway] [StateReport] Unknown numericUserId 14 from server a8694107-56c4-4a78-93f4-4ea90eddc580 — skipping
+[Nest] 2996829  - 06/05/2026, 2:28:12 AM    WARN [AgentGateway] [StateReport] Unknown numericUserId 16 from server a8694107-56c4-4a78-93f4-4ea90eddc580 — skipping
+[Nest] 2996829  - 06/05/2026, 2:28:12 AM    WARN [AgentGateway] [StateReport] Unknown numericUserId 20 from server a8694107-56c4-4a78-93f4-4ea90eddc580 — skipping
+[Nest] 2996829  - 06/05/2026, 2:28:12 AM    WARN [AgentGateway] [StateReport] Unknown numericUserId 21 from server a8694107-56c4-4a78-93f4-4ea90eddc580 — skipping
+[Nest] 2996829  - 06/05/2026, 2:28:58 AM    WARN [AgentGateway] [StateReport] Unknown numericUserId 12 from server d7c6b76e-359f-47bd-81af-ea9f7e2223f2 — skipping
+[Nest] 2996829  - 06/05/2026, 2:28:58 AM    WARN [AgentGateway] [StateReport] Unknown numericUserId 13 from server d7c6b76e-359f-47bd-81af-ea9f7e2223f2 — skipping
+[Nest] 2996829  - 06/05/2026, 2:28:58 AM    WARN [AgentGateway] [StateReport] Unknown numericUserId 15 from server d7c6b76e-359f-47bd-81af-ea9f7e2223f2 — skipping
+[Nest] 2996829  - 06/05/2026, 2:28:58 AM    WARN [AgentGateway] [StateReport] Unknown numericUserId 16 from server d7c6b76e-359f-47bd-81af-ea9f7e2223f2 — skipping
+[Nest] 2996829  - 06/05/2026, 2:28:58 AM    WARN [AgentGateway] [StateReport] Unknown numericUserId 18 from server d7c6b76e-359f-47bd-81af-ea9f7e2223f2 — skipping
+[Nest] 2996829  - 06/05/2026, 2:28:58 AM    WARN [AgentGateway] [StateReport] Unknown numericUserId 19 from server d7c6b76e-359f-47bd-81af-ea9f7e2223f2 — skipping
+[Nest] 2996829  - 06/05/2026, 2:28:58 AM    WARN [AgentGateway] [StateReport] Unknown numericUserId 21 from server d7c6b76e-359f-47bd-81af-ea9f7e2223f2 — skipping
+[Nest] 2996829  - 06/05/2026, 2:29:12 AM    WARN [AgentGateway] [StateReport] Unknown numericUserId 13 from server a8694107-56c4-4a78-93f4-4ea90eddc580 — skipping
+[Nest] 2996829  - 06/05/2026, 2:29:12 AM    WARN [AgentGateway] [StateReport] Unknown numericUserId 14 from server a8694107-56c4-4a78-93f4-4ea90eddc580 — skipping
+[Nest] 2996829  - 06/05/2026, 2:29:12 AM    WARN [AgentGateway] [StateReport] Unknown numericUserId 16 from server a8694107-56c4-4a78-93f4-4ea90eddc580 — skipping
+[Nest] 2996829  - 06/05/2026, 2:29:12 AM    WARN [AgentGateway] [StateReport] Unknown numericUserId 20 from server a8694107-56c4-4a78-93f4-4ea90eddc580 — skipping
+[Nest] 2996829  - 06/05/2026, 2:29:12 AM    WARN [AgentGateway] [StateReport] Unknown numericUserId 21 from server a8694107-56c4-4a78-93f4-4ea90eddc580 — skipping
+[Nest] 2996829  - 06/05/2026, 2:29:58 AM    WARN [AgentGateway] [StateReport] Unknown numericUserId 12 from server d7c6b76e-359f-47bd-81af-ea9f7e2223f2 — skipping
+[Nest] 2996829  - 06/05/2026, 2:29:58 AM    WARN [AgentGateway] [StateReport] Unknown numericUserId 13 from server d7c6b76e-359f-47bd-81af-ea9f7e2223f2 — skipping
+[Nest] 2996829  - 06/05/2026, 2:29:58 AM    WARN [AgentGateway] [StateReport] Unknown numericUserId 15 from server d7c6b76e-359f-47bd-81af-ea9f7e2223f2 — skipping
+[Nest] 2996829  - 06/05/2026, 2:29:58 AM    WARN [AgentGateway] [StateReport] Unknown numericUserId 16 from server d7c6b76e-359f-47bd-81af-ea9f7e2223f2 — skipping
+[Nest] 2996829  - 06/05/2026, 2:29:58 AM    WARN [AgentGateway] [StateReport] Unknown numericUserId 18 from server d7c6b76e-359f-47bd-81af-ea9f7e2223f2 — skipping
+[Nest] 2996829  - 06/05/2026, 2:29:58 AM    WARN [AgentGateway] [StateReport] Unknown numericUserId 19 from server d7c6b76e-359f-47bd-81af-ea9f7e2223f2 — skipping
+[Nest] 2996829  - 06/05/2026, 2:29:58 AM    WARN [AgentGateway] [StateReport] Unknown numericUserId 21 from server d7c6b76e-359f-47bd-81af-ea9f7e2223f2 — skipping
+[Nest] 2996829  - 06/05/2026, 2:30:12 AM    WARN [AgentGateway] [StateReport] Unknown numericUserId 13 from server a8694107-56c4-4a78-93f4-4ea90eddc580 — skipping
+[Nest] 2996829  - 06/05/2026, 2:30:12 AM    WARN [AgentGateway] [StateReport] Unknown numericUserId 14 from server a8694107-56c4-4a78-93f4-4ea90eddc580 — skipping
+[Nest] 2996829  - 06/05/2026, 2:30:12 AM    WARN [AgentGateway] [StateReport] Unknown numericUserId 16 from server a8694107-56c4-4a78-93f4-4ea90eddc580 — skipping
+[Nest] 2996829  - 06/05/2026, 2:30:12 AM    WARN [AgentGateway] [StateReport] Unknown numericUserId 20 from server a8694107-56c4-4a78-93f4-4ea90eddc580 — skipping
+[Nest] 2996829  - 06/05/2026, 2:30:12 AM    WARN [AgentGateway] [StateReport] Unknown numericUserId 21 from server a8694107-56c4-4a78-93f4-4ea90eddc580 — skipping
+[Nest] 2996829  - 06/05/2026, 2:30:58 AM    WARN [AgentGateway] [StateReport] Unknown numericUserId 12 from server d7c6b76e-359f-47bd-81af-ea9f7e2223f2 — skipping
+[Nest] 2996829  - 06/05/2026, 2:30:58 AM    WARN [AgentGateway] [StateReport] Unknown numericUserId 13 from server d7c6b76e-359f-47bd-81af-ea9f7e2223f2 — skipping
+[Nest] 2996829  - 06/05/2026, 2:30:58 AM    WARN [AgentGateway] [StateReport] Unknown numericUserId 15 from server d7c6b76e-359f-47bd-81af-ea9f7e2223f2 — skipping
+[Nest] 2996829  - 06/05/2026, 2:30:58 AM    WARN [AgentGateway] [StateReport] Unknown numericUserId 16 from server d7c6b76e-359f-47bd-81af-ea9f7e2223f2 — skipping
+[Nest] 2996829  - 06/05/2026, 2:30:58 AM    WARN [AgentGateway] [StateReport] Unknown numericUserId 18 from server d7c6b76e-359f-47bd-81af-ea9f7e2223f2 — skipping
+[Nest] 2996829  - 06/05/2026, 2:30:58 AM    WARN [AgentGateway] [StateReport] Unknown numericUserId 19 from server d7c6b76e-359f-47bd-81af-ea9f7e2223f2 — skipping
+[Nest] 2996829  - 06/05/2026, 2:30:58 AM    WARN [AgentGateway] [StateReport] Unknown numericUserId 21 from server d7c6b76e-359f-47bd-81af-ea9f7e2223f2 — skipping
+[Nest] 2996829  - 06/05/2026, 2:31:12 AM    WARN [AgentGateway] [StateReport] Unknown numericUserId 13 from server a8694107-56c4-4a78-93f4-4ea90eddc580 — skipping
+[Nest] 2996829  - 06/05/2026, 2:31:12 AM    WARN [AgentGateway] [StateReport] Unknown numericUserId 14 from server a8694107-56c4-4a78-93f4-4ea90eddc580 — skipping
+[Nest] 2996829  - 06/05/2026, 2:31:12 AM    WARN [AgentGateway] [StateReport] Unknown numericUserId 16 from server a8694107-56c4-4a78-93f4-4ea90eddc580 — skipping
+[Nest] 2996829  - 06/05/2026, 2:31:12 AM    WARN [AgentGateway] [StateReport] Unknown numericUserId 20 from server a8694107-56c4-4a78-93f4-4ea90eddc580 — skipping
+[Nest] 2996829  - 06/05/2026, 2:31:12 AM    WARN [AgentGateway] [StateReport] Unknown numericUserId 21 from server a8694107-56c4-4a78-93f4-4ea90eddc580 — skipping
+[Nest] 2996829  - 06/05/2026, 2:31:58 AM    WARN [AgentGateway] [StateReport] Unknown numericUserId 12 from server d7c6b76e-359f-47bd-81af-ea9f7e2223f2 — skipping
+[Nest] 2996829  - 06/05/2026, 2:31:58 AM    WARN [AgentGateway] [StateReport] Unknown numericUserId 13 from server d7c6b76e-359f-47bd-81af-ea9f7e2223f2 — skipping
+[Nest] 2996829  - 06/05/2026, 2:31:58 AM    WARN [AgentGateway] [StateReport] Unknown numericUserId 15 from server d7c6b76e-359f-47bd-81af-ea9f7e2223f2 — skipping
+[Nest] 2996829  - 06/05/2026, 2:31:58 AM    WARN [AgentGateway] [StateReport] Unknown numericUserId 16 from server d7c6b76e-359f-47bd-81af-ea9f7e2223f2 — skipping
+[Nest] 2996829  - 06/05/2026, 2:31:58 AM    WARN [AgentGateway] [StateReport] Unknown numericUserId 18 from server d7c6b76e-359f-47bd-81af-ea9f7e2223f2 — skipping
+[Nest] 2996829  - 06/05/2026, 2:31:58 AM    WARN [AgentGateway] [StateReport] Unknown numericUserId 19 from server d7c6b76e-359f-47bd-81af-ea9f7e2223f2 — skipping
+[Nest] 2996829  - 06/05/2026, 2:31:58 AM    WARN [AgentGateway] [StateReport] Unknown numericUserId 21 from server d7c6b76e-359f-47bd-81af-ea9f7e2223f2 — skipping
+[Nest] 2996829  - 06/05/2026, 2:32:12 AM    WARN [AgentGateway] [StateReport] Unknown numericUserId 13 from server a8694107-56c4-4a78-93f4-4ea90eddc580 — skipping
+[Nest] 2996829  - 06/05/2026, 2:32:12 AM    WARN [AgentGateway] [StateReport] Unknown numericUserId 14 from server a8694107-56c4-4a78-93f4-4ea90eddc580 — skipping
+[Nest] 2996829  - 06/05/2026, 2:32:12 AM    WARN [AgentGateway] [StateReport] Unknown numericUserId 16 from server a8694107-56c4-4a78-93f4-4ea90eddc580 — skipping
+[Nest] 2996829  - 06/05/2026, 2:32:12 AM    WARN [AgentGateway] [StateReport] Unknown numericUserId 20 from server a8694107-56c4-4a78-93f4-4ea90eddc580 — skipping
+[Nest] 2996829  - 06/05/2026, 2:32:12 AM    WARN [AgentGateway] [StateReport] Unknown numericUserId 21 from server a8694107-56c4-4a78-93f4-4ea90eddc580 — skipping
+[Nest] 2996829  - 06/05/2026, 2:32:58 AM    WARN [AgentGateway] [StateReport] Unknown numericUserId 12 from server d7c6b76e-359f-47bd-81af-ea9f7e2223f2 — skipping
+[Nest] 2996829  - 06/05/2026, 2:32:58 AM    WARN [AgentGateway] [StateReport] Unknown numericUserId 13 from server d7c6b76e-359f-47bd-81af-ea9f7e2223f2 — skipping
+[Nest] 2996829  - 06/05/2026, 2:32:58 AM    WARN [AgentGateway] [StateReport] Unknown numericUserId 15 from server d7c6b76e-359f-47bd-81af-ea9f7e2223f2 — skipping
+[Nest] 2996829  - 06/05/2026, 2:32:58 AM    WARN [AgentGateway] [StateReport] Unknown numericUserId 16 from server d7c6b76e-359f-47bd-81af-ea9f7e2223f2 — skipping
+[Nest] 2996829  - 06/05/2026, 2:32:58 AM    WARN [AgentGateway] [StateReport] Unknown numericUserId 18 from server d7c6b76e-359f-47bd-81af-ea9f7e2223f2 — skipping
+[Nest] 2996829  - 06/05/2026, 2:32:58 AM    WARN [AgentGateway] [StateReport] Unknown numericUserId 19 from server d7c6b76e-359f-47bd-81af-ea9f7e2223f2 — skipping
+[Nest] 2996829  - 06/05/2026, 2:32:58 AM    WARN [AgentGateway] [StateReport] Unknown numericUserId 21 from server d7c6b76e-359f-47bd-81af-ea9f7e2223f2 — skipping
+[Nest] 2996829  - 06/05/2026, 2:33:12 AM    WARN [AgentGateway] [StateReport] Unknown numericUserId 13 from server a8694107-56c4-4a78-93f4-4ea90eddc580 — skipping
+[Nest] 2996829  - 06/05/2026, 2:33:12 AM    WARN [AgentGateway] [StateReport] Unknown numericUserId 14 from server a8694107-56c4-4a78-93f4-4ea90eddc580 — skipping
+[Nest] 2996829  - 06/05/2026, 2:33:12 AM    WARN [AgentGateway] [StateReport] Unknown numericUserId 16 from server a8694107-56c4-4a78-93f4-4ea90eddc580 — skipping
+[Nest] 2996829  - 06/05/2026, 2:33:12 AM    WARN [AgentGateway] [StateReport] Unknown numericUserId 20 from server a8694107-56c4-4a78-93f4-4ea90eddc580 — skipping
+[Nest] 2996829  - 06/05/2026, 2:33:12 AM    WARN [AgentGateway] [StateReport] Unknown numericUserId 21 from server a8694107-56c4-4a78-93f4-4ea90eddc580 — skipping
+[Nest] 2996829  - 06/05/2026, 2:33:58 AM    WARN [AgentGateway] [StateReport] Unknown numericUserId 12 from server d7c6b76e-359f-47bd-81af-ea9f7e2223f2 — skipping
+[Nest] 2996829  - 06/05/2026, 2:33:58 AM    WARN [AgentGateway] [StateReport] Unknown numericUserId 13 from server d7c6b76e-359f-47bd-81af-ea9f7e2223f2 — skipping
+[Nest] 2996829  - 06/05/2026, 2:33:58 AM    WARN [AgentGateway] [StateReport] Unknown numericUserId 15 from server d7c6b76e-359f-47bd-81af-ea9f7e2223f2 — skipping
+[Nest] 2996829  - 06/05/2026, 2:33:58 AM    WARN [AgentGateway] [StateReport] Unknown numericUserId 16 from server d7c6b76e-359f-47bd-81af-ea9f7e2223f2 — skipping
+[Nest] 2996829  - 06/05/2026, 2:33:58 AM    WARN [AgentGateway] [StateReport] Unknown numericUserId 18 from server d7c6b76e-359f-47bd-81af-ea9f7e2223f2 — skipping
+[Nest] 2996829  - 06/05/2026, 2:33:58 AM    WARN [AgentGateway] [StateReport] Unknown numericUserId 19 from server d7c6b76e-359f-47bd-81af-ea9f7e2223f2 — skipping
+[Nest] 2996829  - 06/05/2026, 2:33:58 AM    WARN [AgentGateway] [StateReport] Unknown numericUserId 21 from server d7c6b76e-359f-47bd-81af-ea9f7e2223f2 — skipping
+[Nest] 2996829  - 06/05/2026, 2:34:12 AM    WARN [AgentGateway] [StateReport] Unknown numericUserId 13 from server a8694107-56c4-4a78-93f4-4ea90eddc580 — skipping
+[Nest] 2996829  - 06/05/2026, 2:34:12 AM    WARN [AgentGateway] [StateReport] Unknown numericUserId 14 from server a8694107-56c4-4a78-93f4-4ea90eddc580 — skipping
+[Nest] 2996829  - 06/05/2026, 2:34:12 AM    WARN [AgentGateway] [StateReport] Unknown numericUserId 16 from server a8694107-56c4-4a78-93f4-4ea90eddc580 — skipping
+[Nest] 2996829  - 06/05/2026, 2:34:12 AM    WARN [AgentGateway] [StateReport] Unknown numericUserId 20 from server a8694107-56c4-4a78-93f4-4ea90eddc580 — skipping
+[Nest] 2996829  - 06/05/2026, 2:34:12 AM    WARN [AgentGateway] [StateReport] Unknown numericUserId 21 from server a8694107-56c4-4a78-93f4-4ea90eddc580 — skipping
+[Nest] 2996829  - 06/05/2026, 2:34:58 AM    WARN [AgentGateway] [StateReport] Unknown numericUserId 12 from server d7c6b76e-359f-47bd-81af-ea9f7e2223f2 — skipping
+[Nest] 2996829  - 06/05/2026, 2:34:58 AM    WARN [AgentGateway] [StateReport] Unknown numericUserId 13 from server d7c6b76e-359f-47bd-81af-ea9f7e2223f2 — skipping
+[Nest] 2996829  - 06/05/2026, 2:34:58 AM    WARN [AgentGateway] [StateReport] Unknown numericUserId 15 from server d7c6b76e-359f-47bd-81af-ea9f7e2223f2 — skipping
+[Nest] 2996829  - 06/05/2026, 2:34:58 AM    WARN [AgentGateway] [StateReport] Unknown numericUserId 16 from server d7c6b76e-359f-47bd-81af-ea9f7e2223f2 — skipping
+[Nest] 2996829  - 06/05/2026, 2:34:58 AM    WARN [AgentGateway] [StateReport] Unknown numericUserId 18 from server d7c6b76e-359f-47bd-81af-ea9f7e2223f2 — skipping
+[Nest] 2996829  - 06/05/2026, 2:34:58 AM    WARN [AgentGateway] [StateReport] Unknown numericUserId 19 from server d7c6b76e-359f-47bd-81af-ea9f7e2223f2 — skipping
+[Nest] 2996829  - 06/05/2026, 2:34:58 AM    WARN [AgentGateway] [StateReport] Unknown numericUserId 21 from server d7c6b76e-359f-47bd-81af-ea9f7e2223f2 — skipping
+[Nest] 2996829  - 06/05/2026, 2:35:12 AM    WARN [AgentGateway] [StateReport] Unknown numericUserId 13 from server a8694107-56c4-4a78-93f4-4ea90eddc580 — skipping
+[Nest] 2996829  - 06/05/2026, 2:35:12 AM    WARN [AgentGateway] [StateReport] Unknown numericUserId 14 from server a8694107-56c4-4a78-93f4-4ea90eddc580 — skipping
+[Nest] 2996829  - 06/05/2026, 2:35:12 AM    WARN [AgentGateway] [StateReport] Unknown numericUserId 16 from server a8694107-56c4-4a78-93f4-4ea90eddc580 — skipping
+[Nest] 2996829  - 06/05/2026, 2:35:12 AM    WARN [AgentGateway] [StateReport] Unknown numericUserId 20 from server a8694107-56c4-4a78-93f4-4ea90eddc580 — skipping
+[Nest] 2996829  - 06/05/2026, 2:35:12 AM    WARN [AgentGateway] [StateReport] Unknown numericUserId 21 from server a8694107-56c4-4a78-93f4-4ea90eddc580 — skipping
+[Nest] 2996829  - 06/05/2026, 2:35:58 AM    WARN [AgentGateway] [StateReport] Unknown numericUserId 12 from server d7c6b76e-359f-47bd-81af-ea9f7e2223f2 — skipping
+[Nest] 2996829  - 06/05/2026, 2:35:58 AM    WARN [AgentGateway] [StateReport] Unknown numericUserId 13 from server d7c6b76e-359f-47bd-81af-ea9f7e2223f2 — skipping
+[Nest] 2996829  - 06/05/2026, 2:35:58 AM    WARN [AgentGateway] [StateReport] Unknown numericUserId 15 from server d7c6b76e-359f-47bd-81af-ea9f7e2223f2 — skipping
+[Nest] 2996829  - 06/05/2026, 2:35:58 AM    WARN [AgentGateway] [StateReport] Unknown numericUserId 16 from server d7c6b76e-359f-47bd-81af-ea9f7e2223f2 — skipping
+[Nest] 2996829  - 06/05/2026, 2:35:58 AM    WARN [AgentGateway] [StateReport] Unknown numericUserId 18 from server d7c6b76e-359f-47bd-81af-ea9f7e2223f2 — skipping
+[Nest] 2996829  - 06/05/2026, 2:35:58 AM    WARN [AgentGateway] [StateReport] Unknown numericUserId 19 from server d7c6b76e-359f-47bd-81af-ea9f7e2223f2 — skipping
+[Nest] 2996829  - 06/05/2026, 2:35:58 AM    WARN [AgentGateway] [StateReport] Unknown numericUserId 21 from server d7c6b76e-359f-47bd-81af-ea9f7e2223f2 — skipping
+[Nest] 2996829  - 06/05/2026, 2:36:12 AM    WARN [AgentGateway] [StateReport] Unknown numericUserId 13 from server a8694107-56c4-4a78-93f4-4ea90eddc580 — skipping
+[Nest] 2996829  - 06/05/2026, 2:36:12 AM    WARN [AgentGateway] [StateReport] Unknown numericUserId 14 from server a8694107-56c4-4a78-93f4-4ea90eddc580 — skipping
+[Nest] 2996829  - 06/05/2026, 2:36:12 AM    WARN [AgentGateway] [StateReport] Unknown numericUserId 16 from server a8694107-56c4-4a78-93f4-4ea90eddc580 — skipping
+[Nest] 2996829  - 06/05/2026, 2:36:12 AM    WARN [AgentGateway] [StateReport] Unknown numericUserId 20 from server a8694107-56c4-4a78-93f4-4ea90eddc580 — skipping
+[Nest] 2996829  - 06/05/2026, 2:36:12 AM    WARN [AgentGateway] [StateReport] Unknown numericUserId 21 from server a8694107-56c4-4a78-93f4-4ea90eddc580 — skipping
+[Nest] 2996829  - 06/05/2026, 2:36:58 AM    WARN [AgentGateway] [StateReport] Unknown numericUserId 12 from server d7c6b76e-359f-47bd-81af-ea9f7e2223f2 — skipping
+[Nest] 2996829  - 06/05/2026, 2:36:58 AM    WARN [AgentGateway] [StateReport] Unknown numericUserId 13 from server d7c6b76e-359f-47bd-81af-ea9f7e2223f2 — skipping
+[Nest] 2996829  - 06/05/2026, 2:36:58 AM    WARN [AgentGateway] [StateReport] Unknown numericUserId 15 from server d7c6b76e-359f-47bd-81af-ea9f7e2223f2 — skipping
+[Nest] 2996829  - 06/05/2026, 2:36:58 AM    WARN [AgentGateway] [StateReport] Unknown numericUserId 16 from server d7c6b76e-359f-47bd-81af-ea9f7e2223f2 — skipping
+[Nest] 2996829  - 06/05/2026, 2:36:58 AM    WARN [AgentGateway] [StateReport] Unknown numericUserId 18 from server d7c6b76e-359f-47bd-81af-ea9f7e2223f2 — skipping
+[Nest] 2996829  - 06/05/2026, 2:36:58 AM    WARN [AgentGateway] [StateReport] Unknown numericUserId 19 from server d7c6b76e-359f-47bd-81af-ea9f7e2223f2 — skipping
+[Nest] 2996829  - 06/05/2026, 2:36:58 AM    WARN [AgentGateway] [StateReport] Unknown numericUserId 21 from server d7c6b76e-359f-47bd-81af-ea9f7e2223f2 — skipping
+[Nest] 2996829  - 06/05/2026, 2:37:12 AM    WARN [AgentGateway] [StateReport] Unknown numericUserId 13 from server a8694107-56c4-4a78-93f4-4ea90eddc580 — skipping
+[Nest] 2996829  - 06/05/2026, 2:37:12 AM    WARN [AgentGateway] [StateReport] Unknown numericUserId 14 from server a8694107-56c4-4a78-93f4-4ea90eddc580 — skipping
+[Nest] 2996829  - 06/05/2026, 2:37:12 AM    WARN [AgentGateway] [StateReport] Unknown numericUserId 16 from server a8694107-56c4-4a78-93f4-4ea90eddc580 — skipping
+[Nest] 2996829  - 06/05/2026, 2:37:12 AM    WARN [AgentGateway] [StateReport] Unknown numericUserId 20 from server a8694107-56c4-4a78-93f4-4ea90eddc580 — skipping
+[Nest] 2996829  - 06/05/2026, 2:37:12 AM    WARN [AgentGateway] [StateReport] Unknown numericUserId 21 from server a8694107-56c4-4a78-93f4-4ea90eddc580 — skipping
+[Nest] 2996829  - 06/05/2026, 2:37:58 AM    WARN [AgentGateway] [StateReport] Unknown numericUserId 12 from server d7c6b76e-359f-47bd-81af-ea9f7e2223f2 — skipping
+[Nest] 2996829  - 06/05/2026, 2:37:58 AM    WARN [AgentGateway] [StateReport] Unknown numericUserId 13 from server d7c6b76e-359f-47bd-81af-ea9f7e2223f2 — skipping
+[Nest] 2996829  - 06/05/2026, 2:37:58 AM    WARN [AgentGateway] [StateReport] Unknown numericUserId 15 from server d7c6b76e-359f-47bd-81af-ea9f7e2223f2 — skipping
+[Nest] 2996829  - 06/05/2026, 2:37:58 AM    WARN [AgentGateway] [StateReport] Unknown numericUserId 16 from server d7c6b76e-359f-47bd-81af-ea9f7e2223f2 — skipping
+[Nest] 2996829  - 06/05/2026, 2:37:58 AM    WARN [AgentGateway] [StateReport] Unknown numericUserId 18 from server d7c6b76e-359f-47bd-81af-ea9f7e2223f2 — skipping
+[Nest] 2996829  - 06/05/2026, 2:37:58 AM    WARN [AgentGateway] [StateReport] Unknown numericUserId 19 from server d7c6b76e-359f-47bd-81af-ea9f7e2223f2 — skipping
+[Nest] 2996829  - 06/05/2026, 2:37:58 AM    WARN [AgentGateway] [StateReport] Unknown numericUserId 21 from server d7c6b76e-359f-47bd-81af-ea9f7e2223f2 — skipping
+[Nest] 2996829  - 06/05/2026, 2:38:12 AM    WARN [AgentGateway] [StateReport] Unknown numericUserId 13 from server a8694107-56c4-4a78-93f4-4ea90eddc580 — skipping
+[Nest] 2996829  - 06/05/2026, 2:38:12 AM    WARN [AgentGateway] [StateReport] Unknown numericUserId 14 from server a8694107-56c4-4a78-93f4-4ea90eddc580 — skipping
+[Nest] 2996829  - 06/05/2026, 2:38:12 AM    WARN [AgentGateway] [StateReport] Unknown numericUserId 16 from server a8694107-56c4-4a78-93f4-4ea90eddc580 — skipping
+[Nest] 2996829  - 06/05/2026, 2:38:12 AM    WARN [AgentGateway] [StateReport] Unknown numericUserId 20 from server a8694107-56c4-4a78-93f4-4ea90eddc580 — skipping
+[Nest] 2996829  - 06/05/2026, 2:38:12 AM    WARN [AgentGateway] [StateReport] Unknown numericUserId 21 from server a8694107-56c4-4a78-93f4-4ea90eddc580 — skipping
+[Nest] 2996829  - 06/05/2026, 2:39:00 AM    WARN [AgentGateway] [StateReport] Unknown numericUserId 18 from server d7c6b76e-359f-47bd-81af-ea9f7e2223f2 — skipping
+[Nest] 2996829  - 06/05/2026, 2:39:00 AM    WARN [AgentGateway] [StateReport] Unknown numericUserId 19 from server d7c6b76e-359f-47bd-81af-ea9f7e2223f2 — skipping
+[Nest] 2996829  - 06/05/2026, 2:39:00 AM    WARN [AgentGateway] [StateReport] Unknown numericUserId 21 from server d7c6b76e-359f-47bd-81af-ea9f7e2223f2 — skipping
+[Nest] 2996829  - 06/05/2026, 2:39:12 AM    WARN [AgentGateway] [StateReport] Unknown numericUserId 20 from server a8694107-56c4-4a78-93f4-4ea90eddc580 — skipping
+[Nest] 2996829  - 06/05/2026, 2:39:12 AM    WARN [AgentGateway] [StateReport] Unknown numericUserId 21 from server a8694107-56c4-4a78-93f4-4ea90eddc580 — skipping
+[Nest] 2996829  - 06/05/2026, 2:39:58 AM    WARN [AgentGateway] [StateReport] Unknown numericUserId 18 from server d7c6b76e-359f-47bd-81af-ea9f7e2223f2 — skipping
+[Nest] 2996829  - 06/05/2026, 2:39:58 AM    WARN [AgentGateway] [StateReport] Unknown numericUserId 19 from server d7c6b76e-359f-47bd-81af-ea9f7e2223f2 — skipping
+[Nest] 2996829  - 06/05/2026, 2:39:58 AM    WARN [AgentGateway] [StateReport] Unknown numericUserId 21 from server d7c6b76e-359f-47bd-81af-ea9f7e2223f2 — skipping
+[Nest] 2996829  - 06/05/2026, 2:40:12 AM    WARN [AgentGateway] [StateReport] Unknown numericUserId 20 from server a8694107-56c4-4a78-93f4-4ea90eddc580 — skipping
+[Nest] 2996829  - 06/05/2026, 2:40:12 AM    WARN [AgentGateway] [StateReport] Unknown numericUserId 21 from server a8694107-56c4-4a78-93f4-4ea90eddc580 — skipping
+[Nest] 2996829  - 06/05/2026, 2:40:59 AM    WARN [AgentGateway] [StateReport] Unknown numericUserId 18 from server d7c6b76e-359f-47bd-81af-ea9f7e2223f2 — skipping
+[Nest] 2996829  - 06/05/2026, 2:40:59 AM    WARN [AgentGateway] [StateReport] Unknown numericUserId 19 from server d7c6b76e-359f-47bd-81af-ea9f7e2223f2 — skipping
+[Nest] 2996829  - 06/05/2026, 2:40:59 AM    WARN [AgentGateway] [StateReport] Unknown numericUserId 21 from server d7c6b76e-359f-47bd-81af-ea9f7e2223f2 — skipping
+[Nest] 2996829  - 06/05/2026, 2:41:12 AM    WARN [AgentGateway] [StateReport] Unknown numericUserId 20 from server a8694107-56c4-4a78-93f4-4ea90eddc580 — skipping
+[Nest] 2996829  - 06/05/2026, 2:41:12 AM    WARN [AgentGateway] [StateReport] Unknown numericUserId 21 from server a8694107-56c4-4a78-93f4-4ea90eddc580 — skipping
+[Nest] 2996829  - 06/05/2026, 2:41:58 AM    WARN [AgentGateway] [StateReport] Unknown numericUserId 18 from server d7c6b76e-359f-47bd-81af-ea9f7e2223f2 — skipping
+[Nest] 2996829  - 06/05/2026, 2:41:58 AM    WARN [AgentGateway] [StateReport] Unknown numericUserId 19 from server d7c6b76e-359f-47bd-81af-ea9f7e2223f2 — skipping
+[Nest] 2996829  - 06/05/2026, 2:41:58 AM    WARN [AgentGateway] [StateReport] Unknown numericUserId 21 from server d7c6b76e-359f-47bd-81af-ea9f7e2223f2 — skipping
+[Nest] 2996829  - 06/05/2026, 2:42:12 AM    WARN [AgentGateway] [StateReport] Unknown numericUserId 20 from server a8694107-56c4-4a78-93f4-4ea90eddc580 — skipping
+[Nest] 2996829  - 06/05/2026, 2:42:12 AM    WARN [AgentGateway] [StateReport] Unknown numericUserId 21 from server a8694107-56c4-4a78-93f4-4ea90eddc580 — skipping
+[Nest] 2996829  - 06/05/2026, 2:42:58 AM    WARN [AgentGateway] [StateReport] Unknown numericUserId 18 from server d7c6b76e-359f-47bd-81af-ea9f7e2223f2 — skipping
+[Nest] 2996829  - 06/05/2026, 2:42:58 AM    WARN [AgentGateway] [StateReport] Unknown numericUserId 19 from server d7c6b76e-359f-47bd-81af-ea9f7e2223f2 — skipping
+[Nest] 2996829  - 06/05/2026, 2:42:58 AM    WARN [AgentGateway] [StateReport] Unknown numericUserId 21 from server d7c6b76e-359f-47bd-81af-ea9f7e2223f2 — skipping
+[Nest] 2996829  - 06/05/2026, 2:43:12 AM    WARN [AgentGateway] [StateReport] Unknown numericUserId 20 from server a8694107-56c4-4a78-93f4-4ea90eddc580 — skipping
+[Nest] 2996829  - 06/05/2026, 2:43:12 AM    WARN [AgentGateway] [StateReport] Unknown numericUserId 21 from server a8694107-56c4-4a78-93f4-4ea90eddc580 — skipping
+[Nest] 2996829  - 06/05/2026, 2:43:58 AM    WARN [AgentGateway] [StateReport] Unknown numericUserId 18 from server d7c6b76e-359f-47bd-81af-ea9f7e2223f2 — skipping
+[Nest] 2996829  - 06/05/2026, 2:43:58 AM    WARN [AgentGateway] [StateReport] Unknown numericUserId 19 from server d7c6b76e-359f-47bd-81af-ea9f7e2223f2 — skipping
+[Nest] 2996829  - 06/05/2026, 2:43:58 AM    WARN [AgentGateway] [StateReport] Unknown numericUserId 21 from server d7c6b76e-359f-47bd-81af-ea9f7e2223f2 — skipping
+[Nest] 2996829  - 06/05/2026, 2:44:12 AM    WARN [AgentGateway] [StateReport] Unknown numericUserId 20 from server a8694107-56c4-4a78-93f4-4ea90eddc580 — skipping
+[Nest] 2996829  - 06/05/2026, 2:44:12 AM    WARN [AgentGateway] [StateReport] Unknown numericUserId 21 from server a8694107-56c4-4a78-93f4-4ea90eddc580 — skipping
+[Nest] 2996829  - 06/05/2026, 2:44:48 AM    WARN [AgentGateway] [StateReport] Unknown numericUserId 18 from server d7c6b76e-359f-47bd-81af-ea9f7e2223f2 — skipping
+[Nest] 2996829  - 06/05/2026, 2:44:48 AM    WARN [AgentGateway] [StateReport] Unknown numericUserId 19 from server d7c6b76e-359f-47bd-81af-ea9f7e2223f2 — skipping
+[Nest] 2996829  - 06/05/2026, 2:44:48 AM    WARN [AgentGateway] [StateReport] Unknown numericUserId 21 from server d7c6b76e-359f-47bd-81af-ea9f7e2223f2 — skipping
+[Nest] 2996829  - 06/05/2026, 2:44:59 AM    WARN [AgentGateway] [StateReport] Unknown numericUserId 19 from server d7c6b76e-359f-47bd-81af-ea9f7e2223f2 — skipping
+[Nest] 2996829  - 06/05/2026, 2:44:59 AM    WARN [AgentGateway] [StateReport] Unknown numericUserId 21 from server d7c6b76e-359f-47bd-81af-ea9f7e2223f2 — skipping
+[Nest] 2996829  - 06/05/2026, 2:45:12 AM    WARN [AgentGateway] [StateReport] Unknown numericUserId 20 from server a8694107-56c4-4a78-93f4-4ea90eddc580 — skipping
+[Nest] 2996829  - 06/05/2026, 2:45:12 AM    WARN [AgentGateway] [StateReport] Unknown numericUserId 21 from server a8694107-56c4-4a78-93f4-4ea90eddc580 — skipping
+[Nest] 2996829  - 06/05/2026, 2:45:59 AM    WARN [AgentGateway] [StateReport] Unknown numericUserId 19 from server d7c6b76e-359f-47bd-81af-ea9f7e2223f2 — skipping
+[Nest] 2996829  - 06/05/2026, 2:45:59 AM    WARN [AgentGateway] [StateReport] Unknown numericUserId 21 from server d7c6b76e-359f-47bd-81af-ea9f7e2223f2 — skipping
+[Nest] 2996829  - 06/05/2026, 2:46:12 AM    WARN [AgentGateway] [StateReport] Unknown numericUserId 20 from server a8694107-56c4-4a78-93f4-4ea90eddc580 — skipping
+[Nest] 2996829  - 06/05/2026, 2:46:12 AM    WARN [AgentGateway] [StateReport] Unknown numericUserId 21 from server a8694107-56c4-4a78-93f4-4ea90eddc580 — skipping
+[Nest] 2996829  - 06/05/2026, 2:46:58 AM    WARN [AgentGateway] [StateReport] Unknown numericUserId 17 from server d7c6b76e-359f-47bd-81af-ea9f7e2223f2 — skipping
+[Nest] 2996829  - 06/05/2026, 2:46:58 AM    WARN [AgentGateway] [StateReport] Unknown numericUserId 18 from server d7c6b76e-359f-47bd-81af-ea9f7e2223f2 — skipping
+[Nest] 2996829  - 06/05/2026, 2:46:58 AM    WARN [AgentGateway] [StateReport] Unknown numericUserId 19 from server d7c6b76e-359f-47bd-81af-ea9f7e2223f2 — skipping
+[Nest] 2996829  - 06/05/2026, 2:46:58 AM    WARN [AgentGateway] [StateReport] Unknown numericUserId 21 from server d7c6b76e-359f-47bd-81af-ea9f7e2223f2 — skipping
+[Nest] 2996829  - 06/05/2026, 2:47:12 AM    WARN [AgentGateway] [StateReport] Unknown numericUserId 20 from server a8694107-56c4-4a78-93f4-4ea90eddc580 — skipping
+[Nest] 2996829  - 06/05/2026, 2:47:12 AM    WARN [AgentGateway] [StateReport] Unknown numericUserId 21 from server a8694107-56c4-4a78-93f4-4ea90eddc580 — skipping
+=== cpu agent logs tail ===
+Jun 05 01:26:09 nyabase-test-1 nyabase-agent[2587818]:     at IncomingMessage.emit (node:events:531:35)
+Jun 05 01:26:09 nyabase-test-1 nyabase-agent[2587818]:     at endReadableNT (node:internal/streams/readable:1698:12)
+Jun 05 01:26:09 nyabase-test-1 nyabase-agent[2587818]:     at process.processTicksAndRejections (node:internal/process/task_queues:89:21) {
+Jun 05 01:26:09 nyabase-test-1 nyabase-agent[2587818]:   reason: undefined,
+Jun 05 01:26:09 nyabase-test-1 nyabase-agent[2587818]:   statusCode: 409,
+Jun 05 01:26:09 nyabase-test-1 nyabase-agent[2587818]:   json: {
+Jun 05 01:26:09 nyabase-test-1 nyabase-agent[2587818]:     message: 'Conflict. The container name "/nyabase-335a0264-murt-20260604t171809z-58cdf9-beta-life" is already in use by container "a64421d0e3db8aa68fddc484220aecb544ef573de39b4e5d94ed04c700cc3167". You have to remove (or rename) that container to be able to reuse that name.'
+Jun 05 01:26:09 nyabase-test-1 nyabase-agent[2587818]:   }
+Jun 05 01:26:09 nyabase-test-1 nyabase-agent[2587818]: }
+Jun 05 01:33:28 nyabase-test-1 nyabase-agent[2587818]: [WS] Disconnected: 1006
+Jun 05 01:33:28 nyabase-test-1 nyabase-agent[2587818]: [Agent] Disconnected from backend
+Jun 05 01:33:29 nyabase-test-1 nyabase-agent[2587818]: [WS] Connecting to ws://10.8.96.92:3001/ws/agent...
+Jun 05 01:33:29 nyabase-test-1 nyabase-agent[2587818]: [WS] Error: connect ECONNREFUSED 10.8.96.92:3001
+Jun 05 01:33:29 nyabase-test-1 nyabase-agent[2587818]: [WS] Disconnected: 1006
+Jun 05 01:33:29 nyabase-test-1 nyabase-agent[2587818]: [Agent] Disconnected from backend
+Jun 05 01:33:31 nyabase-test-1 nyabase-agent[2587818]: [WS] Connecting to ws://10.8.96.92:3001/ws/agent...
+Jun 05 01:33:31 nyabase-test-1 nyabase-agent[2587818]: [WS] Error: connect ECONNREFUSED 10.8.96.92:3001
+Jun 05 01:33:31 nyabase-test-1 nyabase-agent[2587818]: [WS] Disconnected: 1006
+Jun 05 01:33:31 nyabase-test-1 nyabase-agent[2587818]: [Agent] Disconnected from backend
+Jun 05 01:33:35 nyabase-test-1 nyabase-agent[2587818]: [WS] Connecting to ws://10.8.96.92:3001/ws/agent...
+Jun 05 01:33:35 nyabase-test-1 nyabase-agent[2587818]: [WS] Connected
+Jun 05 01:33:35 nyabase-test-1 nyabase-agent[2587818]: [WS] Disconnected: 4003 Invalid token
+Jun 05 01:33:35 nyabase-test-1 nyabase-agent[2587818]: [Agent] Disconnected from backend
+Jun 05 01:33:36 nyabase-test-1 nyabase-agent[2587818]: [WS] Connecting to ws://10.8.96.92:3001/ws/agent...
+Jun 05 01:33:36 nyabase-test-1 nyabase-agent[2587818]: [WS] Connected
+Jun 05 01:33:36 nyabase-test-1 nyabase-agent[2587818]: [WS] Disconnected: 4003 Invalid token
+Jun 05 01:33:36 nyabase-test-1 nyabase-agent[2587818]: [Agent] Disconnected from backend
+Jun 05 01:33:37 nyabase-test-1 nyabase-agent[2587818]: [WS] Connecting to ws://10.8.96.92:3001/ws/agent...
+Jun 05 01:33:37 nyabase-test-1 nyabase-agent[2587818]: [WS] Connected
+Jun 05 01:33:37 nyabase-test-1 nyabase-agent[2587818]: [WS] Disconnected: 4003 Invalid token
+Jun 05 01:33:37 nyabase-test-1 nyabase-agent[2587818]: [Agent] Disconnected from backend
+Jun 05 01:33:38 nyabase-test-1 nyabase-agent[2587818]: [WS] Connecting to ws://10.8.96.92:3001/ws/agent...
+Jun 05 01:33:38 nyabase-test-1 nyabase-agent[2587818]: [WS] Connected
+Jun 05 01:33:38 nyabase-test-1 nyabase-agent[2587818]: [WS] Disconnected: 4003 Invalid token
+Jun 05 01:33:38 nyabase-test-1 nyabase-agent[2587818]: [Agent] Disconnected from backend
+Jun 05 01:33:39 nyabase-test-1 nyabase-agent[2587818]: [WS] Connecting to ws://10.8.96.92:3001/ws/agent...
+Jun 05 01:33:39 nyabase-test-1 nyabase-agent[2587818]: [WS] Connected
+Jun 05 01:33:39 nyabase-test-1 nyabase-agent[2587818]: [WS] Disconnected: 4003 Invalid token
+Jun 05 01:33:39 nyabase-test-1 nyabase-agent[2587818]: [Agent] Disconnected from backend
+Jun 05 01:33:40 nyabase-test-1 nyabase-agent[2587818]: [WS] Connecting to ws://10.8.96.92:3001/ws/agent...
+Jun 05 01:33:40 nyabase-test-1 nyabase-agent[2587818]: [WS] Connected
+Jun 05 01:33:40 nyabase-test-1 nyabase-agent[2587818]: [WS] Disconnected: 4003 Invalid token
+Jun 05 01:33:40 nyabase-test-1 nyabase-agent[2587818]: [Agent] Disconnected from backend
+Jun 05 01:33:40 nyabase-test-1 systemd[1]: Stopping nyabase-agent.service - nyabase Agent...
+Jun 05 01:33:40 nyabase-test-1 systemd[1]: nyabase-agent.service: Deactivated successfully.
+Jun 05 01:33:40 nyabase-test-1 systemd[1]: Stopped nyabase-agent.service - nyabase Agent.
+Jun 05 01:33:40 nyabase-test-1 systemd[1]: nyabase-agent.service: Consumed 1.564s CPU time, 37.9M memory peak.
+Jun 05 01:33:52 nyabase-test-1 systemd[1]: Started nyabase-agent.service - nyabase Agent.
+Jun 05 01:33:52 nyabase-test-1 nyabase-agent[2590701]: [Agent] Starting nyabase-agent v0.1.0
+Jun 05 01:33:52 nyabase-test-1 nyabase-agent[2590701]: [Agent] mount-helper already up to date at /var/lib/nyabase-agent/nyabase-mount-helper
+Jun 05 01:33:52 nyabase-test-1 nyabase-agent[2590701]: [Agent] mount-helper OK: /var/lib/nyabase-agent/nyabase-mount-helper
+Jun 05 01:33:52 nyabase-test-1 nyabase-agent[2590701]: [Agent] Reconciling nyabase-docker daemon (dockerRoot: /data/nyabase-docker )...
+Jun 05 01:33:53 nyabase-test-1 nyabase-agent[2590701]: [Agent] nyabase-docker daemon is running
+Jun 05 01:33:53 nyabase-test-1 nyabase-agent[2590701]: [WS] Connecting to ws://10.8.96.92:3001/ws/agent...
+Jun 05 01:33:53 nyabase-test-1 nyabase-agent[2590701]: [Agent] Started, connecting to ws://10.8.96.92:3001/ws/agent
+Jun 05 01:33:53 nyabase-test-1 nyabase-agent[2590701]: [WS] Connected
+Jun 05 01:34:16 nyabase-test-1 nyabase-agent[2590701]: [WS] Disconnected: 1006
+Jun 05 01:34:16 nyabase-test-1 nyabase-agent[2590701]: [Agent] Disconnected from backend
+Jun 05 01:34:17 nyabase-test-1 nyabase-agent[2590701]: [WS] Connecting to ws://10.8.96.92:3001/ws/agent...
+Jun 05 01:34:17 nyabase-test-1 nyabase-agent[2590701]: [WS] Error: connect ECONNREFUSED 10.8.96.92:3001
+Jun 05 01:34:17 nyabase-test-1 nyabase-agent[2590701]: [WS] Disconnected: 1006
+Jun 05 01:34:17 nyabase-test-1 nyabase-agent[2590701]: [Agent] Disconnected from backend
+Jun 05 01:34:19 nyabase-test-1 nyabase-agent[2590701]: [WS] Connecting to ws://10.8.96.92:3001/ws/agent...
+Jun 05 01:34:19 nyabase-test-1 nyabase-agent[2590701]: [WS] Connected
+Jun 05 01:34:34 nyabase-test-1 nyabase-agent[2590701]: [Dispatcher] Durable command failed [runtime.container.delete]: Error: (HTTP code 409) unexpected - cannot remove container "b5a1312bfdfd3a7cceabfe0a7f9a28435ac09ea3a7240733346c739f6ae4883d": container is running: stop the container before removing or force remove
+Jun 05 01:34:34 nyabase-test-1 nyabase-agent[2590701]:     at /snapshot/agent-bundle/agent.cjs
+Jun 05 01:34:34 nyabase-test-1 nyabase-agent[2590701]:     at c (/snapshot/agent-bundle/agent.cjs)
+Jun 05 01:34:34 nyabase-test-1 nyabase-agent[2590701]:     at ea.buildPayload (/snapshot/agent-bundle/agent.cjs)
+Jun 05 01:34:34 nyabase-test-1 nyabase-agent[2590701]:     at IncomingMessage.<anonymous> (/snapshot/agent-bundle/agent.cjs)
+Jun 05 01:34:34 nyabase-test-1 nyabase-agent[2590701]:     at IncomingMessage.emit (node:events:531:35)
+Jun 05 01:34:34 nyabase-test-1 nyabase-agent[2590701]:     at endReadableNT (node:internal/streams/readable:1698:12)
+Jun 05 01:34:34 nyabase-test-1 nyabase-agent[2590701]:     at process.processTicksAndRejections (node:internal/process/task_queues:89:21) {
+Jun 05 01:34:34 nyabase-test-1 nyabase-agent[2590701]:   reason: undefined,
+Jun 05 01:34:34 nyabase-test-1 nyabase-agent[2590701]:   statusCode: 409,
+Jun 05 01:34:34 nyabase-test-1 nyabase-agent[2590701]:   json: {
+Jun 05 01:34:34 nyabase-test-1 nyabase-agent[2590701]:     message: 'cannot remove container "b5a1312bfdfd3a7cceabfe0a7f9a28435ac09ea3a7240733346c739f6ae4883d": container is running: stop the container before removing or force remove'
+Jun 05 01:34:34 nyabase-test-1 nyabase-agent[2590701]:   }
+Jun 05 01:34:34 nyabase-test-1 nyabase-agent[2590701]: }
+Jun 05 01:34:58 nyabase-test-1 nyabase-agent[2590701]: [Dispatcher] Durable command failed [runtime.container.delete]: Error: (HTTP code 409) unexpected - cannot remove container "67e3b3580ac8f04b84361f3d0b0f3598b14e0c90e79b1fcf8d63c17bb3d7f6b2": container is running: stop the container before removing or force remove
+Jun 05 01:34:58 nyabase-test-1 nyabase-agent[2590701]:     at /snapshot/agent-bundle/agent.cjs
+Jun 05 01:34:58 nyabase-test-1 nyabase-agent[2590701]:     at c (/snapshot/agent-bundle/agent.cjs)
+Jun 05 01:34:58 nyabase-test-1 nyabase-agent[2590701]:     at ea.buildPayload (/snapshot/agent-bundle/agent.cjs)
+Jun 05 01:34:58 nyabase-test-1 nyabase-agent[2590701]:     at IncomingMessage.<anonymous> (/snapshot/agent-bundle/agent.cjs)
+Jun 05 01:34:58 nyabase-test-1 nyabase-agent[2590701]:     at IncomingMessage.emit (node:events:531:35)
+Jun 05 01:34:58 nyabase-test-1 nyabase-agent[2590701]:     at endReadableNT (node:internal/streams/readable:1698:12)
+Jun 05 01:34:58 nyabase-test-1 nyabase-agent[2590701]:     at process.processTicksAndRejections (node:internal/process/task_queues:89:21) {
+Jun 05 01:34:58 nyabase-test-1 nyabase-agent[2590701]:   reason: undefined,
+Jun 05 01:34:58 nyabase-test-1 nyabase-agent[2590701]:   statusCode: 409,
+Jun 05 01:34:58 nyabase-test-1 nyabase-agent[2590701]:   json: {
+Jun 05 01:34:58 nyabase-test-1 nyabase-agent[2590701]:     message: 'cannot remove container "67e3b3580ac8f04b84361f3d0b0f3598b14e0c90e79b1fcf8d63c17bb3d7f6b2": container is running: stop the container before removing or force remove'
+Jun 05 01:34:58 nyabase-test-1 nyabase-agent[2590701]:   }
+Jun 05 01:34:58 nyabase-test-1 nyabase-agent[2590701]: }
+Jun 05 01:36:08 nyabase-test-1 nyabase-agent[2590701]: [Dispatcher] Durable command failed [runtime.container.delete]: Error: (HTTP code 409) unexpected - cannot remove container "3f83da4469bc0b2572b5ece6d18bbf2863f06bd4e1386879a1d24623d967c418": container is running: stop the container before removing or force remove
+Jun 05 01:36:08 nyabase-test-1 nyabase-agent[2590701]:     at /snapshot/agent-bundle/agent.cjs
+Jun 05 01:36:08 nyabase-test-1 nyabase-agent[2590701]:     at c (/snapshot/agent-bundle/agent.cjs)
+Jun 05 01:36:08 nyabase-test-1 nyabase-agent[2590701]:     at ea.buildPayload (/snapshot/agent-bundle/agent.cjs)
+Jun 05 01:36:08 nyabase-test-1 nyabase-agent[2590701]:     at IncomingMessage.<anonymous> (/snapshot/agent-bundle/agent.cjs)
+Jun 05 01:36:08 nyabase-test-1 nyabase-agent[2590701]:     at IncomingMessage.emit (node:events:531:35)
+Jun 05 01:36:08 nyabase-test-1 nyabase-agent[2590701]:     at endReadableNT (node:internal/streams/readable:1698:12)
+Jun 05 01:36:08 nyabase-test-1 nyabase-agent[2590701]:     at process.processTicksAndRejections (node:internal/process/task_queues:89:21) {
+Jun 05 01:36:08 nyabase-test-1 nyabase-agent[2590701]:   reason: undefined,
+Jun 05 01:36:08 nyabase-test-1 nyabase-agent[2590701]:   statusCode: 409,
+Jun 05 01:36:08 nyabase-test-1 nyabase-agent[2590701]:   json: {
+Jun 05 01:36:08 nyabase-test-1 nyabase-agent[2590701]:     message: 'cannot remove container "3f83da4469bc0b2572b5ece6d18bbf2863f06bd4e1386879a1d24623d967c418": container is running: stop the container before removing or force remove'
+Jun 05 01:36:08 nyabase-test-1 nyabase-agent[2590701]:   }
+Jun 05 01:36:08 nyabase-test-1 nyabase-agent[2590701]: }
+Jun 05 01:36:33 nyabase-test-1 nyabase-agent[2590701]: [WS] Disconnected: 1006
+Jun 05 01:36:33 nyabase-test-1 nyabase-agent[2590701]: [Agent] Disconnected from backend
+Jun 05 01:36:34 nyabase-test-1 nyabase-agent[2590701]: [WS] Connecting to ws://10.8.96.92:3001/ws/agent...
+Jun 05 01:36:34 nyabase-test-1 nyabase-agent[2590701]: [WS] Error: connect ECONNREFUSED 10.8.96.92:3001
+Jun 05 01:36:34 nyabase-test-1 nyabase-agent[2590701]: [WS] Disconnected: 1006
+Jun 05 01:36:34 nyabase-test-1 nyabase-agent[2590701]: [Agent] Disconnected from backend
+Jun 05 01:36:36 nyabase-test-1 nyabase-agent[2590701]: [WS] Connecting to ws://10.8.96.92:3001/ws/agent...
+Jun 05 01:36:36 nyabase-test-1 nyabase-agent[2590701]: [WS] Error: connect ECONNREFUSED 10.8.96.92:3001
+Jun 05 01:36:36 nyabase-test-1 nyabase-agent[2590701]: [WS] Disconnected: 1006
+Jun 05 01:36:36 nyabase-test-1 nyabase-agent[2590701]: [Agent] Disconnected from backend
+Jun 05 01:36:40 nyabase-test-1 nyabase-agent[2590701]: [WS] Connecting to ws://10.8.96.92:3001/ws/agent...
+Jun 05 01:36:40 nyabase-test-1 nyabase-agent[2590701]: [WS] Connected
+Jun 05 01:36:40 nyabase-test-1 nyabase-agent[2590701]: [WS] Disconnected: 4003 Invalid token
+Jun 05 01:36:40 nyabase-test-1 nyabase-agent[2590701]: [Agent] Disconnected from backend
+Jun 05 01:36:41 nyabase-test-1 nyabase-agent[2590701]: [WS] Connecting to ws://10.8.96.92:3001/ws/agent...
+Jun 05 01:36:41 nyabase-test-1 nyabase-agent[2590701]: [WS] Connected
+Jun 05 01:36:41 nyabase-test-1 nyabase-agent[2590701]: [WS] Disconnected: 4003 Invalid token
+Jun 05 01:36:41 nyabase-test-1 nyabase-agent[2590701]: [Agent] Disconnected from backend
+Jun 05 01:36:42 nyabase-test-1 nyabase-agent[2590701]: [WS] Connecting to ws://10.8.96.92:3001/ws/agent...
+Jun 05 01:36:42 nyabase-test-1 nyabase-agent[2590701]: [WS] Connected
+Jun 05 01:36:42 nyabase-test-1 nyabase-agent[2590701]: [WS] Disconnected: 4003 Invalid token
+Jun 05 01:36:42 nyabase-test-1 nyabase-agent[2590701]: [Agent] Disconnected from backend
+Jun 05 01:36:43 nyabase-test-1 nyabase-agent[2590701]: [WS] Connecting to ws://10.8.96.92:3001/ws/agent...
+Jun 05 01:36:43 nyabase-test-1 nyabase-agent[2590701]: [WS] Connected
+Jun 05 01:36:43 nyabase-test-1 nyabase-agent[2590701]: [WS] Disconnected: 4003 Invalid token
+Jun 05 01:36:43 nyabase-test-1 nyabase-agent[2590701]: [Agent] Disconnected from backend
+Jun 05 01:36:44 nyabase-test-1 nyabase-agent[2590701]: [WS] Connecting to ws://10.8.96.92:3001/ws/agent...
+Jun 05 01:36:44 nyabase-test-1 nyabase-agent[2590701]: [WS] Connected
+Jun 05 01:36:44 nyabase-test-1 nyabase-agent[2590701]: [WS] Disconnected: 4003 Invalid token
+Jun 05 01:36:44 nyabase-test-1 nyabase-agent[2590701]: [Agent] Disconnected from backend
+Jun 05 01:36:45 nyabase-test-1 nyabase-agent[2590701]: [WS] Connecting to ws://10.8.96.92:3001/ws/agent...
+Jun 05 01:36:45 nyabase-test-1 nyabase-agent[2590701]: [WS] Connected
+Jun 05 01:36:45 nyabase-test-1 nyabase-agent[2590701]: [WS] Disconnected: 4003 Invalid token
+Jun 05 01:36:45 nyabase-test-1 nyabase-agent[2590701]: [Agent] Disconnected from backend
+Jun 05 01:36:45 nyabase-test-1 systemd[1]: Stopping nyabase-agent.service - nyabase Agent...
+Jun 05 01:36:45 nyabase-test-1 systemd[1]: nyabase-agent.service: Deactivated successfully.
+Jun 05 01:36:45 nyabase-test-1 systemd[1]: Stopped nyabase-agent.service - nyabase Agent.
+Jun 05 01:36:56 nyabase-test-1 systemd[1]: Started nyabase-agent.service - nyabase Agent.
+Jun 05 01:36:57 nyabase-test-1 nyabase-agent[2592054]: [Agent] Starting nyabase-agent v0.1.0
+Jun 05 01:36:57 nyabase-test-1 nyabase-agent[2592054]: [Agent] mount-helper already up to date at /var/lib/nyabase-agent/nyabase-mount-helper
+Jun 05 01:36:57 nyabase-test-1 nyabase-agent[2592054]: [Agent] mount-helper OK: /var/lib/nyabase-agent/nyabase-mount-helper
+Jun 05 01:36:57 nyabase-test-1 nyabase-agent[2592054]: [Agent] Reconciling nyabase-docker daemon (dockerRoot: /data/nyabase-docker )...
+Jun 05 01:36:58 nyabase-test-1 nyabase-agent[2592054]: [Agent] nyabase-docker daemon is running
+Jun 05 01:36:58 nyabase-test-1 nyabase-agent[2592054]: [WS] Connecting to ws://10.8.96.92:3001/ws/agent...
+Jun 05 01:36:58 nyabase-test-1 nyabase-agent[2592054]: [Agent] Started, connecting to ws://10.8.96.92:3001/ws/agent
+Jun 05 01:36:58 nyabase-test-1 nyabase-agent[2592054]: [WS] Connected
+Jun 05 01:37:22 nyabase-test-1 nyabase-agent[2592054]: [WS] Disconnected: 1006
+Jun 05 01:37:22 nyabase-test-1 nyabase-agent[2592054]: [Agent] Disconnected from backend
+Jun 05 01:37:23 nyabase-test-1 nyabase-agent[2592054]: [WS] Connecting to ws://10.8.96.92:3001/ws/agent...
+Jun 05 01:37:23 nyabase-test-1 nyabase-agent[2592054]: [WS] Error: connect ECONNREFUSED 10.8.96.92:3001
+Jun 05 01:37:23 nyabase-test-1 nyabase-agent[2592054]: [WS] Disconnected: 1006
+Jun 05 01:37:23 nyabase-test-1 nyabase-agent[2592054]: [Agent] Disconnected from backend
+Jun 05 01:37:25 nyabase-test-1 nyabase-agent[2592054]: [WS] Connecting to ws://10.8.96.92:3001/ws/agent...
+Jun 05 01:37:25 nyabase-test-1 nyabase-agent[2592054]: [WS] Connected

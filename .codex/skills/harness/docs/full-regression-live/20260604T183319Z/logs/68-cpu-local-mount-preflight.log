@@ -1,0 +1,41 @@
+==host==
+10.8.96.91 172.17.0.1 
+==local-mount==
+drwx--x--- 13 root root  183 Jun  5 04:44 /data/nyabase-docker
+drwxr-xr-x  3 root root 4096 Jun  5 02:41 /mnt/nyabase-test
+==fs==
+xfs_quota: cannot setup path for mount /data/nyabase-docker: No such device or address
+==nfs-client==
+/usr/sbin/mount.nfs
+Desired=Unknown/Install/Remove/Purge/Hold
+| Status=Not/Inst/Conf-files/Unpacked/halF-conf/Half-inst/trig-aWait/Trig-pend
+|/ Err?=(none)/Reinst-required (Status,Err: uppercase=bad)
+||/ Name           Version      Architecture Description
++++-==============-============-============-=============================================
+ii  nfs-common     1:2.8.3-1    amd64        NFS support files common to client and server
+==agent==
+● nyabase-agent.service - nyabase Agent
+     Loaded: loaded (/etc/systemd/system/nyabase-agent.service; enabled; preset: enabled)
+     Active: active (running) since Fri 2026-06-05 04:44:13 CST; 29min ago
+ Invocation: 25b0513d5f8f4500af77a58ff9685728
+   Main PID: 2610168 (nyabase-agent)
+      Tasks: 14 (limit: 19167)
+     Memory: 45.9M (peak: 49.2M)
+        CPU: 4.182s
+     CGroup: /system.slice/nyabase-agent.service
+             ├─2610168 /usr/local/bin/nyabase-agent --config /etc/nyabase/agent.yaml
+             ├─2616054 /sbin/mount.nfs 10.8.96.91:/data/nyabase-test-nfs-export /mnt/nyabase-test/mount-20260604t184130z-8d01c8-nfs -o rw,vers=4.2
+             ├─2616133 /sbin/mount.nfs 10.8.96.91:/data/nyabase-test-nfs-export /mnt/nyabase-test/mount-20260604t184130z-8d01c8-nfs -o rw,vers=4.2
+             ├─2616154 /sbin/mount.nfs 10.8.96.91:/data/nyabase-test-nfs-export /mnt/nyabase-test/mount-20260604t184130z-8d01c8-nfs -o rw,vers=4.2
+             └─2616212 /sbin/mount.nfs 10.8.96.91:/data/nyabase-test-nfs-export /mnt/nyabase-test/mount-20260604t184130z-8d01c8-nfs -o rw,vers=4.2
+
+Jun 05 04:44:32 nyabase-test-1 nyabase-agent[2610168]:     at async j_.handle (/snapshot/agent-bundle/agent.cjs)
+Jun 05 04:44:32 nyabase-test-1 nyabase-agent[2610168]:     at async t.<anonymous> (/snapshot/agent-bundle/agent.cjs)
+Jun 05 04:53:58 nyabase-test-1 nyabase-agent[2610168]: [WS] Disconnected: 1006
+Jun 05 04:53:58 nyabase-test-1 nyabase-agent[2610168]: [Agent] Disconnected from backend
+Jun 05 04:53:59 nyabase-test-1 nyabase-agent[2610168]: [WS] Connecting to ws://10.8.96.92:3001/ws/agent...
+Jun 05 04:53:59 nyabase-test-1 nyabase-agent[2610168]: [WS] Error: connect ECONNREFUSED 10.8.96.92:3001
+Jun 05 04:53:59 nyabase-test-1 nyabase-agent[2610168]: [WS] Disconnected: 1006
+Jun 05 04:53:59 nyabase-test-1 nyabase-agent[2610168]: [Agent] Disconnected from backend
+Jun 05 04:54:01 nyabase-test-1 nyabase-agent[2610168]: [WS] Connecting to ws://10.8.96.92:3001/ws/agent...
+Jun 05 04:54:01 nyabase-test-1 nyabase-agent[2610168]: [WS] Connected

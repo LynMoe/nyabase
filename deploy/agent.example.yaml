@@ -1,0 +1,23 @@
+# nyabase Agent Configuration
+# Copy to /etc/nyabase/agent.yaml and edit
+
+backendUrl: "wss://platform.example.com/ws/agent"
+agentToken: "REPLACE_WITH_AGENT_TOKEN"
+serverId: "REPLACE_WITH_SERVER_ID"
+
+# Docker data-root directory.
+# The agent manages its own dockerd (nyabase-docker.service) using this path.
+# WARNING: Changing this value after first deployment requires manually migrating
+# all Docker data on the host (images, containers, volumes). Do not change it lightly.
+dockerRoot: "/var/lib/nyabase-docker"
+
+# macvlan network configuration
+parentIface: "eth0"
+macvlanCidr: "192.168.10.0/24"
+macvlanGateway: "192.168.10.1"
+
+# Metrics collection interval (milliseconds)
+metricsIntervalMs: 10000
+
+# State file location
+stateFilePath: "/var/lib/nyabase-agent/state.json"

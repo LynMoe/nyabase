@@ -1,0 +1,44 @@
+{
+  "backendHost": "10.8.96.92",
+  "backendWsUrl": "ws://10.8.96.92:3001/ws/agent",
+  "agents": [
+    {
+      "key": "cpu",
+      "name": "nyabase-test-cpu",
+      "ssh": "root@10.8.96.91",
+      "sudo": false,
+      "isGpuServer": false,
+      "parentIface": "eth0",
+      "serverIpCidr": "10.8.109.0/24",
+      "gateway": "10.8.0.1",
+      "reservedIps": ["10.8.96.91"],
+      "macvlanCidr": "10.8.0.0/16",
+      "macvlanGateway": "10.8.0.1",
+      "dockerRoot": "/data/nyabase-docker",
+      "defaultCpuMillis": 1000,
+      "defaultMemBytes": 1073741824,
+      "defaultDiskBytes": 2147483648,
+      "defaultGpuMode": "none",
+      "defaultGpuIndices": []
+    },
+    {
+      "key": "gpu",
+      "name": "nyabase-test-gpu",
+      "ssh": "lyn@10.8.1.12",
+      "sudo": true,
+      "isGpuServer": true,
+      "parentIface": "bond0",
+      "serverIpCidr": "10.8.110.0/24",
+      "gateway": "10.8.0.1",
+      "reservedIps": ["10.8.1.12"],
+      "macvlanCidr": "10.8.0.0/16",
+      "macvlanGateway": "10.8.0.1",
+      "dockerRoot": "/data0/nbTest/nyabase-docker-pquota",
+      "defaultCpuMillis": 1000,
+      "defaultMemBytes": 1073741824,
+      "defaultDiskBytes": 2147483648,
+      "defaultGpuMode": "indices",
+      "defaultGpuIndices": [0, 1]
+    }
+  ]
+}

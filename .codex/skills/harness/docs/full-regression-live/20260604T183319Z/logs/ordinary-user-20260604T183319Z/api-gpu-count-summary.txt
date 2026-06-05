@@ -1,0 +1,9 @@
+status fail-gpucount-ignored phase active resources {"cpuMillis":100,"memBytes":67108864,"diskBytes":268435456,"gpuIndices":[]} cleanup {"attempted":true,"deleted":true,"residuals":[]} error 
+login-gamma 200 
+get-access 200 
+create-with-gpu-count 201 queued
+wait-create-operation 200 succeeded
+read-created-container-terminal 200 active
+delete-container 201 queued
+wait-delete-operation 200 succeeded
+list-own-after-cleanup 200 

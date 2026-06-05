@@ -1,0 +1,751 @@
+--- report json ---
+{
+  "runId": "ult-20260604152403-902297",
+  "apiBase": "http://localhost:3001/api",
+  "startedAt": "2026-06-04T15:24:03.309Z",
+  "commands": [],
+  "endpoints": [
+    {
+      "method": "POST",
+      "path": "/auth/login",
+      "status": 200,
+      "ok": true
+    },
+    {
+      "method": "GET",
+      "path": "/auth/me",
+      "status": 200,
+      "ok": true
+    },
+    {
+      "method": "GET",
+      "path": "/servers",
+      "status": 200,
+      "ok": true
+    },
+    {
+      "method": "GET",
+      "path": "/images",
+      "status": 200,
+      "ok": true
+    },
+    {
+      "method": "POST",
+      "path": "/users",
+      "status": 201,
+      "ok": true
+    },
+    {
+      "method": "POST",
+      "path": "/users/067b4dd3-3d10-42b0-86f0-0dd289e16811/server-grants/1b9c08fa-32e1-4943-8dc5-d83772cd52f9",
+      "status": 201,
+      "ok": true
+    },
+    {
+      "method": "POST",
+      "path": "/users/067b4dd3-3d10-42b0-86f0-0dd289e16811/image-grants",
+      "status": 201,
+      "ok": true
+    },
+    {
+      "method": "POST",
+      "path": "/auth/login",
+      "status": 200,
+      "ok": true
+    },
+    {
+      "method": "GET",
+      "path": "/auth/me",
+      "status": 200,
+      "ok": true
+    },
+    {
+      "method": "GET",
+      "path": "/me/access",
+      "status": 200,
+      "ok": true
+    },
+    {
+      "method": "GET",
+      "path": "/servers",
+      "status": 200,
+      "ok": true
+    },
+    {
+      "method": "GET",
+      "path": "/images",
+      "status": 200,
+      "ok": true
+    },
+    {
+      "method": "POST",
+      "path": "/containers",
+      "status": 201,
+      "ok": true
+    },
+    {
+      "method": "GET",
+      "path": "/containers?serverId=1b9c08fa-32e1-4943-8dc5-d83772cd52f9&ownOnly=true",
+      "status": 200,
+      "ok": true
+    },
+    {
+      "method": "GET",
+      "path": "/containers/1b9c08fa-32e1-4943-8dc5-d83772cd52f9/8b016495-e7b5-48ef-b18e-939d72da93a8",
+      "status": 200,
+      "ok": true
+    },
+    {
+      "method": "POST",
+      "path": "/containers/1b9c08fa-32e1-4943-8dc5-d83772cd52f9/8b016495-e7b5-48ef-b18e-939d72da93a8/stop",
+      "status": 409,
+      "ok": false
+    },
+    {
+      "method": "GET",
+      "path": "/containers/1b9c08fa-32e1-4943-8dc5-d83772cd52f9/8b016495-e7b5-48ef-b18e-939d72da93a8",
+      "status": 200,
+      "ok": true
+    },
+    {
+      "method": "POST",
+      "path": "/containers/1b9c08fa-32e1-4943-8dc5-d83772cd52f9/8b016495-e7b5-48ef-b18e-939d72da93a8/start",
+      "status": 201,
+      "ok": true
+    },
+    {
+      "method": "GET",
+      "path": "/containers/1b9c08fa-32e1-4943-8dc5-d83772cd52f9/8b016495-e7b5-48ef-b18e-939d72da93a8",
+      "status": 200,
+      "ok": true
+    },
+    {
+      "method": "POST",
+      "path": "/containers/1b9c08fa-32e1-4943-8dc5-d83772cd52f9/8b016495-e7b5-48ef-b18e-939d72da93a8/restart",
+      "status": 201,
+      "ok": true
+    },
+    {
+      "method": "GET",
+      "path": "/containers/1b9c08fa-32e1-4943-8dc5-d83772cd52f9/8b016495-e7b5-48ef-b18e-939d72da93a8",
+      "status": 200,
+      "ok": true
+    },
+    {
+      "method": "DELETE",
+      "path": "/containers/1b9c08fa-32e1-4943-8dc5-d83772cd52f9/8b016495-e7b5-48ef-b18e-939d72da93a8",
+      "status": 409,
+      "ok": false
+    },
+    {
+      "method": "GET",
+      "path": "/containers/1b9c08fa-32e1-4943-8dc5-d83772cd52f9/8b016495-e7b5-48ef-b18e-939d72da93a8",
+      "status": 200,
+      "ok": true
+    },
+    {
+      "method": "GET",
+      "path": "/containers/1b9c08fa-32e1-4943-8dc5-d83772cd52f9/8b016495-e7b5-48ef-b18e-939d72da93a8",
+      "status": 200,
+      "ok": true
+    },
+    {
+      "method": "GET",
+      "path": "/containers/1b9c08fa-32e1-4943-8dc5-d83772cd52f9/8b016495-e7b5-48ef-b18e-939d72da93a8",
+      "status": 200,
+      "ok": true
+    },
+    {
+      "method": "GET",
+      "path": "/containers/1b9c08fa-32e1-4943-8dc5-d83772cd52f9/8b016495-e7b5-48ef-b18e-939d72da93a8",
+      "status": 200,
+      "ok": true
+    },
+    {
+      "method": "GET",
+      "path": "/containers/1b9c08fa-32e1-4943-8dc5-d83772cd52f9/8b016495-e7b5-48ef-b18e-939d72da93a8",
+      "status": 200,
+      "ok": true
+    },
+    {
+      "method": "GET",
+      "path": "/containers/1b9c08fa-32e1-4943-8dc5-d83772cd52f9/8b016495-e7b5-48ef-b18e-939d72da93a8",
+      "status": 200,
+      "ok": true
+    },
+    {
+      "method": "GET",
+      "path": "/containers/1b9c08fa-32e1-4943-8dc5-d83772cd52f9/8b016495-e7b5-48ef-b18e-939d72da93a8",
+      "status": 200,
+      "ok": true
+    },
+    {
+      "method": "GET",
+      "path": "/containers/1b9c08fa-32e1-4943-8dc5-d83772cd52f9/8b016495-e7b5-48ef-b18e-939d72da93a8",
+      "status": 200,
+      "ok": true
+    },
+    {
+      "method": "GET",
+      "path": "/containers/1b9c08fa-32e1-4943-8dc5-d83772cd52f9/8b016495-e7b5-48ef-b18e-939d72da93a8",
+      "status": 200,
+      "ok": true
+    },
+    {
+      "method": "GET",
+      "path": "/containers/1b9c08fa-32e1-4943-8dc5-d83772cd52f9/8b016495-e7b5-48ef-b18e-939d72da93a8",
+      "status": 200,
+      "ok": true
+    },
+    {
+      "method": "GET",
+      "path": "/containers/1b9c08fa-32e1-4943-8dc5-d83772cd52f9/8b016495-e7b5-48ef-b18e-939d72da93a8",
+      "status": 200,
+      "ok": true
+    },
+    {
+      "method": "GET",
+      "path": "/containers/1b9c08fa-32e1-4943-8dc5-d83772cd52f9/8b016495-e7b5-48ef-b18e-939d72da93a8",
+      "status": 200,
+      "ok": true
+    },
+    {
+      "method": "GET",
+      "path": "/containers/1b9c08fa-32e1-4943-8dc5-d83772cd52f9/8b016495-e7b5-48ef-b18e-939d72da93a8",
+      "status": 200,
+      "ok": true
+    },
+    {
+      "method": "GET",
+      "path": "/containers/1b9c08fa-32e1-4943-8dc5-d83772cd52f9/8b016495-e7b5-48ef-b18e-939d72da93a8",
+      "status": 200,
+      "ok": true
+    },
+    {
+      "method": "GET",
+      "path": "/containers/1b9c08fa-32e1-4943-8dc5-d83772cd52f9/8b016495-e7b5-48ef-b18e-939d72da93a8",
+      "status": 200,
+      "ok": true
+    },
+    {
+      "method": "GET",
+      "path": "/containers/1b9c08fa-32e1-4943-8dc5-d83772cd52f9/8b016495-e7b5-48ef-b18e-939d72da93a8",
+      "status": 200,
+      "ok": true
+    },
+    {
+      "method": "GET",
+      "path": "/containers/1b9c08fa-32e1-4943-8dc5-d83772cd52f9/8b016495-e7b5-48ef-b18e-939d72da93a8",
+      "status": 200,
+      "ok": true
+    },
+    {
+      "method": "GET",
+      "path": "/containers/1b9c08fa-32e1-4943-8dc5-d83772cd52f9/8b016495-e7b5-48ef-b18e-939d72da93a8",
+      "status": 200,
+      "ok": true
+    },
+    {
+      "method": "GET",
+      "path": "/containers/1b9c08fa-32e1-4943-8dc5-d83772cd52f9/8b016495-e7b5-48ef-b18e-939d72da93a8",
+      "status": 200,
+      "ok": true
+    },
+    {
+      "method": "GET",
+      "path": "/containers/1b9c08fa-32e1-4943-8dc5-d83772cd52f9/8b016495-e7b5-48ef-b18e-939d72da93a8",
+      "status": 200,
+      "ok": true
+    },
+    {
+      "method": "GET",
+      "path": "/containers/1b9c08fa-32e1-4943-8dc5-d83772cd52f9/8b016495-e7b5-48ef-b18e-939d72da93a8",
+      "status": 200,
+      "ok": true
+    },
+    {
+      "method": "GET",
+      "path": "/containers/1b9c08fa-32e1-4943-8dc5-d83772cd52f9/8b016495-e7b5-48ef-b18e-939d72da93a8",
+      "status": 200,
+      "ok": true
+    },
+    {
+      "method": "GET",
+      "path": "/containers/1b9c08fa-32e1-4943-8dc5-d83772cd52f9/8b016495-e7b5-48ef-b18e-939d72da93a8",
+      "status": 200,
+      "ok": true
+    },
+    {
+      "method": "GET",
+      "path": "/containers/1b9c08fa-32e1-4943-8dc5-d83772cd52f9/8b016495-e7b5-48ef-b18e-939d72da93a8",
+      "status": 200,
+      "ok": true
+    },
+    {
+      "method": "GET",
+      "path": "/containers?serverId=1b9c08fa-32e1-4943-8dc5-d83772cd52f9&ownOnly=true",
+      "status": 200,
+      "ok": true
+    },
+    {
+      "method": "DELETE",
+      "path": "/containers/1b9c08fa-32e1-4943-8dc5-d83772cd52f9/8b016495-e7b5-48ef-b18e-939d72da93a8",
+      "status": 200,
+      "ok": true
+    },
+    {
+      "method": "DELETE",
+      "path": "/users/067b4dd3-3d10-42b0-86f0-0dd289e16811",
+      "status": 204,
+      "ok": true
+    }
+  ],
+  "resources": {
+    "adminUserId": "ffc82de9-1e90-4a3c-9a9c-b4e259bb983f",
+    "serverId": "1b9c08fa-32e1-4943-8dc5-d83772cd52f9",
+    "imageId": "d66f3dac-e5bf-4ef6-837e-2454ee8951d8",
+    "userId": "067b4dd3-3d10-42b0-86f0-0dd289e16811",
+    "username": "ult-20260604152403-902297-user",
+    "password": "Pwd-ult-20260604152403-902297-123!",
+    "createOperationId": "4b12af89-f334-4ea2-a1ab-db9780f84ba8",
+    "containerId": "8b016495-e7b5-48ef-b18e-939d72da93a8",
+    "dockerId": "",
+    "startOperationId": "a477a9b5-8488-4d1e-af0b-14e201ca5816",
+    "restartOperationId": "9469e7df-25d7-40b6-8032-a366ee0f29fc"
+  },
+  "steps": [
+    {
+      "ts": "2026-06-04T15:24:03.309Z",
+      "name": "preflight root",
+      "apiBase": "http://localhost:3001/api"
+    },
+    {
+      "ts": "2026-06-04T15:24:03.446Z",
+      "name": "admin login for fixture",
+      "status": 200,
+      "userId": "ffc82de9-1e90-4a3c-9a9c-b4e259bb983f"
+    },
+    {
+      "ts": "2026-06-04T15:24:03.449Z",
+      "name": "admin me",
+      "username": "admin",
+      "caps": [
+        "manage_users",
+        "manage_groups",
+        "manage_servers",
+        "manage_images",
+        "manage_grants",
+        "manage_containers_any",
+        "view_audit",
+        "view_metrics_all"
+      ]
+    },
+    {
+      "ts": "2026-06-04T15:24:03.451Z",
+      "name": "server selected",
+      "serverId": "1b9c08fa-32e1-4943-8dc5-d83772cd52f9",
+      "serverName": "nyabase-test-cpu",
+      "status": "online",
+      "isGpu": false
+    },
+    {
+      "ts": "2026-06-04T15:24:03.452Z",
+      "name": "image selected",
+      "imageId": "d66f3dac-e5bf-4ef6-837e-2454ee8951d8",
+      "imageName": "murt-20260604t152317z-382edb-cpu-a",
+      "imageRef": "ubuntu:24.04"
+    },
+    {
+      "ts": "2026-06-04T15:24:03.559Z",
+      "name": "ordinary user created",
+      "userId": "067b4dd3-3d10-42b0-86f0-0dd289e16811",
+      "username": "ult-20260604152403-902297-user"
+    },
+    {
+      "ts": "2026-06-04T15:24:03.568Z",
+      "name": "server grant attempt",
+      "status": 201,
+      "body": {
+        "id": "b403ecee-0502-4237-9609-20de9f615647",
+        "scope": "user",
+        "scopeId": "067b4dd3-3d10-42b0-86f0-0dd289e16811",
+        "serverId": "1b9c08fa-32e1-4943-8dc5-d83772cd52f9",
+        "cpuMillis": 500,
+        "memBytes": 268435456,
+        "diskBytes": 536870912,
+        "gpuMode": "none",
+        "gpuIndices": [],
+        "createdAt": "2026-06-04T15:24:03.000Z",
+        "updatedAt": "2026-06-04T15:24:03.000Z"
+      }
+    },
+    {
+      "ts": "2026-06-04T15:24:03.571Z",
+      "name": "image grant attempt",
+      "status": 201,
+      "body": {
+        "id": "dde8086f-401b-484d-b7bd-8cc39fa4f6a7",
+        "scope": "user",
+        "scopeId": "067b4dd3-3d10-42b0-86f0-0dd289e16811",
+        "imageId": "d66f3dac-e5bf-4ef6-837e-2454ee8951d8",
+        "serverId": "1b9c08fa-32e1-4943-8dc5-d83772cd52f9",
+        "createdAt": "2026-06-04T15:24:03.000Z"
+      }
+    },
+    {
+      "ts": "2026-06-04T15:24:03.681Z",
+      "name": "ordinary user login",
+      "status": 200,
+      "userId": "067b4dd3-3d10-42b0-86f0-0dd289e16811",
+      "username": "ult-20260604152403-902297-user",
+      "caps": []
+    },
+    {
+      "ts": "2026-06-04T15:24:03.685Z",
+      "name": "ordinary user access",
+      "status": 200,
+      "body": {
+        "servers": [
+          {
+            "serverId": "1b9c08fa-32e1-4943-8dc5-d83772cd52f9",
+            "cpuMillis": 500,
+            "memBytes": 268435456,
+            "diskBytes": 536870912,
+            "gpuMode": "none",
+            "gpuIndices": [],
+            "allowedImageIds": [
+              "d66f3dac-e5bf-4ef6-837e-2454ee8951d8"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "ts": "2026-06-04T15:24:03.686Z",
+      "name": "ordinary user servers",
+      "status": 200,
+      "count": 1
+    },
+    {
+      "ts": "2026-06-04T15:24:03.687Z",
+      "name": "ordinary user images",
+      "status": 200,
+      "count": 1
+    },
+    {
+      "ts": "2026-06-04T15:24:03.696Z",
+      "name": "container create requested",
+      "status": 201,
+      "body": {
+        "ok": true,
+        "operationId": "4b12af89-f334-4ea2-a1ab-db9780f84ba8",
+        "status": "queued"
+      }
+    },
+    {
+      "ts": "2026-06-04T15:24:03.700Z",
+      "name": "container visible to owner",
+      "containerId": "8b016495-e7b5-48ef-b18e-939d72da93a8",
+      "dockerId": "",
+      "status": "unknown",
+      "ownerId": "067b4dd3-3d10-42b0-86f0-0dd289e16811"
+    },
+    {
+      "ts": "2026-06-04T15:24:03.702Z",
+      "name": "container detail",
+      "status": 200,
+      "containerStatus": "unknown"
+    },
+    {
+      "ts": "2026-06-04T15:24:03.707Z",
+      "name": "container stop requested",
+      "status": 409,
+      "body": {
+        "message": "Container has not been bound to Docker yet",
+        "error": "Conflict",
+        "statusCode": 409
+      }
+    },
+    {
+      "ts": "2026-06-04T15:24:11.712Z",
+      "name": "container stop observed",
+      "status": 200,
+      "containerStatus": "unknown",
+      "dockerId": "bdd47339cc5651abec9f850540c489042ff8076fbbfada1d30aa9156de66776e"
+    },
+    {
+      "ts": "2026-06-04T15:24:11.723Z",
+      "name": "container start requested",
+      "status": 201,
+      "body": {
+        "ok": true,
+        "operationId": "a477a9b5-8488-4d1e-af0b-14e201ca5816",
+        "status": "queued"
+      }
+    },
+    {
+      "ts": "2026-06-04T15:24:19.733Z",
+      "name": "container start observed",
+      "status": 200,
+      "containerStatus": "unknown",
+      "dockerId": "bdd47339cc5651abec9f850540c489042ff8076fbbfada1d30aa9156de66776e"
+    },
+    {
+      "ts": "2026-06-04T15:24:19.743Z",
+      "name": "container restart requested",
+      "status": 201,
+      "body": {
+        "ok": true,
+        "operationId": "9469e7df-25d7-40b6-8032-a366ee0f29fc",
+        "status": "queued"
+      }
+    },
+    {
+      "ts": "2026-06-04T15:24:27.752Z",
+      "name": "container restart observed",
+      "status": 200,
+      "containerStatus": "unknown",
+      "dockerId": "bdd47339cc5651abec9f850540c489042ff8076fbbfada1d30aa9156de66776e"
+    },
+    {
+      "ts": "2026-06-04T15:24:27.754Z",
+      "name": "container delete requested",
+      "status": 409,
+      "body": {
+        "message": "Another operation is already in progress for this resource",
+        "error": "Conflict",
+        "statusCode": 409
+      }
+    },
+    {
+      "ts": "2026-06-04T15:26:27.913Z",
+      "name": "container residual check",
+      "status": 200,
+      "residualCount": 1
+    }
+  ],
+  "failures": [
+    {
+      "ts": "2026-06-04T15:26:27.906Z",
+      "step": "wait delete gone",
+      "error": "Error: timeout after 120000ms; last=false\n    at waitFor (file:///root/nyabase/.codex/skills/harness/docs/live-test-user/20260604-232219/artifacts/user-live-test.mjs:32:9)\n    at async file:///root/nyabase/.codex/skills/harness/docs/live-test-user/20260604-232219/artifacts/user-live-test.mjs:115:3",
+      "rootCause": "product-or-infra"
+    }
+  ],
+  "cleanup": [
+    {
+      "type": "container",
+      "id": "8b016495-e7b5-48ef-b18e-939d72da93a8",
+      "status": 200
+    },
+    {
+      "type": "user",
+      "id": "067b4dd3-3d10-42b0-86f0-0dd289e16811",
+      "status": 204
+    }
+  ],
+  "finishedAt": "2026-06-04T15:26:27.929Z"
+}\n--- backend tail ---
+[Nest] 2934288  - 06/04/2026, 11:22:31 PM     LOG [NestFactory] Starting Nest application...
+[Nest] 2934288  - 06/04/2026, 11:22:31 PM     LOG [InstanceLoader] DatabaseModule dependencies initialized +20ms
+[Nest] 2934288  - 06/04/2026, 11:22:31 PM     LOG [InstanceLoader] TypeOrmModule dependencies initialized +0ms
+[Nest] 2934288  - 06/04/2026, 11:22:31 PM     LOG [InstanceLoader] PassportModule dependencies initialized +0ms
+[Nest] 2934288  - 06/04/2026, 11:22:31 PM     LOG [InstanceLoader] ConfigHostModule dependencies initialized +0ms
+[Nest] 2934288  - 06/04/2026, 11:22:31 PM     LOG [InstanceLoader] ConfigModule dependencies initialized +1ms
+[Nest] 2934288  - 06/04/2026, 11:22:31 PM     LOG [InstanceLoader] JwtModule dependencies initialized +4ms
+[Nest] 2934288  - 06/04/2026, 11:22:31 PM     LOG [InstanceLoader] JwtModule dependencies initialized +0ms
+[Nest] 2934288  - 06/04/2026, 11:22:31 PM     LOG [InstanceLoader] TypeOrmCoreModule dependencies initialized +43ms
+[Nest] 2934288  - 06/04/2026, 11:22:31 PM     LOG [InstanceLoader] TypeOrmModule dependencies initialized +1ms
+[Nest] 2934288  - 06/04/2026, 11:22:31 PM     LOG [InstanceLoader] TypeOrmModule dependencies initialized +0ms
+[Nest] 2934288  - 06/04/2026, 11:22:31 PM     LOG [InstanceLoader] TypeOrmModule dependencies initialized +0ms
+[Nest] 2934288  - 06/04/2026, 11:22:31 PM     LOG [InstanceLoader] TypeOrmModule dependencies initialized +0ms
+[Nest] 2934288  - 06/04/2026, 11:22:31 PM     LOG [InstanceLoader] TypeOrmModule dependencies initialized +0ms
+[Nest] 2934288  - 06/04/2026, 11:22:31 PM     LOG [InstanceLoader] TypeOrmModule dependencies initialized +0ms
+[Nest] 2934288  - 06/04/2026, 11:22:31 PM     LOG [InstanceLoader] TypeOrmModule dependencies initialized +0ms
+[Nest] 2934288  - 06/04/2026, 11:22:31 PM     LOG [InstanceLoader] TypeOrmModule dependencies initialized +0ms
+[Nest] 2934288  - 06/04/2026, 11:22:31 PM     LOG [InstanceLoader] TypeOrmModule dependencies initialized +0ms
+[Nest] 2934288  - 06/04/2026, 11:22:31 PM     LOG [InstanceLoader] TypeOrmModule dependencies initialized +0ms
+[Nest] 2934288  - 06/04/2026, 11:22:31 PM     LOG [InstanceLoader] TypeOrmModule dependencies initialized +0ms
+[Nest] 2934288  - 06/04/2026, 11:22:31 PM     LOG [InstanceLoader] TypeOrmModule dependencies initialized +0ms
+[Nest] 2934288  - 06/04/2026, 11:22:31 PM     LOG [InstanceLoader] TypeOrmModule dependencies initialized +0ms
+[Nest] 2934288  - 06/04/2026, 11:22:31 PM     LOG [InstanceLoader] TypeOrmModule dependencies initialized +0ms
+[Nest] 2934288  - 06/04/2026, 11:22:31 PM     LOG [InstanceLoader] TypeOrmModule dependencies initialized +0ms
+[Nest] 2934288  - 06/04/2026, 11:22:31 PM     LOG [InstanceLoader] AccessModule dependencies initialized +1ms
+[Nest] 2934288  - 06/04/2026, 11:22:31 PM     LOG [InstanceLoader] QuotaModule dependencies initialized +1ms
+[Nest] 2934288  - 06/04/2026, 11:22:31 PM     LOG [InstanceLoader] AgentGatewayModule dependencies initialized +1ms
+[Nest] 2934288  - 06/04/2026, 11:22:31 PM     LOG [InstanceLoader] MetricsModule dependencies initialized +0ms
+[Nest] 2934288  - 06/04/2026, 11:22:31 PM     LOG [InstanceLoader] AuditModule dependencies initialized +1ms
+[Nest] 2934288  - 06/04/2026, 11:22:31 PM     LOG [InstanceLoader] AppModule dependencies initialized +0ms
+[Nest] 2934288  - 06/04/2026, 11:22:31 PM     LOG [InstanceLoader] OperationsModule dependencies initialized +0ms
+[Nest] 2934288  - 06/04/2026, 11:22:31 PM     LOG [InstanceLoader] MountSourcesModule dependencies initialized +0ms
+[Nest] 2934288  - 06/04/2026, 11:22:31 PM     LOG [InstanceLoader] AuthModule dependencies initialized +0ms
+[Nest] 2934288  - 06/04/2026, 11:22:31 PM     LOG [InstanceLoader] RemoteFsMountsModule dependencies initialized +1ms
+[Nest] 2934288  - 06/04/2026, 11:22:31 PM     LOG [InstanceLoader] UsersModule dependencies initialized +0ms
+[Nest] 2934288  - 06/04/2026, 11:22:31 PM     LOG [InstanceLoader] ImagesModule dependencies initialized +0ms
+[Nest] 2934288  - 06/04/2026, 11:22:31 PM     LOG [InstanceLoader] GroupsModule dependencies initialized +0ms
+[Nest] 2934288  - 06/04/2026, 11:22:31 PM     LOG [InstanceLoader] ServersModule dependencies initialized +0ms
+[Nest] 2934288  - 06/04/2026, 11:22:31 PM     LOG [InstanceLoader] DataDirsModule dependencies initialized +0ms
+[Nest] 2934288  - 06/04/2026, 11:22:31 PM     LOG [InstanceLoader] ContainersModule dependencies initialized +0ms
+[Nest] 2934288  - 06/04/2026, 11:22:31 PM     LOG [RoutesResolver] AuthController {/api/auth}: +69ms
+[Nest] 2934288  - 06/04/2026, 11:22:31 PM     LOG [RouterExplorer] Mapped {/api/auth/login, POST} route +1ms
+[Nest] 2934288  - 06/04/2026, 11:22:31 PM     LOG [RouterExplorer] Mapped {/api/auth/refresh, POST} route +1ms
+[Nest] 2934288  - 06/04/2026, 11:22:31 PM     LOG [RouterExplorer] Mapped {/api/auth/logout, POST} route +0ms
+[Nest] 2934288  - 06/04/2026, 11:22:31 PM     LOG [RouterExplorer] Mapped {/api/auth/me, GET} route +0ms
+[Nest] 2934288  - 06/04/2026, 11:22:31 PM     LOG [RouterExplorer] Mapped {/api/auth/tokens, GET} route +0ms
+[Nest] 2934288  - 06/04/2026, 11:22:31 PM     LOG [RouterExplorer] Mapped {/api/auth/tokens, POST} route +1ms
+[Nest] 2934288  - 06/04/2026, 11:22:31 PM     LOG [RouterExplorer] Mapped {/api/auth/tokens/:id, DELETE} route +0ms
+[Nest] 2934288  - 06/04/2026, 11:22:31 PM     LOG [RoutesResolver] UsersController {/api/users}: +0ms
+[Nest] 2934288  - 06/04/2026, 11:22:31 PM     LOG [RouterExplorer] Mapped {/api/users, GET} route +0ms
+[Nest] 2934288  - 06/04/2026, 11:22:31 PM     LOG [RouterExplorer] Mapped {/api/users, POST} route +0ms
+[Nest] 2934288  - 06/04/2026, 11:22:31 PM     LOG [RouterExplorer] Mapped {/api/users/:id, GET} route +0ms
+[Nest] 2934288  - 06/04/2026, 11:22:31 PM     LOG [RouterExplorer] Mapped {/api/users/:id, PATCH} route +1ms
+[Nest] 2934288  - 06/04/2026, 11:22:31 PM     LOG [RouterExplorer] Mapped {/api/users/:id, DELETE} route +0ms
+[Nest] 2934288  - 06/04/2026, 11:22:31 PM     LOG [RouterExplorer] Mapped {/api/users/:id/ssh-keys, GET} route +0ms
+[Nest] 2934288  - 06/04/2026, 11:22:31 PM     LOG [RouterExplorer] Mapped {/api/users/:id/ssh-keys, POST} route +0ms
+[Nest] 2934288  - 06/04/2026, 11:22:31 PM     LOG [RouterExplorer] Mapped {/api/users/:id/ssh-keys/:keyId, DELETE} route +0ms
+[Nest] 2934288  - 06/04/2026, 11:22:31 PM     LOG [RoutesResolver] GroupsController {/api/groups}: +0ms
+[Nest] 2934288  - 06/04/2026, 11:22:31 PM     LOG [RouterExplorer] Mapped {/api/groups, GET} route +0ms
+[Nest] 2934288  - 06/04/2026, 11:22:31 PM     LOG [RouterExplorer] Mapped {/api/groups, POST} route +0ms
+[Nest] 2934288  - 06/04/2026, 11:22:31 PM     LOG [RouterExplorer] Mapped {/api/groups/:id, GET} route +0ms
+[Nest] 2934288  - 06/04/2026, 11:22:31 PM     LOG [RouterExplorer] Mapped {/api/groups/:id, PATCH} route +0ms
+[Nest] 2934288  - 06/04/2026, 11:22:31 PM     LOG [RouterExplorer] Mapped {/api/groups/:id, DELETE} route +0ms
+[Nest] 2934288  - 06/04/2026, 11:22:31 PM     LOG [RouterExplorer] Mapped {/api/groups/:id/members, GET} route +0ms
+[Nest] 2934288  - 06/04/2026, 11:22:31 PM     LOG [RouterExplorer] Mapped {/api/groups/:id/members, POST} route +0ms
+[Nest] 2934288  - 06/04/2026, 11:22:31 PM     LOG [RouterExplorer] Mapped {/api/groups/:id/members/:userId, DELETE} route +1ms
+[Nest] 2934288  - 06/04/2026, 11:22:31 PM     LOG [RouterExplorer] Mapped {/api/groups/:id/server-grants, GET} route +0ms
+[Nest] 2934288  - 06/04/2026, 11:22:31 PM     LOG [RouterExplorer] Mapped {/api/groups/:id/server-grants/:serverId, POST} route +0ms
+[Nest] 2934288  - 06/04/2026, 11:22:31 PM     LOG [RouterExplorer] Mapped {/api/groups/:id/server-grants/:serverId, DELETE} route +0ms
+[Nest] 2934288  - 06/04/2026, 11:22:31 PM     LOG [RouterExplorer] Mapped {/api/groups/:id/image-grants, GET} route +0ms
+[Nest] 2934288  - 06/04/2026, 11:22:31 PM     LOG [RouterExplorer] Mapped {/api/groups/:id/image-grants, POST} route +0ms
+[Nest] 2934288  - 06/04/2026, 11:22:31 PM     LOG [RouterExplorer] Mapped {/api/groups/:id/image-grants/:imageId/sync-servers, POST} route +0ms
+[Nest] 2934288  - 06/04/2026, 11:22:31 PM     LOG [RouterExplorer] Mapped {/api/groups/:id/image-grants/:imageId/:serverId, DELETE} route +0ms
+[Nest] 2934288  - 06/04/2026, 11:22:31 PM     LOG [RouterExplorer] Mapped {/api/groups/:id/mount-source-grants, GET} route +0ms
+[Nest] 2934288  - 06/04/2026, 11:22:31 PM     LOG [RouterExplorer] Mapped {/api/groups/:id/mount-source-grants, POST} route +0ms
+[Nest] 2934288  - 06/04/2026, 11:22:31 PM     LOG [RouterExplorer] Mapped {/api/groups/:id/mount-source-grants/:sourceKind/:sourceId, DELETE} route +0ms
+[Nest] 2934288  - 06/04/2026, 11:22:31 PM     LOG [RoutesResolver] UserGrantsController {/api/users/:userId}: +0ms
+[Nest] 2934288  - 06/04/2026, 11:22:31 PM     LOG [RouterExplorer] Mapped {/api/users/:userId/server-grants, GET} route +0ms
+[Nest] 2934288  - 06/04/2026, 11:22:31 PM     LOG [RouterExplorer] Mapped {/api/users/:userId/server-grants/:serverId, POST} route +0ms
+[Nest] 2934288  - 06/04/2026, 11:22:31 PM     LOG [RouterExplorer] Mapped {/api/users/:userId/server-grants/:serverId, DELETE} route +0ms
+[Nest] 2934288  - 06/04/2026, 11:22:31 PM     LOG [RouterExplorer] Mapped {/api/users/:userId/image-grants, GET} route +0ms
+[Nest] 2934288  - 06/04/2026, 11:22:31 PM     LOG [RouterExplorer] Mapped {/api/users/:userId/image-grants, POST} route +1ms
+[Nest] 2934288  - 06/04/2026, 11:22:31 PM     LOG [RouterExplorer] Mapped {/api/users/:userId/image-grants/:imageId/:serverId, DELETE} route +0ms
+[Nest] 2934288  - 06/04/2026, 11:22:31 PM     LOG [RouterExplorer] Mapped {/api/users/:userId/mount-source-grants, GET} route +0ms
+[Nest] 2934288  - 06/04/2026, 11:22:31 PM     LOG [RouterExplorer] Mapped {/api/users/:userId/mount-source-grants, POST} route +0ms
+[Nest] 2934288  - 06/04/2026, 11:22:31 PM     LOG [RouterExplorer] Mapped {/api/users/:userId/mount-source-grants/:sourceKind/:sourceId, DELETE} route +0ms
+[Nest] 2934288  - 06/04/2026, 11:22:31 PM     LOG [RouterExplorer] Mapped {/api/users/:userId/effective-access, GET} route +0ms
+[Nest] 2934288  - 06/04/2026, 11:22:31 PM     LOG [RoutesResolver] MeAccessController {/api/me}: +0ms
+[Nest] 2934288  - 06/04/2026, 11:22:31 PM     LOG [RouterExplorer] Mapped {/api/me/access, GET} route +0ms
+[Nest] 2934288  - 06/04/2026, 11:22:31 PM     LOG [RoutesResolver] AuditController {/api/audit}: +0ms
+[Nest] 2934288  - 06/04/2026, 11:22:31 PM     LOG [RouterExplorer] Mapped {/api/audit, GET} route +0ms
+[Nest] 2934288  - 06/04/2026, 11:22:31 PM     LOG [RoutesResolver] OperationsController {/api/operations}: +0ms
+[Nest] 2934288  - 06/04/2026, 11:22:31 PM     LOG [RouterExplorer] Mapped {/api/operations/:operationId, GET} route +0ms
+[Nest] 2934288  - 06/04/2026, 11:22:31 PM     LOG [RoutesResolver] MetricsController {/api/metrics}: +0ms
+[Nest] 2934288  - 06/04/2026, 11:22:31 PM     LOG [RouterExplorer] Mapped {/api/metrics/servers/:id/host, GET} route +0ms
+[Nest] 2934288  - 06/04/2026, 11:22:31 PM     LOG [RouterExplorer] Mapped {/api/metrics/servers/:id/gpus, GET} route +0ms
+[Nest] 2934288  - 06/04/2026, 11:22:31 PM     LOG [RouterExplorer] Mapped {/api/metrics/servers/:id/users, GET} route +0ms
+[Nest] 2934288  - 06/04/2026, 11:22:31 PM     LOG [RouterExplorer] Mapped {/api/metrics/servers/:id/containers, GET} route +0ms
+[Nest] 2934288  - 06/04/2026, 11:22:31 PM     LOG [RouterExplorer] Mapped {/api/metrics/query, GET} route +0ms
+[Nest] 2934288  - 06/04/2026, 11:22:31 PM     LOG [RouterExplorer] Mapped {/api/metrics/query_range, GET} route +0ms
+[Nest] 2934288  - 06/04/2026, 11:22:31 PM     LOG [RoutesResolver] ServersController {/api/servers}: +0ms
+[Nest] 2934288  - 06/04/2026, 11:22:31 PM     LOG [RouterExplorer] Mapped {/api/servers, GET} route +1ms
+[Nest] 2934288  - 06/04/2026, 11:22:31 PM     LOG [RouterExplorer] Mapped {/api/servers, POST} route +0ms
+[Nest] 2934288  - 06/04/2026, 11:22:31 PM     LOG [RouterExplorer] Mapped {/api/servers/:id/regenerate-token, POST} route +0ms
+[Nest] 2934288  - 06/04/2026, 11:22:31 PM     LOG [RouterExplorer] Mapped {/api/servers/:id/self-check, GET} route +0ms
+[Nest] 2934288  - 06/04/2026, 11:22:31 PM     LOG [RouterExplorer] Mapped {/api/servers/:id/quota, GET} route +0ms
+[Nest] 2934288  - 06/04/2026, 11:22:31 PM     LOG [RouterExplorer] Mapped {/api/servers/all-disks, GET} route +0ms
+[Nest] 2934288  - 06/04/2026, 11:22:31 PM     LOG [RouterExplorer] Mapped {/api/servers/:id/gpus, GET} route +0ms
+[Nest] 2934288  - 06/04/2026, 11:22:31 PM     LOG [RouterExplorer] Mapped {/api/servers/:id/disks, GET} route +0ms
+[Nest] 2934288  - 06/04/2026, 11:22:31 PM     LOG [RouterExplorer] Mapped {/api/servers/:id/disks, POST} route +0ms
+[Nest] 2934288  - 06/04/2026, 11:22:31 PM     LOG [RouterExplorer] Mapped {/api/servers/:id/disks/:diskId, PATCH} route +0ms
+[Nest] 2934288  - 06/04/2026, 11:22:31 PM     LOG [RouterExplorer] Mapped {/api/servers/:id/disks/:diskId, DELETE} route +0ms
+[Nest] 2934288  - 06/04/2026, 11:22:31 PM     LOG [RouterExplorer] Mapped {/api/servers/:id/defaults, PATCH} route +0ms
+[Nest] 2934288  - 06/04/2026, 11:22:31 PM     LOG [RouterExplorer] Mapped {/api/servers/:id, GET} route +0ms
+[Nest] 2934288  - 06/04/2026, 11:22:31 PM     LOG [RouterExplorer] Mapped {/api/servers/:id/docker-daemon/reconcile, POST} route +0ms
+[Nest] 2934288  - 06/04/2026, 11:22:31 PM     LOG [RouterExplorer] Mapped {/api/servers/:id, PATCH} route +0ms
+[Nest] 2934288  - 06/04/2026, 11:22:31 PM     LOG [RouterExplorer] Mapped {/api/servers/:id, DELETE} route +0ms
+[Nest] 2934288  - 06/04/2026, 11:22:31 PM     LOG [RoutesResolver] ImagesController {/api/images}: +0ms
+[Nest] 2934288  - 06/04/2026, 11:22:31 PM     LOG [RouterExplorer] Mapped {/api/images, GET} route +1ms
+[Nest] 2934288  - 06/04/2026, 11:22:31 PM     LOG [RouterExplorer] Mapped {/api/images, POST} route +0ms
+[Nest] 2934288  - 06/04/2026, 11:22:31 PM     LOG [RouterExplorer] Mapped {/api/images/:id, GET} route +0ms
+[Nest] 2934288  - 06/04/2026, 11:22:31 PM     LOG [RouterExplorer] Mapped {/api/images/:id/status, GET} route +0ms
+[Nest] 2934288  - 06/04/2026, 11:22:31 PM     LOG [RouterExplorer] Mapped {/api/images/:id/pull, POST} route +0ms
+[Nest] 2934288  - 06/04/2026, 11:22:31 PM     LOG [RouterExplorer] Mapped {/api/images/:id/pull-progress, GET} route +0ms
+[Nest] 2934288  - 06/04/2026, 11:22:31 PM     LOG [RouterExplorer] Mapped {/api/images/:id, PATCH} route +0ms
+[Nest] 2934288  - 06/04/2026, 11:22:31 PM     LOG [RouterExplorer] Mapped {/api/images/:id, DELETE} route +0ms
+[Nest] 2934288  - 06/04/2026, 11:22:31 PM     LOG [RoutesResolver] ContainersController {/api/containers}: +0ms
+[Nest] 2934288  - 06/04/2026, 11:22:31 PM     LOG [RouterExplorer] Mapped {/api/containers, GET} route +0ms
+[Nest] 2934288  - 06/04/2026, 11:22:31 PM     LOG [RouterExplorer] Mapped {/api/containers, POST} route +0ms
+[Nest] 2934288  - 06/04/2026, 11:22:31 PM     LOG [RouterExplorer] Mapped {/api/containers/:serverId/:containerId, GET} route +0ms
+[Nest] 2934288  - 06/04/2026, 11:22:31 PM     LOG [RouterExplorer] Mapped {/api/containers/:serverId/:containerId/start, POST} route +0ms
+[Nest] 2934288  - 06/04/2026, 11:22:31 PM     LOG [RouterExplorer] Mapped {/api/containers/:serverId/:containerId/stop, POST} route +0ms
+[Nest] 2934288  - 06/04/2026, 11:22:31 PM     LOG [RouterExplorer] Mapped {/api/containers/:serverId/:containerId/restart, POST} route +0ms
+[Nest] 2934288  - 06/04/2026, 11:22:31 PM     LOG [RouterExplorer] Mapped {/api/containers/:serverId/:containerId/ssh/enable, POST} route +0ms
+[Nest] 2934288  - 06/04/2026, 11:22:31 PM     LOG [RouterExplorer] Mapped {/api/containers/:serverId/:containerId/ssh/reconcile, POST} route +0ms
+[Nest] 2934288  - 06/04/2026, 11:22:31 PM     LOG [RouterExplorer] Mapped {/api/containers/:serverId/:containerId, DELETE} route +0ms
+[Nest] 2934288  - 06/04/2026, 11:22:31 PM     LOG [RouterExplorer] Mapped {/api/containers/:serverId/:containerId/mounts, GET} route +1ms
+[Nest] 2934288  - 06/04/2026, 11:22:31 PM     LOG [RouterExplorer] Mapped {/api/containers/:serverId/:containerId/mounts, PATCH} route +0ms
+[Nest] 2934288  - 06/04/2026, 11:22:31 PM     LOG [RouterExplorer] Mapped {/api/containers/:serverId/:containerId/stats, GET} route +0ms
+[Nest] 2934288  - 06/04/2026, 11:22:31 PM     LOG [RouterExplorer] Mapped {/api/containers/:serverId/:containerId/exec, POST} route +0ms
+[Nest] 2934288  - 06/04/2026, 11:22:31 PM     LOG [RoutesResolver] DataDirsController {/api/data-dirs}: +0ms
+[Nest] 2934288  - 06/04/2026, 11:22:31 PM     LOG [RouterExplorer] Mapped {/api/data-dirs, GET} route +0ms
+[Nest] 2934288  - 06/04/2026, 11:22:31 PM     LOG [RouterExplorer] Mapped {/api/data-dirs, POST} route +0ms
+[Nest] 2934288  - 06/04/2026, 11:22:31 PM     LOG [RouterExplorer] Mapped {/api/data-dirs/:serverId/:sourceId/:name, DELETE} route +0ms
+[Nest] 2934288  - 06/04/2026, 11:22:31 PM     LOG [RoutesResolver] AdminDataDirsController {/api/admin/data-dirs}: +0ms
+[Nest] 2934288  - 06/04/2026, 11:22:31 PM     LOG [RouterExplorer] Mapped {/api/admin/data-dirs/issues, GET} route +0ms
+[Nest] 2934288  - 06/04/2026, 11:22:31 PM     LOG [RoutesResolver] RemoteFsMountsController {/api/system/remote-fs-mounts}: +0ms
+[Nest] 2934288  - 06/04/2026, 11:22:31 PM     LOG [RouterExplorer] Mapped {/api/system/remote-fs-mounts, GET} route +0ms
+[Nest] 2934288  - 06/04/2026, 11:22:31 PM     LOG [RouterExplorer] Mapped {/api/system/remote-fs-mounts, POST} route +0ms
+[Nest] 2934288  - 06/04/2026, 11:22:31 PM     LOG [RouterExplorer] Mapped {/api/system/remote-fs-mounts/:id, GET} route +0ms
+[Nest] 2934288  - 06/04/2026, 11:22:31 PM     LOG [RouterExplorer] Mapped {/api/system/remote-fs-mounts/:id, PATCH} route +0ms
+[Nest] 2934288  - 06/04/2026, 11:22:31 PM     LOG [RouterExplorer] Mapped {/api/system/remote-fs-mounts/:id, DELETE} route +0ms
+[Nest] 2934288  - 06/04/2026, 11:22:31 PM     LOG [RouterExplorer] Mapped {/api/system/remote-fs-mounts/:id/remount, POST} route +0ms
+[Nest] 2934288  - 06/04/2026, 11:22:31 PM     LOG [RouterExplorer] Mapped {/api/system/remote-fs-mounts/:id/servers, GET} route +0ms
+[Nest] 2934288  - 06/04/2026, 11:22:31 PM     LOG [RouterExplorer] Mapped {/api/system/remote-fs-mounts/:id/servers, POST} route +0ms
+[Nest] 2934288  - 06/04/2026, 11:22:31 PM     LOG [RouterExplorer] Mapped {/api/system/remote-fs-mounts/:id/servers/:serverId, DELETE} route +1ms
+[Nest] 2934288  - 06/04/2026, 11:22:31 PM     LOG [RoutesResolver] MountSourcesController {/api/mount-sources}: +0ms
+[Nest] 2934288  - 06/04/2026, 11:22:31 PM     LOG [RouterExplorer] Mapped {/api/mount-sources, GET} route +0ms
+[Nest] 2934288  - 06/04/2026, 11:22:31 PM     LOG [RouterExplorer] Mapped {/api/mount-sources/grants, GET} route +0ms
+[Nest] 2934288  - 06/04/2026, 11:22:31 PM     LOG [RouterExplorer] Mapped {/api/mount-sources/grants/:sourceKind/:sourceId, POST} route +0ms
+[Nest] 2934288  - 06/04/2026, 11:22:31 PM     LOG [RouterExplorer] Mapped {/api/mount-sources/grants/:sourceKind/:sourceId/:scope/:scopeId, DELETE} route +0ms
+[Nest] 2934288  - 06/04/2026, 11:22:31 PM     LOG [AppService] System groups ready (Administrators, Operators, Users)
+[Nest] 2934288  - 06/04/2026, 11:22:31 PM     LOG [AppService] Default admin user created and added to Administrators
+[Nest] 2934288  - 06/04/2026, 11:22:31 PM     LOG [NestApplication] Nest application successfully started +0ms
+[Nest] 2934288  - 06/04/2026, 11:22:31 PM     LOG [AgentGateway] Agent WebSocket gateway ready at /ws/agent
+[Nest] 2934288  - 06/04/2026, 11:22:31 PM     LOG [ConsoleGateway] Console WebSocket gateway ready at /ws/console
+[Nest] 2934288  - 06/04/2026, 11:22:31 PM     LOG [Bootstrap] Backend listening on port 3001
+[Nest] 2934288  - 06/04/2026, 11:23:00 PM     LOG [AgentGateway] Agent connected: server=nyabase-test-cpu (1b9c08fa-32e1-4943-8dc5-d83772cd52f9)
+[Nest] 2934288  - 06/04/2026, 11:23:00 PM     LOG [AgentGateway] Hello from nyabase-test-cpu: nyabase-test-1, 0 GPUs, agentVersion=0.1.0
+[Nest] 2934288  - 06/04/2026, 11:23:00 PM     LOG [AgentGateway] Freezing dockerRoot for nyabase-test-cpu: /data/nyabase-docker (socket: /run/nyabase-agent/docker.sock)
+[Nest] 2934288  - 06/04/2026, 11:23:00 PM    WARN [AgentGateway] [StateReport] Unknown numericUserId 2 from server 1b9c08fa-32e1-4943-8dc5-d83772cd52f9 — skipping
+[Nest] 2934288  - 06/04/2026, 11:23:00 PM    WARN [AgentGateway] [StateReport] Unknown numericUserId 2 from server 1b9c08fa-32e1-4943-8dc5-d83772cd52f9 — skipping
+[Nest] 2934288  - 06/04/2026, 11:23:05 PM     LOG [AgentGateway] Agent connected: server=nyabase-test-gpu (343488f6-2689-488a-8bf8-8c02caf25989)
+[Nest] 2934288  - 06/04/2026, 11:23:09 PM     LOG [AgentGateway] Hello from nyabase-test-gpu: aya-1, 4 GPUs, agentVersion=0.1.0
+[Nest] 2934288  - 06/04/2026, 11:23:09 PM     LOG [AgentGateway] Freezing dockerRoot for nyabase-test-gpu: /data0/nbTest/nyabase-docker-pquota (socket: /run/nyabase-agent/docker.sock)
+[Nest] 2934288  - 06/04/2026, 11:24:02 PM     LOG [ConsoleGateway] Console connected: session=655113fb-e5b9-468d-b6ad-aa9470851e9e server=1b9c08fa-32e1-4943-8dc5-d83772cd52f9 user=7627a940-cc5a-469f-9148-c609a636fc3e
+[Nest] 2934288  - 06/04/2026, 11:24:03 PM    WARN [AgentGateway] [StateReport] Unknown numericUserId 8 from server 1b9c08fa-32e1-4943-8dc5-d83772cd52f9 — skipping
+[Nest] 2934288  - 06/04/2026, 11:24:04 PM     LOG [ConsoleGateway] Console disconnected: session=655113fb-e5b9-468d-b6ad-aa9470851e9e
+[Nest] 2934288  - 06/04/2026, 11:24:04 PM     LOG [ConsoleGateway] Console connected: session=18fe153b-e608-4f1f-8c4a-f3ad8886b0d0 server=1b9c08fa-32e1-4943-8dc5-d83772cd52f9 user=7627a940-cc5a-469f-9148-c609a636fc3e
+[Nest] 2934288  - 06/04/2026, 11:24:08 PM     LOG [ConsoleGateway] Console disconnected: session=18fe153b-e608-4f1f-8c4a-f3ad8886b0d0
+[Nest] 2934288  - 06/04/2026, 11:24:32 PM    WARN [ExecSessionRegistry] Session 20c0ea32-56a6-4e29-8150-a9d53933958e expired unclaimed; sending execClose to agent
+[Nest] 2934288  - 06/04/2026, 11:25:11 PM    WARN [AgentGateway] [StateReport] Unknown numericUserId 7 from server 1b9c08fa-32e1-4943-8dc5-d83772cd52f9 — skipping
+[Nest] 2934288  - 06/04/2026, 11:25:11 PM    WARN [AgentGateway] [StateReport] Unknown numericUserId 8 from server 1b9c08fa-32e1-4943-8dc5-d83772cd52f9 — skipping
+[Nest] 2934288  - 06/04/2026, 11:25:11 PM    WARN [AgentGateway] [StateReport] Unknown numericUserId 9 from server 1b9c08fa-32e1-4943-8dc5-d83772cd52f9 — skipping
+[Nest] 2934288  - 06/04/2026, 11:25:11 PM    WARN [AgentGateway] [StateReport] Unknown numericUserId 13 from server 1b9c08fa-32e1-4943-8dc5-d83772cd52f9 — skipping
+[Nest] 2934288  - 06/04/2026, 11:25:11 PM    WARN [AgentGateway] [StateReport] Unknown numericUserId 15 from server 1b9c08fa-32e1-4943-8dc5-d83772cd52f9 — skipping
+[Nest] 2934288  - 06/04/2026, 11:25:11 PM    WARN [AgentGateway] [StateReport] Unknown numericUserId 11 from server 343488f6-2689-488a-8bf8-8c02caf25989 — skipping
+[Nest] 2934288  - 06/04/2026, 11:25:11 PM    WARN [AgentGateway] [StateReport] Unknown numericUserId 13 from server 343488f6-2689-488a-8bf8-8c02caf25989 — skipping
+[Nest] 2934288  - 06/04/2026, 11:26:03 PM    WARN [AgentGateway] [StateReport] Unknown numericUserId 7 from server 1b9c08fa-32e1-4943-8dc5-d83772cd52f9 — skipping
+[Nest] 2934288  - 06/04/2026, 11:26:03 PM    WARN [AgentGateway] [StateReport] Unknown numericUserId 8 from server 1b9c08fa-32e1-4943-8dc5-d83772cd52f9 — skipping
+[Nest] 2934288  - 06/04/2026, 11:26:03 PM    WARN [AgentGateway] [StateReport] Unknown numericUserId 9 from server 1b9c08fa-32e1-4943-8dc5-d83772cd52f9 — skipping
+[Nest] 2934288  - 06/04/2026, 11:26:03 PM    WARN [AgentGateway] [StateReport] Unknown numericUserId 13 from server 1b9c08fa-32e1-4943-8dc5-d83772cd52f9 — skipping
+[Nest] 2934288  - 06/04/2026, 11:26:03 PM    WARN [AgentGateway] [StateReport] Unknown numericUserId 15 from server 1b9c08fa-32e1-4943-8dc5-d83772cd52f9 — skipping
+[Nest] 2934288  - 06/04/2026, 11:26:05 PM    WARN [AgentGateway] [StateReport] Unknown numericUserId 11 from server 343488f6-2689-488a-8bf8-8c02caf25989 — skipping
+[Nest] 2934288  - 06/04/2026, 11:26:05 PM    WARN [AgentGateway] [StateReport] Unknown numericUserId 13 from server 343488f6-2689-488a-8bf8-8c02caf25989 — skipping
+\n--- frontend tail ---
+
+  VITE v6.4.2  ready in 470 ms
+
+  ➜  Local:   http://localhost:5173/
+  ➜  Network: http://10.8.96.92:5173/
+  ➜  Network: http://172.17.0.1:5173/
+  ➜  Network: http://10.77.77.2:5173/

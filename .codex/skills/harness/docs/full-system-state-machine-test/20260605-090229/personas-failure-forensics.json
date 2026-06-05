@@ -1,0 +1,187 @@
+{
+  "op": {
+    "id": "8e3b2790-75bf-4bc0-a982-756b34fa073c",
+    "kind": "container.create",
+    "status": "failed",
+    "resourceType": "container",
+    "resourceId": "31f7a47e-bd77-41e1-b9ff-a5f8b0e5839c",
+    "serverId": "88ff8efa-2fbd-4e16-b189-2ab949d26ade",
+    "requestedBy": "786da846-4249-4ac6-a85b-eb9cf9d8c9fa",
+    "request": {
+      "serverId": "88ff8efa-2fbd-4e16-b189-2ab949d26ade",
+      "imageId": "cba08763-9dd4-4479-a916-48e074820f56",
+      "name": "murt-20260605t011349z-d34e47-delta-gpu-v2",
+      "cpuMillis": 100,
+      "memBytes": 134217728,
+      "gpuIndices": [
+        1
+      ],
+      "dataDirs": []
+    },
+    "result": null,
+    "attempts": 1,
+    "lastError": "(HTTP code 403) unexpected - failed to set up container networking: Address already in use ",
+    "createdAt": "2026-06-05T01:14:25.000Z",
+    "startedAt": "2026-06-05T01:14:29.048Z",
+    "completedAt": "2026-06-05T01:14:32.387Z",
+    "steps": [
+      {
+        "id": "bb12e61d-b194-4da3-af5b-421a00233a95",
+        "stepKey": "dispatch-runtime-command",
+        "sequence": 1,
+        "hook": null,
+        "status": "failed",
+        "desiredGeneration": null,
+        "commandId": "52f2fb3d-f37e-4c55-bf15-6b8902f1ecf4",
+        "attempts": 1,
+        "lastError": "(HTTP code 403) unexpected - failed to set up container networking: Address already in use ",
+        "result": null,
+        "createdAt": "2026-06-05T01:14:25.000Z",
+        "updatedAt": "2026-06-05T01:14:32.000Z",
+        "startedAt": "2026-06-05T01:14:29.048Z",
+        "completedAt": "2026-06-05T01:14:32.387Z"
+      }
+    ],
+    "commands": [
+      {
+        "id": "52f2fb3d-f37e-4c55-bf15-6b8902f1ecf4",
+        "operationStepId": "bb12e61d-b194-4da3-af5b-421a00233a95",
+        "serverId": "88ff8efa-2fbd-4e16-b189-2ab949d26ade",
+        "resourceKey": "container:31f7a47e-bd77-41e1-b9ff-a5f8b0e5839c",
+        "commandKind": "runtime.container.create",
+        "idempotencyKey": "runtime.container.create:31f7a47e-bd77-41e1-b9ff-a5f8b0e5839c:8e3b2790-75bf-4bc0-a982-756b34fa073c",
+        "desiredGeneration": null,
+        "payload": {
+          "containerId": "31f7a47e-bd77-41e1-b9ff-a5f8b0e5839c",
+          "specGeneration": 1,
+          "ownerId": "786da846-4249-4ac6-a85b-eb9cf9d8c9fa",
+          "numericOwnerId": 5,
+          "imageDockerRef": "ubuntu:24.04",
+          "imageId": "cba08763-9dd4-4479-a916-48e074820f56",
+          "name": "murt-20260605t011349z-d34e47-delta-gpu-v2",
+          "cpuMillis": 100,
+          "memBytes": 134217728,
+          "gpuIndices": [
+            1
+          ],
+          "createDirs": [],
+          "mounts": [],
+          "sshServerEnabled": false,
+          "sshPublicKeys": "[redacted]",
+          "ipCidr": "10.8.110.0/24",
+          "gateway": "10.8.0.1",
+          "reservedIps": [
+            "10.8.1.12"
+          ],
+          "cmd": [
+            "sleep",
+            "3600"
+          ]
+        },
+        "status": "failed",
+        "attempts": 1,
+        "lastError": "(HTTP code 403) unexpected - failed to set up container networking: Address already in use ",
+        "nextAttemptAt": "2026-06-05T01:14:25.975Z",
+        "sentAt": "2026-06-05T01:14:29.048Z",
+        "completedAt": "2026-06-05T01:14:32.387Z",
+        "createdAt": "2026-06-05T01:14:25.000Z",
+        "updatedAt": "2026-06-05T01:14:32.000Z"
+      }
+    ]
+  },
+  "containers": [
+    {
+      "id": "31f7a47e-bd77-41e1-b9ff-a5f8b0e5839c",
+      "name": "murt-20260605t011349z-d34e47-delta-gpu-v2",
+      "ownerId": "786da846-4249-4ac6-a85b-eb9cf9d8c9fa",
+      "serverId": "88ff8efa-2fbd-4e16-b189-2ab949d26ade",
+      "phase": "failed",
+      "powerIntent": "running",
+      "runtime": {
+        "bound": false,
+        "runtimeId": null,
+        "status": "unknown",
+        "ip": null,
+        "observedAt": null,
+        "stale": true,
+        "drift": []
+      },
+      "activeOperation": null,
+      "actions": {
+        "start": {
+          "enabled": false,
+          "reason": "phase_not_active",
+          "message": "Container is failed"
+        },
+        "stop": {
+          "enabled": false,
+          "reason": "phase_not_active",
+          "message": "Container is failed"
+        },
+        "restart": {
+          "enabled": false,
+          "reason": "phase_not_active",
+          "message": "Container is failed"
+        },
+        "delete": {
+          "enabled": true
+        },
+        "stats": {
+          "enabled": false,
+          "reason": "phase_not_active",
+          "message": "Container is failed"
+        },
+        "console": {
+          "enabled": false,
+          "reason": "phase_not_active",
+          "message": "Container is failed"
+        },
+        "updateMounts": {
+          "enabled": false,
+          "reason": "phase_not_active",
+          "message": "Container is failed"
+        },
+        "enableSsh": {
+          "enabled": false,
+          "reason": "phase_not_active",
+          "message": "Container is failed"
+        },
+        "reconcileSsh": {
+          "enabled": false,
+          "reason": "phase_not_active",
+          "message": "Container is failed"
+        }
+      },
+      "resources": {
+        "cpuMillis": 100,
+        "memBytes": 134217728,
+        "diskBytes": 268435456,
+        "gpuIndices": [
+          1
+        ]
+      },
+      "ssh": {
+        "enabled": false,
+        "status": "disabled",
+        "user": "root",
+        "port": 22
+      }
+    }
+  ],
+  "servers": [
+    {
+      "id": "c5134298-fda7-4369-ab51-e0c7065d7058",
+      "name": "nyabase-test-cpu",
+      "status": "online",
+      "isGpuServer": false,
+      "lastSeenAt": "2026-06-05T01:17:15.109Z"
+    },
+    {
+      "id": "88ff8efa-2fbd-4e16-b189-2ab949d26ade",
+      "name": "nyabase-test-gpu",
+      "status": "online",
+      "isGpuServer": true,
+      "lastSeenAt": "2026-06-05T01:17:14.573Z"
+    }
+  ]
+}

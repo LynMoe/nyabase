@@ -1,0 +1,230 @@
+{
+  "runId": "adminlane-20260604t152325z",
+  "runPrefix": "murt-adminlane-20260604t152325z",
+  "backendUrl": "http://localhost:3001",
+  "tempDir": "/root/nyabase/test/runtime/murt/adminlane-20260604t152325z",
+  "createdAt": "2026-06-04T15:23:27.656Z",
+  "status": "pass",
+  "servers": {
+    "cpu": {
+      "id": "1b9c08fa-32e1-4943-8dc5-d83772cd52f9",
+      "name": "nyabase-test-cpu",
+      "isGpuServer": false,
+      "status": "online"
+    },
+    "gpu": {
+      "id": "343488f6-2689-488a-8bf8-8c02caf25989",
+      "name": "nyabase-test-gpu",
+      "isGpuServer": true,
+      "status": "online"
+    },
+    "gpuSetup": "available"
+  },
+  "images": {
+    "cpuA": {
+      "id": "1108d8a3-dfb0-48fa-8d6a-4411d3040723",
+      "name": "murt-adminlane-20260604t152325z-cpu-a",
+      "dockerImage": "ubuntu:24.04",
+      "isActive": true,
+      "cmd": "sleep 3600"
+    },
+    "cpuB": {
+      "id": "088e0e01-188e-43f8-8248-15ca1c707ccc",
+      "name": "murt-adminlane-20260604t152325z-cpu-b-same-ref",
+      "dockerImage": "ubuntu:24.04",
+      "isActive": true,
+      "cmd": "sleep 3600"
+    },
+    "inactive": {
+      "id": "cd581249-b745-49f1-8dc6-3f9e8154f2e2",
+      "name": "murt-adminlane-20260604t152325z-inactive",
+      "dockerImage": "ubuntu:24.04",
+      "isActive": false,
+      "cmd": "sleep 3600"
+    },
+    "gpuA": {
+      "id": "175e174d-ff66-4976-98cf-e442d71472bf",
+      "name": "murt-adminlane-20260604t152325z-gpu-a",
+      "dockerImage": "ubuntu:24.04",
+      "isActive": true,
+      "cmd": "sleep 3600"
+    }
+  },
+  "sources": {
+    "local": null,
+    "remote": null,
+    "gaps": [
+      "setup-gap: no local data disk source returned for CPU server 1b9c08fa-32e1-4943-8dc5-d83772cd52f9",
+      "setup-gap: no remote FS mount assigned to CPU server 1b9c08fa-32e1-4943-8dc5-d83772cd52f9",
+      "setup-gap: local source unavailable for alpha",
+      "setup-gap: remote source unavailable for beta",
+      "setup-gap: local source unavailable for delta",
+      "setup-gap: remote source unavailable for delta"
+    ]
+  },
+  "users": {
+    "alpha": {
+      "id": "a93b9b4c-04d9-4a37-9424-b8f6d0f2ba40",
+      "username": "murt-adminlane-20260604t152325z-alpha",
+      "credentialFile": "/root/nyabase/test/runtime/murt/adminlane-20260604t152325z/alpha.env",
+      "capabilities": [],
+      "effectiveAccess": {
+        "servers": [
+          {
+            "serverId": "1b9c08fa-32e1-4943-8dc5-d83772cd52f9",
+            "cpuMillis": 500,
+            "memBytes": 268435456,
+            "diskBytes": 67108864,
+            "gpuMode": "none",
+            "gpuIndices": [],
+            "allowedImageIds": [
+              "1108d8a3-dfb0-48fa-8d6a-4411d3040723"
+            ]
+          }
+        ]
+      }
+    },
+    "beta": {
+      "id": "c8c5c54c-d90f-4f8b-b148-2a5b936796b0",
+      "username": "murt-adminlane-20260604t152325z-beta",
+      "credentialFile": "/root/nyabase/test/runtime/murt/adminlane-20260604t152325z/beta.env",
+      "capabilities": [],
+      "effectiveAccess": {
+        "servers": [
+          {
+            "serverId": "1b9c08fa-32e1-4943-8dc5-d83772cd52f9",
+            "cpuMillis": 1000,
+            "memBytes": 536870912,
+            "diskBytes": 134217728,
+            "gpuMode": "none",
+            "gpuIndices": [],
+            "allowedImageIds": [
+              "088e0e01-188e-43f8-8248-15ca1c707ccc"
+            ]
+          }
+        ]
+      }
+    },
+    "gamma": {
+      "id": "1a522967-1864-415d-8cbc-34c8f21bb35d",
+      "username": "murt-adminlane-20260604t152325z-gamma",
+      "credentialFile": "/root/nyabase/test/runtime/murt/adminlane-20260604t152325z/gamma.env",
+      "capabilities": [],
+      "effectiveAccess": {
+        "servers": [
+          {
+            "serverId": "343488f6-2689-488a-8bf8-8c02caf25989",
+            "cpuMillis": 1000,
+            "memBytes": 1073741824,
+            "diskBytes": 268435456,
+            "gpuMode": "indices",
+            "gpuIndices": [
+              0
+            ],
+            "allowedImageIds": [
+              "175e174d-ff66-4976-98cf-e442d71472bf"
+            ]
+          }
+        ]
+      }
+    },
+    "delta": {
+      "id": "1b35bc0d-a3f7-4e4d-99fe-645f28127bc2",
+      "username": "murt-adminlane-20260604t152325z-delta",
+      "credentialFile": "/root/nyabase/test/runtime/murt/adminlane-20260604t152325z/delta.env",
+      "capabilities": [],
+      "effectiveAccess": {
+        "servers": [
+          {
+            "serverId": "1b9c08fa-32e1-4943-8dc5-d83772cd52f9",
+            "cpuMillis": 1500,
+            "memBytes": 1073741824,
+            "diskBytes": 268435456,
+            "gpuMode": "none",
+            "gpuIndices": [],
+            "allowedImageIds": [
+              "1108d8a3-dfb0-48fa-8d6a-4411d3040723"
+            ]
+          },
+          {
+            "serverId": "343488f6-2689-488a-8bf8-8c02caf25989",
+            "cpuMillis": 1000,
+            "memBytes": 1073741824,
+            "diskBytes": 268435456,
+            "gpuMode": "indices",
+            "gpuIndices": [
+              1
+            ],
+            "allowedImageIds": [
+              "175e174d-ff66-4976-98cf-e442d71472bf"
+            ]
+          }
+        ]
+      }
+    },
+    "epsilon": {
+      "id": "d8a22bcc-0b49-4218-b657-cf13e9a55d53",
+      "username": "murt-adminlane-20260604t152325z-epsilon",
+      "credentialFile": "/root/nyabase/test/runtime/murt/adminlane-20260604t152325z/epsilon.env",
+      "capabilities": [],
+      "effectiveAccess": {
+        "servers": []
+      }
+    }
+  },
+  "grants": {
+    "alpha": {
+      "serverGrants": [
+        "cpu:1b9c08fa-32e1-4943-8dc5-d83772cd52f9"
+      ],
+      "imageGrants": [
+        "cpuA:1108d8a3-dfb0-48fa-8d6a-4411d3040723@1b9c08fa-32e1-4943-8dc5-d83772cd52f9"
+      ],
+      "mountSourceGrants": []
+    },
+    "beta": {
+      "serverGrants": [
+        "cpu:1b9c08fa-32e1-4943-8dc5-d83772cd52f9"
+      ],
+      "imageGrants": [
+        "cpuB:088e0e01-188e-43f8-8248-15ca1c707ccc@1b9c08fa-32e1-4943-8dc5-d83772cd52f9"
+      ],
+      "mountSourceGrants": []
+    },
+    "gamma": {
+      "serverGrants": [
+        "gpu:343488f6-2689-488a-8bf8-8c02caf25989"
+      ],
+      "imageGrants": [
+        "gpuA:175e174d-ff66-4976-98cf-e442d71472bf@343488f6-2689-488a-8bf8-8c02caf25989"
+      ],
+      "mountSourceGrants": []
+    },
+    "delta": {
+      "serverGrants": [
+        "cpu:1b9c08fa-32e1-4943-8dc5-d83772cd52f9",
+        "gpu:343488f6-2689-488a-8bf8-8c02caf25989"
+      ],
+      "imageGrants": [
+        "cpuA:1108d8a3-dfb0-48fa-8d6a-4411d3040723@1b9c08fa-32e1-4943-8dc5-d83772cd52f9",
+        "gpuA:175e174d-ff66-4976-98cf-e442d71472bf@343488f6-2689-488a-8bf8-8c02caf25989"
+      ],
+      "mountSourceGrants": []
+    },
+    "epsilon": {
+      "serverGrants": [],
+      "imageGrants": [
+        "inactive:cd581249-b745-49f1-8dc6-3f9e8154f2e2@1b9c08fa-32e1-4943-8dc5-d83772cd52f9"
+      ],
+      "mountSourceGrants": []
+    }
+  },
+  "setupGaps": [
+    "setup-gap: no local data disk source returned for CPU server 1b9c08fa-32e1-4943-8dc5-d83772cd52f9",
+    "setup-gap: no remote FS mount assigned to CPU server 1b9c08fa-32e1-4943-8dc5-d83772cd52f9",
+    "setup-gap: local source unavailable for alpha",
+    "setup-gap: remote source unavailable for beta",
+    "setup-gap: local source unavailable for delta",
+    "setup-gap: remote source unavailable for delta"
+  ]
+}

@@ -1,0 +1,22 @@
+[Unit]
+Description=nyabase Agent
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/nyabase-agent
+ExecStart=/usr/bin/node /opt/nyabase-agent/dist/main.js
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=nyabase-agent
+
+# State directory
+RuntimeDirectory=nyabase-agent
+StateDirectory=nyabase-agent
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,17 @@
+# Example agent.yaml. The schema is enforced by `zAgentConfig` in src/config.ts;
+# unknown fields are silently ignored.
+#
+# Note: there is intentionally no `dockerSocket` / `xfsMount` / `overlayMount` /
+# `dataDisks` field. The agent always talks to its own nyabase-managed dockerd
+# at a fixed UNIX socket (see DaemonManager.SOCKET_PATH) and the XFS mount is
+# derived from `dockerRoot`. Data disks are now managed by the backend.
+
+backendUrl: ws://localhost:3001/ws/agent
+agentToken: "4436e28fc3fba07c93219b989ecf3e1de05e001f777b647cceb82524e16ca99f"
+serverId: "37d69a7a-b799-41a9-8bcc-493ae67dd259"
+dockerRoot: /var/lib/nyabase-docker
+parentIface: eth0
+macvlanCidr: 192.168.100.0/24
+macvlanGateway: 192.168.100.1
+metricsIntervalMs: 10000
+isGpuServer: true

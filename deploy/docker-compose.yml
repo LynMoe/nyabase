@@ -1,0 +1,47 @@
+services:
+  victoriametrics:
+    image: victoriametrics/victoria-metrics:v1.101.0
+    container_name: nyabase-vm
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8428:8428"
+    volumes:
+      - vm-data:/victoria-metrics-data
+    command:
+      - "--retentionPeriod=12"
+      - "--storageDataPath=/victoria-metrics-data"
+
+  backend:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.backend
+    container_name: nyabase-backend
+    restart: unless-stopped
+    ports:
+      - "3001:3001"
+    environment:
+      NODE_ENV: production
+      PORT: "3001"
+      DB_DRIVER: sqlite
+      DB_PATH: /data/nyabase.db
+      # REQUIRED: set a strong secret before going to production.
+      # The backend will refuse to start with the default value.
+      JWT_SECRET: "${JWT_SECRET:-change-me-in-production}"
+      VICTORIA_METRICS_URL: "http://victoriametrics:8428"
+      # Run explicit TypeORM migrations; do not mutate schema with synchronize.
+      DB_SYNC: "false"
+      DB_MIGRATIONS_RUN: "true"
+      # Default admin password — change in production
+      ADMIN_INIT_PASSWORD: "admin123"
+      # CORS_ORIGIN is not needed when the frontend is served by the
+      # same backend process (same origin). Set it only if you need
+      # cross-origin access from other domains.
+      # CORS_ORIGIN: "https://example.com"
+    volumes:
+      - backend-data:/data
+    depends_on:
+      - victoriametrics
+
+volumes:
+  vm-data:
+  backend-data:

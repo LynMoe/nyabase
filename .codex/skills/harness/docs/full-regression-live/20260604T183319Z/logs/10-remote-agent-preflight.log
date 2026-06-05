@@ -1,0 +1,60 @@
+=== secrets/config files ===
+total 12
+-rw------- 1 root root  739 Jun  5 01:36 agent-secrets.json
+drwxr-xr-x 2 root root 4096 Jun  5 01:36 configs
+-rw-r--r-- 1 root root 1106 Jun  5 01:36 servers.json
+{
+  "generatedAt": "2026-06-04T17:36:41.220Z",
+  "backendUrl": "http://localhost:3001",
+  "agents": [
+    {
+      "key": "cpu",
+      "name": "nyabase-test-cpu",
+      "serverId": "d7c6b76e-359f-47bd-81af-ea9f7e2223f2",
+      "ssh": "root@10.8.96.91",
+      "sudo": false,
+      "isGpuServer": false,
+      "parentIface": "eth0",
+      "ipCidr": "10.8.109.0/24",
+      "gateway": "10.8.0.1",
+      "reservedIps": [
+        "10.8.96.91"
+      ],
+      "dockerRoot": "/data/nyabase-docker",
+      "status": "unknown",
+      "configPath": "/root/nyabase/test/runtime/agents/configs/cpu.yaml"
+    },
+    {
+      "key": "gpu",
+      "name": "nyabase-test-gpu",
+      "serverId": "a8694107-56c4-4a78-93f4-4ea90eddc580",
+      "ssh": "lyn@10.8.1.12",
+      "sudo": true,
+      "isGpuServer": true,
+      "parentIface": "bond0",
+      "ipCidr": "10.8.110.0/24",
+      "gateway": "10.8.0.1",
+      "reservedIps": [
+        "10.8.1.12"
+      ],
+      "dockerRoot": "/data0/nbTest/nyabase-docker-pquota",
+      "status": "unknown",
+      "configPath": "/root/nyabase/test/runtime/agents/configs/gpu.yaml"
+    }
+  ]
+}
+=== remote service quick ===
+--- cpu root@10.8.96.91
+active
+d244ed766d862a593bc792cd528585b89ef58da3e9c52bc43233ad063d2c0484  /usr/local/bin/nyabase-agent
+Jun 05 01:37:23 nyabase-test-1 nyabase-agent[2592054]: [Agent] Disconnected from backend
+Jun 05 01:37:25 nyabase-test-1 nyabase-agent[2592054]: [WS] Connecting to ws://10.8.96.92:3001/ws/agent...
+Jun 05 01:37:25 nyabase-test-1 nyabase-agent[2592054]: [WS] Connected
+
+--- gpu lyn@10.8.1.12
+active
+d244ed766d862a593bc792cd528585b89ef58da3e9c52bc43233ad063d2c0484  /usr/local/bin/nyabase-agent
+Jun 04 17:48:50 aya-1 nyabase-agent[140065]:     message: 'failed to set up container networking: Address already in use'
+Jun 04 17:48:50 aya-1 nyabase-agent[140065]:   }
+Jun 04 17:48:50 aya-1 nyabase-agent[140065]: }
+

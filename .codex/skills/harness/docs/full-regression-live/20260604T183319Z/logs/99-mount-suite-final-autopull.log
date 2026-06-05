@@ -1,0 +1,26 @@
+
+ RUN  v4.1.5 /root/nyabase
+
+ × test/specs/live/multi-user-redteam-mount-sources.spec.ts > multi-user red-team mount sources runtime matrix > verifies user-scoped mount source, data-dir, container mount, dynamic patch, and cleanup behavior 17717ms
+   → delete in-use data dir returned 200: {"ok":true,"operationId":"e34ac69d-a63c-48c6-8786-5361cd4e729c","status":"queued"}: expected [ 400, 409, 422, 500 ] to include 200
+
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 1 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  test/specs/live/multi-user-redteam-mount-sources.spec.ts > multi-user red-team mount sources runtime matrix > verifies user-scoped mount source, data-dir, container mount, dynamic patch, and cleanup behavior
+AssertionError: delete in-use data dir returned 200: {"ok":true,"operationId":"e34ac69d-a63c-48c6-8786-5361cd4e729c","status":"queued"}: expected [ 400, 409, 422, 500 ] to include 200
+ ❯ test/specs/live/multi-user-redteam-mount-sources.spec.ts:260:119
+    258|         sourceId: state.sources.local.id,
+    259|       });
+    260|       expect(DELETE_GUARD_STATUSES, `delete in-use data dir returned $…
+       |                                                                                                                       ^
+    261|       const alphaOneAfterGuard = await request<ContainerDto>('GET', co…
+    262|       record('mounted container healthy after delete guard', alpha, al…
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/1]⎯
+
+
+ Test Files  1 failed (1)
+      Tests  1 failed (1)
+   Start at  05:30:49
+   Duration  17.88s (transform 53ms, setup 0ms, import 66ms, tests 17.72s, environment 0ms)
+

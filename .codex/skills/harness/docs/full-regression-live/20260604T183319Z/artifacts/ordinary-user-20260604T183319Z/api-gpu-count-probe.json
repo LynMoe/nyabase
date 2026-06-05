@@ -1,0 +1,820 @@
+{
+  "startedAt": "2026-06-04T18:47:14.601Z",
+  "apiBase": "http://localhost:3001/api",
+  "statePath": "/root/nyabase/test/runtime/murt/20260604t183830z-bcdeeb/state.json",
+  "persona": "gamma",
+  "prefix": "frlive-user-20260604T183319Z-",
+  "steps": [
+    {
+      "name": "login-gamma",
+      "username": "murt-20260604t183830z-bcdeeb-gamma",
+      "response": {
+        "method": "POST",
+        "path": "/auth/login",
+        "status": 200,
+        "ok": true,
+        "ms": 156,
+        "body": {
+          "accessToken": "<redacted>",
+          "refreshToken": "<redacted>",
+          "user": {
+            "id": "d54b5b5c-3609-42b1-a6bd-4f0b9d6276d0",
+            "username": "murt-20260604t183830z-bcdeeb-gamma",
+            "displayName": "MURT gamma",
+            "status": "active",
+            "createdAt": "2026-06-04T18:38:31.000Z",
+            "capabilities": [],
+            "groups": [
+              {
+                "id": "bec5c550-54fd-4017-9a1a-04c4d369c0f0",
+                "name": "Users",
+                "priority": 10,
+                "isSystem": true
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "name": "get-access",
+      "response": {
+        "method": "GET",
+        "path": "/me/access",
+        "status": 200,
+        "ok": true,
+        "ms": 3,
+        "body": {
+          "servers": [
+            {
+              "serverId": "a8694107-56c4-4a78-93f4-4ea90eddc580",
+              "cpuMillis": 1000,
+              "memBytes": 1073741824,
+              "diskBytes": 268435456,
+              "gpuMode": "indices",
+              "gpuIndices": [
+                0
+              ],
+              "allowedImageIds": [
+                "63af86dc-efd1-4d9e-8748-148d7e54d3b6"
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "name": "create-with-gpu-count",
+      "expected": "gpuCount:1 should allocate one permitted GPU index",
+      "response": {
+        "method": "POST",
+        "path": "/v2/containers",
+        "status": 201,
+        "ok": true,
+        "ms": 10,
+        "body": {
+          "ok": true,
+          "operationId": "649e2175-8d34-4afb-becf-07b2a1bfc0a6",
+          "status": "queued"
+        }
+      }
+    },
+    {
+      "name": "wait-create-operation",
+      "samples": [
+        {
+          "ts": "2026-06-04T18:47:14.772Z",
+          "status": 200,
+          "body": {
+            "id": "649e2175-8d34-4afb-becf-07b2a1bfc0a6",
+            "kind": "container.create",
+            "status": "queued",
+            "resourceType": "container",
+            "resourceId": "8f8c29d5-b5fd-4fa8-8a4a-38b86d7a12bf",
+            "serverId": "a8694107-56c4-4a78-93f4-4ea90eddc580",
+            "requestedBy": "d54b5b5c-3609-42b1-a6bd-4f0b9d6276d0",
+            "request": {
+              "serverId": "a8694107-56c4-4a78-93f4-4ea90eddc580",
+              "imageId": "63af86dc-efd1-4d9e-8748-148d7e54d3b6",
+              "name": "frlive-user-20260604t183319z-gamma-gpucount-mpzuklzc",
+              "cpuMillis": 100,
+              "memBytes": 67108864,
+              "gpuCount": 1
+            },
+            "result": null,
+            "attempts": 0,
+            "lastError": null,
+            "createdAt": "2026-06-04T18:47:14.000Z",
+            "startedAt": null,
+            "completedAt": null,
+            "steps": [
+              {
+                "id": "3e15a7ae-200e-4709-8991-0cd1e2d746d5",
+                "stepKey": "<redacted>",
+                "sequence": 1,
+                "hook": null,
+                "status": "pending",
+                "desiredGeneration": null,
+                "commandId": "53f924e8-3e0d-412b-b313-ecf3e613ce16",
+                "attempts": 0,
+                "lastError": null,
+                "result": null,
+                "createdAt": "2026-06-04T18:47:14.000Z",
+                "updatedAt": "2026-06-04T18:47:14.000Z",
+                "startedAt": null,
+                "completedAt": null
+              }
+            ],
+            "commands": [
+              {
+                "id": "53f924e8-3e0d-412b-b313-ecf3e613ce16",
+                "operationStepId": "3e15a7ae-200e-4709-8991-0cd1e2d746d5",
+                "serverId": "a8694107-56c4-4a78-93f4-4ea90eddc580",
+                "resourceKey": "<redacted>",
+                "commandKind": "runtime.container.create",
+                "idempotencyKey": "<redacted>",
+                "desiredGeneration": null,
+                "payload": {
+                  "containerId": "8f8c29d5-b5fd-4fa8-8a4a-38b86d7a12bf",
+                  "specGeneration": 1,
+                  "ownerId": "d54b5b5c-3609-42b1-a6bd-4f0b9d6276d0",
+                  "numericOwnerId": 14,
+                  "imageDockerRef": "ubuntu:24.04",
+                  "imageId": "63af86dc-efd1-4d9e-8748-148d7e54d3b6",
+                  "name": "frlive-user-20260604t183319z-gamma-gpucount-mpzuklzc",
+                  "cpuMillis": 100,
+                  "memBytes": 67108864,
+                  "gpuIndices": [],
+                  "createDirs": [],
+                  "sshServerEnabled": false,
+                  "ipCidr": "10.8.110.0/24",
+                  "gateway": "10.8.0.1",
+                  "reservedIps": [
+                    "10.8.1.12"
+                  ],
+                  "cmd": [
+                    "sleep",
+                    "3600"
+                  ]
+                },
+                "status": "pending",
+                "attempts": 0,
+                "lastError": null,
+                "nextAttemptAt": "2026-06-04T18:47:14.764Z",
+                "sentAt": null,
+                "completedAt": null,
+                "createdAt": "2026-06-04T18:47:14.000Z",
+                "updatedAt": "2026-06-04T18:47:14.000Z"
+              }
+            ]
+          }
+        },
+        {
+          "ts": "2026-06-04T18:47:16.278Z",
+          "status": 200,
+          "body": {
+            "id": "649e2175-8d34-4afb-becf-07b2a1bfc0a6",
+            "kind": "container.create",
+            "status": "succeeded",
+            "resourceType": "container",
+            "resourceId": "8f8c29d5-b5fd-4fa8-8a4a-38b86d7a12bf",
+            "serverId": "a8694107-56c4-4a78-93f4-4ea90eddc580",
+            "requestedBy": "d54b5b5c-3609-42b1-a6bd-4f0b9d6276d0",
+            "request": {
+              "serverId": "a8694107-56c4-4a78-93f4-4ea90eddc580",
+              "imageId": "63af86dc-efd1-4d9e-8748-148d7e54d3b6",
+              "name": "frlive-user-20260604t183319z-gamma-gpucount-mpzuklzc",
+              "cpuMillis": 100,
+              "memBytes": 67108864,
+              "gpuCount": 1
+            },
+            "result": {
+              "runtimeId": "2a20dfb7c60f567b22e6ffde9b9c24689f884cd795134c418f985b36f19588fd"
+            },
+            "attempts": 1,
+            "lastError": null,
+            "createdAt": "2026-06-04T18:47:14.000Z",
+            "startedAt": "2026-06-04T18:47:15.086Z",
+            "completedAt": "2026-06-04T18:47:15.526Z",
+            "steps": [
+              {
+                "id": "3e15a7ae-200e-4709-8991-0cd1e2d746d5",
+                "stepKey": "<redacted>",
+                "sequence": 1,
+                "hook": null,
+                "status": "succeeded",
+                "desiredGeneration": null,
+                "commandId": "53f924e8-3e0d-412b-b313-ecf3e613ce16",
+                "attempts": 1,
+                "lastError": null,
+                "result": {
+                  "runtimeId": "2a20dfb7c60f567b22e6ffde9b9c24689f884cd795134c418f985b36f19588fd"
+                },
+                "createdAt": "2026-06-04T18:47:14.000Z",
+                "updatedAt": "2026-06-04T18:47:15.000Z",
+                "startedAt": "2026-06-04T18:47:15.086Z",
+                "completedAt": "2026-06-04T18:47:15.526Z"
+              }
+            ],
+            "commands": [
+              {
+                "id": "53f924e8-3e0d-412b-b313-ecf3e613ce16",
+                "operationStepId": "3e15a7ae-200e-4709-8991-0cd1e2d746d5",
+                "serverId": "a8694107-56c4-4a78-93f4-4ea90eddc580",
+                "resourceKey": "<redacted>",
+                "commandKind": "runtime.container.create",
+                "idempotencyKey": "<redacted>",
+                "desiredGeneration": null,
+                "payload": {
+                  "containerId": "8f8c29d5-b5fd-4fa8-8a4a-38b86d7a12bf",
+                  "specGeneration": 1,
+                  "ownerId": "d54b5b5c-3609-42b1-a6bd-4f0b9d6276d0",
+                  "numericOwnerId": 14,
+                  "imageDockerRef": "ubuntu:24.04",
+                  "imageId": "63af86dc-efd1-4d9e-8748-148d7e54d3b6",
+                  "name": "frlive-user-20260604t183319z-gamma-gpucount-mpzuklzc",
+                  "cpuMillis": 100,
+                  "memBytes": 67108864,
+                  "gpuIndices": [],
+                  "createDirs": [],
+                  "sshServerEnabled": false,
+                  "ipCidr": "10.8.110.0/24",
+                  "gateway": "10.8.0.1",
+                  "reservedIps": [
+                    "10.8.1.12"
+                  ],
+                  "cmd": [
+                    "sleep",
+                    "3600"
+                  ]
+                },
+                "status": "succeeded",
+                "attempts": 1,
+                "lastError": null,
+                "nextAttemptAt": "2026-06-04T18:47:14.764Z",
+                "sentAt": "2026-06-04T18:47:15.086Z",
+                "completedAt": "2026-06-04T18:47:15.526Z",
+                "createdAt": "2026-06-04T18:47:14.000Z",
+                "updatedAt": "2026-06-04T18:47:15.000Z"
+              }
+            ]
+          }
+        }
+      ],
+      "response": {
+        "method": "GET",
+        "path": "/operations/649e2175-8d34-4afb-becf-07b2a1bfc0a6",
+        "status": 200,
+        "ok": true,
+        "ms": 3,
+        "body": {
+          "id": "649e2175-8d34-4afb-becf-07b2a1bfc0a6",
+          "kind": "container.create",
+          "status": "succeeded",
+          "resourceType": "container",
+          "resourceId": "8f8c29d5-b5fd-4fa8-8a4a-38b86d7a12bf",
+          "serverId": "a8694107-56c4-4a78-93f4-4ea90eddc580",
+          "requestedBy": "d54b5b5c-3609-42b1-a6bd-4f0b9d6276d0",
+          "request": {
+            "serverId": "a8694107-56c4-4a78-93f4-4ea90eddc580",
+            "imageId": "63af86dc-efd1-4d9e-8748-148d7e54d3b6",
+            "name": "frlive-user-20260604t183319z-gamma-gpucount-mpzuklzc",
+            "cpuMillis": 100,
+            "memBytes": 67108864,
+            "gpuCount": 1
+          },
+          "result": {
+            "runtimeId": "2a20dfb7c60f567b22e6ffde9b9c24689f884cd795134c418f985b36f19588fd"
+          },
+          "attempts": 1,
+          "lastError": null,
+          "createdAt": "2026-06-04T18:47:14.000Z",
+          "startedAt": "2026-06-04T18:47:15.086Z",
+          "completedAt": "2026-06-04T18:47:15.526Z",
+          "steps": [
+            {
+              "id": "3e15a7ae-200e-4709-8991-0cd1e2d746d5",
+              "stepKey": "<redacted>",
+              "sequence": 1,
+              "hook": null,
+              "status": "succeeded",
+              "desiredGeneration": null,
+              "commandId": "53f924e8-3e0d-412b-b313-ecf3e613ce16",
+              "attempts": 1,
+              "lastError": null,
+              "result": {
+                "runtimeId": "2a20dfb7c60f567b22e6ffde9b9c24689f884cd795134c418f985b36f19588fd"
+              },
+              "createdAt": "2026-06-04T18:47:14.000Z",
+              "updatedAt": "2026-06-04T18:47:15.000Z",
+              "startedAt": "2026-06-04T18:47:15.086Z",
+              "completedAt": "2026-06-04T18:47:15.526Z"
+            }
+          ],
+          "commands": [
+            {
+              "id": "53f924e8-3e0d-412b-b313-ecf3e613ce16",
+              "operationStepId": "3e15a7ae-200e-4709-8991-0cd1e2d746d5",
+              "serverId": "a8694107-56c4-4a78-93f4-4ea90eddc580",
+              "resourceKey": "<redacted>",
+              "commandKind": "runtime.container.create",
+              "idempotencyKey": "<redacted>",
+              "desiredGeneration": null,
+              "payload": {
+                "containerId": "8f8c29d5-b5fd-4fa8-8a4a-38b86d7a12bf",
+                "specGeneration": 1,
+                "ownerId": "d54b5b5c-3609-42b1-a6bd-4f0b9d6276d0",
+                "numericOwnerId": 14,
+                "imageDockerRef": "ubuntu:24.04",
+                "imageId": "63af86dc-efd1-4d9e-8748-148d7e54d3b6",
+                "name": "frlive-user-20260604t183319z-gamma-gpucount-mpzuklzc",
+                "cpuMillis": 100,
+                "memBytes": 67108864,
+                "gpuIndices": [],
+                "createDirs": [],
+                "sshServerEnabled": false,
+                "ipCidr": "10.8.110.0/24",
+                "gateway": "10.8.0.1",
+                "reservedIps": [
+                  "10.8.1.12"
+                ],
+                "cmd": [
+                  "sleep",
+                  "3600"
+                ]
+              },
+              "status": "succeeded",
+              "attempts": 1,
+              "lastError": null,
+              "nextAttemptAt": "2026-06-04T18:47:14.764Z",
+              "sentAt": "2026-06-04T18:47:15.086Z",
+              "completedAt": "2026-06-04T18:47:15.526Z",
+              "createdAt": "2026-06-04T18:47:14.000Z",
+              "updatedAt": "2026-06-04T18:47:15.000Z"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "name": "read-created-container-terminal",
+      "samples": [
+        {
+          "ts": "2026-06-04T18:47:16.281Z",
+          "status": 200,
+          "body": {
+            "id": "8f8c29d5-b5fd-4fa8-8a4a-38b86d7a12bf",
+            "name": "frlive-user-20260604t183319z-gamma-gpucount-mpzuklzc",
+            "phase": "active",
+            "resources": {
+              "cpuMillis": 100,
+              "memBytes": 67108864,
+              "diskBytes": 268435456,
+              "gpuIndices": []
+            },
+            "runtime": {
+              "bound": true,
+              "status": "running",
+              "stale": false,
+              "ip": null
+            },
+            "actions": {
+              "start": {
+                "enabled": false,
+                "reason": "phase_not_active",
+                "message": "Container is not stopped"
+              },
+              "stop": {
+                "enabled": true
+              },
+              "restart": {
+                "enabled": true
+              },
+              "delete": {
+                "enabled": true
+              },
+              "stats": {
+                "enabled": true
+              },
+              "console": {
+                "enabled": true
+              },
+              "updateMounts": {
+                "enabled": true
+              },
+              "enableSsh": {
+                "enabled": true
+              },
+              "reconcileSsh": {
+                "enabled": true
+              }
+            },
+            "activeOperation": null
+          }
+        }
+      ],
+      "response": {
+        "method": "GET",
+        "path": "/v2/containers/8f8c29d5-b5fd-4fa8-8a4a-38b86d7a12bf",
+        "status": 200,
+        "ok": true,
+        "ms": 3,
+        "body": {
+          "id": "8f8c29d5-b5fd-4fa8-8a4a-38b86d7a12bf",
+          "serverId": "a8694107-56c4-4a78-93f4-4ea90eddc580",
+          "serverName": "nyabase-test-gpu",
+          "ownerId": "d54b5b5c-3609-42b1-a6bd-4f0b9d6276d0",
+          "name": "frlive-user-20260604t183319z-gamma-gpucount-mpzuklzc",
+          "imageId": "63af86dc-efd1-4d9e-8748-148d7e54d3b6",
+          "phase": "active",
+          "powerIntent": "running",
+          "runtime": {
+            "bound": true,
+            "runtimeId": "2a20dfb7c60f567b22e6ffde9b9c24689f884cd795134c418f985b36f19588fd",
+            "status": "running",
+            "ip": null,
+            "observedAt": "2026-06-04T18:47:15.527Z",
+            "stale": false,
+            "drift": []
+          },
+          "activeOperation": null,
+          "resources": {
+            "cpuMillis": 100,
+            "memBytes": 67108864,
+            "diskBytes": 268435456,
+            "gpuIndices": []
+          },
+          "ssh": {
+            "enabled": false,
+            "status": "disabled"
+          },
+          "mounts": [],
+          "actions": {
+            "start": {
+              "enabled": false,
+              "reason": "phase_not_active",
+              "message": "Container is not stopped"
+            },
+            "stop": {
+              "enabled": true
+            },
+            "restart": {
+              "enabled": true
+            },
+            "delete": {
+              "enabled": true
+            },
+            "stats": {
+              "enabled": true
+            },
+            "console": {
+              "enabled": true
+            },
+            "updateMounts": {
+              "enabled": true
+            },
+            "enableSsh": {
+              "enabled": true
+            },
+            "reconcileSsh": {
+              "enabled": true
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "delete-container",
+      "response": {
+        "method": "POST",
+        "path": "/v2/containers/8f8c29d5-b5fd-4fa8-8a4a-38b86d7a12bf/actions/delete",
+        "status": 201,
+        "ok": true,
+        "ms": 6,
+        "body": {
+          "ok": true,
+          "operationId": "85114170-4dcd-4b28-a7b8-8cb551b424f6",
+          "status": "queued"
+        }
+      }
+    },
+    {
+      "name": "wait-delete-operation",
+      "samples": [
+        {
+          "ts": "2026-06-04T18:47:16.289Z",
+          "status": 200,
+          "body": {
+            "id": "85114170-4dcd-4b28-a7b8-8cb551b424f6",
+            "kind": "container.delete",
+            "status": "queued",
+            "resourceType": "container",
+            "resourceId": "8f8c29d5-b5fd-4fa8-8a4a-38b86d7a12bf",
+            "serverId": "a8694107-56c4-4a78-93f4-4ea90eddc580",
+            "requestedBy": "d54b5b5c-3609-42b1-a6bd-4f0b9d6276d0",
+            "request": {
+              "action": "delete"
+            },
+            "result": null,
+            "attempts": 0,
+            "lastError": null,
+            "createdAt": "2026-06-04T18:47:16.000Z",
+            "startedAt": null,
+            "completedAt": null,
+            "steps": [
+              {
+                "id": "a408d76a-050f-4599-88bf-5bbcb0b2315b",
+                "stepKey": "<redacted>",
+                "sequence": 1,
+                "hook": null,
+                "status": "pending",
+                "desiredGeneration": null,
+                "commandId": "42f35f84-f3c3-4213-aacc-0909bcb62a51",
+                "attempts": 0,
+                "lastError": null,
+                "result": null,
+                "createdAt": "2026-06-04T18:47:16.000Z",
+                "updatedAt": "2026-06-04T18:47:16.000Z",
+                "startedAt": null,
+                "completedAt": null
+              }
+            ],
+            "commands": [
+              {
+                "id": "42f35f84-f3c3-4213-aacc-0909bcb62a51",
+                "operationStepId": "a408d76a-050f-4599-88bf-5bbcb0b2315b",
+                "serverId": "a8694107-56c4-4a78-93f4-4ea90eddc580",
+                "resourceKey": "<redacted>",
+                "commandKind": "runtime.container.delete",
+                "idempotencyKey": "<redacted>",
+                "desiredGeneration": null,
+                "payload": {
+                  "containerId": "8f8c29d5-b5fd-4fa8-8a4a-38b86d7a12bf",
+                  "runtimeId": "2a20dfb7c60f567b22e6ffde9b9c24689f884cd795134c418f985b36f19588fd",
+                  "action": "delete",
+                  "force": true
+                },
+                "status": "pending",
+                "attempts": 0,
+                "lastError": null,
+                "nextAttemptAt": "2026-06-04T18:47:16.282Z",
+                "sentAt": null,
+                "completedAt": null,
+                "createdAt": "2026-06-04T18:47:16.000Z",
+                "updatedAt": "2026-06-04T18:47:16.000Z"
+              }
+            ]
+          }
+        },
+        {
+          "ts": "2026-06-04T18:47:17.793Z",
+          "status": 200,
+          "body": {
+            "id": "85114170-4dcd-4b28-a7b8-8cb551b424f6",
+            "kind": "container.delete",
+            "status": "succeeded",
+            "resourceType": "container",
+            "resourceId": "8f8c29d5-b5fd-4fa8-8a4a-38b86d7a12bf",
+            "serverId": "a8694107-56c4-4a78-93f4-4ea90eddc580",
+            "requestedBy": "d54b5b5c-3609-42b1-a6bd-4f0b9d6276d0",
+            "request": {
+              "action": "delete"
+            },
+            "result": null,
+            "attempts": 1,
+            "lastError": null,
+            "createdAt": "2026-06-04T18:47:16.000Z",
+            "startedAt": "2026-06-04T18:47:17.087Z",
+            "completedAt": "2026-06-04T18:47:17.319Z",
+            "steps": [
+              {
+                "id": "a408d76a-050f-4599-88bf-5bbcb0b2315b",
+                "stepKey": "<redacted>",
+                "sequence": 1,
+                "hook": null,
+                "status": "succeeded",
+                "desiredGeneration": null,
+                "commandId": "42f35f84-f3c3-4213-aacc-0909bcb62a51",
+                "attempts": 1,
+                "lastError": null,
+                "result": null,
+                "createdAt": "2026-06-04T18:47:16.000Z",
+                "updatedAt": "2026-06-04T18:47:17.000Z",
+                "startedAt": "2026-06-04T18:47:17.087Z",
+                "completedAt": "2026-06-04T18:47:17.319Z"
+              }
+            ],
+            "commands": [
+              {
+                "id": "42f35f84-f3c3-4213-aacc-0909bcb62a51",
+                "operationStepId": "a408d76a-050f-4599-88bf-5bbcb0b2315b",
+                "serverId": "a8694107-56c4-4a78-93f4-4ea90eddc580",
+                "resourceKey": "<redacted>",
+                "commandKind": "runtime.container.delete",
+                "idempotencyKey": "<redacted>",
+                "desiredGeneration": null,
+                "payload": {
+                  "containerId": "8f8c29d5-b5fd-4fa8-8a4a-38b86d7a12bf",
+                  "runtimeId": "2a20dfb7c60f567b22e6ffde9b9c24689f884cd795134c418f985b36f19588fd",
+                  "action": "delete",
+                  "force": true
+                },
+                "status": "succeeded",
+                "attempts": 1,
+                "lastError": null,
+                "nextAttemptAt": "2026-06-04T18:47:16.282Z",
+                "sentAt": "2026-06-04T18:47:17.087Z",
+                "completedAt": "2026-06-04T18:47:17.319Z",
+                "createdAt": "2026-06-04T18:47:16.000Z",
+                "updatedAt": "2026-06-04T18:47:17.000Z"
+              }
+            ]
+          }
+        }
+      ],
+      "response": {
+        "method": "GET",
+        "path": "/operations/85114170-4dcd-4b28-a7b8-8cb551b424f6",
+        "status": 200,
+        "ok": true,
+        "ms": 4,
+        "body": {
+          "id": "85114170-4dcd-4b28-a7b8-8cb551b424f6",
+          "kind": "container.delete",
+          "status": "succeeded",
+          "resourceType": "container",
+          "resourceId": "8f8c29d5-b5fd-4fa8-8a4a-38b86d7a12bf",
+          "serverId": "a8694107-56c4-4a78-93f4-4ea90eddc580",
+          "requestedBy": "d54b5b5c-3609-42b1-a6bd-4f0b9d6276d0",
+          "request": {
+            "action": "delete"
+          },
+          "result": null,
+          "attempts": 1,
+          "lastError": null,
+          "createdAt": "2026-06-04T18:47:16.000Z",
+          "startedAt": "2026-06-04T18:47:17.087Z",
+          "completedAt": "2026-06-04T18:47:17.319Z",
+          "steps": [
+            {
+              "id": "a408d76a-050f-4599-88bf-5bbcb0b2315b",
+              "stepKey": "<redacted>",
+              "sequence": 1,
+              "hook": null,
+              "status": "succeeded",
+              "desiredGeneration": null,
+              "commandId": "42f35f84-f3c3-4213-aacc-0909bcb62a51",
+              "attempts": 1,
+              "lastError": null,
+              "result": null,
+              "createdAt": "2026-06-04T18:47:16.000Z",
+              "updatedAt": "2026-06-04T18:47:17.000Z",
+              "startedAt": "2026-06-04T18:47:17.087Z",
+              "completedAt": "2026-06-04T18:47:17.319Z"
+            }
+          ],
+          "commands": [
+            {
+              "id": "42f35f84-f3c3-4213-aacc-0909bcb62a51",
+              "operationStepId": "a408d76a-050f-4599-88bf-5bbcb0b2315b",
+              "serverId": "a8694107-56c4-4a78-93f4-4ea90eddc580",
+              "resourceKey": "<redacted>",
+              "commandKind": "runtime.container.delete",
+              "idempotencyKey": "<redacted>",
+              "desiredGeneration": null,
+              "payload": {
+                "containerId": "8f8c29d5-b5fd-4fa8-8a4a-38b86d7a12bf",
+                "runtimeId": "2a20dfb7c60f567b22e6ffde9b9c24689f884cd795134c418f985b36f19588fd",
+                "action": "delete",
+                "force": true
+              },
+              "status": "succeeded",
+              "attempts": 1,
+              "lastError": null,
+              "nextAttemptAt": "2026-06-04T18:47:16.282Z",
+              "sentAt": "2026-06-04T18:47:17.087Z",
+              "completedAt": "2026-06-04T18:47:17.319Z",
+              "createdAt": "2026-06-04T18:47:16.000Z",
+              "updatedAt": "2026-06-04T18:47:17.000Z"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "name": "list-own-after-cleanup",
+      "response": {
+        "method": "GET",
+        "path": "/v2/containers?ownOnly=true",
+        "status": 200,
+        "ok": true,
+        "ms": 2,
+        "body": [
+          {
+            "id": "c45d4a0b-a861-4c29-8af2-5b26574beb24",
+            "serverId": "a8694107-56c4-4a78-93f4-4ea90eddc580",
+            "serverName": "nyabase-test-gpu",
+            "ownerId": "d54b5b5c-3609-42b1-a6bd-4f0b9d6276d0",
+            "name": "murt-20260604t183830z-bcdeeb-gamma-target-v2",
+            "imageId": "63af86dc-efd1-4d9e-8748-148d7e54d3b6",
+            "phase": "failed",
+            "powerIntent": "running",
+            "runtime": {
+              "bound": false,
+              "runtimeId": null,
+              "status": "unknown",
+              "ip": null,
+              "observedAt": null,
+              "stale": true,
+              "drift": []
+            },
+            "activeOperation": null,
+            "resources": {
+              "cpuMillis": 100,
+              "memBytes": 134217728,
+              "diskBytes": 268435456,
+              "gpuIndices": [
+                0
+              ]
+            },
+            "ssh": {
+              "enabled": false,
+              "status": "disabled"
+            },
+            "mounts": [],
+            "actions": {
+              "start": {
+                "enabled": false,
+                "reason": "phase_not_active",
+                "message": "Container is failed"
+              },
+              "stop": {
+                "enabled": false,
+                "reason": "phase_not_active",
+                "message": "Container is failed"
+              },
+              "restart": {
+                "enabled": false,
+                "reason": "phase_not_active",
+                "message": "Container is failed"
+              },
+              "delete": {
+                "enabled": true
+              },
+              "stats": {
+                "enabled": false,
+                "reason": "phase_not_active",
+                "message": "Container is failed"
+              },
+              "console": {
+                "enabled": false,
+                "reason": "phase_not_active",
+                "message": "Container is failed"
+              },
+              "updateMounts": {
+                "enabled": false,
+                "reason": "phase_not_active",
+                "message": "Container is failed"
+              },
+              "enableSsh": {
+                "enabled": false,
+                "reason": "phase_not_active",
+                "message": "Container is failed"
+              },
+              "reconcileSsh": {
+                "enabled": false,
+                "reason": "phase_not_active",
+                "message": "Container is failed"
+              }
+            }
+          }
+        ]
+      }
+    }
+  ],
+  "cleanup": {
+    "attempted": true,
+    "deleted": true,
+    "residuals": []
+  },
+  "status": "fail-gpucount-ignored",
+  "createName": "frlive-user-20260604t183319z-gamma-gpucount-mpzuklzc",
+  "request": {
+    "serverId": "a8694107-56c4-4a78-93f4-4ea90eddc580",
+    "imageId": "63af86dc-efd1-4d9e-8748-148d7e54d3b6",
+    "name": "frlive-user-20260604t183319z-gamma-gpucount-mpzuklzc",
+    "cpuMillis": 100,
+    "memBytes": 67108864,
+    "gpuCount": 1
+  },
+  "containerId": "8f8c29d5-b5fd-4fa8-8a4a-38b86d7a12bf",
+  "observedResources": {
+    "cpuMillis": 100,
+    "memBytes": 67108864,
+    "diskBytes": 268435456,
+    "gpuIndices": []
+  },
+  "observedPhase": "active",
+  "gpuCountHonored": false,
+  "finishedAt": "2026-06-04T18:47:17.795Z"
+}

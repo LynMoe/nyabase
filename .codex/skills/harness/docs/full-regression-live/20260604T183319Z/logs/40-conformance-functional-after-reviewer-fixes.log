@@ -1,0 +1,90 @@
+## command: bash scripts/check-control-plane-redesign-conformance.sh
+PASS old route params removed
+PASS old frontend route removed
+PASS old TanStack serverId+containerId route file removed
+PASS old applySpec command removed
+PASS old setPower command removed
+PASS old applyMounts command removed
+PASS old reconcileSsh command removed
+PASS legacy label constants removed
+PASS legacy spec version removed
+PASS legacy desired import id removed
+PASS old container read model service removed
+PASS old container mounts command-coupling service removed
+PASS old container ssh sync hook service removed
+PASS old direct start method removed
+PASS old direct stop method removed
+PASS old direct restart method removed
+PASS old direct delete method removed
+PASS old transient docker id resolver removed
+PASS old list visibility wait helper removed
+PASS old REST container API path removed from frontend/tests
+PASS old double-quoted REST container API path removed from frontend/tests
+PASS old template REST container API path removed from frontend/tests
+PASS frontend/test Docker ID identity inference removed
+PASS frontend lifecycle docker binding inference removed
+PASS backend ContainerEntity docker id query removed
+PASS backend ContainerEntity sshEnabled query removed
+PASS public/test spec docker id removed
+PASS frontend metrics docker id removed
+PASS old direct delete route usage removed
+PASS old direct delete routePath usage removed
+PASS old exec endpoint suffix removed
+PASS old mounts endpoint suffix removed
+PASS container action policy service exists
+PASS container control service exists
+PASS container operation service exists
+PASS runtime observation service exists
+PASS runtime orphan service exists
+PASS frontend operation tracker exists
+PASS common source artifact guard
+
+Control-plane redesign conformance check passed.
+## command: pnpm test:functional
+
+> nyabase@ test:functional /root/nyabase
+> bash test/scripts/run-functional.sh
+
+
+[0;36m== Shared Instance ==[0m
+  [0;32mPASS[0m backend reachable at http://localhost:3001/api
+  [0;32mPASS[0m frontend reachable at http://localhost:5173
+  [0;32mPASS[0m VictoriaMetrics reachable at http://127.0.0.1:8428
+
+[0;36m== Auth ==[0m
+  [0;32mPASS[0m wrong admin password rejected (HTTP 401)
+  [0;32mPASS[0m admin login (HTTP 200)
+  [0;32mPASS[0m admin token returned
+  [0;32mPASS[0m admin /auth/me (HTTP 200)
+
+[0;36m== Fixed Agents ==[0m
+  [0;32mPASS[0m list servers (HTTP 200)
+  [0;32mPASS[0m CPU agent row exists
+  [0;32mPASS[0m GPU agent row exists
+  [0;32mPASS[0m CPU agent online
+  [0;32mPASS[0m GPU agent online
+
+[0;36m== Users And Groups ==[0m
+  [0;32mPASS[0m create functional user (HTTP 201)
+  [0;32mPASS[0m functional user login (HTTP 200)
+  [0;32mPASS[0m create functional group (HTTP 201)
+  [0;32mPASS[0m add functional user to group (HTTP 201)
+  [0;32mPASS[0m read functional user (HTTP 200)
+
+[0;36m== Images And Grants ==[0m
+  [0;32mPASS[0m create functional image (HTTP 201)
+  [0;32mPASS[0m grant CPU server to functional user (HTTP 201)
+  [0;32mPASS[0m grant image to functional user (HTTP 201)
+  [0;32mPASS[0m functional user lists accessible servers (HTTP 200)
+  [0;32mPASS[0m functional user sees at least one server
+  [0;32mPASS[0m functional user access summary (HTTP 200)
+
+[0;36m== Isolation ==[0m
+  [0;32mPASS[0m ordinary user cannot read audit (HTTP 403)
+  [0;32mPASS[0m ordinary user cannot create user (HTTP 403)
+
+[0;36m== Summary ==[0m
+  [0;32mPassed: 25[0m
+  [0;31mFailed: 0[0m
+  [1;33mSkipped: 0[0m
+## command: common artifact guard
