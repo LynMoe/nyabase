@@ -34,6 +34,9 @@ export class ImageEntity {
   @Column({ type: 'boolean', default: true })
   isActive: boolean;
 
+  @Column({ name: 'disable_ssh', type: 'boolean', default: false })
+  disableSsh: boolean;
+
   @CreateDateColumn()
   createdAt: Date;
 

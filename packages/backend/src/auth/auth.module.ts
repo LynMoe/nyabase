@@ -1,7 +1,6 @@
 import { Module } from '@nestjs/common';
 import { JwtModule } from '@nestjs/jwt';
 import { PassportModule } from '@nestjs/passport';
-import { ConfigService } from '@nestjs/config';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { AuthService } from './auth.service.js';
 import { AuthController } from './auth.controller.js';
@@ -12,15 +11,16 @@ import { UserEntity } from '../entities/user.entity.js';
 import { RefreshTokenEntity } from '../entities/refresh-token.entity.js';
 import { ApiTokenEntity } from '../entities/api-token.entity.js';
 import { AccessModule } from '../access/access.module.js';
+import { NyabaseConfigService } from '../config/nyabase-config.service.js';
 
 @Module({
   imports: [
     PassportModule,
     JwtModule.registerAsync({
-      inject: [ConfigService],
-      useFactory: (config: ConfigService) => ({
-        secret: config.get<string>('app.jwtSecret'),
-        signOptions: { expiresIn: config.get<string>('app.jwtExpiresIn', '15m') },
+      inject: [NyabaseConfigService],
+      useFactory: (config: NyabaseConfigService) => ({
+        secret: config.get<string>('auth.jwtSecret'),
+        signOptions: { expiresIn: config.get<string>('auth.jwtExpiresIn') },
       }),
     }),
     TypeOrmModule.forFeature([UserEntity, RefreshTokenEntity, ApiTokenEntity]),

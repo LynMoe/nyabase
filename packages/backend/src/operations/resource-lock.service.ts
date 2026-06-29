@@ -1,68 +1,91 @@
-import { Injectable } from '@nestjs/common';
+import { ConflictException, Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { DataSource, LessThan, Repository } from 'typeorm';
+import { EntityManager, In, Repository } from 'typeorm';
 import { ResourceLockEntity } from '../entities/resource-lock.entity.js';
-import { runSerializedTransaction } from '../database/serialized-transaction.js';
 
-export interface AcquiredResourceLock {
+export interface ResourceLockConflict {
   resourceKey: string;
-  holderId: string;
-  fencingToken: number;
+  operationId: string;
+}
+
+export class ResourceLockedException extends ConflictException {
+  constructor(readonly conflicts: ResourceLockConflict[]) {
+    super({
+      statusCode: 409,
+      code: 'RESOURCE_LOCKED',
+      reason: 'resource_locked',
+      lockedResourceKeys: conflicts.map((conflict) => conflict.resourceKey),
+      locks: conflicts.map((conflict) => ({
+        resourceKey: conflict.resourceKey,
+        operationId: conflict.operationId,
+      })),
+      message: 'Resource is locked by an active operation',
+    });
+  }
 }
 
 @Injectable()
 export class ResourceLockService {
   constructor(
-    private dataSource: DataSource,
     @InjectRepository(ResourceLockEntity)
     private locksRepo: Repository<ResourceLockEntity>,
   ) {}
 
-  async acquire(
-    resourceKey: string,
-    holderId: string,
-    ttlMs = 30_000,
-  ): Promise<AcquiredResourceLock | null> {
-    const now = new Date();
-    const expiresAt = new Date(now.getTime() + ttlMs);
+  async findConflicts(
+    manager: EntityManager,
+    resourceKeys: string[],
+    operationId: string,
+  ): Promise<ResourceLockConflict[]> {
+    if (resourceKeys.length === 0) return [];
+    const existing = await manager.find(ResourceLockEntity, {
+      where: { resourceKey: In(resourceKeys) },
+    });
+    return existing
+      .filter((lock) => lock.operationId !== operationId)
+      .map((lock) => ({
+        resourceKey: lock.resourceKey,
+        operationId: lock.operationId,
+      }))
+      .sort((a, b) => a.resourceKey.localeCompare(b.resourceKey));
+  }
 
-    return runSerializedTransaction(this.dataSource, async (manager) => {
-      await manager.delete(ResourceLockEntity, {
+  async insertForOperation(
+    manager: EntityManager,
+    input: {
+      operationId: string;
+      serverId: string;
+      resourceKeys: string[];
+    },
+  ): Promise<void> {
+    const keys = [...new Set(input.resourceKeys)].sort();
+    const conflicts = await this.findConflicts(manager, keys, input.operationId);
+    if (conflicts.length > 0) {
+      throw new ResourceLockedException(conflicts);
+    }
+    for (const resourceKey of keys) {
+      await manager.insert(ResourceLockEntity, {
         resourceKey,
-        expiresAt: LessThan(now),
+        operationId: input.operationId,
+        serverId: input.serverId,
       });
-
-      const existing = await manager.findOne(ResourceLockEntity, {
-        where: { resourceKey },
-      });
-      if (existing && existing.holderId !== holderId && existing.expiresAt > now) {
-        return null;
-      }
-
-      const fencingToken = (existing?.fencingToken ?? 0) + 1;
-      await manager.save(
-        ResourceLockEntity,
-        manager.create(ResourceLockEntity, {
-          resourceKey,
-          holderId,
-          fencingToken,
-          expiresAt,
-        }),
-      );
-      return { resourceKey, holderId, fencingToken };
-    });
+    }
   }
 
-  async release(lock: AcquiredResourceLock): Promise<void> {
-    await this.locksRepo.delete({
-      resourceKey: lock.resourceKey,
-      holderId: lock.holderId,
-      fencingToken: lock.fencingToken,
-    });
+  async releaseOperation(operationId: string, manager?: EntityManager): Promise<void> {
+    const repo = manager ? manager.getRepository(ResourceLockEntity) : this.locksRepo;
+    await repo.delete({ operationId });
   }
 
-  async recoverExpired(now = new Date()): Promise<number> {
-    const result = await this.locksRepo.delete({ expiresAt: LessThan(now) });
-    return result.affected ?? 0;
+  async releaseOperations(operationIds: string[], manager: EntityManager): Promise<void> {
+    if (operationIds.length === 0) return;
+    await manager.delete(ResourceLockEntity, { operationId: In(operationIds) });
+  }
+
+  async findActiveByResourceKeys(resourceKeys: string[]): Promise<ResourceLockEntity[]> {
+    if (resourceKeys.length === 0) return [];
+    return this.locksRepo.find({
+      where: { resourceKey: In(resourceKeys) },
+      order: { resourceKey: 'ASC' },
+    });
   }
 }

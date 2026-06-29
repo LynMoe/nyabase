@@ -15,6 +15,7 @@ import { AuditService } from '../audit/audit.service.js';
 import { AgentCommandKind, AuditAction, OperationKind, RemoteFsMountStatus, RemoteFsParams, zRemoteFsParams } from '@nyabase/common';
 import { AccessResolverService } from '../access/access-resolver.service.js';
 import { OperationsService } from '../operations/operations.service.js';
+import { ResourceKeyService } from '../operations/resource-key.service.js';
 import { AgentGateway } from '../gateway/agent-gateway.js';
 
 /** Forbidden hostMountPoint prefixes */
@@ -44,6 +45,7 @@ export class RemoteFsMountsService {
     private auditService: AuditService,
     private accessResolver: AccessResolverService,
     private operationsService: OperationsService,
+    private resourceKeys: ResourceKeyService,
     private agentGateway: AgentGateway,
   ) {}
 
@@ -322,6 +324,7 @@ export class RemoteFsMountsService {
         resourceId: mount.id,
         requestedBy,
         payload,
+        resourceKeys: [this.resourceKeys.remoteFsAssignment(serverId, mount.id)],
       },
     );
     return { operationId: dispatched.operationId };
@@ -343,6 +346,7 @@ export class RemoteFsMountsService {
       requestedBy,
       payload: { id: mountId, force: true },
       request: { scope, mountId, serverId },
+      resourceKeys: [this.resourceKeys.remoteFsAssignment(serverId, mountId)],
       beforePersist: async (manager, context) => {
         if (scope === 'assignment') {
           const assignment = await manager.findOne(RemoteFsServerAssignmentEntity, {

@@ -37,13 +37,9 @@ export enum ContainerPowerIntent {
 export enum OperationStatus {
   Queued = 'queued',
   Running = 'running',
-  WaitingAgent = 'waiting_agent',
-  WaitingObserved = 'waiting_observed',
-  Blocked = 'blocked',
-  Retrying = 'retrying',
+  WaitingReport = 'waiting_report',
   Succeeded = 'succeeded',
   Failed = 'failed',
-  Compensating = 'compensating',
   Cancelled = 'cancelled',
 }
 
@@ -54,7 +50,6 @@ export enum OperationKind {
   ContainerRestart = 'container.restart',
   ContainerDelete = 'container.delete',
   ContainerUpdateMounts = 'container.update_mounts',
-  ContainerEnableSsh = 'container.enable_ssh',
   ContainerReconcileSsh = 'container.reconcile_ssh',
   DataDirCreate = 'datadir.create',
   DataDirDelete = 'datadir.delete',
@@ -65,6 +60,7 @@ export enum OperationKind {
 }
 
 export enum AgentCommandKind {
+  Noop = 'noop',
   RuntimeContainerCreate = 'runtime.container.create',
   RuntimeContainerPower = 'runtime.container.power',
   RuntimeContainerDelete = 'runtime.container.delete',
@@ -80,37 +76,9 @@ export enum AgentCommandKind {
   ImagePull = 'image.pull',
 }
 
-export enum AgentCommandStatus {
-  Pending = 'pending',
-  WaitingAgent = 'waiting_agent',
-  Sent = 'sent',
-  Running = 'running',
-  Retrying = 'retrying',
-  Succeeded = 'succeeded',
-  Failed = 'failed',
-  Cancelled = 'cancelled',
-}
-
-export enum HookStatus {
-  Pending = 'pending',
-  Running = 'running',
-  WaitingAgent = 'waiting_agent',
-  WaitingObserved = 'waiting_observed',
-  NotApplicable = 'not_applicable',
-  Succeeded = 'succeeded',
-  Failed = 'failed',
-  Retrying = 'retrying',
-}
-
-export enum HookKind {
-  Mounts = 'mounts',
-  Ssh = 'ssh',
-  DataDirs = 'data_dirs',
-  RemoteFs = 'remote_fs',
-  DataDisks = 'data_disks',
-  Quota = 'quota',
-  Audit = 'audit',
-  Grants = 'grants',
+export enum CommandHookName {
+  ContainerMountsEnsure = 'container.mounts.ensure',
+  ContainerSshEnsure = 'container.ssh.ensure',
 }
 
 export enum RuntimeDriftKind {
@@ -144,6 +112,7 @@ export enum Capability {
   ManageContainersAny = 'manage_containers_any',
   ViewAudit = 'view_audit',
   ViewMetricsAll = 'view_metrics_all',
+  ManageSystemSettings = 'manage_system_settings',
 }
 
 /** Systemd ActiveState of the nyabase-managed dockerd unit */
@@ -181,6 +150,8 @@ export enum AuditAction {
   CreateUser = 'user.create',
   UpdateUser = 'user.update',
   DeleteUser = 'user.delete',
+  ViewUserInternalSshKey = 'user.internal_ssh_key.view',
+  RotateUserInternalSshKey = 'user.internal_ssh_key.rotate',
   CreateGroup = 'group.create',
   UpdateGroup = 'group.update',
   DeleteGroup = 'group.delete',

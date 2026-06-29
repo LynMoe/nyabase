@@ -36,10 +36,10 @@ export default function ImagesPage() {
   });
 
   return (
-    <div className="p-6 space-y-4 w-full">
-      <div className="flex items-center justify-between">
+    <div className="px-4 py-4 md:px-6 space-y-5 w-full">
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
         <div>
-          <h1 className="text-2xl font-semibold tracking-tight">容器镜像</h1>
+          <h1 className="text-2xl font-semibold tracking-tight text-foreground">容器镜像</h1>
           <p className="text-muted-foreground text-sm">{images.length} 个预置镜像</p>
         </div>
         <div className="flex items-center gap-2">

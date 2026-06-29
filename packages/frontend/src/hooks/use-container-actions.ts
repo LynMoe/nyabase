@@ -41,7 +41,7 @@ export function useContainerActions(options: { admin?: boolean } = {}) {
       setTrackedOperationId(res.operationId);
       const label: Partial<Record<ContainerAction, string>> = {
         start: '启动', stop: '停止', restart: '重启', delete: '删除',
-        updateMounts: '更新挂载', enableSsh: '启用 SSH', reconcileSsh: '修复 SSH',
+        updateMounts: '更新挂载', reconcileSsh: '修复 SSH',
       };
       toast({
         title: `容器${label[action] ?? action}已排队`,

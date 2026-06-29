@@ -1,10 +1,10 @@
 import { Inject, Injectable, Logger, OnModuleDestroy, forwardRef } from '@nestjs/common';
-import { ConfigService } from '@nestjs/config';
 import { MetricPoint } from '@nyabase/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { In, Repository } from 'typeorm';
 import { ContainerEntity } from '../entities/container.entity.js';
 import { UsersService } from '../users/users.service.js';
+import { NyabaseConfigService } from '../config/nyabase-config.service.js';
 
 /** A single batch enqueued by an agent. */
 interface QueuedBatch {
@@ -56,13 +56,13 @@ export class MetricsWriter implements OnModuleDestroy {
   private flushTimer: NodeJS.Timeout | null = null;
 
   constructor(
-    private config: ConfigService,
+    private config: NyabaseConfigService,
     @Inject(forwardRef(() => UsersService))
     private usersService: UsersService,
     @InjectRepository(ContainerEntity)
     private containersRepo: Repository<ContainerEntity>,
   ) {
-    this.vmUrl = config.get<string>('app.victoriaMetricsUrl', 'http://victoriametrics:8428');
+    this.vmUrl = config.get<string>('metrics.victoriaMetricsUrl');
     this.flushTimer = setInterval(() => {
       void this.flushLoop();
     }, this.flushIntervalMs);

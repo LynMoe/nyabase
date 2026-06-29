@@ -13,8 +13,11 @@ import { Route as ProfileRouteImport } from './routes/profile'
 import { Route as LoginRouteImport } from './routes/login'
 import { Route as IndexRouteImport } from './routes/index'
 import { Route as UsersIndexRouteImport } from './routes/users/index'
+import { Route as SystemSettingsIndexRouteImport } from './routes/system-settings/index'
+import { Route as SshProxyIndexRouteImport } from './routes/ssh-proxy/index'
 import { Route as ServersIndexRouteImport } from './routes/servers/index'
 import { Route as ImagesIndexRouteImport } from './routes/images/index'
+import { Route as HttpProxyIndexRouteImport } from './routes/http-proxy/index'
 import { Route as GroupsIndexRouteImport } from './routes/groups/index'
 import { Route as DataDirsIndexRouteImport } from './routes/data-dirs/index'
 import { Route as ContainersIndexRouteImport } from './routes/containers/index'
@@ -24,6 +27,7 @@ import { Route as GroupsIdRouteImport } from './routes/groups/$id'
 import { Route as ContainersContainerIdRouteImport } from './routes/containers/$containerId'
 import { Route as ManageRemoteFsIndexRouteImport } from './routes/manage/remote-fs/index'
 import { Route as ManageContainersIndexRouteImport } from './routes/manage/containers/index'
+import { Route as ManageContainersContainerIdRouteImport } from './routes/manage/containers/$containerId'
 
 const ProfileRoute = ProfileRouteImport.update({
   id: '/profile',
@@ -45,6 +49,16 @@ const UsersIndexRoute = UsersIndexRouteImport.update({
   path: '/users/',
   getParentRoute: () => rootRouteImport,
 } as any)
+const SystemSettingsIndexRoute = SystemSettingsIndexRouteImport.update({
+  id: '/system-settings/',
+  path: '/system-settings/',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const SshProxyIndexRoute = SshProxyIndexRouteImport.update({
+  id: '/ssh-proxy/',
+  path: '/ssh-proxy/',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const ServersIndexRoute = ServersIndexRouteImport.update({
   id: '/servers/',
   path: '/servers/',
@@ -53,6 +67,11 @@ const ServersIndexRoute = ServersIndexRouteImport.update({
 const ImagesIndexRoute = ImagesIndexRouteImport.update({
   id: '/images/',
   path: '/images/',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const HttpProxyIndexRoute = HttpProxyIndexRouteImport.update({
+  id: '/http-proxy/',
+  path: '/http-proxy/',
   getParentRoute: () => rootRouteImport,
 } as any)
 const GroupsIndexRoute = GroupsIndexRouteImport.update({
@@ -100,6 +119,12 @@ const ManageContainersIndexRoute = ManageContainersIndexRouteImport.update({
   path: '/manage/containers/',
   getParentRoute: () => rootRouteImport,
 } as any)
+const ManageContainersContainerIdRoute =
+  ManageContainersContainerIdRouteImport.update({
+    id: '/manage/containers/$containerId',
+    path: '/manage/containers/$containerId',
+    getParentRoute: () => rootRouteImport,
+  } as any)
 
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
@@ -112,9 +137,13 @@ export interface FileRoutesByFullPath {
   '/containers/': typeof ContainersIndexRoute
   '/data-dirs/': typeof DataDirsIndexRoute
   '/groups/': typeof GroupsIndexRoute
+  '/http-proxy/': typeof HttpProxyIndexRoute
   '/images/': typeof ImagesIndexRoute
   '/servers/': typeof ServersIndexRoute
+  '/ssh-proxy/': typeof SshProxyIndexRoute
+  '/system-settings/': typeof SystemSettingsIndexRoute
   '/users/': typeof UsersIndexRoute
+  '/manage/containers/$containerId': typeof ManageContainersContainerIdRoute
   '/manage/containers/': typeof ManageContainersIndexRoute
   '/manage/remote-fs/': typeof ManageRemoteFsIndexRoute
 }
@@ -129,9 +158,13 @@ export interface FileRoutesByTo {
   '/containers': typeof ContainersIndexRoute
   '/data-dirs': typeof DataDirsIndexRoute
   '/groups': typeof GroupsIndexRoute
+  '/http-proxy': typeof HttpProxyIndexRoute
   '/images': typeof ImagesIndexRoute
   '/servers': typeof ServersIndexRoute
+  '/ssh-proxy': typeof SshProxyIndexRoute
+  '/system-settings': typeof SystemSettingsIndexRoute
   '/users': typeof UsersIndexRoute
+  '/manage/containers/$containerId': typeof ManageContainersContainerIdRoute
   '/manage/containers': typeof ManageContainersIndexRoute
   '/manage/remote-fs': typeof ManageRemoteFsIndexRoute
 }
@@ -147,9 +180,13 @@ export interface FileRoutesById {
   '/containers/': typeof ContainersIndexRoute
   '/data-dirs/': typeof DataDirsIndexRoute
   '/groups/': typeof GroupsIndexRoute
+  '/http-proxy/': typeof HttpProxyIndexRoute
   '/images/': typeof ImagesIndexRoute
   '/servers/': typeof ServersIndexRoute
+  '/ssh-proxy/': typeof SshProxyIndexRoute
+  '/system-settings/': typeof SystemSettingsIndexRoute
   '/users/': typeof UsersIndexRoute
+  '/manage/containers/$containerId': typeof ManageContainersContainerIdRoute
   '/manage/containers/': typeof ManageContainersIndexRoute
   '/manage/remote-fs/': typeof ManageRemoteFsIndexRoute
 }
@@ -166,9 +203,13 @@ export interface FileRouteTypes {
     | '/containers/'
     | '/data-dirs/'
     | '/groups/'
+    | '/http-proxy/'
     | '/images/'
     | '/servers/'
+    | '/ssh-proxy/'
+    | '/system-settings/'
     | '/users/'
+    | '/manage/containers/$containerId'
     | '/manage/containers/'
     | '/manage/remote-fs/'
   fileRoutesByTo: FileRoutesByTo
@@ -183,9 +224,13 @@ export interface FileRouteTypes {
     | '/containers'
     | '/data-dirs'
     | '/groups'
+    | '/http-proxy'
     | '/images'
     | '/servers'
+    | '/ssh-proxy'
+    | '/system-settings'
     | '/users'
+    | '/manage/containers/$containerId'
     | '/manage/containers'
     | '/manage/remote-fs'
   id:
@@ -200,9 +245,13 @@ export interface FileRouteTypes {
     | '/containers/'
     | '/data-dirs/'
     | '/groups/'
+    | '/http-proxy/'
     | '/images/'
     | '/servers/'
+    | '/ssh-proxy/'
+    | '/system-settings/'
     | '/users/'
+    | '/manage/containers/$containerId'
     | '/manage/containers/'
     | '/manage/remote-fs/'
   fileRoutesById: FileRoutesById
@@ -218,9 +267,13 @@ export interface RootRouteChildren {
   ContainersIndexRoute: typeof ContainersIndexRoute
   DataDirsIndexRoute: typeof DataDirsIndexRoute
   GroupsIndexRoute: typeof GroupsIndexRoute
+  HttpProxyIndexRoute: typeof HttpProxyIndexRoute
   ImagesIndexRoute: typeof ImagesIndexRoute
   ServersIndexRoute: typeof ServersIndexRoute
+  SshProxyIndexRoute: typeof SshProxyIndexRoute
+  SystemSettingsIndexRoute: typeof SystemSettingsIndexRoute
   UsersIndexRoute: typeof UsersIndexRoute
+  ManageContainersContainerIdRoute: typeof ManageContainersContainerIdRoute
   ManageContainersIndexRoute: typeof ManageContainersIndexRoute
   ManageRemoteFsIndexRoute: typeof ManageRemoteFsIndexRoute
 }
@@ -255,6 +308,20 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof UsersIndexRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/system-settings/': {
+      id: '/system-settings/'
+      path: '/system-settings'
+      fullPath: '/system-settings/'
+      preLoaderRoute: typeof SystemSettingsIndexRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/ssh-proxy/': {
+      id: '/ssh-proxy/'
+      path: '/ssh-proxy'
+      fullPath: '/ssh-proxy/'
+      preLoaderRoute: typeof SshProxyIndexRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/servers/': {
       id: '/servers/'
       path: '/servers'
@@ -267,6 +334,13 @@ declare module '@tanstack/react-router' {
       path: '/images'
       fullPath: '/images/'
       preLoaderRoute: typeof ImagesIndexRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/http-proxy/': {
+      id: '/http-proxy/'
+      path: '/http-proxy'
+      fullPath: '/http-proxy/'
+      preLoaderRoute: typeof HttpProxyIndexRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/groups/': {
@@ -332,6 +406,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof ManageContainersIndexRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/manage/containers/$containerId': {
+      id: '/manage/containers/$containerId'
+      path: '/manage/containers/$containerId'
+      fullPath: '/manage/containers/$containerId'
+      preLoaderRoute: typeof ManageContainersContainerIdRouteImport
+      parentRoute: typeof rootRouteImport
+    }
   }
 }
 
@@ -346,9 +427,13 @@ const rootRouteChildren: RootRouteChildren = {
   ContainersIndexRoute: ContainersIndexRoute,
   DataDirsIndexRoute: DataDirsIndexRoute,
   GroupsIndexRoute: GroupsIndexRoute,
+  HttpProxyIndexRoute: HttpProxyIndexRoute,
   ImagesIndexRoute: ImagesIndexRoute,
   ServersIndexRoute: ServersIndexRoute,
+  SshProxyIndexRoute: SshProxyIndexRoute,
+  SystemSettingsIndexRoute: SystemSettingsIndexRoute,
   UsersIndexRoute: UsersIndexRoute,
+  ManageContainersContainerIdRoute: ManageContainersContainerIdRoute,
   ManageContainersIndexRoute: ManageContainersIndexRoute,
   ManageRemoteFsIndexRoute: ManageRemoteFsIndexRoute,
 }

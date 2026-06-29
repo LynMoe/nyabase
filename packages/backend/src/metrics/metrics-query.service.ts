@@ -1,6 +1,6 @@
 import { Injectable, Logger, ServiceUnavailableException } from '@nestjs/common';
-import { ConfigService } from '@nestjs/config';
 import { MetricSeries } from '@nyabase/common';
+import { NyabaseConfigService } from '../config/nyabase-config.service.js';
 
 interface VmRangeResult {
   metric: Record<string, string>;
@@ -12,8 +12,8 @@ export class MetricsQueryService {
   private readonly vmUrl: string;
   private readonly logger = new Logger(MetricsQueryService.name);
 
-  constructor(config: ConfigService) {
-    this.vmUrl = config.get<string>('app.victoriaMetricsUrl', 'http://victoriametrics:8428');
+  constructor(config: NyabaseConfigService) {
+    this.vmUrl = config.get<string>('metrics.victoriaMetricsUrl');
   }
 
   /** Query a time range; returns one Series per label combination, keyed by `keyLabel`. */

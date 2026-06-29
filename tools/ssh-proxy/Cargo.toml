@@ -1,0 +1,32 @@
+[package]
+name = "nyabase-ssh-proxy"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "nyabase-ssh-proxy"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+arc-swap = "1"
+base64 = "0.22"
+futures-util = "0.3"
+russh = { version = "0.61", features = ["ring"] }
+russh-sftp = "2.1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tokio = { version = "1", features = ["macros", "net", "rt-multi-thread", "signal", "sync", "time", "io-util"] }
+tokio-tungstenite = { version = "0.26", features = ["rustls-tls-webpki-roots"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+
+[dev-dependencies]
+pretty_assertions = "1"
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+strip = true

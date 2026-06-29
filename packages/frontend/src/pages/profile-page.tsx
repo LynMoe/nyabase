@@ -23,15 +23,15 @@ export default function ProfilePage() {
   if (!user) return null;
 
   return (
-    <div className="px-4 py-4 md:px-6 space-y-5 w-full max-w-5xl">
+    <div className="px-4 py-4 md:px-6 space-y-5 w-full">
       <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
         <div>
-          <h1 className="text-2xl font-bold text-foreground">用户中心</h1>
+          <h1 className="text-2xl font-semibold tracking-tight text-foreground">用户中心</h1>
           <p className="text-sm text-muted-foreground mt-0.5">
-            管理账号密码和用于容器 SSH 登录的公钥
+            管理账号密码和用于 SSH 代理登录的公钥
           </p>
         </div>
-        <div className="flex items-center gap-2 rounded-lg border border-border bg-card px-3 py-2">
+        <div className="flex items-center gap-2 rounded-md border border-border bg-card px-3 py-2">
           <UserCircle className="h-4 w-4 text-muted-foreground shrink-0" />
           <div className="min-w-0">
             <p className="text-sm font-medium text-foreground truncate">{user.displayName}</p>
@@ -86,7 +86,7 @@ function PasswordPanel({ userId }: { userId: string }) {
   });
 
   return (
-    <section className="rounded-xl border border-border bg-card p-4 space-y-4">
+    <section className="rounded-lg border border-border bg-card p-4 space-y-4">
       <div className="flex items-start gap-2">
         <ShieldCheck className="h-4 w-4 text-primary mt-1 shrink-0" />
         <div>
@@ -204,14 +204,14 @@ function SshKeysPanel({ userId }: { userId: string }) {
   });
 
   return (
-    <section className="rounded-xl border border-border bg-card p-4 space-y-4">
+    <section className="rounded-lg border border-border bg-card p-4 space-y-4">
       <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
         <div className="flex items-start gap-2">
           <KeyRound className="h-4 w-4 text-primary mt-1 shrink-0" />
           <div>
             <h2 className="text-base font-semibold text-foreground">SSH 公钥</h2>
             <p className="text-xs text-muted-foreground mt-0.5">
-              容器启用 Dropbear SSH 后，会使用这里的公钥以 root 登录容器。
+              这些公钥用于认证到 SSH 代理，不会直接写入容器。
             </p>
           </div>
         </div>
@@ -232,7 +232,7 @@ function SshKeysPanel({ userId }: { userId: string }) {
           <div className="px-4 py-8 text-center">
             <KeyRound className="h-8 w-8 mx-auto text-muted-foreground/30" />
             <p className="text-sm text-muted-foreground mt-2">暂无 SSH 公钥</p>
-            <p className="text-xs text-muted-foreground/70 mt-1">添加公钥后即可用于容器 SSH 登录。</p>
+            <p className="text-xs text-muted-foreground/70 mt-1">添加公钥后即可用于 SSH 代理登录。</p>
           </div>
         ) : (
           <div className="divide-y divide-border max-h-80 overflow-y-auto">
@@ -321,7 +321,7 @@ function SshKeysPanel({ userId }: { userId: string }) {
             <AlertDialogTitle>删除 SSH 公钥？</AlertDialogTitle>
             <AlertDialogDescription>
               将删除公钥 <span className="font-semibold text-foreground">{deleteTarget?.name}</span>。
-              已启用 SSH 的容器会在下次同步后不再接受这把公钥。
+              SSH 代理会在同步后不再接受这把公钥。
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>

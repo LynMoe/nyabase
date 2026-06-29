@@ -2,7 +2,7 @@ import { Link, getRouteApi } from '@tanstack/react-router';
 import { useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { AlertTriangle, ArrowLeft, BarChart2, ChevronDown, Info, Loader2, Power, Terminal, Trash2 } from 'lucide-react';
-import { ContainerPhase, ContainerStatus, type ContainerAction, type ContainerMetrics, type ContainerMetricsDto, type ContainerView, type OperationRefResponse } from '@nyabase/common';
+import { Capability, ContainerStatus, OperationStatus, type ContainerAction, type ContainerMetrics, type ContainerMetricsDto, type ContainerView, type OperationRefResponse } from '@nyabase/common';
 import { api } from '../lib/api.js';
 import { Badge } from '../components/ui/badge.js';
 import { Button } from '../components/ui/button.js';
@@ -34,6 +34,8 @@ import {
 } from '../components/dashboard/server-metrics.js';
 
 const routeApi = getRouteApi('/containers/$containerId');
+const adminRouteApi = getRouteApi('/manage/containers/$containerId');
+type ContainerDetailPlane = 'admin' | 'user';
 
 function actionTitle(container: ContainerView, action: ContainerAction): string | undefined {
   const availability = container.actions[action];
@@ -45,7 +47,6 @@ const ACTION_LABELS: Partial<Record<ContainerAction, string>> = {
   stop: '停止',
   restart: '重启',
   delete: '删除',
-  enableSsh: '启用 SSH',
   reconcileSsh: '修复 SSH',
 };
 
@@ -56,89 +57,118 @@ const OPERATION_STATE_LABELS: Record<string, string> = {
   'container.restart': 'restarting',
   'container.delete': 'deleting',
   'container.update_mounts': 'updating mounts',
-  'container.enable_ssh': 'enabling SSH',
-  'container.reconcile_ssh': 'reconciling SSH',
-};
-
-const PHASE_LABELS: Record<ContainerPhase, string> = {
-  [ContainerPhase.Provisioning]: '初始化',
-  [ContainerPhase.Active]: '就绪',
-  [ContainerPhase.Updating]: '更新中',
-  [ContainerPhase.Deleting]: '删除中',
-  [ContainerPhase.Deleted]: '已删除',
-  [ContainerPhase.Failed]: '失败',
-  [ContainerPhase.Orphaned]: '孤儿运行态',
+  'container.reconcile_ssh': 'repairing SSH',
 };
 
 export default function ContainerDetailPage() {
   const { containerId } = routeApi.useParams();
   const { tab: initialTab } = routeApi.useSearch();
+  return (
+    <ContainerDetailContent
+      containerId={containerId}
+      initialTab={initialTab}
+      plane="user"
+      backTo="/containers"
+    />
+  );
+}
+
+export function AdminContainerDetailPage() {
+  const { containerId } = adminRouteApi.useParams();
+  const { tab: initialTab } = adminRouteApi.useSearch();
+  return (
+    <ContainerDetailContent
+      containerId={containerId}
+      initialTab={initialTab}
+      plane="admin"
+      backTo="/manage/containers"
+    />
+  );
+}
+
+function ContainerDetailContent({
+  containerId,
+  initialTab,
+  plane,
+  backTo,
+}: {
+  containerId: string;
+  initialTab: 'overview' | 'console';
+  plane: ContainerDetailPlane;
+  backTo: '/containers' | '/manage/containers';
+}) {
   const qc = useQueryClient();
   const { user } = useAuthStore();
   const [activeTab, setActiveTab] = useState<'overview' | 'console'>(initialTab);
   const [metricsRange, setMetricsRange] = useState('1h');
   const [trackedOperationId, setTrackedOperationId] = useState<string | null>(null);
-  useOperationTracker(trackedOperationId);
+  useOperationTracker(trackedOperationId, { admin: plane === 'admin' });
+
+  const apiBasePath = plane === 'admin' ? '/admin/v2/containers' : '/v2/containers';
+  const metricsBasePath = plane === 'admin' ? '/admin/metrics' : '/metrics';
+  const canViewMetrics = plane !== 'admin' || (user?.capabilities.includes(Capability.ViewMetricsAll) ?? false);
 
   const { data: c } = useQuery({
-    queryKey: queryKeys.containers.detail('user', containerId),
-    queryFn: () => api.get<ContainerView>(`/v2/containers/${containerId}`),
+    queryKey: queryKeys.containers.detail(plane, containerId),
+    queryFn: () => api.get<ContainerView>(`${apiBasePath}/${containerId}`),
     refetchInterval: 5_000,
   });
 
   const { data: metricsData, isLoading: metricsLoading, isError: metricsError } = useQuery({
-    queryKey: ['metrics-container-detail', c?.serverId, containerId, c?.runtime.runtimeId, metricsRange],
-    queryFn: () => api.get<ContainerMetricsDto>(`/metrics/servers/${c!.serverId}/containers?range=${metricsRange}`),
-    enabled: activeTab === 'overview' && Boolean(c?.serverId),
+    queryKey: ['metrics-container-detail', plane, c?.serverId, containerId, c?.runtime.runtimeId, metricsRange],
+    queryFn: () => api.get<ContainerMetricsDto>(`${metricsBasePath}/servers/${c!.serverId}/containers?range=${metricsRange}`),
+    enabled: activeTab === 'overview' && Boolean(c?.serverId) && canViewMetrics,
     staleTime: 30_000,
     refetchInterval: 60_000,
     retry: false,
   });
 
   const runAction = useMutation({
-    mutationFn: (action: ContainerAction) => api.post<OperationRefResponse>(`/v2/containers/${containerId}/actions/${containerActionPath(action)}`),
+    mutationFn: (action: ContainerAction) => api.post<OperationRefResponse>(`${apiBasePath}/${containerId}/actions/${containerActionPath(action)}`),
     onSuccess: (res) => {
       setTrackedOperationId(res.operationId);
       toast({ title: '操作已排队', description: `操作 ${res.operationId.slice(0, 8)}` });
-      void qc.invalidateQueries({ queryKey: queryKeys.containers.detail('user', containerId) });
-      void qc.invalidateQueries({ queryKey: queryKeys.containers.userList });
+      void qc.invalidateQueries({ queryKey: queryKeys.containers.detail(plane, containerId) });
+      void qc.invalidateQueries({ queryKey: plane === 'admin' ? queryKeys.containers.adminList : queryKeys.containers.userList });
     },
     onError: (e) => toast({ title: '操作失败', description: (e as Error).message, variant: 'destructive' }),
   });
 
-  if (!c) return <div className="p-6 flex items-center gap-2 text-muted-foreground"><Loader2 className="w-4 h-4 animate-spin" />加载中...</div>;
+  if (!c) return <div className="px-4 py-4 md:px-6 flex items-center gap-2 text-muted-foreground"><Loader2 className="w-4 h-4 animate-spin" />加载中...</div>;
 
   const running = c.runtime.status === ContainerStatus.Running;
-  const canManageContainer = user?.id === c.ownerId;
-  const confirmation = c.runtimeConfirmation;
-  const runtimeLabel = confirmation?.status === 'pending'
-    ? '确认中'
-    : confirmation?.status === 'expired'
-    ? '确认超时'
+  const canManageContainer = plane === 'admin' || user?.id === c.ownerId;
+  const runtimeLabel = c.activeOperation?.status === OperationStatus.WaitingReport
+    ? '等待上报'
+    : c.activeOperation
+    ? '操作中'
     : c.runtime.bound
     ? (c.runtime.status ?? ContainerStatus.Unknown)
     : 'unbound';
-  const runtimeBadgeVariant = confirmation ? 'warning' : running ? 'success' : 'secondary';
-  const containerStateLabel = confirmation?.status === 'pending'
-    ? '确认中'
-    : confirmation?.status === 'expired'
-    ? '确认超时'
-    : PHASE_LABELS[c.phase] ?? c.phase;
+  const runtimeBadgeVariant = c.activeOperation ? 'warning' : running ? 'success' : 'secondary';
+  const containerStateLabel = c.activeOperation?.status === OperationStatus.WaitingReport
+    ? '命令已完成，等待 agent 上报确认'
+    : c.activeOperation
+    ? '操作执行中'
+    : c.runtime.bound
+    ? (c.runtime.status ?? ContainerStatus.Unknown)
+    : '未绑定';
   const ip = c.runtime.ip ?? '等待运行态';
-  const sshLabel = c.ssh.status === 'running' ? '可用' : c.ssh.enabled ? c.ssh.status : '未启用';
+  const sshLabel = c.ssh.ready ? '代理可用' : c.ssh.enabled ? c.ssh.status : '镜像禁用';
   const operationState = c.activeOperation
     ? OPERATION_STATE_LABELS[c.activeOperation.kind] ?? c.activeOperation.kind
     : null;
   const failureInfo = c.failureReason?.trim()
     ? c.failureReason
     : c.failureCode ?? null;
+  const sshCommand = c.ssh.login?.omittedServer ?? c.ssh.login?.explicitServer;
   const sshInfo = c.ssh.lastError
     ? c.ssh.lastError
-    : c.ssh.enabled && c.ssh.status === 'running' && c.runtime.ip
-    ? `ssh root@${c.runtime.ip}`
+    : c.ssh.ready && sshCommand && c.ssh.proxyHost && c.ssh.proxyPort
+    ? `ssh ${sshCommand}@${c.ssh.proxyHost} -p ${c.ssh.proxyPort}`
     : c.ssh.enabled
-    ? 'Dropbear SSH 服务尚不可用'
-    : '启用后使用 root 和用户中心公钥连接';
+    ? 'SSH 代理路由尚不可用'
+    : '镜像已禁用 SSH';
   const runtimeMetricId = c.runtime.runtimeId?.slice(0, 12);
   const containerMetrics = metricsData?.containers.find((metrics) => (
     metrics.containerId === c.id
@@ -151,15 +181,18 @@ export default function ContainerDetailPage() {
     : null;
 
   return (
-    <div className="p-6 space-y-4 w-full">
+    <div className="px-4 py-4 md:px-6 space-y-5 w-full">
       <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
         <div className="flex items-center gap-3">
-          <Link to="/containers"><Button variant="outline" size="icon" className="h-8 w-8"><ArrowLeft className="h-4 w-4" /></Button></Link>
+          <Link to={backTo}><Button variant="outline" size="icon" className="h-8 w-8"><ArrowLeft className="h-4 w-4" /></Button></Link>
           <div>
             <div className="flex items-center gap-2">
-              <h1 className="text-2xl font-bold text-foreground">{c.name}</h1>
-              <Badge variant={runtimeBadgeVariant} title={confirmation?.message}>
-                {confirmation?.status === 'pending' && <Loader2 className="mr-1 h-3 w-3 animate-spin" />}
+              <h1 className="text-2xl font-semibold tracking-tight text-foreground">{c.name}</h1>
+              {plane === 'admin' && c.ownerName && (
+                <Badge variant="outline">{c.ownerName}</Badge>
+              )}
+              <Badge variant={runtimeBadgeVariant} title={c.activeOperation?.status === OperationStatus.WaitingReport ? '命令已完成，等待 agent 上报确认' : c.activeOperation?.kind}>
+                {c.activeOperation && <Loader2 className="mr-1 h-3 w-3 animate-spin" />}
                 {runtimeLabel}
               </Badge>
             </div>
@@ -204,7 +237,7 @@ export default function ContainerDetailPage() {
 
       {activeTab === 'overview' && (
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-          <div className="bg-card rounded-xl border p-4">
+          <div className="bg-card rounded-lg border p-4">
             <h3 className="text-sm font-semibold text-foreground mb-3">容器信息</h3>
             <div className="space-y-2">
               {[
@@ -218,7 +251,7 @@ export default function ContainerDetailPage() {
               <div className="flex items-center justify-between gap-3 py-1.5 text-sm border-b border-border/50 last:border-0">
                 <span className="text-muted-foreground">容器状态</span>
                 <div className="flex min-w-0 items-center justify-end gap-2">
-                  <span className="text-foreground font-medium text-right truncate" title={confirmation?.message}>{containerStateLabel}</span>
+                  <span className="text-foreground font-medium text-right truncate">{containerStateLabel}</span>
                   {operationState && (
                     <TooltipProvider>
                       <Tooltip>
@@ -280,21 +313,9 @@ export default function ContainerDetailPage() {
                     </TooltipProvider>
                   </div>
                   <div className="flex min-w-0 items-center justify-end gap-2">
-                    <Badge variant={c.ssh.status === 'running' ? 'success' : c.ssh.enabled ? 'secondary' : 'outline'}>
+                    <Badge variant={c.ssh.ready ? 'success' : c.ssh.enabled ? 'secondary' : 'outline'}>
                       {sshLabel}
                     </Badge>
-                    {canManageContainer && !c.ssh.enabled && (
-                      <Button
-                        variant="link"
-                        size="sm"
-                        className="h-auto px-0 py-0 text-xs"
-                        disabled={!c.actions.enableSsh.enabled || runAction.isPending}
-                        title={actionTitle(c, 'enableSsh')}
-                        onClick={() => runAction.mutate('enableSsh')}
-                      >
-                        启用
-                      </Button>
-                    )}
                     {canManageContainer && c.ssh.enabled && (
                       <Button
                         variant="link"
@@ -304,7 +325,7 @@ export default function ContainerDetailPage() {
                         title={actionTitle(c, 'reconcileSsh')}
                         onClick={() => runAction.mutate('reconcileSsh')}
                       >
-                        修复
+                        修复 SSH
                       </Button>
                     )}
                   </div>
@@ -313,13 +334,15 @@ export default function ContainerDetailPage() {
             </div>
           </div>
 
-          <div className="bg-card rounded-xl border p-4">
+          <div className="bg-card rounded-lg border p-4">
             <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
               <h3 className="text-sm font-semibold text-foreground">容器指标</h3>
               <TimeRangeSelector value={metricsRange} onChange={setMetricsRange} />
             </div>
             {metricsLoading ? (
               <div className="h-[340px] animate-pulse rounded bg-muted/40" />
+            ) : !canViewMetrics ? (
+              <EmptyChart title="无指标权限" />
             ) : metricsError || !containerMetrics ? (
               <EmptyChart title="容器指标" />
             ) : (
@@ -335,12 +358,19 @@ export default function ContainerDetailPage() {
             )}
           </div>
 
-          <MountsCard serverId={c.serverId} containerId={containerId} isRunning={c.actions.updateMounts.enabled} />
+          <MountsCard
+            serverId={c.serverId}
+            containerId={containerId}
+            isRunning={c.actions.updateMounts.enabled}
+            readonly={plane === 'admin'}
+            apiBasePath={apiBasePath}
+            plane={plane}
+          />
         </div>
       )}
 
       {activeTab === 'console' && (
-        <ContainerConsole container={c} />
+        <ContainerConsole container={c} apiBasePath={apiBasePath} />
       )}
     </div>
   );

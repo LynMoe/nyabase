@@ -42,10 +42,6 @@ export class ContainerMountEntity {
   @Column('text')
   containerPath: string;
 
-  /** Only meaningful during first container creation — agent creates dir if missing */
-  @Column({ type: 'boolean', default: false })
-  createIfMissing: boolean;
-
   @CreateDateColumn()
   createdAt: Date;
 

@@ -19,5 +19,13 @@ macvlanGateway: "192.168.10.1"
 # Metrics collection interval (milliseconds)
 metricsIntervalMs: 10000
 
+# Optional host-level guardrail for the nyabase-managed Docker daemon.
+# When enabled, Docker containers are placed under a systemd slice that:
+# - does not limit CPU on hosts with fewer than 12 logical cores;
+# - reserves floor(cpuCores / 12) logical cores on larger hosts;
+# - reserves min(10% host memory, 64GiB) for the host.
+dockerResourceLimit:
+  enabled: false
+
 # State file location
 stateFilePath: "/var/lib/nyabase-agent/state.json"

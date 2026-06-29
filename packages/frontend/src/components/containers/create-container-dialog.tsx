@@ -18,7 +18,6 @@ interface MountEntry {
   sourceId: string;
   dirName: string;
   containerPath: string;
-  createIfMissing: boolean;
 }
 
 interface Props {
@@ -36,7 +35,6 @@ export function CreateContainerDialog({ open, onOpenChange, defaultServerId }: P
     name: '',
   });
   const [mounts, setMounts] = useState<MountEntry[]>([]);
-  const [sshServerEnabled, setSshServerEnabled] = useState(false);
   const [addMount, setAddMount] = useState<Partial<MountEntry>>({});
   const [dataDirPick, setDataDirPick] = useState<string>('');
   const [showAdvanced, setShowAdvanced] = useState(false);
@@ -65,7 +63,6 @@ export function CreateContainerDialog({ open, onOpenChange, defaultServerId }: P
   useEffect(() => {
     if (!open) return;
     setMounts([]);
-    setSshServerEnabled(false);
     setAddMount({});
     setDataDirPick('');
     setShowAdvanced(false);
@@ -84,7 +81,6 @@ export function CreateContainerDialog({ open, onOpenChange, defaultServerId }: P
         imageId: form.imageId,
         name: form.name,
         dataDirs: mounts.length > 0 ? mounts : undefined,
-        sshServerEnabled: sshServerEnabled ? true : undefined,
       });
     },
     onSuccess: (res) => {
@@ -127,7 +123,6 @@ export function CreateContainerDialog({ open, onOpenChange, defaultServerId }: P
       sourceId: addMount.sourceId,
       dirName: addMount.dirName,
       containerPath: addMount.containerPath,
-      createIfMissing: addMount.createIfMissing ?? false,
     };
     if (mountedSourceKeys.has(mountSourceKey(mountEntry))) {
       toast({ title: '数据目录已挂载', description: '同一个容器不能重复挂载同一个数据目录', variant: 'destructive' });
@@ -188,7 +183,7 @@ export function CreateContainerDialog({ open, onOpenChange, defaultServerId }: P
                   <option key={s.id} value={s.id}>{s.name}</option>
                 ))}
                 {onlineServers.length === 0 && (
-                  <option disabled>暂无可用服务器</option>
+                  <option disabled>暂无可用服务器或授权</option>
                 )}
               </select>
             </div>
@@ -206,9 +201,14 @@ export function CreateContainerDialog({ open, onOpenChange, defaultServerId }: P
                   <option key={img.id} value={img.id}>{img.name}</option>
                 ))}
                 {form.serverId && availableImages.length === 0 && (
-                  <option disabled>此服务器上无可用镜像</option>
+                  <option disabled>此服务器暂无可用镜像授权</option>
                 )}
               </select>
+              {onlineServers.length === 0 && (
+                <p className="text-xs text-muted-foreground/70">
+                  当前账号没有可用于创建容器的在线服务器授权，请联系管理员分配服务器和镜像权限。
+                </p>
+              )}
             </div>
           </div>
 
@@ -244,19 +244,6 @@ export function CreateContainerDialog({ open, onOpenChange, defaultServerId }: P
                     {serverAccess.diskBytes > 0 ? ` ${formatBytes(serverAccess.diskBytes)}` : '不限'}
                   </div>
                 )}
-
-                <label className="flex items-center justify-between gap-3 rounded-lg border border-border px-3 py-2.5">
-                  <span className="min-w-0">
-                    <span className="block text-sm font-medium text-foreground">启用 Dropbear SSH</span>
-                    <span className="block text-xs text-muted-foreground/70">使用用户中心公钥以 root 登录</span>
-                  </span>
-                  <input
-                    type="checkbox"
-                    className="h-4 w-4 shrink-0 accent-primary"
-                    checked={sshServerEnabled}
-                    onChange={(e) => setSshServerEnabled(e.target.checked)}
-                  />
-                </label>
               </div>
             )}
           </div>
@@ -281,9 +268,9 @@ export function CreateContainerDialog({ open, onOpenChange, defaultServerId }: P
                         {m.sourceKind === 'remote' ? <Network className="inline h-3 w-3 mr-1 text-primary" /> : <FolderOpen className="inline h-3 w-3 mr-1 text-muted-foreground" />}
                         {m.dirName} → {m.containerPath}
                       </span>
-                      <Button size="icon" variant="ghost" className="h-6 w-6 text-muted-foreground hover:text-red-500 shrink-0"
+                      <Button size="icon" variant="ghost" className="h-8 w-8 text-muted-foreground hover:text-red-500 shrink-0"
                         onClick={() => setMounts((prev) => prev.filter((_, j) => j !== i))}>
-                        <X className="h-3 w-3" />
+                        <X className="h-4 w-4" />
                       </Button>
                     </div>
                   ))}
@@ -340,7 +327,7 @@ export function CreateContainerDialog({ open, onOpenChange, defaultServerId }: P
                 </Button>
               </div>
               <p className="text-xs text-muted-foreground/70">
-                容器内路径无需预先存在，挂载时会自动创建目录。
+                数据目录必须先登记；容器内挂载点由运行时处理。
               </p>
                 </>
               )}

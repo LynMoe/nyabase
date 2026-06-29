@@ -68,11 +68,7 @@ const DIRECT_COMMAND_KINDS = new Set<string>([
 ]);
 
 function parseCreateContainerPayload(payload: unknown): CreateContainerPayload {
-  const parsed = zCreateContainerPayload.parse(payload);
-  return {
-    ...parsed,
-    sshServerEnabled: parsed.sshServerEnabled ?? false,
-  };
+  return zCreateContainerPayload.parse(payload);
 }
 
 /**
@@ -207,6 +203,9 @@ export class CommandDispatcher {
     commandId: string,
   ): Promise<CommandExecutionResult> {
     switch (kind) {
+      case AgentCommandKind.Noop:
+        return undefined;
+
       case AgentCommandKind.RuntimeContainerCreate:
         return this.handleCreateContainer(parseCreateContainerPayload(payload));
 
@@ -215,7 +214,6 @@ export class CommandDispatcher {
         switch (p.action) {
           case 'start':
             await this.docker.startContainer(p.runtimeId);
-            await this.reconcileAfterContainerStart(p.runtimeId, p.mounts, p.sshServerEnabled, p.sshPublicKeys);
             break;
           case 'stop':
             try { await this.docker.stopContainer(p.runtimeId, p.timeoutSeconds); } catch (err) {
@@ -225,7 +223,6 @@ export class CommandDispatcher {
             break;
           case 'restart':
             await this.docker.restartContainer(p.runtimeId, p.timeoutSeconds);
-            await this.reconcileAfterContainerStart(p.runtimeId, p.mounts, p.sshServerEnabled, p.sshPublicKeys);
             break;
         }
         return undefined;
@@ -414,10 +411,6 @@ export class CommandDispatcher {
       name,
       cpuMillis,
       memBytes,
-      createDirs,
-      mounts,
-      sshServerEnabled,
-      sshPublicKeys,
     } = payload;
 
     // Compensation stack — every effectful step pushes a rollback function.
@@ -438,20 +431,6 @@ export class CommandDispatcher {
       // XFS quota uses the numeric ID; container name/label/paths continue to use UUID ownerId.
       await this.quota.ensureProjectForUser(numericOwnerId);
 
-      for (const d of createDirs) {
-        const src = this.dataDirs.getSource(d.sourceId);
-        if (d.createIfMissing) {
-          await this.dataDirs.createDir(d.sourceId, d.dirName, d.ownerUid);
-          // Intentionally NOT compensated: data dirs are user-owned and may be
-          // pre-existing; deleting them on container-creation failure would
-          // risk wiping a real user dataset.
-        }
-        if (src?.kind === 'local' && src.quotaEnabled) {
-          const hostPath = this.dataDirs.getDirPath(d.sourceId, d.dirName);
-          await this.quota.addPathToProject(numericOwnerId, hostPath);
-        }
-      }
-
       const cidr = payload.ipCidr ?? this.config.macvlanCidr;
       const gateway = payload.gateway ?? this.config.macvlanGateway;
       const reservedIps = payload.reservedIps ?? [];
@@ -460,7 +439,7 @@ export class CommandDispatcher {
 
       const dockerId = await this.docker.createContainer({
         name, imageRef: imageDockerRef, cpuMillis, memBytes, gpuIndices,
-        ip, sshServerEnabled, containerId, ownerId, imageId, runtimeOverrides, serverId: this.config.serverId,
+        ip, containerId, ownerId, imageId, runtimeOverrides, serverId: this.config.serverId,
       });
       pushComp(`removeContainer(${dockerId.slice(0, 12)})`, async () => {
         await this.docker.removeContainer(dockerId, true);
@@ -469,8 +448,6 @@ export class CommandDispatcher {
       await this.docker.startContainer(dockerId);
       // start has no separate compensation: removeContainer(force=true) above
       // also stops a running container.
-
-      await this.reconcileAfterContainerStart(dockerId, mounts, sshServerEnabled, sshPublicKeys);
 
       const { upperDir, workDir } = await this.docker.getGraphDriverDirs(dockerId);
       if (!upperDir) {
@@ -495,24 +472,6 @@ export class CommandDispatcher {
         await compensations[i]();
       }
       throw err;
-    }
-  }
-
-  private async reconcileAfterContainerStart(
-    runtimeId: string,
-    mounts: ContainerMountSpec[],
-    sshServerEnabled: boolean,
-    sshPublicKeys: string[],
-  ): Promise<void> {
-    if (mounts.length > 0) {
-      await this.reconcileContainerMounts(runtimeId, mounts);
-    }
-
-    if (sshServerEnabled) {
-      await this.dropbearManager.reconcileContainerSsh({
-        runtimeId,
-        publicKeys: sshPublicKeys,
-      });
     }
   }
 

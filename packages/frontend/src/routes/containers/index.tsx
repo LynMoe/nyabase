@@ -46,18 +46,18 @@ function ServerContainersSection({
               online ? 'bg-green-50 text-green-700' : 'bg-muted text-muted-foreground'
             }`}
           >
-            {server.status}
+            {online ? '在线' : '离线'}
           </span>
           <span className="text-xs text-muted-foreground">{items.length} 个容器</span>
         </div>
-        <Button size="sm" variant="outline" className="h-7 text-xs" onClick={onCreate}>
-          <Plus className="h-3 w-3" />
+        <Button size="sm" variant="outline" onClick={onCreate}>
+          <Plus className="h-4 w-4" />
           新建
         </Button>
       </div>
 
       {items.length === 0 ? (
-        <div className="bg-card rounded-xl border border-dashed px-5 py-6 text-center">
+        <div className="bg-card rounded-lg border border-dashed px-5 py-6 text-center">
           <Container className="h-6 w-6 text-muted-foreground/40 mx-auto mb-2" />
           <div className="text-sm text-muted-foreground">该服务器暂无容器</div>
         </div>
@@ -166,9 +166,9 @@ function ContainersPage() {
 
   return (
     <div className="px-4 py-4 md:px-6 space-y-5 w-full">
-      <div className="flex items-center justify-between">
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
         <div>
-          <h1 className="text-2xl font-semibold tracking-tight">容器</h1>
+          <h1 className="text-2xl font-semibold tracking-tight text-foreground">容器</h1>
           <p className="text-muted-foreground text-sm">{containers.length} 个容器</p>
         </div>
         <div className="flex items-center gap-2">
@@ -184,8 +184,8 @@ function ContainersPage() {
       {listLoading ? (
         <Card><CardContent className="h-32 animate-pulse bg-muted/50 rounded-lg mt-6" /></Card>
       ) : servers.length === 0 && containers.length === 0 ? (
-        <div className="bg-card rounded-xl border border-dashed p-10 text-center text-muted-foreground">
-          请先在"服务器"中添加服务器
+        <div className="bg-card rounded-lg border border-dashed p-10 text-center text-muted-foreground">
+          暂无可访问的服务器。请联系管理员为你分配服务器和镜像权限。
         </div>
       ) : (
         <div className="space-y-6">

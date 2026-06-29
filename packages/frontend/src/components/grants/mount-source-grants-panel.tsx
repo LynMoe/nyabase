@@ -148,7 +148,7 @@ export function MountSourceGrantsPanel({ subject, description }: Props) {
       )}
 
       {noSources && (
-        <div className="text-sm text-muted-foreground py-6 text-center border border-dashed border-border rounded-xl">
+        <div className="text-sm text-muted-foreground py-6 text-center border border-dashed border-border rounded-lg">
           暂无可用数据源
         </div>
       )}

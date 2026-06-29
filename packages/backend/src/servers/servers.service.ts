@@ -30,7 +30,11 @@ import { rpcWithErrorMapping } from '../gateway/agent-errors.js';
 import { AccessResolverService } from '../access/access-resolver.service.js';
 import { UsersService } from '../users/users.service.js';
 import { OperationsService } from '../operations/operations.service.js';
+import { ResourceKeyService } from '../operations/resource-key.service.js';
 import { QuotaDispatchService } from '../quota/quota-dispatch.service.js';
+import { SshProxyGateway } from '../ssh/ssh-proxy-gateway.js';
+
+const SERVER_SLUG_RE = /^[a-z0-9][a-z0-9_-]*$/;
 
 @Injectable()
 export class ServersService {
@@ -47,11 +51,14 @@ export class ServersService {
     private accessResolver: AccessResolverService,
     private usersService: UsersService,
     private operationsService: OperationsService,
+    private resourceKeys: ResourceKeyService,
     private quotaDispatchService: QuotaDispatchService,
+    private sshProxyGateway: SshProxyGateway,
   ) {}
 
   async create(dto: {
     name: string;
+    slug: string;
     parentIface: string;
     ipCidr: string;
     gateway: string;
@@ -63,8 +70,9 @@ export class ServersService {
     defaultGpuMode?: GpuGrantMode;
     defaultGpuIndices?: number[];
   }) {
-    const existing = await this.serversRepo.findOne({ where: { name: dto.name } });
-    if (existing) throw new ConflictException('Server name already exists');
+    this.assertValidSlug(dto.slug);
+    const existingSlug = await this.serversRepo.findOne({ where: { slug: dto.slug } });
+    if (existingSlug) throw new ConflictException('Server slug already exists');
 
     const rawToken = randomBytes(32).toString('hex');
     const tokenHash = createHash('sha256').update(rawToken).digest('hex');
@@ -72,6 +80,7 @@ export class ServersService {
     const server = this.serversRepo.create({
       id: uuidv4(),
       name: dto.name,
+      slug: dto.slug,
       parentIface: dto.parentIface,
       ipCidr: dto.ipCidr,
       gateway: dto.gateway,
@@ -87,6 +96,7 @@ export class ServersService {
       defaultGpuIndices: dto.defaultGpuIndices ?? [],
     });
     await this.serversRepo.save(server);
+    await this.sshProxyGateway.broadcastSnapshot();
     return { server, agentToken: rawToken };
   }
 
@@ -127,6 +137,7 @@ export class ServersService {
     id: string,
     dto: {
       name?: string;
+      slug?: string;
       parentIface?: string;
       ipCidr?: string;
       gateway?: string;
@@ -136,12 +147,20 @@ export class ServersService {
   ) {
     const server = await this.findById(id);
     if (dto.name !== undefined) server.name = dto.name;
+    if (dto.slug !== undefined && dto.slug !== server.slug) {
+      this.assertValidSlug(dto.slug);
+      const existingSlug = await this.serversRepo.findOne({ where: { slug: dto.slug } });
+      if (existingSlug && existingSlug.id !== id) throw new ConflictException('Server slug already exists');
+      server.slug = dto.slug;
+    }
     if (dto.parentIface !== undefined) server.parentIface = dto.parentIface;
     if (dto.ipCidr !== undefined) server.ipCidr = dto.ipCidr;
     if (dto.gateway !== undefined) server.gateway = dto.gateway;
     if (dto.reservedIps !== undefined) server.reservedIps = dto.reservedIps;
     if (dto.isGpuServer !== undefined) server.isGpuServer = dto.isGpuServer;
-    return this.serversRepo.save(server);
+    const saved = await this.serversRepo.save(server);
+    await this.sshProxyGateway.broadcastSnapshot();
+    return saved;
   }
 
   async updateDefaults(
@@ -194,6 +213,7 @@ export class ServersService {
   async delete(id: string) {
     const server = await this.findById(id);
     await this.serversRepo.remove(server);
+    await this.sshProxyGateway.broadcastSnapshot();
   }
 
   async regenerateToken(id: string) {
@@ -363,6 +383,7 @@ export class ServersService {
         serverId,
         requestedBy: null,
         payload,
+        resourceKeys: [this.resourceKeys.disk(serverId, disk.id)],
       },
     );
   }
@@ -379,6 +400,7 @@ export class ServersService {
       serverId,
       requestedBy: null,
       payload: { diskId: disk.id },
+      resourceKeys: [this.resourceKeys.disk(serverId, disk.id)],
       beforePersist: async (manager, context) => {
         await manager.update(DataDiskEntity, disk.id, {
           desiredState: 'removing',
@@ -425,6 +447,7 @@ export class ServersService {
     return {
       id: server.id,
       name: server.name,
+      slug: server.slug,
       parentIface: server.parentIface,
       ipCidr: server.ipCidr,
       gateway: server.gateway,
@@ -456,6 +479,12 @@ export class ServersService {
         reason: 'agent_state_unready',
         message: availability.message,
       });
+    }
+  }
+
+  private assertValidSlug(slug: string): void {
+    if (!SERVER_SLUG_RE.test(slug)) {
+      throw new BadRequestException('Server slug must be a lowercase resource name');
     }
   }
 }

@@ -9,6 +9,7 @@ import { AuthModule } from '../auth/auth.module.js';
 import { AccessModule } from '../access/access.module.js';
 import { AgentGatewayModule } from '../gateway/agent-gateway.module.js';
 import { OperationsModule } from '../operations/operations.module.js';
+import { SshModule } from '../ssh/ssh.module.js';
 
 @Module({
   imports: [
@@ -17,6 +18,7 @@ import { OperationsModule } from '../operations/operations.module.js';
     AccessModule,
     AgentGatewayModule,
     OperationsModule,
+    SshModule,
   ],
   providers: [ImagesService],
   controllers: [ImagesController, AdminImagesController],

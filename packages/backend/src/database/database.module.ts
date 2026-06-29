@@ -1,7 +1,7 @@
 import { Module, Logger } from '@nestjs/common';
-import { ConfigService } from '@nestjs/config';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { DB_ENTITIES } from './db-entities.js';
+import { NyabaseConfigService } from '../config/nyabase-config.service.js';
 
 /**
  * `synchronize` decision matrix:
@@ -12,17 +12,17 @@ import { DB_ENTITIES } from './db-entities.js';
  * (`packages/backend/src/database/migrations/*.ts`); the AppDataSource in
  * `datasource.ts` exposes the CLI entrypoint.
  */
-function resolveSynchronize(logger: Logger): boolean {
-  const isProduction = process.env.NODE_ENV === 'production';
+function resolveSynchronize(config: NyabaseConfigService, logger: Logger): boolean {
+  const isProduction = config.get<string>('runtime.nodeEnv') === 'production';
   if (isProduction) {
-    if (process.env.DB_SYNC === 'true') {
+    if (config.get<boolean>('database.synchronize')) {
       logger.warn(
         'DB_SYNC=true is ignored in production. Use migrations instead.',
       );
     }
     return false;
   }
-  return process.env.DB_SYNC !== 'false';
+  return config.get<boolean>('database.synchronize');
 }
 
 function migrationGlobs(): string[] {
@@ -34,23 +34,23 @@ function migrationGlobs(): string[] {
 @Module({
   imports: [
     TypeOrmModule.forRootAsync({
-      inject: [ConfigService],
-      useFactory: (config: ConfigService) => {
+      inject: [NyabaseConfigService],
+      useFactory: (config: NyabaseConfigService) => {
         const logger = new Logger('DatabaseModule');
-        const driver = config.get<string>('app.dbDriver', 'sqlite');
-        const synchronize = resolveSynchronize(logger);
+        const driver = config.get<string>('database.driver');
+        const synchronize = resolveSynchronize(config, logger);
 
         const migrations = migrationGlobs();
-        const migrationsRun = process.env.DB_MIGRATIONS_RUN === 'true';
+        const migrationsRun = config.get<boolean>('database.migrationsRun');
 
         if (driver === 'postgres') {
           return {
             type: 'postgres',
-            host: config.get('app.dbHost'),
-            port: config.get('app.dbPort'),
-            database: config.get('app.dbName'),
-            username: config.get('app.dbUser'),
-            password: config.get('app.dbPassword'),
+            host: config.get<string>('database.host'),
+            port: config.get<number>('database.port'),
+            database: config.get<string>('database.name'),
+            username: config.get<string>('database.user'),
+            password: config.get<string>('database.password'),
             entities: DB_ENTITIES,
             migrations,
             migrationsRun,
@@ -59,7 +59,7 @@ function migrationGlobs(): string[] {
         }
         return {
           type: 'better-sqlite3',
-          database: config.get<string>('app.dbPath', './nyabase.db'),
+          database: config.get<string>('database.path'),
           entities: DB_ENTITIES,
           migrations,
           migrationsRun,

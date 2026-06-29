@@ -6,9 +6,11 @@ import { ImageEntity } from '../entities/image.entity.js';
 import { ServerEntity } from '../entities/server.entity.js';
 import { AgentGateway } from '../gateway/agent-gateway.js';
 import { OperationsService } from '../operations/operations.service.js';
+import { ResourceKeyService } from '../operations/resource-key.service.js';
 import type { AccessResolverService } from '../access/access-resolver.service.js';
 import { AgentCommandKind, OperationKind } from '@nyabase/common';
 import type { ImageRuntimeOverrides } from '@nyabase/common';
+import { SshProxyGateway } from '../ssh/ssh-proxy-gateway.js';
 
 const DEFAULT_RUNTIME_OVERRIDES: ImageRuntimeOverrides = {
   uid: 0,
@@ -53,6 +55,8 @@ export class ImagesService {
     private serversRepo: Repository<ServerEntity>,
     private agentGateway: AgentGateway,
     private operationsService: OperationsService,
+    private resourceKeys: ResourceKeyService,
+    private sshProxyGateway: SshProxyGateway,
   ) {}
 
   async create(dto: {
@@ -61,17 +65,21 @@ export class ImagesService {
     runtimeOverrides?: ImageRuntimeOverrides;
     defaultUid?: number;
     description?: string;
+    disableSsh?: boolean;
   }) {
     const runtimeOverrides = normalizeRuntimeOverrides(dto.runtimeOverrides, dto.defaultUid);
-    return this.repo.save(
+    const saved = await this.repo.save(
       this.repo.create({
         id: uuidv4(),
         ...dto,
         defaultUid: runtimeOverrides.uid,
         runtimeOverrides,
         description: dto.description ?? null,
+        disableSsh: dto.disableSsh ?? false,
       }),
     );
+    await this.sshProxyGateway.broadcastSnapshot();
+    return saved;
   }
 
   async findAll(activeOnly = false) {
@@ -111,6 +119,7 @@ export class ImagesService {
     defaultUid?: number;
     description?: string | null;
     isActive?: boolean;
+    disableSsh?: boolean;
   }) {
     const img = await this.findById(id);
     if (dto.name !== undefined) img.name = dto.name;
@@ -129,12 +138,16 @@ export class ImagesService {
     }
     if (dto.description !== undefined) img.description = dto.description ?? null;
     if (dto.isActive !== undefined) img.isActive = dto.isActive;
-    return this.repo.save(img);
+    if (dto.disableSsh !== undefined) img.disableSsh = dto.disableSsh;
+    const saved = await this.repo.save(img);
+    await this.sshProxyGateway.broadcastSnapshot();
+    return saved;
   }
 
   async delete(id: string) {
     const img = await this.findById(id);
     await this.repo.remove(img);
+    await this.sshProxyGateway.broadcastSnapshot();
   }
 
   /** Get per-server status for an image (present / pulling / absent) */
@@ -148,7 +161,8 @@ export class ImagesService {
       const pullKey = `${server.id}:${image.dockerImage}`;
       const pp = this.agentGateway.pullProgress.get(pullKey);
 
-      const present = pp?.status === 'done';
+      const present = pp?.status === 'done'
+        || this.agentGateway.stateCache.hasImage(server.id, image.dockerImage);
 
       const status: ImageServerStatus = {
         serverId: server.id,
@@ -195,7 +209,7 @@ export class ImagesService {
           resourceId: image.id,
           requestedBy: null,
           payload: { dockerRef: image.dockerImage, imageId: image.id },
-          resourceKey: `image:${server.id}:${image.id}`,
+          resourceKeys: [this.resourceKeys.image(server.id, image.id)],
         });
         started.push(server.id);
       } catch (err) {

@@ -1,0 +1,37 @@
+runtime:
+  nodeEnv: production
+
+server:
+  port: 3001
+  corsOrigin: ""
+
+branding:
+  title: nyabase
+  description: 开发容器管理平台
+
+auth:
+  jwtSecret: change-me-in-production
+  jwtExpiresIn: 15m
+  refreshTokenExpiresDays: 7
+  adminInitPassword: admin123
+
+database:
+  driver: sqlite
+  path: /data/nyabase.db
+  host: localhost
+  port: 5432
+  name: nyabase
+  user: nyabase
+  password: ""
+  synchronize: false
+  migrationsRun: true
+
+metrics:
+  victoriaMetricsUrl: http://victoriametrics:8428
+
+ssh:
+  keyEncryptionSecret: ""
+  proxyToken: ""
+  proxyPublicHost: ""
+  proxyPublicPort: 2222
+  proxySnapshotStaleMs: 300000

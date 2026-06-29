@@ -7,8 +7,7 @@ export interface ContainerActionPolicyInput {
   runtimeReady: boolean;
   runtimeDrift: RuntimeDriftDto[];
   activeOperationId: string | null;
-  runtimeConfirmationPending?: boolean;
-  runtimeConfirmationExpired?: boolean;
+  sshEnabled: boolean;
 }
 
 @Injectable()
@@ -30,31 +29,21 @@ export class ContainerActionPolicyService {
       stats: this.disabled(reason, message),
       console: this.disabled(reason, message),
       updateMounts: this.disabled(reason, message),
-      enableSsh: this.disabled(reason, message),
       reconcileSsh: this.disabled(reason, message),
     };
   }
 
   forContainer(input: ContainerActionPolicyInput): Record<ContainerAction, ActionAvailability> {
     if (input.activeOperationId) {
-      return this.allDisabled('operation_in_progress', `Operation ${input.activeOperationId} is still running`);
+      const running = input.runtimeStatus === ContainerStatus.Running;
+      return {
+        ...this.allDisabled('operation_in_progress', `Operation ${input.activeOperationId} is still running`),
+        stats: running ? this.enabled() : this.disabled('phase_not_active', 'Container is not running'),
+        console: running ? this.enabled() : this.disabled('phase_not_active', 'Container is not running'),
+      };
     }
     if (!input.runtimeReady) {
       return this.allDisabled('agent_state_unready', 'Agent runtime state is not ready; wait for the first full state report');
-    }
-    if (input.runtimeConfirmationPending) {
-      const running = input.runtimeStatus === ContainerStatus.Running;
-      return {
-        start: this.disabled('runtime_confirmation_pending', '上一个操作已完成，正在等待 agent 上报运行态确认'),
-        stop: this.disabled('runtime_confirmation_pending', '上一个操作已完成，正在等待 agent 上报运行态确认'),
-        restart: this.disabled('runtime_confirmation_pending', '上一个操作已完成，正在等待 agent 上报运行态确认'),
-        delete: this.disabled('runtime_confirmation_pending', '上一个操作已完成，正在等待 agent 上报运行态确认'),
-        stats: running ? this.enabled() : this.disabled('phase_not_active', 'Container is not running'),
-        console: running ? this.enabled() : this.disabled('phase_not_active', 'Container is not running'),
-        updateMounts: this.disabled('runtime_confirmation_pending', '上一个操作已完成，正在等待 agent 上报运行态确认'),
-        enableSsh: this.disabled('runtime_confirmation_pending', '上一个操作已完成，正在等待 agent 上报运行态确认'),
-        reconcileSsh: this.disabled('runtime_confirmation_pending', '上一个操作已完成，正在等待 agent 上报运行态确认'),
-      };
     }
     if (input.phase === ContainerPhase.Deleted || input.phase === ContainerPhase.Deleting) {
       return this.allDisabled('phase_not_active', 'Container is being deleted or already deleted');
@@ -68,7 +57,7 @@ export class ContainerActionPolicyService {
         delete: this.enabled(),
       };
     }
-    const hasRuntimeDrift = !input.runtimeConfirmationExpired && input.runtimeDrift.some((drift) =>
+    const hasRuntimeDrift = input.runtimeDrift.some((drift) =>
       drift.kind === RuntimeDriftKind.RuntimeMissing
       || drift.kind === RuntimeDriftKind.RuntimeUnbound
       || drift.kind === RuntimeDriftKind.RuntimeIdMismatch
@@ -79,7 +68,6 @@ export class ContainerActionPolicyService {
       return {
         ...this.allDisabled('runtime_missing', 'Runtime state does not match desired state'),
         delete: this.enabled(),
-        reconcileSsh: this.enabled(),
       };
     }
     const running = input.runtimeStatus === ContainerStatus.Running;
@@ -92,8 +80,9 @@ export class ContainerActionPolicyService {
       stats: running ? this.enabled() : this.disabled('phase_not_active', 'Container is not running'),
       console: running ? this.enabled() : this.disabled('phase_not_active', 'Container is not running'),
       updateMounts: this.enabled(),
-      enableSsh: this.enabled(),
-      reconcileSsh: running ? this.enabled() : this.disabled('phase_not_active', 'Container is not running'),
+      reconcileSsh: input.sshEnabled
+        ? running ? this.enabled() : this.disabled('phase_not_active', 'Container is not running')
+        : this.disabled('image_not_available', 'Image has SSH disabled'),
     };
   }
 }

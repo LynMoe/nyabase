@@ -19,44 +19,50 @@ type MountInput = {
   sourceId: string;
   dirName: string;
   containerPath: string;
-  createIfMissing?: boolean;
 };
 
 export function MountsCard({
   serverId,
   containerId,
   isRunning,
+  readonly = false,
+  apiBasePath = '/v2/containers',
+  plane = 'user',
 }: {
   serverId: string;
   containerId: string;
   isRunning: boolean;
+  readonly?: boolean;
+  apiBasePath?: string;
+  plane?: 'admin' | 'user';
 }) {
   const qc = useQueryClient();
   const [addOpen, setAddOpen] = useState(false);
   const [pendingRemoveIndex, setPendingRemoveIndex] = useState<number | null>(null);
 
   const { data: mounts = [] } = useQuery<ContainerMountView[]>({
-    queryKey: ['container-mounts', containerId],
-    queryFn: () => api.get<ContainerView>(`/v2/containers/${containerId}`).then((c) => c.mounts),
+    queryKey: ['container-mounts', plane, containerId],
+    queryFn: () => api.get<ContainerView>(`${apiBasePath}/${containerId}`).then((c) => c.mounts),
   });
 
   const { data: serverDirs = [] } = useQuery<DataDirDto[]>({
     queryKey: queryKeys.dataDirs.byServer('user', serverId),
     queryFn: () => api.get<DataDirDto[]>(`/data-dirs?serverId=${serverId}`),
-    enabled: addOpen,
+    enabled: addOpen && !readonly,
   });
 
   const { data: mountSources = [] } = useQuery<MountSourceDto[]>({
     queryKey: queryKeys.mountSources.byServer('user', serverId),
     queryFn: () => api.get<MountSourceDto[]>(`/mount-sources?serverId=${serverId}`),
+    enabled: !readonly,
   });
 
   const patchMounts = useMutation({
     mutationFn: (newList: MountInput[]) =>
-      api.post(`/v2/containers/${containerId}/actions/update-mounts`, newList),
+      api.post(`${apiBasePath}/${containerId}/actions/update-mounts`, newList),
     onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ['container-mounts', containerId] });
-      qc.invalidateQueries({ queryKey: queryKeys.containers.detail('user', containerId) });
+      qc.invalidateQueries({ queryKey: ['container-mounts', plane, containerId] });
+      qc.invalidateQueries({ queryKey: queryKeys.containers.detail(plane, containerId) });
       toast({ title: isRunning ? '挂载更新已排队' : '挂载已保存（下次启动同步）' });
     },
     onError: (e) => toast({ title: '操作失败', description: e.message, variant: 'destructive' }),
@@ -98,12 +104,14 @@ export function MountsCard({
   const pendingMount = pendingRemoveIndex !== null ? mounts[pendingRemoveIndex] : null;
 
   return (
-    <div className="bg-card rounded-xl border border-border p-4">
+    <div className="bg-card rounded-lg border border-border p-4">
       <div className="flex items-center justify-between mb-3">
         <h3 className="text-sm font-semibold text-foreground/90">数据目录挂载</h3>
-        <Button size="sm" variant="outline" className="h-7 text-xs" onClick={() => setAddOpen(true)}>
-          <Plus className="h-3 w-3 mr-1" />添加
-        </Button>
+        {!readonly && (
+          <Button size="sm" variant="outline" onClick={() => setAddOpen(true)}>
+            <Plus className="h-4 w-4" />添加
+          </Button>
+        )}
       </div>
 
       {mounts.length === 0 ? (
@@ -126,18 +134,20 @@ export function MountsCard({
                     <div className="text-xs text-muted-foreground/70 font-mono truncate">{m.containerPath}</div>
                   </div>
                 </div>
-                <Button size="icon" variant="ghost" className="h-7 w-7 text-red-400 hover:text-red-600 shrink-0"
-                  disabled={patchMounts.isPending}
-                  onClick={() => setPendingRemoveIndex(i)}>
-                  <X className="h-3.5 w-3.5" />
-                </Button>
+                {!readonly && (
+                  <Button size="icon" variant="ghost" className="h-8 w-8 text-red-400 hover:text-red-600 shrink-0"
+                    disabled={patchMounts.isPending}
+                    onClick={() => setPendingRemoveIndex(i)}>
+                    <X className="h-3.5 w-3.5" />
+                  </Button>
+                )}
               </div>
             );
           })}
         </div>
       )}
 
-      <AlertDialog open={pendingRemoveIndex !== null} onOpenChange={(v) => { if (!v) setPendingRemoveIndex(null); }}>
+      {!readonly && <AlertDialog open={pendingRemoveIndex !== null} onOpenChange={(v) => { if (!v) setPendingRemoveIndex(null); }}>
         <AlertDialogContent>
           <AlertDialogHeader>
             <AlertDialogTitle>移除挂载</AlertDialogTitle>
@@ -156,9 +166,9 @@ export function MountsCard({
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>
-      </AlertDialog>
+      </AlertDialog>}
 
-      <AddMountDialog
+      {!readonly && <AddMountDialog
         open={addOpen}
         onClose={() => setAddOpen(false)}
         onConfirm={handleAdd}
@@ -166,7 +176,7 @@ export function MountsCard({
         mountSources={mountSources}
         mountedSourceKeys={mountedSourceKeys}
         isPending={patchMounts.isPending}
-      />
+      />}
     </div>
   );
 }
@@ -210,7 +220,6 @@ function AddMountDialog({ open, onClose, onConfirm, serverDirs, mountSources, mo
       sourceId: selectedDir.sourceId,
       dirName: selectedDir.name,
       containerPath: containerPath.trim(),
-      createIfMissing: false,
     });
     reset();
   };
@@ -252,7 +261,7 @@ function AddMountDialog({ open, onClose, onConfirm, serverDirs, mountSources, mo
                   onChange={(e) => setContainerPath(e.target.value)}
                   onKeyDown={(e) => e.key === 'Enter' && canConfirm && handleConfirm()}
                 />
-                <p className="text-xs text-muted-foreground/70">路径不存在时自动创建</p>
+                <p className="text-xs text-muted-foreground/70">数据目录必须先登记；容器内挂载点由运行时处理</p>
               </div>
             </>
           )}

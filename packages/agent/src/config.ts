@@ -2,6 +2,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as yaml from 'js-yaml';
 import { z } from 'zod';
+import { type DockerResourceLimitConfig } from './docker/resource-limits.js';
 
 /**
  * Schema for the on-disk agent.yaml file (or env-derived equivalent).
@@ -45,6 +46,9 @@ const zAgentConfig = z.object({
   mountHelperPath: z.string().min(1),
   /** If false, the agent skips nvidia-smi probing and emits no GPU metrics. */
   isGpuServer: z.boolean(),
+  dockerResourceLimit: z.object({
+    enabled: z.boolean(),
+  }),
 });
 
 export type AgentConfig = z.infer<typeof zAgentConfig> & {
@@ -118,12 +122,17 @@ function loadRaw(): Record<string, unknown> {
     metricsIntervalMs: process.env.METRICS_INTERVAL_MS,
     mountHelperPath: process.env.MOUNT_HELPER_PATH,
     isGpuServer: process.env.IS_GPU_SERVER,
+    dockerResourceLimit: process.env.DOCKER_RESOURCE_LIMIT_ENABLED === undefined
+      ? undefined
+      : { enabled: process.env.DOCKER_RESOURCE_LIMIT_ENABLED },
   };
 }
 
 function coerceShape(raw: Record<string, unknown>): Record<string, unknown> {
   const metricsRaw = raw.metricsIntervalMs;
   const isGpuRaw = raw.isGpuServer;
+  const dockerResourceLimitRaw = raw.dockerResourceLimit as Record<string, unknown> | undefined;
+  const dockerResourceLimitEnabledRaw = dockerResourceLimitRaw?.enabled;
   return {
     backendUrl: raw.backendUrl ?? 'ws://localhost:3001/ws/agent',
     agentToken: raw.agentToken ?? '',
@@ -145,6 +154,14 @@ function coerceShape(raw: Record<string, unknown>): Record<string, unknown> {
         : typeof isGpuRaw === 'string'
         ? isGpuRaw !== 'false' && isGpuRaw !== '0' && isGpuRaw !== ''
         : true,
+    dockerResourceLimit: {
+      enabled:
+        typeof dockerResourceLimitEnabledRaw === 'boolean'
+          ? dockerResourceLimitEnabledRaw
+          : typeof dockerResourceLimitEnabledRaw === 'string'
+          ? dockerResourceLimitEnabledRaw !== 'false' && dockerResourceLimitEnabledRaw !== '0' && dockerResourceLimitEnabledRaw !== ''
+          : false,
+    } satisfies DockerResourceLimitConfig,
   };
 }
 

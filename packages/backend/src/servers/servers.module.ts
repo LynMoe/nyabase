@@ -14,6 +14,7 @@ import { UsersModule } from '../users/users.module.js';
 import { AgentGatewayModule } from '../gateway/agent-gateway.module.js';
 import { OperationsModule } from '../operations/operations.module.js';
 import { QuotaModule } from '../quota/quota.module.js';
+import { SshModule } from '../ssh/ssh.module.js';
 
 @Module({
   imports: [
@@ -30,6 +31,7 @@ import { QuotaModule } from '../quota/quota.module.js';
     forwardRef(() => AgentGatewayModule),
     forwardRef(() => OperationsModule),
     forwardRef(() => QuotaModule),
+    forwardRef(() => SshModule),
   ],
   providers: [ServersService],
   controllers: [ServersController, AdminServersController],

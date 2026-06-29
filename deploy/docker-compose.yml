@@ -20,25 +20,11 @@ services:
     ports:
       - "3001:3001"
     environment:
-      NODE_ENV: production
-      PORT: "3001"
-      DB_DRIVER: sqlite
-      DB_PATH: /data/nyabase.db
-      # REQUIRED: set a strong secret before going to production.
-      # The backend will refuse to start with the default value.
-      JWT_SECRET: "${JWT_SECRET:-change-me-in-production}"
-      VICTORIA_METRICS_URL: "http://victoriametrics:8428"
-      # Run explicit TypeORM migrations; do not mutate schema with synchronize.
-      DB_SYNC: "false"
-      DB_MIGRATIONS_RUN: "true"
-      # Default admin password — change in production
-      ADMIN_INIT_PASSWORD: "admin123"
-      # CORS_ORIGIN is not needed when the frontend is served by the
-      # same backend process (same origin). Set it only if you need
-      # cross-origin access from other domains.
-      # CORS_ORIGIN: "https://example.com"
+      NYABASE_CONFIG_FILE: /etc/nyabase/config.yaml
     volumes:
       - backend-data:/data
+      # Copy deploy/config.example.yaml to deploy/config.yaml and set production secrets first.
+      - ./config.yaml:/etc/nyabase/config.yaml:ro
     depends_on:
       - victoriametrics
 

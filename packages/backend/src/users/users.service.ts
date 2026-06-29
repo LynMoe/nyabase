@@ -12,9 +12,12 @@ import { UserEntity } from '../entities/user.entity.js';
 import { SshPublicKeyEntity } from '../entities/ssh-public-key.entity.js';
 import { AuthService } from '../auth/auth.service.js';
 import { AccessResolverService } from '../access/access-resolver.service.js';
-import { LifecycleHookRegistryService } from '../operations/lifecycle-hook-registry.service.js';
+import { ContainerSshSyncService } from '../containers/container-ssh-sync.service.js';
 import { runSerializedTransaction } from '../database/serialized-transaction.js';
 import { UserStatus, UserDto, normalizeOpenSshPublicKey } from '@nyabase/common';
+import { SshIdentityService } from '../ssh/ssh-identity.service.js';
+import { SshProxyGateway } from '../ssh/ssh-proxy-gateway.js';
+import { NyabaseConfigService } from '../config/nyabase-config.service.js';
 
 @Injectable()
 export class UsersService {
@@ -32,7 +35,10 @@ export class UsersService {
     private authService: AuthService,
     private accessResolver: AccessResolverService,
     private dataSource: DataSource,
-    private lifecycleHooks: LifecycleHookRegistryService,
+    private containerSshSync: ContainerSshSyncService,
+    private sshIdentities: SshIdentityService,
+    private sshProxyGateway: SshProxyGateway,
+    private config: NyabaseConfigService,
   ) {}
 
   async createUser(dto: {
@@ -61,7 +67,9 @@ export class UsersService {
         displayName: dto.displayName,
         status: UserStatus.Active,
       });
-      return manager.save(entity);
+      const saved = await manager.save(entity);
+      await this.sshIdentities.createUserKeyInTransaction(manager, saved);
+      return saved;
     });
 
     this.numericIdCache.set(user.id, user.numericId);
@@ -161,7 +169,9 @@ export class UsersService {
     if (dto.status === UserStatus.Disabled) {
       this.accessResolver.invalidateUser(id);
     }
-    return this.usersRepo.save(user);
+    const saved = await this.usersRepo.save(user);
+    await this.notifySshProxyChanged();
+    return saved;
   }
 
   async deleteUser(id: string): Promise<void> {
@@ -173,13 +183,14 @@ export class UsersService {
       this.numericIdCache.delete(id);
       this.uuidCache.delete(user.numericId);
     }
+    await this.notifySshProxyChanged();
   }
 
   async ensureAdminExists(addToAdminsGroup: (userId: string) => Promise<void>): Promise<void> {
     const adminExists = await this.usersRepo.findOne({ where: { username: 'admin' } });
     if (!adminExists) {
-      const isProd = process.env.NODE_ENV === 'production';
-      let initPassword = process.env.ADMIN_INIT_PASSWORD ?? '';
+      const isProd = this.config.get<string>('runtime.nodeEnv') === 'production';
+      let initPassword = this.config.get<string>('auth.adminInitPassword');
 
       if (!initPassword) {
         if (isProd) {
@@ -228,7 +239,7 @@ export class UsersService {
       createdAt: new Date(),
     });
     const saved = await this.sshKeysRepo.save(key);
-    await this.notifySshKeysChanged(userId);
+    await this.notifySshProxyChanged();
     return saved;
   }
 
@@ -236,7 +247,7 @@ export class UsersService {
     const key = await this.sshKeysRepo.findOne({ where: { id: keyId, userId } });
     if (!key) throw new NotFoundException('SSH key not found');
     await this.sshKeysRepo.remove(key);
-    await this.notifySshKeysChanged(userId);
+    await this.notifySshProxyChanged();
   }
 
   async getUserSshKeyTexts(userId: string): Promise<string[]> {
@@ -244,11 +255,20 @@ export class UsersService {
     return keys.map((k) => k.keyText);
   }
 
-  private async notifySshKeysChanged(userId: string): Promise<void> {
+  async notifyInternalSshKeyRotated(userId: string): Promise<void> {
     try {
-      await this.lifecycleHooks.enqueueUserSshKeyChange(userId);
+      await this.containerSshSync.enqueueForUser(userId);
     } catch (e) {
       this.logger.warn(`SSH key change hook enqueue failed for ${userId}: ${e instanceof Error ? e.message : String(e)}`);
+    }
+    await this.notifySshProxyChanged();
+  }
+
+  private async notifySshProxyChanged(): Promise<void> {
+    try {
+      await this.sshProxyGateway.broadcastSnapshot();
+    } catch (e) {
+      this.logger.warn(`SSH proxy snapshot broadcast failed: ${e instanceof Error ? e.message : String(e)}`);
     }
   }
 

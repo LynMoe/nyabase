@@ -14,7 +14,7 @@ import { toast } from '../hooks/use-toast.js';
 import { Plus, Trash2, Settings2, Server, ImageIcon, KeyRound, RefreshCw } from 'lucide-react';
 import { UserStatus, GpuGrantMode, zCreateUserRequest, zUpdateUserRequest } from '@nyabase/common';
 import type {
-  UserDto, GroupDto, ServerDto, ServerGrantDto, ImageDto, EffectiveAccessDto,
+  UserDto, GroupDto, ServerDto, ServerGrantDto, ImageDto, EffectiveAccessDto, UserInternalSshKeyDto,
 } from '@nyabase/common';
 import { formatBytes, formatCpu, resourceVal } from '../lib/utils.js';
 import {
@@ -41,10 +41,10 @@ export default function UsersPage() {
   });
 
   return (
-    <div className="p-6 space-y-6 w-full">
-      <div className="flex items-center justify-between">
+    <div className="px-4 py-4 md:px-6 space-y-5 w-full">
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
         <div>
-          <h1 className="text-2xl font-bold text-foreground">用户管理</h1>
+          <h1 className="text-2xl font-semibold tracking-tight text-foreground">用户管理</h1>
           <p className="text-sm text-muted-foreground mt-0.5">{users.length} 个账号</p>
         </div>
         <div className="flex items-center gap-2">
@@ -57,7 +57,7 @@ export default function UsersPage() {
         </div>
       </div>
 
-      <div className="bg-background rounded-xl border border-border overflow-hidden">
+      <div className="bg-background rounded-lg border border-border overflow-hidden">
         <table className="w-full text-sm">
           <thead>
             <tr className="bg-muted/50 border-b border-border">
@@ -95,13 +95,13 @@ export default function UsersPage() {
                 </td>
                 <td className="py-3 px-4">
                   <div className="flex items-center justify-end gap-1">
-                    <Button size="sm" variant="outline" className="h-7 text-xs px-2"
+                    <Button size="sm" variant="outline"
                       onClick={() => setShowGrants(u)}>
-                      <Settings2 className="h-3 w-3 mr-1" />权限
+                      <Settings2 className="h-4 w-4" />权限
                     </Button>
-                    <Button size="icon" variant="ghost" className="h-7 w-7 text-red-400 hover:text-red-600"
+                    <Button size="icon" variant="ghost" className="h-8 w-8 text-red-400 hover:text-red-600"
                       onClick={() => setDeleteTarget(u)}>
-                      <Trash2 className="h-3.5 w-3.5" />
+                      <Trash2 className="h-4 w-4" />
                     </Button>
                   </div>
                 </td>
@@ -148,7 +148,7 @@ export default function UsersPage() {
 // ---------------------------------------------------------------------------
 
 function UserGrantsDialog({ user, onClose }: { user: UserDto; onClose: () => void }) {
-  const [activeTab, setActiveTab] = useState<'effective' | 'groups' | 'overrides' | 'mount-source-grants' | 'password'>('effective');
+  const [activeTab, setActiveTab] = useState<'effective' | 'groups' | 'overrides' | 'mount-source-grants' | 'ssh' | 'password'>('effective');
 
   const userTabs = [
     { key: 'effective' as const, label: '有效权限' },
@@ -158,6 +158,7 @@ function UserGrantsDialog({ user, onClose }: { user: UserDto; onClose: () => voi
     { key: 'groups' as const, label: '所属用户组' },
     { key: 'overrides' as const, label: '独立授权' },
     { key: 'mount-source-grants' as const, label: '数据源授权' },
+    { key: 'ssh' as const, label: 'SSH', icon: KeyRound },
     { key: 'password' as const, label: '密码', icon: KeyRound },
   ];
 
@@ -202,10 +203,67 @@ function UserGrantsDialog({ user, onClose }: { user: UserDto; onClose: () => voi
               description="为该用户独立授权可访问的数据源（与用户组授权取并集，仍需同时拥有对应服务器的访问权限）"
             />
           )}
+          {activeTab === 'ssh' && <InternalSshKeyTab userId={user.id} />}
           {activeTab === 'password' && <AdminChangePasswordTab userId={user.id} />}
         </div>
       </DialogContent>
     </Dialog>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Internal SSH Key Tab
+// ---------------------------------------------------------------------------
+
+function InternalSshKeyTab({ userId }: { userId: string }) {
+  const qc = useQueryClient();
+  const [includePrivate, setIncludePrivate] = useState(false);
+  const { data: key, isLoading } = useQuery({
+    queryKey: ['user-internal-ssh-key', userId, includePrivate],
+    queryFn: () => api.get<UserInternalSshKeyDto>(`/admin/users/${userId}/internal-ssh-key${includePrivate ? '?includePrivate=true' : ''}`),
+  });
+  const rotate = useMutation({
+    mutationFn: () => api.post<UserInternalSshKeyDto>(`/admin/users/${userId}/internal-ssh-key/rotate`),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['user-internal-ssh-key', userId] });
+      toast({ title: '内部 SSH 密钥已轮换' });
+    },
+    onError: (e) => toast({ title: '轮换失败', description: (e as Error).message, variant: 'destructive' }),
+  });
+
+  if (isLoading || !key) return <div className="text-sm text-muted-foreground text-center py-8">加载中...</div>;
+
+  return (
+    <div className="space-y-3">
+      <div className="grid grid-cols-2 gap-3 text-xs">
+        <div className="rounded-lg border border-border p-3">
+          <div className="text-muted-foreground mb-1">版本</div>
+          <div className="font-semibold text-foreground">{key.generation}</div>
+        </div>
+        <div className="rounded-lg border border-border p-3">
+          <div className="text-muted-foreground mb-1">指纹</div>
+          <div className="font-mono text-foreground break-all">{key.fingerprint}</div>
+        </div>
+      </div>
+      <div className="space-y-1.5">
+        <Label className="text-xs text-muted-foreground">内部公钥</Label>
+        <textarea readOnly value={key.publicKey} rows={3} className="w-full rounded-md border bg-muted px-3 py-2 text-xs font-mono" />
+      </div>
+      {includePrivate && key.privateKey && (
+        <div className="space-y-1.5">
+          <Label className="text-xs text-muted-foreground">内部私钥</Label>
+          <textarea readOnly value={key.privateKey} rows={8} className="w-full rounded-md border bg-muted px-3 py-2 text-xs font-mono" />
+        </div>
+      )}
+      <div className="flex flex-wrap justify-end gap-2">
+        <Button variant="outline" size="sm" onClick={() => setIncludePrivate((value) => !value)}>
+          {includePrivate ? '隐藏私钥' : '查看私钥'}
+        </Button>
+        <Button size="sm" variant="outline" onClick={() => rotate.mutate()} disabled={rotate.isPending}>
+          {rotate.isPending ? '轮换中...' : '轮换内部密钥'}
+        </Button>
+      </div>
+    </div>
   );
 }
 
@@ -259,7 +317,7 @@ function EffectiveTab({ userId }: { userId: string }) {
         };
 
         return (
-          <div key={access.serverId} className="border border-border rounded-xl overflow-hidden">
+          <div key={access.serverId} className="border border-border rounded-lg overflow-hidden">
             <div className="flex items-center gap-2.5 px-4 py-2.5 bg-muted/50 border-b border-border">
               <span className={`w-2 h-2 rounded-full shrink-0 ${
                 server?.status === 'online' ? 'bg-green-500' :
@@ -380,7 +438,7 @@ function GroupsTab({ userId, user }: { userId: string; user: UserDto }) {
             <Button
               size="sm"
               variant="outline"
-              className={`h-7 text-xs ${isMember ? 'text-red-600 border-red-200 hover:bg-red-50' : ''}`}
+              className={isMember ? 'text-red-600 border-red-200 hover:bg-red-50' : undefined}
               onClick={() => isMember ? removeFromGroup.mutate(g.id) : addToGroup.mutate(g.id)}
             >
               {isMember ? '移出' : '加入'}
@@ -448,7 +506,7 @@ function OverridesTab({ userId }: { userId: string }) {
         const g = getGrant(s.id);
         if (editingServerId === s.id) {
           return (
-            <div key={s.id} className="border-2 border-primary/30 rounded-xl p-3 space-y-3 bg-primary/5">
+            <div key={s.id} className="border-2 border-primary/30 rounded-lg p-3 space-y-3 bg-primary/5">
               <div className="font-medium text-sm text-foreground">{s.name}</div>
               <ResourceGrantForm
               value={form}
@@ -456,10 +514,10 @@ function OverridesTab({ userId }: { userId: string }) {
               emptyHint="（空=服务器默认）"
               showGpu={s.isGpuServer}
               serverDefaults={{ cpuMillis: s.defaultCpuMillis, memBytes: s.defaultMemBytes, diskBytes: s.defaultDiskBytes }}
-            />
+              />
               <div className="flex gap-2 justify-end">
-                <Button size="sm" variant="outline" className="h-7 text-xs" onClick={() => setEditingServerId(null)}>取消</Button>
-                <Button size="sm" className="h-7 text-xs" onClick={() => upsert.mutate(s.id)}>保存</Button>
+                <Button size="sm" variant="outline" onClick={() => setEditingServerId(null)}>取消</Button>
+                <Button size="sm" onClick={() => upsert.mutate(s.id)}>保存</Button>
               </div>
             </div>
           );
@@ -474,7 +532,7 @@ function OverridesTab({ userId }: { userId: string }) {
                 <span className="text-sm font-medium text-foreground">{s.name}</span>
                 <span className={`text-xs px-1.5 py-0.5 rounded ${
                   s.status === 'online' ? 'bg-green-50 text-green-700' : 'bg-muted text-muted-foreground'
-                }`}>{s.status}</span>
+                }`}>{s.status === 'online' ? '在线' : '离线'}</span>
                 {g && <span className="text-xs text-amber-600 bg-amber-100 px-1.5 py-0.5 rounded">已独立授权</span>}
               </div>
               {g ? (
@@ -497,11 +555,11 @@ function OverridesTab({ userId }: { userId: string }) {
               )}
             </div>
             <div className="flex gap-1">
-              <Button size="sm" variant="outline" className="h-7 text-xs" onClick={() => startEdit(s.id)}>
+              <Button size="sm" variant="outline" onClick={() => startEdit(s.id)}>
                 {g ? '编辑' : '授权'}
               </Button>
               {g && (
-                <Button size="sm" variant="ghost" className="h-7 text-xs text-red-400 hover:text-red-600"
+                <Button size="sm" variant="ghost" className="text-red-400 hover:text-red-600"
                   onClick={() => remove.mutate(s.id)}>
                   移除
                 </Button>

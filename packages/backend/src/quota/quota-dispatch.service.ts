@@ -1,10 +1,11 @@
 import { Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { HookKind } from '@nyabase/common';
+import { AgentCommandKind, OperationKind } from '@nyabase/common';
 import { Repository } from 'typeorm';
 import { v4 as uuidv4 } from 'uuid';
 import { QuotaDesiredEntity } from '../entities/quota-desired.entity.js';
-import { LifecycleHookRegistryService } from '../operations/lifecycle-hook-registry.service.js';
+import { OperationsService } from '../operations/operations.service.js';
+import { ResourceKeyService } from '../operations/resource-key.service.js';
 
 export interface QuotaApplyRequest {
   serverId: string;
@@ -21,7 +22,8 @@ export class QuotaDispatchService {
   constructor(
     @InjectRepository(QuotaDesiredEntity)
     private quotaDesiredRepo: Repository<QuotaDesiredEntity>,
-    private lifecycleHooks: LifecycleHookRegistryService,
+    private operations: OperationsService,
+    private resourceKeys: ResourceKeyService,
   ) {}
 
   async apply(request: QuotaApplyRequest): Promise<void> {
@@ -42,18 +44,26 @@ export class QuotaDispatchService {
         }),
       );
 
-      await this.lifecycleHooks.enqueue({
-        hook: HookKind.Quota,
+      const dispatched = await this.operations.dispatchAgentCommand({
+        operationKind: OperationKind.QuotaApply,
+        commandKind: AgentCommandKind.QuotaApply,
+        serverId: request.serverId,
         resourceType: 'quota',
         resourceId: request.userId,
-        serverId: request.serverId,
-        desiredGeneration: desired.generation,
-        result: {
-          source: 'quota_dispatch',
-          requestedBy: request.requestedBy,
+        requestedBy: request.requestedBy,
+        payload: {
           numericUserId: request.numericUserId,
           diskBytes: request.diskBytes,
         },
+        request: {
+          source: 'quota_dispatch',
+          numericUserId: request.numericUserId,
+          diskBytes: request.diskBytes,
+        },
+        resourceKeys: [this.resourceKeys.quota(request.serverId, request.userId)],
+      });
+      await this.quotaDesiredRepo.update(desired.id, {
+        lastOperationId: dispatched.operationId,
       });
     });
   }

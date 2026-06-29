@@ -108,7 +108,7 @@ export const TIP_STYLE = { fontSize: 11, borderRadius: 6, border: '1px solid #e5
 export function EmptyChart({ title }: { title: string }) {
   return (
     <div
-      className="bg-card rounded-xl border p-4 flex flex-col items-center justify-center"
+      className="bg-card rounded-lg border p-4 flex flex-col items-center justify-center"
       style={{ minHeight: 160 }}
     >
       <Activity className="h-6 w-6 text-muted-foreground/30 mb-2" />
@@ -123,7 +123,7 @@ export function SkeletonSection({ rows }: { rows: number }) {
       {Array.from({ length: rows }).map((_, i) => (
         <div key={i} className="grid grid-cols-1 md:grid-cols-3 gap-3">
           {[1, 2, 3].map((j) => (
-            <div key={j} className="bg-card rounded-xl border p-4 h-[196px] animate-pulse">
+            <div key={j} className="bg-card rounded-lg border p-4 h-[196px] animate-pulse">
               <div className="h-3 w-24 bg-muted rounded mb-3" />
               <div className="h-full bg-muted/50 rounded" />
             </div>
@@ -177,7 +177,7 @@ export function TimeRangeSelector({
 // Lightweight placeholder used while the chart chunk is loading.
 export function ChartLoading({ title, height = 160 }: { title?: string; height?: number }) {
   return (
-    <div className="bg-card rounded-xl border p-4 animate-pulse" style={{ minHeight: height + 32 }}>
+    <div className="bg-card rounded-lg border p-4 animate-pulse" style={{ minHeight: height + 32 }}>
       {title && <div className="h-3 w-24 bg-muted rounded mb-3" />}
       <div className="h-full bg-muted/40 rounded" style={{ height }} />
     </div>

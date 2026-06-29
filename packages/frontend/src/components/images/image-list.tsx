@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
-  CheckCircle, Download, ImageIcon, Loader2, Pencil, Plus,
+  CheckCircle, ChevronDown, ChevronUp, Download, ImageIcon, Loader2, Pencil, Plus, Trash2,
 } from 'lucide-react';
 import type { ImageDto } from '@nyabase/common';
 
@@ -138,15 +138,16 @@ function ImageCard({ image, onToggle, onEdit, onDelete }: ImageCardProps) {
   const onlineServers = statuses.filter((s) => s.online);
   const presentCount = statuses.filter((s) => s.present).length;
   const pullingCount = statuses.filter((s) => s.pulling).length;
+  const canPullAll = expanded && onlineServers.length > 0;
 
   return (
     <Card>
-      <CardHeader className="pb-3">
-        <div className="flex items-center justify-between">
-          <div className="flex items-center gap-3 min-w-0">
-            <div>
-              <div className="flex items-center gap-2">
-                <CardTitle className="text-base">{image.name}</CardTitle>
+      <CardHeader className="p-4">
+        <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+          <div className="min-w-0 space-y-2">
+            <div className="min-w-0">
+              <div className="flex flex-wrap items-center gap-2">
+                <CardTitle className="min-w-0 truncate text-base leading-6">{image.name}</CardTitle>
                 <Badge
                   variant={image.isActive ? 'success' : 'secondary'}
                   className="cursor-pointer text-xs"
@@ -155,13 +156,25 @@ function ImageCard({ image, onToggle, onEdit, onDelete }: ImageCardProps) {
                   {image.isActive ? '启用' : '停用'}
                 </Badge>
               </div>
-              <CardDescription className="font-mono text-xs mt-0.5">{image.dockerImage}</CardDescription>
+              <CardDescription className="mt-1 break-all font-mono text-xs">{image.dockerImage}</CardDescription>
+            </div>
+
+            <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-muted-foreground">
+              <span>UID: <code className="rounded bg-muted px-1 py-0.5">{image.runtimeOverrides?.uid ?? image.defaultUid}</code></span>
+              {image.runtimeOverrides?.entrypoint && (
+                <span className="min-w-0 break-all">Entrypoint: <code className="rounded bg-muted px-1 py-0.5">{image.runtimeOverrides.entrypoint.join(' ')}</code></span>
+              )}
+              {image.runtimeOverrides?.cmd && (
+                <span className="min-w-0 break-all">CMD: <code className="rounded bg-muted px-1 py-0.5">{image.runtimeOverrides.cmd.join(' ')}</code></span>
+              )}
+              {image.runtimeOverrides?.init && <span>启用 init</span>}
+              {image.description && <span className="min-w-0 break-words">{image.description}</span>}
             </div>
           </div>
 
-          <div className="flex items-center gap-2 shrink-0">
-            {statuses.length > 0 && (
-              <div className="flex items-center gap-1 text-xs text-muted-foreground mr-2">
+          <div className="flex flex-wrap items-center justify-end gap-2 shrink-0">
+            {expanded && statuses.length > 0 && (
+              <div className="flex h-8 items-center gap-1 rounded-md border border-border bg-background px-2 text-xs text-muted-foreground">
                 <CheckCircle className="h-3.5 w-3.5 text-green-500" />
                 <span>{presentCount}/{statuses.length}</span>
                 {pullingCount > 0 && (
@@ -173,60 +186,35 @@ function ImageCard({ image, onToggle, onEdit, onDelete }: ImageCardProps) {
             )}
 
             <Button
-              variant="outline" size="sm" className="h-8"
+              variant="outline" size="sm"
               onClick={() => { setExpanded(!expanded); if (!expanded) refetch(); }}
             >
+              {expanded ? <ChevronUp className="h-4 w-4" /> : <ChevronDown className="h-4 w-4" />}
               {expanded ? '收起' : '展开详情'}
             </Button>
 
-            {onlineServers.length > 0 && (
-              <Button
-                size="sm" className="h-8"
-                disabled={pullAll.isPending || pulling}
-                onClick={() => { if (!expanded) setExpanded(true); pullAll.mutate(undefined); }}
-              >
-                {pulling ? (
-                  <><Loader2 className="h-3.5 w-3.5 animate-spin" />Pull 中...</>
-                ) : (
-                  <><Download className="h-3.5 w-3.5" />Pull 全部</>
-                )}
-              </Button>
-            )}
-
             <Button
-              variant="ghost" size="sm"
-              className="h-8 text-muted-foreground"
+              variant="outline" size="sm"
               onClick={onEdit} title="编辑镜像参数"
             >
-              <Pencil className="h-3.5 w-3.5" />编辑
+              <Pencil className="h-4 w-4" />编辑
             </Button>
             <Button
-              variant="ghost" size="sm"
-              className="h-8 text-destructive hover:text-destructive"
+              variant="ghost" size="icon"
+              className="h-9 w-9 text-destructive hover:text-destructive"
               onClick={onDelete}
+              title="删除镜像"
             >
-              删除
+              <Trash2 className="h-4 w-4" />
             </Button>
           </div>
-        </div>
-
-        <div className="flex flex-wrap items-center gap-4 text-xs text-muted-foreground mt-1">
-          <span>UID: <code className="bg-muted px-1 py-0.5 rounded">{image.runtimeOverrides?.uid ?? image.defaultUid}</code></span>
-          {image.runtimeOverrides?.entrypoint && (
-            <span>Entrypoint: <code className="bg-muted px-1 py-0.5 rounded">{image.runtimeOverrides.entrypoint.join(' ')}</code></span>
-          )}
-          {image.runtimeOverrides?.cmd && (
-            <span>CMD: <code className="bg-muted px-1 py-0.5 rounded">{image.runtimeOverrides.cmd.join(' ')}</code></span>
-          )}
-          {image.runtimeOverrides?.init && <span>Init mode</span>}
-          {image.description && <span>{image.description}</span>}
         </div>
       </CardHeader>
 
       {expanded && (
         <>
           <Separator />
-          <CardContent className="pt-4">
+          <CardContent className="space-y-3 p-4">
             {statusError ? (
               <p className="text-sm text-destructive text-center py-4">
                 加载服务器状态失败，请检查权限或稍后重试
@@ -240,16 +228,34 @@ function ImageCard({ image, onToggle, onEdit, onDelete }: ImageCardProps) {
                 暂无服务器连接此系统
               </p>
             ) : (
-              <div className="space-y-2">
-                {statuses.map((s) => (
-                  <ServerStatusRow
-                    key={s.serverId}
-                    status={s}
-                    onPull={() => pullAll.mutate([s.serverId])}
-                    pulling={pulling}
-                  />
-                ))}
-              </div>
+              <>
+                <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+                  <p className="text-xs text-muted-foreground">
+                    已加载 {statuses.length} 台服务器，在线 {onlineServers.length} 台。
+                  </p>
+                  <Button
+                    size="sm"
+                    disabled={!canPullAll || pullAll.isPending || pulling}
+                    onClick={() => pullAll.mutate(undefined)}
+                  >
+                    {pulling ? (
+                      <><Loader2 className="h-4 w-4 animate-spin" />Pull 中...</>
+                    ) : (
+                      <><Download className="h-4 w-4" />Pull 全部在线服务器</>
+                    )}
+                  </Button>
+                </div>
+                <div className="divide-y divide-border rounded-md border border-border bg-background">
+                  {statuses.map((s) => (
+                    <ServerStatusRow
+                      key={s.serverId}
+                      status={s}
+                      onPull={() => pullAll.mutate([s.serverId])}
+                      pulling={pulling}
+                    />
+                  ))}
+                </div>
+              </>
             )}
           </CardContent>
         </>

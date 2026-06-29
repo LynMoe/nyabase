@@ -38,10 +38,10 @@ export default function ServersPage() {
   if (!canManage) return null;
 
   return (
-    <div className="p-6 space-y-4 w-full">
-      <div className="flex items-center justify-between">
+    <div className="px-4 py-4 md:px-6 space-y-5 w-full">
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
         <div>
-          <h1 className="text-2xl font-semibold tracking-tight">服务器</h1>
+          <h1 className="text-2xl font-semibold tracking-tight text-foreground">服务器</h1>
           <p className="text-muted-foreground text-sm">{servers.length} 台已注册</p>
         </div>
         <div className="flex items-center gap-2">
@@ -86,6 +86,7 @@ function ServerCard({ server: s }: { server: ServerDto }) {
   const totalDisk = disks.reduce((a, d) => a + d.totalBytes, 0);
   const usedDisk = disks.reduce((a, d) => a + d.usedBytes, 0);
   const diskPct = totalDisk > 0 ? (usedDisk / totalDisk) * 100 : 0;
+  const networkSummary = [s.slug, s.ipCidr].filter(Boolean).join(' · ');
 
   return (
     <Link to="/servers/$id" params={{ id: s.id }}>
@@ -93,9 +94,9 @@ function ServerCard({ server: s }: { server: ServerDto }) {
         <CardHeader className="pb-2">
           <div className="flex items-center justify-between">
             <CardTitle className="text-base">{s.name}</CardTitle>
-            <Badge variant={online ? 'success' : 'secondary'}>{s.status}</Badge>
+            <Badge variant={online ? 'success' : 'secondary'}>{online ? '在线' : '离线'}</Badge>
           </div>
-          <CardDescription className="font-mono text-xs">{s.ipCidr}</CardDescription>
+          <CardDescription className="font-mono text-xs">{networkSummary || '-'}</CardDescription>
         </CardHeader>
         <CardContent className="space-y-2">
           {gpus.length > 0 && (
@@ -125,7 +126,7 @@ function ServerCard({ server: s }: { server: ServerDto }) {
 
 function CreateServerDialog({ open, onOpenChange }: { open: boolean; onOpenChange: (v: boolean) => void }) {
   const qc = useQueryClient();
-  const [form, setForm] = useState({ name: '', parentIface: 'eth0', ipCidr: '', gateway: '' });
+  const [form, setForm] = useState({ name: '', slug: '', parentIface: 'eth0', ipCidr: '', gateway: '' });
   const [isGpuServer, setIsGpuServer] = useState(true);
   const [createdToken, setCreatedToken] = useState<string | null>(null);
 
@@ -143,6 +144,7 @@ function CreateServerDialog({ open, onOpenChange }: { open: boolean; onOpenChang
 
   const fields: [keyof typeof form, string, string][] = [
     ['name', '服务器名称', 'prod-gpu-1'],
+    ['slug', '路由标识', 'prod-gpu-1'],
     ['parentIface', '物理网卡', 'eth0'],
     ['ipCidr', 'macvlan 网段 (CIDR)', '192.168.10.0/24'],
     ['gateway', '网关', '192.168.10.1'],
@@ -153,13 +155,13 @@ function CreateServerDialog({ open, onOpenChange }: { open: boolean; onOpenChang
       <DialogContent className="max-w-md">
         <DialogHeader>
           <DialogTitle>添加服务器</DialogTitle>
-          <DialogDescription>添加后将生成 Agent Token，部署到服务器上的 agent 配置文件中。</DialogDescription>
+          <DialogDescription>添加后将生成 Agent 令牌，部署到服务器上的 agent 配置文件中。</DialogDescription>
         </DialogHeader>
 
         {createdToken ? (
           <div className="space-y-4">
             <p className="text-sm text-muted-foreground">
-              ⚠ Agent Token 仅显示一次，请立即复制并保存。
+              Agent 令牌仅显示一次，请立即复制并保存。
             </p>
             <div className="rounded-md bg-muted p-3">
               <code className="text-xs break-all">{createdToken}</code>
@@ -168,7 +170,7 @@ function CreateServerDialog({ open, onOpenChange }: { open: boolean; onOpenChang
               variant="outline" className="w-full"
               onClick={() => navigator.clipboard.writeText(createdToken)}
             >
-              复制 Token
+              复制令牌
             </Button>
             <Button className="w-full" onClick={handleClose}>完成</Button>
           </div>
@@ -196,7 +198,7 @@ function CreateServerDialog({ open, onOpenChange }: { open: boolean; onOpenChang
             </div>
             <DialogFooter>
               <Button variant="outline" onClick={handleClose}>取消</Button>
-              <Button onClick={() => mutate()} disabled={isPending || !form.name || !form.ipCidr}>
+              <Button onClick={() => mutate()} disabled={isPending || !form.name || !form.slug || !form.ipCidr}>
                 {isPending ? '创建中...' : '创建'}
               </Button>
             </DialogFooter>

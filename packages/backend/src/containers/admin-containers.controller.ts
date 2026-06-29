@@ -21,7 +21,6 @@ const zMountInput = z.object({
   sourceId: z.string(),
   dirName: z.string().min(1).max(64),
   containerPath: z.string().startsWith('/'),
-  createIfMissing: z.boolean().optional(),
 });
 const zUpdateMounts = z.array(zMountInput);
 
@@ -69,11 +68,6 @@ export class AdminContainersController {
   ) {
     zUpdateMounts.parse(body);
     return this.containerControl.actionForAdmin(containerId, 'updateMounts', user.id, body);
-  }
-
-  @Post(':containerId/actions/enable-ssh')
-  async enableSsh(@Param('containerId') containerId: string, @CurrentUser() user: UserEntity) {
-    return this.containerControl.actionForAdmin(containerId, 'enableSsh', user.id);
   }
 
   @Post(':containerId/actions/reconcile-ssh')

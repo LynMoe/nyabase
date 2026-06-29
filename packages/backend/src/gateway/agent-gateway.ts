@@ -49,8 +49,11 @@ import { ExecSessionRegistry } from './exec-session-registry.js';
 import { LogChunkTracker } from './log-chunk-tracker.js';
 import { PullProgressTracker } from './pull-progress-tracker.js';
 import { UsersService } from '../users/users.service.js';
-import { OperationOrchestratorService } from '../operations/operation-orchestrator.service.js';
+import { OperationReportUnlockService } from '../operations/operation-report-unlock.service.js';
 import { DataDirReconcilerService } from '../datadirs/data-dir-reconciler.service.js';
+import { ContainerSshRouteService } from '../ssh/container-ssh-route.service.js';
+import { SshProxyGateway } from '../ssh/ssh-proxy-gateway.js';
+import { HttpProxyGateway } from '../http-proxy/http-proxy-gateway.js';
 
 const DIRECT_RPC_KINDS = new Set<string>([
   'execStream',
@@ -74,6 +77,7 @@ export class AgentGateway implements OnModuleInit, OnModuleDestroy {
 
   private readonly logChunkTracker = new LogChunkTracker();
   private readonly pullProgressTracker = new PullProgressTracker();
+  private readonly reportedUnknownXfsNumericIdsByServer = new Map<string, Set<number>>();
 
   // ---------------------------------------------------------------------------
   // Pull progress — delegated to PullProgressTracker; expose the same surface
@@ -98,11 +102,20 @@ export class AgentGateway implements OnModuleInit, OnModuleDestroy {
     @Inject(forwardRef(() => UsersService))
     private usersService: UsersService,
     @Optional()
-    @Inject(forwardRef(() => OperationOrchestratorService))
-    private operationOrchestrator?: OperationOrchestratorService,
+    @Inject(forwardRef(() => OperationReportUnlockService))
+    private operationReportUnlock?: OperationReportUnlockService,
     @Optional()
     @Inject(forwardRef(() => DataDirReconcilerService))
     private dataDirReconciler?: DataDirReconcilerService,
+    @Optional()
+    @Inject(forwardRef(() => ContainerSshRouteService))
+    private sshRoutes?: ContainerSshRouteService,
+    @Optional()
+    @Inject(forwardRef(() => SshProxyGateway))
+    private sshProxyGateway?: SshProxyGateway,
+    @Optional()
+    @Inject(forwardRef(() => HttpProxyGateway))
+    private httpProxyGateway?: HttpProxyGateway,
   ) {}
 
   onModuleInit() {
@@ -236,6 +249,7 @@ export class AgentGateway implements OnModuleInit, OnModuleDestroy {
           }
           this.stateCache.updateDataDirs(server.id, report.dirs);
           await this.dataDirReconciler?.reconcile(server.id);
+          await this.operationReportUnlock?.onDataDirReport(server.id, report.observedAt);
           break;
         }
         case 'pullProgress': {
@@ -348,22 +362,32 @@ export class AgentGateway implements OnModuleInit, OnModuleDestroy {
     for (const c of payload.containers) {
       snap.containers.set(c.spec.runtimeId, c);
     }
+    await this.sshRoutes?.updateFromStateReport(
+      server.id,
+      payload.containers,
+      payload.observedAt,
+      payload.incremental,
+    );
+    this.httpProxyGateway?.scheduleBroadcast('container_state_report');
 
     // Resolve numericUserId → UUID for each xfsProject entry.
     const numericIds = payload.xfsProjects.map((p) => p.numericUserId);
     const uuidMap = await this.usersService.getUserIdsByNumericIds(numericIds);
+    const unknownNumericIds = new Set<number>();
     snap.xfsProjects = payload.xfsProjects
       .map((p) => {
         const userId = uuidMap.get(p.numericUserId);
         if (!userId) {
-          this.logger.warn(`[StateReport] Unknown numericUserId ${p.numericUserId} from server ${server.id} — skipping`);
+          unknownNumericIds.add(p.numericUserId);
           return null;
         }
         return { userId, projectId: p.projectId, usedBytes: p.usedBytes, hardLimitBytes: p.hardLimitBytes };
       })
       .filter((p): p is NonNullable<typeof p> => p !== null);
+    this.warnForNewUnknownXfsNumericIds(server.id, unknownNumericIds);
 
     snap.disks = payload.disks;
+    if (payload.localImages) snap.localImages = payload.localImages;
     // Sync remote FS mount statuses from stateReport (fill in any that weren't sent as individual events)
     if (payload.remoteFsMounts) {
       if (payload.incremental) {
@@ -376,13 +400,32 @@ export class AgentGateway implements OnModuleInit, OnModuleDestroy {
     }
     snap.lastUpdated = Date.now();
     if (payload.incremental) {
-      snap.lastIncrementalReportAt = payload.observedAt ?? snap.lastUpdated;
+      snap.lastIncrementalReportAt = payload.observedAt;
       snap.lastIncrementalReportReceivedAt = snap.lastUpdated;
     } else {
       snap.runtimeReady = true;
-      snap.lastFullReportAt = payload.observedAt ?? snap.lastUpdated;
+      snap.lastFullReportAt = payload.observedAt;
       snap.lastFullReportReceivedAt = snap.lastUpdated;
     }
+    await this.operationReportUnlock?.onStateReport(server.id, payload.observedAt);
+    await this.sshProxyGateway?.broadcastSnapshot();
+  }
+
+  private warnForNewUnknownXfsNumericIds(serverId: string, unknownNumericIds: Set<number>): void {
+    if (unknownNumericIds.size === 0) return;
+    let reported = this.reportedUnknownXfsNumericIdsByServer.get(serverId);
+    if (!reported) {
+      reported = new Set<number>();
+      this.reportedUnknownXfsNumericIdsByServer.set(serverId, reported);
+    }
+    const newIds = [...unknownNumericIds]
+      .filter((id) => !reported.has(id))
+      .sort((a, b) => a - b);
+    if (newIds.length === 0) return;
+    for (const id of newIds) reported.add(id);
+    this.logger.warn(
+      `[StateReport] Unknown XFS numericUserIds from server ${serverId} — skipping new=${newIds.join(',')} reportUnknownCount=${unknownNumericIds.size}`,
+    );
   }
 
   private async onMetricsBatch(payload: MetricsBatchPayload): Promise<void> {
@@ -394,7 +437,7 @@ export class AgentGateway implements OnModuleInit, OnModuleDestroy {
   }
 
   private async onOperationProgress(payload: OperationProgressPayload): Promise<void> {
-    await this.operationOrchestrator?.recordProgress(payload);
+    void payload;
   }
 
   // ---------------------------------------------------------------------------

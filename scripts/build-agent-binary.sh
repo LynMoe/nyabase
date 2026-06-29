@@ -7,6 +7,8 @@
 # On startup the agent extracts it to /var/lib/nyabase-agent/ automatically.
 # The prebuilt static Dropbear binary is supplied under packages/agent/assets/dropbear
 # and embedded the same way; this script does not build or download Dropbear.
+# The SFTP subsystem binary is built from tools/sftp-server as a static musl asset
+# and embedded into the agent for injection into containers.
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -14,6 +16,7 @@ OUT_DIR="$REPO_ROOT/dist"
 BINARY_NAME="nyabase-agent"
 HELPER_NAME="nyabase-mount-helper"
 DROPBEAR_NAME="nyabase-dropbear"
+SFTP_NAME="nyabase-sftp-server"
 DEFAULT_DROPBEAR_SRC="$REPO_ROOT/packages/agent/assets/dropbear/nyabase-dropbear-linux-x64"
 NODE_TARGET="${NODE_TARGET:-node22-linux-x64}"
 AGENT_PACKAGE_JSON="$REPO_ROOT/packages/agent/package.json"
@@ -43,6 +46,15 @@ else
   HELPER_SRC="target/release/$HELPER_NAME"
   echo "Built dynamic binary: $HELPER_SRC"
 fi
+cd "$REPO_ROOT"
+
+echo ""
+echo "=== Building SFTP server (Rust) ==="
+cd "$REPO_ROOT/tools/sftp-server"
+cargo build --release --target x86_64-unknown-linux-musl
+SFTP_SRC="target/x86_64-unknown-linux-musl/release/$SFTP_NAME"
+SFTP_SHA="$(sha256sum "$SFTP_SRC" | awk '{print $1; exit}')"
+echo "Built static SFTP server: tools/sftp-server/$SFTP_SRC"
 cd "$REPO_ROOT"
 
 echo ""
@@ -94,6 +106,11 @@ cp "$DROPBEAR_SRC" "$BUNDLE_DIR/$DROPBEAR_NAME"
 chmod 755 "$BUNDLE_DIR/$DROPBEAR_NAME"
 cp "$DROPBEAR_SHA_SRC" "$BUNDLE_DIR/$DROPBEAR_NAME.sha256"
 
+# Place SFTP server alongside the bundle so pkg can embed it as an asset.
+cp "$REPO_ROOT/tools/sftp-server/$SFTP_SRC" "$BUNDLE_DIR/$SFTP_NAME"
+chmod 755 "$BUNDLE_DIR/$SFTP_NAME"
+printf '%s  %s\n' "$SFTP_SHA" "$SFTP_NAME" > "$BUNDLE_DIR/$SFTP_NAME.sha256"
+
 echo ""
 echo "=== Bundling agent (esbuild → CJS) ==="
 echo "Injecting agent version: $AGENT_VERSION"
@@ -115,7 +132,7 @@ echo "=== Compiling Node.js binary ($NODE_TARGET) ==="
 # Embed native assets via a temporary config file placed next to the bundle
 # entry, so __dirname-relative reads resolve correctly at runtime.
 cat > "$BUNDLE_DIR/pkg.config.json" << EOF
-{"pkg": {"assets": ["$HELPER_NAME", "$DROPBEAR_NAME", "$DROPBEAR_NAME.sha256"]}}
+{"pkg": {"assets": ["$HELPER_NAME", "$DROPBEAR_NAME", "$DROPBEAR_NAME.sha256", "$SFTP_NAME", "$SFTP_NAME.sha256"]}}
 EOF
 ./node_modules/.bin/pkg \
   --targets "$NODE_TARGET" \

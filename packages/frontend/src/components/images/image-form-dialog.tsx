@@ -20,6 +20,7 @@ interface FormState {
   entrypoint: string;
   cmd: string;
   init: boolean;
+  disableSsh: boolean;
   description: string;
 }
 
@@ -30,6 +31,7 @@ const EMPTY_FORM: FormState = {
   entrypoint: '',
   cmd: '',
   init: false,
+  disableSsh: false,
   description: '',
 };
 
@@ -61,6 +63,7 @@ export function ImageFormDialog({ mode, image, open, onOpenChange }: ImageFormDi
         entrypoint: linesFromArgs(image.runtimeOverrides?.entrypoint),
         cmd: linesFromArgs(image.runtimeOverrides?.cmd),
         init: image.runtimeOverrides?.init ?? false,
+        disableSsh: image.disableSsh ?? false,
         description: image.description ?? '',
       });
     } else if (mode === 'create' && open) {
@@ -82,12 +85,14 @@ export function ImageFormDialog({ mode, image, open, onOpenChange }: ImageFormDi
           dockerImage: form.dockerImage,
           runtimeOverrides,
           description: form.description.trim() || undefined,
+          disableSsh: form.disableSsh,
         });
       }
       return api.patch(`/admin/images/${image!.id}`, {
         name: form.name,
         runtimeOverrides,
         description: form.description.trim() || undefined,
+        disableSsh: form.disableSsh,
       });
     },
     onSuccess: () => {
@@ -166,7 +171,7 @@ export function ImageFormDialog({ mode, image, open, onOpenChange }: ImageFormDi
             <div className="space-y-3 rounded-md border border-border p-3">
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 <div className="space-y-1.5">
-                  <Label htmlFor="image-uid">UID override</Label>
+                  <Label htmlFor="image-uid">UID 覆盖</Label>
                   <Input
                     id="image-uid"
                     type="number" min="0"
@@ -182,12 +187,12 @@ export function ImageFormDialog({ mode, image, open, onOpenChange }: ImageFormDi
                     onChange={(e) => setForm((f) => ({ ...f, init: e.target.checked }))}
                     className="h-4 w-4 rounded border-input"
                   />
-                  Init mode
+                  启用 init
                 </label>
               </div>
 
               <div className="space-y-1.5">
-                <Label htmlFor="image-entrypoint">Entrypoint override</Label>
+                <Label htmlFor="image-entrypoint">入口命令覆盖</Label>
                 <textarea
                   id="image-entrypoint"
                   value={form.entrypoint}
@@ -199,7 +204,7 @@ export function ImageFormDialog({ mode, image, open, onOpenChange }: ImageFormDi
               </div>
 
               <div className="space-y-1.5">
-                <Label htmlFor="image-cmd">CMD override</Label>
+                <Label htmlFor="image-cmd">默认命令覆盖</Label>
                 <textarea
                   id="image-cmd"
                   value={form.cmd}
@@ -220,6 +225,19 @@ export function ImageFormDialog({ mode, image, open, onOpenChange }: ImageFormDi
                 placeholder="用于深度学习开发..."
               />
             </div>
+
+            <label className="flex items-center justify-between gap-3 rounded-md border border-border px-3 py-2.5">
+              <span className="min-w-0">
+                <span className="block text-sm font-medium text-foreground">禁用 SSH</span>
+                <span className="block text-xs text-muted-foreground">下次同步或生命周期操作时移除容器 SSH 运行时</span>
+              </span>
+              <input
+                type="checkbox"
+                checked={form.disableSsh}
+                onChange={(e) => setForm((f) => ({ ...f, disableSsh: e.target.checked }))}
+                className="h-4 w-4 shrink-0 accent-primary"
+              />
+            </label>
           </div>
         </div>
 

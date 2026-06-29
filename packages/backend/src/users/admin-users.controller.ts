@@ -6,6 +6,7 @@ import {
   Delete,
   Param,
   Body,
+  Query,
   UseGuards,
   HttpCode,
   ForbiddenException,
@@ -18,6 +19,7 @@ import { CurrentUser } from '../auth/decorators/current-user.decorator.js';
 import { GroupsService } from '../groups/groups.service.js';
 import { UserEntity } from '../entities/user.entity.js';
 import { Capability, zCreateUserRequest, zUpdateUserRequest } from '@nyabase/common';
+import { SshIdentityService } from '../ssh/ssh-identity.service.js';
 
 @Controller('admin/users')
 @UseGuards(JwtAuthGuard, CapabilitiesGuard)
@@ -25,6 +27,7 @@ export class AdminUsersController {
   constructor(
     private usersService: UsersService,
     private groupsService: GroupsService,
+    private sshIdentities: SshIdentityService,
   ) {}
 
   @Get()
@@ -55,6 +58,29 @@ export class AdminUsersController {
   async listSshKeys(@Param('id') id: string) {
     await this.usersService.findById(id);
     return this.usersService.listSshKeys(id);
+  }
+
+  @Get(':id/internal-ssh-key')
+  @RequireCaps(Capability.ManageUsers)
+  async getInternalSshKey(
+    @Param('id') id: string,
+    @Query('includePrivate') includePrivate: string | undefined,
+    @CurrentUser() currentUser: UserEntity,
+  ) {
+    await this.usersService.findById(id);
+    return this.sshIdentities.getUserKeyDto(id, currentUser.id, includePrivate === 'true');
+  }
+
+  @Post(':id/internal-ssh-key/rotate')
+  @RequireCaps(Capability.ManageUsers)
+  async rotateInternalSshKey(
+    @Param('id') id: string,
+    @CurrentUser() currentUser: UserEntity,
+  ) {
+    await this.usersService.findById(id);
+    const rotated = await this.sshIdentities.rotateUserKey(id, currentUser.id);
+    await this.usersService.notifyInternalSshKeyRotated(id);
+    return rotated;
   }
 
   @Patch(':id')

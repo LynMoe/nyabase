@@ -2,7 +2,7 @@ import { Link, useRouterState } from '@tanstack/react-router';
 import React, { type ReactNode } from 'react';
 import {
   LayoutDashboard, Server, Container, Layers, Users, ImageIcon,
-  ScrollText, FolderOpen, LogOut, Shield, UserCircle, Network,
+  ScrollText, FolderOpen, LogOut, Shield, UserCircle, Network, Settings, Cable, Globe,
 } from 'lucide-react';
 import { cn } from '../../lib/utils.js';
 import { useAuthStore } from '../../store/auth.js';
@@ -11,21 +11,25 @@ import { Button } from '../ui/button.js';
 import { Separator } from '../ui/separator.js';
 import { Capability } from '@nyabase/common';
 import { ThemeToggle } from '../theme-toggle.js';
+import { usePublicSettings } from '../../hooks/use-public-settings.js';
 
 const userNavItems = [
   { to: '/', icon: LayoutDashboard, label: '监控大屏' },
   { to: '/containers', icon: Container, label: '容器' },
+  { to: '/http-proxy', icon: Globe, label: 'HTTP 反代' },
   { to: '/data-dirs', icon: FolderOpen, label: '数据目录' },
 ];
 
 const adminNavItems = [
-  { to: '/servers', icon: Server, label: '服务器', cap: Capability.ManageServers },
-  { to: '/images', icon: ImageIcon, label: '镜像', cap: Capability.ManageImages },
-  { to: '/manage/containers', icon: Layers, label: '容器管理', cap: Capability.ManageContainersAny },
-  { to: '/manage/remote-fs', icon: Network, label: '远程文件系统', cap: Capability.ManageServers },
-  { to: '/users', icon: Users, label: '用户', cap: Capability.ManageUsers },
-  { to: '/groups', icon: Shield, label: '用户组', cap: Capability.ManageGroups },
-  { to: '/audit', icon: ScrollText, label: '审计', cap: Capability.ViewAudit },
+  { to: '/servers', icon: Server, label: '服务器', caps: [Capability.ManageServers] },
+  { to: '/images', icon: ImageIcon, label: '镜像', caps: [Capability.ManageImages] },
+  { to: '/manage/containers', icon: Layers, label: '容器管理', caps: [Capability.ManageContainersAny] },
+  { to: '/manage/remote-fs', icon: Network, label: '远程文件系统', caps: [Capability.ManageServers] },
+  { to: '/ssh-proxy', icon: Cable, label: 'SSH 代理', caps: [Capability.ViewMetricsAll, Capability.ManageSystemSettings] },
+  { to: '/users', icon: Users, label: '用户', caps: [Capability.ManageUsers] },
+  { to: '/groups', icon: Shield, label: '用户组', caps: [Capability.ManageGroups] },
+  { to: '/audit', icon: ScrollText, label: '审计', caps: [Capability.ViewAudit] },
+  { to: '/system-settings', icon: Settings, label: '系统设置', caps: [Capability.ManageSystemSettings] },
 ];
 
 type NavItemDef = { to: string; icon: React.ComponentType<{ className?: string }>; label: string };
@@ -51,6 +55,7 @@ function NavItem({ item, pathname }: { item: NavItemDef; pathname: string }) {
 export function AppLayout({ children }: { children: ReactNode }) {
   const { user, clearAuth, refreshToken } = useAuthStore();
   const pathname = useRouterState({ select: (s) => s.location.pathname });
+  const { settings } = usePublicSettings();
 
   const handleLogout = async () => {
     try {
@@ -62,7 +67,7 @@ export function AppLayout({ children }: { children: ReactNode }) {
 
   const userCaps = new Set(user?.capabilities ?? []);
 
-  const visibleAdminNav = adminNavItems.filter((item) => userCaps.has(item.cap));
+  const visibleAdminNav = adminNavItems.filter((item) => item.caps.some((capability) => userCaps.has(capability)));
 
   return (
     <div className="flex h-screen overflow-hidden">
@@ -70,7 +75,7 @@ export function AppLayout({ children }: { children: ReactNode }) {
       <aside className="w-56 border-r bg-card flex flex-col shrink-0">
         {/* Logo */}
         <div className="px-4 h-14 flex items-center">
-          <span className="font-semibold text-lg">nyabase</span>
+          <span className="font-semibold text-lg truncate">{settings.branding.title}</span>
         </div>
 
         <Separator />

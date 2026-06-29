@@ -74,7 +74,6 @@ export const zContainerSpec = z.object({
   gpuIndices: z.array(z.number().int()),
   ip: z.string(),
   serverId: z.string(),
-  sshServerEnabled: z.boolean(),
   dataDirs: z.array(zDataDirMount),
   createdAt: z.string(),
   specVersion: z.string(),
@@ -95,6 +94,8 @@ export const zContainerSshServerState = z.object({
   port: z.literal(22),
   pid: z.number().int().positive().optional(),
   keyHash: z.string().optional(),
+  appliedKeyGeneration: z.number().int().nonnegative().optional(),
+  hostKeyFingerprint: z.string().optional(),
   lastReconciledAt: z.number().optional(),
   lastError: z.string().optional(),
 });
@@ -138,6 +139,22 @@ export const zLocalImageInfo = z.object({
   createdAt: z.number(),
 });
 
+export const zDockerResourceLimitStatus = z.object({
+  enabled: z.boolean(),
+  cgroupParent: z.string().nullable(),
+  hostCpuCores: z.number().int().nonnegative(),
+  reservedCpuCores: z.number().int().nonnegative(),
+  dockerCpuCores: z.number().nullable(),
+  cpuQuotaPercent: z.number().nullable(),
+  hostMemBytes: z.number().int().nonnegative(),
+  reservedMemBytes: z.number().int().nonnegative(),
+  memoryHighBytes: z.number().int().nonnegative().nullable(),
+  memoryMaxBytes: z.number().int().nonnegative().nullable(),
+  sliceUnit: z.string().nullable(),
+  sliceFileInSync: z.boolean(),
+  unconfinedContainerCount: z.number().int().nonnegative().nullable(),
+});
+
 export const zDockerDaemonStatus = z.object({
   serverId: z.string(),
   state: zDockerDaemonState,
@@ -149,6 +166,7 @@ export const zDockerDaemonStatus = z.object({
   socketPath: z.string(),
   serverVersion: z.string().nullable(),
   storageDriver: z.string().nullable(),
+  resourceLimit: zDockerResourceLimitStatus.optional(),
   lastError: z.string().nullable(),
   checkedAt: z.number(),
 });
@@ -246,10 +264,11 @@ export const zDataDiskSpec = z.object({
 export const zStateReportPayload = z.object({
   serverId: z.string(),
   /** Unix ms timestamp captured before the agent starts collecting this report. */
-  observedAt: z.number().int().nonnegative().optional(),
+  observedAt: z.number().int().nonnegative(),
   containers: z.array(zContainerSnapshot),
   xfsProjects: z.array(zXfsProjectUsage),
   disks: z.array(zDiskInfo),
+  localImages: z.array(zLocalImageInfo).optional(),
   remoteFsMounts: z.array(zRemoteFsMountStatus).default([]),
   incremental: z.boolean(),
 });
@@ -277,9 +296,6 @@ export interface AgentCommandEnvelope<K extends AgentCommandKind = AgentCommandK
   operationId: string;
   commandId: string;
   commandKind: K;
-  idempotencyKey: string;
-  resourceKey: string;
-  desiredGeneration: number | null;
   payload: P;
 }
 
@@ -287,9 +303,6 @@ export const zAgentCommandEnvelope = z.object({
   operationId: z.string(),
   commandId: z.string(),
   commandKind: z.nativeEnum(AgentCommandKind),
-  idempotencyKey: z.string(),
-  resourceKey: z.string(),
-  desiredGeneration: z.number().int().nullable(),
   payload: z.unknown(),
 }).superRefine((value, ctx) => {
   if (!Object.prototype.hasOwnProperty.call(value, 'payload')) {
@@ -342,6 +355,8 @@ export const zDataDirEntry = z.object({
 
 export const zDataDirReportPayload = z.object({
   serverId: z.string(),
+  /** Unix ms timestamp captured before the agent starts collecting this report. */
+  observedAt: z.number().int().nonnegative(),
   dirs: z.array(zDataDirEntry),
 });
 
@@ -365,11 +380,7 @@ export const zContainerSetPowerPayload = z.object({
   runtimeId: z.string(),
   action: z.enum(['start', 'stop', 'restart']),
   timeoutSeconds: z.number().int().nonnegative().optional(),
-  /** Desired runtime bind mounts to re-apply after start/restart. */
   mounts: z.array(zContainerMountSpec).default([]),
-  /** Reconcile Dropbear SSH after start/restart when desired. */
-  sshServerEnabled: z.boolean().default(false),
-  sshPublicKeys: z.array(z.string()).default([]),
 });
 
 export const zDeleteContainerPayload = z.object({
@@ -469,8 +480,26 @@ export const zReconcileDockerDaemonPayload = z.object({});
 
 export const zReconcileContainerSshPayload = z.object({
   runtimeId: z.string(),
-  publicKeys: z.array(z.string()),
+  enabled: z.boolean().default(true),
+  internalPublicKey: z.string().optional(),
+  internalKeyGeneration: z.number().int().nonnegative().optional(),
   expectedKeyHash: z.string().optional(),
+}).superRefine((value, ctx) => {
+  if (!value.enabled) return;
+  if (!value.internalPublicKey?.trim()) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['internalPublicKey'],
+      message: 'Internal public key is required when SSH is enabled',
+    });
+  }
+  if (value.internalKeyGeneration === undefined) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['internalKeyGeneration'],
+      message: 'Internal key generation is required when SSH is enabled',
+    });
+  }
 });
 
 export const zSelfCheckItem = z.object({
@@ -502,23 +531,7 @@ export const zCreateContainerPayload = z.object({
   cpuMillis: z.number().int().nonnegative(),
   memBytes: z.number().int().nonnegative(),
   gpuIndices: z.array(z.number().int().nonnegative()).optional(),
-  /** Dirs to create on the host before starting container (local only; remote dirs created via createDataDir) */
-  createDirs: z
-    .array(
-      z.object({
-        sourceKind: z.enum(['local', 'remote']),
-        sourceId: z.string(),
-        dirName: z.string(),
-        createIfMissing: z.boolean(),
-        ownerUid: z.number().int().nonnegative(),
-      }),
-    )
-    .default([]),
-  /** Desired runtime bind mounts to reconcile immediately after container start. */
   mounts: z.array(zContainerMountSpec).default([]),
-  sshServerEnabled: z.boolean().default(false),
-  /** Public keys to install when sshServerEnabled is true. */
-  sshPublicKeys: z.array(z.string()).default([]),
   /** Server network config — used by agent to allocate the container IP */
   ipCidr: z.string(),
   gateway: z.string(),
@@ -539,6 +552,7 @@ export type ContainerStatsSummary = z.infer<typeof zContainerStatsSummary>;
 export type ContainerSnapshot = z.infer<typeof zContainerSnapshot>;
 export type XfsProjectUsage = z.infer<typeof zXfsProjectUsage>;
 export type LocalImageInfo = z.infer<typeof zLocalImageInfo>;
+export type DockerResourceLimitStatus = z.infer<typeof zDockerResourceLimitStatus>;
 export type DataDirEntry = z.infer<typeof zDataDirEntry>;
 export type NfsParams = z.infer<typeof zNfsParams>;
 export type CephFsParams = z.infer<typeof zCephFsParams>;

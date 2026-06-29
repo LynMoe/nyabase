@@ -406,7 +406,7 @@ export class GroupsService {
     this.applyGrantDto(grant, dto);
     await this.serverGrantsRepo.save(grant);
     this.accessResolver.invalidateUser(userId);
-    await this.auditService.log(actorId ?? null, AuditAction.UpsertServerGrant, userId, 'group', { serverId, ...dto });
+    await this.auditService.log(actorId ?? null, AuditAction.UpsertServerGrant, userId, 'user', { serverId, ...dto });
     await this.syncUserQuota(userId, serverId, actorId ?? null);
     return this.serverGrantToDto(grant);
   }
@@ -414,7 +414,7 @@ export class GroupsService {
   async deleteUserServerGrant(userId: string, serverId: string, actorId?: string): Promise<void> {
     await this.serverGrantsRepo.delete({ scope: 'user', scopeId: userId, serverId });
     this.accessResolver.invalidateUser(userId);
-    await this.auditService.log(actorId ?? null, AuditAction.DeleteServerGrant, userId, 'group', { serverId });
+    await this.auditService.log(actorId ?? null, AuditAction.DeleteServerGrant, userId, 'user', { serverId });
     await this.syncUserQuota(userId, serverId, actorId ?? null);
   }
 
@@ -467,6 +467,7 @@ export class GroupsService {
       Capability.ManageContainersAny,
       Capability.ViewAudit,
       Capability.ViewMetricsAll,
+      Capability.ManageSystemSettings,
     ]);
     const users = await this.ensureSystemGroup('Users', 10, []);
     return { admins, operators, users };
@@ -482,6 +483,29 @@ export class GroupsService {
       group = this.groupsRepo.create({ id: uuidv4(), name, priority, isSystem: true, description: null });
       group.capabilities = caps;
       await this.groupsRepo.save(group);
+    } else {
+      const current = new Set(group.capabilities);
+      let changed = false;
+      for (const cap of caps) {
+        if (!current.has(cap)) {
+          current.add(cap);
+          changed = true;
+        }
+      }
+      if (group.priority !== priority) {
+        group.priority = priority;
+        changed = true;
+      }
+      if (!group.isSystem) {
+        group.isSystem = true;
+        changed = true;
+      }
+      if (changed) {
+        group.capabilities = Array.from(current);
+        await this.groupsRepo.save(group);
+        const members = await this.membersRepo.find({ where: { groupId: group.id } });
+        for (const member of members) this.accessResolver.invalidateUser(member.userId);
+      }
     }
     return group;
   }

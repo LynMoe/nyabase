@@ -6,7 +6,6 @@ import {
 import { JwtService } from '@nestjs/jwt';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
-import { ConfigService } from '@nestjs/config';
 import * as argon2 from 'argon2';
 import { v4 as uuidv4 } from 'uuid';
 import { createHash, randomBytes } from 'crypto';
@@ -14,6 +13,7 @@ import { UserEntity } from '../entities/user.entity.js';
 import { RefreshTokenEntity } from '../entities/refresh-token.entity.js';
 import { ApiTokenEntity } from '../entities/api-token.entity.js';
 import { UserStatus } from '@nyabase/common';
+import { NyabaseConfigService } from '../config/nyabase-config.service.js';
 
 export interface JwtPayload {
   sub: string;
@@ -30,7 +30,7 @@ export class AuthService {
     @InjectRepository(ApiTokenEntity)
     private apiTokensRepo: Repository<ApiTokenEntity>,
     private jwtService: JwtService,
-    private config: ConfigService,
+    private config: NyabaseConfigService,
   ) {}
 
   async validateUser(username: string, password: string): Promise<UserEntity> {
@@ -51,7 +51,7 @@ export class AuthService {
 
     const rawRefresh = randomBytes(48).toString('hex');
     const hash = createHash('sha256').update(rawRefresh).digest('hex');
-    const expiresInDays = this.config.get<number>('app.refreshTokenExpiresIn', 7);
+    const expiresInDays = this.config.get<number>('auth.refreshTokenExpiresDays');
     const expiresAt = new Date(Date.now() + expiresInDays * 86400 * 1000);
 
     await this.refreshTokensRepo.save(

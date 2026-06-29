@@ -15,6 +15,7 @@ import {
 } from '@nyabase/common';
 import { Mutex } from 'async-mutex';
 import { SOCKET_PATH } from './daemon-manager.js';
+import { calculateDockerResourceLimitPlan, getHostResourceSnapshot } from './resource-limits.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -125,7 +126,6 @@ export class DockerClient {
     memBytes: number;
     gpuIndices: number[];
     ip: string;
-    sshServerEnabled: boolean;
     containerId: string;
     ownerId: string;
     imageId: string;
@@ -151,6 +151,10 @@ export class DockerClient {
           Capabilities: [['gpu']],
         }]
       : [];
+    const cgroupParent = calculateDockerResourceLimitPlan(
+      this.config.dockerResourceLimit,
+      getHostResourceSnapshot(),
+    ).cgroupParent;
 
     const createOptions: Dockerode.ContainerCreateOptions = {
       name: `nyabase-${params.ownerId.slice(0, 8)}-${params.name}`,
@@ -166,6 +170,7 @@ export class DockerClient {
         MemorySwap: params.memBytes > 0 ? params.memBytes : 0,
         Init: params.runtimeOverrides.init,
         Runtime: params.gpuIndices.length > 0 ? 'nvidia' : undefined,
+        CgroupParent: cgroupParent ?? undefined,
         ...(deviceRequests.length > 0 && { DeviceRequests: deviceRequests }),
         NetworkMode: NYABASE_NETWORK,
       },
@@ -504,7 +509,6 @@ export class DockerClient {
       gpuIndices: [],
       ip: this.ipFromContainerInfo(container),
       serverId,
-      sshServerEnabled: false,
       dataDirs: [],
       createdAt: '',
       specVersion: labels[LABEL.SPEC_GENERATION] ?? '',

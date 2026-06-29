@@ -26,10 +26,10 @@ export default function GroupDetailPage() {
     queryKey: ['group', id], queryFn: () => api.get<GroupDto>(`/admin/groups/${id}`),
   });
 
-  if (!group) return <div className="p-6 text-muted-foreground">加载中...</div>;
+  if (!group) return <div className="px-4 py-4 md:px-6 text-muted-foreground">加载中...</div>;
 
   return (
-    <div className="p-6 space-y-6 w-full">
+    <div className="px-4 py-4 md:px-6 space-y-5 w-full">
       <div className="flex items-center gap-3">
         <Link to="/groups">
           <Button variant="outline" size="icon" className="h-8 w-8">
@@ -37,7 +37,7 @@ export default function GroupDetailPage() {
           </Button>
         </Link>
         <div>
-          <h1 className="text-2xl font-bold text-foreground">{group.name}</h1>
+          <h1 className="text-2xl font-semibold tracking-tight text-foreground">{group.name}</h1>
           <p className="text-sm text-muted-foreground">优先级 {group.priority} · {group.isSystem ? '系统组' : '自定义组'}</p>
         </div>
       </div>
@@ -102,7 +102,7 @@ function GroupMembersTab({ groupId }: { groupId: string }) {
     <div className="space-y-4">
       <div className="space-y-2">
         {members.length === 0 && (
-          <div className="text-sm text-muted-foreground py-6 text-center border border-dashed border-border rounded-xl">暂无成员</div>
+          <div className="text-sm text-muted-foreground py-6 text-center border border-dashed border-border rounded-lg">暂无成员</div>
         )}
         {members.map((m) => (
           <div key={m.userId} className="flex items-center justify-between py-2.5 px-4 rounded-lg border border-border bg-background">
@@ -110,9 +110,9 @@ function GroupMembersTab({ groupId }: { groupId: string }) {
               <span className="font-mono text-sm font-medium text-foreground">{m.username}</span>
               {m.displayName && <span className="text-sm text-muted-foreground ml-2">{m.displayName}</span>}
             </div>
-            <Button size="icon" variant="ghost" className="h-7 w-7 text-red-400 hover:text-red-600"
+            <Button size="icon" variant="ghost" className="h-8 w-8 text-red-400 hover:text-red-600"
               onClick={() => removeMember.mutate(m.userId)}>
-              <Trash2 className="h-3.5 w-3.5" />
+              <Trash2 className="h-4 w-4" />
             </Button>
           </div>
         ))}
@@ -129,9 +129,9 @@ function GroupMembersTab({ groupId }: { groupId: string }) {
               <option key={u.id} value={u.id}>{u.username}{u.displayName ? ` (${u.displayName})` : ''}</option>
             ))}
           </select>
-          <Button size="sm" className="h-8 text-xs shrink-0" disabled={!selectedUserId || addMember.isPending}
+          <Button size="sm" className="shrink-0" disabled={!selectedUserId || addMember.isPending}
             onClick={() => selectedUserId && addMember.mutate(selectedUserId)}>
-            <Plus className="h-3.5 w-3.5 mr-1" />添加
+            <Plus className="h-4 w-4" />添加
           </Button>
         </div>
       )}
@@ -186,7 +186,7 @@ function GroupServerGrantsTab({ groupId }: { groupId: string }) {
         const g = getGrant(s.id);
         if (editingServerId === s.id) {
           return (
-            <div key={s.id} className="border rounded-xl p-4 space-y-3 bg-background">
+            <div key={s.id} className="border rounded-lg p-4 space-y-3 bg-background">
               <div className="font-medium text-sm text-foreground">{s.name}</div>
               <ResourceGrantForm
                 value={form}
@@ -196,19 +196,19 @@ function GroupServerGrantsTab({ groupId }: { groupId: string }) {
                 serverDefaults={{ cpuMillis: s.defaultCpuMillis, memBytes: s.defaultMemBytes, diskBytes: s.defaultDiskBytes }}
               />
               <div className="flex gap-2 justify-end">
-                <Button size="sm" variant="outline" className="h-7 text-xs" onClick={() => setEditingServerId(null)}>取消</Button>
-                <Button size="sm" className="h-7 text-xs" onClick={() => upsert.mutate(s.id)}>保存</Button>
+                <Button size="sm" variant="outline" onClick={() => setEditingServerId(null)}>取消</Button>
+                <Button size="sm" onClick={() => upsert.mutate(s.id)}>保存</Button>
               </div>
             </div>
           );
         }
 
         return (
-          <div key={s.id} className="flex items-center justify-between py-3 px-4 rounded-xl border border-border bg-background">
+          <div key={s.id} className="flex items-center justify-between py-3 px-4 rounded-lg border border-border bg-background">
             <div>
               <span className="font-medium text-foreground">{s.name}</span>
               <span className={`ml-2 text-xs px-1.5 py-0.5 rounded ${s.status === 'online' ? 'bg-green-50 text-green-700' : 'bg-muted text-muted-foreground'}`}>
-                {s.status}
+                {s.status === 'online' ? '在线' : '离线'}
               </span>
               {g ? (
                 <div className="text-xs mt-1 space-x-3">
@@ -232,8 +232,8 @@ function GroupServerGrantsTab({ groupId }: { groupId: string }) {
               )}
             </div>
             <div className="flex gap-1">
-              <Button size="sm" variant="outline" className="h-8 text-xs" onClick={() => startEdit(s.id)}>
-                {g ? '编辑' : <><Plus className="h-3 w-3 mr-1" />授权</>}
+              <Button size="sm" variant="outline" onClick={() => startEdit(s.id)}>
+                {g ? '编辑' : <><Plus className="h-4 w-4" />授权</>}
               </Button>
               {g && (
                 <Button size="icon" variant="ghost" className="h-8 w-8 text-red-400 hover:text-red-600"
@@ -284,7 +284,7 @@ function GroupImageGrantsTab({ groupId }: { groupId: string }) {
       {images.map((img) => {
         const grantedServerIds = getGrantedServers(img.id);
         return (
-          <div key={img.id} className="bg-background rounded-xl border border-border p-4">
+          <div key={img.id} className="bg-background rounded-lg border border-border p-4">
             <div className="flex items-center justify-between mb-3">
               <div>
                 <span className="font-medium text-foreground">{img.name}</span>
@@ -327,14 +327,14 @@ function GroupImageGrantsTab({ groupId }: { groupId: string }) {
               .filter((g) => g.imageId === imageId)
               .map((g) => serverMap.get(g.serverId)?.name ?? g.serverId);
             return (
-              <div key={imageId} className="flex items-center justify-between bg-red-50 border border-red-100 rounded-xl px-4 py-3">
+              <div key={imageId} className="flex items-center justify-between bg-red-50 border border-red-100 rounded-lg px-4 py-3">
                 <div>
                   <span className="text-sm font-mono text-red-700">[已删除] {imageId.slice(0, 8)}…</span>
                   <div className="text-xs text-red-400 mt-0.5">{grantedServers.join('、')}</div>
                 </div>
-                <Button size="sm" variant="ghost" className="h-7 text-xs text-red-500 hover:text-red-700 hover:bg-red-100"
+                <Button size="sm" variant="ghost" className="text-red-500 hover:text-red-700 hover:bg-red-100"
                   onClick={() => syncServers.mutate({ imageId, serverIds: [] })}>
-                  <Trash2 className="h-3.5 w-3.5 mr-1" />移除
+                  <Trash2 className="h-4 w-4" />移除
                 </Button>
               </div>
             );

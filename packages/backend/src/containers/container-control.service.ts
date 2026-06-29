@@ -13,6 +13,7 @@ import {
   ContainerView,
   CreateContainerRequest,
   OperationKind,
+  OperationStatus,
   OperationRefResponse,
   RuntimeDriftKind,
   type ExecSessionRequest,
@@ -29,26 +30,27 @@ import { OperationEntity } from '../entities/operation.entity.js';
 import { ServerEntity } from '../entities/server.entity.js';
 import { UserEntity } from '../entities/user.entity.js';
 import { DataDiskEntity } from '../entities/data-disk.entity.js';
+import { DataDirectoryEntity } from '../entities/data-directory.entity.js';
 import { RemoteFsMountEntity } from '../entities/remote-fs-mount.entity.js';
 import { RemoteFsServerAssignmentEntity } from '../entities/remote-fs-server-assignment.entity.js';
-import { SshPublicKeyEntity } from '../entities/ssh-public-key.entity.js';
 import { ContainerActionPolicyService } from './container-action-policy.service.js';
 import { ContainerOperationService } from './container-operation.service.js';
+import { OperationsService } from '../operations/operations.service.js';
+import { ResourceKeyService } from '../operations/resource-key.service.js';
 import { runSerializedTransaction } from '../database/serialized-transaction.js';
 import { resolveGpuIndices, shouldCountContainerForQuota } from './resource-quota.policy.js';
 import { AgentGateway } from '../gateway/agent-gateway.js';
 import { ExecSessionRegistry } from '../gateway/exec-session-registry.js';
+import { ContainerSshRouteService } from '../ssh/container-ssh-route.service.js';
+import { SshIdentityService } from '../ssh/ssh-identity.service.js';
+import { SshProxySnapshotService } from '../ssh/ssh-proxy-snapshot.service.js';
+import type { ContainerSshRouteEntity } from '../entities/container-ssh-route.entity.js';
 
 type MountInput = NonNullable<CreateContainerRequest['dataDirs']>[number];
 
 type NormalizedMount = MountInput & { id: string };
 
-type RuntimeConfirmationStatus = {
-  status: 'pending' | 'confirmed' | 'expired';
-  view: NonNullable<ContainerView['runtimeConfirmation']> | null;
-};
-
-const RUNTIME_CONFIRMATION_MESSAGE = '上一个操作已完成，正在等待 agent 上报运行态确认';
+type ResolvedMount = NormalizedMount & { hostPath: string };
 
 @Injectable()
 export class ContainerControlService {
@@ -57,6 +59,8 @@ export class ContainerControlService {
     private access: AccessResolverService,
     private actions: ContainerActionPolicyService,
     private operations: ContainerOperationService,
+    private operationsService: OperationsService,
+    private resourceKeys: ResourceKeyService,
     @InjectRepository(ContainerEntity)
     private containersRepo: Repository<ContainerEntity>,
     @InjectRepository(ContainerDesiredSpecEntity)
@@ -75,14 +79,17 @@ export class ContainerControlService {
     private gpuAllocationsRepo: Repository<GpuAllocationEntity>,
     @InjectRepository(DataDiskEntity)
     private dataDisksRepo: Repository<DataDiskEntity>,
+    @InjectRepository(DataDirectoryEntity)
+    private dataDirsRepo: Repository<DataDirectoryEntity>,
     @InjectRepository(RemoteFsMountEntity)
     private remoteFsRepo: Repository<RemoteFsMountEntity>,
     @InjectRepository(RemoteFsServerAssignmentEntity)
     private remoteFsAssignmentsRepo: Repository<RemoteFsServerAssignmentEntity>,
-    @InjectRepository(SshPublicKeyEntity)
-    private sshKeysRepo: Repository<SshPublicKeyEntity>,
     private agentGateway: AgentGateway,
     private execSessionRegistry: ExecSessionRegistry,
+    private sshRoutes: ContainerSshRouteService,
+    private sshIdentities: SshIdentityService,
+    private sshProxySnapshots: SshProxySnapshotService,
   ) {}
 
   async list(userId: string, filters: { serverId?: string } = {}): Promise<ContainerView[]> {
@@ -142,24 +149,13 @@ export class ContainerControlService {
       }
     }
     const normalizedMounts = this.normalizeMounts(request.dataDirs ?? []);
-    const mountSpecs = await this.toAgentMountSpecs(request.serverId, userId, normalizedMounts);
-    const sshKeys = request.sshServerEnabled === true
-      ? await this.sshKeysRepo.find({ where: { userId } })
-      : [];
-    const sshPublicKeys = sshKeys.map((key) => key.keyText);
+    await this.toAgentMountSpecs(request.serverId, userId, normalizedMounts);
     const runtimeOverrides = image.runtimeOverrides ?? {
       uid: image.defaultUid,
       entrypoint: null,
       cmd: null,
       init: false,
     };
-    const createDirs = normalizedMounts.map((dir) => ({
-      sourceKind: dir.sourceKind,
-      sourceId: dir.sourceId,
-      dirName: dir.dirName,
-      createIfMissing: dir.createIfMissing === true,
-      ownerUid: runtimeOverrides.uid,
-    }));
 
     return runSerializedTransaction(this.dataSource, async (manager) => {
       const now = new Date();
@@ -202,7 +198,6 @@ export class ContainerControlService {
         gpuMode: gpuIndices.length > 0 ? 'indices' : 'none',
         gpuIndices,
         mountsJson: normalizedMounts,
-        sshEnabled: request.sshServerEnabled === true,
         powerIntent: ContainerPowerIntent.Running,
       }));
       await manager.save(ContainerLifecycleEntity, manager.create(ContainerLifecycleEntity, {
@@ -210,7 +205,6 @@ export class ContainerControlService {
         phase: ContainerPhase.Provisioning,
         boundRuntimeId: null,
         activeOperationId: null,
-        runtimeConfirmation: null,
         lastTransitionAt: now,
         failureReason: null,
         failureCode: null,
@@ -243,10 +237,6 @@ export class ContainerControlService {
           cpuMillis: requestedCpu,
           memBytes: requestedMem,
           gpuIndices,
-          createDirs,
-          mounts: mountSpecs,
-          sshServerEnabled: request.sshServerEnabled === true,
-          sshPublicKeys,
           ipCidr: server.ipCidr,
           gateway: server.gateway,
           reservedIps: server.reservedIps,
@@ -282,8 +272,11 @@ export class ContainerControlService {
       container,
       desired,
       lifecycle,
-      await this.serverNameMap([container.serverId]),
-      await this.imageNameMap([container.imageId]),
+      await this.serverMap([container.serverId]),
+      await this.imageMap([container.imageId]),
+      await this.userMap([container.ownerId]),
+      (await this.sshRoutes.findByContainerIds([container.id])).get(container.id) ?? null,
+      (await this.omittedServerLoginContainerIds([container])).has(container.id),
     );
     const availability = view.actions[action];
     if (!availability.enabled) {
@@ -293,8 +286,7 @@ export class ContainerControlService {
 
     if (action !== 'delete' || lifecycle.boundRuntimeId) this.assertRuntimeReady(container.serverId);
     if (action === 'updateMounts') return this.updateMounts(container, desired, lifecycle, requestedBy, accessUserId, body);
-    if (action === 'enableSsh') return this.applySsh(container, desired, lifecycle, requestedBy, true, body ?? { action });
-    if (action === 'reconcileSsh') return this.applySsh(container, desired, lifecycle, requestedBy, false, body ?? { action });
+    if (action === 'reconcileSsh') return this.reconcileSsh(container, lifecycle, requestedBy);
     if (action === 'delete' && !lifecycle.boundRuntimeId) {
       return this.operations.completeLocalContainerDelete(container.id, requestedBy);
     }
@@ -314,15 +306,6 @@ export class ContainerControlService {
       force: action === 'delete' ? true : undefined,
       body,
     };
-    if (action === 'start' || action === 'restart') {
-      const desiredMounts = this.normalizedMountsFromDesired(desired);
-      const keys = desired.sshEnabled
-        ? await this.sshKeysRepo.find({ where: { userId: container.ownerId } })
-        : [];
-      actionPayload.mounts = await this.toAgentMountSpecs(container.serverId, container.ownerId, desiredMounts);
-      actionPayload.sshServerEnabled = desired.sshEnabled;
-      actionPayload.sshPublicKeys = keys.map((key) => key.keyText);
-    }
     return this.operations.enqueueExistingContainerAction({
       containerId: container.id,
       requestedBy,
@@ -332,11 +315,6 @@ export class ContainerControlService {
       payload: actionPayload,
       phase,
       powerIntent,
-      beforeSave: async (manager) => {
-        await manager.update(ContainerLifecycleEntity, container.id, {
-          runtimeConfirmation: null,
-        });
-      },
     });
   }
 
@@ -372,8 +350,11 @@ export class ContainerControlService {
       container,
       desired,
       lifecycle,
-      await this.serverNameMap([container.serverId]),
-      await this.imageNameMap([container.imageId]),
+      await this.serverMap([container.serverId]),
+      await this.imageMap([container.imageId]),
+      await this.userMap([container.ownerId]),
+      (await this.sshRoutes.findByContainerIds([container.id])).get(container.id) ?? null,
+      (await this.omittedServerLoginContainerIds([container])).has(container.id),
     );
     if (!view.actions.console.enabled) {
       throw new ForbiddenException(view.actions.console.message ?? view.actions.console.reason ?? 'Console unavailable');
@@ -467,7 +448,7 @@ export class ContainerControlService {
       containerId: container.id,
       requestedBy,
       kind: OperationKind.ContainerUpdateMounts,
-      commandKind: AgentCommandKind.RuntimeContainerMountsApply,
+      commandKind: AgentCommandKind.Noop,
       request: { action: 'updateMounts', mounts },
       payload: {
         containerId: container.id,
@@ -477,9 +458,6 @@ export class ContainerControlService {
       },
       phase: ContainerPhase.Updating,
       beforeSave: async (manager, operationId) => {
-        await manager.update(ContainerLifecycleEntity, container.id, {
-          runtimeConfirmation: null,
-        });
         await manager.update(ContainerDesiredSpecEntity, { containerId: container.id }, {
           mountsJson: mounts,
           generation: () => 'generation + 1',
@@ -490,65 +468,30 @@ export class ContainerControlService {
     });
   }
 
-  private async applySsh(
-    container: ContainerEntity,
-    desired: ContainerDesiredSpecEntity,
-    lifecycle: ContainerLifecycleEntity,
-    userId: string,
-    enable: boolean,
-    request: unknown,
-  ): Promise<OperationRefResponse> {
-    if (!lifecycle.boundRuntimeId) throw new ForbiddenException('Runtime is not bound yet');
-    if (!enable && !desired.sshEnabled) throw new ConflictException('SSH is not enabled for this container');
-    const keys = await this.sshKeysRepo.find({ where: { userId: container.ownerId } });
-    const publicKeys = keys.map((key) => key.keyText);
-    return this.operations.enqueueExistingContainerAction({
-      containerId: container.id,
-      requestedBy: userId,
-      kind: enable ? OperationKind.ContainerEnableSsh : OperationKind.ContainerReconcileSsh,
-      commandKind: AgentCommandKind.RuntimeContainerSshApply,
-      request,
-      payload: {
-        containerId: container.id,
-        runtimeId: lifecycle.boundRuntimeId,
-        publicKeys,
-      },
-      phase: ContainerPhase.Updating,
-      beforeSave: enable
-        ? async (manager) => {
-          await manager.update(ContainerLifecycleEntity, container.id, {
-            runtimeConfirmation: null,
-          });
-          await manager.update(ContainerDesiredSpecEntity, { containerId: container.id }, {
-            sshEnabled: true,
-            updatedAt: new Date(),
-          });
-        }
-        : async (manager) => {
-          await manager.update(ContainerLifecycleEntity, container.id, {
-            runtimeConfirmation: null,
-          });
-        },
-    });
-  }
-
   private async viewsFor(containers: ContainerEntity[]): Promise<ContainerView[]> {
     if (containers.length === 0) return [];
     const ids = containers.map((c) => c.id);
-    const [desiredRows, lifecycleRows, servers, images] = await Promise.all([
+    const [desiredRows, lifecycleRows, servers, images, users, routes] = await Promise.all([
       this.desiredRepo.find({ where: { containerId: In(ids) } }),
       this.lifecycleRepo.find({ where: { containerId: In(ids) } }),
-      this.serverNameMap([...new Set(containers.map((c) => c.serverId))]),
-      this.imageNameMap([...new Set(containers.map((c) => c.imageId))]),
+      this.serverMap([...new Set(containers.map((c) => c.serverId))]),
+      this.imageMap([...new Set(containers.map((c) => c.imageId))]),
+      this.userMap([...new Set(containers.map((c) => c.ownerId))]),
+      this.sshRoutes.findByContainerIds(ids),
     ]);
     const desired = new Map(desiredRows.map((d) => [d.containerId, d]));
     const lifecycle = new Map(lifecycleRows.map((l) => [l.containerId, l]));
-    return Promise.all(containers.filter((c) => !c.deletedAt).map((c) => this.toView(
+    const visible = containers.filter((c) => !c.deletedAt);
+    const omittedLoginIds = await this.omittedServerLoginContainerIds(visible);
+    return Promise.all(visible.map((c) => this.toView(
       c,
       desired.get(c.id) ?? null,
       lifecycle.get(c.id) ?? null,
       servers,
       images,
+      users,
+      routes.get(c.id) ?? null,
+      omittedLoginIds.has(c.id),
     )));
   }
 
@@ -556,12 +499,13 @@ export class ContainerControlService {
     c: ContainerEntity,
     desired: ContainerDesiredSpecEntity | null,
     lifecycle: ContainerLifecycleEntity | null,
-    serverNames: Map<string, string>,
-    imageNames: Map<string, string>,
+    servers: Map<string, ServerEntity>,
+    images: Map<string, ImageEntity>,
+    users: Map<string, UserEntity>,
+    sshRoute: ContainerSshRouteEntity | null,
+    omittedServerLoginAllowed: boolean,
   ): Promise<ContainerView> {
-    const activeOperation = lifecycle?.activeOperationId
-      ? await this.operationsRepo.findOneBy({ id: lifecycle.activeOperationId })
-      : null;
+    const activeOperation = await this.activeOperationForContainer(c.id, lifecycle);
     const phase = lifecycle?.phase ?? ContainerPhase.Failed;
     const runtimeReady = this.agentGateway.stateCache.isRuntimeReady(c.serverId);
     const serverSnap = this.agentGateway.stateCache.get(c.serverId);
@@ -570,18 +514,18 @@ export class ContainerControlService {
     const runtimeStatus = snapshot?.status ?? ContainerStatus.Unknown;
     const runtimeIp = this.nonEmptyString(snapshot?.spec.ip) ?? null;
     const drift = this.runtimeDrift(desired, lifecycle, snapshot, runtimeReady);
-    const runtimeConfirmation = this.runtimeConfirmationStatus(lifecycle, snapshot, serverSnap?.lastFullReportReceivedAt ?? null);
-    this.clearResolvedRuntimeConfirmation(c.id, lifecycle, runtimeConfirmation.status);
+    const server = servers.get(c.serverId);
+    const image = images.get(c.imageId);
+    const owner = users.get(c.ownerId);
     return {
       id: c.id,
       serverId: c.serverId,
-      serverName: serverNames.get(c.serverId) ?? c.serverId,
+      serverName: server?.name ?? c.serverId,
       ownerId: c.ownerId,
-      ownerName: undefined,
+      ownerName: owner?.username,
       name: c.name,
       imageId: c.imageId,
-      imageName: imageNames.get(c.imageId),
-      phase,
+      imageName: image?.name,
       failureCode: lifecycle?.failureCode ?? null,
       failureReason: lifecycle?.failureReason ?? null,
       powerIntent: desired?.powerIntent ?? ContainerPowerIntent.Stopped,
@@ -601,10 +545,17 @@ export class ContainerControlService {
         resourceType: activeOperation.resourceType,
         resourceId: activeOperation.resourceId,
         serverId: activeOperation.serverId,
-        attempts: activeOperation.attempts,
+        requestedBy: activeOperation.requestedBy,
+        resourceKeys: activeOperation.resourceKeysJson,
+        commandId: activeOperation.commandId,
+        commandKind: activeOperation.commandKind,
+        request: activeOperation.requestJson,
+        result: activeOperation.resultJson,
+        hookResults: activeOperation.hookResultsJson,
         lastError: activeOperation.lastError,
         createdAt: activeOperation.createdAt.toISOString(),
         startedAt: activeOperation.startedAt?.toISOString() ?? null,
+        commandCompletedAt: activeOperation.commandCompletedAt?.toISOString() ?? null,
         completedAt: activeOperation.completedAt?.toISOString() ?? null,
       } : null,
       resources: {
@@ -613,111 +564,40 @@ export class ContainerControlService {
         diskBytes: desired?.diskBytes ?? 0,
         gpuIndices: desired?.gpuIndices ?? [],
       },
-      ssh: snapshot?.sshServer ?? { enabled: desired?.sshEnabled ?? false, status: desired?.sshEnabled ? 'unknown' : 'disabled', user: 'root', port: 22 },
+      ssh: this.sshView(c, owner, server, image, snapshot, sshRoute, omittedServerLoginAllowed),
       mounts: this.mountsFromDesired(desired),
-      runtimeConfirmation: runtimeConfirmation.view,
       actions: this.actions.forContainer({
         phase,
         runtimeReady,
         runtimeStatus,
         runtimeDrift: drift,
-        activeOperationId: lifecycle?.activeOperationId ?? null,
-        runtimeConfirmationPending: runtimeConfirmation.status === 'pending',
-        runtimeConfirmationExpired: runtimeConfirmation.status === 'expired',
+        activeOperationId: activeOperation?.id ?? null,
+        sshEnabled: image?.disableSsh !== true,
       }),
     };
   }
 
-  private nonEmptyString(value: unknown): string | null {
-    return typeof value === 'string' && value.trim() !== '' ? value : null;
-  }
-
-  private clearResolvedRuntimeConfirmation(
+  private async activeOperationForContainer(
     containerId: string,
     lifecycle: ContainerLifecycleEntity | null,
-    status: RuntimeConfirmationStatus['status'],
-  ): void {
-    if (!lifecycle?.runtimeConfirmation || status === 'pending') return;
-    void this.lifecycleRepo.update(containerId, { runtimeConfirmation: null }).catch(() => undefined);
-  }
-
-  private runtimeConfirmationStatus(
-    lifecycle: ContainerLifecycleEntity | null,
-    snapshot: ContainerSnapshot | undefined,
-    lastFullReportAt: number | null,
-  ): RuntimeConfirmationStatus {
-    const lock = lifecycle?.runtimeConfirmation;
-    if (!lock) return { status: 'confirmed', view: null };
-
-    if (this.runtimeConfirmationSatisfied(lock, snapshot, lastFullReportAt)) {
-      return { status: 'confirmed', view: null };
-    }
-
-    const deadlineMs = Date.parse(lock.deadlineAt);
-    const now = Date.now();
-    if (Number.isFinite(deadlineMs) && deadlineMs <= now) {
-      return {
-        status: 'expired',
-        view: {
-          status: 'expired',
-          operationId: lock.operationId,
-          kind: lock.kind,
-          deadlineAt: lock.deadlineAt,
-          message: '运行态确认超时，可重试或修复操作',
-        },
-      };
-    }
-
-    return {
-      status: 'pending',
-      view: {
-        status: 'pending',
-        operationId: lock.operationId,
-        kind: lock.kind,
-        deadlineAt: lock.deadlineAt,
-        message: RUNTIME_CONFIRMATION_MESSAGE,
-      },
-    };
-  }
-
-  private runtimeConfirmationSatisfied(
-    lock: NonNullable<ContainerLifecycleEntity['runtimeConfirmation']>,
-    snapshot: ContainerSnapshot | undefined,
-    lastFullReportAt: number | null,
-  ): boolean {
-    const startedAtMs = Date.parse(lock.startedAt);
-    if (!lastFullReportAt || !Number.isFinite(startedAtMs) || lastFullReportAt < startedAtMs) return false;
-
-    switch (lock.kind) {
-      case OperationKind.ContainerCreate:
-        return Boolean(snapshot && (!lock.expectedRuntimeId || snapshot.spec.runtimeId === lock.expectedRuntimeId));
-      case OperationKind.ContainerStart:
-      case OperationKind.ContainerStop:
-      case OperationKind.ContainerRestart:
-        return this.snapshotMatchesPowerIntent(snapshot, lock.expectedPowerIntent);
-      case OperationKind.ContainerUpdateMounts: {
-        const observedGeneration = this.numberOrNull(
-          snapshot?.labels?.['nyabase.specGeneration'] ?? snapshot?.labels?.['nyabase.spec_generation'],
-        );
-        return observedGeneration !== null
-          && typeof lock.expectedGeneration === 'number'
-          && observedGeneration >= lock.expectedGeneration;
+  ): Promise<OperationEntity | null> {
+    if (lifecycle?.activeOperationId) {
+      const operation = await this.operationsRepo.findOneBy({ id: lifecycle.activeOperationId });
+      if (operation && ![
+        OperationStatus.Succeeded,
+        OperationStatus.Failed,
+        OperationStatus.Cancelled,
+      ].includes(operation.status)) {
+        return operation;
       }
-      case OperationKind.ContainerEnableSsh:
-      case OperationKind.ContainerReconcileSsh:
-        return snapshot?.sshServer.enabled === true && snapshot.sshServer.status !== 'disabled';
-      default:
-        return false;
     }
+    return this.operationsService.activeOperationForResource([
+      this.resourceKeys.container(containerId),
+    ]);
   }
 
-  private snapshotMatchesPowerIntent(
-    snapshot: ContainerSnapshot | undefined,
-    intent: ContainerPowerIntent | undefined,
-  ): boolean {
-    if (!snapshot || !intent) return false;
-    if (intent === ContainerPowerIntent.Running) return snapshot.status === ContainerStatus.Running;
-    return snapshot.status === ContainerStatus.Exited || snapshot.status === ContainerStatus.Dead;
+  private nonEmptyString(value: unknown): string | null {
+    return typeof value === 'string' && value.trim() !== '' ? value : null;
   }
 
   private mountsFromDesired(desired: ContainerDesiredSpecEntity | null): ContainerView['mounts'] {
@@ -739,7 +619,6 @@ export class ContainerControlService {
       sourceId: mount.sourceId,
       dirName: mount.dirName,
       containerPath: mount.containerPath,
-      createIfMissing: mount.createIfMissing === true,
     }));
   }
 
@@ -765,7 +644,6 @@ export class ContainerControlService {
         sourceId,
         dirName,
         containerPath,
-        createIfMissing: dir.createIfMissing === true,
       };
     });
   }
@@ -784,20 +662,69 @@ export class ContainerControlService {
     mounts: NormalizedMount[],
   ): Promise<ContainerMountSpec[]> {
     const result: ContainerMountSpec[] = [];
-    for (const mount of mounts) {
+    const resolved = await this.resolveMounts(serverId, userId, mounts);
+    for (const mount of resolved) {
       result.push({
         sourceKind: mount.sourceKind,
         sourceId: mount.sourceId,
         userId,
         dirName: mount.dirName,
-        hostPath: await this.resolveHostPath(serverId, userId, mount),
+        hostPath: mount.hostPath,
         containerPath: mount.containerPath,
       });
     }
     return result;
   }
 
-  private async resolveHostPath(serverId: string, _userId: string, mount: NormalizedMount): Promise<string> {
+  private async reconcileSsh(
+    container: ContainerEntity,
+    lifecycle: ContainerLifecycleEntity,
+    requestedBy: string,
+  ): Promise<OperationRefResponse> {
+    if (!lifecycle.boundRuntimeId) throw new ForbiddenException('Runtime is not bound yet');
+    const internalKey = await this.sshIdentities.getUserInternalPublicKey(container.ownerId);
+    return this.operations.enqueueExistingContainerAction({
+      containerId: container.id,
+      requestedBy,
+      kind: OperationKind.ContainerReconcileSsh,
+      commandKind: AgentCommandKind.RuntimeContainerSshApply,
+      request: { action: 'reconcileSsh' },
+      payload: {
+        containerId: container.id,
+        runtimeId: lifecycle.boundRuntimeId,
+        enabled: true,
+        internalPublicKey: internalKey.publicKey,
+        internalKeyGeneration: internalKey.generation,
+      },
+      phase: ContainerPhase.Updating,
+    });
+  }
+
+  private async resolveMounts(
+    serverId: string,
+    userId: string,
+    mounts: NormalizedMount[],
+  ): Promise<ResolvedMount[]> {
+    const result: ResolvedMount[] = [];
+    for (const mount of mounts) {
+      result.push({
+        ...mount,
+        hostPath: await this.resolveHostPath(serverId, userId, mount),
+      });
+    }
+    return result;
+  }
+
+  private async resolveHostPath(serverId: string, userId: string, mount: NormalizedMount): Promise<string> {
+    const dataDir = await this.dataDirsRepo.findOneBy({
+      sourceKind: mount.sourceKind,
+      sourceId: mount.sourceId,
+      name: mount.dirName,
+      userId,
+      desiredState: 'active',
+    });
+    if (!dataDir) throw new NotFoundException('Data directory not found');
+
     if (mount.sourceKind === 'local') {
       const disk = await this.dataDisksRepo.findOneBy({ id: mount.sourceId, serverId, desiredState: 'active' });
       if (!disk) throw new NotFoundException('Data disk not found');
@@ -838,7 +765,6 @@ export class ContainerControlService {
       userId,
       dirName: mount.dirName,
       containerPath: mount.containerPath,
-      createIfMissing: mount.createIfMissing === true,
     })));
   }
 
@@ -937,6 +863,93 @@ export class ContainerControlService {
     return Number.isSafeInteger(parsed) ? parsed : null;
   }
 
+  private sshView(
+    container: ContainerEntity,
+    owner: UserEntity | undefined,
+    server: ServerEntity | undefined,
+    image: ImageEntity | undefined,
+    snapshot: ContainerSnapshot | undefined,
+    route: ContainerSshRouteEntity | null,
+    omittedServerLoginAllowed: boolean,
+  ): ContainerView['ssh'] {
+    const endpoint = this.sshProxySnapshots.endpoint();
+    const disabledByImage = image?.disableSsh === true;
+    const status = route?.sshStatus ?? snapshot?.sshServer.status ?? (disabledByImage ? 'disabled' : 'unknown');
+    const runningRoute = Boolean(
+      !disabledByImage
+      && route?.macvlanIp
+      && route.runtimeStatus === ContainerStatus.Running
+      && route.sshStatus === 'running',
+    );
+    const username = owner?.username ?? container.ownerId;
+    const explicitLogin = runningRoute && server
+      ? `${username}.${server.slug}.${container.name}`
+      : null;
+    return {
+      enabled: !disabledByImage,
+      ready: runningRoute,
+      status,
+      disabledReason: disabledByImage
+        ? 'image_ssh_disabled'
+        : runningRoute
+        ? undefined
+        : !route
+        ? 'route_missing'
+        : route.runtimeStatus !== ContainerStatus.Running
+        ? 'runtime_not_running'
+        : 'sync_pending',
+      login: {
+        omittedServer: runningRoute && omittedServerLoginAllowed
+          ? `${username}.${container.name}`
+          : null,
+        explicitServer: explicitLogin,
+      },
+      proxyHost: endpoint?.host ?? null,
+      proxyPort: endpoint?.port ?? null,
+      observedAt: route?.observedAt?.toISOString() ?? null,
+      appliedInternalKeyGeneration: route?.appliedInternalKeyGeneration ?? null,
+      hostKeyFingerprint: route?.containerHostKeyFingerprint ?? snapshot?.sshServer.hostKeyFingerprint ?? null,
+      user: 'root',
+      port: 22,
+      lastError: route?.lastError ?? snapshot?.sshServer.lastError,
+    };
+  }
+
+  private async omittedServerLoginContainerIds(containers: ContainerEntity[]): Promise<Set<string>> {
+    const relevant = containers.filter((container) => !container.deletedAt);
+    if (relevant.length === 0) return new Set();
+    const ownerIds = [...new Set(relevant.map((container) => container.ownerId))];
+    const names = [...new Set(relevant.map((container) => container.name))];
+    const candidates = await this.containersRepo.find({
+      where: {
+        ownerId: In(ownerIds),
+        name: In(names),
+      },
+    });
+    const candidateIds = candidates.filter((container) => !container.deletedAt).map((container) => container.id);
+    const [routes, images] = await Promise.all([
+      this.sshRoutes.findByContainerIds(candidateIds),
+      this.imageMap([...new Set(candidates.map((container) => container.imageId))]),
+    ]);
+    const activeByOwnerName = new Map<string, ContainerEntity[]>();
+    for (const candidate of candidates) {
+      if (candidate.deletedAt) continue;
+      const route = routes.get(candidate.id);
+      const image = images.get(candidate.imageId);
+      if (!route || image?.disableSsh === true) continue;
+      if (!route.macvlanIp || route.runtimeStatus !== ContainerStatus.Running || route.sshStatus !== 'running') continue;
+      const key = `${candidate.ownerId}\n${candidate.name.toLowerCase()}`;
+      const list = activeByOwnerName.get(key) ?? [];
+      list.push(candidate);
+      activeByOwnerName.set(key, list);
+    }
+    const result = new Set<string>();
+    for (const list of activeByOwnerName.values()) {
+      if (list.length === 1) result.add(list[0].id);
+    }
+    return result;
+  }
+
   private async assertCanRead(userId: string, c: ContainerEntity): Promise<void> {
     if (c.ownerId === userId) return;
     throw new ForbiddenException();
@@ -946,14 +959,19 @@ export class ContainerControlService {
     await this.assertCanRead(userId, c);
   }
 
-  private async serverNameMap(serverIds: string[]): Promise<Map<string, string>> {
+  private async serverMap(serverIds: string[]): Promise<Map<string, ServerEntity>> {
     const rows = serverIds.length ? await this.serversRepo.find({ where: { id: In(serverIds) } }) : [];
-    return new Map(rows.map((s) => [s.id, s.name]));
+    return new Map(rows.map((s) => [s.id, s]));
   }
 
-  private async imageNameMap(imageIds: string[]): Promise<Map<string, string>> {
+  private async imageMap(imageIds: string[]): Promise<Map<string, ImageEntity>> {
     const rows = imageIds.length ? await this.imagesRepo.find({ where: { id: In(imageIds) } }) : [];
-    return new Map(rows.map((image) => [image.id, image.name]));
+    return new Map(rows.map((image) => [image.id, image]));
+  }
+
+  private async userMap(userIds: string[]): Promise<Map<string, UserEntity>> {
+    const rows = userIds.length ? await this.usersRepo.find({ where: { id: In(userIds) } }) : [];
+    return new Map(rows.map((user) => [user.id, user]));
   }
 
   private operationKind(action: ContainerAction): OperationKind {
@@ -963,7 +981,6 @@ export class ContainerControlService {
       case 'restart': return OperationKind.ContainerRestart;
       case 'delete': return OperationKind.ContainerDelete;
       case 'updateMounts': return OperationKind.ContainerUpdateMounts;
-      case 'enableSsh': return OperationKind.ContainerEnableSsh;
       case 'reconcileSsh': return OperationKind.ContainerReconcileSsh;
       default: return OperationKind.ContainerRestart;
     }
@@ -973,7 +990,6 @@ export class ContainerControlService {
     switch (action) {
       case 'delete': return AgentCommandKind.RuntimeContainerDelete;
       case 'updateMounts': return AgentCommandKind.RuntimeContainerMountsApply;
-      case 'enableSsh':
       case 'reconcileSsh': return AgentCommandKind.RuntimeContainerSshApply;
       default: return AgentCommandKind.RuntimeContainerPower;
     }

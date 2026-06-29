@@ -70,7 +70,7 @@ assert_absent "legacy desired import id removed" 'legacy-' packages/backend/src 
 # Hidden old container chain must be removed, not kept as fallback.
 assert_file_absent "old container read model service removed" packages/backend/src/containers/container-read-model.service.ts
 assert_file_absent "old container mounts command-coupling service removed" packages/backend/src/containers/container-mounts.service.ts
-assert_file_absent "old container ssh sync hook service removed" packages/backend/src/containers/container-ssh-sync.service.ts
+assert_file_present "container ssh sync operation service exists" packages/backend/src/containers/container-ssh-sync.service.ts
 assert_absent "old direct start method removed" 'startContainer(' packages/backend/src/containers packages/backend/src/operations packages/frontend/src test/specs test/scripts
 assert_absent "old direct stop method removed" 'stopContainer(' packages/backend/src/containers packages/backend/src/operations packages/frontend/src test/specs test/scripts
 assert_absent "old direct restart method removed" 'restartContainer(' packages/backend/src/containers packages/backend/src/operations packages/frontend/src test/specs test/scripts
@@ -100,6 +100,24 @@ assert_file_present "container operation service exists" packages/backend/src/co
 assert_file_absent "old runtime observation service removed" packages/backend/src/runtime/runtime-observation.service.ts
 assert_file_present "runtime orphan service exists" packages/backend/src/runtime/runtime-orphan.service.ts
 assert_file_present "frontend operation tracker exists" packages/frontend/src/hooks/use-operation-tracker.ts
+
+# Lightweight operation queue contract: old durable sub-queues are gone.
+assert_file_absent "old agent command outbox entity removed" packages/backend/src/entities/agent-command-outbox.entity.ts
+assert_file_absent "old operation step entity removed" packages/backend/src/entities/operation-step.entity.ts
+assert_file_absent "old reconcile task entity removed" packages/backend/src/entities/reconcile-task.entity.ts
+assert_file_absent "old operation orchestrator removed" packages/backend/src/operations/operation-orchestrator.service.ts
+assert_file_absent "old outbox worker removed" packages/backend/src/operations/agent-command-outbox-worker.service.ts
+assert_file_absent "old reconcile worker removed" packages/backend/src/operations/reconcile-task-worker.service.ts
+assert_file_absent "old lifecycle hook registry removed" packages/backend/src/operations/lifecycle-hook-registry.service.ts
+assert_file_present "operation queue worker exists" packages/backend/src/operations/operation-queue-worker.service.ts
+assert_file_present "operation report unlock exists" packages/backend/src/operations/operation-report-unlock.service.ts
+assert_file_present "command hooks module exists" packages/backend/src/command-hooks/command-hooks.module.ts
+assert_absent "old command status enum removed" 'AgentCommandStatus' packages/common/src packages/backend/src packages/frontend/src packages/agent/src
+assert_absent "old hook status enum removed" 'HookStatus' packages/common/src packages/backend/src packages/frontend/src packages/agent/src
+assert_absent "old hook kind enum removed" 'HookKind' packages/common/src packages/backend/src packages/frontend/src packages/agent/src
+assert_absent "runtime confirmation UI removed" 'runtimeConfirmation' packages/common/src packages/backend/src packages/frontend/src packages/agent/src
+assert_absent "old operation waiting-agent status removed" 'waiting_agent' packages/common/src packages/backend/src packages/frontend/src packages/agent/src
+assert_absent "old operation retrying status removed" 'retrying' packages/common/src packages/backend/src packages/frontend/src packages/agent/src
 
 # No generated common-source artifacts.
 common_artifacts="$(find packages/common/src \( -name '*.js' -o -name '*.js.map' -o -name '*.d.ts' -o -name '*.d.ts.map' \) -print | sort)"

@@ -23,7 +23,7 @@ export function ChartCard({
   title: string; height?: number; children: ReactNode;
 }) {
   return (
-    <div className="bg-card rounded-xl border p-4">
+    <div className="bg-card rounded-lg border p-4">
       <p className="text-xs font-medium text-muted-foreground mb-3">{title}</p>
       <ResponsiveContainer width="100%" height={height}>
         {children as React.ReactElement}

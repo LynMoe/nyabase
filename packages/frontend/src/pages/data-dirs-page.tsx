@@ -105,9 +105,9 @@ export default function DataDirsPage() {
 
   return (
     <div className="px-4 py-4 md:px-6 space-y-5 w-full">
-      <div className="flex items-center justify-between">
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
         <div>
-          <h1 className="text-2xl font-bold text-foreground">数据目录</h1>
+          <h1 className="text-2xl font-semibold tracking-tight text-foreground">数据目录</h1>
           <p className="text-sm text-muted-foreground mt-0.5">{totalDirs} 个目录</p>
         </div>
         <Button variant="ghost" size="icon" className="h-8 w-8 text-muted-foreground"
@@ -122,8 +122,8 @@ export default function DataDirsPage() {
       </div>
 
       {servers.length === 0 ? (
-        <div className="bg-card rounded-xl border border-dashed border-border p-10 text-center text-muted-foreground/70">
-          请先在"服务器"中添加服务器
+        <div className="bg-card rounded-lg border border-dashed border-border p-10 text-center text-muted-foreground/70">
+          暂无可访问的数据目录。请联系管理员为你分配服务器或数据源权限。
         </div>
       ) : (
         <div className="space-y-6">
@@ -169,7 +169,7 @@ export default function DataDirsPage() {
                   <Server className="h-4 w-4 text-muted-foreground shrink-0" />
                   <span className="font-semibold text-foreground/90">{s.name}</span>
                   <span className={`text-xs px-1.5 py-0.5 rounded-full font-medium shrink-0 ${s.status === 'online' ? 'bg-green-50 text-green-700' : 'bg-muted text-muted-foreground/70'}`}>
-                    {s.status}
+                    {s.status === 'online' ? '在线' : '离线'}
                   </span>
                 </div>
 
@@ -189,7 +189,9 @@ export default function DataDirsPage() {
                       );
                     })
                   ) : (
-                    <div className="text-sm text-muted-foreground/70 italic">该服务器暂无可访问的本地数据盘</div>
+                    <div className="text-sm text-muted-foreground/70 italic">
+                      该服务器暂无可用本地数据盘，或当前账号未获得本地数据盘权限
+                    </div>
                   )}
                 </div>
               </div>
@@ -225,7 +227,7 @@ function DirSection({
   const [pendingDelete, setPendingDelete] = useState<string | null>(null);
 
   return (
-    <div className="rounded-xl border border-border bg-card p-3 space-y-2">
+    <div className="rounded-lg border border-border bg-card p-3 space-y-2">
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-2 min-w-0">
           {icon}
@@ -236,8 +238,8 @@ function DirSection({
             )}
           </div>
         </div>
-        <Button size="sm" variant="ghost" className="h-7 text-xs shrink-0" onClick={onNew}>
-          <Plus className="h-3 w-3" />新建
+        <Button size="sm" variant="outline" className="shrink-0" onClick={onNew}>
+          <Plus className="h-4 w-4" />新建
         </Button>
       </div>
       {dirs.length === 0 ? (
@@ -259,9 +261,9 @@ function DirSection({
                     </span>
                   ))}
                 </div>
-                <Button size="icon" variant="ghost" className="h-7 w-7 text-red-400 hover:text-red-500"
+                <Button size="icon" variant="ghost" className="h-8 w-8 text-red-400 hover:text-red-500"
                   onClick={() => setPendingDelete(d.name)}>
-                  <Trash2 className="h-3 w-3" />
+                  <Trash2 className="h-4 w-4" />
                 </Button>
               </div>
             );
@@ -327,7 +329,7 @@ function CreateDirDialog({ sourceKind, serverId, sourceId, open, onOpenChange }:
         <DialogHeader>
           <DialogTitle>新建数据目录</DialogTitle>
           <p className="text-xs text-muted-foreground mt-1">
-            {sourceKind === 'remote' ? '远程 FS 目录 — 不参与配额统计' : '本地 XFS 目录'}
+            {sourceKind === 'remote' ? '远程文件系统目录，不参与配额统计' : '本地 XFS 目录'}
           </p>
         </DialogHeader>
         <div className="space-y-3">

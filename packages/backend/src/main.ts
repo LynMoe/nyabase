@@ -7,24 +7,19 @@ import { join } from 'path';
 import { AppModule } from './app.module.js';
 import { AgentGateway } from './gateway/agent-gateway.js';
 import { ConsoleGateway } from './gateway/console-gateway.js';
+import { SshProxyGateway } from './ssh/ssh-proxy-gateway.js';
+import { HttpProxyGateway } from './http-proxy/http-proxy-gateway.js';
+import { NyabaseConfigService } from './config/nyabase-config.service.js';
 import { SpaFallbackFilter } from './filters/spa-fallback.filter.js';
 import { ZodExceptionFilter } from './filters/zod-exception.filter.js';
 
 async function bootstrap() {
   const logger = new Logger('Bootstrap');
 
-  // Fail fast in production if the default JWT secret is still in use
-  if (
-    process.env.NODE_ENV === 'production' &&
-    (process.env.JWT_SECRET === 'change-me-in-production' || !process.env.JWT_SECRET)
-  ) {
-    logger.error('JWT_SECRET must be set to a strong secret in production. Aborting.');
-    process.exit(1);
-  }
-
   const app = await NestFactory.create<NestExpressApplication>(AppModule, {
     logger: ['error', 'warn', 'log', 'debug'],
   });
+  const config = app.get(NyabaseConfigService);
 
   app.setGlobalPrefix('api');
   app.useGlobalFilters(new ZodExceptionFilter());
@@ -40,8 +35,8 @@ async function bootstrap() {
     }),
   );
 
-  const corsOrigin = process.env.CORS_ORIGIN;
-  if (!corsOrigin && process.env.NODE_ENV === 'production') {
+  const corsOrigin = config.get<string>('server.corsOrigin');
+  if (!corsOrigin && config.get<string>('runtime.nodeEnv') === 'production') {
     logger.warn('CORS_ORIGIN is not set in production. All cross-origin requests will be rejected.');
   }
 
@@ -63,12 +58,14 @@ async function bootstrap() {
     logger.log(`Serving frontend static files from ${publicDir} with SPA fallback`);
   }
 
-  const port = parseInt(process.env.PORT ?? '3001', 10);
+  const port = config.get<number>('server.port');
   const server = await app.listen(port);
 
   const httpServer = server as import('http').Server;
   app.get(AgentGateway).attachToHttpServer(httpServer);
   app.get(ConsoleGateway).attachToHttpServer(httpServer);
+  app.get(SshProxyGateway).attachToHttpServer(httpServer);
+  app.get(HttpProxyGateway).attachToHttpServer(httpServer);
 
   logger.log(`Backend listening on port ${port}`);
 }

@@ -9,14 +9,19 @@ import { AuthModule } from '../auth/auth.module.js';
 import { AccessModule } from '../access/access.module.js';
 import { GroupsModule } from '../groups/groups.module.js';
 import { OperationsModule } from '../operations/operations.module.js';
+import { ContainersModule } from '../containers/containers.module.js';
+import { SshModule } from '../ssh/ssh.module.js';
+import { UserInternalSshKeyEntity } from '../entities/user-internal-ssh-key.entity.js';
 
 @Module({
   imports: [
-    TypeOrmModule.forFeature([UserEntity, SshPublicKeyEntity]),
+    TypeOrmModule.forFeature([UserEntity, SshPublicKeyEntity, UserInternalSshKeyEntity]),
     AuthModule,
     AccessModule,
     GroupsModule,
     forwardRef(() => OperationsModule),
+    forwardRef(() => ContainersModule),
+    forwardRef(() => SshModule),
   ],
   providers: [UsersService],
   controllers: [UsersController, AdminUsersController],

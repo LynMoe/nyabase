@@ -38,10 +38,10 @@ export default function ManageContainersPage() {
     .sort(([, a], [, b]) => a.ownerName.localeCompare(b.ownerName));
 
   return (
-    <div className="p-6 space-y-6 w-full">
-      <div className="flex items-center justify-between">
+    <div className="px-4 py-4 md:px-6 space-y-5 w-full">
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
         <div>
-          <h1 className="text-2xl font-semibold tracking-tight">容器管理</h1>
+          <h1 className="text-2xl font-semibold tracking-tight text-foreground">容器管理</h1>
           <p className="text-muted-foreground text-sm">
             全局共 {containers.length} 个容器，{groups.length} 位用户
           </p>
@@ -61,7 +61,7 @@ export default function ManageContainersPage() {
           </CardContent>
         </Card>
       ) : (
-        <div className="space-y-4">
+        <div className="space-y-5">
           {groups.map(([ownerId, group]) => (
             <div key={ownerId}>
               <div className="flex items-center gap-2 mb-2 px-1">
@@ -76,7 +76,7 @@ export default function ManageContainersPage() {
                       <ContainerRow
                         container={c}
                         onAction={doAction}
-                        linkToDetail={false}
+                        detailTo="/manage/containers/$containerId"
                       />
                       {i < group.items.length - 1 && <Separator />}
                     </div>

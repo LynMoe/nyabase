@@ -162,7 +162,7 @@ export default function DashboardPage() {
   }
 
   return (
-    <div className="p-6 space-y-6 w-full">
+    <div className="px-4 py-4 md:px-6 space-y-5 w-full">
       {/* Toolbar */}
       <div className="flex flex-wrap items-center gap-3">
         <div className="flex items-center gap-2">

@@ -32,3 +32,17 @@ export function RequireCapability({
   if (!canAccess) return <AccessDenied />;
   return <>{children}</>;
 }
+
+export function RequireAnyCapability({
+  capabilities,
+  children,
+}: {
+  capabilities: Capability[];
+  children: ReactNode;
+}) {
+  const user = useAuthStore((state) => state.user);
+  const canAccess = capabilities.some((capability) => user?.capabilities.includes(capability));
+
+  if (!canAccess) return <AccessDenied />;
+  return <>{children}</>;
+}

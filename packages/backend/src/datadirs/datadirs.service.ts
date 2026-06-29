@@ -15,6 +15,7 @@ import { ServersService } from '../servers/servers.service.js';
 import { UsersService } from '../users/users.service.js';
 import { AuditService } from '../audit/audit.service.js';
 import { OperationsService } from '../operations/operations.service.js';
+import { ResourceKeyService } from '../operations/resource-key.service.js';
 import { AgentCommandKind, AuditAction, ContainerStatus, DataDirDto, OperationKind } from '@nyabase/common';
 import { AgentGateway } from '../gateway/agent-gateway.js';
 
@@ -99,6 +100,7 @@ export class DataDirsService {
     private usersService: UsersService,
     private auditService: AuditService,
     private operationsService: OperationsService,
+    private resourceKeys: ResourceKeyService,
     private agentGateway: AgentGateway,
   ) {}
 
@@ -206,6 +208,9 @@ export class DataDirsService {
       resourceId: entity.id,
       requestedBy: actorId,
       payload: createDataDirPayload,
+      resourceKeys: [
+        this.resourceKeys.dataDir({ serverId, sourceKind, sourceId, userId, name }),
+      ],
       request: {
         userId,
         sourceKind,
@@ -215,8 +220,14 @@ export class DataDirsService {
       },
     });
 
-    await this.auditService.log(actorId, AuditAction.CreateDataDir, `${serverId}/${sourceId}/${name}`, 'datadir', {
-      userId, sourceKind, sourceId, name, operationId: dispatched.operationId,
+    await this.auditService.log(actorId, AuditAction.CreateDataDir, entity.id, 'datadir', {
+      userId,
+      serverId,
+      sourceKind,
+      sourceId,
+      name,
+      path: `${serverId}/${sourceId}/${name}`,
+      operationId: dispatched.operationId,
     });
 
     const hostPath = await this.computeHostPath(sourceKind, sourceId, name);
@@ -246,6 +257,9 @@ export class DataDirsService {
       resourceId: row.id,
       requestedBy: actorId,
       payload: deleteDataDirPayload,
+      resourceKeys: [
+        this.resourceKeys.dataDir({ serverId, sourceKind, sourceId, userId, name }),
+      ],
       request: { userId, sourceKind, sourceId, name },
       beforePersist: async (manager, context) => {
         await manager.update(DataDirectoryEntity, row.id, {
@@ -256,8 +270,14 @@ export class DataDirsService {
       },
     });
 
-    await this.auditService.log(actorId, AuditAction.DeleteDataDir, `${serverId}/${sourceId}/${name}`, 'datadir', {
-      userId, sourceKind, sourceId, name, operationId: dispatched.operationId,
+    await this.auditService.log(actorId, AuditAction.DeleteDataDir, row.id, 'datadir', {
+      userId,
+      serverId,
+      sourceKind,
+      sourceId,
+      name,
+      path: `${serverId}/${sourceId}/${name}`,
+      operationId: dispatched.operationId,
     });
     return {
       ok: true,

@@ -16,6 +16,7 @@ export const zGpuGrantMode = z.nativeEnum(GpuGrantMode);
 const IPV4_CIDR_RE = /^\d{1,3}(\.\d{1,3}){3}\/\d{1,2}$/;
 const USERNAME_RE = /^[a-z0-9_-]+$/;
 const RESOURCE_NAME_RE = /^[a-z0-9][a-z0-9_-]*$/;
+const SERVER_SLUG_RE = /^[a-z0-9][a-z0-9_-]*$/;
 
 // ---------------------------------------------------------------------------
 // Auth
@@ -72,6 +73,7 @@ export const zAddSshKeyRequest = z.object({
 
 export const zCreateServerRequest = z.object({
   name: z.string().min(1).max(128),
+  slug: z.string().min(1).max(64).regex(SERVER_SLUG_RE),
   parentIface: z.string().min(1),
   ipCidr: z.string().regex(IPV4_CIDR_RE),
   gateway: z.string().ip({ version: 'v4' }),
@@ -86,6 +88,7 @@ export const zCreateServerRequest = z.object({
 
 export const zUpdateServerRequest = z.object({
   name: z.string().min(1).max(128).optional(),
+  slug: z.string().min(1).max(64).regex(SERVER_SLUG_RE).optional(),
   parentIface: z.string().min(1).optional(),
   ipCidr: z.string().regex(IPV4_CIDR_RE).optional(),
   gateway: z.string().ip({ version: 'v4' }).optional(),
@@ -132,6 +135,7 @@ export const zCreateImageRequest = z.object({
   runtimeOverrides: zImageRuntimeOverrides.optional(),
   defaultUid: z.number().int().nonnegative().optional(),
   description: z.string().optional(),
+  disableSsh: z.boolean().optional(),
 }).transform((value) => ({
   ...value,
   runtimeOverrides: value.runtimeOverrides ?? {
@@ -149,6 +153,7 @@ export const zUpdateImageRequest = z.object({
   defaultUid: z.number().int().nonnegative().optional(),
   description: z.string().optional().nullable(),
   isActive: z.boolean().optional(),
+  disableSsh: z.boolean().optional(),
 });
 
 export const zPullImageRequest = z.object({
@@ -170,12 +175,10 @@ export const zCreateContainerRequest = z.object({
         sourceId: z.string(),
         dirName: z.string().min(1).max(64),
         containerPath: z.string().startsWith('/'),
-        createIfMissing: z.boolean().optional(),
       }),
     )
     .optional(),
-  sshServerEnabled: z.boolean().optional(),
-});
+}).strict();
 
 export const zExecSessionRequest = z.object({
   shell: z.string().optional(),
@@ -235,6 +238,14 @@ export const zSyncImageGrantServersRequest = z.object({
 });
 
 // ---------------------------------------------------------------------------
+// System settings
+// ---------------------------------------------------------------------------
+
+export const zPatchSystemSettingsRequest = z.object({
+  values: z.record(z.unknown()),
+}).strict();
+
+// ---------------------------------------------------------------------------
 // Inferred request types
 // ---------------------------------------------------------------------------
 
@@ -262,3 +273,4 @@ export type UpsertServerGrantRequest = z.infer<typeof zUpsertServerGrantRequest>
 export type AddGroupMemberRequest = z.infer<typeof zAddGroupMemberRequest>;
 export type AddImageGrantRequest = z.infer<typeof zAddImageGrantRequest>;
 export type SyncImageGrantServersRequest = z.infer<typeof zSyncImageGrantServersRequest>;
+export type PatchSystemSettingsRequest = z.infer<typeof zPatchSystemSettingsRequest>;

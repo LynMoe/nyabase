@@ -4,22 +4,21 @@ import { DataSource, EntityManager, Repository } from 'typeorm';
 import { v4 as uuidv4 } from 'uuid';
 import {
   AgentCommandKind,
-  AgentCommandStatus,
   ContainerPhase,
   ContainerPowerIntent,
   OperationKind,
   OperationRefResponse,
   OperationStatus,
 } from '@nyabase/common';
-import { AgentCommandOutboxEntity } from '../entities/agent-command-outbox.entity.js';
 import { ContainerMountEntity } from '../entities/container-mount.entity.js';
 import { ContainerDesiredSpecEntity } from '../entities/container-desired-spec.entity.js';
 import { ContainerEntity } from '../entities/container.entity.js';
 import { ContainerLifecycleEntity } from '../entities/container-lifecycle.entity.js';
 import { GpuAllocationEntity } from '../entities/gpu-allocation.entity.js';
 import { OperationEntity } from '../entities/operation.entity.js';
-import { OperationStepEntity } from '../entities/operation-step.entity.js';
 import { runSerializedTransaction } from '../database/serialized-transaction.js';
+import { OperationsService } from '../operations/operations.service.js';
+import { ResourceKeyService } from '../operations/resource-key.service.js';
 
 export interface ContainerOperationRequest {
   containerId: string;
@@ -38,6 +37,8 @@ export interface ContainerOperationRequest {
 export class ContainerOperationService {
   constructor(
     private dataSource: DataSource,
+    private operations: OperationsService,
+    private resourceKeys: ResourceKeyService,
     @InjectRepository(OperationEntity)
     private operationsRepo: Repository<OperationEntity>,
   ) {}
@@ -46,81 +47,38 @@ export class ContainerOperationService {
     manager: EntityManager,
     input: ContainerOperationRequest,
   ): Promise<OperationRefResponse> {
-    const now = new Date();
-    const operationId = uuidv4();
-    const stepId = uuidv4();
-    const commandId = uuidv4();
-    if (input.beforeSave) {
-      await input.beforeSave(manager, operationId, commandId);
-    }
-    const operation = manager.create(OperationEntity, {
-      id: operationId,
-      idempotencyKey: `${input.kind}:${input.containerId}:${operationId}`,
+    const ref = await this.operations.enqueueCommandInTransaction(manager, {
       kind: input.kind,
+      commandKind: input.commandKind,
+      serverId: input.serverId,
       resourceType: 'container',
       resourceId: input.containerId,
-      serverId: input.serverId,
       requestedBy: input.requestedBy,
-      status: OperationStatus.Queued,
       request: input.request,
-      result: null,
-      lastError: null,
-      attempts: 0,
-      startedAt: null,
-      completedAt: null,
-    });
-    const step = manager.create(OperationStepEntity, {
-      id: stepId,
-      operationId,
-      stepKey: 'dispatch-runtime-command',
-      sequence: 1,
-      hook: null,
-      status: 'pending' as OperationStepEntity['status'],
-      desiredGeneration: null,
-      commandId,
-      attempts: 0,
-      lastError: null,
-      result: null,
-      startedAt: null,
-      completedAt: null,
-    });
-    const command = manager.create(AgentCommandOutboxEntity, {
-      id: commandId,
-      operationId,
-      operationStepId: stepId,
-      serverId: input.serverId,
-      resourceKey: `container:${input.containerId}`,
-      commandKind: input.commandKind,
-      idempotencyKey: `${input.commandKind}:${input.containerId}:${operationId}`,
-      desiredGeneration: null,
       payload: input.payload,
-      status: AgentCommandStatus.Pending,
-      attempts: 0,
-      lastError: null,
-      nextAttemptAt: now,
-      leaseHolderId: null,
-      leaseExpiresAt: null,
-      sentAt: null,
-      completedAt: null,
+      baseResourceKeys: [this.resourceKeys.container(input.containerId)],
+      unlockReportKind: 'state',
+      beforeCommit: async (operationManager, context) => {
+        if (input.beforeSave) {
+          await input.beforeSave(operationManager, context.operationId, context.commandId);
+        }
+        const now = new Date();
+        await operationManager.update(ContainerLifecycleEntity, input.containerId, {
+          phase: input.phase,
+          activeOperationId: context.operationId,
+          lastTransitionAt: now,
+          failureReason: null,
+          failureCode: null,
+        });
+        if (input.powerIntent) {
+          await operationManager.update(ContainerDesiredSpecEntity, { containerId: input.containerId }, {
+            powerIntent: input.powerIntent,
+            updatedAt: now,
+          });
+        }
+      },
     });
-
-    await manager.save(OperationEntity, operation);
-    await manager.save(OperationStepEntity, step);
-    await manager.save(AgentCommandOutboxEntity, command);
-    await manager.update(ContainerLifecycleEntity, input.containerId, {
-      phase: input.phase,
-      activeOperationId: operationId,
-      lastTransitionAt: now,
-      failureReason: null,
-      failureCode: null,
-    });
-    if (input.powerIntent) {
-      await manager.update(ContainerDesiredSpecEntity, { containerId: input.containerId }, {
-        powerIntent: input.powerIntent,
-        updatedAt: now,
-      });
-    }
-    return { ok: true, operationId, status: OperationStatus.Queued };
+    return { ok: true, operationId: ref.operationId, status: ref.status };
   }
 
   async enqueueExistingContainerAction(
@@ -136,27 +94,33 @@ export class ContainerOperationService {
     return runSerializedTransaction(this.dataSource, async (manager) => {
       const now = new Date();
       const operationId = uuidv4();
+      const commandId = uuidv4();
       const container = await manager.findOneByOrFail(ContainerEntity, { id: containerId });
       await manager.save(OperationEntity, manager.create(OperationEntity, {
         id: operationId,
-        idempotencyKey: `${OperationKind.ContainerDelete}:local:${containerId}:${operationId}`,
         kind: OperationKind.ContainerDelete,
         resourceType: 'container',
         resourceId: containerId,
         serverId: container.serverId,
         requestedBy,
+        commandId,
+        commandKind: AgentCommandKind.RuntimeContainerDelete,
+        resourceKeysJson: [this.resourceKeys.container(containerId)],
+        unlockReportKind: null,
         status: OperationStatus.Succeeded,
-        request: { action: 'delete', localOnly: true },
-        result: { localOnly: true },
+        requestJson: { action: 'delete', localOnly: true },
+        payloadJson: null,
+        hookPlanJson: [],
+        hookResultsJson: [],
+        resultJson: { localOnly: true },
         lastError: null,
-        attempts: 0,
         startedAt: now,
+        commandCompletedAt: now,
         completedAt: now,
       }));
       await manager.update(ContainerLifecycleEntity, containerId, {
         phase: ContainerPhase.Deleted,
         activeOperationId: null,
-        runtimeConfirmation: null,
         lastTransitionAt: now,
         failureReason: null,
         failureCode: null,

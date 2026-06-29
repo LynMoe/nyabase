@@ -15,3 +15,11 @@ macvlanCidr: 192.168.100.0/24
 macvlanGateway: 192.168.100.1
 metricsIntervalMs: 10000
 isGpuServer: true
+
+# Optional host-level guardrail for the nyabase-managed Docker daemon.
+# When enabled, Docker containers are placed under a systemd slice that:
+# - does not limit CPU on hosts with fewer than 12 logical cores;
+# - reserves floor(cpuCores / 12) logical cores on larger hosts;
+# - reserves min(10% host memory, 64GiB) for the host.
+dockerResourceLimit:
+  enabled: false

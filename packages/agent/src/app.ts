@@ -157,19 +157,7 @@ export class AgentApplication {
 
   private async sendHello(): Promise<void> {
     const [gpus, diskInfos] = [await this.gpuMonitor.getGpuInfo(), this.dataDirs.getLocalDiskInfos()];
-
-    let localImages: LocalImageInfo[] = [];
-    try {
-      const imgs = await this.docker.docker.listImages({ all: false });
-      localImages = imgs.map((img) => ({
-        id: img.Id,
-        repoTags: img.RepoTags ?? [],
-        size: img.Size,
-        createdAt: img.Created,
-      }));
-    } catch (e) {
-      console.warn('[Agent] Failed to list images:', e);
-    }
+    const localImages = await this.listLocalImages();
 
     this.wsClient.send({
       id: uuidv4(), ts: Date.now(), kind: 'hello',
@@ -191,6 +179,21 @@ export class AgentApplication {
         dockerSocket: SOCKET_PATH,
       },
     } as AgentToBackendMessage & { payload: { mountHelperMissing?: boolean } });
+  }
+
+  private async listLocalImages(): Promise<LocalImageInfo[]> {
+    try {
+      const imgs = await this.docker.docker.listImages({ all: false });
+      return imgs.map((img) => ({
+        id: img.Id,
+        repoTags: img.RepoTags ?? [],
+        size: img.Size,
+        createdAt: img.Created,
+      }));
+    } catch (e) {
+      console.warn('[Agent] Failed to list images:', e);
+      return [];
+    }
   }
 
   async sendDockerDaemonStatus(): Promise<void> {
@@ -236,16 +239,17 @@ export class AgentApplication {
         const stats = statsMap.get(c.Id) ?? null;
         const sshServer = await this.dropbearManager.inspectContainerSshState(
           c.Id,
-          spec.sshServerEnabled,
+          false,
           status,
         );
         snapshots.push({ spec, status, stats, sshServer, labels: c.Labels });
       }
 
-      const [xfsProjects, diskInfos, remoteFsMountStatuses] = await Promise.all([
+      const [xfsProjects, diskInfos, remoteFsMountStatuses, localImages] = await Promise.all([
         this.quota.getAllUsages(),
         Promise.resolve(this.dataDirs.getLocalDiskInfos()),
         Promise.resolve(this.remoteFsMounter.getAllStatuses()),
+        this.listLocalImages(),
       ]);
 
       this.wsClient.send({
@@ -258,6 +262,7 @@ export class AgentApplication {
             numericUserId, projectId, usedBytes, hardLimitBytes,
           })),
           disks: diskInfos,
+          localImages,
           remoteFsMounts: remoteFsMountStatuses,
           incremental: false,
         },
@@ -270,10 +275,11 @@ export class AgentApplication {
   private async sendDataDirReport(): Promise<void> {
     if (!this.wsClient.connected) return;
     try {
+      const observedAt = Date.now();
       const dirs = await this.dataDirs.listAllDirs();
       this.wsClient.send({
         id: uuidv4(), ts: Date.now(), kind: 'dataDirReport',
-        payload: { serverId: this.config.serverId, dirs },
+        payload: { serverId: this.config.serverId, observedAt, dirs },
       } as AgentToBackendMessage);
     } catch (e) {
       console.warn('[Agent] Failed to send dataDirReport:', e);

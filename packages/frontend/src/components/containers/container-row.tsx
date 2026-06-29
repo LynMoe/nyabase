@@ -1,6 +1,6 @@
 import { Link } from '@tanstack/react-router';
 import { AlertTriangle, Loader2, Play, Square, RotateCw, Trash2, Terminal } from 'lucide-react';
-import { ContainerPhase, ContainerStatus } from '@nyabase/common';
+import { ContainerStatus, OperationStatus } from '@nyabase/common';
 import type { ContainerAction, ContainerView } from '@nyabase/common';
 import { Badge } from '../ui/badge.js';
 import { Button } from '../ui/button.js';
@@ -17,16 +17,6 @@ export const STATUS_VARIANT: Record<string, 'success' | 'destructive' | 'warning
   [ContainerStatus.Unknown]: 'outline',
 };
 
-const PHASE_LABEL: Record<ContainerPhase, string> = {
-  [ContainerPhase.Provisioning]: '初始化',
-  [ContainerPhase.Active]: '就绪',
-  [ContainerPhase.Updating]: '更新中',
-  [ContainerPhase.Deleting]: '删除中',
-  [ContainerPhase.Deleted]: '已删除',
-  [ContainerPhase.Failed]: '失败',
-  [ContainerPhase.Orphaned]: '孤儿运行态',
-};
-
 function actionTitle(c: ContainerView, action: ContainerAction): string | undefined {
   const availability = c.actions[action];
   return availability.enabled ? undefined : availability.message ?? availability.reason;
@@ -36,30 +26,28 @@ export function ContainerRow({
   container: c,
   onAction,
   linkToDetail = true,
+  detailTo = '/containers/$containerId',
 }: {
   container: ContainerView;
   onAction: (action: ContainerAction, containerId: string, name: string) => void;
   linkToDetail?: boolean;
+  detailTo?: '/containers/$containerId' | '/manage/containers/$containerId';
 }) {
   const running = c.runtime.status === ContainerStatus.Running;
   const showRuntimeStatus = c.runtime.bound && c.runtime.status !== ContainerStatus.Unknown;
-  const confirmation = c.runtimeConfirmation;
-  const statusLabel = confirmation?.status === 'pending'
-    ? '确认中'
-    : confirmation?.status === 'expired'
-    ? '确认超时'
+  const activeOperation = c.activeOperation;
+  const statusLabel = activeOperation?.status === OperationStatus.WaitingReport
+    ? '等待上报'
+    : activeOperation
+    ? '操作中'
     : showRuntimeStatus
     ? (c.runtime.status ?? ContainerStatus.Unknown)
-    : PHASE_LABEL[c.phase];
-  const statusVariant = confirmation
+    : '未绑定';
+  const statusVariant = activeOperation
     ? 'warning'
     : showRuntimeStatus
     ? STATUS_VARIANT[String(c.runtime.status)] ?? 'outline'
-    : c.phase === ContainerPhase.Active
-    ? 'success'
-    : c.phase === ContainerPhase.Failed
-    ? 'destructive'
-    : 'warning';
+    : 'outline';
   const detailItems = [
     c.runtime.ip ? { key: 'ip', value: c.runtime.ip, className: 'font-mono' } : null,
     { key: 'cpu', value: formatCpu(c.resources.cpuMillis) },
@@ -76,7 +64,7 @@ export function ContainerRow({
         <div className="flex items-center gap-2 flex-wrap">
           {linkToDetail ? (
             <Link
-              to="/containers/$containerId"
+              to={detailTo}
               params={{ containerId: c.id }}
               search={{ tab: 'overview' }}
               className="font-medium text-sm hover:underline"
@@ -86,8 +74,8 @@ export function ContainerRow({
           ) : (
             <span className="font-medium text-sm">{c.name}</span>
           )}
-          <Badge variant={statusVariant} title={confirmation?.message}>
-            {confirmation?.status === 'pending' && <Loader2 className="mr-1 h-3 w-3 animate-spin" />}
+          <Badge variant={statusVariant} title={activeOperation?.status === OperationStatus.WaitingReport ? '命令已完成，等待 agent 上报确认' : activeOperation?.kind}>
+            {activeOperation && <Loader2 className="mr-1 h-3 w-3 animate-spin" />}
             {statusLabel}
           </Badge>
           {failureInfo && (
@@ -154,7 +142,7 @@ export function ContainerRow({
         </Button>
         {c.actions.console.enabled && linkToDetail ? (
           <Button size="icon" variant="ghost" className="h-8 w-8" asChild>
-            <Link to="/containers/$containerId" params={{ containerId: c.id }} search={{ tab: 'console' }}>
+            <Link to={detailTo} params={{ containerId: c.id }} search={{ tab: 'console' }}>
               <Terminal className="h-3.5 w-3.5" />
             </Link>
           </Button>

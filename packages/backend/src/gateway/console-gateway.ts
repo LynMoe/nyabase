@@ -1,11 +1,11 @@
 import { Injectable, Logger } from '@nestjs/common';
-import { ConfigService } from '@nestjs/config';
 import * as http from 'http';
 import { WebSocketServer, WebSocket } from 'ws';
 import { JwtService } from '@nestjs/jwt';
 import type { JwtPayload } from '../auth/auth.service.js';
 import { AgentGateway } from './agent-gateway.js';
 import { ExecSessionRegistry } from './exec-session-registry.js';
+import { NyabaseConfigService } from '../config/nyabase-config.service.js';
 
 type BrowserMessage =
   | { type: 'auth'; token: string }
@@ -20,7 +20,7 @@ export class ConsoleGateway {
     private readonly agentGateway: AgentGateway,
     private readonly sessionRegistry: ExecSessionRegistry,
     private readonly jwtService: JwtService,
-    private readonly config: ConfigService,
+    private readonly config: NyabaseConfigService,
   ) {}
 
   attachToHttpServer(server: http.Server): void {
@@ -86,7 +86,7 @@ export class ConsoleGateway {
         let jwtPayload: JwtPayload;
         try {
           jwtPayload = this.jwtService.verify<JwtPayload>(msg.token, {
-            secret: this.config.get<string>('app.jwtSecret'),
+            secret: this.config.get<string>('auth.jwtSecret'),
           });
         } catch {
           abortAgentSession('invalid token');

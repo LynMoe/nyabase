@@ -35,7 +35,13 @@ function decodeBase64(data: string): string {
   }
 }
 
-export function ContainerConsole({ container }: { container: ContainerView }) {
+export function ContainerConsole({
+  container,
+  apiBasePath = '/v2/containers',
+}: {
+  container: ContainerView;
+  apiBasePath?: string;
+}) {
   const mountRef = useRef<HTMLDivElement | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
   const disposablesRef = useRef<IDisposable[]>([]);
@@ -108,7 +114,7 @@ export function ContainerConsole({ container }: { container: ContainerView }) {
 
         const cols = Math.max(1, terminal.cols || 100);
         const rows = Math.max(1, terminal.rows || 30);
-        const session = await api.post<ExecSessionResponse>(`/v2/containers/${container.id}/exec-sessions`, {
+        const session = await api.post<ExecSessionResponse>(`${apiBasePath}/${container.id}/exec-sessions`, {
           tty: true,
           cols,
           rows,
@@ -183,7 +189,7 @@ export function ContainerConsole({ container }: { container: ContainerView }) {
       cancelled = true;
       cleanup();
     };
-  }, [cleanup, container.actions.console, container.id, nonce, token]);
+  }, [apiBasePath, cleanup, container.actions.console, container.id, nonce, token]);
 
   const statusLabel: Record<ConsoleStatus, string> = {
     idle: '未连接',
@@ -194,7 +200,7 @@ export function ContainerConsole({ container }: { container: ContainerView }) {
   };
 
   return (
-    <div className="rounded-xl border bg-card overflow-hidden">
+    <div className="rounded-lg border bg-card overflow-hidden">
       <div className="flex items-center justify-between gap-3 border-b px-4 py-3">
         <div className="flex items-center gap-2 min-w-0">
           <TerminalIcon className="h-4 w-4 text-muted-foreground shrink-0" />
@@ -203,8 +209,8 @@ export function ContainerConsole({ container }: { container: ContainerView }) {
           <span className="text-xs text-muted-foreground">容器 IP</span>
           <span className="font-mono text-xs text-foreground">{ip}</span>
         </div>
-        <Button size="sm" variant="outline" className="h-7 text-xs" onClick={() => setNonce((v) => v + 1)} disabled={status === 'connecting'}>
-          {status === 'connecting' ? <Loader2 className="h-3 w-3 animate-spin" /> : <RotateCw className="h-3 w-3" />}
+        <Button size="sm" variant="outline" onClick={() => setNonce((v) => v + 1)} disabled={status === 'connecting'}>
+          {status === 'connecting' ? <Loader2 className="h-4 w-4 animate-spin" /> : <RotateCw className="h-4 w-4" />}
           重连
         </Button>
       </div>

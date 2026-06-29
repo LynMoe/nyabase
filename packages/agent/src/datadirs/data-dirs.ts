@@ -9,6 +9,7 @@ const execFileAsync = promisify(execFile);
 const DOCKER_ROOT_RESERVED_DIRS = new Set([
   'buildkit',
   'containers',
+  'engine-id',
   'image',
   'network',
   'overlay2',

@@ -17,7 +17,7 @@ export function ServerStatusRow({ status: s, onPull, pulling }: ServerStatusRowP
   const isPullingThis = !!s.pulling;
 
   return (
-    <div className="flex items-center gap-3 py-2">
+    <div className="flex items-center gap-3 px-3 py-2.5">
       <div className="w-5 flex justify-center shrink-0">
         {!s.online ? (
           <Circle className="h-4 w-4 text-muted-foreground/40" />
@@ -36,7 +36,7 @@ export function ServerStatusRow({ status: s, onPull, pulling }: ServerStatusRowP
         <div className="flex items-center gap-2">
           <span className="text-sm font-medium truncate">{s.serverName || s.hostname}</span>
           <Badge variant={s.online ? 'secondary' : 'outline'} className="text-xs shrink-0">
-            {s.online ? 'online' : 'offline'}
+            {s.online ? '在线' : '离线'}
           </Badge>
         </div>
 
@@ -57,7 +57,7 @@ export function ServerStatusRow({ status: s, onPull, pulling }: ServerStatusRowP
 
       <div className="shrink-0 w-20 text-right">
         {isPullingThis ? (
-          <span className="text-xs text-blue-500 font-medium">pulling...</span>
+          <span className="text-xs text-blue-500 font-medium">Pull 中</span>
         ) : s.present ? (
           <span className="text-xs text-green-600 font-medium">已就绪</span>
         ) : s.error ? (
@@ -71,17 +71,17 @@ export function ServerStatusRow({ status: s, onPull, pulling }: ServerStatusRowP
 
       {s.online && !s.present && !isPullingThis && (
         <Button
-          variant="outline" size="sm" className="h-7 text-xs shrink-0"
+          variant="outline" size="sm" className="shrink-0"
           disabled={pulling}
           onClick={onPull}
         >
-          <Download className="h-3 w-3" />Pull
+          <Download className="h-4 w-4" />Pull
         </Button>
       )}
 
       {s.online && s.present && (
         <Button
-          variant="ghost" size="sm" className="h-7 text-xs shrink-0 text-muted-foreground"
+          variant="ghost" size="icon" className="h-8 w-8 shrink-0 text-muted-foreground"
           disabled={pulling}
           onClick={onPull}
           title="重新拉取（更新镜像）"

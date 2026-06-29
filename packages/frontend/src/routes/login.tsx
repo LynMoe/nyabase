@@ -8,6 +8,7 @@ import { Label } from '../components/ui/label.js';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '../components/ui/card.js';
 import { toast } from '../hooks/use-toast.js';
 import { zLoginRequest, type LoginResponse } from '@nyabase/common';
+import { usePublicSettings } from '../hooks/use-public-settings.js';
 
 function LoginPage() {
   const [username, setUsername] = useState('');
@@ -16,6 +17,7 @@ function LoginPage() {
   const [loading, setLoading] = useState(false);
   const { setAuth, user } = useAuthStore();
   const navigate = useNavigate();
+  const { settings } = usePublicSettings();
 
   useEffect(() => {
     if (user) navigate({ to: '/', replace: true });
@@ -54,8 +56,8 @@ function LoginPage() {
     <div className="min-h-screen flex items-center justify-center bg-muted/40">
       <Card className="w-full max-w-sm">
         <CardHeader className="text-center space-y-1">
-          <CardTitle className="text-2xl">nyabase</CardTitle>
-          <CardDescription>开发容器管理平台</CardDescription>
+          <CardTitle className="text-2xl">{settings.branding.title}</CardTitle>
+          <CardDescription>{settings.branding.description}</CardDescription>
         </CardHeader>
         <CardContent>
           <form onSubmit={handleLogin} className="space-y-4">

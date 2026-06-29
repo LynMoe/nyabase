@@ -57,9 +57,6 @@ export class ContainerDesiredSpecEntity {
   @Column({ name: 'mounts_json', type: 'simple-json', default: '[]' })
   mountsJson: unknown;
 
-  @Column({ name: 'ssh_enabled', type: 'boolean', default: false })
-  sshEnabled: boolean;
-
   @Index()
   @Column({ name: 'power_intent', type: 'text', default: ContainerPowerIntent.Running })
   powerIntent: ContainerPowerIntent;

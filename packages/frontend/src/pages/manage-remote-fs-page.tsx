@@ -102,10 +102,10 @@ export default function RemoteFsMountsPage() {
   const serverMap = new Map(servers.map((s) => [s.id, s]));
 
   return (
-    <div className="p-6 space-y-6 w-full">
-      <div className="flex items-center justify-between">
+    <div className="px-4 py-4 md:px-6 space-y-5 w-full">
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
         <div>
-          <h1 className="text-2xl font-bold text-foreground">远程文件系统</h1>
+          <h1 className="text-2xl font-semibold tracking-tight text-foreground">远程文件系统</h1>
           <p className="text-sm text-muted-foreground mt-0.5">{allMounts.length} 个挂载</p>
         </div>
         <div className="flex items-center gap-2">
@@ -140,14 +140,14 @@ export default function RemoteFsMountsPage() {
       </div>
 
       {mounts.length === 0 ? (
-        <div className="bg-card rounded-xl border border-dashed p-10 text-center text-muted-foreground">
+        <div className="bg-card rounded-lg border border-dashed p-10 text-center text-muted-foreground">
           <Network className="h-8 w-8 text-muted-foreground/40 mx-auto mb-2" />
           暂无挂载
         </div>
       ) : (
         <div className="space-y-3">
           {mounts.map((m) => (
-            <div key={m.id} className="bg-card rounded-xl border p-4">
+            <div key={m.id} className="bg-card rounded-lg border p-4">
               <div className="flex items-start justify-between gap-3">
                 <div className="space-y-2 min-w-0 flex-1">
                   <div className="flex items-center gap-2 flex-wrap">
@@ -582,7 +582,7 @@ function ServerAssignDialog({ mount, servers, onClose }: {
                     {isAssigned && status && <StatusBadge status={status} />}
                   </div>
                   <Button size="sm" variant="outline"
-                    className={`h-7 text-xs ${isAssigned ? 'text-red-600 border-red-200 hover:bg-red-50' : ''}`}
+                    className={isAssigned ? 'text-red-600 border-red-200 hover:bg-red-50' : undefined}
                     disabled={assign.isPending || unassign.isPending}
                     onClick={() => toggle(s.id)}>
                     {isAssigned ? '取消' : '分配'}

@@ -11,13 +11,10 @@ import {
   ServerStatus,
   Capability,
   GpuGrantMode,
-  ContainerPhase,
   ContainerPowerIntent,
   ContainerStatus,
   OperationKind,
   OperationStatus,
-  HookKind,
-  HookStatus,
   RuntimeDriftKind,
 } from '../enums.js';
 import type {
@@ -59,7 +56,9 @@ export type {
   AddGroupMemberRequest,
   AddImageGrantRequest,
   SyncImageGrantServersRequest,
+  PatchSystemSettingsRequest,
 } from './rest-schema.js';
+import type { ConfigSourceName, ConfigValueKind } from '../config/definition.js';
 
 // ---------------------------------------------------------------------------
 // Common
@@ -70,6 +69,13 @@ export interface PaginatedResponse<T> {
   total: number;
   page: number;
   pageSize: number;
+}
+
+export interface OffsetPaginatedResponse<T> {
+  items: T[];
+  total: number;
+  limit: number;
+  offset: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -124,6 +130,17 @@ export interface CreateApiTokenResponse {
 }
 
 // ---------------------------------------------------------------------------
+// Public settings
+// ---------------------------------------------------------------------------
+
+export interface PublicSettingsDto {
+  branding: {
+    title: string;
+    description: string;
+  };
+}
+
+// ---------------------------------------------------------------------------
 // Groups
 // ---------------------------------------------------------------------------
 
@@ -162,12 +179,78 @@ export interface GroupMemberDto {
 }
 
 // ---------------------------------------------------------------------------
+// System settings
+// ---------------------------------------------------------------------------
+
+export interface SystemSettingFieldDto {
+  key: string;
+  yamlPath: string;
+  env: string;
+  valueKind: ConfigValueKind;
+  effectiveValue: unknown;
+  source: ConfigSourceName;
+  yamlValue: unknown;
+  envValuePresent: boolean;
+  defaultValue: unknown;
+  secret: boolean;
+  editable: boolean;
+  restartRequired: boolean;
+  public: boolean;
+  label: string;
+  description: string;
+}
+
+export interface SystemSettingsDto {
+  configFile: string;
+  fields: SystemSettingFieldDto[];
+  editable: SystemSettingFieldDto[];
+  readOnly: SystemSettingFieldDto[];
+  publicSettings: PublicSettingsDto;
+}
+
+// ---------------------------------------------------------------------------
+// Audit
+// ---------------------------------------------------------------------------
+
+export interface AuditResourceSnapshotDto {
+  id: string | null;
+  type: string | null;
+  name: string | null;
+  labels?: Record<string, string | number | boolean | null>;
+}
+
+export interface AuditLogDto {
+  id: string;
+  actorId: string | null;
+  actorName: string | null;
+  actorUsername: string | null;
+  actorSnapshot: AuditResourceSnapshotDto | null;
+  action: string;
+  targetId: string | null;
+  targetType: string | null;
+  targetName: string | null;
+  targetSnapshot: AuditResourceSnapshotDto | null;
+  related: AuditResourceSnapshotDto[];
+  payload: unknown;
+  ts: string;
+}
+
+export type AuditListResponse = OffsetPaginatedResponse<AuditLogDto>;
+
+export interface SshProxyHostKeySummaryDto {
+  fingerprint: string | null;
+  generation: number | null;
+  rotatedAt: string | null;
+}
+
+// ---------------------------------------------------------------------------
 // Servers
 // ---------------------------------------------------------------------------
 
 export interface ServerDto {
   id: string;
   name: string;
+  slug: string;
   parentIface: string;
   ipCidr: string;
   gateway: string;
@@ -225,6 +308,7 @@ export interface ImageDto {
   defaultUid: number;
   description: string | null;
   isActive: boolean;
+  disableSsh: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -285,14 +369,12 @@ export type ContainerAction =
   | 'stats'
   | 'console'
   | 'updateMounts'
-  | 'enableSsh'
   | 'reconcileSsh';
 
 export type ActionBlockedReason =
   | 'container_unbound'
   | 'phase_not_active'
   | 'operation_in_progress'
-  | 'runtime_confirmation_pending'
   | 'agent_offline'
   | 'agent_state_unready'
   | 'runtime_missing'
@@ -323,9 +405,29 @@ export interface ContainerRuntimeView {
 export interface ContainerSshView {
   enabled: boolean;
   status: ContainerSshServerStatus;
+  ready: boolean;
+  disabledReason?: 'image_ssh_disabled' | 'runtime_not_running' | 'route_missing' | 'sync_pending' | 'unknown';
+  login?: {
+    omittedServer: string | null;
+    explicitServer: string | null;
+  };
+  proxyHost?: string | null;
+  proxyPort?: number | null;
+  observedAt?: string | null;
+  appliedInternalKeyGeneration?: number | null;
+  hostKeyFingerprint?: string | null;
   user?: 'root';
   port?: 22;
   lastError?: string;
+}
+
+export interface UserInternalSshKeyDto {
+  userId: string;
+  publicKey: string;
+  privateKey?: string;
+  fingerprint: string;
+  generation: number;
+  rotatedAt: string;
 }
 
 export interface ContainerMountView {
@@ -334,14 +436,6 @@ export interface ContainerMountView {
   sourceId: string;
   dirName: string;
   containerPath: string;
-}
-
-export interface RuntimeConfirmationView {
-  status: 'pending' | 'expired';
-  operationId: string;
-  kind: OperationKind;
-  deadlineAt: string;
-  message: string;
 }
 
 export interface ContainerView {
@@ -353,7 +447,6 @@ export interface ContainerView {
   name: string;
   imageId: string;
   imageName?: string;
-  phase: ContainerPhase;
   failureCode?: string | null;
   failureReason?: string | null;
   powerIntent: ContainerPowerIntent;
@@ -368,7 +461,6 @@ export interface ContainerView {
   };
   ssh: ContainerSshView;
   mounts: ContainerMountView[];
-  runtimeConfirmation?: RuntimeConfirmationView | null;
   actions: Record<ContainerAction, ActionAvailability>;
 }
 
@@ -379,7 +471,6 @@ export interface ApiErrorV2 {
   action?: ContainerAction;
   resourceType?: string;
   resourceId?: string;
-  phase?: ContainerPhase;
   activeOperationId?: string | null;
   message: string;
 }
@@ -404,20 +495,18 @@ export interface OperationSummaryDto {
   resourceType: string;
   resourceId: string;
   serverId: string;
-  attempts: number;
+  requestedBy: string | null;
+  resourceKeys: string[];
+  commandId: string;
+  commandKind: string;
+  request: unknown | null;
+  result: unknown | null;
+  hookResults: unknown | null;
   lastError: string | null;
   createdAt: string;
   startedAt: string | null;
+  commandCompletedAt: string | null;
   completedAt: string | null;
-}
-
-export interface HookSummaryDto {
-  hook: HookKind;
-  status: HookStatus;
-  desiredGeneration: number | null;
-  attempts: number;
-  lastError: string | null;
-  updatedAt: string;
 }
 
 export interface RuntimeDriftDto {
@@ -524,7 +613,6 @@ export interface ContainerMountInputDto {
   sourceId: string;
   dirName: string;
   containerPath: string;
-  createIfMissing?: boolean;
 }
 
 // ---------------------------------------------------------------------------

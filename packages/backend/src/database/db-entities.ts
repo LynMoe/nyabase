@@ -2,6 +2,9 @@ import { UserEntity } from '../entities/user.entity.js';
 import { RefreshTokenEntity } from '../entities/refresh-token.entity.js';
 import { ApiTokenEntity } from '../entities/api-token.entity.js';
 import { SshPublicKeyEntity } from '../entities/ssh-public-key.entity.js';
+import { UserInternalSshKeyEntity } from '../entities/user-internal-ssh-key.entity.js';
+import { SshProxyHostKeyEntity } from '../entities/ssh-proxy-host-key.entity.js';
+import { SshProxyTokenEntity } from '../entities/ssh-proxy-token.entity.js';
 import { ServerEntity } from '../entities/server.entity.js';
 import { ImageEntity } from '../entities/image.entity.js';
 import { AuditLogEntity } from '../entities/audit-log.entity.js';
@@ -22,11 +25,11 @@ import { GpuAllocationEntity } from '../entities/gpu-allocation.entity.js';
 import { RuntimeOrphanEntity } from '../entities/runtime-orphan.entity.js';
 import { ContainerMountRuntimeEntity } from '../entities/container-mount-runtime.entity.js';
 import { OperationEntity } from '../entities/operation.entity.js';
-import { OperationStepEntity } from '../entities/operation-step.entity.js';
-import { AgentCommandOutboxEntity } from '../entities/agent-command-outbox.entity.js';
 import { ResourceLockEntity } from '../entities/resource-lock.entity.js';
-import { ReconcileTaskEntity } from '../entities/reconcile-task.entity.js';
 import { QuotaDesiredEntity } from '../entities/quota-desired.entity.js';
+import { ContainerSshRouteEntity } from '../entities/container-ssh-route.entity.js';
+import { HttpDomainPoolEntity } from '../entities/http-domain-pool.entity.js';
+import { HttpProxyBindingEntity } from '../entities/http-proxy-binding.entity.js';
 
 /**
  * Single source of truth for all TypeORM entities.
@@ -38,6 +41,9 @@ export const DB_ENTITIES = [
   RefreshTokenEntity,
   ApiTokenEntity,
   SshPublicKeyEntity,
+  UserInternalSshKeyEntity,
+  SshProxyHostKeyEntity,
+  SshProxyTokenEntity,
   ServerEntity,
   ImageEntity,
   AuditLogEntity,
@@ -58,9 +64,9 @@ export const DB_ENTITIES = [
   RuntimeOrphanEntity,
   ContainerMountRuntimeEntity,
   OperationEntity,
-  OperationStepEntity,
-  AgentCommandOutboxEntity,
   ResourceLockEntity,
-  ReconcileTaskEntity,
   QuotaDesiredEntity,
+  ContainerSshRouteEntity,
+  HttpDomainPoolEntity,
+  HttpProxyBindingEntity,
 ];

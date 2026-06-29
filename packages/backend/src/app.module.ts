@@ -1,5 +1,4 @@
 import { Module } from '@nestjs/common';
-import { ConfigModule } from '@nestjs/config';
 import { DatabaseModule } from './database/database.module.js';
 import { AuthModule } from './auth/auth.module.js';
 import { UsersModule } from './users/users.module.js';
@@ -14,16 +13,15 @@ import { AuditModule } from './audit/audit.module.js';
 import { RemoteFsMountsModule } from './remote-fs/remote-fs-mounts.module.js';
 import { MountSourcesModule } from './mount-sources/mount-sources.module.js';
 import { OperationsModule } from './operations/operations.module.js';
+import { SshModule } from './ssh/ssh.module.js';
+import { SystemSettingsModule } from './system-settings/system-settings.module.js';
+import { HttpProxyModule } from './http-proxy/http-proxy.module.js';
 import { AppService } from './app.service.js';
-import appConfig from './config/app.config.js';
+import { NyabaseConfigModule } from './config/nyabase-config.module.js';
 
 @Module({
   imports: [
-    ConfigModule.forRoot({
-      isGlobal: true,
-      load: [appConfig],
-      envFilePath: ['.env.local', '.env'],
-    }),
+    NyabaseConfigModule,
     DatabaseModule,
     AuthModule,
     UsersModule,
@@ -38,6 +36,9 @@ import appConfig from './config/app.config.js';
     RemoteFsMountsModule,
     MountSourcesModule,
     OperationsModule,
+    SshModule,
+    HttpProxyModule,
+    SystemSettingsModule,
   ],
   providers: [AppService],
 })

@@ -23,6 +23,7 @@ const CAP_LABELS: Record<string, string> = {
   [Capability.ManageContainersAny]: '管理所有容器',
   [Capability.ViewAudit]: '查看审计',
   [Capability.ViewMetricsAll]: '查看全量监控',
+  [Capability.ManageSystemSettings]: '管理系统设置',
 };
 
 const MEMBER_LIMIT = 30;
@@ -89,10 +90,10 @@ export default function GroupsPage() {
   });
 
   return (
-    <div className="p-6 space-y-6 w-full">
-      <div className="flex items-center justify-between">
+    <div className="px-4 py-4 md:px-6 space-y-5 w-full">
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
         <div>
-          <h1 className="text-2xl font-bold text-foreground">用户组管理</h1>
+          <h1 className="text-2xl font-semibold tracking-tight text-foreground">用户组管理</h1>
           <p className="text-sm text-muted-foreground mt-0.5">通过用户组统一分配服务器/镜像权限</p>
         </div>
         <div className="flex items-center gap-2">
@@ -115,7 +116,7 @@ export default function GroupsPage() {
           const extraImages = imageIds.length - IMAGE_CHIP_LIMIT;
 
           return (
-            <div key={g.id} className="bg-card rounded-xl border border-border p-4">
+            <div key={g.id} className="bg-card rounded-lg border border-border p-4">
               <div className="flex items-start justify-between gap-4">
                 <div className="flex-1 min-w-0 space-y-2.5">
                   {/* Header row */}
@@ -199,19 +200,19 @@ export default function GroupsPage() {
 
                 {/* Actions */}
                 <div className="flex items-center gap-1 shrink-0">
-                  <Button size="sm" variant="outline" className="h-8 text-xs gap-1"
+                  <Button size="sm" variant="outline"
                     onClick={() => setEditGroup(g)}>
-                    <Settings2 className="h-3.5 w-3.5" />编辑
+                    <Settings2 className="h-4 w-4" />编辑
                   </Button>
                   <Link to="/groups/$id" params={{ id: g.id }}>
-                    <Button size="sm" variant="outline" className="h-8 text-xs gap-1">
-                      授权 <ChevronRight className="h-3 w-3" />
+                    <Button size="sm" variant="outline">
+                      授权 <ChevronRight className="h-4 w-4" />
                     </Button>
                   </Link>
                   {!g.isSystem && (
                     <Button size="icon" variant="ghost" className="h-8 w-8 text-red-400 hover:text-red-600"
                       onClick={() => { if (confirm(`删除用户组 "${g.name}"？`)) deleteGroup.mutate(g.id); }}>
-                      <Trash2 className="h-3.5 w-3.5" />
+                      <Trash2 className="h-4 w-4" />
                     </Button>
                   )}
                 </div>

@@ -1,11 +1,16 @@
-import { Controller, Get, Query, UseGuards } from '@nestjs/common';
+import { Controller, Get, NotFoundException, Param, Query, UseGuards } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard.js';
 import { CapabilitiesGuard } from '../auth/guards/capabilities.guard.js';
 import { RequireCaps } from '../auth/decorators/require-caps.decorator.js';
 import { AuditLogEntity } from '../entities/audit-log.entity.js';
-import { Capability } from '@nyabase/common';
+import {
+  Capability,
+  type AuditListResponse,
+  type AuditLogDto,
+  type AuditResourceSnapshotDto,
+} from '@nyabase/common';
 
 @Controller('audit')
 @UseGuards(JwtAuthGuard, CapabilitiesGuard)
@@ -20,11 +25,98 @@ export class AuditController {
   async list(
     @Query('limit') limit?: string,
     @Query('offset') offset?: string,
-  ) {
-    return this.repo.find({
+  ): Promise<AuditListResponse | AuditLogDto[]> {
+    const parsedLimit = parseLimit(limit);
+    const parsedOffset = parseOffset(offset);
+
+    if (offset === undefined) {
+      const items = await this.repo.find({
+        order: { ts: 'DESC' },
+        take: parsedLimit,
+      });
+      return items.map(toDto);
+    }
+
+    const [items, total] = await this.repo.findAndCount({
       order: { ts: 'DESC' },
-      take: parseInt(limit ?? '100', 10),
-      skip: parseInt(offset ?? '0', 10),
+      take: parsedLimit,
+      skip: parsedOffset,
     });
+    return {
+      items: items.map(toDto),
+      total,
+      limit: parsedLimit,
+      offset: parsedOffset,
+    };
   }
+
+  @Get(':id')
+  async detail(@Param('id') id: string): Promise<AuditLogDto> {
+    const row = await this.repo.findOne({ where: { id } });
+    if (!row) throw new NotFoundException('Audit log not found');
+    return toDto(row);
+  }
+}
+
+function toDto(row: AuditLogEntity): AuditLogDto {
+  return {
+    id: row.id,
+    actorId: row.actorId,
+    actorName: row.actorName ?? null,
+    actorUsername: row.actorUsername ?? null,
+    actorSnapshot: snapshot(row.actorSnapshot),
+    action: row.action,
+    targetId: row.targetId,
+    targetType: row.targetType,
+    targetName: row.targetName ?? null,
+    targetSnapshot: snapshot(row.targetSnapshot),
+    related: snapshots(row.related),
+    payload: row.payload ?? null,
+    ts: row.ts.toISOString(),
+  };
+}
+
+function parseLimit(value: string | undefined): number {
+  const parsed = Number.parseInt(value ?? '100', 10);
+  if (!Number.isFinite(parsed)) return 100;
+  return Math.min(Math.max(parsed, 1), 500);
+}
+
+function parseOffset(value: string | undefined): number {
+  const parsed = Number.parseInt(value ?? '0', 10);
+  if (!Number.isFinite(parsed)) return 0;
+  return Math.max(parsed, 0);
+}
+
+function snapshots(value: unknown): AuditResourceSnapshotDto[] {
+  return Array.isArray(value)
+    ? value.map(snapshot).filter((entry): entry is AuditResourceSnapshotDto => entry !== null)
+    : [];
+}
+
+function snapshot(value: unknown): AuditResourceSnapshotDto | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const record = value as Record<string, unknown>;
+  return {
+    id: typeof record.id === 'string' ? record.id : null,
+    type: typeof record.type === 'string' ? record.type : null,
+    name: typeof record.name === 'string' ? record.name : null,
+    labels: labels(record.labels),
+  };
+}
+
+function labels(value: unknown): Record<string, string | number | boolean | null> | undefined {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
+  const output: Record<string, string | number | boolean | null> = {};
+  for (const [key, entry] of Object.entries(value)) {
+    if (
+      typeof entry === 'string' ||
+      typeof entry === 'number' ||
+      typeof entry === 'boolean' ||
+      entry === null
+    ) {
+      output[key] = entry;
+    }
+  }
+  return Object.keys(output).length > 0 ? output : undefined;
 }

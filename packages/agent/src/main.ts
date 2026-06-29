@@ -21,7 +21,7 @@ async function main() {
   }
 
   // Ensure the nyabase-managed dockerd is running with the correct unit file.
-  const daemonManager = new DaemonManager(config.dockerRoot, config.isGpuServer);
+  const daemonManager = new DaemonManager(config.dockerRoot, config.isGpuServer, config.dockerResourceLimit);
   console.log('[Agent] Reconciling nyabase-docker daemon (dockerRoot:', config.dockerRoot, ')...');
   try {
     await daemonManager.reconcile(config.serverId);

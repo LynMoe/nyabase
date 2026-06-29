@@ -78,17 +78,19 @@ export default function ServerDetailPage() {
   };
 
   if (!server) return (
-    <div className="p-6 flex items-center gap-2 text-muted-foreground/70">
+    <div className="px-4 py-4 md:px-6 flex items-center gap-2 text-muted-foreground/70">
       <div className="w-4 h-4 border-2 border-muted border-t-primary rounded-full animate-spin" />
       加载中...
     </div>
   );
 
   const online = server.status === 'online';
+  const statusLabel = online ? '在线' : server.status === 'offline' ? '离线' : '未知';
+  const networkSummary = [server.slug, server.ipCidr].filter(Boolean).join(' · ');
   const gpus = server.gpus ?? [];
 
   return (
-    <div className="p-6 space-y-6 w-full">
+    <div className="px-4 py-4 md:px-6 space-y-5 w-full">
       {/* Header */}
       <div className="flex items-start justify-between">
         <div className="flex items-center gap-3">
@@ -98,8 +100,8 @@ export default function ServerDetailPage() {
             </Button>
           </Link>
           <div>
-            <h1 className="text-2xl font-bold text-foreground">{server.name}</h1>
-            <p className="text-sm text-muted-foreground/70 font-mono mt-0.5">{server.ipCidr}</p>
+            <h1 className="text-2xl font-semibold tracking-tight text-foreground">{server.name}</h1>
+            <p className="text-sm text-muted-foreground/70 font-mono mt-0.5">{networkSummary || '-'}</p>
           </div>
         </div>
         <div className={`flex items-center gap-1.5 text-sm px-3 py-1.5 rounded-full font-medium
@@ -107,7 +109,7 @@ export default function ServerDetailPage() {
             : server.status === 'offline' ? 'bg-red-50 text-red-600 border border-red-200'
             : 'bg-muted text-muted-foreground border border-border'}`}>
           {online ? <Wifi className="h-4 w-4" /> : <WifiOff className="h-4 w-4" />}
-          {server.status}
+          {statusLabel}
         </div>
       </div>
 
@@ -116,12 +118,13 @@ export default function ServerDetailPage() {
         <InfoCard
           title="配置信息"
           action={canManage ? (
-            <Button variant="ghost" size="icon" className="h-6 w-6" onClick={() => setShowEditServer(true)}>
-              <Pencil className="h-3.5 w-3.5 text-muted-foreground" />
+            <Button variant="ghost" size="icon" className="h-8 w-8" onClick={() => setShowEditServer(true)}>
+              <Pencil className="h-4 w-4 text-muted-foreground" />
             </Button>
           ) : undefined}
         >
           <InfoRow label="名称" value={server.name} />
+          <InfoRow label="路由标识" value={server.slug} mono />
           <InfoRow label="物理网卡" value={server.parentIface} mono />
           <InfoRow label="CIDR" value={server.ipCidr} mono />
           <InfoRow label="网关" value={server.gateway} mono />
@@ -129,11 +132,11 @@ export default function ServerDetailPage() {
           {canManage && (
             <div className="pt-2 mt-2">
               <Button
-                variant="outline" size="sm" className="text-xs h-7 gap-1"
+                variant="outline" size="sm"
                 onClick={() => setShowRegenConfirm(true)} disabled={regenerating}
               >
-                <RefreshCw className={`h-3 w-3 ${regenerating ? 'animate-spin' : ''}`} />
-                重新生成 Agent Token
+                <RefreshCw className={`h-4 w-4 ${regenerating ? 'animate-spin' : ''}`} />
+                重新生成 Agent 令牌
               </Button>
             </div>
           )}
@@ -162,18 +165,18 @@ export default function ServerDetailPage() {
 
       {/* New token display — terminal-style dark chip kept fixed across themes */}
       {newToken && (
-        <div className="bg-amber-500/10 dark:bg-amber-500/15 border border-amber-500/30 rounded-xl p-4">
-          <div className="text-sm font-medium text-amber-800 dark:text-amber-300 mb-2">新 Agent Token（仅显示一次）</div>
+        <div className="bg-amber-500/10 dark:bg-amber-500/15 border border-amber-500/30 rounded-lg p-4">
+          <div className="text-sm font-medium text-amber-800 dark:text-amber-300 mb-2">新 Agent 令牌（仅显示一次）</div>
           {/* terminal-style: literal dark colors required for green-on-black look */}
           <div className="bg-zinc-900 rounded-lg p-3 text-xs text-green-400 font-mono break-all mb-2">
             {newToken}
           </div>
           <div className="flex gap-2">
-            <Button size="sm" variant="outline" className="text-xs h-7"
+            <Button size="sm" variant="outline"
               onClick={() => navigator.clipboard.writeText(newToken)}>
-              复制 Token
+              复制令牌
             </Button>
-            <Button size="sm" variant="ghost" className="text-xs h-7"
+            <Button size="sm" variant="ghost"
               onClick={() => setNewToken(null)}>
               关闭
             </Button>
@@ -211,9 +214,9 @@ export default function ServerDetailPage() {
       <AlertDialog open={showRegenConfirm} onOpenChange={setShowRegenConfirm}>
         <AlertDialogContent>
           <AlertDialogHeader>
-            <AlertDialogTitle>重新生成 Agent Token</AlertDialogTitle>
+            <AlertDialogTitle>重新生成 Agent 令牌</AlertDialogTitle>
             <AlertDialogDescription>
-              重新生成后，旧 agent token 立即失效，需要更新服务器上的 agent 配置。确定继续？
+              重新生成后，旧 agent 令牌立即失效，需要更新服务器上的 agent 配置。确定继续？
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
@@ -256,7 +259,7 @@ function DockerDaemonCard({
       qc.setQueryData(queryKeys.servers.detail(serverId), (old: ServerDto | undefined) =>
         old ? { ...old, dockerDaemon: fresh } : old,
       );
-      toast({ title: 'Docker Daemon 协调完成' });
+      toast({ title: 'Docker 守护进程协调完成' });
     },
     onError: (e) => toast({ title: '协调失败', description: e.message, variant: 'destructive' }),
   });
@@ -284,10 +287,10 @@ function DockerDaemonCard({
   };
 
   return (
-    <div className="bg-card rounded-xl border border-border p-4">
+    <div className="bg-card rounded-lg border border-border p-4">
       <div className="flex items-center justify-between mb-3">
         <div className="flex items-center gap-2 text-sm font-medium text-foreground/90">
-          <Container className="h-4 w-4 text-muted-foreground" />Docker Daemon
+          <Container className="h-4 w-4 text-muted-foreground" />Docker 守护进程
         </div>
         <div className="flex items-center gap-2">
           {daemonStatus && (
@@ -296,12 +299,12 @@ function DockerDaemonCard({
             </span>
           )}
           <Button
-            size="sm" variant="outline" className="text-xs h-7 gap-1"
+            size="sm" variant="outline"
             onClick={() => mutate()}
             disabled={isPending || !online}
             title={!online ? 'Agent 离线，无法协调' : '重新检查并同步 systemd unit 文件'}
           >
-            <RefreshCw className={`h-3 w-3 ${isPending ? 'animate-spin' : ''}`} />
+            <RefreshCw className={`h-4 w-4 ${isPending ? 'animate-spin' : ''}`} />
             {isPending ? '协调中...' : '重新协调'}
           </Button>
         </div>
@@ -317,11 +320,11 @@ function DockerDaemonCard({
         <div className="space-y-0.5 text-sm">
           <DaemonRow label="Unit 文件" value={daemonStatus.unitFileInSync ? '已同步' : '配置漂移'} highlight={!daemonStatus.unitFileInSync} />
           <DaemonRow label="开机自启" value={daemonStatus.enabled ? '已启用' : '未启用'} highlight={!daemonStatus.enabled} />
-          <DaemonRow label="Server 版本" value={daemonStatus.serverVersion ?? '—'} />
-          <DaemonRow label="Storage Driver" value={daemonStatus.storageDriver ?? '—'} mono />
+          <DaemonRow label="服务端版本" value={daemonStatus.serverVersion ?? '—'} />
+          <DaemonRow label="存储驱动" value={daemonStatus.storageDriver ?? '—'} mono />
           <DaemonRow label="PID" value={daemonStatus.pid !== null ? String(daemonStatus.pid) : '—'} mono />
-          <DaemonRow label="Docker Root" value={daemonStatus.dockerRoot} mono />
-          <DaemonRow label="Socket" value={daemonStatus.socketPath} mono />
+          <DaemonRow label="Docker 根目录" value={daemonStatus.dockerRoot} mono />
+          <DaemonRow label="套接字路径" value={daemonStatus.socketPath} mono />
           {daemonStatus.lastError && (
             <div className="mt-2 text-xs bg-red-50 text-red-700 border border-red-200 rounded-lg px-3 py-2 break-all">
               {daemonStatus.lastError}
@@ -360,20 +363,20 @@ function DataDisksCard({
   onRemove: (diskId: string) => void;
 }) {
   return (
-    <div className="bg-card rounded-xl border border-border p-4">
+    <div className="bg-card rounded-lg border border-border p-4">
       <div className="flex items-center justify-between mb-3">
         <h2 className="text-sm font-medium text-foreground/90 flex items-center gap-2">
           <HardDrive className="h-4 w-4 text-muted-foreground" />数据盘
         </h2>
         {canManage && (
-          <Button size="sm" variant="outline" className="h-7 text-xs" onClick={onAdd}>
-            <Plus className="h-3.5 w-3.5" />添加
+          <Button size="sm" variant="outline" onClick={onAdd}>
+            <Plus className="h-4 w-4" />添加
           </Button>
         )}
       </div>
 
       {disks.length === 0 ? (
-        <div className="bg-muted/50 rounded-xl border border-dashed border-border p-6 text-center">
+        <div className="bg-muted/50 rounded-lg border border-dashed border-border p-6 text-center">
           <div className="text-sm text-muted-foreground/70">
             {canManage ? '还没有数据盘，点击"添加"注册挂载点' : '暂无数据盘'}
           </div>
@@ -405,18 +408,18 @@ function DataDisksCard({
                     <div className="flex items-center gap-0.5 shrink-0">
                       <Button
                         size="icon" variant="ghost"
-                        className="h-7 w-7 text-muted-foreground hover:text-foreground"
+                        className="h-8 w-8 text-muted-foreground hover:text-foreground"
                         onClick={() => onEdit(disk)}
                         title="编辑名称"
                       >
-                        <Pencil className="h-3.5 w-3.5" />
+                        <Pencil className="h-4 w-4" />
                       </Button>
                       <Button
                         size="icon" variant="ghost"
-                        className="h-7 w-7 text-red-400 hover:text-red-600 hover:bg-red-50"
+                        className="h-8 w-8 text-red-400 hover:text-red-600 hover:bg-red-50"
                         onClick={() => onRemove(disk.diskId)}
                       >
-                        <Trash2 className="h-3.5 w-3.5" />
+                        <Trash2 className="h-4 w-4" />
                       </Button>
                     </div>
                   )}
@@ -467,13 +470,13 @@ function SelfCheckCard({ serverId, online }: { serverId: string; online: boolean
   };
 
   return (
-    <div className="bg-card rounded-xl border border-border p-4">
+    <div className="bg-card rounded-lg border border-border p-4">
       <div className="flex items-center justify-between mb-3">
         <div className="flex items-center gap-2 text-sm font-medium text-foreground/90">
           <ShieldCheck className="h-4 w-4 text-muted-foreground" />系统自检
         </div>
         <Button
-          size="sm" variant="outline" className="text-xs h-7 gap-1"
+          size="sm" variant="outline"
           onClick={() => { reset(); mutate(); }}
           disabled={isPending || !online}
           title={!online ? 'Agent 离线，无法运行自检' : undefined}
@@ -524,7 +527,7 @@ function InfoCard({ title, icon, action, children }: {
   title: string; icon?: React.ReactNode; action?: React.ReactNode; children: React.ReactNode;
 }) {
   return (
-    <div className="bg-card rounded-xl border border-border p-4">
+    <div className="bg-card rounded-lg border border-border p-4">
       <div className="flex items-center justify-between mb-3">
         <div className="flex items-center gap-2 text-sm font-medium text-foreground/90">
           {icon}{title}
@@ -670,12 +673,12 @@ function ServerDefaultsCard({ server, serverId }: { server: ServerDto; serverId:
   });
 
   return (
-    <div className="bg-card rounded-xl border border-border p-4">
+    <div className="bg-card rounded-lg border border-border p-4">
       <div className="flex items-center justify-between mb-3">
         <h2 className="text-sm font-medium text-foreground/90 flex items-center gap-2">
           <Settings className="h-4 w-4 text-muted-foreground" />默认资源限制
         </h2>
-        <Button size="sm" variant="outline" className="text-xs h-7"
+        <Button size="sm" variant="outline"
           onClick={() => {
             if (!editing) setForm(serverDefaultsToForm(server));
             setEditing(!editing);
@@ -710,7 +713,7 @@ function ServerDefaultsCard({ server, serverId }: { server: ServerDto; serverId:
       ) : (
         <div className="space-y-3">
           <ResourceGrantForm value={form} onChange={setForm} showGpu={server.isGpuServer} />
-          <Button size="sm" className="h-7 text-xs" onClick={() => mutate()} disabled={isPending}>
+          <Button size="sm" onClick={() => mutate()} disabled={isPending}>
             {isPending ? '保存中...' : '保存默认值'}
           </Button>
         </div>
@@ -724,13 +727,14 @@ function EditServerDialog({ server, open, onOpenChange }: {
 }) {
   const qc = useQueryClient();
   const [name, setName] = useState(server.name);
+  const [slug, setSlug] = useState(server.slug);
   const [parentIface, setParentIface] = useState(server.parentIface);
   const [ipCidr, setIpCidr] = useState(server.ipCidr);
   const [gateway, setGateway] = useState(server.gateway);
   const [isGpuServer, setIsGpuServer] = useState(server.isGpuServer);
 
   const { mutate, isPending } = useMutation({
-    mutationFn: () => api.patch(`/admin/servers/${server.id}`, { name, parentIface, ipCidr, gateway, isGpuServer }),
+    mutationFn: () => api.patch(`/admin/servers/${server.id}`, { name, slug, parentIface, ipCidr, gateway, isGpuServer }),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: queryKeys.servers.detail(server.id) });
       qc.invalidateQueries({ queryKey: queryKeys.servers.admin });
@@ -743,6 +747,7 @@ function EditServerDialog({ server, open, onOpenChange }: {
   const handleOpen = (v: boolean) => {
     if (v) {
       setName(server.name);
+      setSlug(server.slug);
       setParentIface(server.parentIface);
       setIpCidr(server.ipCidr);
       setGateway(server.gateway);
@@ -751,7 +756,7 @@ function EditServerDialog({ server, open, onOpenChange }: {
     onOpenChange(v);
   };
 
-  const changed = name !== server.name || parentIface !== server.parentIface
+  const changed = name !== server.name || slug !== server.slug || parentIface !== server.parentIface
     || ipCidr !== server.ipCidr || gateway !== server.gateway
     || isGpuServer !== server.isGpuServer;
 
@@ -763,6 +768,10 @@ function EditServerDialog({ server, open, onOpenChange }: {
           <div className="space-y-1.5">
             <Label className="text-sm text-foreground/90">名称</Label>
             <Input value={name} onChange={(e) => setName(e.target.value)} placeholder="gpu-server-1" />
+          </div>
+          <div className="space-y-1.5">
+            <Label className="text-sm text-foreground/90">路由标识</Label>
+            <Input value={slug} onChange={(e) => setSlug(e.target.value)} placeholder="gpu-server-1" className="font-mono" />
           </div>
           <div className="space-y-1.5">
             <Label className="text-sm text-foreground/90">物理网卡</Label>
@@ -791,7 +800,7 @@ function EditServerDialog({ server, open, onOpenChange }: {
         </div>
         <DialogFooter>
           <Button variant="outline" onClick={() => onOpenChange(false)}>取消</Button>
-          <Button onClick={() => mutate()} disabled={isPending || !changed || !name || !parentIface || !ipCidr || !gateway}>
+          <Button onClick={() => mutate()} disabled={isPending || !changed || !name || !slug || !parentIface || !ipCidr || !gateway}>
             {isPending ? '保存中...' : '保存'}
           </Button>
         </DialogFooter>

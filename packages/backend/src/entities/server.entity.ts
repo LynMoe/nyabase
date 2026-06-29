@@ -41,8 +41,12 @@ export class ServerEntity {
   @PrimaryColumn('text')
   id: string;
 
-  @Column({ type: 'text', unique: true })
+  @Column({ type: 'text' })
   name: string;
+
+  @Index({ unique: true })
+  @Column({ type: 'text' })
+  slug: string;
 
   @Column('text')
   parentIface: string;

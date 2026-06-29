@@ -10,6 +10,15 @@ export class AuditLogEntity {
   @Column({ type: 'text', nullable: true })
   actorId: string | null;
 
+  @Column({ type: 'text', nullable: true })
+  actorName: string | null;
+
+  @Column({ type: 'text', nullable: true })
+  actorUsername: string | null;
+
+  @Column({ type: 'simple-json', nullable: true })
+  actorSnapshot: unknown;
+
   @Column('text')
   action: AuditAction;
 
@@ -18,6 +27,15 @@ export class AuditLogEntity {
 
   @Column({ type: 'text', nullable: true })
   targetType: string | null;
+
+  @Column({ type: 'text', nullable: true })
+  targetName: string | null;
+
+  @Column({ type: 'simple-json', nullable: true })
+  targetSnapshot: unknown;
+
+  @Column({ type: 'simple-json', nullable: true })
+  related: unknown;
 
   @Column({ type: 'simple-json', nullable: true })
   payload: unknown;

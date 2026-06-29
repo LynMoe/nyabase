@@ -9,23 +9,20 @@ import {
 
 @Entity('resource_locks')
 export class ResourceLockEntity {
-  @PrimaryColumn('text')
+  @PrimaryColumn({ name: 'resource_key', type: 'text' })
   resourceKey: string;
 
   @Index()
-  @Column('text')
-  holderId: string;
-
-  @Column({ type: 'int', default: 0 })
-  fencingToken: number;
+  @Column({ name: 'operation_id', type: 'text' })
+  operationId: string;
 
   @Index()
-  @Column('datetime')
-  expiresAt: Date;
+  @Column({ name: 'server_id', type: 'text' })
+  serverId: string;
 
-  @CreateDateColumn()
+  @CreateDateColumn({ name: 'created_at' })
   createdAt: Date;
 
-  @UpdateDateColumn()
+  @UpdateDateColumn({ name: 'updated_at' })
   updatedAt: Date;
 }
