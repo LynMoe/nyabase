@@ -14,6 +14,7 @@ import {
   HostMetricsDto, GpuMetricsDto, UserMetricsDto, ContainerMetricsDto,
   HostDiskCapacity, HostDiskIo, HostNetIo,
   UserMetrics, ContainerMetrics, type MetricSeries,
+  LABEL,
 } from '@nyabase/common';
 import { MetricsQueryService, emptySeries, parseRange } from './metrics-query.service.js';
 import { AgentGateway } from '../gateway/agent-gateway.js';
@@ -364,13 +365,14 @@ export class MetricsController {
     }
 
     for (const runtime of this.agentGateway.stateCache.get(serverId)?.containers.values() ?? []) {
-      const desiredId = runtime.labels?.['nyabase.containerId'] ?? runtime.labels?.['nyabase.container_id'];
+      const desiredId = runtime.labels?.[LABEL.CONTAINER_ID];
       const container = desiredId ? desiredById.get(desiredId) : undefined;
-      const ownerId = container?.ownerId ?? runtime.spec.ownerId ?? '';
-      const name = container?.name ?? runtime.spec.name ?? runtime.spec.runtimeId.slice(0, 12);
-      const info = { containerId: desiredId ?? runtime.spec.runtimeId.slice(0, 12), name, ownerId };
-      result.set(runtime.spec.runtimeId, info);
-      result.set(runtime.spec.runtimeId.slice(0, 12), info);
+      const runtimeId = runtime.runtime.runtimeId;
+      const ownerId = container?.ownerId ?? '';
+      const name = container?.name ?? runtimeId.slice(0, 12);
+      const info = { containerId: desiredId ?? runtimeId.slice(0, 12), name, ownerId };
+      result.set(runtimeId, info);
+      result.set(runtimeId.slice(0, 12), info);
       if (desiredId) result.set(desiredId, info);
     }
 
@@ -520,55 +522,6 @@ export class MetricsController {
       if (fallback.numericId != null && fallback.id) byId.set(String(fallback.numericId), fallback);
     }
     return byId;
-  }
-
-  // ---------------------------------------------------------------------------
-  // GET /metrics/query  — raw PromQL instant query proxy (with user_id injection)
-  // GET /metrics/query_range — raw PromQL range query proxy
-  // ---------------------------------------------------------------------------
-
-  @Get('query')
-  async rawQuery(
-    @CurrentUser() user: UserEntity,
-    @Query('query') query: string,
-    @Query('time') time?: string,
-  ) {
-    return this.rawQueryFor(this.injectUserId(query, user.id), time);
-  }
-
-  @Get('query_range')
-  async rawQueryRange(
-    @CurrentUser() user: UserEntity,
-    @Query('query') query: string,
-    @Query('start') start?: string,
-    @Query('end') end?: string,
-    @Query('step') step?: string,
-  ) {
-    return this.rawQueryRangeFor(this.injectUserId(query, user.id), start, end, step);
-  }
-
-  protected rawQueryFor(query: string, time?: string) {
-    return this.metricsQuery.rawInstantQuery(query, time);
-  }
-
-  protected rawQueryRangeFor(query: string, start?: string, end?: string, step?: string) {
-    return this.metricsQuery.rawRangeQuery(query, start, end, step);
-  }
-
-  /**
-   * Inject a user_id label filter into every nyabase_ metric selector in a PromQL query.
-   *
-   * We only rewrite identifiers with the "nyabase_" prefix to avoid accidentally
-   * corrupting PromQL keywords (sum, rate, by, on, …) or aggregation operators
-   * that share the same syntactic form as metric names.
-   */
-  private injectUserId(query: string, userId: string): string {
-    return query.replace(/(nyabase_[a-zA-Z0-9_]*)(\{[^}]*\})?/g, (_, metric, labels) => {
-      if (!labels) return `${metric}{user_id="${userId}"}`;
-      const inner = labels.slice(1, -1).trim();
-      if (!inner) return `${metric}{user_id="${userId}"}`;
-      return `${metric}{${inner},user_id="${userId}"}`;
-    });
   }
 
   private async diskOwnerFilter(userId: string): Promise<string> {

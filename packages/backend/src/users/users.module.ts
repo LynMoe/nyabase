@@ -8,10 +8,9 @@ import { SshPublicKeyEntity } from '../entities/ssh-public-key.entity.js';
 import { AuthModule } from '../auth/auth.module.js';
 import { AccessModule } from '../access/access.module.js';
 import { GroupsModule } from '../groups/groups.module.js';
-import { OperationsModule } from '../operations/operations.module.js';
-import { ContainersModule } from '../containers/containers.module.js';
 import { SshModule } from '../ssh/ssh.module.js';
 import { UserInternalSshKeyEntity } from '../entities/user-internal-ssh-key.entity.js';
+import { ProxySnapshotNotifierModule } from '../proxy-snapshots/proxy-snapshot-notifier.module.js';
 
 @Module({
   imports: [
@@ -19,9 +18,8 @@ import { UserInternalSshKeyEntity } from '../entities/user-internal-ssh-key.enti
     AuthModule,
     AccessModule,
     GroupsModule,
-    forwardRef(() => OperationsModule),
-    forwardRef(() => ContainersModule),
     forwardRef(() => SshModule),
+    ProxySnapshotNotifierModule,
   ],
   providers: [UsersService],
   controllers: [UsersController, AdminUsersController],

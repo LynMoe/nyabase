@@ -1,4 +1,8 @@
 import { z } from 'zod';
+import {
+  SSH_PROXY_SNAPSHOT_STALE_MAX_MS,
+  SSH_PROXY_SNAPSHOT_STALE_MIN_MS,
+} from '../constants.js';
 
 export const DEFAULT_NYABASE_CONFIG_FILE = '/etc/nyabase/config.yaml';
 
@@ -25,6 +29,10 @@ export interface ConfigFieldDefinition<T = unknown> {
 const sourceOrder = ['default', 'yaml', 'env'] as const;
 const nonEmptyString = z.string().trim().min(1);
 const optionalString = z.string().trim();
+const proxyToken = z.string().refine(
+  (value) => value === '' || /^[A-Za-z0-9_-]{32,1024}$/.test(value),
+  'Expected an empty value or a 32-1024 character ASCII token using only letters, digits, _ or -',
+);
 const port = z.coerce.number().int().min(1).max(65_535);
 const positiveInt = z.coerce.number().int().positive();
 const positiveDays = z.coerce.number().int().positive();
@@ -181,14 +189,14 @@ export const controlPlaneConfigDefinitions = [
     yamlPath: 'database.driver',
     env: 'DB_DRIVER',
     defaultValue: 'sqlite',
-    schema: z.enum(['sqlite', 'postgres']),
+    schema: z.literal('sqlite'),
     valueKind: 'enum',
     secret: false,
     editable: false,
     restartRequired: true,
     public: false,
     label: 'Database driver',
-    description: 'TypeORM database driver.',
+    description: 'SQLite-only TypeORM database driver.',
   }),
   field({
     key: 'database.path',
@@ -203,76 +211,6 @@ export const controlPlaneConfigDefinitions = [
     public: false,
     label: 'SQLite path',
     description: 'SQLite database file path.',
-  }),
-  field({
-    key: 'database.host',
-    yamlPath: 'database.host',
-    env: 'DB_HOST',
-    defaultValue: 'localhost',
-    schema: nonEmptyString,
-    valueKind: 'string',
-    secret: false,
-    editable: false,
-    restartRequired: true,
-    public: false,
-    label: 'Postgres host',
-    description: 'Postgres hostname.',
-  }),
-  field({
-    key: 'database.port',
-    yamlPath: 'database.port',
-    env: 'DB_PORT',
-    defaultValue: 5432,
-    schema: port,
-    valueKind: 'number',
-    secret: false,
-    editable: false,
-    restartRequired: true,
-    public: false,
-    label: 'Postgres port',
-    description: 'Postgres port.',
-  }),
-  field({
-    key: 'database.name',
-    yamlPath: 'database.name',
-    env: 'DB_NAME',
-    defaultValue: 'nyabase',
-    schema: nonEmptyString,
-    valueKind: 'string',
-    secret: false,
-    editable: false,
-    restartRequired: true,
-    public: false,
-    label: 'Postgres database',
-    description: 'Postgres database name.',
-  }),
-  field({
-    key: 'database.user',
-    yamlPath: 'database.user',
-    env: 'DB_USER',
-    defaultValue: 'nyabase',
-    schema: nonEmptyString,
-    valueKind: 'string',
-    secret: false,
-    editable: false,
-    restartRequired: true,
-    public: false,
-    label: 'Postgres user',
-    description: 'Postgres username.',
-  }),
-  field({
-    key: 'database.password',
-    yamlPath: 'database.password',
-    env: 'DB_PASSWORD',
-    defaultValue: '',
-    schema: z.string(),
-    valueKind: 'string',
-    secret: true,
-    editable: false,
-    restartRequired: true,
-    public: false,
-    label: 'Postgres password',
-    description: 'Postgres password.',
   }),
   field({
     key: 'database.synchronize',
@@ -345,11 +283,25 @@ export const controlPlaneConfigDefinitions = [
     description: 'Base URL for metrics reads and writes.',
   }),
   field({
+    key: 'http.proxyToken',
+    yamlPath: 'http.proxyToken',
+    env: 'HTTP_PROXY_TOKEN',
+    defaultValue: '',
+    schema: proxyToken,
+    valueKind: 'string',
+    secret: true,
+    editable: false,
+    restartRequired: true,
+    public: false,
+    label: 'HTTP proxy token',
+    description: 'Bearer token used by the HTTP proxy process to connect to the backend.',
+  }),
+  field({
     key: 'ssh.keyEncryptionSecret',
     yamlPath: 'ssh.keyEncryptionSecret',
     env: 'SSH_KEY_ENCRYPTION_SECRET',
     defaultValue: '',
-    schema: z.string(),
+    schema: z.string().max(1024),
     valueKind: 'string',
     secret: true,
     editable: false,
@@ -363,7 +315,7 @@ export const controlPlaneConfigDefinitions = [
     yamlPath: 'ssh.proxyToken',
     env: 'SSH_PROXY_TOKEN',
     defaultValue: '',
-    schema: z.string(),
+    schema: proxyToken,
     valueKind: 'string',
     secret: true,
     editable: false,
@@ -405,14 +357,16 @@ export const controlPlaneConfigDefinitions = [
     yamlPath: 'ssh.proxySnapshotStaleMs',
     env: 'SSH_PROXY_SNAPSHOT_STALE_MS',
     defaultValue: 300_000,
-    schema: positiveInt,
+    schema: positiveInt
+      .min(SSH_PROXY_SNAPSHOT_STALE_MIN_MS)
+      .max(SSH_PROXY_SNAPSHOT_STALE_MAX_MS),
     valueKind: 'number',
     secret: false,
     editable: true,
     restartRequired: false,
     public: false,
     label: 'SSH proxy snapshot staleness',
-    description: 'Milliseconds before an SSH proxy snapshot is considered stale.',
+    description: 'Milliseconds before an SSH proxy snapshot is considered stale (120000-300000).',
   }),
 ] as const satisfies readonly ConfigFieldDefinition[];
 

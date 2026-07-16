@@ -27,11 +27,6 @@ const gpuServer = {
   isGpuServer: true,
   status: 'online',
   lastSeenAt: '2026-06-01T12:00:00.000Z',
-  defaultCpuMillis: 8000,
-  defaultMemBytes: 68719476736,
-  defaultDiskBytes: 107374182400,
-  defaultGpuMode: 'all',
-  defaultGpuIndices: [0],
   disks: [],
   gpus: [{ index: 0, uuid: 'GPU-aaaaaaaa-bbbb-cccc-dddd-eeeeeeee0000', model: 'NVIDIA L40', totalMemMiB: 46068 }],
   agentVersion: '0.1.0',
@@ -63,6 +58,7 @@ const container = containerView({
 
 test.describe('authenticated GPU rendering', () => {
   test.beforeEach(async ({ page }) => {
+    await page.clock.setFixedTime('2026-06-08T12:00:00.000Z');
     await seedAuth(page);
     await mockApi(page);
   });
@@ -194,7 +190,7 @@ function containerView(input: { id: string; runtimeId: string; name: string; ip:
       stale: false,
       drift: [],
     },
-    activeOperation: null,
+  activeTask: null,
     resources: {
       cpuMillis: 2000,
       memBytes: 8589934592,
@@ -216,8 +212,9 @@ function containerView(input: { id: string; runtimeId: string; name: string; ip:
       stats: { enabled: true },
       console: { enabled: true },
       updateMounts: { enabled: true },
-      enableSsh: input.sshEnabled ? { enabled: false, message: 'SSH 已启用' } : { enabled: true },
-      reconcileSsh: { enabled: true },
+      reconcileSsh: input.sshEnabled
+        ? { enabled: true }
+        : { enabled: false, reason: 'image_not_available', message: 'Image has SSH disabled' },
     },
   };
 }

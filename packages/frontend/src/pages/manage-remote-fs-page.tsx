@@ -6,20 +6,20 @@ import { Input } from '../components/ui/input.js';
 import { Label } from '../components/ui/label.js';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from '../components/ui/dialog.js';
 import { toast } from '../hooks/use-toast.js';
-import { Plus, RefreshCw, Network, Trash2, RotateCcw, AlertCircle, AlertTriangle, CheckCircle2, Loader2, ServerIcon, Pencil } from 'lucide-react';
+import { Plus, RefreshCw, Network, Trash2, AlertCircle, AlertTriangle, CheckCircle2, Loader2, ServerIcon, Pencil } from 'lucide-react';
 import { useAuthStore } from '../store/auth.js';
 import { Capability } from '@nyabase/common';
 import type { ServerDto, RemoteFsMountDto, DataDirIssueDto } from '@nyabase/common';
 import { queryKeys } from '../lib/query-keys.js';
 
 type FsType = 'nfs' | 'cephfs';
-type OperationIdsResponse = { operationIds?: string[] };
-type RemoteFsOperationResponse = RemoteFsMountDto & OperationIdsResponse;
-type AssignmentOperationResponse = { operationId?: string };
+type TaskIdsResponse = { taskIds?: string[] };
+type RemoteFsTaskResponse = RemoteFsMountDto & TaskIdsResponse;
+type AssignmentTaskResponse = { taskId?: string };
 
-function operationIdsDescription(operationIds?: string[]): string | undefined {
-  if (!operationIds || operationIds.length === 0) return undefined;
-  return `操作 ${operationIds.map((id) => id.slice(0, 8)).join(', ')}`;
+function taskIdsDescription(taskIds?: string[]): string | undefined {
+  if (!taskIds || taskIds.length === 0) return undefined;
+  return `任务 ${taskIds.map((id) => id.slice(0, 8)).join(', ')}`;
 }
 
 function formatBytes(bytes: number): string {
@@ -82,21 +82,12 @@ export default function RemoteFsMountsPage() {
   const serverAssignMount = serverAssignMountId ? (allMounts.find((m) => m.id === serverAssignMountId) ?? null) : null;
 
   const deleteMount = useMutation({
-    mutationFn: (id: string) => api.delete<OperationIdsResponse>(`/admin/remote-fs-mounts/${id}`),
+    mutationFn: (id: string) => api.delete<TaskIdsResponse>(`/admin/remote-fs-mounts/${id}`),
     onSuccess: (res) => {
       qc.invalidateQueries({ queryKey: ['remote-fs-mounts'] });
-      toast({ title: '挂载删除已排队', description: operationIdsDescription(res.operationIds) });
+      toast({ title: '挂载删除已排队', description: taskIdsDescription(res.taskIds) });
     },
     onError: (e) => toast({ title: '删除失败', description: e.message, variant: 'destructive' }),
-  });
-
-  const remount = useMutation({
-    mutationFn: (id: string) => api.post<OperationIdsResponse>(`/admin/remote-fs-mounts/${id}/remount`),
-    onSuccess: (res) => {
-      qc.invalidateQueries({ queryKey: ['remote-fs-mounts'] });
-      toast({ title: '重新挂载已排队', description: operationIdsDescription(res.operationIds) });
-    },
-    onError: (e) => toast({ title: '重新挂载失败', description: e.message, variant: 'destructive' }),
   });
 
   const serverMap = new Map(servers.map((s) => [s.id, s]));
@@ -193,10 +184,6 @@ export default function RemoteFsMountsPage() {
                   </div>
                 </div>
                 <div className="flex items-center gap-1 shrink-0">
-                  <Button size="icon" variant="ghost" className="h-8 w-8 text-muted-foreground hover:text-blue-600"
-                    title="重新挂载（所有已分配服务器）" onClick={() => remount.mutate(m.id)}>
-                    <RotateCcw className="h-3.5 w-3.5" />
-                  </Button>
                   <Button size="icon" variant="ghost" className="h-8 w-8 text-muted-foreground hover:text-purple-600"
                     title="管理服务器分配" onClick={() => setServerAssignMountId(m.id)}>
                     <ServerIcon className="h-3.5 w-3.5" />
@@ -255,18 +242,16 @@ function RemoteFsMountDialog({ open, mount, servers, onClose }: {
 }) {
   const qc = useQueryClient();
   const isEdit = !!mount;
-  const canEditParams = !isEdit || (mount?.serverIds.length ?? 0) === 0;
 
   const [name, setName] = useState(mount?.name ?? '');
   const [displayName, setDisplayName] = useState(mount?.displayName ?? '');
   const [description, setDescription] = useState(mount?.description ?? '');
   const [type, setType] = useState<FsType>((mount?.type as FsType) ?? 'nfs');
   const [options, setOptions] = useState(mount?.options ?? '');
-  const [hostMountPoint, setHostMountPoint] = useState(mount?.hostMountPoint ?? '');
   const [serverIds, setServerIds] = useState<string[]>(mount?.serverIds ?? []);
 
-  const existingNfsParams = mount?.type === 'nfs' ? mount.params as NfsForm : null;
-  const existingCephParams = mount?.type === 'cephfs' ? mount.params as CephFsForm : null;
+  const existingNfsParams = mount?.params.type === 'nfs' ? mount.params : null;
+  const existingCephParams = mount?.params.type === 'cephfs' ? mount.params : null;
 
   const [nfsForm, setNfsForm] = useState<NfsForm>({
     nfsServer: existingNfsParams?.nfsServer ?? '',
@@ -278,7 +263,7 @@ function RemoteFsMountDialog({ open, mount, servers, onClose }: {
     exportPath: existingCephParams?.exportPath ?? '/',
     fsName: existingCephParams?.fsName ?? '',
     clientName: existingCephParams?.clientName ?? 'admin',
-    secret: existingCephParams?.secret ?? '',
+    secret: '',
   });
 
   const toggleServer = (sid: string) => setServerIds((prev) =>
@@ -293,21 +278,7 @@ function RemoteFsMountDialog({ open, mount, servers, onClose }: {
           displayName: displayName || undefined,
           description: description || undefined,
         };
-        if (canEditParams) {
-          body.options = options;
-          if (hostMountPoint) body.hostMountPoint = hostMountPoint;
-          body.params = type === 'nfs'
-            ? { type: 'nfs' as const, ...nfsForm }
-            : {
-                type: 'cephfs' as const,
-                monHosts: cephForm.monHosts,
-                exportPath: cephForm.exportPath,
-                fsName: cephForm.fsName || undefined,
-                clientName: cephForm.clientName,
-                secret: cephForm.secret,
-              };
-        }
-        return api.patch<RemoteFsOperationResponse>(`/admin/remote-fs-mounts/${mount!.id}`, body);
+        return api.patch<RemoteFsTaskResponse>(`/admin/remote-fs-mounts/${mount!.id}`, body);
       }
       const params = type === 'nfs'
         ? { type: 'nfs' as const, ...nfsForm }
@@ -319,13 +290,12 @@ function RemoteFsMountDialog({ open, mount, servers, onClose }: {
             clientName: cephForm.clientName,
             secret: cephForm.secret,
           };
-      return api.post<RemoteFsOperationResponse>('/admin/remote-fs-mounts', {
+      return api.post<RemoteFsTaskResponse>('/admin/remote-fs-mounts', {
         name,
         displayName: displayName || undefined,
         description: description || undefined,
         serverIds: serverIds.length ? serverIds : undefined,
         options: options || undefined,
-        hostMountPoint: hostMountPoint || undefined,
         params,
       });
     },
@@ -333,7 +303,7 @@ function RemoteFsMountDialog({ open, mount, servers, onClose }: {
       qc.invalidateQueries({ queryKey: ['remote-fs-mounts'] });
       toast({
         title: isEdit ? '挂载更新已排队' : '挂载创建已排队',
-        description: operationIdsDescription(res.operationIds),
+        description: taskIdsDescription(res.taskIds),
       });
       onClose();
     },
@@ -346,10 +316,13 @@ function RemoteFsMountDialog({ open, mount, servers, onClose }: {
     ? '格式错误：请用逗号分隔多个地址，不能含空格（如 10.0.0.1,10.0.0.2:6789）'
     : null;
 
-  const paramsValid = !canEditParams || (
+  const paramsValid = isEdit || (
     type === 'nfs'
       ? nfsForm.nfsServer.trim().length > 0 && nfsForm.exportPath.trim().length > 0
-      : monHostsValid && cephForm.exportPath.trim().length > 0 && cephForm.clientName.trim().length > 0 && cephForm.secret.trim().length > 0
+      : monHostsValid
+        && cephForm.exportPath.trim().length > 0
+        && cephForm.clientName.trim().length > 0
+        && cephForm.secret.trim().length > 0
   );
   const isValid = name.trim().length > 0 && paramsValid;
 
@@ -375,21 +348,19 @@ function RemoteFsMountDialog({ open, mount, servers, onClose }: {
             <Input value={description} onChange={(e) => setDescription(e.target.value)} placeholder="可选描述，展示给用户" />
           </div>
 
-          {canEditParams && (
+          {!isEdit && (
             <>
-              {/* Type selector — disabled in edit mode (type cannot change) */}
               <div className="space-y-1.5">
                 <Label className="text-sm">类型</Label>
                 <div className="flex gap-2">
                   {(['nfs', 'cephfs'] as FsType[]).map((t) => (
                     <button key={t} type="button"
-                      onClick={() => { if (!isEdit) setType(t); }}
-                      disabled={isEdit}
+                      onClick={() => setType(t)}
                       className={`flex-1 py-2 rounded-lg text-sm font-medium border transition-colors ${
                         type === t
                           ? 'bg-primary/10 border-primary/40 text-primary'
                           : 'bg-muted border-border text-muted-foreground hover:bg-accent'
-                      } disabled:opacity-60 disabled:cursor-not-allowed`}>
+                      }`}>
                       {t === 'nfs' ? 'NFS' : 'CephFS'}
                     </button>
                   ))}
@@ -453,20 +424,16 @@ function RemoteFsMountDialog({ open, mount, servers, onClose }: {
                   <div className="space-y-1.5">
                     <Label className="text-sm">Secret Key（Base64）</Label>
                     <Input type="password" value={cephForm.secret} onChange={(e) => setCephForm({ ...cephForm, secret: e.target.value })}
-                      placeholder="AQA...==" autoComplete="new-password" />
+                      placeholder="AQA...=="
+                      autoComplete="new-password" />
                   </div>
                 </div>
               )}
 
-              <div className="grid grid-cols-2 gap-3">
-                <div className="space-y-1.5">
-                  <Label className="text-sm">挂载选项（可选）</Label>
-                  <Input value={options} onChange={(e) => setOptions(e.target.value)} placeholder="rw,soft" />
-                </div>
-                <div className="space-y-1.5">
-                  <Label className="text-sm">宿主挂载点（留空自动生成）</Label>
-                  <Input value={hostMountPoint} onChange={(e) => setHostMountPoint(e.target.value)} placeholder="/mnt/remote-fs/<id>" />
-                </div>
+              <div className="space-y-1.5">
+                <Label className="text-sm">挂载选项（可选）</Label>
+                <Input value={options} onChange={(e) => setOptions(e.target.value)} placeholder="ro,soft" />
+                <p className="text-xs text-muted-foreground">宿主挂载点由系统固定生成，物理参数创建后不可修改。</p>
               </div>
 
               {!isEdit && servers.length > 0 && (
@@ -489,9 +456,9 @@ function RemoteFsMountDialog({ open, mount, servers, onClose }: {
             </>
           )}
 
-          {isEdit && !canEditParams && (
-            <p className="text-xs text-amber-700 dark:text-amber-300 bg-amber-500/10 dark:bg-amber-500/15 rounded px-3 py-2">
-              该挂载已分配到服务器，关键参数不可修改。如需更改，请先在"管理服务器"中移除所有服务器分配，或删除引用此挂载的容器后重建。
+          {isEdit && (
+            <p className="text-xs text-muted-foreground bg-muted rounded px-3 py-2">
+              此处只修改名称和描述。文件系统地址、凭据、挂载选项和宿主路径是不可变身份；需要变更时请取消分配并新建挂载。
             </p>
           )}
         </div>
@@ -519,12 +486,12 @@ function ServerAssignDialog({ mount, servers, onClose }: {
 
   const assign = useMutation({
     mutationFn: (serverId: string) =>
-      api.post<AssignmentOperationResponse>(`/admin/remote-fs-mounts/${mount.id}/servers`, { serverId }),
+      api.post<AssignmentTaskResponse>(`/admin/remote-fs-mounts/${mount.id}/servers`, { serverId }),
     onSuccess: (res) => {
       qc.invalidateQueries({ queryKey: ['remote-fs-mounts'] });
       toast({
         title: '服务器分配已排队',
-        description: res.operationId ? `操作 ${res.operationId.slice(0, 8)}` : undefined,
+        description: res.taskId ? `任务 ${res.taskId.slice(0, 8)}` : undefined,
       });
     },
     onError: (e) => toast({ title: '分配失败', description: e.message, variant: 'destructive' }),
@@ -532,12 +499,12 @@ function ServerAssignDialog({ mount, servers, onClose }: {
 
   const unassign = useMutation({
     mutationFn: (serverId: string) =>
-      api.delete<OperationIdsResponse>(`/admin/remote-fs-mounts/${mount.id}/servers/${serverId}`),
+      api.delete<TaskIdsResponse>(`/admin/remote-fs-mounts/${mount.id}/servers/${serverId}`),
     onSuccess: (res) => {
       qc.invalidateQueries({ queryKey: ['remote-fs-mounts'] });
       toast({
         title: '服务器取消分配已排队',
-        description: operationIdsDescription(res.operationIds),
+        description: taskIdsDescription(res.taskIds),
       });
     },
     onError: (e) => toast({ title: '取消分配失败', description: e.message, variant: 'destructive' }),

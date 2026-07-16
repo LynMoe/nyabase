@@ -59,7 +59,7 @@ export function ImageFormDialog({ mode, image, open, onOpenChange }: ImageFormDi
       setForm({
         name: image.name,
         dockerImage: image.dockerImage,
-        uid: String(image.runtimeOverrides?.uid ?? image.defaultUid),
+        uid: String(image.runtimeOverrides.uid),
         entrypoint: linesFromArgs(image.runtimeOverrides?.entrypoint),
         cmd: linesFromArgs(image.runtimeOverrides?.cmd),
         init: image.runtimeOverrides?.init ?? false,

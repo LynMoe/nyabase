@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
-    "build": "tsc -p tsconfig.json",
+    "build": "rm -rf dist && tsc -p tsconfig.json",
     "dev": "ts-node-dev --respawn --transpile-only -r tsconfig-paths/register src/main.ts",
     "start": "node -r tsconfig-paths/register dist/main.js",
     "typecheck": "tsc --noEmit",

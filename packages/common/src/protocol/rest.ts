@@ -13,8 +13,8 @@ import {
   GpuGrantMode,
   ContainerPowerIntent,
   ContainerStatus,
-  OperationKind,
-  OperationStatus,
+  AgentTaskKind,
+  AgentTaskStatus,
   RuntimeDriftKind,
 } from '../enums.js';
 import type {
@@ -24,6 +24,8 @@ import type {
   GpuInfo,
   DataDirEntry,
   DockerDaemonStatus,
+  CephFsParams,
+  NfsParams,
   RemoteFsParams,
   RemoteFsMountStatus,
 } from './agent-messages.js';
@@ -40,9 +42,6 @@ export type {
   AddSshKeyRequest,
   CreateServerRequest,
   UpdateServerRequest,
-  UpdateServerDefaultsRequest,
-  AddDataDiskRequest,
-  UpdateDataDiskRequest,
   ImageRuntimeOverrides,
   CreateImageRequest,
   UpdateImageRequest,
@@ -50,6 +49,9 @@ export type {
   CreateContainerRequest,
   ExecSessionRequest,
   CreateDataDirRequest,
+  RemoteFsCreateParams,
+  CreateRemoteFsMountRequest,
+  UpdateRemoteFsMountRequest,
   CreateGroupRequest,
   UpdateGroupRequest,
   UpsertServerGrantRequest,
@@ -251,27 +253,16 @@ export interface ServerDto {
   id: string;
   name: string;
   slug: string;
-  parentIface: string;
-  ipCidr: string;
-  gateway: string;
-  isGpuServer: boolean;
   status: ServerStatus;
+  quarantineCode: string | null;
+  quarantineMessage: string | null;
   lastSeenAt: string | null;
   runtimeReady: boolean;
   runtimeObservedAt: string | null;
-  /** Default resource limits applied when a grant leaves fields null */
-  defaultCpuMillis: number;
-  defaultMemBytes: number;
-  defaultDiskBytes: number;
-  defaultGpuMode: GpuGrantMode;
-  defaultGpuIndices: number[];
   /** Latest persisted/runtime-reported host disk observations */
   disks?: DiskInfo[];
   gpus?: GpuInfo[];
   agentVersion?: string;
-  /** Frozen on first agent hello; never changes after that */
-  dockerRoot?: string | null;
-  dockerSocket?: string | null;
   /** Latest persisted/runtime-reported docker daemon status */
   dockerDaemon?: DockerDaemonStatus | null;
 }
@@ -289,6 +280,7 @@ export interface ServerAgentTokenResponse {
 export interface DataDiskDto {
   diskId: string;
   mountPoint: string;
+  sourceIdentity: string;
   label?: string;
   totalBytes: number;
   usedBytes: number;
@@ -304,8 +296,6 @@ export interface ImageDto {
   name: string;
   dockerImage: string;
   runtimeOverrides: ImageRuntimeOverrides;
-  /** @deprecated use runtimeOverrides.uid */
-  defaultUid: number;
   description: string | null;
   isActive: boolean;
   disableSsh: boolean;
@@ -374,7 +364,7 @@ export type ContainerAction =
 export type ActionBlockedReason =
   | 'container_unbound'
   | 'phase_not_active'
-  | 'operation_in_progress'
+  | 'task_in_progress'
   | 'agent_offline'
   | 'agent_state_unready'
   | 'runtime_missing'
@@ -389,7 +379,7 @@ export interface ActionAvailability {
   enabled: boolean;
   reason?: ActionBlockedReason;
   message?: string;
-  operationId?: string;
+  taskId?: string;
 }
 
 export interface ContainerRuntimeView {
@@ -452,7 +442,7 @@ export interface ContainerView {
   powerIntent: ContainerPowerIntent;
   runtimeReady: boolean;
   runtime: ContainerRuntimeView;
-  activeOperation: OperationSummaryDto | null;
+  activeTask: AgentTaskDto | null;
   resources: {
     cpuMillis: number;
     memBytes: number;
@@ -471,7 +461,7 @@ export interface ApiErrorV2 {
   action?: ContainerAction;
   resourceType?: string;
   resourceId?: string;
-  activeOperationId?: string | null;
+  activeTaskId?: string | null;
   message: string;
 }
 
@@ -482,31 +472,31 @@ export interface ContainerStatsResponse {
   lastObservedAt?: string;
 }
 
-export interface OperationRefResponse {
+export interface AgentTaskRefResponse {
   ok: true;
-  operationId: string;
-  status: OperationStatus;
+  taskId: string;
+  status: AgentTaskStatus;
 }
 
-export interface OperationSummaryDto {
+export interface AgentTaskDto {
   id: string;
-  kind: OperationKind;
-  status: OperationStatus;
+  kind: AgentTaskKind;
+  status: AgentTaskStatus;
   resourceType: string;
   resourceId: string;
   serverId: string;
   requestedBy: string | null;
-  resourceKeys: string[];
-  commandId: string;
-  commandKind: string;
   request: unknown | null;
+  agentResult: unknown | null;
   result: unknown | null;
-  hookResults: unknown | null;
-  lastError: string | null;
+  error: unknown | null;
+  failureStage: 'dispatch' | 'agent' | 'finalizer' | null;
   createdAt: string;
   startedAt: string | null;
-  commandCompletedAt: string | null;
+  lastSentAt: string | null;
   completedAt: string | null;
+  /** Minimum guaranteed lookup horizon; referenced safety proofs may live longer. */
+  retentionUntil: string | null;
 }
 
 export interface RuntimeDriftDto {
@@ -527,6 +517,12 @@ export interface RuntimeStalenessDto {
 // Remote FS Mounts (system-level)
 // ---------------------------------------------------------------------------
 
+export type CephFsMountParamsDto = Omit<CephFsParams, 'secret'> & {
+  secretConfigured: boolean;
+};
+
+export type RemoteFsMountParamsDto = NfsParams | CephFsMountParamsDto;
+
 export interface RemoteFsMountDto {
   id: string;
   name: string;
@@ -536,36 +532,14 @@ export interface RemoteFsMountDto {
   type: RemoteFsParams['type'];
   options: string;
   hostMountPoint: string;
-  params: RemoteFsParams;
+  params: RemoteFsMountParamsDto;
   createdAt: string;
   updatedAt: string;
   /** Server IDs this mount is assigned to */
   serverIds: string[];
   /** Live mount status per server, keyed by serverId; undefined if agent offline */
   serverStatuses?: Record<string, RemoteFsMountStatus>;
-}
-
-export interface CreateRemoteFsMountRequest {
-  name: string;
-  /** User-facing display name */
-  displayName?: string;
-  description?: string;
-  /** Optional: immediately assign to these servers after creation */
-  serverIds?: string[];
-  type: RemoteFsParams['type'];
-  options?: string;
-  hostMountPoint?: string;
-  params: RemoteFsParams;
-}
-
-export interface UpdateRemoteFsMountRequest {
-  name?: string;
-  /** User-facing display name */
-  displayName?: string;
-  description?: string;
-  options?: string;
-  hostMountPoint?: string;
-  params?: RemoteFsParams;
+  taskIds?: string[];
 }
 
 export type MountSourceKind = 'local' | 'remote';
@@ -576,6 +550,8 @@ export interface MountSourceGrantDto {
   scopeId: string;
   sourceKind: MountSourceKind;
   sourceId: string;
+  serverId: string | null;
+  sourceIdentity: string | null;
   createdAt: string;
 }
 
@@ -622,16 +598,21 @@ export interface ContainerMountInputDto {
 export interface DataDirDto extends DataDirEntry {
   /** DB row id */
   id: string;
+  /** User-facing name; stored only in Backend. */
+  name: string;
   /** Owner user id (from DB, not filesystem) */
   userId: string;
   serverId: string;
   serverName: string;
+  desiredState: 'creating' | 'active' | 'removing' | 'failed';
+  generation: number;
+  lastTaskId: string | null;
 }
 
 export interface DataDirIssueDto {
   kind: 'orphan' | 'missing';
   /** Filesystem entry (orphan) or DB-derived entry (missing) */
-  entry: DataDirEntry & { userId?: string };
+  entry: DataDirEntry & { name?: string; userId?: string };
   serverId: string;
 }
 

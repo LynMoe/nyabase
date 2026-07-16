@@ -15,27 +15,8 @@ import { CapabilitiesGuard } from '../auth/guards/capabilities.guard.js';
 import { RequireCaps } from '../auth/decorators/require-caps.decorator.js';
 import { CurrentUser } from '../auth/decorators/current-user.decorator.js';
 import { UserEntity } from '../entities/user.entity.js';
-import { Capability, zRemoteFsParams } from '@nyabase/common';
+import { Capability, zCreateRemoteFsMountRequest, zUpdateRemoteFsMountRequest } from '@nyabase/common';
 import { z } from 'zod';
-
-const zCreateRemoteFs = z.object({
-  name: z.string().min(1).max(128),
-  displayName: z.string().max(128).optional(),
-  description: z.string().optional(),
-  serverIds: z.string().array().optional(),
-  options: z.string().optional(),
-  hostMountPoint: z.string().startsWith('/').optional(),
-  params: zRemoteFsParams,
-});
-
-const zUpdateRemoteFs = z.object({
-  name: z.string().min(1).max(128).optional(),
-  displayName: z.string().max(128).optional(),
-  description: z.string().optional(),
-  options: z.string().optional(),
-  hostMountPoint: z.string().startsWith('/').optional(),
-  params: zRemoteFsParams.optional(),
-});
 
 const zAssignServer = z.object({
   serverId: z.string().min(1),
@@ -53,11 +34,8 @@ export class RemoteFsMountsController {
     return Promise.all(
       mounts.map(async (m) => {
         const serverIds = await this.remoteFsMountsService.getServerIds(m.id);
-        return {
-          ...m,
-          serverIds,
-          serverStatuses: await this.remoteFsMountsService.getMountStatuses(m.id, serverIds),
-        };
+        const serverStatuses = await this.remoteFsMountsService.getMountStatuses(m.id, serverIds);
+        return this.remoteFsMountsService.toDto(m, serverIds, serverStatuses);
       }),
     );
   }
@@ -65,7 +43,7 @@ export class RemoteFsMountsController {
   @Post()
   @RequireCaps(Capability.ManageServers)
   async create(@Body() body: unknown, @CurrentUser() user: UserEntity) {
-    const dto = zCreateRemoteFs.parse(body);
+    const dto = zCreateRemoteFsMountRequest.parse(body);
     const mount = await this.remoteFsMountsService.create(user.id, {
       name: dto.name,
       displayName: dto.displayName,
@@ -73,15 +51,11 @@ export class RemoteFsMountsController {
       serverIds: dto.serverIds,
       type: dto.params.type,
       options: dto.options,
-      hostMountPoint: dto.hostMountPoint,
       params: dto.params,
     });
     const serverIds = await this.remoteFsMountsService.getServerIds(mount.id);
-    return {
-      ...mount,
-      serverIds,
-      serverStatuses: await this.remoteFsMountsService.getMountStatuses(mount.id, serverIds),
-    };
+    const serverStatuses = await this.remoteFsMountsService.getMountStatuses(mount.id, serverIds);
+    return this.remoteFsMountsService.toDto(mount, serverIds, serverStatuses);
   }
 
   @Get(':id')
@@ -89,43 +63,28 @@ export class RemoteFsMountsController {
   async get(@Param('id') id: string) {
     const m = await this.remoteFsMountsService.findById(id);
     const serverIds = await this.remoteFsMountsService.getServerIds(id);
-    return {
-      ...m,
-      serverIds,
-      serverStatuses: await this.remoteFsMountsService.getMountStatuses(id, serverIds),
-    };
+    const serverStatuses = await this.remoteFsMountsService.getMountStatuses(id, serverIds);
+    return this.remoteFsMountsService.toDto(m, serverIds, serverStatuses);
   }
 
   @Patch(':id')
   @RequireCaps(Capability.ManageServers)
   async update(@Param('id') id: string, @Body() body: unknown, @CurrentUser() user: UserEntity) {
-    const dto = zUpdateRemoteFs.parse(body);
+    const dto = zUpdateRemoteFsMountRequest.parse(body);
     const mount = await this.remoteFsMountsService.update(user.id, id, {
       name: dto.name,
       displayName: dto.displayName,
       description: dto.description,
-      options: dto.options,
-      hostMountPoint: dto.hostMountPoint,
-      params: dto.params,
     });
     const serverIds = await this.remoteFsMountsService.getServerIds(id);
-    return {
-      ...mount,
-      serverIds,
-      serverStatuses: await this.remoteFsMountsService.getMountStatuses(id, serverIds),
-    };
+    const serverStatuses = await this.remoteFsMountsService.getMountStatuses(id, serverIds);
+    return this.remoteFsMountsService.toDto(mount, serverIds, serverStatuses);
   }
 
   @Delete(':id')
   @RequireCaps(Capability.ManageServers)
   async remove(@Param('id') id: string, @CurrentUser() user: UserEntity) {
     return this.remoteFsMountsService.remove(user.id, id);
-  }
-
-  @Post(':id/remount')
-  @RequireCaps(Capability.ManageServers)
-  async remount(@Param('id') id: string, @CurrentUser() user: UserEntity) {
-    return this.remoteFsMountsService.remount(user.id, id);
   }
 
   // ---------------------------------------------------------------------------

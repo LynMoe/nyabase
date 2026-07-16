@@ -2,6 +2,7 @@ import {
   Column,
   CreateDateColumn,
   Entity,
+  ForeignKey,
   Index,
   PrimaryColumn,
   Unique,
@@ -9,6 +10,7 @@ import {
 } from 'typeorm';
 import { ContainerPowerIntent } from '@nyabase/common';
 import type { ImageRuntimeOverrides } from '@nyabase/common';
+import { ContainerEntity } from './container.entity.js';
 import { numericTextTransformer } from './entity-transformers.js';
 
 export type ContainerGpuMode = 'none' | 'indices' | 'all';
@@ -20,6 +22,7 @@ export class ContainerDesiredSpecEntity {
   id: string;
 
   @Index()
+  @ForeignKey(() => ContainerEntity, { onDelete: 'CASCADE' })
   @Column({ name: 'container_id', type: 'text' })
   containerId: string;
 

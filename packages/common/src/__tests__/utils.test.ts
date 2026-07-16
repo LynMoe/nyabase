@@ -4,6 +4,9 @@ import {
   allocateNextIp,
   ipToNum,
   numToIp,
+  canonicalIpv4Address,
+  canonicalIpv4Cidr,
+  ipv4CidrsOverlap,
   parseCidr,
   formatBytes,
   generateToken,
@@ -34,6 +37,18 @@ describe('ipToNum / numToIp', () => {
     expect(() => numToIp(-1)).toThrow();
     expect(() => numToIp(0x1_0000_0000)).toThrow();
     expect(() => numToIp(NaN)).toThrow();
+  });
+});
+
+describe('canonical IPv4 network identity', () => {
+  it('normalizes textual addresses and CIDR bases', () => {
+    expect(canonicalIpv4Address('010.008.000.001')).toBe('10.8.0.1');
+    expect(canonicalIpv4Cidr('10.8.1.12/16')).toBe('10.8.0.0/16');
+  });
+
+  it('detects equal and partially overlapping networks', () => {
+    expect(ipv4CidrsOverlap('10.8.0.0/16', '10.8.1.0/24')).toBe(true);
+    expect(ipv4CidrsOverlap('10.8.0.0/16', '10.9.0.0/16')).toBe(false);
   });
 });
 
@@ -80,6 +95,11 @@ describe('cidrToIps', () => {
   it('throws on malformed CIDR', () => {
     expect(() => cidrToIps('bogus')).toThrow();
   });
+
+  it('rejects huge materialization and invalid reservations without allocating', () => {
+    expect(() => cidrToIps('0.0.0.0/0')).toThrow('too large');
+    expect(() => cidrToIps('10.0.0.0/30', ['not-an-ip'])).toThrow('Invalid IPv4');
+  });
 });
 
 describe('allocateNextIp', () => {
@@ -95,6 +115,10 @@ describe('allocateNextIp', () => {
 
   it('skips reserved IPs', () => {
     expect(allocateNextIp('10.0.0.0/29', new Set(), ['10.0.0.1'])).toBe('10.0.0.2');
+  });
+
+  it('rejects an unbounded allocation range', () => {
+    expect(() => allocateNextIp('0.0.0.0/0', new Set())).toThrow('too large');
   });
 });
 

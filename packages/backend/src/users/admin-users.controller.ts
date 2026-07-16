@@ -94,11 +94,10 @@ export class AdminUsersController {
 
   @Delete(':id')
   @RequireCaps(Capability.ManageUsers)
-  @HttpCode(204)
+  @HttpCode(200)
   async deleteUser(@Param('id') id: string, @CurrentUser() currentUser: UserEntity) {
     if (currentUser.id === id) throw new ForbiddenException("Can't delete yourself");
-    await this.groupsService.cleanupUserData(id);
-    await this.usersService.deleteUser(id);
+    return this.groupsService.deleteUserPermanently(id, currentUser.id);
   }
 
   @Delete(':id/ssh-keys/:keyId')

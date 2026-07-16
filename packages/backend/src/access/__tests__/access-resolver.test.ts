@@ -1,7 +1,7 @@
 import { describe, it, expect, vi } from 'vitest';
 import { Capability, GpuGrantMode } from '@nyabase/common';
 // Import from the standalone utility module to avoid loading TypeORM entity decorators
-import { resolveGrantWithServerDefaults } from '../grant-utils.js';
+import { resolveGrant } from '../grant-utils.js';
 
 vi.mock('../../entities/group.entity.js', () => ({ GroupEntity: class GroupEntity {} }));
 vi.mock('../../entities/group-member.entity.js', () => ({ GroupMemberEntity: class GroupMemberEntity {} }));
@@ -13,24 +13,13 @@ vi.mock('../../entities/mount-source-grant.entity.js', () => ({ MountSourceGrant
 vi.mock('../../entities/remote-fs-server-assignment.entity.js', () => ({
   RemoteFsServerAssignmentEntity: class RemoteFsServerAssignmentEntity {},
 }));
-vi.mock('../../entities/data-disk.entity.js', () => ({ DataDiskEntity: class DataDiskEntity {} }));
 
 import { AccessResolverService } from '../access-resolver.service.js';
+import { AccessCacheEpochService } from '../access-cache-epoch.service.js';
 
 // ---------------------------------------------------------------------------
-// resolveGrantWithServerDefaults — pure function, no TypeORM entity imports
+// resolveGrant — pure function, no TypeORM entity imports
 // ---------------------------------------------------------------------------
-
-function makeDefaults(overrides = {}) {
-  return {
-    defaultCpuMillis: 2000,
-    defaultMemBytes: 4 * 1024 ** 3,
-    defaultDiskBytes: 20 * 1024 ** 3,
-    defaultGpuMode: GpuGrantMode.None,
-    defaultGpuIndices: [] as number[],
-    ...overrides,
-  };
-}
 
 function makeGrant(overrides = {}) {
   return {
@@ -43,59 +32,52 @@ function makeGrant(overrides = {}) {
   };
 }
 
-describe('resolveGrantWithServerDefaults', () => {
-  it('uses server defaults when all grant fields are null', () => {
-    const result = resolveGrantWithServerDefaults(makeGrant(), makeDefaults());
-    expect(result.cpuMillis).toBe(2000);
-    expect(result.memBytes).toBe(4 * 1024 ** 3);
-    expect(result.diskBytes).toBe(20 * 1024 ** 3);
-    expect(result.gpuMode).toBe(GpuGrantMode.None);
+describe('resolveGrant', () => {
+  it('treats null resource fields as unlimited and null GPU mode as all', () => {
+    const result = resolveGrant(makeGrant());
+    expect(result.cpuMillis).toBe(0);
+    expect(result.memBytes).toBe(0);
+    expect(result.diskBytes).toBe(0);
+    expect(result.gpuMode).toBe(GpuGrantMode.All);
     expect(result.gpuIndices).toEqual([]);
   });
 
   it('uses grant values when set (non-null)', () => {
-    const result = resolveGrantWithServerDefaults(
+    const result = resolveGrant(
       makeGrant({ cpuMillis: 8000, memBytes: 8 * 1024 ** 3 }),
-      makeDefaults(),
     );
     expect(result.cpuMillis).toBe(8000);
     expect(result.memBytes).toBe(8 * 1024 ** 3);
-    // null fields still fall back to defaults
-    expect(result.diskBytes).toBe(20 * 1024 ** 3);
+    expect(result.diskBytes).toBe(0);
   });
 
   it('uses grant gpuIndices when set', () => {
-    const result = resolveGrantWithServerDefaults(
+    const result = resolveGrant(
       makeGrant({ gpuMode: GpuGrantMode.Indices, gpuIndices: [0, 2] }),
-      makeDefaults({ defaultGpuIndices: [0, 1, 2, 3] }),
     );
     expect(result.gpuIndices).toEqual([0, 2]);
     expect(result.gpuMode).toBe(GpuGrantMode.Indices);
   });
 
-  it('inherits server gpuIndices when grant gpuIndices is null', () => {
-    const result = resolveGrantWithServerDefaults(
+  it('uses empty gpuIndices when grant gpuIndices is null', () => {
+    const result = resolveGrant(
       makeGrant({ gpuMode: GpuGrantMode.Indices }),
-      makeDefaults({ defaultGpuIndices: [0, 1] }),
     );
-    expect(result.gpuIndices).toEqual([0, 1]);
+    expect(result.gpuIndices).toEqual([]);
   });
 
-  it('inherits server gpuMode when grant gpuMode is null', () => {
-    const result = resolveGrantWithServerDefaults(
+  it('uses all GPU mode when grant gpuMode is null', () => {
+    const result = resolveGrant(
       makeGrant({ gpuMode: null }),
-      makeDefaults({ defaultGpuMode: GpuGrantMode.All, defaultGpuIndices: [0, 1] }),
     );
     expect(result.gpuMode).toBe(GpuGrantMode.All);
-    expect(result.gpuIndices).toEqual([0, 1]);
+    expect(result.gpuIndices).toEqual([]);
   });
 
-  it('preserves zero as an explicit grant value (not overridden by defaults)', () => {
-    const result = resolveGrantWithServerDefaults(
+  it('preserves zero as an explicit unlimited grant value', () => {
+    const result = resolveGrant(
       makeGrant({ cpuMillis: 0 }),
-      makeDefaults({ defaultCpuMillis: 4000 }),
     );
-    // 0 is a valid explicit value meaning "unlimited" — must NOT be replaced by default
     expect(result.cpuMillis).toBe(0);
   });
 });
@@ -223,12 +205,6 @@ function makeAccessResolver(input: {
       }),
     }),
   };
-  const serversRepo = {
-    find: async () => [
-      makeServer('server-accessible'),
-      makeServer('server-ungranted'),
-    ],
-  };
   const imagesRepo = {
     find: async () => [],
   };
@@ -243,8 +219,17 @@ function makeAccessResolver(input: {
   const remoteFsAssignmentsRepo = {
     find: async () => [],
   };
-  const dataDisksRepo = {
-    find: async () => [],
+  const serversRepo = {
+    find: async () => [
+      makeServer('server-accessible'),
+      makeServer('server-ungranted'),
+    ],
+  };
+  const agentGateway = {
+    stateCache: {
+      get: () => undefined,
+      getAll: () => [],
+    },
   };
 
   return new AccessResolverService(
@@ -256,7 +241,8 @@ function makeAccessResolver(input: {
     serversRepo as never,
     mountSourceGrantsRepo as never,
     remoteFsAssignmentsRepo as never,
-    dataDisksRepo as never,
+    agentGateway as never,
+    new AccessCacheEpochService(),
   );
 }
 
@@ -277,15 +263,7 @@ function makeServer(id: string) {
   return {
     id,
     name: id,
-    parentIface: 'eth0',
-    ipCidr: '10.0.0.0/24',
-    gateway: '10.0.0.1',
     agentTokenHash: `token-${id}`,
-    defaultCpuMillis: 1000,
-    defaultMemBytes: 1024,
-    defaultDiskBytes: 2048,
-    defaultGpuMode: GpuGrantMode.None,
-    defaultGpuIndices: [],
   };
 }
 

@@ -7,6 +7,7 @@ import {
   Body,
   UseGuards,
   HttpCode,
+  Query,
 } from '@nestjs/common';
 import { GroupsService } from './groups.service.js';
 import { AccessResolverService } from '../access/access-resolver.service.js';
@@ -15,13 +16,11 @@ import { CapabilitiesGuard } from '../auth/guards/capabilities.guard.js';
 import { RequireCaps } from '../auth/decorators/require-caps.decorator.js';
 import { CurrentUser } from '../auth/decorators/current-user.decorator.js';
 import { UserEntity } from '../entities/user.entity.js';
-import { Capability, zUpsertServerGrantRequest, zAddImageGrantRequest, EffectiveAccessDto, MountSourceKind } from '@nyabase/common';
-import { z } from 'zod';
-
-const zUpsertMountSourceGrantBody = z.object({
-  sourceKind: z.enum(['local', 'remote']),
-  sourceId: z.string().uuid(),
-});
+import { Capability, zUpsertServerGrantRequest, zAddImageGrantRequest, EffectiveAccessDto } from '@nyabase/common';
+import {
+  parseMountSourceGrantTarget,
+  zMountSourceGrantTarget,
+} from '../mount-sources/mount-source-grant-target.js';
 
 @Controller('admin/users/:userId')
 @UseGuards(JwtAuthGuard, CapabilitiesGuard)
@@ -51,13 +50,12 @@ export class UserGrantsController {
 
   @Delete('server-grants/:serverId')
   @RequireCaps(Capability.ManageGrants)
-  @HttpCode(204)
   async deleteUserServerGrant(
     @Param('userId') userId: string,
     @Param('serverId') serverId: string,
     @CurrentUser() actor: UserEntity,
   ) {
-    await this.groupsService.deleteUserServerGrant(userId, serverId, actor.id);
+    return this.groupsService.deleteUserServerGrant(userId, serverId, actor.id);
   }
 
   @Get('image-grants')
@@ -100,8 +98,8 @@ export class UserGrantsController {
     @Body() body: unknown,
     @CurrentUser() actor: UserEntity,
   ) {
-    const { sourceKind, sourceId } = zUpsertMountSourceGrantBody.parse(body);
-    return this.groupsService.upsertUserMountSourceGrant(actor.id, userId, sourceKind as MountSourceKind, sourceId);
+    const target = zMountSourceGrantTarget.parse(body);
+    return this.groupsService.upsertUserMountSourceGrant(actor.id, userId, target);
   }
 
   @Delete('mount-source-grants/:sourceKind/:sourceId')
@@ -111,9 +109,11 @@ export class UserGrantsController {
     @Param('userId') userId: string,
     @Param('sourceKind') sourceKind: string,
     @Param('sourceId') sourceId: string,
+    @Query('serverId') serverId: string | undefined,
     @CurrentUser() actor: UserEntity,
   ) {
-    await this.groupsService.deleteUserMountSourceGrant(actor.id, userId, sourceKind as MountSourceKind, sourceId);
+    const target = parseMountSourceGrantTarget(sourceKind, sourceId, serverId);
+    await this.groupsService.deleteUserMountSourceGrant(actor.id, userId, target);
   }
 
   @Get('effective-access')

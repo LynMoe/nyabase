@@ -18,14 +18,33 @@ export class CapabilitiesGuard implements CanActivate {
       context.getClass(),
     ]);
 
-    const user: UserEntity = context.switchToHttp().getRequest().user;
+    const request = context.switchToHttp().getRequest();
+    const user: UserEntity = request.user;
     if (!user) return false;
 
-    if (!requiredCaps?.length) return true;
+    if (!requiredCaps?.length) {
+      if (this.isAdminRequest(request)) {
+        throw new ForbiddenException('Admin route is missing required capabilities');
+      }
+      return true;
+    }
 
     const userCaps = await this.accessResolver.userCapabilities(user.id);
     const ok = requiredCaps.every((c) => userCaps.has(c));
     if (!ok) throw new ForbiddenException();
     return true;
+  }
+
+  private isAdminRequest(request: { originalUrl?: string; url?: string; path?: string; route?: { path?: string } }): boolean {
+    const candidates = [
+      request.originalUrl,
+      request.url,
+      request.path,
+      request.route?.path,
+    ].filter((value): value is string => typeof value === 'string');
+    return candidates.some((value) => {
+      const path = value.split('?')[0];
+      return path === '/admin' || path.startsWith('/admin/') || path === '/api/admin' || path.startsWith('/api/admin/');
+    });
   }
 }

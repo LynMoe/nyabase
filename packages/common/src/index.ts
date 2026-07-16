@@ -6,7 +6,7 @@ export * from './config/definition.js';
 export * from './protocol/agent-messages.js';
 export * from './protocol/ws.js';
 export * from './protocol/rest.js';
-export * from './protocol/schema.js';
+export * from './protocol/rest-schema.js';
 export * from './protocol/ssh-public-key.js';
 export * from './protocol/ssh-proxy.js';
 export * from './protocol/http-proxy.js';

@@ -2,7 +2,7 @@ import { Link, getRouteApi } from '@tanstack/react-router';
 import { useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { AlertTriangle, ArrowLeft, BarChart2, ChevronDown, Info, Loader2, Power, Terminal, Trash2 } from 'lucide-react';
-import { Capability, ContainerStatus, OperationStatus, type ContainerAction, type ContainerMetrics, type ContainerMetricsDto, type ContainerView, type OperationRefResponse } from '@nyabase/common';
+import { AgentTaskStatus, Capability, ContainerStatus, type AgentTaskRefResponse, type ContainerAction, type ContainerMetrics, type ContainerMetricsDto, type ContainerView } from '@nyabase/common';
 import { api } from '../lib/api.js';
 import { Badge } from '../components/ui/badge.js';
 import { Button } from '../components/ui/button.js';
@@ -10,7 +10,7 @@ import { formatBytesCompact, formatBytesLimit, formatCpu } from '../lib/utils.js
 import { useAuthStore } from '../store/auth.js';
 import { MountsCard } from '../components/containers/mounts-card.js';
 import { toast } from '../hooks/use-toast.js';
-import { useOperationTracker } from '../hooks/use-operation-tracker.js';
+import { isPendingAgentTaskStatus, useAgentTaskTracker } from '../hooks/use-agent-task-tracker.js';
 import { containerActionPath } from '../lib/container-actions.js';
 import { ContainerConsole } from '../components/containers/container-console.js';
 import { queryKeys } from '../lib/query-keys.js';
@@ -26,6 +26,16 @@ import {
   TooltipProvider,
   TooltipTrigger,
 } from '../components/ui/tooltip.js';
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from '../components/ui/alert-dialog.js';
 import {
   EmptyChart,
   InlineSingleLineChart,
@@ -50,7 +60,7 @@ const ACTION_LABELS: Partial<Record<ContainerAction, string>> = {
   reconcileSsh: '修复 SSH',
 };
 
-const OPERATION_STATE_LABELS: Record<string, string> = {
+const TASK_KIND_LABELS: Record<string, string> = {
   'container.create': 'creating',
   'container.start': 'starting',
   'container.stop': 'stopping',
@@ -59,6 +69,34 @@ const OPERATION_STATE_LABELS: Record<string, string> = {
   'container.update_mounts': 'updating mounts',
   'container.reconcile_ssh': 'repairing SSH',
 };
+
+const TASK_STATUS_LABELS: Record<AgentTaskStatus, string> = {
+  [AgentTaskStatus.Pending]: '任务处理中',
+  [AgentTaskStatus.Succeeded]: '已完成',
+  [AgentTaskStatus.Failed]: '失败',
+};
+
+function taskStatusLabel(status: AgentTaskStatus | string | null | undefined): string {
+  return status ? TASK_STATUS_LABELS[status as AgentTaskStatus] ?? String(status) : '任务';
+}
+
+function taskBadgeTitle(task: ContainerView['activeTask']): string | undefined {
+  if (!task) return undefined;
+  return `${task.kind} · ${taskStatusLabel(task.status)}`;
+}
+
+function taskVariant(status: AgentTaskStatus | string | null | undefined): 'success' | 'destructive' | 'warning' | 'secondary' | 'outline' {
+  if (status === AgentTaskStatus.Failed) return 'destructive';
+  if (status === AgentTaskStatus.Succeeded) return 'success';
+  if (isPendingAgentTaskStatus(status)) return 'warning';
+  return 'outline';
+}
+
+function taskErrorMessage(task: ContainerView['activeTask']): string | null {
+  if (!task || typeof task.error !== 'object' || task.error === null) return null;
+  const message = (task.error as { message?: unknown }).message;
+  return typeof message === 'string' && message.trim() ? message : null;
+}
 
 export default function ContainerDetailPage() {
   const { containerId } = routeApi.useParams();
@@ -101,8 +139,9 @@ function ContainerDetailContent({
   const { user } = useAuthStore();
   const [activeTab, setActiveTab] = useState<'overview' | 'console'>(initialTab);
   const [metricsRange, setMetricsRange] = useState('1h');
-  const [trackedOperationId, setTrackedOperationId] = useState<string | null>(null);
-  useOperationTracker(trackedOperationId, { admin: plane === 'admin' });
+  const [trackedTaskId, setTrackedTaskId] = useState<string | null>(null);
+  const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false);
+  useAgentTaskTracker(trackedTaskId, { admin: plane === 'admin' });
 
   const apiBasePath = plane === 'admin' ? '/admin/v2/containers' : '/v2/containers';
   const metricsBasePath = plane === 'admin' ? '/admin/metrics' : '/metrics';
@@ -124,10 +163,10 @@ function ContainerDetailContent({
   });
 
   const runAction = useMutation({
-    mutationFn: (action: ContainerAction) => api.post<OperationRefResponse>(`${apiBasePath}/${containerId}/actions/${containerActionPath(action)}`),
+    mutationFn: (action: ContainerAction) => api.post<AgentTaskRefResponse>(`${apiBasePath}/${containerId}/actions/${containerActionPath(action)}`),
     onSuccess: (res) => {
-      setTrackedOperationId(res.operationId);
-      toast({ title: '操作已排队', description: `操作 ${res.operationId.slice(0, 8)}` });
+      setTrackedTaskId(res.taskId);
+      toast({ title: '任务已排队', description: `任务 ${res.taskId.slice(0, 8)}` });
       void qc.invalidateQueries({ queryKey: queryKeys.containers.detail(plane, containerId) });
       void qc.invalidateQueries({ queryKey: plane === 'admin' ? queryKeys.containers.adminList : queryKeys.containers.userList });
     },
@@ -138,28 +177,31 @@ function ContainerDetailContent({
 
   const running = c.runtime.status === ContainerStatus.Running;
   const canManageContainer = plane === 'admin' || user?.id === c.ownerId;
-  const runtimeLabel = c.activeOperation?.status === OperationStatus.WaitingReport
-    ? '等待上报'
-    : c.activeOperation
-    ? '操作中'
+  const task = c.activeTask;
+  const pendingTask = isPendingAgentTaskStatus(task?.status) ? task : null;
+  const runtimeLabel = task
+    ? taskStatusLabel(task.status)
     : c.runtime.bound
     ? (c.runtime.status ?? ContainerStatus.Unknown)
     : 'unbound';
-  const runtimeBadgeVariant = c.activeOperation ? 'warning' : running ? 'success' : 'secondary';
-  const containerStateLabel = c.activeOperation?.status === OperationStatus.WaitingReport
-    ? '命令已完成，等待 agent 上报确认'
-    : c.activeOperation
-    ? '操作执行中'
+  const runtimeBadgeVariant = task ? taskVariant(task.status) : running ? 'success' : 'secondary';
+  const containerStateLabel = pendingTask
+    ? '任务处理中'
+    : task
+    ? `任务${taskStatusLabel(task.status)}`
     : c.runtime.bound
     ? (c.runtime.status ?? ContainerStatus.Unknown)
     : '未绑定';
   const ip = c.runtime.ip ?? '等待运行态';
   const sshLabel = c.ssh.ready ? '代理可用' : c.ssh.enabled ? c.ssh.status : '镜像禁用';
-  const operationState = c.activeOperation
-    ? OPERATION_STATE_LABELS[c.activeOperation.kind] ?? c.activeOperation.kind
+  const taskState = task
+    ? TASK_KIND_LABELS[task.kind] ?? task.kind
     : null;
+  const taskFailure = taskErrorMessage(task);
   const failureInfo = c.failureReason?.trim()
     ? c.failureReason
+    : taskFailure
+    ? taskFailure
     : c.failureCode ?? null;
   const sshCommand = c.ssh.login?.omittedServer ?? c.ssh.login?.explicitServer;
   const sshInfo = c.ssh.lastError
@@ -191,8 +233,8 @@ function ContainerDetailContent({
               {plane === 'admin' && c.ownerName && (
                 <Badge variant="outline">{c.ownerName}</Badge>
               )}
-              <Badge variant={runtimeBadgeVariant} title={c.activeOperation?.status === OperationStatus.WaitingReport ? '命令已完成，等待 agent 上报确认' : c.activeOperation?.kind}>
-                {c.activeOperation && <Loader2 className="mr-1 h-3 w-3 animate-spin" />}
+              <Badge variant={runtimeBadgeVariant} title={taskBadgeTitle(task)}>
+                {pendingTask && <Loader2 className="mr-1 h-3 w-3 animate-spin" />}
                 {runtimeLabel}
               </Badge>
             </div>
@@ -227,7 +269,7 @@ function ContainerDetailContent({
             size="sm"
             disabled={!c.actions.delete.enabled || runAction.isPending}
             title={actionTitle(c, 'delete')}
-            onClick={() => runAction.mutate('delete')}
+            onClick={() => setDeleteConfirmOpen(true)}
           >
             <Trash2 className="h-4 w-4" />
             删除
@@ -252,26 +294,26 @@ function ContainerDetailContent({
                 <span className="text-muted-foreground">容器状态</span>
                 <div className="flex min-w-0 items-center justify-end gap-2">
                   <span className="text-foreground font-medium text-right truncate">{containerStateLabel}</span>
-                  {operationState && (
+                  {taskState && (
                     <TooltipProvider>
                       <Tooltip>
                         <TooltipTrigger asChild>
                           <button
                             type="button"
                             className="inline-flex items-center gap-1 rounded-sm text-muted-foreground transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-                            aria-label="当前操作"
+                            aria-label="当前任务"
                           >
-                            <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                            {pendingTask && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
                             <Info className="h-3.5 w-3.5" />
                           </button>
                         </TooltipTrigger>
                         <TooltipContent>
-                          <p>{operationState}</p>
+                          <p>{taskState}</p>
                         </TooltipContent>
                       </Tooltip>
                     </TooltipProvider>
                   )}
-                  {failureInfo && !operationState && (
+                  {failureInfo && (
                     <TooltipProvider>
                       <Tooltip>
                         <TooltipTrigger asChild>
@@ -372,6 +414,30 @@ function ContainerDetailContent({
       {activeTab === 'console' && (
         <ContainerConsole container={c} apiBasePath={apiBasePath} />
       )}
+
+      <AlertDialog open={deleteConfirmOpen} onOpenChange={setDeleteConfirmOpen}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>删除容器？</AlertDialogTitle>
+            <AlertDialogDescription>
+              确定要删除容器 &ldquo;{c.name}&rdquo;？此操作不可恢复。
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>取消</AlertDialogCancel>
+            <AlertDialogAction
+              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+              disabled={runAction.isPending}
+              onClick={() => {
+                setDeleteConfirmOpen(false);
+                runAction.mutate('delete');
+              }}
+            >
+              删除
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
   );
 }

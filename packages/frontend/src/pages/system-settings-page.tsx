@@ -68,31 +68,11 @@ const FIELD_LABELS: Record<string, { label: string; description: string }> = {
   },
   'database.driver': {
     label: '数据库驱动',
-    description: 'TypeORM 使用的数据库驱动类型。',
+    description: 'TypeORM 使用 SQLite 数据库驱动。',
   },
   'database.path': {
     label: 'SQLite 文件路径',
     description: 'SQLite 数据库文件路径。',
-  },
-  'database.host': {
-    label: 'Postgres 主机',
-    description: 'Postgres 主机名。',
-  },
-  'database.port': {
-    label: 'Postgres 端口',
-    description: 'Postgres 端口。',
-  },
-  'database.name': {
-    label: 'Postgres 数据库',
-    description: 'Postgres 数据库名称。',
-  },
-  'database.user': {
-    label: 'Postgres 用户',
-    description: 'Postgres 用户名。',
-  },
-  'database.password': {
-    label: 'Postgres 密码',
-    description: 'Postgres 密码。',
   },
   'database.synchronize': {
     label: '数据库同步',
@@ -114,6 +94,10 @@ const FIELD_LABELS: Record<string, { label: string; description: string }> = {
     label: 'VictoriaMetrics 地址',
     description: '指标读写使用的基础地址。',
   },
+  'http.proxyToken': {
+    label: 'HTTP 代理令牌',
+    description: 'HTTP 代理进程连接后端时使用的 Bearer 令牌。',
+  },
   'ssh.keyEncryptionSecret': {
     label: 'SSH 密钥加密密钥',
     description: '用于加密数据库中内部 SSH 密钥的密钥。',
@@ -132,7 +116,7 @@ const FIELD_LABELS: Record<string, { label: string; description: string }> = {
   },
   'ssh.proxySnapshotStaleMs': {
     label: 'SSH 代理快照过期时间',
-    description: 'SSH 代理状态快照被判定为过期前的毫秒数。',
+    description: 'SSH 代理状态快照被判定为过期前的毫秒数（120000–300000）。',
   },
 };
 

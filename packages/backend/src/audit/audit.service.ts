@@ -10,7 +10,6 @@ import { ServerEntity } from '../entities/server.entity.js';
 import { ImageEntity } from '../entities/image.entity.js';
 import { ContainerEntity } from '../entities/container.entity.js';
 import { RemoteFsMountEntity } from '../entities/remote-fs-mount.entity.js';
-import { DataDiskEntity } from '../entities/data-disk.entity.js';
 import { DataDirectoryEntity } from '../entities/data-directory.entity.js';
 import { MountSourceGrantEntity } from '../entities/mount-source-grant.entity.js';
 import { NyabaseConfigService } from '../config/nyabase-config.service.js';
@@ -171,7 +170,7 @@ export class AuditService {
         case 'remote_fs_mount':
           return this.remoteFsMountSnapshot(id);
         case 'data_disk':
-          return this.dataDiskSnapshot(id);
+          return fallbackSnapshot('mount_source', id, payload);
         case 'datadir':
           return this.dataDirSnapshot(id);
         case 'mount_source':
@@ -227,8 +226,6 @@ export class AuditService {
       labels: {
         slug: server.slug,
         status: server.status,
-        ipCidr: server.ipCidr,
-        gateway: server.gateway,
       },
     };
   }
@@ -281,22 +278,6 @@ export class AuditService {
     };
   }
 
-  private async dataDiskSnapshot(id: string): Promise<AuditResourceSnapshot | null> {
-    const disk = await this.dataSource.getRepository(DataDiskEntity).findOne({ where: { id } });
-    if (!disk) return null;
-    return {
-      id,
-      type: 'data_disk',
-      name: disk.label?.trim() || disk.mountPoint,
-      labels: {
-        serverId: disk.serverId,
-        mountPoint: disk.mountPoint,
-        label: disk.label,
-        desiredState: disk.desiredState,
-      },
-    };
-  }
-
   private async dataDirSnapshot(id: string): Promise<AuditResourceSnapshot | null> {
     const dir = await this.dataSource.getRepository(DataDirectoryEntity).findOne({ where: { id } });
     if (!dir) return null;
@@ -343,7 +324,7 @@ export class AuditService {
   }
 
   private sourceSnapshot(sourceKind: string | null | undefined, sourceId: string): Promise<AuditResourceSnapshot | null> {
-    if (sourceKind === 'local') return this.dataDiskSnapshot(sourceId);
+    if (sourceKind === 'local') return Promise.resolve(fallbackSnapshot('mount_source', sourceId));
     if (sourceKind === 'remote') return this.remoteFsMountSnapshot(sourceId);
     return Promise.resolve(fallbackSnapshot('mount_source', sourceId));
   }

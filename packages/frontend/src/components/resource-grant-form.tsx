@@ -2,7 +2,6 @@ import { GpuGrantMode } from '@nyabase/common';
 import type { GpuGrantMode as GpuGrantModeT } from '@nyabase/common';
 import { Input } from './ui/input.js';
 import { Label } from './ui/label.js';
-import { formatBytes, formatCpu } from '../lib/utils.js';
 
 export interface ResourceFormValue {
   cpuCores: string;
@@ -36,22 +35,6 @@ export function grantToForm(g: {
   };
 }
 
-export function serverDefaultsToForm(s: {
-  defaultCpuMillis?: number;
-  defaultMemBytes?: number;
-  defaultDiskBytes?: number;
-  defaultGpuMode?: GpuGrantModeT;
-  defaultGpuIndices?: number[];
-}): ResourceFormValue {
-  return {
-    cpuCores: s.defaultCpuMillis != null ? String(+(s.defaultCpuMillis / 1000).toFixed(2)) : '',
-    memGb: s.defaultMemBytes != null ? String(+(s.defaultMemBytes / 1024 ** 3).toFixed(2)) : '',
-    diskGb: s.defaultDiskBytes != null ? String(+(s.defaultDiskBytes / 1024 ** 3).toFixed(2)) : '',
-    gpuMode: s.defaultGpuMode ?? GpuGrantMode.None,
-    gpuIndices: s.defaultGpuIndices?.join(',') ?? '',
-  };
-}
-
 export function formToGrantPayload(v: ResourceFormValue) {
   return {
     cpuMillis: v.cpuCores ? Math.round(parseFloat(v.cpuCores) * 1000) : null,
@@ -62,27 +45,15 @@ export function formToGrantPayload(v: ResourceFormValue) {
   };
 }
 
-export function formToServerDefaultsPayload(v: ResourceFormValue) {
-  return {
-    defaultCpuMillis: v.cpuCores ? Math.round(parseFloat(v.cpuCores) * 1000) : undefined,
-    defaultMemBytes: v.memGb ? Math.round(parseFloat(v.memGb) * 1024 ** 3) : undefined,
-    defaultDiskBytes: v.diskGb ? Math.round(parseFloat(v.diskGb) * 1024 ** 3) : undefined,
-    defaultGpuMode: v.gpuMode || GpuGrantMode.None,
-    defaultGpuIndices: v.gpuIndices ? v.gpuIndices.split(',').map(Number) : undefined,
-  };
-}
-
 interface Props {
   value: ResourceFormValue;
   onChange: (v: ResourceFormValue) => void;
   emptyHint?: string;
   showDisk?: boolean;
   showGpu?: boolean;
-  /** When provided, shows server-level defaults as a reference line below the inputs */
-  serverDefaults?: { cpuMillis: number; memBytes: number; diskBytes: number };
 }
 
-export function ResourceGrantForm({ value, onChange, emptyHint, showDisk = true, showGpu = true, serverDefaults }: Props) {
+export function ResourceGrantForm({ value, onChange, emptyHint, showDisk = true, showGpu = true }: Props) {
   const set = (k: keyof ResourceFormValue, v: string) => onChange({ ...value, [k]: v });
 
   const fields = [
@@ -109,15 +80,7 @@ export function ResourceGrantForm({ value, onChange, emptyHint, showDisk = true,
           </div>
         ))}
       </div>
-      <p className="text-xs text-muted-foreground/70">填 0 表示不限制</p>
-      {serverDefaults && (
-        <p className="text-xs text-muted-foreground/70">
-          服务器默认：
-          {serverDefaults.cpuMillis === 0 ? '不限' : formatCpu(serverDefaults.cpuMillis)} CPU
-          {' / '}{serverDefaults.memBytes === 0 ? '不限' : formatBytes(serverDefaults.memBytes)} 内存
-          {showDisk && <>{' / '}{serverDefaults.diskBytes === 0 ? '不限' : formatBytes(serverDefaults.diskBytes)} 磁盘</>}
-        </p>
-      )}
+      <p className="text-xs text-muted-foreground/70">CPU / 内存 / 磁盘填空或 0 表示不限制；GPU 留空表示全部 GPU</p>
       {showGpu && (
         <div className="grid grid-cols-3 gap-3">
           <div>
@@ -127,7 +90,7 @@ export function ResourceGrantForm({ value, onChange, emptyHint, showDisk = true,
               value={value.gpuMode}
               onChange={(e) => set('gpuMode', e.target.value)}
             >
-              <option value="">服务器默认</option>
+              <option value="">全部</option>
               <option value={GpuGrantMode.None}>无</option>
               <option value={GpuGrantMode.Indices}>指定索引</option>
               <option value={GpuGrantMode.All}>全部</option>

@@ -1,12 +1,23 @@
 export enum UserStatus {
   Active = 'active',
   Disabled = 'disabled',
+  /** Access is revoked while durable per-server quota=0 tasks converge. */
+  Deleting = 'deleting',
+  /** Terminal tombstone retained for durable references; it can never be reactivated. */
+  Deleted = 'deleted',
 }
 
 export enum ServerStatus {
   Online = 'online',
   Offline = 'offline',
   Unknown = 'unknown',
+  AgentStateUnready = 'agent_state_unready',
+  /**
+   * Backend rejected structurally impossible terminal evidence. The server is
+   * fenced across reconnects until an administrator explicitly retries the
+   * retained task after repairing/replacing the Agent binary.
+   */
+  AgentQuarantined = 'agent_quarantined',
 }
 
 export enum ContainerStatus {
@@ -24,9 +35,7 @@ export enum ContainerPhase {
   Active = 'active',
   Updating = 'updating',
   Deleting = 'deleting',
-  Deleted = 'deleted',
   Failed = 'failed',
-  Orphaned = 'orphaned',
 }
 
 export enum ContainerPowerIntent {
@@ -34,51 +43,28 @@ export enum ContainerPowerIntent {
   Stopped = 'stopped',
 }
 
-export enum OperationStatus {
-  Queued = 'queued',
-  Running = 'running',
-  WaitingReport = 'waiting_report',
+export enum AgentTaskStatus {
+  Pending = 'pending',
   Succeeded = 'succeeded',
   Failed = 'failed',
-  Cancelled = 'cancelled',
 }
 
-export enum OperationKind {
+/** One durable, high-level effect executed by exactly one authenticated Agent. */
+export enum AgentTaskKind {
   ContainerCreate = 'container.create',
   ContainerStart = 'container.start',
   ContainerStop = 'container.stop',
   ContainerRestart = 'container.restart',
   ContainerDelete = 'container.delete',
-  ContainerUpdateMounts = 'container.update_mounts',
-  ContainerReconcileSsh = 'container.reconcile_ssh',
-  DataDirCreate = 'datadir.create',
-  DataDirDelete = 'datadir.delete',
-  DiskApply = 'disk.apply',
-  RemoteFsApply = 'remote_fs.apply',
-  QuotaApply = 'quota.apply',
-  ImagePull = 'image.pull',
-}
-
-export enum AgentCommandKind {
-  Noop = 'noop',
-  RuntimeContainerCreate = 'runtime.container.create',
-  RuntimeContainerPower = 'runtime.container.power',
-  RuntimeContainerDelete = 'runtime.container.delete',
-  RuntimeContainerMountsApply = 'runtime.container.mounts.apply',
-  RuntimeContainerSshApply = 'runtime.container.ssh.apply',
-  DataDirApply = 'datadir.apply',
-  DataDirDelete = 'datadir.delete',
-  DiskApply = 'disk.apply',
-  DiskRemove = 'disk.remove',
-  RemoteFsApply = 'remote_fs.apply',
-  RemoteFsRemove = 'remote_fs.remove',
-  QuotaApply = 'quota.apply',
-  ImagePull = 'image.pull',
-}
-
-export enum CommandHookName {
-  ContainerMountsEnsure = 'container.mounts.ensure',
+  ContainerRuntimeAbsent = 'container.runtime.absent',
   ContainerSshEnsure = 'container.ssh.ensure',
+  DataDirEnsure = 'datadir.ensure',
+  DataDirAbsent = 'datadir.absent',
+  RemoteFsEnsure = 'remote_fs.ensure',
+  RemoteFsAbsent = 'remote_fs.absent',
+  QuotaEnsure = 'quota.ensure',
+  ImageEnsurePresent = 'image.ensure_present',
+  ImageEnsureAbsent = 'image.ensure_absent',
 }
 
 export enum RuntimeDriftKind {
@@ -140,7 +126,6 @@ export enum AuditAction {
   ExecContainer = 'container.exec',
   CreateServer = 'server.create',
   UpdateServer = 'server.update',
-  UpdateServerDefaults = 'server.defaults.update',
   DeleteServer = 'server.delete',
   AddDataDisk = 'server.disk.add',
   RemoveDataDisk = 'server.disk.remove',
@@ -168,7 +153,6 @@ export enum AuditAction {
   CreateRemoteFsMount = 'remote_fs.create',
   UpdateRemoteFsMount = 'remote_fs.update',
   DeleteRemoteFsMount = 'remote_fs.delete',
-  RemountRemoteFsMount = 'remote_fs.remount',
   AssignRemoteFsServer = 'remote_fs.server.assign',
   UnassignRemoteFsServer = 'remote_fs.server.unassign',
   UpsertMountSourceGrant = 'grant.mount_source.upsert',

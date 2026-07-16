@@ -2,12 +2,12 @@ import {
   Injectable,
   Logger,
   OnModuleDestroy,
+  OnModuleInit,
+  ServiceUnavailableException,
 } from '@nestjs/common';
-import { InjectRepository } from '@nestjs/typeorm';
-import { createHash, randomBytes } from 'crypto';
+import { randomBytes } from 'crypto';
 import * as http from 'http';
 import { WebSocket, WebSocketServer } from 'ws';
-import { Repository } from 'typeorm';
 import {
   zEnvelope,
   zSshProxyAuditEvent,
@@ -15,85 +15,175 @@ import {
   zSshProxyDisconnectAllResult,
   zSshProxyMetric,
   zSshProxyStatusReport,
+  SSH_PROXY_SNAPSHOT_STALE_MAX_MS,
+  SSH_PROXY_SNAPSHOT_STALE_MIN_MS,
+  MAX_SSH_PROXY_SNAPSHOT_BYTES,
   type SshProxyBackendMessage,
   type SshProxyStatusReport,
 } from '@nyabase/common';
-import { SshProxyTokenEntity } from '../entities/ssh-proxy-token.entity.js';
 import { SshProxySnapshotService } from './ssh-proxy-snapshot.service.js';
 import { NyabaseConfigService } from '../config/nyabase-config.service.js';
+import { ProxySnapshotNotifierService } from '../proxy-snapshots/proxy-snapshot-notifier.service.js';
+import {
+  configuredProxyTokenDigest,
+  hasValidBearerToken,
+} from '../common/proxy-bearer-auth.js';
+
+export const MAX_SSH_PROXY_BUFFERED_BYTES = MAX_SSH_PROXY_SNAPSHOT_BYTES;
+export const MAX_SSH_PROXY_CLIENTS = 4;
+export const MAX_PENDING_SSH_DISCONNECT_ALL = 16;
+const MAX_SSH_PROXY_CONTROL_FRAME_BYTES = 1024 * 1024;
+const MAX_SSH_PROXY_SNAPSHOT_RENEWAL_MS = 60_000;
+const INITIAL_CONNECTION_DEADLINE_MS = 15_000;
+
+export function sshProxySnapshotRenewalMs(staleAfterMs: number): number {
+  if (
+    !Number.isSafeInteger(staleAfterMs)
+    || staleAfterMs < SSH_PROXY_SNAPSHOT_STALE_MIN_MS
+    || staleAfterMs > SSH_PROXY_SNAPSHOT_STALE_MAX_MS
+  ) {
+    throw new Error(
+      `SSH proxy snapshot staleAfterMs must be between ${SSH_PROXY_SNAPSHOT_STALE_MIN_MS} and ${SSH_PROXY_SNAPSHOT_STALE_MAX_MS}`,
+    );
+  }
+  return Math.min(
+    MAX_SSH_PROXY_SNAPSHOT_RENEWAL_MS,
+    Math.floor(staleAfterMs / 3),
+  );
+}
 
 @Injectable()
-export class SshProxyGateway implements OnModuleDestroy {
+export class SshProxyGateway implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(SshProxyGateway.name);
   private wss: WebSocketServer | null = null;
   private clients = new Set<WebSocket>();
+  /** Slots are reserved synchronously before authentication or snapshot I/O. */
+  private initializingClients = new Set<WebSocket>();
   private latestStatus = new Map<WebSocket, SshProxyStatusReport>();
+  private snapshotBroadcastPromise: Promise<void> | null = null;
+  private snapshotDirty = false;
+  /**
+   * In-memory invalidation token for snapshots built across a committed
+   * authorization change. Every broadcast request replaces it synchronously;
+   * builders may publish only when the token they started with is still live.
+   */
+  private snapshotRevision: object = {};
+  private snapshotRenewalTimer: NodeJS.Timeout | null = null;
+  private destroyed = false;
+  private unregisterSnapshotListener: (() => void) | null = null;
+  private readonly expectedTokenDigest: Buffer;
   private pendingDisconnectAll = new Map<string, {
     expected: number;
-    replies: number;
+    awaiting: Set<WebSocket>;
     disconnected: number;
     timeout: NodeJS.Timeout;
     resolve: (result: { requestId: string; requested: number; disconnected: number }) => void;
   }>();
 
   constructor(
-    @InjectRepository(SshProxyTokenEntity)
-    private tokensRepo: Repository<SshProxyTokenEntity>,
     private snapshots: SshProxySnapshotService,
     private config: NyabaseConfigService,
-  ) {}
+    private proxySnapshots: ProxySnapshotNotifierService,
+  ) {
+    this.expectedTokenDigest = configuredProxyTokenDigest(
+      config.get<string>('ssh.proxyToken'),
+      'ssh.proxyToken',
+    );
+  }
+
+  onModuleInit(): void {
+    this.unregisterSnapshotListener = this.proxySnapshots.register(
+      'ssh',
+      () => this.broadcastSnapshot(),
+    );
+    this.scheduleSnapshotRenewal();
+  }
 
   attachToHttpServer(server: http.Server): void {
-    this.wss = new WebSocketServer({ noServer: true });
+    this.wss = new WebSocketServer({
+      noServer: true,
+      maxPayload: MAX_SSH_PROXY_CONTROL_FRAME_BYTES,
+      perMessageDeflate: false,
+    });
     server.on('upgrade', (req: http.IncomingMessage, socket, head) => {
       if (req.url?.split('?')[0] !== '/ws/ssh-proxy') return;
-      this.wss!.handleUpgrade(req, socket as import('stream').Duplex, head, (ws) => {
-        this.wss!.emit('connection', ws, req);
-      });
+      try {
+        this.wss!.handleUpgrade(req, socket as import('stream').Duplex, head, (ws) => {
+          this.wss!.emit('connection', ws, req);
+        });
+      } catch (error) {
+        this.logger.warn(
+          `SSH proxy WebSocket upgrade failed: ${error instanceof Error ? error.message : String(error)}`,
+        );
+        socket.destroy();
+      }
     });
     this.wss.on('connection', (ws, req) => {
-      void this.handleConnection(ws, req);
+      ws.on('close', () => this.removeAdmittedClient(ws));
+      // Attach before the first await: an unhandled EventEmitter `error`
+      // would otherwise terminate the Backend during authentication/build.
+      ws.on('error', (error) => this.logger.warn(`SSH proxy WS error: ${error.message}`));
+      void this.handleConnection(ws, req).catch((error: unknown) => {
+        this.logger.warn(
+          `SSH proxy connection initialization failed: ${error instanceof Error ? error.message : String(error)}`,
+        );
+        ws.terminate();
+      });
     });
     this.logger.log('SSH proxy WebSocket gateway ready at /ws/ssh-proxy');
   }
 
   onModuleDestroy(): void {
-    for (const client of this.clients) client.close();
+    this.destroyed = true;
+    this.unregisterSnapshotListener?.();
+    this.unregisterSnapshotListener = null;
+    if (this.snapshotRenewalTimer) clearTimeout(this.snapshotRenewalTimer);
+    this.snapshotRenewalTimer = null;
+    for (const client of this.initializingClients) client.terminate();
+    for (const client of this.clients) client.terminate();
+    this.initializingClients.clear();
     this.clients.clear();
     this.latestStatus.clear();
+    this.snapshotDirty = false;
+    for (const [requestId, pending] of this.pendingDisconnectAll) {
+      clearTimeout(pending.timeout);
+      pending.resolve({ requestId, requested: pending.expected, disconnected: pending.disconnected });
+    }
+    this.pendingDisconnectAll.clear();
     this.wss?.close();
   }
 
   async broadcastSnapshot(): Promise<void> {
-    if (this.clients.size === 0) return;
-    const snapshot = await this.snapshots.buildSnapshot();
-    this.broadcast({ kind: 'update', payload: snapshot });
+    return this.requestSnapshotBroadcast(true);
   }
 
-  async ensureToken(): Promise<string> {
-    const configuredToken = this.config.get<string>('ssh.proxyToken');
-    if (configuredToken.trim()) {
-      const tokenHash = this.hash(configuredToken);
-      const existing = await this.tokensRepo.findOneBy({ id: 'singleton' });
-      if (!existing || existing.tokenHash !== tokenHash) {
-        await this.tokensRepo.save(this.tokensRepo.create({
-          id: 'singleton',
-          tokenHash,
-          createdAt: existing?.createdAt ?? new Date(),
-        }));
-      }
-      return configuredToken;
+  /** Lease renewal is not an authorization invalidation. If a build is
+   * already in flight, its eventual snapshot is newer than this request and
+   * can safely satisfy it without being discarded or starting another build.
+   */
+  private async renewSnapshotLease(): Promise<void> {
+    return this.requestSnapshotBroadcast(false);
+  }
+
+  private async requestSnapshotBroadcast(invalidate: boolean): Promise<void> {
+    if (this.destroyed) return;
+    if (invalidate) {
+      // This must happen before the first await, including when no proxy is
+      // currently admitted: an initial-connection build may be in flight and
+      // must discard its pre-revocation snapshot.
+      this.snapshotRevision = {};
     }
-    const existing = await this.tokensRepo.findOneBy({ id: 'singleton' });
-    if (existing) return '';
-    const raw = randomBytes(32).toString('hex');
-    await this.tokensRepo.save(this.tokensRepo.create({
-      id: 'singleton',
-      tokenHash: this.hash(raw),
-      createdAt: new Date(),
-    }));
-    this.logger.warn('Generated SSH proxy token because SSH_PROXY_TOKEN is not set; set it explicitly in production');
-    return raw;
+    this.scheduleSnapshotRenewal();
+    if (!invalidate && this.snapshotBroadcastPromise) return this.snapshotBroadcastPromise;
+    this.snapshotDirty = true;
+    if (this.snapshotBroadcastPromise) return this.snapshotBroadcastPromise;
+    const pending = this.flushSnapshotBroadcasts();
+    this.snapshotBroadcastPromise = pending;
+    try {
+      await pending;
+    } finally {
+      if (this.snapshotBroadcastPromise === pending) this.snapshotBroadcastPromise = null;
+    }
   }
 
   getStatus(): {
@@ -140,6 +230,12 @@ export class SshProxyGateway implements OnModuleDestroy {
     if (targets.length === 0) {
       return { requestId, requested: 0, disconnected: 0 };
     }
+    if (this.pendingDisconnectAll.size >= MAX_PENDING_SSH_DISCONNECT_ALL) {
+      throw new ServiceUnavailableException({
+        code: 'SSH_PROXY_DISCONNECT_ALL_BUSY',
+        message: 'Too many SSH proxy disconnect-all requests are already pending',
+      });
+    }
     const message: SshProxyBackendMessage = {
       kind: 'disconnectAll',
       payload: { requestId, reason },
@@ -154,47 +250,120 @@ export class SshProxyGateway implements OnModuleDestroy {
       }, 5_000);
       this.pendingDisconnectAll.set(requestId, {
         expected: targets.length,
-        replies: 0,
+        awaiting: new Set(targets),
         disconnected: 0,
         timeout,
         resolve,
       });
-      for (const client of targets) client.send(encoded);
+      for (const client of targets) {
+        const sent = this.sendOrTerminate(
+          client,
+          encoded,
+          'disconnect-all command',
+          () => this.resolveDisconnectAll(requestId, 0, client),
+        );
+        if (!sent) this.resolveDisconnectAll(requestId, 0, client);
+      }
     });
   }
 
   private async handleConnection(ws: WebSocket, req: http.IncomingMessage): Promise<void> {
-    if (!await this.authorize(req)) {
-      ws.close(4003, 'Invalid token');
+    if (
+      this.destroyed
+      || this.clients.size + this.initializingClients.size >= MAX_SSH_PROXY_CLIENTS
+    ) {
+      ws.terminate();
       return;
     }
+    this.initializingClients.add(ws);
+    const deadline = Date.now() + INITIAL_CONNECTION_DEADLINE_MS;
+    try {
+      if (!this.authorize(req)) {
+        ws.terminate();
+        return;
+      }
 
-    this.clients.add(ws);
-    ws.on('close', () => {
-      this.clients.delete(ws);
-      this.latestStatus.delete(ws);
-    });
-    ws.on('error', (error) => this.logger.warn(`SSH proxy WS error: ${error.message}`));
-    ws.on('message', (raw) => this.handleMessage(ws, raw.toString()));
+      // Build before admission so an in-flight broadcast cannot overtake this
+      // connection's initial snapshot. The reservation above bounds both
+      // authentication I/O and concurrent snapshot builds.
+      let initialSnapshot: Awaited<ReturnType<SshProxySnapshotService['buildSnapshot']>>;
+      while (true) {
+        const buildRevision = this.snapshotRevision;
+        initialSnapshot = await this.buildInitialSnapshotBefore(deadline, ws);
+        if (this.destroyed || ws.readyState !== WebSocket.OPEN) {
+          if (ws.readyState === WebSocket.OPEN) ws.terminate();
+          return;
+        }
+        if (buildRevision !== this.snapshotRevision) continue;
+        break;
+      }
+      this.initializingClients.delete(ws);
+      this.clients.add(ws);
+      ws.on('message', (raw) => this.handleMessage(ws, raw.toString()));
 
-    ws.send(JSON.stringify({
-      ts: Date.now(),
-      kind: 'snapshot',
-      payload: await this.snapshots.buildSnapshot(),
-    }));
+      const initialEncoded = JSON.stringify({
+        ts: Date.now(),
+        kind: 'snapshot',
+        payload: initialSnapshot,
+      });
+      this.sendOrTerminate(ws, initialEncoded, 'initial snapshot');
+    } finally {
+      this.initializingClients.delete(ws);
+    }
   }
 
-  private async authorize(req: http.IncomingMessage): Promise<boolean> {
-    const authHeader = req.headers.authorization;
-    const bearer = authHeader?.startsWith('Bearer ') ? authHeader.slice(7) : '';
-    const queryToken = typeof req.url === 'string'
-      ? new URL(req.url, 'http://localhost').searchParams.get('token') ?? ''
-      : '';
-    const token = bearer || queryToken;
-    if (!token) return false;
-    await this.ensureToken();
-    const row = await this.tokensRepo.findOneBy({ id: 'singleton' });
-    return row?.tokenHash === this.hash(token);
+  private async flushSnapshotBroadcasts(): Promise<void> {
+    while (this.snapshotDirty) {
+      this.snapshotDirty = false;
+      if (this.clients.size === 0) continue;
+      try {
+        const buildRevision = this.snapshotRevision;
+        const snapshot = await this.snapshots.buildSnapshot();
+        if (this.destroyed) return;
+        if (buildRevision !== this.snapshotRevision) {
+          this.snapshotDirty = true;
+          continue;
+        }
+        this.broadcast({ kind: 'update', payload: snapshot });
+      } catch (error) {
+        // Preserve one dirty bit so the next domain event retries. Do not spin
+        // forever on a deterministic snapshot defect.
+        this.snapshotDirty = true;
+        throw error;
+      }
+    }
+  }
+
+  private scheduleSnapshotRenewal(): void {
+    if (this.destroyed) return;
+    const staleAfterMs = this.config.get<number>('ssh.proxySnapshotStaleMs');
+    const renewalMs = sshProxySnapshotRenewalMs(staleAfterMs);
+    if (this.snapshotRenewalTimer) clearTimeout(this.snapshotRenewalTimer);
+    this.snapshotRenewalTimer = setTimeout(() => {
+      this.snapshotRenewalTimer = null;
+      if (this.destroyed) return;
+      if (this.clients.size === 0) {
+        this.scheduleSnapshotRenewal();
+        return;
+      }
+      // A build which is still running will produce a snapshot newer than
+      // this tick. Reschedule without attaching another waiter to the same
+      // potentially long-lived Promise on every interval.
+      if (this.snapshotBroadcastPromise) {
+        this.scheduleSnapshotRenewal();
+        return;
+      }
+      void this.renewSnapshotLease().catch((error: unknown) => {
+        this.logger.warn(
+          `SSH proxy snapshot renewal failed: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      });
+    }, renewalMs);
+    this.snapshotRenewalTimer.unref();
+  }
+
+  private authorize(req: http.IncomingMessage): boolean {
+    return hasValidBearerToken(req, this.expectedTokenDigest);
   }
 
   private handleMessage(ws: WebSocket, raw: string): void {
@@ -228,7 +397,7 @@ export class SshProxyGateway implements OnModuleDestroy {
     }
     if (envelope.kind === 'disconnectAllResult') {
       const result = zSshProxyDisconnectAllResult.safeParse(envelope.payload);
-      if (result.success) this.resolveDisconnectAll(result.data.requestId, result.data.disconnected);
+      if (result.success) this.resolveDisconnectAll(result.data.requestId, result.data.disconnected, ws);
       return;
     }
     if (envelope.kind === 'audit') {
@@ -242,16 +411,53 @@ export class SshProxyGateway implements OnModuleDestroy {
   private broadcast(message: SshProxyBackendMessage): void {
     const encoded = JSON.stringify({ ts: Date.now(), ...message });
     for (const client of this.clients) {
-      if (client.readyState === WebSocket.OPEN) client.send(encoded);
+      this.sendOrTerminate(client, encoded, 'snapshot');
     }
   }
 
-  private resolveDisconnectAll(requestId: string, disconnected: number): void {
+  private sendOrTerminate(
+    client: WebSocket,
+    encoded: string,
+    context: string,
+    onAsyncFailure?: () => void,
+  ): boolean {
+    if (client.readyState !== WebSocket.OPEN) return false;
+    const encodedBytes = Buffer.byteLength(encoded);
+    if (client.bufferedAmount + encodedBytes > MAX_SSH_PROXY_BUFFERED_BYTES) {
+      this.logger.warn(
+        `SSH proxy ${context} dropped by terminating a backpressured client; bufferedAmount=${client.bufferedAmount}`,
+      );
+      client.terminate();
+      return false;
+    }
+    try {
+      client.send(encoded, (error) => {
+        if (!error) return;
+        this.logger.warn(`SSH proxy ${context} send failed: ${error.message}`);
+        client.terminate();
+        onAsyncFailure?.();
+      });
+      return true;
+    } catch (error) {
+      this.logger.warn(
+        `SSH proxy ${context} send failed: ${error instanceof Error ? error.message : String(error)}`,
+      );
+      client.terminate();
+      return false;
+    }
+  }
+
+  private resolveClosedProxy(client: WebSocket): void {
+    for (const requestId of this.pendingDisconnectAll.keys()) {
+      this.resolveDisconnectAll(requestId, 0, client);
+    }
+  }
+
+  private resolveDisconnectAll(requestId: string, disconnected: number, client: WebSocket): void {
     const pending = this.pendingDisconnectAll.get(requestId);
-    if (!pending) return;
-    pending.replies += 1;
+    if (!pending || !pending.awaiting.delete(client)) return;
     pending.disconnected += disconnected;
-    if (pending.replies < pending.expected) return;
+    if (pending.awaiting.size > 0) return;
     this.pendingDisconnectAll.delete(requestId);
     clearTimeout(pending.timeout);
     pending.resolve({
@@ -269,7 +475,35 @@ export class SshProxyGateway implements OnModuleDestroy {
     }
   }
 
-  private hash(token: string): string {
-    return createHash('sha256').update(token).digest('hex');
+  private removeAdmittedClient(client: WebSocket): void {
+    this.clients.delete(client);
+    this.latestStatus.delete(client);
+    this.resolveClosedProxy(client);
+  }
+
+  private async buildInitialSnapshotBefore(
+    deadline: number,
+    client: WebSocket,
+  ): Promise<Awaited<ReturnType<SshProxySnapshotService['buildSnapshot']>>> {
+    const remainingMs = deadline - Date.now();
+    if (remainingMs <= 0) throw new Error('SSH proxy initial snapshot deadline exceeded');
+    let expired = false;
+    const timer = setTimeout(() => {
+      expired = true;
+      if (client.readyState === WebSocket.OPEN) client.terminate();
+    }, remainingMs);
+    timer.unref();
+    try {
+      // TypeORM/SQLite work is not cancellable. Keep the reservation until the
+      // started build actually settles; otherwise close/reconnect can create
+      // an unbounded number of hidden in-flight snapshot queries.
+      const snapshot = await this.snapshots.buildSnapshot();
+      if (expired || Date.now() >= deadline) {
+        throw new Error('SSH proxy initial snapshot deadline exceeded');
+      }
+      return snapshot;
+    } finally {
+      clearTimeout(timer);
+    }
   }
 }

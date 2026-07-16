@@ -13,6 +13,9 @@ import { Capability, GpuGrantMode } from '@nyabase/common';
 import type { GroupDto, ServerDto, ImageDto, ServerGrantDto } from '@nyabase/common';
 import { formatCpu, formatBytesCompact } from '../lib/utils.js';
 import { queryKeys } from '../lib/query-keys.js';
+import { useAdminAgentTaskBatchFeedback } from '../hooks/use-agent-task-tracker.js';
+
+type TaskIdsResponse = { taskIds?: string[] };
 
 const CAP_LABELS: Record<string, string> = {
   [Capability.ManageUsers]: '管理用户',
@@ -69,6 +72,12 @@ export default function GroupsPage() {
   const [showCreate, setShowCreate] = useState(false);
   const [editGroup, setEditGroup] = useState<GroupDto | null>(null);
   const qc = useQueryClient();
+  const [trackedTaskIds, setTrackedTaskIds] = useState<string[]>([]);
+  useAdminAgentTaskBatchFeedback(trackedTaskIds);
+  const trackTaskIds = (taskIds?: string[]) => {
+    if (!taskIds?.length) return;
+    setTrackedTaskIds((current) => [...new Set([...current, ...taskIds])]);
+  };
 
   const { data: groups = [], isFetching: groupsFetching, refetch: refetchGroups } = useQuery({
     queryKey: queryKeys.groups.admin, queryFn: () => api.get<GroupDto[]>('/admin/groups'),
@@ -84,8 +93,12 @@ export default function GroupsPage() {
   const imageMap = new Map(images.map((img) => [img.id, img.name]));
 
   const deleteGroup = useMutation({
-    mutationFn: (id: string) => api.delete(`/admin/groups/${id}`),
-    onSuccess: () => { qc.invalidateQueries({ queryKey: queryKeys.groups.admin }); toast({ title: '用户组已删除' }); },
+    mutationFn: (id: string) => api.delete<TaskIdsResponse>(`/admin/groups/${id}`),
+    onSuccess: (result) => {
+      trackTaskIds(result.taskIds);
+      qc.invalidateQueries({ queryKey: queryKeys.groups.admin });
+      toast({ title: '用户组已删除' });
+    },
     onError: (e) => toast({ title: '删除失败', description: e.message, variant: 'destructive' }),
   });
 
@@ -223,7 +236,13 @@ export default function GroupsPage() {
       </div>
 
       <CreateGroupDialog open={showCreate} onOpenChange={setShowCreate} />
-      {editGroup && <EditGroupDialog group={editGroup} onClose={() => setEditGroup(null)} />}
+      {editGroup && (
+        <EditGroupDialog
+          group={editGroup}
+          onClose={() => setEditGroup(null)}
+          onTaskIds={trackTaskIds}
+        />
+      )}
     </div>
   );
 }
@@ -298,7 +317,15 @@ function CreateGroupDialog({ open, onOpenChange }: { open: boolean; onOpenChange
   );
 }
 
-function EditGroupDialog({ group, onClose }: { group: GroupDto; onClose: () => void }) {
+function EditGroupDialog({
+  group,
+  onClose,
+  onTaskIds,
+}: {
+  group: GroupDto;
+  onClose: () => void;
+  onTaskIds: (taskIds?: string[]) => void;
+}) {
   const qc = useQueryClient();
   const [form, setForm] = useState({
     name: group.name,
@@ -308,13 +335,14 @@ function EditGroupDialog({ group, onClose }: { group: GroupDto; onClose: () => v
   });
 
   const { mutate, isPending } = useMutation({
-    mutationFn: () => api.patch(`/admin/groups/${group.id}`, {
+    mutationFn: () => api.patch<GroupDto & TaskIdsResponse>(`/admin/groups/${group.id}`, {
       name: form.name,
       description: form.description || null,
       priority: parseInt(form.priority) || 0,
       capabilities: form.capabilities,
     }),
-    onSuccess: () => {
+    onSuccess: (result) => {
+      onTaskIds(result.taskIds);
       qc.invalidateQueries({ queryKey: queryKeys.groups.admin });
       toast({ title: '用户组已更新' });
       onClose();

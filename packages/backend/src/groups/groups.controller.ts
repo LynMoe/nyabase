@@ -8,6 +8,7 @@ import {
   Body,
   UseGuards,
   HttpCode,
+  Query,
 } from '@nestjs/common';
 import { GroupsService } from './groups.service.js';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard.js';
@@ -19,14 +20,11 @@ import {
   Capability,
   zCreateGroupRequest, zUpdateGroupRequest, zUpsertServerGrantRequest,
   zAddGroupMemberRequest, zAddImageGrantRequest, zSyncImageGrantServersRequest,
-  MountSourceKind,
 } from '@nyabase/common';
-import { z } from 'zod';
-
-const zUpsertMountSourceGrantBody = z.object({
-  sourceKind: z.enum(['local', 'remote']),
-  sourceId: z.string().uuid(),
-});
+import {
+  parseMountSourceGrantTarget,
+  zMountSourceGrantTarget,
+} from '../mount-sources/mount-source-grant-target.js';
 
 @Controller('admin/groups')
 @UseGuards(JwtAuthGuard, CapabilitiesGuard)
@@ -62,9 +60,8 @@ export class GroupsController {
 
   @Delete(':id')
   @RequireCaps(Capability.ManageGroups)
-  @HttpCode(204)
   async delete(@Param('id') id: string, @CurrentUser() user: UserEntity) {
-    await this.groupsService.delete(id, user.id);
+    return this.groupsService.delete(id, user.id);
   }
 
   // ---------------------------------------------------------------------------
@@ -81,15 +78,14 @@ export class GroupsController {
   @RequireCaps(Capability.ManageGroups)
   async addMember(@Param('id') id: string, @Body() body: unknown, @CurrentUser() user: UserEntity) {
     const { userId } = zAddGroupMemberRequest.parse(body);
-    await this.groupsService.addMember(id, userId, user.id);
-    return { ok: true };
+    const result = await this.groupsService.addMember(id, userId, user.id);
+    return { ok: true, ...result };
   }
 
   @Delete(':id/members/:userId')
   @RequireCaps(Capability.ManageGroups)
-  @HttpCode(204)
   async removeMember(@Param('id') id: string, @Param('userId') userId: string, @CurrentUser() user: UserEntity) {
-    await this.groupsService.removeMember(id, userId, user.id);
+    return this.groupsService.removeMember(id, userId, user.id);
   }
 
   // ---------------------------------------------------------------------------
@@ -116,9 +112,8 @@ export class GroupsController {
 
   @Delete(':id/server-grants/:serverId')
   @RequireCaps(Capability.ManageGrants)
-  @HttpCode(204)
   async deleteServerGrant(@Param('id') id: string, @Param('serverId') serverId: string, @CurrentUser() user: UserEntity) {
-    await this.groupsService.deleteGroupServerGrant(id, serverId, user.id);
+    return this.groupsService.deleteGroupServerGrant(id, serverId, user.id);
   }
 
   // ---------------------------------------------------------------------------
@@ -181,8 +176,8 @@ export class GroupsController {
     @Body() body: unknown,
     @CurrentUser() actor: UserEntity,
   ) {
-    const { sourceKind, sourceId } = zUpsertMountSourceGrantBody.parse(body);
-    return this.groupsService.upsertGroupMountSourceGrant(actor.id, id, sourceKind as MountSourceKind, sourceId);
+    const target = zMountSourceGrantTarget.parse(body);
+    return this.groupsService.upsertGroupMountSourceGrant(actor.id, id, target);
   }
 
   @Delete(':id/mount-source-grants/:sourceKind/:sourceId')
@@ -192,8 +187,10 @@ export class GroupsController {
     @Param('id') id: string,
     @Param('sourceKind') sourceKind: string,
     @Param('sourceId') sourceId: string,
+    @Query('serverId') serverId: string | undefined,
     @CurrentUser() actor: UserEntity,
   ) {
-    await this.groupsService.deleteGroupMountSourceGrant(actor.id, id, sourceKind as MountSourceKind, sourceId);
+    const target = parseMountSourceGrantTarget(sourceKind, sourceId, serverId);
+    await this.groupsService.deleteGroupMountSourceGrant(actor.id, id, target);
   }
 }

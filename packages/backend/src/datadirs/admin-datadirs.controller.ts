@@ -18,7 +18,7 @@ import { RequireCaps } from '../auth/decorators/require-caps.decorator.js';
 import { CurrentUser } from '../auth/decorators/current-user.decorator.js';
 import { AccessResolverService } from '../access/access-resolver.service.js';
 import { UserEntity } from '../entities/user.entity.js';
-import { Capability } from '@nyabase/common';
+import { Capability, zDataDirName } from '@nyabase/common';
 import { z } from 'zod';
 
 const zAdminCreateDirRequest = z.object({
@@ -84,9 +84,9 @@ export class AdminDataDirsController {
     if (sourceKind !== 'local' && sourceKind !== 'remote') {
       throw new BadRequestException(`sourceKind must be 'local' or 'remote'`);
     }
+    const safeName = zDataDirName.parse(name);
     const kind = sourceKind as 'local' | 'remote';
-    await this.requireTargetMountAccess(targetUserId, serverId, kind, sourceId);
-    return this.dataDirsService.deleteDir(user.id, targetUserId, serverId, kind, sourceId, name);
+    return this.dataDirsService.deleteDir(user.id, targetUserId, serverId, kind, sourceId, safeName);
   }
 
   private async requireTargetMountAccess(

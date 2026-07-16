@@ -8,7 +8,7 @@ import { ServerEntity } from '../entities/server.entity.js';
 import { AuthModule } from '../auth/auth.module.js';
 import { AccessModule } from '../access/access.module.js';
 import { AgentGatewayModule } from '../gateway/agent-gateway.module.js';
-import { OperationsModule } from '../operations/operations.module.js';
+import { AgentTasksModule } from '../agent-tasks/agent-tasks.module.js';
 import { SshModule } from '../ssh/ssh.module.js';
 
 @Module({
@@ -17,7 +17,7 @@ import { SshModule } from '../ssh/ssh.module.js';
     AuthModule,
     AccessModule,
     AgentGatewayModule,
-    OperationsModule,
+    AgentTasksModule,
     SshModule,
   ],
   providers: [ImagesService],

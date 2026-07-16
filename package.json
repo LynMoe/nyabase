@@ -3,7 +3,7 @@
   "private": true,
   "packageManager": "pnpm@9.15.0",
   "scripts": {
-    "build": "pnpm --filter @nyabase/common build && pnpm --filter @nyabase/backend build && pnpm --filter @nyabase/agent build",
+    "build": "pnpm --filter @nyabase/common build && pnpm --filter @nyabase/frontend build && pnpm --filter @nyabase/backend build && pnpm --filter @nyabase/agent build",
     "build:agent-binary": "bash scripts/build-agent-binary.sh",
     "build:frontend": "pnpm --filter @nyabase/frontend build",
     "dev": "bash scripts/dev.sh",
@@ -11,8 +11,8 @@
     "dev:frontend": "pnpm --filter @nyabase/frontend dev",
     "dev:agent": "pnpm --filter @nyabase/agent dev",
     "lint": "eslint packages/common/src packages/backend/src packages/agent/src packages/frontend/src",
-    "typecheck": "pnpm --filter @nyabase/common typecheck && pnpm --filter @nyabase/backend typecheck && pnpm --filter @nyabase/agent typecheck && pnpm --filter @nyabase/frontend typecheck",
-    "test:unit": "pnpm --filter @nyabase/common test && pnpm --filter @nyabase/backend test && pnpm --filter @nyabase/agent test",
+    "typecheck": "pnpm --filter @nyabase/common build && pnpm --filter @nyabase/common typecheck && pnpm --filter @nyabase/backend typecheck && pnpm --filter @nyabase/agent typecheck && pnpm --filter @nyabase/frontend typecheck",
+    "test:unit": "pnpm --filter @nyabase/common test && pnpm --filter @nyabase/backend test && pnpm --filter @nyabase/agent test && pnpm --filter @nyabase/frontend test",
     "test:functional": "node test/scripts/run-live-api-suite.mjs",
     "test": "pnpm typecheck && pnpm test:unit",
     "dev:reset": "bash scripts/dev.sh reset",
@@ -21,7 +21,7 @@
     "dev:all": "bash scripts/dev.sh all",
     "check": "bash scripts/check.sh",
     "check:visual": "bash scripts/check-visual.sh",
-    "check:control-plane-redesign": "bash scripts/check-control-plane-redesign-conformance.sh"
+    "check:agent-task": "bash scripts/check-agent-task-conformance.sh"
   },
   "devDependencies": {
     "@typescript-eslint/eslint-plugin": "^8.32.0",

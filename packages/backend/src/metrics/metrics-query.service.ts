@@ -77,22 +77,6 @@ export class MetricsQueryService {
     return results[0]?.series ?? emptySeries(step);
   }
 
-  /** Proxy a raw PromQL instant query to VictoriaMetrics and return the response as-is */
-  async rawInstantQuery(query: string, time?: string): Promise<unknown> {
-    const params = new URLSearchParams({ query });
-    if (time) params.set('time', time);
-    return this.vmFetch(`${this.vmUrl}/api/v1/query?${params}`);
-  }
-
-  /** Proxy a raw PromQL range query to VictoriaMetrics and return the response as-is */
-  async rawRangeQuery(query: string, start?: string, end?: string, step?: string): Promise<unknown> {
-    const params = new URLSearchParams({ query });
-    if (start) params.set('start', start);
-    if (end) params.set('end', end);
-    if (step) params.set('step', step);
-    return this.vmFetch(`${this.vmUrl}/api/v1/query_range?${params}`);
-  }
-
   private async vmFetch(url: string): Promise<unknown> {
     try {
       const res = await fetch(url, { signal: AbortSignal.timeout(15_000) });

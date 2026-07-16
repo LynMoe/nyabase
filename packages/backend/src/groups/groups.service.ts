@@ -5,20 +5,34 @@ import {
   ForbiddenException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { In, Repository } from 'typeorm';
+import { DataSource, EntityManager, In, Repository } from 'typeorm';
 import { v4 as uuidv4 } from 'uuid';
 import { GroupEntity } from '../entities/group.entity.js';
 import { GroupMemberEntity } from '../entities/group-member.entity.js';
 import { ServerGrantEntity } from '../entities/server-grant.entity.js';
 import { ImageGrantEntity } from '../entities/image-grant.entity.js';
 import { MountSourceGrantEntity } from '../entities/mount-source-grant.entity.js';
-import { RemoteFsMountEntity } from '../entities/remote-fs-mount.entity.js';
-import { DataDiskEntity } from '../entities/data-disk.entity.js';
 import { UserEntity } from '../entities/user.entity.js';
+import { ServerEntity } from '../entities/server.entity.js';
+import { ImageEntity } from '../entities/image.entity.js';
 import { AccessResolverService } from '../access/access-resolver.service.js';
 import { AuditService } from '../audit/audit.service.js';
 import { QuotaDispatchService } from '../quota/quota-dispatch.service.js';
+import { runSerializedTransaction } from '../database/serialized-transaction.js';
 import {
+  MountSourcesService,
+  type MountSourceGrantTarget,
+} from '../mount-sources/mount-sources.service.js';
+import { AccessRevocationGuardService } from '../access/access-revocation-guard.service.js';
+import { ProxySnapshotNotifierService } from '../proxy-snapshots/proxy-snapshot-notifier.service.js';
+import { ContainerEntity } from '../entities/container.entity.js';
+import { DataDirectoryEntity } from '../entities/data-directory.entity.js';
+import { AgentTaskEntity } from '../entities/agent-task.entity.js';
+import { QuotaDesiredEntity } from '../entities/quota-desired.entity.js';
+import { ResourceLockEntity } from '../entities/resource-lock.entity.js';
+import {
+  AgentTaskKind,
+  AgentTaskStatus,
   Capability,
   GpuGrantMode,
   AuditAction,
@@ -28,8 +42,13 @@ import {
   ServerGrantDto,
   ImageGrantDto,
   MountSourceGrantDto,
-  MountSourceKind,
+  MAX_PLATFORM_SERVERS,
+  UserStatus,
 } from '@nyabase/common';
+
+type TaskIdsResult = { taskIds: string[] };
+type WithTaskIds<T> = T & TaskIdsResult;
+export type UserDeleteResult = { deleted: boolean; taskIds: string[] };
 
 @Injectable()
 export class GroupsService {
@@ -42,17 +61,15 @@ export class GroupsService {
     private serverGrantsRepo: Repository<ServerGrantEntity>,
     @InjectRepository(ImageGrantEntity)
     private imageGrantsRepo: Repository<ImageGrantEntity>,
-    @InjectRepository(MountSourceGrantEntity)
-    private mountSourceGrantsRepo: Repository<MountSourceGrantEntity>,
-    @InjectRepository(RemoteFsMountEntity)
-    private remoteFsMountsRepo: Repository<RemoteFsMountEntity>,
-    @InjectRepository(DataDiskEntity)
-    private dataDisksRepo: Repository<DataDiskEntity>,
     @InjectRepository(UserEntity)
     private usersRepo: Repository<UserEntity>,
     private accessResolver: AccessResolverService,
     private auditService: AuditService,
     private quotaDispatchService: QuotaDispatchService,
+    private dataSource: DataSource,
+    private mountSources: MountSourcesService,
+    private revocationGuard: AccessRevocationGuardService,
+    private proxySnapshots: ProxySnapshotNotifierService,
   ) {}
 
   // ---------------------------------------------------------------------------
@@ -132,7 +149,9 @@ export class GroupsService {
     });
     group.capabilities = dto.capabilities ?? [];
     await this.groupsRepo.save(group);
-    await this.auditService.log(actorId ?? null, AuditAction.CreateGroup, group.id, 'group', { name: group.name });
+    await this.auditBestEffort(
+      actorId ?? null, AuditAction.CreateGroup, group.id, 'group', { name: group.name },
+    );
     return this.toDto(group);
   }
 
@@ -140,46 +159,82 @@ export class GroupsService {
     id: string,
     dto: { name?: string; description?: string; priority?: number; capabilities?: Capability[] },
     actorId?: string,
-  ): Promise<GroupDto> {
-    const group = await this.findById(id);
-
-    if (dto.name !== undefined) {
-      const existing = await this.groupsRepo.findOne({ where: { name: dto.name } });
-      if (existing && existing.id !== id) throw new ConflictException('Group name already exists');
-      group.name = dto.name;
-    }
-    if (dto.description !== undefined) group.description = dto.description ?? null;
-    if (dto.priority !== undefined) group.priority = dto.priority;
-    if (dto.capabilities !== undefined) group.capabilities = dto.capabilities;
-
-    await this.groupsRepo.save(group);
-    await this.auditService.log(actorId ?? null, AuditAction.UpdateGroup, id, 'group', dto);
-
-    const members = await this.membersRepo.find({ where: { groupId: id } });
+  ): Promise<WithTaskIds<GroupDto>> {
+    const { group, members, taskIds } = await runSerializedTransaction(this.dataSource, async (manager) => {
+      const current = await manager.findOne(GroupEntity, { where: { id } });
+      if (!current) throw new NotFoundException('Group not found');
+      if (dto.name !== undefined) {
+        const existing = await manager.findOne(GroupEntity, { where: { name: dto.name } });
+        if (existing && existing.id !== id) throw new ConflictException('Group name already exists');
+        current.name = dto.name;
+      }
+      if (dto.description !== undefined) current.description = dto.description ?? null;
+      const priorityChanged = dto.priority !== undefined && dto.priority !== current.priority;
+      if (dto.priority !== undefined) current.priority = dto.priority;
+      if (dto.capabilities !== undefined) current.capabilities = dto.capabilities;
+      const saved = await manager.save(GroupEntity, current);
+      const affected = await manager.find(GroupMemberEntity, { where: { groupId: id } });
+      const taskIds: string[] = [];
+      if (priorityChanged && affected.length > 0) {
+        const grants = await manager.find(ServerGrantEntity, {
+          where: { scope: 'group', scopeId: id },
+          select: { serverId: true },
+        });
+        for (const member of affected) {
+          for (const grant of grants) {
+            const taskId = await this.syncUserQuotaInTransaction(
+              manager, member.userId, grant.serverId, actorId ?? null,
+            );
+            if (taskId) taskIds.push(taskId);
+          }
+        }
+      }
+      return { group: saved, members: affected, taskIds };
+    });
+    await this.auditBestEffort(actorId ?? null, AuditAction.UpdateGroup, id, 'group', dto);
     for (const m of members) this.accessResolver.invalidateUser(m.userId);
 
-    return this.toDto(group);
+    return this.withTaskIds(this.toDto(group), taskIds);
   }
 
-  async delete(id: string, actorId?: string): Promise<void> {
-    const group = await this.findById(id);
-    if (group.isSystem) throw new ForbiddenException('Cannot delete system group');
-
-    const [members, groupServerGrants] = await Promise.all([
-      this.membersRepo.find({ where: { groupId: id } }),
-      this.serverGrantsRepo.find({ where: { scope: 'group', scopeId: id }, select: { serverId: true } }),
-    ]);
-    await this.membersRepo.delete({ groupId: id });
-    await this.serverGrantsRepo.delete({ scope: 'group', scopeId: id });
-    await this.imageGrantsRepo.delete({ scope: 'group', scopeId: id });
-    await this.mountSourceGrantsRepo.delete({ scope: 'group', scopeId: id });
-    await this.groupsRepo.remove(group);
-    await this.auditService.log(actorId ?? null, AuditAction.DeleteGroup, id, 'group', { name: group.name });
+  async delete(id: string, actorId?: string): Promise<TaskIdsResult> {
+    const { group, members, taskIds } = await runSerializedTransaction(this.dataSource, async (manager) => {
+      const current = await manager.findOne(GroupEntity, { where: { id } });
+      if (!current) throw new NotFoundException('Group not found');
+      if (current.isSystem) throw new ForbiddenException('Cannot delete system group');
+      const [affected, grants] = await Promise.all([
+        manager.find(GroupMemberEntity, { where: { groupId: id } }),
+        manager.find(ServerGrantEntity, {
+          where: { scope: 'group', scopeId: id }, select: { serverId: true },
+        }),
+      ]);
+      await this.mountSources.deleteScopeInTransaction(manager, 'group', id);
+      await manager.delete(GroupMemberEntity, { groupId: id });
+      await manager.delete(ServerGrantEntity, { scope: 'group', scopeId: id });
+      await manager.delete(ImageGrantEntity, { scope: 'group', scopeId: id });
+      await manager.remove(GroupEntity, current);
+      await this.revocationGuard.assertServerAccessRevocationSafe(
+        manager,
+        affected.flatMap((member) => grants.map((grant) => ({
+          userId: member.userId,
+          serverId: grant.serverId,
+        }))),
+      );
+      const taskIds: string[] = [];
+      for (const member of affected) {
+        for (const grant of grants) {
+          const taskId = await this.syncUserQuotaInTransaction(
+            manager, member.userId, grant.serverId, actorId ?? null,
+          );
+          if (taskId) taskIds.push(taskId);
+        }
+      }
+      return { group: current, members: affected, taskIds };
+    });
+    await this.auditBestEffort(actorId ?? null, AuditAction.DeleteGroup, id, 'group', { name: group.name });
 
     for (const m of members) this.accessResolver.invalidateUser(m.userId);
-    await Promise.all(
-      members.flatMap((m) => groupServerGrants.map((g) => this.syncUserQuota(m.userId, g.serverId, actorId ?? null))),
-    );
+    return { taskIds: this.uniqueTaskIds(taskIds) };
   }
 
   // ---------------------------------------------------------------------------
@@ -199,29 +254,74 @@ export class GroupsService {
     });
   }
 
-  async addMember(groupId: string, userId: string, actorId?: string): Promise<void> {
-    await this.findById(groupId);
-    const existing = await this.membersRepo.findOne({ where: { groupId, userId } });
-    if (existing) return; // idempotent
-    await this.membersRepo.save(this.membersRepo.create({ id: uuidv4(), groupId, userId }));
-    this.accessResolver.invalidateUser(userId);
-    await this.auditService.log(actorId ?? null, AuditAction.AddGroupMember, groupId, 'group', { userId });
-    const groupGrants = await this.serverGrantsRepo.find({
-      where: { scope: 'group', scopeId: groupId },
-      select: { serverId: true },
+  async addMember(groupId: string, userId: string, actorId?: string): Promise<TaskIdsResult> {
+    const changed = await runSerializedTransaction(this.dataSource, async (manager) => {
+      if (!await manager.findOne(GroupEntity, { where: { id: groupId } })) {
+        throw new NotFoundException('Group not found');
+      }
+      await this.requireUserInTransaction(manager, userId);
+      const existing = await manager.findOne(GroupMemberEntity, { where: { groupId, userId } });
+      if (existing) return { changed: false, taskIds: [] as string[] };
+      await manager.save(GroupMemberEntity, manager.create(GroupMemberEntity, {
+        id: uuidv4(), groupId, userId,
+      }));
+      const groupGrants = await manager.find(ServerGrantEntity, {
+        where: { scope: 'group', scopeId: groupId },
+        select: { serverId: true },
+      });
+      const taskIds: string[] = [];
+      for (const grant of groupGrants) {
+        const taskId = await this.syncUserQuotaInTransaction(
+          manager, userId, grant.serverId, actorId ?? null,
+        );
+        if (taskId) taskIds.push(taskId);
+      }
+      return { changed: true, taskIds };
     });
-    await Promise.all(groupGrants.map((g) => this.syncUserQuota(userId, g.serverId, actorId ?? null)));
+    if (!changed.changed) return { taskIds: [] };
+    this.accessResolver.invalidateUser(userId);
+    await this.auditBestEffort(actorId ?? null, AuditAction.AddGroupMember, groupId, 'group', { userId });
+    return { taskIds: this.uniqueTaskIds(changed.taskIds) };
   }
 
-  async removeMember(groupId: string, userId: string, actorId?: string): Promise<void> {
-    const groupGrants = await this.serverGrantsRepo.find({
-      where: { scope: 'group', scopeId: groupId },
-      select: { serverId: true },
+  async removeMember(groupId: string, userId: string, actorId?: string): Promise<TaskIdsResult> {
+    const taskIds = await runSerializedTransaction(this.dataSource, async (manager) => {
+      const membership = await manager.findOneBy(GroupMemberEntity, { groupId, userId });
+      if (!membership) return [] as string[];
+      const [groupGrants, mountGrants] = await Promise.all([
+        manager.find(ServerGrantEntity, {
+          where: { scope: 'group', scopeId: groupId },
+          select: { serverId: true },
+        }),
+        manager.find(MountSourceGrantEntity, {
+          where: { scope: 'group', scopeId: groupId },
+        }),
+      ]);
+      await manager.delete(GroupMemberEntity, { groupId, userId });
+      await this.revocationGuard.assertServerAccessRevocationSafe(
+        manager,
+        groupGrants.map((grant) => ({ userId, serverId: grant.serverId })),
+      );
+      for (const grant of mountGrants) {
+        await this.revocationGuard.assertMountSourceRevocationSafe(manager, [userId], {
+          sourceKind: grant.sourceKind,
+          sourceId: grant.sourceId,
+          serverId: grant.serverId,
+          sourceIdentity: grant.sourceIdentity,
+        });
+      }
+      const taskIds: string[] = [];
+      for (const grant of groupGrants) {
+        const taskId = await this.syncUserQuotaInTransaction(
+          manager, userId, grant.serverId, actorId ?? null,
+        );
+        if (taskId) taskIds.push(taskId);
+      }
+      return taskIds;
     });
-    await this.membersRepo.delete({ groupId, userId });
     this.accessResolver.invalidateUser(userId);
-    await this.auditService.log(actorId ?? null, AuditAction.RemoveGroupMember, groupId, 'group', { userId });
-    await Promise.all(groupGrants.map((g) => this.syncUserQuota(userId, g.serverId, actorId ?? null)));
+    await this.auditBestEffort(actorId ?? null, AuditAction.RemoveGroupMember, groupId, 'group', { userId });
+    return { taskIds: this.uniqueTaskIds(taskIds) };
   }
 
   async ensureUserInGroup(groupName: string, userId: string): Promise<void> {
@@ -236,13 +336,223 @@ export class GroupsService {
     await this.removeMember(group.id, userId);
   }
 
-  /** Remove all group memberships, server grants, image grants, and mount source grants for a deleted user */
-  async cleanupUserData(userId: string): Promise<void> {
-    await this.membersRepo.delete({ userId });
-    await this.serverGrantsRepo.delete({ scope: 'user', scopeId: userId });
-    await this.imageGrantsRepo.delete({ scope: 'user', scopeId: userId });
-    await this.mountSourceGrantsRepo.delete({ scope: 'user', scopeId: userId });
+  /**
+   * Revoke access and durably drain every known physical quota to zero. The
+   * final successful quota task tombstones the user automatically.
+   */
+  async deleteUserPermanently(userId: string, actorId: string): Promise<UserDeleteResult> {
+    const result = await runSerializedTransaction(this.dataSource, async (manager) => {
+      const user = await manager.findOneBy(UserEntity, { id: userId });
+      if (!user || user.status === UserStatus.Deleted) throw new NotFoundException('User not found');
+      const [container, dataDir] = await Promise.all([
+        manager.findOneBy(ContainerEntity, { ownerId: userId }),
+        manager.findOneBy(DataDirectoryEntity, { userId }),
+      ]);
+      if (container || dataDir) {
+        throw new ConflictException({
+          code: 'USER_DELETE_HAS_RESOURCES',
+          message: 'Delete every container and data directory before deleting the user',
+          userId,
+        });
+      }
+
+      const desiredQuotas = await manager.find(QuotaDesiredEntity, {
+        where: { userId },
+        order: { serverId: 'ASC' },
+      });
+
+      const pendingQuotaTasks = await manager.find(AgentTaskEntity, {
+        select: {
+          id: true,
+          kind: true,
+          serverId: true,
+          resourceType: true,
+          resourceId: true,
+          payloadJson: true,
+          startedAt: true,
+          lastSentAt: true,
+          agentResultJson: true,
+        },
+        where: {
+          kind: AgentTaskKind.QuotaEnsure,
+          resourceType: 'quota',
+          resourceId: userId,
+          status: AgentTaskStatus.Pending,
+        },
+        order: { id: 'ASC' },
+        take: MAX_PLATFORM_SERVERS + 1,
+      });
+      if (pendingQuotaTasks.length > MAX_PLATFORM_SERVERS) {
+        throw new ConflictException({
+          code: 'USER_DELETE_QUOTA_AUTHORITY_CORRUPT',
+          message: 'User quota has more pending task owners than the platform Server bound',
+          userId,
+        });
+      }
+      const desiredByServer = new Map(desiredQuotas.map((desired) => [desired.serverId, desired]));
+      const exactDeletingTasks = pendingQuotaTasks.filter((task) => {
+        const desired = desiredByServer.get(task.serverId);
+        return desired !== undefined && this.quotaTaskMatchesDesired(task, desired, 0);
+      });
+
+      const quotaLocks = await manager.createQueryBuilder(ResourceLockEntity, 'lock')
+        .where('lock.resource_key LIKE :resourceKey', { resourceKey: `quota:%:${userId}` })
+        .getMany();
+
+      if (user.status === UserStatus.Deleting) {
+        const exactTaskIds = new Set(exactDeletingTasks.map((task) => task.id));
+        const invalidPending = pendingQuotaTasks.find((task) => !exactTaskIds.has(task.id));
+        const invalidLock = quotaLocks.find((lock) => !exactTaskIds.has(lock.taskId));
+        if (invalidPending || invalidLock) {
+          throw new ConflictException({
+            code: 'USER_DELETE_QUOTA_BLOCKED',
+            message: 'User deletion is blocked by quota evidence that is not its exact zero-limit task',
+            userId,
+            taskId: invalidPending?.id ?? invalidLock?.taskId,
+          });
+        }
+        if (exactDeletingTasks.length > 0) {
+          return { deleted: false, taskIds: this.uniqueTaskIds(exactDeletingTasks.map((task) => task.id)) };
+        }
+        const lastTaskIds = desiredQuotas
+          .map((desired) => desired.lastTaskId)
+          .filter((id): id is string => id !== null);
+        const proofs = lastTaskIds.length === 0
+          ? []
+          : await manager.find(AgentTaskEntity, {
+              select: {
+                id: true,
+                status: true,
+                kind: true,
+                serverId: true,
+                resourceType: true,
+                resourceId: true,
+                payloadJson: true,
+              },
+              where: { id: In(lastTaskIds) },
+            });
+        const proofById = new Map(proofs.map((task) => [task.id, task]));
+        const converged = desiredQuotas.every((desired) => {
+          const proof = desired.lastTaskId ? proofById.get(desired.lastTaskId) : undefined;
+          return proof?.status === AgentTaskStatus.Succeeded
+            && this.quotaTaskMatchesDesired(proof, desired, 0);
+        });
+        if (!converged) {
+          throw new ConflictException({
+            code: 'USER_DELETE_QUOTA_BLOCKED',
+            message: 'User deletion has no pending task and lacks exact successful zero-quota evidence',
+            userId,
+          });
+        }
+        await manager.delete(QuotaDesiredEntity, { userId });
+        await manager.update(UserEntity, userId, { status: UserStatus.Deleted });
+        return { deleted: true, taskIds: [] };
+      }
+
+      const physicallyAmbiguousTask = pendingQuotaTasks.find((task) =>
+        task.startedAt !== null
+        || task.lastSentAt !== null
+        || task.agentResultJson !== null);
+      if (physicallyAmbiguousTask) {
+        throw new ConflictException({
+          code: 'USER_DELETE_QUOTA_IN_PROGRESS',
+          message: 'Wait for the dispatched quota task to reach a terminal state before deleting the user',
+          userId,
+          taskId: physicallyAmbiguousTask.id,
+        });
+      }
+
+      const undispatchedTaskIds = pendingQuotaTasks.map((task) => task.id);
+      const undispatchedTaskIdSet = new Set(undispatchedTaskIds);
+      const physicallyAmbiguousLock = quotaLocks.find((lock) =>
+        !undispatchedTaskIdSet.has(lock.taskId));
+      if (physicallyAmbiguousLock) {
+        throw new ConflictException({
+          code: 'USER_DELETE_QUOTA_IN_PROGRESS',
+          message: 'Wait for every task holding the user quota lock to reach a safe terminal state',
+          userId,
+          taskId: physicallyAmbiguousLock.taskId,
+        });
+      }
+      if (undispatchedTaskIds.length > 0) {
+        await manager.update(AgentTaskEntity, { id: In(undispatchedTaskIds) }, {
+          status: AgentTaskStatus.Failed,
+          failureStage: null,
+          errorJson: {
+            code: 'TASK_SUPERSEDED',
+            message: 'User deletion superseded the undispatched quota intent',
+          },
+          lastSentAt: null,
+          nextDispatchAt: null,
+          completedAt: new Date(),
+        } as never);
+        await manager.delete(ResourceLockEntity, { taskId: In(undispatchedTaskIds) });
+      }
+
+      const lastTaskIds = desiredQuotas
+        .map((desired) => desired.lastTaskId)
+        .filter((id): id is string => id !== null);
+      const proofs = lastTaskIds.length === 0
+        ? []
+        : await manager.find(AgentTaskEntity, {
+            select: {
+              id: true,
+              status: true,
+              kind: true,
+              serverId: true,
+              resourceType: true,
+              resourceId: true,
+              payloadJson: true,
+            },
+            where: { id: In(lastTaskIds) },
+          });
+      const proofById = new Map(proofs.map((task) => [task.id, task]));
+      const taskIds: string[] = [];
+      for (const desired of desiredQuotas) {
+        const proof = desired.lastTaskId ? proofById.get(desired.lastTaskId) : undefined;
+        if (
+          proof?.status === AgentTaskStatus.Succeeded
+          && this.quotaTaskMatchesDesired(proof, desired, 0)
+        ) continue;
+        taskIds.push(await this.quotaDispatchService.applyInTransaction(manager, {
+          serverId: desired.serverId,
+          userId,
+          numericUserId: user.numericId,
+          diskBytes: 0,
+          requestedBy: actorId,
+          allowDeleting: true,
+        }));
+      }
+
+      await manager.update(UserEntity, userId, {
+        status: taskIds.length > 0 ? UserStatus.Deleting : UserStatus.Deleted,
+      });
+      await manager.delete(GroupMemberEntity, { userId });
+      await manager.delete(ServerGrantEntity, { scope: 'user', scopeId: userId });
+      await manager.delete(ImageGrantEntity, { scope: 'user', scopeId: userId });
+      await this.mountSources.deleteScopeInTransaction(
+        manager,
+        'user',
+        userId,
+        { bypassResourceGuard: true },
+      );
+      if (taskIds.length === 0) await manager.delete(QuotaDesiredEntity, { userId });
+      return { deleted: taskIds.length === 0, taskIds: this.uniqueTaskIds(taskIds) };
+    });
     this.accessResolver.invalidateUser(userId);
+    await this.proxySnapshots.notify('user-deleted');
+    await this.auditBestEffort(
+      actorId,
+      AuditAction.DeleteUser,
+      userId,
+      'user',
+      {
+        status: result.deleted ? UserStatus.Deleted : UserStatus.Deleting,
+        grantsRemoved: true,
+        quotaDrainTaskIds: result.taskIds,
+      },
+    );
+    return result;
   }
 
   // ---------------------------------------------------------------------------
@@ -267,33 +577,61 @@ export class GroupsService {
       gpuIndices: number[] | null;
     }>,
     actorId?: string,
-  ): Promise<ServerGrantDto> {
-    await this.findById(groupId);
-    let grant = await this.serverGrantsRepo.findOne({
-      where: { scope: 'group', scopeId: groupId, serverId },
-    });
-    if (!grant) {
-      grant = this.serverGrantsRepo.create({
-        id: uuidv4(),
-        scope: 'group',
-        scopeId: groupId,
-        serverId,
-        gpuMode: null,
+  ): Promise<WithTaskIds<ServerGrantDto>> {
+    const { grant, members, taskIds } = await runSerializedTransaction(this.dataSource, async (manager) => {
+      if (!await manager.findOne(GroupEntity, { where: { id: groupId } })) {
+        throw new NotFoundException('Group not found');
+      }
+      await this.requireServerInTransaction(manager, serverId);
+      let current = await manager.findOne(ServerGrantEntity, {
+        where: { scope: 'group', scopeId: groupId, serverId },
       });
-    }
-    this.applyGrantDto(grant, dto);
-    await this.serverGrantsRepo.save(grant);
-    const members = await this.invalidateGroupMembers(groupId);
-    await this.auditService.log(actorId ?? null, AuditAction.UpsertServerGrant, groupId, 'group', { serverId, ...dto });
-    await Promise.all(members.map((m) => this.syncUserQuota(m.userId, serverId, actorId ?? null)));
-    return this.serverGrantToDto(grant);
+      if (!current) {
+        current = manager.create(ServerGrantEntity, {
+          id: uuidv4(), scope: 'group', scopeId: groupId, serverId, gpuMode: null,
+        });
+      }
+      this.applyGrantDto(current, dto);
+      const saved = await manager.save(ServerGrantEntity, current);
+      const affected = await manager.find(GroupMemberEntity, { where: { groupId } });
+      const taskIds: string[] = [];
+      for (const member of affected) {
+        const taskId = await this.syncUserQuotaInTransaction(
+          manager, member.userId, serverId, actorId ?? null,
+        );
+        if (taskId) taskIds.push(taskId);
+      }
+      return { grant: saved, members: affected, taskIds };
+    });
+    for (const member of members) this.accessResolver.invalidateUser(member.userId);
+    await this.auditBestEffort(actorId ?? null, AuditAction.UpsertServerGrant, groupId, 'group', { serverId, ...dto });
+    return this.withTaskIds(this.serverGrantToDto(grant), taskIds);
   }
 
-  async deleteGroupServerGrant(groupId: string, serverId: string, actorId?: string): Promise<void> {
-    await this.serverGrantsRepo.delete({ scope: 'group', scopeId: groupId, serverId });
-    const members = await this.invalidateGroupMembers(groupId);
-    await this.auditService.log(actorId ?? null, AuditAction.DeleteServerGrant, groupId, 'group', { serverId });
-    await Promise.all(members.map((m) => this.syncUserQuota(m.userId, serverId, actorId ?? null)));
+  async deleteGroupServerGrant(groupId: string, serverId: string, actorId?: string): Promise<TaskIdsResult> {
+    const { members, taskIds } = await runSerializedTransaction(this.dataSource, async (manager) => {
+      const existing = await manager.findOneBy(ServerGrantEntity, {
+        scope: 'group', scopeId: groupId, serverId,
+      });
+      if (!existing) return { members: [] as GroupMemberEntity[], taskIds: [] as string[] };
+      const affected = await manager.find(GroupMemberEntity, { where: { groupId } });
+      await manager.delete(ServerGrantEntity, { scope: 'group', scopeId: groupId, serverId });
+      await this.revocationGuard.assertServerAccessRevocationSafe(
+        manager,
+        affected.map((member) => ({ userId: member.userId, serverId })),
+      );
+      const taskIds: string[] = [];
+      for (const member of affected) {
+        const taskId = await this.syncUserQuotaInTransaction(
+          manager, member.userId, serverId, actorId ?? null,
+        );
+        if (taskId) taskIds.push(taskId);
+      }
+      return { members: affected, taskIds };
+    });
+    for (const member of members) this.accessResolver.invalidateUser(member.userId);
+    await this.auditBestEffort(actorId ?? null, AuditAction.DeleteServerGrant, groupId, 'group', { serverId });
+    return { taskIds: this.uniqueTaskIds(taskIds) };
   }
 
   // ---------------------------------------------------------------------------
@@ -308,20 +646,21 @@ export class GroupsService {
   }
 
   async addGroupImageGrant(groupId: string, imageId: string, serverId: string): Promise<ImageGrantDto> {
-    await this.findById(groupId);
-    let grant = await this.imageGrantsRepo.findOne({
-      where: { scope: 'group', scopeId: groupId, imageId, serverId },
-    });
-    if (!grant) {
-      grant = this.imageGrantsRepo.create({
-        id: uuidv4(),
-        scope: 'group',
-        scopeId: groupId,
-        imageId,
-        serverId,
+    const grant = await runSerializedTransaction(this.dataSource, async (manager) => {
+      await this.requireGroupInTransaction(manager, groupId);
+      await this.requireImageInTransaction(manager, imageId);
+      await this.requireServerInTransaction(manager, serverId);
+      let current = await manager.findOne(ImageGrantEntity, {
+        where: { scope: 'group', scopeId: groupId, imageId, serverId },
       });
-      await this.imageGrantsRepo.save(grant);
-    }
+      if (!current) {
+        current = manager.create(ImageGrantEntity, {
+          id: uuidv4(), scope: 'group', scopeId: groupId, imageId, serverId,
+        });
+        current = await manager.save(ImageGrantEntity, current);
+      }
+      return current;
+    });
     await this.invalidateGroupMembers(groupId);
     return this.imageGrantToDto(grant);
   }
@@ -337,36 +676,37 @@ export class GroupsService {
     imageId: string,
     serverIds: string[],
   ): Promise<ImageGrantDto[]> {
-    await this.findById(groupId);
-    const existing = await this.imageGrantsRepo.find({
-      where: { scope: 'group', scopeId: groupId, imageId },
+    const updated = await runSerializedTransaction(this.dataSource, async (manager) => {
+      await this.requireGroupInTransaction(manager, groupId);
+      await this.requireImageInTransaction(manager, imageId);
+      const targetServerIds = [...new Set(serverIds)];
+      if (targetServerIds.length > 0) {
+        const servers = await manager.find(ServerEntity, {
+          where: { id: In(targetServerIds) },
+          select: { id: true },
+        });
+        const found = new Set(servers.map((server) => server.id));
+        const missing = targetServerIds.filter((serverId) => !found.has(serverId));
+        if (missing.length > 0) throw new NotFoundException(`Server not found: ${missing.join(', ')}`);
+      }
+      const existing = await manager.find(ImageGrantEntity, {
+        where: { scope: 'group', scopeId: groupId, imageId },
+      });
+      const existingServerIds = new Set(existing.map((grant) => grant.serverId));
+      const target = new Set(targetServerIds);
+      const toRemove = existing.filter((grant) => !target.has(grant.serverId));
+      const toAdd = targetServerIds
+        .filter((serverId) => !existingServerIds.has(serverId))
+        .map((serverId) => manager.create(ImageGrantEntity, {
+          id: uuidv4(), scope: 'group', scopeId: groupId, imageId, serverId,
+        }));
+      if (toRemove.length > 0) await manager.remove(ImageGrantEntity, toRemove);
+      if (toAdd.length > 0) await manager.save(ImageGrantEntity, toAdd);
+      return manager.find(ImageGrantEntity, {
+        where: { scope: 'group', scopeId: groupId, imageId },
+      });
     });
-
-    const existingServerIds = new Set(existing.map((g) => g.serverId));
-    const targetServerIds = new Set(serverIds);
-
-    const toRemove = existing.filter((g) => !targetServerIds.has(g.serverId));
-    const toAdd = serverIds
-      .filter((sid) => !existingServerIds.has(sid))
-      .map((sid) =>
-        this.imageGrantsRepo.create({
-          id: uuidv4(),
-          scope: 'group',
-          scopeId: groupId,
-          imageId,
-          serverId: sid,
-        }),
-      );
-
-    await Promise.all([
-      toRemove.length > 0 ? this.imageGrantsRepo.remove(toRemove) : Promise.resolve(),
-      toAdd.length > 0 ? this.imageGrantsRepo.save(toAdd) : Promise.resolve(),
-    ]);
-
     await this.invalidateGroupMembers(groupId);
-    const updated = await this.imageGrantsRepo.find({
-      where: { scope: 'group', scopeId: groupId, imageId },
-    });
     return updated.map((g) => this.imageGrantToDto(g));
   }
 
@@ -390,32 +730,43 @@ export class GroupsService {
       gpuIndices: number[] | null;
     }>,
     actorId?: string,
-  ): Promise<ServerGrantDto> {
-    let grant = await this.serverGrantsRepo.findOne({
-      where: { scope: 'user', scopeId: userId, serverId },
-    });
-    if (!grant) {
-      grant = this.serverGrantsRepo.create({
-        id: uuidv4(),
-        scope: 'user',
-        scopeId: userId,
-        serverId,
-        gpuMode: null,
+  ): Promise<WithTaskIds<ServerGrantDto>> {
+    const { grant, taskId } = await runSerializedTransaction(this.dataSource, async (manager) => {
+      await this.requireUserInTransaction(manager, userId);
+      await this.requireServerInTransaction(manager, serverId);
+      let current = await manager.findOne(ServerGrantEntity, {
+        where: { scope: 'user', scopeId: userId, serverId },
       });
-    }
-    this.applyGrantDto(grant, dto);
-    await this.serverGrantsRepo.save(grant);
+      if (!current) {
+        current = manager.create(ServerGrantEntity, {
+          id: uuidv4(), scope: 'user', scopeId: userId, serverId, gpuMode: null,
+        });
+      }
+      this.applyGrantDto(current, dto);
+      const saved = await manager.save(ServerGrantEntity, current);
+      const taskId = await this.syncUserQuotaInTransaction(
+        manager, userId, serverId, actorId ?? null,
+      );
+      return { grant: saved, taskId };
+    });
     this.accessResolver.invalidateUser(userId);
-    await this.auditService.log(actorId ?? null, AuditAction.UpsertServerGrant, userId, 'user', { serverId, ...dto });
-    await this.syncUserQuota(userId, serverId, actorId ?? null);
-    return this.serverGrantToDto(grant);
+    await this.auditBestEffort(actorId ?? null, AuditAction.UpsertServerGrant, userId, 'user', { serverId, ...dto });
+    return this.withTaskIds(this.serverGrantToDto(grant), taskId ? [taskId] : []);
   }
 
-  async deleteUserServerGrant(userId: string, serverId: string, actorId?: string): Promise<void> {
-    await this.serverGrantsRepo.delete({ scope: 'user', scopeId: userId, serverId });
+  async deleteUserServerGrant(userId: string, serverId: string, actorId?: string): Promise<TaskIdsResult> {
+    const taskId = await runSerializedTransaction(this.dataSource, async (manager) => {
+      const existing = await manager.findOneBy(ServerGrantEntity, {
+        scope: 'user', scopeId: userId, serverId,
+      });
+      if (!existing) return null;
+      await manager.delete(ServerGrantEntity, { scope: 'user', scopeId: userId, serverId });
+      await this.revocationGuard.assertServerAccessRevocationSafe(manager, [{ userId, serverId }]);
+      return this.syncUserQuotaInTransaction(manager, userId, serverId, actorId ?? null);
+    });
     this.accessResolver.invalidateUser(userId);
-    await this.auditService.log(actorId ?? null, AuditAction.DeleteServerGrant, userId, 'user', { serverId });
-    await this.syncUserQuota(userId, serverId, actorId ?? null);
+    await this.auditBestEffort(actorId ?? null, AuditAction.DeleteServerGrant, userId, 'user', { serverId });
+    return { taskIds: taskId ? [taskId] : [] };
   }
 
   // ---------------------------------------------------------------------------
@@ -428,19 +779,21 @@ export class GroupsService {
   }
 
   async addUserImageGrant(userId: string, imageId: string, serverId: string): Promise<ImageGrantDto> {
-    let grant = await this.imageGrantsRepo.findOne({
-      where: { scope: 'user', scopeId: userId, imageId, serverId },
-    });
-    if (!grant) {
-      grant = this.imageGrantsRepo.create({
-        id: uuidv4(),
-        scope: 'user',
-        scopeId: userId,
-        imageId,
-        serverId,
+    const grant = await runSerializedTransaction(this.dataSource, async (manager) => {
+      await this.requireUserInTransaction(manager, userId);
+      await this.requireImageInTransaction(manager, imageId);
+      await this.requireServerInTransaction(manager, serverId);
+      let current = await manager.findOne(ImageGrantEntity, {
+        where: { scope: 'user', scopeId: userId, imageId, serverId },
       });
-      await this.imageGrantsRepo.save(grant);
-    }
+      if (!current) {
+        current = manager.create(ImageGrantEntity, {
+          id: uuidv4(), scope: 'user', scopeId: userId, imageId, serverId,
+        });
+        current = await manager.save(ImageGrantEntity, current);
+      }
+      return current;
+    });
     this.accessResolver.invalidateUser(userId);
     return this.imageGrantToDto(grant);
   }
@@ -520,25 +873,111 @@ export class GroupsService {
     return members;
   }
 
-  private async syncUserQuota(
+  private async syncUserQuotaInTransaction(
+    manager: EntityManager,
     userId: string,
     serverId: string,
     requestedBy: string | null,
-  ): Promise<void> {
-    const grant = await this.accessResolver.resolveServer(userId, serverId);
-    if (!grant) return;
-    const user = await this.usersRepo.findOne({ where: { id: userId }, select: ['id', 'numericId'] });
-    if (!user?.numericId) return;
-    try {
-      await this.quotaDispatchService.apply({
-        serverId,
+  ): Promise<string | null> {
+    const grant = await this.accessResolver.resolveServerInTransaction(manager, userId, serverId);
+    if (!grant) return null;
+    const user = await manager.findOne(UserEntity, {
+      where: { id: userId },
+      select: { id: true, numericId: true },
+    });
+    if (!user?.numericId) {
+      throw new ConflictException(`User ${userId} has no numeric quota identity`);
+    }
+    return this.quotaDispatchService.applyInTransaction(manager, {
+      serverId,
+      userId,
+      numericUserId: user.numericId,
+      diskBytes: grant.diskBytes,
+      requestedBy,
+    });
+  }
+
+  private async requireGroupInTransaction(manager: EntityManager, groupId: string): Promise<void> {
+    if (!await manager.findOneBy(GroupEntity, { id: groupId })) {
+      throw new NotFoundException('Group not found');
+    }
+  }
+
+  private async requireUserInTransaction(manager: EntityManager, userId: string): Promise<void> {
+    const user = await manager.findOneBy(UserEntity, { id: userId });
+    if (!user) {
+      throw new NotFoundException('User not found');
+    }
+    if (user.status === UserStatus.Deleted || user.status === UserStatus.Deleting) {
+      throw new ConflictException({
+        code: user.status === UserStatus.Deleted ? 'USER_DELETED' : 'USER_DELETING',
+        message: 'A deleted or deleting user cannot receive memberships or grants',
         userId,
-        numericUserId: user.numericId,
-        diskBytes: grant.diskBytes,
-        requestedBy,
       });
-    } catch {
-      // Quota reconciliation is durable; failures are visible on the reconcile task/operation.
+    }
+  }
+
+  private quotaTaskMatchesDesired(
+    task: AgentTaskEntity,
+    desired: QuotaDesiredEntity,
+    diskBytes: number,
+  ): boolean {
+    const payload = task.payloadJson && typeof task.payloadJson === 'object' && !Array.isArray(task.payloadJson)
+      ? task.payloadJson as Record<string, unknown>
+      : null;
+    return task.kind === AgentTaskKind.QuotaEnsure
+      && task.resourceType === 'quota'
+      && task.resourceId === desired.userId
+      && task.serverId === desired.serverId
+      && payload?.generation === desired.generation
+      && payload.numericUserId === desired.numericUserId
+      && payload.diskBytes === diskBytes
+      && desired.limitBytes === diskBytes
+      && desired.lastTaskId === task.id;
+  }
+
+  private async requireServerInTransaction(manager: EntityManager, serverId: string): Promise<void> {
+    if (!await manager.findOneBy(ServerEntity, { id: serverId })) {
+      throw new NotFoundException('Server not found');
+    }
+  }
+
+  private async requireImageInTransaction(manager: EntityManager, imageId: string): Promise<void> {
+    const image = await manager.findOneBy(ImageEntity, { id: imageId });
+    if (!image) {
+      throw new NotFoundException('Image not found');
+    }
+    if (image.deleting) {
+      throw new ConflictException({
+        code: 'IMAGE_DELETING',
+        message: 'Image cleanup is in progress and cannot receive new grants',
+        imageId,
+      });
+    }
+  }
+
+  private uniqueTaskIds(taskIds: readonly string[]): string[] {
+    return [...new Set(taskIds)];
+  }
+
+  private withTaskIds<T extends object>(value: T, taskIds: readonly string[]): T & TaskIdsResult {
+    return Object.assign(value, { taskIds: this.uniqueTaskIds(taskIds) });
+  }
+
+  private async auditBestEffort(
+    actorId: string | null,
+    action: AuditAction,
+    targetId: string,
+    targetType: string,
+    details: unknown,
+  ): Promise<void> {
+    try {
+      await this.auditService.log(actorId, action, targetId, targetType, details);
+    } catch (error) {
+      // The business mutation and its durable Agent intent have already
+      // committed atomically. Audit transport/storage failure must not turn a
+      // successful request into a misleading 500 that callers retry.
+      console.warn('[Groups] Audit write failed after commit', error);
     }
   }
 
@@ -608,40 +1047,23 @@ export class GroupsService {
   // ---------------------------------------------------------------------------
 
   async listGroupMountSourceGrants(groupId: string): Promise<MountSourceGrantDto[]> {
-    const grants = await this.mountSourceGrantsRepo.find({ where: { scope: 'group', scopeId: groupId } });
-    return grants.map((g) => this.mountSourceGrantToDto(g));
+    return this.mountSources.listGrantsForScope('group', groupId);
   }
 
   async upsertGroupMountSourceGrant(
     actorId: string,
     groupId: string,
-    sourceKind: MountSourceKind,
-    sourceId: string,
+    target: MountSourceGrantTarget,
   ): Promise<MountSourceGrantDto> {
-    await this.findById(groupId);
-    await this.assertSourceExists(sourceKind, sourceId);
-
-    let grant = await this.mountSourceGrantsRepo.findOne({
-      where: { scope: 'group', scopeId: groupId, sourceKind, sourceId },
-    });
-    if (!grant) {
-      grant = this.mountSourceGrantsRepo.create({ id: uuidv4(), scope: 'group', scopeId: groupId, sourceKind, sourceId });
-      await this.mountSourceGrantsRepo.save(grant);
-      await this.auditService.log(actorId, AuditAction.UpsertMountSourceGrant, grant.id, 'mount_source', { groupId, sourceKind, sourceId });
-    }
-    await this.invalidateGroupMembers(groupId);
-    return this.mountSourceGrantToDto(grant);
+    return this.mountSources.upsertGrant(actorId, 'group', groupId, target);
   }
 
   async deleteGroupMountSourceGrant(
     actorId: string,
     groupId: string,
-    sourceKind: MountSourceKind,
-    sourceId: string,
+    target: MountSourceGrantTarget,
   ): Promise<void> {
-    await this.mountSourceGrantsRepo.delete({ scope: 'group', scopeId: groupId, sourceKind, sourceId });
-    await this.invalidateGroupMembers(groupId);
-    await this.auditService.log(actorId, AuditAction.DeleteMountSourceGrant, sourceId, 'mount_source', { groupId, sourceKind });
+    await this.mountSources.deleteGrant(actorId, 'group', groupId, target);
   }
 
   // ---------------------------------------------------------------------------
@@ -649,63 +1071,27 @@ export class GroupsService {
   // ---------------------------------------------------------------------------
 
   async listUserMountSourceGrants(userId: string): Promise<MountSourceGrantDto[]> {
-    const grants = await this.mountSourceGrantsRepo.find({ where: { scope: 'user', scopeId: userId } });
-    return grants.map((g) => this.mountSourceGrantToDto(g));
+    return this.mountSources.listGrantsForScope('user', userId);
   }
 
   async upsertUserMountSourceGrant(
     actorId: string,
     userId: string,
-    sourceKind: MountSourceKind,
-    sourceId: string,
+    target: MountSourceGrantTarget,
   ): Promise<MountSourceGrantDto> {
-    await this.assertSourceExists(sourceKind, sourceId);
-
-    let grant = await this.mountSourceGrantsRepo.findOne({
-      where: { scope: 'user', scopeId: userId, sourceKind, sourceId },
-    });
-    if (!grant) {
-      grant = this.mountSourceGrantsRepo.create({ id: uuidv4(), scope: 'user', scopeId: userId, sourceKind, sourceId });
-      await this.mountSourceGrantsRepo.save(grant);
-      await this.auditService.log(actorId, AuditAction.UpsertMountSourceGrant, grant.id, 'mount_source', { userId, sourceKind, sourceId });
-    }
-    this.accessResolver.invalidateUser(userId);
-    return this.mountSourceGrantToDto(grant);
+    return this.mountSources.upsertGrant(actorId, 'user', userId, target);
   }
 
   async deleteUserMountSourceGrant(
     actorId: string,
     userId: string,
-    sourceKind: MountSourceKind,
-    sourceId: string,
+    target: MountSourceGrantTarget,
   ): Promise<void> {
-    await this.mountSourceGrantsRepo.delete({ scope: 'user', scopeId: userId, sourceKind, sourceId });
-    this.accessResolver.invalidateUser(userId);
-    await this.auditService.log(actorId, AuditAction.DeleteMountSourceGrant, sourceId, 'mount_source', { userId, sourceKind });
+    await this.mountSources.deleteGrant(actorId, 'user', userId, target);
   }
 
   // ---------------------------------------------------------------------------
   // Helpers
   // ---------------------------------------------------------------------------
 
-  private mountSourceGrantToDto(g: MountSourceGrantEntity): MountSourceGrantDto {
-    return {
-      id: g.id,
-      scope: g.scope,
-      scopeId: g.scopeId,
-      sourceKind: g.sourceKind,
-      sourceId: g.sourceId,
-      createdAt: g.createdAt.toISOString(),
-    };
-  }
-
-  private async assertSourceExists(sourceKind: MountSourceKind, sourceId: string): Promise<void> {
-    if (sourceKind === 'local') {
-      const disk = await this.dataDisksRepo.findOne({ where: { id: sourceId } });
-      if (!disk) throw new NotFoundException(`Data disk ${sourceId} not found`);
-    } else {
-      const mount = await this.remoteFsMountsRepo.findOne({ where: { id: sourceId } });
-      if (!mount) throw new NotFoundException(`Remote FS mount ${sourceId} not found`);
-    }
-  }
 }

@@ -15,11 +15,8 @@ export class ImageEntity {
   @Column({ type: 'text', unique: true })
   name: string;
 
-  @Column('text')
+  @Column({ type: 'text', unique: true })
   dockerImage: string;
-
-  @Column({ type: 'int', default: 0 })
-  defaultUid: number;
 
   @Column({
     name: 'runtime_overrides',
@@ -36,6 +33,13 @@ export class ImageEntity {
 
   @Column({ name: 'disable_ssh', type: 'boolean', default: false })
   disableSsh: boolean;
+
+  /** Retains canonical dockerImage ownership until every Agent proves absence. */
+  @Column({ name: 'deleting', type: 'boolean', default: false })
+  deleting: boolean;
+
+  @Column({ name: 'cleanup_generation', type: 'integer', default: 0 })
+  cleanupGeneration: number;
 
   @CreateDateColumn()
   createdAt: Date;

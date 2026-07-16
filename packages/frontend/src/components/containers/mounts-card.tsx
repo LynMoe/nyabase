@@ -199,8 +199,9 @@ function AddMountDialog({ open, onClose, onConfirm, serverDirs, mountSources, mo
 
   const sourceMap = new Map(mountSources.map((s) => [`${s.kind}:${s.id}`, s]));
   const dataDirKey = (d: DataDirDto) => `${d.sourceKind}:${d.sourceId}:${d.name}`;
-  const uniqueDirs = serverDirs.filter(
-    (d, i) => serverDirs.findIndex((x) => dataDirKey(x) === dataDirKey(d)) === i,
+  const activeDirs = serverDirs.filter((d) => d.desiredState === 'active');
+  const uniqueDirs = activeDirs.filter(
+    (d, i) => activeDirs.findIndex((x) => dataDirKey(x) === dataDirKey(d)) === i,
   );
   const formatLabel = (d: DataDirDto) => {
     const src = sourceMap.get(`${d.sourceKind}:${d.sourceId}`);

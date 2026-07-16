@@ -1,6 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { In, Repository } from 'typeorm';
+import { EntityManager, In, IsNull, Repository } from 'typeorm';
 import { GroupEntity } from '../entities/group.entity.js';
 import { GroupMemberEntity } from '../entities/group-member.entity.js';
 import { ServerGrantEntity } from '../entities/server-grant.entity.js';
@@ -9,9 +9,19 @@ import { ImageEntity } from '../entities/image.entity.js';
 import { ServerEntity } from '../entities/server.entity.js';
 import { MountSourceGrantEntity } from '../entities/mount-source-grant.entity.js';
 import { RemoteFsServerAssignmentEntity } from '../entities/remote-fs-server-assignment.entity.js';
-import { DataDiskEntity } from '../entities/data-disk.entity.js';
-import { Capability, GpuGrantMode, EffectiveServerAccessDto, GroupSummaryDto, MountSourceKind } from '@nyabase/common';
-import { resolveGrantWithServerDefaults } from './grant-utils.js';
+import { UserEntity } from '../entities/user.entity.js';
+import {
+  Capability,
+  EffectiveServerAccessDto,
+  GpuGrantMode,
+  GroupSummaryDto,
+  MountSourceKind,
+  UserStatus,
+} from '@nyabase/common';
+import { resolveGrant } from './grant-utils.js';
+import { AgentGateway } from '../gateway/agent-gateway.js';
+import { exactLocalDisk } from '../mount-sources/utils.js';
+import { AccessCacheEpochService } from './access-cache-epoch.service.js';
 
 export interface ResolvedServerGrant {
   cpuMillis: number;
@@ -26,6 +36,10 @@ export interface MountSourceRef {
   id: string;
 }
 
+interface CachedMountSourceRef extends MountSourceRef {
+  sourceIdentity: string | null;
+}
+
 /** Per-user cache entry */
 interface UserCache {
   capabilities: Set<Capability>;
@@ -34,8 +48,9 @@ interface UserCache {
   serverGrants: Map<string, ResolvedServerGrant>;
   /** serverId → imageId Set */
   imageGrants: Map<string, Set<string>>;
-  /** serverId → Set of "kind:sourceId" */
-  mountSourceGrants: Map<string, Set<string>>;
+  /** serverId → exact source identity map */
+  mountSourceGrants: Map<string, Map<string, CachedMountSourceRef>>;
+  epoch: number;
   fetchedAt: number;
 }
 
@@ -70,8 +85,8 @@ export class AccessResolverService {
     private mountSourceGrantsRepo: Repository<MountSourceGrantEntity>,
     @InjectRepository(RemoteFsServerAssignmentEntity)
     private remoteFsAssignmentsRepo: Repository<RemoteFsServerAssignmentEntity>,
-    @InjectRepository(DataDiskEntity)
-    private dataDisksRepo: Repository<DataDiskEntity>,
+    private agentGateway: AgentGateway,
+    private cacheEpoch: AccessCacheEpochService,
   ) {}
 
   // ---------------------------------------------------------------------------
@@ -83,6 +98,7 @@ export class AccessResolverService {
   }
 
   invalidateAll() {
+    this.cacheEpoch.bump();
     this.cache.clear();
   }
 
@@ -114,6 +130,36 @@ export class AccessResolverService {
   async resolveServer(userId: string, serverId: string): Promise<ResolvedServerGrant | null> {
     const uc = await this.getUserCache(userId);
     return uc.serverGrants.get(serverId) ?? null;
+  }
+
+  /** Resolve the effective grant from the caller's transaction snapshot. */
+  async resolveServerInTransaction(
+    manager: EntityManager,
+    userId: string,
+    serverId: string,
+  ): Promise<ResolvedServerGrant | null> {
+    const memberships = await manager.find(GroupMemberEntity, { where: { userId } });
+    const groupIds = memberships.map((membership) => membership.groupId);
+    const groups = groupIds.length > 0
+      ? await manager.find(GroupEntity, {
+          where: { id: In(groupIds) },
+          order: { priority: 'DESC', id: 'DESC' },
+        })
+      : [];
+    const groupOrder = new Map(groups.map((group, index) => [group.id, index]));
+    const userGrant = await manager.findOne(ServerGrantEntity, {
+      where: { scope: 'user', scopeId: userId, serverId },
+    });
+    const groupGrants = groupIds.length > 0
+      ? await manager.find(ServerGrantEntity, {
+          where: { scope: 'group', scopeId: In(groupIds), serverId },
+        })
+      : [];
+    groupGrants.sort((left, right) =>
+      (groupOrder.get(left.scopeId) ?? Number.MAX_SAFE_INTEGER)
+      - (groupOrder.get(right.scopeId) ?? Number.MAX_SAFE_INTEGER));
+    const selectedGrant = userGrant ?? groupGrants[0];
+    return selectedGrant ? resolveGrant(selectedGrant) : null;
   }
 
   async listAccessibleServers(userId: string): Promise<string[]> {
@@ -154,11 +200,17 @@ export class AccessResolverService {
    */
   async resolveMountSources(userId: string, serverId: string): Promise<Set<MountSourceRef>> {
     const uc = await this.getUserCache(userId);
-    const keys = uc.mountSourceGrants.get(serverId) ?? new Set<string>();
+    const cached = uc.mountSourceGrants.get(serverId);
     const result = new Set<MountSourceRef>();
-    for (const key of keys) {
-      const colon = key.indexOf(':');
-      result.add({ kind: key.slice(0, colon) as MountSourceKind, id: key.slice(colon + 1) });
+    for (const source of cached?.values() ?? []) {
+      if (source.kind === 'local') {
+        const snapshot = this.agentGateway.stateCache.get(serverId);
+        const disk = snapshot && snapshot.helloAt !== null
+          ? exactLocalDisk(snapshot.disks, source.id)
+          : null;
+        if (!disk || disk.sourceIdentity !== source.sourceIdentity) continue;
+      }
+      result.add({ kind: source.kind, id: source.id });
     }
     return result;
   }
@@ -176,6 +228,61 @@ export class AccessResolverService {
     return false;
   }
 
+  /** Fail-closed authorization from the caller's serialized DB snapshot. */
+  async hasMountSourceAccessInTransaction(
+    manager: EntityManager,
+    userId: string,
+    serverId: string,
+    source: MountSourceRef,
+    expectedSourceIdentity?: string,
+  ): Promise<boolean> {
+    const user = await manager.findOneBy(UserEntity, { id: userId });
+    if (!user || user.status !== UserStatus.Active) return false;
+    if (!await this.resolveServerInTransaction(manager, userId, serverId)) return false;
+    const memberships = await manager.find(GroupMemberEntity, { where: { userId } });
+    const scopes = [
+      { scope: 'user' as const, scopeId: userId },
+      ...memberships.map((membership) => ({
+        scope: 'group' as const,
+        scopeId: membership.groupId,
+      })),
+    ];
+
+    if (source.kind === 'local') {
+      const snapshot = this.agentGateway.stateCache.get(serverId);
+      const disk = snapshot && snapshot.helloAt !== null
+        ? exactLocalDisk(snapshot.disks, source.id)
+        : null;
+      if (!disk || (expectedSourceIdentity !== undefined
+        && disk.sourceIdentity !== expectedSourceIdentity)) return false;
+      for (const scope of scopes) {
+        if (await manager.findOneBy(MountSourceGrantEntity, {
+          ...scope,
+          sourceKind: 'local',
+          sourceId: source.id,
+          serverId,
+          sourceIdentity: disk.sourceIdentity,
+        })) return true;
+      }
+      return false;
+    }
+
+    if (expectedSourceIdentity !== undefined) return false;
+    if (await manager.count(RemoteFsServerAssignmentEntity, {
+      where: { remoteFsMountId: source.id, serverId, desiredState: 'active' },
+    }) === 0) return false;
+    for (const scope of scopes) {
+      if (await manager.findOneBy(MountSourceGrantEntity, {
+        ...scope,
+        sourceKind: 'remote',
+        sourceId: source.id,
+        serverId: IsNull(),
+        sourceIdentity: IsNull(),
+      })) return true;
+    }
+    return false;
+  }
+
   /** Returns true if the user may access the given image on any server */
   async isImageAccessibleForUser(userId: string, imageId: string): Promise<boolean> {
     const uc = await this.getUserCache(userId);
@@ -184,6 +291,67 @@ export class AccessResolverService {
       if (imageSet?.has(imageId)) return true;
     }
     return false;
+  }
+
+  /**
+   * Resolve every authorization input for container creation from one DB
+   * transaction snapshot. This deliberately bypasses the read cache so a
+   * revoked grant cannot race a stale create request into the task outbox.
+   */
+  async resolveContainerCreateAccessInTransaction(
+    manager: EntityManager,
+    userId: string,
+    serverId: string,
+    imageId: string,
+    mountSources: readonly (MountSourceRef & { sourceIdentity?: string })[],
+  ): Promise<{ grant: ResolvedServerGrant; mountSourcesAllowed: boolean } | null> {
+    const user = await manager.findOneBy(UserEntity, { id: userId });
+    if (!user || user.status !== UserStatus.Active) return null;
+    const memberships = await manager.find(GroupMemberEntity, { where: { userId } });
+    const groupIds = memberships.map((membership) => membership.groupId);
+    const groups = groupIds.length > 0
+      ? await manager.find(GroupEntity, {
+          where: { id: In(groupIds) },
+          order: { priority: 'DESC', id: 'DESC' },
+        })
+      : [];
+    const groupOrder = new Map(groups.map((group, index) => [group.id, index]));
+
+    const userGrant = await manager.findOne(ServerGrantEntity, {
+      where: { scope: 'user', scopeId: userId, serverId },
+    });
+    const groupGrants = groupIds.length > 0
+      ? await manager.find(ServerGrantEntity, {
+          where: { scope: 'group', scopeId: In(groupIds), serverId },
+        })
+      : [];
+    groupGrants.sort((left, right) =>
+      (groupOrder.get(left.scopeId) ?? Number.MAX_SAFE_INTEGER)
+      - (groupOrder.get(right.scopeId) ?? Number.MAX_SAFE_INTEGER));
+    const selectedGrant = userGrant ?? groupGrants[0];
+    if (!selectedGrant) return null;
+
+    const imageGrantWhere = [
+      { scope: 'user' as const, scopeId: userId, serverId, imageId },
+      ...(groupIds.length > 0
+        ? [{ scope: 'group' as const, scopeId: In(groupIds), serverId, imageId }]
+        : []),
+    ];
+    if (await manager.count(ImageGrantEntity, { where: imageGrantWhere }) === 0) return null;
+
+    for (const source of mountSources) {
+      if (!await this.hasMountSourceAccessInTransaction(
+        manager,
+        userId,
+        serverId,
+        source,
+        source.kind === 'local' ? source.sourceIdentity : undefined,
+      )) {
+        return { grant: resolveGrant(selectedGrant), mountSourcesAllowed: false };
+      }
+    }
+
+    return { grant: resolveGrant(selectedGrant), mountSourcesAllowed: true };
   }
 
   async getEffectiveAccess(userId: string): Promise<EffectiveServerAccessDto[]> {
@@ -209,35 +377,34 @@ export class AccessResolverService {
   // ---------------------------------------------------------------------------
 
   private async allMountSourcesForServer(serverId: string): Promise<Set<MountSourceRef>> {
-    const [localDisks, remoteAssignments] = await Promise.all([
-      this.dataDisksRepo.find({ where: { serverId, desiredState: 'active' }, select: { id: true } }),
-      this.remoteFsAssignmentsRepo.find({
-        where: { serverId, desiredState: 'active' },
-        select: { remoteFsMountId: true },
-      }),
-    ]);
+    const remoteAssignments = await this.remoteFsAssignmentsRepo.find({
+      where: { serverId, desiredState: 'active' },
+      select: { remoteFsMountId: true },
+    });
     const result = new Set<MountSourceRef>();
-    for (const d of localDisks) result.add({ kind: 'local', id: d.id });
+    for (const d of this.agentGateway.stateCache.get(serverId)?.disks ?? []) {
+      result.add({ kind: 'local', id: d.diskId });
+    }
     for (const a of remoteAssignments) result.add({ kind: 'remote', id: a.remoteFsMountId });
     return result;
   }
 
   private async getUserCache(userId: string): Promise<UserCache> {
+    const epoch = this.cacheEpoch.current();
     const cached = this.cache.get(userId);
-    if (cached && Date.now() - cached.fetchedAt < CACHE_TTL_MS) {
+    if (cached && cached.epoch === epoch && Date.now() - cached.fetchedAt < CACHE_TTL_MS) {
       // Touch for LRU recency.
       this.cache.delete(userId);
       this.cache.set(userId, cached);
       return cached;
     }
 
-    // Step 1: memberships + all servers in parallel
     const [memberships, servers] = await Promise.all([
       this.membersRepo.find({ where: { userId } }),
-      this.serversRepo.find(),
+      this.serversRepo.find({ select: { id: true } }),
     ]);
     const groupIds = memberships.map((m) => m.groupId);
-    const serverMap = new Map(servers.map((s) => [s.id, s]));
+    const serverIds = new Set(servers.map((s) => s.id));
 
     // Step 2: all grant types in parallel
     const [
@@ -305,14 +472,14 @@ export class AccessResolverService {
       }
     }
     for (const [sid, { grant }] of bestGroupGrant) {
-      const server = serverMap.get(sid);
-      if (server) serverGrants.set(sid, this.resolveGrantWithDefaults(grant, server));
+      if (!serverIds.has(sid)) continue;
+      serverGrants.set(sid, this.resolveGrant(grant));
     }
 
     // User-level server grants override group grants
     for (const g of userServerGrants) {
-      const server = serverMap.get(g.serverId);
-      if (server) serverGrants.set(g.serverId, this.resolveGrantWithDefaults(g, server));
+      if (!serverIds.has(g.serverId)) continue;
+      serverGrants.set(g.serverId, this.resolveGrant(g));
     }
 
     // Image grants (group-level then user-level, union)
@@ -325,33 +492,22 @@ export class AccessResolverService {
       imageGrants.get(ig.serverId)!.add(ig.imageId);
     }
 
-    // Mount source grants — resolve to (serverId, "kind:sourceId") pairs
-    // and intersect with servers the user has a server-grant for.
+    // Mount source grants are bound to an exact physical identity and
+    // intersected with servers the user can reach.
     const allMsgGrants = [...userMountSourceGrants, ...groupMountSourceGrants];
-    const mountSourceGrants = new Map<string, Set<string>>();
+    const mountSourceGrants = new Map<string, Map<string, CachedMountSourceRef>>();
 
     if (allMsgGrants.length > 0) {
-      const localIds = [...new Set(
-        allMsgGrants.filter((g) => g.sourceKind === 'local').map((g) => g.sourceId),
-      )];
       const remoteIds = [...new Set(
         allMsgGrants.filter((g) => g.sourceKind === 'remote').map((g) => g.sourceId),
       )];
 
-      const [diskRows, assignmentRows] = await Promise.all([
-        localIds.length > 0
-          ? this.dataDisksRepo.find({ where: { id: In(localIds) }, select: { id: true, serverId: true } })
-          : Promise.resolve([]),
-        remoteIds.length > 0
-          ? this.remoteFsAssignmentsRepo.find({
-              where: { remoteFsMountId: In(remoteIds) },
-              select: { remoteFsMountId: true, serverId: true },
-            })
-          : Promise.resolve([]),
-      ]);
-
-      // disk id → serverId
-      const diskServerMap = new Map(diskRows.map((d) => [d.id, d.serverId]));
+      const assignmentRows = remoteIds.length > 0
+        ? await this.remoteFsAssignmentsRepo.find({
+            where: { remoteFsMountId: In(remoteIds), desiredState: 'active' },
+            select: { remoteFsMountId: true, serverId: true },
+          })
+        : [];
       // remoteFsMountId → serverId[]
       const remoteServerMap = new Map<string, string[]>();
       for (const a of assignmentRows) {
@@ -363,17 +519,27 @@ export class AccessResolverService {
 
       for (const g of allMsgGrants) {
         if (g.sourceKind === 'local') {
-          const serverId = diskServerMap.get(g.sourceId);
-          if (!serverId) continue;
-          if (!accessibleServerIds.has(serverId)) continue;
-          if (!mountSourceGrants.has(serverId)) mountSourceGrants.set(serverId, new Set());
-          mountSourceGrants.get(serverId)!.add(`local:${g.sourceId}`);
+          if (!g.serverId || !g.sourceIdentity || !accessibleServerIds.has(g.serverId)) continue;
+          const snapshot = this.agentGateway.stateCache.get(g.serverId);
+          if (!snapshot || snapshot.helloAt === null || snapshot.serverId !== g.serverId) continue;
+          const disk = exactLocalDisk(snapshot.disks, g.sourceId);
+          if (!disk || disk.sourceIdentity !== g.sourceIdentity) continue;
+          if (!mountSourceGrants.has(g.serverId)) mountSourceGrants.set(g.serverId, new Map());
+          mountSourceGrants.get(g.serverId)!.set(`local:${g.sourceId}`, {
+            kind: 'local',
+            id: g.sourceId,
+            sourceIdentity: g.sourceIdentity,
+          });
         } else {
           const serverIds = remoteServerMap.get(g.sourceId) ?? [];
           for (const serverId of serverIds) {
             if (!accessibleServerIds.has(serverId)) continue;
-            if (!mountSourceGrants.has(serverId)) mountSourceGrants.set(serverId, new Set());
-            mountSourceGrants.get(serverId)!.add(`remote:${g.sourceId}`);
+            if (!mountSourceGrants.has(serverId)) mountSourceGrants.set(serverId, new Map());
+            mountSourceGrants.get(serverId)!.set(`remote:${g.sourceId}`, {
+              kind: 'remote',
+              id: g.sourceId,
+              sourceIdentity: null,
+            });
           }
         }
       }
@@ -385,6 +551,7 @@ export class AccessResolverService {
       serverGrants,
       imageGrants,
       mountSourceGrants,
+      epoch,
       fetchedAt: Date.now(),
     };
     this.setCacheBounded(userId, uc);
@@ -402,12 +569,11 @@ export class AccessResolverService {
     }
   }
 
-  private resolveGrantWithDefaults(
+  private resolveGrant(
     grant: ServerGrantEntity,
-    server: ServerEntity,
   ): ResolvedServerGrant {
-    return resolveGrantWithServerDefaults(grant, server);
+    return resolveGrant(grant);
   }
 }
 
-export { resolveGrantWithServerDefaults } from './grant-utils.js';
+export { resolveGrant } from './grant-utils.js';

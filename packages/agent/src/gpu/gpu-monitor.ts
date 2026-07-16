@@ -4,6 +4,7 @@ import * as fs from 'fs';
 import { GpuInfo, MetricPoint } from '@nyabase/common';
 
 const execFileAsync = promisify(execFile);
+const NVIDIA_SMI_TIMEOUT_MS = 5_000;
 
 let probedAvailability: boolean | null = null;
 
@@ -49,10 +50,13 @@ export interface GpuProcessInfo {
 
 export interface GpuContainerIdentity {
   metricContainerId: string;
-  ownerId?: string;
 }
 
 export class GpuMonitor {
+  private gpuInfoInFlight?: Promise<GpuInfo[]>;
+  private gpuStatsInFlight?: Promise<GpuStats[]>;
+  private gpuProcessesInFlight?: Promise<GpuProcessInfo[]>;
+
   /**
    * @param enabled If false, all collection methods short-circuit to empty.
    *                Set from `AgentConfig.isGpuServer`. Independent of the
@@ -66,11 +70,19 @@ export class GpuMonitor {
 
   async getGpuInfo(): Promise<GpuInfo[]> {
     if (!this.enabled) return [];
+    if (this.gpuInfoInFlight) return this.gpuInfoInFlight;
+    this.gpuInfoInFlight = this.queryGpuInfo().finally(() => {
+      this.gpuInfoInFlight = undefined;
+    });
+    return this.gpuInfoInFlight;
+  }
+
+  private async queryGpuInfo(): Promise<GpuInfo[]> {
     try {
       const { stdout } = await execFileAsync('nvidia-smi', [
         '--query-gpu=index,uuid,name,memory.total',
         '--format=csv,noheader,nounits',
-      ]);
+      ], { timeout: NVIDIA_SMI_TIMEOUT_MS });
       return stdout.trim().split('\n').filter(Boolean).map((line) => {
         const [index, uuid, name, totalMemMiB] = line.split(', ').map((s) => s.trim());
         return {
@@ -87,11 +99,19 @@ export class GpuMonitor {
 
   async getGpuStats(): Promise<GpuStats[]> {
     if (!this.enabled) return [];
+    if (this.gpuStatsInFlight) return this.gpuStatsInFlight;
+    this.gpuStatsInFlight = this.queryGpuStats().finally(() => {
+      this.gpuStatsInFlight = undefined;
+    });
+    return this.gpuStatsInFlight;
+  }
+
+  private async queryGpuStats(): Promise<GpuStats[]> {
     try {
       const { stdout } = await execFileAsync('nvidia-smi', [
         '--query-gpu=index,uuid,utilization.gpu,memory.used,memory.total,temperature.gpu,power.draw,clocks.gr',
         '--format=csv,noheader,nounits',
-      ]);
+      ], { timeout: NVIDIA_SMI_TIMEOUT_MS });
       return stdout.trim().split('\n').filter(Boolean).map((line) => {
         const [index, uuid, util, memUsed, memTotal, temp, power, graphicsClock] =
           line.split(', ').map((s) => s.trim());
@@ -114,11 +134,19 @@ export class GpuMonitor {
 
   async getGpuProcesses(): Promise<GpuProcessInfo[]> {
     if (!this.enabled) return [];
+    if (this.gpuProcessesInFlight) return this.gpuProcessesInFlight;
+    this.gpuProcessesInFlight = this.queryGpuProcesses().finally(() => {
+      this.gpuProcessesInFlight = undefined;
+    });
+    return this.gpuProcessesInFlight;
+  }
+
+  private async queryGpuProcesses(): Promise<GpuProcessInfo[]> {
     try {
       const { stdout } = await execFileAsync('nvidia-smi', [
         '--query-compute-apps=pid,used_memory,gpu_uuid',
         '--format=csv,noheader,nounits',
-      ]);
+      ], { timeout: NVIDIA_SMI_TIMEOUT_MS });
       const lines = stdout.trim().split('\n').filter(Boolean);
       // Resolve container IDs in parallel (each reads a single /proc/<pid>/cgroup file)
       const processes = await Promise.all(
@@ -230,7 +258,6 @@ export class GpuMonitor {
           server: serverId,
           gpu_uuid: p.gpuUuid,
           container_id: owner.metricContainerId,
-          user_id: owner.ownerId ?? '',
         },
         value: p.usedMemoryMiB * 1024 * 1024,
         ts,

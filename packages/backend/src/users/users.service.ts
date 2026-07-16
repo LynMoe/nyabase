@@ -6,26 +6,30 @@ import {
   Logger,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { DataSource, In, Repository } from 'typeorm';
+import { DataSource, In, Not, Repository } from 'typeorm';
 import { v4 as uuidv4 } from 'uuid';
 import { UserEntity } from '../entities/user.entity.js';
 import { SshPublicKeyEntity } from '../entities/ssh-public-key.entity.js';
 import { AuthService } from '../auth/auth.service.js';
 import { AccessResolverService } from '../access/access-resolver.service.js';
-import { ContainerSshSyncService } from '../containers/container-ssh-sync.service.js';
+import { ContainerSshConvergenceService } from '../ssh/container-ssh-convergence.service.js';
 import { runSerializedTransaction } from '../database/serialized-transaction.js';
-import { UserStatus, UserDto, normalizeOpenSshPublicKey } from '@nyabase/common';
+import {
+  UserStatus,
+  UserDto,
+  normalizeOpenSshPublicKey,
+  MAX_AGENT_XFS_PROJECTS,
+  MAX_PLATFORM_ACTIVE_USERS,
+  MAX_SSH_PUBLIC_KEYS_PER_USER,
+  MAX_SSH_PUBLIC_KEY_TEXT_LENGTH,
+} from '@nyabase/common';
 import { SshIdentityService } from '../ssh/ssh-identity.service.js';
-import { SshProxyGateway } from '../ssh/ssh-proxy-gateway.js';
 import { NyabaseConfigService } from '../config/nyabase-config.service.js';
+import { ProxySnapshotNotifierService } from '../proxy-snapshots/proxy-snapshot-notifier.service.js';
 
 @Injectable()
 export class UsersService {
   private readonly logger = new Logger(UsersService.name);
-
-  /** Bidirectional cache: UUID ↔ numericId (never changes after creation). */
-  private readonly numericIdCache = new Map<string, number>();
-  private readonly uuidCache = new Map<number, string>();
 
   constructor(
     @InjectRepository(UserEntity)
@@ -35,9 +39,9 @@ export class UsersService {
     private authService: AuthService,
     private accessResolver: AccessResolverService,
     private dataSource: DataSource,
-    private containerSshSync: ContainerSshSyncService,
+    private containerSshConvergence: ContainerSshConvergenceService,
     private sshIdentities: SshIdentityService,
-    private sshProxyGateway: SshProxyGateway,
+    private proxySnapshots: ProxySnapshotNotifierService,
     private config: NyabaseConfigService,
   ) {}
 
@@ -52,6 +56,26 @@ export class UsersService {
     const passwordHash = await this.authService.hashPassword(dto.password);
 
     const user = await runSerializedTransaction(this.dataSource, async (manager) => {
+      const [totalUsers, activeUsers] = await Promise.all([
+        manager.count(UserEntity),
+        manager.count(UserEntity, { where: { status: UserStatus.Active } }),
+      ]);
+      // Deleted users remain durable tombstones and their numeric IDs may
+      // already exist as XFS project records on every previously granted
+      // server. Bound the lifetime namespace by the authoritative report
+      // shape so ordinary user churn can never make Agent inventory invalid.
+      if (totalUsers >= MAX_AGENT_XFS_PROJECTS) {
+        throw new ConflictException({
+          code: 'USER_LIFETIME_CAPACITY_REACHED',
+          message: `At most ${MAX_AGENT_XFS_PROJECTS} lifetime users are supported`,
+        });
+      }
+      if (activeUsers >= MAX_PLATFORM_ACTIVE_USERS) {
+        throw new ConflictException({
+          code: 'USER_CAPACITY_REACHED',
+          message: `At most ${MAX_PLATFORM_ACTIVE_USERS} active users are supported`,
+        });
+      }
       const result = await manager
         .createQueryBuilder()
         .select('COALESCE(MAX(u.numericId), 0)', 'max')
@@ -72,79 +96,50 @@ export class UsersService {
       return saved;
     });
 
-    this.numericIdCache.set(user.id, user.numericId);
-    this.uuidCache.set(user.numericId, user.id);
     return user;
   }
 
   /**
-   * Resolve UUIDs → numericIds. Missing entries are batch-fetched from DB and
-   * cached. UUIDs not found in DB are omitted from the result.
+   * Resolve UUIDs -> numericIds with one bounded batch query. These mappings
+   * are durable data, not process state; retaining every historical user in a
+   * process cache would grow without bound under normal user churn.
    */
   async getNumericIdsByUserIds(uuids: string[]): Promise<Map<string, number>> {
+    const ids = [...new Set(uuids)];
     const result = new Map<string, number>();
-    const missing: string[] = [];
-
-    for (const uuid of uuids) {
-      const cached = this.numericIdCache.get(uuid);
-      if (cached !== undefined) {
-        result.set(uuid, cached);
-      } else {
-        missing.push(uuid);
-      }
+    if (ids.length === 0) return result;
+    const rows = await this.usersRepo.findBy({ id: In(ids) });
+    for (const row of rows) {
+      // Skip users created before the numericId migration (numericId is nullable).
+      if (row.numericId == null) continue;
+      result.set(row.id, row.numericId);
     }
-
-    if (missing.length > 0) {
-      const rows = await this.usersRepo.findBy({ id: In(missing) });
-      for (const row of rows) {
-        // Skip users created before the numericId migration (numericId is nullable).
-        if (row.numericId == null) continue;
-        this.numericIdCache.set(row.id, row.numericId);
-        this.uuidCache.set(row.numericId, row.id);
-        result.set(row.id, row.numericId);
-      }
-    }
-
     return result;
   }
 
   /**
-   * Resolve numericIds → UUIDs. Missing entries are batch-fetched from DB and
-   * cached. numericIds not found in DB are omitted from the result.
+   * Resolve numericIds -> UUIDs with one bounded batch query. IDs not present
+   * in durable state are omitted.
    */
   async getUserIdsByNumericIds(numericIds: number[]): Promise<Map<number, string>> {
+    const ids = [...new Set(numericIds)];
     const result = new Map<number, string>();
-    const missing: number[] = [];
-
-    for (const num of numericIds) {
-      const cached = this.uuidCache.get(num);
-      if (cached !== undefined) {
-        result.set(num, cached);
-      } else {
-        missing.push(num);
-      }
+    if (ids.length === 0) return result;
+    const rows = await this.usersRepo.findBy({ numericId: In(ids) });
+    for (const row of rows) {
+      result.set(row.numericId, row.id);
     }
-
-    if (missing.length > 0) {
-      const rows = await this.usersRepo.findBy({ numericId: In(missing) });
-      for (const row of rows) {
-        this.numericIdCache.set(row.id, row.numericId);
-        this.uuidCache.set(row.numericId, row.id);
-        result.set(row.numericId, row.id);
-      }
-    }
-
     return result;
   }
 
   async findById(id: string): Promise<UserEntity> {
     const user = await this.usersRepo.findOne({ where: { id } });
-    if (!user) throw new NotFoundException('User not found');
+    if (!user || user.status === UserStatus.Deleted) throw new NotFoundException('User not found');
     return user;
   }
 
   async findAll(): Promise<UserEntity[]> {
-    return this.usersRepo.find();
+    return this.usersRepo.find({ where: { status: Not(UserStatus.Deleted) } });
   }
 
   async findByIds(ids: string[]): Promise<UserEntity[]> {
@@ -160,30 +155,46 @@ export class UsersService {
       status?: UserStatus;
     },
   ): Promise<UserEntity> {
-    const user = await this.findById(id);
-    if (dto.displayName !== undefined) user.displayName = dto.displayName;
-    if (dto.status !== undefined) user.status = dto.status;
-    if (dto.password) {
-      user.passwordHash = await this.authService.hashPassword(dto.password);
-    }
-    if (dto.status === UserStatus.Disabled) {
-      this.accessResolver.invalidateUser(id);
-    }
-    const saved = await this.usersRepo.save(user);
-    await this.notifySshProxyChanged();
+    const passwordHash = dto.password
+      ? await this.authService.hashPassword(dto.password)
+      : undefined;
+    const saved = await runSerializedTransaction(this.dataSource, async (manager) => {
+      const user = await manager.findOneBy(UserEntity, { id });
+      if (!user) throw new NotFoundException('User not found');
+      if (user.status === UserStatus.Deleted || user.status === UserStatus.Deleting) {
+        throw new ConflictException({
+          code: user.status === UserStatus.Deleted ? 'USER_DELETED' : 'USER_DELETING',
+          message: 'A deleted or deleting user cannot be updated',
+          userId: id,
+        });
+      }
+      if (dto.status === UserStatus.Deleted) {
+        throw new BadRequestException({
+          code: 'USER_DELETED_STATUS_RESERVED',
+          message: 'Deleted is reserved for the DELETE endpoint',
+        });
+      }
+      if (
+        dto.status === UserStatus.Active
+        && user.status !== UserStatus.Active
+        && await manager.count(UserEntity, { where: { status: UserStatus.Active } })
+          >= MAX_PLATFORM_ACTIVE_USERS
+      ) {
+        throw new ConflictException({
+          code: 'USER_CAPACITY_REACHED',
+          message: `At most ${MAX_PLATFORM_ACTIVE_USERS} active users are supported`,
+        });
+      }
+      const allowed: Partial<Pick<UserEntity, 'displayName' | 'passwordHash' | 'status'>> = {};
+      if (dto.displayName !== undefined) allowed.displayName = dto.displayName;
+      if (passwordHash !== undefined) allowed.passwordHash = passwordHash;
+      if (dto.status !== undefined) allowed.status = dto.status;
+      if (Object.keys(allowed).length > 0) await manager.update(UserEntity, id, allowed);
+      return manager.findOneByOrFail(UserEntity, { id });
+    });
+    if (dto.status !== undefined) this.accessResolver.invalidateUser(id);
+    await this.notifyProxySnapshotsChanged('user-updated');
     return saved;
-  }
-
-  async deleteUser(id: string): Promise<void> {
-    const user = await this.findById(id);
-    this.accessResolver.invalidateUser(id);
-    await this.usersRepo.remove(user);
-    // Evict from bidirectional cache so stale entries don't linger.
-    if (user.numericId != null) {
-      this.numericIdCache.delete(id);
-      this.uuidCache.delete(user.numericId);
-    }
-    await this.notifySshProxyChanged();
   }
 
   async ensureAdminExists(addToAdminsGroup: (userId: string) => Promise<void>): Promise<void> {
@@ -230,16 +241,33 @@ export class UsersService {
   async addSshKey(userId: string, name: string, keyText: string): Promise<SshPublicKeyEntity> {
     const normalizedKeyText = normalizeOpenSshPublicKey(keyText);
     if (!normalizedKeyText) throw new BadRequestException('Invalid OpenSSH public key');
+    if (normalizedKeyText.length > MAX_SSH_PUBLIC_KEY_TEXT_LENGTH) {
+      throw new BadRequestException(
+        `SSH public key must not exceed ${MAX_SSH_PUBLIC_KEY_TEXT_LENGTH} characters`,
+      );
+    }
 
-    const key = this.sshKeysRepo.create({
-      id: uuidv4(),
-      userId,
-      name,
-      keyText: normalizedKeyText,
-      createdAt: new Date(),
+    const saved = await runSerializedTransaction(this.dataSource, async (manager) => {
+      const user = await manager.findOneBy(UserEntity, { id: userId });
+      if (!user || user.status !== UserStatus.Active) {
+        throw new ConflictException('SSH keys require an active user');
+      }
+      const keyCount = await manager.count(SshPublicKeyEntity, { where: { userId } });
+      if (keyCount >= MAX_SSH_PUBLIC_KEYS_PER_USER) {
+        throw new ConflictException({
+          code: 'SSH_PUBLIC_KEY_CAPACITY_REACHED',
+          message: `At most ${MAX_SSH_PUBLIC_KEYS_PER_USER} SSH public keys are supported per user`,
+        });
+      }
+      return manager.save(SshPublicKeyEntity, manager.create(SshPublicKeyEntity, {
+        id: uuidv4(),
+        userId,
+        name,
+        keyText: normalizedKeyText,
+        createdAt: new Date(),
+      }));
     });
-    const saved = await this.sshKeysRepo.save(key);
-    await this.notifySshProxyChanged();
+    await this.notifyProxySnapshotsChanged('user-ssh-key-added');
     return saved;
   }
 
@@ -247,7 +275,7 @@ export class UsersService {
     const key = await this.sshKeysRepo.findOne({ where: { id: keyId, userId } });
     if (!key) throw new NotFoundException('SSH key not found');
     await this.sshKeysRepo.remove(key);
-    await this.notifySshProxyChanged();
+    await this.notifyProxySnapshotsChanged('user-ssh-key-deleted');
   }
 
   async getUserSshKeyTexts(userId: string): Promise<string[]> {
@@ -257,18 +285,18 @@ export class UsersService {
 
   async notifyInternalSshKeyRotated(userId: string): Promise<void> {
     try {
-      await this.containerSshSync.enqueueForUser(userId);
+      await this.containerSshConvergence.reconcileUser(userId);
     } catch (e) {
       this.logger.warn(`SSH key change hook enqueue failed for ${userId}: ${e instanceof Error ? e.message : String(e)}`);
     }
-    await this.notifySshProxyChanged();
+    await this.notifyProxySnapshotsChanged('user-internal-ssh-key-rotated');
   }
 
-  private async notifySshProxyChanged(): Promise<void> {
+  private async notifyProxySnapshotsChanged(reason: string): Promise<void> {
     try {
-      await this.sshProxyGateway.broadcastSnapshot();
+      await this.proxySnapshots.notify(reason);
     } catch (e) {
-      this.logger.warn(`SSH proxy snapshot broadcast failed: ${e instanceof Error ? e.message : String(e)}`);
+      this.logger.warn(`Proxy snapshot notification failed: ${e instanceof Error ? e.message : String(e)}`);
     }
   }
 

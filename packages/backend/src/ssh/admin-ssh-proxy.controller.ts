@@ -3,6 +3,7 @@ import { Capability } from '@nyabase/common';
 import { RequireCaps } from '../auth/decorators/require-caps.decorator.js';
 import { CapabilitiesGuard } from '../auth/guards/capabilities.guard.js';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard.js';
+import { postCommitBestEffort } from '../common/post-commit.js';
 import { SshIdentityService } from './ssh-identity.service.js';
 import { SshProxyGateway } from './ssh-proxy-gateway.js';
 
@@ -44,7 +45,10 @@ export class AdminSshProxyController {
   @RequireCaps(Capability.ManageSystemSettings)
   async rotateHostKey(): Promise<SshProxyHostKeySummaryDto> {
     await this.sshIdentities.rotateProxyHostKey();
-    await this.sshProxyGateway.broadcastSnapshot();
+    await postCommitBestEffort(
+      'SSH proxy host-key snapshot broadcast',
+      () => this.sshProxyGateway.broadcastSnapshot(),
+    );
     return this.hostKeyDto();
   }
 

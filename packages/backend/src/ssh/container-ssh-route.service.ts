@@ -5,32 +5,71 @@ import {
   type ContainerSnapshot,
   type SshProxyRuntimeRouteSnapshot,
 } from '@nyabase/common';
-import { In, Repository } from 'typeorm';
+import { DataSource, In, Repository } from 'typeorm';
 import { ContainerSshRouteEntity } from '../entities/container-ssh-route.entity.js';
+import { runSerializedTransaction } from '../database/serialized-transaction.js';
+import { NetworkAddressClaimEntity } from '../entities/network-address-claim.entity.js';
 
 @Injectable()
 export class ContainerSshRouteService {
   constructor(
     @InjectRepository(ContainerSshRouteEntity)
     private routesRepo: Repository<ContainerSshRouteEntity>,
+    private dataSource: DataSource,
   ) {}
 
   async updateFromStateReport(
     serverId: string,
     containers: ContainerSnapshot[],
-    observedAtMs: number,
-    incremental: boolean,
+    receivedAtMs: number,
   ): Promise<void> {
-    const observedAt = new Date(observedAtMs);
-    const rows = containers
-      .map((container) => this.routeFromSnapshot(serverId, container, observedAt))
-      .filter((row): row is ContainerSshRouteEntity => row !== null);
-    if (!incremental) {
-      await this.routesRepo.delete({ serverId });
-    }
-    if (rows.length > 0) {
-      await this.routesRepo.upsert(rows, ['containerId']);
-    }
+    // Route TTL is a Backend-local freshness decision. Never compare the
+    // Agent host's wall clock with the Backend clock; preserve Agent
+    // observedAt only in the state-report evidence/cache.
+    const observedAt = new Date(receivedAtMs);
+    await runSerializedTransaction(this.dataSource, async (manager) => {
+      const containerIds = containers
+        .map((container) => container.labels?.['nyabase.container_id'])
+        .filter((id): id is string => Boolean(id));
+      const addresses = containers.map((container) => container.runtime.ip);
+      const claims = containerIds.length === 0
+        ? []
+        : await manager.find(NetworkAddressClaimEntity, {
+          where: [
+            { ownerId: In(containerIds), state: 'active' },
+            { address: In(addresses), state: 'active' },
+          ],
+        });
+      const byContainerId = new Map(claims.filter((claim) => claim.ownerKind === 'container').map((claim) => [
+        claim.ownerId,
+        claim,
+      ]));
+      const rows = containers
+        .map((container) => {
+          const containerId = container.labels?.['nyabase.container_id'];
+          const reservation = containerId ? byContainerId.get(containerId) : undefined;
+          const activeForAddress = claims.filter((claim) => claim.address === container.runtime.ip);
+          if (
+            !reservation
+            || reservation.serverId !== serverId
+            || reservation.address !== container.runtime.ip
+            || activeForAddress.length !== 1
+            || activeForAddress[0]?.id !== reservation.id
+          ) return null;
+          return this.routeFromSnapshot(serverId, container, observedAt);
+        })
+        .filter((row): row is ContainerSshRouteEntity => row !== null);
+      await manager.delete(ContainerSshRouteEntity, { serverId });
+      if (rows.length > 0) await manager.upsert(ContainerSshRouteEntity, rows, ['containerId']);
+    });
+  }
+
+  async clearServer(serverId: string): Promise<void> {
+    await this.routesRepo.delete({ serverId });
+  }
+
+  async clearAll(): Promise<void> {
+    await this.routesRepo.clear();
   }
 
   async findByContainerIds(containerIds: string[]): Promise<Map<string, ContainerSshRouteEntity>> {
@@ -60,13 +99,13 @@ export class ContainerSshRouteService {
     observedAt: Date,
   ): ContainerSshRouteEntity | null {
     const labels = snapshot.labels ?? {};
-    const containerId = labels['nyabase.containerId'] ?? labels['nyabase.container_id'];
+    const containerId = labels['nyabase.container_id'];
     if (!containerId) return null;
     return this.routesRepo.create({
       containerId,
       serverId,
-      runtimeId: snapshot.spec.runtimeId,
-      macvlanIp: snapshot.spec.ip || null,
+      runtimeId: snapshot.runtime.runtimeId,
+      macvlanIp: snapshot.runtime.ip || null,
       runtimeStatus: snapshot.status ?? ContainerStatus.Unknown,
       sshStatus: snapshot.sshServer.status,
       appliedInternalKeyGeneration: snapshot.sshServer.appliedKeyGeneration ?? null,

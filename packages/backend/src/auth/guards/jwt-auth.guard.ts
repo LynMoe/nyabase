@@ -4,14 +4,15 @@ import { AuthService } from '../auth.service.js';
 
 @Injectable()
 export class JwtAuthGuard extends AuthGuard('jwt') {
-  constructor(private authService: AuthService) {
+  constructor(
+    private authService: AuthService,
+  ) {
     super();
   }
 
   async canActivate(context: ExecutionContext): Promise<boolean> {
     const request = context.switchToHttp().getRequest();
     const authHeader: string | undefined = request.headers['authorization'];
-
     // Bearer-token format dispatch:
     //   - API tokens are emitted as 64-char lowercase hex (32 random bytes,
     //     see AuthService.createApiToken). They never contain '.' so they
@@ -30,12 +31,6 @@ export class JwtAuthGuard extends AuthGuard('jwt') {
         }
         throw new UnauthorizedException();
       }
-    }
-
-    // Support ?token= query param for SSE endpoints (EventSource cannot set headers)
-    const queryToken: string | undefined = request.query?.token;
-    if (queryToken && !authHeader) {
-      request.headers['authorization'] = `Bearer ${queryToken}`;
     }
 
     return super.canActivate(context) as Promise<boolean>;

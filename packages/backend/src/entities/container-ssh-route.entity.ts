@@ -1,12 +1,16 @@
-import { Column, Entity, Index, PrimaryColumn } from 'typeorm';
+import { Column, Entity, ForeignKey, Index, PrimaryColumn } from 'typeorm';
 import { ContainerStatus } from '@nyabase/common';
+import { ContainerEntity } from './container.entity.js';
+import { ServerEntity } from './server.entity.js';
 
 @Entity('container_ssh_routes')
 export class ContainerSshRouteEntity {
   @PrimaryColumn({ name: 'container_id', type: 'text' })
+  @ForeignKey(() => ContainerEntity, { onDelete: 'CASCADE' })
   containerId: string;
 
   @Index()
+  @ForeignKey(() => ServerEntity, { onDelete: 'RESTRICT' })
   @Column({ name: 'server_id', type: 'text' })
   serverId: string;
 

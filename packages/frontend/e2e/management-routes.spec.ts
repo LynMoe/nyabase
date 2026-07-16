@@ -30,11 +30,6 @@ const gpuServer = {
   isGpuServer: true,
   status: 'online',
   lastSeenAt: null,
-  defaultCpuMillis: 8000,
-  defaultMemBytes: 64 * 1024 ** 3,
-  defaultDiskBytes: 100 * 1024 ** 3,
-  defaultGpuMode: 'indices',
-  defaultGpuIndices: [0],
   disks: [{ diskId: 'disk-data', mountPoint: '/data', label: 'Data SSD', totalBytes: 2 * 1024 ** 4, usedBytes: 640 * 1024 ** 3, pquotaEnabled: true }],
   gpus: [{ index: 0, uuid: 'GPU-aaaaaaaa-bbbb-cccc-dddd-eeeeeeee0000', model: 'NVIDIA L40', totalMemMiB: 46068 }],
   agentVersion: '0.1.0',
@@ -65,11 +60,6 @@ const cpuServer = {
   isGpuServer: false,
   status: 'offline',
   lastSeenAt: null,
-  defaultCpuMillis: 4000,
-  defaultMemBytes: 16 * 1024 ** 3,
-  defaultDiskBytes: 50 * 1024 ** 3,
-  defaultGpuMode: 'none',
-  defaultGpuIndices: [],
   disks: [],
   gpus: [],
   agentVersion: '0.1.0',
@@ -85,7 +75,6 @@ const images = [
     id: 'img-cuda',
     name: 'cuda-pytorch',
     dockerImage: 'nvcr.io/nvidia/pytorch:24.05-py3',
-    defaultUid: 1001,
     description: 'GPU notebook image',
     isActive: true,
     entrypoint: null,
@@ -95,7 +84,6 @@ const images = [
     id: 'img-ubuntu',
     name: 'ubuntu-base',
     dockerImage: 'ubuntu:24.04',
-    defaultUid: 1000,
     description: 'CPU base image',
     isActive: false,
     entrypoint: null,
@@ -150,7 +138,7 @@ const container = {
     stale: false,
     drift: [],
   },
-  activeOperation: null,
+  activeTask: null,
   resources: {
     cpuMillis: 2000,
     memBytes: 8 * 1024 ** 3,
@@ -175,7 +163,6 @@ const container = {
     stats: { enabled: true },
     console: { enabled: true },
     updateMounts: { enabled: true },
-    enableSsh: { enabled: false, message: 'SSH 已启用' },
     reconcileSsh: { enabled: true },
   },
 };
@@ -271,7 +258,7 @@ test.describe('authenticated visual route coverage', () => {
     await expect(page.getByText('gpu-lab-01')).toBeVisible();
     await expect(page.getByText('GPU 0: L40')).toBeVisible();
     await expect(page.getByText('cpu-lab-01')).toBeVisible();
-    await expect(page.getByText('offline')).toBeVisible();
+    await expect(page.getByText('离线')).toBeVisible();
     await expect(page).toHaveScreenshot('servers-management.png', { fullPage: true });
   });
 
@@ -284,6 +271,11 @@ test.describe('authenticated visual route coverage', () => {
     await expect(page.getByText('nvcr.io/nvidia/pytorch:24.05-py3')).toBeVisible();
     await expect(page.getByText('ubuntu-base')).toBeVisible();
     await expect(page.getByText('停用')).toBeVisible();
+    await expect(page.getByText('已加载')).toHaveCount(0);
+    await page.getByRole('button', { name: '展开详情' }).first().click();
+    await expect(page.getByText('已加载 2 台服务器，在线 1 台。')).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Pull 全部在线服务器' })).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Pull', exact: true })).toBeVisible();
     await expect(page).toHaveScreenshot('images-management.png', { fullPage: true });
   });
 
@@ -306,7 +298,7 @@ test.describe('authenticated visual route coverage', () => {
     await expect(page.getByRole('heading', { name: '用户中心' })).toBeVisible();
     await expect(page.getByRole('heading', { name: '修改密码' })).toBeVisible();
     await expect(page.getByRole('heading', { name: 'SSH 公钥' })).toBeVisible();
-    await expect(page.getByText('用于容器 SSH 登录')).toBeVisible();
+    await expect(page.getByText('这些公钥用于认证到 SSH 代理，不会直接写入容器。')).toBeVisible();
     await expect(page.getByText('work-laptop')).toBeVisible();
     await expect(page.getByText('cluster-jumpbox')).toBeVisible();
     const keyTextInput = page.getByLabel('公钥内容');
@@ -397,6 +389,27 @@ async function mockApi(page: Page): Promise<void> {
     if (path === '/admin/servers/srv-gpu/disks' || path === '/servers/srv-gpu/disks') return json(route, gpuServer.disks);
     if (path === '/admin/servers/srv-cpu/disks' || path === '/servers/srv-cpu/disks') return json(route, []);
     if (path === '/admin/images') return json(route, images);
+    if (path === '/admin/images/img-cuda/status') return json(route, [
+      {
+        serverId: 'srv-gpu',
+        serverName: 'gpu-lab-01',
+        hostname: 'gpu-lab-01',
+        online: true,
+        present: false,
+        pulling: null,
+        error: null,
+      },
+      {
+        serverId: 'srv-cpu',
+        serverName: 'cpu-lab-01',
+        hostname: 'cpu-lab-01',
+        online: false,
+        present: false,
+        pulling: null,
+        error: null,
+      },
+    ]);
+    if (path === '/admin/images/img-ubuntu/status') return json(route, []);
     if (path === '/admin/users') return json(route, users);
     if (path === '/users/user-admin/ssh-keys') {
       if (route.request().method() === 'POST') {

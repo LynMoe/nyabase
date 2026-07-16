@@ -1,5 +1,9 @@
 import { Inject, Injectable, Logger, OnModuleDestroy, forwardRef } from '@nestjs/common';
-import { MetricPoint } from '@nyabase/common';
+import {
+  MAX_AGENT_WS_FRAME_BYTES,
+  MAX_METRIC_POINTS_PER_BATCH,
+  type MetricPoint,
+} from '@nyabase/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { In, Repository } from 'typeorm';
 import { ContainerEntity } from '../entities/container.entity.js';
@@ -10,17 +14,24 @@ import { NyabaseConfigService } from '../config/nyabase-config.service.js';
 interface QueuedBatch {
   serverId: string;
   points: MetricPoint[];
+  estimatedBytes: number;
 }
 
 export interface MetricsWriterStats {
   queued: number;
+  queuedPoints: number;
+  queuedBytes: number;
   dropped: number;
   inFlight: number;
   lastFlushAt: number | null;
   lastError: string | null;
 }
 
-const DEFAULT_QUEUE_LIMIT = 10_000;
+const DEFAULT_QUEUE_LIMIT = 1_024;
+const MAX_QUEUED_POINTS = MAX_METRIC_POINTS_PER_BATCH * 4;
+const MAX_QUEUED_BYTES = MAX_AGENT_WS_FRAME_BYTES * 2;
+const MAX_FLUSH_POINTS = MAX_METRIC_POINTS_PER_BATCH * 2;
+const MAX_FLUSH_BYTES = MAX_AGENT_WS_FRAME_BYTES;
 const DEFAULT_FLUSH_INTERVAL_MS = 1_000;
 const DEFAULT_MAX_CONCURRENT_FLUSHES = 1;
 const DEFAULT_BATCH_FLUSH_SIZE = 64;
@@ -49,6 +60,8 @@ export class MetricsWriter implements OnModuleDestroy {
   private readonly batchFlushSize = DEFAULT_BATCH_FLUSH_SIZE;
 
   private dropped = 0;
+  private queuedPoints = 0;
+  private queuedBytes = 0;
   private inFlight = 0;
   private lastFlushAt: number | null = null;
   private lastError: string | null = null;
@@ -76,15 +89,39 @@ export class MetricsWriter implements OnModuleDestroy {
    */
   async writeBatch(serverId: string, points: MetricPoint[]): Promise<void> {
     if (points.length === 0 || this.shuttingDown) return;
+    if (points.length > MAX_METRIC_POINTS_PER_BATCH) {
+      this.dropped += 1;
+      this.logger.warn(
+        `Rejected metrics batch with ${points.length} points; maximum is `
+        + `${MAX_METRIC_POINTS_PER_BATCH}`,
+      );
+      return;
+    }
 
     points = await this.normalizeIdentityLabels(serverId, points);
+    const estimatedBytes = Buffer.byteLength(JSON.stringify({ serverId, points }));
+    if (estimatedBytes > MAX_FLUSH_BYTES) {
+      this.dropped += 1;
+      this.logger.warn(
+        `Rejected metrics batch of ${estimatedBytes} bytes; queue byte limit is `
+        + `${MAX_FLUSH_BYTES}`,
+      );
+      return;
+    }
 
-    if (this.queue.length >= this.queueLimit) {
+    while (
+      this.queue.length > 0
+      && (this.queue.length >= this.queueLimit
+        || this.queuedPoints + points.length > MAX_QUEUED_POINTS
+        || this.queuedBytes + estimatedBytes > MAX_QUEUED_BYTES)
+    ) {
       // Drop the oldest batch to make room. We log at warn the first time per
       // contiguous burst so we don't spam logs when the upstream is wedged.
       const droppedBatch = this.queue.shift();
       this.dropped += 1;
       if (droppedBatch) {
+        this.queuedPoints -= droppedBatch.points.length;
+        this.queuedBytes -= droppedBatch.estimatedBytes;
         this.logger.warn(
           `Metrics queue full (limit=${this.queueLimit}); dropped 1 batch ` +
             `(${droppedBatch.points.length} points from server ${droppedBatch.serverId}). ` +
@@ -93,7 +130,9 @@ export class MetricsWriter implements OnModuleDestroy {
       }
     }
 
-    this.queue.push({ serverId, points });
+    this.queue.push({ serverId, points, estimatedBytes });
+    this.queuedPoints += points.length;
+    this.queuedBytes += estimatedBytes;
 
     // Trigger an immediate flush if we have capacity. The interval timer is a
     // safety net for the steady-state case.
@@ -103,6 +142,8 @@ export class MetricsWriter implements OnModuleDestroy {
   getStats(): MetricsWriterStats {
     return {
       queued: this.queue.length,
+      queuedPoints: this.queuedPoints,
+      queuedBytes: this.queuedBytes,
       dropped: this.dropped,
       inFlight: this.inFlight,
       lastFlushAt: this.lastFlushAt,
@@ -207,8 +248,24 @@ export class MetricsWriter implements OnModuleDestroy {
    */
   private takeBatch(): QueuedBatch[] | null {
     if (this.queue.length === 0) return null;
-    const take = Math.min(this.queue.length, this.batchFlushSize);
-    return this.queue.splice(0, take);
+    const result: QueuedBatch[] = [];
+    let points = 0;
+    let bytes = 0;
+    while (result.length < this.batchFlushSize && this.queue.length > 0) {
+      const next = this.queue[0];
+      if (
+        result.length > 0
+        && (points + next.points.length > MAX_FLUSH_POINTS
+          || bytes + next.estimatedBytes > MAX_FLUSH_BYTES)
+      ) break;
+      this.queue.shift();
+      result.push(next);
+      points += next.points.length;
+      bytes += next.estimatedBytes;
+      this.queuedPoints -= next.points.length;
+      this.queuedBytes -= next.estimatedBytes;
+    }
+    return result;
   }
 
   private async flushOne(batches: QueuedBatch[]): Promise<void> {
@@ -216,7 +273,7 @@ export class MetricsWriter implements OnModuleDestroy {
     for (const batch of batches) {
       for (const p of batch.points) {
         const labelParts = Object.entries({ ...p.labels, server: batch.serverId })
-          .map(([k, v]) => `${k}="${v}"`)
+          .map(([k, v]) => `${k}="${escapePrometheusLabelValue(v)}"`)
           .join(',');
         const labelStr = labelParts ? `{${labelParts}}` : '';
         lines.push(`${p.name}${labelStr} ${p.value} ${p.ts}`);
@@ -247,4 +304,8 @@ export class MetricsWriter implements OnModuleDestroy {
       this.lastFlushAt = Date.now();
     }
   }
+}
+
+function escapePrometheusLabelValue(value: string): string {
+  return value.replace(/\\/g, '\\\\').replace(/\n/g, '\\n').replace(/"/g, '\\"');
 }

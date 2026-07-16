@@ -5,20 +5,16 @@ import type { ResolvedServerGrant } from '../access/access-resolver.service.js';
 export const QUOTA_EXCLUDED_LIFECYCLE_PHASES: readonly ContainerPhase[] = [
   ContainerPhase.Failed,
   ContainerPhase.Deleting,
-  ContainerPhase.Deleted,
 ] as const;
 
 /**
- * Quota accounting follows user-facing availability: delete-requested
- * tombstones and failed create placeholders are no longer usable and must not
- * block replacement creates.
+ * Quota accounting follows user-facing availability: delete-requested and
+ * failed create placeholders are no longer usable and must not block retries.
  */
 export function shouldCountContainerForQuota(
   lifecyclePhase: ContainerPhase,
-  deletedAt?: Date | string | null,
 ): boolean {
-  return deletedAt == null
-    && !QUOTA_EXCLUDED_LIFECYCLE_PHASES.includes(lifecyclePhase);
+  return !QUOTA_EXCLUDED_LIFECYCLE_PHASES.includes(lifecyclePhase);
 }
 
 /**

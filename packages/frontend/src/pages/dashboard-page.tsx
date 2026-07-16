@@ -15,7 +15,7 @@ const STORED_SERVER_KEY = 'nyabase-dashboard-server-v2';
 
 function preferredDashboardServerId(servers: ServerDto[]): string {
   const onlineServers = servers.filter((server) => server.status === 'online');
-  return onlineServers.find((server) => server.isGpuServer)?.id
+  return onlineServers.find((server) => (server.gpus?.length ?? 0) > 0)?.id
     ?? onlineServers[0]?.id
     ?? servers[0]?.id
     ?? '';
@@ -28,12 +28,12 @@ function preferredDashboardServerId(servers: ServerDto[]): string {
 function UsersTab({
   serverId,
   range,
-  isGpuServer,
+  hasGpu,
   admin = false,
 }: {
   serverId: string;
   range: string;
-  isGpuServer: boolean;
+  hasGpu: boolean;
   admin?: boolean;
 }) {
   const metricsBase = admin ? '/admin/metrics' : '/metrics';
@@ -65,7 +65,7 @@ function UsersTab({
     <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
       <MultiLineChart title="CPU 用量（核心数）" entries={entries('cpu')} yFormatter={(v) => v.toFixed(2)} />
       <MultiLineChart title="内存用量" entries={entries('memUsed')} yFormatter={formatBytesCompact} />
-      {isGpuServer && (
+      {hasGpu && (
         <MultiLineChart title="GPU 显存" entries={gpuEntries} yFormatter={formatBytesCompact} />
       )}
       <MultiLineChart title="磁盘 IO（读 + 写）" entries={entries('diskBps')} yFormatter={fmtBps} />
@@ -82,12 +82,12 @@ function UsersTab({
 function ContainersTab({
   serverId,
   range,
-  isGpuServer,
+  hasGpu,
   admin = false,
 }: {
   serverId: string;
   range: string;
-  isGpuServer: boolean;
+  hasGpu: boolean;
   admin?: boolean;
 }) {
   const metricsBase = admin ? '/admin/metrics' : '/metrics';
@@ -119,7 +119,7 @@ function ContainersTab({
     <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
       <MultiLineChart title="CPU 用量（核心数）" entries={entries('cpu')} yFormatter={(v) => v.toFixed(2)} />
       <MultiLineChart title="内存用量" entries={entries('memUsed')} yFormatter={formatBytesCompact} />
-      {isGpuServer && (
+      {hasGpu && (
         <MultiLineChart title="GPU 显存" entries={gpuEntries} yFormatter={formatBytesCompact} />
       )}
       <MultiLineChart title="磁盘 IO（读 + 写）" entries={entries('diskBps')} yFormatter={fmtBps} />
@@ -154,7 +154,7 @@ export default function DashboardPage() {
   }, [servers, serverId]);
 
   const selectedServer = servers.find((s) => s.id === serverId);
-  const isGpuServer = selectedServer?.isGpuServer ?? false;
+  const hasGpu = (selectedServer?.gpus?.length ?? 0) > 0;
 
   function handleServerChange(id: string) {
     setServerId(id);
@@ -234,8 +234,8 @@ export default function DashboardPage() {
 
           <div className="pt-1">
             {activeTab === 'users'
-              ? <UsersTab serverId={selectedServer.id} range={range} isGpuServer={isGpuServer} admin={adminMetrics} />
-              : <ContainersTab serverId={selectedServer.id} range={range} isGpuServer={isGpuServer} admin={adminMetrics} />}
+              ? <UsersTab serverId={selectedServer.id} range={range} hasGpu={hasGpu} admin={adminMetrics} />
+              : <ContainersTab serverId={selectedServer.id} range={range} hasGpu={hasGpu} admin={adminMetrics} />}
           </div>
         </div>
       )}

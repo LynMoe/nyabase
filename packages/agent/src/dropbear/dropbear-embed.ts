@@ -3,15 +3,20 @@ import * as fs from 'fs';
 import * as path from 'path';
 
 const DROPBEAR_ASSET_NAME = 'nyabase-dropbear-linux-x64';
+const DROPBEARKEY_ASSET_NAME = 'nyabase-dropbearkey-linux-x64';
 const SFTP_ASSET_NAME = 'nyabase-sftp-server-linux-x64';
 const PKG_DROPBEAR_NAME = 'nyabase-dropbear';
+const PKG_DROPBEARKEY_NAME = 'nyabase-dropbearkey';
 const PKG_SFTP_NAME = 'nyabase-sftp-server';
-const DROPBEAR_EXTRACT_PATH = '/var/lib/nyabase-agent/nyabase-dropbear';
-const SFTP_EXTRACT_PATH = '/var/lib/nyabase-agent/nyabase-sftp-server';
+const DROPBEAR_EXTRACT_PATH = '/run/nyabase-agent/nyabase-dropbear';
+const DROPBEARKEY_EXTRACT_PATH = '/run/nyabase-agent/nyabase-dropbearkey';
+const SFTP_EXTRACT_PATH = '/run/nyabase-agent/nyabase-sftp-server';
 
 export interface DropbearAsset {
   binaryPath: string;
   sha256Path?: string;
+  dropbearKeyPath?: string;
+  dropbearKeySha256Path?: string;
   sftpServerPath?: string;
   sftpServerSha256Path?: string;
   source: 'env' | 'pkg' | 'source' | 'missing';
@@ -33,6 +38,10 @@ function sourceDropbearPath(): string {
 
 function sourceSftpServerPath(): string {
   return path.resolve(__dirname, '../../assets/sftp', SFTP_ASSET_NAME);
+}
+
+function sourceDropbearKeyPath(): string {
+  return path.resolve(__dirname, '../../assets/dropbear', DROPBEARKEY_ASSET_NAME);
 }
 
 function extractPkgAsset(assetPath: string, extractPath: string, label: string): { path: string; sha256Path?: string } {
@@ -62,11 +71,16 @@ export function resolveAndExtractDropbear(): DropbearAsset {
   const override = process.env.NYABASE_DROPBEAR_PATH;
   if (override) {
     const sourceSftp = sourceSftpServerPath();
+    const sourceDropbearKey = sourceDropbearKeyPath();
+    const dropbearKeyOverride = process.env.NYABASE_DROPBEARKEY_PATH
+      ?? (fs.existsSync(sourceDropbearKey) ? sourceDropbearKey : undefined);
     const sftpOverride = process.env.NYABASE_SFTP_SERVER_PATH
       ?? (fs.existsSync(sourceSftp) ? sourceSftp : undefined);
     return {
       binaryPath: override,
       sha256Path: maybeShaPath(override),
+      dropbearKeyPath: dropbearKeyOverride,
+      dropbearKeySha256Path: dropbearKeyOverride ? maybeShaPath(dropbearKeyOverride) : undefined,
       sftpServerPath: sftpOverride,
       sftpServerSha256Path: sftpOverride ? maybeShaPath(sftpOverride) : undefined,
       source: 'env',
@@ -75,15 +89,21 @@ export function resolveAndExtractDropbear(): DropbearAsset {
 
   if ('pkg' in process) {
     const dropbearAssetPath = path.join(__dirname, PKG_DROPBEAR_NAME);
+    const dropbearKeyAssetPath = path.join(__dirname, PKG_DROPBEARKEY_NAME);
     const sftpAssetPath = path.join(__dirname, PKG_SFTP_NAME);
     try {
       const dropbear = extractPkgAsset(dropbearAssetPath, DROPBEAR_EXTRACT_PATH, 'Dropbear');
+      const dropbearKey = fs.existsSync(dropbearKeyAssetPath)
+        ? extractPkgAsset(dropbearKeyAssetPath, DROPBEARKEY_EXTRACT_PATH, 'Dropbear key utility')
+        : undefined;
       const sftp = fs.existsSync(sftpAssetPath)
         ? extractPkgAsset(sftpAssetPath, SFTP_EXTRACT_PATH, 'SFTP server')
         : undefined;
       return {
         binaryPath: dropbear.path,
         sha256Path: dropbear.sha256Path,
+        dropbearKeyPath: dropbearKey?.path,
+        dropbearKeySha256Path: dropbearKey?.sha256Path,
         sftpServerPath: sftp?.path,
         sftpServerSha256Path: sftp?.sha256Path,
         source: 'pkg',
@@ -93,6 +113,8 @@ export function resolveAndExtractDropbear(): DropbearAsset {
       return {
         binaryPath: dropbearAssetPath,
         sha256Path: maybeShaPath(dropbearAssetPath),
+        dropbearKeyPath: fs.existsSync(dropbearKeyAssetPath) ? dropbearKeyAssetPath : undefined,
+        dropbearKeySha256Path: fs.existsSync(dropbearKeyAssetPath) ? maybeShaPath(dropbearKeyAssetPath) : undefined,
         sftpServerPath: fs.existsSync(sftpAssetPath) ? sftpAssetPath : undefined,
         sftpServerSha256Path: fs.existsSync(sftpAssetPath) ? maybeShaPath(sftpAssetPath) : undefined,
         source: 'pkg',
@@ -113,10 +135,13 @@ export function resolveAndExtractDropbear(): DropbearAsset {
     };
   }
   const sftpServerPath = sourceSftpServerPath();
+  const dropbearKeyPath = sourceDropbearKeyPath();
 
   return {
     binaryPath,
     sha256Path: maybeShaPath(binaryPath),
+    dropbearKeyPath: fs.existsSync(dropbearKeyPath) ? dropbearKeyPath : undefined,
+    dropbearKeySha256Path: fs.existsSync(dropbearKeyPath) ? maybeShaPath(dropbearKeyPath) : undefined,
     sftpServerPath: fs.existsSync(sftpServerPath) ? sftpServerPath : undefined,
     sftpServerSha256Path: fs.existsSync(sftpServerPath) ? maybeShaPath(sftpServerPath) : undefined,
     source: 'source',

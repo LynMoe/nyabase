@@ -1,13 +1,12 @@
-import { useEffect, useRef, useState } from 'react';
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { useState } from 'react';
+import { useMutation, useQueries, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   CheckCircle, ChevronDown, ChevronUp, Download, ImageIcon, Loader2, Pencil, Plus, Trash2,
 } from 'lucide-react';
-import type { ImageDto } from '@nyabase/common';
+import { AgentTaskStatus, type AgentTaskDto, type ImageDto } from '@nyabase/common';
 
-import { api } from '../../lib/api.js';
 import { queryKeys } from '../../lib/query-keys.js';
-import { useAuthStore } from '../../store/auth.js';
+import { api } from '../../lib/api.js';
 import { toast } from '../../hooks/use-toast.js';
 import { Badge } from '../ui/badge.js';
 import { Button } from '../ui/button.js';
@@ -18,6 +17,11 @@ import { Separator } from '../ui/separator.js';
 
 import type { ServerStatus } from './types.js';
 import { ServerStatusRow } from './pull-progress-dialog.js';
+
+interface ImagePullResponse {
+  tasks: Array<{ serverId: string; taskId: string; status: AgentTaskStatus }>;
+  rejected: Array<{ serverId: string; message: string }>;
+}
 
 interface ImageListProps {
   images: ImageDto[];
@@ -77,67 +81,69 @@ interface ImageCardProps {
 
 function ImageCard({ image, onToggle, onEdit, onDelete }: ImageCardProps) {
   const [expanded, setExpanded] = useState(false);
-  const [pulling, setPulling] = useState(false);
-  const [statuses, setStatuses] = useState<ServerStatus[]>([]);
-  const sseRef = useRef<EventSource | null>(null);
+  const [taskIdsByServer, setTaskIdsByServer] = useState<Record<string, string>>({});
 
   const {
-    data: fetchedStatuses, refetch, isPending: statusPending, isError: statusError,
+    data: fetchedStatuses = [], refetch, isPending: statusPending, isError: statusError,
   } = useQuery({
     queryKey: queryKeys.images.status(image.id),
     queryFn: () => api.get<ServerStatus[]>(`/admin/images/${image.id}/status`),
     enabled: expanded,
-    refetchInterval: expanded ? 5_000 : false,
+    refetchInterval: expanded ? 2_000 : false,
   });
 
-  useEffect(() => {
-    if (fetchedStatuses) setStatuses(fetchedStatuses);
-  }, [fetchedStatuses]);
+  const taskQueries = useQueries({
+    queries: Object.entries(taskIdsByServer).map(([serverId, taskId]) => ({
+      queryKey: ['agent-task', 'admin', taskId],
+      queryFn: () => api.get<AgentTaskDto>(`/admin/agent-tasks/${taskId}`),
+      refetchInterval: (query: { state: { data?: AgentTaskDto } }) => (
+        query.state.data?.status === AgentTaskStatus.Succeeded
+        || query.state.data?.status === AgentTaskStatus.Failed
+          ? false
+          : 1_000
+      ),
+      meta: { serverId },
+    })),
+  });
+  const taskByServer = new Map<string, AgentTaskDto>();
+  Object.keys(taskIdsByServer).forEach((serverId, index) => {
+    const task = taskQueries[index]?.data;
+    if (task) taskByServer.set(serverId, task);
+  });
+  const statuses = fetchedStatuses.map((status) => ({
+    ...status,
+    task: taskByServer.get(status.serverId) ?? status.task,
+  }));
 
   const pullAll = useMutation({
     mutationFn: (serverIds?: string[]) =>
-      api.post<{ started: string[]; skipped: string[] }>(
+      api.post<ImagePullResponse>(
         `/admin/images/${image.id}/pull`,
         { serverIds },
       ),
     onSuccess: (res) => {
-      if (res.started.length > 0) {
-        setPulling(true);
-        openSse();
-        toast({ title: `已在 ${res.started.length} 台服务器上开始 pull` });
+      if (res.tasks.length > 0) {
+        setTaskIdsByServer((current) => ({
+          ...current,
+          ...Object.fromEntries(res.tasks.map((task) => [task.serverId, task.taskId])),
+        }));
+        toast({ title: `已创建 ${res.tasks.length} 个 Pull 任务` });
       }
-      if (res.skipped.length > 0) {
-        toast({ title: `${res.skipped.length} 台服务器离线，已跳过`, variant: 'destructive' });
+      if (res.rejected.length > 0) {
+        toast({
+          title: `${res.rejected.length} 个 Pull 任务未创建`,
+          description: res.rejected.map((item) => item.message).join('; '),
+          variant: 'destructive',
+        });
       }
+      void refetch();
     },
     onError: (e) => toast({ title: 'Pull 失败', description: e.message, variant: 'destructive' }),
   });
 
-  const openSse = () => {
-    sseRef.current?.close();
-    const token = useAuthStore.getState().accessToken ?? '';
-    const es = new EventSource(`/api/admin/images/${image.id}/pull-progress?token=${token}`);
-    es.onmessage = (e) => {
-      try {
-        const data = JSON.parse(e.data);
-        if (data.heartbeat) return;
-        setStatuses(data);
-        refetch();
-        if ((data as ServerStatus[]).every((s) => !s.pulling)) {
-          setPulling(false);
-          es.close();
-        }
-      } catch { /* ignore */ }
-    };
-    es.onerror = () => { es.close(); setPulling(false); };
-    sseRef.current = es;
-  };
-
-  useEffect(() => () => sseRef.current?.close(), []);
-
   const onlineServers = statuses.filter((s) => s.online);
   const presentCount = statuses.filter((s) => s.present).length;
-  const pullingCount = statuses.filter((s) => s.pulling).length;
+  const pullingCount = statuses.filter((s) => s.task?.status === AgentTaskStatus.Pending).length;
   const canPullAll = expanded && onlineServers.length > 0;
 
   return (
@@ -160,7 +166,7 @@ function ImageCard({ image, onToggle, onEdit, onDelete }: ImageCardProps) {
             </div>
 
             <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-muted-foreground">
-              <span>UID: <code className="rounded bg-muted px-1 py-0.5">{image.runtimeOverrides?.uid ?? image.defaultUid}</code></span>
+              <span>UID: <code className="rounded bg-muted px-1 py-0.5">{image.runtimeOverrides.uid}</code></span>
               {image.runtimeOverrides?.entrypoint && (
                 <span className="min-w-0 break-all">Entrypoint: <code className="rounded bg-muted px-1 py-0.5">{image.runtimeOverrides.entrypoint.join(' ')}</code></span>
               )}
@@ -235,10 +241,10 @@ function ImageCard({ image, onToggle, onEdit, onDelete }: ImageCardProps) {
                   </p>
                   <Button
                     size="sm"
-                    disabled={!canPullAll || pullAll.isPending || pulling}
+                    disabled={!canPullAll || pullAll.isPending || pullingCount > 0}
                     onClick={() => pullAll.mutate(undefined)}
                   >
-                    {pulling ? (
+                    {pullAll.isPending || pullingCount > 0 ? (
                       <><Loader2 className="h-4 w-4 animate-spin" />Pull 中...</>
                     ) : (
                       <><Download className="h-4 w-4" />Pull 全部在线服务器</>
@@ -251,7 +257,7 @@ function ImageCard({ image, onToggle, onEdit, onDelete }: ImageCardProps) {
                       key={s.serverId}
                       status={s}
                       onPull={() => pullAll.mutate([s.serverId])}
-                      pulling={pulling}
+                      pulling={pullAll.isPending || pullingCount > 0}
                     />
                   ))}
                 </div>

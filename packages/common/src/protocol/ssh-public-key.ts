@@ -28,7 +28,7 @@ export function normalizeOpenSshPublicKey(input: string): string | null {
   const parts = input.trim().split(/[ \t]+/).filter((part) => part.length > 0);
   if (parts.length < 2) return null;
 
-  const [keyType, keyBlob, ...commentParts] = parts;
+  const [keyType, keyBlob] = parts;
   if (!keyType || !keyBlob || !ACCEPTED_KEY_TYPES.has(keyType)) return null;
   if (!isValidBase64(keyBlob)) return null;
 
@@ -36,7 +36,10 @@ export function normalizeOpenSshPublicKey(input: string): string | null {
   if (!blob || blob.length === 0) return null;
   if (!isValidOpenSshKeyBlob(keyType, blob)) return null;
 
-  return [keyType, keyBlob, ...commentParts].join(' ');
+  // The separate key name is the product-visible label. OpenSSH comments are
+  // not authentication material, can contain arbitrary Unicode, and would
+  // make the bounded proxy snapshot byte proof depend on UTF-16 accounting.
+  return `${keyType} ${keyBlob}`;
 }
 
 export function isOpenSshPublicKey(input: string): boolean {

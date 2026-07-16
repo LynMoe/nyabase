@@ -1,7 +1,10 @@
 import { Module, Logger } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
+import { DataSource, type DataSourceOptions } from 'typeorm';
 import { DB_ENTITIES } from './db-entities.js';
 import { NyabaseConfigService } from '../config/nyabase-config.service.js';
+import { configureExclusiveSqliteConnection } from './exclusive-sqlite.js';
+import { installDatabaseCoordinator } from './database-coordinator.js';
 
 /**
  * `synchronize` decision matrix:
@@ -43,28 +46,25 @@ function migrationGlobs(): string[] {
         const migrations = migrationGlobs();
         const migrationsRun = config.get<boolean>('database.migrationsRun');
 
-        if (driver === 'postgres') {
-          return {
-            type: 'postgres',
-            host: config.get<string>('database.host'),
-            port: config.get<number>('database.port'),
-            database: config.get<string>('database.name'),
-            username: config.get<string>('database.user'),
-            password: config.get<string>('database.password'),
-            entities: DB_ENTITIES,
-            migrations,
-            migrationsRun,
-            synchronize,
-          };
+        if (driver !== 'sqlite') {
+          throw new Error(`Unsupported database.driver "${driver}". Only "sqlite" is supported.`);
         }
+
         return {
           type: 'better-sqlite3',
           database: config.get<string>('database.path'),
+          timeout: 0,
+          prepareDatabase: configureExclusiveSqliteConnection,
           entities: DB_ENTITIES,
           migrations,
           migrationsRun,
           synchronize,
         };
+      },
+      dataSourceFactory: async (options?: DataSourceOptions) => {
+        if (!options) throw new Error('TypeORM did not provide DataSource options');
+        const dataSource = await new DataSource(options).initialize();
+        return installDatabaseCoordinator(dataSource);
       },
     }),
   ],

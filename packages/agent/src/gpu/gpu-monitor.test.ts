@@ -64,6 +64,7 @@ describe('GpuMonitor stats metrics', () => {
         '--query-gpu=index,uuid,utilization.gpu,memory.used,memory.total,temperature.gpu,power.draw,clocks.gr',
         '--format=csv,noheader,nounits',
       ],
+      { timeout: 5_000 },
       expect.any(Function),
     );
     expect(stats[0]).toMatchObject({
@@ -97,6 +98,38 @@ describe('GpuMonitor stats metrics', () => {
     ]);
   });
 
+  it('coalesces overlapping nvidia-smi stats calls into one process', async () => {
+    let callback!: ExecFileCallback;
+    execFileMock.mockImplementation(((_cmd: string, _args: readonly string[], ...rest: unknown[]) => {
+      callback = getExecCallback(rest);
+    }) as typeof execFile);
+    const monitor = new GpuMonitor(true);
+
+    const first = monitor.getGpuStats();
+    const second = monitor.getGpuStats();
+
+    expect(execFileMock).toHaveBeenCalledTimes(1);
+    expect(execFileMock).toHaveBeenCalledWith(
+      'nvidia-smi',
+      [
+        '--query-gpu=index,uuid,utilization.gpu,memory.used,memory.total,temperature.gpu,power.draw,clocks.gr',
+        '--format=csv,noheader,nounits',
+      ],
+      { timeout: 5_000 },
+      expect.any(Function),
+    );
+
+    callback(null, { stdout: '0, GPU-0, 25, 1024, 46080, 39, 72.5, 1410\n', stderr: '' });
+    await expect(Promise.all([first, second])).resolves.toEqual([
+      [expect.objectContaining({ uuid: 'GPU-0', memUsedMiB: 1024 })],
+      [expect.objectContaining({ uuid: 'GPU-0', memUsedMiB: 1024 })],
+    ]);
+
+    mockExecFileStdout('0, GPU-0, 0, 0, 46080, 35, 40.0, 1200\n');
+    await monitor.getGpuStats();
+    expect(execFileMock).toHaveBeenCalledTimes(2);
+  });
+
   it('emits GPU process memory only for known managed containers', () => {
     const knownId = '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef';
     const unknownId = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
@@ -109,7 +142,7 @@ describe('GpuMonitor stats metrics', () => {
       [],
       processes,
       new Map([
-        [knownId, { metricContainerId: knownId.slice(0, 12), ownerId: 'user-a' }],
+        [knownId, { metricContainerId: 'container-a' }],
       ]),
       'srv-1',
     );
@@ -120,15 +153,14 @@ describe('GpuMonitor stats metrics', () => {
         labels: {
           server: 'srv-1',
           gpu_uuid: 'GPU-a',
-          container_id: knownId.slice(0, 12),
-          user_id: 'user-a',
+          container_id: 'container-a',
         },
         value: 256 * 1024 * 1024,
       }),
     ]);
   });
 
-  it('allows managed GPU process metrics without an owner label', () => {
+  it('emits no Agent-owned user identity label', () => {
     const knownId = '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef';
     const points = new GpuMonitor(true).buildMetrics(
       [],
@@ -143,7 +175,6 @@ describe('GpuMonitor stats metrics', () => {
           server: 'srv-1',
           gpu_uuid: 'GPU-a',
           container_id: knownId.slice(0, 12),
-          user_id: '',
         },
       }),
     ]);

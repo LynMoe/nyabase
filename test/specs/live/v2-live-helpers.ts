@@ -5,17 +5,22 @@ export type Persona = 'alpha' | 'beta' | 'gamma' | 'delta' | 'epsilon';
 export type HttpMethod = 'GET' | 'POST' | 'PATCH' | 'DELETE';
 
 export type ApiResult<T = unknown> = { method: HttpMethod; path: string; status: number; ok: boolean; body: T };
-export type OperationRef = { ok: true; operationId: string; status: string };
-export type OperationView = { id: string; status: string; resourceId: string; lastError: string | null };
+export type AgentTaskRef = { ok: true; taskId: string; status: 'pending' };
+export type AgentTaskView = {
+  id: string;
+  status: 'pending' | 'succeeded' | 'failed';
+  resourceId: string;
+  error: unknown | null;
+};
 export type ContainerView = {
   id: string;
   serverId: string;
   ownerId: string;
   name: string;
   imageId: string;
-  phase: string;
-  runtime: { bound: boolean; runtimeId: string | null; status: string | null; stale: boolean };
-  actions: Record<string, { enabled: boolean; reason?: string; message?: string; operationId?: string }>;
+  runtimeReady: boolean;
+  runtime: { bound: boolean; runtimeId: string | null; status: string | null; stale?: boolean };
+  actions: Record<string, { enabled: boolean; reason?: string; message?: string; taskId?: string }>;
 };
 
 export type SetupState = {
@@ -74,34 +79,43 @@ export async function api<T = unknown>(state: SetupState, method: HttpMethod, pa
   return res;
 }
 
-export async function waitOperationSucceeded(state: SetupState, token: string, operationId: string, timeoutMs = 120_000): Promise<OperationView> {
+export async function waitTaskSucceeded(state: SetupState, token: string, taskId: string, timeoutMs = 120_000): Promise<AgentTaskView> {
   const deadline = Date.now() + timeoutMs;
-  let last: OperationView | null = null;
+  let last: AgentTaskView | null = null;
   while (Date.now() < deadline) {
-    const res = await api<OperationView>(state, 'GET', `/operations/${operationId}`, token);
+    const res = await api<AgentTaskView>(state, 'GET', `/agent-tasks/${taskId}`, token);
     last = res.body;
-    if (['succeeded', 'failed', 'cancelled'].includes(last.status)) {
-      expect(last.status, `operation ${operationId} failed: ${last.lastError ?? ''}`).toBe('succeeded');
+    if (last.status === 'succeeded' || last.status === 'failed') {
+      expect(last.status, `agent task ${taskId} failed: ${formatTaskError(last.error)}`).toBe('succeeded');
       return last;
     }
     await sleep(1000);
   }
-  throw new Error(`timed out waiting operation ${operationId}; last=${last?.status ?? 'unknown'} ${last?.lastError ?? ''}`);
+  throw new Error(`timed out waiting for agent task ${taskId}; last=${last?.status ?? 'unknown'} ${formatTaskError(last?.error)}`);
 }
 
-export async function waitContainerPhase(state: SetupState, token: string, containerId: string, phase: string, timeoutMs = 90_000): Promise<ContainerView> {
+export async function waitContainerRunning(state: SetupState, token: string, containerId: string, timeoutMs = 90_000): Promise<ContainerView> {
   const deadline = Date.now() + timeoutMs;
   let last: ContainerView | null = null;
   while (Date.now() < deadline) {
     const res = await rawApi<ContainerView>(state, 'GET', `/v2/containers/${containerId}`, token);
-    if (res.status === 404 && phase === 'deleted') return { id: containerId, phase: 'deleted' } as ContainerView;
     if (res.ok) {
       last = res.body;
-      if (last.phase === phase) return last;
+      if (last.runtimeReady && last.runtime.bound && last.runtime.status === 'running') return last;
     }
     await sleep(1000);
   }
-  throw new Error(`timed out waiting container ${containerId} phase ${phase}; last=${last?.phase ?? 'missing'}`);
+  throw new Error(`timed out waiting for running container ${containerId}; last=${runtimeSummary(last)}`);
+}
+
+export async function waitContainerDeleted(state: SetupState, token: string, containerId: string, timeoutMs = 90_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const res = await rawApi<ContainerView>(state, 'GET', `/v2/containers/${containerId}`, token);
+    if (res.status === 404) return;
+    await sleep(1000);
+  }
+  throw new Error(`timed out waiting for deleted container ${containerId}`);
 }
 
 export async function waitActionEnabled(state: SetupState, token: string, containerId: string, action: string, timeoutMs = 90_000): Promise<ContainerView> {
@@ -113,35 +127,47 @@ export async function waitActionEnabled(state: SetupState, token: string, contai
     await sleep(1000);
   }
   const a = last?.actions?.[action];
-  throw new Error(`timed out waiting action ${action} enabled for ${containerId}; phase=${last?.phase} reason=${a?.reason} message=${a?.message}`);
+  throw new Error(`timed out waiting action ${action} enabled for ${containerId}; runtime=${runtimeSummary(last)} reason=${a?.reason} message=${a?.message}`);
 }
 
-export async function createContainerActive(state: SetupState, token: string, input: { serverId: string; imageId: string; name: string; cpuMillis?: number; memBytes?: number; gpuIndices?: number[] }): Promise<ContainerView> {
-  const ref = (await api<OperationRef>(state, 'POST', '/v2/containers', token, {
+export async function createContainerRunning(state: SetupState, token: string, input: { serverId: string; imageId: string; name: string; cpuMillis?: number; memBytes?: number; gpuIndices?: number[] }): Promise<ContainerView> {
+  const ref = (await api<AgentTaskRef>(state, 'POST', '/v2/containers', token, {
     cpuMillis: 100,
     memBytes: 64 * 1024 * 1024,
     gpuIndices: [],
     ...input,
   })).body;
-  const op = await waitOperationSucceeded(state, token, ref.operationId);
-  const view = await waitContainerPhase(state, token, op.resourceId, 'active');
-  await waitActionEnabled(state, token, op.resourceId, 'delete');
+  const task = await waitTaskSucceeded(state, token, ref.taskId);
+  const view = await waitContainerRunning(state, token, task.resourceId);
+  await waitActionEnabled(state, token, task.resourceId, 'delete');
   return view;
 }
 
-export async function containerAction(state: SetupState, token: string, containerId: string, action: string, body?: unknown): Promise<OperationView> {
+export async function containerAction(state: SetupState, token: string, containerId: string, action: string, body?: unknown): Promise<AgentTaskView> {
   await waitActionEnabled(state, token, containerId, action);
-  const ref = (await api<OperationRef>(state, 'POST', `/v2/containers/${containerId}/actions/${kebab(action)}`, token, body)).body;
-  return waitOperationSucceeded(state, token, ref.operationId);
+  const ref = (await api<AgentTaskRef>(state, 'POST', `/v2/containers/${containerId}/actions/${kebab(action)}`, token, body)).body;
+  return waitTaskSucceeded(state, token, ref.taskId);
 }
 
-export async function removeContainerViaOperation(state: SetupState, token: string, containerId: string): Promise<void> {
+export async function removeContainerViaTask(state: SetupState, token: string, containerId: string): Promise<void> {
   await containerAction(state, token, containerId, 'delete');
-  await waitContainerPhase(state, token, containerId, 'deleted');
+  await waitContainerDeleted(state, token, containerId);
 }
 
 export async function sleep(ms: number) { await new Promise((resolve) => setTimeout(resolve, ms)); }
 
 function kebab(action: string): string {
   return action.replace(/[A-Z]/g, (m) => `-${m.toLowerCase()}`);
+}
+
+function runtimeSummary(view: ContainerView | null): string {
+  if (!view) return 'missing';
+  return `ready=${view.runtimeReady} bound=${view.runtime?.bound} status=${view.runtime?.status ?? 'none'}`;
+}
+
+function formatTaskError(error: unknown): string {
+  if (error == null) return '';
+  if (typeof error === 'string') return error;
+  if (typeof error === 'object' && 'message' in error && typeof error.message === 'string') return error.message;
+  return JSON.stringify(error);
 }

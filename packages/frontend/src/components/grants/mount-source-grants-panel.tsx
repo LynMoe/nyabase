@@ -24,8 +24,12 @@ function subjectPaths(subject: Subject) {
     grantQueryKey: [`${subject.type}-mount-source-grants`, subject.id],
     grantUrl: `${base}/mount-source-grants`,
     addUrl: `${base}/mount-source-grants`,
-    removeUrl: (sourceKind: string, sourceId: string) =>
-      `${base}/mount-source-grants/${sourceKind}/${sourceId}`,
+    removeUrl: (sourceKind: string, sourceId: string, serverId?: string) => {
+      const suffix = sourceKind === 'local'
+        ? `?serverId=${encodeURIComponent(serverId ?? '')}`
+        : '';
+      return `${base}/mount-source-grants/${sourceKind}/${sourceId}${suffix}`;
+    },
   };
 }
 
@@ -50,7 +54,9 @@ export function MountSourceGrantsPanel({ subject, description }: Props) {
     queryFn: () => api.get('/admin/servers'),
   });
 
-  const grantedKeys = new Set(grants.map((g) => `${g.sourceKind}:${g.sourceId}`));
+  const grantedKeys = new Set(grants.map((grant) => grant.sourceKind === 'local'
+    ? `local:${grant.serverId}:${grant.sourceId}`
+    : `remote:${grant.sourceId}`));
 
   // Group local disks by server, preserving server list order
   const disksByServer = new Map<string, DiskSummary[]>();
@@ -62,10 +68,24 @@ export function MountSourceGrantsPanel({ subject, description }: Props) {
   const serversWithDisks = servers.filter((s) => disksByServer.has(s.id));
 
   const toggle = useMutation({
-    mutationFn: ({ sourceKind, sourceId, granted }: { sourceKind: string; sourceId: string; granted: boolean }) =>
+    mutationFn: ({
+      sourceKind,
+      sourceId,
+      serverId,
+      granted,
+    }: {
+      sourceKind: 'local' | 'remote';
+      sourceId: string;
+      serverId?: string;
+      granted: boolean;
+    }) =>
       granted
-        ? api.delete(paths.removeUrl(sourceKind, sourceId))
-        : api.post(paths.addUrl, { sourceKind, sourceId }),
+        ? api.delete(paths.removeUrl(sourceKind, sourceId, serverId))
+        : api.post(paths.addUrl, {
+            sourceKind,
+            sourceId,
+            ...(sourceKind === 'local' ? { serverId } : {}),
+          }),
     onSuccess: () => qc.invalidateQueries({ queryKey: paths.grantQueryKey }),
     onError: (e) => toast({ title: '操作失败', description: (e as Error).message, variant: 'destructive' }),
   });
@@ -82,12 +102,12 @@ export function MountSourceGrantsPanel({ subject, description }: Props) {
         <div key={server.id} className="space-y-1.5">
           <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wide">{server.name}</p>
           {(disksByServer.get(server.id) ?? []).map((d) => {
-            const key = `local:${d.diskId}`;
+            const key = `local:${d.serverId}:${d.diskId}`;
             const granted = grantedKeys.has(key);
             const label = d.label ?? d.mountPoint.split('/').filter(Boolean).pop() ?? d.mountPoint;
             return (
               <div
-                key={d.diskId}
+                key={`${d.serverId}:${d.diskId}`}
                 className={`flex items-center justify-between py-2.5 px-3 rounded-lg border ${granted ? 'border-primary/30 bg-primary/5' : 'border-border'}`}
               >
                 <div>
@@ -98,7 +118,12 @@ export function MountSourceGrantsPanel({ subject, description }: Props) {
                   </span>
                 </div>
                 <button
-                  onClick={() => toggle.mutate({ sourceKind: 'local', sourceId: d.diskId, granted })}
+                  onClick={() => toggle.mutate({
+                    sourceKind: 'local',
+                    sourceId: d.diskId,
+                    serverId: d.serverId,
+                    granted,
+                  })}
                   disabled={toggle.isPending}
                   className={`px-3 py-1.5 rounded-lg text-xs font-medium border transition-colors ${
                     granted

@@ -3,36 +3,48 @@ import {
   NotFoundException,
   ConflictException,
   BadRequestException,
+  Logger,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { In, Repository } from 'typeorm';
+import { DataSource, EntityManager, In, Repository } from 'typeorm';
 import { v4 as uuidv4 } from 'uuid';
 import { RemoteFsMountEntity } from '../entities/remote-fs-mount.entity.js';
 import { RemoteFsServerAssignmentEntity } from '../entities/remote-fs-server-assignment.entity.js';
 import { ContainerMountEntity } from '../entities/container-mount.entity.js';
 import { DataDirectoryEntity } from '../entities/data-directory.entity.js';
+import { ServerEntity } from '../entities/server.entity.js';
 import { AuditService } from '../audit/audit.service.js';
-import { AgentCommandKind, AuditAction, OperationKind, RemoteFsMountStatus, RemoteFsParams, zRemoteFsParams } from '@nyabase/common';
+import {
+  AgentTaskKind,
+  AuditAction,
+  ContainerStatus,
+  LABEL,
+  MAX_AGENT_REMOTE_FS_MOUNTS,
+  RemoteFsType,
+  zRemoteFsParams,
+  type RemoteFsMountDto,
+  type RemoteFsMountParamsDto,
+  type RemoteFsMountStatus,
+  type RemoteFsParams,
+  type ContainerSnapshot,
+} from '@nyabase/common';
 import { AccessResolverService } from '../access/access-resolver.service.js';
-import { OperationsService } from '../operations/operations.service.js';
-import { ResourceKeyService } from '../operations/resource-key.service.js';
+import { AgentTasksService } from '../agent-tasks/agent-tasks.service.js';
+import { ResourceKeyService } from '../agent-tasks/resource-key.service.js';
+import { runSerializedTransaction } from '../database/serialized-transaction.js';
 import { AgentGateway } from '../gateway/agent-gateway.js';
+import { RemoteFsSecretCryptoService } from './remote-fs-secret-crypto.service.js';
+import { postCommitBestEffort } from '../common/post-commit.js';
+import { MountSourcesService } from '../mount-sources/mount-sources.service.js';
+import { ContainerLifecycleEntity } from '../entities/container-lifecycle.entity.js';
+import { ProxySnapshotNotifierService } from '../proxy-snapshots/proxy-snapshot-notifier.service.js';
 
-/** Forbidden hostMountPoint prefixes */
-const FORBIDDEN_PREFIXES = ['/', '/etc', '/var/run', '/proc', '/sys', '/dev'];
-
-function validateHostMountPoint(p: string) {
-  for (const prefix of FORBIDDEN_PREFIXES) {
-    if (p === prefix || p.startsWith(prefix + '/')) {
-      throw new BadRequestException(
-        `hostMountPoint must not be under system directory ${prefix}`,
-      );
-    }
-  }
-}
+type RemoteFsEnsureScope = 'assign';
 
 @Injectable()
 export class RemoteFsMountsService {
+  private readonly logger = new Logger(RemoteFsMountsService.name);
+
   constructor(
     @InjectRepository(RemoteFsMountEntity)
     private mountsRepo: Repository<RemoteFsMountEntity>,
@@ -44,25 +56,32 @@ export class RemoteFsMountsService {
     private dataDirectoriesRepo: Repository<DataDirectoryEntity>,
     private auditService: AuditService,
     private accessResolver: AccessResolverService,
-    private operationsService: OperationsService,
+    private dataSource: DataSource,
+    private tasks: AgentTasksService,
     private resourceKeys: ResourceKeyService,
     private agentGateway: AgentGateway,
+    private secretCrypto: RemoteFsSecretCryptoService,
+    private mountSources: MountSourcesService,
+    private proxySnapshots: ProxySnapshotNotifierService,
   ) {}
 
   async list(serverId?: string): Promise<RemoteFsMountEntity[]> {
+    let mounts: RemoteFsMountEntity[];
     if (serverId) {
       const assignments = await this.assignmentsRepo.find({ where: { serverId } });
       if (assignments.length === 0) return [];
       const mountIds = assignments.map((a) => a.remoteFsMountId);
-      return this.mountsRepo.find({ where: { id: In(mountIds) } });
+      mounts = await this.mountsRepo.find({ where: { id: In(mountIds) } });
+    } else {
+      mounts = await this.mountsRepo.find();
     }
-    return this.mountsRepo.find();
+    return Promise.all(mounts.map((mount) => this.ensureStoredParamsEncrypted(mount)));
   }
 
   async findById(id: string): Promise<RemoteFsMountEntity> {
     const m = await this.mountsRepo.findOne({ where: { id } });
     if (!m) throw new NotFoundException(`Remote FS mount ${id} not found`);
-    return m;
+    return this.ensureStoredParamsEncrypted(m);
   }
 
   async getServerIds(mountId: string): Promise<string[]> {
@@ -79,17 +98,22 @@ export class RemoteFsMountsService {
       serverIds?: string[];
       type: string;
       options?: string;
-      hostMountPoint?: string;
       params: RemoteFsParams;
     },
-  ): Promise<RemoteFsMountEntity & { operationIds?: string[] }> {
+  ): Promise<RemoteFsMountEntity & { taskIds?: string[] }> {
+    const serverIds = [...new Set(dto.serverIds ?? [])];
+    if (serverIds.length > 1) {
+      throw new BadRequestException(
+        'Create accepts at most one server; create the mount first, then assign servers one at a time',
+      );
+    }
     const id = uuidv4();
     const fsType = dto.params.type;
-    const hostMountPoint = dto.hostMountPoint ?? `/mnt/remote-fs/${id}`;
-    validateHostMountPoint(hostMountPoint);
+    const hostMountPoint = `/mnt/remote-fs/${id}`;
 
     // Validate params via zod
     zRemoteFsParams.parse(dto.params);
+    const storedParams = this.paramsForStorageCreate(dto.params);
 
     const mount = this.mountsRepo.create({
       id,
@@ -99,20 +123,47 @@ export class RemoteFsMountsService {
       type: fsType,
       hostMountPoint,
       options: dto.options ?? '',
-      params: dto.params,
+      params: storedParams,
+      desiredState: 'active',
+      generation: 1,
+      lastTaskId: null,
     });
-    await this.mountsRepo.save(mount);
+    const now = new Date();
+    mount.createdAt = now;
+    mount.updatedAt = now;
 
-    const operationIds: string[] = [];
-    if (dto.serverIds?.length) {
-      const assignments = await Promise.all(dto.serverIds.map((sid) => this.assignServer(actorId, id, sid)));
-      for (const assignment of assignments) {
-        if (assignment.operationId) operationIds.push(assignment.operationId);
+    const taskIds = await runSerializedTransaction(this.dataSource, async (manager) => {
+      await manager.save(RemoteFsMountEntity, mount);
+      const ids: string[] = [];
+      for (const serverId of serverIds) {
+        await this.assertServerExists(manager, serverId);
+        await this.assertServerAssignmentCapacity(manager, serverId);
+        const assignment = manager.create(RemoteFsServerAssignmentEntity, {
+          id: uuidv4(),
+          remoteFsMountId: id,
+          serverId,
+          desiredState: 'ensuring',
+          generation: 1,
+          lastTaskId: null,
+        });
+        await manager.save(RemoteFsServerAssignmentEntity, assignment);
+        const task = await this.enqueueMountTask(manager, mount, serverId, actorId, 'assign');
+        assignment.lastTaskId = task.taskId;
+        await manager.save(RemoteFsServerAssignmentEntity, assignment);
+        ids.push(task.taskId);
       }
-    }
+      return ids;
+    });
 
-    await this.auditService.log(actorId, AuditAction.CreateRemoteFsMount, id, 'remote_fs_mount', dto);
-    return Object.assign(mount, { operationIds });
+    await postCommitBestEffort(
+      'RemoteFS create audit',
+      () => this.auditService.log(
+        actorId, AuditAction.CreateRemoteFsMount, id, 'remote_fs_mount', this.auditPayload(dto),
+      ),
+      this.logger,
+    );
+    this.accessResolver.invalidateAll();
+    return Object.assign(mount, { taskIds });
   }
 
   async update(
@@ -122,99 +173,83 @@ export class RemoteFsMountsService {
       name?: string;
       displayName?: string;
       description?: string;
-      options?: string;
-      hostMountPoint?: string;
-      params?: RemoteFsParams;
     },
-  ): Promise<RemoteFsMountEntity & { operationIds?: string[] }> {
-    const mount = await this.findById(id);
-
-    const isCriticalChange =
-      dto.options !== undefined ||
-      dto.hostMountPoint !== undefined ||
-      dto.params !== undefined;
-
-    if (isCriticalChange) {
-      const inUse = await this.containerMountsRepo.findOne({
-        where: { sourceKind: 'remote', sourceId: id },
+  ): Promise<RemoteFsMountEntity & { taskIds?: string[] }> {
+    const nextMount = await runSerializedTransaction(this.dataSource, async (manager) => {
+      const mount = await manager.findOneBy(RemoteFsMountEntity, { id });
+      if (!mount) throw new NotFoundException(`Remote FS mount ${id} not found`);
+      if (mount.desiredState !== 'active') {
+        throw new ConflictException('Remote FS mount is not active');
+      }
+      const next = manager.create(RemoteFsMountEntity, {
+        ...mount,
+        name: dto.name !== undefined ? dto.name : mount.name,
+        displayName: dto.displayName !== undefined ? dto.displayName || null : mount.displayName,
+        description: dto.description !== undefined ? dto.description : mount.description,
+        generation: mount.generation,
       });
-      if (inUse) {
+      return manager.save(RemoteFsMountEntity, next);
+    });
+
+    await postCommitBestEffort(
+      'RemoteFS update audit',
+      () => this.auditService.log(actorId, AuditAction.UpdateRemoteFsMount, id, 'remote_fs_mount', dto),
+      this.logger,
+    );
+    this.accessResolver.invalidateAll();
+    return Object.assign(nextMount, { taskIds: [] });
+  }
+
+  toDto(
+    mount: RemoteFsMountEntity,
+    serverIds: string[],
+    serverStatuses?: Record<string, RemoteFsMountStatus>,
+  ): RemoteFsMountDto {
+    const taskIds = (mount as RemoteFsMountEntity & { taskIds?: string[] }).taskIds;
+    return {
+      id: mount.id,
+      name: mount.name,
+      displayName: mount.displayName,
+      description: mount.description,
+      type: mount.type as RemoteFsParams['type'],
+      options: mount.options,
+      hostMountPoint: mount.hostMountPoint,
+      params: this.paramsForApi(mount.params),
+      createdAt: this.toIso(mount.createdAt),
+      updatedAt: this.toIso(mount.updatedAt),
+      serverIds,
+      serverStatuses,
+      ...(taskIds ? { taskIds } : {}),
+    };
+  }
+
+  async remove(actorId: string, id: string): Promise<{ ok: true; taskIds: string[] }> {
+    await runSerializedTransaction(this.dataSource, async (manager) => {
+      const mount = await manager.findOneBy(RemoteFsMountEntity, { id });
+      if (!mount) throw new NotFoundException(`Remote FS mount ${id} not found`);
+      await this.assertNotInUse(manager, id);
+      const assignmentCount = await manager.count(RemoteFsServerAssignmentEntity, {
+        where: { remoteFsMountId: id },
+      });
+      if (assignmentCount > 0) {
         throw new ConflictException(
-          'This remote FS mount is in use by container mounts; remove those mounts before changing critical parameters',
+          'Unassign every server successfully before deleting the remote FS mount',
         );
       }
-    }
-
-    if (dto.name !== undefined) mount.name = dto.name;
-    if (dto.displayName !== undefined) mount.displayName = dto.displayName || null;
-    if (dto.description !== undefined) mount.description = dto.description;
-    if (dto.options !== undefined) mount.options = dto.options;
-    if (dto.hostMountPoint !== undefined) {
-      validateHostMountPoint(dto.hostMountPoint);
-      mount.hostMountPoint = dto.hostMountPoint;
-    }
-    if (dto.params !== undefined) {
-      if (dto.params.type !== mount.type) {
-        throw new BadRequestException('Cannot change the type of an existing remote FS mount');
-      }
-      zRemoteFsParams.parse(dto.params);
-      mount.params = dto.params;
-    }
-    await this.mountsRepo.save(mount);
-
-    const operationIds: string[] = [];
-    if (isCriticalChange) {
-      const serverIds = await this.getServerIds(id);
-      const dispatched = await Promise.all(serverIds.map((sid) => this.dispatchMount(mount, sid, actorId).catch(() => null)));
-      operationIds.push(...dispatched
-        .filter((result): result is { operationId: string } => result !== null)
-        .map((result) => result.operationId));
-    }
-
-    await this.auditService.log(actorId, AuditAction.UpdateRemoteFsMount, id, 'remote_fs_mount', dto);
-    return Object.assign(mount, { operationIds });
-  }
-
-  async remove(actorId: string, id: string): Promise<{ ok: true; operationIds: string[] }> {
-    await this.findById(id);
-
-    const inUse = await this.containerMountsRepo.findOne({
-      where: { sourceKind: 'remote', sourceId: id },
+      await this.mountSources.deleteSourceInTransaction(manager, {
+        sourceKind: 'remote',
+        sourceId: id,
+      });
+      await manager.delete(RemoteFsMountEntity, id);
     });
-    if (inUse) {
-      throw new ConflictException('This remote FS mount is in use by container mounts; remove those mounts first');
-    }
 
-    const dataDirInUse = await this.dataDirectoriesRepo.findOne({
-      where: { sourceKind: 'remote', sourceId: id },
-    });
-    if (dataDirInUse) {
-      throw new ConflictException('This remote FS mount still has data directories; delete those data directories first');
-    }
-
-    const serverIds = await this.getServerIds(id);
-    const dispatched = await Promise.all(serverIds.map((serverId) =>
-      this.dispatchMountRemove(id, serverId, actorId, 'mount').catch(() => null),
-    ));
-    const operationIds = dispatched
-      .filter((result): result is { operationId: string } => result !== null)
-      .map((result) => result.operationId);
-
-    await this.auditService.log(actorId, AuditAction.DeleteRemoteFsMount, id, 'remote_fs_mount');
-    return { ok: true, operationIds };
-  }
-
-  async remount(actorId: string, id: string): Promise<{ ok: true; operationIds: string[] }> {
-    const mount = await this.findById(id);
-    const serverIds = await this.getServerIds(id);
-    const dispatched = await Promise.all(
-      serverIds.map((sid) => this.dispatchMount(mount, sid, actorId).catch(() => null)),
+    await postCommitBestEffort(
+      'RemoteFS delete audit',
+      () => this.auditService.log(actorId, AuditAction.DeleteRemoteFsMount, id, 'remote_fs_mount'),
+      this.logger,
     );
-    const operationIds = dispatched
-      .filter((result): result is { operationId: string } => result !== null)
-      .map((result) => result.operationId);
-    await this.auditService.log(actorId, AuditAction.RemountRemoteFsMount, id, 'remote_fs_mount');
-    return { ok: true, operationIds };
+    this.accessResolver.invalidateAll();
+    return { ok: true, taskIds: [] };
   }
 
   // ---------------------------------------------------------------------------
@@ -230,64 +265,107 @@ export class RemoteFsMountsService {
     actorId: string,
     mountId: string,
     serverId: string,
-  ): Promise<RemoteFsServerAssignmentEntity & { operationId?: string }> {
-    const mount = await this.findById(mountId);
-
-    let assignment = await this.assignmentsRepo.findOne({ where: { remoteFsMountId: mountId, serverId } });
-    if (!assignment) {
-      assignment = this.assignmentsRepo.create({ id: uuidv4(), remoteFsMountId: mountId, serverId });
-      await this.assignmentsRepo.save(assignment);
-      await this.auditService.log(actorId, AuditAction.AssignRemoteFsServer, mountId, 'remote_fs_mount', { serverId });
-      // Invalidate so that the new server appears in users' resolveMountSources cache.
-      this.accessResolver.invalidateAll();
-    }
-
-    const dispatched = await this.dispatchMount(mount, serverId, actorId).catch(() => null);
-    return Object.assign(assignment, {
-      operationId: dispatched?.operationId,
+  ): Promise<RemoteFsServerAssignmentEntity & { taskId?: string }> {
+    const applied = await runSerializedTransaction(this.dataSource, async (manager) => {
+      const mount = await manager.findOneBy(RemoteFsMountEntity, { id: mountId });
+      if (!mount) throw new NotFoundException(`Remote FS mount ${mountId} not found`);
+      if (mount.desiredState !== 'active') {
+        throw new ConflictException('Remote FS mount is not active');
+      }
+      await this.assertServerExists(manager, serverId);
+      const existing = await manager.findOne(RemoteFsServerAssignmentEntity, {
+        where: { remoteFsMountId: mountId, serverId },
+      });
+      if (existing) {
+        await this.assertRepairConsumersStopped(manager, mountId, serverId);
+      } else {
+        await this.assertServerAssignmentCapacity(manager, serverId);
+      }
+      await this.tasks.supersedePendingForResourceInTransaction(manager, {
+        serverId,
+        resourceType: 'remote_fs_mount',
+        resourceId: mountId,
+        reason: 'A newer RemoteFS ensure intent replaced this task',
+      });
+      const assignment = existing ?? manager.create(RemoteFsServerAssignmentEntity, {
+        id: uuidv4(),
+        remoteFsMountId: mountId,
+        serverId,
+        generation: 0,
+        lastTaskId: null,
+      });
+      assignment.desiredState = 'ensuring';
+      assignment.generation = (assignment.generation ?? 0) + 1;
+      await manager.save(RemoteFsServerAssignmentEntity, assignment);
+      const created = await this.enqueueMountTask(
+        manager,
+        mount,
+        serverId,
+        actorId,
+        'assign',
+      );
+      assignment.lastTaskId = created.taskId;
+      await manager.save(RemoteFsServerAssignmentEntity, assignment);
+      return { assignment, taskId: created.taskId, created: !existing };
+    });
+    await postCommitBestEffort(
+      'RemoteFS assignment audit',
+      () => this.auditService.log(
+        actorId,
+        AuditAction.AssignRemoteFsServer,
+        mountId,
+        'remote_fs_mount',
+        { serverId, repair: !applied.created },
+      ),
+      this.logger,
+    );
+    this.accessResolver.invalidateAll();
+    this.proxySnapshots.invalidate(
+      `RemoteFS ${mountId} assignment ensure committed on ${serverId}`,
+    );
+    return Object.assign(applied.assignment, {
+      ...(applied.taskId ? { taskId: applied.taskId } : {}),
     });
   }
 
-  async unassignServer(actorId: string, mountId: string, serverId: string): Promise<{ ok: true; operationIds: string[] }> {
-    const assignment = await this.assignmentsRepo.findOne({ where: { remoteFsMountId: mountId, serverId } });
-    if (!assignment) return { ok: true, operationIds: [] };
-
-    const inUse = await this.containerMountsRepo.findOne({
-      where: { sourceKind: 'remote', sourceId: mountId, serverId },
+  async unassignServer(actorId: string, mountId: string, serverId: string): Promise<{ ok: true; taskIds: string[] }> {
+    const task = await runSerializedTransaction(this.dataSource, async (manager) => {
+      const assignment = await manager.findOne(RemoteFsServerAssignmentEntity, {
+        where: { remoteFsMountId: mountId, serverId },
+      });
+      if (!assignment) return null;
+      await this.assertNotInUse(manager, mountId, serverId);
+      await this.tasks.supersedePendingForResourceInTransaction(manager, {
+        serverId,
+        resourceType: 'remote_fs_mount',
+        resourceId: mountId,
+        reason: 'A newer RemoteFS absent intent replaced this task',
+      });
+      assignment.desiredState = 'removing';
+      assignment.generation = (assignment.generation ?? 0) + 1;
+      await manager.save(RemoteFsServerAssignmentEntity, assignment);
+      const created = await this.enqueueRemoveTask(manager, mountId, serverId, actorId);
+      await manager.update(RemoteFsServerAssignmentEntity, assignment.id, { lastTaskId: created.taskId });
+      return created;
     });
-    if (inUse) {
-      throw new ConflictException(
-        `Cannot unassign: container "${inUse.containerName}" on this server still references this mount`,
-      );
-    }
-
-    const dataDirInUse = await this.dataDirectoriesRepo.findOne({
-      where: { sourceKind: 'remote', sourceId: mountId },
-    });
-    if (dataDirInUse) {
-      throw new ConflictException(
-        'Cannot unassign: this remote FS mount still has data directories; delete those data directories first',
-      );
-    }
-
-    const dispatched = await this.dispatchMountRemove(mountId, serverId, actorId, 'assignment').catch(() => null);
-    await this.auditService.log(actorId, AuditAction.UnassignRemoteFsServer, mountId, 'remote_fs_mount', { serverId });
+    if (!task) return { ok: true, taskIds: [] };
+    await postCommitBestEffort(
+      'RemoteFS unassignment audit',
+      () => this.auditService.log(
+        actorId, AuditAction.UnassignRemoteFsServer, mountId, 'remote_fs_mount', { serverId },
+      ),
+      this.logger,
+    );
+    this.accessResolver.invalidateAll();
     return {
       ok: true,
-      operationIds: dispatched ? [dispatched.operationId] : [],
+      taskIds: [task.taskId],
     };
   }
 
   // ---------------------------------------------------------------------------
-  // Gateway hooks
+  // Status projection
   // ---------------------------------------------------------------------------
-
-  async dispatchAll(serverId: string): Promise<void> {
-    const mounts = await this.list(serverId);
-    await Promise.all(
-      mounts.map((mount) => this.dispatchMount(mount, serverId, null).catch(() => {})),
-    );
-  }
 
   async getMountStatuses(mountId: string, serverIds: string[]): Promise<Record<string, RemoteFsMountStatus>> {
     const result: Record<string, RemoteFsMountStatus> = {};
@@ -303,81 +381,225 @@ export class RemoteFsMountsService {
   // Internal
   // ---------------------------------------------------------------------------
 
-  private async dispatchMount(
+  private async enqueueMountTask(
+    manager: EntityManager,
     mount: RemoteFsMountEntity,
     serverId: string,
     requestedBy: string | null,
-  ): Promise<{ operationId: string }> {
+    scope: RemoteFsEnsureScope,
+  ) {
     const payload = {
       id: mount.id,
       hostMountPoint: mount.hostMountPoint,
       options: mount.options,
       params: mount.params,
     };
+    const request = {
+      scope,
+      mountId: mount.id,
+      serverId,
+      mount: this.mountDefinition(mount),
+    };
 
-    const dispatched = await this.operationsService.dispatchAgentCommand(
-      {
-        operationKind: OperationKind.RemoteFsApply,
-        commandKind: AgentCommandKind.RemoteFsApply,
-        serverId,
-        resourceType: 'remote_fs_mount',
-        resourceId: mount.id,
-        requestedBy,
-        payload,
-        resourceKeys: [this.resourceKeys.remoteFsAssignment(serverId, mount.id)],
-      },
-    );
-    return { operationId: dispatched.operationId };
+    return this.tasks.enqueueInTransaction(manager, {
+      kind: AgentTaskKind.RemoteFsEnsure,
+      serverId,
+      resourceType: 'remote_fs_mount',
+      resourceId: mount.id,
+      requestedBy,
+      payload,
+      request,
+      resourceKeys: [
+        this.resourceKeys.remoteFsAssignment(serverId, mount.id),
+        this.resourceKeys.mountSource({
+          serverId,
+          sourceKind: 'remote',
+          sourceId: mount.id,
+        }),
+      ],
+    });
   }
 
-  private async dispatchMountRemove(
+  private async enqueueRemoveTask(
+    manager: EntityManager,
     mountId: string,
     serverId: string,
     requestedBy: string | null,
-    scope: 'mount' | 'assignment' = 'mount',
-  ): Promise<{ operationId: string }> {
-    const mount = await this.findById(mountId);
-    const dispatched = await this.operationsService.dispatchAgentCommand({
-      operationKind: OperationKind.RemoteFsApply,
-      commandKind: AgentCommandKind.RemoteFsRemove,
+  ) {
+    const mount = await manager.findOneByOrFail(RemoteFsMountEntity, { id: mountId });
+    return this.tasks.enqueueInTransaction(manager, {
+      kind: AgentTaskKind.RemoteFsAbsent,
       serverId,
       resourceType: 'remote_fs_mount',
       resourceId: mountId,
       requestedBy,
-      payload: { id: mountId, force: true },
-      request: { scope, mountId, serverId },
-      resourceKeys: [this.resourceKeys.remoteFsAssignment(serverId, mountId)],
-      beforePersist: async (manager, context) => {
-        if (scope === 'assignment') {
-          const assignment = await manager.findOne(RemoteFsServerAssignmentEntity, {
-            where: { remoteFsMountId: mountId, serverId },
-          });
-          if (assignment) {
-            assignment.desiredState = 'removing';
-            assignment.generation = (assignment.generation ?? 0) + 1;
-            assignment.lastOperationId = context.operationId;
-            await manager.save(RemoteFsServerAssignmentEntity, assignment);
-          }
-          return;
-        }
-        await manager.update(RemoteFsMountEntity, mount.id, {
-          desiredState: 'removing',
-          generation: (mount.generation ?? 0) + 1,
-          lastOperationId: context.operationId,
-        });
-        const assignments = await manager.find(RemoteFsServerAssignmentEntity, {
-          where: { remoteFsMountId: mountId },
-        });
-        if (assignments.length > 0) {
-          await manager.save(RemoteFsServerAssignmentEntity, assignments.map((assignment) => {
-            assignment.desiredState = 'removing';
-            assignment.generation = (assignment.generation ?? 0) + 1;
-            assignment.lastOperationId = context.operationId;
-            return assignment;
-          }));
-        }
+      payload: {
+        id: mountId,
+        hostMountPoint: mount.hostMountPoint,
+        options: mount.options,
+        params: mount.params,
+      },
+      request: { scope: 'assignment', mountId, serverId },
+      resourceKeys: [
+        this.resourceKeys.remoteFsAssignment(serverId, mountId),
+        this.resourceKeys.mountSource({
+          serverId,
+          sourceKind: 'remote',
+          sourceId: mountId,
+        }),
+      ],
+    });
+  }
+
+  private async assertNotInUse(
+    manager: EntityManager,
+    mountId: string,
+    serverId?: string,
+  ): Promise<void> {
+    const containerMount = await manager.findOne(ContainerMountEntity, {
+      where: {
+        sourceKind: 'remote',
+        sourceId: mountId,
+        ...(serverId ? { serverId } : {}),
       },
     });
-    return { operationId: dispatched.operationId };
+    if (containerMount) {
+      throw new ConflictException(
+        `Remote FS mount is still referenced by container "${containerMount.containerName}"`,
+      );
+    }
+    const dataDir = await manager.findOne(DataDirectoryEntity, {
+      where: { sourceKind: 'remote', sourceId: mountId },
+    });
+    if (dataDir) {
+      throw new ConflictException(
+        'Remote FS mount still has data directories; delete those data directories first',
+      );
+    }
+  }
+
+  /**
+   * Replacing or recreating a host mount can change the filesystem visible to
+   * an already-created bind. Require one current exact stopped observation for
+   * every consumer before the assignment transition. The mount-source lock
+   * acquired by the Ensure task then prevents a start/restart task from racing
+   * the physical mount operation.
+   */
+  private async assertRepairConsumersStopped(
+    manager: EntityManager,
+    mountId: string,
+    serverId: string,
+  ): Promise<void> {
+    const references = await manager.find(ContainerMountEntity, {
+      where: { sourceKind: 'remote', sourceId: mountId, serverId },
+    });
+    if (references.length === 0) return;
+
+    const snapshot = this.agentGateway.stateCache.get(serverId);
+    if (!this.agentGateway.isOnline(serverId) || !snapshot?.runtimeReady) {
+      throw new ConflictException(
+        'Remote FS repair requires a current online inventory proving every consumer is stopped',
+      );
+    }
+    const containerIds = [...new Set(references.map((reference) => reference.containerId))];
+    const lifecycles = await manager.find(ContainerLifecycleEntity, {
+      where: { containerId: In(containerIds) },
+    });
+    const lifecycleById = new Map(lifecycles.map((lifecycle) => [lifecycle.containerId, lifecycle]));
+    const snapshotsByContainerId = new Map<string, ContainerSnapshot[]>();
+    for (const runtime of snapshot.containers.values()) {
+      const containerId = runtime.labels?.[LABEL.CONTAINER_ID];
+      if (!containerId) continue;
+      const group = snapshotsByContainerId.get(containerId) ?? [];
+      group.push(runtime);
+      snapshotsByContainerId.set(containerId, group);
+    }
+    for (const containerId of containerIds) {
+      const lifecycle = lifecycleById.get(containerId);
+      const observations = snapshotsByContainerId.get(containerId) ?? [];
+      const exact = observations.length === 1 ? observations[0] : null;
+      if (
+        !lifecycle
+        || lifecycle.activeTaskId !== null
+        || !lifecycle.boundRuntimeId
+        || !exact
+        || exact.runtime.runtimeId !== lifecycle.boundRuntimeId
+        || exact.status !== ContainerStatus.Exited
+      ) {
+        throw new ConflictException(
+          `Remote FS repair requires container ${containerId} to have one current exact stopped runtime`,
+        );
+      }
+    }
+  }
+
+  private async assertServerExists(manager: EntityManager, serverId: string): Promise<void> {
+    if (await manager.findOneBy(ServerEntity, { id: serverId })) return;
+    throw new NotFoundException(`Server ${serverId} not found`);
+  }
+
+  private async assertServerAssignmentCapacity(
+    manager: EntityManager,
+    serverId: string,
+  ): Promise<void> {
+    const count = await manager.count(RemoteFsServerAssignmentEntity, { where: { serverId } });
+    if (count < MAX_AGENT_REMOTE_FS_MOUNTS) return;
+    throw new ConflictException(
+      `Server ${serverId} already has the maximum ${MAX_AGENT_REMOTE_FS_MOUNTS} RemoteFS assignments`,
+    );
+  }
+
+  private mountDefinition(mount: RemoteFsMountEntity): Record<string, unknown> {
+    return {
+      id: mount.id,
+      name: mount.name,
+      displayName: mount.displayName,
+      description: mount.description,
+      type: mount.type,
+      hostMountPoint: mount.hostMountPoint,
+      options: mount.options,
+      params: mount.params,
+      generation: mount.generation,
+    };
+  }
+
+  private paramsForStorageCreate(params: RemoteFsParams): RemoteFsParams {
+    if (params.type !== RemoteFsType.CephFs) return params;
+    return {
+      ...params,
+      secret: this.secretCrypto.encrypt(params.secret),
+    };
+  }
+
+  private async ensureStoredParamsEncrypted(mount: RemoteFsMountEntity): Promise<RemoteFsMountEntity> {
+    if (mount.params.type !== RemoteFsType.CephFs) return mount;
+    if (!mount.params.secret || this.secretCrypto.isEncrypted(mount.params.secret)) return mount;
+    throw new Error(`Remote FS mount ${mount.id} contains an unencrypted CephFS secret`);
+  }
+
+  private paramsForApi(params: RemoteFsParams): RemoteFsMountParamsDto {
+    if (params.type !== RemoteFsType.CephFs) return params;
+    const { secret, ...publicParams } = params;
+    return {
+      ...publicParams,
+      secretConfigured: Boolean(secret && secret.trim().length > 0),
+    };
+  }
+
+  private auditPayload<T extends { params?: RemoteFsParams }>(dto: T): T {
+    if (!dto.params || dto.params.type !== RemoteFsType.CephFs) return dto;
+    const { secret, ...publicParams } = dto.params;
+    return {
+      ...dto,
+      params: {
+        ...publicParams,
+        secretConfigured: typeof secret === 'string' && secret.trim().length > 0,
+      },
+    } as T;
+  }
+
+  private toIso(value: Date | string): string {
+    if (value instanceof Date) return value.toISOString();
+    return new Date(value).toISOString();
   }
 }

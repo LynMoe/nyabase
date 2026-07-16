@@ -2,6 +2,7 @@ import 'reflect-metadata';
 import { DataSource } from 'typeorm';
 import { DB_ENTITIES } from './db-entities.js';
 import { loadNyabaseConfig } from '../config/nyabase-config-loader.js';
+import { configureExclusiveSqliteConnection } from './exclusive-sqlite.js';
 
 const config = loadNyabaseConfig();
 const driver = config.fields['database.driver'].effectiveValue;
@@ -14,23 +15,16 @@ function migrationGlobs(): string[] {
 
 const migrations = migrationGlobs();
 
-export const AppDataSource =
-  driver === 'postgres'
-    ? new DataSource({
-        type: 'postgres',
-        host: config.fields['database.host'].effectiveValue as string,
-        port: config.fields['database.port'].effectiveValue as number,
-        database: config.fields['database.name'].effectiveValue as string,
-        username: config.fields['database.user'].effectiveValue as string,
-        password: config.fields['database.password'].effectiveValue as string,
-        entities: DB_ENTITIES,
-        migrations,
-        synchronize: false,
-      })
-    : new DataSource({
-        type: 'better-sqlite3',
-        database: config.fields['database.path'].effectiveValue as string,
-        entities: DB_ENTITIES,
-        migrations,
-        synchronize: false,
-      });
+if (driver !== 'sqlite') {
+  throw new Error(`Unsupported database.driver "${driver}". Only "sqlite" is supported.`);
+}
+
+export const AppDataSource = new DataSource({
+  type: 'better-sqlite3',
+  database: config.fields['database.path'].effectiveValue as string,
+  timeout: 0,
+  prepareDatabase: configureExclusiveSqliteConnection,
+  entities: DB_ENTITIES,
+  migrations,
+  synchronize: false,
+});

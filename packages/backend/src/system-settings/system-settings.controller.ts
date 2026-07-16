@@ -16,6 +16,7 @@ import { CapabilitiesGuard } from '../auth/guards/capabilities.guard.js';
 import { RequireCaps } from '../auth/decorators/require-caps.decorator.js';
 import { NyabaseConfigService } from '../config/nyabase-config.service.js';
 import { SshProxyGateway } from '../ssh/ssh-proxy-gateway.js';
+import { postCommitBestEffort } from '../common/post-commit.js';
 
 @Controller()
 export class SystemSettingsController {
@@ -42,7 +43,10 @@ export class SystemSettingsController {
   async patchSettings(@Body() body: unknown): Promise<SystemSettingsDto> {
     const { values } = zPatchSystemSettingsRequest.parse(body);
     await this.config.updateEditable(values);
-    await this.sshProxyGateway.broadcastSnapshot();
+    await postCommitBestEffort(
+      'System settings SSH snapshot broadcast',
+      () => this.sshProxyGateway.broadcastSnapshot(),
+    );
     return this.systemSettingsDto();
   }
 

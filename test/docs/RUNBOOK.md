@@ -80,7 +80,7 @@ The suite uses only the shared backend API. Admin first ensures persistent
 servers, disks, images, users, groups, quotas, image grants, server grants, and
 mount-source grants. It then starts separate persona Node processes that log in
 as ordinary users and exercise profile, SSH key, API token, access summary,
-mount source, data directory, container lifecycle, operation polling, metrics,
+mount source, data directory, container lifecycle, AgentTask polling, metrics,
 and isolation endpoints.
 
 Persistent fixture resources are reused across runs:
@@ -91,11 +91,13 @@ Persistent fixture resources are reused across runs:
 Runtime containers and per-run data directories are cleaned by default. Set
 `NYABASE_LIVE_API_KEEP_CONTAINERS=1` only when debugging a failed container.
 
-Legacy red-team specs remain available for targeted debugging:
+Targeted persona and mount specs remain available for focused debugging:
 
 ```bash
-bash test/scripts/run-live-suite.sh legacy-admin-setup
-bash test/scripts/run-live-suite.sh legacy-redteam
+bash test/scripts/run-live-suite.sh admin-setup
+bash test/scripts/run-live-suite.sh personas
+bash test/scripts/run-live-suite.sh mounts
+bash test/scripts/run-live-suite.sh continuation
 ```
 
 The frontend Playwright e2e specs under `packages/frontend/e2e/` are mocked UI

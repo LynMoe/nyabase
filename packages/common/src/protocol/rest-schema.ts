@@ -6,14 +6,17 @@
  */
 
 import { z } from 'zod';
-import { Capability, GpuGrantMode, UserStatus } from '../enums.js';
+import { Capability, GpuGrantMode, RemoteFsType, UserStatus } from '../enums.js';
+import { MAX_SSH_PUBLIC_KEY_TEXT_LENGTH } from '../constants.js';
+import { normalizeDockerImageRef } from '../utils.js';
 import { normalizeOpenSshPublicKey } from './ssh-public-key.js';
+import { MAX_CONTAINER_MOUNTS } from '../constants.js';
 
 export const zUserStatus = z.nativeEnum(UserStatus);
+const zMutableUserStatus = z.enum([UserStatus.Active, UserStatus.Disabled]);
 export const zCapability = z.nativeEnum(Capability);
 export const zGpuGrantMode = z.nativeEnum(GpuGrantMode);
 
-const IPV4_CIDR_RE = /^\d{1,3}(\.\d{1,3}){3}\/\d{1,2}$/;
 const USERNAME_RE = /^[a-z0-9_-]+$/;
 const RESOURCE_NAME_RE = /^[a-z0-9][a-z0-9_-]*$/;
 const SERVER_SLUG_RE = /^[a-z0-9][a-z0-9_-]*$/;
@@ -49,12 +52,12 @@ export const zUpdateUserRequest = z.object({
   displayName: z.string().min(1).max(128).optional(),
   password: z.string().min(8).optional(),
   currentPassword: z.string().optional(),
-  status: zUserStatus.optional(),
+  status: zMutableUserStatus.optional(),
 });
 
 export const zAddSshKeyRequest = z.object({
   name: z.string().min(1).max(128),
-  keyText: z.string().min(1).transform((value, ctx) => {
+  keyText: z.string().min(1).max(MAX_SSH_PUBLIC_KEY_TEXT_LENGTH).transform((value, ctx) => {
     const normalized = normalizeOpenSshPublicKey(value);
     if (!normalized) {
       ctx.addIssue({
@@ -74,49 +77,12 @@ export const zAddSshKeyRequest = z.object({
 export const zCreateServerRequest = z.object({
   name: z.string().min(1).max(128),
   slug: z.string().min(1).max(64).regex(SERVER_SLUG_RE),
-  parentIface: z.string().min(1),
-  ipCidr: z.string().regex(IPV4_CIDR_RE),
-  gateway: z.string().ip({ version: 'v4' }),
-  reservedIps: z.array(z.string().ip({ version: 'v4' })).optional(),
-  isGpuServer: z.boolean().optional(),
-  defaultCpuMillis: z.number().int().nonnegative().optional(),
-  defaultMemBytes: z.number().int().nonnegative().optional(),
-  defaultDiskBytes: z.number().int().nonnegative().optional(),
-  defaultGpuMode: zGpuGrantMode.optional(),
-  defaultGpuIndices: z.array(z.number().int().nonnegative()).optional(),
-});
+}).strict();
 
 export const zUpdateServerRequest = z.object({
   name: z.string().min(1).max(128).optional(),
   slug: z.string().min(1).max(64).regex(SERVER_SLUG_RE).optional(),
-  parentIface: z.string().min(1).optional(),
-  ipCidr: z.string().regex(IPV4_CIDR_RE).optional(),
-  gateway: z.string().ip({ version: 'v4' }).optional(),
-  reservedIps: z.array(z.string().ip({ version: 'v4' })).optional(),
-  isGpuServer: z.boolean().optional(),
-});
-
-export const zUpdateServerDefaultsRequest = z.object({
-  defaultCpuMillis: z.number().int().nonnegative().optional(),
-  defaultMemBytes: z.number().int().nonnegative().optional(),
-  defaultDiskBytes: z.number().int().nonnegative().optional(),
-  defaultGpuMode: zGpuGrantMode.optional(),
-  defaultGpuIndices: z.array(z.number().int().nonnegative()).optional(),
-});
-
-// ---------------------------------------------------------------------------
-// Data disks
-// ---------------------------------------------------------------------------
-
-export const zAddDataDiskRequest = z.object({
-  mountPoint: z.string().startsWith('/'),
-  label: z.string().optional(),
-});
-
-export const zUpdateDataDiskRequest = z.object({
-  /** Display name for the disk; null clears it */
-  label: z.union([z.string().max(128), z.null()]),
-});
+}).strict();
 
 // ---------------------------------------------------------------------------
 // Images
@@ -129,32 +95,48 @@ export const zImageRuntimeOverrides = z.object({
   init: z.boolean(),
 });
 
+export const zDockerImageRef = z.string().min(1).max(512).transform((value, context) => {
+  try {
+    return normalizeDockerImageRef(value);
+  } catch (error) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: error instanceof Error ? error.message : 'Invalid Docker image reference',
+    });
+    return z.NEVER;
+  }
+});
+
 export const zCreateImageRequest = z.object({
   name: z.string().min(1).max(128),
-  dockerImage: z.string().min(1),
+  dockerImage: zDockerImageRef,
   runtimeOverrides: zImageRuntimeOverrides.optional(),
-  defaultUid: z.number().int().nonnegative().optional(),
   description: z.string().optional(),
   disableSsh: z.boolean().optional(),
-}).transform((value) => ({
+}).strict().transform((value) => ({
   ...value,
   runtimeOverrides: value.runtimeOverrides ?? {
-    uid: value.defaultUid ?? 0,
+    uid: 0,
     entrypoint: null,
     cmd: null,
     init: false,
   },
-}));
+})).pipe(z.object({
+  name: z.string().min(1).max(128),
+  dockerImage: zDockerImageRef,
+  runtimeOverrides: zImageRuntimeOverrides,
+  description: z.string().optional(),
+  disableSsh: z.boolean().optional(),
+}).strict());
 
 export const zUpdateImageRequest = z.object({
   name: z.string().min(1).max(128).optional(),
-  dockerImage: z.string().min(1).optional(),
+  dockerImage: zDockerImageRef.optional(),
   runtimeOverrides: zImageRuntimeOverrides.optional(),
-  defaultUid: z.number().int().nonnegative().optional(),
   description: z.string().optional().nullable(),
   isActive: z.boolean().optional(),
   disableSsh: z.boolean().optional(),
-});
+}).strict();
 
 export const zPullImageRequest = z.object({
   serverIds: z.array(z.string()).optional(),
@@ -165,18 +147,19 @@ export const zPullImageRequest = z.object({
 // ---------------------------------------------------------------------------
 
 export const zCreateContainerRequest = z.object({
-  serverId: z.string(),
-  imageId: z.string(),
+  serverId: z.string().min(1).max(128),
+  imageId: z.string().min(1).max(128),
   name: z.string().min(1).max(64).regex(RESOURCE_NAME_RE),
   dataDirs: z
     .array(
       z.object({
         sourceKind: z.enum(['local', 'remote']),
-        sourceId: z.string(),
+        sourceId: z.string().min(1).max(128),
         dirName: z.string().min(1).max(64),
-        containerPath: z.string().startsWith('/'),
+        containerPath: z.string().min(1).max(4096).startsWith('/'),
       }),
     )
+    .max(MAX_CONTAINER_MOUNTS)
     .optional(),
 }).strict();
 
@@ -197,6 +180,91 @@ export const zCreateDataDirRequest = z.object({
   sourceId: z.string(),
   name: z.string().min(1).max(64).regex(RESOURCE_NAME_RE),
 });
+
+// ---------------------------------------------------------------------------
+// Remote FS Mounts
+// ---------------------------------------------------------------------------
+
+const REMOTE_FS_TOKEN_RE = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
+const REMOTE_FS_HOST_RE = /^(?:[A-Za-z0-9](?:[A-Za-z0-9.-]{0,251}[A-Za-z0-9])?|\[[0-9A-Fa-f:.]+\])$/;
+const REMOTE_FS_MONITOR_RE = /^(?:[A-Za-z0-9](?:[A-Za-z0-9.-]{0,251}[A-Za-z0-9])?|\[[0-9A-Fa-f:.]+\])(?::[1-9][0-9]{0,4})?$/;
+const REMOTE_FS_PATH_RE = /^\/(?!.*(?:^|\/)\.\.?(?:\/|$))[^,\0\r\n]*$/;
+const REMOTE_FS_OPTION_RE = /^[A-Za-z0-9][A-Za-z0-9._-]*(?:=[A-Za-z0-9][A-Za-z0-9._:/@%+-]*)?$/;
+const RESERVED_REMOTE_FS_OPTIONS = new Set([
+  'bg',
+  'fs',
+  'fg',
+  'mds_namespace',
+  'name',
+  'secret',
+  'secretfile',
+  'vers',
+]);
+
+export const zRemoteFsOptions = z.string().max(1024).superRefine((value, ctx) => {
+  if (!value) return;
+  const parts = value.split(',');
+  if (parts.some((part) => !part || part !== part.trim() || !REMOTE_FS_OPTION_RE.test(part))) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: 'Remote FS options must be a comma-separated list of safe option tokens',
+    });
+    return;
+  }
+  for (const part of parts) {
+    const key = part.split('=', 1)[0].toLowerCase();
+    if (RESERVED_REMOTE_FS_OPTIONS.has(key)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: `Remote FS option ${key} is managed by Nyabase`,
+      });
+    }
+  }
+});
+
+export const zRemoteFsCreateNfsParams = z.object({
+  type: z.literal(RemoteFsType.Nfs),
+  nfsServer: z.string().min(1).max(255).regex(REMOTE_FS_HOST_RE),
+  exportPath: z.string().min(1).max(4096).regex(REMOTE_FS_PATH_RE),
+  version: z.enum(['3', '4', '4.1', '4.2']),
+}).strict();
+
+export const zRemoteFsCreateCephFsParams = z.object({
+  type: z.literal(RemoteFsType.CephFs),
+  monHosts: z.string().min(1).max(2048).superRefine((value, ctx) => {
+    const monitors = value.split(',');
+    if (monitors.some((monitor) => !REMOTE_FS_MONITOR_RE.test(monitor))) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'monHosts must contain safe comma-separated host[:port] values',
+      });
+    }
+  }),
+  fsName: z.string().min(1).max(128).regex(REMOTE_FS_TOKEN_RE).optional(),
+  exportPath: z.string().min(1).max(4096).regex(REMOTE_FS_PATH_RE),
+  clientName: z.string().min(1).max(128).regex(REMOTE_FS_TOKEN_RE),
+  secret: z.string().min(1).max(4096).regex(/^[A-Za-z0-9+/]+={0,2}$/),
+}).strict();
+
+export const zRemoteFsCreateParams = z.discriminatedUnion('type', [
+  zRemoteFsCreateNfsParams,
+  zRemoteFsCreateCephFsParams,
+]);
+
+export const zCreateRemoteFsMountRequest = z.object({
+  name: z.string().min(1).max(128),
+  displayName: z.string().max(128).optional(),
+  description: z.string().optional(),
+  serverIds: z.array(z.string()).optional(),
+  options: zRemoteFsOptions.optional(),
+  params: zRemoteFsCreateParams,
+}).strict();
+
+export const zUpdateRemoteFsMountRequest = z.object({
+  name: z.string().min(1).max(128).optional(),
+  displayName: z.string().max(128).optional(),
+  description: z.string().optional(),
+}).strict();
 
 // ---------------------------------------------------------------------------
 // Groups & grants
@@ -257,9 +325,6 @@ export type UpdateUserRequest = z.infer<typeof zUpdateUserRequest>;
 export type AddSshKeyRequest = z.infer<typeof zAddSshKeyRequest>;
 export type CreateServerRequest = z.infer<typeof zCreateServerRequest>;
 export type UpdateServerRequest = z.infer<typeof zUpdateServerRequest>;
-export type UpdateServerDefaultsRequest = z.infer<typeof zUpdateServerDefaultsRequest>;
-export type AddDataDiskRequest = z.infer<typeof zAddDataDiskRequest>;
-export type UpdateDataDiskRequest = z.infer<typeof zUpdateDataDiskRequest>;
 export type ImageRuntimeOverrides = z.infer<typeof zImageRuntimeOverrides>;
 export type CreateImageRequest = z.infer<typeof zCreateImageRequest>;
 export type UpdateImageRequest = z.infer<typeof zUpdateImageRequest>;
@@ -267,6 +332,9 @@ export type PullImageRequest = z.infer<typeof zPullImageRequest>;
 export type CreateContainerRequest = z.infer<typeof zCreateContainerRequest>;
 export type ExecSessionRequest = z.infer<typeof zExecSessionRequest>;
 export type CreateDataDirRequest = z.infer<typeof zCreateDataDirRequest>;
+export type RemoteFsCreateParams = z.infer<typeof zRemoteFsCreateParams>;
+export type CreateRemoteFsMountRequest = z.infer<typeof zCreateRemoteFsMountRequest>;
+export type UpdateRemoteFsMountRequest = z.infer<typeof zUpdateRemoteFsMountRequest>;
 export type CreateGroupRequest = z.infer<typeof zCreateGroupRequest>;
 export type UpdateGroupRequest = z.infer<typeof zUpdateGroupRequest>;
 export type UpsertServerGrantRequest = z.infer<typeof zUpsertServerGrantRequest>;

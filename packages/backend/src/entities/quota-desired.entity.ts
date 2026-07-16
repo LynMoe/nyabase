@@ -6,8 +6,10 @@ import {
   PrimaryColumn,
   Unique,
   UpdateDateColumn,
+  ForeignKey,
 } from 'typeorm';
 import { numericTextTransformer } from './entity-transformers.js';
+import { ServerEntity } from './server.entity.js';
 
 @Entity('quota_desired')
 @Unique(['serverId', 'userId'])
@@ -16,6 +18,7 @@ export class QuotaDesiredEntity {
   id: string;
 
   @Index()
+  @ForeignKey(() => ServerEntity, { onDelete: 'RESTRICT' })
   @Column('text')
   serverId: string;
 
@@ -36,7 +39,7 @@ export class QuotaDesiredEntity {
   generation: number;
 
   @Column({ type: 'text', nullable: true })
-  lastOperationId: string | null;
+  lastTaskId: string | null;
 
   @CreateDateColumn()
   createdAt: Date;

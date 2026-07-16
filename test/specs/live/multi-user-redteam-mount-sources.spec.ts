@@ -41,19 +41,18 @@ type DataDirDto = {
   hostPath: string;
   serverId: string;
   serverName: string;
-  operationId?: string;
-  status?: string;
+  taskId?: string;
 };
 
 type ContainerDto = {
   id: string;
-  containerId?: string;
   serverId: string;
   ownerId: string;
   name: string;
   imageId: string;
-  phase: string;
+  runtimeReady: boolean;
   runtime: {
+    bound: boolean;
     status: string | null;
     stale?: boolean;
   };
@@ -77,14 +76,20 @@ type ContainerMountDto = {
   containerPath: string;
 };
 
-type OperationRef = { ok: true; operationId: string; status: string };
+type AgentTaskRef = { ok: true; taskId: string; status: 'pending' };
+
+type AgentTaskView = {
+  id: string;
+  status: 'pending' | 'succeeded' | 'failed';
+  resourceId: string;
+  error: unknown | null;
+};
 
 type MountInput = {
   sourceKind: MountSourceKind;
   sourceId: string;
   dirName: string;
   containerPath: string;
-  createIfMissing?: boolean;
 };
 
 type FixtureUser = {
@@ -263,7 +268,9 @@ describe('multi-user red-team mount sources runtime matrix', () => {
         containerId: shortId(alphaOne.containerId),
       });
       expect(alphaOneAfterGuard.status).toBe(200);
-      expect(['running', 'creating', 'exited'].includes(alphaOneAfterGuard.body.runtime.status ?? alphaOneAfterGuard.body.phase)).toBe(true);
+      expect(alphaOneAfterGuard.body.runtimeReady).toBe(true);
+      expect(alphaOneAfterGuard.body.runtime.bound).toBe(true);
+      expect(alphaOneAfterGuard.body.runtime.status).toBe('running');
 
       await expectCrossUserDeleteDenied(delta, alphaDir, 'delta guessing alpha local dir while mounted');
 
@@ -287,12 +294,11 @@ describe('multi-user red-team mount sources runtime matrix', () => {
       expect(emptyDetail.body.mounts).toEqual([]);
 
       await patchMounts(delta, patchContainer, [{
-        sourceKind: 'remote',
-        sourceId: state.sources.remote.id,
-        dirName: patchDir.name,
-        containerPath: '/mnt/patch',
-        createIfMissing: false,
-      }], 'dynamic mount patch add');
+      sourceKind: 'remote',
+      sourceId: state.sources.remote.id,
+      dirName: patchDir.name,
+      containerPath: '/mnt/patch',
+    }], 'dynamic mount patch add');
       await execWriteRead(delta, patchContainer, '/mnt/patch', 'delta-patch-marker', 'delta-patch-rw');
       await patchMounts(delta, patchContainer, [], 'dynamic mount patch remove');
       const removedDetail = await request<ContainerDto>('GET', containerPath(patchContainer), delta.token);
@@ -308,7 +314,7 @@ describe('multi-user red-team mount sources runtime matrix', () => {
         alphaTwo,
         alphaOne,
       ]) {
-        await removeContainerViaOperation(container.actor, container);
+        await removeContainerViaTask(container.actor, container);
       }
 
       for (const dir of [patchDir, deltaRemoteDir, deltaLocalDir, betaDir, alphaDir]) {
@@ -411,7 +417,6 @@ async function expectDeniedSourceUse(actor: Actor, sourceKind: MountSourceKind, 
       sourceId,
       dirName: name,
       containerPath: '/mnt/deny',
-      createIfMissing: true,
     }],
   });
   record(`${actor.label} cannot create container with ${sourceKind} mount`, actor, createContainer, 'denied', { sourceKind, sourceId, name });
@@ -425,13 +430,13 @@ async function createDataDir(actor: Actor, sourceKind: MountSourceKind, sourceId
     sourceId,
     name,
   });
-  record(`create data dir ${name}`, actor, result, '201/200', { sourceKind, sourceId, name });
-  expect([200, 201]).toContain(result.status);
+  record(`create data dir ${name}`, actor, result, '201 AgentTask reference', { sourceKind, sourceId, name });
+  expect(result.status).toBe(201);
   expect(result.body.name).toBe(name);
   expect(result.body.sourceKind).toBe(sourceKind);
   expect(result.body.sourceId).toBe(sourceId);
-
-  if (result.body.operationId) await waitForOperationTerminal(actor, result.body.operationId);
+  expect(result.body.taskId).toEqual(expect.any(String));
+  await waitForAgentTaskSucceeded(actor, result.body.taskId!);
 
   const dir = { actor, name, sourceKind, sourceId, id: result.body.id };
   createdDirs.push(dir);
@@ -451,7 +456,7 @@ async function createMountedContainer(
   containerPathValue: string,
 ) {
   const before = await listRunContainers(actor);
-  const result = await request<OperationRef>('POST', '/v2/containers', actor.token, {
+  const result = await request<AgentTaskRef>('POST', '/v2/containers', actor.token, {
     serverId: state.cpuServerId,
     imageId: state.image.id,
     name,
@@ -463,13 +468,13 @@ async function createMountedContainer(
       sourceId,
       dirName,
       containerPath: containerPathValue,
-      createIfMissing: false,
     }],
   });
-  record(`create mounted container ${name}`, actor, result, '201/200 operation ref', { sourceKind, sourceId, dirName });
-  expect([200, 201]).toContain(result.status);
-  await waitForOperationTerminal(actor, result.body.operationId);
+  record(`create mounted container ${name}`, actor, result, '201 AgentTask reference', { sourceKind, sourceId, dirName });
+  expect(result.status).toBe(201);
+  const task = await waitForAgentTaskSucceeded(actor, result.body.taskId);
   const container = await waitForContainerActionable(actor, name, before);
+  expect(container.id).toBe(task.resourceId);
   expect(container.ownerId).toBe(actor.user.id);
   expect(container.imageId).toBe(state.image.id);
   expect(container.mounts).toEqual(expect.arrayContaining([
@@ -480,7 +485,7 @@ async function createMountedContainer(
 
 async function createPlainContainer(actor: Actor, name: string) {
   const before = await listRunContainers(actor);
-  const result = await request<OperationRef>('POST', '/v2/containers', actor.token, {
+  const result = await request<AgentTaskRef>('POST', '/v2/containers', actor.token, {
     serverId: state.cpuServerId,
     imageId: state.image.id,
     name,
@@ -488,10 +493,11 @@ async function createPlainContainer(actor: Actor, name: string) {
     memBytes: 16 * MI_B,
     gpuIndices: [],
   });
-  record(`create plain container ${name}`, actor, result, '201/200 no dataDirs', { name });
-  expect([200, 201]).toContain(result.status);
-  await waitForOperationTerminal(actor, result.body.operationId);
+  record(`create plain container ${name}`, actor, result, '201 AgentTask reference without dataDirs', { name });
+  expect(result.status).toBe(201);
+  const task = await waitForAgentTaskSucceeded(actor, result.body.taskId);
   const container = await waitForContainerActionable(actor, name, before);
+  expect(container.id).toBe(task.resourceId);
   expect(container.mounts).toEqual([]);
   return trackContainer(actor, name, container);
 }
@@ -501,7 +507,7 @@ function trackContainer(actor: Actor, name: string, dto: ContainerDto): TrackedC
     actor,
     name,
     serverId: state.cpuServerId,
-    containerId: canonicalContainerId(dto),
+    containerId: dto.id,
   };
   createdContainers.push(container);
   report.created.containers.push(toReportContainer(container));
@@ -509,10 +515,10 @@ function trackContainer(actor: Actor, name: string, dto: ContainerDto): TrackedC
 }
 
 async function patchMounts(actor: Actor, container: TrackedContainer, mounts: MountInput[], step: string) {
-  const result = await request<OperationRef>('POST', `${containerPath(container)}/actions/update-mounts`, actor.token, mounts);
-  record(step, actor, result, '200/201 operation ref', { containerId: shortId(container.containerId), count: mounts.length });
-  expect([200, 201]).toContain(result.status);
-  await waitForOperationTerminal(actor, result.body.operationId);
+  const result = await request<AgentTaskRef>('POST', `${containerPath(container)}/actions/update-mounts`, actor.token, mounts);
+  record(step, actor, result, '201 AgentTask reference', { containerId: shortId(container.containerId), count: mounts.length });
+  expect(result.status).toBe(201);
+  await waitForAgentTaskSucceeded(actor, result.body.taskId);
   const detail = await request<ContainerDto>('GET', containerPath(container), actor.token);
   record(`${step} readback`, actor, detail, '200', { containerId: shortId(container.containerId), count: detail.body.mounts.length });
   expect(detail.status).toBe(200);
@@ -538,7 +544,7 @@ async function execWriteRead(
 ) {
   const command = `printf '%s\\n' '${marker}' > ${mountPath}/${filename}; cat ${mountPath}/${filename}; exit`;
   const output = await execCommand(actor, container, command);
-  record(`exec write/read ${marker}`, actor, { method: 'POST+/ws', path: `${containerPath(container)}/exec-sessions`, status: 200, ok: true, body: { output } }, 'marker echoed', {
+  record(`exec write/read ${marker}`, actor, { method: 'POST+/ws', path: `${containerPath(container)}/exec-sessions`, status: 200, body: { output } }, 'marker echoed', {
     containerId: shortId(container.containerId),
     marker,
   });
@@ -553,7 +559,7 @@ async function execExpectRead(
   step: string,
 ) {
   const output = await execCommand(actor, container, `cat ${filePath}; exit`);
-  record(step, actor, { method: 'POST+/ws', path: `${containerPath(container)}/exec-sessions`, status: 200, ok: true, body: { output } }, 'marker echoed from second container', {
+  record(step, actor, { method: 'POST+/ws', path: `${containerPath(container)}/exec-sessions`, status: 200, body: { output } }, 'marker echoed from second container', {
     containerId: shortId(container.containerId),
     marker,
   });
@@ -627,45 +633,44 @@ async function expectCrossUserDeleteDenied(
   expect(DENY_STATUSES).toContain(result.status);
 }
 
-async function removeContainerViaOperation(actor: Actor, container: TrackedContainer) {
-  const operation = await requestContainerDeleteOperation(actor, container);
-  record(`delete container ${container.name} via V2 operation`, actor, operation, '200/201 operation ref', {
+async function removeContainerViaTask(actor: Actor, container: TrackedContainer) {
+  const taskRef = await requestContainerDeleteTask(actor, container);
+  record(`delete container ${container.name} via AgentTask`, actor, taskRef, '201 AgentTask reference', {
     containerId: shortId(container.containerId),
-    operationId: shortId(operation.body.operationId),
+    taskId: shortId(taskRef.body.taskId),
   });
-  expect([200, 201]).toContain(operation.status);
-  await waitForOperationTerminal(actor, operation.body.operationId);
+  expect(taskRef.status).toBe(201);
+  await waitForAgentTaskSucceeded(actor, taskRef.body.taskId);
   removeCreatedContainer(container.containerId);
   report.deleted.containers.push(toReportContainer(container));
   await waitForContainerGone(actor, container);
 }
 
-async function requestContainerDeleteOperation(actor: Actor, container: TrackedContainer) {
-  return request<{ ok: true; operationId: string; status: string }>('POST', `/v2/containers/${container.containerId}/actions/delete`, actor.token);
+async function requestContainerDeleteTask(actor: Actor, container: TrackedContainer) {
+  return request<AgentTaskRef>('POST', `/v2/containers/${container.containerId}/actions/delete`, actor.token);
 }
 
-async function waitForOperationTerminal(actor: Actor, operationId: string) {
-  const terminal = new Set(['succeeded', 'failed', 'cancelled']);
+async function waitForAgentTaskSucceeded(actor: Actor, taskId: string): Promise<AgentTaskView> {
   let finalStatus: string | undefined;
   const deadline = Date.now() + 120_000;
   while (Date.now() < deadline) {
-    const operation = await request<{ id: string; status: string; lastError: string | null }>('GET', `/operations/${operationId}`, actor.token);
-    if (operation.status === 200 && terminal.has(operation.body.status)) {
-      finalStatus = operation.body.status;
-      expect(operation.body.status, `operation ${operationId} failed: ${operation.body.lastError ?? ''}`).toBe('succeeded');
-      return operation.body;
+    const task = await request<AgentTaskView>('GET', `/agent-tasks/${taskId}`, actor.token);
+    if (task.status === 200 && (task.body.status === 'succeeded' || task.body.status === 'failed')) {
+      finalStatus = task.body.status;
+      expect(task.body.status, `agent task ${taskId} failed: ${formatTaskError(task.body.error)}`).toBe('succeeded');
+      return task.body;
     }
     await sleep(1000);
   }
-  throw new Error(`Timed out waiting for operation ${operationId}; last status ${finalStatus ?? 'unknown'}`);
+  throw new Error(`Timed out waiting for agent task ${taskId}; last status ${finalStatus ?? 'unknown'}`);
 }
 
 async function deleteDataDir(actor: Actor, dir: { name: string; sourceKind: MountSourceKind; sourceId: string; id?: string }) {
-  const result = await request('DELETE', dataDirPath(dir), actor.token);
-  record(`delete data dir ${dir.name}`, actor, result, '200/201 operation ref or 204', { sourceKind: dir.sourceKind, sourceId: dir.sourceId, name: dir.name });
-  expect([200, 201, 204]).toContain(result.status);
-  const body = result.body as { operationId?: string };
-  if (body?.operationId) await waitForOperationTerminal(actor, body.operationId);
+  const result = await request<AgentTaskRef>('DELETE', dataDirPath(dir), actor.token);
+  record(`delete data dir ${dir.name}`, actor, result, '200 AgentTask reference', { sourceKind: dir.sourceKind, sourceId: dir.sourceId, name: dir.name });
+  expect(result.status).toBe(200);
+  expect(result.body.taskId).toEqual(expect.any(String));
+  await waitForAgentTaskSucceeded(actor, result.body.taskId);
   removeCreatedDir(dir);
   report.deleted.dataDirs.push(toReportDir({ actor, ...dir }));
 }
@@ -673,10 +678,10 @@ async function deleteDataDir(actor: Actor, dir: { name: string; sourceKind: Moun
 async function cleanupAll() {
   for (const container of [...createdContainers].reverse()) {
     try {
-      const result = await requestContainerDeleteOperation(container.actor, container);
+      const result = await requestContainerDeleteTask(container.actor, container);
       recordCleanup('container', container.actor, container.name, `best-effort delete ${result.status}`);
-      if ([200, 201].includes(result.status)) {
-        await waitForOperationTerminal(container.actor, result.body.operationId);
+      if (result.status === 201) {
+        await waitForAgentTaskSucceeded(container.actor, result.body.taskId);
         await waitForContainerGone(container.actor, container);
         removeCreatedContainer(container.containerId);
       } else if ([403, 404].includes(result.status)) {
@@ -690,13 +695,13 @@ async function cleanupAll() {
 
   for (const dir of [...createdDirs].reverse()) {
     try {
-      const result = await request('DELETE', dataDirPath(dir), dir.actor.token);
+      const result = await request<AgentTaskRef>('DELETE', dataDirPath(dir), dir.actor.token);
       recordCleanup('data-dir', dir.actor, dir.name, `best-effort delete ${result.status}`);
-      if ([200, 201].includes(result.status)) {
-        const body = result.body as { operationId?: string };
-        if (body?.operationId) await waitForOperationTerminal(dir.actor, body.operationId);
+      if (result.status === 200) {
+        expect(result.body.taskId).toEqual(expect.any(String));
+        await waitForAgentTaskSucceeded(dir.actor, result.body.taskId);
         removeCreatedDir(dir);
-      } else if ([204, 403, 404].includes(result.status)) removeCreatedDir(dir);
+      } else if ([403, 404].includes(result.status)) removeCreatedDir(dir);
     } catch (error) {
       recordCleanup('data-dir', dir.actor, dir.name, `failed: ${describeError(error)}`);
       if (report.status === 'pass') report.status = 'fail-infra';
@@ -731,11 +736,16 @@ async function listRunDataDirs(actor: Actor) {
 }
 
 async function waitForContainerActionable(actor: Actor, name: string, before: ContainerDto[]) {
-  const beforeIds = new Set(before.map((container) => canonicalContainerId(container)));
+  const beforeIds = new Set(before.map((container) => container.id));
   const deadline = Date.now() + 45_000;
   while (Date.now() < deadline) {
     const containers = await listRunContainers(actor);
-    const found = containers.find((container) => container.name === name && !beforeIds.has(canonicalContainerId(container)));
+    const found = containers.find((container) =>
+      container.name === name
+      && !beforeIds.has(container.id)
+      && container.runtimeReady
+      && container.runtime.bound
+      && container.runtime.status === 'running');
     if (found) return found;
     await sleep(1000);
   }
@@ -852,10 +862,6 @@ function dataDirPath(dir: { sourceKind: MountSourceKind; sourceId: string; name:
   return `/data-dirs/${state.cpuServerId}/${dir.sourceId}/${encodeURIComponent(dir.name)}?sourceKind=${dir.sourceKind}`;
 }
 
-function canonicalContainerId(container: Pick<ContainerDto, 'id' | 'containerId'>) {
-  return container.containerId ?? container.id;
-}
-
 function containerPath(container: Pick<TrackedContainer, 'serverId' | 'containerId'>) {
   return `/v2/containers/${container.containerId}`;
 }
@@ -964,6 +970,15 @@ function decodeConsoleData(value: string) {
 
 function describeError(error: unknown) {
   return redactString(error instanceof Error ? error.message : String(error));
+}
+
+function formatTaskError(error: unknown) {
+  if (error == null) return '';
+  if (typeof error === 'string') return redactString(error);
+  if (typeof error === 'object' && 'message' in error && typeof error.message === 'string') {
+    return redactString(error.message);
+  }
+  return redactString(JSON.stringify(error) ?? String(error));
 }
 
 function classifyFailure(error: unknown): Report['status'] {

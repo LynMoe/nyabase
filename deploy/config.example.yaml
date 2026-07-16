@@ -10,27 +10,30 @@ branding:
   description: 开发容器管理平台
 
 auth:
-  jwtSecret: change-me-in-production
+  # Required in production. Generate with:
+  #   openssl rand -hex 32
+  jwtSecret: ""
   jwtExpiresIn: 15m
   refreshTokenExpiresDays: 7
-  adminInitPassword: admin123
+  # Leave empty to generate a one-time password on first production boot.
+  adminInitPassword: ""
 
 database:
   driver: sqlite
   path: /data/nyabase.db
-  host: localhost
-  port: 5432
-  name: nyabase
-  user: nyabase
-  password: ""
   synchronize: false
   migrationsRun: true
 
 metrics:
   victoriaMetricsUrl: http://victoriametrics:8428
 
+http:
+  # Required. Generate independently with: openssl rand -hex 32
+  proxyToken: ""
+
 ssh:
   keyEncryptionSecret: ""
+  # Required. Generate independently with: openssl rand -hex 32
   proxyToken: ""
   proxyPublicHost: ""
   proxyPublicPort: 2222

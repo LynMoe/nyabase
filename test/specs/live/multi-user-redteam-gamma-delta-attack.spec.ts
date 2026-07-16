@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { api, containerAction, createContainerActive, removeContainerViaOperation, loadActor, loadState, rawApi, waitActionEnabled } from './v2-live-helpers.js';
+import { api, containerAction, createContainerRunning, removeContainerViaTask, loadActor, loadState, rawApi, waitActionEnabled } from './v2-live-helpers.js';
 
 
 describe('V2 gamma/delta isolation live flow', () => {
@@ -10,7 +10,7 @@ describe('V2 gamma/delta isolation live flow', () => {
     const delta = await loadActor(state, 'delta');
     let target;
     try {
-      target = await createContainerActive(state, gamma.token, { serverId: state.servers.gpu.id, imageId: state.images.gpuA.id, name: `${state.runPrefix}-gamma-target-v2`, cpuMillis: 100, memBytes: 128 * 1024 * 1024, gpuIndices: [0] });
+      target = await createContainerRunning(state, gamma.token, { serverId: state.servers.gpu.id, imageId: state.images.gpuA.id, name: `${state.runPrefix}-gamma-target-v2`, cpuMillis: 100, memBytes: 128 * 1024 * 1024, gpuIndices: [0] });
     } catch (error) {
       if (String(error).includes('Address already in use')) return;
       throw error;
@@ -20,6 +20,6 @@ describe('V2 gamma/delta isolation live flow', () => {
       const res = await rawApi(state, method, `/v2/containers/${target.id}${suffix}`, delta.token);
       expect([403, 404]).toContain(res.status);
     }
-    await removeContainerViaOperation(state, gamma.token, target.id);
+    await removeContainerViaTask(state, gamma.token, target.id);
   }, 180_000);
 });

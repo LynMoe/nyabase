@@ -30,11 +30,6 @@ const gpuServer = {
   isGpuServer: true,
   status: 'online',
   lastSeenAt: null,
-  defaultCpuMillis: 8000,
-  defaultMemBytes: 64 * 1024 ** 3,
-  defaultDiskBytes: 100 * 1024 ** 3,
-  defaultGpuMode: 'indices',
-  defaultGpuIndices: [0],
   disks: [],
   gpus: [{ index: 0, uuid: 'GPU-aaaaaaaa-bbbb-cccc-dddd-eeeeeeee0000', model: 'NVIDIA L40', totalMemMiB: 46068 }],
   agentVersion: '0.1.0',
@@ -48,11 +43,21 @@ const images = [
     id: 'img-cuda',
     name: 'cuda-pytorch',
     dockerImage: 'nvcr.io/nvidia/pytorch:24.05-py3',
-    defaultUid: 1001,
     description: 'GPU notebook image',
     isActive: true,
     entrypoint: null,
     cmd: 'sleep infinity',
+    disableSsh: false,
+  },
+  {
+    id: 'img-no-ssh',
+    name: 'cuda-no-ssh',
+    dockerImage: 'nvcr.io/nvidia/pytorch:24.05-py3',
+    description: 'GPU notebook image without SSH',
+    isActive: true,
+    entrypoint: null,
+    cmd: 'sleep infinity',
+    disableSsh: true,
   },
 ];
 
@@ -70,6 +75,7 @@ const sshDisabledContainer = containerView({
   name: 'cuda-ssh-disabled',
   ip: '10.8.110.22',
   sshEnabled: false,
+  imageId: 'img-no-ssh',
 });
 
 test.describe('Dropbear SSH visual UX', () => {
@@ -79,7 +85,7 @@ test.describe('Dropbear SSH visual UX', () => {
     await mockApi(page);
   });
 
-  test('create container dialog shows SSH opt-in in advanced options', async ({ page }) => {
+  test('create container dialog does not expose legacy SSH controls', async ({ page }) => {
     await page.goto('/containers');
 
     await page.getByRole('button', { name: '新建容器', exact: true }).click();
@@ -87,10 +93,7 @@ test.describe('Dropbear SSH visual UX', () => {
 
     await page.getByRole('button', { name: '高级选项' }).click();
 
-    await expect(page.getByText('启用 Dropbear SSH')).toBeVisible();
-    await expect(page.getByText('使用用户中心公钥以 root 登录')).toBeVisible();
-    await expect(page.getByRole('checkbox', { name: /启用 Dropbear SSH/ })).toBeVisible();
-    await expect(page.getByText(/注入|SSH 用户|SSH UID/)).toHaveCount(0);
+    await expect(page.getByText(/启用 Dropbear SSH|注入|SSH 用户|SSH UID/)).toHaveCount(0);
     await expect(page).toHaveScreenshot('create-container-dialog-ssh-option.png', { fullPage: true });
   });
 
@@ -99,22 +102,31 @@ test.describe('Dropbear SSH visual UX', () => {
 
     await expect(page.getByRole('heading', { name: 'cuda-ssh-enabled' })).toBeVisible();
     await expect(page.getByText('SSH', { exact: true })).toBeVisible();
-    await expect(page.getByText('可用')).toBeVisible();
-    await expect(page.getByRole('button', { name: '修复' })).toBeVisible();
-    await expect(page.getByRole('button', { name: '修复' })).toBeVisible();
+    await expect(page.getByText('代理可用')).toBeVisible();
+    await expect(page.getByRole('button', { name: '修复 SSH' })).toBeVisible();
     await expect(page.getByText(/SSH 用户|SSH UID|lab@|ssh lab@/)).toHaveCount(0);
     await expect(page).toHaveScreenshot('container-detail-ssh-enabled.png', { fullPage: true });
   });
 
-  test('container detail shows one-way enable action when SSH is disabled', async ({ page }) => {
+  test('repair action posts the reconcile SSH endpoint', async ({ page }) => {
+    await page.goto(`/containers/${enabledContainerId}`);
+
+    const repair = page.waitForResponse((response) => {
+      const url = new URL(response.url());
+      return response.request().method() === 'POST'
+        && url.pathname === `/api/v2/containers/${enabledContainerId}/actions/reconcile-ssh`;
+    });
+    await page.getByRole('button', { name: '修复 SSH' }).click();
+    await repair;
+  });
+
+  test('container detail hides repair action when image disables SSH', async ({ page }) => {
     await page.goto(`/containers/${disabledContainerId}`);
 
     await expect(page.getByRole('heading', { name: 'cuda-ssh-disabled' })).toBeVisible();
     await expect(page.getByText('SSH', { exact: true })).toBeVisible();
-    await expect(page.getByText('未启用')).toBeVisible();
-    await expect(page.getByText('未启用')).toBeVisible();
-    await expect(page.getByRole('button', { name: '启用' })).toBeVisible();
-    await expect(page.getByRole('button', { name: '修复' })).toHaveCount(0);
+    await expect(page.getByText('镜像禁用')).toBeVisible();
+    await expect(page.getByRole('button', { name: '修复 SSH' })).toHaveCount(0);
     await expect(page.getByRole('button', { name: /禁用 SSH|关闭 SSH|停用 SSH|Disable SSH/i })).toHaveCount(0);
     await expect(page.getByText(/ssh root@10\.8\.110\.22|SSH 用户|SSH UID/)).toHaveCount(0);
     await expect(page).toHaveScreenshot('container-detail-ssh-disabled.png', { fullPage: true });
@@ -218,6 +230,9 @@ async function mockApi(page: Page): Promise<void> {
     if (path === `/v2/containers/${disabledContainerId}`) return json(route, sshDisabledContainer);
     if (path === `/v2/containers/${enabledContainerId}/stats`) return json(route, containerStats(enabledContainerId));
     if (path === `/v2/containers/${disabledContainerId}/stats`) return json(route, containerStats(disabledContainerId));
+    if (path === `/v2/containers/${enabledContainerId}/actions/reconcile-ssh` && method === 'POST') {
+      return json(route, { ok: true, taskId: 'task-repair-ssh', status: 'pending' });
+    }
     if (path === `/v2/containers/${enabledContainerId}/exec-sessions` && method === 'POST') return json(route, { sessionId: 'mock-console-session' });
     if (path === '/data-dirs') return json(route, []);
     if (path === '/mount-sources') return json(route, []);
@@ -226,7 +241,7 @@ async function mockApi(page: Page): Promise<void> {
   });
 }
 
-function containerView(input: { id: string; runtimeId: string; name: string; ip: string; sshEnabled: boolean }) {
+function containerView(input: { id: string; runtimeId: string; name: string; ip: string; sshEnabled: boolean; imageId?: string }) {
   return {
     id: input.id,
     serverId: 'srv-gpu',
@@ -234,7 +249,7 @@ function containerView(input: { id: string; runtimeId: string; name: string; ip:
     ownerId: 'user-admin',
     ownerName: 'Ada Admin',
     name: input.name,
-    imageId: 'img-cuda',
+    imageId: input.imageId ?? 'img-cuda',
     phase: 'active',
     powerIntent: 'running',
     runtime: {
@@ -246,7 +261,7 @@ function containerView(input: { id: string; runtimeId: string; name: string; ip:
       stale: false,
       drift: [],
     },
-    activeOperation: null,
+    activeTask: null,
     resources: {
       cpuMillis: 2000,
       memBytes: 8 * 1024 ** 3,
@@ -256,6 +271,14 @@ function containerView(input: { id: string; runtimeId: string; name: string; ip:
     ssh: {
       enabled: input.sshEnabled,
       status: input.sshEnabled ? 'running' : 'disabled',
+      ready: input.sshEnabled,
+      disabledReason: input.sshEnabled ? undefined : 'image_ssh_disabled',
+      login: input.sshEnabled ? {
+        omittedServer: 'admin.cuda-ssh-enabled',
+        explicitServer: 'admin.gpu-lab-01.cuda-ssh-enabled',
+      } : undefined,
+      proxyHost: input.sshEnabled ? 'ssh.example.test' : null,
+      proxyPort: input.sshEnabled ? 2222 : null,
       user: 'root',
       port: 22,
     },
@@ -268,8 +291,9 @@ function containerView(input: { id: string; runtimeId: string; name: string; ip:
       stats: { enabled: true },
       console: { enabled: true },
       updateMounts: { enabled: true },
-      enableSsh: input.sshEnabled ? { enabled: false, message: 'SSH 已启用' } : { enabled: true },
-      reconcileSsh: { enabled: input.sshEnabled },
+      reconcileSsh: input.sshEnabled
+        ? { enabled: true }
+        : { enabled: false, reason: 'image_not_available', message: 'Image has SSH disabled' },
     },
   };
 }

@@ -1,11 +1,12 @@
 import { Link } from '@tanstack/react-router';
 import { AlertTriangle, Loader2, Play, Square, RotateCw, Trash2, Terminal } from 'lucide-react';
-import { ContainerStatus, OperationStatus } from '@nyabase/common';
+import { AgentTaskStatus, ContainerStatus } from '@nyabase/common';
 import type { ContainerAction, ContainerView } from '@nyabase/common';
 import { Badge } from '../ui/badge.js';
 import { Button } from '../ui/button.js';
 import { formatBytesLimit, formatCpu } from '../../lib/utils.js';
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '../ui/tooltip.js';
+import { isPendingAgentTaskStatus } from '../../hooks/use-agent-task-tracker.js';
 
 export const STATUS_VARIANT: Record<string, 'success' | 'destructive' | 'warning' | 'secondary' | 'outline'> = {
   [ContainerStatus.Running]: 'success',
@@ -17,9 +18,37 @@ export const STATUS_VARIANT: Record<string, 'success' | 'destructive' | 'warning
   [ContainerStatus.Unknown]: 'outline',
 };
 
+const TASK_STATUS_LABELS: Record<AgentTaskStatus, string> = {
+  [AgentTaskStatus.Pending]: '任务处理中',
+  [AgentTaskStatus.Succeeded]: '已完成',
+  [AgentTaskStatus.Failed]: '失败',
+};
+
 function actionTitle(c: ContainerView, action: ContainerAction): string | undefined {
   const availability = c.actions[action];
   return availability.enabled ? undefined : availability.message ?? availability.reason;
+}
+
+function taskStatusLabel(status: AgentTaskStatus | string | null | undefined): string {
+  return status ? TASK_STATUS_LABELS[status as AgentTaskStatus] ?? String(status) : '任务';
+}
+
+function taskBadgeTitle(task: ContainerView['activeTask']): string | undefined {
+  if (!task) return undefined;
+  return `${task.kind} · ${taskStatusLabel(task.status)}`;
+}
+
+function taskVariant(status: AgentTaskStatus | string | null | undefined): 'success' | 'destructive' | 'warning' | 'secondary' | 'outline' {
+  if (status === AgentTaskStatus.Failed) return 'destructive';
+  if (status === AgentTaskStatus.Succeeded) return 'success';
+  if (isPendingAgentTaskStatus(status)) return 'warning';
+  return 'outline';
+}
+
+function taskErrorMessage(task: ContainerView['activeTask']): string | null {
+  if (!task || typeof task.error !== 'object' || task.error === null) return null;
+  const message = (task.error as { message?: unknown }).message;
+  return typeof message === 'string' && message.trim() ? message : null;
 }
 
 export function ContainerRow({
@@ -35,16 +64,20 @@ export function ContainerRow({
 }) {
   const running = c.runtime.status === ContainerStatus.Running;
   const showRuntimeStatus = c.runtime.bound && c.runtime.status !== ContainerStatus.Unknown;
-  const activeOperation = c.activeOperation;
-  const statusLabel = activeOperation?.status === OperationStatus.WaitingReport
-    ? '等待上报'
-    : activeOperation
-    ? '操作中'
+  const task = c.activeTask;
+  const pendingTask = isPendingAgentTaskStatus(task?.status) ? task : null;
+  const domainFailed = !task && Boolean(c.failureReason?.trim() || c.failureCode);
+  const statusLabel = task
+    ? taskStatusLabel(task.status)
+    : domainFailed
+    ? '失败'
     : showRuntimeStatus
     ? (c.runtime.status ?? ContainerStatus.Unknown)
     : '未绑定';
-  const statusVariant = activeOperation
-    ? 'warning'
+  const statusVariant = task
+    ? taskVariant(task.status)
+    : domainFailed
+    ? 'destructive'
     : showRuntimeStatus
     ? STATUS_VARIANT[String(c.runtime.status)] ?? 'outline'
     : 'outline';
@@ -54,8 +87,11 @@ export function ContainerRow({
     { key: 'mem', value: formatBytesLimit(c.resources.memBytes) },
     c.resources.gpuIndices.length > 0 ? { key: 'gpu', value: `GPU ${c.resources.gpuIndices.join(',')}` } : null,
   ].filter((item): item is { key: string; value: string; className?: string } => item !== null);
+  const taskFailure = taskErrorMessage(task);
   const failureInfo = c.failureReason?.trim()
     ? c.failureReason
+    : taskFailure
+    ? taskFailure
     : c.failureCode ?? null;
 
   return (
@@ -74,8 +110,8 @@ export function ContainerRow({
           ) : (
             <span className="font-medium text-sm">{c.name}</span>
           )}
-          <Badge variant={statusVariant} title={activeOperation?.status === OperationStatus.WaitingReport ? '命令已完成，等待 agent 上报确认' : activeOperation?.kind}>
-            {activeOperation && <Loader2 className="mr-1 h-3 w-3 animate-spin" />}
+          <Badge variant={statusVariant} title={taskBadgeTitle(task)}>
+            {pendingTask && <Loader2 className="mr-1 h-3 w-3 animate-spin" />}
             {statusLabel}
           </Badge>
           {failureInfo && (

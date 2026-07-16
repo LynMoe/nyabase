@@ -6,14 +6,14 @@ export interface ContainerActionPolicyInput {
   runtimeStatus: ContainerStatus | null;
   runtimeReady: boolean;
   runtimeDrift: RuntimeDriftDto[];
-  activeOperationId: string | null;
+  activeTaskId: string | null;
   sshEnabled: boolean;
 }
 
 @Injectable()
 export class ContainerActionPolicyService {
-  disabled(reason: ActionAvailability['reason'], message: string, operationId?: string | null): ActionAvailability {
-    return { enabled: false, reason, message, operationId: operationId ?? undefined };
+  disabled(reason: ActionAvailability['reason'], message: string, taskId?: string | null): ActionAvailability {
+    return { enabled: false, reason, message, taskId: taskId ?? undefined };
   }
 
   enabled(): ActionAvailability {
@@ -34,19 +34,18 @@ export class ContainerActionPolicyService {
   }
 
   forContainer(input: ContainerActionPolicyInput): Record<ContainerAction, ActionAvailability> {
-    if (input.activeOperationId) {
+    if (input.activeTaskId) {
       const running = input.runtimeStatus === ContainerStatus.Running;
       return {
-        ...this.allDisabled('operation_in_progress', `Operation ${input.activeOperationId} is still running`),
+        ...this.allDisabled('task_in_progress', `Task ${input.activeTaskId} is still pending`),
         stats: running ? this.enabled() : this.disabled('phase_not_active', 'Container is not running'),
-        console: running ? this.enabled() : this.disabled('phase_not_active', 'Container is not running'),
       };
     }
     if (!input.runtimeReady) {
       return this.allDisabled('agent_state_unready', 'Agent runtime state is not ready; wait for the first full state report');
     }
-    if (input.phase === ContainerPhase.Deleted || input.phase === ContainerPhase.Deleting) {
-      return this.allDisabled('phase_not_active', 'Container is being deleted or already deleted');
+    if (input.phase === ContainerPhase.Deleting) {
+      return this.allDisabled('phase_not_active', 'Container is being deleted');
     }
     if (input.phase === ContainerPhase.Provisioning || input.phase === ContainerPhase.Updating) {
       return this.allDisabled('phase_not_active', 'Container is not active yet');
@@ -61,8 +60,7 @@ export class ContainerActionPolicyService {
       drift.kind === RuntimeDriftKind.RuntimeMissing
       || drift.kind === RuntimeDriftKind.RuntimeUnbound
       || drift.kind === RuntimeDriftKind.RuntimeIdMismatch
-      || drift.kind === RuntimeDriftKind.SpecGenerationStale
-      || drift.kind === RuntimeDriftKind.PowerIntentMismatch,
+      || drift.kind === RuntimeDriftKind.SpecGenerationStale,
     );
     if (hasRuntimeDrift) {
       return {
@@ -79,7 +77,10 @@ export class ContainerActionPolicyService {
       delete: this.enabled(),
       stats: running ? this.enabled() : this.disabled('phase_not_active', 'Container is not running'),
       console: running ? this.enabled() : this.disabled('phase_not_active', 'Container is not running'),
-      updateMounts: this.enabled(),
+      updateMounts: this.disabled(
+        'phase_not_active',
+        'Container mounts are immutable; delete and recreate the container to change them',
+      ),
       reconcileSsh: input.sshEnabled
         ? running ? this.enabled() : this.disabled('phase_not_active', 'Container is not running')
         : this.disabled('image_not_available', 'Image has SSH disabled'),

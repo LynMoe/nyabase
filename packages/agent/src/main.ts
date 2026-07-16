@@ -1,38 +1,47 @@
-import { execFileSync } from 'child_process';
-import { loadAgentConfig } from './config.js';
+import { loadAgentConfig, resolveAgentVersion } from './config.js';
 import { AgentApplication } from './app.js';
 import { DaemonManager } from './docker/daemon-manager.js';
-import { resolveAndExtractMountHelper } from './mountHelperEmbed.js';
+import { acquireProcessGuard } from './process-guard.js';
+import { assertHostStorageLayout, HostStorageIdentityGuard } from './host-storage.js';
+import { readLocalDataSourceIdentity } from './datadirs/data-dirs.js';
 
 async function main() {
+  if (process.argv.includes('--version')) {
+    console.log(resolveAgentVersion());
+    return;
+  }
   const config = loadAgentConfig();
+  const processGuard = await acquireProcessGuard(config.serverId);
+  let app: AgentApplication | null = null;
+  let shuttingDown = false;
+  const shutdown = (signal: NodeJS.Signals) => {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    console.log(`[Agent] ${signal} received, stopping`);
+    app?.stop();
+    // Keep the kernel-owned process guard live until process death. Releasing
+    // it before exit creates a window in which a second Agent can mutate the
+    // same host concurrently with this still-running process.
+    void processGuard;
+    process.exit(0);
+  };
+  process.once('SIGINT', () => shutdown('SIGINT'));
+  process.once('SIGTERM', () => shutdown('SIGTERM'));
   console.log('[Agent] Starting nyabase-agent v' + config.agentVersion);
 
-  config.mountHelperPath = resolveAndExtractMountHelper(config.mountHelperPath);
+  // No unit file, daemon, mount, or quota mutation is allowed until every
+  // configured physical root is proved safe and exact.
+  assertHostStorageLayout(config);
+  const storageIdentity = new HostStorageIdentityGuard(config, {
+    readIdentity: readLocalDataSourceIdentity,
+  });
 
-  let mountHelperOk = false;
-  try {
-    execFileSync(config.mountHelperPath, ['--version'], { timeout: 3000 });
-    mountHelperOk = true;
-    console.log('[Agent] mount-helper OK:', config.mountHelperPath);
-  } catch {
-    console.warn('[Agent] WARNING: mount-helper not found or failed at', config.mountHelperPath);
-    console.warn('[Agent] Dynamic container mounts will not work.');
-  }
-
-  // Ensure the nyabase-managed dockerd is running with the correct unit file.
+  // Constructing the manager is side-effect free. AgentApplication performs
+  // the local stateless Docker rollback before opening its WebSocket; network
+  // and RemoteFS convergence still require Backend bootstrap authority.
   const daemonManager = new DaemonManager(config.dockerRoot, config.isGpuServer, config.dockerResourceLimit);
-  console.log('[Agent] Reconciling nyabase-docker daemon (dockerRoot:', config.dockerRoot, ')...');
-  try {
-    await daemonManager.reconcile(config.serverId);
-    console.log('[Agent] nyabase-docker daemon is running');
-  } catch (err) {
-    console.error('[Agent] Fatal: failed to start nyabase-docker daemon:', err);
-    process.exit(1);
-  }
-
-  const app = new AgentApplication(config, mountHelperOk, daemonManager);
-  app.start();
+  app = new AgentApplication(config, daemonManager, storageIdentity);
+  await app.start();
   console.log('[Agent] Started, connecting to', config.backendUrl);
 }
 

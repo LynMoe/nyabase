@@ -46,14 +46,13 @@ export function dataDiskDisplayName(mountPoint: string, label?: string | null): 
 
 /**
  * Format a nullable resource limit for display.
- * Falls back to serverDefault when null; shows '不限' when the resolved value is 0.
+ * Null and 0 both mean unlimited.
  */
 export function resourceVal(
   value: number | null,
-  serverDefault: number,
   fmt: (n: number) => string,
 ): string {
-  const v = value ?? serverDefault;
+  const v = value ?? 0;
   return v === 0 ? '不限' : fmt(v);
 }
 

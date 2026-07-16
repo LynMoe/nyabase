@@ -1,5 +1,8 @@
-import { Column, CreateDateColumn, Entity, Index, PrimaryColumn, UpdateDateColumn } from 'typeorm';
-import type { HttpProxyTargetProtocol } from '@nyabase/common';
+import {
+  Column, CreateDateColumn, Entity, ForeignKey, Index, PrimaryColumn, UpdateDateColumn,
+} from 'typeorm';
+import { ContainerEntity } from './container.entity.js';
+import { HttpDomainPoolEntity } from './http-domain-pool.entity.js';
 
 @Entity('http_proxy_bindings')
 export class HttpProxyBindingEntity {
@@ -11,6 +14,7 @@ export class HttpProxyBindingEntity {
   hostname: string;
 
   @Index()
+  @ForeignKey(() => HttpDomainPoolEntity, { onDelete: 'RESTRICT' })
   @Column({ name: 'domain_pool_id', type: 'text' })
   domainPoolId: string;
 
@@ -19,14 +23,12 @@ export class HttpProxyBindingEntity {
   ownerId: string;
 
   @Index()
+  @ForeignKey(() => ContainerEntity, { onDelete: 'CASCADE' })
   @Column({ name: 'container_id', type: 'text' })
   containerId: string;
 
   @Column({ name: 'target_port', type: 'int' })
   targetPort: number;
-
-  @Column({ name: 'target_protocol', type: 'text', default: 'http' })
-  targetProtocol: HttpProxyTargetProtocol;
 
   @CreateDateColumn({ name: 'created_at' })
   createdAt: Date;

@@ -15,12 +15,21 @@ import {
 } from '../components/resource-grant-form.js';
 import { MountSourceGrantsPanel } from '../components/grants/mount-source-grants-panel.js';
 import { queryKeys } from '../lib/query-keys.js';
+import { useAdminAgentTaskBatchFeedback } from '../hooks/use-agent-task-tracker.js';
+
+type TaskIdsResponse = { taskIds?: string[] };
 
 const routeApi = getRouteApi('/groups/$id');
 
 export default function GroupDetailPage() {
   const { id } = routeApi.useParams();
   const [activeTab, setActiveTab] = useState<'members' | 'server-grants' | 'image-grants' | 'mount-source-grants'>('members');
+  const [trackedTaskIds, setTrackedTaskIds] = useState<string[]>([]);
+  useAdminAgentTaskBatchFeedback(trackedTaskIds);
+  const trackTaskIds = (taskIds?: string[]) => {
+    if (!taskIds?.length) return;
+    setTrackedTaskIds((current) => [...new Set([...current, ...taskIds])]);
+  };
 
   const { data: group } = useQuery({
     queryKey: ['group', id], queryFn: () => api.get<GroupDto>(`/admin/groups/${id}`),
@@ -54,8 +63,8 @@ export default function GroupDetailPage() {
         ))}
       </div>
 
-      {activeTab === 'members' && <GroupMembersTab groupId={id} />}
-      {activeTab === 'server-grants' && <GroupServerGrantsTab groupId={id} />}
+      {activeTab === 'members' && <GroupMembersTab groupId={id} onTaskIds={trackTaskIds} />}
+      {activeTab === 'server-grants' && <GroupServerGrantsTab groupId={id} onTaskIds={trackTaskIds} />}
       {activeTab === 'image-grants' && <GroupImageGrantsTab groupId={id} />}
       {activeTab === 'mount-source-grants' && (
         <MountSourceGrantsPanel
@@ -67,7 +76,13 @@ export default function GroupDetailPage() {
   );
 }
 
-function GroupMembersTab({ groupId }: { groupId: string }) {
+function GroupMembersTab({
+  groupId,
+  onTaskIds,
+}: {
+  groupId: string;
+  onTaskIds: (taskIds?: string[]) => void;
+}) {
   const qc = useQueryClient();
   const [selectedUserId, setSelectedUserId] = useState('');
 
@@ -83,8 +98,9 @@ function GroupMembersTab({ groupId }: { groupId: string }) {
   const nonMembers = allUsers.filter((u) => !memberIds.has(u.id));
 
   const addMember = useMutation({
-    mutationFn: (userId: string) => api.post(`/admin/groups/${groupId}/members`, { userId }),
-    onSuccess: () => {
+    mutationFn: (userId: string) => api.post<TaskIdsResponse>(`/admin/groups/${groupId}/members`, { userId }),
+    onSuccess: (result) => {
+      onTaskIds(result.taskIds);
       qc.invalidateQueries({ queryKey: ['group-members', groupId] });
       toast({ title: '成员已添加' });
       setSelectedUserId('');
@@ -93,8 +109,12 @@ function GroupMembersTab({ groupId }: { groupId: string }) {
   });
 
   const removeMember = useMutation({
-    mutationFn: (userId: string) => api.delete(`/admin/groups/${groupId}/members/${userId}`),
-    onSuccess: () => { qc.invalidateQueries({ queryKey: ['group-members', groupId] }); toast({ title: '成员已移出' }); },
+    mutationFn: (userId: string) => api.delete<TaskIdsResponse>(`/admin/groups/${groupId}/members/${userId}`),
+    onSuccess: (result) => {
+      onTaskIds(result.taskIds);
+      qc.invalidateQueries({ queryKey: ['group-members', groupId] });
+      toast({ title: '成员已移出' });
+    },
     onError: (e) => toast({ title: '失败', description: e.message, variant: 'destructive' }),
   });
 
@@ -139,7 +159,13 @@ function GroupMembersTab({ groupId }: { groupId: string }) {
   );
 }
 
-function GroupServerGrantsTab({ groupId }: { groupId: string }) {
+function GroupServerGrantsTab({
+  groupId,
+  onTaskIds,
+}: {
+  groupId: string;
+  onTaskIds: (taskIds?: string[]) => void;
+}) {
   const qc = useQueryClient();
   const [editingServerId, setEditingServerId] = useState<string | null>(null);
   const [form, setForm] = useState<ResourceFormValue>(EMPTY_RESOURCE_FORM);
@@ -155,11 +181,12 @@ function GroupServerGrantsTab({ groupId }: { groupId: string }) {
   const getGrant = (sid: string) => grants.find((g) => g.serverId === sid);
 
   const upsert = useMutation({
-    mutationFn: (serverId: string) => api.post(
+    mutationFn: (serverId: string) => api.post<ServerGrantDto & TaskIdsResponse>(
       `/admin/groups/${groupId}/server-grants/${serverId}`,
       formToGrantPayload(form),
     ),
-    onSuccess: () => {
+    onSuccess: (result) => {
+      onTaskIds(result.taskIds);
       qc.invalidateQueries({ queryKey: ['group-server-grants', groupId] });
       toast({ title: '授权已更新' });
       setEditingServerId(null);
@@ -168,8 +195,12 @@ function GroupServerGrantsTab({ groupId }: { groupId: string }) {
   });
 
   const remove = useMutation({
-    mutationFn: (serverId: string) => api.delete(`/admin/groups/${groupId}/server-grants/${serverId}`),
-    onSuccess: () => { qc.invalidateQueries({ queryKey: ['group-server-grants', groupId] }); toast({ title: '授权已移除' }); },
+    mutationFn: (serverId: string) => api.delete<TaskIdsResponse>(`/admin/groups/${groupId}/server-grants/${serverId}`),
+    onSuccess: (result) => {
+      onTaskIds(result.taskIds);
+      qc.invalidateQueries({ queryKey: ['group-server-grants', groupId] });
+      toast({ title: '授权已移除' });
+    },
     onError: (e) => toast({ title: '失败', description: e.message, variant: 'destructive' }),
   });
 
@@ -191,9 +222,8 @@ function GroupServerGrantsTab({ groupId }: { groupId: string }) {
               <ResourceGrantForm
                 value={form}
                 onChange={setForm}
-                emptyHint="（空=服务器默认）"
-                showGpu={s.isGpuServer}
-                serverDefaults={{ cpuMillis: s.defaultCpuMillis, memBytes: s.defaultMemBytes, diskBytes: s.defaultDiskBytes }}
+                emptyHint="（空=不限）"
+                showGpu={(s.gpus?.length ?? 0) > 0}
               />
               <div className="flex gap-2 justify-end">
                 <Button size="sm" variant="outline" onClick={() => setEditingServerId(null)}>取消</Button>
@@ -212,18 +242,18 @@ function GroupServerGrantsTab({ groupId }: { groupId: string }) {
               </span>
               {g ? (
                 <div className="text-xs mt-1 space-x-3">
-                  <span className={g.cpuMillis === null ? 'text-muted-foreground/40' : 'text-muted-foreground'}>
-                    {resourceVal(g.cpuMillis, s.defaultCpuMillis, formatCpu)} CPU
+                  <span className="text-muted-foreground">
+                    {resourceVal(g.cpuMillis, formatCpu)} CPU
                   </span>
-                  <span className={g.memBytes === null ? 'text-muted-foreground/40' : 'text-muted-foreground'}>
-                    {resourceVal(g.memBytes, s.defaultMemBytes, formatBytes)} 内存
+                  <span className="text-muted-foreground">
+                    {resourceVal(g.memBytes, formatBytes)} 内存
                   </span>
-                  <span className={g.diskBytes === null ? 'text-muted-foreground/40' : 'text-muted-foreground'}>
-                    {resourceVal(g.diskBytes, s.defaultDiskBytes, formatBytes)} 磁盘
+                  <span className="text-muted-foreground">
+                    {resourceVal(g.diskBytes, formatBytes)} 磁盘
                   </span>
-                  {s.isGpuServer && (
+                  {(s.gpus?.length ?? 0) > 0 && (
                     <span className="text-muted-foreground">
-                      GPU: {g.gpuMode ?? '服务器默认'}{g.gpuMode === GpuGrantMode.Indices ? ` [${g.gpuIndices?.join(',')}]` : ''}
+                      GPU: {g.gpuMode ?? 'all'}{g.gpuMode === GpuGrantMode.Indices ? ` [${g.gpuIndices?.join(',')}]` : ''}
                     </span>
                   )}
                 </div>

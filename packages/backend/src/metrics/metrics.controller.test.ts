@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
+import { PATH_METADATA } from '@nestjs/common/constants';
 import type { MetricSeries } from '@nyabase/common';
 import { MetricsController } from './metrics.controller.js';
 import { AdminMetricsController } from './admin-metrics.controller.js';
@@ -6,6 +7,16 @@ import type { MetricsQueryService } from './metrics-query.service.js';
 import type { AccessResolverService } from '../access/access-resolver.service.js';
 import type { UsersService } from '../users/users.service.js';
 import type { UserEntity } from '../entities/user.entity.js';
+
+describe('MetricsController.routes', () => {
+  it('does not expose legacy raw PromQL paths', () => {
+    const ordinaryPaths = declaredRoutePaths(MetricsController);
+    const adminPaths = declaredRoutePaths(AdminMetricsController);
+
+    expect(ordinaryPaths).not.toEqual(expect.arrayContaining(['query', 'query_range']));
+    expect(adminPaths).not.toEqual(expect.arrayContaining(['query', 'query_range']));
+  });
+});
 
 describe('MetricsController.gpuMetrics', () => {
   it('returns graphicsClockMHz and includes clock-only GPU indices in the union', async () => {
@@ -352,21 +363,36 @@ function series(step: number, points: Array<[number, number]>): MetricSeries {
 
 function runtimeContainers(rows: Array<{ runtimeId: string; containerId: string }>) {
   return new Map(rows.map((row) => [row.runtimeId, {
-    spec: {
+    runtime: {
       runtimeId: row.runtimeId,
-      name: row.containerId,
-      ownerId: '',
-      imageId: 'image-a',
-      cpuMillis: 1000,
-      memBytes: 1024,
-      gpuIndices: [],
       ip: '10.0.0.2',
       serverId: 'srv-1',
-      sshServerEnabled: false,
-      dataDirs: [],
-      createdAt: '2026-06-05T00:00:00.000Z',
-      specVersion: '1',
+      specGeneration: '1',
+      quotaPaths: ['/var/lib/docker/overlay2/runtime/diff', '/var/lib/docker/overlay2/runtime/work'],
     },
     labels: { 'nyabase.container_id': row.containerId },
   }]));
+}
+
+function declaredRoutePaths(controller: { prototype: object }): string[] {
+  const paths: string[] = [];
+  let proto: object | null = controller.prototype;
+
+  while (proto && proto !== Object.prototype) {
+    for (const name of Object.getOwnPropertyNames(proto)) {
+      if (name === 'constructor') continue;
+      const handler = Object.getOwnPropertyDescriptor(proto, name)?.value;
+      if (typeof handler !== 'function') continue;
+
+      const path = Reflect.getMetadata(PATH_METADATA, handler) as string | string[] | undefined;
+      if (Array.isArray(path)) {
+        paths.push(...path.map(String));
+      } else if (path != null) {
+        paths.push(String(path));
+      }
+    }
+    proto = Object.getPrototypeOf(proto);
+  }
+
+  return paths;
 }

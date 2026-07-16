@@ -15,6 +15,7 @@ import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard.js';
 import { CurrentUser } from '../auth/decorators/current-user.decorator.js';
 import { AccessResolverService } from '../access/access-resolver.service.js';
 import { UserEntity } from '../entities/user.entity.js';
+import { zDataDirName } from '@nyabase/common';
 import { z } from 'zod';
 
 const zCreateDirRequest = z.object({
@@ -65,9 +66,10 @@ export class DataDirsController {
     if (sourceKind !== 'local' && sourceKind !== 'remote') {
       throw new BadRequestException(`sourceKind must be 'local' or 'remote'`);
     }
+    const safeName = zDataDirName.parse(name);
     const kind = sourceKind as 'local' | 'remote';
     const ok = await this.accessResolver.hasMountSourceAccess(user.id, serverId, kind, sourceId);
     if (!ok) throw new ForbiddenException('No access to this data source');
-    return this.dataDirsService.deleteDir(user.id, user.id, serverId, kind, sourceId, name);
+    return this.dataDirsService.deleteDir(user.id, user.id, serverId, kind, sourceId, safeName);
   }
 }

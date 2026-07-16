@@ -33,6 +33,7 @@ const smokeOnly = process.argv.includes('--smoke');
 
 const results = [];
 const cleanupContainers = [];
+const cleanupDataDirs = [];
 let cachedAdmin;
 
 await mkdir(runDir, { recursive: true, mode: 0o700 });
@@ -98,6 +99,7 @@ try {
 
   await step('admin cleans stale live-api runtime containers before persona run', async () => {
     await cleanupStaleLiveApiContainers(admin.accessToken);
+    await cleanupStaleLiveApiDataDirs(admin.accessToken, fixture);
   });
 
   await runPersona('alpha', fixture, async (actor) => {
@@ -157,13 +159,13 @@ try {
     assert([403, 404].includes(deniedCreate.status), `ungranted container create expected 403/404, got ${deniedCreate.status}`);
   });
 
-  await step('admin metrics, audit, operations, and cleanup paths work after persona operations', async () => {
+  await step('admin metrics, audit, Agent tasks, and cleanup paths work after persona tasks', async () => {
     await api('GET', `/admin/metrics/servers/${fixture.servers.cpu.id}/host?range=5m`, admin.accessToken);
     await api('GET', `/admin/metrics/servers/${fixture.servers.cpu.id}/users?range=5m`, admin.accessToken);
     await api('GET', `/admin/metrics/servers/${fixture.servers.cpu.id}/containers?range=5m`, admin.accessToken);
     if (fixture.servers.gpu) await api('GET', `/admin/metrics/servers/${fixture.servers.gpu.id}/gpus?range=5m`, admin.accessToken);
     await api('GET', '/audit?limit=50', admin.accessToken);
-    for (const c of [...cleanupContainers]) await removeContainer(admin.accessToken, c.id, true);
+    await cleanupTrackedResources(admin.accessToken);
   });
 
   await writeReports('pass');
@@ -234,25 +236,9 @@ async function ensureFixture(adminToken) {
 
 async function discoverServers(token) {
   const servers = (await api('GET', '/admin/servers', token)).body;
-  const cpu = servers.find((s) => s.status === 'online' && !s.isGpuServer) ?? servers.find((s) => !s.isGpuServer);
+  const cpu = servers.find((s) => s.status === 'online' && !hasGpu(s)) ?? servers.find((s) => !hasGpu(s));
   assert(cpu, 'no CPU server is registered; run register/deploy agents first');
-  const gpu = servers.find((s) => s.status === 'online' && s.isGpuServer) ?? null;
-  await api('PATCH', `/admin/servers/${cpu.id}/defaults`, token, {
-    defaultCpuMillis: 1000,
-    defaultMemBytes: 1024 * 1024 * 1024,
-    defaultDiskBytes: 1024 * 1024 * 1024,
-    defaultGpuMode: 'none',
-    defaultGpuIndices: [],
-  });
-  if (gpu) {
-    await api('PATCH', `/admin/servers/${gpu.id}/defaults`, token, {
-      defaultCpuMillis: 1000,
-      defaultMemBytes: 1024 * 1024 * 1024,
-      defaultDiskBytes: 1024 * 1024 * 1024,
-      defaultGpuMode: 'indices',
-      defaultGpuIndices: [0],
-    });
-  }
+  const gpu = servers.find((s) => s.status === 'online' && hasGpu(s)) ?? null;
   return { cpu: pickServer(cpu), gpu: gpu ? pickServer(gpu) : null };
 }
 
@@ -260,30 +246,34 @@ async function ensureLocalDisk(token, serverId) {
   assert(localMountPoint, 'NYABASE_MOUNT_LOCAL_MOUNTPOINT is required');
   const disks = (await api('GET', `/admin/servers/${serverId}/disks`, token)).body;
   const found = disks.find((d) => d.mountPoint === localMountPoint);
-  if (found) {
-    await api('PATCH', `/admin/servers/${serverId}/disks/${found.diskId}`, token, { label: `${fixturePrefix}-local` });
-    return { ...found, label: `${fixturePrefix}-local` };
-  }
-  return (await api('POST', `/admin/servers/${serverId}/disks`, token, { mountPoint: localMountPoint, label: `${fixturePrefix}-local` }, [200, 201])).body;
+  if (found) return found;
+  throw new Error(
+    `Local data source ${localMountPoint} is not reported by agent ${serverId}; add it to agent.yaml localDataSources and restart the agent`,
+  );
 }
 
 async function ensureRemoteMount(token, serverId) {
   if (!enableRemoteFs || !nfsServer || !nfsExport) return null;
   const name = `${fixturePrefix}-nfs`;
   const existing = (await api('GET', `/admin/remote-fs-mounts?serverId=${encodeURIComponent(serverId)}`, token)).body.find((m) => m.name === name);
-  const mount = existing ?? (await api('POST', '/admin/remote-fs-mounts', token, {
-    name,
-    displayName: 'Live API NFS',
-    description: 'Persistent live API test mount',
-    serverIds: [serverId],
-    options: 'rw',
-    hostMountPoint: `/mnt/nyabase-test/${name}`,
-    params: { type: 'nfs', nfsServer, exportPath: nfsExport, version: '4.2' },
-  }, [200, 201])).body;
-  await api('PATCH', `/admin/remote-fs-mounts/${mount.id}`, token, { displayName: 'Live API NFS' });
+  let mount = existing;
+  if (!mount) {
+    const created = await api('POST', '/admin/remote-fs-mounts', token, {
+      name,
+      displayName: 'Live API NFS',
+      description: 'Persistent live API test mount',
+      serverIds: [serverId],
+      options: 'rw',
+      hostMountPoint: `/mnt/nyabase-test/${name}`,
+      params: { type: 'nfs', nfsServer, exportPath: nfsExport, version: '4.2' },
+    }, [201]);
+    await waitAgentTaskRefs(token, created, 180000, true);
+    mount = created.body;
+  }
+  const updated = await api('PATCH', `/admin/remote-fs-mounts/${mount.id}`, token, { displayName: 'Live API NFS' });
+  await waitAgentTaskRefs(token, updated);
   await api('GET', `/admin/remote-fs-mounts/${mount.id}/servers`, token);
-  await api('POST', `/admin/remote-fs-mounts/${mount.id}/servers`, token, { serverId }, [200, 201, 409]);
-  await api('POST', `/admin/remote-fs-mounts/${mount.id}/remount`, token, undefined, [200, 201, 202]);
+  await waitAgentTaskRefs(token, await api('POST', `/admin/remote-fs-mounts/${mount.id}/servers`, token, { serverId }, [201]), 180000, true);
   return (await api('GET', `/admin/remote-fs-mounts/${mount.id}`, token)).body;
 }
 
@@ -375,14 +365,14 @@ async function ensureGroups(token, users) {
 }
 
 async function ensureServerGrant(token, scope, scopeId, serverId, quota) {
-  if (scope === 'user') return api('POST', `/admin/users/${scopeId}/server-grants/${serverId}`, token, quota, [200, 201]);
-  return api('POST', `/admin/groups/${scopeId}/server-grants/${serverId}`, token, quota, [200, 201]);
+  if (scope === 'user') return api('POST', `/admin/users/${scopeId}/server-grants/${serverId}`, token, quota, [201]);
+  return api('POST', `/admin/groups/${scopeId}/server-grants/${serverId}`, token, quota, [201]);
 }
 
 async function ensureImageGrant(token, scope, scopeId, imageId, serverId) {
   if (scope === 'user') return api('POST', `/admin/users/${scopeId}/image-grants`, token, { imageId, serverId }, [200, 201, 409]);
   await api('POST', `/admin/groups/${scopeId}/image-grants`, token, { imageId, serverId }, [200, 201, 409]);
-  return api('POST', `/admin/groups/${scopeId}/image-grants/${imageId}/sync-servers`, token, { serverIds: [serverId] }, [200, 201]);
+  return api('POST', `/admin/groups/${scopeId}/image-grants/${imageId}/sync-servers`, token, { serverIds: [serverId] }, [201]);
 }
 
 async function ensureMountGrant(token, scope, scopeId, sourceKind, sourceId) {
@@ -466,31 +456,53 @@ async function userAccessChecks(actor, fixture, source) {
 async function dataDirChecks(actor, fixture, source) {
   if (!source) return;
   const name = `${actor.persona}-${runId}`.toLowerCase().replace(/[^a-z0-9_-]/g, '-').slice(0, 63);
-  await api('POST', '/data-dirs', actor.token, { serverId: source.serverId, sourceKind: source.kind, sourceId: source.id, name }, [200, 201]);
+  const cleanupRef = trackDataDir(actor.token, source.serverId, source, name);
+  const created = await api('POST', '/data-dirs', actor.token, { serverId: source.serverId, sourceKind: source.kind, sourceId: source.id, name }, [201, 409]);
+  if (created.status === 201) {
+    assert(created.body?.taskId, 'data-dir create did not return taskId');
+    await waitAgentTask(actor.token, created.body.taskId);
+  }
   await api('GET', `/data-dirs?serverId=${source.serverId}`, actor.token);
   await api('GET', `/admin/data-dirs?serverId=${source.serverId}&userId=${actor.user.id}`, (await adminToken()).accessToken, undefined, [200]);
-  await api('DELETE', `/data-dirs/${source.serverId}/${source.id}/${name}?sourceKind=${source.kind}`, actor.token, undefined, [200, 204]);
+  const deleted = await api('DELETE', `/data-dirs/${source.serverId}/${source.id}/${name}?sourceKind=${source.kind}`, actor.token, undefined, [200]);
+  assert(deleted.body?.taskId, 'data-dir delete did not return taskId');
+  await waitAgentTask(actor.token, deleted.body.taskId);
+  forgetDataDir(cleanupRef);
 }
 
 async function containerChecks(actor, fixture, options) {
   const serverId = options.serverId ?? fixture.servers.cpu.id;
+  const dirName = `${actor.persona}-ctr-${runId}`.toLowerCase().replace(/[^a-z0-9_-]/g, '-').slice(0, 63);
+  let cleanupRef = null;
+  if (options.source) {
+    cleanupRef = trackDataDir(actor.token, serverId, options.source, dirName);
+    const createdDir = await api('POST', '/data-dirs', actor.token, {
+      serverId,
+      sourceKind: options.source.kind,
+      sourceId: options.source.id,
+      name: dirName,
+    }, [201, 409]);
+    if (createdDir.status === 201) {
+      assert(createdDir.body?.taskId, 'container data-dir create did not return taskId');
+      await waitAgentTask(actor.token, createdDir.body.taskId);
+    }
+  }
   const dataDirs = options.source ? [{
     sourceKind: options.source.kind,
     sourceId: options.source.id,
-    dirName: `${actor.persona}-ctr-${runId}`.toLowerCase().replace(/[^a-z0-9_-]/g, '-').slice(0, 63),
+    dirName,
     containerPath: '/workspace',
-    createIfMissing: true,
   }] : [];
   const create = await api('POST', '/v2/containers', actor.token, {
     serverId,
     imageId: options.imageId,
     name: options.name.toLowerCase().replace(/[^a-z0-9_-]/g, '-'),
     dataDirs,
-    sshServerEnabled: options.ssh,
-  }, [200, 201, 202]);
-  const op = await waitOperation(actor.token, create.body.operationId);
-  const c = await waitContainer(actor.token, op.resourceId, 'active');
-  cleanupContainers.push({ id: c.id, owner: actor.persona });
+  }, [201]);
+  assert(create.body?.taskId, 'container create did not return taskId');
+  const task = await waitAgentTask(actor.token, create.body.taskId);
+  const c = await waitContainerRunning(actor.token, task.resourceId);
+  cleanupContainers.push({ id: c.id, owner: actor.persona, dataDir: cleanupRef });
   await api('GET', '/v2/containers', actor.token);
   await api('GET', `/v2/containers/${c.id}`, actor.token);
   await waitActionEnabled(actor.token, c.id, 'stats');
@@ -498,8 +510,7 @@ async function containerChecks(actor, fixture, options) {
   await api('GET', `/metrics/servers/${serverId}/containers?range=5m`, actor.token);
   await api('POST', `/v2/containers/${c.id}/exec-sessions`, actor.token, { shell: '/bin/sh', tty: false }, [200, 201, 202]);
   if (options.ssh) {
-    await action(actor.token, c.id, 'enable-ssh');
-    await action(actor.token, c.id, 'reconcile-ssh');
+    await waitSshProxyReady(actor.token, c.id);
   }
   if (dataDirs.length > 0) await action(actor.token, c.id, 'update-mounts', dataDirs);
   await action(actor.token, c.id, 'stop');
@@ -508,39 +519,76 @@ async function containerChecks(actor, fixture, options) {
   return c;
 }
 
+async function waitSshProxyReady(token, containerId, timeoutMs = 180000) {
+  const deadline = Date.now() + timeoutMs;
+  let last = null;
+  while (Date.now() < deadline) {
+    const res = await api('GET', `/v2/containers/${containerId}`, token);
+    last = res.body;
+    if (last.ssh?.ready === true && last.ssh?.login?.explicitServer && last.ssh?.proxyHost && last.ssh?.proxyPort) {
+      return last;
+    }
+    await sleep(1000);
+  }
+  throw new Error(`timed out waiting SSH proxy route for ${containerId}; ssh=${JSON.stringify(last?.ssh ?? null)}`);
+}
+
 async function adminContainerRead(token, containerId) {
   await api('GET', `/admin/v2/containers/${containerId}`, token);
   await api('GET', `/admin/v2/containers/${containerId}/stats`, token);
 }
 
-async function waitOperation(token, operationId, timeoutMs = 180000) {
+async function waitAgentTask(token, taskId, timeoutMs = 180000) {
+  return waitAgentTaskPath(token, `/agent-tasks/${taskId}`, timeoutMs);
+}
+
+async function waitAdminAgentTask(token, taskId, timeoutMs = 180000) {
+  return waitAgentTaskPath(token, `/admin/agent-tasks/${taskId}`, timeoutMs);
+}
+
+async function waitAgentTaskRefs(token, response, timeoutMs = 180000, required = false) {
+  const taskIds = [
+    ...(response.body?.taskId ? [response.body.taskId] : []),
+    ...(Array.isArray(response.body?.taskIds) ? response.body.taskIds : []),
+  ];
+  if (required) assert(taskIds.length > 0, 'AgentTask response did not return taskId or taskIds');
+  for (const taskId of taskIds) {
+    await waitAdminAgentTask(token, taskId, timeoutMs);
+  }
+}
+
+async function waitAgentTaskPath(token, path, timeoutMs = 180000) {
   const deadline = Date.now() + timeoutMs;
   let last = null;
   while (Date.now() < deadline) {
-    const res = await api('GET', `/operations/${operationId}`, token);
+    const res = await api('GET', path, token);
     last = res.body;
-    if (['succeeded', 'failed', 'cancelled'].includes(last.status)) {
-      assert(last.status === 'succeeded', `operation ${operationId} ended ${last.status}: ${last.lastError ?? ''}`);
+    if (last.status === 'succeeded' || last.status === 'failed') {
+      assert(last.status === 'succeeded', `agent task ${last.id ?? path} ended ${last.status}: ${formatTaskError(last.error)}`);
       return last;
     }
     await sleep(1000);
   }
-  throw new Error(`timed out waiting for operation ${operationId}; last=${last?.status}`);
+  throw new Error(`timed out waiting for agent task ${last?.id ?? path}; last=${last?.status} ${formatTaskError(last?.error)}`);
 }
 
-async function waitContainer(token, containerId, phase, timeoutMs = 120000) {
+async function waitContainerRunning(token, containerId, timeoutMs = 120000) {
   const deadline = Date.now() + timeoutMs;
   let last = null;
   while (Date.now() < deadline) {
     const res = await raw('GET', `/v2/containers/${containerId}`, token);
-    if (res.status === 404 && phase === 'deleted') return { id: containerId, phase: 'deleted' };
     if (res.ok) {
       last = res.body;
-      if (last.phase === phase) return last;
+      if (last?.runtimeReady === true && last?.runtime?.bound === true && last?.runtime?.status === 'running') return last;
     }
     await sleep(1000);
   }
-  throw new Error(`timed out waiting for container ${containerId} phase ${phase}; last=${last?.phase}`);
+  throw new Error(`timed out waiting for running container ${containerId}; last=${containerRuntimeSummary(last)}`);
+}
+
+function containerRuntimeSummary(view) {
+  if (!view) return 'none';
+  return `runtimeReady=${view.runtimeReady} bound=${view.runtime?.bound} status=${view.runtime?.status ?? 'none'}`;
 }
 
 async function waitActionEnabled(token, containerId, actionName, timeoutMs = 120000, admin = false) {
@@ -554,13 +602,14 @@ async function waitActionEnabled(token, containerId, actionName, timeoutMs = 120
     await sleep(1000);
   }
   const action = last?.actions?.[actionName];
-  throw new Error(`timed out waiting action ${actionName} enabled for ${containerId}; phase=${last?.phase} reason=${action?.reason ?? ''}`);
+  throw new Error(`timed out waiting action ${actionName} enabled for ${containerId}; runtime=${containerRuntimeSummary(last)} reason=${action?.reason ?? ''}`);
 }
 
 async function action(token, containerId, actionName, body) {
   await waitActionEnabled(token, containerId, actionKey(actionName));
-  const ref = await api('POST', `/v2/containers/${containerId}/actions/${actionName}`, token, body, [200, 201, 202]);
-  await waitOperation(token, ref.body.operationId);
+  const ref = await api('POST', `/v2/containers/${containerId}/actions/${actionName}`, token, body, [201]);
+  assert(ref.body?.taskId, `container ${actionName} did not return taskId`);
+  await waitAgentTask(token, ref.body.taskId);
 }
 
 async function removeContainer(token, containerId, admin = false) {
@@ -568,17 +617,12 @@ async function removeContainer(token, containerId, admin = false) {
   const view = await raw('GET', path, token);
   if (view.status === 404) return;
   await waitActionEnabled(token, containerId, 'delete', 120000, admin);
-  const ref = await api('POST', `${path}/actions/delete`, token, undefined, [200, 201, 202]);
-  const opPath = admin ? `/admin/operations/${ref.body.operationId}` : `/operations/${ref.body.operationId}`;
-  for (let i = 0; i < 180; i += 1) {
-    const op = await api('GET', opPath, token);
-    if (['succeeded', 'failed', 'cancelled'].includes(op.body.status)) {
-      assert(op.body.status === 'succeeded', `delete operation failed: ${op.body.lastError ?? ''}`);
-      break;
-    }
-    await sleep(1000);
-  }
-  cleanupContainers.splice(cleanupContainers.findIndex((c) => c.id === containerId), 1);
+  const ref = await api('POST', `${path}/actions/delete`, token, undefined, [201]);
+  assert(ref.body?.taskId, 'container delete did not return taskId');
+  if (admin) await waitAdminAgentTask(token, ref.body.taskId);
+  else await waitAgentTask(token, ref.body.taskId);
+  const index = cleanupContainers.findIndex((c) => c.id === containerId);
+  if (index !== -1) cleanupContainers.splice(index, 1);
 }
 
 async function adminToken() {
@@ -587,12 +631,10 @@ async function adminToken() {
 }
 
 async function cleanupBestEffort() {
-  if (keepContainers || cleanupContainers.length === 0) return;
+  if (keepContainers || (cleanupContainers.length === 0 && cleanupDataDirs.length === 0)) return;
   try {
     const admin = await adminToken();
-    for (const c of [...cleanupContainers]) {
-      await removeContainer(admin.accessToken, c.id, true).catch(() => {});
-    }
+    await cleanupTrackedResources(admin.accessToken, { bestEffort: true });
   } catch {
     // Report the primary failure; cleanup failures are visible in runtime state.
   }
@@ -605,11 +647,91 @@ async function cleanupStaleLiveApiContainers(adminAccessToken) {
   }
 }
 
+async function cleanupStaleLiveApiDataDirs(adminAccessToken, fixture) {
+  const serverId = fixture.servers.cpu.id;
+  for (const persona of ['alpha', 'beta']) {
+    const user = fixture.users[persona];
+    if (!user?.id) continue;
+    const dirs = (await api('GET', `/admin/data-dirs?serverId=${serverId}&userId=${user.id}`, adminAccessToken, undefined, [200])).body;
+    for (const dir of dirs.filter((item) => isLiveApiDataDirName(persona, item.name))) {
+      await deleteAdminDataDir(adminAccessToken, user.id, dir).catch(() => {});
+    }
+  }
+}
+
+async function cleanupTrackedResources(adminAccessToken, options = {}) {
+  const bestEffort = options.bestEffort === true;
+  for (const c of [...cleanupContainers]) {
+    const promise = removeContainer(adminAccessToken, c.id, true);
+    if (bestEffort) await promise.catch(() => {});
+    else await promise;
+  }
+  for (const dir of [...cleanupDataDirs].reverse()) {
+    const promise = deleteDataDir(dir);
+    if (bestEffort) await promise.catch(() => {});
+    else await promise;
+  }
+}
+
+function trackDataDir(token, serverId, source, name) {
+  const ref = { token, serverId, source, name };
+  cleanupDataDirs.push(ref);
+  return ref;
+}
+
+function forgetDataDir(ref) {
+  const index = cleanupDataDirs.indexOf(ref);
+  if (index !== -1) cleanupDataDirs.splice(index, 1);
+}
+
+async function deleteDataDir(dir, timeoutMs = 180000) {
+  const deadline = Date.now() + timeoutMs;
+  let last = null;
+  while (Date.now() < deadline) {
+    const res = await raw('DELETE', `/data-dirs/${dir.serverId}/${dir.source.id}/${dir.name}?sourceKind=${dir.source.kind}`, dir.token);
+    last = res;
+    if (res.status === 404) {
+      forgetDataDir(dir);
+      return;
+    }
+    assert([200, 409].includes(res.status), `unexpected cleanup data-dir status ${res.status}: ${JSON.stringify(res.body)}`);
+    if (res.status !== 409) {
+      assert(res.body?.taskId, 'cleanup data-dir delete did not return taskId');
+      await waitAgentTask(dir.token, res.body.taskId);
+      forgetDataDir(dir);
+      return;
+    }
+    await sleep(1000);
+  }
+  throw new Error(`timed out cleaning data dir ${dir.source.kind}:${dir.source.id}/${dir.name}; last=${last?.status} ${JSON.stringify(last?.body)}`);
+}
+
+async function deleteAdminDataDir(token, userId, dir, timeoutMs = 180000) {
+  const deadline = Date.now() + timeoutMs;
+  let last = null;
+  while (Date.now() < deadline) {
+    const res = await raw('DELETE', `/admin/data-dirs/${dir.serverId}/${dir.sourceId}/${dir.name}?sourceKind=${dir.sourceKind}&userId=${userId}`, token);
+    last = res;
+    if (res.status === 404) return;
+    assert([200, 409].includes(res.status), `unexpected admin cleanup data-dir status ${res.status}: ${JSON.stringify(res.body)}`);
+    if (res.status !== 409) {
+      assert(res.body?.taskId, 'admin cleanup data-dir delete did not return taskId');
+      await waitAdminAgentTask(token, res.body.taskId);
+      return;
+    }
+    await sleep(1000);
+  }
+  throw new Error(`timed out cleaning stale data dir ${dir.sourceKind}:${dir.sourceId}/${dir.name}; last=${last?.status} ${JSON.stringify(last?.body)}`);
+}
+
+function isLiveApiDataDirName(persona, name) {
+  return typeof name === 'string'
+    && (name.startsWith(`${persona}-`) || name.startsWith(`${persona}-ctr-`));
+}
+
 function actionKey(endpointAction) {
   return {
     'update-mounts': 'updateMounts',
-    'enable-ssh': 'enableSsh',
-    'reconcile-ssh': 'reconcileSsh',
   }[endpointAction] ?? endpointAction;
 }
 
@@ -737,7 +859,11 @@ async function loadEnv(path) {
 }
 
 function pickServer(server) {
-  return { id: server.id, name: server.name, status: server.status, isGpuServer: server.isGpuServer };
+  return { id: server.id, name: server.name, status: server.status, gpuCount: server.gpus?.length ?? 0 };
+}
+
+function hasGpu(server) {
+  return (server.gpus?.length ?? 0) > 0;
 }
 
 function pickImage(image) {
@@ -754,6 +880,13 @@ function timestamp() {
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function formatTaskError(error) {
+  if (error == null) return '';
+  if (typeof error === 'string') return error;
+  if (typeof error?.message === 'string') return error.message;
+  return JSON.stringify(error);
 }
 
 function assert(condition, message) {

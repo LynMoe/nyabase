@@ -5,21 +5,18 @@
  * the discriminated `Envelope<kind, payload>` union on top of them.
  */
 
-import { ContainerStatus } from '../enums.js';
 import type {
   // Agent → Backend
   HelloPayload,
   HeartbeatPayload,
+  InventoryFaultPayload,
   StateReportPayload,
   MetricsBatchPayload,
   CommandAckPayload,
-  AgentCommandEnvelope,
-  OperationProgressPayload,
-  ContainerEventPayload,
+  TaskExecutePayload,
+  TaskResultPayload,
+  TaskAcceptedPayload,
   LogChunkPayload,
-  DataDirReportPayload,
-  PullProgressPayload,
-  RemoteFsMountStatus,
   DockerDaemonStatus,
   // Backend → Agent
   ExecStreamPayload,
@@ -27,18 +24,17 @@ import type {
   ExecInputPayload,
   ExecClosePayload,
   ReconcilePayload,
-  FetchContainerStatsPayload,
-  CheckDiskPayload,
+  AdmissionReadyPayload,
+  InspectContainerPayload,
+  AgentBootstrapPayload,
   SelfCheckPayload,
-  ReconcileDockerDaemonPayload,
 } from './agent-messages.js';
 
 // Re-export payload types so consumers can keep importing them from `ws.ts`.
 export type {
   DiskInfo,
   GpuInfo,
-  DataDirMount,
-  ContainerSpec,
+  ContainerRuntimeObservation,
   ContainerSshServerStatus,
   ContainerSshServerState,
   ContainerStatsSummary,
@@ -48,16 +44,16 @@ export type {
   DataDirEntry,
   HelloPayload,
   HeartbeatPayload,
+  InventoryFaultPayload,
   StateReportPayload,
   MetricPoint,
   MetricsBatchPayload,
   CommandAckPayload,
-  AgentCommandEnvelope,
-  OperationProgressPayload,
-  ContainerEventPayload,
+  TaskExecutePayload,
+  TaskError,
+  TaskResultPayload,
+  TaskAcceptedPayload,
   LogChunkPayload,
-  DataDirReportPayload,
-  PullProgressPayload,
   NfsParams,
   CephFsParams,
   RemoteFsParams,
@@ -65,36 +61,37 @@ export type {
   RemoteFsMountStatus,
   ContainerMountSpec,
   DataDiskSpec,
+  DataDirName,
   DockerDaemonStatus,
-  CreateContainerPayload,
-  StartContainerPayload,
-  StopContainerPayload,
-  RestartContainerPayload,
-  ContainerSetPowerPayload,
-  DeleteContainerPayload,
-  UpdateUserQuotaPayload,
-  PullImagePayload,
   ExecStreamPayload,
   ExecResizePayload,
   ExecInputPayload,
   ExecClosePayload,
-  CreateDataDirPayload,
-  DeleteDataDirPayload,
   ReconcilePayload,
-  FetchContainerStatsPayload,
-  CheckDiskPayload,
-  ApplyDataDiskPayload,
-  RemoveDataDiskPayload,
-  ApplyRemoteFsMountPayload,
-  RemoveRemoteFsMountPayload,
-  ReconcileContainerMountsPayload,
-  ApplyContainerMountPayload,
-  RemoveContainerMountPayload,
+  AdmissionReadyPayload,
+  InspectContainerPayload,
+  InspectContainerResult,
+  AgentBootstrapPayload,
+  AgentBootstrapResult,
   SelfCheckPayload,
   SelfCheckItem,
   SelfCheckResult,
-  ReconcileDockerDaemonPayload,
-  ReconcileContainerSshPayload,
+  ContainerSshTaskSpec,
+  ContainerCreateTaskPayload,
+  ContainerStartTaskPayload,
+  ContainerStopTaskPayload,
+  ContainerRestartTaskPayload,
+  ContainerDeleteTaskPayload,
+  ContainerRuntimeAbsentTaskPayload,
+  ContainerSshEnsureTaskPayload,
+  DataDirEnsureTaskPayload,
+  DataDirAbsentTaskPayload,
+  RemoteFsEnsureTaskPayload,
+  RemoteFsAbsentTaskPayload,
+  QuotaEnsureTaskPayload,
+  ImageEnsurePresentTaskPayload,
+  ImageEnsureAbsentTaskPayload,
+  AgentTaskPayloadByKind,
 } from './agent-messages.js';
 
 // ---------------------------------------------------------------------------
@@ -115,16 +112,6 @@ export interface Envelope<K extends string = string, P = unknown> {
 // Auxiliary types not represented as Zod schemas
 // ---------------------------------------------------------------------------
 
-export interface CheckDiskResult {
-  exists: boolean;
-  fsType: string;
-  isXfs: boolean;
-}
-
-export interface RegisterDiskResult {
-  diskId: string;
-}
-
 // ---------------------------------------------------------------------------
 // Message kind union types
 // ---------------------------------------------------------------------------
@@ -132,28 +119,83 @@ export interface RegisterDiskResult {
 export type AgentToBackendMessage =
   | Envelope<'hello', HelloPayload>
   | Envelope<'heartbeat', HeartbeatPayload>
+  | Envelope<'inventoryFault', InventoryFaultPayload>
   | Envelope<'stateReport', StateReportPayload>
   | Envelope<'metricsBatch', MetricsBatchPayload>
   | Envelope<'commandAck', CommandAckPayload>
-  | Envelope<'operationProgress', OperationProgressPayload>
-  | Envelope<'containerEvent', ContainerEventPayload>
+  | Envelope<'task.result.v1', TaskResultPayload>
   | Envelope<'logChunk', LogChunkPayload>
-  | Envelope<'dataDirReport', DataDirReportPayload>
-  | Envelope<'pullProgress', PullProgressPayload>
-  | Envelope<'remoteFsMountStatus', RemoteFsMountStatus>
   | Envelope<'dockerDaemonStatus', DockerDaemonStatus>;
 
 export type BackendToAgentMessage =
-  | Envelope<'agentCommand', AgentCommandEnvelope>
+  | Envelope<'admission.ready.v1', AdmissionReadyPayload>
+  | Envelope<'task.execute.v1', TaskExecutePayload>
+  | Envelope<'task.accepted.v1', TaskAcceptedPayload>
   | Envelope<'execStream', ExecStreamPayload>
   | Envelope<'execResize', ExecResizePayload>
   | Envelope<'execInput', ExecInputPayload>
   | Envelope<'execClose', ExecClosePayload>
   | Envelope<'reconcile', ReconcilePayload>
-  | Envelope<'fetchContainerStats', FetchContainerStatsPayload>
-  | Envelope<'checkDisk', CheckDiskPayload>
-  | Envelope<'selfCheck', SelfCheckPayload>
-  | Envelope<'reconcileDockerDaemon', ReconcileDockerDaemonPayload>;
+  | Envelope<'inspectContainer', InspectContainerPayload>
+  | Envelope<'agent.bootstrap.v1', AgentBootstrapPayload>
+  | Envelope<'selfCheck', SelfCheckPayload>;
 
-// Re-exported for legacy consumers that imported ContainerStatus through ws.ts.
-export { ContainerStatus };
+export const DIRECT_WS_COMMAND_KINDS = [
+  'execStream',
+  'execResize',
+  'execInput',
+  'execClose',
+  'reconcile',
+  'inspectContainer',
+  'agent.bootstrap.v1',
+  'selfCheck',
+] as const;
+
+export type DirectWsCommandKind = (typeof DIRECT_WS_COMMAND_KINDS)[number];
+
+const directWsCommandKindSet = new Set<string>(DIRECT_WS_COMMAND_KINDS);
+
+export function isDirectWsCommandKind(kind: string): kind is DirectWsCommandKind {
+  return directWsCommandKindSet.has(kind);
+}
+
+export const DIRECT_RPC_KINDS = [
+  'execStream',
+  'inspectContainer',
+  'agent.bootstrap.v1',
+  'selfCheck',
+] as const;
+
+export type DirectRpcKind = (typeof DIRECT_RPC_KINDS)[number];
+const directRpcKindSet = new Set<string>(DIRECT_RPC_KINDS);
+
+export function isDirectRpcKind(kind: string): kind is DirectRpcKind {
+  return directRpcKindSet.has(kind);
+}
+
+export const PUBLIC_DIRECT_RPC_KINDS = [
+  'execStream',
+  'inspectContainer',
+  'selfCheck',
+] as const;
+
+export type PublicDirectRpcKind = (typeof PUBLIC_DIRECT_RPC_KINDS)[number];
+const publicDirectRpcKindSet = new Set<string>(PUBLIC_DIRECT_RPC_KINDS);
+
+export function isPublicDirectRpcKind(kind: string): kind is PublicDirectRpcKind {
+  return publicDirectRpcKindSet.has(kind);
+}
+
+export const AGENT_NOTIFY_KINDS = [
+  'execResize',
+  'execInput',
+  'execClose',
+  'reconcile',
+] as const;
+
+export type AgentNotifyKind = (typeof AGENT_NOTIFY_KINDS)[number];
+const agentNotifyKindSet = new Set<string>(AGENT_NOTIFY_KINDS);
+
+export function isAgentNotifyKind(kind: string): kind is AgentNotifyKind {
+  return agentNotifyKindSet.has(kind);
+}

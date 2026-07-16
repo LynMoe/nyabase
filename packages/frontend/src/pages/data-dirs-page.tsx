@@ -11,7 +11,7 @@ import {
   AlertDialog, AlertDialogContent, AlertDialogHeader, AlertDialogTitle,
   AlertDialogDescription, AlertDialogFooter, AlertDialogCancel, AlertDialogAction,
 } from '../components/ui/alert-dialog.js';
-import type { ServerDto, DataDirDto, ContainerView, MountSourceDto, OperationRefResponse } from '@nyabase/common';
+import type { AgentTaskRefResponse, ServerDto, DataDirDto, ContainerView, MountSourceDto } from '@nyabase/common';
 import { dataDiskDisplayName } from '../lib/utils.js';
 import { queryKeys } from '../lib/query-keys.js';
 
@@ -53,12 +53,12 @@ export default function DataDirsPage() {
 
   const deleteDir = useMutation({
     mutationFn: ({ serverId, sourceKind, sourceId, name }: { serverId: string; sourceKind: string; sourceId: string; name: string }) =>
-      api.delete<OperationRefResponse>(`/data-dirs/${serverId}/${sourceId}/${name}?sourceKind=${sourceKind}`),
+      api.delete<AgentTaskRefResponse>(`/data-dirs/${serverId}/${sourceId}/${name}?sourceKind=${sourceKind}`),
     onSuccess: (res) => {
       setTimeout(() => qc.invalidateQueries({ queryKey: queryKeys.dataDirs.allUser }), 800);
       toast({
         title: '目录删除已排队',
-        description: res.operationId ? `操作 ${res.operationId.slice(0, 8)}` : undefined,
+        description: res.taskId ? `任务 ${res.taskId.slice(0, 8)}` : undefined,
       });
     },
     onError: (e) => toast({ title: '删除失败', description: e.message, variant: 'destructive' }),
@@ -255,6 +255,11 @@ function DirSection({
                 <div className="flex items-center gap-2 min-w-0">
                   <FolderOpen className="h-3.5 w-3.5 text-muted-foreground/70 shrink-0" />
                   <span className="font-mono text-sm text-foreground">{d.name}</span>
+                  {d.desiredState !== 'active' && (
+                    <span className="text-xs px-1.5 py-0.5 rounded bg-amber-500/10 text-amber-600">
+                      {d.desiredState === 'creating' ? '创建中' : d.desiredState === 'removing' ? '删除中' : '失败，可重试删除'}
+                    </span>
+                  )}
                   {usingContainers.length > 0 && usingContainers.map((c) => (
                     <span key={c.id} className="text-xs px-1.5 py-0.5 rounded bg-primary/10 text-primary">
                       <Container className="inline h-2.5 w-2.5 mr-0.5" />{c.name}
@@ -310,12 +315,12 @@ function CreateDirDialog({ sourceKind, serverId, sourceId, open, onOpenChange }:
   const [name, setName] = useState('');
 
   const { mutate, isPending } = useMutation({
-    mutationFn: () => api.post<DataDirDto & { operationId?: string }>('/data-dirs', { serverId, sourceKind, sourceId, name }),
+    mutationFn: () => api.post<DataDirDto & { taskId?: string }>('/data-dirs', { serverId, sourceKind, sourceId, name }),
     onSuccess: (res) => {
       setTimeout(() => qc.invalidateQueries({ queryKey: queryKeys.dataDirs.allUser }), 800);
       toast({
         title: '目录创建已排队',
-        description: res.operationId ? `操作 ${res.operationId.slice(0, 8)}` : undefined,
+        description: res.taskId ? `任务 ${res.taskId.slice(0, 8)}` : undefined,
       });
       onOpenChange(false);
       setName('');

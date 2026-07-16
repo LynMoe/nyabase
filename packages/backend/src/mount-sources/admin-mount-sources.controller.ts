@@ -16,13 +16,15 @@ import { CapabilitiesGuard } from '../auth/guards/capabilities.guard.js';
 import { RequireCaps } from '../auth/decorators/require-caps.decorator.js';
 import { CurrentUser } from '../auth/decorators/current-user.decorator.js';
 import { UserEntity } from '../entities/user.entity.js';
-import { Capability, MountSourceKind } from '@nyabase/common';
+import { Capability } from '@nyabase/common';
 import { z } from 'zod';
+import { parseMountSourceGrantTarget } from './mount-source-grant-target.js';
 
 const zGrantBody = z.object({
   scope: z.enum(['user', 'group']),
-  scopeId: z.string(),
-});
+  scopeId: z.string().min(1),
+  serverId: z.string().min(1).optional(),
+}).strict();
 
 @Controller('admin/mount-sources')
 @UseGuards(JwtAuthGuard, CapabilitiesGuard)
@@ -34,9 +36,12 @@ export class AdminMountSourcesController {
   async listGrants(
     @Query('sourceKind') sourceKind: string,
     @Query('sourceId') sourceId: string,
+    @Query('serverId') serverId: string | undefined,
   ) {
     if (!sourceKind || !sourceId) throw new BadRequestException('sourceKind and sourceId are required');
-    return this.mountSourcesService.listGrantsForSource(sourceKind as MountSourceKind, sourceId);
+    return this.mountSourcesService.listGrantsForSource(
+      parseMountSourceGrantTarget(sourceKind, sourceId, serverId),
+    );
   }
 
   @Post('grants/:sourceKind/:sourceId')
@@ -47,8 +52,13 @@ export class AdminMountSourcesController {
     @Body() body: unknown,
     @CurrentUser() actor: UserEntity,
   ) {
-    const { scope, scopeId } = zGrantBody.parse(body);
-    return this.mountSourcesService.upsertGrant(actor.id, sourceKind as MountSourceKind, sourceId, scope, scopeId);
+    const { scope, scopeId, serverId } = zGrantBody.parse(body);
+    return this.mountSourcesService.upsertGrant(
+      actor.id,
+      scope,
+      scopeId,
+      parseMountSourceGrantTarget(sourceKind, sourceId, serverId),
+    );
   }
 
   @Delete('grants/:sourceKind/:sourceId/:scope/:scopeId')
@@ -59,8 +69,15 @@ export class AdminMountSourcesController {
     @Param('sourceId') sourceId: string,
     @Param('scope') scope: string,
     @Param('scopeId') scopeId: string,
+    @Query('serverId') serverId: string | undefined,
     @CurrentUser() actor: UserEntity,
   ) {
-    await this.mountSourcesService.deleteGrant(actor.id, sourceKind as MountSourceKind, sourceId, scope as 'user' | 'group', scopeId);
+    const parsedScope = z.enum(['user', 'group']).parse(scope);
+    await this.mountSourcesService.deleteGrant(
+      actor.id,
+      parsedScope,
+      scopeId,
+      parseMountSourceGrantTarget(sourceKind, sourceId, serverId),
+    );
   }
 }

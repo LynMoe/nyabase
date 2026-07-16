@@ -62,22 +62,4 @@ export class AdminMetricsController extends MetricsController {
   ): Promise<ContainerMetricsDto> {
     return this.containerMetricsFor(serverId, user, range, true);
   }
-
-  @Get('query')
-  async adminRawQuery(
-    @Query('query') query: string,
-    @Query('time') time?: string,
-  ) {
-    return this.rawQueryFor(query, time);
-  }
-
-  @Get('query_range')
-  async adminRawQueryRange(
-    @Query('query') query: string,
-    @Query('start') start?: string,
-    @Query('end') end?: string,
-    @Query('step') step?: string,
-  ) {
-    return this.rawQueryRangeFor(query, start, end, step);
-  }
 }

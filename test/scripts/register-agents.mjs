@@ -41,16 +41,7 @@ const secrets = {
 for (const agent of config.agents) {
   const body = {
     name: agent.name,
-    parentIface: agent.parentIface,
-    ipCidr: agent.serverIpCidr,
-    gateway: agent.gateway,
-    reservedIps: agent.reservedIps,
-    isGpuServer: agent.isGpuServer,
-    defaultCpuMillis: agent.defaultCpuMillis,
-    defaultMemBytes: agent.defaultMemBytes,
-    defaultDiskBytes: agent.defaultDiskBytes,
-    defaultGpuMode: agent.defaultGpuMode,
-    defaultGpuIndices: agent.defaultGpuIndices,
+    slug: `test-${agent.key}`,
   };
   const created = await request('POST', '/admin/servers', admin.accessToken, body);
   const server = created.server;
@@ -146,9 +137,15 @@ function renderAgentYaml(agent, backendWsUrl, serverId, token) {
     `parentIface: ${JSON.stringify(agent.parentIface)}`,
     `macvlanCidr: ${JSON.stringify(agent.macvlanCidr)}`,
     `macvlanGateway: ${JSON.stringify(agent.macvlanGateway)}`,
+    `reservedIps: ${JSON.stringify(agent.reservedIps ?? [])}`,
     'metricsIntervalMs: 10000',
-    'mountHelperPath: "/var/lib/nyabase-agent/nyabase-mount-helper"',
     `isGpuServer: ${agent.isGpuServer ? 'true' : 'false'}`,
+    'localDataSources:',
+    ...(agent.localDataSources ?? []).flatMap((source) => [
+      `  - id: ${JSON.stringify(source.id)}`,
+      `    mountPoint: ${JSON.stringify(source.mountPoint)}`,
+      ...(source.label == null ? [] : [`    label: ${JSON.stringify(source.label)}`]),
+    ]),
     '',
   ].join('\n');
 }

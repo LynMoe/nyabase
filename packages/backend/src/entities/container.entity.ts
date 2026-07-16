@@ -2,16 +2,23 @@ import {
   Column,
   CreateDateColumn,
   Entity,
+  ForeignKey,
   Index,
   PrimaryColumn,
 } from 'typeorm';
+import { ImageEntity } from './image.entity.js';
+import { ServerEntity } from './server.entity.js';
 
 @Entity('containers')
+@Index('UQ_containers_owner_server_name', ['ownerId', 'serverId', 'name'], {
+  unique: true,
+})
 export class ContainerEntity {
   @PrimaryColumn('text')
   id: string;
 
   @Index()
+  @ForeignKey(() => ServerEntity, { onDelete: 'RESTRICT' })
   @Column({ name: 'server_id', type: 'text' })
   serverId: string;
 
@@ -23,6 +30,7 @@ export class ContainerEntity {
   @Column('text')
   name: string;
 
+  @ForeignKey(() => ImageEntity, { onDelete: 'RESTRICT' })
   @Column({ name: 'image_id', type: 'text' })
   imageId: string;
 
@@ -33,7 +41,4 @@ export class ContainerEntity {
   @CreateDateColumn({ name: 'created_at' })
   createdAt: Date;
 
-  @Index()
-  @Column({ name: 'deleted_at', type: 'datetime', nullable: true })
-  deletedAt: Date | null;
 }

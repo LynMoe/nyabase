@@ -1,20 +1,29 @@
 # Example agent.yaml. The schema is enforced by `zAgentConfig` in src/config.ts;
-# unknown fields are silently ignored.
+# unknown and retired fields are rejected.
 #
-# Note: there is intentionally no `dockerSocket` / `xfsMount` / `overlayMount` /
-# `dataDisks` field. The agent always talks to its own nyabase-managed dockerd
-# at a fixed UNIX socket (see DaemonManager.SOCKET_PATH) and the XFS mount is
-# derived from `dockerRoot`. Data disks are now managed by the backend.
+# Note: there is intentionally no `dockerSocket` / `xfsMount` / `overlayMount`
+# field. The agent always talks to its own nyabase-managed dockerd at a fixed
+# UNIX socket (see DaemonManager.SOCKET_PATH).
+#
+# Local data source roots are owned by this file: `localDataSources[].mountPoint`
+# declares the host root for user data. The backend only creates/deletes data
+# directories under those roots; it never creates, edits, or deletes the roots
+# themselves.
 
 backendUrl: ws://localhost:3001/ws/agent
-agentToken: "4436e28fc3fba07c93219b989ecf3e1de05e001f777b647cceb82524e16ca99f"
-serverId: "37d69a7a-b799-41a9-8bcc-493ae67dd259"
+agentToken: "REPLACE_WITH_AGENT_TOKEN_FROM_BACKEND"
+serverId: "REPLACE_WITH_SERVER_ID_FROM_BACKEND"
 dockerRoot: /var/lib/nyabase-docker
 parentIface: eth0
 macvlanCidr: 192.168.100.0/24
 macvlanGateway: 192.168.100.1
+reservedIps: []
 metricsIntervalMs: 10000
 isGpuServer: true
+localDataSources:
+  - id: local-main
+    mountPoint: /data/nyabase
+    label: Main local data
 
 # Optional host-level guardrail for the nyabase-managed Docker daemon.
 # When enabled, Docker containers are placed under a systemd slice that:

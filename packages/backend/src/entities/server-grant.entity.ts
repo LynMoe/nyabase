@@ -6,8 +6,10 @@ import {
   Unique,
   CreateDateColumn,
   UpdateDateColumn,
+  ForeignKey,
 } from 'typeorm';
 import { GpuGrantMode } from '@nyabase/common';
+import { ServerEntity } from './server.entity.js';
 
 /** Stores a nullable bigint-safe number as text in SQLite. */
 const nullableNumericTextTransformer = {
@@ -46,6 +48,7 @@ export class ServerGrantEntity {
   scopeId: string;
 
   @Index()
+  @ForeignKey(() => ServerEntity, { onDelete: 'RESTRICT' })
   @Column('text')
   serverId: string;
 

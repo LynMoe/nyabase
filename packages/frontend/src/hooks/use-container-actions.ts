@@ -2,8 +2,8 @@ import { useState, useCallback } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
 import { api } from '../lib/api.js';
 import { toast } from './use-toast.js';
-import type { ContainerAction, OperationRefResponse } from '@nyabase/common';
-import { useOperationTracker } from './use-operation-tracker.js';
+import type { AgentTaskRefResponse, ContainerAction } from '@nyabase/common';
+import { useAgentTaskTracker } from './use-agent-task-tracker.js';
 import { containerActionPath } from '../lib/container-actions.js';
 import { queryKeys } from '../lib/query-keys.js';
 
@@ -20,32 +20,32 @@ export interface ConfirmState {
 export function useContainerActions(options: { admin?: boolean } = {}) {
   const qc = useQueryClient();
   const basePath = options.admin === true ? '/admin/v2/containers' : '/v2/containers';
-  const [pendingOps, setPendingOps] = useState<Set<string>>(new Set());
-  const [trackedOperationId, setTrackedOperationId] = useState<string | null>(null);
+  const [pendingActions, setPendingActions] = useState<Set<string>>(new Set());
+  const [trackedTaskId, setTrackedTaskId] = useState<string | null>(null);
   const [confirmState, setConfirmState] = useState<ConfirmState | null>(null);
 
-  useOperationTracker(trackedOperationId, { admin: options.admin });
+  useAgentTaskTracker(trackedTaskId, { admin: options.admin });
 
-  const addPending = useCallback((key: string) => setPendingOps((s) => new Set([...s, key])), []);
-  const removePending = useCallback((key: string) => setPendingOps((s) => {
+  const addPending = useCallback((key: string) => setPendingActions((s) => new Set([...s, key])), []);
+  const removePending = useCallback((key: string) => setPendingActions((s) => {
     const next = new Set(s);
     next.delete(key);
     return next;
   }), []);
 
   const execAction = useCallback(async (action: ContainerAction, containerId: string) => {
-    if (pendingOps.has(containerId)) return;
+    if (pendingActions.has(containerId)) return;
     addPending(containerId);
     try {
-      const res = await api.post<OperationRefResponse>(`${basePath}/${containerId}/actions/${containerActionPath(action)}`);
-      setTrackedOperationId(res.operationId);
+      const res = await api.post<AgentTaskRefResponse>(`${basePath}/${containerId}/actions/${containerActionPath(action)}`);
+      setTrackedTaskId(res.taskId);
       const label: Partial<Record<ContainerAction, string>> = {
         start: '启动', stop: '停止', restart: '重启', delete: '删除',
         updateMounts: '更新挂载', reconcileSsh: '修复 SSH',
       };
       toast({
         title: `容器${label[action] ?? action}已排队`,
-        description: `操作 ${res.operationId.slice(0, 8)}`,
+        description: `任务 ${res.taskId.slice(0, 8)}`,
       });
       void qc.invalidateQueries({
         queryKey: options.admin === true ? queryKeys.containers.adminList : queryKeys.containers.userList,
@@ -58,10 +58,10 @@ export function useContainerActions(options: { admin?: boolean } = {}) {
     } finally {
       removePending(containerId);
     }
-  }, [pendingOps, qc, addPending, removePending, basePath, options.admin]);
+  }, [pendingActions, qc, addPending, removePending, basePath, options.admin]);
 
   const doAction = useCallback((action: ContainerAction, containerId: string, name: string) => {
-    if (pendingOps.has(containerId)) return;
+    if (pendingActions.has(containerId)) return;
     if (action === 'start') {
       void execAction(action, containerId);
       return;
@@ -77,7 +77,7 @@ export function useContainerActions(options: { admin?: boolean } = {}) {
       return;
     }
     setConfirmState({ action, containerId, name, ...cfg });
-  }, [pendingOps, execAction]);
+  }, [pendingActions, execAction]);
 
   const handleConfirm = useCallback(async () => {
     if (!confirmState) return;
@@ -88,5 +88,5 @@ export function useContainerActions(options: { admin?: boolean } = {}) {
 
   const handleCancel = useCallback(() => setConfirmState(null), []);
 
-  return { doAction, pendingOps, confirmState, handleConfirm, handleCancel };
+  return { doAction, pendingActions, confirmState, handleConfirm, handleCancel };
 }

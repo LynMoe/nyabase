@@ -23,6 +23,11 @@ const adminUser = {
   groups: [{ id: 'group-admins', name: 'Admins', priority: 100, isSystem: true }],
 };
 
+const systemSettingsAdminUser = {
+  ...adminUser,
+  capabilities: [...adminUser.capabilities, 'manage_system_settings'],
+};
+
 const normalUser = {
   id: 'user-lin',
   username: 'lin',
@@ -42,11 +47,6 @@ const server = {
   isGpuServer: true,
   status: 'online',
   lastSeenAt: '2026-06-04T03:18:00.000Z',
-  defaultCpuMillis: 8000,
-  defaultMemBytes: 64 * 1024 ** 3,
-  defaultDiskBytes: 100 * 1024 ** 3,
-  defaultGpuMode: 'indices',
-  defaultGpuIndices: [0],
   disks: [],
   gpus: [{ index: 0, uuid: 'GPU-aaaaaaaa-bbbb-cccc-dddd-eeeeeeee0000', model: 'NVIDIA L40', totalMemMiB: 46068 }],
   agentVersion: '0.1.0',
@@ -82,7 +82,6 @@ const images = [
     id: 'img-cuda',
     name: 'cuda-pytorch',
     dockerImage: 'nvcr.io/nvidia/pytorch:24.05-py3',
-    defaultUid: 1001,
     description: 'GPU notebook image',
     isActive: true,
     entrypoint: null,
@@ -92,7 +91,6 @@ const images = [
     id: 'img-ubuntu',
     name: 'ubuntu-base',
     dockerImage: 'ubuntu:24.04',
-    defaultUid: 1000,
     description: 'CPU base image',
     isActive: true,
     entrypoint: null,
@@ -159,31 +157,55 @@ const auditLogs = [
   {
     id: 'audit-create',
     actorId: 'user-admin',
+    actorName: '管理员 (admin)',
+    actorUsername: 'admin',
+    actorSnapshot: { id: 'user-admin', type: 'user', name: '管理员 (admin)', labels: { username: 'admin', displayName: '管理员' } },
     action: 'container.create',
-    targetType: 'operation',
-    targetId: 'opcreate00000001',
-    payload: { operationId: 'opcreate00000001', containerId: 'ctr-lin-workspace' },
+    targetType: 'container',
+    targetId: 'ctr-lin-workspace',
+    targetName: 'lin-notebook-with-a-very-long-target-name-that-should-not-push-the-view-button-away',
+    targetSnapshot: { id: 'ctr-lin-workspace', type: 'container', name: 'lin-notebook-with-a-very-long-target-name-that-should-not-push-the-view-button-away', labels: { serverId: 'srv-gpu', ownerId: 'user-lin', imageId: 'img-cuda' } },
+    related: [{ id: 'srv-gpu', type: 'server', name: 'gpu-lab-01' }],
+    payload: { taskId: 'taskcreate000001', containerId: 'ctr-lin-workspace' },
     ts: '2026-06-04T03:12:00.000Z',
   },
   {
     id: 'audit-start',
     actorId: 'user-lin',
+    actorName: 'Lin Lab (lin)',
+    actorUsername: 'lin',
+    actorSnapshot: { id: 'user-lin', type: 'user', name: 'Lin Lab (lin)', labels: { username: 'lin', displayName: 'Lin Lab' } },
     action: 'container.start',
-    targetType: 'operation',
-    targetId: 'opstart00000002',
-    payload: { operationId: 'opstart00000002', containerId: 'ctr-lin-workspace' },
+    targetType: 'container',
+    targetId: 'ctr-lin-workspace',
+    targetName: 'lin-notebook',
+    targetSnapshot: { id: 'ctr-lin-workspace', type: 'container', name: 'lin-notebook', labels: { serverId: 'srv-gpu', ownerId: 'user-lin', imageId: 'img-cuda' } },
+    related: [{ id: 'srv-gpu', type: 'server', name: 'gpu-lab-01' }],
+    payload: { taskId: 'taskstart000002', containerId: 'ctr-lin-workspace' },
     ts: '2026-06-04T03:13:00.000Z',
   },
   {
     id: 'audit-delete',
     actorId: null,
+    actorName: null,
+    actorUsername: null,
+    actorSnapshot: null,
     action: 'container.delete',
-    targetType: 'operation',
-    targetId: 'opdelete0000003',
-    payload: { operationId: 'opdelete0000003', containerId: 'ctr-old-workspace' },
+    targetType: 'container',
+    targetId: 'ctr-old-workspace',
+    targetName: 'old-workspace',
+    targetSnapshot: { id: 'ctr-old-workspace', type: 'container', name: 'old-workspace', labels: { serverId: 'srv-gpu', ownerId: 'user-lin', imageId: 'img-ubuntu' } },
+    related: [{ id: 'srv-gpu', type: 'server', name: 'gpu-lab-01' }],
+    payload: { taskId: 'taskdelete00003', containerId: 'ctr-old-workspace' },
     ts: '2026-06-04T03:14:00.000Z',
   },
 ];
+const auditResponse = {
+  items: auditLogs,
+  total: auditLogs.length,
+  limit: 50,
+  offset: 0,
+};
 
 const normalContainer = {
   id: 'ctr-lin-workspace',
@@ -204,7 +226,7 @@ const normalContainer = {
     stale: false,
     drift: [],
   },
-  activeOperation: null,
+  activeTask: null,
   resources: {
     cpuMillis: 2000,
     memBytes: 8 * 1024 ** 3,
@@ -229,7 +251,6 @@ const normalContainer = {
     stats: { enabled: true },
     console: { enabled: true },
     updateMounts: { enabled: true },
-    enableSsh: { enabled: false, message: 'SSH 已启用' },
     reconcileSsh: { enabled: true },
   },
 };
@@ -278,6 +299,110 @@ const normalSshKeys = [
   },
 ];
 
+const systemSettings = {
+  configFile: '/etc/nyabase/config.yaml',
+  publicSettings: {
+    branding: {
+      title: 'Lab Console',
+      description: 'Research container control plane',
+    },
+  },
+  fields: [
+    {
+      key: 'branding.title',
+      yamlPath: 'branding.title',
+      env: 'NYABASE_BRAND_TITLE',
+      valueKind: 'string',
+      effectiveValue: 'Lab Console',
+      source: 'yaml',
+      yamlValue: 'Lab Console',
+      envValuePresent: false,
+      defaultValue: 'nyabase',
+      secret: false,
+      editable: true,
+      restartRequired: false,
+      public: true,
+      label: 'Brand title',
+      description: 'Product title shown in the login page and sidebar.',
+    },
+    {
+      key: 'server.corsOrigin',
+      yamlPath: 'server.corsOrigin',
+      env: 'CORS_ORIGIN',
+      valueKind: 'string',
+      effectiveValue: '',
+      source: 'default',
+      yamlValue: undefined,
+      envValuePresent: false,
+      defaultValue: '',
+      secret: false,
+      editable: true,
+      restartRequired: true,
+      public: false,
+      label: 'CORS origin',
+      description: 'Allowed browser origin when the frontend is hosted separately.',
+    },
+    {
+      key: 'auth.jwtSecret',
+      yamlPath: 'auth.jwtSecret',
+      env: 'JWT_SECRET',
+      valueKind: 'string',
+      effectiveValue: '********',
+      source: 'env',
+      yamlValue: undefined,
+      envValuePresent: true,
+      defaultValue: '********',
+      secret: true,
+      editable: false,
+      restartRequired: true,
+      public: false,
+      label: 'JWT secret',
+      description: 'Secret used to sign browser and API JWTs.',
+    },
+    {
+      key: 'ssh.proxySnapshotStaleMs',
+      yamlPath: 'ssh.proxySnapshotStaleMs',
+      env: 'SSH_PROXY_SNAPSHOT_STALE_MS',
+      valueKind: 'number',
+      effectiveValue: 300000,
+      source: 'default',
+      yamlValue: undefined,
+      envValuePresent: false,
+      defaultValue: 300000,
+      secret: false,
+      editable: true,
+      restartRequired: false,
+      public: false,
+      label: 'SSH proxy snapshot staleness',
+      description: 'Milliseconds before an SSH proxy snapshot is considered stale.',
+    },
+  ],
+  editable: [] as unknown[],
+  readOnly: [] as unknown[],
+};
+systemSettings.editable = systemSettings.fields.filter((field) => field.editable);
+systemSettings.readOnly = systemSettings.fields.filter((field) => !field.editable);
+
+const sshProxyHostKey = {
+  fingerprint: 'SHA256:hostkeyfingerprint',
+  generation: 3,
+  rotatedAt: '2026-06-04T02:00:00.000Z',
+};
+
+const sshProxyStatus = {
+  connectedProxies: 0,
+  activeConnections: 0,
+  totalConnections: 0,
+  totalRejectedConnections: 0,
+  totalClosedConnections: 0,
+  totalBytesFromClient: 0,
+  totalBytesToClient: 0,
+  bandwidthInBps: 0,
+  bandwidthOutBps: 0,
+  updatedAt: null,
+  proxies: [],
+};
+
 test.describe('admin persona route coverage', () => {
   test.beforeEach(async ({ page }) => {
     await page.clock.setFixedTime(visualNow);
@@ -313,18 +438,63 @@ test.describe('admin persona route coverage', () => {
     await expect(page.getByRole('cell', { name: 'lin', exact: true })).toBeVisible();
   });
 
-  test('audit route shows lifecycle operation records with operation ids', async ({ page }) => {
+  test('audit route shows lifecycle task records with task ids', async ({ page }) => {
     await page.goto('/audit');
 
     await expect(page.getByRole('heading', { name: '审计日志' })).toBeVisible();
-    await expect(page.getByText('3 条记录')).toBeVisible();
+    await expect(page.getByText('共 3 条，当前显示 1-3')).toBeVisible();
     await expect(page.getByText('container.create')).toBeVisible();
     await expect(page.getByText('container.start')).toBeVisible();
     await expect(page.getByText('container.delete')).toBeVisible();
-    await expect(page.getByText('operation:opcreate00000001')).toBeVisible();
-    await expect(page.getByText('operation:opstart00000002')).toBeVisible();
-    await expect(page.getByText('operation:opdelete0000003')).toBeVisible();
-    await expect(page).toHaveScreenshot('admin-audit-lifecycle-operations.png', { fullPage: true });
+    await expect(page.getByText('lin-notebook-with-a-very-long-target-name-that-should-not-push-the-view-button-away').first()).toBeVisible();
+    await expect(page.getByText('容器:ctr-lin-workspace').first()).toBeVisible();
+    await expect(page.getByRole('button', { name: '查看' })).toHaveCount(3);
+    await expect(page.getByRole('button', { name: '查看' }).first()).toBeVisible();
+    await page.getByRole('button', { name: '查看' }).first().click();
+    await expect(page.getByRole('dialog', { name: '审计详情' })).toBeVisible();
+    await expect(page.getByText('原始 JSON')).toBeVisible();
+    await expect(page.getByText('"actorSnapshot"')).toBeVisible();
+    await expect(page.getByText('"targetSnapshot"')).toBeVisible();
+    await expect(page.getByText('"containerId": "ctr-lin-workspace"')).toBeVisible();
+    await page.keyboard.press('Escape');
+    await expect(page).toHaveScreenshot('admin-audit-lifecycle-tasks.png', { fullPage: true });
+  });
+
+});
+
+test.describe('system settings admin route coverage', () => {
+  test.beforeEach(async ({ page }) => {
+    await page.clock.setFixedTime(visualNow);
+    await seedAuth(page, systemSettingsAdminUser);
+    await mockApi(page);
+  });
+
+  test('system settings route shows editable form and hierarchical effective config', async ({ page }) => {
+    await page.goto('/system-settings');
+
+    await expect(page.getByRole('heading', { name: '系统设置' })).toBeVisible();
+    await expect(page.getByRole('link', { name: '系统设置' })).toBeVisible();
+    await expect(page.getByText('/etc/nyabase/config.yaml')).toBeVisible();
+    await expect(page.locator('label').filter({ hasText: '产品标题' })).toBeVisible();
+    await expect(page.getByLabel('产品标题')).toHaveValue('Lab Console');
+    await expect(page.locator('label').filter({ hasText: '跨域来源' })).toHaveCount(0);
+    await expect(page.getByText('server.corsOrigin')).toBeVisible();
+    await expect(page.getByText('config.yaml').first()).toBeVisible();
+    await expect(page.getByText('需要重启').first()).toBeVisible();
+    await expect(page.getByRole('heading', { name: '品牌' })).toBeVisible();
+    await expect(page.getByRole('heading', { name: '认证' })).toBeVisible();
+    await expect(page.getByRole('heading', { name: 'SSH 代理' })).toBeVisible();
+    await expect(page.locator('label').filter({ hasText: 'SSH 代理快照过期时间' })).toBeVisible();
+    await expect(page.getByText('SHA256:hostkeyfingerprint')).toHaveCount(0);
+    await expect(page).toHaveScreenshot('system-settings-admin.png', { fullPage: true });
+  });
+
+  test('ssh proxy route owns host key summary and rotation action', async ({ page }) => {
+    await page.goto('/ssh-proxy');
+
+    await expect(page.getByRole('heading', { name: 'SSH 代理' })).toBeVisible();
+    await expect(page.getByText('SHA256:hostkeyfingerprint')).toBeVisible();
+    await expect(page.getByRole('button', { name: '轮换' })).toBeVisible();
   });
 });
 
@@ -403,6 +573,7 @@ test.describe('normal user persona route coverage', () => {
       { path: '/manage/containers', heading: '容器管理', blockedRequest: 'GET /api/admin/v2/containers' },
       { path: '/manage/remote-fs', heading: '远程文件系统', blockedRequest: 'GET /api/admin/remote-fs-mounts' },
       { path: '/servers', heading: '服务器', blockedRequest: 'GET /api/admin/servers' },
+      { path: '/system-settings', heading: '系统设置', blockedRequest: 'GET /api/admin/system-settings' },
     ];
 
     for (const routeInfo of restrictedRoutes) {
@@ -422,10 +593,23 @@ test.describe('normal user persona route coverage', () => {
 
     await page.goto('/containers/ctr-lin-workspace');
     await expect(page.getByRole('heading', { name: 'lin-notebook' })).toBeVisible();
-    await page.getByRole('button', { name: '修复' }).click();
+    await page.getByRole('button', { name: '修复 SSH' }).click();
 
     await expect.poll(() => requests).toContain('POST /api/v2/containers/ctr-lin-workspace/actions/reconcile-ssh');
     expect(requests).not.toContain('POST /api/v2/containers/ctr-lin-workspace/actions/reconcileSsh');
+  });
+
+  test('empty user grants use permission wording for containers and data directories', async ({ page }) => {
+    await page.route('**/api/servers', (route) => json(route, []));
+    await page.route('**/api/v2/containers', (route) => json(route, []));
+    await page.route('**/api/data-dirs**', (route) => json(route, []));
+    await page.route('**/api/mount-sources**', (route) => json(route, []));
+
+    await page.goto('/containers');
+    await expect(page.getByText('暂无可访问的服务器。请联系管理员为你分配服务器和镜像权限。')).toBeVisible();
+
+    await page.goto('/data-dirs');
+    await expect(page.getByText('暂无可访问的数据目录。请联系管理员为你分配服务器或数据源权限。')).toBeVisible();
   });
 });
 
@@ -461,7 +645,7 @@ async function assertNormalUserNavigation(page: Page): Promise<void> {
   await expect(page.getByRole('link', { name: '数据目录' })).toBeVisible();
   await expect(page.getByRole('link', { name: '用户中心' })).toBeVisible();
 
-  for (const label of ['服务器', '镜像', '容器管理', '远程文件系统', '用户', '用户组', '审计']) {
+  for (const label of ['服务器', '镜像', '容器管理', '远程文件系统', '用户', '用户组', '审计', '系统设置']) {
     await expect(page.getByRole('link', { name: label, exact: true })).toHaveCount(0);
   }
 }
@@ -471,30 +655,44 @@ async function mockApi(page: Page): Promise<void> {
     const url = new URL(route.request().url());
     const path = url.pathname.replace(/^\/api/, '');
 
+    if (path === '/public/settings') {
+      return json(route, {
+        branding: {
+          title: 'nyabase',
+          description: '开发容器管理平台',
+        },
+      });
+    }
     if (path === '/admin/servers') return json(route, [server]);
     if (path === '/servers') return json(route, [server]);
     if (path === '/admin/servers/srv-gpu/disks' || path === '/servers/srv-gpu/disks') return json(route, [dataDisk]);
     if (path === '/admin/images') return json(route, images);
     if (path === '/admin/users') return json(route, [adminUser, normalUser]);
     if (path === '/admin/groups') return json(route, groups);
+    if (path === '/admin/system-settings') return json(route, systemSettings);
+    if (path === '/admin/ssh-proxy/status') return json(route, sshProxyStatus);
+    if (path === '/admin/ssh-proxy/host-key') return json(route, sshProxyHostKey);
     if (path === '/admin/v2/containers') return json(route, [normalContainer]);
     if (path === '/admin/remote-fs-mounts') return json(route, []);
-    if (path === '/admin/audit') return json(route, auditLogs);
-    if (path === '/audit') return json(route, auditLogs);
-    if (path === '/audit') return json(route, auditLogs);
+    if (path === '/admin/audit') return json(route, auditResponse);
+    if (path === '/audit') return json(route, auditResponse);
+    if (path.startsWith('/audit/')) {
+      const auditId = decodeURIComponent(path.slice('/audit/'.length));
+      return json(route, auditLogs.find((log) => log.id === auditId) ?? auditLogs[0]);
+    }
     if (path === '/v2/containers') return json(route, [normalContainer]);
     if (path === '/v2/containers/ctr-lin-workspace') return json(route, normalContainer);
     if (path === '/v2/containers/ctr-lin-workspace/actions/reconcile-ssh') {
       return json(route, {
         ok: true,
-        operationId: 'opreconcile0001',
-        status: 'queued',
+        taskId: 'taskreconcile001',
+        status: 'pending',
       });
     }
-    if (path === '/operations/opreconcile0001') {
+    if (path === '/agent-tasks/taskreconcile001') {
       return json(route, {
-        id: 'opreconcile0001',
-        kind: 'container.reconcile_ssh',
+        id: 'taskreconcile001',
+        kind: 'container.ssh.ensure',
         status: 'succeeded',
         resourceType: 'container',
         resourceId: 'ctr-lin-workspace',

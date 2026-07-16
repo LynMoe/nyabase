@@ -8,14 +8,13 @@ import { GroupEntity } from '../entities/group.entity.js';
 import { GroupMemberEntity } from '../entities/group-member.entity.js';
 import { ServerGrantEntity } from '../entities/server-grant.entity.js';
 import { ImageGrantEntity } from '../entities/image-grant.entity.js';
-import { MountSourceGrantEntity } from '../entities/mount-source-grant.entity.js';
-import { RemoteFsMountEntity } from '../entities/remote-fs-mount.entity.js';
-import { DataDiskEntity } from '../entities/data-disk.entity.js';
 import { UserEntity } from '../entities/user.entity.js';
 import { AccessModule } from '../access/access.module.js';
 import { AuthModule } from '../auth/auth.module.js';
 import { AuditModule } from '../audit/audit.module.js';
 import { QuotaModule } from '../quota/quota.module.js';
+import { MountSourcesModule } from '../mount-sources/mount-sources.module.js';
+import { ProxySnapshotNotifierModule } from '../proxy-snapshots/proxy-snapshot-notifier.module.js';
 
 @Module({
   imports: [
@@ -24,15 +23,14 @@ import { QuotaModule } from '../quota/quota.module.js';
       GroupMemberEntity,
       ServerGrantEntity,
       ImageGrantEntity,
-      MountSourceGrantEntity,
-      RemoteFsMountEntity,
-      DataDiskEntity,
       UserEntity,
     ]),
     AccessModule,
     AuthModule,
     AuditModule,
     QuotaModule,
+    MountSourcesModule,
+    ProxySnapshotNotifierModule,
   ],
   providers: [GroupsService],
   controllers: [GroupsController, UserGrantsController, MeAccessController],

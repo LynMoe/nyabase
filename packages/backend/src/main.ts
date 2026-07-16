@@ -66,6 +66,13 @@ async function bootstrap() {
   app.get(ConsoleGateway).attachToHttpServer(httpServer);
   app.get(SshProxyGateway).attachToHttpServer(httpServer);
   app.get(HttpProxyGateway).attachToHttpServer(httpServer);
+  const websocketPaths = new Set(['/ws/agent', '/ws/console', '/ws/ssh-proxy', '/ws/http-proxy']);
+  // noServer gateways intentionally ignore paths they do not own. The final
+  // listener closes every unknown upgrade so raw sockets cannot remain open.
+  httpServer.on('upgrade', (request, socket) => {
+    const path = request.url?.split('?')[0] ?? '';
+    if (!websocketPaths.has(path)) socket.destroy();
+  });
 
   logger.log(`Backend listening on port ${port}`);
 }

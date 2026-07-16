@@ -1,6 +1,11 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import type { LogChunkPayload } from '@nyabase/common';
-import { LogChunkTracker } from '../log-chunk-tracker.js';
+import {
+  LogChunkTracker,
+  MAX_BUFFERED_DATA_CHARS_PER_SESSION,
+  MAX_BUFFERED_LOG_DATA_CHARS,
+  MAX_LOG_LISTENERS_PER_SERVER,
+} from '../log-chunk-tracker.js';
 
 function chunk(overrides: Partial<LogChunkPayload> = {}): LogChunkPayload {
   return { sessionId: 'sess-1', data: 'hello', ...overrides };
@@ -45,12 +50,11 @@ describe('LogChunkTracker', () => {
     expect(received).toEqual(['buffered', 'live']);
   });
 
-  it('does not buffer standalone EOF chunks when no listener is registered', () => {
+  it('buffers standalone EOF chunks until the listener is registered', () => {
     tracker.dispatch(chunk({ eof: true, data: '' }));
     const cb = vi.fn();
     tracker.onLogChunk('sess-1', 'srv-1', cb);
-    // Only call from the registration replay path, which would be empty
-    expect(cb).not.toHaveBeenCalled();
+    expect(cb).toHaveBeenCalledWith(expect.objectContaining({ eof: true }));
   });
 
   it('removes listener after eof is dispatched', () => {
@@ -86,6 +90,52 @@ describe('LogChunkTracker', () => {
     const cb = vi.fn();
     tracker.onLogChunk('sess-1', 'srv-2', cb);
     tracker.clearServer('srv-1');
+    expect(cb).not.toHaveBeenCalled();
+  });
+
+  it('replays a fast terminal chunk that arrived before the browser listener', () => {
+    const cb = vi.fn();
+    tracker.dispatch({
+      sessionId: 'fast-exit',
+      data: '',
+      eof: true,
+      exitCode: 0,
+    });
+
+    tracker.onLogChunk('fast-exit', 'srv-1', cb);
+
+    expect(cb).toHaveBeenCalledOnce();
+    expect(cb).toHaveBeenCalledWith(expect.objectContaining({ eof: true, exitCode: 0 }));
+  });
+
+  it('rejects listeners beyond the per-server cap', () => {
+    const unsubscribers = Array.from({ length: MAX_LOG_LISTENERS_PER_SERVER }, (_, index) =>
+      tracker.onLogChunk(`sess-${index}`, 'srv-1', vi.fn()));
+    expect(() => tracker.onLogChunk('overflow', 'srv-1', vi.fn())).toThrow('Server log listener limit');
+    unsubscribers.forEach((unsubscribe) => unsubscribe());
+  });
+
+  it('evicts old pre-listener output at the global character budget', () => {
+    const data = 'x'.repeat(MAX_BUFFERED_DATA_CHARS_PER_SESSION);
+    const sessionCount = Math.floor(MAX_BUFFERED_LOG_DATA_CHARS / data.length);
+    for (let index = 0; index < sessionCount; index += 1) {
+      tracker.dispatch(chunk({ sessionId: `buffer-${index}`, data }));
+    }
+    tracker.dispatch(chunk({ sessionId: 'newest', data: 'y' }));
+
+    const oldest = vi.fn();
+    const newest = vi.fn();
+    tracker.onLogChunk('buffer-0', 'srv-1', oldest);
+    tracker.onLogChunk('newest', 'srv-1', newest);
+
+    expect(oldest).not.toHaveBeenCalled();
+    expect(newest).toHaveBeenCalledWith(expect.objectContaining({ data: 'y' }));
+  });
+
+  it('drops a single pre-listener chunk above the per-session budget', () => {
+    tracker.dispatch(chunk({ data: 'x'.repeat(MAX_BUFFERED_DATA_CHARS_PER_SESSION + 1) }));
+    const cb = vi.fn();
+    tracker.onLogChunk('sess-1', 'srv-1', cb);
     expect(cb).not.toHaveBeenCalled();
   });
 });

@@ -1,6 +1,6 @@
 import { Link, getRouteApi } from '@tanstack/react-router';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { useState, useEffect } from 'react';
+import { useState } from 'react';
 import { api } from '../lib/api.js';
 import { Button } from '../components/ui/button.js';
 import { Input } from '../components/ui/input.js';
@@ -14,32 +14,24 @@ import { Separator } from '../components/ui/separator.js';
 import { toast } from '../hooks/use-toast.js';
 import { formatBytes, relativeTime, dataDiskDisplayName } from '../lib/utils.js';
 import { queryKeys } from '../lib/query-keys.js';
-import { HardDrive, Plus, Trash2, Cpu, ArrowLeft, Wifi, WifiOff, RefreshCw, Settings, Pencil, ShieldCheck, CheckCircle2, XCircle, AlertTriangle, Play, Container } from 'lucide-react';
-import { GpuGrantMode, Capability, DockerDaemonState } from '@nyabase/common';
+import { HardDrive, Cpu, ArrowLeft, Wifi, WifiOff, RefreshCw, Pencil, ShieldCheck, CheckCircle2, XCircle, AlertTriangle, Play, Container } from 'lucide-react';
+import { Capability, DockerDaemonState, ServerStatus } from '@nyabase/common';
 import type { ServerDto, DataDiskDto, SelfCheckResult, SelfCheckItem, DockerDaemonStatus, DataDirIssueDto } from '@nyabase/common';
 import { useAuthStore } from '../store/auth.js';
-import {
-  ResourceGrantForm, ResourceFormValue,
-  serverDefaultsToForm, formToServerDefaultsPayload,
-} from '../components/resource-grant-form.js';
 import { HostSection, GpuSection, TimeRangeSelector } from '../components/dashboard/server-metrics.js';
 
 const routeApi = getRouteApi('/servers/$id');
-type DiskOperationResponse = DataDiskDto & { operationId?: string; status?: string };
-type OperationRef = { ok: true; operationId?: string; status?: string };
 
 export default function ServerDetailPage() {
   const { id } = routeApi.useParams();
   const { user } = useAuthStore();
   const canManage = user?.capabilities.includes(Capability.ManageServers) ?? false;
   const canManageContainers = user?.capabilities.includes(Capability.ManageContainersAny) ?? false;
-  const qc = useQueryClient();
-  const [showAddDisk, setShowAddDisk] = useState(false);
   const [showEditServer, setShowEditServer] = useState(false);
-  const [editingDisk, setEditingDisk] = useState<DataDiskDto | null>(null);
   const [regenerating, setRegenerating] = useState(false);
   const [newToken, setNewToken] = useState<string | null>(null);
   const [showRegenConfirm, setShowRegenConfirm] = useState(false);
+  const queryClient = useQueryClient();
 
   const { data: server } = useQuery({
     queryKey: queryKeys.servers.detail(id),
@@ -51,18 +43,6 @@ export default function ServerDetailPage() {
     queryKey: queryKeys.servers.disks('admin', id),
     queryFn: () => api.get<DataDiskDto[]>(`/admin/servers/${id}/disks`),
     refetchInterval: 15_000,
-  });
-
-  const removeDisk = useMutation({
-    mutationFn: (diskId: string) => api.delete<OperationRef>(`/admin/servers/${id}/disks/${diskId}`),
-    onSuccess: (res) => {
-      qc.invalidateQueries({ queryKey: queryKeys.servers.disks('admin', id) });
-      toast({
-        title: '数据盘移除已排队',
-        description: res.operationId ? `操作 ${res.operationId.slice(0, 8)}` : undefined,
-      });
-    },
-    onError: (e) => toast({ title: '操作失败', description: e.message, variant: 'destructive' }),
   });
 
   const regenerateToken = async () => {
@@ -77,6 +57,25 @@ export default function ServerDetailPage() {
     }
   };
 
+  const retryAgentQuarantine = useMutation({
+    mutationFn: () => api.post<{ taskIds: string[] }>(
+      `/admin/servers/${id}/agent-quarantine/retry`,
+    ),
+    onSuccess: ({ taskIds }) => {
+      toast({
+        title: 'Agent 隔离已解除',
+        description: `将重新协调 ${taskIds.length} 个保留任务，请启动已修复的 Agent。`,
+      });
+      queryClient.invalidateQueries({ queryKey: queryKeys.servers.detail(id) });
+      queryClient.invalidateQueries({ queryKey: queryKeys.servers.admin });
+    },
+    onError: (error) => toast({
+      title: '解除隔离失败',
+      description: error.message,
+      variant: 'destructive',
+    }),
+  });
+
   if (!server) return (
     <div className="px-4 py-4 md:px-6 flex items-center gap-2 text-muted-foreground/70">
       <div className="w-4 h-4 border-2 border-muted border-t-primary rounded-full animate-spin" />
@@ -85,9 +84,19 @@ export default function ServerDetailPage() {
   );
 
   const online = server.status === 'online';
-  const statusLabel = online ? '在线' : server.status === 'offline' ? '离线' : '未知';
-  const networkSummary = [server.slug, server.ipCidr].filter(Boolean).join(' · ');
+  const quarantined = server.status === ServerStatus.AgentQuarantined;
+  const inventoryQuarantined = server.quarantineCode === 'AGENT_INVENTORY_FAULT';
+  const statusLabel = online
+    ? '在线'
+    : quarantined
+      ? '已隔离'
+      : server.status === ServerStatus.AgentStateUnready
+        ? '状态未就绪'
+        : server.status === 'offline'
+          ? '离线'
+          : '未知';
   const gpus = server.gpus ?? [];
+  const hasGpu = gpus.length > 0;
 
   return (
     <div className="px-4 py-4 md:px-6 space-y-5 w-full">
@@ -101,17 +110,47 @@ export default function ServerDetailPage() {
           </Link>
           <div>
             <h1 className="text-2xl font-semibold tracking-tight text-foreground">{server.name}</h1>
-            <p className="text-sm text-muted-foreground/70 font-mono mt-0.5">{networkSummary || '-'}</p>
+            <p className="text-sm text-muted-foreground/70 font-mono mt-0.5">{server.slug}</p>
           </div>
         </div>
         <div className={`flex items-center gap-1.5 text-sm px-3 py-1.5 rounded-full font-medium
           ${online ? 'bg-green-50 text-green-700 border border-green-200'
+            : quarantined ? 'bg-red-50 text-red-700 border border-red-300'
             : server.status === 'offline' ? 'bg-red-50 text-red-600 border border-red-200'
             : 'bg-muted text-muted-foreground border border-border'}`}>
           {online ? <Wifi className="h-4 w-4" /> : <WifiOff className="h-4 w-4" />}
           {statusLabel}
         </div>
       </div>
+
+      {quarantined && (
+        <div className="flex flex-col gap-3 rounded-lg border border-red-300 bg-red-50 p-4 text-red-900 dark:border-red-900 dark:bg-red-950/30 dark:text-red-200 sm:flex-row sm:items-center sm:justify-between">
+          <div>
+            <div className="font-medium">
+              {inventoryQuarantined ? 'Agent 权威资源清单失败，服务器已安全隔离' : 'Agent 任务结果不可信，服务器已安全隔离'}
+            </div>
+            <p className="mt-1 text-sm opacity-80">
+              {inventoryQuarantined
+                ? `${server.quarantineMessage ?? '无法证明当前物理资源清单。'} 同一网络的新 IP 分配已冻结；请先修复或清理物理资源，再允许 Agent 重连。只有新的完整清单成功提交后才会解除冻结。`
+                : `${server.quarantineMessage ?? '任务的物理结果无法被安全确认。'} 相关物理资源锁仍被保留；请先修复 Agent 或 Backend 投影，再显式重试同一任务。`}
+            </p>
+          </div>
+          {canManage && (
+            <Button
+              variant="destructive"
+              onClick={() => retryAgentQuarantine.mutate()}
+              disabled={retryAgentQuarantine.isPending}
+            >
+              <RefreshCw className={`h-4 w-4 ${retryAgentQuarantine.isPending ? 'animate-spin' : ''}`} />
+              {retryAgentQuarantine.isPending
+                ? '解除中...'
+                : inventoryQuarantined
+                  ? '允许重连并重新采集'
+                  : '解除隔离并重试'}
+            </Button>
+          )}
+        </div>
+      )}
 
       {/* Info grid */}
       <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
@@ -125,9 +164,6 @@ export default function ServerDetailPage() {
         >
           <InfoRow label="名称" value={server.name} />
           <InfoRow label="路由标识" value={server.slug} mono />
-          <InfoRow label="物理网卡" value={server.parentIface} mono />
-          <InfoRow label="CIDR" value={server.ipCidr} mono />
-          <InfoRow label="网关" value={server.gateway} mono />
           <InfoRow label="最近活跃" value={relativeTime(server.lastSeenAt)} />
           {canManage && (
             <div className="pt-2 mt-2">
@@ -142,7 +178,7 @@ export default function ServerDetailPage() {
           )}
         </InfoCard>
 
-        {canManage && <DockerDaemonCard serverId={id} online={online} daemonStatus={server.dockerDaemon ?? null} />}
+        {canManage && <DockerDaemonCard online={online} daemonStatus={server.dockerDaemon ?? null} />}
 
         {gpus.length > 0 && (
           <InfoCard title="GPU" icon={<Cpu className="h-4 w-4 text-purple-500" />}>
@@ -187,28 +223,14 @@ export default function ServerDetailPage() {
       <div className={`grid grid-cols-1 gap-4 items-start ${canManage ? 'lg:grid-cols-3' : ''}`}>
         <DataDisksCard
           disks={disks}
-          canManage={canManage}
           canManageContainers={canManageContainers}
-          onAdd={() => setShowAddDisk(true)}
-          onEdit={setEditingDisk}
-          onRemove={(diskId) => removeDisk.mutate(diskId)}
         />
-        {canManage && <ServerDefaultsCard server={server} serverId={id} />}
         {canManage && <SelfCheckCard serverId={id} online={online} />}
       </div>
 
       {/* Host & GPU metrics */}
-      {online && <ServerMetricsSection serverId={id} isGpuServer={server.isGpuServer} />}
+      {online && <ServerMetricsSection serverId={id} hasGpu={hasGpu} />}
 
-      {canManage && <AddDiskDialog serverId={id} open={showAddDisk} onOpenChange={setShowAddDisk} />}
-      {canManage && (
-        <EditDiskDialog
-          serverId={id}
-          disk={editingDisk}
-          open={editingDisk !== null}
-          onOpenChange={(v) => { if (!v) setEditingDisk(null); }}
-        />
-      )}
       {canManage && <EditServerDialog server={server} open={showEditServer} onOpenChange={setShowEditServer} />}
 
       <AlertDialog open={showRegenConfirm} onOpenChange={setShowRegenConfirm}>
@@ -231,7 +253,7 @@ export default function ServerDetailPage() {
   );
 }
 
-function ServerMetricsSection({ serverId, isGpuServer }: { serverId: string; isGpuServer: boolean }) {
+function ServerMetricsSection({ serverId, hasGpu }: { serverId: string; hasGpu: boolean }) {
   const [range, setRange] = useState('1h');
   return (
     <div className="space-y-4">
@@ -240,30 +262,17 @@ function ServerMetricsSection({ serverId, isGpuServer }: { serverId: string; isG
         <TimeRangeSelector value={range} onChange={setRange} />
       </div>
       <HostSection serverId={serverId} range={range} admin />
-      {isGpuServer && <GpuSection serverId={serverId} range={range} admin />}
+      {hasGpu && <GpuSection serverId={serverId} range={range} admin />}
     </div>
   );
 }
 
 function DockerDaemonCard({
-  serverId, online, daemonStatus,
+  online, daemonStatus,
 }: {
-  serverId: string;
   online: boolean;
   daemonStatus: DockerDaemonStatus | null;
 }) {
-  const qc = useQueryClient();
-  const { mutate, isPending } = useMutation({
-    mutationFn: () => api.post<DockerDaemonStatus>(`/admin/servers/${serverId}/docker-daemon/reconcile`),
-    onSuccess: (fresh) => {
-      qc.setQueryData(queryKeys.servers.detail(serverId), (old: ServerDto | undefined) =>
-        old ? { ...old, dockerDaemon: fresh } : old,
-      );
-      toast({ title: 'Docker 守护进程协调完成' });
-    },
-    onError: (e) => toast({ title: '协调失败', description: e.message, variant: 'destructive' }),
-  });
-
   const stateColor = (s: DockerDaemonStatus | null) => {
     if (!s) return 'bg-muted text-muted-foreground border-border';
     switch (s.state) {
@@ -298,15 +307,6 @@ function DockerDaemonCard({
               {stateLabel(daemonStatus)}
             </span>
           )}
-          <Button
-            size="sm" variant="outline"
-            onClick={() => mutate()}
-            disabled={isPending || !online}
-            title={!online ? 'Agent 离线，无法协调' : '重新检查并同步 systemd unit 文件'}
-          >
-            <RefreshCw className={`h-4 w-4 ${isPending ? 'animate-spin' : ''}`} />
-            {isPending ? '协调中...' : '重新协调'}
-          </Button>
         </div>
       </div>
 
@@ -349,18 +349,10 @@ function DaemonRow({ label, value, mono, highlight }: { label: string; value: st
 
 function DataDisksCard({
   disks,
-  canManage,
   canManageContainers,
-  onAdd,
-  onEdit,
-  onRemove,
 }: {
   disks: DataDiskDto[];
-  canManage: boolean;
   canManageContainers: boolean;
-  onAdd: () => void;
-  onEdit: (disk: DataDiskDto) => void;
-  onRemove: (diskId: string) => void;
 }) {
   return (
     <div className="bg-card rounded-lg border border-border p-4">
@@ -368,17 +360,12 @@ function DataDisksCard({
         <h2 className="text-sm font-medium text-foreground/90 flex items-center gap-2">
           <HardDrive className="h-4 w-4 text-muted-foreground" />数据盘
         </h2>
-        {canManage && (
-          <Button size="sm" variant="outline" onClick={onAdd}>
-            <Plus className="h-4 w-4" />添加
-          </Button>
-        )}
       </div>
 
       {disks.length === 0 ? (
         <div className="bg-muted/50 rounded-lg border border-dashed border-border p-6 text-center">
           <div className="text-sm text-muted-foreground/70">
-            {canManage ? '还没有数据盘，点击"添加"注册挂载点' : '暂无数据盘'}
+            暂无 agent 配置的数据盘
           </div>
         </div>
       ) : (
@@ -404,25 +391,6 @@ function DataDisksCard({
                     </div>
                     <span className="font-mono text-xs text-muted-foreground/70 truncate">{disk.mountPoint}</span>
                   </div>
-                  {canManage && (
-                    <div className="flex items-center gap-0.5 shrink-0">
-                      <Button
-                        size="icon" variant="ghost"
-                        className="h-8 w-8 text-muted-foreground hover:text-foreground"
-                        onClick={() => onEdit(disk)}
-                        title="编辑名称"
-                      >
-                        <Pencil className="h-4 w-4" />
-                      </Button>
-                      <Button
-                        size="icon" variant="ghost"
-                        className="h-8 w-8 text-red-400 hover:text-red-600 hover:bg-red-50"
-                        onClick={() => onRemove(disk.diskId)}
-                      >
-                        <Trash2 className="h-4 w-4" />
-                      </Button>
-                    </div>
-                  )}
                 </div>
                 {total > 0 ? (
                   <div className="text-xs text-muted-foreground/70">
@@ -548,193 +516,15 @@ function InfoRow({ label, value, mono }: { label: string; value: string; mono?: 
   );
 }
 
-function AddDiskDialog({ serverId, open, onOpenChange }: {
-  serverId: string; open: boolean; onOpenChange: (v: boolean) => void;
-}) {
-  const qc = useQueryClient();
-  const [mountPoint, setMountPoint] = useState('');
-  const [label, setLabel] = useState('');
-
-  const { mutate, isPending } = useMutation({
-    mutationFn: () => api.post<DiskOperationResponse>(`/admin/servers/${serverId}/disks`, {
-      mountPoint, label: label || undefined,
-    }),
-    onSuccess: (res) => {
-      qc.invalidateQueries({ queryKey: queryKeys.servers.disks('admin', serverId) });
-      toast({
-        title: '数据盘添加已排队',
-        description: res.operationId ? `操作 ${res.operationId.slice(0, 8)}` : undefined,
-      });
-      setMountPoint(''); setLabel('');
-      onOpenChange(false);
-    },
-    onError: (e) => toast({ title: '添加失败', description: e.message, variant: 'destructive' }),
-  });
-
-  return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-sm">
-        <DialogHeader><DialogTitle>添加数据盘</DialogTitle></DialogHeader>
-        <div className="space-y-3">
-          <div className="space-y-1.5">
-            <Label className="text-sm text-foreground/90">挂载点</Label>
-            <Input placeholder="/data" value={mountPoint} onChange={(e) => setMountPoint(e.target.value)} />
-            <p className="text-xs text-muted-foreground/70">必须为 XFS 文件系统并启用 pquota 选项</p>
-          </div>
-          <div className="space-y-1.5">
-            <Label className="text-sm text-foreground/90">名称（可选）</Label>
-            <Input placeholder="例如：主存储" value={label} onChange={(e) => setLabel(e.target.value)} />
-            <p className="text-xs text-muted-foreground/70">用于在界面中识别该数据盘；留空则使用挂载路径末级名称</p>
-          </div>
-        </div>
-        <DialogFooter>
-          <Button variant="outline" onClick={() => onOpenChange(false)}>取消</Button>
-          <Button onClick={() => mutate()} disabled={isPending || !mountPoint}>
-            {isPending ? '添加中...' : '添加'}
-          </Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
-  );
-}
-
-function EditDiskDialog({ serverId, disk, open, onOpenChange }: {
-  serverId: string;
-  disk: DataDiskDto | null;
-  open: boolean;
-  onOpenChange: (v: boolean) => void;
-}) {
-  const qc = useQueryClient();
-  const [label, setLabel] = useState('');
-
-  useEffect(() => {
-    if (open && disk) setLabel(disk.label ?? '');
-  }, [open, disk]);
-
-  const { mutate, isPending } = useMutation({
-    mutationFn: () =>
-      api.patch<DiskOperationResponse>(
-        `/admin/servers/${encodeURIComponent(serverId.trim())}/disks/${encodeURIComponent(disk!.diskId.trim())}`,
-        {
-          label: label.trim() === '' ? null : label.trim(),
-        },
-      ),
-    onSuccess: (res) => {
-      qc.invalidateQueries({ queryKey: queryKeys.servers.disks('admin', serverId) });
-      toast({
-        title: '数据盘更新已排队',
-        description: res.operationId ? `操作 ${res.operationId.slice(0, 8)}` : undefined,
-      });
-      onOpenChange(false);
-    },
-    onError: (e) => toast({ title: '更新失败', description: e.message, variant: 'destructive' }),
-  });
-
-  return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-sm">
-        <DialogHeader><DialogTitle>编辑数据盘名称</DialogTitle></DialogHeader>
-        {disk && (
-          <>
-            <p className="text-xs text-muted-foreground font-mono truncate" title={disk.mountPoint}>{disk.mountPoint}</p>
-            <div className="space-y-3 pt-2">
-              <div className="space-y-1.5">
-                <Label className="text-sm text-foreground/90">名称</Label>
-                <Input placeholder="例如：主存储" value={label} onChange={(e) => setLabel(e.target.value)} />
-                <p className="text-xs text-muted-foreground/70">留空则回到默认显示（挂载路径末级）</p>
-              </div>
-            </div>
-            <DialogFooter>
-              <Button variant="outline" onClick={() => onOpenChange(false)}>取消</Button>
-              <Button onClick={() => mutate()} disabled={isPending || !disk}>
-                {isPending ? '保存中...' : '保存'}
-              </Button>
-            </DialogFooter>
-          </>
-        )}
-      </DialogContent>
-    </Dialog>
-  );
-}
-
-function ServerDefaultsCard({ server, serverId }: { server: ServerDto; serverId: string }) {
-  const qc = useQueryClient();
-  const [editing, setEditing] = useState(false);
-  const [form, setForm] = useState<ResourceFormValue>(() => serverDefaultsToForm(server));
-
-  const { mutate, isPending } = useMutation({
-    mutationFn: () => api.patch(`/admin/servers/${serverId}/defaults`, formToServerDefaultsPayload(form)),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: queryKeys.servers.detail(serverId) });
-      toast({ title: '默认资源已更新' });
-      setEditing(false);
-    },
-    onError: (e) => toast({ title: '更新失败', description: e.message, variant: 'destructive' }),
-  });
-
-  return (
-    <div className="bg-card rounded-lg border border-border p-4">
-      <div className="flex items-center justify-between mb-3">
-        <h2 className="text-sm font-medium text-foreground/90 flex items-center gap-2">
-          <Settings className="h-4 w-4 text-muted-foreground" />默认资源限制
-        </h2>
-        <Button size="sm" variant="outline"
-          onClick={() => {
-            if (!editing) setForm(serverDefaultsToForm(server));
-            setEditing(!editing);
-          }}>
-          {editing ? '取消' : '编辑'}
-        </Button>
-      </div>
-
-      {!editing ? (
-        <div className="grid grid-cols-2 gap-2 text-sm">
-          <div className="flex justify-between py-1 border-b border-border">
-            <span className="text-muted-foreground">默认 CPU</span>
-            <span className="text-foreground/90 font-mono text-xs">{server.defaultCpuMillis > 0 ? `${server.defaultCpuMillis / 1000} 核` : '不限制'}</span>
-          </div>
-          <div className="flex justify-between py-1 border-b border-border">
-            <span className="text-muted-foreground">默认内存</span>
-            <span className="text-foreground/90 font-mono text-xs">{server.defaultMemBytes > 0 ? formatBytes(server.defaultMemBytes) : '不限制'}</span>
-          </div>
-          <div className="flex justify-between py-1 border-b border-border">
-            <span className="text-muted-foreground">默认磁盘</span>
-            <span className="text-foreground/90 font-mono text-xs">{server.defaultDiskBytes > 0 ? formatBytes(server.defaultDiskBytes) : '不限制'}</span>
-          </div>
-          {server.isGpuServer && (
-            <div className="flex justify-between py-1">
-              <span className="text-muted-foreground">GPU 默认模式</span>
-              <span className="text-foreground/90 font-mono text-xs">{server.defaultGpuMode}
-                {server.defaultGpuMode === GpuGrantMode.Indices ? ` [${server.defaultGpuIndices?.join(',')}]` : ''}
-              </span>
-            </div>
-          )}
-        </div>
-      ) : (
-        <div className="space-y-3">
-          <ResourceGrantForm value={form} onChange={setForm} showGpu={server.isGpuServer} />
-          <Button size="sm" onClick={() => mutate()} disabled={isPending}>
-            {isPending ? '保存中...' : '保存默认值'}
-          </Button>
-        </div>
-      )}
-    </div>
-  );
-}
-
 function EditServerDialog({ server, open, onOpenChange }: {
   server: ServerDto; open: boolean; onOpenChange: (v: boolean) => void;
 }) {
   const qc = useQueryClient();
   const [name, setName] = useState(server.name);
   const [slug, setSlug] = useState(server.slug);
-  const [parentIface, setParentIface] = useState(server.parentIface);
-  const [ipCidr, setIpCidr] = useState(server.ipCidr);
-  const [gateway, setGateway] = useState(server.gateway);
-  const [isGpuServer, setIsGpuServer] = useState(server.isGpuServer);
 
   const { mutate, isPending } = useMutation({
-    mutationFn: () => api.patch(`/admin/servers/${server.id}`, { name, slug, parentIface, ipCidr, gateway, isGpuServer }),
+    mutationFn: () => api.patch(`/admin/servers/${server.id}`, { name, slug }),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: queryKeys.servers.detail(server.id) });
       qc.invalidateQueries({ queryKey: queryKeys.servers.admin });
@@ -748,17 +538,11 @@ function EditServerDialog({ server, open, onOpenChange }: {
     if (v) {
       setName(server.name);
       setSlug(server.slug);
-      setParentIface(server.parentIface);
-      setIpCidr(server.ipCidr);
-      setGateway(server.gateway);
-      setIsGpuServer(server.isGpuServer);
     }
     onOpenChange(v);
   };
 
-  const changed = name !== server.name || slug !== server.slug || parentIface !== server.parentIface
-    || ipCidr !== server.ipCidr || gateway !== server.gateway
-    || isGpuServer !== server.isGpuServer;
+  const changed = name !== server.name || slug !== server.slug;
 
   return (
     <Dialog open={open} onOpenChange={handleOpen}>
@@ -773,34 +557,10 @@ function EditServerDialog({ server, open, onOpenChange }: {
             <Label className="text-sm text-foreground/90">路由标识</Label>
             <Input value={slug} onChange={(e) => setSlug(e.target.value)} placeholder="gpu-server-1" className="font-mono" />
           </div>
-          <div className="space-y-1.5">
-            <Label className="text-sm text-foreground/90">物理网卡</Label>
-            <Input value={parentIface} onChange={(e) => setParentIface(e.target.value)} placeholder="eth0" className="font-mono" />
-          </div>
-          <div className="space-y-1.5">
-            <Label className="text-sm text-foreground/90">网段 CIDR</Label>
-            <Input value={ipCidr} onChange={(e) => setIpCidr(e.target.value)} placeholder="192.168.100.0/24" className="font-mono" />
-          </div>
-          <div className="space-y-1.5">
-            <Label className="text-sm text-foreground/90">网关</Label>
-            <Input value={gateway} onChange={(e) => setGateway(e.target.value)} placeholder="192.168.100.1" className="font-mono" />
-          </div>
-          <div className="flex items-center gap-2 pt-1">
-            <input
-              id="edit-is-gpu-server"
-              type="checkbox"
-              checked={isGpuServer}
-              onChange={(e) => setIsGpuServer(e.target.checked)}
-              className="h-4 w-4 rounded border-border"
-            />
-            <Label htmlFor="edit-is-gpu-server" className="text-sm text-foreground/90 cursor-pointer">
-              GPU 服务器（启用 GPU 监控与配额）
-            </Label>
-          </div>
         </div>
         <DialogFooter>
           <Button variant="outline" onClick={() => onOpenChange(false)}>取消</Button>
-          <Button onClick={() => mutate()} disabled={isPending || !changed || !name || !slug || !parentIface || !ipCidr || !gateway}>
+          <Button onClick={() => mutate()} disabled={isPending || !changed || !name || !slug}>
             {isPending ? '保存中...' : '保存'}
           </Button>
         </DialogFooter>

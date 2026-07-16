@@ -5,7 +5,10 @@ import {
   Index,
   PrimaryColumn,
   UpdateDateColumn,
+  ForeignKey,
 } from 'typeorm';
+import { ServerEntity } from './server.entity.js';
+import { AgentTaskEntity } from './agent-task.entity.js';
 
 @Entity('resource_locks')
 export class ResourceLockEntity {
@@ -13,10 +16,12 @@ export class ResourceLockEntity {
   resourceKey: string;
 
   @Index()
-  @Column({ name: 'operation_id', type: 'text' })
-  operationId: string;
+  @ForeignKey(() => AgentTaskEntity, { onDelete: 'RESTRICT' })
+  @Column({ name: 'task_id', type: 'text' })
+  taskId: string;
 
   @Index()
+  @ForeignKey(() => ServerEntity, { onDelete: 'RESTRICT' })
   @Column({ name: 'server_id', type: 'text' })
   serverId: string;
 

@@ -34,7 +34,7 @@ deploy_one() {
   ssh "$ssh_target" "${sudo_prefix}systemctl stop nyabase-agent 2>/dev/null || true; ${sudo_prefix}rm -f /usr/local/bin/nyabase-agent"
   scp dist/nyabase-agent "$ssh_target:/tmp/nyabase-agent"
   scp "$config_path" "$ssh_target:/tmp/nyabase-agent.yaml"
-  ssh "$ssh_target" "${sudo_prefix}mkdir -p /etc/nyabase /var/lib/nyabase-agent; ${sudo_prefix}mv /tmp/nyabase-agent /usr/local/bin/nyabase-agent; ${sudo_prefix}chmod +x /usr/local/bin/nyabase-agent; ${sudo_prefix}mv /tmp/nyabase-agent.yaml /etc/nyabase/agent.yaml; ${sudo_prefix}chmod 600 /etc/nyabase/agent.yaml"
+  ssh "$ssh_target" "${sudo_prefix}mkdir -p /etc/nyabase; ${sudo_prefix}mv /tmp/nyabase-agent /usr/local/bin/nyabase-agent; ${sudo_prefix}chmod +x /usr/local/bin/nyabase-agent; ${sudo_prefix}mv /tmp/nyabase-agent.yaml /etc/nyabase/agent.yaml; ${sudo_prefix}chmod 600 /etc/nyabase/agent.yaml"
   ssh "$ssh_target" "${sudo_prefix}cat > /tmp/nyabase-agent.service" <<'EOF'
 [Unit]
 Description=nyabase Agent
@@ -47,9 +47,14 @@ User=root
 ExecStart=/usr/local/bin/nyabase-agent --config /etc/nyabase/agent.yaml
 Restart=always
 RestartSec=5
+KillMode=control-group
+TimeoutStopSec=30s
+SendSIGKILL=yes
 StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=nyabase-agent
+StateDirectory=nyabase-agent
+StateDirectoryMode=0700
 
 [Install]
 WantedBy=multi-user.target

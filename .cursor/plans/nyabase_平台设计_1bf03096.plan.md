@@ -179,7 +179,7 @@ export interface Envelope<K extends string = string, P = unknown> {
 
 实现位置：[packages/agent/src/quota/](packages/agent/src/quota/)
 - `XfsQuotaManager`：
-  - 启动期重建 `/etc/projects` 与 `/etc/projid` 与磁盘上实际目录的对齐：扫描每个 DataDisk 的 `<mount>/<userId>/`，按 userId 聚合 projectId（agent 本地 `/var/lib/nyabase-agent/projects.json` 持久化 userId → projectId 映射）。
+  - `/etc/projects` 与 `/etc/projid` 是受管 XFS 真实状态；projectId 由稳定 numeric user ID 推导，Agent 不持久化私有映射或恢复文件。
   - 对每个 running 容器（按 nyabase label 过滤）的 GraphDriver upper/work 目录加入对应用户的 project。
   - `xfs_quota -x -c "limit -p bhard=<bytes> <pid>" <fs>` 设置硬限。
   - 用量上报：`xfs_quota -x -c "report -N -p" <fs>` 解析后随 stateReport / metricsBatch 一并发回。
@@ -269,7 +269,7 @@ agent 端 [packages/agent/src/ws/](packages/agent/src/ws/)：
 - 单一长连接，唯一对外通道。
 - 指数退避重连，断连期间命令丢弃（backend 端 ack 超时返回错误）；agent 内部状态/quota/IP 操作仍然依赖 docker label 真相。
 - 出站 envelope 自带 uuidv7 id（事件类省略）；命令处理统一接口 `Handler<TPayload, TResult>`。
-- 本地状态文件：`/var/lib/nyabase-agent/state.json` 仅存 user→projectId、agent token、上一次成功的 macvlan 配置等"运维元数据"，**不存任何容器信息**。
+- Agent 不保存本地业务/协调状态；token 与网络参数来自静态配置，任务恢复只依赖 Backend task 与受管资源真实状态。当前执行架构以 `docs/agent-task-execution.md` 为准。
 
 ## 12. 用户与权限
 

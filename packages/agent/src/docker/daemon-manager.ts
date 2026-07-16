@@ -1,8 +1,11 @@
 import * as fs from 'fs';
+import * as path from 'path';
 import { execFile } from 'child_process';
 import { promisify } from 'util';
+import { randomBytes } from 'crypto';
 import Dockerode from 'dockerode';
 import { DockerDaemonState, LABEL, type DockerDaemonStatus } from '@nyabase/common';
+import { runIsolatedCommand } from '../fs/isolated-command.js';
 import {
   calculateDockerResourceLimitPlan,
   DOCKER_LIMIT_SLICE_NAME,
@@ -15,12 +18,30 @@ import {
 const execFileAsync = promisify(execFile);
 
 export const SOCKET_PATH = '/run/nyabase-agent/docker.sock';
-const UNIT_NAME = 'nyabase-docker.service';
+export const NYABASE_DOCKER_UNIT_NAME = 'nyabase-docker.service';
+const UNIT_NAME = NYABASE_DOCKER_UNIT_NAME;
 const UNIT_PATH = `/etc/systemd/system/${UNIT_NAME}`;
 
 /** Maximum wait time for dockerd socket to become reachable after start (ms) */
 const SOCKET_WAIT_TIMEOUT_MS = 60_000;
 const SOCKET_POLL_INTERVAL_MS = 500;
+export const DAEMON_DOCKER_PROBE_TIMEOUT_MS = 5_000;
+
+export function assertDockerDaemonIdentity(
+  configuredRoot: string,
+  info: { Driver?: string; DockerRootDir?: string },
+): void {
+  const liveRoot = typeof info.DockerRootDir === 'string'
+    ? path.resolve(info.DockerRootDir)
+    : null;
+  const expectedRoot = path.resolve(configuredRoot);
+  if (liveRoot !== expectedRoot) {
+    throw new Error(`dockerd data-root mismatch: expected ${expectedRoot}, observed ${liveRoot ?? 'missing'}`);
+  }
+  if (info.Driver !== 'overlay2') {
+    throw new Error(`dockerd storage driver mismatch: expected overlay2, observed ${info.Driver ?? 'missing'}`);
+  }
+}
 
 const NVIDIA_RUNTIME_BIN = '/usr/bin/nvidia-container-runtime';
 
@@ -32,16 +53,127 @@ const NVIDIA_RUNTIME_BIN = '/usr/bin/nvidia-container-runtime';
  */
 const NYABASE_DAEMON_JSON_PATH = '/etc/nyabase/docker-daemon.json';
 
-function ensureNyabaseDaemonJson(): void {
-  try {
-    const dir = '/etc/nyabase';
-    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true, mode: 0o755 });
-    if (!fs.existsSync(NYABASE_DAEMON_JSON_PATH)) {
-      fs.writeFileSync(NYABASE_DAEMON_JSON_PATH, '{}\n', { mode: 0o644 });
-    }
-  } catch (e) {
-    console.warn('[DaemonManager] Could not write docker-daemon.json:', e);
+export class DaemonDockerProbeTimeoutError extends Error {
+  constructor(
+    public readonly operation: string,
+    public readonly timeoutMs: number,
+  ) {
+    super(`Docker daemon probe timed out after ${timeoutMs}ms: ${operation}`);
+    this.name = 'DaemonDockerProbeTimeoutError';
   }
+}
+
+export function withDaemonDockerDeadline<T>(
+  promise: Promise<T>,
+  timeoutMs: number,
+  operation: string,
+): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => reject(
+      new DaemonDockerProbeTimeoutError(operation, timeoutMs),
+    ), timeoutMs);
+    timer.unref();
+    promise.then(
+      (value) => { clearTimeout(timer); resolve(value); },
+      (error) => { clearTimeout(timer); reject(error); },
+    );
+  });
+}
+
+export interface DockerSocketWaitOptions {
+  waitTimeoutMs?: number;
+  pollIntervalMs?: number;
+  probeTimeoutMs?: number;
+  description?: string;
+}
+
+/**
+ * Poll dockerd with a deadline on every individual ping as well as the whole
+ * startup wait. A never-settling ping therefore cannot defeat reconciliation.
+ */
+export async function waitForDockerSocket(
+  ping: () => Promise<unknown>,
+  options: DockerSocketWaitOptions = {},
+): Promise<void> {
+  const waitTimeoutMs = options.waitTimeoutMs ?? SOCKET_WAIT_TIMEOUT_MS;
+  const pollIntervalMs = options.pollIntervalMs ?? SOCKET_POLL_INTERVAL_MS;
+  const probeTimeoutMs = options.probeTimeoutMs ?? DAEMON_DOCKER_PROBE_TIMEOUT_MS;
+  const description = options.description ?? 'dockerd socket';
+  const deadline = Date.now() + waitTimeoutMs;
+
+  while (Date.now() < deadline) {
+    const remaining = deadline - Date.now();
+    try {
+      await withDaemonDockerDeadline(
+        ping(),
+        Math.max(1, Math.min(probeTimeoutMs, remaining)),
+        `ping ${description}`,
+      );
+      return;
+    } catch {
+      const pollRemaining = deadline - Date.now();
+      if (pollRemaining <= 0) break;
+      await new Promise<void>((resolve) => {
+        setTimeout(resolve, Math.min(pollIntervalMs, pollRemaining));
+      });
+    }
+  }
+  throw new Error(`Timed out waiting ${waitTimeoutMs / 1000}s for ${description}`);
+}
+
+/** Atomically converge a trusted root-owned config file to exact bytes. */
+export function ensureExactFileAtomic(filePath: string, expected: string, mode = 0o644): boolean {
+  const dir = path.dirname(filePath);
+  fs.mkdirSync(dir, { recursive: true, mode: 0o755 });
+  try {
+    const stat = fs.lstatSync(filePath);
+    if (stat.isSymbolicLink()) throw new Error(`Refusing symbolic-link config path ${filePath}`);
+    const fd = fs.openSync(filePath, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
+    try {
+      if (fs.readFileSync(fd, 'utf8') === expected) return true;
+    } finally {
+      fs.closeSync(fd);
+    }
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+  }
+
+  const tempPath = path.join(
+    dir,
+    `.${path.basename(filePath)}.${process.pid}.${randomBytes(8).toString('hex')}.tmp`,
+  );
+  let tempFd: number | null = null;
+  try {
+    tempFd = fs.openSync(
+      tempPath,
+      fs.constants.O_WRONLY
+      | fs.constants.O_CREAT
+      | fs.constants.O_EXCL
+      | fs.constants.O_NOFOLLOW,
+      mode,
+    );
+    fs.writeFileSync(tempFd, expected, 'utf8');
+    fs.fchmodSync(tempFd, mode);
+    fs.fsyncSync(tempFd);
+    fs.closeSync(tempFd);
+    tempFd = null;
+    fs.renameSync(tempPath, filePath);
+    const dirFd = fs.openSync(dir, fs.constants.O_RDONLY | fs.constants.O_DIRECTORY);
+    try {
+      fs.fsyncSync(dirFd);
+    } finally {
+      fs.closeSync(dirFd);
+    }
+    return false;
+  } catch (error) {
+    if (tempFd !== null) fs.closeSync(tempFd);
+    try { fs.unlinkSync(tempPath); } catch { /* best effort temp cleanup */ }
+    throw error;
+  }
+}
+
+function ensureNyabaseDaemonJson(): void {
+  ensureExactFileAtomic(NYABASE_DAEMON_JSON_PATH, '{}\n');
 }
 
 export function renderDockerLimitSliceFile(plan: DockerResourceLimitPlan): string | null {
@@ -92,7 +224,9 @@ ExecReload=/bin/kill -s HUP $MAINPID
 TimeoutStartSec=0
 RestartSec=5
 Restart=always
-KillMode=process
+KillMode=control-group
+TimeoutStopSec=30s
+SendSIGKILL=yes
 OOMScoreAdjust=-500
 RuntimeDirectory=nyabase-agent
 
@@ -111,7 +245,12 @@ export class DaemonManager {
     this.dockerRoot = dockerRoot;
     this.gpuEnabled = gpuEnabled;
     this.resourceLimitConfig = resourceLimitConfig;
-    this.dockerode = new Dockerode({ socketPath: SOCKET_PATH });
+    // DaemonManager only issues unary probes, so a modem-level timeout can
+    // safely destroy wedged HTTP requests (unlike long-lived exec/event APIs).
+    this.dockerode = new Dockerode({
+      socketPath: SOCKET_PATH,
+      timeout: DAEMON_DOCKER_PROBE_TIMEOUT_MS,
+    });
   }
 
   /**
@@ -122,12 +261,15 @@ export class DaemonManager {
   async reconcile(serverId: string): Promise<DockerDaemonStatus> {
     this.assertSupportedOs();
     this.assertDockerdPresent();
-    ensureNyabaseDaemonJson();
+    this.ensureDaemonConfig();
 
     const plan = this.getResourceLimitPlan();
     const inSync = this.syncSystemdUnits(plan);
+    // Always reload. A previous Agent may have crashed after atomically
+    // replacing the files but before systemd consumed them; on-disk equality
+    // is not evidence about systemd's loaded unit state.
+    await this.systemctl('daemon-reload');
     if (!inSync) {
-      await this.systemctl('daemon-reload');
       await this.systemctl('restart', UNIT_NAME);
     } else {
       await this.systemctl('start', UNIT_NAME);
@@ -137,7 +279,7 @@ export class DaemonManager {
 
     // Wait for socket to become reachable
     await this.waitForSocket();
-
+    await this.assertLiveDaemonIdentity();
     return this.getStatus(serverId);
   }
 
@@ -155,14 +297,22 @@ export class DaemonManager {
 
     let serverVersion: string | null = null;
     let storageDriver: string | null = null;
+    let liveDockerRoot: string | null = null;
     let lastError: string | null = null;
 
     if (active) {
       try {
-        const info = await this.dockerode.version() as { Version?: string };
-        serverVersion = info.Version ?? null;
-        const dockerInfo = await this.dockerode.info() as { Driver?: string };
+        const [versionInfo, dockerInfo] = await withDaemonDockerDeadline(
+          Promise.all([
+            this.dockerode.version() as Promise<{ Version?: string }>,
+            this.dockerode.info() as Promise<{ Driver?: string; DockerRootDir?: string }>,
+          ]),
+          DAEMON_DOCKER_PROBE_TIMEOUT_MS,
+          'read dockerd version and info',
+        );
+        serverVersion = versionInfo.Version ?? null;
         storageDriver = dockerInfo.Driver ?? null;
+        liveDockerRoot = dockerInfo.DockerRootDir ?? null;
       } catch (err) {
         lastError = err instanceof Error ? err.message : String(err);
       }
@@ -200,7 +350,7 @@ export class DaemonManager {
       enabled,
       active,
       pid: mainPid ?? null,
-      dockerRoot: this.dockerRoot,
+      dockerRoot: liveDockerRoot ?? this.dockerRoot,
       socketPath: SOCKET_PATH,
       serverVersion,
       storageDriver,
@@ -212,6 +362,15 @@ export class DaemonManager {
 
   getContainerCgroupParent(): string | null {
     return this.getResourceLimitPlan().cgroupParent;
+  }
+
+  private async assertLiveDaemonIdentity(): Promise<void> {
+    const info = await withDaemonDockerDeadline(
+      this.dockerode.info() as Promise<{ Driver?: string; DockerRootDir?: string }>,
+      DAEMON_DOCKER_PROBE_TIMEOUT_MS,
+      'verify dockerd physical identity',
+    );
+    assertDockerDaemonIdentity(this.dockerRoot, info);
   }
 
   private getResourceLimitPlan(): DockerResourceLimitPlan {
@@ -286,15 +445,13 @@ export class DaemonManager {
    * @returns true if file was already in sync (no write needed), false if it was updated.
    */
   private syncUnitFile(unitPath: string, expected: string): boolean {
-    try {
-      const current = fs.readFileSync(unitPath, 'utf-8');
-      if (current === expected) return true;
-    } catch {
-      // file does not exist — fall through to write
-    }
-    console.log('[DaemonManager] Writing unit file:', unitPath);
-    fs.writeFileSync(unitPath, expected, { mode: 0o644 });
-    return false;
+    const inSync = ensureExactFileAtomic(unitPath, expected);
+    if (!inSync) console.log('[DaemonManager] Wrote unit file:', unitPath);
+    return inSync;
+  }
+
+  private ensureDaemonConfig(): void {
+    ensureNyabaseDaemonJson();
   }
 
   private removeUnitFileIfExists(unitPath: string): boolean {
@@ -315,14 +472,28 @@ export class DaemonManager {
 
   private async countContainersOutsideCgroupParent(plan: DockerResourceLimitPlan): Promise<number | null> {
     if (!plan.enabled || plan.cgroupParent === null) return null;
+    const deadline = Date.now() + DAEMON_DOCKER_PROBE_TIMEOUT_MS;
+    const probe = <T>(promise: Promise<T>, operation: string): Promise<T> => {
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) {
+        return Promise.reject(new DaemonDockerProbeTimeoutError(operation, 0));
+      }
+      return withDaemonDockerDeadline(promise, remaining, operation);
+    };
     try {
-      const containers = await this.dockerode.listContainers({
-        all: true,
-        filters: { label: [`${LABEL.MANAGED}=true`] },
-      });
+      const containers = await probe(
+        this.dockerode.listContainers({
+          all: true,
+          filters: { label: [`${LABEL.MANAGED}=true`] },
+        }),
+        'list managed containers for cgroup audit',
+      );
       let count = 0;
       for (const container of containers) {
-        const info = await this.dockerode.getContainer(container.Id).inspect();
+        const info = await probe(
+          this.dockerode.getContainer(container.Id).inspect(),
+          `inspect managed container ${container.Id} for cgroup audit`,
+        );
         const cgroupParent = info.HostConfig?.CgroupParent ?? '';
         if (cgroupParent !== plan.cgroupParent) count += 1;
       }
@@ -339,11 +510,16 @@ export class DaemonManager {
 
   private async systemctl(...args: string[]): Promise<void> {
     try {
-      await execFileAsync('systemctl', args, { timeout: 30_000 });
+      // systemctl may outlive its caller while systemd is still completing a
+      // daemon start/restart. Keep the cross-restart physical flock in the
+      // helper so the next Agent must quiesce that effect before proceeding.
+      await runIsolatedCommand('/usr/bin/systemctl', args, 30_000);
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
-      // daemon-reload and enable failures are logged as warnings; start failures are propagated.
-      if (args[0] === 'daemon-reload' || args[0] === 'enable') {
+      // Enabling persistence is best effort for an already running Agent.
+      // daemon-reload is part of physical identity convergence and must fail
+      // closed; otherwise an old loaded unit can masquerade as the exact file.
+      if (args[0] === 'enable') {
         console.warn(`[DaemonManager] systemctl ${args.join(' ')} warning:`, msg);
         return;
       }
@@ -378,17 +554,9 @@ export class DaemonManager {
   }
 
   private async waitForSocket(): Promise<void> {
-    const deadline = Date.now() + SOCKET_WAIT_TIMEOUT_MS;
-    while (Date.now() < deadline) {
-      try {
-        await this.dockerode.ping();
-        return;
-      } catch {
-        await new Promise((r) => setTimeout(r, SOCKET_POLL_INTERVAL_MS));
-      }
-    }
-    throw new Error(
-      `Timed out waiting ${SOCKET_WAIT_TIMEOUT_MS / 1000}s for dockerd socket at ${SOCKET_PATH}`,
+    return waitForDockerSocket(
+      () => this.dockerode.ping(),
+      { description: `dockerd socket at ${SOCKET_PATH}` },
     );
   }
 }

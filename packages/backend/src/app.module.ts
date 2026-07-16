@@ -12,7 +12,10 @@ import { DataDirsModule } from './datadirs/datadirs.module.js';
 import { AuditModule } from './audit/audit.module.js';
 import { RemoteFsMountsModule } from './remote-fs/remote-fs-mounts.module.js';
 import { MountSourcesModule } from './mount-sources/mount-sources.module.js';
-import { OperationsModule } from './operations/operations.module.js';
+import { AgentTasksModule } from './agent-tasks/agent-tasks.module.js';
+import { AgentTasksController } from './agent-tasks/agent-tasks.controller.js';
+import { AdminAgentTasksController } from './agent-tasks/admin-agent-tasks.controller.js';
+import { AdminAgentQuarantineController } from './agent-tasks/admin-agent-quarantine.controller.js';
 import { SshModule } from './ssh/ssh.module.js';
 import { SystemSettingsModule } from './system-settings/system-settings.module.js';
 import { HttpProxyModule } from './http-proxy/http-proxy.module.js';
@@ -35,11 +38,12 @@ import { NyabaseConfigModule } from './config/nyabase-config.module.js';
     AuditModule,
     RemoteFsMountsModule,
     MountSourcesModule,
-    OperationsModule,
+    AgentTasksModule,
     SshModule,
     HttpProxyModule,
     SystemSettingsModule,
   ],
+  controllers: [AgentTasksController, AdminAgentTasksController, AdminAgentQuarantineController],
   providers: [AppService],
 })
 export class AppModule {}

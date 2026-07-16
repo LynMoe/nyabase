@@ -1,5 +1,21 @@
 import type { RemoteFsMountSpec } from '@nyabase/common';
 
+/**
+ * The requested filesystem state may already have been reached, but a
+ * security-sensitive teardown step (for example, deleting a Ceph secret)
+ * could not be proven complete. Callers must keep the task retryable instead
+ * of converting this into a successful terminal result.
+ */
+export class FsCleanupIncompleteError extends Error {
+  constructor(
+    message: string,
+    readonly cleanupCause?: unknown,
+  ) {
+    super(message);
+    this.name = 'FsCleanupIncompleteError';
+  }
+}
+
 export interface SelfCheckItem {
   id: string;
   label: string;

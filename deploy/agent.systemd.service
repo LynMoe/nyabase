@@ -7,16 +7,21 @@ Wants=network-online.target
 Type=simple
 User=root
 WorkingDirectory=/opt/nyabase-agent
-ExecStart=/usr/bin/node /opt/nyabase-agent/dist/main.js
+ExecStart=/opt/nyabase-agent/bin/nyabase-agent --config /etc/nyabase/agent.yaml
 Restart=always
 RestartSec=5
+KillMode=control-group
+TimeoutStopSec=30s
+SendSIGKILL=yes
 StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=nyabase-agent
 
-# State directory
+# Volatile runtime directory (removed automatically by systemd)
 RuntimeDirectory=nyabase-agent
+# Persistent directory for the never-unlinked cross-restart mutation lock.
 StateDirectory=nyabase-agent
+StateDirectoryMode=0700
 
 [Install]
 WantedBy=multi-user.target

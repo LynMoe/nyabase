@@ -1,5 +1,5 @@
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { api } from '../lib/api.js';
 import { Button } from '../components/ui/button.js';
 import { Input } from '../components/ui/input.js';
@@ -23,20 +23,44 @@ import {
 } from '../components/resource-grant-form.js';
 import { MountSourceGrantsPanel } from '../components/grants/mount-source-grants-panel.js';
 import { queryKeys } from '../lib/query-keys.js';
+import { useAdminAgentTaskBatchFeedback } from '../hooks/use-agent-task-tracker.js';
+
+type TaskIdsResponse = { taskIds?: string[] };
+type DeleteUserResponse = { deleted: boolean; taskIds: string[] };
 
 export default function UsersPage() {
   const [showCreate, setShowCreate] = useState(false);
   const [showGrants, setShowGrants] = useState<UserDto | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<UserDto | null>(null);
   const qc = useQueryClient();
+  const [trackedTaskIds, setTrackedTaskIds] = useState<string[]>([]);
+  const taskFeedback = useAdminAgentTaskBatchFeedback(trackedTaskIds);
+  useEffect(() => {
+    if (taskFeedback.allTerminal) {
+      void qc.invalidateQueries({ queryKey: queryKeys.users.admin });
+    }
+  }, [qc, taskFeedback.allTerminal]);
+  const trackTaskIds = (taskIds?: string[]) => {
+    if (!taskIds?.length) return;
+    setTrackedTaskIds((current) => [...new Set([...current, ...taskIds])]);
+  };
 
   const { data: users = [], isFetching, refetch } = useQuery({
     queryKey: queryKeys.users.admin, queryFn: () => api.get<UserDto[]>('/admin/users'),
   });
 
   const deleteUser = useMutation({
-    mutationFn: (id: string) => api.delete(`/admin/users/${id}`),
-    onSuccess: () => { qc.invalidateQueries({ queryKey: queryKeys.users.admin }); toast({ title: '用户已删除' }); },
+    mutationFn: (id: string) => api.delete<DeleteUserResponse>(`/admin/users/${id}`),
+    onSuccess: (result) => {
+      trackTaskIds(result.taskIds);
+      qc.invalidateQueries({ queryKey: queryKeys.users.admin });
+      toast({
+        title: result.deleted ? '用户已删除' : '用户删除已开始',
+        description: result.deleted
+          ? undefined
+          : `正在执行 ${result.taskIds.length} 个磁盘配额归零任务，全部成功后会自动完成删除`,
+      });
+    },
     onError: (e) => toast({ title: '删除失败', description: e.message, variant: 'destructive' }),
   });
 
@@ -87,7 +111,9 @@ export default function UsersPage() {
                   <span className={`inline-flex items-center gap-1 text-xs px-2 py-0.5 rounded-full font-medium
                     ${u.status === UserStatus.Active ? 'bg-green-50 text-green-700' : 'bg-red-50 text-red-600'}`}>
                     <span className={`w-1.5 h-1.5 rounded-full ${u.status === UserStatus.Active ? 'bg-green-500' : 'bg-red-400'}`} />
-                    {u.status === UserStatus.Active ? '正常' : '禁用'}
+                    {u.status === UserStatus.Active
+                      ? '正常'
+                      : u.status === UserStatus.Deleting ? '删除中' : '禁用'}
                   </span>
                 </td>
                 <td className="py-3 px-4 text-muted-foreground text-xs">
@@ -116,6 +142,7 @@ export default function UsersPage() {
         <UserGrantsDialog
           user={users.find((u) => u.id === showGrants.id) ?? showGrants}
           onClose={() => setShowGrants(null)}
+          onTaskIds={trackTaskIds}
         />
       )}
 
@@ -147,7 +174,15 @@ export default function UsersPage() {
 // UserGrantsDialog
 // ---------------------------------------------------------------------------
 
-function UserGrantsDialog({ user, onClose }: { user: UserDto; onClose: () => void }) {
+function UserGrantsDialog({
+  user,
+  onClose,
+  onTaskIds,
+}: {
+  user: UserDto;
+  onClose: () => void;
+  onTaskIds: (taskIds?: string[]) => void;
+}) {
   const [activeTab, setActiveTab] = useState<'effective' | 'groups' | 'overrides' | 'mount-source-grants' | 'ssh' | 'password'>('effective');
 
   const userTabs = [
@@ -195,8 +230,8 @@ function UserGrantsDialog({ user, onClose }: { user: UserDto; onClose: () => voi
 
         <div className="flex-1 overflow-y-auto min-h-0 py-3">
           {activeTab === 'effective' && <EffectiveTab userId={user.id} />}
-          {activeTab === 'groups' && <GroupsTab userId={user.id} user={user} />}
-          {activeTab === 'overrides' && <OverridesTab userId={user.id} />}
+          {activeTab === 'groups' && <GroupsTab userId={user.id} user={user} onTaskIds={onTaskIds} />}
+          {activeTab === 'overrides' && <OverridesTab userId={user.id} onTaskIds={onTaskIds} />}
           {activeTab === 'mount-source-grants' && (
             <MountSourceGrantsPanel
               subject={{ type: 'user', id: user.id }}
@@ -326,7 +361,6 @@ function EffectiveTab({ userId }: { userId: string }) {
               <span className="font-semibold text-foreground text-sm">
                 {server?.name ?? access.serverId.slice(0, 8)}
               </span>
-              {server && <span className="text-xs text-muted-foreground font-mono">{server.ipCidr}</span>}
             </div>
 
             <div className="px-4 py-3 space-y-3">
@@ -388,7 +422,15 @@ function EffectiveTab({ userId }: { userId: string }) {
 // Groups Tab
 // ---------------------------------------------------------------------------
 
-function GroupsTab({ userId, user }: { userId: string; user: UserDto }) {
+function GroupsTab({
+  userId,
+  user,
+  onTaskIds,
+}: {
+  userId: string;
+  user: UserDto;
+  onTaskIds: (taskIds?: string[]) => void;
+}) {
   const qc = useQueryClient();
 
   const { data: allGroups = [] } = useQuery({
@@ -396,8 +438,9 @@ function GroupsTab({ userId, user }: { userId: string; user: UserDto }) {
   });
 
   const addToGroup = useMutation({
-    mutationFn: (groupId: string) => api.post(`/admin/groups/${groupId}/members`, { userId }),
-    onSuccess: () => {
+    mutationFn: (groupId: string) => api.post<TaskIdsResponse>(`/admin/groups/${groupId}/members`, { userId }),
+    onSuccess: (result) => {
+      onTaskIds(result.taskIds);
       qc.invalidateQueries({ queryKey: queryKeys.users.admin });
       qc.invalidateQueries({ queryKey: ['user-effective-access', userId] });
       toast({ title: '已加入用户组' });
@@ -406,8 +449,9 @@ function GroupsTab({ userId, user }: { userId: string; user: UserDto }) {
   });
 
   const removeFromGroup = useMutation({
-    mutationFn: (groupId: string) => api.delete(`/admin/groups/${groupId}/members/${userId}`),
-    onSuccess: () => {
+    mutationFn: (groupId: string) => api.delete<TaskIdsResponse>(`/admin/groups/${groupId}/members/${userId}`),
+    onSuccess: (result) => {
+      onTaskIds(result.taskIds);
       qc.invalidateQueries({ queryKey: queryKeys.users.admin });
       qc.invalidateQueries({ queryKey: ['user-effective-access', userId] });
       toast({ title: '已移出用户组' });
@@ -454,7 +498,13 @@ function GroupsTab({ userId, user }: { userId: string; user: UserDto }) {
 // Overrides Tab
 // ---------------------------------------------------------------------------
 
-function OverridesTab({ userId }: { userId: string }) {
+function OverridesTab({
+  userId,
+  onTaskIds,
+}: {
+  userId: string;
+  onTaskIds: (taskIds?: string[]) => void;
+}) {
   const qc = useQueryClient();
   const [editingServerId, setEditingServerId] = useState<string | null>(null);
   const [form, setForm] = useState<ResourceFormValue>(EMPTY_RESOURCE_FORM);
@@ -470,11 +520,12 @@ function OverridesTab({ userId }: { userId: string }) {
   const getGrant = (sid: string) => serverGrants.find((g) => g.serverId === sid);
 
   const upsert = useMutation({
-    mutationFn: (serverId: string) => api.post(
+    mutationFn: (serverId: string) => api.post<ServerGrantDto & TaskIdsResponse>(
       `/admin/users/${userId}/server-grants/${serverId}`,
       formToGrantPayload(form),
     ),
-    onSuccess: () => {
+    onSuccess: (result) => {
+      onTaskIds(result.taskIds);
       qc.invalidateQueries({ queryKey: ['user-server-grants', userId] });
       qc.invalidateQueries({ queryKey: ['user-effective-access', userId] });
       toast({ title: '授权已更新' });
@@ -484,8 +535,9 @@ function OverridesTab({ userId }: { userId: string }) {
   });
 
   const remove = useMutation({
-    mutationFn: (serverId: string) => api.delete(`/admin/users/${userId}/server-grants/${serverId}`),
-    onSuccess: () => {
+    mutationFn: (serverId: string) => api.delete<TaskIdsResponse>(`/admin/users/${userId}/server-grants/${serverId}`),
+    onSuccess: (result) => {
+      onTaskIds(result.taskIds);
       qc.invalidateQueries({ queryKey: ['user-server-grants', userId] });
       qc.invalidateQueries({ queryKey: ['user-effective-access', userId] });
       toast({ title: '授权已移除' });
@@ -501,7 +553,7 @@ function OverridesTab({ userId }: { userId: string }) {
 
   return (
     <div className="space-y-2">
-      <p className="text-xs text-muted-foreground">独立授权会完全覆盖该用户在对应服务器上的用户组授权。空字段使用服务器默认值。</p>
+      <p className="text-xs text-muted-foreground">独立授权会完全覆盖该用户在对应服务器上的用户组授权。CPU / 内存 / 磁盘空字段表示不限制，GPU 空字段表示全部 GPU。</p>
       {servers.map((s) => {
         const g = getGrant(s.id);
         if (editingServerId === s.id) {
@@ -511,9 +563,8 @@ function OverridesTab({ userId }: { userId: string }) {
               <ResourceGrantForm
               value={form}
               onChange={setForm}
-              emptyHint="（空=服务器默认）"
-              showGpu={s.isGpuServer}
-              serverDefaults={{ cpuMillis: s.defaultCpuMillis, memBytes: s.defaultMemBytes, diskBytes: s.defaultDiskBytes }}
+              emptyHint="（空=不限）"
+              showGpu={(s.gpus?.length ?? 0) > 0}
               />
               <div className="flex gap-2 justify-end">
                 <Button size="sm" variant="outline" onClick={() => setEditingServerId(null)}>取消</Button>
@@ -537,17 +588,17 @@ function OverridesTab({ userId }: { userId: string }) {
               </div>
               {g ? (
                 <div className="text-xs mt-0.5 space-x-2">
-                  <span className={g.cpuMillis === null ? 'text-muted-foreground/40' : 'text-muted-foreground'}>
-                    {resourceVal(g.cpuMillis, s.defaultCpuMillis, formatCpu)} CPU
-                  </span>
-                  <span className={g.memBytes === null ? 'text-muted-foreground/40' : 'text-muted-foreground'}>
-                    {resourceVal(g.memBytes, s.defaultMemBytes, formatBytes)} 内存
-                  </span>
-                  <span className={g.diskBytes === null ? 'text-muted-foreground/40' : 'text-muted-foreground'}>
-                    {resourceVal(g.diskBytes, s.defaultDiskBytes, formatBytes)} 磁盘
+                  <span className="text-muted-foreground">
+                    {resourceVal(g.cpuMillis, formatCpu)} CPU
                   </span>
                   <span className="text-muted-foreground">
-                    GPU: {g.gpuMode ?? '服务器默认'}{g.gpuMode === GpuGrantMode.Indices ? ` [${g.gpuIndices?.join(',')}]` : ''}
+                    {resourceVal(g.memBytes, formatBytes)} 内存
+                  </span>
+                  <span className="text-muted-foreground">
+                    {resourceVal(g.diskBytes, formatBytes)} 磁盘
+                  </span>
+                  <span className="text-muted-foreground">
+                    GPU: {g.gpuMode ?? 'all'}{g.gpuMode === GpuGrantMode.Indices ? ` [${g.gpuIndices?.join(',')}]` : ''}
                   </span>
                 </div>
               ) : (

@@ -1,26 +1,68 @@
 import * as os from 'os';
+import * as path from 'node:path';
+import * as fs from 'node:fs';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
 import { v4 as uuidv4 } from 'uuid';
 import { AgentConfig } from './config.js';
 import { AgentWsClient } from './ws/client.js';
-import { DockerClient } from './docker/docker-client.js';
-import { DaemonManager, SOCKET_PATH } from './docker/daemon-manager.js';
+import { DOCKER_READ_DEADLINES, DockerClient } from './docker/docker-client.js';
+import { DockerPhysicalReferenceGuard } from './docker/physical-reference-guard.js';
+import { DaemonManager } from './docker/daemon-manager.js';
 import { XfsQuotaManager } from './quota/xfs-quota.js';
-import { DataDirsManager } from './datadirs/data-dirs.js';
+import { DataDirsManager, readLocalDataSourceIdentity } from './datadirs/data-dirs.js';
 import { RemoteFsMounter } from './fs/remote-fs-mounter.js';
 import { GpuMonitor, probeGpuAvailability, type GpuContainerIdentity } from './gpu/gpu-monitor.js';
 import { HostMetricsCollector } from './metrics/host-metrics.js';
-import { CommandDispatcher, withDockerMutex } from './commands/dispatcher.js';
 import { DropbearManager } from './dropbear/dropbear-manager.js';
+import { DirectCommandDispatcher } from './rpc/direct-command-dispatcher.js';
+import { AgentTaskRunner } from './tasks/task-runner.js';
+import { AgentMessageRouter } from './tasks/task-router.js';
+import { createAgentTaskHandlerRegistry } from './tasks/handlers/index.js';
+import { withContainerMutex } from './tasks/handlers/container-mutex.js';
+import { getAgentConfigFingerprint, getHostFingerprint } from './host-identity.js';
+import { CoalescedJob } from './coalesced-job.js';
+import { HostStorageIdentityGuard } from './host-storage.js';
+import { quiesceDockerBeforeAgentStartup } from './docker/startup-mutation-barrier.js';
 import {
   ContainerStatus,
+  AgentTaskKind,
   ContainerSnapshot,
   AgentToBackendMessage,
   LABEL,
   type MetricPoint,
   type LocalImageInfo,
-  type ContainerStatsSummary,
+  type RemoteFsMountSpec,
+  remoteFsSourceIdentity,
   RemoteFsMountStatus,
+  normalizeDockerImageRef,
+  MAX_MANAGED_CONTAINERS_PER_AGENT,
+  MAX_MANAGED_DATA_DIRS_PER_AGENT,
+  MAX_AGENT_WS_FRAME_BYTES,
+  MAX_METRIC_POINTS_PER_BATCH,
 } from '@nyabase/common';
+
+const EXEC_BARRIER_TASK_KINDS = new Set<AgentTaskKind>([
+  AgentTaskKind.ContainerStart,
+  AgentTaskKind.ContainerStop,
+  AgentTaskKind.ContainerRestart,
+  AgentTaskKind.ContainerDelete,
+  AgentTaskKind.ContainerRuntimeAbsent,
+  AgentTaskKind.ContainerSshEnsure,
+]);
+
+export function taskExecBarrierRuntimeId(
+  kind: AgentTaskKind,
+  parsedPayload: unknown,
+): string | null {
+  if (!EXEC_BARRIER_TASK_KINDS.has(kind)) return null;
+  return parsedPayload
+    && typeof parsedPayload === 'object'
+    && !Array.isArray(parsedPayload)
+    && typeof (parsedPayload as { runtimeId?: unknown }).runtimeId === 'string'
+    ? (parsedPayload as { runtimeId: string }).runtimeId
+    : null;
+}
 
 /**
  * Pick up to `size` items starting at `start`, wrapping around. Returns the
@@ -45,8 +87,86 @@ const DOCKER_STATE_TO_STATUS: Record<string, ContainerStatus> = {
 
 /** Round-robin shard size for per-container `stats` calls (see collectAndSendMetrics). */
 const CONTAINER_STATS_SHARD_SIZE = 20;
+const DOCKER_EVENT_RECONNECT_MS = 1_000;
+export const STATE_REPORT_CONTAINER_CONCURRENCY = 64;
+/** Three exact inspect reads, three graph-path fallbacks, and one SSH read. */
+export const STATE_REPORT_CONTAINER_WORST_CASE_MS =
+  (6 * DOCKER_READ_DEADLINES.inspect) + 10_000;
+/** Fires well before the Backend's 5-minute initial report gate. */
+export const AUTHORITATIVE_INVENTORY_DEADLINE_MS = 90_000;
+/** Bounded opportunity for inventoryFault / close 4502 to reach the Backend. */
+export const AUTHORITATIVE_INVENTORY_FAIL_STOP_GRACE_MS = 750;
+const execFileAsync = promisify(execFile);
+
+async function inspectLocalDisk(mountPoint: string): Promise<{
+  exists: boolean;
+  fsType: string;
+  isXfs: boolean;
+}> {
+  if (!fs.existsSync(mountPoint)) return { exists: false, fsType: '', isXfs: false };
+  try {
+    const { stdout } = await execFileAsync(
+      'stat',
+      ['-f', '-c', '%T', mountPoint],
+      { timeout: 5_000 },
+    );
+    const fsType = stdout.trim();
+    return { exists: true, fsType, isXfs: fsType.toLowerCase() === 'xfs' };
+  } catch {
+    return { exists: true, fsType: 'unknown', isXfs: false };
+  }
+}
+
+class AuthoritativeInventoryTooLargeError extends Error {
+  constructor(readonly encodedBytes: number) {
+    super(
+      `Authoritative inventory frame is ${encodedBytes} bytes; maximum is ${MAX_AGENT_WS_FRAME_BYTES}`,
+    );
+  }
+}
+
+function scheduleAgentKillAfterAuthoritativeInventoryDeadline(error: Error): void {
+  console.error(
+    `[Agent] ${error.message}; allowing ${AUTHORITATIVE_INVENTORY_FAIL_STOP_GRACE_MS}ms for durable fault delivery before replacement`,
+  );
+  // Intentionally keep this timer referenced. Once the authoritative collector
+  // misses its hard deadline, no late success may cancel the fail-stop. The
+  // short grace only lets the already-requested inventoryFault / close 4502
+  // leave the socket before systemd starts a fresh stateless observer.
+  setTimeout(() => {
+    process.kill(process.pid, 'SIGKILL');
+  }, AUTHORITATIVE_INVENTORY_FAIL_STOP_GRACE_MS);
+}
+
+export async function mapWithConcurrency<T, U>(
+  values: readonly T[],
+  concurrency: number,
+  mapper: (value: T, index: number) => Promise<U>,
+): Promise<U[]> {
+  if (!Number.isSafeInteger(concurrency) || concurrency <= 0) {
+    throw new Error('concurrency must be a positive safe integer');
+  }
+  const results = new Array<U>(values.length);
+  let next = 0;
+  const worker = async () => {
+    while (true) {
+      const index = next;
+      next += 1;
+      if (index >= values.length) return;
+      results[index] = await mapper(values[index], index);
+    }
+  };
+  await Promise.all(Array.from(
+    { length: Math.min(concurrency, values.length) },
+    () => worker(),
+  ));
+  return results;
+}
 
 export class AgentApplication {
+  private stateReportSequence = 0;
+  private reportingGeneration = 0;
+  private helloGeneration = 0;
   private readonly docker: DockerClient;
   private readonly quota: XfsQuotaManager;
   private readonly dataDirs: DataDirsManager;
@@ -55,7 +175,13 @@ export class AgentApplication {
   private readonly remoteFsMounter: RemoteFsMounter;
   private readonly dropbearManager: DropbearManager;
   private readonly wsClient: AgentWsClient;
-  private readonly dispatcher: CommandDispatcher;
+  private readonly direct: DirectCommandDispatcher;
+  private readonly taskRunner: AgentTaskRunner;
+  private readonly router: AgentMessageRouter;
+  private readonly metricsJob = new CoalescedJob();
+  private readonly dockerStatusJob = new CoalescedJob();
+  private dockerEventListenerGeneration = 0;
+  private runtimeBootstrap: Promise<void> | null = null;
 
   /** Set to false once the one-time nvidia-smi probe fails (or if config disables it). */
   private gpuActive: boolean;
@@ -64,53 +190,124 @@ export class AgentApplication {
 
   constructor(
     private readonly config: AgentConfig,
-    private readonly mountHelperOk: boolean,
     private readonly daemonManager: DaemonManager,
+    private readonly storageIdentity: HostStorageIdentityGuard,
   ) {
     this.docker = new DockerClient(config);
-    this.quota = new XfsQuotaManager(config.dockerRoot);
+    const physicalReferenceGuard = new DockerPhysicalReferenceGuard(this.docker);
+    this.quota = new XfsQuotaManager(
+      config.dockerRoot,
+      config.localDataSources.map((source) => source.mountPoint),
+    );
     this.dataDirs = new DataDirsManager(this.quota, config.dockerRoot);
+    for (const source of config.localDataSources) {
+      this.dataDirs.addSource({
+        kind: 'local',
+        id: source.id,
+        root: source.mountPoint,
+        identity: readLocalDataSourceIdentity(source.mountPoint),
+        label: source.label,
+        quotaEnabled: true,
+      });
+    }
     this.gpuMonitor = new GpuMonitor(config.isGpuServer);
     this.gpuActive = config.isGpuServer;
     this.hostMetrics = new HostMetricsCollector();
-    this.dropbearManager = new DropbearManager(this.docker, withDockerMutex);
+    this.dropbearManager = new DropbearManager(this.docker, withContainerMutex);
 
-    this.remoteFsMounter = new RemoteFsMounter((status: RemoteFsMountStatus) => {
-      this.sendIfConnected({
-        id: uuidv4(), ts: Date.now(), kind: 'remoteFsMountStatus', payload: status,
-      } as AgentToBackendMessage);
+    this.remoteFsMounter = new RemoteFsMounter((_status: RemoteFsMountStatus) => {
+      // Runtime projections have one ordered path: a coalesced full report.
+      // If a mount changes during collection, AgentTaskRunner retains one
+      // fresh ordered follow-up rather than racing an incremental message.
+      void this.sendStateReport();
+    }, {
+      physicalReferenceGuard,
+      forbiddenHostPaths: [
+        config.dockerRoot,
+        ...config.localDataSources.map((source) => source.mountPoint),
+      ],
     });
 
     this.wsClient = new AgentWsClient({
       url: config.backendUrl,
       token: config.agentToken,
-      onConnect: () => this.onConnect(),
-      onDisconnect: () => console.log('[Agent] Disconnected from backend'),
+      serverId: config.serverId,
+      onConnect: (generation) => this.onConnect(generation),
+      onDisconnect: () => {
+        this.reportingGeneration = 0;
+        this.helloGeneration = 0;
+        this.taskRunner.resetConnection();
+        this.direct.resetConnection();
+        const previousRemoteFsIds = this.remoteFsMounter.getAllSpecs().map((spec) => spec.id);
+        this.remoteFsMounter.resetConnection();
+        this.syncRemoteFsSources([], previousRemoteFsIds);
+        console.log('[Agent] Disconnected from backend');
+      },
     });
 
-    this.dispatcher = new CommandDispatcher(
-      config, this.docker, this.quota, this.dataDirs,
-      this.remoteFsMounter, this.wsClient, this.dropbearManager, this.daemonManager,
-      (dockerId) => this.getContainerGpuMemUsedMiB(dockerId),
+    this.direct = new DirectCommandDispatcher(
+      config, this.docker, this.remoteFsMounter, this.wsClient,
+      this.dropbearManager,
+      this.quota,
+      (specs, previousIds) => this.syncRemoteFsSources(specs, previousIds),
+      () => this.ensurePhysicalBootstrap(),
+    );
+    const handlers = createAgentTaskHandlerRegistry({
+      config,
+      docker: this.docker,
+      physicalReferenceGuard,
+      quota: this.quota,
+      dataDirs: this.dataDirs,
+      remoteFsMounter: this.remoteFsMounter,
+      dropbear: this.dropbearManager,
+      ws: this.wsClient,
+    });
+    this.taskRunner = new AgentTaskRunner(
+      handlers,
+      (result) => this.sendIfConnected({
+        id: uuidv4(), ts: Date.now(), kind: 'task.result.v1', payload: result,
+      }),
+      () => this.storageIdentity.assertCurrent(),
+      async (task, parsedPayload) => {
+        const runtimeId = taskExecBarrierRuntimeId(task.kind, parsedPayload);
+        const release = runtimeId
+          ? await this.direct.acquireRuntimeTaskFence(runtimeId)
+          : undefined;
+        await this.direct.waitForIdle();
+        return release;
+      },
+    );
+    this.router = new AgentMessageRouter(
+      this.taskRunner,
+      this.direct,
+      () => this.storageIdentity.assertCurrent(),
     );
 
-    // Wire the message handler after both wsClient and dispatcher are fully constructed.
-    this.wsClient.setMessageHandler((msg) => this.dispatcher.handle(msg));
+    this.wsClient.setMessageHandler((msg) => this.router.handle(msg));
   }
 
-  start(): void {
+  async start(): Promise<void> {
+    // Stateless recovery is local and unconditional. It must finish before a
+    // WebSocket exists so a replacement Agent also rolls back orphaned execs
+    // while Backend is offline. Only static, already-proved host identity is
+    // used; durable desired state remains exclusively in Backend.
+    await this.ensureRuntimeBootstrap();
+    await this.validateLocalDataSources();
     this.wsClient.on('diskChanged', () => {
       void this.sendStateReport();
-      void this.sendDataDirReport();
     });
-    this.wsClient.on('dataDirChanged', () => void this.sendDataDirReport());
+    this.wsClient.on('dataDirChanged', () => void this.sendStateReport());
     this.wsClient.on('reconcile', () => {
+      this.reportingGeneration = this.wsClient.connectionGeneration;
       void this.sendStateReport();
-      void this.sendDataDirReport();
+      void this.sendDockerDaemonStatus();
     });
 
     setInterval(() => {
-      if (this.wsClient.connected) {
+      if (
+        this.wsClient.connected
+        && this.helloGeneration === this.wsClient.connectionGeneration
+      ) {
         this.wsClient.send({
           id: uuidv4(), ts: Date.now(), kind: 'heartbeat',
           payload: { serverId: this.config.serverId, uptime: process.uptime() },
@@ -119,7 +316,6 @@ export class AgentApplication {
     }, 5_000);
 
     setInterval(() => void this.sendStateReport(), 15_000);
-    setInterval(() => void this.sendDataDirReport(), 60_000);
     setInterval(() => void this.collectAndSendMetrics(), this.config.metricsIntervalMs);
     setInterval(() => void this.sendDockerDaemonStatus(), 30_000);
 
@@ -137,32 +333,108 @@ export class AgentApplication {
     this.wsClient.start();
   }
 
+  stop(): void {
+    this.reportingGeneration = 0;
+    this.helloGeneration = 0;
+    this.wsClient.stop();
+  }
+
+  private async validateLocalDataSources(): Promise<void> {
+    for (const source of this.config.localDataSources) {
+      const check = await inspectLocalDisk(source.mountPoint);
+      if (!check.exists) throw new Error(`Local data source path does not exist: ${source.mountPoint}`);
+      if (!check.isXfs) {
+        throw new Error(`Local data source ${source.mountPoint} uses filesystem ${check.fsType}, must be XFS`);
+      }
+      const observed = this.dataDirs.inspectSource(source.id);
+      if (!observed.ready) {
+        throw new Error(
+          `Local data source ${source.mountPoint} must be an exact mounted XFS filesystem`,
+        );
+      }
+      const capability = await this.quota.checkProjectQuotaEnforcement(source.mountPoint);
+      if (!capability.accounting || !capability.enforcement) {
+        const status = `accounting=${capability.accounting ? 'on' : 'off'}, enforcement=${capability.enforcement ? 'on' : 'off'}`;
+        throw new Error(
+          `Local data source ${source.mountPoint} has no XFS project quota enforcement (${status})${capability.output ? `: ${capability.output}` : ''}`,
+        );
+      }
+    }
+  }
+
   private sendIfConnected(msg: AgentToBackendMessage): void {
     if (this.wsClient.connected) {
       this.wsClient.send(msg);
     }
   }
 
-  private async onConnect(): Promise<void> {
-    try {
-      await this.docker.ensureMacvlanNetwork();
-    } catch (e) {
-      console.warn('[Agent] Could not ensure macvlan network:', (e as Error).message);
-    }
-    await this.sendHello();
-    await this.sendStateReport();
-    await this.sendDataDirReport();
-    await this.sendDockerDaemonStatus();
+  private async onConnect(generation: number): Promise<void> {
+    // Do not start Backend's hello/bootstrap deadlines while work accepted on
+    // an older connection still owns the single physical lane. Stateless
+    // reconnect attempts may retire pre-hello, but none can falsely turn a
+    // legitimate long task into an inventory quarantine.
+    await this.router?.waitForBootstrapIdle();
+    await this.direct.waitForIdle();
+    await this.taskRunner.waitForIdle();
+    if (generation !== this.wsClient.connectionGeneration) return;
+    // Hello is a read-only static identity preflight. Backend binds the exact
+    // host/config/network identity durably before it sends bootstrap authority.
+    this.storageIdentity.assertCurrent();
+    await this.sendHello(generation);
+    if (generation === this.wsClient.connectionGeneration) this.helloGeneration = generation;
   }
 
-  private async sendHello(): Promise<void> {
-    const [gpus, diskInfos] = [await this.gpuMonitor.getGpuInfo(), this.dataDirs.getLocalDiskInfos()];
-    const localImages = await this.listLocalImages();
+  private async ensurePhysicalBootstrap(): Promise<void> {
+    // A previous connection may still own a mutation after transport loss.
+    // Join the same lane before using the Backend-granted bootstrap authority.
+    await this.taskRunner.waitForIdle();
+    this.storageIdentity.assertCurrent();
+    await this.ensureRuntimeBootstrap();
+    this.storageIdentity.assertCurrent();
+    await this.docker.ensureMacvlanNetwork();
+    this.storageIdentity.assertCurrent();
+  }
 
-    this.wsClient.send({
+  private ensureRuntimeBootstrap(): Promise<void> {
+    if (!this.runtimeBootstrap) {
+      const attempt = (async () => {
+        this.storageIdentity.assertCurrent();
+        console.log('[Agent] Quiescing previous Docker mutation domain before network admission...');
+        await quiesceDockerBeforeAgentStartup();
+        this.storageIdentity.assertCurrent();
+        console.log('[Agent] Reconciling nyabase-docker daemon for stateless recovery...');
+        await this.daemonManager.reconcile(this.config.serverId);
+        this.storageIdentity.assertCurrent();
+        console.log('[Agent] Quiescing managed containers for stateless process recovery...');
+        await this.docker.quiesceManagedContainersForStatelessRecovery();
+        this.storageIdentity.assertCurrent();
+      })();
+      this.runtimeBootstrap = attempt;
+      void attempt.catch(() => {
+        // Ambiguous mutation deadlines kill the process. A returned rejection
+        // is therefore a completed, retryable startup attempt; do not poison
+        // every later admitted connection with the same rejected Promise.
+        if (this.runtimeBootstrap === attempt) this.runtimeBootstrap = null;
+      });
+    }
+    return this.runtimeBootstrap;
+  }
+
+  private async sendHello(generation: number): Promise<void> {
+    const [gpus, diskInfos] = [await this.gpuMonitor.getGpuInfo(), this.dataDirs.getLocalDiskInfos()];
+    this.storageIdentity.assertCurrent();
+    const configFingerprint = getAgentConfigFingerprint(
+      this.config,
+      diskInfos,
+      this.storageIdentity.dockerRootIdentity,
+    );
+
+    const sent = this.wsClient.send({
       id: uuidv4(), ts: Date.now(), kind: 'hello',
       payload: {
         serverId: this.config.serverId,
+        hostFingerprint: getHostFingerprint(),
+        configFingerprint,
         hostname: os.hostname(),
         kernelVersion: os.release(),
         cpuCores: os.cpus().length,
@@ -171,123 +443,373 @@ export class AgentApplication {
         gpus,
         macvlanCidr: this.config.macvlanCidr,
         macvlanGateway: this.config.macvlanGateway,
+        macvlanReservedIps: [...this.config.reservedIps],
         macvlanIface: this.config.parentIface,
-        agentVersion: this.config.agentVersion,
-        localImages,
-        mountHelperMissing: !this.mountHelperOk,
         dockerRoot: this.config.dockerRoot,
-        dockerSocket: SOCKET_PATH,
+        agentVersion: this.config.agentVersion,
+        // Docker is deliberately untouched until Backend accepts this static
+        // identity and grants bootstrap. The first full report carries the
+        // authoritative image inventory.
+        localImages: [],
       },
-    } as AgentToBackendMessage & { payload: { mountHelperMissing?: boolean } });
+    } as AgentToBackendMessage, generation);
+    if (!sent) throw new Error('Agent connection changed before hello could be sent');
   }
 
-  private async listLocalImages(): Promise<LocalImageInfo[]> {
-    try {
-      const imgs = await this.docker.docker.listImages({ all: false });
-      return imgs.map((img) => ({
-        id: img.Id,
-        repoTags: img.RepoTags ?? [],
-        size: img.Size,
-        createdAt: img.Created,
-      }));
-    } catch (e) {
-      console.warn('[Agent] Failed to list images:', e);
-      return [];
+  private syncRemoteFsSources(
+    specs: readonly RemoteFsMountSpec[],
+    previousIds: readonly string[],
+  ): void {
+    const localIds = new Set(this.config.localDataSources.map((source) => source.id));
+    const activeIds = new Set(specs.map((spec) => spec.id));
+    for (const id of activeIds) {
+      if (localIds.has(id)) {
+        throw new Error(`RemoteFS source id ${id} conflicts with a static local data source`);
+      }
+    }
+    for (const id of previousIds) {
+      if (!activeIds.has(id)) this.dataDirs.removeSource(id);
+    }
+    for (const spec of specs) {
+      this.dataDirs.addSource({
+        kind: 'remote',
+        id: spec.id,
+        root: spec.hostMountPoint,
+        identity: remoteFsSourceIdentity(spec.params),
+        quotaEnabled: false,
+      });
     }
   }
 
+  private async listLocalImages(): Promise<LocalImageInfo[]> {
+    const imgs = await this.docker.listImages();
+    return imgs.map((img) => ({
+      id: img.Id,
+      repoTags: (img.RepoTags ?? []).flatMap((tag) => {
+        try {
+          return [normalizeDockerImageRef(tag)];
+        } catch {
+          return [];
+        }
+      }),
+      size: img.Size,
+      createdAt: img.Created,
+    }));
+  }
+
   async sendDockerDaemonStatus(): Promise<void> {
-    if (!this.wsClient.connected) return;
+    const generation = this.wsClient.connectionGeneration;
+    return this.dockerStatusJob.run(() => this.captureAndSendDockerDaemonStatus(generation));
+  }
+
+  private async captureAndSendDockerDaemonStatus(generation: number): Promise<void> {
+    if (
+      !this.wsClient.connected
+      || generation !== this.wsClient.connectionGeneration
+      || generation !== this.reportingGeneration
+    ) return;
     try {
+      this.storageIdentity.assertCurrent();
       const status = await this.daemonManager.getStatus(this.config.serverId);
+      this.storageIdentity.assertCurrent();
       this.wsClient.send({
         id: uuidv4(), ts: Date.now(), kind: 'dockerDaemonStatus', payload: status,
-      } as AgentToBackendMessage);
+      } as AgentToBackendMessage, generation);
     } catch (e) {
       console.warn('[Agent] Failed to send dockerDaemonStatus:', e);
     }
   }
 
   private async sendStateReport(): Promise<void> {
-    if (!this.wsClient.connected) return;
+    const generation = this.wsClient.connectionGeneration;
+    return this.taskRunner.enqueueObservation(
+      'stateReport',
+      () => this.captureAndSendStateReportWithDeadline(generation),
+    );
+  }
+
+  private async captureAndSendStateReportWithDeadline(generation: number): Promise<void> {
+    const timer = setTimeout(() => {
+      const error = new Error(
+        `Authoritative inventory capture exceeded ${AUTHORITATIVE_INVENTORY_DEADLINE_MS}ms`,
+      );
+      try {
+        this.reportInventoryFault(generation, error);
+      } finally {
+        // A collector that ignored/could not observe its own read deadline
+        // must not occupy the single physical lane forever. The Agent has no
+        // durable task state, so process replacement is the smallest safe
+        // recovery boundary.
+        scheduleAgentKillAfterAuthoritativeInventoryDeadline(error);
+      }
+    }, AUTHORITATIVE_INVENTORY_DEADLINE_MS);
+    timer.unref?.();
     try {
+      // Keep awaiting the read-only collector after the deadline. This keeps
+      // the physical task lane serialized while the retired connection is
+      // replaced; reportInventoryFault prevents any late old-generation send.
+      await this.captureAndSendStateReport(generation);
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  private async captureAndSendStateReport(generation: number): Promise<void> {
+    if (
+      !this.wsClient.connected
+      || generation !== this.wsClient.connectionGeneration
+      || generation !== this.reportingGeneration
+    ) return;
+    try {
+      this.storageIdentity.assertCurrent();
+      const sequence = ++this.stateReportSequence;
       const observedAt = Date.now();
       const containers = await this.docker.listNyabaseContainers();
-
-      // Fetch stats for all running containers in parallel
-      const runningIds = new Set(containers.filter((c) => c.State === 'running').map((c) => c.Id));
-      const statsResults = await Promise.allSettled(
-        [...runningIds].map((id) =>
-          this.docker.fetchContainerStatsWithGpuMem(
-            id,
-            (dockerId) => this.getContainerGpuMemUsedMiB(dockerId),
-          ).then((stats) => ({ id, stats })),
-        ),
-      );
-      const statsMap = new Map<string, ContainerStatsSummary>();
-      for (const r of statsResults) {
-        if (r.status === 'fulfilled') statsMap.set(r.value.id, r.value.stats);
-      }
-
-      const snapshots: ContainerSnapshot[] = [];
-      for (const c of containers) {
-        const spec = this.docker.parseContainerSpec(c.Labels, c);
-        if (!spec) continue;
-        spec.runtimeId = c.Id;
-
-        const status: ContainerStatus = DOCKER_STATE_TO_STATUS[c.State] ?? ContainerStatus.Unknown;
-        const stats = statsMap.get(c.Id) ?? null;
-        const sshServer = await this.dropbearManager.inspectContainerSshState(
-          c.Id,
-          false,
-          status,
+      if (containers.length > MAX_MANAGED_CONTAINERS_PER_AGENT) {
+        throw new Error(
+          `Managed container inventory exceeds ${MAX_MANAGED_CONTAINERS_PER_AGENT}; refusing an unbounded state report`,
         );
-        snapshots.push({ spec, status, stats, sshServer, labels: c.Labels });
       }
 
-      const [xfsProjects, diskInfos, remoteFsMountStatuses, localImages] = await Promise.all([
+      const observations = await mapWithConcurrency(
+        containers,
+        STATE_REPORT_CONTAINER_CONCURRENCY,
+        async (container): Promise<ContainerSnapshot> => {
+          if (!container.Id) throw new Error('Managed runtime inventory contains an empty runtime id');
+          const first = await this.docker.inspectContainer(container.Id);
+          const firstLabels = first.Config?.Labels ?? {};
+          const runtime = this.docker.parseContainerRuntimeObservation(firstLabels, first);
+          if (!runtime || first.Id !== container.Id || runtime.serverId !== this.config.serverId) {
+            throw new Error(
+              `Managed runtime ${container.Id} has incomplete or foreign immutable identity/network evidence`,
+            );
+          }
+          const firstPaths = this.canonicalRuntimeQuotaPaths(
+            container.Id,
+            await this.docker.getGraphDriverDirs(container.Id, first),
+          );
+
+          // Graph path discovery may cross Docker/containerd boundaries. A
+          // second inspect proves that the exact immutable runtime identity did
+          // not change while those recovery paths were captured.
+          const confirmed = await this.docker.inspectContainer(container.Id);
+          const confirmedLabels = confirmed.Config?.Labels ?? {};
+          const confirmedRuntime = this.docker.parseContainerRuntimeObservation(confirmedLabels, confirmed);
+          const identityKeys = [
+            LABEL.MANAGED,
+            LABEL.CONTAINER_ID,
+            LABEL.SERVER_ID,
+            LABEL.SPEC_GENERATION,
+            LABEL.RUNTIME_SPEC_HASH,
+          ] as const;
+          if (
+            !confirmedRuntime
+            || confirmed.Id !== first.Id
+            || confirmedRuntime.serverId !== this.config.serverId
+            || confirmedRuntime.ip !== runtime.ip
+            || identityKeys.some((key) => confirmedLabels[key] !== firstLabels[key])
+          ) {
+            throw new Error(`Managed runtime ${container.Id} changed identity during full inventory capture`);
+          }
+          const confirmedPaths = this.canonicalRuntimeQuotaPaths(
+            container.Id,
+            await this.docker.getGraphDriverDirs(container.Id, confirmed),
+          );
+          if (
+            confirmedPaths[0] !== firstPaths[0]
+            || confirmedPaths[1] !== firstPaths[1]
+          ) {
+            throw new Error(`Managed runtime ${container.Id} changed writable-layer paths during full inventory capture`);
+          }
+
+          const status: ContainerStatus = DOCKER_STATE_TO_STATUS[confirmed.State.Status] ?? ContainerStatus.Unknown;
+          const sshServer = await this.dropbearManager.inspectContainerSshState(
+            container.Id,
+            status,
+          );
+
+          // SSH observation uses the fail-stop read-only exec lane: it can
+          // never change container power. A final exact inspect still proves
+          // that the runtime identity and status did not change concurrently.
+          const final = await this.docker.inspectContainer(container.Id);
+          const finalLabels = final.Config?.Labels ?? {};
+          const finalRuntime = this.docker.parseContainerRuntimeObservation(finalLabels, final);
+          if (
+            !finalRuntime
+            || final.Id !== confirmed.Id
+            || finalRuntime.serverId !== this.config.serverId
+            || finalRuntime.ip !== confirmedRuntime.ip
+            || identityKeys.some((key) => finalLabels[key] !== confirmedLabels[key])
+          ) {
+            throw new Error(`Managed runtime ${container.Id} changed identity during SSH inventory capture`);
+          }
+          const finalPaths = this.canonicalRuntimeQuotaPaths(
+            container.Id,
+            await this.docker.getGraphDriverDirs(container.Id, final),
+          );
+          if (
+            finalPaths[0] !== confirmedPaths[0]
+            || finalPaths[1] !== confirmedPaths[1]
+          ) {
+            throw new Error(`Managed runtime ${container.Id} changed writable-layer paths during SSH inventory capture`);
+          }
+          const finalStatus: ContainerStatus = DOCKER_STATE_TO_STATUS[final.State.Status]
+            ?? ContainerStatus.Unknown;
+          if (
+            final.State.Status !== confirmed.State.Status
+            || final.State.Running !== confirmed.State.Running
+            || finalStatus !== status
+          ) {
+            throw new Error(`Managed runtime ${container.Id} changed power state during SSH inventory capture`);
+          }
+          return {
+            runtime: { ...finalRuntime, runtimeId: final.Id, quotaPaths: finalPaths },
+            status: finalStatus,
+            sshServer: finalStatus === ContainerStatus.Running
+              ? sshServer
+              : { enabled: false, status: 'container_stopped', user: 'root', port: 22 },
+            labels: {
+              [LABEL.MANAGED]: 'true',
+              [LABEL.CONTAINER_ID]: finalLabels[LABEL.CONTAINER_ID]!,
+              [LABEL.SERVER_ID]: finalLabels[LABEL.SERVER_ID]!,
+              [LABEL.SPEC_GENERATION]: finalLabels[LABEL.SPEC_GENERATION]!,
+              [LABEL.RUNTIME_SPEC_HASH]: finalLabels[LABEL.RUNTIME_SPEC_HASH]!,
+            },
+          };
+        },
+      );
+
+      const [dataDirs, xfsProjects, diskInfos, remoteFsMountStatuses, localImages] = await Promise.all([
+        this.dataDirs.listAllDirs(),
         this.quota.getAllUsages(),
         Promise.resolve(this.dataDirs.getLocalDiskInfos()),
         Promise.resolve(this.remoteFsMounter.getAllStatuses()),
         this.listLocalImages(),
       ]);
+      this.storageIdentity.assertCurrent();
+      if (dataDirs.length > MAX_MANAGED_DATA_DIRS_PER_AGENT) {
+        throw new Error(
+          `Managed data directory inventory exceeds ${MAX_MANAGED_DATA_DIRS_PER_AGENT}`,
+        );
+      }
 
-      this.wsClient.send({
+      const reportMessage = {
         id: uuidv4(), ts: Date.now(), kind: 'stateReport',
         payload: {
           serverId: this.config.serverId,
+          sequence,
           observedAt,
-          containers: snapshots,
+          containers: observations,
+          dataDirs,
           xfsProjects: xfsProjects.map(({ numericUserId, projectId, usedBytes, hardLimitBytes }) => ({
             numericUserId, projectId, usedBytes, hardLimitBytes,
           })),
           disks: diskInfos,
           localImages,
           remoteFsMounts: remoteFsMountStatuses,
-          incremental: false,
         },
-      } as AgentToBackendMessage);
+      } as AgentToBackendMessage;
+      const encodedBytes = Buffer.byteLength(JSON.stringify(reportMessage));
+      if (encodedBytes > MAX_AGENT_WS_FRAME_BYTES) {
+        throw new AuthoritativeInventoryTooLargeError(encodedBytes);
+      }
+      if (
+        generation !== this.wsClient.connectionGeneration
+        || generation !== this.reportingGeneration
+      ) return;
+      const sent = this.wsClient.send(reportMessage, generation);
+      if (!sent) {
+        // The complete inventory above is valid; failure to queue its frame
+        // proves only transport loss/backpressure. Do not turn an ordinary
+        // reconnect into a durable inventory quarantine. A stale collector
+        // must also never clear or retire a newer reporting generation.
+        if (
+          generation === this.wsClient.connectionGeneration
+          && generation === this.reportingGeneration
+        ) {
+          this.reportingGeneration = 0;
+          this.wsClient.retireGeneration(
+            generation,
+            1011,
+            'Authoritative inventory transport unavailable',
+          );
+        }
+        return;
+      }
     } catch (e) {
       console.warn('[Agent] Failed to send stateReport:', e);
+      this.reportInventoryFault(generation, e);
     }
   }
 
-  private async sendDataDirReport(): Promise<void> {
-    if (!this.wsClient.connected) return;
-    try {
-      const observedAt = Date.now();
-      const dirs = await this.dataDirs.listAllDirs();
-      this.wsClient.send({
-        id: uuidv4(), ts: Date.now(), kind: 'dataDirReport',
-        payload: { serverId: this.config.serverId, observedAt, dirs },
-      } as AgentToBackendMessage);
-    } catch (e) {
-      console.warn('[Agent] Failed to send dataDirReport:', e);
+  private reportInventoryFault(generation: number, error: unknown): void {
+    if (
+      generation !== this.wsClient.connectionGeneration
+      || generation !== this.reportingGeneration
+    ) return;
+    const tooLarge = error instanceof AuthoritativeInventoryTooLargeError;
+    const message = (error instanceof Error ? error.message : String(error)).slice(0, 2048)
+      || 'Authoritative inventory capture failed';
+    const faultSent = this.wsClient.send({
+      id: uuidv4(),
+      ts: Date.now(),
+      kind: 'inventoryFault',
+      payload: {
+        serverId: this.config.serverId,
+        code: tooLarge
+          ? 'AUTHORITATIVE_INVENTORY_TOO_LARGE'
+          : 'AUTHORITATIVE_INVENTORY_FAILED',
+        message,
+        observedAt: Date.now(),
+      },
+    } as AgentToBackendMessage, generation);
+    if (!faultSent) {
+      console.error('[Agent] Inventory fault payload could not be queued; relying on close code 4502');
     }
+    this.reportingGeneration = 0;
+    this.wsClient.retireGeneration(
+      generation,
+      4502,
+      tooLarge ? 'Authoritative inventory too large' : 'Authoritative inventory failed',
+    );
+  }
+
+  private canonicalRuntimeQuotaPaths(
+    runtimeId: string,
+    graph: { upperDir: string; workDir: string },
+  ): [string, string] {
+    const dockerRoot = path.resolve(this.config.dockerRoot);
+    const quotaPaths = [graph.upperDir, graph.workDir] as const;
+    if (
+      new Set(quotaPaths).size !== 2
+      || quotaPaths.some((quotaPath) => !path.isAbsolute(quotaPath)
+        || path.resolve(quotaPath) !== quotaPath
+        || !quotaPath.startsWith(`${dockerRoot}${path.sep}`))
+    ) {
+      throw new Error(
+        `Managed runtime ${runtimeId} has unavailable or non-canonical writable-layer paths`,
+      );
+    }
+    return [quotaPaths[0], quotaPaths[1]];
   }
 
   private async collectAndSendMetrics(): Promise<void> {
-    if (!this.wsClient.connected) return;
+    const generation = this.wsClient.connectionGeneration;
+    return this.metricsJob.run(async () => {
+      try {
+        await this.captureAndSendMetrics(generation);
+      } catch (error) {
+        console.warn('[Agent] Failed to collect metrics:', error);
+      }
+    });
+  }
+
+  private async captureAndSendMetrics(generation: number): Promise<void> {
+    if (
+      !this.wsClient.connected
+      || generation !== this.wsClient.connectionGeneration
+      || generation !== this.reportingGeneration
+    ) return;
 
     const disks = this.dataDirs.getLocalDiskInfos();
     const hostPoints = this.hostMetrics.collectHostMetrics(this.config.serverId, disks);
@@ -332,12 +854,19 @@ export class AgentApplication {
       }
     } catch { /* quota unavailable */ }
 
-    const allPoints = [...hostPoints, ...gpuPoints, ...containerPoints, ...userDiskPoints];
+    const collectedPoints = [...hostPoints, ...gpuPoints, ...containerPoints, ...userDiskPoints];
+    const allPoints = collectedPoints.slice(0, MAX_METRIC_POINTS_PER_BATCH);
+    if (collectedPoints.length > allPoints.length) {
+      console.warn(
+        `[Agent] Metrics batch truncated from ${collectedPoints.length} to `
+        + `${MAX_METRIC_POINTS_PER_BATCH} points`,
+      );
+    }
     if (allPoints.length > 0) {
       this.wsClient.send({
         id: uuidv4(), ts: Date.now(), kind: 'metricsBatch',
         payload: { serverId: this.config.serverId, points: allPoints },
-      } as AgentToBackendMessage);
+      } as AgentToBackendMessage, generation);
     }
   }
 
@@ -345,18 +874,15 @@ export class AgentApplication {
     c: Awaited<ReturnType<DockerClient['listNyabaseContainers']>>[number],
   ): Promise<MetricPoint[]> {
     const fullId = c.Id;
-    const shortId = fullId.slice(0, 12);
-    const ownerId = c.Labels['nyabase.ownerId'] ?? '';
-    const containerName = c.Labels[LABEL.CONTAINER_ID] ?? shortId;
+    const productContainerId = c.Labels[LABEL.CONTAINER_ID];
+    if (!productContainerId) return [];
     const points: MetricPoint[] = [];
 
     try {
       const stats = await this.docker.fetchContainerStats(fullId);
       const labels = {
         server: this.config.serverId,
-        container_id: shortId,
-        container_name: containerName,
-        user_id: ownerId,
+        container_id: productContainerId,
       };
       const ts = Date.now();
       points.push(
@@ -376,11 +902,6 @@ export class AgentApplication {
     return points;
   }
 
-  private async getContainerGpuMemUsedMiB(dockerId: string): Promise<Record<string, number>> {
-    if (!this.gpuActive) return {};
-    return this.gpuMonitor.getContainerGpuMemUsedMiB(dockerId);
-  }
-
   private gpuContainerIdentityMap(
     containers: Awaited<ReturnType<DockerClient['listNyabaseContainers']>>,
   ): Map<string, GpuContainerIdentity> {
@@ -388,12 +909,11 @@ export class AgentApplication {
     for (const container of containers) {
       const fullId = container.Id;
       const shortId = fullId.slice(0, 12);
-      const ownerId = container.Labels['nyabase.ownerId'] ?? '';
       const productContainerId = container.Labels[LABEL.CONTAINER_ID] ?? '';
+      if (!productContainerId) continue;
 
       const identity = {
-        metricContainerId: shortId,
-        ...(ownerId ? { ownerId } : {}),
+        metricContainerId: productContainerId,
       };
       result.set(fullId, identity);
       result.set(shortId, identity);
@@ -403,23 +923,59 @@ export class AgentApplication {
   }
 
   private async startDockerEventListener(): Promise<void> {
+    const generation = ++this.dockerEventListenerGeneration;
+    let events: NodeJS.ReadableStream;
     try {
-      const events = await this.docker.docker.getEvents({ filters: { type: ['container'] } });
-      events.on('data', (chunk: Buffer) => {
-        try {
-          const event = JSON.parse(chunk.toString());
-          const action: string = event.Action;
-          const runtimeId: string = event.Actor?.ID;
-          const labels: Record<string, string> = event.Actor?.Attributes ?? {};
-          if (labels[LABEL.MANAGED] !== 'true' && !labels['nyabase.spec_version']) return;
-          this.wsClient.send({
-            id: uuidv4(), ts: Date.now(), kind: 'containerEvent',
-            payload: { serverId: this.config.serverId, runtimeId, action },
-          } as AgentToBackendMessage);
-        } catch { /* ignore parse errors */ }
-      });
+      events = await this.docker.openContainerEventStream();
     } catch (err) {
       console.error('[Agent] Failed to listen to docker events:', err);
+      this.scheduleDockerEventReconnect(generation);
+      return;
     }
+    if (generation !== this.dockerEventListenerGeneration) {
+      try { (events as NodeJS.ReadableStream & { destroy?: () => void }).destroy?.(); } catch { /* stale stream */ }
+      return;
+    }
+
+    let finished = false;
+    const onData = (chunk: Buffer) => {
+      if (finished || generation !== this.dockerEventListenerGeneration) return;
+      try {
+        const event = JSON.parse(chunk.toString());
+        const labels: Record<string, string> = event.Actor?.Attributes ?? {};
+        if (labels[LABEL.MANAGED] !== 'true') return;
+        void this.sendStateReport();
+      } catch { /* ignore parse errors */ }
+    };
+    const reconnect = (error?: unknown) => {
+      if (finished) return;
+      finished = true;
+      events.removeListener('data', onData);
+      events.removeListener('error', onError);
+      events.removeListener('end', onEnd);
+      events.removeListener('close', onClose);
+      try { (events as NodeJS.ReadableStream & { destroy?: () => void }).destroy?.(); } catch { /* already closed */ }
+      if (error) console.error('[Agent] Docker event stream disconnected:', error);
+      this.scheduleDockerEventReconnect(generation);
+    };
+    const onError = (error: unknown) => reconnect(error);
+    const onEnd = () => reconnect();
+    const onClose = () => reconnect();
+    events.on('data', onData);
+    events.once('error', onError);
+    events.once('end', onEnd);
+    events.once('close', onClose);
+    const streamState = events as NodeJS.ReadableStream & { destroyed?: boolean; readableEnded?: boolean };
+    if (streamState.destroyed || streamState.readableEnded) reconnect();
+  }
+
+  private scheduleDockerEventReconnect(generation: number): void {
+    if (generation !== this.dockerEventListenerGeneration) return;
+    const timer = setTimeout(() => {
+      if (generation === this.dockerEventListenerGeneration) {
+        void this.startDockerEventListener();
+      }
+    }, DOCKER_EVENT_RECONNECT_MS);
+    timer.unref();
   }
 }

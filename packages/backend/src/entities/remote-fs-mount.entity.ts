@@ -4,6 +4,7 @@ import {
 import type { RemoteFsParams } from '@nyabase/common';
 
 @Entity('remote_fs_mounts')
+@Index('IDX_remote_fs_mount_host_path', ['hostMountPoint'], { unique: true })
 export class RemoteFsMountEntity {
   @PrimaryColumn('text')
   id: string;
@@ -39,7 +40,7 @@ export class RemoteFsMountEntity {
   generation: number;
 
   @Column({ type: 'text', nullable: true })
-  lastOperationId: string | null;
+  lastTaskId: string | null;
 
   @CreateDateColumn()
   createdAt: Date;

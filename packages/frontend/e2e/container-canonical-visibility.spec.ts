@@ -37,11 +37,6 @@ const server = {
   isGpuServer: true,
   status: 'online',
   lastSeenAt: '2026-06-04T01:58:00.000Z',
-  defaultCpuMillis: 8000,
-  defaultMemBytes: 64 * 1024 ** 3,
-  defaultDiskBytes: 100 * 1024 ** 3,
-  defaultGpuMode: 'indices',
-  defaultGpuIndices: [0],
   disks: [],
   gpus: [{ index: 0, uuid: 'GPU-aaaaaaaa-bbbb-cccc-dddd-eeeeeeee0000', model: 'NVIDIA L40', totalMemMiB: 46068 }],
   agentVersion: '0.1.0',
@@ -71,10 +66,10 @@ const adminPendingContainer = containerFixture({
   ownerName: 'Ada Admin',
   ip: '10.8.110.41',
   status: 'running',
-  operation: operation({
-    id: 'opadminpending1',
+  task: agentTask({
+    id: 'taskadminpending1',
     kind: 'container.stop',
-    status: 'waiting_agent',
+    status: 'pending',
     resourceId: 'ctr-admin-pending',
   }),
 });
@@ -87,13 +82,11 @@ const userPendingContainer = containerFixture({
   ownerName: 'Lin Lab',
   ip: '10.8.110.42',
   status: 'exited',
-  operation: operation({
-    id: 'oplinpending12',
+  task: agentTask({
+    id: 'tasklinpending12',
     kind: 'container.start',
-    status: 'retrying',
+    status: 'pending',
     resourceId: 'ctr-lin-pending',
-    attempts: 2,
-    lastError: 'agent disconnected during start',
     startedAt: '2026-06-04T01:59:00.000Z',
   }),
 });
@@ -127,7 +120,7 @@ const allContainers = [
 
 const normalContainers = [userPendingContainer, userStartableContainer, userRunningContainer];
 
-test.describe('canonical container operation visibility', () => {
+test.describe('canonical container task visibility', () => {
   test.beforeEach(async ({ page }) => {
     await page.clock.setFixedTime(visualNow);
   });
@@ -149,7 +142,7 @@ test.describe('canonical container operation visibility', () => {
 
     const pendingRow = containerRow(page, 'admin-train-pending');
     await expect(pendingRow.locator('button:disabled')).toHaveCount(4);
-    await expect.soft(page).toHaveScreenshot('manage-containers-operation-canonical.png', { fullPage: true });
+    await expect.soft(page).toHaveScreenshot('manage-containers-task-canonical.png', { fullPage: true });
 
     const detailRequest = page.waitForRequest((request) => {
       const url = new URL(request.url());
@@ -166,7 +159,7 @@ test.describe('canonical container operation visibility', () => {
     expect(containerRequests.some((entry) => entry.includes(userRunningContainer.runtime.runtimeId!))).toBe(false);
   });
 
-  test('normal user containers show own operations without admin management context', async ({ page }) => {
+  test('normal user containers show own tasks without admin management context', async ({ page }) => {
     await seedAuth(page, normalUser);
     const containerRequests = recordContainerRequests(page);
     await mockApi(page);
@@ -184,7 +177,7 @@ test.describe('canonical container operation visibility', () => {
 
     const pendingRow = containerRow(page, 'lin-queued-workspace');
     await expect(pendingRow.locator('button:disabled')).toHaveCount(4);
-    await expect.soft(page).toHaveScreenshot('containers-normal-user-canonical-operations.png', { fullPage: true });
+    await expect.soft(page).toHaveScreenshot('containers-normal-user-canonical-tasks.png', { fullPage: true });
 
     const startRequest = page.waitForRequest((request) => {
       const url = new URL(request.url());
@@ -244,12 +237,12 @@ async function mockApi(page: Page): Promise<void> {
 
     if (path === '/v2/containers/ctr-lin-start/actions/start' && method === 'POST') {
       await delay();
-      return json(route, { ok: true, operationId: 'opstartcanonical', status: 'queued' });
+      return json(route, { ok: true, taskId: 'taskstartcanonical', status: 'pending' });
     }
 
-    if (path === '/operations/opstartcanonical') {
-      return json(route, operation({
-        id: 'opstartcanonical',
+    if (path === '/agent-tasks/taskstartcanonical') {
+      return json(route, agentTask({
+        id: 'taskstartcanonical',
         kind: 'container.start',
         status: 'succeeded',
         resourceId: 'ctr-lin-start',
@@ -277,20 +270,19 @@ function containerFixture(input: {
   ownerName: string;
   ip: string;
   status: string;
-  operation?: ReturnType<typeof operation>;
+  task?: ReturnType<typeof agentTask>;
 }) {
   const running = input.status === 'running';
-  const activeOperation = input.operation ?? null;
+  const activeTask = input.task ?? null;
   const allDisabled = {
-    start: { enabled: false, reason: 'operation_in_progress', message: 'Operation is still running' },
-    stop: { enabled: false, reason: 'operation_in_progress', message: 'Operation is still running' },
-    restart: { enabled: false, reason: 'operation_in_progress', message: 'Operation is still running' },
-    delete: { enabled: false, reason: 'operation_in_progress', message: 'Operation is still running' },
-    stats: { enabled: false, reason: 'operation_in_progress', message: 'Operation is still running' },
-    console: { enabled: false, reason: 'operation_in_progress', message: 'Operation is still running' },
-    updateMounts: { enabled: false, reason: 'operation_in_progress', message: 'Operation is still running' },
-    enableSsh: { enabled: false, reason: 'operation_in_progress', message: 'Operation is still running' },
-    reconcileSsh: { enabled: false, reason: 'operation_in_progress', message: 'Operation is still running' },
+    start: { enabled: false, reason: 'task_in_progress', message: 'Task is still pending' },
+    stop: { enabled: false, reason: 'task_in_progress', message: 'Task is still pending' },
+    restart: { enabled: false, reason: 'task_in_progress', message: 'Task is still pending' },
+    delete: { enabled: false, reason: 'task_in_progress', message: 'Task is still pending' },
+    stats: { enabled: false, reason: 'task_in_progress', message: 'Task is still pending' },
+    console: { enabled: false, reason: 'task_in_progress', message: 'Task is still pending' },
+    updateMounts: { enabled: false, reason: 'task_in_progress', message: 'Task is still pending' },
+    reconcileSsh: { enabled: false, reason: 'task_in_progress', message: 'Task is still pending' },
   };
   return {
     id: input.id,
@@ -300,7 +292,7 @@ function containerFixture(input: {
     ownerName: input.ownerName,
     name: input.name,
     imageId: 'img-cuda',
-    phase: activeOperation ? 'updating' : 'active',
+    phase: activeTask ? 'updating' : 'active',
     powerIntent: running ? 'running' : 'stopped',
     runtime: {
       bound: true,
@@ -311,7 +303,7 @@ function containerFixture(input: {
       stale: false,
       drift: [],
     },
-    activeOperation,
+    activeTask,
     resources: {
       cpuMillis: 2000,
       memBytes: 8 * 1024 ** 3,
@@ -320,7 +312,7 @@ function containerFixture(input: {
     },
     ssh: { enabled: false, status: 'disabled', user: 'root', port: 22 },
     mounts: [],
-    actions: activeOperation ? allDisabled : {
+    actions: activeTask ? allDisabled : {
       start: running ? { enabled: false, reason: 'phase_not_active', message: 'Container is not stopped' } : { enabled: true },
       stop: running ? { enabled: true } : { enabled: false, reason: 'phase_not_active', message: 'Container is not running' },
       restart: running ? { enabled: true } : { enabled: false, reason: 'phase_not_active', message: 'Container is not running' },
@@ -328,29 +320,31 @@ function containerFixture(input: {
       stats: running ? { enabled: true } : { enabled: false, reason: 'phase_not_active', message: 'Container is not running' },
       console: running ? { enabled: true } : { enabled: false, reason: 'phase_not_active', message: 'Container is not running' },
       updateMounts: { enabled: true },
-      enableSsh: { enabled: true },
       reconcileSsh: running ? { enabled: true } : { enabled: false, reason: 'phase_not_active', message: 'Container is not running' },
     },
   };
 }
 
-function operation(input: {
+function agentTask(input: {
   id: string;
   kind: string;
   status: string;
   resourceId: string;
-  attempts?: number;
-  lastError?: string | null;
   startedAt?: string | null;
   completedAt?: string | null;
 }) {
   return {
     resourceType: 'container',
     serverId: 'srv-gpu',
-    attempts: 1,
-    lastError: null,
+    requestedBy: null,
+    request: null,
+    agentResult: null,
+    result: null,
+    error: null,
+    failureStage: null,
     createdAt: '2026-06-04T01:58:00.000Z',
     startedAt: null,
+    lastSentAt: null,
     completedAt: null,
     ...input,
   };

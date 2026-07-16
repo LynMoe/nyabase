@@ -1,8 +1,8 @@
 import { CheckCircle, XCircle, Circle, Loader2, Download, RefreshCw } from 'lucide-react';
+import { AgentTaskStatus } from '@nyabase/common';
 import type { ServerStatus } from './types.js';
 import { Badge } from '../ui/badge.js';
 import { Button } from '../ui/button.js';
-import { Progress } from '../ui/progress.js';
 
 interface ServerStatusRowProps {
   status: ServerStatus;
@@ -14,7 +14,8 @@ interface ServerStatusRowProps {
 // Despite the file name, this is rendered inline (not a Radix Dialog) since
 // pull progress is shown alongside server status in the expanded card.
 export function ServerStatusRow({ status: s, onPull, pulling }: ServerStatusRowProps) {
-  const isPullingThis = !!s.pulling;
+  const isPullingThis = s.task?.status === AgentTaskStatus.Pending;
+  const failed = s.task?.status === AgentTaskStatus.Failed;
 
   return (
     <div className="flex items-center gap-3 px-3 py-2.5">
@@ -23,7 +24,7 @@ export function ServerStatusRow({ status: s, onPull, pulling }: ServerStatusRowP
           <Circle className="h-4 w-4 text-muted-foreground/40" />
         ) : isPullingThis ? (
           <Loader2 className="h-4 w-4 text-blue-500 animate-spin" />
-        ) : s.error ? (
+        ) : failed ? (
           <XCircle className="h-4 w-4 text-destructive" />
         ) : s.present ? (
           <CheckCircle className="h-4 w-4 text-green-500" />
@@ -40,18 +41,10 @@ export function ServerStatusRow({ status: s, onPull, pulling }: ServerStatusRowP
           </Badge>
         </div>
 
-        {isPullingThis && s.pulling && (
-          <div className="mt-1.5 space-y-1">
-            <div className="flex justify-between text-xs text-muted-foreground">
-              <span className="truncate max-w-[300px]">{s.pulling.message}</span>
-              <span className="shrink-0 ml-2">{s.pulling.progress}%</span>
-            </div>
-            <Progress value={s.pulling.progress} className="h-1.5" />
-          </div>
-        )}
-
-        {s.error && (
-          <p className="text-xs text-destructive mt-0.5 truncate">{s.error}</p>
+        {failed && (
+          <p className="text-xs text-destructive mt-0.5 truncate">
+            {taskErrorMessage(s.task?.error)}
+          </p>
         )}
       </div>
 
@@ -60,7 +53,7 @@ export function ServerStatusRow({ status: s, onPull, pulling }: ServerStatusRowP
           <span className="text-xs text-blue-500 font-medium">Pull 中</span>
         ) : s.present ? (
           <span className="text-xs text-green-600 font-medium">已就绪</span>
-        ) : s.error ? (
+        ) : failed ? (
           <span className="text-xs text-destructive font-medium">失败</span>
         ) : s.online ? (
           <span className="text-xs text-muted-foreground">未拉取</span>
@@ -91,4 +84,12 @@ export function ServerStatusRow({ status: s, onPull, pulling }: ServerStatusRowP
       )}
     </div>
   );
+}
+
+function taskErrorMessage(error: unknown): string {
+  if (error && typeof error === 'object' && 'message' in error) {
+    const message = (error as { message?: unknown }).message;
+    if (typeof message === 'string' && message.length > 0) return message;
+  }
+  return 'Pull 失败';
 }

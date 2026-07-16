@@ -14,28 +14,19 @@ export interface GrantFields {
   gpuIndices: number[] | null;
 }
 
-export interface ServerDefaults {
-  defaultCpuMillis: number;
-  defaultMemBytes: number;
-  defaultDiskBytes: number;
-  defaultGpuMode: GpuGrantMode;
-  defaultGpuIndices: number[];
-}
-
 /**
- * Merge a grant's nullable resource fields with the server's defaults.
- * A null field means "inherit from server default".
+ * Resolve nullable grant fields directly.
+ * Null CPU/memory/disk means unlimited (0); null GPU mode means all GPUs.
  * Exported as a standalone function so it can be unit-tested without TypeORM.
  */
-export function resolveGrantWithServerDefaults(
+export function resolveGrant(
   grant: GrantFields,
-  defaults: ServerDefaults,
 ): ResolvedServerGrant {
   return {
-    cpuMillis: grant.cpuMillis ?? defaults.defaultCpuMillis,
-    memBytes: grant.memBytes ?? defaults.defaultMemBytes,
-    diskBytes: grant.diskBytes ?? defaults.defaultDiskBytes,
-    gpuMode: grant.gpuMode ?? defaults.defaultGpuMode,
-    gpuIndices: grant.gpuIndices ?? defaults.defaultGpuIndices,
+    cpuMillis: grant.cpuMillis ?? 0,
+    memBytes: grant.memBytes ?? 0,
+    diskBytes: grant.diskBytes ?? 0,
+    gpuMode: grant.gpuMode ?? GpuGrantMode.All,
+    gpuIndices: grant.gpuIndices ?? [],
   };
 }

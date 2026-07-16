@@ -15,7 +15,8 @@ configuration, scripts, specs, runtime metadata, and the shared test database.
 | `test/runtime/agents/` | Generated server metadata, tokens, and agent YAML. |
 | `test/runtime/logs/` | `nohup` logs and PID files for local backend/frontend. |
 | `test/runtime/live-api/` | Persistent live API fixture, persona credentials, and per-run reports. |
-| `test/runtime/murt/`, `test/runtime/murtc/`, `test/runtime/mount/`, `test/runtime/dropbear/` | Legacy generated live-test fixtures and reports. |
+| `test/runtime/ssh-proxy-live/` | SSH proxy live probe reports and transfer fixtures. |
+| `test/runtime/murt/`, `test/runtime/mount/` | Generated persona, continuation, and mount-test fixtures and reports. |
 
 ## Fixed Instance
 
@@ -28,6 +29,7 @@ All tests use the same shared local instance:
 | Agent WebSocket | `ws://10.8.96.92:3001/ws/agent` |
 | VictoriaMetrics | `http://127.0.0.1:8428` |
 | SQLite DB | `test/runtime/db/nyabase-test.db` |
+| Backend config | `test/runtime/config.yaml` generated from `test/config/local.env` |
 | Admin | `admin / admin123` |
 
 Local backend and frontend startup must use `nohup`. Do not start alternate
@@ -64,8 +66,9 @@ Use `bash test/scripts/start-local.sh` when the DB should be preserved. Use
 - Visual gate: `bash scripts/check-visual.sh`
 - Product API functional suite: `pnpm test:functional`
 - Live API suite with persistent fixtures: `bash test/scripts/run-live-suite.sh api`
+- Live SSH proxy acceptance probe: `bash test/scripts/run-live-suite.sh ssh-proxy`
 - Live smoke only: `bash test/scripts/run-live-suite.sh smoke`
-- Legacy red-team specs for targeted debugging: `bash test/scripts/run-live-suite.sh legacy-admin-setup` and `bash test/scripts/run-live-suite.sh legacy-redteam`
+- Targeted live specs: `bash test/scripts/run-live-suite.sh admin-setup`, `personas`, `mounts`, or `continuation`
 
 The live API suite is not a mock. It logs into the shared backend, uses admin
 APIs to ensure persistent servers, images, data sources, users, groups, grants,

@@ -3,10 +3,9 @@
 # Switching from Bun resolves dockerode hijack hangs (oven-sh/bun#29012) by using
 # the native Node.js HTTP implementation, which dockerode is designed against.
 #
-# The mount-helper Rust binary is embedded as a pkg asset inside the agent binary.
-# On startup the agent extracts it to /var/lib/nyabase-agent/ automatically.
-# The prebuilt static Dropbear binary is supplied under packages/agent/assets/dropbear
-# and embedded the same way; this script does not build or download Dropbear.
+# The prebuilt static Dropbear server and dropbearkey binaries are supplied under
+# packages/agent/assets/dropbear and embedded together; this script does not
+# build or download Dropbear.
 # The SFTP subsystem binary is built from tools/sftp-server as a static musl asset
 # and embedded into the agent for injection into containers.
 set -euo pipefail
@@ -14,10 +13,11 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 OUT_DIR="$REPO_ROOT/dist"
 BINARY_NAME="nyabase-agent"
-HELPER_NAME="nyabase-mount-helper"
 DROPBEAR_NAME="nyabase-dropbear"
+DROPBEARKEY_NAME="nyabase-dropbearkey"
 SFTP_NAME="nyabase-sftp-server"
 DEFAULT_DROPBEAR_SRC="$REPO_ROOT/packages/agent/assets/dropbear/nyabase-dropbear-linux-x64"
+DEFAULT_DROPBEARKEY_SRC="$REPO_ROOT/packages/agent/assets/dropbear/nyabase-dropbearkey-linux-x64"
 NODE_TARGET="${NODE_TARGET:-node22-linux-x64}"
 AGENT_PACKAGE_JSON="$REPO_ROOT/packages/agent/package.json"
 
@@ -28,27 +28,6 @@ AGENT_VERSION="$(
 )"
 AGENT_VERSION_DEFINE="$(node -e "process.stdout.write(JSON.stringify(process.argv[1]));" "$AGENT_VERSION")"
 
-# Load Rust toolchain if installed via rustup
-if [ -f "$HOME/.cargo/env" ]; then
-  # shellcheck source=/dev/null
-  source "$HOME/.cargo/env"
-fi
-
-echo "=== Building mount-helper (Rust) ==="
-cd "$REPO_ROOT/tools/mount-helper"
-if cargo build --release --target x86_64-unknown-linux-musl 2>/dev/null; then
-  HELPER_SRC="target/x86_64-unknown-linux-musl/release/$HELPER_NAME"
-  echo "Built musl static binary: $HELPER_SRC"
-else
-  # fallback: dynamic binary (no musl toolchain installed)
-  echo "musl target not available, building dynamic binary..."
-  cargo build --release
-  HELPER_SRC="target/release/$HELPER_NAME"
-  echo "Built dynamic binary: $HELPER_SRC"
-fi
-cd "$REPO_ROOT"
-
-echo ""
 echo "=== Building SFTP server (Rust) ==="
 cd "$REPO_ROOT/tools/sftp-server"
 cargo build --release --target x86_64-unknown-linux-musl
@@ -98,13 +77,35 @@ if [ "$EXPECTED_DROPBEAR_SHA" != "$ACTUAL_DROPBEAR_SHA" ]; then
   exit 1
 fi
 
-# Place mount-helper alongside the bundle so pkg can embed it as an asset.
-cp "$REPO_ROOT/tools/mount-helper/$HELPER_SRC" "$BUNDLE_DIR/$HELPER_NAME"
+DROPBEARKEY_SRC="${NYABASE_DROPBEARKEY_PATH:-}"
+if [ -z "$DROPBEARKEY_SRC" ] && [ -f "$DEFAULT_DROPBEARKEY_SRC" ]; then
+  DROPBEARKEY_SRC="$DEFAULT_DROPBEARKEY_SRC"
+fi
+if [ -z "$DROPBEARKEY_SRC" ]; then
+  echo "ERROR: Dropbear key utility asset source is not configured." >&2
+  echo "Set NYABASE_DROPBEARKEY_PATH or vendor it at:" >&2
+  echo "  $DEFAULT_DROPBEARKEY_SRC" >&2
+  exit 1
+fi
+DROPBEARKEY_SHA_SRC="${NYABASE_DROPBEARKEY_SHA256_PATH:-$DROPBEARKEY_SRC.sha256}"
+if [ ! -f "$DROPBEARKEY_SRC" ] || [ ! -f "$DROPBEARKEY_SHA_SRC" ]; then
+  echo "ERROR: Dropbear key utility or sha256 sidecar is missing." >&2
+  exit 1
+fi
+EXPECTED_DROPBEARKEY_SHA="$(awk '{print $1; exit}' "$DROPBEARKEY_SHA_SRC")"
+ACTUAL_DROPBEARKEY_SHA="$(sha256sum "$DROPBEARKEY_SRC" | awk '{print $1; exit}')"
+if [ "$EXPECTED_DROPBEARKEY_SHA" != "$ACTUAL_DROPBEARKEY_SHA" ]; then
+  echo "ERROR: Dropbear key utility sha256 mismatch for $DROPBEARKEY_SRC" >&2
+  exit 1
+fi
 
 # Place Dropbear alongside the bundle so pkg can embed it as an asset.
 cp "$DROPBEAR_SRC" "$BUNDLE_DIR/$DROPBEAR_NAME"
 chmod 755 "$BUNDLE_DIR/$DROPBEAR_NAME"
 cp "$DROPBEAR_SHA_SRC" "$BUNDLE_DIR/$DROPBEAR_NAME.sha256"
+cp "$DROPBEARKEY_SRC" "$BUNDLE_DIR/$DROPBEARKEY_NAME"
+chmod 755 "$BUNDLE_DIR/$DROPBEARKEY_NAME"
+cp "$DROPBEARKEY_SHA_SRC" "$BUNDLE_DIR/$DROPBEARKEY_NAME.sha256"
 
 # Place SFTP server alongside the bundle so pkg can embed it as an asset.
 cp "$REPO_ROOT/tools/sftp-server/$SFTP_SRC" "$BUNDLE_DIR/$SFTP_NAME"
@@ -132,7 +133,7 @@ echo "=== Compiling Node.js binary ($NODE_TARGET) ==="
 # Embed native assets via a temporary config file placed next to the bundle
 # entry, so __dirname-relative reads resolve correctly at runtime.
 cat > "$BUNDLE_DIR/pkg.config.json" << EOF
-{"pkg": {"assets": ["$HELPER_NAME", "$DROPBEAR_NAME", "$DROPBEAR_NAME.sha256", "$SFTP_NAME", "$SFTP_NAME.sha256"]}}
+{"pkg": {"assets": ["$DROPBEAR_NAME", "$DROPBEAR_NAME.sha256", "$DROPBEARKEY_NAME", "$DROPBEARKEY_NAME.sha256", "$SFTP_NAME", "$SFTP_NAME.sha256"]}}
 EOF
 ./node_modules/.bin/pkg \
   --targets "$NODE_TARGET" \

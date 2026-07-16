@@ -1,4 +1,4 @@
-import { Module } from '@nestjs/common';
+import { Module, forwardRef } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { AccessResolverService } from './access-resolver.service.js';
 import { GroupEntity } from '../entities/group.entity.js';
@@ -9,7 +9,9 @@ import { ImageEntity } from '../entities/image.entity.js';
 import { ServerEntity } from '../entities/server.entity.js';
 import { MountSourceGrantEntity } from '../entities/mount-source-grant.entity.js';
 import { RemoteFsServerAssignmentEntity } from '../entities/remote-fs-server-assignment.entity.js';
-import { DataDiskEntity } from '../entities/data-disk.entity.js';
+import { AgentGatewayModule } from '../gateway/agent-gateway.module.js';
+import { AccessCacheEpochModule } from './access-cache-epoch.module.js';
+import { AccessRevocationGuardService } from './access-revocation-guard.service.js';
 
 @Module({
   imports: [
@@ -22,10 +24,11 @@ import { DataDiskEntity } from '../entities/data-disk.entity.js';
       ServerEntity,
       MountSourceGrantEntity,
       RemoteFsServerAssignmentEntity,
-      DataDiskEntity,
     ]),
+    AccessCacheEpochModule,
+    forwardRef(() => AgentGatewayModule),
   ],
-  providers: [AccessResolverService],
-  exports: [AccessResolverService],
+  providers: [AccessResolverService, AccessRevocationGuardService],
+  exports: [AccessResolverService, AccessRevocationGuardService],
 })
 export class AccessModule {}

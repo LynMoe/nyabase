@@ -22,18 +22,16 @@ function makeGrant(overrides: Partial<ResolvedServerGrant> = {}): ResolvedServer
 // ---------------------------------------------------------------------------
 
 describe('shouldCountContainerForQuota', () => {
-  it('counts active non-deleted containers', () => {
-    expect(shouldCountContainerForQuota(ContainerPhase.Active, null)).toBe(true);
+  it('counts active containers', () => {
+    expect(shouldCountContainerForQuota(ContainerPhase.Active)).toBe(true);
   });
 
-  it('excludes deleted and delete-requested containers', () => {
-    expect(shouldCountContainerForQuota(ContainerPhase.Active, new Date())).toBe(false);
-    expect(shouldCountContainerForQuota(ContainerPhase.Deleting, null)).toBe(false);
-    expect(shouldCountContainerForQuota(ContainerPhase.Deleted, null)).toBe(false);
+  it('excludes delete-requested containers', () => {
+    expect(shouldCountContainerForQuota(ContainerPhase.Deleting)).toBe(false);
   });
 
   it('excludes failed create placeholders so retries are not blocked by quota', () => {
-    expect(shouldCountContainerForQuota(ContainerPhase.Failed, null)).toBe(false);
+    expect(shouldCountContainerForQuota(ContainerPhase.Failed)).toBe(false);
   });
 });
 

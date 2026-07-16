@@ -1,7 +1,7 @@
 # Dropbear asset
 
-This directory stores the static Linux x64 Dropbear server binary consumed by
-source-mode agent runtime and `scripts/build-agent-binary.sh`.
+This directory stores the static Linux x64 Dropbear server and `dropbearkey`
+binaries consumed by source-mode agent runtime and `scripts/build-agent-binary.sh`.
 
 Regenerate the asset from the archived Dockerfile:
 
@@ -12,7 +12,10 @@ docker buildx build \
   --output type=local,dest=packages/agent/assets/dropbear \
   packages/agent/assets/dropbear
 chmod 755 packages/agent/assets/dropbear/nyabase-dropbear-linux-x64
-(cd packages/agent/assets/dropbear && sha256sum -c nyabase-dropbear-linux-x64.sha256)
+chmod 755 packages/agent/assets/dropbear/nyabase-dropbearkey-linux-x64
+(cd packages/agent/assets/dropbear && sha256sum -c \
+  nyabase-dropbear-linux-x64.sha256 \
+  nyabase-dropbearkey-linux-x64.sha256)
 ```
 
 The Dockerfile downloads the official Dropbear source release from

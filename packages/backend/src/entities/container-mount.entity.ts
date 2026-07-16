@@ -1,8 +1,10 @@
 import {
-  Entity, PrimaryColumn, Column, Index, Unique, CreateDateColumn, UpdateDateColumn,
+  Entity, PrimaryColumn, Column, Index, Unique, CreateDateColumn, UpdateDateColumn, ForeignKey,
 } from 'typeorm';
+import { ContainerEntity } from './container.entity.js';
+import { ServerEntity } from './server.entity.js';
 
-/** Legacy table name; rows now store containerId-keyed desired mount specs. */
+/** Desired container mount specifications keyed by stable container ID. */
 @Entity('container_mounts')
 @Unique(['serverId', 'containerId', 'containerPath'])
 @Unique(['serverId', 'containerId', 'sourceKind', 'sourceId', 'userId', 'dirName'])
@@ -11,17 +13,14 @@ export class ContainerMountEntity {
   id: string;
 
   @Index()
+  @ForeignKey(() => ServerEntity, { onDelete: 'RESTRICT' })
   @Column('text')
   serverId: string;
 
   @Index()
+  @ForeignKey(() => ContainerEntity, { onDelete: 'CASCADE' })
   @Column('text')
   containerId: string;
-
-  /** Observed Docker binding kept for migration/backfill/result compatibility only. */
-  @Index()
-  @Column({ type: 'text', nullable: true })
-  dockerId: string | null;
 
   @Index()
   @Column('text')
@@ -32,6 +31,10 @@ export class ContainerMountEntity {
 
   @Column('text')
   sourceId: string;
+
+  /** Immutable physical identity captured with the container mount intent. */
+  @Column('text')
+  sourceIdentity: string;
 
   @Column('text')
   userId: string;

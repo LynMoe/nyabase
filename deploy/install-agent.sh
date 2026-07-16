@@ -9,6 +9,7 @@ AGENT_DIR="/opt/nyabase-agent"
 BIN_DIR="/opt/nyabase-agent/bin"
 CONFIG_DIR="/etc/nyabase"
 STATE_DIR="/var/lib/nyabase-agent"
+PHYSICAL_MUTATION_LOCK="$STATE_DIR/physical-mutation.lock"
 
 echo "=== nyabase Agent Installer ==="
 
@@ -36,6 +37,12 @@ if ! command -v dockerd &>/dev/null; then
 fi
 echo "Found dockerd at $(command -v dockerd)"
 
+if ! command -v flock &>/dev/null; then
+  echo "ERROR: flock not found in PATH (install util-linux)."
+  exit 1
+fi
+echo "Found flock at $(command -v flock)"
+
 # Disable and stop the system docker.service if running — nyabase manages its own daemon.
 if systemctl is-active --quiet docker.service 2>/dev/null; then
   echo "WARNING: system docker.service is active. nyabase will manage its own dockerd."
@@ -51,16 +58,26 @@ if ! command -v node &>/dev/null; then
 fi
 
 # Install pnpm
-npm install -g pnpm
+npm install -g pnpm@9.15.0 --no-update-notifier
 
 # Create directories
-mkdir -p "$AGENT_DIR" "$BIN_DIR" "$CONFIG_DIR" "$STATE_DIR"
+mkdir -p "$AGENT_DIR" "$BIN_DIR" "$CONFIG_DIR"
+install -d -o root -g root -m 0700 "$STATE_DIR"
+if [ -L "$PHYSICAL_MUTATION_LOCK" ] || { [ -e "$PHYSICAL_MUTATION_LOCK" ] && [ ! -f "$PHYSICAL_MUTATION_LOCK" ]; }; then
+  echo "ERROR: unsafe physical mutation lock path: $PHYSICAL_MUTATION_LOCK"
+  exit 1
+fi
+# Never replace or unlink this inode during upgrades: old helpers may still
+# hold its flock after the Agent process itself has exited.
+touch "$PHYSICAL_MUTATION_LOCK"
+chown root:root "$PHYSICAL_MUTATION_LOCK"
+chmod 0600 "$PHYSICAL_MUTATION_LOCK"
 
 # Copy agent files (assumes build artifacts are in ./dist/)
 if [ -f "dist/nyabase-agent" ]; then
   # Pre-built binary mode
-  cp "dist/nyabase-agent" "$AGENT_DIR/nyabase-agent"
-  chmod +x "$AGENT_DIR/nyabase-agent"
+  cp "dist/nyabase-agent" "$BIN_DIR/nyabase-agent"
+  chmod +x "$BIN_DIR/nyabase-agent"
 else
   # Source mode
   cp -r packages/agent/dist "$AGENT_DIR/"
@@ -69,6 +86,13 @@ else
   cd "$AGENT_DIR"
   NODE_ENV=production pnpm install --prod
   cd -
+  cat > "$BIN_DIR/nyabase-agent" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+cd /opt/nyabase-agent
+exec /usr/bin/node /opt/nyabase-agent/dist/main.js "$@"
+EOF
+  chmod +x "$BIN_DIR/nyabase-agent"
 fi
 
 # Install systemd service
@@ -76,37 +100,14 @@ cp deploy/agent.systemd.service /etc/systemd/system/nyabase-agent.service
 
 # Copy example config if no config exists
 if [ ! -f "$CONFIG_DIR/agent.yaml" ]; then
-  cp deploy/agent.example.yaml "$CONFIG_DIR/agent.yaml"
+  install -o root -g root -m 0600 deploy/agent.example.yaml "$CONFIG_DIR/agent.yaml"
   echo "IMPORTANT: Edit $CONFIG_DIR/agent.yaml with your configuration before starting"
+else
+  chown root:root "$CONFIG_DIR/agent.yaml"
+  chmod 0600 "$CONFIG_DIR/agent.yaml"
 fi
 
 systemctl daemon-reload
-
-# ---------------------------------------------------------------------------
-# One-time cleanup for upgrades from versions that used state.json
-# ---------------------------------------------------------------------------
-# state.json is no longer used. XFS project IDs are now derived from each
-# user's numeric DB ID (numericId + 10000 offset), so old /etc/projects and
-# /etc/projid entries keyed by UUID or old sequence numbers are obsolete.
-#
-# IMPORTANT: After this cleanup, all XFS quota limits and project/path bindings
-# are gone. The backend will enqueue fresh durable quota.apply commands on the
-# next agent reconnect, which will re-create XFS projects. Data directories on
-# disk are NOT affected — only quota accounting is reset.
-#
-# RUNBOOK — run manually when upgrading from a state.json-based agent:
-#   systemctl stop nyabase-agent
-#   rm -f /var/lib/nyabase-agent/state.json /tmp/nyabase-agent-state.json
-#   # Remove nyabase-managed lines from /etc/projects and /etc/projid:
-#   grep -v '^[0-9]*:/var/lib/nyabase-docker' /etc/projects > /etc/projects.tmp && mv /etc/projects.tmp /etc/projects
-#   grep -v '^nyabase_' /etc/projid > /etc/projid.tmp && mv /etc/projid.tmp /etc/projid
-#   systemctl start nyabase-agent
-
-# Remove stale state.json if present (safe to run on fresh installs too)
-if [ -f /var/lib/nyabase-agent/state.json ]; then
-  echo "Removing legacy state.json..."
-  rm -f /var/lib/nyabase-agent/state.json /tmp/nyabase-agent-state.json
-fi
 
 echo ""
 echo "=== Installation complete ==="
@@ -116,6 +117,3 @@ echo "3. journalctl -fu nyabase-agent   # watch logs"
 echo ""
 echo "The agent will automatically create and manage nyabase-docker.service"
 echo "using the dockerRoot path from agent.yaml."
-echo ""
-echo "NOTE: If upgrading from a state.json-based agent, see the RUNBOOK comment"
-echo "      in this script for XFS quota reset instructions."

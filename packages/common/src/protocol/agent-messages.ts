@@ -10,12 +10,37 @@
 
 import { z } from 'zod';
 import {
-  AgentCommandKind,
+  AgentTaskKind,
   ContainerStatus,
   DockerDaemonState,
   RemoteFsType,
 } from '../enums.js';
-import { zImageRuntimeOverrides } from './rest-schema.js';
+import {
+  zImageRuntimeOverrides,
+  zRemoteFsCreateCephFsParams,
+  zRemoteFsCreateNfsParams,
+  zRemoteFsOptions,
+} from './rest-schema.js';
+import {
+  MAX_AGENT_DISKS,
+  MAX_AGENT_GPU_DEVICES,
+  MAX_AGENT_LOCAL_IMAGES,
+  MAX_AGENT_MACVLAN_RESERVED_IPS,
+  MAX_AGENT_REMOTE_FS_MOUNTS,
+  MAX_AGENT_XFS_PROJECTS,
+  MAX_CONTAINER_MOUNTS,
+  MAX_MANAGED_CONTAINERS_PER_AGENT,
+  MAX_MANAGED_DATA_DIRS_PER_AGENT,
+  MAX_METRIC_LABEL_KEY_LENGTH,
+  MAX_METRIC_LABEL_VALUE_LENGTH,
+  MAX_METRIC_LABELS_PER_POINT,
+  MAX_METRIC_NAME_LENGTH,
+  MAX_METRIC_POINTS_PER_BATCH,
+  LABEL,
+  XFS_PROJECT_ID_MAX,
+  XFS_PROJECT_ID_OFFSET,
+} from '../constants.js';
+import { canonicalIpv4Address } from '../utils.js';
 
 // ---------------------------------------------------------------------------
 // Primitives
@@ -23,6 +48,19 @@ import { zImageRuntimeOverrides } from './rest-schema.js';
 
 export const zContainerStatus = z.nativeEnum(ContainerStatus);
 export const zDockerDaemonState = z.nativeEnum(DockerDaemonState);
+export const zDataDirName = z.string().min(1).superRefine((name, ctx) => {
+  if (name === '.' || name === '..' || /[/\\]/.test(name) || /[\x00-\x1F\x7F]/.test(name)) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: 'Invalid data directory name',
+    });
+  }
+});
+
+export const zTaskId = z.string()
+  .min(1)
+  .max(128)
+  .regex(/^[A-Za-z0-9][A-Za-z0-9._:-]*$/);
 
 // ---------------------------------------------------------------------------
 // WS envelope
@@ -35,6 +73,14 @@ export const zEnvelope = z.object({
   ts: z.number(),
   kind: z.string(),
   payload: z.unknown(),
+}).superRefine((value, ctx) => {
+  if (!Object.prototype.hasOwnProperty.call(value, 'payload')) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['payload'],
+      message: 'Required',
+    });
+  }
 });
 
 // ---------------------------------------------------------------------------
@@ -44,6 +90,8 @@ export const zEnvelope = z.object({
 export const zDiskInfo = z.object({
   diskId: z.string(),
   mountPoint: z.string(),
+  /** Stable filesystem identity (XFS UUID), not a mutable device path. */
+  sourceIdentity: z.string().min(1),
   label: z.string().optional(),
   totalBytes: z.number(),
   usedBytes: z.number(),
@@ -57,27 +105,27 @@ export const zGpuInfo = z.object({
   totalMemMiB: z.number(),
 });
 
-export const zDataDirMount = z.object({
-  diskId: z.string(),
-  dirName: z.string(),
-  hostPath: z.string(),
-  containerPath: z.string(),
-});
+export const zContainerQuotaPaths = z.array(z.string().min(1).max(4096)).length(2).refine(
+  (paths) => new Set(paths).size === paths.length,
+  'Container quota recovery paths must be unique',
+);
 
-export const zContainerSpec = z.object({
-  runtimeId: z.string(),
-  name: z.string(),
-  ownerId: z.string(),
-  imageId: z.string(),
-  cpuMillis: z.number(),
-  memBytes: z.number(),
-  gpuIndices: z.array(z.number().int()),
-  ip: z.string(),
-  serverId: z.string(),
-  dataDirs: z.array(zDataDirMount),
-  createdAt: z.string(),
-  specVersion: z.string(),
-});
+const zCanonicalIpv4Address = z.string().min(7).max(15).refine((value) => {
+  try {
+    return canonicalIpv4Address(value) === value;
+  } catch {
+    return false;
+  }
+}, 'Expected a canonical IPv4 address');
+
+/** Fresh physical runtime evidence; desired product state never crosses this wire. */
+export const zContainerRuntimeObservation = z.object({
+  runtimeId: z.string().min(1).max(256),
+  ip: zCanonicalIpv4Address,
+  serverId: zTaskId,
+  specGeneration: z.string().max(20).regex(/^[1-9]\d*$/),
+  quotaPaths: zContainerQuotaPaths,
+}).strict();
 
 export const zContainerSshServerStatus = z.enum([
   'disabled',
@@ -113,23 +161,45 @@ export const zContainerStatsSummary = z.object({
   gpuMemUsedMiB: z.record(z.number()),
 });
 
+export const zContainerIdentityLabels = z.object({
+  [LABEL.MANAGED]: z.literal('true'),
+  [LABEL.CONTAINER_ID]: zTaskId,
+  [LABEL.SERVER_ID]: zTaskId,
+  [LABEL.SPEC_GENERATION]: z.string().max(20).regex(/^[1-9]\d*$/),
+  [LABEL.RUNTIME_SPEC_HASH]: z.string().regex(/^[a-f0-9]{64}$/),
+}).strict();
+
 export const zContainerSnapshot = z.object({
-  spec: zContainerSpec,
+  runtime: zContainerRuntimeObservation,
   status: zContainerStatus,
-  stats: zContainerStatsSummary.nullable(),
   sshServer: zContainerSshServerState,
-  labels: z.record(z.string()).optional(),
-});
+  labels: zContainerIdentityLabels,
+}).strict();
 
 /**
  * NOTE: agent → backend only carries numericUserId (agent has no UUID mapping).
  * Backend resolves UUID via getUserIdsByNumericIds after receiving stateReport.
  */
+const zSafeByteCount = z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER);
 export const zXfsProjectUsage = z.object({
-  numericUserId: z.number().int(),
-  projectId: z.number().int(),
-  usedBytes: z.number(),
-  hardLimitBytes: z.number(),
+  numericUserId: z.number()
+    .int()
+    .positive()
+    .max(XFS_PROJECT_ID_MAX - XFS_PROJECT_ID_OFFSET),
+  projectId: z.number()
+    .int()
+    .min(XFS_PROJECT_ID_OFFSET + 1)
+    .max(XFS_PROJECT_ID_MAX),
+  usedBytes: zSafeByteCount,
+  hardLimitBytes: zSafeByteCount,
+}).superRefine((usage, ctx) => {
+  if (usage.projectId !== usage.numericUserId + XFS_PROJECT_ID_OFFSET) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['projectId'],
+      message: 'XFS projectId does not match numericUserId',
+    });
+  }
 });
 
 export const zLocalImageInfo = z.object({
@@ -173,87 +243,87 @@ export const zDockerDaemonStatus = z.object({
 
 export const zHelloPayload = z.object({
   serverId: z.string(),
+  hostFingerprint: z.string().regex(/^[a-f0-9]{64}$/),
+  configFingerprint: z.string().regex(/^[a-f0-9]{64}$/),
   hostname: z.string(),
   kernelVersion: z.string(),
   cpuCores: z.number().int(),
   totalMemBytes: z.number(),
-  disks: z.array(zDiskInfo),
-  gpus: z.array(zGpuInfo),
+  disks: z.array(zDiskInfo).max(MAX_AGENT_DISKS),
+  gpus: z.array(zGpuInfo).max(MAX_AGENT_GPU_DEVICES),
   macvlanCidr: z.string(),
   macvlanGateway: z.string(),
+  macvlanReservedIps: z.array(z.string()).max(MAX_AGENT_MACVLAN_RESERVED_IPS),
   macvlanIface: z.string(),
+  dockerRoot: z.string().min(1),
   agentVersion: z.string(),
-  localImages: z.array(zLocalImageInfo).default([]),
-  dockerRoot: z.string().optional(),
-  dockerSocket: z.string().optional(),
-});
-
-export const zPullProgressPayload = z.object({
-  serverId: z.string(),
-  dockerRef: z.string(),
-  imageId: z.string().optional(),
-  status: z.enum(['pulling', 'done', 'error']),
-  progress: z.number(),
-  message: z.string(),
-  error: z.string().optional(),
-});
+  localImages: z.array(zLocalImageInfo).max(MAX_AGENT_LOCAL_IMAGES),
+}).strict();
 
 export const zHeartbeatPayload = z.object({
   serverId: z.string(),
   uptime: z.number(),
 });
 
+export const zInventoryFaultPayload = z.object({
+  serverId: zTaskId,
+  code: z.enum([
+    'AUTHORITATIVE_INVENTORY_FAILED',
+    'AUTHORITATIVE_INVENTORY_TOO_LARGE',
+  ]),
+  message: z.string().min(1).max(2048),
+  observedAt: z.number().int().nonnegative(),
+}).strict();
+
 // ---------------------------------------------------------------------------
 // Remote FS params (discriminated union by type)
 // ---------------------------------------------------------------------------
 
-export const zNfsParams = z.object({
-  type: z.literal(RemoteFsType.Nfs),
-  nfsServer: z.string().min(1),
-  exportPath: z.string().startsWith('/'),
-  version: z.enum(['3', '4', '4.1', '4.2']),
-});
+export const zNfsParams = zRemoteFsCreateNfsParams;
 
-export const zCephFsParams = z.object({
-  type: z.literal(RemoteFsType.CephFs),
-  /** Comma-separated monitor hosts, e.g. "10.0.0.1,10.0.0.2:6789" */
-  monHosts: z.string().min(1),
-  /** Optional filesystem name for multi-fs clusters */
-  fsName: z.string().optional(),
-  exportPath: z.string().startsWith('/'),
-  /** CephX client name, e.g. "admin" */
-  clientName: z.string().min(1),
-  /** Base64-encoded CephX secret key (stored in plain text) */
-  secret: z.string().min(1),
-});
+export const zCephFsParams = zRemoteFsCreateCephFsParams;
 
 export const zRemoteFsParams = z.discriminatedUnion('type', [zNfsParams, zCephFsParams]);
 
+/** Stable identity for the remote filesystem itself; excludes credentials and mount options. */
+export function remoteFsSourceIdentity(params: z.infer<typeof zRemoteFsParams>): string {
+  if (params.type === RemoteFsType.Nfs) {
+    return ['remote', 'nfs', params.nfsServer.trim(), params.exportPath].map(encodeURIComponent).join(':');
+  }
+  const monitors = params.monHosts.split(',').map((value) => value.trim()).filter(Boolean).sort();
+  return [
+    'remote',
+    'cephfs',
+    monitors.join(','),
+    params.exportPath,
+    params.fsName ?? '',
+    params.clientName,
+  ].map(encodeURIComponent).join(':');
+}
+
 export const zRemoteFsMountSpec = z.object({
-  id: z.string(),
-  hostMountPoint: z.string(),
-  options: z.string(),
+  id: zTaskId,
+  hostMountPoint: z.string().min(1).max(4096),
+  options: zRemoteFsOptions,
   params: zRemoteFsParams,
-});
+}).strict();
 
 export const zRemoteFsMountStatus = z.object({
-  id: z.string(),
-  hostMountPoint: z.string(),
+  id: zTaskId,
+  hostMountPoint: z.string().min(1).max(4096),
   status: z.enum(['mounted', 'mounting', 'error']),
-  error: z.string().optional(),
-  lastCheckedAt: z.number(),
-  totalBytes: z.number().optional(),
-  usedBytes: z.number().optional(),
-});
+  error: z.string().min(1).max(2048).optional(),
+  lastCheckedAt: z.number().int().nonnegative(),
+  totalBytes: zSafeByteCount.optional(),
+  usedBytes: zSafeByteCount.optional(),
+}).strict();
 
 export const zContainerMountSpec = z.object({
-  sourceKind: z.enum(['local', 'remote']),
-  sourceId: z.string(),
-  userId: z.string(),
-  dirName: z.string(),
-  containerPath: z.string(),
-  hostPath: z.string(),
-});
+  sourceId: z.string().min(1).max(128),
+  resourceId: zTaskId,
+  sourceIdentity: z.string().min(1).max(4096),
+  containerPath: z.string().min(1).max(4096),
+}).strict();
 
 export const zDataDiskSpec = z.object({
   diskId: z.string(),
@@ -261,29 +331,66 @@ export const zDataDiskSpec = z.object({
   label: z.string().optional(),
 });
 
+export const zDataDirEntry = z.object({
+  sourceKind: z.enum(['local', 'remote']),
+  sourceId: z.string().min(1).max(256),
+  resourceId: zTaskId,
+  hostPath: z.string().min(1).max(4096),
+}).strict();
+
 export const zStateReportPayload = z.object({
   serverId: z.string(),
+  /** Monotonic within one Agent WebSocket session. */
+  sequence: z.number().int().nonnegative(),
   /** Unix ms timestamp captured before the agent starts collecting this report. */
   observedAt: z.number().int().nonnegative(),
-  containers: z.array(zContainerSnapshot),
-  xfsProjects: z.array(zXfsProjectUsage),
-  disks: z.array(zDiskInfo),
-  localImages: z.array(zLocalImageInfo).optional(),
-  remoteFsMounts: z.array(zRemoteFsMountStatus).default([]),
-  incremental: z.boolean(),
+  containers: z.array(zContainerSnapshot).max(MAX_MANAGED_CONTAINERS_PER_AGENT),
+  dataDirs: z.array(zDataDirEntry).max(MAX_MANAGED_DATA_DIRS_PER_AGENT),
+  xfsProjects: z.array(zXfsProjectUsage).max(MAX_AGENT_XFS_PROJECTS),
+  disks: z.array(zDiskInfo).max(MAX_AGENT_DISKS),
+  localImages: z.array(zLocalImageInfo).max(MAX_AGENT_LOCAL_IMAGES),
+  remoteFsMounts: z.array(zRemoteFsMountStatus).max(MAX_AGENT_REMOTE_FS_MOUNTS),
+}).strict().superRefine((value, ctx) => {
+  const keys = value.dataDirs.map((entry) =>
+    `${entry.sourceKind}\u0000${entry.sourceId}\u0000${entry.resourceId}`);
+  if (new Set(keys).size !== keys.length) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['dataDirs'],
+      message: 'Data directory inventory identities must be unique',
+    });
+  }
+});
+
+const zMetricLabels = z.record(
+  z.string()
+    .min(1)
+    .max(MAX_METRIC_LABEL_KEY_LENGTH)
+    .regex(/^[a-zA-Z_][a-zA-Z0-9_]*$/),
+  z.string().max(MAX_METRIC_LABEL_VALUE_LENGTH),
+).superRefine((labels, ctx) => {
+  if (Object.keys(labels).length > MAX_METRIC_LABELS_PER_POINT) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: `Metric point has more than ${MAX_METRIC_LABELS_PER_POINT} labels`,
+    });
+  }
 });
 
 export const zMetricPoint = z.object({
-  name: z.string(),
-  labels: z.record(z.string()),
-  value: z.number(),
-  ts: z.number(),
-});
+  name: z.string()
+    .min(1)
+    .max(MAX_METRIC_NAME_LENGTH)
+    .regex(/^[a-zA-Z_:][a-zA-Z0-9_:]*$/),
+  labels: zMetricLabels,
+  value: z.number().finite(),
+  ts: z.number().int().nonnegative(),
+}).strict();
 
 export const zMetricsBatchPayload = z.object({
-  serverId: z.string(),
-  points: z.array(zMetricPoint),
-});
+  serverId: z.string().min(1).max(256),
+  points: z.array(zMetricPoint).max(MAX_METRIC_POINTS_PER_BATCH),
+}).strict();
 
 export const zCommandAckPayload = z.object({
   commandId: z.string(),
@@ -292,117 +399,77 @@ export const zCommandAckPayload = z.object({
   data: z.unknown().optional(),
 });
 
-export interface AgentCommandEnvelope<K extends AgentCommandKind = AgentCommandKind, P = unknown> {
-  operationId: string;
-  commandId: string;
-  commandKind: K;
-  payload: P;
-}
-
-export const zAgentCommandEnvelope = z.object({
-  operationId: z.string(),
-  commandId: z.string(),
-  commandKind: z.nativeEnum(AgentCommandKind),
-  payload: z.unknown(),
-}).superRefine((value, ctx) => {
-  if (!Object.prototype.hasOwnProperty.call(value, 'payload')) {
-    ctx.addIssue({
-      code: z.ZodIssueCode.custom,
-      path: ['payload'],
-      message: 'Required',
-    });
-  }
-}).transform((value): AgentCommandEnvelope => value as AgentCommandEnvelope);
-
-export const zOperationProgressPayload = z.object({
-  operationId: z.string(),
-  commandId: z.string(),
-  status: z.enum([
-    'accepted',
-    'running',
-    'waiting_observed',
-    'succeeded',
-    'failed',
-    'not_applicable',
-  ]),
-  step: z.string(),
-  data: z.unknown().optional(),
-  error: z.string().optional(),
-  ts: z.number(),
+const zTaskOpaqueValue = z.unknown().refine((value) => value !== undefined, {
+  message: 'Required',
 });
 
-export const zContainerEventPayload = z.object({
-  serverId: z.string(),
-  runtimeId: z.string(),
-  action: z.string(),
-  exitCode: z.number().int().optional(),
+export const zPayloadHash = z.string().regex(/^[a-f0-9]{64}$/, {
+  message: 'Expected a lowercase SHA-256 hex digest',
 });
+
+export const zTaskExecutePayload = z.object({
+  taskId: zTaskId,
+  kind: z.nativeEnum(AgentTaskKind),
+  payloadHash: zPayloadHash,
+  payload: zTaskOpaqueValue,
+}).strict();
+
+export const zTaskError = z.object({
+  code: z.string().min(1).max(128),
+  message: z.string().min(1).max(2048),
+  details: z.unknown().optional(),
+}).strict();
+
+const zTaskResultIdentity = {
+  taskId: zTaskId,
+  payloadHash: zPayloadHash,
+};
+
+export const zTaskResultPayload = z.discriminatedUnion('status', [
+  z.object({
+    ...zTaskResultIdentity,
+    status: z.literal('succeeded'),
+    result: zTaskOpaqueValue,
+  }).strict(),
+  z.object({
+    ...zTaskResultIdentity,
+    status: z.literal('failed'),
+    error: zTaskError,
+    observed: z.record(z.unknown()),
+  }).strict(),
+  z.object({
+    ...zTaskResultIdentity,
+    status: z.literal('incomplete'),
+    error: zTaskError,
+  }).strict(),
+]);
+
+export const zTaskAcceptedPayload = z.object({
+  taskId: zTaskId,
+  payloadHash: zPayloadHash,
+}).strict();
+
+export type TaskExecutePayload = z.infer<typeof zTaskExecutePayload>;
+export type TaskError = z.infer<typeof zTaskError>;
+export type TaskResultPayload = z.infer<typeof zTaskResultPayload>;
+export type TaskAcceptedPayload = z.infer<typeof zTaskAcceptedPayload>;
 
 export const zLogChunkPayload = z.object({
   sessionId: z.string(),
-  data: z.string(),
+  data: z.string().max(2 * 1024 * 1024),
   stderr: z.boolean().optional(),
   eof: z.boolean().optional(),
   exitCode: z.number().int().optional(),
 });
 
-export const zDataDirEntry = z.object({
-  sourceKind: z.enum(['local', 'remote']),
-  sourceId: z.string(),
-  name: z.string(),
-  hostPath: z.string(),
-});
-
-export const zDataDirReportPayload = z.object({
-  serverId: z.string(),
-  /** Unix ms timestamp captured before the agent starts collecting this report. */
-  observedAt: z.number().int().nonnegative(),
-  dirs: z.array(zDataDirEntry),
-});
-
 // ---------------------------------------------------------------------------
-// Backend → Agent command payloads
+// Backend → Agent direct RPC payloads
 // ---------------------------------------------------------------------------
-
-export const zStartContainerPayload = z.object({ runtimeId: z.string() });
-
-export const zStopContainerPayload = z.object({
-  runtimeId: z.string(),
-  timeoutSeconds: z.number().int().nonnegative().optional(),
-});
-
-export const zRestartContainerPayload = z.object({
-  runtimeId: z.string(),
-  timeoutSeconds: z.number().int().nonnegative().optional(),
-});
-
-export const zContainerSetPowerPayload = z.object({
-  runtimeId: z.string(),
-  action: z.enum(['start', 'stop', 'restart']),
-  timeoutSeconds: z.number().int().nonnegative().optional(),
-  mounts: z.array(zContainerMountSpec).default([]),
-});
-
-export const zDeleteContainerPayload = z.object({
-  runtimeId: z.string(),
-  force: z.boolean().optional(),
-});
-
-export const zUpdateUserQuotaPayload = z.object({
-  /** Numeric user ID (not UUID) — agent only needs this to call xfs_quota setLimit. */
-  numericUserId: z.number().int(),
-  diskBytes: z.number().int().nonnegative(),
-});
-
-export const zPullImagePayload = z.object({
-  dockerRef: z.string(),
-  imageId: z.string().optional(),
-});
 
 export const zExecStreamPayload = z.object({
-  sessionId: z.string(),
-  runtimeId: z.string(),
-  cmd: z.array(z.string()),
+  sessionId: z.string().min(1).max(128),
+  runtimeId: z.string().min(1).max(256),
+  cmd: z.array(z.string().max(8 * 1024)).min(1).max(64),
   tty: z.boolean(),
   cols: z.number().int().positive().optional(),
   rows: z.number().int().positive().optional(),
@@ -410,81 +477,64 @@ export const zExecStreamPayload = z.object({
 });
 
 export const zExecResizePayload = z.object({
-  sessionId: z.string(),
-  cols: z.number().int().positive(),
-  rows: z.number().int().positive(),
+  sessionId: z.string().min(1).max(128),
+  cols: z.number().int().positive().max(1_000),
+  rows: z.number().int().positive().max(1_000),
 });
 
 export const zExecInputPayload = z.object({
-  sessionId: z.string(),
-  data: z.string(),
+  sessionId: z.string().min(1).max(128),
+  data: z.string().max(128 * 1024),
 });
 
-export const zExecClosePayload = z.object({ sessionId: z.string() });
-
-export const zCreateDataDirPayload = z.object({
-  diskId: z.string(),
-  name: z.string(),
-  uid: z.number().int().nonnegative(),
-  /** Numeric user ID used by agent to set up XFS quota for the new directory. */
-  numericUserId: z.number().int(),
-});
-
-export const zDeleteDataDirPayload = z.object({
-  diskId: z.string(),
-  name: z.string(),
-});
+export const zExecClosePayload = z.object({ sessionId: z.string().min(1).max(128) });
 
 export const zReconcilePayload = z.object({ serverId: z.string() });
+export const zAdmissionReadyPayload = z.object({ serverId: z.string() }).strict();
 
-export const zFetchContainerStatsPayload = z.object({ runtimeId: z.string() });
+export const zInspectContainerPayload = z.object({
+  containerId: z.string().min(1),
+  runtimeId: z.string().min(1),
+}).strict();
 
-export const zCheckDiskPayload = z.object({ mountPoint: z.string() });
+export const zInspectContainerResult = z.object({
+  runtimeId: z.string().min(1),
+  startedAt: z.string().min(1),
+  running: z.boolean(),
+  graphPaths: z.array(z.string()),
+}).strict();
 
-export const zApplyDataDiskPayload = z.object({
-  diskId: z.string(),
-  mountPoint: z.string(),
-  label: z.string().optional(),
-});
+export const zAgentBootstrapPayload = z.object({
+  remoteFsMounts: z.array(zRemoteFsMountSpec).max(MAX_AGENT_REMOTE_FS_MOUNTS),
+}).strict();
 
-export const zRemoveDataDiskPayload = z.object({
-  diskId: z.string(),
-  force: z.boolean().optional(),
-});
-
-export const zApplyRemoteFsMountPayload = zRemoteFsMountSpec;
-
-export const zRemoveRemoteFsMountPayload = z.object({
-  id: z.string(),
-  force: z.boolean().optional(),
-});
-
-export const zReconcileContainerMountsPayload = z.object({
-  runtimeId: z.string(),
-  expected: z.array(zContainerMountSpec),
-  toRemove: z.array(z.string()).optional(),
-});
-
-export const zApplyContainerMountPayload = z.object({
-  runtimeId: z.string(),
-  mount: zContainerMountSpec,
-});
-
-export const zRemoveContainerMountPayload = z.object({
-  runtimeId: z.string(),
-  containerPath: z.string(),
-});
+export const zAgentBootstrapResult = z.object({
+  remoteFsMounts: z.array(zRemoteFsMountStatus).max(MAX_AGENT_REMOTE_FS_MOUNTS),
+}).strict();
 
 export const zSelfCheckPayload = z.object({});
-export const zReconcileDockerDaemonPayload = z.object({});
 
-export const zReconcileContainerSshPayload = z.object({
-  runtimeId: z.string(),
+export const zSelfCheckItem = z.object({
+  id: z.string(),
+  label: z.string(),
+  status: z.enum(['ok', 'fail', 'warn']),
+  message: z.string(),
+});
+
+export const zSelfCheckResult = z.object({
+  items: z.array(zSelfCheckItem),
+});
+
+// ---------------------------------------------------------------------------
+// Durable Agent task payloads (selected by AgentTaskKind)
+// ---------------------------------------------------------------------------
+
+export const zContainerSshTaskSpec = z.object({
   enabled: z.boolean().default(true),
   internalPublicKey: z.string().optional(),
   internalKeyGeneration: z.number().int().nonnegative().optional(),
   expectedKeyHash: z.string().optional(),
-}).superRefine((value, ctx) => {
+}).strict().superRefine((value, ctx) => {
   if (!value.enabled) return;
   if (!value.internalPublicKey?.trim()) {
     ctx.addIssue({
@@ -502,25 +552,18 @@ export const zReconcileContainerSshPayload = z.object({
   }
 });
 
-export const zSelfCheckItem = z.object({
-  id: z.string(),
-  label: z.string(),
-  status: z.enum(['ok', 'fail', 'warn']),
-  message: z.string(),
-});
-
-export const zSelfCheckResult = z.object({
-  items: z.array(zSelfCheckItem),
-});
-
-export const zCreateContainerPayload = z.object({
+export const zContainerCreateTaskPayload = z.object({
   containerId: z.string(),
-  specGeneration: z.number().int().positive().default(1),
+  specGeneration: z.number().int().positive(),
+  quotaGeneration: z.number().int().positive(),
+  dockerRoot: z.string().min(1),
   ownerId: z.string(),
   /** Numeric owner ID used by agent for XFS quota (path/label still use ownerId UUID). */
   numericOwnerId: z.number().int(),
   imageDockerRef: z.string(),
+  imageDockerId: z.string().min(1),
   imageId: z.string(),
+  assignedIp: z.string().min(7).max(15),
   runtimeOverrides: zImageRuntimeOverrides.default({
     uid: 0,
     entrypoint: null,
@@ -530,13 +573,145 @@ export const zCreateContainerPayload = z.object({
   name: z.string(),
   cpuMillis: z.number().int().nonnegative(),
   memBytes: z.number().int().nonnegative(),
+  diskBytes: z.number().int().nonnegative(),
   gpuIndices: z.array(z.number().int().nonnegative()).optional(),
-  mounts: z.array(zContainerMountSpec).default([]),
-  /** Server network config — used by agent to allocate the container IP */
-  ipCidr: z.string(),
-  gateway: z.string(),
-  reservedIps: z.array(z.string()).default([]),
+  mounts: z.array(zContainerMountSpec).max(MAX_CONTAINER_MOUNTS).default([]),
+  ssh: zContainerSshTaskSpec.optional(),
+}).strict();
+
+export const zContainerStartTaskPayload = z.object({
+  containerId: z.string(),
+  runtimeId: z.string(),
+  dockerRoot: z.string().min(1),
+  quotaGeneration: z.number().int().positive(),
+  numericOwnerId: z.number().int(),
+  diskBytes: z.number().int().nonnegative(),
+  quotaPaths: zContainerQuotaPaths,
+  mounts: z.array(zContainerMountSpec).max(MAX_CONTAINER_MOUNTS).default([]),
+  ssh: zContainerSshTaskSpec.optional(),
+}).strict();
+
+export const zContainerStopTaskPayload = z.object({
+  containerId: z.string(),
+  runtimeId: z.string(),
+  timeoutSeconds: z.number().int().nonnegative().optional(),
+}).strict();
+
+export const zContainerRestartTaskPayload = z.object({
+  containerId: z.string(),
+  runtimeId: z.string(),
+  dockerRoot: z.string().min(1),
+  quotaGeneration: z.number().int().positive(),
+  numericOwnerId: z.number().int(),
+  diskBytes: z.number().int().nonnegative(),
+  quotaPaths: zContainerQuotaPaths,
+  baselineStartedAt: z.string().min(1),
+  timeoutSeconds: z.number().int().nonnegative().optional(),
+  mounts: z.array(zContainerMountSpec).max(MAX_CONTAINER_MOUNTS).default([]),
+  ssh: zContainerSshTaskSpec.optional(),
+}).strict();
+
+export const zContainerDeleteTaskPayload = z.object({
+  containerId: zTaskId,
+  runtimeId: z.string().min(1).max(256).nullable(),
+  serverId: zTaskId,
+  specGeneration: z.string().max(20).regex(/^[1-9]\d*$/).nullable(),
+  runtimeSpecHash: z.string().regex(/^[a-f0-9]{64}$/).nullable(),
+  numericOwnerId: z.number().int(),
+  quotaPaths: z.array(z.string().min(1)).max(2).refine(
+    (paths) => new Set(paths).size === paths.length,
+    'Container quota recovery paths must be unique',
+  ),
+}).strict().superRefine((value, ctx) => {
+  const bound = value.runtimeId !== null;
+  if (bound && value.specGeneration !== null && value.runtimeSpecHash !== null && value.quotaPaths.length === 2) {
+    return;
+  }
+  if (!bound && value.specGeneration === null && value.runtimeSpecHash === null && value.quotaPaths.length === 0) {
+    return;
+  }
+  ctx.addIssue({
+    code: z.ZodIssueCode.custom,
+    message: 'Bound container deletion requires exact runtime identity and two recovery paths; unbound deletion requires none',
+  });
 });
+
+/**
+ * Exact immutable identity of one unexpected managed Docker runtime.
+ * Cleanup is intentionally addressed by runtime id and every discovery label;
+ * the Agent must refuse to touch a runtime if any label changed after report.
+ */
+export const zContainerRuntimeAbsentTaskPayload = z.object({
+  runtimeId: z.string().min(1).max(256),
+  containerId: zTaskId,
+  serverId: zTaskId,
+  specGeneration: z.string().max(20).regex(/^[1-9]\d*$/),
+  runtimeSpecHash: z.string().regex(/^[a-f0-9]{64}$/),
+  quotaPaths: zContainerQuotaPaths,
+  observedIp: zCanonicalIpv4Address,
+}).strict();
+
+export const zContainerSshEnsureTaskPayload = z.object({
+  containerId: z.string(),
+  runtimeId: z.string(),
+  enabled: z.boolean().default(true),
+  internalPublicKey: z.string().optional(),
+  internalKeyGeneration: z.number().int().nonnegative().optional(),
+  expectedKeyHash: z.string().optional(),
+}).strict().superRefine((value, ctx) => {
+  if (!value.enabled) return;
+  if (!value.internalPublicKey?.trim()) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['internalPublicKey'], message: 'Internal public key is required when SSH is enabled' });
+  }
+  if (value.internalKeyGeneration === undefined) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['internalKeyGeneration'], message: 'Internal key generation is required when SSH is enabled' });
+  }
+});
+
+export const zDataDirEnsureTaskPayload = z.object({
+  resourceId: zTaskId,
+  generation: z.number().int().positive(),
+  diskId: z.string(),
+  sourceIdentity: z.string().min(1),
+  quotaRequired: z.boolean(),
+  uid: z.number().int().nonnegative(),
+  numericUserId: z.number().int(),
+  quotaGeneration: z.number().int().positive(),
+  diskBytes: z.number().int().nonnegative(),
+}).strict();
+
+export const zDataDirAbsentTaskPayload = z.object({
+  resourceId: zTaskId,
+  generation: z.number().int().positive(),
+  diskId: z.string(),
+  sourceIdentity: z.string().min(1),
+  numericUserId: z.number().int(),
+}).strict();
+
+export const zRemoteFsEnsureTaskPayload = zRemoteFsMountSpec.strict();
+
+export const zRemoteFsAbsentTaskPayload = z.object({
+  id: z.string(),
+  hostMountPoint: z.string(),
+  options: z.string(),
+  params: zRemoteFsParams,
+}).strict();
+
+export const zQuotaEnsureTaskPayload = z.object({
+  generation: z.number().int().positive(),
+  numericUserId: z.number().int(),
+  diskBytes: z.number().int().nonnegative(),
+}).strict();
+
+export const zImageEnsurePresentTaskPayload = z.object({
+  dockerRef: z.string().min(1),
+  imageId: z.string().optional(),
+}).strict();
+
+export const zImageEnsureAbsentTaskPayload = z.object({
+  dockerRef: z.string().min(1),
+  imageId: z.string(),
+}).strict();
 
 // ---------------------------------------------------------------------------
 // Inferred types
@@ -544,8 +719,8 @@ export const zCreateContainerPayload = z.object({
 
 export type DiskInfo = z.infer<typeof zDiskInfo>;
 export type GpuInfo = z.infer<typeof zGpuInfo>;
-export type DataDirMount = z.infer<typeof zDataDirMount>;
-export type ContainerSpec = z.infer<typeof zContainerSpec>;
+export type DataDirName = z.infer<typeof zDataDirName>;
+export type ContainerRuntimeObservation = z.infer<typeof zContainerRuntimeObservation>;
 export type ContainerSshServerStatus = z.infer<typeof zContainerSshServerStatus>;
 export type ContainerSshServerState = z.infer<typeof zContainerSshServerState>;
 export type ContainerStatsSummary = z.infer<typeof zContainerStatsSummary>;
@@ -563,43 +738,81 @@ export type ContainerMountSpec = z.infer<typeof zContainerMountSpec>;
 export type DataDiskSpec = z.infer<typeof zDataDiskSpec>;
 export type HelloPayload = z.infer<typeof zHelloPayload>;
 export type HeartbeatPayload = z.infer<typeof zHeartbeatPayload>;
+export type InventoryFaultPayload = z.infer<typeof zInventoryFaultPayload>;
 export type StateReportPayload = z.infer<typeof zStateReportPayload>;
 export type MetricPoint = z.infer<typeof zMetricPoint>;
 export type MetricsBatchPayload = z.infer<typeof zMetricsBatchPayload>;
 export type CommandAckPayload = z.infer<typeof zCommandAckPayload>;
-export type OperationProgressPayload = z.infer<typeof zOperationProgressPayload>;
-export type ContainerEventPayload = z.infer<typeof zContainerEventPayload>;
 export type LogChunkPayload = z.infer<typeof zLogChunkPayload>;
-export type DataDirReportPayload = z.infer<typeof zDataDirReportPayload>;
-export type PullProgressPayload = z.infer<typeof zPullProgressPayload>;
 export type DockerDaemonStatus = z.infer<typeof zDockerDaemonStatus>;
 
-export type CreateContainerPayload = z.infer<typeof zCreateContainerPayload>;
-export type StartContainerPayload = z.infer<typeof zStartContainerPayload>;
-export type StopContainerPayload = z.infer<typeof zStopContainerPayload>;
-export type RestartContainerPayload = z.infer<typeof zRestartContainerPayload>;
-export type ContainerSetPowerPayload = z.infer<typeof zContainerSetPowerPayload>;
-export type DeleteContainerPayload = z.infer<typeof zDeleteContainerPayload>;
-export type UpdateUserQuotaPayload = z.infer<typeof zUpdateUserQuotaPayload>;
-export type PullImagePayload = z.infer<typeof zPullImagePayload>;
 export type ExecStreamPayload = z.infer<typeof zExecStreamPayload>;
 export type ExecResizePayload = z.infer<typeof zExecResizePayload>;
 export type ExecInputPayload = z.infer<typeof zExecInputPayload>;
 export type ExecClosePayload = z.infer<typeof zExecClosePayload>;
-export type CreateDataDirPayload = z.infer<typeof zCreateDataDirPayload>;
-export type DeleteDataDirPayload = z.infer<typeof zDeleteDataDirPayload>;
 export type ReconcilePayload = z.infer<typeof zReconcilePayload>;
-export type FetchContainerStatsPayload = z.infer<typeof zFetchContainerStatsPayload>;
-export type CheckDiskPayload = z.infer<typeof zCheckDiskPayload>;
-export type ApplyDataDiskPayload = z.infer<typeof zApplyDataDiskPayload>;
-export type RemoveDataDiskPayload = z.infer<typeof zRemoveDataDiskPayload>;
-export type ApplyRemoteFsMountPayload = z.infer<typeof zApplyRemoteFsMountPayload>;
-export type RemoveRemoteFsMountPayload = z.infer<typeof zRemoveRemoteFsMountPayload>;
-export type ReconcileContainerMountsPayload = z.infer<typeof zReconcileContainerMountsPayload>;
-export type ApplyContainerMountPayload = z.infer<typeof zApplyContainerMountPayload>;
-export type RemoveContainerMountPayload = z.infer<typeof zRemoveContainerMountPayload>;
+export type AdmissionReadyPayload = z.infer<typeof zAdmissionReadyPayload>;
+export type InspectContainerPayload = z.infer<typeof zInspectContainerPayload>;
+export type InspectContainerResult = z.infer<typeof zInspectContainerResult>;
+export type AgentBootstrapPayload = z.infer<typeof zAgentBootstrapPayload>;
+export type AgentBootstrapResult = z.infer<typeof zAgentBootstrapResult>;
 export type SelfCheckPayload = z.infer<typeof zSelfCheckPayload>;
-export type ReconcileDockerDaemonPayload = z.infer<typeof zReconcileDockerDaemonPayload>;
-export type ReconcileContainerSshPayload = z.infer<typeof zReconcileContainerSshPayload>;
 export type SelfCheckItem = z.infer<typeof zSelfCheckItem>;
 export type SelfCheckResult = z.infer<typeof zSelfCheckResult>;
+
+export type ContainerSshTaskSpec = z.infer<typeof zContainerSshTaskSpec>;
+export type ContainerCreateTaskPayload = z.infer<typeof zContainerCreateTaskPayload>;
+export type ContainerStartTaskPayload = z.infer<typeof zContainerStartTaskPayload>;
+export type ContainerStopTaskPayload = z.infer<typeof zContainerStopTaskPayload>;
+export type ContainerRestartTaskPayload = z.infer<typeof zContainerRestartTaskPayload>;
+export type ContainerDeleteTaskPayload = z.infer<typeof zContainerDeleteTaskPayload>;
+export type ContainerRuntimeAbsentTaskPayload = z.infer<typeof zContainerRuntimeAbsentTaskPayload>;
+export type ContainerSshEnsureTaskPayload = z.infer<typeof zContainerSshEnsureTaskPayload>;
+export type DataDirEnsureTaskPayload = z.infer<typeof zDataDirEnsureTaskPayload>;
+export type DataDirAbsentTaskPayload = z.infer<typeof zDataDirAbsentTaskPayload>;
+export type RemoteFsEnsureTaskPayload = z.infer<typeof zRemoteFsEnsureTaskPayload>;
+export type RemoteFsAbsentTaskPayload = z.infer<typeof zRemoteFsAbsentTaskPayload>;
+export type QuotaEnsureTaskPayload = z.infer<typeof zQuotaEnsureTaskPayload>;
+export type ImageEnsurePresentTaskPayload = z.infer<typeof zImageEnsurePresentTaskPayload>;
+export type ImageEnsureAbsentTaskPayload = z.infer<typeof zImageEnsureAbsentTaskPayload>;
+
+export interface AgentTaskPayloadByKind {
+  [AgentTaskKind.ContainerCreate]: ContainerCreateTaskPayload;
+  [AgentTaskKind.ContainerStart]: ContainerStartTaskPayload;
+  [AgentTaskKind.ContainerStop]: ContainerStopTaskPayload;
+  [AgentTaskKind.ContainerRestart]: ContainerRestartTaskPayload;
+  [AgentTaskKind.ContainerDelete]: ContainerDeleteTaskPayload;
+  [AgentTaskKind.ContainerRuntimeAbsent]: ContainerRuntimeAbsentTaskPayload;
+  [AgentTaskKind.ContainerSshEnsure]: ContainerSshEnsureTaskPayload;
+  [AgentTaskKind.DataDirEnsure]: DataDirEnsureTaskPayload;
+  [AgentTaskKind.DataDirAbsent]: DataDirAbsentTaskPayload;
+  [AgentTaskKind.RemoteFsEnsure]: RemoteFsEnsureTaskPayload;
+  [AgentTaskKind.RemoteFsAbsent]: RemoteFsAbsentTaskPayload;
+  [AgentTaskKind.QuotaEnsure]: QuotaEnsureTaskPayload;
+  [AgentTaskKind.ImageEnsurePresent]: ImageEnsurePresentTaskPayload;
+  [AgentTaskKind.ImageEnsureAbsent]: ImageEnsureAbsentTaskPayload;
+}
+
+export const agentTaskPayloadSchemas = {
+  [AgentTaskKind.ContainerCreate]: zContainerCreateTaskPayload,
+  [AgentTaskKind.ContainerStart]: zContainerStartTaskPayload,
+  [AgentTaskKind.ContainerStop]: zContainerStopTaskPayload,
+  [AgentTaskKind.ContainerRestart]: zContainerRestartTaskPayload,
+  [AgentTaskKind.ContainerDelete]: zContainerDeleteTaskPayload,
+  [AgentTaskKind.ContainerRuntimeAbsent]: zContainerRuntimeAbsentTaskPayload,
+  [AgentTaskKind.ContainerSshEnsure]: zContainerSshEnsureTaskPayload,
+  [AgentTaskKind.DataDirEnsure]: zDataDirEnsureTaskPayload,
+  [AgentTaskKind.DataDirAbsent]: zDataDirAbsentTaskPayload,
+  [AgentTaskKind.RemoteFsEnsure]: zRemoteFsEnsureTaskPayload,
+  [AgentTaskKind.RemoteFsAbsent]: zRemoteFsAbsentTaskPayload,
+  [AgentTaskKind.QuotaEnsure]: zQuotaEnsureTaskPayload,
+  [AgentTaskKind.ImageEnsurePresent]: zImageEnsurePresentTaskPayload,
+  [AgentTaskKind.ImageEnsureAbsent]: zImageEnsureAbsentTaskPayload,
+} satisfies Record<AgentTaskKind, z.ZodTypeAny>;
+
+export function parseAgentTaskPayload<K extends AgentTaskKind>(
+  kind: K,
+  payload: unknown,
+): AgentTaskPayloadByKind[K] {
+  return agentTaskPayloadSchemas[kind].parse(payload) as AgentTaskPayloadByKind[K];
+}

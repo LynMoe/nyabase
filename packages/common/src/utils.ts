@@ -7,6 +7,52 @@
 
 const IPV4_REGEX = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/;
 const CIDR_REGEX = /^(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})\/(\d{1,2})$/;
+const MAX_MATERIALIZED_CIDR_HOSTS = 65_534;
+
+/**
+ * Canonicalize the deliberately small Docker reference grammar accepted by
+ * nyabase. Every stored image has an explicit tag and an
+ * explicit registry, so aliases such as `ubuntu`, `ubuntu:latest`, and
+ * `docker.io/library/ubuntu:latest` cannot acquire separate logical owners.
+ */
+export function normalizeDockerImageRef(input: string): string {
+  const value = input.trim();
+  if (value.length === 0 || value.length > 512 || /\s|:\/\//.test(value)) {
+    throw new Error('Docker image reference must be a non-empty registry/repository:tag');
+  }
+  if (value.includes('@')) {
+    throw new Error('Docker image digests are not supported; use one explicit immutable tag');
+  }
+  const slash = value.lastIndexOf('/');
+  const colon = value.lastIndexOf(':');
+  if (colon <= slash || colon === value.length - 1) {
+    throw new Error('Docker image reference must include an explicit tag');
+  }
+  const tag = value.slice(colon + 1);
+  if (!/^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$/.test(tag)) {
+    throw new Error('Docker image tag is invalid');
+  }
+  const name = value.slice(0, colon);
+  const suffix = `:${tag}`;
+
+  const segments = name.toLowerCase().split('/');
+  if (segments.some((segment) => segment.length === 0)) {
+    throw new Error('Docker image repository contains an empty path segment');
+  }
+  const first = segments[0]!;
+  const hasRegistry = segments.length > 1
+    && (first === 'localhost' || first.includes('.') || first.includes(':'));
+  let registry = hasRegistry ? segments.shift()! : 'docker.io';
+  if (registry === 'index.docker.io') registry = 'docker.io';
+  if (!/^(?:localhost|[a-z0-9.-]+)(?::[0-9]{1,5})?$/.test(registry)) {
+    throw new Error('Docker image registry is invalid');
+  }
+  if (registry === 'docker.io' && segments.length === 1) segments.unshift('library');
+  if (segments.some((segment) => !/^[a-z0-9]+(?:[._-][a-z0-9]+)*$/.test(segment))) {
+    throw new Error('Docker image repository is invalid');
+  }
+  return `${registry}/${segments.join('/')}${suffix}`;
+}
 
 /** Convert an IPv4 string to a 32-bit unsigned integer. Throws on invalid input. */
 export function ipToNum(ip: string): number {
@@ -46,6 +92,28 @@ export function parseCidr(cidr: string): { base: string; prefixLen: number } {
   return { base: m[1], prefixLen };
 }
 
+/** Return the unique textual representation of an IPv4 address. */
+export function canonicalIpv4Address(ip: string): string {
+  return numToIp(ipToNum(ip));
+}
+
+/** Return the unique network-base representation of an IPv4 CIDR. */
+export function canonicalIpv4Cidr(cidr: string): string {
+  const { base, prefixLen } = parseCidr(cidr);
+  const { networkAddr } = cidrBounds(base, prefixLen);
+  return `${numToIp(networkAddr)}/${prefixLen}`;
+}
+
+/** True when two IPv4 CIDRs cover at least one same address. */
+export function ipv4CidrsOverlap(left: string, right: string): boolean {
+  const leftParsed = parseCidr(left);
+  const rightParsed = parseCidr(right);
+  const leftBounds = cidrBounds(leftParsed.base, leftParsed.prefixLen);
+  const rightBounds = cidrBounds(rightParsed.base, rightParsed.prefixLen);
+  return leftBounds.networkAddr <= rightBounds.broadcastAddr
+    && rightBounds.networkAddr <= leftBounds.broadcastAddr;
+}
+
 /**
  * Convert CIDR to sorted list of usable host IPs
  * (excludes network addr, broadcast, and given reservations).
@@ -53,18 +121,16 @@ export function parseCidr(cidr: string): { base: string; prefixLen: number } {
  */
 export function cidrToIps(cidr: string, reservedIps: string[] = []): string[] {
   const { base, prefixLen } = parseCidr(cidr);
-  const baseNum = ipToNum(base);
-  const hostBits = 32 - prefixLen;
-  if (hostBits <= 1) return [];
+  const { networkAddr, broadcastAddr, usableHosts } = cidrBounds(base, prefixLen);
+  if (usableHosts === 0) return [];
+  if (usableHosts > MAX_MATERIALIZED_CIDR_HOSTS) {
+    throw new Error(`CIDR is too large to materialize safely: ${cidr}`);
+  }
 
-  const networkAddr = (baseNum & ((~0 << hostBits) >>> 0)) >>> 0;
-  const broadcastAddr = (networkAddr | ((1 << hostBits) - 1)) >>> 0;
-
-  // Validate reservations once (ignore malformed entries to avoid breaking
-  // unrelated callers, but require well-formed CIDR base).
   const reserved = new Set<string>();
   for (const ip of reservedIps) {
-    if (IPV4_REGEX.test(ip)) reserved.add(ip);
+    ipToNum(ip);
+    reserved.add(ip);
   }
 
   const ips: string[] = [];
@@ -81,15 +147,73 @@ export function allocateNextIp(
   usedIps: Set<string>,
   reservedIps: string[] = [],
 ): string | null {
-  for (const ip of cidrToIps(cidr, reservedIps)) {
+  const { base, prefixLen } = parseCidr(cidr);
+  const { networkAddr, broadcastAddr, usableHosts } = cidrBounds(base, prefixLen);
+  if (usableHosts > MAX_MATERIALIZED_CIDR_HOSTS) {
+    throw new Error(`CIDR is too large for bounded allocation: ${cidr}`);
+  }
+  const reserved = new Set(reservedIps.map((ip) => {
+    ipToNum(ip);
+    return ip;
+  }));
+  for (let numeric = networkAddr + 1; numeric < broadcastAddr; numeric += 1) {
+    const ip = numToIp(numeric);
+    if (reserved.has(ip)) continue;
     if (!usedIps.has(ip)) return ip;
   }
   return null;
 }
 
+/** True only for a non-network, non-broadcast IPv4 host inside the CIDR. */
+export function isUsableHostInCidr(cidr: string, ip: string): boolean {
+  try {
+    const { base, prefixLen } = parseCidr(cidr);
+    const { networkAddr, broadcastAddr } = cidrBounds(base, prefixLen);
+    const numeric = ipToNum(ip);
+    return numeric > networkAddr && numeric < broadcastAddr;
+  } catch {
+    return false;
+  }
+}
+
+function cidrBounds(base: string, prefixLen: number): {
+  networkAddr: number;
+  broadcastAddr: number;
+  usableHosts: number;
+} {
+  const baseNum = ipToNum(base);
+  const hostBits = 32 - prefixLen;
+  const size = 2 ** hostBits;
+  const networkAddr = Math.floor(baseNum / size) * size;
+  const broadcastAddr = networkAddr + size - 1;
+  return {
+    networkAddr,
+    broadcastAddr,
+    usableHosts: hostBits <= 1 ? 0 : size - 2,
+  };
+}
+
 /** Sleep for ms milliseconds. */
 export function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/** Deterministic JSON used for task identities across Backend and Agent. */
+export function canonicalJson(value: unknown): string {
+  if (value === undefined) return 'null';
+  if (value === null || typeof value !== 'object') return JSON.stringify(value);
+  if (Array.isArray(value)) return `[${value.map((entry) => canonicalJson(entry)).join(',')}]`;
+  const record = value as Record<string, unknown>;
+  return `{${Object.keys(record).sort().map((key) =>
+    `${JSON.stringify(key)}:${canonicalJson(record[key])}`).join(',')}}`;
+}
+
+/** Normalize a requested XFS quota to the 1 KiB block size used on the wire. */
+export function normalizeXfsQuotaBytes(bytes: number): number {
+  if (!Number.isSafeInteger(bytes) || bytes < 0) {
+    throw new Error(`Invalid quota byte limit: ${bytes}`);
+  }
+  return Math.ceil(bytes / 1024) * 1024;
 }
 
 const BYTE_UNITS = ['B', 'KB', 'MB', 'GB', 'TB', 'PB'] as const;

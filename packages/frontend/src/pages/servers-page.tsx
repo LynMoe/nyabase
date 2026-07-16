@@ -13,7 +13,7 @@ import { toast } from '../hooks/use-toast.js';
 import { formatBytes, relativeTime } from '../lib/utils.js';
 import { queryKeys } from '../lib/query-keys.js';
 import { Plus, Server, RefreshCw } from 'lucide-react';
-import { Capability } from '@nyabase/common';
+import { Capability, ServerStatus } from '@nyabase/common';
 import type { ServerDto } from '@nyabase/common';
 import { useAuthStore } from '../store/auth.js';
 
@@ -81,12 +81,12 @@ export default function ServersPage() {
 
 function ServerCard({ server: s }: { server: ServerDto }) {
   const online = s.status === 'online';
+  const quarantined = s.status === ServerStatus.AgentQuarantined;
   const disks = s.disks ?? [];
   const gpus = s.gpus ?? [];
   const totalDisk = disks.reduce((a, d) => a + d.totalBytes, 0);
   const usedDisk = disks.reduce((a, d) => a + d.usedBytes, 0);
   const diskPct = totalDisk > 0 ? (usedDisk / totalDisk) * 100 : 0;
-  const networkSummary = [s.slug, s.ipCidr].filter(Boolean).join(' · ');
 
   return (
     <Link to="/servers/$id" params={{ id: s.id }}>
@@ -94,9 +94,11 @@ function ServerCard({ server: s }: { server: ServerDto }) {
         <CardHeader className="pb-2">
           <div className="flex items-center justify-between">
             <CardTitle className="text-base">{s.name}</CardTitle>
-            <Badge variant={online ? 'success' : 'secondary'}>{online ? '在线' : '离线'}</Badge>
+            <Badge variant={online ? 'success' : quarantined ? 'destructive' : 'secondary'}>
+              {online ? '在线' : quarantined ? '已隔离' : '离线'}
+            </Badge>
           </div>
-          <CardDescription className="font-mono text-xs">{networkSummary || '-'}</CardDescription>
+          <CardDescription className="font-mono text-xs">{s.slug}</CardDescription>
         </CardHeader>
         <CardContent className="space-y-2">
           {gpus.length > 0 && (
@@ -126,12 +128,11 @@ function ServerCard({ server: s }: { server: ServerDto }) {
 
 function CreateServerDialog({ open, onOpenChange }: { open: boolean; onOpenChange: (v: boolean) => void }) {
   const qc = useQueryClient();
-  const [form, setForm] = useState({ name: '', slug: '', parentIface: 'eth0', ipCidr: '', gateway: '' });
-  const [isGpuServer, setIsGpuServer] = useState(true);
+  const [form, setForm] = useState({ name: '', slug: '' });
   const [createdToken, setCreatedToken] = useState<string | null>(null);
 
   const { mutate, isPending } = useMutation({
-    mutationFn: () => api.post<{ server: ServerDto; agentToken: string }>('/admin/servers', { ...form, isGpuServer }),
+    mutationFn: () => api.post<{ server: ServerDto; agentToken: string }>('/admin/servers', form),
     onSuccess: (res) => {
       setCreatedToken(res.agentToken);
       qc.invalidateQueries({ queryKey: queryKeys.servers.admin });
@@ -145,9 +146,6 @@ function CreateServerDialog({ open, onOpenChange }: { open: boolean; onOpenChang
   const fields: [keyof typeof form, string, string][] = [
     ['name', '服务器名称', 'prod-gpu-1'],
     ['slug', '路由标识', 'prod-gpu-1'],
-    ['parentIface', '物理网卡', 'eth0'],
-    ['ipCidr', 'macvlan 网段 (CIDR)', '192.168.10.0/24'],
-    ['gateway', '网关', '192.168.10.1'],
   ];
 
   return (
@@ -155,7 +153,7 @@ function CreateServerDialog({ open, onOpenChange }: { open: boolean; onOpenChang
       <DialogContent className="max-w-md">
         <DialogHeader>
           <DialogTitle>添加服务器</DialogTitle>
-          <DialogDescription>添加后将生成 Agent 令牌，部署到服务器上的 agent 配置文件中。</DialogDescription>
+          <DialogDescription>添加后将生成 Agent 令牌。网络、GPU、Docker 根目录等配置只写入目标机器的 agent.yaml。</DialogDescription>
         </DialogHeader>
 
         {createdToken ? (
@@ -183,22 +181,10 @@ function CreateServerDialog({ open, onOpenChange }: { open: boolean; onOpenChang
                   <Input placeholder={ph} value={form[k]} onChange={(e) => set(k, e.target.value)} />
                 </div>
               ))}
-              <div className="flex items-center gap-2 pt-1">
-                <input
-                  id="create-is-gpu-server"
-                  type="checkbox"
-                  checked={isGpuServer}
-                  onChange={(e) => setIsGpuServer(e.target.checked)}
-                  className="h-4 w-4 rounded border-border"
-                />
-                <Label htmlFor="create-is-gpu-server" className="text-sm cursor-pointer">
-                  GPU 服务器（启用 GPU 监控与配额）
-                </Label>
-              </div>
             </div>
             <DialogFooter>
               <Button variant="outline" onClick={handleClose}>取消</Button>
-              <Button onClick={() => mutate()} disabled={isPending || !form.name || !form.slug || !form.ipCidr}>
+              <Button onClick={() => mutate()} disabled={isPending || !form.name || !form.slug}>
                 {isPending ? '创建中...' : '创建'}
               </Button>
             </DialogFooter>

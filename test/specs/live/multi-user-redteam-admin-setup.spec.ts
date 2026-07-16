@@ -24,11 +24,11 @@ type LoginResponse = {
 type ServerDto = {
   id: string;
   name: string;
-  isGpuServer: boolean;
   status: string;
+  gpus?: Array<{ index: number }>;
 };
 
-type ServerManifest = Pick<ServerDto, 'id' | 'name' | 'isGpuServer' | 'status'>;
+type ServerManifest = Pick<ServerDto, 'id' | 'name' | 'status'> & { gpuCount: number };
 
 type DataDiskDto = {
   diskId: string;
@@ -161,8 +161,8 @@ describe('multi-user red-team admin fixture setup', () => {
     expect(admin.user.capabilities).toEqual(expect.arrayContaining(Array.from(MANAGEMENT_CAPS)));
 
     const servers = await api<ServerDto[]>('GET', '/admin/servers', admin.accessToken);
-    const cpu = servers.find((s) => s.status === 'online' && !s.isGpuServer);
-    const gpu = servers.find((s) => s.status === 'online' && s.isGpuServer) ?? null;
+    const cpu = servers.find((s) => s.status === 'online' && !hasGpu(s));
+    const gpu = servers.find((s) => s.status === 'online' && hasGpu(s)) ?? null;
     expect(cpu, 'expected one online CPU server from product API').toBeTruthy();
 
     const gpuSetup = gpu ? 'available' : 'blocked-infra';
@@ -398,7 +398,6 @@ async function createImage(
   const image = await api<ImageDto>('POST', '/admin/images', token, {
     name: `${runPrefix}-${label}`,
     dockerImage,
-    defaultUid: 0,
     runtimeOverrides: {
       uid: 0,
       entrypoint: null,
@@ -540,9 +539,13 @@ function serverManifest(server: ServerDto): ServerManifest {
   return {
     id: server.id,
     name: server.name,
-    isGpuServer: server.isGpuServer,
     status: server.status,
+    gpuCount: server.gpus?.length ?? 0,
   };
+}
+
+function hasGpu(server: ServerDto): boolean {
+  return (server.gpus?.length ?? 0) > 0;
 }
 
 function imageManifest(image: ImageDto): ImageManifest {

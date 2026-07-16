@@ -15,11 +15,13 @@
       "macvlanCidr": "10.8.0.0/16",
       "macvlanGateway": "10.8.0.1",
       "dockerRoot": "/data/nyabase-docker",
-      "defaultCpuMillis": 1000,
-      "defaultMemBytes": 1073741824,
-      "defaultDiskBytes": 2147483648,
-      "defaultGpuMode": "none",
-      "defaultGpuIndices": []
+      "localDataSources": [
+        {
+          "id": "test-local-cpu",
+          "mountPoint": "/data/nyabase",
+          "label": "nyabase test local source"
+        }
+      ]
     },
     {
       "key": "gpu",
@@ -34,11 +36,13 @@
       "macvlanCidr": "10.8.0.0/16",
       "macvlanGateway": "10.8.0.1",
       "dockerRoot": "/data0/nbTest/nyabase-docker-pquota",
-      "defaultCpuMillis": 1000,
-      "defaultMemBytes": 1073741824,
-      "defaultDiskBytes": 2147483648,
-      "defaultGpuMode": "indices",
-      "defaultGpuIndices": [0, 1]
+      "localDataSources": [
+        {
+          "id": "test-local-gpu",
+          "mountPoint": "/data0/nbTest/nyabase-data-pquota",
+          "label": "nyabase test gpu local source"
+        }
+      ]
     }
   ]
 }

@@ -5,7 +5,7 @@ import {
 } from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import { EntityManager, MoreThan, Repository } from 'typeorm';
 import * as argon2 from 'argon2';
 import { v4 as uuidv4 } from 'uuid';
 import { createHash, randomBytes } from 'crypto';
@@ -14,6 +14,7 @@ import { RefreshTokenEntity } from '../entities/refresh-token.entity.js';
 import { ApiTokenEntity } from '../entities/api-token.entity.js';
 import { UserStatus } from '@nyabase/common';
 import { NyabaseConfigService } from '../config/nyabase-config.service.js';
+import { runSerializedTransaction } from '../database/serialized-transaction.js';
 
 export interface JwtPayload {
   sub: string;
@@ -46,44 +47,37 @@ export class AuthService {
   }
 
   async login(user: UserEntity) {
-    const payload: JwtPayload = { sub: user.id, username: user.username };
-    const accessToken = this.jwtService.sign(payload);
-
-    const rawRefresh = randomBytes(48).toString('hex');
-    const hash = createHash('sha256').update(rawRefresh).digest('hex');
-    const expiresInDays = this.config.get<number>('auth.refreshTokenExpiresDays');
-    const expiresAt = new Date(Date.now() + expiresInDays * 86400 * 1000);
-
-    await this.refreshTokensRepo.save(
-      this.refreshTokensRepo.create({
-        id: uuidv4(),
-        userId: user.id,
-        hash,
-        expiresAt,
-        createdAt: new Date(),
-      }),
-    );
-
-    return { accessToken, refreshToken: rawRefresh };
+    return this.issueTokens(user);
   }
 
   async refreshTokens(rawRefreshToken: string) {
     const hash = createHash('sha256').update(rawRefreshToken).digest('hex');
-    const token = await this.refreshTokensRepo.findOne({ where: { hash } });
+    const now = new Date();
 
-    if (!token || token.revoked || token.expiresAt < new Date()) {
-      throw new UnauthorizedException('Invalid refresh token');
-    }
+    return runSerializedTransaction(this.refreshTokensRepo.manager.connection, async (manager) => {
+      const token = await manager.findOne(RefreshTokenEntity, { where: { hash } });
 
-    const user = await this.usersRepo.findOne({ where: { id: token.userId } });
-    if (!user || user.status !== UserStatus.Active) {
-      throw new UnauthorizedException('User not found or disabled');
-    }
+      if (!token || token.revoked || token.expiresAt < now) {
+        throw new UnauthorizedException('Invalid refresh token');
+      }
 
-    // Rotate: revoke old, issue new
-    token.revoked = true;
-    await this.refreshTokensRepo.save(token);
-    return this.login(user);
+      const user = await manager.findOne(UserEntity, { where: { id: token.userId } });
+      if (!user || user.status !== UserStatus.Active) {
+        throw new UnauthorizedException('User not found or disabled');
+      }
+
+      const revoked = await manager.update(RefreshTokenEntity, {
+        id: token.id,
+        revoked: false,
+        expiresAt: MoreThan(now),
+      }, {
+        revoked: true,
+      });
+      if (revoked.affected !== 1) {
+        throw new UnauthorizedException('Invalid refresh token');
+      }
+      return this.issueTokens(user, manager);
+    });
   }
 
   async logout(rawRefreshToken: string) {
@@ -92,6 +86,9 @@ export class AuthService {
   }
 
   async validateJwtPayload(payload: JwtPayload): Promise<UserEntity> {
+    if (typeof payload.sub !== 'string' || payload.sub.length === 0) {
+      throw new UnauthorizedException();
+    }
     const user = await this.usersRepo.findOne({ where: { id: payload.sub } });
     if (!user || user.status !== UserStatus.Active) {
       throw new UnauthorizedException();
@@ -157,5 +154,28 @@ export class AuthService {
 
   async verifyPassword(hash: string, password: string): Promise<boolean> {
     return argon2.verify(hash, password);
+  }
+
+  private async issueTokens(user: UserEntity, manager?: EntityManager) {
+    const payload: JwtPayload = { sub: user.id, username: user.username };
+    const accessToken = this.jwtService.sign(payload);
+
+    const rawRefresh = randomBytes(48).toString('hex');
+    const hash = createHash('sha256').update(rawRefresh).digest('hex');
+    const expiresInDays = this.config.get<number>('auth.refreshTokenExpiresDays');
+    const expiresAt = new Date(Date.now() + expiresInDays * 86400 * 1000);
+    const repo = manager?.getRepository(RefreshTokenEntity) ?? this.refreshTokensRepo;
+
+    await repo.save(
+      repo.create({
+        id: uuidv4(),
+        userId: user.id,
+        hash,
+        expiresAt,
+        createdAt: new Date(),
+      }),
+    );
+
+    return { accessToken, refreshToken: rawRefresh };
   }
 }

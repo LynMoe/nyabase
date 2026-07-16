@@ -1,9 +1,11 @@
-import { Column, Entity, Index, PrimaryColumn } from 'typeorm';
+import { Column, Entity, ForeignKey, Index, PrimaryColumn } from 'typeorm';
 import { ContainerPhase } from '@nyabase/common';
+import { ContainerEntity } from './container.entity.js';
 
 @Entity('container_lifecycle')
 export class ContainerLifecycleEntity {
   @PrimaryColumn({ name: 'container_id', type: 'text' })
+  @ForeignKey(() => ContainerEntity, { onDelete: 'CASCADE' })
   containerId: string;
 
   @Index()
@@ -14,9 +16,16 @@ export class ContainerLifecycleEntity {
   @Column({ name: 'bound_runtime_id', type: 'text', nullable: true })
   boundRuntimeId: string | null;
 
+  /** Immutable create evidence used to finish cleanup after runtime loss. */
+  @Column({ name: 'quota_paths_json', type: 'simple-json', default: '[]' })
+  quotaPathsJson: string[];
+
+  @Column({ name: 'runtime_spec_hash', type: 'text', nullable: true })
+  runtimeSpecHash: string | null;
+
   @Index()
-  @Column({ name: 'active_operation_id', type: 'text', nullable: true })
-  activeOperationId: string | null;
+  @Column({ name: 'active_task_id', type: 'text', nullable: true })
+  activeTaskId: string | null;
 
   @Column({ name: 'last_transition_at', type: 'datetime' })
   lastTransitionAt: Date;

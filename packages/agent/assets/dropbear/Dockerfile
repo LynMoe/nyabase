@@ -30,19 +30,27 @@ RUN ./configure \
     --disable-loginfunc \
     --enable-static \
     LDFLAGS='-static' \
-  && make -j"$(nproc)" PROGRAMS=dropbear MULTI=0 SCPPROGRESS=0 \
+  && make -j"$(nproc)" PROGRAMS="dropbear dropbearkey" MULTI=0 SCPPROGRESS=0 \
   && mkdir -p /out \
-  && strip dropbear \
+  && strip dropbear dropbearkey \
   && cp dropbear /out/nyabase-dropbear-linux-x64 \
-  && chmod 755 /out/nyabase-dropbear-linux-x64 \
+  && cp dropbearkey /out/nyabase-dropbearkey-linux-x64 \
+  && chmod 755 /out/nyabase-dropbear-linux-x64 /out/nyabase-dropbearkey-linux-x64 \
   && sha256sum /out/nyabase-dropbear-linux-x64 \
     | awk '{print $1 "  nyabase-dropbear-linux-x64"}' \
     > /out/nyabase-dropbear-linux-x64.sha256 \
+  && sha256sum /out/nyabase-dropbearkey-linux-x64 \
+    | awk '{print $1 "  nyabase-dropbearkey-linux-x64"}' \
+    > /out/nyabase-dropbearkey-linux-x64.sha256 \
   && file /out/nyabase-dropbear-linux-x64 | tee /tmp/dropbear-file.txt \
   && grep -q 'statically linked' /tmp/dropbear-file.txt \
+  && file /out/nyabase-dropbearkey-linux-x64 | tee /tmp/dropbearkey-file.txt \
+  && grep -q 'statically linked' /tmp/dropbearkey-file.txt \
   && (/out/nyabase-dropbear-linux-x64 -h >/tmp/dropbear-help.txt 2>&1 || true) \
   && grep -q 'Dropbear' /tmp/dropbear-help.txt
 
 FROM scratch AS artifact
 COPY --from=build /out/nyabase-dropbear-linux-x64 /nyabase-dropbear-linux-x64
 COPY --from=build /out/nyabase-dropbear-linux-x64.sha256 /nyabase-dropbear-linux-x64.sha256
+COPY --from=build /out/nyabase-dropbearkey-linux-x64 /nyabase-dropbearkey-linux-x64
+COPY --from=build /out/nyabase-dropbearkey-linux-x64.sha256 /nyabase-dropbearkey-linux-x64.sha256

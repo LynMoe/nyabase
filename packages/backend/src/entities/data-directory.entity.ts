@@ -1,9 +1,17 @@
 import {
-  Entity, PrimaryColumn, Column, Index, Unique, CreateDateColumn, UpdateDateColumn,
+  Entity, PrimaryColumn, Column, Index, CreateDateColumn, UpdateDateColumn, ForeignKey,
 } from 'typeorm';
+import { ServerEntity } from './server.entity.js';
 
 @Entity('data_directories')
-@Unique(['sourceKind', 'sourceId', 'name'])
+@Index('IDX_data_directory_local_physical', ['serverId', 'sourceId', 'name'], {
+  unique: true,
+  where: `"sourceKind" = 'local'`,
+})
+@Index('IDX_data_directory_remote_physical', ['sourceId', 'name'], {
+  unique: true,
+  where: `"sourceKind" = 'remote'`,
+})
 export class DataDirectoryEntity {
   @PrimaryColumn('text')
   id: string;
@@ -16,7 +24,7 @@ export class DataDirectoryEntity {
   @Column('text')
   sourceKind: 'local' | 'remote';
 
-  /** For local: data_disks.id; for remote: remote_fs_mounts.id */
+  /** For local: agent.yaml localDataSources.id; for remote: remote_fs_mounts.id */
   @Index()
   @Column('text')
   sourceId: string;
@@ -25,11 +33,16 @@ export class DataDirectoryEntity {
   @Column('text')
   name: string;
 
+  /** Immutable physical filesystem identity captured with the reservation. */
+  @Column('text')
+  sourceIdentity: string;
+
   /**
-   * Populated only for local sources (data_disks.serverId).
+   * Populated only for local sources.
    * Remote sources are shared across servers, so this is NULL.
    */
   @Index()
+  @ForeignKey(() => ServerEntity, { onDelete: 'RESTRICT' })
   @Column({ type: 'text', nullable: true })
   serverId: string | null;
 
@@ -39,13 +52,13 @@ export class DataDirectoryEntity {
 
   @Index()
   @Column({ type: 'text', default: 'active' })
-  desiredState: 'active' | 'removing';
+  desiredState: 'creating' | 'active' | 'removing' | 'failed';
 
   @Column({ type: 'integer', default: 1 })
   generation: number;
 
   @Column({ type: 'text', nullable: true })
-  lastOperationId: string | null;
+  lastTaskId: string | null;
 
   @CreateDateColumn()
   createdAt: Date;

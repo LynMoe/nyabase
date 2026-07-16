@@ -3,28 +3,40 @@ import * as fs from 'fs';
 import { promisify } from 'util';
 import type { RemoteFsMountSpec, NfsParams } from '@nyabase/common';
 import type { FsMountDriver, SelfCheckItem } from './fs-driver.js';
+import {
+  runIsolatedCommand,
+  type IsolatedCommandRunner,
+} from './isolated-command.js';
 
 const execFileAsync = promisify(execFile);
+const NFS_MOUNT_TIMEOUT_MS = 30_000;
 
 export class NfsDriver implements FsMountDriver {
   readonly type = 'nfs';
 
+  constructor(private readonly runCommand: IsolatedCommandRunner = runIsolatedCommand) {}
+
   async mount(spec: RemoteFsMountSpec): Promise<void> {
     const params = spec.params as NfsParams;
-    const opts = [`vers=${params.version}`, spec.options].filter(Boolean).join(',');
-    await execFileAsync('mount', [
+    // fg is not user-configurable. Combined with schema-level bg rejection it
+    // prevents mount.nfs from intentionally leaving a retry daemon behind.
+    const opts = [`vers=${params.version}`, 'fg', spec.options].filter(Boolean).join(',');
+    await this.runCommand('mount', [
       '-t', 'nfs',
       ...(opts ? ['-o', opts] : []),
       `${params.nfsServer}:${params.exportPath}`,
       spec.hostMountPoint,
-    ], { timeout: 30_000 });
+    ], NFS_MOUNT_TIMEOUT_MS);
   }
 
   matchesCurrent(spec: RemoteFsMountSpec, current: { src: string; opts: string }): boolean {
     const params = spec.params as NfsParams;
     const expectedSrc = `${params.nfsServer}:${params.exportPath}`;
     if (current.src !== expectedSrc) return false;
-    return current.opts.includes(`vers=${params.version}`);
+    const options = new Set(current.opts.split(',').filter(Boolean));
+    return options.has(`vers=${params.version}`)
+      && spec.options.split(',').map((value) => value.trim()).filter(Boolean)
+        .every((option) => options.has(option));
   }
 
   async selfCheck(): Promise<SelfCheckItem> {

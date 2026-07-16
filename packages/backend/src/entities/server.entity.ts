@@ -1,40 +1,10 @@
 import {
   Entity, PrimaryColumn, Column, CreateDateColumn, UpdateDateColumn, Index,
 } from 'typeorm';
-import { ServerStatus, GpuGrantMode } from '@nyabase/common';
+import { ServerStatus } from '@nyabase/common';
 
-// TypeORM may call `from` with an already-transformed JS value in some hydration paths
-// (e.g. after create+save). Guard each transformer against that.
-
-/** Stores a bigint-safe number as text in SQLite while exposing it as `number` in TypeScript. */
-const numericTextTransformer = {
-  to: (v: number): string => String(v ?? 0),
-  from: (v: string | number): number => {
-    if (typeof v === 'number') return v;
-    return parseInt(v ?? '0', 10);
-  },
-};
-
-/** Stores a string[] as a JSON array in SQLite. Handles legacy comma-separated data. */
-const stringArrayTransformer = {
-  to: (v: string[]): string => JSON.stringify(Array.isArray(v) ? v : []),
-  from: (v: string | string[]): string[] => {
-    if (Array.isArray(v)) return v;
-    if (!v || v === '') return [];
-    try { return JSON.parse(v) as string[]; }
-    catch { return (v as string).split(',').filter(Boolean); }
-  },
-};
-
-/** Stores a number[] as a JSON array in SQLite. */
-const numberArrayTransformer = {
-  to: (v: number[]): string => JSON.stringify(Array.isArray(v) ? v : []),
-  from: (v: string | number[]): number[] => {
-    if (Array.isArray(v)) return v;
-    try { return JSON.parse(v as string) as number[]; }
-    catch { return []; }
-  },
-};
+export const AGENT_INVENTORY_FAULT_QUARANTINE_CODE = 'AGENT_INVENTORY_FAULT';
+export const AGENT_TASK_FAIL_STOP_QUARANTINE_CODE = 'AGENT_TASK_FAIL_STOP';
 
 @Entity('servers')
 export class ServerEntity {
@@ -48,58 +18,41 @@ export class ServerEntity {
   @Column({ type: 'text' })
   slug: string;
 
-  @Column('text')
-  parentIface: string;
-
-  @Column('text')
-  ipCidr: string;
-
-  @Column('text')
-  gateway: string;
-
   // Looked up on every agent WS handshake; unique per server (one token per server).
   @Index({ unique: true })
   @Column('text')
   agentTokenHash: string;
 
-  @Column({ type: 'text', default: '[]', transformer: stringArrayTransformer })
-  reservedIps: string[];
+  /** Bound on the first authenticated hello and immutable thereafter. */
+  @Index({ unique: true })
+  @Column({ type: 'text', nullable: true })
+  hostFingerprint: string | null;
 
-  @Column({ type: 'boolean', default: true })
-  isGpuServer: boolean;
+  /** Immutable semantic fingerprint of all static physical addressing config. */
+  @Column({ type: 'text', nullable: true })
+  agentConfigFingerprint: string | null;
 
   @Column({ type: 'text', default: ServerStatus.Unknown })
   status: ServerStatus;
 
+  @Index('IDX_servers_quarantine_code')
+  @Column({ name: 'quarantine_code', type: 'text', nullable: true })
+  quarantineCode: string | null;
+
+  @Column({ name: 'quarantine_message', type: 'text', nullable: true })
+  quarantineMessage: string | null;
+
   @Column({ type: 'datetime', nullable: true })
   lastSeenAt: Date | null;
 
-  /**
-   * Frozen on first agent hello. Set by AgentGateway; never updated afterwards.
-   * Stored here so it survives agent restarts without needing agent to be online.
-   */
-  @Column({ type: 'text', nullable: true })
-  dockerRoot: string | null;
+  @Column({ name: 'macvlan_cidr', type: 'text', nullable: true })
+  macvlanCidr: string | null;
 
-  @Column({ type: 'text', nullable: true })
-  dockerSocket: string | null;
+  @Column({ name: 'macvlan_gateway', type: 'text', nullable: true })
+  macvlanGateway: string | null;
 
-  // --- Resource defaults (applied when a grant leaves a field null) ---
-
-  @Column({ type: 'int', default: 0 })
-  defaultCpuMillis: number;
-
-  @Column({ type: 'text', default: '0', transformer: numericTextTransformer })
-  defaultMemBytes: number;
-
-  @Column({ type: 'text', default: '0', transformer: numericTextTransformer })
-  defaultDiskBytes: number;
-
-  @Column({ type: 'text', default: GpuGrantMode.None })
-  defaultGpuMode: GpuGrantMode;
-
-  @Column({ type: 'text', default: '[]', transformer: numberArrayTransformer })
-  defaultGpuIndices: number[];
+  @Column({ name: 'macvlan_reserved_ips', type: 'simple-json', default: '[]' })
+  macvlanReservedIps: string[];
 
   @CreateDateColumn()
   createdAt: Date;

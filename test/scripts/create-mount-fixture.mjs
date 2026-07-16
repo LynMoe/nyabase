@@ -36,7 +36,7 @@ const admin = await request('POST', '/auth/login', undefined, {
 const token = admin.accessToken;
 
 const servers = await request('GET', '/admin/servers', token);
-const cpu = servers.find((server) => server.status === 'online' && !server.isGpuServer);
+const cpu = servers.find((server) => server.status === 'online' && (server.gpus?.length ?? 0) === 0);
 if (!cpu) throw new Error('No online CPU server found. Run register/deploy agents first.');
 
 const localDisk = await ensureLocalDisk(token, cpu.id, localMountPoint);
@@ -133,10 +133,9 @@ async function ensureLocalDisk(token, serverId, mountPoint) {
   const existing = await request('GET', `/admin/servers/${serverId}/disks`, token);
   const found = existing.find((disk) => disk.mountPoint === mountPoint);
   if (found) return found;
-  return request('POST', `/admin/servers/${serverId}/disks`, token, {
-    mountPoint,
-    label: 'nyabase test local source',
-  });
+  throw new Error(
+    `Local data source ${mountPoint} is not reported by agent ${serverId}; add it to agent.yaml localDataSources and restart the agent`,
+  );
 }
 
 async function ensureRemoteMount(token, serverId, prefix, nfsServer, exportPath) {
@@ -180,7 +179,6 @@ async function createImage(token, prefix) {
   return request('POST', '/admin/images', token, {
     name: `${prefix}-alpine`,
     dockerImage: 'alpine:3.20',
-    defaultUid: 0,
     runtimeOverrides: {
       uid: 0,
       entrypoint: null,
