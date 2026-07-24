@@ -1,8 +1,8 @@
 import { useEffect, useState } from 'react';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
-import type { ImageDto } from '@nyabase/common';
+import type { AdminImageDto } from '@nyabase/common';
 
-import { api } from '../../lib/api.js';
+import { api, ApiError, apiErrorCurrent } from '../../lib/api.js';
 import { queryKeys } from '../../lib/query-keys.js';
 import { toast } from '../../hooks/use-toast.js';
 import { Button } from '../ui/button.js';
@@ -12,17 +12,23 @@ import { Separator } from '../ui/separator.js';
 import {
   Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle,
 } from '../ui/dialog.js';
+import {
+  minimalImageEditPayload,
+  normalizeImageRuntimeOverridesForUi,
+  parseImageFormPayload,
+  type ImageFormPayloadInput,
+} from '../../lib/image-form-payload.js';
+import {
+  createRevisionedServerBackedDraft,
+  editRevisionedServerBackedDraft,
+  mergeAuthoritativeRevisionedServerBackedDraft,
+  mergeRevisionedServerBackedDraft,
+  resolveRevisionedDraftConflicts,
+  type RevisionedServerBackedDraft,
+} from '../../lib/server-backed-draft.js';
+import { isAdminImageDto } from '../../lib/conflict-snapshots.js';
 
-interface FormState {
-  name: string;
-  dockerImage: string;
-  uid: string;
-  entrypoint: string;
-  cmd: string;
-  init: boolean;
-  disableSsh: boolean;
-  description: string;
-}
+type FormState = ImageFormPayloadInput;
 
 const EMPTY_FORM: FormState = {
   name: '',
@@ -45,54 +51,52 @@ const PRESETS = [
 
 interface ImageFormDialogProps {
   mode: 'create' | 'edit';
-  image?: ImageDto | null;
+  image?: AdminImageDto | null;
+  serverImage?: AdminImageDto | null;
   open: boolean;
   onOpenChange: (open: boolean) => void;
 }
 
-export function ImageFormDialog({ mode, image, open, onOpenChange }: ImageFormDialogProps) {
+export function ImageFormDialog({ mode, image, serverImage, open, onOpenChange }: ImageFormDialogProps) {
   const qc = useQueryClient();
-  const [form, setForm] = useState<FormState>(EMPTY_FORM);
+  const [draft, setDraft] = useState<RevisionedServerBackedDraft<FormState>>(
+    () => createRevisionedServerBackedDraft(EMPTY_FORM, 0),
+  );
 
   useEffect(() => {
     if (mode === 'edit' && image) {
-      setForm({
-        name: image.name,
-        dockerImage: image.dockerImage,
-        uid: String(image.runtimeOverrides.uid),
-        entrypoint: linesFromArgs(image.runtimeOverrides?.entrypoint),
-        cmd: linesFromArgs(image.runtimeOverrides?.cmd),
-        init: image.runtimeOverrides?.init ?? false,
-        disableSsh: image.disableSsh ?? false,
-        description: image.description ?? '',
-      });
+      setDraft(createRevisionedServerBackedDraft(formFromImage(image), image.revision));
     } else if (mode === 'create' && open) {
-      setForm(EMPTY_FORM);
+      setDraft(createRevisionedServerBackedDraft(EMPTY_FORM, 0));
     }
-  }, [mode, image, open]);
+  }, [mode, image?.id, open]);
+
+  useEffect(() => {
+    if (mode !== 'edit' || !open || !serverImage || serverImage.id !== image?.id) return;
+    setDraft((current) => mergeRevisionedServerBackedDraft(
+      current,
+      formFromImage(serverImage),
+      serverImage.revision,
+    ));
+  }, [mode, open, image?.id, serverImage?.id, serverImage?.revision]);
+
+  const form = draft.values;
+  const setField = <K extends keyof FormState>(field: K, value: FormState[K]) => {
+    setDraft((current) => editRevisionedServerBackedDraft(current, field, value));
+  };
 
   const { mutate, isPending } = useMutation({
     mutationFn: () => {
-      const runtimeOverrides = {
-        uid: parseInt(form.uid, 10),
-        entrypoint: argsFromLines(form.entrypoint),
-        cmd: argsFromLines(form.cmd),
-        init: form.init,
-      };
-      if (mode === 'create') {
-        return api.post('/admin/images', {
-          name: form.name,
-          dockerImage: form.dockerImage,
-          runtimeOverrides,
-          description: form.description.trim() || undefined,
-          disableSsh: form.disableSsh,
-        });
-      }
+      const parsed = mode === 'create'
+        ? parseImageFormPayload('create', form)
+        : parseImageFormPayload('edit', form);
+      if (!parsed.success) throw new Error(parsed.error.issues[0]?.message ?? '镜像参数无效');
+      if (mode === 'create') return api.post('/admin/images', parsed.data);
+      const payload = minimalImageEditPayload(parsed.data, draft.dirtyFields);
+      if (Object.keys(payload).length === 0) throw new Error('没有需要保存的镜像字段');
       return api.patch(`/admin/images/${image!.id}`, {
-        name: form.name,
-        runtimeOverrides,
-        description: form.description.trim() || undefined,
-        disableSsh: form.disableSsh,
+        ...payload,
+        expectedRevision: draft.revision,
       });
     },
     onSuccess: () => {
@@ -100,23 +104,51 @@ export function ImageFormDialog({ mode, image, open, onOpenChange }: ImageFormDi
       toast({ title: mode === 'create' ? '镜像已添加' : '镜像已更新' });
       onOpenChange(false);
     },
-    onError: (e) =>
+    onError: async (e) => {
+      if (e instanceof ApiError && e.code === 'IMAGE_REVISION_CONFLICT') {
+        const current = apiErrorCurrent(e, 'IMAGE_REVISION_CONFLICT', isAdminImageDto);
+        if (current) {
+          qc.setQueryData<AdminImageDto[]>(queryKeys.images.admin, (images) => images?.map(
+            (candidate) => candidate.id === current.id ? current : candidate,
+          ));
+          setDraft((draftState) => mergeAuthoritativeRevisionedServerBackedDraft(
+            draftState,
+            formFromImage(current),
+            current.revision,
+          ));
+        } else {
+          await qc.refetchQueries({ queryKey: queryKeys.images.admin, type: 'active' });
+        }
+      }
       toast({
-        title: mode === 'create' ? '添加失败' : '更新失败',
+        title: e instanceof ApiError && e.code === 'IMAGE_REVISION_CONFLICT'
+          ? '服务器镜像已变化'
+          : mode === 'create' ? '添加失败' : '更新失败',
         description: (e as Error).message,
         variant: 'destructive',
-      }),
+      });
+    },
   });
 
   if (mode === 'edit' && !image) return null;
 
   const isCreate = mode === 'create';
-  const uid = Number(form.uid);
-  const submittable = !!form.name && (!isCreate || !!form.dockerImage) && Number.isInteger(uid) && uid >= 0;
+  const parsedForm = isCreate
+    ? parseImageFormPayload('create', form)
+    : parseImageFormPayload('edit', form);
+  const submittable = parsedForm.success;
+  const hasChanges = mode === 'create' || draft.dirtyFields.size > 0;
+  const hasConflicts = draft.conflictFields.size > 0;
+  const serverChanged = mode === 'edit' && Boolean(
+    image?.revision && serverImage?.revision && image.revision !== serverImage.revision,
+  );
+  const uidError = parsedForm.success
+    ? null
+    : parsedForm.error.issues.find((issue) => issue.path.join('.') === 'runtimeOverrides.uid')?.message;
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-md">
+      <DialogContent className="max-h-[90vh] max-w-md overflow-y-auto">
         <DialogHeader>
           <DialogTitle>{isCreate ? '添加镜像' : '编辑镜像'}</DialogTitle>
           <DialogDescription>
@@ -126,11 +158,35 @@ export function ImageFormDialog({ mode, image, open, onOpenChange }: ImageFormDi
           </DialogDescription>
         </DialogHeader>
 
+        {serverChanged && (
+          <div className="space-y-2 rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-xs text-amber-900">
+            <p>
+              服务器上的镜像已更新。未修改字段已同步，本地修改已保留
+              {hasConflicts ? `；${draft.conflictFields.size} 个字段发生冲突。` : '。'}
+            </p>
+            {hasConflicts && (
+              <div className="flex gap-2">
+                <Button size="sm" variant="outline" onClick={() => setDraft(resolveRevisionedDraftConflicts(draft, 'use-server'))}>
+                  使用服务器值
+                </Button>
+                <Button size="sm" onClick={() => setDraft(resolveRevisionedDraftConflicts(draft, 'keep-local'))}>
+                  保留本地并覆盖
+                </Button>
+              </div>
+            )}
+          </div>
+        )}
+
         <div className="space-y-4">
           {isCreate ? (
             <PresetPicker
               onPick={(value, label) =>
-                setForm((f) => ({ ...f, dockerImage: value, name: f.name || label }))
+                setDraft((current) => {
+                  const withImage = editRevisionedServerBackedDraft(current, 'dockerImage', value);
+                  return current.values.name
+                    ? withImage
+                    : editRevisionedServerBackedDraft(withImage, 'name', label);
+                })
               }
             />
           ) : (
@@ -151,7 +207,7 @@ export function ImageFormDialog({ mode, image, open, onOpenChange }: ImageFormDi
                 id="image-name"
                 placeholder="Ubuntu 22.04 Dev"
                 value={form.name}
-                onChange={(e) => setForm((f) => ({ ...f, name: e.target.value }))}
+                onChange={(e) => setField('name', e.target.value)}
               />
             </div>
 
@@ -162,7 +218,7 @@ export function ImageFormDialog({ mode, image, open, onOpenChange }: ImageFormDi
                   id="image-docker"
                   placeholder="ubuntu:22.04"
                   value={form.dockerImage}
-                  onChange={(e) => setForm((f) => ({ ...f, dockerImage: e.target.value }))}
+                  onChange={(e) => setField('dockerImage', e.target.value)}
                   className="font-mono text-sm"
                 />
               </div>
@@ -174,17 +230,19 @@ export function ImageFormDialog({ mode, image, open, onOpenChange }: ImageFormDi
                   <Label htmlFor="image-uid">UID 覆盖</Label>
                   <Input
                     id="image-uid"
-                    type="number" min="0"
+                    type="number" min="0" max="4294967294" step="1"
                     value={form.uid}
-                    onChange={(e) => setForm((f) => ({ ...f, uid: e.target.value }))}
+                    onChange={(e) => setField('uid', e.target.value)}
                     placeholder="0"
+                    aria-invalid={Boolean(uidError)}
                   />
+                  {uidError && <p className="text-xs text-destructive">UID 必须是 0 到 4294967294 的十进制整数</p>}
                 </div>
                 <label className="flex items-center gap-2 pt-6 text-sm">
                   <input
                     type="checkbox"
                     checked={form.init}
-                    onChange={(e) => setForm((f) => ({ ...f, init: e.target.checked }))}
+                    onChange={(e) => setField('init', e.target.checked)}
                     className="h-4 w-4 rounded border-input"
                   />
                   启用 init
@@ -196,7 +254,7 @@ export function ImageFormDialog({ mode, image, open, onOpenChange }: ImageFormDi
                 <textarea
                   id="image-entrypoint"
                   value={form.entrypoint}
-                  onChange={(e) => setForm((f) => ({ ...f, entrypoint: e.target.value }))}
+                  onChange={(e) => setField('entrypoint', e.target.value)}
                   placeholder="/usr/local/bin/start.sh"
                   rows={2}
                   className="flex w-full rounded-md border border-input bg-background px-3 py-2 text-sm font-mono ring-offset-background placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
@@ -208,7 +266,7 @@ export function ImageFormDialog({ mode, image, open, onOpenChange }: ImageFormDi
                 <textarea
                   id="image-cmd"
                   value={form.cmd}
-                  onChange={(e) => setForm((f) => ({ ...f, cmd: e.target.value }))}
+                  onChange={(e) => setField('cmd', e.target.value)}
                   placeholder={'sleep\ninfinity'}
                   rows={2}
                   className="flex w-full rounded-md border border-input bg-background px-3 py-2 text-sm font-mono ring-offset-background placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
@@ -221,7 +279,7 @@ export function ImageFormDialog({ mode, image, open, onOpenChange }: ImageFormDi
               <Input
                 id="image-desc"
                 value={form.description}
-                onChange={(e) => setForm((f) => ({ ...f, description: e.target.value }))}
+                onChange={(e) => setField('description', e.target.value)}
                 placeholder="用于深度学习开发..."
               />
             </div>
@@ -234,7 +292,7 @@ export function ImageFormDialog({ mode, image, open, onOpenChange }: ImageFormDi
               <input
                 type="checkbox"
                 checked={form.disableSsh}
-                onChange={(e) => setForm((f) => ({ ...f, disableSsh: e.target.checked }))}
+                onChange={(e) => setField('disableSsh', e.target.checked)}
                 className="h-4 w-4 shrink-0 accent-primary"
               />
             </label>
@@ -243,7 +301,7 @@ export function ImageFormDialog({ mode, image, open, onOpenChange }: ImageFormDi
 
         <DialogFooter>
           <Button variant="outline" onClick={() => onOpenChange(false)}>取消</Button>
-          <Button onClick={() => mutate()} disabled={isPending || !submittable}>
+          <Button onClick={() => mutate()} disabled={isPending || !submittable || !hasChanges || hasConflicts}>
             {isPending
               ? (isCreate ? '添加中...' : '保存中...')
               : (isCreate ? '添加' : '保存')}
@@ -254,16 +312,22 @@ export function ImageFormDialog({ mode, image, open, onOpenChange }: ImageFormDi
   );
 }
 
-function argsFromLines(value: string): string[] | null {
-  const args = value
-    .split('\n')
-    .map((line) => line.trim())
-    .filter(Boolean);
-  return args.length > 0 ? args : null;
-}
-
 function linesFromArgs(value: string[] | null | undefined): string {
   return value?.join('\n') ?? '';
+}
+
+function formFromImage(image: AdminImageDto): FormState {
+  const runtimeOverrides = normalizeImageRuntimeOverridesForUi(image.runtimeOverrides);
+  return {
+    name: image.name,
+    dockerImage: image.dockerImage,
+    uid: String(runtimeOverrides.uid),
+    entrypoint: linesFromArgs(runtimeOverrides.entrypoint),
+    cmd: linesFromArgs(runtimeOverrides.cmd),
+    init: runtimeOverrides.init,
+    disableSsh: image.disableSsh ?? false,
+    description: image.description ?? '',
+  };
 }
 
 function PresetPicker({ onPick }: { onPick: (value: string, label: string) => void }) {

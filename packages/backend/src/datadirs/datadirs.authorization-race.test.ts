@@ -1,9 +1,12 @@
 import {
   AgentTaskStatus,
+  Capability,
   GpuGrantMode,
   MAX_MANAGED_DATA_DIRS_PER_AGENT,
+  RemoteFsType,
   ServerStatus,
   UserStatus,
+  remoteFsSourceIdentity,
 } from '@nyabase/common';
 import { DataSource, EntityManager } from 'typeorm';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -52,6 +55,7 @@ describe('DataDirsService create versus mount grant revocation', () => {
   };
 
   beforeEach(async () => {
+    snapshot.disks[0].sourceIdentity = 'physical-a';
     dataSource = new DataSource({
       type: 'better-sqlite3',
       database: ':memory:',
@@ -82,6 +86,17 @@ describe('DataDirsService create versus mount grant revocation', () => {
     await dataSource.getRepository(UserEntity).save({
       id: 'user-a', numericId: 1001, username: 'user-a', passwordHash: 'hash',
       displayName: 'User A', status: UserStatus.Active,
+    });
+    await dataSource.getRepository(UserEntity).save({
+      id: 'actor-a', numericId: 1002, username: 'actor-a', passwordHash: 'hash',
+      displayName: 'Actor A', status: UserStatus.Active,
+    });
+    await dataSource.getRepository(GroupEntity).save({
+      id: 'grant-admins', name: 'Grant admins', description: null, priority: 1,
+      capabilitiesJson: JSON.stringify([Capability.ManageGrants]), isSystem: false, systemKey: null,
+    });
+    await dataSource.getRepository(GroupMemberEntity).save({
+      id: 'actor-grant-membership', groupId: 'grant-admins', userId: 'actor-a',
     });
     await dataSource.getRepository(ServerGrantEntity).save({
       id: 'server-grant-a', scope: 'user', scopeId: 'user-a', serverId: 'server-a',
@@ -177,6 +192,37 @@ describe('DataDirsService create versus mount grant revocation', () => {
     expect(await dataSource.getRepository(DataDirectoryEntity).count()).toBe(0);
   });
 
+  it('rejects an admin create when ManageContainersAny is revoked before task admission', async () => {
+    await dataSource.getRepository(GroupEntity).update('grant-admins', {
+      capabilitiesJson: JSON.stringify([
+        Capability.ManageGrants,
+        Capability.ManageContainersAny,
+      ]),
+    });
+    let release!: () => void;
+    pauseBeforeCommit = new Promise<void>((resolve) => { release = resolve; });
+    const reached = new Promise<void>((resolve) => { reachedBeforeCommit = resolve; });
+    const create = dataDirs.createDir(
+      'actor-a',
+      'user-a',
+      'server-a',
+      'local',
+      'disk-a',
+      'admin-dir',
+      1001,
+      'admin',
+    );
+    await reached;
+
+    await dataSource.getRepository(GroupEntity).update('grant-admins', {
+      capabilitiesJson: JSON.stringify([Capability.ManageGrants]),
+    });
+    release();
+
+    await expect(create).rejects.toThrow();
+    expect(await dataSource.getRepository(DataDirectoryEntity).count()).toBe(0);
+  });
+
   it('commits create first and then rejects revocation without orphaning the directory', async () => {
     await expect(dataDirs.createDir(
       'actor-a', 'user-a', 'server-a', 'local', 'disk-a', 'dir-a', 1001,
@@ -209,5 +255,61 @@ describe('DataDirsService create versus mount grant revocation', () => {
     });
     countSpy.mockRestore();
     expect(await dataSource.getRepository(DataDirectoryEntity).count()).toBe(0);
+  });
+
+  it('rejects delete when the local disk identity no longer matches the reservation', async () => {
+    await dataSource.getRepository(DataDirectoryEntity).save({
+      id: 'dir-a', userId: 'user-a', sourceKind: 'local', sourceId: 'disk-a',
+      name: 'data-a', sourceIdentity: 'physical-a', serverId: 'server-a', uid: 1001,
+      desiredState: 'active', generation: 1, lastTaskId: 'create-task-a',
+    });
+    snapshot.disks[0].sourceIdentity = 'physical-replacement';
+
+    await expect(dataDirs.deleteDir(
+      'actor-a', 'user-a', 'server-a', 'local', 'disk-a', 'data-a',
+    )).rejects.toMatchObject({
+      response: expect.objectContaining({ code: 'DATA_DIRECTORY_SOURCE_NOT_READY' }),
+    });
+    expect(await dataSource.getRepository(DataDirectoryEntity).findOneByOrFail({ id: 'dir-a' }))
+      .toMatchObject({ desiredState: 'active', generation: 1, lastTaskId: 'create-task-a' });
+  });
+
+  it('rejects delete when the remote assignment disappears before task admission', async () => {
+    const params = {
+      type: RemoteFsType.Nfs,
+      nfsServer: 'nfs.example',
+      exportPath: '/data',
+      version: '4.2',
+    } as const;
+    await dataSource.getRepository(RemoteFsMountEntity).save({
+      id: 'remote-a', name: 'remote-a', displayName: null, description: null,
+      type: RemoteFsType.Nfs, hostMountPoint: '/mnt/remote-a', options: '', params,
+      desiredState: 'active', generation: 1, lastTaskId: null,
+    });
+    await dataSource.getRepository(RemoteFsServerAssignmentEntity).save({
+      id: 'assignment-a', remoteFsMountId: 'remote-a', serverId: 'server-a',
+      desiredState: 'active', generation: 1, lastTaskId: 'ensure-task-a',
+    });
+    await dataSource.getRepository(DataDirectoryEntity).save({
+      id: 'dir-remote-a', userId: 'user-a', sourceKind: 'remote', sourceId: 'remote-a',
+      name: 'data-a', sourceIdentity: remoteFsSourceIdentity(params), serverId: null, uid: 1001,
+      desiredState: 'active', generation: 1, lastTaskId: 'create-task-a',
+    });
+
+    let release!: () => void;
+    pauseBeforeCommit = new Promise<void>((resolve) => { release = resolve; });
+    const reached = new Promise<void>((resolve) => { reachedBeforeCommit = resolve; });
+    const deleting = dataDirs.deleteDir(
+      'actor-a', 'user-a', 'server-a', 'remote', 'remote-a', 'data-a',
+    );
+    await reached;
+    await dataSource.getRepository(RemoteFsServerAssignmentEntity).delete({ id: 'assignment-a' });
+    release();
+
+    await expect(deleting).rejects.toMatchObject({
+      response: expect.objectContaining({ code: 'DATA_DIRECTORY_SOURCE_NOT_READY' }),
+    });
+    expect(await dataSource.getRepository(DataDirectoryEntity).findOneByOrFail({ id: 'dir-remote-a' }))
+      .toMatchObject({ desiredState: 'active', generation: 1, lastTaskId: 'create-task-a' });
   });
 });

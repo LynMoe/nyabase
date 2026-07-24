@@ -10,6 +10,10 @@ import {
 
 const execFileAsync = promisify(execFile);
 const NFS_MOUNT_TIMEOUT_MS = 30_000;
+// retry is consumed by mount.nfs while establishing a foreground mount and is
+// not retained in the kernel mount table. It controls command convergence, not
+// the identity of the mounted filesystem.
+const NFS_HELPER_ONLY_OPTION_KEYS = new Set(['retry']);
 
 export class NfsDriver implements FsMountDriver {
   readonly type = 'nfs';
@@ -34,9 +38,16 @@ export class NfsDriver implements FsMountDriver {
     const expectedSrc = `${params.nfsServer}:${params.exportPath}`;
     if (current.src !== expectedSrc) return false;
     const options = new Set(current.opts.split(',').filter(Boolean));
+    const requested = spec.options.split(',').map((value) => value.trim()).filter(Boolean);
+    const desiredReadOnly = requested.includes('ro');
+    if (options.has('ro') === options.has('rw')) return false;
+    if (desiredReadOnly ? !options.has('ro') : !options.has('rw')) return false;
     return options.has(`vers=${params.version}`)
-      && spec.options.split(',').map((value) => value.trim()).filter(Boolean)
-        .every((option) => options.has(option));
+      && requested
+        .every((option) => (
+          NFS_HELPER_ONLY_OPTION_KEYS.has(option.split('=', 1)[0]!.toLowerCase())
+          || options.has(option)
+        ));
   }
 
   async selfCheck(): Promise<SelfCheckItem> {

@@ -162,6 +162,14 @@ function makeHandler(
     }),
     ...dataDirsOverrides,
   };
+  if (!('inspectSourceExact' in dataDirsOverrides)) {
+    (dataDirs as Record<string, unknown>).inspectSourceExact = vi.fn(async (sourceId: string) =>
+      dataDirs.inspectSource(sourceId));
+  }
+  if (!('inspectDirExact' in dataDirsOverrides)) {
+    (dataDirs as Record<string, unknown>).inspectDirExact = vi.fn(async (sourceId: string, resourceId: string) =>
+      dataDirs.inspectDir(sourceId, resourceId));
+  }
   const remoteFsMounter = {
     getSpec: vi.fn().mockReturnValue(undefined),
     verifyMounted: vi.fn().mockResolvedValue(false),

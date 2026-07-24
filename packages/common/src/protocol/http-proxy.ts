@@ -2,15 +2,22 @@ import { z } from 'zod';
 import { ContainerStatus } from '../enums.js';
 import {
   MAX_HTTP_PROXY_CERTIFICATE_PEM_LENGTH,
+  MAX_HTTP_PROXY_ACTIVE_CONNECTIONS,
   MAX_HTTP_PROXY_DOMAIN_POOLS,
   MAX_HTTP_PROXY_PRIVATE_KEY_PEM_LENGTH,
   MAX_HTTP_PROXY_ROUTES,
+  PROXY_SNAPSHOT_MAX_CLOCK_SKEW_MS,
 } from '../constants.js';
 
 const zAscii = (max: number) => z.string().min(1).max(max).regex(/^[\x20-\x7e]+$/);
 const zAsciiText = (max: number) => z.string().min(1).max(max)
   .regex(/^[\x09\x0a\x0d\x20-\x7e]+$/);
 const zId = zAscii(64);
+const zSafeCounter = z.number().int().min(0).max(Number.MAX_SAFE_INTEGER);
+const zProxyTimestampMs = zSafeCounter.refine(
+  (value) => value <= Date.now() + PROXY_SNAPSHOT_MAX_CLOCK_SKEW_MS,
+  'Proxy timestamp exceeds the allowed clock-skew window',
+);
 
 // Long enough to remain online after subtracting the shared 30s clock-skew
 // allowance while still renewing well before expiry.
@@ -66,18 +73,18 @@ export const zHttpProxySnapshot = z.object({
 }).strict();
 
 export const zHttpProxyStatusReport = z.object({
-  proxyId: z.string(),
-  hostname: z.string().nullable(),
-  httpListen: z.string(),
-  httpsListen: z.string().nullable(),
-  uptimeMs: z.number().int().nonnegative(),
-  connectedAt: z.number(),
-  lastSnapshotGeneration: z.number().int().nonnegative().nullable(),
-  lastSnapshotAt: z.number().nullable(),
-  activeConnections: z.number().int().nonnegative(),
-  totalRequests: z.number().int().nonnegative(),
-  totalRejectedRequests: z.number().int().nonnegative(),
-});
+  proxyId: zAscii(128),
+  hostname: zAscii(253).nullable(),
+  httpListen: zAscii(128),
+  httpsListen: zAscii(128).nullable(),
+  uptimeMs: zSafeCounter,
+  connectedAt: zProxyTimestampMs,
+  lastSnapshotGeneration: zSafeCounter.nullable(),
+  lastSnapshotAt: zProxyTimestampMs.nullable(),
+  activeConnections: z.number().int().min(0).max(MAX_HTTP_PROXY_ACTIVE_CONNECTIONS),
+  totalRequests: zSafeCounter,
+  totalRejectedRequests: zSafeCounter,
+}).strict();
 
 export const zHttpProxyClientAck = z.object({
   generation: z.number().int().nonnegative(),

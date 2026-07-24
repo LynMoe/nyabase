@@ -1,6 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import * as path from 'node:path';
-import { In, IsNull, type EntityManager } from 'typeorm';
+import { DataSource, In, type EntityManager } from 'typeorm';
 import { isDeepStrictEqual } from 'node:util';
 import { v4 as uuidv4 } from 'uuid';
 import {
@@ -27,12 +27,9 @@ import {
   networkClaimReuseKey,
 } from '../common/monotonic-reuse-guard.js';
 import { runSerializedTransaction } from '../database/serialized-transaction.js';
-import type { DataSource } from 'typeorm';
 import { ContainerDesiredSpecEntity } from '../entities/container-desired-spec.entity.js';
 import { ContainerEntity } from '../entities/container.entity.js';
 import { ContainerLifecycleEntity } from '../entities/container-lifecycle.entity.js';
-import { ContainerMountEntity } from '../entities/container-mount.entity.js';
-import { DataDirectoryEntity } from '../entities/data-directory.entity.js';
 import { QuotaDesiredEntity } from '../entities/quota-desired.entity.js';
 import { NetworkAddressClaimEntity } from '../entities/network-address-claim.entity.js';
 import { AgentTaskEntity } from '../entities/agent-task.entity.js';
@@ -44,6 +41,10 @@ import {
   assertNetworkClaimCapacity,
   gcExpiredNetworkClaims,
 } from '../common/network-claim-ledger.js';
+import {
+  ContainerMountIntegrityError,
+  resolveContainerMountIntegrity,
+} from '../containers/container-mount-integrity.js';
 
 class RuntimeCleanupLedgerCorruptionError extends Error {}
 
@@ -151,6 +152,46 @@ export class RuntimeDriftReconcilerService {
             failedContainerIds.push(containerId);
             continue;
           }
+          const desired = desiredById.get(containerId);
+          const exactContainerClaim = claimByContainerId.get(containerId);
+          const canonical = desired
+            ? reported.find((snapshot) => this.isCanonical(
+                snapshot,
+                lifecycle!,
+                desired,
+                exactContainerClaim?.address ?? null,
+              ))
+            : undefined;
+          if (canonical && desired) {
+            const recovery = await this.prioritizePowerRecoveryAheadOfUndispatchedSsh(
+              manager,
+              container!,
+              desired,
+              lifecycle!,
+              activeTask,
+              canonical,
+              dockerRoot,
+            );
+            if (recovery) {
+              claimsChanged = await this.releaseCanonicalRuntimeClaims(
+                manager,
+                serverId,
+                canonical.runtime.runtimeId,
+              ) || claimsChanged;
+              const cleanup = await this.scheduleRuntimeCleanups(
+                manager,
+                serverId,
+                durableServer.macvlanCidr,
+                reported.filter((snapshot) => snapshot !== canonical),
+                dockerRoot,
+              );
+              claimsChanged ||= cleanup.claimsChanged;
+              taskIds.push(...cleanup.taskIds);
+              if (recovery.taskId) taskIds.push(recovery.taskId);
+              if (recovery.failed) failedContainerIds.push(containerId);
+              continue;
+            }
+          }
           const taskOwnedRuntimeId = lifecycle!.boundRuntimeId
             ?? this.stagedRuntimeId(activeTask);
           if (!taskOwnedRuntimeId) {
@@ -187,7 +228,6 @@ export class RuntimeDriftReconcilerService {
             (snapshot) => snapshot.runtime.runtimeId === taskOwnedRuntimeId,
           );
           const extras = reported.filter((snapshot) => snapshot !== taskOwnedSnapshot);
-          const exactContainerClaim = claimByContainerId.get(containerId);
           if (
             !taskOwnedSnapshot
             || exactContainerClaim?.address === taskOwnedSnapshot.runtime.ip
@@ -322,7 +362,10 @@ export class RuntimeDriftReconcilerService {
           failedContainerIds.push(container.id);
           continue;
         }
-        if (lifecycle.phase !== ContainerPhase.Active) continue;
+        const canRefineUnsupportedPowerFailure =
+          lifecycle.phase === ContainerPhase.Failed
+          && lifecycle.failureCode === 'runtime_power_state_unsupported';
+        if (lifecycle.phase !== ContainerPhase.Active && !canRefineUnsupportedPowerFailure) continue;
         if (!desiredById.has(container.id)) {
           await this.markFailed(
             manager,
@@ -830,7 +873,28 @@ export class RuntimeDriftReconcilerService {
     let payload: Record<string, unknown>;
     let resourceKeys = [this.resourceKeys.container(container.id)];
     if (wantsRunning) {
-      const start = await this.startRecoveryPayload(manager, container, desired, lifecycle, dockerRoot);
+      let start: Awaited<ReturnType<RuntimeDriftReconcilerService['startRecoveryPayload']>>;
+      try {
+        start = await this.startRecoveryPayload(manager, container, desired, lifecycle, dockerRoot);
+      } catch (error) {
+        if (!(error instanceof ContainerMountIntegrityError)) throw error;
+        const failureCode = error.kind === 'desired_invalid'
+          ? 'runtime_power_recovery_mount_spec_invalid'
+          : error.kind === 'index_divergent'
+            ? 'runtime_power_recovery_mount_index_divergent'
+            : 'runtime_power_recovery_mount_source_unavailable';
+        await this.markFailed(
+          manager,
+          lifecycle,
+          failureCode,
+          error.kind === 'desired_invalid'
+            ? 'A stopped canonical runtime cannot be restarted because its durable desired mount snapshot is invalid'
+            : error.kind === 'index_divergent'
+              ? 'A stopped canonical runtime cannot be restarted because its durable mount representations disagree'
+              : 'A stopped canonical runtime cannot be restarted because an exact durable mount source is unavailable',
+        );
+        return { taskId: null, failed: true };
+      }
       if (!start) {
         await this.markFailed(
           manager,
@@ -878,6 +942,73 @@ export class RuntimeDriftReconcilerService {
     }
   }
 
+  private async prioritizePowerRecoveryAheadOfUndispatchedSsh(
+    manager: EntityManager,
+    container: ContainerEntity,
+    desired: ContainerDesiredSpecEntity,
+    lifecycle: ContainerLifecycleEntity,
+    activeTask: AgentTaskEntity,
+    canonical: ContainerSnapshot,
+    dockerRoot: string,
+  ): Promise<{ taskId: string | null; failed: boolean } | null> {
+    if (
+      activeTask.kind !== AgentTaskKind.ContainerSshEnsure
+      || activeTask.serverId !== container.serverId
+      || activeTask.resourceType !== 'container'
+      || activeTask.resourceId !== container.id
+      || activeTask.agentResultJson !== null
+      || activeTask.startedAt !== null
+      || activeTask.lastSentAt !== null
+      || desired.powerIntent !== ContainerPowerIntent.Running
+      || (canonical.status !== ContainerStatus.Exited && canonical.status !== ContainerStatus.Dead)
+    ) return null;
+    try {
+      const payload = parseAgentTaskPayload(activeTask.kind, activeTask.payloadJson);
+      if (
+        payload.containerId !== container.id
+        || payload.runtimeId !== canonical.runtime.runtimeId
+      ) return null;
+    } catch {
+      // Corrupt durable payloads are owned by the dispatcher fail-stop path;
+      // report reconciliation must not reinterpret or supersede them.
+      return null;
+    }
+
+    const superseded = await this.tasks.supersedePendingForResourceInTransaction(manager, {
+      serverId: container.serverId,
+      resourceType: 'container',
+      resourceId: container.id,
+      reason: 'Canonical desired-running runtime stopped before SSH task dispatch',
+    });
+    if (superseded.length !== 1 || superseded[0] !== activeTask.id) {
+      throw new Error(
+        `SSH task ${activeTask.id} lost undispatched lifecycle ownership during power recovery`,
+      );
+    }
+
+    const now = new Date();
+    await manager.update(ContainerLifecycleEntity, container.id, {
+      phase: ContainerPhase.Active,
+      activeTaskId: null,
+      lastTransitionAt: now,
+      failureReason: null,
+      failureCode: null,
+    });
+    lifecycle.phase = ContainerPhase.Active;
+    lifecycle.activeTaskId = null;
+    lifecycle.lastTransitionAt = now;
+    lifecycle.failureReason = null;
+    lifecycle.failureCode = null;
+    return this.schedulePowerRecovery(
+      manager,
+      container,
+      desired,
+      lifecycle,
+      canonical,
+      dockerRoot,
+    );
+  }
+
   private async startRecoveryPayload(
     manager: EntityManager,
     container: ContainerEntity,
@@ -886,6 +1017,7 @@ export class RuntimeDriftReconcilerService {
     dockerRoot: string,
   ): Promise<{ payload: Record<string, unknown>; resourceKeys: string[] } | null> {
     if (!lifecycle.boundRuntimeId || lifecycle.quotaPathsJson.length !== 2 || !dockerRoot.trim()) return null;
+    const mounts = await resolveContainerMountIntegrity(manager, container, desired);
     const quota = await manager.findOne(QuotaDesiredEntity, {
       where: { serverId: container.serverId, userId: container.ownerId },
     });
@@ -897,33 +1029,16 @@ export class RuntimeDriftReconcilerService {
       || quota.generation < 1
       || quota.limitBytes < 0
     ) return null;
-    const mounts = await manager.find(ContainerMountEntity, {
-      where: { serverId: container.serverId, containerId: container.id },
-      order: { containerPath: 'ASC' },
-    });
     const agentMounts: ContainerMountSpec[] = [];
     const resourceKeys = [
       this.resourceKeys.container(container.id),
       this.resourceKeys.quota(container.serverId, container.ownerId),
     ];
     for (const mount of mounts) {
-      const dataDir = await manager.findOne(DataDirectoryEntity, {
-        where: {
-          sourceKind: mount.sourceKind,
-          sourceId: mount.sourceId,
-          name: mount.dirName,
-          userId: container.ownerId,
-          desiredState: 'active',
-          ...(mount.sourceKind === 'local'
-            ? { serverId: container.serverId }
-            : { serverId: IsNull() }),
-        },
-      });
-      if (!dataDir || dataDir.sourceIdentity !== mount.sourceIdentity) return null;
       agentMounts.push({
         sourceId: mount.sourceId,
-        resourceId: dataDir.id,
-        sourceIdentity: dataDir.sourceIdentity,
+        resourceId: mount.resourceId,
+        sourceIdentity: mount.sourceIdentity,
         containerPath: mount.containerPath,
       });
       resourceKeys.push(

@@ -6,12 +6,13 @@ import {
 } from 'lucide-react';
 import { cn } from '../../lib/utils.js';
 import { useAuthStore } from '../../store/auth.js';
-import { api } from '../../lib/api.js';
 import { Button } from '../ui/button.js';
 import { Separator } from '../ui/separator.js';
 import { Capability } from '@nyabase/common';
 import { ThemeToggle } from '../theme-toggle.js';
 import { usePublicSettings } from '../../hooks/use-public-settings.js';
+import { terminateBrowserSession } from '../../lib/session-termination.js';
+import { SSH_PROXY_STATUS_CAPABILITIES } from '../../lib/ssh-proxy-access.js';
 
 const userNavItems = [
   { to: '/', icon: LayoutDashboard, label: '监控大屏' },
@@ -25,9 +26,9 @@ const adminNavItems = [
   { to: '/images', icon: ImageIcon, label: '镜像', caps: [Capability.ManageImages] },
   { to: '/manage/containers', icon: Layers, label: '容器管理', caps: [Capability.ManageContainersAny] },
   { to: '/manage/remote-fs', icon: Network, label: '远程文件系统', caps: [Capability.ManageServers] },
-  { to: '/ssh-proxy', icon: Cable, label: 'SSH 代理', caps: [Capability.ViewMetricsAll, Capability.ManageSystemSettings] },
-  { to: '/users', icon: Users, label: '用户', caps: [Capability.ManageUsers] },
-  { to: '/groups', icon: Shield, label: '用户组', caps: [Capability.ManageGroups] },
+  { to: '/ssh-proxy', icon: Cable, label: 'SSH 代理', caps: SSH_PROXY_STATUS_CAPABILITIES },
+  { to: '/users', icon: Users, label: '用户', caps: [Capability.ManageUsers, Capability.ManageGrants] },
+  { to: '/groups', icon: Shield, label: '用户组', caps: [Capability.ManageGroups, Capability.ManageGrants] },
   { to: '/audit', icon: ScrollText, label: '审计', caps: [Capability.ViewAudit] },
   { to: '/system-settings', icon: Settings, label: '系统设置', caps: [Capability.ManageSystemSettings] },
 ];
@@ -53,16 +54,12 @@ function NavItem({ item, pathname }: { item: NavItemDef; pathname: string }) {
 }
 
 export function AppLayout({ children }: { children: ReactNode }) {
-  const { user, clearAuth, refreshToken } = useAuthStore();
+  const { user } = useAuthStore();
   const pathname = useRouterState({ select: (s) => s.location.pathname });
   const { settings } = usePublicSettings();
 
   const handleLogout = async () => {
-    try {
-      if (refreshToken) await api.post('/auth/logout', { refreshToken });
-    } catch {}
-    clearAuth();
-    // __root.tsx useEffect handles redirect to /login when user becomes null
+    await terminateBrowserSession();
   };
 
   const userCaps = new Set(user?.capabilities ?? []);

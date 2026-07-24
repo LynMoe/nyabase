@@ -10,11 +10,16 @@ import {
   LABEL,
   isDirectWsCommandKind,
   zAgentBootstrapPayload,
+  zAgentBootstrapResult,
+  zCommandAckPayload,
   zExecClosePayload,
   zExecInputPayload,
   zExecResizePayload,
   zExecStreamPayload,
   zInspectContainerPayload,
+  zInspectContainerResult,
+  zReconcilePayload,
+  zSelfCheckResult,
 } from '@nyabase/common';
 import type { AgentConfig } from '../config.js';
 import type { DockerClient } from '../docker/docker-client.js';
@@ -27,7 +32,7 @@ const execFileAsync = promisify(execFile);
 
 type ExecHandles = {
   kill(): Promise<void>;
-  resize(cols: number, rows: number): void;
+  resize(cols: number, rows: number): Promise<void>;
   write(data: string): boolean;
 };
 
@@ -36,6 +41,7 @@ type ExecSession = {
   generation: number;
   runtimeId: string;
   closing: Promise<void> | null;
+  controlTail: Promise<void>;
 };
 
 type PendingExecSession = {
@@ -75,6 +81,7 @@ export class DirectCommandDispatcher {
       previousIds: readonly string[],
     ) => void,
     private readonly beforeAgentBootstrap?: () => Promise<void>,
+    private readonly assertRuntimePhysicalEnvironment: () => Promise<void> = async () => undefined,
   ) {}
 
   async handle(message: BackendToAgentMessage): Promise<void> {
@@ -92,7 +99,7 @@ export class DirectCommandDispatcher {
         commandId,
         false,
         undefined,
-        error instanceof Error ? error.message : String(error),
+        (error instanceof Error ? error.message : String(error)).slice(0, 2048) || 'Direct RPC failed',
         requestGeneration,
       );
     }
@@ -184,7 +191,7 @@ export class DirectCommandDispatcher {
   private async execute(kind: string, payload: unknown, commandId: string): Promise<unknown | typeof HANDLED> {
     switch (kind) {
       case 'execStream':
-        await this.openExec(commandId, zExecStreamPayload.parse(payload));
+        this.openExec(commandId, zExecStreamPayload.parse(payload));
         return HANDLED;
       case 'execResize': {
         const parsed = zExecResizePayload.parse(payload);
@@ -193,7 +200,11 @@ export class DirectCommandDispatcher {
           session
           && session.generation === this.connectionGeneration
           && session.closing === null
-        ) session.handles.resize(parsed.cols, parsed.rows);
+        ) {
+          await this.enqueueActiveExecControl(parsed.sessionId, session, async () => {
+            await session.handles.resize(parsed.cols, parsed.rows);
+          });
+        }
         else {
           const pending = this.pendingExecSessions.get(parsed.sessionId);
           if (
@@ -212,10 +223,11 @@ export class DirectCommandDispatcher {
           && session.generation === this.connectionGeneration
           && session.closing === null
         ) {
-          if (session.handles.write(parsed.data) === false) {
-            await this.closeExecSession(parsed.sessionId, session);
-            throw new Error(`Exec session ${parsed.sessionId} exceeded stdin backpressure`);
-          }
+          await this.enqueueActiveExecControl(parsed.sessionId, session, async () => {
+            if (session.handles.write(parsed.data) === false) {
+              throw new Error(`Exec session ${parsed.sessionId} exceeded stdin backpressure`);
+            }
+          });
         }
         else {
           const pending = this.pendingExecSessions.get(parsed.sessionId);
@@ -251,55 +263,64 @@ export class DirectCommandDispatcher {
         }
         return HANDLED;
       }
-      case 'reconcile':
-        this.ws.emit('reconcile');
+      case 'reconcile': {
+        const parsed = zReconcilePayload.parse(payload);
+        if (parsed.serverId !== this.config.serverId) {
+          throw new Error('Reconcile server identity mismatch');
+        }
+        this.ws.emit('reconcile', parsed);
         return HANDLED;
+      }
       case 'inspectContainer': {
         const parsed = zInspectContainerPayload.parse(payload);
-        const info = await this.docker.inspectContainer(parsed.runtimeId);
-        const labels = info.Config?.Labels ?? {};
-        if (info.Id !== parsed.runtimeId) {
-          throw new Error(`Runtime identity mismatch for ${parsed.runtimeId}`);
-        }
-        if (
-          labels[LABEL.MANAGED] !== 'true'
-          || labels[LABEL.CONTAINER_ID] !== parsed.containerId
-          || labels[LABEL.SERVER_ID] !== this.config.serverId
-        ) {
-          throw new Error(`Container ${parsed.runtimeId} is not the requested managed container`);
-        }
-        const graph = await this.docker.getGraphDriverDirs(parsed.runtimeId);
-        const graphPaths = Array.from(new Set([graph.upperDir, graph.workDir]
-          .map((value) => value.trim())
-          .filter(Boolean)));
-        return {
-          runtimeId: info.Id,
-          startedAt: info.State.StartedAt,
-          running: Boolean(info.State.Running),
-          graphPaths,
-        };
+        return this.withRuntimePhysicalGuard(async () => {
+          const info = await this.docker.inspectContainer(parsed.runtimeId);
+          const labels = info.Config?.Labels ?? {};
+          if (info.Id !== parsed.runtimeId) {
+            throw new Error(`Runtime identity mismatch for ${parsed.runtimeId}`);
+          }
+          if (
+            labels[LABEL.MANAGED] !== 'true'
+            || labels[LABEL.CONTAINER_ID] !== parsed.containerId
+            || labels[LABEL.SERVER_ID] !== this.config.serverId
+          ) {
+            throw new Error(`Container ${parsed.runtimeId} is not the requested managed container`);
+          }
+          const graph = await this.docker.getGraphDriverDirs(parsed.runtimeId);
+          const graphPaths = Array.from(new Set([graph.upperDir, graph.workDir]
+            .map((value) => value.trim())
+            .filter(Boolean)));
+          return zInspectContainerResult.parse({
+            runtimeId: info.Id,
+            startedAt: info.State.StartedAt,
+            running: Boolean(info.State.Running),
+            graphPaths,
+          });
+        });
       }
       case 'agent.bootstrap.v1': {
         const parsed = zAgentBootstrapPayload.parse(payload);
         await this.beforeAgentBootstrap?.();
         const previousIds = this.remoteFsMounter.getAllSpecs().map((spec) => spec.id);
         const remoteFsMounts = await this.remoteFsMounter.adoptSnapshot(parsed.remoteFsMounts);
+        const result = zAgentBootstrapResult.parse({ remoteFsMounts });
         const activeSpecs = parsed.remoteFsMounts.map((spec) => {
           const active = this.remoteFsMounter.getSpec(spec.id);
           if (!active) throw new Error(`RemoteFS bootstrap lost active spec ${spec.id}`);
           return active;
         });
         this.onRemoteFsSnapshot?.(activeSpecs, previousIds);
-        return { remoteFsMounts };
+        return result;
       }
       case 'selfCheck':
-        return this.selfCheck();
+        return this.withRuntimePhysicalGuard(async () =>
+          zSelfCheckResult.parse(await this.selfCheck()));
       default:
         throw new Error(`Unsupported direct RPC ${kind}`);
     }
   }
 
-  private async openExec(commandId: string, payload: ReturnType<typeof zExecStreamPayload.parse>): Promise<void> {
+  private openExec(commandId: string, payload: ReturnType<typeof zExecStreamPayload.parse>): void {
     if (this.runtimeTaskFences.has(payload.runtimeId)) {
       throw new Error(`Runtime ${payload.runtimeId} is fenced by a durable task`);
     }
@@ -315,40 +336,133 @@ export class DirectCommandDispatcher {
       payload.runtimeId,
       openingGeneration,
     );
-    this.ack(commandId, true, { sessionId: payload.sessionId }, undefined, openingGeneration);
     let activeSession: ExecSession | null = null;
+    let published = false;
+    let bufferedOutputChars = 0;
+    let outputOverflow = false;
+    const bufferedEvents: Array<() => void> = [];
+    const publishOrBuffer = (size: number, event: () => void): void => {
+      if (published) {
+        event();
+        return;
+      }
+      if (
+        outputOverflow
+        || bufferedEvents.length >= MAX_PENDING_INPUT_CHUNKS
+        || bufferedOutputChars + size > MAX_PENDING_INPUT_CHARS
+      ) {
+        outputOverflow = true;
+        bufferedEvents.length = 0;
+        bufferedOutputChars = 0;
+        return;
+      }
+      bufferedOutputChars += size;
+      bufferedEvents.push(event);
+    };
     const opening = (async () => {
       let handles: ExecHandles | null = null;
       try {
-        handles = await this.docker.exec(
-          payload.runtimeId,
-          payload.cmd,
-          payload.tty,
-          (data, isErr) => {
-            if (openingGeneration !== this.connectionGeneration) return;
-            this.ws.send({
-              id: uuidv4(), ts: Date.now(), kind: 'logChunk',
-              payload: { sessionId: payload.sessionId, data, stderr: isErr },
-            });
-          },
-          (exitCode) => {
-            // Docker invokes onEnd only after its physical exit barrier. Owner
-            // cleanup is identity-guarded so an old callback cannot delete a
-            // replacement session with the same external ID.
+        await this.assertRuntimePhysicalEnvironment();
+        let openError: unknown;
+        try {
+          handles = await this.docker.exec(
+            payload.runtimeId,
+            payload.cmd,
+            payload.tty,
+            (data, isErr) => publishOrBuffer(data.length, () => {
+              if (openingGeneration !== this.connectionGeneration) return;
+              this.ws.send({
+                id: uuidv4(), ts: Date.now(), kind: 'logChunk',
+                payload: { sessionId: payload.sessionId, data, stderr: isErr },
+              });
+            }),
+            (exitCode) => publishOrBuffer(0, () => {
+              // Docker invokes onEnd only after its physical exit barrier. Owner
+              // cleanup is identity-guarded so an old callback cannot delete a
+              // replacement session with the same external ID.
+              if (this.pendingExecSessions.get(payload.sessionId) === reservation) {
+                this.pendingExecSessions.delete(payload.sessionId);
+              }
+              if (activeSession && this.execSessions.get(payload.sessionId) === activeSession) {
+                this.execSessions.delete(payload.sessionId);
+              }
+              if (openingGeneration !== this.connectionGeneration) return;
+              this.ws.send({
+                id: uuidv4(), ts: Date.now(), kind: 'logChunk',
+                payload: { sessionId: payload.sessionId, data: '', eof: true, exitCode },
+              });
+            }),
+            (closeBarrier) => this.trackPhysicalExecWork(closeBarrier),
+          );
+        } catch (error) {
+          openError = error;
+        }
+        if (openError || !handles) {
+          // The post-sample is mandatory even when Docker rejected the open.
+          await this.assertRuntimePhysicalEnvironment();
+          if (openError) throw openError;
+          throw new Error('Docker exec returned no session handles');
+        }
+
+        let initialResize = payload.cols && payload.rows
+          ? { cols: payload.cols, rows: payload.rows }
+          : undefined;
+        // Controls may arrive while Docker open/resize or the daemon sample is
+        // pending. Drain every pre-publication control, then sample. If another
+        // control arrived during that await, repeat. The final empty check and
+        // session-map publication are synchronous, so no admitted Docker RPC or
+        // attach-stream write can escape the success acknowledgement.
+        while (true) {
+          if (
+            openingGeneration !== this.connectionGeneration
+            || reservation.close
+            || this.pendingExecSessions.get(payload.sessionId) !== reservation
+          ) {
+            await this.assertRuntimePhysicalEnvironment();
+            await handles.kill();
             if (this.pendingExecSessions.get(payload.sessionId) === reservation) {
               this.pendingExecSessions.delete(payload.sessionId);
             }
-            if (activeSession && this.execSessions.get(payload.sessionId) === activeSession) {
-              this.execSessions.delete(payload.sessionId);
+            if (openingGeneration === this.connectionGeneration) {
+              this.ack(
+                commandId,
+                false,
+                undefined,
+                `Exec session ${payload.sessionId} was closed before opening`,
+                openingGeneration,
+              );
             }
-            if (openingGeneration !== this.connectionGeneration) return;
-            this.ws.send({
-              id: uuidv4(), ts: Date.now(), kind: 'logChunk',
-              payload: { sessionId: payload.sessionId, data: '', eof: true, exitCode },
-            });
-          },
-          (closeBarrier) => this.trackPhysicalExecWork(closeBarrier),
-        );
+            return;
+          }
+          if (outputOverflow) {
+            await this.assertRuntimePhysicalEnvironment();
+            throw new Error('Exec emitted too much output before physical identity verification');
+          }
+
+          const resize = reservation.resize ?? initialResize;
+          reservation.resize = undefined;
+          initialResize = undefined;
+          const inputs = reservation.inputs.splice(0);
+          reservation.inputChars = 0;
+          let controlError: unknown;
+          try {
+            if (resize) await handles.resize(resize.cols, resize.rows);
+            for (const input of inputs) {
+              if (handles.write(input) === false) {
+                throw new Error(
+                  `Exec session ${payload.sessionId} exceeded stdin backpressure while opening`,
+                );
+              }
+            }
+          } catch (error) {
+            controlError = error;
+          }
+          // Mandatory after both successful and failed Docker/control work.
+          await this.assertRuntimePhysicalEnvironment();
+          if (controlError) throw controlError;
+          if (reservation.resize || reservation.inputs.length > 0) continue;
+          break;
+        }
 
         if (
           openingGeneration !== this.connectionGeneration
@@ -359,6 +473,15 @@ export class DirectCommandDispatcher {
           if (this.pendingExecSessions.get(payload.sessionId) === reservation) {
             this.pendingExecSessions.delete(payload.sessionId);
           }
+          if (openingGeneration === this.connectionGeneration) {
+            this.ack(
+              commandId,
+              false,
+              undefined,
+              `Exec session ${payload.sessionId} was closed before opening`,
+              openingGeneration,
+            );
+          }
           return;
         }
 
@@ -367,36 +490,26 @@ export class DirectCommandDispatcher {
           generation: openingGeneration,
           runtimeId: payload.runtimeId,
           closing: null,
+          controlTail: Promise.resolve(),
         };
         this.pendingExecSessions.delete(payload.sessionId);
         this.execSessions.set(payload.sessionId, activeSession);
-        const resize = reservation.resize ?? (payload.cols && payload.rows
-          ? { cols: payload.cols, rows: payload.rows }
-          : undefined);
-        if (resize) handles.resize(resize.cols, resize.rows);
-        for (const input of reservation.inputs) {
-          if (handles.write(input) === false) {
-            await this.closeExecSession(payload.sessionId, activeSession);
-            return;
-          }
-        }
+        published = true;
+        this.ack(commandId, true, { sessionId: payload.sessionId }, undefined, openingGeneration);
+        for (const event of bufferedEvents) event();
+        bufferedEvents.length = 0;
       } catch (error) {
         if (handles) {
           // Once a handle exists, only its physical completion callback may
           // release the owner. A non-settling kill is intentional fail-stop.
           await handles.kill();
-          return;
         }
         if (this.pendingExecSessions.get(payload.sessionId) === reservation) {
           this.pendingExecSessions.delete(payload.sessionId);
         }
         if (openingGeneration !== this.connectionGeneration) return;
         const message = error instanceof Error ? error.message : String(error);
-        const data = Buffer.from(`\r\n\u001b[31m[exec error: ${message}]\u001b[0m\r\n`).toString('base64');
-        this.ws.send({
-          id: uuidv4(), ts: Date.now(), kind: 'logChunk',
-          payload: { sessionId: payload.sessionId, data, eof: true, exitCode: -1 },
-        });
+        this.ack(commandId, false, undefined, message.slice(0, 2048), openingGeneration);
       }
     })();
     reservation.opening = opening;
@@ -407,6 +520,61 @@ export class DirectCommandDispatcher {
       this.physicalExecFailure ??= error;
       console.error(`[DirectRPC] Exec ${payload.sessionId} physical close failed:`, error);
     });
+  }
+
+  private async withRuntimePhysicalGuard<T>(operation: () => Promise<T>): Promise<T> {
+    await this.assertRuntimePhysicalEnvironment();
+    try {
+      return await operation();
+    } finally {
+      await this.assertRuntimePhysicalEnvironment();
+    }
+  }
+
+  private enqueueActiveExecControl(
+    sessionId: string,
+    session: ExecSession,
+    operation: () => Promise<void>,
+  ): Promise<void> {
+    const admitted = session.controlTail
+      .catch(() => undefined)
+      .then(async () => {
+        try {
+          await this.assertRuntimePhysicalEnvironment();
+          if (!this.isActiveExecOwner(sessionId, session)) return;
+
+          let operationError: unknown;
+          try {
+            await operation();
+          } catch (error) {
+            operationError = error;
+          }
+          let postSampleError: unknown;
+          try {
+            await this.assertRuntimePhysicalEnvironment();
+          } catch (error) {
+            postSampleError = error;
+          }
+          if (postSampleError) throw postSampleError;
+          if (operationError) throw operationError;
+        } catch (error) {
+          if (this.execSessions.get(sessionId) === session && session.closing === null) {
+            await this.closeExecSession(sessionId, session);
+          } else if (session.closing) {
+            await session.closing;
+          }
+          throw error;
+        }
+      });
+    session.controlTail = admitted.then(() => undefined, () => undefined);
+    this.trackPhysicalExecBarrier(session.controlTail);
+    return admitted;
+  }
+
+  private isActiveExecOwner(sessionId: string, session: ExecSession): boolean {
+    return this.execSessions.get(sessionId) === session
+      && session.generation === this.connectionGeneration
+      && session.closing === null;
   }
 
   private pendingExec(
@@ -456,6 +624,14 @@ export class DirectCommandDispatcher {
     );
   }
 
+  /** Track a bounded control even when its caller receives a clean RPC error. */
+  private trackPhysicalExecBarrier(work: Promise<void>): void {
+    this.physicalExecWork.add(work);
+    void work.finally(() => {
+      this.physicalExecWork.delete(work);
+    });
+  }
+
   private ack(
     commandId: string,
     ok: boolean,
@@ -464,11 +640,17 @@ export class DirectCommandDispatcher {
     expectedGeneration = this.connectionGeneration,
   ): void {
     if (!commandId || expectedGeneration !== this.connectionGeneration) return;
+    const payload = zCommandAckPayload.parse({
+      commandId,
+      ok,
+      ...(data !== undefined ? { data } : {}),
+      ...(error ? { error } : {}),
+    });
     this.ws.send({
       id: uuidv4(),
       ts: Date.now(),
       kind: 'commandAck',
-      payload: { commandId, ok, ...(data !== undefined ? { data } : {}), ...(error ? { error } : {}) },
+      payload,
     } as AgentToBackendMessage);
   }
 

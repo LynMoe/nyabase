@@ -1,6 +1,6 @@
 import { DataSource } from 'typeorm';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { GpuGrantMode, ServerStatus, UserStatus } from '@nyabase/common';
+import { AuditAction, GpuGrantMode, ServerStatus, UserStatus } from '@nyabase/common';
 import { ResourceKeyService } from '../../agent-tasks/resource-key.service.js';
 import { ContainerDesiredSpecEntity } from '../../entities/container-desired-spec.entity.js';
 import { ContainerEntity } from '../../entities/container.entity.js';
@@ -20,6 +20,7 @@ describe('ContainerControlService SSH generation fence', () => {
   let dataSource: DataSource;
   let identities: SshIdentityService;
   let control: ContainerControlService;
+  let audit: { log: ReturnType<typeof vi.fn> };
   const capturedPayloads: Array<Record<string, unknown>> = [];
 
   beforeEach(async () => {
@@ -145,6 +146,7 @@ describe('ContainerControlService SSH generation fence', () => {
       get: vi.fn().mockReturnValue({ gpus: [] }),
       getAll: vi.fn().mockReturnValue([]),
     };
+    audit = { log: vi.fn().mockResolvedValue(undefined) };
     control = new ContainerControlService(
       dataSource,
       access as never,
@@ -164,9 +166,11 @@ describe('ContainerControlService SSH generation fence', () => {
       {} as never,
       { stateCache, isOnline: vi.fn().mockReturnValue(true) } as never,
       {} as never,
+      { isAuthorizedForAdmission: vi.fn().mockResolvedValue(true) } as never,
       {} as never,
       identities,
       {} as never,
+      audit as never,
     );
   });
 
@@ -193,7 +197,7 @@ describe('ContainerControlService SSH generation fence', () => {
       name: 'work',
     });
     await outerReadDone;
-    await identities.rotateUserKey('user-a', 'admin-a');
+    await identities.rotateUserKey('user-a', 'admin-a', async () => undefined);
     releaseOuterRead();
 
     await expect(firstCreate).rejects.toThrow(/rotated while creating/i);
@@ -213,6 +217,14 @@ describe('ContainerControlService SSH generation fence', () => {
         },
       }),
     ]);
+    expect(audit.log).toHaveBeenCalledOnce();
+    expect(audit.log).toHaveBeenCalledWith(
+      'user-a',
+      AuditAction.CreateContainer,
+      expect.any(String),
+      'container',
+      expect.objectContaining({ taskId: 'task-1', serverId: 'server-a', imageId: 'image-a' }),
+    );
   });
 
   it.each([

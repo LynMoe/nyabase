@@ -73,9 +73,24 @@ describe('resolveGpuIndices', () => {
     it('deduplicates and sorts granted indices', () => {
       const result = resolveGpuIndices(
         makeGrant({ gpuMode: GpuGrantMode.Indices, gpuIndices: [3, 1, 3] }),
-        [],
+        [0, 1, 2, 3],
       );
       expect(result).toEqual([1, 3]);
+    });
+
+    it('rejects empty, unavailable, and nonexistent granted indices', () => {
+      expect(() => resolveGpuIndices(
+        makeGrant({ gpuMode: GpuGrantMode.Indices, gpuIndices: [] }),
+        [0],
+      )).toThrow('At least one GPU index');
+      expect(() => resolveGpuIndices(
+        makeGrant({ gpuMode: GpuGrantMode.Indices, gpuIndices: [0] }),
+        [],
+      )).toThrow('GPU inventory unavailable');
+      expect(() => resolveGpuIndices(
+        makeGrant({ gpuMode: GpuGrantMode.Indices, gpuIndices: [2] }),
+        [0, 1],
+      )).toThrow('GPU index 2 is not present');
     });
   });
 });

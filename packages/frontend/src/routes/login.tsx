@@ -1,4 +1,4 @@
-import { createFileRoute, useNavigate } from '@tanstack/react-router';
+import { createFileRoute } from '@tanstack/react-router';
 import { useEffect, useState } from 'react';
 import { api } from '../lib/api.js';
 import { useAuthStore } from '../store/auth.js';
@@ -7,21 +7,23 @@ import { Input } from '../components/ui/input.js';
 import { Label } from '../components/ui/label.js';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '../components/ui/card.js';
 import { toast } from '../hooks/use-toast.js';
-import { zLoginRequest, type LoginResponse } from '@nyabase/common';
+import { zLoginRequest } from '@nyabase/common';
 import { usePublicSettings } from '../hooks/use-public-settings.js';
+import { sanitizeInternalRedirect } from '../lib/internal-redirect.js';
 
 function LoginPage() {
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
   const [fieldErr, setFieldErr] = useState<{ username?: string; password?: string }>({});
   const [loading, setLoading] = useState(false);
-  const { setAuth, user } = useAuthStore();
-  const navigate = useNavigate();
+  const { user, status } = useAuthStore();
+  const { redirect, reason } = Route.useSearch();
+  const safeRedirect = sanitizeInternalRedirect(redirect);
   const { settings } = usePublicSettings();
 
   useEffect(() => {
-    if (user) navigate({ to: '/', replace: true });
-  }, [user, navigate]);
+    if (user && status === 'authenticated') window.location.replace(safeRedirect);
+  }, [user, status, safeRedirect]);
 
   const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -38,9 +40,8 @@ function LoginPage() {
     setFieldErr({});
     setLoading(true);
     try {
-      const res = await api.post<LoginResponse>('/auth/login', parsed.data);
-      setAuth(res.accessToken, res.refreshToken, res.user);
-      navigate({ to: '/', replace: true });
+      await api.login(parsed.data);
+      window.location.replace(safeRedirect);
     } catch (err) {
       toast({
         title: '登录失败',
@@ -60,6 +61,13 @@ function LoginPage() {
           <CardDescription>{settings.branding.description}</CardDescription>
         </CardHeader>
         <CardContent>
+          {reason && (
+            <div className="mb-4 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-800">
+              {reason === 'password-changed'
+                ? '密码已变更，原会话已安全结束。请使用新密码登录。'
+                : '账号状态已变更，原会话已安全结束。请重新登录。'}
+            </div>
+          )}
           <form onSubmit={handleLogin} className="space-y-4">
             <div className="space-y-2">
               <Label htmlFor="username">用户名</Label>
@@ -97,4 +105,12 @@ function LoginPage() {
   );
 }
 
-export const Route = createFileRoute('/login')({ component: LoginPage });
+export const Route = createFileRoute('/login')({
+  validateSearch: (search: Record<string, unknown>) => ({
+    redirect: sanitizeInternalRedirect(search.redirect),
+    reason: search.reason === 'password-changed' || search.reason === 'account-changed'
+      ? search.reason
+      : undefined,
+  }),
+  component: LoginPage,
+});

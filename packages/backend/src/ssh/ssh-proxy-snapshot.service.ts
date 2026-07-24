@@ -47,8 +47,11 @@ export class SshProxySnapshotService {
    * Read every table under one database-coordinator lease. A proxy snapshot is
    * either wholly before or wholly after a key rotation/report transaction;
    * it can never combine a new desired key with an old route as a usable row.
-   */
+  */
   async buildSnapshot(): Promise<SshProxySnapshot> {
+    // Initial host-key generation may invoke several ssh-keygen subprocesses;
+    // ensure it completes before acquiring the snapshot transaction lease.
+    await this.identities.ensureProxyHostKey();
     return runSerializedTransaction(this.dataSource, async (manager) => {
       const users = await manager.find(UserEntity, {
         where: { status: UserStatus.Active },
@@ -89,7 +92,7 @@ export class SshProxySnapshotService {
           }),
         manager.find(ContainerMountEntity, { where: { sourceKind: 'remote' } }),
         manager.find(RemoteFsServerAssignmentEntity),
-        this.identities.ensureProxyHostKeyInTransaction(manager),
+        this.identities.getProxyHostKeyInTransaction(manager),
       ]);
 
       const publicKeysByUser = new Map<string, string[]>();

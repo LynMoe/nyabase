@@ -18,7 +18,7 @@ import { CurrentUser } from '../auth/decorators/current-user.decorator.js';
 import { UserEntity } from '../entities/user.entity.js';
 import {
   Capability,
-  zCreateGroupRequest, zUpdateGroupRequest, zUpsertServerGrantRequest,
+  zCreateGroupRequest, zUpdateAdminGroupRequest, zUpsertServerGrantRequest,
   zAddGroupMemberRequest, zAddImageGrantRequest, zSyncImageGrantServersRequest,
 } from '@nyabase/common';
 import {
@@ -54,8 +54,8 @@ export class GroupsController {
   @Patch(':id')
   @RequireCaps(Capability.ManageGroups)
   async update(@Param('id') id: string, @Body() body: unknown, @CurrentUser() user: UserEntity) {
-    const dto = zUpdateGroupRequest.parse(body);
-    return this.groupsService.update(id, dto, user.id);
+    const { expectedRevision, ...dto } = zUpdateAdminGroupRequest.parse(body);
+    return this.groupsService.update(id, dto, user.id, expectedRevision);
   }
 
   @Delete(':id')
@@ -131,9 +131,10 @@ export class GroupsController {
   async addImageGrant(
     @Param('id') id: string,
     @Body() body: unknown,
+    @CurrentUser() actor: UserEntity,
   ) {
     const { imageId, serverId } = zAddImageGrantRequest.parse(body);
-    return this.groupsService.addGroupImageGrant(id, imageId, serverId);
+    return this.groupsService.addGroupImageGrant(id, imageId, serverId, actor.id);
   }
 
   /** Bulk-sync image grants for a specific image across a set of servers */
@@ -143,9 +144,10 @@ export class GroupsController {
     @Param('id') id: string,
     @Param('imageId') imageId: string,
     @Body() body: unknown,
+    @CurrentUser() actor: UserEntity,
   ) {
     const { serverIds } = zSyncImageGrantServersRequest.parse(body);
-    return this.groupsService.syncGroupImageGrantsForServers(id, imageId, serverIds);
+    return this.groupsService.syncGroupImageGrantsForServers(id, imageId, serverIds, actor.id);
   }
 
   @Delete(':id/image-grants/:imageId/:serverId')
@@ -155,8 +157,9 @@ export class GroupsController {
     @Param('id') id: string,
     @Param('imageId') imageId: string,
     @Param('serverId') serverId: string,
+    @CurrentUser() actor: UserEntity,
   ) {
-    await this.groupsService.deleteGroupImageGrant(id, imageId, serverId);
+    await this.groupsService.deleteGroupImageGrant(id, imageId, serverId, actor.id);
   }
 
   // ---------------------------------------------------------------------------

@@ -1,12 +1,20 @@
 use std::collections::HashMap;
+use std::ffi::OsString;
+use std::fs::OpenOptions;
 use std::future::Future;
-use std::io::BufReader;
+use std::io::{BufReader, Read};
 use std::net::SocketAddr;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+#[cfg(unix)]
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+
 use anyhow::{anyhow, Context, Result};
+use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
+use base64::Engine;
 use futures_util::{SinkExt, StreamExt};
 use rustls::pki_types::CertificateDer;
 use rustls::server::{ClientHello, ResolvesServerCert};
@@ -18,15 +26,18 @@ use tokio::sync::{mpsc, watch, OwnedSemaphorePermit, Semaphore};
 use tokio::task::JoinSet;
 use tokio::time;
 use tokio_rustls::TlsAcceptor;
-use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::Error as WebSocketError;
 use tokio_tungstenite::tungstenite::Message;
+use tokio_tungstenite::{connect_async_tls_with_config, Connector};
 use tracing::{debug, info, warn};
 
 const MAX_REQUEST_HEADER_BYTES: usize = 64 * 1024;
+const MAX_UPSTREAM_UPGRADE_HEADER_BYTES: usize = 64 * 1024;
 const MAX_REQUEST_BODY_BYTES: usize = 16 * 1024 * 1024;
 const REQUEST_HEADER_DEADLINE: Duration = Duration::from_secs(10);
+const UPSTREAM_CONNECT_DEADLINE: Duration = Duration::from_secs(10);
+const UPSTREAM_UPGRADE_HEADER_DEADLINE: Duration = Duration::from_secs(10);
 const REQUEST_LIFETIME_DEADLINE: Duration = Duration::from_secs(120);
 const CONTROL_WRITE_DEADLINE: Duration = Duration::from_secs(5);
 const TLS_HANDSHAKE_DEADLINE: Duration = Duration::from_secs(10);
@@ -40,10 +51,12 @@ const MAX_STATUS_INTERVAL_MS: u64 = 60_000;
 // connection cap deliberately small so the worst-case resident set remains
 // finite and operationally reasonable without another buffering subsystem.
 const MAX_ACTIVE_CONNECTIONS: usize = 32;
+const MAX_BACKEND_CA_PEM_BYTES: u64 = 1024 * 1024;
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 struct Config {
     backend_ws: String,
+    backend_tls: Option<Arc<rustls::ClientConfig>>,
     token: String,
     http_listen: String,
     https_listen: Option<String>,
@@ -56,7 +69,9 @@ impl Config {
     fn from_env() -> Result<Self> {
         let backend_ws = std::env::var("NYABASE_BACKEND_WS")
             .unwrap_or_else(|_| "ws://127.0.0.1:3000/ws/http-proxy".to_string());
-        let token = required_control_token("HTTP_PROXY_TOKEN")?;
+        let backend_tls = backend_tls_config_from_env("NYABASE_BACKEND_CA_FILE")?;
+        validate_backend_ws_url(&backend_ws, backend_tls.is_some())?;
+        let token = required_control_token("HTTP_PROXY_TOKEN", "HTTP_PROXY_TOKEN_FILE")?;
         let http_listen =
             std::env::var("NYABASE_HTTP_LISTEN").unwrap_or_else(|_| "0.0.0.0:8080".to_string());
         let https_listen = std::env::var("NYABASE_HTTPS_LISTEN")
@@ -72,6 +87,7 @@ impl Config {
             validate_status_interval(env_u64("NYABASE_HTTP_STATUS_INTERVAL_MS", 1_000)?)?;
         Ok(Self {
             backend_ws,
+            backend_tls,
             token,
             http_listen,
             https_listen,
@@ -656,11 +672,13 @@ async fn connect_control(
     runtime: &Arc<Runtime>,
     status_rx: &mut mpsc::Receiver<String>,
 ) -> Result<()> {
+    validate_backend_ws_url(&config.backend_ws, config.backend_tls.is_some())?;
     let mut request = config.backend_ws.clone().into_client_request()?;
     request
         .headers_mut()
         .insert("Authorization", format!("Bearer {}", config.token).parse()?);
-    let (ws, _) = connect_async(request).await?;
+    let connector = config.backend_tls.clone().map(Connector::Rustls);
+    let (ws, _) = connect_async_tls_with_config(request, None, false, connector).await?;
     runtime.connected_at.store(now_ms(), Ordering::Relaxed);
     let (mut write, mut read) = ws.split();
     loop {
@@ -902,10 +920,30 @@ where
 }
 
 async fn handle_connection<S>(
+    inbound: S,
+    peer: SocketAddr,
+    store: Arc<SnapshotStore>,
+    runtime: Arc<Runtime>,
+) -> Result<()>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    handle_connection_with_fixed_request_deadline(
+        inbound,
+        peer,
+        store,
+        runtime,
+        REQUEST_LIFETIME_DEADLINE,
+    )
+    .await
+}
+
+async fn handle_connection_with_fixed_request_deadline<S>(
     mut inbound: S,
     _peer: SocketAddr,
     store: Arc<SnapshotStore>,
     runtime: Arc<Runtime>,
+    fixed_request_deadline: Duration,
 ) -> Result<()>
 where
     S: AsyncRead + AsyncWrite + Unpin,
@@ -937,7 +975,8 @@ where
         return Ok(());
     }
 
-    let proxy = proxy_single_request(
+    let is_websocket = matches!(&plan.mode, RequestMode::WebSocket { .. });
+    let proxy = proxy_request(
         &mut inbound,
         &runtime,
         &authorization.route,
@@ -945,15 +984,29 @@ where
         header_end,
         plan,
     );
-    tokio::select! {
-        biased;
-        _ = wait_until_route_revoked(&store, &authorization, &mut changes) => {
-            return Err(anyhow!("HTTP route authorization was revoked"));
+    if is_websocket {
+        // An upgraded tunnel is a connection, not a bounded HTTP request.
+        // Its connect/handshake stages retain their own deadlines, while the
+        // established relay remains governed by route lease/revocation and
+        // peer EOF rather than the ordinary request lifetime.
+        tokio::select! {
+            biased;
+            _ = wait_until_route_revoked(&store, &authorization, &mut changes) => {
+                return Err(anyhow!("HTTP route authorization was revoked"));
+            }
+            result = proxy => result?,
         }
-        result = time::timeout(REQUEST_LIFETIME_DEADLINE, proxy) => {
-            match result {
-                Ok(result) => result?,
-                Err(_) => return Err(anyhow!("request lifetime deadline exceeded")),
+    } else {
+        tokio::select! {
+            biased;
+            _ = wait_until_route_revoked(&store, &authorization, &mut changes) => {
+                return Err(anyhow!("HTTP route authorization was revoked"));
+            }
+            result = time::timeout(fixed_request_deadline, proxy) => {
+                match result {
+                    Ok(result) => result?,
+                    Err(_) => return Err(anyhow!("request lifetime deadline exceeded")),
+                }
             }
         }
     }
@@ -992,7 +1045,12 @@ fn find_header_end(bytes: &[u8]) -> Option<usize> {
 struct RequestPlan {
     host: String,
     header: Vec<u8>,
-    body_len: usize,
+    mode: RequestMode,
+}
+
+enum RequestMode {
+    FixedBody { body_len: usize },
+    WebSocket { expected_accept: String },
 }
 
 fn request_plan(header: &[u8]) -> Result<RequestPlan> {
@@ -1016,6 +1074,13 @@ fn request_plan(header: &[u8]) -> Result<RequestPlan> {
     let mut content_length = None;
     let mut host_count = 0;
     let mut host = None;
+    let mut connection = None;
+    let mut upgrade = None;
+    let mut websocket_key = None;
+    let mut websocket_version = None;
+    let mut websocket_protocol_seen = false;
+    let mut websocket_extensions_seen = false;
+    let mut websocket_header_seen = false;
     let mut rewritten = format!("{request_line}\r\n");
     for line in lines {
         if line.is_empty() {
@@ -1025,15 +1090,15 @@ fn request_plan(header: &[u8]) -> Result<RequestPlan> {
         if !is_http_token(name) {
             return Err(anyhow!("malformed request header name"));
         }
+        if invalid_header_value(value) {
+            return Err(anyhow!("malformed request header value"));
+        }
         if name.eq_ignore_ascii_case("host") {
             host_count += 1;
             host = Some(normalize_host_authority(value)?);
         }
-        if name.eq_ignore_ascii_case("upgrade")
-            || name.eq_ignore_ascii_case("transfer-encoding")
-            || name.eq_ignore_ascii_case("expect")
-        {
-            return Err(anyhow!("streaming and upgraded requests are disabled"));
+        if name.eq_ignore_ascii_case("transfer-encoding") || name.eq_ignore_ascii_case("expect") {
+            return Err(anyhow!("streaming request bodies are disabled"));
         }
         if name.eq_ignore_ascii_case("content-length") {
             if content_length.is_some() {
@@ -1049,9 +1114,54 @@ fn request_plan(header: &[u8]) -> Result<RequestPlan> {
             }
             content_length = Some(parsed);
         }
-        if name.eq_ignore_ascii_case("connection")
-            || name.eq_ignore_ascii_case("proxy-connection")
-            || name.eq_ignore_ascii_case("keep-alive")
+        if name.eq_ignore_ascii_case("connection") {
+            if connection.replace(value.trim().to_string()).is_some() {
+                return Err(anyhow!("duplicate Connection header"));
+            }
+            continue;
+        }
+        if name.eq_ignore_ascii_case("upgrade") {
+            if upgrade.replace(value.trim().to_string()).is_some() {
+                return Err(anyhow!("duplicate Upgrade header"));
+            }
+            websocket_header_seen = true;
+            continue;
+        }
+        if name.eq_ignore_ascii_case("sec-websocket-key") {
+            if websocket_key.replace(value.trim().to_string()).is_some() {
+                return Err(anyhow!("duplicate Sec-WebSocket-Key header"));
+            }
+            websocket_header_seen = true;
+        }
+        if name.eq_ignore_ascii_case("sec-websocket-version") {
+            if websocket_version
+                .replace(value.trim().to_string())
+                .is_some()
+            {
+                return Err(anyhow!("duplicate Sec-WebSocket-Version header"));
+            }
+            websocket_header_seen = true;
+        }
+        if name.eq_ignore_ascii_case("sec-websocket-protocol") {
+            if websocket_protocol_seen {
+                return Err(anyhow!("duplicate Sec-WebSocket-Protocol header"));
+            }
+            websocket_protocol_seen = true;
+            websocket_header_seen = true;
+        }
+        if name.eq_ignore_ascii_case("sec-websocket-extensions") {
+            if websocket_extensions_seen {
+                return Err(anyhow!("duplicate Sec-WebSocket-Extensions header"));
+            }
+            websocket_extensions_seen = true;
+            websocket_header_seen = true;
+        }
+        if name.eq_ignore_ascii_case("sec-websocket-accept") {
+            return Err(anyhow!(
+                "Sec-WebSocket-Accept is forbidden in a client request"
+            ));
+        }
+        if name.eq_ignore_ascii_case("proxy-connection") || name.eq_ignore_ascii_case("keep-alive")
         {
             continue;
         }
@@ -1061,12 +1171,98 @@ fn request_plan(header: &[u8]) -> Result<RequestPlan> {
     if host_count != 1 {
         return Err(anyhow!("exactly one Host header is required"));
     }
-    rewritten.push_str("Connection: close\r\n\r\n");
+    let connection_has_upgrade = match connection.as_deref() {
+        Some(value) => header_has_token(value, "upgrade")?,
+        None => false,
+    };
+    let websocket_intent = websocket_header_seen || upgrade.is_some() || connection_has_upgrade;
+    let mode = if websocket_intent {
+        if request_parts[0] != "GET"
+            || request_parts[2] != "HTTP/1.1"
+            || !request_parts[1].starts_with('/')
+        {
+            return Err(anyhow!("WebSocket upgrade requires GET over HTTP/1.1"));
+        }
+        if content_length.is_some() {
+            return Err(anyhow!("WebSocket upgrade must not include Content-Length"));
+        }
+        if !connection_has_upgrade {
+            return Err(anyhow!("WebSocket Connection token is missing"));
+        }
+        if upgrade
+            .as_deref()
+            .is_none_or(|value| !value.eq_ignore_ascii_case("websocket"))
+        {
+            return Err(anyhow!("only a WebSocket Upgrade is supported"));
+        }
+        if websocket_version.as_deref() != Some("13") {
+            return Err(anyhow!("only WebSocket version 13 is supported"));
+        }
+        let key = websocket_key.context("Sec-WebSocket-Key is required")?;
+        let decoded = BASE64_STANDARD
+            .decode(key.as_bytes())
+            .map_err(|_| anyhow!("Sec-WebSocket-Key is invalid"))?;
+        if decoded.len() != 16 {
+            return Err(anyhow!("Sec-WebSocket-Key is invalid"));
+        }
+        rewritten.push_str("Upgrade: websocket\r\nConnection: Upgrade\r\n\r\n");
+        RequestMode::WebSocket {
+            expected_accept: tokio_tungstenite::tungstenite::handshake::derive_accept_key(
+                key.as_bytes(),
+            ),
+        }
+    } else {
+        rewritten.push_str("Connection: close\r\n\r\n");
+        RequestMode::FixedBody {
+            body_len: content_length.unwrap_or(0),
+        }
+    };
     Ok(RequestPlan {
         host: host.context("Host header is empty or invalid")?,
         header: rewritten.into_bytes(),
-        body_len: content_length.unwrap_or(0),
+        mode,
     })
+}
+
+async fn proxy_request<S: AsyncRead + AsyncWrite + Unpin>(
+    inbound: &mut S,
+    runtime: &Runtime,
+    route: &Route,
+    received: Vec<u8>,
+    header_end: usize,
+    plan: RequestPlan,
+) -> Result<()> {
+    match plan.mode {
+        RequestMode::FixedBody { body_len } => {
+            proxy_single_request(
+                inbound,
+                runtime,
+                route,
+                received,
+                header_end,
+                plan.header,
+                body_len,
+            )
+            .await
+        }
+        RequestMode::WebSocket { expected_accept } => {
+            if received.len() != header_end {
+                reject(inbound, runtime, "400 Bad Request").await?;
+                return Err(anyhow!(
+                    "early WebSocket data or a pipelined request is forbidden"
+                ));
+            }
+            proxy_websocket_upgrade(
+                inbound,
+                runtime,
+                route,
+                plan.header,
+                &expected_accept,
+                UPSTREAM_UPGRADE_HEADER_DEADLINE,
+            )
+            .await
+        }
+    }
 }
 
 async fn proxy_single_request<S: AsyncRead + AsyncWrite + Unpin>(
@@ -1075,36 +1271,195 @@ async fn proxy_single_request<S: AsyncRead + AsyncWrite + Unpin>(
     route: &Route,
     received: Vec<u8>,
     header_end: usize,
-    plan: RequestPlan,
+    header: Vec<u8>,
+    body_len: usize,
 ) -> Result<()> {
     let mut body = received[header_end..].to_vec();
-    if !initial_body_bytes_allowed(plan.body_len, body.len()) {
+    if !initial_body_bytes_allowed(body_len, body.len()) {
         reject(inbound, runtime, "400 Bad Request").await?;
         return Err(anyhow!(
             "pipelined or cross-host follow-up request is forbidden"
         ));
     }
-    body.resize(plan.body_len, 0);
-    if plan.body_len > received.len().saturating_sub(header_end) {
+    body.resize(body_len, 0);
+    if body_len > received.len().saturating_sub(header_end) {
         inbound
             .read_exact(&mut body[received.len().saturating_sub(header_end)..])
             .await?;
     }
 
-    let upstream_addr = format!("{}:{}", route.target_ip, route.target_port);
-    let mut upstream = match TcpStream::connect(&upstream_addr).await {
-        Ok(stream) => stream,
-        Err(error) => {
-            reject(inbound, runtime, "503 Service Unavailable").await?;
-            return Err(error.into());
-        }
-    };
-    upstream.write_all(&plan.header).await?;
+    let mut upstream = connect_upstream(inbound, runtime, route).await?;
+    upstream.write_all(&header).await?;
     upstream.write_all(&body).await?;
     upstream.shutdown().await?;
     io::copy(&mut upstream, inbound).await?;
     inbound.shutdown().await?;
     Ok(())
+}
+
+async fn connect_upstream<S: AsyncWrite + Unpin>(
+    inbound: &mut S,
+    runtime: &Runtime,
+    route: &Route,
+) -> Result<TcpStream> {
+    let upstream_addr = format!("{}:{}", route.target_ip, route.target_port);
+    match time::timeout(
+        UPSTREAM_CONNECT_DEADLINE,
+        TcpStream::connect(&upstream_addr),
+    )
+    .await
+    {
+        Ok(Ok(stream)) => Ok(stream),
+        Ok(Err(error)) => {
+            reject(inbound, runtime, "503 Service Unavailable").await?;
+            Err(error.into())
+        }
+        Err(_) => {
+            reject(inbound, runtime, "503 Service Unavailable").await?;
+            Err(anyhow!("upstream connection deadline exceeded"))
+        }
+    }
+}
+
+async fn proxy_websocket_upgrade<S: AsyncRead + AsyncWrite + Unpin>(
+    inbound: &mut S,
+    runtime: &Runtime,
+    route: &Route,
+    header: Vec<u8>,
+    expected_accept: &str,
+    response_deadline: Duration,
+) -> Result<()> {
+    let mut upstream = connect_upstream(inbound, runtime, route).await?;
+    upstream.write_all(&header).await?;
+    let response = match time::timeout(response_deadline, read_response_head(&mut upstream)).await {
+        Ok(Ok(response)) => response,
+        Ok(Err(error)) => {
+            reject(inbound, runtime, "502 Bad Gateway").await?;
+            return Err(error);
+        }
+        Err(_) => {
+            reject(inbound, runtime, "504 Gateway Timeout").await?;
+            return Err(anyhow!("upstream WebSocket response deadline exceeded"));
+        }
+    };
+    let Some(response_header_end) = find_header_end(&response) else {
+        reject(inbound, runtime, "502 Bad Gateway").await?;
+        return Err(anyhow!("upstream WebSocket response is incomplete"));
+    };
+    if let Err(error) =
+        validate_websocket_response(&response[..response_header_end], expected_accept)
+    {
+        reject(inbound, runtime, "502 Bad Gateway").await?;
+        return Err(error);
+    }
+    inbound.write_all(&response).await?;
+    let _ = io::copy_bidirectional(inbound, &mut upstream).await?;
+    inbound.shutdown().await?;
+    upstream.shutdown().await?;
+    Ok(())
+}
+
+async fn read_response_head<S: AsyncRead + Unpin>(upstream: &mut S) -> Result<Vec<u8>> {
+    let mut head = Vec::with_capacity(1024);
+    let mut buf = [0_u8; 1024];
+    loop {
+        let n = upstream.read(&mut buf).await?;
+        if n == 0 {
+            return Ok(head);
+        }
+        head.extend_from_slice(&buf[..n]);
+        if let Some(header_end) = find_header_end(&head) {
+            if header_end > MAX_UPSTREAM_UPGRADE_HEADER_BYTES {
+                return Err(anyhow!("upstream WebSocket response header is too large"));
+            }
+            return Ok(head);
+        }
+        if head.len() > MAX_UPSTREAM_UPGRADE_HEADER_BYTES {
+            return Err(anyhow!("upstream WebSocket response header is too large"));
+        }
+    }
+}
+
+fn validate_websocket_response(header: &[u8], expected_accept: &str) -> Result<()> {
+    let text = std::str::from_utf8(header).context("upstream WebSocket response is not UTF-8")?;
+    let mut lines = text.split("\r\n");
+    let status = lines.next().context("missing upstream response status")?;
+    let mut status_parts = status.splitn(3, ' ');
+    if status_parts.next() != Some("HTTP/1.1") || status_parts.next() != Some("101") {
+        return Err(anyhow!("upstream did not accept the WebSocket upgrade"));
+    }
+    let mut connection = None;
+    let mut upgrade = None;
+    let mut accept = None;
+    for line in lines {
+        if line.is_empty() {
+            break;
+        }
+        let (name, value) = line
+            .split_once(':')
+            .context("malformed upstream WebSocket response header")?;
+        if !is_http_token(name) || invalid_header_value(value) {
+            return Err(anyhow!("malformed upstream WebSocket response header"));
+        }
+        if name.eq_ignore_ascii_case("content-length")
+            || name.eq_ignore_ascii_case("transfer-encoding")
+        {
+            return Err(anyhow!(
+                "upstream WebSocket response contains a forbidden body framing header"
+            ));
+        }
+        if name.eq_ignore_ascii_case("connection")
+            && connection.replace(value.trim().to_string()).is_some()
+        {
+            return Err(anyhow!("duplicate upstream Connection header"));
+        }
+        if name.eq_ignore_ascii_case("upgrade")
+            && upgrade.replace(value.trim().to_string()).is_some()
+        {
+            return Err(anyhow!("duplicate upstream Upgrade header"));
+        }
+        if name.eq_ignore_ascii_case("sec-websocket-accept")
+            && accept.replace(value.trim().to_string()).is_some()
+        {
+            return Err(anyhow!("duplicate upstream Sec-WebSocket-Accept header"));
+        }
+    }
+    if !header_has_token(
+        connection
+            .as_deref()
+            .context("upstream Connection header is missing")?,
+        "upgrade",
+    )? {
+        return Err(anyhow!("upstream Connection upgrade token is missing"));
+    }
+    if upgrade
+        .as_deref()
+        .is_none_or(|value| !value.eq_ignore_ascii_case("websocket"))
+    {
+        return Err(anyhow!("upstream Upgrade header is not websocket"));
+    }
+    if accept.as_deref() != Some(expected_accept) {
+        return Err(anyhow!("upstream Sec-WebSocket-Accept is invalid"));
+    }
+    Ok(())
+}
+
+fn header_has_token(value: &str, expected: &str) -> Result<bool> {
+    let mut found = false;
+    for token in value.split(',') {
+        let token = token.trim();
+        if !is_http_token(token) {
+            return Err(anyhow!("malformed comma-separated header token"));
+        }
+        found |= token.eq_ignore_ascii_case(expected);
+    }
+    Ok(found)
+}
+
+fn invalid_header_value(value: &str) -> bool {
+    value
+        .bytes()
+        .any(|byte| (byte < b' ' && byte != b'\t') || byte == 0x7f)
 }
 
 fn initial_body_bytes_allowed(content_length: usize, received_after_header: usize) -> bool {
@@ -1238,10 +1593,160 @@ fn is_valid_wildcard_domain(value: &str) -> bool {
         })
 }
 
-fn required_control_token(name: &str) -> Result<String> {
-    let token = std::env::var(name).with_context(|| format!("{name} is required"))?;
+fn required_control_token(name: &str, file_name: &str) -> Result<String> {
+    load_control_token(
+        name,
+        std::env::var_os(name),
+        file_name,
+        std::env::var_os(file_name).map(PathBuf::from),
+    )
+}
+
+fn load_control_token(
+    name: &str,
+    direct: Option<OsString>,
+    file_name: &str,
+    file: Option<PathBuf>,
+) -> Result<String> {
+    match (direct, file) {
+        (Some(_), Some(_)) => Err(anyhow!("{name} and {file_name} are mutually exclusive")),
+        (Some(token), None) => {
+            let token = token
+                .into_string()
+                .map_err(|_| anyhow!("{name} must be valid UTF-8"))?;
+            validate_control_token(name, &token)?;
+            Ok(token)
+        }
+        (None, Some(path)) => read_control_token_file(name, file_name, &path),
+        (None, None) => Err(anyhow!("{name} or {file_name} is required")),
+    }
+}
+
+fn read_control_token_file(name: &str, file_name: &str, path: &Path) -> Result<String> {
+    let mut options = OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    options.custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
+    let file = options
+        .open(path)
+        .with_context(|| format!("failed to open {file_name}"))?;
+    let metadata = file
+        .metadata()
+        .with_context(|| format!("failed to inspect {file_name}"))?;
+    if !metadata.is_file() {
+        return Err(anyhow!("{file_name} must reference a regular file"));
+    }
+    #[cfg(unix)]
+    {
+        let mode = metadata.permissions().mode() & 0o777;
+        if mode & 0o400 == 0 || mode & 0o077 != 0 || mode & 0o111 != 0 {
+            return Err(anyhow!(
+                "{file_name} must be owner-readable, non-executable, and inaccessible to group/other"
+            ));
+        }
+    }
+    if metadata.len() > MAX_CONTROL_TOKEN_BYTES as u64 {
+        return Err(anyhow!(
+            "{file_name} content is outside the allowed token size"
+        ));
+    }
+    let mut bytes = Vec::with_capacity(metadata.len() as usize);
+    file.take(MAX_CONTROL_TOKEN_BYTES as u64 + 1)
+        .read_to_end(&mut bytes)
+        .with_context(|| format!("failed to read {file_name}"))?;
+    if bytes.len() > MAX_CONTROL_TOKEN_BYTES {
+        return Err(anyhow!(
+            "{file_name} content is outside the allowed token size"
+        ));
+    }
+    let token =
+        String::from_utf8(bytes).map_err(|_| anyhow!("{file_name} content must be valid UTF-8"))?;
     validate_control_token(name, &token)?;
     Ok(token)
+}
+
+fn validate_backend_ws_url(value: &str, has_custom_ca: bool) -> Result<()> {
+    let request = value
+        .into_client_request()
+        .context("NYABASE_BACKEND_WS is not a valid WebSocket URL")?;
+    match request.uri().scheme_str() {
+        Some("wss") => Ok(()),
+        Some("ws") if !has_custom_ca => Ok(()),
+        Some("ws") => Err(anyhow!(
+            "NYABASE_BACKEND_CA_FILE requires a wss:// Backend URL"
+        )),
+        _ => Err(anyhow!("NYABASE_BACKEND_WS must use ws:// or wss://")),
+    }
+}
+
+fn backend_tls_config_from_env(name: &str) -> Result<Option<Arc<rustls::ClientConfig>>> {
+    let Some(path) = std::env::var_os(name).map(PathBuf::from) else {
+        return Ok(None);
+    };
+    if path.as_os_str().is_empty() {
+        return Err(anyhow!("{name} must not be empty when configured"));
+    }
+    let pem = read_bounded_ca_file(name, &path)?;
+    Ok(Some(backend_tls_config_from_pem(name, &pem)?))
+}
+
+fn read_bounded_ca_file(name: &str, path: &Path) -> Result<Vec<u8>> {
+    let file = OpenOptions::new()
+        .read(true)
+        .open(path)
+        .with_context(|| format!("failed to open {name}"))?;
+    let metadata = file
+        .metadata()
+        .with_context(|| format!("failed to inspect {name}"))?;
+    if !metadata.is_file() {
+        return Err(anyhow!("{name} must reference a regular file"));
+    }
+    if metadata.len() == 0 || metadata.len() > MAX_BACKEND_CA_PEM_BYTES {
+        return Err(anyhow!(
+            "{name} must contain a non-empty bounded PEM bundle"
+        ));
+    }
+    let mut pem = Vec::with_capacity(metadata.len() as usize);
+    file.take(MAX_BACKEND_CA_PEM_BYTES + 1)
+        .read_to_end(&mut pem)
+        .with_context(|| format!("failed to read {name}"))?;
+    if pem.is_empty() || pem.len() as u64 > MAX_BACKEND_CA_PEM_BYTES {
+        return Err(anyhow!(
+            "{name} must contain a non-empty bounded PEM bundle"
+        ));
+    }
+    Ok(pem)
+}
+
+fn backend_tls_config_from_pem(name: &str, pem: &[u8]) -> Result<Arc<rustls::ClientConfig>> {
+    if pem.is_empty() {
+        return Err(anyhow!("{name} contains no CA certificates"));
+    }
+    let mut reader = BufReader::new(pem);
+    let mut roots = rustls::RootCertStore::empty();
+    let mut certificates = 0usize;
+    for item in rustls_pemfile::read_all(&mut reader) {
+        let item = item.map_err(|_| anyhow!("{name} contains invalid PEM"))?;
+        let rustls_pemfile::Item::X509Certificate(certificate) = item else {
+            return Err(anyhow!("{name} may contain only CA certificates"));
+        };
+        roots
+            .add(certificate)
+            .map_err(|_| anyhow!("{name} contains an invalid CA certificate"))?;
+        certificates += 1;
+    }
+    if certificates == 0 {
+        return Err(anyhow!("{name} contains no CA certificates"));
+    }
+    Ok(Arc::new(
+        rustls::ClientConfig::builder_with_provider(Arc::new(
+            rustls::crypto::ring::default_provider(),
+        ))
+        .with_safe_default_protocol_versions()
+        .context("failed to select secure Backend TLS protocol versions")?
+        .with_root_certificates(roots)
+        .with_no_client_auth(),
+    ))
 }
 
 fn validate_control_token(name: &str, token: &str) -> Result<()> {
@@ -1330,6 +1835,40 @@ fn now_ms() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Write as _;
+    use std::sync::atomic::AtomicU64;
+
+    static NEXT_TEST_FILE: AtomicU64 = AtomicU64::new(1);
+
+    struct PrivateTestFile {
+        path: PathBuf,
+    }
+
+    impl PrivateTestFile {
+        fn new(contents: &[u8], mode: u32) -> Self {
+            let id = NEXT_TEST_FILE.fetch_add(1, Ordering::Relaxed);
+            let path = std::env::temp_dir().join(format!(
+                "nyabase-http-proxy-secret-{}-{id}",
+                std::process::id()
+            ));
+            let mut file = std::fs::OpenOptions::new()
+                .create_new(true)
+                .write(true)
+                .open(&path)
+                .unwrap();
+            file.write_all(contents).unwrap();
+            file.sync_all().unwrap();
+            #[cfg(unix)]
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode)).unwrap();
+            Self { path }
+        }
+    }
+
+    impl Drop for PrivateTestFile {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.path);
+        }
+    }
 
     #[test]
     fn control_token_is_required_to_be_trim_exact_and_bounded() {
@@ -1356,6 +1895,100 @@ mod tests {
         assert!(
             validate_control_token("HTTP_PROXY_TOKEN", &format!("é{}", "a".repeat(32))).is_err()
         );
+    }
+
+    #[test]
+    fn control_token_file_is_mutually_exclusive_private_and_non_leaking() {
+        let token = "a".repeat(32);
+        let private = PrivateTestFile::new(token.as_bytes(), 0o600);
+        assert_eq!(
+            load_control_token(
+                "HTTP_PROXY_TOKEN",
+                None,
+                "HTTP_PROXY_TOKEN_FILE",
+                Some(private.path.clone()),
+            )
+            .unwrap(),
+            token,
+        );
+        assert!(load_control_token(
+            "HTTP_PROXY_TOKEN",
+            Some(OsString::from("b".repeat(32))),
+            "HTTP_PROXY_TOKEN_FILE",
+            Some(private.path.clone()),
+        )
+        .unwrap_err()
+        .to_string()
+        .contains("mutually exclusive"));
+
+        let public = PrivateTestFile::new(token.as_bytes(), 0o644);
+        assert!(load_control_token(
+            "HTTP_PROXY_TOKEN",
+            None,
+            "HTTP_PROXY_TOKEN_FILE",
+            Some(public.path.clone()),
+        )
+        .is_err());
+
+        let invalid_secret = format!("{}!", "s".repeat(31));
+        let invalid = PrivateTestFile::new(invalid_secret.as_bytes(), 0o400);
+        let error = load_control_token(
+            "HTTP_PROXY_TOKEN",
+            None,
+            "HTTP_PROXY_TOKEN_FILE",
+            Some(invalid.path.clone()),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(!error.contains(&invalid_secret));
+
+        let newline = PrivateTestFile::new(format!("{token}\n").as_bytes(), 0o400);
+        assert!(load_control_token(
+            "HTTP_PROXY_TOKEN",
+            None,
+            "HTTP_PROXY_TOKEN_FILE",
+            Some(newline.path.clone()),
+        )
+        .is_err());
+        let empty = PrivateTestFile::new(b"", 0o400);
+        assert!(load_control_token(
+            "HTTP_PROXY_TOKEN",
+            None,
+            "HTTP_PROXY_TOKEN_FILE",
+            Some(empty.path.clone()),
+        )
+        .is_err());
+        let oversized = PrivateTestFile::new("a".repeat(1025).as_bytes(), 0o400);
+        assert!(load_control_token(
+            "HTTP_PROXY_TOKEN",
+            None,
+            "HTTP_PROXY_TOKEN_FILE",
+            Some(oversized.path.clone()),
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn backend_ca_is_explicit_and_plain_ws_remains_compatible_without_it() {
+        assert!(validate_backend_ws_url("wss://backend.example/ws/http-proxy", false).is_ok());
+        assert!(validate_backend_ws_url("wss://backend.example/ws/http-proxy", true).is_ok());
+        assert!(validate_backend_ws_url("ws://backend.example/ws/http-proxy", false).is_ok());
+        assert!(validate_backend_ws_url("ws://backend.example/ws/http-proxy", true).is_err());
+        assert!(validate_backend_ws_url("http://backend.example/ws/http-proxy", false).is_err());
+        assert!(backend_tls_config_from_pem(
+            "NYABASE_BACKEND_CA_FILE",
+            include_bytes!("../tests/fixtures/test-ca.pem"),
+        )
+        .is_ok());
+        assert!(backend_tls_config_from_pem("NYABASE_BACKEND_CA_FILE", b"").is_err());
+        assert!(
+            backend_tls_config_from_pem("NYABASE_BACKEND_CA_FILE", b"not a PEM bundle").is_err()
+        );
+        assert!(backend_tls_config_from_pem(
+            "NYABASE_BACKEND_CA_FILE",
+            b"-----BEGIN CERTIFICATE-----\ninvalid\n-----END CERTIFICATE-----\n",
+        )
+        .is_err());
     }
 
     #[test]
@@ -1551,18 +2184,14 @@ mod tests {
     }
 
     #[test]
-    fn forces_one_request_per_connection_and_rejects_upgrades() {
+    fn forces_one_fixed_body_request_per_connection() {
         let plan = request_plan(b"POST / HTTP/1.1\r\nHost: app.example.test\r\nContent-Length: 4\r\nConnection: keep-alive\r\n\r\n").unwrap();
-        assert_eq!(plan.body_len, 4);
+        assert!(matches!(plan.mode, RequestMode::FixedBody { body_len: 4 }));
         assert!(String::from_utf8(plan.header)
             .unwrap()
             .contains("Connection: close\r\n"));
         assert!(initial_body_bytes_allowed(4, 4));
         assert!(!initial_body_bytes_allowed(4, 5));
-        assert!(request_plan(
-            b"GET / HTTP/1.1\r\nHost: app.example.test\r\nUpgrade: websocket\r\n\r\n"
-        )
-        .is_err());
         assert!(request_plan(
             b"POST / HTTP/1.1\r\nHost: app.example.test\r\nContent-Length: 4\r\nContent-Length: 4\r\n\r\n"
         )
@@ -1571,6 +2200,47 @@ mod tests {
             b"GET http://attacker.invalid/ HTTP/1.1\r\nHost: app.example.test\r\n\r\n"
         )
         .is_err());
+    }
+
+    #[test]
+    fn accepts_only_bounded_unambiguous_rfc6455_upgrades() {
+        let valid = b"GET /socket HTTP/1.1\r\nHost: app.example.test\r\nConnection: keep-alive, Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n";
+        let plan = request_plan(valid).unwrap();
+        assert!(matches!(plan.mode, RequestMode::WebSocket { .. }));
+        let rewritten = String::from_utf8(plan.header).unwrap();
+        assert!(rewritten.contains("Upgrade: websocket\r\nConnection: Upgrade\r\n"));
+
+        for invalid in [
+            b"GET / HTTP/1.1\r\nHost: app.example.test\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n".as_slice(),
+            b"GET / HTTP/1.1\r\nHost: app.example.test\r\nConnection: Upgrade\r\nUpgrade: h2c\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n".as_slice(),
+            b"GET / HTTP/1.1\r\nHost: app.example.test\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n".as_slice(),
+            b"GET / HTTP/1.1\r\nHost: app.example.test\r\nConnection: Upgrade\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n".as_slice(),
+            b"GET / HTTP/1.1\r\nHost: app.example.test\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 12\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n".as_slice(),
+            b"GET / HTTP/1.1\r\nHost: app.example.test\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: invalid\r\n\r\n".as_slice(),
+            b"GET / HTTP/1.1\r\nHost: app.example.test\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nTransfer-Encoding: chunked\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n".as_slice(),
+            b"GET / HTTP/1.1\r\nHost: app.example.test\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nExpect: 100-continue\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n".as_slice(),
+            b"CONNECT app.example.test:443 HTTP/1.1\r\nHost: app.example.test\r\n\r\n".as_slice(),
+        ] {
+            assert!(request_plan(invalid).is_err());
+        }
+    }
+
+    #[test]
+    fn validates_the_upstream_websocket_handshake_before_relay() {
+        let expected = "s3pPLMBiTxaQ9kYGzzhZRbK+xOo=";
+        assert!(validate_websocket_response(
+            b"HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=\r\n\r\n",
+            expected,
+        )
+        .is_ok());
+        for invalid in [
+            b"HTTP/1.1 200 OK\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=\r\n\r\n".as_slice(),
+            b"HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Accept: wrong\r\n\r\n".as_slice(),
+            b"HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=\r\nSec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=\r\n\r\n".as_slice(),
+            b"HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nContent-Length: 0\r\nSec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=\r\n\r\n".as_slice(),
+        ] {
+            assert!(validate_websocket_response(invalid, expected).is_err());
+        }
     }
 
     #[tokio::test]
@@ -1697,6 +2367,257 @@ mod tests {
             .unwrap();
 
         assert!(!store.authorization_is_current(&authorization));
+    }
+
+    fn websocket_test_plan() -> (Vec<u8>, String) {
+        let plan = request_plan(
+            b"GET /socket HTTP/1.1\r\nHost: app.example.test\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n",
+        )
+        .unwrap();
+        let RequestMode::WebSocket { expected_accept } = plan.mode else {
+            panic!("expected WebSocket request plan");
+        };
+        (plan.header, expected_accept)
+    }
+
+    fn websocket_accept_response(expected_accept: &str) -> Vec<u8> {
+        format!(
+            "HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Accept: {expected_accept}\r\n\r\n"
+        )
+        .into_bytes()
+    }
+
+    #[tokio::test]
+    async fn valid_websocket_upgrade_relays_bidirectional_bytes() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let upstream_port = listener.local_addr().unwrap().port();
+        let (header, expected_accept) = websocket_test_plan();
+        let response = websocket_accept_response(&expected_accept);
+        let upstream = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let request = read_request_head(&mut socket).await.unwrap();
+            assert!(String::from_utf8(request)
+                .unwrap()
+                .contains("Connection: Upgrade\r\n"));
+            socket.write_all(&response).await.unwrap();
+            let mut from_client = [0_u8; 17];
+            socket.read_exact(&mut from_client).await.unwrap();
+            assert_eq!(&from_client, b"client-frame-data");
+            socket.write_all(b"server-frame-data").await.unwrap();
+            socket.shutdown().await.unwrap();
+        });
+
+        let route = test_route(upstream_port);
+        let runtime = test_runtime();
+        let task_runtime = runtime.clone();
+        let (mut client, mut proxy_side) = tokio::io::duplex(4096);
+        let proxy = tokio::spawn(async move {
+            proxy_websocket_upgrade(
+                &mut proxy_side,
+                &task_runtime,
+                &route,
+                header,
+                &expected_accept,
+                Duration::from_secs(1),
+            )
+            .await
+        });
+
+        let response = read_response_head(&mut client).await.unwrap();
+        assert!(String::from_utf8(response)
+            .unwrap()
+            .starts_with("HTTP/1.1 101"));
+        client.write_all(b"client-frame-data").await.unwrap();
+        let mut from_server = [0_u8; 17];
+        client.read_exact(&mut from_server).await.unwrap();
+        assert_eq!(&from_server, b"server-frame-data");
+        client.shutdown().await.unwrap();
+
+        time::timeout(Duration::from_secs(1), proxy)
+            .await
+            .expect("WebSocket proxy did not finish")
+            .unwrap()
+            .unwrap();
+        upstream.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn websocket_non_101_timeout_and_oversize_fail_closed() {
+        async fn run_failure(response: Option<Vec<u8>>, deadline: Duration) -> (String, String) {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let upstream_port = listener.local_addr().unwrap().port();
+            let upstream = tokio::spawn(async move {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let _ = read_request_head(&mut socket).await.unwrap();
+                match response {
+                    Some(response) => {
+                        let _ = socket.write_all(&response).await;
+                        let _ = socket.shutdown().await;
+                    }
+                    None => std::future::pending::<()>().await,
+                }
+            });
+            let (header, expected_accept) = websocket_test_plan();
+            let route = test_route(upstream_port);
+            let runtime = test_runtime();
+            let (mut client, mut proxy_side) = tokio::io::duplex(4096);
+            let error = proxy_websocket_upgrade(
+                &mut proxy_side,
+                &runtime,
+                &route,
+                header,
+                &expected_accept,
+                deadline,
+            )
+            .await
+            .unwrap_err()
+            .to_string();
+            let mut rejection = Vec::new();
+            client.read_to_end(&mut rejection).await.unwrap();
+            upstream.abort();
+            let _ = upstream.await;
+            (error, String::from_utf8(rejection).unwrap())
+        }
+
+        let (error, rejection) = run_failure(
+            Some(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n".to_vec()),
+            Duration::from_secs(1),
+        )
+        .await;
+        assert!(error.contains("did not accept"));
+        assert!(rejection.starts_with("HTTP/1.1 502 Bad Gateway"));
+
+        let (error, rejection) = run_failure(None, Duration::from_millis(10)).await;
+        assert!(error.contains("deadline exceeded"));
+        assert!(rejection.starts_with("HTTP/1.1 504 Gateway Timeout"));
+
+        let mut oversized = b"HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nX-Fill: ".to_vec();
+        oversized.resize(MAX_UPSTREAM_UPGRADE_HEADER_BYTES + 1, b'a');
+        oversized.extend_from_slice(b"\r\n\r\n");
+        let (error, rejection) = run_failure(Some(oversized), Duration::from_secs(1)).await;
+        assert!(error.contains("too large"));
+        assert!(rejection.starts_with("HTTP/1.1 502 Bad Gateway"));
+    }
+
+    #[tokio::test]
+    async fn websocket_tunnel_closes_when_route_authority_is_revoked() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let upstream_port = listener.local_addr().unwrap().port();
+        let (_, expected_accept) = websocket_test_plan();
+        let response = websocket_accept_response(&expected_accept);
+        let upstream = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let _ = read_request_head(&mut socket).await.unwrap();
+            socket.write_all(&response).await.unwrap();
+            let mut byte = [0_u8; 1];
+            let _ = socket.read(&mut byte).await;
+        });
+
+        let route = test_route(upstream_port);
+        let store = Arc::new(SnapshotStore::default());
+        store.store(test_snapshot(1, 30_000, vec![route])).unwrap();
+        let runtime = test_runtime();
+        let (mut client, proxy_side) = tokio::io::duplex(4096);
+        let handler_store = store.clone();
+        let handler = tokio::spawn(handle_connection_with_fixed_request_deadline(
+            proxy_side,
+            "127.0.0.1:12345".parse().unwrap(),
+            handler_store,
+            runtime,
+            Duration::from_millis(10),
+        ));
+        client
+            .write_all(b"GET /socket HTTP/1.1\r\nHost: app.example.test\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n")
+            .await
+            .unwrap();
+        let response = read_response_head(&mut client).await.unwrap();
+        assert!(String::from_utf8(response)
+            .unwrap()
+            .starts_with("HTTP/1.1 101"));
+
+        time::sleep(Duration::from_millis(30)).await;
+        assert!(
+            !handler.is_finished(),
+            "WebSocket tunnel inherited the ordinary HTTP request deadline"
+        );
+
+        store.store(test_snapshot(2, 30_000, Vec::new())).unwrap();
+        let result = time::timeout(Duration::from_secs(1), handler)
+            .await
+            .expect("revoked WebSocket tunnel did not close")
+            .unwrap();
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("authorization was revoked"));
+        let mut byte = [0_u8; 1];
+        assert_eq!(client.read(&mut byte).await.unwrap(), 0);
+        upstream.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn fixed_http_request_retains_the_absolute_lifetime_deadline() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let upstream_port = listener.local_addr().unwrap().port();
+        let upstream = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let _ = read_request_head(&mut socket).await.unwrap();
+            std::future::pending::<()>().await;
+        });
+        let route = test_route(upstream_port);
+        let store = Arc::new(SnapshotStore::default());
+        store.store(test_snapshot(1, 30_000, vec![route])).unwrap();
+        let runtime = test_runtime();
+        let (mut client, proxy_side) = tokio::io::duplex(4096);
+        let handler = tokio::spawn(handle_connection_with_fixed_request_deadline(
+            proxy_side,
+            "127.0.0.1:12345".parse().unwrap(),
+            store,
+            runtime,
+            Duration::from_millis(10),
+        ));
+        client
+            .write_all(b"GET /slow HTTP/1.1\r\nHost: app.example.test\r\n\r\n")
+            .await
+            .unwrap();
+
+        let result = time::timeout(Duration::from_secs(1), handler)
+            .await
+            .expect("fixed HTTP request did not reach its lifetime deadline")
+            .unwrap();
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("request lifetime deadline exceeded"));
+        upstream.abort();
+    }
+
+    #[tokio::test]
+    async fn early_websocket_bytes_are_rejected_as_smuggling() {
+        let route = test_route(9);
+        let runtime = test_runtime();
+        let (header, _) = websocket_test_plan();
+        let header_end = header.len();
+        let mut received = header.clone();
+        received.extend_from_slice(b"early-frame");
+        let plan = request_plan(&header).unwrap();
+        let (mut client, mut proxy_side) = tokio::io::duplex(1024);
+        let error = proxy_request(
+            &mut proxy_side,
+            &runtime,
+            &route,
+            received,
+            header_end,
+            plan,
+        )
+        .await
+        .unwrap_err();
+        assert!(error.to_string().contains("early WebSocket data"));
+        let mut response = Vec::new();
+        client.read_to_end(&mut response).await.unwrap();
+        assert!(String::from_utf8(response)
+            .unwrap()
+            .starts_with("HTTP/1.1 400 Bad Request"));
     }
 
     #[tokio::test]

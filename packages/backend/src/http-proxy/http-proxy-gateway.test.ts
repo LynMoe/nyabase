@@ -9,6 +9,35 @@ const testConfig = () => ({
   get: vi.fn((key: string) => key === 'http.proxyToken' ? TEST_TOKEN : undefined),
 });
 
+describe('HttpProxyGateway status projection defenses', () => {
+  it('never throws when an internally corrupted status timestamp reaches projection', () => {
+    const gateway = makeGateway({ buildSnapshot: vi.fn() });
+    const internals = gateway as unknown as {
+      latestStatus: Map<object, object>;
+    };
+    internals.latestStatus.set({}, {
+      proxyId: 'proxy-corrupt',
+      hostname: null,
+      httpListen: '0.0.0.0:8080',
+      httpsListen: null,
+      uptimeMs: 1,
+      connectedAt: 1e300,
+      lastSnapshotGeneration: null,
+      lastSnapshotAt: null,
+      activeConnections: 0,
+      totalRequests: Number.POSITIVE_INFINITY,
+      totalRejectedRequests: 0,
+    });
+
+    expect(() => gateway.getStatus()).not.toThrow();
+    expect(gateway.getStatus()).toMatchObject({
+      updatedAt: null,
+      totalRequests: 0,
+    });
+    gateway.onModuleDestroy();
+  });
+});
+
 describe('HttpProxyGateway snapshot broadcast coalescing', () => {
   beforeEach(() => vi.useFakeTimers());
   afterEach(() => vi.useRealTimers());

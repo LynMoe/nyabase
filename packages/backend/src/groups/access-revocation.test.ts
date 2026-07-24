@@ -25,6 +25,8 @@ import { RemoteFsServerAssignmentEntity } from '../entities/remote-fs-server-ass
 import { ServerEntity } from '../entities/server.entity.js';
 import { ServerGrantEntity } from '../entities/server-grant.entity.js';
 import { UserEntity } from '../entities/user.entity.js';
+import { SshPublicKeyEntity } from '../entities/ssh-public-key.entity.js';
+import { UserInternalSshKeyEntity } from '../entities/user-internal-ssh-key.entity.js';
 import { AgentTaskEntity } from '../entities/agent-task.entity.js';
 import { ResourceLockEntity } from '../entities/resource-lock.entity.js';
 import type { AgentGateway } from '../gateway/agent-gateway.js';
@@ -48,6 +50,8 @@ describe('GroupsService fail-closed access revocation', () => {
       entities: [
         ServerEntity,
         UserEntity,
+        SshPublicKeyEntity,
+        UserInternalSshKeyEntity,
         GroupEntity,
         GroupMemberEntity,
         ServerGrantEntity,
@@ -71,6 +75,9 @@ describe('GroupsService fail-closed access revocation', () => {
     access = {
       invalidateUser: vi.fn(),
       invalidateAll: vi.fn(),
+      assertActorCapabilitiesInTransaction: vi.fn().mockResolvedValue(new Set()),
+      assertActorMayAdministerUserInTransaction: vi.fn().mockResolvedValue(undefined),
+      assertNotFinalActiveAdministratorInTransaction: vi.fn().mockResolvedValue(undefined),
       resolveServerInTransaction: vi.fn(async (manager, userId, serverId) => {
         const direct = await manager.findOneBy(ServerGrantEntity, {
           scope: 'user', scopeId: userId, serverId,
@@ -112,6 +119,7 @@ describe('GroupsService fail-closed access revocation', () => {
       mountSources,
       guard,
       { notify: vi.fn().mockResolvedValue(undefined) } as unknown as ProxySnapshotNotifierService,
+      { deleteUserCredentialsInTransaction: vi.fn() } as never,
     );
   });
 
@@ -206,6 +214,7 @@ describe('GroupsService fail-closed access revocation', () => {
   });
 
   it('blocks deleting a user with resources, then atomically tombstones and cleans an empty user', async () => {
+    await saveUserSshKeys();
     await saveUserGrant('user-grant', 4096);
     await saveQuota(4096);
     await saveQuotaTask({ sent: false });
@@ -216,6 +225,8 @@ describe('GroupsService fail-closed access revocation', () => {
     expect(await dataSource.getRepository(UserEntity).findOneByOrFail({ id: 'user-a' }))
       .toMatchObject({ status: UserStatus.Active });
     expect(await dataSource.getRepository(ServerGrantEntity).count()).toBe(1);
+    expect(await dataSource.getRepository(SshPublicKeyEntity).count()).toBe(1);
+    expect(await dataSource.getRepository(UserInternalSshKeyEntity).count()).toBe(1);
 
     await dataSource.getRepository(DataDirectoryEntity).delete('dir-a');
     quotaApply.mockImplementationOnce(async (manager, request) => {
@@ -265,6 +276,8 @@ describe('GroupsService fail-closed access revocation', () => {
     });
     expect(await dataSource.getRepository(UserEntity).findOneByOrFail({ id: 'user-a' }))
       .toMatchObject({ status: UserStatus.Deleting });
+    expect(await dataSource.getRepository(SshPublicKeyEntity).count()).toBe(0);
+    expect(await dataSource.getRepository(UserInternalSshKeyEntity).count()).toBe(0);
     expect(await dataSource.getRepository(ServerGrantEntity).count()).toBe(0);
     expect(await dataSource.getRepository(QuotaDesiredEntity).findOneByOrFail({ id: 'quota-a' }))
       .toMatchObject({ limitBytes: 0, generation: 2, lastTaskId: 'quota-drain-task' });
@@ -280,6 +293,10 @@ describe('GroupsService fail-closed access revocation', () => {
       taskId: 'quota-drain-task',
     })).toMatchObject({ resourceKey: 'quota:server-a:user-a' });
 
+    // Simulate a pre-upgrade Deleting row whose SSH material survived the
+    // initial request. The finalizer must clean it in the same transaction that
+    // exposes the terminal Deleted tombstone.
+    await saveUserSshKeys();
     const finalizer = new AgentTaskFinalizerService();
     await dataSource.transaction(async (manager) => {
       const drainTask = await manager.findOneByOrFail(AgentTaskEntity, { id: 'quota-drain-task' });
@@ -291,6 +308,8 @@ describe('GroupsService fail-closed access revocation', () => {
     expect(await dataSource.getRepository(UserEntity).findOneByOrFail({ id: 'user-a' }))
       .toMatchObject({ status: UserStatus.Deleted });
     expect(await dataSource.getRepository(QuotaDesiredEntity).count()).toBe(0);
+    expect(await dataSource.getRepository(SshPublicKeyEntity).count()).toBe(0);
+    expect(await dataSource.getRepository(UserInternalSshKeyEntity).count()).toBe(0);
 
     await expect(service.upsertUserServerGrant('user-a', 'server-a', { diskBytes: 8192 }))
       .rejects.toMatchObject({ response: expect.objectContaining({ code: 'USER_DELETED' }) });
@@ -357,6 +376,24 @@ describe('GroupsService fail-closed access revocation', () => {
     await dataSource.getRepository(QuotaDesiredEntity).save({
       id: 'quota-a', serverId: 'server-a', userId: 'user-a', numericUserId: 1001,
       limitBytes, source: 'grant', generation: 1, lastTaskId: 'old-safe-task',
+    });
+  }
+
+  async function saveUserSshKeys(): Promise<void> {
+    await dataSource.getRepository(SshPublicKeyEntity).save({
+      id: 'public-key-a',
+      userId: 'user-a',
+      name: 'laptop',
+      keyText: 'ssh-ed25519 AAAA',
+      createdAt: new Date(),
+    });
+    await dataSource.getRepository(UserInternalSshKeyEntity).save({
+      userId: 'user-a',
+      encryptedPrivateKey: 'encrypted-private-a',
+      publicKey: 'internal-public-a',
+      fingerprint: 'fingerprint-a',
+      generation: 1,
+      rotatedAt: new Date(),
     });
   }
 

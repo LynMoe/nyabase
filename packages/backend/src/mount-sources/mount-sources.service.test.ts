@@ -1,4 +1,5 @@
-import { RemoteFsType, ServerStatus, UserStatus } from '@nyabase/common';
+import { Capability, RemoteFsType, ServerStatus, UserStatus } from '@nyabase/common';
+import { ForbiddenException } from '@nestjs/common';
 import { DataSource } from 'typeorm';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { AccessRevocationGuardService } from '../access/access-revocation-guard.service.js';
@@ -22,6 +23,7 @@ import { MountSourcesService } from './mount-sources.service.js';
 describe('MountSourcesService canonical grant writer', () => {
   let dataSource: DataSource;
   let service: MountSourcesService;
+  let assertGrantActor: ReturnType<typeof vi.fn>;
   const snapshots = new Map<string, unknown>();
 
   beforeEach(async () => {
@@ -51,7 +53,11 @@ describe('MountSourcesService canonical grant writer', () => {
     snapshots.clear();
     snapshots.set('server-a', snapshot('server-a', 'disk-shared', 'physical-a'));
     snapshots.set('server-b', snapshot('server-b', 'disk-shared', 'physical-b'));
-    const access = { invalidateAll: vi.fn() } as unknown as AccessResolverService;
+    assertGrantActor = vi.fn().mockResolvedValue(new Set());
+    const access = {
+      invalidateAll: vi.fn(),
+      assertActorCapabilitiesInTransaction: assertGrantActor,
+    } as unknown as AccessResolverService;
     service = new MountSourcesService(
       dataSource.getRepository(RemoteFsMountEntity),
       dataSource.getRepository(RemoteFsServerAssignmentEntity),
@@ -83,6 +89,24 @@ describe('MountSourcesService canonical grant writer', () => {
     expect(await dataSource.getRepository(MountSourceGrantEntity).countBy({
       sourceKind: 'local', sourceId: 'disk-shared', serverId: 'server-b',
     })).toBe(0);
+  });
+
+  it('rechecks ManageGrants in the writer transaction after the HTTP guard', async () => {
+    assertGrantActor.mockRejectedValueOnce(new ForbiddenException({
+      code: 'PRIVILEGE_ESCALATION_DENIED',
+    }));
+
+    await expect(service.upsertGrant('actor-a', 'user', 'user-a', {
+      sourceKind: 'local', sourceId: 'disk-shared', serverId: 'server-a',
+    })).rejects.toMatchObject({
+      response: expect.objectContaining({ code: 'PRIVILEGE_ESCALATION_DENIED' }),
+    });
+    expect(assertGrantActor).toHaveBeenCalledWith(
+      expect.anything(),
+      'actor-a',
+      [Capability.ManageGrants],
+    );
+    expect(await dataSource.getRepository(MountSourceGrantEntity).count()).toBe(0);
   });
 
   it('deletes only the requested local server identity', async () => {

@@ -41,6 +41,10 @@ export class ImageEntity {
   @Column({ name: 'cleanup_generation', type: 'integer', default: 0 })
   cleanupGeneration: number;
 
+  /** Durable optimistic-concurrency token for every retained row mutation. */
+  @Column({ type: 'integer', default: 1 })
+  revision: number;
+
   @CreateDateColumn()
   createdAt: Date;
 

@@ -25,6 +25,10 @@ export const MAX_SSH_PUBLIC_KEYS_PER_USER = 4;
 export const MAX_SSH_PUBLIC_KEY_TEXT_LENGTH = 1_024;
 export const MAX_SSH_PROXY_CONTAINERS =
   MAX_PLATFORM_SERVERS * MAX_MANAGED_CONTAINERS_PER_AGENT;
+/** Standalone proxy hard cap; status payloads may describe at most this many live sessions. */
+export const MAX_SSH_PROXY_STATUS_CONNECTIONS = 1_024;
+/** Standalone HTTP proxy semaphore cap mirrored on its status wire. */
+export const MAX_HTTP_PROXY_ACTIVE_CONNECTIONS = 32;
 export const MAX_SSH_PROXY_SNAPSHOT_BYTES = 4 * 1024 * 1024;
 export const MAX_HTTP_PROXY_ROUTES = MAX_SSH_PROXY_CONTAINERS;
 export const MAX_HTTP_PROXY_DOMAIN_POOLS = 16;
@@ -43,6 +47,14 @@ export const XFS_PROJECT_ID_MAX = 0xffff_ffff;
 export const MAX_AGENT_LOCAL_IMAGES = 8_192;
 export const MAX_AGENT_DISKS = 128;
 export const MAX_AGENT_GPU_DEVICES = 256;
+/**
+ * Resource grants cross JSON, SQLite and Docker's signed integer API. Keep
+ * every value exactly representable in JavaScript, including the NanoCPU
+ * conversion performed by the Agent.
+ */
+export const MAX_RESOURCE_CPU_MILLIS = Math.floor(Number.MAX_SAFE_INTEGER / 1_000_000);
+export const MAX_RESOURCE_BYTES = Number.MAX_SAFE_INTEGER;
+export const MAX_GROUP_PRIORITY = Number.MAX_SAFE_INTEGER;
 /** Lossy telemetry is intentionally much smaller than authoritative inventory. */
 export const MAX_METRIC_POINTS_PER_BATCH = 4_096;
 export const MAX_METRIC_NAME_LENGTH = 128;

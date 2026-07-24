@@ -5,6 +5,7 @@ import { DB_ENTITIES } from './db-entities.js';
 import { NyabaseConfigService } from '../config/nyabase-config.service.js';
 import { configureExclusiveSqliteConnection } from './exclusive-sqlite.js';
 import { installDatabaseCoordinator } from './database-coordinator.js';
+import { migrationGlobs } from './migration-paths.js';
 
 /**
  * `synchronize` decision matrix:
@@ -28,12 +29,6 @@ function resolveSynchronize(config: NyabaseConfigService, logger: Logger): boole
   return config.get<boolean>('database.synchronize');
 }
 
-function migrationGlobs(): string[] {
-  return __dirname.includes('/dist/')
-    ? ['dist/database/migrations/*.js']
-    : ['src/database/migrations/*.ts'];
-}
-
 @Module({
   imports: [
     TypeOrmModule.forRootAsync({
@@ -43,7 +38,7 @@ function migrationGlobs(): string[] {
         const driver = config.get<string>('database.driver');
         const synchronize = resolveSynchronize(config, logger);
 
-        const migrations = migrationGlobs();
+        const migrations = migrationGlobs(__dirname);
         const migrationsRun = config.get<boolean>('database.migrationsRun');
 
         if (driver !== 'sqlite') {

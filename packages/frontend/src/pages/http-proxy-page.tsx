@@ -3,8 +3,6 @@ import { AlertTriangle, CheckCircle2, Edit, Globe2, Plus, RefreshCw, Save, Trash
 import { useMemo, useState } from 'react';
 import {
   Capability,
-  normalizeHttpProxyHostname,
-  normalizeHttpProxyWildcardDomain,
   type ContainerStatus,
   type HttpProxyBindingStatus,
   type HttpProxyWarningReason,
@@ -25,6 +23,20 @@ import { Input } from '../components/ui/input.js';
 import { Label } from '../components/ui/label.js';
 import { toast } from '../hooks/use-toast.js';
 import { useAuthStore } from '../store/auth.js';
+import {
+  emptyBindingForm,
+  emptyPoolForm,
+  validateBindingForm,
+  validatePoolForm,
+  type BindingField,
+  type BindingFormErrors,
+  type ContainerOption,
+  type PoolFormErrors,
+  type SaveBindingPayload,
+  type SavePoolPayload,
+} from '../lib/http-proxy-form.js';
+import { queryPollInterval } from '../lib/query-lifecycle.js';
+import { queryPresentationState } from '../lib/query-presentation.js';
 
 interface Binding {
   id: string;
@@ -54,49 +66,11 @@ interface DomainPool {
   certificateNotAfter: string | null;
 }
 
-interface ContainerOption {
-  id: string;
-  name: string;
-}
-
 interface ProxyStatus {
   connectedProxies: number;
   totalRequests: number;
   totalRejectedRequests: number;
   updatedAt: string | null;
-}
-
-const emptyBindingForm = {
-  hostname: '',
-  containerId: '',
-  targetPort: '80',
-};
-
-const emptyPoolForm = {
-  wildcardDomain: '',
-  enabled: true,
-  httpsEnabled: false,
-  certificatePem: '',
-  privateKeyPem: '',
-};
-
-type BindingField = keyof typeof emptyBindingForm;
-type BindingFormErrors = Partial<Record<BindingField, string>>;
-type PoolField = keyof Pick<typeof emptyPoolForm, 'wildcardDomain' | 'certificatePem' | 'privateKeyPem'>;
-type PoolFormErrors = Partial<Record<PoolField, string>>;
-
-interface SaveBindingPayload {
-  hostname: string;
-  containerId: string;
-  targetPort: number;
-}
-
-interface SavePoolPayload {
-  wildcardDomain: string;
-  enabled: boolean;
-  httpsEnabled: boolean;
-  certificatePem?: string | null;
-  privateKeyPem?: string | null;
 }
 
 export default function HttpProxyPage() {
@@ -116,7 +90,11 @@ export default function HttpProxyPage() {
   const bindings = useQuery({
     queryKey: ['http-proxy-bindings'],
     queryFn: () => api.get<Binding[]>('/v2/http-proxy/bindings'),
-    refetchInterval: 5_000,
+    refetchInterval: (query) => queryPollInterval(query.state, {
+      activeIntervalMs: 5_000,
+      transientBaseIntervalMs: 5_000,
+      transientMaxIntervalMs: 30_000,
+    }),
   });
   const pools = useQuery({
     queryKey: ['http-proxy-domain-pools'],
@@ -126,7 +104,11 @@ export default function HttpProxyPage() {
   const status = useQuery({
     queryKey: ['http-proxy-status'],
     queryFn: () => api.get<ProxyStatus>('/admin/http-proxy/status'),
-    refetchInterval: 2_000,
+    refetchInterval: (query) => queryPollInterval(query.state, {
+      activeIntervalMs: 2_000,
+      transientBaseIntervalMs: 2_000,
+      transientMaxIntervalMs: 30_000,
+    }),
     enabled: canViewMetrics,
   });
   const containers = useQuery({
@@ -199,6 +181,21 @@ export default function HttpProxyPage() {
 
   const rows = bindings.data ?? [];
   const poolRows = pools.data ?? [];
+  const bindingPresentation = queryPresentationState({
+    hasData: bindings.data !== undefined,
+    isPending: bindings.isPending,
+    isError: bindings.isError,
+  });
+  const poolPresentation = queryPresentationState({
+    hasData: pools.data !== undefined,
+    isPending: pools.isPending,
+    isError: pools.isError,
+  });
+  const statusPresentation = queryPresentationState({
+    hasData: status.data !== undefined,
+    isPending: status.isPending,
+    isError: status.isError,
+  });
 
   const setBindingField = (field: BindingField, value: string) => {
     setBindingForm((form) => ({ ...form, [field]: value }));
@@ -213,7 +210,10 @@ export default function HttpProxyPage() {
   };
 
   const handleSaveBinding = () => {
-    const result = validateBindingForm(bindingForm, containerOptions);
+    const catalog = containers.isPending || containers.isError || containers.data === undefined
+      ? null
+      : containerOptions;
+    const result = validateBindingForm(bindingForm, catalog);
     setBindingErrors(result.errors);
     if (!result.payload) {
       toast({
@@ -227,7 +227,19 @@ export default function HttpProxyPage() {
   };
 
   const handleSavePool = () => {
-    const result = validatePoolForm(poolForm, editingPoolId !== null);
+    const editingPool = editingPoolId
+      ? poolRows.find((pool) => pool.id === editingPoolId)
+      : null;
+    const result = validatePoolForm(poolForm, {
+      isEditing: editingPoolId !== null,
+      existingCertificate: editingPool?.certificateFingerprint
+        ? {
+            fingerprint: editingPool.certificateFingerprint,
+            wildcardDomain: editingPool.wildcardDomain,
+            notAfter: editingPool.certificateNotAfter,
+          }
+        : null,
+    });
     setPoolErrors(result.errors);
     if (!result.payload) {
       toast({
@@ -246,7 +258,11 @@ export default function HttpProxyPage() {
         <div>
           <h1 className="text-2xl font-semibold tracking-tight text-foreground">HTTP 反代</h1>
           <p className="text-sm text-muted-foreground mt-0.5">
-            {canViewMetrics && status.data?.updatedAt ? `最后更新 ${formatTime(status.data.updatedAt)}` : `${rows.length} 个域名绑定`}
+            {canViewMetrics && status.data?.updatedAt
+              ? `最后更新 ${formatTime(status.data.updatedAt)}`
+              : bindings.data
+                ? `${rows.length} 个域名绑定`
+                : bindings.isError ? '域名绑定加载失败' : '正在加载域名绑定'}
           </p>
         </div>
         <Button variant="ghost" size="icon" className="h-8 w-8 text-muted-foreground" aria-label="刷新 HTTP 反代绑定" onClick={() => bindings.refetch()} disabled={bindings.isFetching}>
@@ -256,19 +272,32 @@ export default function HttpProxyPage() {
 
       {canViewMetrics && (
         <>
-          {status.isError && (
+          {statusPresentation === 'loading' ? (
+            <QueryLoadingNotice label="正在加载代理状态..." />
+          ) : statusPresentation === 'error' ? (
             <QueryErrorNotice
               title="代理状态加载失败"
               error={status.error}
               onRetry={() => status.refetch()}
               isRetrying={status.isFetching}
             />
-          )}
-          <section className="grid gap-3 sm:grid-cols-3">
-            <Metric label="在线代理" value={(status.data?.connectedProxies ?? 0).toString()} />
-            <Metric label="累计请求" value={(status.data?.totalRequests ?? 0).toString()} />
-            <Metric label="拒绝请求" value={(status.data?.totalRejectedRequests ?? 0).toString()} />
-          </section>
+          ) : status.data ? (
+            <>
+              {statusPresentation === 'stale-error' && (
+                <QueryErrorNotice
+                  title="代理状态刷新失败，以下为上次成功数据"
+                  error={status.error}
+                  onRetry={() => { void status.refetch(); }}
+                  isRetrying={status.isFetching}
+                />
+              )}
+              <section className="grid gap-3 sm:grid-cols-3">
+                <Metric label="在线代理" value={status.data.connectedProxies.toString()} />
+                <Metric label="累计请求" value={status.data.totalRequests.toString()} />
+                <Metric label="拒绝请求" value={status.data.totalRejectedRequests.toString()} />
+              </section>
+            </>
+          ) : null}
         </>
       )}
 
@@ -299,11 +328,14 @@ export default function HttpProxyPage() {
               id="http-binding-container"
               className={`h-9 w-full rounded-md border bg-background px-3 text-sm ${bindingErrors.containerId ? 'border-destructive' : 'border-input'}`}
               value={bindingForm.containerId}
+              disabled={containers.isPending || containers.isError}
               onChange={(event) => setBindingField('containerId', event.target.value)}
               aria-invalid={!!bindingErrors.containerId}
               aria-describedby={bindingErrors.containerId ? 'http-binding-container-error' : undefined}
             >
-              <option value="">选择容器</option>
+              <option value="">
+                {containers.isPending ? '正在加载容器...' : containers.isError ? '容器列表加载失败' : '选择容器'}
+              </option>
               {containerOptions.map((container) => <option key={container.id} value={container.id}>{container.name}</option>)}
             </select>
             {containers.isError && (
@@ -328,23 +360,28 @@ export default function HttpProxyPage() {
               className={bindingErrors.targetPort ? 'border-destructive focus-visible:ring-destructive' : undefined}
             />
           </FormField>
-          <Button className="w-full" onClick={handleSaveBinding} disabled={saveBinding.isPending}>
+          <Button className="w-full" onClick={handleSaveBinding} disabled={saveBinding.isPending || containers.isPending || containers.isError}>
             <Save className="h-4 w-4" />
             保存绑定
           </Button>
         </div>
 
         <div className="overflow-hidden rounded-lg border border-border bg-card">
-          {bindings.isError ? (
+          {bindingPresentation === 'loading' ? (
+            <QueryLoadingNotice label="正在加载域名绑定..." />
+          ) : (
+            <>
+          {(bindingPresentation === 'error' || bindingPresentation === 'stale-error') && (
             <div className="p-4">
               <QueryErrorNotice
-                title="域名绑定加载失败"
+                title={bindingPresentation === 'stale-error' ? '域名绑定刷新失败，以下为上次成功数据' : '域名绑定加载失败'}
                 error={bindings.error}
-                onRetry={() => bindings.refetch()}
+                onRetry={() => { void bindings.refetch(); }}
                 isRetrying={bindings.isFetching}
               />
             </div>
-          ) : (
+          )}
+          {bindings.data && (
             <table className="w-full text-sm">
               <thead className="bg-muted/60 text-xs text-muted-foreground">
                 <tr>
@@ -401,6 +438,8 @@ export default function HttpProxyPage() {
                 ))}
               </tbody>
             </table>
+          )}
+            </>
           )}
         </div>
       </section>
@@ -465,16 +504,21 @@ export default function HttpProxyPage() {
           </div>
 
           <div className="overflow-hidden rounded-lg border border-border bg-card">
-            {pools.isError ? (
+            {poolPresentation === 'loading' ? (
+              <QueryLoadingNotice label="正在加载域名池..." />
+            ) : (
+              <>
+            {(poolPresentation === 'error' || poolPresentation === 'stale-error') && (
               <div className="p-4">
                 <QueryErrorNotice
-                  title="域名池加载失败"
+                  title={poolPresentation === 'stale-error' ? '域名池刷新失败，以下为上次成功数据' : '域名池加载失败'}
                   error={pools.error}
-                  onRetry={() => pools.refetch()}
+                  onRetry={() => { void pools.refetch(); }}
                   isRetrying={pools.isFetching}
                 />
               </div>
-            ) : (
+            )}
+            {pools.data && (
               <table className="w-full text-sm">
                 <thead className="bg-muted/60 text-xs text-muted-foreground">
                   <tr>
@@ -524,6 +568,8 @@ export default function HttpProxyPage() {
                   ))}
                 </tbody>
               </table>
+            )}
+              </>
             )}
           </div>
         </section>
@@ -616,6 +662,14 @@ function formatTime(value: string): string {
   return new Date(value).toLocaleString();
 }
 
+function QueryLoadingNotice({ label }: { label: string }) {
+  return (
+    <div className="p-6 text-center text-sm text-muted-foreground" role="status">
+      {label}
+    </div>
+  );
+}
+
 function QueryErrorNotice({ title, error, onRetry, isRetrying }: { title: string; error: unknown; onRetry: () => void; isRetrying: boolean }) {
   return (
     <div className="rounded-lg border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive">
@@ -654,83 +708,4 @@ function withoutFieldError<T extends string>(errors: Partial<Record<T, string>>,
 
 function firstError(errors: Record<string, string | undefined>): string {
   return Object.values(errors).find(Boolean) ?? '请修正高亮字段后再保存';
-}
-
-function validateBindingForm(form: typeof emptyBindingForm, containers: ContainerOption[]): { errors: BindingFormErrors; payload: SaveBindingPayload | null } {
-  const errors: BindingFormErrors = {};
-  const hostname = normalizeHttpProxyHostname(form.hostname);
-  const targetPort = Number(form.targetPort);
-
-  if (!hostname) {
-    errors.hostname = '请输入域名';
-  } else if (hostname.startsWith('*.') || hostname.includes('*')) {
-    errors.hostname = '绑定域名不能使用通配符';
-  } else if (!isValidHostname(hostname)) {
-    errors.hostname = '请输入有效域名，如 app.apps.example.com';
-  }
-
-  if (!form.containerId) {
-    errors.containerId = '请选择目标容器';
-  } else if (containers.length > 0 && !containers.some((container) => container.id === form.containerId)) {
-    errors.containerId = '请选择有效容器';
-  }
-
-  if (!Number.isInteger(targetPort) || targetPort < 1 || targetPort > 65535) {
-    errors.targetPort = '端口必须是 1 到 65535 之间的整数';
-  }
-
-  if (Object.keys(errors).length > 0) return { errors, payload: null };
-  return {
-    errors,
-    payload: {
-      hostname,
-      containerId: form.containerId,
-      targetPort,
-    },
-  };
-}
-
-function validatePoolForm(form: typeof emptyPoolForm, isEditing: boolean): { errors: PoolFormErrors; payload: SavePoolPayload | null } {
-  const errors: PoolFormErrors = {};
-  const rawWildcardDomain = form.wildcardDomain.trim();
-  const wildcardDomain = rawWildcardDomain ? normalizeHttpProxyWildcardDomain(rawWildcardDomain) : '';
-  const certificatePem = form.certificatePem.trim();
-  const privateKeyPem = form.privateKeyPem.trim();
-
-  if (!rawWildcardDomain) {
-    errors.wildcardDomain = '请输入通配根域';
-  } else if (!isValidWildcardDomain(wildcardDomain)) {
-    errors.wildcardDomain = '请输入有效通配域名，如 *.apps.example.com';
-  }
-
-  if ((certificatePem && !privateKeyPem) || (!certificatePem && privateKeyPem)) {
-    const message = '证书 PEM 与私钥 PEM 必须成对填写';
-    errors.certificatePem = message;
-    errors.privateKeyPem = message;
-  }
-
-  if (Object.keys(errors).length > 0) return { errors, payload: null };
-
-  const payload: SavePoolPayload = {
-    wildcardDomain,
-    enabled: form.enabled,
-    httpsEnabled: form.httpsEnabled,
-  };
-  if (!isEditing || certificatePem || privateKeyPem) {
-    payload.certificatePem = certificatePem || null;
-    payload.privateKeyPem = privateKeyPem || null;
-  }
-  return { errors, payload };
-}
-
-function isValidWildcardDomain(wildcardDomain: string): boolean {
-  if (!wildcardDomain.startsWith('*.')) return false;
-  return isValidHostname(wildcardDomain.slice(2));
-}
-
-function isValidHostname(hostname: string): boolean {
-  if (hostname.length > 253) return false;
-  const labels = hostname.split('.');
-  if (labels.length < 2) return false;
-  return labels.every((label) => /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(label));
 }

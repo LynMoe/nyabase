@@ -39,7 +39,7 @@ export class DataDirTaskHandler implements AgentTaskHandler<DataDirTaskResult> {
       await this.assertSourceReady(parsed.diskId, parsed.sourceIdentity);
       const source = this.dataDirs.getSource(parsed.diskId);
       const quotaAssigned = source?.kind === 'local' && source.quotaEnabled;
-      const before = this.dataDirs.inspectDir(parsed.diskId, parsed.resourceId);
+      const before = await this.dataDirs.inspectDirExact(parsed.diskId, parsed.resourceId);
       if (quotaAssigned !== parsed.quotaRequired) {
         this.managed(
           'data_dir_quota_policy_mismatch',
@@ -88,7 +88,7 @@ export class DataDirTaskHandler implements AgentTaskHandler<DataDirTaskResult> {
           parsed.sourceIdentity,
         );
       } catch (error) {
-        const inspected = this.tryInspectDir(parsed.diskId, parsed.resourceId);
+        const inspected = await this.tryInspectDir(parsed.diskId, parsed.resourceId);
         if (error instanceof DataDirOperationIncompleteError) {
           this.incomplete(
             'data_dir_apply_incomplete',
@@ -121,7 +121,7 @@ export class DataDirTaskHandler implements AgentTaskHandler<DataDirTaskResult> {
           cause: this.errorMessage(error),
         });
       }
-      const afterCreate = this.dataDirs.inspectDir(parsed.diskId, parsed.resourceId);
+      const afterCreate = await this.dataDirs.inspectDirExact(parsed.diskId, parsed.resourceId);
       if (quotaAssigned) {
         try {
           await this.dataDirs.withPinnedDir(
@@ -168,7 +168,7 @@ export class DataDirTaskHandler implements AgentTaskHandler<DataDirTaskResult> {
     await this.assertSourceReady(parsed.diskId, parsed.sourceIdentity);
     const source = this.dataDirs.getSource(parsed.diskId);
     const quotaAssigned = source?.kind === 'local' && source.quotaEnabled;
-    const before = this.dataDirs.inspectDir(parsed.diskId, parsed.resourceId);
+    const before = await this.dataDirs.inspectDirExact(parsed.diskId, parsed.resourceId);
     await this.assertPathUnreferenced(before.path, {
       operation: 'absent',
       diskId: parsed.diskId,
@@ -182,7 +182,7 @@ export class DataDirTaskHandler implements AgentTaskHandler<DataDirTaskResult> {
         parsed.sourceIdentity,
       );
     } catch (error) {
-      const inspected = this.tryInspectDir(parsed.diskId, parsed.resourceId);
+      const inspected = await this.tryInspectDir(parsed.diskId, parsed.resourceId);
       const observed = inspected.observation;
       if (error instanceof DataDirIdentityConflictError) {
         if (!observed) {
@@ -214,26 +214,36 @@ export class DataDirTaskHandler implements AgentTaskHandler<DataDirTaskResult> {
     // absence and rolls forward through only this cleanup.
     if (quotaAssigned) {
       try {
-        this.quota.removePathFromProject(parsed.numericUserId, before.path);
+        const expectedProjectId = this.quota.projectIdForUser(parsed.numericUserId);
+        const registration = this.quota.inspectExactPathRegistration(before.path);
+        if (registration.projectId !== null && registration.projectId !== expectedProjectId) {
+          this.incomplete(
+            'data_dir_quota_cleanup_owner_mismatch',
+            `Quota registration for ${before.path} belongs to another project`,
+            { registration, expectedProjectId },
+          );
+        }
+        await this.quota.removeExactPathRegistration(before.path);
       } catch (error) {
-        if (this.quota.isPathRegisteredToProject(parsed.numericUserId, before.path)) {
+        const registration = this.tryInspectExactRegistration(before.path);
+        if (registration === null || registration.projectId !== null) {
           this.incomplete('data_dir_quota_cleanup_incomplete', `Quota registration for ${before.path} is not absent yet`, {
-            ...this.dataDirs.inspectDir(parsed.diskId, parsed.resourceId),
-            quotaRegistrationPresent: true,
+            ...await this.dataDirs.inspectDirExact(parsed.diskId, parsed.resourceId),
+            quotaRegistration: registration,
             cause: this.errorMessage(error),
           });
         }
       }
     }
     this.ws.emit('dataDirChanged');
-    return { ...this.dataDirs.inspectDir(parsed.diskId, parsed.resourceId), quotaAssigned };
+    return { ...await this.dataDirs.inspectDirExact(parsed.diskId, parsed.resourceId), quotaAssigned };
   }
 
   async verify(kind: AgentTaskKind, payload: unknown, result: DataDirTaskResult): Promise<void> {
     if (kind === AgentTaskKind.DataDirEnsure) {
       const parsed = zDataDirEnsureTaskPayload.parse(payload);
       await this.assertSourceReady(parsed.diskId, parsed.sourceIdentity);
-      const observed = this.dataDirs.inspectDir(parsed.diskId, parsed.resourceId);
+      const observed = await this.dataDirs.inspectDirExact(parsed.diskId, parsed.resourceId);
       const source = this.dataDirs.getSource(parsed.diskId);
       const sourceQuotaEnabled = source?.kind === 'local' && source.quotaEnabled;
       if (sourceQuotaEnabled !== parsed.quotaRequired) {
@@ -255,7 +265,7 @@ export class DataDirTaskHandler implements AgentTaskHandler<DataDirTaskResult> {
             // fresh physical directory observation so terminal evidence never
             // describes an earlier pre-verify state or violates Backend's
             // DataDir safety schema.
-            observedDir = this.dataDirs.inspectDir(parsed.diskId, parsed.resourceId);
+            observedDir = await this.dataDirs.inspectDirExact(parsed.diskId, parsed.resourceId);
           } catch (inspectionError) {
             this.incomplete(
               'data_dir_final_observation_unavailable',
@@ -333,13 +343,16 @@ export class DataDirTaskHandler implements AgentTaskHandler<DataDirTaskResult> {
 
     const parsed = zDataDirAbsentTaskPayload.parse(payload);
     await this.assertSourceReady(parsed.diskId, parsed.sourceIdentity);
-    const observed = this.dataDirs.inspectDir(parsed.diskId, parsed.resourceId);
-    const registrationPresent = result.quotaAssigned
-      && this.quota.isPathRegisteredToProject(parsed.numericUserId, observed.path);
+    const observed = await this.dataDirs.inspectDirExact(parsed.diskId, parsed.resourceId);
+    const registration = result.quotaAssigned
+      ? this.tryInspectExactRegistration(observed.path)
+      : { path: observed.path, projectId: null };
+    const registrationPresent = registration === null || registration.projectId !== null;
     if (observed.exists || observed.resourceId !== null || registrationPresent) {
       this.incomplete('data_dir_not_absent', `DataDir ${parsed.resourceId} was not fully removed`, {
         ...observed,
         quotaRegistrationPresent: registrationPresent,
+        quotaRegistration: registration,
       });
     }
   }
@@ -395,12 +408,12 @@ export class DataDirTaskHandler implements AgentTaskHandler<DataDirTaskResult> {
     }
   }
 
-  private tryInspectDir(
+  private async tryInspectDir(
     sourceId: string,
     resourceId: string,
-  ): { observation: DataDirObservation | null; details: Record<string, unknown> } {
+  ): Promise<{ observation: DataDirObservation | null; details: Record<string, unknown> }> {
     try {
-      const observation = this.dataDirs.inspectDir(sourceId, resourceId);
+      const observation = await this.dataDirs.inspectDirExact(sourceId, resourceId);
       return { observation, details: { ...observation } };
     } catch (error) {
       return {
@@ -410,8 +423,18 @@ export class DataDirTaskHandler implements AgentTaskHandler<DataDirTaskResult> {
     }
   }
 
+  private tryInspectExactRegistration(
+    pathValue: string,
+  ): ReturnType<XfsQuotaManager['inspectExactPathRegistration']> | null {
+    try {
+      return this.quota.inspectExactPathRegistration(pathValue);
+    } catch {
+      return null;
+    }
+  }
+
   private async assertSourceReady(sourceId: string, expectedIdentity: string): Promise<void> {
-    const observed = this.dataDirs.inspectSource(sourceId);
+    const observed = await this.dataDirs.inspectSourceExact(sourceId);
     if (!observed.ready || observed.identity !== expectedIdentity) {
       this.incomplete(
         'data_dir_source_unavailable',

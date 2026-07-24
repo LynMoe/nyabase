@@ -23,6 +23,9 @@ export class AppService implements OnApplicationBootstrap {
     await this.usersService.ensureAdminExists(async (userId) => {
       await this.groupsService.addMember(admins.id, userId);
       this.logger.log('Default admin user created and added to Administrators');
-    });
+    }, (excludedUserId) => this.groupsService.hasActiveSystemGroupMember(
+      admins.id,
+      excludedUserId,
+    ));
   }
 }

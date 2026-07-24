@@ -66,6 +66,11 @@ import { ExecSessionAuthorizationService } from './exec-session-authorization.se
     RuntimeDriftReconcilerService,
     FailStopService,
   ],
-  exports: [AgentGateway, ConsoleGateway, ExecSessionRegistry],
+  exports: [
+    AgentGateway,
+    ConsoleGateway,
+    ExecSessionRegistry,
+    ExecSessionAuthorizationService,
+  ],
 })
 export class AgentGatewayModule {}

@@ -1,0 +1,48 @@
+{
+  "name": "full",
+  "description": "Release CPU surface including NFS, CephFS, SSH, HTTP proxy, and every UI route.",
+  "cpuOnly": true,
+  "groups": [
+    "00-foundation",
+    "10-auth-rbac",
+    "20-servers-images",
+    "30-containers",
+    "40-storage-quota",
+    "50-proxies-network",
+    "60-metrics-audit-settings",
+    "70-browser",
+    "90-cleanup-evidence"
+  ],
+  "requiredEnv": [
+    "E2E_BASE_URL",
+    "E2E_RATE_LIMIT_BASE_URL",
+    "E2E_RUN_ID",
+    "E2E_ADMIN_USERNAME",
+    "E2E_ADMIN_PASSWORD",
+    "E2E_EDGE_SPKI",
+    "E2E_RESOURCE_MANIFEST",
+    "E2E_SEED_STATE",
+    "E2E_NFS_FIXTURE",
+    "E2E_CEPHFS_FIXTURE"
+  ],
+  "requiredCapabilities": [
+    "fresh-control-plane",
+    "tls-edge",
+    "victoria-metrics",
+    "local-tls-registry",
+    "two-cpu-nodes",
+    "real-systemd",
+    "agent-managed-dockerd",
+    "cgroup-v2",
+    "xfs-project-quota",
+    "mount-namespaces",
+    "network-namespaces",
+    "shared-macvlan-l2",
+    "nfs-fixture",
+    "cephfs-fixture",
+    "ssh-proxy",
+    "http-proxy"
+  ],
+  "workers": 1,
+  "timeoutMs": 180000
+}

@@ -1,0 +1,105 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nyabase.local/schemas/cpu-e2e-run-evidence-v1.json",
+  "title": "Nyabase CPU E2E current-run closure evidence",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "runId",
+    "profile",
+    "generatedAt",
+    "ledgerSha256",
+    "build",
+    "playwright",
+    "caseEvents",
+    "cleanup"
+  ],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "runId": { "type": "string", "minLength": 1 },
+    "profile": { "enum": ["smoke", "core", "full", "recovery"] },
+    "generatedAt": { "type": "string", "format": "date-time" },
+    "ledgerSha256": { "$ref": "#/$defs/sha256" },
+    "build": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "provenancePath",
+        "provenanceSha256",
+        "gitSha",
+        "trackedDiffSha256",
+        "untrackedSourceSha256",
+        "productSourceSha256",
+        "backendImageId",
+        "nodeImageId",
+        "builtAt"
+      ],
+      "properties": {
+        "provenancePath": { "type": "string", "minLength": 1 },
+        "provenanceSha256": { "$ref": "#/$defs/sha256" },
+        "gitSha": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+        "trackedDiffSha256": { "$ref": "#/$defs/sha256" },
+        "untrackedSourceSha256": { "$ref": "#/$defs/sha256" },
+        "productSourceSha256": { "$ref": "#/$defs/sha256" },
+        "backendImageId": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+        "nodeImageId": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+        "builtAt": { "type": "string", "format": "date-time" }
+      }
+    },
+    "playwright": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "reportPath", "reportSha256", "startedAt", "finishedAt"],
+      "properties": {
+        "status": { "const": "passed" },
+        "reportPath": { "type": "string", "minLength": 1 },
+        "reportSha256": { "$ref": "#/$defs/sha256" },
+        "startedAt": { "type": "string", "format": "date-time" },
+        "finishedAt": { "type": "string", "format": "date-time" }
+      }
+    },
+    "caseEvents": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["caseId", "kind", "source", "status", "observedAt", "observedHttpSurfaces"],
+        "properties": {
+          "caseId": { "type": "string", "minLength": 1 },
+          "kind": { "enum": ["behavioral", "fixture", "evidence"] },
+          "source": { "enum": ["playwright", "fixture", "evidence", "cleanup"] },
+          "status": { "const": "passed" },
+          "observedAt": { "type": "string", "format": "date-time" },
+          "specPath": { "type": "string", "minLength": 1 },
+          "specTestId": { "type": "string", "minLength": 1 },
+          "fixtureProducer": { "type": "string", "minLength": 1 },
+          "evidenceProducer": { "type": "string", "minLength": 1 },
+          "artifactPath": { "type": "string", "minLength": 1 },
+          "artifactSha256": { "$ref": "#/$defs/sha256" },
+          "observedHttpSurfaces": {
+            "type": "array",
+            "uniqueItems": true,
+            "items": { "type": "string", "minLength": 1 }
+          }
+        }
+      }
+    },
+    "cleanup": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["phase", "status", "manifestSchemaVersion", "manifestPath", "manifestSha256", "checkedAt"],
+      "properties": {
+        "phase": { "const": "post-down" },
+        "status": { "const": "clean" },
+        "manifestSchemaVersion": { "const": 2 },
+        "manifestPath": { "type": "string", "minLength": 1 },
+        "manifestSha256": { "$ref": "#/$defs/sha256" },
+        "checkedAt": { "type": "string", "format": "date-time" }
+      }
+    }
+  },
+  "$defs": {
+    "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+  }
+}

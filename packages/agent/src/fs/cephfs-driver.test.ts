@@ -65,12 +65,30 @@ describe('CephFsDriver', () => {
     const driver = new CephFsDriver();
     expect(driver.matchesCurrent(spec(), {
       src: '10.0.0.10:6789:/',
-      opts: 'rw,name=nyabase,ro',
+      opts: 'ro,name=nyabase',
     })).toBe(false);
     expect(driver.matchesCurrent(spec(), {
       src: '10.0.0.1:6789:/',
-      opts: 'rw,name=nyabase,ro',
+      opts: 'ro,name=nyabase',
     })).toBe(true);
+  });
+
+  it('preserves explicitly requested IPv4/IPv6 monitor ports and access mode', () => {
+    const driver = new CephFsDriver();
+    const requested = spec();
+    (requested.params as { monHosts: string }).monHosts = '10.0.0.1:6789,[2001:db8::1]:6789';
+    expect(driver.matchesCurrent(requested, {
+      src: '10.0.0.1:3300,[2001:db8::1]:6789:/',
+      opts: 'ro,name=nyabase',
+    })).toBe(false);
+    expect(driver.matchesCurrent(requested, {
+      src: '10.0.0.1:6789,[2001:db8::1]:3300:/',
+      opts: 'ro,name=nyabase',
+    })).toBe(false);
+    expect(driver.matchesCurrent(requested, {
+      src: '10.0.0.1:6789,[2001:db8::1]:6789:/',
+      opts: 'rw,name=nyabase',
+    })).toBe(false);
   });
 
   it('classifies stale-secret cleanup failure as retryable incomplete cleanup', async () => {

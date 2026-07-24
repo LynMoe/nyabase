@@ -70,20 +70,27 @@ export class CephFsDriver implements FsMountDriver {
     const params = spec.params as CephFsParams;
     const sourceSuffix = `:${params.exportPath}`;
     if (!current.src.endsWith(sourceSuffix)) return false;
-    const desiredMonitors = params.monHosts.split(',').map(normalizeMonitorIdentity).filter(Boolean);
-    const currentMonitors = new Set(
-      current.src.slice(0, -sourceSuffix.length)
-        .split(',')
-        .map(normalizeMonitorIdentity)
-        .filter(Boolean),
-    );
-    if (!desiredMonitors.every((monitor) => currentMonitors.has(monitor))) return false;
+    const desiredMonitors = params.monHosts.split(',')
+      .map(parseMonitorIdentity)
+      .filter(isMonitorIdentity);
+    const currentMonitors = current.src.slice(0, -sourceSuffix.length)
+      .split(',')
+      .map(parseMonitorIdentity)
+      .filter(isMonitorIdentity);
+    if (!desiredMonitors.every((desired) => currentMonitors.some((observed) => (
+      observed.host === desired.host
+      && (desired.port === null || observed.port === desired.port)
+    )))) return false;
     const options = new Set(current.opts.split(',').filter(Boolean));
+    const requested = requestedOptions(spec.options);
+    const desiredReadOnly = requested.includes('ro');
+    if (options.has('ro') === options.has('rw')) return false;
+    if (desiredReadOnly ? !options.has('ro') : !options.has('rw')) return false;
     if (!options.has(`name=${params.clientName}`)) return false;
     if (params.fsName && !options.has(`fs=${params.fsName}`) && !options.has(`mds_namespace=${params.fsName}`)) {
       return false;
     }
-    return requestedOptions(spec.options).every((option) => options.has(option));
+    return requested.every((option) => options.has(option));
   }
 
   async cleanup(spec: RemoteFsMountSpec): Promise<void> {
@@ -131,9 +138,28 @@ function requestedOptions(options: string): string[] {
   return options.split(',').map((value) => value.trim()).filter(Boolean);
 }
 
-function normalizeMonitorIdentity(raw: string): string {
+interface MonitorIdentity {
+  host: string;
+  port: number | null;
+}
+
+function parseMonitorIdentity(raw: string): MonitorIdentity | null {
   const value = raw.trim();
-  const bracketed = value.match(/^\[([^\]]+)](?::\d+)?$/);
-  if (bracketed) return bracketed[1];
-  return (value.match(/:/g)?.length ?? 0) === 1 ? value.split(':')[0] : value;
+  if (!value) return null;
+  const bracketed = value.match(/^\[([^\]]+)](?::(\d+))?$/);
+  if (bracketed) {
+    return {
+      host: bracketed[1].toLowerCase(),
+      port: bracketed[2] ? Number(bracketed[2]) : null,
+    };
+  }
+  const hostPort = value.match(/^([^:]+):(\d+)$/);
+  if (hostPort) {
+    return { host: hostPort[1].toLowerCase(), port: Number(hostPort[2]) };
+  }
+  return { host: value.toLowerCase(), port: null };
+}
+
+function isMonitorIdentity(value: MonitorIdentity | null): value is MonitorIdentity {
+  return value !== null;
 }

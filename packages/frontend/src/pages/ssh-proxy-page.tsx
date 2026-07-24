@@ -26,6 +26,9 @@ import {
 } from '../components/ui/alert-dialog.js';
 import { toast } from '../hooks/use-toast.js';
 import { useAuthStore } from '../store/auth.js';
+import { QueryErrorState, QueryLoadingState } from '../components/query-state.js';
+import { canViewSshProxyStatus } from '../lib/ssh-proxy-access.js';
+import { queryPollInterval } from '../lib/query-lifecycle.js';
 
 interface SshProxyAdminStatus {
   connectedProxies: number;
@@ -50,19 +53,25 @@ interface DisconnectAllResult {
 export default function SshProxyPage() {
   const qc = useQueryClient();
   const user = useAuthStore((state) => state.user);
-  const canViewMetrics = user?.capabilities.includes(Capability.ViewMetricsAll) ?? false;
+  const canViewStatus = canViewSshProxyStatus(user?.capabilities ?? []);
   const canManageSettings = user?.capabilities.includes(Capability.ManageSystemSettings) ?? false;
-  const { data, isFetching, refetch } = useQuery({
+  const statusQuery = useQuery({
     queryKey: ['ssh-proxy-status'],
     queryFn: () => api.get<SshProxyAdminStatus>('/admin/ssh-proxy/status'),
-    refetchInterval: 1_000,
-    enabled: canViewMetrics,
+    refetchInterval: (query) => queryPollInterval(query.state, {
+      activeIntervalMs: 1_000,
+      transientBaseIntervalMs: 2_000,
+      transientMaxIntervalMs: 30_000,
+    }),
+    enabled: canViewStatus,
   });
-  const { data: hostKey, isFetching: hostKeyFetching, refetch: refetchHostKey } = useQuery({
+  const hostKeyQuery = useQuery({
     queryKey: ['ssh-proxy-host-key'],
     queryFn: () => api.get<SshProxyHostKeySummaryDto>('/admin/ssh-proxy/host-key'),
     enabled: canManageSettings,
   });
+  const { data, isFetching, refetch } = statusQuery;
+  const { data: hostKey, isFetching: hostKeyFetching, refetch: refetchHostKey } = hostKeyQuery;
 
   const disconnectAll = useMutation({
     mutationFn: () => api.post<DisconnectAllResult>('/admin/ssh-proxy/disconnect-all'),
@@ -105,22 +114,24 @@ export default function SshProxyPage() {
       <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
         <div>
           <h1 className="text-2xl font-semibold tracking-tight text-foreground">SSH 代理</h1>
-          {canViewMetrics && (
+          {canViewStatus && (
             <p className="text-sm text-muted-foreground mt-0.5">
-              {status.updatedAt ? `最后更新 ${formatTime(status.updatedAt)}` : '等待代理上报实时状态'}
+              {statusQuery.isError
+                ? '代理状态加载失败'
+                : status.updatedAt ? `最后更新 ${formatTime(status.updatedAt)}` : '等待代理上报实时状态'}
             </p>
           )}
         </div>
         <div className="flex items-center gap-2">
-          {canViewMetrics && (
+          {canViewStatus && (
             <Button variant="ghost" size="icon" className="h-8 w-8 text-muted-foreground" onClick={() => refetch()} disabled={isFetching}>
               <RefreshCw className={`h-4 w-4 ${isFetching ? 'animate-spin' : ''}`} />
             </Button>
           )}
-          {canManageSettings && canViewMetrics && (
+          {canManageSettings && (
             <AlertDialog>
               <AlertDialogTrigger asChild>
-                <Button variant="destructive" disabled={status.activeConnections === 0 || disconnectAll.isPending}>
+                <Button variant="destructive" disabled={(canViewStatus && Boolean(data) && status.activeConnections === 0) || disconnectAll.isPending}>
                   <Unplug className="h-4 w-4" />
                   断开全部
                 </Button>
@@ -129,7 +140,10 @@ export default function SshProxyPage() {
                 <AlertDialogHeader>
                   <AlertDialogTitle>断开所有 SSH 代理会话？</AlertDialogTitle>
                   <AlertDialogDescription>
-                    当前有 {status.activeConnections} 个活跃连接。确认后会向所有在线 SSH 代理实例发送断开命令。
+                    {canViewStatus && data
+                      ? `当前有 ${status.activeConnections} 个活跃连接。`
+                      : '当前连接数不可见或尚未加载。'}
+                    确认后会向所有在线 SSH 代理实例发送断开命令。
                   </AlertDialogDescription>
                 </AlertDialogHeader>
                 <AlertDialogFooter>
@@ -144,7 +158,12 @@ export default function SshProxyPage() {
         </div>
       </div>
 
-      {canViewMetrics && (
+      {canViewStatus && statusQuery.isLoading && <QueryLoadingState label="加载 SSH 代理状态..." />}
+      {canViewStatus && statusQuery.isError && (
+        <QueryErrorState error={statusQuery.error} resourceName="SSH 代理状态" onRetry={() => { void statusQuery.refetch(); }} />
+      )}
+
+      {canViewStatus && statusQuery.isSuccess && (
         <section className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
           <MetricTile icon={Wifi} label="在线代理" value={status.connectedProxies.toString()} sub={`${status.proxies.length} 个实例上报`} />
           <MetricTile icon={Activity} label="活跃连接" value={status.activeConnections.toString()} sub={`累计 ${status.totalConnections} 次`} />
@@ -172,15 +191,21 @@ export default function SshProxyPage() {
               </Button>
             </div>
           </div>
-          <div className="rounded-lg border border-border bg-card p-4 grid gap-3 sm:grid-cols-3">
-            <InfoCell label="指纹" value={hostKey?.fingerprint ?? '-'} mono />
-            <InfoCell label="版本" value={hostKey?.generation?.toString() ?? '-'} />
-            <InfoCell label="轮换时间" value={hostKey?.rotatedAt ? formatTime(hostKey.rotatedAt) : '-'} />
-          </div>
+          {hostKeyQuery.isLoading ? (
+            <QueryLoadingState label="加载 SSH 主机密钥..." />
+          ) : hostKeyQuery.isError ? (
+            <QueryErrorState error={hostKeyQuery.error} resourceName="SSH 主机密钥" onRetry={() => { void hostKeyQuery.refetch(); }} />
+          ) : hostKey ? (
+            <div className="rounded-lg border border-border bg-card p-4 grid gap-3 sm:grid-cols-3">
+              <InfoCell label="指纹" value={hostKey.fingerprint ?? '未配置'} mono />
+              <InfoCell label="版本" value={hostKey.generation?.toString() ?? '未配置'} />
+              <InfoCell label="轮换时间" value={hostKey.rotatedAt ? formatTime(hostKey.rotatedAt) : '从未轮换'} />
+            </div>
+          ) : null}
         </section>
       )}
 
-      {canViewMetrics && (
+      {canViewStatus && statusQuery.isSuccess && (
         <>
           <section className="space-y-3">
             <div className="flex items-center justify-between gap-4">

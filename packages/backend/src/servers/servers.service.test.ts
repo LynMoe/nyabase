@@ -1,6 +1,7 @@
 import {
   AgentTaskKind, AgentTaskStatus, ContainerPhase, ContainerPowerIntent, ContainerStatus,
   MAX_PLATFORM_SERVERS, ServerStatus,
+  AuditAction,
 } from '@nyabase/common';
 import { DataSource } from 'typeorm';
 import { createHash } from 'node:crypto';
@@ -31,12 +32,16 @@ import { ServersService } from './servers.service.js';
 import { AgentTaskFinalizerService } from '../agent-tasks/agent-task-finalizer.service.js';
 import { NetworkAddressClaimEntity } from '../entities/network-address-claim.entity.js';
 import { HttpHostnameReservationEntity } from '../entities/http-hostname-reservation.entity.js';
+import type { AuditService } from '../audit/audit.service.js';
 
 describe('ServersService delete fencing', () => {
   let dataSource: DataSource;
   let service: ServersService;
   let broadcastSnapshot: ReturnType<typeof vi.fn>;
   let runWithSessionFence: ReturnType<typeof vi.fn>;
+  let claimSessionFence: ReturnType<typeof vi.fn>;
+  let auditLog: ReturnType<typeof vi.fn>;
+  let assertActorCapabilities: ReturnType<typeof vi.fn>;
 
   beforeEach(async () => {
     dataSource = new DataSource({
@@ -69,18 +74,43 @@ describe('ServersService delete fencing', () => {
     });
     await dataSource.initialize();
     broadcastSnapshot = vi.fn().mockResolvedValue(undefined);
+    claimSessionFence = vi.fn();
     runWithSessionFence = vi.fn(async (
       _serverId: string,
       _reason: string,
       work: () => Promise<unknown>,
-    ) => work());
+      options?: { authorizeAndClaim?: (claim: () => void) => Promise<void> },
+    ) => {
+      await options?.authorizeAndClaim?.(() => {
+        (claimSessionFence as unknown as () => void)();
+      });
+      return work();
+    });
+    auditLog = vi.fn().mockResolvedValue(undefined);
+    assertActorCapabilities = vi.fn().mockResolvedValue(new Set());
     service = new ServersService(
       dataSource.getRepository(ServerEntity),
-      { runWithSessionFence } as unknown as AgentGateway,
-      {} as AccessResolverService,
+      {
+        runWithSessionFence,
+        stateCache: { get: vi.fn().mockReturnValue(undefined) },
+      } as unknown as AgentGateway,
+      {
+        assertActorCapabilitiesInTransaction: assertActorCapabilities,
+        runWithActorCapabilities: vi.fn(async (
+          actorId: string,
+          capabilities: unknown,
+          work: (manager: unknown) => Promise<unknown>,
+        ) => {
+          await (assertActorCapabilities as unknown as (
+            ...args: unknown[]
+          ) => Promise<unknown>)(dataSource.manager, actorId, capabilities);
+          return work(dataSource.manager);
+        }),
+      } as unknown as AccessResolverService,
       { broadcastSnapshot } as unknown as SshProxyGateway,
       dataSource,
       { forgetServer: vi.fn() } as never,
+      { log: auditLog } as unknown as AuditService,
     );
     await insertServer();
   });
@@ -88,6 +118,122 @@ describe('ServersService delete fencing', () => {
   afterEach(async () => {
     vi.restoreAllMocks();
     if (dataSource?.isInitialized) await dataSource.destroy();
+  });
+
+  it('exposes the immutable host fingerprint only in the explicit admin projection', async () => {
+    const hostFingerprint = 'a'.repeat(64);
+    await dataSource.getRepository(ServerEntity).update('server-a', { hostFingerprint });
+
+    await expect(service.findDtoById('server-a')).resolves.not.toHaveProperty(
+      'hostFingerprint',
+    );
+    await expect(
+      service.findDtoById('server-a', { includeHostFingerprint: true }),
+    ).resolves.toMatchObject({ id: 'server-a', hostFingerprint });
+    await expect(
+      service.findAllDtos({ includeHostFingerprint: true }),
+    ).resolves.toEqual([
+      expect.objectContaining({ id: 'server-a', hostFingerprint }),
+    ]);
+  });
+
+  it('keeps ordinary server projections free of host and Agent internals', async () => {
+    const projected = await service.findUserDtoById('server-a');
+    expect(projected).toEqual({
+      id: 'server-a',
+      name: 'Server A',
+      slug: 'server-a',
+      status: ServerStatus.Unknown,
+      lastSeenAt: null,
+      runtimeReady: false,
+    });
+    expect(projected).not.toHaveProperty('agentTokenHash');
+    expect(projected).not.toHaveProperty('dockerDaemon');
+    expect(projected).not.toHaveProperty('disks');
+    expect(projected).not.toHaveProperty('gpus');
+    expect(projected).not.toHaveProperty('quarantineCode');
+  });
+
+  it('does not throw when a legacy runtime cache contains an invalid epoch', async () => {
+    const internals = service as unknown as {
+      agentGateway: { stateCache: { get(serverId: string): unknown } };
+    };
+    internals.agentGateway.stateCache.get = vi.fn().mockReturnValue({
+      runtimeReady: true,
+      lastUpdated: 1e300,
+      disks: [],
+      gpus: [],
+      dockerDaemon: null,
+      agentVersion: '0.1.0',
+    });
+
+    await expect(service.findDtoById('server-a')).resolves.toMatchObject({
+      id: 'server-a',
+      runtimeObservedAt: null,
+    });
+  });
+
+  it('validates commandAck self-check data before exposing it', async () => {
+    const internals = service as unknown as {
+      agentGateway: {
+        isOnline(serverId: string): boolean;
+        stateCache: { getRuntimeBlockReason(serverId: string): { enabled: boolean } };
+        rpc(serverId: string, kind: string, payload: unknown): Promise<unknown>;
+      };
+      accessResolver: {
+        startExternalWithActorCapabilities(
+          actorId: string,
+          capabilities: unknown,
+          work: () => Promise<unknown>,
+        ): Promise<{ completion: Promise<unknown> }>;
+      };
+    };
+    internals.agentGateway.isOnline = vi.fn().mockReturnValue(true);
+    internals.agentGateway.stateCache.getRuntimeBlockReason = vi.fn().mockReturnValue({ enabled: true });
+    internals.accessResolver.startExternalWithActorCapabilities = vi.fn(async (
+      _actorId,
+      _capabilities,
+      work,
+    ) => ({ completion: work() }));
+    internals.agentGateway.rpc = vi.fn().mockResolvedValue({
+      items: [{ id: 'docker', label: 'Docker', status: 'ok', message: 'healthy' }],
+    });
+    await expect(service.selfCheck('actor-a', 'server-a')).resolves.toEqual({
+      items: [{ id: 'docker', label: 'Docker', status: 'ok', message: 'healthy' }],
+    });
+
+    internals.agentGateway.rpc = vi.fn().mockResolvedValue({
+      items: Array.from({ length: 129 }, () => ({
+        id: 'docker', label: 'Docker', status: 'ok', message: 'healthy',
+      })),
+    });
+    await expect(service.selfCheck('actor-a', 'server-a')).rejects.toThrow();
+  });
+
+  it('does not acquire an Agent session fence after server authority is revoked', async () => {
+    assertActorCapabilities.mockRejectedValueOnce(new Error('authority revoked'));
+    await expect(service.delete('actor-a', 'server-a')).rejects.toThrow('authority revoked');
+    expect(claimSessionFence).not.toHaveBeenCalled();
+    expect(await dataSource.getRepository(ServerEntity).countBy({ id: 'server-a' })).toBe(1);
+    expect(auditLog).not.toHaveBeenCalled();
+
+    assertActorCapabilities.mockRejectedValueOnce(new Error('authority revoked'));
+    await expect(service.regenerateToken('actor-a', 'server-a')).rejects.toThrow('authority revoked');
+    expect(claimSessionFence).not.toHaveBeenCalled();
+    expect(auditLog).not.toHaveBeenCalled();
+  });
+
+  it('rechecks authority after fencing and never mutates when revocation wins the final lease', async () => {
+    assertActorCapabilities
+      .mockResolvedValueOnce(new Set())
+      .mockRejectedValueOnce(new Error('authority revoked after fence claim'));
+
+    await expect(service.delete('actor-a', 'server-a'))
+      .rejects.toThrow('authority revoked after fence claim');
+
+    expect(claimSessionFence).toHaveBeenCalledOnce();
+    expect(await dataSource.getRepository(ServerEntity).countBy({ id: 'server-a' })).toBe(1);
+    expect(auditLog).not.toHaveBeenCalled();
   });
 
   it('refuses deletion while a pending task and resource lock reference the server', async () => {
@@ -120,7 +266,7 @@ describe('ServersService delete fencing', () => {
       serverId: 'server-a',
     });
 
-    await expect(service.delete('server-a')).rejects.toMatchObject({
+    await expect(service.delete('actor-a', 'server-a')).rejects.toMatchObject({
       response: {
         code: 'SERVER_NOT_EMPTY',
         dependencies: expect.arrayContaining(['pending agent tasks', 'resource locks']),
@@ -128,24 +274,38 @@ describe('ServersService delete fencing', () => {
     });
     expect(await dataSource.getRepository(ServerEntity).findOneBy({ id: 'server-a' })).not.toBeNull();
     expect(broadcastSnapshot).not.toHaveBeenCalled();
+    expect(auditLog).not.toHaveBeenCalled();
     expect(runWithSessionFence).toHaveBeenCalledWith(
       'server-a',
       'Server deletion started',
       expect.any(Function),
-      { requireBoundServerEmptyInventory: true },
+      expect.objectContaining({
+        requireBoundServerEmptyInventory: true,
+        authorizeAndClaim: expect.any(Function),
+      }),
     );
   });
 
   it('deletes an empty server transactionally', async () => {
-    await expect(service.delete('server-a')).resolves.toBeUndefined();
+    await expect(service.delete('actor-a', 'server-a')).resolves.toBeUndefined();
     expect(await dataSource.getRepository(ServerEntity).findOneBy({ id: 'server-a' })).toBeNull();
     expect(runWithSessionFence).toHaveBeenCalledWith(
       'server-a',
       'Server deletion started',
       expect.any(Function),
-      { requireBoundServerEmptyInventory: true },
+      expect.objectContaining({
+        requireBoundServerEmptyInventory: true,
+        authorizeAndClaim: expect.any(Function),
+      }),
     );
     expect(broadcastSnapshot).toHaveBeenCalledTimes(1);
+    expect(auditLog).toHaveBeenCalledWith(
+      'actor-a',
+      AuditAction.DeleteServer,
+      'server-a',
+      'server',
+      { serverId: 'server-a', name: 'Server A', slug: 'server-a' },
+    );
   });
 
   it('serializes concurrent creation at the fixed server capacity boundary', async () => {
@@ -164,13 +324,21 @@ describe('ServersService delete fencing', () => {
     ));
 
     const results = await Promise.allSettled([
-      service.create({ name: 'Last A', slug: 'last-a' }),
-      service.create({ name: 'Last B', slug: 'last-b' }),
+      service.create('actor-a', { name: 'Last A', slug: 'last-a' }),
+      service.create('actor-a', { name: 'Last B', slug: 'last-b' }),
     ]);
 
     expect(results.filter((result) => result.status === 'fulfilled')).toHaveLength(1);
     expect(results.filter((result) => result.status === 'rejected')).toHaveLength(1);
     expect(await dataSource.getRepository(ServerEntity).count()).toBe(MAX_PLATFORM_SERVERS);
+    expect(auditLog).toHaveBeenCalledTimes(1);
+    expect(auditLog).toHaveBeenCalledWith(
+      'actor-a',
+      AuditAction.CreateServer,
+      expect.any(String),
+      'server',
+      expect.not.objectContaining({ agentToken: expect.anything() }),
+    );
   });
 
   it('refuses deletion while an exact local mount-source grant references the server', async () => {
@@ -184,7 +352,7 @@ describe('ServersService delete fencing', () => {
       sourceIdentity: 'disk-identity-a',
     });
 
-    await expect(service.delete('server-a')).rejects.toMatchObject({
+    await expect(service.delete('actor-a', 'server-a')).rejects.toMatchObject({
       response: {
         code: 'SERVER_NOT_EMPTY',
         dependencies: expect.arrayContaining(['local mount source grants']),
@@ -194,6 +362,7 @@ describe('ServersService delete fencing', () => {
     expect(await dataSource.getRepository(MountSourceGrantEntity).findOneBy({ id: 'mount-grant-a' }))
       .not.toBeNull();
     expect(broadcastSnapshot).not.toHaveBeenCalled();
+    expect(auditLog).not.toHaveBeenCalled();
   });
 
   it('updates only mutable metadata and never resurrects or rolls back server identity', async () => {
@@ -201,10 +370,10 @@ describe('ServersService delete fencing', () => {
       hostFingerprint: 'host-fingerprint-a',
       agentConfigFingerprint: 'config-fingerprint-a',
     });
-    const rawToken = await service.regenerateToken('server-a');
+    const rawToken = await service.regenerateToken('actor-a', 'server-a');
     const rotatedHash = createHash('sha256').update(rawToken).digest('hex');
 
-    await expect(service.update('server-a', {
+    await expect(service.update('actor-a', 'server-a', {
       name: 'Renamed Server',
       slug: 'renamed-server',
     })).resolves.toMatchObject({
@@ -218,10 +387,35 @@ describe('ServersService delete fencing', () => {
         agentConfigFingerprint: 'config-fingerprint-a',
       });
 
-    await service.delete('server-a');
-    await expect(service.update('server-a', { name: 'Must Not Return' }))
+    expect(auditLog).toHaveBeenCalledWith(
+      'actor-a',
+      AuditAction.UpdateServer,
+      'server-a',
+      'server',
+      {
+        serverId: 'server-a',
+        previous: { name: 'Server A', slug: 'server-a' },
+        current: { name: 'Renamed Server', slug: 'renamed-server' },
+      },
+    );
+
+    await service.delete('actor-a', 'server-a');
+    const successfulAuditCount = auditLog.mock.calls.length;
+    await expect(service.update('actor-a', 'server-a', { name: 'Must Not Return' }))
       .rejects.toMatchObject({ status: 404 });
+    expect(auditLog).toHaveBeenCalledTimes(successfulAuditCount);
     expect(await dataSource.getRepository(ServerEntity).count()).toBe(0);
+  });
+
+  it('does not roll back a committed server mutation when audit storage is unavailable', async () => {
+    auditLog.mockRejectedValueOnce(new Error('audit unavailable'));
+
+    await expect(service.update('actor-a', 'server-a', { name: 'Committed Name' }))
+      .resolves.toMatchObject({ name: 'Committed Name' });
+
+    expect(await dataSource.getRepository(ServerEntity).findOneByOrFail({ id: 'server-a' }))
+      .toMatchObject({ name: 'Committed Name' });
+    expect(auditLog).toHaveBeenCalledOnce();
   });
 
   it('cascades terminal task history while deleting an otherwise empty server', async () => {
@@ -249,7 +443,7 @@ describe('ServersService delete fencing', () => {
       completedAt: new Date(),
     });
 
-    await expect(service.delete('server-a')).resolves.toBeUndefined();
+    await expect(service.delete('actor-a', 'server-a')).resolves.toBeUndefined();
     expect(await dataSource.getRepository(ServerEntity).count()).toBe(0);
     expect(await dataSource.getRepository(AgentTaskEntity).count()).toBe(0);
   });
@@ -397,7 +591,7 @@ describe('ServersService delete fencing', () => {
       createdBy: 'user-a',
     })).resolves.toMatchObject({ id: 'container-recreated' });
     await dataSource.getRepository(ContainerEntity).delete('container-recreated');
-    await expect(service.delete('server-a')).rejects.toMatchObject({
+    await expect(service.delete('actor-a', 'server-a')).rejects.toMatchObject({
       response: {
         code: 'SERVER_NOT_EMPTY',
         dependencies: expect.arrayContaining(['active or draining network address claims']),
@@ -406,7 +600,7 @@ describe('ServersService delete fencing', () => {
   });
 
   it('database-rejects server-scoped state resurrection after deletion', async () => {
-    await service.delete('server-a');
+    await service.delete('actor-a', 'server-a');
 
     await expect(dataSource.getRepository(ServerGrantEntity).insert({
       id: 'grant-after-delete',
@@ -503,7 +697,7 @@ describe('ServersService delete fencing', () => {
       completedAt: new Date(),
     });
 
-    await expect(service.delete('server-a')).resolves.toBeUndefined();
+    await expect(service.delete('actor-a', 'server-a')).resolves.toBeUndefined();
     expect(await dataSource.getRepository(QuotaDesiredEntity).count()).toBe(0);
     expect(await dataSource.getRepository(AgentTaskEntity).count()).toBe(0);
   });

@@ -1,12 +1,13 @@
 import { describe, expect, it, vi } from 'vitest';
 import { PATH_METADATA } from '@nestjs/common/constants';
-import type { MetricSeries } from '@nyabase/common';
+import { GpuGrantMode, type MetricSeries } from '@nyabase/common';
 import { MetricsController } from './metrics.controller.js';
 import { AdminMetricsController } from './admin-metrics.controller.js';
 import type { MetricsQueryService } from './metrics-query.service.js';
 import type { AccessResolverService } from '../access/access-resolver.service.js';
 import type { UsersService } from '../users/users.service.js';
 import type { UserEntity } from '../entities/user.entity.js';
+import { parseRange } from './metrics-query.service.js';
 
 describe('MetricsController.routes', () => {
   it('does not expose legacy raw PromQL paths', () => {
@@ -15,6 +16,29 @@ describe('MetricsController.routes', () => {
 
     expect(ordinaryPaths).not.toEqual(expect.arrayContaining(['query', 'query_range']));
     expect(adminPaths).not.toEqual(expect.arrayContaining(['query', 'query_range']));
+  });
+
+  it('rejects unsupported ranges instead of silently widening them to a default', () => {
+    expect(() => parseRange('7d')).toThrow('range must be one of 1h, 6h, or 24h');
+    expect(parseRange(undefined)).toMatchObject({ step: 60 });
+  });
+
+  it('quotes an admin-controlled server id as one PromQL label value', async () => {
+    const maliciousServerId = 'srv"} or vector(1) #';
+    const metricsQuery = {
+      queryRangeByLabel: vi.fn().mockResolvedValue(new Map()),
+    } as unknown as MetricsQueryService;
+    const controller = makeAdminController(metricsQuery);
+
+    await controller.adminGpuMetrics(maliciousServerId, '1h');
+
+    const selectors = vi.mocked(metricsQuery.queryRangeByLabel).mock.calls
+      .map(([selector]) => selector);
+    expect(selectors).toHaveLength(5);
+    for (const selector of selectors) {
+      expect(selector).toContain(`server=${JSON.stringify(maliciousServerId)}`);
+      expect(selector).not.toContain('server="srv"} or vector(1) #"');
+    }
   });
 });
 
@@ -68,6 +92,169 @@ describe('MetricsController.gpuMetrics', () => {
       }),
     ]);
   });
+
+  it('joins idle GPU inventory metadata without exposing physical UUIDs', async () => {
+    const metricsQuery = {
+      queryRangeByLabel: vi.fn().mockResolvedValue(new Map()),
+    } as unknown as MetricsQueryService;
+    const controller = makeController(
+      metricsQuery,
+      undefined,
+      undefined,
+      [],
+      new Map(),
+      [{ index: 2, uuid: 'GPU-physical-secret', model: 'NVIDIA A100', totalMemMiB: 40_960 }],
+    );
+
+    const result = await controller.gpuMetrics('srv-1', { id: 'user-1' } as UserEntity, '1h');
+
+    expect(result.gpus).toEqual([{
+      index: 2,
+      model: 'NVIDIA A100',
+      memTotalMiB: 40_960,
+      util: empty(60),
+      memUsed: empty(60),
+      temp: empty(60),
+      power: empty(60),
+      graphicsClockMHz: empty(60),
+    }]);
+    expect(JSON.stringify(result)).not.toContain('GPU-physical-secret');
+  });
+
+  it.each([
+    [GpuGrantMode.None, [], []],
+    [GpuGrantMode.Indices, [1], [1]],
+    [GpuGrantMode.All, [], [0, 1]],
+  ] as const)(
+    'filters ordinary GPU metrics for %s resolved access',
+    async (gpuMode, gpuIndices, expectedIndices) => {
+      const metricByIndex = new Map([
+        ['0', series(60, [[1000, 10]])],
+        ['1', series(60, [[1000, 20]])],
+      ]);
+      const metricsQuery = {
+        queryRangeByLabel: vi.fn()
+          .mockResolvedValueOnce(metricByIndex)
+          .mockResolvedValueOnce(metricByIndex)
+          .mockResolvedValueOnce(metricByIndex)
+          .mockResolvedValueOnce(metricByIndex)
+          .mockResolvedValueOnce(metricByIndex),
+      } as unknown as MetricsQueryService;
+      const accessResolver = {
+        runWithActiveServerAccess: vi.fn(async (
+          _userId: string,
+          _serverId: string,
+          work: (manager: unknown) => Promise<unknown>,
+        ) => work({})),
+        resolveServerInTransaction: vi.fn().mockResolvedValue({
+          cpuMillis: 0,
+          memBytes: 0,
+          diskBytes: 0,
+          gpuMode,
+          gpuIndices: [...gpuIndices],
+        }),
+      } as unknown as AccessResolverService;
+      const controller = makeController(metricsQuery, accessResolver);
+
+      const result = await controller.gpuMetrics(
+        'srv-1',
+        { id: 'user-1' } as UserEntity,
+        '1h',
+      );
+
+      expect(result.gpus.map((gpu) => gpu.index)).toEqual(expectedIndices);
+    },
+  );
+});
+
+describe('MetricsController.hostMetrics projection', () => {
+  it('shows only granted logical disks and aggregates physical device/interface labels', async () => {
+    const ioA = series(60, [[1000, 3], [1060, 5]]);
+    const ioB = series(60, [[1000, 7], [1060, 11]]);
+    const net = series(60, [[1000, 13]]);
+    const metricsQuery = makeHostSeriesQuery(
+      new Map([['disk-visible', series(60, [[1000, 20]])]]),
+      new Map([['disk-visible', series(60, [[1000, 100]])]]),
+      new Map([['nvme0n1', ioA], ['dm-secret', ioB]]),
+      new Map([['eth-secret', net]]),
+    );
+    const accessResolver = {
+      runWithActiveServerAccess: vi.fn(async (
+        _userId: string,
+        _serverId: string,
+        work: (manager: unknown) => Promise<unknown>,
+      ) => work({})),
+      hasMountSourceAccessInTransaction: vi.fn().mockImplementation(
+        async (_manager, _userId, _serverId, source) => source.id === 'disk-visible',
+      ),
+      resolveMountSources: vi.fn(),
+    } as unknown as AccessResolverService;
+    const controller = new MetricsController(
+      metricsQuery,
+      accessResolver,
+      {} as UsersService,
+      { find: vi.fn() } as never,
+      { stateCache: { get: vi.fn().mockReturnValue({
+        disks: [
+          {
+            diskId: 'disk-visible', sourceIdentity: 'xfs:visible',
+            mountPoint: '/srv/shared/data', label: 'Shared data',
+          },
+          {
+            diskId: 'disk-private', sourceIdentity: 'xfs:private',
+            mountPoint: '/srv/private/admin', label: null,
+          },
+        ],
+      }) } } as never,
+    );
+
+    const result = await controller.hostMetrics(
+      'srv-1',
+      { id: 'user-1' } as UserEntity,
+      '1h',
+    );
+
+    expect(result.disks).toEqual([expect.objectContaining({
+      diskId: 'disk-visible', displayName: 'Shared data',
+    })]);
+    expect(result.disks[0]).not.toHaveProperty('mountPoint');
+    expect(result.diskIo).toEqual([{
+      label: 'All disks',
+      bps: series(60, [[1000, 10], [1060, 16]]),
+    }]);
+    expect(result.netIo).toEqual([{ label: 'All interfaces', bps: net }]);
+    expect(JSON.stringify(result)).not.toMatch(/srv\/private|nvme0n1|dm-secret|eth-secret/);
+    expect(vi.mocked(accessResolver.hasMountSourceAccessInTransaction)).toHaveBeenCalledWith(
+      expect.anything(),
+      'user-1',
+      'srv-1',
+      { kind: 'local', id: 'disk-visible' },
+      'xfs:visible',
+    );
+    expect(accessResolver.resolveMountSources).not.toHaveBeenCalled();
+  });
+
+  it('retains physical topology only on the ViewMetricsAll admin plane', async () => {
+    const diskIo = series(60, [[1000, 3]]);
+    const netIo = series(60, [[1000, 4]]);
+    const controller = new AdminMetricsController(
+      makeHostSeriesQuery(
+        new Map(), new Map(), new Map([['nvme0n1', diskIo]]), new Map([['eth0', netIo]]),
+      ),
+      {} as AccessResolverService,
+      {} as UsersService,
+      { find: vi.fn() } as never,
+      { stateCache: { get: vi.fn().mockReturnValue({
+        disks: [{ diskId: 'disk-a', mountPoint: '/srv/admin-only', label: null }],
+      }) } } as never,
+    );
+
+    await expect(controller.adminHostMetrics('srv-1', '1h')).resolves.toMatchObject({
+      disks: [{ diskId: 'disk-a', displayName: 'admin-only', mountPoint: '/srv/admin-only' }],
+      diskIo: [{ label: 'nvme0n1', dev: 'nvme0n1', bps: diskIo }],
+      netIo: [{ label: 'eth0', iface: 'eth0', bps: netIo }],
+    });
+  });
 });
 
 describe('MetricsController.userMetrics', () => {
@@ -87,6 +274,9 @@ describe('MetricsController.userMetrics', () => {
     const accessResolver = {
       hasCapability: vi.fn(),
       listAccessibleServers: vi.fn().mockResolvedValue(['srv-1']),
+      runWithActiveServerAccess: vi.fn(async (
+        _userId: string, _serverId: string, work: (manager: unknown) => Promise<unknown>,
+      ) => work({})),
     } as unknown as AccessResolverService;
     const usersService = {
       getNumericIdsByUserIds: vi.fn().mockResolvedValue(new Map([['user-1', 12]])),
@@ -130,7 +320,8 @@ describe('MetricsController.userMetrics', () => {
     expect(result.users.map((u) => u.userId)).not.toContain('other-user');
     expect(result.users.map((u) => u.userId)).not.toContain('12');
     expect(accessResolver.hasCapability).not.toHaveBeenCalled();
-    expect(vi.mocked(accessResolver.listAccessibleServers)).toHaveBeenCalledWith('user-1');
+    expect(vi.mocked(accessResolver.runWithActiveServerAccess))
+      .toHaveBeenCalledWith('user-1', 'srv-1', expect.any(Function));
   });
 
   it('does not let ViewMetricsAll widen the user metrics plane', async () => {
@@ -143,6 +334,9 @@ describe('MetricsController.userMetrics', () => {
     const accessResolver = {
       hasCapability: vi.fn().mockResolvedValue(true),
       listAccessibleServers: vi.fn().mockResolvedValue(['srv-1']),
+      runWithActiveServerAccess: vi.fn(async (
+        _userId: string, _serverId: string, work: (manager: unknown) => Promise<unknown>,
+      ) => work({})),
     } as unknown as AccessResolverService;
     const usersService = {
       getNumericIdsByUserIds: vi.fn().mockResolvedValue(new Map()),
@@ -255,6 +449,9 @@ describe('MetricsController.containerMetrics', () => {
       {
         hasCapability: vi.fn(),
         listAccessibleServers: vi.fn().mockResolvedValue(['srv-1']),
+        runWithActiveServerAccess: vi.fn(async (
+          _userId: string, _serverId: string, work: (manager: unknown) => Promise<unknown>,
+        ) => work({})),
       } as unknown as AccessResolverService,
       defaultUsersService(),
       [
@@ -317,21 +514,50 @@ function makeContainerSeriesQuery(input: SeriesQueryInput): MetricsQueryService 
 
 function makeController(
   metricsQuery: MetricsQueryService,
-  accessResolver: AccessResolverService = {
-    hasCapability: vi.fn().mockResolvedValue(true),
-    listAccessibleServers: vi.fn().mockResolvedValue(['srv-1']),
-  } as unknown as AccessResolverService,
-  usersService: UsersService = {} as unknown as UsersService,
+  accessResolver: AccessResolverService | undefined = undefined,
+  usersService: UsersService | undefined = undefined,
   containers: Array<Record<string, unknown>> = [],
   runtimeSnapshots = new Map(),
+  gpus: Array<Record<string, unknown>> = [],
 ): MetricsController {
+  const resolvedAccess = accessResolver ?? {
+    hasCapability: vi.fn().mockResolvedValue(true),
+    listAccessibleServers: vi.fn().mockResolvedValue(['srv-1']),
+    runWithActiveServerAccess: vi.fn(async (
+      _userId: string, _serverId: string, work: (manager: unknown) => Promise<unknown>,
+    ) => work({})),
+    resolveServerInTransaction: vi.fn().mockResolvedValue({
+      cpuMillis: 0,
+      memBytes: 0,
+      diskBytes: 0,
+      gpuMode: GpuGrantMode.All,
+      gpuIndices: [],
+    }),
+    resolveMountSources: vi.fn().mockResolvedValue(new Set()),
+  } as unknown as AccessResolverService;
   return new MetricsController(
     metricsQuery,
-    accessResolver,
-    usersService,
+    resolvedAccess,
+    usersService ?? ({} as unknown as UsersService),
     { find: vi.fn().mockResolvedValue(containers) } as never,
-    { stateCache: { get: vi.fn().mockReturnValue({ disks: [], containers: runtimeSnapshots }) } } as never,
+    { stateCache: { get: vi.fn().mockReturnValue({ disks: [], gpus, containers: runtimeSnapshots }) } } as never,
   );
+}
+
+function makeHostSeriesQuery(
+  diskUsed: Map<string, MetricSeries>,
+  diskTotal: Map<string, MetricSeries>,
+  diskIo: Map<string, MetricSeries>,
+  netIo: Map<string, MetricSeries>,
+): MetricsQueryService {
+  return {
+    queryRangeSingle: vi.fn().mockResolvedValue({ step: 60, points: [] }),
+    queryRangeByLabel: vi.fn()
+      .mockResolvedValueOnce(diskUsed)
+      .mockResolvedValueOnce(diskTotal)
+      .mockResolvedValueOnce(diskIo)
+      .mockResolvedValueOnce(netIo),
+  } as unknown as MetricsQueryService;
 }
 
 function makeAdminController(
@@ -359,6 +585,10 @@ function defaultUsersService(): UsersService {
 
 function series(step: number, points: Array<[number, number]>): MetricSeries {
   return { step, points: points.map(([t, v]) => ({ t, v })) };
+}
+
+function empty(step: number): MetricSeries {
+  return { step, points: [] };
 }
 
 function runtimeContainers(rows: Array<{ runtimeId: string; containerId: string }>) {

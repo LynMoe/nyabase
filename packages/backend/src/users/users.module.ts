@@ -11,15 +11,19 @@ import { GroupsModule } from '../groups/groups.module.js';
 import { SshModule } from '../ssh/ssh.module.js';
 import { UserInternalSshKeyEntity } from '../entities/user-internal-ssh-key.entity.js';
 import { ProxySnapshotNotifierModule } from '../proxy-snapshots/proxy-snapshot-notifier.module.js';
+import { AuditModule } from '../audit/audit.module.js';
+import { QuotaModule } from '../quota/quota.module.js';
 
 @Module({
   imports: [
     TypeOrmModule.forFeature([UserEntity, SshPublicKeyEntity, UserInternalSshKeyEntity]),
-    AuthModule,
-    AccessModule,
-    GroupsModule,
+    forwardRef(() => AuthModule),
+    forwardRef(() => AccessModule),
+    forwardRef(() => GroupsModule),
     forwardRef(() => SshModule),
     ProxySnapshotNotifierModule,
+    forwardRef(() => AuditModule),
+    forwardRef(() => QuotaModule),
   ],
   providers: [UsersService],
   controllers: [UsersController, AdminUsersController],

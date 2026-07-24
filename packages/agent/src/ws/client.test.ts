@@ -213,6 +213,44 @@ describe('AgentWsClient initialization recovery', () => {
     client.stop();
   });
 
+  it('backs off repeated sockets that close before durable admission', async () => {
+    vi.useFakeTimers();
+    vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const client = new AgentWsClient({
+      url: 'ws://backend.invalid/ws/agent',
+      token: 'token',
+      serverId: 'server-a',
+    });
+
+    client.start();
+    const first = fakeWs.sockets[0];
+    first.emitOpen();
+    const firstClose = first.emitClose();
+    await vi.advanceTimersByTimeAsync(1_000);
+    await firstClose;
+    expect(fakeWs.sockets).toHaveLength(2);
+
+    const second = fakeWs.sockets[1];
+    second.emitOpen();
+    const secondClose = second.emitClose();
+    await vi.advanceTimersByTimeAsync(1_000);
+    await flushMicrotasks();
+    expect(fakeWs.sockets).toHaveLength(2);
+    await vi.advanceTimersByTimeAsync(1_000);
+    await secondClose;
+    expect(fakeWs.sockets).toHaveLength(3);
+
+    const admitted = fakeWs.sockets[2];
+    admitted.emitOpen();
+    await admit(admitted);
+    const admittedClose = admitted.emitClose();
+    await vi.advanceTimersByTimeAsync(1_000);
+    await admittedClose;
+    expect(fakeWs.sockets).toHaveLength(4);
+    client.stop();
+  });
+
   it('terminates instead of growing an unbounded outbound buffer', async () => {
     vi.spyOn(console, 'log').mockImplementation(() => undefined);
     vi.spyOn(console, 'error').mockImplementation(() => undefined);

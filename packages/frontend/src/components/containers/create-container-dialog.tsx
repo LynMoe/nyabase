@@ -10,7 +10,7 @@ import { Label } from '../ui/label.js';
 import { toast } from '../../hooks/use-toast.js';
 import { formatBytes } from '../../lib/utils.js';
 import { queryKeys } from '../../lib/query-keys.js';
-import { zCreateContainerRequest, type AgentTaskRefResponse, type ServerDto, type ImageDto, type EffectiveAccessDto, type DataDirDto, type MountSourceDto, type CreateContainerRequest } from '@nyabase/common';
+import { zCreateContainerRequest, type AgentTaskRefResponse, type UserServerDto, type ImageDto, type EffectiveAccessDto, type DataDirDto, type MountSourceDto, type CreateContainerRequest } from '@nyabase/common';
 import { Plus, X, FolderOpen, Network, ChevronDown, ChevronUp, RefreshCw } from 'lucide-react';
 
 interface MountEntry {
@@ -46,7 +46,7 @@ export function CreateContainerDialog({ open, onOpenChange, defaultServerId }: P
   const [showAdvanced, setShowAdvanced] = useState(false);
 
   const serversQuery = useQuery({
-    queryKey: queryKeys.servers.user, queryFn: () => api.get<ServerDto[]>('/servers'),
+    queryKey: queryKeys.servers.user, queryFn: () => api.get<UserServerDto[]>('/servers'),
   });
   const accessQuery = useQuery({
     queryKey: ['me-access'],
@@ -86,6 +86,7 @@ export function CreateContainerDialog({ open, onOpenChange, defaultServerId }: P
   }, [open]);
 
   useEffect(() => {
+    setMounts([]);
     setDataDirPick('');
     setAddMount({});
   }, [form.serverId]);
@@ -129,18 +130,23 @@ export function CreateContainerDialog({ open, onOpenChange, defaultServerId }: P
 
   const addMountEntry = () => {
     if (!addMount.sourceKind || !addMount.sourceId || !addMount.dirName || !addMount.containerPath) return;
-    if (!addMount.containerPath.startsWith('/')) {
-      toast({ title: '挂载路径无效', description: '容器内路径必须以 / 开头', variant: 'destructive' });
+    const normalizedPath = normalizeContainerMountPath(addMount.containerPath);
+    if (!normalizedPath) {
+      toast({ title: '挂载路径无效', description: '容器内路径必须是非根绝对路径，且不能包含 . 或 .. 路径段', variant: 'destructive' });
       return;
     }
     const mountEntry: MountEntry = {
       sourceKind: addMount.sourceKind,
       sourceId: addMount.sourceId,
       dirName: addMount.dirName,
-      containerPath: addMount.containerPath,
+      containerPath: normalizedPath,
     };
     if (mountedSourceKeys.has(mountSourceKey(mountEntry))) {
       toast({ title: '数据目录已挂载', description: '同一个容器不能重复挂载同一个数据目录', variant: 'destructive' });
+      return;
+    }
+    if (mounts.some((mount) => mount.containerPath === normalizedPath)) {
+      toast({ title: '挂载路径已占用', description: '同一个容器内路径只能挂载一个数据目录', variant: 'destructive' });
       return;
     }
     setMounts((m) => [...m, mountEntry]);
@@ -226,7 +232,13 @@ export function CreateContainerDialog({ open, onOpenChange, defaultServerId }: P
                 id="create-container-server"
                 className={`flex h-10 w-full rounded-md border bg-background px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-ring ${formErrors.serverId ? 'border-destructive' : 'border-input'}`}
                 value={form.serverId}
-                onChange={(e) => { set('serverId', e.target.value); set('imageId', ''); }}
+                onChange={(e) => {
+                  set('serverId', e.target.value);
+                  set('imageId', '');
+                  setMounts([]);
+                  setDataDirPick('');
+                  setAddMount({});
+                }}
                 aria-invalid={!!formErrors.serverId}
                 aria-describedby={formErrors.serverId ? 'create-container-server-error' : undefined}
               >
@@ -313,7 +325,7 @@ export function CreateContainerDialog({ open, onOpenChange, defaultServerId }: P
           </div>
 
           {/* Data dir mounts — only already-registered dirs from 数据目录 */}
-          {form.serverId && (serverDirs.length > 0 || mountSources.length > 0 || serverDirsQuery.isError || mountSourcesQuery.isError) && (
+          {form.serverId && (
             <div className="space-y-2">
               <div className="text-sm font-medium leading-none text-foreground/90">数据目录挂载（可选）</div>
               <div className="space-y-2">
@@ -325,7 +337,15 @@ export function CreateContainerDialog({ open, onOpenChange, defaultServerId }: P
                 )}
               </div>
 
-              {uniqueServerDirs.length === 0 && !serverDirsQuery.isError && !mountSourcesQuery.isError && (
+              {(serverDirsQuery.isLoading || mountSourcesQuery.isLoading) && (
+                <p className="text-xs text-muted-foreground/70">正在加载可用数据目录...</p>
+              )}
+
+              {uniqueServerDirs.length === 0
+                && !serverDirsQuery.isLoading
+                && !mountSourcesQuery.isLoading
+                && !serverDirsQuery.isError
+                && !mountSourcesQuery.isError && (
                 <p className="text-xs text-muted-foreground/70">
                   暂无已注册的数据目录，请先在「数据目录」页面创建后再挂载。
                 </p>
@@ -439,11 +459,25 @@ function validateCreateForm(form: typeof emptyForm, mounts: MountEntry[]): { err
     errors.name = '容器名称只能包含小写字母、数字、下划线或连字符，最长 64 个字符';
   }
 
+  const normalizedMounts = mounts.map((mount) => ({
+    ...mount,
+    containerPath: normalizeContainerMountPath(mount.containerPath),
+  }));
+  if (normalizedMounts.some((mount) => !mount.containerPath)) {
+    return { errors, payload: null, message: '挂载路径必须是非根绝对路径，且不能包含 . 或 .. 路径段' };
+  }
+  const pathKeys = normalizedMounts.map((mount) => mount.containerPath as string);
+  if (new Set(pathKeys).size !== pathKeys.length) {
+    return { errors, payload: null, message: '同一个容器内路径只能挂载一个数据目录' };
+  }
+
   const payload = {
     serverId: form.serverId,
     imageId: form.imageId,
     name,
-    dataDirs: mounts.length > 0 ? mounts : undefined,
+    dataDirs: normalizedMounts.length > 0
+      ? normalizedMounts.map((mount) => ({ ...mount, containerPath: mount.containerPath as string }))
+      : undefined,
   };
   const parsed = zCreateContainerRequest.safeParse(payload);
   if (!parsed.success) {
@@ -463,6 +497,14 @@ function validateCreateForm(form: typeof emptyForm, mounts: MountEntry[]): { err
   if (Object.keys(errors).length > 0) return { errors, payload: null, message };
   if (!parsed.success) return { errors, payload: null, message: parsed.error.issues[0]?.message ?? '请检查表单字段' };
   return { errors, payload: parsed.data, message: '' };
+}
+
+function normalizeContainerMountPath(value: string): string | null {
+  const trimmed = value.trim();
+  if (!trimmed.startsWith('/')) return null;
+  const parts = trimmed.split('/').filter(Boolean);
+  if (parts.length === 0 || parts.some((part) => part === '.' || part === '..')) return null;
+  return `/${parts.join('/')}`;
 }
 
 function withoutFieldError<T extends string>(errors: Partial<Record<T, string>>, field: T): Partial<Record<T, string>> {

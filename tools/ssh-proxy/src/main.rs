@@ -1,9 +1,16 @@
 use std::collections::HashMap;
+use std::ffi::OsString;
+use std::fs::OpenOptions;
 use std::future::Future;
-use std::net::{Ipv4Addr, SocketAddr};
+use std::io::{BufReader, Read};
+use std::net::{Ipv4Addr, Shutdown, SocketAddr};
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+#[cfg(unix)]
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 
 use anyhow::{Context, Result};
 use arc_swap::ArcSwapOption;
@@ -22,9 +29,9 @@ use tokio::io;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{mpsc, watch, Semaphore};
 use tokio::task::JoinSet;
-use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::Message;
+use tokio_tungstenite::{connect_async_tls_with_config, Connector};
 use tracing::{debug, info, warn};
 
 type TelemetrySender = mpsc::Sender<ProxyEvent>;
@@ -40,14 +47,16 @@ const MAX_STATUS_INTERVAL_MS: u64 = 60_000;
 const MAX_CHANNELS_PER_CONNECTION: usize = 16;
 const MAX_REMOTE_FORWARDS_PER_CONNECTION: usize = 8;
 const MAX_CHILD_TASKS_PER_CONNECTION: usize = 64;
+const MAX_BACKEND_CA_PEM_BYTES: u64 = 1024 * 1024;
 
 fn valid_snapshot_stale_after_ms(value: u64) -> bool {
     (SSH_PROXY_SNAPSHOT_STALE_MIN_MS..=SSH_PROXY_SNAPSHOT_STALE_MAX_MS).contains(&value)
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 struct ProxyConfig {
     backend_ws: String,
+    backend_tls: Option<Arc<rustls::ClientConfig>>,
     token: String,
     listen: String,
     max_connections: usize,
@@ -60,7 +69,9 @@ impl ProxyConfig {
     fn from_env() -> Result<Self> {
         let backend_ws = std::env::var("NYABASE_BACKEND_WS")
             .unwrap_or_else(|_| "ws://127.0.0.1:3000/ws/ssh-proxy".to_string());
-        let token = required_control_token("SSH_PROXY_TOKEN")?;
+        let backend_tls = backend_tls_config_from_env("NYABASE_BACKEND_CA_FILE")?;
+        validate_backend_ws_url(&backend_ws, backend_tls.is_some())?;
+        let token = required_control_token("SSH_PROXY_TOKEN", "SSH_PROXY_TOKEN_FILE")?;
         let listen =
             std::env::var("NYABASE_SSH_LISTEN").unwrap_or_else(|_| "0.0.0.0:2222".to_string());
         let max_connections =
@@ -72,6 +83,7 @@ impl ProxyConfig {
 
         Ok(Self {
             backend_ws,
+            backend_tls,
             token,
             listen,
             max_connections,
@@ -684,10 +696,152 @@ fn nonzero(value: u64) -> Option<u64> {
     }
 }
 
-fn required_control_token(name: &str) -> Result<String> {
-    let token = std::env::var(name).with_context(|| format!("{name} is required"))?;
+fn required_control_token(name: &str, file_name: &str) -> Result<String> {
+    load_control_token(
+        name,
+        std::env::var_os(name),
+        file_name,
+        std::env::var_os(file_name).map(PathBuf::from),
+    )
+}
+
+fn load_control_token(
+    name: &str,
+    direct: Option<OsString>,
+    file_name: &str,
+    file: Option<PathBuf>,
+) -> Result<String> {
+    match (direct, file) {
+        (Some(_), Some(_)) => {
+            anyhow::bail!("{name} and {file_name} are mutually exclusive")
+        }
+        (Some(token), None) => {
+            let token = token
+                .into_string()
+                .map_err(|_| anyhow::anyhow!("{name} must be valid UTF-8"))?;
+            validate_control_token(name, &token)?;
+            Ok(token)
+        }
+        (None, Some(path)) => read_control_token_file(name, file_name, &path),
+        (None, None) => anyhow::bail!("{name} or {file_name} is required"),
+    }
+}
+
+fn read_control_token_file(name: &str, file_name: &str, path: &Path) -> Result<String> {
+    let mut options = OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    options.custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
+    let file = options
+        .open(path)
+        .with_context(|| format!("failed to open {file_name}"))?;
+    let metadata = file
+        .metadata()
+        .with_context(|| format!("failed to inspect {file_name}"))?;
+    if !metadata.is_file() {
+        anyhow::bail!("{file_name} must reference a regular file");
+    }
+    #[cfg(unix)]
+    {
+        let mode = metadata.permissions().mode() & 0o777;
+        if mode & 0o400 == 0 || mode & 0o077 != 0 || mode & 0o111 != 0 {
+            anyhow::bail!(
+                "{file_name} must be owner-readable, non-executable, and inaccessible to group/other"
+            );
+        }
+    }
+    if metadata.len() > MAX_CONTROL_TOKEN_BYTES as u64 {
+        anyhow::bail!("{file_name} content is outside the allowed token size");
+    }
+    let mut bytes = Vec::with_capacity(metadata.len() as usize);
+    file.take(MAX_CONTROL_TOKEN_BYTES as u64 + 1)
+        .read_to_end(&mut bytes)
+        .with_context(|| format!("failed to read {file_name}"))?;
+    if bytes.len() > MAX_CONTROL_TOKEN_BYTES {
+        anyhow::bail!("{file_name} content is outside the allowed token size");
+    }
+    let token = String::from_utf8(bytes)
+        .map_err(|_| anyhow::anyhow!("{file_name} content must be valid UTF-8"))?;
     validate_control_token(name, &token)?;
     Ok(token)
+}
+
+fn validate_backend_ws_url(value: &str, has_custom_ca: bool) -> Result<()> {
+    let request = value
+        .into_client_request()
+        .context("NYABASE_BACKEND_WS is not a valid WebSocket URL")?;
+    match request.uri().scheme_str() {
+        Some("wss") => Ok(()),
+        Some("ws") if !has_custom_ca => Ok(()),
+        Some("ws") => anyhow::bail!("NYABASE_BACKEND_CA_FILE requires a wss:// Backend URL"),
+        _ => anyhow::bail!("NYABASE_BACKEND_WS must use ws:// or wss://"),
+    }
+}
+
+fn backend_tls_config_from_env(name: &str) -> Result<Option<Arc<rustls::ClientConfig>>> {
+    let Some(path) = std::env::var_os(name).map(PathBuf::from) else {
+        return Ok(None);
+    };
+    if path.as_os_str().is_empty() {
+        anyhow::bail!("{name} must not be empty when configured");
+    }
+    let pem = read_bounded_ca_file(name, &path)?;
+    Ok(Some(backend_tls_config_from_pem(name, &pem)?))
+}
+
+fn read_bounded_ca_file(name: &str, path: &Path) -> Result<Vec<u8>> {
+    let file = OpenOptions::new()
+        .read(true)
+        .open(path)
+        .with_context(|| format!("failed to open {name}"))?;
+    let metadata = file
+        .metadata()
+        .with_context(|| format!("failed to inspect {name}"))?;
+    if !metadata.is_file() {
+        anyhow::bail!("{name} must reference a regular file");
+    }
+    if metadata.len() == 0 || metadata.len() > MAX_BACKEND_CA_PEM_BYTES {
+        anyhow::bail!("{name} must contain a non-empty bounded PEM bundle");
+    }
+    let mut pem = Vec::with_capacity(metadata.len() as usize);
+    file.take(MAX_BACKEND_CA_PEM_BYTES + 1)
+        .read_to_end(&mut pem)
+        .with_context(|| format!("failed to read {name}"))?;
+    if pem.is_empty() || pem.len() as u64 > MAX_BACKEND_CA_PEM_BYTES {
+        anyhow::bail!("{name} must contain a non-empty bounded PEM bundle");
+    }
+    Ok(pem)
+}
+
+fn backend_tls_config_from_pem(name: &str, pem: &[u8]) -> Result<Arc<rustls::ClientConfig>> {
+    if pem.is_empty() {
+        anyhow::bail!("{name} contains no CA certificates");
+    }
+    let mut reader = BufReader::new(pem);
+    let mut roots = rustls::RootCertStore::empty();
+    let mut certificates = 0usize;
+    for item in rustls_pemfile::read_all(&mut reader) {
+        let item = item.map_err(|_| anyhow::anyhow!("{name} contains invalid PEM"))?;
+        let rustls_pemfile::Item::X509Certificate(certificate) = item else {
+            anyhow::bail!("{name} may contain only CA certificates");
+        };
+        roots
+            .add(certificate)
+            .map_err(|_| anyhow::anyhow!("{name} contains an invalid CA certificate"))?;
+        certificates += 1;
+    }
+    if certificates == 0 {
+        anyhow::bail!("{name} contains no CA certificates");
+    }
+    Ok(Arc::new(
+        rustls::ClientConfig::builder_with_provider(Arc::new(
+            rustls::crypto::ring::default_provider(),
+        ))
+        .with_safe_default_protocol_versions()
+        .context("failed to select secure Backend TLS protocol versions")?
+        .with_root_certificates(roots)
+        .with_no_client_auth(),
+    ))
 }
 
 fn validate_control_token(name: &str, token: &str) -> Result<()> {
@@ -744,6 +898,9 @@ async fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .init();
+    rustls::crypto::ring::default_provider()
+        .install_default()
+        .ok();
 
     let config = ProxyConfig::from_env()?;
     let store = Arc::new(SnapshotStore::default());
@@ -873,11 +1030,13 @@ async fn run_backend_once(
     runtime: &ProxyRuntime,
     telemetry_rx: &mut mpsc::Receiver<ProxyEvent>,
 ) -> Result<()> {
+    validate_backend_ws_url(&config.backend_ws, config.backend_tls.is_some())?;
     let mut request = config.backend_ws.as_str().into_client_request()?;
     request
         .headers_mut()
         .insert("authorization", format!("Bearer {}", config.token).parse()?);
-    let (ws, _) = connect_async(request).await?;
+    let connector = config.backend_tls.clone().map(Connector::Rustls);
+    let (ws, _) = connect_async_tls_with_config(request, None, false, connector).await?;
     let (mut write, mut read) = ws.split();
     // Snapshot generation is scoped to one Backend WebSocket connection. This
     // permits a freshly restarted Backend to begin at generation 1 while still
@@ -1102,6 +1261,13 @@ async fn handle_ssh_connection(
     telemetry: TelemetrySender,
     connection: Arc<ConnectionState>,
 ) -> Result<()> {
+    // russh::server::run_stream returns a RunningSession backed by an internal
+    // Tokio JoinHandle. Dropping that value detaches the task, so cancelling
+    // this outer connection future alone would otherwise leave the accepted
+    // TCP session alive after authorization revocation. Retain a duplicated
+    // socket descriptor whose Drop performs shutdown(2) on the shared socket;
+    // that wakes both halves owned by russh even if its JoinHandle is detached.
+    let (stream, socket_guard) = revocable_session_stream(stream)?;
     let snapshot = store.load().context("no routing snapshot is installed")?;
     if !snapshot.is_fresh() {
         anyhow::bail!("routing snapshot {} is stale", snapshot.generation);
@@ -1123,7 +1289,38 @@ async fn handle_ssh_connection(
     let handler = ProxySshSession::new(store, config, peer, telemetry, connection);
     let session = russh::server::run_stream(server_config, stream, handler).await?;
     session.await?;
+    socket_guard.shutdown();
     Ok(())
+}
+
+struct SessionSocketGuard(std::net::TcpStream);
+
+impl SessionSocketGuard {
+    fn shutdown(&self) {
+        let _ = self.0.shutdown(Shutdown::Both);
+    }
+}
+
+impl Drop for SessionSocketGuard {
+    fn drop(&mut self) {
+        self.shutdown();
+    }
+}
+
+fn revocable_session_stream(stream: TcpStream) -> Result<(TcpStream, SessionSocketGuard)> {
+    let control = stream
+        .into_std()
+        .context("failed to retain SSH session socket ownership")?;
+    let session = control
+        .try_clone()
+        .context("failed to duplicate SSH session socket")?;
+    session
+        .set_nonblocking(true)
+        .context("failed to configure duplicated SSH session socket")?;
+    Ok((
+        TcpStream::from_std(session).context("failed to adopt duplicated SSH session socket")?,
+        SessionSocketGuard(control),
+    ))
 }
 
 #[derive(Debug, Deserialize)]
@@ -2023,9 +2220,17 @@ impl russh::server::Handler for ProxySshSession {
             session.channel_failure(channel)?;
             return Ok(());
         };
+        // OpenSSH sends SendEnv requests with want_reply=false. russh's server
+        // Handler API intentionally hides that bit and remembers it inside the
+        // Session. Asking the upstream for a reply here would therefore create
+        // an unpaired Success/Failure message. If a later exec request arrived
+        // before that message, the relay could satisfy (or fail) the exec with
+        // the environment reply. Forward env as fire-and-forget and let russh
+        // emit success only when the original client actually requested one.
         upstream
-            .set_env(true, variable_name, variable_value)
+            .set_env(false, variable_name, variable_value)
             .await?;
+        session.channel_success(channel)?;
         Ok(())
     }
 
@@ -2644,6 +2849,75 @@ fn now_ms() -> u64 {
 mod tests {
     use super::*;
     use pretty_assertions::assert_eq;
+    use std::io::Write as _;
+    use std::sync::atomic::AtomicU64;
+    use tokio::io::AsyncReadExt as _;
+
+    static NEXT_TEST_FILE: AtomicU64 = AtomicU64::new(1);
+
+    struct PrivateTestFile {
+        path: PathBuf,
+    }
+
+    impl PrivateTestFile {
+        fn new(contents: &[u8], mode: u32) -> Self {
+            let id = NEXT_TEST_FILE.fetch_add(1, Ordering::Relaxed);
+            let path = std::env::temp_dir().join(format!(
+                "nyabase-ssh-proxy-secret-{}-{id}",
+                std::process::id()
+            ));
+            let mut file = std::fs::OpenOptions::new()
+                .create_new(true)
+                .write(true)
+                .open(&path)
+                .unwrap();
+            file.write_all(contents).unwrap();
+            file.sync_all().unwrap();
+            #[cfg(unix)]
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode)).unwrap();
+            Self { path }
+        }
+    }
+
+    impl Drop for PrivateTestFile {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.path);
+        }
+    }
+
+    #[tokio::test]
+    async fn revocation_shutdown_closes_a_detached_session_socket() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let client = TcpStream::connect(address).await.unwrap();
+        let (mut peer, _) = listener.accept().await.unwrap();
+        let (session_stream, socket_guard) = revocable_session_stream(client).unwrap();
+
+        // Model russh's private JoinHandle retaining its duplicated descriptor
+        // after the owning connection future has been cancelled.
+        let detached_session = tokio::spawn(async move {
+            let _session_stream = session_stream;
+            std::future::pending::<()>().await;
+        });
+        let (abort, registration) = AbortHandle::new_pair();
+        let owner = tokio::spawn(Abortable::new(
+            async move {
+                let _socket_guard = socket_guard;
+                std::future::pending::<()>().await;
+            },
+            registration,
+        ));
+        abort.abort();
+        assert!(owner.await.unwrap().is_err());
+
+        let mut byte = [0_u8; 1];
+        let read = tokio::time::timeout(Duration::from_millis(250), peer.read(&mut byte))
+            .await
+            .expect("peer did not observe bounded revocation shutdown");
+        assert!(matches!(read, Ok(0) | Err(_)));
+        detached_session.abort();
+        let _ = detached_session.await;
+    }
 
     const ALICE_KEY: &str =
         "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAILM+rvN+ot98qgEN796jTiQfZfG1KaT0PtFDJ/XFSqti alice@example";
@@ -2683,6 +2957,100 @@ mod tests {
         assert!(
             validate_control_token("SSH_PROXY_TOKEN", &format!("é{}", "a".repeat(32))).is_err()
         );
+    }
+
+    #[test]
+    fn control_token_file_is_mutually_exclusive_private_and_non_leaking() {
+        let token = "a".repeat(32);
+        let private = PrivateTestFile::new(token.as_bytes(), 0o600);
+        assert_eq!(
+            load_control_token(
+                "SSH_PROXY_TOKEN",
+                None,
+                "SSH_PROXY_TOKEN_FILE",
+                Some(private.path.clone()),
+            )
+            .unwrap(),
+            token,
+        );
+        assert!(load_control_token(
+            "SSH_PROXY_TOKEN",
+            Some(OsString::from("b".repeat(32))),
+            "SSH_PROXY_TOKEN_FILE",
+            Some(private.path.clone()),
+        )
+        .unwrap_err()
+        .to_string()
+        .contains("mutually exclusive"));
+
+        let public = PrivateTestFile::new(token.as_bytes(), 0o644);
+        assert!(load_control_token(
+            "SSH_PROXY_TOKEN",
+            None,
+            "SSH_PROXY_TOKEN_FILE",
+            Some(public.path.clone()),
+        )
+        .is_err());
+
+        let invalid_secret = format!("{}!", "s".repeat(31));
+        let invalid = PrivateTestFile::new(invalid_secret.as_bytes(), 0o400);
+        let error = load_control_token(
+            "SSH_PROXY_TOKEN",
+            None,
+            "SSH_PROXY_TOKEN_FILE",
+            Some(invalid.path.clone()),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(!error.contains(&invalid_secret));
+
+        let newline = PrivateTestFile::new(format!("{token}\n").as_bytes(), 0o400);
+        assert!(load_control_token(
+            "SSH_PROXY_TOKEN",
+            None,
+            "SSH_PROXY_TOKEN_FILE",
+            Some(newline.path.clone()),
+        )
+        .is_err());
+        let empty = PrivateTestFile::new(b"", 0o400);
+        assert!(load_control_token(
+            "SSH_PROXY_TOKEN",
+            None,
+            "SSH_PROXY_TOKEN_FILE",
+            Some(empty.path.clone()),
+        )
+        .is_err());
+        let oversized = PrivateTestFile::new("a".repeat(1025).as_bytes(), 0o400);
+        assert!(load_control_token(
+            "SSH_PROXY_TOKEN",
+            None,
+            "SSH_PROXY_TOKEN_FILE",
+            Some(oversized.path.clone()),
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn backend_ca_is_explicit_and_plain_ws_remains_compatible_without_it() {
+        assert!(validate_backend_ws_url("wss://backend.example/ws/ssh-proxy", false).is_ok());
+        assert!(validate_backend_ws_url("wss://backend.example/ws/ssh-proxy", true).is_ok());
+        assert!(validate_backend_ws_url("ws://backend.example/ws/ssh-proxy", false).is_ok());
+        assert!(validate_backend_ws_url("ws://backend.example/ws/ssh-proxy", true).is_err());
+        assert!(validate_backend_ws_url("http://backend.example/ws/ssh-proxy", false).is_err());
+        assert!(backend_tls_config_from_pem(
+            "NYABASE_BACKEND_CA_FILE",
+            include_bytes!("../tests/fixtures/test-ca.pem"),
+        )
+        .is_ok());
+        assert!(backend_tls_config_from_pem("NYABASE_BACKEND_CA_FILE", b"").is_err());
+        assert!(
+            backend_tls_config_from_pem("NYABASE_BACKEND_CA_FILE", b"not a PEM bundle").is_err()
+        );
+        assert!(backend_tls_config_from_pem(
+            "NYABASE_BACKEND_CA_FILE",
+            b"-----BEGIN CERTIFICATE-----\ninvalid\n-----END CERTIFICATE-----\n",
+        )
+        .is_err());
     }
 
     #[test]
@@ -2735,6 +3103,7 @@ mod tests {
     async fn unregistering_a_connection_aborts_and_cleans_all_child_tasks() {
         let config = ProxyConfig {
             backend_ws: "ws://backend.invalid".to_string(),
+            backend_tls: None,
             token: "a".repeat(32),
             listen: "127.0.0.1:2222".to_string(),
             max_connections: 8,
@@ -3006,6 +3375,7 @@ mod tests {
     async fn assert_invalid_key_snapshot_revokes(invalid: ProxySnapshot, expected_error: &str) {
         let config = ProxyConfig {
             backend_ws: "ws://backend.invalid".to_string(),
+            backend_tls: None,
             token: "a".repeat(32),
             listen: "127.0.0.1:2222".to_string(),
             max_connections: 8,
@@ -3053,6 +3423,7 @@ mod tests {
     async fn snapshot_deadline_expires_and_revokes_without_a_status_tick() {
         let config = ProxyConfig {
             backend_ws: "ws://backend.invalid".to_string(),
+            backend_tls: None,
             token: "a".repeat(32),
             listen: "127.0.0.1:2222".to_string(),
             max_connections: 8,
@@ -3162,6 +3533,7 @@ mod tests {
     async fn revoked_connections_abort_directly_without_protocol_backpressure() {
         let config = ProxyConfig {
             backend_ws: "ws://backend.invalid".to_string(),
+            backend_tls: None,
             token: "test".to_string(),
             listen: "127.0.0.1:2222".to_string(),
             max_connections: 8,
@@ -3242,6 +3614,7 @@ mod tests {
     async fn blocked_control_write_times_out_and_control_revocation_aborts_sessions() {
         let config = ProxyConfig {
             backend_ws: "ws://backend.invalid".to_string(),
+            backend_tls: None,
             token: "test".to_string(),
             listen: "127.0.0.1:2222".to_string(),
             max_connections: 8,

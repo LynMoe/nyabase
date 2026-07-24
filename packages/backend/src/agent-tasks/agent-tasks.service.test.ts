@@ -219,6 +219,95 @@ describe('AgentTasksService supersede commit barrier', () => {
 });
 
 describe('AgentTasksService server ownership fence', () => {
+  it.each([
+    [
+      'kind/resourceType mismatch',
+      AgentTaskKind.ImageEnsurePresent,
+      'container',
+      'image-a',
+      { imageId: 'image-a', dockerRef: 'example.invalid/image:a' },
+    ],
+    [
+      'payload/resource mismatch',
+      AgentTaskKind.ImageEnsureAbsent,
+      'image',
+      'image-a',
+      { imageId: 'image-other', dockerRef: 'example.invalid/image:a' },
+    ],
+    [
+      'empty durable container identity',
+      AgentTaskKind.ContainerStop,
+      'container',
+      'container-a',
+      { containerId: '', runtimeId: 'runtime-a' },
+    ],
+    [
+      'empty durable row server identity',
+      AgentTaskKind.ImageEnsurePresent,
+      'image',
+      'image-a',
+      { imageId: 'image-a', dockerRef: 'example.invalid/image:a' },
+      '',
+    ],
+    [
+      'overlong durable row server identity',
+      AgentTaskKind.ImageEnsurePresent,
+      'image',
+      'image-a',
+      { imageId: 'image-a', dockerRef: 'example.invalid/image:a' },
+      's'.repeat(129),
+    ],
+    [
+      'invalid durable row resource identity',
+      AgentTaskKind.ImageEnsurePresent,
+      'image',
+      'bad resource',
+      { imageId: 'bad resource', dockerRef: 'example.invalid/image:a' },
+    ],
+    [
+      'unknown durable row kind',
+      'unknown.kind' as AgentTaskKind,
+      'image',
+      'image-a',
+      { imageId: 'image-a', dockerRef: 'example.invalid/image:a' },
+    ],
+  ])('rejects %s at enqueue before persistence', async (
+    _case,
+    kind,
+    resourceType,
+    resourceId,
+    payload,
+    serverId = 'server-a',
+  ) => {
+    const insertForTask = vi.fn();
+    const save = vi.fn();
+    const service = new AgentTasksService(
+      {} as never,
+      { generic: vi.fn(() => 'resource-key') } as never,
+      { insertForTask } as never,
+      { forWirePayload: vi.fn((_kind, value) => value) } as never,
+      {} as never,
+    );
+    const manager = {
+      findOneBy: vi.fn().mockResolvedValue({ id: 'server-a', status: ServerStatus.Online }),
+      count: vi.fn().mockResolvedValue(0),
+      save,
+    } as unknown as EntityManager;
+
+    await expect(service.enqueueInTransaction(manager, {
+      kind,
+      serverId,
+      resourceType,
+      resourceId,
+      requestedBy: null,
+      payload,
+    })).rejects.toMatchObject({ response: expect.objectContaining({
+      code: expect.stringMatching(/^INVALID_AGENT_TASK_/),
+    }) });
+    expect(save).not.toHaveBeenCalled();
+    expect(insertForTask).not.toHaveBeenCalled();
+  });
+
   it('rejects enqueue inside the transaction when the target server was deleted', async () => {
     const insertForTask = vi.fn();
     const service = new AgentTasksService(

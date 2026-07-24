@@ -29,6 +29,21 @@ export interface ConfigFieldDefinition<T = unknown> {
 const sourceOrder = ['default', 'yaml', 'env'] as const;
 const nonEmptyString = z.string().trim().min(1);
 const optionalString = z.string().trim();
+const developmentJwtSecret = 'change-me-in-production';
+const jwtSecret = z.string().trim().refine(
+  (value) => value === developmentJwtSecret || value.length >= 32,
+  'Expected at least 32 characters',
+);
+const jwtLifetime = z.string().trim().regex(/^\d+(?:s|m|h|d)$/).refine((value) => {
+  const amount = Number.parseInt(value, 10);
+  const unit = value.at(-1);
+  const milliseconds = amount * ({ s: 1_000, m: 60_000, h: 3_600_000, d: 86_400_000 }[unit!] ?? 0);
+  return milliseconds >= 60_000 && milliseconds <= 24 * 60 * 60_000;
+}, 'Expected a duration between 1 minute and 24 hours');
+const adminInitialPassword = z.string().refine(
+  (value) => value === '' || (value.length >= 8 && value.length <= 256),
+  'Expected an empty value or an 8-256 character password',
+);
 const proxyToken = z.string().refine(
   (value) => value === '' || /^[A-Za-z0-9_-]{32,1024}$/.test(value),
   'Expected an empty value or a 32-1024 character ASCII token using only letters, digits, _ or -',
@@ -132,8 +147,8 @@ export const controlPlaneConfigDefinitions = [
     key: 'auth.jwtSecret',
     yamlPath: 'auth.jwtSecret',
     env: 'JWT_SECRET',
-    defaultValue: 'change-me-in-production',
-    schema: nonEmptyString,
+    defaultValue: developmentJwtSecret,
+    schema: jwtSecret,
     valueKind: 'string',
     secret: true,
     editable: false,
@@ -147,7 +162,7 @@ export const controlPlaneConfigDefinitions = [
     yamlPath: 'auth.jwtExpiresIn',
     env: 'JWT_EXPIRES_IN',
     defaultValue: '15m',
-    schema: nonEmptyString,
+    schema: jwtLifetime,
     valueKind: 'string',
     secret: false,
     editable: true,
@@ -161,7 +176,7 @@ export const controlPlaneConfigDefinitions = [
     yamlPath: 'auth.refreshTokenExpiresDays',
     env: 'REFRESH_TOKEN_EXPIRES_DAYS',
     defaultValue: 7,
-    schema: positiveDays,
+    schema: positiveDays.max(365),
     valueKind: 'number',
     secret: false,
     editable: true,
@@ -175,7 +190,7 @@ export const controlPlaneConfigDefinitions = [
     yamlPath: 'auth.adminInitPassword',
     env: 'ADMIN_INIT_PASSWORD',
     defaultValue: '',
-    schema: z.string(),
+    schema: adminInitialPassword,
     valueKind: 'string',
     secret: true,
     editable: false,

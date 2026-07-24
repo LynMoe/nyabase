@@ -1,30 +1,16 @@
 import './index.css';
 import React from 'react';
 import ReactDOM from 'react-dom/client';
-import { QueryClient, QueryClientProvider, QueryCache } from '@tanstack/react-query';
+import { QueryClientProvider } from '@tanstack/react-query';
 import { RouterProvider, createRouter } from '@tanstack/react-router';
 import { routeTree } from './routeTree.gen';
 import { Toaster } from './components/ui/toaster.js';
-import { toast } from './hooks/use-toast.js';
-import { ApiError } from './lib/api.js';
 import { ErrorBoundary } from './components/error-boundary.js';
 import { ThemeApplier } from './components/theme-applier.js';
+import { queryClient } from './lib/query-client.js';
+import { initializeAuthSync } from './lib/auth-session.js';
 
-const queryClient = new QueryClient({
-  queryCache: new QueryCache({
-    onError: (error) => {
-      if (error instanceof ApiError && error.status >= 500) {
-        toast({ title: '服务器错误', description: error.message, variant: 'destructive' });
-      }
-    },
-  }),
-  defaultOptions: {
-    queries: {
-      staleTime: 30_000,
-      retry: 1,
-    },
-  },
-});
+initializeAuthSync();
 
 const router = createRouter({
   routeTree,

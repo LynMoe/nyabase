@@ -8,9 +8,7 @@
     "build": "tsc -b && vite build",
     "preview": "vite preview",
     "typecheck": "tsc --noEmit",
-    "test": "vitest run src --passWithNoTests",
-    "test:visual": "playwright test",
-    "test:visual:update": "playwright test --update-snapshots"
+    "test": "vitest run src --passWithNoTests"
   },
   "dependencies": {
     "@nyabase/common": "workspace:*",
@@ -46,7 +44,6 @@
     "zustand": "^5.0.4"
   },
   "devDependencies": {
-    "@playwright/test": "^1.60.0",
     "@tanstack/router-vite-plugin": "^1.118.10",
     "@types/node": "^22.15.3",
     "@types/react": "^19.1.2",

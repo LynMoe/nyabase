@@ -54,8 +54,7 @@ describe('SshProxySnapshotService consistency fence', () => {
       ],
     });
     await dataSource.initialize();
-    const identities = {
-      ensureProxyHostKeyInTransaction: vi.fn(async () => ({
+    const hostKey = {
         id: 'singleton',
         privateKey: 'host-private',
         encryptedPrivateKey: 'host-private',
@@ -63,7 +62,10 @@ describe('SshProxySnapshotService consistency fence', () => {
         fingerprint: HOST_FINGERPRINT,
         generation: 1,
         rotatedAt: new Date(),
-      })),
+    };
+    const identities = {
+      ensureProxyHostKey: vi.fn(async () => hostKey),
+      getProxyHostKeyInTransaction: vi.fn(async () => hostKey),
       decryptUserPrivateKey: vi.fn((key: UserInternalSshKeyEntity) => key.encryptedPrivateKey),
     };
     const config = {

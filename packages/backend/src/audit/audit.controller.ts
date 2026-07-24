@@ -1,4 +1,12 @@
-import { Controller, Get, NotFoundException, Param, Query, UseGuards } from '@nestjs/common';
+import {
+  BadRequestException,
+  Controller,
+  Get,
+  NotFoundException,
+  Param,
+  Query,
+  UseGuards,
+} from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard.js';
@@ -7,6 +15,7 @@ import { RequireCaps } from '../auth/decorators/require-caps.decorator.js';
 import { AuditLogEntity } from '../entities/audit-log.entity.js';
 import {
   Capability,
+  zResourceIdentity,
   type AuditListResponse,
   type AuditLogDto,
   type AuditResourceSnapshotDto,
@@ -52,7 +61,8 @@ export class AuditController {
 
   @Get(':id')
   async detail(@Param('id') id: string): Promise<AuditLogDto> {
-    const row = await this.repo.findOne({ where: { id } });
+    const auditId = zResourceIdentity.parse(id);
+    const row = await this.repo.findOne({ where: { id: auditId } });
     if (!row) throw new NotFoundException('Audit log not found');
     return toDto(row);
   }
@@ -77,15 +87,30 @@ function toDto(row: AuditLogEntity): AuditLogDto {
 }
 
 function parseLimit(value: string | undefined): number {
-  const parsed = Number.parseInt(value ?? '100', 10);
-  if (!Number.isFinite(parsed)) return 100;
+  if (value === undefined) return 100;
+  const parsed = parsePaginationInteger(value, 'limit');
+  if (parsed < 1) throw invalidPagination('limit must be at least 1');
   return Math.min(Math.max(parsed, 1), 500);
 }
 
 function parseOffset(value: string | undefined): number {
-  const parsed = Number.parseInt(value ?? '0', 10);
-  if (!Number.isFinite(parsed)) return 0;
-  return Math.max(parsed, 0);
+  if (value === undefined) return 0;
+  return parsePaginationInteger(value, 'offset');
+}
+
+function parsePaginationInteger(value: string, field: string): number {
+  if (!/^(?:0|[1-9][0-9]*)$/.test(value)) {
+    throw invalidPagination(`${field} must be a canonical non-negative integer`);
+  }
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed)) {
+    throw invalidPagination(`${field} exceeds the safe integer range`);
+  }
+  return parsed;
+}
+
+function invalidPagination(message: string): BadRequestException {
+  return new BadRequestException({ code: 'INVALID_AUDIT_PAGINATION', message });
 }
 
 function snapshots(value: unknown): AuditResourceSnapshotDto[] {

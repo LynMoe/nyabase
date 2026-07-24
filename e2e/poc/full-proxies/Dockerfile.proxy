@@ -1,0 +1,6 @@
+FROM debian:trixie-slim
+
+COPY proxy /usr/local/bin/nyabase-proxy
+
+USER 65532:65532
+ENTRYPOINT ["/usr/local/bin/nyabase-proxy"]

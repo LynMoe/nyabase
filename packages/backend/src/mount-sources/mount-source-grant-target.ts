@@ -1,15 +1,16 @@
 import { z } from 'zod';
+import { zResourceIdentity } from '@nyabase/common';
 import type { MountSourceGrantTarget } from './mount-sources.service.js';
 
 export const zMountSourceGrantTarget = z.discriminatedUnion('sourceKind', [
   z.object({
     sourceKind: z.literal('local'),
-    sourceId: z.string().min(1),
-    serverId: z.string().min(1),
+    sourceId: zResourceIdentity,
+    serverId: zResourceIdentity,
   }).strict(),
   z.object({
     sourceKind: z.literal('remote'),
-    sourceId: z.string().min(1),
+    sourceId: zResourceIdentity,
   }).strict(),
 ]);
 

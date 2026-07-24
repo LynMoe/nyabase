@@ -34,7 +34,7 @@ export class AdminMetricsController extends MetricsController {
     @Param('id') serverId: string,
     @Query('range') range: string,
   ): Promise<HostMetricsDto> {
-    return this.hostMetricsFor(serverId, range);
+    return this.hostMetricsFor(serverId, range, { includePhysicalTopology: true });
   }
 
   @Get('servers/:id/gpus')

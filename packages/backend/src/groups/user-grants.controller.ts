@@ -69,9 +69,10 @@ export class UserGrantsController {
   async addUserImageGrant(
     @Param('userId') userId: string,
     @Body() body: unknown,
+    @CurrentUser() actor: UserEntity,
   ) {
     const { imageId, serverId } = zAddImageGrantRequest.parse(body);
-    return this.groupsService.addUserImageGrant(userId, imageId, serverId);
+    return this.groupsService.addUserImageGrant(userId, imageId, serverId, actor.id);
   }
 
   @Delete('image-grants/:imageId/:serverId')
@@ -81,8 +82,9 @@ export class UserGrantsController {
     @Param('userId') userId: string,
     @Param('imageId') imageId: string,
     @Param('serverId') serverId: string,
+    @CurrentUser() actor: UserEntity,
   ) {
-    await this.groupsService.deleteUserImageGrant(userId, imageId, serverId);
+    await this.groupsService.deleteUserImageGrant(userId, imageId, serverId, actor.id);
   }
 
   @Get('mount-source-grants')
@@ -119,6 +121,7 @@ export class UserGrantsController {
   @Get('effective-access')
   @RequireCaps(Capability.ManageGrants)
   async effectiveAccess(@Param('userId') userId: string): Promise<EffectiveAccessDto> {
+    await this.groupsService.assertUserScopeExists(userId);
     const servers = await this.accessResolver.getEffectiveAccess(userId);
     return { servers };
   }

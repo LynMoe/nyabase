@@ -10,6 +10,7 @@ BIN_DIR="/opt/nyabase-agent/bin"
 CONFIG_DIR="/etc/nyabase"
 STATE_DIR="/var/lib/nyabase-agent"
 PHYSICAL_MUTATION_LOCK="$STATE_DIR/physical-mutation.lock"
+ATOMIC_EXCHANGE_HELPER="$BIN_DIR/nyabase-atomic-file-exchange"
 
 echo "=== nyabase Agent Installer ==="
 
@@ -73,7 +74,16 @@ touch "$PHYSICAL_MUTATION_LOCK"
 chown root:root "$PHYSICAL_MUTATION_LOCK"
 chmod 0600 "$PHYSICAL_MUTATION_LOCK"
 
-# Copy agent files (assumes build artifacts are in ./dist/)
+# A standalone Agent release is exactly two executable artifacts. Never
+# install the JS/pkg launcher without its provenance-checked syscall helper.
+if [ ! -f "dist/nyabase-atomic-file-exchange" ]; then
+  echo "ERROR: missing release-built dist/nyabase-atomic-file-exchange" >&2
+  exit 1
+fi
+install -o root -g root -m 0755 \
+  "dist/nyabase-atomic-file-exchange" "$ATOMIC_EXCHANGE_HELPER"
+"$ATOMIC_EXCHANGE_HELPER" --self-test /etc
+
 if [ -f "dist/nyabase-agent" ]; then
   # Pre-built binary mode
   cp "dist/nyabase-agent" "$BIN_DIR/nyabase-agent"

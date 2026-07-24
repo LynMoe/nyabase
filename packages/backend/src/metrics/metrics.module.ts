@@ -13,8 +13,8 @@ import { AgentGatewayModule } from '../gateway/agent-gateway.module.js';
 @Module({
   imports: [
     TypeOrmModule.forFeature([ContainerEntity]),
-    AuthModule,
-    AccessModule,
+    forwardRef(() => AuthModule),
+    forwardRef(() => AccessModule),
     // forwardRef breaks the AgentGateway → Users → Groups → AgentGateway →
     // Metrics → Users module-evaluation cycle (UsersModule is still being
     // defined when this file is loaded transitively).

@@ -11,8 +11,16 @@ import { useAuthStore } from '../store/auth.js';
 import { Capability } from '@nyabase/common';
 import type { ServerDto, RemoteFsMountDto, DataDirIssueDto } from '@nyabase/common';
 import { queryKeys } from '../lib/query-keys.js';
+import { QueryErrorState, QueryLoadingState } from '../components/query-state.js';
+import {
+  createRemoteFsMountDraft,
+  type CephFsForm,
+  type NfsForm,
+  type RemoteFsType,
+} from '../lib/remote-fs-form.js';
+import { queryPollInterval } from '../lib/query-lifecycle.js';
 
-type FsType = 'nfs' | 'cephfs';
+type FsType = RemoteFsType;
 type TaskIdsResponse = { taskIds?: string[] };
 type RemoteFsTaskResponse = RemoteFsMountDto & TaskIdsResponse;
 type AssignmentTaskResponse = { taskId?: string };
@@ -71,12 +79,15 @@ export default function RemoteFsMountsPage() {
   const { user } = useAuthStore();
   const canManageContainers = user?.capabilities.includes(Capability.ManageContainersAny) ?? false;
 
-  const { data: servers = [] } = useQuery({ queryKey: queryKeys.servers.admin, queryFn: () => api.get<ServerDto[]>('/admin/servers') });
-  const { data: allMounts = [], isFetching } = useQuery({
+  const serversQuery = useQuery({ queryKey: queryKeys.servers.admin, queryFn: () => api.get<ServerDto[]>('/admin/servers') });
+  const mountsQuery = useQuery({
     queryKey: ['remote-fs-mounts'],
     queryFn: () => api.get<RemoteFsMountDto[]>('/admin/remote-fs-mounts'),
-    refetchInterval: 15_000,
+    refetchInterval: (query) => queryPollInterval(query.state, { activeIntervalMs: 15_000 }),
   });
+  const servers = serversQuery.data ?? [];
+  const allMounts = mountsQuery.data ?? [];
+  const { isFetching } = mountsQuery;
 
   const mounts = filterType === 'all' ? allMounts : allMounts.filter((m) => m.type === filterType);
   const serverAssignMount = serverAssignMountId ? (allMounts.find((m) => m.id === serverAssignMountId) ?? null) : null;
@@ -91,6 +102,18 @@ export default function RemoteFsMountsPage() {
   });
 
   const serverMap = new Map(servers.map((s) => [s.id, s]));
+
+  if (serversQuery.isLoading || mountsQuery.isLoading) {
+    return <QueryLoadingState label="加载远程文件系统..." />;
+  }
+  const inventoryError = serversQuery.error ?? mountsQuery.error;
+  if (inventoryError) return (
+    <QueryErrorState
+      error={inventoryError}
+      resourceName="远程文件系统目录"
+      onRetry={() => { void Promise.all([serversQuery.refetch(), mountsQuery.refetch()]); }}
+    />
+  );
 
   return (
     <div className="px-4 py-4 md:px-6 space-y-5 w-full">
@@ -206,8 +229,15 @@ export default function RemoteFsMountsPage() {
         </div>
       )}
 
-      <RemoteFsMountDialog key={editMount?.id ?? 'new'} open={showCreate || !!editMount} mount={editMount ?? undefined}
-        servers={servers} onClose={() => { setShowCreate(false); setEditMount(null); }} />
+      {(showCreate || editMount) && (
+        <RemoteFsMountDialog
+          key={editMount?.id ?? 'new'}
+          open
+          mount={editMount ?? undefined}
+          servers={servers}
+          onClose={() => { setShowCreate(false); setEditMount(null); }}
+        />
+      )}
       {serverAssignMount && (
         <ServerAssignDialog mount={serverAssignMount} servers={servers}
           onClose={() => setServerAssignMountId(null)} />
@@ -220,20 +250,6 @@ export default function RemoteFsMountsPage() {
 // Create/Edit dialog
 // ---------------------------------------------------------------------------
 
-interface NfsForm {
-  nfsServer: string;
-  exportPath: string;
-  version: '3' | '4' | '4.1' | '4.2';
-}
-
-interface CephFsForm {
-  monHosts: string;
-  exportPath: string;
-  fsName: string;
-  clientName: string;
-  secret: string;
-}
-
 function RemoteFsMountDialog({ open, mount, servers, onClose }: {
   open: boolean;
   mount?: RemoteFsMountDto;
@@ -242,41 +258,23 @@ function RemoteFsMountDialog({ open, mount, servers, onClose }: {
 }) {
   const qc = useQueryClient();
   const isEdit = !!mount;
-
-  const [name, setName] = useState(mount?.name ?? '');
-  const [displayName, setDisplayName] = useState(mount?.displayName ?? '');
-  const [description, setDescription] = useState(mount?.description ?? '');
-  const [type, setType] = useState<FsType>((mount?.type as FsType) ?? 'nfs');
-  const [options, setOptions] = useState(mount?.options ?? '');
-  const [serverIds, setServerIds] = useState<string[]>(mount?.serverIds ?? []);
-
-  const existingNfsParams = mount?.params.type === 'nfs' ? mount.params : null;
-  const existingCephParams = mount?.params.type === 'cephfs' ? mount.params : null;
-
-  const [nfsForm, setNfsForm] = useState<NfsForm>({
-    nfsServer: existingNfsParams?.nfsServer ?? '',
-    exportPath: existingNfsParams?.exportPath ?? '/',
-    version: existingNfsParams?.version ?? '4',
-  });
-  const [cephForm, setCephForm] = useState<CephFsForm>({
-    monHosts: existingCephParams?.monHosts ?? '',
-    exportPath: existingCephParams?.exportPath ?? '/',
-    fsName: existingCephParams?.fsName ?? '',
-    clientName: existingCephParams?.clientName ?? 'admin',
-    secret: '',
-  });
-
-  const toggleServer = (sid: string) => setServerIds((prev) =>
-    prev.includes(sid) ? prev.filter((id) => id !== sid) : [...prev, sid],
-  );
+  const [initial] = useState(() => createRemoteFsMountDraft(mount));
+  const [name, setName] = useState(initial.name);
+  const [displayName, setDisplayName] = useState(initial.displayName);
+  const [description, setDescription] = useState(initial.description);
+  const [type, setType] = useState<FsType>(initial.type);
+  const [options, setOptions] = useState(initial.options);
+  const [serverId, setServerId] = useState(initial.serverId);
+  const [nfsForm, setNfsForm] = useState<NfsForm>(initial.nfsForm);
+  const [cephForm, setCephForm] = useState<CephFsForm>(initial.cephForm);
 
   const { mutate, isPending } = useMutation({
     mutationFn: () => {
       if (isEdit) {
         const body: Record<string, unknown> = {
           name,
-          displayName: displayName || undefined,
-          description: description || undefined,
+          displayName: displayName.trim() || null,
+          description: description.trim() || null,
         };
         return api.patch<RemoteFsTaskResponse>(`/admin/remote-fs-mounts/${mount!.id}`, body);
       }
@@ -294,7 +292,7 @@ function RemoteFsMountDialog({ open, mount, servers, onClose }: {
         name,
         displayName: displayName || undefined,
         description: description || undefined,
-        serverIds: serverIds.length ? serverIds : undefined,
+        serverIds: serverId ? [serverId] : undefined,
         options: options || undefined,
         params,
       });
@@ -439,18 +437,17 @@ function RemoteFsMountDialog({ open, mount, servers, onClose }: {
               {!isEdit && servers.length > 0 && (
                 <div className="space-y-1.5">
                   <Label className="text-sm">立即分配到服务器（可选）</Label>
-                  <div className="flex flex-wrap gap-2">
+                  <select
+                    value={serverId}
+                    onChange={(event) => setServerId(event.target.value)}
+                    className="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
+                  >
+                    <option value="">暂不分配</option>
                     {servers.map((s) => (
-                      <button key={s.id} type="button" onClick={() => toggleServer(s.id)}
-                        className={`px-3 py-1.5 rounded-lg text-xs font-medium border transition-colors ${
-                          serverIds.includes(s.id)
-                            ? 'bg-primary/10 border-primary/30 text-primary'
-                            : 'bg-muted border-border text-muted-foreground hover:bg-accent'
-                        }`}>
-                        {s.name}
-                      </button>
+                      <option key={s.id} value={s.id}>{s.name}</option>
                     ))}
-                  </div>
+                  </select>
+                  <p className="text-xs text-muted-foreground">创建时最多分配一台服务器；其余服务器可在创建后逐台分配。</p>
                 </div>
               )}
             </>
@@ -568,11 +565,24 @@ function ServerAssignDialog({ mount, servers, onClose }: {
 }
 
 function RemoteDanglingDirPanel({ sourceId }: { sourceId: string }) {
-  const { data: issues = [] } = useQuery({
+  const issuesQuery = useQuery({
     queryKey: ['data-dir-issues', 'remote', sourceId],
     queryFn: () => api.get<DataDirIssueDto[]>(`/admin/data-dirs/issues?sourceKind=remote&sourceId=${sourceId}`),
-    refetchInterval: 30_000,
+    refetchInterval: (query) => queryPollInterval(query.state, { activeIntervalMs: 30_000 }),
   });
+  const issues = issuesQuery.data ?? [];
+
+  if (issuesQuery.isLoading) {
+    return <div className="mt-3 text-xs text-muted-foreground">正在检查远程数据目录一致性...</div>;
+  }
+  if (issuesQuery.isError) {
+    return (
+      <div className="mt-3 rounded-md border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700">
+        一致性检查失败，当前不能断言“无问题”。
+        <button className="ml-2 underline" onClick={() => { void issuesQuery.refetch(); }}>重试</button>
+      </div>
+    );
+  }
 
   if (issues.length === 0) return null;
 

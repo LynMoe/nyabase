@@ -19,14 +19,17 @@ import { ResourceKeyService } from '../agent-tasks/resource-key.service.js';
 import {
   AgentTaskKind,
   AuditAction,
+  Capability,
   DataDirDto,
-  MAX_MANAGED_DATA_DIRS_PER_AGENT,
+  type UserDataDirDto,
   remoteFsSourceIdentity,
 } from '@nyabase/common';
 import { AgentGateway } from '../gateway/agent-gateway.js';
 import { QuotaDesiredEntity } from '../entities/quota-desired.entity.js';
 import { postCommitBestEffort } from '../common/post-commit.js';
 import { AccessResolverService } from '../access/access-resolver.service.js';
+import { exactLocalDisk } from '../mount-sources/utils.js';
+import { assertAgentDataDirCapacity } from './data-dir-capacity.js';
 
 @Injectable()
 export class DataDirsService {
@@ -120,6 +123,10 @@ export class DataDirsService {
     });
   }
 
+  async listUserDirs(userId: string, serverId: string): Promise<UserDataDirDto[]> {
+    return (await this.listDirs(userId, serverId)).map(({ hostPath: _hostPath, ...row }) => row);
+  }
+
   async createDir(
     actorId: string,
     userId: string,
@@ -128,6 +135,7 @@ export class DataDirsService {
     sourceId: string,
     name: string,
     uid: number,
+    authorizationKind: 'owner' | 'admin' = 'owner',
   ) {
     // Validate source exists on this server
     let sourceIdentity: string;
@@ -206,6 +214,11 @@ export class DataDirsService {
         uid,
       },
       beforeCommit: async (manager, context) => {
+        if (authorizationKind === 'admin') {
+          await this.accessResolver.assertActorCapabilitiesInTransaction(
+            manager, actorId, [Capability.ManageContainersAny],
+          );
+        }
         const authorized = await this.accessResolver.hasMountSourceAccessInTransaction(
           manager,
           userId,
@@ -216,12 +229,6 @@ export class DataDirsService {
         if (!authorized) {
           throw new ConflictException('Mount source authorization changed while preparing the data directory');
         }
-        if (await manager.count(DataDirectoryEntity) >= MAX_MANAGED_DATA_DIRS_PER_AGENT) {
-          throw new ConflictException({
-            code: 'DATA_DIRECTORY_CAPACITY_REACHED',
-            message: `At most ${MAX_MANAGED_DATA_DIRS_PER_AGENT} data directories are supported`,
-          });
-        }
         const duplicate = await manager.findOne(DataDirectoryEntity, {
           where: {
             sourceKind,
@@ -231,6 +238,23 @@ export class DataDirsService {
           },
         });
         if (duplicate) throw new ConflictException(`Directory "${name}" already exists on this source`);
+        if (sourceKind === 'local') {
+          await assertAgentDataDirCapacity(manager, serverId, { additionalRows: 1 });
+        } else {
+          // One shared remote row becomes visible to every durable assignment,
+          // not only to the Server chosen to execute its creation task.
+          const assignedServers = await manager.find(RemoteFsServerAssignmentEntity, {
+            where: { remoteFsMountId: sourceId },
+          });
+          for (const affectedServerId of new Set([
+            serverId,
+            ...assignedServers.map((assignment) => assignment.serverId),
+          ])) {
+            await assertAgentDataDirCapacity(manager, affectedServerId, {
+              additionalRows: 1,
+            });
+          }
+        }
         if (sourceKind === 'remote') {
           const mount = await manager.findOneBy(RemoteFsMountEntity, {
             id: sourceId,
@@ -301,6 +325,7 @@ export class DataDirsService {
     sourceKind: 'local' | 'remote',
     sourceId: string,
     name: string,
+    authorizationKind: 'owner' | 'admin' = 'owner',
   ) {
     const row = await this.dataDirRepo.findOne({
       where: {
@@ -341,6 +366,11 @@ export class DataDirsService {
       ],
       request: { userId, sourceKind, sourceId, sourceIdentity: row.sourceIdentity, name },
       beforeCommit: async (manager, context) => {
+        if (authorizationKind === 'admin') {
+          await this.accessResolver.assertActorCapabilitiesInTransaction(
+            manager, actorId, [Capability.ManageContainersAny],
+          );
+        }
         const fresh = await manager.findOneBy(DataDirectoryEntity, { id: row.id });
         if (
           !fresh
@@ -363,6 +393,21 @@ export class DataDirsService {
           name,
           manager,
         );
+        await this.assertDeletionSourceReady(manager, serverId, fresh);
+        if (authorizationKind === 'owner') {
+          const authorized = await this.accessResolver.hasMountSourceAccessInTransaction(
+            manager,
+            userId,
+            serverId,
+            { kind: sourceKind, id: sourceId },
+            sourceKind === 'local' ? row.sourceIdentity : undefined,
+          );
+          if (!authorized) {
+            throw new ConflictException(
+              'Mount source authorization changed while preparing data directory deletion',
+            );
+          }
+        }
         await manager.update(DataDirectoryEntity, row.id, {
           desiredState: 'removing',
           generation: nextGeneration,
@@ -410,6 +455,54 @@ export class DataDirsService {
       },
     });
     if (mount) throw new ConflictException(`Data directory "${dirName}" is referenced by a container`);
+  }
+
+  /**
+   * A delete task is only safe on an Agent that currently exposes the exact
+   * physical source captured by the directory reservation. The route-level
+   * authorization read is deliberately insufficient: a RemoteFS assignment
+   * may finish unmounting between that read and durable task admission.
+   */
+  private async assertDeletionSourceReady(
+    manager: EntityManager,
+    serverId: string,
+    row: DataDirectoryEntity,
+  ): Promise<void> {
+    if (row.sourceKind === 'local') {
+      const snapshot = this.agentGateway.stateCache.get(serverId);
+      const disk = snapshot && snapshot.helloAt !== null
+        ? exactLocalDisk(snapshot.disks, row.sourceId)
+        : null;
+      if (!disk || disk.sourceIdentity !== row.sourceIdentity) {
+        throw new ConflictException({
+          code: 'DATA_DIRECTORY_SOURCE_NOT_READY',
+          message: 'The exact local data source is no longer ready on this server',
+        });
+      }
+      return;
+    }
+
+    const [assignment, mount] = await Promise.all([
+      manager.findOneBy(RemoteFsServerAssignmentEntity, {
+        remoteFsMountId: row.sourceId,
+        serverId,
+        desiredState: 'active',
+      }),
+      manager.findOneBy(RemoteFsMountEntity, {
+        id: row.sourceId,
+        desiredState: 'active',
+      }),
+    ]);
+    if (
+      !assignment
+      || !mount
+      || remoteFsSourceIdentity(mount.params) !== row.sourceIdentity
+    ) {
+      throw new ConflictException({
+        code: 'DATA_DIRECTORY_SOURCE_NOT_READY',
+        message: 'The exact remote data source is no longer assigned to this server',
+      });
+    }
   }
 
   private physicalDataDirPath(root: string, resourceId: string): string {

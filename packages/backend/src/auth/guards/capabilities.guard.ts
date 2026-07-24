@@ -1,6 +1,6 @@
 import { Injectable, CanActivate, ExecutionContext, ForbiddenException } from '@nestjs/common';
 import { Reflector } from '@nestjs/core';
-import { CAPS_KEY } from '../decorators/require-caps.decorator.js';
+import { ANY_CAPS_KEY, CAPS_KEY } from '../decorators/require-caps.decorator.js';
 import { AccessResolverService } from '../../access/access-resolver.service.js';
 import { Capability } from '@nyabase/common';
 import { UserEntity } from '../../entities/user.entity.js';
@@ -17,20 +17,26 @@ export class CapabilitiesGuard implements CanActivate {
       context.getHandler(),
       context.getClass(),
     ]);
+    const anyCaps = this.reflector.getAllAndOverride<Capability[]>(ANY_CAPS_KEY, [
+      context.getHandler(),
+      context.getClass(),
+    ]);
 
     const request = context.switchToHttp().getRequest();
     const user: UserEntity = request.user;
     if (!user) return false;
 
-    if (!requiredCaps?.length) {
+    if (!requiredCaps?.length && !anyCaps?.length) {
       if (this.isAdminRequest(request)) {
         throw new ForbiddenException('Admin route is missing required capabilities');
       }
       return true;
     }
 
-    const userCaps = await this.accessResolver.userCapabilities(user.id);
-    const ok = requiredCaps.every((c) => userCaps.has(c));
+    const userCaps = await this.accessResolver.userCapabilitiesCurrent(user.id);
+    const allSatisfied = !requiredCaps?.length || requiredCaps.every((c) => userCaps.has(c));
+    const anySatisfied = !anyCaps?.length || anyCaps.some((c) => userCaps.has(c));
+    const ok = allSatisfied && anySatisfied;
     if (!ok) throw new ForbiddenException();
     return true;
   }

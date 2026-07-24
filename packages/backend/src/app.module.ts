@@ -21,11 +21,15 @@ import { SystemSettingsModule } from './system-settings/system-settings.module.j
 import { HttpProxyModule } from './http-proxy/http-proxy.module.js';
 import { AppService } from './app.service.js';
 import { NyabaseConfigModule } from './config/nyabase-config.module.js';
+import { AccessModule } from './access/access.module.js';
+import { CatalogModule } from './catalog/catalog.module.js';
+import { HealthController } from './health/health.controller.js';
 
 @Module({
   imports: [
     NyabaseConfigModule,
     DatabaseModule,
+    AccessModule,
     AuthModule,
     UsersModule,
     ServersModule,
@@ -42,8 +46,14 @@ import { NyabaseConfigModule } from './config/nyabase-config.module.js';
     SshModule,
     HttpProxyModule,
     SystemSettingsModule,
+    CatalogModule,
   ],
-  controllers: [AgentTasksController, AdminAgentTasksController, AdminAgentQuarantineController],
+  controllers: [
+    HealthController,
+    AgentTasksController,
+    AdminAgentTasksController,
+    AdminAgentQuarantineController,
+  ],
   providers: [AppService],
 })
 export class AppModule {}

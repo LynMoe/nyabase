@@ -1,4 +1,4 @@
-import { Module } from '@nestjs/common';
+import { Module, forwardRef } from '@nestjs/common';
 import { JwtModule } from '@nestjs/jwt';
 import { PassportModule } from '@nestjs/passport';
 import { TypeOrmModule } from '@nestjs/typeorm';
@@ -12,6 +12,7 @@ import { RefreshTokenEntity } from '../entities/refresh-token.entity.js';
 import { ApiTokenEntity } from '../entities/api-token.entity.js';
 import { AccessModule } from '../access/access.module.js';
 import { NyabaseConfigService } from '../config/nyabase-config.service.js';
+import { AuditModule } from '../audit/audit.module.js';
 
 @Module({
   imports: [
@@ -25,6 +26,7 @@ import { NyabaseConfigService } from '../config/nyabase-config.service.js';
     }),
     TypeOrmModule.forFeature([UserEntity, RefreshTokenEntity, ApiTokenEntity]),
     AccessModule,
+    forwardRef(() => AuditModule),
   ],
   providers: [AuthService, JwtStrategy, JwtAuthGuard, CapabilitiesGuard],
   controllers: [AuthController],

@@ -30,6 +30,7 @@ export class ImagesController {
     const image = await this.imagesService.findById(id);
     const accessible = await this.accessResolver.isImageAccessibleForUser(user.id, image.id);
     if (!accessible) throw new ForbiddenException();
-    return image;
+    if (image.deleting) throw new ForbiddenException();
+    return this.imagesService.toDto(image);
   }
 }

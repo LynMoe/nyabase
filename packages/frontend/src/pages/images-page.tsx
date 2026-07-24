@@ -1,7 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useState } from 'react';
 import { Plus, RefreshCw } from 'lucide-react';
-import type { ImageDto } from '@nyabase/common';
+import type { AdminImageDto, AgentTaskStatus } from '@nyabase/common';
 
 import { api } from '../lib/api.js';
 import { toast } from '../hooks/use-toast.js';
@@ -13,24 +13,44 @@ import {
 } from '../components/ui/alert-dialog.js';
 import { ImageList } from '../components/images/image-list.js';
 import { ImageFormDialog } from '../components/images/image-form-dialog.js';
+import { QueryErrorState } from '../components/query-state.js';
+import { imageDeleteFeedback, imageListPollInterval } from '../lib/image-lifecycle-ui.js';
+import { queryPollInterval } from '../lib/query-lifecycle.js';
+
+type DeleteImageResponse = {
+  tasks: Array<{ serverId: string; taskId: string; status: AgentTaskStatus }>;
+};
 
 export default function ImagesPage() {
   const [showCreate, setShowCreate] = useState(false);
-  const [editTarget, setEditTarget] = useState<ImageDto | null>(null);
-  const [deleteTarget, setDeleteTarget] = useState<ImageDto | null>(null);
+  const [editTarget, setEditTarget] = useState<AdminImageDto | null>(null);
+  const [deleteTarget, setDeleteTarget] = useState<AdminImageDto | null>(null);
   const qc = useQueryClient();
 
-  const { data: images = [], isLoading, isFetching, refetch } = useQuery({
+  const imagesQuery = useQuery({
     queryKey: queryKeys.images.admin,
-    queryFn: () => api.get<ImageDto[]>('/admin/images'),
-    refetchInterval: 30_000,
+    queryFn: () => api.get<AdminImageDto[]>('/admin/images'),
+    refetchInterval: (query) => queryPollInterval(query.state, {
+      activeIntervalMs: imageListPollInterval(query.state.data),
+      transientBaseIntervalMs: 2_000,
+      transientMaxIntervalMs: 30_000,
+    }),
   });
+  const images = imagesQuery.data ?? [];
+  const { isLoading, isFetching, refetch } = imagesQuery;
+  const serverEditTarget = editTarget && imagesQuery.data
+    ? (imagesQuery.data.find((image) => image.id === editTarget.id) ?? null)
+    : editTarget;
+  const currentDeleteTarget = deleteTarget && imagesQuery.data
+    ? (imagesQuery.data.find((image) => image.id === deleteTarget.id) ?? null)
+    : deleteTarget;
 
   const deleteImg = useMutation({
-    mutationFn: (id: string) => api.delete(`/admin/images/${id}`),
-    onSuccess: () => {
+    mutationFn: (id: string) => api.delete<DeleteImageResponse>(`/admin/images/${id}`),
+    onSuccess: (result) => {
       qc.invalidateQueries({ queryKey: queryKeys.images.admin });
-      toast({ title: '镜像已删除' });
+      toast(imageDeleteFeedback(result.tasks.length));
+      setDeleteTarget(null);
     },
     onError: (e) => toast({ title: '删除失败', description: e.message, variant: 'destructive' }),
   });
@@ -40,61 +60,82 @@ export default function ImagesPage() {
       <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
         <div>
           <h1 className="text-2xl font-semibold tracking-tight text-foreground">容器镜像</h1>
-          <p className="text-muted-foreground text-sm">{images.length} 个预置镜像</p>
+          <p className="text-muted-foreground text-sm">
+            {imagesQuery.data ? `${images.length} 个预置镜像` : '镜像数量尚未加载'}
+          </p>
         </div>
         <div className="flex items-center gap-2">
           <Button
             variant="ghost" size="icon"
             className="h-8 w-8 text-muted-foreground"
-            onClick={() => refetch()} disabled={isFetching}
+            onClick={() => {
+              if (editTarget && !window.confirm('刷新会保留镜像表单中的本地修改，并标记冲突。继续刷新？')) return;
+              void refetch();
+            }} disabled={isFetching}
           >
             <RefreshCw className={`h-4 w-4 ${isFetching ? 'animate-spin' : ''}`} />
           </Button>
-          <Button onClick={() => setShowCreate(true)}>
+          <Button onClick={() => setShowCreate(true)} disabled={imagesQuery.isError}>
             <Plus className="h-4 w-4" />添加镜像
           </Button>
         </div>
       </div>
 
-      <ImageList
-        images={images}
-        isLoading={isLoading}
-        onCreate={() => setShowCreate(true)}
-        onEdit={(img) => setEditTarget(img)}
-        onDelete={(img) => setDeleteTarget(img)}
-      />
+      {imagesQuery.isError ? (
+        <QueryErrorState
+          error={imagesQuery.error}
+          resourceName="镜像目录"
+          onRetry={() => { void imagesQuery.refetch(); }}
+        />
+      ) : (
+        <ImageList
+          images={images}
+          isLoading={isLoading}
+          onCreate={() => setShowCreate(true)}
+          onEdit={(img) => setEditTarget(img)}
+          onDelete={(img) => setDeleteTarget(img)}
+        />
+      )}
 
-      <ImageFormDialog
-        mode="create"
-        open={showCreate}
-        onOpenChange={setShowCreate}
-      />
-      <ImageFormDialog
-        mode="edit"
-        image={editTarget}
-        open={!!editTarget}
-        onOpenChange={(open) => { if (!open) setEditTarget(null); }}
-      />
+      {showCreate && (
+        <ImageFormDialog
+          mode="create"
+          open
+          onOpenChange={setShowCreate}
+        />
+      )}
+      {editTarget && serverEditTarget && !serverEditTarget.deleting && (
+        <ImageFormDialog
+          mode="edit"
+          image={editTarget}
+          serverImage={serverEditTarget}
+          open
+          onOpenChange={(open) => { if (!open) setEditTarget(null); }}
+        />
+      )}
 
       <AlertDialog
-        open={!!deleteTarget}
+        open={!!currentDeleteTarget}
         onOpenChange={(open) => { if (!open) setDeleteTarget(null); }}
       >
         <AlertDialogContent>
           <AlertDialogHeader>
-            <AlertDialogTitle>确认删除镜像？</AlertDialogTitle>
+            <AlertDialogTitle>{currentDeleteTarget?.deleting ? '重试镜像清理？' : '确认删除镜像？'}</AlertDialogTitle>
             <AlertDialogDescription>
-              此操作不可撤销，将删除镜像{' '}
-              <span className="font-semibold text-foreground">{deleteTarget?.name}</span>。
+              {currentDeleteTarget?.deleting
+                ? '将为未完成的服务器重新排队清理任务；记录会在全部清理成功后移除。'
+                : '删除会先排队清理所有服务器上的运行时镜像；记录会在全部成功后移除。'}{' '}
+              <span className="font-semibold text-foreground">{currentDeleteTarget?.name}</span>。
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
             <AlertDialogCancel>取消</AlertDialogCancel>
             <AlertDialogAction
               className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
-              onClick={() => { if (deleteTarget) deleteImg.mutate(deleteTarget.id); }}
+              onClick={() => { if (currentDeleteTarget) deleteImg.mutate(currentDeleteTarget.id); }}
+              disabled={deleteImg.isPending}
             >
-              删除
+              {deleteImg.isPending ? '提交中...' : currentDeleteTarget?.deleting ? '重试清理' : '排队删除'}
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>

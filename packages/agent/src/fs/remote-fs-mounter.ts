@@ -3,15 +3,20 @@ import * as path from 'path';
 import { execFile } from 'child_process';
 import { promisify } from 'util';
 import type { RemoteFsMountSpec, RemoteFsMountStatus } from '@nyabase/common';
-import type { FsMountDriver } from './fs-driver.js';
+import { FsCleanupIncompleteError, type FsMountDriver } from './fs-driver.js';
 import { NfsDriver } from './nfs-driver.js';
 import {
   createIsolatedCommandRunner,
   type IsolatedCommandRunner,
 } from './isolated-command.js';
 import { CephFsDriver } from './cephfs-driver.js';
-import { parseProcMounts, readProcMountsFresh } from './proc-mounts.js';
+import {
+  parseProcMountInfo,
+  readProcMountInfoFresh,
+  type ProcMountInfoEntry,
+} from './proc-mounts.js';
 import type { PhysicalReferenceGuard } from '../docker/physical-reference-guard.js';
+import { EXACT_UNMOUNT_HELPER_SCRIPT } from './exact-unmount-helper.js';
 
 const execFileAsync = promisify(execFile);
 const MAX_PENDING_MUTATIONS = 2;
@@ -19,6 +24,17 @@ const MAX_PENDING_MUTATIONS = 2;
 interface MountEntry {
   spec: RemoteFsMountSpec;
   status: RemoteFsMountStatus;
+}
+
+interface CurrentRemoteMount {
+  mountId: number;
+  parentMountId: number;
+  deviceId: string;
+  fsRoot: string;
+  mountPoint: string;
+  fsType: string;
+  src: string;
+  opts: string;
 }
 
 const DEFAULT_ALLOWED_HOST_MOUNT_ROOTS = ['/mnt/remote-fs'];
@@ -51,6 +67,8 @@ export interface RemoteFsMounterOptions {
   allowedHostMountRoots?: string[];
   /** Static host roots that must never overlap a Backend-owned RemoteFS path. */
   forbiddenHostPaths?: string[];
+  /** Test seam for exact kernel mount-id observations. */
+  readMountInfo?: () => Promise<string>;
 }
 
 /** Full physical identity required before an absent operation may unmount. */
@@ -73,6 +91,7 @@ export class RemoteFsMounter {
   private readonly forbiddenHostPaths: string[];
   private readonly physicalReferenceGuard: PhysicalReferenceGuard;
   private readonly physicalMutationRunner: IsolatedCommandRunner;
+  private readonly readMountInfo: () => Promise<string>;
   private mutationTail: Promise<void> = Promise.resolve();
   private pendingMutations = 0;
 
@@ -91,6 +110,7 @@ export class RemoteFsMounter {
       .map((root) => path.resolve(root));
     this.physicalMutationRunner = options.physicalMutationRunner
       ?? createIsolatedCommandRunner({ lockPath: options.physicalMutationLockPath });
+    this.readMountInfo = options.readMountInfo ?? readProcMountInfoFresh;
     const drivers: FsMountDriver[] = [
       new NfsDriver(this.physicalMutationRunner),
       new CephFsDriver(this.physicalMutationRunner),
@@ -202,6 +222,28 @@ export class RemoteFsMounter {
     return mounted;
   }
 
+  /** Exact boot-lifetime mount identity for cross-subsystem before/after sampling. */
+  async observeMountedIdentity(spec: RemoteFsMountSpec): Promise<string | null> {
+    // Cross-subsystem pre/post verification must never follow or even inspect
+    // the remote target. Only a spec already adopted into this connection may
+    // be sampled, and the physical observation comes exclusively from a fresh
+    // mountinfo snapshot. All target syscalls belong to the bounded helper.
+    const entry = this.mounts.get(spec.id);
+    if (!entry || !this.specsEqual(entry.spec, spec)) return null;
+    const current = await this.getCurrentMount(entry.spec.hostMountPoint);
+    if (!current || !this.requireDriver(entry.spec).matchesCurrent(entry.spec, current)) return null;
+    return JSON.stringify([
+      current.mountId,
+      current.parentMountId,
+      current.deviceId,
+      current.fsRoot,
+      current.mountPoint,
+      current.fsType,
+      current.src,
+      current.opts,
+    ]);
+  }
+
   async verifyUnmounted(
     id: string,
     fallback?: RemoteFsMountRemovalFallback,
@@ -268,9 +310,9 @@ export class RemoteFsMounter {
       }
 
       if (current) {
-        // The allowlisted root is Agent-owned. Ensure is allowed to replace a
-        // stale physical mount so a changed Backend spec can converge.
-        await this.ensureUnmounted(spec.hostMountPoint);
+        throw new Error(
+          `Refusing to replace ${spec.hostMountPoint}: current mount does not match its immutable Backend spec`,
+        );
       }
 
       // Mounting over an absent path can still strand an already-running bind
@@ -290,6 +332,13 @@ export class RemoteFsMounter {
       this.setStatus(entry, 'mounted', undefined, usage);
       return this.cloneSpec(spec);
     } catch (error) {
+      // A Ceph mount may already exist when deletion of its one-use secret
+      // fails. Physical convergence never makes credential cleanup optional:
+      // preserve the retryable incomplete classification for the task handler.
+      if (error instanceof FsCleanupIncompleteError) {
+        this.setStatus(entry, 'error', this.errorMessage(error));
+        throw error;
+      }
       // mount(8) may return an ambiguous transport error after the kernel has
       // completed the effect. Only the fresh physical postcondition decides.
       try {
@@ -324,7 +373,7 @@ export class RemoteFsMounter {
             `Refusing to unmount ${spec.hostMountPoint}: current mount does not match the full absent spec`,
           );
         }
-        await this.ensureUnmounted(spec.hostMountPoint);
+        await this.ensureUnmounted(spec, current);
       }
       if (driver.cleanup) await driver.cleanup(spec);
       this.mounts.delete(id);
@@ -343,7 +392,7 @@ export class RemoteFsMounter {
         `Refusing to replace ${spec.hostMountPoint}: current mount does not match its known spec`,
       );
     }
-    await this.ensureUnmounted(spec.hostMountPoint);
+    await this.ensureUnmounted(spec, current);
     if (driver.cleanup) await driver.cleanup(spec);
   }
 
@@ -362,16 +411,23 @@ export class RemoteFsMounter {
   }
 
   private async getAllStatusesFresh(): Promise<RemoteFsMountStatus[]> {
-    const currentByPoint = new Map(
-      parseProcMounts(await readProcMountsFresh()).map((entry) => [
-        entry.mountPoint,
-        { src: entry.source, opts: entry.options },
-      ]),
-    );
+    const observed = parseProcMountInfo(await this.readMountInfo());
     const statuses: RemoteFsMountStatus[] = [];
     for (const entry of this.mounts.values()) {
       const driver = this.requireDriver(entry.spec);
-      const current = currentByPoint.get(entry.spec.hostMountPoint) ?? null;
+      const exact = observed.filter((mount) => mount.mountPoint === entry.spec.hostMountPoint);
+      if (exact.length > 1) {
+        entry.status = {
+          id: entry.spec.id,
+          hostMountPoint: entry.spec.hostMountPoint,
+          status: 'error',
+          error: 'Mount point has an ambiguous stacked mount',
+          lastCheckedAt: Date.now(),
+        };
+        statuses.push({ ...entry.status });
+        continue;
+      }
+      const current = exact[0] ? this.currentMount(exact[0]) : null;
       if (current && driver.matchesCurrent(entry.spec, current)) {
         entry.status = {
           ...entry.status,
@@ -406,7 +462,7 @@ export class RemoteFsMounter {
       spec.hostMountPoint,
       createMountPoint,
     );
-    const allowedRoots = await this.getCanonicalAllowedRoots(false);
+    const allowedRoots = this.getLexicalAllowedRoots();
     if (!allowedRoots.some((root) => hostMountPoint === path.join(root, spec.id))) {
       throw new Error(
         `RemoteFS ${spec.id} path must be exactly <allowed-root>/${spec.id}: ${hostMountPoint}`,
@@ -445,6 +501,16 @@ export class RemoteFsMounter {
 
     const normalized = path.resolve(rawMountPoint);
     this.assertNotSystemPath(normalized);
+    if (!createMountPoint) {
+      const allowedRoot = this.getLexicalAllowedRoots()
+        .find((root) => this.isStrictlyInside(normalized, root));
+      if (!allowedRoot) {
+        throw new Error(
+          `remote-fs hostMountPoint must be under ${this.allowedHostMountRoots.join(', ')}: ${rawMountPoint}`,
+        );
+      }
+      return normalized;
+    }
     for (const allowedRoot of await this.getCanonicalAllowedRoots(createMountPoint)) {
       if (!this.isStrictlyInside(normalized, allowedRoot)) continue;
       await this.assertNoExistingSymlinkPath(allowedRoot, normalized);
@@ -467,6 +533,17 @@ export class RemoteFsMounter {
     throw new Error(
       `remote-fs hostMountPoint must be under ${this.allowedHostMountRoots.join(', ')}: ${rawMountPoint}`,
     );
+  }
+
+  private getLexicalAllowedRoots(): string[] {
+    return this.allowedHostMountRoots.map((rawRoot) => {
+      if (!path.isAbsolute(rawRoot)) {
+        throw new Error(`remote-fs allowed host mount root must be absolute: ${rawRoot}`);
+      }
+      const normalizedRoot = path.resolve(rawRoot);
+      this.assertNotSystemPath(normalizedRoot);
+      return normalizedRoot;
+    });
   }
 
   private async getCanonicalAllowedRoots(create: boolean): Promise<string[]> {
@@ -538,24 +615,40 @@ export class RemoteFsMounter {
       || this.isStrictlyInside(right, left);
   }
 
-  private async getCurrentMount(mountPoint: string): Promise<{ src: string; opts: string } | null> {
-    const entries = parseProcMounts(await readProcMountsFresh());
-    const current = entries.find((entry) => entry.mountPoint === mountPoint);
-    return current ? { src: current.source, opts: current.options } : null;
+  private async getCurrentMount(mountPoint: string): Promise<CurrentRemoteMount | null> {
+    const exact = parseProcMountInfo(await this.readMountInfo())
+      .filter((entry) => entry.mountPoint === mountPoint);
+    if (exact.length > 1) {
+      throw new Error(`RemoteFS mount point has an ambiguous stacked mount: ${mountPoint}`);
+    }
+    return exact[0] ? this.currentMount(exact[0]) : null;
   }
 
-  private async umountHost(mountPoint: string): Promise<void> {
-    await this.physicalMutationRunner('umount', [mountPoint], 15_000);
+  private async umountHost(expected: CurrentRemoteMount): Promise<void> {
+    await this.physicalMutationRunner(process.execPath, [
+      '-e',
+      EXACT_UNMOUNT_HELPER_SCRIPT,
+      JSON.stringify(expected),
+      '/proc/self/mountinfo',
+      'umount',
+    ], 15_000);
   }
 
-  private async ensureUnmounted(mountPoint: string): Promise<void> {
+  private async ensureUnmounted(spec: RemoteFsMountSpec, expected: CurrentRemoteMount): Promise<void> {
+    const mountPoint = spec.hostMountPoint;
     // Keep the proof adjacent to the destructive effect. In particular, a
     // matching Ensure never reaches this fence, while both stale-target and
     // old-path replacement unmounts do.
     await this.physicalReferenceGuard.assertNoRunningBindReferences(mountPoint);
+    const confirmed = await this.getCurrentMount(mountPoint);
+    if (!confirmed) return;
+    const driver = this.requireDriver(spec);
+    if (!this.sameMountIdentity(expected, confirmed) || !driver.matchesCurrent(spec, confirmed)) {
+      throw new Error(`Refusing to unmount ${mountPoint}: mount identity changed after reference validation`);
+    }
     let commandError: unknown;
     try {
-      await this.umountHost(mountPoint);
+      await this.umountHost(confirmed);
     } catch (error) {
       commandError = error;
     }
@@ -563,6 +656,30 @@ export class RemoteFsMounter {
     if (!remaining) return;
     if (commandError) throw commandError;
     throw new Error(`RemoteFS mount point ${mountPoint} remained mounted after umount`);
+  }
+
+  private currentMount(entry: ProcMountInfoEntry): CurrentRemoteMount {
+    return {
+      mountId: entry.mountId,
+      parentMountId: entry.parentMountId,
+      deviceId: entry.deviceId,
+      fsRoot: entry.fsRoot,
+      mountPoint: entry.mountPoint,
+      fsType: entry.fsType,
+      src: entry.source,
+      opts: entry.options,
+    };
+  }
+
+  private sameMountIdentity(left: CurrentRemoteMount, right: CurrentRemoteMount): boolean {
+    return left.mountId === right.mountId
+      && left.parentMountId === right.parentMountId
+      && left.deviceId === right.deviceId
+      && left.fsRoot === right.fsRoot
+      && left.mountPoint === right.mountPoint
+      && left.fsType === right.fsType
+      && left.src === right.src
+      && left.opts === right.opts;
   }
 
   private async readDiskUsage(

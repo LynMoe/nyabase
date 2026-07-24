@@ -629,7 +629,7 @@ export class DockerClient {
     onEnd: (exitCode: number) => void,
     onClosing?: (completion: Promise<void>) => void,
   ): Promise<{
-    resize: (cols: number, rows: number) => void;
+    resize: (cols: number, rows: number) => Promise<void>;
     kill: () => Promise<void>;
     write: (data: string) => boolean;
   }> {
@@ -661,7 +661,15 @@ export class DockerClient {
     let controlsClosed = false;
     let endNotified = false;
     let completion: Promise<void> | null = null;
-    let pendingResize: { cols: number; rows: number } | null = null;
+    type PendingResize = {
+      cols: number;
+      rows: number;
+      waiters: Array<{
+        resolve: () => void;
+        reject: (error: unknown) => void;
+      }>;
+    };
+    let pendingResize: PendingResize | null = null;
     let resizeInFlight: Promise<void> | null = null;
     const startResizeDrain = () => {
       if (resizeInFlight || controlsClosed || !pendingResize) return;
@@ -674,9 +682,12 @@ export class DockerClient {
               `exec.resize(${dockerId.slice(0, 12)})`,
               () => exec.resize({ w: next.cols, h: next.rows }),
             );
-          } catch {
-            // Interactive resize is best effort. A newer coalesced size may
-            // still succeed after a transient Docker API failure.
+            for (const waiter of next.waiters) waiter.resolve();
+          } catch (error) {
+            // Every admitted caller owns an exact completion result. A newer
+            // coalesced resize may still run, but this batch must not be
+            // reported complete after Docker rejected it.
+            for (const waiter of next.waiters) waiter.reject(error);
           }
         }
       };
@@ -688,7 +699,12 @@ export class DockerClient {
     };
     const finish = (): Promise<void> => {
       controlsClosed = true;
+      const abandonedResize = pendingResize;
       pendingResize = null;
+      if (abandonedResize) {
+        const error = new Error(`Interactive exec ${dockerId} closed before resize completed`);
+        for (const waiter of abandonedResize.waiters) waiter.reject(error);
+      }
       if (completion) return completion;
       completion = (async () => {
         const exitCode = await this.completeInteractiveExecFailClosed(exec, dockerId);
@@ -758,9 +774,20 @@ export class DockerClient {
 
     return {
       resize: (cols, rows) => {
-        if (controlsClosed) return;
-        pendingResize = { cols, rows };
-        startResizeDrain();
+        if (controlsClosed) {
+          return Promise.reject(new Error(`Interactive exec ${dockerId} is closing`));
+        }
+        const completion = new Promise<void>((resolve, reject) => {
+          if (pendingResize) {
+            pendingResize.cols = cols;
+            pendingResize.rows = rows;
+            pendingResize.waiters.push({ resolve, reject });
+          } else {
+            pendingResize = { cols, rows, waiters: [{ resolve, reject }] };
+          }
+          startResizeDrain();
+        });
+        return completion;
       },
       // Closing the hijacked stream alone does not signal the in-container
       // process. Every caller must await the shared physical completion

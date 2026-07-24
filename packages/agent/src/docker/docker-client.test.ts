@@ -569,16 +569,42 @@ describe('DockerClient interactive exec backpressure', () => {
     });
     const handles = await client.exec('runtime-a', ['/bin/sh'], true, vi.fn(), vi.fn());
 
-    handles.resize(80, 24);
+    let firstSettled = false;
+    const firstCompletion = handles.resize(80, 24).then(() => { firstSettled = true; });
+    const coalesced: Promise<void>[] = [];
     for (let index = 0; index < 100; index += 1) {
-      handles.resize(100 + index, 40 + index);
+      coalesced.push(handles.resize(100 + index, 40 + index));
     }
     await vi.waitFor(() => expect(resize).toHaveBeenCalledOnce());
+    expect(firstSettled).toBe(false);
 
     first.resolve(undefined);
     await vi.waitFor(() => expect(resize).toHaveBeenCalledTimes(2));
+    await Promise.all([firstCompletion, ...coalesced]);
     expect(resize.mock.calls[1]?.[0]).toEqual({ w: 199, h: 139 });
 
+    stream.destroy();
+  });
+
+  it('rejects the exact admitted resize barrier after Docker rejects it', async () => {
+    const client = new DockerClient(makeConfig());
+    const stream = new PassThrough();
+    const exec = {
+      start: vi.fn().mockResolvedValue(stream),
+      inspect: vi.fn().mockResolvedValue({ Running: false, ExitCode: 0, Pid: 0 }),
+      resize: vi.fn().mockRejectedValue(Object.assign(new Error('resize rejected'), {
+        statusCode: 500,
+      })),
+    };
+    Object.defineProperty(client, 'docker', {
+      value: {
+        getContainer: () => ({ exec: vi.fn().mockResolvedValue(exec) }),
+        modem: { demuxStream: vi.fn() },
+      },
+    });
+    const handles = await client.exec('runtime-a', ['/bin/sh'], true, vi.fn(), vi.fn());
+
+    await expect(handles.resize(120, 40)).rejects.toThrow('resize rejected');
     stream.destroy();
   });
 });

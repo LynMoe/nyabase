@@ -3,7 +3,10 @@ import { AgentApplication } from './app.js';
 import { DaemonManager } from './docker/daemon-manager.js';
 import { acquireProcessGuard } from './process-guard.js';
 import { assertHostStorageLayout, HostStorageIdentityGuard } from './host-storage.js';
-import { readLocalDataSourceIdentity } from './datadirs/data-dirs.js';
+import {
+  readLocalDataSourceIdentity,
+  readLocalDataSourceRuntimeIdentity,
+} from './datadirs/data-dirs.js';
 
 async function main() {
   if (process.argv.includes('--version')) {
@@ -34,6 +37,7 @@ async function main() {
   assertHostStorageLayout(config);
   const storageIdentity = new HostStorageIdentityGuard(config, {
     readIdentity: readLocalDataSourceIdentity,
+    readRuntimeIdentity: readLocalDataSourceRuntimeIdentity,
   });
 
   // Constructing the manager is side-effect free. AgentApplication performs

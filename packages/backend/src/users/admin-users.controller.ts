@@ -10,6 +10,7 @@ import {
   UseGuards,
   HttpCode,
   ForbiddenException,
+  BadRequestException,
 } from '@nestjs/common';
 import { UsersService } from './users.service.js';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard.js';
@@ -18,8 +19,7 @@ import { RequireCaps } from '../auth/decorators/require-caps.decorator.js';
 import { CurrentUser } from '../auth/decorators/current-user.decorator.js';
 import { GroupsService } from '../groups/groups.service.js';
 import { UserEntity } from '../entities/user.entity.js';
-import { Capability, zCreateUserRequest, zUpdateUserRequest } from '@nyabase/common';
-import { SshIdentityService } from '../ssh/ssh-identity.service.js';
+import { Capability, SystemGroupKey, zCreateUserRequest, zUpdateUserRequest } from '@nyabase/common';
 
 @Controller('admin/users')
 @UseGuards(JwtAuthGuard, CapabilitiesGuard)
@@ -27,7 +27,6 @@ export class AdminUsersController {
   constructor(
     private usersService: UsersService,
     private groupsService: GroupsService,
-    private sshIdentities: SshIdentityService,
   ) {}
 
   @Get()
@@ -39,10 +38,12 @@ export class AdminUsersController {
 
   @Post()
   @RequireCaps(Capability.ManageUsers)
-  async createUser(@Body() body: unknown) {
+  async createUser(@Body() body: unknown, @CurrentUser() actor: UserEntity) {
     const dto = zCreateUserRequest.parse(body);
-    const user = await this.usersService.createUser(dto);
-    await this.groupsService.ensureUserInGroup('Users', user.id);
+    const user = await this.usersService.createUser(dto, {
+      systemGroupKey: SystemGroupKey.Users,
+      actorId: actor.id,
+    });
     return this.usersService.toDto(user);
   }
 
@@ -67,8 +68,7 @@ export class AdminUsersController {
     @Query('includePrivate') includePrivate: string | undefined,
     @CurrentUser() currentUser: UserEntity,
   ) {
-    await this.usersService.findById(id);
-    return this.sshIdentities.getUserKeyDto(id, currentUser.id, includePrivate === 'true');
+    return this.usersService.getInternalSshKey(currentUser.id, id, includePrivate === 'true');
   }
 
   @Post(':id/internal-ssh-key/rotate')
@@ -77,18 +77,21 @@ export class AdminUsersController {
     @Param('id') id: string,
     @CurrentUser() currentUser: UserEntity,
   ) {
-    await this.usersService.findById(id);
-    const rotated = await this.sshIdentities.rotateUserKey(id, currentUser.id);
-    await this.usersService.notifyInternalSshKeyRotated(id);
-    return rotated;
+    return this.usersService.rotateInternalSshKey(currentUser.id, id);
   }
 
   @Patch(':id')
   @RequireCaps(Capability.ManageUsers)
-  async updateUser(@Param('id') id: string, @Body() body: unknown) {
+  async updateUser(
+    @Param('id') id: string,
+    @Body() body: unknown,
+    @CurrentUser() actor: UserEntity,
+  ) {
     const dto = zUpdateUserRequest.parse(body);
-    delete (dto as Record<string, unknown>).currentPassword;
-    const user = await this.usersService.updateUser(id, dto);
+    if (dto.currentPassword !== undefined) {
+      throw new BadRequestException('currentPassword is only valid for self-service updates');
+    }
+    const user = await this.usersService.updateUser(id, dto, actor.id);
     return this.usersService.toDto(user);
   }
 
@@ -106,7 +109,8 @@ export class AdminUsersController {
   async deleteSshKey(
     @Param('id') id: string,
     @Param('keyId') keyId: string,
+    @CurrentUser() actor: UserEntity,
   ) {
-    await this.usersService.deleteSshKey(id, keyId);
+    await this.usersService.deleteSshKey(id, keyId, actor.id);
   }
 }

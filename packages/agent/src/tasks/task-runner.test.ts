@@ -598,6 +598,35 @@ describe('AgentTaskRunner', () => {
       }),
     ]);
   });
+
+  it('rechecks physical identity after a handler failure before publishing its outcome', async () => {
+    const sent: TaskResultPayload[] = [];
+    const assertPhysicalEnvironment = vi.fn()
+      .mockResolvedValueOnce(undefined)
+      .mockRejectedValueOnce(new Error('Docker daemon identity changed'));
+    const runner = new AgentTaskRunner(
+      new AgentTaskHandlerRegistry([{
+        kinds: [AgentTaskKind.RemoteFsEnsure],
+        ensure: vi.fn(async () => { throw new ManagedTaskError(
+          { code: 'mount_failed', message: 'mount rejected' },
+          { applied: false },
+        ); }),
+        verify: vi.fn(async () => undefined),
+      }]),
+      (result) => sent.push(result),
+      assertPhysicalEnvironment,
+    );
+
+    await runner.execute(task);
+
+    expect(assertPhysicalEnvironment).toHaveBeenCalledTimes(2);
+    expect(sent).toEqual([
+      expect.objectContaining({
+        status: 'incomplete',
+        error: expect.objectContaining({ message: 'Docker daemon identity changed' }),
+      }),
+    ]);
+  });
 });
 
 function makeRunner(handler: AgentTaskHandler): {

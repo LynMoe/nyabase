@@ -15,9 +15,9 @@ describe('parseMountInfo', () => {
       '43 36 8:3 / /data\\040main rw,prjquota - xfs /dev/sdc rw,prjquota',
     ].join('\n'));
     expect(mounts).toEqual([
-      expect.objectContaining({ deviceId: '8:1', fsRoot: '/', mountPoint: '/', fsType: 'ext4' }),
-      expect.objectContaining({ deviceId: '8:2', fsRoot: '/', mountPoint: '/var/lib/nyabase-docker', fsType: 'xfs' }),
-      expect.objectContaining({ deviceId: '8:3', fsRoot: '/', mountPoint: '/data main', fsType: 'xfs' }),
+      expect.objectContaining({ mountId: 36, deviceId: '8:1', fsRoot: '/', mountPoint: '/', fsType: 'ext4' }),
+      expect.objectContaining({ mountId: 42, deviceId: '8:2', fsRoot: '/', mountPoint: '/var/lib/nyabase-docker', fsType: 'xfs' }),
+      expect.objectContaining({ mountId: 43, deviceId: '8:3', fsRoot: '/', mountPoint: '/data main', fsType: 'xfs' }),
     ]);
     expect(mounts[1].superOptions.has('pquota')).toBe(true);
     expect(mounts[2].mountOptions.has('prjquota')).toBe(true);
@@ -41,6 +41,17 @@ describe('parseMountInfo', () => {
     expect(() => assertQuotaMountTopology(
       ['/var/lib/nyabase-docker', '/data'], mounts,
     )).not.toThrow();
+  });
+
+  it('rejects stacked exact mounts even when they share one XFS device', () => {
+    const mounts = parseMountInfo([
+      '42 36 8:2 /docker /var/lib/nyabase-docker rw,pquota - xfs /dev/sdb rw,pquota',
+      '43 36 8:2 /users-old /data rw,pquota - xfs /dev/sdb rw,pquota',
+      '44 36 8:2 /users-new /data rw,pquota - xfs /dev/sdb rw,pquota',
+    ].join('\n'));
+    expect(() => assertQuotaMountTopology(
+      ['/var/lib/nyabase-docker', '/data'], mounts,
+    )).toThrow('ambiguous stacked mount');
   });
 
   it('rejects multiple quota filesystems and non-XFS roots', () => {

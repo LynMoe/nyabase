@@ -7,11 +7,13 @@ describe('JwtAuthGuard query token handling', () => {
       .spyOn(Object.getPrototypeOf(JwtAuthGuard.prototype), 'canActivate')
       .mockReturnValue(true);
     const request = makeRequest({ queryToken: 'jwt-token' });
+    request.user = { id: 'user-a', authVersion: 7 };
     const guard = makeGuard();
 
     await expect(guard.canActivate(makeContext(request))).resolves.toBe(true);
 
     expect(request.headers.authorization).toBeUndefined();
+    expect(request.authContext).toEqual({ kind: 'jwt', authVersion: 7 });
     expect(baseCanActivate).toHaveBeenCalled();
     baseCanActivate.mockRestore();
   });
@@ -31,6 +33,7 @@ describe('JwtAuthGuard query token handling', () => {
 
     expect(authService.validateApiToken).toHaveBeenCalledWith(rawToken);
     expect(request.user).toEqual({ id: 'user-a' });
+    expect(request.authContext).toEqual({ kind: 'api-token' });
     expect(baseCanActivate).not.toHaveBeenCalled();
     baseCanActivate.mockRestore();
   });
@@ -59,6 +62,7 @@ function makeRequest(input: {
     },
     params: input.params ?? {},
     user: undefined as unknown,
+    authContext: undefined as unknown,
   };
 }
 

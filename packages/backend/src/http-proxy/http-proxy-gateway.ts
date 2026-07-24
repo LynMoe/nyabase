@@ -171,10 +171,10 @@ export class HttpProxyGateway implements OnModuleInit, OnModuleDestroy {
       .sort((a, b) => b - a)[0];
     return {
       connectedProxies: this.clients.size,
-      activeConnections: proxies.reduce((sum, proxy) => sum + proxy.activeConnections, 0),
-      totalRequests: proxies.reduce((sum, proxy) => sum + proxy.totalRequests, 0),
-      totalRejectedRequests: proxies.reduce((sum, proxy) => sum + proxy.totalRejectedRequests, 0),
-      updatedAt: last ? new Date(last).toISOString() : null,
+      activeConnections: boundedStatusSum(proxies, (proxy) => proxy.activeConnections),
+      totalRequests: boundedStatusSum(proxies, (proxy) => proxy.totalRequests),
+      totalRejectedRequests: boundedStatusSum(proxies, (proxy) => proxy.totalRejectedRequests),
+      updatedAt: safeStatusTimestampIso(last),
       proxies,
     };
   }
@@ -378,4 +378,22 @@ export class HttpProxyGateway implements OnModuleInit, OnModuleDestroy {
       clearTimeout(timer);
     }
   }
+}
+
+function safeStatusTimestampIso(value: number | undefined): string | null {
+  if (!Number.isSafeInteger(value) || value === undefined || value <= 0) return null;
+  const timestamp = new Date(value);
+  if (!Number.isFinite(timestamp.getTime())) return null;
+  return timestamp.toISOString();
+}
+
+function boundedStatusSum<T>(rows: readonly T[], valueFor: (row: T) => number): number {
+  let result = 0;
+  for (const row of rows) {
+    const value = valueFor(row);
+    if (!Number.isFinite(value) || value < 0) continue;
+    result += value;
+    if (result >= Number.MAX_SAFE_INTEGER) return Number.MAX_SAFE_INTEGER;
+  }
+  return result;
 }

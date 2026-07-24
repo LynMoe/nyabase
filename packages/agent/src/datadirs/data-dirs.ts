@@ -3,17 +3,26 @@ import * as path from 'path';
 import { execFileSync, spawn, type ChildProcess } from 'child_process';
 import type { XfsQuotaManager } from '../quota/xfs-quota.js';
 import {
+  MAX_AGENT_WS_FRAME_BYTES,
   MAX_MANAGED_DATA_DIRS_PER_AGENT,
+  zDataDirEntry,
   zTaskId,
   type DataDirEntry,
 } from '@nyabase/common';
 import { parseProcMounts } from '../fs/proc-mounts.js';
+import { parseMountInfo, type MountIdentity } from '../host-storage.js';
 import {
   PHYSICAL_MUTATION_FENCE_CONFLICT_EXIT_CODE,
   PHYSICAL_MUTATION_LOCK_PATH,
   PhysicalMutationFenceBusyError,
   fencePhysicalMutationCommand,
 } from '../physical-mutation-fence.js';
+import {
+  createRemoteDataDirHelperRunner,
+  RemoteDataDirHelperError,
+  type RemoteDataDirHelperRunner,
+} from './remote-data-dir-runner.js';
+import type { RemoteDataDirHelperPayload } from './remote-data-dir-helper.js';
 
 const META_DIR = '.nyabase';
 const DIRS_DIR = 'dirs';
@@ -61,6 +70,8 @@ export interface DataSourceObservation {
   fsType: string | null;
   ready: boolean;
   device: string | null;
+  /** Boot-lifetime exact remote mount identity; never persisted or sent. */
+  physicalIdentity?: string | null;
 }
 
 interface DataDirMarker {
@@ -88,6 +99,12 @@ export interface DataDirsManagerOptions {
   /** Production sends SIGKILL; tests inject a recorder that deliberately returns. */
   fatalHook?: (error: DataDirMutationDeadlineError) => void;
   physicalMutationLockPath?: string;
+  remoteSourceVerifier?: (source: DataSource) => Promise<string | null>;
+  remoteHelperRunner?: RemoteDataDirHelperRunner;
+  /** Internal child-process mode: execute remote operations locally in the helper. */
+  remoteHelperInline?: boolean;
+  /** Internal helper mode: keep mutation children in the outer killable process group. */
+  childProcessDetached?: boolean;
 }
 
 export class DataDirIdentityConflictError extends Error {
@@ -141,10 +158,11 @@ export function spawnPinnedSourceMutation(
   args: readonly string[],
   sourceFd: number,
   lockPath = PHYSICAL_MUTATION_LOCK_PATH,
+  detached = true,
 ): ChildProcess {
   const fenced = fencePhysicalMutationCommand(file, args, lockPath);
   return spawn(fenced.executable, fenced.args, {
-    detached: true,
+    detached,
     stdio: ['ignore', 'ignore', 'ignore', sourceFd],
   });
 }
@@ -155,7 +173,24 @@ export function spawnPinnedSourceMutation(
  * XFS filesystem, so the mount's filesystem root is part of the identity.
  */
 export function readLocalDataSourceIdentity(root: string): string {
+  const { uuid, mount } = sampleLocalDataSourceIdentity(root);
+  return `local:xfs:${uuid}:fsroot=${encodeURIComponent(mount.fsRoot)}`;
+}
+
+/** Boot-lifetime identity used only by the hot-remount fail-stop guard. */
+export function readLocalDataSourceRuntimeIdentity(root: string): string {
+  const { uuid, mount } = sampleLocalDataSourceIdentity(root);
+  return [
+    `local:xfs:${uuid}`,
+    `device=${encodeURIComponent(mount.deviceId)}`,
+    `fsroot=${encodeURIComponent(mount.fsRoot)}`,
+    `mount=${mount.mountId}`,
+  ].join(':');
+}
+
+function sampleLocalDataSourceIdentity(root: string): { uuid: string; mount: MountIdentity } {
   const resolvedRoot = path.resolve(root);
+  const before = readOneExactLocalMount(resolvedRoot);
   const uuid = execFileSync(
     'findmnt',
     ['--noheadings', '--raw', '--output', 'UUID', '--mountpoint', resolvedRoot],
@@ -164,26 +199,32 @@ export function readLocalDataSourceIdentity(root: string): string {
   if (!uuid || uuid === '-') {
     throw new Error(`Local XFS source ${root} has no filesystem UUID`);
   }
-  const exact = fs.readFileSync('/proc/self/mountinfo', 'utf8').split('\n').find((line) => {
-    if (!line.trim()) return false;
-    const fields = line.split(' ');
-    return fields.length > 5
-      && path.resolve(decodeMountInfoPath(fields[4])) === resolvedRoot;
-  });
-  if (!exact) throw new Error(`Local XFS source ${root} is not an exact mount`);
-  const fields = exact.split(' ');
-  const separator = fields.indexOf('-');
-  if (separator < 6 || fields[separator + 1] !== 'xfs') {
-    throw new Error(`Local source ${root} is not an exact XFS mount`);
+  const after = readOneExactLocalMount(resolvedRoot);
+  if (
+    before.mountId !== after.mountId
+    || before.deviceId !== after.deviceId
+    || before.fsRoot !== after.fsRoot
+    || before.fsType !== after.fsType
+  ) {
+    throw new Error(`Local XFS source ${root} changed while its identity was sampled`);
   }
-  const fsRoot = path.resolve(decodeMountInfoPath(fields[3]));
-  return `local:xfs:${uuid.toLowerCase()}:fsroot=${encodeURIComponent(fsRoot)}`;
+  return { uuid: uuid.toLowerCase(), mount: after };
 }
 
-function decodeMountInfoPath(value: string): string {
-  return value.replace(/\\([0-7]{3})/g, (_match, octal: string) =>
-    String.fromCharCode(Number.parseInt(octal, 8)),
-  );
+function readOneExactLocalMount(resolvedRoot: string): MountIdentity {
+  const exact = parseMountInfo(fs.readFileSync('/proc/self/mountinfo', 'utf8'))
+    .filter((mount) => mount.mountPoint === resolvedRoot);
+  if (exact.length !== 1) {
+    throw new Error(
+      exact.length === 0
+        ? `Local XFS source ${resolvedRoot} is not an exact mount`
+        : `Local XFS source ${resolvedRoot} has an ambiguous stacked mount`,
+    );
+  }
+  if (exact[0]!.fsType !== 'xfs') {
+    throw new Error(`Local source ${resolvedRoot} is not an exact XFS mount`);
+  }
+  return exact[0]!;
 }
 
 export class DataDirsManager {
@@ -194,6 +235,10 @@ export class DataDirsManager {
   private readonly childProcessCap: number;
   private readonly fatalHook: (error: DataDirMutationDeadlineError) => void;
   private readonly physicalMutationLockPath: string;
+  private remoteSourceVerifier?: (source: DataSource) => Promise<string | null>;
+  private readonly remoteHelperRunner: RemoteDataDirHelperRunner;
+  private readonly remoteHelperInline: boolean;
+  private readonly childProcessDetached: boolean;
   private failStopTriggered = false;
   /** Mutation children remain fenced until their process exit is observable. */
   private readonly activeChildren = new Map<string, ActiveDataDirChild>();
@@ -222,6 +267,22 @@ export class DataDirsManager {
     );
     this.fatalHook = options.fatalHook ?? killAgentAfterAmbiguousDataDirMutation;
     this.physicalMutationLockPath = options.physicalMutationLockPath ?? PHYSICAL_MUTATION_LOCK_PATH;
+    this.remoteSourceVerifier = options.remoteSourceVerifier;
+    this.remoteHelperInline = options.remoteHelperInline === true;
+    this.childProcessDetached = options.childProcessDetached !== false;
+    this.remoteHelperRunner = options.remoteHelperRunner ?? createRemoteDataDirHelperRunner({
+      command: (payload) => ({
+        executable: process.execPath,
+        args: [path.join(__dirname, 'remote-data-dir-helper.js'), JSON.stringify(payload)],
+      }),
+      timeoutMs: this.mutationTimeoutMs,
+      outputLimitBytes: MAX_AGENT_WS_FRAME_BYTES,
+      lockPath: this.physicalMutationLockPath,
+      fatalHook: (error) => this.triggerMutationFailStop(new DataDirMutationDeadlineError(
+        `${error.operation}: ${error.reason}`,
+        this.mutationTimeoutMs,
+      )),
+    });
   }
 
   addSource(src: DataSource): void {
@@ -234,6 +295,10 @@ export class DataDirsManager {
 
   getSource(id: string): DataSource | undefined {
     return this.sources.get(id);
+  }
+
+  setRemoteSourceVerifier(verifier: (source: DataSource) => Promise<string | null>): void {
+    this.remoteSourceVerifier = verifier;
   }
 
   inspectSource(sourceId: string): DataSourceObservation {
@@ -254,7 +319,7 @@ export class DataDirsManager {
       ? mount?.fsType === 'xfs'
       : mount?.fsType === 'nfs' || mount?.fsType === 'nfs4' || mount?.fsType === 'ceph';
     const mounted = Boolean(mount && expectedType);
-    let identityMatches = source.kind === 'remote';
+    let identityMatches = false;
     if (mounted && source.kind === 'local') {
       try {
         identityMatches = readLocalDataSourceIdentity(root) === source.identity;
@@ -274,6 +339,43 @@ export class DataDirsManager {
       fsType: mount?.fsType ?? null,
       ready: Boolean(stat?.isDirectory() && mounted && identityMatches),
       device: stat ? String(stat.dev) : null,
+      ...(source.kind === 'remote' ? { physicalIdentity: null } : {}),
+    };
+  }
+
+  async inspectSourceExact(sourceId: string): Promise<DataSourceObservation> {
+    const source = this.sources.get(sourceId);
+    if (!source || source.kind !== 'remote') return this.inspectSource(sourceId);
+    const observed = this.remoteHelperInline
+      ? this.inspectSource(sourceId)
+      : {
+          sourceId: source.id,
+          kind: source.kind,
+          root: source.root,
+          identity: source.identity,
+          configured: true,
+          exists: false,
+          isDirectory: false,
+          mounted: false,
+          fsType: null,
+          ready: false,
+          device: null,
+          physicalIdentity: null,
+        } satisfies DataSourceObservation;
+    if (!this.remoteSourceVerifier) return observed;
+    let physicalIdentity: string | null = null;
+    try {
+      physicalIdentity = await this.remoteSourceVerifier(source);
+    } catch {
+      physicalIdentity = null;
+    }
+    return {
+      ...observed,
+      physicalIdentity,
+      exists: physicalIdentity ? true : observed.exists,
+      isDirectory: physicalIdentity ? true : observed.isDirectory,
+      mounted: physicalIdentity ? true : observed.mounted,
+      ready: Boolean(physicalIdentity),
     };
   }
 
@@ -287,16 +389,40 @@ export class DataDirsManager {
     const entries: DataDirEntry[] = [];
     let scannedChildren = 0;
     for (const source of this.sources.values()) {
-      if (!this.inspectSource(source.id).ready) {
+      if (source.kind === 'remote' && !this.remoteHelperInline) {
+        const remoteEntries = zDataDirEntry.array().max(MAX_MANAGED_DATA_DIRS_PER_AGENT).parse(
+          await this.runRemoteHelper(source, 'list'),
+        );
+        const seenResourceIds = new Set<string>();
+        for (const entry of remoteEntries) {
+          if (
+            entry.sourceKind !== 'remote'
+            || entry.sourceId !== source.id
+            || entry.hostPath !== this.dataPath(source.root, entry.resourceId)
+            || seenResourceIds.has(entry.resourceId)
+          ) {
+            throw new Error(`Remote DataDir helper returned an invalid inventory entry for ${source.id}`);
+          }
+          seenResourceIds.add(entry.resourceId);
+        }
+        scannedChildren += remoteEntries.length;
+        if (scannedChildren > MAX_MANAGED_DATA_DIRS_PER_AGENT) {
+          throw new Error(`Data directory inventory exceeds ${MAX_MANAGED_DATA_DIRS_PER_AGENT} entries`);
+        }
+        entries.push(...remoteEntries);
+        continue;
+      }
+      const before = await this.inspectSourceExact(source.id);
+      if (!before.ready) {
         throw new Error(`Data directory source ${source.id} is not safely mounted`);
       }
       const dirsRoot = this.dirsRoot(source.root);
-      if (!this.pathExists(dirsRoot)) continue;
-      if (!this.isSafeRootDirectory(dirsRoot)) {
-        throw new Error(`Data directory inventory root is unsafe: ${dirsRoot}`);
-      }
-      const directory = fs.opendirSync(dirsRoot);
-      try {
+      if (this.pathExists(dirsRoot)) {
+        if (!this.isSafeRootDirectory(dirsRoot)) {
+          throw new Error(`Data directory inventory root is unsafe: ${dirsRoot}`);
+        }
+        const directory = fs.opendirSync(dirsRoot);
+        try {
         let entry: fs.Dirent | null;
         while ((entry = directory.readSync()) !== null) {
           scannedChildren += 1;
@@ -337,8 +463,16 @@ export class DataDirsManager {
             hostPath: dataPath,
           });
         }
-      } finally {
-        directory.closeSync();
+        } finally {
+          directory.closeSync();
+        }
+      }
+      const after = await this.inspectSourceExact(source.id);
+      if (
+        !after.ready
+        || (source.kind === 'remote' && before.physicalIdentity !== after.physicalIdentity)
+      ) {
+        throw new Error(`Data directory source ${source.id} changed during inventory`);
       }
     }
     return entries;
@@ -418,6 +552,18 @@ export class DataDirsManager {
     sourceIdentity: string,
   ): Promise<DataDirCreateResult> {
     if (this.failStopTriggered) return new Promise<DataDirCreateResult>(() => { /* process is terminating */ });
+    const configuredSource = this.requireSource(sourceId);
+    if (configuredSource.kind === 'remote' && !this.remoteHelperInline) {
+      return this.requireCreateResult(
+        await this.runRemoteHelper(configuredSource, 'create', {
+          resourceId,
+          sourceIdentity,
+          uid,
+        }),
+        configuredSource,
+        resourceId,
+      );
+    }
     return this.withPinnedSource(sourceId, sourceIdentity, async (pinned) => {
       const { source, root } = pinned;
       this.assertResourceId(resourceId);
@@ -481,6 +627,11 @@ export class DataDirsManager {
     sourceIdentity: string,
   ): Promise<void> {
     if (this.failStopTriggered) return new Promise<void>(() => { /* process is terminating */ });
+    const configuredSource = this.requireSource(sourceId);
+    if (configuredSource.kind === 'remote' && !this.remoteHelperInline) {
+      await this.runRemoteHelper(configuredSource, 'delete', { resourceId, sourceIdentity });
+      return;
+    }
     await this.withPinnedSource(sourceId, sourceIdentity, async (pinned) => {
       const { source, root } = pinned;
       this.assertResourceId(resourceId);
@@ -549,12 +700,34 @@ export class DataDirsManager {
     }
   }
 
-  verifyOwnership(
+  async inspectDirExact(sourceId: string, resourceId: string): Promise<DataDirObservation> {
+    const source = this.requireSource(sourceId);
+    if (source.kind !== 'remote' || this.remoteHelperInline) return this.inspectDir(sourceId, resourceId);
+    return this.requireDirObservation(
+      await this.runRemoteHelper(source, 'inspect', { resourceId }),
+      source,
+      resourceId,
+    );
+  }
+
+  async verifyOwnership(
     sourceId: string,
     uid: number,
     resourceId: string,
     sourceIdentity: string,
   ): Promise<string | null> {
+    const configuredSource = this.requireSource(sourceId);
+    if (configuredSource.kind === 'remote' && !this.remoteHelperInline) {
+      return this.requireOwnershipResult(
+        await this.runRemoteHelper(configuredSource, 'verifyOwnership', {
+          uid,
+          resourceId,
+          sourceIdentity,
+        }),
+        configuredSource,
+        resourceId,
+      );
+    }
     return this.withPinnedSource(sourceId, sourceIdentity, async ({ source, root }) => {
       const expected = this.expectedMarker(source, resourceId, sourceIdentity);
       const marker = this.readMarker(root, resourceId);
@@ -588,7 +761,15 @@ export class DataDirsManager {
   }
 
   /** Resolve a Backend resource identity to the only allowed durable bind path. */
-  resolveMountPath(sourceId: string, resourceId: string, sourceIdentity: string): Promise<string> {
+  async resolveMountPath(sourceId: string, resourceId: string, sourceIdentity: string): Promise<string> {
+    const source = this.requireSource(sourceId);
+    if (source.kind === 'remote' && !this.remoteHelperInline) {
+      const result = await this.runRemoteHelper(source, 'resolve', { resourceId, sourceIdentity });
+      if (typeof result !== 'string' || result !== this.dataPath(source.root, resourceId)) {
+        throw new Error(`Remote DataDir helper returned an invalid bind path for ${resourceId}`);
+      }
+      return result;
+    }
     return this.withPinnedDir(sourceId, resourceId, sourceIdentity, async (_pinnedPath, durablePath) => durablePath);
   }
 
@@ -638,7 +819,7 @@ export class DataDirsManager {
   ): Promise<T> {
     if (this.failStopTriggered) return new Promise<T>(() => { /* process is terminating */ });
     const source = this.requireSource(sourceId);
-    const observed = this.inspectSource(sourceId);
+    const observed = await this.inspectSourceExact(sourceId);
     if (!observed.ready || observed.identity !== expectedIdentity || observed.device === null) {
       throw new Error(`Data source identity is unavailable or changed: ${sourceId}`);
     }
@@ -649,11 +830,114 @@ export class DataDirsManager {
       if (!pinnedStat.isDirectory() || String(pinnedStat.dev) !== observed.device) {
         throw new Error(`Data source changed while being pinned: ${sourceId}`);
       }
+      if (source.kind === 'remote') {
+        const confirmed = await this.inspectSourceExact(sourceId);
+        if (!confirmed.ready || confirmed.physicalIdentity !== observed.physicalIdentity) {
+          throw new Error(`Remote data source changed while being pinned: ${sourceId}`);
+        }
+      }
       const root = `/proc/${process.pid}/fd/${fd}`;
       return await operation({ source, root, fd });
     } finally {
       fs.closeSync(fd);
     }
+  }
+
+  private async runRemoteHelper(
+    source: DataSource,
+    operation: RemoteDataDirHelperPayload['operation'],
+    extra: Partial<RemoteDataDirHelperPayload> = {},
+  ): Promise<unknown> {
+    const before = await this.inspectSourceExact(source.id);
+    if (!before.ready || !before.physicalIdentity) {
+      throw new Error(`Remote data source identity is unavailable: ${source.id}`);
+    }
+    const payload: RemoteDataDirHelperPayload = {
+      operation,
+      source: { ...source },
+      physicalIdentity: before.physicalIdentity,
+      ...extra,
+    };
+    let result: unknown;
+    try {
+      result = await this.remoteHelperRunner(`remote-data-dir-${operation}(${source.id})`, payload);
+    } catch (error) {
+      if (error instanceof RemoteDataDirHelperError) {
+        if (error.remoteName === DataDirIdentityConflictError.name) {
+          throw new DataDirIdentityConflictError(error.message);
+        }
+        if (error.remoteName === DataDirOperationIncompleteError.name) {
+          throw new DataDirOperationIncompleteError(
+            error.message,
+            error.remoteOperation ?? `remote-data-dir-${operation}`,
+          );
+        }
+      }
+      throw error;
+    }
+    const after = await this.inspectSourceExact(source.id);
+    if (!after.ready || after.physicalIdentity !== before.physicalIdentity) {
+      throw new DataDirOperationIncompleteError(
+        `Remote data source ${source.id} changed during ${operation}`,
+        `remote-data-dir-${operation}`,
+      );
+    }
+    return result;
+  }
+
+  private requireDirObservation(
+    value: unknown,
+    source: DataSource,
+    resourceId: string,
+  ): DataDirObservation {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) {
+      throw new Error('Remote DataDir helper returned an invalid observation');
+    }
+    const observed = value as Record<string, unknown>;
+    if (
+      observed.path !== this.dataPath(source.root, resourceId)
+      || typeof observed.exists !== 'boolean'
+      || typeof observed.isDirectory !== 'boolean'
+      || (observed.uid !== null && (!Number.isSafeInteger(observed.uid) || (observed.uid as number) < 0))
+      || (observed.gid !== null && (!Number.isSafeInteger(observed.gid) || (observed.gid as number) < 0))
+      || (observed.resourceId !== null && !zTaskId.safeParse(observed.resourceId).success)
+      || (!observed.exists && (observed.isDirectory || observed.uid !== null || observed.gid !== null))
+    ) throw new Error('Remote DataDir helper returned an invalid observation');
+    return observed as unknown as DataDirObservation;
+  }
+
+  private requireCreateResult(
+    value: unknown,
+    source: DataSource,
+    resourceId: string,
+  ): DataDirCreateResult {
+    if (
+      !value
+      || typeof value !== 'object'
+      || Array.isArray(value)
+      || (value as Record<string, unknown>).path !== this.dataPath(source.root, resourceId)
+      || typeof (value as Record<string, unknown>).created !== 'boolean'
+    ) throw new Error('Remote DataDir helper returned an invalid create result');
+    return value as DataDirCreateResult;
+  }
+
+  private requireOwnershipResult(
+    value: unknown,
+    source: DataSource,
+    resourceId: string,
+  ): string | null {
+    const root = this.dataPath(source.root, resourceId);
+    if (
+      value !== null
+      && (
+        typeof value !== 'string'
+        || path.resolve(value) !== value
+        || (value !== root && !value.startsWith(`${root}${path.sep}`))
+      )
+    ) {
+      throw new Error('Remote DataDir helper returned an invalid ownership result');
+    }
+    return value as string | null;
   }
 
   private expectedMarker(
@@ -1317,6 +1601,7 @@ export class DataDirsManager {
           args,
           pinned.fd,
           this.physicalMutationLockPath,
+          this.childProcessDetached,
         );
         record.child = child;
         child.once('error', (error) => {

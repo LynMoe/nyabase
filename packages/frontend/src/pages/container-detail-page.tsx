@@ -1,5 +1,5 @@
 import { Link, getRouteApi } from '@tanstack/react-router';
-import { useState } from 'react';
+import { useCallback, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { AlertTriangle, ArrowLeft, BarChart2, ChevronDown, Info, Loader2, Power, Terminal, Trash2 } from 'lucide-react';
 import { AgentTaskStatus, Capability, ContainerStatus, type AgentTaskRefResponse, type ContainerAction, type ContainerMetrics, type ContainerMetricsDto, type ContainerView } from '@nyabase/common';
@@ -9,11 +9,18 @@ import { Button } from '../components/ui/button.js';
 import { formatBytesCompact, formatBytesLimit, formatCpu } from '../lib/utils.js';
 import { useAuthStore } from '../store/auth.js';
 import { MountsCard } from '../components/containers/mounts-card.js';
+import { QueryErrorState, QueryLoadingState } from '../components/query-state.js';
 import { toast } from '../hooks/use-toast.js';
-import { isPendingAgentTaskStatus, useAgentTaskTracker } from '../hooks/use-agent-task-tracker.js';
+import {
+  isPendingAgentTaskStatus,
+  useAdminAgentTaskBatchFeedback,
+  useRequesterAgentTaskBatchFeedback,
+} from '../hooks/use-agent-task-tracker.js';
 import { containerActionPath } from '../lib/container-actions.js';
 import { ContainerConsole } from '../components/containers/container-console.js';
 import { queryKeys } from '../lib/query-keys.js';
+import { addTrackedTaskIds, retireTrackedTaskIds as retireTaskIds } from '../lib/tracked-task-ids.js';
+import { queryPollInterval } from '../lib/query-lifecycle.js';
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -139,33 +146,50 @@ function ContainerDetailContent({
   const { user } = useAuthStore();
   const [activeTab, setActiveTab] = useState<'overview' | 'console'>(initialTab);
   const [metricsRange, setMetricsRange] = useState('1h');
-  const [trackedTaskId, setTrackedTaskId] = useState<string | null>(null);
+  const [trackedTaskIds, setTrackedTaskIds] = useState<string[]>([]);
   const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false);
-  useAgentTaskTracker(trackedTaskId, { admin: plane === 'admin' });
+  const retireTrackedTaskIds = useCallback((settledIds: readonly string[]) => {
+    setTrackedTaskIds((current) => retireTaskIds(current, settledIds));
+  }, []);
+  useRequesterAgentTaskBatchFeedback(plane === 'user' ? trackedTaskIds : [], {
+    invalidateQueryKeys: [
+      queryKeys.containers.detail(plane, containerId),
+      queryKeys.containers.userList,
+    ],
+    onSettledTaskIds: retireTrackedTaskIds,
+  });
+  useAdminAgentTaskBatchFeedback(plane === 'admin' ? trackedTaskIds : [], {
+    invalidateQueryKeys: [
+      queryKeys.containers.detail(plane, containerId),
+      queryKeys.containers.adminList,
+    ],
+    onSettledTaskIds: retireTrackedTaskIds,
+  });
 
   const apiBasePath = plane === 'admin' ? '/admin/v2/containers' : '/v2/containers';
   const metricsBasePath = plane === 'admin' ? '/admin/metrics' : '/metrics';
   const canViewMetrics = plane !== 'admin' || (user?.capabilities.includes(Capability.ViewMetricsAll) ?? false);
 
-  const { data: c } = useQuery({
+  const containerQuery = useQuery({
     queryKey: queryKeys.containers.detail(plane, containerId),
     queryFn: () => api.get<ContainerView>(`${apiBasePath}/${containerId}`),
-    refetchInterval: 5_000,
+    refetchInterval: (query) => queryPollInterval(query.state, { activeIntervalMs: 5_000 }),
   });
+  const c = containerQuery.data;
 
-  const { data: metricsData, isLoading: metricsLoading, isError: metricsError } = useQuery({
+  const { data: metricsData, isLoading: metricsLoading, error: metricsError } = useQuery({
     queryKey: ['metrics-container-detail', plane, c?.serverId, containerId, c?.runtime.runtimeId, metricsRange],
     queryFn: () => api.get<ContainerMetricsDto>(`${metricsBasePath}/servers/${c!.serverId}/containers?range=${metricsRange}`),
     enabled: activeTab === 'overview' && Boolean(c?.serverId) && canViewMetrics,
     staleTime: 30_000,
-    refetchInterval: 60_000,
+    refetchInterval: (query) => queryPollInterval(query.state, { activeIntervalMs: 60_000 }),
     retry: false,
   });
 
   const runAction = useMutation({
     mutationFn: (action: ContainerAction) => api.post<AgentTaskRefResponse>(`${apiBasePath}/${containerId}/actions/${containerActionPath(action)}`),
     onSuccess: (res) => {
-      setTrackedTaskId(res.taskId);
+      setTrackedTaskIds((current) => addTrackedTaskIds(current, [res.taskId]));
       toast({ title: '任务已排队', description: `任务 ${res.taskId.slice(0, 8)}` });
       void qc.invalidateQueries({ queryKey: queryKeys.containers.detail(plane, containerId) });
       void qc.invalidateQueries({ queryKey: plane === 'admin' ? queryKeys.containers.adminList : queryKeys.containers.userList });
@@ -173,7 +197,16 @@ function ContainerDetailContent({
     onError: (e) => toast({ title: '操作失败', description: (e as Error).message, variant: 'destructive' }),
   });
 
-  if (!c) return <div className="px-4 py-4 md:px-6 flex items-center gap-2 text-muted-foreground"><Loader2 className="w-4 h-4 animate-spin" />加载中...</div>;
+  if (containerQuery.isLoading) return <QueryLoadingState label="加载容器..." />;
+  if (containerQuery.isError) return (
+    <QueryErrorState
+      error={containerQuery.error}
+      resourceName="容器"
+      onRetry={() => { void containerQuery.refetch(); }}
+      onBack={() => window.history.back()}
+    />
+  );
+  if (!c) return null;
 
   const running = c.runtime.status === ContainerStatus.Running;
   const canManageContainer = plane === 'admin' || user?.id === c.ownerId;
@@ -385,8 +418,10 @@ function ContainerDetailContent({
               <div className="h-[340px] animate-pulse rounded bg-muted/40" />
             ) : !canViewMetrics ? (
               <EmptyChart title="无指标权限" />
-            ) : metricsError || !containerMetrics ? (
-              <EmptyChart title="容器指标" />
+            ) : metricsError ? (
+              <QueryErrorState error={metricsError} resourceName="容器指标" />
+            ) : !containerMetrics ? (
+              <EmptyChart title="暂无容器指标" />
             ) : (
               <div className={hasGpuChart ? 'space-y-4' : 'grid grid-cols-1 gap-4'}>
                 <div className={hasGpuChart ? 'grid grid-cols-1 xl:grid-cols-2 gap-4' : 'space-y-4'}>
@@ -404,7 +439,8 @@ function ContainerDetailContent({
             serverId={c.serverId}
             containerId={containerId}
             isRunning={c.actions.updateMounts.enabled}
-            readonly={plane === 'admin'}
+            readonly
+            readonlyReason={c.actions.updateMounts.message ?? '容器挂载在创建后不可修改；如需变更，请删除并重新创建容器。'}
             apiBasePath={apiBasePath}
             plane={plane}
           />

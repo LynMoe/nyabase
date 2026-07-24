@@ -52,22 +52,22 @@ export class ServerGrantEntity {
   @Column('text')
   serverId: string;
 
-  /** null → fall back to server default */
+  /** null resolves to 0, which means no CPU limit. */
   @Column({ type: 'int', nullable: true })
   cpuMillis: number | null;
 
-  /** Stored as text to avoid integer overflow; null → server default */
+  /** Stored as text to preserve safe integers; null resolves to no limit. */
   @Column({ type: 'text', nullable: true, transformer: nullableNumericTextTransformer })
   memBytes: number | null;
 
   @Column({ type: 'text', nullable: true, transformer: nullableNumericTextTransformer })
   diskBytes: number | null;
 
-  /** null → fall back to server default */
+  /** null retains the historical all-GPU policy. */
   @Column({ type: 'text', nullable: true, default: null })
   gpuMode: GpuGrantMode | null;
 
-  /** null → not applicable */
+  /** null is normalized to an empty list unless mode is `indices`. */
   @Column({ type: 'text', nullable: true, transformer: nullableNumberArrayTransformer })
   gpuIndices: number[] | null;
 

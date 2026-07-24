@@ -12,7 +12,7 @@ import { DataSource, In, IsNull, Repository } from 'typeorm';
 import * as http from 'http';
 import * as path from 'node:path';
 import { WebSocketServer, WebSocket } from 'ws';
-import { createHash } from 'crypto';
+import { createHash, randomBytes } from 'crypto';
 import {
   AgentToBackendMessage,
   BackendToAgentMessage,
@@ -104,10 +104,30 @@ export const MAX_AGENT_INITIALIZING_CONNECTIONS = 8;
 export const MAX_AGENT_PENDING_INBOUND_BYTES_PER_SERVER = MAX_AGENT_WS_FRAME_BYTES;
 export const MAX_AGENT_PENDING_INBOUND_BYTES_GLOBAL = 64 * 1024 * 1024;
 export const MAX_AGENT_STATE_REPORT_QUEUE_AGE_MS = 15_000;
+export const SERVER_DELETE_INVENTORY_PROOF_TIMEOUT_MS = 120_000;
 
 type MessageIngress = {
   wallMs: number;
   monotonicMs: number;
+};
+
+type ServerDeletionInventoryProofResult = {
+  nonce: string;
+  sessionId: string;
+  sequence: number;
+  receivedMonotonicAt: number;
+  snapshot: ServerSnapshot;
+};
+
+type ServerDeletionInventoryProofChallenge = {
+  nonce: string;
+  sessionId: string;
+  minimumSequence: number;
+  startedMonotonicAt: number;
+  promise: Promise<ServerDeletionInventoryProofResult>;
+  resolve: (proof: ServerDeletionInventoryProofResult) => void;
+  reject: (error: Error) => void;
+  timer: ReturnType<typeof setTimeout>;
 };
 
 class AgentIdentityFaultError extends Error {
@@ -138,6 +158,14 @@ export interface SessionFenceOptions {
    * empty authoritative inventory before retiring the session.
    */
   requireBoundServerEmptyInventory?: boolean;
+  /**
+   * Optionally authorize and claim the process-local fence at one caller-owned
+   * linearization point. The caller may invoke `claim` synchronously inside a
+   * serialized database transaction after checking current authority. This
+   * prevents a revoked actor from fencing an Agent without keeping that
+   * database lease across inventory collection or route revocation.
+   */
+  authorizeAndClaim?: (claim: () => void) => Promise<void>;
 }
 
 @Injectable()
@@ -155,6 +183,14 @@ export class AgentGateway implements OnModuleInit, OnModuleDestroy {
   private readonly overloadedSessions = new WeakSet<AgentSession>();
   /** Short-lived admission fence used while credentials or the server row change. */
   private readonly sessionAdmissionBlocks = new Set<string>();
+  private readonly committedStateReportSequences = new Map<
+    string,
+    { sessionId: string; sequence: number }
+  >();
+  private readonly serverDeletionInventoryProofs = new Map<
+    string,
+    ServerDeletionInventoryProofChallenge
+  >();
   private sessionWatchdog: ReturnType<typeof setInterval> | null = null;
   private unregisterServerBlockListener: (() => void) | null = null;
   private destroyed = false;
@@ -257,6 +293,14 @@ export class AgentGateway implements OnModuleInit, OnModuleDestroy {
     this.inboundWorkBytes.clear();
     this.inboundWorkBytesTotal = 0;
     this.pendingHeartbeatServers.clear();
+    for (const [serverId, proof] of this.serverDeletionInventoryProofs) {
+      this.rejectServerDeletionInventoryProof(
+        serverId,
+        proof,
+        new Error('Backend gateway shutting down'),
+      );
+    }
+    this.committedStateReportSequences.clear();
     this.wss?.close();
   }
 
@@ -437,8 +481,21 @@ export class AgentGateway implements OnModuleInit, OnModuleDestroy {
     reason: string,
   ): boolean {
     if (this.sessions.get(serverId) !== session) return false;
+    const deletionProof = this.serverDeletionInventoryProofs.get(serverId);
+    if (deletionProof?.sessionId === session.id) {
+      this.rejectServerDeletionInventoryProof(
+        serverId,
+        deletionProof,
+        new ConflictException({
+          code: 'SERVER_DELETE_INVENTORY_SESSION_LOST',
+          message: 'The Agent session closed before deletion inventory proof committed',
+          serverId,
+        }),
+      );
+    }
     this.sessions.delete(serverId);
     this.stateCache.delete(serverId);
+    this.committedStateReportSequences.delete(serverId);
     this.reportedUnknownXfsNumericIdsByServer.delete(serverId);
     this.logChunkTracker.clearServer(serverId);
     this.execSessionRegistry.clearServer(serverId, false);
@@ -739,7 +796,13 @@ export class AgentGateway implements OnModuleInit, OnModuleDestroy {
             await this.rejectSession(session, server.id, 'State report inventory identity mismatch');
             break;
           }
-          await this.onStateReport(server, report, session, ingress.wallMs);
+          await this.onStateReport(
+            server,
+            report,
+            session,
+            ingress.wallMs,
+            ingress.monotonicMs,
+          );
           break;
         }
         case 'metricsBatch': {
@@ -1643,6 +1706,7 @@ export class AgentGateway implements OnModuleInit, OnModuleDestroy {
     payload: StateReportPayload,
     reportSession?: AgentSession,
     receivedAt = Date.now(),
+    receivedMonotonicAt = performance.now(),
   ): Promise<void> {
     const expectedSession = reportSession ?? this.sessions.get(server.id);
     const blockEpoch = this.proxySnapshots.currentBlockEpoch(server.id);
@@ -1746,7 +1810,9 @@ export class AgentGateway implements OnModuleInit, OnModuleDestroy {
       disks: [...payload.disks],
       localImages: [...payload.localImages],
       remoteFsMounts,
-      lastUpdated: payload.observedAt,
+      // Freshness and route projection use the Backend receive clock. The
+      // Agent timestamp remains diagnostic evidence in lastFullReportAt.
+      lastUpdated: receivedAt,
     };
     next.runtimeReady = true;
     next.lastFullReportAt = payload.observedAt;
@@ -1771,6 +1837,17 @@ export class AgentGateway implements OnModuleInit, OnModuleDestroy {
       return;
     }
     this.stateCache.set(server.id, next);
+    this.committedStateReportSequences.set(server.id, {
+      sessionId: expectedSession?.id ?? next.sessionId,
+      sequence: payload.sequence,
+    });
+    this.commitServerDeletionInventoryProof(
+      server.id,
+      expectedSession,
+      payload,
+      receivedMonotonicAt,
+      next,
+    );
     expectedSession?.markFullReportReceived();
     if (expectedSession && !pendingSafetyRecovery) {
       this.proxySnapshots.unblockServerIfEpoch(
@@ -1875,18 +1952,51 @@ export class AgentGateway implements OnModuleInit, OnModuleDestroy {
     if (!unique(payload.xfsProjects.map((project) => project.numericUserId))) return false;
     if (!unique(payload.remoteFsMounts.map((status) => status.id))) return false;
 
-    if (payload.remoteFsMounts.length === 0) return true;
-    const remoteIds = payload.remoteFsMounts.map((status) => status.id);
+    const statusByRemoteId = new Map(payload.remoteFsMounts.map((status) => [status.id, status]));
+    const remoteDataDirs = payload.dataDirs.filter((entry) => entry.sourceKind === 'remote');
+    for (const entry of remoteDataDirs) {
+      const status = statusByRemoteId.get(entry.sourceId);
+      const canonicalRoot = `/mnt/remote-fs/${entry.sourceId}`;
+      const canonicalDataPath = path.posix.join(
+        canonicalRoot,
+        '.nyabase',
+        'dirs',
+        entry.resourceId,
+        'data',
+      );
+      if (
+        !status
+        || status.status !== 'mounted'
+        || status.hostMountPoint !== canonicalRoot
+        || entry.hostPath !== canonicalDataPath
+      ) return false;
+    }
+
+    const remoteIds = [...new Set([
+      ...payload.remoteFsMounts.map((status) => status.id),
+      ...remoteDataDirs.map((entry) => entry.sourceId),
+    ])];
+    if (remoteIds.length === 0) return true;
     const [mounts, assignments] = await Promise.all([
       this.remoteFsMountsRepo.find({
         where: { id: In(remoteIds), desiredState: 'active' },
       }),
       this.remoteFsAssignmentsRepo.find({
+        // A durable unassignment first changes the row to `removing`, then the
+        // Agent executes remote_fs.absent. A full report collected immediately
+        // before that task may still legitimately contain the exact mounted
+        // filesystem. Keep validating it against the still-present immutable
+        // assignment instead of treating this normal transition as an Agent
+        // identity fault. The finalizer deletes the row only after absence is
+        // proved, so a report with no remaining assignment still fails closed.
         where: { serverId, remoteFsMountId: In(remoteIds) },
       }),
     ]);
     const mountsById = new Map(mounts.map((mount) => [mount.id, mount]));
     const assignedIds = new Set(assignments.map((assignment) => assignment.remoteFsMountId));
+    const activeAssignedIds = new Set(assignments
+      .filter((assignment) => assignment.desiredState === 'active')
+      .map((assignment) => assignment.remoteFsMountId));
 
     for (const status of payload.remoteFsMounts) {
       const canonicalPath = `/mnt/remote-fs/${status.id}`;
@@ -1897,11 +2007,18 @@ export class AgentGateway implements OnModuleInit, OnModuleDestroy {
       ) return false;
       if (mount && assignedIds.has(status.id)) continue;
       // Report collection/send and task execution share the Agent execution
-      // lane; WebSocket delivery and the Backend per-server queue preserve
-      // that order. While an Absent finalizer is pending the assignment row is
-      // still present. Once it is deleted, any later report containing the id
-      // is real drift. Cross-host wall clocks are never a causal barrier.
+      // lane, but an independent HTTP unassignment transaction may commit while
+      // an earlier full report is already in flight. While an Absent finalizer
+      // is pending the assignment row is still present (normally `removing`).
+      // Once it is deleted, any later report containing the id is real drift.
+      // Cross-host wall clocks are never a causal barrier.
       return false;
+    }
+    for (const entry of remoteDataDirs) {
+      // A transitional assignment is sufficient to identify an already
+      // reported mount, but Remote DataDirs are usable only while the
+      // assignment remains durably active.
+      if (!mountsById.has(entry.sourceId) || !activeAssignedIds.has(entry.sourceId)) return false;
     }
     return true;
   }
@@ -1985,6 +2102,7 @@ export class AgentGateway implements OnModuleInit, OnModuleDestroy {
   // ---------------------------------------------------------------------------
 
   getSession(serverId: string): AgentSession | undefined {
+    if (this.sessionAdmissionBlocks.has(serverId)) return undefined;
     return this.sessions.get(serverId);
   }
 
@@ -2005,20 +2123,45 @@ export class AgentGateway implements OnModuleInit, OnModuleDestroy {
     options: SessionFenceOptions = {},
   ): Promise<T> {
     let ownsFence = false;
+    let deletionProof: ServerDeletionInventoryProofChallenge | null = null;
     try {
-      await this.enqueueServerWork(serverId, async () => {
-        if (this.sessionAdmissionBlocks.has(serverId)) {
-          throw new Error(`Server ${serverId} already has an active session admission fence`);
+      const prepared = await this.enqueueServerWork(serverId, async () => {
+        const claim = () => {
+          if (ownsFence) {
+            throw new Error(`Server ${serverId} session admission fence was claimed twice`);
+          }
+          if (this.sessionAdmissionBlocks.has(serverId)) {
+            throw new Error(`Server ${serverId} already has an active session admission fence`);
+          }
+          this.sessionAdmissionBlocks.add(serverId);
+          ownsFence = true;
+        };
+        if (options.authorizeAndClaim) await options.authorizeAndClaim(claim);
+        else claim();
+        if (!ownsFence) {
+          throw new Error(`Server ${serverId} session admission fence was not claimed`);
         }
-        this.sessionAdmissionBlocks.add(serverId);
-        ownsFence = true;
         if (options.requireBoundServerEmptyInventory) {
-          await this.assertBoundServerDeletionInventory(serverId);
+          const proof = await this.beginBoundServerDeletionInventoryProof(serverId);
+          if (proof) return proof;
         }
         await this.retireSession(serverId, reason);
+        return null;
       });
+      deletionProof = prepared;
+      if (deletionProof) {
+        const proof = await deletionProof.promise;
+        await this.enqueueServerWork(serverId, async () => {
+          if (!this.sessionAdmissionBlocks.has(serverId)) {
+            throw new Error(`Server ${serverId} deletion inventory fence was released early`);
+          }
+          await this.assertBoundServerDeletionInventory(serverId, proof);
+          await this.retireSession(serverId, reason);
+        });
+      }
       return await work();
     } finally {
+      if (deletionProof) this.cancelServerDeletionInventoryProof(serverId, deletionProof);
       // Only the invocation that inserted this fence may remove it. Cover both
       // retirement and work failures so a transient revocation observer cannot
       // strand the server behind a process-local 4410 until Backend restart.
@@ -2030,16 +2173,18 @@ export class AgentGateway implements OnModuleInit, OnModuleDestroy {
     }
   }
 
-  private async assertBoundServerDeletionInventory(serverId: string): Promise<void> {
+  private async beginBoundServerDeletionInventoryProof(
+    serverId: string,
+  ): Promise<ServerDeletionInventoryProofChallenge | null> {
     const durable = await this.serversRepo.findOneBy({ id: serverId });
-    if (!durable) return;
+    if (!durable) return null;
     if (
       !durable.hostFingerprint
       && !durable.agentConfigFingerprint
       && !durable.macvlanCidr
       && !durable.macvlanGateway
     ) {
-      return;
+      return null;
     }
     if (
       !durable.hostFingerprint
@@ -2060,13 +2205,58 @@ export class AgentGateway implements OnModuleInit, OnModuleDestroy {
       && !this.proxySnapshots.isServerBlocked(serverId)
       && session?.dispatchReady === true
       && session.ws.readyState === WebSocket.OPEN
-      && !session.fullReportExpired(performance.now(), 120_000)
       && snapshot?.runtimeReady === true
       && snapshot.sessionId === session.id;
     if (!current) {
       throw new ConflictException({
         code: 'SERVER_DELETE_REQUIRES_CURRENT_INVENTORY',
         message: 'A bound Server can be deleted only while its Agent is online with a current authoritative full inventory',
+        serverId,
+      });
+    }
+
+    const committed = this.committedStateReportSequences.get(serverId);
+    const proof = this.createServerDeletionInventoryProof(
+      serverId,
+      session,
+      committed?.sessionId === session.id ? committed.sequence : -1,
+    );
+    if (!session.send({
+      id: undefined,
+      ts: Date.now(),
+      kind: 'reconcile',
+      payload: { serverId, proofNonce: proof.nonce },
+    })) {
+      this.cancelServerDeletionInventoryProof(serverId, proof);
+      throw new ConflictException({
+        code: 'SERVER_DELETE_REQUIRES_CURRENT_INVENTORY',
+        message: 'The Agent could not accept a fresh deletion inventory challenge',
+        serverId,
+      });
+    }
+    return proof;
+  }
+
+  private async assertBoundServerDeletionInventory(
+    serverId: string,
+    proof: ServerDeletionInventoryProofResult,
+  ): Promise<void> {
+    const durable = await this.serversRepo.findOneBy({ id: serverId });
+    const session = this.sessions.get(serverId);
+    const snapshot = this.stateCache.get(serverId);
+    const current = durable?.status === ServerStatus.Online
+      && this.sessionAdmissionBlocks.has(serverId)
+      && !this.proxySnapshots.isServerBlocked(serverId)
+      && session?.id === proof.sessionId
+      && session.dispatchReady
+      && session.ws.readyState === WebSocket.OPEN
+      && snapshot === proof.snapshot
+      && snapshot.runtimeReady
+      && snapshot.sessionId === proof.sessionId;
+    if (!current) {
+      throw new ConflictException({
+        code: 'SERVER_DELETE_REQUIRES_CURRENT_INVENTORY',
+        message: 'The deletion inventory proof is no longer current for the fenced Agent session',
         serverId,
       });
     }
@@ -2092,6 +2282,98 @@ export class AgentGateway implements OnModuleInit, OnModuleDestroy {
         residuals,
       });
     }
+  }
+
+  private createServerDeletionInventoryProof(
+    serverId: string,
+    session: AgentSession,
+    minimumSequence: number,
+  ): ServerDeletionInventoryProofChallenge {
+    let resolve!: (proof: ServerDeletionInventoryProofResult) => void;
+    let reject!: (error: Error) => void;
+    const promise = new Promise<ServerDeletionInventoryProofResult>((resolvePromise, rejectPromise) => {
+      resolve = resolvePromise;
+      reject = rejectPromise;
+    });
+    // A shutdown can reject between challenge creation and the caller's next
+    // microtask attaching its await. Keep the original Promise rejectable for
+    // the caller while preventing that narrow window from becoming unhandled.
+    void promise.catch(() => undefined);
+    if (this.serverDeletionInventoryProofs.has(serverId)) {
+      throw new Error(`Server ${serverId} already has a deletion inventory proof challenge`);
+    }
+    const proof = {
+      nonce: randomBytes(32).toString('hex'),
+      sessionId: session.id,
+      minimumSequence,
+      startedMonotonicAt: performance.now(),
+      promise,
+      resolve,
+      reject,
+      timer: undefined as unknown as ReturnType<typeof setTimeout>,
+    };
+    proof.timer = setTimeout(() => {
+      this.rejectServerDeletionInventoryProof(
+        serverId,
+        proof,
+        new ConflictException({
+          code: 'SERVER_DELETE_INVENTORY_PROOF_TIMEOUT',
+          message: 'The Agent did not commit the challenged deletion inventory before the deadline',
+          serverId,
+        }),
+      );
+    }, SERVER_DELETE_INVENTORY_PROOF_TIMEOUT_MS);
+    proof.timer.unref?.();
+    this.serverDeletionInventoryProofs.set(serverId, proof);
+    return proof;
+  }
+
+  private commitServerDeletionInventoryProof(
+    serverId: string,
+    session: AgentSession | undefined,
+    payload: StateReportPayload,
+    receivedMonotonicAt: number,
+    snapshot: ServerSnapshot,
+  ): void {
+    const proof = this.serverDeletionInventoryProofs.get(serverId);
+    if (
+      !proof
+      || !session
+      || payload.reconcileProofNonce !== proof.nonce
+      || session.id !== proof.sessionId
+      || snapshot.sessionId !== proof.sessionId
+      || payload.sequence <= proof.minimumSequence
+      || receivedMonotonicAt < proof.startedMonotonicAt
+    ) return;
+    this.serverDeletionInventoryProofs.delete(serverId);
+    clearTimeout(proof.timer);
+    proof.resolve({
+      nonce: proof.nonce,
+      sessionId: proof.sessionId,
+      sequence: payload.sequence,
+      receivedMonotonicAt,
+      snapshot,
+    });
+  }
+
+  private cancelServerDeletionInventoryProof(
+    serverId: string,
+    proof: ServerDeletionInventoryProofChallenge,
+  ): void {
+    if (this.serverDeletionInventoryProofs.get(serverId) !== proof) return;
+    this.serverDeletionInventoryProofs.delete(serverId);
+    clearTimeout(proof.timer);
+  }
+
+  private rejectServerDeletionInventoryProof(
+    serverId: string,
+    proof: ServerDeletionInventoryProofChallenge,
+    error: Error,
+  ): void {
+    if (this.serverDeletionInventoryProofs.get(serverId) !== proof) return;
+    this.serverDeletionInventoryProofs.delete(serverId);
+    clearTimeout(proof.timer);
+    proof.reject(error);
   }
 
   private async retireSession(serverId: string, reason: string): Promise<void> {
@@ -2155,7 +2437,8 @@ export class AgentGateway implements OnModuleInit, OnModuleDestroy {
 
   isOnline(serverId: string): boolean {
     const session = this.sessions.get(serverId);
-    return !this.proxySnapshots.isServerBlocked(serverId)
+    return !this.sessionAdmissionBlocks.has(serverId)
+      && !this.proxySnapshots.isServerBlocked(serverId)
       && !!session
       && session.dispatchReady
       && session.ws.readyState === WebSocket.OPEN;
@@ -2164,15 +2447,17 @@ export class AgentGateway implements OnModuleInit, OnModuleDestroy {
   onlineServerIds(): string[] {
     return [...this.sessions.entries()]
       .filter(([serverId, session]) =>
-        !this.proxySnapshots.isServerBlocked(serverId)
+        !this.sessionAdmissionBlocks.has(serverId)
+        && !this.proxySnapshots.isServerBlocked(serverId)
         && session.ws.readyState === WebSocket.OPEN)
       .map(([serverId]) => serverId);
   }
 
   private dispatchReadyServerIds(): string[] {
     return [...this.sessions.entries()]
-      .filter(([, session]) =>
-        session.dispatchReady && session.ws.readyState === WebSocket.OPEN)
+      .filter(([serverId, session]) =>
+        !this.sessionAdmissionBlocks.has(serverId)
+        && session.dispatchReady && session.ws.readyState === WebSocket.OPEN)
       .map(([serverId]) => serverId);
   }
 
@@ -2261,7 +2546,11 @@ export class AgentGateway implements OnModuleInit, OnModuleDestroy {
       throw new Error(`Direct command ${kind} is disabled; use an AgentTask`);
     }
     const session = this.sessions.get(serverId);
-    if (this.proxySnapshots.isServerBlocked(serverId) || !session?.dispatchReady) {
+    if (
+      this.sessionAdmissionBlocks.has(serverId)
+      || this.proxySnapshots.isServerBlocked(serverId)
+      || !session?.dispatchReady
+    ) {
       throw new Error('Agent offline, initializing, or quarantined');
     }
     return session.rpc<T>(kind, payload, timeoutMs);
@@ -2273,7 +2562,11 @@ export class AgentGateway implements OnModuleInit, OnModuleDestroy {
       throw new Error(`One-way Agent message ${kind} is not allowed`);
     }
     const session = this.sessions.get(serverId);
-    if (this.proxySnapshots.isServerBlocked(serverId) || !session?.dispatchReady) return;
+    if (
+      this.sessionAdmissionBlocks.has(serverId)
+      || this.proxySnapshots.isServerBlocked(serverId)
+      || !session?.dispatchReady
+    ) return;
     session.send(
       { id: undefined, ts: Date.now(), kind, payload } as BackendToAgentMessage,
     );
@@ -2284,7 +2577,7 @@ export class AgentGateway implements OnModuleInit, OnModuleDestroy {
     payload: Extract<BackendToAgentMessage, { kind: 'task.execute.v1' }>['payload'],
   ): void {
     const session = this.sessions.get(serverId);
-    if (!session?.dispatchReady) return;
+    if (this.sessionAdmissionBlocks.has(serverId) || !session?.dispatchReady) return;
     session.send({
       id: undefined,
       ts: Date.now(),

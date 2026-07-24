@@ -20,7 +20,8 @@ describe('UsersService terminal deleted state', () => {
   let service: UsersService;
   let invalidateUser: ReturnType<typeof vi.fn>;
   let notify: ReturnType<typeof vi.fn>;
-  let createUserKeyInTransaction: ReturnType<typeof vi.fn>;
+  let prepareUserKey: ReturnType<typeof vi.fn>;
+  let savePreparedUserKeyInTransaction: ReturnType<typeof vi.fn>;
 
   beforeEach(async () => {
     dataSource = new DataSource({
@@ -32,17 +33,26 @@ describe('UsersService terminal deleted state', () => {
     await dataSource.initialize();
     invalidateUser = vi.fn();
     notify = vi.fn().mockResolvedValue(undefined);
-    createUserKeyInTransaction = vi.fn().mockResolvedValue(undefined);
+    prepareUserKey = vi.fn(async (user: { id: string }) => ({
+      userId: user.id,
+      generation: 1,
+    }));
+    savePreparedUserKeyInTransaction = vi.fn().mockResolvedValue(undefined);
     service = new UsersService(
       dataSource.getRepository(UserEntity),
       {} as Repository<SshPublicKeyEntity>,
-      { hashPassword: vi.fn().mockResolvedValue('hash') } as unknown as AuthService,
+      {
+        hashPassword: vi.fn().mockResolvedValue('hash'),
+        revokeBrowserSessionsInTransaction: vi.fn().mockResolvedValue(undefined),
+      } as unknown as AuthService,
       { invalidateUser } as unknown as AccessResolverService,
       dataSource,
       {} as ContainerSshConvergenceService,
-      { createUserKeyInTransaction } as unknown as SshIdentityService,
+      { prepareUserKey, savePreparedUserKeyInTransaction } as unknown as SshIdentityService,
       { notify } as unknown as ProxySnapshotNotifierService,
       {} as NyabaseConfigService,
+      { log: vi.fn().mockResolvedValue(undefined) } as never,
+      { applyInTransaction: vi.fn() } as never,
     );
   });
 
@@ -112,22 +122,23 @@ describe('UsersService terminal deleted state', () => {
 
     await expect(service.createUser({
       username: 'overflow-user',
-      password: 'secret',
+      password: 'secret123',
       displayName: 'Overflow User',
     })).rejects.toMatchObject({
       response: expect.objectContaining({ code: 'USER_LIFETIME_CAPACITY_REACHED' }),
     });
 
     expect(await dataSource.getRepository(UserEntity).count()).toBe(MAX_AGENT_XFS_PROJECTS);
-    expect(createUserKeyInTransaction).not.toHaveBeenCalled();
+    expect(prepareUserKey).toHaveBeenCalledOnce();
+    expect(savePreparedUserKeyInTransaction).not.toHaveBeenCalled();
   });
 
   it('serializes concurrent creation at the lifetime user capacity', async () => {
     await seedDeletedUsers(MAX_AGENT_XFS_PROJECTS - 1);
 
     const results = await Promise.allSettled([
-      service.createUser({ username: 'last-a', password: 'secret', displayName: 'Last A' }),
-      service.createUser({ username: 'last-b', password: 'secret', displayName: 'Last B' }),
+      service.createUser({ username: 'last-a', password: 'secret123', displayName: 'Last A' }),
+      service.createUser({ username: 'last-b', password: 'secret123', displayName: 'Last B' }),
     ]);
 
     expect(results.filter((result) => result.status === 'fulfilled')).toHaveLength(1);
@@ -139,7 +150,8 @@ describe('UsersService terminal deleted state', () => {
       response: expect.objectContaining({ code: 'USER_LIFETIME_CAPACITY_REACHED' }),
     });
     expect(await dataSource.getRepository(UserEntity).count()).toBe(MAX_AGENT_XFS_PROJECTS);
-    expect(createUserKeyInTransaction).toHaveBeenCalledOnce();
+    expect(prepareUserKey).toHaveBeenCalledTimes(2);
+    expect(savePreparedUserKeyInTransaction).toHaveBeenCalledOnce();
   });
 
   async function saveUser(status: UserStatus) {

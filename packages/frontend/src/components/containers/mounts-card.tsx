@@ -13,6 +13,7 @@ import { toast } from '../../hooks/use-toast.js';
 import { queryKeys } from '../../lib/query-keys.js';
 import { FolderOpen, Network, Plus, X } from 'lucide-react';
 import type { ContainerMountView, DataDirDto, MountSourceDto, ContainerView } from '@nyabase/common';
+import { QueryErrorState, QueryLoadingState } from '../query-state.js';
 
 type MountInput = {
   sourceKind: 'local' | 'remote';
@@ -26,6 +27,7 @@ export function MountsCard({
   containerId,
   isRunning,
   readonly = false,
+  readonlyReason,
   apiBasePath = '/v2/containers',
   plane = 'user',
 }: {
@@ -33,6 +35,7 @@ export function MountsCard({
   containerId: string;
   isRunning: boolean;
   readonly?: boolean;
+  readonlyReason?: string;
   apiBasePath?: string;
   plane?: 'admin' | 'user';
 }) {
@@ -40,22 +43,25 @@ export function MountsCard({
   const [addOpen, setAddOpen] = useState(false);
   const [pendingRemoveIndex, setPendingRemoveIndex] = useState<number | null>(null);
 
-  const { data: mounts = [] } = useQuery<ContainerMountView[]>({
+  const mountsQuery = useQuery<ContainerMountView[]>({
     queryKey: ['container-mounts', plane, containerId],
     queryFn: () => api.get<ContainerView>(`${apiBasePath}/${containerId}`).then((c) => c.mounts),
   });
+  const mounts = mountsQuery.data ?? [];
 
-  const { data: serverDirs = [] } = useQuery<DataDirDto[]>({
+  const serverDirsQuery = useQuery<DataDirDto[]>({
     queryKey: queryKeys.dataDirs.byServer('user', serverId),
     queryFn: () => api.get<DataDirDto[]>(`/data-dirs?serverId=${serverId}`),
     enabled: addOpen && !readonly,
   });
+  const serverDirs = serverDirsQuery.data ?? [];
 
-  const { data: mountSources = [] } = useQuery<MountSourceDto[]>({
+  const mountSourcesQuery = useQuery<MountSourceDto[]>({
     queryKey: queryKeys.mountSources.byServer('user', serverId),
     queryFn: () => api.get<MountSourceDto[]>(`/mount-sources?serverId=${serverId}`),
     enabled: !readonly,
   });
+  const mountSources = mountSourcesQuery.data ?? [];
 
   const patchMounts = useMutation({
     mutationFn: (newList: MountInput[]) =>
@@ -114,7 +120,19 @@ export function MountsCard({
         )}
       </div>
 
-      {mounts.length === 0 ? (
+      {readonly && readonlyReason && (
+        <p className="mb-3 rounded-md bg-muted/50 px-3 py-2 text-xs text-muted-foreground">{readonlyReason}</p>
+      )}
+
+      {mountsQuery.isLoading ? (
+        <QueryLoadingState label="加载挂载信息..." />
+      ) : mountsQuery.error ? (
+        <QueryErrorState
+          error={mountsQuery.error}
+          resourceName="容器挂载"
+          onRetry={() => { void mountsQuery.refetch(); }}
+        />
+      ) : mounts.length === 0 ? (
         <p className="text-xs text-muted-foreground/70 italic">暂无挂载</p>
       ) : (
         <div className="space-y-2">
@@ -176,6 +194,9 @@ export function MountsCard({
         mountSources={mountSources}
         mountedSourceKeys={mountedSourceKeys}
         isPending={patchMounts.isPending}
+        isLoading={serverDirsQuery.isLoading || mountSourcesQuery.isLoading}
+        error={serverDirsQuery.error ?? mountSourcesQuery.error}
+        onRetry={() => { void Promise.all([serverDirsQuery.refetch(), mountSourcesQuery.refetch()]); }}
       />}
     </div>
   );
@@ -185,7 +206,18 @@ export function MountsCard({
 // Add mount dialog
 // ---------------------------------------------------------------------------
 
-function AddMountDialog({ open, onClose, onConfirm, serverDirs, mountSources, mountedSourceKeys, isPending }: {
+function AddMountDialog({
+  open,
+  onClose,
+  onConfirm,
+  serverDirs,
+  mountSources,
+  mountedSourceKeys,
+  isPending,
+  isLoading,
+  error,
+  onRetry,
+}: {
   open: boolean;
   onClose: () => void;
   onConfirm: (entry: MountInput) => void;
@@ -193,6 +225,9 @@ function AddMountDialog({ open, onClose, onConfirm, serverDirs, mountSources, mo
   mountSources: MountSourceDto[];
   mountedSourceKeys: Set<string>;
   isPending: boolean;
+  isLoading: boolean;
+  error: unknown;
+  onRetry: () => void;
 }) {
   const [dataDirPick, setDataDirPick] = useState('');
   const [containerPath, setContainerPath] = useState('');
@@ -232,7 +267,11 @@ function AddMountDialog({ open, onClose, onConfirm, serverDirs, mountSources, mo
       <DialogContent className="max-w-sm">
         <DialogHeader><DialogTitle>添加数据目录挂载</DialogTitle></DialogHeader>
         <div className="space-y-4">
-          {uniqueDirs.length === 0 ? (
+          {isLoading ? (
+            <QueryLoadingState label="加载可用数据目录..." />
+          ) : error ? (
+            <QueryErrorState error={error} resourceName="可用数据目录" onRetry={onRetry} />
+          ) : uniqueDirs.length === 0 ? (
             <p className="text-sm text-muted-foreground/70">暂无已注册的数据目录，请先在「数据目录」页面创建。</p>
           ) : (
             <>
@@ -269,7 +308,7 @@ function AddMountDialog({ open, onClose, onConfirm, serverDirs, mountSources, mo
         </div>
         <DialogFooter>
           <Button variant="outline" onClick={handleClose}>取消</Button>
-          <Button onClick={handleConfirm} disabled={!canConfirm || isPending}>
+          <Button onClick={handleConfirm} disabled={!canConfirm || isPending || isLoading || Boolean(error)}>
             {isPending ? '添加中...' : '确认添加'}
           </Button>
         </DialogFooter>

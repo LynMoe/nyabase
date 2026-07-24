@@ -11,7 +11,14 @@ import { Activity, Cpu } from 'lucide-react';
 import type { GpuMetricsDto, HostMetricsDto, MetricSeries } from '@nyabase/common';
 
 import { api } from '../../lib/api.js';
+import {
+  hostDiskCapacityTitle,
+  hostDiskIoChartEntries,
+  hostNetIoChartEntries,
+} from '../../lib/host-metrics-presentation.js';
 import { formatBytesCompact } from '../../lib/utils.js';
+import { QueryErrorState } from '../query-state.js';
+import { queryPollInterval } from '../../lib/query-lifecycle.js';
 import {
   AXIS_TICK, GRID_STROKE, SectionHeader, SkeletonSection, TIP_STYLE,
   colorFor, fmtBps, fmtPercent, multiSeriesData, singleSeriesData,
@@ -141,16 +148,18 @@ export function MultiLineChartImpl({
 
 export function HostSectionImpl({ serverId, range, admin = false }: { serverId: string; range: string; admin?: boolean }) {
   const basePath = admin ? '/admin/metrics' : '/metrics';
-  const { data, isLoading, isError } = useQuery({
+  const { data, isLoading, error, refetch } = useQuery({
     queryKey: ['metrics-host', admin ? 'admin' : 'user', serverId, range],
     queryFn: () => api.get<HostMetricsDto>(`${basePath}/servers/${serverId}/host?range=${range}`),
     staleTime: 30_000,
-    refetchInterval: 60_000,
+    refetchInterval: (query) => queryPollInterval(query.state, { activeIntervalMs: 60_000 }),
     retry: false,
   });
 
   if (isLoading) return <SkeletonSection rows={2} />;
-  if (isError || !data) return null;
+  if (error || !data) {
+    return <QueryErrorState error={error ?? new Error('未收到主机指标数据')} resourceName="主机指标" onRetry={() => void refetch()} />;
+  }
 
   return (
     <div className="space-y-3">
@@ -167,7 +176,7 @@ export function HostSectionImpl({ serverId, range, admin = false }: { serverId: 
           {data.disks.map((d) => (
             <SingleLineChartImpl
               key={d.diskId}
-              title={`磁盘容量 — ${d.mountPoint}`}
+              title={hostDiskCapacityTitle(d)}
               series={d.used}
               yFormatter={formatBytesCompact}
             />
@@ -180,14 +189,14 @@ export function HostSectionImpl({ serverId, range, admin = false }: { serverId: 
           {data.diskIo.length > 0 && (
             <MultiLineChartImpl
               title="磁盘 IO（读 + 写）"
-              entries={data.diskIo.map((d) => ({ key: d.dev, label: d.dev, series: d.bps }))}
+              entries={hostDiskIoChartEntries(data.diskIo)}
               yFormatter={fmtBps}
             />
           )}
           {data.netIo.length > 0 && (
             <MultiLineChartImpl
               title="网络 IO（收 + 发）"
-              entries={data.netIo.map((n) => ({ key: n.iface, label: n.iface, series: n.bps }))}
+              entries={hostNetIoChartEntries(data.netIo)}
               yFormatter={fmtBps}
             />
           )}
@@ -199,15 +208,18 @@ export function HostSectionImpl({ serverId, range, admin = false }: { serverId: 
 
 export function GpuSectionImpl({ serverId, range, admin = false }: { serverId: string; range: string; admin?: boolean }) {
   const basePath = admin ? '/admin/metrics' : '/metrics';
-  const { data, isLoading } = useQuery({
+  const { data, isLoading, error, refetch } = useQuery({
     queryKey: ['metrics-gpus', admin ? 'admin' : 'user', serverId, range],
     queryFn: () => api.get<GpuMetricsDto>(`${basePath}/servers/${serverId}/gpus?range=${range}`),
     staleTime: 30_000,
-    refetchInterval: 60_000,
+    refetchInterval: (query) => queryPollInterval(query.state, { activeIntervalMs: 60_000 }),
     retry: false,
   });
 
   if (isLoading) return <SkeletonSection rows={1} />;
+  if (error) {
+    return <QueryErrorState error={error} resourceName="GPU 指标" onRetry={() => void refetch()} />;
+  }
   if (!data || data.gpus.length === 0) return null;
 
   return (

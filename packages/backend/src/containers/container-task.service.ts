@@ -20,6 +20,10 @@ export interface ContainerTaskRequest {
   request: unknown;
   payload: unknown;
   payloadInTransaction?: (manager: EntityManager) => Promise<unknown>;
+  prepareInTransaction?: (manager: EntityManager) => Promise<{
+    payload: unknown;
+    resourceKeys?: string[];
+  }>;
   phase: ContainerPhase;
   nextDispatchAt?: Date;
   resourceKeys?: string[];
@@ -39,9 +43,14 @@ export class ContainerTaskService {
     manager: EntityManager,
     input: ContainerTaskRequest,
   ): Promise<AgentTaskRefResponse> {
-    const payload = input.payloadInTransaction
-      ? await input.payloadInTransaction(manager)
-      : input.payload;
+    const prepared = input.prepareInTransaction
+      ? await input.prepareInTransaction(manager)
+      : null;
+    const payload = prepared
+      ? prepared.payload
+      : input.payloadInTransaction
+        ? await input.payloadInTransaction(manager)
+        : input.payload;
     return this.tasks.enqueueInTransaction(manager, {
       kind: input.kind,
       serverId: input.serverId,
@@ -51,7 +60,9 @@ export class ContainerTaskService {
       request: input.request,
       payload,
       nextDispatchAt: input.nextDispatchAt,
-      resourceKeys: input.resourceKeys ?? [this.resourceKeys.container(input.containerId)],
+      resourceKeys: prepared?.resourceKeys
+        ?? input.resourceKeys
+        ?? [this.resourceKeys.container(input.containerId)],
       beforeCommit: async (taskManager, context) => {
         await input.beforeSave?.(taskManager, context.taskId);
         await taskManager.update(ContainerLifecycleEntity, input.containerId, {

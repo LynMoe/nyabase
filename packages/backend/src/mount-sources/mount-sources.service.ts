@@ -7,8 +7,8 @@ import { RemoteFsServerAssignmentEntity } from '../entities/remote-fs-server-ass
 import { MountSourceGrantEntity } from '../entities/mount-source-grant.entity.js';
 import { AccessResolverService, MountSourceRef } from '../access/access-resolver.service.js';
 import { AuditService } from '../audit/audit.service.js';
-import { AuditAction, MountSourceDto, MountSourceGrantDto } from '@nyabase/common';
-import { dataDiskDisplayName } from './utils.js';
+import { AuditAction, Capability, MountSourceDto, MountSourceGrantDto } from '@nyabase/common';
+import { publicDataDiskDisplayName } from './utils.js';
 import { AgentGateway } from '../gateway/agent-gateway.js';
 import { postCommitBestEffort } from '../common/post-commit.js';
 import { runSerializedTransaction } from '../database/serialized-transaction.js';
@@ -78,6 +78,11 @@ export class MountSourcesService {
     target: MountSourceGrantTarget,
   ): Promise<MountSourceGrantDto> {
     const { grant, created } = await runSerializedTransaction(this.dataSource, async (manager) => {
+      await this.accessResolver.assertActorCapabilitiesInTransaction(
+        manager,
+        actorId,
+        [Capability.ManageGrants],
+      );
       await this.assertScopeExists(manager, scope, scopeId);
       const sourceIdentity = await this.resolveSourceIdentity(manager, target);
       const exact = target.sourceKind === 'local'
@@ -163,6 +168,11 @@ export class MountSourcesService {
     target: MountSourceGrantTarget,
   ): Promise<void> {
     const affected = await runSerializedTransaction(this.dataSource, async (manager) => {
+      await this.accessResolver.assertActorCapabilitiesInTransaction(
+        manager,
+        actorId,
+        [Capability.ManageGrants],
+      );
       await this.assertScopeExists(manager, scope, scopeId);
       const removed = await manager.find(MountSourceGrantEntity, {
         where: { scope, scopeId, ...this.targetWhere(target) },
@@ -260,8 +270,7 @@ export class MountSourcesService {
           kind: 'local',
           id: ref.id,
           serverId,
-          label: `本地 · ${dataDiskDisplayName(disk.mountPoint, disk.label)}`,
-          hostRoot: disk.mountPoint,
+          label: `本地 · ${publicDataDiskDisplayName(disk.diskId, disk.label)}`,
         });
       } else {
         const m = mountMap.get(ref.id);
@@ -272,7 +281,6 @@ export class MountSourcesService {
           serverId,
           label: m.displayName?.trim() || m.name,
           description: m.description ?? undefined,
-          hostRoot: m.hostMountPoint,
         });
       }
     }

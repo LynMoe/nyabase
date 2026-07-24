@@ -4,6 +4,7 @@ import {
   ContainerPhase,
   ContainerStatus,
   LABEL,
+  MAX_MANAGED_DATA_DIRS_PER_AGENT,
   MAX_AGENT_REMOTE_FS_MOUNTS,
   RemoteFsType,
   ServerStatus,
@@ -45,6 +46,7 @@ describe('RemoteFsMountsService control-plane invariants', () => {
     };
   };
   let proxySnapshots: { invalidate: ReturnType<typeof vi.fn> };
+  let assertActorCapabilities: ReturnType<typeof vi.fn>;
 
   beforeEach(async () => {
     dataSource = new DataSource({
@@ -82,7 +84,11 @@ describe('RemoteFsMountsService control-plane invariants', () => {
       } as AgentTaskPayloadCodecService,
       dataSource.getRepository(AgentTaskEntity),
     );
-    const access = { invalidateAll: vi.fn() } as unknown as AccessResolverService;
+    assertActorCapabilities = vi.fn().mockResolvedValue(new Set());
+    const access = {
+      invalidateAll: vi.fn(),
+      assertActorCapabilitiesInTransaction: assertActorCapabilities,
+    } as unknown as AccessResolverService;
     agentGateway = {
       isOnline: vi.fn().mockReturnValue(true),
       stateCache: {
@@ -118,6 +124,14 @@ describe('RemoteFsMountsService control-plane invariants', () => {
   afterEach(async () => {
     vi.restoreAllMocks();
     if (dataSource?.isInitialized) await dataSource.destroy();
+  });
+
+  it('does not persist a mount or task after ManageServers is revoked', async () => {
+    assertActorCapabilities.mockRejectedValueOnce(new Error('authority revoked'));
+
+    await expect(service.create('actor-a', mountInput())).rejects.toThrow('authority revoked');
+    expect(await dataSource.getRepository(RemoteFsMountEntity).count()).toBe(0);
+    expect(await dataSource.getRepository(AgentTaskEntity).count()).toBe(0);
   });
 
   it('does not let an offline assignment block the same mount on another server', async () => {
@@ -221,6 +235,135 @@ describe('RemoteFsMountsService control-plane invariants', () => {
       .toMatchObject({ id: mount.id, desiredState: 'active' });
   });
 
+  it('keeps one active assignment as the repair/delete path for global remote DataDirs', async () => {
+    const mount = await createMount();
+    const assignedA = await service.assignServer('actor-a', mount.id, 'server-a');
+    const taskA = await dataSource.getRepository(AgentTaskEntity).findOneByOrFail({
+      id: assignedA.taskId,
+    });
+    await dataSource.transaction((manager) => finalizer.applySucceeded(manager, taskA, {
+      id: mount.id,
+      hostMountPoint: mount.hostMountPoint,
+    }));
+    await terminalizeTask(taskA.id, AgentTaskStatus.Succeeded);
+    await dataSource.getRepository(DataDirectoryEntity).save({
+      id: 'shared-reachable-dir',
+      userId: 'user-a',
+      sourceKind: 'remote',
+      sourceId: mount.id,
+      name: 'shared',
+      sourceIdentity: `remote:${mount.id}`,
+      serverId: null,
+      uid: 1000,
+      desiredState: 'active',
+      generation: 1,
+      lastTaskId: null,
+    });
+
+    await expect(service.unassignServer('actor-a', mount.id, 'server-a'))
+      .rejects.toMatchObject({
+        response: expect.objectContaining({ code: 'REMOTE_FS_LAST_ASSIGNMENT_HAS_DATA_DIRS' }),
+      });
+    expect(await dataSource.getRepository(RemoteFsServerAssignmentEntity).findOneByOrFail({
+      remoteFsMountId: mount.id,
+      serverId: 'server-a',
+    })).toMatchObject({ desiredState: 'active', lastTaskId: taskA.id });
+
+    const assignedB = await service.assignServer('actor-a', mount.id, 'server-b');
+    const taskB = await dataSource.getRepository(AgentTaskEntity).findOneByOrFail({
+      id: assignedB.taskId,
+    });
+    await dataSource.transaction((manager) => finalizer.applySucceeded(manager, taskB, {
+      id: mount.id,
+      hostMountPoint: mount.hostMountPoint,
+    }));
+    await terminalizeTask(taskB.id, AgentTaskStatus.Succeeded);
+    await expect(service.unassignServer('actor-a', mount.id, 'server-a'))
+      .resolves.toMatchObject({ ok: true, taskIds: [expect.any(String)] });
+  });
+
+  it('isolates assignment removal by Server while preserving shared remote DataDirs', async () => {
+    const mount = await createMount();
+    const assignedA = await service.assignServer('actor-a', mount.id, 'server-a');
+    const assignedB = await service.assignServer('actor-a', mount.id, 'server-b');
+    for (const assigned of [assignedA, assignedB]) {
+      const task = await dataSource.getRepository(AgentTaskEntity).findOneByOrFail({
+        id: assigned.taskId,
+      });
+      await dataSource.transaction((manager) => finalizer.applySucceeded(manager, task, {
+        id: mount.id,
+        hostMountPoint: mount.hostMountPoint,
+      }));
+      await terminalizeTask(assigned.taskId!, AgentTaskStatus.Succeeded);
+    }
+    await dataSource.getRepository(DataDirectoryEntity).save({
+      id: 'shared-remote-dir',
+      userId: 'user-a',
+      sourceKind: 'remote',
+      sourceId: mount.id,
+      name: 'shared',
+      sourceIdentity: `remote:${mount.id}`,
+      serverId: null,
+      uid: 1000,
+      desiredState: 'active',
+      generation: 1,
+      lastTaskId: null,
+    });
+
+    await dataSource.getRepository(ImageEntity).save({
+      id: 'image-isolation',
+      name: 'image-isolation',
+      dockerImage: 'image:isolation',
+      runtimeOverrides: { uid: 0, entrypoint: null, cmd: null, init: false },
+      description: null,
+      isActive: true,
+      disableSsh: true,
+    });
+    await dataSource.getRepository(ContainerEntity).save({
+      id: 'container-server-b',
+      serverId: 'server-b',
+      ownerId: 'user-a',
+      name: 'server-b-consumer',
+      imageId: 'image-isolation',
+      createdBy: 'user-a',
+    });
+    await dataSource.getRepository(ContainerMountEntity).save({
+      id: 'mount-server-b',
+      serverId: 'server-b',
+      containerId: 'container-server-b',
+      containerName: 'server-b-consumer',
+      sourceKind: 'remote',
+      sourceId: mount.id,
+      sourceIdentity: `remote:${mount.id}`,
+      userId: 'user-a',
+      dirName: 'shared',
+      containerPath: '/data',
+    });
+
+    const removalA = await service.unassignServer('actor-a', mount.id, 'server-a');
+    expect(removalA.taskIds).toHaveLength(1);
+    const removeTaskA = await dataSource.getRepository(AgentTaskEntity).findOneByOrFail({
+      id: removalA.taskIds[0],
+    });
+    await dataSource.transaction((manager) =>
+      finalizer.applySucceeded(manager, removeTaskA, { id: mount.id }));
+    await terminalizeTask(removeTaskA.id, AgentTaskStatus.Succeeded);
+    expect(await dataSource.getRepository(RemoteFsServerAssignmentEntity).findOneBy({
+      remoteFsMountId: mount.id,
+      serverId: 'server-a',
+    })).toBeNull();
+    expect(await dataSource.getRepository(RemoteFsServerAssignmentEntity).findOneByOrFail({
+      remoteFsMountId: mount.id,
+      serverId: 'server-b',
+    })).toMatchObject({ desiredState: 'active' });
+
+    await expect(service.unassignServer('actor-a', mount.id, 'server-b'))
+      .rejects.toThrow('server-b-consumer');
+    await dataSource.getRepository(ContainerMountEntity).delete({ id: 'mount-server-b' });
+    await expect(service.remove('actor-a', mount.id))
+      .rejects.toThrow('still has data directories');
+  });
+
   it('refuses to finalize ensure evidence against a changed physical generation', async () => {
     const mount = await createMount();
     const assigned = await service.assignServer('actor-a', mount.id, 'server-a');
@@ -300,6 +443,61 @@ describe('RemoteFsMountsService control-plane invariants', () => {
     await expect(service.assignServer('actor-a', candidate.id, 'server-a'))
       .rejects.toThrow(`maximum ${MAX_AGENT_REMOTE_FS_MOUNTS} RemoteFS assignments`);
     expect(await dataSource.getRepository(AgentTaskEntity).count()).toBe(0);
+  });
+
+  it('rejects an assignment whose existing remote DataDirs overflow the target Agent inventory', async () => {
+    const mount = await createMount();
+    const assignedB = await service.assignServer('actor-a', mount.id, 'server-b');
+    const taskB = await dataSource.getRepository(AgentTaskEntity).findOneByOrFail({
+      id: assignedB.taskId,
+    });
+    await dataSource.transaction((manager) => finalizer.applySucceeded(manager, taskB, {
+      id: mount.id,
+      hostMountPoint: mount.hostMountPoint,
+    }));
+    await terminalizeTask(taskB.id, AgentTaskStatus.Succeeded);
+    await dataSource.getRepository(DataDirectoryEntity).save({
+      id: 'remote-capacity-row',
+      userId: 'user-a',
+      sourceKind: 'remote',
+      sourceId: mount.id,
+      name: 'remote-capacity-row',
+      sourceIdentity: `remote:${mount.id}`,
+      serverId: null,
+      uid: 1000,
+      desiredState: 'active',
+      generation: 1,
+      lastTaskId: null,
+    });
+    // Populate the exact Agent limit efficiently without making the test loop
+    // through thousands of TypeORM save transactions.
+    await dataSource.query(
+      `WITH RECURSIVE digit(n) AS (
+         SELECT 0 UNION ALL SELECT n + 1 FROM digit WHERE n < 15
+       )
+       INSERT INTO data_directories
+         (id, userId, sourceKind, sourceId, name, sourceIdentity, serverId)
+       SELECT
+         'local-cap-' || (a.n + 16 * b.n + 256 * c.n),
+         'user-a',
+         'local',
+         'disk-cap',
+         'dir-' || (a.n + 16 * b.n + 256 * c.n),
+         'local:disk-cap',
+         'server-a'
+       FROM digit a CROSS JOIN digit b CROSS JOIN digit c
+       WHERE (a.n + 16 * b.n + 256 * c.n) < ?`,
+      [MAX_MANAGED_DATA_DIRS_PER_AGENT],
+    );
+
+    await expect(service.assignServer('actor-a', mount.id, 'server-a'))
+      .rejects.toMatchObject({
+        response: expect.objectContaining({ code: 'DATA_DIRECTORY_CAPACITY_REACHED' }),
+      });
+    expect(await dataSource.getRepository(RemoteFsServerAssignmentEntity).findOneBy({
+      remoteFsMountId: mount.id,
+      serverId: 'server-a',
+    })).toBeNull();
   });
 
   it('rejects repair with a running consumer, then permits one exact stopped consumer under the mount-source lock', async () => {

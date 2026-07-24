@@ -70,7 +70,7 @@ export class ContainerActionPolicyService {
     }
     const running = input.runtimeStatus === ContainerStatus.Running;
     const stopped = input.runtimeStatus === ContainerStatus.Exited || input.runtimeStatus === ContainerStatus.Dead;
-    return {
+    const actions: Record<ContainerAction, ActionAvailability> = {
       start: stopped ? this.enabled() : this.disabled('phase_not_active', 'Container is not stopped'),
       stop: running ? this.enabled() : this.disabled('phase_not_active', 'Container is not running'),
       restart: running ? this.enabled() : this.disabled('phase_not_active', 'Container is not running'),
@@ -85,5 +85,15 @@ export class ContainerActionPolicyService {
         ? running ? this.enabled() : this.disabled('phase_not_active', 'Container is not running')
         : this.disabled('image_not_available', 'Image has SSH disabled'),
     };
+    if (input.runtimeDrift.some((drift) =>
+      drift.kind === RuntimeDriftKind.DesiredMountSpecInvalid)) {
+      const invalidMounts = this.disabled(
+        'runtime_missing',
+        'Durable container mount configuration is invalid',
+      );
+      actions.start = invalidMounts;
+      actions.restart = invalidMounts;
+    }
+    return actions;
   }
 }

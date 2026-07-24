@@ -3,23 +3,22 @@ import { useQuery } from '@tanstack/react-query';
 import { api } from '../lib/api.js';
 import { formatBytesCompact } from '../lib/utils.js';
 import { Server, HardDrive, Wifi, Users, Container } from 'lucide-react';
-import { Capability, type ServerDto, type UserMetricsDto, type ContainerMetricsDto, type MetricSeries } from '@nyabase/common';
+import { Capability, type UserServerDto, type UserMetricsDto, type ContainerMetricsDto, type MetricSeries } from '@nyabase/common';
 import {
   MultiLineChart, EmptyChart, SkeletonSection, TimeRangeSelector,
   fmtBps, zeroFillSeriesFromReferences,
 } from '../components/dashboard/server-metrics.js';
 import { useAuthStore } from '../store/auth.js';
 import { queryKeys } from '../lib/query-keys.js';
+import { adminCatalogPaths, type MetricServerCatalogItem } from '../lib/admin-catalog.js';
+import { QueryErrorState, QueryLoadingState } from '../components/query-state.js';
+import { safePreferences } from '../lib/safe-preferences.js';
+import { dashboardServerHasGpu, preferredDashboardServerId } from '../lib/dashboard-server-selection.js';
+import { queryPollInterval } from '../lib/query-lifecycle.js';
 
 const STORED_SERVER_KEY = 'nyabase-dashboard-server-v2';
 
-function preferredDashboardServerId(servers: ServerDto[]): string {
-  const onlineServers = servers.filter((server) => server.status === 'online');
-  return onlineServers.find((server) => (server.gpus?.length ?? 0) > 0)?.id
-    ?? onlineServers[0]?.id
-    ?? servers[0]?.id
-    ?? '';
-}
+type DashboardServer = UserServerDto | MetricServerCatalogItem;
 
 // ---------------------------------------------------------------------------
 // Users dimension tab
@@ -37,16 +36,19 @@ function UsersTab({
   admin?: boolean;
 }) {
   const metricsBase = admin ? '/admin/metrics' : '/metrics';
-  const { data, isLoading, isError } = useQuery({
+  const { data, isLoading, error } = useQuery({
     queryKey: ['metrics-users', admin ? 'admin' : 'user', serverId, range],
     queryFn: () => api.get<UserMetricsDto>(`${metricsBase}/servers/${serverId}/users?range=${range}`),
     staleTime: 30_000,
-    refetchInterval: 60_000,
+    refetchInterval: (query) => queryPollInterval(query.state, { activeIntervalMs: 60_000 }),
     retry: false,
   });
 
   if (isLoading) return <SkeletonSection rows={3} />;
-  if (isError || !data || data.users.length === 0) return <EmptyChart title="用户资源" />;
+  if (error) return <QueryErrorState error={error} resourceName="用户指标" />;
+  if (!data || data.users.length === 0) return <EmptyChart title="用户资源" />;
+
+  const showGpu = hasGpu || data.users.some((user) => user.gpuMemUsed.points.some((point) => point.v !== null));
 
   const entries = (key: keyof UserMetricsDto['users'][0]) =>
     data.users.map((u) => ({
@@ -65,7 +67,7 @@ function UsersTab({
     <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
       <MultiLineChart title="CPU 用量（核心数）" entries={entries('cpu')} yFormatter={(v) => v.toFixed(2)} />
       <MultiLineChart title="内存用量" entries={entries('memUsed')} yFormatter={formatBytesCompact} />
-      {hasGpu && (
+      {showGpu && (
         <MultiLineChart title="GPU 显存" entries={gpuEntries} yFormatter={formatBytesCompact} />
       )}
       <MultiLineChart title="磁盘 IO（读 + 写）" entries={entries('diskBps')} yFormatter={fmtBps} />
@@ -91,16 +93,19 @@ function ContainersTab({
   admin?: boolean;
 }) {
   const metricsBase = admin ? '/admin/metrics' : '/metrics';
-  const { data, isLoading, isError } = useQuery({
+  const { data, isLoading, error } = useQuery({
     queryKey: ['metrics-containers', admin ? 'admin' : 'user', serverId, range],
     queryFn: () => api.get<ContainerMetricsDto>(`${metricsBase}/servers/${serverId}/containers?range=${range}`),
     staleTime: 30_000,
-    refetchInterval: 60_000,
+    refetchInterval: (query) => queryPollInterval(query.state, { activeIntervalMs: 60_000 }),
     retry: false,
   });
 
   if (isLoading) return <SkeletonSection rows={3} />;
-  if (isError || !data || data.containers.length === 0) return <EmptyChart title="容器资源" />;
+  if (error) return <QueryErrorState error={error} resourceName="容器指标" />;
+  if (!data || data.containers.length === 0) return <EmptyChart title="容器资源" />;
+
+  const showGpu = hasGpu || data.containers.some((container) => container.gpuMemUsed.points.some((point) => point.v !== null));
 
   const entries = (key: keyof ContainerMetricsDto['containers'][0]) =>
     data.containers.map((c) => ({
@@ -119,7 +124,7 @@ function ContainersTab({
     <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
       <MultiLineChart title="CPU 用量（核心数）" entries={entries('cpu')} yFormatter={(v) => v.toFixed(2)} />
       <MultiLineChart title="内存用量" entries={entries('memUsed')} yFormatter={formatBytesCompact} />
-      {hasGpu && (
+      {showGpu && (
         <MultiLineChart title="GPU 显存" entries={gpuEntries} yFormatter={formatBytesCompact} />
       )}
       <MultiLineChart title="磁盘 IO（读 + 写）" entries={entries('diskBps')} yFormatter={fmtBps} />
@@ -131,14 +136,18 @@ function ContainersTab({
 export default function DashboardPage() {
   const { user } = useAuthStore();
   const adminMetrics = user?.capabilities.includes(Capability.ViewMetricsAll) ?? false;
-  const serversPath = adminMetrics ? '/admin/servers' : '/servers';
-  const { data: servers = [], isLoading: srvLoading } = useQuery({
-    queryKey: adminMetrics ? queryKeys.servers.admin : queryKeys.servers.user,
-    queryFn: () => api.get<ServerDto[]>(serversPath),
-    refetchInterval: 30_000,
+  const serversPath = adminMetrics ? adminCatalogPaths.metricServers : '/servers';
+  const serversQuery = useQuery<DashboardServer[]>({
+    queryKey: adminMetrics ? ['admin-catalog', 'metric-servers'] : queryKeys.servers.user,
+    queryFn: () => adminMetrics
+      ? api.get<MetricServerCatalogItem[]>(serversPath)
+      : api.get<UserServerDto[]>(serversPath),
+    refetchInterval: (query) => queryPollInterval(query.state, { activeIntervalMs: 30_000 }),
   });
+  const servers = serversQuery.data ?? [];
+  const srvLoading = serversQuery.isLoading;
 
-  const [serverId, setServerId] = useState<string>(() => localStorage.getItem(STORED_SERVER_KEY) ?? '');
+  const [serverId, setServerId] = useState<string>(() => safePreferences.get(STORED_SERVER_KEY) ?? '');
   const [range, setRange] = useState('1h');
   const [activeTab, setActiveTab] = useState<'users' | 'containers'>('users');
 
@@ -147,18 +156,18 @@ export default function DashboardPage() {
     if (serverId && servers.some((server) => server.id === serverId)) return;
     setServerId(fallbackId);
     if (fallbackId) {
-      localStorage.setItem(STORED_SERVER_KEY, fallbackId);
+      safePreferences.set(STORED_SERVER_KEY, fallbackId);
     } else {
-      localStorage.removeItem(STORED_SERVER_KEY);
+      safePreferences.remove(STORED_SERVER_KEY);
     }
   }, [servers, serverId]);
 
   const selectedServer = servers.find((s) => s.id === serverId);
-  const hasGpu = (selectedServer?.gpus?.length ?? 0) > 0;
+  const hasGpu = Boolean(selectedServer && dashboardServerHasGpu(selectedServer));
 
   function handleServerChange(id: string) {
     setServerId(id);
-    localStorage.setItem(STORED_SERVER_KEY, id);
+    safePreferences.set(STORED_SERVER_KEY, id);
   }
 
   return (
@@ -173,7 +182,11 @@ export default function DashboardPage() {
             disabled={srvLoading || servers.length === 0}
             className="text-sm rounded-md border border-input bg-background px-2 py-1.5 pr-7 focus:outline-none focus:ring-2 focus:ring-ring disabled:opacity-50"
           >
-            {servers.length === 0 && <option value="">无可用服务器</option>}
+            {servers.length === 0 && (
+              <option value="">
+                {serversQuery.isError ? '服务器目录加载失败' : srvLoading ? '正在加载服务器...' : '无可用服务器'}
+              </option>
+            )}
             {servers.map((s) => (
               <option key={s.id} value={s.id}>
                 {s.name}{s.status !== 'online' ? ' (离线)' : ''}
@@ -200,7 +213,15 @@ export default function DashboardPage() {
       </div>
 
       {/* Content */}
-      {!selectedServer ? (
+      {serversQuery.isLoading ? (
+        <QueryLoadingState label="加载指标服务器目录..." />
+      ) : serversQuery.isError ? (
+        <QueryErrorState
+          error={serversQuery.error}
+          resourceName="指标服务器目录"
+          onRetry={() => { void serversQuery.refetch(); }}
+        />
+      ) : !selectedServer ? (
         <div className="flex flex-col items-center justify-center py-20 text-muted-foreground">
           <HardDrive className="h-10 w-10 mb-3 opacity-20" />
           <p className="text-sm">请选择服务器</p>

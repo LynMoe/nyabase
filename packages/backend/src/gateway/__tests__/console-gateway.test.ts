@@ -17,20 +17,39 @@ describe('ConsoleGateway durable authorization', () => {
     };
     const gateway = makeGateway(authorization);
     const check = (gateway as unknown as {
-      isSessionAuthorized(info: ExecSessionInfo): Promise<boolean>;
+      isSessionAuthorized(
+        info: ExecSessionInfo,
+        authVersion: number,
+        tokenExpiresAtMs: number,
+      ): Promise<boolean>;
     }).isSessionAuthorized.bind(gateway);
     const pending = Array.from(
       { length: MAX_CONCURRENT_CONSOLE_AUTH_CHECKS },
-      () => check(info()),
+      () => check(info(), 0, Date.now() + 60_000),
     );
 
-    await expect(check(info())).rejects.toThrow('authorization capacity');
+    await expect(check(info(), 0, Date.now() + 60_000)).rejects.toThrow('authorization capacity');
     expect(authorization.isAuthorized).toHaveBeenCalledTimes(MAX_CONCURRENT_CONSOLE_AUTH_CHECKS);
 
     releases.forEach((release) => release(true));
     await expect(Promise.all(pending)).resolves.toEqual(
       Array.from({ length: MAX_CONCURRENT_CONSOLE_AUTH_CHECKS }, () => true),
     );
+  });
+
+  it('fails a durable console recheck once the access JWT expires', async () => {
+    const authorization = { isAuthorized: vi.fn().mockResolvedValue(true) };
+    const gateway = makeGateway(authorization);
+    const check = (gateway as unknown as {
+      isSessionAuthorized(
+        info: ExecSessionInfo,
+        authVersion: number,
+        tokenExpiresAtMs: number,
+      ): Promise<boolean>;
+    }).isSessionAuthorized.bind(gateway);
+
+    await expect(check(info(), 0, Date.now() - 1)).resolves.toBe(false);
+    expect(authorization.isAuthorized).not.toHaveBeenCalled();
   });
 
   it('does not release an admission slot when the socket closes during durable authorization', async () => {
@@ -111,7 +130,7 @@ function makeGateway(
   return new ConsoleGateway(
     agentGateway as never,
     registry as never,
-    { verify: vi.fn(() => ({ sub: 'user-a' })) } as never,
+    { verify: vi.fn(() => ({ sub: 'user-a', ver: 0, exp: Math.floor(Date.now() / 1000) + 3_600 })) } as never,
     { get: vi.fn(() => 'secret') } as never,
     authorization as never,
   );

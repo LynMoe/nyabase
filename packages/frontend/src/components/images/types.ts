@@ -1,4 +1,6 @@
-import type { AgentTaskDto } from '@nyabase/common';
+import type { UserAgentTaskDto } from '@nyabase/common';
+
+export type ImageTaskStatusDto = UserAgentTaskDto;
 
 export interface ServerStatus {
   serverId: string;
@@ -6,5 +8,5 @@ export interface ServerStatus {
   hostname: string;
   online: boolean;
   present: boolean;
-  task?: AgentTaskDto;
+  task?: ImageTaskStatusDto | null;
 }

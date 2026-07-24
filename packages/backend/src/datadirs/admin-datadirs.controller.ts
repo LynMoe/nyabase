@@ -18,16 +18,17 @@ import { RequireCaps } from '../auth/decorators/require-caps.decorator.js';
 import { CurrentUser } from '../auth/decorators/current-user.decorator.js';
 import { AccessResolverService } from '../access/access-resolver.service.js';
 import { UserEntity } from '../entities/user.entity.js';
-import { Capability, zDataDirName } from '@nyabase/common';
+import { Capability, zDataDirResourceName } from '@nyabase/common';
 import { z } from 'zod';
 
+const zResourceId = z.string().min(1).max(128);
 const zAdminCreateDirRequest = z.object({
-  serverId: z.string(),
+  serverId: zResourceId,
   sourceKind: z.enum(['local', 'remote']),
-  sourceId: z.string(),
-  userId: z.string(),
+  sourceId: zResourceId,
+  userId: zResourceId,
   name: z.string().min(1).max(64).regex(/^[a-z0-9][a-z0-9_-]*$/),
-});
+}).strict();
 
 @Controller('admin/data-dirs')
 @UseGuards(JwtAuthGuard, CapabilitiesGuard)
@@ -61,14 +62,26 @@ export class AdminDataDirsController {
     @Query('serverId') serverId: string,
     @Query('userId') targetUserId?: string,
   ) {
-    return this.dataDirsService.listDirs(targetUserId ?? user.id, serverId);
+    return this.dataDirsService.listDirs(
+      targetUserId ? zResourceId.parse(targetUserId) : user.id,
+      zResourceId.parse(serverId),
+    );
   }
 
   @Post()
   async create(@CurrentUser() user: UserEntity, @Body() body: unknown) {
     const dto = zAdminCreateDirRequest.parse(body);
     await this.requireTargetMountAccess(dto.userId, dto.serverId, dto.sourceKind, dto.sourceId);
-    return this.dataDirsService.createDir(user.id, dto.userId, dto.serverId, dto.sourceKind, dto.sourceId, dto.name, 1000);
+    return this.dataDirsService.createDir(
+      user.id,
+      dto.userId,
+      dto.serverId,
+      dto.sourceKind,
+      dto.sourceId,
+      dto.name,
+      1000,
+      'admin',
+    );
   }
 
   @Delete(':serverId/:sourceId/:name')
@@ -84,9 +97,14 @@ export class AdminDataDirsController {
     if (sourceKind !== 'local' && sourceKind !== 'remote') {
       throw new BadRequestException(`sourceKind must be 'local' or 'remote'`);
     }
-    const safeName = zDataDirName.parse(name);
+    const safeName = zDataDirResourceName.parse(name);
+    const safeServerId = zResourceId.parse(serverId);
+    const safeSourceId = zResourceId.parse(sourceId);
+    const safeTargetUserId = zResourceId.parse(targetUserId);
     const kind = sourceKind as 'local' | 'remote';
-    return this.dataDirsService.deleteDir(user.id, targetUserId, serverId, kind, sourceId, safeName);
+    return this.dataDirsService.deleteDir(
+      user.id, safeTargetUserId, safeServerId, kind, safeSourceId, safeName, 'admin',
+    );
   }
 
   private async requireTargetMountAccess(

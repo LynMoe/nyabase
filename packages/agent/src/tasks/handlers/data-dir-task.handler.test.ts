@@ -191,16 +191,17 @@ describe('DataDirTaskHandler', () => {
 
   it('rolls forward marker cleanup when the data inode is already absent', async () => {
     const deleteDir = vi.fn();
-    const removePathFromProject = vi.fn();
+    const removeExactPathRegistration = vi.fn().mockResolvedValue({ path: PATH, projectId: 10007 });
     const { handler } = makeHandler({ inspectDir: vi.fn().mockReturnValue(observation(false)), deleteDir }, {
-      removePathFromProject,
-      isPathRegisteredToProject: vi.fn().mockReturnValue(false),
+      projectIdForUser: vi.fn().mockReturnValue(10007),
+      inspectExactPathRegistration: vi.fn().mockReturnValue({ path: PATH, projectId: null }),
+      removeExactPathRegistration,
     });
 
     const result = await handler.ensure(AgentTaskKind.DataDirAbsent, absentPayload);
     await expect(handler.verify(AgentTaskKind.DataDirAbsent, absentPayload, result)).resolves.toBeUndefined();
     expect(deleteDir).toHaveBeenCalledWith('disk-a', RESOURCE_ID, IDENTITY);
-    expect(removePathFromProject).toHaveBeenCalledWith(7, PATH);
+    expect(removeExactPathRegistration).toHaveBeenCalledWith(PATH);
   });
 
   it('keeps deletion pending while either data or marker residue remains', async () => {
@@ -362,6 +363,14 @@ function makeHandler(
       callback('/proc/pinned/data', PATH)),
     ...dataDirsOverrides,
   };
+  if (!('inspectSourceExact' in dataDirsOverrides)) {
+    (dataDirs as Record<string, unknown>).inspectSourceExact = vi.fn(async (sourceId: string) =>
+      dataDirs.inspectSource(sourceId));
+  }
+  if (!('inspectDirExact' in dataDirsOverrides)) {
+    (dataDirs as Record<string, unknown>).inspectDirExact = vi.fn(async (sourceId: string, resourceId: string) =>
+      dataDirs.inspectDir(sourceId, resourceId));
+  }
   const quota = {
     setLimit: vi.fn().mockResolvedValue(undefined),
     getUsageForUser: vi.fn().mockResolvedValue({
@@ -371,6 +380,9 @@ function makeHandler(
     inspectPathAssignment: vi.fn(),
     removePathFromProject: vi.fn(),
     isPathRegisteredToProject: vi.fn().mockReturnValue(false),
+    projectIdForUser: vi.fn().mockReturnValue(10007),
+    inspectExactPathRegistration: vi.fn((pathValue: string) => ({ path: pathValue, projectId: null })),
+    removeExactPathRegistration: vi.fn().mockResolvedValue({ path: PATH, projectId: null }),
     ...quotaOverrides,
   };
   const ws = { emit: vi.fn() };

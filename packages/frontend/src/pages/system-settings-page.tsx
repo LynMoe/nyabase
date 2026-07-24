@@ -5,12 +5,23 @@ import {
   type SystemSettingFieldDto,
   type SystemSettingsDto,
 } from '@nyabase/common';
-import { api } from '../lib/api.js';
+import { api, ApiError, apiErrorCurrent } from '../lib/api.js';
 import { Button } from '../components/ui/button.js';
 import { Input } from '../components/ui/input.js';
 import { Label } from '../components/ui/label.js';
 import { Badge } from '../components/ui/badge.js';
 import { toast } from '../hooks/use-toast.js';
+import { QueryErrorState, QueryLoadingState } from '../components/query-state.js';
+import { parseSystemSettingDraft } from '../lib/system-setting-draft.js';
+import {
+  createRevisionedServerBackedDraft,
+  editRevisionedServerBackedDraft,
+  mergeAuthoritativeRevisionedServerBackedDraft,
+  mergeRevisionedServerBackedDraft,
+  resolveRevisionedDraftConflicts,
+  type RevisionedServerBackedDraft,
+} from '../lib/server-backed-draft.js';
+import { isSystemSettingsDto } from '../lib/conflict-snapshots.js';
 
 const SOURCE_LABELS = {
   default: '默认值',
@@ -141,12 +152,6 @@ function editableInputValue(field: SystemSettingFieldDto): string {
   return value === undefined || value === null ? '' : String(value);
 }
 
-function parseEditableValue(field: SystemSettingFieldDto, value: string): unknown {
-  if (field.valueKind === 'number') return Number(value);
-  if (field.valueKind === 'boolean') return value === 'true';
-  return value;
-}
-
 function groupFields(fields: SystemSettingFieldDto[]): Array<{
   key: string;
   label: string;
@@ -166,11 +171,12 @@ function groupFields(fields: SystemSettingFieldDto[]): Array<{
 
 export default function SystemSettingsPage() {
   const qc = useQueryClient();
-  const { data, isFetching, refetch } = useQuery({
+  const settingsQuery = useQuery({
     queryKey: ['system-settings'],
     queryFn: () => api.get<SystemSettingsDto>('/admin/system-settings'),
   });
-  const [draft, setDraft] = useState<Record<string, string>>({});
+  const { data, isFetching, refetch } = settingsQuery;
+  const [draftState, setDraftState] = useState<RevisionedServerBackedDraft<Record<string, string>> | null>(null);
   const editableFields = useMemo(
     () => (data?.editable ?? []).filter((field) => !field.restartRequired),
     [data?.editable],
@@ -178,37 +184,101 @@ export default function SystemSettingsPage() {
 
   useEffect(() => {
     if (!data) return;
-    setDraft(Object.fromEntries(editableFields.map((field) => [field.key, editableInputValue(field)])));
+    const incoming = Object.fromEntries(editableFields.map((field) => [field.key, editableInputValue(field)]));
+    setDraftState((current) => current
+      ? mergeRevisionedServerBackedDraft(
+          current,
+          incoming,
+          data.revision,
+          data.snapshotToken,
+        )
+      : createRevisionedServerBackedDraft(incoming, data.revision, data.snapshotToken));
   }, [data, editableFields]);
 
-  const changedValues = useMemo(() => {
-    if (!data) return {};
+  const parsedChanges = useMemo(() => {
     const values: Record<string, unknown> = {};
+    const errors: Record<string, string> = {};
+    if (!data) return { values, errors };
     for (const field of editableFields) {
-      const current = draft[field.key];
+      if (!draftState?.dirtyFields.has(field.key)) continue;
+      const current = draftState.values[field.key];
       if (current === undefined) continue;
-      if (current !== editableInputValue(field)) {
-        values[field.key] = parseEditableValue(field, current);
-      }
+      const parsed = parseSystemSettingDraft(field, current);
+      if (parsed.success) values[field.key] = parsed.value;
+      else errors[field.key] = parsed.error;
     }
-    return values;
-  }, [data, draft, editableFields]);
+    return { values, errors };
+  }, [data, draftState, editableFields]);
+  const changedValues = parsedChanges.values;
 
   const saveSettings = useMutation({
-    mutationFn: (values: Record<string, unknown>) => api.patch<SystemSettingsDto>('/admin/system-settings', { values }),
+    mutationFn: ({ values, expectedRevision, expectedSnapshotToken }: {
+      values: Record<string, unknown>;
+      expectedRevision: number;
+      expectedSnapshotToken: string;
+    }) => api.patch<SystemSettingsDto>('/admin/system-settings', {
+      values,
+      expectedRevision,
+      expectedSnapshotToken,
+    }),
     onSuccess: (updated) => {
       qc.setQueryData(['system-settings'], updated);
+      const incoming = Object.fromEntries(
+        updated.editable
+          .filter((field) => !field.restartRequired)
+          .map((field) => [field.key, editableInputValue(field)]),
+      );
+      setDraftState(createRevisionedServerBackedDraft(
+        incoming,
+        updated.revision,
+        updated.snapshotToken,
+      ));
       qc.invalidateQueries({ queryKey: ['public-settings'] });
       toast({ title: '系统设置已保存' });
     },
-    onError: (error) => toast({
-      title: '保存失败',
-      description: error instanceof Error ? error.message : '请检查配置值',
-      variant: 'destructive',
-    }),
+    onError: async (error) => {
+      if (error instanceof ApiError && error.code === 'SYSTEM_SETTINGS_REVISION_CONFLICT') {
+        const current = apiErrorCurrent(
+          error,
+          'SYSTEM_SETTINGS_REVISION_CONFLICT',
+          isSystemSettingsDto,
+        );
+        if (current) {
+          qc.setQueryData(['system-settings'], current);
+          const incoming = Object.fromEntries(
+            current.editable
+              .filter((field) => !field.restartRequired)
+              .map((field) => [field.key, editableInputValue(field)]),
+          );
+          setDraftState((draft) => draft
+            ? mergeAuthoritativeRevisionedServerBackedDraft(
+                draft,
+                incoming,
+                current.revision,
+                current.snapshotToken,
+              )
+            : createRevisionedServerBackedDraft(
+                incoming,
+                current.revision,
+                current.snapshotToken,
+              ));
+        } else {
+          await qc.refetchQueries({ queryKey: ['system-settings'], type: 'active' });
+        }
+      }
+      toast({
+        title: error instanceof ApiError && error.code === 'SYSTEM_SETTINGS_REVISION_CONFLICT'
+          ? '服务器设置已变化'
+          : '保存失败',
+        description: error instanceof Error ? error.message : '请检查配置值',
+        variant: 'destructive',
+      });
+    },
   });
 
   const hasChanges = Object.keys(changedValues).length > 0;
+  const hasValidationErrors = Object.keys(parsedChanges.errors).length > 0;
+  const hasConflicts = (draftState?.conflictFields.size ?? 0) > 0;
   const effectiveGroups = useMemo(() => groupFields(data?.fields ?? []), [data?.fields]);
 
   return (
@@ -217,28 +287,66 @@ export default function SystemSettingsPage() {
         <div>
           <h1 className="text-2xl font-semibold tracking-tight text-foreground">系统设置</h1>
           <p className="text-sm text-muted-foreground mt-0.5">
-            {data?.configFile ?? '/etc/nyabase/config.yaml'}
+            {data?.configFile ?? '配置路径尚未加载'}
           </p>
         </div>
         <div className="flex items-center gap-2">
-          <Button variant="ghost" size="icon" className="h-8 w-8 text-muted-foreground" onClick={() => refetch()} disabled={isFetching}>
+          <Button
+            variant="ghost"
+            size="icon"
+            className="h-8 w-8 text-muted-foreground"
+            onClick={() => {
+              if ((draftState?.dirtyFields.size ?? 0) > 0
+                && !window.confirm('刷新会保留本地修改，并标记与服务器同时修改的冲突。继续刷新？')) return;
+              void refetch();
+            }}
+            disabled={isFetching}
+            title="刷新服务器配置"
+          >
             <RefreshCw className={`h-4 w-4 ${isFetching ? 'animate-spin' : ''}`} />
           </Button>
-          <Button type="submit" form="system-settings-form" disabled={!hasChanges || saveSettings.isPending}>
+          <Button type="submit" form="system-settings-form" disabled={!hasChanges || hasValidationErrors || hasConflicts || saveSettings.isPending}>
             <Save className="h-4 w-4" />
             保存
           </Button>
         </div>
       </div>
 
+      {settingsQuery.isLoading ? (
+        <QueryLoadingState label="加载系统设置..." />
+      ) : settingsQuery.isError ? (
+        <QueryErrorState error={settingsQuery.error} resourceName="系统设置" onRetry={() => { void settingsQuery.refetch(); }} />
+      ) : (
+        <>
+
       <section className="space-y-3">
         <h2 className="text-base font-semibold text-foreground">配置修改</h2>
+        {hasConflicts && draftState && (
+          <div className="flex flex-col gap-3 rounded-md border border-amber-300 bg-amber-50 px-4 py-3 text-sm text-amber-900 sm:flex-row sm:items-center sm:justify-between">
+            <span>服务器同时修改了 {draftState.conflictFields.size} 个字段；本地输入已保留，请选择处理方式。</span>
+            <div className="flex gap-2">
+              <Button size="sm" variant="outline" onClick={() => setDraftState(resolveRevisionedDraftConflicts(draftState, 'use-server'))}>
+                使用服务器值
+              </Button>
+              <Button size="sm" onClick={() => setDraftState(resolveRevisionedDraftConflicts(draftState, 'keep-local'))}>
+                保留本地并覆盖
+              </Button>
+            </div>
+          </div>
+        )}
         <form
           id="system-settings-form"
           className="overflow-hidden rounded-lg border border-border bg-background"
           onSubmit={(event) => {
             event.preventDefault();
-            if (hasChanges && !saveSettings.isPending) saveSettings.mutate(changedValues);
+            if (data && draftState && hasChanges && !hasValidationErrors && !hasConflicts && !saveSettings.isPending) {
+              if (!draftState.snapshotToken) return;
+              saveSettings.mutate({
+                values: changedValues,
+                expectedRevision: draftState.revision,
+                expectedSnapshotToken: draftState.snapshotToken,
+              });
+            }
           }}
         >
           {editableFields.map((field) => (
@@ -251,6 +359,7 @@ export default function SystemSettingsPage() {
                   <Badge variant={field.source === 'env' ? 'warning' : field.source === 'yaml' ? 'secondary' : 'outline'}>
                     {SOURCE_LABELS[field.source]}
                   </Badge>
+                  {draftState?.conflictFields.has(field.key) && <Badge variant="warning">服务器冲突</Badge>}
                     {field.restartRequired && <Badge variant="outline">需要重启</Badge>}
                 </div>
                 <p className="mt-1 font-mono text-xs text-muted-foreground">{field.yamlPath}</p>
@@ -258,9 +367,14 @@ export default function SystemSettingsPage() {
               </div>
               <SettingInput
                 field={field}
-                value={draft[field.key] ?? ''}
-                onChange={(value) => setDraft((prev) => ({ ...prev, [field.key]: value }))}
+                value={draftState?.values[field.key] ?? ''}
+                onChange={(value) => setDraftState((current) => current
+                  ? editRevisionedServerBackedDraft(current, field.key, value)
+                  : current)}
               />
+              {parsedChanges.errors[field.key] && (
+                <p className="text-xs text-destructive lg:col-start-2">{parsedChanges.errors[field.key]}</p>
+              )}
             </div>
           ))}
         </form>
@@ -314,6 +428,8 @@ export default function SystemSettingsPage() {
           ))}
         </div>
       </section>
+        </>
+      )}
     </div>
   );
 }

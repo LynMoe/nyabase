@@ -29,6 +29,24 @@ describe('QuotaTaskHandler convergence', () => {
     expect(quota.getUsageForUser).toHaveBeenCalledTimes(2);
   });
 
+  it('accepts an observed effective-zero limit after an idempotent clear error', async () => {
+    const quota = {
+      setLimit: vi.fn().mockRejectedValue(new Error('clear raced with an earlier clear')),
+      getUsageForUser: vi.fn().mockResolvedValue({
+        numericUserId: 7,
+        projectId: 10007,
+        usedBytes: 0,
+        hardLimitBytes: 0,
+      }),
+    };
+    const handler = new QuotaTaskHandler(quota as unknown as XfsQuotaManager);
+    const payload = { generation: 2, numericUserId: 7, diskBytes: 0 };
+
+    const result = await handler.ensure(AgentTaskKind.QuotaEnsure, payload);
+    await expect(handler.verify(AgentTaskKind.QuotaEnsure, payload, result)).resolves.toBeUndefined();
+    expect(result).toEqual({ numericUserId: 7, hardLimitBytes: 0 });
+  });
+
   it('returns a terminal failure when a fresh observation proves no limit', async () => {
     const quota = {
       setLimit: vi.fn().mockRejectedValue(new Error('second XFS source failed')),

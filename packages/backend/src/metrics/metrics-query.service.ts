@@ -1,4 +1,9 @@
-import { Injectable, Logger, ServiceUnavailableException } from '@nestjs/common';
+import {
+  BadRequestException,
+  Injectable,
+  Logger,
+  ServiceUnavailableException,
+} from '@nestjs/common';
 import { MetricSeries } from '@nyabase/common';
 import { NyabaseConfigService } from '../config/nyabase-config.service.js';
 
@@ -104,8 +109,11 @@ export function emptySeries(step: number): MetricSeries {
 export function parseRange(range = '1h'): { start: number; end: number; step: number } {
   const end = Math.floor(Date.now() / 60_000) * 60;
   const durations: Record<string, number> = { '1h': 3600, '6h': 21600, '24h': 86400 };
-  const duration = durations[range] ?? 3600;
   const steps: Record<string, number> = { '1h': 60, '6h': 300, '24h': 600 };
-  const step = steps[range] ?? 60;
+  const duration = durations[range];
+  const step = steps[range];
+  if (duration === undefined || step === undefined) {
+    throw new BadRequestException('range must be one of 1h, 6h, or 24h');
+  }
   return { start: end - duration, end, step };
 }

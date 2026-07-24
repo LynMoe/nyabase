@@ -7,17 +7,19 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { PhysicalReferenceGuardError } from '../docker/physical-reference-guard.js';
 import { unwrapFencedCommandForTest } from '../physical-mutation-fence.js';
 import { RemoteFsMounter } from './remote-fs-mounter.js';
-import { readProcMountsFresh } from './proc-mounts.js';
+import { readProcMountInfoFresh } from './proc-mounts.js';
+import { FsCleanupIncompleteError, type FsMountDriver } from './fs-driver.js';
+import { EXACT_UNMOUNT_HELPER_SCRIPT } from './exact-unmount-helper.js';
 
 vi.mock('child_process', () => ({ execFile: vi.fn(), spawn: vi.fn() }));
 vi.mock('./proc-mounts.js', async (importOriginal) => ({
   ...await importOriginal<typeof import('./proc-mounts.js')>(),
-  readProcMountsFresh: vi.fn(),
+  readProcMountInfoFresh: vi.fn(),
 }));
 
 const execFileMock = vi.mocked(execFile);
 const spawnMock = vi.mocked(spawn);
-const readProcMountsFreshMock = vi.mocked(readProcMountsFresh);
+const readProcMountInfoFreshMock = vi.mocked(readProcMountInfoFresh);
 const allowReferences = {
   assertNoRunningBindReferences: vi.fn().mockResolvedValue(undefined),
 };
@@ -44,7 +46,7 @@ describe('RemoteFsMounter', () => {
     allowedRoot = path.join(tmpRoot, 'remote-fs');
     fs.mkdirSync(allowedRoot, { recursive: true });
     procMounts = '';
-    readProcMountsFreshMock.mockImplementation(async () => procMounts);
+    readProcMountInfoFreshMock.mockImplementation(async () => mountInfoFromProcMounts(procMounts));
     mockLogicalSpawn((command, commandArgs) => {
       if (command === 'mount') {
         return fakeSpawn(() => {
@@ -101,7 +103,7 @@ describe('RemoteFsMounter', () => {
     await mounter.applyMount(spec);
 
     expect(spawnMock).toHaveBeenCalledTimes(1);
-    expect(readProcMountsFreshMock.mock.calls.length).toBeGreaterThanOrEqual(3);
+    expect(readProcMountInfoFreshMock.mock.calls.length).toBeGreaterThanOrEqual(3);
     expect(statuses).toContainEqual(expect.objectContaining({
       id: spec.id,
       status: 'mounted',
@@ -145,6 +147,69 @@ describe('RemoteFsMounter', () => {
     expect(mounter.getStatus(spec.id)).toMatchObject({ status: 'mounted' });
   });
 
+  it('never converts incomplete Ceph secret cleanup into mount success', async () => {
+    const mounter = createMounter(() => {}, { allowedHostMountRoots: [allowedRoot] });
+    const spec = remoteSpec(path.join(allowedRoot, 'remote-1'));
+    const cleanupFailure = new FsCleanupIncompleteError(
+      'CephFS attempt secret cleanup is incomplete',
+      new Error('secret unlink failed'),
+    );
+    const driver: FsMountDriver = {
+      type: 'nfs',
+      mount: vi.fn(async () => {
+        procMounts = `10.0.0.10:/exports/project ${spec.hostMountPoint} nfs rw,vers=4.2 0 0\n`;
+        throw cleanupFailure;
+      }),
+      matchesCurrent: (_requested, current) => current.src === '10.0.0.10:/exports/project',
+      selfCheck: vi.fn(async () => ({
+        id: 'nfs',
+        label: 'test driver',
+        status: 'ok' as const,
+        message: 'test driver ready',
+      })),
+    };
+    (mounter as unknown as { drivers: Map<string, FsMountDriver> }).drivers.set('nfs', driver);
+
+    await expect(mounter.applyMount(spec)).rejects.toBe(cleanupFailure);
+    expect(mounter.getStatus(spec.id)).toMatchObject({
+      status: 'error',
+      error: 'CephFS attempt secret cleanup is incomplete',
+    });
+  });
+
+  it('rejects incomplete secret cleanup on the exact-mount fast path', async () => {
+    const mounter = createMounter(() => {}, { allowedHostMountRoots: [allowedRoot] });
+    const spec = remoteSpec(path.join(allowedRoot, 'remote-1'));
+    procMounts = `10.0.0.10:/exports/project ${spec.hostMountPoint} nfs rw,vers=4.2 0 0\n`;
+    const cleanupFailure = new FsCleanupIncompleteError(
+      'CephFS stale secret cleanup is incomplete',
+      new Error('stale secret unlink failed'),
+    );
+    const mount = vi.fn(async () => {});
+    const driver: FsMountDriver = {
+      type: 'nfs',
+      mount,
+      cleanup: vi.fn(async () => {
+        throw cleanupFailure;
+      }),
+      matchesCurrent: (_requested, current) => current.src === '10.0.0.10:/exports/project',
+      selfCheck: vi.fn(async () => ({
+        id: 'nfs',
+        label: 'test driver',
+        status: 'ok' as const,
+        message: 'test driver ready',
+      })),
+    };
+    (mounter as unknown as { drivers: Map<string, FsMountDriver> }).drivers.set('nfs', driver);
+
+    await expect(mounter.applyMount(spec)).rejects.toBe(cleanupFailure);
+    expect(mount).not.toHaveBeenCalled();
+    expect(mounter.getStatus(spec.id)).toMatchObject({
+      status: 'error',
+      error: 'CephFS stale secret cleanup is incomplete',
+    });
+  });
+
   it('fails closed for absent without a full known spec or with a mismatched mount', async () => {
     const mounter = createMounter(() => {}, { allowedHostMountRoots: [allowedRoot] });
     const spec = remoteSpec(path.join(allowedRoot, 'remote-1'));
@@ -160,26 +225,17 @@ describe('RemoteFsMounter', () => {
     expect(logicalSpawnCalls().some(([command]) => command === 'umount')).toBe(false);
   });
 
-  it('checks fresh Docker references immediately before Ensure replaces a stale mount', async () => {
+  it('refuses to replace a stale/unknown mount even when Docker has no references', async () => {
     const spec = remoteSpec(path.join(allowedRoot, 'remote-1'));
     procMounts = `10.0.0.99:/stale ${spec.hostMountPoint} nfs rw,vers=4.2 0 0\n`;
-    const physicalReferenceGuard = {
-      assertNoRunningBindReferences: vi.fn().mockRejectedValue(new PhysicalReferenceGuardError(
-        'physical_path_referenced',
-        'runtime retains stale mount',
-        { targetPath: spec.hostMountPoint, runtimeId: 'runtime-drift' },
-      )),
-    };
+    const physicalReferenceGuard = { assertNoRunningBindReferences: vi.fn() };
     const mounter = createMounter(() => {}, {
       allowedHostMountRoots: [allowedRoot],
       physicalReferenceGuard,
     });
 
-    await expect(mounter.applyMount(spec)).rejects.toMatchObject({
-      code: 'physical_path_referenced',
-    });
-    expect(physicalReferenceGuard.assertNoRunningBindReferences)
-      .toHaveBeenCalledWith(spec.hostMountPoint);
+    await expect(mounter.applyMount(spec)).rejects.toThrow('immutable Backend spec');
+    expect(physicalReferenceGuard.assertNoRunningBindReferences).not.toHaveBeenCalled();
     expect(logicalSpawnCalls().some(([command]) => command === 'umount')).toBe(false);
     expect(spawnMock).not.toHaveBeenCalled();
   });
@@ -225,9 +281,47 @@ describe('RemoteFsMounter', () => {
       params: spec.params,
     });
 
-    expect(logicalSpawnCalls()).toContainEqual(['umount', [spec.hostMountPoint]]);
+    expect(logicalSpawnCalls()).toContainEqual(['umount', ['--', spec.hostMountPoint]]);
     expect(logicalSpawnCalls().filter(([command]) => command === 'umount')).toHaveLength(1);
-    expect(readProcMountsFreshMock.mock.calls.length).toBeGreaterThanOrEqual(2);
+    expect(readProcMountInfoFreshMock.mock.calls.length).toBeGreaterThanOrEqual(2);
+  });
+
+  it('rejects stacked exact mounts without calling umount', async () => {
+    const spec = remoteSpec(path.join(allowedRoot, 'remote-1'));
+    procMounts = [
+      `10.0.0.10:/exports/project ${spec.hostMountPoint} nfs rw,vers=4.2 0 0`,
+      `10.0.0.10:/exports/project ${spec.hostMountPoint} nfs rw,vers=4.2 0 0`,
+      '',
+    ].join('\n');
+    const mounter = createMounter(() => {}, { allowedHostMountRoots: [allowedRoot] });
+
+    await expect(mounter.removeMount(spec.id, {
+      hostMountPoint: spec.hostMountPoint,
+      options: spec.options,
+      params: spec.params,
+    })).rejects.toThrow('ambiguous stacked mount');
+    expect(logicalSpawnCalls().some(([command]) => command === 'umount')).toBe(false);
+  });
+
+  it('rechecks exact mount identity after the Docker reference scan', async () => {
+    const spec = remoteSpec(path.join(allowedRoot, 'remote-1'));
+    procMounts = `10.0.0.10:/exports/project ${spec.hostMountPoint} nfs rw,vers=4.2 0 0\n`;
+    const physicalReferenceGuard = {
+      assertNoRunningBindReferences: vi.fn().mockImplementation(async () => {
+        procMounts = `10.0.0.99:/foreign ${spec.hostMountPoint} nfs rw,vers=4.2 0 0\n`;
+      }),
+    };
+    const mounter = createMounter(() => {}, {
+      allowedHostMountRoots: [allowedRoot],
+      physicalReferenceGuard,
+    });
+
+    await expect(mounter.removeMount(spec.id, {
+      hostMountPoint: spec.hostMountPoint,
+      options: spec.options,
+      params: spec.params,
+    })).rejects.toThrow('mount identity changed');
+    expect(logicalSpawnCalls().some(([command]) => command === 'umount')).toBe(false);
   });
 
   it('accepts an errored umount only when a fresh probe proves absence', async () => {
@@ -271,8 +365,27 @@ describe('RemoteFsMounter', () => {
     expect(logicalSpawnCalls().some(([command]) => command === 'umount')).toBe(false);
   });
 
+  it('uses only lexical validation and fresh mountinfo for bootstrap identity observations', async () => {
+    const spec = remoteSpec(path.join(allowedRoot, 'remote-1'));
+    procMounts = `10.0.0.10:/exports/project ${spec.hostMountPoint} nfs rw,vers=4.2 0 0\n`;
+    const lstatSpy = vi.spyOn(fs.promises, 'lstat');
+    const realpathSpy = vi.spyOn(fs.promises, 'realpath');
+    try {
+      const mounter = createMounter(() => {}, { allowedHostMountRoots: [allowedRoot] });
+      await mounter.adoptSnapshot([spec]);
+      await expect(mounter.observeMountedIdentity(spec)).resolves.toEqual(expect.any(String));
+
+      expect(lstatSpy).not.toHaveBeenCalled();
+      expect(realpathSpy).not.toHaveBeenCalled();
+      expect(readProcMountInfoFreshMock).toHaveBeenCalled();
+    } finally {
+      lstatSpy.mockRestore();
+      realpathSpy.mockRestore();
+    }
+  });
+
   it('turns a bootstrap observation failure into per-mount error state', async () => {
-    readProcMountsFreshMock.mockRejectedValueOnce(new Error('proc unavailable'));
+    readProcMountInfoFreshMock.mockRejectedValueOnce(new Error('proc unavailable'));
     const mounter = createMounter(() => {}, { allowedHostMountRoots: [allowedRoot] });
 
     await expect(mounter.adoptSnapshot([
@@ -327,6 +440,13 @@ describe('RemoteFsMounter', () => {
   });
 });
 
+function mountInfoFromProcMounts(procMounts: string): string {
+  return procMounts.split('\n').filter(Boolean).map((line, index) => {
+    const [source, mountPoint, fsType, options] = line.split(/\s+/);
+    return `${100 + index} 1 0:${100 + index} / ${mountPoint} ${options} - ${fsType} ${source} ${options}`;
+  }).join('\n');
+}
+
 function remoteSpec(hostMountPoint: string, id = 'remote-1'): RemoteFsMountSpec {
   return {
     id,
@@ -364,7 +484,8 @@ function mockLogicalSpawn(
 ): void {
   spawnMock.mockImplementation(((command: string, args: readonly string[]) => {
     const logical = unwrapFencedCommandForTest(command, args);
-    return implementation(logical.executable, logical.args);
+    const normalized = normalizeExactUnmountCommand(logical.executable, logical.args);
+    return implementation(normalized[0], normalized[1]);
   }) as unknown as typeof spawn);
 }
 
@@ -374,6 +495,17 @@ function logicalSpawnCalls(): Array<[string, readonly string[]]> {
       String(command),
       Array.isArray(args) ? args as string[] : [],
     );
-    return [logical.executable, logical.args];
+    return normalizeExactUnmountCommand(logical.executable, logical.args);
   });
+}
+
+function normalizeExactUnmountCommand(
+  executable: string,
+  args: readonly string[],
+): [string, readonly string[]] {
+  if (executable !== process.execPath || args[0] !== '-e' || args[1] !== EXACT_UNMOUNT_HELPER_SCRIPT) {
+    return [executable, args];
+  }
+  const expected = JSON.parse(args[2]) as { mountPoint: string };
+  return ['umount', ['--', expected.mountPoint]];
 }

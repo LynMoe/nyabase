@@ -20,6 +20,44 @@ const defaultConfig = (staleAfter: number | (() => number) = 300_000) => ({
   }),
 });
 
+describe('SshProxyGateway status projection defenses', () => {
+  it('never throws when an internally corrupted status timestamp reaches projection', () => {
+    const gateway = new SshProxyGateway(
+      { buildSnapshot: vi.fn() } as never,
+      defaultConfig() as never,
+      { register: vi.fn() } as never,
+    );
+    const internals = gateway as unknown as {
+      latestStatus: Map<object, object>;
+    };
+    internals.latestStatus.set({}, {
+      proxyId: 'proxy-corrupt',
+      hostname: null,
+      listen: '0.0.0.0:2222',
+      uptimeMs: 1,
+      connectedAt: 1e300,
+      lastSnapshotGeneration: null,
+      lastSnapshotAt: null,
+      activeConnections: 0,
+      totalConnections: Number.POSITIVE_INFINITY,
+      totalRejectedConnections: 0,
+      totalClosedConnections: 0,
+      totalBytesFromClient: 0,
+      totalBytesToClient: 0,
+      bandwidthInBps: 0,
+      bandwidthOutBps: 0,
+      connections: [],
+    });
+
+    expect(() => gateway.getStatus()).not.toThrow();
+    expect(gateway.getStatus()).toMatchObject({
+      updatedAt: null,
+      totalConnections: 0,
+    });
+    gateway.onModuleDestroy();
+  });
+});
+
 describe('SshProxyGateway snapshot broadcast coalescing', () => {
   it('reserves only the bounded number of active or initializing proxy slots', async () => {
     const snapshots = { buildSnapshot: vi.fn() };
@@ -261,6 +299,30 @@ describe('SshProxyGateway snapshot broadcast coalescing', () => {
     await expect(gateway.disconnectAll()).resolves.toMatchObject({ requested: 1, disconnected: 0 });
     expect(client.terminate).toHaveBeenCalledOnce();
     expect((gateway as unknown as { pendingDisconnectAll: Map<string, unknown> }).pendingDisconnectAll.size).toBe(0);
+  });
+
+  it('bounds a corrupt per-proxy disconnect count before aggregation', async () => {
+    const gateway = new SshProxyGateway(
+      { buildSnapshot: vi.fn() } as never,
+      defaultConfig() as never,
+      { register: vi.fn() } as never,
+    );
+    let sent: Record<string, unknown> | undefined;
+    const client = {
+      readyState: WebSocket.OPEN,
+      bufferedAmount: 0,
+      send: vi.fn((encoded: string) => { sent = JSON.parse(encoded); }),
+      terminate: vi.fn(),
+    };
+    (gateway as unknown as { clients: Set<typeof client> }).clients.add(client);
+
+    const completion = gateway.disconnectAll();
+    const requestId = (sent?.payload as { requestId: string }).requestId;
+    (gateway as unknown as {
+      resolveDisconnectAll: (id: string, count: number, socket: typeof client) => void;
+    }).resolveDisconnectAll(requestId, Number.POSITIVE_INFINITY, client);
+
+    await expect(completion).resolves.toEqual({ requestId, requested: 1, disconnected: 0 });
   });
 
   it('destroys the upgrade socket when ws.handleUpgrade throws synchronously', () => {

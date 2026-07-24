@@ -4,6 +4,7 @@ import { DataSource, EntityManager, In, Repository } from 'typeorm';
 import { v4 as uuidv4 } from 'uuid';
 import {
   ActionAvailability,
+  AuditAction,
   AgentTaskKind,
   AgentTaskStatus,
   ContainerAction,
@@ -12,6 +13,7 @@ import {
   ContainerStatus,
   ContainerStatsResponse,
   ContainerView,
+  Capability,
   CreateContainerRequest,
   AgentTaskRefResponse,
   LABEL,
@@ -46,6 +48,7 @@ import { runSerializedTransaction } from '../database/serialized-transaction.js'
 import { resolveGpuIndices, shouldCountContainerForQuota } from './resource-quota.policy.js';
 import { AgentGateway } from '../gateway/agent-gateway.js';
 import { ExecSessionRegistry } from '../gateway/exec-session-registry.js';
+import { ExecSessionAuthorizationService } from '../gateway/exec-session-authorization.service.js';
 import { ContainerSshRouteService } from '../ssh/container-ssh-route.service.js';
 import { SshIdentityService } from '../ssh/ssh-identity.service.js';
 import { SshProxySnapshotService } from '../ssh/ssh-proxy-snapshot.service.js';
@@ -56,13 +59,25 @@ import {
   assertNetworkClaimCapacity,
   gcExpiredNetworkClaims,
 } from '../common/network-claim-ledger.js';
-import { AGENT_TASK_MIN_RETENTION_MS } from '../agent-tasks/agent-task-retention.service.js';
-
-type MountInput = NonNullable<CreateContainerRequest['dataDirs']>[number];
-
-type NormalizedMount = MountInput & { id: string };
-
-type ResolvedMount = NormalizedMount & { resourceId: string; sourceIdentity: string };
+import { toUserAgentTaskDto } from '../agent-tasks/agent-task-projection.js';
+import { AuditService } from '../audit/audit.service.js';
+import { postCommitBestEffort } from '../common/post-commit.js';
+import {
+  requesterSafeContainerFailure,
+  requesterSafeSshError,
+} from './container-view-projection.js';
+import {
+  normalizeContainerMounts,
+  type ContainerMountInput as MountInput,
+  type NormalizedContainerMount as NormalizedMount,
+} from './container-mount-normalizer.js';
+import {
+  ContainerMountIntegrityError,
+  resolveActiveContainerMountSources,
+  resolveContainerMountIntegrity,
+  type ResolvedContainerMount as ResolvedMount,
+} from './container-mount-integrity.js';
+import { safeEpochToIso } from '../common/safe-date.js';
 
 @Injectable()
 export class ContainerControlService {
@@ -103,9 +118,11 @@ export class ContainerControlService {
     private remoteFsAssignmentsRepo: Repository<RemoteFsServerAssignmentEntity>,
     private agentGateway: AgentGateway,
     private execSessionRegistry: ExecSessionRegistry,
+    private execSessionAuthorization: ExecSessionAuthorizationService,
     private sshRoutes: ContainerSshRouteService,
     private sshIdentities: SshIdentityService,
     private sshProxySnapshots: SshProxySnapshotService,
+    private auditService: AuditService,
   ) {}
 
   async list(userId: string, filters: { serverId?: string } = {}): Promise<ContainerView[]> {
@@ -137,6 +154,7 @@ export class ContainerControlService {
   }
 
   async create(userId: string, request: CreateContainerRequest): Promise<AgentTaskRefResponse> {
+    const containerId = uuidv4();
     const grant = await this.access.resolveServer(userId, request.serverId);
     if (!grant) throw new ForbiddenException('No server access');
     const allowedImages = await this.access.resolveAllowedImages(userId, request.serverId);
@@ -178,7 +196,7 @@ export class ContainerControlService {
       ? null
       : await this.sshIdentities.getUserInternalPublicKey(userId);
 
-    return runSerializedTransaction(this.dataSource, async (manager) => {
+    const task = await runSerializedTransaction(this.dataSource, async (manager) => {
       const freshAccess = await this.access.resolveContainerCreateAccessInTransaction(
         manager,
         userId,
@@ -271,7 +289,6 @@ export class ContainerControlService {
         });
       }
 
-      const containerId = uuidv4();
       const now = new Date();
       await gcExpiredNetworkClaims(manager);
       const claims = await manager.find(NetworkAddressClaimEntity, {
@@ -410,6 +427,16 @@ export class ContainerControlService {
         },
       });
     });
+    await postCommitBestEffort(
+      'Container create audit',
+      () => this.auditService.log(userId, AuditAction.CreateContainer, containerId, 'container', {
+        serverId: request.serverId,
+        imageId: request.imageId,
+        name: request.name,
+        taskId: task.taskId,
+      }),
+    );
+    return task;
   }
 
   private async assertMountSnapshotsStillActive(
@@ -418,30 +445,26 @@ export class ContainerControlService {
     userId: string,
     mounts: readonly ResolvedMount[],
   ): Promise<void> {
-    for (const mount of mounts) {
-      const row = await manager.findOneBy(DataDirectoryEntity, {
-        id: mount.resourceId,
-        userId,
-        sourceKind: mount.sourceKind,
-        sourceId: mount.sourceId,
-        sourceIdentity: mount.sourceIdentity,
-        desiredState: 'active',
-        ...(mount.sourceKind === 'local' ? { serverId } : {}),
-      });
-      if (!row) throw new ConflictException(`DataDir ${mount.resourceId} is no longer active`);
-      if (mount.sourceKind === 'remote') {
-        const [assignment, remote] = await Promise.all([
-          manager.findOneBy(RemoteFsServerAssignmentEntity, {
-            remoteFsMountId: mount.sourceId,
-            serverId,
-            desiredState: 'active',
-          }),
-          manager.findOneBy(RemoteFsMountEntity, { id: mount.sourceId, desiredState: 'active' }),
-        ]);
-        if (!assignment || !remote || remoteFsSourceIdentity(remote.params) !== mount.sourceIdentity) {
-          throw new ConflictException(`Remote mount source ${mount.sourceId} is no longer active`);
-        }
+    let fresh: ResolvedMount[];
+    try {
+      fresh = await resolveActiveContainerMountSources(
+        manager,
+        { serverId, ownerId: userId },
+        mounts,
+      );
+    } catch (error) {
+      if (error instanceof ContainerMountIntegrityError) {
+        throw this.mountIntegrityConflict(error);
       }
+      throw error;
+    }
+    if (fresh.some((mount, index) =>
+      mount.resourceId !== mounts[index]?.resourceId
+      || mount.sourceIdentity !== mounts[index]?.sourceIdentity)) {
+      throw new ConflictException({
+        code: 'CONTAINER_MOUNT_SOURCE_UNAVAILABLE',
+        message: 'A container mount source changed while preparing the action; retry',
+      });
     }
   }
 
@@ -466,7 +489,7 @@ export class ContainerControlService {
     accessUserId: string,
     requireOwnerAccess: boolean,
   ): Promise<AgentTaskRefResponse> {
-    return this.runContainerInteraction(container.id, () =>
+    const task = await this.runContainerInteraction(container.id, () =>
       this.actionOnContainerLocked(
         container,
         action,
@@ -475,6 +498,17 @@ export class ContainerControlService {
         accessUserId,
         requireOwnerAccess,
       ));
+    await postCommitBestEffort(
+      'Container action audit',
+      () => this.auditService.log(
+        requestedBy,
+        this.auditActionForContainerAction(action),
+        container.id,
+        'container',
+        { serverId: container.serverId, ownerId: container.ownerId, taskId: task.taskId },
+      ),
+    );
+    return task;
   }
 
   private async actionOnContainerLocked(
@@ -504,20 +538,27 @@ export class ContainerControlService {
     }
 
     if (action !== 'delete' || lifecycle.boundRuntimeId) this.assertRuntimeReady(container.serverId);
-    if (action === 'reconcileSsh') return this.reconcileSsh(container, lifecycle, requestedBy);
+    if (action === 'reconcileSsh') {
+      return this.reconcileSsh(
+        container,
+        lifecycle,
+        requestedBy,
+        requireOwnerAccess,
+      );
+    }
     const kind = this.taskKind(action);
     const phase = action === 'delete' ? ContainerPhase.Deleting : ContainerPhase.Updating;
-    const currentMounts = this.normalizedMountsFromDesired(desired);
-    const numericOwnerId = action === 'start' || action === 'restart'
+    const isPowerEnsure = action === 'start' || action === 'restart';
+    const numericOwnerId = isPowerEnsure
       ? await this.requireNumericUserId(container.ownerId)
       : null;
-    const quotaDesired = action === 'start' || action === 'restart'
+    const quotaDesired = isPowerEnsure
       ? await this.dataSource.getRepository(QuotaDesiredEntity).findOne({
           where: { serverId: container.serverId, userId: container.ownerId },
         })
       : null;
     if (
-      (action === 'start' || action === 'restart')
+      isPowerEnsure
       && (
         !quotaDesired
         || quotaDesired.numericUserId !== numericOwnerId
@@ -525,10 +566,10 @@ export class ContainerControlService {
     ) {
       throw new ConflictException('Current durable quota generation is unavailable for this container owner');
     }
-    const dockerRoot = action === 'start' || action === 'restart'
+    const dockerRoot = isPowerEnsure
       ? this.agentGateway.stateCache.requireRuntimeReady(container.serverId).dockerRoot
       : null;
-    if ((action === 'start' || action === 'restart') && lifecycle.quotaPathsJson.length !== 2) {
+    if (isPowerEnsure && lifecycle.quotaPathsJson.length !== 2) {
       throw new ConflictException('Container writable-layer quota recovery metadata is incomplete');
     }
     if (
@@ -545,29 +586,41 @@ export class ContainerControlService {
     ) {
       throw new ConflictException('Unbound container has ambiguous runtime cleanup evidence');
     }
-    const expectedPowerSsh = action === 'start' || action === 'restart'
+    const expectedPowerSsh = isPowerEnsure
       ? await this.containerSshPayload(container)
       : null;
-    const powerEnsure = action === 'start' || action === 'restart'
+    const powerEnsure = isPowerEnsure
       ? {
         dockerRoot,
         quotaGeneration: quotaDesired!.generation,
         numericOwnerId: numericOwnerId!,
         diskBytes: quotaDesired!.limitBytes,
         quotaPaths: lifecycle.quotaPathsJson,
-        mounts: await this.toAgentMountSpecs(container.serverId, container.ownerId, currentMounts),
       }
       : {};
     const bodyRecord = body && typeof body === 'object' && !Array.isArray(body)
       ? body as Record<string, unknown>
       : {};
-    const runtimeObservation = action === 'restart' && lifecycle.boundRuntimeId
-      ? zInspectContainerResult.parse(await this.agentGateway.rpc(
+    let runtimeObservation = null;
+    if (action === 'restart' && lifecycle.boundRuntimeId) {
+      const startInspect = () => this.agentGateway.rpc(
         container.serverId,
         'inspectContainer',
         { containerId: container.id, runtimeId: lifecycle.boundRuntimeId },
-      ))
-      : null;
+      );
+      const started = requireOwnerAccess
+        ? await this.access.startExternalWithActiveServerAccess(
+          requestedBy,
+          container.serverId,
+          startInspect,
+        )
+        : await this.access.startExternalWithActorCapabilities(
+          requestedBy,
+          [Capability.ManageContainersAny],
+          startInspect,
+        );
+      runtimeObservation = zInspectContainerResult.parse(await started.completion);
+    }
     if (runtimeObservation && runtimeObservation.runtimeId !== lifecycle.boundRuntimeId) {
       throw new ConflictException('Agent returned an unexpected container runtime identity');
     }
@@ -602,24 +655,59 @@ export class ContainerControlService {
       kind,
       request: body ?? { action },
       payload: actionPayload,
-      payloadInTransaction: expectedPowerSsh
+      prepareInTransaction: isPowerEnsure
         ? async (manager) => {
+          const freshDesiredForMounts = await manager.findOne(
+            ContainerDesiredSpecEntity,
+            { where: { containerId: container.id } },
+          );
+          if (
+            !freshDesiredForMounts
+            || freshDesiredForMounts.generation !== desired.generation
+          ) {
+            throw new ConflictException('Container desired state changed while preparing the action; retry');
+          }
+          const resolvedMounts = await this.resolveMountIntegrityForAction(
+            manager,
+            container,
+            freshDesiredForMounts,
+          );
           const freshSsh = await this.containerSshPayloadInTransaction(manager, container);
-          if (!this.sameSshPayload(expectedPowerSsh, freshSsh)) {
+          if (!this.sameSshPayload(expectedPowerSsh!, freshSsh)) {
             throw new ConflictException('Internal SSH key or image SSH policy changed while preparing the action; retry');
           }
-          return { ...actionPayload, ssh: freshSsh };
+          return {
+            payload: {
+              ...actionPayload,
+              mounts: this.agentMountSpecs(resolvedMounts),
+              ssh: freshSsh,
+            },
+            resourceKeys: this.containerTaskResourceKeys(
+              container.serverId,
+              container.ownerId,
+              container.id,
+              resolvedMounts,
+              true,
+            ),
+          };
         }
         : undefined,
       phase,
-      resourceKeys: this.containerTaskResourceKeys(
-        container.serverId,
-        container.ownerId,
-        container.id,
-        action === 'start' || action === 'restart' ? currentMounts : [],
-        action === 'delete' || action === 'start' || action === 'restart',
-      ),
+      resourceKeys: isPowerEnsure
+        ? undefined
+        : this.containerTaskResourceKeys(
+          container.serverId,
+          container.ownerId,
+          container.id,
+          [],
+          action === 'delete',
+        ),
       beforeSave: async (manager) => {
+        if (!requireOwnerAccess) {
+          await this.access.assertActorCapabilitiesInTransaction(
+            manager, requestedBy, [Capability.ManageContainersAny],
+          );
+        }
         const [freshContainer, freshDesired, freshLifecycle, freshQuota, freshActor, freshAccess] = await Promise.all([
           manager.findOneBy(ContainerEntity, { id: container.id }),
           manager.findOne(ContainerDesiredSpecEntity, { where: { containerId: container.id } }),
@@ -695,6 +783,7 @@ export class ContainerControlService {
   async createExecSession(
     containerId: string,
     userId: string,
+    authVersion: number,
     request: ExecSessionRequest,
   ): Promise<{ sessionId: string }> {
     const container = await this.containersRepo.findOneBy({ id: containerId });
@@ -703,6 +792,7 @@ export class ContainerControlService {
     return this.createExecSessionForContainer(
       container,
       userId,
+      authVersion,
       request,
       'container-owner',
     );
@@ -711,6 +801,7 @@ export class ContainerControlService {
   async createExecSessionForAdmin(
     containerId: string,
     actorId: string,
+    authVersion: number,
     request: ExecSessionRequest,
   ): Promise<{ sessionId: string }> {
     const container = await this.containersRepo.findOneBy({ id: containerId });
@@ -718,6 +809,7 @@ export class ContainerControlService {
     return this.createExecSessionForContainer(
       container,
       actorId,
+      authVersion,
       request,
       'manage-containers-any',
     );
@@ -726,21 +818,34 @@ export class ContainerControlService {
   private async createExecSessionForContainer(
     container: ContainerEntity,
     actorId: string,
+    authVersion: number,
     request: ExecSessionRequest,
     authorizationKind: 'container-owner' | 'manage-containers-any',
   ): Promise<{ sessionId: string }> {
-    return this.runContainerInteraction(container.id, () =>
+    const session = await this.runContainerInteraction(container.id, () =>
       this.createExecSessionForContainerLocked(
         container,
         actorId,
+        authVersion,
         request,
         authorizationKind,
       ));
+    await postCommitBestEffort(
+      'Container exec audit',
+      () => this.auditService.log(actorId, AuditAction.ExecContainer, container.id, 'container', {
+        serverId: container.serverId,
+        ownerId: container.ownerId,
+        sessionId: session.sessionId,
+        tty: request.tty !== false,
+      }),
+    );
+    return session;
   }
 
   private async createExecSessionForContainerLocked(
     container: ContainerEntity,
     actorId: string,
+    authVersion: number,
     request: ExecSessionRequest,
     authorizationKind: 'container-owner' | 'manage-containers-any',
   ): Promise<{ sessionId: string }> {
@@ -763,32 +868,49 @@ export class ContainerControlService {
     if (!runtimeId) throw new ForbiddenException('Runtime is not bound yet');
 
     const sessionId = uuidv4();
-    this.execSessionRegistry.register(sessionId, {
+    const sessionAuthority = {
       serverId: container.serverId,
       userId: actorId,
       containerId: container.id,
       dockerId: runtimeId,
       authorizationKind,
       createdAt: Date.now(),
-    });
+      claimed: false,
+    };
+    let started = false;
+    let admission: { result: Promise<unknown> } | null;
     try {
       const shell = request.shell?.trim() || '/bin/sh';
-      await this.agentGateway.rpc(container.serverId, 'execStream', {
-        sessionId,
-        runtimeId,
-        cmd: [shell],
-        tty: request.tty !== false,
-        cols: request.cols,
-        rows: request.rows,
-      });
+      admission = await this.execSessionAuthorization.startAuthorized(
+        sessionAuthority,
+        authVersion,
+        () => {
+          started = true;
+          this.execSessionRegistry.register(sessionId, sessionAuthority);
+          return this.agentGateway.rpc(container.serverId, 'execStream', {
+            sessionId,
+            runtimeId,
+            cmd: [shell],
+            tty: request.tty !== false,
+            cols: request.cols,
+            rows: request.rows,
+          });
+        },
+      );
+      if (!admission) {
+        throw new ForbiddenException('Console authorization was revoked before session admission');
+      }
+      await admission.result;
       return { sessionId };
     } catch (error) {
-      try {
-        this.agentGateway.notify(container.serverId, 'execClose', { sessionId });
-      } catch {
-        // Agent disconnect is already a complete process-local exec teardown.
+      if (started) {
+        try {
+          this.agentGateway.notify(container.serverId, 'execClose', { sessionId });
+        } catch {
+          // Agent disconnect is already a complete process-local exec teardown.
+        }
+        this.execSessionRegistry.remove(sessionId);
       }
-      this.execSessionRegistry.remove(sessionId);
       throw error;
     }
   }
@@ -810,11 +932,12 @@ export class ContainerControlService {
 
     if (view.runtime.runtimeId) {
       const observedAt = this.agentGateway.stateCache.get(view.serverId)?.lastUpdated ?? Date.now();
+      const lastObservedAt = safeEpochToIso(observedAt);
       return {
         containerId: view.id,
         stats: null,
-        ts: observedAt,
-        lastObservedAt: new Date(observedAt).toISOString(),
+        ts: lastObservedAt ? observedAt : Date.now(),
+        ...(lastObservedAt ? { lastObservedAt } : {}),
       };
     }
     return {
@@ -874,10 +997,21 @@ export class ContainerControlService {
     const runtimeId = lifecycle?.boundRuntimeId ?? snapshot?.runtime.runtimeId ?? null;
     const runtimeStatus = snapshot?.status ?? ContainerStatus.Unknown;
     const runtimeIp = this.nonEmptyString(snapshot?.runtime.ip) ?? null;
+    const viewMounts = this.safeNormalizedMountsFromDesired(desired);
     const drift = this.runtimeDrift(desired, lifecycle, snapshot, runtimeReady);
+    if (desired && viewMounts === null) {
+      drift.push({
+        kind: RuntimeDriftKind.DesiredMountSpecInvalid,
+        message: 'Durable container mount configuration is invalid',
+      });
+    }
     const server = servers.get(c.serverId);
     const image = images.get(c.imageId);
     const owner = users.get(c.ownerId);
+    const safeFailure = requesterSafeContainerFailure(
+      lifecycle?.failureCode,
+      lifecycle?.failureReason,
+    );
     return {
       id: c.id,
       serverId: c.serverId,
@@ -887,8 +1021,8 @@ export class ContainerControlService {
       name: c.name,
       imageId: c.imageId,
       imageName: image?.name,
-      failureCode: lifecycle?.failureCode ?? null,
-      failureReason: lifecycle?.failureReason ?? null,
+      failureCode: safeFailure.failureCode,
+      failureReason: safeFailure.failureReason,
       powerIntent: desired?.powerIntent ?? ContainerPowerIntent.Stopped,
       runtimeReady,
       runtime: {
@@ -896,30 +1030,10 @@ export class ContainerControlService {
         runtimeId,
         status: runtimeStatus,
         ip: runtimeIp,
-        observedAt: snapshot ? new Date(serverSnap?.lastUpdated ?? Date.now()).toISOString() : null,
+        observedAt: snapshot ? safeEpochToIso(serverSnap?.lastUpdated ?? Date.now()) : null,
         drift,
       },
-      activeTask: activeTask ? {
-        id: activeTask.id,
-        kind: activeTask.kind,
-        status: activeTask.status,
-        resourceType: activeTask.resourceType,
-        resourceId: activeTask.resourceId,
-        serverId: activeTask.serverId,
-        requestedBy: activeTask.requestedBy,
-        request: activeTask.requestJson,
-        agentResult: activeTask.agentResultJson,
-        result: activeTask.resultJson,
-        error: activeTask.errorJson,
-        failureStage: activeTask.failureStage,
-        createdAt: activeTask.createdAt.toISOString(),
-        startedAt: activeTask.startedAt?.toISOString() ?? null,
-        lastSentAt: activeTask.lastSentAt?.toISOString() ?? null,
-        completedAt: activeTask.completedAt?.toISOString() ?? null,
-        retentionUntil: activeTask.completedAt
-          ? new Date(activeTask.completedAt.getTime() + AGENT_TASK_MIN_RETENTION_MS).toISOString()
-          : null,
-      } : null,
+      activeTask: activeTask ? toUserAgentTaskDto(activeTask) : null,
       resources: {
         cpuMillis: desired?.cpuMillis ?? 0,
         memBytes: desired?.memBytes ?? 0,
@@ -927,7 +1041,7 @@ export class ContainerControlService {
         gpuIndices: desired?.gpuIndices ?? [],
       },
       ssh: this.sshView(c, owner, server, image, snapshot, sshRoute, omittedServerLoginAllowed),
-      mounts: this.mountsFromDesired(desired),
+      mounts: this.mountViews(viewMounts ?? []),
       actions: this.actions.forContainer({
         phase,
         runtimeReady,
@@ -961,8 +1075,7 @@ export class ContainerControlService {
     return typeof value === 'string' && value.trim() !== '' ? value : null;
   }
 
-  private mountsFromDesired(desired: ContainerDesiredSpecEntity | null): ContainerView['mounts'] {
-    const mounts = this.normalizedMountsFromDesired(desired);
+  private mountViews(mounts: readonly NormalizedMount[]): ContainerView['mounts'] {
     return mounts.map((mount, index) => ({
       id: mount.id ?? `${mount.sourceKind}:${mount.sourceId}:${mount.dirName}:${index}`,
       sourceKind: mount.sourceKind,
@@ -973,57 +1086,75 @@ export class ContainerControlService {
   }
 
   private normalizedMountsFromDesired(desired: ContainerDesiredSpecEntity | null): NormalizedMount[] {
-    const mounts = Array.isArray(desired?.mountsJson) ? desired.mountsJson as NormalizedMount[] : [];
-    return mounts.map((mount, index) => ({
-      id: mount.id ?? `${mount.sourceKind}:${mount.sourceId}:${mount.dirName}:${index}`,
-      sourceKind: mount.sourceKind,
-      sourceId: mount.sourceId,
-      dirName: mount.dirName,
-      containerPath: mount.containerPath,
-    }));
+    if (!desired) return [];
+    try {
+      return normalizeContainerMounts(desired.mountsJson);
+    } catch {
+      throw new ConflictException({
+        code: 'CONTAINER_MOUNT_SPEC_INVALID',
+        message: 'Durable container mount configuration is invalid',
+      });
+    }
+  }
+
+  private safeNormalizedMountsFromDesired(
+    desired: ContainerDesiredSpecEntity | null,
+  ): NormalizedMount[] | null {
+    try {
+      return this.normalizedMountsFromDesired(desired);
+    } catch {
+      return null;
+    }
   }
 
   private normalizeMounts(input: MountInput[]): NormalizedMount[] {
-    const seenPaths = new Set<string>();
-    const seenDirs = new Set<string>();
-    return input.map((dir) => {
-      const sourceKind = dir.sourceKind;
-      const sourceId = String(dir.sourceId ?? '').trim();
-      const dirName = String(dir.dirName ?? '').trim();
-      const containerPath = this.normalizeContainerPath(String(dir.containerPath ?? '').trim());
-      if (sourceKind !== 'local' && sourceKind !== 'remote') throw new BadRequestException('Invalid mount source kind');
-      if (!sourceId) throw new BadRequestException('Mount source is required');
-      if (!/^[a-z0-9][a-z0-9_-]{0,63}$/.test(dirName)) throw new BadRequestException('Invalid mount dir name');
-      if (seenPaths.has(containerPath)) throw new BadRequestException('Duplicate container mount path');
-      seenPaths.add(containerPath);
-      const key = `${sourceKind}:${sourceId}:${dirName}`;
-      if (seenDirs.has(key)) throw new BadRequestException('Duplicate mount source directory');
-      seenDirs.add(key);
-      return {
-        id: `${sourceKind}:${sourceId}:${dirName}:${containerPath}`,
-        sourceKind,
-        sourceId,
-        dirName,
-        containerPath,
-      };
+    return normalizeContainerMounts(input);
+  }
+
+  private async resolveMountIntegrityForAction(
+    manager: EntityManager,
+    container: ContainerEntity,
+    desired: ContainerDesiredSpecEntity,
+  ): Promise<ResolvedMount[]> {
+    let resolved: ResolvedMount[];
+    try {
+      resolved = await resolveContainerMountIntegrity(manager, container, desired);
+    } catch (error) {
+      if (!(error instanceof ContainerMountIntegrityError)) throw error;
+      throw this.mountIntegrityConflict(error);
+    }
+
+    const disks = this.agentGateway.stateCache.get(container.serverId)?.disks ?? [];
+    for (const mount of resolved) {
+      if (mount.sourceKind !== 'local') continue;
+      const exact = disks.filter((disk) => disk.diskId === mount.sourceId);
+      if (
+        exact.length !== 1
+        || exact[0]!.sourceIdentity !== mount.sourceIdentity
+      ) {
+        throw new ConflictException({
+          code: 'CONTAINER_MOUNT_SOURCE_UNAVAILABLE',
+          message: 'A local container mount source is not present with its exact physical identity',
+        });
+      }
+    }
+    return resolved;
+  }
+
+  private mountIntegrityConflict(error: ContainerMountIntegrityError): ConflictException {
+    const code = error.kind === 'desired_invalid'
+      ? 'CONTAINER_MOUNT_SPEC_INVALID'
+      : error.kind === 'index_divergent'
+        ? 'CONTAINER_MOUNT_INDEX_DIVERGENT'
+        : 'CONTAINER_MOUNT_SOURCE_UNAVAILABLE';
+    return new ConflictException({
+      code,
+      message: error.kind === 'desired_invalid'
+        ? 'Durable container mount configuration is invalid'
+        : error.kind === 'index_divergent'
+          ? 'Durable container mount configuration is internally inconsistent'
+          : 'A durable container mount source is no longer active with its exact identity',
     });
-  }
-
-  private normalizeContainerPath(value: string): string {
-    if (!value.startsWith('/')) throw new BadRequestException('Container path must be absolute');
-    const parts = value.split('/').filter(Boolean);
-    if (parts.length === 0) throw new BadRequestException('Container path must not be root');
-    if (parts.some((part) => part === '.' || part === '..')) throw new BadRequestException('Container path must not contain dot segments');
-    return `/${parts.join('/')}`;
-  }
-
-  private async toAgentMountSpecs(
-    serverId: string,
-    userId: string,
-    mounts: NormalizedMount[],
-  ): Promise<ContainerMountSpec[]> {
-    const resolved = await this.resolveMounts(serverId, userId, mounts);
-    return this.agentMountSpecs(resolved);
   }
 
   private agentMountSpecs(mounts: readonly ResolvedMount[]): ContainerMountSpec[] {
@@ -1039,6 +1170,7 @@ export class ContainerControlService {
     container: ContainerEntity,
     lifecycle: ContainerLifecycleEntity,
     requestedBy: string,
+    requireOwnerAccess: boolean,
   ): Promise<AgentTaskRefResponse> {
     if (!lifecycle.boundRuntimeId) throw new ForbiddenException('Runtime is not bound yet');
     const expectedSsh = await this.containerSshPayload(container);
@@ -1065,11 +1197,34 @@ export class ContainerControlService {
       },
       phase: ContainerPhase.Updating,
       beforeSave: async (manager) => {
-        const current = await manager.findOneBy(ContainerLifecycleEntity, {
-          containerId: container.id,
-        });
+        if (requireOwnerAccess) {
+          const [actor, access] = await Promise.all([
+            manager.findOneBy(UserEntity, { id: requestedBy }),
+            this.access.resolveServerInTransaction(manager, requestedBy, container.serverId),
+          ]);
+          if (
+            actor?.status !== UserStatus.Active
+            || container.ownerId !== requestedBy
+            || !access
+          ) {
+            throw new ForbiddenException(
+              'Container owner is disabled or server access was revoked',
+            );
+          }
+        } else {
+          await this.access.assertActorCapabilitiesInTransaction(
+            manager, requestedBy, [Capability.ManageContainersAny],
+          );
+        }
+        const [current, freshContainer] = await Promise.all([
+          manager.findOneBy(ContainerLifecycleEntity, { containerId: container.id }),
+          manager.findOneBy(ContainerEntity, { id: container.id }),
+        ]);
         if (
           !current
+          || !freshContainer
+          || freshContainer.serverId !== container.serverId
+          || freshContainer.ownerId !== container.ownerId
           || current.phase !== lifecycle.phase
           || current.activeTaskId !== lifecycle.activeTaskId
           || current.boundRuntimeId !== lifecycle.boundRuntimeId
@@ -1303,7 +1458,7 @@ export class ContainerControlService {
       hostKeyFingerprint: route?.containerHostKeyFingerprint ?? snapshot?.sshServer.hostKeyFingerprint ?? null,
       user: 'root',
       port: 22,
-      lastError: route?.lastError ?? snapshot?.sshServer.lastError,
+      lastError: requesterSafeSshError(route?.lastError ?? snapshot?.sshServer.lastError),
     };
   }
 
@@ -1396,7 +1551,26 @@ export class ContainerControlService {
       case 'delete': return AgentTaskKind.ContainerDelete;
       case 'updateMounts': throw new BadRequestException('Container mounts are immutable; delete and recreate the container');
       case 'reconcileSsh': return AgentTaskKind.ContainerSshEnsure;
-      default: return AgentTaskKind.ContainerRestart;
+      case 'stats':
+      case 'console':
+        throw new BadRequestException(`Container action ${action} is not a lifecycle task`);
+    }
+  }
+
+  private auditActionForContainerAction(action: ContainerAction): AuditAction {
+    switch (action) {
+      case 'start': return AuditAction.StartContainer;
+      case 'stop': return AuditAction.StopContainer;
+      case 'restart': return AuditAction.RestartContainer;
+      case 'delete': return AuditAction.DeleteContainer;
+      case 'reconcileSsh': return AuditAction.ReconcileContainerSsh;
+      case 'updateMounts':
+        // Mount replacement is rejected before task admission, so this branch
+        // cannot produce a successful action audit.
+        throw new BadRequestException('Container mounts are immutable; delete and recreate the container');
+      case 'stats':
+      case 'console':
+        throw new BadRequestException(`Container action ${action} has no lifecycle audit`);
     }
   }
 

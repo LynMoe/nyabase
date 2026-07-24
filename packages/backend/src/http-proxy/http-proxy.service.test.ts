@@ -1,4 +1,9 @@
-import { BadRequestException, ConflictException, NotFoundException } from '@nestjs/common';
+import {
+  BadRequestException,
+  ConflictException,
+  ForbiddenException,
+  NotFoundException,
+} from '@nestjs/common';
 import {
   ContainerStatus,
   HTTP_PROXY_SNAPSHOT_STALE_AFTER_MS,
@@ -18,6 +23,7 @@ import { HttpDomainPoolEntity } from '../entities/http-domain-pool.entity.js';
 import { HttpProxyBindingEntity } from '../entities/http-proxy-binding.entity.js';
 import { HttpHostnameReservationEntity } from '../entities/http-hostname-reservation.entity.js';
 import { NetworkAddressClaimEntity } from '../entities/network-address-claim.entity.js';
+import { UserEntity } from '../entities/user.entity.js';
 import {
   HttpProxyService,
   MAX_HTTP_HOSTNAME_RESERVATIONS,
@@ -43,13 +49,99 @@ describe('HttpProxyService authorization boundaries', () => {
       domainPoolsRepo: { count: vi.fn().mockResolvedValue(MAX_HTTP_PROXY_DOMAIN_POOLS) },
     });
 
-    await expect(service.createDomainPool({
+    await expect(service.createDomainPool('actor-a', {
       wildcardDomain: '*.overflow.example.test',
       enabled: true,
       httpsEnabled: false,
     })).rejects.toMatchObject({
       response: expect.objectContaining({ code: 'HTTP_PROXY_DOMAIN_POOL_CAPACITY_REACHED' }),
     });
+  });
+
+  it('rejects a canonical duplicate wildcard owner before create or update', async () => {
+    const service = makeService();
+    await expect(service.createDomainPool('actor-a', {
+      wildcardDomain: ' APPS.EXAMPLE.TEST. ',
+      enabled: true,
+      httpsEnabled: false,
+    })).rejects.toMatchObject({
+      status: 409,
+      response: expect.objectContaining({ code: 'HTTP_PROXY_DOMAIN_POOL_EXISTS' }),
+    });
+
+    const current = { ...makePool(), id: 'pool-current', wildcardDomain: '*.old.example.test' };
+    const occupied = { ...makePool(), id: 'pool-owner' };
+    const updateService = makeService({
+      domainPoolsRepo: {
+        findOneBy: vi.fn()
+          .mockResolvedValueOnce(current)
+          .mockResolvedValueOnce(occupied),
+      },
+    });
+    await expect(updateService.updateDomainPool('actor-a', current.id, {
+      wildcardDomain: 'APPS.EXAMPLE.TEST',
+    })).rejects.toMatchObject({
+      status: 409,
+      response: expect.objectContaining({ code: 'HTTP_PROXY_DOMAIN_POOL_EXISTS' }),
+    });
+  });
+
+  it.each([
+    [{ code: '23505' }],
+    [{ driverError: { code: 'SQLITE_CONSTRAINT_UNIQUE', message: 'UNIQUE failed' } }],
+  ])('maps a concurrent wildcard unique violation to 409 (%j)', async (dbError) => {
+    const service = makeService({
+      domainPoolsRepo: {
+        findOneBy: vi.fn().mockResolvedValue(null),
+        save: vi.fn().mockRejectedValue(dbError),
+      },
+    });
+
+    await expect(service.createDomainPool('actor-a', {
+      wildcardDomain: '*.race.example.test',
+      enabled: true,
+      httpsEnabled: false,
+    })).rejects.toMatchObject({
+      status: 409,
+      response: expect.objectContaining({ code: 'HTTP_PROXY_DOMAIN_POOL_EXISTS' }),
+    });
+  });
+
+  it('maps a concurrent wildcard collision during update to 409', async () => {
+    const current = { ...makePool(), wildcardDomain: '*.old.example.test' };
+    const service = makeService({
+      domainPoolsRepo: {
+        findOneBy: vi.fn()
+          .mockResolvedValueOnce(current)
+          .mockResolvedValueOnce(null),
+        save: vi.fn().mockRejectedValue({ code: '23505' }),
+      },
+    });
+
+    await expect(service.updateDomainPool('actor-a', current.id, {
+      wildcardDomain: '*.race.example.test',
+    })).rejects.toMatchObject({
+      status: 409,
+      response: expect.objectContaining({ code: 'HTTP_PROXY_DOMAIN_POOL_EXISTS' }),
+    });
+  });
+
+  it('does not persist a domain pool after the actor capability is revoked', async () => {
+    const save = vi.fn();
+    const service = makeService({
+      domainPoolsRepo: { save },
+      accessResolver: {
+        assertActorCapabilitiesInTransaction: vi.fn()
+          .mockRejectedValue(new ForbiddenException('authority revoked')),
+      },
+    });
+
+    await expect(service.createDomainPool('actor-a', {
+      wildcardDomain: '*.revoked.example.test',
+      enabled: true,
+      httpsEnabled: false,
+    })).rejects.toBeInstanceOf(ForbiddenException);
+    expect(save).not.toHaveBeenCalled();
   });
 
   it('rejects unique hostname churn at the fixed active-plus-draining capacity', async () => {
@@ -66,6 +158,80 @@ describe('HttpProxyService authorization boundaries', () => {
     })).rejects.toMatchObject({
       response: expect.objectContaining({ code: 'HTTP_HOSTNAME_RESERVATION_CAPACITY_REACHED' }),
     });
+  });
+
+  it('rejects unknown or empty partial mutation fields', async () => {
+    const service = makeService();
+    await expect(service.createBinding('user-a', {
+      hostname: 'a.apps.example.test',
+      containerId: 'container-a',
+      targetPort: 80,
+      typo: true,
+    })).rejects.toBeInstanceOf(BadRequestException);
+    await expect(service.updateBinding('user-a', 'binding-a', {}))
+      .rejects.toBeInstanceOf(BadRequestException);
+    await expect(service.updateDomainPool('actor-a', 'pool-a', { typo: true }))
+      .rejects.toBeInstanceOf(BadRequestException);
+  });
+
+  it('maps invalid binding hostnames to stable 400 errors on create and update', async () => {
+    const service = makeService({
+      bindingsRepo: {
+        findOneBy: vi.fn().mockResolvedValue(makeBinding({
+          id: 'binding-a', ownerId: 'user-a', hostname: 'a.apps.example.test',
+        })),
+      },
+    });
+
+    for (const operation of [
+      () => service.createBinding('user-a', {
+        hostname: '*.apps.example.test',
+        containerId: 'container-a',
+        targetPort: 80,
+      }),
+      () => service.updateBinding('user-a', 'binding-a', {
+        hostname: 'bad host.apps.example.test',
+      }),
+    ]) {
+      await expect(operation()).rejects.toMatchObject({
+        status: 400,
+        response: expect.objectContaining({ code: 'INVALID_HTTP_PROXY_HOSTNAME' }),
+      });
+    }
+  });
+
+  it('maps invalid wildcard domains to stable 400 errors on create and update', async () => {
+    const service = makeService();
+
+    for (const operation of [
+      () => service.createDomainPool('actor-a', {
+        wildcardDomain: 'apps..example.test',
+        enabled: true,
+        httpsEnabled: false,
+      }),
+      () => service.updateDomainPool('actor-a', 'pool-a', {
+        wildcardDomain: '*.*.example.test',
+      }),
+    ]) {
+      await expect(operation()).rejects.toMatchObject({
+        status: 400,
+        response: expect.objectContaining({ code: 'INVALID_HTTP_PROXY_WILDCARD_DOMAIN' }),
+      });
+    }
+  });
+
+  it('rechecks that the binding owner is active inside task admission', async () => {
+    const bindingsRepo = { save: vi.fn() };
+    const service = makeService({
+      bindingsRepo,
+      usersRepo: { findOneBy: vi.fn().mockResolvedValue(null) },
+    });
+    await expect(service.createBinding('user-a', {
+      hostname: 'a.apps.example.test',
+      containerId: 'container-a',
+      targetPort: 80,
+    })).rejects.toMatchObject({ status: 403 });
+    expect(bindingsRepo.save).not.toHaveBeenCalled();
   });
 
   it('publishes every authoritative snapshot with the required lease TTL', async () => {
@@ -306,7 +472,7 @@ describe('HttpProxyService authorization boundaries', () => {
     const dataSource = transactionDataSource(manager);
     const service = makeService({ domainPoolsRepo, dataSource });
 
-    await expect(service.updateDomainPool('pool-a', { enabled: false }))
+    await expect(service.updateDomainPool('actor-a', 'pool-a', { enabled: false }))
       .rejects.toBeInstanceOf(NotFoundException);
 
     expect(domainPoolsRepo.findOneBy).not.toHaveBeenCalled();
@@ -378,7 +544,7 @@ describe('HttpProxyService TLS admission', () => {
 
   it('requires certificate and private key updates in the same transaction', async () => {
     const service = makeService();
-    await expect(service.updateDomainPool('pool-a', {
+    await expect(service.updateDomainPool('actor-a', 'pool-a', {
       certificatePem: matching.certificatePem,
     })).rejects.toBeInstanceOf(BadRequestException);
   });
@@ -390,10 +556,15 @@ function makeService(overrides: {
   hostnameReservationsRepo?: Record<string, unknown>;
   usersRepo?: Record<string, unknown>;
   dataSource?: Record<string, unknown>;
+  accessResolver?: Record<string, unknown>;
 } = {}): HttpProxyService {
   const domainPoolsRepo = {
     find: vi.fn().mockResolvedValue([makePool()]),
-    findOneBy: vi.fn().mockResolvedValue(makePool()),
+    findOneBy: vi.fn(async (where: { id?: string; wildcardDomain?: string }) => {
+      const pool = makePool();
+      if (where.id === pool.id || where.wildcardDomain === pool.wildcardDomain) return pool;
+      return null;
+    }),
     save: vi.fn(async (row: unknown) => row),
     delete: vi.fn(),
     ...overrides.domainPoolsRepo,
@@ -447,7 +618,11 @@ function makeService(overrides: {
       { id: 'user-a', username: 'alice', status: UserStatus.Active },
       { id: 'user-b', username: 'bob', status: UserStatus.Active },
     ]),
-    findOneBy: vi.fn().mockResolvedValue({ id: 'user-b', username: 'bob' }),
+    findOneBy: vi.fn(async (where: { id?: string }) => ({
+      id: where.id ?? 'user-a',
+      username: where.id === 'user-b' ? 'bob' : 'alice',
+      status: UserStatus.Active,
+    })),
     ...overrides.usersRepo,
   };
   const config = {
@@ -481,6 +656,7 @@ function makeService(overrides: {
     if (entity === HttpDomainPoolEntity) return domainPoolsRepo;
     if (entity === HttpProxyBindingEntity) return bindingsRepo;
     if (entity === ContainerEntity) return containersRepo;
+    if (entity === UserEntity) return usersRepo;
     if (entity === HttpHostnameReservationEntity) return hostnameReservationsRepo;
     throw new Error('Unexpected entity in fake transaction manager');
   }
@@ -495,6 +671,10 @@ function makeService(overrides: {
     usersRepo as never,
     config as never,
     dataSource as never,
+    {
+      assertActorCapabilitiesInTransaction: vi.fn().mockResolvedValue(new Set()),
+      ...overrides.accessResolver,
+    } as never,
   );
 }
 

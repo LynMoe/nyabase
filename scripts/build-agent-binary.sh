@@ -1,5 +1,7 @@
 #!/bin/bash
-# Build nyabase-agent as a standalone Node.js binary using esbuild + @yao-pkg/pkg.
+# Build the two inseparable Agent release artifacts:
+# dist/nyabase-agent and dist/nyabase-atomic-file-exchange.
+# The installer deliberately refuses a release missing either binary.
 # Switching from Bun resolves dockerode hijack hangs (oven-sh/bun#29012) by using
 # the native Node.js HTTP implementation, which dockerode is designed against.
 #
@@ -16,12 +18,35 @@ BINARY_NAME="nyabase-agent"
 DROPBEAR_NAME="nyabase-dropbear"
 DROPBEARKEY_NAME="nyabase-dropbearkey"
 SFTP_NAME="nyabase-sftp-server"
+ATOMIC_EXCHANGE_NAME="nyabase-atomic-file-exchange"
 DEFAULT_DROPBEAR_SRC="$REPO_ROOT/packages/agent/assets/dropbear/nyabase-dropbear-linux-x64"
 DEFAULT_DROPBEARKEY_SRC="$REPO_ROOT/packages/agent/assets/dropbear/nyabase-dropbearkey-linux-x64"
 NODE_TARGET="${NODE_TARGET:-node22-linux-x64}"
 AGENT_PACKAGE_JSON="$REPO_ROOT/packages/agent/package.json"
 
+CARGO_BIN="${CARGO:-}"
+if [ -z "$CARGO_BIN" ]; then
+  if command -v cargo >/dev/null 2>&1; then
+    CARGO_BIN="$(command -v cargo)"
+  elif [ -n "${HOME:-}" ] && [ -x "$HOME/.cargo/bin/cargo" ]; then
+    CARGO_BIN="$HOME/.cargo/bin/cargo"
+  fi
+fi
+if [ -z "$CARGO_BIN" ] || [ ! -x "$CARGO_BIN" ]; then
+  echo "ERROR: Cargo is required to build the static SFTP server." >&2
+  echo "Set CARGO to an executable path or install Cargo in PATH or \$HOME/.cargo/bin." >&2
+  exit 1
+fi
+
 cd "$REPO_ROOT"
+
+echo "=== Building atomic file exchange helper (static musl) ==="
+mkdir -p "$OUT_DIR"
+musl-gcc -static -O2 -Wall -Wextra -Werror \
+  -o "$OUT_DIR/$ATOMIC_EXCHANGE_NAME" \
+  "$REPO_ROOT/tools/atomic-file-exchange/atomic-file-exchange.c"
+chmod 0755 "$OUT_DIR/$ATOMIC_EXCHANGE_NAME"
+"$OUT_DIR/$ATOMIC_EXCHANGE_NAME" --self-test /tmp
 
 AGENT_VERSION="$(
   node -e "const pkg = require(process.argv[1]); if (typeof pkg.version !== 'string' || pkg.version.trim().length === 0) process.exit(1); process.stdout.write(pkg.version.trim());" "$AGENT_PACKAGE_JSON"
@@ -30,7 +55,7 @@ AGENT_VERSION_DEFINE="$(node -e "process.stdout.write(JSON.stringify(process.arg
 
 echo "=== Building SFTP server (Rust) ==="
 cd "$REPO_ROOT/tools/sftp-server"
-cargo build --release --target x86_64-unknown-linux-musl
+"$CARGO_BIN" build --release --target x86_64-unknown-linux-musl
 SFTP_SRC="target/x86_64-unknown-linux-musl/release/$SFTP_NAME"
 SFTP_SHA="$(sha256sum "$SFTP_SRC" | awk '{print $1; exit}')"
 echo "Built static SFTP server: tools/sftp-server/$SFTP_SRC"
@@ -147,6 +172,7 @@ rm -rf "$BUNDLE_DIR"
 echo ""
 echo "=== Done ==="
 echo "Agent: $OUT_DIR/$BINARY_NAME  ($(du -sh "$OUT_DIR/$BINARY_NAME" | cut -f1))"
+echo "Atomic exchange helper: $OUT_DIR/$ATOMIC_EXCHANGE_NAME  ($(du -sh "$OUT_DIR/$ATOMIC_EXCHANGE_NAME" | cut -f1))"
 echo ""
 echo "Usage on target machine:"
-echo "  $BINARY_NAME --config /etc/nyabase/agent.yaml"
+echo "  deploy/install-agent.sh  # installs and probes both required binaries"

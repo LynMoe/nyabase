@@ -1,5 +1,5 @@
 import { useQuery, useQueries, useMutation, useQueryClient } from '@tanstack/react-query';
-import { useState } from 'react';
+import { useCallback, useState } from 'react';
 import { api } from '../lib/api.js';
 import { Button } from '../components/ui/button.js';
 import { Input } from '../components/ui/input.js';
@@ -11,36 +11,67 @@ import {
   AlertDialog, AlertDialogContent, AlertDialogHeader, AlertDialogTitle,
   AlertDialogDescription, AlertDialogFooter, AlertDialogCancel, AlertDialogAction,
 } from '../components/ui/alert-dialog.js';
-import type { AgentTaskRefResponse, ServerDto, DataDirDto, ContainerView, MountSourceDto } from '@nyabase/common';
-import { dataDiskDisplayName } from '../lib/utils.js';
+import {
+  zCreateDataDirRequest,
+  type AgentTaskRefResponse,
+  type UserServerDto,
+  type UserDataDiskDto,
+  type DataDirDto,
+  type ContainerView,
+  type MountSourceDto,
+} from '@nyabase/common';
 import { queryKeys } from '../lib/query-keys.js';
-
-type DataDiskInfo = { diskId: string; mountPoint: string; label?: string | null; totalBytes: number; usedBytes: number; pquotaEnabled: boolean };
+import { containerUsesDataDir } from '../lib/data-dir-identity.js';
+import { QueryErrorState, QueryLoadingState } from '../components/query-state.js';
+import { useRequesterAgentTaskBatchFeedback } from '../hooks/use-agent-task-tracker.js';
+import { queryPollInterval } from '../lib/query-lifecycle.js';
+import { addTrackedTaskIds, retireTrackedTaskIds as retireTaskIds } from '../lib/tracked-task-ids.js';
 
 export default function DataDirsPage() {
   const [showCreate, setShowCreate] = useState(false);
   const [createSource, setCreateSource] = useState<{ kind: 'local' | 'remote'; serverId: string; sourceId: string } | null>(null);
+  const [trackedTaskIds, setTrackedTaskIds] = useState<string[]>([]);
   const qc = useQueryClient();
+  const retireTrackedTaskIds = useCallback((settledIds: readonly string[]) => {
+    setTrackedTaskIds((current) => retireTaskIds(current, settledIds));
+  }, []);
+  useRequesterAgentTaskBatchFeedback(trackedTaskIds, {
+    invalidateQueryKeys: [queryKeys.dataDirs.allUser, queryKeys.containers.userList],
+    onSettledTaskIds: retireTrackedTaskIds,
+  });
+  const trackTaskId = (taskId?: string) => {
+    if (!taskId) return;
+    setTrackedTaskIds((current) => addTrackedTaskIds(current, [taskId]));
+  };
 
-  const { data: servers = [] } = useQuery({ queryKey: queryKeys.servers.user, queryFn: () => api.get<ServerDto[]>('/servers') });
-  const { data: containers = [] } = useQuery({
+  const serversQuery = useQuery({ queryKey: queryKeys.servers.user, queryFn: () => api.get<UserServerDto[]>('/servers') });
+  const containersQuery = useQuery({
     queryKey: queryKeys.containers.userList,
     queryFn: () => api.get<ContainerView[]>('/v2/containers'),
-    refetchInterval: 15_000,
+    refetchInterval: (query) => queryPollInterval(query.state, { activeIntervalMs: 15_000 }),
   });
+  const servers = serversQuery.data ?? [];
+  const containers = containersQuery.data ?? [];
 
   const serverDirsResults = useQueries({
     queries: servers.map((s) => ({
       queryKey: queryKeys.dataDirs.byServer('user', s.id),
       queryFn: () => api.get<DataDirDto[]>(`/data-dirs?serverId=${s.id}`),
+      refetchInterval: (query: { state: { data?: DataDirDto[]; error?: unknown; fetchFailureCount?: number } }) =>
+        queryPollInterval(query.state, {
+          activeIntervalMs: query.state.data?.some((dir) =>
+            dir.desiredState === 'creating' || dir.desiredState === 'removing') ? 2_000 : false,
+          transientBaseIntervalMs: 2_000,
+          transientMaxIntervalMs: 30_000,
+        }),
     })),
   });
 
   const serverDisksResults = useQueries({
     queries: servers.map((s) => ({
       queryKey: queryKeys.servers.disks('user', s.id),
-      queryFn: () => api.get<DataDiskInfo[]>(`/servers/${s.id}/disks`),
-      enabled: s.status === 'online',
+      queryFn: () => api.get<UserDataDiskDto[]>(`/servers/${s.id}/disks`),
+      enabled: s.status === 'online' && s.runtimeReady,
     })),
   });
 
@@ -55,7 +86,8 @@ export default function DataDirsPage() {
     mutationFn: ({ serverId, sourceKind, sourceId, name }: { serverId: string; sourceKind: string; sourceId: string; name: string }) =>
       api.delete<AgentTaskRefResponse>(`/data-dirs/${serverId}/${sourceId}/${name}?sourceKind=${sourceKind}`),
     onSuccess: (res) => {
-      setTimeout(() => qc.invalidateQueries({ queryKey: queryKeys.dataDirs.allUser }), 800);
+      trackTaskId(res.taskId);
+      void qc.invalidateQueries({ queryKey: queryKeys.dataDirs.allUser });
       toast({
         title: '目录删除已排队',
         description: res.taskId ? `任务 ${res.taskId.slice(0, 8)}` : undefined,
@@ -73,14 +105,18 @@ export default function DataDirsPage() {
   // Derive unique remote sources and their dirs (server-agnostic)
   // ---------------------------------------------------------------------------
 
-  const uniqueRemoteSources: { source: MountSourceDto; serverId: string }[] = [];
-  const seenRemoteSourceIds = new Set<string>();
+  const uniqueRemoteSources: { source: MountSourceDto; serverId: string; ready: boolean }[] = [];
+  const remoteSourceIndex = new Map<string, number>();
   servers.forEach((s, i) => {
     const sources = serverMountSourceResults[i]?.data ?? [];
     sources.filter((ms) => ms.kind === 'remote').forEach((ms) => {
-      if (!seenRemoteSourceIds.has(ms.id)) {
-        seenRemoteSourceIds.add(ms.id);
-        uniqueRemoteSources.push({ source: ms, serverId: s.id });
+      const ready = s.status === 'online' && s.runtimeReady;
+      const existingIndex = remoteSourceIndex.get(ms.id);
+      if (existingIndex === undefined) {
+        remoteSourceIndex.set(ms.id, uniqueRemoteSources.length);
+        uniqueRemoteSources.push({ source: ms, serverId: s.id, ready });
+      } else if (ready && !uniqueRemoteSources[existingIndex]?.ready) {
+        uniqueRemoteSources[existingIndex] = { source: ms, serverId: s.id, ready };
       }
     });
   });
@@ -101,7 +137,38 @@ export default function DataDirsPage() {
     (sum, r) => sum + (r.data?.filter((d) => d.sourceKind === 'local').length ?? 0), 0,
   );
   const totalDirs = localDirCount + uniqueRemoteDirs.length;
-  const isRefreshing = serverDirsResults.some((r) => r.isFetching);
+  const allDependentQueries = [
+    ...serverDirsResults,
+    ...serverDisksResults.filter((_, index) => servers[index]?.status === 'online' && servers[index]?.runtimeReady),
+    ...serverMountSourceResults,
+  ];
+  const firstQueryError = serversQuery.error
+    ?? containersQuery.error
+    ?? allDependentQueries.find((result) => result.error)?.error;
+  const isInitialLoading = serversQuery.isLoading
+    || containersQuery.isLoading
+    || allDependentQueries.some((result) => result.isLoading);
+  const isRefreshing = serversQuery.isFetching
+    || containersQuery.isFetching
+    || allDependentQueries.some((result) => result.isFetching);
+
+  if (isInitialLoading) {
+    return <QueryLoadingState label="正在加载数据目录..." />;
+  }
+
+  if (firstQueryError) {
+    return (
+      <QueryErrorState
+        error={firstQueryError}
+        resourceName="数据目录"
+        onRetry={() => {
+          void serversQuery.refetch();
+          void containersQuery.refetch();
+          allDependentQueries.forEach((result) => void result.refetch());
+        }}
+      />
+    );
+  }
 
   return (
     <div className="px-4 py-4 md:px-6 space-y-5 w-full">
@@ -136,7 +203,7 @@ export default function DataDirsPage() {
                 <span className="font-semibold text-foreground/90">远程共享存储</span>
               </div>
               <div className="space-y-2 ml-6">
-                {uniqueRemoteSources.map(({ source, serverId }) => {
+                {uniqueRemoteSources.map(({ source, serverId, ready }) => {
                   const sourceDirs = uniqueRemoteDirs.filter((d) => d.sourceId === source.id);
                   return (
                     <DirSection key={source.id}
@@ -146,10 +213,11 @@ export default function DataDirsPage() {
                       dirs={sourceDirs}
                       containers={containers}
                       onDelete={(name) => {
-                        const dir = sourceDirs.find((d) => d.name === name);
-                        deleteDir.mutate({ serverId: dir?.serverId ?? serverId, sourceKind: 'remote', sourceId: source.id, name });
+                        deleteDir.mutate({ serverId, sourceKind: 'remote', sourceId: source.id, name });
                       }}
                       onNew={() => openCreate('remote', serverId, source.id)}
+                      operationDisabled={!ready || deleteDir.isPending}
+                      operationDisabledReason={!ready ? '当前没有在线且运行时就绪的已分配服务器，暂时无法变更此远程目录。' : undefined}
                     />
                   );
                 })}
@@ -180,17 +248,21 @@ export default function DataDirsPage() {
                       return (
                         <DirSection key={disk.diskId}
                           icon={<FolderOpen className="h-3.5 w-3.5 text-muted-foreground" />}
-                          label={dataDiskDisplayName(disk.mountPoint, disk.label)}
+                          label={disk.displayName}
                           dirs={diskDirs}
                           containers={containers}
                           onDelete={(name) => deleteDir.mutate({ serverId: s.id, sourceKind: 'local', sourceId: disk.diskId, name })}
                           onNew={() => openCreate('local', s.id, disk.diskId)}
+                          operationDisabled={!s.runtimeReady || deleteDir.isPending}
+                          operationDisabledReason={!s.runtimeReady ? '服务器运行时尚未就绪，暂时无法变更目录。' : undefined}
                         />
                       );
                     })
                   ) : (
                     <div className="text-sm text-muted-foreground/70 italic">
-                      该服务器暂无可用本地数据盘，或当前账号未获得本地数据盘权限
+                      {!s.runtimeReady
+                        ? '该服务器运行时尚未就绪，暂时无法读取本地数据盘'
+                        : '该服务器暂无可用本地数据盘，或当前账号未获得本地数据盘权限'}
                     </div>
                   )}
                 </div>
@@ -206,6 +278,7 @@ export default function DataDirsPage() {
           serverId={createSource.serverId}
           sourceId={createSource.sourceId}
           open={showCreate}
+          onTaskId={trackTaskId}
           onOpenChange={(v) => { setShowCreate(v); if (!v) setCreateSource(null); }}
         />
       )}
@@ -214,7 +287,7 @@ export default function DataDirsPage() {
 }
 
 function DirSection({
-  icon, label, description, dirs, containers, onDelete, onNew,
+  icon, label, description, dirs, containers, onDelete, onNew, operationDisabled = false, operationDisabledReason,
 }: {
   icon: React.ReactNode;
   label: string;
@@ -223,6 +296,8 @@ function DirSection({
   containers: ContainerView[];
   onDelete: (name: string) => void;
   onNew: () => void;
+  operationDisabled?: boolean;
+  operationDisabledReason?: string;
 }) {
   const [pendingDelete, setPendingDelete] = useState<string | null>(null);
 
@@ -238,18 +313,19 @@ function DirSection({
             )}
           </div>
         </div>
-        <Button size="sm" variant="outline" className="shrink-0" onClick={onNew}>
+        <Button size="sm" variant="outline" className="shrink-0" onClick={onNew} disabled={operationDisabled}>
           <Plus className="h-4 w-4" />新建
         </Button>
       </div>
+      {operationDisabledReason && (
+        <p className="text-xs text-amber-600">{operationDisabledReason}</p>
+      )}
       {dirs.length === 0 ? (
         <p className="text-xs text-muted-foreground/70 italic px-2">暂无目录</p>
       ) : (
         <div className="space-y-1">
           {dirs.map((d) => {
-            const usingContainers = containers.filter(
-              (c) => c.mounts.some((m) => m.sourceId === d.sourceId && m.dirName === d.name),
-            );
+            const usingContainers = containers.filter((container) => containerUsesDataDir(container, d));
             return (
               <div key={`${d.sourceId}-${d.name}`} className="flex items-center justify-between px-2 py-1 rounded-lg hover:bg-accent">
                 <div className="flex items-center gap-2 min-w-0">
@@ -267,6 +343,7 @@ function DirSection({
                   ))}
                 </div>
                 <Button size="icon" variant="ghost" className="h-8 w-8 text-red-400 hover:text-red-500"
+                  disabled={operationDisabled}
                   onClick={() => setPendingDelete(d.name)}>
                   <Trash2 className="h-4 w-4" />
                 </Button>
@@ -304,20 +381,31 @@ function DirSection({
   );
 }
 
-function CreateDirDialog({ sourceKind, serverId, sourceId, open, onOpenChange }: {
+function CreateDirDialog({ sourceKind, serverId, sourceId, open, onOpenChange, onTaskId }: {
   sourceKind: 'local' | 'remote';
   serverId: string;
   sourceId: string;
   open: boolean;
   onOpenChange: (v: boolean) => void;
+  onTaskId: (taskId?: string) => void;
 }) {
   const qc = useQueryClient();
   const [name, setName] = useState('');
 
+  const parsedRequest = zCreateDataDirRequest.safeParse({ serverId, sourceKind, sourceId, name });
+  const nameError = parsedRequest.success
+    ? null
+    : parsedRequest.error.issues.find((issue) => issue.path[0] === 'name')?.message ?? null;
+
   const { mutate, isPending } = useMutation({
-    mutationFn: () => api.post<DataDirDto & { taskId?: string }>('/data-dirs', { serverId, sourceKind, sourceId, name }),
+    mutationFn: () => {
+      const parsed = zCreateDataDirRequest.safeParse({ serverId, sourceKind, sourceId, name });
+      if (!parsed.success) throw new Error(parsed.error.issues[0]?.message ?? '目录参数无效');
+      return api.post<DataDirDto & { taskId?: string }>('/data-dirs', parsed.data);
+    },
     onSuccess: (res) => {
-      setTimeout(() => qc.invalidateQueries({ queryKey: queryKeys.dataDirs.allUser }), 800);
+      onTaskId(res.taskId);
+      void qc.invalidateQueries({ queryKey: queryKeys.dataDirs.allUser });
       toast({
         title: '目录创建已排队',
         description: res.taskId ? `任务 ${res.taskId.slice(0, 8)}` : undefined,
@@ -341,12 +429,14 @@ function CreateDirDialog({ sourceKind, serverId, sourceId, open, onOpenChange }:
           <div className="space-y-1.5">
             <Label className="text-sm text-foreground/90">目录名</Label>
             <Input placeholder="my-datasets" value={name} onChange={(e) => setName(e.target.value)}
-              onKeyDown={(e) => e.key === 'Enter' && name && mutate()} />
+              aria-invalid={Boolean(nameError)}
+              onKeyDown={(e) => e.key === 'Enter' && parsedRequest.success && mutate()} />
+            {nameError && name.length > 0 && <p className="text-xs text-destructive">只允许小写字母、数字、_ 和 -，长度 1–64</p>}
           </div>
         </div>
         <DialogFooter>
           <Button variant="outline" onClick={() => onOpenChange(false)}>取消</Button>
-          <Button onClick={() => mutate()} disabled={isPending || !name}>
+          <Button onClick={() => mutate()} disabled={isPending || !parsedRequest.success}>
             {isPending ? '创建中...' : '创建'}
           </Button>
         </DialogFooter>

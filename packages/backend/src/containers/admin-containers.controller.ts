@@ -5,24 +5,18 @@ import {
   Param,
   Post,
   Query,
+  Req,
   UseGuards,
+  ForbiddenException,
 } from '@nestjs/common';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard.js';
 import { CapabilitiesGuard } from '../auth/guards/capabilities.guard.js';
 import { RequireCaps } from '../auth/decorators/require-caps.decorator.js';
 import { CurrentUser } from '../auth/decorators/current-user.decorator.js';
 import { UserEntity } from '../entities/user.entity.js';
-import { Capability, zExecSessionRequest } from '@nyabase/common';
-import { z } from 'zod';
+import { Capability, zExecSessionRequest, zUpdateContainerMountsRequest } from '@nyabase/common';
 import { ContainerControlService } from './container-control.service.js';
-
-const zMountInput = z.object({
-  sourceKind: z.enum(['local', 'remote']),
-  sourceId: z.string(),
-  dirName: z.string().min(1).max(64),
-  containerPath: z.string().startsWith('/'),
-});
-const zUpdateMounts = z.array(zMountInput);
+import type { RequestAuthContext } from '../auth/guards/jwt-auth.guard.js';
 
 @Controller('admin/v2/containers')
 @UseGuards(JwtAuthGuard, CapabilitiesGuard)
@@ -66,8 +60,8 @@ export class AdminContainersController {
     @Body() body: unknown,
     @CurrentUser() user: UserEntity,
   ) {
-    zUpdateMounts.parse(body);
-    return this.containerControl.actionForAdmin(containerId, 'updateMounts', user.id, body);
+    const mounts = zUpdateContainerMountsRequest.parse(body);
+    return this.containerControl.actionForAdmin(containerId, 'updateMounts', user.id, mounts);
   }
 
   @Post(':containerId/actions/reconcile-ssh')
@@ -85,8 +79,17 @@ export class AdminContainersController {
     @Param('containerId') containerId: string,
     @Body() body: unknown,
     @CurrentUser() user: UserEntity,
+    @Req() httpRequest: { authContext?: RequestAuthContext },
   ) {
     const request = zExecSessionRequest.parse(body);
-    return this.containerControl.createExecSessionForAdmin(containerId, user.id, request);
+    if (httpRequest.authContext?.kind !== 'jwt') {
+      throw new ForbiddenException('Container console admission requires a browser JWT');
+    }
+    return this.containerControl.createExecSessionForAdmin(
+      containerId,
+      user.id,
+      httpRequest.authContext.authVersion,
+      request,
+    );
   }
 }

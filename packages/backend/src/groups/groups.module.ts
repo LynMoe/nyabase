@@ -1,4 +1,4 @@
-import { Module } from '@nestjs/common';
+import { Module, forwardRef } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { GroupsService } from './groups.service.js';
 import { GroupsController } from './groups.controller.js';
@@ -25,11 +25,11 @@ import { ProxySnapshotNotifierModule } from '../proxy-snapshots/proxy-snapshot-n
       ImageGrantEntity,
       UserEntity,
     ]),
-    AccessModule,
-    AuthModule,
-    AuditModule,
-    QuotaModule,
-    MountSourcesModule,
+    forwardRef(() => AccessModule),
+    forwardRef(() => AuthModule),
+    forwardRef(() => AuditModule),
+    forwardRef(() => QuotaModule),
+    forwardRef(() => MountSourcesModule),
     ProxySnapshotNotifierModule,
   ],
   providers: [GroupsService],

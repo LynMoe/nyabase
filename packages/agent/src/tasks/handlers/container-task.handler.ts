@@ -802,7 +802,7 @@ export class ContainerTaskHandler implements AgentTaskHandler<ContainerTaskResul
           );
         }
         if (registration.projectId !== null) {
-          this.quota.removeExactPathRegistration(quotaPath);
+          await this.quota.removeExactPathRegistration(quotaPath);
           mutated = true;
         }
       } catch (error) {
@@ -1274,9 +1274,9 @@ export class ContainerTaskHandler implements AgentTaskHandler<ContainerTaskResul
           if (sourceError instanceof IncompleteTaskError) throw sourceError;
           throw error;
         }
-        const freshSource = this.dataDirs.inspectSource(mount.sourceId);
+        const freshSource = await this.dataDirs.inspectSourceExact(mount.sourceId);
         let dataDir: unknown = null;
-        try { dataDir = this.dataDirs.inspectDir(mount.sourceId, mount.resourceId); } catch { /* marker may be invalid */ }
+        try { dataDir = await this.dataDirs.inspectDirExact(mount.sourceId, mount.resourceId); } catch { /* marker may be invalid */ }
         this.managed('container_mount_resource_invalid', `DataDir ${mount.resourceId} is missing, unsafe, or has the wrong identity`, {
           source: freshSource,
           dataDir,
@@ -1297,7 +1297,7 @@ export class ContainerTaskHandler implements AgentTaskHandler<ContainerTaskResul
   private async assertMountSourceReady(
     mount: ContainerCreateTaskPayload['mounts'][number],
   ): Promise<void> {
-    const observed = this.dataDirs.inspectSource(mount.sourceId);
+    const observed = await this.dataDirs.inspectSourceExact(mount.sourceId);
     if (!observed.ready || observed.identity !== mount.sourceIdentity) {
       this.incomplete('container_mount_source_unavailable', `Mount source ${mount.sourceId} is unavailable or changed`, {
         ...observed,

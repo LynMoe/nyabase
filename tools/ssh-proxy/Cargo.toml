@@ -12,6 +12,9 @@ anyhow = "1"
 arc-swap = "1"
 base64 = "0.22"
 futures-util = "0.3"
+libc = "0.2"
+rustls = { version = "0.23", features = ["ring"] }
+rustls-pemfile = "2"
 russh = { version = "0.61", features = ["ring"] }
 russh-sftp = "2.1"
 serde = { version = "1", features = ["derive"] }

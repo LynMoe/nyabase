@@ -1,0 +1,29 @@
+{
+  "name": "@nyabase/e2e",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "scripts": {
+    "validate": "node coverage/validate.mjs",
+    "test:evidence": "node --test coverage/validation-mode.test.mjs orchestrator/coverage-evidence.test.mjs orchestrator/full-run-chain.test.mjs orchestrator/release-proof.test.mjs orchestrator/error-diagnostics.test.mjs orchestrator/provider-entrypoint-runner.test.mjs orchestrator/artifact-security.test.mjs orchestrator/agent-task-wire-proxy.test.mjs orchestrator/container-provider-contracts.test.mjs orchestrator/host-nfsd-snapshot.test.mjs orchestrator/release-boundaries.test.mjs",
+    "typecheck": "tsc --noEmit",
+    "test": "playwright test",
+    "test:smoke": "E2E_PROFILE=smoke playwright test",
+    "test:core": "E2E_PROFILE=core playwright test",
+    "test:full": "E2E_PROFILE=full playwright test",
+    "test:recovery": "E2E_PROFILE=recovery playwright test",
+    "verify:smoke": "node coverage/validate.mjs --require-profile=smoke",
+    "verify:core": "node coverage/validate.mjs --require-profile=core",
+    "verify:full": "node coverage/validate.mjs --require-profile=full",
+    "verify:recovery": "node coverage/validate.mjs --require-profile=recovery",
+    "probe:smoke": "E2E_PROFILE=smoke playwright test"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.60.0",
+    "@types/node": "22.15.3",
+    "typescript": "5.8.3"
+  }
+}

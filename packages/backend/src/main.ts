@@ -19,6 +19,9 @@ async function bootstrap() {
   const app = await NestFactory.create<NestExpressApplication>(AppModule, {
     logger: ['error', 'warn', 'log', 'debug'],
   });
+  // Let Nest stop HTTP admission and invoke module destroy hooks on SIGTERM
+  // and SIGINT, allowing gateways, task workers, and metric flushing to drain.
+  app.enableShutdownHooks(['SIGTERM', 'SIGINT']);
   const config = app.get(NyabaseConfigService);
 
   app.setGlobalPrefix('api');

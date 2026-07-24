@@ -76,7 +76,7 @@ export class AgentTaskRunner {
   constructor(
     private readonly handlers: AgentTaskHandlerRegistry,
     private readonly sendResult: TaskResultSender,
-    private readonly assertPhysicalEnvironment: () => void = () => undefined,
+    private readonly assertPhysicalEnvironment: () => void | Promise<void> = () => undefined,
     private readonly beforePhysicalTask?: BeforePhysicalTask,
   ) {}
 
@@ -262,6 +262,8 @@ export class AgentTaskRunner {
   private async run(task: TaskExecutePayload): Promise<TaskResultPayload> {
     let parsingPayload = true;
     let releasePhysicalLease: (() => void) | null = null;
+    let physicalTaskStarted = false;
+    let postCheckStarted = false;
     try {
       const handler = this.handlers.get(task.kind);
       const payload = parseAgentTaskPayload(task.kind, task.payload);
@@ -285,19 +287,30 @@ export class AgentTaskRunner {
         };
       }
       releasePhysicalLease = await this.beforePhysicalTask?.(task, payload) ?? null;
-      this.assertPhysicalEnvironment();
+      await this.assertPhysicalEnvironment();
+      physicalTaskStarted = true;
       const result = await handler.ensure(task.kind, payload);
       await handler.verify(task.kind, payload, result);
       // Never publish success for work that crossed a hot-remount identity
       // boundary after the pre-mutation check.
-      this.assertPhysicalEnvironment();
+      postCheckStarted = true;
+      await this.assertPhysicalEnvironment();
       return {
         taskId: task.taskId,
         payloadHash: task.payloadHash,
         status: 'succeeded',
         result: (result ?? null) as SucceededTaskResult['result'],
       };
-    } catch (error) {
+    } catch (caughtError) {
+      let error = caughtError;
+      if (physicalTaskStarted && !postCheckStarted) {
+        postCheckStarted = true;
+        try {
+          await this.assertPhysicalEnvironment();
+        } catch (environmentError) {
+          error = environmentError;
+        }
+      }
       if (error instanceof MissingAgentTaskHandlerError) {
         return {
           taskId: task.taskId,

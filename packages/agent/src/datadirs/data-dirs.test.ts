@@ -121,6 +121,111 @@ describe('DataDirsManager resource-id layout', () => {
     };
   }
 
+  it('requires one exact stable RemoteFS identity before and after inventory', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'nyabase-remote-data-dirs-'));
+    tempDirs.push(root);
+    const source: DataSource = {
+      kind: 'remote', id: 'remote-a', root, identity: 'remote:nfs:stable', quotaEnabled: false,
+    };
+    const observer = (current: DataSource) => ({
+      sourceId: current.id,
+      kind: current.kind,
+      root: current.root,
+      identity: current.identity,
+      configured: true,
+      exists: true,
+      isDirectory: true,
+      mounted: true,
+      fsType: 'nfs',
+      ready: true,
+      device: String(fs.statSync(current.root).dev),
+    });
+
+    const unavailable = new DataDirsManager(undefined, undefined, observer, {
+      remoteSourceVerifier: vi.fn().mockResolvedValue(null),
+      remoteHelperRunner: vi.fn().mockResolvedValue([]),
+    });
+    unavailable.addSource(source);
+    await expect(unavailable.listAllDirs()).rejects.toThrow('identity is unavailable');
+
+    const swappedVerifier = vi.fn()
+      .mockResolvedValueOnce('mount-id-1')
+      .mockResolvedValueOnce('mount-id-2');
+    const swapped = new DataDirsManager(undefined, undefined, observer, {
+      remoteSourceVerifier: swappedVerifier,
+      remoteHelperRunner: vi.fn().mockResolvedValue([]),
+    });
+    swapped.addSource(source);
+    await expect(swapped.listAllDirs()).rejects.toThrow('changed during list');
+
+    const stable = new DataDirsManager(undefined, undefined, observer, {
+      remoteSourceVerifier: vi.fn().mockResolvedValue('mount-id-1'),
+      remoteHelperRunner: vi.fn().mockResolvedValue([]),
+    });
+    stable.addSource(source);
+    await expect(stable.listAllDirs()).resolves.toEqual([]);
+  });
+
+  it('leaves all remote target syscalls and stalled work inside the bounded helper', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'nyabase-remote-parent-seam-'));
+    tempDirs.push(root);
+    const source: DataSource = {
+      kind: 'remote', id: 'remote-a', root, identity: 'remote:nfs:stable', quotaEnabled: false,
+    };
+    const helper = vi.fn(() => new Promise<never>(() => { /* helper owns the stall */ }));
+    const targetInspector = vi.fn(() => {
+      throw new Error('parent attempted a remote target filesystem syscall');
+    });
+    const manager = new DataDirsManager(undefined, undefined, targetInspector, {
+      remoteSourceVerifier: vi.fn().mockResolvedValue('mount-id-1'),
+      remoteHelperRunner: helper,
+    });
+    manager.addSource(source);
+    let outcome = 'pending';
+    void manager.listAllDirs().then(
+      () => { outcome = 'fulfilled'; },
+      () => { outcome = 'rejected'; },
+    );
+    await vi.waitFor(() => expect(helper).toHaveBeenCalledOnce());
+
+    expect(outcome).toBe('pending');
+    expect(targetInspector).not.toHaveBeenCalled();
+  });
+
+  it('rejects remote helper results that escape or contradict the configured source', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'nyabase-remote-helper-results-'));
+    tempDirs.push(root);
+    const source: DataSource = {
+      kind: 'remote', id: 'remote-a', root, identity: 'remote:nfs:stable', quotaEnabled: false,
+    };
+    let response: unknown;
+    const manager = new DataDirsManager(undefined, undefined, undefined, {
+      remoteSourceVerifier: vi.fn().mockResolvedValue('mount-id-1'),
+      remoteHelperRunner: vi.fn(async () => response),
+    });
+    manager.addSource(source);
+
+    response = {
+      path: '/escaped/data', exists: true, isDirectory: true, uid: 1001, gid: 1001,
+      resourceId: RESOURCE_ID,
+    };
+    await expect(manager.inspectDirExact(source.id, RESOURCE_ID)).rejects.toThrow('invalid observation');
+
+    response = [{
+      sourceKind: 'remote', sourceId: 'other-source', resourceId: RESOURCE_ID,
+      hostPath: join(root, '.nyabase', 'dirs', RESOURCE_ID, 'data'),
+    }];
+    await expect(manager.listAllDirs()).rejects.toThrow('invalid inventory entry');
+
+    response = { path: '/escaped/data', created: true };
+    await expect(manager.createDir(source.id, 1001, RESOURCE_ID, source.identity))
+      .rejects.toThrow('invalid create result');
+
+    response = `${join(root, '.nyabase', 'dirs', RESOURCE_ID, 'data')}/../escaped`;
+    await expect(manager.verifyOwnership(source.id, 1001, RESOURCE_ID, source.identity))
+      .rejects.toThrow('invalid ownership result');
+  });
+
   it('creates, reports, re-enters, and deletes only the resource-id path', async () => {
     const { root, manager } = await fixture();
     const durablePath = join(root, '.nyabase', 'dirs', RESOURCE_ID, 'data');

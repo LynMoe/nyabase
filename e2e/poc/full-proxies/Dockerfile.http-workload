@@ -1,0 +1,7 @@
+FROM node:22-bookworm
+
+WORKDIR /app
+COPY http-workload.mjs /app/http-workload.mjs
+
+USER 65532:65532
+ENTRYPOINT ["node", "/app/http-workload.mjs"]

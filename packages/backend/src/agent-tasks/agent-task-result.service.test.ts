@@ -4,8 +4,10 @@ import {
   AgentTaskStatus,
   MAX_AGENT_TASK_RESULT_BYTES,
   ServerStatus,
+  canonicalJson,
   type TaskResultPayload,
 } from '@nyabase/common';
+import { createHash } from 'node:crypto';
 import { DataSource, type Repository } from 'typeorm';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { AgentTaskEntity } from '../entities/agent-task.entity.js';
@@ -17,7 +19,10 @@ import { AgentTaskResultService } from './agent-task-result.service.js';
 
 const TASK_ID = 'task-a';
 const SERVER_ID = 'server-a';
-const PAYLOAD_HASH = 'payload-hash-a';
+const PAYLOAD = { imageId: 'image-a', dockerRef: 'example.invalid/image:a' };
+const PAYLOAD_HASH = createHash('sha256')
+  .update(canonicalJson({ kind: AgentTaskKind.ImageEnsurePresent, payload: PAYLOAD }))
+  .digest('hex');
 const RESOURCE_KEY = 'image:image-a';
 
 describe('AgentTaskResultService outcome staging', () => {
@@ -27,6 +32,7 @@ describe('AgentTaskResultService outcome staging', () => {
   let worker: { wake: ReturnType<typeof vi.fn> };
   let proxySnapshots: { blockServer: ReturnType<typeof vi.fn> };
   let service: AgentTaskResultService;
+  let decodeWirePayload: (task: AgentTaskEntity) => unknown;
 
   beforeEach(async () => {
     dataSource = new DataSource({
@@ -50,9 +56,11 @@ describe('AgentTaskResultService outcome staging', () => {
     locks = dataSource.getRepository(ResourceLockEntity);
     worker = { wake: vi.fn() };
     proxySnapshots = { blockServer: vi.fn() };
+    decodeWirePayload = (task) => task.payloadJson;
     service = new AgentTaskResultService(
       dataSource,
       worker as unknown as AgentTaskFinalizerWorkerService,
+      { forDispatch: (task: AgentTaskEntity) => decodeWirePayload(task) } as never,
       proxySnapshots as never,
     );
     await insertPendingTask(tasks, locks);
@@ -99,6 +107,125 @@ describe('AgentTaskResultService outcome staging', () => {
     expect(worker.wake).not.toHaveBeenCalled();
   });
 
+  it('rejects and quarantines an ordinary payload changed under its original hash', async () => {
+    const tamperedPayload = { imageId: 'image-a', dockerRef: 'example.invalid/tampered:a' };
+    await tasks.update(TASK_ID, { payloadJson: tamperedPayload });
+
+    await expect(service.handle(SERVER_ID, succeededResult({
+      imageId: 'image-a',
+      dockerId: 'sha256:tampered',
+      dockerRef: tamperedPayload.dockerRef,
+    }))).rejects.toMatchObject({ response: { code: 'TASK_RESULT_SCHEMA_INVALID' } });
+
+    expect(await tasks.findOneByOrFail({ id: TASK_ID })).toMatchObject({
+      status: AgentTaskStatus.Failed,
+      agentResultJson: null,
+      errorJson: { code: 'INVALID_AGENT_RESULT' },
+    });
+    expect(await locks.countBy({ taskId: TASK_ID })).toBe(1);
+    expect(await dataSource.getRepository(ServerEntity).findOneByOrFail({ id: SERVER_ID }))
+      .toMatchObject({ status: ServerStatus.AgentQuarantined });
+  });
+
+  it('rejects and quarantines a wrong kind/resourceType tuple at normal ingress', async () => {
+    await tasks.update(TASK_ID, { resourceType: 'container' });
+    await expect(service.handle(SERVER_ID, succeededResult(imageResult('sha256:a'))))
+      .rejects.toMatchObject({ response: { code: 'TASK_RESULT_SCHEMA_INVALID' } });
+    expect(await tasks.findOneByOrFail({ id: TASK_ID })).toMatchObject({
+      status: AgentTaskStatus.Failed,
+      agentResultJson: null,
+      errorJson: { code: 'INVALID_AGENT_RESULT' },
+    });
+    expect(await locks.countBy({ taskId: TASK_ID })).toBe(1);
+    expect(await dataSource.getRepository(ServerEntity).findOneByOrFail({ id: SERVER_ID }))
+      .toMatchObject({ status: ServerStatus.AgentQuarantined });
+  });
+
+  it('rejects and quarantines an encrypted RemoteFS secret changed under its wire hash', async () => {
+    const originalWire = cephRemotePayload('b3JpZ2luYWwtc2VjcmV0');
+    const changedStored = cephRemotePayload('enc-new');
+    const payloadHash = hashPayload(AgentTaskKind.RemoteFsEnsure, originalWire);
+    await tasks.update(TASK_ID, {
+      kind: AgentTaskKind.RemoteFsEnsure,
+      resourceType: 'remote_fs_mount',
+      resourceId: 'remote-a',
+      payloadJson: changedStored,
+      payloadHash,
+    });
+    decodeWirePayload = () => cephRemotePayload('Y2hhbmdlZC1zZWNyZXQ=');
+
+    await expect(service.handle(SERVER_ID, {
+      taskId: TASK_ID,
+      payloadHash,
+      status: 'succeeded',
+      result: { id: 'remote-a', hostMountPoint: originalWire.hostMountPoint },
+    })).rejects.toMatchObject({ response: { code: 'TASK_RESULT_SCHEMA_INVALID' } });
+
+    expect(await tasks.findOneByOrFail({ id: TASK_ID })).toMatchObject({
+      status: AgentTaskStatus.Failed,
+      agentResultJson: null,
+      errorJson: { code: 'INVALID_AGENT_RESULT' },
+    });
+    expect(await locks.countBy({ taskId: TASK_ID })).toBe(1);
+    expect(await dataSource.getRepository(ServerEntity).findOneByOrFail({ id: SERVER_ID }))
+      .toMatchObject({ status: ServerStatus.AgentQuarantined });
+  });
+
+  it.each([
+    ['4097 characters', dataDirBoundaryPath(4097)],
+    ['NUL', `/bad\0root${DATA_DIR_SUFFIX}`],
+    ['CR', `/bad\rroot${DATA_DIR_SUFFIX}`],
+    ['LF', `/bad\nroot${DATA_DIR_SUFFIX}`],
+    ['relative', `relative${DATA_DIR_SUFFIX}`],
+    ['dot segment', `/root/../root${DATA_DIR_SUFFIX}`],
+    ['duplicate separator', `/root//nested${DATA_DIR_SUFFIX}`],
+    ['near suffix', '/root/.nyabase/dirs/datadir-a/data-near'],
+    ['wrong resource', '/root/.nyabase/dirs/datadir-other/data'],
+  ])('rejects and quarantines normal DataDir ingress with invalid %s path', async (_case, path) => {
+    const payload = dataDirPayload();
+    const payloadHash = hashPayload(AgentTaskKind.DataDirEnsure, payload);
+    await tasks.update(TASK_ID, {
+      kind: AgentTaskKind.DataDirEnsure,
+      resourceType: 'datadir',
+      resourceId: 'datadir-a',
+      payloadJson: payload,
+      payloadHash,
+    });
+
+    await expect(service.handle(SERVER_ID, dataDirFailureResult(payloadHash, path)))
+      .rejects.toMatchObject({ response: { code: 'TASK_RESULT_SCHEMA_INVALID' } });
+    expect(await tasks.findOneByOrFail({ id: TASK_ID })).toMatchObject({
+      status: AgentTaskStatus.Failed,
+      agentResultJson: null,
+      errorJson: { code: 'INVALID_AGENT_RESULT' },
+    });
+    expect(await locks.countBy({ taskId: TASK_ID })).toBe(1);
+    expect(await dataSource.getRepository(ServerEntity).findOneByOrFail({ id: SERVER_ID }))
+      .toMatchObject({ status: ServerStatus.AgentQuarantined });
+  });
+
+  it('accepts normal DataDir failure ingress at exactly 4096 path characters', async () => {
+    const payload = dataDirPayload();
+    const payloadHash = hashPayload(AgentTaskKind.DataDirEnsure, payload);
+    await tasks.update(TASK_ID, {
+      kind: AgentTaskKind.DataDirEnsure,
+      resourceType: 'datadir',
+      resourceId: 'datadir-a',
+      payloadJson: payload,
+      payloadHash,
+    });
+    await expect(service.handle(
+      SERVER_ID,
+      dataDirFailureResult(payloadHash, dataDirBoundaryPath(4096)),
+    )).resolves.toEqual({ taskId: TASK_ID, payloadHash });
+    expect(await tasks.findOneByOrFail({ id: TASK_ID })).toMatchObject({
+      status: AgentTaskStatus.Pending,
+      agentResultJson: expect.objectContaining({ status: 'failed' }),
+    });
+    expect(await locks.countBy({ taskId: TASK_ID })).toBe(1);
+    expect(worker.wake).toHaveBeenCalledTimes(1);
+  });
+
   it('stages immutable managed-failure evidence including observed state', async () => {
     await service.handle(SERVER_ID, failedResult('DOCKER_FAILED', 'docker failed'));
 
@@ -116,20 +243,22 @@ describe('AgentTaskResultService outcome staging', () => {
 
   it('atomically terminalizes runtime cleanup failure, quarantines, and retains its exact lock', async () => {
     const quotaPaths = ['/docker/runtime-a/diff', '/docker/runtime-a/work'];
+    const payload = {
+      containerId: 'container-a',
+      runtimeId: 'runtime-a',
+      serverId: SERVER_ID,
+      observedIp: '10.0.0.9',
+      specGeneration: '3',
+      runtimeSpecHash: 'a'.repeat(64),
+      quotaPaths,
+    };
+    const payloadHash = hashPayload(AgentTaskKind.ContainerRuntimeAbsent, payload);
     await tasks.update(TASK_ID, {
       kind: AgentTaskKind.ContainerRuntimeAbsent,
       resourceType: 'container_runtime',
       resourceId: 'runtime-a',
-      payloadJson: {
-        containerId: 'container-a',
-        runtimeId: 'runtime-a',
-        serverId: SERVER_ID,
-        observedIp: '10.0.0.9',
-        specGeneration: '3',
-        runtimeSpecHash: 'a'.repeat(64),
-        numericOwnerId: 42,
-        quotaPaths,
-      },
+      payloadJson: payload,
+      payloadHash,
     });
     await locks.delete({ taskId: TASK_ID });
     await locks.insert({
@@ -140,7 +269,7 @@ describe('AgentTaskResultService outcome staging', () => {
 
     await expect(service.handle(SERVER_ID, {
       taskId: TASK_ID,
-      payloadHash: PAYLOAD_HASH,
+      payloadHash,
       status: 'failed',
       error: { code: 'identity_changed', message: 'runtime labels changed' },
       observed: {
@@ -150,7 +279,7 @@ describe('AgentTaskResultService outcome staging', () => {
         expectedServerId: SERVER_ID,
         expectedQuotaPaths: quotaPaths,
       },
-    })).resolves.toEqual({ taskId: TASK_ID, payloadHash: PAYLOAD_HASH });
+    })).resolves.toEqual({ taskId: TASK_ID, payloadHash });
 
     expect(await tasks.findOneByOrFail({ id: TASK_ID })).toMatchObject({
       status: AgentTaskStatus.Failed,
@@ -169,24 +298,23 @@ describe('AgentTaskResultService outcome staging', () => {
   });
 
   it('fail-stops a quota mismatch so existing workloads cannot remain routable without enforcement', async () => {
+    const payload = { generation: 7, numericUserId: 42, diskBytes: 8192 };
+    const payloadHash = hashPayload(AgentTaskKind.QuotaEnsure, payload);
     await tasks.update(TASK_ID, {
       kind: AgentTaskKind.QuotaEnsure,
       resourceType: 'quota',
       resourceId: 'user-a',
-      payloadJson: {
-        generation: 7,
-        numericUserId: 42,
-        diskBytes: 8192,
-      },
+      payloadJson: payload,
+      payloadHash,
     });
 
     await expect(service.handle(SERVER_ID, {
       taskId: TASK_ID,
-      payloadHash: PAYLOAD_HASH,
+      payloadHash,
       status: 'failed',
       error: { code: 'quota_mismatch', message: 'hard limit remained zero' },
       observed: { numericUserId: 42, hardLimitBytes: 0 },
-    })).resolves.toEqual({ taskId: TASK_ID, payloadHash: PAYLOAD_HASH });
+    })).resolves.toEqual({ taskId: TASK_ID, payloadHash });
 
     expect(await tasks.findOneByOrFail({ id: TASK_ID })).toMatchObject({
       status: AgentTaskStatus.Failed,
@@ -238,25 +366,28 @@ describe('AgentTaskResultService outcome staging', () => {
       },
     },
   ])('stages safe safety-stop coordination failure $code for finalization and cleanup progress', async ({ code, observed }) => {
+    const payload = {
+      containerId: 'container-a',
+      runtimeId: 'runtime-a',
+      timeoutSeconds: 30,
+    };
+    const payloadHash = hashPayload(AgentTaskKind.ContainerStop, payload);
     await tasks.update(TASK_ID, {
       kind: AgentTaskKind.ContainerStop,
       resourceType: 'container',
       resourceId: 'container-a',
       admissionClass: 'safety',
-      payloadJson: {
-        containerId: 'container-a',
-        runtimeId: 'runtime-a',
-        timeoutSeconds: 30,
-      },
+      payloadJson: payload,
+      payloadHash,
     });
 
     await expect(service.handle(SERVER_ID, {
       taskId: TASK_ID,
-      payloadHash: PAYLOAD_HASH,
+      payloadHash,
       status: 'failed',
       error: { code, message: 'fresh no-touch safety observation' },
       observed,
-    })).resolves.toEqual({ taskId: TASK_ID, payloadHash: PAYLOAD_HASH });
+    })).resolves.toEqual({ taskId: TASK_ID, payloadHash });
 
     expect(await tasks.findOneByOrFail({ id: TASK_ID })).toMatchObject({
       status: AgentTaskStatus.Pending,
@@ -271,21 +402,24 @@ describe('AgentTaskResultService outcome staging', () => {
   });
 
   it('fail-stops a true safety-stop failure that proves the runtime remains running', async () => {
+    const payload = {
+      containerId: 'container-a',
+      runtimeId: 'runtime-a',
+      timeoutSeconds: 30,
+    };
+    const payloadHash = hashPayload(AgentTaskKind.ContainerStop, payload);
     await tasks.update(TASK_ID, {
       kind: AgentTaskKind.ContainerStop,
       resourceType: 'container',
       resourceId: 'container-a',
       admissionClass: 'safety',
-      payloadJson: {
-        containerId: 'container-a',
-        runtimeId: 'runtime-a',
-        timeoutSeconds: 30,
-      },
+      payloadJson: payload,
+      payloadHash,
     });
 
     await service.handle(SERVER_ID, {
       taskId: TASK_ID,
-      payloadHash: PAYLOAD_HASH,
+      payloadHash,
       status: 'failed',
       error: { code: 'container_stop_failed', message: 'runtime remains running' },
       observed: {
@@ -347,14 +481,36 @@ describe('AgentTaskResultService outcome staging', () => {
     expect(worker.wake).not.toHaveBeenCalled();
   });
 
+  it('rejects an incomplete result before retry decisions when durable row identity is corrupt', async () => {
+    await tasks.update(TASK_ID, { resourceType: 'container' });
+
+    await expect(service.handle(SERVER_ID, {
+      taskId: TASK_ID,
+      payloadHash: PAYLOAD_HASH,
+      status: 'incomplete',
+      error: { code: 'INTERRUPTED', message: 'connection reset during ensure' },
+    })).rejects.toMatchObject({ response: { code: 'TASK_RESULT_SCHEMA_INVALID' } });
+
+    expect(await tasks.findOneByOrFail({ id: TASK_ID })).toMatchObject({
+      status: AgentTaskStatus.Failed,
+      resourceType: 'container',
+      agentResultJson: null,
+      errorJson: { code: 'INVALID_AGENT_RESULT' },
+    });
+    expect(await locks.countBy({ taskId: TASK_ID })).toBe(1);
+    expect(await dataSource.getRepository(ServerEntity).findOneByOrFail({ id: SERVER_ID }))
+      .toMatchObject({ status: ServerStatus.AgentQuarantined });
+    expect(worker.wake).not.toHaveBeenCalled();
+  });
+
   it.each([
-    [AgentTaskKind.QuotaEnsure, 'quota_observation_unavailable'],
-    [AgentTaskKind.ContainerCreate, 'container_shared_quota_incomplete'],
-    [AgentTaskKind.DataDirEnsure, 'data_dir_quota_unobservable'],
+    [AgentTaskKind.QuotaEnsure, 'quota', 'quota_observation_unavailable'],
+    [AgentTaskKind.ContainerCreate, 'container', 'container_shared_quota_incomplete'],
+    [AgentTaskKind.DataDirEnsure, 'datadir', 'data_dir_quota_unobservable'],
   ] as const)(
     'immediately fail-stops an unobservable quota boundary for %s',
-    async (kind, code) => {
-      await tasks.update(TASK_ID, { kind });
+    async (kind, resourceType, code) => {
+      await tasks.update(TASK_ID, { kind, resourceType });
 
       await expect(service.handle(SERVER_ID, {
         taskId: TASK_ID,
@@ -389,6 +545,7 @@ describe('AgentTaskResultService outcome staging', () => {
   it('does not spend the uncertainty budget while an unbound delete waits for exact residual cleanup', async () => {
     await tasks.update(TASK_ID, {
       kind: AgentTaskKind.ContainerDelete,
+      resourceType: 'container',
       retryWindowStartedAt: new Date('2026-07-15T00:00:00.000Z'),
       incompleteResultCount: 11,
     });
@@ -577,7 +734,7 @@ async function insertPendingTask(
     resourceId: 'image-a',
     requestedBy: 'user-a',
     requestJson: { imageId: 'image-a' },
-    payloadJson: { imageId: 'image-a', dockerRef: 'example.invalid/image:a' },
+    payloadJson: PAYLOAD,
     payloadHash: PAYLOAD_HASH,
     status: AgentTaskStatus.Pending,
     failureStage: null,
@@ -617,5 +774,62 @@ function imageResult(dockerId: string) {
     imageId: 'image-a',
     dockerId,
     dockerRef: 'example.invalid/image:a',
+  };
+}
+
+function hashPayload(kind: AgentTaskKind, payload: unknown): string {
+  return createHash('sha256').update(canonicalJson({ kind, payload })).digest('hex');
+}
+
+const DATA_DIR_SUFFIX = '/.nyabase/dirs/datadir-a/data';
+
+function dataDirBoundaryPath(length: number): string {
+  return `/${'a'.repeat(length - DATA_DIR_SUFFIX.length - 1)}${DATA_DIR_SUFFIX}`;
+}
+
+function dataDirPayload() {
+  return {
+    resourceId: 'datadir-a',
+    generation: 1,
+    diskId: 'disk-a',
+    sourceIdentity: 'local:xfs:disk-a',
+    quotaRequired: true,
+    uid: 1001,
+    numericUserId: 1001,
+    quotaGeneration: 1,
+    diskBytes: 4096,
+  };
+}
+
+function dataDirFailureResult(payloadHash: string, path: string): TaskResultPayload {
+  return {
+    taskId: TASK_ID,
+    payloadHash,
+    status: 'failed',
+    error: { code: 'data_dir_conflict', message: 'observed physical conflict' },
+    observed: {
+      path,
+      expectedResourceId: 'datadir-a',
+      resourceId: null,
+      exists: false,
+      isDirectory: false,
+      uid: null,
+      gid: null,
+    },
+  };
+}
+
+function cephRemotePayload(secret: string) {
+  return {
+    id: 'remote-a',
+    hostMountPoint: '/mnt/remote-fs/remote-a',
+    options: '',
+    params: {
+      type: 'cephfs' as const,
+      monHosts: 'ceph.internal',
+      exportPath: '/exports/a',
+      clientName: 'nyabase',
+      secret,
+    },
   };
 }

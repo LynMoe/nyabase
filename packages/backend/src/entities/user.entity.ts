@@ -28,6 +28,10 @@ export class UserEntity {
   @Column({ type: 'text', default: UserStatus.Active })
   status: UserStatus;
 
+  /** Monotonic browser-session generation embedded in every access JWT. */
+  @Column({ type: 'int', default: 0 })
+  authVersion: number;
+
   @CreateDateColumn()
   createdAt: Date;
 

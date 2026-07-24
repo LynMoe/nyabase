@@ -10,10 +10,8 @@ import {
   HttpCode,
   ForbiddenException,
   BadRequestException,
-  UnauthorizedException,
 } from '@nestjs/common';
 import { UsersService } from './users.service.js';
-import { AuthService } from '../auth/auth.service.js';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard.js';
 import { CapabilitiesGuard } from '../auth/guards/capabilities.guard.js';
 import { CurrentUser } from '../auth/decorators/current-user.decorator.js';
@@ -25,7 +23,6 @@ import { zUpdateUserRequest, zAddSshKeyRequest } from '@nyabase/common';
 export class UsersController {
   constructor(
     private usersService: UsersService,
-    private authService: AuthService,
   ) {}
 
   @Get(':id')
@@ -43,17 +40,14 @@ export class UsersController {
   ) {
     if (currentUser.id !== id) throw new ForbiddenException();
     const dto = zUpdateUserRequest.parse(body);
-    delete (dto as Record<string, unknown>).status;
-    if (dto.password) {
-      if (!dto.currentPassword) {
-        throw new BadRequestException('Current password is required');
-      }
-      const targetUser = await this.usersService.findById(id);
-      const valid = await this.authService.verifyPassword(targetUser.passwordHash, dto.currentPassword);
-      if (!valid) throw new UnauthorizedException('Current password is incorrect');
+    if (dto.status !== undefined) {
+      throw new BadRequestException('status cannot be changed through the self-service route');
     }
-    delete (dto as Record<string, unknown>).currentPassword;
-    const user = await this.usersService.updateUser(id, dto);
+    const user = await this.usersService.updateSelf(
+      id,
+      dto,
+      dto.currentPassword,
+    );
     return this.usersService.toDto(user);
   }
 
@@ -73,7 +67,7 @@ export class UsersController {
   ) {
     if (currentUser.id !== id) throw new ForbiddenException();
     const dto = zAddSshKeyRequest.parse(body);
-    return this.usersService.addSshKey(id, dto.name, dto.keyText);
+    return this.usersService.addSshKey(id, dto.name, dto.keyText, currentUser.id);
   }
 
   @Delete(':id/ssh-keys/:keyId')
@@ -84,6 +78,6 @@ export class UsersController {
     @CurrentUser() currentUser: UserEntity,
   ) {
     if (currentUser.id !== id) throw new ForbiddenException();
-    await this.usersService.deleteSshKey(id, keyId);
+    await this.usersService.deleteSshKey(id, keyId, currentUser.id);
   }
 }

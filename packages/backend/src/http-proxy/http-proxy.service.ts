@@ -2,8 +2,10 @@ import {
   BadRequestException,
   ConflictException,
   ForbiddenException,
+  Inject,
   Injectable,
   NotFoundException,
+  forwardRef,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import {
@@ -18,6 +20,7 @@ import {
 import { DataSource, EntityManager, In, LessThanOrEqual, Repository } from 'typeorm';
 import {
   ContainerStatus,
+  Capability,
   ContainerPhase,
   ContainerPowerIntent,
   ServerStatus,
@@ -54,6 +57,7 @@ import { HttpHostnameReservationEntity } from '../entities/http-hostname-reserva
 import { NetworkAddressClaimEntity } from '../entities/network-address-claim.entity.js';
 import { ContainerMountEntity } from '../entities/container-mount.entity.js';
 import { RemoteFsServerAssignmentEntity } from '../entities/remote-fs-server-assignment.entity.js';
+import { AccessResolverService } from '../access/access-resolver.service.js';
 import {
   hostnameReuseKey,
   monotonicReuseGuard,
@@ -118,6 +122,11 @@ export class HttpProxyService {
     private usersRepo: Repository<UserEntity>,
     private config: NyabaseConfigService,
     private dataSource: DataSource,
+    // AccessModule reaches AgentGatewayModule, which reaches HttpProxyModule.
+    // The module imports are forward refs, so the constructor token must be
+    // one as well or emitted design metadata is undefined on a cold bootstrap.
+    @Inject(forwardRef(() => AccessResolverService))
+    private accessResolver: AccessResolverService,
     private proxySnapshots: ProxySnapshotNotifierService = {
       isServerBlocked: () => false,
     } as unknown as ProxySnapshotNotifierService,
@@ -133,7 +142,7 @@ export class HttpProxyService {
 
   async createBinding(requesterId: string, input: unknown): Promise<HttpProxyBindingDto> {
     const dto = parseBindingInput(input, false);
-    const hostname = normalizeHttpProxyHostname(dto.hostname);
+    const hostname = parseHttpProxyHostname(dto.hostname);
     const binding = await runSerializedTransaction(this.dataSource, async (manager) => {
       if (await manager.count(HttpProxyBindingEntity) >= MAX_HTTP_PROXY_ROUTES) {
         throw new ConflictException({
@@ -147,6 +156,7 @@ export class HttpProxyService {
       if (container.ownerId !== requesterId) {
         throw new ForbiddenException('Container is not owned by current user');
       }
+      await this.assertRequesterActive(manager, requesterId);
       const bindingId = randomUUID();
       await this.reserveHostname(manager, hostname, requesterId, bindingId);
       return manager.save(HttpProxyBindingEntity, manager.create(HttpProxyBindingEntity, {
@@ -169,8 +179,9 @@ export class HttpProxyService {
       if (binding.ownerId !== requesterId) {
         throw new ForbiddenException('Only binding owner can edit it');
       }
+      await this.assertRequesterActive(manager, requesterId);
       if (dto.hostname !== undefined) {
-        const hostname = normalizeHttpProxyHostname(dto.hostname);
+        const hostname = parseHttpProxyHostname(dto.hostname);
         const pool = await this.enabledPoolForHostname(manager, hostname);
         if (hostname !== binding.hostname) {
           await this.reserveHostname(manager, hostname, requesterId, binding.id);
@@ -200,6 +211,7 @@ export class HttpProxyService {
       if (binding.ownerId !== requesterId) {
         throw new ForbiddenException('Only binding owner can delete it');
       }
+      await this.assertRequesterActive(manager, requesterId);
       await this.releaseHostname(manager, binding);
       await manager.delete(HttpProxyBindingEntity, { id });
     });
@@ -210,9 +222,9 @@ export class HttpProxyService {
     return rows.map((row) => this.domainPoolDto(row));
   }
 
-  async createDomainPool(input: unknown): Promise<HttpDomainPoolDto> {
+  async createDomainPool(actorId: string, input: unknown): Promise<HttpDomainPoolDto> {
     const dto = parseDomainPoolInput(input, false);
-    const wildcardDomain = normalizeHttpProxyWildcardDomain(dto.wildcardDomain);
+    const wildcardDomain = parseHttpProxyWildcardDomain(dto.wildcardDomain);
     const certificate = this.certFields(
       dto.certificatePem,
       dto.privateKeyPem,
@@ -221,66 +233,92 @@ export class HttpProxyService {
     if (dto.httpsEnabled && !certificate.certificatePem) {
       throw new BadRequestException('HTTPS requires a valid certificate and private key');
     }
-    const row = await runSerializedTransaction(this.dataSource, async (manager) => {
-      if (await manager.count(HttpDomainPoolEntity) >= MAX_HTTP_PROXY_DOMAIN_POOLS) {
-        throw new ConflictException({
-          code: 'HTTP_PROXY_DOMAIN_POOL_CAPACITY_REACHED',
-          message: `At most ${MAX_HTTP_PROXY_DOMAIN_POOLS} HTTP domain pools are supported`,
-        });
-      }
-      return manager.save(HttpDomainPoolEntity, manager.create(HttpDomainPoolEntity, {
-        id: randomUUID(),
-        wildcardDomain,
-        enabled: dto.enabled ?? true,
-        httpsEnabled: dto.httpsEnabled ?? false,
-        ...certificate,
-      }));
-    });
-    return this.domainPoolDto(row);
-  }
-
-  async updateDomainPool(id: string, input: unknown): Promise<HttpDomainPoolDto> {
-    const dto = parseDomainPoolInput(input, true);
-    const row = await runSerializedTransaction(this.dataSource, async (manager) => {
-      const current = await manager.findOneBy(HttpDomainPoolEntity, { id });
-      if (!current) throw new NotFoundException('Domain pool not found');
-      if (dto.wildcardDomain !== undefined) {
-        const wildcardDomain = normalizeHttpProxyWildcardDomain(dto.wildcardDomain);
-        if (wildcardDomain !== current.wildcardDomain) {
-          const bindingCount = await manager.count(HttpProxyBindingEntity, {
-            where: { domainPoolId: id },
-          });
-          if (bindingCount > 0) {
-            throw new ConflictException('Domain pool wildcard cannot change while bindings exist');
-          }
-          current.wildcardDomain = wildcardDomain;
-        }
-      }
-      if (dto.enabled !== undefined) current.enabled = dto.enabled;
-      if (dto.httpsEnabled !== undefined) current.httpsEnabled = dto.httpsEnabled;
-      if (dto.certificatePem !== undefined || dto.privateKeyPem !== undefined) {
-        if (dto.certificatePem === undefined || dto.privateKeyPem === undefined) {
-          throw new BadRequestException(
-            'certificatePem and privateKeyPem must be updated together',
-          );
-        }
-        Object.assign(
-          current,
-          this.certFields(dto.certificatePem, dto.privateKeyPem, current.wildcardDomain),
+    let row: HttpDomainPoolEntity;
+    try {
+      row = await runSerializedTransaction(this.dataSource, async (manager) => {
+        await this.accessResolver.assertActorCapabilitiesInTransaction(
+          manager, actorId, [Capability.ManageSystemSettings],
         );
-      } else if (current.certificatePem) {
-        this.validateCertificate(current.certificatePem, current.wildcardDomain);
-      }
-      if (current.httpsEnabled && (!current.certificatePem || !current.encryptedPrivateKeyPem)) {
-        throw new BadRequestException('HTTPS requires a valid certificate and private key');
-      }
-      return manager.save(HttpDomainPoolEntity, current);
-    });
+        if (await manager.findOneBy(HttpDomainPoolEntity, { wildcardDomain })) {
+          throw duplicateDomainPoolConflict();
+        }
+        if (await manager.count(HttpDomainPoolEntity) >= MAX_HTTP_PROXY_DOMAIN_POOLS) {
+          throw new ConflictException({
+            code: 'HTTP_PROXY_DOMAIN_POOL_CAPACITY_REACHED',
+            message: `At most ${MAX_HTTP_PROXY_DOMAIN_POOLS} HTTP domain pools are supported`,
+          });
+        }
+        return manager.save(HttpDomainPoolEntity, manager.create(HttpDomainPoolEntity, {
+          id: randomUUID(),
+          wildcardDomain,
+          enabled: dto.enabled ?? true,
+          httpsEnabled: dto.httpsEnabled ?? false,
+          ...certificate,
+        }));
+      });
+    } catch (error) {
+      if (isUniqueConstraintViolation(error)) throw duplicateDomainPoolConflict();
+      throw error;
+    }
     return this.domainPoolDto(row);
   }
 
-  async deleteDomainPool(id: string): Promise<void> {
+  async updateDomainPool(actorId: string, id: string, input: unknown): Promise<HttpDomainPoolDto> {
+    const dto = parseDomainPoolInput(input, true);
+    let row: HttpDomainPoolEntity;
+    try {
+      row = await runSerializedTransaction(this.dataSource, async (manager) => {
+        await this.accessResolver.assertActorCapabilitiesInTransaction(
+          manager, actorId, [Capability.ManageSystemSettings],
+        );
+        const current = await manager.findOneBy(HttpDomainPoolEntity, { id });
+        if (!current) throw new NotFoundException('Domain pool not found');
+        if (dto.wildcardDomain !== undefined) {
+          const wildcardDomain = parseHttpProxyWildcardDomain(dto.wildcardDomain);
+          if (wildcardDomain !== current.wildcardDomain) {
+            const owner = await manager.findOneBy(HttpDomainPoolEntity, { wildcardDomain });
+            if (owner && owner.id !== current.id) throw duplicateDomainPoolConflict();
+            const bindingCount = await manager.count(HttpProxyBindingEntity, {
+              where: { domainPoolId: id },
+            });
+            if (bindingCount > 0) {
+              throw new ConflictException('Domain pool wildcard cannot change while bindings exist');
+            }
+            current.wildcardDomain = wildcardDomain;
+          }
+        }
+        if (dto.enabled !== undefined) current.enabled = dto.enabled;
+        if (dto.httpsEnabled !== undefined) current.httpsEnabled = dto.httpsEnabled;
+        if (dto.certificatePem !== undefined || dto.privateKeyPem !== undefined) {
+          if (dto.certificatePem === undefined || dto.privateKeyPem === undefined) {
+            throw new BadRequestException(
+              'certificatePem and privateKeyPem must be updated together',
+            );
+          }
+          Object.assign(
+            current,
+            this.certFields(dto.certificatePem, dto.privateKeyPem, current.wildcardDomain),
+          );
+        } else if (current.certificatePem) {
+          this.validateCertificate(current.certificatePem, current.wildcardDomain);
+        }
+        if (current.httpsEnabled && (!current.certificatePem || !current.encryptedPrivateKeyPem)) {
+          throw new BadRequestException('HTTPS requires a valid certificate and private key');
+        }
+        return manager.save(HttpDomainPoolEntity, current);
+      });
+    } catch (error) {
+      if (isUniqueConstraintViolation(error)) throw duplicateDomainPoolConflict();
+      throw error;
+    }
+    return this.domainPoolDto(row);
+  }
+
+  async deleteDomainPool(actorId: string, id: string): Promise<void> {
     await runSerializedTransaction(this.dataSource, async (manager) => {
+      await this.accessResolver.assertActorCapabilitiesInTransaction(
+        manager, actorId, [Capability.ManageSystemSettings],
+      );
       const row = await manager.findOneBy(HttpDomainPoolEntity, { id });
       if (!row) throw new NotFoundException('Domain pool not found');
       const count = await manager.count(HttpProxyBindingEntity, { where: { domainPoolId: id } });
@@ -712,10 +750,21 @@ export class HttpProxyService {
     const secret = this.config.get<string>('ssh.keyEncryptionSecret') || this.config.get<string>('auth.jwtSecret');
     return createHash('sha256').update(secret).digest();
   }
+
+  private async assertRequesterActive(manager: EntityManager, requesterId: string): Promise<void> {
+    const requester = await manager.findOneBy(UserEntity, {
+      id: requesterId,
+      status: UserStatus.Active,
+    });
+    if (!requester) {
+      throw new ForbiddenException('Current user is no longer active');
+    }
+  }
 }
 
 function parseBindingInput(input: unknown, partial: boolean) {
   const record = objectInput(input);
+  assertExactKeys(record, ['hostname', 'containerId', 'targetPort']);
   const parsed: {
     hostname?: string;
     containerId?: string;
@@ -724,11 +773,21 @@ function parseBindingInput(input: unknown, partial: boolean) {
   if (!partial || record.hostname !== undefined) parsed.hostname = stringField(record.hostname, 'hostname');
   if (!partial || record.containerId !== undefined) parsed.containerId = stringField(record.containerId, 'containerId');
   if (!partial || record.targetPort !== undefined) parsed.targetPort = portField(record.targetPort);
+  if (partial && Object.keys(parsed).length === 0) {
+    throw new BadRequestException('At least one binding field must be updated');
+  }
   return parsed as typeof parsed & { hostname: string; containerId: string; targetPort: number };
 }
 
 function parseDomainPoolInput(input: unknown, partial: boolean) {
   const record = objectInput(input);
+  assertExactKeys(record, [
+    'wildcardDomain',
+    'enabled',
+    'httpsEnabled',
+    'certificatePem',
+    'privateKeyPem',
+  ]);
   const parsed: {
     wildcardDomain?: string;
     enabled?: boolean;
@@ -753,7 +812,18 @@ function parseDomainPoolInput(input: unknown, partial: boolean) {
       MAX_HTTP_PROXY_PRIVATE_KEY_PEM_LENGTH,
     );
   }
+  if (partial && Object.keys(parsed).length === 0) {
+    throw new BadRequestException('At least one domain pool field must be updated');
+  }
   return parsed as typeof parsed & { wildcardDomain: string };
+}
+
+function assertExactKeys(record: Record<string, unknown>, allowed: readonly string[]): void {
+  const allowedSet = new Set(allowed);
+  const unknown = Object.keys(record).filter((key) => !allowedSet.has(key));
+  if (unknown.length > 0) {
+    throw new BadRequestException(`Unknown request field: ${unknown.sort()[0]}`);
+  }
 }
 
 function objectInput(input: unknown): Record<string, unknown> {
@@ -789,4 +859,47 @@ function portField(value: unknown): number {
     throw new BadRequestException('targetPort must be an integer between 1 and 65535');
   }
   return value;
+}
+
+function parseHttpProxyHostname(value: string): string {
+  try {
+    return normalizeHttpProxyHostname(value);
+  } catch {
+    throw new BadRequestException({
+      code: 'INVALID_HTTP_PROXY_HOSTNAME',
+      message: 'hostname must be a valid ASCII DNS hostname without a wildcard',
+    });
+  }
+}
+
+function parseHttpProxyWildcardDomain(value: string): string {
+  try {
+    return normalizeHttpProxyWildcardDomain(value);
+  } catch {
+    throw new BadRequestException({
+      code: 'INVALID_HTTP_PROXY_WILDCARD_DOMAIN',
+      message: 'wildcardDomain must be a valid ASCII DNS wildcard domain',
+    });
+  }
+}
+
+function duplicateDomainPoolConflict(): ConflictException {
+  return new ConflictException({
+    code: 'HTTP_PROXY_DOMAIN_POOL_EXISTS',
+    message: 'A domain pool already owns this wildcard domain',
+  });
+}
+
+function isUniqueConstraintViolation(error: unknown): boolean {
+  const record = error && typeof error === 'object'
+    ? error as Record<string, unknown>
+    : null;
+  const driver = record?.driverError && typeof record.driverError === 'object'
+    ? record.driverError as Record<string, unknown>
+    : null;
+  const code = String(driver?.code ?? record?.code ?? '');
+  const message = String(driver?.message ?? record?.message ?? '');
+  return code === '23505'
+    || code === 'SQLITE_CONSTRAINT_UNIQUE'
+    || (code === 'SQLITE_CONSTRAINT' && /unique/i.test(message));
 }

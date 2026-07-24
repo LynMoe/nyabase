@@ -7,6 +7,7 @@ import { join } from 'path';
 import { PassThrough } from 'stream';
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { unwrapFencedCommandForTest } from '../physical-mutation-fence.js';
+import { PROJECTS_FILE_AMBIGUITY_EXIT_CODE } from './projects-file-helper.js';
 import {
   normalizeXfsQuotaBytes,
   spawnPinnedXfsCommand,
@@ -33,8 +34,7 @@ const testFencePath = join(testFenceRoot, 'physical-mutation.lock');
 const existsSyncMock = vi.mocked(fs.existsSync);
 const realpathSyncMock = vi.mocked(fs.realpathSync);
 const readFileSyncMock = vi.mocked(fs.readFileSync);
-const writeFileSyncMock = vi.mocked(fs.writeFileSync);
-const renameSyncMock = vi.mocked(fs.renameSync);
+let projectsFileContents = '';
 
 const DEFAULT_MOUNTINFO = [
   '23 18 0:20 / / rw,relatime - ext4 /dev/root rw',
@@ -44,6 +44,7 @@ const DEFAULT_MOUNTINFO = [
 function mockMountInfo(mountInfo = DEFAULT_MOUNTINFO): void {
   readFileSyncMock.mockImplementation((filePath) => {
     if (filePath === '/proc/self/mountinfo') return mountInfo;
+    if (filePath === '/etc/projects') return projectsFileContents;
     return '';
   });
 }
@@ -53,7 +54,36 @@ function mockExecFile(
 ): void {
   spawnMock.mockImplementation(((cmd: string, args: readonly string[]) => {
     const logical = unwrapFencedCommandForTest(cmd, args);
-    const result = handler(logical.executable, logical.args);
+    let result;
+    if (logical.executable === process.execPath && logical.args[0] === '-e') {
+      const operation = logical.args[2];
+      const expectedText = logical.args[3];
+      const durablePath = logical.args[4];
+      const lines = projectsFileContents.split('\n');
+      const matches = lines.flatMap((line, lineIndex) => {
+        const separator = line.indexOf(':');
+        return separator >= 0 && line.slice(separator + 1) === durablePath
+          ? [{ projectId: Number(line.slice(0, separator)), lineIndex }]
+          : [];
+      });
+      if (matches.length > 1) {
+        result = { error: new Error('ambiguous duplicate registrations') };
+      } else if (matches[0] && expectedText !== '*' && matches[0].projectId !== Number(expectedText)) {
+        result = { error: new Error('conflicting path owner') };
+      } else {
+        if (operation === 'ensure' && !matches[0]) {
+          const separator = projectsFileContents && !projectsFileContents.endsWith('\n') ? '\n' : '';
+          projectsFileContents += `${separator}${expectedText}:${durablePath}\n`;
+        } else if (operation === 'remove' && matches[0]) {
+          projectsFileContents = lines
+            .filter((_line, index) => index !== matches[0]!.lineIndex)
+            .join('\n');
+        }
+        result = { stdout: '{"changed":true}\n' };
+      }
+    } else {
+      result = handler(logical.executable, logical.args);
+    }
     const child = new EventEmitter() as ChildProcess;
     const stdout = new PassThrough();
     const stderr = new PassThrough();
@@ -112,6 +142,12 @@ function newManager(
     ...options,
     spawnProcess: options.spawnProcess ?? spawnMock as unknown as typeof spawn,
     physicalMutationLockPath: options.physicalMutationLockPath ?? testFencePath,
+    readProjectsFile: options.readProjectsFile ?? (() => ({
+      exists: true,
+      contents: projectsFileContents,
+      mode: 0o644,
+      identity: null,
+    })),
   });
 }
 
@@ -124,10 +160,30 @@ function okQuotaState(accounting = 'ON', enforcement = 'ON'): string {
 }
 
 describe('XFS quota unit normalization and registration cleanup', () => {
+  it('proves atomic exchange capability before startup projects recovery', () => {
+    const order: string[] = [];
+    const manager = newManager('/data', [], {
+      assertAtomicExchangeCapability: () => order.push('capability'),
+      readProjectsFile: () => {
+        order.push('recover-read');
+        return { exists: false, contents: '', mode: 0o644, identity: null };
+      },
+    });
+
+    manager.recoverProjectsFileState();
+    expect(order).toEqual(['capability', 'recover-read']);
+  });
+
   beforeEach(() => {
     vi.clearAllMocks();
+    spawnMock.mockReset();
+    projectsFileContents = '';
     existsSyncMock.mockReturnValue(true);
     realpathSyncMock.mockImplementation((value) => String(value));
+    mockMountInfo();
+    mockExecFile((cmd, args) => {
+      throw new Error(`unexpected command ${cmd} ${args.join(' ')}`);
+    });
   });
 
   it('rounds byte limits up to the 1 KiB units reported by xfs_quota', () => {
@@ -138,60 +194,46 @@ describe('XFS quota unit normalization and registration cleanup', () => {
     expect(() => normalizeXfsQuotaBytes(-1)).toThrow('Invalid quota byte limit');
   });
 
-  it('removes only the exact user/path registration from /etc/projects', () => {
-    readFileSyncMock.mockReturnValue([
+  it('rejects ambiguous ownership instead of removing only one matching owner', async () => {
+    projectsFileContents = [
       '10007:/data/target',
       '10007:/data/target-child',
       '10008:/data/target',
       '',
-    ].join('\n'));
+    ].join('\n');
 
-    newManager('/data').removePathFromProject(7, '/data/target');
-
-    expect(writeFileSyncMock).toHaveBeenCalledWith(
-      `/etc/projects.nyabase-${process.pid}.tmp`,
-      '10007:/data/target-child\n10008:/data/target\n',
-      { mode: 0o644 },
-    );
-    expect(renameSyncMock).toHaveBeenCalledWith(
-      `/etc/projects.nyabase-${process.pid}.tmp`,
-      '/etc/projects',
-    );
+    await expect(newManager('/data').removePathFromProject(7, '/data/target'))
+      .rejects.toThrow('Failed to remove exact path');
+    expect(projectsFileContents).toContain('10007:/data/target');
   });
 
-  it('removes one exact path without guessing its numeric owner', () => {
-    readFileSyncMock.mockReturnValue([
+  it('removes one exact path without guessing its numeric owner', async () => {
+    projectsFileContents = [
       '10007:/data/target',
       '10008:/data/sibling',
       '',
-    ].join('\n'));
+    ].join('\n');
 
     const manager = newManager('/data');
     expect(manager.inspectExactPathRegistration('/data/target')).toEqual({
       path: '/data/target',
       projectId: 10007,
     });
-    expect(manager.removeExactPathRegistration('/data/target')).toEqual({
+    await expect(manager.removeExactPathRegistration('/data/target')).resolves.toEqual({
       path: '/data/target',
       projectId: 10007,
     });
-
-    expect(writeFileSyncMock).toHaveBeenCalledWith(
-      `/etc/projects.nyabase-${process.pid}.tmp`,
-      '10008:/data/sibling\n',
-      { mode: 0o644 },
-    );
+    expect(projectsFileContents).toBe('10008:/data/sibling\n');
   });
 
-  it('does not rewrite /etc/projects when the exact path is absent', () => {
-    readFileSyncMock.mockReturnValue('10007:/data/other\n');
+  it('does not rewrite /etc/projects when the exact path is absent', async () => {
+    projectsFileContents = '10007:/data/other\n';
 
-    expect(newManager('/data').removeExactPathRegistration('/data/target')).toEqual({
+    await expect(newManager('/data').removeExactPathRegistration('/data/target')).resolves.toEqual({
       path: '/data/target',
       projectId: null,
     });
-    expect(writeFileSyncMock).not.toHaveBeenCalled();
-    expect(renameSyncMock).not.toHaveBeenCalled();
+    expect(projectsFileContents).toBe('10007:/data/other\n');
   });
 
   it.each([
@@ -201,13 +243,12 @@ describe('XFS quota unit normalization and registration cleanup', () => {
     ['foreign project id', '9999:/data/target\n'],
     ['non-canonical project id', '010007:/data/target\n'],
     ['out-of-range project id', '4294967296:/data/target\n'],
-  ])('fails closed without a write for %s', (_caseName, projects) => {
-    readFileSyncMock.mockReturnValue(projects);
+  ])('fails closed without a write for %s', async (_caseName, projects) => {
+    projectsFileContents = projects;
     const manager = newManager('/data');
 
-    expect(() => manager.removeExactPathRegistration('/data/target')).toThrow();
-    expect(writeFileSyncMock).not.toHaveBeenCalled();
-    expect(renameSyncMock).not.toHaveBeenCalled();
+    await expect(manager.removeExactPathRegistration('/data/target')).rejects.toThrow();
+    expect(projectsFileContents).toBe(projects);
   });
 });
 
@@ -215,6 +256,7 @@ describe('XfsQuotaManager fail-closed command handling', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     spawnMock.mockReset();
+    projectsFileContents = '';
     existsSyncMock.mockReturnValue(false);
     realpathSyncMock.mockImplementation((value) => String(value));
     mockMountInfo();
@@ -260,11 +302,7 @@ describe('XfsQuotaManager fail-closed command handling', () => {
       /read project metadata for \/data\/users\/alice failed: command="xfs_io -c stat \/data\/users\/alice"; code=5; message=xfs_io exited with code 5; stderr=stat failed/,
     );
 
-    expect(writeFileSyncMock).toHaveBeenCalledWith(
-      `/etc/projects.nyabase-${process.pid}.tmp`,
-      '10007:/data/users/alice\n',
-      { mode: 0o644 },
-    );
+    expect(projectsFileContents).toBe('10007:/data/users/alice\n');
   });
 
   it('fail-stops a stalled quota mutation, poisons the manager, and never settles either call', async () => {
@@ -408,6 +446,33 @@ describe('XfsQuotaManager fail-closed command handling', () => {
     expect(outcome).toBe('pending');
   });
 
+  it('fail-stops when the projects CAS helper retains ambiguous recovery state', async () => {
+    projectsFileContents = '10007:/data/target\n';
+    const current = fakeChild();
+    const fatalHook = vi.fn();
+    spawnMock.mockImplementation(() => {
+      queueMicrotask(() => {
+        current.stderr.end('[projects-file] recovery retained');
+        current.stdout.end();
+        current.child.emit('close', PROJECTS_FILE_AMBIGUITY_EXIT_CODE, null);
+      });
+      return current.child;
+    });
+    const manager = newManager('/data', [], { commandTimeoutMs: 1_000, fatalHook });
+
+    const mutation = manager.removeExactPathRegistration('/data/target');
+    let outcome = 'pending';
+    void mutation.then(() => { outcome = 'fulfilled'; }, () => { outcome = 'rejected'; });
+    await vi.waitFor(() => expect(fatalHook).toHaveBeenCalledOnce());
+
+    expect(current.kill).toHaveBeenCalledWith('SIGKILL');
+    expect(fatalHook.mock.calls[0][0]).toMatchObject({
+      mode: 'mutation',
+      reason: expect.stringContaining('recovery retained'),
+    });
+    expect(outcome).toBe('pending');
+  });
+
   it('does not turn a quota report failure into a successful empty usage snapshot', async () => {
     mockExecFile(() => ({ error: Object.assign(new Error('report failed'), { code: 5 }) }));
     await expect(newManager('/data').getAllUsages()).rejects.toThrow(
@@ -425,6 +490,47 @@ describe('XfsQuotaManager fail-closed command handling', () => {
   it('accepts a recognized report header when no project rows exist', async () => {
     mockExecFile(() => ({ stdout: 'Project quota on /data (/dev/sdb)\n' }));
     await expect(newManager('/data').getAllUsages()).resolves.toEqual([]);
+  });
+
+  it('ignores a syntactically valid external project row from a real XFS report', async () => {
+    mockExecFile(() => ({
+      stdout: [
+        'Project quota on /data (/dev/loop0)',
+        '#0                 168          0          0     00 [--------]',
+        '#10007               2          0       5120     00 [--------]',
+        '',
+      ].join('\n'),
+    }));
+
+    await expect(newManager('/data').getAllUsages()).resolves.toEqual([
+      {
+        numericUserId: 7,
+        projectId: 10007,
+        usedBytes: 2048,
+        hardLimitBytes: 5 * 1024 * 1024,
+      },
+    ]);
+  });
+
+  it('accepts a headerless real XFS report containing only project zero', async () => {
+    mockExecFile(() => ({
+      stdout: '#0                 168          0          0     00 [--------]\n',
+    }));
+
+    await expect(newManager('/data').getAllUsages()).resolves.toEqual([]);
+  });
+
+  it.each([
+    '#abc 168 0 0 00 [--------]',
+    '#0 invalid 0 0 00 [--------]',
+    '#0 168 invalid 0 00 [--------]',
+    '#0 168 0 invalid 00 [--------]',
+  ])('rejects a malformed hash-prefixed quota row: %s', async (row) => {
+    mockExecFile(() => ({ stdout: `Project quota on /data (/dev/loop0)\n${row}\n` }));
+
+    await expect(newManager('/data').getAllUsages()).rejects.toThrow(
+      `[XFS] Malformed project row in quota report on /data: ${row}`,
+    );
   });
 });
 
@@ -487,6 +593,33 @@ describe('XfsQuotaManager setLimit report verification', () => {
     });
 
     await expect(newManager('/data').setLimit(5, 20 * 1024 * 1024)).resolves.toBeUndefined();
+  });
+
+  it('accepts the real empty filtered report after clearing a limit to zero', async () => {
+    mockExecFile((cmd, args) => {
+      if (cmd !== 'xfs_quota') throw new Error(`unexpected executable ${cmd}`);
+      switch (args[2]) {
+        case 'state -p':
+          return { stdout: okQuotaState() };
+        case 'limit -p bhard=0k 10005':
+          return {};
+        case 'report -N -p -b -n -L 10005 -U 10005':
+          // Verified against loop-backed XFS: -L/-U emits only a newline when
+          // a zero/unlimited project has no report row.
+          return { stdout: '\n' };
+        default:
+          throw new Error(`unexpected quota command ${args[2]}`);
+      }
+    });
+
+    const manager = newManager('/data');
+    await expect(manager.setLimit(5, 0)).resolves.toBeUndefined();
+    await expect(manager.getUsageForUser(5)).resolves.toEqual({
+      numericUserId: 5,
+      projectId: 10005,
+      usedBytes: 0,
+      hardLimitBytes: 0,
+    });
   });
 
   it('deduplicates multiple configured mount aliases for one XFS filesystem', async () => {
@@ -567,6 +700,7 @@ describe('XfsQuotaManager addPathToProject verification', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     spawnMock.mockReset();
+    projectsFileContents = '';
     existsSyncMock.mockReturnValue(false);
     realpathSyncMock.mockImplementation((value) => String(value));
     mockMountInfo();
@@ -606,11 +740,7 @@ describe('XfsQuotaManager addPathToProject verification', () => {
       ['-x', '-c', 'report -N -p -b -n -L 10007 -U 10007', '/data'],
       { detached: true, stdio: ['ignore', 'pipe', 'pipe'] },
     ]);
-    expect(writeFileSyncMock).toHaveBeenCalledWith(
-      `/etc/projects.nyabase-${process.pid}.tmp`,
-      '10007:/data/users/alice\n',
-      { mode: 0o644 },
-    );
+    expect(projectsFileContents).toBe('10007:/data/users/alice\n');
   });
 
   it('rewrites a parent pinned path to child fd 3 for both mutation and observation', async () => {
@@ -640,8 +770,9 @@ describe('XfsQuotaManager addPathToProject verification', () => {
         '/data/users/alice',
       )).resolves.toBeUndefined();
 
-      const pinnedCalls = logicalSpawnCalls().filter(([, args]) =>
-        args.some((arg) => String(arg).includes('/proc/self/fd/3')));
+      const pinnedCalls = logicalSpawnCalls().filter(([cmd, args]) =>
+        (cmd === 'xfs_quota' || cmd === 'xfs_io')
+        && args.some((arg) => String(arg).includes('/proc/self/fd/3')));
       expect(pinnedCalls).toHaveLength(2);
       for (const call of pinnedCalls) {
         expect((call[2] as { stdio: unknown[] }).stdio).toEqual([
@@ -676,6 +807,7 @@ describe('XfsQuotaManager addPathToProject verification', () => {
   });
 
   it('reports whether an existing path is assigned to the expected project', async () => {
+    projectsFileContents = '10007:/data/users/alice\n';
     mockExecFile((cmd, args) => {
       if (cmd === 'xfs_io' && args[1] === 'stat') {
         return { stdout: 'fsxattr.projid = 10007\nfsxattr.xflags = 0x20000000 [P]\n' };
@@ -751,6 +883,17 @@ describe('XfsQuotaManager quota mount resolution', () => {
         hardLimitBytes: 5 * 1024 * 1024,
       },
     ]);
+  });
+
+  it('rejects equal-depth stacked quota mounts instead of selecting the first row', async () => {
+    mockMountInfo([
+      '23 18 0:20 / / rw,relatime - ext4 /dev/root rw',
+      '42 23 8:16 /old /data rw,relatime - xfs /dev/sdb rw,prjquota',
+      '43 23 8:16 /new /data rw,relatime - xfs /dev/sdb rw,prjquota',
+    ].join('\n'));
+    await expect(newManager('/data').checkProjectQuotaEnforcement('/data/users/alice'))
+      .rejects.toThrow('Ambiguous stacked mount');
+    expect(spawnMock).not.toHaveBeenCalled();
   });
 });
 

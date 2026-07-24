@@ -27,12 +27,24 @@ export class JwtAuthGuard extends AuthGuard('jwt') {
         const user = await this.authService.validateApiToken(raw);
         if (user) {
           request.user = user;
+          request.authContext = { kind: 'api-token' as const };
           return true;
         }
         throw new UnauthorizedException();
       }
     }
 
-    return super.canActivate(context) as Promise<boolean>;
+    const allowed = await (super.canActivate(context) as Promise<boolean>);
+    if (allowed) {
+      request.authContext = {
+        kind: 'jwt' as const,
+        authVersion: request.user.authVersion,
+      };
+    }
+    return allowed;
   }
 }
+
+export type RequestAuthContext =
+  | { kind: 'jwt'; authVersion: number }
+  | { kind: 'api-token' };

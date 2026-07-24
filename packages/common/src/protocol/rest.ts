@@ -36,6 +36,7 @@ import type { ImageRuntimeOverrides } from './rest-schema.js';
 export type {
   LoginRequest,
   RefreshTokenRequest,
+  RotateRefreshTokenRequest,
   CreateApiTokenRequest,
   CreateUserRequest,
   UpdateUserRequest,
@@ -45,8 +46,10 @@ export type {
   ImageRuntimeOverrides,
   CreateImageRequest,
   UpdateImageRequest,
+  UpdateAdminImageRequest,
   PullImageRequest,
   CreateContainerRequest,
+  UpdateContainerMountsRequest,
   ExecSessionRequest,
   CreateDataDirRequest,
   RemoteFsCreateParams,
@@ -54,6 +57,7 @@ export type {
   UpdateRemoteFsMountRequest,
   CreateGroupRequest,
   UpdateGroupRequest,
+  UpdateAdminGroupRequest,
   UpsertServerGrantRequest,
   AddGroupMemberRequest,
   AddImageGrantRequest,
@@ -111,6 +115,36 @@ export interface UserDto {
   groups: GroupSummaryDto[];
 }
 
+export interface ActionAvailabilityDto {
+  allowed: boolean;
+  reason: string | null;
+  missingCapabilities: Capability[];
+}
+
+export interface UserAdministrationAvailabilityDto {
+  canAdminister: ActionAvailabilityDto;
+  canDelete: ActionAvailabilityDto;
+}
+
+export interface GroupAdministrationAvailabilityDto {
+  canEditMetadata: ActionAvailabilityDto;
+  canEditPriority: ActionAvailabilityDto;
+  canManageMembers: ActionAvailabilityDto;
+  /** Current-member removals may be narrower than generic membership edits. */
+  canRemoveMembers: Record<string, ActionAvailabilityDto>;
+  canDelete: ActionAvailabilityDto;
+}
+
+/** Current, authoritative administration decisions for one actor snapshot. */
+export interface AdministrationActionsDto {
+  actorCapabilities: Capability[];
+  assignableGroupCapabilities: Capability[];
+  createUser: ActionAvailabilityDto;
+  createGroup: ActionAvailabilityDto;
+  users: Record<string, UserAdministrationAvailabilityDto>;
+  groups: Record<string, GroupAdministrationAvailabilityDto>;
+}
+
 export interface SshPublicKeyDto {
   id: string;
   name: string;
@@ -160,6 +194,8 @@ export interface GroupDto {
   priority: number;
   isSystem: boolean;
   capabilities: Capability[];
+  /** Durable optimistic-concurrency token for metadata edits. */
+  revision: number;
   createdAt: string;
   updatedAt: string;
   /** Server IDs that have grants for this group (populated in list endpoint) */
@@ -203,6 +239,9 @@ export interface SystemSettingFieldDto {
 }
 
 export interface SystemSettingsDto {
+  revision: number;
+  /** Opaque content identity paired with revision for external-file CAS. */
+  snapshotToken: string;
   configFile: string;
   fields: SystemSettingFieldDto[];
   editable: SystemSettingFieldDto[];
@@ -253,6 +292,8 @@ export interface ServerDto {
   id: string;
   name: string;
   slug: string;
+  /** Admin-only immutable host identity bound by the authenticated Agent hello. */
+  hostFingerprint?: string | null;
   status: ServerStatus;
   quarantineCode: string | null;
   quarantineMessage: string | null;
@@ -265,6 +306,16 @@ export interface ServerDto {
   agentVersion?: string;
   /** Latest persisted/runtime-reported docker daemon status */
   dockerDaemon?: DockerDaemonStatus | null;
+}
+
+/** Purpose-safe server selector returned to an ordinary current principal. */
+export interface UserServerDto {
+  id: string;
+  name: string;
+  slug: string;
+  status: ServerStatus;
+  lastSeenAt: string | null;
+  runtimeReady: boolean;
 }
 
 export interface ServerAgentTokenResponse {
@@ -287,6 +338,22 @@ export interface DataDiskDto {
   pquotaEnabled: boolean;
 }
 
+/** Ordinary-user disk selector; physical paths and source identities stay server-side. */
+export interface UserDataDiskDto {
+  diskId: string;
+  displayName: string;
+  totalBytes: number;
+  usedBytes: number;
+  pquotaEnabled: boolean;
+}
+
+/** Ordinary-user GPU selector without the host hardware UUID. */
+export interface UserGpuDto {
+  index: number;
+  model: string;
+  totalMemMiB: number;
+}
+
 // ---------------------------------------------------------------------------
 // Images
 // ---------------------------------------------------------------------------
@@ -301,6 +368,15 @@ export interface ImageDto {
   disableSsh: boolean;
 }
 
+/** Explicit administrative lifecycle projection; never serialize ImageEntity directly. */
+export interface AdminImageDto extends ImageDto {
+  revision: number;
+  deleting: boolean;
+  cleanupGeneration: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
 // ---------------------------------------------------------------------------
 // Grants
 // ---------------------------------------------------------------------------
@@ -310,11 +386,13 @@ export interface ServerGrantDto {
   scope: 'group' | 'user';
   scopeId: string;
   serverId: string;
-  /** null → fall back to server default */
+  /** null (or resolved 0) means no CPU limit. */
   cpuMillis: number | null;
+  /** null (or resolved 0) means no memory limit. */
   memBytes: number | null;
+  /** null (or resolved 0) means no disk quota limit. */
   diskBytes: number | null;
-  /** null → fall back to server default */
+  /** null retains the historical all-GPU policy; CPU-only grants use `none`. */
   gpuMode: GpuGrantMode | null;
   gpuIndices: number[] | null;
   createdAt: string;
@@ -349,7 +427,6 @@ export interface EffectiveAccessDto {
 // ---------------------------------------------------------------------------
 // Containers
 // ---------------------------------------------------------------------------
-
 
 export type ContainerAction =
   | 'start'
@@ -396,7 +473,12 @@ export interface ContainerSshView {
   enabled: boolean;
   status: ContainerSshServerStatus;
   ready: boolean;
-  disabledReason?: 'image_ssh_disabled' | 'runtime_not_running' | 'route_missing' | 'sync_pending' | 'unknown';
+  disabledReason?:
+    | 'image_ssh_disabled'
+    | 'runtime_not_running'
+    | 'route_missing'
+    | 'sync_pending'
+    | 'unknown';
   login?: {
     omittedServer: string | null;
     explicitServer: string | null;
@@ -442,7 +524,7 @@ export interface ContainerView {
   powerIntent: ContainerPowerIntent;
   runtimeReady: boolean;
   runtime: ContainerRuntimeView;
-  activeTask: AgentTaskDto | null;
+  activeTask: UserAgentTaskDto | null;
   resources: {
     cpuMillis: number;
     memBytes: number;
@@ -494,8 +576,39 @@ export interface AgentTaskDto {
   createdAt: string;
   startedAt: string | null;
   lastSentAt: string | null;
+  /** Admin-only immutable dispatch identity; omitted from user task projections. */
+  payloadHash?: string;
+  /** Admin-only durable count of Backend sends for this task. */
+  dispatchAttemptCount?: number;
   completedAt: string | null;
   /** Minimum guaranteed lookup horizon; referenced safety proofs may live longer. */
+  retentionUntil: string | null;
+}
+
+/**
+ * Requester-safe task progress. Raw requests, Agent outcomes and finalizer
+ * evidence may contain host paths or privileged resource details and are only
+ * present on the administrative task plane.
+ */
+export type UserAgentTaskErrorCode =
+  | 'TASK_DISPATCH_FAILED'
+  | 'TASK_EXECUTION_FAILED'
+  | 'TASK_FINALIZATION_FAILED'
+  | 'TASK_FAILED';
+
+export interface UserAgentTaskDto {
+  id: string;
+  kind: AgentTaskKind;
+  status: AgentTaskStatus;
+  resourceType: string;
+  resourceId: string;
+  serverId: string;
+  error: { code: UserAgentTaskErrorCode; message: string } | null;
+  failureStage: 'dispatch' | 'agent' | 'finalizer' | null;
+  createdAt: string;
+  startedAt: string | null;
+  lastSentAt: string | null;
+  completedAt: string | null;
   retentionUntil: string | null;
 }
 
@@ -564,8 +677,6 @@ export interface MountSourceDto {
   label: string;
   /** Optional description for remote sources */
   description?: string;
-  /** mountPoint for local, hostMountPoint for remote */
-  hostRoot: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -609,6 +720,9 @@ export interface DataDirDto extends DataDirEntry {
   lastTaskId: string | null;
 }
 
+/** Ordinary-user projection: physical host paths remain Agent/admin internals. */
+export type UserDataDirDto = Omit<DataDirDto, 'hostPath'>;
+
 export interface DataDirIssueDto {
   kind: 'orphan' | 'missing';
   /** Filesystem entry (orphan) or DB-derived entry (missing) */
@@ -640,19 +754,28 @@ export interface MetricSeries {
 
 export interface HostDiskCapacity {
   diskId: string;
-  mountPoint: string;
+  /** Purpose-safe label available on both ordinary and admin metrics planes. */
+  displayName: string;
+  /** Physical host path, present only on the ViewMetricsAll admin plane. */
+  mountPoint?: string;
   used: MetricSeries;
   total: MetricSeries;
 }
 
 export interface HostDiskIo {
-  dev: string;
+  /** Purpose-safe series label. Ordinary responses aggregate physical devices. */
+  label: string;
+  /** Physical block-device name, present only on the admin plane. */
+  dev?: string;
   /** read + write combined */
   bps: MetricSeries;
 }
 
 export interface HostNetIo {
-  iface: string;
+  /** Purpose-safe series label. Ordinary responses aggregate physical interfaces. */
+  label: string;
+  /** Physical interface name, present only on the admin plane. */
+  iface?: string;
   /** rx + tx combined */
   bps: MetricSeries;
 }

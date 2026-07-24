@@ -14,16 +14,20 @@ import { ContainerRow } from '../components/containers/container-row.js';
 import { useContainerActions } from '../hooks/use-container-actions.js';
 import { cn } from '../lib/utils.js';
 import { queryKeys } from '../lib/query-keys.js';
+import { QueryErrorState } from '../components/query-state.js';
+import { queryPollInterval } from '../lib/query-lifecycle.js';
 
 export default function ManageContainersPage() {
   const { doAction, confirmState, handleConfirm, handleCancel } =
     useContainerActions({ admin: true });
 
-  const { data: containers = [], isLoading, isFetching, refetch } = useQuery({
+  const containersQuery = useQuery({
     queryKey: queryKeys.containers.adminList,
     queryFn: () => api.get<ContainerView[]>('/admin/v2/containers'),
-    refetchInterval: 8_000,
+    refetchInterval: (query) => queryPollInterval(query.state, { activeIntervalMs: 8_000 }),
   });
+  const containers = containersQuery.data ?? [];
+  const { isLoading, isFetching, refetch } = containersQuery;
 
   const grouped = containers.reduce<Map<string, { ownerName: string; items: ContainerView[] }>>(
     (acc, c) => {
@@ -43,7 +47,9 @@ export default function ManageContainersPage() {
         <div>
           <h1 className="text-2xl font-semibold tracking-tight text-foreground">容器管理</h1>
           <p className="text-muted-foreground text-sm">
-            全局共 {containers.length} 个容器，{groups.length} 位用户
+            {containersQuery.data
+              ? `全局共 ${containers.length} 个容器，${groups.length} 位用户`
+              : '全局容器数量尚未加载'}
           </p>
         </div>
         <Button variant="ghost" size="icon" className="h-8 w-8 text-muted-foreground" onClick={() => refetch()} disabled={isFetching}>
@@ -53,6 +59,8 @@ export default function ManageContainersPage() {
 
       {isLoading ? (
         <Card><CardContent className="h-32 animate-pulse bg-muted/50 rounded-lg mt-6" /></Card>
+      ) : containersQuery.isError ? (
+        <QueryErrorState error={containersQuery.error} resourceName="全局容器目录" onRetry={() => { void containersQuery.refetch(); }} />
       ) : containers.length === 0 ? (
         <Card>
           <CardContent className="flex flex-col items-center justify-center py-12 space-y-3">

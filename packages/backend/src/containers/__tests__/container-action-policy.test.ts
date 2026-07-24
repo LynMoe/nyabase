@@ -102,4 +102,19 @@ describe('ContainerActionPolicyService', () => {
     expect(actions.stop.enabled).toBe(true);
     expect(actions.start.enabled).toBe(false);
   });
+
+  it('blocks mount-consuming starts but retains safe stop/delete for corrupt durable mounts', () => {
+    const actions = policy.forContainer({
+      phase: ContainerPhase.Active,
+      runtimeStatus: ContainerStatus.Running,
+      runtimeReady: true,
+      runtimeDrift: [{ kind: RuntimeDriftKind.DesiredMountSpecInvalid }],
+      activeTaskId: null,
+      sshEnabled: true,
+    });
+    expect(actions.restart.enabled).toBe(false);
+    expect(actions.restart.message).toMatch(/mount configuration is invalid/);
+    expect(actions.stop.enabled).toBe(true);
+    expect(actions.delete.enabled).toBe(true);
+  });
 });

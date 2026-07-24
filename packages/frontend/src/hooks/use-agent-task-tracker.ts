@@ -1,14 +1,26 @@
 import { useEffect, useMemo, useRef } from 'react';
-import { useQueries, useQuery, useQueryClient } from '@tanstack/react-query';
-import { AgentTaskStatus, type AgentTaskDto } from '@nyabase/common';
+import { useQueries, useQuery, useQueryClient, type QueryKey } from '@tanstack/react-query';
+import { AgentTaskStatus, type AgentTaskDto, type UserAgentTaskDto } from '@nyabase/common';
 import { api } from '../lib/api.js';
 import { queryKeys } from '../lib/query-keys.js';
 import { toast } from './use-toast.js';
+import { isPermanentQueryError, queryPollInterval } from '../lib/query-lifecycle.js';
 
 const TERMINAL = new Set<AgentTaskStatus>([
   AgentTaskStatus.Succeeded,
   AgentTaskStatus.Failed,
 ]);
+
+type TaskProgressDto = AgentTaskDto | UserAgentTaskDto;
+
+export interface AgentTaskTrackerOptions {
+  admin?: boolean;
+  invalidateQueryKeys?: readonly QueryKey[];
+}
+
+export interface AgentTaskFeedbackOptions extends Omit<AgentTaskTrackerOptions, 'admin'> {
+  onSettledTaskIds?: (taskIds: readonly string[]) => void;
+}
 
 export function isTerminalAgentTaskStatus(
   status: AgentTaskStatus | string | null | undefined,
@@ -22,94 +34,182 @@ export function isPendingAgentTaskStatus(
   return status === AgentTaskStatus.Pending;
 }
 
+export function agentTaskPollInterval(state: {
+  data?: TaskProgressDto;
+  error?: unknown;
+  fetchFailureCount?: number;
+}): number | false {
+  return queryPollInterval(state, {
+    activeIntervalMs: 1_000,
+    transientBaseIntervalMs: 2_000,
+    transientMaxIntervalMs: 30_000,
+    isTerminal: (task) => isTerminalAgentTaskStatus(task.status),
+  });
+}
+
+export function isAgentTaskQuerySettled(state: {
+  data?: TaskProgressDto;
+  error?: unknown;
+}): boolean {
+  return isTerminalAgentTaskStatus(state.data?.status) || isPermanentQueryError(state.error);
+}
+
 export function useAgentTaskTracker(
   taskId: string | null | undefined,
-  options: { admin?: boolean } = {},
+  options: AgentTaskTrackerOptions = {},
 ) {
   const qc = useQueryClient();
+  const invalidatedTaskIds = useRef(new Set<string>());
+  const notifiedErrors = useRef(new Set<string>());
   const basePath = options.admin === true ? '/admin/agent-tasks' : '/agent-tasks';
   const query = useQuery({
     queryKey: ['agent-task', options.admin === true ? 'admin' : 'user', taskId],
-    queryFn: () => api.get<AgentTaskDto>(`${basePath}/${taskId}`),
+    queryFn: () => api.get<TaskProgressDto>(`${basePath}/${taskId}`),
     enabled: Boolean(taskId),
-    refetchInterval: (state) => (
-      isTerminalAgentTaskStatus(state.state.data?.status) ? false : 1000
-    ),
+    refetchInterval: (state) => agentTaskPollInterval(state.state),
   });
 
   useEffect(() => {
-    if (isTerminalAgentTaskStatus(query.data?.status)) {
-      void qc.invalidateQueries({
-        queryKey: options.admin === true ? queryKeys.containers.adminList : queryKeys.containers.userList,
+    if (!taskId || !isTerminalAgentTaskStatus(query.data?.status)
+      || invalidatedTaskIds.current.has(taskId)) return;
+    invalidatedTaskIds.current.add(taskId);
+    invalidateTrackedResources(qc, options);
+    if (query.data?.status === AgentTaskStatus.Failed) {
+      toast({
+        title: '宿主任务失败',
+        description: formatTaskError(query.data.error),
+        variant: 'destructive',
       });
-      void qc.invalidateQueries({ queryKey: ['container', options.admin === true ? 'admin' : 'user'] });
     }
-  }, [query.data?.status, qc, options.admin]);
+  }, [taskId, query.data, qc, options]);
+
+  useEffect(() => {
+    if (!taskId || !isPermanentQueryError(query.error) || notifiedErrors.current.has(taskId)) return;
+    notifiedErrors.current.add(taskId);
+    invalidateTrackedResources(qc, options);
+    toast({
+      title: '任务跟踪已停止',
+      description: query.error instanceof Error ? query.error.message : '任务已不可读取，请刷新资源状态',
+      variant: 'destructive',
+    });
+  }, [taskId, query.error, qc, options]);
 
   return query;
 }
 
 export function useAgentTaskBatchTracker(
   taskIds: readonly string[],
-  options: { admin?: boolean } = {},
+  options: AgentTaskTrackerOptions = {},
 ) {
   const qc = useQueryClient();
+  const invalidatedBatches = useRef(new Set<string>());
   const ids = useMemo(() => [...new Set(taskIds.filter(Boolean))], [taskIds]);
   const basePath = options.admin === true ? '/admin/agent-tasks' : '/agent-tasks';
   const queries = useQueries({
     queries: ids.map((taskId) => ({
       queryKey: ['agent-task', options.admin === true ? 'admin' : 'user', taskId],
-      queryFn: () => api.get<AgentTaskDto>(`${basePath}/${taskId}`),
-      refetchInterval: (state: { state: { data?: AgentTaskDto } }) => (
-        isTerminalAgentTaskStatus(state.state.data?.status) ? false : 1000
-      ),
+      queryFn: () => api.get<TaskProgressDto>(`${basePath}/${taskId}`),
+      refetchInterval: (state: { state: { data?: TaskProgressDto; error?: unknown; fetchFailureCount?: number } }) =>
+        agentTaskPollInterval(state.state),
     })),
   });
   const tasks = queries.flatMap((query) => query.data ? [query.data] : []);
-  const allTerminal = ids.length > 0
+  const permanentErrors = queries.flatMap((query, index) => isPermanentQueryError(query.error)
+    ? [{ taskId: ids[index]!, error: query.error }]
+    : []);
+  const allSettled = ids.length > 0
     && queries.length === ids.length
-    && queries.every((query) => isTerminalAgentTaskStatus(query.data?.status));
+    && queries.every((query) => isAgentTaskQuerySettled(query));
   const failed = tasks.filter((task) => task.status === AgentTaskStatus.Failed);
+  const batchKey = ids.join(',');
 
   useEffect(() => {
-    if (!allTerminal) return;
-    void qc.invalidateQueries({ queryKey: queryKeys.containers.adminList });
-    void qc.invalidateQueries({ queryKey: ['container', 'admin'] });
-  }, [allTerminal, qc]);
+    if (!allSettled || !batchKey || invalidatedBatches.current.has(batchKey)) return;
+    invalidatedBatches.current.add(batchKey);
+    invalidateTrackedResources(qc, options);
+  }, [allSettled, batchKey, qc, options]);
 
-  return { ids, tasks, allTerminal, failed };
+  return {
+    ids,
+    tasks,
+    allSettled,
+    // Compatibility for existing consumers: permanently unreadable is also a
+    // settled tracking outcome and must trigger final resource invalidation.
+    allTerminal: allSettled,
+    failed,
+    permanentErrors,
+  };
 }
 
 /** Keep the admin UI attached to every physical task returned by a mutation. */
-export function useAdminAgentTaskBatchFeedback(taskIds: readonly string[]) {
-  const tracker = useAgentTaskBatchTracker(taskIds, { admin: true });
+export function useAdminAgentTaskBatchFeedback(
+  taskIds: readonly string[],
+  options: AgentTaskFeedbackOptions = {},
+) {
+  return useAgentTaskBatchFeedback(taskIds, { ...options, admin: true });
+}
+
+/** Track only tasks created by the current principal through requester-scoped endpoints. */
+export function useRequesterAgentTaskBatchFeedback(
+  taskIds: readonly string[],
+  options: AgentTaskFeedbackOptions = {},
+) {
+  return useAgentTaskBatchFeedback(taskIds, options);
+}
+
+function useAgentTaskBatchFeedback(
+  taskIds: readonly string[],
+  options: AgentTaskFeedbackOptions & { admin?: boolean } = {},
+) {
+  const { onSettledTaskIds, ...trackerOptions } = options;
+  const tracker = useAgentTaskBatchTracker(taskIds, trackerOptions);
   const notifiedIds = useRef(new Set<string>());
   const pendingIds = tracker.ids.filter((taskId) => !notifiedIds.current.has(taskId));
   const pendingIdSet = new Set(pendingIds);
   const pendingTasks = tracker.tasks.filter((task) => pendingIdSet.has(task.id));
   const pendingFailed = pendingTasks.filter((task) => task.status === AgentTaskStatus.Failed);
-  const pendingAllTerminal = pendingIds.length > 0
-    && pendingTasks.length === pendingIds.length
-    && pendingTasks.every((task) => isTerminalAgentTaskStatus(task.status));
+  const pendingPermanentErrors = tracker.permanentErrors.filter(({ taskId }) => pendingIdSet.has(taskId));
+  const pendingSettledCount = pendingTasks.filter((task) => isTerminalAgentTaskStatus(task.status)).length
+    + pendingPermanentErrors.length;
+  const pendingAllTerminal = pendingIds.length > 0 && pendingSettledCount === pendingIds.length;
   const batchKey = pendingIds.join(',');
 
   useEffect(() => {
     if (!pendingAllTerminal || !batchKey) return;
     pendingIds.forEach((taskId) => notifiedIds.current.add(taskId));
-    if (pendingFailed.length > 0) {
-      const details = pendingFailed
+    onSettledTaskIds?.(pendingIds);
+    if (pendingFailed.length > 0 || pendingPermanentErrors.length > 0) {
+      const taskDetails = pendingFailed
         .map((task) => `${task.id.slice(0, 8)}: ${formatTaskError(task.error)}`)
-        .join('；');
-      toast({ title: '宿主任务失败', description: details, variant: 'destructive' });
+      const trackingDetails = pendingPermanentErrors.map(({ taskId, error }) =>
+        `${taskId.slice(0, 8)}: ${error instanceof Error ? error.message : '任务不可读取'}`);
+      toast({
+        title: pendingFailed.length > 0 ? '宿主任务失败' : '任务跟踪已停止',
+        description: [...taskDetails, ...trackingDetails].join('；'),
+        variant: 'destructive',
+      });
       return;
     }
     toast({
       title: '宿主任务已完成',
       description: `${pendingTasks.length} 个任务均已成功`,
     });
-  }, [batchKey, pendingAllTerminal, pendingFailed, pendingIds, pendingTasks.length]);
+  }, [batchKey, onSettledTaskIds, pendingAllTerminal, pendingFailed, pendingIds, pendingPermanentErrors, pendingTasks.length]);
 
   return tracker;
+}
+
+function invalidateTrackedResources(
+  qc: ReturnType<typeof useQueryClient>,
+  options: AgentTaskTrackerOptions,
+): void {
+  const defaults: readonly QueryKey[] = [
+    options.admin === true ? queryKeys.containers.adminList : queryKeys.containers.userList,
+    ['container', options.admin === true ? 'admin' : 'user'],
+  ];
+  for (const queryKey of options.invalidateQueryKeys ?? defaults) {
+    void qc.invalidateQueries({ queryKey });
+  }
 }
 
 function formatTaskError(error: unknown): string {

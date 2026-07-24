@@ -16,14 +16,14 @@ import { CapabilitiesGuard } from '../auth/guards/capabilities.guard.js';
 import { RequireCaps } from '../auth/decorators/require-caps.decorator.js';
 import { CurrentUser } from '../auth/decorators/current-user.decorator.js';
 import { UserEntity } from '../entities/user.entity.js';
-import { Capability } from '@nyabase/common';
+import { Capability, zResourceIdentity } from '@nyabase/common';
 import { z } from 'zod';
 import { parseMountSourceGrantTarget } from './mount-source-grant-target.js';
 
 const zGrantBody = z.object({
   scope: z.enum(['user', 'group']),
-  scopeId: z.string().min(1),
-  serverId: z.string().min(1).optional(),
+  scopeId: zResourceIdentity,
+  serverId: zResourceIdentity.optional(),
 }).strict();
 
 @Controller('admin/mount-sources')
@@ -73,10 +73,11 @@ export class AdminMountSourcesController {
     @CurrentUser() actor: UserEntity,
   ) {
     const parsedScope = z.enum(['user', 'group']).parse(scope);
+    const parsedScopeId = zResourceIdentity.parse(scopeId);
     await this.mountSourcesService.deleteGrant(
       actor.id,
       parsedScope,
-      scopeId,
+      parsedScopeId,
       parseMountSourceGrantTarget(sourceKind, sourceId, serverId),
     );
   }

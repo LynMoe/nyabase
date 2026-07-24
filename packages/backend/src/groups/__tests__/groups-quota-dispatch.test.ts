@@ -46,6 +46,7 @@ function makeService() {
     invalidateUser: vi.fn(),
     resolveServer: vi.fn().mockResolvedValue({ diskBytes: 4096 }),
     resolveServerInTransaction: vi.fn().mockResolvedValue({ diskBytes: 4096 }),
+    assertActorCapabilitiesInTransaction: vi.fn().mockResolvedValue(new Set()),
   };
   const auditService = { log: vi.fn().mockResolvedValue(undefined) };
   const quotaDispatchService = {
@@ -85,6 +86,8 @@ function makeService() {
       return input;
     }),
     delete: vi.fn(),
+    count: vi.fn().mockResolvedValue(0),
+    increment: vi.fn().mockResolvedValue({ affected: 1 }),
   };
   const dataSource = {
     options: { type: 'postgres' },
@@ -109,6 +112,7 @@ function makeService() {
       assertMountSourceRevocationSafe: vi.fn(),
     } as never,
     { notify: vi.fn() } as never,
+    { deleteUserCredentialsInTransaction: vi.fn() } as never,
   );
   return {
     service,

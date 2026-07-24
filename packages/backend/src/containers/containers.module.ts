@@ -25,6 +25,7 @@ import { AgentTasksModule } from '../agent-tasks/agent-tasks.module.js';
 import { AgentGatewayModule } from '../gateway/agent-gateway.module.js';
 import { SshModule } from '../ssh/ssh.module.js';
 import { ProxySnapshotNotifierModule } from '../proxy-snapshots/proxy-snapshot-notifier.module.js';
+import { AuditModule } from '../audit/audit.module.js';
 
 @Module({
   imports: [
@@ -49,6 +50,7 @@ import { ProxySnapshotNotifierModule } from '../proxy-snapshots/proxy-snapshot-n
     AgentGatewayModule,
     SshModule,
     ProxySnapshotNotifierModule,
+    AuditModule,
   ],
   providers: [
     ContainersService,

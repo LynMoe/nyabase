@@ -41,8 +41,6 @@ forbidden_path packages/backend/src/operations
 forbidden_path packages/backend/src/command-hooks
 forbidden_path packages/agent/src/commands
 forbidden_path packages/frontend/src/hooks/use-operation-tracker.ts
-forbidden_path packages/frontend/e2e/operation-states.spec.ts
-forbidden_path packages/frontend/e2e/__screenshots__/chromium/operation-states.spec.ts
 forbidden_path packages/common/src/protocol/schema.ts
 forbidden_path packages/agent/src/tasks/task-store.ts
 forbidden_path packages/backend/dist/operations
@@ -100,15 +98,18 @@ no_match "obsolete public names remain" \
   'operationId|operationIds|activeOperation|lastOperation|/operations|admin/operations' \
   "${SOURCE_PATHS[@]}"
 
-no_match "obsolete public names remain in live tests" \
-  'operationId|operationIds|activeOperation|lastOperation|/operations|admin/operations' \
-  test
-
-mapfile -t migrations < <(find packages/backend/src/database/migrations -maxdepth 1 -type f -name '*.ts' | sort)
-[[ ${#migrations[@]} -eq 1 ]] || fail "expected exactly one fresh baseline migration, found ${#migrations[@]}"
-no_match "baseline contains obsolete coordination tables" \
+# Migration tests intentionally live beside the migrations. Select only the
+# timestamped TypeORM migration sources, keep their deterministic order, and
+# allow additive post-baseline migrations without weakening the AgentTask
+# execution-model checks.
+mapfile -t migrations < <(
+  find packages/backend/src/database/migrations -maxdepth 1 -type f \
+    -regextype posix-extended -regex '.*/[0-9]+-[A-Za-z0-9_-]+\.ts' | sort
+)
+[[ ${#migrations[@]} -ge 1 ]] || fail "no timestamped schema migration was found"
+no_match "schema migrations contain obsolete coordination tables" \
   'operations|operation_steps|operation_attempts|operation_commands|operation_work_items|container_mount_runtime|progress_json|resource_keys_json|agent_outcome' \
-  "${migrations[0]}"
+  "${migrations[@]}"
 rg -q 'CREATE TABLE "agent_tasks"' "${migrations[0]}" \
   || fail "baseline does not create agent_tasks"
 

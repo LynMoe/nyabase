@@ -16,12 +16,14 @@ import {
   AlertDialogAction,
 } from '../../components/ui/alert-dialog.js';
 import { Plus, Container, RefreshCw, Server } from 'lucide-react';
-import type { ContainerView, ServerDto } from '@nyabase/common';
+import type { ContainerView, UserServerDto } from '@nyabase/common';
 import { ContainerRow } from '../../components/containers/container-row.js';
 import { CreateContainerDialog } from '../../components/containers/create-container-dialog.js';
 import { useContainerActions } from '../../hooks/use-container-actions.js';
 import { cn } from '../../lib/utils.js';
 import { queryKeys } from '../../lib/query-keys.js';
+import { QueryErrorState } from '../../components/query-state.js';
+import { queryPollInterval } from '../../lib/query-lifecycle.js';
 
 function ServerContainersSection({
   server,
@@ -29,7 +31,7 @@ function ServerContainersSection({
   onCreate,
   onAction,
 }: {
-  server: ServerDto;
+  server: UserServerDto;
   items: ContainerView[];
   onCreate: () => void;
   onAction: (action: import('@nyabase/common').ContainerAction, containerId: string, name: string) => void;
@@ -122,16 +124,20 @@ function ContainersPage() {
   const { doAction, confirmState, handleConfirm, handleCancel } =
     useContainerActions();
 
-  const { data: servers = [], isLoading: serversLoading, isFetching: serversFetching } = useQuery({
+  const serversQuery = useQuery({
     queryKey: queryKeys.servers.user,
-    queryFn: () => api.get<ServerDto[]>('/servers'),
+    queryFn: () => api.get<UserServerDto[]>('/servers'),
   });
+  const servers = serversQuery.data ?? [];
+  const { isLoading: serversLoading, isFetching: serversFetching } = serversQuery;
 
-  const { data: containers = [], isLoading: containersLoading, isFetching, refetch } = useQuery({
+  const containersQuery = useQuery({
     queryKey: queryKeys.containers.userList,
     queryFn: () => api.get<ContainerView[]>('/v2/containers'),
-    refetchInterval: 8_000,
+    refetchInterval: (query) => queryPollInterval(query.state, { activeIntervalMs: 8_000 }),
   });
+  const containers = containersQuery.data ?? [];
+  const { isLoading: containersLoading, isFetching, refetch } = containersQuery;
 
   const orphanGroups = useMemo(() => {
     const known = new Set(servers.map((s) => s.id));
@@ -169,7 +175,9 @@ function ContainersPage() {
       <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
         <div>
           <h1 className="text-2xl font-semibold tracking-tight text-foreground">容器</h1>
-          <p className="text-muted-foreground text-sm">{containers.length} 个容器</p>
+          <p className="text-muted-foreground text-sm">
+            {containersQuery.data ? `${containers.length} 个容器` : '容器数量尚未加载'}
+          </p>
         </div>
         <div className="flex items-center gap-2">
           <Button variant="ghost" size="icon" className="h-8 w-8 text-muted-foreground" onClick={handleRefresh} disabled={isRefreshing}>
@@ -183,6 +191,12 @@ function ContainersPage() {
 
       {listLoading ? (
         <Card><CardContent className="h-32 animate-pulse bg-muted/50 rounded-lg mt-6" /></Card>
+      ) : serversQuery.isError || containersQuery.isError ? (
+        <QueryErrorState
+          error={serversQuery.error ?? containersQuery.error}
+          resourceName="容器与服务器目录"
+          onRetry={() => { void Promise.all([serversQuery.refetch(), containersQuery.refetch()]); }}
+        />
       ) : servers.length === 0 && containers.length === 0 ? (
         <div className="bg-card rounded-lg border border-dashed p-10 text-center text-muted-foreground">
           暂无可访问的服务器。请联系管理员为你分配服务器和镜像权限。

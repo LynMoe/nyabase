@@ -3,17 +3,24 @@ import {
   AgentTaskStatus,
   AgentTaskKind,
   ServerStatus,
-  zTaskResultPayload,
-  type TaskResultPayload,
 } from '@nyabase/common';
 import { DataSource, IsNull, LessThanOrEqual, MoreThan, Not } from 'typeorm';
 import { runSerializedTransaction } from '../database/serialized-transaction.js';
 import { AgentTaskEntity } from '../entities/agent-task.entity.js';
-import { ServerEntity } from '../entities/server.entity.js';
+import {
+  AGENT_TASK_FAIL_STOP_QUARANTINE_CODE,
+  ServerEntity,
+} from '../entities/server.entity.js';
 import { AgentTaskFinalizerService } from './agent-task-finalizer.service.js';
 import { ResourceLockService } from './resource-lock.service.js';
 import { ProxySnapshotNotifierService } from '../proxy-snapshots/proxy-snapshot-notifier.service.js';
 import { AccessCacheEpochService } from '../access/access-cache-epoch.service.js';
+import {
+  parseAndValidateStagedTerminalResult,
+  STAGED_AGENT_RESULT_CORRUPT_CODE,
+  StagedTerminalEvidenceError,
+} from './agent-task-staged-result.js';
+import { AgentTaskPayloadCodecService } from './agent-task-payload-codec.service.js';
 
 const WORKER_INTERVAL_MS = 1_000;
 const FINALIZE_BATCH_SIZE = 32;
@@ -21,6 +28,11 @@ const MAX_FINALIZE_SCAN_PER_PASS = 256;
 const FINALIZER_RETRY_BASE_MS = 1_000;
 const FINALIZER_RETRY_MAX_MS = 60_000;
 export const MAX_FINALIZER_ATTEMPTS = 12;
+
+type FinalizeTaskOutcome =
+  | { kind: 'skipped' }
+  | { kind: 'finalized' }
+  | { kind: 'staged-corrupt'; serverId: string; details: string };
 
 /**
  * Applies staged Agent outcomes using database-only retries. A staged outcome
@@ -38,6 +50,7 @@ export class AgentTaskFinalizerWorkerService implements OnModuleInit, OnModuleDe
     private dataSource: DataSource,
     private finalizer: AgentTaskFinalizerService,
     private resourceLocks: ResourceLockService,
+    private payloadCodec: AgentTaskPayloadCodecService,
     private proxySnapshots: ProxySnapshotNotifierService,
     private accessCacheEpoch: AccessCacheEpochService,
   ) {}
@@ -103,7 +116,20 @@ export class AgentTaskFinalizerWorkerService implements OnModuleInit, OnModuleDe
         scanned += tasks.length;
         for (const task of tasks) {
           try {
-            if (await this.finalizeTask(task.id)) finalized += 1;
+            const outcome = await this.finalizeTask(task.id);
+            if (outcome.kind === 'finalized') {
+              finalized += 1;
+            } else if (outcome.kind === 'staged-corrupt') {
+              // Process-local routing state follows the durable quarantine and
+              // is deliberately updated only after its transaction commits.
+              this.proxySnapshots.blockServer(
+                outcome.serverId,
+                `staged Agent evidence is corrupt on ${outcome.serverId}`,
+              );
+              this.logger.warn(
+                `Task ${task.id} staged evidence failed closed: ${outcome.details}`,
+              );
+            }
           } catch (error) {
             let quarantinedServerId: string | null = null;
             try {
@@ -132,7 +158,7 @@ export class AgentTaskFinalizerWorkerService implements OnModuleInit, OnModuleDe
     }
   }
 
-  private async finalizeTask(taskId: string): Promise<boolean> {
+  private async finalizeTask(taskId: string): Promise<FinalizeTaskOutcome> {
     const committed = await runSerializedTransaction(this.dataSource, async (manager) => {
       const task = await manager.findOne(AgentTaskEntity, { where: { id: taskId } });
       if (
@@ -141,7 +167,47 @@ export class AgentTaskFinalizerWorkerService implements OnModuleInit, OnModuleDe
         || task.agentResultJson === null
       ) return null;
 
-      const result = this.parseStagedResult(task);
+      let result;
+      try {
+        result = parseAndValidateStagedTerminalResult(
+          task,
+          () => this.payloadCodec.forDispatch(task),
+        );
+      } catch (error) {
+        if (!(error instanceof StagedTerminalEvidenceError)) throw error;
+        // Corruption terminalization and Server admission revocation are one
+        // serialized commit. A queued dispatcher can therefore observe only
+        // the pre-corruption Online state or the post-commit quarantine, never
+        // a Failed task on a still-dispatchable Server.
+        await manager.update(AgentTaskEntity, task.id, {
+          status: AgentTaskStatus.Failed,
+          failureStage: task.failureStage === 'dispatch' ? 'dispatch' : 'finalizer',
+          finalizerAttemptCount: (task.finalizerAttemptCount ?? 0) + 1,
+          finalizerRetryAt: null,
+          resultJson: null,
+          errorJson: {
+            code: STAGED_AGENT_RESULT_CORRUPT_CODE,
+            message: 'Persisted terminal Agent evidence failed immutable task identity validation',
+            details: error.message.slice(0, 2048),
+          },
+          completedAt: new Date(),
+        } as never);
+        await manager.update(ServerEntity, { id: task.serverId }, {
+          status: ServerStatus.AgentQuarantined,
+          quarantineCode: AGENT_TASK_FAIL_STOP_QUARANTINE_CODE,
+          quarantineMessage: 'Persisted terminal Agent evidence is corrupt; task locks are retained until exact evidence is repaired',
+        });
+        return {
+          stagedCorruption: {
+            serverId: task.serverId,
+            details: error.message.slice(0, 2048),
+          },
+          notifyProxyRevocation: false,
+          resourceId: task.resourceId,
+          invalidateAccessCache: false,
+          quarantineServerId: null,
+        };
+      }
       if (result.status === 'succeeded') {
         await this.finalizer.applySucceeded(manager, task, result.result);
         await manager.update(AgentTaskEntity, task.id, {
@@ -169,6 +235,7 @@ export class AgentTaskFinalizerWorkerService implements OnModuleInit, OnModuleDe
         await this.resourceLocks.releaseTask(task.id, manager);
       }
       return {
+        stagedCorruption: null,
         notifyProxyRevocation:
           task.kind === AgentTaskKind.ContainerDelete && result.status === 'succeeded',
         resourceId: task.resourceId,
@@ -178,7 +245,14 @@ export class AgentTaskFinalizerWorkerService implements OnModuleInit, OnModuleDe
         quarantineServerId: retainRuntimeCleanupLock ? task.serverId : null,
       };
     });
-    if (!committed) return false;
+    if (!committed) return { kind: 'skipped' };
+    if (committed.stagedCorruption) {
+      return {
+        kind: 'staged-corrupt',
+        serverId: committed.stagedCorruption.serverId,
+        details: committed.stagedCorruption.details,
+      };
+    }
     if (committed.quarantineServerId) {
       this.proxySnapshots.blockServer(
         committed.quarantineServerId,
@@ -200,22 +274,7 @@ export class AgentTaskFinalizerWorkerService implements OnModuleInit, OnModuleDe
         );
       });
     }
-    return true;
-  }
-
-  private parseStagedResult(
-    task: AgentTaskEntity,
-  ): Exclude<TaskResultPayload, { status: 'incomplete' }> {
-    const evidence = this.record(task.agentResultJson);
-    const result = zTaskResultPayload.parse({
-      taskId: task.id,
-      payloadHash: task.payloadHash,
-      ...evidence,
-    });
-    if (result.status === 'incomplete') {
-      throw new Error(`Task ${task.id} has a nonterminal staged outcome`);
-    }
-    return result;
+    return { kind: 'finalized' };
   }
 
   private async recordRetryDiagnostic(taskId: string, error: unknown): Promise<string | null> {
@@ -230,7 +289,7 @@ export class AgentTaskFinalizerWorkerService implements OnModuleInit, OnModuleDe
       if (attempt >= MAX_FINALIZER_ATTEMPTS) {
         await manager.update(AgentTaskEntity, task.id, {
           status: AgentTaskStatus.Failed,
-          failureStage: 'finalizer',
+          failureStage: task.failureStage === 'dispatch' ? 'dispatch' : 'finalizer',
           finalizerAttemptCount: attempt,
           finalizerRetryAt: null,
           errorJson: {
@@ -291,13 +350,6 @@ export class AgentTaskFinalizerWorkerService implements OnModuleInit, OnModuleDe
       message: message.slice(0, 2048),
       details: message.slice(0, 8192),
     };
-  }
-
-  private record(value: unknown): Record<string, unknown> {
-    if (!value || typeof value !== 'object' || Array.isArray(value)) {
-      throw new Error('Agent task staged outcome is invalid');
-    }
-    return value as Record<string, unknown>;
   }
 
   private errorMessage(error: unknown): string {

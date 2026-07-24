@@ -8,6 +8,13 @@ export interface ProcMountEntry {
   options: string;
 }
 
+export interface ProcMountInfoEntry extends ProcMountEntry {
+  mountId: number;
+  parentMountId: number;
+  deviceId: string;
+  fsRoot: string;
+}
+
 /**
  * Cached, async reader for /proc/mounts.
  *
@@ -48,6 +55,36 @@ export async function readProcMountsFresh(): Promise<string> {
   const value = await fs.promises.readFile('/proc/mounts', 'utf-8');
   cache = { value, expiresAt: Date.now() + TTL_MS };
   return value;
+}
+
+export async function readProcMountInfoFresh(): Promise<string> {
+  return fs.promises.readFile('/proc/self/mountinfo', 'utf-8');
+}
+
+export function parseProcMountInfo(content: string): ProcMountInfoEntry[] {
+  const entries: ProcMountInfoEntry[] = [];
+  for (const line of content.split('\n')) {
+    if (!line.trim()) continue;
+    const fields = line.split(' ');
+    const separator = fields.indexOf('-');
+    if (separator < 6 || separator + 3 >= fields.length) continue;
+    const mountId = Number(fields[0]);
+    const parentMountId = Number(fields[1]);
+    if (!Number.isSafeInteger(mountId) || !Number.isSafeInteger(parentMountId)) continue;
+    const mountOptions = fields[5].split(',').filter(Boolean);
+    const superOptions = fields[separator + 3].split(',').filter(Boolean);
+    entries.push({
+      mountId,
+      parentMountId,
+      deviceId: fields[2],
+      fsRoot: decodeProcMountField(fields[3]),
+      mountPoint: decodeProcMountField(fields[4]),
+      fsType: decodeProcMountField(fields[separator + 1]),
+      source: decodeProcMountField(fields[separator + 2]),
+      options: [...new Set([...mountOptions, ...superOptions])].join(','),
+    });
+  }
+  return entries;
 }
 
 export function parseProcMounts(content: string): ProcMountEntry[] {

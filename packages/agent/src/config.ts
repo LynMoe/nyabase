@@ -11,7 +11,6 @@ import {
   MAX_AGENT_LOCAL_DATA_SOURCES,
   MAX_AGENT_MACVLAN_RESERVED_IPS,
 } from '@nyabase/common';
-import { type DockerResourceLimitConfig } from './docker/resource-limits.js';
 
 /**
  * Schema for the on-disk agent.yaml file (or env-derived equivalent).
@@ -26,6 +25,7 @@ const zAgentConfig = z.object({
   backendUrl: z
     .string()
     .min(1, 'backendUrl is required')
+    .max(2048, 'backendUrl is too long')
     .refine((v) => {
       try {
         const u = new URL(v);
@@ -38,10 +38,13 @@ const zAgentConfig = z.object({
     }, 'backendUrl must use wss://; ws:// is allowed only for a loopback development endpoint'),
   agentToken: z
     .string()
-    .min(16, 'agentToken must be at least 16 characters'),
+    .min(16, 'agentToken must be at least 16 characters')
+    .max(256, 'agentToken is too long'),
   serverId: z
     .string()
-    .min(1, 'serverId is required'),
+    .min(1, 'serverId is required')
+    .max(128, 'serverId is too long')
+    .regex(/^[A-Za-z0-9][A-Za-z0-9._:-]*$/, 'serverId contains unsupported characters'),
   /**
    * Docker data-root directory. Written to the nyabase-docker.service unit file.
    * Immutable after first deployment — changing it requires migrating all
@@ -49,24 +52,33 @@ const zAgentConfig = z.object({
    */
   dockerRoot: z
     .string()
+    .regex(
+      /^\/[A-Za-z0-9._/-]+$/,
+      'dockerRoot must contain only systemd-safe path characters',
+    )
     .refine((v) => path.isAbsolute(v), 'dockerRoot must be an absolute path'),
-  parentIface: z.string().min(1),
-  macvlanCidr: z.string().min(1),
-  macvlanGateway: z.string().min(1),
-  reservedIps: z.array(z.string()).max(MAX_AGENT_MACVLAN_RESERVED_IPS),
+  parentIface: z.string().min(1).max(64),
+  macvlanCidr: z.string().min(1).max(18),
+  macvlanGateway: z.string().min(7).max(15),
+  reservedIps: z.array(z.string().min(7).max(15)).max(MAX_AGENT_MACVLAN_RESERVED_IPS),
   metricsIntervalMs: z.number().int().min(5_000).max(300_000),
   /** If false, the agent skips nvidia-smi probing and emits no GPU metrics. */
   isGpuServer: z.boolean(),
   dockerResourceLimit: z.object({
     enabled: z.boolean(),
-  }),
+  }).strict(),
   localDataSources: z.array(z.object({
-    id: z.string().min(1, 'localDataSources.id is required'),
+    id: z.string()
+      .min(1, 'localDataSources.id is required')
+      .max(128)
+      .regex(/^[A-Za-z0-9][A-Za-z0-9._:-]*$/, 'localDataSources.id contains unsupported characters'),
     mountPoint: z
       .string()
+      .max(4096)
+      .refine((value) => !/[\0\r\n]/.test(value), 'localDataSources.mountPoint contains control characters')
       .refine((v) => path.isAbsolute(v), 'localDataSources.mountPoint must be an absolute path'),
     label: z.string().max(128).optional(),
-  })).max(MAX_AGENT_LOCAL_DATA_SOURCES).default([]),
+  }).strict()).max(MAX_AGENT_LOCAL_DATA_SOURCES).default([]),
 }).strict().superRefine((value, ctx) => {
   const normalizedDockerRoot = path.resolve(value.dockerRoot);
   const remoteFsRoot = path.resolve('/mnt/remote-fs');
@@ -330,64 +342,65 @@ function assertConfigFilePrivate(configPath: string): void {
 }
 
 function coerceShape(raw: Record<string, unknown>): Record<string, unknown> {
-  const metricsRaw = raw.metricsIntervalMs;
-  const isGpuRaw = raw.isGpuServer;
-  const dockerResourceLimitRaw = raw.dockerResourceLimit as Record<string, unknown> | undefined;
-  const dockerResourceLimitEnabledRaw = dockerResourceLimitRaw?.enabled;
-
-  function coerceLocalDataSources(rawSources: unknown) {
-    let sources = rawSources;
-    if (typeof sources === 'string') {
-      const trimmed = sources.trim();
-      sources = trimmed ? yaml.load(trimmed) : [];
-    }
-    if (!Array.isArray(sources)) return [];
-    return sources.map((source) => {
-      const src = source as Record<string, unknown>;
-      return {
-        id: String(src.id ?? ''),
-        mountPoint: String(src.mountPoint ?? ''),
-        ...(src.label == null ? {} : { label: String(src.label) }),
-      };
-    });
-  }
+  const defaultWhenAbsent = (value: unknown, fallback: unknown) =>
+    value === undefined ? fallback : value;
+  const coerceExactInteger = (value: unknown, fallback: number): unknown => {
+    if (value === undefined) return fallback;
+    if (typeof value !== 'string') return value;
+    if (!/^(?:0|[1-9]\d*)$/.test(value)) return value;
+    const parsed = Number(value);
+    return Number.isSafeInteger(parsed) ? parsed : value;
+  };
+  const coerceExactBoolean = (value: unknown, fallback: boolean): unknown => {
+    if (value === undefined) return fallback;
+    if (typeof value !== 'string') return value;
+    if (value === 'true' || value === '1') return true;
+    if (value === 'false' || value === '0') return false;
+    return value;
+  };
+  const coerceReservedIps = (value: unknown): unknown => {
+    if (value === undefined) return [];
+    if (typeof value !== 'string') return value;
+    if (value.trim() === '') return [];
+    const entries = value.split(',').map((entry) => entry.trim());
+    return entries.some((entry) => entry.length === 0) ? value : entries;
+  };
+  const coerceLocalDataSources = (value: unknown): unknown => {
+    if (value === undefined) return [];
+    if (typeof value !== 'string') return value;
+    const trimmed = value.trim();
+    if (trimmed === '') return [];
+    return yaml.load(trimmed);
+  };
+  const coerceDockerResourceLimit = (value: unknown): unknown => {
+    if (value === undefined) return { enabled: false };
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return value;
+    const record = value as Record<string, unknown>;
+    if (!Object.prototype.hasOwnProperty.call(record, 'enabled')) return record;
+    const enabled = record.enabled;
+    return {
+      ...record,
+      enabled: typeof enabled === 'string'
+        ? coerceExactBoolean(enabled, false)
+        : enabled,
+    };
+  };
 
   return {
     // Preserve unknown top-level keys so the strict schema rejects retired
     // configuration instead of silently reviving a compatibility path.
     ...raw,
-    backendUrl: raw.backendUrl ?? 'ws://localhost:3001/ws/agent',
-    agentToken: raw.agentToken ?? '',
-    serverId: raw.serverId ?? '',
-    dockerRoot: raw.dockerRoot ?? '/var/lib/nyabase-docker',
-    parentIface: raw.parentIface ?? 'eth0',
-    macvlanCidr: raw.macvlanCidr ?? '192.168.100.0/24',
-    macvlanGateway: raw.macvlanGateway ?? '192.168.100.1',
-    reservedIps: Array.isArray(raw.reservedIps)
-      ? raw.reservedIps.map((v) => String(v))
-      : typeof raw.reservedIps === 'string'
-      ? raw.reservedIps.split(',').map((v) => v.trim()).filter(Boolean)
-      : [],
-    metricsIntervalMs:
-      typeof metricsRaw === 'string'
-        ? parseInt(metricsRaw, 10)
-        : typeof metricsRaw === 'number'
-        ? metricsRaw
-        : 10_000,
-    isGpuServer:
-      typeof isGpuRaw === 'boolean'
-        ? isGpuRaw
-        : typeof isGpuRaw === 'string'
-        ? isGpuRaw !== 'false' && isGpuRaw !== '0' && isGpuRaw !== ''
-        : true,
-    dockerResourceLimit: {
-      enabled:
-        typeof dockerResourceLimitEnabledRaw === 'boolean'
-          ? dockerResourceLimitEnabledRaw
-          : typeof dockerResourceLimitEnabledRaw === 'string'
-          ? dockerResourceLimitEnabledRaw !== 'false' && dockerResourceLimitEnabledRaw !== '0' && dockerResourceLimitEnabledRaw !== ''
-          : false,
-    } satisfies DockerResourceLimitConfig,
+    backendUrl: defaultWhenAbsent(raw.backendUrl, 'ws://localhost:3001/ws/agent'),
+    agentToken: defaultWhenAbsent(raw.agentToken, ''),
+    serverId: defaultWhenAbsent(raw.serverId, ''),
+    dockerRoot: defaultWhenAbsent(raw.dockerRoot, '/var/lib/nyabase-docker'),
+    parentIface: defaultWhenAbsent(raw.parentIface, 'eth0'),
+    macvlanCidr: defaultWhenAbsent(raw.macvlanCidr, '192.168.100.0/24'),
+    macvlanGateway: defaultWhenAbsent(raw.macvlanGateway, '192.168.100.1'),
+    reservedIps: coerceReservedIps(raw.reservedIps),
+    metricsIntervalMs: coerceExactInteger(raw.metricsIntervalMs, 10_000),
+    isGpuServer: coerceExactBoolean(raw.isGpuServer, true),
+    dockerResourceLimit: coerceDockerResourceLimit(raw.dockerResourceLimit),
     localDataSources: coerceLocalDataSources(raw.localDataSources),
   };
 }

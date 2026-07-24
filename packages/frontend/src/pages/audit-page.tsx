@@ -21,6 +21,8 @@ import {
   DialogTitle,
 } from '../components/ui/dialog.js';
 import { cn } from '../lib/utils.js';
+import { QueryErrorState } from '../components/query-state.js';
+import { queryPollInterval } from '../lib/query-lifecycle.js';
 
 const PAGE_SIZES = [25, 50, 100] as const;
 
@@ -65,11 +67,12 @@ export default function AuditPage() {
   const [detailId, setDetailId] = useState<string | null>(null);
   const offset = page * pageSize;
 
-  const { data, isLoading, isFetching, refetch } = useQuery({
+  const auditQuery = useQuery({
     queryKey: ['audit', pageSize, offset],
     queryFn: () => api.get<AuditListResponse>(`/audit?limit=${pageSize}&offset=${offset}`),
-    refetchInterval: 30_000,
+    refetchInterval: (query) => queryPollInterval(query.state, { activeIntervalMs: 30_000 }),
   });
+  const { data, isLoading, isFetching, refetch } = auditQuery;
   const logs = data?.items ?? [];
   const total = data?.total ?? 0;
   const totalPages = Math.max(1, Math.ceil(total / pageSize));
@@ -100,7 +103,7 @@ export default function AuditPage() {
         <div>
           <h1 className="text-2xl font-semibold tracking-tight text-foreground">审计日志</h1>
           <p className="text-sm text-muted-foreground mt-0.5">
-            共 {total} 条，当前显示 {currentStart}-{currentEnd}
+            {data ? `共 ${total} 条，当前显示 ${currentStart}-${currentEnd}` : '审计记录数量尚未加载'}
           </p>
         </div>
         <div className="flex flex-wrap items-center gap-2">
@@ -129,6 +132,8 @@ export default function AuditPage() {
         <div className="space-y-2">
           {[1, 2, 3].map((i) => <div key={i} className="h-14 bg-muted rounded-lg animate-pulse" />)}
         </div>
+      ) : auditQuery.isError ? (
+        <QueryErrorState error={auditQuery.error} resourceName="审计记录" onRetry={() => { void auditQuery.refetch(); }} />
       ) : logs.length === 0 ? (
         <div className="bg-card rounded-lg border border-border p-10 text-center text-muted-foreground/70">
           暂无审计记录

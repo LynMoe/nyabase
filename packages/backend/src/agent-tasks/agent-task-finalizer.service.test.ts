@@ -193,6 +193,128 @@ describe('AgentTaskFinalizerService managed failures', () => {
     );
   });
 
+  it('returns a pre-application SSH runtime stop to Active without changing desired power', async () => {
+    await service.applyFailed(
+      manager as unknown as EntityManager,
+      {
+        ...task(AgentTaskKind.ContainerSshEnsure),
+        payloadJson: { containerId: 'resource-a', runtimeId: 'runtime-a' },
+      } as AgentTaskEntity,
+      { code: 'container_ssh_runtime_stopped', message: 'runtime stopped before SSH convergence' },
+      {
+        applied: false,
+        runtimeId: 'runtime-a',
+        containerId: 'resource-a',
+        serverId: 'server-a',
+        running: false,
+        safetyRollback: {
+          runtimeId: 'runtime-a',
+          containerId: 'resource-a',
+          serverId: 'server-a',
+          running: false,
+        },
+      },
+    );
+
+    expect(manager.update).toHaveBeenCalledWith(
+      ContainerLifecycleEntity,
+      'resource-a',
+      expect.objectContaining({
+        phase: ContainerPhase.Active,
+        activeTaskId: null,
+        failureCode: null,
+      }),
+    );
+    expect(manager.update).not.toHaveBeenCalledWith(
+      ContainerDesiredSpecEntity,
+      expect.anything(),
+      expect.anything(),
+    );
+  });
+
+  it.each([
+    {
+      errorCode: 'container_ssh_incomplete',
+      observed: {
+        safetyRollback: {
+          runtimeId: 'runtime-a', containerId: 'resource-a', serverId: 'server-a', running: false,
+        },
+      },
+    },
+    {
+      errorCode: 'container_ssh_runtime_stopped',
+      observed: {
+        applied: false,
+        safetyRollback: {
+          runtimeId: 'runtime-other', containerId: 'resource-a', serverId: 'server-a', running: false,
+        },
+      },
+    },
+    {
+      errorCode: 'container_ssh_runtime_stopped',
+      observed: {
+        applied: false,
+        runtimeId: 'runtime-other',
+        containerId: 'resource-a',
+        serverId: 'server-a',
+        running: false,
+        safetyRollback: {
+          runtimeId: 'runtime-a', containerId: 'resource-a', serverId: 'server-a', running: false,
+        },
+      },
+    },
+  ])('keeps actual or mismatched SSH safety-stop evidence failed ($errorCode)', async ({
+    errorCode,
+    observed,
+  }) => {
+    await service.applyFailed(
+      manager as unknown as EntityManager,
+      {
+        ...task(AgentTaskKind.ContainerSshEnsure),
+        payloadJson: { containerId: 'resource-a', runtimeId: 'runtime-a' },
+      } as AgentTaskEntity,
+      { code: errorCode, message: 'SSH convergence failed' },
+      observed,
+    );
+
+    expect(manager.update).toHaveBeenCalledWith(
+      ContainerLifecycleEntity,
+      'resource-a',
+      expect.objectContaining({ phase: ContainerPhase.Failed, failureCode: errorCode }),
+    );
+    expect(manager.update).toHaveBeenCalledWith(
+      ContainerDesiredSpecEntity,
+      { containerId: 'resource-a' },
+      expect.objectContaining({ powerIntent: 'stopped' }),
+    );
+  });
+
+  it('does not classify runtime-less SSH task identity as an exact pre-application stop', async () => {
+    await service.applyFailed(
+      manager as unknown as EntityManager,
+      {
+        ...task(AgentTaskKind.ContainerSshEnsure),
+        payloadJson: { containerId: 'resource-a' },
+      } as AgentTaskEntity,
+      { code: 'container_ssh_runtime_stopped', message: 'SSH convergence failed' },
+      {
+        applied: false,
+        containerId: 'resource-a',
+        serverId: 'server-a',
+        running: false,
+        safetyRollback: {
+          containerId: 'resource-a', serverId: 'server-a', running: false,
+        },
+      },
+    );
+
+    expect(manager.update).toHaveBeenCalledWith(
+      ContainerLifecycleEntity,
+      'resource-a',
+      expect.objectContaining({ phase: ContainerPhase.Failed }),
+    );
+  });
+
   it('finalizes a corrupt never-dispatched container payload without inferring power state', async () => {
     mockContainerPhase(ContainerPhase.Updating);
     const dispatchTask = {

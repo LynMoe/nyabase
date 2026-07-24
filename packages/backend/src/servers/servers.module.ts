@@ -12,6 +12,7 @@ import { AgentGatewayModule } from '../gateway/agent-gateway.module.js';
 import { QuotaModule } from '../quota/quota.module.js';
 import { SshModule } from '../ssh/ssh.module.js';
 import { ProxySnapshotNotifierModule } from '../proxy-snapshots/proxy-snapshot-notifier.module.js';
+import { AuditModule } from '../audit/audit.module.js';
 
 @Module({
   imports: [
@@ -19,13 +20,14 @@ import { ProxySnapshotNotifierModule } from '../proxy-snapshots/proxy-snapshot-n
       ServerEntity,
       MountSourceGrantEntity,
     ]),
-    AuthModule,
-    AccessModule,
+    forwardRef(() => AuthModule),
+    forwardRef(() => AccessModule),
     forwardRef(() => UsersModule),
     forwardRef(() => AgentGatewayModule),
     forwardRef(() => QuotaModule),
     forwardRef(() => SshModule),
     ProxySnapshotNotifierModule,
+    AuditModule,
   ],
   providers: [ServersService],
   controllers: [ServersController, AdminServersController],

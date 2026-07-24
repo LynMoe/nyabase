@@ -13,12 +13,14 @@ Format per entry:
 ```
 
 ## 2026-06-01: nyabase visual e2e baseline
+- Status: Superseded by the 2026-07-16 retirement rule below.
 - Trigger: The harness was adapted from a previous project that referenced `frontend/e2e/**` and old auth fixtures; nyabase uses `packages/frontend/**` and did not yet have Playwright infrastructure.
 - Rule: Put visual specs under `packages/frontend/e2e/**`, run them through `packages/frontend/playwright.config.ts`, and use `pnpm --filter @nyabase/frontend exec playwright ...`. The first baseline covers the public `/login` route and unauthenticated `/` redirect. Authenticated routes need a nyabase-specific fixture recipe before they are added.
 - Rationale: Keeps visual coverage aligned with the pnpm workspace layout and avoids carrying old-project auth assumptions into nyabase.
 - Proposal: direct harness adaptation session `20260601T152346Z`.
 
 ## 2026-06-01: Judge fresh render before snapshot promotion
+- Status: Superseded for nyabase by the 2026-07-16 retirement rule below; retain only as generic historical guidance.
 - Trigger: Visual baselines can be regenerated before the current pixels are judged against the acceptance criteria, turning a failing render into a misleading green snapshot suite.
 - Rule: When the primary visual AC is under evaluation, capture and inspect the fresh render before running `--update-snapshots`. If a dispatch suggests regeneration first, still back up existing baselines, judge fresh pixels first, and restore the backup on product FAIL so failing pixels are not promoted.
 - Rationale: Snapshot update is promotion, not measurement; judging first prevents locking a regression into the baseline.
@@ -29,3 +31,9 @@ Format per entry:
 - Rule: Treat any user-requested command, test, probe, or scenario as a required acceptance item. If existing suites do not cover it, add a controlled probe when safe, or report FAIL/BLOCKED with the concrete blocker.
 - Rationale: Existing suite coverage is evidence, not the task boundary; skipped hard requirements must not be hidden under residual risk.
 - Proposal: direct harness requirement-coverage session `20260605T063122Z`.
+
+## 2026-07-16: Retire mocked visual snapshot testing
+- Trigger: The mocked Playwright suite produced baseline churn without proving the real frontend, Backend, and Agent path.
+- Rule: Do not recreate the retired screenshot-baseline suite or use pixel snapshots as a nyabase release gate. Future browser E2E must exercise a real disposable Backend and CPU Agent environment; browser tooling may be added only for those functional flows.
+- Rationale: Release evidence must cover the real control and runtime path instead of mock fidelity or snapshot maintenance.
+- Proposal: direct user requirement in the CPU-only local E2E feasibility session.

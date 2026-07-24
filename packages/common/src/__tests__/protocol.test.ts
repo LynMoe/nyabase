@@ -13,7 +13,13 @@ import {
   agentTaskPayloadSchemas,
   parseAgentTaskPayload,
   zStateReportPayload,
+  zDiskInfo,
+  zGpuInfo,
+  zReconcilePayload,
   zInventoryFaultPayload,
+  zInspectContainerResult,
+  zSelfCheckResult,
+  zSafeEpochMs,
   zMetricsBatchPayload,
   zAgentBootstrapPayload,
   zAgentBootstrapResult,
@@ -27,6 +33,8 @@ import {
   zAddSshKeyRequest,
   zCreateImageRequest,
   zUpdateImageRequest,
+  zUpdateAdminImageRequest,
+  zUpdateAdminGroupRequest,
   zCreateContainerRequest,
   zLoginRequest,
   zCreateServerRequest,
@@ -56,8 +64,15 @@ import {
   MAX_METRIC_LABELS_PER_POINT,
   MAX_METRIC_POINTS_PER_BATCH,
   MAX_AGENT_REMOTE_FS_MOUNTS,
+  MAX_AGENT_GPU_DEVICES,
+  MAX_HTTP_PROXY_ACTIVE_CONNECTIONS,
+  MAX_SSH_PROXY_STATUS_CONNECTIONS,
+  PROXY_SNAPSHOT_MAX_CLOCK_SKEW_MS,
+  ECMASCRIPT_DATE_MAX_EPOCH_MS,
+  AGENT_PROTOCOL_MAX_FUTURE_CLOCK_SKEW_MS,
   type AgentTaskRefResponse,
   type AgentTaskDto,
+  type UserAgentTaskDto,
 } from '@nyabase/common';
 
 declare const process: {
@@ -90,6 +105,15 @@ describe('zUpdateUserRequest', () => {
     expect(zUpdateUserRequest.parse({ status: UserStatus.Active }))
       .toEqual({ status: UserStatus.Active });
     expect(() => zUpdateUserRequest.parse({ status: UserStatus.Deleted })).toThrow();
+  });
+});
+
+describe('zUpdateAdminGroupRequest', () => {
+  it('requires a positive CAS revision and at least one mutable group field', () => {
+    expect(zUpdateAdminGroupRequest.parse({ expectedRevision: 2, description: null }))
+      .toEqual({ expectedRevision: 2, description: null });
+    expect(() => zUpdateAdminGroupRequest.parse({ description: 'missing revision' })).toThrow();
+    expect(() => zUpdateAdminGroupRequest.parse({ expectedRevision: 2 })).toThrow();
   });
 });
 
@@ -249,6 +273,32 @@ describe('durable Agent task protocol', () => {
     });
   });
 
+  it('bounds durable container and runtime identities at exact contract edges', () => {
+    const containerAt = (length: number) => 'c'.repeat(length);
+    const runtimeAt = (length: number) => 'r'.repeat(length);
+
+    for (const containerId of [containerAt(1), containerAt(128)]) {
+      expect(zContainerStopTaskPayload.parse({ containerId, runtimeId: 'r' }).containerId)
+        .toBe(containerId);
+    }
+    for (const containerId of [containerAt(0), containerAt(129)]) {
+      expect(() => zContainerStopTaskPayload.parse({ containerId, runtimeId: 'r' })).toThrow();
+    }
+    for (const runtimeId of [runtimeAt(1), runtimeAt(256)]) {
+      expect(zContainerStopTaskPayload.parse({ containerId: 'c', runtimeId }).runtimeId)
+        .toBe(runtimeId);
+      expect(zContainerSshEnsureTaskPayload.parse({
+        containerId: 'c', runtimeId, enabled: false,
+      }).runtimeId).toBe(runtimeId);
+    }
+    for (const runtimeId of [runtimeAt(0), runtimeAt(257)]) {
+      expect(() => zContainerStopTaskPayload.parse({ containerId: 'c', runtimeId })).toThrow();
+      expect(() => zContainerSshEnsureTaskPayload.parse({
+        containerId: 'c', runtimeId, enabled: false,
+      })).toThrow();
+    }
+  });
+
   it('accepts desired mounts on start payloads', () => {
     const parsed = zContainerStartTaskPayload.parse({
       containerId: 'container-a',
@@ -390,6 +440,24 @@ describe('zHelloPayload', () => {
     const incomplete: Partial<typeof payload> = { ...payload };
     delete incomplete.localImages;
     expect(() => zHelloPayload.parse(incomplete)).toThrow();
+
+    const disk = {
+      diskId: 'disk-a', mountPoint: '/srv/data', sourceIdentity: 'uuid-a',
+      totalBytes: 1024, usedBytes: 0, pquotaEnabled: true,
+    };
+    expect(() => zHelloPayload.parse({ ...payload, disks: [disk, disk] })).toThrow(
+      'inventory identities must be unique',
+    );
+    const gpu = { index: 0, uuid: 'GPU-a', model: 'Model A', totalMemMiB: 1 };
+    expect(() => zHelloPayload.parse({
+      ...payload,
+      gpus: [gpu, { ...gpu, uuid: 'GPU-b' }],
+    })).toThrow('inventory identities must be unique');
+    for (const dockerRoot of ['/var/lib/docker/', '/var//lib/docker', '/var/lib/../docker']) {
+      expect(() => zHelloPayload.parse({ ...payload, dockerRoot })).toThrow(
+        'canonical absolute path',
+      );
+    }
   });
 
   it('requires int cpuCores', () => {
@@ -415,6 +483,33 @@ describe('zHelloPayload', () => {
 });
 
 describe('zStateReportPayload', () => {
+  it('bounds and validates physical inventory identities before caching them', () => {
+    const disk = {
+      diskId: 'disk-a',
+      mountPoint: '/srv/data',
+      sourceIdentity: 'uuid-a',
+      label: 'Shared data',
+      totalBytes: 1024,
+      usedBytes: 512,
+      pquotaEnabled: true,
+    };
+    expect(zDiskInfo.parse(disk)).toEqual(disk);
+    for (const invalid of [
+      { ...disk, diskId: '../private' },
+      { ...disk, mountPoint: 'relative/path' },
+      { ...disk, mountPoint: '/srv/data\nother' },
+      { ...disk, usedBytes: -1 },
+      { ...disk, totalBytes: Number.MAX_SAFE_INTEGER + 1 },
+      { ...disk, unexpected: true },
+    ]) expect(() => zDiskInfo.parse(invalid)).toThrow();
+
+    expect(zGpuInfo.parse({
+      index: 0, uuid: 'GPU-a', model: 'Model A', totalMemMiB: 24_576,
+    })).toMatchObject({ index: 0, model: 'Model A' });
+    expect(() => zGpuInfo.parse({
+      index: MAX_AGENT_GPU_DEVICES, uuid: 'GPU-a', model: 'Model A', totalMemMiB: 1,
+    })).toThrow();
+  });
   it('requires complete image and remote filesystem observations', () => {
     const payload = {
       serverId: 's',
@@ -431,6 +526,33 @@ describe('zStateReportPayload', () => {
     const incomplete: Partial<typeof payload> = { ...payload };
     delete incomplete.localImages;
     expect(() => zStateReportPayload.parse(incomplete)).toThrow();
+    const disk = {
+      diskId: 'disk-a', mountPoint: '/srv/data', sourceIdentity: 'uuid-a',
+      totalBytes: 1024, usedBytes: 0, pquotaEnabled: true,
+    };
+    expect(() => zStateReportPayload.parse({ ...payload, disks: [disk, disk] })).toThrow(
+      'Disk inventory identities must be unique',
+    );
+  });
+
+  it('accepts only safe ordered sequence and bounded Agent epoch values', () => {
+    const payload = {
+      serverId: 's', sequence: 1, observedAt: Date.now(),
+      containers: [], dataDirs: [], xfsProjects: [], disks: [], localImages: [], remoteFsMounts: [],
+    };
+    expect(zStateReportPayload.parse(payload)).toMatchObject(payload);
+    for (const sequence of [Number.MAX_SAFE_INTEGER + 1, 1e300, Number.POSITIVE_INFINITY]) {
+      expect(() => zStateReportPayload.parse({ ...payload, sequence })).toThrow();
+    }
+    for (const observedAt of [
+      ECMASCRIPT_DATE_MAX_EPOCH_MS + 1,
+      1e300,
+      Date.now() + AGENT_PROTOCOL_MAX_FUTURE_CLOCK_SKEW_MS + 10_000,
+    ]) {
+      expect(() => zStateReportPayload.parse({ ...payload, observedAt })).toThrow();
+    }
+    const maxDate = new Date(zSafeEpochMs.parse(ECMASCRIPT_DATE_MAX_EPOCH_MS));
+    expect(() => maxDate.toISOString()).not.toThrow();
   });
 
   it('requires finite nonnegative XFS evidence with the deterministic project identity', () => {
@@ -460,6 +582,33 @@ describe('zStateReportPayload', () => {
     expect(() => zStateReportPayload.parse({
       ...payload,
       xfsProjects: [{ ...payload.xfsProjects[0], usedBytes: Number.MAX_SAFE_INTEGER + 1 }],
+    })).toThrow();
+  });
+});
+
+describe('bounded direct Agent RPC results', () => {
+  it('bounds inspectContainer graph recovery paths', () => {
+    const base = {
+      runtimeId: 'runtime-a', startedAt: '2026-07-17T00:00:00.000Z', running: true,
+      graphPaths: ['/docker/upper', '/docker/work'],
+    };
+    expect(zInspectContainerResult.parse(base)).toEqual(base);
+    expect(() => zInspectContainerResult.parse({
+      ...base,
+      graphPaths: [...base.graphPaths, '/docker/third'],
+    })).toThrow();
+    expect(() => zInspectContainerResult.parse({
+      ...base,
+      graphPaths: ['x'.repeat(4097)],
+    })).toThrow();
+  });
+
+  it('bounds self-check item count and text fields', () => {
+    const item = { id: 'docker', label: 'Docker', status: 'ok' as const, message: 'healthy' };
+    expect(zSelfCheckResult.parse({ items: [item] })).toEqual({ items: [item] });
+    expect(() => zSelfCheckResult.parse({ items: Array.from({ length: 129 }, () => item) })).toThrow();
+    expect(() => zSelfCheckResult.parse({
+      items: [{ ...item, message: 'x'.repeat(2049) }],
     })).toThrow();
   });
 });
@@ -541,6 +690,18 @@ describe('zContainerCreateTaskPayload', () => {
     ]);
   });
 
+  it.each(['/', '//', '///'])('rejects root mount spelling %j at the Agent task boundary', (containerPath) => {
+    expect(() => zContainerCreateTaskPayload.parse({
+      ...base,
+      mounts: [{
+        sourceId: 'disk-1',
+        resourceId: 'resource-1',
+        sourceIdentity: 'local:xfs:uuid-1',
+        containerPath,
+      }],
+    })).toThrow();
+  });
+
   it('rejects legacy SSH injection fields', () => {
     expect(() => zContainerCreateTaskPayload.parse({
       ...base,
@@ -580,6 +741,14 @@ describe('image runtime override REST schemas', () => {
     })).toThrow();
   });
 
+  it('preserves an explicit null description on image creation', () => {
+    expect(zCreateImageRequest.parse({
+      name: 'Alpine',
+      dockerImage: 'alpine:latest',
+      description: null,
+    })).toMatchObject({ description: null });
+  });
+
   it('accepts explicit runtimeOverrides for image update', () => {
     const parsed = zUpdateImageRequest.parse({
       runtimeOverrides: {
@@ -596,6 +765,15 @@ describe('image runtime override REST schemas', () => {
       cmd: ['run'],
       init: true,
     });
+  });
+
+  it('requires a safe CAS revision plus a real field for administrative image updates', () => {
+    expect(zUpdateAdminImageRequest.parse({ expectedRevision: 7, isActive: false }))
+      .toEqual({ expectedRevision: 7, isActive: false });
+    expect(() => zUpdateAdminImageRequest.parse({ expectedRevision: 7 })).toThrow();
+    for (const expectedRevision of [0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1]) {
+      expect(() => zUpdateAdminImageRequest.parse({ expectedRevision, isActive: false })).toThrow();
+    }
   });
 
   it('rejects invalid override uid and empty args', () => {
@@ -724,6 +902,27 @@ describe('Container SSH protocol state', () => {
       enabled: false,
     });
   });
+
+  it('bounds reconcile inventory proof nonces and permits one report echo', () => {
+    const proofNonce = 'a'.repeat(64);
+    expect(zReconcilePayload.parse({ serverId: 'server-a', proofNonce })).toEqual({
+      serverId: 'server-a',
+      proofNonce,
+    });
+    expect(() => zReconcilePayload.parse({ serverId: 'server-a', proofNonce: 'short' })).toThrow();
+    expect(zStateReportPayload.parse({
+      serverId: 'server-a',
+      sequence: 1,
+      observedAt: 1,
+      reconcileProofNonce: proofNonce,
+      containers: [],
+      dataDirs: [],
+      xfsProjects: [],
+      disks: [],
+      localImages: [],
+      remoteFsMounts: [],
+    })).toMatchObject({ reconcileProofNonce: proofNonce });
+  });
 });
 
 describe('zRemoteFsParams', () => {
@@ -789,6 +988,31 @@ describe('remote-fs REST request schemas', () => {
     expect(zUpdateRemoteFsMountRequest.parse({ name: 'renamed' })).toEqual({ name: 'renamed' });
   });
 
+  it('accepts only real TCP port values in Ceph monitor endpoints', () => {
+    const request = (monHosts: string) => ({
+      name: 'ceph-a',
+      params: {
+        type: RemoteFsType.CephFs,
+        monHosts,
+        exportPath: '/',
+        clientName: 'admin',
+        secret: 'AQAB==',
+      },
+    });
+
+    for (const monHosts of [
+      'node-a:1',
+      'node-a:65535',
+      '[2001:db8::1]:6789,node-b',
+    ]) {
+      expect(zCreateRemoteFsMountRequest.parse(request(monHosts)).params)
+        .toMatchObject({ monHosts });
+    }
+    for (const monHosts of ['node-a:0', 'node-a:65536', 'node-a:99999']) {
+      expect(() => zCreateRemoteFsMountRequest.parse(request(monHosts))).toThrow();
+    }
+  });
+
   it('rejects argv-breaking parameters and reserved mount options', () => {
     const base = {
       name: 'nfs-a',
@@ -803,6 +1027,9 @@ describe('remote-fs REST request schemas', () => {
     expect(() => zCreateRemoteFsMountRequest.parse({ ...base, options: 'vers=3' })).toThrow();
     expect(() => zCreateRemoteFsMountRequest.parse({ ...base, options: 'bg' })).toThrow();
     expect(() => zCreateRemoteFsMountRequest.parse({ ...base, options: 'fg' })).toThrow();
+    expect(() => zCreateRemoteFsMountRequest.parse({ ...base, options: 'ro,rw' })).toThrow();
+    expect(() => zCreateRemoteFsMountRequest.parse({ ...base, options: 'ro,ro' })).toThrow();
+    expect(() => zCreateRemoteFsMountRequest.parse({ ...base, options: 'hard,soft' })).toThrow();
     expect(() => zCreateRemoteFsMountRequest.parse({
       ...base,
       params: { ...base.params, nfsServer: '-o' },
@@ -1072,8 +1299,24 @@ describe('Control-plane REST protocol exports', () => {
       completedAt: null,
       retentionUntil: null,
     };
+    const requesterTask: UserAgentTaskDto = {
+      id: task.id,
+      kind: task.kind,
+      status: task.status,
+      resourceType: task.resourceType,
+      resourceId: task.resourceId,
+      serverId: task.serverId,
+      error: null,
+      failureStage: null,
+      createdAt: task.createdAt,
+      startedAt: null,
+      lastSentAt: null,
+      completedAt: null,
+      retentionUntil: null,
+    };
     expect(taskRef.status).toBe(AgentTaskStatus.Pending);
     expect(task.kind).toBe(AgentTaskKind.ContainerCreate);
+    expect(requesterTask).not.toHaveProperty('request');
     expect(RuntimeDriftKind.SpecGenerationMismatch).toBe('spec_generation_mismatch');
     expect(zEnvelope.parse({ ts: 1, kind: 'hello', payload: {} }).kind).toBe('hello');
     expect(ContainerStatus.Running).toBe('running');
@@ -1085,6 +1328,7 @@ describe('Control-plane REST protocol exports', () => {
     for (const dtoName of [
       'AgentTaskRefResponse',
       'AgentTaskDto',
+      'UserAgentTaskDto',
       'RuntimeDriftDto',
       'RuntimeStalenessDto',
     ]) {
@@ -1131,8 +1375,84 @@ describe('SSH proxy admin status protocol', () => {
 
     expect(status.activeConnections).toBe(1);
     expect(status.connections[0].containerName).toBe('work');
-    expect(zSshProxyDisconnectAllCommand.parse({ requestId: 'req-a' }).requestId).toBe('req-a');
-    expect(zSshProxyDisconnectAllResult.parse({ requestId: 'req-a', disconnected: 1 }).disconnected).toBe(1);
+    const requestId = 'a'.repeat(24);
+    expect(zSshProxyDisconnectAllCommand.parse({ requestId }).requestId).toBe(requestId);
+    expect(zSshProxyDisconnectAllResult.parse({ requestId, disconnected: 1 }).disconnected).toBe(1);
+  });
+
+  it('strictly bounds disconnect-all commands and proxy results', () => {
+    const requestId = 'a'.repeat(24);
+    for (const candidate of [
+      { requestId: 'req-a', disconnected: 1 },
+      { requestId, disconnected: MAX_SSH_PROXY_STATUS_CONNECTIONS + 1 },
+      { requestId, disconnected: 1e300 },
+      { requestId, disconnected: 1, unexpected: true },
+    ]) {
+      expect(zSshProxyDisconnectAllResult.safeParse(candidate).success).toBe(false);
+    }
+    expect(zSshProxyDisconnectAllCommand.safeParse({
+      requestId,
+      reason: 'x'.repeat(513),
+    }).success).toBe(false);
+    expect(zSshProxyDisconnectAllCommand.safeParse({
+      requestId,
+      reason: 'bounded',
+      unexpected: true,
+    }).success).toBe(false);
+  });
+
+  it('rejects unbounded, unknown, unsafe-counter, and invalid-clock status evidence', () => {
+    const connection = {
+      id: 'conn-1',
+      peer: '127.0.0.1:55555',
+      username: null,
+      login: null,
+      serverSlug: null,
+      serverId: null,
+      containerName: null,
+      containerId: null,
+      runtimeId: null,
+      connectedAt: 1,
+      authenticatedAt: null,
+      bytesFromClient: 0,
+      bytesToClient: 0,
+      channels: 0,
+    };
+    const valid = {
+      proxyId: 'proxy-a',
+      hostname: 'host-a',
+      listen: '0.0.0.0:2222',
+      uptimeMs: 1000,
+      connectedAt: 1,
+      lastSnapshotGeneration: 2,
+      lastSnapshotAt: 3,
+      activeConnections: 0,
+      totalConnections: 4,
+      totalRejectedConnections: 0,
+      totalClosedConnections: 3,
+      totalBytesFromClient: 1024,
+      totalBytesToClient: 2048,
+      bandwidthInBps: 10,
+      bandwidthOutBps: 20,
+      connections: [],
+    };
+    const invalid = [
+      { ...valid, proxyId: 'p'.repeat(129) },
+      { ...valid, connectedAt: 1e300 },
+      { ...valid, lastSnapshotAt: Date.now() + PROXY_SNAPSHOT_MAX_CLOCK_SKEW_MS + 60_000 },
+      { ...valid, totalConnections: Number.MAX_SAFE_INTEGER + 1 },
+      { ...valid, unexpected: true },
+      { ...valid, activeConnections: 1 },
+      {
+        ...valid,
+        activeConnections: MAX_SSH_PROXY_STATUS_CONNECTIONS + 1,
+        connections: Array(MAX_SSH_PROXY_STATUS_CONNECTIONS + 1).fill(connection),
+      },
+      { ...valid, activeConnections: 1, connections: [{ ...connection, unexpected: true }] },
+    ];
+    for (const candidate of invalid) {
+      expect(zSshProxyStatusReport.safeParse(candidate).success).toBe(false);
+    }
   });
 });
 
@@ -1214,6 +1534,32 @@ describe('HTTP proxy route protocol', () => {
     });
     expect(status.totalRequests).toBe(3);
     expect(httpProxyWarningMessage(['container_ip_missing', 'proxy_offline'])).toContain('容器 IP 缺失');
+  });
+
+  it('rejects unbounded, unknown, unsafe-counter, and invalid-clock HTTP status evidence', () => {
+    const valid = {
+      proxyId: 'proxy-a',
+      hostname: 'host-a',
+      httpListen: '0.0.0.0:8080',
+      httpsListen: null,
+      uptimeMs: 100,
+      connectedAt: 1,
+      lastSnapshotGeneration: 1,
+      lastSnapshotAt: 2,
+      activeConnections: 1,
+      totalRequests: 3,
+      totalRejectedRequests: 1,
+    };
+    for (const candidate of [
+      { ...valid, hostname: 'h'.repeat(254) },
+      { ...valid, connectedAt: 1e300 },
+      { ...valid, lastSnapshotAt: Date.now() + PROXY_SNAPSHOT_MAX_CLOCK_SKEW_MS + 60_000 },
+      { ...valid, totalRequests: Number.MAX_SAFE_INTEGER + 1 },
+      { ...valid, activeConnections: MAX_HTTP_PROXY_ACTIVE_CONNECTIONS + 1 },
+      { ...valid, unexpected: true },
+    ]) {
+      expect(zHttpProxyStatusReport.safeParse(candidate).success).toBe(false);
+    }
   });
 });
 

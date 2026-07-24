@@ -23,6 +23,11 @@ import {
 import { AgentTaskFinalizerWorkerService } from './agent-task-finalizer-worker.service.js';
 import { validateTerminalAgentResult } from './agent-task-result-validator.js';
 import { ProxySnapshotNotifierService } from '../proxy-snapshots/proxy-snapshot-notifier.service.js';
+import { AgentTaskPayloadCodecService } from './agent-task-payload-codec.service.js';
+import {
+  validateDurableAgentTaskIdentity,
+  validateDurableAgentTaskRowIdentity,
+} from './agent-task-durable-contract.js';
 
 const PROVEN_NO_EFFECT_COORDINATION_RESULTS = new Set([
   'container_delete_unbound_runtime_present',
@@ -56,6 +61,7 @@ export class AgentTaskResultService {
   constructor(
     private dataSource: DataSource,
     private finalizerWorker: AgentTaskFinalizerWorkerService,
+    private payloadCodec: AgentTaskPayloadCodecService,
     private proxySnapshots: ProxySnapshotNotifierService = {
       blockServer: () => undefined,
     } as unknown as ProxySnapshotNotifierService,
@@ -86,6 +92,24 @@ export class AgentTaskResultService {
     try {
       const committed = await runSerializedTransaction(this.dataSource, async (manager) => {
         const task = await this.loadAndValidate(manager, serverId, result);
+        let wirePayload: unknown = null;
+        try {
+          // Every ingress outcome is bound to a known durable row before any
+          // retry, quarantine, staging, projection, or lock decision.
+          validateDurableAgentTaskRowIdentity(task);
+          if (result.status !== 'incomplete') {
+            wirePayload = validateDurableAgentTaskIdentity(
+              task,
+              this.payloadCodec.forDispatch(task),
+            );
+          }
+        } catch (error) {
+          throw new ConflictException({
+            code: 'TASK_RESULT_SCHEMA_INVALID',
+            message: 'Durable task payload identity no longer matches the dispatched task',
+            details: error instanceof Error ? error.message : String(error),
+          });
+        }
 
         if (task.status === AgentTaskStatus.Failed && this.errorCode(task.errorJson) === 'TASK_SUPERSEDED') {
           // The successor intent is already durable. Ack a late result from the
@@ -165,7 +189,7 @@ export class AgentTaskResultService {
           return { accepted: null, needsFinalizer: false, quarantineServerId: null };
         }
 
-        validateTerminalAgentResult(task, result);
+        validateTerminalAgentResult(task, result, { wirePayload });
 
         const evidence = this.agentEvidence(result);
         if (

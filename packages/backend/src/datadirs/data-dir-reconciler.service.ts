@@ -56,9 +56,11 @@ export class DataDirReconcilerService {
       observedKeys.add(key);
     }
     const failedEntries = expected.filter((entry) => entry.desiredState === 'failed');
-    const activeMissingEntries = expected.filter((entry) =>
-      entry.blocksWhenMissing && !observedKeys.has(this.key(entry)));
-    const missingEntries = [...activeMissingEntries, ...failedEntries];
+    const reportedMissingEntries = expected.filter((entry) =>
+      entry.reportsWhenMissing && !observedKeys.has(this.key(entry)));
+    const blockingMissingEntries = reportedMissingEntries.filter((entry) =>
+      entry.blocksWhenMissing);
+    const missingEntries = [...reportedMissingEntries, ...failedEntries];
     const issues = {
       orphans: orphanEntries.map((entry) => this.issue('orphan', serverId, entry)),
       missing: missingEntries.map((entry) => this.issue('missing', serverId, entry)),
@@ -66,14 +68,15 @@ export class DataDirReconcilerService {
     // A durable failed row is already unreachable from container mount
     // admission and has an ordinary delete/retry path. Keep it observable, but
     // do not quarantine the whole Agent and thereby make that repair path
-    // impossible. Only unknown physical state or an active promise that has
-    // disappeared blocks authoritative promotion.
-    const blockingCount = issues.orphans.length + activeMissingEntries.length;
+    // impossible. Unknown physical entries and an active server-local promise
+    // that disappeared block authoritative promotion. A shared remote entry
+    // missing from one client remains visible without becoming global proof.
+    const blockingCount = issues.orphans.length + blockingMissingEntries.length;
     return {
       issues,
       blockingReason: blockingCount === 0
         ? null
-        : `Authoritative data directory inventory has ${issues.orphans.length} orphan and ${activeMissingEntries.length} active-missing entries`,
+        : `Authoritative data directory inventory has ${issues.orphans.length} orphan and ${blockingMissingEntries.length} active-missing entries`,
     };
   }
 
@@ -89,6 +92,7 @@ export class DataDirReconcilerService {
     userId: string;
     hostPath: string;
     desiredState: DataDirectoryEntity['desiredState'];
+    reportsWhenMissing: boolean;
     blocksWhenMissing: boolean;
   }>> {
     const results: Array<{
@@ -99,6 +103,7 @@ export class DataDirReconcilerService {
       userId: string;
       hostPath: string;
       desiredState: DataDirectoryEntity['desiredState'];
+      reportsWhenMissing: boolean;
       blocksWhenMissing: boolean;
     }> = [];
 
@@ -122,6 +127,7 @@ export class DataDirReconcilerService {
           userId: dir.userId,
           hostPath: this.physicalDataDirPath(mountPoint, dir.id),
           desiredState: dir.desiredState,
+          reportsWhenMissing: dir.desiredState === 'active',
           blocksWhenMissing: dir.desiredState === 'active',
         });
     }
@@ -164,7 +170,14 @@ export class DataDirReconcilerService {
           userId: dir.userId,
           hostPath: this.physicalDataDirPath(hostMountPoint, dir.id),
           desiredState: dir.desiredState,
-          blocksWhenMissing: assignmentState === 'active' && dir.desiredState === 'active',
+          // A remote directory is global to the shared filesystem. One
+          // assigned client's absence observation cannot prove that shared
+          // directory is globally absent (for example, another NFS client may
+          // have created it while this client's directory cache is stale).
+          // Keep the discrepancy visible, but reserve fail-closed missing
+          // evidence for server-local sources.
+          reportsWhenMissing: assignmentState === 'active' && dir.desiredState === 'active',
+          blocksWhenMissing: false,
         });
       }
     }

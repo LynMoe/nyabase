@@ -3,6 +3,8 @@ import * as path from 'path';
 import type { AgentConfig } from './config.js';
 
 export interface MountIdentity {
+  /** Kernel mount id (mountinfo field 1), unique for the lifetime of a mount. */
+  mountId: number;
   deviceId: string;
   /** Root of this mount inside the backing filesystem (mountinfo field 4). */
   fsRoot: string;
@@ -20,7 +22,10 @@ export class HostStorageIdentityChangedError extends Error {
 }
 
 export interface HostStorageIdentityGuardOptions {
+  /** Stable identity used in the Agent fingerprint and wire projections. */
   readIdentity: (root: string) => string;
+  /** Boot-lifetime identity that also detects an unmount/remount of the same FS. */
+  readRuntimeIdentity?: (root: string) => string;
   assertLayout?: (config: AgentConfig) => void;
   fatalHook?: (error: HostStorageIdentityChangedError) => void;
 }
@@ -32,7 +37,9 @@ export interface HostStorageIdentityGuardOptions {
  */
 export class HostStorageIdentityGuard {
   private readonly expected = new Map<string, string>();
+  private readonly expectedRuntime = new Map<string, string>();
   private readonly readIdentity: (root: string) => string;
+  private readonly readRuntimeIdentity: (root: string) => string;
   private readonly assertLayout: (config: AgentConfig) => void;
   private readonly fatalHook: (error: HostStorageIdentityChangedError) => void;
 
@@ -41,6 +48,7 @@ export class HostStorageIdentityGuard {
     options: HostStorageIdentityGuardOptions,
   ) {
     this.readIdentity = options.readIdentity;
+    this.readRuntimeIdentity = options.readRuntimeIdentity ?? options.readIdentity;
     this.assertLayout = options.assertLayout ?? assertHostStorageLayout;
     this.fatalHook = options.fatalHook ?? ((error) => {
       console.error(`[Storage] ${error.message}; terminating Agent before further physical work`);
@@ -48,6 +56,7 @@ export class HostStorageIdentityGuard {
     });
     for (const root of this.roots()) {
       this.expected.set(root, this.readIdentity(root));
+      this.expectedRuntime.set(root, this.readRuntimeIdentity(root));
     }
   }
 
@@ -60,8 +69,10 @@ export class HostStorageIdentityGuard {
       this.assertLayout(this.config);
       for (const root of this.roots()) {
         const expected = this.expected.get(root);
+        const expectedRuntime = this.expectedRuntime.get(root);
         const current = this.readIdentity(root);
-        if (!expected || current !== expected) {
+        const currentRuntime = this.readRuntimeIdentity(root);
+        if (!expected || current !== expected || !expectedRuntime || currentRuntime !== expectedRuntime) {
           throw new Error(`storage identity changed at ${root}: expected ${expected}, observed ${current}`);
         }
       }
@@ -114,8 +125,15 @@ export function assertQuotaMountTopology(
   const quotaDevices = new Set<string>();
   const physicalRoots = new Set<string>();
   for (const root of roots) {
-    const exact = mounts.find((mount) => mount.mountPoint === root);
-    if (!exact) throw new Error(`Configured storage root must be an exact filesystem mount: ${root}`);
+    const exactMatches = mounts.filter((mount) => mount.mountPoint === root);
+    if (exactMatches.length !== 1) {
+      throw new Error(
+        exactMatches.length === 0
+          ? `Configured storage root must be an exact filesystem mount: ${root}`
+          : `Configured storage root has an ambiguous stacked mount: ${root}`,
+      );
+    }
+    const exact = exactMatches[0]!;
     if (exact.fsType !== 'xfs') {
       throw new Error(`Configured storage root ${root} uses ${exact.fsType}, expected xfs`);
     }
@@ -147,6 +165,7 @@ export function parseMountInfo(contents: string): MountIdentity[] {
     const separator = fields.indexOf('-');
     if (separator < 6 || separator + 3 >= fields.length) continue;
     result.push({
+      mountId: Number.parseInt(fields[0], 10),
       deviceId: fields[2],
       fsRoot: path.resolve(decodeMountInfoPath(fields[3])),
       mountPoint: path.resolve(decodeMountInfoPath(fields[4])),

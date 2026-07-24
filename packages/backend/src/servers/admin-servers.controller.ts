@@ -18,6 +18,8 @@ import {
   zCreateServerRequest,
   zUpdateServerRequest,
 } from '@nyabase/common';
+import { CurrentUser } from '../auth/decorators/current-user.decorator.js';
+import type { UserEntity } from '../entities/user.entity.js';
 
 @Controller('admin/servers')
 @UseGuards(JwtAuthGuard, CapabilitiesGuard)
@@ -29,7 +31,7 @@ export class AdminServersController {
   @Get()
   @RequireCaps(Capability.ManageServers)
   async list() {
-    return this.serversService.findAllDtos();
+    return this.serversService.findAllDtos({ includeHostFingerprint: true });
   }
 
   @Get('all-disks')
@@ -40,23 +42,23 @@ export class AdminServersController {
 
   @Post()
   @RequireCaps(Capability.ManageServers)
-  async create(@Body() body: unknown) {
+  async create(@CurrentUser() actor: UserEntity, @Body() body: unknown) {
     const dto = zCreateServerRequest.parse(body);
-    const { server, agentToken } = await this.serversService.create(dto);
+    const { server, agentToken } = await this.serversService.create(actor.id, dto);
     return { server, agentToken };
   }
 
   @Post(':id/regenerate-token')
   @RequireCaps(Capability.ManageServers)
-  async regenerateToken(@Param('id') id: string) {
-    const token = await this.serversService.regenerateToken(id);
+  async regenerateToken(@Param('id') id: string, @CurrentUser() actor: UserEntity) {
+    const token = await this.serversService.regenerateToken(actor.id, id);
     return { token };
   }
 
   @Get(':id/self-check')
   @RequireCaps(Capability.ManageServers)
-  async selfCheck(@Param('id') id: string) {
-    return this.serversService.selfCheck(id);
+  async selfCheck(@Param('id') id: string, @CurrentUser() actor: UserEntity) {
+    return this.serversService.selfCheck(actor.id, id);
   }
 
   @Get(':id/disks')
@@ -68,20 +70,24 @@ export class AdminServersController {
   @Get(':id')
   @RequireCaps(Capability.ManageServers)
   async get(@Param('id') id: string) {
-    return this.serversService.findDtoById(id);
+    return this.serversService.findDtoById(id, { includeHostFingerprint: true });
   }
 
   @Patch(':id')
   @RequireCaps(Capability.ManageServers)
-  async update(@Param('id') id: string, @Body() body: unknown) {
+  async update(
+    @Param('id') id: string,
+    @CurrentUser() actor: UserEntity,
+    @Body() body: unknown,
+  ) {
     const dto = zUpdateServerRequest.parse(body);
-    return this.serversService.update(id, dto);
+    return this.serversService.update(actor.id, id, dto);
   }
 
   @Delete(':id')
   @RequireCaps(Capability.ManageServers)
   @HttpCode(204)
-  async delete(@Param('id') id: string) {
-    await this.serversService.delete(id);
+  async delete(@Param('id') id: string, @CurrentUser() actor: UserEntity) {
+    await this.serversService.delete(actor.id, id);
   }
 }

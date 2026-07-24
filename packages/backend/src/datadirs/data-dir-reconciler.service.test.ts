@@ -122,14 +122,27 @@ describe('DataDirReconcilerService authoritative inventory', () => {
       .resolves.toMatchObject({ blockingReason: null });
   });
 
-  it('requires an active remote assignment directory but not transition-state assignments', async () => {
+  it('reports an active remote assignment missing without treating one client as global proof', async () => {
     const active = await remoteServiceWith('active').reconcileReport('server-a', [], []);
-    expect(active.blockingReason).toContain('1 active-missing');
+    expect(active.blockingReason).toBeNull();
     expect(active.issues.missing).toHaveLength(1);
 
     await expect(remoteServiceWith('removing').reconcileReport('server-a', [], []))
       .resolves.toMatchObject({ blockingReason: null });
     await expect(remoteServiceWith('failed').reconcileReport('server-a', [], []))
       .resolves.toMatchObject({ blockingReason: null });
+  });
+
+  it('still blocks an unknown remote directory as orphan evidence', async () => {
+    const orphan = await remoteServiceWith('active').reconcileReport('server-a', [{
+      sourceKind: 'remote',
+      sourceId: 'remote-a',
+      resourceId: 'unknown-remote-dir',
+      hostPath: '/mnt/remote-a/.nyabase/dirs/unknown-remote-dir/data',
+    }], []);
+
+    expect(orphan.blockingReason).toContain('1 orphan');
+    expect(orphan.issues.orphans).toHaveLength(1);
+    expect(orphan.issues.missing).toHaveLength(1);
   });
 });

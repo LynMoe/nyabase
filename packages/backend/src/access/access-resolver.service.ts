@@ -1,6 +1,6 @@
-import { Injectable } from '@nestjs/common';
+import { ForbiddenException, Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { EntityManager, In, IsNull, Repository } from 'typeorm';
+import { EntityManager, In, IsNull, Not, Repository } from 'typeorm';
 import { GroupEntity } from '../entities/group.entity.js';
 import { GroupMemberEntity } from '../entities/group-member.entity.js';
 import { ServerGrantEntity } from '../entities/server-grant.entity.js';
@@ -17,11 +17,15 @@ import {
   GroupSummaryDto,
   MountSourceKind,
   UserStatus,
+  SystemGroupKey,
+  type AdministrationActionsDto,
 } from '@nyabase/common';
 import { resolveGrant } from './grant-utils.js';
 import { AgentGateway } from '../gateway/agent-gateway.js';
 import { exactLocalDisk } from '../mount-sources/utils.js';
 import { AccessCacheEpochService } from './access-cache-epoch.service.js';
+import { runSerializedTransaction } from '../database/serialized-transaction.js';
+import { projectAdministrationActions } from './administration-availability.js';
 
 export interface ResolvedServerGrant {
   cpuMillis: number;
@@ -34,6 +38,14 @@ export interface ResolvedServerGrant {
 export interface MountSourceRef {
   kind: MountSourceKind;
   id: string;
+}
+
+/**
+ * Keeps a started external operation boxed so Promise assimilation cannot make
+ * the authority transaction wait for the remote acknowledgement.
+ */
+export interface StartedExternalWork<T> {
+  completion: Promise<T>;
 }
 
 interface CachedMountSourceRef extends MountSourceRef {
@@ -61,6 +73,7 @@ const CACHE_TTL_MS = 30_000;
  * working set of active sessions.
  */
 const CACHE_MAX_ENTRIES = 512;
+const CACHE_FILL_MAX_RETRIES = 2;
 
 @Injectable()
 export class AccessResolverService {
@@ -94,6 +107,9 @@ export class AccessResolverService {
   // ---------------------------------------------------------------------------
 
   invalidateUser(userId: string) {
+    // Fence any read that began before this invalidation. Merely deleting the
+    // entry lets an older in-flight fill publish stale authority afterwards.
+    this.cacheEpoch.bump();
     this.cache.delete(userId);
   }
 
@@ -111,9 +127,233 @@ export class AccessResolverService {
     return uc.capabilities;
   }
 
+  /**
+   * Resolve security-sensitive route authority from a current serialized DB
+   * snapshot. The regular cache remains suitable for projections, but must
+   * never extend revoked admin/read authority for its TTL.
+   */
+  async userCapabilitiesCurrent(userId: string): Promise<Set<Capability>> {
+    return runSerializedTransaction(
+      this.groupsRepo.manager.connection,
+      (manager) => this.userCapabilitiesInTransaction(manager, userId, true),
+    );
+  }
+
+  /** Build UI action truth from the same durable authority model as mutations. */
+  async administrationActionsCurrent(actorId: string): Promise<AdministrationActionsDto> {
+    return runSerializedTransaction(this.groupsRepo.manager.connection, async (manager) => {
+      const [actorCapabilities, users, groups, memberships, serverGrants, imageGrants, mountGrants] = await Promise.all([
+        this.userCapabilitiesInTransaction(manager, actorId, true),
+        manager.find(UserEntity, { where: { status: Not(UserStatus.Deleted) } }),
+        manager.find(GroupEntity),
+        manager.find(GroupMemberEntity),
+        manager.find(ServerGrantEntity, { select: { scope: true, scopeId: true } }),
+        manager.find(ImageGrantEntity, { select: { scope: true, scopeId: true } }),
+        manager.find(MountSourceGrantEntity, { select: { scope: true, scopeId: true } }),
+      ]);
+      const allGrants = [...serverGrants, ...imageGrants, ...mountGrants];
+      const grantedUsers = new Set(allGrants.filter((grant) => grant.scope === 'user').map((grant) => grant.scopeId));
+      const grantedGroups = new Set(allGrants.filter((grant) => grant.scope === 'group').map((grant) => grant.scopeId));
+      const groupIdsByUser = new Map<string, string[]>();
+      for (const membership of memberships) {
+        const ids = groupIdsByUser.get(membership.userId) ?? [];
+        ids.push(membership.groupId);
+        groupIdsByUser.set(membership.userId, ids);
+      }
+      return projectAdministrationActions({
+        actorId,
+        actorCapabilities,
+        users: users.map((user) => ({
+          id: user.id,
+          status: user.status,
+          groupIds: groupIdsByUser.get(user.id) ?? [],
+          hasDirectResourceGrants: grantedUsers.has(user.id),
+        })),
+        groups: groups.map((group) => ({
+          id: group.id,
+          isSystem: group.isSystem,
+          systemKey: group.systemKey,
+          capabilities: group.capabilities,
+          hasResourceGrants: grantedGroups.has(group.id),
+        })),
+      });
+    });
+  }
+
+  /** Run database-only work inside the fresh capability transaction. */
+  async runWithActorCapabilities<T>(
+    actorId: string,
+    required: Iterable<Capability>,
+    work: (manager: EntityManager) => Promise<T>,
+  ): Promise<T> {
+    return runSerializedTransaction(this.groupsRepo.manager.connection, async (manager) => {
+      await this.assertActorCapabilitiesInTransaction(manager, actorId, required);
+      return work(manager);
+    });
+  }
+
+  /**
+   * Start an external effect while current authority is linearized, then
+   * release the database lease before waiting for the remote result.
+   */
+  async startExternalWithActorCapabilities<T>(
+    actorId: string,
+    required: Iterable<Capability>,
+    start: () => Promise<T>,
+  ): Promise<StartedExternalWork<T>> {
+    return runSerializedTransaction(this.groupsRepo.manager.connection, async (manager) => {
+      await this.assertActorCapabilitiesInTransaction(manager, actorId, required);
+      // `start` must only synchronously dispatch/enqueue bounded work. Boxing
+      // the returned Promise keeps the dispatch at the same linearization
+      // point as the current-authority read while preventing the transaction
+      // from awaiting the external acknowledgement.
+      return { completion: start() };
+    });
+  }
+
+  /** Linearize a direct side-effect with current active-user Server access. */
+  async runWithActiveServerAccess<T>(
+    userId: string,
+    serverId: string,
+    work: (manager: EntityManager) => Promise<T>,
+  ): Promise<T> {
+    return runSerializedTransaction(this.groupsRepo.manager.connection, async (manager) => {
+      const user = await manager.findOneBy(UserEntity, { id: userId });
+      if (
+        !user
+        || user.status !== UserStatus.Active
+        || !await this.resolveServerInTransaction(manager, userId, serverId)
+      ) {
+        throw new ForbiddenException('Server access was revoked');
+      }
+      return work(manager);
+    });
+  }
+
+  /** Server-grant counterpart of startExternalWithActorCapabilities. */
+  async startExternalWithActiveServerAccess<T>(
+    userId: string,
+    serverId: string,
+    start: () => Promise<T>,
+  ): Promise<StartedExternalWork<T>> {
+    return runSerializedTransaction(this.groupsRepo.manager.connection, async (manager) => {
+      const user = await manager.findOneBy(UserEntity, { id: userId });
+      if (
+        !user
+        || user.status !== UserStatus.Active
+        || !await this.resolveServerInTransaction(manager, userId, serverId)
+      ) {
+        throw new ForbiddenException('Server access was revoked');
+      }
+      return { completion: start() };
+    });
+  }
+
   async hasCapability(userId: string, cap: Capability): Promise<boolean> {
     const caps = await this.userCapabilities(userId);
     return caps.has(cap);
+  }
+
+  /** Resolve capabilities from the caller's durable transaction snapshot. */
+  async userCapabilitiesInTransaction(
+    manager: EntityManager,
+    userId: string,
+    requireActive = true,
+  ): Promise<Set<Capability>> {
+    const user = await manager.findOneBy(UserEntity, { id: userId });
+    if (!user || (requireActive && user.status !== UserStatus.Active)) return new Set();
+    const memberships = await manager.find(GroupMemberEntity, { where: { userId } });
+    if (memberships.length === 0) return new Set();
+    const groups = await manager.find(GroupEntity, {
+      where: { id: In(memberships.map((membership) => membership.groupId)) },
+    });
+    const capabilities = new Set<Capability>();
+    for (const group of groups) {
+      for (const capability of group.capabilities) capabilities.add(capability);
+    }
+    return capabilities;
+  }
+
+  /** Fail closed unless the active actor owns every requested capability. */
+  async assertActorCapabilitiesInTransaction(
+    manager: EntityManager,
+    actorId: string,
+    required: Iterable<Capability>,
+  ): Promise<Set<Capability>> {
+    const actorCapabilities = await this.userCapabilitiesInTransaction(manager, actorId, true);
+    const missing = [...new Set(required)].filter((capability) => !actorCapabilities.has(capability));
+    if (missing.length > 0) {
+      throw new ForbiddenException({
+        code: 'PRIVILEGE_ESCALATION_DENIED',
+        message: 'The actor cannot grant or administer capabilities they do not hold',
+        missingCapabilities: missing,
+      });
+    }
+    return actorCapabilities;
+  }
+
+  /** An administrator may not mutate a user who owns capabilities they lack. */
+  async assertActorMayAdministerUserInTransaction(
+    manager: EntityManager,
+    actorId: string,
+    targetUserId: string,
+  ): Promise<void> {
+    await this.assertActorCapabilitiesInTransaction(manager, actorId, [Capability.ManageUsers]);
+    const targetCapabilities = await this.userCapabilitiesInTransaction(
+      manager,
+      targetUserId,
+      false,
+    );
+    await this.assertActorCapabilitiesInTransaction(manager, actorId, targetCapabilities);
+    const memberships = await manager.find(GroupMemberEntity, { where: { userId: targetUserId } });
+    const groupIds = memberships.map((membership) => membership.groupId);
+    const scopes = [
+      { scope: 'user' as const, scopeId: targetUserId },
+      ...(groupIds.length > 0
+        ? [{ scope: 'group' as const, scopeId: In(groupIds) }]
+        : []),
+    ];
+    const [serverGrantCount, imageGrantCount, mountGrantCount] = await Promise.all([
+      manager.count(ServerGrantEntity, { where: scopes }),
+      manager.count(ImageGrantEntity, { where: scopes }),
+      manager.count(MountSourceGrantEntity, { where: scopes }),
+    ]);
+    if (serverGrantCount + imageGrantCount + mountGrantCount > 0) {
+      await this.assertActorCapabilitiesInTransaction(
+        manager,
+        actorId,
+        [Capability.ManageGrants],
+      );
+    }
+  }
+
+  async assertNotFinalActiveAdministratorInTransaction(
+    manager: EntityManager,
+    userId: string,
+  ): Promise<void> {
+    const administrators = await manager.findOne(GroupEntity, {
+      where: { systemKey: SystemGroupKey.Administrators, isSystem: true },
+    });
+    if (!administrators) return;
+    const membership = await manager.findOne(GroupMemberEntity, {
+      where: { groupId: administrators.id, userId },
+    });
+    if (!membership) return;
+    const otherMemberships = (await manager.find(GroupMemberEntity, {
+      where: { groupId: administrators.id },
+    })).filter((candidate) => candidate.userId !== userId);
+    const otherUserIds = otherMemberships.map((candidate) => candidate.userId);
+    const alternatives = otherUserIds.length === 0
+      ? 0
+      : await manager.count(UserEntity, {
+          where: { id: In(otherUserIds), status: UserStatus.Active },
+        });
+    if (alternatives === 0) {
+      throw new ForbiddenException({
+        code: 'LAST_ACTIVE_ADMINISTRATOR',
+        message: 'The final active administrator cannot be disabled, deleted, or removed',
+      });
+    }
   }
 
   async getUserGroupSummaries(userId: string): Promise<GroupSummaryDto[]> {
@@ -389,7 +629,7 @@ export class AccessResolverService {
     return result;
   }
 
-  private async getUserCache(userId: string): Promise<UserCache> {
+  private async getUserCache(userId: string, retryCount = 0): Promise<UserCache> {
     const epoch = this.cacheEpoch.current();
     const cached = this.cache.get(userId);
     if (cached && cached.epoch === epoch && Date.now() - cached.fetchedAt < CACHE_TTL_MS) {
@@ -554,6 +794,14 @@ export class AccessResolverService {
       epoch,
       fetchedAt: Date.now(),
     };
+    // If any authorization mutation committed while this multi-query snapshot
+    // was assembled, never return or publish the stale fill to its caller.
+    if (this.cacheEpoch.current() !== epoch) {
+      if (retryCount >= CACHE_FILL_MAX_RETRIES) {
+        throw new Error('Authorization changed repeatedly while resolving access');
+      }
+      return this.getUserCache(userId, retryCount + 1);
+    }
     this.setCacheBounded(userId, uc);
     return uc;
   }

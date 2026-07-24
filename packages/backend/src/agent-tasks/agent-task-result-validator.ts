@@ -1,10 +1,24 @@
 import { ConflictException } from '@nestjs/common';
-import { AgentTaskKind, normalizeXfsQuotaBytes, type TaskResultPayload } from '@nyabase/common';
+import {
+  AgentTaskKind,
+  normalizeXfsQuotaBytes,
+  parseAgentTaskPayload,
+  zTaskId,
+  type DataDirAbsentTaskPayload,
+  type DataDirEnsureTaskPayload,
+  type ImageEnsurePresentTaskPayload,
+  type TaskResultPayload,
+} from '@nyabase/common';
 import * as path from 'node:path';
 import { z } from 'zod';
 import type { AgentTaskEntity } from '../entities/agent-task.entity.js';
+import { parseAndValidateAgentTaskWireIdentity } from './agent-task-durable-contract.js';
 
 const zNonEmptyString = z.string().min(1);
+const zPhysicalPosixPath = z.string().min(1).max(4096).refine(
+  (value) => !/[\0\r\n]/u.test(value),
+  'physical POSIX path must not contain NUL, CR, or LF',
+);
 const PRE_EFFECT_TERMINAL_CODES = new Set([
   'invalid_task_payload',
   'task_payload_hash_mismatch',
@@ -35,13 +49,15 @@ const zContainerRuntimeAbsentResult = z.object({
     'runtime cleanup quota paths must be unique',
   ),
 }).passthrough();
-const zDataDirResult = z.object({
-  path: zNonEmptyString,
+const zDataDirObservation = z.object({
+  path: zPhysicalPosixPath,
   exists: z.boolean(),
   isDirectory: z.boolean(),
   uid: z.number().int().nonnegative().nullable(),
   gid: z.number().int().nonnegative().nullable(),
-  resourceId: z.string().nullable(),
+  resourceId: zTaskId.nullable(),
+}).passthrough();
+const zDataDirResult = zDataDirObservation.extend({
   quotaAssigned: z.boolean(),
 }).passthrough();
 const zRemoteFsEnsureResult = z.object({
@@ -73,8 +89,20 @@ const zImageAbsentResult = z.object({
 export function validateTerminalAgentResult(
   task: AgentTaskEntity,
   result: Exclude<TaskResultPayload, { status: 'incomplete' }>,
-  options: { source?: 'agent' | 'dispatch' } = {},
+  options: { source?: 'agent' | 'dispatch'; wirePayload?: unknown } = {},
 ): void {
+  try {
+    if (Object.prototype.hasOwnProperty.call(options, 'wirePayload')) {
+      const payload = parseAndValidateAgentTaskWireIdentity(task, options.wirePayload);
+      // All task-kind semantic checks below must interpret exactly the same
+      // strict, codec-decoded payload that was bound to the durable row/hash.
+      task = { ...task, payloadJson: payload } as AgentTaskEntity;
+    } else {
+      validateLightweightTaskIdentity(task);
+    }
+  } catch (error) {
+    throw invalidResult(task, error);
+  }
   if (result.status === 'failed') {
     validateFailedResult(task, result.error, result.observed, options.source ?? 'agent');
     return;
@@ -125,23 +153,33 @@ export function validateTerminalAgentResult(
       case AgentTaskKind.DataDirEnsure:
       case AgentTaskKind.DataDirAbsent: {
         const parsed = zDataDirResult.parse(result.result);
+        validateDataDirPhysicalPath(task, parsed.path);
         if (task.kind === AgentTaskKind.DataDirEnsure) {
+          const payload = strictDataDirEnsurePayload(task);
           assertIdentity('resourceId', task.resourceId, parsed.resourceId ?? '');
           if (!parsed.exists || !parsed.isDirectory) {
             throw invalidResult(task, new Error('ensured data directory is not an existing directory'));
           }
-          const payload = taskPayload(task);
-          if (typeof payload.uid === 'number' && parsed.uid !== payload.uid) {
-            throw invalidResult(task, new Error('ensured data directory uid does not match the request'));
+          if (parsed.uid !== payload.uid || parsed.gid !== payload.uid) {
+            throw invalidResult(
+              task,
+              new Error('ensured data directory uid/gid do not match the signed request'),
+            );
           }
-          if (
-            typeof payload.quotaRequired !== 'boolean'
-            || parsed.quotaAssigned !== payload.quotaRequired
-          ) {
+          if (parsed.quotaAssigned !== payload.quotaRequired) {
             throw invalidResult(task, new Error('ensured data directory quota state does not match the signed policy'));
           }
-        } else if (parsed.exists || parsed.resourceId !== null) {
-          throw invalidResult(task, new Error('removed data directory still exists'));
+        } else {
+          strictDataDirAbsentPayload(task);
+          if (
+            parsed.exists
+            || parsed.isDirectory
+            || parsed.uid !== null
+            || parsed.gid !== null
+            || parsed.resourceId !== null
+          ) {
+            throw invalidResult(task, new Error('removed data directory still has physical state'));
+          }
         }
         return;
       }
@@ -175,9 +213,12 @@ export function validateTerminalAgentResult(
       }
       case AgentTaskKind.ImageEnsurePresent: {
         const parsed = zImageResult.parse(result.result);
-        const payload = taskPayload(task);
+        const payload = strictImageEnsurePresentPayload(task);
         if (parsed.dockerRef !== payload.dockerRef) {
           throw invalidResult(task, new Error('image reference does not match the dispatched specification'));
+        }
+        if (parsed.imageId !== (payload.imageId ?? null)) {
+          throw invalidResult(task, new Error('image result identity does not match the signed request'));
         }
         return;
       }
@@ -198,6 +239,45 @@ export function validateTerminalAgentResult(
   }
 }
 
+function validateLightweightTaskIdentity(task: AgentTaskEntity): void {
+  const payload = record(task.payloadJson);
+  if (!payload) return;
+  const optionalIdentity = (field: string, expected: string): void => {
+    if (Object.prototype.hasOwnProperty.call(payload, field)) {
+      assertIdentity(`payload ${field}`, expected, String(payload[field]));
+    }
+  };
+  switch (task.kind) {
+    case AgentTaskKind.ContainerCreate:
+    case AgentTaskKind.ContainerStart:
+    case AgentTaskKind.ContainerStop:
+    case AgentTaskKind.ContainerRestart:
+    case AgentTaskKind.ContainerDelete:
+    case AgentTaskKind.ContainerSshEnsure:
+      optionalIdentity('containerId', task.resourceId);
+      break;
+    case AgentTaskKind.ContainerRuntimeAbsent:
+      optionalIdentity('runtimeId', task.resourceId);
+      break;
+    case AgentTaskKind.DataDirEnsure:
+    case AgentTaskKind.DataDirAbsent:
+      optionalIdentity('resourceId', task.resourceId);
+      break;
+    case AgentTaskKind.RemoteFsEnsure:
+    case AgentTaskKind.RemoteFsAbsent:
+      optionalIdentity('id', task.resourceId);
+      break;
+    case AgentTaskKind.ImageEnsurePresent:
+      optionalIdentity('imageId', task.resourceId);
+      break;
+    case AgentTaskKind.ImageEnsureAbsent:
+      optionalIdentity('imageId', task.resourceId);
+      break;
+    case AgentTaskKind.QuotaEnsure:
+      break;
+  }
+}
+
 function validateFailedResult(
   task: AgentTaskEntity,
   error: { code: string },
@@ -215,11 +295,14 @@ function validateFailedResult(
       validateNeverDispatchedEvidence(task, observed);
       return;
     }
-    const payload = taskPayload(task);
     if (observed.applied === false && observed.reason === 'invalid_payload') {
-      if (PRE_EFFECT_TERMINAL_CODES.has(error.code)) return;
+      if (PRE_EFFECT_TERMINAL_CODES.has(error.code)) {
+        validateInvalidPayloadNoEffectEvidence(observed);
+        return;
+      }
       throw new Error('invalid-payload no-effect evidence has an unsupported terminal error code');
     }
+    const payload = taskPayload(task);
     switch (task.kind) {
       case AgentTaskKind.ContainerCreate: {
         const explicitRollback = record(observed.safetyRollback);
@@ -296,18 +379,43 @@ function validateFailedResult(
       }
       case AgentTaskKind.DataDirEnsure:
       case AgentTaskKind.DataDirAbsent: {
+        const parsed = zDataDirObservation.parse(observed);
+        const dataDirPayload = task.kind === AgentTaskKind.DataDirEnsure
+          ? strictDataDirEnsurePayload(task)
+          : strictDataDirAbsentPayload(task);
         const expected = stringValue(observed.expectedResourceId);
-        if (expected !== task.resourceId) {
+        if (expected !== task.resourceId || dataDirPayload.resourceId !== expected) {
           throw new Error('DataDir failure expected identity does not match the durable resource');
         }
-        if (typeof observed.exists !== 'boolean' || typeof observed.isDirectory !== 'boolean') {
-          throw new Error('DataDir failure does not contain a complete physical type observation');
+        validateDataDirPhysicalPath(task, parsed.path);
+        if (!parsed.exists && (
+          parsed.isDirectory
+          || parsed.uid !== null
+          || parsed.gid !== null
+        )) {
+          throw new Error('absent DataDir failure observation contains impossible inode state');
         }
-        if (
-          !Object.prototype.hasOwnProperty.call(observed, 'resourceId')
-          || (observed.resourceId !== null && stringValue(observed.resourceId) === null)
-        ) {
-          throw new Error('DataDir failure does not contain a complete physical resource identity');
+        if (parsed.exists && (parsed.uid === null || parsed.gid === null)) {
+          throw new Error('present DataDir failure observation lacks uid/gid identity');
+        }
+        if (Object.prototype.hasOwnProperty.call(observed, 'quotaAssigned')
+          && typeof observed.quotaAssigned !== 'boolean') {
+          throw new Error('DataDir failure quotaAssigned observation is not boolean');
+        }
+        if (task.kind === AgentTaskKind.DataDirEnsure) {
+          const ensurePayload = dataDirPayload as DataDirEnsureTaskPayload;
+          if (
+            Object.prototype.hasOwnProperty.call(observed, 'expectedUid')
+            && observed.expectedUid !== ensurePayload.uid
+          ) {
+            throw new Error('DataDir failure expected uid does not match the signed request');
+          }
+          if (
+            Object.prototype.hasOwnProperty.call(observed, 'quotaRequired')
+            && observed.quotaRequired !== ensurePayload.quotaRequired
+          ) {
+            throw new Error('DataDir failure quota policy does not match the signed request');
+          }
         }
         return;
       }
@@ -350,7 +458,16 @@ function validateFailedResult(
         }
         return;
       }
-      case AgentTaskKind.ImageEnsurePresent:
+      case AgentTaskKind.ImageEnsurePresent: {
+        const imagePayload = strictImageEnsurePresentPayload(task);
+        if (stringValue(observed.dockerRef) !== imagePayload.dockerRef) {
+          throw new Error('image failure does not match the durable image reference');
+        }
+        if (typeof observed.present !== 'boolean') {
+          throw new Error('image failure has no physical presence observation');
+        }
+        return;
+      }
       case AgentTaskKind.ImageEnsureAbsent: {
         if (stringValue(observed.dockerRef) !== stringValue(payload.dockerRef)) {
           throw new Error('image failure does not match the durable image reference');
@@ -368,6 +485,17 @@ function validateFailedResult(
   }
 }
 
+function validateInvalidPayloadNoEffectEvidence(observed: Record<string, unknown>): void {
+  const keys = Object.keys(observed).sort();
+  if (
+    keys.length !== 2
+    || keys[0] !== 'applied'
+    || keys[1] !== 'reason'
+  ) {
+    throw new Error('invalid-payload evidence must be the exact no-effect observation');
+  }
+}
+
 function validateNeverDispatchedEvidence(
   task: AgentTaskEntity,
   observed: Record<string, unknown>,
@@ -380,6 +508,7 @@ function validateNeverDispatchedEvidence(
   ) {
     throw new Error('never-dispatched evidence must not claim physical runtime state');
   }
+  let identityField: string;
   switch (task.kind) {
     case AgentTaskKind.ContainerCreate:
     case AgentTaskKind.ContainerStart:
@@ -387,26 +516,40 @@ function validateNeverDispatchedEvidence(
     case AgentTaskKind.ContainerRestart:
     case AgentTaskKind.ContainerDelete:
     case AgentTaskKind.ContainerSshEnsure:
-      if (stringValue(observed.containerId) === task.resourceId) return;
+      identityField = 'containerId';
       break;
     case AgentTaskKind.ContainerRuntimeAbsent:
-      if (stringValue(observed.expectedRuntimeId) === task.resourceId) return;
+      identityField = 'expectedRuntimeId';
       break;
     case AgentTaskKind.DataDirEnsure:
     case AgentTaskKind.DataDirAbsent:
-      if (stringValue(observed.expectedResourceId) === task.resourceId) return;
+      identityField = 'expectedResourceId';
       break;
     case AgentTaskKind.RemoteFsEnsure:
     case AgentTaskKind.RemoteFsAbsent:
-      if (stringValue(observed.id) === task.resourceId) return;
+      identityField = 'id';
       break;
     case AgentTaskKind.QuotaEnsure:
     case AgentTaskKind.ImageEnsurePresent:
     case AgentTaskKind.ImageEnsureAbsent:
-      if (stringValue(observed.resourceId) === task.resourceId) return;
+      identityField = 'resourceId';
       break;
   }
-  throw new Error('never-dispatched evidence does not match its durable task identity');
+  const actualKeys = Object.keys(observed).sort();
+  const expectedKeys = ['applied', identityField, 'reason'].sort();
+  if (
+    actualKeys.length !== expectedKeys.length
+    || actualKeys.some((key, index) => key !== expectedKeys[index])
+  ) {
+    throw new Error('never-dispatched evidence must contain only its exact no-effect identity fields');
+  }
+  if (
+    observed.applied !== false
+    || observed.reason !== 'never_dispatched'
+    || stringValue(observed[identityField]) !== task.resourceId
+  ) {
+    throw new Error('never-dispatched evidence does not match its durable task identity');
+  }
 }
 
 /**
@@ -537,6 +680,42 @@ function taskPayload(task: AgentTaskEntity): Record<string, unknown> {
     throw invalidResult(task, new Error('durable task payload is not an object'));
   }
   return task.payloadJson as Record<string, unknown>;
+}
+
+function strictDataDirEnsurePayload(task: AgentTaskEntity): DataDirEnsureTaskPayload {
+  const payload = parseAgentTaskPayload(AgentTaskKind.DataDirEnsure, task.payloadJson);
+  assertIdentity('payload resourceId', task.resourceId, payload.resourceId);
+  return payload;
+}
+
+function strictDataDirAbsentPayload(task: AgentTaskEntity): DataDirAbsentTaskPayload {
+  const payload = parseAgentTaskPayload(AgentTaskKind.DataDirAbsent, task.payloadJson);
+  assertIdentity('payload resourceId', task.resourceId, payload.resourceId);
+  return payload;
+}
+
+function strictImageEnsurePresentPayload(task: AgentTaskEntity): ImageEnsurePresentTaskPayload {
+  const payload = parseAgentTaskPayload(AgentTaskKind.ImageEnsurePresent, task.payloadJson);
+  if (payload.imageId !== undefined) {
+    assertIdentity('payload imageId', task.resourceId, payload.imageId);
+  }
+  return payload;
+}
+
+function validateDataDirPhysicalPath(task: AgentTaskEntity, value: unknown): string {
+  const observedPath = zPhysicalPosixPath.parse(value);
+  const resolved = path.posix.normalize(observedPath);
+  const suffix = `/${path.posix.join('.nyabase', 'dirs', task.resourceId, 'data')}`;
+  if (
+    !path.posix.isAbsolute(observedPath)
+    || resolved !== observedPath
+    || !resolved.endsWith(suffix)
+  ) {
+    throw new Error(
+      `DataDir physical path must end with the exact .nyabase/dirs/${task.resourceId}/data layout`,
+    );
+  }
+  return resolved;
 }
 
 function assertIdentity(field: string, expected: string, actual: string): void {

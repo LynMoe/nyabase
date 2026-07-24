@@ -19,7 +19,12 @@ import {
   type DockerDaemonStatus,
   type DiskInfo,
   type ServerDto,
+  type UserServerDto,
+  type UserDataDiskDto,
   MAX_PLATFORM_SERVERS,
+  AuditAction,
+  Capability,
+  zSelfCheckResult,
 } from '@nyabase/common';
 import { AgentGateway } from '../gateway/agent-gateway.js';
 import { rpcWithErrorMapping } from '../gateway/agent-errors.js';
@@ -42,8 +47,15 @@ import { MountSourceGrantEntity } from '../entities/mount-source-grant.entity.js
 import { NetworkAddressClaimEntity } from '../entities/network-address-claim.entity.js';
 import { ProxySnapshotNotifierService } from '../proxy-snapshots/proxy-snapshot-notifier.service.js';
 import { gcExpiredNetworkClaims } from '../common/network-claim-ledger.js';
+import { AuditService } from '../audit/audit.service.js';
+import { publicDataDiskDisplayName } from '../mount-sources/utils.js';
+import { safeEpochToIso } from '../common/safe-date.js';
 
 const SERVER_SLUG_RE = /^[a-z0-9][a-z0-9_-]*$/;
+
+interface ServerDtoOptions {
+  includeHostFingerprint?: boolean;
+}
 
 @Injectable()
 export class ServersService {
@@ -57,9 +69,10 @@ export class ServersService {
     private sshProxyGateway: SshProxyGateway,
     private dataSource: DataSource,
     private proxySnapshots: ProxySnapshotNotifierService,
+    private auditService: AuditService,
   ) {}
 
-  async create(dto: {
+  async create(actorId: string, dto: {
     name: string;
     slug: string;
   }) {
@@ -67,6 +80,9 @@ export class ServersService {
     const rawToken = randomBytes(32).toString('hex');
     const tokenHash = createHash('sha256').update(rawToken).digest('hex');
     const server = await runSerializedTransaction(this.dataSource, async (manager) => {
+      await this.accessResolver.assertActorCapabilitiesInTransaction(
+        manager, actorId, [Capability.ManageServers],
+      );
       if (await manager.count(ServerEntity) >= MAX_PLATFORM_SERVERS) {
         throw new ConflictException({
           code: 'SERVER_CAPACITY_REACHED',
@@ -94,20 +110,32 @@ export class ServersService {
       }));
     });
     await postCommitBestEffort(
+      'Server create audit',
+      () => this.auditService.log(actorId, AuditAction.CreateServer, server.id, 'server', {
+        serverId: server.id,
+        name: server.name,
+        slug: server.slug,
+      }),
+      this.logger,
+    );
+    await postCommitBestEffort(
       'Server create SSH snapshot broadcast',
       () => this.sshProxyGateway.broadcastSnapshot(),
       this.logger,
     );
-    return { server, agentToken: rawToken };
+    return {
+      server: await this.toDto(server, { includeHostFingerprint: true }),
+      agentToken: rawToken,
+    };
   }
 
   async findAll(): Promise<ServerEntity[]> {
     return this.serversRepo.find();
   }
 
-  async findAllDtos(): Promise<ServerDto[]> {
+  async findAllDtos(options: ServerDtoOptions = {}): Promise<ServerDto[]> {
     const servers = await this.serversRepo.find();
-    return Promise.all(servers.map((server) => this.toDto(server)));
+    return Promise.all(servers.map((server) => this.toDto(server, options)));
   }
 
   async findByIds(ids: string[]): Promise<ServerEntity[]> {
@@ -120,14 +148,23 @@ export class ServersService {
     return Promise.all(servers.map((server) => this.toDto(server)));
   }
 
+  async findUserDtosByIds(ids: string[]): Promise<UserServerDto[]> {
+    const servers = await this.findByIds(ids);
+    return servers.map((server) => this.toUserDto(server));
+  }
+
   async findById(id: string): Promise<ServerEntity> {
     const server = await this.serversRepo.findOne({ where: { id } });
     if (!server) throw new NotFoundException('Server not found');
     return server;
   }
 
-  async findDtoById(id: string): Promise<ServerDto> {
-    return this.toDto(await this.findById(id));
+  async findDtoById(id: string, options: ServerDtoOptions = {}): Promise<ServerDto> {
+    return this.toDto(await this.findById(id), options);
+  }
+
+  async findUserDtoById(id: string): Promise<UserServerDto> {
+    return this.toUserDto(await this.findById(id));
   }
 
   async findByTokenHash(hash: string): Promise<ServerEntity | null> {
@@ -135,6 +172,7 @@ export class ServersService {
   }
 
   async update(
+    actorId: string,
     id: string,
     dto: {
       name?: string;
@@ -142,7 +180,10 @@ export class ServersService {
     },
   ) {
     if (dto.slug !== undefined) this.assertValidSlug(dto.slug);
-    const saved = await runSerializedTransaction(this.dataSource, async (manager) => {
+    const { saved, previous } = await runSerializedTransaction(this.dataSource, async (manager) => {
+      await this.accessResolver.assertActorCapabilitiesInTransaction(
+        manager, actorId, [Capability.ManageServers],
+      );
       const server = await manager.findOneBy(ServerEntity, { id });
       if (!server) throw new NotFoundException('Server not found');
       if (dto.slug !== undefined && dto.slug !== server.slug) {
@@ -155,19 +196,36 @@ export class ServersService {
       if (dto.name !== undefined) allowed.name = dto.name;
       if (dto.slug !== undefined) allowed.slug = dto.slug;
       if (Object.keys(allowed).length > 0) await manager.update(ServerEntity, id, allowed);
-      return manager.findOneByOrFail(ServerEntity, { id });
+      return {
+        saved: await manager.findOneByOrFail(ServerEntity, { id }),
+        previous: { name: server.name, slug: server.slug },
+      };
     });
+    await postCommitBestEffort(
+      'Server update audit',
+      () => this.auditService.log(actorId, AuditAction.UpdateServer, saved.id, 'server', {
+        serverId: saved.id,
+        previous,
+        current: { name: saved.name, slug: saved.slug },
+      }),
+      this.logger,
+    );
     await postCommitBestEffort(
       'Server update SSH snapshot broadcast',
       () => this.sshProxyGateway.broadcastSnapshot(),
       this.logger,
     );
-    return saved;
+    return this.toDto(saved, { includeHostFingerprint: true });
   }
 
-  async delete(id: string) {
-    await this.agentGateway.runWithSessionFence(id, 'Server deletion started', async () => {
-      await runSerializedTransaction(this.dataSource, async (manager) => {
+  async delete(actorId: string, id: string) {
+    const deleted = await this.agentGateway.runWithSessionFence(
+      id,
+      'Server deletion started',
+      () => runSerializedTransaction(this.dataSource, async (manager) => {
+        await this.accessResolver.assertActorCapabilitiesInTransaction(
+          manager, actorId, [Capability.ManageServers],
+        );
         const server = await manager.findOneBy(ServerEntity, { id });
         if (!server) throw new NotFoundException('Server not found');
         await gcExpiredNetworkClaims(manager);
@@ -224,8 +282,22 @@ export class ServersService {
           }
         }
         await manager.delete(ServerEntity, id);
-      });
-    }, { requireBoundServerEmptyInventory: true });
+        return { serverId: server.id, name: server.name, slug: server.slug };
+      }),
+      {
+        requireBoundServerEmptyInventory: true,
+        authorizeAndClaim: (claim) => this.accessResolver.runWithActorCapabilities(
+          actorId,
+          [Capability.ManageServers],
+          async () => { claim(); },
+        ),
+      },
+    );
+    await postCommitBestEffort(
+      'Server delete audit',
+      () => this.auditService.log(actorId, AuditAction.DeleteServer, deleted.serverId, 'server', deleted),
+      this.logger,
+    );
     this.proxySnapshots.forgetServer(id, 'server deleted');
     await postCommitBestEffort(
       'Server delete SSH snapshot broadcast',
@@ -234,16 +306,38 @@ export class ServersService {
     );
   }
 
-  async regenerateToken(id: string) {
+  async regenerateToken(actorId: string, id: string) {
     const rawToken = randomBytes(32).toString('hex');
     const agentTokenHash = createHash('sha256').update(rawToken).digest('hex');
-    await this.agentGateway.runWithSessionFence(id, 'Agent token rotation started', async () => {
-      await runSerializedTransaction(this.dataSource, async (manager) => {
+    await this.agentGateway.runWithSessionFence(
+      id,
+      'Agent token rotation started',
+      () => runSerializedTransaction(this.dataSource, async (manager) => {
+        await this.accessResolver.assertActorCapabilitiesInTransaction(
+          manager, actorId, [Capability.ManageServers],
+        );
         const server = await manager.findOneBy(ServerEntity, { id });
         if (!server) throw new NotFoundException('Server not found');
         await manager.update(ServerEntity, id, { agentTokenHash });
-      });
-    });
+      }),
+      {
+        authorizeAndClaim: (claim) => this.accessResolver.runWithActorCapabilities(
+          actorId,
+          [Capability.ManageServers],
+          async () => { claim(); },
+        ),
+      },
+    );
+    await postCommitBestEffort(
+      'Server Agent token rotation audit',
+      () => this.auditService.log(
+        actorId,
+        AuditAction.RotateServerAgentToken,
+        id,
+        'server',
+      ),
+      this.logger,
+    );
     return rawToken;
   }
 
@@ -256,26 +350,49 @@ export class ServersService {
     return (this.agentGateway.stateCache.get(serverId)?.disks ?? []).map((disk) => this.toDiskDto(disk));
   }
 
-  async listAllDisks(): Promise<Array<{ diskId: string; serverId: string; mountPoint: string; label: string | null }>> {
+  async listUserDiskDtos(serverId: string): Promise<UserDataDiskDto[]> {
+    await this.findById(serverId);
+    return (this.agentGateway.stateCache.get(serverId)?.disks ?? []).map((disk) => ({
+      diskId: disk.diskId,
+      displayName: publicDataDiskDisplayName(disk.diskId, disk.label),
+      totalBytes: disk.totalBytes,
+      usedBytes: disk.usedBytes,
+      pquotaEnabled: disk.pquotaEnabled,
+    }));
+  }
+
+  async listAllDisks(): Promise<Array<{
+    diskId: string;
+    serverId: string;
+    mountPoint: string;
+    sourceIdentity: string;
+    label: string | null;
+  }>> {
     return this.agentGateway.stateCache.getAll()
       .flatMap((snap) => snap.disks.map((disk) => ({
         diskId: disk.diskId,
         serverId: snap.serverId,
         mountPoint: disk.mountPoint,
+        sourceIdentity: disk.sourceIdentity,
         label: disk.label ?? null,
       })))
       .sort((a, b) => a.serverId.localeCompare(b.serverId) || a.mountPoint.localeCompare(b.mountPoint));
   }
 
-  async selfCheck(serverId: string): Promise<SelfCheckResult> {
+  async selfCheck(actorId: string, serverId: string): Promise<SelfCheckResult> {
     await this.findById(serverId);
     if (!this.agentGateway.isOnline(serverId)) {
       throw new BadRequestException('Agent is offline, cannot run self-check');
     }
     this.assertRuntimeReady(serverId);
-    return rpcWithErrorMapping(() =>
-      this.agentGateway.rpc<SelfCheckResult>(serverId, 'selfCheck', {}),
+    const started = await this.accessResolver.startExternalWithActorCapabilities(
+      actorId,
+      [Capability.ManageServers],
+      () => rpcWithErrorMapping(() =>
+        this.agentGateway.rpc<SelfCheckResult>(serverId, 'selfCheck', {}),
+      ),
     );
+    return zSelfCheckResult.parse(await started.completion);
   }
 
   async persistDockerDaemonStatus(serverId: string, status: DockerDaemonStatus): Promise<DockerDaemonStatus> {
@@ -308,23 +425,38 @@ export class ServersService {
     };
   }
 
-  private async toDto(server: ServerEntity): Promise<ServerDto> {
+  private async toDto(server: ServerEntity, options: ServerDtoOptions = {}): Promise<ServerDto> {
     const snap = this.agentGateway.stateCache.get(server.id);
     const disks = await this.listDiskDtos(server.id);
     return {
       id: server.id,
       name: server.name,
       slug: server.slug,
+      ...(options.includeHostFingerprint
+        ? { hostFingerprint: server.hostFingerprint }
+        : {}),
       status: server.status,
       quarantineCode: server.quarantineCode,
       quarantineMessage: server.quarantineMessage,
       lastSeenAt: server.lastSeenAt?.toISOString() ?? null,
       runtimeReady: snap?.runtimeReady === true,
-      runtimeObservedAt: snap?.lastUpdated ? new Date(snap.lastUpdated).toISOString() : null,
+      runtimeObservedAt: safeEpochToIso(snap?.lastUpdated),
       disks,
       gpus: snap?.gpus ?? [],
       agentVersion: snap?.agentVersion,
       dockerDaemon: snap?.dockerDaemon ?? null,
+    };
+  }
+
+  private toUserDto(server: ServerEntity): UserServerDto {
+    const snapshot = this.agentGateway.stateCache.get(server.id);
+    return {
+      id: server.id,
+      name: server.name,
+      slug: server.slug,
+      status: server.status,
+      lastSeenAt: server.lastSeenAt?.toISOString() ?? null,
+      runtimeReady: snapshot?.runtimeReady === true,
     };
   }
 

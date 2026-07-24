@@ -1,0 +1,27 @@
+import { describe, expect, it } from 'vitest';
+import { ApiError, apiErrorCurrent } from './api-error.js';
+
+describe('ApiError conflict envelope', () => {
+  const isSnapshot = (value: unknown): value is { revision: number; name: string } => {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+    const candidate = value as Record<string, unknown>;
+    return Number.isSafeInteger(candidate.revision) && typeof candidate.name === 'string';
+  };
+
+  it('returns only a validated current snapshot for the expected conflict code', () => {
+    const current = { revision: 2, name: 'remote' };
+    const error = new ApiError(409, 'REVISION_CONFLICT', 'conflict', { current });
+    expect(apiErrorCurrent(error, 'REVISION_CONFLICT', isSnapshot)).toBe(current);
+    expect(apiErrorCurrent(error, 'OTHER', isSnapshot)).toBeNull();
+  });
+
+  it('fails closed for malformed or absent current response data', () => {
+    expect(apiErrorCurrent(
+      new ApiError(409, 'REVISION_CONFLICT', 'conflict', { current: { revision: '2' } }),
+      'REVISION_CONFLICT',
+      isSnapshot,
+    )).toBeNull();
+    expect(apiErrorCurrent(new ApiError(409, 'REVISION_CONFLICT', 'conflict'), 'REVISION_CONFLICT', isSnapshot))
+      .toBeNull();
+  });
+});

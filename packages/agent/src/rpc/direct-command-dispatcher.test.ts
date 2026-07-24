@@ -81,6 +81,80 @@ describe('DirectCommandDispatcher identity/bootstrap RPC', () => {
     });
   });
 
+  it('samples runtime physical identity again when Docker inspection fails', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    const sent: AgentToBackendMessage[] = [];
+    const guard = vi.fn().mockResolvedValue(undefined);
+    const docker = {
+      inspectContainer: vi.fn(async () => { throw new Error('inspect failed'); }),
+    };
+
+    await makeDispatcher(docker, {}, sent, undefined, guard).handle({
+      id: 'rpc-a',
+      ts: 1,
+      kind: 'inspectContainer',
+      payload: { containerId: 'container-a', runtimeId: 'runtime-a' },
+    });
+
+    expect(guard).toHaveBeenCalledTimes(2);
+    expect(sent.at(-1)).toMatchObject({
+      kind: 'commandAck',
+      payload: { commandId: 'rpc-a', ok: false, error: 'inspect failed' },
+    });
+  });
+
+  it('does not inspect Docker when the runtime physical pre-sample fails', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    const sent: AgentToBackendMessage[] = [];
+    const guard = vi.fn(async () => { throw new Error('runtime drift'); });
+    const docker = { inspectContainer: vi.fn() };
+
+    await makeDispatcher(docker, {}, sent, undefined, guard).handle({
+      id: 'rpc-a',
+      ts: 1,
+      kind: 'inspectContainer',
+      payload: { containerId: 'container-a', runtimeId: 'runtime-a' },
+    });
+
+    expect(docker.inspectContainer).not.toHaveBeenCalled();
+    expect(guard).toHaveBeenCalledOnce();
+    expect(sent.at(-1)).toMatchObject({
+      kind: 'commandAck',
+      payload: { commandId: 'rpc-a', ok: false, error: 'runtime drift' },
+    });
+  });
+
+  it('runs the runtime physical post-sample before publishing self-check results', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    const sent: AgentToBackendMessage[] = [];
+    const guard = vi.fn()
+      .mockResolvedValueOnce(undefined)
+      .mockRejectedValueOnce(new Error('runtime drift'));
+    const docker = {
+      pingDaemon: vi.fn().mockResolvedValue(undefined),
+      daemonInfo: vi.fn(async () => { throw new Error('unavailable'); }),
+    };
+    const dispatcher = makeDispatcher(
+      docker,
+      { getDriverSelfChecks: vi.fn(() => []) },
+      sent,
+      undefined,
+      guard,
+      {
+        dropbear: { getSelfCheckItems: vi.fn(async () => []) },
+        quota: { checkToolAvailable: vi.fn().mockResolvedValue(undefined) },
+      },
+    );
+
+    await dispatcher.handle({ id: 'self-a', ts: 1, kind: 'selfCheck', payload: {} });
+
+    expect(guard).toHaveBeenCalledTimes(2);
+    expect(sent.at(-1)).toMatchObject({
+      kind: 'commandAck',
+      payload: { commandId: 'self-a', ok: false, error: 'runtime drift' },
+    });
+  });
+
   it('acks bootstrap after the full stable RemoteFS snapshot is adopted', async () => {
     const sent: AgentToBackendMessage[] = [];
     const sync = vi.fn();
@@ -151,6 +225,35 @@ describe('DirectCommandDispatcher identity/bootstrap RPC', () => {
     });
   });
 
+  it('validates the outgoing bootstrap result before publishing the snapshot', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    const sent: AgentToBackendMessage[] = [];
+    const sync = vi.fn();
+    const mounter = {
+      getAllSpecs: vi.fn(() => []),
+      adoptSnapshot: vi.fn(async () => [{
+        id: 'remote-a',
+        hostMountPoint: '/mnt/remote-fs/remote-a',
+        status: 'not-a-status',
+        lastCheckedAt: 1,
+      }]),
+      getSpec: vi.fn(),
+    };
+
+    await makeDispatcher({}, mounter, sent, sync).handle({
+      id: 'bootstrap-a',
+      ts: 1,
+      kind: 'agent.bootstrap.v1',
+      payload: { remoteFsMounts: [] },
+    });
+
+    expect(sync).not.toHaveBeenCalled();
+    expect(sent.at(-1)).toMatchObject({
+      kind: 'commandAck',
+      payload: { commandId: 'bootstrap-a', ok: false },
+    });
+  });
+
   it('never emits an old bootstrap acknowledgement onto a replacement connection', async () => {
     const sent: AgentToBackendMessage[] = [];
     let release!: () => void;
@@ -183,6 +286,319 @@ describe('DirectCommandDispatcher identity/bootstrap RPC', () => {
 });
 
 describe('DirectCommandDispatcher exec lifecycle', () => {
+  it('reserves synchronously but does not open or acknowledge before the physical pre-sample', async () => {
+    const sent: AgentToBackendMessage[] = [];
+    let releaseGuard!: () => void;
+    const guardGate = new Promise<void>((resolve) => { releaseGuard = resolve; });
+    const guard = vi.fn().mockReturnValueOnce(guardGate).mockResolvedValue(undefined);
+    const handles = {
+      kill: vi.fn().mockResolvedValue(undefined), resize: vi.fn(), write: vi.fn(() => true),
+    };
+    const docker = { exec: vi.fn().mockResolvedValue(handles) };
+    const dispatcher = makeDispatcher(docker, {}, sent, undefined, guard);
+
+    const handled = dispatcher.handle({
+      id: 'exec-a', ts: 1, kind: 'execStream',
+      payload: { sessionId: 'session-a', runtimeId: 'runtime-a', cmd: ['/bin/sh'], tty: true },
+    });
+    expect((dispatcher as unknown as {
+      pendingExecSessions: Map<string, unknown>;
+    }).pendingExecSessions.has('session-a')).toBe(true);
+    expect(docker.exec).not.toHaveBeenCalled();
+    expect(sent).toHaveLength(0);
+
+    releaseGuard();
+    await handled;
+    await dispatcher.waitForIdle();
+    expect(docker.exec).toHaveBeenCalledOnce();
+    expect(sent).toContainEqual(expect.objectContaining({
+      kind: 'commandAck',
+      payload: expect.objectContaining({ commandId: 'exec-a', ok: true }),
+    }));
+  });
+
+  it('kills the unpublished exec and suppresses ack/output when the post-sample detects drift', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    const sent: AgentToBackendMessage[] = [];
+    const guard = vi.fn()
+      .mockResolvedValueOnce(undefined)
+      .mockRejectedValueOnce(new Error('runtime drift'));
+    const handles = {
+      kill: vi.fn().mockResolvedValue(undefined), resize: vi.fn(), write: vi.fn(() => true),
+    };
+    const docker = {
+      exec: vi.fn(async (
+        _runtimeId: string,
+        _cmd: string[],
+        _tty: boolean,
+        onData: (data: string, stderr: boolean) => void,
+      ) => {
+        onData('buffered-output', false);
+        return handles;
+      }),
+    };
+    const dispatcher = makeDispatcher(docker, {}, sent, undefined, guard);
+
+    await dispatcher.handle({
+      id: 'exec-a', ts: 1, kind: 'execStream',
+      payload: { sessionId: 'session-a', runtimeId: 'runtime-a', cmd: ['/bin/sh'], tty: true },
+    });
+    await dispatcher.waitForIdle();
+
+    expect(guard).toHaveBeenCalledTimes(2);
+    expect(handles.kill).toHaveBeenCalledOnce();
+    expect((dispatcher as unknown as { execSessions: Map<string, unknown> }).execSessions.size).toBe(0);
+    expect(sent.some((message) => message.kind === 'logChunk')).toBe(false);
+    expect(sent).toContainEqual(expect.objectContaining({
+      kind: 'commandAck',
+      payload: expect.objectContaining({ commandId: 'exec-a', ok: false, error: 'runtime drift' }),
+    }));
+  });
+
+  it('runs the post-sample after Docker rejects an exec open', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    const sent: AgentToBackendMessage[] = [];
+    const guard = vi.fn().mockResolvedValue(undefined);
+    const dispatcher = makeDispatcher({
+      exec: vi.fn(async () => { throw new Error('open failed'); }),
+    }, {}, sent, undefined, guard);
+
+    await dispatcher.handle({
+      id: 'exec-a', ts: 1, kind: 'execStream',
+      payload: { sessionId: 'session-a', runtimeId: 'runtime-a', cmd: ['/bin/sh'], tty: true },
+    });
+    await dispatcher.waitForIdle();
+
+    expect(guard).toHaveBeenCalledTimes(2);
+    expect(sent).toContainEqual(expect.objectContaining({
+      kind: 'commandAck',
+      payload: expect.objectContaining({ commandId: 'exec-a', ok: false, error: 'open failed' }),
+    }));
+  });
+
+  it('does not publish exec success before initial Docker resize and its post-sample settle', async () => {
+    const sent: AgentToBackendMessage[] = [];
+    let releaseResize!: () => void;
+    const resizeGate = new Promise<void>((resolve) => { releaseResize = resolve; });
+    const guard = vi.fn().mockResolvedValue(undefined);
+    const handles = {
+      kill: vi.fn().mockResolvedValue(undefined),
+      resize: vi.fn(() => resizeGate),
+      write: vi.fn(() => true),
+    };
+    const dispatcher = makeDispatcher(
+      { exec: vi.fn().mockResolvedValue(handles) },
+      {},
+      sent,
+      undefined,
+      guard,
+    );
+
+    await dispatcher.handle({
+      id: 'exec-a', ts: 1, kind: 'execStream',
+      payload: {
+        sessionId: 'session-a', runtimeId: 'runtime-a', cmd: ['/bin/sh'], tty: true,
+        cols: 120, rows: 40,
+      },
+    });
+    await vi.waitFor(() => expect(handles.resize).toHaveBeenCalledWith(120, 40));
+
+    expect(guard).toHaveBeenCalledOnce();
+    expect(sent.some((message) => message.kind === 'commandAck')).toBe(false);
+    let idleSettled = false;
+    const idle = dispatcher.waitForIdle().then(() => { idleSettled = true; });
+    await Promise.resolve();
+    expect(idleSettled).toBe(false);
+
+    releaseResize();
+    await idle;
+    expect(guard).toHaveBeenCalledTimes(2);
+    expect(sent).toContainEqual(expect.objectContaining({
+      kind: 'commandAck',
+      payload: expect.objectContaining({ commandId: 'exec-a', ok: true }),
+    }));
+  });
+
+  it('kills an unpublished exec when daemon drift follows its initial resize', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    const sent: AgentToBackendMessage[] = [];
+    const guard = vi.fn()
+      .mockResolvedValueOnce(undefined)
+      .mockRejectedValueOnce(new Error('runtime drift'));
+    const handles = {
+      kill: vi.fn().mockResolvedValue(undefined),
+      resize: vi.fn().mockResolvedValue(undefined),
+      write: vi.fn(() => true),
+    };
+    const dispatcher = makeDispatcher(
+      { exec: vi.fn().mockResolvedValue(handles) }, {}, sent, undefined, guard,
+    );
+
+    await dispatcher.handle({
+      id: 'exec-a', ts: 1, kind: 'execStream',
+      payload: {
+        sessionId: 'session-a', runtimeId: 'runtime-a', cmd: ['/bin/sh'], tty: true,
+        cols: 120, rows: 40,
+      },
+    });
+    await dispatcher.waitForIdle();
+
+    expect(handles.resize).toHaveBeenCalledOnce();
+    expect(handles.kill).toHaveBeenCalledOnce();
+    expect((dispatcher as unknown as { execSessions: Map<string, unknown> }).execSessions.size)
+      .toBe(0);
+    expect(sent.some((message) => message.kind === 'logChunk')).toBe(false);
+    expect(sent.at(-1)).toMatchObject({
+      kind: 'commandAck',
+      payload: { commandId: 'exec-a', ok: false, error: 'runtime drift' },
+    });
+  });
+
+  it('post-samples a failed active resize and closes the exact session before error ack', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    const sent: AgentToBackendMessage[] = [];
+    const guard = vi.fn().mockResolvedValue(undefined);
+    const handles = {
+      kill: vi.fn().mockResolvedValue(undefined),
+      resize: vi.fn(async () => { throw new Error('resize failed'); }),
+      write: vi.fn(() => true),
+    };
+    const dispatcher = makeDispatcher(
+      { exec: vi.fn().mockResolvedValue(handles) }, {}, sent, undefined, guard,
+    );
+    await dispatcher.handle({
+      id: 'exec-a', ts: 1, kind: 'execStream',
+      payload: { sessionId: 'session-a', runtimeId: 'runtime-a', cmd: ['/bin/sh'], tty: true },
+    });
+    await dispatcher.waitForIdle();
+
+    await dispatcher.handle({
+      id: 'resize-a', ts: 2, kind: 'execResize',
+      payload: { sessionId: 'session-a', cols: 120, rows: 40 },
+    });
+
+    expect(guard).toHaveBeenCalledTimes(4);
+    expect(handles.kill).toHaveBeenCalledOnce();
+    expect((dispatcher as unknown as { execSessions: Map<string, unknown> }).execSessions.size)
+      .toBe(0);
+    expect(sent.at(-1)).toMatchObject({
+      kind: 'commandAck',
+      payload: { commandId: 'resize-a', ok: false, error: 'resize failed' },
+    });
+  });
+
+  it('closes an active resize when the post-sample detects daemon drift', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    const sent: AgentToBackendMessage[] = [];
+    let releaseResize!: () => void;
+    const resizeGate = new Promise<void>((resolve) => { releaseResize = resolve; });
+    const guard = vi.fn()
+      .mockResolvedValueOnce(undefined)
+      .mockResolvedValueOnce(undefined)
+      .mockResolvedValueOnce(undefined)
+      .mockRejectedValueOnce(new Error('runtime drift'));
+    const handles = {
+      kill: vi.fn().mockResolvedValue(undefined),
+      resize: vi.fn(() => resizeGate),
+      write: vi.fn(() => true),
+    };
+    const dispatcher = makeDispatcher(
+      { exec: vi.fn().mockResolvedValue(handles) }, {}, sent, undefined, guard,
+    );
+    await dispatcher.handle({
+      id: 'exec-a', ts: 1, kind: 'execStream',
+      payload: { sessionId: 'session-a', runtimeId: 'runtime-a', cmd: ['/bin/sh'], tty: true },
+    });
+    await dispatcher.waitForIdle();
+
+    const resizing = dispatcher.handle({
+      id: 'resize-a', ts: 2, kind: 'execResize',
+      payload: { sessionId: 'session-a', cols: 120, rows: 40 },
+    });
+    await vi.waitFor(() => expect(handles.resize).toHaveBeenCalledOnce());
+    expect(handles.kill).not.toHaveBeenCalled();
+    releaseResize();
+    await resizing;
+
+    expect(handles.kill).toHaveBeenCalledOnce();
+    expect((dispatcher as unknown as { execSessions: Map<string, unknown> }).execSessions.size)
+      .toBe(0);
+    expect(sent.at(-1)).toMatchObject({
+      kind: 'commandAck',
+      payload: { commandId: 'resize-a', ok: false, error: 'runtime drift' },
+    });
+  });
+
+  it('does not write active input when its daemon pre-sample fails', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    const sent: AgentToBackendMessage[] = [];
+    const guard = vi.fn()
+      .mockResolvedValueOnce(undefined)
+      .mockResolvedValueOnce(undefined)
+      .mockRejectedValueOnce(new Error('runtime drift'));
+    const handles = {
+      kill: vi.fn().mockResolvedValue(undefined), resize: vi.fn(), write: vi.fn(() => true),
+    };
+    const dispatcher = makeDispatcher(
+      { exec: vi.fn().mockResolvedValue(handles) }, {}, sent, undefined, guard,
+    );
+    await dispatcher.handle({
+      id: 'exec-a', ts: 1, kind: 'execStream',
+      payload: { sessionId: 'session-a', runtimeId: 'runtime-a', cmd: ['/bin/sh'], tty: true },
+    });
+    await dispatcher.waitForIdle();
+
+    await dispatcher.handle({
+      id: 'input-a', ts: 2, kind: 'execInput',
+      payload: { sessionId: 'session-a', data: 'YQ==' },
+    });
+
+    expect(handles.write).not.toHaveBeenCalled();
+    expect(handles.kill).toHaveBeenCalledOnce();
+    expect(sent.at(-1)).toMatchObject({
+      kind: 'commandAck',
+      payload: { commandId: 'input-a', ok: false, error: 'runtime drift' },
+    });
+  });
+
+  it('does not run a queued input after execClose wins while the pre-sample is pending', async () => {
+    const sent: AgentToBackendMessage[] = [];
+    let releaseGuard!: () => void;
+    const guardGate = new Promise<void>((resolve) => { releaseGuard = resolve; });
+    const guard = vi.fn()
+      .mockResolvedValueOnce(undefined)
+      .mockResolvedValueOnce(undefined)
+      .mockReturnValueOnce(guardGate)
+      .mockResolvedValue(undefined);
+    const handles = {
+      kill: vi.fn().mockResolvedValue(undefined), resize: vi.fn(), write: vi.fn(() => true),
+    };
+    const dispatcher = makeDispatcher(
+      { exec: vi.fn().mockResolvedValue(handles) }, {}, sent, undefined, guard,
+    );
+    await dispatcher.handle({
+      id: 'exec-a', ts: 1, kind: 'execStream',
+      payload: { sessionId: 'session-a', runtimeId: 'runtime-a', cmd: ['/bin/sh'], tty: true },
+    });
+    await dispatcher.waitForIdle();
+
+    const input = dispatcher.handle({
+      id: 'input-a', ts: 2, kind: 'execInput',
+      payload: { sessionId: 'session-a', data: 'YQ==' },
+    });
+    await vi.waitFor(() => expect(guard).toHaveBeenCalledTimes(3));
+    await dispatcher.handle({
+      id: 'close-a', ts: 3, kind: 'execClose', payload: { sessionId: 'session-a' },
+    });
+    releaseGuard();
+    await input;
+
+    expect(handles.write).not.toHaveBeenCalled();
+    expect(handles.kill).toHaveBeenCalledOnce();
+    expect((dispatcher as unknown as { execSessions: Map<string, unknown> }).execSessions.size)
+      .toBe(0);
+  });
+
   it('keeps a closing exec owner and idle barrier until physical kill settles', async () => {
     const sent: AgentToBackendMessage[] = [];
     let releaseKill!: () => void;
@@ -566,7 +982,7 @@ describe('DirectCommandDispatcher exec lifecycle', () => {
     });
     dispatcher.resetConnection();
     resolveOpen(handles);
-    await Promise.resolve();
+    await dispatcher.waitForIdle();
 
     expect(handles.kill).toHaveBeenCalledOnce();
   });
@@ -577,6 +993,8 @@ function makeDispatcher(
   mounter: object,
   sent: AgentToBackendMessage[],
   sync?: (...args: unknown[]) => void,
+  guard?: () => Promise<void>,
+  dependencies?: { dropbear?: object; quota?: object },
 ): DirectCommandDispatcher {
   const ws = { send: (message: AgentToBackendMessage) => sent.push(message), emit: vi.fn() };
   return new DirectCommandDispatcher(
@@ -584,9 +1002,11 @@ function makeDispatcher(
     docker as never,
     mounter as never,
     ws as never,
-    {} as never,
-    { checkToolAvailable: vi.fn() } as never,
+    (dependencies?.dropbear ?? {}) as never,
+    (dependencies?.quota ?? { checkToolAvailable: vi.fn() }) as never,
     sync,
+    undefined,
+    guard,
   );
 }
 

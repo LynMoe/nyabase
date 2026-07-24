@@ -3,9 +3,13 @@ import { useQueryClient } from '@tanstack/react-query';
 import { api } from '../lib/api.js';
 import { toast } from './use-toast.js';
 import type { AgentTaskRefResponse, ContainerAction } from '@nyabase/common';
-import { useAgentTaskTracker } from './use-agent-task-tracker.js';
+import {
+  useAdminAgentTaskBatchFeedback,
+  useRequesterAgentTaskBatchFeedback,
+} from './use-agent-task-tracker.js';
 import { containerActionPath } from '../lib/container-actions.js';
 import { queryKeys } from '../lib/query-keys.js';
+import { addTrackedTaskIds, retireTrackedTaskIds as retireTaskIds } from '../lib/tracked-task-ids.js';
 
 export interface ConfirmState {
   action: ContainerAction;
@@ -21,10 +25,18 @@ export function useContainerActions(options: { admin?: boolean } = {}) {
   const qc = useQueryClient();
   const basePath = options.admin === true ? '/admin/v2/containers' : '/v2/containers';
   const [pendingActions, setPendingActions] = useState<Set<string>>(new Set());
-  const [trackedTaskId, setTrackedTaskId] = useState<string | null>(null);
+  const [trackedTaskIds, setTrackedTaskIds] = useState<string[]>([]);
   const [confirmState, setConfirmState] = useState<ConfirmState | null>(null);
 
-  useAgentTaskTracker(trackedTaskId, { admin: options.admin });
+  const retireTrackedTaskIds = useCallback((settledIds: readonly string[]) => {
+    setTrackedTaskIds((current) => retireTaskIds(current, settledIds));
+  }, []);
+  useRequesterAgentTaskBatchFeedback(options.admin === true ? [] : trackedTaskIds, {
+    onSettledTaskIds: retireTrackedTaskIds,
+  });
+  useAdminAgentTaskBatchFeedback(options.admin === true ? trackedTaskIds : [], {
+    onSettledTaskIds: retireTrackedTaskIds,
+  });
 
   const addPending = useCallback((key: string) => setPendingActions((s) => new Set([...s, key])), []);
   const removePending = useCallback((key: string) => setPendingActions((s) => {
@@ -38,7 +50,7 @@ export function useContainerActions(options: { admin?: boolean } = {}) {
     addPending(containerId);
     try {
       const res = await api.post<AgentTaskRefResponse>(`${basePath}/${containerId}/actions/${containerActionPath(action)}`);
-      setTrackedTaskId(res.taskId);
+      setTrackedTaskIds((current) => addTrackedTaskIds(current, [res.taskId]));
       const label: Partial<Record<ContainerAction, string>> = {
         start: '启动', stop: '停止', restart: '重启', delete: '删除',
         updateMounts: '更新挂载', reconcileSsh: '修复 SSH',

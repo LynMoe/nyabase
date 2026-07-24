@@ -1,4 +1,4 @@
-import { DataSource, type EntityManager } from 'typeorm';
+import { DataSource, IsNull, type EntityManager } from 'typeorm';
 import {
   AgentTaskKind,
   AgentTaskStatus,
@@ -7,6 +7,8 @@ import {
   ContainerStatus,
   LABEL,
   MAX_ACTIVE_RUNTIME_CLEANUP_CLAIMS_PER_SERVER,
+  remoteFsSourceIdentity,
+  RemoteFsType,
   ServerStatus,
   type ContainerSnapshot,
 } from '@nyabase/common';
@@ -23,12 +25,32 @@ import { ImageEntity } from '../entities/image.entity.js';
 import { AgentTaskEntity } from '../entities/agent-task.entity.js';
 import { NetworkAddressClaimEntity } from '../entities/network-address-claim.entity.js';
 import { QuotaDesiredEntity } from '../entities/quota-desired.entity.js';
+import { RemoteFsMountEntity } from '../entities/remote-fs-mount.entity.js';
+import { RemoteFsServerAssignmentEntity } from '../entities/remote-fs-server-assignment.entity.js';
 import { ServerEntity } from '../entities/server.entity.js';
 import { RuntimeDriftReconcilerService } from './runtime-drift-reconciler.service.js';
 
 const SERVER_ID = 'server-a';
 const HASH = 'a'.repeat(64);
 const DOCKER_ROOT = '/var/lib/nyabase-docker';
+const LOCAL_MOUNT = {
+  sourceKind: 'local' as const,
+  sourceId: 'disk-a',
+  dirName: 'workspace',
+  containerPath: '/workspace',
+};
+const REMOTE_MOUNT = {
+  sourceKind: 'remote' as const,
+  sourceId: 'remote-a',
+  dirName: 'shared',
+  containerPath: '/shared',
+};
+const REMOTE_PARAMS = {
+  type: RemoteFsType.Nfs,
+  nfsServer: 'nfs.internal',
+  exportPath: '/export',
+  version: '4.2' as const,
+} as const;
 
 describe('RuntimeDriftReconcilerService', () => {
   let dataSource: DataSource;
@@ -36,6 +58,7 @@ describe('RuntimeDriftReconcilerService', () => {
   let enqueued: Array<EnqueueAgentTaskInput & { taskId: string }>;
   let activeLocks: Map<string, string>;
   let enqueueInTransaction: ReturnType<typeof vi.fn>;
+  let supersedePendingForResourceInTransaction: ReturnType<typeof vi.fn>;
 
   beforeEach(async () => {
     dataSource = new DataSource({
@@ -49,6 +72,8 @@ describe('RuntimeDriftReconcilerService', () => {
         ContainerMountEntity,
         DataDirectoryEntity,
         QuotaDesiredEntity,
+        RemoteFsMountEntity,
+        RemoteFsServerAssignmentEntity,
         ServerEntity,
         ImageEntity,
         AgentTaskEntity,
@@ -118,9 +143,37 @@ describe('RuntimeDriftReconcilerService', () => {
       await input.beforeCommit?.(manager, { taskId });
       return { ok: true as const, taskId, status: AgentTaskStatus.Pending };
     });
+    supersedePendingForResourceInTransaction = vi.fn(async (
+      manager: EntityManager,
+      input: { serverId: string; resourceType: string; resourceId: string; reason: string },
+    ) => {
+      const pending = await manager.find(AgentTaskEntity, {
+        where: {
+          serverId: input.serverId,
+          resourceType: input.resourceType,
+          resourceId: input.resourceId,
+          status: AgentTaskStatus.Pending,
+          agentResultJson: IsNull(),
+          startedAt: IsNull(),
+          lastSentAt: IsNull(),
+        },
+      });
+      if (pending.length > 1) throw new Error('duplicate pending test owner');
+      for (const task of pending) {
+        await manager.update(AgentTaskEntity, task.id, {
+          status: AgentTaskStatus.Failed,
+          errorJson: { code: 'TASK_SUPERSEDED', message: input.reason },
+          completedAt: new Date(),
+        });
+        for (const [key, owner] of activeLocks) {
+          if (owner === task.id) activeLocks.delete(key);
+        }
+      }
+      return pending.map((task) => task.id);
+    });
     service = new RuntimeDriftReconcilerService(
       dataSource,
-      { enqueueInTransaction } as never,
+      { enqueueInTransaction, supersedePendingForResourceInTransaction } as never,
       new ResourceKeyService(),
     );
   });
@@ -593,6 +646,32 @@ describe('RuntimeDriftReconcilerService', () => {
     expect(enqueued).toEqual([]);
   });
 
+  it('refines a transient unsupported power failure when a later full inventory proves absence', async () => {
+    await seedContainer('container-a');
+
+    await service.reconcile(
+      SERVER_ID,
+      [snapshot('runtime-a', 'container-a', { status: ContainerStatus.Unknown })],
+      DOCKER_ROOT,
+    );
+    expect(await lifecycle('container-a')).toMatchObject({
+      phase: ContainerPhase.Failed,
+      failureCode: 'runtime_power_state_unsupported',
+      boundRuntimeId: 'runtime-a',
+    });
+
+    const result = await service.reconcile(SERVER_ID, [], DOCKER_ROOT);
+
+    expect(result.failedContainerIds).toEqual(['container-a']);
+    expect(await lifecycle('container-a')).toMatchObject({
+      phase: ContainerPhase.Failed,
+      failureCode: 'runtime_missing',
+      activeTaskId: null,
+      boundRuntimeId: 'runtime-a',
+    });
+    expect(enqueued).toEqual([]);
+  });
+
   it('deduplicates repeated cleanup reports through the runtime and container resource locks', async () => {
     const report = snapshot('runtime-unknown', 'container-unknown');
 
@@ -644,6 +723,299 @@ describe('RuntimeDriftReconcilerService', () => {
       activeTaskId: 'task-1',
     });
   });
+
+  it('fails closed without enqueue when desired recovery mounts are malformed', async () => {
+    await seedContainer('container-a', {
+      desired: {
+        powerIntent: ContainerPowerIntent.Running,
+        mountsJson: { not: 'a mount array' },
+      },
+    });
+    await seedQuota();
+
+    const result = await service.reconcile(
+      SERVER_ID,
+      [snapshot('runtime-a', 'container-a', { status: ContainerStatus.Exited })],
+      DOCKER_ROOT,
+    );
+
+    expect(result).toMatchObject({ taskIds: [], failedContainerIds: ['container-a'] });
+    expect(enqueued).toEqual([]);
+    expect(await lifecycle('container-a')).toMatchObject({
+      phase: ContainerPhase.Failed,
+      activeTaskId: null,
+      failureCode: 'runtime_power_recovery_mount_spec_invalid',
+    });
+  });
+
+  it('fails closed without enqueue when desired recovery mounts and index rows diverge', async () => {
+    await seedContainer('container-a', {
+      desired: {
+        powerIntent: ContainerPowerIntent.Running,
+        mountsJson: [LOCAL_MOUNT],
+      },
+    });
+    await seedQuota();
+
+    await service.reconcile(
+      SERVER_ID,
+      [snapshot('runtime-a', 'container-a', { status: ContainerStatus.Exited })],
+      DOCKER_ROOT,
+    );
+
+    expect(enqueued).toEqual([]);
+    expect(await lifecycle('container-a')).toMatchObject({
+      phase: ContainerPhase.Failed,
+      activeTaskId: null,
+      failureCode: 'runtime_power_recovery_mount_index_divergent',
+    });
+  });
+
+  it('fails closed without enqueue when an exact mount row lost its active DataDir identity', async () => {
+    await seedContainer('container-a', {
+      desired: {
+        powerIntent: ContainerPowerIntent.Running,
+        mountsJson: [LOCAL_MOUNT],
+      },
+    });
+    await seedQuota();
+    await dataSource.getRepository(ContainerMountEntity).save({
+      id: 'mount-a',
+      serverId: SERVER_ID,
+      containerId: 'container-a',
+      containerName: 'container-a',
+      userId: 'user-a',
+      sourceIdentity: 'xfs:uuid-a:root-a',
+      ...LOCAL_MOUNT,
+    });
+
+    await service.reconcile(
+      SERVER_ID,
+      [snapshot('runtime-a', 'container-a', { status: ContainerStatus.Exited })],
+      DOCKER_ROOT,
+    );
+
+    expect(enqueued).toEqual([]);
+    expect(await lifecycle('container-a')).toMatchObject({
+      phase: ContainerPhase.Failed,
+      activeTaskId: null,
+      failureCode: 'runtime_power_recovery_mount_source_unavailable',
+    });
+  });
+
+  it('fails closed when a remote recovery mount lacks an active exact Server assignment', async () => {
+    const sourceIdentity = remoteFsSourceIdentity(REMOTE_PARAMS);
+    await seedContainer('container-a', {
+      desired: {
+        powerIntent: ContainerPowerIntent.Running,
+        mountsJson: [REMOTE_MOUNT],
+      },
+    });
+    await seedQuota();
+    await dataSource.getRepository(RemoteFsMountEntity).save({
+      id: REMOTE_MOUNT.sourceId,
+      name: 'Remote A',
+      displayName: null,
+      description: null,
+      type: 'nfs',
+      hostMountPoint: `/mnt/remote-fs/${REMOTE_MOUNT.sourceId}`,
+      options: '',
+      params: REMOTE_PARAMS,
+      desiredState: 'active',
+      generation: 1,
+      lastTaskId: 'remote-task-a',
+    });
+    await dataSource.getRepository(RemoteFsServerAssignmentEntity).save({
+      id: 'assignment-a',
+      remoteFsMountId: REMOTE_MOUNT.sourceId,
+      serverId: SERVER_ID,
+      desiredState: 'failed',
+      generation: 1,
+      lastTaskId: 'remote-task-a',
+    });
+    await dataSource.getRepository(DataDirectoryEntity).save({
+      id: 'datadir-remote-a',
+      userId: 'user-a',
+      sourceKind: REMOTE_MOUNT.sourceKind,
+      sourceId: REMOTE_MOUNT.sourceId,
+      name: REMOTE_MOUNT.dirName,
+      sourceIdentity,
+      serverId: null,
+      uid: 1000,
+      desiredState: 'active',
+      generation: 1,
+      lastTaskId: 'datadir-task-a',
+    });
+    await dataSource.getRepository(ContainerMountEntity).save({
+      id: 'mount-remote-a',
+      serverId: SERVER_ID,
+      containerId: 'container-a',
+      containerName: 'container-a',
+      userId: 'user-a',
+      sourceIdentity,
+      ...REMOTE_MOUNT,
+    });
+
+    await service.reconcile(
+      SERVER_ID,
+      [snapshot('runtime-a', 'container-a', { status: ContainerStatus.Exited })],
+      DOCKER_ROOT,
+    );
+
+    expect(enqueued).toEqual([]);
+    expect(await lifecycle('container-a')).toMatchObject({
+      phase: ContainerPhase.Failed,
+      activeTaskId: null,
+      failureCode: 'runtime_power_recovery_mount_source_unavailable',
+    });
+  });
+
+  it('queues one exact non-empty mount recovery payload and lock set', async () => {
+    await seedContainer('container-a', {
+      desired: {
+        powerIntent: ContainerPowerIntent.Running,
+        mountsJson: [LOCAL_MOUNT],
+      },
+    });
+    await seedQuota();
+    await dataSource.getRepository(DataDirectoryEntity).save({
+      id: 'datadir-a',
+      userId: 'user-a',
+      sourceIdentity: 'xfs:uuid-a:root-a',
+      serverId: SERVER_ID,
+      uid: 1000,
+      desiredState: 'active',
+      generation: 1,
+      lastTaskId: 'datadir-task-a',
+      sourceKind: LOCAL_MOUNT.sourceKind,
+      sourceId: LOCAL_MOUNT.sourceId,
+      name: LOCAL_MOUNT.dirName,
+    });
+    await dataSource.getRepository(ContainerMountEntity).save({
+      id: 'mount-a',
+      serverId: SERVER_ID,
+      containerId: 'container-a',
+      containerName: 'container-a',
+      userId: 'user-a',
+      sourceIdentity: 'xfs:uuid-a:root-a',
+      ...LOCAL_MOUNT,
+    });
+
+    const result = await service.reconcile(
+      SERVER_ID,
+      [snapshot('runtime-a', 'container-a', { status: ContainerStatus.Exited })],
+      DOCKER_ROOT,
+    );
+
+    expect(result.taskIds).toEqual(['task-1']);
+    expect(enqueued).toHaveLength(1);
+    expect(enqueued[0]).toMatchObject({
+      kind: AgentTaskKind.ContainerStart,
+      payload: {
+        mounts: [{
+          sourceId: 'disk-a',
+          resourceId: 'datadir-a',
+          sourceIdentity: 'xfs:uuid-a:root-a',
+          containerPath: '/workspace',
+        }],
+      },
+      resourceKeys: [
+        'container:container-a',
+        'datadir:server-a:local:disk-a:workspace',
+        'mount_source:server-a:local:disk-a',
+        'quota:server-a:user-a',
+      ],
+    });
+  });
+
+  it('supersedes an undispatched SSH task before recovering stopped desired-running power', async () => {
+    await seedContainer('container-a', {
+      lifecycle: { phase: ContainerPhase.Updating, activeTaskId: 'ssh-task' },
+      desired: { powerIntent: ContainerPowerIntent.Running },
+    });
+    await dataSource.getRepository(QuotaDesiredEntity).save({
+      id: 'quota-a', serverId: SERVER_ID, userId: 'user-a', generation: 4,
+      numericUserId: 42, limitBytes: 8192, lastTaskId: 'quota-task',
+    });
+    await dataSource.getRepository(AgentTaskEntity).save(pendingTask(
+      'ssh-task',
+      AgentTaskKind.ContainerSshEnsure,
+      'container-a',
+      { containerId: 'container-a', runtimeId: 'runtime-a', enabled: false },
+    ));
+    activeLocks.set('container:container-a', 'ssh-task');
+
+    const first = await service.reconcile(
+      SERVER_ID,
+      [snapshot('runtime-a', 'container-a', { status: ContainerStatus.Exited })],
+      DOCKER_ROOT,
+    );
+    const second = await service.reconcile(
+      SERVER_ID,
+      [snapshot('runtime-a', 'container-a', { status: ContainerStatus.Exited })],
+      DOCKER_ROOT,
+    );
+
+    expect(first.taskIds).toEqual(['task-1']);
+    expect(second.taskIds).toEqual([]);
+    expect(supersedePendingForResourceInTransaction).toHaveBeenCalledOnce();
+    expect(enqueued).toHaveLength(1);
+    expect(enqueued[0]).toMatchObject({
+      kind: AgentTaskKind.ContainerStart,
+      resourceId: 'container-a',
+      request: { reason: 'authoritative_state_report_power_recovery' },
+    });
+    expect(await dataSource.getRepository(AgentTaskEntity).findOneByOrFail({ id: 'ssh-task' }))
+      .toMatchObject({ status: AgentTaskStatus.Failed });
+    expect(await lifecycle('container-a')).toMatchObject({
+      phase: ContainerPhase.Updating,
+      activeTaskId: 'task-1',
+    });
+    expect(await dataSource.getRepository(ContainerDesiredSpecEntity).findOneByOrFail({
+      containerId: 'container-a',
+    })).toMatchObject({ powerIntent: ContainerPowerIntent.Running });
+  });
+
+  it.each(['sent', 'staged'] as const)(
+    'does not supersede a %s SSH task when a stopped runtime is reported',
+    async (state) => {
+      await seedContainer('container-a', {
+        lifecycle: { phase: ContainerPhase.Updating, activeTaskId: 'ssh-task' },
+        desired: { powerIntent: ContainerPowerIntent.Running },
+      });
+      const sshTask = pendingTask(
+        'ssh-task',
+        AgentTaskKind.ContainerSshEnsure,
+        'container-a',
+        { containerId: 'container-a', runtimeId: 'runtime-a', enabled: false },
+      );
+      if (state === 'sent') {
+        sshTask.startedAt = new Date('2026-07-17T00:00:00.000Z');
+        sshTask.lastSentAt = new Date('2026-07-17T00:00:00.000Z');
+      } else {
+        sshTask.agentResultJson = {
+          status: 'failed',
+          error: { code: 'container_ssh_runtime_stopped', message: 'finalizer pending' },
+          observed: { applied: false },
+        };
+      }
+      await dataSource.getRepository(AgentTaskEntity).save(sshTask);
+
+      const result = await service.reconcile(
+        SERVER_ID,
+        [snapshot('runtime-a', 'container-a', { status: ContainerStatus.Exited })],
+        DOCKER_ROOT,
+      );
+
+      expect(result.taskIds).toEqual([]);
+      expect(supersedePendingForResourceInTransaction).not.toHaveBeenCalled();
+      expect(enqueued).toEqual([]);
+      expect(await lifecycle('container-a')).toMatchObject({
+        phase: ContainerPhase.Updating,
+        activeTaskId: 'ssh-task',
+      });
+    },
+  );
 
   it('queues a durable stop when desired stopped but the canonical runtime is running', async () => {
     await seedContainer('container-a', {
@@ -731,6 +1103,18 @@ describe('RuntimeDriftReconcilerService', () => {
         [LABEL.RUNTIME_SPEC_HASH]: overrides.runtimeSpecHash ?? HASH,
       },
     };
+  }
+
+  async function seedQuota(): Promise<void> {
+    await dataSource.getRepository(QuotaDesiredEntity).save({
+      id: 'quota-a',
+      serverId: SERVER_ID,
+      userId: 'user-a',
+      generation: 4,
+      numericUserId: 42,
+      limitBytes: 8192,
+      lastTaskId: 'quota-task',
+    });
   }
 
   async function seedContainer(

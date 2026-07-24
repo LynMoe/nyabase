@@ -7,23 +7,24 @@ import {
   type OnModuleInit,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { createHash } from 'crypto';
 import { isDeepStrictEqual } from 'node:util';
 import { v7 as uuidv7 } from 'uuid';
 import {
   AgentTaskKind,
   AgentTaskStatus,
+  Capability,
   MAX_ACTIVE_RUNTIME_CLEANUP_CLAIMS_PER_SERVER,
   ServerStatus,
   canonicalJson,
   parseAgentTaskPayload,
-  zTaskResultPayload,
   type AgentTaskDto,
+  type UserAgentTaskDto,
   type ContainerRuntimeAbsentTaskPayload,
   type TaskResultPayload,
 } from '@nyabase/common';
 import {
   DataSource,
+  Brackets,
   EntityManager,
   In,
   IsNull,
@@ -47,11 +48,9 @@ import { validateTerminalAgentResult } from './agent-task-result-validator.js';
 import { ResourceKeyService } from './resource-key.service.js';
 import { ResourceLockedException, ResourceLockService } from './resource-lock.service.js';
 import { ProxySnapshotNotifierService } from '../proxy-snapshots/proxy-snapshot-notifier.service.js';
-import {
-  type EnqueueAgentTaskInput,
-  type EnqueueAgentTaskResult,
-} from './agent-task.types.js';
+import { type EnqueueAgentTaskInput, type EnqueueAgentTaskResult } from './agent-task.types.js';
 import { networkHasUntrustedInventory } from '../common/network-inventory-safety.js';
+import { toUserAgentTaskDto } from './agent-task-projection.js';
 import {
   AGENT_TASK_MIN_RETENTION_MS,
   MAX_AGENT_TASK_ROWS_HARD,
@@ -59,8 +58,20 @@ import {
   MAX_NON_SAFETY_AGENT_TASKS_PER_RETENTION_WINDOW,
   MAX_NORMAL_AGENT_TASKS_PER_RETENTION_WINDOW,
 } from './agent-task-retention.service.js';
+import {
+  parseAndValidateStagedTerminalResult,
+  STAGED_AGENT_RESULT_CORRUPT_CODE,
+} from './agent-task-staged-result.js';
+import {
+  AGENT_TASK_RESOURCE_TYPE_BY_KIND,
+  MAX_AGENT_TASK_WIRE_BYTES,
+  agentTaskPayloadHash,
+  parseAndValidateAgentTaskWireIdentity,
+  validateDurableAgentTaskIdentity,
+  validateDurableAgentTaskRowIdentity,
+} from './agent-task-durable-contract.js';
 
-export const MAX_AGENT_TASK_WIRE_BYTES = 1024 * 1024;
+export { MAX_AGENT_TASK_WIRE_BYTES } from './agent-task-durable-contract.js';
 // CreateContainerRequest may legitimately contain 64 mount paths of 4096
 // bytes each. Keep metadata bounded, but use the same explicit 1 MiB envelope
 // as the immutable Agent wire payload so the public request schema fits.
@@ -70,7 +81,8 @@ export const MAX_PENDING_AGENT_TASKS_GLOBAL = 4096;
 export const MAX_RECONCILIATION_TASKS_PER_SERVER = 2048;
 export const MAX_RECONCILIATION_TASKS_GLOBAL = 8192;
 export const MAX_SAFETY_TASKS_PER_SERVER = 1024;
-export const MAX_ALL_TASKS_PER_SERVER = MAX_RECONCILIATION_TASKS_PER_SERVER + MAX_SAFETY_TASKS_PER_SERVER;
+export const MAX_ALL_TASKS_PER_SERVER =
+  MAX_RECONCILIATION_TASKS_PER_SERVER + MAX_SAFETY_TASKS_PER_SERVER;
 export const AGENT_TASK_RESEND_INTERVAL_MS = 5_000;
 // Keep a deferred head task ineligible for at least one complete dispatcher
 // interval so another task in the same priority lane can make progress.
@@ -90,13 +102,16 @@ const RETRYABLE_QUARANTINE_ERROR_CODES = [
   'AGENT_QUOTA_OUTCOME_UNSAFE',
   'AGENT_SAFETY_OUTCOME_UNSAFE',
   'FINALIZER_RETRY_EXHAUSTED',
+  STAGED_AGENT_RESULT_CORRUPT_CODE,
 ] as const;
-const RETRYABLE_QUARANTINE_ERROR_CODE_SET = new Set<string>(
-  RETRYABLE_QUARANTINE_ERROR_CODES,
-);
+const RETRYABLE_QUARANTINE_ERROR_CODE_SET = new Set<string>(RETRYABLE_QUARANTINE_ERROR_CODES);
 
 export class PermanentTaskPayloadError extends Error {
-  constructor(readonly taskId: string, message: string, options?: ErrorOptions) {
+  constructor(
+    readonly taskId: string,
+    message: string,
+    options?: ErrorOptions,
+  ) {
     super(message, options);
     this.name = 'PermanentTaskPayloadError';
   }
@@ -117,9 +132,9 @@ export class AgentTasksService implements OnModuleInit {
   ) {}
 
   /**
-   * Validate only rows which can still be dispatched. A staged Agent result is
-   * already owned by the database-only finalizer and must not depend on the
-   * payload encryption key remaining available.
+   * Validate only rows which can still be dispatched. Staged Agent results are
+   * owned by the database-only finalizer, which independently reconstructs the
+   * codec-decoded wire payload and verifies its durable hash before projection.
    *
    * A payload defect before the first send proves that no physical mutation
    * happened, so stage the normal internal failure result and continue startup.
@@ -145,11 +160,8 @@ export class AgentTasksService implements OnModuleInit {
         // thousands of legal 1 MiB tasks and must not retain a whole batch of
         // decoded JSON objects in memory.
         const task = await this.tasksRepo.findOneBy({ id });
-        if (
-          !task
-          || task.status !== AgentTaskStatus.Pending
-          || task.agentResultJson !== null
-        ) continue;
+        if (!task || task.status !== AgentTaskStatus.Pending || task.agentResultJson !== null)
+          continue;
         try {
           this.buildWirePayload(task);
         } catch (error) {
@@ -166,10 +178,11 @@ export class AgentTasksService implements OnModuleInit {
           // is no longer provably absent.
           const current = await this.tasksRepo.findOneBy({ id: task.id });
           if (
-            !current
-            || current.status !== AgentTaskStatus.Pending
-            || current.agentResultJson !== null
-          ) continue;
+            !current ||
+            current.status !== AgentTaskStatus.Pending ||
+            current.agentResultJson !== null
+          )
+            continue;
           throw error;
         }
       }
@@ -179,17 +192,25 @@ export class AgentTasksService implements OnModuleInit {
 
   async enqueue(input: EnqueueAgentTaskInput): Promise<EnqueueAgentTaskResult> {
     return runSerializedTransaction(this.dataSource, (manager) =>
-      this.enqueueInTransaction(manager, input));
+      this.enqueueInTransaction(manager, input),
+    );
   }
 
   /**
    * Explicitly retry tasks retained after impossible Agent terminal evidence.
-   * The caller must hold the Agent session fence. Locks are intentionally
-   * preserved: replay reconciles the same immutable intent and is the only
-   * operation allowed to leave the durable server quarantine.
+   * The caller supplies an authorization-aware Agent session fence. The fence
+   * must be acquired before this method opens its mutation transaction, or
+   * route/session retirement would recursively wait on SQLite's single lease.
+   * Locks are intentionally preserved: replay reconciles the same immutable
+   * intent and is the only operation allowed to leave durable quarantine.
    */
-  async retryAgentQuarantine(serverId: string): Promise<string[]> {
-    return runSerializedTransaction(this.dataSource, async (manager) => {
+  async retryAgentQuarantine(
+    serverId: string,
+    authorizeInTransaction: (manager: EntityManager) => Promise<void>,
+    runWithSessionFence: <T>(work: () => Promise<T>) => Promise<T>,
+  ): Promise<string[]> {
+    return runWithSessionFence(() => runSerializedTransaction(this.dataSource, async (manager) => {
+      await authorizeInTransaction(manager);
       const server = await manager.findOneBy(ServerEntity, { id: serverId });
       if (!server) throw new NotFoundException('Server not found');
       if (server.status !== ServerStatus.AgentQuarantined) {
@@ -210,8 +231,9 @@ export class AgentTasksService implements OnModuleInit {
         this.pendingStartedAuthorityIds(manager, serverId),
       ]);
       const expectedRetryIds = new Set([...retainedFailedIds, ...pendingStartedIds]);
-      const missingAuthorityId = [...expectedRetryIds]
-        .find((taskId) => !authorityIdSet.has(taskId));
+      const missingAuthorityId = [...expectedRetryIds].find(
+        (taskId) => !authorityIdSet.has(taskId),
+      );
       if (missingAuthorityId) {
         throw new ConflictException({
           code: 'AGENT_QUARANTINE_LOCK_MISSING',
@@ -235,9 +257,11 @@ export class AgentTasksService implements OnModuleInit {
             message: `Resource lock references missing Agent task ${missingTaskId}`,
           });
         }
-        if (await manager.count(ResourceLockEntity, {
-          where: { taskId: In(batchIds), serverId: Not(serverId) },
-        }) > 0) {
+        if (
+          (await manager.count(ResourceLockEntity, {
+            where: { taskId: In(batchIds), serverId: Not(serverId) },
+          })) > 0
+        ) {
           throw new ConflictException({
             code: 'AGENT_QUARANTINE_LOCK_SERVER_MISMATCH',
             message: 'Retained task authority contains a lock owned by another Server',
@@ -253,8 +277,7 @@ export class AgentTasksService implements OnModuleInit {
             });
           }
           const retryFailed = this.isRetryableQuarantineFailure(task);
-          const pendingStarted = task.status === AgentTaskStatus.Pending
-            && task.startedAt !== null;
+          const pendingStarted = task.status === AgentTaskStatus.Pending && task.startedAt !== null;
           if (!retryFailed && task.status !== AgentTaskStatus.Pending) {
             throw new ConflictException({
               code: 'AGENT_QUARANTINE_AUTHORITY_INVALID',
@@ -273,32 +296,39 @@ export class AgentTasksService implements OnModuleInit {
           }
 
           if (!retryFailed) {
-            await manager.update(AgentTaskEntity, task.id, (task.agentResultJson === null
-              ? {
-                  // Explicit retry starts a fresh bounded uncertainty epoch.
-                  // Keep startedAt as proof that physical dispatch once
-                  // happened, but do not let an old quarantine interval make
-                  // failExhaustedTasks immediately quarantine it again.
-                  admissionClass: 'safety',
-                  failureStage: null,
-                  dispatchAttemptCount: 0,
-                  incompleteResultCount: 0,
-                  retryWindowStartedAt: null,
-                  lastSentAt: null,
-                  nextDispatchAt: null,
-                  errorJson: null,
-                  resultJson: null,
-                  completedAt: null,
-                }
-              : {
-                  // Physical work is already terminal. Preserve immutable
-                  // evidence and let only the database finalizer retry.
-                  admissionClass: 'safety',
-                }) as never);
+            await manager.update(
+              AgentTaskEntity,
+              task.id,
+              (task.agentResultJson === null
+                ? {
+                    // Explicit retry starts a fresh bounded uncertainty epoch.
+                    // Keep startedAt as proof that physical dispatch once
+                    // happened, but do not let an old quarantine interval make
+                    // failExhaustedTasks immediately quarantine it again.
+                    admissionClass: 'safety',
+                    failureStage: null,
+                    dispatchAttemptCount: 0,
+                    incompleteResultCount: 0,
+                    retryWindowStartedAt: null,
+                    lastSentAt: null,
+                    nextDispatchAt: null,
+                    errorJson: null,
+                    resultJson: null,
+                    completedAt: null,
+                  }
+                : {
+                    // Physical work is already terminal. Preserve immutable
+                    // evidence and let only the database finalizer retry.
+                    admissionClass: 'safety',
+                  }) as never,
+            );
             retryIds.push(task.id);
             continue;
           }
-          if (this.errorCode(task.errorJson) === 'FINALIZER_RETRY_EXHAUSTED') {
+          if (
+            this.errorCode(task.errorJson) === 'FINALIZER_RETRY_EXHAUSTED'
+            || this.errorCode(task.errorJson) === STAGED_AGENT_RESULT_CORRUPT_CODE
+          ) {
             await manager.update(AgentTaskEntity, task.id, {
               status: AgentTaskStatus.Pending,
               admissionClass: 'safety',
@@ -331,8 +361,8 @@ export class AgentTasksService implements OnModuleInit {
         }
       }
       if (
-        retryIds.length !== expectedRetryIds.size
-        || retryIds.some((taskId) => !expectedRetryIds.has(taskId))
+        retryIds.length !== expectedRetryIds.size ||
+        retryIds.some((taskId) => !expectedRetryIds.has(taskId))
       ) {
         throw new ConflictException({
           code: 'AGENT_QUARANTINE_AUTHORITY_INVALID',
@@ -346,7 +376,7 @@ export class AgentTasksService implements OnModuleInit {
           : { quarantineCode: null, quarantineMessage: null }),
       });
       return retryIds.sort();
-    });
+    }));
   }
 
   /**
@@ -354,24 +384,23 @@ export class AgentTasksService implements OnModuleInit {
    * outcome, not a Backend crash loop. Preserve the exact task and lock set so
    * an administrator can repair/replay only this intent.
    */
-  async failPostDispatchPayloadCorruption(
-    taskId: string,
-    error: unknown,
-  ): Promise<string | null> {
+  async failPostDispatchPayloadCorruption(taskId: string, error: unknown): Promise<string | null> {
     const serverId = await runSerializedTransaction(this.dataSource, async (manager) => {
       const task = await manager.findOne(AgentTaskEntity, { where: { id: taskId } });
       if (
-        !task
-        || task.status !== AgentTaskStatus.Pending
-        || task.agentResultJson !== null
-        || task.startedAt === null
-      ) return null;
+        !task ||
+        task.status !== AgentTaskStatus.Pending ||
+        task.agentResultJson !== null ||
+        task.startedAt === null
+      )
+        return null;
       await manager.update(AgentTaskEntity, task.id, {
         status: AgentTaskStatus.Failed,
         failureStage: 'agent',
         errorJson: {
           code: 'AGENT_TASK_PAYLOAD_CORRUPT_OUTCOME_UNKNOWN',
-          message: 'Durable task payload is corrupt after physical dispatch; server is quarantined and locks are retained',
+          message:
+            'Durable task payload is corrupt after physical dispatch; server is quarantined and locks are retained',
           details: this.errorMessage(error).slice(0, 2048),
         },
         lastSentAt: null,
@@ -381,7 +410,8 @@ export class AgentTasksService implements OnModuleInit {
       await manager.update(ServerEntity, task.serverId, {
         status: ServerStatus.AgentQuarantined,
         quarantineCode: AGENT_TASK_FAIL_STOP_QUARANTINE_CODE,
-        quarantineMessage: 'A dispatched task payload is corrupt; the immutable task and locks require explicit repair/retry',
+        quarantineMessage:
+          'A dispatched task payload is corrupt; the immutable task and locks require explicit repair/retry',
       });
       return task.serverId;
     });
@@ -419,11 +449,13 @@ export class AgentTasksService implements OnModuleInit {
     const noEffectTaskIds: string[] = [];
     for (const task of unstarted) {
       if (task.nextDispatchAt && task.nextDispatchAt.getTime() > now.getTime()) continue;
-      if (await this.stageNeverDispatchedPayloadFailure(
-        task.id,
-        new Error('Agent task expired before its first physical dispatch'),
-        'AGENT_TASK_NOT_DISPATCHED',
-      )) {
+      if (
+        await this.stageNeverDispatchedPayloadFailure(
+          task.id,
+          new Error('Agent task expired before its first physical dispatch'),
+          'AGENT_TASK_NOT_DISPATCHED',
+        )
+      ) {
         noEffectTaskIds.push(task.id);
       }
     }
@@ -446,14 +478,18 @@ export class AgentTasksService implements OnModuleInit {
         select: { id: true },
         where: {
           ...base,
-          retryWindowStartedAt: LessThanOrEqual(new Date(now.getTime() - MAX_AGENT_TASK_UNCERTAIN_AGE_MS)),
+          retryWindowStartedAt: LessThanOrEqual(
+            new Date(now.getTime() - MAX_AGENT_TASK_UNCERTAIN_AGE_MS),
+          ),
         },
         order: { retryWindowStartedAt: 'ASC', id: 'ASC' },
         take: TASK_EXHAUSTION_BATCH,
       }),
     ]);
-    const candidateIds = [...new Set([...attempted, ...aged].map((task) => task.id))]
-      .slice(0, TASK_EXHAUSTION_BATCH);
+    const candidateIds = [...new Set([...attempted, ...aged].map((task) => task.id))].slice(
+      0,
+      TASK_EXHAUSTION_BATCH,
+    );
     if (candidateIds.length === 0) return { taskIds: noEffectTaskIds, serverIds: [] };
 
     const outcome = await runSerializedTransaction(this.dataSource, async (manager) => {
@@ -464,21 +500,21 @@ export class AgentTasksService implements OnModuleInit {
         // transaction. The candidate scan above never decodes payload/result.
         const task = await manager.findOneBy(AgentTaskEntity, { id: taskId });
         if (
-          !task
-          || task.status !== AgentTaskStatus.Pending
-          || task.agentResultJson !== null
-          || task.retryWindowStartedAt === null
-          || (
-            task.incompleteResultCount < MAX_AGENT_TASK_INCOMPLETE_RESULTS
-            && task.retryWindowStartedAt.getTime() > now.getTime() - MAX_AGENT_TASK_UNCERTAIN_AGE_MS
-          )
-        ) continue;
+          !task ||
+          task.status !== AgentTaskStatus.Pending ||
+          task.agentResultJson !== null ||
+          task.retryWindowStartedAt === null ||
+          (task.incompleteResultCount < MAX_AGENT_TASK_INCOMPLETE_RESULTS &&
+            task.retryWindowStartedAt.getTime() > now.getTime() - MAX_AGENT_TASK_UNCERTAIN_AGE_MS)
+        )
+          continue;
         await manager.update(AgentTaskEntity, task.id, {
           status: AgentTaskStatus.Failed,
           failureStage: 'agent',
           errorJson: {
             code: 'AGENT_TASK_OUTCOME_UNKNOWN',
-            message: 'Agent task retry/response deadline was exhausted; server is quarantined and locks are retained',
+            message:
+              'Agent task retry/response deadline was exhausted; server is quarantined and locks are retained',
             dispatchAttemptCount: task.dispatchAttemptCount,
             incompleteResultCount: task.incompleteResultCount,
           },
@@ -489,7 +525,8 @@ export class AgentTasksService implements OnModuleInit {
         await manager.update(ServerEntity, task.serverId, {
           status: ServerStatus.AgentQuarantined,
           quarantineCode: AGENT_TASK_FAIL_STOP_QUARANTINE_CODE,
-          quarantineMessage: 'An Agent task outcome deadline was exhausted; the immutable task and locks require explicit retry',
+          quarantineMessage:
+            'An Agent task outcome deadline was exhausted; the immutable task and locks require explicit retry',
         });
         taskIds.push(task.id);
         serverIds.add(task.serverId);
@@ -509,66 +546,82 @@ export class AgentTasksService implements OnModuleInit {
     manager: EntityManager,
     input: EnqueueAgentTaskInput,
   ): Promise<EnqueueAgentTaskResult> {
+    try {
+      validateDurableAgentTaskRowIdentity(input);
+    } catch (error) {
+      const details = error instanceof Error ? error.message : String(error);
+      throw new BadRequestException({
+        code: 'INVALID_AGENT_TASK_IDENTITY',
+        message: `Invalid durable identity for ${input.kind}`,
+        details,
+      });
+    }
     const server = await manager.findOneBy(ServerEntity, { id: input.serverId });
     if (!server) throw new NotFoundException('Server not found');
     if (server.status === ServerStatus.AgentQuarantined) {
       throw new ConflictException({
         code: 'AGENT_SERVER_QUARANTINED',
-        message: 'Server is quarantined; repair the Agent and explicitly retry before creating new tasks',
+        message:
+          'Server is quarantined; repair the Agent and explicitly retry before creating new tasks',
         serverId: input.serverId,
       });
     }
     const requestJson = this.prepareRequestJson(input.request);
     const admissionClass = input.admissionClass ?? 'normal';
     const retentionWindowStart = new Date(Date.now() - AGENT_TASK_MIN_RETENTION_MS);
-    const [serverPending, globalPending, serverSafety, recentTasks, totalTasks] = await Promise.all([
-      manager.count(AgentTaskEntity, {
-        where: { serverId: input.serverId, status: AgentTaskStatus.Pending },
-      }),
-      manager.count(AgentTaskEntity, { where: { status: AgentTaskStatus.Pending } }),
-      manager.count(AgentTaskEntity, {
-        where: {
-          serverId: input.serverId,
-          status: AgentTaskStatus.Pending,
-          admissionClass: 'safety',
-        },
-      }),
-      manager.count(AgentTaskEntity, {
-        where: { createdAt: MoreThanOrEqual(retentionWindowStart) },
-      }),
-      manager.count(AgentTaskEntity),
-    ]);
+    const [serverPending, globalPending, serverSafety, recentTasks, totalTasks] = await Promise.all(
+      [
+        manager.count(AgentTaskEntity, {
+          where: { serverId: input.serverId, status: AgentTaskStatus.Pending },
+        }),
+        manager.count(AgentTaskEntity, { where: { status: AgentTaskStatus.Pending } }),
+        manager.count(AgentTaskEntity, {
+          where: {
+            serverId: input.serverId,
+            status: AgentTaskStatus.Pending,
+            admissionClass: 'safety',
+          },
+        }),
+        manager.count(AgentTaskEntity, {
+          where: { createdAt: MoreThanOrEqual(retentionWindowStart) },
+        }),
+        manager.count(AgentTaskEntity),
+      ],
+    );
     if (totalTasks >= MAX_AGENT_TASK_ROWS_HARD) {
       throw new ServiceUnavailableException({
         code: 'AGENT_TASK_STORAGE_CAPACITY_REACHED',
         message: 'Durable Agent task storage reached its fail-closed hard bound',
       });
     }
-    const retentionWindowLimit = admissionClass === 'safety'
-      ? MAX_AGENT_TASKS_PER_RETENTION_WINDOW
-      : admissionClass === 'reconciliation'
-        ? MAX_NON_SAFETY_AGENT_TASKS_PER_RETENTION_WINDOW
-        : MAX_NORMAL_AGENT_TASKS_PER_RETENTION_WINDOW;
+    const retentionWindowLimit =
+      admissionClass === 'safety'
+        ? MAX_AGENT_TASKS_PER_RETENTION_WINDOW
+        : admissionClass === 'reconciliation'
+          ? MAX_NON_SAFETY_AGENT_TASKS_PER_RETENTION_WINDOW
+          : MAX_NORMAL_AGENT_TASKS_PER_RETENTION_WINDOW;
     if (recentTasks >= retentionWindowLimit) {
       throw new ServiceUnavailableException({
         code: 'AGENT_TASK_RETENTION_WINDOW_CAPACITY_REACHED',
-        message: 'Agent task creation is temporarily rate-limited by the bounded result-retention window',
+        message:
+          'Agent task creation is temporarily rate-limited by the bounded result-retention window',
       });
     }
-    const serverLimit = admissionClass === 'safety'
-      ? MAX_ALL_TASKS_PER_SERVER
-      : admissionClass === 'reconciliation'
-        ? MAX_RECONCILIATION_TASKS_PER_SERVER
-        : MAX_PENDING_AGENT_TASKS_PER_SERVER;
-    const globalLimit = admissionClass === 'reconciliation'
+    const serverLimit =
+      admissionClass === 'safety'
+        ? MAX_ALL_TASKS_PER_SERVER
+        : admissionClass === 'reconciliation'
+          ? MAX_RECONCILIATION_TASKS_PER_SERVER
+          : MAX_PENDING_AGENT_TASKS_PER_SERVER;
+    const globalLimit =
+      admissionClass === 'reconciliation'
         ? MAX_RECONCILIATION_TASKS_GLOBAL
         : MAX_PENDING_AGENT_TASKS_GLOBAL;
-    const safetyFull = admissionClass === 'safety'
-      && serverSafety >= MAX_SAFETY_TASKS_PER_SERVER;
+    const safetyFull = admissionClass === 'safety' && serverSafety >= MAX_SAFETY_TASKS_PER_SERVER;
     if (
-      serverPending >= serverLimit
-      || (admissionClass !== 'safety' && globalPending >= globalLimit)
-      || safetyFull
+      serverPending >= serverLimit ||
+      (admissionClass !== 'safety' && globalPending >= globalLimit) ||
+      safetyFull
     ) {
       throw new ServiceUnavailableException({
         code: 'AGENT_TASK_QUEUE_FULL',
@@ -579,41 +632,62 @@ export class AgentTasksService implements OnModuleInit {
     // UUIDv7 preserves enqueue order when SQLite timestamps share the same
     // millisecond, so the per-server dispatcher has a deterministic FIFO tie-break.
     const taskId = uuidv7();
-    const resourceKeys = [...new Set(
-      input.resourceKeys?.length
-        ? input.resourceKeys
-        : [this.resourceKeys.generic(input.serverId, input.resourceType, input.resourceId)],
-    )].sort();
+    const resourceKeys = [
+      ...new Set(
+        input.resourceKeys?.length
+          ? input.resourceKeys
+          : [this.resourceKeys.generic(input.serverId, input.resourceType, input.resourceId)],
+      ),
+    ].sort();
     const payload = this.parsePayload(input);
-    const wirePayload = this.payloadCodec.forWirePayload(input.kind, payload);
-    this.assertWirePayloadSize(input.kind, wirePayload);
-    const payloadHash = this.payloadHash(input.kind, wirePayload);
-    await manager.save(AgentTaskEntity, manager.create(AgentTaskEntity, {
-      id: taskId,
-      kind: input.kind,
-      serverId: input.serverId,
-      resourceType: input.resourceType,
-      resourceId: input.resourceId,
-      requestedBy: input.requestedBy,
-      requestJson,
-      payloadJson: payload,
-      payloadHash,
-      admissionClass,
-      status: AgentTaskStatus.Pending,
-      failureStage: null,
-      agentResultJson: null,
-      dispatchAttemptCount: 0,
-      incompleteResultCount: 0,
-      retryWindowStartedAt: null,
-      nextDispatchAt: input.nextDispatchAt ?? null,
-      finalizerAttemptCount: 0,
-      finalizerRetryAt: null,
-      resultJson: null,
-      errorJson: null,
-      startedAt: null,
-      lastSentAt: null,
-      completedAt: null,
-    }));
+    let wirePayload;
+    try {
+      wirePayload = parseAndValidateAgentTaskWireIdentity(
+        input,
+        this.payloadCodec.forWirePayload(input.kind, payload),
+      );
+    } catch (error) {
+      const details = error instanceof Error ? error.message : String(error);
+      throw new BadRequestException({
+        code: details.startsWith('Agent task wire payload exceeds ')
+          ? 'AGENT_TASK_PAYLOAD_TOO_LARGE'
+          : 'INVALID_AGENT_TASK_IDENTITY',
+        message: details.startsWith('Agent task wire payload exceeds ')
+          ? details
+          : `Invalid durable identity for ${input.kind}`,
+        details,
+      });
+    }
+    const payloadHash = agentTaskPayloadHash(input.kind, wirePayload);
+    await manager.save(
+      AgentTaskEntity,
+      manager.create(AgentTaskEntity, {
+        id: taskId,
+        kind: input.kind,
+        serverId: input.serverId,
+        resourceType: input.resourceType,
+        resourceId: input.resourceId,
+        requestedBy: input.requestedBy,
+        requestJson,
+        payloadJson: payload,
+        payloadHash,
+        admissionClass,
+        status: AgentTaskStatus.Pending,
+        failureStage: null,
+        agentResultJson: null,
+        dispatchAttemptCount: 0,
+        incompleteResultCount: 0,
+        retryWindowStartedAt: null,
+        nextDispatchAt: input.nextDispatchAt ?? null,
+        finalizerAttemptCount: 0,
+        finalizerRetryAt: null,
+        resultJson: null,
+        errorJson: null,
+        startedAt: null,
+        lastSentAt: null,
+        completedAt: null,
+      }),
+    );
     try {
       await this.resourceLocks.insertForTask(manager, {
         taskId,
@@ -669,7 +743,8 @@ export class AgentTasksService implements OnModuleInit {
     if (pending.length > 1) {
       throw new ConflictException({
         code: 'AGENT_TASK_SUPERSEDE_OWNER_CONFLICT',
-        message: 'Multiple undispatched tasks claim the same logical resource; repair durable task ownership before replacing intent',
+        message:
+          'Multiple undispatched tasks claim the same logical resource; repair durable task ownership before replacing intent',
         serverId: input.serverId,
         resourceType: input.resourceType,
         resourceId: input.resourceId,
@@ -689,39 +764,55 @@ export class AgentTasksService implements OnModuleInit {
     return pending.map((task) => task.id);
   }
 
-  async getForUser(userId: string, taskId: string): Promise<AgentTaskDto> {
+  async getForUser(userId: string, taskId: string): Promise<UserAgentTaskDto> {
     const task = await this.tasksRepo.findOneBy({ id: taskId });
     if (!task || task.requestedBy !== userId) throw new NotFoundException('Task not found');
-    return this.toDto(task);
+    return toUserAgentTaskDto(task);
   }
 
-  async getForAdmin(taskId: string): Promise<AgentTaskDto> {
+  async getForAdmin(
+    taskId: string,
+    capabilities: ReadonlySet<Capability>,
+  ): Promise<AgentTaskDto> {
     const task = await this.tasksRepo.findOneBy({ id: taskId });
-    if (!task) throw new NotFoundException('Task not found');
-    return this.toDto(task);
+    if (!task || !canReadAdminTaskEvidence(task, capabilities)) {
+      throw new NotFoundException('Task not found');
+    }
+    return this.toDto(task, true, true);
   }
 
   async listForUser(
     userId: string,
     filters: { resourceType?: string; resourceId?: string; serverId?: string; limit?: number } = {},
-  ): Promise<AgentTaskDto[]> {
-    return this.list({ ...filters, requestedBy: userId });
+  ): Promise<UserAgentTaskDto[]> {
+    const rows = await this.listRows({ ...filters, requestedBy: userId });
+    return rows.map(toUserAgentTaskDto);
   }
 
   async listForAdmin(
+    capabilities: ReadonlySet<Capability>,
     filters: { resourceType?: string; resourceId?: string; serverId?: string; limit?: number } = {},
   ): Promise<AgentTaskDto[]> {
-    return this.list(filters);
+    const scopes = adminTaskEvidenceScopes(capabilities);
+    if (scopes.length === 0) return [];
+    const rows = await this.listRows(filters, true, scopes);
+    return rows.map((task) => this.toDto(task, false, true));
+  }
+
+  /** Capability-scoped consumers that need status but not physical evidence. */
+  async listPurposeSafe(
+    filters: { resourceType?: string; resourceId?: string; serverId?: string; limit?: number } = {},
+  ): Promise<UserAgentTaskDto[]> {
+    const rows = await this.listRows(filters);
+    return rows.map(toUserAgentTaskDto);
   }
 
   /** Return only the highest-priority due task for one physical Agent lane. */
-  async nextDueForDispatch(
-    serverId: string,
-    cutoff: Date,
-  ): Promise<AgentTaskEntity | null> {
+  async nextDueForDispatch(serverId: string, cutoff: Date): Promise<AgentTaskEntity | null> {
     // Select only identities for the invariant check. A corrupt database must
     // not make the dispatcher materialize an unbounded set of task payloads.
-    const inFlight = await this.tasksRepo.createQueryBuilder('task')
+    const inFlight = await this.tasksRepo
+      .createQueryBuilder('task')
       .select(['task.id'])
       .where('task.server_id = :serverId', { serverId })
       .andWhere('task.status = :pending', { pending: AgentTaskStatus.Pending })
@@ -739,72 +830,87 @@ export class AgentTasksService implements OnModuleInit {
     const now = new Date();
     const maxBackoffFuture = new Date(now.getTime() + 60_000);
     const maxSentFuture = new Date(now.getTime() + 5_000);
-    return this.tasksRepo.createQueryBuilder('task')
-      .where('task.status = :pending', { pending: AgentTaskStatus.Pending })
-      .andWhere('task.agent_result_json IS NULL')
-      .andWhere('task.server_id = :serverId', { serverId })
-      // Exactly one sent-but-unanswered task owns the physical slot. A staged
-      // DB finalizer or an incomplete task in backoff does not own that slot;
-      // durable resource locks still prevent unsafe overlapping effects.
-      .andWhere(`NOT EXISTS (
+    return (
+      this.tasksRepo
+        .createQueryBuilder('task')
+        .where('task.status = :pending', { pending: AgentTaskStatus.Pending })
+        .andWhere('task.agent_result_json IS NULL')
+        .andWhere('task.server_id = :serverId', { serverId })
+        // Exactly one sent-but-unanswered task owns the physical slot. A staged
+        // DB finalizer or an incomplete task in backoff does not own that slot;
+        // durable resource locks still prevent unsafe overlapping effects.
+        .andWhere(
+          `NOT EXISTS (
         SELECT 1 FROM agent_tasks active
         WHERE active.server_id = task.server_id
           AND active.status = :pending
           AND active.agent_result_json IS NULL
           AND active.last_sent_at IS NOT NULL
           AND active.id <> task.id
-      )`)
-      .andWhere(`(
+      )`,
+        )
+        .andWhere(
+          `(
         task.next_dispatch_at IS NULL
         OR task.next_dispatch_at <= :now
         OR task.next_dispatch_at > :maxBackoffFuture
-      )`, {
-        now,
-        maxBackoffFuture,
-      })
-      .andWhere(`(
+      )`,
+          {
+            now,
+            maxBackoffFuture,
+          },
+        )
+        .andWhere(
+          `(
         task.last_sent_at IS NULL
         OR task.last_sent_at <= :cutoff
         OR task.last_sent_at > :maxSentFuture
-      )`, { cutoff, maxSentFuture })
-      // Safety convergence must preempt ordinary retries. Otherwise an older
-      // incomplete intent can consume its uncertainty budget while the exact
-      // cleanup that would make it succeed waits behind it.
-      .orderBy(`CASE task.admission_class
+      )`,
+          { cutoff, maxSentFuture },
+        )
+        // Safety convergence must preempt ordinary retries. Otherwise an older
+        // incomplete intent can consume its uncertainty budget while the exact
+        // cleanup that would make it succeed waits behind it.
+        .orderBy(
+          `CASE task.admission_class
         WHEN 'safety' THEN 0
         WHEN 'reconciliation' THEN 1
         ELSE 2
-      END`, 'ASC')
-      .addOrderBy('task.created_at', 'ASC')
-      .addOrderBy('task.id', 'ASC')
-      .limit(1)
-      .getOne();
+      END`,
+          'ASC',
+        )
+        .addOrderBy('task.created_at', 'ASC')
+        .addOrderBy('task.id', 'ASC')
+        .limit(1)
+        .getOne()
+    );
   }
 
-  async markSentAndBuild(taskId: string): Promise<import('@nyabase/common').TaskExecutePayload | null> {
+  async markSentAndBuild(
+    taskId: string,
+  ): Promise<import('@nyabase/common').TaskExecutePayload | null> {
     const output = await runSerializedTransaction(this.dataSource, async (manager) => {
       const task = await manager.findOne(AgentTaskEntity, { where: { id: taskId } });
-      if (
-        !task
-        || task.status !== AgentTaskStatus.Pending
-        || task.agentResultJson !== null
-      ) return null;
+      if (!task || task.status !== AgentTaskStatus.Pending || task.agentResultJson !== null)
+        return null;
       const server = await manager.findOneBy(ServerEntity, { id: task.serverId });
       if (!server || server.status !== ServerStatus.Online) return null;
       const now = new Date();
       const maxBackoffFuture = now.getTime() + 60_000;
       if (
-        task.nextDispatchAt
-        && task.nextDispatchAt.getTime() > now.getTime()
-        && task.nextDispatchAt.getTime() <= maxBackoffFuture
-      ) return null;
+        task.nextDispatchAt &&
+        task.nextDispatchAt.getTime() > now.getTime() &&
+        task.nextDispatchAt.getTime() <= maxBackoffFuture
+      )
+        return null;
       const resendCutoff = now.getTime() - AGENT_TASK_RESEND_INTERVAL_MS;
       const maxSentFuture = now.getTime() + AGENT_TASK_RESEND_INTERVAL_MS;
       if (
-        task.lastSentAt
-        && task.lastSentAt.getTime() > resendCutoff
-        && task.lastSentAt.getTime() <= maxSentFuture
-      ) return null;
+        task.lastSentAt &&
+        task.lastSentAt.getTime() > resendCutoff &&
+        task.lastSentAt.getTime() <= maxSentFuture
+      )
+        return null;
       const physicalOwner = await manager.findOne(AgentTaskEntity, {
         where: {
           serverId: task.serverId,
@@ -814,11 +920,7 @@ export class AgentTasksService implements OnModuleInit {
         },
       });
       if (physicalOwner && physicalOwner.id !== task.id) return null;
-      const networkFreezeReason = await this.networkActivationFreezeReason(
-        manager,
-        task,
-        server,
-      );
+      const networkFreezeReason = await this.networkActivationFreezeReason(manager, task, server);
       if (networkFreezeReason) {
         await manager.update(AgentTaskEntity, task.id, {
           nextDispatchAt: new Date(now.getTime() + MIN_AGENT_TASK_DISPATCH_DEFER_MS),
@@ -856,10 +958,11 @@ export class AgentTasksService implements OnModuleInit {
     server: ServerEntity,
   ): Promise<string | null> {
     if (
-      task.kind !== AgentTaskKind.ContainerCreate
-      && task.kind !== AgentTaskKind.ContainerStart
-      && task.kind !== AgentTaskKind.ContainerRestart
-    ) return null;
+      task.kind !== AgentTaskKind.ContainerCreate &&
+      task.kind !== AgentTaskKind.ContainerStart &&
+      task.kind !== AgentTaskKind.ContainerRestart
+    )
+      return null;
     if (!server.macvlanCidr) return 'Target Server has no authoritative network identity';
     if (await networkHasUntrustedInventory(manager, server.macvlanCidr)) {
       return 'A Server on the shared macvlan has no trusted authoritative inventory';
@@ -891,8 +994,9 @@ export class AgentTasksService implements OnModuleInit {
       return `Container activation payload identity does not match ${task.resourceId}`;
     }
     if (
-      task.kind === AgentTaskKind.ContainerCreate
-      && parseAgentTaskPayload(AgentTaskKind.ContainerCreate, task.payloadJson).assignedIp !== claim.address
+      task.kind === AgentTaskKind.ContainerCreate &&
+      parseAgentTaskPayload(AgentTaskKind.ContainerCreate, task.payloadJson).assignedIp !==
+        claim.address
     ) {
       return `Container ${task.resourceId} create address does not match its exact active claim`;
     }
@@ -912,12 +1016,13 @@ export class AgentTasksService implements OnModuleInit {
     const outcome = await runSerializedTransaction(this.dataSource, async (manager) => {
       const task = await manager.findOne(AgentTaskEntity, { where: { id: taskId } });
       if (
-        !task
-        || task.status !== AgentTaskStatus.Pending
-        || task.agentResultJson !== null
-        || task.startedAt !== null
-        || task.lastSentAt !== null
-      ) return { staged: false, quarantineServerId: null as string | null };
+        !task ||
+        task.status !== AgentTaskStatus.Pending ||
+        task.agentResultJson !== null ||
+        task.startedAt !== null ||
+        task.lastSentAt !== null
+      )
+        return { staged: false, quarantineServerId: null as string | null };
       const taskError = {
         code,
         message: this.errorMessage(error).slice(0, 2048),
@@ -989,19 +1094,16 @@ export class AgentTasksService implements OnModuleInit {
   async deferDispatchFailure(taskId: string, error: unknown): Promise<void> {
     await runSerializedTransaction(this.dataSource, async (manager) => {
       const task = await manager.findOne(AgentTaskEntity, { where: { id: taskId } });
-      if (
-        !task
-        || task.status !== AgentTaskStatus.Pending
-        || task.agentResultJson !== null
-      ) return;
+      if (!task || task.status !== AgentTaskStatus.Pending || task.agentResultJson !== null) return;
       await manager.update(AgentTaskEntity, task.id, {
         dispatchAttemptCount: task.dispatchAttemptCount + 1,
         lastSentAt: null,
         nextDispatchAt: new Date(
-          Date.now() + Math.min(
-            60_000,
-            MIN_AGENT_TASK_DISPATCH_DEFER_MS * (2 ** Math.min(task.dispatchAttemptCount, 6)),
-          ),
+          Date.now() +
+            Math.min(
+              60_000,
+              MIN_AGENT_TASK_DISPATCH_DEFER_MS * 2 ** Math.min(task.dispatchAttemptCount, 6),
+            ),
         ),
         failureStage: null,
         errorJson: {
@@ -1032,11 +1134,12 @@ export class AgentTasksService implements OnModuleInit {
         take: 2,
       });
       if (owners.length < 2) return null;
-      if (!await manager.existsBy(ServerEntity, { id: serverId })) return null;
+      if (!(await manager.existsBy(ServerEntity, { id: serverId }))) return null;
       await manager.update(ServerEntity, serverId, {
         status: ServerStatus.AgentQuarantined,
         quarantineCode: AGENT_TASK_FAIL_STOP_QUARANTINE_CODE,
-        quarantineMessage: 'Multiple pending Agent tasks claimed the same physical execution slot; tasks and locks require explicit repair',
+        quarantineMessage:
+          'Multiple pending Agent tasks claimed the same physical execution slot; tasks and locks require explicit repair',
       });
       return owners.map((task) => task.id);
     });
@@ -1048,21 +1151,11 @@ export class AgentTasksService implements OnModuleInit {
     return true;
   }
 
-  private payloadHash(kind: string, payload: unknown): string {
-    return createHash('sha256')
-      .update(canonicalJson({ kind, payload }))
-      .digest('hex');
-  }
-
   private buildWirePayload(task: AgentTaskEntity): unknown {
     try {
+      validateDurableAgentTaskRowIdentity(task);
       const wireCandidate = this.payloadCodec.forDispatch(task);
-      const wirePayload = this.jsonValue(parseAgentTaskPayload(task.kind, wireCandidate));
-      this.assertWirePayloadSize(task.kind, wirePayload);
-      if (this.payloadHash(task.kind, wirePayload) !== task.payloadHash) {
-        throw new Error('wire payload hash does not match its durable identity');
-      }
-      return wirePayload;
+      return validateDurableAgentTaskIdentity(task, wireCandidate);
     } catch (error) {
       if (error instanceof PermanentTaskPayloadError) throw error;
       throw new PermanentTaskPayloadError(
@@ -1103,20 +1196,12 @@ export class AgentTasksService implements OnModuleInit {
   }
 
   private isNeverDispatched(task: AgentTaskEntity): boolean {
-    return task.status === AgentTaskStatus.Pending
-      && task.agentResultJson === null
-      && task.startedAt === null
-      && task.lastSentAt === null;
-  }
-
-  private assertWirePayloadSize(kind: string, payload: unknown): void {
-    const bytes = Buffer.byteLength(canonicalJson({ kind, payload }));
-    if (bytes > MAX_AGENT_TASK_WIRE_BYTES) {
-      throw new BadRequestException({
-        code: 'AGENT_TASK_PAYLOAD_TOO_LARGE',
-        message: `Agent task wire payload exceeds ${MAX_AGENT_TASK_WIRE_BYTES} bytes`,
-      });
-    }
+    return (
+      task.status === AgentTaskStatus.Pending &&
+      task.agentResultJson === null &&
+      task.startedAt === null &&
+      task.lastSentAt === null
+    );
   }
 
   private jsonValue(value: unknown): unknown {
@@ -1158,9 +1243,10 @@ export class AgentTasksService implements OnModuleInit {
       const wireCandidate = this.payloadCodec.forWirePayload(input.kind, storedCandidate);
       const parsedWire = this.jsonValue(parseAgentTaskPayload(input.kind, wireCandidate));
       if (
-        input.kind !== AgentTaskKind.RemoteFsEnsure
-        && input.kind !== AgentTaskKind.RemoteFsAbsent
-      ) return parsedWire;
+        input.kind !== AgentTaskKind.RemoteFsEnsure &&
+        input.kind !== AgentTaskKind.RemoteFsAbsent
+      )
+        return parsedWire;
 
       // RemoteFS credentials are encrypted at rest. Validate the decrypted wire
       // form, then restore only the encrypted secret into the schema-stripped
@@ -1184,7 +1270,7 @@ export class AgentTasksService implements OnModuleInit {
 
   private record(value: unknown): Record<string, unknown> | null {
     return value && typeof value === 'object' && !Array.isArray(value)
-      ? value as Record<string, unknown>
+      ? (value as Record<string, unknown>)
       : null;
   }
 
@@ -1194,18 +1280,19 @@ export class AgentTasksService implements OnModuleInit {
   }
 
   private isRetryableQuarantineFailure(task: AgentTaskEntity): boolean {
-    return task.status === AgentTaskStatus.Failed
-      && (
-        task.kind === AgentTaskKind.ContainerRuntimeAbsent
-        || RETRYABLE_QUARANTINE_ERROR_CODE_SET.has(this.errorCode(task.errorJson) ?? '')
-      );
+    return (
+      task.status === AgentTaskStatus.Failed &&
+      (task.kind === AgentTaskKind.ContainerRuntimeAbsent ||
+        RETRYABLE_QUARANTINE_ERROR_CODE_SET.has(this.errorCode(task.errorJson) ?? ''))
+    );
   }
 
   private async quarantineRetryAuthorityIds(
     manager: EntityManager,
     serverId: string,
   ): Promise<string[]> {
-    const rows = await manager.getRepository(ResourceLockEntity)
+    const rows = await manager
+      .getRepository(ResourceLockEntity)
       .createQueryBuilder('lock')
       .select('lock.task_id', 'taskId')
       .where('lock.server_id = :serverId', { serverId })
@@ -1223,22 +1310,26 @@ export class AgentTasksService implements OnModuleInit {
     manager: EntityManager,
     serverId: string,
   ): Promise<string[]> {
-    const rows = await manager.getRepository(AgentTaskEntity)
+    const rows = await manager
+      .getRepository(AgentTaskEntity)
       .createQueryBuilder('task')
       .select('task.id', 'taskId')
       .where('task.server_id = :serverId', { serverId })
       .andWhere('task.status = :status', { status: AgentTaskStatus.Failed })
-      .andWhere(`(
+      .andWhere(
+        `(
         task.kind = :runtimeAbsent
         OR (
           task.error_json IS NOT NULL
           AND json_valid(task.error_json) = 1
           AND json_extract(task.error_json, '$.code') IN (:...errorCodes)
         )
-      )`, {
-        runtimeAbsent: AgentTaskKind.ContainerRuntimeAbsent,
-        errorCodes: RETRYABLE_QUARANTINE_ERROR_CODES,
-      })
+      )`,
+        {
+          runtimeAbsent: AgentTaskKind.ContainerRuntimeAbsent,
+          errorCodes: RETRYABLE_QUARANTINE_ERROR_CODES,
+        },
+      )
       .orderBy('task.id', 'ASC')
       .limit(MAX_ALL_TASKS_PER_SERVER + 1)
       .getRawMany<{ taskId: string }>();
@@ -1252,7 +1343,8 @@ export class AgentTasksService implements OnModuleInit {
     manager: EntityManager,
     serverId: string,
   ): Promise<string[]> {
-    const rows = await manager.getRepository(AgentTaskEntity)
+    const rows = await manager
+      .getRepository(AgentTaskEntity)
       .createQueryBuilder('task')
       .select('task.id', 'taskId')
       .where('task.server_id = :serverId', { serverId })
@@ -1279,13 +1371,7 @@ export class AgentTasksService implements OnModuleInit {
 
   private assertRetryableStagedResult(task: AgentTaskEntity): void {
     try {
-      const evidence = this.record(task.agentResultJson);
-      const result = zTaskResultPayload.parse({
-        taskId: task.id,
-        payloadHash: task.payloadHash,
-        ...evidence,
-      });
-      if (result.status === 'incomplete') throw new Error('staged outcome is not terminal');
+      parseAndValidateStagedTerminalResult(task, () => this.payloadCodec.forDispatch(task));
     } catch (error) {
       throw new ConflictException({
         code: 'AGENT_QUARANTINE_STAGED_RESULT_CORRUPT',
@@ -1339,9 +1425,9 @@ export class AgentTasksService implements OnModuleInit {
         });
       }
       if (
-        payload.runtimeId !== claim.ownerId
-        || payload.serverId !== serverId
-        || payload.observedIp !== claim.address
+        payload.runtimeId !== claim.ownerId ||
+        payload.serverId !== serverId ||
+        payload.observedIp !== claim.address
       ) {
         throw new ConflictException({
           code: 'AGENT_QUARANTINE_CLEANUP_CLAIM_CORRUPT',
@@ -1386,8 +1472,8 @@ export class AgentTasksService implements OnModuleInit {
         claim.cleanupPayloadJson,
       ) as ContainerRuntimeAbsentTaskPayload;
       if (
-        claim.address !== claimPayload.observedIp
-        || !isDeepStrictEqual(this.runtimeCleanupIdentity(claimPayload), expectedIdentity)
+        claim.address !== claimPayload.observedIp ||
+        !isDeepStrictEqual(this.runtimeCleanupIdentity(claimPayload), expectedIdentity)
       ) {
         throw new ConflictException({
           code: 'AGENT_QUARANTINE_CLEANUP_IDENTITY_CONFLICT',
@@ -1408,7 +1494,11 @@ export class AgentTasksService implements OnModuleInit {
     };
   }
 
-  private toDto(task: AgentTaskEntity, includeDetails = true): AgentTaskDto {
+  private toDto(
+    task: AgentTaskEntity,
+    includeDetails = true,
+    includeDispatchEvidence = false,
+  ): AgentTaskDto {
     return {
       id: task.id,
       kind: task.kind,
@@ -1417,7 +1507,7 @@ export class AgentTasksService implements OnModuleInit {
       resourceId: task.resourceId,
       serverId: task.serverId,
       requestedBy: task.requestedBy,
-      request: includeDetails ? task.requestJson : null,
+      request: includeDetails ? this.requestForDto(task) : null,
       agentResult: includeDetails ? task.agentResultJson : null,
       result: includeDetails ? task.resultJson : null,
       error: task.errorJson,
@@ -1425,6 +1515,12 @@ export class AgentTasksService implements OnModuleInit {
       createdAt: task.createdAt.toISOString(),
       startedAt: task.startedAt?.toISOString() ?? null,
       lastSentAt: task.lastSentAt?.toISOString() ?? null,
+      ...(includeDispatchEvidence
+        ? {
+            payloadHash: task.payloadHash,
+            dispatchAttemptCount: task.dispatchAttemptCount,
+          }
+        : {}),
       completedAt: task.completedAt?.toISOString() ?? null,
       retentionUntil: task.completedAt
         ? new Date(task.completedAt.getTime() + AGENT_TASK_MIN_RETENTION_MS).toISOString()
@@ -1432,19 +1528,64 @@ export class AgentTasksService implements OnModuleInit {
     };
   }
 
-  private async list(filters: {
-    requestedBy?: string;
-    resourceType?: string;
-    resourceId?: string;
-    serverId?: string;
-    limit?: number;
-  }): Promise<AgentTaskDto[]> {
+  private requestForDto(task: AgentTaskEntity): unknown | null {
+    if (
+      task.kind !== AgentTaskKind.RemoteFsEnsure
+      && task.kind !== AgentTaskKind.RemoteFsAbsent
+    ) {
+      return task.requestJson;
+    }
+    return this.redactRemoteFsCredential(task.requestJson);
+  }
+
+  /** API history must not expose either plaintext or durable ciphertext. */
+  private redactRemoteFsCredential(value: unknown): unknown {
+    if (Array.isArray(value)) {
+      return value.map((entry) => this.redactRemoteFsCredential(entry));
+    }
+    if (!value || typeof value !== 'object') return value;
+    return Object.fromEntries(
+      Object.entries(value as Record<string, unknown>)
+        .filter(([key]) => key !== 'secret')
+        .map(([key, entry]) => [key, this.redactRemoteFsCredential(entry)]),
+    );
+  }
+
+  private async listRows(
+    filters: {
+      requestedBy?: string;
+      resourceType?: string;
+      resourceId?: string;
+      serverId?: string;
+      limit?: number;
+    },
+    includeDispatchEvidence = false,
+    adminScopes?: readonly AdminTaskEvidenceScope[],
+  ): Promise<AgentTaskEntity[]> {
     const limit = Math.max(1, Math.min(100, Math.trunc(filters.limit ?? 50)));
     const query = this.tasksRepo.createQueryBuilder('task');
-    if (filters.requestedBy) query.andWhere('task.requested_by = :requestedBy', { requestedBy: filters.requestedBy });
-    if (filters.resourceType) query.andWhere('task.resource_type = :resourceType', { resourceType: filters.resourceType });
-    if (filters.resourceId) query.andWhere('task.resource_id = :resourceId', { resourceId: filters.resourceId });
-    if (filters.serverId) query.andWhere('task.server_id = :serverId', { serverId: filters.serverId });
+    if (filters.requestedBy)
+      query.andWhere('task.requested_by = :requestedBy', { requestedBy: filters.requestedBy });
+    if (filters.resourceType)
+      query.andWhere('task.resource_type = :resourceType', { resourceType: filters.resourceType });
+    if (filters.resourceId)
+      query.andWhere('task.resource_id = :resourceId', { resourceId: filters.resourceId });
+    if (filters.serverId)
+      query.andWhere('task.server_id = :serverId', { serverId: filters.serverId });
+    if (adminScopes) {
+      if (adminScopes.length === 0) return [];
+      query.andWhere(new Brackets((scopeQuery) => {
+        adminScopes.forEach((scope, index) => {
+          const clause = `(task.kind IN (:...adminTaskKinds${index}) AND task.resource_type = :adminTaskResourceType${index})`;
+          const parameters = {
+            [`adminTaskKinds${index}`]: scope.kinds,
+            [`adminTaskResourceType${index}`]: scope.resourceType,
+          };
+          if (index === 0) scopeQuery.where(clause, parameters);
+          else scopeQuery.orWhere(clause, parameters);
+        });
+      }));
+    }
     const rows = await query
       // History is a bounded summary. Full request/outcome evidence is fetched
       // only by the single-task endpoint, avoiding a 100-row amplification of
@@ -1462,12 +1603,78 @@ export class AgentTasksService implements OnModuleInit {
         'task.createdAt',
         'task.startedAt',
         'task.lastSentAt',
+        ...(includeDispatchEvidence ? ['task.payloadHash', 'task.dispatchAttemptCount'] : []),
         'task.completedAt',
       ])
       .orderBy('task.created_at', 'DESC')
       .addOrderBy('task.id', 'DESC')
       .limit(limit)
       .getMany();
-    return rows.map((task) => this.toDto(task, false));
+    return rows;
   }
+}
+
+interface AdminTaskEvidenceScope {
+  capability: Capability;
+  resourceType: string;
+  kinds: readonly AgentTaskKind[];
+}
+
+/**
+ * Raw Agent task evidence is operational authority, not a generic admin
+ * ledger. Keep the kind/resource pair together so a corrupt or legacy row
+ * cannot cross domains merely by carrying a familiar resource type.
+ */
+const ADMIN_TASK_EVIDENCE_SCOPES: readonly AdminTaskEvidenceScope[] = [
+  {
+    capability: Capability.ManageContainersAny,
+    resourceType: AGENT_TASK_RESOURCE_TYPE_BY_KIND[AgentTaskKind.ContainerCreate],
+    kinds: [
+      AgentTaskKind.ContainerCreate,
+      AgentTaskKind.ContainerStart,
+      AgentTaskKind.ContainerStop,
+      AgentTaskKind.ContainerRestart,
+      AgentTaskKind.ContainerDelete,
+      AgentTaskKind.ContainerSshEnsure,
+    ],
+  },
+  {
+    capability: Capability.ManageContainersAny,
+    resourceType: AGENT_TASK_RESOURCE_TYPE_BY_KIND[AgentTaskKind.DataDirEnsure],
+    kinds: [AgentTaskKind.DataDirEnsure, AgentTaskKind.DataDirAbsent],
+  },
+  {
+    capability: Capability.ManageServers,
+    resourceType: AGENT_TASK_RESOURCE_TYPE_BY_KIND[AgentTaskKind.ContainerRuntimeAbsent],
+    kinds: [AgentTaskKind.ContainerRuntimeAbsent],
+  },
+  {
+    capability: Capability.ManageServers,
+    resourceType: AGENT_TASK_RESOURCE_TYPE_BY_KIND[AgentTaskKind.RemoteFsEnsure],
+    kinds: [AgentTaskKind.RemoteFsEnsure, AgentTaskKind.RemoteFsAbsent],
+  },
+  {
+    capability: Capability.ManageGrants,
+    resourceType: AGENT_TASK_RESOURCE_TYPE_BY_KIND[AgentTaskKind.QuotaEnsure],
+    kinds: [AgentTaskKind.QuotaEnsure],
+  },
+  {
+    capability: Capability.ManageImages,
+    resourceType: AGENT_TASK_RESOURCE_TYPE_BY_KIND[AgentTaskKind.ImageEnsurePresent],
+    kinds: [AgentTaskKind.ImageEnsurePresent, AgentTaskKind.ImageEnsureAbsent],
+  },
+];
+
+function adminTaskEvidenceScopes(
+  capabilities: ReadonlySet<Capability>,
+): readonly AdminTaskEvidenceScope[] {
+  return ADMIN_TASK_EVIDENCE_SCOPES.filter((scope) => capabilities.has(scope.capability));
+}
+
+function canReadAdminTaskEvidence(
+  task: Pick<AgentTaskEntity, 'kind' | 'resourceType'>,
+  capabilities: ReadonlySet<Capability>,
+): boolean {
+  return adminTaskEvidenceScopes(capabilities).some((scope) =>
+    scope.resourceType === task.resourceType && scope.kinds.includes(task.kind));
 }

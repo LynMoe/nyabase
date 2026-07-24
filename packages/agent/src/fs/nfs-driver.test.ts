@@ -34,6 +34,36 @@ describe('NfsDriver', () => {
     ], 30_000);
   });
 
+  it('excludes the mount-helper retry policy from physical identity', () => {
+    const driver = new NfsDriver(vi.fn());
+    const requested = spec('soft,proto=tcp,timeo=1,retrans=1,retry=0');
+
+    expect(driver.matchesCurrent(requested, {
+      src: '10.0.0.10:/exports/project',
+      opts: 'rw,vers=4.2,soft,proto=tcp,timeo=1,retrans=1',
+    })).toBe(true);
+    expect(driver.matchesCurrent(requested, {
+      src: '10.0.0.10:/exports/project',
+      opts: 'rw,vers=4.2,proto=tcp,timeo=1,retrans=1',
+    })).toBe(false);
+  });
+
+  it('requires exact read/write semantics and rejects contradictory current options', () => {
+    const driver = new NfsDriver(vi.fn());
+    expect(driver.matchesCurrent(spec(''), {
+      src: '10.0.0.10:/exports/project',
+      opts: 'ro,vers=4.2',
+    })).toBe(false);
+    expect(driver.matchesCurrent(spec('ro'), {
+      src: '10.0.0.10:/exports/project',
+      opts: 'ro,vers=4.2',
+    })).toBe(true);
+    expect(driver.matchesCurrent(spec('ro'), {
+      src: '10.0.0.10:/exports/project',
+      opts: 'ro,rw,vers=4.2',
+    })).toBe(false);
+  });
+
   it('kills the complete isolated process group on timeout', async () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), 'nyabase-nfs-timeout-'));
     temporaryRoots.push(root);

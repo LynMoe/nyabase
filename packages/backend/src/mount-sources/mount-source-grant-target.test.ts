@@ -24,4 +24,13 @@ describe('mount source grant target contract', () => {
       sourceId: 'remote-a',
     });
   });
+
+  it('bounds every route-derived resource identity', () => {
+    expect(() => parseMountSourceGrantTarget('local', 'x'.repeat(129), 'server-a')).toThrow();
+    expect(() => parseMountSourceGrantTarget('local', 'disk-a', 'x'.repeat(129))).toThrow();
+    expect(() => parseMountSourceGrantTarget('remote', 'x'.repeat(129), undefined)).toThrow();
+    expect(() => parseMountSourceGrantTarget('local', '../disk-a', 'server-a')).toThrow();
+    expect(() => parseMountSourceGrantTarget('local', 'disk-a', 'server/a')).toThrow();
+    expect(() => parseMountSourceGrantTarget('remote', '\nremote-a', undefined)).toThrow();
+  });
 });

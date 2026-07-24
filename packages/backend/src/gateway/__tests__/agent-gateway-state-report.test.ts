@@ -23,6 +23,7 @@ import { WebSocket } from 'ws';
 import {
   AgentGateway,
   MAX_AGENT_PENDING_INBOUND_BYTES_GLOBAL,
+  SERVER_DELETE_INVENTORY_PROOF_TIMEOUT_MS,
 } from '../agent-gateway.js';
 import { AgentRpcTransportError } from '../agent-session.js';
 import { ServerEntity } from '../../entities/server.entity.js';
@@ -35,7 +36,12 @@ const RUNTIME_SPEC_HASH = 'c'.repeat(64);
 
 type TestGateway = Pick<AgentGateway, 'stateCache' | 'rpc' | 'notify'> & {
   onHello(server: ServerEntity, payload: unknown, session?: unknown): Promise<void>;
-  onStateReport(server: ServerEntity, payload: StateReportPayload, session?: unknown): Promise<void>;
+  onStateReport(
+    server: ServerEntity,
+    payload: StateReportPayload,
+    session?: unknown,
+    receivedAt?: number,
+  ): Promise<void>;
   onContainerEvent(server: ServerEntity, payload: { serverId: string; runtimeId: string; action: string }): Promise<void>;
   handleMessage(
     session: unknown,
@@ -51,7 +57,15 @@ type TestGateway = Pick<AgentGateway, 'stateCache' | 'rpc' | 'notify'> & {
   dispatchReadyServerIds(): string[];
   sendTask(serverId: string, payload: TaskExecutePayload): void;
   fenceSession(serverId: string, reason: string): Promise<void>;
-  runWithSessionFence<T>(serverId: string, reason: string, work: () => Promise<T>): Promise<T>;
+  runWithSessionFence<T>(
+    serverId: string,
+    reason: string,
+    work: () => Promise<T>,
+    options?: {
+      requireBoundServerEmptyInventory?: boolean;
+      authorizeAndClaim?: (claim: () => void) => Promise<void>;
+    },
+  ): Promise<T>;
 };
 
 function makeContainer(runtimeId: string): ContainerSnapshot {
@@ -701,8 +715,8 @@ describe('AgentGateway state cache runtime readiness', () => {
     const snapshot = gateway.stateCache.get('server-a');
     expect(snapshot?.runtimeReady).toBe(true);
     expect(snapshot?.lastFullReportAt).toBe(1_780_000_000_000);
-    expect(snapshot?.lastUpdated).toBe(1_780_000_000_000);
     expect(snapshot?.lastFullReportReceivedAt).toEqual(expect.any(Number));
+    expect(snapshot?.lastUpdated).toBe(snapshot?.lastFullReportReceivedAt);
     expect(snapshot?.containers.get('docker-a')).toEqual(report.containers[0]);
     expect(snapshot?.dataDirs).toEqual(report.dataDirs);
     expect(snapshot?.xfsProjects).toEqual([
@@ -876,6 +890,194 @@ describe('AgentGateway state cache runtime readiness', () => {
       expect.any(String),
     );
     expect(gateway.stateCache.get('server-a')?.runtimeReady).toBe(true);
+  });
+
+  it('accepts a remote DataDir only when its exact active assignment is mounted at the canonical path', async () => {
+    const { gateway, remoteFsAssignmentsRepo, remoteFsMountsRepo } = makeGateway();
+    activeSession(gateway, 'server-a');
+    remoteFsAssignmentsRepo.find.mockResolvedValue([{
+      remoteFsMountId: 'remote-a', serverId: 'server-a', desiredState: 'active',
+    }]);
+    remoteFsMountsRepo.find.mockResolvedValue([{
+      id: 'remote-a', hostMountPoint: '/mnt/remote-fs/remote-a', desiredState: 'active',
+    }]);
+    const report = makeReport({
+      containers: [],
+      xfsProjects: [],
+      disks: [],
+      dataDirs: [{
+        sourceKind: 'remote',
+        sourceId: 'remote-a',
+        resourceId: 'data-a',
+        hostPath: '/mnt/remote-fs/remote-a/.nyabase/dirs/data-a/data',
+      }],
+    });
+    const validate = gateway as unknown as {
+      validStateReportInventory(serverId: string, payload: StateReportPayload): Promise<boolean>;
+    };
+
+    await expect(validate.validStateReportInventory('server-a', report)).resolves.toBe(true);
+    remoteFsAssignmentsRepo.find.mockResolvedValue([]);
+    await expect(validate.validStateReportInventory('server-a', report)).resolves.toBe(false);
+  });
+
+  it.each(['ensuring', 'removing'] as const)(
+    'accepts the exact mounted inventory while its durable assignment is %s',
+    async (desiredState) => {
+      const { gateway, remoteFsAssignmentsRepo, remoteFsMountsRepo } = makeGateway();
+      activeSession(gateway, 'server-a');
+      remoteFsAssignmentsRepo.find.mockResolvedValue([{
+        remoteFsMountId: 'remote-a', serverId: 'server-a', desiredState,
+      }]);
+      remoteFsMountsRepo.find.mockResolvedValue([{
+        id: 'remote-a', hostMountPoint: '/mnt/remote-fs/remote-a', desiredState: 'active',
+      }]);
+      const report = makeReport({
+        containers: [],
+        xfsProjects: [],
+        disks: [],
+        dataDirs: [],
+        remoteFsMounts: [{
+          id: 'remote-a',
+          hostMountPoint: '/mnt/remote-fs/remote-a',
+          status: 'mounted',
+          lastCheckedAt: 1,
+        }],
+      });
+      const validate = gateway as unknown as {
+        validStateReportInventory(serverId: string, payload: StateReportPayload): Promise<boolean>;
+      };
+
+      await expect(validate.validStateReportInventory('server-a', report)).resolves.toBe(true);
+      expect(remoteFsAssignmentsRepo.find).toHaveBeenCalledWith({
+        where: { serverId: 'server-a', remoteFsMountId: expect.anything() },
+      });
+      remoteFsAssignmentsRepo.find.mockResolvedValue([]);
+      await expect(validate.validStateReportInventory('server-a', report)).resolves.toBe(false);
+    },
+  );
+
+  it('does not quarantine or retire a dispatch-ready Agent for a removing mount report', async () => {
+    const {
+      gateway,
+      remoteFsAssignmentsRepo,
+      remoteFsMountsRepo,
+      runtimeDriftReconciler,
+      serversRepo,
+      proxySnapshots,
+    } = makeGateway();
+    const server = { id: 'server-a', name: 'server-a' } as ServerEntity;
+    const session = activeSession(gateway, 'server-a');
+    session.markBootstrapReady();
+    session.markDispatchReady();
+    remoteFsAssignmentsRepo.find.mockImplementation(async (
+      options?: { where?: { desiredState?: string } },
+    ) =>
+      options?.where?.desiredState === 'active'
+        ? []
+        : [{
+            remoteFsMountId: 'remote-a', serverId: 'server-a', desiredState: 'removing',
+          }]);
+    remoteFsMountsRepo.find.mockResolvedValue([{
+      id: 'remote-a', hostMountPoint: '/mnt/remote-fs/remote-a', desiredState: 'active',
+    }]);
+    const report = makeReport({
+      containers: [],
+      xfsProjects: [],
+      disks: [],
+      dataDirs: [],
+      remoteFsMounts: [{
+        id: 'remote-a',
+        hostMountPoint: '/mnt/remote-fs/remote-a',
+        status: 'mounted',
+        lastCheckedAt: 1,
+      }],
+    });
+
+    await gateway.handleMessage(session, server, wsMessage('stateReport', report));
+
+    expect(session.ws.terminate).not.toHaveBeenCalled();
+    expect(serversRepo.update).not.toHaveBeenCalledWith('server-a', expect.objectContaining({
+      status: ServerStatus.AgentQuarantined,
+    }));
+    expect(proxySnapshots.blockServer).not.toHaveBeenCalled();
+    expect(runtimeDriftReconciler.reconcile).toHaveBeenCalledWith(
+      'server-a',
+      [],
+      expect.any(String),
+    );
+    expect(gateway.dispatchReadyServerIds()).toContain('server-a');
+  });
+
+  it.each(['ensuring', 'removing', 'failed'] as const)(
+    'rejects a remote DataDir while its durable assignment is %s',
+    async (desiredState) => {
+      const { gateway, remoteFsAssignmentsRepo, remoteFsMountsRepo } = makeGateway();
+      remoteFsAssignmentsRepo.find.mockResolvedValue([{
+        remoteFsMountId: 'remote-a', serverId: 'server-a', desiredState,
+      }]);
+      remoteFsMountsRepo.find.mockResolvedValue([{
+        id: 'remote-a', hostMountPoint: '/mnt/remote-fs/remote-a', desiredState: 'active',
+      }]);
+      const report = makeReport({
+        containers: [],
+        xfsProjects: [],
+        disks: [],
+        dataDirs: [{
+          sourceKind: 'remote',
+          sourceId: 'remote-a',
+          resourceId: 'data-a',
+          hostPath: '/mnt/remote-fs/remote-a/.nyabase/dirs/data-a/data',
+        }],
+      });
+      const validate = gateway as unknown as {
+        validStateReportInventory(serverId: string, payload: StateReportPayload): Promise<boolean>;
+      };
+
+      await expect(validate.validStateReportInventory('server-a', report)).resolves.toBe(false);
+    },
+  );
+
+  it.each([
+    ['missing status', { remoteFsMounts: [] }],
+    ['unmounted status', {
+      remoteFsMounts: [{
+        id: 'remote-a', hostMountPoint: '/mnt/remote-fs/remote-a', status: 'error' as const,
+        error: 'wrong source', lastCheckedAt: 1,
+      }],
+    }],
+    ['noncanonical data path', {
+      dataDirs: [{
+        sourceKind: 'remote' as const,
+        sourceId: 'remote-a',
+        resourceId: 'data-a',
+        hostPath: '/mnt/remote-fs/remote-a/other/data',
+      }],
+    }],
+  ])('rejects a remote DataDir with %s', async (_label, overrides) => {
+    const { gateway, remoteFsAssignmentsRepo, remoteFsMountsRepo } = makeGateway();
+    activeSession(gateway, 'server-a');
+    remoteFsAssignmentsRepo.find.mockResolvedValue([{
+      remoteFsMountId: 'remote-a', serverId: 'server-a', desiredState: 'active',
+    }]);
+    remoteFsMountsRepo.find.mockResolvedValue([{
+      id: 'remote-a', hostMountPoint: '/mnt/remote-fs/remote-a', desiredState: 'active',
+    }]);
+    const baseDataDir = {
+      sourceKind: 'remote' as const,
+      sourceId: 'remote-a',
+      resourceId: 'data-a',
+      hostPath: '/mnt/remote-fs/remote-a/.nyabase/dirs/data-a/data',
+    };
+    const report = makeReport({
+      containers: [], xfsProjects: [], disks: [], dataDirs: [baseDataDir],
+      ...overrides,
+    });
+    const validate = gateway as unknown as {
+      validStateReportInventory(serverId: string, payload: StateReportPayload): Promise<boolean>;
+    };
+
+    await expect(validate.validStateReportInventory('server-a', report)).resolves.toBe(false);
   });
 
   it.each([
@@ -2148,6 +2350,160 @@ describe('AgentGateway authenticated bootstrap readiness', () => {
 });
 
 describe('AgentGateway explicit session fencing', () => {
+  it('deletes only after a matching post-fence full report commits on the same session', async () => {
+    const { gateway, serversRepo } = makeGateway();
+    serversRepo.findOneBy.mockResolvedValue({
+      id: 'server-a',
+      hostFingerprint: HOST_FINGERPRINT,
+      agentConfigFingerprint: CONFIG_FINGERPRINT,
+      macvlanCidr: '10.0.0.0/24',
+      macvlanGateway: '10.0.0.1',
+      status: ServerStatus.Online,
+    });
+    const session = activeSession(gateway, 'server-a');
+    session.markDispatchReady();
+    session.send.mockReturnValue(true);
+    const existing = gateway.stateCache.get('server-a')!;
+    gateway.stateCache.set('server-a', {
+      ...existing,
+      runtimeReady: true,
+      containers: new Map(),
+      dataDirs: [],
+      xfsProjects: [],
+      unknownXfsNumericIds: [],
+      remoteFsMounts: [],
+    });
+    await gateway.onStateReport(
+      { id: 'server-a' } as ServerEntity,
+      makeReport({
+        sequence: 1,
+        containers: [],
+        dataDirs: [],
+        xfsProjects: [],
+        disks: [],
+        localImages: [],
+        remoteFsMounts: [],
+      }),
+      session,
+      Date.now(),
+    );
+    const work = vi.fn().mockResolvedValue('deleted');
+
+    const deletion = gateway.runWithSessionFence(
+      'server-a',
+      'Server deletion started',
+      work,
+      { requireBoundServerEmptyInventory: true },
+    );
+    await vi.waitFor(() => expect(session.send).toHaveBeenCalledWith(expect.objectContaining({
+      kind: 'reconcile',
+      payload: expect.objectContaining({
+        serverId: 'server-a',
+        proofNonce: expect.stringMatching(/^[a-f0-9]{64}$/),
+      }),
+    })));
+    const challenge = session.send.mock.calls[0]![0] as {
+      payload: { proofNonce: string };
+    };
+    expect(gateway.dispatchReadyServerIds()).toEqual([]);
+    gateway.sendTask('server-a', {
+      taskId: 'task-a',
+      kind: AgentTaskKind.ImageEnsurePresent,
+      payloadHash: TASK_HASH,
+      payload: { imageId: 'image-a', dockerImage: 'registry.example/image:a' },
+    });
+    expect(session.send).toHaveBeenCalledTimes(1);
+
+    const empty = {
+      containers: [], dataDirs: [], xfsProjects: [], disks: [], localImages: [], remoteFsMounts: [],
+    };
+    await gateway.onStateReport(
+      { id: 'server-a' } as ServerEntity,
+      makeReport({
+        sequence: 1,
+        reconcileProofNonce: challenge.payload.proofNonce,
+        ...empty,
+      }),
+      session,
+      Date.now(),
+    );
+    expect(work).not.toHaveBeenCalled();
+    await gateway.onStateReport(
+      { id: 'server-a' } as ServerEntity,
+      makeReport({ sequence: 2, reconcileProofNonce: 'b'.repeat(64), ...empty }),
+      session,
+      Date.now(),
+    );
+    expect(work).not.toHaveBeenCalled();
+    expect(session.ws.terminate).not.toHaveBeenCalled();
+
+    await gateway.onStateReport(
+      { id: 'server-a' } as ServerEntity,
+      makeReport({
+        sequence: 3,
+        reconcileProofNonce: challenge.payload.proofNonce,
+        ...empty,
+      }),
+      session,
+      Date.now(),
+    );
+
+    await expect(deletion).resolves.toBe('deleted');
+    expect(work).toHaveBeenCalledOnce();
+    expect(session.ws.terminate).toHaveBeenCalledOnce();
+    expect((gateway as unknown as { sessions: Map<string, unknown> }).sessions.has('server-a'))
+      .toBe(false);
+  });
+
+  it('fails closed when an old Agent does not echo the deletion proof challenge', async () => {
+    vi.useFakeTimers();
+    try {
+      const { gateway, serversRepo } = makeGateway();
+      serversRepo.findOneBy.mockResolvedValue({
+        id: 'server-a',
+        hostFingerprint: HOST_FINGERPRINT,
+        agentConfigFingerprint: CONFIG_FINGERPRINT,
+        macvlanCidr: '10.0.0.0/24',
+        macvlanGateway: '10.0.0.1',
+        status: ServerStatus.Online,
+      });
+      const session = activeSession(gateway, 'server-a');
+      session.markDispatchReady();
+      session.send.mockReturnValue(true);
+      gateway.stateCache.set('server-a', {
+        ...gateway.stateCache.get('server-a')!,
+        runtimeReady: true,
+        containers: new Map(),
+        dataDirs: [],
+        xfsProjects: [],
+        unknownXfsNumericIds: [],
+        remoteFsMounts: [],
+      });
+      const work = vi.fn();
+      const deletion = gateway.runWithSessionFence(
+        'server-a',
+        'Server deletion started',
+        work,
+        { requireBoundServerEmptyInventory: true },
+      );
+      const rejected = expect(deletion).rejects.toMatchObject({
+        response: expect.objectContaining({ code: 'SERVER_DELETE_INVENTORY_PROOF_TIMEOUT' }),
+      });
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(session.send).toHaveBeenCalledOnce();
+
+      await vi.advanceTimersByTimeAsync(SERVER_DELETE_INVENTORY_PROOF_TIMEOUT_MS);
+      await rejected;
+
+      expect(work).not.toHaveBeenCalled();
+      expect(session.ws.terminate).not.toHaveBeenCalled();
+      expect(gateway.dispatchReadyServerIds()).toEqual(['server-a']);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('does not invent inventory quarantine when a post-hello pre-report socket is retired', async () => {
     const { gateway, serversRepo } = makeGateway();
     const session = activeSession(gateway, 'server-a') as ReturnType<typeof makeSession>;
@@ -2259,6 +2615,31 @@ describe('AgentGateway explicit session fencing', () => {
     await expect(gateway.runWithSessionFence('server-a', 'second fence', secondWork))
       .resolves.toBe('recovered');
     expect(secondWork).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not claim, retire, or run work when current authority rejects the fence', async () => {
+    const { gateway } = makeGateway();
+    const session = activeSession(gateway, 'server-a');
+    session.markDispatchReady();
+    const work = vi.fn().mockResolvedValue('must-not-run');
+    const claim = vi.fn();
+
+    await expect(gateway.runWithSessionFence(
+      'server-a',
+      'revoked fence',
+      work,
+      {
+        authorizeAndClaim: async (claimFence) => {
+          claim.mockImplementation(claimFence);
+          throw new Error('authority revoked');
+        },
+      },
+    )).rejects.toThrow('authority revoked');
+
+    expect(claim).not.toHaveBeenCalled();
+    expect(work).not.toHaveBeenCalled();
+    expect(session.ws.terminate).not.toHaveBeenCalled();
+    expect(gateway.dispatchReadyServerIds()).toEqual(['server-a']);
   });
 });
 

@@ -9,6 +9,7 @@ import { MountSourcesService } from './mount-sources.service.js';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard.js';
 import { CurrentUser } from '../auth/decorators/current-user.decorator.js';
 import { UserEntity } from '../entities/user.entity.js';
+import { zResourceIdentity } from '@nyabase/common';
 
 @Controller('mount-sources')
 @UseGuards(JwtAuthGuard)
@@ -22,6 +23,6 @@ export class MountSourcesController {
   @Get()
   async list(@CurrentUser() user: UserEntity, @Query('serverId') serverId: string) {
     if (!serverId) throw new BadRequestException('serverId is required');
-    return this.mountSourcesService.listForUser(user.id, serverId);
+    return this.mountSourcesService.listForUser(user.id, zResourceIdentity.parse(serverId));
   }
 }

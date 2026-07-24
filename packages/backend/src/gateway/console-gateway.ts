@@ -164,6 +164,16 @@ export class ConsoleGateway {
           jwtPayload = this.jwtService.verify<JwtPayload>(msg.token, {
             secret: this.config.get<string>('auth.jwtSecret'),
           });
+          if (
+            typeof jwtPayload.sub !== 'string'
+            || jwtPayload.sub.length === 0
+            || !Number.isInteger(jwtPayload.ver)
+            || jwtPayload.ver < 0
+            || !Number.isInteger(jwtPayload.exp)
+            || jwtPayload.exp! <= 0
+          ) {
+            throw new Error('Invalid token claims');
+          }
         } catch {
           ws.close(4003, 'Invalid token');
           return finishAdmission();
@@ -193,7 +203,11 @@ export class ConsoleGateway {
         // the query settles even if the transport closes in the meantime.
         let initiallyAuthorized = false;
         try {
-          initiallyAuthorized = await this.isSessionAuthorized(sessionInfo);
+          initiallyAuthorized = await this.isSessionAuthorized(
+            sessionInfo,
+            jwtPayload.ver,
+            jwtPayload.exp! * 1_000,
+          );
         } catch {
           // Database/capacity failure is fail-closed for an interactive shell.
         }
@@ -231,7 +245,7 @@ export class ConsoleGateway {
         const checkActiveAuthorization = (): Promise<boolean> => {
           if (authorizationInFlight) return authorizationInFlight;
           const check = this.sessionRegistry.get(sessionId) === sessionInfo
-            ? this.isSessionAuthorized(sessionInfo)
+            ? this.isSessionAuthorized(sessionInfo, jwtPayload.ver, jwtPayload.exp! * 1_000)
             : Promise.resolve(false);
           const tracked = check.finally(() => {
             if (authorizationInFlight === tracked) authorizationInFlight = null;
@@ -371,13 +385,18 @@ export class ConsoleGateway {
     });
   }
 
-  private async isSessionAuthorized(info: ExecSessionInfo): Promise<boolean> {
+  private async isSessionAuthorized(
+    info: ExecSessionInfo,
+    authVersion: number,
+    tokenExpiresAtMs: number,
+  ): Promise<boolean> {
+    if (!Number.isFinite(tokenExpiresAtMs) || Date.now() >= tokenExpiresAtMs) return false;
     if (this.activeAuthorizationChecks >= MAX_CONCURRENT_CONSOLE_AUTH_CHECKS) {
       throw new Error('Console authorization capacity reached');
     }
     this.activeAuthorizationChecks += 1;
     try {
-      return await this.sessionAuthorization.isAuthorized(info);
+      return await this.sessionAuthorization.isAuthorized(info, authVersion);
     } finally {
       this.activeAuthorizationChecks -= 1;
     }

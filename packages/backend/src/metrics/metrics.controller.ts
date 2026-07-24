@@ -1,12 +1,15 @@
 import {
   Controller, Get, Param, Query, UseGuards,
-  NotFoundException,
+  ForbiddenException, NotFoundException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard.js';
 import { CurrentUser } from '../auth/decorators/current-user.decorator.js';
-import { AccessResolverService } from '../access/access-resolver.service.js';
+import {
+  AccessResolverService,
+  type ResolvedServerGrant,
+} from '../access/access-resolver.service.js';
 import { UsersService } from '../users/users.service.js';
 import { ContainerEntity } from '../entities/container.entity.js';
 import { UserEntity } from '../entities/user.entity.js';
@@ -14,10 +17,15 @@ import {
   HostMetricsDto, GpuMetricsDto, UserMetricsDto, ContainerMetricsDto,
   HostDiskCapacity, HostDiskIo, HostNetIo,
   UserMetrics, ContainerMetrics, type MetricSeries,
-  LABEL,
+  GpuGrantMode, LABEL, MAX_AGENT_GPU_DEVICES,
+  type DiskInfo,
 } from '@nyabase/common';
 import { MetricsQueryService, emptySeries, parseRange } from './metrics-query.service.js';
 import { AgentGateway } from '../gateway/agent-gateway.js';
+import {
+  dataDiskDisplayName,
+  publicDataDiskDisplayName,
+} from '../mount-sources/utils.js';
 
 interface ContainerMetricIdentity {
   containerId: string;
@@ -50,8 +58,10 @@ export class MetricsController {
   // ---------------------------------------------------------------------------
 
   private async ensureAccess(userId: string, serverId: string): Promise<void> {
-    const accessible = await this.accessResolver.listAccessibleServers(userId);
-    if (!accessible.includes(serverId)) {
+    try {
+      await this.accessResolver.runWithActiveServerAccess(userId, serverId, async () => undefined);
+    } catch (error) {
+      if (!(error instanceof ForbiddenException)) throw error;
       throw new NotFoundException('Server not found');
     }
   }
@@ -66,13 +76,27 @@ export class MetricsController {
     @CurrentUser() user: UserEntity,
     @Query('range') range: string,
   ): Promise<HostMetricsDto> {
-    await this.ensureAccess(user.id, serverId);
-    return this.hostMetricsFor(serverId, range);
+    // Capture one physical identity snapshot, then authorize every entry from
+    // the same current database transaction. A cached mount grant or a disk
+    // replacement at the same logical id must not widen this projection.
+    const inventory = [...(this.agentGateway.stateCache.get(serverId)?.disks ?? [])];
+    const visibleDisks = await this.currentVisibleLocalDisks(user.id, serverId, inventory);
+    return this.hostMetricsFor(serverId, range, {
+      includePhysicalTopology: false,
+      diskInfos: visibleDisks,
+    });
   }
 
-  protected async hostMetricsFor(serverId: string, range: string): Promise<HostMetricsDto> {
+  protected async hostMetricsFor(
+    serverId: string,
+    range: string,
+    options: {
+      includePhysicalTopology: boolean;
+      diskInfos?: readonly DiskInfo[];
+    },
+  ): Promise<HostMetricsDto> {
     const { start, end, step } = parseRange(range);
-    const srv = `server="${serverId}"`;
+    const srv = promqlLabelMatcher('server', serverId);
 
     const w = `${step}s`;
     const [cpu, memUsed, memTotal, load1, diskUsedRaw, diskTotalRaw, diskIoRaw, netIoRaw] =
@@ -93,18 +117,55 @@ export class MetricsController {
         ),
       ]);
 
-    const diskInfos = this.agentGateway.stateCache.get(serverId)?.disks ?? [];
+    const diskInfos = options.diskInfos
+      ?? (this.agentGateway.stateCache.get(serverId)?.disks ?? []);
     const disks: HostDiskCapacity[] = diskInfos.map((d) => ({
       diskId: d.diskId,
-      mountPoint: d.mountPoint,
+      displayName: options.includePhysicalTopology
+        ? dataDiskDisplayName(d.mountPoint, d.label)
+        : publicDataDiskDisplayName(d.diskId, d.label),
+      ...(options.includePhysicalTopology ? { mountPoint: d.mountPoint } : {}),
       used: diskUsedRaw.get(d.diskId) ?? emptySeries(step),
       total: diskTotalRaw.get(d.diskId) ?? emptySeries(step),
     }));
 
-    const diskIo: HostDiskIo[] = Array.from(diskIoRaw.entries()).map(([dev, bps]) => ({ dev, bps }));
-    const netIo: HostNetIo[] = Array.from(netIoRaw.entries()).map(([iface, bps]) => ({ iface, bps }));
+    const diskIo: HostDiskIo[] = options.includePhysicalTopology
+      ? Array.from(diskIoRaw.entries()).map(([dev, bps]) => ({ label: dev, dev, bps }))
+      : aggregateTopologySeries('All disks', diskIoRaw.values(), step);
+    const netIo: HostNetIo[] = options.includePhysicalTopology
+      ? Array.from(netIoRaw.entries()).map(([iface, bps]) => ({ label: iface, iface, bps }))
+      : aggregateTopologySeries('All interfaces', netIoRaw.values(), step);
 
     return { cpu, memUsed, memTotal, load1, disks, diskIo, netIo };
+  }
+
+  private async currentVisibleLocalDisks(
+    userId: string,
+    serverId: string,
+    inventory: readonly DiskInfo[],
+  ): Promise<DiskInfo[]> {
+    try {
+      return await this.accessResolver.runWithActiveServerAccess(
+        userId,
+        serverId,
+        async (manager) => {
+          const visible: DiskInfo[] = [];
+          for (const disk of inventory) {
+            if (await this.accessResolver.hasMountSourceAccessInTransaction(
+              manager,
+              userId,
+              serverId,
+              { kind: 'local', id: disk.diskId },
+              disk.sourceIdentity,
+            )) visible.push(disk);
+          }
+          return visible;
+        },
+      );
+    } catch (error) {
+      if (!(error instanceof ForbiddenException)) throw error;
+      throw new NotFoundException('Server not found');
+    }
   }
 
   // ---------------------------------------------------------------------------
@@ -117,13 +178,20 @@ export class MetricsController {
     @CurrentUser() user: UserEntity,
     @Query('range') range: string,
   ): Promise<GpuMetricsDto> {
-    await this.ensureAccess(user.id, serverId);
-    return this.gpuMetricsFor(serverId, range);
+    const grant = await this.currentServerGrant(user.id, serverId);
+    const allowedGpuIndices = grant.gpuMode === GpuGrantMode.All
+      ? undefined
+      : new Set(grant.gpuMode === GpuGrantMode.Indices ? grant.gpuIndices : []);
+    return this.gpuMetricsFor(serverId, range, allowedGpuIndices);
   }
 
-  protected async gpuMetricsFor(serverId: string, range: string): Promise<GpuMetricsDto> {
+  protected async gpuMetricsFor(
+    serverId: string,
+    range: string,
+    allowedGpuIndices?: ReadonlySet<number>,
+  ): Promise<GpuMetricsDto> {
     const { start, end, step } = parseRange(range);
-    const srv = `server="${serverId}"`;
+    const srv = promqlLabelMatcher('server', serverId);
 
     const [utilRaw, memUsedRaw, tempRaw, powerRaw, graphicsClockRaw] = await Promise.all([
       this.metricsQuery.queryRangeByLabel(`nyabase_gpu_util_ratio{${srv}}`, start, end, step, 'gpu_index'),
@@ -139,21 +207,30 @@ export class MetricsController {
       ),
     ]);
 
-    const allIndices = new Set([
-      ...utilRaw.keys(),
-      ...memUsedRaw.keys(),
-      ...tempRaw.keys(),
-      ...powerRaw.keys(),
-      ...graphicsClockRaw.keys(),
+    const inventory = this.agentGateway.stateCache.get(serverId)?.gpus ?? [];
+    const inventoryByIndex = new Map(inventory.map((gpu) => [gpu.index, gpu]));
+    const allIndices = new Set<number>([
+      ...inventoryByIndex.keys(),
+      ...Array.from(utilRaw.keys(), Number),
+      ...Array.from(memUsedRaw.keys(), Number),
+      ...Array.from(tempRaw.keys(), Number),
+      ...Array.from(powerRaw.keys(), Number),
+      ...Array.from(graphicsClockRaw.keys(), Number),
     ]);
 
     const gpus = Array.from(allIndices)
-      .sort((a, b) => parseInt(a) - parseInt(b))
-      .map((idxStr) => {
+      .filter((index) => Number.isSafeInteger(index)
+        && index >= 0
+        && index < MAX_AGENT_GPU_DEVICES
+        && (allowedGpuIndices === undefined || allowedGpuIndices.has(index)))
+      .sort((a, b) => a - b)
+      .map((index) => {
+        const idxStr = String(index);
+        const gpu = inventoryByIndex.get(index);
         return {
-          index: parseInt(idxStr),
-          model: `GPU ${idxStr}`,
-          memTotalMiB: 0,
+          index,
+          model: gpu?.model ?? `GPU ${idxStr}`,
+          memTotalMiB: gpu?.totalMemMiB ?? 0,
           util: utilRaw.get(idxStr) ?? emptySeries(step),
           memUsed: memUsedRaw.get(idxStr) ?? emptySeries(step),
           temp: tempRaw.get(idxStr) ?? emptySeries(step),
@@ -163,6 +240,30 @@ export class MetricsController {
       });
 
     return { gpus };
+  }
+
+  private async currentServerGrant(
+    userId: string,
+    serverId: string,
+  ): Promise<ResolvedServerGrant> {
+    try {
+      return await this.accessResolver.runWithActiveServerAccess(
+        userId,
+        serverId,
+        async (manager) => {
+          const grant = await this.accessResolver.resolveServerInTransaction(
+            manager,
+            userId,
+            serverId,
+          );
+          if (!grant) throw new ForbiddenException('Server access was revoked');
+          return grant;
+        },
+      );
+    } catch (error) {
+      if (!(error instanceof ForbiddenException)) throw error;
+      throw new NotFoundException('Server not found');
+    }
   }
 
   // ---------------------------------------------------------------------------
@@ -186,7 +287,7 @@ export class MetricsController {
     viewAll: boolean,
   ): Promise<UserMetricsDto> {
     const { start, end, step } = parseRange(range);
-    const srv = `server="${serverId}"`;
+    const srv = promqlLabelMatcher('server', serverId);
     const window = `${step}s`;
     const diskOwnerFilter = viewAll
       ? ''
@@ -274,7 +375,7 @@ export class MetricsController {
     viewAll: boolean,
   ): Promise<ContainerMetricsDto> {
     const { start, end, step } = parseRange(range);
-    const srv = `server="${serverId}"`;
+    const srv = promqlLabelMatcher('server', serverId);
     const window = `${step}s`;
 
     const [series, containerMap] = await Promise.all([
@@ -527,8 +628,52 @@ export class MetricsController {
   private async diskOwnerFilter(userId: string): Promise<string> {
     const numericMap = await this.usersService.getNumericIdsByUserIds([userId]);
     const numericId = numericMap.get(userId);
-    if (numericId == null) return `,user_id="${userId}"`;
-    return `,user_id=~"${userId}|${numericId}"`;
+    if (numericId == null) return `,${promqlLabelMatcher('user_id', userId)}`;
+    const exactOwnerAlternatives = `${escapePromqlRegex(userId)}|${numericId}`;
+    return `,user_id=~${promqlStringLiteral(exactOwnerAlternatives)}`;
   }
 
+}
+
+function aggregateTopologySeries<T extends HostDiskIo | HostNetIo>(
+  label: string,
+  source: Iterable<MetricSeries>,
+  step: number,
+): T[] {
+  const rows = [...source];
+  if (rows.length === 0) return [];
+  const values = new Map<number, { sum: number; observed: boolean }>();
+  for (const series of rows) {
+    for (const point of series.points) {
+      const current = values.get(point.t) ?? { sum: 0, observed: false };
+      if (point.v !== null) {
+        current.sum += point.v;
+        current.observed = true;
+      }
+      values.set(point.t, current);
+    }
+  }
+  return [{
+    label,
+    bps: {
+      step,
+      points: [...values.entries()]
+        .sort(([left], [right]) => left - right)
+        .map(([t, value]) => ({ t, v: value.observed ? value.sum : null })),
+    },
+  } as T];
+}
+
+/** Keep all request-derived values inside one PromQL string literal. */
+function promqlStringLiteral(value: string): string {
+  return JSON.stringify(value);
+}
+
+function promqlLabelMatcher(label: string, value: string): string {
+  return `${label}=${promqlStringLiteral(value)}`;
+}
+
+/** Escape a literal embedded in a Prometheus/RE2 regular expression. */
+function escapePromqlRegex(value: string): string {
+  return value.replace(/[\\^$.*+?()[\]{}|]/g, '\\$&');
 }

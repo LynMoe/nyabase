@@ -1,4 +1,4 @@
-import { Module } from '@nestjs/common';
+import { Module, forwardRef } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { AccessModule } from '../access/access.module.js';
 import { AuthModule } from '../auth/auth.module.js';
@@ -15,6 +15,7 @@ import { HttpProxyController } from './http-proxy.controller.js';
 import { HttpProxyGateway } from './http-proxy-gateway.js';
 import { HttpProxyService } from './http-proxy.service.js';
 import { HttpHostnameReservationEntity } from '../entities/http-hostname-reservation.entity.js';
+import { AuditModule } from '../audit/audit.module.js';
 
 @Module({
   imports: [
@@ -28,9 +29,10 @@ import { HttpHostnameReservationEntity } from '../entities/http-hostname-reserva
       UserEntity,
       HttpHostnameReservationEntity,
     ]),
-    AuthModule,
-    AccessModule,
+    forwardRef(() => AuthModule),
+    forwardRef(() => AccessModule),
     ProxySnapshotNotifierModule,
+    AuditModule,
   ],
   providers: [HttpProxyService, HttpProxyGateway],
   controllers: [HttpProxyController, AdminHttpProxyController],

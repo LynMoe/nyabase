@@ -13,6 +13,13 @@ import {
   PhysicalMutationFenceBusyError,
   fencePhysicalMutationCommand,
 } from '../physical-mutation-fence.js';
+import {
+  PROJECTS_FILE_AMBIGUITY_EXIT_CODE,
+  PROJECTS_FILE_HELPER_SCRIPT,
+  assertAtomicFileExchangeCapability,
+  readProjectsFileSnapshot,
+  type ProjectsFileSnapshot,
+} from './projects-file-helper.js';
 
 export { normalizeXfsQuotaBytes } from '@nyabase/common';
 
@@ -44,6 +51,12 @@ export interface XfsQuotaManagerOptions {
   fatalHook?: (error: XfsCommandAmbiguityError) => void;
   /** Test seam. Production always uses child_process.spawn. */
   spawnProcess?: typeof spawn;
+  /** Test/packaging seam. Production owns exactly /etc/projects. */
+  projectsFilePath?: string;
+  /** Stable nofollow reader seam; production uses the shared safe reader. */
+  readProjectsFile?: (projectsPath: string) => ProjectsFileSnapshot;
+  /** Test seam; production probes the installed helper on the /etc mount. */
+  assertAtomicExchangeCapability?: () => void;
 }
 
 export class XfsCommandAmbiguityError extends Error {
@@ -122,6 +135,9 @@ export class XfsQuotaManager {
   private readonly fatalHook: (error: XfsCommandAmbiguityError) => void;
   private readonly spawnProcess: typeof spawn;
   private readonly physicalMutationLockPath: string;
+  private readonly projectsFilePath: string;
+  private readonly readProjectsFile: (projectsPath: string) => ProjectsFileSnapshot;
+  private readonly assertAtomicExchangeCapability: () => void;
   private commandTail: Promise<void> = Promise.resolve();
   private readonly commandQueueCap: number;
   private pendingCommands = 0;
@@ -147,7 +163,16 @@ export class XfsQuotaManager {
     );
     this.fatalHook = options.fatalHook ?? killAgentAfterAmbiguousXfsCommand;
     this.spawnProcess = options.spawnProcess ?? spawn;
+    this.projectsFilePath = options.projectsFilePath ?? '/etc/projects';
     this.physicalMutationLockPath = options.physicalMutationLockPath ?? PHYSICAL_MUTATION_LOCK_PATH;
+    this.readProjectsFile = options.readProjectsFile
+      ?? ((projectsPath) => readProjectsFileSnapshot(projectsPath, this.physicalMutationLockPath));
+    this.assertAtomicExchangeCapability = options.assertAtomicExchangeCapability
+      ?? (() => assertAtomicFileExchangeCapability(
+        path.dirname(this.projectsFilePath),
+        undefined,
+        this.physicalMutationLockPath,
+      ));
   }
 
   private toProjectId(numericUserId: number): number {
@@ -163,6 +188,12 @@ export class XfsQuotaManager {
 
   projectIdForUser(numericUserId: number): number {
     return this.toProjectId(numericUserId);
+  }
+
+  /** Startup boundary: reconcile any durable /etc/projects transaction before serving work. */
+  recoverProjectsFileState(): void {
+    this.assertAtomicExchangeCapability();
+    this.readProjectsFile(this.projectsFilePath);
   }
 
   /**
@@ -200,9 +231,10 @@ export class XfsQuotaManager {
     await this.assertProjectQuotaEnforcementOnMount(dirPath, quotaMount);
     const pinned = this.preparePinnedPath(dirPath);
 
-    // Register the path in /etc/projects so xfs_quota can find it.
+    // Register the path under the same cross-process physical fence used by
+    // quota commands. The helper rejects duplicate or conflicting ownership.
     this.assertProjectPathSafe(durablePath);
-    this.appendLineIfMissing('/etc/projects', `${projectId}:${durablePath}`);
+    await this.mutateExactPathRegistration('ensure', projectId, durablePath);
 
     // project -s -p both adds the path AND re-initialises the project in one step.
     await this.runXfsQuota(
@@ -245,7 +277,13 @@ export class XfsQuotaManager {
     const inheritance = this.hasProjectInheritanceFlag(stat.stdout);
     const quotaPresent = Boolean(await this.getUsageForProject(expectedProjectId, quotaMount));
     this.assertProjectPathSafe(durablePath);
-    const registered = this.getRegisteredProjectPaths(expectedProjectId).includes(durablePath);
+    const registration = this.readExactPathRegistration(durablePath);
+    if (registration && registration.projectId !== expectedProjectId) {
+      throw new Error(
+        `[XFS] Path ${durablePath} is registered to project ${registration.projectId}, expected ${expectedProjectId}`,
+      );
+    }
+    const registered = registration?.projectId === expectedProjectId;
     return {
       path: durablePath,
       expectedProjectId,
@@ -258,29 +296,25 @@ export class XfsQuotaManager {
   }
 
   /** Remove the durable path registration after its inode has been deleted. */
-  removePathFromProject(numericUserId: number, dirPath: string): void {
+  async removePathFromProject(numericUserId: number, dirPath: string): Promise<void> {
     if (this.poisoned) {
       throw new Error('[XFS] Quota manager is poisoned by an ambiguous command');
     }
     const projectId = this.toProjectId(numericUserId);
-    const target = `${projectId}:${dirPath}`;
     this.assertProjectPathSafe(dirPath);
-    if (!fs.existsSync('/etc/projects')) return;
-    try {
-      const existing = fs.readFileSync('/etc/projects', 'utf-8');
-      const lines = existing.split('\n');
-      const filtered = lines.filter((line) => line !== target);
-      if (filtered.length === lines.length) return;
-      this.atomicWriteFile('/etc/projects', filtered.join('\n'));
-    } catch (err) {
-      throw new Error(`[XFS] Failed to remove path ${dirPath} from /etc/projects: ${err instanceof Error ? err.message : String(err)}`);
-    }
+    await this.mutateExactPathRegistration('remove', projectId, dirPath);
   }
 
   isPathRegisteredToProject(numericUserId: number, dirPath: string): boolean {
     const projectId = this.toProjectId(numericUserId);
     this.assertProjectPathSafe(dirPath);
-    return this.getRegisteredProjectPaths(projectId).includes(dirPath);
+    const registration = this.readExactPathRegistration(dirPath);
+    if (registration && registration.projectId !== projectId) {
+      throw new Error(
+        `[XFS] Path ${dirPath} is registered to project ${registration.projectId}, expected ${projectId}`,
+      );
+    }
+    return registration?.projectId === projectId;
   }
 
   /**
@@ -294,21 +328,14 @@ export class XfsQuotaManager {
   }
 
   /** Remove one unambiguous Nyabase registration by exact path. */
-  removeExactPathRegistration(dirPath: string): ExactProjectPathRegistration {
+  async removeExactPathRegistration(dirPath: string): Promise<ExactProjectPathRegistration> {
     if (this.poisoned) {
       throw new Error('[XFS] Quota manager is poisoned by an ambiguous command');
     }
     const registration = this.readExactPathRegistration(dirPath);
     if (!registration) return { path: dirPath, projectId: null };
-    try {
-      const filtered = registration.lines.filter((_line, index) => index !== registration.lineIndex);
-      this.atomicWriteFile('/etc/projects', filtered.join('\n'));
-      return { path: dirPath, projectId: registration.projectId };
-    } catch (error) {
-      throw new Error(
-        `[XFS] Failed to remove exact path ${dirPath} from /etc/projects: ${error instanceof Error ? error.message : String(error)}`,
-      );
-    }
+    await this.mutateExactPathRegistration('remove', null, dirPath);
+    return { path: dirPath, projectId: registration.projectId };
   }
 
   async setLimit(numericUserId: number, hardLimitBytes: number): Promise<void> {
@@ -326,6 +353,10 @@ export class XfsQuotaManager {
 
       const usage = await this.getUsageForProject(projectId, quotaMount);
       if (!usage) {
+        // XFS removes the filtered report row for an effective zero/unlimited
+        // project limit. A successful `bhard=0k` followed by an observed
+        // absent row is therefore the exact converged representation.
+        if (expectedHardLimitBytes === 0) continue;
         throw new Error(`[XFS] Project ${projectId} is missing from quota report after limit application on ${quotaMount}`);
       }
       if (usage.hardLimitBytes !== expectedHardLimitBytes) {
@@ -418,7 +449,13 @@ export class XfsQuotaManager {
     const usages: QuotaUsage[] = [];
     for (const quotaMount of this.getQuotaCommandTargets()) {
       const usage = await this.getUsageForProject(projectId, quotaMount);
-      if (!usage) return null;
+      if (!usage) {
+        // A bounded, successful filtered observation with no row is XFS's
+        // representation of an effective zero/unlimited limit. Normalize it
+        // for quota-intent consumers without changing the private presence
+        // check used by path-assignment verification.
+        return { numericUserId, projectId, usedBytes: 0, hardLimitBytes: 0 };
+      }
       usages.push(usage);
     }
     if (usages.length === 0) return null;
@@ -446,24 +483,21 @@ export class XfsQuotaManager {
     return [...byFilesystem.values()];
   }
 
-  private parseUsageLine(line: string): QuotaUsage | null {
+  private parseUsageLine(line: string): { isProjectRow: boolean; usage: QuotaUsage | null } {
     const parts = line.trim().split(/\s+/);
-    if (parts.length < 4) return null;
+    if (parts.length < 4) return { isProjectRow: false, usage: null };
 
     // xfs_quota report -N outputs "#<projectId>" in the first column.
     const m = /^#(\d+)$/.exec(parts[0]);
-    if (!m) return null;
+    if (!m) return { isProjectRow: false, usage: null };
 
     const projectId = Number(m[1]);
-    const numericUserId = projectId - XFS_PROJECT_ID_OFFSET;
     if (
       !Number.isSafeInteger(projectId)
       || projectId > XFS_PROJECT_ID_MAX
-      || !Number.isSafeInteger(numericUserId)
-      || numericUserId <= 0
-    ) return null;
+      || !parts.slice(1, 4).every((part) => /^\d+$/.test(part))
+    ) return { isProjectRow: false, usage: null };
 
-    if (!/^\d+$/.test(parts[1]) || !/^\d+$/.test(parts[3])) return null;
     const usedBlocks = Number(parts[1]);
     const hardLimitBlocks = Number(parts[3]);
     const usedBytes = usedBlocks * XFS_QUOTA_BLOCK_BYTES;
@@ -471,52 +505,78 @@ export class XfsQuotaManager {
     if (
       !Number.isSafeInteger(usedBytes)
       || !Number.isSafeInteger(hardLimitBytes)
-    ) return null;
+    ) return { isProjectRow: false, usage: null };
+
+    const numericUserId = projectId - XFS_PROJECT_ID_OFFSET;
+    if (!Number.isSafeInteger(numericUserId) || numericUserId <= 0) {
+      // Project zero and projects below the Nyabase offset are valid XFS rows
+      // owned by the filesystem or another consumer, not malformed output.
+      return { isProjectRow: true, usage: null };
+    }
 
     return {
-      numericUserId,
-      projectId,
-      usedBytes,
-      hardLimitBytes,
+      isProjectRow: true,
+      usage: {
+        numericUserId,
+        projectId,
+        usedBytes,
+        hardLimitBytes,
+      },
     };
   }
 
   private parseQuotaReport(output: string, quotaMount: string): QuotaUsage[] {
     const usages: QuotaUsage[] = [];
+    let sawValidProjectRow = false;
     for (const line of output.split('\n')) {
       const trimmed = line.trim();
       if (!trimmed) continue;
-      const usage = this.parseUsageLine(trimmed);
-      if (usage) {
-        usages.push(usage);
+      const parsed = this.parseUsageLine(trimmed);
+      if (parsed.usage) {
+        sawValidProjectRow = true;
+        usages.push(parsed.usage);
+        continue;
+      }
+      if (parsed.isProjectRow) {
+        sawValidProjectRow = true;
         continue;
       }
       if (trimmed.startsWith('#')) {
         throw new Error(`[XFS] Malformed project row in quota report on ${quotaMount}: ${trimmed}`);
       }
     }
-    if (usages.length === 0 && !/\bProject quota on\b/i.test(output)) {
+    if (!sawValidProjectRow && !/\bProject quota on\b/i.test(output)) {
       throw new Error(`[XFS] Empty or unrecognized project quota report on ${quotaMount}`);
     }
     return usages;
   }
 
-  private appendLineIfMissing(filePath: string, line: string): void {
-    const existing = fs.existsSync(filePath) ? fs.readFileSync(filePath, 'utf-8') : '';
-    if (!existing.split('\n').includes(line)) {
-      const separator = existing.length > 0 && !existing.endsWith('\n') ? '\n' : '';
-      this.atomicWriteFile(filePath, `${existing}${separator}${line}\n`);
-    }
-  }
-
-  private atomicWriteFile(filePath: string, contents: string): void {
-    const temporaryPath = `${filePath}.nyabase-${process.pid}.tmp`;
+  private async mutateExactPathRegistration(
+    operation: 'ensure' | 'remove',
+    projectId: number | null,
+    dirPath: string,
+  ): Promise<void> {
     try {
-      fs.writeFileSync(temporaryPath, contents, { mode: 0o644 });
-      fs.renameSync(temporaryPath, filePath);
+      await this.runCommand(
+        process.execPath,
+        [
+          '-e',
+          PROJECTS_FILE_HELPER_SCRIPT,
+          operation,
+          projectId === null ? '*' : String(projectId),
+          dirPath,
+          this.projectsFilePath,
+        ],
+        `${operation} exact /etc/projects registration for ${dirPath}`,
+        'mutation',
+      );
     } catch (error) {
-      try { fs.unlinkSync(temporaryPath); } catch { /* no temporary file */ }
-      throw error;
+      if (error instanceof XfsCommandAmbiguityError) {
+        return new Promise<void>(() => { /* process is terminating */ });
+      }
+      throw new Error(
+        `[XFS] Failed to ${operation} exact path ${dirPath}: ${error instanceof Error ? error.message : String(error)}`,
+      );
     }
   }
 
@@ -527,6 +587,11 @@ export class XfsQuotaManager {
       quotaMount,
       `read quota report for project ${projectId}`,
     );
+    // Unlike an unfiltered report, the real XFS -L/-U query emits only a
+    // newline when the requested project has no quota row. The exit-zero empty
+    // result is an exact "absent" observation; command and malformed-output
+    // failures remain rejected by runXfsQuota/parseQuotaReport.
+    if (stdout.trim() === '') return null;
     for (const usage of this.parseQuotaReport(stdout, quotaMount)) {
       if (usage?.projectId === projectId) return usage;
     }
@@ -537,8 +602,14 @@ export class XfsQuotaManager {
     projectId: number,
     dirPath: string,
     quotaMount: string,
-    _durablePath = dirPath,
+    durablePath = dirPath,
   ): Promise<void> {
+    const registration = this.readExactPathRegistration(durablePath);
+    if (!registration || registration.projectId !== projectId) {
+      throw new Error(
+        `[XFS] Path ${durablePath} has no unique registration for project ${projectId}`,
+      );
+    }
     const stat = await this.runXfsIo(
       'stat',
       dirPath,
@@ -605,7 +676,13 @@ export class XfsQuotaManager {
     let best: { deviceId: string; mountPoint: string } | null = null;
     for (const mount of mounts) {
       if (!this.isPathOnMount(lookupPath, mount.mountPoint)) continue;
-      if (!best || mount.mountPoint.length > best.mountPoint.length) best = mount;
+      if (!best || mount.mountPoint.length > best.mountPoint.length) {
+        best = mount;
+        continue;
+      }
+      if (mount.mountPoint.length === best.mountPoint.length) {
+        throw new Error(`[XFS] Ambiguous stacked mount for ${lookupPath}: ${mount.mountPoint}`);
+      }
     }
     return best;
   }
@@ -845,6 +922,22 @@ export class XfsQuotaManager {
           finish(new PhysicalMutationFenceBusyError(executable));
           return;
         }
+        if (code === PROJECTS_FILE_AMBIGUITY_EXIT_CODE) {
+          ambiguous = true;
+          clearTimeout(timer);
+          this.makeCommandAmbiguous(
+            child,
+            new XfsCommandAmbiguityError(
+              operation,
+              mode,
+              `projects-file transaction retained recovery state: ${stderr
+                .toString('utf8')
+                .trim()
+                .slice(0, 512) || 'unknown recovery boundary'}`,
+            ),
+          );
+          return;
+        }
         const error = new Error(
           `${executable} exited ${signal ? `with signal ${signal}` : `with code ${String(code)}`}`,
         ) as ExecError;
@@ -937,9 +1030,10 @@ export class XfsQuotaManager {
 
   private getRegisteredProjectPaths(projectId: number): string[] {
     try {
-      if (!fs.existsSync('/etc/projects')) return [];
+      const snapshot = this.readProjectsFile(this.projectsFilePath);
+      if (!snapshot.exists) return [];
       const prefix = `${projectId}:`;
-      return fs.readFileSync('/etc/projects', 'utf-8')
+      return snapshot.contents
         .split('\n')
         .filter((line) => line.startsWith(prefix))
         .map((line) => line.slice(prefix.length))
@@ -953,9 +1047,11 @@ export class XfsQuotaManager {
     dirPath: string,
   ): { projectId: number; lines: string[]; lineIndex: number } | null {
     this.assertProjectPathSafe(dirPath);
-    if (!fs.existsSync('/etc/projects')) return null;
     try {
-      const lines = fs.readFileSync('/etc/projects', 'utf-8').split('\n');
+      const snapshot = this.readProjectsFile(this.projectsFilePath);
+      if (!snapshot.exists) return null;
+      const contents = snapshot.contents;
+      const lines = contents.split('\n');
       const matches = lines.flatMap((line, lineIndex) => {
         const separator = line.indexOf(':');
         if (separator < 0 || line.slice(separator + 1) !== dirPath) return [];

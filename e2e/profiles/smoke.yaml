@@ -1,0 +1,36 @@
+{
+  "name": "smoke",
+  "description": "Cold-stack trust check through the real TLS edge and two CPU Agents.",
+  "cpuOnly": true,
+  "groups": [
+    "00-foundation",
+    "10-auth-rbac",
+    "20-servers-images",
+    "30-containers",
+    "90-cleanup-evidence"
+  ],
+  "requiredEnv": [
+    "E2E_BASE_URL",
+    "E2E_RUN_ID",
+    "E2E_ADMIN_USERNAME",
+    "E2E_ADMIN_PASSWORD",
+    "E2E_EDGE_SPKI",
+    "E2E_RESOURCE_MANIFEST",
+    "E2E_SEED_STATE"
+  ],
+  "requiredCapabilities": [
+    "fresh-control-plane",
+    "tls-edge",
+    "local-tls-registry",
+    "two-cpu-nodes",
+    "real-systemd",
+    "agent-managed-dockerd",
+    "cgroup-v2",
+    "xfs-project-quota",
+    "mount-namespaces",
+    "network-namespaces",
+    "shared-macvlan-l2"
+  ],
+  "workers": 1,
+  "timeoutMs": 60000
+}

@@ -1,0 +1,26 @@
+.git
+.codex
+.idea
+.vscode
+
+node_modules
+**/node_modules
+**/dist
+**/coverage
+**/.turbo
+**/target
+
+# Never send local environment secrets to a Docker build context. Keep tracked
+# examples available to image builds and documentation checks.
+**/.env
+**/.env.*
+!**/.env.example
+
+# Per-run CPU E2E state contains private keys, passwords, and Agent tokens.
+e2e/.runtime
+
+*.db
+*.db-shm
+*.db-wal
+*.log
+*.tmp

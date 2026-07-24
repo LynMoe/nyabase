@@ -43,6 +43,119 @@ export function assertDockerDaemonIdentity(
   }
 }
 
+export interface DockerDaemonRuntimeIdentity {
+  mainPid: number;
+  processStartTime: string;
+  processExecutable: string;
+  controlGroup: string;
+  processCgroups: string;
+  socketDevice: string;
+  socketInode: string;
+  socketCtimeMs: string;
+  socketMode: string;
+  socketUid: string;
+  socketGid: string;
+  dockerRoot: string;
+  storageDriver: 'overlay2';
+}
+
+export class DockerDaemonRuntimeIdentityDriftError extends Error {
+  readonly fatal = true;
+
+  constructor(
+    message: string,
+    readonly expected: DockerDaemonRuntimeIdentity | null,
+    readonly observed: DockerDaemonRuntimeIdentity | null,
+  ) {
+    super(message);
+    this.name = 'DockerDaemonRuntimeIdentityDriftError';
+  }
+}
+
+function killAgentAfterDockerDaemonIdentityDrift(
+  error: DockerDaemonRuntimeIdentityDriftError,
+): void {
+  console.error(`[DaemonManager] ${error.message}; terminating Agent before Docker replay`);
+  process.kill(process.pid, 'SIGKILL');
+}
+
+/** Pins one coherent managed-dockerd identity and fail-stops on any later drift. */
+export class DockerDaemonRuntimeIdentityGuard {
+  private expected: DockerDaemonRuntimeIdentity | null = null;
+  private drift: DockerDaemonRuntimeIdentityDriftError | null = null;
+
+  constructor(
+    private readonly sample: () => Promise<DockerDaemonRuntimeIdentity>,
+    private readonly fatalHook: (
+      error: DockerDaemonRuntimeIdentityDriftError,
+    ) => void = killAgentAfterDockerDaemonIdentityDrift,
+  ) {}
+
+  async capture(): Promise<DockerDaemonRuntimeIdentity> {
+    if (this.drift) return this.trip(this.drift);
+    const sampled = await this.sample();
+    this.expected = Object.freeze({ ...sampled });
+    return { ...sampled };
+  }
+
+  async assertCurrent(): Promise<void> {
+    if (this.drift) return this.trip(this.drift);
+    if (!this.expected) {
+      return this.trip(new DockerDaemonRuntimeIdentityDriftError(
+        'Docker daemon runtime identity was not captured during bootstrap',
+        null,
+        null,
+      ));
+    }
+    let observed: DockerDaemonRuntimeIdentity;
+    try {
+      observed = await this.sample();
+    } catch (error) {
+      return this.trip(new DockerDaemonRuntimeIdentityDriftError(
+        `Docker daemon runtime identity became unobservable: ${error instanceof Error ? error.message : String(error)}`,
+        this.expected,
+        null,
+      ));
+    }
+    if (!sameDockerDaemonRuntimeIdentity(this.expected, observed)) {
+      return this.trip(new DockerDaemonRuntimeIdentityDriftError(
+        'Docker daemon runtime identity changed after bootstrap',
+        this.expected,
+        observed,
+      ));
+    }
+  }
+
+  private trip(error: DockerDaemonRuntimeIdentityDriftError): never {
+    this.drift ??= error;
+    try {
+      this.fatalHook(this.drift);
+    } catch (fatalError) {
+      if (fatalError !== this.drift) throw fatalError;
+    }
+    throw this.drift;
+  }
+}
+
+export function sameDockerDaemonRuntimeIdentity(
+  left: DockerDaemonRuntimeIdentity,
+  right: DockerDaemonRuntimeIdentity,
+): boolean {
+  return left.mainPid === right.mainPid
+    && left.processStartTime === right.processStartTime
+    && left.processExecutable === right.processExecutable
+    && left.controlGroup === right.controlGroup
+    && left.processCgroups === right.processCgroups
+    && left.socketDevice === right.socketDevice
+    && left.socketInode === right.socketInode
+    && left.socketCtimeMs === right.socketCtimeMs
+    && left.socketMode === right.socketMode
+    && left.socketUid === right.socketUid
+    && left.socketGid === right.socketGid
+    && left.dockerRoot === right.dockerRoot
+    && left.storageDriver === right.storageDriver;
+}
+
 const NVIDIA_RUNTIME_BIN = '/usr/bin/nvidia-container-runtime';
 
 /**
@@ -189,7 +302,15 @@ MemoryMax=${plan.memory.maxBytes}
 `;
 }
 
-export function renderUnitFile(dockerRoot: string, gpuEnabled: boolean, plan: DockerResourceLimitPlan): string {
+export function renderUnitFile(
+  dockerRoot: string,
+  gpuEnabled: boolean,
+  plan: DockerResourceLimitPlan,
+  dockerdPath = '/usr/bin/dockerd',
+): string {
+  if (!/^\/[A-Za-z0-9._/-]+$/.test(dockerRoot)) {
+    throw new Error('dockerRoot contains systemd-unsafe path characters');
+  }
   const nvidiaFlag =
     gpuEnabled && fs.existsSync(NVIDIA_RUNTIME_BIN)
       ? `  --add-runtime nvidia=${NVIDIA_RUNTIME_BIN} \\\n`
@@ -210,7 +331,7 @@ StartLimitIntervalSec=60
 [Service]
 Type=notify
 ${sliceDirective}Delegate=yes
-ExecStart=/usr/bin/dockerd \\
+ExecStart=${dockerdPath} \\
   --config-file=${NYABASE_DAEMON_JSON_PATH} \\
   --pidfile=/run/nyabase-agent/docker.pid \\
   --data-root=${dockerRoot} \\
@@ -235,22 +356,43 @@ WantedBy=multi-user.target
 `;
 }
 
+export interface DaemonManagerOptions {
+  runtimeIdentitySampler?: () => Promise<DockerDaemonRuntimeIdentity>;
+  runtimeIdentityFatalHook?: (error: DockerDaemonRuntimeIdentityDriftError) => void;
+}
+
 export class DaemonManager {
   private readonly dockerRoot: string;
   private readonly gpuEnabled: boolean;
   private readonly resourceLimitConfig: DockerResourceLimitConfig;
   private readonly dockerode: Dockerode;
+  private readonly dockerdPath: string;
+  private readonly runtimeIdentityGuard: DockerDaemonRuntimeIdentityGuard;
 
-  constructor(dockerRoot: string, gpuEnabled = false, resourceLimitConfig: DockerResourceLimitConfig = { enabled: false }) {
+  constructor(
+    dockerRoot: string,
+    gpuEnabled = false,
+    resourceLimitConfig: DockerResourceLimitConfig = { enabled: false },
+    options: DaemonManagerOptions = {},
+  ) {
     this.dockerRoot = dockerRoot;
     this.gpuEnabled = gpuEnabled;
     this.resourceLimitConfig = resourceLimitConfig;
+    this.dockerdPath = [
+      '/usr/bin/dockerd',
+      '/usr/local/bin/dockerd',
+      '/usr/sbin/dockerd',
+    ].find((candidate) => fs.existsSync(candidate)) ?? '/usr/bin/dockerd';
     // DaemonManager only issues unary probes, so a modem-level timeout can
     // safely destroy wedged HTTP requests (unlike long-lived exec/event APIs).
     this.dockerode = new Dockerode({
       socketPath: SOCKET_PATH,
       timeout: DAEMON_DOCKER_PROBE_TIMEOUT_MS,
     });
+    this.runtimeIdentityGuard = new DockerDaemonRuntimeIdentityGuard(
+      options.runtimeIdentitySampler ?? (() => this.sampleLiveDaemonRuntimeIdentity()),
+      options.runtimeIdentityFatalHook,
+    );
   }
 
   /**
@@ -279,7 +421,7 @@ export class DaemonManager {
 
     // Wait for socket to become reachable
     await this.waitForSocket();
-    await this.assertLiveDaemonIdentity();
+    await this.runtimeIdentityGuard.capture();
     return this.getStatus(serverId);
   }
 
@@ -364,13 +506,145 @@ export class DaemonManager {
     return this.getResourceLimitPlan().cgroupParent;
   }
 
-  private async assertLiveDaemonIdentity(): Promise<void> {
+  async assertRuntimeIdentity(): Promise<void> {
+    await this.runtimeIdentityGuard.assertCurrent();
+  }
+
+  private async sampleLiveDaemonRuntimeIdentity(): Promise<DockerDaemonRuntimeIdentity> {
+    const beforeUnit = await this.queryRuntimeSystemctlExact();
+    const beforeProcess = this.readDaemonProcessIdentity(
+      beforeUnit.mainPid,
+      beforeUnit.controlGroup,
+    );
+    const beforeSocket = this.readDockerSocketIdentity();
     const info = await withDaemonDockerDeadline(
       this.dockerode.info() as Promise<{ Driver?: string; DockerRootDir?: string }>,
       DAEMON_DOCKER_PROBE_TIMEOUT_MS,
       'verify dockerd physical identity',
     );
     assertDockerDaemonIdentity(this.dockerRoot, info);
+    const afterUnit = await this.queryRuntimeSystemctlExact();
+    const afterProcess = this.readDaemonProcessIdentity(
+      afterUnit.mainPid,
+      afterUnit.controlGroup,
+    );
+    const afterSocket = this.readDockerSocketIdentity();
+    if (
+      beforeUnit.mainPid !== afterUnit.mainPid
+      || beforeUnit.controlGroup !== afterUnit.controlGroup
+      || beforeProcess.processStartTime !== afterProcess.processStartTime
+      || beforeProcess.processExecutable !== afterProcess.processExecutable
+      || beforeProcess.processCgroups !== afterProcess.processCgroups
+      || beforeSocket.socketDevice !== afterSocket.socketDevice
+      || beforeSocket.socketInode !== afterSocket.socketInode
+      || beforeSocket.socketCtimeMs !== afterSocket.socketCtimeMs
+      || beforeSocket.socketMode !== afterSocket.socketMode
+      || beforeSocket.socketUid !== afterSocket.socketUid
+      || beforeSocket.socketGid !== afterSocket.socketGid
+    ) {
+      throw new Error('Docker daemon identity changed while it was sampled');
+    }
+    return {
+      mainPid: afterUnit.mainPid,
+      controlGroup: afterUnit.controlGroup,
+      ...afterProcess,
+      ...afterSocket,
+      dockerRoot: path.resolve(info.DockerRootDir!),
+      storageDriver: 'overlay2',
+    };
+  }
+
+  private async queryRuntimeSystemctlExact(): Promise<{
+    mainPid: number;
+    controlGroup: string;
+  }> {
+    const { stdout } = await execFileAsync(
+      'systemctl',
+      ['show', UNIT_NAME, '--property=ActiveState,MainPID,ControlGroup'],
+      { timeout: 10_000, maxBuffer: 64 * 1024, encoding: 'utf8' },
+    );
+    const props: Record<string, string> = {};
+    for (const line of stdout.trim().split('\n')) {
+      const index = line.indexOf('=');
+      if (index > 0) props[line.slice(0, index)] = line.slice(index + 1);
+    }
+    const mainPidText = props['MainPID'] ?? '';
+    const mainPid = /^\d+$/.test(mainPidText) ? Number(mainPidText) : 0;
+    const controlGroup = props['ControlGroup'] ?? '';
+    if (
+      props['ActiveState'] !== 'active'
+      || !Number.isSafeInteger(mainPid)
+      || mainPid <= 1
+      || !controlGroup.startsWith('/')
+      || controlGroup === '/'
+      || controlGroup.includes('\0')
+      || controlGroup.includes('\n')
+    ) {
+      throw new Error('nyabase-docker.service has no exact active MainPID/control group');
+    }
+    return { mainPid, controlGroup };
+  }
+
+  private readDaemonProcessIdentity(
+    mainPid: number,
+    controlGroup: string,
+  ): Pick<
+    DockerDaemonRuntimeIdentity,
+    'processStartTime' | 'processExecutable' | 'processCgroups'
+  > {
+    const procRoot = `/proc/${mainPid}`;
+    const stat = fs.readFileSync(path.join(procRoot, 'stat'), 'utf8');
+    const commEnd = stat.lastIndexOf(')');
+    const fields = commEnd >= 0 ? stat.slice(commEnd + 1).trim().split(/\s+/) : [];
+    // `fields[0]` is Linux proc stat field 3 (state); starttime is field 22.
+    const processStartTime = fields[19] ?? '';
+    if (!/^\d+$/.test(processStartTime)) {
+      throw new Error(`Could not read dockerd process start time for PID ${mainPid}`);
+    }
+    const processExecutable = fs.realpathSync(path.join(procRoot, 'exe'));
+    const expectedExecutable = fs.realpathSync(this.dockerdPath);
+    if (processExecutable !== expectedExecutable) {
+      throw new Error(
+        `Managed Docker MainPID executable mismatch: expected ${expectedExecutable}, observed ${processExecutable}`,
+      );
+    }
+    const processCgroups = fs.readFileSync(path.join(procRoot, 'cgroup'), 'utf8')
+      .trim()
+      .split('\n')
+      .filter(Boolean)
+      .sort()
+      .join('\n');
+    const inManagedControlGroup = processCgroups.split('\n').some((line) => {
+      const lastColon = line.lastIndexOf(':');
+      return lastColon >= 0 && line.slice(lastColon + 1) === controlGroup;
+    });
+    if (!processCgroups || !inManagedControlGroup) {
+      throw new Error(`Managed Docker MainPID ${mainPid} is outside ${controlGroup}`);
+    }
+    return { processStartTime, processExecutable, processCgroups };
+  }
+
+  private readDockerSocketIdentity(): Pick<
+    DockerDaemonRuntimeIdentity,
+    | 'socketDevice'
+    | 'socketInode'
+    | 'socketCtimeMs'
+    | 'socketMode'
+    | 'socketUid'
+    | 'socketGid'
+  > {
+    const socket = fs.lstatSync(SOCKET_PATH, { bigint: true });
+    if (!socket.isSocket() || socket.uid !== 0n) {
+      throw new Error(`Managed Docker socket is absent or unsafe: ${SOCKET_PATH}`);
+    }
+    return {
+      socketDevice: socket.dev.toString(),
+      socketInode: socket.ino.toString(),
+      socketCtimeMs: socket.ctimeMs.toString(),
+      socketMode: socket.mode.toString(),
+      socketUid: socket.uid.toString(),
+      socketGid: socket.gid.toString(),
+    };
   }
 
   private getResourceLimitPlan(): DockerResourceLimitPlan {
@@ -405,9 +679,9 @@ export class DaemonManager {
   }
 
   private assertDockerdPresent(): void {
-    if (!fs.existsSync('/usr/bin/dockerd') && !fs.existsSync('/usr/local/bin/dockerd')) {
+    if (!fs.existsSync(this.dockerdPath)) {
       throw new Error(
-        'dockerd binary not found at /usr/bin/dockerd or /usr/local/bin/dockerd. ' +
+        'dockerd binary not found at /usr/bin/dockerd, /usr/local/bin/dockerd, or /usr/sbin/dockerd. ' +
         'Please install docker-ce before starting the agent.',
       );
     }
@@ -416,7 +690,7 @@ export class DaemonManager {
   private syncSystemdUnits(plan: DockerResourceLimitPlan): boolean {
     const serviceInSync = this.syncUnitFile(
       UNIT_PATH,
-      renderUnitFile(this.dockerRoot, this.gpuEnabled, plan),
+      renderUnitFile(this.dockerRoot, this.gpuEnabled, plan, this.dockerdPath),
     );
     const sliceContent = renderDockerLimitSliceFile(plan);
     const sliceInSync = sliceContent === null
@@ -428,7 +702,7 @@ export class DaemonManager {
   private areSystemdUnitsInSync(plan: DockerResourceLimitPlan): boolean {
     const serviceInSync = this.isUnitFileInSync(
       UNIT_PATH,
-      renderUnitFile(this.dockerRoot, this.gpuEnabled, plan),
+      renderUnitFile(this.dockerRoot, this.gpuEnabled, plan, this.dockerdPath),
     );
     return serviceInSync && (!plan.enabled || this.isLimitSliceFileInSync(plan));
   }

@@ -19,6 +19,13 @@ import { Capability, DockerDaemonState, ServerStatus } from '@nyabase/common';
 import type { ServerDto, DataDiskDto, SelfCheckResult, SelfCheckItem, DockerDaemonStatus, DataDirIssueDto } from '@nyabase/common';
 import { useAuthStore } from '../store/auth.js';
 import { HostSection, GpuSection, TimeRangeSelector } from '../components/dashboard/server-metrics.js';
+import { QueryErrorState, QueryLoadingState } from '../components/query-state.js';
+import {
+  buildServerEditPatch,
+  canViewAdminServerMetrics,
+  createServerEditDraft,
+} from '../lib/server-detail-logic.js';
+import { queryPollInterval } from '../lib/query-lifecycle.js';
 
 const routeApi = getRouteApi('/servers/$id');
 
@@ -27,23 +34,25 @@ export default function ServerDetailPage() {
   const { user } = useAuthStore();
   const canManage = user?.capabilities.includes(Capability.ManageServers) ?? false;
   const canManageContainers = user?.capabilities.includes(Capability.ManageContainersAny) ?? false;
+  const canViewMetrics = canViewAdminServerMetrics(user?.capabilities ?? []);
   const [showEditServer, setShowEditServer] = useState(false);
   const [regenerating, setRegenerating] = useState(false);
   const [newToken, setNewToken] = useState<string | null>(null);
   const [showRegenConfirm, setShowRegenConfirm] = useState(false);
   const queryClient = useQueryClient();
 
-  const { data: server } = useQuery({
+  const serverQuery = useQuery({
     queryKey: queryKeys.servers.detail(id),
     queryFn: () => api.get<ServerDto>(`/admin/servers/${id}`),
-    refetchInterval: 15_000,
+    refetchInterval: (query) => queryPollInterval(query.state, { activeIntervalMs: 15_000 }),
   });
 
-  const { data: disks = [] } = useQuery({
+  const disksQuery = useQuery({
     queryKey: queryKeys.servers.disks('admin', id),
     queryFn: () => api.get<DataDiskDto[]>(`/admin/servers/${id}/disks`),
-    refetchInterval: 15_000,
+    refetchInterval: (query) => queryPollInterval(query.state, { activeIntervalMs: 15_000 }),
   });
+  const disks = disksQuery.data ?? [];
 
   const regenerateToken = async () => {
     setRegenerating(true);
@@ -76,12 +85,17 @@ export default function ServerDetailPage() {
     }),
   });
 
-  if (!server) return (
-    <div className="px-4 py-4 md:px-6 flex items-center gap-2 text-muted-foreground/70">
-      <div className="w-4 h-4 border-2 border-muted border-t-primary rounded-full animate-spin" />
-      加载中...
-    </div>
+  if (serverQuery.isLoading) return <QueryLoadingState label="加载服务器..." />;
+  if (serverQuery.isError) return (
+    <QueryErrorState
+      error={serverQuery.error}
+      resourceName="服务器"
+      onRetry={() => { void serverQuery.refetch(); }}
+      onBack={() => window.history.back()}
+    />
   );
+  const server = serverQuery.data;
+  if (!server) return null;
 
   const online = server.status === 'online';
   const quarantined = server.status === ServerStatus.AgentQuarantined;
@@ -224,14 +238,19 @@ export default function ServerDetailPage() {
         <DataDisksCard
           disks={disks}
           canManageContainers={canManageContainers}
+          isLoading={disksQuery.isLoading}
+          error={disksQuery.error}
+          onRetry={() => { void disksQuery.refetch(); }}
         />
         {canManage && <SelfCheckCard serverId={id} online={online} />}
       </div>
 
       {/* Host & GPU metrics */}
-      {online && <ServerMetricsSection serverId={id} hasGpu={hasGpu} />}
+      {online && canViewMetrics && <ServerMetricsSection serverId={id} hasGpu={hasGpu} />}
 
-      {canManage && <EditServerDialog server={server} open={showEditServer} onOpenChange={setShowEditServer} />}
+      {canManage && showEditServer && (
+        <EditServerDialog server={server} open onOpenChange={setShowEditServer} />
+      )}
 
       <AlertDialog open={showRegenConfirm} onOpenChange={setShowRegenConfirm}>
         <AlertDialogContent>
@@ -350,9 +369,15 @@ function DaemonRow({ label, value, mono, highlight }: { label: string; value: st
 function DataDisksCard({
   disks,
   canManageContainers,
+  isLoading,
+  error,
+  onRetry,
 }: {
   disks: DataDiskDto[];
   canManageContainers: boolean;
+  isLoading: boolean;
+  error: unknown;
+  onRetry: () => void;
 }) {
   return (
     <div className="bg-card rounded-lg border border-border p-4">
@@ -362,7 +387,11 @@ function DataDisksCard({
         </h2>
       </div>
 
-      {disks.length === 0 ? (
+      {isLoading ? (
+        <QueryLoadingState label="加载数据盘..." />
+      ) : error ? (
+        <QueryErrorState error={error} resourceName="数据盘" onRetry={onRetry} />
+      ) : disks.length === 0 ? (
         <div className="bg-muted/50 rounded-lg border border-dashed border-border p-6 text-center">
           <div className="text-sm text-muted-foreground/70">
             暂无 agent 配置的数据盘
@@ -520,11 +549,13 @@ function EditServerDialog({ server, open, onOpenChange }: {
   server: ServerDto; open: boolean; onOpenChange: (v: boolean) => void;
 }) {
   const qc = useQueryClient();
-  const [name, setName] = useState(server.name);
-  const [slug, setSlug] = useState(server.slug);
+  const [original] = useState(() => createServerEditDraft(server));
+  const [name, setName] = useState(original.name);
+  const [slug, setSlug] = useState(original.slug);
+  const patch = buildServerEditPatch(original, { name, slug });
 
   const { mutate, isPending } = useMutation({
-    mutationFn: () => api.patch(`/admin/servers/${server.id}`, { name, slug }),
+    mutationFn: () => api.patch(`/admin/servers/${server.id}`, patch),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: queryKeys.servers.detail(server.id) });
       qc.invalidateQueries({ queryKey: queryKeys.servers.admin });
@@ -534,18 +565,10 @@ function EditServerDialog({ server, open, onOpenChange }: {
     onError: (e) => toast({ title: '更新失败', description: e.message, variant: 'destructive' }),
   });
 
-  const handleOpen = (v: boolean) => {
-    if (v) {
-      setName(server.name);
-      setSlug(server.slug);
-    }
-    onOpenChange(v);
-  };
-
-  const changed = name !== server.name || slug !== server.slug;
+  const changed = Object.keys(patch).length > 0;
 
   return (
-    <Dialog open={open} onOpenChange={handleOpen}>
+    <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="max-w-sm">
         <DialogHeader><DialogTitle>编辑服务器配置</DialogTitle></DialogHeader>
         <div className="space-y-3">
@@ -560,7 +583,7 @@ function EditServerDialog({ server, open, onOpenChange }: {
         </div>
         <DialogFooter>
           <Button variant="outline" onClick={() => onOpenChange(false)}>取消</Button>
-          <Button onClick={() => mutate()} disabled={isPending || !changed || !name || !slug}>
+          <Button onClick={() => mutate()} disabled={isPending || !changed || !name.trim() || !slug.trim()}>
             {isPending ? '保存中...' : '保存'}
           </Button>
         </DialogFooter>
@@ -573,12 +596,21 @@ function DanglingDirPanel({ sourceKind, sourceId }: {
   sourceKind: 'local' | 'remote';
   sourceId: string;
 }) {
-  const { data: issues = [] } = useQuery({
+  const issuesQuery = useQuery({
     queryKey: ['data-dir-issues', sourceKind, sourceId],
     queryFn: () => api.get<DataDirIssueDto[]>(`/admin/data-dirs/issues?sourceKind=${sourceKind}&sourceId=${sourceId}`),
-    refetchInterval: 30_000,
+    refetchInterval: (query) => queryPollInterval(query.state, { activeIntervalMs: 30_000 }),
   });
+  const issues = issuesQuery.data ?? [];
 
+  if (issuesQuery.isLoading) return <QueryLoadingState label="检查目录一致性..." />;
+  if (issuesQuery.error) return (
+    <QueryErrorState
+      error={issuesQuery.error}
+      resourceName="目录一致性状态"
+      onRetry={() => { void issuesQuery.refetch(); }}
+    />
+  );
   if (issues.length === 0) return null;
 
   const orphans = issues.filter((i) => i.kind === 'orphan');

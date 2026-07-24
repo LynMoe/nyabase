@@ -37,7 +37,7 @@ export function RequireAnyCapability({
   capabilities,
   children,
 }: {
-  capabilities: Capability[];
+  capabilities: readonly Capability[];
   children: ReactNode;
 }) {
   const user = useAuthStore((state) => state.user);

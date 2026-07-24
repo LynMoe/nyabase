@@ -128,7 +128,6 @@ export class AgentWsClient extends EventEmitter {
       this.helloSentGeneration = 0;
       this.admissionReadyGeneration = 0;
       console.log('[WS] Connected');
-      this.reconnectDelay = 1000;
       this.startPingTimer(socket, () => awaitingPong, (value) => { awaitingPong = value; });
     });
 
@@ -146,6 +145,12 @@ export class AgentWsClient extends EventEmitter {
             return;
           }
           this.admissionReadyGeneration = generation;
+          // A TCP/WebSocket open is not a successful control-plane connection:
+          // authentication, quarantine, or admission fencing may still reject
+          // it. Reset backoff only after Backend durably admits this generation
+          // so repeated pre-admission closes cannot become a 1 Hz reconnect
+          // storm.
+          this.reconnectDelay = 1000;
           this.enqueueConnectionInitialization(socket, generation);
           return;
         }

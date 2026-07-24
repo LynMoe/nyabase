@@ -37,6 +37,20 @@ export function resolveGpuIndices(
       return [...new Set(knownGpuIndices)].sort((a, b) => a - b);
 
     case GpuGrantMode.Indices:
-      return [...new Set(grant.gpuIndices)].sort((a, b) => a - b);
+      if (grant.gpuIndices.length === 0) {
+        throw new BadRequestException('At least one GPU index must be granted in indices mode');
+      }
+      if (knownGpuIndices.length === 0) {
+        throw new BadRequestException('GPU inventory unavailable for this server');
+      }
+      {
+        const known = new Set(knownGpuIndices);
+        const selected = [...new Set(grant.gpuIndices)].sort((a, b) => a - b);
+        const unavailable = selected.find((index) => !known.has(index));
+        if (unavailable !== undefined) {
+          throw new BadRequestException(`GPU index ${unavailable} is not present on this server`);
+        }
+        return selected;
+      }
   }
 }

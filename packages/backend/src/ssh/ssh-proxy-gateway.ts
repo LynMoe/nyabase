@@ -18,6 +18,7 @@ import {
   SSH_PROXY_SNAPSHOT_STALE_MAX_MS,
   SSH_PROXY_SNAPSHOT_STALE_MIN_MS,
   MAX_SSH_PROXY_SNAPSHOT_BYTES,
+  MAX_SSH_PROXY_STATUS_CONNECTIONS,
   type SshProxyBackendMessage,
   type SshProxyStatusReport,
 } from '@nyabase/common';
@@ -207,15 +208,18 @@ export class SshProxyGateway implements OnModuleInit, OnModuleDestroy {
       .sort((a, b) => b - a)[0];
     return {
       connectedProxies: this.clients.size,
-      activeConnections: proxies.reduce((sum, proxy) => sum + proxy.activeConnections, 0),
-      totalConnections: proxies.reduce((sum, proxy) => sum + proxy.totalConnections, 0),
-      totalRejectedConnections: proxies.reduce((sum, proxy) => sum + proxy.totalRejectedConnections, 0),
-      totalClosedConnections: proxies.reduce((sum, proxy) => sum + proxy.totalClosedConnections, 0),
-      totalBytesFromClient: proxies.reduce((sum, proxy) => sum + proxy.totalBytesFromClient, 0),
-      totalBytesToClient: proxies.reduce((sum, proxy) => sum + proxy.totalBytesToClient, 0),
-      bandwidthInBps: proxies.reduce((sum, proxy) => sum + proxy.bandwidthInBps, 0),
-      bandwidthOutBps: proxies.reduce((sum, proxy) => sum + proxy.bandwidthOutBps, 0),
-      updatedAt: last ? new Date(last).toISOString() : null,
+      activeConnections: boundedStatusSum(proxies, (proxy) => proxy.activeConnections),
+      totalConnections: boundedStatusSum(proxies, (proxy) => proxy.totalConnections),
+      totalRejectedConnections: boundedStatusSum(
+        proxies,
+        (proxy) => proxy.totalRejectedConnections,
+      ),
+      totalClosedConnections: boundedStatusSum(proxies, (proxy) => proxy.totalClosedConnections),
+      totalBytesFromClient: boundedStatusSum(proxies, (proxy) => proxy.totalBytesFromClient),
+      totalBytesToClient: boundedStatusSum(proxies, (proxy) => proxy.totalBytesToClient),
+      bandwidthInBps: boundedStatusSum(proxies, (proxy) => proxy.bandwidthInBps),
+      bandwidthOutBps: boundedStatusSum(proxies, (proxy) => proxy.bandwidthOutBps),
+      updatedAt: safeStatusTimestampIso(last),
       proxies,
     };
   }
@@ -456,7 +460,16 @@ export class SshProxyGateway implements OnModuleInit, OnModuleDestroy {
   private resolveDisconnectAll(requestId: string, disconnected: number, client: WebSocket): void {
     const pending = this.pendingDisconnectAll.get(requestId);
     if (!pending || !pending.awaiting.delete(client)) return;
-    pending.disconnected += disconnected;
+    // Wire validation already enforces this physical per-proxy cap. Retain a
+    // second arithmetic boundary here so an internal/corrupt call can never
+    // turn the aggregate into Infinity or an unsafe JSON/audit count.
+    const boundedDisconnected = Number.isSafeInteger(disconnected)
+      ? Math.max(0, Math.min(MAX_SSH_PROXY_STATUS_CONNECTIONS, disconnected))
+      : 0;
+    pending.disconnected = Math.min(
+      MAX_SSH_PROXY_CLIENTS * MAX_SSH_PROXY_STATUS_CONNECTIONS,
+      pending.disconnected + boundedDisconnected,
+    );
     if (pending.awaiting.size > 0) return;
     this.pendingDisconnectAll.delete(requestId);
     clearTimeout(pending.timeout);
@@ -506,4 +519,22 @@ export class SshProxyGateway implements OnModuleInit, OnModuleDestroy {
       clearTimeout(timer);
     }
   }
+}
+
+function safeStatusTimestampIso(value: number | undefined): string | null {
+  if (!Number.isSafeInteger(value) || value === undefined || value <= 0) return null;
+  const timestamp = new Date(value);
+  if (!Number.isFinite(timestamp.getTime())) return null;
+  return timestamp.toISOString();
+}
+
+function boundedStatusSum<T>(rows: readonly T[], valueFor: (row: T) => number): number {
+  let result = 0;
+  for (const row of rows) {
+    const value = valueFor(row);
+    if (!Number.isFinite(value) || value < 0) continue;
+    result += value;
+    if (result >= Number.MAX_SAFE_INTEGER) return Number.MAX_SAFE_INTEGER;
+  }
+  return result;
 }

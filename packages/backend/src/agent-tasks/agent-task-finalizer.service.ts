@@ -33,6 +33,8 @@ import { HttpProxyBindingEntity } from '../entities/http-proxy-binding.entity.js
 import { HttpHostnameReservationEntity } from '../entities/http-hostname-reservation.entity.js';
 import { validateTerminalAgentResult } from './agent-task-result-validator.js';
 import { UserEntity } from '../entities/user.entity.js';
+import { SshPublicKeyEntity } from '../entities/ssh-public-key.entity.js';
+import { UserInternalSshKeyEntity } from '../entities/user-internal-ssh-key.entity.js';
 
 /**
  * Applies only the durable control-plane projection of an Agent result.
@@ -128,7 +130,18 @@ export class AgentTaskFinalizerService {
       case AgentTaskKind.ContainerStart:
       case AgentTaskKind.ContainerStop:
       case AgentTaskKind.ContainerRestart:
+        await this.markContainerFailed(manager, task, ContainerPhase.Failed, error);
+        await this.alignContainerPowerFromFailure(manager, task, observed);
+        return;
       case AgentTaskKind.ContainerSshEnsure:
+        if (this.isPreApplicationSshRuntimeStop(task, error, observed)) {
+          // The runtime stopped before SSH convergence touched it. Preserve
+          // the durable Running intent and return ownership to report-side
+          // power recovery; an actual SSH convergence failure still follows
+          // the fail-closed safety-stop branch above.
+          await this.finalizeContainerUpdate(manager, task);
+          return;
+        }
         await this.markContainerFailed(manager, task, ContainerPhase.Failed, error);
         await this.alignContainerPowerFromFailure(manager, task, observed);
         return;
@@ -451,6 +464,37 @@ export class AgentTaskFinalizerService {
       powerIntent,
       updatedAt: new Date(),
     });
+  }
+
+  private isPreApplicationSshRuntimeStop(
+    task: AgentTaskEntity,
+    error: unknown,
+    observed: unknown,
+  ): boolean {
+    if (this.string(this.record(error)?.code) !== 'container_ssh_runtime_stopped') return false;
+    const record = this.record(observed);
+    const rollback = this.record(record?.safetyRollback);
+    const payload = this.record(task.payloadJson);
+    if (
+      !record
+      || record.applied !== false
+      || record.running !== false
+      || !rollback
+      || rollback.running !== false
+      || Array.isArray(record.runtimeIds)
+      || Array.isArray(rollback.runtimeIds)
+    ) return false;
+    const runtimeId = this.string(payload?.runtimeId);
+    if (
+      !runtimeId
+      || this.string(payload?.containerId) !== task.resourceId
+    ) return false;
+    return this.string(record.containerId) === task.resourceId
+      && this.string(record.serverId) === task.serverId
+      && this.string(record.runtimeId) === runtimeId
+      && this.string(rollback.containerId) === task.resourceId
+      && this.string(rollback.serverId) === task.serverId
+      && this.string(rollback.runtimeId) === runtimeId;
   }
 
   private async finalizeContainerDelete(manager: EntityManager, task: AgentTaskEntity): Promise<void> {
@@ -851,6 +895,11 @@ export class AgentTaskFinalizerService {
       }
     }
 
+    // The initial delete request already removes both key classes when it
+    // enters Deleting. Repeat idempotently for upgrade-era Deleting rows before
+    // the same transaction makes the terminal tombstone visible.
+    await manager.delete(SshPublicKeyEntity, { userId: user.id });
+    await manager.delete(UserInternalSshKeyEntity, { userId: user.id });
     await manager.delete(QuotaDesiredEntity, { userId: user.id });
     await manager.update(UserEntity, user.id, { status: UserStatus.Deleted });
   }

@@ -13,6 +13,7 @@ import {
   AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle,
 } from '../components/ui/alert-dialog.js';
 import { toast } from '../hooks/use-toast.js';
+import { clearLocalSession } from '../lib/auth-session.js';
 
 type PasswordErrors = Partial<Record<'currentPassword' | 'newPassword' | 'confirmPassword', string>>;
 type SshKeyErrors = Partial<Record<'name' | 'keyText', string>>;
@@ -78,9 +79,11 @@ function PasswordPanel({ userId }: { userId: string }) {
       currentPassword: form.currentPassword,
     }),
     onSuccess: () => {
-      toast({ title: '密码已修改' });
+      toast({ title: '密码已修改，请使用新密码重新登录' });
       setForm({ currentPassword: '', newPassword: '', confirmPassword: '' });
       setErrors({});
+      clearLocalSession();
+      window.location.replace('/login?reason=password-changed');
     },
     onError: (e) => toast({ title: '修改失败', description: e.message, variant: 'destructive' }),
   });
@@ -151,10 +154,12 @@ function SshKeysPanel({ userId }: { userId: string }) {
   const [nameTouched, setNameTouched] = useState(false);
 
   const queryKey = ['ssh-keys', userId];
-  const { data: keys = [], isFetching, refetch } = useQuery({
+  const keysQuery = useQuery({
     queryKey,
     queryFn: () => api.get<SshPublicKeyDto[]>(`/users/${userId}/ssh-keys`),
   });
+  const keys = keysQuery.data ?? [];
+  const { isFetching, refetch } = keysQuery;
 
   const validate = () => {
     const resolvedName = resolveKeyName(form.name, form.keyText);
@@ -228,7 +233,14 @@ function SshKeysPanel({ userId }: { userId: string }) {
       </div>
 
       <div className="rounded-lg border border-border bg-background overflow-hidden">
-        {keys.length === 0 ? (
+        {keysQuery.isLoading ? (
+          <div className="px-4 py-8 text-center text-sm text-muted-foreground">正在加载 SSH 公钥...</div>
+        ) : keysQuery.isError ? (
+          <div className="px-4 py-6 space-y-2 text-center">
+            <p className="text-sm text-destructive">SSH 公钥加载失败，当前列表不可用</p>
+            <Button size="sm" variant="outline" onClick={() => { void refetch(); }}>重试</Button>
+          </div>
+        ) : keys.length === 0 ? (
           <div className="px-4 py-8 text-center">
             <KeyRound className="h-8 w-8 mx-auto text-muted-foreground/30" />
             <p className="text-sm text-muted-foreground mt-2">暂无 SSH 公钥</p>
@@ -307,7 +319,7 @@ function SshKeysPanel({ userId }: { userId: string }) {
         <div className="flex justify-end">
           <Button
             onClick={() => { if (validate()) addKey.mutate(); }}
-            disabled={addKey.isPending}
+            disabled={addKey.isPending || keysQuery.isError}
           >
             <Plus className="h-4 w-4" />
             {addKey.isPending ? '添加中...' : '添加公钥'}

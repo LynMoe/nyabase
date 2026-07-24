@@ -9,6 +9,7 @@ import { AgentWsClient } from './ws/client.js';
 import { DOCKER_READ_DEADLINES, DockerClient } from './docker/docker-client.js';
 import { DockerPhysicalReferenceGuard } from './docker/physical-reference-guard.js';
 import { DaemonManager } from './docker/daemon-manager.js';
+import { DockerEventNdjsonDecoder } from './docker/docker-event-decoder.js';
 import { XfsQuotaManager } from './quota/xfs-quota.js';
 import { DataDirsManager, readLocalDataSourceIdentity } from './datadirs/data-dirs.js';
 import { RemoteFsMounter } from './fs/remote-fs-mounter.js';
@@ -56,10 +57,10 @@ export function taskExecBarrierRuntimeId(
   parsedPayload: unknown,
 ): string | null {
   if (!EXEC_BARRIER_TASK_KINDS.has(kind)) return null;
-  return parsedPayload
-    && typeof parsedPayload === 'object'
-    && !Array.isArray(parsedPayload)
-    && typeof (parsedPayload as { runtimeId?: unknown }).runtimeId === 'string'
+  return parsedPayload &&
+    typeof parsedPayload === 'object' &&
+    !Array.isArray(parsedPayload) &&
+    typeof (parsedPayload as { runtimeId?: unknown }).runtimeId === 'string'
     ? (parsedPayload as { runtimeId: string }).runtimeId
     : null;
 }
@@ -89,11 +90,14 @@ const DOCKER_STATE_TO_STATUS: Record<string, ContainerStatus> = {
 const CONTAINER_STATS_SHARD_SIZE = 20;
 const DOCKER_EVENT_RECONNECT_MS = 1_000;
 export const STATE_REPORT_CONTAINER_CONCURRENCY = 64;
-/** Three exact inspect reads, three graph-path fallbacks, and one SSH read. */
-export const STATE_REPORT_CONTAINER_WORST_CASE_MS =
-  (6 * DOCKER_READ_DEADLINES.inspect) + 10_000;
+/** Three exact inspect reads, three graph-path fallbacks, one absence probe, and one SSH read. */
+export const STATE_REPORT_CONTAINER_WORST_CASE_MS = 7 * DOCKER_READ_DEADLINES.inspect + 10_000;
 /** Fires well before the Backend's 5-minute initial report gate. */
 export const AUTHORITATIVE_INVENTORY_DEADLINE_MS = 90_000;
+/** A transient Docker lifecycle race gets at most two complete re-samples. */
+export const AUTHORITATIVE_INVENTORY_RESAMPLE_LIMIT = 3;
+/** Re-sampling never extends the outer authoritative inventory deadline. */
+export const AUTHORITATIVE_INVENTORY_RESAMPLE_DEADLINE_MS = 45_000;
 /** Bounded opportunity for inventoryFault / close 4502 to reach the Backend. */
 export const AUTHORITATIVE_INVENTORY_FAIL_STOP_GRACE_MS = 750;
 const execFileAsync = promisify(execFile);
@@ -105,11 +109,9 @@ async function inspectLocalDisk(mountPoint: string): Promise<{
 }> {
   if (!fs.existsSync(mountPoint)) return { exists: false, fsType: '', isXfs: false };
   try {
-    const { stdout } = await execFileAsync(
-      'stat',
-      ['-f', '-c', '%T', mountPoint],
-      { timeout: 5_000 },
-    );
+    const { stdout } = await execFileAsync('stat', ['-f', '-c', '%T', mountPoint], {
+      timeout: 5_000,
+    });
     const fsType = stdout.trim();
     return { exists: true, fsType, isXfs: fsType.toLowerCase() === 'xfs' };
   } catch {
@@ -123,6 +125,21 @@ class AuthoritativeInventoryTooLargeError extends Error {
       `Authoritative inventory frame is ${encodedBytes} bytes; maximum is ${MAX_AGENT_WS_FRAME_BYTES}`,
     );
   }
+}
+
+/**
+ * A managed runtime may be stopped or removed by an external actor while a
+ * read-only full inventory is in flight. That observation is not a corrupt
+ * inventory: the whole sample must be discarded and the coalesced Docker
+ * event (or periodic report) must collect one fresh authoritative snapshot.
+ */
+class RetryableAuthoritativeInventoryRaceError extends Error {}
+
+function isDockerContainerNotFound(error: unknown): boolean {
+  return (
+    ((typeof error === 'object' && error !== null) || typeof error === 'function') &&
+    (error as { statusCode?: unknown }).statusCode === 404
+  );
 }
 
 function scheduleAgentKillAfterAuthoritativeInventoryDeadline(error: Error): void {
@@ -156,16 +173,14 @@ export async function mapWithConcurrency<T, U>(
       results[index] = await mapper(values[index], index);
     }
   };
-  await Promise.all(Array.from(
-    { length: Math.min(concurrency, values.length) },
-    () => worker(),
-  ));
+  await Promise.all(Array.from({ length: Math.min(concurrency, values.length) }, () => worker()));
   return results;
 }
 
 export class AgentApplication {
   private stateReportSequence = 0;
   private reportingGeneration = 0;
+  private pendingReconcileProofNonce: string | null = null;
   private helloGeneration = 0;
   private readonly docker: DockerClient;
   private readonly quota: XfsQuotaManager;
@@ -215,17 +230,29 @@ export class AgentApplication {
     this.hostMetrics = new HostMetricsCollector();
     this.dropbearManager = new DropbearManager(this.docker, withContainerMutex);
 
-    this.remoteFsMounter = new RemoteFsMounter((_status: RemoteFsMountStatus) => {
-      // Runtime projections have one ordered path: a coalesced full report.
-      // If a mount changes during collection, AgentTaskRunner retains one
-      // fresh ordered follow-up rather than racing an incremental message.
-      void this.sendStateReport();
-    }, {
-      physicalReferenceGuard,
-      forbiddenHostPaths: [
-        config.dockerRoot,
-        ...config.localDataSources.map((source) => source.mountPoint),
-      ],
+    this.remoteFsMounter = new RemoteFsMounter(
+      (_status: RemoteFsMountStatus) => {
+        // Runtime projections have one ordered path: a coalesced full report.
+        // If a mount changes during collection, AgentTaskRunner retains one
+        // fresh ordered follow-up rather than racing an incremental message.
+        void this.sendStateReport();
+      },
+      {
+        physicalReferenceGuard,
+        forbiddenHostPaths: [
+          config.dockerRoot,
+          ...config.localDataSources.map((source) => source.mountPoint),
+        ],
+      },
+    );
+    this.dataDirs.setRemoteSourceVerifier(async (source) => {
+      const spec = this.remoteFsMounter.getSpec(source.id);
+      if (
+        !spec
+        || spec.hostMountPoint !== source.root
+        || remoteFsSourceIdentity(spec.params) !== source.identity
+      ) return null;
+      return this.remoteFsMounter.observeMountedIdentity(spec);
     });
 
     this.wsClient = new AgentWsClient({
@@ -235,6 +262,7 @@ export class AgentApplication {
       onConnect: (generation) => this.onConnect(generation),
       onDisconnect: () => {
         this.reportingGeneration = 0;
+        this.pendingReconcileProofNonce = null;
         this.helloGeneration = 0;
         this.taskRunner.resetConnection();
         this.direct.resetConnection();
@@ -246,11 +274,15 @@ export class AgentApplication {
     });
 
     this.direct = new DirectCommandDispatcher(
-      config, this.docker, this.remoteFsMounter, this.wsClient,
+      config,
+      this.docker,
+      this.remoteFsMounter,
+      this.wsClient,
       this.dropbearManager,
       this.quota,
       (specs, previousIds) => this.syncRemoteFsSources(specs, previousIds),
       () => this.ensurePhysicalBootstrap(),
+      () => this.assertRuntimePhysicalEnvironment(),
     );
     const handlers = createAgentTaskHandlerRegistry({
       config,
@@ -264,10 +296,14 @@ export class AgentApplication {
     });
     this.taskRunner = new AgentTaskRunner(
       handlers,
-      (result) => this.sendIfConnected({
-        id: uuidv4(), ts: Date.now(), kind: 'task.result.v1', payload: result,
-      }),
-      () => this.storageIdentity.assertCurrent(),
+      (result) =>
+        this.sendIfConnected({
+          id: uuidv4(),
+          ts: Date.now(),
+          kind: 'task.result.v1',
+          payload: result,
+        }),
+      () => this.assertRuntimePhysicalEnvironment(),
       async (task, parsedPayload) => {
         const runtimeId = taskExecBarrierRuntimeId(task.kind, parsedPayload);
         const release = runtimeId
@@ -277,10 +313,8 @@ export class AgentApplication {
         return release;
       },
     );
-    this.router = new AgentMessageRouter(
-      this.taskRunner,
-      this.direct,
-      () => this.storageIdentity.assertCurrent(),
+    this.router = new AgentMessageRouter(this.taskRunner, this.direct, () =>
+      this.storageIdentity.assertCurrent(),
     );
 
     this.wsClient.setMessageHandler((msg) => this.router.handle(msg));
@@ -291,25 +325,27 @@ export class AgentApplication {
     // WebSocket exists so a replacement Agent also rolls back orphaned execs
     // while Backend is offline. Only static, already-proved host identity is
     // used; durable desired state remains exclusively in Backend.
+    // Focused prototype harnesses may intentionally omit constructor-owned
+    // dependencies; a real AgentApplication always owns the quota manager.
+    this.quota?.recoverProjectsFileState?.();
     await this.ensureRuntimeBootstrap();
     await this.validateLocalDataSources();
     this.wsClient.on('diskChanged', () => {
       void this.sendStateReport();
     });
     this.wsClient.on('dataDirChanged', () => void this.sendStateReport());
-    this.wsClient.on('reconcile', () => {
+    this.wsClient.on('reconcile', (payload: { proofNonce?: string }) => {
       this.reportingGeneration = this.wsClient.connectionGeneration;
-      void this.sendStateReport();
+      void this.sendStateReport(payload.proofNonce);
       void this.sendDockerDaemonStatus();
     });
 
     setInterval(() => {
-      if (
-        this.wsClient.connected
-        && this.helloGeneration === this.wsClient.connectionGeneration
-      ) {
+      if (this.wsClient.connected && this.helloGeneration === this.wsClient.connectionGeneration) {
         this.wsClient.send({
-          id: uuidv4(), ts: Date.now(), kind: 'heartbeat',
+          id: uuidv4(),
+          ts: Date.now(),
+          kind: 'heartbeat',
           payload: { serverId: this.config.serverId, uptime: process.uptime() },
         } as AgentToBackendMessage);
       }
@@ -325,7 +361,9 @@ export class AgentApplication {
     if (this.gpuActive) {
       void probeGpuAvailability().then((has) => {
         if (!has) {
-          console.log('[Agent] nvidia-smi probe failed or no GPUs detected — disabling GPU metrics.');
+          console.log(
+            '[Agent] nvidia-smi probe failed or no GPUs detected — disabling GPU metrics.',
+          );
           this.gpuActive = false;
         }
       });
@@ -335,16 +373,28 @@ export class AgentApplication {
 
   stop(): void {
     this.reportingGeneration = 0;
+    this.pendingReconcileProofNonce = null;
     this.helloGeneration = 0;
     this.wsClient.stop();
+  }
+
+  private async assertRuntimePhysicalEnvironment(): Promise<void> {
+    this.storageIdentity.assertCurrent();
+    // Some focused prototype harnesses intentionally omit constructor-owned
+    // dependencies. A real AgentApplication always has DaemonManager here.
+    await this.daemonManager?.assertRuntimeIdentity?.();
+    this.storageIdentity.assertCurrent();
   }
 
   private async validateLocalDataSources(): Promise<void> {
     for (const source of this.config.localDataSources) {
       const check = await inspectLocalDisk(source.mountPoint);
-      if (!check.exists) throw new Error(`Local data source path does not exist: ${source.mountPoint}`);
+      if (!check.exists)
+        throw new Error(`Local data source path does not exist: ${source.mountPoint}`);
       if (!check.isXfs) {
-        throw new Error(`Local data source ${source.mountPoint} uses filesystem ${check.fsType}, must be XFS`);
+        throw new Error(
+          `Local data source ${source.mountPoint} uses filesystem ${check.fsType}, must be XFS`,
+        );
       }
       const observed = this.dataDirs.inspectSource(source.id);
       if (!observed.ready) {
@@ -390,24 +440,26 @@ export class AgentApplication {
     await this.taskRunner.waitForIdle();
     this.storageIdentity.assertCurrent();
     await this.ensureRuntimeBootstrap();
-    this.storageIdentity.assertCurrent();
+    await this.assertRuntimePhysicalEnvironment();
     await this.docker.ensureMacvlanNetwork();
-    this.storageIdentity.assertCurrent();
+    await this.assertRuntimePhysicalEnvironment();
   }
 
   private ensureRuntimeBootstrap(): Promise<void> {
     if (!this.runtimeBootstrap) {
       const attempt = (async () => {
         this.storageIdentity.assertCurrent();
-        console.log('[Agent] Quiescing previous Docker mutation domain before network admission...');
+        console.log(
+          '[Agent] Quiescing previous Docker mutation domain before network admission...',
+        );
         await quiesceDockerBeforeAgentStartup();
         this.storageIdentity.assertCurrent();
         console.log('[Agent] Reconciling nyabase-docker daemon for stateless recovery...');
         await this.daemonManager.reconcile(this.config.serverId);
-        this.storageIdentity.assertCurrent();
+        await this.assertRuntimePhysicalEnvironment();
         console.log('[Agent] Quiescing managed containers for stateless process recovery...');
         await this.docker.quiesceManagedContainersForStatelessRecovery();
-        this.storageIdentity.assertCurrent();
+        await this.assertRuntimePhysicalEnvironment();
       })();
       this.runtimeBootstrap = attempt;
       void attempt.catch(() => {
@@ -421,7 +473,10 @@ export class AgentApplication {
   }
 
   private async sendHello(generation: number): Promise<void> {
-    const [gpus, diskInfos] = [await this.gpuMonitor.getGpuInfo(), this.dataDirs.getLocalDiskInfos()];
+    const [gpus, diskInfos] = [
+      await this.gpuMonitor.getGpuInfo(),
+      this.dataDirs.getLocalDiskInfos(),
+    ];
     this.storageIdentity.assertCurrent();
     const configFingerprint = getAgentConfigFingerprint(
       this.config,
@@ -429,30 +484,35 @@ export class AgentApplication {
       this.storageIdentity.dockerRootIdentity,
     );
 
-    const sent = this.wsClient.send({
-      id: uuidv4(), ts: Date.now(), kind: 'hello',
-      payload: {
-        serverId: this.config.serverId,
-        hostFingerprint: getHostFingerprint(),
-        configFingerprint,
-        hostname: os.hostname(),
-        kernelVersion: os.release(),
-        cpuCores: os.cpus().length,
-        totalMemBytes: os.totalmem(),
-        disks: diskInfos,
-        gpus,
-        macvlanCidr: this.config.macvlanCidr,
-        macvlanGateway: this.config.macvlanGateway,
-        macvlanReservedIps: [...this.config.reservedIps],
-        macvlanIface: this.config.parentIface,
-        dockerRoot: this.config.dockerRoot,
-        agentVersion: this.config.agentVersion,
-        // Docker is deliberately untouched until Backend accepts this static
-        // identity and grants bootstrap. The first full report carries the
-        // authoritative image inventory.
-        localImages: [],
-      },
-    } as AgentToBackendMessage, generation);
+    const sent = this.wsClient.send(
+      {
+        id: uuidv4(),
+        ts: Date.now(),
+        kind: 'hello',
+        payload: {
+          serverId: this.config.serverId,
+          hostFingerprint: getHostFingerprint(),
+          configFingerprint,
+          hostname: os.hostname(),
+          kernelVersion: os.release(),
+          cpuCores: os.cpus().length,
+          totalMemBytes: os.totalmem(),
+          disks: diskInfos,
+          gpus,
+          macvlanCidr: this.config.macvlanCidr,
+          macvlanGateway: this.config.macvlanGateway,
+          macvlanReservedIps: [...this.config.reservedIps],
+          macvlanIface: this.config.parentIface,
+          dockerRoot: this.config.dockerRoot,
+          agentVersion: this.config.agentVersion,
+          // Docker is deliberately untouched until Backend accepts this static
+          // identity and grants bootstrap. The first full report carries the
+          // authoritative image inventory.
+          localImages: [],
+        },
+      } as AgentToBackendMessage,
+      generation,
+    );
     if (!sent) throw new Error('Agent connection changed before hello could be sent');
   }
 
@@ -504,31 +564,52 @@ export class AgentApplication {
 
   private async captureAndSendDockerDaemonStatus(generation: number): Promise<void> {
     if (
-      !this.wsClient.connected
-      || generation !== this.wsClient.connectionGeneration
-      || generation !== this.reportingGeneration
-    ) return;
+      !this.wsClient.connected ||
+      generation !== this.wsClient.connectionGeneration ||
+      generation !== this.reportingGeneration
+    )
+      return;
     try {
-      this.storageIdentity.assertCurrent();
+      await this.assertRuntimePhysicalEnvironment();
       const status = await this.daemonManager.getStatus(this.config.serverId);
-      this.storageIdentity.assertCurrent();
-      this.wsClient.send({
-        id: uuidv4(), ts: Date.now(), kind: 'dockerDaemonStatus', payload: status,
-      } as AgentToBackendMessage, generation);
+      await this.assertRuntimePhysicalEnvironment();
+      this.wsClient.send(
+        {
+          id: uuidv4(),
+          ts: Date.now(),
+          kind: 'dockerDaemonStatus',
+          payload: status,
+        } as AgentToBackendMessage,
+        generation,
+      );
     } catch (e) {
       console.warn('[Agent] Failed to send dockerDaemonStatus:', e);
     }
   }
 
-  private async sendStateReport(): Promise<void> {
+  private async sendStateReport(proofNonce?: string): Promise<void> {
+    if (proofNonce) this.pendingReconcileProofNonce = proofNonce;
+    // Capture eligibility when this closure is scheduled, but claim the
+    // challenge only when the closure actually starts. This prevents a
+    // pre-challenge collector from reading a later nonce, lets a later
+    // coalesced trigger retain a still-pending challenge, and ensures an
+    // ordinary follow-up queued after proof collection starts cannot replay it.
+    const eligibleProofNonce = proofNonce ?? this.pendingReconcileProofNonce ?? undefined;
     const generation = this.wsClient.connectionGeneration;
-    return this.taskRunner.enqueueObservation(
-      'stateReport',
-      () => this.captureAndSendStateReportWithDeadline(generation),
-    );
+    return this.taskRunner.enqueueObservation('stateReport', () => {
+      const requestedProofNonce = eligibleProofNonce
+        && this.pendingReconcileProofNonce === eligibleProofNonce
+        ? eligibleProofNonce
+        : undefined;
+      if (requestedProofNonce) this.pendingReconcileProofNonce = null;
+      return this.captureAndSendStateReportWithDeadline(generation, requestedProofNonce);
+    });
   }
 
-  private async captureAndSendStateReportWithDeadline(generation: number): Promise<void> {
+  private async captureAndSendStateReportWithDeadline(
+    generation: number,
+    proofNonce?: string,
+  ): Promise<void> {
     const timer = setTimeout(() => {
       const error = new Error(
         `Authoritative inventory capture exceeded ${AUTHORITATIVE_INVENTORY_DEADLINE_MS}ms`,
@@ -548,193 +629,236 @@ export class AgentApplication {
       // Keep awaiting the read-only collector after the deadline. This keeps
       // the physical task lane serialized while the retired connection is
       // replaced; reportInventoryFault prevents any late old-generation send.
-      await this.captureAndSendStateReport(generation);
+      await this.captureAndSendStateReport(generation, proofNonce);
     } finally {
       clearTimeout(timer);
     }
   }
 
-  private async captureAndSendStateReport(generation: number): Promise<void> {
+  private async captureAndSendStateReport(generation: number, proofNonce?: string): Promise<void> {
     if (
-      !this.wsClient.connected
-      || generation !== this.wsClient.connectionGeneration
-      || generation !== this.reportingGeneration
-    ) return;
+      !this.wsClient.connected ||
+      generation !== this.wsClient.connectionGeneration ||
+      generation !== this.reportingGeneration
+    )
+      return;
+    const resampleDeadlineAt = Date.now() + AUTHORITATIVE_INVENTORY_RESAMPLE_DEADLINE_MS;
     try {
-      this.storageIdentity.assertCurrent();
-      const sequence = ++this.stateReportSequence;
-      const observedAt = Date.now();
-      const containers = await this.docker.listNyabaseContainers();
-      if (containers.length > MAX_MANAGED_CONTAINERS_PER_AGENT) {
-        throw new Error(
-          `Managed container inventory exceeds ${MAX_MANAGED_CONTAINERS_PER_AGENT}; refusing an unbounded state report`,
-        );
-      }
-
-      const observations = await mapWithConcurrency(
-        containers,
-        STATE_REPORT_CONTAINER_CONCURRENCY,
-        async (container): Promise<ContainerSnapshot> => {
-          if (!container.Id) throw new Error('Managed runtime inventory contains an empty runtime id');
-          const first = await this.docker.inspectContainer(container.Id);
-          const firstLabels = first.Config?.Labels ?? {};
-          const runtime = this.docker.parseContainerRuntimeObservation(firstLabels, first);
-          if (!runtime || first.Id !== container.Id || runtime.serverId !== this.config.serverId) {
+      for (let attempt = 1; attempt <= AUTHORITATIVE_INVENTORY_RESAMPLE_LIMIT; attempt += 1) {
+        try {
+          await this.assertRuntimePhysicalEnvironment();
+          const sequence = ++this.stateReportSequence;
+          const observedAt = Date.now();
+          const containers = await this.docker.listNyabaseContainers();
+          if (containers.length > MAX_MANAGED_CONTAINERS_PER_AGENT) {
             throw new Error(
-              `Managed runtime ${container.Id} has incomplete or foreign immutable identity/network evidence`,
+              `Managed container inventory exceeds ${MAX_MANAGED_CONTAINERS_PER_AGENT}; refusing an unbounded state report`,
             );
           }
-          const firstPaths = this.canonicalRuntimeQuotaPaths(
-            container.Id,
-            await this.docker.getGraphDriverDirs(container.Id, first),
-          );
 
-          // Graph path discovery may cross Docker/containerd boundaries. A
-          // second inspect proves that the exact immutable runtime identity did
-          // not change while those recovery paths were captured.
-          const confirmed = await this.docker.inspectContainer(container.Id);
-          const confirmedLabels = confirmed.Config?.Labels ?? {};
-          const confirmedRuntime = this.docker.parseContainerRuntimeObservation(confirmedLabels, confirmed);
-          const identityKeys = [
-            LABEL.MANAGED,
-            LABEL.CONTAINER_ID,
-            LABEL.SERVER_ID,
-            LABEL.SPEC_GENERATION,
-            LABEL.RUNTIME_SPEC_HASH,
-          ] as const;
-          if (
-            !confirmedRuntime
-            || confirmed.Id !== first.Id
-            || confirmedRuntime.serverId !== this.config.serverId
-            || confirmedRuntime.ip !== runtime.ip
-            || identityKeys.some((key) => confirmedLabels[key] !== firstLabels[key])
-          ) {
-            throw new Error(`Managed runtime ${container.Id} changed identity during full inventory capture`);
-          }
-          const confirmedPaths = this.canonicalRuntimeQuotaPaths(
-            container.Id,
-            await this.docker.getGraphDriverDirs(container.Id, confirmed),
-          );
-          if (
-            confirmedPaths[0] !== firstPaths[0]
-            || confirmedPaths[1] !== firstPaths[1]
-          ) {
-            throw new Error(`Managed runtime ${container.Id} changed writable-layer paths during full inventory capture`);
-          }
+          const observations = await mapWithConcurrency(
+            containers,
+            STATE_REPORT_CONTAINER_CONCURRENCY,
+            async (container): Promise<ContainerSnapshot> => {
+              if (!container.Id)
+                throw new Error('Managed runtime inventory contains an empty runtime id');
+              const first = await this.inspectRuntimeForAuthoritativeInventory(container.Id);
+              const firstLabels = first.Config?.Labels ?? {};
+              const runtime = this.docker.parseContainerRuntimeObservation(firstLabels, first);
+              if (
+                !runtime ||
+                first.Id !== container.Id ||
+                runtime.serverId !== this.config.serverId
+              ) {
+                throw new Error(
+                  `Managed runtime ${container.Id} has incomplete or foreign immutable identity/network evidence`,
+                );
+              }
+              this.authoritativeContainerStatus(container.Id, first.State.Status);
+              const firstPaths = await this.authoritativeRuntimeQuotaPaths(container.Id, first);
 
-          const status: ContainerStatus = DOCKER_STATE_TO_STATUS[confirmed.State.Status] ?? ContainerStatus.Unknown;
-          const sshServer = await this.dropbearManager.inspectContainerSshState(
-            container.Id,
-            status,
-          );
+              // Graph path discovery may cross Docker/containerd boundaries. A
+              // second inspect proves that the exact immutable runtime identity did
+              // not change while those recovery paths were captured.
+              const confirmed = await this.inspectRuntimeForAuthoritativeInventory(container.Id);
+              const confirmedLabels = confirmed.Config?.Labels ?? {};
+              const confirmedRuntime = this.docker.parseContainerRuntimeObservation(
+                confirmedLabels,
+                confirmed,
+              );
+              const identityKeys = [
+                LABEL.MANAGED,
+                LABEL.CONTAINER_ID,
+                LABEL.SERVER_ID,
+                LABEL.SPEC_GENERATION,
+                LABEL.RUNTIME_SPEC_HASH,
+              ] as const;
+              if (
+                !confirmedRuntime ||
+                confirmed.Id !== first.Id ||
+                confirmedRuntime.serverId !== this.config.serverId ||
+                confirmedRuntime.ip !== runtime.ip ||
+                identityKeys.some((key) => confirmedLabels[key] !== firstLabels[key])
+              ) {
+                throw new Error(
+                  `Managed runtime ${container.Id} changed identity during full inventory capture`,
+                );
+              }
+              const confirmedPaths = await this.authoritativeRuntimeQuotaPaths(
+                container.Id,
+                confirmed,
+              );
+              if (confirmedPaths[0] !== firstPaths[0] || confirmedPaths[1] !== firstPaths[1]) {
+                throw new Error(
+                  `Managed runtime ${container.Id} changed writable-layer paths during full inventory capture`,
+                );
+              }
 
-          // SSH observation uses the fail-stop read-only exec lane: it can
-          // never change container power. A final exact inspect still proves
-          // that the runtime identity and status did not change concurrently.
-          const final = await this.docker.inspectContainer(container.Id);
-          const finalLabels = final.Config?.Labels ?? {};
-          const finalRuntime = this.docker.parseContainerRuntimeObservation(finalLabels, final);
-          if (
-            !finalRuntime
-            || final.Id !== confirmed.Id
-            || finalRuntime.serverId !== this.config.serverId
-            || finalRuntime.ip !== confirmedRuntime.ip
-            || identityKeys.some((key) => finalLabels[key] !== confirmedLabels[key])
-          ) {
-            throw new Error(`Managed runtime ${container.Id} changed identity during SSH inventory capture`);
-          }
-          const finalPaths = this.canonicalRuntimeQuotaPaths(
-            container.Id,
-            await this.docker.getGraphDriverDirs(container.Id, final),
-          );
-          if (
-            finalPaths[0] !== confirmedPaths[0]
-            || finalPaths[1] !== confirmedPaths[1]
-          ) {
-            throw new Error(`Managed runtime ${container.Id} changed writable-layer paths during SSH inventory capture`);
-          }
-          const finalStatus: ContainerStatus = DOCKER_STATE_TO_STATUS[final.State.Status]
-            ?? ContainerStatus.Unknown;
-          if (
-            final.State.Status !== confirmed.State.Status
-            || final.State.Running !== confirmed.State.Running
-            || finalStatus !== status
-          ) {
-            throw new Error(`Managed runtime ${container.Id} changed power state during SSH inventory capture`);
-          }
-          return {
-            runtime: { ...finalRuntime, runtimeId: final.Id, quotaPaths: finalPaths },
-            status: finalStatus,
-            sshServer: finalStatus === ContainerStatus.Running
-              ? sshServer
-              : { enabled: false, status: 'container_stopped', user: 'root', port: 22 },
-            labels: {
-              [LABEL.MANAGED]: 'true',
-              [LABEL.CONTAINER_ID]: finalLabels[LABEL.CONTAINER_ID]!,
-              [LABEL.SERVER_ID]: finalLabels[LABEL.SERVER_ID]!,
-              [LABEL.SPEC_GENERATION]: finalLabels[LABEL.SPEC_GENERATION]!,
-              [LABEL.RUNTIME_SPEC_HASH]: finalLabels[LABEL.RUNTIME_SPEC_HASH]!,
+              const status = this.authoritativeContainerStatus(
+                container.Id,
+                confirmed.State.Status,
+              );
+              const sshServer = await this.dropbearManager.inspectContainerSshState(
+                container.Id,
+                status,
+              );
+
+              // SSH observation uses the fail-stop read-only exec lane: it can
+              // never change container power. A final exact inspect still proves
+              // that the runtime identity and status did not change concurrently.
+              const final = await this.inspectRuntimeForAuthoritativeInventory(container.Id);
+              const finalLabels = final.Config?.Labels ?? {};
+              const finalRuntime = this.docker.parseContainerRuntimeObservation(finalLabels, final);
+              if (
+                !finalRuntime ||
+                final.Id !== confirmed.Id ||
+                finalRuntime.serverId !== this.config.serverId ||
+                finalRuntime.ip !== confirmedRuntime.ip ||
+                identityKeys.some((key) => finalLabels[key] !== confirmedLabels[key])
+              ) {
+                throw new Error(
+                  `Managed runtime ${container.Id} changed identity during SSH inventory capture`,
+                );
+              }
+              const finalPaths = await this.authoritativeRuntimeQuotaPaths(container.Id, final);
+              if (finalPaths[0] !== confirmedPaths[0] || finalPaths[1] !== confirmedPaths[1]) {
+                throw new Error(
+                  `Managed runtime ${container.Id} changed writable-layer paths during SSH inventory capture`,
+                );
+              }
+              const finalStatus = this.authoritativeContainerStatus(
+                container.Id,
+                final.State.Status,
+              );
+              if (
+                final.State.Status !== confirmed.State.Status ||
+                final.State.Running !== confirmed.State.Running ||
+                finalStatus !== status
+              ) {
+                throw new RetryableAuthoritativeInventoryRaceError(
+                  `Managed runtime ${container.Id} changed power state during SSH inventory capture`,
+                );
+              }
+              return {
+                runtime: { ...finalRuntime, runtimeId: final.Id, quotaPaths: finalPaths },
+                status: finalStatus,
+                sshServer:
+                  finalStatus === ContainerStatus.Running
+                    ? sshServer
+                    : { enabled: false, status: 'container_stopped', user: 'root', port: 22 },
+                labels: {
+                  [LABEL.MANAGED]: 'true',
+                  [LABEL.CONTAINER_ID]: finalLabels[LABEL.CONTAINER_ID]!,
+                  [LABEL.SERVER_ID]: finalLabels[LABEL.SERVER_ID]!,
+                  [LABEL.SPEC_GENERATION]: finalLabels[LABEL.SPEC_GENERATION]!,
+                  [LABEL.RUNTIME_SPEC_HASH]: finalLabels[LABEL.RUNTIME_SPEC_HASH]!,
+                },
+              };
             },
-          };
-        },
-      );
+          );
 
-      const [dataDirs, xfsProjects, diskInfos, remoteFsMountStatuses, localImages] = await Promise.all([
-        this.dataDirs.listAllDirs(),
-        this.quota.getAllUsages(),
-        Promise.resolve(this.dataDirs.getLocalDiskInfos()),
-        Promise.resolve(this.remoteFsMounter.getAllStatuses()),
-        this.listLocalImages(),
-      ]);
-      this.storageIdentity.assertCurrent();
-      if (dataDirs.length > MAX_MANAGED_DATA_DIRS_PER_AGENT) {
-        throw new Error(
-          `Managed data directory inventory exceeds ${MAX_MANAGED_DATA_DIRS_PER_AGENT}`,
-        );
-      }
+          const [dataDirs, xfsProjects, diskInfos, remoteFsMountStatuses, localImages] =
+            await Promise.all([
+              this.dataDirs.listAllDirs(),
+              this.quota.getAllUsages(),
+              Promise.resolve(this.dataDirs.getLocalDiskInfos()),
+              Promise.resolve(this.remoteFsMounter.getAllStatuses()),
+              this.listLocalImages(),
+            ]);
+          await this.assertRuntimePhysicalEnvironment();
+          if (dataDirs.length > MAX_MANAGED_DATA_DIRS_PER_AGENT) {
+            throw new Error(
+              `Managed data directory inventory exceeds ${MAX_MANAGED_DATA_DIRS_PER_AGENT}`,
+            );
+          }
 
-      const reportMessage = {
-        id: uuidv4(), ts: Date.now(), kind: 'stateReport',
-        payload: {
-          serverId: this.config.serverId,
-          sequence,
-          observedAt,
-          containers: observations,
-          dataDirs,
-          xfsProjects: xfsProjects.map(({ numericUserId, projectId, usedBytes, hardLimitBytes }) => ({
-            numericUserId, projectId, usedBytes, hardLimitBytes,
-          })),
-          disks: diskInfos,
-          localImages,
-          remoteFsMounts: remoteFsMountStatuses,
-        },
-      } as AgentToBackendMessage;
-      const encodedBytes = Buffer.byteLength(JSON.stringify(reportMessage));
-      if (encodedBytes > MAX_AGENT_WS_FRAME_BYTES) {
-        throw new AuthoritativeInventoryTooLargeError(encodedBytes);
-      }
-      if (
-        generation !== this.wsClient.connectionGeneration
-        || generation !== this.reportingGeneration
-      ) return;
-      const sent = this.wsClient.send(reportMessage, generation);
-      if (!sent) {
-        // The complete inventory above is valid; failure to queue its frame
-        // proves only transport loss/backpressure. Do not turn an ordinary
-        // reconnect into a durable inventory quarantine. A stale collector
-        // must also never clear or retire a newer reporting generation.
-        if (
-          generation === this.wsClient.connectionGeneration
-          && generation === this.reportingGeneration
-        ) {
-          this.reportingGeneration = 0;
-          this.wsClient.retireGeneration(
-            generation,
-            1011,
-            'Authoritative inventory transport unavailable',
+          const reportMessage = {
+            id: uuidv4(),
+            ts: Date.now(),
+            kind: 'stateReport',
+            payload: {
+              serverId: this.config.serverId,
+              sequence,
+              observedAt,
+              ...(proofNonce ? { reconcileProofNonce: proofNonce } : {}),
+              containers: observations,
+              dataDirs,
+              xfsProjects: xfsProjects.map(
+                ({ numericUserId, projectId, usedBytes, hardLimitBytes }) => ({
+                  numericUserId,
+                  projectId,
+                  usedBytes,
+                  hardLimitBytes,
+                }),
+              ),
+              disks: diskInfos,
+              localImages,
+              remoteFsMounts: remoteFsMountStatuses,
+            },
+          } as AgentToBackendMessage;
+          const encodedBytes = Buffer.byteLength(JSON.stringify(reportMessage));
+          if (encodedBytes > MAX_AGENT_WS_FRAME_BYTES) {
+            throw new AuthoritativeInventoryTooLargeError(encodedBytes);
+          }
+          if (
+            generation !== this.wsClient.connectionGeneration ||
+            generation !== this.reportingGeneration
+          )
+            return;
+          const sent = this.wsClient.send(reportMessage, generation);
+          if (!sent) {
+            // The complete inventory above is valid; failure to queue its frame
+            // proves only transport loss/backpressure. Do not turn an ordinary
+            // reconnect into a durable inventory quarantine. A stale collector
+            // must also never clear or retire a newer reporting generation.
+            if (
+              generation === this.wsClient.connectionGeneration &&
+              generation === this.reportingGeneration
+            ) {
+              this.reportingGeneration = 0;
+              this.wsClient.retireGeneration(
+                generation,
+                1011,
+                'Authoritative inventory transport unavailable',
+              );
+            }
+            return;
+          }
+          return;
+        } catch (sampleError) {
+          const canResample =
+            sampleError instanceof RetryableAuthoritativeInventoryRaceError &&
+            attempt < AUTHORITATIVE_INVENTORY_RESAMPLE_LIMIT &&
+            Date.now() < resampleDeadlineAt &&
+            generation === this.wsClient.connectionGeneration &&
+            generation === this.reportingGeneration;
+          if (!canResample) throw sampleError;
+          console.warn(
+            `[Agent] Authoritative inventory sample raced a Docker lifecycle transition; ` +
+              `re-sampling ${attempt + 1}/${AUTHORITATIVE_INVENTORY_RESAMPLE_LIMIT}:`,
+            sampleError,
           );
         }
-        return;
       }
     } catch (e) {
       console.warn('[Agent] Failed to send stateReport:', e);
@@ -744,27 +868,32 @@ export class AgentApplication {
 
   private reportInventoryFault(generation: number, error: unknown): void {
     if (
-      generation !== this.wsClient.connectionGeneration
-      || generation !== this.reportingGeneration
-    ) return;
+      generation !== this.wsClient.connectionGeneration ||
+      generation !== this.reportingGeneration
+    )
+      return;
     const tooLarge = error instanceof AuthoritativeInventoryTooLargeError;
-    const message = (error instanceof Error ? error.message : String(error)).slice(0, 2048)
-      || 'Authoritative inventory capture failed';
-    const faultSent = this.wsClient.send({
-      id: uuidv4(),
-      ts: Date.now(),
-      kind: 'inventoryFault',
-      payload: {
-        serverId: this.config.serverId,
-        code: tooLarge
-          ? 'AUTHORITATIVE_INVENTORY_TOO_LARGE'
-          : 'AUTHORITATIVE_INVENTORY_FAILED',
-        message,
-        observedAt: Date.now(),
-      },
-    } as AgentToBackendMessage, generation);
+    const message =
+      (error instanceof Error ? error.message : String(error)).slice(0, 2048) ||
+      'Authoritative inventory capture failed';
+    const faultSent = this.wsClient.send(
+      {
+        id: uuidv4(),
+        ts: Date.now(),
+        kind: 'inventoryFault',
+        payload: {
+          serverId: this.config.serverId,
+          code: tooLarge ? 'AUTHORITATIVE_INVENTORY_TOO_LARGE' : 'AUTHORITATIVE_INVENTORY_FAILED',
+          message,
+          observedAt: Date.now(),
+        },
+      } as AgentToBackendMessage,
+      generation,
+    );
     if (!faultSent) {
-      console.error('[Agent] Inventory fault payload could not be queued; relying on close code 4502');
+      console.error(
+        '[Agent] Inventory fault payload could not be queued; relying on close code 4502',
+      );
     }
     this.reportingGeneration = 0;
     this.wsClient.retireGeneration(
@@ -781,16 +910,69 @@ export class AgentApplication {
     const dockerRoot = path.resolve(this.config.dockerRoot);
     const quotaPaths = [graph.upperDir, graph.workDir] as const;
     if (
-      new Set(quotaPaths).size !== 2
-      || quotaPaths.some((quotaPath) => !path.isAbsolute(quotaPath)
-        || path.resolve(quotaPath) !== quotaPath
-        || !quotaPath.startsWith(`${dockerRoot}${path.sep}`))
+      new Set(quotaPaths).size !== 2 ||
+      quotaPaths.some(
+        (quotaPath) =>
+          !path.isAbsolute(quotaPath) ||
+          path.resolve(quotaPath) !== quotaPath ||
+          !quotaPath.startsWith(`${dockerRoot}${path.sep}`),
+      )
     ) {
       throw new Error(
         `Managed runtime ${runtimeId} has unavailable or non-canonical writable-layer paths`,
       );
     }
     return [quotaPaths[0], quotaPaths[1]];
+  }
+
+  private async inspectRuntimeForAuthoritativeInventory(
+    runtimeId: string,
+  ): Promise<Awaited<ReturnType<DockerClient['inspectContainer']>>> {
+    try {
+      return await this.docker.inspectContainer(runtimeId);
+    } catch (error) {
+      if (isDockerContainerNotFound(error)) {
+        throw new RetryableAuthoritativeInventoryRaceError(
+          `Managed runtime ${runtimeId} disappeared during authoritative inventory capture`,
+        );
+      }
+      throw error;
+    }
+  }
+
+  private authoritativeContainerStatus(runtimeId: string, dockerStatus: string): ContainerStatus {
+    // Docker exposes `removing` while an exact rm is in progress. Treating
+    // that transient as a durable Unknown snapshot can permanently classify
+    // the control-plane resource as runtime_power_state_unsupported before
+    // the next empty full inventory proves runtime_missing. Re-sample the
+    // complete inventory instead, just like an inspect 404 or a power change.
+    if (dockerStatus === 'removing') {
+      throw new RetryableAuthoritativeInventoryRaceError(
+        `Managed runtime ${runtimeId} is being removed during authoritative inventory capture`,
+      );
+    }
+    return DOCKER_STATE_TO_STATUS[dockerStatus] ?? ContainerStatus.Unknown;
+  }
+
+  private async authoritativeRuntimeQuotaPaths(
+    runtimeId: string,
+    inspected: Awaited<ReturnType<DockerClient['inspectContainer']>>,
+  ): Promise<[string, string]> {
+    const graph = await this.docker.getGraphDriverDirs(runtimeId, inspected);
+    if (!graph.upperDir || !graph.workDir) {
+      try {
+        await this.docker.inspectContainer(runtimeId);
+      } catch (error) {
+        if (isDockerContainerNotFound(error)) {
+          throw new RetryableAuthoritativeInventoryRaceError(
+            `Managed runtime ${runtimeId} disappeared while writable-layer paths were captured`,
+          );
+        }
+        // Preserve the missing-path integrity fault below. A timeout, transport
+        // error, or any non-404 response cannot prove a lifecycle race.
+      }
+    }
+    return this.canonicalRuntimeQuotaPaths(runtimeId, graph);
   }
 
   private async collectAndSendMetrics(): Promise<void> {
@@ -806,10 +988,11 @@ export class AgentApplication {
 
   private async captureAndSendMetrics(generation: number): Promise<void> {
     if (
-      !this.wsClient.connected
-      || generation !== this.wsClient.connectionGeneration
-      || generation !== this.reportingGeneration
-    ) return;
+      !this.wsClient.connected ||
+      generation !== this.wsClient.connectionGeneration ||
+      generation !== this.reportingGeneration
+    )
+      return;
 
     const disks = this.dataDirs.getLocalDiskInfos();
     const hostPoints = this.hostMetrics.collectHostMetrics(this.config.serverId, disks);
@@ -822,7 +1005,12 @@ export class AgentApplication {
 
     const containerOwnerMap = this.gpuContainerIdentityMap(containers);
     const gpuPoints = this.gpuActive
-      ? this.gpuMonitor.buildMetrics(gpuStats, gpuProcesses, containerOwnerMap, this.config.serverId)
+      ? this.gpuMonitor.buildMetrics(
+          gpuStats,
+          gpuProcesses,
+          containerOwnerMap,
+          this.config.serverId,
+        )
       : [];
 
     // Round-robin shard the per-container `stats` work to avoid hammering the
@@ -830,15 +1018,15 @@ export class AgentApplication {
     // CONTAINER_STATS_SHARD_SIZE running containers; subsequent cycles rotate.
     const running = containers.filter((c) => c.State === 'running');
     const shard = pickShard(running, this.statsShardCursor, CONTAINER_STATS_SHARD_SIZE);
-    this.statsShardCursor = running.length === 0
-      ? 0
-      : (this.statsShardCursor + shard.length) % running.length;
+    this.statsShardCursor =
+      running.length === 0 ? 0 : (this.statsShardCursor + shard.length) % running.length;
 
     const containerResults = await Promise.allSettled(
       shard.map((c) => this.collectContainerMetrics(c)),
     );
-    const containerPoints: MetricPoint[] = containerResults
-      .flatMap((r) => (r.status === 'fulfilled' ? r.value : []));
+    const containerPoints: MetricPoint[] = containerResults.flatMap((r) =>
+      r.status === 'fulfilled' ? r.value : [],
+    );
 
     const userDiskPoints: MetricPoint[] = [];
     try {
@@ -852,21 +1040,28 @@ export class AgentApplication {
           ts,
         });
       }
-    } catch { /* quota unavailable */ }
+    } catch {
+      /* quota unavailable */
+    }
 
     const collectedPoints = [...hostPoints, ...gpuPoints, ...containerPoints, ...userDiskPoints];
     const allPoints = collectedPoints.slice(0, MAX_METRIC_POINTS_PER_BATCH);
     if (collectedPoints.length > allPoints.length) {
       console.warn(
-        `[Agent] Metrics batch truncated from ${collectedPoints.length} to `
-        + `${MAX_METRIC_POINTS_PER_BATCH} points`,
+        `[Agent] Metrics batch truncated from ${collectedPoints.length} to ` +
+          `${MAX_METRIC_POINTS_PER_BATCH} points`,
       );
     }
     if (allPoints.length > 0) {
-      this.wsClient.send({
-        id: uuidv4(), ts: Date.now(), kind: 'metricsBatch',
-        payload: { serverId: this.config.serverId, points: allPoints },
-      } as AgentToBackendMessage, generation);
+      this.wsClient.send(
+        {
+          id: uuidv4(),
+          ts: Date.now(),
+          kind: 'metricsBatch',
+          payload: { serverId: this.config.serverId, points: allPoints },
+        } as AgentToBackendMessage,
+        generation,
+      );
     }
   }
 
@@ -893,11 +1088,18 @@ export class AgentApplication {
         { name: 'nyabase_container_mem_used_bytes', labels, value: stats.memUsedBytes, ts },
         { name: 'nyabase_container_mem_limit_bytes', labels, value: stats.memLimitBytes, ts },
         { name: 'nyabase_container_io_read_bytes_total', labels, value: stats.blockReadBytes, ts },
-        { name: 'nyabase_container_io_write_bytes_total', labels, value: stats.blockWriteBytes, ts },
+        {
+          name: 'nyabase_container_io_write_bytes_total',
+          labels,
+          value: stats.blockWriteBytes,
+          ts,
+        },
         { name: 'nyabase_container_net_rx_bytes_total', labels, value: stats.netRxBytes, ts },
         { name: 'nyabase_container_net_tx_bytes_total', labels, value: stats.netTxBytes, ts },
       );
-    } catch { /* stats unavailable */ }
+    } catch {
+      /* stats unavailable */
+    }
 
     return points;
   }
@@ -933,19 +1135,37 @@ export class AgentApplication {
       return;
     }
     if (generation !== this.dockerEventListenerGeneration) {
-      try { (events as NodeJS.ReadableStream & { destroy?: () => void }).destroy?.(); } catch { /* stale stream */ }
+      try {
+        (events as NodeJS.ReadableStream & { destroy?: () => void }).destroy?.();
+      } catch {
+        /* stale stream */
+      }
       return;
     }
 
     let finished = false;
-    const onData = (chunk: Buffer) => {
+    const decoder = new DockerEventNdjsonDecoder();
+    const reportManagedEvents = (decoded: readonly Record<string, unknown>[]) => {
+      const managed = decoded.some((event) => {
+        const actor = event.Actor;
+        if (!actor || typeof actor !== 'object' || Array.isArray(actor)) return false;
+        const attributes = (actor as { Attributes?: unknown }).Attributes;
+        if (!attributes || typeof attributes !== 'object' || Array.isArray(attributes)) return false;
+        return (attributes as Record<string, unknown>)[LABEL.MANAGED] === 'true';
+      });
+      if (managed) void this.sendStateReport();
+    };
+    const onData = (chunk: Buffer | string) => {
       if (finished || generation !== this.dockerEventListenerGeneration) return;
       try {
-        const event = JSON.parse(chunk.toString());
-        const labels: Record<string, string> = event.Actor?.Attributes ?? {};
-        if (labels[LABEL.MANAGED] !== 'true') return;
+        reportManagedEvents(decoder.push(chunk));
+      } catch (error) {
+        // The malformed frame may have hidden a managed lifecycle event.
+        // Trigger a full observation before replacing the stream so state
+        // convergence does not wait for the periodic reporting interval.
         void this.sendStateReport();
-      } catch { /* ignore parse errors */ }
+        reconnect(error);
+      }
     };
     const reconnect = (error?: unknown) => {
       if (finished) return;
@@ -954,18 +1174,35 @@ export class AgentApplication {
       events.removeListener('error', onError);
       events.removeListener('end', onEnd);
       events.removeListener('close', onClose);
-      try { (events as NodeJS.ReadableStream & { destroy?: () => void }).destroy?.(); } catch { /* already closed */ }
+      try {
+        (events as NodeJS.ReadableStream & { destroy?: () => void }).destroy?.();
+      } catch {
+        /* already closed */
+      }
       if (error) console.error('[Agent] Docker event stream disconnected:', error);
       this.scheduleDockerEventReconnect(generation);
     };
     const onError = (error: unknown) => reconnect(error);
-    const onEnd = () => reconnect();
-    const onClose = () => reconnect();
+    const finishAndReconnect = () => {
+      if (finished) return;
+      try {
+        reportManagedEvents(decoder.finish());
+        reconnect();
+      } catch (error) {
+        void this.sendStateReport();
+        reconnect(error);
+      }
+    };
+    const onEnd = () => finishAndReconnect();
+    const onClose = () => finishAndReconnect();
     events.on('data', onData);
     events.once('error', onError);
     events.once('end', onEnd);
     events.once('close', onClose);
-    const streamState = events as NodeJS.ReadableStream & { destroyed?: boolean; readableEnded?: boolean };
+    const streamState = events as NodeJS.ReadableStream & {
+      destroyed?: boolean;
+      readableEnded?: boolean;
+    };
     if (streamState.destroyed || streamState.readableEnded) reconnect();
   }
 

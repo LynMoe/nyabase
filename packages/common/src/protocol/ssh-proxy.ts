@@ -9,6 +9,8 @@ import {
   MAX_SSH_PUBLIC_KEYS_PER_USER,
   MAX_SSH_PUBLIC_KEY_TEXT_LENGTH,
   MAX_SSH_PROXY_CONTAINERS,
+  MAX_SSH_PROXY_STATUS_CONNECTIONS,
+  PROXY_SNAPSHOT_MAX_CLOCK_SKEW_MS,
 } from '../constants.js';
 
 const zAscii = (max: number) => z.string().min(1).max(max).regex(/^[\x20-\x7e]+$/);
@@ -18,6 +20,11 @@ const zAsciiText = (max: number) => z.string().min(1).max(max)
 // domain prevents Zod's UTF-16 length accounting from underestimating the
 // actual UTF-8 WebSocket frame size.
 const zId = zAscii(64);
+const zSafeCounter = z.number().int().min(0).max(Number.MAX_SAFE_INTEGER);
+const zProxyTimestampMs = zSafeCounter.refine(
+  (value) => value <= Date.now() + PROXY_SNAPSHOT_MAX_CLOCK_SKEW_MS,
+  'Proxy timestamp exceeds the allowed clock-skew window',
+);
 
 export const zSshProxyEndpoint = z.object({
   host: zAscii(253),
@@ -114,50 +121,62 @@ export const zSshProxyAuditEvent = z.object({
 });
 
 export const zSshProxyConnectionInfo = z.object({
-  id: z.string(),
-  peer: z.string(),
-  username: z.string().nullable(),
-  login: z.string().nullable(),
-  serverSlug: z.string().nullable(),
-  serverId: z.string().nullable(),
-  containerName: z.string().nullable(),
-  containerId: z.string().nullable(),
-  runtimeId: z.string().nullable(),
-  connectedAt: z.number(),
-  authenticatedAt: z.number().nullable(),
-  bytesFromClient: z.number().nonnegative(),
-  bytesToClient: z.number().nonnegative(),
-  channels: z.number().int().nonnegative(),
-});
+  id: zAscii(64),
+  peer: zAscii(128),
+  username: zAscii(64).nullable(),
+  login: zAscii(256).nullable(),
+  serverSlug: zAscii(64).nullable(),
+  serverId: zId.nullable(),
+  containerName: zAscii(64).nullable(),
+  containerId: zId.nullable(),
+  runtimeId: zAscii(128).nullable(),
+  connectedAt: zProxyTimestampMs,
+  authenticatedAt: zProxyTimestampMs.nullable(),
+  bytesFromClient: zSafeCounter,
+  bytesToClient: zSafeCounter,
+  channels: z.number().int().min(0).max(16),
+}).strict();
 
 export const zSshProxyStatusReport = z.object({
-  proxyId: z.string(),
-  hostname: z.string().nullable(),
-  listen: z.string(),
-  uptimeMs: z.number().int().nonnegative(),
-  connectedAt: z.number(),
-  lastSnapshotGeneration: z.number().int().nonnegative().nullable(),
-  lastSnapshotAt: z.number().nullable(),
-  activeConnections: z.number().int().nonnegative(),
-  totalConnections: z.number().int().nonnegative(),
-  totalRejectedConnections: z.number().int().nonnegative(),
-  totalClosedConnections: z.number().int().nonnegative(),
-  totalBytesFromClient: z.number().nonnegative(),
-  totalBytesToClient: z.number().nonnegative(),
-  bandwidthInBps: z.number().nonnegative(),
-  bandwidthOutBps: z.number().nonnegative(),
-  connections: z.array(zSshProxyConnectionInfo),
+  proxyId: zAscii(128),
+  hostname: zAscii(253).nullable(),
+  listen: zAscii(128),
+  uptimeMs: zSafeCounter,
+  connectedAt: zProxyTimestampMs,
+  lastSnapshotGeneration: zSafeCounter.nullable(),
+  lastSnapshotAt: zProxyTimestampMs.nullable(),
+  activeConnections: z.number().int().min(0).max(MAX_SSH_PROXY_STATUS_CONNECTIONS),
+  totalConnections: zSafeCounter,
+  totalRejectedConnections: zSafeCounter,
+  totalClosedConnections: zSafeCounter,
+  totalBytesFromClient: zSafeCounter,
+  totalBytesToClient: zSafeCounter,
+  bandwidthInBps: z.number().min(0).max(Number.MAX_SAFE_INTEGER),
+  bandwidthOutBps: z.number().min(0).max(Number.MAX_SAFE_INTEGER),
+  connections: z.array(zSshProxyConnectionInfo).max(MAX_SSH_PROXY_STATUS_CONNECTIONS),
+}).strict().superRefine((status, context) => {
+  if (status.activeConnections !== status.connections.length) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['activeConnections'],
+      message: 'activeConnections must equal the bounded connection detail count',
+    });
+  }
 });
 
 export const zSshProxyDisconnectAllCommand = z.object({
-  requestId: z.string().min(1),
-  reason: z.string().optional(),
-});
+  // Backend-generated 96-bit correlation id. Exact syntax prevents an
+  // authenticated peer from manufacturing attacker-sized pending-map probes.
+  requestId: z.string().length(24).regex(/^[a-f0-9]{24}$/),
+  reason: zAsciiText(512).optional(),
+}).strict();
 
 export const zSshProxyDisconnectAllResult = z.object({
-  requestId: z.string(),
-  disconnected: z.number().int().nonnegative(),
-});
+  requestId: z.string().length(24).regex(/^[a-f0-9]{24}$/),
+  // One standalone proxy cannot own more sessions than its configured hard
+  // cap. This also makes aggregation across the bounded proxy client set safe.
+  disconnected: z.number().int().min(0).max(MAX_SSH_PROXY_STATUS_CONNECTIONS),
+}).strict();
 
 export type SshProxyEndpoint = z.infer<typeof zSshProxyEndpoint>;
 export type SshProxyHostKey = z.infer<typeof zSshProxyHostKey>;
