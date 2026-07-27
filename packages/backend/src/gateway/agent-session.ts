@@ -43,6 +43,7 @@ export class AgentSession {
   private lastInboundAt = performance.now();
   private lastFullReportReceivedAt: number | null = null;
   private readonly lastReportSequence = new Map<'state', number>();
+  private durableGeneration: number | null = null;
 
   constructor(serverId: string, ws: WebSocket) {
     this.serverId = serverId;
@@ -51,6 +52,27 @@ export class AgentSession {
 
   get dispatchReady(): boolean {
     return this.taskDispatchReady;
+  }
+
+  bindDurableGeneration(generation: number): void {
+    if (!Number.isSafeInteger(generation) || generation <= 0) {
+      throw new Error('Invalid durable Agent session generation');
+    }
+    if (this.durableGeneration !== null && this.durableGeneration !== generation) {
+      throw new Error('Durable Agent session generation cannot change');
+    }
+    this.durableGeneration = generation;
+  }
+
+  get generation(): number {
+    if (this.durableGeneration === null) {
+      throw new Error('Agent session has not been durably admitted');
+    }
+    return this.durableGeneration;
+  }
+
+  get hasDurableGeneration(): boolean {
+    return this.durableGeneration !== null;
   }
 
   beginHello(): boolean {
@@ -123,8 +145,13 @@ export class AgentSession {
     return true;
   }
 
-  /** Send a command and wait for commandAck with matching id */
-  async rpc<T>(
+  /**
+   * Register and synchronously enqueue a command, returning the response
+   * promise without awaiting it. Callers that linearize socket ownership can
+   * hold their fence only for this method and await the Agent response after
+   * releasing it.
+   */
+  enqueueRpc<T>(
     kind: DirectRpcKind,
     payload: unknown,
     timeoutMs = 30_000,
@@ -152,6 +179,15 @@ export class AgentSession {
         reject(new AgentRpcTransportError('Agent not connected or outbound buffer is full'));
       }
     });
+  }
+
+  /** Send a command and wait for commandAck with matching id. */
+  async rpc<T>(
+    kind: DirectRpcKind,
+    payload: unknown,
+    timeoutMs = 30_000,
+  ): Promise<T> {
+    return this.enqueueRpc<T>(kind, payload, timeoutMs);
   }
 
   resolveAck(commandId: string, ok: boolean, error?: string, data?: unknown) {

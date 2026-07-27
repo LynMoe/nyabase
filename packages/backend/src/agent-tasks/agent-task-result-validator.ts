@@ -11,7 +11,7 @@ import {
 } from '@nyabase/common';
 import * as path from 'node:path';
 import { z } from 'zod';
-import type { AgentTaskEntity } from '../entities/agent-task.entity.js';
+import type { AgentTaskRecord } from '../domain/domain-records.js';
 import { parseAndValidateAgentTaskWireIdentity } from './agent-task-durable-contract.js';
 
 const zNonEmptyString = z.string().min(1);
@@ -87,7 +87,7 @@ const zImageAbsentResult = z.object({
  * from becoming a permanently unfinalizable head-of-line item.
  */
 export function validateTerminalAgentResult(
-  task: AgentTaskEntity,
+  task: AgentTaskRecord,
   result: Exclude<TaskResultPayload, { status: 'incomplete' }>,
   options: { source?: 'agent' | 'dispatch'; wirePayload?: unknown } = {},
 ): void {
@@ -96,7 +96,7 @@ export function validateTerminalAgentResult(
       const payload = parseAndValidateAgentTaskWireIdentity(task, options.wirePayload);
       // All task-kind semantic checks below must interpret exactly the same
       // strict, codec-decoded payload that was bound to the durable row/hash.
-      task = { ...task, payloadJson: payload } as AgentTaskEntity;
+      task = { ...task, payloadJson: payload } as AgentTaskRecord;
     } else {
       validateLightweightTaskIdentity(task);
     }
@@ -239,7 +239,7 @@ export function validateTerminalAgentResult(
   }
 }
 
-function validateLightweightTaskIdentity(task: AgentTaskEntity): void {
+function validateLightweightTaskIdentity(task: AgentTaskRecord): void {
   const payload = record(task.payloadJson);
   if (!payload) return;
   const optionalIdentity = (field: string, expected: string): void => {
@@ -279,7 +279,7 @@ function validateLightweightTaskIdentity(task: AgentTaskEntity): void {
 }
 
 function validateFailedResult(
-  task: AgentTaskEntity,
+  task: AgentTaskRecord,
   error: { code: string },
   observed: Record<string, unknown>,
   source: 'agent' | 'dispatch',
@@ -497,7 +497,7 @@ function validateInvalidPayloadNoEffectEvidence(observed: Record<string, unknown
 }
 
 function validateNeverDispatchedEvidence(
-  task: AgentTaskEntity,
+  task: AgentTaskRecord,
   observed: Record<string, unknown>,
 ): void {
   if (
@@ -559,7 +559,7 @@ function validateNeverDispatchedEvidence(
  * a freshly observed exact runtime state.
  */
 function validateContainerNoEffectEvidence(
-  task: AgentTaskEntity,
+  task: AgentTaskRecord,
   observed: Record<string, unknown>,
 ): void {
   const payload = taskPayload(task);
@@ -620,7 +620,7 @@ function validateContainerNoEffectEvidence(
 }
 
 function validateContainerBarrierRuntimeIdentity(
-  task: AgentTaskEntity,
+  task: AgentTaskRecord,
   payload: Record<string, unknown>,
   barrier: Record<string, unknown>,
   absent: boolean,
@@ -640,7 +640,7 @@ function validateContainerBarrierRuntimeIdentity(
   }
 }
 
-function validateContainerQuotaPaths(task: AgentTaskEntity, value: unknown): string[] {
+function validateContainerQuotaPaths(task: AgentTaskRecord, value: unknown): string[] {
   const quotaPaths = z.array(zNonEmptyString).length(2).parse(value);
   const payload = taskPayload(task);
   const rawRoot = stringValue(payload.dockerRoot);
@@ -675,26 +675,26 @@ function stringValue(value: unknown): string | null {
   return typeof value === 'string' && value.length > 0 ? value : null;
 }
 
-function taskPayload(task: AgentTaskEntity): Record<string, unknown> {
+function taskPayload(task: AgentTaskRecord): Record<string, unknown> {
   if (!task.payloadJson || typeof task.payloadJson !== 'object' || Array.isArray(task.payloadJson)) {
     throw invalidResult(task, new Error('durable task payload is not an object'));
   }
   return task.payloadJson as Record<string, unknown>;
 }
 
-function strictDataDirEnsurePayload(task: AgentTaskEntity): DataDirEnsureTaskPayload {
+function strictDataDirEnsurePayload(task: AgentTaskRecord): DataDirEnsureTaskPayload {
   const payload = parseAgentTaskPayload(AgentTaskKind.DataDirEnsure, task.payloadJson);
   assertIdentity('payload resourceId', task.resourceId, payload.resourceId);
   return payload;
 }
 
-function strictDataDirAbsentPayload(task: AgentTaskEntity): DataDirAbsentTaskPayload {
+function strictDataDirAbsentPayload(task: AgentTaskRecord): DataDirAbsentTaskPayload {
   const payload = parseAgentTaskPayload(AgentTaskKind.DataDirAbsent, task.payloadJson);
   assertIdentity('payload resourceId', task.resourceId, payload.resourceId);
   return payload;
 }
 
-function strictImageEnsurePresentPayload(task: AgentTaskEntity): ImageEnsurePresentTaskPayload {
+function strictImageEnsurePresentPayload(task: AgentTaskRecord): ImageEnsurePresentTaskPayload {
   const payload = parseAgentTaskPayload(AgentTaskKind.ImageEnsurePresent, task.payloadJson);
   if (payload.imageId !== undefined) {
     assertIdentity('payload imageId', task.resourceId, payload.imageId);
@@ -702,7 +702,7 @@ function strictImageEnsurePresentPayload(task: AgentTaskEntity): ImageEnsurePres
   return payload;
 }
 
-function validateDataDirPhysicalPath(task: AgentTaskEntity, value: unknown): string {
+function validateDataDirPhysicalPath(task: AgentTaskRecord, value: unknown): string {
   const observedPath = zPhysicalPosixPath.parse(value);
   const resolved = path.posix.normalize(observedPath);
   const suffix = `/${path.posix.join('.nyabase', 'dirs', task.resourceId, 'data')}`;
@@ -726,7 +726,7 @@ function assertIdentity(field: string, expected: string, actual: string): void {
   });
 }
 
-function invalidResult(task: AgentTaskEntity, error: unknown): ConflictException {
+function invalidResult(task: AgentTaskRecord, error: unknown): ConflictException {
   const details = error instanceof Error ? error.message : String(error);
   return new ConflictException({
     code: 'TASK_RESULT_SCHEMA_INVALID',

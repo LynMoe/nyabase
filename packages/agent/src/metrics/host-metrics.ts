@@ -33,7 +33,7 @@ export class HostMetricsCollector {
 
     // Disk capacity
     for (const disk of disks) {
-      const labels = { server: serverId, disk_id: disk.diskId, mount: disk.mountPoint };
+      const labels = { server: serverId, disk_id: disk.diskId };
       points.push({ name: 'nyabase_disk_total_bytes', labels, value: disk.totalBytes, ts });
       points.push({ name: 'nyabase_disk_used_bytes', labels, value: disk.usedBytes, ts });
     }
@@ -101,9 +101,10 @@ export class HostMetricsCollector {
 
   /** Read /proc/diskstats and emit counters for physical block devices */
   private readDiskStats(serverId: string, ts: number): MetricPoint[] {
-    const points: MetricPoint[] = [];
     try {
       const content = fs.readFileSync('/proc/diskstats', 'utf-8');
+      let totalReadBytes = 0;
+      let totalWriteBytes = 0;
       for (const line of content.split('\n')) {
         const parts = line.trim().split(/\s+/);
         if (parts.length < 14) continue;
@@ -123,19 +124,24 @@ export class HostMetricsCollector {
         const readBytes = sectorsRead * 512;
         const writeBytes = sectorsWrite * 512;
 
-        const labels = { server: serverId, dev };
-        points.push({ name: 'nyabase_host_disk_read_bytes_total', labels, value: readBytes, ts });
-        points.push({ name: 'nyabase_host_disk_write_bytes_total', labels, value: writeBytes, ts });
+        totalReadBytes += readBytes;
+        totalWriteBytes += writeBytes;
       }
+      const labels = { server: serverId };
+      return [
+        { name: 'nyabase_host_disk_read_bytes_total', labels, value: totalReadBytes, ts },
+        { name: 'nyabase_host_disk_write_bytes_total', labels, value: totalWriteBytes, ts },
+      ];
     } catch { /* no /proc/diskstats on this platform */ }
-    return points;
+    return [];
   }
 
   /** Read /proc/net/dev and emit counters for physical interfaces */
   private readNetDev(serverId: string, ts: number): MetricPoint[] {
-    const points: MetricPoint[] = [];
     try {
       const content = fs.readFileSync('/proc/net/dev', 'utf-8');
+      let totalRxBytes = 0;
+      let totalTxBytes = 0;
       for (const line of content.split('\n').slice(2)) {
         const trimmed = line.trim();
         if (!trimmed) continue;
@@ -161,27 +167,29 @@ export class HostMetricsCollector {
         const txBytes = vals[8];
         if (isNaN(rxBytes) || isNaN(txBytes)) continue;
 
-        const labels = { server: serverId, iface };
-        points.push({ name: 'nyabase_host_net_rx_bytes_total', labels, value: rxBytes, ts });
-        points.push({ name: 'nyabase_host_net_tx_bytes_total', labels, value: txBytes, ts });
+        totalRxBytes += rxBytes;
+        totalTxBytes += txBytes;
       }
+      const labels = { server: serverId };
+      return [
+        { name: 'nyabase_host_net_rx_bytes_total', labels, value: totalRxBytes, ts },
+        { name: 'nyabase_host_net_tx_bytes_total', labels, value: totalTxBytes, ts },
+      ];
     } catch { /* no /proc/net/dev on this platform */ }
-    return points;
+    return [];
   }
 
   collectContainerMetrics(
     serverId: string,
     containerId: string,
-    containerName: string,
-    ownerId: string,
+    _containerName: string,
+    _ownerId: string,
     cgroupPath: string,
   ): MetricPoint[] {
     const ts = Date.now();
     const labels = {
       server: serverId,
       container_id: containerId.slice(0, 12),
-      container_name: containerName,
-      user_id: ownerId,
     };
     const points: MetricPoint[] = [];
 

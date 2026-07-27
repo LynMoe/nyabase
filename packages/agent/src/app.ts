@@ -196,6 +196,10 @@ export class AgentApplication {
   private readonly metricsJob = new CoalescedJob();
   private readonly dockerStatusJob = new CoalescedJob();
   private dockerEventListenerGeneration = 0;
+  private periodicTimers: NodeJS.Timeout[] = [];
+  private dockerEventReconnectTimer: NodeJS.Timeout | null = null;
+  private dockerEventStream: (NodeJS.ReadableStream & { destroy?: () => void }) | null = null;
+  private stopped = false;
   private runtimeBootstrap: Promise<void> | null = null;
 
   /** Set to false once the one-time nvidia-smi probe fails (or if config disables it). */
@@ -321,6 +325,10 @@ export class AgentApplication {
   }
 
   async start(): Promise<void> {
+    if (this.periodicTimers?.length) {
+      throw new Error('AgentApplication is already started');
+    }
+    this.stopped = false;
     // Stateless recovery is local and unconditional. It must finish before a
     // WebSocket exists so a replacement Agent also rolls back orphaned execs
     // while Backend is offline. Only static, already-proved host identity is
@@ -340,7 +348,7 @@ export class AgentApplication {
       void this.sendDockerDaemonStatus();
     });
 
-    setInterval(() => {
+    this.schedulePeriodic(() => {
       if (this.wsClient.connected && this.helloGeneration === this.wsClient.connectionGeneration) {
         this.wsClient.send({
           id: uuidv4(),
@@ -351,9 +359,9 @@ export class AgentApplication {
       }
     }, 5_000);
 
-    setInterval(() => void this.sendStateReport(), 15_000);
-    setInterval(() => void this.collectAndSendMetrics(), this.config.metricsIntervalMs);
-    setInterval(() => void this.sendDockerDaemonStatus(), 30_000);
+    this.schedulePeriodic(() => void this.sendStateReport(), 15_000);
+    this.schedulePeriodic(() => void this.collectAndSendMetrics(), this.config.metricsIntervalMs);
+    this.schedulePeriodic(() => void this.sendDockerDaemonStatus(), 30_000);
 
     void this.startDockerEventListener();
     // One-time host probe; permanently disables GPU collection if nvidia-smi
@@ -372,10 +380,29 @@ export class AgentApplication {
   }
 
   stop(): void {
+    this.stopped = true;
     this.reportingGeneration = 0;
     this.pendingReconcileProofNonce = null;
     this.helloGeneration = 0;
+    for (const timer of this.periodicTimers ?? []) clearInterval(timer);
+    this.periodicTimers = [];
+    if (this.dockerEventReconnectTimer) clearTimeout(this.dockerEventReconnectTimer);
+    this.dockerEventReconnectTimer = null;
+    this.dockerEventListenerGeneration += 1;
+    try {
+      this.dockerEventStream?.destroy?.();
+    } catch {
+      /* stream already closed */
+    }
+    this.dockerEventStream = null;
     this.wsClient.stop();
+  }
+
+  private schedulePeriodic(work: () => void, intervalMs: number): void {
+    const timer = setInterval(work, intervalMs);
+    // Periodic observation alone must not keep an otherwise stopped Agent alive.
+    timer.unref?.();
+    (this.periodicTimers ??= []).push(timer);
   }
 
   private async assertRuntimePhysicalEnvironment(): Promise<void> {
@@ -1082,9 +1109,6 @@ export class AgentApplication {
       const ts = Date.now();
       points.push(
         { name: 'nyabase_container_cpu_usage_ratio', labels, value: stats.cpuUsageRatio, ts },
-        ...(stats.cpuUsageUsec !== undefined
-          ? [{ name: 'nyabase_container_cpu_usage_usec', labels, value: stats.cpuUsageUsec, ts }]
-          : []),
         { name: 'nyabase_container_mem_used_bytes', labels, value: stats.memUsedBytes, ts },
         { name: 'nyabase_container_mem_limit_bytes', labels, value: stats.memLimitBytes, ts },
         { name: 'nyabase_container_io_read_bytes_total', labels, value: stats.blockReadBytes, ts },
@@ -1097,6 +1121,14 @@ export class AgentApplication {
         { name: 'nyabase_container_net_rx_bytes_total', labels, value: stats.netRxBytes, ts },
         { name: 'nyabase_container_net_tx_bytes_total', labels, value: stats.netTxBytes, ts },
       );
+      if (stats.cpuUsageUsec !== undefined) {
+        points.push({
+          name: 'nyabase_container_cpu_usage_usec',
+          labels,
+          value: stats.cpuUsageUsec,
+          ts,
+        });
+      }
     } catch {
       /* stats unavailable */
     }
@@ -1125,6 +1157,7 @@ export class AgentApplication {
   }
 
   private async startDockerEventListener(): Promise<void> {
+    if (this.stopped) return;
     const generation = ++this.dockerEventListenerGeneration;
     let events: NodeJS.ReadableStream;
     try {
@@ -1142,6 +1175,7 @@ export class AgentApplication {
       }
       return;
     }
+    this.dockerEventStream = events as NodeJS.ReadableStream & { destroy?: () => void };
 
     let finished = false;
     const decoder = new DockerEventNdjsonDecoder();
@@ -1179,6 +1213,7 @@ export class AgentApplication {
       } catch {
         /* already closed */
       }
+      if (this.dockerEventStream === events) this.dockerEventStream = null;
       if (error) console.error('[Agent] Docker event stream disconnected:', error);
       this.scheduleDockerEventReconnect(generation);
     };
@@ -1207,12 +1242,15 @@ export class AgentApplication {
   }
 
   private scheduleDockerEventReconnect(generation: number): void {
-    if (generation !== this.dockerEventListenerGeneration) return;
+    if (this.stopped || generation !== this.dockerEventListenerGeneration) return;
+    if (this.dockerEventReconnectTimer) clearTimeout(this.dockerEventReconnectTimer);
     const timer = setTimeout(() => {
+      if (this.dockerEventReconnectTimer === timer) this.dockerEventReconnectTimer = null;
       if (generation === this.dockerEventListenerGeneration) {
         void this.startDockerEventListener();
       }
     }, DOCKER_EVENT_RECONNECT_MS);
     timer.unref();
+    this.dockerEventReconnectTimer = timer;
   }
 }

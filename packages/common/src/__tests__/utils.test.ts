@@ -117,6 +117,16 @@ describe('allocateNextIp', () => {
     expect(allocateNextIp('10.0.0.0/29', new Set(), ['10.0.0.1'])).toBe('10.0.0.2');
   });
 
+  it('skips both the gateway and configured reservations supplied by the caller', () => {
+    expect(
+      allocateNextIp(
+        '172.29.240.0/29',
+        new Set(),
+        ['172.29.240.1', '172.29.240.2'],
+      ),
+    ).toBe('172.29.240.3');
+  });
+
   it('rejects an unbounded allocation range', () => {
     expect(() => allocateNextIp('0.0.0.0/0', new Set())).toThrow('too large');
   });

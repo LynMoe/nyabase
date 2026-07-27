@@ -6,7 +6,7 @@ import {
 
 export const DEFAULT_NYABASE_CONFIG_FILE = '/etc/nyabase/config.yaml';
 
-export type ConfigSourceName = 'default' | 'yaml' | 'env';
+export type ConfigSourceName = 'default' | 'yaml' | 'env' | 'database';
 export type ConfigSourceOrder = readonly ConfigSourceName[];
 export type ConfigValueKind = 'string' | 'number' | 'boolean' | 'enum';
 
@@ -52,6 +52,119 @@ const port = z.coerce.number().int().min(1).max(65_535);
 const positiveInt = z.coerce.number().int().positive();
 const positiveDays = z.coerce.number().int().positive();
 const nonNegativeInt = z.coerce.number().int().nonnegative();
+const postgresUrl = z.string().trim().refine(
+  (value) => /^postgres(?:ql)?:\/\/[^/\s]+\/[^?\s]+(?:\?.*)?$/.test(value),
+  'Expected a PostgreSQL connection URL',
+);
+
+const MAX_REDIS_URL_BYTES = 2_048;
+const MAX_REDIS_USERNAME_BYTES = 128;
+const MAX_REDIS_PASSWORD_BYTES = 1_024;
+const MAX_REDIS_DATABASE = 2_147_483_647;
+
+/**
+ * Parses the exact Redis URL subset supported by Nyabase.
+ *
+ * TLS is selected only by the scheme and its verification settings live in
+ * dedicated config fields, so query parameters cannot weaken or conflict with
+ * the transport policy. Redis ACL credentials remain supported while malformed
+ * or unbounded user-info is rejected before it reaches node-redis.
+ */
+export function parseRedisConnectionUrl(value: string): URL {
+  if (
+    value !== value.trim()
+    || new TextEncoder().encode(value).byteLength > MAX_REDIS_URL_BYTES
+  ) {
+    throw new Error('Invalid Redis connection URL');
+  }
+
+  let parsed: URL;
+  try {
+    parsed = new URL(value);
+  } catch {
+    throw new Error('Invalid Redis connection URL');
+  }
+
+  if (
+    (parsed.protocol !== 'redis:' && parsed.protocol !== 'rediss:')
+    || parsed.hostname === ''
+    || parsed.search !== ''
+    || parsed.hash !== ''
+    || !/^\/(?:0|[1-9]\d*)$/.test(parsed.pathname)
+  ) {
+    throw new Error('Invalid Redis connection URL');
+  }
+
+  const database = Number(parsed.pathname.slice(1));
+  if (!Number.isSafeInteger(database) || database > MAX_REDIS_DATABASE) {
+    throw new Error('Invalid Redis connection URL');
+  }
+
+  if (parsed.port !== '') {
+    const port = Number(parsed.port);
+    if (!Number.isInteger(port) || port < 1 || port > 65_535) {
+      throw new Error('Invalid Redis connection URL');
+    }
+  }
+
+  let username: string;
+  let password: string;
+  try {
+    username = decodeURIComponent(parsed.username);
+    password = decodeURIComponent(parsed.password);
+  } catch {
+    throw new Error('Invalid Redis connection URL');
+  }
+
+  if (
+    (username !== '' && password === '')
+    || (username !== '' && !/^[A-Za-z0-9._-]+$/.test(username))
+    || credentialByteLength(username) > MAX_REDIS_USERNAME_BYTES
+    || credentialByteLength(password) > MAX_REDIS_PASSWORD_BYTES
+    || /[\u0000-\u001f\u007f]/.test(password)
+  ) {
+    throw new Error('Invalid Redis connection URL');
+  }
+
+  return parsed;
+}
+
+function isRedisConnectionUrl(value: string): boolean {
+  try {
+    parseRedisConnectionUrl(value);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function credentialByteLength(value: string): number {
+  return new TextEncoder().encode(value).byteLength;
+}
+
+const redisUrl = z.string().trim().refine(
+  isRedisConnectionUrl,
+  'Expected a canonical redis(s) URL with a hostname, /<database> path, optional bounded credentials, and no query or fragment',
+);
+const consolePublicUrl = z.string().trim()
+  .refine(
+    (value) => new TextEncoder().encode(value).byteLength <= 2_048,
+    'Expected at most 2048 UTF-8 bytes',
+  )
+  .refine((value) => {
+    if (value === '') return true;
+    try {
+      const parsed = new URL(value);
+      return (parsed.protocol === 'ws:' || parsed.protocol === 'wss:')
+        && parsed.username === ''
+        && parsed.password === ''
+        && parsed.search === ''
+        && parsed.hash === ''
+        && parsed.pathname === '/ws/console';
+    } catch {
+      return false;
+    }
+  }, 'Expected an empty value or an absolute ws(s) URL ending in /ws/console');
 const booleanLike = z.union([z.boolean(), z.string(), z.number()]).transform((value, ctx) => {
   if (typeof value === 'boolean') return value;
   if (typeof value === 'number') {
@@ -200,37 +313,93 @@ export const controlPlaneConfigDefinitions = [
     description: 'Password used only when bootstrapping the first admin account.',
   }),
   field({
-    key: 'database.driver',
-    yamlPath: 'database.driver',
-    env: 'DB_DRIVER',
-    defaultValue: 'sqlite',
-    schema: z.literal('sqlite'),
+    key: 'runtime.role',
+    yamlPath: 'runtime.role',
+    env: 'NYABASE_RUNTIME_ROLE',
+    defaultValue: 'all',
     valueKind: 'enum',
+    schema: z.enum(['all', 'api', 'gateway', 'worker']),
     secret: false,
     editable: false,
     restartRequired: true,
     public: false,
-    label: 'Database driver',
-    description: 'SQLite-only TypeORM database driver.',
+    label: 'Runtime role',
+    description: 'Backend role to run: all, API, Agent Gateway, or control worker.',
   }),
   field({
-    key: 'database.path',
-    yamlPath: 'database.path',
-    env: 'DB_PATH',
-    defaultValue: './nyabase.db',
-    schema: nonEmptyString,
+    key: 'runtime.consolePublicUrl',
+    yamlPath: 'runtime.consolePublicUrl',
+    env: 'NYABASE_CONSOLE_PUBLIC_URL',
+    defaultValue: '',
     valueKind: 'string',
+    schema: consolePublicUrl,
     secret: false,
     editable: false,
     restartRequired: true,
     public: false,
-    label: 'SQLite path',
-    description: 'SQLite database file path.',
+    label: 'Console public URL',
+    description: 'Browser-reachable ws(s) URL for this Gateway owner; empty keeps the single-Gateway relative URL.',
   }),
   field({
-    key: 'database.synchronize',
-    yamlPath: 'database.synchronize',
-    env: 'DB_SYNC',
+    key: 'database.url',
+    yamlPath: 'database.url',
+    env: 'DATABASE_URL',
+    defaultValue: 'postgresql://nyabase:nyabase@postgres:5432/nyabase',
+    schema: postgresUrl,
+    valueKind: 'string',
+    secret: true,
+    editable: false,
+    restartRequired: true,
+    public: false,
+    label: 'PostgreSQL URL',
+    description: 'PostgreSQL connection URL for the authoritative control-plane database.',
+  }),
+  field({
+    key: 'database.poolMax',
+    yamlPath: 'database.poolMax',
+    env: 'DB_POOL_MAX',
+    defaultValue: 20,
+    schema: positiveInt.max(200),
+    valueKind: 'number',
+    secret: false,
+    editable: false,
+    restartRequired: true,
+    public: false,
+    label: 'PostgreSQL maximum pool size',
+    description: 'Maximum number of PostgreSQL connections used by this process.',
+  }),
+  field({
+    key: 'database.idleTimeoutMs',
+    yamlPath: 'database.idleTimeoutMs',
+    env: 'DB_IDLE_TIMEOUT_MS',
+    defaultValue: 30_000,
+    schema: positiveInt.min(1_000).max(600_000),
+    valueKind: 'number',
+    secret: false,
+    editable: false,
+    restartRequired: true,
+    public: false,
+    label: 'PostgreSQL idle timeout',
+    description: 'Milliseconds before an idle pooled PostgreSQL connection is closed.',
+  }),
+  field({
+    key: 'database.statementTimeoutMs',
+    yamlPath: 'database.statementTimeoutMs',
+    env: 'DB_STATEMENT_TIMEOUT_MS',
+    defaultValue: 30_000,
+    schema: positiveInt.min(1_000).max(600_000),
+    valueKind: 'number',
+    secret: false,
+    editable: false,
+    restartRequired: true,
+    public: false,
+    label: 'PostgreSQL statement timeout',
+    description: 'Server-side timeout applied to application SQL statements.',
+  }),
+  field({
+    key: 'database.migrationsRun',
+    yamlPath: 'database.migrationsRun',
+    env: 'DB_MIGRATIONS_RUN',
     defaultValue: true,
     schema: booleanLike,
     valueKind: 'boolean',
@@ -238,22 +407,67 @@ export const controlPlaneConfigDefinitions = [
     editable: false,
     restartRequired: true,
     public: false,
-    label: 'Database synchronize',
-    description: 'Allows TypeORM synchronize outside production.',
+    label: 'Run PostgreSQL migrations',
+    description: 'Runs pending SQL-first PostgreSQL migrations while holding the migration advisory lock.',
   }),
   field({
-    key: 'database.migrationsRun',
-    yamlPath: 'database.migrationsRun',
-    env: 'DB_MIGRATIONS_RUN',
-    defaultValue: false,
-    schema: booleanLike,
-    valueKind: 'boolean',
+    key: 'redis.url',
+    yamlPath: 'redis.url',
+    env: 'REDIS_URL',
+    defaultValue: 'redis://redis:6379/0',
+    schema: redisUrl,
+    valueKind: 'string',
+    secret: true,
+    editable: false,
+    restartRequired: true,
+    public: false,
+    label: 'Redis URL',
+    description: 'Redis connection URL for addressed split-role RPC, disposable cache/wakes, and shared rate limits. Use rediss:// in production across hosts.',
+  }),
+  field({
+    key: 'redis.keyPrefix',
+    yamlPath: 'redis.keyPrefix',
+    env: 'REDIS_KEY_PREFIX',
+    defaultValue: 'nyabase:',
+    schema: z.string().trim().regex(/^[A-Za-z0-9:_-]{1,64}$/),
+    valueKind: 'string',
     secret: false,
     editable: false,
     restartRequired: true,
     public: false,
-    label: 'Run migrations',
-    description: 'Runs pending TypeORM migrations on startup.',
+    label: 'Redis key prefix',
+    description: 'Namespace prefix applied to every disposable Redis key and channel.',
+  }),
+  field({
+    key: 'redis.tlsCaFile',
+    yamlPath: 'redis.tlsCaFile',
+    env: 'REDIS_TLS_CA_FILE',
+    defaultValue: '',
+    schema: optionalString,
+    valueKind: 'string',
+    secret: false,
+    editable: false,
+    restartRequired: true,
+    public: false,
+    label: 'Redis TLS CA file',
+    description: 'Optional PEM CA bundle for a rediss:// private-CA endpoint. Certificate verification cannot be disabled.',
+  }),
+  field({
+    key: 'redis.tlsServername',
+    yamlPath: 'redis.tlsServername',
+    env: 'REDIS_TLS_SERVERNAME',
+    defaultValue: '',
+    schema: optionalString.max(253).refine(
+      (value) => value === '' || /^[A-Za-z0-9.-]+$/.test(value),
+      'Expected an empty value or a DNS server name',
+    ),
+    valueKind: 'string',
+    secret: false,
+    editable: false,
+    restartRequired: true,
+    public: false,
+    label: 'Redis TLS server name',
+    description: 'Optional certificate server name override for a rediss:// endpoint.',
   }),
   field({
     key: 'audit.retentionDays',
@@ -295,7 +509,21 @@ export const controlPlaneConfigDefinitions = [
     restartRequired: true,
     public: false,
     label: 'VictoriaMetrics URL',
-    description: 'Base URL for metrics reads and writes.',
+    description: 'Base URL used only for VictoriaMetrics queries.',
+  }),
+  field({
+    key: 'metrics.vmagentUrl',
+    yamlPath: 'metrics.vmagentUrl',
+    env: 'VMAGENT_URL',
+    defaultValue: 'http://vmagent:8429',
+    schema: nonEmptyString,
+    valueKind: 'string',
+    secret: false,
+    editable: true,
+    restartRequired: true,
+    public: false,
+    label: 'vmagent URL',
+    description: 'Base URL used only for metrics ingestion through the vmagent durable queue.',
   }),
   field({
     key: 'http.proxyToken',

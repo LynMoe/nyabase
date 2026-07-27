@@ -1,9 +1,9 @@
 import type { UserAgentTaskDto } from '@nyabase/common';
-import type { AgentTaskEntity } from '../entities/agent-task.entity.js';
+import type { AgentTaskRecord } from '../domain/domain-records.js';
 import { AGENT_TASK_MIN_RETENTION_MS } from './agent-task-retention.service.js';
 
 /** Project durable task evidence onto the requester-safe progress contract. */
-export function toUserAgentTaskDto(task: AgentTaskEntity): UserAgentTaskDto {
+export function toUserAgentTaskDto(task: AgentTaskRecord): UserAgentTaskDto {
   return {
     id: task.id,
     kind: task.kind,
@@ -25,7 +25,7 @@ export function toUserAgentTaskDto(task: AgentTaskEntity): UserAgentTaskDto {
 
 function requesterSafeError(
   raw: unknown,
-  stage: AgentTaskEntity['failureStage'],
+  stage: AgentTaskRecord['failureStage'],
 ): UserAgentTaskDto['error'] {
   if (!raw) return null;
   // Agent error codes are privileged evidence.  A syntactically tidy code can

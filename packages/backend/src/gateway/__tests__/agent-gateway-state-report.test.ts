@@ -18,44 +18,56 @@ import {
 } from '@nyabase/common';
 import { createHash } from 'node:crypto';
 import { EventEmitter } from 'node:events';
+import { performance } from 'node:perf_hooks';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { WebSocket } from 'ws';
 import {
   AgentGateway,
+  AGENT_DURABLE_HEARTBEAT_INTERVAL_MS,
   MAX_AGENT_PENDING_INBOUND_BYTES_GLOBAL,
   SERVER_DELETE_INVENTORY_PROOF_TIMEOUT_MS,
 } from '../agent-gateway.js';
 import { AgentRpcTransportError } from '../agent-session.js';
-import { ServerEntity } from '../../entities/server.entity.js';
-import { MAX_NETWORK_ADDRESS_CLAIMS_GLOBAL } from '../../common/network-claim-ledger.js';
+import { StateCache } from '../state-cache.js';
+import type { ServerRecord } from '../../domain/domain-records.js';
+import { ProxySnapshotNotifierService } from '../../proxy-snapshots/proxy-snapshot-notifier.service.js';
 
 const HOST_FINGERPRINT = 'a'.repeat(64);
 const CONFIG_FINGERPRINT = 'f'.repeat(64);
 const TASK_HASH = 'b'.repeat(64);
 const RUNTIME_SPEC_HASH = 'c'.repeat(64);
+// Retained only for the old transaction-manager test double. Production
+// gateway code no longer passes persistence entity constructors.
+const LEGACY_SERVER_ENTITY = class ServerRecordTestDouble {};
 
-type TestGateway = Pick<AgentGateway, 'stateCache' | 'rpc' | 'notify'> & {
-  onHello(server: ServerEntity, payload: unknown, session?: unknown): Promise<void>;
+type TestGateway = Pick<AgentGateway, 'stateCache' | 'rpc' | 'notify' | 'notifyAsync'> & {
+  onHello(server: ServerRecord, payload: unknown, session?: unknown): Promise<void>;
+  onHeartbeat(server: ServerRecord, payload: unknown, session: unknown): Promise<void>;
   onStateReport(
-    server: ServerEntity,
+    server: ServerRecord,
     payload: StateReportPayload,
     session?: unknown,
     receivedAt?: number,
   ): Promise<void>;
-  onContainerEvent(server: ServerEntity, payload: { serverId: string; runtimeId: string; action: string }): Promise<void>;
+  onContainerEvent(server: ServerRecord, payload: { serverId: string; runtimeId: string; action: string }): Promise<void>;
   handleMessage(
     session: unknown,
-    server: ServerEntity,
+    server: ServerRecord,
     raw: string,
     ingress?: { wallMs: number; monotonicMs: number },
   ): Promise<void>;
   handleConnection(ws: unknown, req: unknown): Promise<void>;
   attachToHttpServer(server: unknown): void;
-  receiveMessage(session: unknown, server: ServerEntity, raw: string): void;
-  bindHostFingerprint(server: ServerEntity, payload: unknown, session?: unknown): Promise<boolean>;
+  receiveMessage(session: unknown, server: ServerRecord, raw: string): void;
+  handleRoutedRpcMessage(message: string): Promise<void>;
+  bindHostFingerprint(server: ServerRecord, payload: unknown, session?: unknown): Promise<boolean>;
   assertBootstrapReady(expected: RemoteFsMountSpec[], result: AgentBootstrapResult): void;
   dispatchReadyServerIds(): string[];
-  sendTask(serverId: string, payload: TaskExecutePayload): void;
+  sendTask(
+    serverId: string,
+    binding: { id: string; generation: number; gatewayId: string },
+    payload: TaskExecutePayload,
+  ): void;
   fenceSession(serverId: string, reason: string): Promise<void>;
   runWithSessionFence<T>(
     serverId: string,
@@ -167,6 +179,7 @@ function makeGateway() {
     setOrphanHandler: vi.fn(),
     clearServer: vi.fn(),
     get: vi.fn(),
+    register: vi.fn(),
     remove: vi.fn(),
   };
   const usersService = {
@@ -218,9 +231,9 @@ function makeGateway() {
   };
   const transactionManager = {
     findOneBy: vi.fn(async (entity: unknown, where: unknown) =>
-      entity === ServerEntity ? serversRepo.findOneBy(where) : null),
+      entity === LEGACY_SERVER_ENTITY ? serversRepo.findOneBy(where) : null),
     findOneByOrFail: vi.fn(async (entity: unknown, where: unknown) => {
-      if (entity === ServerEntity) {
+      if (entity === LEGACY_SERVER_ENTITY) {
         const row = await serversRepo.findOneBy(where);
         if (row) return row;
       }
@@ -228,7 +241,7 @@ function makeGateway() {
     }),
     findOne: vi.fn().mockResolvedValue(null),
     find: vi.fn(async (entity: unknown, options?: unknown) => {
-      if (entity === ServerEntity) {
+      if (entity === LEGACY_SERVER_ENTITY) {
         const row = await serversRepo.findOneBy({ id: 'server-a' });
         return row ? [row] : [];
       }
@@ -246,7 +259,7 @@ function makeGateway() {
     count: vi.fn().mockResolvedValue(0),
     delete: vi.fn().mockResolvedValue({ affected: 0 }),
     update: vi.fn(async (entity: unknown, criteria: unknown, value: unknown) => {
-      if (entity === ServerEntity) return serversRepo.update(criteria, value);
+      if (entity === LEGACY_SERVER_ENTITY) return serversRepo.update(criteria, value);
       return { affected: 1 };
     }),
     create: vi.fn((_entity: unknown, value: unknown) => value),
@@ -278,8 +291,21 @@ function makeGateway() {
     invalidate: vi.fn(),
     isServerBlocked: vi.fn().mockReturnValue(false),
   };
+  const redisGatewayId = 'gateway:00000000-0000-4000-8000-000000000001';
+  const redis = {
+    gatewayId: redisGatewayId,
+    publish: vi.fn().mockResolvedValue(undefined),
+    subscribe: vi.fn().mockResolvedValue(vi.fn().mockResolvedValue(undefined)),
+    publishAddressedRpc: vi.fn().mockResolvedValue(true),
+    subscribeAddressedRpc: vi.fn().mockResolvedValue(vi.fn().mockResolvedValue(undefined)),
+  };
   const ipReservationsRepo = {
-    find: vi.fn(async (options?: { where?: Array<{ ownerId?: { value?: string[]; _value?: string[] } }> }) => {
+    find: vi.fn(async (options?: {
+      where?: Array<{
+        ownerId?: { value?: string[]; _value?: string[] };
+        address?: { value?: string[]; _value?: string[] };
+      }>;
+    }) => {
       const ownerFilter = options?.where?.find((where) => where.ownerId)?.ownerId;
       const ownerIds = ownerFilter?.value ?? ownerFilter?._value ?? [];
       return ownerIds.map((ownerId) => ({
@@ -292,23 +318,278 @@ function makeGateway() {
       }));
     }),
   };
+  const query = (table: string) => {
+    let numericIds: number[] = [];
+    const builder = {
+      select: vi.fn(),
+      selectAll: vi.fn(),
+      where: vi.fn((column?: string, operator?: string, value?: unknown) => {
+        if (
+          table === 'iam.users'
+          && column === 'numeric_id'
+          && operator === 'in'
+          && Array.isArray(value)
+        ) numericIds = value as number[];
+        return builder;
+      }),
+      limit: vi.fn(),
+      orderBy: vi.fn(),
+      forUpdate: vi.fn(),
+      execute: vi.fn(async () => {
+        if (table === 'workflow.tasks') return agentTasksRepo.find();
+        if (table === 'iam.users') {
+          const mapped = await usersService.getUserIdsByNumericIds(numericIds);
+          return [...mapped.entries()].map(([numeric_id, id]) => ({
+            id,
+            numeric_id,
+          }));
+        }
+        return [];
+      }),
+      executeTakeFirst: vi.fn(async () =>
+        table === 'workflow.tasks' && await agentTasksRepo.existsBy({})
+          ? { id: 'pending-safety' }
+          : undefined),
+    };
+    for (const method of [
+      'select', 'selectAll', 'limit', 'orderBy', 'forUpdate',
+    ] as const) {
+      builder[method].mockReturnValue(builder);
+    }
+    return builder;
+  };
+  const queryExecutor = {
+    transformQuery: vi.fn((node: unknown) => node),
+    compileQuery: vi.fn(() => ({ sql: '', parameters: [] })),
+    executeQuery: vi.fn().mockResolvedValue({ rows: [] }),
+    withPlugins: vi.fn(),
+  };
+  queryExecutor.withPlugins.mockReturnValue(queryExecutor);
+  const pgTransaction = {
+    ...transactionManager,
+    getExecutor: vi.fn(() => queryExecutor),
+    executeQuery: queryExecutor.executeQuery,
+    selectFrom: vi.fn((table: string) => query(table)),
+    deleteFrom: vi.fn(() => {
+      const builder = {
+        where: vi.fn(),
+        execute: vi.fn().mockResolvedValue([]),
+      };
+      builder.where.mockReturnValue(builder);
+      return builder;
+    }),
+  };
+  const database = { selectFrom: vi.fn((table: string) => query(table)) };
+  const transactions = {
+    run: vi.fn(async (work: (transaction: unknown) => Promise<unknown>) =>
+      work(pgTransaction)),
+  };
+  const infrastructure = {
+    findServerById: vi.fn((id: string) => serversRepo.findOneBy({ id })),
+    findServerByTokenHash: vi.fn((agentTokenHash: string) =>
+      serversRepo.findOne({ where: { agentTokenHash } })),
+    listServers: vi.fn(async () => {
+      const row = await serversRepo.findOneBy({ id: 'server-a' });
+      return row ? [row] : [];
+    }),
+    markAllNonQuarantinedOffline: vi.fn(),
+    updateServerLiveness: vi.fn(async (id: string, status: ServerStatus) => {
+      const lastSeenAt = new Date();
+      await serversRepo.update(id, { status, lastSeenAt });
+      const current = await serversRepo.findOneBy({ id });
+      return current ? { ...current, status, lastSeenAt } : null;
+    }),
+    quarantineServer: vi.fn(async (id: string, code: string, message: string) => {
+      await serversRepo.update(id, {
+        status: ServerStatus.AgentQuarantined,
+        quarantineCode: code,
+        quarantineMessage: message,
+        lastSeenAt: new Date(),
+      });
+      const current = await serversRepo.findOneBy({ id });
+      return current ? {
+        ...current,
+        status: ServerStatus.AgentQuarantined,
+        quarantineCode: code,
+        quarantineMessage: message,
+      } : null;
+    }),
+    admitAgent: vi.fn(async (
+      id: string,
+      update: {
+        hostFingerprint: string;
+        agentConfigFingerprint: string;
+        macvlanCidr: string;
+        macvlanGateway: string;
+        macvlanReservedIps: string[];
+      },
+    ) => {
+      const result = await serversRepo.update(
+        { id, hostFingerprint: null, agentConfigFingerprint: null },
+        {
+          hostFingerprint: update.hostFingerprint,
+          agentConfigFingerprint: update.agentConfigFingerprint,
+          macvlanCidr: update.macvlanCidr,
+          macvlanGateway: update.macvlanGateway,
+          macvlanReservedIps: update.macvlanReservedIps,
+        },
+      );
+      if (result?.affected === 0) return null;
+      const current = await serversRepo.findOneBy({ id });
+      return current ? { ...current, ...update } : null;
+    }),
+  };
+  const containerAuthority = {
+    find: vi.fn(async (id: string) => {
+      const [container] = await containersRepo.find({
+        where: { id: { value: [id] } },
+      });
+      const [lifecycle] = await containerLifecyclesRepo.find({
+        where: { containerId: { value: [id] } },
+      });
+      return container && lifecycle ? {
+        ...container,
+        lifecyclePhase: lifecycle.phase,
+        activeTaskId: lifecycle.activeTaskId,
+        boundRuntimeId: lifecycle.boundRuntimeId,
+        runtimeSpecHash: lifecycle.runtimeSpecHash,
+      } : null;
+    }),
+    findByIds: vi.fn(async (ids: string[]) => {
+      const containers = await containersRepo.find({
+        where: { id: { value: [...new Set(ids)] } },
+      });
+      const lifecycles = await containerLifecyclesRepo.find({
+        where: { containerId: { value: [...new Set(ids)] } },
+      });
+      const lifecycleById = new Map(lifecycles.map((row: {
+        containerId: string;
+      }) => [row.containerId, row]));
+      return containers.flatMap((container: { id: string }) => {
+        const lifecycle = lifecycleById.get(container.id) as {
+          phase: ContainerPhase;
+          activeTaskId: string | null;
+          boundRuntimeId: string | null;
+          runtimeSpecHash: string | null;
+        } | undefined;
+        return lifecycle ? [{
+          ...container,
+          lifecyclePhase: lifecycle.phase,
+          activeTaskId: lifecycle.activeTaskId,
+          boundRuntimeId: lifecycle.boundRuntimeId,
+          runtimeSpecHash: lifecycle.runtimeSpecHash,
+        }] : [];
+      });
+    }),
+    listMounts: vi.fn((ids: string[]) => containerMountsRepo.find({
+      where: { containerId: { value: ids } },
+    })),
+    activeNetworkClaims: vi.fn(async (input: {
+      containerIds?: string[];
+      addresses?: string[];
+    }) => ipReservationsRepo.find({
+      where: [
+        { ownerId: { value: input.containerIds ?? [] } },
+        { address: { value: input.addresses ?? [] } },
+      ],
+    })),
+  };
+  const storage = {
+    listAssignmentsForServer: vi.fn((serverId: string) =>
+      remoteFsAssignmentsRepo.find({ where: {
+        serverId,
+        remoteFsMountId: expect.anything(),
+      } })),
+    findActiveRemoteFsMount: vi.fn(async (id: string) =>
+      (await remoteFsMountsRepo.find({ where: { id } }))[0] ?? null),
+    listRemoteFsMountsByIds: vi.fn(async (ids: string[]) => {
+      const wanted = new Set(ids);
+      return (await remoteFsMountsRepo.find())
+        .filter((row: { id: string }) => wanted.has(row.id))
+        .map((row: { desiredState?: string }) => ({
+          desiredState: row.desiredState ?? 'active',
+          ...row,
+        }));
+    }),
+    findAssignment: vi.fn(async (mountId: string, serverId: string) =>
+      (await remoteFsAssignmentsRepo.find()).find((row: {
+        remoteFsMountId: string;
+        serverId: string;
+      }) => row.remoteFsMountId === mountId && row.serverId === serverId) ?? null),
+    transitionAssignment: vi.fn(async (
+      id: string,
+      generation: number,
+      _states: string[],
+      patch: Record<string, unknown>,
+    ) => ({ id, generation, ...patch })),
+  };
+  const workflow = {
+    retireCurrentAgentSessions: vi.fn(),
+    retireAgentSession: vi.fn(),
+    retireAgentSessionWithCleanup: vi.fn(async (_input, _reason, cleanup) => {
+      await cleanup(transactionManager);
+      return { retired: true, cleanup: undefined };
+    }),
+    admitAgentSession: vi.fn().mockResolvedValue({ generation: 1 }),
+    recordAgentObservation: vi.fn().mockResolvedValue({ accepted: true }),
+    renewAgentSession: vi.fn().mockResolvedValue(true),
+    publishAgentRuntimeProjection: vi.fn().mockResolvedValue(true),
+    publishAgentDockerDaemonProjection: vi.fn().mockResolvedValue(true),
+    quarantineAgentInventoryFault: vi.fn(async (
+      input: { serverId: string },
+      message: string,
+      options: { preserveExisting?: boolean } = {},
+    ) => {
+      const current = await infrastructure.findServerById(input.serverId);
+      if (
+        options.preserveExisting
+        && current?.status === ServerStatus.AgentQuarantined
+      ) return true;
+      await infrastructure.quarantineServer(
+        input.serverId,
+        'AGENT_INVENTORY_FAULT',
+        message,
+      );
+      return true;
+    }),
+    acceptExecLogChunk: vi.fn().mockResolvedValue(true),
+    findExecSessionForAgent: vi.fn().mockResolvedValue(null),
+    closeExecSession: vi.fn().mockResolvedValue(true),
+    runWithAgentSessionFence: vi.fn(async (_input, work) => work()),
+    runWithAgentSessionSendFence: vi.fn(async (_input, work) => work({})),
+    currentDatabaseTime: vi.fn().mockResolvedValue(new Date()),
+    markAgentSessionReady: vi.fn().mockResolvedValue({}),
+    findCurrentAgentSession: vi.fn().mockResolvedValue({
+      id: 'session-owner',
+      serverId: 'server-a',
+      generation: 1,
+      state: 'ready',
+      gatewayId: redisGatewayId,
+      leaseExpiresAt: new Date(Date.now() + 60_000),
+    }),
+    findTask: vi.fn(async (id: string) =>
+      (await agentTasksRepo.find()).find((task: { id: string }) => task.id === id) ?? null),
+    findTasks: vi.fn(async (ids: string[]) => {
+      const wanted = new Set(ids);
+      return new Map((await agentTasksRepo.find())
+        .filter((task: { id: string }) => wanted.has(task.id))
+        .map((task: { id: string }) => [task.id, task]));
+    }),
+  };
 
   const gateway = new AgentGateway(
-    serversRepo as never,
-    containersRepo as never,
-    containerLifecyclesRepo as never,
-    containerMountsRepo as never,
+    database as never,
+    transactions as never,
+    infrastructure as never,
+    containerAuthority as never,
+    storage as never,
+    workflow as never,
+    agentTasks as never,
     metricsWriter as never,
     execSessionRegistry as never,
-    usersService as never,
     taskDispatcher as never,
     taskResults as never,
-    remoteFsAssignmentsRepo as never,
-    remoteFsMountsRepo as never,
-    agentTasksRepo as never,
     taskPayloadCodec as never,
-    dataSource as never,
-    agentTasks as never,
     resourceKeys as never,
     runtimeDriftReconciler as never,
     dataDirReconciler as never,
@@ -318,7 +599,13 @@ function makeGateway() {
     sshConvergence as never,
     failStop as never,
     proxySnapshots as never,
-    ipReservationsRepo as never,
+    {
+      servesApi: vi.fn().mockReturnValue(true),
+      servesGateway: vi.fn().mockReturnValue(true),
+    } as never,
+    redis as never,
+    { get: vi.fn(() => '') } as never,
+    new StateCache(),
   );
 
   return {
@@ -338,8 +625,12 @@ function makeGateway() {
     taskPayloadCodec,
     dataDirReconciler,
     transactionManager,
+    pgTransaction,
+    queryExecutor,
     dataSource,
     agentTasks,
+    workflow,
+    infrastructure,
     resourceKeys,
     sshRoutes,
     sshProxyGateway,
@@ -348,6 +639,7 @@ function makeGateway() {
     runtimeDriftReconciler,
     failStop,
     proxySnapshots,
+    redis,
     ipReservationsRepo,
   };
 }
@@ -360,10 +652,13 @@ function makeSession(serverId = 'server-a') {
     ws: { close: vi.fn(), terminate: vi.fn(), readyState: WebSocket.OPEN as number },
     send: vi.fn(),
     rpc: vi.fn().mockResolvedValue({ remoteFsMounts: [] }),
+    enqueueRpc: vi.fn().mockResolvedValue({ remoteFsMounts: [] }),
     beginHello: vi.fn().mockReturnValue(true),
     hasReceivedHello: true,
     bootstrapReady: false,
     dispatchReady: false,
+    generation: 1,
+    bindDurableGeneration: vi.fn(),
     markBootstrapReady: vi.fn(),
     markDispatchReady: vi.fn(),
     rejectAll: vi.fn(),
@@ -440,7 +735,7 @@ describe('AgentGateway state cache runtime readiness', () => {
 
   it('hello initializes a snapshot but does not mark runtime ready', async () => {
     const { gateway } = makeGateway();
-    const server = { id: 'server-a', name: 'server-a' } as ServerEntity;
+    const server = { id: 'server-a', name: 'server-a' } as ServerRecord;
 
     await gateway.onHello(server, helloPayload());
 
@@ -448,6 +743,37 @@ describe('AgentGateway state cache runtime readiness', () => {
     expect(snapshot?.runtimeReady).toBe(false);
     expect(snapshot?.helloAt).toEqual(expect.any(Number));
     expect(snapshot?.agentVersion).toBe('0.1.0');
+  });
+
+  it('keeps routes blocked when a reconnect never acquires durable authority', async () => {
+    const { gateway, workflow } = makeGateway();
+    const notifier = new ProxySnapshotNotifierService();
+    const httpSnapshots = vi.fn();
+    const sshSnapshots = vi.fn();
+    notifier.blockServer('server-a', 'agent session initializing');
+    notifier.register('http', async () => httpSnapshots());
+    notifier.register('ssh', async () => sshSnapshots());
+    (gateway as unknown as { proxySnapshots: ProxySnapshotNotifierService }).proxySnapshots =
+      notifier;
+    workflow.admitAgentSession.mockRejectedValueOnce(
+      new Error('Another Agent session generation is still authoritative'),
+    );
+    const session = activeSession(gateway, 'server-a');
+
+    await gateway.onHello(
+      { id: 'server-a', name: 'server-a' } as ServerRecord,
+      helloPayload(),
+      session,
+    );
+
+    expect(notifier.isServerBlocked('server-a')).toBe(true);
+    expect(httpSnapshots).not.toHaveBeenCalled();
+    expect(sshSnapshots).not.toHaveBeenCalled();
+    expect(workflow.retireAgentSessionWithCleanup).not.toHaveBeenCalled();
+    expect((gateway as unknown as { sessions: Map<string, unknown> })
+      .sessions.has('server-a')).toBe(false);
+    expect(session.rejectAll).toHaveBeenCalledWith('Durable Agent session admission failed');
+    expect(session.ws.terminate).toHaveBeenCalledOnce();
   });
 
   it('resolves bootstrap acknowledgements outside the serialized hello queue', () => {
@@ -459,7 +785,7 @@ describe('AgentGateway state cache runtime readiness', () => {
 
     gateway.receiveMessage(
       session,
-      { id: 'server-a', name: 'server-a' } as ServerEntity,
+      { id: 'server-a', name: 'server-a' } as ServerRecord,
       wsMessage('commandAck', {
         commandId: 'bootstrap-command-a',
         ok: true,
@@ -479,7 +805,7 @@ describe('AgentGateway state cache runtime readiness', () => {
     const { gateway, taskResults } = makeGateway();
     const session = activeSession(gateway, 'server-a');
     session.bootstrapReady = false;
-    const server = { id: 'server-a', name: 'server-a' } as ServerEntity;
+    const server = { id: 'server-a', name: 'server-a' } as ServerRecord;
 
     for (let index = 0; index < 256; index += 1) {
       gateway.receiveMessage(session, server, wsMessage('heartbeat', {
@@ -495,6 +821,60 @@ describe('AgentGateway state cache runtime readiness', () => {
     expect(session.ws.terminate).not.toHaveBeenCalled();
   });
 
+  it('bounds ready-session heartbeat writes independently of socket liveness volume', async () => {
+    const { gateway } = makeGateway();
+    const session = activeSession(gateway, 'server-a');
+    session.bootstrapReady = true;
+    const server = { id: 'server-a', name: 'server-a' } as ServerRecord;
+    const persist = vi.fn().mockResolvedValue(undefined);
+    (gateway as unknown as { onHeartbeat: typeof persist }).onHeartbeat = persist;
+
+    for (let index = 0; index < 256; index += 1) {
+      gateway.receiveMessage(session, server, wsMessage('heartbeat', {
+        serverId: 'server-a',
+        uptime: index,
+      }));
+    }
+    await vi.waitFor(() => expect(persist).toHaveBeenCalledTimes(1));
+    await vi.waitFor(() => expect(
+      (gateway as unknown as { pendingHeartbeatServers: Set<string> })
+        .pendingHeartbeatServers.has('server-a'),
+    ).toBe(false));
+
+    for (let index = 0; index < 256; index += 1) {
+      gateway.receiveMessage(session, server, wsMessage('heartbeat', {
+        serverId: 'server-a',
+        uptime: 256 + index,
+      }));
+    }
+    expect(session.markInbound).toHaveBeenCalledTimes(512);
+    expect(persist).toHaveBeenCalledTimes(1);
+
+    (gateway as unknown as {
+      lastDurableHeartbeatAt: Map<string, { sessionId: string; monotonicMs: number }>;
+    })
+      .lastDurableHeartbeatAt.set(
+        'server-a',
+        {
+          sessionId: session.id,
+          monotonicMs: performance.now() - AGENT_DURABLE_HEARTBEAT_INTERVAL_MS,
+        },
+      );
+    gateway.receiveMessage(session, server, wsMessage('heartbeat', {
+      serverId: 'server-a',
+      uptime: 512,
+    }));
+    await vi.waitFor(() => expect(persist).toHaveBeenCalledTimes(2));
+
+    const replacement = activeSession(gateway, 'server-a');
+    replacement.bootstrapReady = true;
+    gateway.receiveMessage(replacement, server, wsMessage('heartbeat', {
+      serverId: 'server-a',
+      uptime: 0,
+    }));
+    await vi.waitFor(() => expect(persist).toHaveBeenCalledTimes(3));
+  });
+
   it('consumes heartbeat persistence failures and fences only that connection', async () => {
     const { gateway, proxySnapshots } = makeGateway();
     const session = activeSession(gateway, 'server-a');
@@ -504,7 +884,7 @@ describe('AgentGateway state cache runtime readiness', () => {
 
     gateway.receiveMessage(
       session,
-      { id: 'server-a', name: 'server-a' } as ServerEntity,
+      { id: 'server-a', name: 'server-a' } as ServerRecord,
       wsMessage('heartbeat', { serverId: 'server-a', uptime: 1 }),
     );
     await vi.waitFor(() => expect(session.ws.terminate).toHaveBeenCalledTimes(1));
@@ -518,10 +898,27 @@ describe('AgentGateway state cache runtime readiness', () => {
       .pendingHeartbeatServers.has('server-a')).toBe(false);
   });
 
-  it('keeps owned console output off the authoritative inbound queue', () => {
+  it('does not write duplicate Redis presence during durable heartbeats', async () => {
+    const { gateway, redis, workflow } = makeGateway();
+    const session = activeSession(gateway, 'server-a');
+    session.bootstrapReady = true;
+    session.dispatchReady = true;
+
+    await gateway.onHeartbeat(
+      { id: 'server-a', name: 'server-a', status: ServerStatus.Online } as ServerRecord,
+      { serverId: 'server-a', uptime: 1 },
+      session,
+    );
+
+    expect(workflow.runWithAgentSessionFence).toHaveBeenCalledOnce();
+    expect(workflow.renewAgentSession).toHaveBeenCalledOnce();
+    expect(redis.publishAddressedRpc).not.toHaveBeenCalled();
+  });
+
+  it('keeps owned console output off the authoritative inbound queue', async () => {
     const { gateway, execSessionRegistry, taskResults, proxySnapshots } = makeGateway();
     const session = activeSession(gateway, 'server-a');
-    const server = { id: 'server-a', name: 'server-a' } as ServerEntity;
+    const server = { id: 'server-a', name: 'server-a' } as ServerRecord;
     execSessionRegistry.get.mockReturnValue({ serverId: 'server-a' });
     const tracker = (gateway as unknown as {
       logChunkTracker: { dispatch: ReturnType<typeof vi.fn> };
@@ -538,7 +935,7 @@ describe('AgentGateway state cache runtime readiness', () => {
       }));
     }
 
-    expect(tracker.dispatch).toHaveBeenCalledTimes(256);
+    await vi.waitFor(() => expect(tracker.dispatch).toHaveBeenCalledTimes(256));
     expect((gateway as unknown as { inboundWorkDepth: Map<string, number> })
       .inboundWorkDepth.has('server-a')).toBe(false);
     expect(proxySnapshots.blockServer).not.toHaveBeenCalled();
@@ -546,10 +943,59 @@ describe('AgentGateway state cache runtime readiness', () => {
     expect(session.ws.terminate).not.toHaveBeenCalled();
   });
 
+  it('preserves console data and EOF order across asynchronous lease checks', async () => {
+    const { gateway, execSessionRegistry, workflow } = makeGateway();
+    const session = activeSession(gateway, 'server-a');
+    const server = { id: 'server-a', name: 'server-a' } as ServerRecord;
+    execSessionRegistry.get.mockReturnValue({ serverId: 'server-a' });
+    const tracker = (gateway as unknown as {
+      logChunkTracker: { dispatch: ReturnType<typeof vi.fn> };
+    }).logChunkTracker;
+    tracker.dispatch = vi.fn();
+    let releaseFirst!: () => void;
+    const firstLeaseCheck = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    workflow.acceptExecLogChunk.mockImplementationOnce(async () => {
+      await firstLeaseCheck;
+      return true;
+    });
+
+    gateway.receiveMessage(session, server, wsMessage('logChunk', {
+      sessionId: 'exec-a',
+      data: 'first',
+      eof: false,
+    }));
+    gateway.receiveMessage(session, server, wsMessage('logChunk', {
+      sessionId: 'exec-a',
+      data: 'second',
+      eof: false,
+    }));
+    gateway.receiveMessage(session, server, wsMessage('logChunk', {
+      sessionId: 'exec-a',
+      data: '',
+      eof: true,
+      exitCode: 0,
+    }));
+
+    await vi.waitFor(() => expect(workflow.acceptExecLogChunk).toHaveBeenCalledTimes(1));
+    expect(tracker.dispatch).not.toHaveBeenCalled();
+    releaseFirst();
+    await vi.waitFor(() => expect(tracker.dispatch).toHaveBeenCalledTimes(3));
+    expect(tracker.dispatch.mock.calls.map(([chunk]) => ({
+      data: chunk.data,
+      eof: chunk.eof ?? false,
+    }))).toEqual([
+      { data: 'first', eof: false },
+      { data: 'second', eof: false },
+      { data: '', eof: true },
+    ]);
+  });
+
   it('reconnects one session without durable quarantine at the global inbound budget', () => {
     const { gateway, proxySnapshots, taskResults } = makeGateway();
     const session = activeSession(gateway, 'server-a');
-    const server = { id: 'server-a', name: 'server-a' } as ServerEntity;
+    const server = { id: 'server-a', name: 'server-a' } as ServerRecord;
     (gateway as unknown as { inboundWorkBytesTotal: number }).inboundWorkBytesTotal =
       MAX_AGENT_PENDING_INBOUND_BYTES_GLOBAL;
 
@@ -581,7 +1027,7 @@ describe('AgentGateway state cache runtime readiness', () => {
 
     gateway.receiveMessage(
       session,
-      { id: 'server-a', name: 'server-a' } as ServerEntity,
+      { id: 'server-a', name: 'server-a' } as ServerRecord,
       wsMessage('logChunk', { sessionId: 'foreign-exec', data: 'secret', eof: false }),
     );
 
@@ -624,7 +1070,7 @@ describe('AgentGateway state cache runtime readiness', () => {
     expect(session.ws.terminate).not.toHaveBeenCalled();
   });
 
-  it('quarantines only an explicit pre-hello Agent initialization failure close', async () => {
+  it('never lets a pre-hello close mutate durable successor authority', async () => {
     const { gateway, serversRepo } = makeGateway();
     const session = makeSession();
     session.hasReceivedHello = false;
@@ -653,9 +1099,8 @@ describe('AgentGateway state cache runtime readiness', () => {
       'Agent initialization failed',
       4501,
     );
-    expect(serversRepo.update).toHaveBeenCalledWith('server-a', expect.objectContaining({
+    expect(serversRepo.update).not.toHaveBeenCalledWith('server-a', expect.objectContaining({
       status: ServerStatus.AgentQuarantined,
-      quarantineMessage: 'Agent pre-hello initialization failed',
     }));
   });
 
@@ -706,7 +1151,7 @@ describe('AgentGateway state cache runtime readiness', () => {
 
   it('first full state report marks ready and stores only stateCache runtime data', async () => {
     const { gateway, usersService, sshRoutes, sshConvergence } = makeGateway();
-    const server = { id: 'server-a', name: 'server-a' } as ServerEntity;
+    const server = { id: 'server-a', name: 'server-a' } as ServerRecord;
     const report = makeReport({ observedAt: 1_780_000_000_000 });
 
     await gateway.onStateReport(server, report);
@@ -742,7 +1187,7 @@ describe('AgentGateway state cache runtime readiness', () => {
     (gateway as unknown as { logger: { error: typeof loggerError } }).logger.error = loggerError;
 
     await expect(gateway.onStateReport(
-      { id: 'server-a', name: 'server-a' } as ServerEntity,
+      { id: 'server-a', name: 'server-a' } as ServerRecord,
       makeReport({ remoteFsMounts: [] }),
       session as never,
     )).resolves.toBeUndefined();
@@ -753,12 +1198,37 @@ describe('AgentGateway state cache runtime readiness', () => {
     expect(serversRepo.update).not.toHaveBeenCalledWith('server-a', expect.objectContaining({
       status: ServerStatus.AgentQuarantined,
     }));
-    expect(loggerError).toHaveBeenCalledWith(expect.stringContaining('snapshot capacity fault'));
+    await vi.waitFor(() =>
+      expect(loggerError).toHaveBeenCalledWith(expect.stringContaining('snapshot capacity fault')));
+  });
+
+  it('releases state-report authority without awaiting independent SSH snapshot I/O', async () => {
+    const { gateway, sshProxyGateway } = makeGateway();
+    const session = activeSession(gateway, 'server-a');
+    session.bootstrapReady = true;
+    let releaseSnapshot!: () => void;
+    sshProxyGateway.broadcastSnapshot.mockReturnValueOnce(
+      new Promise<void>((resolve) => { releaseSnapshot = resolve; }),
+    );
+
+    const outcome = await Promise.race([
+      gateway.onStateReport(
+        { id: 'server-a', name: 'server-a' } as ServerRecord,
+        makeReport({ remoteFsMounts: [] }),
+        session as never,
+      ).then(() => 'completed'),
+      new Promise<string>((resolve) => setTimeout(() => resolve('blocked'), 50)),
+    ]);
+
+    expect(outcome).toBe('completed');
+    expect(gateway.stateCache.get('server-a')?.runtimeReady).toBe(true);
+    expect(sshProxyGateway.broadcastSnapshot).toHaveBeenCalledOnce();
+    releaseSnapshot();
   });
 
   it('does not expose a half-applied state report when projection building fails', async () => {
     const { gateway, usersService } = makeGateway();
-    const server = { id: 'server-a', name: 'server-a' } as ServerEntity;
+    const server = { id: 'server-a', name: 'server-a' } as ServerRecord;
     await gateway.onStateReport(server, makeReport({
       containers: [makeContainer('stable-runtime')],
       xfsProjects: [],
@@ -775,7 +1245,7 @@ describe('AgentGateway state cache runtime readiness', () => {
 
   it('refreshes local images from full state reports', async () => {
     const { gateway } = makeGateway();
-    const server = { id: 'server-a', name: 'server-a' } as ServerEntity;
+    const server = { id: 'server-a', name: 'server-a' } as ServerRecord;
 
     await gateway.onStateReport(server, makeReport({
       localImages: [
@@ -790,7 +1260,7 @@ describe('AgentGateway state cache runtime readiness', () => {
     const { gateway } = makeGateway();
     const warn = vi.fn();
     (gateway as unknown as { logger: { warn: typeof warn } }).logger.warn = warn;
-    const server = { id: 'server-a', name: 'server-a' } as ServerEntity;
+    const server = { id: 'server-a', name: 'server-a' } as ServerRecord;
 
     await gateway.onStateReport(server, makeReport({
       xfsProjects: [
@@ -827,8 +1297,8 @@ describe('AgentGateway state cache runtime readiness', () => {
   });
 
   it('docker daemon messages do not mark runtime ready', async () => {
-    const { gateway } = makeGateway();
-    const server = { id: 'server-a', name: 'server-a' } as ServerEntity;
+    const { gateway, workflow } = makeGateway();
+    const server = { id: 'server-a', name: 'server-a' } as ServerRecord;
     const session = activeSession(gateway, 'server-a');
 
     await gateway.handleMessage(session, server, JSON.stringify({
@@ -851,11 +1321,23 @@ describe('AgentGateway state cache runtime readiness', () => {
     }));
 
     expect(gateway.stateCache.isRuntimeReady('server-a')).toBe(false);
+    expect(gateway.stateCache.get('server-a')?.dockerDaemon).toMatchObject({
+      state: 'active',
+      active: true,
+      storageDriver: 'overlay2',
+    });
+    expect(workflow.publishAgentDockerDaemonProjection).toHaveBeenCalledWith(
+      expect.objectContaining({
+        serverId: 'server-a',
+        sessionId: session.id,
+        sessionGeneration: session.generation,
+      }),
+    );
   });
 
   it('rejects reports that arrive out of sequence within one session', async () => {
     const { gateway } = makeGateway();
-    const server = { id: 'server-a', name: 'server-a' } as ServerEntity;
+    const server = { id: 'server-a', name: 'server-a' } as ServerRecord;
     const session = activeSession(gateway, 'server-a');
 
     await gateway.handleMessage(session, server, wsMessage('stateReport', makeReport({
@@ -877,7 +1359,7 @@ describe('AgentGateway state cache runtime readiness', () => {
 
   it('accepts structurally valid unknown runtime inventory for durable drift reconciliation', async () => {
     const { gateway, runtimeDriftReconciler } = makeGateway();
-    const server = { id: 'server-a', name: 'server-a' } as ServerEntity;
+    const server = { id: 'server-a', name: 'server-a' } as ServerRecord;
     const session = activeSession(gateway, 'server-a');
 
     const report = makeReport({ remoteFsMounts: [] });
@@ -966,7 +1448,7 @@ describe('AgentGateway state cache runtime readiness', () => {
       serversRepo,
       proxySnapshots,
     } = makeGateway();
-    const server = { id: 'server-a', name: 'server-a' } as ServerEntity;
+    const server = { id: 'server-a', name: 'server-a' } as ServerRecord;
     const session = activeSession(gateway, 'server-a');
     session.markBootstrapReady();
     session.markDispatchReady();
@@ -1085,7 +1567,7 @@ describe('AgentGateway state cache runtime readiness', () => {
     ['duplicate paths', ['/var/lib/docker/overlay2/shared', '/var/lib/docker/overlay2/shared']],
   ])('rejects a full report with %s writable-layer evidence', async (_caseName, quotaPaths) => {
     const { gateway, runtimeDriftReconciler } = makeGateway();
-    const server = { id: 'server-a', name: 'server-a' } as ServerEntity;
+    const server = { id: 'server-a', name: 'server-a' } as ServerRecord;
     const session = activeSession(gateway, 'server-a');
     const container = makeContainer('runtime-unsafe');
     container.runtime.quotaPaths = quotaPaths;
@@ -1102,7 +1584,7 @@ describe('AgentGateway state cache runtime readiness', () => {
 
   it('rejects a runtime address outside the server macvlan CIDR', async () => {
     const { gateway, runtimeDriftReconciler } = makeGateway();
-    const server = { id: 'server-a', name: 'server-a' } as ServerEntity;
+    const server = { id: 'server-a', name: 'server-a' } as ServerRecord;
     const session = activeSession(gateway, 'server-a');
     const container = makeContainer('runtime-foreign-network');
     container.runtime.ip = '192.168.10.2';
@@ -1124,7 +1606,7 @@ describe('AgentGateway state cache runtime readiness', () => {
       serversRepo,
       proxySnapshots,
     } = makeGateway();
-    const server = { id: 'server-a', name: 'server-a' } as ServerEntity;
+    const server = { id: 'server-a', name: 'server-a' } as ServerRecord;
     const session = activeSession(gateway, 'server-a');
     runtimeDriftReconciler.reconcile.mockRejectedValueOnce(new Error('database unavailable'));
 
@@ -1148,7 +1630,7 @@ describe('AgentGateway state cache runtime readiness', () => {
 
   it('quarantines before promotion when the atomic data-directory inventory cannot reconcile', async () => {
     const { gateway, dataDirReconciler, serversRepo } = makeGateway();
-    const server = { id: 'server-a', name: 'server-a' } as ServerEntity;
+    const server = { id: 'server-a', name: 'server-a' } as ServerRecord;
     const session = activeSession(gateway, 'server-a');
     dataDirReconciler.reconcileReport.mockResolvedValueOnce({
       issues: { orphans: [{ kind: 'orphan' }], missing: [] },
@@ -1180,7 +1662,7 @@ describe('AgentGateway state cache runtime readiness', () => {
 
   it('drops an expired queued report without quarantine and accepts the next fresh report', async () => {
     const { gateway, runtimeDriftReconciler, serversRepo } = makeGateway();
-    const server = { id: 'server-a', name: 'server-a' } as ServerEntity;
+    const server = { id: 'server-a', name: 'server-a' } as ServerRecord;
     const session = activeSession(gateway, 'server-a');
 
     await gateway.handleMessage(
@@ -1207,7 +1689,7 @@ describe('AgentGateway state cache runtime readiness', () => {
 
   it('accepts duplicate product claimants so the durable reconciler can clean the extra runtime', async () => {
     const { gateway, runtimeDriftReconciler } = makeGateway();
-    const server = { id: 'server-a', name: 'server-a' } as ServerEntity;
+    const server = { id: 'server-a', name: 'server-a' } as ServerRecord;
     const session = activeSession(gateway, 'server-a');
     const canonical = makeContainer('docker-a');
     const extra = makeContainer('docker-extra');
@@ -1228,12 +1710,17 @@ describe('AgentGateway state cache runtime readiness', () => {
     const { gateway, metricsWriter } = makeGateway();
     const warn = vi.fn();
     (gateway as unknown as { logger: { warn: typeof warn } }).logger.warn = warn;
-    const server = { id: 'server-a', name: 'server-a' } as ServerEntity;
+    const server = { id: 'server-a', name: 'server-a' } as ServerRecord;
 
     await gateway.handleMessage(activeSession(gateway, 'server-a'), server, wsMessage('metricsBatch', {
       serverId: 'server-b',
       points: [
-        { name: 'nyabase_test_metric', labels: { server: 'server-b' }, value: 1, ts: 1_780_000_000_000 },
+        {
+          name: 'nyabase_host_cpu_usage_ratio',
+          labels: { server: 'server-b' },
+          value: 1,
+          ts: 1_780_000_000_000,
+        },
       ],
     }));
 
@@ -1243,9 +1730,14 @@ describe('AgentGateway state cache runtime readiness', () => {
 
   it('writes metrics batches whose serverId matches the authenticated session', async () => {
     const { gateway, metricsWriter } = makeGateway();
-    const server = { id: 'server-a', name: 'server-a' } as ServerEntity;
+    const server = { id: 'server-a', name: 'server-a' } as ServerRecord;
     const points = [
-      { name: 'nyabase_test_metric', labels: { server: 'server-a' }, value: 1, ts: 1_780_000_000_000 },
+      {
+        name: 'nyabase_host_cpu_usage_ratio',
+        labels: { server: 'server-a' },
+        value: 1,
+        ts: 1_780_000_000_000,
+      },
     ];
 
     await gateway.handleMessage(activeSession(gateway, 'server-a'), server, wsMessage('metricsBatch', {
@@ -1258,7 +1750,7 @@ describe('AgentGateway state cache runtime readiness', () => {
 
   it('drops malformed lossy metrics without quarantining the authoritative Agent', async () => {
     const { gateway, metricsWriter, taskResults } = makeGateway();
-    const server = { id: 'server-a', name: 'server-a' } as ServerEntity;
+    const server = { id: 'server-a', name: 'server-a' } as ServerRecord;
     const session = activeSession(gateway, 'server-a') as ReturnType<typeof makeSession>;
 
     await gateway.handleMessage(session, server, wsMessage('metricsBatch', {
@@ -1271,15 +1763,40 @@ describe('AgentGateway state cache runtime readiness', () => {
     expect(session.ws.terminate).not.toHaveBeenCalled();
   });
 
-  it('keeps the Agent session when the lossy metrics sink is unavailable', async () => {
+  it('drops syntactically valid but unbounded metric identities at the Agent envelope', async () => {
     const { gateway, metricsWriter, taskResults } = makeGateway();
-    metricsWriter.writeBatch.mockRejectedValue(new Error('metrics database unavailable'));
-    const server = { id: 'server-a', name: 'server-a' } as ServerEntity;
+    const server = { id: 'server-a', name: 'server-a' } as ServerRecord;
     const session = activeSession(gateway, 'server-a') as ReturnType<typeof makeSession>;
 
     await gateway.handleMessage(session, server, wsMessage('metricsBatch', {
       serverId: 'server-a',
-      points: [{ name: 'safe_metric', labels: {}, value: 1, ts: 1 }],
+      points: [{
+        name: 'nyabase_host_cpu_usage_ratio',
+        labels: { server: 'server-a', container_name: 'attacker-controlled' },
+        value: 1,
+        ts: 1_780_000_000_000,
+      }],
+    }));
+
+    expect(metricsWriter.writeBatch).not.toHaveBeenCalled();
+    expect(taskResults.quarantineProtocolFault).not.toHaveBeenCalled();
+    expect(session.ws.terminate).not.toHaveBeenCalled();
+  });
+
+  it('keeps the Agent session when the lossy metrics sink is unavailable', async () => {
+    const { gateway, metricsWriter, taskResults } = makeGateway();
+    metricsWriter.writeBatch.mockRejectedValue(new Error('metrics database unavailable'));
+    const server = { id: 'server-a', name: 'server-a' } as ServerRecord;
+    const session = activeSession(gateway, 'server-a') as ReturnType<typeof makeSession>;
+
+    await gateway.handleMessage(session, server, wsMessage('metricsBatch', {
+      serverId: 'server-a',
+      points: [{
+        name: 'nyabase_host_cpu_usage_ratio',
+        labels: { server: 'server-a' },
+        value: 1,
+        ts: 1_780_000_000_000,
+      }],
     }));
 
     expect(metricsWriter.writeBatch).toHaveBeenCalledOnce();
@@ -1289,7 +1806,7 @@ describe('AgentGateway state cache runtime readiness', () => {
 
   it('commits a durable task result through the authenticated session', async () => {
     const { gateway, taskResults, taskDispatcher } = makeGateway();
-    const server = { id: 'server-a', name: 'server-a' } as ServerEntity;
+    const server = { id: 'server-a', name: 'server-a' } as ServerRecord;
     const session = activeSession(gateway, 'server-a') as ReturnType<typeof makeSession>;
     await expect(gateway.handleMessage(session, server, wsMessage('task.result.v1', {
       taskId: 'task-a',
@@ -1300,7 +1817,7 @@ describe('AgentGateway state cache runtime readiness', () => {
     expect(taskResults.handle).toHaveBeenCalledWith('server-a', expect.objectContaining({
       taskId: 'task-a',
       status: 'succeeded',
-    }));
+    }), expect.objectContaining({ generation: 1 }));
     expect(session.send).toHaveBeenCalledWith(expect.objectContaining({
       kind: 'task.accepted.v1',
       payload: { taskId: 'task-a', payloadHash: TASK_HASH },
@@ -1315,7 +1832,7 @@ describe('AgentGateway state cache runtime readiness', () => {
       id: 'server-a',
       status: ServerStatus.Online,
     });
-    const server = { id: 'server-a', name: 'server-a' } as ServerEntity;
+    const server = { id: 'server-a', name: 'server-a' } as ServerRecord;
     const session = activeSession(gateway, 'server-a') as ReturnType<typeof makeSession>;
 
     await gateway.handleMessage(session, server, wsMessage('task.result.v1', {
@@ -1335,7 +1852,7 @@ describe('AgentGateway state cache runtime readiness', () => {
   it('does not acknowledge a nonterminal incomplete task result', async () => {
     const { gateway, taskResults, taskDispatcher } = makeGateway();
     taskResults.handle.mockResolvedValue(null);
-    const server = { id: 'server-a', name: 'server-a' } as ServerEntity;
+    const server = { id: 'server-a', name: 'server-a' } as ServerRecord;
     const session = activeSession(gateway, 'server-a') as ReturnType<typeof makeSession>;
 
     await gateway.handleMessage(session, server, wsMessage('task.result.v1', {
@@ -1347,14 +1864,14 @@ describe('AgentGateway state cache runtime readiness', () => {
 
     expect(taskResults.handle).toHaveBeenCalledWith('server-a', expect.objectContaining({
       status: 'incomplete',
-    }));
+    }), expect.objectContaining({ generation: 1 }));
     expect(session.send).not.toHaveBeenCalled();
     expect(taskDispatcher.wake).toHaveBeenCalledTimes(1);
   });
 
   it('durably quarantines a malformed task result before retiring the connection', async () => {
     const { gateway, taskResults } = makeGateway();
-    const server = { id: 'server-a', name: 'server-a' } as ServerEntity;
+    const server = { id: 'server-a', name: 'server-a' } as ServerRecord;
     const session = activeSession(gateway, 'server-a') as ReturnType<typeof makeSession>;
     const malformed = {
       taskId: 'task-a',
@@ -1373,6 +1890,7 @@ describe('AgentGateway state cache runtime readiness', () => {
       'server-a',
       malformed,
       expect.anything(),
+      expect.objectContaining({ generation: 1 }),
     );
     expect(taskResults.handle).not.toHaveBeenCalled();
     expect(session.ws.terminate).toHaveBeenCalledTimes(1);
@@ -1380,7 +1898,7 @@ describe('AgentGateway state cache runtime readiness', () => {
 
   it('durably quarantines an invalid outer envelope before retiring the connection', async () => {
     const { gateway, taskResults } = makeGateway();
-    const server = { id: 'server-a', name: 'server-a' } as ServerEntity;
+    const server = { id: 'server-a', name: 'server-a' } as ServerRecord;
     const session = activeSession(gateway, 'server-a') as ReturnType<typeof makeSession>;
 
     await gateway.handleMessage(
@@ -1395,6 +1913,7 @@ describe('AgentGateway state cache runtime readiness', () => {
     expect(taskResults.quarantineProtocolFault).toHaveBeenCalledWith(
       'server-a',
       expect.anything(),
+      expect.objectContaining({ generation: 1 }),
     );
     expect(taskResults.handle).not.toHaveBeenCalled();
     expect(session.ws.terminate).toHaveBeenCalledTimes(1);
@@ -1415,7 +1934,7 @@ describe('AgentGateway state cache runtime readiness', () => {
     serversRepo.update.mockImplementation(async (_id: string, patch: Record<string, unknown>) => {
       Object.assign(durable, patch);
     });
-    const server = { id: 'server-a', name: 'server-a' } as ServerEntity;
+    const server = { id: 'server-a', name: 'server-a' } as ServerRecord;
     const session = activeSession(gateway, 'server-a') as ReturnType<typeof makeSession>;
 
     await gateway.handleMessage(session, server, wsMessage('inventoryFault', {
@@ -1455,7 +1974,7 @@ describe('AgentGateway state cache runtime readiness', () => {
   it('retires the connection when terminal evidence is rejected so Agent re-executes', async () => {
     const { gateway, taskResults } = makeGateway();
     taskResults.handle.mockRejectedValue(new Error('invalid terminal safety evidence'));
-    const server = { id: 'server-a', name: 'server-a' } as ServerEntity;
+    const server = { id: 'server-a', name: 'server-a' } as ServerRecord;
     const session = activeSession(gateway, 'server-a') as ReturnType<typeof makeSession>;
 
     await gateway.handleMessage(session, server, wsMessage('task.result.v1', {
@@ -1513,7 +2032,7 @@ describe('AgentGateway authenticated bootstrap readiness', () => {
       params: { type: 'nfs', nfsServer: 'nfs.internal', exportPath: '/export', version: '4.2' },
     }]);
     const session = makeSession();
-    session.rpc.mockResolvedValue({
+    session.enqueueRpc.mockResolvedValue({
       remoteFsMounts: [{
         id: 'remote-a',
         hostMountPoint: '/mnt/remote-fs/remote-a',
@@ -1524,12 +2043,12 @@ describe('AgentGateway authenticated bootstrap readiness', () => {
     (gateway as unknown as { sessions: Map<string, unknown> }).sessions.set('server-a', session);
 
     await gateway.onHello(
-      { id: 'server-a', name: 'server-a', hostFingerprint: HOST_FINGERPRINT, agentConfigFingerprint: CONFIG_FINGERPRINT } as ServerEntity,
+      { id: 'server-a', name: 'server-a', hostFingerprint: HOST_FINGERPRINT, agentConfigFingerprint: CONFIG_FINGERPRINT } as ServerRecord,
       helloPayload(),
       session,
     );
 
-    expect(session.rpc).toHaveBeenCalledWith('agent.bootstrap.v1', {
+    expect(session.enqueueRpc).toHaveBeenCalledWith('agent.bootstrap.v1', {
       remoteFsMounts: [{
         id: 'remote-a',
         hostMountPoint: '/mnt/remote-fs/remote-a',
@@ -1548,7 +2067,7 @@ describe('AgentGateway authenticated bootstrap readiness', () => {
     }));
 
     await gateway.onStateReport(
-      { id: 'server-a', name: 'server-a' } as ServerEntity,
+      { id: 'server-a', name: 'server-a' } as ServerRecord,
       makeReport(),
     );
 
@@ -1578,8 +2097,8 @@ describe('AgentGateway authenticated bootstrap readiness', () => {
     session.bootstrapReady = true;
 
     await gateway.onStateReport(
-      { id: 'server-a', name: 'server-a' } as ServerEntity,
-      makeReport(),
+      { id: 'server-a', name: 'server-a' } as ServerRecord,
+      makeReport({ remoteFsMounts: [] }),
       session,
     );
 
@@ -1589,6 +2108,10 @@ describe('AgentGateway authenticated bootstrap readiness', () => {
     expect(gateway.dispatchReadyServerIds()).toEqual(['server-a']);
 
     gateway.sendTask('server-a', {
+      id: session.id,
+      generation: session.generation,
+      gatewayId: (gateway as unknown as { gatewayId: string }).gatewayId,
+    }, {
       taskId: 'task-recovery',
       kind: AgentTaskKind.ImageEnsurePresent,
       payloadHash: TASK_HASH,
@@ -1600,8 +2123,8 @@ describe('AgentGateway authenticated bootstrap readiness', () => {
     }));
 
     await gateway.onStateReport(
-      { id: 'server-a', name: 'server-a' } as ServerEntity,
-      makeReport({ sequence: 2 }),
+      { id: 'server-a', name: 'server-a' } as ServerRecord,
+      makeReport({ sequence: 2, remoteFsMounts: [] }),
       session,
     );
 
@@ -1620,8 +2143,8 @@ describe('AgentGateway authenticated bootstrap readiness', () => {
     session.bootstrapReady = true;
 
     await gateway.onStateReport(
-      { id: 'server-a', name: 'server-a' } as ServerEntity,
-      makeReport(),
+      { id: 'server-a', name: 'server-a' } as ServerRecord,
+      makeReport({ remoteFsMounts: [] }),
       session,
     );
 
@@ -1655,9 +2178,9 @@ describe('AgentGateway authenticated bootstrap readiness', () => {
       name: 'server-a',
       hostFingerprint: HOST_FINGERPRINT,
       agentConfigFingerprint: CONFIG_FINGERPRINT,
-    } as ServerEntity;
+    } as ServerRecord;
     const failed = makeSession();
-    failed.rpc.mockRejectedValue(new Error('mount verification failed'));
+    failed.enqueueRpc.mockRejectedValue(new Error('mount verification failed'));
     const maps = gateway as unknown as {
       sessions: Map<string, unknown>;
     };
@@ -1689,13 +2212,13 @@ describe('AgentGateway authenticated bootstrap readiness', () => {
     maps.sessions.delete('server-a');
     maps.sessions.set('server-a', reconnect);
     await gateway.onHello(
-      { ...server } as ServerEntity,
+      { ...server } as ServerRecord,
       helloPayload(),
       reconnect,
     );
 
     expect(reconnect.ws.terminate).toHaveBeenCalledTimes(1);
-    expect(reconnect.rpc).not.toHaveBeenCalled();
+    expect(reconnect.enqueueRpc).not.toHaveBeenCalled();
     expect(reconnect.markDispatchReady).not.toHaveBeenCalled();
     expect(gateway.dispatchReadyServerIds()).toEqual([]);
     expect(taskDispatcher.wake).not.toHaveBeenCalled();
@@ -1723,9 +2246,9 @@ describe('AgentGateway authenticated bootstrap readiness', () => {
       name: 'server-a',
       hostFingerprint: HOST_FINGERPRINT,
       agentConfigFingerprint: CONFIG_FINGERPRINT,
-    } as ServerEntity;
+    } as ServerRecord;
     const disconnected = makeSession();
-    disconnected.rpc.mockImplementation(async () => {
+    disconnected.enqueueRpc.mockImplementation(async () => {
       disconnected.ws.readyState = WebSocket.CLOSED;
       throw new AgentRpcTransportError('Agent disconnected');
     });
@@ -1744,7 +2267,7 @@ describe('AgentGateway authenticated bootstrap readiness', () => {
     const reconnect = makeSession();
     maps.sessions.set('server-a', reconnect);
     await gateway.onHello(server, helloPayload(), reconnect);
-    expect(reconnect.rpc).toHaveBeenCalledWith(
+    expect(reconnect.enqueueRpc).toHaveBeenCalledWith(
       'agent.bootstrap.v1',
       { remoteFsMounts: [] },
       AGENT_BOOTSTRAP_RPC_TIMEOUT_MS,
@@ -1771,11 +2294,11 @@ describe('AgentGateway authenticated bootstrap readiness', () => {
       Object.assign(durable, patch);
     });
     const session = makeSession();
-    session.rpc.mockRejectedValue(new Error('Agent RPC timeout: agent.bootstrap.v1'));
+    session.enqueueRpc.mockRejectedValue(new Error('Agent RPC timeout: agent.bootstrap.v1'));
     (gateway as unknown as { sessions: Map<string, unknown> }).sessions.set('server-a', session);
 
     await gateway.onHello(
-      { id: 'server-a', name: 'server-a' } as ServerEntity,
+      { id: 'server-a', name: 'server-a' } as ServerRecord,
       helloPayload(),
       session,
     );
@@ -1797,6 +2320,7 @@ describe('AgentGateway authenticated bootstrap readiness', () => {
       agentTasksRepo,
       taskPayloadCodec,
       transactionManager,
+      pgTransaction,
       agentTasks,
     } = makeGateway();
     remoteFsAssignmentsRepo.find.mockResolvedValue([{
@@ -1852,7 +2376,7 @@ describe('AgentGateway authenticated bootstrap readiness', () => {
       return null;
     });
     const session = makeSession();
-    session.rpc.mockResolvedValue({
+    session.enqueueRpc.mockResolvedValue({
       remoteFsMounts: [{
         id: 'remote-a',
         hostMountPoint: '/mnt/remote-fs/remote-a',
@@ -1864,7 +2388,7 @@ describe('AgentGateway authenticated bootstrap readiness', () => {
     (gateway as unknown as { sessions: Map<string, unknown> }).sessions.set('server-a', session);
 
     await gateway.onHello(
-      { id: 'server-a', name: 'server-a', hostFingerprint: HOST_FINGERPRINT, agentConfigFingerprint: CONFIG_FINGERPRINT } as ServerEntity,
+      { id: 'server-a', name: 'server-a', hostFingerprint: HOST_FINGERPRINT, agentConfigFingerprint: CONFIG_FINGERPRINT } as ServerRecord,
       helloPayload(),
       session,
     );
@@ -1876,7 +2400,7 @@ describe('AgentGateway authenticated bootstrap readiness', () => {
     expect(gateway.dispatchReadyServerIds()).toEqual([]);
 
     await gateway.onStateReport(
-      { id: 'server-a', name: 'server-a' } as ServerEntity,
+      { id: 'server-a', name: 'server-a' } as ServerRecord,
       makeReport({
         remoteFsMounts: [{
           id: 'remote-a',
@@ -1890,7 +2414,7 @@ describe('AgentGateway authenticated bootstrap readiness', () => {
     expect(session.markDispatchReady).toHaveBeenCalledTimes(1);
     expect(taskDispatcher.wake).toHaveBeenCalledTimes(1);
     expect(agentTasks.enqueueInTransaction).toHaveBeenCalledWith(
-      transactionManager,
+      pgTransaction,
       expect.objectContaining({
         kind: AgentTaskKind.RemoteFsEnsure,
         resourceId: 'remote-a',
@@ -1907,6 +2431,7 @@ describe('AgentGateway authenticated bootstrap readiness', () => {
       agentTasksRepo,
       containerMountsRepo,
       transactionManager,
+      pgTransaction,
       agentTasks,
     } = makeGateway();
     remoteFsAssignmentsRepo.find.mockResolvedValue([{
@@ -2008,13 +2533,13 @@ describe('AgentGateway authenticated bootstrap readiness', () => {
     };
 
     await gateway.onStateReport(
-      { id: 'server-a', name: 'server-a' } as ServerEntity,
+      { id: 'server-a', name: 'server-a' } as ServerRecord,
       makeReport({ remoteFsMounts: [remoteError] }),
     );
 
     expect(agentTasks.enqueueInTransaction).toHaveBeenCalledTimes(1);
     expect(agentTasks.enqueueInTransaction).toHaveBeenLastCalledWith(
-      transactionManager,
+      pgTransaction,
       expect.objectContaining({
         kind: AgentTaskKind.ContainerStop,
         resourceId: 'container-a',
@@ -2024,7 +2549,7 @@ describe('AgentGateway authenticated bootstrap readiness', () => {
 
     containerMountsRepo.find.mockResolvedValue([]);
     await gateway.onStateReport(
-      { id: 'server-a', name: 'server-a' } as ServerEntity,
+      { id: 'server-a', name: 'server-a' } as ServerRecord,
       makeReport({
         sequence: 2,
         containers: [{ ...makeContainer('docker-a'), status: ContainerStatus.Exited }],
@@ -2034,7 +2559,7 @@ describe('AgentGateway authenticated bootstrap readiness', () => {
 
     expect(agentTasks.enqueueInTransaction).toHaveBeenCalledTimes(2);
     expect(agentTasks.enqueueInTransaction).toHaveBeenLastCalledWith(
-      transactionManager,
+      pgTransaction,
       expect.objectContaining({
         kind: AgentTaskKind.RemoteFsEnsure,
         resourceId: 'remote-a',
@@ -2070,12 +2595,12 @@ describe('AgentGateway authenticated bootstrap readiness', () => {
     (gateway as unknown as { sessions: Map<string, unknown> }).sessions.set('server-a', session);
 
     await gateway.onHello(
-      { id: 'server-a', name: 'server-a', hostFingerprint: HOST_FINGERPRINT, agentConfigFingerprint: CONFIG_FINGERPRINT } as ServerEntity,
+      { id: 'server-a', name: 'server-a', hostFingerprint: HOST_FINGERPRINT, agentConfigFingerprint: CONFIG_FINGERPRINT } as ServerRecord,
       helloPayload(),
       session,
     );
 
-    expect(session.rpc).not.toHaveBeenCalled();
+    expect(session.enqueueRpc).not.toHaveBeenCalled();
     expect(session.markDispatchReady).not.toHaveBeenCalled();
     expect(taskDispatcher.wake).not.toHaveBeenCalled();
     expect(session.ws.terminate).toHaveBeenCalledTimes(1);
@@ -2101,7 +2626,7 @@ describe('AgentGateway authenticated bootstrap readiness', () => {
     (gateway as unknown as { sessions: Map<string, unknown> }).sessions.set('server-a', session);
 
     await gateway.onHello(
-      { id: 'server-a', name: 'server-a' } as ServerEntity,
+      { id: 'server-a', name: 'server-a' } as ServerRecord,
       helloPayload(),
       session,
     );
@@ -2157,18 +2682,18 @@ describe('AgentGateway authenticated bootstrap readiness', () => {
     gateway.notify('server-a', 'reconcile', { serverId: 'server-a' });
     expect(session.rpc).not.toHaveBeenCalled();
     expect(session.send).not.toHaveBeenCalled();
-    expect(() => (gateway.notify as unknown as (
+    await expect((gateway.notifyAsync as unknown as (
       serverId: string,
       kind: string,
       payload: unknown,
-    ) => void)('server-a', 'selfCheck', {})).toThrow('is not allowed');
+    ) => Promise<void>)('server-a', 'selfCheck', {})).rejects.toThrow('is not allowed');
 
     session.markDispatchReady();
-    session.rpc.mockResolvedValue({ running: true });
+    session.enqueueRpc.mockResolvedValue({ running: true });
     await expect(gateway.rpc('server-a', 'selfCheck', {}))
       .resolves.toEqual({ running: true });
     gateway.notify('server-a', 'reconcile', { serverId: 'server-a' });
-    expect(session.rpc).toHaveBeenCalledTimes(1);
+    expect(session.enqueueRpc).toHaveBeenCalledTimes(1);
     expect(session.send).toHaveBeenCalledWith(expect.objectContaining({ kind: 'reconcile' }));
   });
 
@@ -2183,7 +2708,7 @@ describe('AgentGateway authenticated bootstrap readiness', () => {
     maps.sessions.set('server-a', active);
 
     await gateway.onHello(
-      { id: 'server-a', name: 'server-a', hostFingerprint: HOST_FINGERPRINT, agentConfigFingerprint: CONFIG_FINGERPRINT } as ServerEntity,
+      { id: 'server-a', name: 'server-a', hostFingerprint: HOST_FINGERPRINT, agentConfigFingerprint: CONFIG_FINGERPRINT } as ServerRecord,
       helloPayload('b'.repeat(64)),
       conflicting,
     );
@@ -2204,7 +2729,7 @@ describe('AgentGateway authenticated bootstrap readiness', () => {
         id: 'server-a',
         hostFingerprint: HOST_FINGERPRINT,
         agentConfigFingerprint: CONFIG_FINGERPRINT,
-      } as ServerEntity,
+      } as ServerRecord,
       helloPayload(HOST_FINGERPRINT, 'e'.repeat(64)),
       session,
     );
@@ -2228,13 +2753,19 @@ describe('AgentGateway authenticated bootstrap readiness', () => {
   ])('durably quarantines a deterministic %s fault', async (_label, override, message) => {
     const { gateway, serversRepo } = makeGateway();
     const session = makeSession();
+    Object.defineProperty(session, 'generation', {
+      configurable: true,
+      get: () => {
+        throw new Error('pre-admission session has no durable generation');
+      },
+    });
 
     const accepted = await gateway.bindHostFingerprint(
       {
         id: 'server-a',
         hostFingerprint: HOST_FINGERPRINT,
         agentConfigFingerprint: CONFIG_FINGERPRINT,
-      } as ServerEntity,
+      } as ServerRecord,
       { ...helloPayload(), ...override },
       session,
     );
@@ -2248,13 +2779,72 @@ describe('AgentGateway authenticated bootstrap readiness', () => {
     expect(session.ws.terminate).toHaveBeenCalledOnce();
   });
 
+  it('durably quarantines a duplicate static address before session admission', async () => {
+    const {
+      gateway,
+      infrastructure,
+      serversRepo,
+      workflow,
+      proxySnapshots,
+    } = makeGateway();
+    const current = {
+      id: 'server-a',
+      hostFingerprint: null,
+      agentConfigFingerprint: null,
+      macvlanCidr: null,
+      macvlanGateway: null,
+      macvlanReservedIps: [],
+      status: ServerStatus.Unknown,
+    };
+    serversRepo.findOneBy.mockResolvedValue(current);
+    infrastructure.listServers.mockResolvedValue([
+      current,
+      {
+        id: 'server-b',
+        hostFingerprint: 'b'.repeat(64),
+        agentConfigFingerprint: 'c'.repeat(64),
+        macvlanCidr: '10.0.0.0/24',
+        macvlanGateway: '10.0.0.1',
+        macvlanReservedIps: ['10.0.0.2'],
+        status: ServerStatus.Online,
+      },
+    ]);
+    const session = makeSession();
+    Object.defineProperty(session, 'generation', {
+      configurable: true,
+      get: () => {
+        throw new Error('pre-admission session has no durable generation');
+      },
+    });
+
+    const accepted = await gateway.bindHostFingerprint(
+      current as unknown as ServerRecord,
+      { ...helloPayload(), macvlanReservedIps: ['10.0.0.2'] },
+      session,
+    );
+
+    expect(accepted).toBe(false);
+    expect(workflow.quarantineAgentInventoryFault).not.toHaveBeenCalled();
+    expect(serversRepo.update).toHaveBeenCalledWith('server-a', expect.objectContaining({
+      status: ServerStatus.AgentQuarantined,
+      quarantineCode: 'AGENT_INVENTORY_FAULT',
+      quarantineMessage:
+        'Agent static address 10.0.0.2 is already owned by another network identity',
+    }));
+    expect(proxySnapshots.blockServer).toHaveBeenCalledWith(
+      'server-a',
+      'authoritative Agent inventory failed on server-a',
+    );
+    expect(session.ws.terminate).toHaveBeenCalledOnce();
+  });
+
   it('retires a database binding failure without misclassifying it as Agent identity evidence', async () => {
     const { gateway, serversRepo, proxySnapshots } = makeGateway();
     const session = makeSession();
     serversRepo.findOneBy.mockRejectedValueOnce(new Error('database temporarily unavailable'));
 
     const accepted = await gateway.bindHostFingerprint(
-      { id: 'server-a' } as ServerEntity,
+      { id: 'server-a' } as ServerRecord,
       helloPayload(),
       session,
     );
@@ -2270,18 +2860,20 @@ describe('AgentGateway authenticated bootstrap readiness', () => {
     expect(session.ws.terminate).toHaveBeenCalledOnce();
   });
 
-  it('retires global network-ledger pressure without quarantining valid Agent identity', async () => {
+  it('retires network-ledger database pressure without quarantining valid Agent identity', async () => {
     const {
       gateway,
       serversRepo,
       proxySnapshots,
-      transactionManager,
+      queryExecutor,
     } = makeGateway();
     const session = makeSession();
-    transactionManager.count.mockResolvedValue(MAX_NETWORK_ADDRESS_CLAIMS_GLOBAL);
+    queryExecutor.executeQuery.mockRejectedValueOnce(
+      new Error('network ledger temporarily unavailable'),
+    );
 
     const accepted = await gateway.bindHostFingerprint(
-      { id: 'server-a' } as ServerEntity,
+      { id: 'server-a' } as ServerRecord,
       helloPayload(),
       session,
     );
@@ -2331,12 +2923,12 @@ describe('AgentGateway authenticated bootstrap readiness', () => {
 
     const [first, second] = await Promise.all([
       gateway.bindHostFingerprint(
-        { id: 'server-a', hostFingerprint: null, agentConfigFingerprint: null } as ServerEntity,
+        { id: 'server-a', hostFingerprint: null, agentConfigFingerprint: null } as ServerRecord,
         helloPayload('c'.repeat(64)),
         firstSession,
       ),
       gateway.bindHostFingerprint(
-        { id: 'server-a', hostFingerprint: null, agentConfigFingerprint: null } as ServerEntity,
+        { id: 'server-a', hostFingerprint: null, agentConfigFingerprint: null } as ServerRecord,
         helloPayload('d'.repeat(64)),
         secondSession,
       ),
@@ -2350,6 +2942,44 @@ describe('AgentGateway authenticated bootstrap readiness', () => {
 });
 
 describe('AgentGateway explicit session fencing', () => {
+  it('does not leave stale local route blocks when a real block listener retires replaced A', async () => {
+    const fixture = makeGateway();
+    const gateway = fixture.gateway;
+    const notifier = new ProxySnapshotNotifierService();
+    (gateway as unknown as { proxySnapshots: ProxySnapshotNotifierService }).proxySnapshots =
+      notifier;
+    const httpSnapshots: string[][] = [];
+    const sshSnapshots: string[][] = [];
+    notifier.register('http', async () => {
+      httpSnapshots.push(notifier.isServerBlocked('server-a') ? [] : ['gateway-b-route']);
+    });
+    notifier.register('ssh', async () => {
+      sshSnapshots.push(notifier.isServerBlocked('server-a') ? [] : ['gateway-b-route']);
+    });
+    fixture.workflow.retireAgentSessionWithCleanup.mockResolvedValueOnce({
+      retired: false,
+      cleanup: undefined,
+    });
+    const staleA = activeSession(gateway, 'server-a');
+    staleA.markDispatchReady();
+    (gateway as unknown as { onModuleInit(): void }).onModuleInit();
+    try {
+      notifier.blockServer('server-a', 'delayed gateway A close');
+      await vi.waitFor(() => {
+        expect((gateway as unknown as {
+          sessions: Map<string, unknown>;
+        }).sessions.has('server-a')).toBe(false);
+      });
+
+      expect(staleA.ws.terminate).toHaveBeenCalledOnce();
+      expect(notifier.isServerBlocked('server-a')).toBe(false);
+      expect(httpSnapshots.at(-1)).toEqual(['gateway-b-route']);
+      expect(sshSnapshots.at(-1)).toEqual(['gateway-b-route']);
+    } finally {
+      (gateway as unknown as { onModuleDestroy(): void }).onModuleDestroy();
+    }
+  });
+
   it('deletes only after a matching post-fence full report commits on the same session', async () => {
     const { gateway, serversRepo } = makeGateway();
     serversRepo.findOneBy.mockResolvedValue({
@@ -2374,7 +3004,7 @@ describe('AgentGateway explicit session fencing', () => {
       remoteFsMounts: [],
     });
     await gateway.onStateReport(
-      { id: 'server-a' } as ServerEntity,
+      { id: 'server-a' } as ServerRecord,
       makeReport({
         sequence: 1,
         containers: [],
@@ -2407,6 +3037,10 @@ describe('AgentGateway explicit session fencing', () => {
     };
     expect(gateway.dispatchReadyServerIds()).toEqual([]);
     gateway.sendTask('server-a', {
+      id: session.id,
+      generation: session.generation,
+      gatewayId: (gateway as unknown as { gatewayId: string }).gatewayId,
+    }, {
       taskId: 'task-a',
       kind: AgentTaskKind.ImageEnsurePresent,
       payloadHash: TASK_HASH,
@@ -2418,7 +3052,7 @@ describe('AgentGateway explicit session fencing', () => {
       containers: [], dataDirs: [], xfsProjects: [], disks: [], localImages: [], remoteFsMounts: [],
     };
     await gateway.onStateReport(
-      { id: 'server-a' } as ServerEntity,
+      { id: 'server-a' } as ServerRecord,
       makeReport({
         sequence: 1,
         reconcileProofNonce: challenge.payload.proofNonce,
@@ -2429,7 +3063,7 @@ describe('AgentGateway explicit session fencing', () => {
     );
     expect(work).not.toHaveBeenCalled();
     await gateway.onStateReport(
-      { id: 'server-a' } as ServerEntity,
+      { id: 'server-a' } as ServerRecord,
       makeReport({ sequence: 2, reconcileProofNonce: 'b'.repeat(64), ...empty }),
       session,
       Date.now(),
@@ -2438,7 +3072,7 @@ describe('AgentGateway explicit session fencing', () => {
     expect(session.ws.terminate).not.toHaveBeenCalled();
 
     await gateway.onStateReport(
-      { id: 'server-a' } as ServerEntity,
+      { id: 'server-a' } as ServerRecord,
       makeReport({
         sequence: 3,
         reconcileProofNonce: challenge.payload.proofNonce,
@@ -2554,10 +3188,9 @@ describe('AgentGateway explicit session fencing', () => {
     }));
   });
 
-  it('terminates the Agent first and republishes an offline snapshot when route deletion fails', async () => {
+  it('fails stop when exact retirement cleanup cannot commit atomically', async () => {
     const {
       gateway,
-      serversRepo,
       sshRoutes,
       sshProxyGateway,
       httpProxyGateway,
@@ -2567,14 +3200,11 @@ describe('AgentGateway explicit session fencing', () => {
     sshRoutes.clearServer.mockRejectedValueOnce(new Error('route database unavailable'));
 
     await expect(gateway.fenceSession('server-a', 'credential rotated'))
-      .rejects.toThrow('route revocation was only partially applied');
+      .rejects.toThrow('atomic retirement failed');
 
     expect(session.ws.terminate).toHaveBeenCalledTimes(1);
-    expect(serversRepo.update).toHaveBeenCalledWith('server-a', expect.objectContaining({
-      status: ServerStatus.Offline,
-    }));
-    expect(httpProxyGateway.scheduleBroadcast).toHaveBeenCalledWith('agent_session_retired');
-    expect(sshProxyGateway.broadcastSnapshot).toHaveBeenCalledTimes(1);
+    expect(httpProxyGateway.scheduleBroadcast).not.toHaveBeenCalled();
+    expect(sshProxyGateway.broadcastSnapshot).not.toHaveBeenCalled();
   });
 
   it('does not renew stale proxy leases when neither offline status nor route deletion commits', async () => {
@@ -2592,7 +3222,7 @@ describe('AgentGateway explicit session fencing', () => {
     sshRoutes.clearServer.mockRejectedValueOnce(new Error('route database unavailable'));
 
     await expect(gateway.fenceSession('server-a', 'credential rotated'))
-      .rejects.toThrow('route revocation failed completely');
+      .rejects.toThrow('atomic retirement failed');
 
     expect(session.ws.terminate).toHaveBeenCalledTimes(1);
     expect(httpProxyGateway.scheduleBroadcast).not.toHaveBeenCalled();
@@ -2608,7 +3238,7 @@ describe('AgentGateway explicit session fencing', () => {
     const firstWork = vi.fn().mockResolvedValue('first');
 
     await expect(gateway.runWithSessionFence('server-a', 'first fence', firstWork))
-      .rejects.toThrow('route revocation was only partially applied');
+      .rejects.toThrow('atomic retirement failed');
     expect(firstWork).not.toHaveBeenCalled();
 
     const secondWork = vi.fn().mockResolvedValue('recovered');
@@ -2640,6 +3270,162 @@ describe('AgentGateway explicit session fencing', () => {
     expect(work).not.toHaveBeenCalled();
     expect(session.ws.terminate).not.toHaveBeenCalled();
     expect(gateway.dispatchReadyServerIds()).toEqual(['server-a']);
+  });
+});
+
+describe('AgentGateway routed RPC capacity', () => {
+  it('drops an expired routed exec before any WebSocket frame or durable exec lookup', async () => {
+    const fixture = makeGateway();
+    const session = activeSession(fixture.gateway, 'server-a');
+    session.markDispatchReady();
+    fixture.workflow.currentDatabaseTime.mockResolvedValue(
+      new Date('2026-01-01T00:00:01Z'),
+    );
+
+    await fixture.gateway.handleRoutedRpcMessage(JSON.stringify({
+      v: 1,
+      type: 'request',
+      requestId: 'expired-exec',
+      targetGatewayId: fixture.redis.gatewayId,
+      replyGatewayId: 'gateway:00000000-0000-4000-8000-000000000002',
+      serverId: 'server-a',
+      sessionId: session.id,
+      sessionGeneration: session.generation,
+      kind: 'execStream',
+      payload: {
+        sessionId: 'exec-a',
+        runtimeId: 'runtime-a',
+        _nyabaseExecAuthority: {
+          userId: 'user-a',
+          containerId: 'container-a',
+          authorizationKind: 'container-owner',
+        },
+      },
+      timeoutMs: 1_000,
+      mode: 'rpc',
+      deadlineAt: new Date('2026-01-01T00:00:00Z').getTime(),
+    }));
+
+    expect(session.enqueueRpc).not.toHaveBeenCalled();
+    expect(session.send).not.toHaveBeenCalled();
+    expect(fixture.workflow.findExecSessionForAgent).not.toHaveBeenCalled();
+    expect(fixture.execSessionRegistry.register).not.toHaveBeenCalled();
+    expect(fixture.redis.publishAddressedRpc).toHaveBeenCalledWith(
+      'gateway:00000000-0000-4000-8000-000000000002',
+      expect.stringContaining('"Agent socket-owner request expired"'),
+    );
+  });
+
+  it('uses one addressed subscription while bounding API-side pending RPCs', async () => {
+    const fixture = makeGateway();
+    const gateway = fixture.gateway;
+    (gateway as unknown as {
+      runtimeRole: { servesGateway(): boolean };
+    }).runtimeRole = { servesGateway: () => false };
+    const subscribers = new Set<(message: string) => void>();
+    fixture.redis.subscribeAddressedRpc.mockImplementation(async (
+      handler: (message: string) => void,
+    ) => {
+      subscribers.add(handler);
+      return async () => {
+        subscribers.delete(handler);
+      };
+    });
+    fixture.redis.publishAddressedRpc.mockResolvedValue(true);
+
+    const perServer = Array.from({ length: 8 }, () =>
+      gateway.rpc('server-cap', 'selfCheck', {}, 1_000));
+    await vi.waitFor(() => expect(subscribers.size).toBe(1));
+    await expect(gateway.rpc('server-cap', 'selfCheck', {}, 1_000))
+      .rejects.toThrow('capacity exceeded');
+
+    const routed = [...perServer];
+    for (let index = 0; index < 56; index += 1) {
+      routed.push(gateway.rpc(`server-${Math.floor(index / 7)}`, 'selfCheck', {}, 1_000));
+    }
+    await vi.waitFor(() =>
+      expect(fixture.redis.publishAddressedRpc).toHaveBeenCalledTimes(64));
+    await expect(gateway.rpc('server-global-overflow', 'selfCheck', {}, 1_000))
+      .rejects.toThrow('capacity exceeded');
+
+    const requests = fixture.redis.publishAddressedRpc.mock.calls
+      .map(([, message]) => JSON.parse(message as string) as {
+        type: string;
+        requestId: string;
+        targetGatewayId: string;
+        sessionId: string;
+        sessionGeneration: number;
+      })
+      .filter((message) => message.type === 'request');
+    for (const handler of [...subscribers]) {
+      handler(JSON.stringify({
+        v: 1,
+        type: 'response',
+        requestId: requests[0]!.requestId,
+        targetGatewayId: fixture.redis.gatewayId,
+        sourceGatewayId: 'gateway:00000000-0000-4000-8000-000000000099',
+        sessionId: requests[0]!.sessionId,
+        sessionGeneration: requests[0]!.sessionGeneration,
+        ok: true,
+        data: { forged: true },
+      }));
+    }
+    expect((gateway as unknown as {
+      routedRpcPendingRequests: Map<string, unknown>;
+    }).routedRpcPendingRequests.size).toBe(64);
+    for (const request of requests) {
+      const response = JSON.stringify({
+        v: 1,
+        type: 'response',
+        requestId: request.requestId,
+        targetGatewayId: fixture.redis.gatewayId,
+        sourceGatewayId: request.targetGatewayId,
+        sessionId: request.sessionId,
+        sessionGeneration: request.sessionGeneration,
+        ok: true,
+        data: { running: true },
+      });
+      for (const handler of [...subscribers]) handler(response);
+    }
+    await expect(Promise.all(routed)).resolves.toHaveLength(64);
+    expect(subscribers.size).toBe(1);
+    expect(fixture.redis.subscribeAddressedRpc).toHaveBeenCalledOnce();
+
+    await expect(gateway.rpc('server-timeout', 'selfCheck', {}, 1))
+      .rejects.toThrow('timed out');
+    expect(subscribers.size).toBe(1);
+
+    const recovered = gateway.rpc<{ running: boolean }>(
+      'server-timeout',
+      'selfCheck',
+      {},
+      1_000,
+    );
+    await vi.waitFor(() =>
+      expect(fixture.redis.publishAddressedRpc).toHaveBeenCalledTimes(66));
+    const recoveryRequest = JSON.parse(
+      fixture.redis.publishAddressedRpc.mock.calls.at(-1)![1] as string,
+    ) as {
+      requestId: string;
+      targetGatewayId: string;
+      sessionId: string;
+      sessionGeneration: number;
+    };
+    for (const handler of [...subscribers]) {
+      handler(JSON.stringify({
+        v: 1,
+        type: 'response',
+        requestId: recoveryRequest.requestId,
+        targetGatewayId: fixture.redis.gatewayId,
+        sourceGatewayId: recoveryRequest.targetGatewayId,
+        sessionId: recoveryRequest.sessionId,
+        sessionGeneration: recoveryRequest.sessionGeneration,
+        ok: true,
+        data: { running: true },
+      }));
+    }
+    await expect(recovered).resolves.toEqual({ running: true });
+    expect(subscribers.size).toBe(1);
   });
 });
 

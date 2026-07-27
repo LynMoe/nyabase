@@ -100,8 +100,12 @@ slot_port_is_available_for_run() {
       --filter "publish=$port"
   )
   ((${#publishers[@]} == 1)) || return 1
-  [[ "$(docker inspect "${publishers[0]}" \
-    --format '{{index .Config.Labels "com.docker.compose.service"}}')" == "$expected_service" ]]
+  local compose_service component
+  compose_service="$(docker inspect "${publishers[0]}" \
+    --format '{{index .Config.Labels "com.docker.compose.service"}}')"
+  component="$(docker inspect "${publishers[0]}" \
+    --format '{{index .Config.Labels "io.nyabase.e2e.component"}}')"
+  [[ "$compose_service" == "$expected_service" || "$component" == "$expected_service" ]]
 }
 
 stored_subnet_is_available_for_run() {
@@ -138,6 +142,7 @@ validate_stored_slot_state() {
   [[ "${NYABASE_E2E_NETWORK:-}" == "nyabase-e2e-${run_id}-cluster" ]] || return 1
   [[ "${NYABASE_E2E_EDGE_PORT:-}" == "$((18443 + slot))" ]] || return 1
   [[ "${NYABASE_E2E_RATE_LIMIT_EDGE_PORT:-}" == "$((19443 + slot))" ]] || return 1
+  [[ "${NYABASE_E2E_SPLIT_GATEWAY_EDGE_PORT:-}" == "$((20443 + slot))" ]] || return 1
 }
 
 load_e2e_state_file() {
@@ -173,8 +178,13 @@ validate_loaded_run_state() {
   [[ "$NYABASE_E2E_PREFIX" == "$prefix" ]] || return 1
   [[ "$NYABASE_E2E_PROJECT" == "$prefix" ]] || return 1
   [[ "$NYABASE_E2E_GATEWAY" == "172.29.${third_octet}.1" ]] || return 1
-  [[ "$NYABASE_E2E_BACKEND_IP" == "172.29.${third_octet}.2" ]] || return 1
+  [[ "$NYABASE_E2E_POSTGRES_IP" == "172.29.${third_octet}.14" ]] || return 1
+  [[ "$NYABASE_E2E_REDIS_IP" == "172.29.${third_octet}.15" ]] || return 1
   [[ "$NYABASE_E2E_VM_IP" == "172.29.${third_octet}.3" ]] || return 1
+  [[ "$NYABASE_E2E_VMAGENT_IP" == "172.29.${third_octet}.16" ]] || return 1
+  [[ "$NYABASE_E2E_API_IP" == "172.29.${third_octet}.17" ]] || return 1
+  [[ "$NYABASE_E2E_GATEWAY_IP" == "172.29.${third_octet}.18" ]] || return 1
+  [[ "$NYABASE_E2E_WORKER_IP" == "172.29.${third_octet}.19" ]] || return 1
   [[ "$NYABASE_E2E_EDGE_IP" == "172.29.${third_octet}.4" ]] || return 1
   [[ "$NYABASE_E2E_REGISTRY_IP" == "172.29.${third_octet}.5" ]] || return 1
   [[ "$NYABASE_E2E_SSH_PROXY_IP" == "172.29.${third_octet}.6" ]] || return 1
@@ -186,6 +196,7 @@ validate_loaded_run_state() {
   [[ "$NYABASE_E2E_NODE2_IP" == "172.29.${third_octet}.12" ]] || return 1
   [[ "$NYABASE_E2E_RATE_LIMIT_EDGE_IP" == "172.29.${third_octet}.13" ]] || return 1
   [[ "$NYABASE_E2E_PROBE_IP" == "172.29.${third_octet}.20" ]] || return 1
+  [[ "$NYABASE_E2E_DUPLICATE_FAULT_IP" == "172.29.${third_octet}.23" ]] || return 1
   [[ "$NYABASE_E2E_PUBLIC_URL" == "https://localhost:$NYABASE_E2E_EDGE_PORT" ]] || return 1
   [[ "$NYABASE_E2E_RATE_LIMIT_PUBLIC_URL" == \
     "https://localhost:$NYABASE_E2E_RATE_LIMIT_EDGE_PORT" ]] || return 1
@@ -242,7 +253,10 @@ resume_stored_slot() {
       "$NYABASE_E2E_SUBNET" "$run_id" "$NYABASE_E2E_NETWORK" \
     || ! slot_port_is_available_for_run "$NYABASE_E2E_EDGE_PORT" "$run_id" edge \
     || ! slot_port_is_available_for_run \
-      "$NYABASE_E2E_RATE_LIMIT_EDGE_PORT" "$run_id" rate-limit-edge; then
+      "$NYABASE_E2E_RATE_LIMIT_EDGE_PORT" "$run_id" rate-limit-edge \
+    || ! slot_port_is_available_for_run \
+      "$NYABASE_E2E_SPLIT_GATEWAY_EDGE_PORT" "$run_id" \
+      provider-fault-split-gateway; then
     if [[ "$reacquired" == true ]]; then
       release_slot_lock "$run_id" "$NYABASE_E2E_SLOT_LOCK" || true
     fi
@@ -259,13 +273,13 @@ release_slot_lock() {
   rmdir "$lock_dir"
 }
 
-# Reserve subnet identity and both host listener ports as one authoritative
+# Reserve subnet identity and all three host listener ports as one authoritative
 # slot decision. The directory lock serializes Nyabase allocators; checking
 # the external Docker/network and listener state only after acquiring it keeps
 # doctor/build on the same collision contract and releases rejected locks.
 reserve_slot_for_run() {
   local run_id="$1"
-  local slot lock_dir subnet third_octet edge_port rate_limit_edge_port
+  local slot lock_dir subnet third_octet edge_port rate_limit_edge_port split_gateway_edge_port
   RESERVED_SLOT=
   RESERVED_SLOT_LOCK=
   RESERVED_SUBNET=
@@ -275,6 +289,7 @@ reserve_slot_for_run() {
     subnet="172.29.${third_octet}.0/24"
     edge_port=$((18443 + slot))
     rate_limit_edge_port=$((19443 + slot))
+    split_gateway_edge_port=$((20443 + slot))
     lock_dir="/tmp/nyabase-e2e-slot-${slot}.lock"
     if ! mkdir "$lock_dir" 2>/dev/null; then
       continue
@@ -286,7 +301,8 @@ reserve_slot_for_run() {
     fi
     if subnet_overlaps_existing "$subnet" \
       || slot_port_is_listening "$edge_port" \
-      || slot_port_is_listening "$rate_limit_edge_port"; then
+      || slot_port_is_listening "$rate_limit_edge_port" \
+      || slot_port_is_listening "$split_gateway_edge_port"; then
       release_slot_lock "$run_id" "$lock_dir" \
         || die "failed to release rejected E2E slot lock: $lock_dir"
       continue
@@ -328,7 +344,7 @@ initialize_run() {
     || die "runId $run_id has a manifest without usable state"
 
   reserve_slot_for_run "$run_id" \
-    || die "no collision-free E2E slot (subnet plus both TLS ports) is available"
+    || die "no collision-free E2E slot (subnet plus three TLS ports) is available"
   local slot="$RESERVED_SLOT"
   local lock_dir="$RESERVED_SLOT_LOCK"
   local subnet="$RESERVED_SUBNET"
@@ -337,6 +353,7 @@ initialize_run() {
   local prefix="nyabase-e2e-${run_id}"
   local edge_port=$((18443 + slot))
   local rate_limit_edge_port=$((19443 + slot))
+  local split_gateway_edge_port=$((20443 + slot))
   local state_tmp="$runtime_dir/.state.env.$$.tmp"
   if ! install -m 0600 /dev/null "$state_tmp"; then
     release_slot_lock "$run_id" "$lock_dir" || true
@@ -354,8 +371,13 @@ initialize_run() {
     "NYABASE_E2E_SLOT_LOCK=$lock_dir" \
     "NYABASE_E2E_SUBNET=$subnet" \
     "NYABASE_E2E_GATEWAY=172.29.${third_octet}.1" \
-    "NYABASE_E2E_BACKEND_IP=172.29.${third_octet}.2" \
+    "NYABASE_E2E_POSTGRES_IP=172.29.${third_octet}.14" \
+    "NYABASE_E2E_REDIS_IP=172.29.${third_octet}.15" \
     "NYABASE_E2E_VM_IP=172.29.${third_octet}.3" \
+    "NYABASE_E2E_VMAGENT_IP=172.29.${third_octet}.16" \
+    "NYABASE_E2E_API_IP=172.29.${third_octet}.17" \
+    "NYABASE_E2E_GATEWAY_IP=172.29.${third_octet}.18" \
+    "NYABASE_E2E_WORKER_IP=172.29.${third_octet}.19" \
     "NYABASE_E2E_EDGE_IP=172.29.${third_octet}.4" \
     "NYABASE_E2E_REGISTRY_IP=172.29.${third_octet}.5" \
     "NYABASE_E2E_SSH_PROXY_IP=172.29.${third_octet}.6" \
@@ -367,10 +389,12 @@ initialize_run() {
     "NYABASE_E2E_NODE2_IP=172.29.${third_octet}.12" \
     "NYABASE_E2E_RATE_LIMIT_EDGE_IP=172.29.${third_octet}.13" \
     "NYABASE_E2E_PROBE_IP=172.29.${third_octet}.20" \
+    "NYABASE_E2E_DUPLICATE_FAULT_IP=172.29.${third_octet}.23" \
     "NYABASE_E2E_EDGE_PORT=$edge_port" \
     "NYABASE_E2E_PUBLIC_URL=https://localhost:${edge_port}" \
     "NYABASE_E2E_RATE_LIMIT_EDGE_PORT=$rate_limit_edge_port" \
     "NYABASE_E2E_RATE_LIMIT_PUBLIC_URL=https://localhost:${rate_limit_edge_port}" \
+    "NYABASE_E2E_SPLIT_GATEWAY_EDGE_PORT=$split_gateway_edge_port" \
     "NYABASE_E2E_BACKEND_IMAGE=${prefix}-backend:worktree" \
     "NYABASE_E2E_NODE_IMAGE=${prefix}-node:worktree" \
     "NYABASE_E2E_SSH_PROXY_IMAGE=${prefix}-ssh-proxy:worktree" \

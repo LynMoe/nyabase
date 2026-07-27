@@ -24,7 +24,10 @@ import {
 } from '../../support/container-persona.js';
 import { ContainerSshImageLease } from '../../support/container-ssh-image-lease.js';
 import { coverageCase } from '../../support/coverage-marker.js';
-import { executeThroughConsole } from '../../support/console.js';
+import {
+  executeThroughConsole,
+  type ConsoleSession,
+} from '../../support/console.js';
 import {
   cleanupContainerThroughProductApi,
   getContainerOrNull,
@@ -223,7 +226,7 @@ async function executeOwnerShell(
   deadline: ContainerDeadline,
 ): Promise<{ output: string; exitCode: number }> {
   const containerId = lease.requireContainerId();
-  const session = await expectJson<{ sessionId: string }>(
+  const session = await expectJson<ConsoleSession>(
     await owner.api.post(`${containerResourcePath('owner', containerId)}/exec-sessions`, {
       data: { shell: '/bin/sh', tty: false },
       timeout: deadline.remaining(`create Console session for ${containerId}`, 30_000),
@@ -233,7 +236,7 @@ async function executeOwnerShell(
   return executeThroughConsole(
     page,
     requireRuntimeEnv('E2E_BASE_URL'),
-    session.sessionId,
+    session,
     owner.accessToken,
     command,
     deadline.remaining(`execute Console command in ${containerId}`, 30_000),
@@ -534,7 +537,7 @@ test.describe('30 containers', () => {
         expect(stats.ts).toBeGreaterThan(0);
         expect(Number.isNaN(Date.parse(stats.lastObservedAt ?? ''))).toBe(false);
 
-        const execSession = await expectJson<{ sessionId: string }>(
+        const execSession = await expectJson<ConsoleSession>(
           await adminApi.post(`/api/v2/containers/${containerId}/exec-sessions`, {
             data: { shell: '/bin/sh', tty: false },
           }),
@@ -544,7 +547,7 @@ test.describe('30 containers', () => {
         const consoleResult = await executeThroughConsole(
           page,
           requireRuntimeEnv('E2E_BASE_URL'),
-          execSession.sessionId,
+          execSession,
           adminSession.accessToken,
           `printf '${marker}\\n'; exit\n`,
         );
@@ -558,7 +561,7 @@ test.describe('30 containers', () => {
             runtimeId: running.runtime.runtimeId,
           }),
         );
-        await waitForContainer(
+        const stopped = await waitForContainer(
           adminApi,
           containerId,
           'stopped',
@@ -567,6 +570,10 @@ test.describe('30 containers', () => {
             view.powerIntent === 'stopped' &&
             view.activeTask === null,
         );
+        expect(stopped.runtime.drift).not.toContainEqual(
+          expect.objectContaining({ kind: 'spec_generation_stale' }),
+        );
+        expect(stopped.actions.start).toEqual({ enabled: true });
 
         const startTask = await settleAction(adminApi, containerId, 'start', 'container.start');
         const started = await waitForContainer(
@@ -816,7 +823,7 @@ test.describe('30 containers', () => {
           expect((await stranger.api.post(path, body)).status()).toBe(403);
           expect((await adminApi.post(path, body)).status()).toBe(403);
 
-          const session = await expectJson<{ sessionId: string }>(
+          const session = await expectJson<ConsoleSession>(
             await owner.api.post(path, body),
             201,
           );
@@ -824,7 +831,7 @@ test.describe('30 containers', () => {
           const result = await executeThroughConsole(
             page,
             requireRuntimeEnv('E2E_BASE_URL'),
-            session.sessionId,
+            session,
             owner.accessToken,
             `printf '${marker}'; exit\n`,
           );
@@ -853,14 +860,14 @@ test.describe('30 containers', () => {
           expect((await anonymousApi.post(path, body)).status()).toBe(401);
           expect((await stranger.api.post(path, body)).status()).toBe(403);
           expect((await adminApi.post(path, body)).status()).toBe(403);
-          const session = await expectJson<{ sessionId: string }>(
+          const session = await expectJson<ConsoleSession>(
             await owner.api.post(path, body),
             201,
           );
           const result = await executeThroughConsole(
             page,
             requireRuntimeEnv('E2E_BASE_URL'),
-            session.sessionId,
+            session,
             owner.accessToken,
             "printf 'CPU='; cat /sys/fs/cgroup/cpu.max; printf 'MEM='; cat /sys/fs/cgroup/memory.max; exit\n",
           );
@@ -1227,7 +1234,7 @@ test.describe('30 containers', () => {
             ).status(),
           ).toBe(403);
 
-          const session = await expectJson<{ sessionId: string }>(
+          const session = await expectJson<ConsoleSession>(
             await adminApi.post(adminPath, body),
             201,
           );
@@ -1235,7 +1242,7 @@ test.describe('30 containers', () => {
           const result = await executeThroughConsole(
             page,
             requireRuntimeEnv('E2E_BASE_URL'),
-            session.sessionId,
+            session,
             adminSession.accessToken,
             `printf '${marker}'; exit\n`,
           );
@@ -1951,6 +1958,7 @@ test.describe('30 containers', () => {
               view.failureCode === 'runtime_missing' &&
               view.activeTask === null &&
               view.runtime.runtimeId === runtimeId &&
+              view.runtime.status === 'unknown' &&
               view.actions.delete?.enabled === true &&
               view.actions.console?.enabled === false,
             deadline,

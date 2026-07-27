@@ -1,31 +1,29 @@
-import { ForbiddenException, Injectable } from '@nestjs/common';
-import { InjectRepository } from '@nestjs/typeorm';
-import { EntityManager, In, IsNull, Not, Repository } from 'typeorm';
-import { GroupEntity } from '../entities/group.entity.js';
-import { GroupMemberEntity } from '../entities/group-member.entity.js';
-import { ServerGrantEntity } from '../entities/server-grant.entity.js';
-import { ImageGrantEntity } from '../entities/image-grant.entity.js';
-import { ImageEntity } from '../entities/image.entity.js';
-import { ServerEntity } from '../entities/server.entity.js';
-import { MountSourceGrantEntity } from '../entities/mount-source-grant.entity.js';
-import { RemoteFsServerAssignmentEntity } from '../entities/remote-fs-server-assignment.entity.js';
-import { UserEntity } from '../entities/user.entity.js';
+import {
+  ForbiddenException,
+  Inject,
+  Injectable,
+} from '@nestjs/common';
+import { sql, type Kysely, type Transaction } from 'kysely';
 import {
   Capability,
-  EffectiveServerAccessDto,
+  type EffectiveServerAccessDto,
   GpuGrantMode,
-  GroupSummaryDto,
-  MountSourceKind,
+  type GroupSummaryDto,
+  type MountSourceKind,
   UserStatus,
   SystemGroupKey,
   type AdministrationActionsDto,
 } from '@nyabase/common';
-import { resolveGrant } from './grant-utils.js';
+import type { NyabaseDatabase } from '../persistence-pg/database.types.js';
+import { PG_DATABASE } from '../persistence-pg/tokens.js';
+import { PgTransactionManager } from '../persistence-pg/transaction.js';
 import { AgentGateway } from '../gateway/agent-gateway.js';
 import { exactLocalDisk } from '../mount-sources/utils.js';
 import { AccessCacheEpochService } from './access-cache-epoch.service.js';
-import { runSerializedTransaction } from '../database/serialized-transaction.js';
 import { projectAdministrationActions } from './administration-availability.js';
+import { resolveGrant } from './grant-utils.js';
+
+export type IamTransaction = Transaction<NyabaseDatabase>;
 
 export interface ResolvedServerGrant {
   cpuMillis: number;
@@ -40,132 +38,147 @@ export interface MountSourceRef {
   id: string;
 }
 
-/**
- * Keeps a started external operation boxed so Promise assimilation cannot make
- * the authority transaction wait for the remote acknowledgement.
- */
 export interface StartedExternalWork<T> {
   completion: Promise<T>;
+}
+
+export interface IamGroup {
+  id: string;
+  name: string;
+  description: string | null;
+  priority: number;
+  isSystem: boolean;
+  systemKey: SystemGroupKey | null;
+  capabilities: Capability[];
+  revision: number;
+  createdAt: Date;
+  updatedAt: Date;
+}
+
+interface ServerGrantRow {
+  id: string;
+  user_id: string | null;
+  group_id: string | null;
+  server_id: string;
+  cpu_millis: number | null;
+  mem_bytes: string | null;
+  disk_bytes: string | null;
+  gpu_mode: string | null;
+  gpu_indices: number[] | null;
 }
 
 interface CachedMountSourceRef extends MountSourceRef {
   sourceIdentity: string | null;
 }
 
-/** Per-user cache entry */
 interface UserCache {
   capabilities: Set<Capability>;
-  groups: GroupEntity[];
-  /** serverId → resolved grant */
+  groups: IamGroup[];
   serverGrants: Map<string, ResolvedServerGrant>;
-  /** serverId → imageId Set */
   imageGrants: Map<string, Set<string>>;
-  /** serverId → exact source identity map */
   mountSourceGrants: Map<string, Map<string, CachedMountSourceRef>>;
   epoch: number;
   fetchedAt: number;
 }
 
 const CACHE_TTL_MS = 30_000;
-/**
- * Hard upper bound on the in-memory user cache. Picked so that a system with
- * thousands of users still bounds memory while keeping hit rates high for the
- * working set of active sessions.
- */
 const CACHE_MAX_ENTRIES = 512;
 const CACHE_FILL_MAX_RETRIES = 2;
 
+function requireIamTransaction(value: unknown): IamTransaction {
+  if (
+    !value
+    || typeof value !== 'object'
+    || typeof (value as { selectFrom?: unknown }).selectFrom !== 'function'
+    || typeof (value as { updateTable?: unknown }).updateTable !== 'function'
+  ) {
+    throw new Error('Authorization work requires the caller PostgreSQL/Kysely transaction');
+  }
+  return value as IamTransaction;
+}
+
 @Injectable()
 export class AccessResolverService {
-  // Insertion-order Map => approximate-LRU: every read re-inserts so the
-  // most recently used entry is at the tail; eviction pops the head.
-  private cache = new Map<string, UserCache>();
+  private readonly cache = new Map<string, UserCache>();
 
   constructor(
-    @InjectRepository(GroupEntity)
-    private groupsRepo: Repository<GroupEntity>,
-    @InjectRepository(GroupMemberEntity)
-    private membersRepo: Repository<GroupMemberEntity>,
-    @InjectRepository(ServerGrantEntity)
-    private serverGrantsRepo: Repository<ServerGrantEntity>,
-    @InjectRepository(ImageGrantEntity)
-    private imageGrantsRepo: Repository<ImageGrantEntity>,
-    @InjectRepository(ImageEntity)
-    private imagesRepo: Repository<ImageEntity>,
-    @InjectRepository(ServerEntity)
-    private serversRepo: Repository<ServerEntity>,
-    @InjectRepository(MountSourceGrantEntity)
-    private mountSourceGrantsRepo: Repository<MountSourceGrantEntity>,
-    @InjectRepository(RemoteFsServerAssignmentEntity)
-    private remoteFsAssignmentsRepo: Repository<RemoteFsServerAssignmentEntity>,
-    private agentGateway: AgentGateway,
-    private cacheEpoch: AccessCacheEpochService,
+    @Inject(PG_DATABASE)
+    private readonly database: Kysely<NyabaseDatabase>,
+    private readonly transactions: PgTransactionManager,
+    private readonly agentGateway: AgentGateway,
+    private readonly cacheEpoch: AccessCacheEpochService,
   ) {}
 
-  // ---------------------------------------------------------------------------
-  // Cache invalidation
-  // ---------------------------------------------------------------------------
-
-  invalidateUser(userId: string) {
-    // Fence any read that began before this invalidation. Merely deleting the
-    // entry lets an older in-flight fill publish stale authority afterwards.
+  invalidateUser(userId: string): void {
     this.cacheEpoch.bump();
     this.cache.delete(userId);
   }
 
-  invalidateAll() {
+  invalidateAll(): void {
     this.cacheEpoch.bump();
     this.cache.clear();
   }
 
-  // ---------------------------------------------------------------------------
-  // Public API
-  // ---------------------------------------------------------------------------
-
-  async userCapabilities(userId: string): Promise<Set<Capability>> {
-    const uc = await this.getUserCache(userId);
-    return uc.capabilities;
+  async authorizationCommitted(userIds?: Iterable<string>): Promise<void> {
+    await this.cacheEpoch.refreshAndPublish();
+    if (userIds) {
+      for (const userId of userIds) this.cache.delete(userId);
+    } else {
+      this.cache.clear();
+    }
   }
 
-  /**
-   * Resolve security-sensitive route authority from a current serialized DB
-   * snapshot. The regular cache remains suitable for projections, but must
-   * never extend revoked admin/read authority for its TTL.
-   */
+  async userCapabilities(userId: string): Promise<Set<Capability>> {
+    return (await this.getUserCache(userId)).capabilities;
+  }
+
   async userCapabilitiesCurrent(userId: string): Promise<Set<Capability>> {
-    return runSerializedTransaction(
-      this.groupsRepo.manager.connection,
-      (manager) => this.userCapabilitiesInTransaction(manager, userId, true),
+    return this.transactions.run(
+      (transaction) => this.userCapabilitiesInTransaction(transaction, userId, true),
     );
   }
 
-  /** Build UI action truth from the same durable authority model as mutations. */
   async administrationActionsCurrent(actorId: string): Promise<AdministrationActionsDto> {
-    return runSerializedTransaction(this.groupsRepo.manager.connection, async (manager) => {
-      const [actorCapabilities, users, groups, memberships, serverGrants, imageGrants, mountGrants] = await Promise.all([
-        this.userCapabilitiesInTransaction(manager, actorId, true),
-        manager.find(UserEntity, { where: { status: Not(UserStatus.Deleted) } }),
-        manager.find(GroupEntity),
-        manager.find(GroupMemberEntity),
-        manager.find(ServerGrantEntity, { select: { scope: true, scopeId: true } }),
-        manager.find(ImageGrantEntity, { select: { scope: true, scopeId: true } }),
-        manager.find(MountSourceGrantEntity, { select: { scope: true, scopeId: true } }),
-      ]);
+    return this.transactions.run(async (transaction) => {
+      const [actorCapabilities, users, groupRows, memberships, serverGrants, imageGrants, mountGrants] =
+        await Promise.all([
+          this.userCapabilitiesInTransaction(transaction, actorId, true),
+          transaction.selectFrom('iam.users')
+            .select(['id', 'status'])
+            .where('status', '!=', UserStatus.Deleted)
+            .execute(),
+          transaction.selectFrom('iam.groups').selectAll().execute(),
+          transaction.selectFrom('iam.group_members')
+            .select(['group_id', 'user_id'])
+            .execute(),
+          transaction.selectFrom('iam.server_grants')
+            .select(['user_id', 'group_id'])
+            .execute(),
+          transaction.selectFrom('iam.image_grants')
+            .select(['user_id', 'group_id'])
+            .execute(),
+          transaction.selectFrom('iam.mount_source_grants')
+            .select(['user_id', 'group_id'])
+            .execute(),
+        ]);
+      const groups = groupRows.map((row) => this.toGroup(row));
       const allGrants = [...serverGrants, ...imageGrants, ...mountGrants];
-      const grantedUsers = new Set(allGrants.filter((grant) => grant.scope === 'user').map((grant) => grant.scopeId));
-      const grantedGroups = new Set(allGrants.filter((grant) => grant.scope === 'group').map((grant) => grant.scopeId));
+      const grantedUsers = new Set(allGrants.flatMap((grant) =>
+        grant.user_id ? [grant.user_id] : []));
+      const grantedGroups = new Set(allGrants.flatMap((grant) =>
+        grant.group_id ? [grant.group_id] : []));
       const groupIdsByUser = new Map<string, string[]>();
       for (const membership of memberships) {
-        const ids = groupIdsByUser.get(membership.userId) ?? [];
-        ids.push(membership.groupId);
-        groupIdsByUser.set(membership.userId, ids);
+        const ids = groupIdsByUser.get(membership.user_id) ?? [];
+        ids.push(membership.group_id);
+        groupIdsByUser.set(membership.user_id, ids);
       }
       return projectAdministrationActions({
         actorId,
         actorCapabilities,
         users: users.map((user) => ({
           id: user.id,
-          status: user.status,
+          status: user.status as UserStatus,
           groupIds: groupIdsByUser.get(user.id) ?? [],
           hasDirectResourceGrants: grantedUsers.has(user.id),
         })),
@@ -180,108 +193,87 @@ export class AccessResolverService {
     });
   }
 
-  /** Run database-only work inside the fresh capability transaction. */
   async runWithActorCapabilities<T>(
     actorId: string,
     required: Iterable<Capability>,
-    work: (manager: EntityManager) => Promise<T>,
+    work: (manager: any) => Promise<T>,
   ): Promise<T> {
-    return runSerializedTransaction(this.groupsRepo.manager.connection, async (manager) => {
-      await this.assertActorCapabilitiesInTransaction(manager, actorId, required);
-      return work(manager);
+    return this.transactions.run(async (transaction) => {
+      await this.assertActorCapabilitiesInTransaction(transaction, actorId, required);
+      return work(transaction);
     });
   }
 
-  /**
-   * Start an external effect while current authority is linearized, then
-   * release the database lease before waiting for the remote result.
-   */
   async startExternalWithActorCapabilities<T>(
     actorId: string,
     required: Iterable<Capability>,
     start: () => Promise<T>,
   ): Promise<StartedExternalWork<T>> {
-    return runSerializedTransaction(this.groupsRepo.manager.connection, async (manager) => {
-      await this.assertActorCapabilitiesInTransaction(manager, actorId, required);
-      // `start` must only synchronously dispatch/enqueue bounded work. Boxing
-      // the returned Promise keeps the dispatch at the same linearization
-      // point as the current-authority read while preventing the transaction
-      // from awaiting the external acknowledgement.
+    return this.transactions.run(async (transaction) => {
+      await this.assertActorCapabilitiesInTransaction(transaction, actorId, required);
       return { completion: start() };
     });
   }
 
-  /** Linearize a direct side-effect with current active-user Server access. */
   async runWithActiveServerAccess<T>(
     userId: string,
     serverId: string,
-    work: (manager: EntityManager) => Promise<T>,
+    work: (manager: any) => Promise<T>,
   ): Promise<T> {
-    return runSerializedTransaction(this.groupsRepo.manager.connection, async (manager) => {
-      const user = await manager.findOneBy(UserEntity, { id: userId });
-      if (
-        !user
-        || user.status !== UserStatus.Active
-        || !await this.resolveServerInTransaction(manager, userId, serverId)
-      ) {
+    return this.transactions.run(async (transaction) => {
+      if (!await this.isActiveUser(transaction, userId)
+        || !await this.resolveServerInTransaction(transaction, userId, serverId)) {
         throw new ForbiddenException('Server access was revoked');
       }
-      return work(manager);
+      return work(transaction);
     });
   }
 
-  /** Server-grant counterpart of startExternalWithActorCapabilities. */
   async startExternalWithActiveServerAccess<T>(
     userId: string,
     serverId: string,
     start: () => Promise<T>,
   ): Promise<StartedExternalWork<T>> {
-    return runSerializedTransaction(this.groupsRepo.manager.connection, async (manager) => {
-      const user = await manager.findOneBy(UserEntity, { id: userId });
-      if (
-        !user
-        || user.status !== UserStatus.Active
-        || !await this.resolveServerInTransaction(manager, userId, serverId)
-      ) {
+    return this.transactions.run(async (transaction) => {
+      if (!await this.isActiveUser(transaction, userId)
+        || !await this.resolveServerInTransaction(transaction, userId, serverId)) {
         throw new ForbiddenException('Server access was revoked');
       }
       return { completion: start() };
     });
   }
 
-  async hasCapability(userId: string, cap: Capability): Promise<boolean> {
-    const caps = await this.userCapabilities(userId);
-    return caps.has(cap);
+  async hasCapability(userId: string, capability: Capability): Promise<boolean> {
+    return (await this.userCapabilities(userId)).has(capability);
   }
 
-  /** Resolve capabilities from the caller's durable transaction snapshot. */
   async userCapabilitiesInTransaction(
-    manager: EntityManager,
+    executor: unknown,
     userId: string,
     requireActive = true,
   ): Promise<Set<Capability>> {
-    const user = await manager.findOneBy(UserEntity, { id: userId });
+    const transaction = requireIamTransaction(executor);
+    const user = await transaction.selectFrom('iam.users')
+      .select(['id', 'status'])
+      .where('id', '=', userId)
+      .executeTakeFirst();
     if (!user || (requireActive && user.status !== UserStatus.Active)) return new Set();
-    const memberships = await manager.find(GroupMemberEntity, { where: { userId } });
-    if (memberships.length === 0) return new Set();
-    const groups = await manager.find(GroupEntity, {
-      where: { id: In(memberships.map((membership) => membership.groupId)) },
-    });
-    const capabilities = new Set<Capability>();
-    for (const group of groups) {
-      for (const capability of group.capabilities) capabilities.add(capability);
-    }
-    return capabilities;
+    const groups = await transaction.selectFrom('iam.group_members as membership')
+      .innerJoin('iam.groups as group', 'group.id', 'membership.group_id')
+      .select('group.capabilities')
+      .where('membership.user_id', '=', userId)
+      .forKeyShare()
+      .execute();
+    return new Set(groups.flatMap((group) => group.capabilities as Capability[]));
   }
 
-  /** Fail closed unless the active actor owns every requested capability. */
   async assertActorCapabilitiesInTransaction(
-    manager: EntityManager,
+    executor: unknown,
     actorId: string,
     required: Iterable<Capability>,
   ): Promise<Set<Capability>> {
-    const actorCapabilities = await this.userCapabilitiesInTransaction(manager, actorId, true);
-    const missing = [...new Set(required)].filter((capability) => !actorCapabilities.has(capability));
+    const capabilities = await this.userCapabilitiesInTransaction(executor, actorId, true);
+    const missing = [...new Set(required)].filter((item) => !capabilities.has(item));
     if (missing.length > 0) {
       throw new ForbiddenException({
         code: 'PRIVILEGE_ESCALATION_DENIED',
@@ -289,38 +281,39 @@ export class AccessResolverService {
         missingCapabilities: missing,
       });
     }
-    return actorCapabilities;
+    return capabilities;
   }
 
-  /** An administrator may not mutate a user who owns capabilities they lack. */
   async assertActorMayAdministerUserInTransaction(
-    manager: EntityManager,
+    executor: unknown,
     actorId: string,
     targetUserId: string,
   ): Promise<void> {
-    await this.assertActorCapabilitiesInTransaction(manager, actorId, [Capability.ManageUsers]);
+    const transaction = requireIamTransaction(executor);
+    await this.assertActorCapabilitiesInTransaction(
+      transaction,
+      actorId,
+      [Capability.ManageUsers],
+    );
     const targetCapabilities = await this.userCapabilitiesInTransaction(
-      manager,
+      transaction,
       targetUserId,
       false,
     );
-    await this.assertActorCapabilitiesInTransaction(manager, actorId, targetCapabilities);
-    const memberships = await manager.find(GroupMemberEntity, { where: { userId: targetUserId } });
-    const groupIds = memberships.map((membership) => membership.groupId);
-    const scopes = [
-      { scope: 'user' as const, scopeId: targetUserId },
-      ...(groupIds.length > 0
-        ? [{ scope: 'group' as const, scopeId: In(groupIds) }]
-        : []),
-    ];
-    const [serverGrantCount, imageGrantCount, mountGrantCount] = await Promise.all([
-      manager.count(ServerGrantEntity, { where: scopes }),
-      manager.count(ImageGrantEntity, { where: scopes }),
-      manager.count(MountSourceGrantEntity, { where: scopes }),
+    await this.assertActorCapabilitiesInTransaction(transaction, actorId, targetCapabilities);
+    const groups = await transaction.selectFrom('iam.group_members')
+      .select('group_id')
+      .where('user_id', '=', targetUserId)
+      .execute();
+    const groupIds = groups.map((group) => group.group_id);
+    const counts = await Promise.all([
+      this.resourceGrantCount(transaction, 'iam.server_grants', targetUserId, groupIds),
+      this.resourceGrantCount(transaction, 'iam.image_grants', targetUserId, groupIds),
+      this.resourceGrantCount(transaction, 'iam.mount_source_grants', targetUserId, groupIds),
     ]);
-    if (serverGrantCount + imageGrantCount + mountGrantCount > 0) {
+    if (counts.some((count) => count > 0)) {
       await this.assertActorCapabilitiesInTransaction(
-        manager,
+        transaction,
         actorId,
         [Capability.ManageGrants],
       );
@@ -328,27 +321,37 @@ export class AccessResolverService {
   }
 
   async assertNotFinalActiveAdministratorInTransaction(
-    manager: EntityManager,
+    executor: unknown,
     userId: string,
   ): Promise<void> {
-    const administrators = await manager.findOne(GroupEntity, {
-      where: { systemKey: SystemGroupKey.Administrators, isSystem: true },
-    });
+    const transaction = requireIamTransaction(executor);
+    // All last-admin checks and corresponding mutations in Users/Groups take
+    // this same row lock, preventing cross-process write skew at READ COMMITTED.
+    await transaction.selectFrom('iam.policy_state')
+      .select('policy_epoch')
+      .where('singleton', '=', true)
+      .forUpdate()
+      .executeTakeFirstOrThrow();
+    const administrators = await transaction.selectFrom('iam.groups')
+      .select('id')
+      .where('system_key', '=', SystemGroupKey.Administrators)
+      .where('is_system', '=', true)
+      .executeTakeFirst();
     if (!administrators) return;
-    const membership = await manager.findOne(GroupMemberEntity, {
-      where: { groupId: administrators.id, userId },
-    });
+    const membership = await transaction.selectFrom('iam.group_members')
+      .select('id')
+      .where('group_id', '=', administrators.id)
+      .where('user_id', '=', userId)
+      .executeTakeFirst();
     if (!membership) return;
-    const otherMemberships = (await manager.find(GroupMemberEntity, {
-      where: { groupId: administrators.id },
-    })).filter((candidate) => candidate.userId !== userId);
-    const otherUserIds = otherMemberships.map((candidate) => candidate.userId);
-    const alternatives = otherUserIds.length === 0
-      ? 0
-      : await manager.count(UserEntity, {
-          where: { id: In(otherUserIds), status: UserStatus.Active },
-        });
-    if (alternatives === 0) {
+    const alternative = await transaction.selectFrom('iam.group_members as membership')
+      .innerJoin('iam.users as user', 'user.id', 'membership.user_id')
+      .select('user.id')
+      .where('membership.group_id', '=', administrators.id)
+      .where('membership.user_id', '!=', userId)
+      .where('user.status', '=', UserStatus.Active)
+      .executeTakeFirst();
+    if (!alternative) {
       throw new ForbiddenException({
         code: 'LAST_ACTIVE_ADMINISTRATOR',
         message: 'The final active administrator cannot be disabled, deleted, or removed',
@@ -357,101 +360,194 @@ export class AccessResolverService {
   }
 
   async getUserGroupSummaries(userId: string): Promise<GroupSummaryDto[]> {
-    const uc = await this.getUserCache(userId);
-    return uc.groups.map((g) => ({
-      id: g.id,
-      name: g.name,
-      priority: g.priority,
-      isSystem: g.isSystem,
+    return (await this.getUserCache(userId)).groups.map((group) => ({
+      id: group.id,
+      name: group.name,
+      priority: group.priority,
+      isSystem: group.isSystem,
     }));
   }
 
-  /** Returns null if user has no access to this server */
   async resolveServer(userId: string, serverId: string): Promise<ResolvedServerGrant | null> {
-    const uc = await this.getUserCache(userId);
-    return uc.serverGrants.get(serverId) ?? null;
+    return (await this.getUserCache(userId)).serverGrants.get(serverId) ?? null;
   }
 
-  /** Resolve the effective grant from the caller's transaction snapshot. */
   async resolveServerInTransaction(
-    manager: EntityManager,
+    executor: unknown,
     userId: string,
     serverId: string,
   ): Promise<ResolvedServerGrant | null> {
-    const memberships = await manager.find(GroupMemberEntity, { where: { userId } });
-    const groupIds = memberships.map((membership) => membership.groupId);
-    const groups = groupIds.length > 0
-      ? await manager.find(GroupEntity, {
-          where: { id: In(groupIds) },
-          order: { priority: 'DESC', id: 'DESC' },
-        })
-      : [];
-    const groupOrder = new Map(groups.map((group, index) => [group.id, index]));
-    const userGrant = await manager.findOne(ServerGrantEntity, {
-      where: { scope: 'user', scopeId: userId, serverId },
-    });
-    const groupGrants = groupIds.length > 0
-      ? await manager.find(ServerGrantEntity, {
-          where: { scope: 'group', scopeId: In(groupIds), serverId },
-        })
-      : [];
-    groupGrants.sort((left, right) =>
-      (groupOrder.get(left.scopeId) ?? Number.MAX_SAFE_INTEGER)
-      - (groupOrder.get(right.scopeId) ?? Number.MAX_SAFE_INTEGER));
-    const selectedGrant = userGrant ?? groupGrants[0];
-    return selectedGrant ? resolveGrant(selectedGrant) : null;
+    const transaction = requireIamTransaction(executor);
+    const direct = await transaction.selectFrom('iam.server_grants')
+      .selectAll()
+      .where('user_id', '=', userId)
+      .where('server_id', '=', serverId)
+      .forKeyShare()
+      .executeTakeFirst();
+    if (direct) return this.resolveServerGrant(direct as ServerGrantRow);
+    const inherited = await transaction.selectFrom('iam.group_members as membership')
+      .innerJoin('iam.groups as group', 'group.id', 'membership.group_id')
+      .innerJoin('iam.server_grants as grant', 'grant.group_id', 'group.id')
+      .selectAll('grant')
+      .where('membership.user_id', '=', userId)
+      .where('grant.server_id', '=', serverId)
+      .orderBy('group.priority', 'desc')
+      .orderBy('group.id', 'desc')
+      .forKeyShare()
+      .executeTakeFirst();
+    return inherited ? this.resolveServerGrant(inherited as ServerGrantRow) : null;
+  }
+
+  async resolveServerPairsInTransaction(
+    executor: unknown,
+    pairs: readonly { userId: string; serverId: string }[],
+  ): Promise<Map<string, ResolvedServerGrant>> {
+    const transaction = requireIamTransaction(executor);
+    const unique = [...new Map(pairs.map((pair) => [
+      `${pair.userId}\0${pair.serverId}`,
+      pair,
+    ])).values()];
+    if (unique.length === 0) return new Map();
+    const result = await sql<{
+      user_id: string;
+      server_id: string;
+      cpu_millis: number | null;
+      mem_bytes: string | null;
+      disk_bytes: string | null;
+      gpu_mode: string | null;
+      gpu_indices: number[] | null;
+    }>`
+      WITH affected AS (
+        SELECT
+          (entry.value ->> 'userId')::uuid AS user_id,
+          entry.value ->> 'serverId' AS server_id
+        FROM jsonb_array_elements(${JSON.stringify(unique)}::jsonb) AS entry(value)
+      )
+      SELECT
+        affected.user_id::text AS user_id,
+        affected.server_id,
+        selected.cpu_millis,
+        selected.mem_bytes,
+        selected.disk_bytes,
+        selected.gpu_mode,
+        selected.gpu_indices
+      FROM affected
+      CROSS JOIN LATERAL (
+        SELECT candidate.*
+        FROM (
+          SELECT
+            direct_grant.cpu_millis,
+            direct_grant.mem_bytes,
+            direct_grant.disk_bytes,
+            direct_grant.gpu_mode,
+            direct_grant.gpu_indices,
+            0 AS scope_rank,
+            0 AS priority,
+            direct_grant.id AS tie_breaker
+          FROM iam.server_grants AS direct_grant
+          WHERE direct_grant.user_id = affected.user_id
+            AND direct_grant.server_id = affected.server_id
+          UNION ALL
+          SELECT
+            inherited_grant.cpu_millis,
+            inherited_grant.mem_bytes,
+            inherited_grant.disk_bytes,
+            inherited_grant.gpu_mode,
+            inherited_grant.gpu_indices,
+            1 AS scope_rank,
+            inherited_group.priority,
+            inherited_group.id AS tie_breaker
+          FROM iam.group_members AS membership
+          INNER JOIN iam.groups AS inherited_group
+            ON inherited_group.id = membership.group_id
+          INNER JOIN iam.server_grants AS inherited_grant
+            ON inherited_grant.group_id = membership.group_id
+          WHERE membership.user_id = affected.user_id
+            AND inherited_grant.server_id = affected.server_id
+        ) AS candidate
+        ORDER BY candidate.scope_rank, candidate.priority DESC, candidate.tie_breaker DESC
+        LIMIT 1
+      ) AS selected
+    `.execute(transaction);
+    return new Map(result.rows.map((row) => [
+      `${row.user_id}\0${row.server_id}`,
+      this.resolveServerGrant(row as ServerGrantRow),
+    ]));
   }
 
   async listAccessibleServers(userId: string): Promise<string[]> {
-    const uc = await this.getUserCache(userId);
-    return Array.from(uc.serverGrants.keys());
+    return [...(await this.getUserCache(userId)).serverGrants.keys()];
   }
 
-  /** Returns all userIds that have an explicit grant (user-scope or via group) for this server. */
   async getUsersWithServerAccess(serverId: string): Promise<string[]> {
-    const [userGrants, groupGrants] = await Promise.all([
-      this.serverGrantsRepo.find({ where: { serverId, scope: 'user' }, select: { scopeId: true } }),
-      this.serverGrantsRepo.find({ where: { serverId, scope: 'group' }, select: { scopeId: true } }),
+    const [direct, inherited] = await Promise.all([
+      this.database.selectFrom('iam.server_grants')
+        .select('user_id')
+        .where('server_id', '=', serverId)
+        .where('user_id', 'is not', null)
+        .execute(),
+      this.database.selectFrom('iam.server_grants as grant')
+        .innerJoin('iam.group_members as membership', 'membership.group_id', 'grant.group_id')
+        .select('membership.user_id')
+        .where('grant.server_id', '=', serverId)
+        .where('grant.group_id', 'is not', null)
+        .execute(),
     ]);
-
-    const userIds = new Set(userGrants.map((g) => g.scopeId));
-
-    const groupIds = groupGrants.map((g) => g.scopeId);
-    if (groupIds.length > 0) {
-      const members = await this.membersRepo.find({
-        where: { groupId: In(groupIds) },
-        select: { userId: true },
-      });
-      for (const m of members) userIds.add(m.userId);
-    }
-
-    return Array.from(userIds);
+    return [...new Set([
+      ...direct.flatMap((row) => row.user_id ? [row.user_id] : []),
+      ...inherited.map((row) => row.user_id),
+    ])];
   }
 
-  /** Returns imageIds the user may use on a specific server */
   async resolveAllowedImages(userId: string, serverId: string): Promise<Set<string>> {
-    const uc = await this.getUserCache(userId);
-    return uc.imageGrants.get(serverId) ?? new Set();
+    return (await this.getUserCache(userId)).imageGrants.get(serverId) ?? new Set();
   }
 
-  /**
-   * Returns the set of mount sources the user may access on a specific server.
-   * Only explicitly granted sources on servers the user can actually reach are included.
-   */
   async resolveMountSources(userId: string, serverId: string): Promise<Set<MountSourceRef>> {
-    const uc = await this.getUserCache(userId);
-    const cached = uc.mountSourceGrants.get(serverId);
+    const cached = (await this.getUserCache(userId)).mountSourceGrants.get(serverId);
     const result = new Set<MountSourceRef>();
     for (const source of cached?.values() ?? []) {
-      if (source.kind === 'local') {
-        const snapshot = this.agentGateway.stateCache.get(serverId);
-        const disk = snapshot && snapshot.helloAt !== null
-          ? exactLocalDisk(snapshot.disks, source.id)
-          : null;
-        if (!disk || disk.sourceIdentity !== source.sourceIdentity) continue;
-      }
+      if (source.kind !== 'local') continue;
+      const snapshot = this.agentGateway.stateCache.get(serverId);
+      const disk = snapshot && snapshot.helloAt !== null
+        ? exactLocalDisk(snapshot.disks, source.id)
+        : null;
+      if (disk?.sourceIdentity !== source.sourceIdentity) continue;
       result.add({ kind: source.kind, id: source.id });
     }
+    const remoteIds = await this.transactions.run(async (transaction) => {
+      if (!await this.isActiveUser(transaction, userId)
+        || !await this.resolveServerInTransaction(transaction, userId, serverId)) return [];
+      const assignments = await transaction
+        .selectFrom('infra.remote_fs_server_assignments')
+        .select('remote_fs_mount_id')
+        .where('server_id', '=', serverId)
+        .where('desired_state', '=', 'active')
+        .execute();
+      const assigned = assignments.map((row) => row.remote_fs_mount_id);
+      if (assigned.length === 0) return [];
+      const groups = await transaction.selectFrom('iam.group_members')
+        .select('group_id')
+        .where('user_id', '=', userId)
+        .execute();
+      const groupIds = groups.map((group) => group.group_id);
+      const direct = await transaction.selectFrom('iam.mount_source_grants')
+        .select('source_id')
+        .where('user_id', '=', userId)
+        .where('source_kind', '=', 'remote')
+        .where('source_id', 'in', assigned)
+        .execute();
+      const inherited = groupIds.length === 0
+        ? []
+        : await transaction.selectFrom('iam.mount_source_grants')
+          .select('source_id')
+          .where('group_id', 'in', groupIds)
+          .where('source_kind', '=', 'remote')
+          .where('source_id', 'in', assigned)
+          .execute();
+      return [...new Set([...direct, ...inherited].map((row) => row.source_id))];
+    });
+    for (const id of remoteIds) result.add({ kind: 'remote', id });
     return result;
   }
 
@@ -461,366 +557,333 @@ export class AccessResolverService {
     kind: MountSourceKind,
     sourceId: string,
   ): Promise<boolean> {
-    const sources = await this.resolveMountSources(userId, serverId);
-    for (const s of sources) {
-      if (s.kind === kind && s.id === sourceId) return true;
+    for (const source of await this.resolveMountSources(userId, serverId)) {
+      if (source.kind === kind && source.id === sourceId) return true;
     }
     return false;
   }
 
-  /** Fail-closed authorization from the caller's serialized DB snapshot. */
   async hasMountSourceAccessInTransaction(
-    manager: EntityManager,
+    executor: unknown,
     userId: string,
     serverId: string,
     source: MountSourceRef,
     expectedSourceIdentity?: string,
   ): Promise<boolean> {
-    const user = await manager.findOneBy(UserEntity, { id: userId });
-    if (!user || user.status !== UserStatus.Active) return false;
-    if (!await this.resolveServerInTransaction(manager, userId, serverId)) return false;
-    const memberships = await manager.find(GroupMemberEntity, { where: { userId } });
-    const scopes = [
-      { scope: 'user' as const, scopeId: userId },
-      ...memberships.map((membership) => ({
-        scope: 'group' as const,
-        scopeId: membership.groupId,
-      })),
-    ];
-
-    if (source.kind === 'local') {
-      const snapshot = this.agentGateway.stateCache.get(serverId);
-      const disk = snapshot && snapshot.helloAt !== null
-        ? exactLocalDisk(snapshot.disks, source.id)
-        : null;
-      if (!disk || (expectedSourceIdentity !== undefined
-        && disk.sourceIdentity !== expectedSourceIdentity)) return false;
-      for (const scope of scopes) {
-        if (await manager.findOneBy(MountSourceGrantEntity, {
-          ...scope,
-          sourceKind: 'local',
-          sourceId: source.id,
-          serverId,
-          sourceIdentity: disk.sourceIdentity,
-        })) return true;
-      }
-      return false;
+    const transaction = requireIamTransaction(executor);
+    if (!await this.isActiveUser(transaction, userId)) return false;
+    if (!await this.resolveServerInTransaction(transaction, userId, serverId)) return false;
+    if (source.kind === 'remote') {
+      const assignment = await transaction
+        .selectFrom('infra.remote_fs_server_assignments')
+        .select('id')
+        .where('remote_fs_mount_id', '=', source.id)
+        .where('server_id', '=', serverId)
+        .where('desired_state', '=', 'active')
+        .forKeyShare()
+        .executeTakeFirst();
+      if (!assignment) return false;
+      const direct = await transaction.selectFrom('iam.mount_source_grants')
+        .select('id')
+        .where('user_id', '=', userId)
+        .where('source_kind', '=', 'remote')
+        .where('source_id', '=', source.id)
+        .forKeyShare()
+        .executeTakeFirst();
+      if (direct) return true;
+      const groups = await transaction.selectFrom('iam.group_members')
+        .select('group_id')
+        .where('user_id', '=', userId)
+        .forKeyShare()
+        .execute();
+      const groupIds = groups.map((group) => group.group_id);
+      if (groupIds.length === 0) return false;
+      return Boolean(await transaction.selectFrom('iam.mount_source_grants')
+        .select('id')
+        .where('group_id', 'in', groupIds)
+        .where('source_kind', '=', 'remote')
+        .where('source_id', '=', source.id)
+        .forKeyShare()
+        .executeTakeFirst());
     }
-
-    if (expectedSourceIdentity !== undefined) return false;
-    if (await manager.count(RemoteFsServerAssignmentEntity, {
-      where: { remoteFsMountId: source.id, serverId, desiredState: 'active' },
-    }) === 0) return false;
-    for (const scope of scopes) {
-      if (await manager.findOneBy(MountSourceGrantEntity, {
-        ...scope,
-        sourceKind: 'remote',
-        sourceId: source.id,
-        serverId: IsNull(),
-        sourceIdentity: IsNull(),
-      })) return true;
-    }
-    return false;
+    const snapshot = this.agentGateway.stateCache.get(serverId);
+    const disk = snapshot && snapshot.helloAt !== null
+      ? exactLocalDisk(snapshot.disks, source.id)
+      : null;
+    if (!disk || (expectedSourceIdentity !== undefined
+      && disk.sourceIdentity !== expectedSourceIdentity)) return false;
+    const groups = await transaction.selectFrom('iam.group_members')
+      .select('group_id')
+      .where('user_id', '=', userId)
+      .forKeyShare()
+      .execute();
+    const groupIds = groups.map((group) => group.group_id);
+    const direct = await transaction.selectFrom('iam.mount_source_grants')
+      .select('id')
+      .where('user_id', '=', userId)
+      .where('source_kind', '=', 'local')
+      .where('source_id', '=', source.id)
+      .where('server_id', '=', serverId)
+      .where('source_identity', '=', disk.sourceIdentity)
+      .forKeyShare()
+      .executeTakeFirst();
+    if (direct) return true;
+    if (groupIds.length === 0) return false;
+    return Boolean(await transaction.selectFrom('iam.mount_source_grants')
+      .select('id')
+      .where('group_id', 'in', groupIds)
+      .where('source_kind', '=', 'local')
+      .where('source_id', '=', source.id)
+      .where('server_id', '=', serverId)
+      .where('source_identity', '=', disk.sourceIdentity)
+      .forKeyShare()
+      .executeTakeFirst());
   }
 
-  /** Returns true if the user may access the given image on any server */
   async isImageAccessibleForUser(userId: string, imageId: string): Promise<boolean> {
-    const uc = await this.getUserCache(userId);
-    for (const serverId of uc.serverGrants.keys()) {
-      const imageSet = uc.imageGrants.get(serverId);
-      if (imageSet?.has(imageId)) return true;
+    const cache = await this.getUserCache(userId);
+    for (const [serverId, images] of cache.imageGrants) {
+      if (cache.serverGrants.has(serverId) && images.has(imageId)) return true;
     }
     return false;
   }
 
-  /**
-   * Resolve every authorization input for container creation from one DB
-   * transaction snapshot. This deliberately bypasses the read cache so a
-   * revoked grant cannot race a stale create request into the task outbox.
-   */
   async resolveContainerCreateAccessInTransaction(
-    manager: EntityManager,
+    executor: unknown,
     userId: string,
     serverId: string,
     imageId: string,
     mountSources: readonly (MountSourceRef & { sourceIdentity?: string })[],
   ): Promise<{ grant: ResolvedServerGrant; mountSourcesAllowed: boolean } | null> {
-    const user = await manager.findOneBy(UserEntity, { id: userId });
-    if (!user || user.status !== UserStatus.Active) return null;
-    const memberships = await manager.find(GroupMemberEntity, { where: { userId } });
-    const groupIds = memberships.map((membership) => membership.groupId);
-    const groups = groupIds.length > 0
-      ? await manager.find(GroupEntity, {
-          where: { id: In(groupIds) },
-          order: { priority: 'DESC', id: 'DESC' },
-        })
-      : [];
-    const groupOrder = new Map(groups.map((group, index) => [group.id, index]));
-
-    const userGrant = await manager.findOne(ServerGrantEntity, {
-      where: { scope: 'user', scopeId: userId, serverId },
-    });
-    const groupGrants = groupIds.length > 0
-      ? await manager.find(ServerGrantEntity, {
-          where: { scope: 'group', scopeId: In(groupIds), serverId },
-        })
-      : [];
-    groupGrants.sort((left, right) =>
-      (groupOrder.get(left.scopeId) ?? Number.MAX_SAFE_INTEGER)
-      - (groupOrder.get(right.scopeId) ?? Number.MAX_SAFE_INTEGER));
-    const selectedGrant = userGrant ?? groupGrants[0];
-    if (!selectedGrant) return null;
-
-    const imageGrantWhere = [
-      { scope: 'user' as const, scopeId: userId, serverId, imageId },
-      ...(groupIds.length > 0
-        ? [{ scope: 'group' as const, scopeId: In(groupIds), serverId, imageId }]
-        : []),
-    ];
-    if (await manager.count(ImageGrantEntity, { where: imageGrantWhere }) === 0) return null;
-
+    const transaction = requireIamTransaction(executor);
+    if (!await this.isActiveUser(transaction, userId)) return null;
+    const grant = await this.resolveServerInTransaction(transaction, userId, serverId);
+    if (!grant) return null;
+    const groups = await transaction.selectFrom('iam.group_members')
+      .select('group_id')
+      .where('user_id', '=', userId)
+      .execute();
+    const groupIds = groups.map((group) => group.group_id);
+    const directImage = await transaction.selectFrom('iam.image_grants')
+      .select('id')
+      .where('user_id', '=', userId)
+      .where('server_id', '=', serverId)
+      .where('image_id', '=', imageId)
+      .executeTakeFirst();
+    const inheritedImage = directImage || groupIds.length === 0
+      ? null
+      : await transaction.selectFrom('iam.image_grants')
+        .select('id')
+        .where('group_id', 'in', groupIds)
+        .where('server_id', '=', serverId)
+        .where('image_id', '=', imageId)
+        .executeTakeFirst();
+    if (!directImage && !inheritedImage) return null;
     for (const source of mountSources) {
       if (!await this.hasMountSourceAccessInTransaction(
-        manager,
+        transaction,
         userId,
         serverId,
         source,
         source.kind === 'local' ? source.sourceIdentity : undefined,
-      )) {
-        return { grant: resolveGrant(selectedGrant), mountSourcesAllowed: false };
-      }
+      )) return { grant, mountSourcesAllowed: false };
     }
-
-    return { grant: resolveGrant(selectedGrant), mountSourcesAllowed: true };
+    return { grant, mountSourcesAllowed: true };
   }
 
   async getEffectiveAccess(userId: string): Promise<EffectiveServerAccessDto[]> {
-    const uc = await this.getUserCache(userId);
-    const result: EffectiveServerAccessDto[] = [];
-    for (const [serverId, grant] of uc.serverGrants.entries()) {
-      const allowedImageIds = Array.from(uc.imageGrants.get(serverId) ?? []);
-      result.push({
-        serverId,
-        cpuMillis: grant.cpuMillis,
-        memBytes: grant.memBytes,
-        diskBytes: grant.diskBytes,
-        gpuMode: grant.gpuMode,
-        gpuIndices: grant.gpuIndices,
-        allowedImageIds,
-      });
-    }
-    return result;
-  }
-
-  // ---------------------------------------------------------------------------
-  // Internal helpers
-  // ---------------------------------------------------------------------------
-
-  private async allMountSourcesForServer(serverId: string): Promise<Set<MountSourceRef>> {
-    const remoteAssignments = await this.remoteFsAssignmentsRepo.find({
-      where: { serverId, desiredState: 'active' },
-      select: { remoteFsMountId: true },
-    });
-    const result = new Set<MountSourceRef>();
-    for (const d of this.agentGateway.stateCache.get(serverId)?.disks ?? []) {
-      result.add({ kind: 'local', id: d.diskId });
-    }
-    for (const a of remoteAssignments) result.add({ kind: 'remote', id: a.remoteFsMountId });
-    return result;
+    const cache = await this.getUserCache(userId);
+    return [...cache.serverGrants].map(([serverId, grant]) => ({
+      serverId,
+      ...grant,
+      allowedImageIds: [...(cache.imageGrants.get(serverId) ?? [])],
+    }));
   }
 
   private async getUserCache(userId: string, retryCount = 0): Promise<UserCache> {
-    const epoch = this.cacheEpoch.current();
+    const epoch = await this.cacheEpoch.refresh();
     const cached = this.cache.get(userId);
     if (cached && cached.epoch === epoch && Date.now() - cached.fetchedAt < CACHE_TTL_MS) {
-      // Touch for LRU recency.
       this.cache.delete(userId);
       this.cache.set(userId, cached);
       return cached;
     }
-
-    const [memberships, servers] = await Promise.all([
-      this.membersRepo.find({ where: { userId } }),
-      this.serversRepo.find({ select: { id: true } }),
-    ]);
-    const groupIds = memberships.map((m) => m.groupId);
-    const serverIds = new Set(servers.map((s) => s.id));
-
-    // Step 2: all grant types in parallel
-    const [
-      groups,
-      userServerGrants,
-      userImageGrants,
-      groupServerGrants,
-      groupImageGrants,
-      userMountSourceGrants,
-      groupMountSourceGrants,
-    ] = await Promise.all([
-      groupIds.length > 0
-        ? this.groupsRepo
-            .createQueryBuilder('g')
-            .where('g.id IN (:...ids)', { ids: groupIds })
-            .orderBy('g.priority', 'DESC')
-            .addOrderBy('g.id', 'DESC')
-            .getMany()
-        : Promise.resolve([] as GroupEntity[]),
-
-      this.serverGrantsRepo.find({ where: { scope: 'user', scopeId: userId } }),
-      this.imageGrantsRepo.find({ where: { scope: 'user', scopeId: userId } }),
-
-      groupIds.length > 0
-        ? this.serverGrantsRepo
-            .createQueryBuilder('sg')
-            .where('sg.scope = :scope AND sg.scopeId IN (:...ids)', { scope: 'group', ids: groupIds })
-            .getMany()
-        : Promise.resolve([] as ServerGrantEntity[]),
-
-      groupIds.length > 0
-        ? this.imageGrantsRepo
-            .createQueryBuilder('ig')
-            .where('ig.scope = :scope AND ig.scopeId IN (:...ids)', { scope: 'group', ids: groupIds })
-            .getMany()
-        : Promise.resolve([] as ImageGrantEntity[]),
-
-      this.mountSourceGrantsRepo.find({ where: { scope: 'user', scopeId: userId } }),
-
-      groupIds.length > 0
-        ? this.mountSourceGrantsRepo
-            .createQueryBuilder('msg')
-            .where('msg.scope = :scope AND msg.scopeId IN (:...ids)', { scope: 'group', ids: groupIds })
-            .getMany()
-        : Promise.resolve([] as MountSourceGrantEntity[]),
-    ]);
-
-    // Capabilities = union of all group capabilities
-    const capabilities = new Set<Capability>();
-    for (const g of groups) {
-      for (const cap of g.capabilities) capabilities.add(cap);
-    }
-
-    const serverGrants = new Map<string, ResolvedServerGrant>();
-    const imageGrants = new Map<string, Set<string>>();
-
-    // Group-level server grants: pick highest-priority group per server
-    const groupOrder = new Map(groups.map((g, i) => [g.id, i]));
-    const bestGroupGrant = new Map<string, { grant: ServerGrantEntity; order: number }>();
-    for (const g of groupServerGrants) {
-      const order = groupOrder.get(g.scopeId) ?? Number.MAX_SAFE_INTEGER;
-      const existing = bestGroupGrant.get(g.serverId);
-      if (!existing || order < existing.order) {
-        bestGroupGrant.set(g.serverId, { grant: g, order });
+    const cache = await this.transactions.run(async (transaction) => {
+      if (!await this.isActiveUser(transaction, userId)) {
+        return this.emptyUserCache(epoch);
       }
-    }
-    for (const [sid, { grant }] of bestGroupGrant) {
-      if (!serverIds.has(sid)) continue;
-      serverGrants.set(sid, this.resolveGrant(grant));
-    }
-
-    // User-level server grants override group grants
-    for (const g of userServerGrants) {
-      if (!serverIds.has(g.serverId)) continue;
-      serverGrants.set(g.serverId, this.resolveGrant(g));
-    }
-
-    // Image grants (group-level then user-level, union)
-    for (const ig of groupImageGrants) {
-      if (!imageGrants.has(ig.serverId)) imageGrants.set(ig.serverId, new Set());
-      imageGrants.get(ig.serverId)!.add(ig.imageId);
-    }
-    for (const ig of userImageGrants) {
-      if (!imageGrants.has(ig.serverId)) imageGrants.set(ig.serverId, new Set());
-      imageGrants.get(ig.serverId)!.add(ig.imageId);
-    }
-
-    // Mount source grants are bound to an exact physical identity and
-    // intersected with servers the user can reach.
-    const allMsgGrants = [...userMountSourceGrants, ...groupMountSourceGrants];
-    const mountSourceGrants = new Map<string, Map<string, CachedMountSourceRef>>();
-
-    if (allMsgGrants.length > 0) {
-      const remoteIds = [...new Set(
-        allMsgGrants.filter((g) => g.sourceKind === 'remote').map((g) => g.sourceId),
-      )];
-
-      const assignmentRows = remoteIds.length > 0
-        ? await this.remoteFsAssignmentsRepo.find({
-            where: { remoteFsMountId: In(remoteIds), desiredState: 'active' },
-            select: { remoteFsMountId: true, serverId: true },
-          })
-        : [];
-      // remoteFsMountId → serverId[]
-      const remoteServerMap = new Map<string, string[]>();
-      for (const a of assignmentRows) {
-        if (!remoteServerMap.has(a.remoteFsMountId)) remoteServerMap.set(a.remoteFsMountId, []);
-        remoteServerMap.get(a.remoteFsMountId)!.push(a.serverId);
+      const groupRows = await transaction.selectFrom('iam.group_members as membership')
+        .innerJoin('iam.groups as group', 'group.id', 'membership.group_id')
+        .selectAll('group')
+        .where('membership.user_id', '=', userId)
+        .orderBy('group.priority', 'desc')
+        .orderBy('group.id', 'desc')
+        .execute();
+      const groups = groupRows.map((row) => this.toGroup(row));
+      const groupIds = groups.map((group) => group.id);
+      const [directServers, inheritedServers, directImages, inheritedImages, directMounts, inheritedMounts] =
+        await Promise.all([
+          transaction.selectFrom('iam.server_grants').selectAll()
+            .where('user_id', '=', userId).execute(),
+          groupIds.length === 0 ? [] : transaction.selectFrom('iam.server_grants')
+            .selectAll().where('group_id', 'in', groupIds).execute(),
+          transaction.selectFrom('iam.image_grants').selectAll()
+            .where('user_id', '=', userId).execute(),
+          groupIds.length === 0 ? [] : transaction.selectFrom('iam.image_grants')
+            .selectAll().where('group_id', 'in', groupIds).execute(),
+          transaction.selectFrom('iam.mount_source_grants').selectAll()
+            .where('user_id', '=', userId).execute(),
+          groupIds.length === 0 ? [] : transaction.selectFrom('iam.mount_source_grants')
+            .selectAll().where('group_id', 'in', groupIds).execute(),
+        ]);
+      const groupOrder = new Map(groups.map((group, index) => [group.id, index]));
+      const serverGrants = new Map<string, ResolvedServerGrant>();
+      const bestInherited = new Map<string, { order: number; grant: ServerGrantRow }>();
+      for (const row of inheritedServers as unknown as ServerGrantRow[]) {
+        const order = groupOrder.get(row.group_id ?? '') ?? Number.MAX_SAFE_INTEGER;
+        const current = bestInherited.get(row.server_id);
+        if (!current || order < current.order) bestInherited.set(row.server_id, { order, grant: row });
       }
-
-      const accessibleServerIds = new Set(serverGrants.keys());
-
-      for (const g of allMsgGrants) {
-        if (g.sourceKind === 'local') {
-          if (!g.serverId || !g.sourceIdentity || !accessibleServerIds.has(g.serverId)) continue;
-          const snapshot = this.agentGateway.stateCache.get(g.serverId);
-          if (!snapshot || snapshot.helloAt === null || snapshot.serverId !== g.serverId) continue;
-          const disk = exactLocalDisk(snapshot.disks, g.sourceId);
-          if (!disk || disk.sourceIdentity !== g.sourceIdentity) continue;
-          if (!mountSourceGrants.has(g.serverId)) mountSourceGrants.set(g.serverId, new Map());
-          mountSourceGrants.get(g.serverId)!.set(`local:${g.sourceId}`, {
-            kind: 'local',
-            id: g.sourceId,
-            sourceIdentity: g.sourceIdentity,
-          });
-        } else {
-          const serverIds = remoteServerMap.get(g.sourceId) ?? [];
-          for (const serverId of serverIds) {
-            if (!accessibleServerIds.has(serverId)) continue;
-            if (!mountSourceGrants.has(serverId)) mountSourceGrants.set(serverId, new Map());
-            mountSourceGrants.get(serverId)!.set(`remote:${g.sourceId}`, {
-              kind: 'remote',
-              id: g.sourceId,
-              sourceIdentity: null,
-            });
-          }
-        }
+      for (const [serverId, selected] of bestInherited) {
+        serverGrants.set(serverId, this.resolveServerGrant(selected.grant));
       }
-    }
-
-    const uc: UserCache = {
-      capabilities,
-      groups,
-      serverGrants,
-      imageGrants,
-      mountSourceGrants,
-      epoch,
-      fetchedAt: Date.now(),
-    };
-    // If any authorization mutation committed while this multi-query snapshot
-    // was assembled, never return or publish the stale fill to its caller.
-    if (this.cacheEpoch.current() !== epoch) {
+      for (const row of directServers as unknown as ServerGrantRow[]) {
+        serverGrants.set(row.server_id, this.resolveServerGrant(row));
+      }
+      const imageGrants = new Map<string, Set<string>>();
+      for (const row of [...inheritedImages, ...directImages]) {
+        const images = imageGrants.get(row.server_id) ?? new Set<string>();
+        images.add(row.image_id);
+        imageGrants.set(row.server_id, images);
+      }
+      const mountSourceGrants = new Map<string, Map<string, CachedMountSourceRef>>();
+      for (const row of [...inheritedMounts, ...directMounts]) {
+        if (row.source_kind !== 'local' || !row.server_id || !row.source_identity) continue;
+        if (!serverGrants.has(row.server_id)) continue;
+        const sources = mountSourceGrants.get(row.server_id) ?? new Map();
+        sources.set(`local:${row.source_id}`, {
+          kind: 'local',
+          id: row.source_id,
+          sourceIdentity: row.source_identity,
+        });
+        mountSourceGrants.set(row.server_id, sources);
+      }
+      return {
+        capabilities: new Set(groups.flatMap((group) => group.capabilities)),
+        groups,
+        serverGrants,
+        imageGrants,
+        mountSourceGrants,
+        epoch,
+        fetchedAt: Date.now(),
+      };
+    });
+    const currentEpoch = await this.cacheEpoch.refresh();
+    if (currentEpoch !== epoch) {
       if (retryCount >= CACHE_FILL_MAX_RETRIES) {
         throw new Error('Authorization changed repeatedly while resolving access');
       }
       return this.getUserCache(userId, retryCount + 1);
     }
-    this.setCacheBounded(userId, uc);
-    return uc;
+    this.setCacheBounded(userId, cache);
+    return cache;
   }
 
-  private setCacheBounded(userId: string, uc: UserCache): void {
-    // If overwriting, drop first so the new entry lands at the LRU tail.
-    if (this.cache.has(userId)) this.cache.delete(userId);
-    this.cache.set(userId, uc);
+  private emptyUserCache(epoch: number): UserCache {
+    return {
+      capabilities: new Set(),
+      groups: [],
+      serverGrants: new Map(),
+      imageGrants: new Map(),
+      mountSourceGrants: new Map(),
+      epoch,
+      fetchedAt: Date.now(),
+    };
+  }
+
+  private setCacheBounded(userId: string, cache: UserCache): void {
+    this.cache.delete(userId);
+    this.cache.set(userId, cache);
     while (this.cache.size > CACHE_MAX_ENTRIES) {
-      const oldestKey = this.cache.keys().next().value;
-      if (oldestKey === undefined) break;
-      this.cache.delete(oldestKey);
+      const oldest = this.cache.keys().next().value;
+      if (oldest === undefined) break;
+      this.cache.delete(oldest);
     }
   }
 
-  private resolveGrant(
-    grant: ServerGrantEntity,
-  ): ResolvedServerGrant {
-    return resolveGrant(grant);
+  private async isActiveUser(transaction: IamTransaction, userId: string): Promise<boolean> {
+    return Boolean(await transaction.selectFrom('iam.users')
+      .select('id')
+      .where('id', '=', userId)
+      .where('status', '=', UserStatus.Active)
+      .forKeyShare()
+      .executeTakeFirst());
+  }
+
+  private async resourceGrantCount(
+    transaction: IamTransaction,
+    table: 'iam.server_grants' | 'iam.image_grants' | 'iam.mount_source_grants',
+    userId: string,
+    groupIds: string[],
+  ): Promise<number> {
+    const direct = await transaction.selectFrom(table)
+      .select('id')
+      .where('user_id', '=', userId)
+      .executeTakeFirst();
+    if (direct) return 1;
+    if (groupIds.length === 0) return 0;
+    return await transaction.selectFrom(table)
+      .select('id')
+      .where('group_id', 'in', groupIds)
+      .executeTakeFirst() ? 1 : 0;
+  }
+
+  private resolveServerGrant(row: ServerGrantRow): ResolvedServerGrant {
+    const number = (value: string | null): number | null => {
+      if (value === null) return null;
+      const parsed = Number(value);
+      if (!Number.isSafeInteger(parsed) || parsed < 0) {
+        throw new Error('IAM grant exceeds the safe application integer range');
+      }
+      return parsed;
+    };
+    return resolveGrant({
+      cpuMillis: row.cpu_millis,
+      memBytes: number(row.mem_bytes),
+      diskBytes: number(row.disk_bytes),
+      gpuMode: row.gpu_mode as GpuGrantMode | null,
+      gpuIndices: row.gpu_indices,
+    });
+  }
+
+  private toGroup(row: {
+    id: string;
+    name: string;
+    description: string | null;
+    priority: number;
+    is_system: boolean;
+    system_key: string | null;
+    capabilities: string[];
+    revision: string;
+    created_at: Date;
+    updated_at: Date;
+  }): IamGroup {
+    const revision = Number(row.revision);
+    if (!Number.isSafeInteger(revision) || revision < 1) {
+      throw new Error('IAM group revision exceeds the safe application range');
+    }
+    return {
+      id: row.id,
+      name: row.name,
+      description: row.description,
+      priority: row.priority,
+      isSystem: row.is_system,
+      systemKey: row.system_key as SystemGroupKey | null,
+      capabilities: row.capabilities as Capability[],
+      revision,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+    };
   }
 }
 

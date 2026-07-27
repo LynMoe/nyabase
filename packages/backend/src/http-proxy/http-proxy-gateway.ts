@@ -1,5 +1,6 @@
 import { Injectable, Logger, OnModuleDestroy, OnModuleInit } from '@nestjs/common';
 import * as http from 'http';
+import { performance } from 'node:perf_hooks';
 import { WebSocket, WebSocketServer } from 'ws';
 import {
   HTTP_PROXY_SNAPSHOT_STALE_AFTER_MS,
@@ -18,6 +19,7 @@ import {
   configuredProxyTokenDigest,
   hasValidBearerToken,
 } from '../common/proxy-bearer-auth.js';
+import { RuntimeRoleService } from '../runtime/runtime-role.service.js';
 
 const DEBOUNCE_MS = 500;
 const MAX_WAIT_MS = 2_000;
@@ -52,6 +54,7 @@ export class HttpProxyGateway implements OnModuleInit, OnModuleDestroy {
     private service: HttpProxyService,
     config: NyabaseConfigService,
     private snapshotNotifier: ProxySnapshotNotifierService,
+    private readonly runtimeRole?: RuntimeRoleService,
   ) {
     this.expectedTokenDigest = configuredProxyTokenDigest(
       config.get<string>('http.proxyToken'),
@@ -60,14 +63,18 @@ export class HttpProxyGateway implements OnModuleInit, OnModuleDestroy {
     if (SNAPSHOT_RENEWAL_MS >= HTTP_PROXY_SNAPSHOT_STALE_AFTER_MS / 2) {
       throw new Error('HTTP proxy snapshot renewal interval must be less than half the lease TTL');
     }
-    this.snapshotRenewalTimer = setInterval(() => {
-      if (this.destroyed || this.clients.size === 0) return;
-      this.requestLeaseRenewal();
-    }, SNAPSHOT_RENEWAL_MS);
-    this.snapshotRenewalTimer.unref();
+    this.snapshotRenewalTimer = null;
+    if (!this.runtimeRole || this.runtimeRole.servesGateway()) {
+      this.snapshotRenewalTimer = setInterval(() => {
+        if (this.destroyed || this.clients.size === 0) return;
+        this.requestLeaseRenewal();
+      }, SNAPSHOT_RENEWAL_MS);
+      this.snapshotRenewalTimer.unref();
+    }
   }
 
   onModuleInit(): void {
+    if (this.runtimeRole && !this.runtimeRole.servesGateway()) return;
     this.unregisterSnapshotNotifier = this.snapshotNotifier.register(
       'http',
       () => this.broadcastSnapshot(),
@@ -210,7 +217,7 @@ export class HttpProxyGateway implements OnModuleInit, OnModuleDestroy {
       return;
     }
     this.initializingClients.add(ws);
-    const deadline = Date.now() + INITIAL_CONNECTION_DEADLINE_MS;
+    const deadline = performance.now() + INITIAL_CONNECTION_DEADLINE_MS;
     try {
       if (!this.authorize(req)) {
         ws.terminate();
@@ -357,7 +364,7 @@ export class HttpProxyGateway implements OnModuleInit, OnModuleDestroy {
     deadline: number,
     client: WebSocket,
   ): Promise<Awaited<ReturnType<HttpProxyService['buildSnapshot']>>> {
-    const remainingMs = deadline - Date.now();
+    const remainingMs = deadline - performance.now();
     if (remainingMs <= 0) throw new Error('HTTP proxy initial snapshot deadline exceeded');
     let expired = false;
     const timer = setTimeout(() => {
@@ -370,7 +377,7 @@ export class HttpProxyGateway implements OnModuleInit, OnModuleDestroy {
       // released only after this Promise settles, even if the transport was
       // already closed by the deadline.
       const snapshot = await this.service.buildSnapshot();
-      if (expired || Date.now() >= deadline) {
+      if (expired || performance.now() >= deadline) {
         throw new Error('HTTP proxy initial snapshot deadline exceeded');
       }
       return snapshot;

@@ -6,7 +6,7 @@ import {
   zTaskId,
   type AgentTaskPayloadByKind,
 } from '@nyabase/common';
-import type { AgentTaskEntity } from '../entities/agent-task.entity.js';
+import type { AgentTaskRecord } from '../domain/domain-records.js';
 
 export const MAX_AGENT_TASK_WIRE_BYTES = 1024 * 1024;
 
@@ -28,11 +28,11 @@ export const AGENT_TASK_RESOURCE_TYPE_BY_KIND = {
 } as const satisfies Record<AgentTaskKind, string>;
 
 type DurableTaskIdentity = Pick<
-  AgentTaskEntity,
+  AgentTaskRecord,
   'kind' | 'resourceType' | 'resourceId' | 'serverId'
 >;
 
-type HashedDurableTaskIdentity = DurableTaskIdentity & Pick<AgentTaskEntity, 'payloadHash'>;
+type HashedDurableTaskIdentity = DurableTaskIdentity & Pick<AgentTaskRecord, 'payloadHash'>;
 
 /**
  * Validate the payload-independent identity of one durable task row. This

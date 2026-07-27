@@ -37,7 +37,7 @@ let last = [];
 while (Date.now() < deadline) {
   last = await request('GET', '/admin/servers', login.accessToken);
   if (expected.every((agent) => last.some((server) => server.id === agent.serverId && server.status === 'online'))) {
-    console.log('backend reports both real CPU Agents online');
+    console.log('split API reports both real CPU Agents online through Gateway-owned WSS');
     process.exit(0);
   }
   await new Promise((resolve) => setTimeout(resolve, 1000));

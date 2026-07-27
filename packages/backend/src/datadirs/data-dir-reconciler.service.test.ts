@@ -29,10 +29,12 @@ const reported = [{
 
 function serviceWith(durableRows: ReturnType<typeof row>[]) {
   return new DataDirReconcilerService(
-    { find: vi.fn().mockResolvedValue(durableRows) } as never,
-    { find: vi.fn().mockResolvedValue([]) } as never,
-    { find: vi.fn().mockResolvedValue([]) } as never,
-    { stateCache: { getDataDirIssues: vi.fn().mockReturnValue([]) } } as never,
+    {
+      listAssignmentsForServer: vi.fn().mockResolvedValue([]),
+      listDataDirectoriesForServerInventory: vi.fn().mockResolvedValue(durableRows),
+      listRemoteFsMountsByIds: vi.fn().mockResolvedValue([]),
+    } as never,
+    { getDataDirIssues: vi.fn().mockReturnValue([]) } as never,
   );
 }
 
@@ -43,30 +45,21 @@ function remoteServiceWith(assignmentState: 'ensuring' | 'active' | 'removing' |
     sourceId: 'remote-a',
     serverId: null,
   };
-  const queryBuilder = {
-    where: vi.fn().mockReturnThis(),
-    getMany: vi.fn().mockResolvedValue([remoteDir]),
-  };
   return new DataDirReconcilerService(
     {
-      find: vi.fn().mockResolvedValue([]),
-      createQueryBuilder: vi.fn().mockReturnValue(queryBuilder),
-    } as never,
-    {
-      find: vi.fn().mockResolvedValue([{
+      listAssignmentsForServer: vi.fn().mockResolvedValue([{
         id: 'assignment-a',
         serverId: 'server-a',
         remoteFsMountId: 'remote-a',
         desiredState: assignmentState,
       }]),
-    } as never,
-    {
-      find: vi.fn().mockResolvedValue([{
+      listDataDirectoriesForServerInventory: vi.fn().mockResolvedValue([remoteDir]),
+      listRemoteFsMountsByIds: vi.fn().mockResolvedValue([{
         id: 'remote-a',
         hostMountPoint: '/mnt/remote-a',
       }]),
     } as never,
-    { stateCache: { getDataDirIssues: vi.fn().mockReturnValue([]) } } as never,
+    { getDataDirIssues: vi.fn().mockReturnValue([]) } as never,
   );
 }
 

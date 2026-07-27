@@ -1,6 +1,9 @@
 import { test, expect } from '../../fixtures/live-stack.js';
 import { coverageCase } from '../../support/coverage-marker.js';
-import { executeThroughConsole } from '../../support/console.js';
+import {
+  executeThroughConsole,
+  type ConsoleSession,
+} from '../../support/console.js';
 import {
   cleanupContainerThroughProductApi,
   getContainerOrNull,
@@ -507,7 +510,7 @@ async function executeInContainer(
   input: string,
   timeoutMs = 30_000,
 ): Promise<{ output: string; exitCode: number }> {
-  const execSession = await expectJson<{ sessionId: string }>(
+  const execSession = await expectJson<ConsoleSession>(
     await ownerApi.post(`/api/v2/containers/${containerId}/exec-sessions`, {
       data: { shell: '/bin/sh', tty: false },
     }),
@@ -516,7 +519,7 @@ async function executeInContainer(
   return executeThroughConsole(
     page,
     requireRuntimeEnv('E2E_BASE_URL'),
-    execSession.sessionId,
+    execSession,
     accessToken,
     input,
     timeoutMs,
@@ -1225,6 +1228,8 @@ test.describe('40 storage and quota', () => {
       const serverId = seedState.servers[0].serverId;
       const disk = await firstLocalDisk(adminApi, serverId);
       const grantPath = `/api/admin/mount-sources/grants/local/${disk.diskId}`;
+      const grantsPath =
+        `/api/admin/mount-sources/grants?sourceKind=local&sourceId=${disk.diskId}&serverId=${serverId}`;
       try {
         const removed = await adminApi.delete(
           `${grantPath}/user/${seedState.adminUserId}?serverId=${serverId}`,
@@ -1232,9 +1237,7 @@ test.describe('40 storage and quota', () => {
         expect(removed.status()).toBe(204);
         expect(
           await expectJson<MountSourceGrant[]>(
-            await adminApi.get(
-              `/api/admin/mount-sources/grants?sourceKind=local&sourceId=${disk.diskId}&serverId=${serverId}`,
-            ),
+            await adminApi.get(grantsPath),
           ),
         ).not.toContainEqual(
           expect.objectContaining({
@@ -1260,20 +1263,27 @@ test.describe('40 storage and quota', () => {
           }),
         );
         const grants = await expectJson<MountSourceGrant[]>(
-          await adminApi.get(
-            `/api/admin/mount-sources/grants?sourceKind=local&sourceId=${disk.diskId}&serverId=${serverId}`,
-          ),
+          await adminApi.get(grantsPath),
         );
         expect(grants.some((entry) => entry.id === grant.id)).toBe(true);
       } finally {
         // Restore the run fixture because later user-facing DataDir cases must
         // traverse the same explicit source authorization.
-        await expectJson<MountSourceGrant>(
-          await adminApi.post(grantPath, {
-            data: { scope: 'user', scopeId: seedState.adminUserId, serverId },
-          }),
-          201,
+        const grants = await expectJson<MountSourceGrant[]>(
+          await adminApi.get(grantsPath),
         );
+        const fixtureGrantPresent = grants.some((entry) =>
+          entry.scope === 'user'
+          && entry.scopeId === seedState.adminUserId
+          && entry.serverId === serverId);
+        if (!fixtureGrantPresent) {
+          await expectJson<MountSourceGrant>(
+            await adminApi.post(grantPath, {
+              data: { scope: 'user', scopeId: seedState.adminUserId, serverId },
+            }),
+            201,
+          );
+        }
       }
     },
   );

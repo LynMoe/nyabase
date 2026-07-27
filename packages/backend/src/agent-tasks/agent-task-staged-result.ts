@@ -4,7 +4,7 @@ import {
   zTaskResultPayload,
   type TaskResultPayload,
 } from '@nyabase/common';
-import type { AgentTaskEntity } from '../entities/agent-task.entity.js';
+import type { AgentTaskRecord } from '../domain/domain-records.js';
 import {
   validateDurableAgentTaskIdentity,
   validateDurableAgentTaskRowIdentity,
@@ -28,7 +28,7 @@ export class StagedTerminalEvidenceError extends Error {
  * not sufficient for a later lock-releasing projection.
  */
 export function parseAndValidateStagedTerminalResult(
-  task: AgentTaskEntity,
+  task: AgentTaskRecord,
   wireCandidate: unknown | (() => unknown),
 ): Exclude<TaskResultPayload, { status: 'incomplete' }> {
   try {

@@ -1,86 +1,87 @@
 import { Injectable } from '@nestjs/common';
-import { InjectRepository } from '@nestjs/typeorm';
 import {
   ContainerStatus,
   type ContainerSnapshot,
   type SshProxyRuntimeRouteSnapshot,
 } from '@nyabase/common';
-import { DataSource, In, Repository } from 'typeorm';
-import { ContainerSshRouteEntity } from '../entities/container-ssh-route.entity.js';
-import { runSerializedTransaction } from '../database/serialized-transaction.js';
-import { NetworkAddressClaimEntity } from '../entities/network-address-claim.entity.js';
+import {
+  ContainerControlRepository,
+  type ContainerSshRouteRecord,
+} from '../containers/container-control.repository.js';
+import { PgTransactionManager } from '../persistence-pg/transaction.js';
+import { sql } from 'kysely';
 
 @Injectable()
 export class ContainerSshRouteService {
   constructor(
-    @InjectRepository(ContainerSshRouteEntity)
-    private routesRepo: Repository<ContainerSshRouteEntity>,
-    private dataSource: DataSource,
+    private readonly containers: ContainerControlRepository,
+    private readonly transactions: PgTransactionManager,
   ) {}
 
   async updateFromStateReport(
     serverId: string,
-    containers: ContainerSnapshot[],
-    receivedAtMs: number,
+    snapshots: ContainerSnapshot[],
+    _receivedAtMs: number,
   ): Promise<void> {
-    // Route TTL is a Backend-local freshness decision. Never compare the
-    // Agent host's wall clock with the Backend clock; preserve Agent
-    // observedAt only in the state-report evidence/cache.
-    const observedAt = new Date(receivedAtMs);
-    await runSerializedTransaction(this.dataSource, async (manager) => {
-      const containerIds = containers
-        .map((container) => container.labels?.['nyabase.container_id'])
-        .filter((id): id is string => Boolean(id));
-      const addresses = containers.map((container) => container.runtime.ip);
-      const claims = containerIds.length === 0
-        ? []
-        : await manager.find(NetworkAddressClaimEntity, {
-          where: [
-            { ownerId: In(containerIds), state: 'active' },
-            { address: In(addresses), state: 'active' },
-          ],
-        });
-      const byContainerId = new Map(claims.filter((claim) => claim.ownerKind === 'container').map((claim) => [
-        claim.ownerId,
-        claim,
-      ]));
-      const rows = containers
-        .map((container) => {
-          const containerId = container.labels?.['nyabase.container_id'];
-          const reservation = containerId ? byContainerId.get(containerId) : undefined;
-          const activeForAddress = claims.filter((claim) => claim.address === container.runtime.ip);
-          if (
-            !reservation
-            || reservation.serverId !== serverId
-            || reservation.address !== container.runtime.ip
-            || activeForAddress.length !== 1
-            || activeForAddress[0]?.id !== reservation.id
-          ) return null;
-          return this.routeFromSnapshot(serverId, container, observedAt);
-        })
-        .filter((row): row is ContainerSshRouteEntity => row !== null);
-      await manager.delete(ContainerSshRouteEntity, { serverId });
-      if (rows.length > 0) await manager.upsert(ContainerSshRouteEntity, rows, ['containerId']);
+    await this.transactions.run(async (transaction) => {
+      const clock = await sql<{ now: Date }>`
+        select clock_timestamp() as now
+      `.execute(transaction);
+      const observedAt = new Date(clock.rows[0]!.now);
+      const addresses = [...new Set(
+        snapshots.map((snapshot) => snapshot.runtime.ip).filter(Boolean),
+      )];
+      const claims = await this.containers.activeNetworkClaims(
+        { addresses },
+        transaction,
+      );
+      const byContainerId = new Map(claims
+        .filter((claim) => claim.ownerKind === 'container' && claim.containerId)
+        .map((claim) => [claim.containerId!, claim]));
+      const byAddress = new Map<string, typeof claims>();
+      for (const claim of claims) {
+        const rows = byAddress.get(claim.address) ?? [];
+        rows.push(claim);
+        byAddress.set(claim.address, rows);
+      }
+      const routes = snapshots.map((snapshot) => {
+        const containerId = snapshot.labels?.['nyabase.container_id'];
+        const reservation = containerId
+          ? byContainerId.get(containerId)
+          : undefined;
+        const activeForAddress = byAddress.get(snapshot.runtime.ip) ?? [];
+        if (
+          !reservation
+          || reservation.serverId !== serverId
+          || reservation.address !== snapshot.runtime.ip
+          || activeForAddress.length !== 1
+          || activeForAddress[0]?.id !== reservation.id
+        ) return null;
+        return this.routeFromSnapshot(serverId, snapshot, observedAt);
+      }).filter((row): row is ContainerSshRouteRecord => row !== null);
+      await this.containers.replaceServerRoutes(serverId, routes, transaction);
     });
   }
 
-  async clearServer(serverId: string): Promise<void> {
-    await this.routesRepo.delete({ serverId });
+  clearServer(
+    serverId: string,
+    executor?: Parameters<ContainerControlRepository['deleteRoutes']>[1],
+  ): Promise<void> {
+    return this.containers.deleteRoutes({ serverId }, executor);
   }
 
-  async clearAll(): Promise<void> {
-    await this.routesRepo.clear();
+  clearAll(): Promise<void> {
+    return this.containers.deleteRoutes();
   }
 
-  async findByContainerIds(containerIds: string[]): Promise<Map<string, ContainerSshRouteEntity>> {
-    if (containerIds.length === 0) return new Map();
-    const rows = await this.routesRepo.find({ where: { containerId: In(containerIds) } });
-    return new Map(rows.map((row) => [row.containerId, row]));
+  findByContainerIds(
+    containerIds: string[],
+  ): Promise<Map<string, ContainerSshRouteRecord>> {
+    return this.containers.routes(containerIds);
   }
 
   async snapshotRows(): Promise<SshProxyRuntimeRouteSnapshot[]> {
-    const rows = await this.routesRepo.find();
-    return rows.map((row) => ({
+    return (await this.containers.listRoutes()).map((row) => ({
       containerId: row.containerId,
       serverId: row.serverId,
       runtimeId: row.runtimeId,
@@ -97,21 +98,22 @@ export class ContainerSshRouteService {
     serverId: string,
     snapshot: ContainerSnapshot,
     observedAt: Date,
-  ): ContainerSshRouteEntity | null {
-    const labels = snapshot.labels ?? {};
-    const containerId = labels['nyabase.container_id'];
+  ): ContainerSshRouteRecord | null {
+    const containerId = snapshot.labels?.['nyabase.container_id'];
     if (!containerId) return null;
-    return this.routesRepo.create({
+    return {
       containerId,
       serverId,
       runtimeId: snapshot.runtime.runtimeId,
       macvlanIp: snapshot.runtime.ip || null,
       runtimeStatus: snapshot.status ?? ContainerStatus.Unknown,
       sshStatus: snapshot.sshServer.status,
-      appliedInternalKeyGeneration: snapshot.sshServer.appliedKeyGeneration ?? null,
-      containerHostKeyFingerprint: snapshot.sshServer.hostKeyFingerprint ?? null,
+      appliedInternalKeyGeneration:
+        snapshot.sshServer.appliedKeyGeneration ?? null,
+      containerHostKeyFingerprint:
+        snapshot.sshServer.hostKeyFingerprint ?? null,
       lastError: snapshot.sshServer.lastError ?? null,
       observedAt,
-    });
+    };
   }
 }

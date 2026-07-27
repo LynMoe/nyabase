@@ -1214,6 +1214,7 @@ test.describe('20 servers, images, and durable tasks', () => {
       const created: CreatedServer[] = [];
       const plannedSlugs = new Set<string>();
       let guardedServerId: string | null = null;
+      let guardUserId: string | null = null;
 
       try {
         for (let index = initial.length; index < 16; index += 1) {
@@ -1244,8 +1245,21 @@ test.describe('20 servers, images, and durable tasks', () => {
         const guarded = created[0];
         expect(guarded).toBeDefined();
         guardedServerId = guarded.server.id;
+        const guardUsername =
+          `${seedState.runId.replace(/-/g, '_').slice(0, 42)}_capacity_guard`;
+        const guardUser = await expectJson<CreatedUser>(
+          await adminApi.post('/api/admin/users', {
+            data: {
+              username: guardUsername,
+              password: `E2e-${Date.now().toString(36)}-Capacity-Cpu!`,
+              displayName: `${seedState.runId} capacity guard user`,
+            },
+          }),
+          201,
+        );
+        guardUserId = guardUser.id;
         await expectJson(
-          await adminApi.post(`/api/admin/users/${seedState.adminUserId}/image-grants`, {
+          await adminApi.post(`/api/admin/users/${guardUser.id}/image-grants`, {
             data: { imageId: seedState.image.id, serverId: guarded.server.id },
           }),
           201,
@@ -1266,7 +1280,7 @@ test.describe('20 servers, images, and durable tasks', () => {
           ).id,
         ).toBe(guarded.server.id);
         const removed = await adminApi.delete(
-          `/api/admin/users/${seedState.adminUserId}/image-grants/${seedState.image.id}/${guarded.server.id}`,
+          `/api/admin/users/${guardUser.id}/image-grants/${seedState.image.id}/${guarded.server.id}`,
         );
         expect(removed.status()).toBe(204);
       } finally {
@@ -1280,13 +1294,13 @@ test.describe('20 servers, images, and durable tasks', () => {
         }
         const serverIds = [...new Set([...created.map((entry) => entry.server.id), ...discovered])];
         await runCleanupSteps('capacity Server scenario', [
-          ...(guardedServerId
+          ...(guardedServerId && guardUserId
             ? [
                 {
                   label: 'guard image grant',
                   run: async () => {
                     const removed = await adminApi.delete(
-                      `/api/admin/users/${seedState.adminUserId}/image-grants/${seedState.image.id}/${guardedServerId}`,
+                      `/api/admin/users/${guardUserId}/image-grants/${seedState.image.id}/${guardedServerId}`,
                       {
                         timeout: cleanupDeadline.remaining('removing capacity guard grant', 30_000),
                       },
@@ -1312,6 +1326,12 @@ test.describe('20 servers, images, and durable tasks', () => {
               );
             },
           })),
+          ...(guardUserId
+            ? [{
+                label: 'capacity guard user',
+                run: () => deleteUser(adminApi, guardUserId!, cleanupDeadline),
+              }]
+            : []),
           {
             label: 'final seed-only inventory',
             run: async () => {

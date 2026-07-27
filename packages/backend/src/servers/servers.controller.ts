@@ -7,7 +7,6 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { GpuGrantMode, type UserDataDiskDto } from '@nyabase/common';
-import type { EntityManager } from 'typeorm';
 import { ServersService } from './servers.service.js';
 import { AgentGateway } from '../gateway/agent-gateway.js';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard.js';
@@ -15,9 +14,10 @@ import { CapabilitiesGuard } from '../auth/guards/capabilities.guard.js';
 import { CurrentUser } from '../auth/decorators/current-user.decorator.js';
 import {
   AccessResolverService,
+  type IamTransaction,
   type ResolvedServerGrant,
 } from '../access/access-resolver.service.js';
-import { UserEntity } from '../entities/user.entity.js';
+import type { UserRecord } from '../domain/domain-records.js';
 import { publicDataDiskDisplayName } from '../mount-sources/utils.js';
 
 @Controller('servers')
@@ -30,19 +30,19 @@ export class ServersController {
   ) {}
 
   @Get()
-  async list(@CurrentUser() user: UserEntity) {
+  async list(@CurrentUser() user: UserRecord) {
     const accessibleIds = await this.accessResolver.listAccessibleServers(user.id);
     return this.serversService.findUserDtosByIds(accessibleIds);
   }
 
   @Get(':id/quota')
-  async getUserQuota(@Param('id') id: string, @CurrentUser() user: UserEntity) {
+  async getUserQuota(@Param('id') id: string, @CurrentUser() user: UserRecord) {
     await this.ensureServerAccess(user.id, id);
     return this.serversService.getUserQuota(id, user.id);
   }
 
   @Get(':id/gpus')
-  async getGpus(@Param('id') id: string, @CurrentUser() user: UserEntity) {
+  async getGpus(@Param('id') id: string, @CurrentUser() user: UserRecord) {
     const grant = await this.withCurrentServerAccess(
       user.id,
       id,
@@ -60,7 +60,7 @@ export class ServersController {
   @Get(':id/disks')
   async listDisks(
     @Param('id') id: string,
-    @CurrentUser() user: UserEntity,
+    @CurrentUser() user: UserRecord,
   ): Promise<UserDataDiskDto[]> {
     // Keep one immutable inventory view for both exact-identity authorization
     // and projection. If the Agent replaces a disk concurrently, the old
@@ -90,7 +90,7 @@ export class ServersController {
   }
 
   @Get(':id')
-  async get(@Param('id') id: string, @CurrentUser() user: UserEntity) {
+  async get(@Param('id') id: string, @CurrentUser() user: UserRecord) {
     const accessibleIds = await this.accessResolver.listAccessibleServers(user.id);
     if (!accessibleIds.includes(id)) {
       throw new NotFoundException('Server not found');
@@ -108,7 +108,7 @@ export class ServersController {
   private async withCurrentServerAccess<T>(
     userId: string,
     serverId: string,
-    work: (manager: EntityManager, grant: ResolvedServerGrant) => Promise<T>,
+    work: (manager: IamTransaction, grant: ResolvedServerGrant) => Promise<T>,
   ): Promise<T> {
     try {
       return await this.accessResolver.runWithActiveServerAccess(

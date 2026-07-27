@@ -8,7 +8,7 @@ import {
 import { MountSourcesService } from './mount-sources.service.js';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard.js';
 import { CurrentUser } from '../auth/decorators/current-user.decorator.js';
-import { UserEntity } from '../entities/user.entity.js';
+import type { UserRecord } from '../domain/domain-records.js';
 import { zResourceIdentity } from '@nyabase/common';
 
 @Controller('mount-sources')
@@ -21,7 +21,7 @@ export class MountSourcesController {
    * Returns sources the current user may access on the given server.
    */
   @Get()
-  async list(@CurrentUser() user: UserEntity, @Query('serverId') serverId: string) {
+  async list(@CurrentUser() user: UserRecord, @Query('serverId') serverId: string) {
     if (!serverId) throw new BadRequestException('serverId is required');
     return this.mountSourcesService.listForUser(user.id, zResourceIdentity.parse(serverId));
   }

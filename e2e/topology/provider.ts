@@ -250,12 +250,27 @@ export type BackendServiceFaultControlInput = Readonly<{
   fault: 'backendService';
   runId: string;
   action: 'restart' | 'probe';
+  /** Omitted means a combined cold restart of all split runtimes. */
+  role?: 'api' | 'gateway' | 'worker' | 'all';
 }>;
 
 export type BackendClockFaultControlInput = Readonly<{
   fault: 'backendClock';
   runId: string;
   action: 'advance' | 'restore' | 'probe';
+}>;
+
+export type RedisServiceFaultControlInput = Readonly<{
+  fault: 'redisService';
+  runId: string;
+  action: 'stop' | 'flush' | 'restart' | 'probe';
+}>;
+
+export type TelemetryServiceFaultControlInput = Readonly<{
+  fault: 'telemetryService';
+  runId: string;
+  service: 'vmagent' | 'victoriametrics';
+  action: 'stop' | 'start' | 'restart' | 'probe';
 }>;
 
 export type DockerdServiceFaultControlInput = Readonly<{
@@ -272,6 +287,28 @@ export type DuplicateAgentSessionFaultControlInput = Readonly<{
   action: 'probe';
 }>;
 
+export type SplitGatewaySessionRaceFaultControlInput =
+  | Readonly<{
+      fault: 'splitGatewaySessionRace';
+      runId: string;
+      nodeKey: TopologyNodeKey;
+      action: 'inject';
+      staleExecSessionId: string;
+    }>
+  | Readonly<{
+      fault: 'splitGatewaySessionRace';
+      runId: string;
+      nodeKey: TopologyNodeKey;
+      action: 'probe';
+      expectedClosedExecSessionIds?: readonly string[];
+    }>
+  | Readonly<{
+      fault: 'splitGatewaySessionRace';
+      runId: string;
+      nodeKey: TopologyNodeKey;
+      action: 'restore';
+    }>;
+
 export type ArtifactAuditFaultControlInput = Readonly<{
   fault: 'artifactAudit';
   runId: string;
@@ -287,8 +324,11 @@ export type TopologyFaultControlInput =
   | ContainerRuntimeDriftFaultControlInput
   | BackendServiceFaultControlInput
   | BackendClockFaultControlInput
+  | RedisServiceFaultControlInput
+  | TelemetryServiceFaultControlInput
   | DockerdServiceFaultControlInput
   | DuplicateAgentSessionFaultControlInput
+  | SplitGatewaySessionRaceFaultControlInput
   | ArtifactAuditFaultControlInput;
 
 interface TopologyFaultControlResultBase {
@@ -370,8 +410,15 @@ export interface AgentTaskWireFaultControlResult extends TopologyFaultControlRes
 export interface BackendServiceFaultControlResult extends TopologyFaultControlResultBase {
   readonly fault: 'backendService';
   readonly action: BackendServiceFaultControlInput['action'];
+  readonly role: 'api' | 'gateway' | 'worker' | 'all';
   readonly containerName: string;
   readonly containerId: string;
+  readonly runtimes: readonly Readonly<{
+    role: 'api' | 'gateway' | 'worker';
+    containerName: string;
+    containerId: string;
+    generation: string;
+  }>[];
   readonly before: { readonly generation: string; readonly healthy: true };
   readonly after: { readonly generation: string; readonly healthy: true };
   readonly restarted: boolean;
@@ -384,6 +431,31 @@ export interface BackendClockFaultControlResult extends TopologyFaultControlResu
   readonly offsetMs: 0 | 691200000;
   readonly generation: string;
   readonly healthy: true;
+}
+
+export interface RedisServiceFaultControlResult extends TopologyFaultControlResultBase {
+  readonly fault: 'redisService';
+  readonly action: RedisServiceFaultControlInput['action'];
+  readonly containerName: string;
+  readonly containerId: string;
+  readonly generation: string;
+  readonly running: boolean;
+  readonly healthy: boolean;
+  readonly keyCount: number;
+  readonly flushed: boolean;
+  readonly persistenceDisabled: true;
+}
+
+export interface TelemetryServiceFaultControlResult extends TopologyFaultControlResultBase {
+  readonly fault: 'telemetryService';
+  readonly service: TelemetryServiceFaultControlInput['service'];
+  readonly action: TelemetryServiceFaultControlInput['action'];
+  readonly containerName: string;
+  readonly containerId: string;
+  readonly generation: string;
+  readonly healthy: boolean;
+  /** vmagent's own bounded persistent-queue backlog; null for VM or stopped vmagent. */
+  readonly queuePendingBytes: number | null;
 }
 
 export interface DockerdServiceFaultControlResult extends TopologyFaultControlResultBase {
@@ -409,6 +481,43 @@ export interface DuplicateAgentSessionFaultControlResult extends TopologyFaultCo
   readonly closed: true;
 }
 
+export interface SplitGatewaySessionRaceFaultControlResult
+  extends TopologyFaultControlResultBase {
+  readonly fault: 'splitGatewaySessionRace';
+  readonly action: SplitGatewaySessionRaceFaultControlInput['action'];
+  readonly nodeKey: TopologyNodeKey;
+  readonly serverId: string;
+  readonly primaryGatewayContainer: string;
+  readonly secondaryGatewayContainer: string;
+  readonly secondaryEdgeContainer: string;
+  readonly secondaryEdgeHostPort: number;
+  readonly secondaryConsoleUrl: string;
+  readonly primaryGatewayProcessGeneration: string;
+  readonly baselineGatewayId: string;
+  readonly ownerGatewayId: string;
+  readonly ownerSessionId: string;
+  readonly ownerGeneration: number;
+  readonly serverOnline: true;
+  readonly runtimeReady: true;
+  readonly primaryGatewayActive: true;
+  readonly primaryGatewayPaused: false;
+  readonly delayedPrimaryCleanupReleased: true;
+  readonly secondaryGatewayActive: boolean;
+  readonly secondaryEdgeActive: boolean;
+  readonly secondaryEdgeHostPortActive: boolean;
+  readonly secondaryEdgeHostPortOwned: boolean;
+  readonly routeActive: boolean;
+  readonly cleanupComplete: boolean;
+  readonly closedExecSessions: readonly Readonly<{
+    sessionId: string;
+    state: 'closed';
+    closedAt: string;
+    closeReason: string;
+    agentSessionId: string;
+    gatewayId: string;
+  }>[];
+}
+
 export interface ArtifactAuditFaultControlResult extends TopologyFaultControlResultBase {
   readonly fault: 'artifactAudit';
   readonly action: 'capture';
@@ -428,8 +537,11 @@ export type TopologyFaultControlResult =
   | ContainerRuntimeDriftFaultControlResult
   | BackendServiceFaultControlResult
   | BackendClockFaultControlResult
+  | RedisServiceFaultControlResult
+  | TelemetryServiceFaultControlResult
   | DockerdServiceFaultControlResult
   | DuplicateAgentSessionFaultControlResult
+  | SplitGatewaySessionRaceFaultControlResult
   | ArtifactAuditFaultControlResult;
 
 export interface TopologyOperationEntrypoint {

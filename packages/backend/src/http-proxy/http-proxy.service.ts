@@ -7,7 +7,6 @@ import {
   NotFoundException,
   forwardRef,
 } from '@nestjs/common';
-import { InjectRepository } from '@nestjs/typeorm';
 import {
   createCipheriv,
   createDecipheriv,
@@ -17,12 +16,14 @@ import {
   randomUUID,
   X509Certificate,
 } from 'crypto';
-import { DataSource, EntityManager, In, LessThanOrEqual, Repository } from 'typeorm';
+import type { Kysely, Selectable, Transaction } from 'kysely';
+import { sql } from 'kysely';
 import {
-  ContainerStatus,
+  AuditAction,
   Capability,
   ContainerPhase,
   ContainerPowerIntent,
+  ContainerStatus,
   ServerStatus,
   UserStatus,
   HTTP_PROXY_SNAPSHOT_STALE_AFTER_MS,
@@ -42,31 +43,34 @@ import {
   type HttpProxySnapshot,
   type HttpProxyWarningReason,
 } from '@nyabase/common';
-import { NyabaseConfigService } from '../config/nyabase-config.service.js';
-import { ContainerEntity } from '../entities/container.entity.js';
-import { ContainerLifecycleEntity } from '../entities/container-lifecycle.entity.js';
-import { ContainerDesiredSpecEntity } from '../entities/container-desired-spec.entity.js';
-import { ContainerSshRouteEntity } from '../entities/container-ssh-route.entity.js';
-import { HttpDomainPoolEntity } from '../entities/http-domain-pool.entity.js';
-import { HttpProxyBindingEntity } from '../entities/http-proxy-binding.entity.js';
-import { UserEntity } from '../entities/user.entity.js';
-import { ServerEntity } from '../entities/server.entity.js';
-import { runSerializedTransaction } from '../database/serialized-transaction.js';
-import { ProxySnapshotNotifierService } from '../proxy-snapshots/proxy-snapshot-notifier.service.js';
-import { HttpHostnameReservationEntity } from '../entities/http-hostname-reservation.entity.js';
-import { NetworkAddressClaimEntity } from '../entities/network-address-claim.entity.js';
-import { ContainerMountEntity } from '../entities/container-mount.entity.js';
-import { RemoteFsServerAssignmentEntity } from '../entities/remote-fs-server-assignment.entity.js';
 import { AccessResolverService } from '../access/access-resolver.service.js';
-import {
-  hostnameReuseKey,
-  monotonicReuseGuard,
-} from '../common/monotonic-reuse-guard.js';
+import { NyabaseConfigService } from '../config/nyabase-config.service.js';
+import type { ContainerControlTable } from '../containers/container-control-database.types.js';
+import type { InfrastructureServerTable } from '../infrastructure/infrastructure-database.types.js';
+import type { NyabaseDatabase } from '../persistence-pg/database.types.js';
+import { PG_DATABASE } from '../persistence-pg/tokens.js';
+import { PgTransactionManager } from '../persistence-pg/transaction.js';
+import { ProxySnapshotNotifierService } from '../proxy-snapshots/proxy-snapshot-notifier.service.js';
+import { AuditService } from '../audit/audit.service.js';
+import type {
+  HttpDomainPoolTable,
+  HttpProxyBindingTable,
+} from './http-proxy-database.types.js';
 
 const KEY_VERSION = 'v1';
 const ROUTE_STALE_MS = 120_000;
+const HTTP_PROXY_ADVISORY_NAMESPACE = 1_856_214_887;
+const DOMAIN_POOL_MUTATION_LOCK = 1;
+const BINDING_CAPACITY_LOCK = 2;
+const HOSTNAME_RESERVATION_LOCK = 3;
 export const MAX_HTTP_HOSTNAME_RESERVATIONS = MAX_HTTP_PROXY_ROUTES * 2;
 const HOSTNAME_RESERVATION_GC_BATCH = 256;
+
+type HttpExecutor = Kysely<NyabaseDatabase> | Transaction<NyabaseDatabase>;
+type DomainPoolRow = Selectable<HttpDomainPoolTable>;
+type BindingRow = Selectable<HttpProxyBindingTable>;
+type ContainerRow = Selectable<ContainerControlTable>;
+type ServerRow = Selectable<InfrastructureServerTable>;
 
 export interface HttpProxyBindingDto {
   id: string;
@@ -102,127 +106,205 @@ export interface HttpDomainPoolDto {
 
 @Injectable()
 export class HttpProxyService {
-  private generation = 0;
-  private snapshotBuildTail: Promise<void> = Promise.resolve();
-
   constructor(
-    @InjectRepository(HttpDomainPoolEntity)
-    private domainPoolsRepo: Repository<HttpDomainPoolEntity>,
-    @InjectRepository(HttpProxyBindingEntity)
-    private bindingsRepo: Repository<HttpProxyBindingEntity>,
-    @InjectRepository(ContainerEntity)
-    private containersRepo: Repository<ContainerEntity>,
-    @InjectRepository(ContainerLifecycleEntity)
-    private lifecyclesRepo: Repository<ContainerLifecycleEntity>,
-    @InjectRepository(ContainerDesiredSpecEntity)
-    private desiredSpecsRepo: Repository<ContainerDesiredSpecEntity>,
-    @InjectRepository(ContainerSshRouteEntity)
-    private routesRepo: Repository<ContainerSshRouteEntity>,
-    @InjectRepository(UserEntity)
-    private usersRepo: Repository<UserEntity>,
-    private config: NyabaseConfigService,
-    private dataSource: DataSource,
-    // AccessModule reaches AgentGatewayModule, which reaches HttpProxyModule.
-    // The module imports are forward refs, so the constructor token must be
-    // one as well or emitted design metadata is undefined on a cold bootstrap.
+    @Inject(PG_DATABASE)
+    private readonly database: Kysely<NyabaseDatabase>,
+    private readonly transactions: PgTransactionManager,
+    private readonly config: NyabaseConfigService,
     @Inject(forwardRef(() => AccessResolverService))
-    private accessResolver: AccessResolverService,
-    private proxySnapshots: ProxySnapshotNotifierService = {
-      isServerBlocked: () => false,
-    } as unknown as ProxySnapshotNotifierService,
+    private readonly accessResolver: AccessResolverService,
+    private readonly proxySnapshots: ProxySnapshotNotifierService,
+    private readonly audit: AuditService,
   ) {}
 
-  async listBindings(requesterId: string, proxyOnline: boolean): Promise<HttpProxyBindingDto[]> {
-    const bindings = await this.bindingsRepo.find({
-      where: { ownerId: requesterId },
-      order: { hostname: 'ASC' },
-    });
-    return this.bindingDtos(bindings.filter((binding) => binding.ownerId === requesterId), requesterId, proxyOnline);
+  async listBindings(
+    requesterId: string,
+    proxyOnline: boolean,
+  ): Promise<HttpProxyBindingDto[]> {
+    const bindings = await this.database
+      .selectFrom('interaction.http_proxy_bindings')
+      .selectAll()
+      .where('owner_id', '=', requesterId)
+      .orderBy('hostname')
+      .execute();
+    return this.bindingDtos(bindings, requesterId, proxyOnline, this.database);
   }
 
-  async createBinding(requesterId: string, input: unknown): Promise<HttpProxyBindingDto> {
+  async createBinding(
+    requesterId: string,
+    input: unknown,
+  ): Promise<HttpProxyBindingDto> {
     const dto = parseBindingInput(input, false);
     const hostname = parseHttpProxyHostname(dto.hostname);
-    const binding = await runSerializedTransaction(this.dataSource, async (manager) => {
-      if (await manager.count(HttpProxyBindingEntity) >= MAX_HTTP_PROXY_ROUTES) {
+    const binding = await this.runSerializable(async (transaction) => {
+      await this.lock(transaction, BINDING_CAPACITY_LOCK);
+      const count = await this.bindingCount(transaction);
+      if (count >= MAX_HTTP_PROXY_ROUTES) {
         throw new ConflictException({
           code: 'HTTP_PROXY_BINDING_CAPACITY_REACHED',
           message: `At most ${MAX_HTTP_PROXY_ROUTES} HTTP proxy bindings are supported`,
         });
       }
-      const pool = await this.enabledPoolForHostname(manager, hostname);
-      const container = await manager.findOneBy(ContainerEntity, { id: dto.containerId });
+      const pool = await this.enabledPoolForHostname(transaction, hostname);
+      const container = await this.findContainer(transaction, dto.containerId);
       if (!container) throw new NotFoundException('Container not found');
-      if (container.ownerId !== requesterId) {
+      if (container.owner_id !== requesterId) {
         throw new ForbiddenException('Container is not owned by current user');
       }
-      await this.assertRequesterActive(manager, requesterId);
+      await this.assertRequesterActive(transaction, requesterId);
       const bindingId = randomUUID();
-      await this.reserveHostname(manager, hostname, requesterId, bindingId);
-      return manager.save(HttpProxyBindingEntity, manager.create(HttpProxyBindingEntity, {
-        id: bindingId,
-        hostname,
-        domainPoolId: pool.id,
-        ownerId: requesterId,
-        containerId: container.id,
-        targetPort: dto.targetPort,
-      }));
+      await this.reserveHostname(transaction, hostname, requesterId, bindingId);
+      try {
+        const row = await transaction
+          .insertInto('interaction.http_proxy_bindings')
+          .values({
+            id: bindingId,
+            hostname,
+            domain_pool_id: pool.id,
+            owner_id: requesterId,
+            container_id: container.id,
+            target_port: dto.targetPort,
+          })
+          .returningAll()
+          .executeTakeFirstOrThrow();
+        await this.audit.append(
+          transaction,
+          requesterId,
+          AuditAction.CreateHttpProxyBinding,
+          row.id,
+          'http_proxy_binding',
+          {
+            hostname: row.hostname,
+            containerId: row.container_id,
+            targetPort: row.target_port,
+          },
+        );
+        return row;
+      } catch (error) {
+        if (isUniqueConstraintViolation(error)) {
+          throw new ConflictException('Hostname is already occupied or draining');
+        }
+        throw error;
+      }
     });
-    return (await this.bindingDtos([binding], requesterId, false))[0]!;
+    return (await this.bindingDtos([binding], requesterId, false, this.database))[0]!;
   }
 
-  async updateBinding(requesterId: string, id: string, input: unknown): Promise<HttpProxyBindingDto> {
+  async updateBinding(
+    requesterId: string,
+    id: string,
+    input: unknown,
+  ): Promise<HttpProxyBindingDto> {
     const dto = parseBindingInput(input, true);
-    const saved = await runSerializedTransaction(this.dataSource, async (manager) => {
-      const binding = await manager.findOneBy(HttpProxyBindingEntity, { id });
+    const saved = await this.runSerializable(async (transaction) => {
+      const binding = await transaction
+        .selectFrom('interaction.http_proxy_bindings')
+        .selectAll()
+        .where('id', '=', id)
+        .forUpdate()
+        .executeTakeFirst();
       if (!binding) throw new NotFoundException('Binding not found');
-      if (binding.ownerId !== requesterId) {
+      if (binding.owner_id !== requesterId) {
         throw new ForbiddenException('Only binding owner can edit it');
       }
-      await this.assertRequesterActive(manager, requesterId);
+      await this.assertRequesterActive(transaction, requesterId);
+      let hostname = binding.hostname;
+      let domainPoolId = binding.domain_pool_id;
       if (dto.hostname !== undefined) {
-        const hostname = parseHttpProxyHostname(dto.hostname);
-        const pool = await this.enabledPoolForHostname(manager, hostname);
-        if (hostname !== binding.hostname) {
-          await this.reserveHostname(manager, hostname, requesterId, binding.id);
-          await this.releaseHostname(manager, binding);
-          binding.hostname = hostname;
-          binding.domainPoolId = pool.id;
+        const nextHostname = parseHttpProxyHostname(dto.hostname);
+        const pool = await this.enabledPoolForHostname(transaction, nextHostname);
+        if (nextHostname !== binding.hostname) {
+          await this.reserveHostname(transaction, nextHostname, requesterId, binding.id);
+          await this.releaseHostname(transaction, binding);
+          hostname = nextHostname;
+          domainPoolId = pool.id;
         }
       }
+      let containerId = binding.container_id;
       if (dto.containerId !== undefined) {
-        const container = await manager.findOneBy(ContainerEntity, { id: dto.containerId });
+        const container = await this.findContainer(transaction, dto.containerId);
         if (!container) throw new NotFoundException('Container not found');
-        if (container.ownerId !== requesterId) {
+        if (container.owner_id !== requesterId) {
           throw new ForbiddenException('Container is not owned by current user');
         }
-        binding.containerId = container.id;
+        containerId = container.id;
       }
-      if (dto.targetPort !== undefined) binding.targetPort = dto.targetPort;
-      return manager.save(HttpProxyBindingEntity, binding);
+      try {
+        const row = await transaction
+          .updateTable('interaction.http_proxy_bindings')
+          .set({
+            hostname,
+            domain_pool_id: domainPoolId,
+            container_id: containerId,
+            target_port: dto.targetPort ?? binding.target_port,
+          })
+          .where('id', '=', id)
+          .returningAll()
+          .executeTakeFirstOrThrow();
+        await this.audit.append(
+          transaction,
+          requesterId,
+          AuditAction.UpdateHttpProxyBinding,
+          row.id,
+          'http_proxy_binding',
+          {
+            hostname: row.hostname,
+            containerId: row.container_id,
+            targetPort: row.target_port,
+          },
+        );
+        return row;
+      } catch (error) {
+        if (isUniqueConstraintViolation(error)) {
+          throw new ConflictException('Hostname is already occupied or draining');
+        }
+        throw error;
+      }
     });
-    return (await this.bindingDtos([saved], requesterId, false))[0]!;
+    return (await this.bindingDtos([saved], requesterId, false, this.database))[0]!;
   }
 
   async deleteBinding(requesterId: string, id: string): Promise<void> {
-    await runSerializedTransaction(this.dataSource, async (manager) => {
-      const binding = await manager.findOneBy(HttpProxyBindingEntity, { id });
+    await this.runSerializable(async (transaction) => {
+      const binding = await transaction
+        .selectFrom('interaction.http_proxy_bindings')
+        .selectAll()
+        .where('id', '=', id)
+        .forUpdate()
+        .executeTakeFirst();
       if (!binding) throw new NotFoundException('Binding not found');
-      if (binding.ownerId !== requesterId) {
+      if (binding.owner_id !== requesterId) {
         throw new ForbiddenException('Only binding owner can delete it');
       }
-      await this.assertRequesterActive(manager, requesterId);
-      await this.releaseHostname(manager, binding);
-      await manager.delete(HttpProxyBindingEntity, { id });
+      await this.assertRequesterActive(transaction, requesterId);
+      await this.releaseHostname(transaction, binding);
+      await transaction
+        .deleteFrom('interaction.http_proxy_bindings')
+        .where('id', '=', id)
+        .execute();
+      await this.audit.append(
+        transaction,
+        requesterId,
+        AuditAction.DeleteHttpProxyBinding,
+        id,
+        'http_proxy_binding',
+      );
     });
   }
 
   async listDomainPools(): Promise<HttpDomainPoolDto[]> {
-    const rows = await this.domainPoolsRepo.find({ order: { wildcardDomain: 'ASC' } });
+    const rows = await this.database
+      .selectFrom('interaction.http_domain_pools')
+      .selectAll()
+      .orderBy('wildcard_domain')
+      .execute();
     return rows.map((row) => this.domainPoolDto(row));
   }
 
-  async createDomainPool(actorId: string, input: unknown): Promise<HttpDomainPoolDto> {
+  async createDomainPool(
+    actorId: string,
+    input: unknown,
+  ): Promise<HttpDomainPoolDto> {
     const dto = parseDomainPoolInput(input, false);
     const wildcardDomain = parseHttpProxyWildcardDomain(dto.wildcardDomain);
     const certificate = this.certFields(
@@ -230,441 +312,666 @@ export class HttpProxyService {
       dto.privateKeyPem,
       wildcardDomain,
     );
-    if (dto.httpsEnabled && !certificate.certificatePem) {
+    if (dto.httpsEnabled && !certificate.certificate_pem) {
       throw new BadRequestException('HTTPS requires a valid certificate and private key');
     }
-    let row: HttpDomainPoolEntity;
     try {
-      row = await runSerializedTransaction(this.dataSource, async (manager) => {
+      const row = await this.runSerializable(async (transaction) => {
         await this.accessResolver.assertActorCapabilitiesInTransaction(
-          manager, actorId, [Capability.ManageSystemSettings],
+          transaction,
+          actorId,
+          [Capability.ManageSystemSettings],
         );
-        if (await manager.findOneBy(HttpDomainPoolEntity, { wildcardDomain })) {
-          throw duplicateDomainPoolConflict();
-        }
-        if (await manager.count(HttpDomainPoolEntity) >= MAX_HTTP_PROXY_DOMAIN_POOLS) {
+        await this.lock(transaction, DOMAIN_POOL_MUTATION_LOCK);
+        const existing = await transaction
+          .selectFrom('interaction.http_domain_pools')
+          .select('id')
+          .where('wildcard_domain', '=', wildcardDomain)
+          .executeTakeFirst();
+        if (existing) throw duplicateDomainPoolConflict();
+        const count = await this.domainPoolCount(transaction);
+        if (count >= MAX_HTTP_PROXY_DOMAIN_POOLS) {
           throw new ConflictException({
             code: 'HTTP_PROXY_DOMAIN_POOL_CAPACITY_REACHED',
             message: `At most ${MAX_HTTP_PROXY_DOMAIN_POOLS} HTTP domain pools are supported`,
           });
         }
-        return manager.save(HttpDomainPoolEntity, manager.create(HttpDomainPoolEntity, {
-          id: randomUUID(),
-          wildcardDomain,
-          enabled: dto.enabled ?? true,
-          httpsEnabled: dto.httpsEnabled ?? false,
-          ...certificate,
-        }));
+        const row = await transaction
+          .insertInto('interaction.http_domain_pools')
+          .values({
+            id: randomUUID(),
+            wildcard_domain: wildcardDomain,
+            enabled: dto.enabled ?? true,
+            https_enabled: dto.httpsEnabled ?? false,
+            ...certificate,
+          })
+          .returningAll()
+          .executeTakeFirstOrThrow();
+        await this.audit.append(
+          transaction,
+          actorId,
+          AuditAction.CreateHttpDomainPool,
+          row.id,
+          'http_domain_pool',
+          this.domainPoolAuditDetails(row),
+        );
+        return row;
       });
+      return this.domainPoolDto(row);
     } catch (error) {
       if (isUniqueConstraintViolation(error)) throw duplicateDomainPoolConflict();
       throw error;
     }
-    return this.domainPoolDto(row);
   }
 
-  async updateDomainPool(actorId: string, id: string, input: unknown): Promise<HttpDomainPoolDto> {
+  async updateDomainPool(
+    actorId: string,
+    id: string,
+    input: unknown,
+  ): Promise<HttpDomainPoolDto> {
     const dto = parseDomainPoolInput(input, true);
-    let row: HttpDomainPoolEntity;
     try {
-      row = await runSerializedTransaction(this.dataSource, async (manager) => {
+      const row = await this.runSerializable(async (transaction) => {
         await this.accessResolver.assertActorCapabilitiesInTransaction(
-          manager, actorId, [Capability.ManageSystemSettings],
+          transaction,
+          actorId,
+          [Capability.ManageSystemSettings],
         );
-        const current = await manager.findOneBy(HttpDomainPoolEntity, { id });
+        await this.lock(transaction, DOMAIN_POOL_MUTATION_LOCK);
+        const current = await transaction
+          .selectFrom('interaction.http_domain_pools')
+          .selectAll()
+          .where('id', '=', id)
+          .forUpdate()
+          .executeTakeFirst();
         if (!current) throw new NotFoundException('Domain pool not found');
+
+        let wildcardDomain = current.wildcard_domain;
         if (dto.wildcardDomain !== undefined) {
-          const wildcardDomain = parseHttpProxyWildcardDomain(dto.wildcardDomain);
-          if (wildcardDomain !== current.wildcardDomain) {
-            const owner = await manager.findOneBy(HttpDomainPoolEntity, { wildcardDomain });
+          const nextWildcard = parseHttpProxyWildcardDomain(dto.wildcardDomain);
+          if (nextWildcard !== current.wildcard_domain) {
+            const owner = await transaction
+              .selectFrom('interaction.http_domain_pools')
+              .select('id')
+              .where('wildcard_domain', '=', nextWildcard)
+              .executeTakeFirst();
             if (owner && owner.id !== current.id) throw duplicateDomainPoolConflict();
-            const bindingCount = await manager.count(HttpProxyBindingEntity, {
-              where: { domainPoolId: id },
-            });
-            if (bindingCount > 0) {
-              throw new ConflictException('Domain pool wildcard cannot change while bindings exist');
+            const binding = await transaction
+              .selectFrom('interaction.http_proxy_bindings')
+              .select('id')
+              .where('domain_pool_id', '=', id)
+              .limit(1)
+              .executeTakeFirst();
+            if (binding) {
+              throw new ConflictException(
+                'Domain pool wildcard cannot change while bindings exist',
+              );
             }
-            current.wildcardDomain = wildcardDomain;
+            wildcardDomain = nextWildcard;
           }
         }
-        if (dto.enabled !== undefined) current.enabled = dto.enabled;
-        if (dto.httpsEnabled !== undefined) current.httpsEnabled = dto.httpsEnabled;
+
+        let certificate = {
+          certificate_pem: current.certificate_pem,
+          encrypted_private_key_pem: current.encrypted_private_key_pem,
+          certificate_fingerprint: current.certificate_fingerprint,
+          certificate_not_after: current.certificate_not_after,
+        };
         if (dto.certificatePem !== undefined || dto.privateKeyPem !== undefined) {
           if (dto.certificatePem === undefined || dto.privateKeyPem === undefined) {
             throw new BadRequestException(
               'certificatePem and privateKeyPem must be updated together',
             );
           }
-          Object.assign(
-            current,
-            this.certFields(dto.certificatePem, dto.privateKeyPem, current.wildcardDomain),
+          certificate = this.certFields(
+            dto.certificatePem,
+            dto.privateKeyPem,
+            wildcardDomain,
           );
-        } else if (current.certificatePem) {
-          this.validateCertificate(current.certificatePem, current.wildcardDomain);
+        } else if (current.certificate_pem) {
+          this.validateCertificate(current.certificate_pem, wildcardDomain);
         }
-        if (current.httpsEnabled && (!current.certificatePem || !current.encryptedPrivateKeyPem)) {
+        const httpsEnabled = dto.httpsEnabled ?? current.https_enabled;
+        if (
+          httpsEnabled
+          && (!certificate.certificate_pem || !certificate.encrypted_private_key_pem)
+        ) {
           throw new BadRequestException('HTTPS requires a valid certificate and private key');
         }
-        return manager.save(HttpDomainPoolEntity, current);
+        const row = await transaction
+          .updateTable('interaction.http_domain_pools')
+          .set({
+            wildcard_domain: wildcardDomain,
+            enabled: dto.enabled ?? current.enabled,
+            https_enabled: httpsEnabled,
+            ...certificate,
+          })
+          .where('id', '=', id)
+          .returningAll()
+          .executeTakeFirstOrThrow();
+        await this.audit.append(
+          transaction,
+          actorId,
+          AuditAction.UpdateHttpDomainPool,
+          row.id,
+          'http_domain_pool',
+          this.domainPoolAuditDetails(row),
+        );
+        return row;
       });
+      return this.domainPoolDto(row);
     } catch (error) {
       if (isUniqueConstraintViolation(error)) throw duplicateDomainPoolConflict();
       throw error;
     }
-    return this.domainPoolDto(row);
   }
 
   async deleteDomainPool(actorId: string, id: string): Promise<void> {
-    await runSerializedTransaction(this.dataSource, async (manager) => {
+    await this.runSerializable(async (transaction) => {
       await this.accessResolver.assertActorCapabilitiesInTransaction(
-        manager, actorId, [Capability.ManageSystemSettings],
+        transaction,
+        actorId,
+        [Capability.ManageSystemSettings],
       );
-      const row = await manager.findOneBy(HttpDomainPoolEntity, { id });
+      await this.lock(transaction, DOMAIN_POOL_MUTATION_LOCK);
+      const row = await transaction
+        .selectFrom('interaction.http_domain_pools')
+        .select('id')
+        .where('id', '=', id)
+        .forUpdate()
+        .executeTakeFirst();
       if (!row) throw new NotFoundException('Domain pool not found');
-      const count = await manager.count(HttpProxyBindingEntity, { where: { domainPoolId: id } });
-      if (count > 0) throw new ConflictException('Domain pool still has bindings');
-      await manager.delete(HttpDomainPoolEntity, { id });
+      const binding = await transaction
+        .selectFrom('interaction.http_proxy_bindings')
+        .select('id')
+        .where('domain_pool_id', '=', id)
+        .limit(1)
+        .executeTakeFirst();
+      if (binding) throw new ConflictException('Domain pool still has bindings');
+      await transaction
+        .deleteFrom('interaction.http_domain_pools')
+        .where('id', '=', id)
+        .execute();
+      await this.audit.append(
+        transaction,
+        actorId,
+        AuditAction.DeleteHttpDomainPool,
+        id,
+        'http_domain_pool',
+      );
     });
   }
 
   buildSnapshot(): Promise<HttpProxySnapshot> {
-    const build = this.snapshotBuildTail.then(() => this.buildSnapshotNow());
-    this.snapshotBuildTail = build.then(() => undefined, () => undefined);
-    return build;
-  }
-
-  private async buildSnapshotNow(): Promise<HttpProxySnapshot> {
-    return runSerializedTransaction(this.dataSource, async (manager) => {
-      const routes = await manager.find(ContainerSshRouteEntity);
-      const routeIps = [...new Set(routes
-        .map((route) => route.macvlanIp)
-        .filter((ip): ip is string => Boolean(ip)))];
+    return this.runSerializable(async (transaction) => {
+      const state = await transaction
+        .selectFrom('interaction.http_proxy_snapshot_state')
+        .selectAll()
+        .where('singleton', '=', true)
+        .forUpdate()
+        .executeTakeFirstOrThrow();
+      const now = await this.databaseNow(transaction);
       const [
-        bindings, pools, containers, lifecycles, desiredSpecs, users, servers,
-        addressClaims, containerMounts, remoteAssignments,
+        bindings,
+        pools,
+        containers,
+        routes,
+        users,
+        servers,
+        runtimeReadyServers,
+        addressClaims,
+        containerMounts,
+        remoteAssignments,
       ] = await Promise.all([
-        manager.find(HttpProxyBindingEntity),
-        manager.find(HttpDomainPoolEntity),
-        manager.find(ContainerEntity),
-        manager.find(ContainerLifecycleEntity),
-        manager.find(ContainerDesiredSpecEntity),
-        manager.find(UserEntity, { where: { status: UserStatus.Active } }),
-        manager.find(ServerEntity),
-        routeIps.length === 0
-          ? Promise.resolve([])
-          : manager.find(NetworkAddressClaimEntity, {
-            where: { state: 'active', address: In(routeIps) },
-          }),
-        manager.find(ContainerMountEntity, { where: { sourceKind: 'remote' } }),
-        manager.find(RemoteFsServerAssignmentEntity),
+        transaction.selectFrom('interaction.http_proxy_bindings').selectAll().execute(),
+        transaction.selectFrom('interaction.http_domain_pools').selectAll().execute(),
+        transaction.selectFrom('control.containers').selectAll().execute(),
+        transaction.selectFrom('control.container_ssh_routes').selectAll().execute(),
+        transaction.selectFrom('iam.users')
+          .select(['id', 'status'])
+          .where('status', '=', UserStatus.Active)
+          .execute(),
+        transaction.selectFrom('infra.servers').selectAll().execute(),
+        transaction
+          .selectFrom('workflow.agent_runtime_projections as projection')
+          .innerJoin(
+            'workflow.agent_sessions as session',
+            'session.id',
+            'projection.session_id',
+          )
+          .select('projection.server_id')
+          .where('projection.runtime_ready', '=', true)
+          .where('session.state', '=', 'ready')
+          .where('session.lease_expires_at', '>', sql<Date>`clock_timestamp()`)
+          .whereRef('session.generation', '=', 'projection.session_generation')
+          .whereRef('session.gateway_id', '=', 'projection.gateway_id')
+          .execute(),
+        transaction.selectFrom('control.container_network_claims')
+          .selectAll()
+          .where('state', '=', 'active')
+          .execute(),
+        transaction.selectFrom('control.container_mounts')
+          .selectAll()
+          .where('source_kind', '=', 'remote')
+          .execute(),
+        transaction.selectFrom('infra.remote_fs_server_assignments').selectAll().execute(),
       ]);
       const poolsById = new Map(pools.map((row) => [row.id, row]));
       const containersById = new Map(containers.map((row) => [row.id, row]));
-      const lifecycleByContainerId = new Map(lifecycles.map((row) => [row.containerId, row]));
-      const desiredByContainerId = new Map(desiredSpecs.map((row) => [row.containerId, row]));
-      const claimsByAddress = new Map<string, NetworkAddressClaimEntity[]>();
+      const claimsByAddress = new Map<string, typeof addressClaims>();
       for (const claim of addressClaims) {
         const claims = claimsByAddress.get(claim.address) ?? [];
         claims.push(claim);
         claimsByAddress.set(claim.address, claims);
       }
-      const activeRemoteAssignments = new Set(remoteAssignments
-        .filter((assignment) => assignment.desiredState === 'active')
-        .map((assignment) => `${assignment.serverId}|${assignment.remoteFsMountId}`));
-      const unsafeRemoteConsumerIds = new Set(containerMounts
-        .filter((mount) => !activeRemoteAssignments.has(`${mount.serverId}|${mount.sourceId}`))
-        .map((mount) => mount.containerId));
-      const onlineServerIds = new Set(servers
-        .filter((server) =>
-          server.status === ServerStatus.Online
-          && !this.proxySnapshots.isServerBlocked(server.id)
-          && Boolean(server.macvlanCidr))
-        .map((server) => server.id));
+      const activeRemoteAssignments = new Set(
+        remoteAssignments
+          .filter((assignment) => assignment.desired_state === 'active')
+          .map((assignment) =>
+            `${assignment.server_id}|${assignment.remote_fs_mount_id}`),
+      );
+      const unsafeRemoteConsumerIds = new Set(
+        containerMounts
+          .filter((mount) =>
+            !activeRemoteAssignments.has(`${mount.server_id}|${mount.source_id}`))
+          .map((mount) => mount.container_id),
+      );
+      const runtimeReadyServerIds = new Set(
+        runtimeReadyServers.map((row) => row.server_id),
+      );
+      const onlineServerIds = new Set(
+        servers
+          .filter((server) =>
+            runtimeReadyServerIds.has(server.id)
+            && this.serverCanProxy(server))
+          .map((server) => server.id),
+      );
       const activeUserIds = new Set(users.map((user) => user.id));
-      const routesByContainerId = new Map(routes
-        .filter((route) => this.routeMatchesLifecycle(
-          route,
-          lifecycleByContainerId.get(route.containerId),
-          desiredByContainerId.get(route.containerId),
-        ))
-        .map((row) => [row.containerId, row]));
-      const createdAtMs = Date.now();
+      const routesByContainerId = new Map(
+        routes
+          .filter((route) => {
+            const container = containersById.get(route.container_id);
+            return container && this.routeMatchesContainer(route, container);
+          })
+          .map((route) => [route.container_id, route]),
+      );
+      const createdAtMs = now.getTime();
       const routable = bindings.flatMap((binding) => {
-        const pool = poolsById.get(binding.domainPoolId);
-        const container = containersById.get(binding.containerId);
-        const route = routesByContainerId.get(binding.containerId);
+        const pool = poolsById.get(binding.domain_pool_id);
+        const container = containersById.get(binding.container_id);
+        const route = routesByContainerId.get(binding.container_id);
         if (
           !pool?.enabled
           || !container
           || !route
           || unsafeRemoteConsumerIds.has(container.id)
-          || !activeUserIds.has(binding.ownerId)
-          || !onlineServerIds.has(container.serverId)
+          || !activeUserIds.has(binding.owner_id)
+          || !onlineServerIds.has(container.server_id)
         ) return [];
-        if (container.ownerId !== binding.ownerId) return [];
-        if (route.serverId !== container.serverId) return [];
-        if (!hostnameMatchesHttpProxyWildcard(binding.hostname, pool.wildcardDomain)) return [];
-        if (pool.httpsEnabled && (!pool.certificatePem || !pool.encryptedPrivateKeyPem)) return [];
-        if (!route.macvlanIp || route.runtimeStatus !== ContainerStatus.Running) return [];
-        const claimsForAddress = claimsByAddress.get(route.macvlanIp) ?? [];
+        if (container.owner_id !== binding.owner_id) return [];
+        if (route.server_id !== container.server_id) return [];
+        if (!hostnameMatchesHttpProxyWildcard(
+          binding.hostname,
+          pool.wildcard_domain,
+        )) return [];
+        if (
+          pool.https_enabled
+          && (!pool.certificate_pem || !pool.encrypted_private_key_pem)
+        ) return [];
+        if (!route.macvlan_ip || route.runtime_status !== ContainerStatus.Running) {
+          return [];
+        }
+        const claimsForAddress = claimsByAddress.get(route.macvlan_ip) ?? [];
         const exactClaim = claimsForAddress.find((claim) =>
-          claim.ownerKind === 'container'
-          && claim.ownerId === container.id
-          && claim.serverId === container.serverId);
+          claim.owner_kind === 'container'
+          && claim.owner_id === container.id
+          && claim.server_id === container.server_id);
         if (claimsForAddress.length !== 1 || !exactClaim) return [];
-        const routeAge = createdAtMs - route.observedAt.getTime();
+        const routeAge = createdAtMs - route.observed_at.getTime();
         if (routeAge < 0 || routeAge > ROUTE_STALE_MS) return [];
         return [{
           bindingId: binding.id,
           hostname: binding.hostname,
           domainPoolId: pool.id,
-          targetIp: route.macvlanIp,
-          targetPort: binding.targetPort,
-          ownerId: binding.ownerId,
+          targetIp: route.macvlan_ip,
+          targetPort: binding.target_port,
+          ownerId: binding.owner_id,
           containerId: container.id,
           containerName: container.name,
-          runtimeId: route.runtimeId,
-          runtimeStatus: route.runtimeStatus,
+          runtimeId: route.runtime_id,
+          runtimeStatus: route.runtime_status,
         }];
       });
-      const nextGeneration = this.generation + 1;
+      const nextGeneration = safeGeneration(state.generation) + 1;
       const snapshot = zHttpProxySnapshot.parse({
         generation: nextGeneration,
-        createdAt: new Date(createdAtMs).toISOString(),
+        createdAt: now.toISOString(),
         staleAfterMs: HTTP_PROXY_SNAPSHOT_STALE_AFTER_MS,
         validUntil: createdAtMs + HTTP_PROXY_SNAPSHOT_STALE_AFTER_MS,
         routes: routable,
         domainPools: pools
-          .filter((pool) => pool.enabled
-            && pool.httpsEnabled
+          .filter((pool) =>
+            pool.enabled
+            && pool.https_enabled
             && this.poolHasSafeTlsLease(pool, createdAtMs))
           .map((pool) => ({
             id: pool.id,
-            wildcardDomain: pool.wildcardDomain,
+            wildcardDomain: pool.wildcard_domain,
             enabled: pool.enabled,
-            httpsEnabled: pool.httpsEnabled,
-            certificatePem: pool.certificatePem,
-            privateKeyPem: this.decrypt(pool.encryptedPrivateKeyPem!),
-            certificateFingerprint: pool.certificateFingerprint,
-            certificateNotAfter: pool.certificateNotAfter?.toISOString() ?? null,
+            httpsEnabled: pool.https_enabled,
+            certificatePem: pool.certificate_pem,
+            privateKeyPem: this.decrypt(pool.encrypted_private_key_pem!),
+            certificateFingerprint: pool.certificate_fingerprint,
+            certificateNotAfter: pool.certificate_not_after?.toISOString() ?? null,
           })),
       });
-      const encodedBytes = Buffer.byteLength(JSON.stringify({
+      const wireEnvelope = JSON.stringify({
         ts: Number.MAX_SAFE_INTEGER,
         kind: 'snapshot',
         payload: snapshot,
-      }));
+      });
+      const encodedBytes = Buffer.byteLength(wireEnvelope);
       if (encodedBytes > MAX_HTTP_PROXY_SNAPSHOT_BYTES) {
         throw new Error(
           `HTTP proxy snapshot is ${encodedBytes} bytes; maximum is ${MAX_HTTP_PROXY_SNAPSHOT_BYTES}`,
         );
       }
-      this.generation = nextGeneration;
+      await transaction
+        .updateTable('interaction.http_proxy_snapshot_state')
+        .set({
+          generation: nextGeneration,
+          lease_issued_at: now,
+          lease_valid_until: new Date(
+            createdAtMs + HTTP_PROXY_SNAPSHOT_STALE_AFTER_MS,
+          ),
+          payload_sha256: createHash('sha256')
+            .update(JSON.stringify(snapshot))
+            .digest('hex'),
+          updated_at: now,
+        })
+        .where('singleton', '=', true)
+        .executeTakeFirstOrThrow();
       return snapshot;
     });
   }
 
   private async enabledPoolForHostname(
-    manager: EntityManager,
+    executor: HttpExecutor,
     hostname: string,
-  ): Promise<HttpDomainPoolEntity> {
-    const pools = await manager.find(HttpDomainPoolEntity, { where: { enabled: true } });
-    const pool = pools.find((row) => hostnameMatchesHttpProxyWildcard(hostname, row.wildcardDomain));
-    if (!pool) throw new BadRequestException('Hostname is not under an enabled wildcard domain pool');
+  ): Promise<DomainPoolRow> {
+    const pools = await executor
+      .selectFrom('interaction.http_domain_pools')
+      .selectAll()
+      .where('enabled', '=', true)
+      .orderBy('wildcard_domain')
+      .execute();
+    const pool = pools.find((row) =>
+      hostnameMatchesHttpProxyWildcard(hostname, row.wildcard_domain));
+    if (!pool) {
+      throw new BadRequestException(
+        'Hostname is not under an enabled wildcard domain pool',
+      );
+    }
     return pool;
   }
 
   private async reserveHostname(
-    manager: EntityManager,
+    transaction: Transaction<NyabaseDatabase>,
     hostname: string,
     ownerId: string,
     bindingId: string,
   ): Promise<void> {
-    const now = new Date();
-    const expired = await manager.find(HttpHostnameReservationEntity, {
-      where: { state: 'releasing', reusableAt: LessThanOrEqual(now) },
-      order: { reusableAt: 'ASC', hostname: 'ASC' },
-      take: HOSTNAME_RESERVATION_GC_BATCH,
-    });
-    const reusableHostnames = expired
-      .filter((reservation) => monotonicReuseGuard.mayReuse(
-        hostnameReuseKey(reservation.hostname),
-        reservation.reusableAt,
-        now.getTime(),
-      ))
-      .map((reservation) => reservation.hostname);
-    if (reusableHostnames.length > 0) {
-      await manager.delete(HttpHostnameReservationEntity, {
-        hostname: In(reusableHostnames),
-      });
-    }
-    const draining = await manager.findOneBy(HttpHostnameReservationEntity, {
-      hostname,
-      state: 'releasing',
-    });
-    if (
-      draining
-      && monotonicReuseGuard.mayReuse(
-        hostnameReuseKey(hostname),
-        draining.reusableAt,
-      )
-    ) {
-      await manager.delete(HttpHostnameReservationEntity, { hostname });
+    await this.lock(transaction, HOSTNAME_RESERVATION_LOCK);
+    const expired = await transaction
+      .selectFrom('interaction.http_hostname_reservations')
+      .select('hostname')
+      .where('state', '=', 'releasing')
+      .where('reusable_at', '<=', sql<Date>`clock_timestamp()`)
+      .orderBy('reusable_at')
+      .orderBy('hostname')
+      .limit(HOSTNAME_RESERVATION_GC_BATCH)
+      .forUpdate()
+      .skipLocked()
+      .execute();
+    if (expired.length > 0) {
+      await transaction
+        .deleteFrom('interaction.http_hostname_reservations')
+        .where('hostname', 'in', expired.map((row) => row.hostname))
+        .where('state', '=', 'releasing')
+        .where('reusable_at', '<=', sql<Date>`clock_timestamp()`)
+        .execute();
     }
     const [existingBinding, reservation] = await Promise.all([
-      manager.findOneBy(HttpProxyBindingEntity, { hostname }),
-      manager.findOneBy(HttpHostnameReservationEntity, { hostname }),
+      transaction
+        .selectFrom('interaction.http_proxy_bindings')
+        .select('id')
+        .where('hostname', '=', hostname)
+        .executeTakeFirst(),
+      transaction
+        .selectFrom('interaction.http_hostname_reservations')
+        .select('hostname')
+        .where('hostname', '=', hostname)
+        .executeTakeFirst(),
     ]);
-    if (existingBinding || reservation) throw new ConflictException('Hostname is already occupied or draining');
-    if (await manager.count(HttpHostnameReservationEntity) >= MAX_HTTP_HOSTNAME_RESERVATIONS) {
+    if (existingBinding || reservation) {
+      throw new ConflictException('Hostname is already occupied or draining');
+    }
+    const count = await transaction
+      .selectFrom('interaction.http_hostname_reservations')
+      .select((expression) => expression.fn.countAll<string>().as('count'))
+      .executeTakeFirstOrThrow();
+    if (Number(count.count) >= MAX_HTTP_HOSTNAME_RESERVATIONS) {
       throw new ConflictException({
         code: 'HTTP_HOSTNAME_RESERVATION_CAPACITY_REACHED',
         message: `At most ${MAX_HTTP_HOSTNAME_RESERVATIONS} active or draining hostnames are supported`,
       });
     }
-    await manager.save(HttpHostnameReservationEntity, manager.create(HttpHostnameReservationEntity, {
-      hostname,
-      ownerId,
-      bindingId,
-      state: 'active',
-      reusableAt: null,
-    }));
+    try {
+      await transaction
+        .insertInto('interaction.http_hostname_reservations')
+        .values({
+          hostname,
+          owner_id: ownerId,
+          binding_id: bindingId,
+          state: 'active',
+          reusable_at: null,
+          release_generation: 0,
+        })
+        .execute();
+    } catch (error) {
+      if (isUniqueConstraintViolation(error)) {
+        throw new ConflictException('Hostname is already occupied or draining');
+      }
+      throw error;
+    }
   }
 
   private async releaseHostname(
-    manager: EntityManager,
-    binding: HttpProxyBindingEntity,
+    transaction: Transaction<NyabaseDatabase>,
+    binding: BindingRow,
   ): Promise<void> {
-    const reservation = await manager.findOneBy(HttpHostnameReservationEntity, {
-      hostname: binding.hostname,
-    });
-    if (
-      !reservation
-      || reservation.state !== 'active'
-      || reservation.ownerId !== binding.ownerId
-      || reservation.bindingId !== binding.id
-    ) {
-      throw new ConflictException('Hostname reservation identity is missing or inconsistent');
+    await this.lock(transaction, HOSTNAME_RESERVATION_LOCK);
+    const result = await transaction
+      .updateTable('interaction.http_hostname_reservations')
+      .set({
+        state: 'releasing',
+        binding_id: null,
+        reusable_at: sql<Date>`
+          clock_timestamp()
+            + (${CONTAINER_DELETE_PROXY_DRAIN_MS} * interval '1 millisecond')
+        `,
+        release_generation: sql`release_generation + 1`,
+      })
+      .where('hostname', '=', binding.hostname)
+      .where('owner_id', '=', binding.owner_id)
+      .where('binding_id', '=', binding.id)
+      .where('state', '=', 'active')
+      .executeTakeFirst();
+    if (result.numUpdatedRows !== 1n) {
+      throw new ConflictException(
+        'Hostname reservation identity is missing or inconsistent',
+      );
     }
-    await manager.update(HttpHostnameReservationEntity, binding.hostname, {
-      state: 'releasing',
-      bindingId: null,
-      reusableAt: new Date(Date.now() + CONTAINER_DELETE_PROXY_DRAIN_MS),
-    });
-    monotonicReuseGuard.arm(hostnameReuseKey(binding.hostname));
   }
 
   private async bindingDtos(
-    bindings: HttpProxyBindingEntity[],
+    bindings: readonly BindingRow[],
     requesterId: string,
     proxyOnline: boolean,
+    executor: HttpExecutor,
   ): Promise<HttpProxyBindingDto[]> {
-    const [pools, containers, lifecycles, desiredSpecs, routes, users] = await Promise.all([
-      this.domainPoolsRepo.find({ where: { id: In([...new Set(bindings.map((row) => row.domainPoolId))]) } }),
-      this.containersRepo.find({ where: { id: In([...new Set(bindings.map((row) => row.containerId))]) } }),
-      this.lifecyclesRepo.find({ where: { containerId: In([...new Set(bindings.map((row) => row.containerId))]) } }),
-      this.desiredSpecsRepo.find({ where: { containerId: In([...new Set(bindings.map((row) => row.containerId))]) } }),
-      this.routesRepo.find({ where: { containerId: In([...new Set(bindings.map((row) => row.containerId))]) } }),
-      this.usersRepo.find({ where: { id: In([...new Set(bindings.map((row) => row.ownerId))]) } }),
+    if (bindings.length === 0) return [];
+    const poolIds = [...new Set(bindings.map((row) => row.domain_pool_id))];
+    const containerIds = [...new Set(bindings.map((row) => row.container_id))];
+    const ownerIds = [...new Set(bindings.map((row) => row.owner_id))];
+    const [pools, containers, routes, users] = await Promise.all([
+      executor.selectFrom('interaction.http_domain_pools')
+        .selectAll()
+        .where('id', 'in', poolIds)
+        .execute(),
+      executor.selectFrom('control.containers')
+        .selectAll()
+        .where('id', 'in', containerIds)
+        .execute(),
+      executor.selectFrom('control.container_ssh_routes')
+        .selectAll()
+        .where('container_id', 'in', containerIds)
+        .execute(),
+      executor.selectFrom('iam.users')
+        .select(['id', 'username', 'status'])
+        .where('id', 'in', ownerIds)
+        .execute(),
     ]);
     const poolsById = new Map(pools.map((row) => [row.id, row]));
     const containersById = new Map(containers.map((row) => [row.id, row]));
-    const lifecycleByContainerId = new Map(lifecycles.map((row) => [row.containerId, row]));
-    const desiredByContainerId = new Map(desiredSpecs.map((row) => [row.containerId, row]));
-    const routesByContainerId = new Map(routes
-      .filter((route) => this.routeMatchesLifecycle(
-        route,
-        lifecycleByContainerId.get(route.containerId),
-        desiredByContainerId.get(route.containerId),
-      ))
-      .map((row) => [row.containerId, row]));
+    const routesByContainerId = new Map(
+      routes
+        .filter((route) => {
+          const container = containersById.get(route.container_id);
+          return container && this.routeMatchesContainer(route, container);
+        })
+        .map((row) => [row.container_id, row]),
+    );
     const usersById = new Map(users.map((row) => [row.id, row]));
     return bindings
-      .filter((binding) => usersById.get(binding.ownerId)?.status === UserStatus.Active)
+      .filter((binding) =>
+        usersById.get(binding.owner_id)?.status === UserStatus.Active)
       .map((binding) => {
-        const pool = poolsById.get(binding.domainPoolId);
-        const container = containersById.get(binding.containerId);
-        const route = routesByContainerId.get(binding.containerId);
+        const pool = poolsById.get(binding.domain_pool_id);
+        const container = containersById.get(binding.container_id);
+        const route = routesByContainerId.get(binding.container_id);
         const reasons = this.warningReasons(pool, container, route, proxyOnline);
-        const status: HttpProxyBindingStatus = pool?.enabled === false ? 'disabled' : reasons.length > 0 ? 'warning' : 'ready';
+        const status: HttpProxyBindingStatus = pool?.enabled === false
+          ? 'disabled'
+          : reasons.length > 0
+            ? 'warning'
+            : 'ready';
         return {
           id: binding.id,
-          mine: binding.ownerId === requesterId,
-          ownerId: binding.ownerId,
-          ownerUsername: usersById.get(binding.ownerId)?.username ?? binding.ownerId,
+          mine: binding.owner_id === requesterId,
+          ownerId: binding.owner_id,
+          ownerUsername: usersById.get(binding.owner_id)?.username ?? binding.owner_id,
           hostname: binding.hostname,
-          domainPoolId: binding.domainPoolId,
-          domainPool: pool?.wildcardDomain ?? binding.domainPoolId,
-          targetUrl: route?.macvlanIp ? `http://${route.macvlanIp}:${binding.targetPort}` : null,
-          containerId: binding.containerId,
+          domainPoolId: binding.domain_pool_id,
+          domainPool: pool?.wildcard_domain ?? binding.domain_pool_id,
+          targetUrl: route?.macvlan_ip
+            ? `http://${route.macvlan_ip}:${binding.target_port}`
+            : null,
+          containerId: binding.container_id,
           containerName: container?.name ?? null,
-          containerStatus: route?.runtimeStatus ?? (container ? null : 'missing'),
-          targetPort: binding.targetPort,
-          entryHttpsEnabled: Boolean(pool?.httpsEnabled),
+          containerStatus: route?.runtime_status ?? (container ? null : 'missing'),
+          targetPort: binding.target_port,
+          entryHttpsEnabled: Boolean(pool?.https_enabled),
           status,
           warningReasons: reasons,
           warningMessage: httpProxyWarningMessage(reasons),
-          createdAt: binding.createdAt.toISOString(),
-          updatedAt: binding.updatedAt.toISOString(),
+          createdAt: binding.created_at.toISOString(),
+          updatedAt: binding.updated_at.toISOString(),
         };
       });
   }
 
   private warningReasons(
-    pool: HttpDomainPoolEntity | undefined,
-    container: ContainerEntity | undefined,
-    route: ContainerSshRouteEntity | undefined,
+    pool: DomainPoolRow | undefined,
+    container: ContainerRow | undefined,
+    route: {
+      server_id: string;
+      runtime_id: string;
+      macvlan_ip: string | null;
+      runtime_status: ContainerStatus;
+      observed_at: Date;
+    } | undefined,
     proxyOnline: boolean,
   ): HttpProxyWarningReason[] {
     const reasons: HttpProxyWarningReason[] = [];
     if (!proxyOnline) reasons.push('proxy_offline');
     if (!pool?.enabled) reasons.push('domain_pool_disabled');
-    if (pool?.httpsEnabled && !this.poolHasSafeTlsLease(pool, Date.now())) {
+    if (pool?.https_enabled && !this.poolHasSafeTlsLease(pool, Date.now())) {
       reasons.push('https_not_configured');
     }
     if (!container) reasons.push('container_deleted');
-    if (!route || (container && route.serverId !== container.serverId)) reasons.push('route_missing', 'container_runtime_missing');
-    else {
-      if (route.runtimeStatus !== ContainerStatus.Running) reasons.push('container_not_running');
-      if (!route.runtimeId) reasons.push('container_runtime_missing');
-      if (!route.macvlanIp) reasons.push('container_ip_missing');
-      if (Date.now() - route.observedAt.getTime() > ROUTE_STALE_MS) reasons.push('container_runtime_stale');
+    if (!route || (container && route.server_id !== container.server_id)) {
+      reasons.push('route_missing', 'container_runtime_missing');
+    } else {
+      if (route.runtime_status !== ContainerStatus.Running) {
+        reasons.push('container_not_running');
+      }
+      if (!route.runtime_id) reasons.push('container_runtime_missing');
+      if (!route.macvlan_ip) reasons.push('container_ip_missing');
+      if (Date.now() - route.observed_at.getTime() > ROUTE_STALE_MS) {
+        reasons.push('container_runtime_stale');
+      }
     }
     return [...new Set(reasons)];
   }
 
-  private routeMatchesLifecycle(
-    route: ContainerSshRouteEntity,
-    lifecycle: ContainerLifecycleEntity | undefined,
-    desired: ContainerDesiredSpecEntity | undefined,
+  private routeMatchesContainer(
+    route: {
+      runtime_id: string;
+    },
+    container: ContainerRow,
   ): boolean {
-    return lifecycle?.phase === ContainerPhase.Active
-      && lifecycle.activeTaskId === null
-      && lifecycle.boundRuntimeId === route.runtimeId
-      && desired?.powerIntent === ContainerPowerIntent.Running;
+    return container.lifecycle_phase === ContainerPhase.Active
+      && container.active_task_id === null
+      && container.bound_runtime_id === route.runtime_id
+      && container.power_intent === ContainerPowerIntent.Running;
   }
 
-  private poolHasSafeTlsLease(pool: HttpDomainPoolEntity, now: number): boolean {
+  private serverCanProxy(server: ServerRow): boolean {
+    return server.status === ServerStatus.Online
+      && Boolean(server.macvlan_cidr);
+  }
+
+  private poolHasSafeTlsLease(pool: DomainPoolRow, now: number): boolean {
     return Boolean(
-      pool.certificatePem
-      && pool.encryptedPrivateKeyPem
-      && pool.certificateNotAfter
-      && pool.certificateNotAfter.getTime() > now
+      pool.certificate_pem
+      && pool.encrypted_private_key_pem
+      && pool.certificate_not_after
+      && pool.certificate_not_after.getTime() > now
         + HTTP_PROXY_SNAPSHOT_STALE_AFTER_MS
         + PROXY_SNAPSHOT_MAX_CLOCK_SKEW_MS,
     );
   }
 
-  private domainPoolDto(row: HttpDomainPoolEntity): HttpDomainPoolDto {
+  private domainPoolDto(row: DomainPoolRow): HttpDomainPoolDto {
     return {
       id: row.id,
-      wildcardDomain: row.wildcardDomain,
+      wildcardDomain: row.wildcard_domain,
       enabled: row.enabled,
-      httpsEnabled: row.httpsEnabled,
-      certificateFingerprint: row.certificateFingerprint,
-      certificateNotAfter: row.certificateNotAfter?.toISOString() ?? null,
-      createdAt: row.createdAt.toISOString(),
-      updatedAt: row.updatedAt.toISOString(),
+      httpsEnabled: row.https_enabled,
+      certificateFingerprint: row.certificate_fingerprint,
+      certificateNotAfter: row.certificate_not_after?.toISOString() ?? null,
+      createdAt: row.created_at.toISOString(),
+      updatedAt: row.updated_at.toISOString(),
+    };
+  }
+
+  private domainPoolAuditDetails(row: DomainPoolRow) {
+    return {
+      wildcardDomain: row.wildcard_domain,
+      enabled: row.enabled,
+      httpsEnabled: row.https_enabled,
+      certificateFingerprint: row.certificate_fingerprint,
     };
   }
 
@@ -672,17 +979,24 @@ export class HttpProxyService {
     certificatePem: string | null | undefined,
     privateKeyPem: string | null | undefined,
     wildcardDomain: string,
-  ): Partial<HttpDomainPoolEntity> {
+  ): {
+    certificate_pem: string | null;
+    encrypted_private_key_pem: string | null;
+    certificate_fingerprint: string | null;
+    certificate_not_after: Date | null;
+  } {
     if (!certificatePem && !privateKeyPem) {
       return {
-        certificatePem: null,
-        encryptedPrivateKeyPem: null,
-        certificateFingerprint: null,
-        certificateNotAfter: null,
+        certificate_pem: null,
+        encrypted_private_key_pem: null,
+        certificate_fingerprint: null,
+        certificate_not_after: null,
       };
     }
     if (!certificatePem || !privateKeyPem) {
-      throw new BadRequestException('Both certificatePem and privateKeyPem are required when configuring HTTPS');
+      throw new BadRequestException(
+        'Both certificatePem and privateKeyPem are required when configuring HTTPS',
+      );
     }
     const cert = this.validateCertificate(certificatePem, wildcardDomain);
     try {
@@ -695,14 +1009,17 @@ export class HttpProxyService {
       throw new BadRequestException('Invalid private key PEM');
     }
     return {
-      certificatePem,
-      encryptedPrivateKeyPem: this.encrypt(privateKeyPem),
-      certificateFingerprint: cert.fingerprint256,
-      certificateNotAfter: new Date(cert.validTo),
+      certificate_pem: certificatePem,
+      encrypted_private_key_pem: this.encrypt(privateKeyPem),
+      certificate_fingerprint: cert.fingerprint256,
+      certificate_not_after: new Date(cert.validTo),
     };
   }
 
-  private validateCertificate(certificatePem: string, wildcardDomain: string): X509Certificate {
+  private validateCertificate(
+    certificatePem: string,
+    wildcardDomain: string,
+  ): X509Certificate {
     let cert: X509Certificate;
     try {
       cert = new X509Certificate(certificatePem);
@@ -734,32 +1051,119 @@ export class HttpProxyService {
   private encrypt(plaintext: string): string {
     const iv = randomBytes(12);
     const cipher = createCipheriv('aes-256-gcm', this.key(), iv);
-    const ciphertext = Buffer.concat([cipher.update(plaintext, 'utf8'), cipher.final()]);
-    return [KEY_VERSION, iv.toString('base64url'), cipher.getAuthTag().toString('base64url'), ciphertext.toString('base64url')].join('.');
+    const ciphertext = Buffer.concat([
+      cipher.update(plaintext, 'utf8'),
+      cipher.final(),
+    ]);
+    return [
+      KEY_VERSION,
+      iv.toString('base64url'),
+      cipher.getAuthTag().toString('base64url'),
+      ciphertext.toString('base64url'),
+    ].join('.');
   }
 
   private decrypt(value: string): string {
     const [version, ivRaw, tagRaw, ciphertextRaw] = value.split('.');
-    if (version !== KEY_VERSION || !ivRaw || !tagRaw || !ciphertextRaw) throw new Error('Unsupported encrypted HTTP proxy key format');
-    const decipher = createDecipheriv('aes-256-gcm', this.key(), Buffer.from(ivRaw, 'base64url'));
+    if (version !== KEY_VERSION || !ivRaw || !tagRaw || !ciphertextRaw) {
+      throw new Error('Unsupported encrypted HTTP proxy key format');
+    }
+    const decipher = createDecipheriv(
+      'aes-256-gcm',
+      this.key(),
+      Buffer.from(ivRaw, 'base64url'),
+    );
     decipher.setAuthTag(Buffer.from(tagRaw, 'base64url'));
-    return Buffer.concat([decipher.update(Buffer.from(ciphertextRaw, 'base64url')), decipher.final()]).toString('utf8');
+    return Buffer.concat([
+      decipher.update(Buffer.from(ciphertextRaw, 'base64url')),
+      decipher.final(),
+    ]).toString('utf8');
   }
 
   private key(): Buffer {
-    const secret = this.config.get<string>('ssh.keyEncryptionSecret') || this.config.get<string>('auth.jwtSecret');
+    const secret = this.config.get<string>('ssh.keyEncryptionSecret')
+      || this.config.get<string>('auth.jwtSecret');
     return createHash('sha256').update(secret).digest();
   }
 
-  private async assertRequesterActive(manager: EntityManager, requesterId: string): Promise<void> {
-    const requester = await manager.findOneBy(UserEntity, {
-      id: requesterId,
-      status: UserStatus.Active,
-    });
+  private async assertRequesterActive(
+    transaction: Transaction<NyabaseDatabase>,
+    requesterId: string,
+  ): Promise<void> {
+    const requester = await transaction
+      .selectFrom('iam.users')
+      .select('id')
+      .where('id', '=', requesterId)
+      .where('status', '=', UserStatus.Active)
+      .forKeyShare()
+      .executeTakeFirst();
     if (!requester) {
       throw new ForbiddenException('Current user is no longer active');
     }
   }
+
+  private findContainer(
+    executor: HttpExecutor,
+    id: string,
+  ): Promise<ContainerRow | undefined> {
+    return executor
+      .selectFrom('control.containers')
+      .selectAll()
+      .where('id', '=', id)
+      .executeTakeFirst();
+  }
+
+  private async bindingCount(executor: HttpExecutor): Promise<number> {
+    const row = await executor
+      .selectFrom('interaction.http_proxy_bindings')
+      .select((expression) => expression.fn.countAll<string>().as('count'))
+      .executeTakeFirstOrThrow();
+    return Number(row.count);
+  }
+
+  private async domainPoolCount(executor: HttpExecutor): Promise<number> {
+    const row = await executor
+      .selectFrom('interaction.http_domain_pools')
+      .select((expression) => expression.fn.countAll<string>().as('count'))
+      .executeTakeFirstOrThrow();
+    return Number(row.count);
+  }
+
+  private async lock(
+    transaction: Transaction<NyabaseDatabase>,
+    key: number,
+  ): Promise<void> {
+    await sql`select pg_advisory_xact_lock(
+      ${HTTP_PROXY_ADVISORY_NAMESPACE},
+      ${key}
+    )`.execute(transaction);
+  }
+
+  private async databaseNow(
+    executor: HttpExecutor,
+  ): Promise<Date> {
+    const result = await sql<{ now: Date }>`
+      select clock_timestamp() as now
+    `.execute(executor);
+    return result.rows[0]!.now;
+  }
+
+  private runSerializable<T>(
+    work: (transaction: Transaction<NyabaseDatabase>) => Promise<T>,
+  ): Promise<T> {
+    return this.transactions.run(work, {
+      isolationLevel: 'serializable',
+      maxAttempts: 5,
+    });
+  }
+}
+
+function safeGeneration(value: string | number | bigint): number {
+  const generation = Number(value);
+  if (!Number.isSafeInteger(generation) || generation < 0) {
+    throw new Error('HTTP proxy snapshot generation exceeds the safe application range');
+  }
+  return generation;
 }
 
 function parseBindingInput(input: unknown, partial: boolean) {
@@ -770,13 +1174,23 @@ function parseBindingInput(input: unknown, partial: boolean) {
     containerId?: string;
     targetPort?: number;
   } = {};
-  if (!partial || record.hostname !== undefined) parsed.hostname = stringField(record.hostname, 'hostname');
-  if (!partial || record.containerId !== undefined) parsed.containerId = stringField(record.containerId, 'containerId');
-  if (!partial || record.targetPort !== undefined) parsed.targetPort = portField(record.targetPort);
+  if (!partial || record.hostname !== undefined) {
+    parsed.hostname = stringField(record.hostname, 'hostname');
+  }
+  if (!partial || record.containerId !== undefined) {
+    parsed.containerId = stringField(record.containerId, 'containerId');
+  }
+  if (!partial || record.targetPort !== undefined) {
+    parsed.targetPort = portField(record.targetPort);
+  }
   if (partial && Object.keys(parsed).length === 0) {
     throw new BadRequestException('At least one binding field must be updated');
   }
-  return parsed as typeof parsed & { hostname: string; containerId: string; targetPort: number };
+  return parsed as typeof parsed & {
+    hostname: string;
+    containerId: string;
+    targetPort: number;
+  };
 }
 
 function parseDomainPoolInput(input: unknown, partial: boolean) {
@@ -795,9 +1209,15 @@ function parseDomainPoolInput(input: unknown, partial: boolean) {
     certificatePem?: string | null;
     privateKeyPem?: string | null;
   } = {};
-  if (!partial || record.wildcardDomain !== undefined) parsed.wildcardDomain = stringField(record.wildcardDomain, 'wildcardDomain');
-  if (record.enabled !== undefined) parsed.enabled = booleanField(record.enabled, 'enabled');
-  if (record.httpsEnabled !== undefined) parsed.httpsEnabled = booleanField(record.httpsEnabled, 'httpsEnabled');
+  if (!partial || record.wildcardDomain !== undefined) {
+    parsed.wildcardDomain = stringField(record.wildcardDomain, 'wildcardDomain');
+  }
+  if (record.enabled !== undefined) {
+    parsed.enabled = booleanField(record.enabled, 'enabled');
+  }
+  if (record.httpsEnabled !== undefined) {
+    parsed.httpsEnabled = booleanField(record.httpsEnabled, 'httpsEnabled');
+  }
   if (record.certificatePem !== undefined) {
     parsed.certificatePem = nullableBoundedStringField(
       record.certificatePem,
@@ -818,7 +1238,10 @@ function parseDomainPoolInput(input: unknown, partial: boolean) {
   return parsed as typeof parsed & { wildcardDomain: string };
 }
 
-function assertExactKeys(record: Record<string, unknown>, allowed: readonly string[]): void {
+function assertExactKeys(
+  record: Record<string, unknown>,
+  allowed: readonly string[],
+): void {
   const allowedSet = new Set(allowed);
   const unknown = Object.keys(record).filter((key) => !allowedSet.has(key));
   if (unknown.length > 0) {
@@ -827,12 +1250,16 @@ function assertExactKeys(record: Record<string, unknown>, allowed: readonly stri
 }
 
 function objectInput(input: unknown): Record<string, unknown> {
-  if (!input || typeof input !== 'object' || Array.isArray(input)) throw new BadRequestException('Request body must be an object');
+  if (!input || typeof input !== 'object' || Array.isArray(input)) {
+    throw new BadRequestException('Request body must be an object');
+  }
   return input as Record<string, unknown>;
 }
 
 function stringField(value: unknown, name: string): string {
-  if (typeof value !== 'string' || !value.trim()) throw new BadRequestException(`${name} is required`);
+  if (typeof value !== 'string' || !value.trim()) {
+    throw new BadRequestException(`${name} is required`);
+  }
   return value.trim();
 }
 
@@ -841,22 +1268,37 @@ function nullableStringField(value: unknown, name: string): string | null {
   return stringField(value, name);
 }
 
-function nullableBoundedStringField(value: unknown, name: string, maxLength: number): string | null {
+function nullableBoundedStringField(
+  value: unknown,
+  name: string,
+  maxLength: number,
+): string | null {
   const parsed = nullableStringField(value, name);
   if (parsed !== null && parsed.length > maxLength) {
-    throw new BadRequestException(`${name} must not exceed ${maxLength} characters`);
+    throw new BadRequestException(
+      `${name} must not exceed ${maxLength} characters`,
+    );
   }
   return parsed;
 }
 
 function booleanField(value: unknown, name: string): boolean {
-  if (typeof value !== 'boolean') throw new BadRequestException(`${name} must be boolean`);
+  if (typeof value !== 'boolean') {
+    throw new BadRequestException(`${name} must be boolean`);
+  }
   return value;
 }
 
 function portField(value: unknown): number {
-  if (typeof value !== 'number' || !Number.isInteger(value) || value < 1 || value > 65535) {
-    throw new BadRequestException('targetPort must be an integer between 1 and 65535');
+  if (
+    typeof value !== 'number'
+    || !Number.isInteger(value)
+    || value < 1
+    || value > 65535
+  ) {
+    throw new BadRequestException(
+      'targetPort must be an integer between 1 and 65535',
+    );
   }
   return value;
 }
@@ -891,15 +1333,13 @@ function duplicateDomainPoolConflict(): ConflictException {
 }
 
 function isUniqueConstraintViolation(error: unknown): boolean {
-  const record = error && typeof error === 'object'
-    ? error as Record<string, unknown>
-    : null;
-  const driver = record?.driverError && typeof record.driverError === 'object'
-    ? record.driverError as Record<string, unknown>
-    : null;
-  const code = String(driver?.code ?? record?.code ?? '');
-  const message = String(driver?.message ?? record?.message ?? '');
-  return code === '23505'
-    || code === 'SQLITE_CONSTRAINT_UNIQUE'
-    || (code === 'SQLITE_CONSTRAINT' && /unique/i.test(message));
+  let current: unknown = error;
+  const visited = new Set<unknown>();
+  while (current && typeof current === 'object' && !visited.has(current)) {
+    visited.add(current);
+    const record = current as { code?: unknown; cause?: unknown };
+    if (record.code === '23505') return true;
+    current = record.cause;
+  }
+  return false;
 }

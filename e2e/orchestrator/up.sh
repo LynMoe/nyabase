@@ -13,7 +13,7 @@ export_compose_state
 completed=false
 cleanup_failed_up() {
   local rc=$?
-  if [[ "$completed" != true ]]; then
+  if [[ "$completed" != true && "${NYABASE_E2E_PARENT_OWNS_CLEANUP:-false}" != true ]]; then
     log "up failed; tearing down only resources owned by $run_id" >&2
     "$E2E_ROOT/e2e/orchestrator/diagnose.sh" "$run_id" >/dev/null 2>&1 || true
     "$E2E_ROOT/e2e/orchestrator/down.sh" "$run_id" --keep-runtime >/dev/null 2>&1 || true
@@ -26,10 +26,15 @@ trap 'exit 130' INT TERM HUP
 [[ -s "$NYABASE_E2E_RUNTIME_DIR/build.env" ]] || die "run build before up"
 docker image inspect "$NYABASE_E2E_BACKEND_IMAGE" >/dev/null 2>&1 || die "backend image is missing; rerun build"
 docker image inspect "$NYABASE_E2E_NODE_IMAGE" >/dev/null 2>&1 || die "node image is missing; rerun build"
+if [[ "$NYABASE_E2E_PROFILE" == full || "$NYABASE_E2E_PROFILE" == recovery ]]; then
+  for image in "$NYABASE_E2E_SSH_PROXY_IMAGE" "$NYABASE_E2E_HTTP_PROXY_IMAGE"; do
+    docker image inspect "$image" >/dev/null 2>&1 \
+      || die "proxy-enabled profile image is missing; rerun build: $image"
+  done
+fi
 if [[ "$NYABASE_E2E_PROFILE" == full ]]; then
   for image in "$NYABASE_E2E_NFS_IMAGE" "$NYABASE_E2E_CEPH_IMAGE" \
-    "$NYABASE_E2E_STORAGE_CLIENT_IMAGE" "$NYABASE_E2E_SSH_PROXY_IMAGE" \
-    "$NYABASE_E2E_HTTP_PROXY_IMAGE" "$NYABASE_E2E_PROXY_TARGET_IMAGE"; do
+    "$NYABASE_E2E_STORAGE_CLIENT_IMAGE" "$NYABASE_E2E_PROXY_TARGET_IMAGE"; do
     docker image inspect "$image" >/dev/null 2>&1 \
       || die "Full profile image is missing; rerun build: $image"
   done
@@ -50,7 +55,9 @@ fi
 # shellcheck disable=SC1090
 source "$NYABASE_E2E_RUNTIME_DIR/secrets.env"
 proxy_public_host=""
-[[ "$NYABASE_E2E_PROFILE" != full ]] || proxy_public_host="$NYABASE_E2E_SSH_PROXY_IP"
+if [[ "$NYABASE_E2E_PROFILE" == full || "$NYABASE_E2E_PROFILE" == recovery ]]; then
+  proxy_public_host="$NYABASE_E2E_SSH_PROXY_IP"
+fi
 
 backend_config_dir="$NYABASE_E2E_RUNTIME_DIR/backend-config"
 rm -rf "$backend_config_dir"
@@ -62,6 +69,7 @@ install -m 0600 /dev/null "$backend_config_dir/config.yaml"
 printf '%s\n' \
   'runtime:' \
   '  nodeEnv: production' \
+  '  role: all' \
   'server:' \
   '  port: 3001' \
   '  corsOrigin: ""' \
@@ -74,12 +82,17 @@ printf '%s\n' \
   '  refreshTokenExpiresDays: 1' \
   "  adminInitPassword: ${ADMIN_INIT_PASSWORD}" \
   'database:' \
-  '  driver: sqlite' \
-  '  path: /data/nyabase.db' \
-  '  synchronize: false' \
+  "  url: \"postgresql://nyabase:${run_id}@postgres:5432/nyabase\"" \
+  '  poolMax: 12' \
+  '  idleTimeoutMs: 30000' \
+  '  statementTimeoutMs: 30000' \
   '  migrationsRun: true' \
+  'redis:' \
+  "  url: \"redis://:${run_id}@redis:6379/0\"" \
+  "  keyPrefix: \"nyabase:${run_id}:\"" \
   'metrics:' \
   '  victoriaMetricsUrl: http://victoriametrics:8428' \
+  '  vmagentUrl: http://vmagent:8429' \
   'http:' \
   "  proxyToken: ${HTTP_PROXY_TOKEN}" \
   'ssh:' \
@@ -106,7 +119,8 @@ mapfile -t compose_containers < <(
 [[ "${#compose_services[@]}" -gt 0 ]] || die "Compose declared no control-plane services"
 [[ "${#compose_containers[@]}" -eq "${#compose_services[@]}" ]] \
   || die "Compose container inventory is incomplete after create"
-for required_service in backend edge rate-limit-edge registry victoriametrics; do
+for required_service in postgres redis victoriametrics vmagent backend-api \
+  backend-gateway backend-worker edge rate-limit-edge registry; do
   printf '%s\n' "${compose_services[@]}" | grep -Fxq "$required_service" \
     || die "required Compose service is absent: $required_service"
 done
@@ -119,8 +133,9 @@ for compose_container in "${compose_containers[@]}"; do
   manifest_resource container "$compose_container"
 done
 manifest_resource network "$NYABASE_E2E_NETWORK"
-manifest_resource volume "$NYABASE_E2E_PREFIX-backend-data"
+manifest_resource volume "$NYABASE_E2E_PREFIX-postgres-data"
 manifest_resource volume "$NYABASE_E2E_PREFIX-vm-data"
+manifest_resource volume "$NYABASE_E2E_PREFIX-vmagent-data"
 manifest_resource volume "$NYABASE_E2E_PREFIX-registry-data"
 node "$E2E_ROOT/e2e/orchestrator/fixture-evidence.mjs" empty-migration-volume \
   "$NYABASE_E2E_RUNTIME_DIR"
@@ -128,32 +143,33 @@ docker_compose_for_run up -d
 
 if ! wait_for_https "$NYABASE_E2E_PUBLIC_URL/api/public/settings" \
   "$NYABASE_E2E_RUNTIME_DIR/certs/ca.crt" 120; then
-  docker_compose_for_run logs --no-color --tail 100 backend edge >&2 || true
-  die "production Backend/TLS edge readiness timed out"
+  docker_compose_for_run logs --no-color --tail 100 \
+    postgres redis backend-api backend-gateway backend-worker edge >&2 || true
+  die "production split control-plane/TLS edge readiness timed out"
 fi
 if ! wait_for_https "$NYABASE_E2E_RATE_LIMIT_PUBLIC_URL/api/public/settings" \
   "$NYABASE_E2E_RUNTIME_DIR/certs/ca.crt" 120; then
-  docker_compose_for_run logs --no-color --tail 100 backend rate-limit-edge >&2 || true
+  docker_compose_for_run logs --no-color --tail 100 backend-api rate-limit-edge >&2 || true
   die "isolated login-rate-limit TLS edge readiness timed out"
 fi
 
-# Production deliberately holds SQLite in locking_mode=EXCLUSIVE. Prove the
-# migration table and schema by cleanly stopping the current-image Backend,
-# inspecting the run-owned volume read-only, and restarting the same container.
-# This happens before Agent registration, so no state-report write stream is
-# interrupted and no product fixture exists yet.
+# Prove the SQL-first migration ledger and required PostgreSQL schemas through
+# the exact run-owned PostgreSQL container. The inspection is read-only and
+# does not stop API, Gateway, Worker, or interrupt the Agent transport.
 node "$E2E_ROOT/e2e/orchestrator/fixture-evidence.mjs" capture-migration \
   "$NYABASE_E2E_RUNTIME_DIR"
 if ! wait_for_https "$NYABASE_E2E_PUBLIC_URL/api/public/settings" \
   "$NYABASE_E2E_RUNTIME_DIR/certs/ca.crt" 120; then
-  docker_compose_for_run logs --no-color --tail 100 backend edge >&2 || true
-  die "production Backend did not recover after read-only migration proof"
+  docker_compose_for_run logs --no-color --tail 100 postgres backend-api edge >&2 || true
+  die "production API did not remain healthy after PostgreSQL migration proof"
 fi
 
 if [[ "$NYABASE_E2E_PROFILE" == full ]]; then
   manifest_phase full_storage_starting
   "$E2E_ROOT/e2e/orchestrator/storage-up.sh" "$run_id"
-  manifest_phase full_proxies_starting
+fi
+if [[ "$NYABASE_E2E_PROFILE" == full || "$NYABASE_E2E_PROFILE" == recovery ]]; then
+  manifest_phase proxy_fixtures_starting
   "$E2E_ROOT/e2e/orchestrator/proxies-up.sh" "$run_id"
 fi
 

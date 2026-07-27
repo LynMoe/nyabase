@@ -1,19 +1,13 @@
 import { Controller, Get, UseGuards } from '@nestjs/common';
-import { InjectRepository } from '@nestjs/typeorm';
-import { Capability, UserStatus } from '@nyabase/common';
-import { Not, Repository } from 'typeorm';
+import { Capability } from '@nyabase/common';
 import { RequireAnyCaps, RequireCaps } from '../auth/decorators/require-caps.decorator.js';
 import { CapabilitiesGuard } from '../auth/guards/capabilities.guard.js';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard.js';
-import { GroupEntity } from '../entities/group.entity.js';
-import { ImageEntity } from '../entities/image.entity.js';
-import { RemoteFsMountEntity } from '../entities/remote-fs-mount.entity.js';
-import { RemoteFsServerAssignmentEntity } from '../entities/remote-fs-server-assignment.entity.js';
-import { ServerEntity } from '../entities/server.entity.js';
-import { UserEntity } from '../entities/user.entity.js';
+import type { UserRecord } from '../domain/domain-records.js';
 import { AgentGateway } from '../gateway/agent-gateway.js';
 import { CurrentUser } from '../auth/decorators/current-user.decorator.js';
 import { AccessResolverService } from '../access/access-resolver.service.js';
+import { CatalogPersistence } from './catalog.persistence.js';
 
 /**
  * Purpose-safe selector data. These endpoints deliberately avoid reusing full
@@ -24,18 +18,7 @@ import { AccessResolverService } from '../access/access-resolver.service.js';
 @UseGuards(JwtAuthGuard, CapabilitiesGuard)
 export class AdminCatalogController {
   constructor(
-    @InjectRepository(UserEntity)
-    private readonly users: Repository<UserEntity>,
-    @InjectRepository(GroupEntity)
-    private readonly groups: Repository<GroupEntity>,
-    @InjectRepository(ImageEntity)
-    private readonly images: Repository<ImageEntity>,
-    @InjectRepository(RemoteFsMountEntity)
-    private readonly remoteFsMounts: Repository<RemoteFsMountEntity>,
-    @InjectRepository(RemoteFsServerAssignmentEntity)
-    private readonly remoteFsAssignments: Repository<RemoteFsServerAssignmentEntity>,
-    @InjectRepository(ServerEntity)
-    private readonly servers: Repository<ServerEntity>,
+    private readonly persistence: CatalogPersistence,
     private readonly agentGateway: AgentGateway,
     private readonly accessResolver: AccessResolverService,
   ) {}
@@ -45,7 +28,7 @@ export class AdminCatalogController {
     Capability.ManageUsers,
     Capability.ManageGroups,
   )
-  administrationActions(@CurrentUser() actor: UserEntity) {
+  administrationActions(@CurrentUser() actor: UserRecord) {
     return this.accessResolver.administrationActionsCurrent(actor.id);
   }
 
@@ -56,14 +39,11 @@ export class AdminCatalogController {
     Capability.ManageGrants,
   )
   async listUsers() {
-    const rows = await this.users.find({
-      where: { status: Not(UserStatus.Deleted) },
-      order: { username: 'ASC', id: 'ASC' },
-    });
+    const rows = await this.persistence.listUsers();
     return rows.map((user) => ({
       id: user.id,
       username: user.username,
-      displayName: user.displayName,
+      displayName: user.display_name,
       status: user.status,
     }));
   }
@@ -71,18 +51,18 @@ export class AdminCatalogController {
   @Get('groups')
   @RequireAnyCaps(Capability.ManageGroups, Capability.ManageGrants)
   async listGroups() {
-    const rows = await this.groups.find({ order: { priority: 'DESC', name: 'ASC', id: 'ASC' } });
+    const rows = await this.persistence.listGroups();
     return rows.map((group) => ({
       id: group.id,
       name: group.name,
-      isSystem: group.isSystem,
+      isSystem: group.is_system,
     }));
   }
 
   @Get('grant-servers')
   @RequireCaps(Capability.ManageGrants)
   async listGrantServers() {
-    const rows = await this.servers.find({ order: { name: 'ASC', id: 'ASC' } });
+    const rows = await this.persistence.listServers();
     return rows.map((server) => {
       const snapshot = this.agentGateway.stateCache.get(server.id);
       return {
@@ -103,49 +83,25 @@ export class AdminCatalogController {
   @Get('grant-images')
   @RequireCaps(Capability.ManageGrants)
   async listGrantImages() {
-    const rows = await this.images.find({
-      where: { isActive: true, deleting: false },
-      order: { name: 'ASC', id: 'ASC' },
-    });
+    const rows = await this.persistence.listActiveImages();
     return rows.map((image) => ({
       id: image.id,
       name: image.name,
       description: image.description,
-      isActive: image.isActive,
+      isActive: image.is_active,
     }));
   }
 
   @Get('grant-remote-fs-mounts')
   @RequireCaps(Capability.ManageGrants)
   async listGrantRemoteFsMounts() {
-    const [mounts, assignments] = await Promise.all([
-      this.remoteFsMounts.find({
-        where: { desiredState: 'active' },
-        order: { name: 'ASC', id: 'ASC' },
-      }),
-      this.remoteFsAssignments.find({
-        where: { desiredState: 'active' },
-        select: { remoteFsMountId: true, serverId: true },
-      }),
-    ]);
-    const serverIdsByMount = new Map<string, string[]>();
-    for (const assignment of assignments) {
-      const serverIds = serverIdsByMount.get(assignment.remoteFsMountId) ?? [];
-      serverIds.push(assignment.serverId);
-      serverIdsByMount.set(assignment.remoteFsMountId, serverIds);
-    }
-    return mounts.map((mount) => ({
-      id: mount.id,
-      name: mount.name,
-      displayName: mount.displayName,
-      serverIds: (serverIdsByMount.get(mount.id) ?? []).sort(),
-    }));
+    return this.persistence.listActiveRemoteFsMounts();
   }
 
   @Get('metric-servers')
   @RequireCaps(Capability.ViewMetricsAll)
   async listMetricServers() {
-    const rows = await this.servers.find({ order: { name: 'ASC', id: 'ASC' } });
+    const rows = await this.persistence.listServers();
     return rows.map((server) => ({
       id: server.id,
       name: server.name,

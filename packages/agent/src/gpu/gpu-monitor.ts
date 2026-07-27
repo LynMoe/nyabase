@@ -213,6 +213,7 @@ export class GpuMonitor {
   ): MetricPoint[] {
     const ts = Date.now();
     const points: MetricPoint[] = [];
+    const gpuIndexByUuid = new Map(stats.map((gpu) => [gpu.uuid, gpu.index]));
 
     for (const s of stats) {
       points.push({
@@ -251,12 +252,13 @@ export class GpuMonitor {
 
     for (const p of processes) {
       const owner = p.containerId ? containerOwnerMap.get(p.containerId) : undefined;
-      if (!owner) continue;
+      const gpuIndex = gpuIndexByUuid.get(p.gpuUuid);
+      if (!owner || gpuIndex === undefined) continue;
       points.push({
         name: 'nyabase_gpu_proc_mem_used_bytes',
         labels: {
           server: serverId,
-          gpu_uuid: p.gpuUuid,
+          gpu_index: String(gpuIndex),
           container_id: owner.metricContainerId,
         },
         value: p.usedMemoryMiB * 1024 * 1024,

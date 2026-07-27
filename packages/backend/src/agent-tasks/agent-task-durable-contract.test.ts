@@ -1,6 +1,6 @@
 import { AgentTaskKind, RemoteFsType } from '@nyabase/common';
 import { describe, expect, it } from 'vitest';
-import type { AgentTaskEntity } from '../entities/agent-task.entity.js';
+import type { AgentTaskRecord } from '../domain/domain-records.js';
 import {
   AGENT_TASK_RESOURCE_TYPE_BY_KIND,
   agentTaskPayloadHash,
@@ -119,7 +119,7 @@ function durableTask(
   kind: AgentTaskKind,
   resourceId: string,
   payload: Record<string, unknown>,
-): AgentTaskEntity {
+): AgentTaskRecord {
   const task = {
     id: 'task-a',
     kind,
@@ -128,7 +128,7 @@ function durableTask(
     resourceId,
     payloadJson: payload,
     payloadHash: '',
-  } as AgentTaskEntity;
+  } as AgentTaskRecord;
   task.payloadHash = agentTaskPayloadHash(
     kind,
     parseAndValidateAgentTaskWireIdentity(task, payload),

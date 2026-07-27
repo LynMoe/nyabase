@@ -9,20 +9,27 @@ describe('AuditController request boundaries', () => {
       const repo = repository();
       const controller = new AuditController(repo as never);
       await expect(controller.list('100', offset)).rejects.toBeInstanceOf(BadRequestException);
-      expect(repo.findAndCount).not.toHaveBeenCalled();
-      expect(repo.find).not.toHaveBeenCalled();
+      expect(repo.list).not.toHaveBeenCalled();
     },
   );
 
+  it('rejects offsets beyond the bounded deep-pagination window', async () => {
+    const repo = repository();
+    const controller = new AuditController(repo as never);
+    await expect(controller.list('100', '100001'))
+      .rejects.toBeInstanceOf(BadRequestException);
+    expect(repo.list).not.toHaveBeenCalled();
+  });
+
   it('retains the documented limit cap but rejects zero and malformed limits', async () => {
     const repo = repository();
-    repo.findAndCount.mockResolvedValue([[], 0]);
+    repo.list.mockResolvedValue({ items: [], total: 0 });
     const controller = new AuditController(repo as never);
 
     await expect(controller.list('999', '0')).resolves.toEqual({
       items: [], total: 0, limit: 500, offset: 0,
     });
-    expect(repo.findAndCount).toHaveBeenCalledWith(expect.objectContaining({ take: 500, skip: 0 }));
+    expect(repo.list).toHaveBeenCalledWith(500, 0, {});
     for (const limit of ['0', '1e2', ' 10', '9007199254740992']) {
       await expect(controller.list(limit, '0')).rejects.toBeInstanceOf(BadRequestException);
     }
@@ -32,14 +39,40 @@ describe('AuditController request boundaries', () => {
     const repo = repository();
     const controller = new AuditController(repo as never);
     await expect(controller.detail('../audit')).rejects.toBeDefined();
-    expect(repo.findOne).not.toHaveBeenCalled();
+    expect(repo.findById).not.toHaveBeenCalled();
+  });
+
+  it('validates and forwards supported filters', async () => {
+    const repo = repository();
+    repo.list.mockResolvedValue({ items: [], total: 0 });
+    const controller = new AuditController(repo as never);
+
+    await controller.list(
+      '50',
+      '10',
+      'group.create',
+      'actor-a',
+      'group',
+      'group-a',
+    );
+
+    expect(repo.list).toHaveBeenCalledWith(50, 10, {
+      action: 'group.create',
+      actorId: 'actor-a',
+      targetType: 'group',
+      targetId: 'group-a',
+    });
+    await expect(controller.list(
+      '50',
+      '0',
+      'unknown.action',
+    )).rejects.toBeInstanceOf(BadRequestException);
   });
 });
 
 function repository() {
   return {
-    find: vi.fn(),
-    findAndCount: vi.fn(),
-    findOne: vi.fn(),
+    list: vi.fn(),
+    findById: vi.fn(),
   };
 }

@@ -37,13 +37,16 @@ async function request(method, path, token, body) {
   return parsed;
 }
 
-const login = await request('POST', '/auth/login', undefined, {
-  username: 'admin', password: secrets.ADMIN_INIT_PASSWORD,
-});
-if (!login?.accessToken || login.user?.id !== seed.adminUserId) {
-  throw new Error('Full seed admin identity mismatch');
+async function authenticateAdmin() {
+  const authenticated = await request('POST', '/auth/login', undefined, {
+    username: 'admin', password: secrets.ADMIN_INIT_PASSWORD,
+  });
+  if (!authenticated?.accessToken || authenticated.user?.id !== seed.adminUserId) {
+    throw new Error('Full seed admin identity mismatch');
+  }
+  return authenticated.accessToken;
 }
-const token = login.accessToken;
+let token = await authenticateAdmin();
 const image = await request('POST', '/admin/images', token, {
   name: `${state.NYABASE_E2E_RUN_ID} real proxy target`,
   dockerImage: proxyTargetTag,
@@ -51,11 +54,13 @@ const image = await request('POST', '/admin/images', token, {
   disableSsh: false,
 });
 for (const server of seed.servers) {
+  token = await authenticateAdmin();
   await request('POST', `/admin/users/${seed.adminUserId}/image-grants`, token, {
     imageId: image.id,
     serverId: server.serverId,
   });
 }
+token = await authenticateAdmin();
 const pull = await request('POST', `/admin/images/${image.id}/pull`, token, {
   serverIds: seed.servers.map((server) => server.serverId),
 });

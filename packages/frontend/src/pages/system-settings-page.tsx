@@ -27,6 +27,7 @@ const SOURCE_LABELS = {
   default: '默认值',
   yaml: 'config.yaml',
   env: '环境变量',
+  database: 'PostgreSQL',
 } as const;
 
 const GROUP_LABELS: Record<string, string> = {
@@ -35,6 +36,7 @@ const GROUP_LABELS: Record<string, string> = {
   branding: '品牌',
   auth: '认证',
   database: '数据库',
+  redis: 'Redis 实时优化层',
   audit: '审计',
   metrics: '监控',
   ssh: 'SSH 代理',
@@ -44,6 +46,10 @@ const FIELD_LABELS: Record<string, { label: string; description: string }> = {
   'runtime.nodeEnv': {
     label: 'Node 运行环境',
     description: '用于生产环境安全检查的运行环境。',
+  },
+  'runtime.role': {
+    label: '运行职责',
+    description: '当前进程承担全部、API、Agent 网关或后台 Worker 职责。',
   },
   'server.port': {
     label: 'HTTP 端口',
@@ -77,21 +83,33 @@ const FIELD_LABELS: Record<string, { label: string; description: string }> = {
     label: '初始管理员密码',
     description: '仅用于初始化第一个管理员账号的密码。',
   },
-  'database.driver': {
-    label: '数据库驱动',
-    description: 'TypeORM 使用 SQLite 数据库驱动。',
+  'database.url': {
+    label: 'PostgreSQL 连接地址',
+    description: '控制面唯一事实源的 PostgreSQL 连接地址。',
   },
-  'database.path': {
-    label: 'SQLite 文件路径',
-    description: 'SQLite 数据库文件路径。',
+  'database.poolMax': {
+    label: '最大连接池',
+    description: '当前进程最多使用的 PostgreSQL 连接数。',
   },
-  'database.synchronize': {
-    label: '数据库同步',
-    description: '允许在非生产环境启用 TypeORM synchronize。',
+  'database.idleTimeoutMs': {
+    label: '空闲连接超时',
+    description: 'PostgreSQL 空闲连接关闭前的毫秒数。',
+  },
+  'database.statementTimeoutMs': {
+    label: 'SQL 执行超时',
+    description: 'PostgreSQL 语句允许执行的最长毫秒数。',
   },
   'database.migrationsRun': {
     label: '启动时执行迁移',
-    description: '启动时自动执行待运行的 TypeORM 迁移。',
+    description: '持有 PostgreSQL advisory lock 时执行待运行的 SQL migration。',
+  },
+  'redis.url': {
+    label: 'Redis 连接地址',
+    description: '仅用于可重建的 presence、缓存、唤醒和限流数据。',
+  },
+  'redis.keyPrefix': {
+    label: 'Redis 键前缀',
+    description: '隔离当前部署所有临时 Redis 键和频道的命名空间。',
   },
   'audit.retentionDays': {
     label: '审计保留天数',
@@ -103,7 +121,11 @@ const FIELD_LABELS: Record<string, { label: string; description: string }> = {
   },
   'metrics.victoriaMetricsUrl': {
     label: 'VictoriaMetrics 地址',
-    description: '指标读写使用的基础地址。',
+    description: '指标查询使用的 VictoriaMetrics 地址。',
+  },
+  'metrics.vmagentUrl': {
+    label: 'vmagent 地址',
+    description: '指标写入使用的 vmagent 地址；持久缓冲和重试由 vmagent 负责。',
   },
   'http.proxyToken': {
     label: 'HTTP 代理令牌',
@@ -146,8 +168,10 @@ function displayValue(field: SystemSettingFieldDto, value: unknown): string {
   return String(value);
 }
 
-function editableInputValue(field: SystemSettingFieldDto): string {
-  const value = field.yamlValue ?? field.effectiveValue ?? field.defaultValue;
+export function editableInputValue(field: SystemSettingFieldDto): string {
+  const value = field.source === 'database'
+    ? field.effectiveValue
+    : field.yamlValue ?? field.effectiveValue ?? field.defaultValue;
   if (typeof value === 'boolean') return value ? 'true' : 'false';
   return value === undefined || value === null ? '' : String(value);
 }

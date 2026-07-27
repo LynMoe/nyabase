@@ -1,42 +1,101 @@
-import { ServiceUnavailableException } from '@nestjs/common';
 import { describe, expect, it, vi } from 'vitest';
 import { HealthController } from './health.controller.js';
+import { RuntimeLifecycleService } from './runtime-lifecycle.service.js';
 
 describe('HealthController', () => {
+  const redis = { isAddressedRpcReady: vi.fn().mockReturnValue(false) };
+  const allRole = { requiresRedisAvailability: vi.fn().mockReturnValue(false) };
+  const readyLifecycle = { isAcceptingTraffic: vi.fn().mockReturnValue(true) };
+  const readyProjection = { isProjectionReady: vi.fn().mockReturnValue(true) };
+
   it('serves dependency-free liveness', () => {
     const controller = new HealthController({
-      isInitialized: false,
-      query: vi.fn(),
-    } as never);
+      check: vi.fn(),
+    } as never, redis as never, allRole as never, readyLifecycle as never, readyProjection as never);
 
     expect(controller.live()).toEqual({ status: 'ok' });
   });
 
-  it('reports ready only after a read-only database probe succeeds', async () => {
-    const query = vi.fn().mockResolvedValue([{ 1: 1 }]);
-    const controller = new HealthController({ isInitialized: true, query } as never);
+  it('preserves the public readiness shape after the PostgreSQL probe succeeds', async () => {
+    const check = vi.fn().mockResolvedValue(undefined);
+    const controller = new HealthController(
+      { check } as never,
+      redis as never,
+      allRole as never,
+      readyLifecycle as never,
+      readyProjection as never,
+    );
 
-    await expect(controller.ready()).resolves.toEqual({ status: 'ok', database: 'ok' });
-    expect(query).toHaveBeenCalledWith('SELECT 1');
+    await expect(controller.ready()).resolves.toEqual({
+      status: 'ok',
+      database: 'ok',
+    });
+    expect(check).toHaveBeenCalledOnce();
   });
 
-  it('fails closed when TypeORM has not initialized', async () => {
-    const query = vi.fn();
-    const controller = new HealthController({ isInitialized: false, query } as never);
-
-    await expect(controller.ready()).rejects.toBeInstanceOf(ServiceUnavailableException);
-    expect(query).not.toHaveBeenCalled();
-  });
-
-  it('fails closed when the database probe errors', async () => {
+  it('fails closed when PostgreSQL is unavailable', async () => {
     const controller = new HealthController({
-      isInitialized: true,
-      query: vi.fn().mockRejectedValue(new Error('database unavailable')),
-    } as never);
+      check: vi.fn().mockRejectedValue(new Error('schema incompatible')),
+    } as never, redis as never, allRole as never, readyLifecycle as never, readyProjection as never);
 
     await expect(controller.ready()).rejects.toMatchObject({
       response: expect.objectContaining({ code: 'DATABASE_NOT_READY' }),
       status: 503,
     });
+  });
+
+  it('fails closed on Redis only for split API/Gateway roles', async () => {
+    const splitRole = { requiresRedisAvailability: vi.fn().mockReturnValue(true) };
+    const controller = new HealthController(
+      { check: vi.fn().mockResolvedValue(undefined) } as never,
+      redis as never,
+      splitRole as never,
+      readyLifecycle as never,
+      readyProjection as never,
+    );
+
+    await expect(controller.ready()).rejects.toMatchObject({
+      response: expect.objectContaining({ code: 'REDIS_NOT_READY' }),
+      status: 503,
+    });
+  });
+
+  it('fails readiness while startup is incomplete or shutdown is draining', async () => {
+    const controller = new HealthController(
+      { check: vi.fn() } as never,
+      redis as never,
+      allRole as never,
+      { isAcceptingTraffic: vi.fn().mockReturnValue(false) } as never,
+      readyProjection as never,
+    );
+
+    await expect(controller.ready()).rejects.toMatchObject({
+      response: expect.objectContaining({ code: 'PROCESS_NOT_READY' }),
+      status: 503,
+    });
+  });
+
+  it('fails API-only readiness when the durable Agent projection poll is unhealthy', async () => {
+    const controller = new HealthController(
+      { check: vi.fn().mockResolvedValue(undefined) } as never,
+      redis as never,
+      allRole as never,
+      readyLifecycle as never,
+      { isProjectionReady: vi.fn().mockReturnValue(false) } as never,
+    );
+
+    await expect(controller.ready()).rejects.toMatchObject({
+      response: expect.objectContaining({ code: 'AGENT_PROJECTION_NOT_READY' }),
+      status: 503,
+    });
+  });
+
+  it('marks the process unready before dependency shutdown starts', () => {
+    const lifecycle = new RuntimeLifecycleService();
+    expect(lifecycle.isAcceptingTraffic()).toBe(false);
+    lifecycle.markReady();
+    expect(lifecycle.isAcceptingTraffic()).toBe(true);
+    lifecycle.beforeApplicationShutdown();
+    expect(lifecycle.isAcceptingTraffic()).toBe(false);
   });
 });

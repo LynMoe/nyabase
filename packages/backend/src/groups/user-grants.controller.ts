@@ -15,7 +15,7 @@ import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard.js';
 import { CapabilitiesGuard } from '../auth/guards/capabilities.guard.js';
 import { RequireCaps } from '../auth/decorators/require-caps.decorator.js';
 import { CurrentUser } from '../auth/decorators/current-user.decorator.js';
-import { UserEntity } from '../entities/user.entity.js';
+import type { UserRecord } from '../domain/domain-records.js';
 import { Capability, zUpsertServerGrantRequest, zAddImageGrantRequest, EffectiveAccessDto } from '@nyabase/common';
 import {
   parseMountSourceGrantTarget,
@@ -42,7 +42,7 @@ export class UserGrantsController {
     @Param('userId') userId: string,
     @Param('serverId') serverId: string,
     @Body() body: unknown,
-    @CurrentUser() actor: UserEntity,
+    @CurrentUser() actor: UserRecord,
   ) {
     const dto = zUpsertServerGrantRequest.parse(body);
     return this.groupsService.upsertUserServerGrant(userId, serverId, dto, actor.id);
@@ -53,7 +53,7 @@ export class UserGrantsController {
   async deleteUserServerGrant(
     @Param('userId') userId: string,
     @Param('serverId') serverId: string,
-    @CurrentUser() actor: UserEntity,
+    @CurrentUser() actor: UserRecord,
   ) {
     return this.groupsService.deleteUserServerGrant(userId, serverId, actor.id);
   }
@@ -69,7 +69,7 @@ export class UserGrantsController {
   async addUserImageGrant(
     @Param('userId') userId: string,
     @Body() body: unknown,
-    @CurrentUser() actor: UserEntity,
+    @CurrentUser() actor: UserRecord,
   ) {
     const { imageId, serverId } = zAddImageGrantRequest.parse(body);
     return this.groupsService.addUserImageGrant(userId, imageId, serverId, actor.id);
@@ -82,7 +82,7 @@ export class UserGrantsController {
     @Param('userId') userId: string,
     @Param('imageId') imageId: string,
     @Param('serverId') serverId: string,
-    @CurrentUser() actor: UserEntity,
+    @CurrentUser() actor: UserRecord,
   ) {
     await this.groupsService.deleteUserImageGrant(userId, imageId, serverId, actor.id);
   }
@@ -98,7 +98,7 @@ export class UserGrantsController {
   async upsertUserMountSourceGrant(
     @Param('userId') userId: string,
     @Body() body: unknown,
-    @CurrentUser() actor: UserEntity,
+    @CurrentUser() actor: UserRecord,
   ) {
     const target = zMountSourceGrantTarget.parse(body);
     return this.groupsService.upsertUserMountSourceGrant(actor.id, userId, target);
@@ -112,7 +112,7 @@ export class UserGrantsController {
     @Param('sourceKind') sourceKind: string,
     @Param('sourceId') sourceId: string,
     @Query('serverId') serverId: string | undefined,
-    @CurrentUser() actor: UserEntity,
+    @CurrentUser() actor: UserRecord,
   ) {
     const target = parseMountSourceGrantTarget(sourceKind, sourceId, serverId);
     await this.groupsService.deleteUserMountSourceGrant(actor.id, userId, target);

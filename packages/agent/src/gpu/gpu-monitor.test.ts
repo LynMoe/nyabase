@@ -139,7 +139,7 @@ describe('GpuMonitor stats metrics', () => {
       { pid: 333, usedMemoryMiB: 128, gpuUuid: 'GPU-b' },
     ];
     const points = new GpuMonitor(true).buildMetrics(
-      [],
+      [baseStats(0, { uuid: 'GPU-a' })],
       processes,
       new Map([
         [knownId, { metricContainerId: 'container-a' }],
@@ -147,12 +147,12 @@ describe('GpuMonitor stats metrics', () => {
       'srv-1',
     );
 
-    expect(points).toEqual([
+    expect(points.filter((point) => point.name === 'nyabase_gpu_proc_mem_used_bytes')).toEqual([
       expect.objectContaining({
         name: 'nyabase_gpu_proc_mem_used_bytes',
         labels: {
           server: 'srv-1',
-          gpu_uuid: 'GPU-a',
+          gpu_index: '0',
           container_id: 'container-a',
         },
         value: 256 * 1024 * 1024,
@@ -163,17 +163,17 @@ describe('GpuMonitor stats metrics', () => {
   it('emits no Agent-owned user identity label', () => {
     const knownId = '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef';
     const points = new GpuMonitor(true).buildMetrics(
-      [],
+      [baseStats(0, { uuid: 'GPU-a' })],
       [{ pid: 111, usedMemoryMiB: 256, gpuUuid: 'GPU-a', containerId: knownId }],
       new Map([[knownId, { metricContainerId: knownId.slice(0, 12) }]]),
       'srv-1',
     );
 
-    expect(points).toEqual([
+    expect(points.filter((point) => point.name === 'nyabase_gpu_proc_mem_used_bytes')).toEqual([
       expect.objectContaining({
         labels: {
           server: 'srv-1',
-          gpu_uuid: 'GPU-a',
+          gpu_index: '0',
           container_id: knownId.slice(0, 12),
         },
       }),

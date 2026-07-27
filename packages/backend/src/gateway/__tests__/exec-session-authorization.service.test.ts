@@ -1,167 +1,380 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { Capability, ContainerPhase, UserStatus } from '@nyabase/common';
-import { DataSource } from 'typeorm';
+import { describe, expect, it, vi } from 'vitest';
+import {
+  Capability,
+  ContainerPhase,
+  ContainerPowerIntent,
+  UserStatus,
+} from '@nyabase/common';
+import {
+  withPostgresTestDatabase,
+  type PostgresTestDatabase,
+} from '../../persistence-pg/postgres-test-harness.js';
+import { PgTransactionManager } from '../../persistence-pg/transaction.js';
 import { ExecSessionAuthorizationService } from '../exec-session-authorization.service.js';
 import type { ExecSessionInfo } from '../exec-session-registry.js';
 
-describe('ExecSessionAuthorizationService', () => {
-  let dataSource: DataSource;
-  let authorization: ExecSessionAuthorizationService;
+const describePostgres = process.env.NYABASE_TEST_DATABASE_URL ? describe : describe.skip;
 
-  beforeEach(async () => {
-    dataSource = new DataSource({ type: 'better-sqlite3', database: ':memory:', entities: [] });
-    await dataSource.initialize();
-    await dataSource.query('CREATE TABLE users (id text PRIMARY KEY, status text NOT NULL, authVersion integer NOT NULL DEFAULT 0)');
-    await dataSource.query('CREATE TABLE groups (id text PRIMARY KEY, capabilitiesJson text NOT NULL)');
-    await dataSource.query('CREATE TABLE group_members (groupId text NOT NULL, userId text NOT NULL)');
-    await dataSource.query(
-      'CREATE TABLE server_grants (scope text NOT NULL, scopeId text NOT NULL, serverId text NOT NULL)',
-    );
-    await dataSource.query('CREATE TABLE containers (id text PRIMARY KEY, server_id text NOT NULL, owner_id text NOT NULL)');
-    await dataSource.query(
-      'CREATE TABLE container_lifecycle (container_id text PRIMARY KEY, phase text NOT NULL, bound_runtime_id text, active_task_id text)',
-    );
-    await dataSource.query(
-      'INSERT INTO users (id, status) VALUES (?, ?), (?, ?)',
-      ['owner-a', UserStatus.Active, 'admin-a', UserStatus.Active],
-    );
-    await dataSource.query(
-      'INSERT INTO containers (id, server_id, owner_id) VALUES (?, ?, ?)',
-      ['container-a', 'server-a', 'owner-a'],
-    );
-    await dataSource.query(
-      'INSERT INTO container_lifecycle (container_id, phase, bound_runtime_id, active_task_id) VALUES (?, ?, ?, NULL)',
-      ['container-a', ContainerPhase.Active, 'runtime-a'],
-    );
-    await dataSource.query(
-      'INSERT INTO groups (id, capabilitiesJson) VALUES (?, ?)',
-      ['admins', JSON.stringify([Capability.ManageContainersAny])],
-    );
-    await dataSource.query(
-      'INSERT INTO group_members (groupId, userId) VALUES (?, ?)',
-      ['admins', 'admin-a'],
-    );
-    await dataSource.query(
-      'INSERT INTO server_grants (scope, scopeId, serverId) VALUES (?, ?, ?)',
-      ['user', 'owner-a', 'server-a'],
-    );
-    authorization = new ExecSessionAuthorizationService(dataSource);
-  });
+const OWNER_ID = '00000000-0000-4000-8000-000000000001';
+const ADMIN_ID = '00000000-0000-4000-8000-000000000002';
+const SERVER_ID = '00000000-0000-4000-8000-000000000003';
+const IMAGE_ID = '00000000-0000-4000-8000-000000000004';
+const CONTAINER_ID = '00000000-0000-4000-8000-000000000005';
+const ADMIN_GROUP_ID = '00000000-0000-4000-8000-000000000006';
+const SERVER_GROUP_ID = '00000000-0000-4000-8000-000000000007';
 
-  afterEach(async () => {
-    if (dataSource?.isInitialized) await dataSource.destroy();
-  });
+describePostgres('PostgreSQL ExecSessionAuthorizationService', () => {
+  it('requires current owner, user, container, lifecycle, server, runtime, and JWT identity', async () => {
+    await withPostgresTestDatabase(async (fixture) => {
+      const authorization = await seed(fixture);
+      const owner = info({ userId: OWNER_ID, authorizationKind: 'container-owner' });
+      const version = await authVersion(fixture, OWNER_ID);
+      await expect(authorization.isAuthorized(owner, version)).resolves.toBe(true);
 
-  it('requires current owner, user, container, lifecycle, server, and runtime identity', async () => {
-    const owner = info({ userId: 'owner-a', authorizationKind: 'container-owner' });
-    await expect(authorization.isAuthorized(owner, 0)).resolves.toBe(true);
+      await fixture.database.updateTable('control.containers')
+        .set({ bound_runtime_id: 'runtime-b' })
+        .where('id', '=', CONTAINER_ID)
+        .execute();
+      await expect(authorization.isAuthorized(owner, version)).resolves.toBe(false);
 
-    await dataSource.query(
-      'UPDATE container_lifecycle SET bound_runtime_id = ? WHERE container_id = ?',
-      ['runtime-b', 'container-a'],
-    );
-    await expect(authorization.isAuthorized(owner, 0)).resolves.toBe(false);
-
-    await dataSource.query(
-      'UPDATE container_lifecycle SET bound_runtime_id = ? WHERE container_id = ?',
-      ['runtime-a', 'container-a'],
-    );
-    await dataSource.query('UPDATE users SET status = ? WHERE id = ?', [UserStatus.Disabled, 'owner-a']);
-    await expect(authorization.isAuthorized(owner, 0)).resolves.toBe(false);
-  });
-
-  it('observes an administrator capability revocation immediately without a cache', async () => {
-    const admin = info({
-      userId: 'admin-a',
-      authorizationKind: 'manage-containers-any',
+      await fixture.database.updateTable('control.containers')
+        .set({ bound_runtime_id: 'runtime-a' })
+        .where('id', '=', CONTAINER_ID)
+        .execute();
+      await fixture.database.updateTable('iam.users')
+        .set({ status: UserStatus.Disabled })
+        .where('id', '=', OWNER_ID)
+        .execute();
+      await expect(authorization.isAuthorized(owner, version)).resolves.toBe(false);
     });
-    await expect(authorization.isAuthorized(admin, 0)).resolves.toBe(true);
-
-    await dataSource.query(
-      'UPDATE groups SET capabilitiesJson = ? WHERE id = ?',
-      ['[]', 'admins'],
-    );
-    await expect(authorization.isAuthorized(admin, 0)).resolves.toBe(false);
   });
 
-  it('requires current server access for an owner both before and during a console', async () => {
-    const owner = info({ userId: 'owner-a', authorizationKind: 'container-owner' });
-    await expect(authorization.isAuthorizedForAdmission(owner)).resolves.toBe(true);
-    await expect(authorization.isAuthorized(owner, 0)).resolves.toBe(true);
+  it('observes administrator capability and owner server-access revocation without a cache', async () => {
+    await withPostgresTestDatabase(async (fixture) => {
+      const authorization = await seed(fixture);
+      const admin = info({
+        userId: ADMIN_ID,
+        authorizationKind: 'manage-containers-any',
+      });
+      const owner = info({ userId: OWNER_ID, authorizationKind: 'container-owner' });
+      await expect(authorization.isAuthorizedForAdmission(admin)).resolves.toBe(true);
+      await expect(authorization.isAuthorizedForAdmission(owner)).resolves.toBe(true);
 
-    await dataSource.query(
-      'DELETE FROM server_grants WHERE scope = ? AND scopeId = ? AND serverId = ?',
-      ['user', 'owner-a', 'server-a'],
-    );
+      await fixture.database.updateTable('iam.groups')
+        .set({ capabilities: [] })
+        .where('id', '=', ADMIN_GROUP_ID)
+        .execute();
+      await fixture.database.deleteFrom('iam.server_grants')
+        .where('user_id', '=', OWNER_ID)
+        .where('server_id', '=', SERVER_ID)
+        .execute();
 
-    await expect(authorization.isAuthorizedForAdmission(owner)).resolves.toBe(false);
-    await expect(authorization.isAuthorized(owner, 0)).resolves.toBe(false);
+      await expect(authorization.isAuthorizedForAdmission(admin)).resolves.toBe(false);
+      await expect(authorization.isAuthorizedForAdmission(owner)).resolves.toBe(false);
+    });
   });
 
-  it('accepts group-derived server access and does not require it from a global admin', async () => {
-    await dataSource.query(
-      'INSERT INTO group_members (groupId, userId) VALUES (?, ?)',
-      ['server-users', 'owner-a'],
-    );
-    await dataSource.query(
-      'INSERT INTO server_grants (scope, scopeId, serverId) VALUES (?, ?, ?)',
-      ['group', 'server-users', 'server-a'],
-    );
-    await dataSource.query(
-      'DELETE FROM server_grants WHERE scope = ? AND scopeId = ?',
-      ['user', 'owner-a'],
-    );
+  it('accepts group-derived owner server access and does not require it from a global admin', async () => {
+    await withPostgresTestDatabase(async (fixture) => {
+      const authorization = await seed(fixture);
+      await fixture.database.insertInto('iam.groups').values({
+        id: SERVER_GROUP_ID,
+        name: 'Server users',
+        description: null,
+        priority: 0,
+        is_system: false,
+        system_key: null,
+        capabilities: [],
+        revision: 1,
+      }).execute();
+      await fixture.database.insertInto('iam.group_members').values({
+        id: '00000000-0000-4000-8000-000000000008',
+        group_id: SERVER_GROUP_ID,
+        user_id: OWNER_ID,
+      }).execute();
+      await fixture.database.insertInto('iam.server_grants').values({
+        id: '00000000-0000-4000-8000-000000000009',
+        user_id: null,
+        group_id: SERVER_GROUP_ID,
+        server_id: SERVER_ID,
+        cpu_millis: null,
+        mem_bytes: null,
+        disk_bytes: null,
+        gpu_mode: null,
+        gpu_indices: null,
+      }).execute();
+      await fixture.database.deleteFrom('iam.server_grants')
+        .where('user_id', '=', OWNER_ID)
+        .execute();
 
-    await expect(authorization.isAuthorized(
-      info({ userId: 'owner-a', authorizationKind: 'container-owner' }),
-      0,
-    )).resolves.toBe(true);
-    await expect(authorization.isAuthorizedForAdmission(info({
-      userId: 'admin-a',
-      authorizationKind: 'manage-containers-any',
-    }))).resolves.toBe(true);
+      await expect(authorization.isAuthorizedForAdmission(info({
+        userId: OWNER_ID,
+        authorizationKind: 'container-owner',
+      }))).resolves.toBe(true);
+      await expect(authorization.isAuthorizedForAdmission(info({
+        userId: ADMIN_ID,
+        authorizationKind: 'manage-containers-any',
+      }))).resolves.toBe(true);
+    });
   });
 
-  it('fails closed on malformed durable capability JSON', async () => {
-    await dataSource.query(
-      'UPDATE groups SET capabilitiesJson = ? WHERE id = ?',
-      ['not-json', 'admins'],
-    );
-    await expect(authorization.isAuthorized(info({
-      userId: 'admin-a',
-      authorizationKind: 'manage-containers-any',
-    }), 0)).resolves.toBe(false);
+  it('starts the Agent side effect only for the exact current credential generation', async () => {
+    await withPostgresTestDatabase(async (fixture) => {
+      const authorization = await seed(fixture);
+      const owner = info({ userId: OWNER_ID, authorizationKind: 'container-owner' });
+      const version = await authVersion(fixture, OWNER_ID);
+      const start = vi.fn(async () => 'started');
+
+      const admitted = await authorization.startAuthorized(owner, version, start);
+      expect(admitted).not.toBeNull();
+      await expect(admitted!.result).resolves.toBe('started');
+
+      await fixture.database.updateTable('iam.users')
+        .set({ auth_version: version + 1 })
+        .where('id', '=', OWNER_ID)
+        .execute();
+      await expect(authorization.startAuthorized(owner, version, start)).resolves.toBeNull();
+      expect(start).toHaveBeenCalledTimes(1);
+    });
   });
 
-  it('rejects a live console as soon as its JWT generation is revoked', async () => {
-    const owner = info({ userId: 'owner-a', authorizationKind: 'container-owner' });
-    await expect(authorization.isAuthorized(owner, 0)).resolves.toBe(true);
-
-    await dataSource.query('UPDATE users SET authVersion = 1 WHERE id = ?', ['owner-a']);
-
-    await expect(authorization.isAuthorized(owner, 0)).resolves.toBe(false);
-    await expect(authorization.isAuthorized(owner, 1)).resolves.toBe(true);
+  it('does not start the Agent side effect when the atomic audit hook fails', async () => {
+    await withPostgresTestDatabase(async (fixture) => {
+      const authorization = await seed(fixture);
+      const owner = info({ userId: OWNER_ID, authorizationKind: 'container-owner' });
+      const version = await authVersion(fixture, OWNER_ID);
+      const start = vi.fn(async () => 'started');
+      await expect(authorization.startAuthorized(
+        owner,
+        version,
+        start,
+        async () => {
+          throw new Error('audit unavailable');
+        },
+      )).rejects.toThrow('audit unavailable');
+      expect(start).not.toHaveBeenCalled();
+    });
   });
 
-  it('does not start an Agent side effect after the exact HTTP credential generation is revoked', async () => {
-    const owner = info({ userId: 'owner-a', authorizationKind: 'container-owner' });
-    const start = vi.fn(async () => 'started');
+  it('serializes real Exec admission with server-access revocation in both orders', async () => {
+    await withPostgresTestDatabase(async (fixture) => {
+      const authorization = await seed(fixture);
+      const owner = info({
+        userId: OWNER_ID,
+        authorizationKind: 'container-owner',
+      });
+      const version = await authVersion(fixture, OWNER_ID);
+      const revoker = await fixture.pool.connect();
+      try {
+        // Revocation owns the policy barrier first: admission waits, observes
+        // the committed revoke, and never starts an Agent side effect.
+        await revoker.query('BEGIN');
+        await revoker.query(
+          `DELETE FROM iam.server_grants
+           WHERE user_id = $1 AND server_id = $2`,
+          [OWNER_ID, SERVER_ID],
+        );
+        const rejectedStart = vi.fn(async () => 'must-not-start');
+        const rejectedAdmission = authorization.startAuthorized(
+          owner,
+          version,
+          rejectedStart,
+        );
+        await expectStillPending(rejectedAdmission);
+        await revoker.query('COMMIT');
+        await expect(rejectedAdmission).resolves.toBeNull();
+        expect(rejectedStart).not.toHaveBeenCalled();
 
-    const admitted = await authorization.startAuthorized(owner, 0, start);
-    expect(admitted).not.toBeNull();
-    await expect(admitted!.result).resolves.toBe('started');
+        await fixture.database.insertInto('iam.server_grants').values(
+          ownerServerGrant(),
+        ).execute();
+        const renewedVersion = await authVersion(fixture, OWNER_ID);
 
-    await dataSource.query('UPDATE users SET authVersion = 1 WHERE id = ?', ['owner-a']);
-    await expect(authorization.startAuthorized(owner, 0, start)).resolves.toBeNull();
-    expect(start).toHaveBeenCalledTimes(1);
+        // Admission owns the policy barrier first: revocation waits for the
+        // authorization/audit/intent transaction to commit.
+        const enteredAdmission = deferred<void>();
+        const releaseAdmission = deferred<void>();
+        const acceptedStart = vi.fn(async () => 'started');
+        const acceptedAdmission = authorization.startAuthorized(
+          owner,
+          renewedVersion,
+          acceptedStart,
+          async () => {
+            enteredAdmission.resolve();
+            await releaseAdmission.promise;
+          },
+        );
+        await enteredAdmission.promise;
+        await revoker.query('BEGIN');
+        const revokeBehindAdmission = revoker.query(
+          `DELETE FROM iam.server_grants
+           WHERE user_id = $1 AND server_id = $2`,
+          [OWNER_ID, SERVER_ID],
+        );
+        await expectStillPending(revokeBehindAdmission);
+        releaseAdmission.resolve();
+        const accepted = await acceptedAdmission;
+        expect(accepted).not.toBeNull();
+        await expect(accepted!.result).resolves.toBe('started');
+        await revokeBehindAdmission;
+        await revoker.query('COMMIT');
+        expect(acceptedStart).toHaveBeenCalledTimes(1);
+      } finally {
+        await revoker.query('ROLLBACK').catch(() => undefined);
+        revoker.release(true);
+      }
+    });
   });
 });
 
+async function seed(fixture: PostgresTestDatabase): Promise<ExecSessionAuthorizationService> {
+  await fixture.database.insertInto('iam.users').values([
+    user(OWNER_ID, 1, 'owner'),
+    user(ADMIN_ID, 2, 'admin'),
+  ]).execute();
+  await fixture.database.insertInto('iam.groups').values({
+    id: ADMIN_GROUP_ID,
+    name: 'Container administrators',
+    description: null,
+    priority: 0,
+    is_system: false,
+    system_key: null,
+    capabilities: [Capability.ManageContainersAny],
+    revision: 1,
+  }).execute();
+  await fixture.database.insertInto('iam.group_members').values({
+    id: '00000000-0000-4000-8000-000000000010',
+    group_id: ADMIN_GROUP_ID,
+    user_id: ADMIN_ID,
+  }).execute();
+  await fixture.database.insertInto('infra.servers').values({
+    id: SERVER_ID,
+    name: 'Compute A',
+    slug: 'compute-a',
+    agent_token_hash: 'a'.repeat(64),
+    host_fingerprint: null,
+    agent_config_fingerprint: null,
+    status: 'online',
+    quarantine_code: null,
+    quarantine_message: null,
+    last_seen_at: null,
+    macvlan_cidr: null,
+    macvlan_gateway: null,
+    macvlan_reserved_ips: JSON.stringify([]),
+    revision: 1,
+  }).execute();
+  await fixture.database.insertInto('infra.images').values({
+    id: IMAGE_ID,
+    name: 'Base image',
+    docker_image: 'example.invalid/base:latest',
+    runtime_overrides: JSON.stringify({ uid: 0, entrypoint: null, cmd: null, init: false }),
+    description: null,
+    is_active: true,
+    disable_ssh: false,
+    deleting: false,
+    cleanup_generation: 0,
+    revision: 1,
+  }).execute();
+  await fixture.database.insertInto('iam.server_grants').values(
+    ownerServerGrant(),
+  ).execute();
+  await fixture.database.insertInto('control.containers').values({
+    id: CONTAINER_ID,
+    server_id: SERVER_ID,
+    owner_id: OWNER_ID,
+    image_id: IMAGE_ID,
+    created_by: OWNER_ID,
+    name: 'notebook',
+    revision: 1,
+    desired_generation: 1,
+    image_ref: 'example.invalid/base:latest',
+    image_default_uid: 0,
+    image_runtime_overrides: JSON.stringify({
+      uid: 0,
+      entrypoint: null,
+      cmd: null,
+      init: false,
+    }),
+    cpu_millis: 100,
+    mem_bytes: 1024,
+    disk_bytes: 1024,
+    gpu_mode: 'none',
+    gpu_indices: [],
+    mounts_json: JSON.stringify([]),
+    power_intent: ContainerPowerIntent.Running,
+    lifecycle_phase: ContainerPhase.Active,
+    bound_runtime_id: 'runtime-a',
+    quota_paths: ['/runtime/diff', '/runtime/work'],
+    runtime_spec_hash: 'spec-hash',
+    active_task_id: null,
+    last_transition_at: new Date(),
+    failure_reason: null,
+    failure_code: null,
+  }).execute();
+  const transactions = new PgTransactionManager(fixture.database);
+  return new ExecSessionAuthorizationService(fixture.database, transactions);
+}
+
+function ownerServerGrant() {
+  return {
+    id: '00000000-0000-4000-8000-000000000011',
+    user_id: OWNER_ID,
+    group_id: null,
+    server_id: SERVER_ID,
+    cpu_millis: null,
+    mem_bytes: null,
+    disk_bytes: null,
+    gpu_mode: null,
+    gpu_indices: null,
+  } as const;
+}
+
+function user(id: string, numericId: number, username: string) {
+  return {
+    id,
+    numeric_id: numericId,
+    username,
+    password_hash: 'hash',
+    display_name: username,
+    status: UserStatus.Active,
+    auth_version: 0,
+    authz_version: 0,
+  };
+}
+
+async function authVersion(fixture: PostgresTestDatabase, userId: string): Promise<number> {
+  return (await fixture.database.selectFrom('iam.users')
+    .select('auth_version')
+    .where('id', '=', userId)
+    .executeTakeFirstOrThrow()).auth_version;
+}
+
+async function expectStillPending(promise: Promise<unknown>): Promise<void> {
+  let settled = false;
+  void promise.finally(() => {
+    settled = true;
+  });
+  await new Promise<void>((resolve) => {
+    setTimeout(resolve, 50);
+  });
+  expect(settled).toBe(false);
+}
+
+function deferred<T>() {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
+}
+
 function info(overrides: Partial<ExecSessionInfo> = {}): ExecSessionInfo {
   return {
-    serverId: 'server-a',
-    userId: 'owner-a',
-    containerId: 'container-a',
+    serverId: SERVER_ID,
+    userId: OWNER_ID,
+    containerId: CONTAINER_ID,
     dockerId: 'runtime-a',
     authorizationKind: 'container-owner',
     createdAt: Date.now(),

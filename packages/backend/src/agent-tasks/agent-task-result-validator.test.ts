@@ -6,7 +6,7 @@ import {
 } from '@nyabase/common';
 import { describe, expect, it } from 'vitest';
 import { createHash } from 'node:crypto';
-import type { AgentTaskEntity } from '../entities/agent-task.entity.js';
+import type { AgentTaskRecord } from '../domain/domain-records.js';
 import {
   parseAndValidateStagedTerminalResult,
   StagedTerminalEvidenceError,
@@ -449,7 +449,7 @@ describe('validateTerminalAgentResult', () => {
     const corruptTask = {
       ...task(AgentTaskKind.DataDirEnsure, 'data-dir-a', dataDirEnsurePayload()),
       payloadJson: 'corrupt-payload',
-    } as unknown as AgentTaskEntity;
+    } as unknown as AgentTaskRecord;
     expect(() => validateTerminalAgentResult(
       corruptTask,
       failed({ applied: false, reason: 'invalid_payload' }, 'invalid_task_payload'),
@@ -527,7 +527,7 @@ describe('validateTerminalAgentResult', () => {
         startedAt: null,
         lastSentAt: null,
         errorJson: { code: 'DISPATCH_PAYLOAD_INVALID' },
-      } as unknown as AgentTaskEntity;
+      } as unknown as AgentTaskRecord;
       let codecCalls = 0;
       expect(() => parseAndValidateStagedTerminalResult(staged, () => {
         codecCalls += 1;
@@ -732,7 +732,7 @@ function task(
   kind: AgentTaskKind,
   resourceId: string,
   payloadJson: Record<string, unknown>,
-): AgentTaskEntity {
+): AgentTaskRecord {
   return {
     id: 'task-a',
     kind,
@@ -744,7 +744,7 @@ function task(
     failureStage: null,
     startedAt: new Date('2026-07-15T00:00:00.000Z'),
     lastSentAt: new Date('2026-07-15T00:00:00.000Z'),
-  } as AgentTaskEntity;
+  } as AgentTaskRecord;
 }
 
 function dataDirEnsurePayload(): Record<string, unknown> {
@@ -800,7 +800,7 @@ function stagedImageEvidenceAtWireBytes(targetBytes: number): StagedImageEvidenc
   return evidence;
 }
 
-function stagedTask(evidence: StagedImageEvidence): AgentTaskEntity {
+function stagedTask(evidence: StagedImageEvidence): AgentTaskRecord {
   const staged = {
     ...task(
       AgentTaskKind.ImageEnsurePresent,
@@ -808,7 +808,7 @@ function stagedTask(evidence: StagedImageEvidence): AgentTaskEntity {
       { dockerRef: 'example.invalid/image:a' },
     ),
     agentResultJson: evidence,
-  } as AgentTaskEntity;
+  } as AgentTaskRecord;
   staged.payloadHash = createHash('sha256')
     .update(canonicalJson({ kind: staged.kind, payload: staged.payloadJson }))
     .digest('hex');

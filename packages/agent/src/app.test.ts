@@ -117,6 +117,42 @@ function createInventoryReportHarness(options: {
 }
 
 describe('AgentApplication connection readiness', () => {
+  it('clears every periodic observer and Docker reconnect path on stop', () => {
+    vi.useFakeTimers();
+    try {
+      const stream = { destroy: vi.fn() };
+      const wsStop = vi.fn();
+      const app = Object.create(AgentApplication.prototype) as AgentApplication;
+      const periodicTimers = [
+        setInterval(() => undefined, 5_000),
+        setInterval(() => undefined, 15_000),
+      ];
+      const reconnectTimer = setTimeout(() => undefined, 1_000);
+      Object.defineProperties(app, {
+        periodicTimers: { value: periodicTimers, writable: true },
+        dockerEventReconnectTimer: { value: reconnectTimer, writable: true },
+        dockerEventStream: { value: stream, writable: true },
+        dockerEventListenerGeneration: { value: 7, writable: true },
+        reportingGeneration: { value: 1, writable: true },
+        pendingReconcileProofNonce: { value: 'nonce', writable: true },
+        helloGeneration: { value: 1, writable: true },
+        wsClient: { value: { stop: wsStop } },
+        stopped: { value: false, writable: true },
+      });
+
+      app.stop();
+
+      expect(stream.destroy).toHaveBeenCalledOnce();
+      expect(wsStop).toHaveBeenCalledOnce();
+      expect(vi.getTimerCount()).toBe(0);
+      expect((app as unknown as { dockerEventListenerGeneration: number })
+        .dockerEventListenerGeneration).toBe(8);
+    } finally {
+      vi.clearAllTimers();
+      vi.useRealTimers();
+    }
+  });
+
   it('completes local stateless recovery before validation or opening a Backend socket', async () => {
     vi.useFakeTimers();
     try {

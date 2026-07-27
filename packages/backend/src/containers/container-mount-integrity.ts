@@ -1,14 +1,14 @@
 import {
   MAX_CONTAINER_MOUNTS,
   remoteFsSourceIdentity,
+  type RemoteFsParams,
 } from '@nyabase/common';
-import { IsNull, type EntityManager } from 'typeorm';
-import { ContainerDesiredSpecEntity } from '../entities/container-desired-spec.entity.js';
-import { ContainerEntity } from '../entities/container.entity.js';
-import { ContainerMountEntity } from '../entities/container-mount.entity.js';
-import { DataDirectoryEntity } from '../entities/data-directory.entity.js';
-import { RemoteFsMountEntity } from '../entities/remote-fs-mount.entity.js';
-import { RemoteFsServerAssignmentEntity } from '../entities/remote-fs-server-assignment.entity.js';
+import { sql, type Transaction } from 'kysely';
+import type { NyabaseDatabase } from '../persistence-pg/database.types.js';
+import type {
+  ContainerAggregate,
+  ContainerMountRecord,
+} from './container-control.repository.js';
 import {
   normalizeContainerMounts,
   type NormalizedContainerMount,
@@ -19,13 +19,6 @@ export type ContainerMountIntegrityFailureKind =
   | 'index_divergent'
   | 'source_unavailable';
 
-/**
- * A durable mount snapshot is intentionally represented twice: compact JSON is
- * the immutable desired spec, while indexed rows protect relationship deletes
- * and supply physical resource locks. Neither representation is authoritative
- * by itself after corruption or a partial migration, so every replay path must
- * prove their exact correspondence before dispatching physical work.
- */
 export class ContainerMountIntegrityError extends Error {
   constructor(
     readonly kind: ContainerMountIntegrityFailureKind,
@@ -41,104 +34,20 @@ export type ResolvedContainerMount = NormalizedContainerMount & {
   sourceIdentity: string;
 };
 
-/** One durable source-identity interpretation shared by create and replay. */
-export async function resolveActiveContainerMountSources(
-  manager: EntityManager,
-  container: Pick<ContainerEntity, 'serverId' | 'ownerId'>,
-  mounts: readonly NormalizedContainerMount[],
-): Promise<ResolvedContainerMount[]> {
-  const resolved: ResolvedContainerMount[] = [];
-  for (const mount of mounts) {
-    const dataDirs = await manager.find(DataDirectoryEntity, {
-      where: {
-        sourceKind: mount.sourceKind,
-        sourceId: mount.sourceId,
-        name: mount.dirName,
-        userId: container.ownerId,
-        desiredState: 'active',
-        serverId: mount.sourceKind === 'local' ? container.serverId : IsNull(),
-      },
-      order: { id: 'ASC' },
-      take: 2,
-    });
-    if (dataDirs.length !== 1) {
-      throw new ContainerMountIntegrityError(
-        'source_unavailable',
-        'A durable container mount no longer resolves to one exact active DataDir identity',
-      );
-    }
-    const dataDir = dataDirs[0]!;
-
-    if (mount.sourceKind === 'remote') {
-      let assignments: RemoteFsServerAssignmentEntity[];
-      let remote: RemoteFsMountEntity | null;
-      try {
-        [assignments, remote] = await Promise.all([
-          manager.find(RemoteFsServerAssignmentEntity, {
-            where: {
-              remoteFsMountId: mount.sourceId,
-              serverId: container.serverId,
-              desiredState: 'active',
-            },
-            order: { id: 'ASC' },
-            take: 2,
-          }),
-          manager.findOne(RemoteFsMountEntity, {
-            where: { id: mount.sourceId, desiredState: 'active' },
-          }),
-        ]);
-      } catch (error) {
-        throw new ContainerMountIntegrityError(
-          'source_unavailable',
-          `Durable remote container mount metadata is invalid: ${errorMessage(error)}`,
-        );
-      }
-      let identityMatches = false;
-      try {
-        identityMatches = Boolean(
-          remote
-          && remoteFsSourceIdentity(remote.params) === dataDir.sourceIdentity,
-        );
-      } catch {
-        identityMatches = false;
-      }
-      if (assignments.length !== 1 || !identityMatches) {
-        throw new ContainerMountIntegrityError(
-          'source_unavailable',
-          'A durable remote container mount no longer has one exact active Server assignment',
-        );
-      }
-    }
-
-    resolved.push({
-      ...mount,
-      resourceId: dataDir.id,
-      sourceIdentity: dataDir.sourceIdentity,
-    });
-  }
-  return resolved;
-}
-
 export async function resolveContainerMountIntegrity(
-  manager: EntityManager,
-  container: Pick<ContainerEntity, 'id' | 'serverId' | 'ownerId' | 'name'>,
-  desired: Pick<ContainerDesiredSpecEntity, 'mountsJson'>,
+  transaction: Transaction<NyabaseDatabase>,
+  container: ContainerAggregate,
+  rows: readonly ContainerMountRecord[],
 ): Promise<ResolvedContainerMount[]> {
   let desiredMounts: NormalizedContainerMount[];
   try {
-    desiredMounts = normalizeContainerMounts(desired.mountsJson);
+    desiredMounts = normalizeContainerMounts(container.mountsJson);
   } catch (error) {
     throw new ContainerMountIntegrityError(
       'desired_invalid',
       `Durable desired mount snapshot is invalid: ${errorMessage(error)}`,
     );
   }
-
-  const rows = await manager.find(ContainerMountEntity, {
-    where: { containerId: container.id },
-    order: { containerPath: 'ASC', id: 'ASC' },
-    take: MAX_CONTAINER_MOUNTS + 1,
-  });
   if (rows.length > MAX_CONTAINER_MOUNTS) {
     throw new ContainerMountIntegrityError(
       'index_divergent',
@@ -149,18 +58,15 @@ export async function resolveContainerMountIntegrity(
     row.containerId !== container.id
     || row.serverId !== container.serverId
     || row.userId !== container.ownerId
-    || row.containerName !== container.name
-    || typeof row.sourceIdentity !== 'string'
-    || row.sourceIdentity.length === 0)) {
+    || !row.sourceIdentity)) {
     throw new ContainerMountIntegrityError(
       'index_divergent',
       'Durable container mount index ownership metadata is inconsistent',
     );
   }
-
-  let indexedMounts: NormalizedContainerMount[];
+  let indexed: NormalizedContainerMount[];
   try {
-    indexedMounts = normalizeContainerMounts(rows.map((row) => ({
+    indexed = normalizeContainerMounts(rows.map((row) => ({
       sourceKind: row.sourceKind,
       sourceId: row.sourceId,
       dirName: row.dirName,
@@ -172,41 +78,174 @@ export async function resolveContainerMountIntegrity(
       `Durable container mount index is invalid: ${errorMessage(error)}`,
     );
   }
+  const desiredIdentities = desiredMounts.map(mountIdentity).sort();
+  const indexedIdentities = indexed.map(mountIdentity).sort();
   if (
-    rows.some((row, index) => row.containerPath !== indexedMounts[index]?.containerPath)
-    || rows.length !== desiredMounts.length
+    desiredIdentities.length !== indexedIdentities.length
+    || desiredIdentities.some((value, index) => value !== indexedIdentities[index])
   ) {
     throw new ContainerMountIntegrityError(
       'index_divergent',
       'Durable desired mount snapshot and mount index have different entries',
     );
   }
-
-  const rowByIdentity = new Map<string, ContainerMountEntity>();
-  for (let index = 0; index < rows.length; index += 1) {
-    rowByIdentity.set(mountIdentity(indexedMounts[index]!), rows[index]!);
+  const byIdentity = new Map(rows.map((row) => [
+    mountIdentity(row),
+    row,
+  ]));
+  const lookupInputs = desiredMounts.map((mount, ordinal) => ({
+    ordinal,
+    sourceKind: mount.sourceKind,
+    sourceId: mount.sourceId,
+    dirName: mount.dirName,
+  }));
+  const directoryResult = await sql<{
+    ordinal: number;
+    id: string | null;
+    source_identity: string | null;
+    match_count: number;
+  }>`
+    WITH inputs AS (
+      SELECT
+        (entry.value ->> 'ordinal')::integer AS ordinal,
+        entry.value ->> 'sourceKind' AS source_kind,
+        entry.value ->> 'sourceId' AS source_id,
+        entry.value ->> 'dirName' AS dir_name
+      FROM jsonb_array_elements(${JSON.stringify(lookupInputs)}::jsonb) AS entry(value)
+    )
+    SELECT
+      inputs.ordinal,
+      matched.id,
+      matched.source_identity,
+      count(matched.id) OVER (PARTITION BY inputs.ordinal)::integer AS match_count
+    FROM inputs
+    LEFT JOIN LATERAL (
+      SELECT directory.id, directory.source_identity
+      FROM control.data_directories AS directory
+      WHERE directory.source_kind = inputs.source_kind
+        AND directory.source_id = inputs.source_id
+        AND directory.name = inputs.dir_name
+        AND directory.user_id = ${container.ownerId}::uuid
+        AND directory.desired_state = 'active'
+        AND (
+          (inputs.source_kind = 'local' AND directory.server_id = ${container.serverId}::uuid)
+          OR (inputs.source_kind = 'remote' AND directory.server_id IS NULL)
+        )
+      ORDER BY directory.id
+      LIMIT 2
+    ) AS matched ON TRUE
+    ORDER BY inputs.ordinal, matched.id
+  `.execute(transaction);
+  const directoryRows = new Map<number, typeof directoryResult.rows>();
+  for (const row of directoryResult.rows) {
+    const bucket = directoryRows.get(row.ordinal) ?? [];
+    bucket.push(row);
+    directoryRows.set(row.ordinal, bucket);
   }
-  if (desiredMounts.some((mount) => !rowByIdentity.has(mountIdentity(mount)))) {
-    throw new ContainerMountIntegrityError(
-      'index_divergent',
-      'Durable desired mount snapshot and mount index have different entries',
-    );
-  }
 
-  const resolved = await resolveActiveContainerMountSources(manager, container, desiredMounts);
-  for (const mount of resolved) {
-    const indexed = rowByIdentity.get(mountIdentity(mount))!;
-    if (mount.sourceIdentity !== indexed.sourceIdentity) {
+  const remoteSourceIds = [...new Set(desiredMounts
+    .filter((mount) => mount.sourceKind === 'remote')
+    .map((mount) => mount.sourceId))];
+  const remoteResult = remoteSourceIds.length === 0
+    ? { rows: [] as Array<{
+        source_id: string;
+        assignment_count: number;
+        params: unknown | null;
+      }> }
+    : await sql<{
+        source_id: string;
+        assignment_count: number;
+        params: unknown | null;
+      }>`
+        WITH inputs AS (
+          SELECT (value #>> '{}')::uuid AS source_id
+          FROM jsonb_array_elements(${JSON.stringify(remoteSourceIds)}::jsonb)
+        )
+        SELECT
+          inputs.source_id::text AS source_id,
+          (
+            SELECT count(*)::integer
+            FROM (
+              SELECT assignment.id
+              FROM infra.remote_fs_server_assignments AS assignment
+              WHERE assignment.remote_fs_mount_id = inputs.source_id
+                AND assignment.server_id = ${container.serverId}::uuid
+                AND assignment.desired_state = 'active'
+              LIMIT 2
+            ) AS active_assignments
+          ) AS assignment_count,
+          remote.params
+        FROM inputs
+        LEFT JOIN infra.remote_fs_mounts AS remote
+          ON remote.id = inputs.source_id
+          AND remote.desired_state = 'active'
+      `.execute(transaction);
+  const remoteBySourceId = new Map(
+    remoteResult.rows.map((row) => [row.source_id, row]),
+  );
+
+  const resolved: ResolvedContainerMount[] = [];
+  for (const [ordinal, mount] of desiredMounts.entries()) {
+    const indexedRow = byIdentity.get(mountIdentity(mount));
+    if (!indexedRow) {
+      throw new ContainerMountIntegrityError(
+        'index_divergent',
+        'Durable desired mount snapshot and mount index have different entries',
+      );
+    }
+    const directoryMatches = directoryRows.get(ordinal) ?? [];
+    const directory = directoryMatches[0];
+    if (
+      directoryMatches.length !== 1
+      || directory?.match_count !== 1
+      || !directory.id
+      || !directory.source_identity
+    ) {
+      throw new ContainerMountIntegrityError(
+        'source_unavailable',
+        'A durable container mount no longer resolves to one exact active DataDir identity',
+      );
+    }
+    if (directory.source_identity !== indexedRow.sourceIdentity) {
       throw new ContainerMountIntegrityError(
         'source_unavailable',
         'A durable container mount no longer resolves to its indexed DataDir identity',
       );
     }
+    if (mount.sourceKind === 'remote') {
+      const remote = remoteBySourceId.get(mount.sourceId);
+      let identityMatches = false;
+      try {
+        identityMatches = Boolean(
+          remote?.params
+          && remoteFsSourceIdentity(remote.params as RemoteFsParams)
+            === directory.source_identity,
+        );
+      } catch {
+        identityMatches = false;
+      }
+      if (remote?.assignment_count !== 1 || !identityMatches) {
+        throw new ContainerMountIntegrityError(
+          'source_unavailable',
+          'A durable remote container mount no longer has one exact active Server assignment',
+        );
+      }
+    }
+    resolved.push({
+      ...mount,
+      resourceId: directory.id,
+      sourceIdentity: directory.source_identity,
+    });
   }
   return resolved;
 }
 
-function mountIdentity(mount: NormalizedContainerMount): string {
+function mountIdentity(mount: {
+  sourceKind: string;
+  sourceId: string;
+  dirName: string;
+  containerPath: string;
+}): string {
   return [
     mount.sourceKind,
     mount.sourceId,

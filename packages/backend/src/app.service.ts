@@ -1,6 +1,7 @@
 import { Injectable, OnApplicationBootstrap, Logger } from '@nestjs/common';
 import { UsersService } from './users/users.service.js';
 import { GroupsService } from './groups/groups.service.js';
+import { RuntimeRoleService } from './runtime/runtime-role.service.js';
 
 @Injectable()
 export class AppService implements OnApplicationBootstrap {
@@ -9,9 +10,11 @@ export class AppService implements OnApplicationBootstrap {
   constructor(
     private usersService: UsersService,
     private groupsService: GroupsService,
+    private readonly runtimeRole: RuntimeRoleService,
   ) {}
 
   async onApplicationBootstrap() {
+    if (!this.runtimeRole.servesApi()) return;
     await this.seedRequiredData();
   }
 

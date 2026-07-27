@@ -1,14 +1,14 @@
-import { Controller, Get, Param, Query, UseGuards } from '@nestjs/common';
-import { InjectRepository } from '@nestjs/typeorm';
+import { Controller, Get, Inject, Param, Query, UseGuards } from '@nestjs/common';
 import { Capability, ContainerMetricsDto, GpuMetricsDto, HostMetricsDto, UserMetricsDto } from '@nyabase/common';
-import { Repository } from 'typeorm';
+import type { Kysely } from 'kysely';
 import { AccessResolverService } from '../access/access-resolver.service.js';
 import { CurrentUser } from '../auth/decorators/current-user.decorator.js';
 import { RequireCaps } from '../auth/decorators/require-caps.decorator.js';
 import { CapabilitiesGuard } from '../auth/guards/capabilities.guard.js';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard.js';
-import { ContainerEntity } from '../entities/container.entity.js';
-import { UserEntity } from '../entities/user.entity.js';
+import type { UserRecord } from '../domain/domain-records.js';
+import type { NyabaseDatabase } from '../persistence-pg/database.types.js';
+import { PG_DATABASE } from '../persistence-pg/tokens.js';
 import { UsersService } from '../users/users.service.js';
 import { MetricsController } from './metrics.controller.js';
 import { MetricsQueryService } from './metrics-query.service.js';
@@ -22,11 +22,11 @@ export class AdminMetricsController extends MetricsController {
     metricsQuery: MetricsQueryService,
     accessResolver: AccessResolverService,
     usersService: UsersService,
-    @InjectRepository(ContainerEntity)
-    containersRepo: Repository<ContainerEntity>,
+    @Inject(PG_DATABASE)
+    database: Kysely<NyabaseDatabase>,
     agentGateway: AgentGateway,
   ) {
-    super(metricsQuery, accessResolver, usersService, containersRepo, agentGateway);
+    super(metricsQuery, accessResolver, usersService, database, agentGateway);
   }
 
   @Get('servers/:id/host')
@@ -48,7 +48,7 @@ export class AdminMetricsController extends MetricsController {
   @Get('servers/:id/users')
   async adminUserMetrics(
     @Param('id') serverId: string,
-    @CurrentUser() user: UserEntity,
+    @CurrentUser() user: UserRecord,
     @Query('range') range: string,
   ): Promise<UserMetricsDto> {
     return this.userMetricsFor(serverId, user, range, true);
@@ -57,7 +57,7 @@ export class AdminMetricsController extends MetricsController {
   @Get('servers/:id/containers')
   async adminContainerMetrics(
     @Param('id') serverId: string,
-    @CurrentUser() user: UserEntity,
+    @CurrentUser() user: UserRecord,
     @Query('range') range: string,
   ): Promise<ContainerMetricsDto> {
     return this.containerMetricsFor(serverId, user, range, true);

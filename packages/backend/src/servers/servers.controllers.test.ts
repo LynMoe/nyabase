@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { AccessResolverService } from '../access/access-resolver.service.js';
-import type { UserEntity } from '../entities/user.entity.js';
+import type { UserRecord } from '../domain/domain-records.js';
 import type { AgentGateway } from '../gateway/agent-gateway.js';
 import { AdminServersController } from './admin-servers.controller.js';
 import { ServersController } from './servers.controller.js';
@@ -32,7 +32,7 @@ describe('Server controller identity projection', () => {
       listAccessibleServers: vi.fn().mockResolvedValue(['server-a']),
     } as unknown as AccessResolverService;
     const controller = new ServersController(service, access, {} as AgentGateway);
-    const user = { id: 'user-a' } as UserEntity;
+    const user = { id: 'user-a' } as UserRecord;
 
     await controller.list(user);
     await controller.get('server-a', user);
@@ -57,7 +57,7 @@ describe('Server controller identity projection', () => {
       regenerateToken,
       selfCheck,
     } as unknown as ServersService);
-    const actor = { id: 'actor-a' } as UserEntity;
+    const actor = { id: 'actor-a' } as UserRecord;
 
     await controller.create(actor, { name: 'Server A', slug: 'server-a' });
     await controller.update('server-a', actor, { name: 'Renamed' });

@@ -94,6 +94,9 @@ describe('ConsoleGateway durable authorization', () => {
     const registry = registryFor(session);
     const agentGateway = {
       notify: vi.fn(),
+      notifyAsync: vi.fn().mockResolvedValue(undefined),
+      notifyExecAsync: vi.fn().mockResolvedValue(undefined),
+      socketOwnerId: vi.fn(() => 'agent-gateway-a'),
       onLogChunk: vi.fn(() => vi.fn()),
       touchLogSession: vi.fn(),
     };
@@ -109,23 +112,120 @@ describe('ConsoleGateway durable authorization', () => {
     await vi.waitFor(() => expect(authorization.isAuthorized).toHaveBeenCalledTimes(2));
 
     expect(client.close).toHaveBeenCalledWith(4403, 'Console authorization revoked');
-    expect(agentGateway.notify).toHaveBeenCalledWith(
+    expect(agentGateway.notifyExecAsync).toHaveBeenCalledWith(
+      'session-a',
+      expect.stringMatching(/^console:/),
       'server-a',
       'execClose',
       { sessionId: 'session-a' },
     );
-    expect(agentGateway.notify).not.toHaveBeenCalledWith(
+    expect(agentGateway.notifyExecAsync).not.toHaveBeenCalledWith(
+      'session-a',
+      expect.any(String),
       'server-a',
       'execInput',
       expect.anything(),
     );
+  });
+
+  it('releases admission when the durable claim query throws', async () => {
+    const workflow = workflowMock();
+    workflow.claimExecSession.mockRejectedValueOnce(new Error('postgres unavailable'));
+    const gateway = makeGateway(
+      { isAuthorized: vi.fn().mockResolvedValue(true) },
+      { get: vi.fn() },
+      undefined,
+      workflow,
+    );
+    const client = websocket();
+    const connection = handle(gateway, client);
+
+    client.emit('message', JSON.stringify({ type: 'auth', token: 'token-a' }));
+    await expect(connection).resolves.toBeUndefined();
+
+    expect(client.close).toHaveBeenCalledWith(1011, 'Console admission unavailable');
+    expect(workflow.closeExecSession).not.toHaveBeenCalled();
+  });
+
+  it('closes the physical and durable session when local registration throws after claim', async () => {
+    const workflow = workflowMock();
+    const registry = {
+      get: vi.fn(),
+      register: vi.fn(() => {
+        throw new Error('local registry full');
+      }),
+      remove: vi.fn(),
+    };
+    const agentGateway = agentGatewayMock();
+    const gateway = makeGateway(
+      { isAuthorized: vi.fn().mockResolvedValue(true) },
+      registry,
+      agentGateway,
+      workflow,
+    );
+    const client = websocket();
+    const connection = handle(gateway, client);
+
+    client.emit('message', JSON.stringify({ type: 'auth', token: 'token-a' }));
+    await expect(connection).resolves.toBeUndefined();
+
+    expect(agentGateway.notifyExecAsync).toHaveBeenCalledWith(
+      'session-a',
+      expect.stringMatching(/^console:/),
+      'server-a',
+      'execClose',
+      { sessionId: 'session-a' },
+    );
+    expect(workflow.closeExecSession).toHaveBeenCalledWith(
+      'session-a',
+      'Console local registration failed',
+    );
+    expect(client.close).toHaveBeenCalledWith(4429, 'Console session limit reached');
+  });
+
+  it('closes the physical and durable session when log registration throws after claim', async () => {
+    const session = info();
+    const registry = registryFor(session);
+    const workflow = workflowMock();
+    const agentGateway = {
+      ...agentGatewayMock(),
+      onLogChunk: vi.fn(() => {
+        throw new Error('log registry full');
+      }),
+    };
+    const gateway = makeGateway(
+      { isAuthorized: vi.fn().mockResolvedValue(true) },
+      registry,
+      agentGateway,
+      workflow,
+    );
+    const client = websocket();
+    const connection = handle(gateway, client);
+
+    client.emit('message', JSON.stringify({ type: 'auth', token: 'token-a' }));
+    await expect(connection).resolves.toBeUndefined();
+
+    expect(registry.remove).toHaveBeenCalledWith('session-a', session);
+    expect(agentGateway.notifyExecAsync).toHaveBeenCalledWith(
+      'session-a',
+      expect.stringMatching(/^console:/),
+      'server-a',
+      'execClose',
+      { sessionId: 'session-a' },
+    );
+    expect(workflow.closeExecSession).toHaveBeenCalledWith(
+      'session-a',
+      'Console log registration failed',
+    );
+    expect(client.close).toHaveBeenCalledWith(4429, 'Console session limit reached');
   });
 });
 
 function makeGateway(
   authorization: object,
   registry: object = { claimForUser: vi.fn() },
-  agentGateway: object = { notify: vi.fn() },
+  agentGateway: object = agentGatewayMock(),
+  workflow: object = workflowMock(),
 ): ConsoleGateway {
   return new ConsoleGateway(
     agentGateway as never,
@@ -133,7 +233,44 @@ function makeGateway(
     { verify: vi.fn(() => ({ sub: 'user-a', ver: 0, exp: Math.floor(Date.now() / 1000) + 3_600 })) } as never,
     { get: vi.fn(() => 'secret') } as never,
     authorization as never,
+    workflow as never,
   );
+}
+
+function handle(gateway: ConsoleGateway, client: ReturnType<typeof websocket>) {
+  return (gateway as unknown as {
+    handleConnection(
+      ws: typeof client,
+      req: { url: string },
+    ): Promise<void>;
+  }).handleConnection(client, { url: '/ws/console?sessionId=session-a' });
+}
+
+function agentGatewayMock() {
+  return {
+    notify: vi.fn(),
+    notifyAsync: vi.fn().mockResolvedValue(undefined),
+    notifyExecAsync: vi.fn().mockResolvedValue(undefined),
+    socketOwnerId: vi.fn(() => 'agent-gateway-a'),
+    onLogChunk: vi.fn(() => vi.fn()),
+    touchLogSession: vi.fn(),
+  };
+}
+
+function workflowMock() {
+  return {
+    claimExecSession: vi.fn().mockResolvedValue({
+      id: 'session-a',
+      serverId: 'server-a',
+      userId: 'user-a',
+      containerId: 'container-a',
+      runtimeId: 'docker-a',
+      authorizationKind: 'container-owner',
+      createdAt: new Date(),
+    }),
+    touchExecSession: vi.fn().mockResolvedValue(true),
+    closeExecSession: vi.fn().mockResolvedValue(true),
+  };
 }
 
 function info(): ExecSessionInfo {

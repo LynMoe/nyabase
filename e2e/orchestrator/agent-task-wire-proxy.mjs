@@ -35,7 +35,7 @@ function validIso(value) {
 export function validateWireProxyConfig(value) {
   exactKeys(
     value,
-    ['version', 'runId', 'nodeKey', 'mode', 'taskId', 'payloadHash', 'backendIp', 'listenPort'],
+    ['version', 'runId', 'nodeKey', 'mode', 'taskId', 'payloadHash', 'gatewayIp', 'listenPort'],
     'wire proxy config',
   );
   invariant(value.version === 1, 'wire proxy config version mismatch');
@@ -59,8 +59,8 @@ export function validateWireProxyConfig(value) {
   );
   invariant(/^[a-f0-9]{64}$/.test(value.payloadHash), 'wire proxy payload hash is invalid');
   invariant(
-    /^\d{1,3}(?:\.\d{1,3}){3}$/.test(value.backendIp),
-    'wire proxy Backend address is invalid',
+    /^\d{1,3}(?:\.\d{1,3}){3}$/.test(value.gatewayIp),
+    'wire proxy Gateway address is invalid',
   );
   invariant(value.listenPort === 18443, 'wire proxy port is not provider-owned');
   return value;
@@ -293,7 +293,7 @@ async function main() {
       return;
     }
 
-    const upstream = new WebSocket(`ws://${config.backendIp}:3001/ws/agent`, {
+    const upstream = new WebSocket(`ws://${config.gatewayIp}:3001/ws/agent`, {
       headers: {
         authorization,
         host: 'edge',

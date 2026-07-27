@@ -7,6 +7,8 @@ import { AgentGateway } from './agent-gateway.js';
 import { ExecSessionRegistry, type ExecSessionInfo } from './exec-session-registry.js';
 import { ExecSessionAuthorizationService } from './exec-session-authorization.service.js';
 import { NyabaseConfigService } from '../config/nyabase-config.service.js';
+import { WorkflowRepository } from '../agent-tasks/workflow.repository.js';
+import { randomUUID } from 'node:crypto';
 
 type BrowserMessage =
   | { type: 'auth'; token: string }
@@ -28,6 +30,7 @@ export class ConsoleGateway {
   private readonly logger = new Logger(ConsoleGateway.name);
   private readonly initializingSockets = new Set<WebSocket>();
   private activeAuthorizationChecks = 0;
+  private readonly gatewayId = `console:${randomUUID()}`;
 
   constructor(
     private readonly agentGateway: AgentGateway,
@@ -35,6 +38,7 @@ export class ConsoleGateway {
     private readonly jwtService: JwtService,
     private readonly config: NyabaseConfigService,
     private readonly sessionAuthorization: ExecSessionAuthorizationService,
+    private readonly workflow: WorkflowRepository,
   ) {}
 
   attachToHttpServer(server: http.Server): void {
@@ -158,7 +162,7 @@ export class ConsoleGateway {
         }
 
         // Validate JWT. Current user/capability/container authority is checked
-        // against SQLite after the process-local session is atomically claimed.
+        // against PostgreSQL after the session is atomically claimed.
         let jwtPayload: JwtPayload;
         try {
           jwtPayload = this.jwtService.verify<JwtPayload>(msg.token, {
@@ -182,17 +186,72 @@ export class ConsoleGateway {
         if (ws.readyState !== WebSocket.OPEN) return finishAdmission();
 
         let revokedByRegistry = false;
-        // Ownership verification and claiming are one synchronous registry operation.
-        const sessionInfo = this.sessionRegistry.claimForUser(
-          sessionId,
-          jwtPayload.sub,
-          (reason) => {
-            revokedByRegistry = true;
-            if (ws.readyState === WebSocket.OPEN) ws.close(1012, reason.slice(0, 120));
-            else if (ws.readyState === WebSocket.CONNECTING) ws.terminate();
-          },
-        );
+        let durableSession: Awaited<
+          ReturnType<WorkflowRepository['claimExecSession']>
+        >;
+        try {
+          durableSession = await this.workflow.claimExecSession(
+            sessionId,
+            jwtPayload.sub,
+            this.gatewayId,
+            this.agentGateway.socketOwnerId(),
+          );
+        } catch (error) {
+          this.logger.warn(
+            `Console durable claim failed session=${sessionId}: ${error instanceof Error ? error.message : String(error)}`,
+          );
+          if (ws.readyState === WebSocket.OPEN) ws.close(1011, 'Console admission unavailable');
+          return finishAdmission();
+        }
+        const cleanupDurableClaim = async (
+          reason: string,
+          local?: ExecSessionInfo,
+        ): Promise<void> => {
+          if (local) this.sessionRegistry.remove(sessionId, local);
+          if (!durableSession) return;
+          await this.agentGateway.notifyExecAsync(
+            sessionId,
+            this.gatewayId,
+            durableSession.serverId,
+            'execClose',
+            { sessionId },
+          ).catch(() => undefined);
+          await this.workflow.closeExecSession(sessionId, reason).catch(() => undefined);
+        };
+        try {
+          if (durableSession && !this.sessionRegistry.get(sessionId)) {
+            this.sessionRegistry.register(sessionId, {
+              serverId: durableSession.serverId,
+              userId: durableSession.userId,
+              containerId: durableSession.containerId,
+              dockerId: durableSession.runtimeId,
+              authorizationKind: durableSession.authorizationKind,
+              createdAt: durableSession.createdAt.getTime(),
+            });
+          }
+        } catch (error) {
+          await cleanupDurableClaim('Console local registration failed');
+          this.logger.warn(
+            `Console local registration failed session=${sessionId}: ${error instanceof Error ? error.message : String(error)}`,
+          );
+          if (ws.readyState === WebSocket.OPEN) ws.close(4429, 'Console session limit reached');
+          return finishAdmission();
+        }
+        // Durable claim is authoritative; the local registry owns only this
+        // browser transport and can be reconstructed on any Gateway process.
+        const sessionInfo = durableSession
+          ? this.sessionRegistry.claimForUser(
+            sessionId,
+            jwtPayload.sub,
+            (reason) => {
+              revokedByRegistry = true;
+              if (ws.readyState === WebSocket.OPEN) ws.close(1012, reason.slice(0, 120));
+              else if (ws.readyState === WebSocket.CONNECTING) ws.terminate();
+            },
+          )
+          : undefined;
         if (!sessionInfo) {
+          await cleanupDurableClaim('Console local claim failed');
           // Unknown, already claimed, and wrong-owner sessions are deliberately indistinguishable.
           ws.close(4404, 'Unknown session');
           return finishAdmission();
@@ -216,9 +275,7 @@ export class ConsoleGateway {
           || ws.readyState !== WebSocket.OPEN
           || this.sessionRegistry.get(sessionId) !== sessionInfo
         ) {
-          if (this.sessionRegistry.remove(sessionId, sessionInfo)) {
-            try { this.agentGateway.notify(sessionInfo.serverId, 'execClose', { sessionId }); } catch { /* fenced */ }
-          }
+          await cleanupDurableClaim('Console authorization revoked', sessionInfo);
           if (ws.readyState === WebSocket.OPEN) ws.close(4403, 'Console authorization revoked');
           return finishAdmission();
         }
@@ -237,7 +294,18 @@ export class ConsoleGateway {
           // handshake would let an already-running shell outlive its authority.
           revokedByRegistry = true;
           if (this.sessionRegistry.remove(sessionId, sessionInfo)) {
-            try { this.agentGateway.notify(serverId, 'execClose', { sessionId }); } catch { /* fenced */ }
+            void this.agentGateway.notifyExecAsync(
+              sessionId,
+              this.gatewayId,
+              serverId,
+              'execClose',
+              { sessionId },
+            ).catch(() => undefined).finally(() => {
+              void this.workflow.closeExecSession(
+                sessionId,
+                'Console authorization revoked',
+              );
+            });
           }
           if (ws.readyState === WebSocket.OPEN) ws.close(code, reason);
           else if (ws.readyState === WebSocket.CONNECTING) ws.terminate();
@@ -245,7 +313,14 @@ export class ConsoleGateway {
         const checkActiveAuthorization = (): Promise<boolean> => {
           if (authorizationInFlight) return authorizationInFlight;
           const check = this.sessionRegistry.get(sessionId) === sessionInfo
-            ? this.isSessionAuthorized(sessionInfo, jwtPayload.ver, jwtPayload.exp! * 1_000)
+            ? this.workflow.touchExecSession(sessionId, this.gatewayId).then((active) =>
+              active
+                ? this.isSessionAuthorized(
+                    sessionInfo,
+                    jwtPayload.ver,
+                    jwtPayload.exp! * 1_000,
+                  )
+                : false)
             : Promise.resolve(false);
           const tracked = check.finally(() => {
             if (authorizationInFlight === tracked) authorizationInFlight = null;
@@ -284,9 +359,7 @@ export class ConsoleGateway {
             safeSend({ type: 'data', data: chunk.data, stderr: chunk.stderr });
           });
         } catch (error) {
-          if (this.sessionRegistry.remove(sessionId, sessionInfo)) {
-            try { this.agentGateway.notify(serverId, 'execClose', { sessionId }); } catch { /* already fenced */ }
-          }
+          await cleanupDurableClaim('Console log registration failed', sessionInfo);
           this.logger.warn(`Aborting claimed console session=${sessionId}: ${error instanceof Error ? error.message : String(error)}`);
           ws.close(4429, 'Console session limit reached');
           return;
@@ -323,12 +396,28 @@ export class ConsoleGateway {
           }
           if (sessionClosed || ws.readyState !== WebSocket.OPEN) return;
           this.sessionRegistry.touch(sessionId);
+          if (!await this.workflow.touchExecSession(sessionId, this.gatewayId)) {
+            revokeSession(4403, 'Console session authority expired');
+            return;
+          }
           this.agentGateway.touchLogSession(sessionId);
           if (m.type === 'input') {
             const encoded = Buffer.from(m.data, 'utf-8').toString('base64');
-            this.agentGateway.notify(serverId, 'execInput', { sessionId, data: encoded });
+            await this.agentGateway.notifyExecAsync(
+              sessionId,
+              this.gatewayId,
+              serverId,
+              'execInput',
+              { sessionId, data: encoded },
+            );
           } else if (m.type === 'resize') {
-            this.agentGateway.notify(serverId, 'execResize', { sessionId, cols: m.cols, rows: m.rows });
+            await this.agentGateway.notifyExecAsync(
+              sessionId,
+              this.gatewayId,
+              serverId,
+              'execResize',
+              { sessionId, cols: m.cols, rows: m.rows },
+            );
           }
         };
         const queueBrowserMessage = (rawMsg: import('ws').RawData) => {
@@ -374,7 +463,17 @@ export class ConsoleGateway {
           const removed = this.sessionRegistry.remove(sessionId, sessionInfo);
           // Only ask the agent to terminate if it hasn't already (to avoid noise).
           if (removed && !agentTerminated && !revokedByRegistry) {
-            try { this.agentGateway.notify(serverId, 'execClose', { sessionId }); } catch { /* already fenced */ }
+            void this.agentGateway.notifyExecAsync(
+              sessionId,
+              this.gatewayId,
+              serverId,
+              'execClose',
+              { sessionId },
+            ).catch(() => undefined).finally(() => {
+              void this.workflow.closeExecSession(sessionId, 'Console transport closed');
+            });
+          } else {
+            void this.workflow.closeExecSession(sessionId, 'Console transport closed');
           }
           this.logger.log(`Console disconnected: session=${sessionId}`);
         });

@@ -20,11 +20,26 @@ interface HostMetrics {
   memTotal: MetricSeries;
   load1: MetricSeries;
   disks: Array<{ diskId: string; mountPoint: string; used: MetricSeries; total: MetricSeries }>;
-  diskIo: Array<{ dev: string; bps: MetricSeries }>;
-  netIo: Array<{ iface: string; bps: MetricSeries }>;
+  diskIo: Array<{ label: string; dev?: string; bps: MetricSeries }>;
+  netIo: Array<{ label: string; iface?: string; bps: MetricSeries }>;
 }
 
 interface GpuMetrics { gpus: unknown[] }
+
+interface RuntimeDependencyMetrics {
+  role: string;
+  postgres: { total: number; idle: number; waiting: number; max: number };
+  redis: { available: boolean; addressedRpcReady: boolean; required: boolean };
+  telemetry: {
+    queuedBatches: number;
+    queuedPoints: number;
+    queuedBytes: number;
+    droppedBatches: number;
+    inFlightFlushes: number;
+    lastFlushAt: number | null;
+    degraded: boolean;
+  };
+}
 
 interface UserMetrics {
   users: Array<{
@@ -137,6 +152,11 @@ test.describe('60 metrics, audit, and settings', () => {
       }
       expect(host.diskIo.length).toBeGreaterThan(0);
       expect(host.netIo.length).toBeGreaterThan(0);
+      expect(host.diskIo.every((entry) => entry.label === 'All disks' && entry.dev === undefined))
+        .toBe(true);
+      expect(host.netIo.every(
+        (entry) => entry.label === 'All interfaces' && entry.iface === undefined,
+      )).toBe(true);
       host.diskIo.forEach((entry) => assertSeries(entry.bps, true));
       host.netIo.forEach((entry) => assertSeries(entry.bps, true));
     }
@@ -426,6 +446,56 @@ test.describe('60 metrics, audit, and settings', () => {
     assertUserMetrics(await expectJson<UserMetrics>(
       await adminApi.get(`/api/admin/metrics/servers/${seedState.servers[0].serverId}/users?range=1h`),
     ));
+  });
+
+  test('api.metrics.admin-runtime-exact-contract', coverageCase(
+    'observability.audit-settings.http.get.api-admin-metrics-runtime',
+    'api.metrics.admin-runtime-exact-contract',
+  ), async ({ adminApi, anonymousApi, trackedApiFactory }) => {
+    const suffix = `${currentRunId().replaceAll('-', '').slice(-10)}${Date.now().toString(36)}`;
+    const username = `runtime_${suffix}`.slice(0, 48);
+    const password = `E2e-${suffix}-Runtime!`;
+    let userId: string | null = null;
+    try {
+      expect((await anonymousApi.get('/api/admin/metrics/runtime')).status()).toBe(401);
+      const user = await expectJson<{ id: string }>(await adminApi.post('/api/admin/users', {
+        data: { username, password, displayName: `Runtime ${suffix}`.slice(0, 80) },
+      }), 201);
+      userId = user.id;
+      const login = await expectJson<{ accessToken: string }>(
+        await anonymousApi.post('/api/auth/login', { data: { username, password } }),
+      );
+      const userApi = await trackedApiFactory({
+        extraHTTPHeaders: { authorization: `Bearer ${login.accessToken}` },
+      });
+      expect((await userApi.get('/api/admin/metrics/runtime')).status()).toBe(403);
+      const runtime = await expectJson<RuntimeDependencyMetrics>(
+        await adminApi.get('/api/admin/metrics/runtime'),
+      );
+      expect(['all', 'api', 'gateway', 'worker']).toContain(runtime.role);
+      expect(runtime.postgres.max).toBeGreaterThan(0);
+      for (const value of [
+        runtime.postgres.total,
+        runtime.postgres.idle,
+        runtime.postgres.waiting,
+        runtime.telemetry.queuedBatches,
+        runtime.telemetry.queuedPoints,
+        runtime.telemetry.queuedBytes,
+        runtime.telemetry.droppedBatches,
+        runtime.telemetry.inFlightFlushes,
+      ]) {
+        expect(value).toBeGreaterThanOrEqual(0);
+      }
+      expect(typeof runtime.redis.available).toBe('boolean');
+      expect(typeof runtime.redis.addressedRpcReady).toBe('boolean');
+      expect(typeof runtime.redis.required).toBe('boolean');
+      expect(typeof runtime.telemetry.degraded).toBe('boolean');
+      expect(JSON.stringify(runtime)).not.toMatch(
+        /database_url|redis_url|password|sql|query|serverId|userId|lastError/i,
+      );
+    } finally {
+      if (userId) await expectSuccess(await adminApi.delete(`/api/admin/users/${userId}`));
+    }
   });
 
   test('api.metrics.owner-containers-exact-contract', coverageCase(

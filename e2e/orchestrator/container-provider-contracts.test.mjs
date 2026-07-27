@@ -161,9 +161,11 @@ test('duplicate-claim fault uses a bounded hostname for the longest valid run id
     state: {
       NYABASE_E2E_PREFIX: `nyabase-e2e-${longestRunId}`,
       NYABASE_E2E_SUBNET: '172.31.42.0/24',
+      NYABASE_E2E_POSTGRES_IP: '172.31.42.14',
       NYABASE_E2E_NODE1_IP: '172.31.42.11',
       NYABASE_E2E_RATE_LIMIT_EDGE_IP: '172.31.42.13',
       NYABASE_E2E_PROBE_IP: '172.31.42.20',
+      NYABASE_E2E_DUPLICATE_FAULT_IP: '172.31.42.23',
       NYABASE_E2E_NETWORK: `nyabase-e2e-${longestRunId}-cluster`,
       NYABASE_E2E_NODE_IMAGE: `nyabase-e2e-${longestRunId}-node:worktree`,
     },
@@ -175,7 +177,8 @@ test('duplicate-claim fault uses a bounded hostname for the longest valid run id
 
   assert.ok(Buffer.byteLength(identity.containerName) > 63);
   assert.equal(identity.hostname, duplicateClaimFaultHostname);
-  assert.equal(identity.outerIp, '172.31.42.14');
+  assert.equal(identity.outerIp, faultContext.state.NYABASE_E2E_DUPLICATE_FAULT_IP);
+  assert.notEqual(identity.outerIp, faultContext.state.NYABASE_E2E_POSTGRES_IP);
   assert.notEqual(identity.outerIp, faultContext.state.NYABASE_E2E_RATE_LIMIT_EDGE_IP);
   assert.notEqual(identity.outerIp, faultContext.state.NYABASE_E2E_PROBE_IP);
   assert.ok(Buffer.byteLength(identity.hostname) <= 63);

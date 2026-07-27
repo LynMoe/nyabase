@@ -1,9 +1,8 @@
 import {
-  Controller, Get, Param, Query, UseGuards,
+  Controller, Get, Inject, Param, Query, UseGuards,
   ForbiddenException, NotFoundException,
 } from '@nestjs/common';
-import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import type { Kysely } from 'kysely';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard.js';
 import { CurrentUser } from '../auth/decorators/current-user.decorator.js';
 import {
@@ -11,8 +10,9 @@ import {
   type ResolvedServerGrant,
 } from '../access/access-resolver.service.js';
 import { UsersService } from '../users/users.service.js';
-import { ContainerEntity } from '../entities/container.entity.js';
-import { UserEntity } from '../entities/user.entity.js';
+import type { UserRecord } from '../domain/domain-records.js';
+import type { NyabaseDatabase } from '../persistence-pg/database.types.js';
+import { PG_DATABASE } from '../persistence-pg/tokens.js';
 import {
   HostMetricsDto, GpuMetricsDto, UserMetricsDto, ContainerMetricsDto,
   HostDiskCapacity, HostDiskIo, HostNetIo,
@@ -48,8 +48,8 @@ export class MetricsController {
     private readonly metricsQuery: MetricsQueryService,
     private readonly accessResolver: AccessResolverService,
     private readonly usersService: UsersService,
-    @InjectRepository(ContainerEntity)
-    private readonly containersRepo: Repository<ContainerEntity>,
+    @Inject(PG_DATABASE)
+    private readonly database: Kysely<NyabaseDatabase>,
     private readonly agentGateway: AgentGateway,
   ) {}
 
@@ -73,7 +73,7 @@ export class MetricsController {
   @Get('servers/:id/host')
   async hostMetrics(
     @Param('id') serverId: string,
-    @CurrentUser() user: UserEntity,
+    @CurrentUser() user: UserRecord,
     @Query('range') range: string,
   ): Promise<HostMetricsDto> {
     // Capture one physical identity snapshot, then authorize every entry from
@@ -107,13 +107,13 @@ export class MetricsController {
         this.metricsQuery.queryRangeSingle(`nyabase_host_load1{${srv}}`, start, end, step),
         this.metricsQuery.queryRangeByLabel(`nyabase_disk_used_bytes{${srv}}`, start, end, step, 'disk_id'),
         this.metricsQuery.queryRangeByLabel(`nyabase_disk_total_bytes{${srv}}`, start, end, step, 'disk_id'),
-        this.metricsQuery.queryRangeByLabel(
+        this.metricsQuery.queryRangeSingle(
           `rate(nyabase_host_disk_read_bytes_total{${srv}}[${w}]) + rate(nyabase_host_disk_write_bytes_total{${srv}}[${w}])`,
-          start, end, step, 'dev',
+          start, end, step,
         ),
-        this.metricsQuery.queryRangeByLabel(
+        this.metricsQuery.queryRangeSingle(
           `rate(nyabase_host_net_rx_bytes_total{${srv}}[${w}]) + rate(nyabase_host_net_tx_bytes_total{${srv}}[${w}])`,
-          start, end, step, 'iface',
+          start, end, step,
         ),
       ]);
 
@@ -129,12 +129,16 @@ export class MetricsController {
       total: diskTotalRaw.get(d.diskId) ?? emptySeries(step),
     }));
 
-    const diskIo: HostDiskIo[] = options.includePhysicalTopology
-      ? Array.from(diskIoRaw.entries()).map(([dev, bps]) => ({ label: dev, dev, bps }))
-      : aggregateTopologySeries('All disks', diskIoRaw.values(), step);
-    const netIo: HostNetIo[] = options.includePhysicalTopology
-      ? Array.from(netIoRaw.entries()).map(([iface, bps]) => ({ label: iface, iface, bps }))
-      : aggregateTopologySeries('All interfaces', netIoRaw.values(), step);
+    const diskIo = aggregateTopologySeries<HostDiskIo>(
+      'All disks',
+      [diskIoRaw],
+      step,
+    );
+    const netIo = aggregateTopologySeries<HostNetIo>(
+      'All interfaces',
+      [netIoRaw],
+      step,
+    );
 
     return { cpu, memUsed, memTotal, load1, disks, diskIo, netIo };
   }
@@ -175,7 +179,7 @@ export class MetricsController {
   @Get('servers/:id/gpus')
   async gpuMetrics(
     @Param('id') serverId: string,
-    @CurrentUser() user: UserEntity,
+    @CurrentUser() user: UserRecord,
     @Query('range') range: string,
   ): Promise<GpuMetricsDto> {
     const grant = await this.currentServerGrant(user.id, serverId);
@@ -273,7 +277,7 @@ export class MetricsController {
   @Get('servers/:id/users')
   async userMetrics(
     @Param('id') serverId: string,
-    @CurrentUser() user: UserEntity,
+    @CurrentUser() user: UserRecord,
     @Query('range') range: string,
   ): Promise<UserMetricsDto> {
     await this.ensureAccess(user.id, serverId);
@@ -282,7 +286,7 @@ export class MetricsController {
 
   protected async userMetricsFor(
     serverId: string,
-    user: UserEntity,
+    user: UserRecord,
     range: string,
     viewAll: boolean,
   ): Promise<UserMetricsDto> {
@@ -361,7 +365,7 @@ export class MetricsController {
   @Get('servers/:id/containers')
   async containerMetrics(
     @Param('id') serverId: string,
-    @CurrentUser() user: UserEntity,
+    @CurrentUser() user: UserRecord,
     @Query('range') range: string,
   ): Promise<ContainerMetricsDto> {
     await this.ensureAccess(user.id, serverId);
@@ -370,7 +374,7 @@ export class MetricsController {
 
   protected async containerMetricsFor(
     serverId: string,
-    user: UserEntity,
+    user: UserRecord,
     range: string,
     viewAll: boolean,
   ): Promise<ContainerMetricsDto> {
@@ -458,18 +462,26 @@ export class MetricsController {
 
   private async containerIdentityMap(serverId: string): Promise<Map<string, ContainerMetricIdentity>> {
     const result = new Map<string, ContainerMetricIdentity>();
-    const desiredContainers = await this.containersRepo.find({ where: { serverId } });
+    const desiredContainers = await this.database
+      .selectFrom('control.containers')
+      .select(['id', 'name', 'owner_id'])
+      .where('server_id', '=', serverId)
+      .execute();
     const desiredById = new Map(desiredContainers.map((container) => [container.id, container]));
 
     for (const container of desiredContainers) {
-      result.set(container.id, { containerId: container.id, name: container.name, ownerId: container.ownerId });
+      result.set(container.id, {
+        containerId: container.id,
+        name: container.name,
+        ownerId: container.owner_id,
+      });
     }
 
     for (const runtime of this.agentGateway.stateCache.get(serverId)?.containers.values() ?? []) {
       const desiredId = runtime.labels?.[LABEL.CONTAINER_ID];
       const container = desiredId ? desiredById.get(desiredId) : undefined;
       const runtimeId = runtime.runtime.runtimeId;
-      const ownerId = container?.ownerId ?? '';
+      const ownerId = container?.owner_id ?? '';
       const name = container?.name ?? runtimeId.slice(0, 12);
       const info = { containerId: desiredId ?? runtimeId.slice(0, 12), name, ownerId };
       result.set(runtimeId, info);
@@ -567,7 +579,7 @@ export class MetricsController {
   private metricForUserIdOrNumericId(
     raw: Map<string, MetricSeries>,
     userId: string,
-    entity: UserEntity | undefined,
+    entity: UserRecord | undefined,
     step: number,
   ): MetricSeries {
     const series = raw.get(userId) ?? emptySeries(step);
@@ -593,8 +605,8 @@ export class MetricsController {
 
   private async resolveMetricUsers(
     rawUserIds: Set<string>,
-    fallbacks: UserEntity[],
-  ): Promise<Map<string, UserEntity>> {
+    fallbacks: UserRecord[],
+  ): Promise<Map<string, UserRecord>> {
     const ids = [...rawUserIds].filter((id) => id && id !== '__unknown__');
     const numericIds = ids
       .filter((id) => /^\d+$/.test(id))
@@ -611,7 +623,7 @@ export class MetricsController {
     }
 
     const entities = uuidIds.size > 0 ? await this.usersService.findByIds([...uuidIds]) : [];
-    const byId = new Map<string, UserEntity>();
+    const byId = new Map<string, UserRecord>();
     for (const fallback of fallbacks) {
       if (fallback.id) byId.set(fallback.id, fallback);
     }

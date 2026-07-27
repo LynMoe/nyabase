@@ -14,7 +14,7 @@ const config = validateWireProxyConfig({
   mode: 'drop-terminal-once',
   taskId: '019b1234-1234-7123-8123-123456789abc',
   payloadHash: 'a'.repeat(64),
-  backendIp: '172.29.42.2',
+  gatewayIp: '172.29.42.18',
   listenPort: 18443,
 });
 

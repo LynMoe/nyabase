@@ -1,17 +1,13 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { Loader2, RotateCw, Terminal as TerminalIcon } from 'lucide-react';
 import type { IDisposable } from '@xterm/xterm';
-import type { ContainerView } from '@nyabase/common';
+import type { ContainerView, ExecSessionResponse } from '@nyabase/common';
 import { api } from '../../lib/api.js';
 import { useAuthStore } from '../../store/auth.js';
 import { Button } from '../ui/button.js';
 import { Badge } from '../ui/badge.js';
 
 type ConsoleStatus = 'idle' | 'connecting' | 'connected' | 'closed' | 'error';
-
-interface ExecSessionResponse {
-  sessionId: string;
-}
 
 interface ConsoleMessage {
   type: 'data' | 'eof';
@@ -20,9 +16,14 @@ interface ConsoleMessage {
   exitCode?: number;
 }
 
-function wsUrl(sessionId: string): string {
-  const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-  return `${protocol}//${window.location.host}/ws/console?sessionId=${encodeURIComponent(sessionId)}`;
+function wsUrl(consoleUrl: string): string {
+  const resolved = new URL(consoleUrl, window.location.href);
+  if (resolved.protocol === 'http:') resolved.protocol = 'ws:';
+  if (resolved.protocol === 'https:') resolved.protocol = 'wss:';
+  if (resolved.protocol !== 'ws:' && resolved.protocol !== 'wss:') {
+    throw new Error('控制台地址无效。');
+  }
+  return resolved.toString();
 }
 
 function decodeBase64(data: string): string {
@@ -121,7 +122,7 @@ export function ContainerConsole({
         });
         if (cancelled) return;
 
-        const ws = new WebSocket(wsUrl(session.sessionId));
+        const ws = new WebSocket(wsUrl(session.consoleUrl));
         wsRef.current = ws;
 
         ws.addEventListener('open', () => {

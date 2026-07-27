@@ -3,7 +3,7 @@
 // Recovery-only process clock. The Compose topology always preloads this file,
 // but ordinary runs leave Date untouched. The provider can select exactly one
 // fixed +8 day offset so the production seven-day retention worker is tested
-// without changing the host clock or mutating SQLite directly.
+// without changing the host clock or mutating PostgreSQL directly.
 const raw = process.env.NYABASE_E2E_CLOCK_OFFSET_MS ?? '0';
 if (!/^(?:0|691200000)$/.test(raw)) {
   throw new Error('NYABASE_E2E_CLOCK_OFFSET_MS is outside the closed E2E clock vocabulary');

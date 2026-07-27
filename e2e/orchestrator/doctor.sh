@@ -37,7 +37,7 @@ if [[ "${NYABASE_E2E_PROFILE:-smoke}" == full ]]; then
 fi
 
 reserve_slot_for_run "$run_id" \
-  || die "no collision-free E2E slot (subnet plus both TLS ports) is available"
+  || die "no collision-free E2E slot (subnet plus three TLS ports) is available"
 doctor_slot_lock="$RESERVED_SLOT_LOCK"
 
 if ! (
@@ -66,4 +66,4 @@ trap - EXIT INT TERM HUP
 doctor_slot_lock=""
 [[ -z "$(docker ps -aq --filter "label=io.nyabase.e2e.run-id=$run_id")" ]] \
   || die "doctor leaked a Docker container"
-log "doctor PASS: Docker privilege, cgroup v2, mount, XFS tools, space, Compose and a slot reserving both TLS ports are available"
+log "doctor PASS: Docker privilege, cgroup v2, mount, XFS tools, space, Compose and a slot reserving three TLS ports are available"

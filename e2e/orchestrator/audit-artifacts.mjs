@@ -18,9 +18,15 @@ const auditMode = process.argv.length === 4 ? process.argv[3] : '--retained-fina
 if (
   !process.argv[2]
   || (process.argv.length !== 3 && process.argv.length !== 4)
-  || (process.argv.length === 4 && auditMode !== '--pre-report')
+  || (
+    process.argv.length === 4
+    && auditMode !== '--pre-report'
+    && auditMode !== '--startup-failure'
+  )
 ) {
-  throw new Error('usage: audit-artifacts.mjs <runtimeDir> [--pre-report]');
+  throw new Error(
+    'usage: audit-artifacts.mjs <runtimeDir> [--pre-report|--startup-failure]',
+  );
 }
 const e2eRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -82,106 +88,110 @@ for (const path of files) {
     findings.push(`${relative(runtimeDir, path)} contains a forbidden credential pattern`);
   }
 }
-const playwrightArtifactPolicy = auditMode === '--pre-report'
-  ? 'pre-report-empty'
-  : 'retained-final';
+const playwrightArtifactPolicy = auditMode === '--retained-final'
+  ? 'retained-final'
+  : auditMode === '--pre-report'
+    ? 'pre-report-empty'
+    : 'startup-failure-empty';
 findings.push(...await (
-  auditMode === '--pre-report'
+  auditMode !== '--retained-final'
     ? inspectPreReportPlaywrightArtifactPolicy(runtimeDir)
     : inspectPlaywrightArtifactPolicy(runtimeDir)
 ));
 
-const fixtureDir = join(runtimeDir, 'fixture-evidence');
-const fixtureIndexPath = join(fixtureDir, 'index.json');
-const ledger = JSON.parse(await readFile(join(e2eRoot, 'coverage', 'features.yaml'), 'utf8'));
-const expectedFixtures = new Map(
-  ledger.features.flatMap((feature) => feature.cases)
-    .filter((coverageCase) => coverageCase.kind === 'fixture')
-    .map((coverageCase) => [coverageCase.caseId, coverageCase.fixtureProducer]),
-);
-if (expectedFixtures.size !== 8) {
-  findings.push(`coverage ledger declares ${expectedFixtures.size} fixtures instead of eight`);
-}
-const fixtureDirInfo = await lstat(fixtureDir);
-if (!fixtureDirInfo.isDirectory() || fixtureDirInfo.isSymbolicLink() || (fixtureDirInfo.mode & 0o777) !== 0o700) {
-  findings.push('fixture-evidence must be a real mode 0700 directory');
-}
-const fixtureIndexInfo = await lstat(fixtureIndexPath);
-const fixtureIndexReadable = fixtureIndexInfo.isFile()
-  && !fixtureIndexInfo.isSymbolicLink()
-  && fixtureIndexInfo.size <= MAX_RETAINED_ARTIFACT_BYTES;
-if (!fixtureIndexInfo.isFile() || fixtureIndexInfo.isSymbolicLink() || (fixtureIndexInfo.mode & 0o777) !== 0o600) {
-  findings.push('fixture-evidence/index.json must be a regular mode 0600 file');
-}
-if (fixtureIndexInfo.size > MAX_RETAINED_ARTIFACT_BYTES) {
-  findings.push('fixture-evidence/index.json exceeds the artifact audit bound');
-}
-let fixtureIndex = { fixtures: [] };
-if (fixtureIndexReadable) {
-  try {
-    fixtureIndex = JSON.parse(await readFile(fixtureIndexPath, 'utf8'));
-  } catch (error) {
-    findings.push(`fixture-evidence/index.json is unreadable: ${error.message}`);
-  }
-}
-if (
-  fixtureIndex.schemaVersion !== 1
-  || fixtureIndex.runId !== runId
-  || !Array.isArray(fixtureIndex.fixtures)
-  || fixtureIndex.fixtures.length !== 8
-) {
-  findings.push('fixture-evidence/index.json does not bind exactly eight proofs to this run');
-}
 const fixtureCaseIds = new Set();
-for (const record of fixtureIndex.fixtures ?? []) {
-  if (fixtureCaseIds.has(record.caseId)) findings.push(`duplicate fixture proof ${record.caseId}`);
-  fixtureCaseIds.add(record.caseId);
-  const expectedProducer = expectedFixtures.get(record.caseId);
-  if (!expectedProducer) findings.push(`unexpected fixture proof ${String(record.caseId)}`);
-  if (record.producer !== expectedProducer) findings.push(`fixture proof ${record.caseId} producer mismatch`);
-  if (!/^[0-9a-f]{64}$/.test(record.artifactSha256 ?? '')) {
-    findings.push(`fixture proof ${record.caseId} has an invalid artifact hash`);
+if (auditMode !== '--startup-failure') {
+  const fixtureDir = join(runtimeDir, 'fixture-evidence');
+  const fixtureIndexPath = join(fixtureDir, 'index.json');
+  const ledger = JSON.parse(await readFile(join(e2eRoot, 'coverage', 'features.yaml'), 'utf8'));
+  const expectedFixtures = new Map(
+    ledger.features.flatMap((feature) => feature.cases)
+      .filter((coverageCase) => coverageCase.kind === 'fixture')
+      .map((coverageCase) => [coverageCase.caseId, coverageCase.fixtureProducer]),
+  );
+  if (expectedFixtures.size !== 8) {
+    findings.push(`coverage ledger declares ${expectedFixtures.size} fixtures instead of eight`);
   }
-  const artifactPath = isAbsolute(record.artifactPath)
-    ? resolve(record.artifactPath)
-    : resolve(runtimeDir, record.artifactPath ?? '');
-  if (!artifactPath.startsWith(`${fixtureDir}${sep}`) || dirname(artifactPath) !== fixtureDir) {
-    findings.push(`fixture proof ${record.caseId} escapes fixture-evidence`);
-    continue;
+  const fixtureDirInfo = await lstat(fixtureDir);
+  if (!fixtureDirInfo.isDirectory() || fixtureDirInfo.isSymbolicLink() || (fixtureDirInfo.mode & 0o777) !== 0o700) {
+    findings.push('fixture-evidence must be a real mode 0700 directory');
   }
-  try {
-    const info = await lstat(artifactPath);
-    if (!info.isFile() || info.isSymbolicLink()) {
-      findings.push(`fixture proof ${record.caseId} is not a regular file`);
+  const fixtureIndexInfo = await lstat(fixtureIndexPath);
+  const fixtureIndexReadable = fixtureIndexInfo.isFile()
+    && !fixtureIndexInfo.isSymbolicLink()
+    && fixtureIndexInfo.size <= MAX_RETAINED_ARTIFACT_BYTES;
+  if (!fixtureIndexInfo.isFile() || fixtureIndexInfo.isSymbolicLink() || (fixtureIndexInfo.mode & 0o777) !== 0o600) {
+    findings.push('fixture-evidence/index.json must be a regular mode 0600 file');
+  }
+  if (fixtureIndexInfo.size > MAX_RETAINED_ARTIFACT_BYTES) {
+    findings.push('fixture-evidence/index.json exceeds the artifact audit bound');
+  }
+  let fixtureIndex = { fixtures: [] };
+  if (fixtureIndexReadable) {
+    try {
+      fixtureIndex = JSON.parse(await readFile(fixtureIndexPath, 'utf8'));
+    } catch (error) {
+      findings.push(`fixture-evidence/index.json is unreadable: ${error.message}`);
+    }
+  }
+  if (
+    fixtureIndex.schemaVersion !== 1
+    || fixtureIndex.runId !== runId
+    || !Array.isArray(fixtureIndex.fixtures)
+    || fixtureIndex.fixtures.length !== 8
+  ) {
+    findings.push('fixture-evidence/index.json does not bind exactly eight proofs to this run');
+  }
+  for (const record of fixtureIndex.fixtures ?? []) {
+    if (fixtureCaseIds.has(record.caseId)) findings.push(`duplicate fixture proof ${record.caseId}`);
+    fixtureCaseIds.add(record.caseId);
+    const expectedProducer = expectedFixtures.get(record.caseId);
+    if (!expectedProducer) findings.push(`unexpected fixture proof ${String(record.caseId)}`);
+    if (record.producer !== expectedProducer) findings.push(`fixture proof ${record.caseId} producer mismatch`);
+    if (!/^[0-9a-f]{64}$/.test(record.artifactSha256 ?? '')) {
+      findings.push(`fixture proof ${record.caseId} has an invalid artifact hash`);
+    }
+    const artifactPath = isAbsolute(record.artifactPath)
+      ? resolve(record.artifactPath)
+      : resolve(runtimeDir, record.artifactPath ?? '');
+    if (!artifactPath.startsWith(`${fixtureDir}${sep}`) || dirname(artifactPath) !== fixtureDir) {
+      findings.push(`fixture proof ${record.caseId} escapes fixture-evidence`);
       continue;
     }
-    if ((info.mode & 0o777) !== 0o600) findings.push(`fixture proof ${record.caseId} is not mode 0600`);
-    if (info.size > MAX_RETAINED_ARTIFACT_BYTES) {
-      findings.push(`fixture proof ${record.caseId} exceeds the artifact audit bound`);
-      continue;
+    try {
+      const info = await lstat(artifactPath);
+      if (!info.isFile() || info.isSymbolicLink()) {
+        findings.push(`fixture proof ${record.caseId} is not a regular file`);
+        continue;
+      }
+      if ((info.mode & 0o777) !== 0o600) findings.push(`fixture proof ${record.caseId} is not mode 0600`);
+      if (info.size > MAX_RETAINED_ARTIFACT_BYTES) {
+        findings.push(`fixture proof ${record.caseId} exceeds the artifact audit bound`);
+        continue;
+      }
+      const bytes = await readFile(artifactPath);
+      if (record.artifactSha256 !== sha256(bytes)) findings.push(`fixture proof ${record.caseId} hash mismatch`);
+      const proof = JSON.parse(bytes.toString('utf8'));
+      if (
+        proof.schemaVersion !== 1
+        || proof.runId !== runId
+        || proof.caseId !== record.caseId
+        || proof.producer !== record.producer
+        || proof.status !== 'passed'
+        || proof.observedAt !== record.observedAt
+        || !proof.claims
+        || typeof proof.claims !== 'object'
+        || Array.isArray(proof.claims)
+      ) {
+        findings.push(`fixture proof ${record.caseId} binding mismatch`);
+      }
+    } catch (error) {
+      findings.push(`fixture proof ${record.caseId} is unreadable: ${error.message}`);
     }
-    const bytes = await readFile(artifactPath);
-    if (record.artifactSha256 !== sha256(bytes)) findings.push(`fixture proof ${record.caseId} hash mismatch`);
-    const proof = JSON.parse(bytes.toString('utf8'));
-    if (
-      proof.schemaVersion !== 1
-      || proof.runId !== runId
-      || proof.caseId !== record.caseId
-      || proof.producer !== record.producer
-      || proof.status !== 'passed'
-      || proof.observedAt !== record.observedAt
-      || !proof.claims
-      || typeof proof.claims !== 'object'
-      || Array.isArray(proof.claims)
-    ) {
-      findings.push(`fixture proof ${record.caseId} binding mismatch`);
-    }
-  } catch (error) {
-    findings.push(`fixture proof ${record.caseId} is unreadable: ${error.message}`);
   }
-}
-for (const caseId of expectedFixtures.keys()) {
-  if (!fixtureCaseIds.has(caseId)) findings.push(`missing fixture proof ${caseId}`);
+  for (const caseId of expectedFixtures.keys()) {
+    if (!fixtureCaseIds.has(caseId)) findings.push(`missing fixture proof ${caseId}`);
+  }
 }
 
 if (findings.length > 0) {

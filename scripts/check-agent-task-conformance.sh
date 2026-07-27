@@ -27,10 +27,11 @@ no_match() {
 }
 
 require_file docs/agent-task-execution.md
-require_file packages/backend/src/entities/agent-task.entity.ts
-require_file packages/backend/src/agent-tasks/agent-tasks.service.ts
-require_file packages/backend/src/agent-tasks/agent-task-result.service.ts
-require_file packages/backend/src/agent-tasks/agent-task-dispatcher.service.ts
+require_file packages/backend/src/agent-tasks/workflow.repository.ts
+require_file packages/backend/src/agent-tasks/workflow-enqueue.port.ts
+require_file packages/backend/src/agent-tasks/workflow-finalizer.registry.ts
+require_file packages/backend/src/agent-tasks/workflow-finalizer-worker.service.ts
+require_file packages/backend/src/agent-tasks/workflow-outbox-worker.service.ts
 require_file packages/agent/src/tasks/task-runner.ts
 require_file packages/agent/src/tasks/task-handler.ts
 require_file packages/frontend/src/hooks/use-agent-task-tracker.ts
@@ -65,7 +66,7 @@ no_match "obsolete task commit protocol remains" \
   'task\.commit\.v1|TaskCommitPayload|zTaskCommitPayload' \
   "${SOURCE_PATHS[@]}"
 no_match "obsolete coordination fields remain" \
-  'fencingToken|leaseFencingToken|leaseOwner|leaseExpiresAt|effectKey|idempotencyKey|WaitingRetry|WaitingObservation|InterventionRequired|progressJson|resourceKeysJson|agentOutcome' \
+  'fencingToken|leaseFencingToken|effectKey|idempotencyKey|WaitingRetry|WaitingObservation|InterventionRequired|progressJson|resourceKeysJson|agentOutcome' \
   "${SOURCE_PATHS[@]}"
 no_match "Agent durable recovery state remains" \
   'AgentTaskStore|stateDir|remote-fs-registry|recoverPersistedMounts|replayTerminal|saveCheckpoint|task\.commit\.v1|TaskCommitPayload|zTaskCommitPayload' \
@@ -98,20 +99,20 @@ no_match "obsolete public names remain" \
   'operationId|operationIds|activeOperation|lastOperation|/operations|admin/operations' \
   "${SOURCE_PATHS[@]}"
 
-# Migration tests intentionally live beside the migrations. Select only the
-# timestamped TypeORM migration sources, keep their deterministic order, and
-# allow additive post-baseline migrations without weakening the AgentTask
-# execution-model checks.
+# Fresh installation is intentionally represented by one clean initial schema.
 mapfile -t migrations < <(
-  find packages/backend/src/database/migrations -maxdepth 1 -type f \
-    -regextype posix-extended -regex '.*/[0-9]+-[A-Za-z0-9_-]+\.ts' | sort
+  find packages/backend/src/persistence-pg/migrations -maxdepth 1 -type f \
+    -regextype posix-extended -regex '.*/[0-9]{6}_[a-z0-9-]+\.sql' | sort
 )
-[[ ${#migrations[@]} -ge 1 ]] || fail "no timestamped schema migration was found"
+[[ ${#migrations[@]} -eq 1 \
+  && "${migrations[0]}" == 'packages/backend/src/persistence-pg/migrations/000001_initial.sql' ]] \
+  || fail "PostgreSQL migrations must contain exactly 000001_initial.sql"
 no_match "schema migrations contain obsolete coordination tables" \
   'operations|operation_steps|operation_attempts|operation_commands|operation_work_items|container_mount_runtime|progress_json|resource_keys_json|agent_outcome' \
   "${migrations[@]}"
-rg -q 'CREATE TABLE "agent_tasks"' "${migrations[0]}" \
-  || fail "baseline does not create agent_tasks"
+rg -q 'CREATE TABLE workflow\.tasks' \
+  packages/backend/src/persistence-pg/migrations/000001_initial.sql \
+  || fail "initial migration does not create canonical tasks"
 
 if rg -n 'better-sqlite3' packages/agent/package.json; then
   fail "Agent still depends on better-sqlite3"

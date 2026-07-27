@@ -20,8 +20,10 @@ const runtimeInfo = await lstat(runtimeDir);
 if (!runtimeInfo.isDirectory() || runtimeInfo.isSymbolicLink() || (runtimeInfo.mode & 0o077) !== 0) {
   throw new Error('Proxy client runtime directory is not private and real');
 }
-const { state } = await loadValidatedRunState(runtimeDir, { expectedProfile: 'full' });
-if (state.NYABASE_E2E_PROFILE !== 'full') throw new Error('Proxy client requires the Full profile');
+const { state } = await loadValidatedRunState(runtimeDir);
+if (!['full', 'recovery'].includes(state.NYABASE_E2E_PROFILE)) {
+  throw new Error('Proxy client requires a proxy-enabled profile');
+}
 
 let raw = '';
 for await (const chunk of process.stdin) {

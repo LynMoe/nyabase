@@ -14,7 +14,7 @@ import { DataDirsService } from './datadirs.service.js';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard.js';
 import { CurrentUser } from '../auth/decorators/current-user.decorator.js';
 import { AccessResolverService } from '../access/access-resolver.service.js';
-import { UserEntity } from '../entities/user.entity.js';
+import type { UserRecord } from '../domain/domain-records.js';
 import { zCreateDataDirRequest, zDataDirResourceName } from '@nyabase/common';
 import { z } from 'zod';
 
@@ -30,7 +30,7 @@ export class DataDirsController {
 
   @Get()
   async list(
-    @CurrentUser() user: UserEntity,
+    @CurrentUser() user: UserRecord,
     @Query('serverId') serverId: string,
     @Query('userId') _queryUserId?: string,
   ) {
@@ -43,7 +43,7 @@ export class DataDirsController {
   }
 
   @Post()
-  async create(@CurrentUser() user: UserEntity, @Body() body: unknown) {
+  async create(@CurrentUser() user: UserRecord, @Body() body: unknown) {
     const dto = zCreateDataDirRequest.parse(body);
     const ok = await this.accessResolver.hasMountSourceAccess(
       user.id, dto.serverId, dto.sourceKind, dto.sourceId,
@@ -76,7 +76,7 @@ export class DataDirsController {
     @Param('serverId') serverId: string,
     @Param('sourceId') sourceId: string,
     @Param('name') name: string,
-    @CurrentUser() user: UserEntity,
+    @CurrentUser() user: UserRecord,
     @Query('userId') _queryUserId?: string,
     @Query('sourceKind') sourceKind?: string,
   ) {

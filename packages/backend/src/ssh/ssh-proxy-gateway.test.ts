@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { WebSocket } from 'ws';
 import { EventEmitter } from 'events';
+import { performance } from 'node:perf_hooks';
 import {
   MAX_SSH_PROXY_CLIENTS,
   MAX_SSH_PROXY_BUFFERED_BYTES,
@@ -59,6 +60,41 @@ describe('SshProxyGateway status projection defenses', () => {
 });
 
 describe('SshProxyGateway snapshot broadcast coalescing', () => {
+  it('keeps the initial-build deadline invariant across wall-clock jumps', async () => {
+    vi.useFakeTimers();
+    try {
+      let release!: (value: object) => void;
+      const snapshots = {
+        buildSnapshot: vi.fn()
+          .mockImplementationOnce(() => new Promise<object>((resolve) => { release = resolve; }))
+          .mockResolvedValueOnce({ generation: 2 }),
+      };
+      const gateway = new SshProxyGateway(
+        snapshots as never,
+        defaultConfig() as never,
+        { register: vi.fn() } as never,
+      );
+      const client = { readyState: WebSocket.OPEN as number, terminate: vi.fn() };
+      const build = (gateway as unknown as {
+        buildInitialSnapshotBefore(deadline: number, ws: typeof client): Promise<object>;
+      }).buildInitialSnapshotBefore(performance.now() + 100, client);
+      vi.setSystemTime(new Date('2020-01-01T00:00:00Z'));
+      vi.advanceTimersByTime(101);
+      expect(client.terminate).toHaveBeenCalledOnce();
+      release({ generation: 1 });
+      await expect(build).rejects.toThrow('deadline exceeded');
+
+      vi.setSystemTime(new Date('2099-01-01T00:00:00Z'));
+      await expect((gateway as unknown as {
+        buildInitialSnapshotBefore(deadline: number, ws: typeof client): Promise<object>;
+      }).buildInitialSnapshotBefore(performance.now() + 100, client))
+        .resolves.toEqual({ generation: 2 });
+      gateway.onModuleDestroy();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('reserves only the bounded number of active or initializing proxy slots', async () => {
     const snapshots = { buildSnapshot: vi.fn() };
     const gateway = new SshProxyGateway(

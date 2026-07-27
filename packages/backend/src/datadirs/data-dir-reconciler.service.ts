@@ -1,11 +1,8 @@
-import { Inject, Injectable, forwardRef } from '@nestjs/common';
-import { InjectRepository } from '@nestjs/typeorm';
-import { In, Repository } from 'typeorm';
-import { DataDirectoryEntity } from '../entities/data-directory.entity.js';
-import { RemoteFsServerAssignmentEntity } from '../entities/remote-fs-server-assignment.entity.js';
-import { RemoteFsMountEntity } from '../entities/remote-fs-mount.entity.js';
+import { Injectable } from '@nestjs/common';
+import type { DataDirectoryRecord } from '../domain/domain-records.js';
 import { DataDirEntry, DataDirIssueDto, type DiskInfo } from '@nyabase/common';
-import { AgentGateway } from '../gateway/agent-gateway.js';
+import { StateCache } from '../gateway/state-cache.js';
+import { StorageRepository } from '../storage/storage.repository.js';
 
 /** A valid full report deterministically conflicts with the durable inventory model. */
 export class DataDirInventoryFaultError extends Error {
@@ -18,14 +15,8 @@ export class DataDirInventoryFaultError extends Error {
 @Injectable()
 export class DataDirReconcilerService {
   constructor(
-    @InjectRepository(DataDirectoryEntity)
-    private dataDirRepo: Repository<DataDirectoryEntity>,
-    @InjectRepository(RemoteFsServerAssignmentEntity)
-    private assignmentRepo: Repository<RemoteFsServerAssignmentEntity>,
-    @InjectRepository(RemoteFsMountEntity)
-    private remoteFsMountRepo: Repository<RemoteFsMountEntity>,
-    @Inject(forwardRef(() => AgentGateway))
-    private agentGateway: AgentGateway,
+    private readonly storage: StorageRepository,
+    private readonly stateCache: StateCache,
   ) {}
 
   async reconcileReport(
@@ -81,7 +72,7 @@ export class DataDirReconcilerService {
   }
 
   async getIssues(sourceKind?: string, sourceId?: string): Promise<DataDirIssueDto[]> {
-    return this.agentGateway.stateCache.getDataDirIssues(sourceKind, sourceId);
+    return this.stateCache.getDataDirIssues(sourceKind, sourceId);
   }
 
   private async loadExpected(serverId: string, disks: readonly DiskInfo[]): Promise<Array<{
@@ -91,7 +82,7 @@ export class DataDirReconcilerService {
     name: string;
     userId: string;
     hostPath: string;
-    desiredState: DataDirectoryEntity['desiredState'];
+    desiredState: DataDirectoryRecord['desiredState'];
     reportsWhenMissing: boolean;
     blocksWhenMissing: boolean;
   }>> {
@@ -102,16 +93,20 @@ export class DataDirReconcilerService {
       name: string;
       userId: string;
       hostPath: string;
-      desiredState: DataDirectoryEntity['desiredState'];
+      desiredState: DataDirectoryRecord['desiredState'];
       reportsWhenMissing: boolean;
       blocksWhenMissing: boolean;
     }> = [];
 
     // Local sources on this server are configured in agent.yaml and reported through state cache.
     const mountPointMap = new Map(disks.map((d) => [d.diskId, d.mountPoint]));
-    const localDirs = await this.dataDirRepo.find({
-      where: { sourceKind: 'local', serverId },
-    });
+    const assignments = await this.storage.listAssignmentsForServer(serverId);
+    const remoteIds = assignments.map((assignment) => assignment.remoteFsMountId);
+    const allDirs = await this.storage.listDataDirectoriesForServerInventory(
+      serverId,
+      remoteIds,
+    );
+    const localDirs = allDirs.filter((directory) => directory.sourceKind === 'local');
     for (const dir of localDirs) {
         const mountPoint = mountPointMap.get(dir.sourceId);
         if (!mountPoint) {
@@ -141,19 +136,14 @@ export class DataDirReconcilerService {
     // Only an active assignment promises that active directories must exist;
     // transition/failed assignments are recognized without making a missing
     // observation blocking.
-    const assignments = await this.assignmentRepo.find({ where: { serverId } });
     if (assignments.length > 0) {
-      const remoteIds = assignments.map((a) => a.remoteFsMountId);
-      const mounts = await this.remoteFsMountRepo.find({ where: { id: In(remoteIds) } });
+      const mounts = await this.storage.listRemoteFsMountsByIds(remoteIds);
       const hostMountPointMap = new Map(mounts.map((m) => [m.id, m.hostMountPoint]));
       const assignmentStateMap = new Map(
         assignments.map((assignment) => [assignment.remoteFsMountId, assignment.desiredState]),
       );
 
-      const remoteDirs = await this.dataDirRepo
-        .createQueryBuilder('dd')
-        .where('dd.sourceKind = :kind AND dd.sourceId IN (:...ids)', { kind: 'remote', ids: remoteIds })
-        .getMany();
+      const remoteDirs = allDirs.filter((directory) => directory.sourceKind === 'remote');
       for (const dir of remoteDirs) {
         const hostMountPoint = hostMountPointMap.get(dir.sourceId);
         const assignmentState = assignmentStateMap.get(dir.sourceId);

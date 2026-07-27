@@ -66,6 +66,12 @@ export type {
 } from './rest-schema.js';
 import type { ConfigSourceName, ConfigValueKind } from '../config/definition.js';
 
+export interface ExecSessionResponse {
+  sessionId: string;
+  /** Owner-affine WebSocket URL. This routes only; JWT + PostgreSQL claim authorize. */
+  consoleUrl: string;
+}
+
 // ---------------------------------------------------------------------------
 // Common
 // ---------------------------------------------------------------------------
@@ -240,7 +246,7 @@ export interface SystemSettingFieldDto {
 
 export interface SystemSettingsDto {
   revision: number;
-  /** Opaque content identity paired with revision for external-file CAS. */
+  /** Opaque PostgreSQL snapshot identity paired with the absolute CAS revision. */
   snapshotToken: string;
   configFile: string;
   fields: SystemSettingFieldDto[];
@@ -763,18 +769,18 @@ export interface HostDiskCapacity {
 }
 
 export interface HostDiskIo {
-  /** Purpose-safe series label. Ordinary responses aggregate physical devices. */
+  /** Purpose-safe bounded series label; current telemetry aggregates devices. */
   label: string;
-  /** Physical block-device name, present only on the admin plane. */
+  /** Legacy optional field; bounded current telemetry does not emit device names. */
   dev?: string;
   /** read + write combined */
   bps: MetricSeries;
 }
 
 export interface HostNetIo {
-  /** Purpose-safe series label. Ordinary responses aggregate physical interfaces. */
+  /** Purpose-safe bounded series label; current telemetry aggregates interfaces. */
   label: string;
-  /** Physical interface name, present only on the admin plane. */
+  /** Legacy optional field; bounded current telemetry does not emit interface names. */
   iface?: string;
   /** rx + tx combined */
   bps: MetricSeries;

@@ -8,7 +8,6 @@ import {
 } from '@nestjs/common';
 import {
   Capability,
-  AuditAction,
   zPatchSystemSettingsRequest,
   type PublicSettingsDto,
   type SystemSettingsDto,
@@ -16,24 +15,21 @@ import {
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard.js';
 import { CapabilitiesGuard } from '../auth/guards/capabilities.guard.js';
 import { RequireCaps } from '../auth/decorators/require-caps.decorator.js';
-import {
-  NyabaseConfigService,
-  SystemSettingsRevisionConflictError,
-} from '../config/nyabase-config.service.js';
-import { SshProxyGateway } from '../ssh/ssh-proxy-gateway.js';
-import { postCommitBestEffort } from '../common/post-commit.js';
+import { NyabaseConfigService } from '../config/nyabase-config.service.js';
 import { CurrentUser } from '../auth/decorators/current-user.decorator.js';
-import type { UserEntity } from '../entities/user.entity.js';
-import { AuditService } from '../audit/audit.service.js';
+import type { UserRecord } from '../domain/domain-records.js';
 import { AccessResolverService } from '../access/access-resolver.service.js';
+import {
+  SystemSettingsAuthorityService,
+  SystemSettingsRevisionConflictError,
+} from './system-settings-authority.service.js';
 
 @Controller()
 export class SystemSettingsController {
   constructor(
     private config: NyabaseConfigService,
-    private sshProxyGateway: SshProxyGateway,
-    private audit: AuditService,
     private accessResolver: AccessResolverService,
+    private authority: SystemSettingsAuthorityService,
   ) {}
 
   @Get('public/settings')
@@ -45,6 +41,7 @@ export class SystemSettingsController {
   @UseGuards(JwtAuthGuard, CapabilitiesGuard)
   @RequireCaps(Capability.ManageSystemSettings)
   async getSettings(): Promise<SystemSettingsDto> {
+    await this.authority.refreshFromPostgres('admin-read');
     return this.systemSettingsDto();
   }
 
@@ -52,19 +49,26 @@ export class SystemSettingsController {
   @UseGuards(JwtAuthGuard, CapabilitiesGuard)
   @RequireCaps(Capability.ManageSystemSettings)
   async patchSettings(
-    @CurrentUser() actor: UserEntity,
+    @CurrentUser() actor: UserRecord,
     @Body() body: unknown,
   ): Promise<SystemSettingsDto> {
     const { values, expectedRevision, expectedSnapshotToken } = zPatchSystemSettingsRequest.parse(body);
     try {
-      const started = await this.accessResolver.startExternalWithActorCapabilities(
+      const committed = await this.accessResolver.runWithActorCapabilities(
         actor.id,
         [Capability.ManageSystemSettings],
-        () => this.config.updateEditable(values, expectedRevision, expectedSnapshotToken),
+        (transaction) => this.authority.update(
+          transaction,
+          actor.id,
+          values,
+          expectedRevision,
+          expectedSnapshotToken,
+        ),
       );
-      await started.completion;
+      await this.authority.committed(committed);
     } catch (error) {
       if (error instanceof SystemSettingsRevisionConflictError) {
+        this.authority.acceptConflict(error.current);
         throw new ConflictException({
           code: 'SYSTEM_SETTINGS_REVISION_CONFLICT',
           message: 'System settings changed; reload and resolve the conflicting fields',
@@ -73,16 +77,6 @@ export class SystemSettingsController {
       }
       throw error;
     }
-    await postCommitBestEffort(
-      'System settings SSH snapshot broadcast',
-      () => this.sshProxyGateway.broadcastSnapshot(),
-    );
-    await postCommitBestEffort(
-      'System settings update audit',
-      () => this.audit.log(actor.id, AuditAction.UpdateSystemSettings, 'control-plane', 'system_settings', {
-        keys: Object.keys(values).sort(),
-      }),
-    );
     return this.systemSettingsDto();
   }
 

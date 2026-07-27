@@ -1,25 +1,21 @@
-import { describe, it, expect, vi } from 'vitest';
-import { Capability, GpuGrantMode } from '@nyabase/common';
-// Import from the standalone utility module to avoid loading TypeORM entity decorators
+import { randomUUID } from 'node:crypto';
+import {
+  Capability,
+  GpuGrantMode,
+  UserStatus,
+} from '@nyabase/common';
+import { describe, expect, it } from 'vitest';
+import { InfrastructureRepository } from '../../infrastructure/infrastructure.repository.js';
+import {
+  withPostgresTestDatabase,
+  type PostgresTestDatabase,
+} from '../../persistence-pg/postgres-test-harness.js';
+import { PgTransactionManager } from '../../persistence-pg/transaction.js';
+import { AccessCacheEpochService } from '../access-cache-epoch.service.js';
+import { AccessResolverService } from '../access-resolver.service.js';
 import { resolveGrant } from '../grant-utils.js';
 
-vi.mock('../../entities/group.entity.js', () => ({ GroupEntity: class GroupEntity {} }));
-vi.mock('../../entities/group-member.entity.js', () => ({ GroupMemberEntity: class GroupMemberEntity {} }));
-vi.mock('../../entities/server-grant.entity.js', () => ({ ServerGrantEntity: class ServerGrantEntity {} }));
-vi.mock('../../entities/image-grant.entity.js', () => ({ ImageGrantEntity: class ImageGrantEntity {} }));
-vi.mock('../../entities/image.entity.js', () => ({ ImageEntity: class ImageEntity {} }));
-vi.mock('../../entities/server.entity.js', () => ({ ServerEntity: class ServerEntity {} }));
-vi.mock('../../entities/mount-source-grant.entity.js', () => ({ MountSourceGrantEntity: class MountSourceGrantEntity {} }));
-vi.mock('../../entities/remote-fs-server-assignment.entity.js', () => ({
-  RemoteFsServerAssignmentEntity: class RemoteFsServerAssignmentEntity {},
-}));
-
-import { AccessResolverService } from '../access-resolver.service.js';
-import { AccessCacheEpochService } from '../access-cache-epoch.service.js';
-
-// ---------------------------------------------------------------------------
-// resolveGrant — pure function, no TypeORM entity imports
-// ---------------------------------------------------------------------------
+const describePostgres = process.env.NYABASE_TEST_DATABASE_URL ? describe : describe.skip;
 
 function makeGrant(overrides = {}) {
   return {
@@ -34,268 +30,186 @@ function makeGrant(overrides = {}) {
 
 describe('resolveGrant', () => {
   it('treats null resource fields as unlimited and null GPU mode as all', () => {
-    const result = resolveGrant(makeGrant());
-    expect(result.cpuMillis).toBe(0);
-    expect(result.memBytes).toBe(0);
-    expect(result.diskBytes).toBe(0);
-    expect(result.gpuMode).toBe(GpuGrantMode.All);
-    expect(result.gpuIndices).toEqual([]);
+    expect(resolveGrant(makeGrant())).toEqual({
+      cpuMillis: 0,
+      memBytes: 0,
+      diskBytes: 0,
+      gpuMode: GpuGrantMode.All,
+      gpuIndices: [],
+    });
   });
 
-  it('uses grant values when set (non-null)', () => {
-    const result = resolveGrant(
-      makeGrant({ cpuMillis: 8000, memBytes: 8 * 1024 ** 3 }),
-    );
-    expect(result.cpuMillis).toBe(8000);
-    expect(result.memBytes).toBe(8 * 1024 ** 3);
-    expect(result.diskBytes).toBe(0);
+  it('uses non-null resource values', () => {
+    expect(resolveGrant(makeGrant({
+      cpuMillis: 8000,
+      memBytes: 8 * 1024 ** 3,
+    }))).toMatchObject({
+      cpuMillis: 8000,
+      memBytes: 8 * 1024 ** 3,
+      diskBytes: 0,
+    });
   });
 
-  it('uses grant gpuIndices when set', () => {
-    const result = resolveGrant(
-      makeGrant({ gpuMode: GpuGrantMode.Indices, gpuIndices: [0, 2] }),
-    );
-    expect(result.gpuIndices).toEqual([0, 2]);
-    expect(result.gpuMode).toBe(GpuGrantMode.Indices);
+  it('uses explicit GPU indices', () => {
+    expect(resolveGrant(makeGrant({
+      gpuMode: GpuGrantMode.Indices,
+      gpuIndices: [0, 2],
+    }))).toMatchObject({
+      gpuMode: GpuGrantMode.Indices,
+      gpuIndices: [0, 2],
+    });
   });
 
-  it('uses empty gpuIndices when grant gpuIndices is null', () => {
-    const result = resolveGrant(
-      makeGrant({ gpuMode: GpuGrantMode.Indices }),
-    );
-    expect(result.gpuIndices).toEqual([]);
+  it('uses empty indices when an indices grant has null indices', () => {
+    expect(resolveGrant(makeGrant({ gpuMode: GpuGrantMode.Indices })))
+      .toMatchObject({ gpuIndices: [] });
   });
 
-  it('uses all GPU mode when grant gpuMode is null', () => {
-    const result = resolveGrant(
-      makeGrant({ gpuMode: null }),
-    );
-    expect(result.gpuMode).toBe(GpuGrantMode.All);
-    expect(result.gpuIndices).toEqual([]);
+  it('uses all GPU mode when mode is null', () => {
+    expect(resolveGrant(makeGrant({ gpuMode: null }))).toMatchObject({
+      gpuMode: GpuGrantMode.All,
+      gpuIndices: [],
+    });
   });
 
-  it('preserves zero as an explicit unlimited grant value', () => {
-    const result = resolveGrant(
-      makeGrant({ cpuMillis: 0 }),
-    );
-    expect(result.cpuMillis).toBe(0);
+  it('preserves explicit zero as unlimited', () => {
+    expect(resolveGrant(makeGrant({ cpuMillis: 0 })).cpuMillis).toBe(0);
   });
 });
 
-describe('AccessResolverService image detail authorization', () => {
-  it('requires an ordinary user image grant to match an effectively granted server', async () => {
-    const service = makeAccessResolver({
-      memberships: [],
-      groups: [],
-      userServerGrants: [makeServerGrant({
-        id: 'server-grant-user-a',
-        scopeId: 'user-a',
-        serverId: 'server-accessible',
-      })],
-      userImageGrants: [makeImageGrant({
-        id: 'image-grant-wrong-server',
-        scopeId: 'user-a',
-        imageId: 'image-a',
-        serverId: 'server-ungranted',
-      })],
+describePostgres('AccessResolver PostgreSQL image authorization', () => {
+  it('requires an image grant to match an effectively granted server', async () => {
+    await withPostgresTestDatabase(async (fixture) => {
+      const context = await setup(fixture);
+      await grantServer(fixture, context.userId, context.serverAccessible);
+      await grantImage(fixture, context.userId, 'image-a', context.serverUngranted);
+      await expect(context.service.isImageAccessibleForUser(
+        context.userId,
+        'image-a',
+      )).resolves.toBe(false);
     });
-
-    await expect(service.isImageAccessibleForUser('user-a', 'image-a')).resolves.toBe(false);
   });
 
-  it('allows an ordinary user when effective server access and image grant share a server', async () => {
-    const service = makeAccessResolver({
-      memberships: [],
-      groups: [],
-      userServerGrants: [makeServerGrant({
-        id: 'server-grant-user-a',
-        scopeId: 'user-a',
-        serverId: 'server-accessible',
-      })],
-      userImageGrants: [makeImageGrant({
-        id: 'image-grant-matching-server',
-        scopeId: 'user-a',
-        imageId: 'image-a',
-        serverId: 'server-accessible',
-      })],
+  it('allows an image grant on an effectively granted server', async () => {
+    await withPostgresTestDatabase(async (fixture) => {
+      const context = await setup(fixture);
+      await grantServer(fixture, context.userId, context.serverAccessible);
+      await grantImage(fixture, context.userId, 'image-a', context.serverAccessible);
+      await expect(context.service.isImageAccessibleForUser(
+        context.userId,
+        'image-a',
+      )).resolves.toBe(true);
     });
-
-    await expect(service.isImageAccessibleForUser('user-a', 'image-a')).resolves.toBe(true);
   });
 
-  it('does not let admin capabilities bypass user-plane image authorization', async () => {
-    const service = makeAccessResolver({
-      memberships: [{
-        id: 'member-admin',
-        groupId: 'group-admin',
-        userId: 'admin-a',
-      }],
-      groups: [makeGroup({
-        id: 'group-admin',
-        capabilities: [Capability.ManageImages],
-      })],
-      userServerGrants: [],
-      userImageGrants: [],
+  it('does not let admin capabilities bypass image authorization', async () => {
+    await withPostgresTestDatabase(async (fixture) => {
+      const context = await setup(fixture, Capability.ManageImages);
+      await expect(context.service.isImageAccessibleForUser(
+        context.userId,
+        'image-a',
+      )).resolves.toBe(false);
     });
-
-    await expect(service.isImageAccessibleForUser('admin-a', 'image-a')).resolves.toBe(false);
   });
 
   it('does not let admin capabilities synthesize effective resource access', async () => {
-    const service = makeAccessResolver({
-      memberships: [{
-        id: 'member-admin',
-        groupId: 'group-admin',
-        userId: 'admin-a',
-      }],
-      groups: [makeGroup({
-        id: 'group-admin',
-        capabilities: [Capability.ManageContainersAny],
-      })],
-      userServerGrants: [],
-      userImageGrants: [],
+    await withPostgresTestDatabase(async (fixture) => {
+      const context = await setup(fixture, Capability.ManageContainersAny);
+      await expect(context.service.getEffectiveAccess(context.userId))
+        .resolves.toEqual([]);
     });
-
-    await expect(service.getEffectiveAccess('admin-a')).resolves.toEqual([]);
   });
 });
 
-function makeAccessResolver(input: {
-  memberships: Array<{ id: string; groupId: string; userId: string }>;
-  groups: Array<{
-    id: string;
-    capabilities: Capability[];
-    priority: number;
-  }>;
-  userServerGrants: Array<ReturnType<typeof makeServerGrant>>;
-  userImageGrants: Array<ReturnType<typeof makeImageGrant>>;
-}) {
-  const groupIds = new Set(input.memberships.map((membership) => membership.groupId));
-  const groups = input.groups.filter((group) => groupIds.has(group.id));
-  const groupServerGrants: Array<ReturnType<typeof makeServerGrant>> = [];
-  const groupImageGrants: Array<ReturnType<typeof makeImageGrant>> = [];
-
-  const groupsRepo = {
-    createQueryBuilder: () => ({
-      where: () => ({
-        orderBy: () => ({
-          addOrderBy: () => ({
-            getMany: async () => groups,
-          }),
-        }),
-      }),
+async function setup(
+  fixture: PostgresTestDatabase,
+  capability?: Capability,
+) {
+  const infrastructure = new InfrastructureRepository(fixture.database);
+  const transactions = new PgTransactionManager(fixture.database);
+  const userId = randomUUID();
+  const serverAccessible = randomUUID();
+  const serverUngranted = randomUUID();
+  await Promise.all([
+    infrastructure.insertServer({
+      id: serverAccessible,
+      name: 'Accessible',
+      slug: `accessible-${serverAccessible.slice(0, 8)}`,
+      agentTokenHash: 'e'.repeat(64),
     }),
-  };
-  const membersRepo = {
-    find: async () => input.memberships,
-  };
-  const serverGrantsRepo = {
-    find: async () => input.userServerGrants,
-    createQueryBuilder: () => ({
-      where: () => ({
-        getMany: async () => groupServerGrants,
-      }),
+    infrastructure.insertServer({
+      id: serverUngranted,
+      name: 'Ungranted',
+      slug: `ungranted-${serverUngranted.slice(0, 8)}`,
+      agentTokenHash: 'f'.repeat(64),
     }),
-  };
-  const imageGrantsRepo = {
-    find: async () => input.userImageGrants,
-    createQueryBuilder: () => ({
-      where: () => ({
-        getMany: async () => groupImageGrants,
-      }),
-    }),
-  };
-  const imagesRepo = {
-    find: async () => [],
-  };
-  const mountSourceGrantsRepo = {
-    find: async () => [],
-    createQueryBuilder: () => ({
-      where: () => ({
-        getMany: async () => [],
-      }),
-    }),
-  };
-  const remoteFsAssignmentsRepo = {
-    find: async () => [],
-  };
-  const serversRepo = {
-    find: async () => [
-      makeServer('server-accessible'),
-      makeServer('server-ungranted'),
-    ],
-  };
-  const agentGateway = {
-    stateCache: {
-      get: () => undefined,
-      getAll: () => [],
-    },
-  };
-
-  return new AccessResolverService(
-    groupsRepo as never,
-    membersRepo as never,
-    serverGrantsRepo as never,
-    imageGrantsRepo as never,
-    imagesRepo as never,
-    serversRepo as never,
-    mountSourceGrantsRepo as never,
-    remoteFsAssignmentsRepo as never,
-    agentGateway as never,
-    new AccessCacheEpochService(),
+  ]);
+  await fixture.database.insertInto('iam.users').values({
+    id: userId,
+    numeric_id: 1001,
+    username: `image-${userId.slice(0, 8)}`,
+    password_hash: 'hash',
+    display_name: 'Image User',
+    status: UserStatus.Active,
+    auth_version: 1,
+    authz_version: 1,
+  }).execute();
+  if (capability) {
+    const groupId = randomUUID();
+    await fixture.database.insertInto('iam.groups').values({
+      id: groupId,
+      name: `Admin ${groupId.slice(0, 8)}`,
+      description: null,
+      priority: 100,
+      is_system: false,
+      system_key: null,
+      capabilities: [capability],
+      revision: 1,
+    }).execute();
+    await fixture.database.insertInto('iam.group_members').values({
+      id: randomUUID(),
+      group_id: groupId,
+      user_id: userId,
+    }).execute();
+  }
+  const service = new AccessResolverService(
+    fixture.database,
+    transactions,
+    { stateCache: { get: () => undefined } } as never,
+    new AccessCacheEpochService(fixture.database),
   );
+  return { service, userId, serverAccessible, serverUngranted };
 }
 
-function makeGroup(input: {
-  id: string;
-  capabilities: Capability[];
-}) {
-  return {
-    id: input.id,
-    name: input.id,
-    priority: 100,
-    isSystem: true,
-    capabilities: input.capabilities,
-  };
+async function grantServer(
+  fixture: PostgresTestDatabase,
+  userId: string,
+  serverId: string,
+) {
+  await fixture.database.insertInto('iam.server_grants').values({
+    id: randomUUID(),
+    user_id: userId,
+    group_id: null,
+    server_id: serverId,
+    cpu_millis: null,
+    mem_bytes: null,
+    disk_bytes: null,
+    gpu_mode: GpuGrantMode.None,
+    gpu_indices: null,
+  }).execute();
 }
 
-function makeServer(id: string) {
-  return {
-    id,
-    name: id,
-    agentTokenHash: `token-${id}`,
-  };
-}
-
-function makeServerGrant(input: {
-  id: string;
-  scopeId: string;
-  serverId: string;
-}) {
-  return {
-    id: input.id,
-    scope: 'user',
-    scopeId: input.scopeId,
-    serverId: input.serverId,
-    cpuMillis: null,
-    memBytes: null,
-    diskBytes: null,
-    gpuMode: GpuGrantMode.None,
-    gpuIndices: null,
-  };
-}
-
-function makeImageGrant(input: {
-  id: string;
-  scopeId: string;
-  imageId: string;
-  serverId: string;
-}) {
-  return {
-    id: input.id,
-    scope: 'user',
-    scopeId: input.scopeId,
-    imageId: input.imageId,
-    serverId: input.serverId,
-  };
+async function grantImage(
+  fixture: PostgresTestDatabase,
+  userId: string,
+  imageId: string,
+  serverId: string,
+) {
+  await fixture.database.insertInto('iam.image_grants').values({
+    id: randomUUID(),
+    user_id: userId,
+    group_id: null,
+    image_id: imageId,
+    server_id: serverId,
+  }).execute();
 }

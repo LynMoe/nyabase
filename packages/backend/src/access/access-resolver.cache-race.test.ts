@@ -1,61 +1,83 @@
-import { Capability } from '@nyabase/common';
-import { describe, expect, it, vi } from 'vitest';
+import { randomUUID } from 'node:crypto';
+import { Capability, UserStatus } from '@nyabase/common';
+import { describe, expect, it } from 'vitest';
+import { withPostgresTestDatabase } from '../persistence-pg/postgres-test-harness.js';
+import { PgTransactionManager } from '../persistence-pg/transaction.js';
 import { AccessCacheEpochService } from './access-cache-epoch.service.js';
 import { AccessResolverService } from './access-resolver.service.js';
 
-describe('AccessResolverService cache generation fence', () => {
-  it('never returns an authority fill that started before invalidateUser', async () => {
-    let release!: () => void;
-    const gate = new Promise<void>((resolve) => { release = resolve; });
-    let oldReadStarted!: () => void;
-    const started = new Promise<void>((resolve) => { oldReadStarted = resolve; });
-    const membersRepo = {
-      find: vi.fn()
-        .mockImplementationOnce(async () => {
-          oldReadStarted();
-          await gate;
-          return [{ id: 'member-old', groupId: 'privileged', userId: 'user-a' }];
-        })
-        .mockResolvedValueOnce([]),
-    };
-    const groupsRepo = {
-      createQueryBuilder: vi.fn(() => ({
-        where: vi.fn().mockReturnThis(),
-        orderBy: vi.fn().mockReturnThis(),
-        addOrderBy: vi.fn().mockReturnThis(),
-        getMany: vi.fn().mockResolvedValue([{
-          id: 'privileged',
-          priority: 1,
-          capabilities: [Capability.ManageUsers],
-        }]),
-      })),
-    };
-    const emptyRepo = {
-      find: vi.fn().mockResolvedValue([]),
-      createQueryBuilder: vi.fn(() => ({
-        where: vi.fn().mockReturnThis(),
-        getMany: vi.fn().mockResolvedValue([]),
-      })),
-    };
-    const resolver = new AccessResolverService(
-      groupsRepo as never,
-      membersRepo as never,
-      emptyRepo as never,
-      emptyRepo as never,
-      emptyRepo as never,
-      { find: vi.fn().mockResolvedValue([]) } as never,
-      emptyRepo as never,
-      emptyRepo as never,
-      { stateCache: { get: vi.fn() } } as never,
-      new AccessCacheEpochService(),
-    );
+const describePostgres = process.env.NYABASE_TEST_DATABASE_URL ? describe : describe.skip;
 
-    const capabilities = resolver.userCapabilities('user-a');
-    await started;
-    resolver.invalidateUser('user-a');
-    release();
+describePostgres('AccessResolver PostgreSQL cache generation fence', () => {
+  it('never returns an authority fill that started before invalidation', async () => {
+    await withPostgresTestDatabase(async ({ database }) => {
+      const userId = randomUUID();
+      const groupId = randomUUID();
+      await database.insertInto('iam.users').values({
+        id: userId,
+        numeric_id: 1001,
+        username: `cache-${userId.slice(0, 8)}`,
+        password_hash: 'hash',
+        display_name: 'Cache User',
+        status: UserStatus.Active,
+        auth_version: 1,
+        authz_version: 1,
+      }).execute();
+      await database.insertInto('iam.groups').values({
+        id: groupId,
+        name: `Privileged ${groupId.slice(0, 8)}`,
+        description: null,
+        priority: 1,
+        is_system: false,
+        system_key: null,
+        capabilities: [Capability.ManageUsers],
+        revision: 1,
+      }).execute();
+      await database.insertInto('iam.group_members').values({
+        id: randomUUID(),
+        group_id: groupId,
+        user_id: userId,
+      }).execute();
 
-    await expect(capabilities).resolves.toEqual(new Set());
-    expect(membersRepo.find).toHaveBeenCalledTimes(2);
+      const canonical = new PgTransactionManager(database);
+      let release!: () => void;
+      const gate = new Promise<void>((resolve) => { release = resolve; });
+      let oldReadFinished!: () => void;
+      const oldRead = new Promise<void>((resolve) => { oldReadFinished = resolve; });
+      let runs = 0;
+      const transactions = {
+        run: <T>(work: Parameters<PgTransactionManager['run']>[0]) => {
+          runs += 1;
+          const current = runs;
+          return canonical.run(async (transaction) => {
+            const value = await work(transaction);
+            if (current === 1) {
+              oldReadFinished();
+              await gate;
+            }
+            return value;
+          }) as Promise<T>;
+        },
+      } as PgTransactionManager;
+      const epoch = new AccessCacheEpochService(database);
+      const resolver = new AccessResolverService(
+        database,
+        transactions,
+        { stateCache: { get: () => undefined } } as never,
+        epoch,
+      );
+
+      const capabilities = resolver.userCapabilities(userId);
+      await oldRead;
+      await database.deleteFrom('iam.group_members')
+        .where('user_id', '=', userId)
+        .where('group_id', '=', groupId)
+        .executeTakeFirstOrThrow();
+      resolver.invalidateUser(userId);
+      release();
+
+      await expect(capabilities).resolves.toEqual(new Set());
+      expect(runs).toBe(2);
+    });
   });
 });

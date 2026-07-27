@@ -18,7 +18,7 @@ import { CapabilitiesGuard } from '../auth/guards/capabilities.guard.js';
 import { RequireCaps } from '../auth/decorators/require-caps.decorator.js';
 import { CurrentUser } from '../auth/decorators/current-user.decorator.js';
 import { GroupsService } from '../groups/groups.service.js';
-import { UserEntity } from '../entities/user.entity.js';
+import type { UserRecord } from '../domain/domain-records.js';
 import { Capability, SystemGroupKey, zCreateUserRequest, zUpdateUserRequest } from '@nyabase/common';
 
 @Controller('admin/users')
@@ -32,13 +32,12 @@ export class AdminUsersController {
   @Get()
   @RequireCaps(Capability.ManageUsers)
   async listUsers() {
-    const users = await this.usersService.findAll();
-    return Promise.all(users.map((u) => this.usersService.toDto(u)));
+    return this.usersService.listDtos();
   }
 
   @Post()
   @RequireCaps(Capability.ManageUsers)
-  async createUser(@Body() body: unknown, @CurrentUser() actor: UserEntity) {
+  async createUser(@Body() body: unknown, @CurrentUser() actor: UserRecord) {
     const dto = zCreateUserRequest.parse(body);
     const user = await this.usersService.createUser(dto, {
       systemGroupKey: SystemGroupKey.Users,
@@ -66,7 +65,7 @@ export class AdminUsersController {
   async getInternalSshKey(
     @Param('id') id: string,
     @Query('includePrivate') includePrivate: string | undefined,
-    @CurrentUser() currentUser: UserEntity,
+    @CurrentUser() currentUser: UserRecord,
   ) {
     return this.usersService.getInternalSshKey(currentUser.id, id, includePrivate === 'true');
   }
@@ -75,7 +74,7 @@ export class AdminUsersController {
   @RequireCaps(Capability.ManageUsers)
   async rotateInternalSshKey(
     @Param('id') id: string,
-    @CurrentUser() currentUser: UserEntity,
+    @CurrentUser() currentUser: UserRecord,
   ) {
     return this.usersService.rotateInternalSshKey(currentUser.id, id);
   }
@@ -85,7 +84,7 @@ export class AdminUsersController {
   async updateUser(
     @Param('id') id: string,
     @Body() body: unknown,
-    @CurrentUser() actor: UserEntity,
+    @CurrentUser() actor: UserRecord,
   ) {
     const dto = zUpdateUserRequest.parse(body);
     if (dto.currentPassword !== undefined) {
@@ -98,7 +97,7 @@ export class AdminUsersController {
   @Delete(':id')
   @RequireCaps(Capability.ManageUsers)
   @HttpCode(200)
-  async deleteUser(@Param('id') id: string, @CurrentUser() currentUser: UserEntity) {
+  async deleteUser(@Param('id') id: string, @CurrentUser() currentUser: UserRecord) {
     if (currentUser.id === id) throw new ForbiddenException("Can't delete yourself");
     return this.groupsService.deleteUserPermanently(id, currentUser.id);
   }
@@ -109,7 +108,7 @@ export class AdminUsersController {
   async deleteSshKey(
     @Param('id') id: string,
     @Param('keyId') keyId: string,
-    @CurrentUser() actor: UserEntity,
+    @CurrentUser() actor: UserRecord,
   ) {
     await this.usersService.deleteSshKey(id, keyId, actor.id);
   }

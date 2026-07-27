@@ -3,7 +3,7 @@ import type { ResolvedServerGrant } from './access-resolver.service.js';
 
 /**
  * Input types use structural duck-typing so this module remains importable
- * without pulling in TypeORM entity decorators (safe to use in unit tests).
+ * without pulling in persistence decorators (safe to use in unit tests).
  */
 
 export interface GrantFields {
@@ -17,7 +17,7 @@ export interface GrantFields {
 /**
  * Resolve nullable grant fields directly.
  * Null CPU/memory/disk means unlimited (0); null GPU mode means all GPUs.
- * Exported as a standalone function so it can be unit-tested without TypeORM.
+ * Exported as a standalone function so it can be unit-tested without a database.
  */
 export function resolveGrant(
   grant: GrantFields,

@@ -35,6 +35,7 @@ const fault = JSON.parse(
     fault: 'backendService',
     runId,
     action: 'restart',
+    role: 'all',
   }),
 );
 invariant(
@@ -42,6 +43,9 @@ invariant(
     fault.runId === runId &&
     fault.fault === 'backendService' &&
     fault.action === 'restart' &&
+    fault.role === 'all' &&
+    Array.isArray(fault.runtimes) &&
+    fault.runtimes.length === 3 &&
     fault.restarted === true &&
     fault.before?.healthy === true &&
     fault.after?.healthy === true &&

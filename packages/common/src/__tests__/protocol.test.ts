@@ -157,7 +157,7 @@ describe('zInventoryFaultPayload', () => {
 
 describe('zMetricsBatchPayload', () => {
   const point = {
-    name: 'nyabase_metric:total',
+    name: 'nyabase_host_cpu_usage_ratio',
     labels: { server: 'server-a' },
     value: 1,
     ts: 1,
@@ -186,6 +186,23 @@ describe('zMetricsBatchPayload', () => {
     expect(() => zMetricsBatchPayload.parse({
       serverId: 'server-a',
       points: [{ ...point, name: 'metric\nforged', value: Number.POSITIVE_INFINITY }],
+    })).toThrow();
+    expect(() => zMetricsBatchPayload.parse({
+      serverId: 'server-a',
+      points: [{ ...point, name: 'syntactically_valid_but_unbounded' }],
+    })).toThrow();
+    expect(() => zMetricsBatchPayload.parse({
+      serverId: 'server-a',
+      points: [{ ...point, labels: { server: 'server-a', container_name: 'unbounded' } }],
+    })).toThrow();
+    expect(() => zMetricsBatchPayload.parse({
+      serverId: 'server-a',
+      points: [{
+        name: 'nyabase_user_disk_used_bytes',
+        labels: { server: 'server-a', user_id: 'user-a' },
+        value: 1,
+        ts: 1,
+      }],
     })).toThrow();
   });
 });

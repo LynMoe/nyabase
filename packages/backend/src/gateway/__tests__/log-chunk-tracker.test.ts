@@ -115,6 +115,22 @@ describe('LogChunkTracker', () => {
     unsubscribers.forEach((unsubscribe) => unsubscribe());
   });
 
+  it('expires a listener after its TTL even when the wall clock rolls backward', () => {
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date('2026-07-27T00:00:00Z'));
+      const cb = vi.fn();
+      tracker.onLogChunk('rollback', 'srv-1', cb);
+      vi.setSystemTime(new Date('2020-01-01T00:00:00Z'));
+      vi.advanceTimersByTime(30 * 60 * 1_000 + 1);
+
+      tracker.dispatch(chunk({ sessionId: 'rollback', data: 'late' }));
+      expect(cb).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('evicts old pre-listener output at the global character budget', () => {
     const data = 'x'.repeat(MAX_BUFFERED_DATA_CHARS_PER_SESSION);
     const sessionCount = Math.floor(MAX_BUFFERED_LOG_DATA_CHARS / data.length);

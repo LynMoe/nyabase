@@ -15,7 +15,19 @@ assert_no_common_src_artifacts() {
   fi
 }
 
+assert_no_backend_legacy_persistence() {
+  if rg -n \
+    "(@nestjs/typeorm|from ['\"]typeorm['\"]|[\"']typeorm[\"'][[:space:]]*:|better-sqlite3)" \
+    packages/backend/src packages/backend/package.json; then
+    echo "Backend still contains a TypeORM or better-sqlite3 dependency/path" >&2
+    exit 1
+  fi
+}
+
 assert_no_common_src_artifacts
+assert_no_backend_legacy_persistence
+bash scripts/check-nest-sse-advisory.test.sh
+bash scripts/check-nest-sse-advisory.sh
 bash scripts/check-agent-task-conformance.sh
 pnpm --filter @nyabase/e2e validate
 pnpm --filter @nyabase/e2e test:evidence
@@ -24,6 +36,8 @@ pnpm build
 node scripts/check-agent-embedded-helpers.mjs
 node scripts/check-backend-bootstrap.mjs
 assert_no_common_src_artifacts
+assert_no_backend_legacy_persistence
+bash scripts/check-nest-sse-advisory.sh
 bash scripts/check-agent-task-conformance.sh
 pnpm typecheck
 pnpm lint

@@ -5,7 +5,7 @@ export default defineConfig({
   test: {
     include: ['src/**/*.test.ts'],
     exclude: ['dist/**'],
-    // reflect-metadata must be loaded before any TypeORM-decorated entity is imported.
+    // Nest decorators and emitted constructor metadata require this before imports.
     setupFiles: ['reflect-metadata'],
   },
   resolve: {

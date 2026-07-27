@@ -13,7 +13,7 @@ import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard.js';
 import { CapabilitiesGuard } from '../auth/guards/capabilities.guard.js';
 import { RequireCaps } from '../auth/decorators/require-caps.decorator.js';
 import { CurrentUser } from '../auth/decorators/current-user.decorator.js';
-import { UserEntity } from '../entities/user.entity.js';
+import type { UserRecord } from '../domain/domain-records.js';
 import { Capability, zExecSessionRequest, zUpdateContainerMountsRequest } from '@nyabase/common';
 import { ContainerControlService } from './container-control.service.js';
 import type { RequestAuthContext } from '../auth/guards/jwt-auth.guard.js';
@@ -30,27 +30,27 @@ export class AdminContainersController {
   }
 
   @Get(':containerId')
-  async get(@Param('containerId') containerId: string, @CurrentUser() user: UserEntity) {
+  async get(@Param('containerId') containerId: string, @CurrentUser() user: UserRecord) {
     return this.containerControl.getForAdmin(containerId, user.id);
   }
 
   @Post(':containerId/actions/start')
-  async start(@Param('containerId') containerId: string, @CurrentUser() user: UserEntity) {
+  async start(@Param('containerId') containerId: string, @CurrentUser() user: UserRecord) {
     return this.containerControl.actionForAdmin(containerId, 'start', user.id);
   }
 
   @Post(':containerId/actions/stop')
-  async stop(@Param('containerId') containerId: string, @CurrentUser() user: UserEntity) {
+  async stop(@Param('containerId') containerId: string, @CurrentUser() user: UserRecord) {
     return this.containerControl.actionForAdmin(containerId, 'stop', user.id);
   }
 
   @Post(':containerId/actions/restart')
-  async restart(@Param('containerId') containerId: string, @CurrentUser() user: UserEntity) {
+  async restart(@Param('containerId') containerId: string, @CurrentUser() user: UserRecord) {
     return this.containerControl.actionForAdmin(containerId, 'restart', user.id);
   }
 
   @Post(':containerId/actions/delete')
-  async delete(@Param('containerId') containerId: string, @CurrentUser() user: UserEntity) {
+  async delete(@Param('containerId') containerId: string, @CurrentUser() user: UserRecord) {
     return this.containerControl.actionForAdmin(containerId, 'delete', user.id);
   }
 
@@ -58,19 +58,19 @@ export class AdminContainersController {
   async updateMounts(
     @Param('containerId') containerId: string,
     @Body() body: unknown,
-    @CurrentUser() user: UserEntity,
+    @CurrentUser() user: UserRecord,
   ) {
     const mounts = zUpdateContainerMountsRequest.parse(body);
     return this.containerControl.actionForAdmin(containerId, 'updateMounts', user.id, mounts);
   }
 
   @Post(':containerId/actions/reconcile-ssh')
-  async reconcileSsh(@Param('containerId') containerId: string, @CurrentUser() user: UserEntity) {
+  async reconcileSsh(@Param('containerId') containerId: string, @CurrentUser() user: UserRecord) {
     return this.containerControl.actionForAdmin(containerId, 'reconcileSsh', user.id);
   }
 
   @Get(':containerId/stats')
-  async stats(@Param('containerId') containerId: string, @CurrentUser() user: UserEntity) {
+  async stats(@Param('containerId') containerId: string, @CurrentUser() user: UserRecord) {
     return this.containerControl.getStatsForAdmin(containerId, user.id);
   }
 
@@ -78,7 +78,7 @@ export class AdminContainersController {
   async execSession(
     @Param('containerId') containerId: string,
     @Body() body: unknown,
-    @CurrentUser() user: UserEntity,
+    @CurrentUser() user: UserRecord,
     @Req() httpRequest: { authContext?: RequestAuthContext },
   ) {
     const request = zExecSessionRequest.parse(body);

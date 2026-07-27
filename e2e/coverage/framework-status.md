@@ -1,20 +1,21 @@
 # CPU E2E framework status
 
-Date: 2026-07-17
+Date: 2026-07-27
 
 ## Current static status
 
 - The fixed-host live suite and mocked visual/snapshot suite have been removed.
-- The replacement runs a production Backend behind a real TLS edge with two
-  distinct systemd DinD nodes, cgroup v2, loop-backed XFS project quota, WSS
-  Agents, Agent-owned dockerd instances, VictoriaMetrics, a private registry,
+- The replacement runs one production Backend image as API/Gateway/Worker
+  roles behind a real TLS edge, backed by PostgreSQL, disposable Redis,
+  vmagent, and VictoriaMetrics, with two distinct systemd DinD nodes, cgroup
+  v2, loop-backed XFS project quota, WSS Agents, Agent-owned dockerd instances, a private registry,
   real storage clients, and production SSH/HTTP proxy binaries.
-- The executable inventory contains 230 implemented cases and no pending case:
-  210 behavioral cases, eight run-bound fixture cases, and 12 evidence cases.
-- Static validation maps exactly 151 HTTP surfaces across 28 controllers,
+- The executable inventory contains 236 implemented cases and no pending case:
+  216 behavioral cases, eight run-bound fixture cases, and 12 evidence cases.
+- Static validation maps exactly 153 HTTP surfaces across 29 controllers,
   20 frontend routes, 14 Agent task kinds, and four WebSocket paths. The exact
   HTTP inventory SHA-256 is
-  `d05c9cd9eb13fa0b18e8cfb25fda693aef4f978d2d606a03baa513ce9e89506e`.
+  `7321dfe34785478fffafd299b7a5af91401dd8b40029bec173c419d2a211fa5d`.
 - This is static-contract closure only. It does not evaluate runtime evidence
   and does not certify the current worktree for release.
 - Trace and video are disabled, screenshots are failure diagnostics only, and

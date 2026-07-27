@@ -1,14 +1,36 @@
 import { RemoteFsType } from '@nyabase/common';
 import { describe, expect, it, vi } from 'vitest';
-import type { UserEntity } from '../entities/user.entity.js';
+import type { UserRecord } from '../domain/domain-records.js';
 import { RemoteFsMountsController } from './remote-fs-mounts.controller.js';
 import type { RemoteFsMountsService } from './remote-fs-mounts.service.js';
 
 describe('RemoteFsMountsController request identities', () => {
+  it.each([128, 2_048])(
+    'projects %i mounts from one bulk list without per-mount assignment reads',
+    async (count) => {
+      const service = serviceMock();
+      service.listWithServerIds.mockResolvedValue(
+        Array.from({ length: count }, (_, index) => ({
+          mount: { id: `mount-${index}` },
+          serverIds: [`server-${index % 2}`],
+        })),
+      );
+      service.getMountStatuses.mockResolvedValue([]);
+      service.toDto.mockImplementation((mount) => mount);
+      const controller = new RemoteFsMountsController(
+        service as unknown as RemoteFsMountsService,
+      );
+
+      await expect(controller.list()).resolves.toHaveLength(count);
+      expect(service.listWithServerIds).toHaveBeenCalledOnce();
+      expect(service.getServerIds).not.toHaveBeenCalled();
+    },
+  );
+
   it('rejects every invalid route/query identity before repository or task work', async () => {
     const service = serviceMock();
     const controller = new RemoteFsMountsController(service as unknown as RemoteFsMountsService);
-    const actor = { id: 'admin-a' } as UserEntity;
+    const actor = { id: 'admin-a' } as UserRecord;
     const invalid = '../escape';
 
     await expect(controller.list(invalid)).rejects.toBeDefined();
@@ -53,7 +75,7 @@ describe('RemoteFsMountsController request identities', () => {
         clientName: 'admin',
         secret: 'AQAB==',
       },
-    }, { id: 'admin-a' } as UserEntity)).rejects.toBeDefined();
+    }, { id: 'admin-a' } as UserRecord)).rejects.toBeDefined();
     for (const operation of Object.values(service)) expect(operation).not.toHaveBeenCalled();
   });
 });
@@ -61,6 +83,7 @@ describe('RemoteFsMountsController request identities', () => {
 function serviceMock() {
   return {
     list: vi.fn(),
+    listWithServerIds: vi.fn(),
     findById: vi.fn(),
     getServerIds: vi.fn(),
     getMountStatuses: vi.fn(),

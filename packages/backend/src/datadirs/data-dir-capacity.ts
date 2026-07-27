@@ -1,8 +1,8 @@
 import { ConflictException } from '@nestjs/common';
-import { In, type EntityManager } from 'typeorm';
 import { MAX_MANAGED_DATA_DIRS_PER_AGENT } from '@nyabase/common';
-import { DataDirectoryEntity } from '../entities/data-directory.entity.js';
-import { RemoteFsServerAssignmentEntity } from '../entities/remote-fs-server-assignment.entity.js';
+import type { Transaction } from 'kysely';
+import type { NyabaseDatabase } from '../persistence-pg/database.types.js';
+import { StorageRepository } from '../storage/storage.repository.js';
 
 interface ProjectionOptions {
   /** Include a RemoteFS mount that this transaction is about to assign. */
@@ -18,26 +18,17 @@ interface ProjectionOptions {
  * source can already be mounted before its database-only finalizer runs.
  */
 export async function assertAgentDataDirCapacity(
-  manager: EntityManager,
+  storage: StorageRepository,
+  transaction: Transaction<NyabaseDatabase>,
   serverId: string,
   options: ProjectionOptions = {},
 ): Promise<void> {
-  const assignments = await manager.find(RemoteFsServerAssignmentEntity, {
-    where: { serverId },
-  });
-  const remoteMountIds = new Set(assignments.map((assignment) => assignment.remoteFsMountId));
-  if (options.includeRemoteMountId) remoteMountIds.add(options.includeRemoteMountId);
-  const [localCount, remoteCount] = await Promise.all([
-    manager.count(DataDirectoryEntity, {
-      where: { sourceKind: 'local', serverId },
-    }),
-    remoteMountIds.size === 0
-      ? Promise.resolve(0)
-      : manager.count(DataDirectoryEntity, {
-        where: { sourceKind: 'remote', sourceId: In([...remoteMountIds]) },
-      }),
-  ]);
-  const projected = localCount + remoteCount + (options.additionalRows ?? 0);
+  await storage.lockDataDirectoryCapacity(serverId, transaction);
+  const projected = await storage.countDataDirectoryProjection(
+    serverId,
+    options.includeRemoteMountId,
+    transaction,
+  ) + (options.additionalRows ?? 0);
   if (projected > MAX_MANAGED_DATA_DIRS_PER_AGENT) {
     throw new ConflictException({
       code: 'DATA_DIRECTORY_CAPACITY_REACHED',

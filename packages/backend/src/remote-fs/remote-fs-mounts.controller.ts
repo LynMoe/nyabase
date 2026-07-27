@@ -14,7 +14,7 @@ import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard.js';
 import { CapabilitiesGuard } from '../auth/guards/capabilities.guard.js';
 import { RequireCaps } from '../auth/decorators/require-caps.decorator.js';
 import { CurrentUser } from '../auth/decorators/current-user.decorator.js';
-import { UserEntity } from '../entities/user.entity.js';
+import type { UserRecord } from '../domain/domain-records.js';
 import {
   Capability,
   zCreateRemoteFsMountRequest,
@@ -36,19 +36,21 @@ export class RemoteFsMountsController {
   @RequireCaps(Capability.ManageServers)
   async list(@Query('serverId') serverId?: string) {
     const parsedServerId = serverId === undefined ? undefined : zResourceIdentity.parse(serverId);
-    const mounts = await this.remoteFsMountsService.list(parsedServerId);
+    const mounts = await this.remoteFsMountsService.listWithServerIds(parsedServerId);
     return Promise.all(
-      mounts.map(async (m) => {
-        const serverIds = await this.remoteFsMountsService.getServerIds(m.id);
-        const serverStatuses = await this.remoteFsMountsService.getMountStatuses(m.id, serverIds);
-        return this.remoteFsMountsService.toDto(m, serverIds, serverStatuses);
+      mounts.map(async ({ mount, serverIds }) => {
+        const serverStatuses = await this.remoteFsMountsService.getMountStatuses(
+          mount.id,
+          serverIds,
+        );
+        return this.remoteFsMountsService.toDto(mount, serverIds, serverStatuses);
       }),
     );
   }
 
   @Post()
   @RequireCaps(Capability.ManageServers)
-  async create(@Body() body: unknown, @CurrentUser() user: UserEntity) {
+  async create(@Body() body: unknown, @CurrentUser() user: UserRecord) {
     const dto = zCreateRemoteFsMountRequest.parse(body);
     const mount = await this.remoteFsMountsService.create(user.id, {
       name: dto.name,
@@ -76,7 +78,7 @@ export class RemoteFsMountsController {
 
   @Patch(':id')
   @RequireCaps(Capability.ManageServers)
-  async update(@Param('id') id: string, @Body() body: unknown, @CurrentUser() user: UserEntity) {
+  async update(@Param('id') id: string, @Body() body: unknown, @CurrentUser() user: UserRecord) {
     const mountId = zResourceIdentity.parse(id);
     const dto = zUpdateRemoteFsMountRequest.parse(body);
     const mount = await this.remoteFsMountsService.update(user.id, mountId, {
@@ -91,7 +93,7 @@ export class RemoteFsMountsController {
 
   @Delete(':id')
   @RequireCaps(Capability.ManageServers)
-  async remove(@Param('id') id: string, @CurrentUser() user: UserEntity) {
+  async remove(@Param('id') id: string, @CurrentUser() user: UserRecord) {
     return this.remoteFsMountsService.remove(user.id, zResourceIdentity.parse(id));
   }
 
@@ -110,7 +112,7 @@ export class RemoteFsMountsController {
   async assignServer(
     @Param('id') id: string,
     @Body() body: unknown,
-    @CurrentUser() user: UserEntity,
+    @CurrentUser() user: UserRecord,
   ) {
     const mountId = zResourceIdentity.parse(id);
     const { serverId } = zAssignServer.parse(body);
@@ -122,7 +124,7 @@ export class RemoteFsMountsController {
   async unassignServer(
     @Param('id') id: string,
     @Param('serverId') serverId: string,
-    @CurrentUser() user: UserEntity,
+    @CurrentUser() user: UserRecord,
   ) {
     return this.remoteFsMountsService.unassignServer(
       user.id,

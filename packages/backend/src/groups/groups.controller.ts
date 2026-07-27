@@ -15,7 +15,7 @@ import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard.js';
 import { CapabilitiesGuard } from '../auth/guards/capabilities.guard.js';
 import { RequireCaps } from '../auth/decorators/require-caps.decorator.js';
 import { CurrentUser } from '../auth/decorators/current-user.decorator.js';
-import { UserEntity } from '../entities/user.entity.js';
+import type { UserRecord } from '../domain/domain-records.js';
 import {
   Capability,
   zCreateGroupRequest, zUpdateAdminGroupRequest, zUpsertServerGrantRequest,
@@ -39,7 +39,7 @@ export class GroupsController {
 
   @Post()
   @RequireCaps(Capability.ManageGroups)
-  async create(@Body() body: unknown, @CurrentUser() user: UserEntity) {
+  async create(@Body() body: unknown, @CurrentUser() user: UserRecord) {
     const dto = zCreateGroupRequest.parse(body);
     return this.groupsService.create(dto, user.id);
   }
@@ -53,14 +53,14 @@ export class GroupsController {
 
   @Patch(':id')
   @RequireCaps(Capability.ManageGroups)
-  async update(@Param('id') id: string, @Body() body: unknown, @CurrentUser() user: UserEntity) {
+  async update(@Param('id') id: string, @Body() body: unknown, @CurrentUser() user: UserRecord) {
     const { expectedRevision, ...dto } = zUpdateAdminGroupRequest.parse(body);
     return this.groupsService.update(id, dto, user.id, expectedRevision);
   }
 
   @Delete(':id')
   @RequireCaps(Capability.ManageGroups)
-  async delete(@Param('id') id: string, @CurrentUser() user: UserEntity) {
+  async delete(@Param('id') id: string, @CurrentUser() user: UserRecord) {
     return this.groupsService.delete(id, user.id);
   }
 
@@ -76,7 +76,7 @@ export class GroupsController {
 
   @Post(':id/members')
   @RequireCaps(Capability.ManageGroups)
-  async addMember(@Param('id') id: string, @Body() body: unknown, @CurrentUser() user: UserEntity) {
+  async addMember(@Param('id') id: string, @Body() body: unknown, @CurrentUser() user: UserRecord) {
     const { userId } = zAddGroupMemberRequest.parse(body);
     const result = await this.groupsService.addMember(id, userId, user.id);
     return { ok: true, ...result };
@@ -84,7 +84,7 @@ export class GroupsController {
 
   @Delete(':id/members/:userId')
   @RequireCaps(Capability.ManageGroups)
-  async removeMember(@Param('id') id: string, @Param('userId') userId: string, @CurrentUser() user: UserEntity) {
+  async removeMember(@Param('id') id: string, @Param('userId') userId: string, @CurrentUser() user: UserRecord) {
     return this.groupsService.removeMember(id, userId, user.id);
   }
 
@@ -104,7 +104,7 @@ export class GroupsController {
     @Param('id') id: string,
     @Param('serverId') serverId: string,
     @Body() body: unknown,
-    @CurrentUser() user: UserEntity,
+    @CurrentUser() user: UserRecord,
   ) {
     const dto = zUpsertServerGrantRequest.parse(body);
     return this.groupsService.upsertGroupServerGrant(id, serverId, dto, user.id);
@@ -112,7 +112,7 @@ export class GroupsController {
 
   @Delete(':id/server-grants/:serverId')
   @RequireCaps(Capability.ManageGrants)
-  async deleteServerGrant(@Param('id') id: string, @Param('serverId') serverId: string, @CurrentUser() user: UserEntity) {
+  async deleteServerGrant(@Param('id') id: string, @Param('serverId') serverId: string, @CurrentUser() user: UserRecord) {
     return this.groupsService.deleteGroupServerGrant(id, serverId, user.id);
   }
 
@@ -131,7 +131,7 @@ export class GroupsController {
   async addImageGrant(
     @Param('id') id: string,
     @Body() body: unknown,
-    @CurrentUser() actor: UserEntity,
+    @CurrentUser() actor: UserRecord,
   ) {
     const { imageId, serverId } = zAddImageGrantRequest.parse(body);
     return this.groupsService.addGroupImageGrant(id, imageId, serverId, actor.id);
@@ -144,7 +144,7 @@ export class GroupsController {
     @Param('id') id: string,
     @Param('imageId') imageId: string,
     @Body() body: unknown,
-    @CurrentUser() actor: UserEntity,
+    @CurrentUser() actor: UserRecord,
   ) {
     const { serverIds } = zSyncImageGrantServersRequest.parse(body);
     return this.groupsService.syncGroupImageGrantsForServers(id, imageId, serverIds, actor.id);
@@ -157,7 +157,7 @@ export class GroupsController {
     @Param('id') id: string,
     @Param('imageId') imageId: string,
     @Param('serverId') serverId: string,
-    @CurrentUser() actor: UserEntity,
+    @CurrentUser() actor: UserRecord,
   ) {
     await this.groupsService.deleteGroupImageGrant(id, imageId, serverId, actor.id);
   }
@@ -177,7 +177,7 @@ export class GroupsController {
   async upsertMountSourceGrant(
     @Param('id') id: string,
     @Body() body: unknown,
-    @CurrentUser() actor: UserEntity,
+    @CurrentUser() actor: UserRecord,
   ) {
     const target = zMountSourceGrantTarget.parse(body);
     return this.groupsService.upsertGroupMountSourceGrant(actor.id, id, target);
@@ -191,7 +191,7 @@ export class GroupsController {
     @Param('sourceKind') sourceKind: string,
     @Param('sourceId') sourceId: string,
     @Query('serverId') serverId: string | undefined,
-    @CurrentUser() actor: UserEntity,
+    @CurrentUser() actor: UserRecord,
   ) {
     const target = parseMountSourceGrantTarget(sourceKind, sourceId, serverId);
     await this.groupsService.deleteGroupMountSourceGrant(actor.id, id, target);

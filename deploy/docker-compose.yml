@@ -1,33 +1,209 @@
+name: nyabase
+
+x-service-defaults: &service-defaults
+  restart: unless-stopped
+  init: true
+  stop_signal: SIGTERM
+  logging:
+    driver: json-file
+    options:
+      max-size: 10m
+      max-file: "3"
+
 services:
+  postgres:
+    <<: *service-defaults
+    image: postgres:18.4-bookworm@sha256:1961f96e6029a02c3812d7cb329a3b03a3ac2bb067058dec17b0f5596aca9296
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-nyabase}
+      POSTGRES_USER: ${POSTGRES_USER:-nyabase}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in deploy/.env}
+      POSTGRES_INITDB_ARGS: --data-checksums
+    volumes:
+      # PostgreSQL 18 stores its version-specific PGDATA below this mount.
+      - postgres-data:/var/lib/postgresql
+    cpus: ${POSTGRES_CPUS:-4.0}
+    mem_limit: ${POSTGRES_MEMORY_LIMIT:-4g}
+    pids_limit: ${POSTGRES_PIDS_LIMIT:-512}
+    shm_size: ${POSTGRES_SHM_SIZE:-256m}
+    networks:
+      - control-plane
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - pg_isready -U "$${POSTGRES_USER}" -d "$${POSTGRES_DB}" -h 127.0.0.1
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+    stop_grace_period: 1m
+
+  redis:
+    <<: *service-defaults
+    image: redis:8.2-bookworm@sha256:616bb446d5db225ddf786052834279e7c7222c48694d4451e8af22b8f5953b28
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?set REDIS_PASSWORD in deploy/.env}
+      REDIS_KEY_PREFIX: ${REDIS_KEY_PREFIX:-nyabase:}
+    command:
+      - /bin/sh
+      - -ec
+      - >-
+        exec redis-server
+        --save ''
+        --appendonly no
+        --maxmemory ${REDIS_MAXMEMORY:-512mb}
+        --maxmemory-policy noeviction
+        --user default off
+        --user nyabase on ">$${REDIS_PASSWORD}" "~$${REDIS_KEY_PREFIX}*" "&$${REDIS_KEY_PREFIX}*" +auth +ping +select +get +set +del +publish +subscribe +unsubscribe +eval +hget +hmget +hset +hdel +hincrby +pttl +pexpire
+    cpus: ${REDIS_CPUS:-2.0}
+    mem_limit: ${REDIS_MEMORY_LIMIT:-768m}
+    pids_limit: ${REDIS_PIDS_LIMIT:-256}
+    networks:
+      - control-plane
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - redis-cli -h 127.0.0.1 --user nyabase --pass "$${REDIS_PASSWORD}" --no-auth-warning ping | grep -qx PONG
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 5s
+    stop_grace_period: 30s
+
   victoriametrics:
-    image: victoriametrics/victoria-metrics:v1.101.0
-    container_name: nyabase-vm
-    restart: unless-stopped
+    <<: *service-defaults
+    image: victoriametrics/victoria-metrics:v1.148.0@sha256:407013e902f9a0ba1d4b2d4c077c47bbaf917c893c52ff39b19efe83a654afda
     ports:
+      # Keep the existing loopback-only operational endpoint.
       - "127.0.0.1:8428:8428"
     volumes:
       - vm-data:/victoria-metrics-data
     command:
-      - "--retentionPeriod=12"
-      - "--storageDataPath=/victoria-metrics-data"
+      - -storageDataPath=/victoria-metrics-data
+      - -retentionPeriod=${VM_RETENTION_PERIOD:-30d}
+      - -storage.minFreeDiskSpaceBytes=${VM_MIN_FREE_DISK_SPACE_BYTES:-5GiB}
+    cpus: ${VICTORIAMETRICS_CPUS:-4.0}
+    mem_limit: ${VICTORIAMETRICS_MEMORY_LIMIT:-4g}
+    pids_limit: ${VICTORIAMETRICS_PIDS_LIMIT:-512}
+    networks:
+      - telemetry
+    healthcheck:
+      test:
+        - CMD
+        - wget
+        - --spider
+        - --quiet
+        - http://127.0.0.1:8428/health
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+    stop_grace_period: 1m
+
+  vmagent:
+    <<: *service-defaults
+    image: victoriametrics/vmagent:v1.148.0@sha256:7da85e2d2fc24452979d0ff19b957901ba14e50217e7cc1de1146d3d5e698ab4
+    command:
+      - -httpListenAddr=:8429
+      - -remoteWrite.url=http://victoriametrics:8428/api/v1/write
+      - -remoteWrite.tmpDataPath=/vmagent-data
+      - -remoteWrite.maxDiskUsagePerURL=${VMAGENT_MAX_DISK_USAGE_PER_URL:-4GiB}
+    volumes:
+      - vmagent-data:/vmagent-data
+    cpus: ${VMAGENT_CPUS:-2.0}
+    mem_limit: ${VMAGENT_MEMORY_LIMIT:-1g}
+    pids_limit: ${VMAGENT_PIDS_LIMIT:-256}
+    networks:
+      - telemetry
+    healthcheck:
+      test:
+        - CMD
+        - wget
+        - --spider
+        - --quiet
+        - http://127.0.0.1:8429/health
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+    stop_grace_period: 1m
 
   backend:
+    <<: *service-defaults
     build:
       context: ..
       dockerfile: deploy/Dockerfile.backend
-    container_name: nyabase-backend
-    restart: unless-stopped
     ports:
+      # Preserve the existing public application/API/Agent gateway entrypoint.
       - "3001:3001"
     environment:
       NYABASE_CONFIG_FILE: /etc/nyabase/config.yaml
+      NYABASE_RUNTIME_ROLE: ${NYABASE_RUNTIME_ROLE:-all}
+      NYABASE_CONSOLE_PUBLIC_URL: ${NYABASE_CONSOLE_PUBLIC_URL:-}
+      DATABASE_URL: ${DATABASE_URL:?set DATABASE_URL in deploy/.env}
+      DB_POOL_MAX: ${DB_POOL_MAX:-20}
+      PG_APPLICATION_NAME: ${PG_APPLICATION_NAME:-nyabase-backend}
+      PG_CONNECTION_TIMEOUT_MS: ${PG_CONNECTION_TIMEOUT_MS:-5000}
+      DB_IDLE_TIMEOUT_MS: ${DB_IDLE_TIMEOUT_MS:-30000}
+      DB_STATEMENT_TIMEOUT_MS: ${DB_STATEMENT_TIMEOUT_MS:-15000}
+      PG_LOCK_TIMEOUT_MS: ${PG_LOCK_TIMEOUT_MS:-5000}
+      PG_IDLE_IN_TRANSACTION_TIMEOUT_MS: ${PG_IDLE_IN_TRANSACTION_TIMEOUT_MS:-30000}
+      PG_READINESS_TIMEOUT_MS: ${PG_READINESS_TIMEOUT_MS:-5000}
+      PG_SSL_MODE: ${PG_SSL_MODE:-disable}
+      PG_SSL_CA_FILE: ${PG_SSL_CA_FILE:-}
+      PG_SSL_SERVERNAME: ${PG_SSL_SERVERNAME:-}
+      DB_MIGRATIONS_RUN: ${DB_MIGRATIONS_RUN:-true}
+      REDIS_URL: ${REDIS_URL:?set REDIS_URL in deploy/.env}
+      REDIS_KEY_PREFIX: ${REDIS_KEY_PREFIX:-nyabase:}
+      REDIS_TLS_CA_FILE: ${REDIS_TLS_CA_FILE:-}
+      REDIS_TLS_SERVERNAME: ${REDIS_TLS_SERVERNAME:-}
+      VICTORIA_METRICS_URL: http://victoriametrics:8428
+      VMAGENT_URL: http://vmagent:8429
     volumes:
-      - backend-data:/data
-      # Copy deploy/config.example.yaml to deploy/config.yaml and set production secrets first.
+      # Copy config.example.yaml to config.yaml and set production secrets first.
       - ./config.yaml:/etc/nyabase/config.yaml:ro
+    read_only: true
+    tmpfs:
+      - /tmp:rw,nosuid,nodev,noexec,uid=10001,gid=10001,mode=1770,size=64m
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    cpus: ${BACKEND_CPUS:-4.0}
+    mem_limit: ${BACKEND_MEMORY_LIMIT:-2g}
+    pids_limit: ${BACKEND_PIDS_LIMIT:-512}
+    networks:
+      - edge
+      - control-plane
+      - telemetry
     depends_on:
-      - victoriametrics
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - >-
+          fetch('http://127.0.0.1:3001/api/health/ready')
+          .then((response) => {
+            if (!response.ok) process.exit(1);
+          })
+          .catch(() => process.exit(1))
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+    stop_grace_period: 1m
+
+networks:
+  edge:
+  control-plane:
+    internal: true
+  telemetry:
+    internal: true
 
 volumes:
+  postgres-data:
   vm-data:
-  backend-data:
+  vmagent-data:

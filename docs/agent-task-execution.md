@@ -84,23 +84,25 @@ treated as physical success or safe absence.
 The design supports:
 
 - lost or duplicate execute/result/accepted messages;
-- Backend process restart with its SQLite database intact;
+- any Backend API/Gateway/Worker process restart with PostgreSQL intact;
 - Agent process or host restart with no Agent recovery directory;
 - connection loss before, during, or after a physical effect;
 - a physical effect completing before its result is delivered;
 - finalizer rollback and duplicate terminal results;
 - repeated whole-handler execution.
 
-The deployment contract is one Backend instance and one authenticated Agent
-process per host. A host-global abstract Unix listener is a kernel-lifetime
-lock: a second process is rejected atomically and SIGKILL leaves no stale lock
-file. Agent hello includes a fingerprint derived from the host machine
+The deployment contract permits one all-role Backend process or multiple
+same-image API/Gateway/Worker processes, plus one authenticated Agent process
+per host. PostgreSQL owns commands, attempts, claims, outbox, observations, and
+monotonic Agent session generations; a stale Gateway generation cannot publish
+new evidence. A host-global abstract Unix listener remains a kernel-lifetime
+Agent lock: a second process is rejected atomically and SIGKILL leaves no stale
+lock file. Agent hello includes a fingerprint derived from the host machine
 identity; Backend binds it to the server and rejects a credential reused from a
 different host. The nyabase Docker daemon and Unix socket are dedicated to this
 Agent; another root process mutating that socket is outside the supported fault
 model. The deployed Agent unit uses `Restart=always` and
-`KillMode=control-group`. No distributed lease or fencing protocol is
-introduced.
+`KillMode=control-group`.
 
 If Agent never connects, a normal never-dispatched task expires as a proved
 no-effect failure after its bounded queue lifetime; unstarted reconciliation
@@ -256,15 +258,16 @@ An initializing or admitted slot is released only when its actual asynchronous
 work settles. Socket close and logical timeout do not free a reservation while
 an uncancellable database or proxy-snapshot build is still running. Console
 authorization is single-flight per session and globally bounded. It rechecks,
-in one current SQLite statement, active user status, container/server/runtime
-identity, active lifecycle, and either exact ownership or the live
-`ManageContainersAny` capability. Revocation removes the identity-matched
-session and sends `execClose` immediately instead of waiting for a WebSocket
-close handshake.
+in one current PostgreSQL statement, active user status,
+container/server/runtime identity, active lifecycle, and either exact ownership
+or the live `ManageContainersAny` capability. Agent-side process admission also
+locks the durable IAM policy/user/container fence until synchronous dispatch.
+Revocation removes the identity-matched session and sends `execClose`
+immediately instead of waiting for a WebSocket close handshake.
 
 Terminal history is retained for at least seven days. The retention worker
-uses bounded scalar/keyset scans and SQLite JSON extraction rather than loading
-legal-size request payloads. It never deletes a row that owns a resource lock,
+uses bounded PostgreSQL keyset scans and indexed JSONB predicates rather than
+loading legal-size request payloads. It never deletes a row that owns a resource claim,
 current domain projection, same-task retry authority, or current image cleanup
 generation proof. Startup, exhaustion, finalizer, supersession, cleanup, and
 quarantine retry scans likewise fetch bounded IDs or small projections first

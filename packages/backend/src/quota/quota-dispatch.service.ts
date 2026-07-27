@@ -1,15 +1,16 @@
 import { ConflictException, Injectable, NotFoundException } from '@nestjs/common';
-import { AgentTaskKind, UserStatus } from '@nyabase/common';
-import { DataSource, EntityManager } from 'typeorm';
+import {
+  AgentTaskKind,
+  MAX_SYNCHRONOUS_QUOTA_INTENTS_PER_MUTATION,
+  UserStatus,
+} from '@nyabase/common';
 import { v4 as uuidv4 } from 'uuid';
-import { AgentTasksService } from '../agent-tasks/agent-tasks.service.js';
+import { WorkflowEnqueuePort } from '../agent-tasks/workflow-enqueue.port.js';
 import { ResourceKeyService } from '../agent-tasks/resource-key.service.js';
-import { runSerializedTransaction } from '../database/serialized-transaction.js';
-import { AgentTaskEntity } from '../entities/agent-task.entity.js';
-import { QuotaDesiredEntity } from '../entities/quota-desired.entity.js';
-import { ResourceLockEntity } from '../entities/resource-lock.entity.js';
-import { ServerEntity } from '../entities/server.entity.js';
-import { UserEntity } from '../entities/user.entity.js';
+import { sql, type Transaction } from 'kysely';
+import type { NyabaseDatabase } from '../persistence-pg/database.types.js';
+import { PgTransactionManager } from '../persistence-pg/transaction.js';
+import { StorageRepository } from '../storage/storage.repository.js';
 
 export interface QuotaApplyRequest {
   serverId: string;
@@ -24,45 +25,111 @@ export interface QuotaApplyRequest {
 @Injectable()
 export class QuotaDispatchService {
   constructor(
-    private dataSource: DataSource,
-    private tasks: AgentTasksService,
-    private resourceKeys: ResourceKeyService,
+    private readonly transactions: PgTransactionManager,
+    private readonly storage: StorageRepository,
+    private readonly workflow: WorkflowEnqueuePort,
+    private readonly resourceKeys: ResourceKeyService,
   ) {}
 
   async apply(request: QuotaApplyRequest): Promise<string> {
-    return runSerializedTransaction(this.dataSource, (manager) =>
-      this.applyInTransaction(manager, request));
+    return this.transactions.run((transaction) =>
+      this.applyInTransaction(transaction, request));
   }
 
-  async applyInTransaction(manager: EntityManager, request: QuotaApplyRequest): Promise<string> {
-    const [server, user] = await Promise.all([
-      manager.findOneBy(ServerEntity, { id: request.serverId }),
-      manager.findOneBy(UserEntity, { id: request.userId }),
+  async applyInTransaction(
+    transaction: Transaction<NyabaseDatabase>,
+    request: QuotaApplyRequest,
+  ): Promise<string> {
+    return (await this.applyManyInTransaction(transaction, [request]))[0]!;
+  }
+
+  async applyManyInTransaction(
+    transaction: Transaction<NyabaseDatabase>,
+    requests: readonly QuotaApplyRequest[],
+  ): Promise<string[]> {
+    if (requests.length === 0) return [];
+    if (requests.length > MAX_SYNCHRONOUS_QUOTA_INTENTS_PER_MUTATION) {
+      throw new ConflictException({
+        code: 'QUOTA_FANOUT_LIMIT',
+        message:
+          `At most ${MAX_SYNCHRONOUS_QUOTA_INTENTS_PER_MUTATION} quota mutations `
+          + 'are supported per transaction',
+        requestedIntents: requests.length,
+        maxIntents: MAX_SYNCHRONOUS_QUOTA_INTENTS_PER_MUTATION,
+      });
+    }
+    const requestKeys = requests.map((request) =>
+      `${request.serverId}\0${request.userId}`);
+    if (new Set(requestKeys).size !== requestKeys.length) {
+      throw new ConflictException({
+        code: 'DUPLICATE_QUOTA_MUTATION',
+        message: 'A quota transaction may mutate each server/user pair only once',
+      });
+    }
+    const uniqueKeys = requestKeys.map((key) =>
+      `quota:${key.replace('\0', ':')}`).sort();
+    await sql`
+      SELECT pg_advisory_xact_lock(
+        1856214886,
+        hashtext(lock_key)
+      )
+      FROM unnest(${sql.val(uniqueKeys)}::text[]) AS locks(lock_key)
+      ORDER BY lock_key
+    `.execute(transaction);
+    const serverIds = [...new Set(requests.map((request) => request.serverId))];
+    const userIds = [...new Set(requests.map((request) => request.userId))];
+    const [servers, users] = await Promise.all([
+      transaction.selectFrom('infra.servers')
+        .select('id')
+        .where('id', 'in', serverIds)
+        .execute(),
+      transaction.selectFrom('iam.users')
+        .select(['id', 'status', 'numeric_id'])
+        .where('id', 'in', userIds)
+        .execute(),
     ]);
-    if (!server) throw new NotFoundException('Server not found');
-    if (!user) throw new NotFoundException('User not found');
-    if (user.status === UserStatus.Deleted) {
-      throw new ConflictException({
-        code: 'USER_DELETED',
-        message: 'A deleted user cannot receive quota intent',
-        userId: request.userId,
-      });
+    const knownServers = new Set(servers.map((server) => server.id));
+    const usersById = new Map(users.map((user) => [user.id, user]));
+    for (const request of requests) {
+      if (!knownServers.has(request.serverId)) {
+        throw new NotFoundException('Server not found');
+      }
+      const user = usersById.get(request.userId);
+      if (!user) throw new NotFoundException('User not found');
+      if (user.status === UserStatus.Deleted) {
+        throw new ConflictException({
+          code: 'USER_DELETED',
+          message: 'A deleted user cannot receive quota intent',
+          userId: request.userId,
+        });
+      }
+      if (
+        user.status === UserStatus.Deleting
+        && (request.allowDeleting !== true || request.diskBytes !== 0)
+      ) {
+        throw new ConflictException({
+          code: 'USER_DELETING',
+          message: 'A deleting user accepts only its internal quota drain intent',
+          userId: request.userId,
+        });
+      }
+      if (user.numeric_id !== request.numericUserId) {
+        throw new ConflictException(`User ${request.userId} numeric quota identity changed`);
+      }
     }
-    if (
-      user.status === UserStatus.Deleting
-      && (request.allowDeleting !== true || request.diskBytes !== 0)
-    ) {
-      throw new ConflictException({
-        code: 'USER_DELETING',
-        message: 'A deleting user accepts only its internal quota drain intent',
-        userId: request.userId,
-      });
+    const taskIds: string[] = [];
+    for (const request of requests) {
+      taskIds.push(await this.applyPreparedInTransaction(transaction, request));
     }
-    if (user.numericId !== request.numericUserId) {
-      throw new ConflictException(`User ${request.userId} numeric quota identity changed`);
-    }
+    return taskIds;
+  }
+
+  private async applyPreparedInTransaction(
+    transaction: Transaction<NyabaseDatabase>,
+    request: QuotaApplyRequest,
+  ): Promise<string> {
     const resourceKey = this.resourceKeys.quota(request.serverId, request.userId);
-    await this.tasks.supersedePendingForResourceInTransaction(manager, {
+    await this.workflow.supersedePendingForResourceInTransaction(transaction, {
       serverId: request.serverId,
       resourceType: 'quota',
       resourceId: request.userId,
@@ -72,35 +139,26 @@ export class QuotaDispatchService {
     // A sent/staged quota task or a container task may still own this shared
     // user quota. Never commit a new grant intent while an older physical
     // effect can still finish; the caller's business transaction must retry.
-    const held = await manager.findOne(ResourceLockEntity, { where: { resourceKey } });
+    const held = (await this.workflow.findResourceClaims(transaction, [resourceKey]))[0];
     if (held) {
-      const owner = await manager.findOne(AgentTaskEntity, { where: { id: held.taskId } });
       throw new ConflictException({
         code: 'QUOTA_MUTATION_IN_PROGRESS',
         message: `Quota for user ${request.userId} is being reconciled by task ${held.taskId}`,
-        taskKind: owner?.kind ?? null,
+        taskKind: (await transaction.selectFrom('workflow.tasks')
+          .select('kind')
+          .where('id', '=', held.taskId)
+          .executeTakeFirst())?.kind ?? null,
       });
     }
 
-    const existing = await manager.findOne(QuotaDesiredEntity, {
-      where: { serverId: request.serverId, userId: request.userId },
-    });
+    const existing = await this.storage.findQuotaDesired(
+      request.serverId,
+      request.userId,
+      transaction,
+    );
     const generation = (existing?.generation ?? 0) + 1;
-    const desired = manager.create(QuotaDesiredEntity, {
-      id: existing?.id ?? uuidv4(),
-      serverId: request.serverId,
-      userId: request.userId,
-      numericUserId: request.numericUserId,
-      limitBytes: request.diskBytes,
-      source: 'grant',
-      generation,
-      lastTaskId: null,
-      createdAt: existing?.createdAt,
-      updatedAt: new Date(),
-    });
-    await manager.save(QuotaDesiredEntity, desired);
-
-    const task = await this.tasks.enqueueInTransaction(manager, {
+    const desiredId = existing?.id ?? uuidv4();
+    const task = await this.workflow.enqueueInTransaction(transaction, {
       kind: AgentTaskKind.QuotaEnsure,
       serverId: request.serverId,
       resourceType: 'quota',
@@ -118,11 +176,21 @@ export class QuotaDispatchService {
         diskBytes: request.diskBytes,
       },
       resourceKeys: [resourceKey],
-      beforeCommit: async (taskManager, context) => {
-        await taskManager.update(QuotaDesiredEntity, desired.id, {
+      beforeCommit: async (taskTransaction, context) => {
+        const desired = await this.storage.upsertQuotaDesired({
+          id: desiredId,
+          serverId: request.serverId,
+          userId: request.userId,
+          numericUserId: request.numericUserId,
+          limitBytes: request.diskBytes,
+          generation,
           lastTaskId: context.taskId,
-          updatedAt: new Date(),
-        });
+        }, existing?.generation ?? null, taskTransaction);
+        if (!desired) {
+          throw new ConflictException(
+            'Quota desired state changed while preparing the Agent task; retry',
+          );
+        }
       },
     });
     return task.taskId;

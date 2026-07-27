@@ -1,9 +1,9 @@
-import { AuditAction, Capability, UserStatus } from '@nyabase/common';
+import { Capability, UserStatus } from '@nyabase/common';
 import { describe, expect, it, vi } from 'vitest';
 import { AuthController } from './auth.controller.js';
 
-describe('AuthController credential audit boundaries', () => {
-  it('audits successful credential lifecycle events with the durable principal and token identity', async () => {
+describe('AuthController credential delegation', () => {
+  it('delegates credential lifecycle events to the transaction-owning service', async () => {
     const user = {
       id: 'user-a',
       username: 'alice',
@@ -31,8 +31,7 @@ describe('AuthController credential audit boundaries', () => {
       userCapabilities: vi.fn().mockResolvedValue(new Set([Capability.ManageUsers])),
       getUserGroupSummaries: vi.fn().mockResolvedValue([]),
     };
-    const audit = { log: vi.fn().mockResolvedValue(undefined) };
-    const controller = new AuthController(auth as never, access as never, audit as never);
+    const controller = new AuthController(auth as never, access as never);
 
     await controller.login(
       { username: 'alice', password: 'correct horse battery staple' },
@@ -47,21 +46,17 @@ describe('AuthController credential audit boundaries', () => {
       'correct horse battery staple',
       '192.0.2.8',
     );
-    expect(audit.log.mock.calls).toEqual([
-      [user.id, AuditAction.UserLogin, user.id, 'user'],
-      [user.id, AuditAction.UserLogout, user.id, 'user'],
-      [user.id, AuditAction.CreateApiToken, token.id, 'api_token', { name: token.name }],
-      [user.id, AuditAction.DeleteApiToken, token.id, 'api_token', { name: token.name }],
-    ]);
+    expect(auth.logout).toHaveBeenCalledWith('refresh-token');
+    expect(auth.createApiToken).toHaveBeenCalledWith(user.id, token.name);
+    expect(auth.deleteApiToken).toHaveBeenCalledWith(user.id, token.id);
   });
 
-  it('does not invent a logout audit for an unknown or already-removed refresh session', async () => {
+  it('preserves idempotent logout delegation for an unknown refresh session', async () => {
     const auth = { logout: vi.fn().mockResolvedValue(null) };
-    const audit = { log: vi.fn() };
-    const controller = new AuthController(auth as never, {} as never, audit as never);
+    const controller = new AuthController(auth as never, {} as never);
 
     await controller.logout({ refreshToken: 'unknown-refresh-token' });
 
-    expect(audit.log).not.toHaveBeenCalled();
+    expect(auth.logout).toHaveBeenCalledWith('unknown-refresh-token');
   });
 });

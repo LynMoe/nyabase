@@ -17,6 +17,7 @@ import {
 import { basename, dirname, isAbsolute, join, resolve, sep } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { assertCleanManifest, manifestSchemaVersion } from './manifest-contract.mjs';
+import { validateMigrationDatabaseEvidence } from './migration-proof-contract.mjs';
 
 const scriptPath = fileURLToPath(import.meta.url);
 const e2eRoot = resolve(dirname(scriptPath), '..');
@@ -187,7 +188,7 @@ function validateFreshMigration(runtimeDir, runId, evidence) {
   const artifact = checkedPath(runtimeDir, event.artifactPath, 'fresh migration proof');
   invariant(event.artifactSha256 === sha256(artifact.bytes), 'fresh migration proof hash mismatch');
   const proof = parseJson(artifact.bytes, 'fresh migration proof');
-  const expectedVolume = `nyabase-e2e-${runId}-backend-data`;
+  const expectedVolume = `nyabase-e2e-${runId}-postgres-data`;
   invariant(
     proof.schemaVersion === 1 &&
       proof.runId === runId &&
@@ -198,16 +199,28 @@ function validateFreshMigration(runtimeDir, runId, evidence) {
   invariant(
     proof.claims?.volume?.name === expectedVolume &&
       proof.claims.volume.absentBeforeComposeCreate === true &&
-      proof.claims.volume.emptyBeforeBackendStart === true &&
+      proof.claims.volume.emptyBeforePostgresStart === true &&
       proof.claims.volume.runOwned === true,
     'fresh migration proof does not establish a cold run-owned database volume',
   );
   invariant(
     proof.claims?.backend?.nodeEnv === 'production' &&
-      proof.claims.backend.database?.driver === 'sqlite' &&
-      proof.claims.backend.database?.synchronize === false &&
-      proof.claims.backend.database?.migrationsRun === true,
+      proof.claims.backend.database?.driver === 'postgresql' &&
+      proof.claims.backend.database?.image === 'postgres:18.4-bookworm' &&
+      proof.claims.backend.database?.migrationsRun === true &&
+      Array.isArray(proof.claims.backend.runtimes) &&
+      ['api', 'gateway', 'worker'].every((role) =>
+        proof.claims.backend.runtimes.some((runtime) => runtime.role === role),
+      ),
     'fresh migration proof does not establish the production migration path',
+  );
+  const migration = validateMigrationDatabaseEvidence(
+    proof.claims.backend.database.migrationManifest,
+    proof.claims.backend.database,
+  );
+  invariant(
+    proof.claims.backend.database.migrationDigest === migration.digest,
+    'fresh migration proof digest does not bind its exact manifest/database',
   );
   invariant(
     isDate(proof.claims.volume.absenceObservedAt) &&
@@ -220,6 +233,9 @@ function validateFreshMigration(runtimeDir, runId, evidence) {
     volumeName: expectedVolume,
     absenceObservedAt: proof.claims.volume.absenceObservedAt,
     emptinessObservedAt: proof.claims.volume.emptinessObservedAt,
+    migrationDigest: migration.digest,
+    migrationCount: migration.migrationCount,
+    tableCount: migration.tableCount,
   };
 }
 
@@ -330,9 +346,10 @@ function loadCandidate(pointer, base = runtimeBase) {
   invariant(JSON.stringify(snapshot.source) === JSON.stringify(value.source), 'candidate source changed');
   invariant(snapshot.ledgerSha256 === value.ledgerSha256, 'candidate ledger changed');
   invariant(
-    snapshot.playwright.reportSha256 === value.playwrightReportSha256 &&
+      snapshot.playwright.reportSha256 === value.playwrightReportSha256 &&
       snapshot.cleanup.manifestSha256 === value.cleanupManifestSha256 &&
-      snapshot.freshMigration.artifactSha256 === value.freshMigrationArtifactSha256,
+      snapshot.freshMigration.artifactSha256 === value.freshMigrationArtifactSha256 &&
+      snapshot.freshMigration.migrationDigest === value.freshMigrationDigest,
     'candidate bound artifacts changed after acceptance',
   );
   return { pointer, receiptPath: receipt.path, receiptSha256: pointer.receiptSha256, value, snapshot };
@@ -408,6 +425,11 @@ export function validateConsecutivePair(previous, current, attempt) {
   invariant(
     previous.snapshot.freshMigration.volumeName !== current.freshMigration.volumeName,
     'consecutive Full runs reused the same database volume',
+  );
+  invariant(
+    shaPattern.test(previous.snapshot.freshMigration.migrationDigest ?? '') &&
+      previous.snapshot.freshMigration.migrationDigest === current.freshMigration.migrationDigest,
+    'consecutive Full runs used different migration manifests',
   );
   invariant(
     Date.parse(previous.value.completedAt) <= Date.parse(attempt.beganAt) &&
@@ -627,6 +649,7 @@ function writeCandidate(runtimeDir, attempt, snapshot, chainPath) {
     playwrightReportSha256: snapshot.playwright.reportSha256,
     cleanupManifestSha256: snapshot.cleanup.manifestSha256,
     freshMigrationArtifactSha256: snapshot.freshMigration.artifactSha256,
+    freshMigrationDigest: snapshot.freshMigration.migrationDigest,
   };
   const receiptBytes = atomicPrivateJson(receiptPath, receipt);
   const pointer = {

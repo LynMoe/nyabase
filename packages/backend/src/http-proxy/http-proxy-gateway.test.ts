@@ -2,6 +2,7 @@ import { HTTP_PROXY_SNAPSHOT_STALE_AFTER_MS } from '@nyabase/common';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { WebSocket } from 'ws';
 import { EventEmitter } from 'events';
+import { performance } from 'node:perf_hooks';
 import { HttpProxyGateway, MAX_HTTP_PROXY_CLIENTS } from './http-proxy-gateway.js';
 
 const TEST_TOKEN = 'h'.repeat(64);
@@ -41,6 +42,32 @@ describe('HttpProxyGateway status projection defenses', () => {
 describe('HttpProxyGateway snapshot broadcast coalescing', () => {
   beforeEach(() => vi.useFakeTimers());
   afterEach(() => vi.useRealTimers());
+
+  it('keeps the initial-build deadline invariant across wall-clock jumps', async () => {
+    let release!: (value: object) => void;
+    const service = {
+      buildSnapshot: vi.fn()
+        .mockImplementationOnce(() => new Promise<object>((resolve) => { release = resolve; }))
+        .mockResolvedValueOnce({ generation: 2 }),
+    };
+    const gateway = makeGateway(service);
+    const client = { readyState: WebSocket.OPEN as number, terminate: vi.fn() };
+    const build = (gateway as unknown as {
+      buildInitialSnapshotBefore(deadline: number, ws: typeof client): Promise<object>;
+    }).buildInitialSnapshotBefore(performance.now() + 100, client);
+    vi.setSystemTime(new Date('2020-01-01T00:00:00Z'));
+    vi.advanceTimersByTime(101);
+    expect(client.terminate).toHaveBeenCalledOnce();
+    release({ generation: 1 });
+    await expect(build).rejects.toThrow('deadline exceeded');
+
+    vi.setSystemTime(new Date('2099-01-01T00:00:00Z'));
+    await expect((gateway as unknown as {
+      buildInitialSnapshotBefore(deadline: number, ws: typeof client): Promise<object>;
+    }).buildInitialSnapshotBefore(performance.now() + 100, client))
+      .resolves.toEqual({ generation: 2 });
+    gateway.onModuleDestroy();
+  });
 
   it('reserves only the bounded number of active or initializing proxy slots', async () => {
     const service = { buildSnapshot: vi.fn() };

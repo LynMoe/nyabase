@@ -1,8 +1,7 @@
 import { Injectable } from '@nestjs/common';
 import * as path from 'node:path';
-import { DataSource, In, type EntityManager } from 'typeorm';
 import { isDeepStrictEqual } from 'node:util';
-import { v4 as uuidv4 } from 'uuid';
+import { randomUUID } from 'node:crypto';
 import {
   AgentTaskKind,
   AgentTaskStatus,
@@ -11,42 +10,46 @@ import {
   ContainerPhase,
   ContainerPowerIntent,
   ContainerStatus,
+  LABEL,
   MAX_ACTIVE_RUNTIME_CLEANUP_CLAIMS_PER_SERVER,
   ServerStatus,
-  LABEL,
   parseAgentTaskPayload,
   type ContainerMountSpec,
   type ContainerRuntimeAbsentTaskPayload,
   type ContainerSnapshot,
 } from '@nyabase/common';
-import { AgentTasksService } from '../agent-tasks/agent-tasks.service.js';
+import type { Transaction } from 'kysely';
+import { WorkflowEnqueuePort } from '../agent-tasks/workflow-enqueue.port.js';
 import { ResourceKeyService } from '../agent-tasks/resource-key.service.js';
-import { ResourceLockedException } from '../agent-tasks/resource-lock.service.js';
+import { ResourceLockedException } from '../agent-tasks/resource-lock.error.js';
+import {
+  WorkflowRepository,
+  type WorkflowTaskRecord,
+} from '../agent-tasks/workflow.repository.js';
 import {
   monotonicReuseGuard,
   networkClaimReuseKey,
 } from '../common/monotonic-reuse-guard.js';
-import { runSerializedTransaction } from '../database/serialized-transaction.js';
-import { ContainerDesiredSpecEntity } from '../entities/container-desired-spec.entity.js';
-import { ContainerEntity } from '../entities/container.entity.js';
-import { ContainerLifecycleEntity } from '../entities/container-lifecycle.entity.js';
-import { QuotaDesiredEntity } from '../entities/quota-desired.entity.js';
-import { NetworkAddressClaimEntity } from '../entities/network-address-claim.entity.js';
-import { AgentTaskEntity } from '../entities/agent-task.entity.js';
+import { MAX_NETWORK_ADDRESS_CLAIMS_GLOBAL } from '../common/network-claim.constants.js';
 import {
-  AGENT_INVENTORY_FAULT_QUARANTINE_CODE,
-  ServerEntity,
-} from '../entities/server.entity.js';
-import {
-  assertNetworkClaimCapacity,
-  gcExpiredNetworkClaims,
-} from '../common/network-claim-ledger.js';
+  ContainerControlRepository,
+  type ContainerAggregate,
+  type ContainerNetworkClaimRecord,
+} from '../containers/container-control.repository.js';
 import {
   ContainerMountIntegrityError,
   resolveContainerMountIntegrity,
 } from '../containers/container-mount-integrity.js';
+import type { NyabaseDatabase } from '../persistence-pg/database.types.js';
+import { PgTransactionManager } from '../persistence-pg/transaction.js';
+
+const INVENTORY_QUARANTINE_CODE = 'AGENT_INVENTORY_FAULT';
+const NETWORK_CLAIM_GC_BATCH = 4_096;
 
 class RuntimeCleanupLedgerCorruptionError extends Error {}
+class RuntimeDriftFenceConflictError extends Error {}
+
+const RUNTIME_DRIFT_FENCE_MAX_ATTEMPTS = 3;
 
 export interface RuntimeDriftReconcileResult {
   taskIds: string[];
@@ -56,15 +59,16 @@ export interface RuntimeDriftReconcileResult {
 }
 
 /**
- * Converts one authoritative full Agent inventory into durable convergence
- * work. The Backend is the sole state machine: the Agent receives only exact,
- * replayable physical effects and keeps no recovery journal.
+ * Converts one authoritative Agent inventory into PostgreSQL-owned convergence
+ * tasks and exact runtime cleanup claims.
  */
 @Injectable()
 export class RuntimeDriftReconcilerService {
   constructor(
-    private readonly dataSource: DataSource,
-    private readonly tasks: AgentTasksService,
+    private readonly transactions: PgTransactionManager,
+    private readonly containers: ContainerControlRepository,
+    private readonly workflow: WorkflowEnqueuePort,
+    private readonly workflowRepository: WorkflowRepository,
     private readonly resourceKeys: ResourceKeyService,
   ) {}
 
@@ -73,557 +77,518 @@ export class RuntimeDriftReconcilerService {
     snapshots: readonly ContainerSnapshot[],
     dockerRoot: string,
   ): Promise<RuntimeDriftReconcileResult> {
-    return runSerializedTransaction(this.dataSource, async (manager) => {
+    for (let attempt = 1; ; attempt += 1) {
       try {
-      await gcExpiredNetworkClaims(manager);
-      const claimedIds = [...new Set(snapshots.map((snapshot) => this.productId(snapshot)))];
-      const [onServer, claimed] = await Promise.all([
-        manager.find(ContainerEntity, { where: { serverId } }),
-        claimedIds.length === 0
-          ? Promise.resolve([])
-          : manager.find(ContainerEntity, { where: { id: In(claimedIds) } }),
-      ]);
-      const containers = new Map<string, ContainerEntity>();
-      for (const container of [...onServer, ...claimed]) containers.set(container.id, container);
-      const ids = [...containers.keys()];
-      const [lifecycles, desiredSpecs, containerClaims, durableServer] = await Promise.all([
-        ids.length === 0
-          ? Promise.resolve([])
-          : manager.find(ContainerLifecycleEntity, { where: { containerId: In(ids) } }),
-        ids.length === 0
-          ? Promise.resolve([])
-          : manager.find(ContainerDesiredSpecEntity, { where: { containerId: In(ids) } }),
-        ids.length === 0
-          ? Promise.resolve([])
-          : manager.find(NetworkAddressClaimEntity, {
-            where: { ownerKind: 'container', ownerId: In(ids), state: 'active' },
-          }),
-        manager.findOneBy(ServerEntity, { id: serverId }),
-      ]);
-      if (!durableServer?.macvlanCidr) throw new Error('Server network identity is not bound');
-      const lifecycleById = new Map(lifecycles.map((row) => [row.containerId, row]));
-      const desiredById = new Map(desiredSpecs.map((row) => [row.containerId, row]));
-      const claimByContainerId = new Map(containerClaims.map((claim) => [claim.ownerId, claim]));
-      const reportedByProduct = this.groupByProduct(snapshots);
-      const taskIds: string[] = [];
-      const failedContainerIds: string[] = [];
-      let claimsChanged = false;
-
-      for (const [containerId, reported] of [...reportedByProduct.entries()].sort(([a], [b]) => a.localeCompare(b))) {
-        const container = containers.get(containerId);
-        const lifecycle = lifecycleById.get(containerId);
-        const belongsHere = Boolean(
-          container
-          && container.serverId === serverId
-          && lifecycle,
-        );
-
-        if (!belongsHere) {
-          const cleanup = await this.scheduleRuntimeCleanups(
-            manager,
-            serverId,
-            durableServer.macvlanCidr,
-            reported,
-            dockerRoot,
-          );
-          claimsChanged ||= cleanup.claimsChanged;
-          taskIds.push(...cleanup.taskIds);
-          continue;
+        return await this.transactions.run(async (transaction) => {
+          try {
+        await this.gcExpiredClaims(transaction);
+        const productIds = [...new Set(
+          snapshots.map((snapshot) => this.productId(snapshot)),
+        )];
+        const [onServer, claimed, server, claims] = await Promise.all([
+          this.containers.list({ serverId }, transaction),
+          productIds.length === 0
+            ? Promise.resolve([])
+            : this.containers.findByIds(productIds, transaction),
+          transaction.selectFrom('infra.servers')
+            .select(['id', 'macvlan_cidr'])
+            .where('id', '=', serverId)
+            .executeTakeFirst(),
+          this.containers.activeNetworkClaims({}, transaction),
+        ]);
+        if (!server?.macvlan_cidr) {
+          throw new Error('Server network identity is not bound');
         }
+        const aggregateById = new Map(
+          [...onServer, ...claimed].map((container) => [container.id, container]),
+        );
+        const activeTasksById = await this.workflowRepository.findTasks(
+          [...new Set([...aggregateById.values()]
+            .flatMap((container) => container.activeTaskId ? [container.activeTaskId] : []))],
+          transaction,
+        );
+        const claimByContainer = new Map(claims
+          .filter((claim) => claim.ownerKind === 'container' && claim.containerId)
+          .map((claim) => [claim.containerId!, claim]));
+        const reportedByProduct = this.groupByProduct(snapshots);
+        const taskIds: string[] = [];
+        const failedContainerIds: string[] = [];
+        let claimsChanged = false;
 
-        // A user/high-level task owns this resource until its finalizer commits.
-        // A report observed in that interval must neither guess its canonical
-        // runtime nor supersede its durable physical intent. Conversely, a
-        // transition phase without an owner cannot make progress and must not
-        // remain an implicit forever-busy state.
-        if (lifecycle!.activeTaskId) {
-          const activeTask = await manager.findOneBy(AgentTaskEntity, { id: lifecycle!.activeTaskId });
-          if (!activeTask || activeTask.status !== AgentTaskStatus.Pending) {
+        for (const [containerId, reported] of [...reportedByProduct.entries()]
+          .sort(([left], [right]) => left.localeCompare(right))) {
+          const container = aggregateById.get(containerId);
+          if (!container || container.serverId !== serverId) {
             const cleanup = await this.scheduleRuntimeCleanups(
-              manager,
+              transaction,
               serverId,
-              durableServer.macvlanCidr,
+              server.macvlan_cidr,
               reported,
               dockerRoot,
             );
-            claimsChanged ||= cleanup.claimsChanged;
             taskIds.push(...cleanup.taskIds);
-            await this.markTransitionOwnerMissing(manager, lifecycle!);
-            failedContainerIds.push(containerId);
+            claimsChanged ||= cleanup.claimsChanged;
             continue;
           }
-          const desired = desiredById.get(containerId);
-          const exactContainerClaim = claimByContainerId.get(containerId);
-          const canonical = desired
-            ? reported.find((snapshot) => this.isCanonical(
-                snapshot,
-                lifecycle!,
-                desired,
-                exactContainerClaim?.address ?? null,
-              ))
-            : undefined;
-          if (canonical && desired) {
-            const recovery = await this.prioritizePowerRecoveryAheadOfUndispatchedSsh(
-              manager,
-              container!,
-              desired,
-              lifecycle!,
-              activeTask,
-              canonical,
-              dockerRoot,
-            );
-            if (recovery) {
-              claimsChanged = await this.releaseCanonicalRuntimeClaims(
-                manager,
-                serverId,
-                canonical.runtime.runtimeId,
-              ) || claimsChanged;
+          const claim = claimByContainer.get(container.id);
+          const canonical = reported.find((snapshot) =>
+            this.isCanonical(snapshot, container, claim?.address ?? null));
+
+          if (container.activeTaskId) {
+            const active = activeTasksById.get(container.activeTaskId);
+            if (!active || active.status !== AgentTaskStatus.Pending) {
               const cleanup = await this.scheduleRuntimeCleanups(
-                manager,
+                transaction, serverId, server.macvlan_cidr, reported, dockerRoot,
+              );
+              taskIds.push(...cleanup.taskIds);
+              claimsChanged ||= cleanup.claimsChanged;
+              await this.markFailed(
+                transaction,
+                container,
+                'runtime_lifecycle_owner_missing',
+                `Container lifecycle is ${container.lifecyclePhase} but has no active durable task owner`,
+              );
+              failedContainerIds.push(container.id);
+              continue;
+            }
+            const prioritized = canonical
+              ? await this.prioritizePowerAheadOfSsh(
+                transaction,
+                container,
+                active,
+                canonical,
+                dockerRoot,
+              )
+              : null;
+            if (prioritized) {
+              if (prioritized.taskId) taskIds.push(prioritized.taskId);
+              if (prioritized.failed) failedContainerIds.push(container.id);
+              const cleanup = await this.scheduleRuntimeCleanups(
+                transaction,
                 serverId,
-                durableServer.macvlanCidr,
+                server.macvlan_cidr,
                 reported.filter((snapshot) => snapshot !== canonical),
                 dockerRoot,
               );
-              claimsChanged ||= cleanup.claimsChanged;
               taskIds.push(...cleanup.taskIds);
-              if (recovery.taskId) taskIds.push(recovery.taskId);
-              if (recovery.failed) failedContainerIds.push(containerId);
+              claimsChanged ||= cleanup.claimsChanged;
               continue;
             }
-          }
-          const taskOwnedRuntimeId = lifecycle!.boundRuntimeId
-            ?? this.stagedRuntimeId(activeTask);
-          if (!taskOwnedRuntimeId) {
-            if (this.isUnboundDeleteTask(activeTask)) {
-              // The immutable delete task cannot safely claim success while a
-              // product-labelled residual exists. Clean every exact runtime
-              // under runtime locks first; the same delete task then replays
-              // and freshly proves product absence.
-              const cleanup = await this.scheduleRuntimeCleanups(
-                manager,
-                serverId,
-                durableServer.macvlanCidr,
-                reported,
-                dockerRoot,
-              );
-              claimsChanged ||= cleanup.claimsChanged;
-              taskIds.push(...cleanup.taskIds);
+            const ownedRuntimeId = container.boundRuntimeId
+              ?? this.stagedRuntimeId(active);
+            if (!ownedRuntimeId) {
+              if (this.isUnboundDeleteTask(active)) {
+                const cleanup = await this.scheduleRuntimeCleanups(
+                  transaction, serverId, server.macvlan_cidr, reported, dockerRoot,
+                );
+                taskIds.push(...cleanup.taskIds);
+                claimsChanged ||= cleanup.claimsChanged;
+              } else {
+                claimsChanged = await this.ensureRuntimeClaims(
+                  transaction, serverId, server.macvlan_cidr, reported, dockerRoot,
+                ) || claimsChanged;
+              }
               continue;
             }
-            // During create execution no report-side heuristic may guess which
-            // duplicate is owned by the in-flight task. Claim every address to
-            // prevent reuse; the immutable Agent result chooses the provisional
-            // canonical runtime on a later report.
-            claimsChanged = await this.ensureRuntimeClaims(
-              manager,
+            const owned = reported.find((snapshot) =>
+              snapshot.runtime.runtimeId === ownedRuntimeId);
+            if (!owned || claim?.address === owned.runtime.ip) {
+              claimsChanged = await this.releaseRuntimeClaim(
+                transaction, serverId, ownedRuntimeId,
+              ) || claimsChanged;
+            } else {
+              claimsChanged = await this.ensureRuntimeClaims(
+                transaction, serverId, server.macvlan_cidr, [owned], dockerRoot,
+              ) || claimsChanged;
+            }
+            const cleanup = await this.scheduleRuntimeCleanups(
+              transaction,
               serverId,
-              durableServer.macvlanCidr,
-              reported,
+              server.macvlan_cidr,
+              reported.filter((snapshot) => snapshot !== owned),
               dockerRoot,
-            ) || claimsChanged;
+            );
+            taskIds.push(...cleanup.taskIds);
+            claimsChanged ||= cleanup.claimsChanged;
             continue;
           }
-          const taskOwnedSnapshot = reported.find(
-            (snapshot) => snapshot.runtime.runtimeId === taskOwnedRuntimeId,
-          );
-          const extras = reported.filter((snapshot) => snapshot !== taskOwnedSnapshot);
-          if (
-            !taskOwnedSnapshot
-            || exactContainerClaim?.address === taskOwnedSnapshot.runtime.ip
-          ) {
-            // Absence, or presence on the exact durable container address,
-            // makes any cleanup-only claims for this runtime obsolete.
-            claimsChanged = await this.releaseCanonicalRuntimeClaims(
-              manager,
-              serverId,
-              taskOwnedRuntimeId,
-            ) || claimsChanged;
-          } else {
-            // A staged/bound runtime on a different address is still owned by
-            // the high-level task, so do not race it with cleanup. Claim the
-            // observed address first and retain every historical claim until
-            // the finalizer commits and a later report chooses canonical or
-            // cleanup state.
-            claimsChanged = await this.ensureRuntimeClaims(
-              manager,
-              serverId,
-              durableServer.macvlanCidr,
-              [taskOwnedSnapshot],
-              dockerRoot,
-            ) || claimsChanged;
-          }
-          const cleanup = await this.scheduleRuntimeCleanups(
-            manager,
-            serverId,
-            durableServer.macvlanCidr,
-            extras,
-            dockerRoot,
-          );
-          claimsChanged ||= cleanup.claimsChanged;
-          taskIds.push(...cleanup.taskIds);
-          continue;
-        }
-        if (this.isTransitionPhase(lifecycle!.phase)) {
-          const cleanup = await this.scheduleRuntimeCleanups(
-            manager,
-            serverId,
-            durableServer.macvlanCidr,
-            reported,
-            dockerRoot,
-          );
-          claimsChanged ||= cleanup.claimsChanged;
-          taskIds.push(...cleanup.taskIds);
-          await this.markTransitionOwnerMissing(manager, lifecycle!);
-          failedContainerIds.push(containerId);
-          continue;
-        }
 
-        const desired = desiredById.get(containerId);
-        if (!desired) {
-          const cleanup = await this.scheduleRuntimeCleanups(
-            manager,
-            serverId,
-            durableServer.macvlanCidr,
-            reported,
-            dockerRoot,
-          );
-          claimsChanged ||= cleanup.claimsChanged;
-          taskIds.push(...cleanup.taskIds);
-          if (lifecycle!.phase === ContainerPhase.Active) {
-            await this.markFailed(
-              manager,
-              lifecycle!,
-              'runtime_desired_missing',
-              'Container desired state is missing during authoritative runtime reconciliation',
+          if (this.isTransitionPhase(container.lifecyclePhase)) {
+            const cleanup = await this.scheduleRuntimeCleanups(
+              transaction, serverId, server.macvlan_cidr, reported, dockerRoot,
             );
-            failedContainerIds.push(containerId);
+            taskIds.push(...cleanup.taskIds);
+            claimsChanged ||= cleanup.claimsChanged;
+            await this.markFailed(
+              transaction,
+              container,
+              'runtime_lifecycle_owner_missing',
+              `Container lifecycle is ${container.lifecyclePhase} but has no active durable task owner`,
+            );
+            failedContainerIds.push(container.id);
+            continue;
           }
-          continue;
+
+          if (canonical) {
+            claimsChanged = await this.releaseRuntimeClaim(
+              transaction,
+              serverId,
+              canonical.runtime.runtimeId,
+            ) || claimsChanged;
+          }
+          const extras = reported.filter((snapshot) => snapshot !== canonical);
+          if (extras.length > 0) {
+            const cleanup = await this.scheduleRuntimeCleanups(
+              transaction, serverId, server.macvlan_cidr, extras, dockerRoot,
+            );
+            taskIds.push(...cleanup.taskIds);
+            claimsChanged ||= cleanup.claimsChanged;
+          }
+          if (container.lifecyclePhase === ContainerPhase.Active && !canonical) {
+            await this.markRuntimeMissing(transaction, container, reported);
+            failedContainerIds.push(container.id);
+            continue;
+          }
+          if (
+            container.lifecyclePhase === ContainerPhase.Active
+            && canonical
+            && extras.length === 0
+          ) {
+            const recovery = await this.schedulePowerRecovery(
+              transaction,
+              container,
+              canonical,
+              dockerRoot,
+            );
+            if (recovery.taskId) taskIds.push(recovery.taskId);
+            if (recovery.failed) failedContainerIds.push(container.id);
+          }
         }
 
-        const canonical = reported.find((snapshot) => this.isCanonical(
-          snapshot,
-          lifecycle!,
-          desired,
-          claimByContainerId.get(containerId)?.address ?? null,
-        ));
-        if (canonical) {
-          claimsChanged = await this.releaseCanonicalRuntimeClaims(
-            manager,
-            serverId,
-            canonical.runtime.runtimeId,
-          ) || claimsChanged;
-        }
-        const extras = reported.filter((snapshot) => snapshot !== canonical);
-        if (extras.length > 0) {
-          const cleanup = await this.scheduleRuntimeCleanups(
-            manager,
-            serverId,
-            durableServer.macvlanCidr,
-            extras,
-            dockerRoot,
-          );
-          claimsChanged ||= cleanup.claimsChanged;
-          taskIds.push(...cleanup.taskIds);
-        }
-
-        if (lifecycle!.phase === ContainerPhase.Active && !canonical) {
-          await this.markRuntimeMissing(manager, lifecycle!, reported);
-          failedContainerIds.push(containerId);
-          continue;
-        }
-
-        if (
-          lifecycle!.phase === ContainerPhase.Active
-          && canonical
-          && extras.length === 0
-        ) {
-          const powerRecovery = await this.schedulePowerRecovery(
-            manager,
-            container!,
-            desired,
-            lifecycle!,
-            canonical,
-            dockerRoot,
-          );
-          if (powerRecovery.taskId) taskIds.push(powerRecovery.taskId);
-          if (powerRecovery.failed) failedContainerIds.push(containerId);
-        }
-      }
-
-      // Absence from a successfully collected full inventory is authoritative.
-      // It is never left as an in-memory/UI-only drift flag.
-      for (const container of onServer) {
-        const lifecycle = lifecycleById.get(container.id);
-        if (!lifecycle || lifecycle.activeTaskId || reportedByProduct.has(container.id)) continue;
-        if (this.isTransitionPhase(lifecycle.phase)) {
-          await this.markTransitionOwnerMissing(manager, lifecycle);
+        for (const container of onServer) {
+          if (
+            container.activeTaskId
+            || reportedByProduct.has(container.id)
+          ) continue;
+          if (this.isTransitionPhase(container.lifecyclePhase)) {
+            await this.markFailed(
+              transaction,
+              container,
+              'runtime_lifecycle_owner_missing',
+              `Container lifecycle is ${container.lifecyclePhase} but has no active durable task owner`,
+            );
+            failedContainerIds.push(container.id);
+            continue;
+          }
+          if (
+            container.lifecyclePhase !== ContainerPhase.Active
+            && !(
+              container.lifecyclePhase === ContainerPhase.Failed
+              && container.failureCode === 'runtime_power_state_unsupported'
+            )
+          ) continue;
+          await this.markRuntimeMissing(transaction, container, []);
           failedContainerIds.push(container.id);
-          continue;
         }
-        const canRefineUnsupportedPowerFailure =
-          lifecycle.phase === ContainerPhase.Failed
-          && lifecycle.failureCode === 'runtime_power_state_unsupported';
-        if (lifecycle.phase !== ContainerPhase.Active && !canRefineUnsupportedPowerFailure) continue;
-        if (!desiredById.has(container.id)) {
-          await this.markFailed(
-            manager,
-            lifecycle,
-            'runtime_desired_missing',
-            'Container desired state is missing during authoritative runtime reconciliation',
-          );
-        } else {
-          await this.markRuntimeMissing(manager, lifecycle, []);
-        }
-        failedContainerIds.push(container.id);
-      }
 
-      const absentCleanupTaskIds = await this.recoverAbsentRuntimeClaims(
-        manager,
-        serverId,
-        snapshots,
-      );
-      taskIds.push(...absentCleanupTaskIds);
-
-      return {
-        taskIds: [...new Set(taskIds)],
-        failedContainerIds: [...new Set(failedContainerIds)],
-        claimsChanged,
-        quarantineReason: null,
-      };
-      } catch (error) {
-        // Only impossible durable/authoritative evidence is an Agent fault.
-        // Global ledger pressure is Backend capacity backpressure: bubble it
-        // so the socket is retired and a later report can run bounded GC and
-        // retry without requiring an administrative quarantine reset.
-        if (!(error instanceof RuntimeCleanupLedgerCorruptionError)) throw error;
-        await manager.update(ServerEntity, serverId, {
-          status: ServerStatus.AgentQuarantined,
-          quarantineCode: AGENT_INVENTORY_FAULT_QUARANTINE_CODE,
-          quarantineMessage: error.message.slice(0, 2048),
-        });
+        taskIds.push(...await this.recoverAbsentRuntimeClaims(
+          transaction,
+          serverId,
+          snapshots,
+        ));
         return {
-          taskIds: [],
-          failedContainerIds: [],
-          // Conservatively revoke all route snapshots after a cleanup-ledger
-          // corruption even if this report did not insert a new claim.
-          claimsChanged: true,
-          quarantineReason: error.message.slice(0, 2048),
+          taskIds: [...new Set(taskIds)],
+          failedContainerIds: [...new Set(failedContainerIds)],
+          claimsChanged,
+          quarantineReason: null,
         };
+          } catch (error) {
+            if (!(error instanceof RuntimeCleanupLedgerCorruptionError)) throw error;
+            const reason = error.message.slice(0, 2048);
+            await transaction.updateTable('infra.servers').set({
+              status: ServerStatus.AgentQuarantined,
+              quarantine_code: INVENTORY_QUARANTINE_CODE,
+              quarantine_message: reason,
+            }).where('id', '=', serverId).executeTakeFirstOrThrow();
+            return {
+              taskIds: [],
+              failedContainerIds: [],
+              claimsChanged: true,
+              quarantineReason: reason,
+            };
+          }
+        });
+      } catch (error) {
+        // Task-result projection and inventory reconciliation use independent
+        // short transactions. If the task result advances a container revision
+        // after this report read it, roll back every reconciliation side effect
+        // and rebuild from the new durable aggregate instead of disconnecting
+        // an otherwise healthy Agent.
+        if (
+          !(error instanceof RuntimeDriftFenceConflictError)
+          || attempt >= RUNTIME_DRIFT_FENCE_MAX_ATTEMPTS
+        ) throw error;
       }
-    });
+    }
   }
 
   private async scheduleRuntimeCleanups(
-    manager: EntityManager,
-    serverId: string,
-    networkKey: string,
-    candidates: readonly ContainerSnapshot[],
-    dockerRoot: string,
-  ): Promise<{ taskIds: string[]; claimsChanged: boolean }> {
-    const sorted = [...candidates]
-      .sort((left, right) => left.runtime.runtimeId.localeCompare(right.runtime.runtimeId));
-    const claimsChanged = await this.ensureRuntimeClaims(
-      manager,
-      serverId,
-      networkKey,
-      sorted,
-      dockerRoot,
-    );
-    return this.scheduleRuntimeCleanupTasks(
-      manager,
-      serverId,
-      sorted,
-      dockerRoot,
-      claimsChanged,
-    );
-  }
-
-  private async ensureRuntimeClaims(
-    manager: EntityManager,
+    transaction: Transaction<NyabaseDatabase>,
     serverId: string,
     networkKey: string,
     snapshots: readonly ContainerSnapshot[],
     dockerRoot: string,
-  ): Promise<boolean> {
-    if (snapshots.length === 0) return false;
-    const prepared = snapshots.map((snapshot) => {
-      const cleanupPayload = this.runtimeCleanupPayload(snapshot, serverId, dockerRoot);
-      return {
-        snapshot,
-        cleanupPayload,
-        address: canonicalIpv4Address(snapshot.runtime.ip),
-      };
-    });
-    const runtimeIds = [...new Set(prepared.map(({ snapshot }) => snapshot.runtime.runtimeId))];
-    const addresses = [...new Set(prepared.map(({ address }) => address))];
-    const [activeCount, relevant] = await Promise.all([
-      manager.count(NetworkAddressClaimEntity, {
-        where: { ownerKind: 'runtime_cleanup', serverId, state: 'active' },
-      }),
-      manager.find(NetworkAddressClaimEntity, {
-        where: {
-          ownerKind: 'runtime_cleanup',
-          ownerId: In(runtimeIds),
-          address: In(addresses),
-          serverId,
-        },
-      }),
-    ]);
-    if (activeCount > MAX_ACTIVE_RUNTIME_CLEANUP_CLAIMS_PER_SERVER) {
-      throw new RuntimeCleanupLedgerCorruptionError(
-        `Server ${serverId} has ${activeCount} active runtime cleanup claims; maximum is ${MAX_ACTIVE_RUNTIME_CLEANUP_CLAIMS_PER_SERVER}`,
-      );
-    }
-    const existingByIdentity = new Map(relevant.map((claim) => [
-      `${claim.ownerId}\0${claim.address}`,
-      claim,
-    ]));
-    const additionalActive = new Set(prepared
-      .filter(({ snapshot, address }) =>
-        existingByIdentity.get(`${snapshot.runtime.runtimeId}\0${address}`)?.state !== 'active')
-      .map(({ snapshot, address }) => `${snapshot.runtime.runtimeId}\0${address}`)).size;
-    const additionalRows = new Set(prepared
-      .filter(({ snapshot, address }) =>
-        !existingByIdentity.has(`${snapshot.runtime.runtimeId}\0${address}`))
-      .map(({ snapshot, address }) => `${snapshot.runtime.runtimeId}\0${address}`)).size;
-    await assertNetworkClaimCapacity(manager, additionalRows);
-    if (activeCount + additionalActive > MAX_ACTIVE_RUNTIME_CLEANUP_CLAIMS_PER_SERVER) {
-      throw new RuntimeCleanupLedgerCorruptionError(
-        `Server ${serverId} runtime cleanup claim capacity ${MAX_ACTIVE_RUNTIME_CLEANUP_CLAIMS_PER_SERVER} would be exceeded`,
-      );
-    }
-
-    let changed = false;
-    // Address safety is independent of queue admission: every observed runtime
-    // gets a durable claim before any cleanup task is attempted.
-    for (const { snapshot, cleanupPayload, address } of prepared) {
-      const existing = existingByIdentity.get(`${snapshot.runtime.runtimeId}\0${address}`);
-      if (!existing) {
-        const created = manager.create(NetworkAddressClaimEntity, {
-          id: uuidv4(),
-          address,
-          networkKey,
-          ownerKind: 'runtime_cleanup',
-          ownerId: snapshot.runtime.runtimeId,
-          serverId,
-          state: 'active',
-          cleanupPayloadJson: cleanupPayload,
-          reusableAt: null,
-        });
-        await manager.save(NetworkAddressClaimEntity, created);
-        existingByIdentity.set(`${snapshot.runtime.runtimeId}\0${address}`, created);
-        changed = true;
-      } else if (existing.networkKey !== networkKey) {
-        throw new RuntimeCleanupLedgerCorruptionError(
-          `Runtime ${snapshot.runtime.runtimeId} changed network identity`,
-        );
-      } else if (
-        existing.cleanupPayloadJson !== null
-        && !isDeepStrictEqual(existing.cleanupPayloadJson, cleanupPayload)
-      ) {
-        throw new RuntimeCleanupLedgerCorruptionError(
-          `Runtime ${snapshot.runtime.runtimeId} changed immutable cleanup evidence`,
-        );
-      } else if (existing.state !== 'active') {
-        await manager.update(NetworkAddressClaimEntity, existing.id, {
-          state: 'active',
-          cleanupPayloadJson: cleanupPayload,
-          reusableAt: null,
-        });
-        changed = true;
-      }
-    }
-    return changed;
-  }
-
-  private async scheduleRuntimeCleanupTasks(
-    manager: EntityManager,
-    serverId: string,
-    sorted: readonly ContainerSnapshot[],
-    dockerRoot: string,
-    claimsChanged: boolean,
   ): Promise<{ taskIds: string[]; claimsChanged: boolean }> {
+    const sorted = [...snapshots].sort((left, right) =>
+      left.runtime.runtimeId.localeCompare(right.runtime.runtimeId));
+    const claimsChanged = await this.ensureRuntimeClaims(
+      transaction, serverId, networkKey, sorted, dockerRoot,
+    );
     const taskIds: string[] = [];
     for (const snapshot of sorted) {
       const payload = this.runtimeCleanupPayload(snapshot, serverId, dockerRoot);
-      const existingTasks = await manager.find(AgentTaskEntity, {
-        select: {
-          id: true,
-          payloadJson: true,
-          admissionClass: true,
-        },
-        where: {
-          kind: AgentTaskKind.ContainerRuntimeAbsent,
-          serverId,
-          resourceType: 'container_runtime',
-          resourceId: snapshot.runtime.runtimeId,
-          status: AgentTaskStatus.Pending,
-        },
-        order: { id: 'ASC' },
-        take: 2,
-      });
-      if (existingTasks.length > 1) {
-        throw new RuntimeCleanupLedgerCorruptionError(
-          `Runtime ${snapshot.runtime.runtimeId} has multiple pending cleanup authorities`,
-        );
-      }
-      const identity = this.cleanupIdentity(payload);
-      const existing = existingTasks.find((task) => {
-        try {
-          const taskPayload = parseAgentTaskPayload(
-            AgentTaskKind.ContainerRuntimeAbsent,
-            task.payloadJson,
-          ) as ContainerRuntimeAbsentTaskPayload;
-          return isDeepStrictEqual(this.cleanupIdentity(taskPayload), identity);
-        } catch {
-          return false;
-        }
-      });
+      const existing = await this.pendingCleanupTask(
+        transaction,
+        serverId,
+        payload,
+      );
       if (existing) {
         if (existing.admissionClass !== 'safety') {
-          await manager.update(AgentTaskEntity, existing.id, {
-            admissionClass: 'safety',
-          });
+          await transaction.updateTable('workflow.tasks')
+            .set({ admission_class: 'safety' })
+            .where('id', '=', existing.id)
+            .where('status', '=', AgentTaskStatus.Pending)
+            .execute();
         }
         taskIds.push(existing.id);
         continue;
       }
       try {
-        const task = await this.enqueueRuntimeCleanup(manager, serverId, payload, 'safety');
+        const task = await this.enqueueRuntimeCleanup(
+          transaction,
+          serverId,
+          payload,
+          'safety',
+        );
         taskIds.push(task.taskId);
       } catch (error) {
-        // Queue pressure is recoverable only while the admitted Agent can
-        // drain older bounded safety work. The exact address claim above is
-        // retained, and a later report retries enqueue. Quarantining here
-        // would prevent the full queue from ever draining.
-        if (error instanceof ResourceLockedException || this.isQueueFull(error)) continue;
+        if (error instanceof ResourceLockedException || this.isQueueFull(error)) {
+          continue;
+        }
         throw error;
       }
     }
     return { taskIds, claimsChanged };
   }
 
-  private async enqueueRuntimeCleanup(
-    manager: EntityManager,
+  private async ensureRuntimeClaims(
+    transaction: Transaction<NyabaseDatabase>,
+    serverId: string,
+    networkKey: string,
+    snapshots: readonly ContainerSnapshot[],
+    dockerRoot: string,
+  ): Promise<boolean> {
+    if (snapshots.length === 0) return false;
+    const all = await this.containers.allNetworkClaims(transaction);
+    const runtimeClaims = all.filter((claim) =>
+      claim.ownerKind === 'runtime_cleanup' && claim.serverId === serverId);
+    const activeCount = runtimeClaims.filter((claim) =>
+      claim.state === 'active').length;
+    if (activeCount > MAX_ACTIVE_RUNTIME_CLEANUP_CLAIMS_PER_SERVER) {
+      throw new RuntimeCleanupLedgerCorruptionError(
+        `Server ${serverId} has ${activeCount} active runtime cleanup claims; maximum is ${MAX_ACTIVE_RUNTIME_CLEANUP_CLAIMS_PER_SERVER}`,
+      );
+    }
+    let changed = false;
+    const initialClaimCount = all.length;
+    let additionalRows = 0;
+    let additionalActive = 0;
+    for (const snapshot of snapshots) {
+      const payload = this.runtimeCleanupPayload(snapshot, serverId, dockerRoot);
+      const address = canonicalIpv4Address(snapshot.runtime.ip);
+      const existing = runtimeClaims.find((claim) =>
+        claim.ownerId === snapshot.runtime.runtimeId);
+      if (existing) {
+        if (
+          existing.address !== address
+          || existing.networkKey !== networkKey
+          || !isDeepStrictEqual(
+            this.cleanupIdentity(
+              parseAgentTaskPayload(
+                AgentTaskKind.ContainerRuntimeAbsent,
+                existing.cleanupPayload,
+              ) as ContainerRuntimeAbsentTaskPayload,
+            ),
+            this.cleanupIdentity(payload),
+          )
+        ) {
+          throw new RuntimeCleanupLedgerCorruptionError(
+            `Runtime ${snapshot.runtime.runtimeId} changed immutable cleanup evidence`,
+          );
+        }
+        if (existing.state === 'releasing') {
+          if (!await this.containers.reactivateRuntimeCleanupClaim(
+            existing.id,
+            payload,
+            transaction,
+          )) throw new RuntimeCleanupLedgerCorruptionError(
+            `Runtime ${snapshot.runtime.runtimeId} lost its cleanup claim fence`,
+          );
+          changed = true;
+        }
+        continue;
+      }
+      if (
+        activeCount + additionalActive + 1
+          > MAX_ACTIVE_RUNTIME_CLEANUP_CLAIMS_PER_SERVER
+      ) {
+        throw new RuntimeCleanupLedgerCorruptionError(
+          `Server ${serverId} runtime cleanup claim capacity would be exceeded`,
+        );
+      }
+      const addressClaim = all.find((claim) =>
+        claim.networkKey === networkKey && claim.address === address);
+      if (addressClaim) {
+        const productId = this.productId(snapshot);
+        if (
+          addressClaim.ownerKind === 'container'
+          && addressClaim.ownerId === productId
+          && addressClaim.serverId === serverId
+          && addressClaim.containerId === productId
+          && addressClaim.state === 'active'
+        ) {
+          // A create result can reach the Agent inventory before its durable
+          // task result has been projected into the container aggregate. The
+          // active reservation already fences this exact product runtime, so
+          // it needs neither a second cleanup claim nor server quarantine.
+          continue;
+        }
+        if (
+          addressClaim.ownerKind !== 'container'
+          || addressClaim.ownerId !== productId
+          || addressClaim.serverId !== serverId
+          || addressClaim.containerId !== null
+          || addressClaim.state !== 'releasing'
+        ) {
+          throw new RuntimeCleanupLedgerCorruptionError(
+            `Runtime ${snapshot.runtime.runtimeId} address ${address} is fenced by ${addressClaim.ownerKind} owner ${addressClaim.ownerId}`,
+          );
+        }
+        if (!await this.containers.adoptReleasedContainerClaimForRuntimeCleanup({
+          containerId: productId,
+          runtimeId: snapshot.runtime.runtimeId,
+          serverId,
+          networkKey,
+          address,
+          cleanupPayload: payload,
+        }, transaction)) {
+          throw new RuntimeCleanupLedgerCorruptionError(
+            `Runtime ${snapshot.runtime.runtimeId} lost its released container claim fence`,
+          );
+        }
+        const adopted: ContainerNetworkClaimRecord = {
+          ...addressClaim,
+          containerId: null,
+          ownerKind: 'runtime_cleanup',
+          ownerId: snapshot.runtime.runtimeId,
+          state: 'active',
+          reusableAt: null,
+          cleanupPayload: payload,
+        };
+        all[all.indexOf(addressClaim)] = adopted;
+        runtimeClaims.push(adopted);
+        additionalActive += 1;
+        changed = true;
+        continue;
+      }
+      additionalRows += 1;
+      additionalActive += 1;
+      if (initialClaimCount + additionalRows > MAX_NETWORK_ADDRESS_CLAIMS_GLOBAL) {
+        throw new RuntimeCleanupLedgerCorruptionError(
+          `Server ${serverId} runtime cleanup claim capacity would be exceeded`,
+        );
+      }
+      const claimId = randomUUID();
+      await this.containers.insertRuntimeCleanupClaim({
+        id: claimId,
+        runtimeId: snapshot.runtime.runtimeId,
+        serverId,
+        networkKey,
+        address,
+        cleanupPayload: payload,
+      }, transaction);
+      const inserted: ContainerNetworkClaimRecord = {
+        id: claimId,
+        containerId: null,
+        ownerKind: 'runtime_cleanup',
+        ownerId: snapshot.runtime.runtimeId,
+        serverId,
+        networkKey,
+        address,
+        state: 'active',
+        reusableAt: null,
+        cleanupPayload: payload,
+      };
+      all.push(inserted);
+      runtimeClaims.push(inserted);
+      changed = true;
+    }
+    return changed;
+  }
+
+  private async pendingCleanupTask(
+    transaction: Transaction<NyabaseDatabase>,
+    serverId: string,
+    payload: ContainerRuntimeAbsentTaskPayload,
+  ): Promise<WorkflowTaskRecord | null> {
+    const rows = await transaction.selectFrom('workflow.tasks')
+      .selectAll()
+      .where('kind', '=', AgentTaskKind.ContainerRuntimeAbsent)
+      .where('server_id', '=', serverId)
+      .where('resource_type', '=', 'container_runtime')
+      .where('resource_id', '=', payload.runtimeId)
+      .where('status', '=', AgentTaskStatus.Pending)
+      .orderBy('id')
+      .limit(2)
+      .execute();
+    if (rows.length > 1) {
+      throw new RuntimeCleanupLedgerCorruptionError(
+        `Runtime ${payload.runtimeId} has multiple pending cleanup authorities`,
+      );
+    }
+    if (rows.length === 0) return null;
+    const task = await this.workflowRepository.findTask(rows[0]!.id, transaction);
+    if (!task) return null;
+    try {
+      const durable = parseAgentTaskPayload(
+        AgentTaskKind.ContainerRuntimeAbsent,
+        task.payload,
+      ) as ContainerRuntimeAbsentTaskPayload;
+      return isDeepStrictEqual(
+        this.cleanupIdentity(durable),
+        this.cleanupIdentity(payload),
+      ) ? task : null;
+    } catch {
+      return null;
+    }
+  }
+
+  private enqueueRuntimeCleanup(
+    transaction: Transaction<NyabaseDatabase>,
     serverId: string,
     payload: ContainerRuntimeAbsentTaskPayload,
     admissionClass: 'safety' | 'reconciliation',
   ) {
-    return this.tasks.enqueueInTransaction(manager, {
-        kind: AgentTaskKind.ContainerRuntimeAbsent,
-        serverId,
-        resourceType: 'container_runtime',
-        resourceId: payload.runtimeId,
-        requestedBy: null,
-        request: { reason: 'authoritative_state_report_drift' },
-        payload,
-        // Cleanup owns only the exact physical runtime. The high-level
-        // container lock may belong to a staged create finalizer whose success
-        // is deliberately waiting for this residual to disappear.
-        resourceKeys: [this.resourceKeys.runtime(serverId, payload.runtimeId)],
-        admissionClass,
+    return this.workflow.enqueueInTransaction(transaction, {
+      kind: AgentTaskKind.ContainerRuntimeAbsent,
+      serverId,
+      resourceType: 'container_runtime',
+      resourceId: payload.runtimeId,
+      requestedBy: null,
+      request: { reason: 'authoritative_state_report_drift' },
+      payload,
+      resourceKeys: [this.resourceKeys.runtime(serverId, payload.runtimeId)],
+      admissionClass,
     });
   }
 
@@ -633,233 +598,110 @@ export class RuntimeDriftReconcilerService {
     dockerRoot: string,
   ): ContainerRuntimeAbsentTaskPayload {
     const labels = snapshot.labels ?? {};
-    let observedIp: string;
     try {
-      observedIp = canonicalIpv4Address(snapshot.runtime.ip);
-    } catch {
+      return parseAgentTaskPayload(AgentTaskKind.ContainerRuntimeAbsent, {
+        runtimeId: snapshot.runtime.runtimeId,
+        containerId: this.productId(snapshot),
+        serverId,
+        specGeneration: labels[LABEL.SPEC_GENERATION],
+        runtimeSpecHash: labels[LABEL.RUNTIME_SPEC_HASH],
+        quotaPaths: this.canonicalQuotaPaths(snapshot, dockerRoot),
+        observedIp: canonicalIpv4Address(snapshot.runtime.ip),
+      }) as ContainerRuntimeAbsentTaskPayload;
+    } catch (error) {
       throw new RuntimeCleanupLedgerCorruptionError(
-        `Runtime ${snapshot.runtime.runtimeId} reported a non-canonical cleanup address`,
+        `Runtime ${snapshot.runtime.runtimeId} has invalid cleanup identity: ${
+          this.errorMessage(error)
+        }`,
       );
     }
-    return parseAgentTaskPayload(AgentTaskKind.ContainerRuntimeAbsent, {
-      runtimeId: snapshot.runtime.runtimeId,
-      containerId: this.productId(snapshot),
-      serverId,
-      specGeneration: labels[LABEL.SPEC_GENERATION],
-      runtimeSpecHash: labels[LABEL.RUNTIME_SPEC_HASH],
-      quotaPaths: this.canonicalQuotaPaths(snapshot, dockerRoot),
-      observedIp,
-    }) as ContainerRuntimeAbsentTaskPayload;
   }
 
   private async recoverAbsentRuntimeClaims(
-    manager: EntityManager,
+    transaction: Transaction<NyabaseDatabase>,
     serverId: string,
     snapshots: readonly ContainerSnapshot[],
   ): Promise<string[]> {
-    const reportedRuntimeIds = new Set(snapshots.map((snapshot) => snapshot.runtime.runtimeId));
-    const claims = await manager.find(NetworkAddressClaimEntity, {
-      where: {
-        ownerKind: 'runtime_cleanup',
-        serverId,
-        state: 'active',
-      },
-      order: { ownerId: 'ASC', address: 'ASC' },
-      take: MAX_ACTIVE_RUNTIME_CLEANUP_CLAIMS_PER_SERVER + 1,
-    });
+    const reported = new Set(
+      snapshots.map((snapshot) => snapshot.runtime.runtimeId),
+    );
+    const claims = (await this.containers.runtimeCleanupClaims(
+      serverId,
+      transaction,
+    )).filter((claim) => claim.state === 'active' && !reported.has(claim.ownerId));
     if (claims.length > MAX_ACTIVE_RUNTIME_CLEANUP_CLAIMS_PER_SERVER) {
       throw new RuntimeCleanupLedgerCorruptionError(
         `Server ${serverId} exceeds the bounded runtime cleanup claim authority`,
       );
     }
-    const byRuntime = new Map<string, NetworkAddressClaimEntity[]>();
-    for (const claim of claims) {
-      if (reportedRuntimeIds.has(claim.ownerId)) continue;
-      const group = byRuntime.get(claim.ownerId) ?? [];
-      group.push(claim);
-      byRuntime.set(claim.ownerId, group);
-    }
-
     const taskIds: string[] = [];
-    for (const [runtimeId, runtimeClaims] of byRuntime) {
-      const payloads = runtimeClaims.map((claim) => {
-        let payload: ContainerRuntimeAbsentTaskPayload;
-        try {
-          payload = parseAgentTaskPayload(
-            AgentTaskKind.ContainerRuntimeAbsent,
-            claim.cleanupPayloadJson,
-          ) as ContainerRuntimeAbsentTaskPayload;
-        } catch (error) {
-          throw new RuntimeCleanupLedgerCorruptionError(
-            `Runtime cleanup claim ${claim.id} has invalid cleanup evidence: ${this.errorMessage(error)}`,
-          );
-        }
-        if (
-          payload.runtimeId !== runtimeId
-          || payload.serverId !== serverId
-          || payload.observedIp !== claim.address
-        ) {
-          throw new RuntimeCleanupLedgerCorruptionError(
-            `Runtime cleanup claim ${claim.id} has mismatched immutable evidence`,
-          );
-        }
-        return payload;
-      });
-      const first = payloads[0]!;
-      const identity = this.cleanupIdentity(first);
-      if (payloads.some((payload) => !isDeepStrictEqual(this.cleanupIdentity(payload), identity))) {
+    for (const claim of claims) {
+      let payload: ContainerRuntimeAbsentTaskPayload;
+      try {
+        payload = parseAgentTaskPayload(
+          AgentTaskKind.ContainerRuntimeAbsent,
+          claim.cleanupPayload,
+        ) as ContainerRuntimeAbsentTaskPayload;
+      } catch (error) {
         throw new RuntimeCleanupLedgerCorruptionError(
-          `Runtime ${runtimeId} has conflicting durable cleanup evidence`,
+          `Runtime cleanup claim ${claim.id} has invalid evidence: ${
+            this.errorMessage(error)
+          }`,
         );
       }
-      const pending = await manager.find(AgentTaskEntity, {
-        select: {
-          id: true,
-          payloadJson: true,
-          admissionClass: true,
-        },
-        where: {
-          kind: AgentTaskKind.ContainerRuntimeAbsent,
-          serverId,
-          resourceType: 'container_runtime',
-          resourceId: runtimeId,
-          status: AgentTaskStatus.Pending,
-        },
-        order: { id: 'ASC' },
-        take: 2,
-      });
-      if (pending.length > 1) {
-        throw new RuntimeCleanupLedgerCorruptionError(
-          `Runtime ${runtimeId} has multiple pending cleanup authorities`,
-        );
-      }
-      const existing = pending.find((task) => {
-        try {
-          const payload = parseAgentTaskPayload(
-            AgentTaskKind.ContainerRuntimeAbsent,
-            task.payloadJson,
-          ) as ContainerRuntimeAbsentTaskPayload;
-          return isDeepStrictEqual(this.cleanupIdentity(payload), identity);
-        } catch {
-          return false;
-        }
-      });
+      if (
+        payload.runtimeId !== claim.ownerId
+        || payload.serverId !== serverId
+        || payload.observedIp !== claim.address
+      ) throw new RuntimeCleanupLedgerCorruptionError(
+        `Runtime cleanup claim ${claim.id} has mismatched immutable evidence`,
+      );
+      const existing = await this.pendingCleanupTask(
+        transaction,
+        serverId,
+        payload,
+      );
       if (existing) {
         if (existing.admissionClass === 'safety') {
-          await manager.update(AgentTaskEntity, existing.id, {
-            admissionClass: 'reconciliation',
-          });
+          await transaction.updateTable('workflow.tasks')
+            .set({ admission_class: 'reconciliation' })
+            .where('id', '=', existing.id)
+            .execute();
         }
         taskIds.push(existing.id);
         continue;
       }
       try {
-        const task = await this.enqueueRuntimeCleanup(manager, serverId, first, 'reconciliation');
-        taskIds.push(task.taskId);
+        taskIds.push((await this.enqueueRuntimeCleanup(
+          transaction,
+          serverId,
+          payload,
+          'reconciliation',
+        )).taskId);
       } catch (error) {
-        if (error instanceof ResourceLockedException || this.isQueueFull(error)) continue;
+        if (error instanceof ResourceLockedException || this.isQueueFull(error)) {
+          continue;
+        }
         throw error;
       }
     }
     return taskIds;
   }
 
-  private cleanupIdentity(payload: ContainerRuntimeAbsentTaskPayload): unknown {
-    return {
-      runtimeId: payload.runtimeId,
-      containerId: payload.containerId,
-      serverId: payload.serverId,
-      specGeneration: payload.specGeneration,
-      runtimeSpecHash: payload.runtimeSpecHash,
-      quotaPaths: payload.quotaPaths,
-    };
-  }
-
-  private stagedRuntimeId(task: AgentTaskEntity): string | null {
-    const evidence = this.record(task.agentResultJson);
-    if (!evidence) return null;
-    if (evidence.status === 'succeeded') {
-      return this.nonEmptyString(this.record(evidence.result)?.runtimeId);
-    }
-    if (evidence.status !== 'failed') return null;
-    const observed = this.record(evidence.observed);
-    return this.nonEmptyString(this.record(observed?.safetyRollback)?.runtimeId)
-      ?? this.nonEmptyString(observed?.runtimeId);
-  }
-
-  private isUnboundDeleteTask(task: AgentTaskEntity): boolean {
-    if (task.kind !== AgentTaskKind.ContainerDelete) return false;
-    try {
-      const payload = parseAgentTaskPayload(task.kind, task.payloadJson) as {
-        runtimeId: string | null;
-      };
-      return payload.runtimeId === null;
-    } catch {
-      // Payload corruption is owned by the dispatcher fail-stop path. Runtime
-      // reconciliation must not guess deletion authority from an invalid row.
-      return false;
-    }
-  }
-
-  private async releaseCanonicalRuntimeClaims(
-    manager: EntityManager,
-    serverId: string,
-    runtimeId: string,
-  ): Promise<boolean> {
-    const claims = await manager.find(NetworkAddressClaimEntity, {
-      where: {
-        ownerKind: 'runtime_cleanup',
-        ownerId: runtimeId,
-        serverId,
-        state: 'active',
-      },
-    });
-    if (claims.length === 0) return false;
-    const reusableAt = new Date(Date.now() + CONTAINER_DELETE_PROXY_DRAIN_MS);
-    for (const claim of claims) monotonicReuseGuard.arm(networkClaimReuseKey(claim.id));
-    await manager.update(
-      NetworkAddressClaimEntity,
-      { id: In(claims.map((claim) => claim.id)) },
-      { state: 'releasing', reusableAt },
-    );
-    return true;
-  }
-
-  private canonicalQuotaPaths(snapshot: ContainerSnapshot, dockerRoot: string): [string, string] {
-    const root = path.resolve(dockerRoot);
-    const quotaPaths = snapshot.runtime.quotaPaths;
-    if (
-      !path.isAbsolute(dockerRoot)
-      || root !== dockerRoot
-      || quotaPaths.length !== 2
-      || new Set(quotaPaths).size !== 2
-      || quotaPaths.some((quotaPath) => !path.isAbsolute(quotaPath)
-        || path.resolve(quotaPath) !== quotaPath
-        || !quotaPath.startsWith(`${root}${path.sep}`))
-    ) {
-      throw new Error(
-        `Runtime ${snapshot.runtime.runtimeId} reported invalid writable-layer recovery paths`,
-      );
-    }
-    return [quotaPaths[0], quotaPaths[1]];
-  }
-
   private async schedulePowerRecovery(
-    manager: EntityManager,
-    container: ContainerEntity,
-    desired: ContainerDesiredSpecEntity,
-    lifecycle: ContainerLifecycleEntity,
+    transaction: Transaction<NyabaseDatabase>,
+    container: ContainerAggregate,
     canonical: ContainerSnapshot,
     dockerRoot: string,
   ): Promise<{ taskId: string | null; failed: boolean }> {
-    const wantsRunning = desired.powerIntent === ContainerPowerIntent.Running;
+    const wantsRunning = container.powerIntent === ContainerPowerIntent.Running;
     const isRunning = canonical.status === ContainerStatus.Running;
     const isStopped = canonical.status === ContainerStatus.Exited
       || canonical.status === ContainerStatus.Dead;
     if (!isRunning && !isStopped) {
       await this.markFailed(
-        manager,
-        lifecycle,
+        transaction,
+        container,
         'runtime_power_state_unsupported',
         `Canonical runtime ${canonical.runtime.runtimeId} reported unsupported power state ${canonical.status}`,
       );
@@ -868,37 +710,31 @@ export class RuntimeDriftReconcilerService {
     if ((wantsRunning && isRunning) || (!wantsRunning && isStopped)) {
       return { taskId: null, failed: false };
     }
-
     let kind: AgentTaskKind;
     let payload: Record<string, unknown>;
     let resourceKeys = [this.resourceKeys.container(container.id)];
     if (wantsRunning) {
-      let start: Awaited<ReturnType<RuntimeDriftReconcilerService['startRecoveryPayload']>>;
+      let start: Awaited<ReturnType<typeof this.startRecoveryPayload>>;
       try {
-        start = await this.startRecoveryPayload(manager, container, desired, lifecycle, dockerRoot);
+        start = await this.startRecoveryPayload(
+          transaction,
+          container,
+          dockerRoot,
+        );
       } catch (error) {
         if (!(error instanceof ContainerMountIntegrityError)) throw error;
-        const failureCode = error.kind === 'desired_invalid'
+        const code = error.kind === 'desired_invalid'
           ? 'runtime_power_recovery_mount_spec_invalid'
           : error.kind === 'index_divergent'
             ? 'runtime_power_recovery_mount_index_divergent'
             : 'runtime_power_recovery_mount_source_unavailable';
-        await this.markFailed(
-          manager,
-          lifecycle,
-          failureCode,
-          error.kind === 'desired_invalid'
-            ? 'A stopped canonical runtime cannot be restarted because its durable desired mount snapshot is invalid'
-            : error.kind === 'index_divergent'
-              ? 'A stopped canonical runtime cannot be restarted because its durable mount representations disagree'
-              : 'A stopped canonical runtime cannot be restarted because an exact durable mount source is unavailable',
-        );
+        await this.markFailed(transaction, container, code, error.message);
         return { taskId: null, failed: true };
       }
       if (!start) {
         await this.markFailed(
-          manager,
-          lifecycle,
+          transaction,
+          container,
           'runtime_power_recovery_precondition_missing',
           'A stopped canonical runtime cannot be restarted because durable quota or mount recovery metadata is incomplete',
         );
@@ -909,11 +745,13 @@ export class RuntimeDriftReconcilerService {
       resourceKeys = start.resourceKeys;
     } else {
       kind = AgentTaskKind.ContainerStop;
-      payload = { containerId: container.id, runtimeId: lifecycle.boundRuntimeId };
+      payload = {
+        containerId: container.id,
+        runtimeId: container.boundRuntimeId,
+      };
     }
-
     try {
-      const task = await this.tasks.enqueueInTransaction(manager, {
+      const task = await this.workflow.enqueueInTransaction(transaction, {
         kind,
         serverId: container.serverId,
         resourceType: 'container',
@@ -923,14 +761,20 @@ export class RuntimeDriftReconcilerService {
         payload,
         resourceKeys,
         admissionClass: 'reconciliation',
-        beforeCommit: async (taskManager, context) => {
-          await taskManager.update(ContainerLifecycleEntity, container.id, {
-            phase: ContainerPhase.Updating,
-            activeTaskId: context.taskId,
-            lastTransitionAt: new Date(),
-            failureReason: null,
-            failureCode: null,
-          });
+        beforeCommit: async (taskTransaction, context) => {
+          if (!await this.containers.transition(
+            container.id,
+            container.revision,
+            {
+              lifecyclePhase: ContainerPhase.Updating,
+              activeTaskId: context.taskId,
+              failureReason: null,
+              failureCode: null,
+            },
+            taskTransaction,
+          )) throw new RuntimeDriftFenceConflictError(
+            `Container ${container.id} lost its recovery fence`,
+          );
         },
       });
       return { taskId: task.taskId, failed: false };
@@ -942,92 +786,91 @@ export class RuntimeDriftReconcilerService {
     }
   }
 
-  private async prioritizePowerRecoveryAheadOfUndispatchedSsh(
-    manager: EntityManager,
-    container: ContainerEntity,
-    desired: ContainerDesiredSpecEntity,
-    lifecycle: ContainerLifecycleEntity,
-    activeTask: AgentTaskEntity,
+  private async prioritizePowerAheadOfSsh(
+    transaction: Transaction<NyabaseDatabase>,
+    container: ContainerAggregate,
+    active: WorkflowTaskRecord,
     canonical: ContainerSnapshot,
     dockerRoot: string,
   ): Promise<{ taskId: string | null; failed: boolean } | null> {
     if (
-      activeTask.kind !== AgentTaskKind.ContainerSshEnsure
-      || activeTask.serverId !== container.serverId
-      || activeTask.resourceType !== 'container'
-      || activeTask.resourceId !== container.id
-      || activeTask.agentResultJson !== null
-      || activeTask.startedAt !== null
-      || activeTask.lastSentAt !== null
-      || desired.powerIntent !== ContainerPowerIntent.Running
-      || (canonical.status !== ContainerStatus.Exited && canonical.status !== ContainerStatus.Dead)
+      active.kind !== AgentTaskKind.ContainerSshEnsure
+      || active.serverId !== container.serverId
+      || active.resourceType !== 'container'
+      || active.resourceId !== container.id
+      || active.agentResult !== null
+      || active.startedAt !== null
+      || active.lastSentAt !== null
+      || container.powerIntent !== ContainerPowerIntent.Running
+      || (
+        canonical.status !== ContainerStatus.Exited
+        && canonical.status !== ContainerStatus.Dead
+      )
     ) return null;
-    try {
-      const payload = parseAgentTaskPayload(activeTask.kind, activeTask.payloadJson);
-      if (
-        payload.containerId !== container.id
-        || payload.runtimeId !== canonical.runtime.runtimeId
-      ) return null;
-    } catch {
-      // Corrupt durable payloads are owned by the dispatcher fail-stop path;
-      // report reconciliation must not reinterpret or supersede them.
-      return null;
-    }
-
-    const superseded = await this.tasks.supersedePendingForResourceInTransaction(manager, {
-      serverId: container.serverId,
-      resourceType: 'container',
-      resourceId: container.id,
-      reason: 'Canonical desired-running runtime stopped before SSH task dispatch',
-    });
-    if (superseded.length !== 1 || superseded[0] !== activeTask.id) {
-      throw new Error(
-        `SSH task ${activeTask.id} lost undispatched lifecycle ownership during power recovery`,
+    const superseded = await this.workflow
+      .supersedePendingForResourceInTransaction(transaction, {
+        serverId: container.serverId,
+        resourceType: 'container',
+        resourceId: container.id,
+        reason: 'Canonical desired-running runtime stopped before SSH dispatch',
+      });
+    if (superseded.length !== 1 || superseded[0] !== active.id) {
+      throw new RuntimeDriftFenceConflictError(
+        `SSH task ${active.id} lost lifecycle ownership`,
       );
     }
-
-    const now = new Date();
-    await manager.update(ContainerLifecycleEntity, container.id, {
-      phase: ContainerPhase.Active,
-      activeTaskId: null,
-      lastTransitionAt: now,
-      failureReason: null,
-      failureCode: null,
-    });
-    lifecycle.phase = ContainerPhase.Active;
-    lifecycle.activeTaskId = null;
-    lifecycle.lastTransitionAt = now;
-    lifecycle.failureReason = null;
-    lifecycle.failureCode = null;
+    const activeContainer = (await this.containers.find(
+      container.id,
+      transaction,
+    ))!;
+    const restored = await this.containers.transition(
+      container.id,
+      activeContainer.revision,
+      {
+        lifecyclePhase: ContainerPhase.Active,
+        activeTaskId: null,
+        failureReason: null,
+        failureCode: null,
+      },
+      transaction,
+    );
+    if (!restored) throw new RuntimeDriftFenceConflictError(
+      `Container ${container.id} lost SSH recovery fence`,
+    );
     return this.schedulePowerRecovery(
-      manager,
-      container,
-      desired,
-      lifecycle,
+      transaction,
+      restored,
       canonical,
       dockerRoot,
     );
   }
 
   private async startRecoveryPayload(
-    manager: EntityManager,
-    container: ContainerEntity,
-    desired: ContainerDesiredSpecEntity,
-    lifecycle: ContainerLifecycleEntity,
+    transaction: Transaction<NyabaseDatabase>,
+    container: ContainerAggregate,
     dockerRoot: string,
   ): Promise<{ payload: Record<string, unknown>; resourceKeys: string[] } | null> {
-    if (!lifecycle.boundRuntimeId || lifecycle.quotaPathsJson.length !== 2 || !dockerRoot.trim()) return null;
-    const mounts = await resolveContainerMountIntegrity(manager, container, desired);
-    const quota = await manager.findOne(QuotaDesiredEntity, {
-      where: { serverId: container.serverId, userId: container.ownerId },
-    });
+    if (
+      !container.boundRuntimeId
+      || container.quotaPaths.length !== 2
+      || !dockerRoot.trim()
+    ) return null;
+    const mounts = await resolveContainerMountIntegrity(
+      transaction,
+      container,
+      await this.containers.listMounts([container.id], transaction),
+    );
+    const quota = await transaction.selectFrom('control.quota_desired')
+      .selectAll()
+      .where('server_id', '=', container.serverId)
+      .where('user_id', '=', container.ownerId)
+      .executeTakeFirst();
     if (
       !quota
-      || !quota.lastTaskId
-      || !Number.isSafeInteger(quota.numericUserId)
-      || quota.numericUserId === null
+      || !quota.last_task_id
+      || !Number.isSafeInteger(quota.numeric_user_id)
       || quota.generation < 1
-      || quota.limitBytes < 0
+      || Number(quota.limit_bytes) < 0
     ) return null;
     const agentMounts: ContainerMountSpec[] = [];
     const resourceKeys = [
@@ -1058,12 +901,12 @@ export class RuntimeDriftReconcilerService {
     return {
       payload: {
         containerId: container.id,
-        runtimeId: lifecycle.boundRuntimeId,
+        runtimeId: container.boundRuntimeId,
         dockerRoot,
         quotaGeneration: quota.generation,
-        numericOwnerId: quota.numericUserId,
-        diskBytes: quota.limitBytes,
-        quotaPaths: lifecycle.quotaPathsJson,
+        numericOwnerId: quota.numeric_user_id,
+        diskBytes: Number(quota.limit_bytes),
+        quotaPaths: container.quotaPaths,
         mounts: agentMounts,
       },
       resourceKeys: [...new Set(resourceKeys)].sort(),
@@ -1071,65 +914,158 @@ export class RuntimeDriftReconcilerService {
   }
 
   private async markRuntimeMissing(
-    manager: EntityManager,
-    lifecycle: ContainerLifecycleEntity,
+    transaction: Transaction<NyabaseDatabase>,
+    container: ContainerAggregate,
     reported: readonly ContainerSnapshot[],
   ): Promise<void> {
     const observed = reported.map((snapshot) => snapshot.runtime.runtimeId).sort();
     await this.markFailed(
-      manager,
-      lifecycle,
+      transaction,
+      container,
       'runtime_missing',
       observed.length === 0
-        ? `Bound runtime ${lifecycle.boundRuntimeId ?? '(none)'} is absent from the authoritative Agent inventory`
-        : `No reported runtime matches bound identity ${lifecycle.boundRuntimeId ?? '(none)'}; observed ${observed.join(', ')}`,
-    );
-  }
-
-  private async markTransitionOwnerMissing(
-    manager: EntityManager,
-    lifecycle: ContainerLifecycleEntity,
-  ): Promise<void> {
-    await this.markFailed(
-      manager,
-      lifecycle,
-      'runtime_lifecycle_owner_missing',
-      `Container lifecycle is ${lifecycle.phase} but has no active durable task owner`,
+        ? `Bound runtime ${container.boundRuntimeId ?? '(none)'} is absent from the authoritative Agent inventory`
+        : `No reported runtime matches bound identity ${container.boundRuntimeId ?? '(none)'}; observed ${observed.join(', ')}`,
     );
   }
 
   private async markFailed(
-    manager: EntityManager,
-    lifecycle: ContainerLifecycleEntity,
+    transaction: Transaction<NyabaseDatabase>,
+    container: ContainerAggregate,
     failureCode: string,
     failureReason: string,
   ): Promise<void> {
-    await manager.update(ContainerLifecycleEntity, lifecycle.containerId, {
-      phase: ContainerPhase.Failed,
-      activeTaskId: null,
-      lastTransitionAt: new Date(),
-      failureCode,
-      failureReason,
-    });
-    lifecycle.phase = ContainerPhase.Failed;
-    lifecycle.activeTaskId = null;
-    lifecycle.failureCode = failureCode;
-    lifecycle.failureReason = failureReason;
+    if (!await this.containers.transition(
+      container.id,
+      container.revision,
+      {
+        lifecyclePhase: ContainerPhase.Failed,
+        activeTaskId: null,
+        failureCode,
+        failureReason,
+      },
+      transaction,
+    )) throw new RuntimeDriftFenceConflictError(
+      `Container ${container.id} lost its failure fence`,
+    );
+  }
+
+  private async releaseRuntimeClaim(
+    transaction: Transaction<NyabaseDatabase>,
+    serverId: string,
+    runtimeId: string,
+  ): Promise<boolean> {
+    const claim = (await this.containers.runtimeCleanupClaims(
+      serverId,
+      transaction,
+    )).find((row) =>
+      row.ownerId === runtimeId && row.state === 'active');
+    if (!claim) return false;
+    monotonicReuseGuard.arm(networkClaimReuseKey(claim.id));
+    const reusableAt = await this.containers.networkClaimReuseDeadline(
+      CONTAINER_DELETE_PROXY_DRAIN_MS,
+      transaction,
+    );
+    return Boolean(await this.containers.markRuntimeCleanupReleasing(
+      runtimeId,
+      serverId,
+      reusableAt,
+      transaction,
+    ));
+  }
+
+  private async gcExpiredClaims(
+    transaction: Transaction<NyabaseDatabase>,
+  ): Promise<void> {
+    const databaseNow = await this.containers.currentDatabaseTime(transaction);
+    const expired = await this.containers.releasedNetworkClaimCandidates(
+      databaseNow,
+      NETWORK_CLAIM_GC_BATCH,
+      transaction,
+    );
+    for (const claim of expired) {
+      if (!monotonicReuseGuard.mayReuse(
+        networkClaimReuseKey(claim.id),
+        claim.reusableAt,
+        databaseNow.getTime(),
+      )) continue;
+      await this.containers.deleteReleasedNetworkClaim(
+        claim.id,
+        claim.reusableAt!,
+        transaction,
+      );
+    }
   }
 
   private isCanonical(
     snapshot: ContainerSnapshot,
-    lifecycle: ContainerLifecycleEntity,
-    desired: ContainerDesiredSpecEntity,
+    container: ContainerAggregate,
     expectedIp: string | null,
   ): boolean {
     const labels = snapshot.labels ?? {};
-    return lifecycle.boundRuntimeId === snapshot.runtime.runtimeId
+    return container.boundRuntimeId === snapshot.runtime.runtimeId
       && expectedIp !== null
       && snapshot.runtime.ip === expectedIp
-      && lifecycle.runtimeSpecHash !== null
-      && lifecycle.runtimeSpecHash === labels[LABEL.RUNTIME_SPEC_HASH]
-      && labels[LABEL.SPEC_GENERATION] === String(desired.generation);
+      && container.runtimeSpecHash !== null
+      && container.runtimeSpecHash === labels[LABEL.RUNTIME_SPEC_HASH]
+      && labels[LABEL.SPEC_GENERATION]
+        === String(container.desiredGeneration);
+  }
+
+  private stagedRuntimeId(task: WorkflowTaskRecord): string | null {
+    const evidence = this.record(task.agentResult);
+    if (!evidence) return null;
+    if (evidence.status === 'succeeded') {
+      return this.nonEmptyString(this.record(evidence.result)?.runtimeId);
+    }
+    if (evidence.status !== 'failed') return null;
+    const observed = this.record(evidence.observed);
+    return this.nonEmptyString(
+      this.record(observed?.safetyRollback)?.runtimeId,
+    ) ?? this.nonEmptyString(observed?.runtimeId);
+  }
+
+  private isUnboundDeleteTask(task: WorkflowTaskRecord): boolean {
+    if (task.kind !== AgentTaskKind.ContainerDelete) return false;
+    try {
+      return (parseAgentTaskPayload(task.kind, task.payload) as {
+        runtimeId: string | null;
+      }).runtimeId === null;
+    } catch {
+      return false;
+    }
+  }
+
+  private canonicalQuotaPaths(
+    snapshot: ContainerSnapshot,
+    dockerRoot: string,
+  ): [string, string] {
+    const root = path.resolve(dockerRoot);
+    const quotaPaths = snapshot.runtime.quotaPaths;
+    if (
+      !path.isAbsolute(dockerRoot)
+      || root !== dockerRoot
+      || quotaPaths.length !== 2
+      || new Set(quotaPaths).size !== 2
+      || quotaPaths.some((quotaPath) =>
+        !path.isAbsolute(quotaPath)
+        || path.resolve(quotaPath) !== quotaPath
+        || !quotaPath.startsWith(`${root}${path.sep}`))
+    ) throw new Error(
+      `Runtime ${snapshot.runtime.runtimeId} reported invalid writable-layer recovery paths`,
+    );
+    return [quotaPaths[0], quotaPaths[1]];
+  }
+
+  private cleanupIdentity(payload: ContainerRuntimeAbsentTaskPayload) {
+    return {
+      runtimeId: payload.runtimeId,
+      containerId: payload.containerId,
+      serverId: payload.serverId,
+      specGeneration: payload.specGeneration,
+      runtimeSpecHash: payload.runtimeSpecHash,
+      quotaPaths: payload.quotaPaths,
+    };
   }
 
   private isTransitionPhase(phase: ContainerPhase): boolean {
@@ -1141,25 +1077,30 @@ export class RuntimeDriftReconcilerService {
   private groupByProduct(
     snapshots: readonly ContainerSnapshot[],
   ): Map<string, ContainerSnapshot[]> {
-    const grouped = new Map<string, ContainerSnapshot[]>();
+    const result = new Map<string, ContainerSnapshot[]>();
     for (const snapshot of snapshots) {
       const id = this.productId(snapshot);
-      const entries = grouped.get(id) ?? [];
-      entries.push(snapshot);
-      grouped.set(id, entries);
+      const rows = result.get(id) ?? [];
+      rows.push(snapshot);
+      result.set(id, rows);
     }
-    return grouped;
+    return result;
   }
 
   private productId(snapshot: ContainerSnapshot): string {
     const value = snapshot.labels?.[LABEL.CONTAINER_ID];
-    if (!value) throw new Error('Validated managed runtime is missing its product container id');
+    if (!value) {
+      throw new Error(
+        'Validated managed runtime is missing its product container id',
+      );
+    }
     return value;
   }
 
   private record(value: unknown): Record<string, unknown> | null {
-    if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
-    return value as Record<string, unknown>;
+    return value && typeof value === 'object' && !Array.isArray(value)
+      ? value as Record<string, unknown>
+      : null;
   }
 
   private nonEmptyString(value: unknown): string | null {
@@ -1167,7 +1108,9 @@ export class RuntimeDriftReconcilerService {
   }
 
   private isQueueFull(error: unknown): boolean {
-    if (!error || typeof error !== 'object' || !('getResponse' in error)) return false;
+    if (!error || typeof error !== 'object' || !('getResponse' in error)) {
+      return false;
+    }
     const getResponse = (error as { getResponse?: unknown }).getResponse;
     if (typeof getResponse !== 'function') return false;
     const response = getResponse.call(error);

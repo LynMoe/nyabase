@@ -7,6 +7,7 @@ import {
 } from '@nestjs/common';
 import { randomBytes } from 'crypto';
 import * as http from 'http';
+import { performance } from 'node:perf_hooks';
 import { WebSocket, WebSocketServer } from 'ws';
 import {
   zEnvelope,
@@ -29,6 +30,7 @@ import {
   configuredProxyTokenDigest,
   hasValidBearerToken,
 } from '../common/proxy-bearer-auth.js';
+import { RuntimeRoleService } from '../runtime/runtime-role.service.js';
 
 export const MAX_SSH_PROXY_BUFFERED_BYTES = MAX_SSH_PROXY_SNAPSHOT_BYTES;
 export const MAX_SSH_PROXY_CLIENTS = 4;
@@ -85,6 +87,7 @@ export class SshProxyGateway implements OnModuleInit, OnModuleDestroy {
     private snapshots: SshProxySnapshotService,
     private config: NyabaseConfigService,
     private proxySnapshots: ProxySnapshotNotifierService,
+    private readonly runtimeRole?: RuntimeRoleService,
   ) {
     this.expectedTokenDigest = configuredProxyTokenDigest(
       config.get<string>('ssh.proxyToken'),
@@ -93,6 +96,7 @@ export class SshProxyGateway implements OnModuleInit, OnModuleDestroy {
   }
 
   onModuleInit(): void {
+    if (this.runtimeRole && !this.runtimeRole.servesGateway()) return;
     this.unregisterSnapshotListener = this.proxySnapshots.register(
       'ssh',
       () => this.broadcastSnapshot(),
@@ -224,13 +228,15 @@ export class SshProxyGateway implements OnModuleInit, OnModuleDestroy {
     };
   }
 
-  async disconnectAll(reason = 'admin disconnect all'): Promise<{
+  async disconnectAll(
+    reason = 'admin disconnect all',
+    requestId = randomBytes(12).toString('hex'),
+  ): Promise<{
     requestId: string;
     requested: number;
     disconnected: number;
   }> {
     const targets = Array.from(this.clients).filter((client) => client.readyState === WebSocket.OPEN);
-    const requestId = randomBytes(12).toString('hex');
     if (targets.length === 0) {
       return { requestId, requested: 0, disconnected: 0 };
     }
@@ -280,7 +286,7 @@ export class SshProxyGateway implements OnModuleInit, OnModuleDestroy {
       return;
     }
     this.initializingClients.add(ws);
-    const deadline = Date.now() + INITIAL_CONNECTION_DEADLINE_MS;
+    const deadline = performance.now() + INITIAL_CONNECTION_DEADLINE_MS;
     try {
       if (!this.authorize(req)) {
         ws.terminate();
@@ -498,7 +504,7 @@ export class SshProxyGateway implements OnModuleInit, OnModuleDestroy {
     deadline: number,
     client: WebSocket,
   ): Promise<Awaited<ReturnType<SshProxySnapshotService['buildSnapshot']>>> {
-    const remainingMs = deadline - Date.now();
+    const remainingMs = deadline - performance.now();
     if (remainingMs <= 0) throw new Error('SSH proxy initial snapshot deadline exceeded');
     let expired = false;
     const timer = setTimeout(() => {
@@ -507,11 +513,11 @@ export class SshProxyGateway implements OnModuleInit, OnModuleDestroy {
     }, remainingMs);
     timer.unref();
     try {
-      // TypeORM/SQLite work is not cancellable. Keep the reservation until the
+      // Repository I/O is not cancellable. Keep the reservation until the
       // started build actually settles; otherwise close/reconnect can create
       // an unbounded number of hidden in-flight snapshot queries.
       const snapshot = await this.snapshots.buildSnapshot();
-      if (expired || Date.now() >= deadline) {
+      if (expired || performance.now() >= deadline) {
         throw new Error('SSH proxy initial snapshot deadline exceeded');
       }
       return snapshot;

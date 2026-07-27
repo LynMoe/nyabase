@@ -6,6 +6,7 @@ import {
   Post,
   UseGuards,
 } from '@nestjs/common';
+import { randomBytes } from 'node:crypto';
 import { AuditAction, Capability } from '@nyabase/common';
 import { RequireAnyCaps, RequireCaps } from '../auth/decorators/require-caps.decorator.js';
 import { CapabilitiesGuard } from '../auth/guards/capabilities.guard.js';
@@ -14,7 +15,7 @@ import { postCommitBestEffort } from '../common/post-commit.js';
 import { SshIdentityService } from './ssh-identity.service.js';
 import { SshProxyGateway } from './ssh-proxy-gateway.js';
 import { CurrentUser } from '../auth/decorators/current-user.decorator.js';
-import type { UserEntity } from '../entities/user.entity.js';
+import type { UserRecord } from '../domain/domain-records.js';
 import { AuditService } from '../audit/audit.service.js';
 import { AccessResolverService } from '../access/access-resolver.service.js';
 
@@ -40,7 +41,7 @@ export class AdminSshProxyController {
     Capability.ViewAudit,
     Capability.ManageSystemSettings,
   )
-  async status(@CurrentUser() actor: UserEntity) {
+  async status(@CurrentUser() actor: UserRecord) {
     const capabilities = await this.accessResolver.userCapabilitiesCurrent(actor.id);
     if (![
       Capability.ViewMetricsAll,
@@ -68,42 +69,50 @@ export class AdminSshProxyController {
   @Post('disconnect-all')
   @HttpCode(200)
   @RequireCaps(Capability.ManageSystemSettings)
-  async disconnectAll(@CurrentUser() actor: UserEntity) {
-    const started = await this.accessResolver.startExternalWithActorCapabilities(
+  async disconnectAll(@CurrentUser() actor: UserRecord) {
+    const requestId = randomBytes(12).toString('hex');
+    await this.accessResolver.runWithActorCapabilities(
       actor.id,
       [Capability.ManageSystemSettings],
-      () => this.sshProxyGateway.disconnectAll(),
-    );
-    const result = await started.completion;
-    await postCommitBestEffort(
-      'SSH proxy disconnect-all audit',
-      () => this.audit.log(
+      (transaction) => this.audit.append(
+        transaction,
         actor.id,
         AuditAction.DisconnectSshProxySessions,
-        result.requestId,
+        requestId,
         'ssh_proxy',
-        { requested: result.requested, disconnected: result.disconnected },
+        { intent: 'disconnect_all' },
       ),
     );
-    return result;
+    return this.sshProxyGateway.disconnectAll('admin disconnect all', requestId);
   }
 
   @Get('host-key')
   @RequireCaps(Capability.ManageSystemSettings)
-  async hostKey(@CurrentUser() actor: UserEntity): Promise<SshProxyHostKeySummaryDto> {
+  async hostKey(@CurrentUser() actor: UserRecord): Promise<SshProxyHostKeySummaryDto> {
     return this.hostKeyDto(actor.id);
   }
 
   @Post('host-key/rotate')
   @HttpCode(200)
   @RequireCaps(Capability.ManageSystemSettings)
-  async rotateHostKey(@CurrentUser() actor: UserEntity): Promise<SshProxyHostKeySummaryDto> {
+  async rotateHostKey(@CurrentUser() actor: UserRecord): Promise<SshProxyHostKeySummaryDto> {
     const rotated = await this.sshIdentities.rotateProxyHostKey(
       async (manager) => {
         await this.accessResolver.assertActorCapabilitiesInTransaction(
           manager, actor.id, [Capability.ManageSystemSettings],
         );
       },
+      (transaction, key) => this.audit.append(
+        transaction,
+        actor.id,
+        AuditAction.RotateSshProxyHostKey,
+        'host-key',
+        'ssh_proxy',
+        {
+          fingerprint: key.fingerprint,
+          generation: key.generation,
+        },
+      ),
     );
     await postCommitBestEffort(
       'SSH proxy host-key snapshot broadcast',
@@ -114,13 +123,6 @@ export class AdminSshProxyController {
       generation: rotated.generation,
       rotatedAt: rotated.rotatedAt.toISOString(),
     };
-    await postCommitBestEffort(
-      'SSH proxy host-key rotation audit',
-      () => this.audit.log(actor.id, AuditAction.RotateSshProxyHostKey, 'host-key', 'ssh_proxy', {
-        fingerprint: result.fingerprint,
-        generation: result.generation,
-      }),
-    );
     return result;
   }
 

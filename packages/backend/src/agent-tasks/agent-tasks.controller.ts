@@ -2,7 +2,7 @@ import { Controller, Get, Param, Query, UseGuards } from '@nestjs/common';
 import { CurrentUser } from '../auth/decorators/current-user.decorator.js';
 import { CapabilitiesGuard } from '../auth/guards/capabilities.guard.js';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard.js';
-import { UserEntity } from '../entities/user.entity.js';
+import type { UserRecord } from '../domain/domain-records.js';
 import { AgentTasksService } from './agent-tasks.service.js';
 
 @Controller('agent-tasks')
@@ -12,7 +12,7 @@ export class AgentTasksController {
 
   @Get()
   list(
-    @CurrentUser() user: UserEntity,
+    @CurrentUser() user: UserRecord,
     @Query('resourceType') resourceType?: string,
     @Query('resourceId') resourceId?: string,
     @Query('serverId') serverId?: string,
@@ -27,7 +27,7 @@ export class AgentTasksController {
   }
 
   @Get(':taskId')
-  get(@Param('taskId') taskId: string, @CurrentUser() user: UserEntity) {
+  get(@Param('taskId') taskId: string, @CurrentUser() user: UserRecord) {
     return this.tasks.getForUser(user.id, taskId);
   }
 }

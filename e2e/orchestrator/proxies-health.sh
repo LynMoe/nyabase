@@ -4,7 +4,8 @@ set -euo pipefail
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/common.sh"
 run_id="$(require_run_id "${1:-}")"
 load_run "$run_id"
-[[ "$NYABASE_E2E_PROFILE" == full ]] || die 'proxy health is owned only by the Full profile'
+[[ "$NYABASE_E2E_PROFILE" == full || "$NYABASE_E2E_PROFILE" == recovery ]] \
+  || die 'proxy health requires a proxy-enabled profile'
 # shellcheck disable=SC1090
 source "$NYABASE_E2E_RUNTIME_DIR/build.env"
 
@@ -40,4 +41,4 @@ assert_proxy "$NYABASE_E2E_PREFIX-http-proxy" http-proxy "$HTTP_PROXY_IMAGE_ID" 
   "$NYABASE_E2E_HTTP_PROXY_IP" "$NYABASE_E2E_RUNTIME_DIR/proxies/http-token"
 NODE_EXTRA_CA_CERTS="$NYABASE_E2E_RUNTIME_DIR/certs/ca.crt" \
   node "$E2E_ROOT/e2e/orchestrator/proxy-health.mjs" "$NYABASE_E2E_RUNTIME_DIR" 120000
-log 'Full proxy health PASS: hardened current binaries and real Backend snapshot control are online'
+log 'proxy health PASS: hardened current binaries and real Backend snapshot control are online'

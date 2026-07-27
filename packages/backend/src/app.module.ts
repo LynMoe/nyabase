@@ -24,10 +24,13 @@ import { NyabaseConfigModule } from './config/nyabase-config.module.js';
 import { AccessModule } from './access/access.module.js';
 import { CatalogModule } from './catalog/catalog.module.js';
 import { HealthController } from './health/health.controller.js';
+import { RedisRuntimeModule } from './runtime/redis-runtime.module.js';
+import { RuntimeLifecycleService } from './health/runtime-lifecycle.service.js';
 
 @Module({
   imports: [
     NyabaseConfigModule,
+    RedisRuntimeModule,
     DatabaseModule,
     AccessModule,
     AuthModule,
@@ -54,6 +57,6 @@ import { HealthController } from './health/health.controller.js';
     AdminAgentTasksController,
     AdminAgentQuarantineController,
   ],
-  providers: [AppService],
+  providers: [AppService, RuntimeLifecycleService],
 })
 export class AppModule {}

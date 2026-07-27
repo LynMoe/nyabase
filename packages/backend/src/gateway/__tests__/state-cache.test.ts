@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { StateCache } from '../state-cache.js';
 import type { ServerSnapshot } from '../state-cache.js';
 
@@ -68,6 +68,102 @@ describe('StateCache', () => {
     it('returns false for unknown server', () => {
       expect(cache.hasImage('nonexistent', 'ubuntu:22.04')).toBe(false);
     });
+  });
+
+  it('hydrates the independently reported Docker daemon projection for API readers', async () => {
+    const report = {
+      ...makeSnap('srv-1'),
+      containers: [],
+      dockerDaemon: null,
+    };
+    const dockerDaemon = {
+      serverId: 'srv-1',
+      state: 'active',
+      unitFileInSync: true,
+      enabled: true,
+      active: true,
+      pid: 42,
+      dockerRoot: '/var/lib/nyabase-docker',
+      socketPath: '/run/nyabase-docker.sock',
+      serverVersion: '26.1.0',
+      storageDriver: 'overlay2',
+      lastError: null,
+      checkedAt: Date.now(),
+    };
+    const rows = [{
+      server_id: 'srv-1',
+      session_id: 'session-a',
+      runtime_ready: true,
+      state_report_json: report,
+      docker_daemon_json: dockerDaemon,
+    }];
+    const query = {
+      innerJoin: () => query,
+      select: () => query,
+      where: () => query,
+      whereRef: () => query,
+      execute: async () => rows,
+    };
+    const projectionCache = new StateCache(
+      { selectFrom: () => query } as never,
+      { servesApi: () => true, servesGateway: () => false } as never,
+    );
+
+    await projectionCache.onModuleInit();
+    try {
+      expect(projectionCache.get('srv-1')?.dockerDaemon).toEqual(dockerDaemon);
+    } finally {
+      projectionCache.onModuleDestroy();
+    }
+  });
+
+  it('single-flights slow API projection polls and drains them on shutdown', async () => {
+    let resolve!: (rows: never[]) => void;
+    const execute = vi.fn(() => new Promise<never[]>((done) => { resolve = done; }));
+    const query = {
+      innerJoin: () => query,
+      select: () => query,
+      where: () => query,
+      whereRef: () => query,
+      execute,
+    };
+    const projectionCache = new StateCache(
+      { selectFrom: () => query } as never,
+      { servesApi: () => true, servesGateway: () => false } as never,
+    );
+
+    const first = projectionCache.onModuleInit();
+    await vi.waitFor(() => expect(execute).toHaveBeenCalledOnce());
+    const second = (projectionCache as unknown as {
+      pollDurableProjections: () => Promise<void>;
+    }).pollDurableProjections();
+    expect(execute).toHaveBeenCalledOnce();
+    const destroy = projectionCache.onModuleDestroy();
+    resolve([]);
+    await Promise.all([first, second, destroy]);
+    expect(execute).toHaveBeenCalledOnce();
+    expect(projectionCache.isProjectionReady()).toBe(false);
+  });
+
+  it('contains rejected projection polls, preserves the last snapshot, and fails readiness closed', async () => {
+    const query = {
+      innerJoin: () => query,
+      select: () => query,
+      where: () => query,
+      whereRef: () => query,
+      execute: vi.fn().mockRejectedValue(new Error('postgres unavailable')),
+    };
+    const projectionCache = new StateCache(
+      { selectFrom: () => query } as never,
+      { servesApi: () => true, servesGateway: () => false } as never,
+    );
+    const existing = makeSnap('server-a');
+    projectionCache.set(existing.serverId, existing);
+
+    await expect(projectionCache.onModuleInit()).resolves.toBeUndefined();
+    expect(projectionCache.get(existing.serverId)).toBe(existing);
+    expect(projectionCache.isProjectionReady()).toBe(false);
+    await projectionCache.onModuleDestroy();
   });
 
 });

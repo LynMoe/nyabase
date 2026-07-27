@@ -149,7 +149,10 @@ function pairScenario() {
       sequence: 8,
       ledgerSha256: '5'.repeat(64),
       source,
-      freshMigration: { volumeName: 'nyabase-e2e-full-first-backend-data' },
+      freshMigration: {
+        volumeName: 'nyabase-e2e-full-first-postgres-data',
+        migrationDigest: '6'.repeat(64),
+      },
     },
   };
   const current = {
@@ -159,7 +162,10 @@ function pairScenario() {
     ledgerSha256: '5'.repeat(64),
     source,
     build: { builtAt: '2026-07-17T00:11:00.000Z' },
-    freshMigration: { volumeName: 'nyabase-e2e-full-second-backend-data' },
+    freshMigration: {
+      volumeName: 'nyabase-e2e-full-second-postgres-data',
+      migrationDigest: '6'.repeat(64),
+    },
   };
   const attempt = {
     sequence: 9,
@@ -204,5 +210,20 @@ test('pair validation requires adjacent sequence, identical source, and distinct
         scenario.attempt,
       ),
     /reused the same database volume/,
+  );
+  assert.throws(
+    () =>
+      validateConsecutivePair(
+        scenario.previous,
+        {
+          ...scenario.current,
+          freshMigration: {
+            ...scenario.current.freshMigration,
+            migrationDigest: '9'.repeat(64),
+          },
+        },
+        scenario.attempt,
+      ),
+    /different migration manifests/,
   );
 });

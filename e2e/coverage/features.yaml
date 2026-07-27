@@ -2,9 +2,9 @@
   "schemaVersion": 2,
   "scope": "cpu-only",
   "baseline": {
-    "httpDecorators": 153,
-    "httpControllerFiles": 29,
-    "httpInventorySha256": "7321dfe34785478fffafd299b7a5af91401dd8b40029bec173c419d2a211fa5d",
+    "httpDecorators": 154,
+    "httpControllerFiles": 30,
+    "httpInventorySha256": "ddcd75ceec7bcfd4f69ee090b1455b063e318f3fde0ac8a87159ce9871643871",
     "frontendRouteFiles": 20,
     "agentTaskKinds": 14,
     "websocketPaths": 4
@@ -3898,6 +3898,7 @@
         "audit/audit.controller.ts|GET|/api/audit",
         "audit/audit.controller.ts|GET|/api/audit/:id",
         "catalog/admin-catalog.controller.ts|GET|/api/admin/catalog/metric-servers",
+        "metrics/admin-runtime-metrics.controller.ts|GET|/api/admin/metrics/runtime",
         "metrics/admin-metrics.controller.ts|GET|/api/admin/metrics/servers/:id/containers",
         "metrics/admin-metrics.controller.ts|GET|/api/admin/metrics/servers/:id/gpus",
         "metrics/admin-metrics.controller.ts|GET|/api/admin/metrics/servers/:id/host",
@@ -4137,6 +4138,27 @@
           ],
           "httpSurfaces": [
             "audit/audit.controller.ts|GET|/api/audit/:id"
+          ]
+        },
+        {
+          "caseId": "observability.audit-settings.http.get.api-admin-metrics-runtime",
+          "title": "GET /api/admin/metrics/runtime exact aggregate dependency contract",
+          "kind": "behavioral",
+          "status": "implemented",
+          "profiles": [
+            "core",
+            "full"
+          ],
+          "persona": "administrator-and-resource-owner",
+          "assertions": [
+            "anonymous and ordinary users cannot read runtime dependency metrics",
+            "the administrator receives bounded PostgreSQL, Redis, and telemetry aggregates without SQL, keys, identities, credentials, or raw errors"
+          ],
+          "specTestIds": [
+            "api.metrics.admin-runtime-exact-contract"
+          ],
+          "httpSurfaces": [
+            "metrics/admin-runtime-metrics.controller.ts|GET|/api/admin/metrics/runtime"
           ]
         },
         {
@@ -4613,6 +4635,66 @@
           "httpSurfaces": []
         },
         {
+          "caseId": "recovery.security.redis-disposable-outage-recovery",
+          "title": "Redis loss, flush, and restart preserve authorization and durable dispatch",
+          "kind": "behavioral",
+          "status": "implemented",
+          "profiles": [
+            "recovery"
+          ],
+          "persona": "release-engineer-and-adversarial-client",
+          "assertions": [
+            "an administrator can authenticate and a physical ContainerCreate dispatch reaches a terminal PostgreSQL task while Redis is stopped",
+            "the split API readiness endpoint fails with REDIS_NOT_READY during the outage and returns 200 only after Redis reconnects",
+            "API-to-socket-owner self-check, restart pre-inspection, and Console admission fail within a bounded deadline while Redis routing is unavailable, without creating a task or mutating the durable/physical runtime",
+            "after Redis recovery the same self-check, exact restart task/result, and real Console marker succeed through the socket owner",
+            "flushing Redis does not revoke current PostgreSQL authority and a later ContainerStop dispatch is observable through PostgreSQL polling",
+            "after an independent Redis restart a fresh login and ContainerStart dispatch restore the same physical runtime"
+          ],
+          "specTestIds": [
+            "recovery.redis.disposable-outage-recovers-authorization-dispatch"
+          ],
+          "httpSurfaces": []
+        },
+        {
+          "caseId": "recovery.security.victoriametrics-backlog-replay",
+          "title": "VictoriaMetrics outage preserves control mutations and vmagent replay",
+          "kind": "behavioral",
+          "status": "implemented",
+          "profiles": [
+            "recovery"
+          ],
+          "persona": "release-engineer-and-adversarial-client",
+          "assertions": [
+            "a real PostgreSQL-backed control mutation succeeds while VictoriaMetrics is stopped",
+            "vmagent's own persistent-queue pending bytes grow while VictoriaMetrics is unavailable",
+            "after VictoriaMetrics starts the measured vmagent backlog decreases through real remote-write replay"
+          ],
+          "specTestIds": [
+            "recovery.telemetry.victoriametrics-outage-buffers-and-replays"
+          ],
+          "httpSurfaces": []
+        },
+        {
+          "caseId": "recovery.security.vmagent-bounded-degradation",
+          "title": "vmagent outage cannot block Agent WebSockets or control dispatch",
+          "kind": "behavioral",
+          "status": "implemented",
+          "profiles": [
+            "recovery"
+          ],
+          "persona": "release-engineer-and-adversarial-client",
+          "assertions": [
+            "after a complete Agent metrics cadence against stopped vmagent both Agents remain online and runtime-ready",
+            "a physical ContainerCreate dispatch converges while vmagent is unavailable",
+            "the metrics read API returns within an explicit eight-second bound and vmagent can restart with a bounded queue reading"
+          ],
+          "specTestIds": [
+            "recovery.telemetry.vmagent-outage-does-not-block-control"
+          ],
+          "httpSurfaces": []
+        },
+        {
           "caseId": "recovery.security.retention-horizon-pruning",
           "title": "Expired unreferenced task history is pruned after the real retention horizon",
           "kind": "behavioral",
@@ -4749,6 +4831,28 @@
           ],
           "specTestIds": [
             "recovery.agent.duplicate-session-is-fenced"
+          ],
+          "httpSurfaces": []
+        },
+        {
+          "caseId": "recovery.security.split-gateway-session-takeover",
+          "title": "split Gateway takeover fences stale socket ownership",
+          "kind": "behavioral",
+          "status": "implemented",
+          "profiles": [
+            "recovery"
+          ],
+          "persona": "release-engineer-and-adversarial-client",
+          "assertions": [
+            "a run-owned current-build secondary Gateway becomes the durable higher-generation Agent owner while the original primary Gateway process is paused and the selected real Agent connection is cut",
+            "an A-bound long-running Console established before takeover is closed after B becomes authoritative, its PostgreSQL exec session is durably closed, follow-up browser input is rejected, and its forbidden marker is absent from B Console output",
+            "after that exact primary process is unpaused and releases delayed close/cleanup work, the secondary session remains Online and owns API self-check, restart inspection/task result, and a real Console input/output/clean-close flow whose API consoleUrl and actual browser WebSocket both use the manifest-owned secondary TLS edge rather than the primary edge",
+            "a separate long-running B Console is closed by the browser after output, PostgreSQL records that exact exec session closed, and an independent B Console proves the Agent physical exec process was terminated rather than naturally exiting",
+            "after delayed primary cleanup is released, an SSH command and an HTTP marker request traverse the retained B-owned routes while both proxy clients retain non-regressing snapshot generations",
+            "provider restore removes the exact Agent route, labelled secondary containers, and secondary host listener while retiring their manifest identities, then proves a newer primary session without changing physical runtime identity"
+          ],
+          "specTestIds": [
+            "recovery.agent.split-gateway-takeover-fences-stale-owner"
           ],
           "httpSurfaces": []
         },

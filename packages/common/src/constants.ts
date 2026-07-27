@@ -21,6 +21,13 @@ export const MAX_AGENT_MACVLAN_RESERVED_IPS = 4_096;
 export const MAX_PLATFORM_ACTIVE_USERS = 128;
 export const MAX_PLATFORM_SERVERS = 16;
 export const MAX_PLATFORM_IMAGES = 256;
+export const MAX_PLATFORM_GROUPS = 256;
+/** Bounds embedded group catalogs and synchronous authorization fan-out. */
+export const MAX_GROUP_MEMBERS = 64;
+/** Bounds each direct/group mount grant catalog and revocation cross-product. */
+export const MAX_MOUNT_SOURCE_GRANTS_PER_SCOPE = 64;
+/** Maximum quota workflows admitted by one caller-owned business transaction. */
+export const MAX_SYNCHRONOUS_QUOTA_INTENTS_PER_MUTATION = 8;
 export const MAX_SSH_PUBLIC_KEYS_PER_USER = 4;
 export const MAX_SSH_PUBLIC_KEY_TEXT_LENGTH = 1_024;
 export const MAX_SSH_PROXY_CONTAINERS =
@@ -40,6 +47,8 @@ export const MAX_MANAGED_DATA_DIRS_PER_AGENT = 4_096;
 export const MAX_AGENT_LOCAL_DATA_SOURCES = 128;
 /** Keeps the worst-case RemoteFS bootstrap well below the shared WS frame cap. */
 export const MAX_AGENT_REMOTE_FS_MOUNTS = 128;
+export const MAX_PLATFORM_REMOTE_FS_MOUNTS =
+  MAX_PLATFORM_SERVERS * MAX_AGENT_REMOTE_FS_MOUNTS;
 export const MAX_AGENT_XFS_PROJECTS = 4_096;
 /** XFS project identity is a deterministic, protocol-visible user mapping. */
 export const XFS_PROJECT_ID_OFFSET = 10_000;
@@ -48,7 +57,7 @@ export const MAX_AGENT_LOCAL_IMAGES = 8_192;
 export const MAX_AGENT_DISKS = 128;
 export const MAX_AGENT_GPU_DEVICES = 256;
 /**
- * Resource grants cross JSON, SQLite and Docker's signed integer API. Keep
+ * Resource grants cross JSON, PostgreSQL bigint and Docker's signed integer API. Keep
  * every value exactly representable in JavaScript, including the NanoCPU
  * conversion performed by the Agent.
  */

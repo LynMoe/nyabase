@@ -17,7 +17,7 @@ import { CapabilitiesGuard } from '../auth/guards/capabilities.guard.js';
 import { RequireCaps } from '../auth/decorators/require-caps.decorator.js';
 import { CurrentUser } from '../auth/decorators/current-user.decorator.js';
 import { AccessResolverService } from '../access/access-resolver.service.js';
-import { UserEntity } from '../entities/user.entity.js';
+import type { UserRecord } from '../domain/domain-records.js';
 import { Capability, zDataDirResourceName } from '@nyabase/common';
 import { z } from 'zod';
 
@@ -58,7 +58,7 @@ export class AdminDataDirsController {
 
   @Get()
   async list(
-    @CurrentUser() user: UserEntity,
+    @CurrentUser() user: UserRecord,
     @Query('serverId') serverId: string,
     @Query('userId') targetUserId?: string,
   ) {
@@ -69,7 +69,7 @@ export class AdminDataDirsController {
   }
 
   @Post()
-  async create(@CurrentUser() user: UserEntity, @Body() body: unknown) {
+  async create(@CurrentUser() user: UserRecord, @Body() body: unknown) {
     const dto = zAdminCreateDirRequest.parse(body);
     await this.requireTargetMountAccess(dto.userId, dto.serverId, dto.sourceKind, dto.sourceId);
     return this.dataDirsService.createDir(
@@ -89,7 +89,7 @@ export class AdminDataDirsController {
     @Param('serverId') serverId: string,
     @Param('sourceId') sourceId: string,
     @Param('name') name: string,
-    @CurrentUser() user: UserEntity,
+    @CurrentUser() user: UserRecord,
     @Query('userId') targetUserId?: string,
     @Query('sourceKind') sourceKind?: string,
   ) {

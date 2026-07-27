@@ -7,53 +7,55 @@ import {
   Query,
   UseGuards,
 } from '@nestjs/common';
-import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard.js';
 import { CapabilitiesGuard } from '../auth/guards/capabilities.guard.js';
 import { RequireCaps } from '../auth/decorators/require-caps.decorator.js';
-import { AuditLogEntity } from '../entities/audit-log.entity.js';
 import {
+  AuditAction,
   Capability,
   zResourceIdentity,
   type AuditListResponse,
   type AuditLogDto,
   type AuditResourceSnapshotDto,
 } from '@nyabase/common';
+import {
+  AuditRepository,
+  MAX_AUDIT_OFFSET,
+  type AuditEvent,
+  type AuditListFilter,
+} from './audit.repository.js';
 
 @Controller('audit')
 @UseGuards(JwtAuthGuard, CapabilitiesGuard)
 @RequireCaps(Capability.ViewAudit)
 export class AuditController {
-  constructor(
-    @InjectRepository(AuditLogEntity)
-    private repo: Repository<AuditLogEntity>,
-  ) {}
+  constructor(private readonly repository: AuditRepository) {}
 
   @Get()
   async list(
     @Query('limit') limit?: string,
     @Query('offset') offset?: string,
+    @Query('action') action?: string,
+    @Query('actorId') actorId?: string,
+    @Query('targetType') targetType?: string,
+    @Query('targetId') targetId?: string,
   ): Promise<AuditListResponse | AuditLogDto[]> {
     const parsedLimit = parseLimit(limit);
     const parsedOffset = parseOffset(offset);
+    const filter = parseFilter({ action, actorId, targetType, targetId });
+    const page = await this.repository.list(
+      parsedLimit,
+      parsedOffset,
+      filter,
+    );
 
     if (offset === undefined) {
-      const items = await this.repo.find({
-        order: { ts: 'DESC' },
-        take: parsedLimit,
-      });
-      return items.map(toDto);
+      return page.items.map(toDto);
     }
 
-    const [items, total] = await this.repo.findAndCount({
-      order: { ts: 'DESC' },
-      take: parsedLimit,
-      skip: parsedOffset,
-    });
     return {
-      items: items.map(toDto),
-      total,
+      items: page.items.map(toDto),
+      total: page.total,
       limit: parsedLimit,
       offset: parsedOffset,
     };
@@ -62,13 +64,13 @@ export class AuditController {
   @Get(':id')
   async detail(@Param('id') id: string): Promise<AuditLogDto> {
     const auditId = zResourceIdentity.parse(id);
-    const row = await this.repo.findOne({ where: { id: auditId } });
+    const row = await this.repository.findById(auditId);
     if (!row) throw new NotFoundException('Audit log not found');
     return toDto(row);
   }
 }
 
-function toDto(row: AuditLogEntity): AuditLogDto {
+function toDto(row: AuditEvent): AuditLogDto {
   return {
     id: row.id,
     actorId: row.actorId,
@@ -86,6 +88,47 @@ function toDto(row: AuditLogEntity): AuditLogDto {
   };
 }
 
+function parseFilter(input: {
+  action?: string;
+  actorId?: string;
+  targetType?: string;
+  targetId?: string;
+}): AuditListFilter {
+  const filter: AuditListFilter = {};
+  if (input.action !== undefined) {
+    if (!(Object.values(AuditAction) as string[]).includes(input.action)) {
+      throw invalidFilter('action is not a known audit action');
+    }
+    filter.action = input.action;
+  }
+  if (input.actorId !== undefined) {
+    filter.actorId = parseResourceFilter(input.actorId, 'actorId');
+  }
+  if (input.targetId !== undefined) {
+    filter.targetId = parseResourceFilter(input.targetId, 'targetId');
+  }
+  if (input.targetType !== undefined) {
+    if (!/^[a-z][a-z0-9_.-]{0,63}$/.test(input.targetType)) {
+      throw invalidFilter('targetType is invalid');
+    }
+    filter.targetType = input.targetType;
+  }
+  return filter;
+}
+
+function parseResourceFilter(value: string, field: string): string {
+  const parsed = zResourceIdentity.safeParse(value);
+  if (!parsed.success) throw invalidFilter(`${field} is invalid`);
+  return parsed.data;
+}
+
+function invalidFilter(message: string): BadRequestException {
+  return new BadRequestException({
+    code: 'INVALID_AUDIT_FILTER',
+    message,
+  });
+}
+
 function parseLimit(value: string | undefined): number {
   if (value === undefined) return 100;
   const parsed = parsePaginationInteger(value, 'limit');
@@ -95,7 +138,11 @@ function parseLimit(value: string | undefined): number {
 
 function parseOffset(value: string | undefined): number {
   if (value === undefined) return 0;
-  return parsePaginationInteger(value, 'offset');
+  const parsed = parsePaginationInteger(value, 'offset');
+  if (parsed > MAX_AUDIT_OFFSET) {
+    throw invalidPagination(`offset must not exceed ${MAX_AUDIT_OFFSET}`);
+  }
+  return parsed;
 }
 
 function parsePaginationInteger(value: string, field: string): number {

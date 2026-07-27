@@ -35,7 +35,6 @@ import {
   MAX_METRIC_LABEL_KEY_LENGTH,
   MAX_METRIC_LABEL_VALUE_LENGTH,
   MAX_METRIC_LABELS_PER_POINT,
-  MAX_METRIC_NAME_LENGTH,
   MAX_METRIC_POINTS_PER_BATCH,
   MAX_RESOURCE_BYTES,
   MAX_RESOURCE_CPU_MILLIS,
@@ -443,6 +442,76 @@ export const zStateReportPayload = z.object({
   }
 });
 
+export const NYABASE_METRIC_NAMES = [
+  'nyabase_container_cpu_usage_ratio',
+  'nyabase_container_cpu_usage_usec',
+  'nyabase_container_io_read_bytes_total',
+  'nyabase_container_io_write_bytes_total',
+  'nyabase_container_mem_limit_bytes',
+  'nyabase_container_mem_used_bytes',
+  'nyabase_container_net_rx_bytes_total',
+  'nyabase_container_net_tx_bytes_total',
+  'nyabase_disk_total_bytes',
+  'nyabase_disk_used_bytes',
+  'nyabase_gpu_clock_graphics_mhz',
+  'nyabase_gpu_mem_used_bytes',
+  'nyabase_gpu_power_watts',
+  'nyabase_gpu_proc_mem_used_bytes',
+  'nyabase_gpu_temp_celsius',
+  'nyabase_gpu_util_ratio',
+  'nyabase_host_cpu_usage_ratio',
+  'nyabase_host_disk_read_bytes_total',
+  'nyabase_host_disk_write_bytes_total',
+  'nyabase_host_load1',
+  'nyabase_host_load15',
+  'nyabase_host_load5',
+  'nyabase_host_mem_available_bytes',
+  'nyabase_host_mem_total_bytes',
+  'nyabase_host_mem_used_bytes',
+  'nyabase_host_net_rx_bytes_total',
+  'nyabase_host_net_tx_bytes_total',
+  'nyabase_user_disk_used_bytes',
+] as const;
+
+const NYABASE_METRIC_LABEL_KEYS = new Set([
+  'server',
+  'container_id',
+  'disk_id',
+  'gpu_index',
+  'user_id',
+]);
+
+const HOST_METRIC_NAMES = new Set<string>([
+  'nyabase_host_cpu_usage_ratio',
+  'nyabase_host_disk_read_bytes_total',
+  'nyabase_host_disk_write_bytes_total',
+  'nyabase_host_load1',
+  'nyabase_host_load15',
+  'nyabase_host_load5',
+  'nyabase_host_mem_available_bytes',
+  'nyabase_host_mem_total_bytes',
+  'nyabase_host_mem_used_bytes',
+  'nyabase_host_net_rx_bytes_total',
+  'nyabase_host_net_tx_bytes_total',
+]);
+const CONTAINER_METRIC_NAMES = new Set<string>([
+  'nyabase_container_cpu_usage_ratio',
+  'nyabase_container_cpu_usage_usec',
+  'nyabase_container_io_read_bytes_total',
+  'nyabase_container_io_write_bytes_total',
+  'nyabase_container_mem_limit_bytes',
+  'nyabase_container_mem_used_bytes',
+  'nyabase_container_net_rx_bytes_total',
+  'nyabase_container_net_tx_bytes_total',
+]);
+const GPU_METRIC_NAMES = new Set<string>([
+  'nyabase_gpu_clock_graphics_mhz',
+  'nyabase_gpu_mem_used_bytes',
+  'nyabase_gpu_power_watts',
+  'nyabase_gpu_temp_celsius',
+  'nyabase_gpu_util_ratio',
+]);
+
 const zMetricLabels = z.record(
   z.string()
     .min(1)
@@ -456,17 +525,84 @@ const zMetricLabels = z.record(
       message: `Metric point has more than ${MAX_METRIC_LABELS_PER_POINT} labels`,
     });
   }
+  if (!labels.server) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: 'Metric point must contain a stable server label',
+    });
+  }
+  for (const key of Object.keys(labels)) {
+    if (!NYABASE_METRIC_LABEL_KEYS.has(key)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: [key],
+        message: `Metric label "${key}" is not in the bounded label contract`,
+      });
+      continue;
+    }
+    const value = labels[key];
+    const stableId = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
+    if (
+      (key === 'gpu_index' && !/^(0|[1-9][0-9]{0,5})$/.test(value))
+      || (
+        key === 'user_id'
+        && (
+          !/^[1-9][0-9]{0,9}$/.test(value)
+          || Number(value) > XFS_PROJECT_ID_MAX - XFS_PROJECT_ID_OFFSET
+        )
+      )
+      || (
+        key !== 'gpu_index'
+        && key !== 'user_id'
+        && !stableId.test(value)
+      )
+    ) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: [key],
+        message: `Metric label "${key}" must contain a stable bounded identity`,
+      });
+    }
+  }
 });
 
 export const zMetricPoint = z.object({
-  name: z.string()
-    .min(1)
-    .max(MAX_METRIC_NAME_LENGTH)
-    .regex(/^[a-zA-Z_:][a-zA-Z0-9_:]*$/),
+  name: z.enum(NYABASE_METRIC_NAMES),
   labels: zMetricLabels,
   value: z.number().finite(),
   ts: zAgentObservedEpochMs,
-}).strict();
+}).strict().superRefine((point, ctx) => {
+  const required = HOST_METRIC_NAMES.has(point.name)
+    ? ['server']
+    : CONTAINER_METRIC_NAMES.has(point.name)
+      ? ['server', 'container_id']
+      : GPU_METRIC_NAMES.has(point.name)
+        ? ['server', 'gpu_index']
+        : point.name === 'nyabase_gpu_proc_mem_used_bytes'
+          ? ['server', 'gpu_index', 'container_id']
+          : point.name === 'nyabase_user_disk_used_bytes'
+            ? ['server', 'user_id']
+            : ['server', 'disk_id'];
+  const expected = new Set(required);
+  for (const key of Object.keys(point.labels)) {
+    if (!expected.has(key)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['labels', key],
+        message: `Metric ${point.name} does not permit label "${key}"`,
+      });
+    }
+  }
+  for (const key of required) {
+    if (!point.labels[key]) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['labels', key],
+        message: `Metric ${point.name} requires label "${key}"`,
+      });
+    }
+  }
+});
 
 export const zMetricsBatchPayload = z.object({
   serverId: zServerIdentity,

@@ -15,7 +15,7 @@ import { UsersService } from './users.service.js';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard.js';
 import { CapabilitiesGuard } from '../auth/guards/capabilities.guard.js';
 import { CurrentUser } from '../auth/decorators/current-user.decorator.js';
-import { UserEntity } from '../entities/user.entity.js';
+import type { UserRecord } from '../domain/domain-records.js';
 import { zUpdateUserRequest, zAddSshKeyRequest } from '@nyabase/common';
 
 @Controller('users')
@@ -26,7 +26,7 @@ export class UsersController {
   ) {}
 
   @Get(':id')
-  async getUser(@Param('id') id: string, @CurrentUser() currentUser: UserEntity) {
+  async getUser(@Param('id') id: string, @CurrentUser() currentUser: UserRecord) {
     if (currentUser.id !== id) throw new ForbiddenException();
     const user = await this.usersService.findById(id);
     return this.usersService.toDto(user);
@@ -36,7 +36,7 @@ export class UsersController {
   async updateUser(
     @Param('id') id: string,
     @Body() body: unknown,
-    @CurrentUser() currentUser: UserEntity,
+    @CurrentUser() currentUser: UserRecord,
   ) {
     if (currentUser.id !== id) throw new ForbiddenException();
     const dto = zUpdateUserRequest.parse(body);
@@ -54,7 +54,7 @@ export class UsersController {
   // SSH Keys
 
   @Get(':id/ssh-keys')
-  async listSshKeys(@Param('id') id: string, @CurrentUser() currentUser: UserEntity) {
+  async listSshKeys(@Param('id') id: string, @CurrentUser() currentUser: UserRecord) {
     if (currentUser.id !== id) throw new ForbiddenException();
     return this.usersService.listSshKeys(id);
   }
@@ -63,7 +63,7 @@ export class UsersController {
   async addSshKey(
     @Param('id') id: string,
     @Body() body: unknown,
-    @CurrentUser() currentUser: UserEntity,
+    @CurrentUser() currentUser: UserRecord,
   ) {
     if (currentUser.id !== id) throw new ForbiddenException();
     const dto = zAddSshKeyRequest.parse(body);
@@ -75,7 +75,7 @@ export class UsersController {
   async deleteSshKey(
     @Param('id') id: string,
     @Param('keyId') keyId: string,
-    @CurrentUser() currentUser: UserEntity,
+    @CurrentUser() currentUser: UserRecord,
   ) {
     if (currentUser.id !== id) throw new ForbiddenException();
     await this.usersService.deleteSshKey(id, keyId, currentUser.id);

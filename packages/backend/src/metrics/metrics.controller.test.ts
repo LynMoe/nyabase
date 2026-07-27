@@ -6,7 +6,7 @@ import { AdminMetricsController } from './admin-metrics.controller.js';
 import type { MetricsQueryService } from './metrics-query.service.js';
 import type { AccessResolverService } from '../access/access-resolver.service.js';
 import type { UsersService } from '../users/users.service.js';
-import type { UserEntity } from '../entities/user.entity.js';
+import type { UserRecord } from '../domain/domain-records.js';
 import { parseRange } from './metrics-query.service.js';
 
 describe('MetricsController.routes', () => {
@@ -59,7 +59,7 @@ describe('MetricsController.gpuMetrics', () => {
     } as unknown as MetricsQueryService;
     const controller = makeController(metricsQuery);
 
-    const result = await controller.gpuMetrics('srv-1', { id: 'user-1' } as UserEntity, '1h');
+    const result = await controller.gpuMetrics('srv-1', { id: 'user-1' } as UserRecord, '1h');
 
     expect(metricsQuery.queryRangeByLabel).toHaveBeenNthCalledWith(
       5,
@@ -106,7 +106,7 @@ describe('MetricsController.gpuMetrics', () => {
       [{ index: 2, uuid: 'GPU-physical-secret', model: 'NVIDIA A100', totalMemMiB: 40_960 }],
     );
 
-    const result = await controller.gpuMetrics('srv-1', { id: 'user-1' } as UserEntity, '1h');
+    const result = await controller.gpuMetrics('srv-1', { id: 'user-1' } as UserRecord, '1h');
 
     expect(result.gpus).toEqual([{
       index: 2,
@@ -158,7 +158,7 @@ describe('MetricsController.gpuMetrics', () => {
 
       const result = await controller.gpuMetrics(
         'srv-1',
-        { id: 'user-1' } as UserEntity,
+        { id: 'user-1' } as UserRecord,
         '1h',
       );
 
@@ -169,14 +169,13 @@ describe('MetricsController.gpuMetrics', () => {
 
 describe('MetricsController.hostMetrics projection', () => {
   it('shows only granted logical disks and aggregates physical device/interface labels', async () => {
-    const ioA = series(60, [[1000, 3], [1060, 5]]);
-    const ioB = series(60, [[1000, 7], [1060, 11]]);
+    const diskIo = series(60, [[1000, 10], [1060, 16]]);
     const net = series(60, [[1000, 13]]);
     const metricsQuery = makeHostSeriesQuery(
       new Map([['disk-visible', series(60, [[1000, 20]])]]),
       new Map([['disk-visible', series(60, [[1000, 100]])]]),
-      new Map([['nvme0n1', ioA], ['dm-secret', ioB]]),
-      new Map([['eth-secret', net]]),
+      diskIo,
+      net,
     );
     const accessResolver = {
       runWithActiveServerAccess: vi.fn(async (
@@ -193,7 +192,7 @@ describe('MetricsController.hostMetrics projection', () => {
       metricsQuery,
       accessResolver,
       {} as UsersService,
-      { find: vi.fn() } as never,
+      fakeContainerDatabase([]),
       { stateCache: { get: vi.fn().mockReturnValue({
         disks: [
           {
@@ -210,7 +209,7 @@ describe('MetricsController.hostMetrics projection', () => {
 
     const result = await controller.hostMetrics(
       'srv-1',
-      { id: 'user-1' } as UserEntity,
+      { id: 'user-1' } as UserRecord,
       '1h',
     );
 
@@ -232,18 +231,21 @@ describe('MetricsController.hostMetrics projection', () => {
       'xfs:visible',
     );
     expect(accessResolver.resolveMountSources).not.toHaveBeenCalled();
+    expect(vi.mocked(metricsQuery.queryRangeByLabel).mock.calls.every(
+      (call) => call[4] !== 'dev' && call[4] !== 'iface',
+    )).toBe(true);
   });
 
-  it('retains physical topology only on the ViewMetricsAll admin plane', async () => {
+  it('retains physical disk inventory only on the admin plane while I/O stays bounded', async () => {
     const diskIo = series(60, [[1000, 3]]);
     const netIo = series(60, [[1000, 4]]);
     const controller = new AdminMetricsController(
       makeHostSeriesQuery(
-        new Map(), new Map(), new Map([['nvme0n1', diskIo]]), new Map([['eth0', netIo]]),
+        new Map(), new Map(), diskIo, netIo,
       ),
       {} as AccessResolverService,
       {} as UsersService,
-      { find: vi.fn() } as never,
+      fakeContainerDatabase([]),
       { stateCache: { get: vi.fn().mockReturnValue({
         disks: [{ diskId: 'disk-a', mountPoint: '/srv/admin-only', label: null }],
       }) } } as never,
@@ -251,8 +253,8 @@ describe('MetricsController.hostMetrics projection', () => {
 
     await expect(controller.adminHostMetrics('srv-1', '1h')).resolves.toMatchObject({
       disks: [{ diskId: 'disk-a', displayName: 'admin-only', mountPoint: '/srv/admin-only' }],
-      diskIo: [{ label: 'nvme0n1', dev: 'nvme0n1', bps: diskIo }],
-      netIo: [{ label: 'eth0', iface: 'eth0', bps: netIo }],
+      diskIo: [{ label: 'All disks', bps: diskIo }],
+      netIo: [{ label: 'All interfaces', bps: netIo }],
     });
   });
 });
@@ -299,7 +301,7 @@ describe('MetricsController.userMetrics', () => {
       ]),
     );
 
-    const result = await controller.userMetrics('srv-1', { id: 'user-1' } as UserEntity, '1h');
+    const result = await controller.userMetrics('srv-1', { id: 'user-1' } as UserRecord, '1h');
 
     const selectors = vi.mocked(metricsQuery.queryRangeByLabel).mock.calls.map(([selector]) => selector);
     expect(selectors).toHaveLength(8);
@@ -359,7 +361,7 @@ describe('MetricsController.userMetrics', () => {
       ]),
     );
 
-    const result = await controller.userMetrics('srv-1', { id: 'user-1' } as UserEntity, '1h');
+    const result = await controller.userMetrics('srv-1', { id: 'user-1' } as UserRecord, '1h');
 
     const selectors = vi.mocked(metricsQuery.queryRangeByLabel).mock.calls.map(([selector]) => selector);
     expect(selectors).toHaveLength(8);
@@ -405,7 +407,7 @@ describe('AdminMetricsController.userMetrics', () => {
       ]),
     );
 
-    const result = await controller.adminUserMetrics('srv-1', { id: 'user-1' } as UserEntity, '1h');
+    const result = await controller.adminUserMetrics('srv-1', { id: 'user-1' } as UserRecord, '1h');
 
     const selectors = vi.mocked(metricsQuery.queryRangeByLabel).mock.calls.map(([selector]) => selector);
     expect(selectors).toHaveLength(8);
@@ -464,7 +466,7 @@ describe('MetricsController.containerMetrics', () => {
       ]),
     );
 
-    const result = await controller.containerMetrics('srv-1', { id: 'user-1' } as UserEntity, '1h');
+    const result = await controller.containerMetrics('srv-1', { id: 'user-1' } as UserRecord, '1h');
 
     const selectors = vi.mocked(metricsQuery.queryRangeByLabel).mock.calls.map(([selector]) => selector);
     expect(selectors).toHaveLength(7);
@@ -539,7 +541,7 @@ function makeController(
     metricsQuery,
     resolvedAccess,
     usersService ?? ({} as unknown as UsersService),
-    { find: vi.fn().mockResolvedValue(containers) } as never,
+    fakeContainerDatabase(containers),
     { stateCache: { get: vi.fn().mockReturnValue({ disks: [], gpus, containers: runtimeSnapshots }) } } as never,
   );
 }
@@ -547,16 +549,20 @@ function makeController(
 function makeHostSeriesQuery(
   diskUsed: Map<string, MetricSeries>,
   diskTotal: Map<string, MetricSeries>,
-  diskIo: Map<string, MetricSeries>,
-  netIo: Map<string, MetricSeries>,
+  diskIo: MetricSeries,
+  netIo: MetricSeries,
 ): MetricsQueryService {
   return {
-    queryRangeSingle: vi.fn().mockResolvedValue({ step: 60, points: [] }),
-    queryRangeByLabel: vi.fn()
-      .mockResolvedValueOnce(diskUsed)
-      .mockResolvedValueOnce(diskTotal)
+    queryRangeSingle: vi.fn()
+      .mockResolvedValueOnce({ step: 60, points: [] })
+      .mockResolvedValueOnce({ step: 60, points: [] })
+      .mockResolvedValueOnce({ step: 60, points: [] })
+      .mockResolvedValueOnce({ step: 60, points: [] })
       .mockResolvedValueOnce(diskIo)
       .mockResolvedValueOnce(netIo),
+    queryRangeByLabel: vi.fn()
+      .mockResolvedValueOnce(diskUsed)
+      .mockResolvedValueOnce(diskTotal),
   } as unknown as MetricsQueryService;
 }
 
@@ -570,7 +576,7 @@ function makeAdminController(
     metricsQuery,
     {} as unknown as AccessResolverService,
     usersService,
-    { find: vi.fn().mockResolvedValue(containers) } as never,
+    fakeContainerDatabase(containers),
     { stateCache: { get: vi.fn().mockReturnValue({ disks: [], containers: runtimeSnapshots }) } } as never,
   );
 }
@@ -581,6 +587,23 @@ function defaultUsersService(): UsersService {
     getUserIdsByNumericIds: vi.fn().mockResolvedValue(new Map()),
     findByIds: vi.fn().mockResolvedValue([]),
   } as unknown as UsersService;
+}
+
+function fakeContainerDatabase(containers: Array<Record<string, unknown>>) {
+  return {
+    selectFrom: () => {
+      const builder = {
+        select: () => builder,
+        where: () => builder,
+        execute: async () => containers.map((container) => ({
+          id: container.id,
+          name: container.name,
+          owner_id: container.ownerId ?? container.owner_id,
+        })),
+      };
+      return builder;
+    },
+  } as never;
 }
 
 function series(step: number, points: Array<[number, number]>): MetricSeries {

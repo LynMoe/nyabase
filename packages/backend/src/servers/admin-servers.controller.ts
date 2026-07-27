@@ -19,7 +19,7 @@ import {
   zUpdateServerRequest,
 } from '@nyabase/common';
 import { CurrentUser } from '../auth/decorators/current-user.decorator.js';
-import type { UserEntity } from '../entities/user.entity.js';
+import type { UserRecord } from '../domain/domain-records.js';
 
 @Controller('admin/servers')
 @UseGuards(JwtAuthGuard, CapabilitiesGuard)
@@ -42,7 +42,7 @@ export class AdminServersController {
 
   @Post()
   @RequireCaps(Capability.ManageServers)
-  async create(@CurrentUser() actor: UserEntity, @Body() body: unknown) {
+  async create(@CurrentUser() actor: UserRecord, @Body() body: unknown) {
     const dto = zCreateServerRequest.parse(body);
     const { server, agentToken } = await this.serversService.create(actor.id, dto);
     return { server, agentToken };
@@ -50,14 +50,14 @@ export class AdminServersController {
 
   @Post(':id/regenerate-token')
   @RequireCaps(Capability.ManageServers)
-  async regenerateToken(@Param('id') id: string, @CurrentUser() actor: UserEntity) {
+  async regenerateToken(@Param('id') id: string, @CurrentUser() actor: UserRecord) {
     const token = await this.serversService.regenerateToken(actor.id, id);
     return { token };
   }
 
   @Get(':id/self-check')
   @RequireCaps(Capability.ManageServers)
-  async selfCheck(@Param('id') id: string, @CurrentUser() actor: UserEntity) {
+  async selfCheck(@Param('id') id: string, @CurrentUser() actor: UserRecord) {
     return this.serversService.selfCheck(actor.id, id);
   }
 
@@ -77,7 +77,7 @@ export class AdminServersController {
   @RequireCaps(Capability.ManageServers)
   async update(
     @Param('id') id: string,
-    @CurrentUser() actor: UserEntity,
+    @CurrentUser() actor: UserRecord,
     @Body() body: unknown,
   ) {
     const dto = zUpdateServerRequest.parse(body);
@@ -87,7 +87,7 @@ export class AdminServersController {
   @Delete(':id')
   @RequireCaps(Capability.ManageServers)
   @HttpCode(204)
-  async delete(@Param('id') id: string, @CurrentUser() actor: UserEntity) {
+  async delete(@Param('id') id: string, @CurrentUser() actor: UserRecord) {
     await this.serversService.delete(actor.id, id);
   }
 }

@@ -12,28 +12,24 @@ import {
 import { AuthService } from './auth.service.js';
 import { JwtAuthGuard } from './guards/jwt-auth.guard.js';
 import { CurrentUser } from './decorators/current-user.decorator.js';
-import { UserEntity } from '../entities/user.entity.js';
+import type { UserRecord } from '../domain/domain-records.js';
 import { AccessResolverService } from '../access/access-resolver.service.js';
 import {
-  AuditAction,
   zLoginRequest,
   zRefreshTokenRequest,
   zRotateRefreshTokenRequest,
   zCreateApiTokenRequest,
   UserDto,
 } from '@nyabase/common';
-import { AuditService } from '../audit/audit.service.js';
-import { postCommitBestEffort } from '../common/post-commit.js';
 
 @Controller('auth')
 export class AuthController {
   constructor(
     private authService: AuthService,
     private accessResolver: AccessResolverService,
-    private audit: AuditService,
   ) {}
 
-  private async userToDto(user: UserEntity): Promise<UserDto> {
+  private async userToDto(user: UserRecord): Promise<UserDto> {
     const [capabilities, groups] = await Promise.all([
       this.accessResolver.userCapabilities(user.id),
       this.accessResolver.getUserGroupSummaries(user.id),
@@ -63,10 +59,6 @@ export class AuthController {
       dto.password,
       request.socket.remoteAddress ?? 'unknown',
     );
-    await postCommitBestEffort(
-      'User login audit',
-      () => this.audit.log(user.id, AuditAction.UserLogin, user.id, 'user'),
-    );
     return { ...tokens, user: await this.userToDto(user) };
   }
 
@@ -81,24 +73,18 @@ export class AuthController {
   @HttpCode(204)
   async logout(@Body() body: unknown) {
     const { refreshToken } = zRefreshTokenRequest.parse(body);
-    const userId = await this.authService.logout(refreshToken);
-    if (userId) {
-      await postCommitBestEffort(
-        'User logout audit',
-        () => this.audit.log(userId, AuditAction.UserLogout, userId, 'user'),
-      );
-    }
+    await this.authService.logout(refreshToken);
   }
 
   @Get('me')
   @UseGuards(JwtAuthGuard)
-  async me(@CurrentUser() user: UserEntity) {
+  async me(@CurrentUser() user: UserRecord) {
     return this.userToDto(user);
   }
 
   @Get('tokens')
   @UseGuards(JwtAuthGuard)
-  async listTokens(@CurrentUser() user: UserEntity) {
+  async listTokens(@CurrentUser() user: UserRecord) {
     const tokens = await this.authService.listApiTokens(user.id);
     return tokens.map((t) => ({
       id: t.id,
@@ -110,15 +96,9 @@ export class AuthController {
 
   @Post('tokens')
   @UseGuards(JwtAuthGuard)
-  async createToken(@CurrentUser() user: UserEntity, @Body() body: unknown) {
+  async createToken(@CurrentUser() user: UserRecord, @Body() body: unknown) {
     const { name } = zCreateApiTokenRequest.parse(body);
     const { entity, secret } = await this.authService.createApiToken(user.id, name);
-    await postCommitBestEffort(
-      'API token create audit',
-      () => this.audit.log(user.id, AuditAction.CreateApiToken, entity.id, 'api_token', {
-        name: entity.name,
-      }),
-    );
     return {
       token: { id: entity.id, name: entity.name, lastUsedAt: entity.lastUsedAt, createdAt: entity.createdAt },
       secret,
@@ -128,13 +108,7 @@ export class AuthController {
   @Delete('tokens/:id')
   @UseGuards(JwtAuthGuard)
   @HttpCode(204)
-  async deleteToken(@CurrentUser() user: UserEntity, @Param('id') id: string) {
-    const token = await this.authService.deleteApiToken(user.id, id);
-    await postCommitBestEffort(
-      'API token delete audit',
-      () => this.audit.log(user.id, AuditAction.DeleteApiToken, token.id, 'api_token', {
-        name: token.name,
-      }),
-    );
+  async deleteToken(@CurrentUser() user: UserRecord, @Param('id') id: string) {
+    await this.authService.deleteApiToken(user.id, id);
   }
 }

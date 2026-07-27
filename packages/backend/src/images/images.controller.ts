@@ -6,7 +6,7 @@ import { ImagesService } from './images.service.js';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard.js';
 import { CapabilitiesGuard } from '../auth/guards/capabilities.guard.js';
 import { CurrentUser } from '../auth/decorators/current-user.decorator.js';
-import { UserEntity } from '../entities/user.entity.js';
+import type { UserRecord } from '../domain/domain-records.js';
 import { AccessResolverService } from '../access/access-resolver.service.js';
 
 @Controller('images')
@@ -19,14 +19,14 @@ export class ImagesController {
 
   @Get()
   async list(
-    @CurrentUser() user: UserEntity,
+    @CurrentUser() user: UserRecord,
     @Query('activeOnly') activeOnly?: string,
   ) {
     return this.imagesService.findAccessibleForUser(user.id, activeOnly === 'true', this.accessResolver);
   }
 
   @Get(':id')
-  async get(@Param('id') id: string, @CurrentUser() user: UserEntity) {
+  async get(@Param('id') id: string, @CurrentUser() user: UserRecord) {
     const image = await this.imagesService.findById(id);
     const accessible = await this.accessResolver.isImageAccessibleForUser(user.id, image.id);
     if (!accessible) throw new ForbiddenException();

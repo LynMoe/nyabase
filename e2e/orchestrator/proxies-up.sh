@@ -6,7 +6,8 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/common.sh"
 run_id="$(require_run_id "${1:-}")"
 load_run "$run_id"
 
-[[ "$NYABASE_E2E_PROFILE" == full ]] || die 'Rust proxy fixtures are owned only by the Full profile'
+[[ "$NYABASE_E2E_PROFILE" == full || "$NYABASE_E2E_PROFILE" == recovery ]] \
+  || die 'Rust proxy fixtures require a proxy-enabled profile'
 for image in "$NYABASE_E2E_SSH_PROXY_IMAGE" "$NYABASE_E2E_HTTP_PROXY_IMAGE"; do
   docker image inspect "$image" >/dev/null 2>&1 || die "Full proxy image is missing: $image"
 done
@@ -78,4 +79,4 @@ manifest_resource container "$http_name"
 
 NODE_EXTRA_CA_CERTS="$NYABASE_E2E_RUNTIME_DIR/certs/ca.crt" \
   node "$E2E_ROOT/e2e/orchestrator/proxy-health.mjs" "$NYABASE_E2E_RUNTIME_DIR" 120000
-log 'Full proxy fixtures PASS: current Rust SSH and HTTP processes acknowledged real Backend snapshots'
+log 'proxy fixtures PASS: current Rust SSH and HTTP processes acknowledged real Backend snapshots'

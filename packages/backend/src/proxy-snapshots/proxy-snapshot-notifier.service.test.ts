@@ -41,4 +41,61 @@ describe('ProxySnapshotNotifierService', () => {
     expect(service.unblockServerIfEpoch('server-a', epoch, 'recovered')).toBe(true);
     expect(service.isServerBlocked('server-a')).toBe(false);
   });
+
+  it('fans remote Redis invalidations locally without republishing or trusting delivery', async () => {
+    let subscribed: ((payload: string) => void) | undefined;
+    const redis = {
+      gatewayId: 'process-a',
+      publish: vi.fn().mockResolvedValue(true),
+      subscribe: vi.fn(async (_topic: string, handler: (payload: string) => void) => {
+        subscribed = handler;
+        return async () => undefined;
+      }),
+    };
+    const service = new ProxySnapshotNotifierService(redis as never);
+    const http = vi.fn().mockResolvedValue(undefined);
+    service.register('http', http);
+    service.onModuleInit();
+    await Promise.resolve();
+
+    subscribed?.(JSON.stringify({ origin: 'process-a', reason: 'self' }));
+    expect(http).not.toHaveBeenCalled();
+    subscribed?.(JSON.stringify({ origin: 'process-b', reason: 'route changed' }));
+    expect(http).toHaveBeenCalledWith('redis:route changed');
+    expect(redis.publish).not.toHaveBeenCalled();
+    await service.onModuleDestroy();
+  });
+
+  it('unsubscribes a Redis handler that resolves after destroy', async () => {
+    let resolveSubscribe!: (unsubscribe: () => Promise<void>) => void;
+    const unsubscribe = vi.fn().mockResolvedValue(undefined);
+    const redis = {
+      subscribe: vi.fn(
+        () => new Promise<() => Promise<void>>((resolve) => {
+          resolveSubscribe = resolve;
+        }),
+      ),
+    };
+    const service = new ProxySnapshotNotifierService(redis as never);
+    service.onModuleInit();
+
+    const destroyed = service.onModuleDestroy();
+    resolveSubscribe(unsubscribe);
+    await destroyed;
+
+    expect(unsubscribe).toHaveBeenCalledOnce();
+    expect((service as unknown as {
+      unsubscribeRedis: unknown;
+    }).unsubscribeRedis).toBeNull();
+  });
+
+  it('contains a rejected Redis subscription without an unhandled rejection', async () => {
+    const redis = {
+      subscribe: vi.fn().mockRejectedValue(new Error('redis unavailable')),
+    };
+    const service = new ProxySnapshotNotifierService(redis as never);
+    service.onModuleInit();
+    await service.onModuleDestroy();
+    expect(redis.subscribe).toHaveBeenCalledOnce();
+  });
 });

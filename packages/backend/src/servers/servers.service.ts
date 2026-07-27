@@ -3,17 +3,14 @@ import {
   NotFoundException,
   ConflictException,
   BadRequestException,
+  Inject,
   Logger,
 } from '@nestjs/common';
-import { InjectRepository } from '@nestjs/typeorm';
-import { DataSource, Not, Repository } from 'typeorm';
 import { v4 as uuidv4 } from 'uuid';
 import { randomBytes, createHash } from 'crypto';
-import { ServerEntity } from '../entities/server.entity.js';
-import { ImageEntity } from '../entities/image.entity.js';
+import type { ServerRecord } from '../domain/domain-records.js';
 import {
   ServerStatus,
-  AgentTaskStatus,
   DataDiskDto,
   SelfCheckResult,
   type DockerDaemonStatus,
@@ -30,26 +27,14 @@ import { AgentGateway } from '../gateway/agent-gateway.js';
 import { rpcWithErrorMapping } from '../gateway/agent-errors.js';
 import { AccessResolverService } from '../access/access-resolver.service.js';
 import { SshProxyGateway } from '../ssh/ssh-proxy-gateway.js';
-import { runSerializedTransaction } from '../database/serialized-transaction.js';
-import { AgentTaskEntity } from '../entities/agent-task.entity.js';
-import { ResourceLockEntity } from '../entities/resource-lock.entity.js';
-import { RemoteFsServerAssignmentEntity } from '../entities/remote-fs-server-assignment.entity.js';
-import { ContainerEntity } from '../entities/container.entity.js';
-import { ContainerMountEntity } from '../entities/container-mount.entity.js';
-import { DataDirectoryEntity } from '../entities/data-directory.entity.js';
-import { QuotaDesiredEntity } from '../entities/quota-desired.entity.js';
-import { GpuAllocationEntity } from '../entities/gpu-allocation.entity.js';
-import { ContainerSshRouteEntity } from '../entities/container-ssh-route.entity.js';
-import { ServerGrantEntity } from '../entities/server-grant.entity.js';
-import { ImageGrantEntity } from '../entities/image-grant.entity.js';
 import { postCommitBestEffort } from '../common/post-commit.js';
-import { MountSourceGrantEntity } from '../entities/mount-source-grant.entity.js';
-import { NetworkAddressClaimEntity } from '../entities/network-address-claim.entity.js';
 import { ProxySnapshotNotifierService } from '../proxy-snapshots/proxy-snapshot-notifier.service.js';
-import { gcExpiredNetworkClaims } from '../common/network-claim-ledger.js';
 import { AuditService } from '../audit/audit.service.js';
 import { publicDataDiskDisplayName } from '../mount-sources/utils.js';
 import { safeEpochToIso } from '../common/safe-date.js';
+import { InfrastructureRepository } from '../infrastructure/infrastructure.repository.js';
+import { PgTransactionManager } from '../persistence-pg/transaction.js';
+import { WorkflowRepository } from '../agent-tasks/workflow.repository.js';
 
 const SERVER_SLUG_RE = /^[a-z0-9][a-z0-9_-]*$/;
 
@@ -60,17 +45,24 @@ interface ServerDtoOptions {
 @Injectable()
 export class ServersService {
   private readonly logger = new Logger(ServersService.name);
+  private readonly infrastructure: InfrastructureRepository;
+  private readonly transactions: PgTransactionManager;
 
   constructor(
-    @InjectRepository(ServerEntity)
-    private serversRepo: Repository<ServerEntity>,
+    @Inject(InfrastructureRepository)
+    infrastructure: unknown,
     private agentGateway: AgentGateway,
     private accessResolver: AccessResolverService,
     private sshProxyGateway: SshProxyGateway,
-    private dataSource: DataSource,
+    @Inject(PgTransactionManager)
+    transactions: unknown,
     private proxySnapshots: ProxySnapshotNotifierService,
     private auditService: AuditService,
-  ) {}
+    private readonly workflowRepository: WorkflowRepository,
+  ) {
+    this.infrastructure = infrastructure as InfrastructureRepository;
+    this.transactions = transactions as PgTransactionManager;
+  }
 
   async create(actorId: string, dto: {
     name: string;
@@ -79,45 +71,52 @@ export class ServersService {
     this.assertValidSlug(dto.slug);
     const rawToken = randomBytes(32).toString('hex');
     const tokenHash = createHash('sha256').update(rawToken).digest('hex');
-    const server = await runSerializedTransaction(this.dataSource, async (manager) => {
+    const server = await this.transactions.run(async (transaction) => {
       await this.accessResolver.assertActorCapabilitiesInTransaction(
-        manager, actorId, [Capability.ManageServers],
+        transaction, actorId, [Capability.ManageServers],
       );
-      if (await manager.count(ServerEntity) >= MAX_PLATFORM_SERVERS) {
+      await this.infrastructure.lockServerCapacity(transaction);
+      if (await this.infrastructure.countServers(transaction) >= MAX_PLATFORM_SERVERS) {
         throw new ConflictException({
           code: 'SERVER_CAPACITY_REACHED',
           message: `At most ${MAX_PLATFORM_SERVERS} servers are supported`,
         });
       }
-      if (await manager.findOneBy(ServerEntity, { slug: dto.slug })) {
+      if (await this.infrastructure.findServerBySlug(dto.slug, transaction)) {
         throw new ConflictException('Server slug already exists');
       }
-      if (await manager.existsBy(ImageEntity, { deleting: true })) {
+      const deletingImage = await transaction
+        .selectFrom('infra.images')
+        .select('id')
+        .where('deleting', '=', true)
+        .executeTakeFirst();
+      if (deletingImage) {
         throw new ConflictException('A server cannot be created while image cleanup is in progress');
       }
-      return manager.save(ServerEntity, manager.create(ServerEntity, {
+      const created = await this.infrastructure.insertServer({
         id: uuidv4(),
         name: dto.name,
         slug: dto.slug,
         agentTokenHash: tokenHash,
-        hostFingerprint: null,
-        agentConfigFingerprint: null,
-        status: ServerStatus.Unknown,
-        lastSeenAt: null,
         macvlanCidr: null,
         macvlanGateway: null,
         macvlanReservedIps: [],
-      }));
+      }, transaction);
+      await this.auditService.append(
+        transaction,
+        actorId,
+        AuditAction.CreateServer,
+        created.id,
+        'server',
+        { serverId: created.id, name: created.name, slug: created.slug },
+      );
+      return created;
+    }).catch((error: unknown) => {
+      if (isPgUniqueViolation(error)) {
+        throw new ConflictException('Server slug already exists');
+      }
+      throw error;
     });
-    await postCommitBestEffort(
-      'Server create audit',
-      () => this.auditService.log(actorId, AuditAction.CreateServer, server.id, 'server', {
-        serverId: server.id,
-        name: server.name,
-        slug: server.slug,
-      }),
-      this.logger,
-    );
     await postCommitBestEffort(
       'Server create SSH snapshot broadcast',
       () => this.sshProxyGateway.broadcastSnapshot(),
@@ -129,18 +128,19 @@ export class ServersService {
     };
   }
 
-  async findAll(): Promise<ServerEntity[]> {
-    return this.serversRepo.find();
+  async findAll(): Promise<ServerRecord[]> {
+    return this.infrastructure.listServers();
   }
 
   async findAllDtos(options: ServerDtoOptions = {}): Promise<ServerDto[]> {
-    const servers = await this.serversRepo.find();
+    const servers = await this.infrastructure.listServers();
     return Promise.all(servers.map((server) => this.toDto(server, options)));
   }
 
-  async findByIds(ids: string[]): Promise<ServerEntity[]> {
+  async findByIds(ids: string[]): Promise<ServerRecord[]> {
     if (ids.length === 0) return [];
-    return this.serversRepo.findBy(ids.map((id) => ({ id })));
+    const wanted = new Set(ids);
+    return (await this.infrastructure.listServers()).filter((server) => wanted.has(server.id));
   }
 
   async findDtosByIds(ids: string[]): Promise<ServerDto[]> {
@@ -153,8 +153,8 @@ export class ServersService {
     return servers.map((server) => this.toUserDto(server));
   }
 
-  async findById(id: string): Promise<ServerEntity> {
-    const server = await this.serversRepo.findOne({ where: { id } });
+  async findById(id: string): Promise<ServerRecord> {
+    const server = await this.infrastructure.findServerById(id);
     if (!server) throw new NotFoundException('Server not found');
     return server;
   }
@@ -167,8 +167,8 @@ export class ServersService {
     return this.toUserDto(await this.findById(id));
   }
 
-  async findByTokenHash(hash: string): Promise<ServerEntity | null> {
-    return this.serversRepo.findOne({ where: { agentTokenHash: hash } });
+  async findByTokenHash(hash: string): Promise<ServerRecord | null> {
+    return this.infrastructure.findServerByTokenHash(hash);
   }
 
   async update(
@@ -180,36 +180,44 @@ export class ServersService {
     },
   ) {
     if (dto.slug !== undefined) this.assertValidSlug(dto.slug);
-    const { saved, previous } = await runSerializedTransaction(this.dataSource, async (manager) => {
+    const saved = await this.transactions.run(async (transaction) => {
       await this.accessResolver.assertActorCapabilitiesInTransaction(
-        manager, actorId, [Capability.ManageServers],
+        transaction, actorId, [Capability.ManageServers],
       );
-      const server = await manager.findOneBy(ServerEntity, { id });
+      const server = await this.infrastructure.findServerById(id, transaction);
       if (!server) throw new NotFoundException('Server not found');
       if (dto.slug !== undefined && dto.slug !== server.slug) {
-        const existingSlug = await manager.findOneBy(ServerEntity, { slug: dto.slug });
+        const existingSlug = await this.infrastructure.findServerBySlug(dto.slug, transaction);
         if (existingSlug && existingSlug.id !== id) {
           throw new ConflictException('Server slug already exists');
         }
       }
-      const allowed: Partial<Pick<ServerEntity, 'name' | 'slug'>> = {};
+      const allowed: Partial<Pick<ServerRecord, 'name' | 'slug'>> = {};
       if (dto.name !== undefined) allowed.name = dto.name;
       if (dto.slug !== undefined) allowed.slug = dto.slug;
-      if (Object.keys(allowed).length > 0) await manager.update(ServerEntity, id, allowed);
-      return {
-        saved: await manager.findOneByOrFail(ServerEntity, { id }),
-        previous: { name: server.name, slug: server.slug },
-      };
+      const saved = Object.keys(allowed).length > 0
+        ? await this.infrastructure.updateServerIdentity(id, allowed, transaction)
+        : server;
+      if (!saved) throw new NotFoundException('Server not found');
+      await this.auditService.append(
+        transaction,
+        actorId,
+        AuditAction.UpdateServer,
+        saved.id,
+        'server',
+        {
+          serverId: saved.id,
+          previous: { name: server.name, slug: server.slug },
+          current: { name: saved.name, slug: saved.slug },
+        },
+      );
+      return saved;
+    }).catch((error: unknown) => {
+      if (isPgUniqueViolation(error)) {
+        throw new ConflictException('Server slug already exists');
+      }
+      throw error;
     });
-    await postCommitBestEffort(
-      'Server update audit',
-      () => this.auditService.log(actorId, AuditAction.UpdateServer, saved.id, 'server', {
-        serverId: saved.id,
-        previous,
-        current: { name: saved.name, slug: saved.slug },
-      }),
-      this.logger,
-    );
     await postCommitBestEffort(
       'Server update SSH snapshot broadcast',
       () => this.sshProxyGateway.broadcastSnapshot(),
@@ -219,35 +227,24 @@ export class ServersService {
   }
 
   async delete(actorId: string, id: string) {
-    const deleted = await this.agentGateway.runWithSessionFence(
+    await this.workflowRepository.runWithAgentSessionMutationFence(
       id,
       'Server deletion started',
-      () => runSerializedTransaction(this.dataSource, async (manager) => {
+      async (transaction) => {
         await this.accessResolver.assertActorCapabilitiesInTransaction(
-          manager, actorId, [Capability.ManageServers],
+          transaction, actorId, [Capability.ManageServers],
         );
-        const server = await manager.findOneBy(ServerEntity, { id });
+        const server = await this.infrastructure.findServerById(id, transaction);
         if (!server) throw new NotFoundException('Server not found');
-        await gcExpiredNetworkClaims(manager);
         const dependencies: string[] = [];
-        const check = async (label: string, entity: Parameters<typeof manager.count>[0], where: object) => {
-          if (await manager.count(entity, { where })) dependencies.push(label);
-        };
-        await check('pending agent tasks', AgentTaskEntity, {
-          serverId: id,
-          status: AgentTaskStatus.Pending,
-        });
-        await check('resource locks', ResourceLockEntity, { serverId: id });
-        await check('remote FS assignments', RemoteFsServerAssignmentEntity, { serverId: id });
-        await check('containers', ContainerEntity, { serverId: id });
-        await check('container mounts', ContainerMountEntity, { serverId: id });
-        await check('local data directories', DataDirectoryEntity, { serverId: id });
-        await check('GPU allocations', GpuAllocationEntity, { serverId: id });
-        await check('SSH routes', ContainerSshRouteEntity, { serverId: id });
-        await check('server grants', ServerGrantEntity, { serverId: id });
-        await check('image grants', ImageGrantEntity, { serverId: id });
-        await check('local mount source grants', MountSourceGrantEntity, { serverId: id });
-        await check('active or draining network address claims', NetworkAddressClaimEntity, { serverId: id });
+        if (await transaction.selectFrom('iam.server_grants').select('id')
+          .where('server_id', '=', id).executeTakeFirst()) dependencies.push('server grants');
+        if (await transaction.selectFrom('iam.image_grants').select('id')
+          .where('server_id', '=', id).executeTakeFirst()) dependencies.push('image grants');
+        if (await transaction.selectFrom('iam.mount_source_grants').select('id')
+          .where('server_id', '=', id).executeTakeFirst()) {
+          dependencies.push('local mount source grants');
+        }
         if (dependencies.length > 0) {
           throw new ConflictException({
             code: 'SERVER_NOT_EMPTY',
@@ -255,48 +252,17 @@ export class ServersService {
             dependencies,
           });
         }
-        // QuotaDesired is a disposable control-plane projection once the
-        // server owns no task, lock, grant, container or data path. Physical
-        // project records contain no reachable data at this point and must not
-        // make an otherwise empty Server undeletable forever.
-        await manager.delete(QuotaDesiredEntity, { serverId: id });
-        // A fresh full-empty report proves that no managed runtime remains on
-        // this host. Static reservation claims are configuration, not a second
-        // decommission state machine: drop the deleted host's rows, and retain
-        // the shared gateway only while another Server uses the same CIDR.
-        if (server.hostFingerprint) {
-          await manager.delete(NetworkAddressClaimEntity, {
-            ownerKind: 'host',
-            ownerId: server.hostFingerprint,
-          });
-        }
-        if (server.macvlanCidr) {
-          const peers = await manager.count(ServerEntity, {
-            where: { macvlanCidr: server.macvlanCidr, id: Not(id) },
-          });
-          if (peers === 0) {
-            await manager.delete(NetworkAddressClaimEntity, {
-              ownerKind: 'gateway',
-              ownerId: server.macvlanCidr,
-            });
-          }
-        }
-        await manager.delete(ServerEntity, id);
-        return { serverId: server.id, name: server.name, slug: server.slug };
-      }),
-      {
-        requireBoundServerEmptyInventory: true,
-        authorizeAndClaim: (claim) => this.accessResolver.runWithActorCapabilities(
+        await this.infrastructure.deleteServer(id, transaction);
+        await this.auditService.append(
+          transaction,
           actorId,
-          [Capability.ManageServers],
-          async () => { claim(); },
-        ),
+          AuditAction.DeleteServer,
+          server.id,
+          'server',
+          { serverId: server.id, name: server.name, slug: server.slug },
+        );
+        return { serverId: server.id, name: server.name, slug: server.slug };
       },
-    );
-    await postCommitBestEffort(
-      'Server delete audit',
-      () => this.auditService.log(actorId, AuditAction.DeleteServer, deleted.serverId, 'server', deleted),
-      this.logger,
     );
     this.proxySnapshots.forgetServer(id, 'server deleted');
     await postCommitBestEffort(
@@ -309,34 +275,24 @@ export class ServersService {
   async regenerateToken(actorId: string, id: string) {
     const rawToken = randomBytes(32).toString('hex');
     const agentTokenHash = createHash('sha256').update(rawToken).digest('hex');
-    await this.agentGateway.runWithSessionFence(
+    await this.workflowRepository.runWithAgentSessionMutationFence(
       id,
       'Agent token rotation started',
-      () => runSerializedTransaction(this.dataSource, async (manager) => {
+      async (transaction) => {
         await this.accessResolver.assertActorCapabilitiesInTransaction(
-          manager, actorId, [Capability.ManageServers],
+          transaction, actorId, [Capability.ManageServers],
         );
-        const server = await manager.findOneBy(ServerEntity, { id });
+        const server = await this.infrastructure.findServerById(id, transaction);
         if (!server) throw new NotFoundException('Server not found');
-        await manager.update(ServerEntity, id, { agentTokenHash });
-      }),
-      {
-        authorizeAndClaim: (claim) => this.accessResolver.runWithActorCapabilities(
+        await this.infrastructure.replaceAgentTokenHash(id, agentTokenHash, transaction);
+        await this.auditService.append(
+          transaction,
           actorId,
-          [Capability.ManageServers],
-          async () => { claim(); },
-        ),
+          AuditAction.RotateServerAgentToken,
+          id,
+          'server',
+        );
       },
-    );
-    await postCommitBestEffort(
-      'Server Agent token rotation audit',
-      () => this.auditService.log(
-        actorId,
-        AuditAction.RotateServerAgentToken,
-        id,
-        'server',
-      ),
-      this.logger,
     );
     return rawToken;
   }
@@ -425,9 +381,9 @@ export class ServersService {
     };
   }
 
-  private async toDto(server: ServerEntity, options: ServerDtoOptions = {}): Promise<ServerDto> {
+  private async toDto(server: ServerRecord, options: ServerDtoOptions = {}): Promise<ServerDto> {
     const snap = this.agentGateway.stateCache.get(server.id);
-    const disks = await this.listDiskDtos(server.id);
+    const disks = (snap?.disks ?? []).map((disk) => this.toDiskDto(disk));
     return {
       id: server.id,
       name: server.name,
@@ -439,7 +395,9 @@ export class ServersService {
       quarantineCode: server.quarantineCode,
       quarantineMessage: server.quarantineMessage,
       lastSeenAt: server.lastSeenAt?.toISOString() ?? null,
-      runtimeReady: snap?.runtimeReady === true,
+      runtimeReady:
+        server.status === ServerStatus.Online
+        && snap?.runtimeReady === true,
       runtimeObservedAt: safeEpochToIso(snap?.lastUpdated),
       disks,
       gpus: snap?.gpus ?? [],
@@ -448,7 +406,7 @@ export class ServersService {
     };
   }
 
-  private toUserDto(server: ServerEntity): UserServerDto {
+  private toUserDto(server: ServerRecord): UserServerDto {
     const snapshot = this.agentGateway.stateCache.get(server.id);
     return {
       id: server.id,
@@ -456,7 +414,9 @@ export class ServersService {
       slug: server.slug,
       status: server.status,
       lastSeenAt: server.lastSeenAt?.toISOString() ?? null,
-      runtimeReady: snapshot?.runtimeReady === true,
+      runtimeReady:
+        server.status === ServerStatus.Online
+        && snapshot?.runtimeReady === true,
     };
   }
 
@@ -477,4 +437,10 @@ export class ServersService {
       throw new BadRequestException('Server slug must be a lowercase resource name');
     }
   }
+}
+
+function isPgUniqueViolation(error: unknown): boolean {
+  return !!error
+    && typeof error === 'object'
+    && (error as { code?: unknown }).code === '23505';
 }

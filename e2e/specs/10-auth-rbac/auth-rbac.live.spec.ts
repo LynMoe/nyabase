@@ -2266,6 +2266,17 @@ test.describe('10 authentication and RBAC', () => {
             allowedImageIds: expect.arrayContaining([imageId]),
           }),
         );
+        expect(
+          (await expectJson<EffectiveAccessView>(await userApi.get('/api/me/access'))).servers,
+        ).toContainEqual(
+          expect.objectContaining({
+            serverId,
+            cpuMillis: 900,
+            memBytes: 192 * MIB,
+            diskBytes: 96 * MIB,
+            allowedImageIds: expect.arrayContaining([imageId]),
+          }),
+        );
 
         const directDeleted = await expectJson<TaskIdsView>(
           await adminApi.delete(`/api/admin/users/${fixture.user.id}/server-grants/${serverId}`),

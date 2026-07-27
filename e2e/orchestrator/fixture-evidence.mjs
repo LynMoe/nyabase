@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { execFile as execFileCallback } from 'node:child_process';
 import { createHash, randomBytes } from 'node:crypto';
-import { chmod, lstat, mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
+import { chmod, lstat, mkdir, readFile, readdir, rename, rm, writeFile } from 'node:fs/promises';
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { promisify } from 'node:util';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -10,6 +10,11 @@ import {
   runEntrypointWithDiagnostics,
 } from '../support/error-diagnostics.mjs';
 import { loadValidatedRunState } from './run-state-contract.mjs';
+import {
+  buildMigrationManifest,
+  validateMigrationDatabaseEvidence,
+  validateMigrationManifest,
+} from './migration-proof-contract.mjs';
 
 const execFile = promisify(execFileCallback);
 const scriptPath = fileURLToPath(import.meta.url);
@@ -26,8 +31,9 @@ const fixtureCaseIds = [
   'images.lifecycle.immutable-digest',
   'network.macvlan.two-agent-inventories-cpu-only',
 ];
-const initialMigration = 'InitialSchema1700000000000';
 const maxCommandBuffer = 8 * 1024 * 1024;
+const backendMigrationDirectory = '/app/dist/persistence-pg/migrations';
+const migrationFilenamePattern = /^\d{6}_[a-z0-9][a-z0-9-]*\.sql$/;
 
 function invariant(condition, message) {
   if (!condition) throw new Error(message);
@@ -265,13 +271,13 @@ function fixtureDefinitions(ledger) {
 
 async function captureMigrationPreflight(runtimeDirValue) {
   const context = await loadContext(runtimeDirValue);
-  const volumeName = `${context.state.NYABASE_E2E_PREFIX}-backend-data`;
+  const volumeName = `${context.state.NYABASE_E2E_PREFIX}-postgres-data`;
   const inspected = await runResult('docker', ['volume', 'inspect', volumeName]);
   invariant(
     inspected.code !== 0 && /no such volume/i.test(inspected.stderr),
     inspected.code === 0
-      ? `fresh migration requires absent Backend volume, found ${volumeName}`
-      : `could not prove Backend volume absence: ${inspected.stderr || inspected.stdout}`,
+      ? `fresh migration requires absent PostgreSQL volume, found ${volumeName}`
+      : `could not prove PostgreSQL volume absence: ${inspected.stderr || inspected.stdout}`,
   );
   await rm(context.fixtureDir, { recursive: true, force: true });
   await mkdir(context.fixtureDir, { recursive: true, mode: 0o700 });
@@ -282,7 +288,7 @@ async function captureMigrationPreflight(runtimeDirValue) {
     volumeName,
     absentBeforeComposeCreate: true,
     absenceObservedAt: observedAt,
-    emptyBeforeBackendStart: false,
+    emptyBeforePostgresStart: false,
   });
   console.log(`fresh migration preflight PASS: ${volumeName} was absent`);
 }
@@ -291,7 +297,7 @@ async function captureEmptyMigrationVolume(runtimeDirValue) {
   const context = await loadContext(runtimeDirValue);
   const preflightPath = join(context.fixtureDir, 'fresh-migration-preflight.json');
   const preflight = safeJson(await readFile(preflightPath), 'fresh migration preflight');
-  const volumeName = `${context.state.NYABASE_E2E_PREFIX}-backend-data`;
+  const volumeName = `${context.state.NYABASE_E2E_PREFIX}-postgres-data`;
   invariant(
     preflight.runId === context.runId &&
       preflight.volumeName === volumeName &&
@@ -300,13 +306,13 @@ async function captureEmptyMigrationVolume(runtimeDirValue) {
   );
   const labels = safeJson(
     await docker(['volume', 'inspect', volumeName, '--format', '{{json .Labels}}']),
-    'Backend volume labels',
+    'PostgreSQL volume labels',
   );
   invariant(
     labels?.['io.nyabase.e2e.run-id'] === context.runId,
-    'Backend volume lacks run ownership',
+    'PostgreSQL volume lacks run ownership',
   );
-  invariant(labels?.['io.nyabase.e2e.managed'] === 'true', 'Backend volume lacks managed label');
+  invariant(labels?.['io.nyabase.e2e.managed'] === 'true', 'PostgreSQL volume lacks managed label');
   const probeName = `${context.state.NYABASE_E2E_PREFIX}-fresh-volume-proof`;
   const component = 'fixture-fresh-volume-proof';
   await runTransientFixtureContainer(context, probeName, component, [
@@ -339,10 +345,10 @@ async function captureEmptyMigrationVolume(runtimeDirValue) {
       runId: labels['io.nyabase.e2e.run-id'],
       managed: labels['io.nyabase.e2e.managed'],
     },
-    emptyBeforeBackendStart: true,
+    emptyBeforePostgresStart: true,
     emptinessObservedAt: observedAt,
   });
-  console.log(`fresh migration empty-volume PASS: ${volumeName} was empty before Backend start`);
+  console.log(`fresh migration empty-volume PASS: ${volumeName} was empty before PostgreSQL start`);
 }
 
 async function apiRequest(context, method, path, token, body) {
@@ -535,35 +541,140 @@ async function nodeImageProof(context, nodeKey, tag, expectedDigest, expectedIma
   return { nodeKey, imageId, repoDigests: sorted(repoDigests) };
 }
 
-function validateMigrationDatabase(database) {
-  invariant(
-    Array.isArray(database.migrations) && database.migrations.length > 0,
-    'production migrations table is empty',
+async function migrationEntriesFromCheckedInSource() {
+  const directory = resolve(e2eRoot, '..', 'packages', 'backend', 'src', 'persistence-pg', 'migrations');
+  const filenames = (await readdir(directory))
+    .filter((filename) => filename.endsWith('.sql'))
+    .sort();
+  return Promise.all(filenames.map(async (filename) => ({
+    filename,
+    sql: await readFile(join(directory, filename)),
+  })));
+}
+
+async function migrationEntriesFromBackendContainer(containerName) {
+  const filenames = safeJson(
+    await docker([
+      'exec',
+      containerName,
+      'node',
+      '-e',
+      "process.stdout.write(JSON.stringify(require('fs').readdirSync(process.argv[1]).filter((name)=>name.endsWith('.sql')).sort()))",
+      backendMigrationDirectory,
+    ]),
+    'Backend image migration filenames',
   );
   invariant(
-    database.migrations.some(
-      (entry) => entry.name === initialMigration && Number(entry.timestamp) === 1700000000000,
-    ),
-    `production database lacks ${initialMigration}`,
+    Array.isArray(filenames) && filenames.length > 0,
+    'Backend image migration directory is empty',
   );
+  for (const filename of filenames) {
+    invariant(
+      typeof filename === 'string' && migrationFilenamePattern.test(filename),
+      'Backend image has an invalid SQL migration filename',
+    );
+  }
+  return Promise.all(filenames.map(async (filename) => {
+    const encoded = await docker([
+      'exec',
+      containerName,
+      'node',
+      '-e',
+      "process.stdout.write(require('fs').readFileSync(process.argv[1]).toString('base64'))",
+      `${backendMigrationDirectory}/${filename}`,
+    ]);
+    return { filename, sql: Buffer.from(encoded, 'base64') };
+  }));
+}
+
+async function loadBackendMigrationManifest(containerName) {
+  const [imageManifest, checkedInManifest] = await Promise.all([
+    migrationEntriesFromBackendContainer(containerName).then(buildMigrationManifest),
+    migrationEntriesFromCheckedInSource().then(buildMigrationManifest),
+  ]);
+  validateMigrationManifest(imageManifest);
+  validateMigrationManifest(checkedInManifest);
   invariant(
-    Array.isArray(database.tables) &&
-      database.tables.includes('migrations') &&
-      database.tables.includes('users'),
-    'production migration schema is incomplete',
+    JSON.stringify(imageManifest) === JSON.stringify(checkedInManifest),
+    'Backend image migration manifest does not exactly match checked-in migrations',
+  );
+  return imageManifest;
+}
+
+async function readMigrationDatabase(postgresName) {
+  const query = `
+    SELECT json_build_object(
+      'migrations', COALESCE((
+        SELECT json_agg(json_build_object(
+          'version', version,
+          'name', name,
+          'checksum', checksum,
+          'executionMs', execution_ms
+        ) ORDER BY version)
+        FROM system.schema_migrations
+      ), '[]'::json),
+      'schemas', COALESCE((
+        SELECT json_agg(schema_name ORDER BY schema_name)
+        FROM information_schema.schemata
+        WHERE schema_name NOT LIKE 'pg_%'
+          AND schema_name NOT IN ('information_schema', 'public')
+      ), '[]'::json),
+      'tables', COALESCE((
+        SELECT json_agg(table_schema || '.' || table_name ORDER BY table_schema, table_name)
+        FROM information_schema.tables
+        WHERE table_schema NOT LIKE 'pg_%'
+          AND table_schema NOT IN ('information_schema', 'public')
+      ), '[]'::json),
+      'constraints', COALESCE((
+        SELECT json_agg(n.nspname || '.' || c.conname ORDER BY n.nspname, c.conname)
+        FROM pg_constraint c
+        JOIN pg_namespace n ON n.oid = c.connamespace
+        WHERE n.nspname NOT LIKE 'pg_%'
+          AND n.nspname NOT IN ('information_schema', 'public')
+      ), '[]'::json),
+      'indexes', COALESCE((
+        SELECT json_agg(schemaname || '.' || indexname ORDER BY schemaname, indexname)
+        FROM pg_indexes
+        WHERE schemaname NOT LIKE 'pg_%'
+          AND schemaname NOT IN ('information_schema', 'public')
+      ), '[]'::json)
+    )
+  `;
+  return safeJson(
+    await docker([
+      'exec',
+      postgresName,
+      'psql',
+      '--no-psqlrc',
+      '--tuples-only',
+      '--no-align',
+      '--set',
+      'ON_ERROR_STOP=1',
+      '--username',
+      'nyabase',
+      '--dbname',
+      'nyabase',
+      '--command',
+      query,
+    ]),
+    'production PostgreSQL migration proof',
   );
 }
 
 function assertProductionMigrationConfig(config) {
   invariant(
-    /runtime:\s*\n\s+nodeEnv:\s*production(?:\s|$)/.test(config),
+    /runtime:\s*\n\s+nodeEnv:\s*production\s*\n\s+role:\s*all(?:\s|$)/.test(config),
     'Backend fixture is not production mode',
   );
   invariant(
-    /database:\s*\n\s+driver:\s*sqlite\s*\n\s+path:\s*\/data\/nyabase\.db\s*\n\s+synchronize:\s*false\s*\n\s+migrationsRun:\s*true(?:\s|$)/.test(
-      config,
-    ),
-    'Backend production migration config mismatch',
+    /database:\s*\n\s+url:\s*"postgresql:\/\/nyabase:[^"\s]+@postgres:5432\/nyabase"\s*\n\s+poolMax:\s*12\s*\n\s+idleTimeoutMs:\s*30000\s*\n\s+statementTimeoutMs:\s*30000\s*\n\s+migrationsRun:\s*true(?:\s|$)/.test(config) &&
+      /redis:\s*\n\s+url:\s*"redis:\/\/:[^"\s]+@redis:6379\/0"\s*\n\s+keyPrefix:\s*"nyabase:[a-z0-9-]+:"(?:\s|$)/.test(
+        config,
+      ) &&
+      /metrics:\s*\n\s+victoriaMetricsUrl:\s*http:\/\/victoriametrics:8428\s*\n\s+vmagentUrl:\s*http:\/\/vmagent:8429(?:\s|$)/.test(
+        config,
+      ),
+    'split control-plane production persistence config mismatch',
   );
 }
 
@@ -573,73 +684,62 @@ async function captureMigrationDatabaseProof(runtimeDirValue) {
     await readFile(join(context.runtimeDir, 'build.env'), 'utf8'),
     'build.env',
   );
-  const backendName = `${context.state.NYABASE_E2E_PREFIX}-backend-1`;
-  const liveImageId = await docker(['inspect', backendName, '--format', '{{.Image}}']);
-  invariant(
-    liveImageId === build.BACKEND_IMAGE_ID,
-    'fresh migration Backend is not the current-run image',
-  );
-  const volumeName = `${context.state.NYABASE_E2E_PREFIX}-backend-data`;
-  const proofContainer = `${context.state.NYABASE_E2E_PREFIX}-migration-proof`;
-  const script = [
-    "const Database=require('better-sqlite3');",
-    "const db=new Database('/data/nyabase.db',{readonly:true,fileMustExist:true});",
-    "const migrations=db.prepare('SELECT timestamp,name FROM migrations ORDER BY id').all();",
-    "const tables=db.prepare(\"SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name\").all().map(r=>r.name);",
-    'db.close();',
-    'process.stdout.write(JSON.stringify({migrations,tables}));',
-  ].join('');
+  const roleContainers = ['api', 'gateway', 'worker'].map((role) => ({
+    role,
+    containerName: `${context.state.NYABASE_E2E_PREFIX}-backend-${role}-1`,
+  }));
+  for (const runtime of roleContainers) {
+    runtime.imageId = await docker(['inspect', runtime.containerName, '--format', '{{.Image}}']);
+    invariant(
+      runtime.imageId === build.BACKEND_IMAGE_ID,
+      `fresh migration ${runtime.role} is not the current-run Backend image`,
+    );
+    const environment = safeJson(
+      await docker(['inspect', runtime.containerName, '--format', '{{json .Config.Env}}']),
+      `${runtime.role} environment`,
+    );
+    invariant(
+      environment.includes(`NYABASE_RUNTIME_ROLE=${runtime.role}`),
+      `${runtime.role} container runtime role mismatch`,
+    );
+  }
+  const postgresName = `${context.state.NYABASE_E2E_PREFIX}-postgres-1`;
+  const postgresImage = await docker(['inspect', postgresName, '--format', '{{.Config.Image}}']);
+  invariant(postgresImage === 'postgres:18.4-bookworm', 'fresh migration PostgreSQL image mismatch');
+  const volumeName = `${context.state.NYABASE_E2E_PREFIX}-postgres-data`;
   const config = await readFile(join(context.runtimeDir, 'backend-config', 'config.yaml'), 'utf8');
   assertProductionMigrationConfig(config);
 
-  let database;
-  await docker(['stop', '--time', '30', backendName]);
-  try {
-    const component = 'fixture-migration-proof';
-    database = safeJson(
-      await runTransientFixtureContainer(context, proofContainer, component, [
-        'run',
-        '--rm',
-        '--name',
-        proofContainer,
-        '--label',
-        `io.nyabase.e2e.run-id=${context.runId}`,
-        '--label',
-        'io.nyabase.e2e.managed=true',
-        '--label',
-        `io.nyabase.e2e.component=${component}`,
-        '--network',
-        'none',
-        '--read-only',
-        '--mount',
-        `type=volume,src=${volumeName},dst=/data,readonly`,
-        liveImageId,
-        'node',
-        '-e',
-        script,
-      ]),
-      'production migration database proof',
-    );
-    validateMigrationDatabase(database);
-  } finally {
-    await docker(['start', backendName]);
-  }
+  const migrationManifest = await loadBackendMigrationManifest(roleContainers[0].containerName);
+  const database = await readMigrationDatabase(postgresName);
+  const validation = validateMigrationDatabaseEvidence(migrationManifest, database);
 
   const backend = {
-    containerName: backendName,
-    imageId: liveImageId,
+    imageId: build.BACKEND_IMAGE_ID,
     nodeEnv: 'production',
+    runtimes: roleContainers.map(({ role, containerName, imageId }) => ({
+      role,
+      containerName,
+      imageId,
+    })),
     database: {
-      driver: 'sqlite',
-      path: '/data/nyabase.db',
-      synchronize: false,
+      driver: 'postgresql',
+      service: postgresName,
+      image: postgresImage,
       migrationsRun: true,
+      migrationManifest,
+      migrationDigest: validation.digest,
       migrations: database.migrations.map((entry) => ({
+        version: String(entry.version),
         name: String(entry.name),
-        timestamp: Number(entry.timestamp),
+        checksum: String(entry.checksum),
+        executionMs: Number(entry.executionMs),
       })),
-      tableCount: database.tables.length,
-      requiredTables: ['migrations', 'users'],
+      schemas: database.schemas,
+      tables: database.tables,
+      constraints: database.constraints,
+      indexes: database.indexes,
+      tableCount: validation.tableCount,
     },
   };
   const knownSecrets = Object.values(context.secrets).filter((value) => value.length >= 8);
@@ -650,12 +750,14 @@ async function captureMigrationDatabaseProof(runtimeDirValue) {
       runId: context.runId,
       observedAt: new Date().toISOString(),
       volumeName,
-      lockProtocol: 'clean-stop-readonly-inspection-restart',
+      inspectionProtocol: 'current-image-dist-manifest-plus-live-readonly-psql-catalog-query',
       backend,
     },
     knownSecrets,
   );
-  console.log(`fresh migration database PASS: ${initialMigration} in current production image`);
+  console.log(
+    `fresh PostgreSQL migration PASS: ${validation.migrationCount} exact migrations digest=${validation.digest}`,
+  );
 }
 
 async function loadMigrationDatabaseProof(context, build) {
@@ -666,40 +768,71 @@ async function loadMigrationDatabaseProof(context, build) {
   invariant(
     captured.schemaVersion === 1 &&
       captured.runId === context.runId &&
-      captured.volumeName === `${context.state.NYABASE_E2E_PREFIX}-backend-data` &&
-      captured.lockProtocol === 'clean-stop-readonly-inspection-restart',
+      captured.volumeName === `${context.state.NYABASE_E2E_PREFIX}-postgres-data` &&
+      captured.inspectionProtocol ===
+        'current-image-dist-manifest-plus-live-readonly-psql-catalog-query',
     'captured production migration proof does not belong to this run',
   );
   invariant(
     captured.backend?.imageId === build.BACKEND_IMAGE_ID,
     'captured migration proof image does not match the current-run build',
   );
-  const liveImageId = await docker([
-    'inspect',
-    captured.backend.containerName,
-    '--format',
-    '{{.Image}}',
-  ]);
   invariant(
-    liveImageId === captured.backend.imageId,
-    'restarted Backend image changed after migration proof',
+    Array.isArray(captured.backend.runtimes) &&
+      captured.backend.runtimes.length === 3,
+    'captured migration proof lacks split runtimes',
   );
+  for (const runtime of captured.backend.runtimes) {
+    const liveImageId = await docker(['inspect', runtime.containerName, '--format', '{{.Image}}']);
+    invariant(liveImageId === captured.backend.imageId, `${runtime.role} image changed after proof`);
+  }
   invariant(
     captured.backend.nodeEnv === 'production',
     'captured migration proof is not production',
   );
   invariant(
-    captured.backend.database?.driver === 'sqlite' &&
-      captured.backend.database.path === '/data/nyabase.db' &&
-      captured.backend.database.synchronize === false &&
+    captured.backend.database?.driver === 'postgresql' &&
+      captured.backend.database.image === 'postgres:18.4-bookworm' &&
       captured.backend.database.migrationsRun === true,
     'captured migration database contract mismatch',
   );
-  validateMigrationDatabase({
-    migrations: captured.backend.database.migrations,
-    tables: captured.backend.database.requiredTables,
-  });
+  const liveManifest = await loadBackendMigrationManifest(captured.backend.runtimes[0].containerName);
+  invariant(
+    JSON.stringify(liveManifest) === JSON.stringify(captured.backend.database.migrationManifest),
+    'Backend image migration manifest changed after capture',
+  );
+  const postgresName = `${context.state.NYABASE_E2E_PREFIX}-postgres-1`;
+  const liveDatabase = await readMigrationDatabase(postgresName);
+  const validation = validateMigrationDatabaseEvidence(liveManifest, liveDatabase);
+  invariant(
+    JSON.stringify({
+      migrations: captured.backend.database.migrations,
+      schemas: captured.backend.database.schemas,
+      tables: captured.backend.database.tables,
+      constraints: captured.backend.database.constraints,
+      indexes: captured.backend.database.indexes,
+    }) === JSON.stringify(liveDatabase),
+    'live migration catalog changed after captured proof',
+  );
+  invariant(
+    captured.backend.database.migrationDigest === validation.digest,
+    'captured migration digest does not match the live image/database',
+  );
+  validateMigrationDatabaseEvidence(
+    captured.backend.database.migrationManifest,
+    captured.backend.database,
+  );
   return captured.backend;
+}
+
+async function verifyMigrationDatabaseProof(runtimeDirValue) {
+  const context = await loadContext(runtimeDirValue);
+  const build = parseEnv(
+    await readFile(join(context.runtimeDir, 'build.env'), 'utf8'),
+    'build.env',
+  );
+  const backend = await loadMigrationDatabaseProof(context, build);
+  console.log(backend.database.migrationDigest);
 }
 
 async function writeFixtureProof(context, definitions, caseId, claims, knownSecrets) {
@@ -738,7 +871,7 @@ async function captureFixtureProofs(runtimeDirValue) {
   invariant(
     preflight.runId === context.runId &&
       preflight.absentBeforeComposeCreate === true &&
-      preflight.emptyBeforeBackendStart === true,
+      preflight.emptyBeforePostgresStart === true,
     'fresh migration preflight is incomplete',
   );
   const agentsFile = safeJson(
@@ -947,7 +1080,7 @@ async function captureFixtureProofs(runtimeDirValue) {
           name: preflight.volumeName,
           absentBeforeComposeCreate: true,
           absenceObservedAt: preflight.absenceObservedAt,
-          emptyBeforeBackendStart: true,
+          emptyBeforePostgresStart: true,
           emptinessObservedAt: preflight.emptinessObservedAt,
           runOwned: true,
         },
@@ -1200,11 +1333,12 @@ async function main() {
   if (command === 'pre-migration') await captureMigrationPreflight(runtimeDir);
   else if (command === 'empty-migration-volume') await captureEmptyMigrationVolume(runtimeDir);
   else if (command === 'capture-migration') await captureMigrationDatabaseProof(runtimeDir);
+  else if (command === 'verify-migration') await verifyMigrationDatabaseProof(runtimeDir);
   else if (command === 'capture') await captureFixtureProofs(runtimeDir);
   else if (command === 'emit') await emitFixtureEvents(runtimeDir, profile);
   else {
     throw new Error(
-      'usage: fixture-evidence.mjs {pre-migration|empty-migration-volume|capture-migration|capture} <runtimeDir> | emit <runtimeDir> <profile>',
+      'usage: fixture-evidence.mjs {pre-migration|empty-migration-volume|capture-migration|verify-migration|capture} <runtimeDir> | emit <runtimeDir> <profile>',
     );
   }
 }

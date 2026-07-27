@@ -63,13 +63,24 @@ async function request(method, path, token, body) {
   return parsed;
 }
 
-const login = await request('POST', '/auth/login', undefined, {
-  username: 'admin',
-  password: secrets.ADMIN_INIT_PASSWORD,
-});
-const token = login.accessToken;
+async function authenticateAdmin(expectedUserId) {
+  const authenticated = await request('POST', '/auth/login', undefined, {
+    username: 'admin',
+    password: secrets.ADMIN_INIT_PASSWORD,
+  });
+  if (
+    !authenticated.accessToken
+    || !authenticated.user?.id
+    || (expectedUserId && authenticated.user.id !== expectedUserId)
+  ) {
+    throw new Error('admin login is missing or changed identity');
+  }
+  return authenticated;
+}
+
+const login = await authenticateAdmin();
+let token = login.accessToken;
 const adminUserId = login.user?.id;
-if (!token || !adminUserId) throw new Error('admin login is missing token or user id');
 
 if (reconcileExisting) {
   const seed = JSON.parse(await readFile(seedPath, 'utf8'));
@@ -109,6 +120,7 @@ if (reconcileExisting) {
 
 const grantTaskIds = [];
 for (const agent of agents) {
+  token = (await authenticateAdmin(adminUserId)).accessToken;
   const grant = await request('POST', `/admin/users/${adminUserId}/server-grants/${agent.serverId}`, token, {
     cpuMillis: 2000,
     memBytes: 1073741824,
@@ -119,6 +131,7 @@ for (const agent of agents) {
   grantTaskIds.push(...(grant.taskIds ?? []));
 }
 
+token = (await authenticateAdmin(adminUserId)).accessToken;
 const image = await request('POST', '/admin/images', token, {
   name: `${state.NYABASE_E2E_RUN_ID} immutable CPU workload`,
   dockerImage: workloadTag,
@@ -127,6 +140,7 @@ const image = await request('POST', '/admin/images', token, {
   runtimeOverrides,
 });
 for (const agent of agents) {
+  token = (await authenticateAdmin(adminUserId)).accessToken;
   await request('POST', `/admin/users/${adminUserId}/image-grants`, token, {
     imageId: image.id,
     serverId: agent.serverId,
@@ -139,6 +153,7 @@ for (const agent of agents) {
 // path instead of receiving a fixture-induced 403.
 const mountSourceGrants = [];
 for (const agent of agents) {
+  token = (await authenticateAdmin(adminUserId)).accessToken;
   const disks = await request('GET', `/admin/servers/${agent.serverId}/disks`, token);
   const disk = disks.find((candidate) => (
     candidate?.pquotaEnabled === true
@@ -162,6 +177,7 @@ for (const agent of agents) {
   });
 }
 
+token = (await authenticateAdmin(adminUserId)).accessToken;
 const pull = await request('POST', `/admin/images/${image.id}/pull`, token, {
   serverIds: agents.map((agent) => agent.serverId),
 });

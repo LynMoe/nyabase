@@ -54,7 +54,7 @@ proxy_target_id=""
 nfs_fixture_id=""
 ceph_fixture_id=""
 storage_client_id=""
-if [[ "$NYABASE_E2E_PROFILE" == full ]]; then
+if [[ "$NYABASE_E2E_PROFILE" == full || "$NYABASE_E2E_PROFILE" == recovery ]]; then
   log "building current-worktree production SSH proxy image"
   docker_build 'SSH proxy image build' \
     --target ssh-proxy \
@@ -73,6 +73,11 @@ if [[ "$NYABASE_E2E_PROFILE" == full ]]; then
     -t "$NYABASE_E2E_HTTP_PROXY_IMAGE" "$E2E_ROOT"
   manifest_resource image "$NYABASE_E2E_HTTP_PROXY_IMAGE"
 
+  ssh_proxy_id="$(docker image inspect "$NYABASE_E2E_SSH_PROXY_IMAGE" --format '{{.Id}}')"
+  http_proxy_id="$(docker image inspect "$NYABASE_E2E_HTTP_PROXY_IMAGE" --format '{{.Id}}')"
+fi
+
+if [[ "$NYABASE_E2E_PROFILE" == full ]]; then
   log "building current-worktree CPU proxy target image"
   docker_build 'proxy target image build' \
     --label "io.nyabase.e2e.run-id=$run_id" \
@@ -105,8 +110,6 @@ if [[ "$NYABASE_E2E_PROFILE" == full ]]; then
     -t "$NYABASE_E2E_STORAGE_CLIENT_IMAGE" "$E2E_ROOT/e2e/images/storage/client"
   manifest_resource image "$NYABASE_E2E_STORAGE_CLIENT_IMAGE"
 
-  ssh_proxy_id="$(docker image inspect "$NYABASE_E2E_SSH_PROXY_IMAGE" --format '{{.Id}}')"
-  http_proxy_id="$(docker image inspect "$NYABASE_E2E_HTTP_PROXY_IMAGE" --format '{{.Id}}')"
   proxy_target_id="$(docker image inspect "$NYABASE_E2E_PROXY_TARGET_IMAGE" --format '{{.Id}}')"
   nfs_fixture_id="$(docker image inspect "$NYABASE_E2E_NFS_IMAGE" --format '{{.Id}}')"
   ceph_fixture_id="$(docker image inspect "$NYABASE_E2E_CEPH_IMAGE" --format '{{.Id}}')"
@@ -185,10 +188,13 @@ install -m 0600 /dev/null "$NYABASE_E2E_RUNTIME_DIR/build.env"
     "BACKEND_COMMON_DIST_SHA256=$backend_common_digest" \
     "AGENT_DIST_SHA256=$agent_dist_digest" \
     "AGENT_COMMON_DIST_SHA256=$agent_common_digest"
-  if [[ "$NYABASE_E2E_PROFILE" == full ]]; then
+  if [[ "$NYABASE_E2E_PROFILE" == full || "$NYABASE_E2E_PROFILE" == recovery ]]; then
     printf '%s\n' \
       "SSH_PROXY_IMAGE_ID=$ssh_proxy_id" \
-      "HTTP_PROXY_IMAGE_ID=$http_proxy_id" \
+      "HTTP_PROXY_IMAGE_ID=$http_proxy_id"
+  fi
+  if [[ "$NYABASE_E2E_PROFILE" == full ]]; then
+    printf '%s\n' \
       "PROXY_TARGET_IMAGE_ID=$proxy_target_id" \
       "NFS_FIXTURE_IMAGE_ID=$nfs_fixture_id" \
       "CEPH_FIXTURE_IMAGE_ID=$ceph_fixture_id" \

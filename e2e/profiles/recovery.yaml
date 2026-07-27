@@ -28,6 +28,8 @@
     "mount-namespaces",
     "network-namespaces",
     "shared-macvlan-l2",
+    "ssh-proxy",
+    "http-proxy",
     "fault-injection"
   ],
   "workers": 1,

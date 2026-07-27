@@ -156,7 +156,7 @@ function assertNodeKey(value) {
   invariant(value === 'node1' || value === 'node2', 'nodeKey must be node1 or node2');
 }
 
-function validateInput(value, runId) {
+export function validateInput(value, runId) {
   invariant(value?.runId === runId, 'fault input runId does not match the runtime');
   if (value?.fault === 'agentService') {
     assertExactKeys(value, ['fault', 'runId', 'nodeKey', 'action']);
@@ -254,8 +254,17 @@ function validateInput(value, runId) {
     return value;
   }
   if (value?.fault === 'backendService') {
-    assertExactKeys(value, ['fault', 'runId', 'action']);
+    assertExactKeys(
+      value,
+      value.role === undefined
+        ? ['fault', 'runId', 'action']
+        : ['fault', 'runId', 'action', 'role'],
+    );
     invariant(value.action === 'restart' || value.action === 'probe', 'unsupported Backend action');
+    invariant(
+      value.role === undefined || ['api', 'gateway', 'worker', 'all'].includes(value.role),
+      'unsupported split Backend role',
+    );
     return value;
   }
   if (value?.fault === 'backendClock') {
@@ -263,6 +272,26 @@ function validateInput(value, runId) {
     invariant(
       ['advance', 'restore', 'probe'].includes(value.action),
       'unsupported Backend clock action',
+    );
+    return value;
+  }
+  if (value?.fault === 'redisService') {
+    assertExactKeys(value, ['fault', 'runId', 'action']);
+    invariant(
+      ['stop', 'flush', 'restart', 'probe'].includes(value.action),
+      'unsupported Redis service action',
+    );
+    return value;
+  }
+  if (value?.fault === 'telemetryService') {
+    assertExactKeys(value, ['fault', 'runId', 'service', 'action']);
+    invariant(
+      value.service === 'vmagent' || value.service === 'victoriametrics',
+      'unsupported telemetry service',
+    );
+    invariant(
+      ['stop', 'start', 'restart', 'probe'].includes(value.action),
+      'unsupported telemetry service action',
     );
     return value;
   }
@@ -276,6 +305,41 @@ function validateInput(value, runId) {
     assertExactKeys(value, ['fault', 'runId', 'nodeKey', 'action']);
     assertNodeKey(value.nodeKey);
     invariant(value.action === 'probe', 'duplicate Agent session supports only probe');
+    return value;
+  }
+  if (value?.fault === 'splitGatewaySessionRace') {
+    assertExactKeys(
+      value,
+      value.action === 'inject'
+        ? ['fault', 'runId', 'nodeKey', 'action', 'staleExecSessionId']
+        : value.action === 'probe' && value.expectedClosedExecSessionIds !== undefined
+          ? ['fault', 'runId', 'nodeKey', 'action', 'expectedClosedExecSessionIds']
+          : ['fault', 'runId', 'nodeKey', 'action'],
+    );
+    assertNodeKey(value.nodeKey);
+    invariant(
+      ['inject', 'probe', 'restore'].includes(value.action),
+      'split Gateway session race action is unsupported',
+    );
+    invariant(
+      value.action !== 'inject'
+        || /^[0-9a-f-]{36}$/.test(value.staleExecSessionId),
+      'split Gateway injection requires the stale Console session identity',
+    );
+    invariant(
+      value.action !== 'probe'
+        || value.expectedClosedExecSessionIds === undefined
+        || (
+          Array.isArray(value.expectedClosedExecSessionIds)
+          && value.expectedClosedExecSessionIds.length >= 1
+          && value.expectedClosedExecSessionIds.length <= 4
+          && new Set(value.expectedClosedExecSessionIds).size
+            === value.expectedClosedExecSessionIds.length
+          && value.expectedClosedExecSessionIds.every((id) =>
+            typeof id === 'string' && /^[0-9a-f-]{36}$/.test(id))
+        ),
+      'split Gateway closed Console session identities are invalid',
+    );
     return value;
   }
   if (value?.fault === 'artifactAudit') {
@@ -304,7 +368,7 @@ async function inspectContainer(name, expectedComponent, runId, optional = false
     `container ${name} is not provider-managed`,
   );
   invariant(
-    labels['io.nyabase.e2e.component'] === expectedComponent,
+    matchesExpectedContainerComponent(labels, expectedComponent),
     `container ${name} component mismatch`,
   );
   if (serverId !== undefined) {
@@ -314,6 +378,11 @@ async function inspectContainer(name, expectedComponent, runId, optional = false
     );
   }
   return container;
+}
+
+export function matchesExpectedContainerComponent(labels, expectedComponent) {
+  return expectedComponent === undefined
+    || labels['io.nyabase.e2e.component'] === expectedComponent;
 }
 
 async function recordManifestResource(kind, name, runId) {
@@ -765,16 +834,21 @@ export function duplicateFaultIdentity(context) {
   const match = /^(\d+)\.(\d+)\.(\d+)\.0\/24$/.exec(context.state.NYABASE_E2E_SUBNET);
   invariant(match, 'provider subnet is not a canonical /24');
   const prefix = `${match[1]}.${match[2]}.${match[3]}`;
+  invariant(
+    context.state.NYABASE_E2E_DUPLICATE_FAULT_IP === `${prefix}.23`,
+    'duplicate-claim fault address is outside its dedicated reservation',
+  );
   return {
     containerName: `${context.state.NYABASE_E2E_PREFIX}-fault-duplicate-claim`,
     // Docker names can exceed the Linux hostname limit. Keep the hostname
     // independent from the caller-selected run ID so the longest valid run
     // still starts its private systemd namespace.
     hostname: duplicateClaimFaultHostname,
-    // .13 is the isolated rate-limit edge and .20 is the independent probe.
-    // Keep this transient provider node on its dedicated otherwise-unused
-    // address so fault injection cannot collide before exercising the product.
-    outerIp: `${prefix}.14`,
+    // The transient provider node has an explicit run-state reservation. It
+    // must not borrow an address from the production-like Compose services
+    // (.14 is PostgreSQL), the independent probe (.20), or the split-Gateway
+    // fault pair (.21/.22).
+    outerIp: context.state.NYABASE_E2E_DUPLICATE_FAULT_IP,
     conflictingAddress: context.state.NYABASE_E2E_NODE1_IP,
     configPath: join(runtimeDir, 'agents', 'fault-duplicate-claim.yaml'),
   };
@@ -1401,7 +1475,7 @@ async function installWireProxy(input, context, identity) {
     mode: input.mode,
     taskId: input.taskId,
     payloadHash: input.payloadHash,
-    backendIp: context.state.NYABASE_E2E_BACKEND_IP,
+    gatewayIp: context.state.NYABASE_E2E_GATEWAY_IP,
     listenPort: wireProxyPort,
   };
   await writeContainerFile(
@@ -1808,69 +1882,106 @@ async function waitForBackendHealthy(context, timeoutMs = 120_000) {
   throw new Error('Backend did not become healthy through the run TLS edge');
 }
 
-async function backendSnapshot(context) {
-  const containerName = `${context.state.NYABASE_E2E_PREFIX}-backend-1`;
-  const result = await dockerResult(['inspect', containerName]);
-  invariant(result.code === 0, `run-owned Backend ${containerName} does not exist`);
-  const parsed = JSON.parse(result.stdout);
-  invariant(Array.isArray(parsed) && parsed.length === 1, 'Backend identity is ambiguous');
-  const container = parsed[0];
-  const labels = container?.Config?.Labels ?? {};
-  invariant(container?.Name === `/${containerName}`, 'Backend canonical name mismatch');
-  invariant(
-    labels['io.nyabase.e2e.run-id'] === context.runId &&
-      labels['io.nyabase.e2e.managed'] === 'true' &&
-      labels['com.docker.compose.service'] === 'backend',
-    'Backend ownership labels mismatch',
-  );
-  invariant(container?.State?.Running === true, 'Backend container is not running');
-  invariant(/^[a-f0-9]{64}$/.test(container.Id ?? ''), 'Backend container ID is invalid');
-  invariant(
-    typeof container.State.StartedAt === 'string' &&
-      !Number.isNaN(Date.parse(container.State.StartedAt)),
-    'Backend StartedAt is invalid',
-  );
-  const clockEntry = (container.Config.Env ?? []).find((entry) =>
-    entry.startsWith('NYABASE_E2E_CLOCK_OFFSET_MS='),
-  );
-  const offsetMs = Number(clockEntry?.slice(clockEntry.indexOf('=') + 1) ?? 0);
-  invariant(
-    offsetMs === 0 || offsetMs === advancedClockOffsetMs,
-    'Backend clock offset is outside the closed provider vocabulary',
+async function backendSnapshot(context, requestedRole = 'all') {
+  const roles = requestedRole === 'all' ? ['api', 'gateway', 'worker'] : [requestedRole];
+  const runtimes = [];
+  for (const role of roles) {
+    invariant(['api', 'gateway', 'worker'].includes(role), 'invalid split runtime role');
+    const containerName = `${context.state.NYABASE_E2E_PREFIX}-backend-${role}-1`;
+    const result = await dockerResult(['inspect', containerName]);
+    invariant(result.code === 0, `run-owned ${role} runtime ${containerName} does not exist`);
+    const parsed = JSON.parse(result.stdout);
+    invariant(Array.isArray(parsed) && parsed.length === 1, `${role} identity is ambiguous`);
+    const container = parsed[0];
+    const labels = container?.Config?.Labels ?? {};
+    invariant(container?.Name === `/${containerName}`, `${role} canonical name mismatch`);
+    invariant(
+      labels['io.nyabase.e2e.run-id'] === context.runId &&
+        labels['io.nyabase.e2e.managed'] === 'true' &&
+        labels['com.docker.compose.service'] === `backend-${role}`,
+      `${role} ownership labels mismatch`,
+    );
+    invariant(container?.State?.Running === true, `${role} container is not running`);
+    invariant(/^[a-f0-9]{64}$/.test(container.Id ?? ''), `${role} container ID is invalid`);
+    invariant(
+      typeof container.State.StartedAt === 'string' &&
+        !Number.isNaN(Date.parse(container.State.StartedAt)),
+      `${role} StartedAt is invalid`,
+    );
+    invariant(
+      (container.Config.Env ?? []).includes(`NYABASE_RUNTIME_ROLE=${role}`),
+      `${role} runtime role fingerprint mismatch`,
+    );
+    const clockEntry = (container.Config.Env ?? []).find((entry) =>
+      entry.startsWith('NYABASE_E2E_CLOCK_OFFSET_MS='),
+    );
+    const offsetMs = Number(clockEntry?.slice(clockEntry.indexOf('=') + 1) ?? 0);
+    invariant(
+      offsetMs === 0 || offsetMs === advancedClockOffsetMs,
+      `${role} clock offset is outside the closed provider vocabulary`,
+    );
+    runtimes.push({
+      role,
+      containerName,
+      containerId: container.Id,
+      generation: sha256(`${container.Id}\n${container.State.StartedAt}\n${offsetMs}\n`),
+      offsetMs,
+    });
+  }
+  const generation = sha256(
+    runtimes.map((runtime) => `${runtime.role}:${runtime.generation}`).join('\n'),
   );
   return {
-    containerName,
-    containerId: container.Id,
-    generation: sha256(`${container.Id}\n${container.State.StartedAt}\n${offsetMs}\n`),
-    offsetMs,
+    role: requestedRole,
+    containerName:
+      requestedRole === 'all'
+        ? `${context.state.NYABASE_E2E_PREFIX}-split-control-plane`
+        : runtimes[0].containerName,
+    containerId: sha256(runtimes.map((runtime) => runtime.containerId).join('\n')),
+    generation,
+    offsetMs: runtimes[0].offsetMs,
+    runtimes,
   };
 }
 
 async function controlBackendService(input, context) {
-  const before = backendSnapshot(context);
+  const role = input.role ?? 'all';
+  const before = backendSnapshot(context, role);
   const beforeSnapshot = await before;
   await waitForBackendHealthy(context);
-  await recordManifestResource('provider-fault', 'backend-service:restart', context.runId);
+  await recordManifestResource('provider-fault', `backend-service:${role}:restart`, context.runId);
   if (input.action === 'restart') {
-    await docker(['restart', '--time', '30', beforeSnapshot.containerName], { timeout: 60_000 });
+    await docker(
+      [
+        'restart',
+        '--time',
+        '30',
+        ...beforeSnapshot.runtimes.map((runtime) => runtime.containerName),
+      ],
+      { timeout: 120_000 },
+    );
   }
   await waitForBackendHealthy(context);
-  const after = await backendSnapshot(context);
+  const after = await backendSnapshot(context, role);
   invariant(
     input.action !== 'restart' || beforeSnapshot.generation !== after.generation,
     'Backend restart did not change its process generation',
   );
   invariant(
-    beforeSnapshot.containerId === after.containerId,
-    'Backend restart unexpectedly replaced the durable Compose container',
+    beforeSnapshot.runtimes.every(
+      (runtime, index) => runtime.containerId === after.runtimes[index]?.containerId,
+    ),
+    'Backend restart unexpectedly replaced a durable Compose container',
   );
   return {
     schemaVersion: 1,
     runId: context.runId,
     fault: input.fault,
     action: input.action,
+    role,
     containerName: after.containerName,
     containerId: after.containerId,
+    runtimes: after.runtimes,
     before: { generation: beforeSnapshot.generation, healthy: true },
     after: { generation: after.generation, healthy: true },
     restarted: input.action === 'restart',
@@ -1897,7 +2008,9 @@ async function controlBackendClock(input, context) {
         '-d',
         '--no-deps',
         '--force-recreate',
-        'backend',
+        'backend-api',
+        'backend-gateway',
+        'backend-worker',
       ],
       {
         timeout: 120_000,
@@ -1908,7 +2021,7 @@ async function controlBackendClock(input, context) {
     );
   }
   await waitForBackendHealthy(context);
-  const snapshot = await backendSnapshot(context);
+  const snapshot = await backendSnapshot(context, 'all');
   invariant(
     input.action === 'probe' || snapshot.offsetMs === expectedOffset,
     'Backend clock recreation did not apply the requested fixed offset',
@@ -1924,6 +2037,185 @@ async function controlBackendClock(input, context) {
     healthy: true,
     observedAt: new Date().toISOString(),
   };
+}
+
+async function dependencySnapshot(context, service) {
+  const containerName = `${context.state.NYABASE_E2E_PREFIX}-${service}-1`;
+  const result = await dockerResult(['inspect', containerName]);
+  invariant(result.code === 0, `run-owned ${service} ${containerName} does not exist`);
+  const [container] = JSON.parse(result.stdout);
+  const labels = container?.Config?.Labels ?? {};
+  invariant(
+    container?.Name === `/${containerName}` &&
+      labels['io.nyabase.e2e.run-id'] === context.runId &&
+      labels['io.nyabase.e2e.managed'] === 'true' &&
+      labels['com.docker.compose.service'] === service,
+    `${service} dependency ownership mismatch`,
+  );
+  invariant(/^[a-f0-9]{64}$/.test(container.Id ?? ''), `${service} container ID is invalid`);
+  const startedAt = container.State?.StartedAt;
+  const running = container.State?.Running === true;
+  const healthy = running && container.State?.Health?.Status === 'healthy';
+  return {
+    containerName,
+    containerId: container.Id,
+    generation: sha256(`${container.Id}\n${startedAt}\n`),
+    running,
+    healthy,
+  };
+}
+
+async function waitForDependency(context, service, expectedHealthy, timeoutMs = 120_000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const snapshot = await dependencySnapshot(context, service);
+    if (snapshot.healthy === expectedHealthy) return snapshot;
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 500));
+  }
+  throw new Error(`${service} did not reach expected health=${expectedHealthy}`);
+}
+
+async function controlRedisService(input, context) {
+  await recordManifestResource('provider-fault', `redis:${input.action}`, context.runId);
+  const before = await dependencySnapshot(context, 'redis');
+  invariant(
+    input.action === 'restart' || before.healthy,
+    'Redis must be healthy before stop, flush, or probe fault control',
+  );
+  let redisContract =
+    input.action === 'stop' ? await inspectRedisContract(before, context.runId) : null;
+  if (input.action === 'flush') {
+    await docker([
+      'exec',
+      before.containerName,
+      'sh',
+      '-ec',
+      'REDISCLI_AUTH="$0" redis-cli FLUSHALL >/dev/null',
+      context.runId,
+    ]);
+  } else if (input.action === 'stop') {
+    await docker(['stop', '--time', '30', before.containerName], { timeout: 60_000 });
+  } else if (input.action === 'restart') {
+    await docker(['restart', '--time', '30', before.containerName], { timeout: 60_000 });
+  }
+  const after = await waitForDependency(context, 'redis', input.action !== 'stop');
+  redisContract ??= await inspectRedisContract(after, context.runId);
+  return {
+    schemaVersion: 1,
+    runId: context.runId,
+    fault: input.fault,
+    action: input.action,
+    containerName: after.containerName,
+    containerId: after.containerId,
+    generation: after.generation,
+    running: after.running,
+    healthy: after.healthy,
+    keyCount: redisContract.keyCount,
+    flushed: input.action === 'flush',
+    persistenceDisabled: true,
+    observedAt: new Date().toISOString(),
+  };
+}
+
+async function inspectRedisContract(snapshot, password) {
+  invariant(snapshot.healthy, 'Redis contract inspection requires a healthy service');
+  const redisConfig = await docker([
+    'exec',
+    snapshot.containerName,
+    'sh',
+    '-ec',
+    'REDISCLI_AUTH="$0" redis-cli --raw CONFIG GET save; REDISCLI_AUTH="$0" redis-cli --raw CONFIG GET appendonly; REDISCLI_AUTH="$0" redis-cli --raw DBSIZE',
+    password,
+  ]);
+  const lines = redisConfig.split('\n');
+  invariant(
+    lines[0] === 'save' &&
+      lines[1] === '' &&
+      lines[2] === 'appendonly' &&
+      lines[3] === 'no' &&
+      /^[0-9]+$/.test(lines[4] ?? ''),
+    'Redis disposable-cache contract mismatch',
+  );
+  return {
+    keyCount: Number(lines[4]),
+  };
+}
+
+async function controlTelemetryService(input, context) {
+  await recordManifestResource(
+    'provider-fault',
+    `telemetry:${input.service}:${input.action}`,
+    context.runId,
+  );
+  const before = await dependencySnapshot(context, input.service);
+  if (input.action === 'stop' && before.running) {
+    await docker(['stop', '--time', '30', before.containerName], { timeout: 60_000 });
+  } else if (input.action === 'start' && !before.running) {
+    await docker(['start', before.containerName], { timeout: 60_000 });
+  } else if (input.action === 'restart') {
+    await docker(['restart', '--time', '30', before.containerName], { timeout: 60_000 });
+  }
+  const expectedHealthy = input.action !== 'stop';
+  const after = await waitForDependency(context, input.service, expectedHealthy);
+  const queuePendingBytes =
+    input.service === 'vmagent' && expectedHealthy
+      ? await inspectVmagentQueue(after.containerName)
+      : null;
+  return {
+    schemaVersion: 1,
+    runId: context.runId,
+    fault: input.fault,
+    service: input.service,
+    action: input.action,
+    containerName: after.containerName,
+    containerId: after.containerId,
+    generation: after.generation,
+    healthy: after.healthy,
+    queuePendingBytes,
+    observedAt: new Date().toISOString(),
+  };
+}
+
+async function inspectVmagentQueue(containerName) {
+  const metrics = await docker([
+    'exec',
+    containerName,
+    'wget',
+    '-qO-',
+    'http://127.0.0.1:8429/metrics',
+  ]);
+  return parseVmagentQueueMetrics(metrics);
+}
+
+export function parseVmagentQueueMetrics(metrics) {
+  for (const metricName of [
+    'vm_persistentqueue_bytes_pending',
+    'vmagent_remotewrite_pending_data_bytes',
+    'vmagent_remotewrite_pending_bytes',
+  ]) {
+    const values = metrics
+      .split('\n')
+      .map((line) => {
+        const match = new RegExp(
+          `^${metricName}(?:\\{.*\\})?\\s+([^\\s]+)(?:\\s|$)`,
+        ).exec(line);
+        return match ? Number(match[1]) : null;
+      })
+      .filter((value) => value !== null);
+    if (values.length > 0) {
+      invariant(
+        values.every((value) => Number.isFinite(value) && value >= 0),
+        `vmagent ${metricName} contains an invalid queue value`,
+      );
+      const total = values.reduce((sum, value) => sum + value, 0);
+      invariant(
+        Number.isSafeInteger(total),
+        `vmagent ${metricName} exceeds the safe queue evidence range`,
+      );
+      return total;
+    }
+  }
+  throw new Error('vmagent did not expose a recognized persistent-queue backlog metric');
 }
 
 async function dockerdSnapshot(containerName) {
@@ -2125,6 +2417,831 @@ async function controlDuplicateAgentSession(input, context) {
   };
 }
 
+const splitGatewayRaceComponent = 'provider-fault-split-gateway';
+const splitGatewayRaceStateFile = 'split-gateway-session-race.json';
+const splitGatewayRaceEdgeConfigFile = 'split-gateway-session-race-edge.conf';
+
+function splitGatewayRaceIdentity(input, context) {
+  const match = /^(\d+)\.(\d+)\.(\d+)\.0\/24$/.exec(context.state.NYABASE_E2E_SUBNET);
+  invariant(match, 'provider subnet is not a canonical /24');
+  const prefix = `${match[1]}.${match[2]}.${match[3]}`;
+  const secondaryEdgeHostPort = Number(
+    context.state.NYABASE_E2E_SPLIT_GATEWAY_EDGE_PORT,
+  );
+  invariant(
+    Number.isInteger(secondaryEdgeHostPort)
+      && secondaryEdgeHostPort >= 1
+      && secondaryEdgeHostPort <= 65_535,
+    'split Gateway edge host port is invalid',
+  );
+  return {
+    nodeContainer: `${context.state.NYABASE_E2E_PREFIX}-${input.nodeKey}`,
+    primaryGatewayContainer: `${context.state.NYABASE_E2E_PREFIX}-backend-gateway-1`,
+    secondaryGatewayContainer: `${context.state.NYABASE_E2E_PREFIX}-fault-gateway-b`,
+    secondaryEdgeContainer: `${context.state.NYABASE_E2E_PREFIX}-fault-edge-b`,
+    secondaryGatewayIp: `${prefix}.21`,
+    secondaryEdgeIp: `${prefix}.22`,
+    secondaryEdgeHostPort,
+    secondaryEdgeHostPortResource: `tcp://127.0.0.1:${secondaryEdgeHostPort}`,
+    secondaryConsoleUrl:
+      `wss://localhost:${secondaryEdgeHostPort}/ws/console`,
+    routeComment: `nyabase-e2e-${context.runId}-split-gateway`,
+    statePath: join(runtimeDir, splitGatewayRaceStateFile),
+    edgeConfigPath: join(runtimeDir, splitGatewayRaceEdgeConfigFile),
+  };
+}
+
+function splitGatewayRouteArgs(identity, edgeIp, operation) {
+  return [
+    'exec',
+    identity.nodeContainer,
+    'iptables',
+    '--wait',
+    '5',
+    '-t',
+    'nat',
+    `-${operation}`,
+    'OUTPUT',
+    '-p',
+    'tcp',
+    '-d',
+    edgeIp,
+    '--dport',
+    '443',
+    '-m',
+    'comment',
+    '--comment',
+    identity.routeComment,
+    '-j',
+    'DNAT',
+    '--to-destination',
+    `${identity.secondaryEdgeIp}:443`,
+  ];
+}
+
+async function splitGatewayRouteActive(identity, context) {
+  return (
+    await dockerResult(splitGatewayRouteArgs(identity, context.state.NYABASE_E2E_EDGE_IP, 'C'))
+  ).code === 0;
+}
+
+async function splitGatewayContainerActive(name, component, context, optional = false) {
+  const inspected = await inspectContainer(name, component, context.runId, optional);
+  return inspected?.State?.Running === true;
+}
+
+async function readSplitGatewayRaceState(identity, input, optional = false) {
+  let value;
+  try {
+    const info = await lstat(identity.statePath);
+    invariant(
+      info.isFile() && !info.isSymbolicLink() && (info.mode & 0o777) === 0o600,
+      'split Gateway race state is not a private regular file',
+    );
+    value = JSON.parse(await readFile(identity.statePath, 'utf8'));
+  } catch (error) {
+    if (optional && error?.code === 'ENOENT') return null;
+    throw error;
+  }
+  assertExactKeys(value, [
+    'schemaVersion',
+    'runId',
+    'nodeKey',
+    'serverId',
+    'staleExecSessionId',
+    'baselineGatewayId',
+    'primaryGatewayProcessGeneration',
+  ]);
+  invariant(
+    value.schemaVersion === 2
+      && value.runId === input.runId
+      && value.nodeKey === input.nodeKey
+      && /^[0-9a-f-]{36}$/.test(value.serverId)
+      && /^[0-9a-f-]{36}$/.test(value.staleExecSessionId)
+      && typeof value.baselineGatewayId === 'string'
+      && value.baselineGatewayId.length > 0
+      && /^[a-f0-9]{64}$/.test(value.primaryGatewayProcessGeneration),
+    'split Gateway race state identity mismatch',
+  );
+  return value;
+}
+
+async function closedExecSessionEvidence(context, sessionIds) {
+  invariant(
+    Array.isArray(sessionIds)
+      && sessionIds.length >= 1
+      && sessionIds.length <= 4
+      && new Set(sessionIds).size === sessionIds.length
+      && sessionIds.every((id) => /^[0-9a-f-]{36}$/.test(id)),
+    'closed exec session evidence identities are invalid',
+  );
+  const postgres = `${context.state.NYABASE_E2E_PREFIX}-postgres-1`;
+  const ids = sessionIds.map((id) => `'${id}'::uuid`).join(', ');
+  const sql = [
+    "SELECT COALESCE(json_agg(json_build_object(",
+    "'sessionId', id,",
+    "'state', state,",
+    "'closedAt', closed_at,",
+    "'closeReason', close_reason,",
+    "'agentSessionId', agent_session_id,",
+    "'gatewayId', gateway_id",
+    ') ORDER BY id), \'[]\'::json)',
+    'FROM workflow.exec_sessions',
+    `WHERE id IN (${ids});`,
+  ].join(' ');
+  const deadline = Date.now() + 15_000;
+  let rows = [];
+  while (Date.now() < deadline) {
+    const result = await dockerResult([
+      'exec',
+      '-e',
+      `PGPASSWORD=${context.runId}`,
+      postgres,
+      'psql',
+      '--no-psqlrc',
+      '--tuples-only',
+      '--no-align',
+      '--set',
+      'ON_ERROR_STOP=1',
+      '--username',
+      'nyabase',
+      '--dbname',
+      'nyabase',
+      '--command',
+      sql,
+    ]);
+    invariant(result.code === 0, 'could not inspect durable exec session closure');
+    rows = JSON.parse(result.stdout);
+    if (
+      Array.isArray(rows)
+      && rows.length === sessionIds.length
+      && sessionIds.every((id) => rows.some((row) => row?.sessionId === id))
+      && rows.every((row) =>
+        /^[0-9a-f-]{36}$/.test(row?.sessionId)
+        && row.state === 'closed'
+        && typeof row.closedAt === 'string'
+        && !Number.isNaN(Date.parse(row.closedAt))
+        && typeof row.closeReason === 'string'
+        && row.closeReason.length > 0
+        && /^[0-9a-f-]{36}$/.test(row.agentSessionId)
+        && typeof row.gatewayId === 'string'
+        && row.gatewayId.length > 0)
+    ) {
+      return rows;
+    }
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 100));
+  }
+  throw new Error(`exec sessions did not close durably: ${JSON.stringify(rows)}`);
+}
+
+async function currentAgentSession(context, serverId) {
+  invariant(/^[0-9a-f-]{36}$/.test(serverId), 'Agent Server identity is invalid');
+  const postgres = `${context.state.NYABASE_E2E_PREFIX}-postgres-1`;
+  const sql = [
+    'SELECT json_build_object(',
+    "'sessionId', session.id,",
+    "'generation', session.generation,",
+    "'gatewayId', session.gateway_id,",
+    "'serverOnline', server.status = 'online',",
+    "'runtimeReady', COALESCE(projection.runtime_ready, false)",
+    ')',
+    'FROM workflow.agent_sessions AS session',
+    'JOIN infra.servers AS server ON server.id = session.server_id',
+    'LEFT JOIN workflow.agent_runtime_projections AS projection',
+    '  ON projection.session_id = session.id',
+    `WHERE session.server_id = '${serverId}'::uuid`,
+    "  AND session.state = 'ready'",
+    'ORDER BY session.generation DESC',
+    'LIMIT 1;',
+  ].join(' ');
+  const result = await dockerResult([
+    'exec',
+    '-e',
+    `PGPASSWORD=${context.runId}`,
+    postgres,
+    'psql',
+    '--no-psqlrc',
+    '--tuples-only',
+    '--no-align',
+    '--set',
+    'ON_ERROR_STOP=1',
+    '--username',
+    'nyabase',
+    '--dbname',
+    'nyabase',
+    '--command',
+    sql,
+  ]);
+  invariant(result.code === 0, 'could not inspect durable Agent session ownership');
+  if (!result.stdout) return null;
+  const value = JSON.parse(result.stdout);
+  invariant(
+    typeof value.sessionId === 'string'
+      && /^[0-9a-f-]{36}$/.test(value.sessionId)
+      && Number.isSafeInteger(value.generation)
+      && value.generation > 0
+      && typeof value.gatewayId === 'string'
+      && value.gatewayId.length > 0
+      && typeof value.serverOnline === 'boolean'
+      && typeof value.runtimeReady === 'boolean',
+    'durable Agent session evidence is invalid',
+  );
+  return value;
+}
+
+async function waitForAgentSessionOwner(
+  context,
+  serverId,
+  accept,
+  description,
+  timeoutMs = 180_000,
+) {
+  const deadline = Date.now() + timeoutMs;
+  let last = null;
+  while (Date.now() < deadline) {
+    last = await currentAgentSession(context, serverId);
+    if (last && accept(last)) return last;
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 500));
+  }
+  throw new Error(
+    `Agent session did not reach ${description}; last=${JSON.stringify(last)}`,
+  );
+}
+
+async function waitForLocalGateway(containerName, timeoutMs = 120_000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const probe = await dockerResult([
+      'exec',
+      containerName,
+      'node',
+      '-e',
+      "fetch('http://127.0.0.1:3001/api/health/ready').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))",
+    ]);
+    if (probe.code === 0) return;
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 500));
+  }
+  throw new Error(`Gateway ${containerName} did not become locally ready`);
+}
+
+async function cutAgentEdgeConnection(identity, context) {
+  const connectionArgs = [
+    'exec',
+    identity.nodeContainer,
+    'ss',
+    '-Htn',
+    'state',
+    'established',
+    'dst',
+    context.state.NYABASE_E2E_EDGE_IP,
+    'dport',
+    '=',
+    ':443',
+  ];
+  const before = await dockerResult(connectionArgs);
+  invariant(
+    before.code === 0 && before.stdout.split('\n').filter(Boolean).length === 1,
+    'selected Agent does not have exactly one established control connection',
+  );
+  const killed = await dockerResult([
+    'exec',
+    identity.nodeContainer,
+    'ss',
+    '--kill',
+    'dst',
+    context.state.NYABASE_E2E_EDGE_IP,
+    'dport',
+    '=',
+    ':443',
+  ]);
+  invariant(killed.code === 0, 'could not cut the selected Agent control connection');
+  const deadline = Date.now() + 10_000;
+  while (Date.now() < deadline) {
+    const remaining = await dockerResult(connectionArgs);
+    if (remaining.code === 0 && !remaining.stdout) return;
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 100));
+  }
+  throw new Error('selected Agent retained its pre-fault control connection');
+}
+
+async function pausePrimaryGatewayAtDatabaseStablePoint(identity, context) {
+  const postgres = `${context.state.NYABASE_E2E_PREFIX}-postgres-1`;
+  const sql = [
+    'SELECT count(*)',
+    'FROM pg_stat_activity AS activity',
+    'WHERE activity.datname = current_database()',
+    `  AND activity.client_addr = '${context.state.NYABASE_E2E_GATEWAY_IP}'::inet`,
+    '  AND (',
+    "    activity.state = 'active'",
+    '    OR activity.xact_start IS NOT NULL',
+    '    OR EXISTS (',
+    '      SELECT 1 FROM pg_locks AS held',
+    '      WHERE held.pid = activity.pid',
+    "        AND held.locktype = 'advisory'",
+    '        AND held.granted',
+    '    )',
+    '  );',
+  ].join(' ');
+  const deadline = Date.now() + 30_000;
+  while (Date.now() < deadline) {
+    await docker(['pause', identity.primaryGatewayContainer]);
+    const inspected = await dockerResult([
+      'exec',
+      '-e',
+      `PGPASSWORD=${context.runId}`,
+      postgres,
+      'psql',
+      '--no-psqlrc',
+      '--tuples-only',
+      '--no-align',
+      '--set',
+      'ON_ERROR_STOP=1',
+      '--username',
+      'nyabase',
+      '--dbname',
+      'nyabase',
+      '--command',
+      sql,
+    ]);
+    invariant(inspected.code === 0, 'could not inspect paused Gateway database work');
+    if (inspected.stdout === '0') return;
+    await docker(['unpause', identity.primaryGatewayContainer]);
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 250));
+  }
+  throw new Error('primary Gateway could not be paused outside authority work');
+}
+
+async function assertStableAgentSessionOwner(
+  context,
+  serverId,
+  expected,
+  durationMs = 12_000,
+) {
+  const deadline = Date.now() + durationMs;
+  let samples = 0;
+  while (Date.now() < deadline) {
+    const current = await currentAgentSession(context, serverId);
+    invariant(
+      current?.sessionId === expected.sessionId
+        && current.gatewayId === expected.gatewayId
+        && current.generation === expected.generation
+        && current.serverOnline
+        && current.runtimeReady,
+      `delayed primary cleanup changed the secondary Agent owner: ${JSON.stringify(current)}`,
+    );
+    samples += 1;
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 250));
+  }
+  invariant(samples >= 20, 'delayed primary cleanup observation window was too short');
+  return expected;
+}
+
+async function createSplitGatewayRaceResources(identity, context) {
+  await assertOuterIpFree(context.state, identity.secondaryGatewayIp);
+  await assertOuterIpFree(context.state, identity.secondaryEdgeIp);
+  const edgeConfig = [
+    'server {',
+    '  listen 443 ssl;',
+    '  server_name edge;',
+    '  ssl_certificate /etc/nginx/tls/edge.crt;',
+    '  ssl_certificate_key /etc/nginx/tls/edge.key;',
+    '  ssl_protocols TLSv1.2 TLSv1.3;',
+    '  ssl_session_tickets off;',
+    '  client_max_body_size 32m;',
+    '  proxy_read_timeout 3600s;',
+    '  proxy_send_timeout 3600s;',
+    '  location ~ ^/ws/(agent|console|ssh-proxy|http-proxy)$ {',
+    '    proxy_pass http://gateway-b:3001;',
+    '    proxy_http_version 1.1;',
+    '    proxy_set_header Host $host;',
+    '    proxy_set_header X-Forwarded-Proto https;',
+    '    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;',
+    '    proxy_set_header Upgrade $http_upgrade;',
+    '    proxy_set_header Connection "upgrade";',
+    '  }',
+    '  location / { return 404; }',
+    '}',
+    '',
+  ].join('\n');
+  await writeFile(identity.edgeConfigPath, edgeConfig, { mode: 0o600, flag: 'wx' });
+  await chmod(identity.edgeConfigPath, 0o600);
+
+  await recordManifestResource(
+    'container',
+    identity.secondaryGatewayContainer,
+    context.runId,
+  );
+  await docker([
+    'run',
+    '-d',
+    '--pull=never',
+    '--name',
+    identity.secondaryGatewayContainer,
+    '--label',
+    `io.nyabase.e2e.run-id=${context.runId}`,
+    '--label',
+    'io.nyabase.e2e.managed=true',
+    '--label',
+    `io.nyabase.e2e.component=${splitGatewayRaceComponent}`,
+    '--network',
+    context.state.NYABASE_E2E_NETWORK,
+    '--network-alias',
+    'gateway-b',
+    '--ip',
+    identity.secondaryGatewayIp,
+    '--env',
+    'NYABASE_CONFIG_FILE=/etc/nyabase/config.yaml',
+    '--env',
+    'NYABASE_RUNTIME_ROLE=gateway',
+    '--env',
+    `NYABASE_CONSOLE_PUBLIC_URL=${identity.secondaryConsoleUrl}`,
+    '--env',
+    `DATABASE_URL=postgresql://nyabase:${context.runId}@postgres:5432/nyabase`,
+    '--env',
+    'DB_MIGRATIONS_RUN=true',
+    '--env',
+    `REDIS_URL=redis://:${context.runId}@redis:6379/0`,
+    '--env',
+    `REDIS_KEY_PREFIX=nyabase:${context.runId}:`,
+    '--env',
+    'VICTORIA_METRICS_URL=http://victoriametrics:8428',
+    '--env',
+    'VMAGENT_URL=http://vmagent:8429',
+    '--env',
+    'NODE_OPTIONS=--require=/run/nyabase-e2e/backend-clock-shim.cjs',
+    '--env',
+    'NYABASE_E2E_CLOCK_OFFSET_MS=0',
+    '--mount',
+    `type=bind,src=${join(runtimeDir, 'backend-config', 'config.yaml')},dst=/etc/nyabase/config.yaml,readonly`,
+    '--mount',
+    `type=bind,src=${join(orchestratorDir, 'backend-clock-shim.cjs')},dst=/run/nyabase-e2e/backend-clock-shim.cjs,readonly`,
+    context.state.NYABASE_E2E_BACKEND_IMAGE,
+  ], { timeout: 120_000 });
+  await waitForLocalGateway(identity.secondaryGatewayContainer);
+
+  const primaryEdge = await inspectContainer(
+    `${context.state.NYABASE_E2E_PREFIX}-edge-1`,
+    undefined,
+    context.runId,
+  );
+  const edgeImage = primaryEdge?.Config?.Image;
+  invariant(typeof edgeImage === 'string' && edgeImage.length > 0, 'edge image is invalid');
+  await recordManifestResource(
+    'host-port',
+    identity.secondaryEdgeHostPortResource,
+    context.runId,
+  );
+  await recordManifestResource('container', identity.secondaryEdgeContainer, context.runId);
+  await docker([
+    'run',
+    '-d',
+    '--pull=never',
+    '--name',
+    identity.secondaryEdgeContainer,
+    '--label',
+    `io.nyabase.e2e.run-id=${context.runId}`,
+    '--label',
+    'io.nyabase.e2e.managed=true',
+    '--label',
+    `io.nyabase.e2e.component=${splitGatewayRaceComponent}`,
+    '--network',
+    context.state.NYABASE_E2E_NETWORK,
+    '--ip',
+    identity.secondaryEdgeIp,
+    '--publish',
+    `127.0.0.1:${identity.secondaryEdgeHostPort}:443`,
+    '--mount',
+    `type=bind,src=${identity.edgeConfigPath},dst=/etc/nginx/conf.d/default.conf,readonly`,
+    '--mount',
+    `type=bind,src=${join(runtimeDir, 'certs')},dst=/etc/nginx/tls,readonly`,
+    edgeImage,
+  ]);
+  const edgeReady = await dockerResult([
+    'exec',
+    identity.secondaryEdgeContainer,
+    'nginx',
+    '-t',
+  ]);
+  invariant(edgeReady.code === 0, 'secondary split Gateway edge is not ready');
+}
+
+async function cleanupSplitGatewayRace(identity, context) {
+  const errors = [];
+  try {
+    while (await splitGatewayRouteActive(identity, context)) {
+      await docker(
+        splitGatewayRouteArgs(identity, context.state.NYABASE_E2E_EDGE_IP, 'D'),
+      );
+    }
+  } catch (error) {
+    errors.push(error);
+  }
+  for (const containerName of [
+    identity.secondaryEdgeContainer,
+    identity.secondaryGatewayContainer,
+  ]) {
+    try {
+      const result = await dockerResult(['inspect', containerName]);
+      if (result.code === 0) {
+        const [container] = JSON.parse(result.stdout);
+        invariant(
+          container?.Config?.Labels?.['io.nyabase.e2e.run-id'] === context.runId
+            && container?.Config?.Labels?.['io.nyabase.e2e.managed'] === 'true'
+            && container?.Config?.Labels?.['io.nyabase.e2e.component']
+              === splitGatewayRaceComponent,
+          `split Gateway cleanup ownership mismatch for ${containerName}`,
+        );
+        await docker(['rm', '-f', containerName]);
+      }
+      const manifest = JSON.parse(await readFile(join(runtimeDir, 'manifest.json'), 'utf8'));
+      assertManifestForRun(manifest, context.runId);
+      if (manifestHasResourceIdentity(manifest, 'container', containerName)) {
+        await retireManifestResource('container', containerName, context.runId);
+      }
+    } catch (error) {
+      errors.push(error);
+    }
+  }
+  try {
+    const listener = await commandResult('ss', [
+      '-H',
+      '-ltn',
+      'sport',
+      '=',
+      `:${identity.secondaryEdgeHostPort}`,
+    ]);
+    invariant(
+      listener.code === 0 && listener.stdout === '',
+      'split Gateway browser edge retained its run-owned host listener',
+    );
+    const manifest = JSON.parse(await readFile(join(runtimeDir, 'manifest.json'), 'utf8'));
+    assertManifestForRun(manifest, context.runId);
+    if (
+      manifestHasResourceIdentity(
+        manifest,
+        'host-port',
+        identity.secondaryEdgeHostPortResource,
+      )
+    ) {
+      await retireManifestResource(
+        'host-port',
+        identity.secondaryEdgeHostPortResource,
+        context.runId,
+      );
+    }
+  } catch (error) {
+    errors.push(error);
+  }
+  try {
+    const primary = await dockerResult(['inspect', identity.primaryGatewayContainer]);
+    invariant(primary.code === 0, 'primary Gateway container is absent during cleanup');
+    const [container] = JSON.parse(primary.stdout);
+    if (container?.State?.Paused === true) {
+      await docker(['unpause', identity.primaryGatewayContainer]);
+    } else if (container?.State?.Running !== true) {
+      await docker(['start', identity.primaryGatewayContainer], { timeout: 120_000 });
+    }
+    await waitForLocalGateway(identity.primaryGatewayContainer);
+  } catch (error) {
+    errors.push(error);
+  }
+  try {
+    await setAgentService(identity.nodeContainer, 'restart');
+  } catch (error) {
+    errors.push(error);
+  }
+  if (errors.length > 0) {
+    throw aggregateErrorWithDiagnostics(
+      'split Gateway race cleanup was incomplete',
+      errors,
+    );
+  }
+}
+
+async function splitGatewayRaceEvidence(
+  input,
+  context,
+  identity,
+  state,
+  owner,
+  expectedClosedExecSessionIds = [state.staleExecSessionId],
+) {
+  const primary = await backendSnapshot(context, 'gateway');
+  const primaryInspection = await inspectContainer(
+    identity.primaryGatewayContainer,
+    undefined,
+    context.runId,
+  );
+  const primaryGatewayActive = await splitGatewayContainerActive(
+    identity.primaryGatewayContainer,
+    undefined,
+    context,
+  );
+  const secondaryGatewayActive = await splitGatewayContainerActive(
+    identity.secondaryGatewayContainer,
+    splitGatewayRaceComponent,
+    context,
+    true,
+  );
+  const secondaryEdgeActive = await splitGatewayContainerActive(
+    identity.secondaryEdgeContainer,
+    splitGatewayRaceComponent,
+    context,
+    true,
+  );
+  const routeActive = await splitGatewayRouteActive(identity, context);
+  const secondaryEdgeListener = await commandResult('ss', [
+    '-H',
+    '-ltn',
+    'sport',
+    '=',
+    `:${identity.secondaryEdgeHostPort}`,
+  ]);
+  invariant(secondaryEdgeListener.code === 0, 'could not inspect split Gateway host listener');
+  const secondaryEdgeHostPortActive = secondaryEdgeListener.stdout !== '';
+  const manifest = JSON.parse(await readFile(join(runtimeDir, 'manifest.json'), 'utf8'));
+  assertManifestForRun(manifest, context.runId);
+  const secondaryEdgeHostPortOwned = manifest.resources.some((entry) =>
+    entry?.kind === 'host-port'
+      && (entry.name ?? entry.id) === identity.secondaryEdgeHostPortResource
+      && entry.active !== false);
+  const closedExecSessions = await closedExecSessionEvidence(
+    context,
+    expectedClosedExecSessionIds,
+  );
+  return {
+    schemaVersion: 1,
+    runId: context.runId,
+    fault: input.fault,
+    action: input.action,
+    nodeKey: input.nodeKey,
+    serverId: state.serverId,
+    primaryGatewayContainer: identity.primaryGatewayContainer,
+    secondaryGatewayContainer: identity.secondaryGatewayContainer,
+    secondaryEdgeContainer: identity.secondaryEdgeContainer,
+    secondaryEdgeHostPort: identity.secondaryEdgeHostPort,
+    secondaryConsoleUrl: identity.secondaryConsoleUrl,
+    primaryGatewayProcessGeneration: primary.generation,
+    baselineGatewayId: state.baselineGatewayId,
+    ownerGatewayId: owner.gatewayId,
+    ownerSessionId: owner.sessionId,
+    ownerGeneration: owner.generation,
+    serverOnline: owner.serverOnline,
+    runtimeReady: owner.runtimeReady,
+    primaryGatewayActive,
+    primaryGatewayPaused: primaryInspection?.State?.Paused === true,
+    delayedPrimaryCleanupReleased: true,
+    secondaryGatewayActive,
+    secondaryEdgeActive,
+    secondaryEdgeHostPortActive,
+    secondaryEdgeHostPortOwned,
+    routeActive,
+    cleanupComplete:
+      !secondaryGatewayActive
+      && !secondaryEdgeActive
+      && !secondaryEdgeHostPortActive
+      && !secondaryEdgeHostPortOwned
+      && !routeActive,
+    closedExecSessions,
+    observedAt: new Date().toISOString(),
+  };
+}
+
+async function controlSplitGatewaySessionRace(input, context) {
+  const identity = splitGatewayRaceIdentity(input, context);
+  const agents = await readAgents();
+  const agent = agents.find((candidate) => candidate.key === input.nodeKey);
+  invariant(agent && /^[0-9a-f-]{36}$/.test(agent.serverId), 'Agent identity is invalid');
+  await recordManifestResource(
+    'provider-fault',
+    `split-gateway-session-race:${input.nodeKey}:${input.action}`,
+    context.runId,
+  );
+
+  if (input.action === 'inject') {
+    invariant(
+      !(await readSplitGatewayRaceState(identity, input, true)),
+      'split Gateway session race is already active',
+    );
+    const baseline = await waitForAgentSessionOwner(
+      context,
+      agent.serverId,
+      (candidate) => candidate.serverOnline && candidate.runtimeReady,
+      'online baseline owner',
+    );
+    const primary = await backendSnapshot(context, 'gateway');
+    const state = {
+      schemaVersion: 2,
+      runId: context.runId,
+      nodeKey: input.nodeKey,
+      serverId: agent.serverId,
+      staleExecSessionId: input.staleExecSessionId,
+      baselineGatewayId: baseline.gatewayId,
+      primaryGatewayProcessGeneration: primary.generation,
+    };
+    await writeFile(identity.statePath, `${JSON.stringify(state)}\n`, {
+      mode: 0o600,
+      flag: 'wx',
+    });
+    await chmod(identity.statePath, 0o600);
+    try {
+      await createSplitGatewayRaceResources(identity, context);
+      await docker(
+        splitGatewayRouteArgs(identity, context.state.NYABASE_E2E_EDGE_IP, 'A'),
+      );
+      invariant(
+        await splitGatewayRouteActive(identity, context),
+        'split Gateway Agent route was not installed',
+      );
+      await pausePrimaryGatewayAtDatabaseStablePoint(identity, context);
+      await cutAgentEdgeConnection(identity, context);
+      const owner = await waitForAgentSessionOwner(
+        context,
+        agent.serverId,
+        (candidate) =>
+          candidate.gatewayId !== baseline.gatewayId
+          && candidate.generation > baseline.generation
+          && candidate.serverOnline
+          && candidate.runtimeReady,
+        'secondary Gateway owner after frozen primary lease expiry',
+      );
+      await docker(['unpause', identity.primaryGatewayContainer]);
+      await waitForLocalGateway(identity.primaryGatewayContainer);
+      const releasedPrimary = await backendSnapshot(context, 'gateway');
+      invariant(
+        releasedPrimary.generation === state.primaryGatewayProcessGeneration,
+        'primary Gateway process changed instead of releasing delayed in-memory cleanup',
+      );
+      const stableOwner = await waitForAgentSessionOwner(
+        context,
+        agent.serverId,
+        (candidate) =>
+          candidate.sessionId === owner.sessionId
+          && candidate.gatewayId === owner.gatewayId
+          && candidate.serverOnline
+          && candidate.runtimeReady,
+        'secondary owner immediately after delayed primary cleanup release',
+      );
+      await assertStableAgentSessionOwner(
+        context,
+        agent.serverId,
+        stableOwner,
+      );
+      return splitGatewayRaceEvidence(input, context, identity, state, stableOwner);
+    } catch (error) {
+      try {
+        await cleanupSplitGatewayRace(identity, context);
+      } catch (cleanupError) {
+        throw aggregateErrorWithDiagnostics(
+          'split Gateway injection and rollback both failed',
+          [error, cleanupError],
+        );
+      }
+      await rm(identity.statePath, { force: true });
+      await rm(identity.edgeConfigPath, { force: true });
+      throw error;
+    }
+  }
+
+  const state = await readSplitGatewayRaceState(identity, input);
+  if (input.action === 'probe') {
+    const owner = await waitForAgentSessionOwner(
+      context,
+      state.serverId,
+      (candidate) =>
+        candidate.gatewayId !== state.baselineGatewayId
+        && candidate.serverOnline
+        && candidate.runtimeReady,
+      'secondary Gateway owner probe',
+    );
+    return splitGatewayRaceEvidence(
+      input,
+      context,
+      identity,
+      state,
+      owner,
+      input.expectedClosedExecSessionIds ?? [state.staleExecSessionId],
+    );
+  }
+
+  const secondaryOwner = await currentAgentSession(context, state.serverId);
+  invariant(secondaryOwner, 'split Gateway restore has no current Agent owner');
+  await cleanupSplitGatewayRace(identity, context);
+  const restoredOwner = await waitForAgentSessionOwner(
+    context,
+    state.serverId,
+    (candidate) =>
+      candidate.gatewayId === state.baselineGatewayId
+      && candidate.generation > secondaryOwner.generation
+      && candidate.serverOnline
+      && candidate.runtimeReady,
+    'primary Gateway owner after exact cleanup',
+  );
+  await rm(identity.statePath, { force: true });
+  await rm(identity.edgeConfigPath, { force: true });
+  return splitGatewayRaceEvidence(input, context, identity, state, restoredOwner);
+}
+
 async function controlArtifactAudit(input, context) {
   await recordManifestResource('provider-fault', 'artifact-audit:capture', context.runId);
   await command('bash', [join(orchestratorDir, 'diagnose.sh'), context.runId], {
@@ -2183,10 +3300,16 @@ async function main() {
     result = await controlBackendService(input, context);
   } else if (input.fault === 'backendClock') {
     result = await controlBackendClock(input, context);
+  } else if (input.fault === 'redisService') {
+    result = await controlRedisService(input, context);
+  } else if (input.fault === 'telemetryService') {
+    result = await controlTelemetryService(input, context);
   } else if (input.fault === 'dockerdService') {
     result = await controlDockerdService(input, context);
   } else if (input.fault === 'duplicateAgentSession') {
     result = await controlDuplicateAgentSession(input, context);
+  } else if (input.fault === 'splitGatewaySessionRace') {
+    result = await controlSplitGatewaySessionRace(input, context);
   } else {
     result = await controlArtifactAudit(input, context);
   }

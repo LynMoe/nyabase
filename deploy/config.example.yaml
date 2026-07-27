@@ -1,5 +1,12 @@
 runtime:
   nodeEnv: production
+  # all runs API, gateways and background workers in one process. Larger
+  # installations can split this into api, gateway and worker services.
+  role: all
+  # Required on each Gateway in a multi-Gateway deployment so browsers connect
+  # directly to the process that owns the Agent socket. Keep empty for the
+  # single-Gateway same-origin default.
+  consolePublicUrl: ""
 
 server:
   port: 3001
@@ -19,13 +26,31 @@ auth:
   adminInitPassword: ""
 
 database:
-  driver: sqlite
-  path: /data/nyabase.db
-  synchronize: false
+  # DATABASE_URL takes precedence in the Compose deployment. URL-encode
+  # reserved characters in the password.
+  url: "postgresql://nyabase:CHANGE_ME@postgres:5432/nyabase"
+  poolMax: 20
+  idleTimeoutMs: 30000
+  statementTimeoutMs: 15000
   migrationsRun: true
 
+redis:
+  # PostgreSQL remains canonical. Split API/Gateway roles nevertheless require
+  # Redis availability for addressed interactive RPC. Use rediss:// with a
+  # managed/Sentinel-backed endpoint outside this single-node Compose example.
+  # REDIS_URL takes precedence in the Compose deployment.
+  url: "redis://nyabase:CHANGE_ME@redis:6379/0"
+  keyPrefix: "nyabase:"
+  # Mount this PEM bundle read-only into the Backend container when a private
+  # CA signs the rediss:// endpoint. Leave both values empty for local Compose.
+  tlsCaFile: ""
+  tlsServername: ""
+
 metrics:
+  # Reads go directly to VictoriaMetrics; writes go through vmagent so its
+  # bounded on-disk queue can absorb a VictoriaMetrics outage.
   victoriaMetricsUrl: http://victoriametrics:8428
+  vmagentUrl: http://vmagent:8429
 
 http:
   # Required. Generate independently with: openssl rand -hex 32

@@ -1,14 +1,12 @@
-import { Inject, Injectable, Logger, OnModuleDestroy, forwardRef } from '@nestjs/common';
+import { Injectable, Logger, OnModuleDestroy } from '@nestjs/common';
 import {
   MAX_AGENT_WS_FRAME_BYTES,
   MAX_METRIC_POINTS_PER_BATCH,
+  zMetricPoint,
   type MetricPoint,
 } from '@nyabase/common';
-import { InjectRepository } from '@nestjs/typeorm';
-import { In, Repository } from 'typeorm';
-import { ContainerEntity } from '../entities/container.entity.js';
-import { UsersService } from '../users/users.service.js';
 import { NyabaseConfigService } from '../config/nyabase-config.service.js';
+import { RuntimeRoleService } from '../runtime/runtime-role.service.js';
 
 /** A single batch enqueued by an agent. */
 interface QueuedBatch {
@@ -35,18 +33,24 @@ const MAX_FLUSH_BYTES = MAX_AGENT_WS_FRAME_BYTES;
 const DEFAULT_FLUSH_INTERVAL_MS = 1_000;
 const DEFAULT_MAX_CONCURRENT_FLUSHES = 1;
 const DEFAULT_BATCH_FLUSH_SIZE = 64;
+const INITIAL_FAILURE_BACKOFF_MS = 10_000;
+const MAX_FAILURE_BACKOFF_MS = 60_000;
 const SHUTDOWN_DRAIN_TIMEOUT_MS = 5_000;
 
 /**
- * MetricsWriter buffers samples in-memory and flushes them to VictoriaMetrics
+ * MetricsWriter buffers samples in-memory and flushes them to vmagent
  * in batches. Backpressure semantics:
  *   - When the queue grows beyond `queueLimit`, we drop the OLDEST batches
  *     (so live metrics keep flowing) and increment `dropped`.
  *   - The flush loop runs on a fixed interval AND is triggered on every
  *     enqueue, with `maxConcurrentFlushes` cap.
+ *   - A failed vmagent request opens a bounded exponential backoff. This is
+ *     also a DNS-isolation boundary: aborting fetch does not necessarily
+ *     cancel an in-flight getaddrinfo worker for an unavailable hostname.
  *   - On shutdown the queue is drained synchronously up to a deadline.
  *
- * No external dependencies (queue is a plain array bounded by `queueLimit`).
+ * No durable application retry queue exists here: vmagent owns persistence and
+ * retry. This process-local queue is deliberately bounded and lossy.
  */
 @Injectable()
 export class MetricsWriter implements OnModuleDestroy {
@@ -65,22 +69,24 @@ export class MetricsWriter implements OnModuleDestroy {
   private inFlight = 0;
   private lastFlushAt: number | null = null;
   private lastError: string | null = null;
+  private consecutiveFailures = 0;
+  private retryNotBeforeMonotonic = 0;
   private shuttingDown = false;
   private flushTimer: NodeJS.Timeout | null = null;
+  private monotonicNowMs = (): number => performance.now();
 
   constructor(
     private config: NyabaseConfigService,
-    @Inject(forwardRef(() => UsersService))
-    private usersService: UsersService,
-    @InjectRepository(ContainerEntity)
-    private containersRepo: Repository<ContainerEntity>,
+    runtimeRole?: RuntimeRoleService,
   ) {
-    this.vmUrl = config.get<string>('metrics.victoriaMetricsUrl');
-    this.flushTimer = setInterval(() => {
-      void this.flushLoop();
-    }, this.flushIntervalMs);
-    // Don't keep the event loop alive only for metrics flushes.
-    this.flushTimer.unref?.();
+    this.vmUrl = config.get<string>('metrics.vmagentUrl');
+    if (!runtimeRole || runtimeRole.servesGateway()) {
+      this.flushTimer = setInterval(() => {
+        void this.flushLoop();
+      }, this.flushIntervalMs);
+      // Don't keep the event loop alive only for metrics flushes.
+      this.flushTimer.unref?.();
+    }
   }
 
   /**
@@ -98,7 +104,16 @@ export class MetricsWriter implements OnModuleDestroy {
       return;
     }
 
-    points = await this.normalizeIdentityLabels(serverId, points);
+    points = points.map((point) => ({
+      ...point,
+      labels: { ...point.labels, server: serverId },
+    }));
+    if (points.some((point) => !zMetricPoint.safeParse(point).success)) {
+      this.dropped += 1;
+      this.logger.warn('Rejected metrics batch outside the bounded metric name/label contract');
+      return;
+    }
+
     const estimatedBytes = Buffer.byteLength(JSON.stringify({ serverId, points }));
     if (estimatedBytes > MAX_FLUSH_BYTES) {
       this.dropped += 1;
@@ -158,8 +173,11 @@ export class MetricsWriter implements OnModuleDestroy {
       this.flushTimer = null;
     }
 
-    const deadline = Date.now() + SHUTDOWN_DRAIN_TIMEOUT_MS;
-    while ((this.queue.length > 0 || this.inFlight > 0) && Date.now() < deadline) {
+    const deadline = this.monotonicNowMs() + SHUTDOWN_DRAIN_TIMEOUT_MS;
+    while (
+      (this.queue.length > 0 || this.inFlight > 0)
+      && this.monotonicNowMs() < deadline
+    ) {
       await this.flushLoop();
       if (this.queue.length === 0 && this.inFlight === 0) break;
       await new Promise((resolve) => setTimeout(resolve, 50));
@@ -176,6 +194,7 @@ export class MetricsWriter implements OnModuleDestroy {
   // ---------------------------------------------------------------------------
 
   private async flushLoop(): Promise<void> {
+    if (this.monotonicNowMs() < this.retryNotBeforeMonotonic) return;
     while (
       this.queue.length > 0 &&
       this.inFlight < this.maxConcurrentFlushes
@@ -187,58 +206,6 @@ export class MetricsWriter implements OnModuleDestroy {
         this.inFlight -= 1;
       });
     }
-  }
-
-  private async normalizeIdentityLabels(serverId: string, points: MetricPoint[]): Promise<MetricPoint[]> {
-    const numericUserIds = new Set<number>();
-    const containerIds = new Set<string>();
-
-    for (const point of points) {
-      const userId = point.labels.user_id?.trim();
-      if (userId && /^\d+$/.test(userId)) numericUserIds.add(Number(userId));
-      const containerId = point.labels.container_id?.trim();
-      const containerName = point.labels.container_name?.trim();
-      if (!userId) {
-        if (containerId) containerIds.add(containerId);
-        if (containerName) containerIds.add(containerName);
-      }
-    }
-
-    const userIdByNumericId = numericUserIds.size > 0
-      ? await this.usersService.getUserIdsByNumericIds([...numericUserIds])
-      : new Map<number, string>();
-    const ownerByContainerId = containerIds.size > 0
-      ? await this.resolveOwnersByRuntimeIds(serverId, [...containerIds])
-      : new Map<string, string>();
-
-    return points.map((point) => {
-      const userId = point.labels.user_id?.trim();
-      let normalizedUserId: string | undefined = userId;
-      if (userId && /^\d+$/.test(userId)) {
-        normalizedUserId = userIdByNumericId.get(Number(userId)) ?? userId;
-      }
-      if (!normalizedUserId) {
-        const containerId = point.labels.container_id?.trim();
-        const containerName = point.labels.container_name?.trim();
-        normalizedUserId =
-          (containerId ? ownerByContainerId.get(containerId) : undefined) ??
-          (containerName ? ownerByContainerId.get(containerName) : undefined);
-      }
-      if (!normalizedUserId || normalizedUserId === point.labels.user_id) return point;
-      return { ...point, labels: { ...point.labels, user_id: normalizedUserId } };
-    });
-  }
-
-  private async resolveOwnersByRuntimeIds(serverId: string, containerIds: string[]): Promise<Map<string, string>> {
-    const containers = containerIds.length > 0
-      ? await this.containersRepo.findBy({ id: In(containerIds) })
-      : [];
-    const result = new Map<string, string>();
-
-    for (const container of containers) {
-      result.set(container.id, container.ownerId);
-    }
-    return result;
   }
 
   /**
@@ -287,22 +254,38 @@ export class MetricsWriter implements OnModuleDestroy {
         method: 'POST',
         headers: { 'Content-Type': 'text/plain' },
         body,
+        signal: AbortSignal.timeout(2_000),
       });
       if (!res.ok) {
         const text = await res.text().catch(() => '<no body>');
-        const msg = `VM write failed: ${res.status} ${text}`;
-        this.lastError = msg;
+        const msg = `vmagent write failed: ${res.status} ${text}`;
+        this.dropped += batches.length;
+        this.recordFailure(msg);
         this.logger.warn(msg);
       } else {
+        this.consecutiveFailures = 0;
+        this.retryNotBeforeMonotonic = 0;
         this.lastError = null;
       }
     } catch (err) {
-      const msg = `VM write error: ${err}`;
-      this.lastError = msg;
+      const msg = `vmagent write error: ${err}`;
+      this.dropped += batches.length;
+      this.recordFailure(msg);
       this.logger.error(msg);
     } finally {
       this.lastFlushAt = Date.now();
     }
+  }
+
+  private recordFailure(message: string): void {
+    const multiplier = 2 ** Math.min(this.consecutiveFailures, 3);
+    const backoffMs = Math.min(
+      INITIAL_FAILURE_BACKOFF_MS * multiplier,
+      MAX_FAILURE_BACKOFF_MS,
+    );
+    this.consecutiveFailures += 1;
+    this.retryNotBeforeMonotonic = this.monotonicNowMs() + backoffMs;
+    this.lastError = message;
   }
 }
 

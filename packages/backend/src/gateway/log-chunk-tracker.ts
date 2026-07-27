@@ -1,5 +1,6 @@
 import type { LogChunkPayload } from '@nyabase/common';
 import type { ExecSessionRegistry } from './exec-session-registry.js';
+import { performance } from 'node:perf_hooks';
 
 /** Auto-clean a stale listener if no EOF arrives within this window. */
 const LOG_LISTENER_TTL_MS = 30 * 60 * 1000;
@@ -19,7 +20,7 @@ export const MAX_LOG_LISTENERS_PER_SERVER = 64;
 interface ListenerEntry {
   cb: (chunk: LogChunkPayload) => void;
   serverId: string;
-  expiresAt: number;
+  expiryGeneration: number;
   timer?: ReturnType<typeof setTimeout>;
 }
 
@@ -53,7 +54,7 @@ export class LogChunkTracker {
 
   start(): void {
     this.sweepTimer = setInterval(() => {
-      const now = Date.now();
+      const now = performance.now();
       for (const [sessionId, buf] of this.buffers) {
         if (now >= buf.expiresAt) {
           this.deleteBuffer(sessionId);
@@ -93,7 +94,7 @@ export class LogChunkTracker {
 
     // No listener yet — buffer until one registers (or TTL expires)
     const buf = this.buffers.get(chunk.sessionId);
-    const now = Date.now();
+    const now = performance.now();
     if (buf && now < buf.expiresAt) {
       if (
         buf.chunks.length >= MAX_BUFFERED_CHUNKS_PER_SESSION
@@ -146,8 +147,7 @@ export class LogChunkTracker {
     if (existingForServer >= MAX_LOG_LISTENERS_PER_SERVER) {
       throw new Error(`Server log listener limit (${MAX_LOG_LISTENERS_PER_SERVER}) reached`);
     }
-    const expiresAt = Date.now() + LOG_LISTENER_TTL_MS;
-    const entry: ListenerEntry = { cb, serverId, expiresAt };
+    const entry: ListenerEntry = { cb, serverId, expiryGeneration: 0 };
     this.listeners.set(sessionId, entry);
     this.scheduleListenerExpiry(sessionId, entry);
 
@@ -175,7 +175,6 @@ export class LogChunkTracker {
   touch(sessionId: string): boolean {
     const entry = this.listeners.get(sessionId);
     if (!entry) return false;
-    entry.expiresAt = Date.now() + LOG_LISTENER_TTL_MS;
     this.scheduleListenerExpiry(sessionId, entry);
     return true;
   }
@@ -236,11 +235,16 @@ export class LogChunkTracker {
 
   private scheduleListenerExpiry(sessionId: string, entry: ListenerEntry): void {
     if (entry.timer) clearTimeout(entry.timer);
+    entry.expiryGeneration += 1;
+    const generation = entry.expiryGeneration;
     entry.timer = setTimeout(() => {
-      if (this.listeners.get(sessionId) === entry && Date.now() >= entry.expiresAt) {
+      if (
+        this.listeners.get(sessionId) === entry
+        && entry.expiryGeneration === generation
+      ) {
         this.removeListener(sessionId, entry.serverId);
       }
-    }, Math.max(1, entry.expiresAt - Date.now()));
+    }, LOG_LISTENER_TTL_MS);
     entry.timer.unref?.();
   }
 }

@@ -16,6 +16,7 @@ import { basename, dirname, isAbsolute, join, resolve, sep } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { assertCleanManifest, manifestSchemaVersion } from './manifest-contract.mjs';
 import { validateFullRunChainArtifact } from './full-run-chain.mjs';
+import { validateMigrationDatabaseEvidence } from './migration-proof-contract.mjs';
 
 const orchestratorDir = dirname(fileURLToPath(import.meta.url));
 const e2eRoot = resolve(orchestratorDir, '..');
@@ -23,6 +24,7 @@ const defaultRuntimeBase = join(e2eRoot, '.runtime');
 const runIdPattern = /^[a-z0-9][a-z0-9-]{2,47}$/;
 const shaPattern = /^[0-9a-f]{64}$/;
 const fullChainCaseId = 'cleanup.release-evidence.two-consecutive-cold-full-runs';
+const freshMigrationCaseId = 'foundation.runtime.fresh-migration';
 
 function invariant(condition, message) {
   if (!condition) throw new Error(message);
@@ -104,6 +106,52 @@ function sourceFingerprint(evidence) {
   return source;
 }
 
+function loadFreshMigration(runId, runtimeDir, evidence) {
+  const events = (evidence.caseEvents ?? []).filter(
+    (event) => event.caseId === freshMigrationCaseId,
+  );
+  invariant(events.length === 1, `${runId} must have one fresh migration fixture event`);
+  const event = events[0];
+  invariant(
+    event.kind === 'fixture' && event.source === 'fixture' && event.status === 'passed',
+    `${runId} fresh migration event identity mismatch`,
+  );
+  const artifact = checkedArtifact(
+    runtimeDir,
+    event.artifactPath,
+    event.artifactSha256,
+    `${runId} fresh migration proof`,
+  );
+  const proof = parseJson(artifact.bytes, `${runId} fresh migration proof`);
+  invariant(
+    proof.schemaVersion === 1
+      && proof.runId === runId
+      && proof.caseId === freshMigrationCaseId
+      && proof.status === 'passed'
+      && proof.claims?.volume?.name === `nyabase-e2e-${runId}-postgres-data`
+      && proof.claims.volume.absentBeforeComposeCreate === true
+      && proof.claims.volume.emptyBeforePostgresStart === true
+      && proof.claims.volume.runOwned === true,
+    `${runId} fresh migration proof identity/cold-volume binding mismatch`,
+  );
+  const migration = validateMigrationDatabaseEvidence(
+    proof.claims?.backend?.database?.migrationManifest,
+    proof.claims?.backend?.database,
+  );
+  invariant(
+    proof.claims.backend.database.migrationDigest === migration.digest,
+    `${runId} fresh migration digest mismatch`,
+  );
+  return {
+    artifactPath: artifact.path,
+    artifactSha256: artifact.sha256,
+    volumeName: proof.claims.volume.name,
+    migrationDigest: migration.digest,
+    migrationCount: migration.migrationCount,
+    tableCount: migration.tableCount,
+  };
+}
+
 function loadRun(runId, profile, runtimeBase) {
   const runtimeDir = checkedRuntime(runId, runtimeBase);
   const evidencePath = join(runtimeDir, 'coverage-evidence.json');
@@ -167,6 +215,7 @@ function loadRun(runId, profile, runtimeBase) {
       sha256: manifest.sha256,
       manifestSchemaVersion,
     },
+    freshMigration: loadFreshMigration(runId, runtimeDir, evidence),
     fullChainEvidence,
     coverageEvidence: evidence,
   };
@@ -205,7 +254,8 @@ export function validateDeclaredReleaseFullChain({
       && JSON.stringify(candidate.source) === JSON.stringify(fullA.source)
       && candidate.playwrightReportSha256 === fullA.playwright.sha256
       && candidate.cleanupManifestSha256 === fullA.cleanup.sha256
-      && shaPattern.test(candidate.freshMigrationArtifactSha256 ?? ''),
+      && candidate.freshMigrationArtifactSha256 === fullA.freshMigration.artifactSha256
+      && candidate.freshMigrationDigest === fullA.freshMigration.migrationDigest,
     'Full A candidate receipt does not bind the declared Full A run',
   );
   invariant(
@@ -213,13 +263,17 @@ export function validateDeclaredReleaseFullChain({
       && chainProof.previous.runtimeDir === fullA.runtimeDir
       && chainProof.previous.sequence === candidate.sequence
       && chainProof.previous.receiptPath === candidateArtifact.path
-      && chainProof.previous.receiptSha256 === candidateArtifact.sha256,
+      && chainProof.previous.receiptSha256 === candidateArtifact.sha256
+      && chainProof.previous.freshMigration?.migrationDigest ===
+        fullA.freshMigration.migrationDigest,
     'Full B chain proof predecessor is not the declared Full A candidate',
   );
   invariant(
     chainProof.current?.runId === fullB.runId
       && chainProof.current.runtimeDir === fullB.runtimeDir
-      && chainProof.current.sequence === candidate.sequence + 1,
+      && chainProof.current.sequence === candidate.sequence + 1
+      && chainProof.current.freshMigration?.migrationDigest ===
+        fullB.freshMigration.migrationDigest,
     'Full B chain proof current run is not the declared Full B run',
   );
 
@@ -228,6 +282,7 @@ export function validateDeclaredReleaseFullChain({
       path: candidateArtifact.path,
       sha256: candidateArtifact.sha256,
       sequence: candidate.sequence,
+      migrationDigest: fullA.freshMigration.migrationDigest,
     },
     fullRunChain: {
       path: chainArtifact.path,
@@ -243,6 +298,7 @@ export function validateDeclaredReleaseFullChain({
         runtimeDir: chainProof.current.runtimeDir,
         sequence: chainProof.current.sequence,
       },
+      migrationDigest: fullB.freshMigration.migrationDigest,
     },
   };
 }
@@ -277,6 +333,12 @@ export function deriveReleaseProof({ releaseId, fullA, fullB, recovery, exitStat
     'release runs used different coverage ledgers',
   );
   invariant(
+    shaPattern.test(fullA.freshMigration?.migrationDigest ?? '')
+      && fullA.freshMigration.migrationDigest === fullB.freshMigration?.migrationDigest
+      && fullB.freshMigration.migrationDigest === recovery.freshMigration?.migrationDigest,
+    'release runs used different migration manifests',
+  );
+  invariant(
     shaPattern.test(fullA.candidate?.sha256 ?? '')
       && Number.isInteger(fullA.candidate?.sequence)
       && fullA.candidate.sequence > 0
@@ -302,6 +364,7 @@ export function deriveReleaseProof({ releaseId, fullA, fullB, recovery, exitStat
     manifestSchemaVersion,
     source: fullA.source,
     ledgerSha256: fullA.ledgerSha256,
+    migrationDigest: fullA.freshMigration.migrationDigest,
     exitStatuses,
     runs: { fullA, fullB, recovery },
   };

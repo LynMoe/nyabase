@@ -1,13 +1,13 @@
 import { Injectable } from '@nestjs/common';
 import { AgentTaskKind, type RemoteFsMountSpec } from '@nyabase/common';
-import { AgentTaskEntity } from '../entities/agent-task.entity.js';
+import type { AgentTaskRecord } from '../domain/domain-records.js';
 import { RemoteFsSecretCryptoService } from '../remote-fs/remote-fs-secret-crypto.service.js';
 
 @Injectable()
 export class AgentTaskPayloadCodecService {
   constructor(private remoteFsSecrets: RemoteFsSecretCryptoService) {}
 
-  forDispatch(task: AgentTaskEntity): unknown {
+  forDispatch(task: AgentTaskRecord): unknown {
     return this.forWirePayload(task.kind, task.payloadJson);
   }
 

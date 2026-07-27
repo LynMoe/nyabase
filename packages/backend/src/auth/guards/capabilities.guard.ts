@@ -3,7 +3,7 @@ import { Reflector } from '@nestjs/core';
 import { ANY_CAPS_KEY, CAPS_KEY } from '../decorators/require-caps.decorator.js';
 import { AccessResolverService } from '../../access/access-resolver.service.js';
 import { Capability } from '@nyabase/common';
-import { UserEntity } from '../../entities/user.entity.js';
+import type { UserRecord } from '../../domain/domain-records.js';
 
 @Injectable()
 export class CapabilitiesGuard implements CanActivate {
@@ -23,7 +23,7 @@ export class CapabilitiesGuard implements CanActivate {
     ]);
 
     const request = context.switchToHttp().getRequest();
-    const user: UserEntity = request.user;
+    const user: UserRecord = request.user;
     if (!user) return false;
 
     if (!requiredCaps?.length && !anyCaps?.length) {

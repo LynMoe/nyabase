@@ -297,6 +297,10 @@ if [[ -n "${NYABASE_E2E_RATE_LIMIT_EDGE_PORT:-}" ]]; then
   ss -H -ltn | awk '{print $4}' | grep -Eq "[:.]${NYABASE_E2E_RATE_LIMIT_EDGE_PORT}$" \
     && leaks+=(rate-limit-edge-port)
 fi
+if [[ -n "${NYABASE_E2E_SPLIT_GATEWAY_EDGE_PORT:-}" ]]; then
+  ss -H -ltn | awk '{print $4}' | grep -Eq "[:.]${NYABASE_E2E_SPLIT_GATEWAY_EDGE_PORT}$" \
+    && leaks+=(split-gateway-edge-port)
+fi
 
 # Secrets are never retained as diagnostics, including when --keep-runtime is
 # used by the one-shot runner after a failed test or cleanup.

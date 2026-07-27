@@ -25,7 +25,10 @@ import { validateFullRunManifest } from './full-run-chain.mjs';
 import { manifestSchemaVersion } from './manifest-contract.mjs';
 import { validateReleaseRunManifest } from './release-proof.mjs';
 import { e2eStateKeys } from './run-state-contract.mjs';
-import { composeProcessEnvironment } from './fault-control.mjs';
+import {
+  composeProcessEnvironment,
+  matchesExpectedContainerComponent,
+} from './fault-control.mjs';
 
 const orchestratorDir = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(orchestratorDir, '..', '..');
@@ -51,6 +54,24 @@ function parseSimpleEnv(text) {
 function runBash(script, args = []) {
   return execFileSync('bash', ['-c', script, 'bash', ...args], { encoding: 'utf8' }).trim();
 }
+
+test('run-owned Compose containers may omit the optional component label', () => {
+  assert.equal(matchesExpectedContainerComponent({}, undefined), true);
+  assert.equal(
+    matchesExpectedContainerComponent(
+      { 'io.nyabase.e2e.component': 'provider-fault-split-gateway' },
+      'provider-fault-split-gateway',
+    ),
+    true,
+  );
+  assert.equal(
+    matchesExpectedContainerComponent(
+      { 'io.nyabase.e2e.component': 'unexpected-component' },
+      'provider-fault-split-gateway',
+    ),
+    false,
+  );
+});
 
 function createManifestRuntime(prefix, runId) {
   const root = mkdtempSync(join(tmpdir(), prefix));
@@ -192,6 +213,23 @@ test('every operational Full-chain transition is serialized and Full B carries t
   );
 });
 
+test('top-level runner owns failed-up diagnostics, artifact audit, and exact teardown', () => {
+  const runner = readFileSync(join(orchestratorDir, 'run.sh'), 'utf8');
+  const up = readFileSync(join(orchestratorDir, 'up.sh'), 'utf8');
+  assert.match(
+    runner,
+    /NYABASE_E2E_PARENT_OWNS_CLEANUP=true[\s\\]*\n\s*"\$E2E_ROOT\/e2e\/orchestrator\/up\.sh" "\$run_id"/,
+  );
+  assert.match(
+    up,
+    /"\$\{NYABASE_E2E_PARENT_OWNS_CLEANUP:-false\}" != true[\s\S]*?diagnose\.sh[\s\S]*?down\.sh/,
+  );
+  assert.match(
+    runner,
+    /diagnose\.sh[\s\S]*?sanitize-playwright-artifacts\.mjs[\s\S]*?audit-artifacts\.mjs[\s\S]*?down\.sh/,
+  );
+});
+
 test('real runtime-base flock serializes two concurrent Full-chain processes', async () => {
   const fixtureRoot = mkdtempSync(join(tmpdir(), 'nyabase-full-chain-flock-'));
   const fixtureOrchestrator = join(fixtureRoot, 'e2e', 'orchestrator');
@@ -308,26 +346,30 @@ async function occupyCandidatePort(kind) {
   for (let slot = 0; slot < 15; slot += 1) {
     const lock = `/tmp/nyabase-e2e-slot-${slot}.lock`;
     if (existsSync(lock)) continue;
-    let primary;
-    let rateLimit;
+    const servers = [];
     try {
-      primary = await listen(18443 + slot);
-      rateLimit = await listen(19443 + slot);
-      if (kind === 'primary') {
-        await close(rateLimit);
-        return { slot, server: primary };
+      servers.push(await listen(18443 + slot));
+      servers.push(await listen(19443 + slot));
+      servers.push(await listen(20443 + slot));
+      const selectedIndex = {
+        primary: 0,
+        'rate-limit': 1,
+        'split-gateway': 2,
+      }[kind];
+      for (const [index, server] of servers.entries()) {
+        if (index !== selectedIndex) await close(server);
       }
-      await close(primary);
-      return { slot, server: rateLimit };
+      return { slot, server: servers[selectedIndex] };
     } catch {
-      if (primary?.listening) await close(primary);
-      if (rateLimit?.listening) await close(rateLimit);
+      for (const server of servers) {
+        if (server?.listening) await close(server);
+      }
     }
   }
   throw new Error(`no candidate slot is available for ${kind} port regression`);
 }
 
-for (const kind of ['primary', 'rate-limit']) {
+for (const kind of ['primary', 'rate-limit', 'split-gateway']) {
   test(`authoritative slot allocator rejects occupied ${kind} port and removes rejected lock`, async () => {
     const occupied = await occupyCandidatePort(kind);
     const runId = `slot-${kind.replace('-', '')}-${process.pid}-${randomBytes(2).toString('hex')}`;
@@ -666,7 +708,12 @@ test('hostile Compose host environment cannot override the run project', () => {
     );
     const config = JSON.parse(output);
     assert.equal(config.name, `nyabase-e2e-${runId}`);
-    assert.equal(config.services.backend.environment.NYABASE_E2E_CLOCK_OFFSET_MS, '0');
+    for (const role of ['api', 'gateway', 'worker']) {
+      assert.equal(
+        config.services[`backend-${role}`].environment.NYABASE_E2E_CLOCK_OFFSET_MS,
+        '0',
+      );
+    }
     assert.deepEqual(ownedSlotLocks(runId), []);
   } finally {
     rmSync(runtimeDir, { recursive: true, force: true });
@@ -723,17 +770,25 @@ test('direct JS Compose environment cannot override validated state interpolatio
     );
     const config = JSON.parse(output);
     assert.equal(config.name, state.NYABASE_E2E_PROJECT);
-    assert.equal(config.services.backend.image, state.NYABASE_E2E_BACKEND_IMAGE);
-    assert.equal(
-      config.services.backend.networks.cluster.ipv4_address,
-      state.NYABASE_E2E_BACKEND_IP,
-    );
-    assert.equal(config.services.backend.environment.NYABASE_E2E_CLOCK_OFFSET_MS, '691200000');
+    for (const role of ['api', 'gateway', 'worker']) {
+      const service = config.services[`backend-${role}`];
+      assert.equal(service.image, state.NYABASE_E2E_BACKEND_IMAGE);
+      assert.equal(
+        service.networks.cluster.ipv4_address,
+        state[`NYABASE_E2E_${role.toUpperCase()}_IP`],
+      );
+      assert.equal(service.environment.NYABASE_RUNTIME_ROLE, role);
+      assert.equal(service.environment.DB_MIGRATIONS_RUN, 'true');
+      assert.equal(service.environment.NYABASE_E2E_CLOCK_OFFSET_MS, '691200000');
+    }
     assert.equal(config.networks.cluster.name, state.NYABASE_E2E_NETWORK);
     assert.equal(config.networks.cluster.ipam.config[0].subnet, state.NYABASE_E2E_SUBNET);
     assert.equal(config.networks.cluster.ipam.config[0].gateway, state.NYABASE_E2E_GATEWAY);
-    assert.equal(config.volumes['backend-data'].name, `${state.NYABASE_E2E_PREFIX}-backend-data`);
-    assert.equal(config.services.backend.labels['io.nyabase.e2e.run-id'], runId);
+    assert.equal(
+      config.volumes['postgres-data'].name,
+      `${state.NYABASE_E2E_PREFIX}-postgres-data`,
+    );
+    assert.equal(config.services['backend-api'].labels['io.nyabase.e2e.run-id'], runId);
     assert.deepEqual(ownedSlotLocks(runId), []);
   } finally {
     rmSync(runtimeDir, { recursive: true, force: true });
@@ -944,23 +999,28 @@ test('Compose interpolation inventory is closed and shell owns the only non-stat
     ),
   ].sort();
   assert.deepEqual(interpolations, [
+    'NYABASE_E2E_API_IP',
     'NYABASE_E2E_BACKEND_CLOCK_OFFSET_MS',
     'NYABASE_E2E_BACKEND_IMAGE',
-    'NYABASE_E2E_BACKEND_IP',
     'NYABASE_E2E_EDGE_IP',
     'NYABASE_E2E_EDGE_PORT',
     'NYABASE_E2E_GATEWAY',
+    'NYABASE_E2E_GATEWAY_IP',
     'NYABASE_E2E_NETWORK',
+    'NYABASE_E2E_POSTGRES_IP',
     'NYABASE_E2E_PREFIX',
     'NYABASE_E2E_PROJECT',
     'NYABASE_E2E_RATE_LIMIT_EDGE_IP',
     'NYABASE_E2E_RATE_LIMIT_EDGE_PORT',
+    'NYABASE_E2E_REDIS_IP',
     'NYABASE_E2E_REGISTRY_IP',
     'NYABASE_E2E_ROOT',
     'NYABASE_E2E_RUNTIME_DIR',
     'NYABASE_E2E_RUN_ID',
     'NYABASE_E2E_SUBNET',
+    'NYABASE_E2E_VMAGENT_IP',
     'NYABASE_E2E_VM_IP',
+    'NYABASE_E2E_WORKER_IP',
   ]);
   assert.deepEqual(
     interpolations.filter((key) => !e2eStateKeys.includes(key)),
@@ -1023,7 +1083,7 @@ test('fault Compose path rejects synchronized state and compose tampering before
       `${state}NYABASE_E2E_UNKNOWN=foreign\n`,
       state.replace(/^NYABASE_E2E_BACKEND_IMAGE=.*\n/m, ''),
       replaceValue(state, 'NYABASE_E2E_BACKEND_IMAGE', 'foreign/image:tag'),
-      replaceValue(state, 'NYABASE_E2E_BACKEND_IP', '172.31.255.2'),
+      replaceValue(state, 'NYABASE_E2E_GATEWAY_IP', '172.31.255.18'),
       replaceValue(state, 'NYABASE_E2E_PROFILE', 'foreign-profile'),
       state.replace(/^NYABASE_E2E_BACKEND_IMAGE=.*$/m, (line) => `${line}\n${line}`),
     ];
@@ -1286,8 +1346,8 @@ test('source-first audit enumerates every outer container producer and lifecycle
       upOuterRunPersistent: 2,
       upComposeCreatePersistent: 1,
       sshOuterTransient: 1,
-      faultOuterTransient: 1,
-      fixtureOuterTransient: 2,
+      faultOuterTransient: 3,
+      fixtureOuterTransient: 1,
       managedDockerdInnerOnly: 1,
     },
   );
@@ -1298,7 +1358,9 @@ test('source-first audit enumerates every outer container producer and lifecycle
   assert.match(fixture, /invariant\(\(await inspect\(name\)\) === null/);
   assert.match(fixture, /await retire\(\)/);
   assert.match(fixture, /fixture-fresh-volume-proof/);
-  assert.match(fixture, /fixture-migration-proof/);
+  assert.match(fixture, /-postgres-1/);
+  assert.match(fixture, /system\.schema_migrations/);
+  assert.match(fixture, /live-readonly-psql-catalog-query/);
   assert.match(byName.get('network-l2-probe.mjs'), /nodeDocker\([\s\S]*?['"]run['"]/);
   assert.match(byName.get('build.sh'), /docker run --rm/);
   assert.match(byName.get('doctor.sh'), /trap cleanup EXIT[\s\S]*docker run -d --name "\$probe"/);
@@ -1391,15 +1453,18 @@ test('resume slot owner partial-write failure removes its exact marker and lock'
   }
 });
 
-for (const portKind of ['primary', 'rate-limit']) {
+for (const portKind of ['primary', 'rate-limit', 'split-gateway']) {
   test(`stored run resume rejects a real occupied ${portKind} port and releases only its reacquired lock`, async () => {
     const runId = `resume-${portKind.replace('-', '')}-${process.pid}-${randomBytes(2).toString('hex')}`;
     const runtimeDir = join(repoRoot, 'e2e', '.runtime', runId);
     let server;
     let lock = '';
     try {
-      const portVariable =
-        portKind === 'primary' ? 'NYABASE_E2E_EDGE_PORT' : 'NYABASE_E2E_RATE_LIMIT_EDGE_PORT';
+      const portVariable = {
+        primary: 'NYABASE_E2E_EDGE_PORT',
+        'rate-limit': 'NYABASE_E2E_RATE_LIMIT_EDGE_PORT',
+        'split-gateway': 'NYABASE_E2E_SPLIT_GATEWAY_EDGE_PORT',
+      }[portKind];
       const output = runBash(
         [
           'source "$1"',
@@ -1647,7 +1712,18 @@ test('Compose manifest boundary covers every declared control-plane service', ()
   const services = [...servicesBlock.matchAll(/^  ([a-z0-9-]+):$/gm)]
     .map((match) => match[1])
     .sort();
-  assert.deepEqual(services, ['backend', 'edge', 'rate-limit-edge', 'registry', 'victoriametrics']);
+  assert.deepEqual(services, [
+    'backend-api',
+    'backend-gateway',
+    'backend-worker',
+    'edge',
+    'postgres',
+    'rate-limit-edge',
+    'redis',
+    'registry',
+    'victoriametrics',
+    'vmagent',
+  ]);
 
   const upScript = readFileSync(join(orchestratorDir, 'up.sh'), 'utf8');
   assert.match(upScript, /config --services/);

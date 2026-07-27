@@ -12,6 +12,8 @@ import { HttpProxyGateway } from './http-proxy/http-proxy-gateway.js';
 import { NyabaseConfigService } from './config/nyabase-config.service.js';
 import { SpaFallbackFilter } from './filters/spa-fallback.filter.js';
 import { ZodExceptionFilter } from './filters/zod-exception.filter.js';
+import { RuntimeRoleService } from './runtime/runtime-role.service.js';
+import { RuntimeLifecycleService } from './health/runtime-lifecycle.service.js';
 
 async function bootstrap() {
   const logger = new Logger('Bootstrap');
@@ -23,8 +25,25 @@ async function bootstrap() {
   // and SIGINT, allowing gateways, task workers, and metric flushing to drain.
   app.enableShutdownHooks(['SIGTERM', 'SIGINT']);
   const config = app.get(NyabaseConfigService);
+  const runtimeRole = app.get(RuntimeRoleService);
 
   app.setGlobalPrefix('api');
+  app.use((
+    request: { path: string },
+    response: {
+      status: (code: number) => { json: (body: unknown) => unknown };
+    },
+    next: () => void,
+  ) => {
+    if (runtimeRole.allowsHttpPath(request.path)) {
+      next();
+      return;
+    }
+    response.status(404).json({
+      statusCode: 404,
+      message: 'Not Found',
+    });
+  });
   app.useGlobalFilters(new ZodExceptionFilter());
   // forbidNonWhitelisted: throw 400 on extra properties so clients learn
   // about typos / dropped fields instead of silently having them ignored.
@@ -53,7 +72,7 @@ async function bootstrap() {
   const publicDir = join(process.cwd(), 'public');
   const indexPath = join(publicDir, 'index.html');
   const hasStaticFrontend = existsSync(indexPath);
-  if (hasStaticFrontend) {
+  if (hasStaticFrontend && runtimeRole.servesApi()) {
     app.useStaticAssets(publicDir);
     // Intercept NestJS 404s so that SPA client-side routes (e.g. /dashboard) receive
     // index.html instead of a JSON 404. API paths still get the standard JSON response.
@@ -65,11 +84,15 @@ async function bootstrap() {
   const server = await app.listen(port);
 
   const httpServer = server as import('http').Server;
-  app.get(AgentGateway).attachToHttpServer(httpServer);
-  app.get(ConsoleGateway).attachToHttpServer(httpServer);
-  app.get(SshProxyGateway).attachToHttpServer(httpServer);
-  app.get(HttpProxyGateway).attachToHttpServer(httpServer);
-  const websocketPaths = new Set(['/ws/agent', '/ws/console', '/ws/ssh-proxy', '/ws/http-proxy']);
+  const websocketPaths = runtimeRole.servesGateway()
+    ? new Set(['/ws/agent', '/ws/console', '/ws/ssh-proxy', '/ws/http-proxy'])
+    : new Set<string>();
+  if (runtimeRole.servesGateway()) {
+    app.get(AgentGateway).attachToHttpServer(httpServer);
+    app.get(ConsoleGateway).attachToHttpServer(httpServer);
+    app.get(SshProxyGateway).attachToHttpServer(httpServer);
+    app.get(HttpProxyGateway).attachToHttpServer(httpServer);
+  }
   // noServer gateways intentionally ignore paths they do not own. The final
   // listener closes every unknown upgrade so raw sockets cannot remain open.
   httpServer.on('upgrade', (request, socket) => {
@@ -77,7 +100,8 @@ async function bootstrap() {
     if (!websocketPaths.has(path)) socket.destroy();
   });
 
-  logger.log(`Backend listening on port ${port}`);
+  app.get(RuntimeLifecycleService).markReady();
+  logger.log(`Backend role=${runtimeRole.role} listening on port ${port}`);
 }
 
 bootstrap().catch(console.error);

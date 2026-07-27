@@ -20,6 +20,11 @@ function run(runId, profile, productSourceSha256 = '4'.repeat(64)) {
     runtimeDir: `/e2e/.runtime/${runId}`,
     ledgerSha256: '5'.repeat(64),
     cleanup: { manifestSchemaVersion: 2 },
+    freshMigration: {
+      artifactSha256: 'b'.repeat(64),
+      migrationDigest: '7'.repeat(64),
+      volumeName: `nyabase-e2e-${runId}-postgres-data`,
+    },
     source: {
       gitSha: 'a'.repeat(40),
       trackedDiffSha256: '1'.repeat(64),
@@ -61,6 +66,7 @@ test('release proof requires Full A=75, Full B=0, Recovery=0 from one source', (
   assert.equal(proof.sameSourceFingerprint, true);
   assert.equal(proof.runs.recovery.profile, 'recovery');
   assert.equal(proof.manifestSchemaVersion, 2);
+  assert.equal(proof.migrationDigest, '7'.repeat(64));
 });
 
 test('release proof rejects status, profile, source, and run identity drift', () => {
@@ -75,6 +81,19 @@ test('release proof rejects status, profile, source, and run identity drift', ()
   assert.throws(() => deriveReleaseProof({ ...base, recovery: run('release-contract-recovery', 'full') }), /Recovery/);
   assert.throws(() => deriveReleaseProof({ ...base, recovery: run('release-contract-recovery', 'recovery', '9'.repeat(64)) }), /source fingerprints/);
   assert.throws(() => deriveReleaseProof({ ...base, recovery: run('release-contract-a', 'recovery') }), /distinct runIds/);
+  assert.throws(
+    () => deriveReleaseProof({
+      ...base,
+      recovery: {
+        ...base.recovery,
+        freshMigration: {
+          ...base.recovery.freshMigration,
+          migrationDigest: '8'.repeat(64),
+        },
+      },
+    }),
+    /different migration manifests/,
+  );
   assert.throws(
     () => deriveReleaseProof({
       ...base,
@@ -156,6 +175,7 @@ test('release artifact validator parses B proof and rejects an A -> C -> B subst
     playwrightReportSha256: '9'.repeat(64),
     cleanupManifestSha256: 'a'.repeat(64),
     freshMigrationArtifactSha256: 'b'.repeat(64),
+    freshMigrationDigest: fullA.freshMigration.migrationDigest,
   };
   const candidateBytes = Buffer.from(`${JSON.stringify(candidate)}\n`);
   const candidateArtifact = {
@@ -199,7 +219,10 @@ test('release artifact validator parses B proof and rejects an A -> C -> B subst
       source: fullA.source,
       playwrightReportSha256: fullA.playwright.sha256,
       cleanupManifestSha256: fullA.cleanup.sha256,
-      freshMigration: { artifactSha256: candidate.freshMigrationArtifactSha256 },
+      freshMigration: {
+        artifactSha256: candidate.freshMigrationArtifactSha256,
+        migrationDigest: candidate.freshMigrationDigest,
+      },
     },
     current: {
       runId: fullB.runId,
@@ -211,6 +234,7 @@ test('release artifact validator parses B proof and rejects an A -> C -> B subst
       playwrightReportSha256: fullB.playwright.sha256,
       playwrightExpected: fullB.playwright.expected,
       cleanupManifestSha256: fullB.cleanup.sha256,
+      freshMigration: fullB.freshMigration,
     },
     attempt: {
       path: attemptPath,

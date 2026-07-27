@@ -4,7 +4,7 @@ This package is the only product E2E framework in the repository. It replaces
 the deleted fixed-host test scripts and mocked visual/snapshot suite with a
 fresh, CPU-only stack that exercises:
 
-`real browser/API -> TLS edge -> Backend -> Agent -> Agent-owned dockerd -> real container`
+`real browser/API -> TLS edge -> API/Gateway/Worker -> Agent -> Agent-owned dockerd -> real container`
 
 The authoritative design is [CPU-only real E2E architecture](../docs/testing/cpu-e2e-architecture.md).
 
@@ -14,7 +14,8 @@ The authoritative design is [CPU-only real E2E architecture](../docs/testing/cpu
   test-body retries, broad TLS bypass, GPU fixture, or shared persistent host.
 - The Docker provider creates two privileged systemd nodes, distinct machine
   IDs, cgroup v2, XFS project quota, Agent-owned dockerd, a TLS registry, fresh
-  SQLite state, VictoriaMetrics, and a production Backend image.
+  PostgreSQL state, disposable Redis, vmagent, VictoriaMetrics, and one
+  production Backend image running separate API/Gateway/Worker roles.
 - DinD uses real local kernel/runtime facilities but does not certify physical
   NICs, switches, firmware, bare-metal boot, or a kernel matrix. A future
   `ssh-baremetal` provider can reuse the same specs for those boundaries.
@@ -67,9 +68,9 @@ bash e2e/orchestrator/e2e.sh down my-cpu-run-001
 | `recovery` | isolated destructive restart, disconnect, drift, retry, quarantine and race cases | implemented; release acceptance requires a current-source Recovery run |
 
 Profile selection is case-level. A passing smoke lane does not imply core or
-full coverage. `coverage/features.yaml` currently inventories 151 exact Backend
-HTTP surfaces across 28 controllers, 20 frontend route files, 14 Agent task
-kinds, and four WebSocket paths; all 230 cases are implemented. Static
+full coverage. `coverage/features.yaml` currently inventories 153 exact Backend
+HTTP surfaces across 29 controllers, 20 frontend route files, 14 Agent task
+kinds, and four WebSocket paths; all 236 cases are implemented. Static
 validation is not runtime evidence.
 
 Runtime release status is determined only by a retained
@@ -79,7 +80,7 @@ it. When no matching proof exists, run
 `e2e/orchestrator/run-full-release.sh` to produce the required same-source,
 same-ledger Full A + Full B + Recovery chain with clean post-down evidence.
 
-One profile run uses one Playwright worker because it owns a shared Backend,
+One profile run uses one Playwright worker because it owns a shared control plane,
 two mutable Agents, and one XFS quota topology. Safe parallelism uses distinct
 run IDs/topology slots; increasing workers inside a run is unsupported.
 

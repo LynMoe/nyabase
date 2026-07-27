@@ -4,6 +4,7 @@ import { SshModule } from '../ssh/ssh.module.js';
 import { AccessModule } from '../access/access.module.js';
 import { SystemSettingsController } from './system-settings.controller.js';
 import { AuditModule } from '../audit/audit.module.js';
+import { SystemSettingsAuthorityService } from './system-settings-authority.service.js';
 
 @Module({
   imports: [
@@ -12,6 +13,8 @@ import { AuditModule } from '../audit/audit.module.js';
     forwardRef(() => SshModule),
     AuditModule,
   ],
+  providers: [SystemSettingsAuthorityService],
   controllers: [SystemSettingsController],
+  exports: [SystemSettingsAuthorityService],
 })
 export class SystemSettingsModule {}

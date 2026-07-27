@@ -8,7 +8,7 @@
   },
   "scripts": {
     "validate": "node coverage/validate.mjs",
-    "test:evidence": "node --test coverage/validation-mode.test.mjs orchestrator/coverage-evidence.test.mjs orchestrator/full-run-chain.test.mjs orchestrator/release-proof.test.mjs orchestrator/error-diagnostics.test.mjs orchestrator/provider-entrypoint-runner.test.mjs orchestrator/artifact-security.test.mjs orchestrator/agent-task-wire-proxy.test.mjs orchestrator/container-provider-contracts.test.mjs orchestrator/host-nfsd-snapshot.test.mjs orchestrator/release-boundaries.test.mjs",
+    "test:evidence": "node --test coverage/validation-mode.test.mjs orchestrator/coverage-evidence.test.mjs orchestrator/full-run-chain.test.mjs orchestrator/release-proof.test.mjs orchestrator/error-diagnostics.test.mjs orchestrator/provider-entrypoint-runner.test.mjs orchestrator/artifact-security.test.mjs orchestrator/agent-task-wire-proxy.test.mjs orchestrator/container-provider-contracts.test.mjs orchestrator/control-plane-topology.test.mjs orchestrator/migration-proof-contract.test.mjs orchestrator/host-nfsd-snapshot.test.mjs orchestrator/release-boundaries.test.mjs",
     "typecheck": "tsc --noEmit",
     "test": "playwright test",
     "test:smoke": "E2E_PROFILE=smoke playwright test",

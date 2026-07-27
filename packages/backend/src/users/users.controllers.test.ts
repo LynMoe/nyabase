@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { UserStatus } from '@nyabase/common';
-import type { UserEntity } from '../entities/user.entity.js';
+import type { UserRecord } from '../domain/domain-records.js';
 import type { GroupsService } from '../groups/groups.service.js';
 import { AdminUsersController } from './admin-users.controller.js';
 import { UsersController } from './users.controller.js';
@@ -10,7 +10,7 @@ describe('user update controller boundaries', () => {
   it('rejects status changes on the self-service route instead of silently ignoring them', async () => {
     const updateSelf = vi.fn();
     const controller = new UsersController({ updateSelf } as unknown as UsersService);
-    const user = { id: 'user-a' } as UserEntity;
+    const user = { id: 'user-a' } as UserRecord;
 
     await expect(controller.updateUser('user-a', {
       status: UserStatus.Disabled,
@@ -24,7 +24,7 @@ describe('user update controller boundaries', () => {
       { updateUser } as unknown as UsersService,
       {} as unknown as GroupsService,
     );
-    const actor = { id: 'admin-a' } as UserEntity;
+    const actor = { id: 'admin-a' } as UserRecord;
 
     await expect(controller.updateUser('user-a', {
       displayName: 'Alice',
@@ -40,7 +40,7 @@ describe('user update controller boundaries', () => {
       addSshKey,
       deleteSshKey,
     } as unknown as UsersService);
-    const user = { id: 'user-a' } as UserEntity;
+    const user = { id: 'user-a' } as UserRecord;
     const keyText = 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAFd/vaXN2I0jY5BiWgFdcK4lc66lU/wUQqmKHUgQzt3';
 
     await controller.addSshKey('user-a', { name: 'laptop', keyText }, user);

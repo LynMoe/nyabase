@@ -1,27 +1,29 @@
-import { ConflictException, Injectable, Logger, NotFoundException } from '@nestjs/common';
-import { InjectRepository } from '@nestjs/typeorm';
-import { DataSource, EntityManager, In, IsNull, Repository } from 'typeorm';
+import { ConflictException, Injectable, NotFoundException } from '@nestjs/common';
 import { v4 as uuidv4 } from 'uuid';
-import { RemoteFsMountEntity } from '../entities/remote-fs-mount.entity.js';
-import { RemoteFsServerAssignmentEntity } from '../entities/remote-fs-server-assignment.entity.js';
-import { MountSourceGrantEntity } from '../entities/mount-source-grant.entity.js';
+import type { MountSourceGrantRecord } from '../domain/domain-records.js';
 import { AccessResolverService, MountSourceRef } from '../access/access-resolver.service.js';
 import { AuditService } from '../audit/audit.service.js';
-import { AuditAction, Capability, MountSourceDto, MountSourceGrantDto } from '@nyabase/common';
+import {
+  AuditAction,
+  Capability,
+  MAX_MOUNT_SOURCE_GRANTS_PER_SCOPE,
+  MountSourceDto,
+  MountSourceGrantDto,
+} from '@nyabase/common';
+import { sql } from 'kysely';
 import { publicDataDiskDisplayName } from './utils.js';
 import { AgentGateway } from '../gateway/agent-gateway.js';
-import { postCommitBestEffort } from '../common/post-commit.js';
-import { runSerializedTransaction } from '../database/serialized-transaction.js';
-import { GroupEntity } from '../entities/group.entity.js';
-import { GroupMemberEntity } from '../entities/group-member.entity.js';
-import { ServerEntity } from '../entities/server.entity.js';
-import { UserEntity } from '../entities/user.entity.js';
 import { UserStatus } from '@nyabase/common';
 import { exactLocalDisk } from './utils.js';
 import {
   AccessRevocationGuardService,
   type ExactMountSource,
 } from '../access/access-revocation-guard.service.js';
+import { PgTransactionManager } from '../persistence-pg/transaction.js';
+import {
+  StorageRepository,
+  type StorageExecutor,
+} from '../storage/storage.repository.js';
 
 export type MountSourceGrantScope = 'user' | 'group';
 export type MountSourceGrantTarget =
@@ -30,19 +32,12 @@ export type MountSourceGrantTarget =
 
 @Injectable()
 export class MountSourcesService {
-  private readonly logger = new Logger(MountSourcesService.name);
-
   constructor(
-    @InjectRepository(RemoteFsMountEntity)
-    private remoteFsMountsRepo: Repository<RemoteFsMountEntity>,
-    @InjectRepository(RemoteFsServerAssignmentEntity)
-    private remoteFsAssignmentsRepo: Repository<RemoteFsServerAssignmentEntity>,
-    @InjectRepository(MountSourceGrantEntity)
-    private mountSourceGrantsRepo: Repository<MountSourceGrantEntity>,
+    private readonly storage: StorageRepository,
+    private readonly transactions: PgTransactionManager,
     private accessResolver: AccessResolverService,
     private auditService: AuditService,
     private agentGateway: AgentGateway,
-    private dataSource: DataSource,
     private revocationGuard: AccessRevocationGuardService,
   ) {}
 
@@ -59,7 +54,7 @@ export class MountSourcesService {
    * List all grants for a specific source (admin view for the grant dialog).
    */
   async listGrantsForSource(target: MountSourceGrantTarget): Promise<MountSourceGrantDto[]> {
-    const grants = await this.mountSourceGrantsRepo.find({ where: this.targetWhere(target) });
+    const grants = await this.storage.listMountSourceGrantsForTarget(target);
     return grants.map((g) => this.grantToDto(g));
   }
 
@@ -67,7 +62,7 @@ export class MountSourcesService {
     scope: MountSourceGrantScope,
     scopeId: string,
   ): Promise<MountSourceGrantDto[]> {
-    const grants = await this.mountSourceGrantsRepo.find({ where: { scope, scopeId } });
+    const grants = await this.storage.listMountSourceGrantsForScope(scope, scopeId);
     return grants.map((grant) => this.grantToDto(grant));
   }
 
@@ -77,87 +72,98 @@ export class MountSourcesService {
     scopeId: string,
     target: MountSourceGrantTarget,
   ): Promise<MountSourceGrantDto> {
-    const { grant, created } = await runSerializedTransaction(this.dataSource, async (manager) => {
+    const { grant } = await this.transactions.run(async (transaction) => {
       await this.accessResolver.assertActorCapabilitiesInTransaction(
-        manager,
+        transaction,
         actorId,
         [Capability.ManageGrants],
       );
-      await this.assertScopeExists(manager, scope, scopeId);
-      const sourceIdentity = await this.resolveSourceIdentity(manager, target);
+      await this.assertScopeExists(transaction, scope, scopeId);
+      await sql`SELECT pg_advisory_xact_lock(
+        hashtextextended(${'mount-source-grant:' + scope + ':' + scopeId}, 0)
+      )`.execute(transaction);
+      const sourceIdentity = await this.resolveSourceIdentity(transaction, target);
       const exact = target.sourceKind === 'local'
-        ? {
-            scope,
-            scopeId,
-            sourceKind: 'local' as const,
-            sourceId: target.sourceId,
-            serverId: target.serverId,
-            sourceIdentity: sourceIdentity!,
-          }
-        : {
-            scope,
-            scopeId,
-            sourceKind: 'remote' as const,
-            sourceId: target.sourceId,
-            serverId: IsNull(),
-            sourceIdentity: IsNull(),
-          };
-      const existing = await manager.findOne(MountSourceGrantEntity, { where: exact });
-      if (existing) return { grant: existing, created: false };
-      if (target.sourceKind === 'local') {
-        const replaced = await manager.find(MountSourceGrantEntity, {
-          where: {
-            scope,
-            scopeId,
-            sourceKind: 'local',
-            sourceId: target.sourceId,
-            serverId: target.serverId,
-          },
-        });
-        const userIds = scope === 'user'
-          ? [scopeId]
-          : (await manager.find(GroupMemberEntity, { where: { groupId: scopeId } }))
-              .map((member) => member.userId);
-        await manager.delete(MountSourceGrantEntity, {
-          scope,
-          scopeId,
-          sourceKind: 'local',
-          sourceId: target.sourceId,
-          serverId: target.serverId,
-        });
-        for (const grant of replaced) {
-          await this.revocationGuard.assertMountSourceRevocationSafe(
-            manager,
-            userIds,
-            this.exactSource(grant),
-          );
-        }
-      }
-      const saved = await manager.save(MountSourceGrantEntity, manager.create(MountSourceGrantEntity, {
-        id: uuidv4(),
+        ? { ...target, sourceIdentity: sourceIdentity! }
+        : target;
+      const existing = await this.storage.findExactMountSourceGrant(
         scope,
         scopeId,
-        sourceKind: target.sourceKind,
-        sourceId: target.sourceId,
-        serverId: target.sourceKind === 'local' ? target.serverId : null,
-        sourceIdentity,
-      }));
+        exact,
+        transaction,
+      );
+      if (existing) return { grant: existing, created: false };
+      const scopeGrants = await this.storage.listMountSourceGrantsForScope(
+        scope,
+        scopeId,
+        transaction,
+      );
+      const replacesLocalCoordinate = target.sourceKind === 'local'
+        && scopeGrants.some((grant) =>
+          grant.sourceKind === 'local'
+          && grant.sourceId === target.sourceId
+          && grant.serverId === target.serverId);
+      if (
+        scopeGrants.length >= MAX_MOUNT_SOURCE_GRANTS_PER_SCOPE
+        && !replacesLocalCoordinate
+      ) {
+        throw new ConflictException({
+          code: 'MOUNT_SOURCE_GRANT_CAPACITY_REACHED',
+          message:
+            `At most ${MAX_MOUNT_SOURCE_GRANTS_PER_SCOPE} mount-source grants `
+            + 'are supported per scope',
+          scope,
+          scopeId,
+          maxGrants: MAX_MOUNT_SOURCE_GRANTS_PER_SCOPE,
+        });
+      }
+      if (target.sourceKind === 'local') {
+        const replaced = scopeGrants.filter((grant) =>
+          grant.sourceKind === 'local'
+          && grant.sourceId === target.sourceId
+          && grant.serverId === target.serverId);
+        const userIds = scope === 'user'
+          ? [scopeId]
+          : (await transaction.selectFrom('iam.group_members')
+              .select('user_id')
+              .where('group_id', '=', scopeId)
+              .execute()).map((member) => member.user_id);
+        await this.storage.deleteExactMountSourceGrants(
+          scope,
+          scopeId,
+          target,
+          transaction,
+        );
+        await this.revocationGuard.assertMountSourcesRevocationSafe(
+          transaction,
+          userIds,
+          replaced.map((grant) => this.exactSource(grant)),
+        );
+      }
+      const saved = await this.storage.insertMountSourceGrant(
+        uuidv4(),
+        scope,
+        scopeId,
+        exact,
+        transaction,
+      ) ?? await this.storage.findExactMountSourceGrant(
+        scope,
+        scopeId,
+        exact,
+        transaction,
+      );
+      if (!saved) throw new ConflictException('Mount source grant changed concurrently; retry');
+      await this.auditService.append(
+        transaction,
+        actorId,
+        AuditAction.UpsertMountSourceGrant,
+        saved.id,
+        'mount_source',
+        { scope, scopeId, ...target, sourceIdentity: saved.sourceIdentity },
+      );
       return { grant: saved, created: true };
     });
-    this.accessResolver.invalidateAll();
-    if (created) {
-      await postCommitBestEffort(
-        'Mount source grant upsert audit',
-        () => this.auditService.log(
-          actorId,
-          AuditAction.UpsertMountSourceGrant,
-          grant.id,
-          'mount_source',
-          { scope, scopeId, ...target, sourceIdentity: grant.sourceIdentity },
-        ),
-        this.logger,
-      );
-    }
+    await this.accessResolver.authorizationCommitted();
     return this.grantToDto(grant);
   }
 
@@ -167,78 +173,77 @@ export class MountSourcesService {
     scopeId: string,
     target: MountSourceGrantTarget,
   ): Promise<void> {
-    const affected = await runSerializedTransaction(this.dataSource, async (manager) => {
+    await this.transactions.run(async (transaction) => {
       await this.accessResolver.assertActorCapabilitiesInTransaction(
-        manager,
+        transaction,
         actorId,
         [Capability.ManageGrants],
       );
-      await this.assertScopeExists(manager, scope, scopeId);
-      const removed = await manager.find(MountSourceGrantEntity, {
-        where: { scope, scopeId, ...this.targetWhere(target) },
-      });
-      const result = await manager.delete(MountSourceGrantEntity, {
+      await this.assertScopeExists(transaction, scope, scopeId);
+      const removed = await this.storage.deleteExactMountSourceGrants(
         scope,
         scopeId,
-        ...this.targetWhere(target),
-      });
+        target,
+        transaction,
+      );
       const userIds = scope === 'user'
         ? [scopeId]
-        : (await manager.find(GroupMemberEntity, { where: { groupId: scopeId } }))
-            .map((member) => member.userId);
-      for (const grant of removed) {
-        await this.revocationGuard.assertMountSourceRevocationSafe(
-          manager,
-          userIds,
-          this.exactSource(grant),
+        : (await transaction.selectFrom('iam.group_members')
+            .select('user_id')
+            .where('group_id', '=', scopeId)
+            .execute()).map((member) => member.user_id);
+      await this.revocationGuard.assertMountSourcesRevocationSafe(
+        transaction,
+        userIds,
+        removed.map((grant) => this.exactSource(grant)),
+      );
+      if (removed.length > 0) {
+        await this.auditService.append(
+          transaction,
+          actorId,
+          AuditAction.DeleteMountSourceGrant,
+          target.sourceId,
+          'mount_source',
+          { scope, scopeId, ...target },
         );
       }
-      return result.affected ?? 0;
+      return removed.length;
     });
-    this.accessResolver.invalidateAll();
-    if (affected > 0) await postCommitBestEffort(
-      'Mount source grant delete audit',
-      () => this.auditService.log(
-        actorId,
-        AuditAction.DeleteMountSourceGrant,
-        target.sourceId,
-        'mount_source',
-        { scope, scopeId, ...target },
-      ),
-      this.logger,
-    );
+    await this.accessResolver.authorizationCommitted();
   }
 
   async deleteScopeInTransaction(
-    manager: EntityManager,
+    executor: unknown,
     scope: MountSourceGrantScope,
     scopeId: string,
     options: { bypassResourceGuard?: boolean } = {},
   ): Promise<void> {
+    const transaction = requireStorageExecutor(executor);
     const removed = options.bypassResourceGuard
       ? []
-      : await manager.find(MountSourceGrantEntity, { where: { scope, scopeId } });
+      : await this.storage.listMountSourceGrantsForScope(scope, scopeId, transaction);
     const userIds = options.bypassResourceGuard
       ? []
       : scope === 'user'
         ? [scopeId]
-        : (await manager.find(GroupMemberEntity, { where: { groupId: scopeId } }))
-            .map((member) => member.userId);
-    await manager.delete(MountSourceGrantEntity, { scope, scopeId });
-    for (const grant of removed) {
-      await this.revocationGuard.assertMountSourceRevocationSafe(
-        manager,
-        userIds,
-        this.exactSource(grant),
-      );
-    }
+        : (await transaction.selectFrom('iam.group_members')
+            .select('user_id')
+            .where('group_id', '=', scopeId)
+            .execute()).map((member) => member.user_id);
+    await this.storage.deleteMountSourceGrantsForScope(scope, scopeId, transaction);
+    await this.revocationGuard.assertMountSourcesRevocationSafe(
+      transaction,
+      userIds,
+      removed.map((grant) => this.exactSource(grant)),
+    );
   }
 
   async deleteSourceInTransaction(
-    manager: EntityManager,
+    executor: unknown,
     target: MountSourceGrantTarget,
   ): Promise<void> {
-    await manager.delete(MountSourceGrantEntity, this.targetWhere(target));
+    const transaction = requireStorageExecutor(executor);
+    await this.storage.deleteMountSourceGrantsForTarget(target, transaction);
   }
 
   // ---------------------------------------------------------------------------
@@ -249,9 +254,9 @@ export class MountSourcesService {
     const localIds = Array.from(refs).filter((r) => r.kind === 'local').map((r) => r.id);
     const remoteIds = Array.from(refs).filter((r) => r.kind === 'remote').map((r) => r.id);
 
-    const [remoteMounts] = await Promise.all([
-      remoteIds.length > 0 ? this.remoteFsMountsRepo.find({ where: { id: In(remoteIds) } }) : Promise.resolve([]),
-    ]);
+    const remoteMounts = remoteIds.length > 0
+      ? await this.storage.listRemoteFsMountsByIds(remoteIds)
+      : [];
 
     const wantedLocalIds = new Set(localIds);
     const diskMap = new Map(
@@ -287,7 +292,7 @@ export class MountSourcesService {
     return result;
   }
 
-  private grantToDto(g: MountSourceGrantEntity): MountSourceGrantDto {
+  private grantToDto(g: MountSourceGrantRecord): MountSourceGrantDto {
     return {
       id: g.id,
       scope: g.scope,
@@ -300,22 +305,7 @@ export class MountSourcesService {
     };
   }
 
-  private targetWhere(target: MountSourceGrantTarget) {
-    return target.sourceKind === 'local'
-      ? {
-          sourceKind: 'local' as const,
-          sourceId: target.sourceId,
-          serverId: target.serverId,
-        }
-      : {
-          sourceKind: 'remote' as const,
-          sourceId: target.sourceId,
-          serverId: IsNull(),
-          sourceIdentity: IsNull(),
-        };
-  }
-
-  private exactSource(grant: MountSourceGrantEntity): ExactMountSource {
+  private exactSource(grant: MountSourceGrantRecord): ExactMountSource {
     return {
       sourceKind: grant.sourceKind,
       sourceId: grant.sourceId,
@@ -325,17 +315,23 @@ export class MountSourcesService {
   }
 
   private async assertScopeExists(
-    manager: EntityManager,
+    transaction: StorageExecutor,
     scope: MountSourceGrantScope,
     scopeId: string,
   ): Promise<void> {
     if (scope === 'group') {
-      if (!await manager.findOneBy(GroupEntity, { id: scopeId })) {
+      if (!await transaction.selectFrom('iam.groups')
+        .select('id')
+        .where('id', '=', scopeId)
+        .executeTakeFirst()) {
         throw new NotFoundException('Group not found');
       }
       return;
     }
-    const user = await manager.findOneBy(UserEntity, { id: scopeId });
+    const user = await transaction.selectFrom('iam.users')
+      .select(['id', 'status'])
+      .where('id', '=', scopeId)
+      .executeTakeFirst();
     if (!user) throw new NotFoundException('User not found');
     if (user.status === UserStatus.Deleted) {
       throw new ConflictException({
@@ -350,18 +346,21 @@ export class MountSourcesService {
   }
 
   private async resolveSourceIdentity(
-    manager: EntityManager,
+    transaction: StorageExecutor,
     target: MountSourceGrantTarget,
   ): Promise<string | null> {
     if (target.sourceKind === 'remote') {
-      const mount = await manager.findOneBy(RemoteFsMountEntity, { id: target.sourceId });
-      if (!mount || mount.desiredState !== 'active') {
+      const mount = await this.storage.lockActiveRemoteFsMount(target.sourceId, transaction);
+      if (!mount) {
         throw new NotFoundException(`Remote FS mount ${target.sourceId} not found`);
       }
       return null;
     }
 
-    if (!await manager.findOneBy(ServerEntity, { id: target.serverId })) {
+    if (!await transaction.selectFrom('infra.servers')
+      .select('id')
+      .where('id', '=', target.serverId)
+      .executeTakeFirst()) {
       throw new NotFoundException(`Server ${target.serverId} not found`);
     }
     const snapshot = this.agentGateway.stateCache.get(target.serverId);
@@ -376,4 +375,18 @@ export class MountSourcesService {
     }
     return disk.sourceIdentity;
   }
+}
+
+function requireStorageExecutor(value: unknown): StorageExecutor {
+  if (
+    !value
+    || typeof value !== 'object'
+    || typeof (value as { selectFrom?: unknown }).selectFrom !== 'function'
+    || typeof (value as { deleteFrom?: unknown }).deleteFrom !== 'function'
+  ) {
+    throw new Error(
+      'Mount source mutations require the caller PostgreSQL/Kysely transaction',
+    );
+  }
+  return value as StorageExecutor;
 }

@@ -171,10 +171,35 @@ function assertFaultResult(
     return;
   }
   if (input.fault === 'backendService') {
+    const role = input.role ?? 'all';
+    const expectedRoles =
+      role === 'all' ? ['api', 'gateway', 'worker'] : [role];
+    const expectedContainer =
+      role === 'all'
+        ? `nyabase-e2e-${input.runId}-split-control-plane`
+        : `nyabase-e2e-${input.runId}-backend-${role}-1`;
     if (
       value.fault !== 'backendService' ||
-      value.containerName !== `nyabase-e2e-${input.runId}-backend-1` ||
+      value.role !== role ||
+      value.containerName !== expectedContainer ||
       !/^[a-f0-9]{64}$/.test(value.containerId) ||
+      !Array.isArray(value.runtimes) ||
+      value.runtimes.length !== expectedRoles.length ||
+      !expectedRoles.every((runtimeRole) =>
+        value.runtimes.some(
+          (runtime: {
+            role?: string;
+            containerName?: string;
+            containerId?: string;
+            generation?: string;
+          }) =>
+            runtime.role === runtimeRole &&
+            runtime.containerName ===
+              `nyabase-e2e-${input.runId}-backend-${runtimeRole}-1` &&
+            /^[a-f0-9]{64}$/.test(runtime.containerId ?? '') &&
+            /^[a-f0-9]{64}$/.test(runtime.generation ?? ''),
+        ),
+      ) ||
       !/^[a-f0-9]{64}$/.test(value.before?.generation ?? '') ||
       !/^[a-f0-9]{64}$/.test(value.after?.generation ?? '') ||
       value.before?.healthy !== true ||
@@ -191,7 +216,7 @@ function assertFaultResult(
     const expectedOffset = input.action === 'advance' ? 691_200_000 : 0;
     if (
       value.fault !== 'backendClock' ||
-      value.containerName !== `nyabase-e2e-${input.runId}-backend-1` ||
+      value.containerName !== `nyabase-e2e-${input.runId}-split-control-plane` ||
       (input.action === 'probe'
         ? value.offsetMs !== 0 && value.offsetMs !== 691_200_000
         : value.offsetMs !== expectedOffset) ||
@@ -199,6 +224,40 @@ function assertFaultResult(
       value.healthy !== true
     ) {
       throw new Error('Topology provider returned invalid Backend clock evidence');
+    }
+    return;
+  }
+  if (input.fault === 'redisService') {
+    if (
+      value.fault !== 'redisService' ||
+      value.containerName !== `nyabase-e2e-${input.runId}-redis-1` ||
+      !/^[a-f0-9]{64}$/.test(value.containerId) ||
+      !/^[a-f0-9]{64}$/.test(value.generation) ||
+      value.running !== (input.action !== 'stop') ||
+      value.healthy !== (input.action !== 'stop') ||
+      value.persistenceDisabled !== true ||
+      value.flushed !== (input.action === 'flush') ||
+      !Number.isSafeInteger(value.keyCount) ||
+      value.keyCount < 0
+    ) {
+      throw new Error('Topology provider returned invalid Redis service evidence');
+    }
+    return;
+  }
+  if (input.fault === 'telemetryService') {
+    if (
+      value.fault !== 'telemetryService' ||
+      value.service !== input.service ||
+      value.containerName !== `nyabase-e2e-${input.runId}-${input.service}-1` ||
+      !/^[a-f0-9]{64}$/.test(value.containerId) ||
+      !/^[a-f0-9]{64}$/.test(value.generation) ||
+      value.healthy !== (input.action !== 'stop') ||
+      (input.service === 'vmagent' && input.action !== 'stop'
+        ? !Number.isSafeInteger(value.queuePendingBytes)
+          || (value.queuePendingBytes ?? -1) < 0
+        : value.queuePendingBytes !== null)
+    ) {
+      throw new Error('Topology provider returned invalid telemetry service evidence');
     }
     return;
   }
@@ -241,6 +300,87 @@ function assertFaultResult(
       value.closed !== true
     ) {
       throw new Error('Topology provider returned invalid duplicate Agent session evidence');
+    }
+    return;
+  }
+  if (input.fault === 'splitGatewaySessionRace') {
+    if (value.fault !== 'splitGatewaySessionRace') {
+      throw new Error('Topology provider returned a mismatched split Gateway race kind');
+    }
+    const active = input.action !== 'restore';
+    const expectedClosedExecSessionIds =
+      input.action === 'inject'
+        ? [input.staleExecSessionId]
+        : input.action === 'probe'
+          ? [...(input.expectedClosedExecSessionIds ?? [])]
+          : [];
+    const validClosedExecSessions =
+      Array.isArray(value.closedExecSessions) &&
+      value.closedExecSessions.length >= expectedClosedExecSessionIds.length &&
+      expectedClosedExecSessionIds.every((id) =>
+        value.closedExecSessions.some(
+          (session: { sessionId?: string }) => session.sessionId === id,
+        ),
+      ) &&
+      value.closedExecSessions.every(
+        (session: {
+          sessionId?: string;
+          state?: string;
+          closedAt?: string;
+          closeReason?: string;
+          agentSessionId?: string;
+          gatewayId?: string;
+        }) =>
+          typeof session.sessionId === 'string' &&
+          /^[0-9a-f-]{36}$/.test(session.sessionId) &&
+          session.state === 'closed' &&
+          typeof session.closedAt === 'string' &&
+          !Number.isNaN(Date.parse(session.closedAt)) &&
+          typeof session.closeReason === 'string' &&
+          session.closeReason.length > 0 &&
+          typeof session.agentSessionId === 'string' &&
+          /^[0-9a-f-]{36}$/.test(session.agentSessionId) &&
+          typeof session.gatewayId === 'string' &&
+          session.gatewayId.length > 0,
+      );
+    if (
+      value.nodeKey !== input.nodeKey ||
+      typeof value.serverId !== 'string' ||
+      !/^[0-9a-f-]{36}$/.test(value.serverId) ||
+      value.primaryGatewayContainer !==
+        `nyabase-e2e-${input.runId}-backend-gateway-1` ||
+      value.secondaryGatewayContainer !==
+        `nyabase-e2e-${input.runId}-fault-gateway-b` ||
+      value.secondaryEdgeContainer !==
+        `nyabase-e2e-${input.runId}-fault-edge-b` ||
+      !Number.isInteger(value.secondaryEdgeHostPort) ||
+      value.secondaryEdgeHostPort < 1 ||
+      value.secondaryEdgeHostPort > 65_535 ||
+      value.secondaryConsoleUrl !==
+        `wss://localhost:${value.secondaryEdgeHostPort}/ws/console` ||
+      !/^[a-f0-9]{64}$/.test(value.primaryGatewayProcessGeneration) ||
+      typeof value.baselineGatewayId !== 'string' ||
+      value.baselineGatewayId.length === 0 ||
+      typeof value.ownerGatewayId !== 'string' ||
+      value.ownerGatewayId.length === 0 ||
+      !/^[0-9a-f-]{36}$/.test(value.ownerSessionId) ||
+      !Number.isSafeInteger(value.ownerGeneration) ||
+      value.ownerGeneration <= 0 ||
+      value.serverOnline !== true ||
+      value.runtimeReady !== true ||
+      value.primaryGatewayActive !== true ||
+      value.primaryGatewayPaused !== false ||
+      value.delayedPrimaryCleanupReleased !== true ||
+      value.secondaryGatewayActive !== active ||
+      value.secondaryEdgeActive !== active ||
+      value.secondaryEdgeHostPortActive !== active ||
+      value.secondaryEdgeHostPortOwned !== active ||
+      value.routeActive !== active ||
+      value.cleanupComplete !== !active ||
+      !validClosedExecSessions ||
+      (active && value.ownerGatewayId === value.baselineGatewayId)
+    ) {
+      throw new Error('Topology provider returned invalid split Gateway race evidence');
     }
     return;
   }

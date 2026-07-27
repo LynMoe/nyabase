@@ -14,9 +14,47 @@ curl --fail --silent --show-error --cacert "$ca" \
 curl --noproxy '*' --fail --silent --show-error --cacert "$ca" \
   "https://registry:5000/v2/" --resolve "registry:5000:${NYABASE_E2E_REGISTRY_IP}" >/dev/null
 
-backend_live_id="$(docker inspect "$NYABASE_E2E_PREFIX-backend-1" --format '{{.Image}}')"
 expected_backend_id="$(docker image inspect "$NYABASE_E2E_BACKEND_IMAGE" --format '{{.Id}}')"
-[[ "$backend_live_id" == "$expected_backend_id" ]] || die "live Backend is not the current run image"
+for role in api gateway worker; do
+  runtime="$NYABASE_E2E_PREFIX-backend-$role-1"
+  runtime_image="$(docker inspect "$runtime" --format '{{.Image}}')"
+  [[ "$runtime_image" == "$expected_backend_id" ]] \
+    || die "live $role runtime is not the current Backend image"
+  [[ "$(docker inspect "$runtime" --format '{{.State.Running}}')" == true ]] \
+    || die "live $role runtime is not running"
+  docker inspect "$runtime" --format '{{range .Config.Env}}{{println .}}{{end}}' \
+    | grep -Fxq "NYABASE_RUNTIME_ROLE=$role" \
+    || die "live $role runtime role fingerprint mismatch"
+  docker inspect "$runtime" --format '{{range .Config.Env}}{{println .}}{{end}}' \
+    | grep -Fxq "DB_MIGRATIONS_RUN=true" \
+    || die "live $role migration ownership fingerprint mismatch"
+done
+
+declare -A service_images=(
+  [postgres]='postgres:18.4-bookworm'
+  [redis]='redis:8.2-bookworm'
+  [victoriametrics]='victoriametrics/victoria-metrics:v1.148.0'
+  [vmagent]='victoriametrics/vmagent:v1.148.0'
+)
+for service in postgres redis victoriametrics vmagent; do
+  container="$NYABASE_E2E_PREFIX-$service-1"
+  [[ "$(docker inspect "$container" --format '{{.State.Health.Status}}')" == healthy ]] \
+    || die "$service dependency is not healthy"
+  [[ "$(docker inspect "$container" --format '{{.Config.Image}}')" == "${service_images[$service]}" ]] \
+    || die "$service dependency image fingerprint mismatch"
+done
+
+postgres_migration_digest="$(
+  node "$E2E_ROOT/e2e/orchestrator/fixture-evidence.mjs" verify-migration \
+    "$NYABASE_E2E_RUNTIME_DIR"
+)"
+[[ "$postgres_migration_digest" =~ ^[0-9a-f]{64}$ ]] \
+  || die "PostgreSQL migration image/database fingerprint is invalid"
+redis_persistence="$(docker exec "$NYABASE_E2E_PREFIX-redis-1" \
+  sh -ec 'REDISCLI_AUTH="$0" redis-cli --raw CONFIG GET save; REDISCLI_AUTH="$0" redis-cli --raw CONFIG GET appendonly' \
+  "$run_id")"
+[[ "$redis_persistence" == $'save\n\nappendonly\nno' ]] \
+  || die "Redis disposable-cache persistence fingerprint mismatch"
 rate_limit_edge_ip="$(docker inspect "$NYABASE_E2E_PREFIX-rate-limit-edge-1" \
   --format '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}')"
 [[ "$rate_limit_edge_ip" == "$NYABASE_E2E_RATE_LIMIT_EDGE_IP" ]] \
@@ -66,6 +104,8 @@ NODE_EXTRA_CA_CERTS="$ca" node "$E2E_ROOT/e2e/orchestrator/api-health.mjs" \
   "$NYABASE_E2E_RUNTIME_DIR" 120000
 if [[ "$NYABASE_E2E_PROFILE" == full ]]; then
   "$E2E_ROOT/e2e/orchestrator/storage-health.sh" "$run_id"
+fi
+if [[ "$NYABASE_E2E_PROFILE" == full || "$NYABASE_E2E_PROFILE" == recovery ]]; then
   "$E2E_ROOT/e2e/orchestrator/proxies-health.sh" "$run_id"
 fi
-log "health PASS: current Backend, primary and isolated rate-limit TLS edges, TLS registry, unique nodes, independent client, WSS Agents and exact nested dockerd identities"
+log "health PASS: current split API/Gateway/Worker image, exact PostgreSQL migration digest $postgres_migration_digest, disposable Redis, vmagent/VM, TLS edges, registry, WSS Agents and exact CPU nodes"

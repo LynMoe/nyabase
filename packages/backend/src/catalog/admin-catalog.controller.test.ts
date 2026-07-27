@@ -4,22 +4,34 @@ import { Capability } from '@nyabase/common';
 import { ANY_CAPS_KEY } from '../auth/decorators/require-caps.decorator.js';
 
 describe('AdminCatalogController', () => {
+  it('projects 4096 user selector rows from one bulk persistence call', async () => {
+    const { controller, persistence } = makeController();
+    persistence.listUsers.mockResolvedValue(Array.from({ length: 4_096 }, (_, index) => ({
+      id: `user-${index}`,
+      username: `user-${index}`,
+      display_name: `User ${index}`,
+      status: 'active',
+    })));
+    await expect(controller.listUsers()).resolves.toHaveLength(4_096);
+    expect(persistence.listUsers).toHaveBeenCalledOnce();
+  });
+
   it('returns purpose-safe user and group selector records', async () => {
-    const { controller, users, groups } = makeController();
-    users.find.mockResolvedValue([{
+    const { controller, persistence } = makeController();
+    persistence.listUsers.mockResolvedValue([{
       id: 'user-a',
       username: 'alice',
-      displayName: 'Alice',
+      display_name: 'Alice',
       status: 'active',
       passwordHash: 'must-not-leak',
       authVersion: 7,
     }]);
-    groups.find.mockResolvedValue([{
+    persistence.listGroups.mockResolvedValue([{
       id: 'group-a',
       name: 'Operators',
       description: null,
       priority: 10,
-      isSystem: false,
+      is_system: false,
       capabilities: ['manage_grants'],
       capabilitiesJson: '["manage_grants"]',
     }]);
@@ -52,8 +64,8 @@ describe('AdminCatalogController', () => {
   });
 
   it('never exposes full Server administration fields to grant or metric selectors', async () => {
-    const { controller, servers, agentGateway } = makeController();
-    servers.find.mockResolvedValue([{
+    const { controller, persistence, agentGateway } = makeController();
+    persistence.listServers.mockResolvedValue([{
       id: 'server-a',
       name: 'Node A',
       slug: 'node-a',
@@ -85,17 +97,13 @@ describe('AdminCatalogController', () => {
   });
 
   it('returns only active remote mount assignments without secret params', async () => {
-    const { controller, remoteFsMounts, remoteFsAssignments } = makeController();
-    remoteFsMounts.find.mockResolvedValue([{
+    const { controller, persistence } = makeController();
+    persistence.listActiveRemoteFsMounts.mockResolvedValue([{
       id: 'mount-a',
       name: 'dataset',
       displayName: 'Dataset',
-      params: { secret: 'must-not-leak' },
+      serverIds: ['server-a', 'server-b'],
     }]);
-    remoteFsAssignments.find.mockResolvedValue([
-      { remoteFsMountId: 'mount-a', serverId: 'server-b' },
-      { remoteFsMountId: 'mount-a', serverId: 'server-a' },
-    ]);
 
     await expect(controller.listGrantRemoteFsMounts()).resolves.toEqual([{
       id: 'mount-a',
@@ -107,30 +115,21 @@ describe('AdminCatalogController', () => {
 });
 
 function makeController() {
-  const users = { find: vi.fn() };
-  const groups = { find: vi.fn() };
-  const images = { find: vi.fn() };
-  const remoteFsMounts = { find: vi.fn() };
-  const remoteFsAssignments = { find: vi.fn() };
-  const servers = { find: vi.fn() };
+  const persistence = {
+    listUsers: vi.fn(),
+    listGroups: vi.fn(),
+    listServers: vi.fn(),
+    listActiveImages: vi.fn(),
+    listActiveRemoteFsMounts: vi.fn(),
+  };
   const agentGateway = { stateCache: { get: vi.fn() } };
   const accessResolver = { administrationActionsCurrent: vi.fn() };
   return {
-    users,
-    groups,
-    images,
-    remoteFsMounts,
-    remoteFsAssignments,
-    servers,
+    persistence,
     agentGateway,
     accessResolver,
     controller: new AdminCatalogController(
-      users as never,
-      groups as never,
-      images as never,
-      remoteFsMounts as never,
-      remoteFsAssignments as never,
-      servers as never,
+      persistence as never,
       agentGateway as never,
       accessResolver as never,
     ),

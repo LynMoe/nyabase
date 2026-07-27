@@ -1,18 +1,27 @@
 import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { connect as connectTls, type TLSSocket } from 'node:tls';
 import type { APIRequestContext } from '@playwright/test';
 import { test, expect } from '../../fixtures/live-stack.js';
 import { ContainerDeadline } from '../../support/container-deadline.js';
 import {
+  closeConsoleAfterOutput,
+  closePersistentConsoleForCleanup,
+  executeThroughConsole,
+  openPersistentConsoleUntilOutput,
+  requirePersistentConsoleClosed,
+  type ConsoleSession,
+} from '../../support/console.js';
+import {
   cleanupContainerPersona,
   createContainerPersona,
   type ContainerPersona,
-  type TrackedApiFactory,
 } from '../../support/container-persona.js';
 import { coverageCase } from '../../support/coverage-marker.js';
 import {
   cleanupContainerThroughProductApi,
+  requestContainerAction,
   waitForAgentTask,
   waitForContainer,
   type AgentTaskRef,
@@ -25,6 +34,7 @@ import {
   runCleanupStepsPreservingPrimary,
 } from '../../support/error-diagnostics.mjs';
 import { controlProviderFault } from '../../support/provider-fault-control.js';
+import { controlProxyClient } from '../../support/proxy-client-control.js';
 import { currentRunId, requireRuntimeEnv } from '../../support/runtime-env.js';
 import { ContainerSshImageLease } from '../../support/container-ssh-image-lease.js';
 import {
@@ -66,6 +76,54 @@ interface ImageView {
 interface ImagePullResponse {
   tasks: Array<AgentTaskRef & { serverId: string }>;
   rejected: Array<{ serverId: string; message: string }>;
+}
+
+interface ProxyStatus {
+  connectedProxies: number;
+  activeConnections: number;
+  proxies: Array<{
+    lastSnapshotGeneration: number | null;
+    lastSnapshotAt: number | null;
+    activeConnections: number;
+  }>;
+}
+
+interface HttpDomainPool {
+  id: string;
+  wildcardDomain: string;
+}
+
+interface HttpProxyBinding {
+  id: string;
+  hostname: string;
+  status: string;
+}
+
+async function waitForProxySnapshotAfter(
+  api: APIRequestContext,
+  path: '/api/admin/ssh-proxy/status' | '/api/admin/http-proxy/status',
+  observedAt: string,
+  timeoutMs = 60_000,
+): Promise<ProxyStatus> {
+  const minimumSnapshotAt = Date.parse(observedAt);
+  const deadline = Date.now() + timeoutMs;
+  let last: ProxyStatus | null = null;
+  while (Date.now() < deadline) {
+    last = await expectJson<ProxyStatus>(await api.get(path));
+    const proxy = last.proxies[0];
+    if (
+      last.connectedProxies === 1
+      && proxy?.lastSnapshotGeneration !== null
+      && proxy?.lastSnapshotAt !== null
+      && proxy.lastSnapshotAt >= minimumSnapshotAt
+    ) {
+      return last;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 250));
+  }
+  throw new Error(
+    `Proxy status ${path} did not install a snapshot after ${observedAt}; last=${JSON.stringify(last)}`,
+  );
 }
 
 interface RunningAdminContainer {
@@ -711,6 +769,45 @@ function delay(ms: number): Promise<void> {
   return new Promise((resolvePromise) => setTimeout(resolvePromise, ms));
 }
 
+async function settleRecoveryContainerAction(
+  api: APIRequestContext,
+  containerId: string,
+  action: 'start' | 'stop' | 'restart',
+  kind: string,
+): Promise<AgentTaskView> {
+  const ref = await requestContainerAction(api, containerId, action);
+  return waitForAgentTask(api, ref.taskId, {
+    kind,
+    resourceId: containerId,
+    timeoutMs: 180_000,
+  });
+}
+
+async function waitForVmagentQueue(
+  provider: AvailableTopologyProvider,
+  runId: string,
+  description: string,
+  accept: (pendingBytes: number) => boolean,
+  timeoutMs = 120_000,
+): Promise<number> {
+  const deadline = Date.now() + timeoutMs;
+  let last: number | null = null;
+  while (Date.now() < deadline) {
+    const probe = await controlProviderFault(provider, {
+      fault: 'telemetryService',
+      runId,
+      service: 'vmagent',
+      action: 'probe',
+    });
+    last = probe.queuePendingBytes;
+    if (last !== null && accept(last)) return last;
+    await delay(500);
+  }
+  throw new Error(
+    `vmagent queue did not reach ${description} within ${timeoutMs}ms; last=${last}`,
+  );
+}
+
 test.describe('80 recovery and security', () => {
   test.describe.configure({ mode: 'serial' });
 
@@ -769,6 +866,469 @@ test.describe('80 recovery and security', () => {
         );
       } finally {
         await cleanupContainerThroughProductApi(adminApi, container.id, adminApi);
+      }
+    },
+  );
+
+  test(
+    'recovery.redis.disposable-outage-recovers-authorization-dispatch',
+    coverageCase(
+      'recovery.security.redis-disposable-outage-recovery',
+      'recovery.redis.disposable-outage-recovers-authorization-dispatch',
+    ),
+    async ({
+      adminApi,
+      adminSession,
+      anonymousApi,
+      page,
+      trackedApiFactory,
+      seedState,
+      topologyProvider,
+    }) => {
+      test.setTimeout(600_000);
+      let redisStopped = false;
+      let container: RunningAdminContainer | null = null;
+      try {
+        const before = await controlProviderFault(topologyProvider, {
+          fault: 'redisService',
+          runId: seedState.runId,
+          action: 'probe',
+        });
+        expect(before).toEqual(expect.objectContaining({ running: true, healthy: true }));
+
+        const stopped = await controlProviderFault(topologyProvider, {
+          fault: 'redisService',
+          runId: seedState.runId,
+          action: 'stop',
+        });
+        redisStopped = true;
+        expect(stopped).toEqual(expect.objectContaining({ running: false, healthy: false }));
+        const outageReadiness = await anonymousApi.get('/api/health/ready');
+        expect(outageReadiness.status()).toBe(503);
+        const outageReadinessBody = await expectJson<{ code: string }>(
+          outageReadiness,
+          503,
+        );
+        expect(outageReadinessBody).toEqual(
+          expect.objectContaining({ code: 'REDIS_NOT_READY' }),
+        );
+
+        const outageSession = await expectJson<{ accessToken: string }>(
+          await anonymousApi.post('/api/auth/login', {
+            data: {
+              username: requireRuntimeEnv('E2E_ADMIN_USERNAME'),
+              password: requireRuntimeEnv('E2E_ADMIN_PASSWORD'),
+            },
+          }),
+        );
+        const outageApi = await trackedApiFactory({
+          extraHTTPHeaders: { authorization: `Bearer ${outageSession.accessToken}` },
+        });
+        container = await createRunningAdminContainer(
+          outageApi,
+          seedState,
+          'node1',
+          'redis-stopped-dispatch',
+        );
+        expect(container.task).toEqual(expect.objectContaining({
+          status: 'succeeded',
+          kind: 'container.create',
+        }));
+
+        const target = seedState.servers.find((server) => server.key === 'node1')!;
+        const beforeTasks = (await listServerTasks(adminApi, target.serverId))
+          .map((task) => task.id)
+          .sort();
+        const beforeView = await expectJson<ContainerView>(
+          await adminApi.get(`/api/admin/v2/containers/${container.id}`),
+        );
+        const beforePhysical = await controlProviderFault(topologyProvider, {
+          fault: 'agentService',
+          runId: seedState.runId,
+          nodeKey: 'node1',
+          action: 'probe',
+        });
+        const expectBoundedRouteFailure = async (
+          request: () => Promise<{ status(): number }>,
+          label: string,
+        ) => {
+          const startedAt = Date.now();
+          const response = await request();
+          expect(
+            [500, 502, 503, 504],
+            `${label} must fail closed while the API cannot reach the socket owner`,
+          ).toContain(response.status());
+          expect(Date.now() - startedAt, `${label} failure must be bounded`).toBeLessThan(45_000);
+        };
+        await expectBoundedRouteFailure(
+          () => adminApi.get(
+            `/api/admin/servers/${target.serverId}/self-check`,
+            { timeout: 45_000 },
+          ),
+          'Agent self-check',
+        );
+        await expectBoundedRouteFailure(
+          () => adminApi.post(
+            `/api/admin/v2/containers/${container!.id}/actions/restart`,
+            { timeout: 45_000 },
+          ),
+          'restart pre-inspection',
+        );
+        await expectBoundedRouteFailure(
+          () => adminApi.post(
+            `/api/admin/v2/containers/${container!.id}/exec-sessions`,
+            {
+              data: { shell: '/bin/sh', tty: false },
+              timeout: 45_000,
+            },
+          ),
+          'Console admission',
+        );
+        const [afterFailureTasks, afterFailureView, afterFailurePhysical, afterFailureServer] =
+          await Promise.all([
+            listServerTasks(adminApi, target.serverId),
+            expectJson<ContainerView>(
+              await adminApi.get(`/api/admin/v2/containers/${container.id}`),
+            ),
+            controlProviderFault(topologyProvider, {
+              fault: 'agentService',
+              runId: seedState.runId,
+              nodeKey: 'node1',
+              action: 'probe',
+            }),
+            expectJson<ServerView>(
+              await adminApi.get(`/api/admin/servers/${target.serverId}`),
+            ),
+        ]);
+        expect(afterFailureTasks.map((task) => task.id).sort()).toEqual(beforeTasks);
+        const {
+          observedAt: beforeRuntimeObservedAt,
+          ...beforeStableRuntime
+        } = beforeView.runtime!;
+        const {
+          observedAt: afterRuntimeObservedAt,
+          ...afterStableRuntime
+        } = afterFailureView.runtime!;
+        expect(afterStableRuntime).toEqual(beforeStableRuntime);
+        expect(Date.parse(afterRuntimeObservedAt!)).toBeGreaterThanOrEqual(
+          Date.parse(beforeRuntimeObservedAt!),
+        );
+        expect(afterFailureView).toEqual(expect.objectContaining({
+          powerIntent: beforeView.powerIntent,
+          activeTask: beforeView.activeTask,
+        }));
+        expect(afterFailurePhysical.runtimeContainerIds).toEqual(
+          beforePhysical.runtimeContainerIds,
+        );
+        expect(afterFailurePhysical.activeRuntimeContainerIds).toEqual(
+          beforePhysical.activeRuntimeContainerIds,
+        );
+        expect(afterFailureServer).toEqual(expect.objectContaining({
+          status: 'online',
+          runtimeReady: true,
+          quarantineCode: null,
+        }));
+
+        const restarted = await controlProviderFault(topologyProvider, {
+          fault: 'redisService',
+          runId: seedState.runId,
+          action: 'restart',
+        });
+        redisStopped = false;
+        expect(restarted).toEqual(expect.objectContaining({ running: true, healthy: true }));
+        expect(restarted.generation).not.toBe(before.generation);
+        await expect.poll(
+          async () => (await anonymousApi.get('/api/health/ready')).status(),
+          {
+            message: 'split API readiness must recover after Redis addressed RPC reconnects',
+            timeout: 120_000,
+            intervals: [250, 500, 1_000],
+          },
+        ).toBe(200);
+
+        let recoveredSelfCheck: {
+          items: Array<{ id: string; status: string }>;
+        } | null = null;
+        let lastRecoveryFailure = 'no recovery attempt completed';
+        const recoveryDeadline = Date.now() + 120_000;
+        while (Date.now() < recoveryDeadline) {
+          try {
+            const response = await adminApi.get(
+              `/api/admin/servers/${target.serverId}/self-check`,
+              { timeout: Math.min(15_000, recoveryDeadline - Date.now()) },
+            );
+            if (response.status() === 200) {
+              const candidate = await expectJson<{
+                items: Array<{ id: string; status: string }>;
+              }>(response);
+              if (candidate.items.find((item) => item.id === 'docker')?.status === 'ok') {
+                recoveredSelfCheck = candidate;
+                break;
+              }
+              lastRecoveryFailure = 'Docker self-check was not ok';
+            } else {
+              lastRecoveryFailure = `HTTP ${response.status()}`;
+            }
+          } catch (error) {
+            lastRecoveryFailure = error instanceof Error ? error.message : String(error);
+          }
+          await delay(500);
+        }
+        expect(
+          recoveredSelfCheck,
+          `Agent RPC did not recover after disposable Redis restart: ${lastRecoveryFailure}`,
+        ).not.toBeNull();
+        const routeRestart = await settleRecoveryContainerAction(
+          adminApi,
+          container.id,
+          'restart',
+          'container.restart',
+        );
+        expect(routeRestart.status).toBe('succeeded');
+        const execSession = await expectJson<ConsoleSession>(
+          await adminApi.post(
+            `/api/admin/v2/containers/${container.id}/exec-sessions`,
+            { data: { shell: '/bin/sh', tty: false } },
+          ),
+          201,
+        );
+        const routeMarker = `redis-route-${seedState.runId}`;
+        const routeConsole = await executeThroughConsole(
+          page,
+          requireRuntimeEnv('E2E_BASE_URL'),
+          execSession,
+          adminSession.accessToken,
+          `printf '${routeMarker}'; exit\n`,
+        );
+        expect(routeConsole).toEqual(expect.objectContaining({
+          exitCode: 0,
+          output: expect.stringContaining(routeMarker),
+        }));
+
+        const flushed = await controlProviderFault(topologyProvider, {
+          fault: 'redisService',
+          runId: seedState.runId,
+          action: 'flush',
+        });
+        expect(flushed.flushed).toBe(true);
+        const stopTask = await settleRecoveryContainerAction(
+          outageApi,
+          container.id,
+          'stop',
+          'container.stop',
+        );
+        expect(stopTask.status).toBe('succeeded');
+        await waitForContainer(
+          outageApi,
+          container.id,
+          'stopped after Redis flush',
+          (view) =>
+            view.runtime.status === 'exited'
+            && view.powerIntent === 'stopped'
+            && view.activeTask === null,
+        );
+
+        const restartedAgain = await controlProviderFault(topologyProvider, {
+          fault: 'redisService',
+          runId: seedState.runId,
+          action: 'restart',
+        });
+        expect(restartedAgain.generation).not.toBe(restarted.generation);
+        const recoveredSession = await expectJson<{ accessToken: string }>(
+          await anonymousApi.post('/api/auth/login', {
+            data: {
+              username: requireRuntimeEnv('E2E_ADMIN_USERNAME'),
+              password: requireRuntimeEnv('E2E_ADMIN_PASSWORD'),
+            },
+          }),
+        );
+        const recoveredApi = await trackedApiFactory({
+          extraHTTPHeaders: { authorization: `Bearer ${recoveredSession.accessToken}` },
+        });
+        const startTask = await settleRecoveryContainerAction(
+          recoveredApi,
+          container.id,
+          'start',
+          'container.start',
+        );
+        expect(startTask.status).toBe('succeeded');
+        await waitForContainer(
+          recoveredApi,
+          container.id,
+          'running after Redis restart',
+          (view) =>
+            view.runtime.status === 'running'
+            && view.powerIntent === 'running'
+            && view.activeTask === null,
+        );
+      } finally {
+        if (redisStopped) {
+          await controlProviderFault(topologyProvider, {
+            fault: 'redisService',
+            runId: seedState.runId,
+            action: 'restart',
+          });
+        }
+        if (container) {
+          await cleanupContainerThroughProductApi(adminApi, container.id, adminApi);
+        }
+      }
+    },
+  );
+
+  test(
+    'recovery.telemetry.victoriametrics-outage-buffers-and-replays',
+    coverageCase(
+      'recovery.security.victoriametrics-backlog-replay',
+      'recovery.telemetry.victoriametrics-outage-buffers-and-replays',
+    ),
+    async ({
+      adminApi,
+      seedState,
+      topologyProvider,
+    }) => {
+      test.setTimeout(360_000);
+      const baseline = await controlProviderFault(topologyProvider, {
+        fault: 'telemetryService',
+        runId: seedState.runId,
+        service: 'vmagent',
+        action: 'probe',
+      });
+      expect(baseline.queuePendingBytes).not.toBeNull();
+      let victoriaMetricsStopped = false;
+      let groupId: string | null = null;
+      try {
+        const stopped = await controlProviderFault(topologyProvider, {
+          fault: 'telemetryService',
+          runId: seedState.runId,
+          service: 'victoriametrics',
+          action: 'stop',
+        });
+        victoriaMetricsStopped = true;
+        expect(stopped.healthy).toBe(false);
+
+        const group = await expectJson<{ id: string }>(
+          await adminApi.post('/api/admin/groups', {
+            data: {
+              name: uniqueName(seedState.runId, 'vm-outage-mutation', 128),
+              description: 'control mutation while VictoriaMetrics is unavailable',
+              capabilities: [],
+            },
+          }),
+          201,
+        );
+        groupId = group.id;
+        expect(
+          await expectJson<{ taskIds: string[] }>(
+            await adminApi.delete(`/api/admin/groups/${groupId}`),
+          ),
+        ).toEqual({ taskIds: [] });
+        groupId = null;
+
+        const queued = await waitForVmagentQueue(
+          topologyProvider,
+          seedState.runId,
+          `more than baseline ${baseline.queuePendingBytes}`,
+          (pendingBytes) => pendingBytes > (baseline.queuePendingBytes ?? 0),
+        );
+        const started = await controlProviderFault(topologyProvider, {
+          fault: 'telemetryService',
+          runId: seedState.runId,
+          service: 'victoriametrics',
+          action: 'start',
+        });
+        victoriaMetricsStopped = false;
+        expect(started.healthy).toBe(true);
+        const replayed = await waitForVmagentQueue(
+          topologyProvider,
+          seedState.runId,
+          `less than outage backlog ${queued}`,
+          (pendingBytes) => pendingBytes < queued,
+        );
+        expect(replayed).toBeLessThan(queued);
+      } finally {
+        if (victoriaMetricsStopped) {
+          await controlProviderFault(topologyProvider, {
+            fault: 'telemetryService',
+            runId: seedState.runId,
+            service: 'victoriametrics',
+            action: 'start',
+          });
+        }
+        if (groupId) {
+          const response = await adminApi.delete(`/api/admin/groups/${groupId}`);
+          expect([200, 404]).toContain(response.status());
+        }
+      }
+    },
+  );
+
+  test(
+    'recovery.telemetry.vmagent-outage-does-not-block-control',
+    coverageCase(
+      'recovery.security.vmagent-bounded-degradation',
+      'recovery.telemetry.vmagent-outage-does-not-block-control',
+    ),
+    async ({ adminApi, seedState, topologyProvider }) => {
+      test.setTimeout(420_000);
+      let vmagentStopped = false;
+      let container: RunningAdminContainer | null = null;
+      try {
+        const stopped = await controlProviderFault(topologyProvider, {
+          fault: 'telemetryService',
+          runId: seedState.runId,
+          service: 'vmagent',
+          action: 'stop',
+        });
+        vmagentStopped = true;
+        expect(stopped).toEqual(expect.objectContaining({
+          healthy: false,
+          queuePendingBytes: null,
+        }));
+        // Cross at least one real 5-second Agent metrics cadence while the
+        // ingestion endpoint is absent, then prove the WS/control path remains
+        // responsive and physical dispatch still converges.
+        await delay(7_000);
+        container = await createRunningAdminContainer(
+          adminApi,
+          seedState,
+          'node2',
+          'vmagent-stopped-control',
+        );
+        for (const server of seedState.servers) {
+          await waitForServer(
+            adminApi,
+            server.serverId,
+            'online while vmagent is unavailable',
+            (candidate) => candidate.status === 'online' && candidate.runtimeReady,
+          );
+        }
+
+        const requestStartedAt = Date.now();
+        const metricsResponse = await adminApi.get(
+          `/api/admin/metrics/servers/${container.serverId}/host?range=1h`,
+          { timeout: 8_000 },
+        );
+        expect(Date.now() - requestStartedAt).toBeLessThan(8_000);
+        expect(metricsResponse.status()).toBe(200);
+        const metrics = await expectJson<{
+          cpu: { points: Array<{ t: number; v: number | null }> };
+        }>(metricsResponse);
+        expect(metrics.cpu.points).toEqual(expect.any(Array));
+      } finally {
+        if (vmagentStopped) {
+          const started = await controlProviderFault(topologyProvider, {
+            fault: 'telemetryService',
+            runId: seedState.runId,
+            service: 'vmagent',
+            action: 'start',
+          });
+          expect(started.healthy).toBe(true);
+          expect(started.queuePendingBytes).not.toBeNull();
+        }
+        if (container) {
+          await cleanupContainerThroughProductApi(adminApi, container.id, adminApi);
+        }
       }
     },
   );
@@ -960,7 +1520,13 @@ test.describe('80 recovery and security', () => {
       'recovery.security.pending-ssh-power-recovery-race',
       'recovery.runtime.pending-ssh-yields-to-power-recovery',
     ),
-    async ({ adminApi, seedState, topologyProvider }) => {
+    async ({
+      adminApi,
+      anonymousApi,
+      trackedApiFactory,
+      seedState,
+      topologyProvider,
+    }) => {
       test.setTimeout(600_000);
       const target = seedState.servers.find((server) => server.key === 'node2')!;
       const sshImage = new ContainerSshImageLease({
@@ -973,25 +1539,28 @@ test.describe('80 recovery and security', () => {
       });
       let container: RunningAdminContainer | null = null;
       let containerLease: ContainerLease | null = null;
+      let persona: ContainerPersona | null = null;
       let agentStopped = false;
       let blockerTask: AgentTaskView | null = null;
       let wireFault: Omit<AgentTaskWireFaultControlInput, 'action'> | null = null;
       let wireRestored = false;
-      let imageGrantTarget: { imageId: string; serverId: string } | null = null;
       let primaryFailure: { error: unknown } | null = null;
       try {
         const image = await sshImage.setup();
-        imageGrantTarget = { imageId: image.id, serverId: target.serverId };
-        await expectJson<unknown>(
-          await adminApi.post(`/api/admin/users/${seedState.adminUserId}/image-grants`, {
-            data: imageGrantTarget,
-          }),
-          201,
-        );
-        containerLease = new ContainerLease({
-          ownerApi: adminApi,
+        persona = await createContainerPersona({
           adminApi,
-          ownerId: seedState.adminUserId,
+          anonymousApi,
+          trackedApiFactory,
+          label: 'pending-ssh-power-race',
+          access: {
+            serverId: target.serverId,
+            imageId: image.id,
+          },
+        });
+        containerLease = new ContainerLease({
+          ownerApi: persona.api,
+          adminApi,
+          ownerId: persona.user.id,
           serverId: target.serverId,
           imageId: image.id,
           name: uniqueContainerLeaseName('pending-ssh-power-race'),
@@ -1176,11 +1745,12 @@ test.describe('80 recovery and security', () => {
             await containerLease?.cleanup();
           },
           async () => {
-            if (!imageGrantTarget) return;
-            const response = await adminApi.delete(
-              `/api/admin/users/${seedState.adminUserId}/image-grants/${imageGrantTarget.imageId}/${imageGrantTarget.serverId}`,
+            if (!persona) return;
+            await cleanupContainerPersona(
+              adminApi,
+              persona,
+              new ContainerDeadline(180_000, 'pending SSH power-race persona cleanup'),
             );
-            expect([204, 404]).toContain(response.status());
           },
           async () => sshImage.cleanup(),
         ], primaryFailure);
@@ -1423,6 +1993,574 @@ test.describe('80 recovery and security', () => {
   );
 
   test(
+    'recovery.agent.split-gateway-takeover-fences-stale-owner',
+    coverageCase(
+      'recovery.security.split-gateway-session-takeover',
+      'recovery.agent.split-gateway-takeover-fences-stale-owner',
+    ),
+    async ({
+      adminApi,
+      adminSession,
+      page,
+      seedState,
+      topologyProvider,
+    }) => {
+      test.setTimeout(900_000);
+      const target = seedState.servers.find((server) => server.key === 'node1')!;
+      const raceAdminApi = adminApi;
+      const raceAdminAccessToken = adminSession.accessToken;
+      let container: RunningAdminContainer | null = null;
+      let sshImageLease: ContainerSshImageLease | null = null;
+      let sshImageGrant: { imageId: string; serverId: string } | null = null;
+      let sshKeyId: string | null = null;
+      let httpPoolId: string | null = null;
+      let httpBindingId: string | null = null;
+      let raceInjected = false;
+      let staleConsoleSessionId: string | null = null;
+      let primaryGatewayProcessGeneration: string | null = null;
+      let primaryFailure: { error: unknown } | null = null;
+      try {
+        sshImageLease = new ContainerSshImageLease({
+          adminApi,
+          seedImageId: seedState.image.id,
+          seedDockerImage: seedState.image.dockerImage,
+          temporaryDockerImage: seedState.uiImage.dockerImage,
+          serverId: target.serverId,
+          label: 'split-gateway-race',
+        });
+        const sshImage = await sshImageLease.setup();
+        await expectJson<unknown>(
+          await adminApi.post(
+            `/api/admin/users/${adminSession.user.id}/image-grants`,
+            {
+              data: {
+                imageId: sshImage.id,
+                serverId: target.serverId,
+              },
+            },
+          ),
+          201,
+        );
+        sshImageGrant = {
+          imageId: sshImage.id,
+          serverId: target.serverId,
+        };
+        container = await createRunningAdminContainer(
+          raceAdminApi,
+          seedState,
+          'node1',
+          'split-gateway-race',
+          { imageId: sshImage.id, sshEnabled: true },
+        );
+        const proxyPublicKey = readFileSync(
+          join(requireRuntimeEnv('E2E_RUNTIME_ROOT'), 'proxies', 'external-key.pub'),
+          'utf8',
+        ).trim();
+        sshKeyId = (await expectJson<{ id: string }>(
+          await raceAdminApi.post(`/api/users/${adminSession.user.id}/ssh-keys`, {
+            data: {
+              name: `${seedState.runId} split Gateway route`,
+              keyText: proxyPublicKey,
+            },
+          }),
+          201,
+        )).id;
+
+        const httpMarker = `split-http-${seedState.runId}`;
+        const httpBody = `nyabase-real-proxy-target:/e2e/${httpMarker}`;
+        const serverSession = await expectJson<ConsoleSession>(
+          await raceAdminApi.post(
+            `/api/admin/v2/containers/${container.id}/exec-sessions`,
+            { data: { shell: '/bin/sh', tty: false } },
+          ),
+          201,
+        );
+        const primaryConsoleEndpoint = new URL(
+          serverSession.consoleUrl,
+          requireRuntimeEnv('E2E_BASE_URL'),
+        );
+        const expectedPrimaryConsoleEndpoint = new URL(
+          '/ws/console',
+          requireRuntimeEnv('E2E_BASE_URL'),
+        );
+        expectedPrimaryConsoleEndpoint.protocol = 'wss:';
+        expect(primaryConsoleEndpoint.origin).toBe(expectedPrimaryConsoleEndpoint.origin);
+        expect(primaryConsoleEndpoint.pathname).toBe('/ws/console');
+        expect(primaryConsoleEndpoint.searchParams.get('sessionId')).toBe(
+          serverSession.sessionId,
+        );
+        const serverStarted = await executeThroughConsole(
+          page,
+          requireRuntimeEnv('E2E_BASE_URL'),
+          serverSession,
+          raceAdminAccessToken,
+          `mkdir -p /tmp/split-http; printf '%s\\n' '#!/bin/sh' 'printf "HTTP/1.1 200 OK\\r\\nContent-Length: ${Buffer.byteLength(httpBody)}\\r\\nConnection: close\\r\\n\\r\\n${httpBody}"' > /tmp/split-http/respond; chmod 700 /tmp/split-http/respond; /usr/bin/nc -lk -p 8080 -e /tmp/split-http/respond > /tmp/split-http/server.log 2>&1 & exit\n`,
+        );
+        expect(serverStarted.exitCode).toBe(0);
+        const suffix = seedState.runId
+          .toLowerCase()
+          .replace(/[^a-z0-9-]+/g, '-')
+          .slice(-24);
+        const pool = await expectJson<HttpDomainPool>(
+          await raceAdminApi.post('/api/admin/http-proxy/domain-pools', {
+            data: {
+              wildcardDomain: `*.split-${suffix}.test`,
+              enabled: true,
+              httpsEnabled: false,
+            },
+          }),
+          201,
+        );
+        httpPoolId = pool.id;
+        const hostname = `route.split-${suffix}.test`;
+        const binding = await expectJson<HttpProxyBinding>(
+          await raceAdminApi.post('/api/v2/http-proxy/bindings', {
+            data: {
+              hostname,
+              containerId: container.id,
+              targetPort: 8080,
+            },
+          }),
+          201,
+        );
+        httpBindingId = binding.id;
+        const beforePhysical = await controlProviderFault(topologyProvider, {
+          fault: 'agentService',
+          runId: seedState.runId,
+          nodeKey: 'node1',
+          action: 'probe',
+        });
+        const [beforeSshProxy, beforeHttpProxy] = await Promise.all([
+          expectJson<ProxyStatus>(await raceAdminApi.get('/api/admin/ssh-proxy/status')),
+          expectJson<ProxyStatus>(await raceAdminApi.get('/api/admin/http-proxy/status')),
+        ]);
+        const staleSession = await expectJson<ConsoleSession>(
+          await raceAdminApi.post(
+            `/api/admin/v2/containers/${container.id}/exec-sessions`,
+            { data: { shell: '/bin/sh', tty: false } },
+          ),
+          201,
+        );
+        staleConsoleSessionId = staleSession.sessionId;
+        const staleConsoleEndpoint = new URL(
+          staleSession.consoleUrl,
+          requireRuntimeEnv('E2E_BASE_URL'),
+        );
+        expect(staleConsoleEndpoint.origin).toBe(expectedPrimaryConsoleEndpoint.origin);
+        const staleOutputMarker = `split-stale-open-${seedState.runId}`;
+        const staleProcessMarker = `split-stale-process-${seedState.runId}`;
+        const staleFollowupMarker = `split-stale-forbidden-${seedState.runId}`;
+        const staleOpen = await openPersistentConsoleUntilOutput(
+          page,
+          requireRuntimeEnv('E2E_BASE_URL'),
+          staleSession,
+          raceAdminAccessToken,
+          `printf '${staleOutputMarker}'; exec /bin/sh -c 'while :; do sleep 60; done' '${staleProcessMarker}'\n`,
+          staleOutputMarker,
+        );
+        expect(staleOpen).toEqual(expect.objectContaining({
+          websocketUrl: staleConsoleEndpoint.toString(),
+          output: expect.stringContaining(staleOutputMarker),
+        }));
+        const injected = await controlProviderFault(topologyProvider, {
+          fault: 'splitGatewaySessionRace',
+          runId: seedState.runId,
+          nodeKey: 'node1',
+          action: 'inject',
+          staleExecSessionId: staleSession.sessionId,
+        });
+        raceInjected = true;
+        primaryGatewayProcessGeneration = injected.primaryGatewayProcessGeneration;
+        expect(injected.ownerGatewayId).not.toBe(injected.baselineGatewayId);
+        expect(injected).toEqual(expect.objectContaining({
+          serverId: target.serverId,
+          serverOnline: true,
+          runtimeReady: true,
+          primaryGatewayActive: true,
+          primaryGatewayPaused: false,
+          delayedPrimaryCleanupReleased: true,
+          secondaryGatewayActive: true,
+          secondaryEdgeActive: true,
+          secondaryEdgeHostPortActive: true,
+          secondaryEdgeHostPortOwned: true,
+          routeActive: true,
+          cleanupComplete: false,
+        }));
+        expect(injected.closedExecSessions).toEqual(
+          expect.arrayContaining([
+            expect.objectContaining({
+              sessionId: staleSession.sessionId,
+              state: 'closed',
+              gatewayId: injected.baselineGatewayId,
+            }),
+          ]),
+        );
+        const staleClosed = await requirePersistentConsoleClosed(
+          page,
+          staleSession.sessionId,
+          `printf '${staleFollowupMarker}'\n`,
+          staleFollowupMarker,
+        );
+        staleConsoleSessionId = null;
+        expect(staleClosed).toEqual(expect.objectContaining({
+          websocketUrl: staleConsoleEndpoint.toString(),
+          output: expect.stringContaining(staleOutputMarker),
+          followupAccepted: false,
+        }));
+        expect(staleClosed.output).not.toContain(staleFollowupMarker);
+        expect(staleClosed.closedAt).toBeGreaterThanOrEqual(staleClosed.openedAt);
+
+        const selfCheck = await expectJson<{
+          items: Array<{ id: string; status: string }>;
+        }>(
+          await raceAdminApi.get(`/api/admin/servers/${target.serverId}/self-check`),
+        );
+        expect(selfCheck.items.find((item) => item.id === 'docker')?.status).toBe('ok');
+
+        const restarted = await settleRecoveryContainerAction(
+          raceAdminApi,
+          container.id,
+          'restart',
+          'container.restart',
+        );
+        expect(restarted).toEqual(expect.objectContaining({
+          status: 'succeeded',
+          serverId: target.serverId,
+          resourceId: container.id,
+        }));
+        const running = await waitForContainer(
+          raceAdminApi,
+          container.id,
+          'running through secondary socket owner',
+          (candidate) =>
+            candidate.runtime.status === 'running'
+            && candidate.runtime.runtimeId === container!.view.runtime.runtimeId
+            && candidate.activeTask === null,
+        );
+        expect(running.failureCode ?? null).toBeNull();
+
+        const execSession = await expectJson<ConsoleSession>(
+          await raceAdminApi.post(
+            `/api/admin/v2/containers/${container.id}/exec-sessions`,
+            { data: { shell: '/bin/sh', tty: false } },
+          ),
+          201,
+        );
+        expect(execSession.consoleUrl).toBe(
+          `${injected.secondaryConsoleUrl}?sessionId=${encodeURIComponent(execSession.sessionId)}`,
+        );
+        const ownerConsoleEndpoint = new URL(
+          execSession.consoleUrl,
+          requireRuntimeEnv('E2E_BASE_URL'),
+        );
+        expect(ownerConsoleEndpoint.protocol).toBe('wss:');
+        expect(ownerConsoleEndpoint.hostname).toBe('localhost');
+        expect(ownerConsoleEndpoint.port).toBe(String(injected.secondaryEdgeHostPort));
+        expect(ownerConsoleEndpoint.host).not.toBe(expectedPrimaryConsoleEndpoint.host);
+        expect(ownerConsoleEndpoint.pathname).toBe('/ws/console');
+        expect(ownerConsoleEndpoint.searchParams.get('sessionId')).toBe(
+          execSession.sessionId,
+        );
+        const marker = `split-owner-${seedState.runId}`;
+        const consoleResult = await executeThroughConsole(
+          page,
+          requireRuntimeEnv('E2E_BASE_URL'),
+          execSession,
+          raceAdminAccessToken,
+          `printf '${marker}'; exit\n`,
+        );
+        expect(consoleResult).toEqual(expect.objectContaining({
+          exitCode: 0,
+          output: expect.stringContaining(marker),
+          websocketUrl: ownerConsoleEndpoint.toString(),
+          closeCode: 1000,
+          closeReason: 'Session ended',
+          closeWasClean: true,
+        }));
+        expect(consoleResult.output).not.toContain(staleFollowupMarker);
+
+        const browserCloseSession = await expectJson<ConsoleSession>(
+          await raceAdminApi.post(
+            `/api/admin/v2/containers/${container.id}/exec-sessions`,
+            { data: { shell: '/bin/sh', tty: false } },
+          ),
+          201,
+        );
+        const browserCloseEndpoint = new URL(
+          browserCloseSession.consoleUrl,
+          requireRuntimeEnv('E2E_BASE_URL'),
+        );
+        expect(browserCloseEndpoint.host).toBe(ownerConsoleEndpoint.host);
+        expect(browserCloseEndpoint.host).not.toBe(expectedPrimaryConsoleEndpoint.host);
+        const browserCloseOutputMarker = `split-browser-close-${seedState.runId}`;
+        const browserCloseProcessMarker = `split-close-process-${seedState.runId}`;
+        const browserClosed = await closeConsoleAfterOutput(
+          page,
+          requireRuntimeEnv('E2E_BASE_URL'),
+          browserCloseSession,
+          raceAdminAccessToken,
+          `printf '${browserCloseOutputMarker}'; exec /bin/sh -c 'while :; do sleep 60; done' '${browserCloseProcessMarker}'\n`,
+          browserCloseOutputMarker,
+        );
+        expect(browserClosed).toEqual(expect.objectContaining({
+          websocketUrl: browserCloseEndpoint.toString(),
+          output: expect.stringContaining(browserCloseOutputMarker),
+          closeCode: 1000,
+          closeWasClean: true,
+        }));
+
+        // Interactive exec close deliberately uses an exact-container stop as
+        // its race-free physical absence barrier when Docker cannot prove the
+        // exec itself exited. Wait for a newer desired-state observation
+        // before opening the verification shell; then require another
+        // strictly newer ready observation so a deferred stop cannot land
+        // between the readiness proof and the next exec request.
+        const runningObservedAt = running.runtime.observedAt;
+        const firstPostBarrierObservation = await waitForContainer(
+          raceAdminApi,
+          container.id,
+          'first running observation with SSH restored after browser-close physical exec barrier',
+          (candidate) =>
+            candidate.runtime.status === 'running'
+            && candidate.activeTask === null
+            && candidate.ssh.status === 'running'
+            && candidate.ssh.ready === true
+            && candidate.runtime.observedAt !== null
+            && (
+              runningObservedAt === null
+              || Date.parse(candidate.runtime.observedAt) > Date.parse(runningObservedAt)
+            ),
+          180_000,
+        );
+        const settledPostBarrierObservation = await waitForContainer(
+          raceAdminApi,
+          container.id,
+          'second running observation with SSH restored after browser-close physical exec barrier',
+          (candidate) =>
+            candidate.runtime.status === 'running'
+            && candidate.activeTask === null
+            && candidate.ssh.status === 'running'
+            && candidate.ssh.ready === true
+            && candidate.runtime.observedAt !== null
+            && firstPostBarrierObservation.runtime.observedAt !== null
+            && Date.parse(candidate.runtime.observedAt)
+              > Date.parse(firstPostBarrierObservation.runtime.observedAt),
+          180_000,
+        );
+
+        const closeCheckSession = await expectJson<ConsoleSession>(
+          await raceAdminApi.post(
+            `/api/admin/v2/containers/${container.id}/exec-sessions`,
+            { data: { shell: '/bin/sh', tty: false } },
+          ),
+          201,
+        );
+        const closeCheckEndpoint = new URL(
+          closeCheckSession.consoleUrl,
+          requireRuntimeEnv('E2E_BASE_URL'),
+        );
+        expect(closeCheckEndpoint.host).toBe(ownerConsoleEndpoint.host);
+        const closeTerminatedMarker = `split-close-terminated-${seedState.runId}`;
+        // The HTTP fixture is an intentionally ephemeral process, not the
+        // container entrypoint. Both the explicit restart and the physical
+        // exec-absence barrier stop it, so restore the workload through the
+        // secondary owner before proving the durable proxy binding still
+        // routes to the recovered container.
+        const closeCheck = await executeThroughConsole(
+          page,
+          requireRuntimeEnv('E2E_BASE_URL'),
+          closeCheckSession,
+          raceAdminAccessToken,
+          `for i in $(seq 1 50); do if ! ps -eo args | grep -F '${browserCloseProcessMarker}' | grep -v 'grep -F' >/dev/null; then /usr/bin/nc -lk -p 8080 -e /tmp/split-http/respond > /tmp/split-http/server.log 2>&1 & for j in $(seq 1 50); do if grep -q ':1F90 .* 0A ' /proc/net/tcp /proc/net/tcp6 2>/dev/null; then printf '${closeTerminatedMarker}'; exit 0; fi; sleep 0.1; done; exit 24; fi; sleep 0.2; done; exit 23\n`,
+        );
+        expect(closeCheck).toEqual(expect.objectContaining({
+          websocketUrl: closeCheckEndpoint.toString(),
+          exitCode: 0,
+          output: expect.stringContaining(closeTerminatedMarker),
+          closeCode: 1000,
+          closeWasClean: true,
+        }));
+        await Promise.all([
+          waitForProxySnapshotAfter(
+            raceAdminApi,
+            '/api/admin/ssh-proxy/status',
+            settledPostBarrierObservation.runtime.observedAt!,
+          ),
+          waitForProxySnapshotAfter(
+            raceAdminApi,
+            '/api/admin/http-proxy/status',
+            settledPostBarrierObservation.runtime.observedAt!,
+          ),
+        ]);
+        const sshRoute = await controlProxyClient(topologyProvider, {
+          runId: seedState.runId,
+          action: 'sshExec',
+          nodeKey: 'node1',
+          containerName: container.view.name,
+          marker: `split-ssh-${seedState.runId}`,
+        });
+        expect(sshRoute.markerMatched).toBe(true);
+        const httpRoute = await controlProxyClient(topologyProvider, {
+          runId: seedState.runId,
+          action: 'httpGet',
+          hostname,
+          marker: httpMarker,
+        });
+        expect(httpRoute).toEqual(expect.objectContaining({
+          httpStatus: 200,
+          markerMatched: true,
+        }));
+        const [afterSshProxy, afterHttpProxy] = await Promise.all([
+          expectJson<ProxyStatus>(await raceAdminApi.get('/api/admin/ssh-proxy/status')),
+          expectJson<ProxyStatus>(await raceAdminApi.get('/api/admin/http-proxy/status')),
+        ]);
+        for (const [before, after] of [
+          [beforeSshProxy, afterSshProxy],
+          [beforeHttpProxy, afterHttpProxy],
+        ] as const) {
+          expect(after.connectedProxies).toBe(1);
+          expect(after.proxies[0]?.lastSnapshotGeneration).not.toBeNull();
+          expect(after.proxies[0]?.lastSnapshotGeneration ?? -1).toBeGreaterThanOrEqual(
+            before.proxies[0]?.lastSnapshotGeneration ?? -1,
+          );
+        }
+
+        const stable = await controlProviderFault(topologyProvider, {
+          fault: 'splitGatewaySessionRace',
+          runId: seedState.runId,
+          nodeKey: 'node1',
+          action: 'probe',
+          expectedClosedExecSessionIds: [
+            staleSession.sessionId,
+            browserCloseSession.sessionId,
+          ],
+        });
+        expect(stable).toEqual(expect.objectContaining({
+          ownerGatewayId: injected.ownerGatewayId,
+          ownerSessionId: injected.ownerSessionId,
+          ownerGeneration: injected.ownerGeneration,
+          primaryGatewayProcessGeneration: injected.primaryGatewayProcessGeneration,
+          serverOnline: true,
+          runtimeReady: true,
+          primaryGatewayActive: true,
+          secondaryGatewayActive: true,
+          secondaryEdgeHostPortActive: true,
+          secondaryEdgeHostPortOwned: true,
+          routeActive: true,
+        }));
+        expect(stable.closedExecSessions).toEqual(
+          expect.arrayContaining([
+            expect.objectContaining({
+              sessionId: staleSession.sessionId,
+              state: 'closed',
+              gatewayId: injected.baselineGatewayId,
+            }),
+            expect.objectContaining({
+              sessionId: browserCloseSession.sessionId,
+              state: 'closed',
+              gatewayId: injected.ownerGatewayId,
+            }),
+          ]),
+        );
+        const afterPhysical = await controlProviderFault(topologyProvider, {
+          fault: 'agentService',
+          runId: seedState.runId,
+          nodeKey: 'node1',
+          action: 'probe',
+        });
+        expect(afterPhysical.runtimeContainerIds).toEqual(beforePhysical.runtimeContainerIds);
+        expect(afterPhysical.activeRuntimeContainerIds).toEqual(
+          beforePhysical.activeRuntimeContainerIds,
+        );
+      } catch (error) {
+        primaryFailure = { error };
+      } finally {
+        await runCleanupStepsPreservingPrimary(
+          'split Gateway session race cleanup failed',
+          [
+            async () => {
+              if (!raceInjected) return;
+              const restored = await controlProviderFault(topologyProvider, {
+                fault: 'splitGatewaySessionRace',
+                runId: seedState.runId,
+                nodeKey: 'node1',
+                action: 'restore',
+              });
+              raceInjected = false;
+              expect(restored).toEqual(expect.objectContaining({
+                serverId: target.serverId,
+                serverOnline: true,
+                runtimeReady: true,
+                primaryGatewayActive: true,
+                primaryGatewayPaused: false,
+                delayedPrimaryCleanupReleased: true,
+                primaryGatewayProcessGeneration:
+                  primaryGatewayProcessGeneration,
+                secondaryGatewayActive: false,
+                secondaryEdgeActive: false,
+                secondaryEdgeHostPortActive: false,
+                secondaryEdgeHostPortOwned: false,
+                routeActive: false,
+                cleanupComplete: true,
+              }));
+            },
+            async () => {
+              if (!staleConsoleSessionId) return;
+              await closePersistentConsoleForCleanup(page, staleConsoleSessionId);
+              staleConsoleSessionId = null;
+            },
+            async () => {
+              if (!container) return;
+              if (httpBindingId) {
+                const response = await raceAdminApi.delete(
+                  `/api/v2/http-proxy/bindings/${httpBindingId}`,
+                );
+                expect([200, 204, 404]).toContain(response.status());
+                httpBindingId = null;
+              }
+              if (httpPoolId) {
+                const response = await raceAdminApi.delete(
+                  `/api/admin/http-proxy/domain-pools/${httpPoolId}`,
+                );
+                expect([200, 204, 404]).toContain(response.status());
+                httpPoolId = null;
+              }
+              if (sshKeyId) {
+                const response = await raceAdminApi.delete(
+                  `/api/users/${adminSession.user.id}/ssh-keys/${sshKeyId}`,
+                );
+                expect([200, 204, 404]).toContain(response.status());
+                sshKeyId = null;
+              }
+              await cleanupContainerThroughProductApi(
+                raceAdminApi,
+                container.id,
+                raceAdminApi,
+              );
+              container = null;
+            },
+            async () => {
+              if (!sshImageGrant) return;
+              const response = await raceAdminApi.delete(
+                `/api/admin/users/${adminSession.user.id}/image-grants/`
+                + `${sshImageGrant.imageId}/${sshImageGrant.serverId}`,
+              );
+              expect([204, 404]).toContain(response.status());
+              sshImageGrant = null;
+            },
+            async () => {
+              if (!sshImageLease) return;
+              await sshImageLease.cleanup();
+              sshImageLease = null;
+            },
+          ],
+          primaryFailure,
+        );
+      }
+    },
+  );
+
+  test(
     'recovery.authorization.held-request-rechecks-after-revocation',
     coverageCase(
       'recovery.security.authorization-race',
@@ -1628,7 +2766,7 @@ test.describe('80 recovery and security', () => {
       expect(proof.schemaVersion).toBe(1);
       expect(proof.runId).toBe(currentRunId());
       expect(proof.fault.kind).toBe('backendService');
-      expect(proof.fault.target).toBe(`nyabase-e2e-${proof.runId}-backend-1`);
+      expect(proof.fault.target).toBe(`nyabase-e2e-${proof.runId}-split-control-plane`);
       expect(Number.isNaN(Date.parse(proof.fault.appliedAt))).toBe(false);
       expect(proof.before.healthy).toBe(true);
       expect(proof.after.healthy).toBe(true);

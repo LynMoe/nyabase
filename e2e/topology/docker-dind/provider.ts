@@ -43,7 +43,7 @@ export const dockerDindProvider = defineTopologyProvider({
     'fresh-control-plane': {
       state: 'available',
       detail:
-        'Per-run Backend SQLite volume, TLS edge, registry, metrics service, and labelled resources.',
+        'Per-run PostgreSQL volume, disposable Redis, vmagent queue, VictoriaMetrics, split Backend roles, TLS edges, registry, and labelled resources.',
     },
     'tls-edge': {
       state: 'available',
@@ -51,7 +51,8 @@ export const dockerDindProvider = defineTopologyProvider({
     },
     'victoria-metrics': {
       state: 'available',
-      detail: 'A dedicated per-run VictoriaMetrics service is part of the Compose control plane.',
+      detail:
+        'Dedicated per-run vmagent and VictoriaMetrics services provide queued ingestion and durable metric storage.',
     },
     'local-tls-registry': {
       state: 'available',
@@ -118,7 +119,7 @@ export const dockerDindProvider = defineTopologyProvider({
     'fault-injection': {
       state: 'available',
       detail:
-        'Closed run-scoped controls exercise Backend and dockerd restart, process-clock retention, Agent reconnect/session fencing, exact task-wire replay/result faults, runtime drift, inventory fail-stop, and artifact auditing.',
+        'Closed run-scoped controls exercise independent API/Gateway/Worker restart, disposable Redis flush/restart, VM/vmagent outage, dockerd restart, process-clock retention, Agent reconnect/session fencing, exact task-wire replay/result faults, runtime drift, inventory fail-stop, and artifact auditing.',
     },
     'physical-nic': {
       state: 'unavailable',

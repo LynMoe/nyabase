@@ -1,12 +1,14 @@
 import { Module, forwardRef } from '@nestjs/common';
-import { TypeOrmModule } from '@nestjs/typeorm';
-import { QuotaDesiredEntity } from '../entities/quota-desired.entity.js';
 import { AgentTasksModule } from '../agent-tasks/agent-tasks.module.js';
 import { QuotaDispatchService } from './quota-dispatch.service.js';
+import { StorageModule } from '../storage/storage.module.js';
+import {
+  QuotaWorkflowFinalizerService,
+} from './quota-workflow-finalizer.service.js';
 
 @Module({
-  imports: [TypeOrmModule.forFeature([QuotaDesiredEntity]), forwardRef(() => AgentTasksModule)],
-  providers: [QuotaDispatchService],
+  imports: [StorageModule, forwardRef(() => AgentTasksModule)],
+  providers: [QuotaDispatchService, QuotaWorkflowFinalizerService],
   exports: [QuotaDispatchService],
 })
 export class QuotaModule {}

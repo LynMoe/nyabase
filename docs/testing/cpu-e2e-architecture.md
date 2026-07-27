@@ -8,7 +8,7 @@ Replace the legacy fixed-host/shared-state test system with a self-contained,
 CPU-only E2E framework that exercises the current product through real
 processes and kernel facilities:
 
-`browser/API -> TLS edge -> Backend -> SQLite/metrics -> Agent -> managed dockerd -> container`
+`browser/API -> TLS edge -> Backend roles -> PostgreSQL/Redis/vmagent/VictoriaMetrics -> Agent -> managed dockerd -> container`
 
 The framework must cover every published CPU product surface through an
 explicit inventory. Unit tests, typechecks, builds, lint, and conformance checks
@@ -56,9 +56,11 @@ Passing a lower layer never substitutes for a missing higher-layer scenario.
 ```mermaid
 flowchart LR
   R["Playwright runner"] -->|"HTTPS / WSS"| E["TLS edge"]
-  E --> B["Production Backend + bundled Frontend"]
-  B --> D["Fresh SQLite volume"]
-  B --> M["VictoriaMetrics"]
+  E --> B["Production Backend API / Gateway / Worker roles"]
+  B --> D["Fresh PostgreSQL volume"]
+  B --> RDS["Disposable Redis"]
+  B --> VA["vmagent durable queue"]
+  VA --> M["VictoriaMetrics"]
   E -->|"WSS /ws/agent"| A1["CPU node 1: systemd + Agent"]
   E -->|"WSS /ws/agent"| A2["CPU node 2: systemd + Agent"]
   A1 --> K1["Agent-owned dockerd + XFS/pquota"]
@@ -79,11 +81,19 @@ flowchart LR
 
 - Backend: the production Docker image built from the current worktree. It
   serves the compiled frontend from the same image.
-- Database: a new SQLite volume, `synchronize=false`, `migrationsRun=true`.
-- Cache: there is no Redis/cache service in the product. Recovery tests target
-  the real in-process Agent `StateCache` and prove reconstruction from a fresh
-  full Agent report after Backend restart.
-- Metrics: a dedicated VictoriaMetrics container.
+- Database: one new authoritative PostgreSQL volume with the exact checked-in
+  SQL migration ledger; API/Gateway/Worker roles never run competing migrations.
+- Cache/transport: Redis carries only bounded cache entries, invalidation and
+  wake hints, shared rate-limit windows, and owner-addressed split-role RPC.
+  Durable Gateway ownership and every business fact remain in PostgreSQL; no
+  Redis presence record participates in routing. Recovery stops, flushes, and
+  restarts Redis, proves split-role interactive RPC/readiness fail closed, then
+  proves authorization and physical dispatch reconstruct from PostgreSQL and
+  fresh Agent/proxy reports.
+- Metrics: Backend writes through vmagent's bounded durable disk queue to a
+  dedicated VictoriaMetrics container. Recovery measures queue growth/replay
+  across a VictoriaMetrics outage and proves a vmagent outage cannot block
+  Agent WebSockets or PostgreSQL control dispatch.
 - Edge: TLS termination and reverse proxy for `/`, `/api`, and `/ws/*`. Agents
   use `wss://`; the runtime CA is installed into both node trust stores.
 - Registry: a local TLS registry containing a per-run, single-push CPU workload
@@ -302,8 +312,11 @@ a shortcut for the behavior under test.
    source digest that includes `tools/**`.
 3. `certs`: generate a per-run CA, edge/registry certificates, and random
    product secrets without printing them.
-4. `control-plane up`: start metrics, Backend, edge, registry; wait for public
-   settings, successful admin login, and fresh migration proof.
+4. `control-plane up`: start PostgreSQL, disposable Redis, telemetry, Backend,
+   edge, and registry. Backend has only a healthy-PostgreSQL startup
+   prerequisite; wait for public settings, successful admin login, and fresh
+   migration proof without treating Redis/telemetry health as Backend
+   readiness.
 5. `register`: create two Server rows through the public admin API and write the
    returned tokens only to 0600 Agent config files.
 6. `nodes up`: create XFS/pquota roots, install the runtime CA, start both
@@ -419,9 +432,10 @@ of physical port security, VLAN policy, MTU, firmware, or bare-metal boot.
 - Building the standalone Agent currently requires Cargo and its packaging
   toolchain. The build must move into a pinned builder image instead of relying
   on host Cargo.
-- The current initial SQLite migration was rewritten. Fresh-database coverage
-  is possible, but upgrade coverage needs immutable prior-version fixtures and
-  a real forward migration chain.
+- Resolved during the PostgreSQL cutover: every run binds source migration
+  bytes, checksums, the exact applied ledger, and the required
+  schema/table/constraint/index inventory. Missing, extra, reordered, drifted,
+  or unsupported migration DDL fails closed before runtime evidence is accepted.
 - There is no dedicated Backend health/build-identity endpoint. Until one is
   added, readiness must combine public-settings/login probes with container
   image ID and build provenance.
@@ -466,9 +480,9 @@ The replacement is complete only when:
 ## 16. Implemented status (2026-07-17)
 
 The replacement framework is implemented as the only product E2E system. Its
-current executable inventory contains 230 implemented cases with no pending
-case: 210 behavioral cases, eight run-bound fixture cases, and 12 evidence
-cases. The static validator maps exactly 151 Backend HTTP surfaces across 28
+current executable inventory contains 236 implemented cases with no pending
+case: 216 behavioral cases, eight run-bound fixture cases, and 12 evidence
+cases. The static validator maps exactly 153 Backend HTTP surfaces across 29
 controllers, 20 frontend routes, 14 Agent task kinds, and four WebSocket paths.
 This is `STATIC CONTRACT ONLY`; it does not certify runtime behavior.
 
@@ -512,7 +526,7 @@ responsibility of a future provider that reuses the same product specs.
 | Dimension | Verdict | Evidence |
 | --- | --- | --- |
 | Layering and maintenance | PASS | ordered product groups, case-level ownership, four profiles, typed topology/provider operations, and one fail-closed validator |
-| Released CPU behavior | CONDITIONAL runtime proof | static inventory is 230/230 cases with exact 151 HTTP, 20 route, 14 task-kind, and four WebSocket mappings; acceptance additionally requires a matching current-source aggregate proof |
+| Released CPU behavior | CONDITIONAL runtime proof | static inventory is 236/236 cases with exact 153 HTTP, 20 route, 14 task-kind, and four WebSocket mappings; acceptance additionally requires a matching current-source aggregate proof |
 | Runtime realism | CONDITIONAL current-source run | the provider implements production Backend/Agents/dockerd and real kernel facilities; only a matching retained release proof certifies a particular worktree |
 | Recovery behavior | CONDITIONAL current-source run | the destructive Recovery contracts are implemented, including process, dockerd, session, task-wire, drift, quarantine, authorization, and retention controls; a matching proof decides acceptance |
 | Evidence and security | CONDITIONAL aggregate proof | release requires same-source receipts, per-run TLS, no test retry, credential scans, exact physical deletion probes, and post-down evidence |
@@ -521,9 +535,8 @@ responsibility of a future provider that reuses the same product specs.
 
 The static framework implementation is complete, but the CPU-only local release
 gate remains pending until its aggregate proof is generated for the final
-source. Three known risks remain outside the intended claim: a historical
-SQLite upgrade needs an immutable old-version database and forward-only
-migration chain; a completely offline hard NFS mount needs an explicit
+source. Two known risks remain outside the intended claim: a completely offline
+hard NFS mount needs an explicit
 operator-recovery experiment because the kernel may hold `mount(8)`
 uninterruptibly; and a dedicated Backend build-identity/health endpoint would
 simplify current provenance-based readiness. Full is a release lane rather

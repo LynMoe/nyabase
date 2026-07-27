@@ -7,12 +7,12 @@ import {
   OnModuleDestroy,
   forwardRef,
 } from '@nestjs/common';
-import { InjectRepository } from '@nestjs/typeorm';
-import { DataSource, In, IsNull, Repository } from 'typeorm';
+import type { Kysely } from 'kysely';
+import { sql } from 'kysely';
 import * as http from 'http';
 import * as path from 'node:path';
 import { WebSocketServer, WebSocket } from 'ws';
-import { createHash, randomBytes } from 'crypto';
+import { createHash, randomBytes, randomUUID } from 'crypto';
 import {
   AgentToBackendMessage,
   BackendToAgentMessage,
@@ -59,16 +59,13 @@ import {
   AGENT_INITIAL_STATE_REPORT_TIMEOUT_MS,
   AGENT_STEADY_STATE_REPORT_TIMEOUT_MS,
 } from '@nyabase/common';
-import {
-  AGENT_INVENTORY_FAULT_QUARANTINE_CODE,
-  ServerEntity,
-} from '../entities/server.entity.js';
+import type { ServerRecord } from '../domain/domain-records.js';
 import { AgentRpcTransportError, AgentSession } from './agent-session.js';
 import { StateCache, ServerSnapshot } from './state-cache.js';
 import { MetricsWriter } from '../metrics/metrics-writer.js';
 import { ExecSessionRegistry } from './exec-session-registry.js';
 import { LogChunkTracker } from './log-chunk-tracker.js';
-import { UsersService } from '../users/users.service.js';
+import { ConsoleChunkOrderer } from './console-chunk-orderer.js';
 import { AgentTaskDispatcherService } from '../agent-tasks/agent-task-dispatcher.service.js';
 import { AgentTaskResultService } from '../agent-tasks/agent-task-result.service.js';
 import {
@@ -76,35 +73,43 @@ import {
   DataDirReconcilerService,
 } from '../datadirs/data-dir-reconciler.service.js';
 import { ContainerSshRouteService } from '../ssh/container-ssh-route.service.js';
-import { ContainerEntity } from '../entities/container.entity.js';
-import { ContainerLifecycleEntity } from '../entities/container-lifecycle.entity.js';
 import { SshProxyGateway } from '../ssh/ssh-proxy-gateway.js';
 import { HttpProxyGateway } from '../http-proxy/http-proxy-gateway.js';
-import { RemoteFsMountEntity } from '../entities/remote-fs-mount.entity.js';
-import { RemoteFsServerAssignmentEntity } from '../entities/remote-fs-server-assignment.entity.js';
 import { AgentTaskPayloadCodecService } from '../agent-tasks/agent-task-payload-codec.service.js';
-import { AgentTaskEntity } from '../entities/agent-task.entity.js';
-import { ContainerMountEntity } from '../entities/container-mount.entity.js';
-import { AgentTasksService } from '../agent-tasks/agent-tasks.service.js';
 import { ResourceKeyService } from '../agent-tasks/resource-key.service.js';
-import { runSerializedTransaction } from '../database/serialized-transaction.js';
 import { ContainerSshConvergenceService } from '../ssh/container-ssh-convergence.service.js';
 import { RuntimeDriftReconcilerService } from '../runtime/runtime-drift-reconciler.service.js';
 import { FailStopService } from '../common/fail-stop.service.js';
 import { ProxySnapshotNotifierService } from '../proxy-snapshots/proxy-snapshot-notifier.service.js';
 import { performance } from 'node:perf_hooks';
 import { ZodError } from 'zod';
-import { NetworkAddressClaimEntity } from '../entities/network-address-claim.entity.js';
-import {
-  assertNetworkClaimCapacity,
-  gcExpiredNetworkClaims,
-} from '../common/network-claim-ledger.js';
+import { RuntimeRoleService } from '../runtime/runtime-role.service.js';
+import { RedisDisposableAdapter } from '../runtime/redis-disposable.adapter.js';
+import { InfrastructureRepository } from '../infrastructure/infrastructure.repository.js';
+import { WorkflowRepository } from '../agent-tasks/workflow.repository.js';
+import { WorkflowEnqueuePort } from '../agent-tasks/workflow-enqueue.port.js';
+import { ContainerControlRepository } from '../containers/container-control.repository.js';
+import { StorageRepository } from '../storage/storage.repository.js';
+import type { NyabaseDatabase } from '../persistence-pg/database.types.js';
+import { PG_DATABASE } from '../persistence-pg/tokens.js';
+import { PgTransactionManager } from '../persistence-pg/transaction.js';
+import { NyabaseConfigService } from '../config/nyabase-config.service.js';
+
+const AGENT_INVENTORY_FAULT_QUARANTINE_CODE = 'AGENT_INVENTORY_FAULT';
+const AGENT_NETWORK_ADVISORY_NAMESPACE = 1_856_214_885;
+const AGENT_NETWORK_ADVISORY_KEY = 11;
 
 export const MAX_AGENT_INITIALIZING_CONNECTIONS = 8;
 export const MAX_AGENT_PENDING_INBOUND_BYTES_PER_SERVER = MAX_AGENT_WS_FRAME_BYTES;
 export const MAX_AGENT_PENDING_INBOUND_BYTES_GLOBAL = 64 * 1024 * 1024;
 export const MAX_AGENT_STATE_REPORT_QUEUE_AGE_MS = 15_000;
 export const SERVER_DELETE_INVENTORY_PROOF_TIMEOUT_MS = 120_000;
+export const MAX_ROUTED_RPC_IN_FLIGHT_GLOBAL = 64;
+export const MAX_ROUTED_RPC_IN_FLIGHT_PER_SERVER = 8;
+export const MAX_ROUTED_RPC_PENDING_GLOBAL = 64;
+export const MAX_ROUTED_RPC_PENDING_PER_SERVER = 8;
+/** Socket heartbeats stay frequent; PostgreSQL liveness is intentionally coalesced. */
+export const AGENT_DURABLE_HEARTBEAT_INTERVAL_MS = 30_000;
 
 type MessageIngress = {
   wallMs: number;
@@ -135,6 +140,128 @@ class AgentIdentityFaultError extends Error {
     super(message);
     this.name = 'AgentIdentityFaultError';
   }
+}
+
+function isConflictCode(error: unknown, expected: string): boolean {
+  if (!(error instanceof ConflictException)) return false;
+  const response = error.getResponse();
+  return typeof response === 'object'
+    && response !== null
+    && (response as { code?: unknown }).code === expected;
+}
+
+type RoutedRpcEnvelope =
+  | {
+      v: 1;
+      type: 'request';
+      requestId: string;
+      targetGatewayId: string;
+      replyGatewayId: string;
+      serverId: string;
+      sessionId: string;
+      sessionGeneration: number;
+      kind: string;
+      payload: unknown;
+      timeoutMs: number;
+      mode: 'rpc' | 'notify';
+      deadlineAt: number;
+    }
+  | {
+      v: 1;
+      type: 'response';
+      requestId: string;
+      targetGatewayId: string;
+      sourceGatewayId: string;
+      sessionId: string;
+      sessionGeneration: number;
+      ok: boolean;
+      data?: unknown;
+      error?: string;
+    };
+
+function parseRoutedRpc(message: string): RoutedRpcEnvelope | null {
+  if (Buffer.byteLength(message) > MAX_AGENT_WS_FRAME_BYTES) return null;
+  try {
+    const value = JSON.parse(message) as Record<string, unknown>;
+    if (
+      value.v === 1
+      &&
+      value.type === 'request'
+      && typeof value.requestId === 'string'
+      && value.requestId.length >= 1
+      && value.requestId.length <= 128
+      && typeof value.serverId === 'string'
+      && value.serverId.length >= 1
+      && value.serverId.length <= 128
+      && isGatewayId(value.targetGatewayId)
+      && isGatewayId(value.replyGatewayId)
+      && typeof value.sessionId === 'string'
+      && value.sessionId.length >= 1
+      && value.sessionId.length <= 128
+      && Number.isSafeInteger(value.sessionGeneration)
+      && Number(value.sessionGeneration) >= 1
+      && typeof value.kind === 'string'
+      && value.kind.length >= 1
+      && value.kind.length <= 128
+      && Number.isSafeInteger(value.timeoutMs)
+      && Number(value.timeoutMs) >= 1
+      && Number(value.timeoutMs) <= 30_000
+      && Number.isSafeInteger(value.deadlineAt)
+    ) {
+      return {
+        v: 1,
+        type: 'request',
+        requestId: value.requestId,
+        targetGatewayId: value.targetGatewayId,
+        replyGatewayId: value.replyGatewayId,
+        serverId: value.serverId,
+        sessionId: value.sessionId,
+        sessionGeneration: Number(value.sessionGeneration),
+        kind: value.kind,
+        payload: value.payload,
+        timeoutMs: Number(value.timeoutMs),
+        mode: value.mode === 'notify' ? 'notify' : 'rpc',
+        deadlineAt: Number(value.deadlineAt),
+      };
+    }
+    if (
+      value.v === 1
+      &&
+      value.type === 'response'
+      && typeof value.requestId === 'string'
+      && value.requestId.length >= 1
+      && value.requestId.length <= 128
+      && isGatewayId(value.targetGatewayId)
+      && isGatewayId(value.sourceGatewayId)
+      && typeof value.sessionId === 'string'
+      && value.sessionId.length >= 1
+      && value.sessionId.length <= 128
+      && Number.isSafeInteger(value.sessionGeneration)
+      && Number(value.sessionGeneration) >= 1
+      && typeof value.ok === 'boolean'
+    ) {
+      return {
+        v: 1,
+        type: 'response',
+        requestId: value.requestId,
+        targetGatewayId: value.targetGatewayId,
+        sourceGatewayId: value.sourceGatewayId,
+        sessionId: value.sessionId,
+        sessionGeneration: Number(value.sessionGeneration),
+        ok: value.ok,
+        data: value.data,
+        error: typeof value.error === 'string' ? value.error : undefined,
+      };
+    }
+  } catch {
+    return null;
+  }
+  return null;
+}
+
+function isGatewayId(value: unknown): value is string {
+  return typeof value === 'string'
+    && /^gateway:[0-9a-f-]{36}$/.test(value);
 }
 
 class BackendBootstrapStateFaultError extends Error {
@@ -180,6 +307,10 @@ export class AgentGateway implements OnModuleInit, OnModuleDestroy {
   private readonly inboundWorkBytes = new Map<string, number>();
   private inboundWorkBytesTotal = 0;
   private readonly pendingHeartbeatServers = new Set<string>();
+  private readonly lastDurableHeartbeatAt = new Map<
+    string,
+    { sessionId: string; monotonicMs: number }
+  >();
   private readonly overloadedSessions = new WeakSet<AgentSession>();
   /** Short-lived admission fence used while credentials or the server row change. */
   private readonly sessionAdmissionBlocks = new Set<string>();
@@ -193,37 +324,43 @@ export class AgentGateway implements OnModuleInit, OnModuleDestroy {
   >();
   private sessionWatchdog: ReturnType<typeof setInterval> | null = null;
   private unregisterServerBlockListener: (() => void) | null = null;
+  private unsubscribeAgentRpc: (() => Promise<void>) | null = null;
   private destroyed = false;
-
-  readonly stateCache = new StateCache();
+  private routedRpcInFlight = 0;
+  private readonly routedRpcInFlightByServer = new Map<string, number>();
+  private routedRpcPending = 0;
+  private readonly routedRpcPendingByServer = new Map<string, number>();
+  private readonly routedRpcPendingRequests = new Map<
+    string,
+    {
+      ownerGatewayId: string;
+      sessionId: string;
+      sessionGeneration: number;
+      handle(response: Extract<RoutedRpcEnvelope, { type: 'response' }>): void;
+      reject(error: Error): void;
+    }
+  >();
+  private routedRpcSubscription: Promise<void> | null = null;
+  private readonly gatewayId: string;
 
   private readonly logChunkTracker = new LogChunkTracker();
+  private readonly consoleChunkOrderer = new ConsoleChunkOrderer();
   private readonly reportedUnknownXfsNumericIdsByServer = new Map<string, Set<number>>();
 
   constructor(
-    @InjectRepository(ServerEntity)
-    private serversRepo: Repository<ServerEntity>,
-    @InjectRepository(ContainerEntity)
-    private containersRepo: Repository<ContainerEntity>,
-    @InjectRepository(ContainerLifecycleEntity)
-    private containerLifecyclesRepo: Repository<ContainerLifecycleEntity>,
-    @InjectRepository(ContainerMountEntity)
-    private containerMountsRepo: Repository<ContainerMountEntity>,
+    @Inject(PG_DATABASE)
+    private readonly database: Kysely<NyabaseDatabase>,
+    private readonly transactions: PgTransactionManager,
+    private readonly infrastructure: InfrastructureRepository,
+    private readonly containers: ContainerControlRepository,
+    private readonly storage: StorageRepository,
+    private readonly workflow: WorkflowRepository,
+    private readonly workflowEnqueue: WorkflowEnqueuePort,
     private metricsWriter: MetricsWriter,
     private execSessionRegistry: ExecSessionRegistry,
-    @Inject(forwardRef(() => UsersService))
-    private usersService: UsersService,
     private taskDispatcher: AgentTaskDispatcherService,
     private taskResults: AgentTaskResultService,
-    @InjectRepository(RemoteFsServerAssignmentEntity)
-    private remoteFsAssignmentsRepo: Repository<RemoteFsServerAssignmentEntity>,
-    @InjectRepository(RemoteFsMountEntity)
-    private remoteFsMountsRepo: Repository<RemoteFsMountEntity>,
-    @InjectRepository(AgentTaskEntity)
-    private agentTasksRepo: Repository<AgentTaskEntity>,
     private taskPayloadCodec: AgentTaskPayloadCodecService,
-    private dataSource: DataSource,
-    private agentTasks: AgentTasksService,
     private resourceKeys: ResourceKeyService,
     private runtimeDriftReconciler: RuntimeDriftReconcilerService,
     @Inject(forwardRef(() => DataDirReconcilerService))
@@ -238,22 +375,32 @@ export class AgentGateway implements OnModuleInit, OnModuleDestroy {
     private sshConvergence: ContainerSshConvergenceService,
     private failStop: FailStopService,
     private proxySnapshots: ProxySnapshotNotifierService,
-    @InjectRepository(NetworkAddressClaimEntity)
-    private addressClaimsRepo: Repository<NetworkAddressClaimEntity>,
-  ) {}
+    private readonly runtimeRole: RuntimeRoleService,
+    private readonly redis: RedisDisposableAdapter,
+    private readonly config: NyabaseConfigService,
+    readonly stateCache: StateCache,
+  ) {
+    this.gatewayId = this.redis.gatewayId;
+  }
 
   async onModuleInit(): Promise<void> {
-    // Process-local sessions never survive a Backend restart. Clear stale
-    // durable presentation state before any HTTP/WebSocket listener exists.
-    await this.serversRepo.createQueryBuilder()
-      .update(ServerEntity)
-      .set({ status: ServerStatus.Offline })
-      .where('status != :quarantined', { quarantined: ServerStatus.AgentQuarantined })
-      .execute();
-    await this.sshRoutes.clearAll();
+    if (this.runtimeRole.servesApi() || this.runtimeRole.servesGateway()) {
+      void this.ensureRoutedRpcSubscription().catch((error) => {
+        this.logger.warn(
+          `Addressed Agent RPC subscription unavailable: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        );
+      });
+    }
+    if (!this.runtimeRole.servesGateway()) return;
     this.execSessionRegistry.setOrphanHandler((sessionId, info) => {
       this.logChunkTracker.removeSession(sessionId);
-      this.notify(info.serverId, 'execClose', { sessionId });
+      void this.closeOwnedExecSession(
+        sessionId,
+        info.serverId,
+        'Unclaimed console session expired',
+      );
     });
     this.unregisterServerBlockListener = this.proxySnapshots.registerServerBlockListener(
       (serverId, reason) => {
@@ -266,8 +413,8 @@ export class AgentGateway implements OnModuleInit, OnModuleDestroy {
       },
     );
     this.taskDispatcher.registerTransport({
-      onlineServerIds: () => this.dispatchReadyServerIds(),
-      send: (serverId, payload) => this.sendTask(serverId, payload),
+      onlineSessions: () => this.dispatchReadySessions(),
+      send: (serverId, session, payload) => this.sendTask(serverId, session, payload),
       quarantine: (serverId, reason) => this.fenceSession(serverId, reason),
     });
     this.logChunkTracker.start();
@@ -278,10 +425,23 @@ export class AgentGateway implements OnModuleInit, OnModuleDestroy {
   onModuleDestroy() {
     this.destroyed = true;
     this.logChunkTracker.stop();
+    this.consoleChunkOrderer.clear();
     if (this.sessionWatchdog) clearInterval(this.sessionWatchdog);
     this.sessionWatchdog = null;
     this.unregisterServerBlockListener?.();
     this.unregisterServerBlockListener = null;
+    void this.unsubscribeAgentRpc?.().catch((error) => {
+      this.logger.warn(
+        `Addressed Agent RPC unsubscribe failed: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    });
+    this.unsubscribeAgentRpc = null;
+    for (const pending of this.routedRpcPendingRequests.values()) {
+      pending.reject(new AgentRpcTransportError('Backend gateway shutting down'));
+    }
+    this.routedRpcPendingRequests.clear();
     for (const ws of this.initializingSockets) ws.terminate();
     this.initializingSockets.clear();
     for (const session of this.sessions.values()) {
@@ -293,6 +453,7 @@ export class AgentGateway implements OnModuleInit, OnModuleDestroy {
     this.inboundWorkBytes.clear();
     this.inboundWorkBytesTotal = 0;
     this.pendingHeartbeatServers.clear();
+    this.lastDurableHeartbeatAt.clear();
     for (const [serverId, proof] of this.serverDeletionInventoryProofs) {
       this.rejectServerDeletionInventoryProof(
         serverId,
@@ -371,7 +532,7 @@ export class AgentGateway implements OnModuleInit, OnModuleDestroy {
 
       const rawToken = authHeader.slice(7);
       const hash = createHash('sha256').update(rawToken).digest('hex');
-      const server = await this.serversRepo.findOne({ where: { agentTokenHash: hash } });
+      const server = await this.infrastructure.findServerByTokenHash(hash);
       if (!server || preAdmissionViolation || this.destroyed || ws.readyState !== WebSocket.OPEN) {
         ws.terminate();
         return;
@@ -381,7 +542,7 @@ export class AgentGateway implements OnModuleInit, OnModuleDestroy {
       // Authentication happened before entering the per-server queue. Re-read
       // inside it so token rotation/deletion cannot race a stale successful
       // lookup into a newly authoritative session.
-      const currentServer = await this.serversRepo.findOneBy({ id: server.id });
+      const currentServer = await this.infrastructure.findServerById(server.id);
       if (
         !currentServer
         || currentServer.agentTokenHash !== hash
@@ -424,7 +585,13 @@ export class AgentGateway implements OnModuleInit, OnModuleDestroy {
         // Revoke process-local route renewal immediately, but retain the
         // session object until frames received before close (notably an
         // inventoryFault) drain through the serialized server queue.
-        this.proxySnapshots.blockServer(currentServer.id, 'Agent disconnected');
+        // The close handler already owns the exact-session retirement path.
+        // Route-only blocking avoids re-entering fenceSession ahead of the
+        // close cleanup through the synchronous block listener.
+        this.proxySnapshots.blockServerRoutes(currentServer.id, 'Agent disconnected');
+        const disconnectBlockEpoch = this.proxySnapshots.currentBlockEpoch(
+          currentServer.id,
+        );
         session.rejectAll('Agent disconnected');
         void this.enqueueServerWork(
           currentServer.id,
@@ -439,8 +606,31 @@ export class AgentGateway implements OnModuleInit, OnModuleDestroy {
               'Agent disconnected before its first authoritative state report completed',
               code,
             );
-            if (!this.retireProcessLocalSession(session, currentServer.id, 'Agent disconnected')) return;
-            await this.handleDisconnect(currentServer);
+            let retired = false;
+            let localRetired = false;
+            try {
+              retired = await this.retireExactSessionAndCleanup(
+                session,
+                currentServer,
+                'Agent disconnected',
+              );
+            } finally {
+              localRetired = this.retireProcessLocalSession(
+                session,
+                currentServer.id,
+                'Agent disconnected',
+                false,
+              );
+            }
+            if (!localRetired) return;
+            if (!retired) {
+              this.proxySnapshots.unblockServerIfEpoch(
+                currentServer.id,
+                disconnectBlockEpoch,
+                'stale Agent disconnect cleanup completed',
+              );
+            }
+            if (retired) this.logger.log(`Agent disconnected: server=${currentServer.name}`);
           },
         ).catch((error: unknown) => {
           this.logger.error(
@@ -454,13 +644,36 @@ export class AgentGateway implements OnModuleInit, OnModuleDestroy {
         kind: 'admission.ready.v1',
         payload: { serverId: currentServer.id },
       })) {
-        const retired = this.retireProcessLocalSession(
-          session,
+        const admissionBlockEpoch = this.proxySnapshots.currentBlockEpoch(
           currentServer.id,
-          'Agent admission acknowledgement could not be delivered',
         );
-        ws.terminate();
-        if (retired) await this.handleDisconnect(currentServer);
+        let durablyRetired = false;
+        let retired = false;
+        try {
+          durablyRetired = await this.retireExactSessionAndCleanup(
+            session,
+            currentServer,
+            'Agent admission acknowledgement could not be delivered',
+          );
+        } finally {
+          retired = this.retireProcessLocalSession(
+            session,
+            currentServer.id,
+            'Agent admission acknowledgement could not be delivered',
+            durablyRetired,
+          );
+          ws.terminate();
+        }
+        if (retired && !durablyRetired) {
+          this.proxySnapshots.unblockServerIfEpoch(
+            currentServer.id,
+            admissionBlockEpoch,
+            'stale Agent admission cleanup completed',
+          );
+        }
+        if (durablyRetired && retired) {
+          this.logger.log(`Agent disconnected: server=${currentServer.name}`);
+        }
         return;
       }
       });
@@ -470,15 +683,11 @@ export class AgentGateway implements OnModuleInit, OnModuleDestroy {
     }
   }
 
-  private async handleDisconnect(server: ServerEntity): Promise<void> {
-    this.logger.log(`Agent disconnected: server=${server.name}`);
-    await this.revokeRetiredSessionRoutes(server.id, 'agent_disconnected');
-  }
-
   private retireProcessLocalSession(
     session: AgentSession,
     serverId: string,
     reason: string,
+    blockRoutes = true,
   ): boolean {
     if (this.sessions.get(serverId) !== session) return false;
     const deletionProof = this.serverDeletionInventoryProofs.get(serverId);
@@ -494,12 +703,13 @@ export class AgentGateway implements OnModuleInit, OnModuleDestroy {
       );
     }
     this.sessions.delete(serverId);
+    this.lastDurableHeartbeatAt.delete(serverId);
     this.stateCache.delete(serverId);
     this.committedStateReportSequences.delete(serverId);
     this.reportedUnknownXfsNumericIdsByServer.delete(serverId);
     this.logChunkTracker.clearServer(serverId);
     this.execSessionRegistry.clearServer(serverId, false);
-    this.proxySnapshots.blockServer(serverId, reason);
+    if (blockRoutes) this.proxySnapshots.blockServer(serverId, reason);
     session.rejectAll(reason);
     return true;
   }
@@ -508,7 +718,7 @@ export class AgentGateway implements OnModuleInit, OnModuleDestroy {
   // Message routing
   // ---------------------------------------------------------------------------
 
-  private receiveMessage(session: AgentSession, server: ServerEntity, raw: string): void {
+  private receiveMessage(session: AgentSession, server: ServerRecord, raw: string): void {
     const ingress: MessageIngress = {
       wallMs: Date.now(),
       monotonicMs: performance.now(),
@@ -555,7 +765,16 @@ export class AgentGateway implements OnModuleInit, OnModuleDestroy {
         // Socket liveness was recorded above. Coalesce the durable lastSeen
         // write to at most one queued item per server; periodic heartbeats can
         // never starve an initial full report or exhaust inbound capacity.
-        if (!session.bootstrapReady || this.pendingHeartbeatServers.has(server.id)) return;
+        const lastDurable = this.lastDurableHeartbeatAt.get(server.id);
+        if (
+          !session.bootstrapReady
+          || this.pendingHeartbeatServers.has(server.id)
+          || (
+            lastDurable?.sessionId === session.id
+            && ingress.monotonicMs - lastDurable.monotonicMs
+              < AGENT_DURABLE_HEARTBEAT_INTERVAL_MS
+          )
+        ) return;
         this.pendingHeartbeatServers.add(server.id);
         void this.enqueueServerWork(
           server.id,
@@ -565,7 +784,14 @@ export class AgentGateway implements OnModuleInit, OnModuleDestroy {
           server.id,
           'heartbeat persistence',
           error,
-        )).finally(() => this.pendingHeartbeatServers.delete(server.id));
+        )).then(() => {
+          if (this.sessions.get(server.id) === session) {
+            this.lastDurableHeartbeatAt.set(server.id, {
+              sessionId: session.id,
+              monotonicMs: performance.now(),
+            });
+          }
+        }).finally(() => this.pendingHeartbeatServers.delete(server.id));
         return;
       }
       if (envelope.kind === 'logChunk' && session.hasReceivedHello) {
@@ -584,18 +810,15 @@ export class AgentGateway implements OnModuleInit, OnModuleDestroy {
           this.logger.warn(`Ignoring log chunk for an unowned exec session from server ${server.id}`);
           return;
         }
-        try {
-          this.logChunkTracker.dispatch(chunk);
-        } catch (error) {
-          // A dead/slow browser is scoped to its interactive session. Retire
-          // that exec best-effort; never escalate it into Agent quarantine.
-          this.logChunkTracker.removeSession(chunk.sessionId);
-          this.execSessionRegistry.remove(chunk.sessionId);
-          try { this.notify(server.id, 'execClose', { sessionId: chunk.sessionId }); } catch { /* fenced */ }
-          this.logger.warn(
-            `Closing failed console stream ${chunk.sessionId}: ${error instanceof Error ? error.message : String(error)}`,
-          );
-        }
+        this.consoleChunkOrderer.enqueue(
+          chunk,
+          () => this.handleAuthenticatedLogChunk(session, server.id, chunk),
+          (error) => this.logger.warn(
+            `Console chunk ${chunk.sessionId} failed: ${
+              error instanceof Error ? error.message : String(error)
+            }`,
+          ),
+        );
         return;
       }
       if (envelope.kind === 'metricsBatch' && this.serverWorkTails.has(server.id)) {
@@ -639,12 +862,23 @@ export class AgentGateway implements OnModuleInit, OnModuleDestroy {
       this.proxySnapshots.blockServer(server.id, 'Agent inbound work limit exceeded');
       session.rejectAll('Agent inbound work limit exceeded');
       void this.enqueueServerWork(server.id, async () => {
-        await this.persistInventoryQuarantine(
+        await this.persistSessionInventoryQuarantine(
+          session,
           server.id,
           'Authenticated Agent inbound queue exceeded its bounded capacity',
         );
-        if (this.retireProcessLocalSession(session, server.id, 'Agent inbound work limit exceeded')) {
-          await this.handleDisconnect(server);
+        try {
+          await this.retireExactSessionAndCleanup(
+            session,
+            server,
+            'Agent inbound work limit exceeded',
+          );
+        } finally {
+          this.retireProcessLocalSession(
+            session,
+            server.id,
+            'Agent inbound work limit exceeded',
+          );
         }
       }).catch((error) => {
           this.logger.error(
@@ -696,7 +930,7 @@ export class AgentGateway implements OnModuleInit, OnModuleDestroy {
 
   private async handleMessage(
     session: AgentSession,
-    server: ServerEntity,
+    server: ServerRecord,
     raw: string,
     ingress: MessageIngress = { wallMs: Date.now(), monotonicMs: performance.now() },
   ): Promise<void> {
@@ -711,7 +945,16 @@ export class AgentGateway implements OnModuleInit, OnModuleDestroy {
     } catch (error) {
       this.logger.warn(`Invalid envelope from agent ${server.id}`);
       try {
-        await this.taskResults.quarantineProtocolFault(server.id, error);
+        // Before hello there is no durable generation to which negative
+        // evidence can be bound. Reject the socket without mutating a newer
+        // session that may already be authoritative on another Gateway.
+        if (session.hasReceivedHello) {
+          await this.taskResults.quarantineProtocolFault(
+            server.id,
+            error,
+            this.agentSessionBinding(session),
+          );
+        }
       } finally {
         await this.rejectSession(session, server.id, 'Invalid Agent envelope');
       }
@@ -721,7 +964,13 @@ export class AgentGateway implements OnModuleInit, OnModuleDestroy {
     if (!parsedEnvelope.success) {
       this.logger.warn(`Invalid envelope from agent ${server.id}`);
       try {
-        await this.taskResults.quarantineProtocolFault(server.id, parsedEnvelope.error);
+        if (session.hasReceivedHello) {
+          await this.taskResults.quarantineProtocolFault(
+            server.id,
+            parsedEnvelope.error,
+            this.agentSessionBinding(session),
+          );
+        }
       } finally {
         await this.rejectSession(session, server.id, 'Invalid Agent envelope');
       }
@@ -777,7 +1026,8 @@ export class AgentGateway implements OnModuleInit, OnModuleDestroy {
         case 'stateReport': {
           const report = zStateReportPayload.parse(msg.payload);
           if (report.serverId !== server.id) {
-            await this.persistInventoryQuarantine(
+            await this.persistSessionInventoryQuarantine(
+              session,
               server.id,
               'State report server identity mismatch',
             );
@@ -786,14 +1036,6 @@ export class AgentGateway implements OnModuleInit, OnModuleDestroy {
           }
           if (!session.acceptReportSequence('state', report.sequence)) {
             this.logger.warn(`Ignoring stale stateReport sequence ${report.sequence} for server ${server.id}`);
-            break;
-          }
-          if (!await this.validStateReportInventory(server.id, report)) {
-            await this.persistInventoryQuarantine(
-              server.id,
-              'State report inventory identity or address claim mismatch',
-            );
-            await this.rejectSession(session, server.id, 'State report inventory identity mismatch');
             break;
           }
           await this.onStateReport(
@@ -840,11 +1082,16 @@ export class AgentGateway implements OnModuleInit, OnModuleDestroy {
               server.id,
               msg.payload,
               parsed.error,
+              this.agentSessionBinding(session),
             );
             throw new Error('Malformed Agent task result quarantined');
           }
           const result = parsed.data;
-          const accepted = await this.taskResults.handle(server.id, result);
+          const accepted = await this.taskResults.handle(server.id, result, {
+            id: session.id,
+            generation: session.generation,
+            gatewayId: this.gatewayId,
+          });
           // A terminal or incomplete result releases the physical execution
           // slot. Wake immediately so safety cleanup throughput is bounded by
           // execution, not the periodic dispatcher tick.
@@ -860,7 +1107,7 @@ export class AgentGateway implements OnModuleInit, OnModuleDestroy {
           // A recovery session deliberately remains proxy-blocked while it
           // executes Pending safety work. Fence only a durable fail-stop
           // quarantine, not the route-only recovery gate itself.
-          const durableServer = await this.serversRepo.findOneBy({ id: server.id });
+          const durableServer = await this.infrastructure.findServerById(server.id);
           if (!durableServer || durableServer.status === ServerStatus.AgentQuarantined) {
             await this.rejectSession(session, server.id, 'Agent task result entered fail-stop quarantine');
           }
@@ -875,6 +1122,16 @@ export class AgentGateway implements OnModuleInit, OnModuleDestroy {
               this.logger.warn(`dockerDaemonStatus serverId mismatch: payload=${parsed.data.serverId} connection=${server.id}, ignoring`);
               break;
             }
+            const published = await this.workflow.publishAgentDockerDaemonProjection({
+              serverId: server.id,
+              sessionId: session.id,
+              sessionGeneration: session.generation,
+              gatewayId: this.gatewayId,
+              status: parsed.data,
+            });
+            if (!published) {
+              throw new Error('Durable Docker daemon projection generation was fenced');
+            }
             this.stateCache.updateDockerDaemonStatus(server.id, parsed.data);
           } else {
             this.logger.warn(`Invalid dockerDaemonStatus from ${server.id}: ${parsed.error.message}`);
@@ -886,6 +1143,7 @@ export class AgentGateway implements OnModuleInit, OnModuleDestroy {
           await this.taskResults.quarantineProtocolFault(
             server.id,
             new Error(`Unsupported Agent message kind ${(msg as { kind: string }).kind}`),
+            this.agentSessionBinding(session),
           );
           await this.rejectSession(session, server.id, 'Unsupported Agent message kind');
       }
@@ -898,7 +1156,8 @@ export class AgentGateway implements OnModuleInit, OnModuleDestroy {
           || err instanceof BackendBootstrapStateFaultError;
         if (authoritativeFault) {
           try {
-            await this.persistInventoryQuarantine(
+            await this.persistSessionInventoryQuarantine(
+              session,
               server.id,
               `State report processing failed: ${err instanceof Error ? err.message : String(err)}`,
             );
@@ -915,7 +1174,11 @@ export class AgentGateway implements OnModuleInit, OnModuleDestroy {
       }
       if (err instanceof ZodError) {
         try {
-          await this.taskResults.quarantineProtocolFault(server.id, err);
+          await this.taskResults.quarantineProtocolFault(
+            server.id,
+            err,
+            this.agentSessionBinding(session),
+          );
         } finally {
           await this.rejectSession(session, server.id, 'Invalid Agent protocol payload');
         }
@@ -938,110 +1201,210 @@ export class AgentGateway implements OnModuleInit, OnModuleDestroy {
   // ---------------------------------------------------------------------------
 
   private async onHello(
-    server: ServerEntity,
+    server: ServerRecord,
     payload: HelloPayload,
     session?: AgentSession,
   ): Promise<void> {
     if (!await this.bindHostFingerprint(server, payload, session)) return;
+    if (session) {
+      try {
+        const admitted = await this.workflow.admitAgentSession({
+          id: session.id,
+          serverId: server.id,
+          sessionToken: session.id,
+          hostFingerprint: payload.hostFingerprint,
+          configFingerprint: payload.configFingerprint,
+          gatewayId: this.gatewayId,
+          consolePublicUrl: this.config.get<string>('runtime.consolePublicUrl'),
+        });
+        session.bindDurableGeneration(admitted.generation);
+      } catch (error) {
+        this.logger.warn(
+          `Durable Agent session admission failed for ${server.id}: ${error instanceof Error ? error.message : String(error)}`,
+        );
+        this.rejectUnadmittedSession(
+          session,
+          server.id,
+          'Durable Agent session admission failed',
+        );
+        return;
+      }
+      await this.completeHello(server, payload, session);
+      return;
+    }
+    await this.completeHello(server, payload);
+  }
 
-    this.logger.log(
-      `Hello from ${server.name}: ${payload.hostname}, ${payload.gpus.length} GPUs, agentVersion=${payload.agentVersion}`,
-    );
-
-    // A socket and hello are not enough to expose the Agent as ready. Keep the
-    // durable server status explicit until the authoritative mount bootstrap
-    // has converged and the task dispatch gate is opened.
-    const helloStatus = await this.transitionServerLiveness(
-      server.id,
-      () => ServerStatus.AgentStateUnready,
-    );
-    if (helloStatus === ServerStatus.AgentQuarantined) {
-      if (session) await this.rejectSession(session, server.id, 'Agent server is quarantined');
+  private async completeHello(
+    server: ServerRecord,
+    payload: HelloPayload,
+    session?: AgentSession,
+  ): Promise<void> {
+    const initializeSnapshot = async (): Promise<
+      | { kind: 'quarantined' }
+      | { kind: 'snapshot'; snapshot: ServerSnapshot }
+    > => {
+      if (session) {
+        await this.workflow.recordAgentObservation({
+          serverId: server.id,
+          sessionId: session.id,
+          sessionGeneration: session.generation,
+          gatewayId: this.gatewayId,
+          sequence: 0,
+          kind: 'hello',
+          payload,
+        });
+      }
+      this.logger.log(
+        `Hello from ${server.name}: ${payload.hostname}, ${payload.gpus.length} GPUs, agentVersion=${payload.agentVersion}`,
+      );
+      const helloStatus = await this.transitionServerLiveness(
+        server.id,
+        () => ServerStatus.AgentStateUnready,
+      );
+      if (helloStatus === ServerStatus.AgentQuarantined) {
+        return { kind: 'quarantined' };
+      }
+      const now = Date.now();
+      const snapshot: ServerSnapshot = {
+        serverId: server.id,
+        runtimeReady: false,
+        sessionId: session?.id ?? this.sessions.get(server.id)?.id ?? '',
+        helloAt: now,
+        lastFullReportAt: null,
+        lastFullReportReceivedAt: null,
+        lastUpdated: now,
+        agentVersion: payload.agentVersion,
+        hostname: payload.hostname,
+        cpuCores: payload.cpuCores,
+        totalMemBytes: payload.totalMemBytes,
+        dockerRoot: payload.dockerRoot,
+        containers: new Map(),
+        disks: payload.disks,
+        gpus: payload.gpus,
+        xfsProjects: [],
+        unknownXfsNumericIds: [],
+        localImages: payload.localImages,
+        dataDirs: [],
+        dataDirIssues: { orphans: [], missing: [] },
+        remoteFsMounts: [],
+        dockerDaemon: null,
+      };
+      this.stateCache.set(server.id, snapshot);
+      return { kind: 'snapshot', snapshot };
+    };
+    if (!session) {
+      await initializeSnapshot();
       return;
     }
 
-    // Reset stateCache so stale containers from the previous agent lifecycle are
-    // cleared before the fresh stateReport arrives.
-    const snap: ServerSnapshot = {
+    const binding = {
       serverId: server.id,
-      runtimeReady: false,
-      sessionId: session?.id ?? this.sessions.get(server.id)?.id ?? '',
-      helloAt: Date.now(),
-      lastFullReportAt: null,
-      lastFullReportReceivedAt: null,
-      lastUpdated: Date.now(),
-      agentVersion: payload.agentVersion,
-      hostname: payload.hostname,
-      cpuCores: payload.cpuCores,
-      totalMemBytes: payload.totalMemBytes,
-      dockerRoot: payload.dockerRoot,
-      containers: new Map(),
-      disks: payload.disks,
-      gpus: payload.gpus,
-      xfsProjects: [],
-      unknownXfsNumericIds: [],
-      localImages: payload.localImages,
-      dataDirs: [],
-      dataDirIssues: { orphans: [], missing: [] },
-      remoteFsMounts: [],
-      dockerDaemon: null,
+      sessionId: session.id,
+      sessionGeneration: session.generation,
+      gatewayId: this.gatewayId,
     };
-    this.stateCache.set(server.id, snap);
-
-    if (!session) return;
     let bootstrapRpcStarted = false;
+    let bootstrapFinalizing = false;
     try {
-      const remoteFsMounts = await this.activeRemoteFsBootstrap(server.id);
-      let bootstrapPayload: ReturnType<typeof zAgentBootstrapPayload.parse>;
-      try {
-        bootstrapPayload = zAgentBootstrapPayload.parse({ remoteFsMounts });
-      } catch (error) {
-        throw new BackendBootstrapStateFaultError(
-          'Durable RemoteFS bootstrap payload is invalid',
-          { cause: error },
-        );
-      }
-      const bootstrapFrameBytes = Buffer.byteLength(JSON.stringify({
-        id: '00000000-0000-0000-0000-000000000000',
-        ts: Number.MAX_SAFE_INTEGER,
-        kind: 'agent.bootstrap.v1',
-        payload: bootstrapPayload,
-      }));
-      if (bootstrapFrameBytes > MAX_AGENT_WS_FRAME_BYTES) {
-        throw new BackendBootstrapStateFaultError(
-          `RemoteFS bootstrap frame is ${bootstrapFrameBytes} bytes; maximum is ${MAX_AGENT_WS_FRAME_BYTES}`,
-        );
-      }
-      bootstrapRpcStarted = true;
-      const bootstrap = zAgentBootstrapResult.parse(
-        await session.rpc<AgentBootstrapResult>(
-          'agent.bootstrap.v1',
-          bootstrapPayload,
-          AGENT_BOOTSTRAP_RPC_TIMEOUT_MS,
-        ),
+      const prepared = await this.workflow.runWithAgentSessionFence(
+        binding,
+        async () => {
+          const initialized = await initializeSnapshot();
+          if (initialized.kind === 'quarantined') return initialized;
+          const remoteFsMounts = await this.activeRemoteFsBootstrap(server.id);
+          let bootstrapPayload: ReturnType<typeof zAgentBootstrapPayload.parse>;
+          try {
+            bootstrapPayload = zAgentBootstrapPayload.parse({ remoteFsMounts });
+          } catch (error) {
+            throw new BackendBootstrapStateFaultError(
+              'Durable RemoteFS bootstrap payload is invalid',
+              { cause: error },
+            );
+          }
+          const bootstrapFrameBytes = Buffer.byteLength(JSON.stringify({
+            id: '00000000-0000-0000-0000-000000000000',
+            ts: Number.MAX_SAFE_INTEGER,
+            kind: 'agent.bootstrap.v1',
+            payload: bootstrapPayload,
+          }));
+          if (bootstrapFrameBytes > MAX_AGENT_WS_FRAME_BYTES) {
+            throw new BackendBootstrapStateFaultError(
+              `RemoteFS bootstrap frame is ${bootstrapFrameBytes} bytes; maximum is ${MAX_AGENT_WS_FRAME_BYTES}`,
+            );
+          }
+          bootstrapRpcStarted = true;
+          return {
+            kind: 'bootstrap' as const,
+            snapshot: initialized.snapshot,
+            remoteFsMounts,
+            response: session.enqueueRpc<AgentBootstrapResult>(
+              'agent.bootstrap.v1',
+              bootstrapPayload,
+              AGENT_BOOTSTRAP_RPC_TIMEOUT_MS,
+            ),
+          };
+        },
       );
-      this.assertBootstrapReady(remoteFsMounts, bootstrap);
-      if (this.sessions.get(server.id) !== session) return;
-      // Bootstrap precedes the first full runtime report, so the ordinary
-      // runtime-ready event guard intentionally cannot be used here.
-      snap.remoteFsMounts = bootstrap.remoteFsMounts;
-      snap.lastUpdated = Date.now();
-      session.markBootstrapReady();
-      session.send({
-        id: undefined,
-        ts: Date.now(),
-        kind: 'reconcile',
-        payload: { serverId: server.id },
-      } as BackendToAgentMessage);
+      if (prepared.kind === 'quarantined') {
+        await this.rejectSession(session, server.id, 'Agent server is quarantined');
+        return;
+      }
+      const bootstrap = zAgentBootstrapResult.parse(
+        await prepared.response,
+      );
+      this.assertBootstrapReady(prepared.remoteFsMounts, bootstrap);
+      bootstrapFinalizing = true;
+      await this.workflow.runWithAgentSessionFence(binding, async () => {
+        if (this.sessions.get(server.id) !== session) {
+          throw new ConflictException({
+            code: 'AGENT_SESSION_STALE',
+            message: 'Agent bootstrap response belongs to a replaced local session',
+          });
+        }
+        prepared.snapshot.remoteFsMounts = bootstrap.remoteFsMounts;
+        prepared.snapshot.lastUpdated = Date.now();
+        session.markBootstrapReady();
+        session.send({
+          id: undefined,
+          ts: Date.now(),
+          kind: 'reconcile',
+          payload: { serverId: server.id },
+        } as BackendToAgentMessage);
+      });
     } catch (error) {
+      if (isConflictCode(error, 'AGENT_SESSION_STALE')) {
+        const blockEpoch = this.proxySnapshots.currentBlockEpoch(server.id);
+        if (this.retireProcessLocalSession(
+          session,
+          server.id,
+          'Agent bootstrap authority was replaced',
+          false,
+        )) {
+          this.proxySnapshots.unblockServerIfEpoch(
+            server.id,
+            blockEpoch,
+            'stale local Agent bootstrap retired',
+          );
+          session.ws.terminate();
+        }
+        return;
+      }
       const message = error instanceof Error ? error.message : String(error);
       this.logger.warn(
         `Agent bootstrap failed [${server.name}]: ${message}`,
       );
       if (this.destroyed) return;
+      if (bootstrapFinalizing) {
+        if (this.sessions.get(server.id) === session) {
+          await this.rejectSession(session, server.id, 'Agent bootstrap finalization failed');
+        }
+        return;
+      }
       if (!bootstrapRpcStarted) {
         if (error instanceof BackendBootstrapStateFaultError) {
-          await this.persistInventoryQuarantine(
+          await this.persistSessionInventoryQuarantine(
+            session,
             server.id,
             `Backend bootstrap state invalid: ${message}`,
             { preserveExisting: true },
@@ -1075,7 +1438,8 @@ export class AgentGateway implements OnModuleInit, OnModuleDestroy {
       // unbounded loop, so persist a fail-stop state that requires operator
       // repair. An open-socket RPC timeout is likewise a bounded initialization
       // failure, but a transport-class rejection above is not evidence.
-      await this.persistInventoryQuarantine(
+      await this.persistSessionInventoryQuarantine(
+        session,
         server.id,
         `Agent bootstrap failed: ${message}`,
         { preserveExisting: true },
@@ -1087,7 +1451,7 @@ export class AgentGateway implements OnModuleInit, OnModuleDestroy {
   }
 
   private async bindHostFingerprint(
-    server: ServerEntity,
+    server: ServerRecord,
     payload: HelloPayload,
     session?: AgentSession,
   ): Promise<boolean> {
@@ -1129,8 +1493,12 @@ export class AgentGateway implements OnModuleInit, OnModuleDestroy {
       return false;
     }
     try {
-      const persisted = await runSerializedTransaction(this.dataSource, async (manager) => {
-        const current = await manager.findOneBy(ServerEntity, { id: server.id });
+      const persisted = await this.transactions.run(async (transaction) => {
+        await sql`select pg_advisory_xact_lock(
+          ${AGENT_NETWORK_ADVISORY_NAMESPACE},
+          ${AGENT_NETWORK_ADVISORY_KEY}
+        )`.execute(transaction);
+        const current = await this.infrastructure.findServerById(server.id, transaction);
         if (!current) throw new Error('Server no longer exists');
         const boundHost = current.hostFingerprint ?? null;
         const boundConfig = current.agentConfigFingerprint ?? null;
@@ -1152,22 +1520,18 @@ export class AgentGateway implements OnModuleInit, OnModuleDestroy {
           ) throw new AgentIdentityFaultError('Agent network identity mismatch');
         }
 
-        await gcExpiredNetworkClaims(manager);
-
-        const [staticClaimRows, runtimeClaimRows, networkServers] = await Promise.all([
-          manager.find(NetworkAddressClaimEntity, {
-            where: {
-              address: In(staticAddresses),
-              ownerKind: In(['gateway', 'host']),
-            },
-          }),
-          manager.find(NetworkAddressClaimEntity, {
-            where: {
-              address: In(staticAddresses),
-              ownerKind: In(['container', 'runtime_cleanup']),
-            },
-          }),
-          manager.find(ServerEntity),
+        await transaction
+          .deleteFrom('control.container_network_claims')
+          .where('state', '=', 'releasing')
+          .where('reusable_at', '<=', sql<Date>`clock_timestamp()`)
+          .execute();
+        const [runtimeClaimRows, networkServers] = await Promise.all([
+          transaction
+            .selectFrom('control.container_network_claims')
+            .selectAll()
+            .where('address', 'in', staticAddresses)
+            .execute(),
+          this.infrastructure.listServers(transaction),
         ]);
         const existingNetworkKeys = new Set(
           networkServers.flatMap((row) => row.macvlanCidr ? [row.macvlanCidr] : []),
@@ -1184,81 +1548,50 @@ export class AgentGateway implements OnModuleInit, OnModuleDestroy {
         }
 
         const conflictingRuntime = runtimeClaimRows.find((row) =>
-          !(boundHost && row.ownerKind === 'runtime_cleanup' && row.serverId === current.id));
+          !(boundHost
+            && row.owner_kind === 'runtime_cleanup'
+            && row.server_id === current.id));
         if (conflictingRuntime) {
           throw new AgentIdentityFaultError(
             `Agent static address ${conflictingRuntime.address} is already owned by a runtime`,
           );
         }
         for (const address of staticAddresses) {
-          const existing = [
-            ...staticClaimRows.filter((row) => row.address === address),
-            ...runtimeClaimRows.filter((row) =>
-              row.address === address
-              && !(boundHost && row.ownerKind === 'runtime_cleanup' && row.serverId === current.id)),
-          ];
           const incomingKind = address === payload.macvlanGateway ? 'gateway' : 'host';
-          if (existing.length === 0) continue;
-          const sameSharedGateway = incomingKind === 'gateway'
-            && existing.every((claim) =>
-              claim.ownerKind === 'gateway'
-              && claim.networkKey === payload.macvlanCidr);
-          const samePhysicalHost = incomingKind === 'host'
-            && existing.every((claim) =>
-              claim.ownerKind === 'host'
-              && claim.ownerId === payload.hostFingerprint);
-          if (!sameSharedGateway && !samePhysicalHost) {
-            throw new AgentIdentityFaultError(
-              `Agent static address ${address} is already owned by another network identity`,
-            );
+          for (const candidate of networkServers) {
+            if (candidate.id === current.id || !candidate.macvlanCidr) continue;
+            const candidateAddresses = [
+              ...(candidate.macvlanGateway ? [candidate.macvlanGateway] : []),
+              ...(candidate.macvlanReservedIps ?? []),
+            ];
+            if (!candidateAddresses.includes(address)) continue;
+            const sameSharedGateway = incomingKind === 'gateway'
+              && candidate.macvlanGateway === address
+              && candidate.macvlanCidr === payload.macvlanCidr;
+            const samePhysicalHost = incomingKind === 'host'
+              && candidate.hostFingerprint === payload.hostFingerprint
+              && candidate.macvlanReservedIps.includes(address);
+            if (!sameSharedGateway && !samePhysicalHost) {
+              throw new AgentIdentityFaultError(
+                `Agent static address ${address} is already owned by another network identity`,
+              );
+            }
           }
         }
-        const newRows = staticAddresses.filter((address) => {
-          const expectedKind = address === payload.macvlanGateway ? 'gateway' : 'host';
-          const expectedOwnerId = expectedKind === 'gateway'
-            ? payload.macvlanCidr
-            : payload.hostFingerprint;
-          return !staticClaimRows.some((row) =>
-            row.address === address
-            && row.ownerKind === expectedKind
-            && row.ownerId === expectedOwnerId
-            && row.state === 'active');
-        }).map((address) => manager.create(
-          NetworkAddressClaimEntity,
-          {
-            id: createHash('sha256').update(
-              `static:${address === payload.macvlanGateway ? payload.macvlanCidr : payload.hostFingerprint}:${address}`,
-            ).digest('hex'),
-            address,
-            networkKey: payload.macvlanCidr,
-            ownerKind: address === payload.macvlanGateway ? 'gateway' : 'host',
-            ownerId: address === payload.macvlanGateway ? payload.macvlanCidr : payload.hostFingerprint,
-            serverId: null,
-            state: 'active',
-            reusableAt: null,
-          },
-        ));
-        await assertNetworkClaimCapacity(manager, newRows.length);
-        if (newRows.length > 0) await manager.save(NetworkAddressClaimEntity, newRows);
-        if (boundHost) {
-          return current;
-        }
-        const update = await manager.update(
-          ServerEntity,
-          { id: server.id, hostFingerprint: IsNull(), agentConfigFingerprint: IsNull() },
-          {
-            hostFingerprint: payload.hostFingerprint,
-            agentConfigFingerprint: payload.configFingerprint,
-            macvlanCidr: payload.macvlanCidr,
-            macvlanGateway: payload.macvlanGateway,
-            macvlanReservedIps: reservedIps,
-          },
-        );
-        if (update.affected !== 1) {
+        const admitted = await this.infrastructure.admitAgent(server.id, {
+          hostFingerprint: payload.hostFingerprint,
+          agentConfigFingerprint: payload.configFingerprint,
+          status: current.status,
+          lastSeenAt: new Date(),
+          macvlanCidr: payload.macvlanCidr,
+          macvlanGateway: payload.macvlanGateway,
+          macvlanReservedIps: reservedIps,
+        }, transaction);
+        if (!admitted) {
           throw new AgentIdentityFaultError('Another Agent won the identity binding race');
         }
-        return manager.findOneByOrFail(ServerEntity, { id: server.id });
-      });
+        return admitted;
+      }, { isolationLevel: 'serializable', maxAttempts: 5 });
       server.hostFingerprint = persisted.hostFingerprint;
       server.agentConfigFingerprint = persisted.agentConfigFingerprint;
       server.macvlanCidr = persisted.macvlanCidr;
@@ -1286,11 +1619,35 @@ export class AgentGateway implements OnModuleInit, OnModuleDestroy {
     serverId: string,
     message: string,
   ): Promise<void> {
-    await this.persistInventoryQuarantine(
+    // Identity validation necessarily runs before durable session admission,
+    // so there is no session generation with which to fence the quarantine.
+    // Persist this authenticated, deterministic fault directly against the
+    // token-bound Server. Post-admission faults continue to use the exact
+    // generation-fenced workflow path.
+    this.proxySnapshots.blockServer(
       serverId,
-      message,
-      { preserveExisting: true },
+      `authoritative Agent inventory failed on ${serverId}`,
     );
+    try {
+      await this.transactions.run(async (transaction) => {
+        const current = await this.infrastructure.findServerById(serverId, transaction);
+        if (!current || current.status === ServerStatus.AgentQuarantined) return;
+        const quarantined = await this.infrastructure.quarantineServer(
+          serverId,
+          AGENT_INVENTORY_FAULT_QUARANTINE_CODE,
+          message.slice(0, 2048),
+          transaction,
+        );
+        if (!quarantined) {
+          throw new Error('Server disappeared while persisting Agent identity quarantine');
+        }
+      }, { isolationLevel: 'serializable', maxAttempts: 5 });
+    } catch (error) {
+      this.failStop.terminate(new Error(
+        `Cannot persist pre-admission Agent identity quarantine for ${serverId}`,
+        { cause: error },
+      ));
+    }
     await this.rejectSession(session, serverId, message);
   }
 
@@ -1299,11 +1656,11 @@ export class AgentGateway implements OnModuleInit, OnModuleDestroy {
     // snapshot. Retention GC and unassignment use the same serialized
     // transaction boundary, so they cannot create a mixed-read false
     // bootstrap quarantine between these three reads.
-    return runSerializedTransaction(this.dataSource, async (manager) => {
-      const assignments = await manager.find(RemoteFsServerAssignmentEntity, {
-        where: { serverId, desiredState: 'active' },
-        order: { remoteFsMountId: 'ASC' },
-      });
+    return this.transactions.run(async (transaction) => {
+      const assignments = (await this.storage.listAssignmentsForServer(
+        serverId,
+        transaction,
+      )).filter((assignment) => assignment.desiredState === 'active');
       if (assignments.length === 0) return [];
       if (assignments.length > MAX_AGENT_REMOTE_FS_MOUNTS) {
         throw new BackendBootstrapStateFaultError(
@@ -1325,18 +1682,7 @@ export class AgentGateway implements OnModuleInit, OnModuleDestroy {
         );
       }
       const lastTaskIds = assignments.map((assignment) => assignment.lastTaskId as string);
-      const tasks = await manager.find(AgentTaskEntity, {
-        select: {
-          id: true,
-          kind: true,
-          status: true,
-          serverId: true,
-          resourceType: true,
-          resourceId: true,
-        },
-        where: { id: In(lastTaskIds) },
-      });
-      const tasksById = new Map(tasks.map((task) => [task.id, task]));
+      const tasksById = await this.workflow.findTasks(lastTaskIds, transaction);
       for (const assignment of assignments) {
         const task = tasksById.get(assignment.lastTaskId as string);
         if (
@@ -1353,13 +1699,12 @@ export class AgentGateway implements OnModuleInit, OnModuleDestroy {
         }
       }
 
-      const mounts = await manager.find(RemoteFsMountEntity, {
-        where: {
-          id: In(assignmentIds),
-          desiredState: 'active',
-        },
-        order: { id: 'ASC' },
-      });
+      const mounts = (await this.storage.listRemoteFsMountsByIds(
+        assignmentIds,
+        transaction,
+      ))
+        .filter((mount) => mount.desiredState === 'active')
+        .sort((left, right) => left.id.localeCompare(right.id));
       const mountsById = new Map(mounts.map((mount) => [mount.id, mount]));
       if (
         mounts.length !== assignmentIds.length
@@ -1445,14 +1790,11 @@ export class AgentGateway implements OnModuleInit, OnModuleDestroy {
       .filter((id): id is string => typeof id === 'string' && id.length > 0);
     const runningRefs = runningContainerIds.length === 0
       ? []
-      : await this.containerMountsRepo.find({
-          where: {
-            serverId,
-            containerId: In(runningContainerIds),
-            sourceKind: 'remote',
-            sourceId: In(repairIds),
-          },
-        });
+      : (await this.containers.listMounts(runningContainerIds))
+        .filter((ref) =>
+          ref.serverId === serverId
+          && ref.sourceKind === 'remote'
+          && repairIds.includes(ref.sourceId));
     const blockedByRunningContainer = new Set(runningRefs.map((ref) => ref.sourceId));
     const created: string[] = [];
     const refsByContainer = new Map<string, Set<string>>();
@@ -1471,29 +1813,21 @@ export class AgentGateway implements OnModuleInit, OnModuleDestroy {
     }
     for (const [containerId, mountIds] of refsByContainer) {
       try {
-        const taskId = await runSerializedTransaction(this.dataSource, async (manager) => {
-          const [container, lifecycle, refs, pending] = await Promise.all([
-            manager.findOneBy(ContainerEntity, { id: containerId, serverId }),
-            manager.findOne(ContainerLifecycleEntity, { where: { containerId } }),
-            manager.find(ContainerMountEntity, {
-              where: {
-                serverId,
-                containerId,
-                sourceKind: 'remote',
-                sourceId: In([...mountIds]),
-              },
-            }),
-            manager.find(AgentTaskEntity, {
-              select: { id: true, kind: true },
-              where: {
-                serverId,
-                resourceType: 'container',
-                resourceId: containerId,
-                status: AgentTaskStatus.Pending,
-              },
-              order: { createdAt: 'DESC' },
-              take: 2,
-            }),
+        const taskId = await this.transactions.run(async (transaction) => {
+          const [container, refs, pending] = await Promise.all([
+            this.containers.find(containerId, transaction),
+            this.containers.listMounts([containerId], transaction),
+            transaction
+              .selectFrom('workflow.tasks')
+              .select(['id', 'kind'])
+              .where('server_id', '=', serverId)
+              .where('resource_type', '=', 'container')
+              .where('resource_id', '=', containerId)
+              .where('status', '=', AgentTaskStatus.Pending)
+              .orderBy('created_at', 'desc')
+              .limit(2)
+              .forUpdate()
+              .execute(),
           ]);
           if (pending.length > 1) {
             throw new BackendBootstrapStateFaultError(
@@ -1501,14 +1835,18 @@ export class AgentGateway implements OnModuleInit, OnModuleDestroy {
             );
           }
           const snapshot = snapshotsByContainerId.get(containerId)
-            ?.find((candidate) => candidate.runtime.runtimeId === lifecycle?.boundRuntimeId);
+            ?.find((candidate) =>
+              candidate.runtime.runtimeId === container?.boundRuntimeId);
           if (
             !container
-            || !lifecycle
+            || container.serverId !== serverId
             || !snapshot
             || snapshot.status !== ContainerStatus.Running
-            || lifecycle.boundRuntimeId !== snapshot.runtime.runtimeId
-            || refs.length === 0
+            || container.boundRuntimeId !== snapshot.runtime.runtimeId
+            || !refs.some((ref) =>
+              ref.serverId === serverId
+              && ref.sourceKind === 'remote'
+              && mountIds.has(ref.sourceId))
           ) return null;
 
           // A stop or delete already establishes the required safety barrier.
@@ -1518,13 +1856,16 @@ export class AgentGateway implements OnModuleInit, OnModuleDestroy {
             || task.kind === AgentTaskKind.ContainerDelete);
           if (safetyTask) return safetyTask.id;
 
-          await this.agentTasks.supersedePendingForResourceInTransaction(manager, {
+          await this.workflowEnqueue.supersedePendingForResourceInTransaction(
+            transaction,
+            {
             serverId,
             resourceType: 'container',
             resourceId: containerId,
             reason: 'RemoteFS recovery requires a fresh stopped-container safety barrier',
-          });
-          const task = await this.agentTasks.enqueueInTransaction(manager, {
+            },
+          );
+          const task = await this.workflowEnqueue.enqueueInTransaction(transaction, {
             kind: AgentTaskKind.ContainerStop,
             serverId,
             resourceType: 'container',
@@ -1542,14 +1883,20 @@ export class AgentGateway implements OnModuleInit, OnModuleDestroy {
             },
             resourceKeys: [this.resourceKeys.container(containerId)],
             admissionClass: 'safety',
-            beforeCommit: async (taskManager, context) => {
-              await taskManager.update(ContainerLifecycleEntity, containerId, {
-                phase: ContainerPhase.Updating,
-                activeTaskId: context.taskId,
-                lastTransitionAt: new Date(),
-                failureReason: null,
-                failureCode: null,
-              });
+            beforeCommit: async (sameTransaction, context) => {
+              await sameTransaction
+                .updateTable('control.containers')
+                .set({
+                  lifecycle_phase: ContainerPhase.Updating,
+                  active_task_id: context.taskId,
+                  last_transition_at: new Date(),
+                  failure_reason: null,
+                  failure_code: null,
+                  revision: sql`revision + 1`,
+                })
+                .where('id', '=', containerId)
+                .where('server_id', '=', serverId)
+                .executeTakeFirstOrThrow();
             },
           });
           return task.taskId;
@@ -1573,29 +1920,38 @@ export class AgentGateway implements OnModuleInit, OnModuleDestroy {
         continue;
       }
       try {
-        const taskId = await runSerializedTransaction(this.dataSource, async (manager) => {
+        const taskId = await this.transactions.run(async (transaction) => {
           const [assignment, mount] = await Promise.all([
-            manager.findOne(RemoteFsServerAssignmentEntity, {
-              where: { serverId, remoteFsMountId: mountId, desiredState: 'active' },
-            }),
-            manager.findOne(RemoteFsMountEntity, {
-              where: { id: mountId, desiredState: 'active' },
-            }),
+            this.storage.findAssignment(mountId, serverId, transaction),
+            this.storage.findActiveRemoteFsMount(mountId, transaction),
           ]);
           // An administrator may have changed intent while the Agent observed
           // the snapshot. The newer projection wins; never revive it here.
-          if (!assignment || !mount) return null;
+          if (!assignment || assignment.desiredState !== 'active' || !mount) return null;
 
-          await this.agentTasks.supersedePendingForResourceInTransaction(manager, {
+          await this.workflowEnqueue.supersedePendingForResourceInTransaction(
+            transaction,
+            {
             serverId,
             resourceType: 'remote_fs_mount',
             resourceId: mountId,
             reason: 'A newer RemoteFS recovery ensure replaced this task',
-          });
-          assignment.desiredState = 'ensuring';
-          assignment.generation = (assignment.generation ?? 0) + 1;
-          await manager.save(RemoteFsServerAssignmentEntity, assignment);
-          const task = await this.agentTasks.enqueueInTransaction(manager, {
+            },
+          );
+          const generation = assignment.generation + 1;
+          const ensuring = await this.storage.transitionAssignment(
+            assignment.id,
+            assignment.generation,
+            ['active'],
+            {
+              desiredState: 'ensuring',
+              generation,
+              lastTaskId: null,
+            },
+            transaction,
+          );
+          if (!ensuring) return null;
+          const task = await this.workflowEnqueue.enqueueInTransaction(transaction, {
             kind: AgentTaskKind.RemoteFsEnsure,
             serverId,
             resourceType: 'remote_fs_mount',
@@ -1630,8 +1986,18 @@ export class AgentGateway implements OnModuleInit, OnModuleDestroy {
             resourceKeys: [this.resourceKeys.remoteFsAssignment(serverId, mountId)],
             admissionClass: 'reconciliation',
           });
-          assignment.lastTaskId = task.taskId;
-          await manager.save(RemoteFsServerAssignmentEntity, assignment);
+          const linked = await this.storage.transitionAssignment(
+            ensuring.id,
+            generation,
+            ['ensuring'],
+            {
+              desiredState: 'ensuring',
+              generation,
+              lastTaskId: task.taskId,
+            },
+            transaction,
+          );
+          if (!linked) throw new Error('RemoteFS recovery assignment changed while linking task');
           return task.taskId;
         });
         if (taskId) created.push(taskId);
@@ -1647,53 +2013,96 @@ export class AgentGateway implements OnModuleInit, OnModuleDestroy {
   }
 
   private async onHeartbeat(
-    server: ServerEntity,
+    server: ServerRecord,
     _payload: HeartbeatPayload,
     session: AgentSession,
   ): Promise<void> {
     if (this.sessions.get(server.id) !== session) return;
-    const status = await this.transitionServerLiveness(
-      server.id,
-      (current) => current === ServerStatus.AgentStateUnready
-        ? ServerStatus.AgentStateUnready
-        : ServerStatus.Online,
-    );
-    if (status === ServerStatus.AgentQuarantined && this.sessions.get(server.id) === session) {
-      await this.rejectSession(session, server.id, 'Agent server is quarantined');
-    }
+    await this.workflow.runWithAgentSessionFence({
+      serverId: server.id,
+      sessionId: session.id,
+      sessionGeneration: session.generation,
+      gatewayId: this.gatewayId,
+    }, async () => {
+      if (!await this.workflow.renewAgentSession({
+        serverId: server.id,
+        sessionId: session.id,
+        sessionGeneration: session.generation,
+        gatewayId: this.gatewayId,
+      })) {
+        throw new Error('Agent heartbeat generation was fenced');
+      }
+      const status = await this.transitionServerLiveness(
+        server.id,
+        (current) => current === ServerStatus.AgentStateUnready
+          ? ServerStatus.AgentStateUnready
+          : ServerStatus.Online,
+      );
+      if (status === ServerStatus.AgentQuarantined) {
+        throw new Error('Agent server is quarantined');
+      }
+    });
   }
 
   private async onInventoryFault(
-    server: ServerEntity,
+    server: ServerRecord,
     fault: InventoryFaultPayload,
     session: AgentSession,
   ): Promise<void> {
-    await this.persistInventoryQuarantine(server.id, fault.message);
+    await this.workflow.runWithAgentSessionFence({
+      serverId: server.id,
+      sessionId: session.id,
+      sessionGeneration: session.generation,
+      gatewayId: this.gatewayId,
+    }, async () => {
+      await this.workflow.recordAgentObservation({
+        serverId: server.id,
+        sessionId: session.id,
+        sessionGeneration: session.generation,
+        gatewayId: this.gatewayId,
+        sequence: 0,
+        kind: 'inventory_fault',
+        payload: fault,
+      });
+      // Observation and quarantine use separate short transactions, each
+      // exact-generation fenced. A takeover in between makes the latter a
+      // harmless stale rejection rather than quarantining the successor.
+    });
+    await this.persistSessionInventoryQuarantine(
+      session,
+      server.id,
+      fault.message,
+    );
     await this.rejectSession(session, server.id, 'Authoritative Agent inventory failed');
   }
 
-  private async persistInventoryQuarantine(
+  private async persistSessionInventoryQuarantine(
+    session: AgentSession,
     serverId: string,
     message: string,
     options: { preserveExisting?: boolean } = {},
-  ): Promise<void> {
-    this.proxySnapshots.blockServer(
-      serverId,
-      `authoritative Agent inventory failed on ${serverId}`,
-    );
+  ): Promise<boolean> {
+    let binding: { id: string; generation: number; gatewayId: string };
     try {
-      await runSerializedTransaction(this.dataSource, async (manager) => {
-        const current = await manager.findOneBy(ServerEntity, { id: serverId });
-        if (!current) return;
-        if (options.preserveExisting && current.status === ServerStatus.AgentQuarantined) return;
-        await manager.update(ServerEntity, serverId, {
-          status: ServerStatus.AgentQuarantined,
-          quarantineCode: AGENT_INVENTORY_FAULT_QUARANTINE_CODE,
-          quarantineMessage: message.slice(0, 2048),
-          lastSeenAt: new Date(),
-        });
-      });
+      binding = this.agentSessionBinding(session);
+    } catch {
+      return false;
+    }
+    try {
+      const persisted = await this.workflow.quarantineAgentInventoryFault(
+        { serverId, ...binding },
+        message,
+        options,
+      );
+      if (persisted) {
+        this.proxySnapshots.blockServer(
+          serverId,
+          `authoritative Agent inventory failed on ${serverId}`,
+        );
+      }
+      return persisted;
     } catch (error) {
+      if (isConflictCode(error, 'AGENT_SESSION_STALE')) return false;
       this.failStop.terminate(new Error(
         `Cannot persist authoritative inventory quarantine for ${serverId}`,
         { cause: error },
@@ -1702,12 +2111,62 @@ export class AgentGateway implements OnModuleInit, OnModuleDestroy {
   }
 
   private async onStateReport(
-    server: ServerEntity,
+    server: ServerRecord,
     payload: StateReportPayload,
     reportSession?: AgentSession,
     receivedAt = Date.now(),
     receivedMonotonicAt = performance.now(),
   ): Promise<void> {
+    if (!reportSession) {
+      const postCommit = await this.applyStateReport(
+        server,
+        payload,
+        reportSession,
+        receivedAt,
+        receivedMonotonicAt,
+      );
+      await postCommit();
+      return;
+    }
+    const expectedSession = reportSession;
+    await this.workflow.runWithAgentSessionFence({
+      serverId: server.id,
+      sessionId: expectedSession.id,
+      sessionGeneration: expectedSession.generation,
+      gatewayId: this.gatewayId,
+    }, async () => {
+      await this.workflow.recordAgentObservation({
+        serverId: server.id,
+        sessionId: expectedSession.id,
+        sessionGeneration: expectedSession.generation,
+        gatewayId: this.gatewayId,
+        sequence: payload.sequence,
+        kind: 'state_report',
+        payload,
+      });
+      if (!await this.validStateReportInventory(server.id, payload)) {
+        throw new AgentInventoryFaultError(
+          'State report inventory identity or address claim mismatch',
+        );
+      }
+      const postCommit = await this.applyStateReport(
+        server,
+        payload,
+        expectedSession,
+        receivedAt,
+        receivedMonotonicAt,
+      );
+      await postCommit();
+    });
+  }
+
+  private async applyStateReport(
+    server: ServerRecord,
+    payload: StateReportPayload,
+    reportSession?: AgentSession,
+    receivedAt = Date.now(),
+    receivedMonotonicAt = performance.now(),
+  ): Promise<() => Promise<void>> {
     const expectedSession = reportSession ?? this.sessions.get(server.id);
     const blockEpoch = this.proxySnapshots.currentBlockEpoch(server.id);
     const current = this.stateCache.get(server.id)
@@ -1722,7 +2181,16 @@ export class AgentGateway implements OnModuleInit, OnModuleDestroy {
 
     // Resolve numericUserId → UUID for each xfsProject entry.
     const numericIds = payload.xfsProjects.map((p) => p.numericUserId);
-    const uuidMap = await this.usersService.getUserIdsByNumericIds(numericIds);
+    const numericUserRows = numericIds.length === 0
+      ? []
+      : await this.database
+        .selectFrom('iam.users')
+        .select(['id', 'numeric_id'])
+        .where('numeric_id', 'in', [...new Set(numericIds)])
+        .execute();
+    const uuidMap = new Map(
+      numericUserRows.map((user) => [user.numeric_id, user.id]),
+    );
     const unknownNumericIds = new Set<number>();
     const xfsProjects = payload.xfsProjects
       .map((p) => {
@@ -1749,23 +2217,11 @@ export class AgentGateway implements OnModuleInit, OnModuleDestroy {
       payload.containers,
       current.dockerRoot,
     );
-    if (runtimeReconcile.claimsChanged) {
-      // Claim commit is the revocation linearization point. Snapshot builders
-      // consult the same ledger, so even a broadcast racing route projection
-      // cannot renew a physically conflicted address.
-      this.proxySnapshots.invalidate('runtime address claim changed');
-    }
     if (runtimeReconcile.quarantineReason) {
-      this.proxySnapshots.blockServer(
-        server.id,
-        `runtime cleanup ledger corruption: ${runtimeReconcile.quarantineReason}`,
+      throw new AgentInventoryFaultError(
+        `Runtime cleanup ledger is corrupted: ${runtimeReconcile.quarantineReason}`,
       );
-      if (expectedSession) {
-        await this.rejectSession(expectedSession, server.id, 'Runtime cleanup ledger is corrupted');
-      }
-      return;
     }
-    if (runtimeReconcile.taskIds.length) this.taskDispatcher.wake();
     const dataDirInventory = await this.dataDirReconciler.reconcileReport(
       server.id,
       payload.dataDirs,
@@ -1774,18 +2230,17 @@ export class AgentGateway implements OnModuleInit, OnModuleDestroy {
     if (dataDirInventory.blockingReason) {
       throw new AgentInventoryFaultError(dataDirInventory.blockingReason);
     }
-    if (expectedSession && !this.isCurrentOpenSession(server.id, expectedSession)) return;
-    const pendingSafetyRecovery = await this.agentTasksRepo.existsBy({
-      serverId: server.id,
-      status: AgentTaskStatus.Pending,
-      admissionClass: 'safety',
-    });
-    if (pendingSafetyRecovery && !this.proxySnapshots.isServerBlocked(server.id)) {
-      this.proxySnapshots.blockServerRoutes(
-        server.id,
-        'Agent safety recovery is pending',
-      );
+    if (expectedSession && !this.isCurrentOpenSession(server.id, expectedSession)) {
+      return async () => undefined;
     }
+    const pendingSafetyRecovery = Boolean(await this.database
+      .selectFrom('workflow.tasks')
+      .select('id')
+      .where('server_id', '=', server.id)
+      .where('status', '=', AgentTaskStatus.Pending)
+      .where('admission_class', '=', 'safety')
+      .limit(1)
+      .executeTakeFirst());
     const routableContainers = await this.routableContainers(
       server.id,
       payload.containers,
@@ -1796,9 +2251,13 @@ export class AgentGateway implements OnModuleInit, OnModuleDestroy {
       routableContainers,
       receivedAt,
     );
-    if (expectedSession && !this.isCurrentOpenSession(server.id, expectedSession)) return;
+    if (expectedSession && !this.isCurrentOpenSession(server.id, expectedSession)) {
+      return async () => undefined;
+    }
     await this.sshConvergence.reconcileServer(server.id);
-    if (expectedSession && !this.isCurrentOpenSession(server.id, expectedSession)) return;
+    if (expectedSession && !this.isCurrentOpenSession(server.id, expectedSession)) {
+      return async () => undefined;
+    }
 
     const next: ServerSnapshot = {
       ...current,
@@ -1814,11 +2273,13 @@ export class AgentGateway implements OnModuleInit, OnModuleDestroy {
       // Agent timestamp remains diagnostic evidence in lastFullReportAt.
       lastUpdated: receivedAt,
     };
-    next.runtimeReady = true;
+    next.runtimeReady = !pendingSafetyRecovery;
     next.lastFullReportAt = payload.observedAt;
     next.lastFullReportReceivedAt = receivedAt;
     const session = this.sessions.get(server.id);
-    if (expectedSession && !this.isCurrentOpenSession(server.id, expectedSession)) return;
+    if (expectedSession && !this.isCurrentOpenSession(server.id, expectedSession)) {
+      return async () => undefined;
+    }
     const promoteSession = Boolean(session?.bootstrapReady && !session.dispatchReady);
     const reportStatus = await this.transitionServerLiveness(
       server.id,
@@ -1826,51 +2287,104 @@ export class AgentGateway implements OnModuleInit, OnModuleDestroy {
       { clearInventoryFault: true },
     );
     if (reportStatus === ServerStatus.AgentQuarantined) {
-      if (session) await this.rejectSession(session, server.id, 'Agent server is quarantined');
-      return;
+      throw new Error('Agent server is quarantined');
     }
     if (expectedSession && !this.isCurrentOpenSession(server.id, expectedSession)) {
       await this.transitionServerLiveness(
         server.id,
         (currentStatus) => this.disconnectedServerStatus(currentStatus),
       );
-      return;
+      return async () => undefined;
     }
-    this.stateCache.set(server.id, next);
-    this.committedStateReportSequences.set(server.id, {
-      sessionId: expectedSession?.id ?? next.sessionId,
-      sequence: payload.sequence,
-    });
-    this.commitServerDeletionInventoryProof(
-      server.id,
-      expectedSession,
-      payload,
-      receivedMonotonicAt,
-      next,
-    );
-    expectedSession?.markFullReportReceived();
-    if (expectedSession && !pendingSafetyRecovery) {
-      this.proxySnapshots.unblockServerIfEpoch(
+    if (expectedSession) {
+      const published = await this.workflow.publishAgentRuntimeProjection({
+        serverId: server.id,
+        sessionId: expectedSession.id,
+        sessionGeneration: expectedSession.generation,
+        gatewayId: this.gatewayId,
+        sequence: payload.sequence,
+        stateReport: {
+          ...next,
+          containers: [...next.containers.values()],
+        },
+        observedAt: new Date(receivedAt),
+        runtimeReady: !pendingSafetyRecovery,
+      });
+      if (!published) {
+        throw new Error('Durable Agent runtime projection generation was fenced');
+      }
+    }
+    if (session) {
+      if (promoteSession) {
+        const durableSession = await this.workflow.markAgentSessionReady(
+          server.id,
+          session.id,
+          session.generation,
+          this.gatewayId,
+          new Date(),
+          !pendingSafetyRecovery,
+        );
+        if (!durableSession) {
+          throw new Error('Durable Agent session generation was fenced');
+        }
+      }
+    }
+    return async () => {
+      if (runtimeReconcile.claimsChanged) {
+        this.proxySnapshots.invalidate('runtime address claim changed');
+      }
+      if (runtimeReconcile.taskIds.length) this.taskDispatcher.wake();
+      if (pendingSafetyRecovery && !this.proxySnapshots.isServerBlocked(server.id)) {
+        this.proxySnapshots.blockServerRoutes(
+          server.id,
+          'Agent safety recovery is pending',
+        );
+      }
+      this.stateCache.set(server.id, next);
+      this.committedStateReportSequences.set(server.id, {
+        sessionId: expectedSession?.id ?? next.sessionId,
+        sequence: payload.sequence,
+      });
+      this.commitServerDeletionInventoryProof(
         server.id,
-        blockEpoch,
-        'authoritative agent state report',
+        expectedSession,
+        payload,
+        receivedMonotonicAt,
+        next,
       );
-    }
-    this.httpProxyGateway.scheduleBroadcast('container_state_report');
-    if (promoteSession && session) {
-      session.markDispatchReady();
-      this.taskDispatcher.wake();
-    }
-    try {
-      await this.sshProxyGateway.broadcastSnapshot();
-    } catch (error) {
-      // The authoritative Agent projection is already committed. Proxy
-      // snapshots have independent short leases and fail closed, so a build
-      // or transport failure must not misclassify a healthy Agent inventory.
-      this.logger.error(
-        `SSH proxy snapshot broadcast failed after state report from ${server.id}: ${error instanceof Error ? error.message : String(error)}`,
-      );
-    }
+      expectedSession?.markFullReportReceived();
+      if (expectedSession && !pendingSafetyRecovery) {
+        this.proxySnapshots.unblockServerIfEpoch(
+          server.id,
+          blockEpoch,
+          'authoritative agent state report',
+        );
+      }
+      this.httpProxyGateway.scheduleBroadcast('container_state_report');
+      if (promoteSession && session) {
+        session.markDispatchReady();
+        this.taskDispatcher.wake();
+      }
+      try {
+        // The broadcaster advances its authorization revision synchronously
+        // before its first await. Do not retain the per-Server PostgreSQL
+        // advisory-lock connection while the independent snapshot transaction
+        // waits for pool capacity or a proxy socket. A telemetry outage must
+        // not be able to amplify ordinary report pressure into control-plane
+        // connection starvation.
+        void this.sshProxyGateway.broadcastSnapshot().catch((error: unknown) => {
+          this.logger.error(
+            `SSH proxy snapshot broadcast failed after state report from ${server.id}: ${error instanceof Error ? error.message : String(error)}`,
+          );
+        });
+      } catch (error) {
+        // Keep the guard for a test double or non-async replacement which
+        // throws before returning a Promise.
+        this.logger.error(
+          `SSH proxy snapshot broadcast failed after state report from ${server.id}: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+    };
   }
 
   private isCurrentOpenSession(serverId: string, session: AgentSession): boolean {
@@ -1883,7 +2397,7 @@ export class AgentGateway implements OnModuleInit, OnModuleDestroy {
     const dockerRoot = this.stateCache.get(serverId)?.dockerRoot;
     if (!dockerRoot || !path.isAbsolute(dockerRoot) || path.resolve(dockerRoot) !== dockerRoot) return false;
     if (!unique(payload.containers.map((container) => container.runtime.runtimeId))) return false;
-    const durableServer = await this.serversRepo.findOneBy({ id: serverId });
+    const durableServer = await this.infrastructure.findServerById(serverId);
     if (!durableServer?.macvlanCidr || !durableServer.macvlanGateway) return false;
     for (const container of payload.containers) {
       const labels = container.labels ?? {};
@@ -1915,16 +2429,16 @@ export class AgentGateway implements OnModuleInit, OnModuleDestroy {
       container.labels?.[LABEL.CONTAINER_ID]).filter((id): id is string => Boolean(id)))];
     if (reportedContainerIds.length > 0) {
       const reportedIps = payload.containers.map((container) => container.runtime.ip);
-      const [durableContainers, lifecycles, addressClaims] = await Promise.all([
-        this.containersRepo.find({ where: { id: In(reportedContainerIds) } }),
-        this.containerLifecyclesRepo.find({ where: { containerId: In(reportedContainerIds) } }),
-        this.addressClaimsRepo.find({ where: [
-          { ownerId: In(reportedContainerIds) },
-          { address: In(reportedIps) },
-        ] }),
+      const [durableContainers, addressClaims] = await Promise.all([
+        this.containers.findByIds(reportedContainerIds),
+        this.containers.activeNetworkClaims({
+          containerIds: reportedContainerIds,
+          addresses: reportedIps,
+        }),
       ]);
-      const durableById = new Map(durableContainers.map((container) => [container.id, container]));
-      const lifecycleById = new Map(lifecycles.map((lifecycle) => [lifecycle.containerId, lifecycle]));
+      const durableById = new Map(
+        durableContainers.map((container) => [container.id, container]),
+      );
       const reservationById = new Map(addressClaims
         .filter((claim) => claim.ownerKind === 'container')
         .map((claim) => [claim.ownerId, claim]));
@@ -1933,12 +2447,14 @@ export class AgentGateway implements OnModuleInit, OnModuleDestroy {
         if (!containerId) return false;
         const durable = durableById.get(containerId);
         if (!durable) continue;
-        const lifecycle = lifecycleById.get(containerId);
         // Noncanonical duplicates and cross-server claimants are accepted only
         // as drift evidence so the Backend can enqueue exact cleanup. The one
         // runtime that is durably bound and eligible for routing must match the
         // authoritative reservation exactly.
-        if (durable.serverId !== serverId || lifecycle?.boundRuntimeId !== snapshot.runtime.runtimeId) continue;
+        if (
+          durable.serverId !== serverId
+          || durable.boundRuntimeId !== snapshot.runtime.runtimeId
+        ) continue;
         const reservation = reservationById.get(containerId);
         if (
           !reservation
@@ -1978,19 +2494,11 @@ export class AgentGateway implements OnModuleInit, OnModuleDestroy {
     ])];
     if (remoteIds.length === 0) return true;
     const [mounts, assignments] = await Promise.all([
-      this.remoteFsMountsRepo.find({
-        where: { id: In(remoteIds), desiredState: 'active' },
-      }),
-      this.remoteFsAssignmentsRepo.find({
-        // A durable unassignment first changes the row to `removing`, then the
-        // Agent executes remote_fs.absent. A full report collected immediately
-        // before that task may still legitimately contain the exact mounted
-        // filesystem. Keep validating it against the still-present immutable
-        // assignment instead of treating this normal transition as an Agent
-        // identity fault. The finalizer deletes the row only after absence is
-        // proved, so a report with no remaining assignment still fails closed.
-        where: { serverId, remoteFsMountId: In(remoteIds) },
-      }),
+      this.storage.listRemoteFsMountsByIds(remoteIds)
+        .then((rows) => rows.filter((row) => row.desiredState === 'active')),
+      this.storage.listAssignmentsForServer(serverId)
+        .then((rows) => rows.filter((row) =>
+          remoteIds.includes(row.remoteFsMountId))),
     ]);
     const mountsById = new Map(mounts.map((mount) => [mount.id, mount]));
     const assignedIds = new Set(assignments.map((assignment) => assignment.remoteFsMountId));
@@ -2038,19 +2546,20 @@ export class AgentGateway implements OnModuleInit, OnModuleDestroy {
       .map((container) => container.labels?.[LABEL.CONTAINER_ID])
       .filter((id): id is string => typeof id === 'string' && id.length > 0);
     if (ids.length === 0) return [];
-    const [lifecycles, remoteMountRefs] = await Promise.all([
-      this.containerLifecyclesRepo.find({ where: { containerId: In(ids) } }),
-      this.containerMountsRepo.find({
-        where: { serverId, containerId: In(ids), sourceKind: 'remote' },
-      }),
+    const [aggregates, remoteMountRefs] = await Promise.all([
+      this.containers.findByIds(ids),
+      this.containers.listMounts(ids)
+        .then((rows) => rows.filter((row) =>
+          row.serverId === serverId && row.sourceKind === 'remote')),
     ]);
-    const byId = new Map(lifecycles.map((lifecycle) => [lifecycle.containerId, lifecycle]));
+    const byId = new Map(aggregates.map((container) => [container.id, container]));
     const remoteIds = [...new Set(remoteMountRefs.map((ref) => ref.sourceId))];
     const activeAssignments = remoteIds.length === 0
       ? []
-      : await this.remoteFsAssignmentsRepo.find({
-          where: { serverId, remoteFsMountId: In(remoteIds), desiredState: 'active' },
-        });
+      : (await this.storage.listAssignmentsForServer(serverId))
+        .filter((assignment) =>
+          assignment.desiredState === 'active'
+          && remoteIds.includes(assignment.remoteFsMountId));
     const activeRemoteIds = new Set(activeAssignments.map((assignment) => assignment.remoteFsMountId));
     const mountedRemoteIds = new Set(remoteFsMounts
       .filter((status) =>
@@ -2069,7 +2578,7 @@ export class AgentGateway implements OnModuleInit, OnModuleDestroy {
       const remoteSourcesHealthy = (id ? refsByContainer.get(id) : undefined)?.every((sourceId) =>
         activeRemoteIds.has(sourceId) && mountedRemoteIds.has(sourceId)) ?? true;
       return remoteSourcesHealthy
-        && lifecycle?.phase === ContainerPhase.Active
+        && lifecycle?.lifecyclePhase === ContainerPhase.Active
         && lifecycle.activeTaskId === null
         && lifecycle.boundRuntimeId === container.runtime.runtimeId
         && lifecycle.runtimeSpecHash === container.labels?.[LABEL.RUNTIME_SPEC_HASH];
@@ -2122,6 +2631,9 @@ export class AgentGateway implements OnModuleInit, OnModuleDestroy {
     work: () => Promise<T>,
     options: SessionFenceOptions = {},
   ): Promise<T> {
+    if (this.destroyed) {
+      throw new AgentRpcTransportError('Backend gateway is shutting down');
+    }
     let ownsFence = false;
     let deletionProof: ServerDeletionInventoryProofChallenge | null = null;
     try {
@@ -2176,7 +2688,7 @@ export class AgentGateway implements OnModuleInit, OnModuleDestroy {
   private async beginBoundServerDeletionInventoryProof(
     serverId: string,
   ): Promise<ServerDeletionInventoryProofChallenge | null> {
-    const durable = await this.serversRepo.findOneBy({ id: serverId });
+    const durable = await this.infrastructure.findServerById(serverId);
     if (!durable) return null;
     if (
       !durable.hostFingerprint
@@ -2241,7 +2753,7 @@ export class AgentGateway implements OnModuleInit, OnModuleDestroy {
     serverId: string,
     proof: ServerDeletionInventoryProofResult,
   ): Promise<void> {
-    const durable = await this.serversRepo.findOneBy({ id: serverId });
+    const durable = await this.infrastructure.findServerById(serverId);
     const session = this.sessions.get(serverId);
     const snapshot = this.stateCache.get(serverId);
     const current = durable?.status === ServerStatus.Online
@@ -2379,13 +2891,105 @@ export class AgentGateway implements OnModuleInit, OnModuleDestroy {
   private async retireSession(serverId: string, reason: string): Promise<void> {
     const session = this.sessions.get(serverId);
     if (session) {
-      await this.quarantineIncompleteInitialization(session, serverId, reason);
-      this.retireProcessLocalSession(session, serverId, reason);
-      session.ws.terminate();
+      const blockEpoch = this.proxySnapshots.currentBlockEpoch(serverId);
+      let server: ServerRecord | null = null;
+      let retired = false;
+      let localRetired = false;
+      try {
+        await this.quarantineIncompleteInitialization(session, serverId, reason);
+        server = await this.infrastructure.findServerById(serverId);
+        retired = server
+          ? await this.retireExactSessionAndCleanup(session, server, reason)
+          : false;
+      } finally {
+        localRetired = this.retireProcessLocalSession(
+          session,
+          serverId,
+          reason,
+          retired,
+        );
+        session.ws.terminate();
+      }
+      if (localRetired && !retired) {
+        this.proxySnapshots.unblockServerIfEpoch(
+          serverId,
+          blockEpoch,
+          'stale local Agent retirement completed',
+        );
+      }
+      if (retired && server) {
+        this.logger.log(`Agent disconnected: server=${server.name}`);
+      }
     } else {
       this.proxySnapshots.blockServer(serverId, reason);
     }
-    await this.revokeRetiredSessionRoutes(serverId, 'agent_session_retired');
+  }
+
+  private async retireExactSessionAndCleanup(
+    session: AgentSession,
+    server: ServerRecord,
+    reason: string,
+  ): Promise<boolean> {
+    let generation: number;
+    try {
+      generation = session.generation;
+    } catch {
+      // A pre-hello socket has no durable generation and therefore no shared
+      // state that this process is authorized to retire.
+      return false;
+    }
+    let outcome: { retired: boolean };
+    try {
+      outcome = await this.workflow.retireAgentSessionWithCleanup(
+        {
+          serverId: server.id,
+          sessionId: session.id,
+          sessionGeneration: generation,
+          gatewayId: this.gatewayId,
+        },
+        reason,
+        async (transaction) => {
+          const current = await this.infrastructure.findServerById(server.id, transaction);
+          if (
+            current
+            && current.status !== ServerStatus.AgentQuarantined
+          ) {
+            await this.infrastructure.updateServerLiveness(
+              server.id,
+              this.disconnectedServerStatus(current.status),
+              {},
+              transaction,
+            );
+          }
+          await this.sshRoutes.clearServer(server.id, transaction);
+        },
+      );
+    } catch (error) {
+      this.proxySnapshots.blockServer(
+        server.id,
+        `Agent session atomic retirement failed: ${reason}`,
+      );
+      return this.failStop.terminate(new Error(
+        `Agent session atomic retirement failed for ${server.id}`,
+        { cause: error },
+      ));
+    }
+    if (!outcome.retired) return false;
+    try {
+      this.httpProxyGateway.scheduleBroadcast('agent_session_retired');
+    } catch (error) {
+      this.logger.error(
+        `HTTP proxy retirement broadcast scheduling failed for ${server.id}: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+    try {
+      await this.sshProxyGateway.broadcastSnapshot();
+    } catch (error) {
+      this.logger.error(
+        `SSH proxy retirement broadcast failed for ${server.id}: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+    return true;
   }
 
   private async quarantineIncompleteInitialization(
@@ -2396,7 +3000,8 @@ export class AgentGateway implements OnModuleInit, OnModuleDestroy {
   ): Promise<void> {
     const explicitInventoryFault = closeCode === 4502;
     if (explicitInventoryFault) {
-      await this.persistInventoryQuarantine(
+      await this.persistSessionInventoryQuarantine(
+        session,
         serverId,
         'Agent reported an authoritative inventory failure',
         { preserveExisting: true },
@@ -2413,13 +3018,8 @@ export class AgentGateway implements OnModuleInit, OnModuleDestroy {
       // reserved close code 4502 above. Everything else is reconnectable.
       return;
     }
-    await this.persistInventoryQuarantine(
-      serverId,
-      preHelloInitializationFault
-        ? 'Agent pre-hello initialization failed'
-        : `Agent initialization interrupted: ${reason}`,
-      { preserveExisting: true },
-    );
+    // Pre-hello sockets have no durable generation. Their close code cannot
+    // mutate a current generation owned by another Gateway.
   }
 
   private async rejectSession(
@@ -2435,7 +3035,27 @@ export class AgentGateway implements OnModuleInit, OnModuleDestroy {
     session.ws.terminate();
   }
 
+  /**
+   * A socket whose durable admission failed never owned the shared Agent
+   * generation, so it must neither retire durable state nor clear the route
+   * block established while admission was pending. Keeping that block also
+   * coalesces repeated reconnect attempts until a later session is admitted
+   * and completes an authoritative full report.
+   */
+  private rejectUnadmittedSession(
+    session: AgentSession,
+    serverId: string,
+    reason: string,
+  ): void {
+    this.retireProcessLocalSession(session, serverId, reason, false);
+    session.rejectAll(reason);
+    session.ws.terminate();
+  }
+
   isOnline(serverId: string): boolean {
+    if (!this.runtimeRole.servesGateway()) {
+      return this.stateCache.isRuntimeReady(serverId);
+    }
     const session = this.sessions.get(serverId);
     return !this.sessionAdmissionBlocks.has(serverId)
       && !this.proxySnapshots.isServerBlocked(serverId)
@@ -2445,6 +3065,11 @@ export class AgentGateway implements OnModuleInit, OnModuleDestroy {
   }
 
   onlineServerIds(): string[] {
+    if (!this.runtimeRole.servesGateway()) {
+      return this.stateCache.getAll()
+        .filter((snapshot) => snapshot.runtimeReady)
+        .map((snapshot) => snapshot.serverId);
+    }
     return [...this.sessions.entries()]
       .filter(([serverId, session]) =>
         !this.sessionAdmissionBlocks.has(serverId)
@@ -2461,6 +3086,25 @@ export class AgentGateway implements OnModuleInit, OnModuleDestroy {
       .map(([serverId]) => serverId);
   }
 
+  private dispatchReadySessions(): Array<{
+    serverId: string;
+    session: { id: string; generation: number; gatewayId: string };
+  }> {
+    return [...this.sessions.entries()]
+      .filter(([serverId, session]) =>
+        !this.sessionAdmissionBlocks.has(serverId)
+        && session.dispatchReady
+        && session.ws.readyState === WebSocket.OPEN)
+      .map(([serverId, session]) => ({
+        serverId,
+        session: {
+          id: session.id,
+          generation: session.generation,
+          gatewayId: this.gatewayId,
+        },
+      }));
+  }
+
   private disconnectedServerStatus(current: ServerStatus): ServerStatus {
     if (current === ServerStatus.AgentStateUnready) return ServerStatus.AgentStateUnready;
     return ServerStatus.Offline;
@@ -2472,20 +3116,20 @@ export class AgentGateway implements OnModuleInit, OnModuleDestroy {
     next: (current: ServerStatus) => ServerStatus,
     options: { clearInventoryFault?: boolean } = {},
   ): Promise<ServerStatus | null> {
-    return runSerializedTransaction(this.dataSource, async (manager) => {
-      const current = await manager.findOneBy(ServerEntity, { id: serverId });
+    return this.transactions.run(async (transaction) => {
+      const current = await this.infrastructure.findServerById(serverId, transaction);
       if (!current) return null;
       if (current.status === ServerStatus.AgentQuarantined) return current.status;
       const status = next(current.status);
-      await manager.update(ServerEntity, serverId, {
+      const updated = await this.infrastructure.updateServerLiveness(
+        serverId,
         status,
-        lastSeenAt: new Date(),
-        ...(options.clearInventoryFault
-          && current.quarantineCode === AGENT_INVENTORY_FAULT_QUARANTINE_CODE
-          ? { quarantineCode: null, quarantineMessage: null }
-          : {}),
-      });
-      return status;
+        options.clearInventoryFault
+          ? { clearInventoryFaultCode: AGENT_INVENTORY_FAULT_QUARANTINE_CODE }
+          : {},
+        transaction,
+      );
+      return updated?.status ?? null;
     });
   }
 
@@ -2545,6 +3189,9 @@ export class AgentGateway implements OnModuleInit, OnModuleDestroy {
     if (!isPublicDirectRpcKind(kind)) {
       throw new Error(`Direct command ${kind} is disabled; use an AgentTask`);
     }
+    if (!this.runtimeRole.servesGateway()) {
+      return this.routeRpcToSocketOwner<T>(serverId, kind, payload, timeoutMs);
+    }
     const session = this.sessions.get(serverId);
     if (
       this.sessionAdmissionBlocks.has(serverId)
@@ -2553,32 +3200,596 @@ export class AgentGateway implements OnModuleInit, OnModuleDestroy {
     ) {
       throw new Error('Agent offline, initializing, or quarantined');
     }
-    return session.rpc<T>(kind, payload, timeoutMs);
+    const enqueued = await this.workflow.runWithAgentSessionSendFence({
+      serverId,
+      id: session.id,
+      generation: session.generation,
+      gatewayId: this.gatewayId,
+    }, async () => {
+      const prepared = await this.prepareExecSessionForSocketOwner(
+        session,
+        kind,
+        payload,
+      );
+      return {
+        response: session.enqueueRpc<T>(kind, prepared.wirePayload, timeoutMs),
+        execSessionId: prepared.execSessionId,
+      };
+    });
+    if (enqueued === null) {
+      throw new AgentRpcTransportError('Agent session generation was fenced');
+    }
+    // The session lock covers exact validation, pending registration, and the
+    // synchronous WebSocket enqueue only. A delayed Agent response must not
+    // delay token rotation, durable retirement, or takeover.
+    try {
+      return await enqueued.response;
+    } catch (error) {
+      if (enqueued.execSessionId) {
+        await this.cleanupExecSessionForSocketOwner(
+          session,
+          enqueued.execSessionId,
+          'Agent exec admission failed',
+        );
+      }
+      throw error;
+    }
+  }
+
+  private async routeRpcToSocketOwner<T>(
+    serverId: string,
+    kind: string,
+    payload: unknown,
+    timeoutMs: number,
+    mode: 'rpc' | 'notify' = 'rpc',
+  ): Promise<T> {
+    if (this.destroyed) {
+      throw new AgentRpcTransportError('Backend gateway is shutting down');
+    }
+    let requestId = randomUUID();
+    for (let attempt = 0; this.routedRpcPendingRequests.has(requestId); attempt += 1) {
+      if (attempt >= 3) {
+        throw new AgentRpcTransportError('Agent RPC request identity collision');
+      }
+      requestId = randomUUID();
+    }
+    const serverPending = this.routedRpcPendingByServer.get(serverId) ?? 0;
+    if (
+      this.routedRpcPending >= MAX_ROUTED_RPC_PENDING_GLOBAL
+      || serverPending >= MAX_ROUTED_RPC_PENDING_PER_SERVER
+    ) {
+      throw new AgentRpcTransportError('Agent socket-owner route capacity exceeded');
+    }
+    this.routedRpcPending += 1;
+    this.routedRpcPendingByServer.set(serverId, serverPending + 1);
+    const timeout = Math.max(1, Math.min(timeoutMs, 30_000));
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    let settled = false;
+    try {
+      await this.ensureRoutedRpcSubscription();
+      const owner = await this.workflow.findCurrentAgentSession(serverId);
+      const databaseNow = await this.workflow.currentDatabaseTime();
+      if (
+        !owner
+        || owner.state !== 'ready'
+        || owner.leaseExpiresAt.getTime() <= databaseNow.getTime()
+      ) {
+        throw new AgentRpcTransportError(
+          'No ready durable Agent socket owner is available',
+        );
+      }
+      return await new Promise<T>((resolve, reject) => {
+        const finish = (
+          outcome: { ok: true; data: T } | { ok: false; error: Error },
+        ): void => {
+          if (settled) return;
+          settled = true;
+          if (timer) clearTimeout(timer);
+          this.routedRpcPendingRequests.delete(requestId);
+          if (outcome.ok) resolve(outcome.data);
+          else reject(outcome.error);
+        };
+        timer = setTimeout(() => {
+          finish({
+            ok: false,
+            error: new AgentRpcTransportError('Agent socket-owner route timed out'),
+          });
+        }, timeout);
+        this.routedRpcPendingRequests.set(requestId, {
+          ownerGatewayId: owner.gatewayId,
+          sessionId: owner.id,
+          sessionGeneration: owner.generation,
+          handle: (envelope) => {
+            if (envelope.ok) finish({ ok: true, data: envelope.data as T });
+            else {
+              finish({
+                ok: false,
+                error: new AgentRpcTransportError(envelope.error ?? 'Agent RPC failed'),
+              });
+            }
+          },
+          reject: (error) => finish({ ok: false, error }),
+        });
+        void this.redis.publishAddressedRpc(
+          owner.gatewayId,
+          JSON.stringify({
+            v: 1,
+            type: 'request',
+            requestId,
+            targetGatewayId: owner.gatewayId,
+            replyGatewayId: this.gatewayId,
+            serverId,
+            sessionId: owner.id,
+            sessionGeneration: owner.generation,
+            kind,
+            payload,
+            timeoutMs: timeout,
+            mode,
+            deadlineAt: databaseNow.getTime() + timeout,
+          }),
+        ).then((published) => {
+          if (!published) {
+            finish({
+              ok: false,
+              error: new AgentRpcTransportError('Agent socket-owner route is unavailable'),
+            });
+          }
+        }).catch((error) => {
+          finish({
+            ok: false,
+            error: new AgentRpcTransportError(
+              `Agent socket-owner route failed: ${error instanceof Error ? error.message : String(error)}`,
+            ),
+          });
+        });
+      });
+    } finally {
+      if (timer) clearTimeout(timer);
+      this.routedRpcPendingRequests.delete(requestId);
+      this.routedRpcPending -= 1;
+      const remaining = (this.routedRpcPendingByServer.get(serverId) ?? 1) - 1;
+      if (remaining <= 0) this.routedRpcPendingByServer.delete(serverId);
+      else this.routedRpcPendingByServer.set(serverId, remaining);
+    }
+  }
+
+  private routeNotifyToSocketOwner(
+    serverId: string,
+    kind: AgentNotifyKind,
+    payload: unknown,
+  ): Promise<void> {
+    if (kind !== 'reconcile') {
+      return Promise.reject(new AgentRpcTransportError(
+        `Agent notification ${kind} cannot cross a Gateway boundary`,
+      ));
+    }
+    return this.routeRpcToSocketOwner<void>(
+      serverId,
+      kind,
+      payload,
+      5_000,
+      'notify',
+    );
+  }
+
+  private ensureRoutedRpcSubscription(): Promise<void> {
+    if (this.destroyed) {
+      return Promise.reject(new AgentRpcTransportError(
+        'Backend gateway is shutting down',
+      ));
+    }
+    if (this.unsubscribeAgentRpc) return Promise.resolve();
+    if (this.routedRpcSubscription) return this.routedRpcSubscription;
+    this.routedRpcSubscription = this.redis
+      .subscribeAddressedRpc((message) => this.handleRoutedRpcMessage(message))
+      .then(async (unsubscribe) => {
+        if (this.destroyed) {
+          await unsubscribe();
+          return;
+        }
+        if (this.unsubscribeAgentRpc) {
+          await unsubscribe();
+          return;
+        }
+        this.unsubscribeAgentRpc = unsubscribe;
+      })
+      .finally(() => {
+        this.routedRpcSubscription = null;
+      });
+    return this.routedRpcSubscription;
+  }
+
+  private async handleRoutedRpcMessage(message: string): Promise<void> {
+    if (this.destroyed) return;
+    const request = parseRoutedRpc(message);
+    if (!request || request.targetGatewayId !== this.gatewayId) return;
+    if (request.type === 'response') {
+      const pending = this.routedRpcPendingRequests.get(request.requestId);
+      if (
+        pending
+        && request.sourceGatewayId === pending.ownerGatewayId
+        && request.sessionId === pending.sessionId
+        && request.sessionGeneration === pending.sessionGeneration
+      ) {
+        pending.handle(request);
+      }
+      return;
+    }
+    if (!this.runtimeRole.servesGateway()) return;
+    if (
+      request.mode === 'rpc'
+        ? !isPublicDirectRpcKind(request.kind)
+        : request.kind !== 'reconcile'
+    ) {
+      await this.respondRoutedRpc(
+        request,
+        false,
+        undefined,
+        'Agent socket-owner request kind is not routable',
+      );
+      return;
+    }
+    const serverInFlight = this.routedRpcInFlightByServer.get(request.serverId) ?? 0;
+    if (
+      this.routedRpcInFlight >= MAX_ROUTED_RPC_IN_FLIGHT_GLOBAL
+      || serverInFlight >= MAX_ROUTED_RPC_IN_FLIGHT_PER_SERVER
+    ) {
+      await this.respondRoutedRpc(
+        request,
+        false,
+        undefined,
+        'Agent socket-owner route capacity exceeded',
+      );
+      return;
+    }
+    this.routedRpcInFlight += 1;
+    this.routedRpcInFlightByServer.set(request.serverId, serverInFlight + 1);
+    try {
+      const session = this.sessions.get(request.serverId);
+      if (
+        request.sessionId !== session?.id
+        || request.sessionGeneration !== session?.generation
+        || this.sessionAdmissionBlocks.has(request.serverId)
+        || this.proxySnapshots.isServerBlocked(request.serverId)
+        || !session?.dispatchReady
+        || session.ws.readyState !== WebSocket.OPEN
+      ) {
+        await this.respondRoutedRpc(
+          request,
+          false,
+          undefined,
+          'Agent socket-owner generation is unavailable or fenced',
+        );
+        return;
+      }
+      try {
+        if (request.mode === 'notify') {
+          const sent = await this.workflow.runWithAgentSessionSendFence({
+            serverId: request.serverId,
+            id: session.id,
+            generation: session.generation,
+            gatewayId: this.gatewayId,
+          }, async (connection) => {
+            const now = await this.workflow.currentDatabaseTime(connection);
+            if (now.getTime() >= request.deadlineAt) return false;
+            return session.send({
+              id: undefined,
+              ts: Date.now(),
+              kind: request.kind,
+              payload: request.payload,
+            } as BackendToAgentMessage);
+          });
+          if (!sent) {
+            throw new AgentRpcTransportError(
+              'Agent socket-owner notification was fenced',
+            );
+          }
+          await this.respondRoutedRpc(request, true);
+          return;
+        }
+        const routedKind = request.kind as PublicDirectRpcKind;
+        const enqueued = await this.workflow.runWithAgentSessionSendFence({
+          serverId: request.serverId,
+          id: session.id,
+          generation: session.generation,
+          gatewayId: this.gatewayId,
+        }, async (connection) => {
+          const now = await this.workflow.currentDatabaseTime(connection);
+          const remainingMs = Math.min(
+            request.timeoutMs,
+            request.deadlineAt - now.getTime(),
+          );
+          if (remainingMs <= 0) {
+            throw new AgentRpcTransportError('Agent socket-owner request expired');
+          }
+          const prepared = await this.prepareExecSessionForSocketOwner(
+            session,
+            routedKind,
+            request.payload,
+          );
+          return {
+            response: session.enqueueRpc(
+              routedKind,
+              prepared.wirePayload,
+              remainingMs,
+            ),
+            execSessionId: prepared.execSessionId,
+          };
+        });
+        if (enqueued === null) {
+          throw new AgentRpcTransportError(
+            'Agent socket-owner request was fenced',
+          );
+        }
+        let data: unknown;
+        try {
+          data = await enqueued.response;
+        } catch (error) {
+          if (enqueued.execSessionId) {
+            await this.cleanupExecSessionForSocketOwner(
+              session,
+              enqueued.execSessionId,
+              'Agent exec admission failed',
+            );
+          }
+          throw error;
+        }
+        await this.respondRoutedRpc(request, true, data);
+      } catch (error) {
+        await this.respondRoutedRpc(
+          request,
+          false,
+          undefined,
+          error instanceof Error ? error.message.slice(0, 2_048) : String(error),
+        );
+      }
+    } finally {
+      this.routedRpcInFlight -= 1;
+      const remaining = (this.routedRpcInFlightByServer.get(request.serverId) ?? 1) - 1;
+      if (remaining <= 0) this.routedRpcInFlightByServer.delete(request.serverId);
+      else this.routedRpcInFlightByServer.set(request.serverId, remaining);
+    }
+  }
+
+  private async respondRoutedRpc(
+    request: Extract<RoutedRpcEnvelope, { type: 'request' }>,
+    ok: boolean,
+    data?: unknown,
+    error?: string,
+  ): Promise<void> {
+    await this.redis.publishAddressedRpc(
+      request.replyGatewayId,
+      JSON.stringify({
+        v: 1,
+        type: 'response',
+        requestId: request.requestId,
+        targetGatewayId: request.replyGatewayId,
+        sourceGatewayId: this.gatewayId,
+        sessionId: request.sessionId,
+        sessionGeneration: request.sessionGeneration,
+        ok,
+        data,
+        error,
+      }),
+    );
   }
 
   /** Fire-and-forget: send a message without waiting for acknowledgement. */
   notify(serverId: string, kind: AgentNotifyKind, payload: unknown): void {
+    void this.notifyAsync(serverId, kind, payload).catch((error) => {
+      this.logger.warn(
+        `Agent notification ${kind} failed for ${serverId}: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    });
+  }
+
+  async notifyAsync(
+    serverId: string,
+    kind: AgentNotifyKind,
+    payload: unknown,
+  ): Promise<void> {
     if (!isAgentNotifyKind(kind)) {
       throw new Error(`One-way Agent message ${kind} is not allowed`);
+    }
+    if (!this.runtimeRole.servesGateway()) {
+      await this.routeNotifyToSocketOwner(serverId, kind, payload);
+      return;
     }
     const session = this.sessions.get(serverId);
     if (
       this.sessionAdmissionBlocks.has(serverId)
       || this.proxySnapshots.isServerBlocked(serverId)
       || !session?.dispatchReady
-    ) return;
-    session.send(
+    ) throw new AgentRpcTransportError('Agent offline, initializing, or quarantined');
+    const sent = await this.workflow.runWithAgentSessionSendFence({
+      serverId,
+      id: session.id,
+      generation: session.generation,
+      gatewayId: this.gatewayId,
+    }, () => session.send(
       { id: undefined, ts: Date.now(), kind, payload } as BackendToAgentMessage,
-    );
+    ));
+    if (!sent) throw new AgentRpcTransportError('Agent notification was fenced');
+  }
+
+  socketOwnerId(): string {
+    return this.gatewayId;
+  }
+
+  async notifyExecAsync(
+    sessionId: string,
+    consoleGatewayId: string,
+    serverId: string,
+    kind: 'execInput' | 'execResize' | 'execClose',
+    payload: unknown,
+  ): Promise<void> {
+    const session = this.sessions.get(serverId);
+    if (
+      this.sessionAdmissionBlocks.has(serverId)
+      || !session?.dispatchReady
+      || session.ws.readyState !== WebSocket.OPEN
+    ) {
+      throw new AgentRpcTransportError('Exec session socket owner is unavailable');
+    }
+    const sent = await this.workflow.runWithExecSessionSendFence({
+      sessionId,
+      consoleGatewayId,
+      serverId,
+      agentSessionId: session.id,
+      agentSessionGeneration: session.generation,
+      agentGatewayId: this.gatewayId,
+    }, () => session.send({
+      id: undefined,
+      ts: Date.now(),
+      kind,
+      payload,
+    } as BackendToAgentMessage));
+    if (!sent) {
+      throw new AgentRpcTransportError('Exec session authority is stale');
+    }
+  }
+
+  private async closeOwnedExecSession(
+    sessionId: string,
+    serverId: string,
+    reason: string,
+  ): Promise<void> {
+    const session = this.sessions.get(serverId);
+    if (session?.dispatchReady && session.ws.readyState === WebSocket.OPEN) {
+      await this.workflow.runWithExecSessionOwnerFence({
+        sessionId,
+        serverId,
+        agentSessionId: session.id,
+        agentSessionGeneration: session.generation,
+        agentGatewayId: this.gatewayId,
+      }, () => session.send({
+        id: undefined,
+        ts: Date.now(),
+        kind: 'execClose',
+        payload: { sessionId },
+      } as BackendToAgentMessage));
+    }
+    await this.workflow.closeExecSession(sessionId, reason);
+  }
+
+  private agentSessionBinding(session: AgentSession): {
+    id: string;
+    generation: number;
+    gatewayId: string;
+  } {
+    return {
+      id: session.id,
+      generation: session.generation,
+      gatewayId: this.gatewayId,
+    };
+  }
+
+  private async prepareExecSessionForSocketOwner(
+    session: AgentSession,
+    kind: PublicDirectRpcKind,
+    payload: unknown,
+  ): Promise<{ wirePayload: unknown; execSessionId: string | null }> {
+    if (kind !== 'execStream') {
+      return { wirePayload: payload, execSessionId: null };
+    }
+    const record = payload && typeof payload === 'object'
+      ? payload as Record<string, unknown>
+      : null;
+    const authority = record?._nyabaseExecAuthority;
+    if (!authority || typeof authority !== 'object') {
+      throw new AgentRpcTransportError('Exec session authority is missing');
+    }
+    const typed = authority as Record<string, unknown>;
+    const sessionId = typeof record?.sessionId === 'string' ? record.sessionId : null;
+    const runtimeId = typeof record?.runtimeId === 'string' ? record.runtimeId : null;
+    const userId = typeof typed.userId === 'string' ? typed.userId : null;
+    const containerId = typeof typed.containerId === 'string' ? typed.containerId : null;
+    const authorizationKind = typed.authorizationKind;
+    if (
+      !sessionId
+      || !runtimeId
+      || !userId
+      || !containerId
+      || (
+        authorizationKind !== 'container-owner'
+        && authorizationKind !== 'manage-containers-any'
+      )
+    ) {
+      throw new AgentRpcTransportError('Exec session authority is malformed');
+    }
+    const info = {
+      serverId: session.serverId,
+      userId,
+      containerId,
+      dockerId: runtimeId,
+      authorizationKind,
+      createdAt: Date.now(),
+    } as const;
+    const durable = await this.workflow.findExecSessionForAgent(sessionId, {
+      serverId: session.serverId,
+      agentSessionId: session.id,
+      agentSessionGeneration: session.generation,
+      gatewayId: this.gatewayId,
+    });
+    if (
+      !durable
+      || durable.userId !== userId
+      || durable.containerId !== containerId
+      || durable.runtimeId !== runtimeId
+      || durable.authorizationKind !== authorizationKind
+    ) {
+      throw new AgentRpcTransportError(
+        'Exec session intent does not match the exact socket owner',
+      );
+    }
+    try {
+      this.execSessionRegistry.register(sessionId, info);
+    } catch (error) {
+      await this.workflow.closeExecSession(
+        sessionId,
+        'Socket-owner registry admission failed',
+      );
+      throw error;
+    }
+    const wirePayload = { ...record };
+    delete wirePayload._nyabaseExecAuthority;
+    return { wirePayload, execSessionId: sessionId };
+  }
+
+  private async cleanupExecSessionForSocketOwner(
+    session: AgentSession,
+    sessionId: string,
+    reason: string,
+  ): Promise<void> {
+    this.execSessionRegistry.remove(sessionId);
+    await this.workflow.closeExecSession(sessionId, reason);
+    await this.workflow.runWithAgentSessionSendFence({
+      serverId: session.serverId,
+      id: session.id,
+      generation: session.generation,
+      gatewayId: this.gatewayId,
+    }, () => session.send({
+      id: undefined,
+      ts: Date.now(),
+      kind: 'execClose',
+      payload: { sessionId },
+    } as BackendToAgentMessage));
   }
 
   private sendTask(
     serverId: string,
+    binding: { id: string; generation: number; gatewayId: string },
     payload: Extract<BackendToAgentMessage, { kind: 'task.execute.v1' }>['payload'],
-  ): void {
+  ): boolean {
     const session = this.sessions.get(serverId);
-    if (this.sessionAdmissionBlocks.has(serverId) || !session?.dispatchReady) return;
-    session.send({
+    if (
+      this.sessionAdmissionBlocks.has(serverId)
+      || !session?.dispatchReady
+      || binding.gatewayId !== this.gatewayId
+      || session.id !== binding.id
+      || session.generation !== binding.generation
+    ) return false;
+    return session.send({
       id: undefined,
       ts: Date.now(),
       kind: 'task.execute.v1',
@@ -2597,6 +3808,41 @@ export class AgentGateway implements OnModuleInit, OnModuleDestroy {
     cb: (chunk: LogChunkPayload) => void,
   ): () => void {
     return this.logChunkTracker.onLogChunk(sessionId, serverId, cb);
+  }
+
+  private async handleAuthenticatedLogChunk(
+    session: AgentSession,
+    serverId: string,
+    chunk: LogChunkPayload,
+  ): Promise<void> {
+    if (!await this.workflow.acceptExecLogChunk(chunk.sessionId, {
+      serverId,
+      agentSessionId: session.id,
+      agentSessionGeneration: session.generation,
+      gatewayId: this.gatewayId,
+    })) return;
+    this.dispatchConsoleChunk(serverId, chunk);
+  }
+
+  private dispatchConsoleChunk(serverId: string, chunk: LogChunkPayload): void {
+    try {
+      this.logChunkTracker.dispatch(chunk);
+    } catch (error) {
+      this.logChunkTracker.removeSession(chunk.sessionId);
+      this.execSessionRegistry.remove(chunk.sessionId);
+      void this.workflow.closeExecSession(
+        chunk.sessionId,
+        'Console output consumer failed',
+      );
+      void this.closeOwnedExecSession(
+        chunk.sessionId,
+        serverId,
+        'Console output delivery failed',
+      );
+      this.logger.warn(
+        `Closing failed console stream ${chunk.sessionId}: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
   }
 
   touchLogSession(sessionId: string): void {

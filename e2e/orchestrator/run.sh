@@ -26,6 +26,7 @@ fi
 "$E2E_ROOT/e2e/orchestrator/preflight.sh" "$profile"
 
 cleanup_complete=false
+playwright_started=false
 finished=false
 finish() {
   local incoming=$?
@@ -45,16 +46,23 @@ finish() {
       # independent audit or exact-run teardown. Unsafe evidence is purged only
       # after teardown has had its chance to use the run manifest.
       "$E2E_ROOT/e2e/orchestrator/diagnose.sh" "$run_id" >/dev/null 2>&1 || true
-      local normalization_status=0
-      node "$E2E_ROOT/e2e/orchestrator/sanitize-playwright-artifacts.mjs" \
-        "$runtime_dir" || normalization_status=$?
-      if ((normalization_status != 0)); then
-        artifacts_safe=false
-        log "failure artifact normalization FAILED: runId=$run_id status=$normalization_status"
+      if [[ "$playwright_started" == true ]]; then
+        local normalization_status=0
+        node "$E2E_ROOT/e2e/orchestrator/sanitize-playwright-artifacts.mjs" \
+          "$runtime_dir" || normalization_status=$?
+        if ((normalization_status != 0)); then
+          artifacts_safe=false
+          log "failure artifact normalization FAILED: runId=$run_id status=$normalization_status"
+        fi
       fi
       local audit_status=0
-      node "$E2E_ROOT/e2e/orchestrator/audit-artifacts.mjs" \
-        "$runtime_dir" || audit_status=$?
+      if [[ "$playwright_started" == true ]]; then
+        node "$E2E_ROOT/e2e/orchestrator/audit-artifacts.mjs" \
+          "$runtime_dir" || audit_status=$?
+      else
+        node "$E2E_ROOT/e2e/orchestrator/audit-artifacts.mjs" \
+          "$runtime_dir" --startup-failure || audit_status=$?
+      fi
       if ((audit_status != 0)); then
         artifacts_safe=false
       fi
@@ -84,7 +92,8 @@ if [[ "$profile" == full ]]; then
     "$expected_predecessor_run_id" "$expected_predecessor_receipt_sha256"
 fi
 "$E2E_ROOT/e2e/orchestrator/build.sh" "$run_id"
-"$E2E_ROOT/e2e/orchestrator/up.sh" "$run_id"
+NYABASE_E2E_PARENT_OWNS_CLEANUP=true \
+  "$E2E_ROOT/e2e/orchestrator/up.sh" "$run_id"
 load_run "$run_id"
 
 # shellcheck disable=SC1090
@@ -117,6 +126,7 @@ rm -f \
 node "$E2E_ROOT/e2e/orchestrator/fixture-evidence.mjs" emit \
   "$NYABASE_E2E_RUNTIME_DIR" "$profile"
 
+playwright_started=true
 set +e
 bash "$E2E_ROOT/e2e/orchestrator/run-playwright-safe.sh" \
   pnpm --dir "$E2E_ROOT" --filter @nyabase/e2e run "test:$profile"

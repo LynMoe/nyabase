@@ -1,14 +1,8 @@
 import { Module, forwardRef } from '@nestjs/common';
-import { TypeOrmModule } from '@nestjs/typeorm';
 import { GroupsService } from './groups.service.js';
 import { GroupsController } from './groups.controller.js';
 import { UserGrantsController } from './user-grants.controller.js';
 import { MeAccessController } from './me-access.controller.js';
-import { GroupEntity } from '../entities/group.entity.js';
-import { GroupMemberEntity } from '../entities/group-member.entity.js';
-import { ServerGrantEntity } from '../entities/server-grant.entity.js';
-import { ImageGrantEntity } from '../entities/image-grant.entity.js';
-import { UserEntity } from '../entities/user.entity.js';
 import { AccessModule } from '../access/access.module.js';
 import { AuthModule } from '../auth/auth.module.js';
 import { AuditModule } from '../audit/audit.module.js';
@@ -18,13 +12,6 @@ import { ProxySnapshotNotifierModule } from '../proxy-snapshots/proxy-snapshot-n
 
 @Module({
   imports: [
-    TypeOrmModule.forFeature([
-      GroupEntity,
-      GroupMemberEntity,
-      ServerGrantEntity,
-      ImageGrantEntity,
-      UserEntity,
-    ]),
     forwardRef(() => AccessModule),
     forwardRef(() => AuthModule),
     forwardRef(() => AuditModule),

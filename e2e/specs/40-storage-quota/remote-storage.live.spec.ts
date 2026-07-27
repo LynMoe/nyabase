@@ -649,8 +649,12 @@ test.describe('40 real remote storage behaviors', () => {
       let grantCreated = false;
       let primaryFailure: { error: unknown } | null = null;
       try {
-        await assignAndWait(adminApi, topologyProvider, mount.id, 'nfs', 'node1', node1.serverId);
-        await assignAndWait(adminApi, topologyProvider, mount.id, 'nfs', 'node2', node2.serverId);
+        await assignAndWait(
+          adminApi, topologyProvider, mount.id, 'nfs', 'node1', node1.serverId,
+        );
+        await assignAndWait(
+          adminApi, topologyProvider, mount.id, 'nfs', 'node2', node2.serverId,
+        );
         grantCreated = true;
         await createRemoteGrant(adminApi, mount.id, seedState.adminUserId);
         dataDirCreated = true;
@@ -705,7 +709,9 @@ test.describe('40 real remote storage behaviors', () => {
       } finally {
         await runCleanupStepsPreservingPrimary('Remote assignment-isolation cleanup failed', [
           async () => {
-            if (containerId) await cleanupContainerThroughProductApi(adminApi, containerId);
+            if (containerId) {
+              await cleanupContainerThroughProductApi(adminApi, containerId);
+            }
           },
           async () => {
             if (dataDirCreated) await deleteRemoteDataDir(adminApi, dataDirInput);
@@ -715,7 +721,9 @@ test.describe('40 real remote storage behaviors', () => {
               await deleteRemoteGrant(adminApi, mount.id, seedState.adminUserId);
             }
           },
-          async () => cleanupRemoteMount(adminApi, topologyProvider, mount.id, 'nfs'),
+          async () => cleanupRemoteMount(
+            adminApi, topologyProvider, mount.id, 'nfs',
+          ),
         ], primaryFailure);
       }
     },

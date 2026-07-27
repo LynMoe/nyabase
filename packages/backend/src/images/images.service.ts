@@ -1,12 +1,14 @@
 import { ConflictException, ForbiddenException, Injectable, Logger, NotFoundException } from '@nestjs/common';
-import { InjectRepository } from '@nestjs/typeorm';
-import { DataSource, Like, Repository } from 'typeorm';
 import { v4 as uuidv4 } from 'uuid';
-import { ImageEntity } from '../entities/image.entity.js';
-import { ServerEntity } from '../entities/server.entity.js';
+import type { ImageRecord } from '../domain/domain-records.js';
 import { AgentGateway } from '../gateway/agent-gateway.js';
-import { AgentTasksService } from '../agent-tasks/agent-tasks.service.js';
 import { ResourceKeyService } from '../agent-tasks/resource-key.service.js';
+import { WorkflowEnqueuePort } from '../agent-tasks/workflow-enqueue.port.js';
+import {
+  WorkflowRepository,
+  type WorkflowTaskSummary,
+} from '../agent-tasks/workflow.repository.js';
+import { AGENT_TASK_MIN_RETENTION_MS } from '../agent-tasks/agent-task-retention.service.js';
 import { AccessResolverService } from '../access/access-resolver.service.js';
 import {
   AgentTaskKind,
@@ -20,13 +22,11 @@ import {
 } from '@nyabase/common';
 import type { ImageRuntimeOverrides } from '@nyabase/common';
 import { SshProxyGateway } from '../ssh/ssh-proxy-gateway.js';
-import { ContainerEntity } from '../entities/container.entity.js';
-import { ImageGrantEntity } from '../entities/image-grant.entity.js';
-import { runSerializedTransaction } from '../database/serialized-transaction.js';
 import { postCommitBestEffort } from '../common/post-commit.js';
-import { ResourceLockEntity } from '../entities/resource-lock.entity.js';
 import { AuditService } from '../audit/audit.service.js';
 import { AuditAction } from '@nyabase/common';
+import { InfrastructureRepository } from '../infrastructure/infrastructure.repository.js';
+import { PgTransactionManager } from '../persistence-pg/transaction.js';
 
 const DEFAULT_RUNTIME_OVERRIDES: ImageRuntimeOverrides = {
   uid: 0,
@@ -57,7 +57,7 @@ function normalizeRuntimeOverrides(
   };
 }
 
-function advanceImageRevision(image: ImageEntity): void {
+function advanceImageRevision(image: ImageRecord): void {
   if (!Number.isSafeInteger(image.revision) || image.revision < 1
     || image.revision === Number.MAX_SAFE_INTEGER) {
     throw new ConflictException({
@@ -91,15 +91,13 @@ export class ImagesService {
   private readonly logger = new Logger(ImagesService.name);
 
   constructor(
-    @InjectRepository(ImageEntity)
-    private repo: Repository<ImageEntity>,
-    @InjectRepository(ServerEntity)
-    private serversRepo: Repository<ServerEntity>,
+    private readonly infrastructure: InfrastructureRepository,
     private agentGateway: AgentGateway,
-    private tasks: AgentTasksService,
+    private readonly workflow: WorkflowEnqueuePort,
+    private readonly workflowRepository: WorkflowRepository,
     private resourceKeys: ResourceKeyService,
     private sshProxyGateway: SshProxyGateway,
-    private dataSource: DataSource,
+    private readonly transactions: PgTransactionManager,
     private auditService: AuditService,
     private accessResolver: AccessResolverService,
   ) {}
@@ -113,54 +111,60 @@ export class ImagesService {
   }) {
     const runtimeOverrides = normalizeRuntimeOverrides(dto.runtimeOverrides);
     const dockerImage = normalizeDockerImageRef(dto.dockerImage);
-    const saved = await runSerializedTransaction(this.dataSource, async (manager) => {
+    const saved = await this.transactions.run(async (transaction) => {
       await this.accessResolver.assertActorCapabilitiesInTransaction(
-        manager, actorId, [Capability.ManageImages],
+        transaction, actorId, [Capability.ManageImages],
       );
-      if (await manager.count(ImageEntity) >= MAX_PLATFORM_IMAGES) {
+      await this.infrastructure.lockImageCapacity(transaction);
+      if (await this.infrastructure.countImages(transaction) >= MAX_PLATFORM_IMAGES) {
         throw new ConflictException({
           code: 'IMAGE_CAPACITY_REACHED',
           message: `At most ${MAX_PLATFORM_IMAGES} images are supported`,
         });
       }
-      if (await manager.existsBy(ImageEntity, { dockerImage })) {
-        throw new ConflictException('Docker image reference already has a logical owner');
-      }
-      if (await manager.existsBy(ImageEntity, { name: dto.name })) {
-        throw new ConflictException('Image name already has a logical owner');
-      }
-      return manager.save(ImageEntity, manager.create(ImageEntity, {
+      const created = await this.infrastructure.insertImage({
         id: uuidv4(),
-        ...dto,
+        name: dto.name,
         dockerImage,
         runtimeOverrides,
         description: dto.description ?? null,
+        isActive: true,
         disableSsh: dto.disableSsh ?? false,
-        revision: 1,
-      }));
+      }, transaction);
+      await this.auditService.append(
+        transaction,
+        actorId,
+        AuditAction.CreateImage,
+        created.id,
+        'image',
+        {
+          name: created.name,
+          dockerImage: created.dockerImage,
+          disableSsh: created.disableSsh,
+        },
+      );
+      return created;
+    }).catch((error: unknown) => {
+      if (!isPgUniqueViolation(error)) throw error;
+      const constraint = (error as { constraint?: string }).constraint ?? '';
+      throw new ConflictException(
+        constraint.includes('docker_image')
+          ? 'Docker image reference already has a logical owner'
+          : 'Image name already has a logical owner',
+      );
     });
     await postCommitBestEffort(
       'Image create SSH snapshot broadcast',
       () => this.sshProxyGateway.broadcastSnapshot(),
       this.logger,
     );
-    await postCommitBestEffort(
-      'Image create audit',
-      () => this.auditService.log(actorId, AuditAction.CreateImage, saved.id, 'image', {
-        name: saved.name,
-        dockerImage: saved.dockerImage,
-        disableSsh: saved.disableSsh,
-      }),
-      this.logger,
-    );
     return this.toAdminDto(saved);
   }
 
   async findAllAdmin(activeOnly = false): Promise<AdminImageDto[]> {
-    const rows = await this.repo.find({
-      ...(activeOnly ? { where: { isActive: true, deleting: false } } : {}),
-      order: { name: 'ASC', id: 'ASC' },
-    });
+    const rows = activeOnly
+      ? await this.infrastructure.listActiveImages()
+      : await this.infrastructure.listImages();
     return rows.map((image) => this.toAdminDto(image));
   }
 
@@ -176,21 +180,15 @@ export class ImagesService {
       for (const id of s.allowedImageIds) imageIdSet.add(id);
     }
     if (imageIdSet.size === 0) return [];
-    const ids = Array.from(imageIdSet);
-    if (activeOnly) {
-      const rows = await this.repo.find({
-        where: ids.map((id) => ({ id, isActive: true, deleting: false })),
-      });
-      return rows.map((image) => this.toDto(image));
-    }
-    const rows = await this.repo.find({
-      where: ids.map((id) => ({ id, deleting: false })),
-    });
+    const rows = (await this.infrastructure.listImages()).filter((image) =>
+      imageIdSet.has(image.id)
+      && !image.deleting
+      && (!activeOnly || image.isActive));
     return rows.map((image) => this.toDto(image));
   }
 
   async findById(id: string) {
-    const img = await this.repo.findOne({ where: { id } });
+    const img = await this.infrastructure.findImageById(id);
     if (!img) throw new NotFoundException('Image not found');
     return img;
   }
@@ -199,7 +197,7 @@ export class ImagesService {
     return this.toAdminDto(await this.findById(id));
   }
 
-  toDto(image: ImageEntity): ImageDto {
+  toDto(image: ImageRecord): ImageDto {
     return {
       id: image.id,
       name: image.name,
@@ -219,11 +217,11 @@ export class ImagesService {
     isActive?: boolean;
     disableSsh?: boolean;
   }, expectedRevision: number) {
-    const saved = await runSerializedTransaction(this.dataSource, async (manager) => {
+    const saved = await this.transactions.run(async (transaction) => {
       await this.accessResolver.assertActorCapabilitiesInTransaction(
-        manager, actorId, [Capability.ManageImages],
+        transaction, actorId, [Capability.ManageImages],
       );
-      const img = await manager.findOneBy(ImageEntity, { id });
+      const img = await this.infrastructure.findImageById(id, transaction);
       if (!img) throw new NotFoundException('Image not found');
       if (img.revision !== expectedRevision) {
         throw new ConflictException({
@@ -243,80 +241,129 @@ export class ImagesService {
           'Docker image reference is immutable; create a new image and delete the old image after use',
         );
       }
-      if (dto.name !== undefined && dto.name !== img.name) {
-        if (await manager.existsBy(ImageEntity, { name: dto.name })) {
-          throw new ConflictException('Image name already has a logical owner');
-        }
-        img.name = dto.name;
+      advanceImageRevision({ ...img });
+      const updated = await this.infrastructure.updateImageCas(
+        id,
+        expectedRevision,
+        {
+          ...(dto.name !== undefined ? { name: dto.name } : {}),
+          ...(dto.runtimeOverrides !== undefined
+            ? { runtimeOverrides: normalizeRuntimeOverrides(dto.runtimeOverrides) }
+            : {}),
+          ...(dto.description !== undefined ? { description: dto.description ?? null } : {}),
+          ...(dto.isActive !== undefined ? { isActive: dto.isActive } : {}),
+          ...(dto.disableSsh !== undefined ? { disableSsh: dto.disableSsh } : {}),
+        },
+        transaction,
+      );
+      if (!updated) {
+        const current = await this.infrastructure.findImageById(id, transaction);
+        throw new ConflictException({
+          code: 'IMAGE_REVISION_CONFLICT',
+          message: 'Image changed; reload and resolve the conflicting fields',
+          current: current ? this.toAdminDto(current) : null,
+        });
       }
-      if (dto.runtimeOverrides !== undefined) {
-        img.runtimeOverrides = normalizeRuntimeOverrides(dto.runtimeOverrides);
+      await this.auditService.append(
+        transaction,
+        actorId,
+        AuditAction.UpdateImage,
+        id,
+        'image',
+        dto,
+      );
+      return updated;
+    }).catch((error: unknown) => {
+      if (isPgUniqueViolation(error)) {
+        throw new ConflictException('Image name already has a logical owner');
       }
-      if (dto.description !== undefined) img.description = dto.description ?? null;
-      if (dto.isActive !== undefined) img.isActive = dto.isActive;
-      if (dto.disableSsh !== undefined) img.disableSsh = dto.disableSsh;
-      advanceImageRevision(img);
-      return manager.save(ImageEntity, img);
+      throw error;
     });
     await postCommitBestEffort(
       'Image update SSH snapshot broadcast',
       () => this.sshProxyGateway.broadcastSnapshot(),
       this.logger,
     );
-    await postCommitBestEffort(
-      'Image update audit',
-      () => this.auditService.log(actorId, AuditAction.UpdateImage, id, 'image', dto),
-      this.logger,
-    );
     return this.toAdminDto(saved);
   }
 
   async delete(actorId: string, id: string) {
-    const result = await runSerializedTransaction(this.dataSource, async (manager) => {
+    const result = await this.transactions.run(async (transaction) => {
       await this.accessResolver.assertActorCapabilitiesInTransaction(
-        manager, actorId, [Capability.ManageImages],
+        transaction, actorId, [Capability.ManageImages],
       );
-      const img = await manager.findOneBy(ImageEntity, { id });
+      const img = await this.infrastructure.findImageById(id, transaction);
       if (!img) throw new NotFoundException('Image not found');
-      const [containerCount, grantCount, retainedLockCount, servers] = await Promise.all([
-        manager.countBy(ContainerEntity, { imageId: id }),
-        manager.count(ImageGrantEntity, { where: { imageId: id } }),
-        manager.count(ResourceLockEntity, {
-          where: { resourceKey: Like(`image:%:${id}`) },
-        }),
-        manager.find(ServerEntity, { order: { id: 'ASC' } }),
-      ]);
-      if (containerCount > 0 || grantCount > 0 || retainedLockCount > 0) {
+      const grant = await transaction
+        .selectFrom('iam.image_grants')
+        .select('id')
+        .where('image_id', '=', id)
+        .executeTakeFirst();
+      if (grant) {
         throw new ConflictException('Image is still referenced by a container, grant, or retained task lock');
       }
-
-      const cleanupGeneration = img.cleanupGeneration + 1;
-      img.deleting = true;
-      img.isActive = false;
-      img.cleanupGeneration = cleanupGeneration;
-      advanceImageRevision(img);
-      await manager.save(ImageEntity, img);
-
+      const [container, retainedClaim] = await Promise.all([
+        transaction.selectFrom('control.containers')
+          .select('id')
+          .where('image_id', '=', id)
+          .limit(1)
+          .executeTakeFirst(),
+        transaction.selectFrom('workflow.resource_claims')
+          .select('resource_key')
+          .where('resource_key', 'like', `image:%:${id}`)
+          .limit(1)
+          .executeTakeFirst(),
+      ]);
+      if (container || retainedClaim) {
+        throw new ConflictException(
+          'Image is still referenced by a container, grant, or retained task lock',
+        );
+      }
+      const servers = await this.infrastructure.listServers(transaction);
+      const deleting = await this.infrastructure.markImageDeletingCas(
+        id,
+        img.revision,
+        transaction,
+      );
+      if (!deleting) throw new ConflictException('Image cleanup is already in progress');
       const cleanupTasks: ImagePullTaskRef[] = [];
       for (const server of servers) {
-        const task = await this.tasks.enqueueInTransaction(manager, {
+        const task = await this.workflow.enqueueInTransaction(transaction, {
           kind: AgentTaskKind.ImageEnsureAbsent,
           serverId: server.id,
           resourceType: 'image',
-          resourceId: img.id,
+          resourceId: deleting.id,
           requestedBy: actorId,
-          request: { action: 'delete_image', dockerRef: img.dockerImage, cleanupGeneration },
-          payload: { dockerRef: img.dockerImage, imageId: img.id },
-          resourceKeys: [this.resourceKeys.image(server.id, img.id)],
+          request: {
+            action: 'delete_image',
+            dockerRef: deleting.dockerImage,
+            cleanupGeneration: deleting.cleanupGeneration,
+          },
+          payload: {
+            dockerRef: deleting.dockerImage,
+            imageId: deleting.id,
+          },
+          resourceKeys: [this.resourceKeys.image(server.id, deleting.id)],
         });
         cleanupTasks.push({ ...task, serverId: server.id });
       }
-      if (servers.length === 0) await manager.remove(ImageEntity, img);
+      if (servers.length === 0) {
+        await this.infrastructure.deleteImage(id, transaction);
+      }
+      await this.auditService.append(
+        transaction,
+        actorId,
+        AuditAction.DeleteImage,
+        id,
+        'image',
+        {
+          name: deleting.name,
+          dockerImage: deleting.dockerImage,
+          cleanupGeneration: deleting.cleanupGeneration,
+        },
+      );
       return {
-        tasks: cleanupTasks,
-        name: img.name,
-        dockerImage: img.dockerImage,
-        cleanupGeneration,
+        cleanupTasks,
       };
     });
     await postCommitBestEffort(
@@ -324,27 +371,17 @@ export class ImagesService {
       () => this.sshProxyGateway.broadcastSnapshot(),
       this.logger,
     );
-    await postCommitBestEffort(
-      'Image delete audit',
-      () => this.auditService.log(actorId, AuditAction.DeleteImage, id, 'image', {
-        name: result.name,
-        dockerImage: result.dockerImage,
-        cleanupGeneration: result.cleanupGeneration,
-        taskIds: result.tasks.map((task) => task.taskId),
-      }),
-      this.logger,
-    );
-    return { tasks: result.tasks };
+    return { tasks: result.cleanupTasks };
   }
 
   /** Get per-server status for an image (present / pulling / absent) */
-  async getServerStatuses(image: ImageEntity): Promise<ImageServerStatus[]> {
-    const servers = await this.serversRepo.find({ order: { name: 'ASC' } });
-    const recentTasks = await this.tasks.listPurposeSafe({
+  async getServerStatuses(image: ImageRecord): Promise<ImageServerStatus[]> {
+    const servers = await this.infrastructure.listServers();
+    const recentTasks = (await this.workflowRepository.listTasks({
       resourceType: 'image',
       resourceId: image.id,
       limit: 100,
-    });
+    })).map((task) => this.toUserTask(task));
     const latestTaskByServer = new Map<string, UserAgentTaskDto>();
     for (const task of recentTasks) {
       if (!latestTaskByServer.has(task.serverId)) latestTaskByServer.set(task.serverId, task);
@@ -374,39 +411,60 @@ export class ImagesService {
   /** Trigger pull on one or all servers */
   async pullOnServers(
     actorId: string,
-    image: ImageEntity,
+    image: ImageRecord,
     serverIds?: string[],
   ): Promise<ImagePullResponse> {
     const targetIds = serverIds
       ? [...new Set(serverIds)]
-      : (await this.serversRepo.find({ order: { name: 'ASC' } })).map((server) => server.id);
+      : (await this.infrastructure.listServers()).map((server) => server.id);
 
     const tasks: ImagePullTaskRef[] = [];
     const rejected: ImagePullResponse['rejected'] = [];
 
     for (const serverId of targetIds) {
       try {
-        const task = await this.tasks.enqueue({
-          kind: AgentTaskKind.ImageEnsurePresent,
-          serverId,
-          resourceType: 'image',
-          resourceId: image.id,
-          requestedBy: actorId,
-          payload: { dockerRef: image.dockerImage, imageId: image.id },
-          resourceKeys: [this.resourceKeys.image(serverId, image.id)],
-          beforeCommit: async (manager) => {
-            await this.accessResolver.assertActorCapabilitiesInTransaction(
-              manager, actorId, [Capability.ManageImages],
+        const task = await this.transactions.run(async (transaction) => {
+          await this.accessResolver.assertActorCapabilitiesInTransaction(
+            transaction,
+            actorId,
+            [Capability.ManageImages],
+          );
+          const current = await this.infrastructure.findImageById(
+            image.id,
+            transaction,
+          );
+          if (!current) throw new NotFoundException('Image not found');
+          if (current.deleting) {
+            throw new ConflictException('Image cleanup is in progress');
+          }
+          if (current.dockerImage !== image.dockerImage) {
+            throw new ConflictException(
+              'Image reference changed while preparing pull; retry',
             );
-            const current = await manager.findOneBy(ImageEntity, { id: image.id });
-            if (!current) throw new NotFoundException('Image not found');
-            if (current.deleting) {
-              throw new ConflictException('Image cleanup is in progress');
-            }
-            if (current.dockerImage !== image.dockerImage) {
-              throw new ConflictException('Image reference changed while preparing pull; retry');
-            }
-          },
+          }
+          const task = await this.workflow.enqueueInTransaction(transaction, {
+            kind: AgentTaskKind.ImageEnsurePresent,
+            serverId,
+            resourceType: 'image',
+            resourceId: image.id,
+            requestedBy: actorId,
+            payload: { dockerRef: image.dockerImage, imageId: image.id },
+            resourceKeys: [this.resourceKeys.image(serverId, image.id)],
+          });
+          await this.auditService.append(
+            transaction,
+            actorId,
+            AuditAction.PullImage,
+            image.id,
+            'image',
+            {
+              dockerImage: image.dockerImage,
+              requestedServerIds: targetIds,
+              serverId,
+              taskId: task.taskId,
+            },
+          );
+          return task;
         });
         tasks.push({ ...task, serverId });
       } catch (err) {
@@ -417,20 +475,10 @@ export class ImagesService {
       }
     }
 
-    await postCommitBestEffort(
-      'Image pull audit',
-      () => this.auditService.log(actorId, AuditAction.PullImage, image.id, 'image', {
-        dockerImage: image.dockerImage,
-        requestedServerIds: targetIds,
-        taskIds: tasks.map((task) => task.taskId),
-        rejected,
-      }),
-      this.logger,
-    );
     return { tasks, rejected };
   }
 
-  private toAdminDto(image: ImageEntity): AdminImageDto {
+  private toAdminDto(image: ImageRecord): AdminImageDto {
     return {
       ...this.toDto(image),
       revision: image.revision,
@@ -440,4 +488,51 @@ export class ImagesService {
       updatedAt: image.updatedAt.toISOString(),
     };
   }
+
+  private toUserTask(task: WorkflowTaskSummary): UserAgentTaskDto {
+    const error = task.error
+      ? task.failureStage === 'dispatch'
+        ? {
+            code: 'TASK_DISPATCH_FAILED' as const,
+            message: 'The task could not be sent to the server',
+          }
+        : task.failureStage === 'agent'
+          ? {
+              code: 'TASK_EXECUTION_FAILED' as const,
+              message: 'The server could not complete the task',
+            }
+          : task.failureStage === 'finalizer'
+            ? {
+                code: 'TASK_FINALIZATION_FAILED' as const,
+                message:
+                  'The server completed the task, but control-plane finalization failed',
+              }
+            : { code: 'TASK_FAILED' as const, message: 'The task failed' }
+      : null;
+    return {
+      id: task.id,
+      kind: task.kind as AgentTaskKind,
+      status: task.status,
+      resourceType: task.resourceType,
+      resourceId: task.resourceId,
+      serverId: task.serverId,
+      error,
+      failureStage: task.failureStage,
+      createdAt: task.createdAt.toISOString(),
+      startedAt: task.startedAt?.toISOString() ?? null,
+      lastSentAt: task.lastSentAt?.toISOString() ?? null,
+      completedAt: task.completedAt?.toISOString() ?? null,
+      retentionUntil: task.completedAt
+        ? new Date(
+            task.completedAt.getTime() + AGENT_TASK_MIN_RETENTION_MS,
+          ).toISOString()
+        : null,
+    };
+  }
+}
+
+function isPgUniqueViolation(error: unknown): boolean {
+  return !!error
+    && typeof error === 'object'
+    && (error as { code?: unknown }).code === '23505';
 }

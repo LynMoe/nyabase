@@ -15,7 +15,7 @@ import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard.js';
 import { CapabilitiesGuard } from '../auth/guards/capabilities.guard.js';
 import { RequireCaps } from '../auth/decorators/require-caps.decorator.js';
 import { CurrentUser } from '../auth/decorators/current-user.decorator.js';
-import { UserEntity } from '../entities/user.entity.js';
+import type { UserRecord } from '../domain/domain-records.js';
 import { Capability, zResourceIdentity } from '@nyabase/common';
 import { z } from 'zod';
 import { parseMountSourceGrantTarget } from './mount-source-grant-target.js';
@@ -50,7 +50,7 @@ export class AdminMountSourcesController {
     @Param('sourceKind') sourceKind: string,
     @Param('sourceId') sourceId: string,
     @Body() body: unknown,
-    @CurrentUser() actor: UserEntity,
+    @CurrentUser() actor: UserRecord,
   ) {
     const { scope, scopeId, serverId } = zGrantBody.parse(body);
     return this.mountSourcesService.upsertGrant(
@@ -70,7 +70,7 @@ export class AdminMountSourcesController {
     @Param('scope') scope: string,
     @Param('scopeId') scopeId: string,
     @Query('serverId') serverId: string | undefined,
-    @CurrentUser() actor: UserEntity,
+    @CurrentUser() actor: UserRecord,
   ) {
     const parsedScope = z.enum(['user', 'group']).parse(scope);
     const parsedScopeId = zResourceIdentity.parse(scopeId);

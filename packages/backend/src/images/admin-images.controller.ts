@@ -13,7 +13,7 @@ import {
   zUpdateAdminImageRequest,
 } from '@nyabase/common';
 import { CurrentUser } from '../auth/decorators/current-user.decorator.js';
-import { UserEntity } from '../entities/user.entity.js';
+import type { UserRecord } from '../domain/domain-records.js';
 
 @Controller('admin/images')
 @UseGuards(JwtAuthGuard, CapabilitiesGuard)
@@ -30,7 +30,7 @@ export class AdminImagesController {
 
   @Post()
   @RequireCaps(Capability.ManageImages)
-  async create(@Body() body: unknown, @CurrentUser() actor: UserEntity) {
+  async create(@Body() body: unknown, @CurrentUser() actor: UserRecord) {
     const dto = zCreateImageRequest.parse(body);
     return this.imagesService.create(actor.id, dto);
   }
@@ -53,7 +53,7 @@ export class AdminImagesController {
   async pull(
     @Param('id') id: string,
     @Body() body: unknown,
-    @CurrentUser() actor: UserEntity,
+    @CurrentUser() actor: UserRecord,
   ) {
     const dto = zPullImageRequest.parse(body);
     const img = await this.imagesService.findById(id);
@@ -65,7 +65,7 @@ export class AdminImagesController {
   async update(
     @Param('id') id: string,
     @Body() body: unknown,
-    @CurrentUser() actor: UserEntity,
+    @CurrentUser() actor: UserRecord,
   ) {
     const { expectedRevision, ...dto } = zUpdateAdminImageRequest.parse(body);
     return this.imagesService.update(actor.id, id, dto, expectedRevision);
@@ -74,7 +74,7 @@ export class AdminImagesController {
   @Delete(':id')
   @RequireCaps(Capability.ManageImages)
   @HttpCode(202)
-  async delete(@Param('id') id: string, @CurrentUser() actor: UserEntity) {
+  async delete(@Param('id') id: string, @CurrentUser() actor: UserRecord) {
     return this.imagesService.delete(actor.id, id);
   }
 }

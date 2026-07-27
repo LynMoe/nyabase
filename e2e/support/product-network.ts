@@ -5,7 +5,7 @@ import {
   uniqueContainerLeaseName,
   type RunningContainerLease,
 } from './container-lease.js';
-import { executeThroughConsole } from './console.js';
+import { executeThroughConsole, type ConsoleSession } from './console.js';
 import type { AgentTaskView, ContainerView } from './durable-api.js';
 import { expectJson } from './http.js';
 import { requireRuntimeEnv } from './runtime-env.js';
@@ -156,7 +156,7 @@ export async function runContainerShell(
   input: string,
   deadline: ContainerDeadline,
 ): Promise<{ output: string; exitCode: number }> {
-  const session = await expectJson<{ sessionId: string }>(
+  const session = await expectJson<ConsoleSession>(
     await api.post(`/api/v2/containers/${runtime.view.id}/exec-sessions`, {
       data: { shell: '/bin/sh', tty: false },
       timeout: deadline.remaining(`open console for ${runtime.view.id}`, 30_000),
@@ -166,7 +166,7 @@ export async function runContainerShell(
   return executeThroughConsole(
     page,
     requireRuntimeEnv('E2E_BASE_URL'),
-    session.sessionId,
+    session,
     accessToken,
     input,
     deadline.remaining(`execute console for ${runtime.view.id}`, 30_000),

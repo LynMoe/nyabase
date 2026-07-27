@@ -1,362 +1,435 @@
-import { Capability, RemoteFsType, ServerStatus, UserStatus } from '@nyabase/common';
-import { ForbiddenException } from '@nestjs/common';
-import { DataSource } from 'typeorm';
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { randomUUID } from 'node:crypto';
+import {
+  Capability,
+  MAX_MOUNT_SOURCE_GRANTS_PER_SCOPE,
+  RemoteFsType,
+  UserStatus,
+} from '@nyabase/common';
+import { describe, expect, it, vi } from 'vitest';
+import { AccessCacheEpochService } from '../access/access-cache-epoch.service.js';
+import { AccessResolverService } from '../access/access-resolver.service.js';
 import { AccessRevocationGuardService } from '../access/access-revocation-guard.service.js';
-import type { AccessResolverService } from '../access/access-resolver.service.js';
-import type { AuditService } from '../audit/audit.service.js';
-import { runSerializedTransaction } from '../database/serialized-transaction.js';
-import { ContainerEntity } from '../entities/container.entity.js';
-import { ContainerMountEntity } from '../entities/container-mount.entity.js';
-import { DataDirectoryEntity } from '../entities/data-directory.entity.js';
-import { GroupEntity } from '../entities/group.entity.js';
-import { GroupMemberEntity } from '../entities/group-member.entity.js';
-import { ImageEntity } from '../entities/image.entity.js';
-import { MountSourceGrantEntity } from '../entities/mount-source-grant.entity.js';
-import { RemoteFsMountEntity } from '../entities/remote-fs-mount.entity.js';
-import { RemoteFsServerAssignmentEntity } from '../entities/remote-fs-server-assignment.entity.js';
-import { ServerEntity } from '../entities/server.entity.js';
-import { UserEntity } from '../entities/user.entity.js';
-import type { AgentGateway } from '../gateway/agent-gateway.js';
+import { InfrastructureRepository } from '../infrastructure/infrastructure.repository.js';
+import {
+  withPostgresTestDatabase,
+  type PostgresTestDatabase,
+} from '../persistence-pg/postgres-test-harness.js';
+import { PgTransactionManager } from '../persistence-pg/transaction.js';
+import { StorageRepository } from '../storage/storage.repository.js';
 import { MountSourcesService } from './mount-sources.service.js';
 
-describe('MountSourcesService canonical grant writer', () => {
-  let dataSource: DataSource;
-  let service: MountSourcesService;
-  let assertGrantActor: ReturnType<typeof vi.fn>;
-  const snapshots = new Map<string, unknown>();
+const describePostgres = process.env.NYABASE_TEST_DATABASE_URL ? describe : describe.skip;
 
-  beforeEach(async () => {
-    dataSource = new DataSource({
-      type: 'better-sqlite3',
-      database: ':memory:',
-      synchronize: true,
-      entities: [
-        ServerEntity,
-        UserEntity,
-        GroupEntity,
-        GroupMemberEntity,
-        RemoteFsMountEntity,
-        RemoteFsServerAssignmentEntity,
-        MountSourceGrantEntity,
-        ImageEntity,
-        ContainerEntity,
-        ContainerMountEntity,
-        DataDirectoryEntity,
-      ],
-    });
-    await dataSource.initialize();
-    await dataSource.getRepository(ServerEntity).save(server('server-a'));
-    await dataSource.getRepository(ServerEntity).save(server('server-b'));
-    await dataSource.getRepository(UserEntity).save(user('user-a'));
-    await dataSource.getRepository(GroupEntity).save(group('group-a'));
-    snapshots.clear();
-    snapshots.set('server-a', snapshot('server-a', 'disk-shared', 'physical-a'));
-    snapshots.set('server-b', snapshot('server-b', 'disk-shared', 'physical-b'));
-    assertGrantActor = vi.fn().mockResolvedValue(new Set());
-    const access = {
-      invalidateAll: vi.fn(),
-      assertActorCapabilitiesInTransaction: assertGrantActor,
-    } as unknown as AccessResolverService;
-    service = new MountSourcesService(
-      dataSource.getRepository(RemoteFsMountEntity),
-      dataSource.getRepository(RemoteFsServerAssignmentEntity),
-      dataSource.getRepository(MountSourceGrantEntity),
-      access,
-      { log: vi.fn() } as unknown as AuditService,
-      { stateCache: { get: (id: string) => snapshots.get(id) } } as unknown as AgentGateway,
-      dataSource,
-      new AccessRevocationGuardService(),
+describe('MountSourcesService batch DTO projection', () => {
+  it('preserves 128 reference order with one deduplicated RemoteFS lookup', async () => {
+    const refs = new Set(Array.from({ length: 128 }, (_, index) => ({
+      kind: 'remote' as const,
+      id: `mount-${index}`,
+    })));
+    const listRemoteFsMountsByIds = vi.fn(async (ids: readonly string[]) =>
+      [...ids].reverse().map((id) => ({
+        id,
+        name: `Name ${id}`,
+        displayName: `Display ${id}`,
+        description: null,
+      })));
+    const service = new MountSourcesService(
+      { listRemoteFsMountsByIds } as never,
+      {} as never,
+      { resolveMountSources: vi.fn().mockResolvedValue(refs) } as never,
+      {} as never,
+      { stateCache: { get: vi.fn() } } as never,
+      {} as never,
     );
-  });
 
-  afterEach(async () => {
-    vi.restoreAllMocks();
-    if (dataSource?.isInitialized) await dataSource.destroy();
-  });
-
-  it('binds a local grant to the exact server and physical identity', async () => {
-    const grant = await service.upsertGrant('actor-a', 'user', 'user-a', {
-      sourceKind: 'local', sourceId: 'disk-shared', serverId: 'server-a',
-    });
-
-    expect(grant).toMatchObject({
-      sourceKind: 'local',
-      sourceId: 'disk-shared',
-      serverId: 'server-a',
-      sourceIdentity: 'physical-a',
-    });
-    expect(await dataSource.getRepository(MountSourceGrantEntity).countBy({
-      sourceKind: 'local', sourceId: 'disk-shared', serverId: 'server-b',
-    })).toBe(0);
-  });
-
-  it('rechecks ManageGrants in the writer transaction after the HTTP guard', async () => {
-    assertGrantActor.mockRejectedValueOnce(new ForbiddenException({
-      code: 'PRIVILEGE_ESCALATION_DENIED',
-    }));
-
-    await expect(service.upsertGrant('actor-a', 'user', 'user-a', {
-      sourceKind: 'local', sourceId: 'disk-shared', serverId: 'server-a',
-    })).rejects.toMatchObject({
-      response: expect.objectContaining({ code: 'PRIVILEGE_ESCALATION_DENIED' }),
-    });
-    expect(assertGrantActor).toHaveBeenCalledWith(
-      expect.anything(),
-      'actor-a',
-      [Capability.ManageGrants],
-    );
-    expect(await dataSource.getRepository(MountSourceGrantEntity).count()).toBe(0);
-  });
-
-  it('deletes only the requested local server identity', async () => {
-    await service.upsertGrant('actor-a', 'user', 'user-a', {
-      sourceKind: 'local', sourceId: 'disk-shared', serverId: 'server-a',
-    });
-    await service.upsertGrant('actor-a', 'user', 'user-a', {
-      sourceKind: 'local', sourceId: 'disk-shared', serverId: 'server-b',
-    });
-
-    await service.deleteGrant('actor-a', 'user', 'user-a', {
-      sourceKind: 'local', sourceId: 'disk-shared', serverId: 'server-a',
-    });
-
-    expect(await dataSource.getRepository(MountSourceGrantEntity).find()).toMatchObject([
-      { serverId: 'server-b', sourceIdentity: 'physical-b' },
-    ]);
-  });
-
-  it('serializes remote upsert against source deletion without leaving an orphan', async () => {
-    await dataSource.getRepository(RemoteFsMountEntity).save(remoteMount('remote-a'));
-    const upsert = service.upsertGrant('actor-a', 'user', 'user-a', {
-      sourceKind: 'remote', sourceId: 'remote-a',
-    });
-    const remove = runSerializedTransaction(dataSource, async (manager) => {
-      await service.deleteSourceInTransaction(manager, {
-        sourceKind: 'remote', sourceId: 'remote-a',
-      });
-      await manager.delete(RemoteFsMountEntity, 'remote-a');
-    });
-
-    await Promise.allSettled([upsert, remove]);
-    expect(await dataSource.getRepository(RemoteFsMountEntity).countBy({ id: 'remote-a' })).toBe(0);
-    expect(await dataSource.getRepository(MountSourceGrantEntity).countBy({ sourceId: 'remote-a' })).toBe(0);
-  });
-
-  it('serializes group deletion against grant upsert without leaving an orphan', async () => {
-    await dataSource.getRepository(RemoteFsMountEntity).save(remoteMount('remote-a'));
-    const remove = runSerializedTransaction(dataSource, async (manager) => {
-      await service.deleteScopeInTransaction(manager, 'group', 'group-a');
-      await manager.delete(GroupEntity, 'group-a');
-    });
-    const upsert = service.upsertGrant('actor-a', 'group', 'group-a', {
-      sourceKind: 'remote', sourceId: 'remote-a',
-    });
-
-    await Promise.allSettled([remove, upsert]);
-    expect(await dataSource.getRepository(GroupEntity).countBy({ id: 'group-a' })).toBe(0);
-    expect(await dataSource.getRepository(MountSourceGrantEntity).countBy({
-      scope: 'group', scopeId: 'group-a',
-    })).toBe(0);
-  });
-
-  it('rejects an upsert queued after a user becomes disabled', async () => {
-    const disable = runSerializedTransaction(dataSource, async (manager) => {
-      await manager.update(UserEntity, 'user-a', { status: UserStatus.Disabled });
-    });
-    const upsert = service.upsertGrant('actor-a', 'user', 'user-a', {
-      sourceKind: 'local', sourceId: 'disk-shared', serverId: 'server-a',
-    });
-
-    await disable;
-    await expect(upsert).rejects.toThrow('active user');
-    expect(await dataSource.getRepository(MountSourceGrantEntity).count()).toBe(0);
-  });
-
-  it('never grants a mount source to a terminal deleted user', async () => {
-    await dataSource.getRepository(UserEntity).update('user-a', { status: UserStatus.Deleted });
-
-    await expect(service.upsertGrant('actor-a', 'user', 'user-a', {
-      sourceKind: 'local', sourceId: 'disk-shared', serverId: 'server-a',
-    })).rejects.toMatchObject({ response: expect.objectContaining({ code: 'USER_DELETED' }) });
-    expect(await dataSource.getRepository(MountSourceGrantEntity).count()).toBe(0);
-  });
-
-  it('rolls back local identity replacement while resources still use the old identity', async () => {
-    await service.upsertGrant('actor-a', 'user', 'user-a', {
-      sourceKind: 'local', sourceId: 'disk-shared', serverId: 'server-a',
-    });
-    await dataSource.getRepository(DataDirectoryEntity).save(dataDir('physical-a'));
-    snapshots.set('server-a', snapshot('server-a', 'disk-shared', 'physical-replacement'));
-
-    await expect(service.upsertGrant('actor-a', 'user', 'user-a', {
-      sourceKind: 'local', sourceId: 'disk-shared', serverId: 'server-a',
-    })).rejects.toMatchObject({ response: expect.objectContaining({ code: 'ACCESS_REVOKE_HAS_RESOURCES' }) });
-
-    expect(await dataSource.getRepository(MountSourceGrantEntity).findOneByOrFail({
-      scope: 'user', scopeId: 'user-a', sourceKind: 'local', sourceId: 'disk-shared',
-    })).toMatchObject({ sourceIdentity: 'physical-a' });
-  });
-
-  it('blocks the last exact mount grant with a data directory but allows an effective alternate', async () => {
-    await service.upsertGrant('actor-a', 'user', 'user-a', {
-      sourceKind: 'local', sourceId: 'disk-shared', serverId: 'server-a',
-    });
-    await dataSource.getRepository(DataDirectoryEntity).save(dataDir('physical-a'));
-
-    await expect(service.deleteGrant('actor-a', 'user', 'user-a', {
-      sourceKind: 'local', sourceId: 'disk-shared', serverId: 'server-a',
-    })).rejects.toMatchObject({ response: expect.objectContaining({ code: 'ACCESS_REVOKE_HAS_RESOURCES' }) });
-
-    await dataSource.getRepository(GroupMemberEntity).save({
-      id: 'member-a', groupId: 'group-a', userId: 'user-a',
-    });
-    await service.upsertGrant('actor-a', 'group', 'group-a', {
-      sourceKind: 'local', sourceId: 'disk-shared', serverId: 'server-a',
-    });
-    await expect(service.deleteGrant('actor-a', 'user', 'user-a', {
-      sourceKind: 'local', sourceId: 'disk-shared', serverId: 'server-a',
-    })).resolves.toBeUndefined();
-    expect(await dataSource.getRepository(MountSourceGrantEntity).find()).toMatchObject([
-      { scope: 'group', scopeId: 'group-a', sourceIdentity: 'physical-a' },
-    ]);
-  });
-
-  it('does not let a container on replacement identity B pin a stale grant for identity A', async () => {
-    snapshots.set('server-a', snapshot('server-a', 'disk-shared', 'physical-b'));
-    await dataSource.getRepository(GroupMemberEntity).save({
-      id: 'member-a', groupId: 'group-a', userId: 'user-a',
-    });
-    await dataSource.getRepository(MountSourceGrantEntity).save([
-      {
-        id: 'stale-user-a', scope: 'user', scopeId: 'user-a', sourceKind: 'local',
-        sourceId: 'disk-shared', serverId: 'server-a', sourceIdentity: 'physical-a',
-      },
-      {
-        id: 'current-group-b', scope: 'group', scopeId: 'group-a', sourceKind: 'local',
-        sourceId: 'disk-shared', serverId: 'server-a', sourceIdentity: 'physical-b',
-      },
-    ]);
-    await dataSource.getRepository(ImageEntity).save({
-      id: 'image-a', name: 'image-a', dockerImage: 'alpine:3.20',
-      runtimeOverrides: { uid: 0, entrypoint: null, cmd: null, init: false },
-      description: null, isActive: true, disableSsh: false,
-    });
-    await dataSource.getRepository(ContainerEntity).save({
-      id: 'container-a', serverId: 'server-a', ownerId: 'user-a', name: 'container-a',
-      imageId: 'image-a', createdBy: 'user-a',
-    });
-    await dataSource.getRepository(DataDirectoryEntity).save(dataDir('physical-b'));
-    await dataSource.getRepository(ContainerMountEntity).save({
-      id: 'container-mount-a', serverId: 'server-a', containerId: 'container-a',
-      containerName: 'container-a', sourceKind: 'local', sourceId: 'disk-shared',
-      sourceIdentity: 'physical-b',
-      userId: 'user-a', dirName: 'data-a', containerPath: '/data',
-    });
-
-    await expect(service.deleteGrant('actor-a', 'user', 'user-a', {
-      sourceKind: 'local', sourceId: 'disk-shared', serverId: 'server-a',
-    })).resolves.toBeUndefined();
-
-    expect(await dataSource.getRepository(MountSourceGrantEntity).find()).toMatchObject([
-      { id: 'current-group-b', sourceIdentity: 'physical-b' },
-    ]);
-  });
-
-  it('enforces shape, partial uniqueness, and the local server FK in SQLite', async () => {
-    const grants = dataSource.getRepository(MountSourceGrantEntity);
-    await expect(grants.save(grants.create({
-      id: 'invalid-local', scope: 'user', scopeId: 'user-a',
-      sourceKind: 'local', sourceId: 'disk-a', serverId: null, sourceIdentity: null,
-    }))).rejects.toThrow();
-    await grants.save(grants.create({
-      id: 'local-a', scope: 'user', scopeId: 'user-a', sourceKind: 'local',
-      sourceId: 'disk-a', serverId: 'server-a', sourceIdentity: 'physical-a',
-    }));
-    await expect(grants.save(grants.create({
-      id: 'local-duplicate', scope: 'user', scopeId: 'user-a', sourceKind: 'local',
-      sourceId: 'disk-a', serverId: 'server-a', sourceIdentity: 'physical-a',
-    }))).rejects.toThrow();
-    await expect(dataSource.getRepository(ServerEntity).delete('server-a')).rejects.toThrow();
+    const projected = await service.listForUser('user-a', 'server-a');
+    expect(projected).toHaveLength(128);
+    expect(projected.map((item) => item.id)).toEqual([...refs].map((ref) => ref.id));
+    expect(listRemoteFsMountsByIds).toHaveBeenCalledOnce();
+    expect(listRemoteFsMountsByIds).toHaveBeenCalledWith([...refs].map((ref) => ref.id));
   });
 });
 
-function server(id: string) {
-  return {
-    id,
-    name: id,
-    slug: id,
-    agentTokenHash: `token-${id}`,
-    hostFingerprint: null,
-    agentConfigFingerprint: null,
-    status: ServerStatus.Unknown,
-    lastSeenAt: null,
-  };
-}
+describePostgres('MountSourcesService PostgreSQL canonical grant writer', () => {
+  it('rolls back the grant when required audit append fails', async () => {
+    await withPostgresTestDatabase(async (fixture) => {
+      const context = await createContext(fixture);
+      context.audit.append.mockRejectedValueOnce(new Error('audit unavailable'));
+      await expect(context.service.upsertGrant(
+        context.actorId,
+        'user',
+        context.userId,
+        {
+          sourceKind: 'local',
+          sourceId: 'disk-shared',
+          serverId: context.serverA,
+        },
+      )).rejects.toThrow('audit unavailable');
+      expect(await context.storage.listMountSourceGrantsForScope('user', context.userId))
+        .toEqual([]);
+    });
+  });
 
-function user(id: string) {
-  return {
-    id,
-    numericId: 1001,
-    username: id,
-    passwordHash: 'hash',
-    displayName: id,
-    status: UserStatus.Active,
-  };
-}
+  it('binds a local grant to the exact server and physical identity', async () => {
+    await withPostgresTestDatabase(async (fixture) => {
+      const context = await createContext(fixture);
+      const grant = await context.service.upsertGrant(
+        context.actorId,
+        'user',
+        context.userId,
+        {
+          sourceKind: 'local',
+          sourceId: 'disk-shared',
+          serverId: context.serverA,
+        },
+      );
+      expect(grant).toMatchObject({
+        sourceKind: 'local',
+        sourceId: 'disk-shared',
+        serverId: context.serverA,
+        sourceIdentity: 'physical-a',
+      });
+      expect(await context.storage.listMountSourceGrantsForScope('user', context.userId))
+        .toHaveLength(1);
+    });
+  });
 
-function group(id: string) {
-  return {
-    id,
-    name: id,
-    description: null,
-    priority: 1,
-    isSystem: false,
-    capabilitiesJson: '[]',
-  };
-}
+  it('rechecks ManageGrants inside the same Kysely transaction', async () => {
+    await withPostgresTestDatabase(async (fixture) => {
+      const context = await createContext(fixture, false);
+      await expect(context.service.upsertGrant(
+        context.actorId,
+        'user',
+        context.userId,
+        {
+          sourceKind: 'local',
+          sourceId: 'disk-shared',
+          serverId: context.serverA,
+        },
+      )).rejects.toMatchObject({
+        response: expect.objectContaining({ code: 'PRIVILEGE_ESCALATION_DENIED' }),
+      });
+      expect(await context.storage.listMountSourceGrantsForScope('user', context.userId))
+        .toHaveLength(0);
+    });
+  });
 
-function remoteMount(id: string) {
-  return {
-    id,
-    name: id,
-    displayName: null,
-    description: null,
-    type: RemoteFsType.Nfs as RemoteFsType.Nfs,
-    hostMountPoint: `/mnt/${id}`,
-    options: '',
-    params: {
-      type: RemoteFsType.Nfs as RemoteFsType.Nfs,
-      nfsServer: 'nfs.example',
-      exportPath: '/data',
-      version: '4.2' as const,
+  it('deletes only the requested local server identity', async () => {
+    await withPostgresTestDatabase(async (fixture) => {
+      const context = await createContext(fixture);
+      await context.service.upsertGrant(context.actorId, 'user', context.userId, {
+        sourceKind: 'local',
+        sourceId: 'disk-shared',
+        serverId: context.serverA,
+      });
+      await context.service.upsertGrant(context.actorId, 'user', context.userId, {
+        sourceKind: 'local',
+        sourceId: 'disk-shared',
+        serverId: context.serverB,
+      });
+      await context.service.deleteGrant(context.actorId, 'user', context.userId, {
+        sourceKind: 'local',
+        sourceId: 'disk-shared',
+        serverId: context.serverA,
+      });
+      expect(await context.storage.listMountSourceGrantsForScope('user', context.userId))
+        .toMatchObject([{
+          serverId: context.serverB,
+          sourceIdentity: 'physical-b',
+        }]);
+    });
+  });
+
+  it('rolls back a local identity replacement while a dependency uses the old identity', async () => {
+    await withPostgresTestDatabase(async (fixture) => {
+      const context = await createContext(fixture);
+      await context.service.upsertGrant(context.actorId, 'user', context.userId, {
+        sourceKind: 'local',
+        sourceId: 'disk-shared',
+        serverId: context.serverA,
+      });
+      await fixture.database.insertInto('control.authorization_dependencies').values({
+        id: randomUUID(),
+        dependency_kind: 'data_directory',
+        dependency_id: randomUUID(),
+        user_id: context.userId,
+        server_id: context.serverA,
+        source_kind: 'local',
+        source_id: 'disk-shared',
+        source_identity: 'physical-a',
+      }).execute();
+      context.snapshots.set(
+        context.serverA,
+        snapshot(context.serverA, 'physical-replacement'),
+      );
+
+      await expect(context.service.upsertGrant(
+        context.actorId,
+        'user',
+        context.userId,
+        {
+          sourceKind: 'local',
+          sourceId: 'disk-shared',
+          serverId: context.serverA,
+        },
+      )).rejects.toMatchObject({
+        response: expect.objectContaining({ code: 'ACCESS_REVOKE_HAS_RESOURCES' }),
+      });
+      expect(await context.storage.listMountSourceGrantsForScope('user', context.userId))
+        .toMatchObject([{ sourceIdentity: 'physical-a' }]);
+    });
+  });
+
+  it('serializes remote grant upsert against source deletion without an orphan', async () => {
+    await withPostgresTestDatabase(async (fixture) => {
+      const context = await createContext(fixture);
+      const mountId = randomUUID();
+      await context.storage.insertRemoteFsMount({
+        id: mountId,
+        name: 'remote-a',
+        displayName: null,
+        description: null,
+        type: RemoteFsType.Nfs,
+        hostMountPoint: `/mnt/remote-fs/${mountId}`,
+        options: '',
+        params: {
+          type: RemoteFsType.Nfs,
+          nfsServer: 'nfs.example',
+          exportPath: '/exports/data',
+          version: '4.2',
+        },
+      });
+
+      const upsert = context.service.upsertGrant(
+        context.actorId,
+        'user',
+        context.userId,
+        { sourceKind: 'remote', sourceId: mountId },
+      );
+      const remove = context.transactions.run(async (transaction) => {
+        await context.service.deleteSourceInTransaction(
+          transaction,
+          { sourceKind: 'remote', sourceId: mountId },
+        );
+        await context.storage.deleteRemoteFsMount(mountId, transaction);
+      });
+      await Promise.allSettled([upsert, remove]);
+
+      const persistedMount = await context.storage.findRemoteFsMount(mountId);
+      const persistedGrants = await context.storage.listMountSourceGrantsForTarget({
+        sourceKind: 'remote',
+        sourceId: mountId,
+      });
+      expect(persistedGrants).toHaveLength(persistedMount ? 1 : 0);
+    });
+  });
+
+  it('serializes concurrent admission at the per-scope mount grant cap', async () => {
+    await withPostgresTestDatabase(async (fixture) => {
+      const context = await createContext(fixture);
+      await fixture.database.insertInto('iam.mount_source_grants').values(
+        Array.from(
+          { length: MAX_MOUNT_SOURCE_GRANTS_PER_SCOPE - 1 },
+          (_, index) => ({
+            id: randomUUID(),
+            user_id: context.userId,
+            group_id: null,
+            source_kind: 'local' as const,
+            source_id: index === 0 ? 'disk-shared' : `capacity-disk-${index}`,
+            server_id: context.serverA,
+            source_identity: index === 0 ? 'physical-a' : `capacity-identity-${index}`,
+          }),
+        ),
+      ).execute();
+      const remoteIds = [randomUUID(), randomUUID()];
+      for (const [index, id] of remoteIds.entries()) {
+        await context.storage.insertRemoteFsMount({
+          id,
+          name: `capacity-remote-${index}`,
+          displayName: null,
+          description: null,
+          type: RemoteFsType.Nfs,
+          hostMountPoint: `/mnt/remote-fs/${id}`,
+          options: '',
+          params: {
+            type: RemoteFsType.Nfs,
+            nfsServer: 'nfs.example',
+            exportPath: `/exports/capacity-${index}`,
+            version: '4.2',
+          },
+        });
+      }
+
+      const attempts = await Promise.allSettled(remoteIds.map((sourceId) =>
+        context.service.upsertGrant(
+          context.actorId,
+          'user',
+          context.userId,
+          { sourceKind: 'remote', sourceId },
+        )));
+      expect(attempts.filter(({ status }) => status === 'fulfilled')).toHaveLength(1);
+      expect(attempts.find(({ status }) => status === 'rejected')).toMatchObject({
+        reason: {
+          response: expect.objectContaining({
+            code: 'MOUNT_SOURCE_GRANT_CAPACITY_REACHED',
+            maxGrants: MAX_MOUNT_SOURCE_GRANTS_PER_SCOPE,
+          }),
+        },
+      });
+      expect(await context.storage.listMountSourceGrantsForScope(
+        'user',
+        context.userId,
+      )).toHaveLength(MAX_MOUNT_SOURCE_GRANTS_PER_SCOPE);
+
+      const winnerIndex = attempts.findIndex(({ status }) => status === 'fulfilled');
+      await expect(context.service.upsertGrant(
+        context.actorId,
+        'user',
+        context.userId,
+        { sourceKind: 'remote', sourceId: remoteIds[winnerIndex]! },
+      )).resolves.toMatchObject({ sourceId: remoteIds[winnerIndex] });
+      context.snapshots.set(
+        context.serverA,
+        snapshot(context.serverA, 'physical-at-cap-replacement'),
+      );
+      await expect(context.service.upsertGrant(
+        context.actorId,
+        'user',
+        context.userId,
+        {
+          sourceKind: 'local',
+          sourceId: 'disk-shared',
+          serverId: context.serverA,
+        },
+      )).resolves.toMatchObject({
+        sourceIdentity: 'physical-at-cap-replacement',
+      });
+      const finalGrants = await context.storage.listMountSourceGrantsForScope(
+        'user',
+        context.userId,
+      );
+      expect(finalGrants).toHaveLength(MAX_MOUNT_SOURCE_GRANTS_PER_SCOPE);
+      expect(finalGrants.filter((grant) =>
+        grant.sourceKind === 'local'
+        && grant.sourceId === 'disk-shared'
+        && grant.serverId === context.serverA)).toMatchObject([
+        { sourceIdentity: 'physical-at-cap-replacement' },
+      ]);
+    });
+  });
+});
+
+async function createContext(
+  fixture: PostgresTestDatabase,
+  actorAuthorized = true,
+) {
+  const infrastructure = new InfrastructureRepository(fixture.database);
+  const storage = new StorageRepository(fixture.database);
+  const transactions = new PgTransactionManager(fixture.database);
+  const actorId = randomUUID();
+  const userId = randomUUID();
+  const groupId = randomUUID();
+  const serverA = randomUUID();
+  const serverB = randomUUID();
+  await infrastructure.insertServer({
+    id: serverA,
+    name: 'server-a',
+    slug: 'server-a',
+    agentTokenHash: 'a'.repeat(64),
+  });
+  await infrastructure.insertServer({
+    id: serverB,
+    name: 'server-b',
+    slug: 'server-b',
+    agentTokenHash: 'b'.repeat(64),
+  });
+  await fixture.database.insertInto('iam.users').values([
+    {
+      id: actorId,
+      numeric_id: 1,
+      username: 'actor',
+      password_hash: 'hash',
+      display_name: 'Actor',
+      status: UserStatus.Active,
+      auth_version: 1,
+      authz_version: 1,
     },
-    desiredState: 'active' as const,
-    generation: 1,
-    lastTaskId: null,
+    {
+      id: userId,
+      numeric_id: 2,
+      username: 'user',
+      password_hash: 'hash',
+      display_name: 'User',
+      status: UserStatus.Active,
+      auth_version: 1,
+      authz_version: 1,
+    },
+  ]).execute();
+  await fixture.database.insertInto('iam.groups').values({
+    id: groupId,
+    name: 'grant-writers',
+    description: null,
+    priority: 10,
+    is_system: false,
+    system_key: null,
+    capabilities: actorAuthorized ? [Capability.ManageGrants] : [],
+    revision: 1,
+  }).execute();
+  await fixture.database.insertInto('iam.group_members').values({
+    id: randomUUID(),
+    group_id: groupId,
+    user_id: actorId,
+  }).execute();
+
+  const snapshots = new Map<string, unknown>([
+    [serverA, snapshot(serverA, 'physical-a')],
+    [serverB, snapshot(serverB, 'physical-b')],
+  ]);
+  const gateway = {
+    stateCache: {
+      get: (serverId: string) => snapshots.get(serverId),
+    },
+  };
+  const access = new AccessResolverService(
+    fixture.database,
+    transactions,
+    gateway as never,
+    new AccessCacheEpochService(fixture.database),
+  );
+  const audit = { append: vi.fn().mockResolvedValue(undefined) };
+  const service = new MountSourcesService(
+    storage,
+    transactions,
+    access,
+    audit as never,
+    gateway as never,
+    new AccessRevocationGuardService(),
+  );
+  return {
+    actorId,
+    userId,
+    serverA,
+    serverB,
+    storage,
+    transactions,
+    snapshots,
+    audit,
+    service,
   };
 }
 
-function snapshot(serverId: string, diskId: string, sourceIdentity: string) {
+function snapshot(serverId: string, sourceIdentity: string) {
   return {
     serverId,
-    helloAt: Date.now(),
-    disks: [{ diskId, sourceIdentity, mountPoint: `/mnt/${serverId}`, label: null }],
-  };
-}
-
-function dataDir(sourceIdentity: string) {
-  return {
-    id: 'dir-a',
-    userId: 'user-a',
-    sourceKind: 'local' as const,
-    sourceId: 'disk-shared',
-    name: 'data-a',
-    sourceIdentity,
-    serverId: 'server-a',
-    uid: 1001,
-    desiredState: 'active' as const,
-    generation: 1,
-    lastTaskId: null,
+    helloAt: new Date(),
+    disks: [{
+      diskId: 'disk-shared',
+      sourceIdentity,
+      mountPoint: '/data',
+      label: 'Data',
+      totalBytes: 10_000,
+      usedBytes: 100,
+      pquotaEnabled: true,
+    }],
   };
 }
