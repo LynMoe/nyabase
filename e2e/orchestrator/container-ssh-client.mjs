@@ -493,8 +493,11 @@ async function runSshProbe(input, context, manifest, identity) {
         '0.5',
         '--network',
         `container:${identity.sourceContainerName}`,
+        // Backend runner image is USER 10001; with --cap-drop ALL the probe
+        // cannot DAC-bypass a root-owned 0700 /run, so scratch ownership must
+        // match the image identity or mktemp fails before any SSH attempt.
         '--tmpfs',
-        '/run:rw,nosuid,nodev,noexec,size=1m,mode=0700',
+        '/run:rw,nosuid,nodev,noexec,size=1m,mode=0700,uid=10001,gid=10001',
         '--entrypoint',
         '/bin/sh',
         image,

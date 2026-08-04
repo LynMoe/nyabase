@@ -42,15 +42,27 @@ fi
 
 "$E2E_ROOT/e2e/orchestrator/certs.sh" "$run_id"
 
+# Backend runs as UID 10001 and NODE_OPTIONS --requires this bind-mounted shim.
+# Working-tree mode can drift to 0600 under a restrictive umask; normalize to
+# world-readable before Compose mounts it read-only into the Backend containers.
+clock_shim="$E2E_ROOT/e2e/orchestrator/backend-clock-shim.cjs"
+[[ -f "$clock_shim" ]] || die "missing Backend clock shim: $clock_shim"
+chmod 0644 "$clock_shim"
+mode="$(stat -c '%a' "$clock_shim")"
+[[ "$((8#$mode & 4))" -ne 0 ]] \
+  || die "Backend clock shim mode $mode is not other-readable for UID 10001"
+
 if [[ ! -s "$NYABASE_E2E_RUNTIME_DIR/secrets.env" ]]; then
-  umask 077
-  install -m 0600 /dev/null "$NYABASE_E2E_RUNTIME_DIR/secrets.env"
-  printf '%s\n' \
-    "ADMIN_INIT_PASSWORD=$(openssl rand -hex 24)" \
-    "JWT_SECRET=$(openssl rand -hex 32)" \
-    "HTTP_PROXY_TOKEN=$(openssl rand -hex 32)" \
-    "SSH_PROXY_TOKEN=$(openssl rand -hex 32)" \
-    "SSH_KEY_SECRET=$(openssl rand -hex 32)" > "$NYABASE_E2E_RUNTIME_DIR/secrets.env"
+  (
+    umask 077
+    install -m 0600 /dev/null "$NYABASE_E2E_RUNTIME_DIR/secrets.env"
+    printf '%s\n' \
+      "ADMIN_INIT_PASSWORD=$(openssl rand -hex 24)" \
+      "JWT_SECRET=$(openssl rand -hex 32)" \
+      "HTTP_PROXY_TOKEN=$(openssl rand -hex 32)" \
+      "SSH_PROXY_TOKEN=$(openssl rand -hex 32)" \
+      "SSH_KEY_SECRET=$(openssl rand -hex 32)" > "$NYABASE_E2E_RUNTIME_DIR/secrets.env"
+  )
 fi
 # shellcheck disable=SC1090
 source "$NYABASE_E2E_RUNTIME_DIR/secrets.env"
@@ -61,11 +73,15 @@ fi
 
 backend_config_dir="$NYABASE_E2E_RUNTIME_DIR/backend-config"
 rm -rf "$backend_config_dir"
-install -d -m 0700 "$backend_config_dir"
-install -m 0600 /dev/null "$backend_config_dir/config.yaml"
+# Backend containers run as UID/GID 10001 and bind-mount this directory (api) or
+# config.yaml (gateway/worker). Match production ownership so the non-root
+# process can read the file even when the host umask would otherwise leave
+# root-owned 0600 content.
+install -d -m 0755 -o 10001 -g 10001 "$backend_config_dir"
 # The capacity boundary scenario creates and then removes 64 real containers.
 # Its 35-minute behavior-plus-cleanup budget must fit inside one immutable
 # APIRequestContext bearer token; auth rotation itself is covered separately.
+umask 022
 printf '%s\n' \
   'runtime:' \
   '  nodeEnv: production' \
@@ -101,6 +117,12 @@ printf '%s\n' \
   "  proxyPublicHost: \"${proxy_public_host}\"" \
   '  proxyPublicPort: 2222' \
   '  proxySnapshotStaleMs: 300000' > "$backend_config_dir/config.yaml"
+chown 10001:10001 "$backend_config_dir/config.yaml"
+chmod 0400 "$backend_config_dir/config.yaml"
+config_owner="$(stat -c '%u:%g' "$backend_config_dir/config.yaml")"
+config_mode="$(stat -c '%a' "$backend_config_dir/config.yaml")"
+[[ "$config_owner" == '10001:10001' && "$config_mode" == '400' ]] \
+  || die "Backend config.yaml must be 10001:10001 mode 0400 (got $config_owner mode $config_mode)"
 
 install -m 0600 "$NYABASE_E2E_RUNTIME_DIR/state.env" \
   "$NYABASE_E2E_RUNTIME_DIR/compose.env"

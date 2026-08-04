@@ -1,5 +1,8 @@
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
 import test from 'node:test';
+import { fileURLToPath } from 'node:url';
 import { sshProbeScript, validateInput as validateSshInput } from './container-ssh-client.mjs';
 import {
   duplicateClaimFaultHostname,
@@ -19,6 +22,7 @@ import {
   validateDedicatedLifecycleHistory,
 } from './lifecycle-probe-contract.mjs';
 
+const orchestratorDir = dirname(fileURLToPath(import.meta.url));
 const runId = 'contract-unit';
 const privateKey = [
   '-----BEGIN OPENSSH PRIVATE KEY-----',
@@ -87,6 +91,14 @@ test('SSH probe script pins identities, key modes, strict host trust, and remova
     assert.ok(sshProbeScript.includes(fragment), `missing SSH safety fragment: ${fragment}`);
   }
   assert.doesNotMatch(sshProbeScript, /ssh .*sh -c/);
+});
+
+test('SSH probe scratch tmpfs matches Backend UID 10001 under cap-drop ALL', () => {
+  const source = readFileSync(join(orchestratorDir, 'container-ssh-client.mjs'), 'utf8');
+  assert.match(
+    source,
+    /\/run:rw,nosuid,nodev,noexec,size=1m,mode=0700,uid=10001,gid=10001/,
+  );
 });
 
 test('capacity runtime evidence requires sorted full IDs and active subset of all', () => {
