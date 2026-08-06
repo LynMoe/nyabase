@@ -8,6 +8,7 @@ const base: ResourceFormValue = {
   diskGb: '',
   gpuMode: '',
   gpuIndices: '',
+  expiresAtLocal: '',
 };
 
 describe('formToGrantPayload', () => {
@@ -51,6 +52,7 @@ describe('formToGrantPayload', () => {
       diskBytes: 0,
       gpuMode: GpuGrantMode.Indices,
       gpuIndices: [0, 1],
+      expiresAt: null,
     });
   });
 
@@ -61,7 +63,22 @@ describe('formToGrantPayload', () => {
       diskBytes: 1_234_567_891,
       gpuMode: GpuGrantMode.None,
       gpuIndices: [] as number[],
+      expiresAt: null as string | null,
     };
     expect(formToGrantPayload(grantToForm(stored))).toEqual(stored);
+  });
+
+  it('round-trips an explicit expiry timestamp', () => {
+    const stored = {
+      cpuMillis: null as number | null,
+      memBytes: null as number | null,
+      diskBytes: null as number | null,
+      gpuMode: GpuGrantMode.All,
+      gpuIndices: [] as number[],
+      expiresAt: '2030-06-15T12:30:00.000Z',
+    };
+    const payload = formToGrantPayload(grantToForm(stored));
+    expect(payload.expiresAt).toBeTruthy();
+    expect(new Date(payload.expiresAt!).getTime()).toBe(new Date(stored.expiresAt).getTime());
   });
 });

@@ -216,6 +216,18 @@ async function setup(database: any) {
     macvlan_reserved_ips: JSON.stringify([]),
     revision: 1,
   }).execute();
+  await database.insertInto('iam.server_grants').values({
+    id: randomUUID(),
+    user_id: userId,
+    group_id: null,
+    server_id: serverId,
+    cpu_millis: null,
+    mem_bytes: null,
+    disk_bytes: null,
+    gpu_mode: 'none',
+    gpu_indices: null,
+    expires_at: null,
+  }).execute();
   const agentSessionId = randomUUID();
   const gatewayId = `gateway:test:${agentSessionId}`;
   const observedAt = new Date();

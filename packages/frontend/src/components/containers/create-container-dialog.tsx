@@ -178,7 +178,11 @@ export function CreateContainerDialog({ open, onOpenChange, defaultServerId }: P
     create(result.payload);
   };
 
-  const accessibleServerIds = new Set(access?.servers.map((s) => s.serverId) ?? []);
+  const accessibleServerIds = new Set(
+    (access?.servers ?? [])
+      .filter((s) => s.accessPhase === 'full')
+      .map((s) => s.serverId),
+  );
   const onlineServers = servers.filter(
     (s) => s.status === 'online' && accessibleServerIds.has(s.id),
   );

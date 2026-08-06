@@ -401,9 +401,23 @@ export interface ServerGrantDto {
   /** null retains the historical all-GPU policy; CPU-only grants use `none`. */
   gpuMode: GpuGrantMode | null;
   gpuIndices: number[] | null;
+  /** null means the grant never expires. */
+  expiresAt: string | null;
   createdAt: string;
   updatedAt: string;
 }
+
+/**
+ * Grant expiry classification used by workers and resolvers.
+ * `lost` is never projected on `/api/me/access` (absence means unavailable).
+ */
+export type GrantExpiryPhase = 'full' | 'grace' | 'lost';
+
+/**
+ * Access phase projected on effective server access: live (`full`) or
+ * post-expiry migration window (`grace`).
+ */
+export type ServerAccessPhase = 'full' | 'grace';
 
 export interface ImageGrantDto {
   id: string;
@@ -422,6 +436,11 @@ export interface EffectiveServerAccessDto {
   diskBytes: number;
   gpuMode: GpuGrantMode;
   gpuIndices: number[];
+  /** Winning grant expiry; null means never expires. */
+  expiresAt: string | null;
+  /** expiresAt + grace window; null when the grant never expires. */
+  purgeAt: string | null;
+  accessPhase: ServerAccessPhase;
   /** imageIds accessible on this server */
   allowedImageIds: string[];
 }

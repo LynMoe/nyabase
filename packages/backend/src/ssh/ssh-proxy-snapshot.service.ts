@@ -19,6 +19,7 @@ import {
 import { NyabaseConfigService } from '../config/nyabase-config.service.js';
 import { PgTransactionManager } from '../persistence-pg/transaction.js';
 import { ProxySnapshotNotifierService } from '../proxy-snapshots/proxy-snapshot-notifier.service.js';
+import { loadUsableServerAccessKeys } from '../access/usable-server-access.js';
 import { SshIdentityService } from './ssh-identity.service.js';
 
 @Injectable()
@@ -68,6 +69,7 @@ export class SshProxySnapshotService {
         remoteMounts,
         remoteAssignments,
         hostKey,
+        usableAccess,
       ] = await Promise.all([
         userIds.length === 0
           ? Promise.resolve([])
@@ -114,6 +116,7 @@ export class SshProxySnapshotService {
           .select(['server_id', 'remote_fs_mount_id', 'desired_state'])
           .execute(),
         this.identities.getProxyHostKey(transaction),
+        loadUsableServerAccessKeys(transaction),
       ]);
 
       const publicKeysByUser = new Map<string, string[]>();
@@ -130,8 +133,11 @@ export class SshProxySnapshotService {
         runtimeReadyServers.map((server) => server.server_id),
       );
       const imageById = new Map(images.map((image) => [image.id, image]));
+      const usableAccessKeys = usableAccess;
+      const aggregateRowsWithAccess = aggregateRows.filter((container) =>
+        usableAccessKeys.has(`${container.ownerId}\0${container.serverId}`));
       const containerById = new Map(
-        aggregateRows.map((container) => [container.id, container]),
+        aggregateRowsWithAccess.map((container) => [container.id, container]),
       );
       const claimsByAddress = new Map<string, typeof addressClaims>();
       for (const claim of addressClaims) {
@@ -248,7 +254,7 @@ export class SshProxySnapshotService {
           id: image.id,
           disableSsh: image.disable_ssh,
         })),
-        containers: aggregateRows.map((container) => ({
+        containers: aggregateRowsWithAccess.map((container) => ({
           id: container.id,
           ownerId: container.ownerId,
           serverId: container.serverId,

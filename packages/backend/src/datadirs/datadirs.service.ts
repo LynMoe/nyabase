@@ -1,5 +1,6 @@
 import {
   ConflictException,
+  ForbiddenException,
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
@@ -121,6 +122,19 @@ export class DataDirsService {
           actorId,
           [Capability.ManageContainersAny],
         );
+      } else {
+        const serverAccess = await this.accessResolver.resolveServerInTransaction(
+          transaction,
+          userId,
+          serverId,
+        );
+        if (!serverAccess || serverAccess.accessPhase !== 'full') {
+          throw new ForbiddenException(
+            serverAccess?.accessPhase === 'grace'
+              ? 'Server grant is in expiry grace; creating data directories is not allowed'
+              : 'No server access',
+          );
+        }
       }
       const sourceIdentity = await this.resolveReadySource(
         transaction,
@@ -284,6 +298,11 @@ export class DataDirsService {
     sourceId: string,
     name: string,
     authorizationKind: 'owner' | 'admin' = 'owner',
+    options: {
+      skipContainerReferenceCheck?: boolean;
+      /** Purge path: avoid mount/quota locks that collide with concurrent container deletes. */
+      directoryOnlyResourceLocks?: boolean;
+    } = {},
   ) {
     const applied = await this.transactions.run(async (transaction) => {
       if (authorizationKind === 'admin') {
@@ -304,14 +323,16 @@ export class DataDirsService {
       if (row.desiredState !== 'active' && row.desiredState !== 'failed') {
         throw new ConflictException('Data directory changed while preparing deletion; retry');
       }
-      await this.assertNotReferencedByContainer(
-        transaction,
-        serverId,
-        sourceKind,
-        sourceId,
-        userId,
-        name,
-      );
+      if (!options.skipContainerReferenceCheck) {
+        await this.assertNotReferencedByContainer(
+          transaction,
+          serverId,
+          sourceKind,
+          sourceId,
+          userId,
+          name,
+        );
+      }
       await this.assertDeletionSourceReady(transaction, serverId, row);
       if (authorizationKind === 'owner' && !await this.accessResolver
         .hasMountSourceAccessInTransaction(
@@ -344,11 +365,13 @@ export class DataDirsService {
           sourceIdentity: row.sourceIdentity,
           numericUserId: user.numeric_id,
         },
-        resourceKeys: [
-          this.resourceKeys.dataDir({ serverId, sourceKind, sourceId, name }),
-          this.resourceKeys.mountSource({ serverId, sourceKind, sourceId }),
-          this.resourceKeys.quota(serverId, userId),
-        ],
+        resourceKeys: options.directoryOnlyResourceLocks
+          ? [this.resourceKeys.dataDir({ serverId, sourceKind, sourceId, name })]
+          : [
+            this.resourceKeys.dataDir({ serverId, sourceKind, sourceId, name }),
+            this.resourceKeys.mountSource({ serverId, sourceKind, sourceId }),
+            this.resourceKeys.quota(serverId, userId),
+          ],
         request: {
           userId,
           sourceKind,

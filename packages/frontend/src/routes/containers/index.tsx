@@ -16,7 +16,11 @@ import {
   AlertDialogAction,
 } from '../../components/ui/alert-dialog.js';
 import { Plus, Container, RefreshCw, Server } from 'lucide-react';
-import type { ContainerView, UserServerDto } from '@nyabase/common';
+import type {
+  ContainerView,
+  EffectiveAccessDto,
+  UserServerDto,
+} from '@nyabase/common';
 import { ContainerRow } from '../../components/containers/container-row.js';
 import { CreateContainerDialog } from '../../components/containers/create-container-dialog.js';
 import { useContainerActions } from '../../hooks/use-container-actions.js';
@@ -139,6 +143,22 @@ function ContainersPage() {
   const containers = containersQuery.data ?? [];
   const { isLoading: containersLoading, isFetching, refetch } = containersQuery;
 
+  const accessQuery = useQuery({
+    queryKey: ['me', 'access'],
+    queryFn: () => api.get<EffectiveAccessDto>('/me/access'),
+    refetchInterval: (query) => queryPollInterval(query.state, { activeIntervalMs: 30_000 }),
+  });
+  const graceServers = useMemo(() => {
+    const byId = new Map(servers.map((server) => [server.id, server.name]));
+    return (accessQuery.data?.servers ?? [])
+      .filter((access) => access.accessPhase === 'grace')
+      .map((access) => ({
+        serverId: access.serverId,
+        serverName: byId.get(access.serverId) ?? access.serverId.slice(0, 8),
+        purgeAt: access.purgeAt,
+      }));
+  }, [accessQuery.data, servers]);
+
   const orphanGroups = useMemo(() => {
     const known = new Set(servers.map((s) => s.id));
     const m = new Map<string, ContainerView[]>();
@@ -156,6 +176,7 @@ function ContainersPage() {
 
   const handleRefresh = () => {
     void qc.invalidateQueries({ queryKey: queryKeys.servers.user });
+    void qc.invalidateQueries({ queryKey: ['me', 'access'] });
     void refetch();
   };
 
@@ -188,6 +209,20 @@ function ContainersPage() {
           </Button>
         </div>
       </div>
+
+      {graceServers.length > 0 && (
+        <div className="rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900 space-y-1">
+          {graceServers.map((server) => (
+            <p key={server.serverId}>
+              服务器「{server.serverName}」授权已到期，容器已被停止；可再启动以迁移数据
+              {server.purgeAt
+                ? `，窗口至 ${new Date(server.purgeAt).toLocaleString()}`
+                : ''}
+              ；窗口结束后本地资源将被删除。
+            </p>
+          ))}
+        </div>
+      )}
 
       {listLoading ? (
         <Card><CardContent className="h-32 animate-pulse bg-muted/50 rounded-lg mt-6" /></Card>

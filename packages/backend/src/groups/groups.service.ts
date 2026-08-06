@@ -47,6 +47,14 @@ type TaskIdsResult = { taskIds: string[] };
 type WithTaskIds<T> = T & TaskIdsResult;
 export type UserDeleteResult = { deleted: boolean; taskIds: string[] };
 type GrantScope = 'user' | 'group';
+type ServerGrantUpsertDto = Partial<{
+  cpuMillis: number | null;
+  memBytes: number | null;
+  diskBytes: number | null;
+  gpuMode: GpuGrantMode | null;
+  gpuIndices: number[] | null;
+  expiresAt: string | null;
+}>;
 
 interface ServerGrant {
   id: string;
@@ -58,6 +66,7 @@ interface ServerGrant {
   diskBytes: number | null;
   gpuMode: GpuGrantMode | null;
   gpuIndices: number[] | null;
+  expiresAt: Date | null;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -684,13 +693,7 @@ export class GroupsService {
   upsertGroupServerGrant(
     groupId: string,
     serverId: string,
-    dto: Partial<{
-      cpuMillis: number | null;
-      memBytes: number | null;
-      diskBytes: number | null;
-      gpuMode: GpuGrantMode | null;
-      gpuIndices: number[] | null;
-    }>,
+    dto: ServerGrantUpsertDto,
     actorId?: string,
   ): Promise<WithTaskIds<ServerGrantDto>> {
     return this.upsertServerGrant('group', groupId, serverId, dto, actorId);
@@ -788,13 +791,7 @@ export class GroupsService {
   upsertUserServerGrant(
     userId: string,
     serverId: string,
-    dto: Partial<{
-      cpuMillis: number | null;
-      memBytes: number | null;
-      diskBytes: number | null;
-      gpuMode: GpuGrantMode | null;
-      gpuIndices: number[] | null;
-    }>,
+    dto: ServerGrantUpsertDto,
     actorId?: string,
   ): Promise<WithTaskIds<ServerGrantDto>> {
     return this.upsertServerGrant('user', userId, serverId, dto, actorId);
@@ -946,6 +943,7 @@ export class GroupsService {
       diskBytes: grant.diskBytes,
       gpuMode: grant.gpuMode,
       gpuIndices: grant.gpuIndices,
+      expiresAt: grant.expiresAt ? grant.expiresAt.toISOString() : null,
       createdAt: grant.createdAt.toISOString(),
       updatedAt: grant.updatedAt.toISOString(),
     };
@@ -977,13 +975,7 @@ export class GroupsService {
     scope: GrantScope,
     scopeId: string,
     serverId: string,
-    dto: Partial<{
-      cpuMillis: number | null;
-      memBytes: number | null;
-      diskBytes: number | null;
-      gpuMode: GpuGrantMode | null;
-      gpuIndices: number[] | null;
-    }>,
+    dto: ServerGrantUpsertDto,
     actorId?: string,
   ): Promise<WithTaskIds<ServerGrantDto>> {
     const result = await this.transactions.run(async (transaction) => {
@@ -1015,6 +1007,7 @@ export class GroupsService {
             ? dto.gpuIndices ?? []
             : null
           : existing?.gpu_indices ?? null,
+        expires_at: 'expiresAt' in dto ? dto.expiresAt ?? null : existing?.expires_at ?? null,
         updated_at: new Date(),
       };
       const row = existing
@@ -1447,6 +1440,7 @@ export class GroupsService {
     disk_bytes: string | null;
     gpu_mode: string | null;
     gpu_indices: number[] | null;
+    expires_at: Date | null;
     created_at: Date;
     updated_at: Date;
   }): ServerGrant {
@@ -1459,6 +1453,7 @@ export class GroupsService {
       cpuMillis: row.cpu_millis,
       memBytes: row.mem_bytes === null ? null : Number(row.mem_bytes),
       diskBytes: row.disk_bytes === null ? null : Number(row.disk_bytes),
+      expiresAt: row.expires_at,
       gpuMode: row.gpu_mode as GpuGrantMode | null,
       gpuIndices: row.gpu_indices,
       createdAt: row.created_at,

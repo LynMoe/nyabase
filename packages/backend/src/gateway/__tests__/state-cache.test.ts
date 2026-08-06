@@ -106,12 +106,57 @@ describe('StateCache', () => {
     };
     const projectionCache = new StateCache(
       { selectFrom: () => query } as never,
-      { servesApi: () => true, servesGateway: () => false } as never,
+      { servesApi: () => true, servesGateway: () => false, runsWorker: () => false } as never,
     );
 
     await projectionCache.onModuleInit();
     try {
       expect(projectionCache.get('srv-1')?.dockerDaemon).toEqual(dockerDaemon);
+    } finally {
+      projectionCache.onModuleDestroy();
+    }
+  });
+
+  it('polls durable projections on the worker role so expiry actions see runtime readiness', async () => {
+    const report = {
+      serverId: 'srv-worker',
+      sessionId: 'session-worker',
+      hostname: 'worker-host',
+      lastUpdated: Date.now(),
+      runtimeReady: true,
+      containers: [],
+      disks: [],
+      gpus: [],
+      localImages: [],
+      dataDirs: [],
+      remoteFsMounts: [],
+      xfsProjects: [],
+      unknownXfsNumericIds: [],
+      dataDirIssues: { orphans: [], missing: [] },
+      dockerDaemon: null,
+    };
+    const rows = [{
+      server_id: 'srv-worker',
+      session_id: 'session-worker',
+      runtime_ready: true,
+      state_report_json: report,
+      docker_daemon_json: null,
+    }];
+    const query = {
+      innerJoin: () => query,
+      select: () => query,
+      where: () => query,
+      whereRef: () => query,
+      execute: async () => rows,
+    };
+    const projectionCache = new StateCache(
+      { selectFrom: () => query } as never,
+      { servesApi: () => false, servesGateway: () => false, runsWorker: () => true } as never,
+    );
+
+    await projectionCache.onModuleInit();
+    try {
+      expect(projectionCache.isRuntimeReady('srv-worker')).toBe(true);
     } finally {
       projectionCache.onModuleDestroy();
     }
@@ -129,7 +174,7 @@ describe('StateCache', () => {
     };
     const projectionCache = new StateCache(
       { selectFrom: () => query } as never,
-      { servesApi: () => true, servesGateway: () => false } as never,
+      { servesApi: () => true, servesGateway: () => false, runsWorker: () => false } as never,
     );
 
     const first = projectionCache.onModuleInit();
@@ -155,7 +200,7 @@ describe('StateCache', () => {
     };
     const projectionCache = new StateCache(
       { selectFrom: () => query } as never,
-      { servesApi: () => true, servesGateway: () => false } as never,
+      { servesApi: () => true, servesGateway: () => false, runsWorker: () => false } as never,
     );
     const existing = makeSnap('server-a');
     projectionCache.set(existing.serverId, existing);

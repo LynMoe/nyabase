@@ -64,6 +64,8 @@ export const MAX_AGENT_GPU_DEVICES = 256;
 export const MAX_RESOURCE_CPU_MILLIS = Math.floor(Number.MAX_SAFE_INTEGER / 1_000_000);
 export const MAX_RESOURCE_BYTES = Number.MAX_SAFE_INTEGER;
 export const MAX_GROUP_PRIORITY = Number.MAX_SAFE_INTEGER;
+/** Days of continued (degraded) access retained after a server grant expires. */
+export const GRANT_EXPIRY_GRACE_DAYS = 14;
 /** Lossy telemetry is intentionally much smaller than authoritative inventory. */
 export const MAX_METRIC_POINTS_PER_BATCH = 4_096;
 export const MAX_METRIC_NAME_LENGTH = 128;

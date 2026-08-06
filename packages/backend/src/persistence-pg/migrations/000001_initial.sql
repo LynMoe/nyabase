@@ -615,6 +615,32 @@ COMMENT ON TABLE control.authorization_dependencies IS 'Transactional projection
 
 
 --
+-- Name: grant_expiry_enforcement; Type: TABLE; Schema: control; Owner: -
+--
+
+CREATE TABLE control.grant_expiry_enforcement (
+    user_id uuid NOT NULL,
+    server_id text NOT NULL,
+    covering_expires_at timestamp with time zone NOT NULL,
+    grace_stopped_at timestamp with time zone,
+    purged_at timestamp with time zone,
+    claim_token uuid,
+    claimed_by text,
+    lease_expires_at timestamp with time zone,
+    updated_at timestamp with time zone DEFAULT clock_timestamp() NOT NULL,
+    CONSTRAINT grant_expiry_enforcement_server_id_check CHECK ((length(btrim(server_id)) > 0)),
+    CONSTRAINT grant_expiry_enforcement_claim_shape_check CHECK ((((claim_token IS NULL) AND (claimed_by IS NULL) AND (lease_expires_at IS NULL)) OR ((claim_token IS NOT NULL) AND (claimed_by IS NOT NULL) AND (lease_expires_at IS NOT NULL))))
+);
+
+
+--
+-- Name: TABLE grant_expiry_enforcement; Type: COMMENT; Schema: control; Owner: -
+--
+
+COMMENT ON TABLE control.grant_expiry_enforcement IS 'Idempotent grant-expiry worker ledger: one-shot grace stop and lost purge per covering expires_at cycle';
+
+
+--
 -- Name: container_gpu_claims; Type: TABLE; Schema: control; Owner: -
 --
 
@@ -998,6 +1024,7 @@ CREATE TABLE iam.server_grants (
     disk_bytes bigint,
     gpu_mode text,
     gpu_indices integer[],
+    expires_at timestamp with time zone,
     created_at timestamp with time zone DEFAULT clock_timestamp() NOT NULL,
     updated_at timestamp with time zone DEFAULT clock_timestamp() NOT NULL,
     CONSTRAINT server_grants_cpu_millis_check CHECK (((cpu_millis IS NULL) OR (cpu_millis >= 0))),
@@ -1774,6 +1801,14 @@ ALTER TABLE ONLY control.authorization_dependencies
 
 
 --
+-- Name: grant_expiry_enforcement grant_expiry_enforcement_pkey; Type: CONSTRAINT; Schema: control; Owner: -
+--
+
+ALTER TABLE ONLY control.grant_expiry_enforcement
+    ADD CONSTRAINT grant_expiry_enforcement_pkey PRIMARY KEY (user_id, server_id, covering_expires_at);
+
+
+--
 -- Name: container_gpu_claims container_gpu_claims_container_id_gpu_index_key; Type: CONSTRAINT; Schema: control; Owner: -
 --
 
@@ -2384,6 +2419,22 @@ CREATE INDEX authorization_dependencies_server_idx ON control.authorization_depe
 
 
 --
+-- Name: grant_expiry_enforcement_pending_idx; Type: INDEX; Schema: control; Owner: -
+--
+
+CREATE INDEX grant_expiry_enforcement_pending_idx ON control.grant_expiry_enforcement USING btree (user_id, server_id)
+  WHERE ((grace_stopped_at IS NULL) OR (purged_at IS NULL));
+
+
+--
+-- Name: grant_expiry_enforcement_lease_idx; Type: INDEX; Schema: control; Owner: -
+--
+
+CREATE INDEX grant_expiry_enforcement_lease_idx ON control.grant_expiry_enforcement USING btree (lease_expires_at)
+  WHERE (claim_token IS NOT NULL);
+
+
+--
 -- Name: authorization_dependencies_source_idx; Type: INDEX; Schema: control; Owner: -
 --
 
@@ -2647,6 +2698,13 @@ CREATE INDEX server_grants_server_idx ON iam.server_grants USING btree (server_i
 --
 
 CREATE UNIQUE INDEX server_grants_user_unique ON iam.server_grants USING btree (user_id, server_id) WHERE (user_id IS NOT NULL);
+
+
+--
+-- Name: server_grants_expires_at_idx; Type: INDEX; Schema: iam; Owner: -
+--
+
+CREATE INDEX server_grants_expires_at_idx ON iam.server_grants USING btree (expires_at) WHERE (expires_at IS NOT NULL);
 
 
 --
@@ -3138,6 +3196,14 @@ CREATE TRIGGER workflow_tasks_touch_updated_at BEFORE UPDATE ON workflow.tasks F
 
 ALTER TABLE ONLY control.authorization_dependencies
     ADD CONSTRAINT authorization_dependencies_user_id_fkey FOREIGN KEY (user_id) REFERENCES iam.users(id) ON DELETE RESTRICT;
+
+
+--
+-- Name: grant_expiry_enforcement grant_expiry_enforcement_user_id_fkey; Type: FK CONSTRAINT; Schema: control; Owner: -
+--
+
+ALTER TABLE ONLY control.grant_expiry_enforcement
+    ADD CONSTRAINT grant_expiry_enforcement_user_id_fkey FOREIGN KEY (user_id) REFERENCES iam.users(id) ON DELETE CASCADE;
 
 
 --

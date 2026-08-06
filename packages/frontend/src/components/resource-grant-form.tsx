@@ -14,6 +14,8 @@ export interface ResourceFormValue {
   diskGb: string;
   gpuMode: GpuGrantModeT | '';
   gpuIndices: string;
+  /** Local datetime string for `<input type="datetime-local">`; empty = never expires. */
+  expiresAtLocal: string;
 }
 
 export const EMPTY_RESOURCE_FORM: ResourceFormValue = {
@@ -22,7 +24,26 @@ export const EMPTY_RESOURCE_FORM: ResourceFormValue = {
   diskGb: '',
   gpuMode: '',
   gpuIndices: '',
+  expiresAtLocal: '',
 };
+
+/** Convert an ISO timestamp to a value accepted by datetime-local inputs (with seconds). */
+export function isoToDatetimeLocal(iso: string | null | undefined): string {
+  if (!iso) return '';
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime())) return '';
+  const pad = (n: number) => String(n).padStart(2, '0');
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
+}
+
+/** Convert a datetime-local value to an ISO string, or null when empty. */
+export function datetimeLocalToIso(local: string): string | null {
+  const trimmed = local.trim();
+  if (!trimmed) return null;
+  const date = new Date(trimmed);
+  if (Number.isNaN(date.getTime())) throw new Error('到期时间无效');
+  return date.toISOString();
+}
 
 export function grantToForm(g: {
   cpuMillis?: number | null;
@@ -30,6 +51,7 @@ export function grantToForm(g: {
   diskBytes?: number | null;
   gpuMode?: GpuGrantModeT | null;
   gpuIndices?: number[] | null;
+  expiresAt?: string | null;
 }): ResourceFormValue {
   return {
     // These divisions are exact for the stored integer units. Avoid display
@@ -40,6 +62,7 @@ export function grantToForm(g: {
     diskGb: g.diskBytes != null ? String(g.diskBytes / BYTES_PER_GIB) : '',
     gpuMode: g.gpuMode ?? '',
     gpuIndices: g.gpuIndices ? g.gpuIndices.join(',') : '',
+    expiresAtLocal: isoToDatetimeLocal(g.expiresAt),
   };
 }
 
@@ -90,6 +113,7 @@ export function formToGrantPayload(v: ResourceFormValue, options: ResourceGrantP
     diskBytes: parseScaledLimit(v.diskGb, BYTES_PER_GIB, MAX_GRANT_BYTES, '磁盘'),
     gpuMode,
     gpuIndices,
+    expiresAt: datetimeLocalToIso(v.expiresAtLocal),
   };
 }
 
@@ -156,6 +180,17 @@ export function ResourceGrantForm({ value, onChange, emptyHint, showDisk = true,
           )}
         </div>
       )}
+      <div>
+        <Label className="text-xs text-muted-foreground">到期时间（清空表示永不过期）</Label>
+        <Input
+          size={1}
+          type="datetime-local"
+          step={1}
+          className="h-8 text-xs mt-1"
+          value={value.expiresAtLocal}
+          onChange={(e) => set('expiresAtLocal', e.target.value)}
+        />
+      </div>
     </div>
   );
 }

@@ -894,6 +894,9 @@ function currentGrant() {
     diskBytes: 4096,
     gpuMode: GpuGrantMode.None,
     gpuIndices: [],
+    expiresAt: null,
+    purgeAt: null,
+    accessPhase: 'full' as const,
   };
 }
 

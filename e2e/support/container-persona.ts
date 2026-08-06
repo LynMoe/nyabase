@@ -1,4 +1,5 @@
 import type { APIRequestContext, APIResponse } from '@playwright/test';
+import { createHash } from 'node:crypto';
 import { ContainerDeadline } from './container-deadline.js';
 import { waitForAgentTask } from './durable-api.js';
 import { aggregateErrorWithDiagnostics } from './error-diagnostics.mjs';
@@ -23,10 +24,16 @@ interface ContainerPersonaSession {
   user: ContainerPersonaUser;
 }
 
+interface ContainerPersonaTokenPair {
+  accessToken: string;
+  refreshToken: string;
+}
+
 export interface ContainerPersona {
   user: ContainerPersonaUser;
   password: string;
   accessToken: string;
+  refreshToken: string;
   api: APIRequestContext;
   access: {
     serverId: string;
@@ -131,6 +138,7 @@ export async function createContainerPersona(
       user,
       password,
       accessToken: session.accessToken,
+      refreshToken: session.refreshToken,
       api,
       access: input.access
         ? { serverId: input.access.serverId, imageId: input.access.imageId }
@@ -141,6 +149,7 @@ export async function createContainerPersona(
       user,
       password,
       accessToken: '',
+      refreshToken: '',
       api: input.adminApi,
       access: input.access
         ? { serverId: input.access.serverId, imageId: input.access.imageId }
@@ -160,6 +169,35 @@ export async function createContainerPersona(
     }
     throw error;
   }
+}
+
+export async function refreshContainerPersonaSession(
+  persona: ContainerPersona,
+  anonymousApi: APIRequestContext,
+  trackedApiFactory: TrackedApiFactory,
+  label: string,
+): Promise<ContainerPersona> {
+  const requestId = createHash('sha256')
+    .update(`${currentRunId()}:container-persona:${label}:${persona.user.id}`)
+    .digest('hex');
+  const session = await expectJson<ContainerPersonaTokenPair>(
+    await anonymousApi.post('/api/auth/refresh', {
+      data: { refreshToken: persona.refreshToken, requestId },
+    }),
+  );
+  const api = await trackedApiFactory({
+    extraHTTPHeaders: { authorization: `Bearer ${session.accessToken}` },
+  });
+  const me = await expectJson<ContainerPersonaUser>(await api.get('/api/auth/me'));
+  if (me.id !== persona.user.id) {
+    throw new Error(`Container persona refresh returned an unexpected identity for ${persona.user.id}`);
+  }
+  return {
+    ...persona,
+    accessToken: session.accessToken,
+    refreshToken: session.refreshToken,
+    api,
+  };
 }
 
 export async function cleanupContainerPersona(

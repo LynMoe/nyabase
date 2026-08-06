@@ -22,6 +22,7 @@ import { HttpProxyModule } from './http-proxy/http-proxy.module.js';
 import { AppService } from './app.service.js';
 import { NyabaseConfigModule } from './config/nyabase-config.module.js';
 import { AccessModule } from './access/access.module.js';
+import { GrantExpiryModule } from './access/grant-expiry.module.js';
 import { CatalogModule } from './catalog/catalog.module.js';
 import { HealthController } from './health/health.controller.js';
 import { RedisRuntimeModule } from './runtime/redis-runtime.module.js';
@@ -50,6 +51,7 @@ import { RuntimeLifecycleService } from './health/runtime-lifecycle.service.js';
     HttpProxyModule,
     SystemSettingsModule,
     CatalogModule,
+    GrantExpiryModule,
   ],
   controllers: [
     HealthController,

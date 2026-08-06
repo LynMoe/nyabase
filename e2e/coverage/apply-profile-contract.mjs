@@ -212,6 +212,8 @@ const reviewedCaseIds = [
   'auth.identity-rbac.catalog-groups-projection',
   'auth.identity-rbac.catalog-users-projection',
   'auth.identity-rbac.direct-and-inherited-capabilities',
+  'auth.identity-rbac.grant-expiry-phases',
+  'auth.identity-rbac.grant-expiry-purge',
   'auth.identity-rbac.groups-and-nested-grants',
   'auth.identity-rbac.http.delete.api-admin-groups-by-id-mount-source-grants-by-sourcekind-by-sourceid',
   'auth.identity-rbac.http.delete.api-admin-users-by-userid-image-grants-by-imageid-by-serverid',
@@ -469,6 +471,16 @@ implemented.set('auth.identity-rbac.direct-and-inherited-capabilities', {
     'groups/user-grants.controller.ts|DELETE|/api/admin/users/:userId/server-grants/:serverId',
     'groups/user-grants.controller.ts|GET|/api/admin/users/:userId/effective-access',
     'groups/me-access.controller.ts|GET|/api/me/access',
+  ],
+});
+implemented.set('auth.identity-rbac.grant-expiry-phases', {
+  profiles: ['core', 'full'],
+  httpSurfaces: [],
+});
+implemented.set('auth.identity-rbac.grant-expiry-purge', {
+  profiles: ['core', 'full'],
+  httpSurfaces: [
+    'access/admin-user-server-purge.controller.ts|POST|/api/admin/users/:userId/servers/:serverId/purge-resources',
   ],
 });
 implemented.set('storage.local-quota.local-source-grants', {

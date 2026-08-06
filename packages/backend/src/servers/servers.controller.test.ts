@@ -84,6 +84,9 @@ function makeController(
     diskBytes: 0,
     gpuMode: grant.gpuMode,
     gpuIndices: [...grant.gpuIndices],
+    expiresAt: null,
+    purgeAt: null,
+    accessPhase: 'full' as const,
   };
   const accessResolver = {
     runWithActiveServerAccess: vi.fn(async (

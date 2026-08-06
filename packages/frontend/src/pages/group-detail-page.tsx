@@ -325,7 +325,13 @@ function GroupServerGrantsTab({
       notifyAccessChangedForSubject({ type: 'group', id: groupId });
       toast({ title: '授权已移除' });
     },
-    onError: (e) => toast({ title: '失败', description: e.message, variant: 'destructive' }),
+    onError: (e) => toast({
+      title: '失败',
+      description: e.message.includes('ACCESS_REVOKE_HAS_RESOURCES') || e.message.includes('still owns')
+        ? `${e.message}。请到对应用户页使用「清理资源」清理该服务器上的容器与本地数据目录后再移除组授权（remote 数据目录不挡移除）。`
+        : e.message,
+      variant: 'destructive',
+    }),
   });
 
   const startEdit = (serverId: string) => {
@@ -392,6 +398,9 @@ function GroupServerGrantsTab({
                       GPU: {g.gpuMode ?? 'all'}{g.gpuMode === GpuGrantMode.Indices ? ` [${g.gpuIndices?.join(',')}]` : ''}
                     </span>
                   )}
+                  <span className="text-muted-foreground">
+                    到期: {g.expiresAt ? new Date(g.expiresAt).toLocaleString() : '永不'}
+                  </span>
                 </div>
               ) : (
                 <div className="text-xs text-muted-foreground/50 mt-1">无授权</div>

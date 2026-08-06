@@ -1,4 +1,5 @@
 import { ConflictException, Injectable } from '@nestjs/common';
+import { GRANT_EXPIRY_GRACE_DAYS } from '@nyabase/common';
 import { sql } from 'kysely';
 import type { IamTransaction } from './access-resolver.service.js';
 
@@ -57,6 +58,11 @@ export class AccessRevocationGuardService {
           FROM iam.server_grants AS direct_grant
           WHERE direct_grant.user_id = affected.user_id
             AND direct_grant.server_id = affected.server_id
+            AND (
+              direct_grant.expires_at IS NULL
+              OR direct_grant.expires_at + make_interval(days => ${GRANT_EXPIRY_GRACE_DAYS})
+                > clock_timestamp()
+            )
         )
         AND NOT EXISTS (
           SELECT 1
@@ -65,6 +71,11 @@ export class AccessRevocationGuardService {
             ON inherited_grant.group_id = membership.group_id
           WHERE membership.user_id = affected.user_id
             AND inherited_grant.server_id = affected.server_id
+            AND (
+              inherited_grant.expires_at IS NULL
+              OR inherited_grant.expires_at + make_interval(days => ${GRANT_EXPIRY_GRACE_DAYS})
+                > clock_timestamp()
+            )
         )
       )
       SELECT
@@ -78,6 +89,13 @@ export class AccessRevocationGuardService {
         FROM control.authorization_dependencies AS candidate
         WHERE candidate.user_id = revoked.user_id
           AND candidate.server_id = revoked.server_id
+          AND (
+            candidate.dependency_kind = 'container'
+            OR (
+              candidate.dependency_kind = 'data_directory'
+              AND candidate.source_kind = 'local'
+            )
+          )
         ORDER BY candidate.created_at, candidate.id
         LIMIT 1
       ) AS dependency
@@ -88,7 +106,7 @@ export class AccessRevocationGuardService {
     if (!conflict) return;
     throw new ConflictException({
       code: 'ACCESS_REVOKE_HAS_RESOURCES',
-      message: `User ${conflict.user_id} still owns resources on server ${conflict.server_id}`,
+      message: `User ${conflict.user_id} still owns local resources on server ${conflict.server_id}`,
       userId: conflict.user_id,
       serverId: conflict.server_id,
       dependencyKind: conflict.dependency_kind,

@@ -218,12 +218,12 @@ const websocketPaths = [
 ].sort();
 
 const requiredBaseline = {
-  httpDecorators: 154,
-  httpControllerFiles: 30,
+  httpDecorators: 155,
+  httpControllerFiles: 31,
   frontendRouteFiles: 20,
   agentTaskKinds: 14,
   websocketPaths: 4,
-  httpInventorySha256: 'ddcd75ceec7bcfd4f69ee090b1455b063e318f3fde0ac8a87159ce9871643871',
+  httpInventorySha256: 'aefdcf0c6b964032fda6dc4f8c0d2aaef8527c4651308a2cb745cb7d4480ccd6',
 };
 for (const [name, required] of Object.entries(requiredBaseline)) {
   if (ledger.baseline?.[name] !== required) {

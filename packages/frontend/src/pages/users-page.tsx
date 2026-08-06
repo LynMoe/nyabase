@@ -502,6 +502,17 @@ function EffectiveTab({ userId }: { userId: string }) {
               <span className="font-semibold text-foreground text-sm">
                 {server?.name ?? access.serverId.slice(0, 8)}
               </span>
+              {access.accessPhase === 'grace' && (
+                <span className="text-xs text-amber-700 bg-amber-100 px-1.5 py-0.5 rounded">
+                  已到期：已强制停机，可再启动以迁移；窗口至{' '}
+                  {access.purgeAt ? new Date(access.purgeAt).toLocaleString() : '未知'}
+                </span>
+              )}
+              {access.expiresAt && access.accessPhase === 'full' && (
+                <span className="text-xs text-muted-foreground">
+                  到期 {new Date(access.expiresAt).toLocaleString()}
+                </span>
+              )}
             </div>
 
             <div className="px-4 py-3 space-y-3">
@@ -870,7 +881,28 @@ function OverridesTab({
       notifyAccessChangedForSubject({ type: 'user', id: userId });
       toast({ title: '授权已移除' });
     },
-    onError: (e) => toast({ title: '失败', description: e.message, variant: 'destructive' }),
+    onError: (e) => toast({
+      title: '失败',
+      description: e.message.includes('ACCESS_REVOKE_HAS_RESOURCES') || e.message.includes('still owns')
+        ? `${e.message}。可先使用「清理资源」删除该用户在此服务器上的容器与本地数据目录（remote 数据目录不挡移除）。`
+        : e.message,
+      variant: 'destructive',
+    }),
+  });
+
+  const purgeResources = useMutation({
+    mutationFn: (serverId: string) => api.post<TaskIdsResponse>(
+      `/admin/users/${userId}/servers/${serverId}/purge-resources`,
+      {},
+    ),
+    onSuccess: (result) => {
+      onTaskIds(result.taskIds);
+      toast({
+        title: '已提交资源清理',
+        description: '将删除容器与本地数据目录；完成后可再次移除授权',
+      });
+    },
+    onError: (e) => toast({ title: '清理失败', description: e.message, variant: 'destructive' }),
   });
 
   const startEdit = (serverId: string) => {
@@ -940,6 +972,9 @@ function OverridesTab({
                   <span className="text-muted-foreground">
                     GPU: {g.gpuMode ?? 'all'}{g.gpuMode === GpuGrantMode.Indices ? ` [${g.gpuIndices?.join(',')}]` : ''}
                   </span>
+                  <span className="text-muted-foreground">
+                    到期: {g.expiresAt ? new Date(g.expiresAt).toLocaleString() : '永不'}
+                  </span>
                 </div>
               ) : (
                 <div className="text-xs text-muted-foreground/50 mt-0.5">无独立授权，沿用用户组授权</div>
@@ -950,10 +985,20 @@ function OverridesTab({
                 {g ? '编辑' : '授权'}
               </Button>
               {g && (
-                <Button size="sm" variant="ghost" disabled={remove.isPending} className="text-red-400 hover:text-red-600"
-                  onClick={() => remove.mutate(s.id)}>
-                  移除
-                </Button>
+                <>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    disabled={purgeResources.isPending}
+                    onClick={() => purgeResources.mutate(s.id)}
+                  >
+                    {purgeResources.isPending ? '清理中...' : '清理资源'}
+                  </Button>
+                  <Button size="sm" variant="ghost" disabled={remove.isPending} className="text-red-400 hover:text-red-600"
+                    onClick={() => remove.mutate(s.id)}>
+                    移除
+                  </Button>
+                </>
               )}
             </div>
           </div>

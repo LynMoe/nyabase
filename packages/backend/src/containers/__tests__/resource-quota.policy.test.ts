@@ -13,6 +13,9 @@ function makeGrant(overrides: Partial<ResolvedServerGrant> = {}): ResolvedServer
     diskBytes: 50 * 1024 ** 3,
     gpuMode: GpuGrantMode.None,
     gpuIndices: [],
+    expiresAt: null,
+    purgeAt: null,
+    accessPhase: 'full',
     ...overrides,
   };
 }

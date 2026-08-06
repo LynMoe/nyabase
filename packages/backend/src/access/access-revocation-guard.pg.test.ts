@@ -65,6 +65,63 @@ describePg('AccessRevocationGuardService PostgreSQL bulk bounds', () => {
     });
   });
 
+  it('allows server grant revoke when only remote data-directory dependencies remain', async () => {
+    await withPostgresTestDatabase(async (fixture) => {
+      const [userId] = await seedUsers(fixture.database, 1);
+      const [serverId] = await seedServers(fixture.database, 1);
+      await fixture.database.insertInto('control.authorization_dependencies').values({
+        id: randomUUID(),
+        dependency_kind: 'data_directory',
+        dependency_id: 'remote-only',
+        user_id: userId,
+        server_id: serverId,
+        source_kind: 'remote',
+        source_id: 'remote-fs-1',
+        source_identity: null,
+      }).execute();
+
+      const guard = new AccessRevocationGuardService();
+      await fixture.database.transaction().execute(async (transaction) => {
+        await expect(
+          guard.assertServerAccessRevocationSafe(transaction, [{ userId, serverId }]),
+        ).resolves.toBeUndefined();
+      });
+    });
+  });
+
+  it('blocks server grant revoke for local data-directory dependencies', async () => {
+    await withPostgresTestDatabase(async (fixture) => {
+      const [userId] = await seedUsers(fixture.database, 1);
+      const [serverId] = await seedServers(fixture.database, 1);
+      await fixture.database.insertInto('control.authorization_dependencies').values({
+        id: randomUUID(),
+        dependency_kind: 'data_directory',
+        dependency_id: 'local-dir',
+        user_id: userId,
+        server_id: serverId,
+        source_kind: 'local',
+        source_id: 'disk-1',
+        source_identity: 'identity-1',
+      }).execute();
+
+      const guard = new AccessRevocationGuardService();
+      await fixture.database.transaction().execute(async (transaction) => {
+        let error: unknown;
+        try {
+          await guard.assertServerAccessRevocationSafe(transaction, [{ userId, serverId }]);
+        } catch (caught) {
+          error = caught;
+        }
+        expect(error).toBeInstanceOf(ConflictException);
+        expect((error as ConflictException).getResponse()).toMatchObject({
+          code: 'ACCESS_REVOKE_HAS_RESOURCES',
+          dependencyKind: 'data_directory',
+          dependencyId: 'local-dir',
+        });
+      });
+    });
+  });
+
   it('checks the 64 x 64 supported mount revocation cross-product in one bounded query', async () => {
     await withPostgresTestDatabase(async (fixture) => {
       const users = await seedUsers(fixture.database, 64);

@@ -6,6 +6,12 @@ type IamGeneratedTimestamp = ColumnType<
   Date | string | undefined,
   Date | string
 >;
+/** Nullable timestamp with no server-side default; omitting it on insert stores NULL. */
+type IamNullableTimestamp = ColumnType<
+  Date | null,
+  Date | string | null | undefined,
+  Date | string | null
+>;
 
 export interface IamServerGrantTable {
   id: string;
@@ -17,6 +23,7 @@ export interface IamServerGrantTable {
   disk_bytes: IamBigInt | null;
   gpu_mode: string | null;
   gpu_indices: number[] | null;
+  expires_at: IamNullableTimestamp;
   created_at: IamGeneratedTimestamp;
   updated_at: IamGeneratedTimestamp;
 }
@@ -55,9 +62,22 @@ export interface AuthorizationDependencyTable {
   created_at: IamGeneratedTimestamp;
 }
 
+export interface GrantExpiryEnforcementTable {
+  user_id: string;
+  server_id: string;
+  covering_expires_at: Date;
+  grace_stopped_at: IamNullableTimestamp;
+  purged_at: IamNullableTimestamp;
+  claim_token: string | null;
+  claimed_by: string | null;
+  lease_expires_at: IamNullableTimestamp;
+  updated_at: IamGeneratedTimestamp;
+}
+
 export interface IamAuthorizationDatabase {
   'iam.server_grants': IamServerGrantTable;
   'iam.image_grants': IamImageGrantTable;
   'iam.mount_source_grants': IamMountSourceGrantTable;
   'control.authorization_dependencies': AuthorizationDependencyTable;
+  'control.grant_expiry_enforcement': GrantExpiryEnforcementTable;
 }

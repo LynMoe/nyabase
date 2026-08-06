@@ -152,6 +152,9 @@ describe('MetricsController.gpuMetrics', () => {
           diskBytes: 0,
           gpuMode,
           gpuIndices: [...gpuIndices],
+          expiresAt: null,
+          purgeAt: null,
+          accessPhase: 'full',
         }),
       } as unknown as AccessResolverService;
       const controller = makeController(metricsQuery, accessResolver);
@@ -534,6 +537,9 @@ function makeController(
       diskBytes: 0,
       gpuMode: GpuGrantMode.All,
       gpuIndices: [],
+      expiresAt: null,
+      purgeAt: null,
+      accessPhase: 'full',
     }),
     resolveMountSources: vi.fn().mockResolvedValue(new Set()),
   } as unknown as AccessResolverService;

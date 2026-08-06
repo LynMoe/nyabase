@@ -1,5 +1,4 @@
 import { GpuGrantMode } from '@nyabase/common';
-import type { ResolvedServerGrant } from './access-resolver.service.js';
 
 /**
  * Input types use structural duck-typing so this module remains importable
@@ -14,6 +13,14 @@ export interface GrantFields {
   gpuIndices: number[] | null;
 }
 
+export interface ResolvedGrantLimits {
+  cpuMillis: number;
+  memBytes: number;
+  diskBytes: number;
+  gpuMode: GpuGrantMode;
+  gpuIndices: number[];
+}
+
 /**
  * Resolve nullable grant fields directly.
  * Null CPU/memory/disk means unlimited (0); null GPU mode means all GPUs.
@@ -21,7 +28,7 @@ export interface GrantFields {
  */
 export function resolveGrant(
   grant: GrantFields,
-): ResolvedServerGrant {
+): ResolvedGrantLimits {
   return {
     cpuMillis: grant.cpuMillis ?? 0,
     memBytes: grant.memBytes ?? 0,

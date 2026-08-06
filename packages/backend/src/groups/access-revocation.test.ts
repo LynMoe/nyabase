@@ -239,20 +239,25 @@ function directGrant(userId: string, serverId: string, diskBytes: number) {
   };
 }
 
+/**
+ * Mirrors the shapes the real writers produce: container rows carry no mount
+ * source, while a data directory always resolves to an exact local or remote one.
+ */
 async function dependency(
   fixture: PostgresTestDatabase,
   userId: string,
   serverId: string,
   kind: string,
 ) {
+  const local = kind === 'data_directory' || kind === 'container_mount';
   await fixture.database.insertInto('control.authorization_dependencies').values({
     id: randomUUID(),
     dependency_kind: kind,
     dependency_id: randomUUID(),
     user_id: userId,
     server_id: serverId,
-    source_kind: null,
-    source_id: null,
-    source_identity: null,
+    source_kind: local ? 'local' : null,
+    source_id: local ? 'disk-a' : null,
+    source_identity: local ? 'local:xfs:00000000-0000-0000-0000-000000000001:fsroot=%2F' : null,
   }).execute();
 }

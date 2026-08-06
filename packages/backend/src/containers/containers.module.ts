@@ -38,6 +38,7 @@ import { AuditModule } from '../audit/audit.module.js';
     ContainersService,
     ContainerActionPolicyService,
     ContainerControlService,
+    ContainerControlRepository,
     ContainerTaskService,
   ],
 })

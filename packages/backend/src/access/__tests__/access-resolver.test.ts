@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import {
   Capability,
+  GRANT_EXPIRY_GRACE_DAYS,
   GpuGrantMode,
   UserStatus,
 } from '@nyabase/common';
@@ -121,6 +122,168 @@ describePostgres('AccessResolver PostgreSQL image authorization', () => {
   });
 });
 
+describePostgres('AccessResolver grant expiry phases', () => {
+  it('resolves a live direct grant as phase full', async () => {
+    await withPostgresTestDatabase(async (fixture) => {
+      const context = await setup(fixture);
+      await grantServer(fixture, context.userId, context.serverAccessible);
+      const grant = await context.service.resolveServer(context.userId, context.serverAccessible);
+      expect(grant).toMatchObject({ accessPhase: 'full', expiresAt: null, purgeAt: null });
+    });
+  });
+
+  it('falls back to a live group grant, phase full, when the direct grant is dead', async () => {
+    await withPostgresTestDatabase(async (fixture) => {
+      const context = await setup(fixture);
+      const groupId = await createGroupWithMember(fixture, context.userId, 1);
+      await grantServer(fixture, context.userId, context.serverAccessible, {
+        expiresAt: daysFromNow(-(GRANT_EXPIRY_GRACE_DAYS + 1)),
+        diskBytes: 1,
+      });
+      await grantGroupServer(fixture, groupId, context.serverAccessible, {
+        expiresAt: null,
+        diskBytes: 2,
+      });
+      const grant = await context.service.resolveServer(context.userId, context.serverAccessible);
+      expect(grant).toMatchObject({ accessPhase: 'full', diskBytes: 2 });
+    });
+  });
+
+  it('resolves a grace-phase direct grant (past expiry, inside the grace window)', async () => {
+    await withPostgresTestDatabase(async (fixture) => {
+      const context = await setup(fixture);
+      const expiresAt = daysFromNow(-1);
+      await grantServer(fixture, context.userId, context.serverAccessible, { expiresAt });
+      const grant = await context.service.resolveServer(context.userId, context.serverAccessible);
+      expect(grant?.accessPhase).toBe('grace');
+      expect(grant?.expiresAt?.toISOString()).toBe(expiresAt.toISOString());
+      expect(grant?.purgeAt?.getTime()).toBe(
+        expiresAt.getTime() + GRANT_EXPIRY_GRACE_DAYS * 24 * 60 * 60 * 1000,
+      );
+    });
+  });
+
+  it('is Lost (resolveServer returns null) once the direct grant is past the grace window', async () => {
+    await withPostgresTestDatabase(async (fixture) => {
+      const context = await setup(fixture);
+      await grantServer(fixture, context.userId, context.serverAccessible, {
+        expiresAt: daysFromNow(-(GRANT_EXPIRY_GRACE_DAYS + 1)),
+      });
+      await expect(context.service.resolveServer(context.userId, context.serverAccessible))
+        .resolves.toBeNull();
+    });
+  });
+
+  it('is Lost when there is no grant at all', async () => {
+    await withPostgresTestDatabase(async (fixture) => {
+      const context = await setup(fixture);
+      await expect(context.service.resolveServer(context.userId, context.serverAccessible))
+        .resolves.toBeNull();
+    });
+  });
+
+  it('prefers the group with the latest expiresAt when only grace-tier groups cover access', async () => {
+    await withPostgresTestDatabase(async (fixture) => {
+      const context = await setup(fixture);
+      const soonerGroup = await createGroupWithMember(fixture, context.userId, 100);
+      const laterGroup = await createGroupWithMember(fixture, context.userId, 1);
+      await grantGroupServer(fixture, soonerGroup, context.serverAccessible, {
+        expiresAt: daysFromNow(-1),
+        diskBytes: 10,
+      });
+      await grantGroupServer(fixture, laterGroup, context.serverAccessible, {
+        expiresAt: daysFromNow(-0.5),
+        diskBytes: 20,
+      });
+      const grant = await context.service.resolveServer(context.userId, context.serverAccessible);
+      expect(grant).toMatchObject({ accessPhase: 'grace', diskBytes: 20 });
+    });
+  });
+
+  it('resolveServerInTransaction and resolveServerPairsInTransaction agree on phase resolution', async () => {
+    await withPostgresTestDatabase(async (fixture) => {
+      const context = await setup(fixture);
+      const groupId = await createGroupWithMember(fixture, context.userId, 1);
+      await grantServer(fixture, context.userId, context.serverAccessible, {
+        expiresAt: daysFromNow(-1),
+        diskBytes: 5,
+      });
+      await grantGroupServer(fixture, groupId, context.serverAccessible, {
+        expiresAt: null,
+        diskBytes: 9,
+      });
+      const transactions = new PgTransactionManager(fixture.database);
+      const [single, batch] = await transactions.run(async (transaction) => Promise.all([
+        context.service.resolveServerInTransaction(
+          transaction,
+          context.userId,
+          context.serverAccessible,
+        ),
+        context.service.resolveServerPairsInTransaction(
+          transaction,
+          [{ userId: context.userId, serverId: context.serverAccessible }],
+        ),
+      ]));
+      const batched = batch.get(`${context.userId}\0${context.serverAccessible}`);
+      expect(single).toMatchObject({ accessPhase: 'full', diskBytes: 9 });
+      expect(batched).toMatchObject({ accessPhase: 'full', diskBytes: 9 });
+    });
+  });
+
+  it('exposes accessPhase/expiresAt/purgeAt on getEffectiveAccess for a grace-phase grant', async () => {
+    await withPostgresTestDatabase(async (fixture) => {
+      const context = await setup(fixture);
+      const expiresAt = daysFromNow(-1);
+      await grantServer(fixture, context.userId, context.serverAccessible, { expiresAt });
+      const [access] = await context.service.getEffectiveAccess(context.userId);
+      expect(access).toMatchObject({
+        serverId: context.serverAccessible,
+        accessPhase: 'grace',
+        expiresAt: expiresAt.toISOString(),
+      });
+      expect(access?.purgeAt).not.toBeNull();
+    });
+  });
+
+  it('rejects container-create access (requires full) while access is only in grace', async () => {
+    await withPostgresTestDatabase(async (fixture) => {
+      const context = await setup(fixture);
+      await grantServer(fixture, context.userId, context.serverAccessible, {
+        expiresAt: daysFromNow(-1),
+      });
+      await grantImage(fixture, context.userId, 'image-a', context.serverAccessible);
+      const transactions = new PgTransactionManager(fixture.database);
+      const result = await transactions.run((transaction) =>
+        context.service.resolveContainerCreateAccessInTransaction(
+          transaction,
+          context.userId,
+          context.serverAccessible,
+          'image-a',
+          [],
+        ));
+      expect(result).toBeNull();
+    });
+  });
+
+  it('allows container-create access while the direct grant is still full', async () => {
+    await withPostgresTestDatabase(async (fixture) => {
+      const context = await setup(fixture);
+      await grantServer(fixture, context.userId, context.serverAccessible);
+      await grantImage(fixture, context.userId, 'image-a', context.serverAccessible);
+      const transactions = new PgTransactionManager(fixture.database);
+      const result = await transactions.run((transaction) =>
+        context.service.resolveContainerCreateAccessInTransaction(
+          transaction,
+          context.userId,
+          context.serverAccessible,
+          'image-a',
+          [],
+        ));
+      expect(result).toMatchObject({ mountSourcesAllowed: true, grant: { accessPhase: 'full' } });
+    });
+  });
+});
+
 async function setup(
   fixture: PostgresTestDatabase,
   capability?: Capability,
@@ -185,6 +348,7 @@ async function grantServer(
   fixture: PostgresTestDatabase,
   userId: string,
   serverId: string,
+  options: { expiresAt?: Date | null; diskBytes?: number | null } = {},
 ) {
   await fixture.database.insertInto('iam.server_grants').values({
     id: randomUUID(),
@@ -193,10 +357,59 @@ async function grantServer(
     server_id: serverId,
     cpu_millis: null,
     mem_bytes: null,
-    disk_bytes: null,
+    disk_bytes: options.diskBytes ?? null,
     gpu_mode: GpuGrantMode.None,
     gpu_indices: null,
+    expires_at: options.expiresAt ?? null,
   }).execute();
+}
+
+async function grantGroupServer(
+  fixture: PostgresTestDatabase,
+  groupId: string,
+  serverId: string,
+  options: { expiresAt?: Date | null; diskBytes?: number | null } = {},
+) {
+  await fixture.database.insertInto('iam.server_grants').values({
+    id: randomUUID(),
+    user_id: null,
+    group_id: groupId,
+    server_id: serverId,
+    cpu_millis: null,
+    mem_bytes: null,
+    disk_bytes: options.diskBytes ?? null,
+    gpu_mode: GpuGrantMode.None,
+    gpu_indices: null,
+    expires_at: options.expiresAt ?? null,
+  }).execute();
+}
+
+async function createGroupWithMember(
+  fixture: PostgresTestDatabase,
+  userId: string,
+  priority: number,
+): Promise<string> {
+  const groupId = randomUUID();
+  await fixture.database.insertInto('iam.groups').values({
+    id: groupId,
+    name: `Group ${groupId.slice(0, 8)}`,
+    description: null,
+    priority,
+    is_system: false,
+    system_key: null,
+    capabilities: [],
+    revision: 1,
+  }).execute();
+  await fixture.database.insertInto('iam.group_members').values({
+    id: randomUUID(),
+    group_id: groupId,
+    user_id: userId,
+  }).execute();
+  return groupId;
+}
+
+function daysFromNow(days: number): Date {
+  return new Date(Date.now() + days * 24 * 60 * 60 * 1000);
 }
 
 async function grantImage(

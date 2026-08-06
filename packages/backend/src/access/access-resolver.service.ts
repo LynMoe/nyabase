@@ -10,6 +10,7 @@ import {
   GpuGrantMode,
   type GroupSummaryDto,
   type MountSourceKind,
+  type ServerAccessPhase,
   UserStatus,
   SystemGroupKey,
   type AdministrationActionsDto,
@@ -21,7 +22,12 @@ import { AgentGateway } from '../gateway/agent-gateway.js';
 import { exactLocalDisk } from '../mount-sources/utils.js';
 import { AccessCacheEpochService } from './access-cache-epoch.service.js';
 import { projectAdministrationActions } from './administration-availability.js';
-import { resolveGrant } from './grant-utils.js';
+import {
+  grantPurgeAt,
+  selectWinningGrantCandidate,
+  type GrantExpiryCandidate,
+} from './grant-expiry.js';
+import { resolveGrant, type ResolvedGrantLimits } from './grant-utils.js';
 
 export type IamTransaction = Transaction<NyabaseDatabase>;
 
@@ -31,6 +37,11 @@ export interface ResolvedServerGrant {
   diskBytes: number;
   gpuMode: GpuGrantMode;
   gpuIndices: number[];
+  /** Winning grant expiry; null means never expires. */
+  expiresAt: Date | null;
+  /** expiresAt + grace window; null when the grant never expires. */
+  purgeAt: Date | null;
+  accessPhase: ServerAccessPhase;
 }
 
 export interface MountSourceRef {
@@ -65,6 +76,7 @@ interface ServerGrantRow {
   disk_bytes: string | null;
   gpu_mode: string | null;
   gpu_indices: number[] | null;
+  expires_at: Date | null;
 }
 
 interface CachedMountSourceRef extends MountSourceRef {
@@ -384,18 +396,57 @@ export class AccessResolverService {
       .where('server_id', '=', serverId)
       .forKeyShare()
       .executeTakeFirst();
-    if (direct) return this.resolveServerGrant(direct as ServerGrantRow);
     const inherited = await transaction.selectFrom('iam.group_members as membership')
       .innerJoin('iam.groups as group', 'group.id', 'membership.group_id')
       .innerJoin('iam.server_grants as grant', 'grant.group_id', 'group.id')
-      .selectAll('grant')
+      .select([
+        'grant.id',
+        'grant.user_id',
+        'grant.group_id',
+        'grant.server_id',
+        'grant.cpu_millis',
+        'grant.mem_bytes',
+        'grant.disk_bytes',
+        'grant.gpu_mode',
+        'grant.gpu_indices',
+        'grant.expires_at',
+        'group.priority',
+        'group.id as group_tie',
+      ])
       .where('membership.user_id', '=', userId)
       .where('grant.server_id', '=', serverId)
-      .orderBy('group.priority', 'desc')
-      .orderBy('group.id', 'desc')
       .forKeyShare()
-      .executeTakeFirst();
-    return inherited ? this.resolveServerGrant(inherited as ServerGrantRow) : null;
+      .execute();
+    const candidates: Array<GrantExpiryCandidate & ServerGrantRow> = [];
+    if (direct) {
+      candidates.push({
+        ...(direct as ServerGrantRow),
+        scopeRank: 0,
+        priority: 0,
+        tieBreaker: (direct as ServerGrantRow).id,
+        expiresAt: (direct as ServerGrantRow).expires_at,
+      });
+    }
+    for (const row of inherited) {
+      candidates.push({
+        id: row.id,
+        user_id: row.user_id,
+        group_id: row.group_id,
+        server_id: row.server_id,
+        cpu_millis: row.cpu_millis,
+        mem_bytes: row.mem_bytes,
+        disk_bytes: row.disk_bytes,
+        gpu_mode: row.gpu_mode,
+        gpu_indices: row.gpu_indices,
+        expires_at: row.expires_at,
+        scopeRank: 1,
+        priority: row.priority,
+        tieBreaker: row.group_tie,
+        expiresAt: row.expires_at,
+      });
+    }
+    const winner = selectWinningGrantCandidate(candidates);
+    return winner ? this.resolveServerGrant(winner.candidate, winner.phase) : null;
   }
 
   async resolveServerPairsInTransaction(
@@ -416,6 +467,10 @@ export class AccessResolverService {
       disk_bytes: string | null;
       gpu_mode: string | null;
       gpu_indices: number[] | null;
+      expires_at: Date | null;
+      scope_rank: number;
+      priority: number;
+      tie_breaker: string;
     }>`
       WITH affected AS (
         SELECT
@@ -426,53 +481,83 @@ export class AccessResolverService {
       SELECT
         affected.user_id::text AS user_id,
         affected.server_id,
-        selected.cpu_millis,
-        selected.mem_bytes,
-        selected.disk_bytes,
-        selected.gpu_mode,
-        selected.gpu_indices
+        candidate.cpu_millis,
+        candidate.mem_bytes,
+        candidate.disk_bytes,
+        candidate.gpu_mode,
+        candidate.gpu_indices,
+        candidate.expires_at,
+        candidate.scope_rank,
+        candidate.priority,
+        candidate.tie_breaker::text AS tie_breaker
       FROM affected
-      CROSS JOIN LATERAL (
-        SELECT candidate.*
-        FROM (
-          SELECT
-            direct_grant.cpu_millis,
-            direct_grant.mem_bytes,
-            direct_grant.disk_bytes,
-            direct_grant.gpu_mode,
-            direct_grant.gpu_indices,
-            0 AS scope_rank,
-            0 AS priority,
-            direct_grant.id AS tie_breaker
-          FROM iam.server_grants AS direct_grant
-          WHERE direct_grant.user_id = affected.user_id
-            AND direct_grant.server_id = affected.server_id
-          UNION ALL
-          SELECT
-            inherited_grant.cpu_millis,
-            inherited_grant.mem_bytes,
-            inherited_grant.disk_bytes,
-            inherited_grant.gpu_mode,
-            inherited_grant.gpu_indices,
-            1 AS scope_rank,
-            inherited_group.priority,
-            inherited_group.id AS tie_breaker
-          FROM iam.group_members AS membership
-          INNER JOIN iam.groups AS inherited_group
-            ON inherited_group.id = membership.group_id
-          INNER JOIN iam.server_grants AS inherited_grant
-            ON inherited_grant.group_id = membership.group_id
-          WHERE membership.user_id = affected.user_id
-            AND inherited_grant.server_id = affected.server_id
-        ) AS candidate
-        ORDER BY candidate.scope_rank, candidate.priority DESC, candidate.tie_breaker DESC
-        LIMIT 1
-      ) AS selected
+      INNER JOIN LATERAL (
+        SELECT
+          direct_grant.cpu_millis,
+          direct_grant.mem_bytes,
+          direct_grant.disk_bytes,
+          direct_grant.gpu_mode,
+          direct_grant.gpu_indices,
+          direct_grant.expires_at,
+          0 AS scope_rank,
+          0 AS priority,
+          direct_grant.id AS tie_breaker
+        FROM iam.server_grants AS direct_grant
+        WHERE direct_grant.user_id = affected.user_id
+          AND direct_grant.server_id = affected.server_id
+        UNION ALL
+        SELECT
+          inherited_grant.cpu_millis,
+          inherited_grant.mem_bytes,
+          inherited_grant.disk_bytes,
+          inherited_grant.gpu_mode,
+          inherited_grant.gpu_indices,
+          inherited_grant.expires_at,
+          1 AS scope_rank,
+          inherited_group.priority,
+          inherited_group.id AS tie_breaker
+        FROM iam.group_members AS membership
+        INNER JOIN iam.groups AS inherited_group
+          ON inherited_group.id = membership.group_id
+        INNER JOIN iam.server_grants AS inherited_grant
+          ON inherited_grant.group_id = membership.group_id
+        WHERE membership.user_id = affected.user_id
+          AND inherited_grant.server_id = affected.server_id
+      ) AS candidate ON TRUE
     `.execute(transaction);
-    return new Map(result.rows.map((row) => [
-      `${row.user_id}\0${row.server_id}`,
-      this.resolveServerGrant(row as ServerGrantRow),
-    ]));
+    const byPair = new Map<string, Array<GrantExpiryCandidate & {
+      cpu_millis: number | null;
+      mem_bytes: string | null;
+      disk_bytes: string | null;
+      gpu_mode: string | null;
+      gpu_indices: number[] | null;
+      expires_at: Date | null;
+    }>>();
+    for (const row of result.rows) {
+      const key = `${row.user_id}\0${row.server_id}`;
+      const list = byPair.get(key) ?? [];
+      list.push({
+        cpu_millis: row.cpu_millis,
+        mem_bytes: row.mem_bytes,
+        disk_bytes: row.disk_bytes,
+        gpu_mode: row.gpu_mode,
+        gpu_indices: row.gpu_indices,
+        expires_at: row.expires_at,
+        scopeRank: row.scope_rank,
+        priority: row.priority,
+        tieBreaker: row.tie_breaker,
+        expiresAt: row.expires_at,
+      });
+      byPair.set(key, list);
+    }
+    const resolved = new Map<string, ResolvedServerGrant>();
+    for (const [key, candidates] of byPair) {
+      const winner = selectWinningGrantCandidate(candidates);
+      if (winner) {
+        resolved.set(key, this.resolveServerGrant(winner.candidate, winner.phase));
+      }
+    }
+    return resolved;
   }
 
   async listAccessibleServers(userId: string): Promise<string[]> {
@@ -658,7 +743,7 @@ export class AccessResolverService {
     const transaction = requireIamTransaction(executor);
     if (!await this.isActiveUser(transaction, userId)) return null;
     const grant = await this.resolveServerInTransaction(transaction, userId, serverId);
-    if (!grant) return null;
+    if (!grant || grant.accessPhase !== 'full') return null;
     const groups = await transaction.selectFrom('iam.group_members')
       .select('group_id')
       .where('user_id', '=', userId)
@@ -695,7 +780,14 @@ export class AccessResolverService {
     const cache = await this.getUserCache(userId);
     return [...cache.serverGrants].map(([serverId, grant]) => ({
       serverId,
-      ...grant,
+      cpuMillis: grant.cpuMillis,
+      memBytes: grant.memBytes,
+      diskBytes: grant.diskBytes,
+      gpuMode: grant.gpuMode,
+      gpuIndices: grant.gpuIndices,
+      expiresAt: grant.expiresAt ? grant.expiresAt.toISOString() : null,
+      purgeAt: grant.purgeAt ? grant.purgeAt.toISOString() : null,
+      accessPhase: grant.accessPhase,
       allowedImageIds: [...(cache.imageGrants.get(serverId) ?? [])],
     }));
   }
@@ -736,19 +828,44 @@ export class AccessResolverService {
           groupIds.length === 0 ? [] : transaction.selectFrom('iam.mount_source_grants')
             .selectAll().where('group_id', 'in', groupIds).execute(),
         ]);
-      const groupOrder = new Map(groups.map((group, index) => [group.id, index]));
+      const groupPriority = new Map(groups.map((group) => [group.id, group.priority]));
       const serverGrants = new Map<string, ResolvedServerGrant>();
-      const bestInherited = new Map<string, { order: number; grant: ServerGrantRow }>();
+      const byServer = new Map<string, Array<GrantExpiryCandidate & ServerGrantRow>>();
+      const pushCandidate = (
+        serverId: string,
+        row: ServerGrantRow,
+        scopeRank: number,
+        priority: number,
+        tieBreaker: string,
+      ) => {
+        const list = byServer.get(serverId) ?? [];
+        list.push({
+          ...row,
+          scopeRank,
+          priority,
+          tieBreaker,
+          expiresAt: row.expires_at,
+        });
+        byServer.set(serverId, list);
+      };
       for (const row of inheritedServers as unknown as ServerGrantRow[]) {
-        const order = groupOrder.get(row.group_id ?? '') ?? Number.MAX_SAFE_INTEGER;
-        const current = bestInherited.get(row.server_id);
-        if (!current || order < current.order) bestInherited.set(row.server_id, { order, grant: row });
-      }
-      for (const [serverId, selected] of bestInherited) {
-        serverGrants.set(serverId, this.resolveServerGrant(selected.grant));
+        const groupId = row.group_id ?? '';
+        pushCandidate(
+          row.server_id,
+          row,
+          1,
+          groupPriority.get(groupId) ?? 0,
+          groupId || row.id,
+        );
       }
       for (const row of directServers as unknown as ServerGrantRow[]) {
-        serverGrants.set(row.server_id, this.resolveServerGrant(row));
+        pushCandidate(row.server_id, row, 0, 0, row.id);
+      }
+      for (const [serverId, candidates] of byServer) {
+        const winner = selectWinningGrantCandidate(candidates);
+        if (winner) {
+          serverGrants.set(serverId, this.resolveServerGrant(winner.candidate, winner.phase));
+        }
       }
       const imageGrants = new Map<string, Set<string>>();
       for (const row of [...inheritedImages, ...directImages]) {
@@ -838,7 +955,17 @@ export class AccessResolverService {
       .executeTakeFirst() ? 1 : 0;
   }
 
-  private resolveServerGrant(row: ServerGrantRow): ResolvedServerGrant {
+  private resolveServerGrant(
+    row: {
+      cpu_millis: number | null;
+      mem_bytes: string | null;
+      disk_bytes: string | null;
+      gpu_mode: string | null;
+      gpu_indices: number[] | null;
+      expires_at?: Date | null;
+    },
+    phase: ServerAccessPhase,
+  ): ResolvedServerGrant {
     const number = (value: string | null): number | null => {
       if (value === null) return null;
       const parsed = Number(value);
@@ -847,13 +974,19 @@ export class AccessResolverService {
       }
       return parsed;
     };
-    return resolveGrant({
-      cpuMillis: row.cpu_millis,
-      memBytes: number(row.mem_bytes),
-      diskBytes: number(row.disk_bytes),
-      gpuMode: row.gpu_mode as GpuGrantMode | null,
-      gpuIndices: row.gpu_indices,
-    });
+    const expiresAt = row.expires_at ?? null;
+    return {
+      ...resolveGrant({
+        cpuMillis: row.cpu_millis,
+        memBytes: number(row.mem_bytes),
+        diskBytes: number(row.disk_bytes),
+        gpuMode: row.gpu_mode as GpuGrantMode | null,
+        gpuIndices: row.gpu_indices,
+      }),
+      expiresAt,
+      purgeAt: grantPurgeAt(expiresAt),
+      accessPhase: phase,
+    };
   }
 
   private toGroup(row: {

@@ -44,6 +44,7 @@ import {
   type HttpProxyWarningReason,
 } from '@nyabase/common';
 import { AccessResolverService } from '../access/access-resolver.service.js';
+import { loadUsableServerAccessKeys } from '../access/usable-server-access.js';
 import { NyabaseConfigService } from '../config/nyabase-config.service.js';
 import type { ContainerControlTable } from '../containers/container-control-database.types.js';
 import type { InfrastructureServerTable } from '../infrastructure/infrastructure-database.types.js';
@@ -522,6 +523,7 @@ export class HttpProxyService {
         addressClaims,
         containerMounts,
         remoteAssignments,
+        usableAccess,
       ] = await Promise.all([
         transaction.selectFrom('interaction.http_proxy_bindings').selectAll().execute(),
         transaction.selectFrom('interaction.http_domain_pools').selectAll().execute(),
@@ -555,9 +557,14 @@ export class HttpProxyService {
           .where('source_kind', '=', 'remote')
           .execute(),
         transaction.selectFrom('infra.remote_fs_server_assignments').selectAll().execute(),
+        loadUsableServerAccessKeys(transaction),
       ]);
       const poolsById = new Map(pools.map((row) => [row.id, row]));
-      const containersById = new Map(containers.map((row) => [row.id, row]));
+      const containersById = new Map(
+        containers
+          .filter((row) => usableAccess.has(`${row.owner_id}\0${row.server_id}`))
+          .map((row) => [row.id, row]),
+      );
       const claimsByAddress = new Map<string, typeof addressClaims>();
       for (const claim of addressClaims) {
         const claims = claimsByAddress.get(claim.address) ?? [];

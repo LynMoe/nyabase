@@ -157,7 +157,13 @@ export class ContainerControlService {
   ): Promise<AgentTaskRefResponse> {
     const containerId = uuidv4();
     const grant = await this.access.resolveServer(userId, request.serverId);
-    if (!grant) throw new ForbiddenException('No server access');
+    if (!grant || grant.accessPhase !== 'full') {
+      throw new ForbiddenException(
+        grant?.accessPhase === 'grace'
+          ? 'Server grant is in expiry grace; creating resources is not allowed'
+          : 'No server access',
+      );
+    }
     if (!(await this.access.resolveAllowedImages(userId, request.serverId)).has(request.imageId)) {
       throw new ForbiddenException('No image access');
     }
@@ -1003,7 +1009,15 @@ export class ContainerControlService {
       )
       : undefined;
     const runtimeId = container.boundRuntimeId ?? snapshot?.runtime.runtimeId ?? null;
-    const runtimeStatus = snapshot?.status ?? ContainerStatus.Unknown;
+    // Prefer the live agent snapshot when present. After a successful stop the
+    // agent often omits exited containers from the running set; fall back to the
+    // durable SSH route status (written by the stop finalizer) so start stays
+    // available for grace-phase migration restarts.
+    const runtimeStatus = snapshot?.status
+      ?? route?.runtimeStatus
+      ?? (container.powerIntent === ContainerPowerIntent.Stopped
+        ? ContainerStatus.Exited
+        : ContainerStatus.Unknown);
     const mounts = this.safeNormalizedMounts(container.mountsJson);
     const drift = this.runtimeDrift(container, snapshot, runtimeReady);
     if (mounts === null || !this.mountRowsMatch(mounts, mountRows)) {
@@ -1095,7 +1109,11 @@ export class ContainerControlService {
         message: 'Container has no bound runtime',
       });
     }
-    if (container.lifecyclePhase === ContainerPhase.Active && !snapshot) {
+    if (
+      container.lifecyclePhase === ContainerPhase.Active
+      && !snapshot
+      && container.powerIntent !== ContainerPowerIntent.Stopped
+    ) {
       drift.push({
         kind: RuntimeDriftKind.RuntimeMissing,
         message: 'Runtime container is missing from agent state',

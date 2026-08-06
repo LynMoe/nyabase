@@ -419,6 +419,7 @@ export const zUpsertServerGrantRequest = z.object({
   diskBytes: zGrantBytes.nullable().optional(),
   gpuMode: zGpuGrantMode.nullable().optional(),
   gpuIndices: zGrantGpuIndices.nullable().optional(),
+  expiresAt: z.string().datetime().nullable().optional(),
 }).strict().superRefine((value, ctx) => {
   if (Object.keys(value).length === 0) {
     ctx.addIssue({

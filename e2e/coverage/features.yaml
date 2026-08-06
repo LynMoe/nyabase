@@ -2,9 +2,9 @@
   "schemaVersion": 2,
   "scope": "cpu-only",
   "baseline": {
-    "httpDecorators": 154,
-    "httpControllerFiles": 30,
-    "httpInventorySha256": "ddcd75ceec7bcfd4f69ee090b1455b063e318f3fde0ac8a87159ce9871643871",
+    "httpDecorators": 155,
+    "httpControllerFiles": 31,
+    "httpInventorySha256": "aefdcf0c6b964032fda6dc4f8c0d2aaef8527c4651308a2cb745cb7d4480ccd6",
     "frontendRouteFiles": 20,
     "agentTaskKinds": 14,
     "websocketPaths": 4
@@ -289,6 +289,7 @@
         "full"
       ],
       "httpSurfaces": [
+        "access/admin-user-server-purge.controller.ts|POST|/api/admin/users/:userId/servers/:serverId/purge-resources",
         "auth/auth.controller.ts|DELETE|/api/auth/tokens/:id",
         "auth/auth.controller.ts|GET|/api/auth/me",
         "auth/auth.controller.ts|GET|/api/auth/tokens",
@@ -350,6 +351,7 @@
       "websockets": [],
       "specs": [
         "specs/10-auth-rbac/auth-rbac.live.spec.ts",
+        "specs/10-auth-rbac/grant-expiry.live.spec.ts",
         "specs/10-auth-rbac/login-rate-limit.live.spec.ts"
       ],
       "cases": [
@@ -1003,6 +1005,56 @@
           ],
           "httpSurfaces": [
             "catalog/admin-catalog.controller.ts|GET|/api/admin/catalog/grant-images"
+          ]
+        },
+        {
+          "caseId": "auth.identity-rbac.grant-expiry-phases",
+          "title": "server grant expiry phases and winning rules",
+          "kind": "behavioral",
+          "status": "implemented",
+          "profiles": [
+            "core",
+            "full"
+          ],
+          "persona": "administrator-and-standard-user",
+          "assertions": [
+            "full and grace are projected on /api/me/access; lost is observable as access absence",
+            "create is forbidden in grace while start remains allowed for migration",
+            "a live group grant wins over an expired direct grant",
+            "among same-phase group grants the latest expiresAt wins then priority"
+          ],
+          "specTestIds": [
+            "api.auth-rbac.grant-expiry.direct-expired-falls-back-to-live-group",
+            "api.auth-rbac.grant-expiry.latest-group-expires-at-wins",
+            "api.auth-rbac.grant-expiry.live-never-beats-finite-expires",
+            "api.auth-rbac.grant-expiry.never-expiring-higher-priority-wins",
+            "api.auth-rbac.grant-expiry.phases-create-start-and-lost"
+          ],
+          "httpSurfaces": []
+        },
+        {
+          "caseId": "auth.identity-rbac.grant-expiry-purge",
+          "title": "grant expiry purge shortcut and worker enforcement",
+          "kind": "behavioral",
+          "status": "implemented",
+          "profiles": [
+            "core",
+            "full"
+          ],
+          "persona": "administrator-and-standard-user",
+          "assertions": [
+            "revoking a server grant with remaining local resources returns ACCESS_REVOKE_HAS_RESOURCES",
+            "admin purge-resources deletes containers and local data dirs then allows grant revoke",
+            "remote data directories do not block server grant revoke",
+            "the expiry worker one-shot stops running containers on grace entry, allows restart, and purges after lost"
+          ],
+          "specTestIds": [
+            "api.auth-rbac.grant-expiry.purge-then-revoke",
+            "api.auth-rbac.grant-expiry.remote-dependency-does-not-block-revoke",
+            "api.auth-rbac.grant-expiry.worker-stops-grace-and-purges-lost"
+          ],
+          "httpSurfaces": [
+            "access/admin-user-server-purge.controller.ts|POST|/api/admin/users/:userId/servers/:serverId/purge-resources"
           ]
         }
       ]

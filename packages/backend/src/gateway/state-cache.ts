@@ -87,11 +87,10 @@ export class StateCache implements OnModuleInit, OnModuleDestroy {
   ) {}
 
   async onModuleInit(): Promise<void> {
-    if (
-      !this.database
-      || !this.runtimeRole?.servesApi()
-      || this.runtimeRole.servesGateway()
-    ) return;
+    // Gateway keeps a live WebSocket-backed cache. API and worker roles both
+    // consume durable projections so background workers (for example grant
+    // expiry) can evaluate runtime readiness without holding agent sockets.
+    if (!this.database || !this.shouldPollDurableProjections()) return;
     this.stopped = false;
     await this.pollDurableProjections();
     if (this.stopped) return;
@@ -298,11 +297,13 @@ export class StateCache implements OnModuleInit, OnModuleDestroy {
   }
 
   private isApiProjectionRole(): boolean {
-    return Boolean(
-      this.database
-      && this.runtimeRole?.servesApi()
-      && !this.runtimeRole.servesGateway(),
-    );
+    return this.shouldPollDurableProjections();
+  }
+
+  private shouldPollDurableProjections(): boolean {
+    if (!this.database || !this.runtimeRole) return false;
+    if (this.runtimeRole.servesGateway()) return false;
+    return this.runtimeRole.servesApi() || this.runtimeRole.runsWorker();
   }
 
 }
