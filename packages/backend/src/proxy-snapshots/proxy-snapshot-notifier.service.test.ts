@@ -25,7 +25,7 @@ describe('ProxySnapshotNotifierService', () => {
     expect(() => service.register('ssh', vi.fn())).not.toThrow();
   });
 
-  it('blocks routes without fencing the Agent recovery session', () => {
+  it('blocks routes without fencing the recovery session', () => {
     const service = new ProxySnapshotNotifierService();
     const invalidate = vi.fn().mockResolvedValue(undefined);
     const fenceSession = vi.fn();

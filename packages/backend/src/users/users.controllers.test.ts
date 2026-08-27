@@ -7,7 +7,7 @@ import { UsersController } from './users.controller.js';
 import type { UsersService } from './users.service.js';
 
 describe('user update controller boundaries', () => {
-  it('rejects status changes on the self-service route instead of silently ignoring them', async () => {
+  it('rejects status changes on the self-service route', async () => {
     const updateSelf = vi.fn();
     const controller = new UsersController({ updateSelf } as unknown as UsersService);
     const user = { id: 'user-a' } as UserRecord;
@@ -33,7 +33,7 @@ describe('user update controller boundaries', () => {
     expect(updateUser).not.toHaveBeenCalled();
   });
 
-  it('attributes self-service SSH public-key mutations to the authenticated actor', async () => {
+  it('attributes self-service SSH key mutations to the authenticated actor', async () => {
     const addSshKey = vi.fn().mockResolvedValue({ id: 'key-a' });
     const deleteSshKey = vi.fn().mockResolvedValue(undefined);
     const controller = new UsersController({

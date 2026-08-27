@@ -1,0 +1,15 @@
+{
+  "type": "async",
+  "status": "Operation created",
+  "status_code": 100,
+  "operation": "/1.0/operations/22222222-2222-4222-8222-222222222222",
+  "metadata": {
+    "id": "22222222-2222-4222-8222-222222222222",
+    "metadata": {
+      "fds": {
+        "0": "fixture-stdin-secret",
+        "control": "fixture-control-secret"
+      }
+    }
+  }
+}

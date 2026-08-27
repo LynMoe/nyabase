@@ -6,7 +6,7 @@ import type { UserRecord } from '../domain/domain-records.js';
 import { HttpProxyGateway } from './http-proxy-gateway.js';
 import { HttpProxyService } from './http-proxy.service.js';
 
-@Controller('v2/http-proxy/bindings')
+@Controller('http-proxy/bindings')
 @UseGuards(JwtAuthGuard, CapabilitiesGuard)
 export class HttpProxyController {
   constructor(
@@ -38,5 +38,16 @@ export class HttpProxyController {
   async delete(@CurrentUser() user: UserRecord, @Param('id') id: string) {
     await this.service.deleteBinding(user.id, id);
     this.gateway.scheduleBroadcast('binding_deleted');
+  }
+}
+
+@Controller('http-proxy/domain-pools')
+@UseGuards(JwtAuthGuard, CapabilitiesGuard)
+export class HttpProxyDomainPoolsController {
+  constructor(private service: HttpProxyService) {}
+
+  @Get()
+  listEnabled() {
+    return this.service.listEnabledDomainPools();
   }
 }

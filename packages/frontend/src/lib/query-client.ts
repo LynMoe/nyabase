@@ -30,12 +30,10 @@ export function clearPrincipalQueryState(): void {
 
 function isCurrentPrincipalAccessQuery(queryKey: readonly unknown[]): boolean {
   const root = String(queryKey[0] ?? '');
-  if (root === 'me-access' || root === 'containers-for-http-proxy') return true;
+  if (root === 'me-access') return true;
   if (root === 'servers' || root === 'images' || root === 'containers'
-    || root === 'container' || root === 'data-dirs' || root === 'mount-sources'
-    || root === 'disks' || root === 'container-mounts'
-    || root === 'metrics-host' || root === 'metrics-gpus' || root === 'metrics-users'
-    || root === 'metrics-containers' || root === 'metrics-container-detail') {
+    || root === 'container' || root === 'volumes' || root === 'shared-backends'
+    || root === 'storage-pools' || root === 'container-intents') {
     return queryKey[1] === 'user';
   }
   return false;

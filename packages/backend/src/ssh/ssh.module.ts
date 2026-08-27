@@ -9,18 +9,18 @@ import { SshKeyCryptoService } from './ssh-key-crypto.service.js';
 import { SshKeygenService } from './ssh-keygen.service.js';
 import { SshProxyGateway } from './ssh-proxy-gateway.js';
 import { SshProxySnapshotService } from './ssh-proxy-snapshot.service.js';
-import { ContainerSshConvergenceService } from './container-ssh-convergence.service.js';
 import { ContainerControlRepository } from '../containers/container-control.repository.js';
-import { AgentTasksModule } from '../agent-tasks/agent-tasks.module.js';
 import { ProxySnapshotNotifierModule } from '../proxy-snapshots/proxy-snapshot-notifier.module.js';
+import { ContainerSshConvergenceService } from './container-ssh-convergence.service.js';
+import { RuntimeModule } from '../runtime/runtime.module.js';
 
 @Module({
   imports: [
     forwardRef(() => AuthModule),
     forwardRef(() => AccessModule),
-    AgentTasksModule,
     ProxySnapshotNotifierModule,
     forwardRef(() => AuditModule),
+    RuntimeModule,
   ],
   providers: [
     SshIdentityService,
@@ -38,9 +38,9 @@ import { ProxySnapshotNotifierModule } from '../proxy-snapshots/proxy-snapshot-n
     SshProxyGateway,
     SshProxySnapshotService,
     ContainerSshRouteService,
-    ContainerSshConvergenceService,
     SshKeyCryptoService,
     SshKeygenService,
+    ContainerSshConvergenceService,
   ],
 })
 export class SshModule {}

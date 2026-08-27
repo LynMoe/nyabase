@@ -7,6 +7,7 @@ import {
   canonicalIpv4Address,
   canonicalIpv4Cidr,
   ipv4CidrsOverlap,
+  ipv4CidrContains,
   parseCidr,
   formatBytes,
   generateToken,
@@ -49,6 +50,13 @@ describe('canonical IPv4 network identity', () => {
   it('detects equal and partially overlapping networks', () => {
     expect(ipv4CidrsOverlap('10.8.0.0/16', '10.8.1.0/24')).toBe(true);
     expect(ipv4CidrsOverlap('10.8.0.0/16', '10.9.0.0/16')).toBe(false);
+  });
+
+  it('detects full containment of allocation subnets', () => {
+    expect(ipv4CidrContains('10.8.0.0/16', '10.8.100.0/24')).toBe(true);
+    expect(ipv4CidrContains('10.8.0.0/16', '10.8.0.0/16')).toBe(true);
+    expect(ipv4CidrContains('10.8.100.0/24', '10.8.0.0/16')).toBe(false);
+    expect(ipv4CidrContains('10.8.0.0/16', '10.9.0.0/24')).toBe(false);
   });
 });
 

@@ -6,7 +6,6 @@ import {
   HTTP_PROXY_SNAPSHOT_STALE_AFTER_MS,
   PROXY_SNAPSHOT_MAX_CLOCK_SKEW_MS,
   MAX_HTTP_PROXY_SNAPSHOT_BYTES,
-  zEnvelope,
   zHttpProxyClientAck,
   zHttpProxyStatusReport,
   type HttpProxyBackendMessage,
@@ -28,6 +27,16 @@ const MAX_CONTROL_FRAME_BYTES = 1024 * 1024;
 const INITIAL_CONNECTION_DEADLINE_MS = 15_000;
 const SNAPSHOT_RENEWAL_MS = Math.floor(HTTP_PROXY_SNAPSHOT_STALE_AFTER_MS / 3);
 export const MAX_HTTP_PROXY_CLIENTS = 4;
+
+function isProxyEnvelope(value: unknown): value is {
+  kind: 'ack' | 'status';
+  payload: unknown;
+} {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const candidate = value as Record<string, unknown>;
+  return (candidate.kind === 'ack' || candidate.kind === 'status')
+    && 'payload' in candidate;
+}
 
 @Injectable()
 export class HttpProxyGateway implements OnModuleInit, OnModuleDestroy {
@@ -64,7 +73,7 @@ export class HttpProxyGateway implements OnModuleInit, OnModuleDestroy {
       throw new Error('HTTP proxy snapshot renewal interval must be less than half the lease TTL');
     }
     this.snapshotRenewalTimer = null;
-    if (!this.runtimeRole || this.runtimeRole.servesGateway()) {
+    if (!this.runtimeRole || this.runtimeRole.servesProxySockets()) {
       this.snapshotRenewalTimer = setInterval(() => {
         if (this.destroyed || this.clients.size === 0) return;
         this.requestLeaseRenewal();
@@ -74,7 +83,7 @@ export class HttpProxyGateway implements OnModuleInit, OnModuleDestroy {
   }
 
   onModuleInit(): void {
-    if (this.runtimeRole && !this.runtimeRole.servesGateway()) return;
+    if (this.runtimeRole && !this.runtimeRole.servesProxySockets()) return;
     this.unregisterSnapshotNotifier = this.snapshotNotifier.register(
       'http',
       () => this.broadcastSnapshot(),
@@ -288,13 +297,13 @@ export class HttpProxyGateway implements OnModuleInit, OnModuleDestroy {
   }
 
   private handleMessage(ws: WebSocket, raw: string): void {
-    const parsed = zEnvelope.safeParse(this.parseJson(raw));
-    if (!parsed.success) {
+    const parsed = this.parseJson(raw);
+    if (!isProxyEnvelope(parsed)) {
       this.logger.warn('Invalid HTTP proxy envelope');
       return;
     }
-    if (parsed.data.kind === 'ack') {
-      const ack = zHttpProxyClientAck.safeParse(parsed.data.payload);
+    if (parsed.kind === 'ack') {
+      const ack = zHttpProxyClientAck.safeParse(parsed.payload);
       if (ack.success) {
         const sent = this.latestSentSnapshot.get(ws);
         const safeUntil = (sent?.validUntil ?? 0) - PROXY_SNAPSHOT_MAX_CLOCK_SKEW_MS;
@@ -307,8 +316,8 @@ export class HttpProxyGateway implements OnModuleInit, OnModuleDestroy {
       }
       return;
     }
-    if (parsed.data.kind === 'status') {
-      const status = zHttpProxyStatusReport.safeParse(parsed.data.payload);
+    if (parsed.kind === 'status') {
+      const status = zHttpProxyStatusReport.safeParse(parsed.payload);
       if (status.success) this.latestStatus.set(ws, status.data);
     }
   }

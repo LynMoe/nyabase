@@ -25,3 +25,14 @@ describe('ApiError conflict envelope', () => {
       .toBeNull();
   });
 });
+
+describe('apiErrorDetails', () => {
+  it('reads nested details from the error body', async () => {
+    const { apiErrorDetails } = await import('./api-error.js');
+    const error = new ApiError(409, 'SHARED_BACKEND_IDENTITY_CONFLICT', 'conflict', {
+      details: { identityKey: 'cephfs:a', expectedFsid: 'aaa' },
+    });
+    expect(apiErrorDetails(error)).toEqual({ identityKey: 'cephfs:a', expectedFsid: 'aaa' });
+    expect(apiErrorDetails(new Error('nope'))).toBeNull();
+  });
+});

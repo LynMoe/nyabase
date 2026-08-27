@@ -1,39 +1,28 @@
 export enum UserStatus {
   Active = 'active',
   Disabled = 'disabled',
-  /** Access is revoked while durable per-server quota=0 tasks converge. */
   Deleting = 'deleting',
-  /** Terminal tombstone retained for durable references; it can never be reactivated. */
   Deleted = 'deleted',
 }
 
 export enum ServerStatus {
   Online = 'online',
-  Offline = 'offline',
+  Unreachable = 'unreachable',
   Unknown = 'unknown',
-  AgentStateUnready = 'agent_state_unready',
-  /**
-   * Backend rejected structurally impossible terminal evidence. The server is
-   * fenced across reconnects until an administrator explicitly retries the
-   * retained task after repairing/replacing the Agent binary.
-   */
-  AgentQuarantined = 'agent_quarantined',
 }
 
 export enum ContainerStatus {
   Creating = 'creating',
   Running = 'running',
-  Exited = 'exited',
-  Paused = 'paused',
-  Restarting = 'restarting',
-  Dead = 'dead',
+  Stopped = 'stopped',
+  Frozen = 'frozen',
+  Error = 'error',
   Unknown = 'unknown',
 }
 
 export enum ContainerPhase {
   Provisioning = 'provisioning',
   Active = 'active',
-  Updating = 'updating',
   Deleting = 'deleting',
   Failed = 'failed',
 }
@@ -43,86 +32,184 @@ export enum ContainerPowerIntent {
   Stopped = 'stopped',
 }
 
-export enum AgentTaskStatus {
+export enum IntentStatus {
   Pending = 'pending',
   Succeeded = 'succeeded',
   Failed = 'failed',
 }
 
-/** One durable, high-level effect executed by exactly one authenticated Agent. */
-export enum AgentTaskKind {
+export enum IntentResourceType {
+  Container = 'container',
+  Volume = 'volume',
+  ImageAssignment = 'image_assignment',
+  Server = 'server',
+  CertificateRotation = 'certificate_rotation',
+}
+
+export enum IntentKind {
   ContainerCreate = 'container.create',
-  ContainerStart = 'container.start',
-  ContainerStop = 'container.stop',
-  ContainerRestart = 'container.restart',
+  ContainerUpdate = 'container.update',
+  ContainerPower = 'container.power',
   ContainerDelete = 'container.delete',
-  ContainerRuntimeAbsent = 'container.runtime.absent',
-  ContainerSshEnsure = 'container.ssh.ensure',
-  DataDirEnsure = 'datadir.ensure',
-  DataDirAbsent = 'datadir.absent',
-  RemoteFsEnsure = 'remote_fs.ensure',
-  RemoteFsAbsent = 'remote_fs.absent',
-  QuotaEnsure = 'quota.ensure',
-  ImageEnsurePresent = 'image.ensure_present',
-  ImageEnsureAbsent = 'image.ensure_absent',
+  VolumeEnsure = 'volume.ensure',
+  VolumeResize = 'volume.resize',
+  ImageAssignmentEnsure = 'image_assignment.ensure',
+  ImageAssignmentDelete = 'image_assignment.delete',
+  ServerConnect = 'server.connect',
+  ServerPreflight = 'server.preflight',
+  CertificateRotate = 'certificate.rotate',
 }
 
-export enum RuntimeDriftKind {
-  AgentStateUnready = 'agent_state_unready',
-  RuntimeMissing = 'runtime_missing',
-  RuntimeUnbound = 'runtime_unbound',
-  RuntimeIdMismatch = 'runtime_id_mismatch',
-  DesiredMissing = 'desired_missing',
-  SpecGenerationMismatch = 'spec_generation_mismatch',
-  SpecGenerationStale = 'spec_generation_stale',
-  PowerIntentMismatch = 'power_intent_mismatch',
-  DesiredMountSpecInvalid = 'desired_mount_spec_invalid',
-  MountMismatch = 'mount_mismatch',
-  SshMismatch = 'ssh_mismatch',
-  QuotaMismatch = 'quota_mismatch',
-  UnmanagedRuntime = 'unmanaged_runtime',
-}
-
-/** Remote filesystem type discriminator */
-export enum RemoteFsType {
-  Nfs = 'nfs',
+export enum StoragePoolDriver {
+  Dir = 'dir',
+  Btrfs = 'btrfs',
+  Zfs = 'zfs',
+  Lvm = 'lvm',
+  LvmCluster = 'lvmcluster',
+  Ceph = 'ceph',
   CephFs = 'cephfs',
 }
 
-/** Actionable capability bits stored in a group */
+export enum StoragePoolResizeFamily {
+  QuotaOnline = 'quota_online',
+  BlockBacked = 'block_backed',
+}
+
+export enum ResourceLifecyclePhase {
+  Provisioning = 'provisioning',
+  Active = 'active',
+  Deleting = 'deleting',
+  Failed = 'failed',
+}
+
+export enum NodeMetricsStatus {
+  Unconfigured = 'unconfigured',
+  Online = 'online',
+  Unreachable = 'unreachable',
+  Unknown = 'unknown',
+}
+
+export enum NodeMetricName {
+  CpuUsageRatio = 'nyabase_node_cpu_usage_ratio',
+  CpuPsiRatio = 'nyabase_node_cpu_psi_ratio',
+  DiskIoReadBytesTotal = 'nyabase_node_disk_io_read_bytes_total',
+  DiskIoWriteBytesTotal = 'nyabase_node_disk_io_write_bytes_total',
+  DiskIoReadSecondsTotal = 'nyabase_node_disk_io_read_seconds_total',
+  DiskIoWriteSecondsTotal = 'nyabase_node_disk_io_write_seconds_total',
+  DiskSmartHealth = 'nyabase_node_disk_smart_health',
+  NetworkForwarding = 'nyabase_node_network_forwarding',
+  NetworkRpFilter = 'nyabase_node_network_rp_filter',
+  NetworkFibRulePresent = 'nyabase_node_network_fib_rule_present',
+  GpuUtilRatio = 'nyabase_node_gpu_util_ratio',
+  GpuMemoryUsedBytes = 'nyabase_node_gpu_mem_used_bytes',
+  GpuMemoryTotalBytes = 'nyabase_node_gpu_mem_total_bytes',
+  GpuTemperatureCelsius = 'nyabase_node_gpu_temperature_celsius',
+  GpuPowerWatts = 'nyabase_node_gpu_power_watts',
+  GpuSmiIndex = 'nyabase_node_gpu_smi_index',
+  GpuProcessMemoryUsedBytes = 'nyabase_node_gpu_process_mem_used_bytes',
+}
+
+export enum PreflightStatus {
+  NotRun = 'not_run',
+  Running = 'running',
+  Passed = 'passed',
+  Failed = 'failed',
+}
+
+export enum CertificateState {
+  Staged = 'staged',
+  Active = 'active',
+  Retired = 'retired',
+  Failed = 'failed',
+}
+
+export enum CertificateTrustState {
+  Pending = 'pending',
+  Trusted = 'trusted',
+  Verified = 'verified',
+  Revoked = 'revoked',
+  CleanupFailed = 'cleanup_failed',
+}
+
+export enum CertificateRotationStatus {
+  Pending = 'pending',
+  Succeeded = 'succeeded',
+  Failed = 'failed',
+}
+
 export enum Capability {
   ManageUsers = 'manage_users',
   ManageGroups = 'manage_groups',
   ManageServers = 'manage_servers',
   ManageImages = 'manage_images',
+  ManageStoragePools = 'manage_storage_pools',
+  ManageIpPools = 'manage_ip_pools',
+  ManageSharedBackends = 'manage_shared_backends',
+  ManageVolumes = 'manage_volumes',
   ManageGrants = 'manage_grants',
   ManageContainersAny = 'manage_containers_any',
+  ManagePreflight = 'manage_preflight',
+  ManageCertificates = 'manage_certificates',
   ViewAudit = 'view_audit',
   ViewMetricsAll = 'view_metrics_all',
   ManageSystemSettings = 'manage_system_settings',
 }
 
-/** Stable identities for built-in groups; display names are not identities. */
 export enum SystemGroupKey {
   Administrators = 'administrators',
   Operators = 'operators',
   Users = 'users',
 }
 
-/** Systemd ActiveState of the nyabase-managed dockerd unit */
-export enum DockerDaemonState {
-  Active = 'active',
-  Activating = 'activating',
-  Inactive = 'inactive',
-  Failed = 'failed',
-  Unknown = 'unknown',
-}
-
-/** How GPU access is expressed in a server grant */
 export enum GpuGrantMode {
   None = 'none',
-  Indices = 'indices',
   All = 'all',
+  Pci = 'pci',
+}
+
+export enum FailureCode {
+  RevisionConflict = 'REVISION_CONFLICT',
+  StorageGrantExceeded = 'STORAGE_GRANT_EXCEEDED',
+  StoragePoolExhausted = 'STORAGE_POOL_EXHAUSTED',
+  StoragePoolQuotaIneffective = 'STORAGE_POOL_QUOTA_INEFFECTIVE',
+  StoragePoolInUse = 'STORAGE_POOL_IN_USE',
+  NetworkAddressExhausted = 'NETWORK_ADDRESS_EXHAUSTED',
+  IpPoolNotConfigured = 'IP_POOL_NOT_CONFIGURED',
+  IpPoolInUse = 'IP_POOL_IN_USE',
+  IpPoolCidrConflict = 'IP_POOL_CIDR_CONFLICT',
+  SharedBackendQuotaExceeded = 'SHARED_BACKEND_QUOTA_EXCEEDED',
+  SharedBackendInUse = 'SHARED_BACKEND_IN_USE',
+  SharedBackendIdentityConflict = 'SHARED_BACKEND_IDENTITY_CONFLICT',
+  VolumeShrinkBelowUsage = 'VOLUME_SHRINK_BELOW_USAGE',
+  VolumeShrinkRequiresDetach = 'VOLUME_SHRINK_REQUIRES_DETACH',
+  VolumeShrinkUnsupported = 'VOLUME_SHRINK_UNSUPPORTED',
+  VolumeDetachDraining = 'VOLUME_DETACH_DRAINING',
+  VolumeCrossServerDenied = 'VOLUME_CROSS_SERVER_DENIED',
+  RootShrinkBelowUsage = 'ROOT_SHRINK_BELOW_USAGE',
+  RootShrinkRequiresStop = 'ROOT_SHRINK_REQUIRES_STOP',
+  RootQuotaPending = 'ROOT_QUOTA_PENDING',
+  RootSizeBelowImageMinimum = 'ROOT_SIZE_BELOW_IMAGE_MINIMUM',
+  GpuChangeRequiresStop = 'GPU_CHANGE_REQUIRES_STOP',
+  GpuRuntimeNotEnabled = 'GPU_RUNTIME_NOT_ENABLED',
+  GpuRuntimeUnavailable = 'GPU_RUNTIME_UNAVAILABLE',
+  GpuAlreadyClaimed = 'GPU_ALREADY_CLAIMED',
+  VolumeCatalogAdoptFailed = 'VOLUME_CATALOG_ADOPT_FAILED',
+  VolumePlacementFailed = 'VOLUME_PLACEMENT_FAILED',
+  ImageManagesOwnNetwork = 'IMAGE_MANAGES_OWN_NETWORK',
+  ImageNotAvailable = 'IMAGE_NOT_AVAILABLE',
+  ImageAssignmentFingerprintMismatch = 'IMAGE_ASSIGNMENT_FINGERPRINT_MISMATCH',
+  ImageInUse = 'IMAGE_IN_USE',
+  ServerUnreachable = 'SERVER_UNREACHABLE',
+  ServerAlreadyConnected = 'SERVER_ALREADY_CONNECTED',
+  TrustTokenExpired = 'TRUST_TOKEN_EXPIRED',
+  InstanceBusy = 'INSTANCE_BUSY',
+  PreflightCleanupFailed = 'PREFLIGHT_CLEANUP_FAILED',
+  PreflightFailed = 'PREFLIGHT_FAILED',
+  GrantRevocationBlocked = 'GRANT_REVOCATION_BLOCKED',
+  PermissionDenied = 'PERMISSION_DENIED',
+  NotFound = 'NOT_FOUND',
+  InvalidInput = 'INVALID_INPUT',
+  InternalError = 'INTERNAL_ERROR',
 }
 
 export enum AuditAction {
@@ -131,61 +218,66 @@ export enum AuditAction {
   StopContainer = 'container.stop',
   RestartContainer = 'container.restart',
   DeleteContainer = 'container.delete',
-  ReconcileContainerSsh = 'container.ssh.reconcile',
-  ExecContainer = 'container.exec',
+  UpdateContainerLimits = 'container.limits.update',
+  ResizeContainerRoot = 'container.root_size.update',
+  UpdateContainerGpu = 'container.gpu.update',
+  AttachVolume = 'container.volume.attach',
+  DetachVolume = 'container.volume.detach',
+  CreateExecSession = 'container.exec_session.create',
+  CreateServer = 'server.create',
+  UpdateServer = 'server.update',
+  DeleteServer = 'server.delete',
+  ConnectServer = 'server.connect',
+  RunServerPreflight = 'server.preflight',
+  RegisterStoragePool = 'storage_pool.register',
+  CreateIpPool = 'ip_pool.create',
+  UpdateIpPool = 'ip_pool.update',
+  DeleteIpPool = 'ip_pool.delete',
+  CreateSharedBackend = 'shared_backend.create',
+  UpdateSharedBackend = 'shared_backend.update',
+  DeleteSharedBackend = 'shared_backend.delete',
+  CreateVolume = 'volume.create',
+  UpdateVolume = 'volume.update',
+  DeleteVolume = 'volume.delete',
+  EnsureVolume = 'volume.ensure',
+  ResizeVolume = 'volume.resize',
+  CreateImage = 'image.create',
+  UpdateImage = 'image.update',
+  DeleteImage = 'image.delete',
+  EnsureImageAssignment = 'image_assignment.ensure',
+  DeleteImageAssignment = 'image_assignment.delete',
+  UpsertServerGrant = 'grant.server.upsert',
+  DeleteServerGrant = 'grant.server.delete',
+  UpsertStoragePoolGrant = 'grant.storage_pool.upsert',
+  DeleteStoragePoolGrant = 'grant.storage_pool.delete',
+  UpsertSharedBackendGrant = 'grant.shared_backend.upsert',
+  DeleteSharedBackendGrant = 'grant.shared_backend.delete',
+  GrantExpired = 'grant.expired',
+  ExpiryStopContainers = 'grant.expiry.stop_containers',
+  ExpiryPurgeResources = 'grant.expiry.purge_resources',
+  RotateIncusClientCertificate = 'certificate.rotate',
+  IncusMutate = 'incus.mutate',
+  UpdateSystemSettings = 'system_settings.update',
+  CreateUser = 'user.create',
+  UpdateUser = 'user.update',
+  DeleteUser = 'user.delete',
+  AddUserSshPublicKey = 'user.ssh_public_key.add',
+  DeleteUserSshPublicKey = 'user.ssh_public_key.delete',
+  CreateGroup = 'group.create',
+  UpdateGroup = 'group.update',
+  DeleteGroup = 'group.delete',
+  AddGroupMember = 'group.member.add',
+  RemoveGroupMember = 'group.member.remove',
+  UserLogin = 'user.login',
+  UserLogout = 'user.logout',
+  CreateApiToken = 'user.api_token.create',
+  DeleteApiToken = 'user.api_token.delete',
   CreateHttpProxyBinding = 'http_proxy.binding.create',
   UpdateHttpProxyBinding = 'http_proxy.binding.update',
   DeleteHttpProxyBinding = 'http_proxy.binding.delete',
   CreateHttpDomainPool = 'http_proxy.domain_pool.create',
   UpdateHttpDomainPool = 'http_proxy.domain_pool.update',
   DeleteHttpDomainPool = 'http_proxy.domain_pool.delete',
-  UpdateSystemSettings = 'system_settings.update',
   DisconnectSshProxySessions = 'ssh_proxy.sessions.disconnect_all',
   RotateSshProxyHostKey = 'ssh_proxy.host_key.rotate',
-  CreateServer = 'server.create',
-  UpdateServer = 'server.update',
-  DeleteServer = 'server.delete',
-  RotateServerAgentToken = 'server.agent_token.rotate',
-  RetryAgentQuarantine = 'server.agent_quarantine.retry',
-  AddDataDisk = 'server.disk.add',
-  RemoveDataDisk = 'server.disk.remove',
-  CreateImage = 'image.create',
-  UpdateImage = 'image.update',
-  PullImage = 'image.pull',
-  DeleteImage = 'image.delete',
-  CreateUser = 'user.create',
-  UpdateUser = 'user.update',
-  DeleteUser = 'user.delete',
-  AddUserSshPublicKey = 'user.ssh_public_key.add',
-  DeleteUserSshPublicKey = 'user.ssh_public_key.delete',
-  ViewUserInternalSshKey = 'user.internal_ssh_key.view',
-  RotateUserInternalSshKey = 'user.internal_ssh_key.rotate',
-  PurgeUserServerResources = 'user.server.purge_resources',
-  CreateGroup = 'group.create',
-  UpdateGroup = 'group.update',
-  DeleteGroup = 'group.delete',
-  AddGroupMember = 'group.member.add',
-  RemoveGroupMember = 'group.member.remove',
-  UpsertServerGrant = 'grant.server.upsert',
-  DeleteServerGrant = 'grant.server.delete',
-  GrantExpired = 'grant.expired',
-  ExpiryStopContainers = 'grant.expiry.stop_containers',
-  ExpiryPurgeResources = 'grant.expiry.purge_resources',
-  UpsertImageGrant = 'grant.image.upsert',
-  DeleteImageGrant = 'grant.image.delete',
-  CreateDataDir = 'datadir.create',
-  DeleteDataDir = 'datadir.delete',
-  UserLogin = 'user.login',
-  UserLogout = 'user.logout',
-  CreateApiToken = 'user.api_token.create',
-  DeleteApiToken = 'user.api_token.delete',
-  CreateRemoteFsMount = 'remote_fs.create',
-  UpdateRemoteFsMount = 'remote_fs.update',
-  DeleteRemoteFsMount = 'remote_fs.delete',
-  AssignRemoteFsServer = 'remote_fs.server.assign',
-  UnassignRemoteFsServer = 'remote_fs.server.unassign',
-  UpsertMountSourceGrant = 'grant.mount_source.upsert',
-  DeleteMountSourceGrant = 'grant.mount_source.delete',
-  UpsertContainerMount = 'container.mount.upsert',
-  DeleteContainerMount = 'container.mount.delete',
 }

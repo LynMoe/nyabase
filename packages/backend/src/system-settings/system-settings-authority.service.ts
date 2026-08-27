@@ -135,7 +135,44 @@ implements OnApplicationBootstrap, OnApplicationShutdown {
       })
       .onConflict((conflict) => conflict.column('singleton').doNothing())
       .execute();
+    await this.backfillMissingEditableDefaults();
     return this.refreshFromPostgres('startup');
+  }
+
+  /**
+   * Additive config keys (for example incus.imageSourceServer) must not fail
+   * closed on an existing snapshot. Fill missing online-editable defaults and
+   * persist a new revision so the snapshot token stays canonical.
+   */
+  private async backfillMissingEditableDefaults(): Promise<void> {
+    const row = await this.database
+      .selectFrom('system.settings')
+      .select(['revision', 'values'])
+      .where('singleton', '=', true)
+      .executeTakeFirstOrThrow();
+    const values = parseValues(row.values);
+    const filled = fillMissingOnlineEditableDefaults(values);
+    if (filled.length === 0) return;
+    const currentRevision = Number(row.revision);
+    const revision = currentRevision + 1;
+    const snapshotToken = settingsSnapshotToken(revision, values);
+    const updated = await this.database
+      .updateTable('system.settings')
+      .set({
+        revision,
+        snapshot_token: snapshotToken,
+        values,
+      })
+      .where('singleton', '=', true)
+      .where('revision', '=', String(currentRevision))
+      .returning('revision')
+      .executeTakeFirst();
+    if (!updated) {
+      throw new Error('Failed to persist system settings default backfill');
+    }
+    this.logger.log(
+      `Backfilled system settings defaults: ${filled.join(', ')} (revision ${revision})`,
+    );
   }
 
   async refreshFromPostgres(
@@ -339,6 +376,25 @@ function parseValues(value: unknown): Record<string, unknown> {
     throw new Error('PostgreSQL system settings values must be an object');
   }
   return parsed as Record<string, unknown>;
+}
+
+export function fillMissingOnlineEditableDefaults(
+  values: Record<string, unknown>,
+): string[] {
+  const filled: string[] = [];
+  for (const definition of controlPlaneConfigDefinitions) {
+    if (
+      !definition.editable
+      || definition.restartRequired
+      || definition.secret
+    ) {
+      continue;
+    }
+    if (Object.prototype.hasOwnProperty.call(values, definition.key)) continue;
+    values[definition.key] = definition.defaultValue;
+    filled.push(definition.key);
+  }
+  return filled;
 }
 
 function validateCompleteValues(values: Record<string, unknown>): void {

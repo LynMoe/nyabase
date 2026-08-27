@@ -220,6 +220,7 @@ describePg('System settings PostgreSQL authority', () => {
       writeFileSync(path, yaml);
       chmodSync(path, 0o444);
       vi.stubEnv('NYABASE_CONFIG_FILE', path);
+      vi.stubEnv('JWT_SECRET', '');
 
       try {
         const firstConfig = new NyabaseConfigService();

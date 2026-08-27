@@ -1,47 +1,44 @@
+import { FailureCode } from './enums.js';
+
 export enum ErrorCode {
-  // Auth
   Unauthorized = 'UNAUTHORIZED',
   Forbidden = 'FORBIDDEN',
   InvalidCredentials = 'INVALID_CREDENTIALS',
   TokenExpired = 'TOKEN_EXPIRED',
-
-  // Resource
   NotFound = 'NOT_FOUND',
   AlreadyExists = 'ALREADY_EXISTS',
   Conflict = 'CONFLICT',
-
-  // Validation
   ValidationError = 'VALIDATION_ERROR',
   InvalidInput = 'INVALID_INPUT',
-
-  // Quota
-  QuotaExceeded = 'QUOTA_EXCEEDED',
-  QuotaBelowUsage = 'QUOTA_BELOW_USAGE',
-
-  // Agent
-  AgentOffline = 'AGENT_OFFLINE',
-  AgentTimeout = 'AGENT_TIMEOUT',
-  AgentError = 'AGENT_ERROR',
-
-  // Container
-  ContainerNotFound = 'CONTAINER_NOT_FOUND',
-  ContainerNotRunning = 'CONTAINER_NOT_RUNNING',
-  ContainerAlreadyExists = 'CONTAINER_ALREADY_EXISTS',
-
-  // Network
-  NoIpAvailable = 'NO_IP_AVAILABLE',
-
-  // Disk
-  DataDirInUse = 'DATA_DIR_IN_USE',
-  DataDirNotFound = 'DATA_DIR_NOT_FOUND',
-  DiskFull = 'DISK_FULL',
-
-  // Internal
+  StorageGrantExceeded = FailureCode.StorageGrantExceeded,
+  StoragePoolExhausted = FailureCode.StoragePoolExhausted,
+  StoragePoolQuotaIneffective = FailureCode.StoragePoolQuotaIneffective,
+  NetworkAddressExhausted = FailureCode.NetworkAddressExhausted,
+  IpPoolNotConfigured = FailureCode.IpPoolNotConfigured,
+  SharedBackendQuotaExceeded = FailureCode.SharedBackendQuotaExceeded,
+  VolumeShrinkBelowUsage = FailureCode.VolumeShrinkBelowUsage,
+  VolumeShrinkRequiresDetach = FailureCode.VolumeShrinkRequiresDetach,
+  VolumeShrinkUnsupported = FailureCode.VolumeShrinkUnsupported,
+  VolumeDetachDraining = FailureCode.VolumeDetachDraining,
+  RootShrinkBelowUsage = FailureCode.RootShrinkBelowUsage,
+  RootShrinkRequiresStop = FailureCode.RootShrinkRequiresStop,
+  RootSizeBelowImageMinimum = FailureCode.RootSizeBelowImageMinimum,
+  GpuChangeRequiresStop = FailureCode.GpuChangeRequiresStop,
+  GpuRuntimeNotEnabled = FailureCode.GpuRuntimeNotEnabled,
+  GpuRuntimeUnavailable = FailureCode.GpuRuntimeUnavailable,
+  GpuAlreadyClaimed = FailureCode.GpuAlreadyClaimed,
+  VolumeCatalogAdoptFailed = FailureCode.VolumeCatalogAdoptFailed,
+  VolumePlacementFailed = FailureCode.VolumePlacementFailed,
+  ImageManagesOwnNetwork = FailureCode.ImageManagesOwnNetwork,
+  ImageNotAvailable = FailureCode.ImageNotAvailable,
+  ServerUnreachable = FailureCode.ServerUnreachable,
+  InstanceBusy = FailureCode.InstanceBusy,
   InternalError = 'INTERNAL_ERROR',
 }
 
 export interface ApiError {
-  code: ErrorCode;
+  code: ErrorCode | FailureCode | string;
   message: string;
-  details?: unknown;
+  details?: Record<string, unknown>;
+  requestId?: string;
 }

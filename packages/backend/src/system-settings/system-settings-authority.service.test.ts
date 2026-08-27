@@ -1,6 +1,20 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { AuthoritativeSystemSettingsSnapshot } from '../config/nyabase-config.service.js';
-import { SystemSettingsAuthorityService } from './system-settings-authority.service.js';
+import {
+  fillMissingOnlineEditableDefaults,
+  SystemSettingsAuthorityService,
+} from './system-settings-authority.service.js';
+
+describe('fillMissingOnlineEditableDefaults', () => {
+  it('adds missing online-editable keys and leaves present values alone', () => {
+    const values: Record<string, unknown> = { 'branding.title': 'Keep' };
+    const filled = fillMissingOnlineEditableDefaults(values);
+    expect(filled).toContain('incus.imageSourceServer');
+    expect(values['incus.imageSourceServer']).toBe('');
+    expect(values['branding.title']).toBe('Keep');
+    expect(fillMissingOnlineEditableDefaults(values)).toEqual([]);
+  });
+});
 
 describe('SystemSettingsAuthorityService lifecycle', () => {
   it('drains an in-flight refresh without applying or broadcasting after shutdown starts', async () => {

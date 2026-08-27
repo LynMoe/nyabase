@@ -1,0 +1,7 @@
+{
+  "type": "error",
+  "status": "Failure",
+  "status_code": 500,
+  "error": "Instance is busy running a \"start\" operation",
+  "error_code": 500
+}

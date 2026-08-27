@@ -1,11 +1,4 @@
-import type {
-  AgentTaskKind,
-  AgentTaskStatus,
-  ImageRuntimeOverrides,
-  RemoteFsParams,
-  ServerStatus,
-  UserStatus,
-} from '@nyabase/common';
+import type { ServerStatus, UserStatus } from '@nyabase/common';
 
 /**
  * Plain domain records returned by the SQL repositories.
@@ -27,23 +20,24 @@ export interface UserRecord {
   updatedAt: Date;
 }
 
-export const AGENT_INVENTORY_FAULT_QUARANTINE_CODE = 'AGENT_INVENTORY_FAULT';
-export const AGENT_TASK_FAIL_STOP_QUARANTINE_CODE = 'AGENT_TASK_FAIL_STOP';
-
 export interface ServerRecord {
   id: string;
   name: string;
   slug: string;
-  agentTokenHash: string;
-  hostFingerprint: string | null;
-  agentConfigFingerprint: string | null;
+  apiEndpoint: string;
+  serverCertFingerprint: string | null;
+  incusVersion: string | null;
+  apiExtensions: string[];
+  systemPoolId: string | null;
+  storageOvercommitRatio: number;
+  parentInterface: string | null;
+  dnsServers: string[];
+  gpuRuntimeAvailable: boolean;
   status: ServerStatus;
-  quarantineCode: string | null;
-  quarantineMessage: string | null;
   lastSeenAt: Date | null;
-  macvlanCidr: string | null;
-  macvlanGateway: string | null;
-  macvlanReservedIps: string[];
+  lastError: string | null;
+  revision: number;
+  preflightStatus: 'not_run' | 'running' | 'passed' | 'failed';
   createdAt: Date;
   updatedAt: Date;
 }
@@ -51,110 +45,16 @@ export interface ServerRecord {
 export interface ImageRecord {
   id: string;
   name: string;
-  dockerImage: string;
-  runtimeOverrides: ImageRuntimeOverrides;
+  alias: string;
+  fingerprint: string | null;
   description: string | null;
+  loginUser: string;
+  minRootSizeBytes: number | null;
+  networkManagedExternally: boolean;
   isActive: boolean;
-  disableSsh: boolean;
   deleting: boolean;
   cleanupGeneration: number;
   revision: number;
-  createdAt: Date;
-  updatedAt: Date;
-}
-
-export interface AgentTaskRecord {
-  id: string;
-  kind: AgentTaskKind;
-  serverId: string;
-  resourceType: string;
-  resourceId: string;
-  requestedBy: string | null;
-  requestJson: unknown | null;
-  payloadJson: unknown;
-  payloadHash: string;
-  admissionClass: 'normal' | 'reconciliation' | 'safety';
-  status: AgentTaskStatus;
-  failureStage: 'dispatch' | 'agent' | 'finalizer' | null;
-  agentResultJson: unknown | null;
-  dispatchAttemptCount: number;
-  incompleteResultCount: number;
-  retryWindowStartedAt: Date | null;
-  nextDispatchAt: Date | null;
-  finalizerAttemptCount: number;
-  finalizerRetryAt: Date | null;
-  resultJson: unknown | null;
-  errorJson: unknown | null;
-  createdAt: Date;
-  startedAt: Date | null;
-  lastSentAt: Date | null;
-  completedAt: Date | null;
-}
-
-export interface DataDirectoryRecord {
-  id: string;
-  userId: string;
-  sourceKind: 'local' | 'remote';
-  sourceId: string;
-  name: string;
-  sourceIdentity: string;
-  serverId: string | null;
-  uid: number;
-  desiredState: 'creating' | 'active' | 'removing' | 'failed';
-  generation: number;
-  lastTaskId: string | null;
-  createdAt: Date;
-  updatedAt: Date;
-}
-
-export interface MountSourceGrantRecord {
-  id: string;
-  scope: 'user' | 'group';
-  scopeId: string;
-  sourceKind: 'local' | 'remote';
-  sourceId: string;
-  serverId: string | null;
-  sourceIdentity: string | null;
-  createdAt: Date;
-  updatedAt: Date;
-}
-
-export interface QuotaDesiredRecord {
-  id: string;
-  serverId: string;
-  userId: string;
-  numericUserId: number | null;
-  limitBytes: number;
-  source: string;
-  generation: number;
-  lastTaskId: string | null;
-  createdAt: Date;
-  updatedAt: Date;
-}
-
-export interface RemoteFsMountRecord {
-  id: string;
-  name: string;
-  displayName: string | null;
-  description: string | null;
-  type: string;
-  hostMountPoint: string;
-  options: string;
-  params: RemoteFsParams;
-  desiredState: 'active' | 'removing';
-  generation: number;
-  lastTaskId: string | null;
-  createdAt: Date;
-  updatedAt: Date;
-}
-
-export interface RemoteFsServerAssignmentRecord {
-  id: string;
-  remoteFsMountId: string;
-  serverId: string;
-  desiredState: 'ensuring' | 'active' | 'removing' | 'failed';
-  generation: number;
-  lastTaskId: string | null;
   createdAt: Date;
   updatedAt: Date;
 }

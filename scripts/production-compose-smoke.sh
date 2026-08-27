@@ -6,7 +6,7 @@ if [[ "$#" -ne 0 ]]; then
   exit 2
 fi
 
-for command_name in docker curl node; do
+for command_name in docker curl node openssl; do
   command -v "$command_name" >/dev/null 2>&1 || {
     echo "required command not found: $command_name" >&2
     exit 1
@@ -20,7 +20,6 @@ smoke_env="$smoke_root/smoke.env"
 smoke_config="$smoke_root/config.yaml"
 smoke_override="$smoke_root/override.yaml"
 smoke_image="${NYABASE_SMOKE_IMAGE:-nyabase-backend:ci}"
-smoke_compose_file="$PWD/deploy/docker-compose.yml"
 
 cleanup_smoke() {
   local status="$?"
@@ -36,7 +35,7 @@ cleanup_smoke() {
       --env-file "$smoke_env" \
       -f deploy/docker-compose.yml \
       -f "$smoke_override" \
-      logs --no-color --tail 200 backend backend-gateway postgres redis >&2 || true
+      logs --no-color --tail 200 backend postgres redis >&2 || true
   fi
   docker compose \
     --project-name "$smoke_project" \
@@ -49,6 +48,16 @@ cleanup_smoke() {
 }
 trap cleanup_smoke EXIT
 
+incus_client_cert="$smoke_root/incus-client-cert.pem"
+incus_client_key="$smoke_root/incus-client-key.pem"
+incus_ca="$smoke_root/incus-ca.pem"
+openssl req -x509 -newkey rsa:2048 -nodes -days 1 \
+  -subj "/CN=nyabase-smoke-incus" \
+  -keyout "$incus_client_key" \
+  -out "$incus_client_cert" >/dev/null 2>&1
+cp -f "$incus_client_cert" "$incus_ca"
+chmod 0600 "$incus_client_cert" "$incus_client_key" "$incus_ca"
+
 {
   echo 'POSTGRES_DB=nyabase'
   echo 'POSTGRES_USER=nyabase'
@@ -56,9 +65,11 @@ trap cleanup_smoke EXIT
   echo 'DATABASE_URL=postgresql://nyabase:smoke-postgres-password@postgres:5432/nyabase'
   echo 'REDIS_PASSWORD=smoke-redis-password'
   echo 'REDIS_URL=redis://nyabase:smoke-redis-password@redis:6379/0'
+  echo "INCUS_CLIENT_CERT_SOURCE=$incus_client_cert"
+  echo "INCUS_CLIENT_KEY_SOURCE=$incus_client_key"
+  echo "INCUS_CA_SOURCE=$incus_ca"
   echo 'REDIS_KEY_PREFIX=nyabase-smoke:'
   echo 'REDIS_MAXMEMORY=64mb'
-  echo 'NYABASE_RUNTIME_ROLE=all'
   echo 'DB_POOL_MAX=4'
   echo 'PG_CONNECTION_TIMEOUT_MS=30000'
   echo 'DB_IDLE_TIMEOUT_MS=10000'
@@ -71,7 +82,6 @@ trap cleanup_smoke EXIT
   echo 'VM_MIN_FREE_DISK_SPACE_BYTES=16MiB'
   echo 'VMAGENT_MAX_DISK_USAGE_PER_URL=64MiB'
   echo "SMOKE_CONFIG_PATH=$smoke_config"
-  echo "SMOKE_COMPOSE_FILE=$smoke_compose_file"
   echo "NYABASE_SMOKE_IMAGE=$smoke_image"
 } >"$smoke_env"
 chmod 0600 "$smoke_env"
@@ -80,6 +90,11 @@ chmod 0600 "$smoke_env"
   echo 'runtime:'
   echo '  nodeEnv: production'
   echo '  role: all'
+  echo 'incus:'
+  echo '  preflightImageAlias: smoke-image'
+  echo '  preflightEgressUrl: https://example.invalid/health'
+  echo '  requestTimeoutMs: 10000'
+  echo '  operationWaitTimeoutMs: 120000'
   echo 'server:'
   echo '  port: 3001'
   echo '  corsOrigin: ""'
@@ -126,28 +141,11 @@ cat >"$smoke_override" <<'YAML'
 services:
   backend:
     image: ${NYABASE_SMOKE_IMAGE}
-    environment:
-      NYABASE_RUNTIME_ROLE: api
-    ports: !override
-      - "127.0.0.1::3001"
-    volumes: !override
-      - ${SMOKE_CONFIG_PATH}:/etc/nyabase/config.yaml:ro
-  backend-gateway:
-    extends:
-      file: ${SMOKE_COMPOSE_FILE}
-      service: backend
-    image: ${NYABASE_SMOKE_IMAGE}
     build: !reset null
-    environment:
-      NYABASE_RUNTIME_ROLE: gateway
-      DB_MIGRATIONS_RUN: "false"
     ports: !override
       - "127.0.0.1::3001"
     volumes: !override
       - ${SMOKE_CONFIG_PATH}:/etc/nyabase/config.yaml:ro
-    depends_on:
-      backend:
-        condition: service_healthy
   victoriametrics:
     ports: !override
       - "127.0.0.1::8428"
@@ -163,13 +161,10 @@ compose=(
 
 timeout 180 "${compose[@]}" up -d --wait --wait-timeout 120
 backend_container="$("${compose[@]}" ps -q backend)"
-gateway_container="$("${compose[@]}" ps -q backend-gateway)"
 redis_container="$("${compose[@]}" ps -q redis)"
 [[ -n "$backend_container" ]]
-[[ -n "$gateway_container" ]]
 [[ -n "$redis_container" ]]
 backend_port="$("${compose[@]}" port backend 3001 | sed -E 's/.*:([0-9]+)$/\1/')"
-gateway_port="$("${compose[@]}" port backend-gateway 3001 | sed -E 's/.*:([0-9]+)$/\1/')"
 curl_probe() {
   curl --fail --silent --show-error \
     --retry 60 --retry-all-errors --retry-delay 1 \
@@ -177,8 +172,6 @@ curl_probe() {
 }
 curl_probe "http://127.0.0.1:${backend_port}/api/health/live"
 curl_probe "http://127.0.0.1:${backend_port}/api/health/ready"
-curl_probe "http://127.0.0.1:${gateway_port}/api/health/live"
-curl_probe "http://127.0.0.1:${gateway_port}/api/health/ready"
 node scripts/http-load-gate.mjs \
   "http://127.0.0.1:${backend_port}/api/health/ready" 128 8
 
@@ -195,27 +188,16 @@ for forbidden_client_command in 'ACL LIST' 'CONFIG GET dir' 'CLIENT LIST'; do
 done
 
 "${compose[@]}" stop --timeout 10 redis
-for split_port in "$backend_port" "$gateway_port"; do
-  curl --fail --silent --show-error \
-    "http://127.0.0.1:${split_port}/api/health/live" >/dev/null
-  ready_status="$(
-    curl --silent --output /dev/null --write-out '%{http_code}' \
-      "http://127.0.0.1:${split_port}/api/health/ready"
-  )"
-  [[ "$ready_status" == 503 ]]
-done
-
+curl_probe "http://127.0.0.1:${backend_port}/api/health/live"
+curl_probe "http://127.0.0.1:${backend_port}/api/health/ready"
 "${compose[@]}" up -d redis
 timeout 60 bash -c '
   api_url="$1"
-  gateway_url="$2"
-  until curl --fail --silent "$api_url" >/dev/null \
-    && curl --fail --silent "$gateway_url" >/dev/null; do
+  until curl --fail --silent "$api_url" >/dev/null; do
     sleep 1
   done
 ' _ \
-  "http://127.0.0.1:${backend_port}/api/health/ready" \
-  "http://127.0.0.1:${gateway_port}/api/health/ready"
+  "http://127.0.0.1:${backend_port}/api/health/ready"
 
 docker inspect "$backend_container" | node -e '
 let input = "";
@@ -239,7 +221,6 @@ process.stdin.on("end", () => {
 });'
 
 [[ "$(docker exec "$backend_container" id -u)" == 10001 ]]
-[[ "$(docker exec "$gateway_container" id -u)" == 10001 ]]
 docker exec "$backend_container" test -r /etc/nyabase/config.yaml
 docker exec "$backend_container" sh -ec 'touch /tmp/nyabase-smoke && rm /tmp/nyabase-smoke'
 if docker exec "$backend_container" sh -ec 'touch /app/should-not-write' 2>/dev/null; then
@@ -251,4 +232,4 @@ fi
 [[ -z "$("${compose[@]}" ps -aq)" ]]
 trap - EXIT
 rm -rf "$smoke_root"
-echo "production Compose split-role Redis recovery smoke passed with non-root read-only Backends"
+echo "production Compose control-plane Redis recovery smoke passed with a non-root read-only Backend"

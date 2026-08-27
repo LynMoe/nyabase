@@ -1,0 +1,33 @@
+{
+  "type": "sync",
+  "status": "Success",
+  "status_code": 200,
+  "metadata": {
+    "architecture": "x86_64",
+    "config": {
+      "limits.cpu": "1",
+      "limits.memory": "1073741824",
+      "volatile.eth0.hwaddr": "02:aa:bb:cc:dd:ee",
+      "operator.note": "preserve"
+    },
+    "description": "",
+    "devices": {
+      "eth0": {
+        "type": "nic",
+        "nictype": "routed",
+        "parent": "eno1",
+        "ipv4.address": "192.0.2.20",
+        "ipv4.gateway": "auto",
+        "hwaddr": "02:aa:bb:cc:dd:ee"
+      },
+      "operatorDisk": {
+        "type": "disk",
+        "source": "operator-volume",
+        "path": "/operator"
+      }
+    },
+    "ephemeral": false,
+    "profiles": ["default"],
+    "stateful": false
+  }
+}

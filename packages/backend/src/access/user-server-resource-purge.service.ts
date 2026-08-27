@@ -1,41 +1,38 @@
-import { Inject, Injectable, Logger } from '@nestjs/common';
-import type { Kysely } from 'kysely';
+import { Injectable } from '@nestjs/common';
 import {
   AuditAction,
   ContainerPhase,
   ContainerPowerIntent,
+  IntentKind,
+  IntentResourceType,
 } from '@nyabase/common';
 import { AuditService } from '../audit/audit.service.js';
 import { ContainerControlRepository } from '../containers/container-control.repository.js';
 import { ContainerControlService } from '../containers/container-control.service.js';
-import { DataDirsService } from '../datadirs/datadirs.service.js';
-import type { NyabaseDatabase } from '../persistence-pg/database.types.js';
-import { PG_DATABASE } from '../persistence-pg/tokens.js';
 import { PgTransactionManager } from '../persistence-pg/transaction.js';
+import { IntentRepository } from '../runtime/intent.repository.js';
+import { ReconcileClaimRepository } from '../runtime/reconcile-claim.repository.js';
+import { VolumesRepository } from '../volumes/volumes.repository.js';
 import { AccessResolverService } from './access-resolver.service.js';
 
+const OPERATOR_PURGE_AUDIT_ACTION = 'user.server.purge_resources' as AuditAction;
+
 export interface PurgeUserServerResourcesResult {
-  taskIds: string[];
+  intentIds: string[];
   containerIds: string[];
-  dataDirectoryIds: string[];
+  volumeIntentIds: string[];
+  volumeIds: string[];
 }
 
-/**
- * Enqueues deletion of a user's containers and local data directories on one
- * server. Remote/shared data directories are intentionally retained and do not
- * block server-grant revocation.
- */
 @Injectable()
 export class UserServerResourcePurgeService {
-  private readonly logger = new Logger(UserServerResourcePurgeService.name);
-
   constructor(
-    @Inject(PG_DATABASE)
-    private readonly database: Kysely<NyabaseDatabase>,
     private readonly transactions: PgTransactionManager,
     private readonly containerRepository: ContainerControlRepository,
     private readonly containers: ContainerControlService,
-    private readonly dataDirs: DataDirsService,
+    private readonly volumes: VolumesRepository,
+    private readonly intents: IntentRepository,
+    private readonly reconcileClaims: ReconcileClaimRepository,
     private readonly access: AccessResolverService,
     private readonly audit: AuditService,
   ) {}
@@ -47,133 +44,165 @@ export class UserServerResourcePurgeService {
     reason: 'admin' | 'expiry' = 'admin',
   ): Promise<PurgeUserServerResourcesResult> {
     const owned = await this.containerRepository.list({ ownerId: userId, serverId });
-    const deletable = owned.filter((container) =>
-      container.lifecyclePhase !== ContainerPhase.Deleting);
-    const localDirs = await this.database.selectFrom('control.data_directories')
-      .selectAll()
-      .where('user_id', '=', userId)
-      .where('server_id', '=', serverId)
-      .where('source_kind', '=', 'local')
-      .execute();
-    const removableDirs = localDirs.filter((dir) =>
-      dir.desired_state === 'active' || dir.desired_state === 'failed');
-
-    const taskIds: string[] = [];
+    const intentIds: string[] = [];
     const containerIds: string[] = [];
-    const dataDirectoryIds: string[] = [];
-
-    for (const container of deletable) {
-      try {
-        const task = await this.containers.actionForAdmin(
-          container.id,
-          'delete',
-          actorId,
-        );
-        taskIds.push(task.taskId);
-        containerIds.push(container.id);
-      } catch (error) {
-        this.logger.warn(
-          `Failed to enqueue delete for container ${container.id}: ${
-            error instanceof Error ? error.message : String(error)
-          }`,
-        );
-      }
+    for (const container of owned) {
+      if (container.lifecycle_phase === ContainerPhase.Deleting) continue;
+      const accepted = reason === 'expiry'
+        ? await this.containers.actionForSystem(container.id, 'delete', actorId)
+        : await this.containers.actionForAdmin(container.id, 'delete', actorId);
+      intentIds.push(accepted.intentId);
+      containerIds.push(container.id);
     }
-
-    // Container deletes hold shared mount/quota locks briefly. Retry local
-    // directory deletes with directory-only locks so purge can finish both.
-    for (const dir of removableDirs) {
-      let enqueued = false;
-      for (let attempt = 0; attempt < 8 && !enqueued; attempt += 1) {
-        try {
-          const result = await this.dataDirs.deleteDir(
-            actorId,
-            userId,
-            serverId,
-            'local',
-            dir.source_id,
-            dir.name,
-            'admin',
-            {
-              skipContainerReferenceCheck: true,
-              directoryOnlyResourceLocks: true,
-            },
-          );
-          if (result.taskId) {
-            taskIds.push(result.taskId);
-            dataDirectoryIds.push(dir.id);
-            enqueued = true;
-          }
-        } catch (error) {
-          const message = error instanceof Error ? error.message : String(error);
-          const locked = /resource is locked/i.test(message);
-          if (!locked || attempt === 7) {
-            this.logger.warn(
-              `Failed to enqueue delete for local data directory ${dir.id}: ${message}`,
-            );
-            break;
-          }
-          await new Promise((resolve) => setTimeout(resolve, 500 * (attempt + 1)));
-        }
-      }
-    }
-
+    const volumeResult = await this.purgeVolumes(
+      userId,
+      (volume) => volume.server_id === serverId && volume.shared_backend_id === null,
+      actorId,
+    );
     await this.transactions.run(async (transaction) => {
       await this.audit.append(
         transaction,
         actorId,
         reason === 'expiry'
           ? AuditAction.ExpiryPurgeResources
-          : AuditAction.PurgeUserServerResources,
+          : OPERATOR_PURGE_AUDIT_ACTION,
         userId,
         'user',
         {
           serverId,
           containerIds,
-          dataDirectoryIds,
-          taskIds,
+          intentIds,
+          volumeIds: volumeResult.volumeIds,
+          volumeIntentIds: volumeResult.intentIds,
           reason,
         },
       );
     });
     await this.access.authorizationCommitted([userId]);
-    return { taskIds, containerIds, dataDirectoryIds };
+    return {
+      intentIds,
+      containerIds,
+      volumeIntentIds: volumeResult.intentIds,
+      volumeIds: volumeResult.volumeIds,
+    };
   }
 
-  /**
-   * Grace-entry side effect: enqueue stops for running containers.
-   * GrantExpired is written by the worker when it completes the lease claim
-   * so multi-replica retries do not duplicate the one-shot audit.
-   * ExpiryStopContainers is written only when stop tasks were enqueued.
-   */
+  async purgeStoragePoolVolumes(
+    userId: string,
+    poolId: string,
+    actorId: string,
+  ): Promise<{ intentIds: string[]; volumeIds: string[] }> {
+    const result = await this.purgeVolumes(
+      userId,
+      (volume) => volume.pool_id === poolId && volume.shared_backend_id === null,
+      actorId,
+      true,
+    );
+    if (result.volumeIds.length > 0) {
+      await this.transactions.run(async (transaction) => {
+        await this.audit.append(
+          transaction,
+          actorId,
+          AuditAction.ExpiryPurgeResources,
+          poolId,
+          'storage_pool',
+          {
+            userId,
+            poolId,
+            ...result,
+            intentIds: [...result.intentIds, ...result.containerIntentIds],
+          },
+        );
+      });
+      await this.access.authorizationCommitted([userId]);
+    }
+    return {
+      intentIds: [...result.intentIds, ...result.containerIntentIds],
+      volumeIds: result.volumeIds,
+    };
+  }
+
+  async purgeSharedBackendVolumes(
+    userId: string,
+    sharedBackendId: string,
+    actorId: string,
+  ): Promise<{ intentIds: string[]; volumeIds: string[] }> {
+    const result = await this.purgeVolumes(
+      userId,
+      (volume) => volume.shared_backend_id === sharedBackendId,
+      actorId,
+      true,
+    );
+    if (result.volumeIds.length > 0) {
+      await this.transactions.run(async (transaction) => {
+        await this.audit.append(
+          transaction,
+          actorId,
+          AuditAction.ExpiryPurgeResources,
+          sharedBackendId,
+          'shared_backend',
+          {
+            userId,
+            sharedBackendId,
+            ...result,
+            intentIds: [...result.intentIds, ...result.containerIntentIds],
+          },
+        );
+      });
+      await this.access.authorizationCommitted([userId]);
+    }
+    return {
+      intentIds: [...result.intentIds, ...result.containerIntentIds],
+      volumeIds: result.volumeIds,
+    };
+  }
+
+  async stopRunningContainersForStoragePool(
+    userId: string,
+    poolId: string,
+    actorId: string,
+    workerId = actorId,
+  ): Promise<{ intentIds: string[] }> {
+    return this.stopRunningContainersForResource(
+      userId,
+      (volume) => volume.pool_id === poolId && volume.shared_backend_id === null,
+      actorId,
+      { resourceKind: 'storage_pool', resourceId: poolId },
+      workerId,
+    );
+  }
+
+  async stopRunningContainersForSharedBackend(
+    userId: string,
+    sharedBackendId: string,
+    actorId: string,
+    workerId = actorId,
+  ): Promise<{ intentIds: string[] }> {
+    return this.stopRunningContainersForResource(
+      userId,
+      (volume) => volume.shared_backend_id === sharedBackendId,
+      actorId,
+      { resourceKind: 'shared_backend', resourceId: sharedBackendId },
+      workerId,
+    );
+  }
+
   async stopRunningContainersForGraceEntry(
     userId: string,
     serverId: string,
     actorId: string,
-  ): Promise<{ taskIds: string[] }> {
+  ): Promise<{ intentIds: string[] }> {
     const owned = await this.containerRepository.list({ ownerId: userId, serverId });
-    const running = owned.filter((container) =>
-      container.lifecyclePhase === ContainerPhase.Active
-      && container.powerIntent === ContainerPowerIntent.Running
-      && container.activeTaskId === null);
-    const taskIds: string[] = [];
-    for (const container of running) {
-      try {
-        const task = await this.containers.actionForAdmin(
-          container.id,
-          'stop',
-          actorId,
-        );
-        taskIds.push(task.taskId);
-      } catch (error) {
-        this.logger.warn(
-          `Failed to enqueue stop for container ${container.id}: ${
-            error instanceof Error ? error.message : String(error)
-          }`,
-        );
-      }
+    const intentIds: string[] = [];
+    for (const container of owned) {
+      if (
+        container.lifecycle_phase !== ContainerPhase.Active
+        || container.power_intent !== ContainerPowerIntent.Running
+      ) continue;
+      const accepted = await this.containers.actionForSystem(container.id, 'stop', actorId);
+      intentIds.push(accepted.intentId);
     }
-    if (taskIds.length > 0) {
+    if (intentIds.length > 0) {
       await this.transactions.run(async (transaction) => {
         await this.audit.append(
           transaction,
@@ -181,10 +210,166 @@ export class UserServerResourcePurgeService {
           AuditAction.ExpiryStopContainers,
           userId,
           'user',
-          { serverId, taskIds },
+          { serverId, intentIds },
         );
       });
+      await this.access.authorizationCommitted([userId]);
     }
-    return { taskIds };
+    return { intentIds };
+  }
+
+  private async stopRunningContainersForResource(
+    userId: string,
+    matches: (volume: {
+      id: string;
+      owner_id: string;
+      pool_id: string;
+      server_id: string | null;
+      shared_backend_id: string | null;
+    }) => boolean,
+    actorId: string,
+    resource: { resourceKind: string; resourceId: string },
+    workerId: string,
+  ): Promise<{ intentIds: string[] }> {
+    const volumes = (await this.volumes.list(userId)).filter(matches);
+    const containerIds = new Set<string>();
+    for (const volume of volumes) {
+      for (const attachment of await this.volumes.listAttachments(undefined, volume.id)) {
+        containerIds.add(attachment.container_id);
+      }
+    }
+    const intentIds: string[] = [];
+    for (const containerId of containerIds) {
+      const container = await this.containerRepository.find(containerId);
+      if (
+        !container
+        || container.lifecycle_phase !== ContainerPhase.Active
+        || container.power_intent !== ContainerPowerIntent.Running
+      ) continue;
+      const claim = await this.reconcileClaims.claim({
+        resourceType: IntentResourceType.Container,
+        resourceId: containerId,
+        placementServerId: container.server_id,
+        serverId: container.server_id,
+        workerId,
+      });
+      if (!claim) continue;
+      try {
+        const current = await this.containerRepository.find(containerId);
+        if (
+          !current
+          || current.lifecycle_phase !== ContainerPhase.Active
+          || current.power_intent !== ContainerPowerIntent.Running
+        ) continue;
+        // The desired power state and pending intent are the completion marker.
+        const accepted = await this.containers.actionForSystem(containerId, 'stop', actorId);
+        intentIds.push(accepted.intentId);
+      } finally {
+        await this.reconcileClaims.release({
+          resourceType: claim.resourceType,
+          resourceId: claim.resourceId,
+          placementServerId: claim.placementServerId,
+          workerId: claim.workerId,
+        });
+      }
+    }
+    if (intentIds.length > 0) {
+      await this.transactions.run(async (transaction) => {
+        await this.audit.append(
+          transaction,
+          actorId,
+          AuditAction.ExpiryStopContainers,
+          userId,
+          'user',
+          { ...resource, intentIds },
+        );
+      });
+      await this.access.authorizationCommitted([userId]);
+    }
+    return { intentIds };
+  }
+
+  private async purgeVolumes(
+    userId: string,
+    matches: (volume: {
+      id: string;
+      owner_id: string;
+      pool_id: string;
+      server_id: string | null;
+      shared_backend_id: string | null;
+    }) => boolean,
+    actorId: string,
+    deleteAttachedContainers = false,
+  ): Promise<{ intentIds: string[]; containerIntentIds: string[]; volumeIds: string[] }> {
+    const result = await this.transactions.run(async (transaction) => {
+      const owned = (await this.volumes.list(userId, transaction)).filter(matches);
+      const intentIds: string[] = [];
+      const containerIds = new Set<string>();
+      const volumeIds: string[] = [];
+      for (const volume of owned) {
+        for (const attachment of await this.volumes.listAttachments(undefined, volume.id, transaction)) {
+          containerIds.add(attachment.container_id);
+        }
+        const locked = await transaction.selectFrom('control.volumes')
+          .selectAll()
+          .where('id', '=', volume.id)
+          .forUpdate()
+          .executeTakeFirst();
+        if (!locked) continue;
+        let desired = locked;
+        if (locked.lifecycle_phase !== 'deleting') {
+          const updated = await this.volumes.updateDesired(
+            locked.id,
+            locked.generation,
+            {
+              lifecycle_phase: 'deleting',
+              failure_code: null,
+              needs_attention: false,
+            },
+            transaction,
+          );
+          if (!updated) continue;
+          desired = updated;
+        }
+        await this.volumes.setAllDesiredPresent(desired.id, false, transaction);
+        const placements = await this.volumes.listPlacements(desired.id, transaction);
+        if (placements.length === 0) {
+          await this.volumes.deleteVolumeRow(desired.id, transaction);
+          volumeIds.push(desired.id);
+          continue;
+        }
+        for (const placement of placements) {
+          const intent = await this.intents.ensurePending({
+            kind: IntentKind.VolumeEnsure,
+            resourceType: IntentResourceType.Volume,
+            resourceId: desired.id,
+            serverId: placement.server_id,
+            requestedBy: actorId,
+            targetGeneration: desired.generation,
+            request: {
+              operation: 'delete',
+              idempotencyKey: 'delete',
+            },
+          }, transaction);
+          intentIds.push(intent.id);
+        }
+        volumeIds.push(desired.id);
+      }
+      return { intentIds, containerIds: [...containerIds], volumeIds };
+    }, { isolationLevel: 'serializable', maxAttempts: 5 });
+    const containerIntentIds: string[] = [];
+    if (deleteAttachedContainers) {
+      for (const containerId of result.containerIds) {
+        const container = await this.containerRepository.find(containerId);
+        if (!container || container.lifecycle_phase === ContainerPhase.Deleting) continue;
+        const accepted = await this.containers.actionForSystem(containerId, 'delete', actorId);
+        containerIntentIds.push(accepted.intentId);
+      }
+    }
+    return {
+      intentIds: result.intentIds,
+      containerIntentIds,
+      volumeIds: result.volumeIds,
+    };
   }
 }

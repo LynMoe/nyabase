@@ -36,8 +36,6 @@ export class SshKeyCryptoService {
   }
 
   private key(): Buffer {
-    const secret = this.config.get<string>('ssh.keyEncryptionSecret')
-      || this.config.get<string>('auth.jwtSecret');
-    return createHash('sha256').update(secret).digest();
+    return createHash('sha256').update(this.config.keyEncryptionSecret()).digest();
   }
 }

@@ -4,7 +4,6 @@ import type { IamAuthorizationDatabase } from '../access/iam-authorization-datab
 import type { InfrastructureDatabase } from '../infrastructure/infrastructure-database.types.js';
 import type { StorageDatabase } from '../storage/storage-database.types.js';
 import type { ContainerControlDatabase } from '../containers/container-control-database.types.js';
-import type { WorkflowDatabase } from '../agent-tasks/workflow-database.types.js';
 import type { HttpProxyDatabase } from '../http-proxy/http-proxy-database.types.js';
 import type { SystemSettingsDatabase } from '../system-settings/system-settings-database.types.js';
 
@@ -16,10 +15,6 @@ export type GeneratedTimestamp = ColumnType<
 >;
 export type BigIntColumn = ColumnType<string, string | number | bigint, string | number | bigint>;
 
-/**
- * Initial database typing surface. Domain lanes add tables here as their
- * SQL-first migrations and query modules replace the legacy ORM entities.
- */
 export interface SchemaMigrationTable {
   version: string;
   name: string;
@@ -31,7 +26,6 @@ export interface SchemaMigrationTable {
 export interface IamPolicyStateTable {
   singleton: boolean;
   policy_epoch: BigIntColumn;
-  next_numeric_user_id: number;
   updated_at: GeneratedTimestamp;
 }
 
@@ -76,7 +70,7 @@ export interface IamRefreshTokenTable {
   previous_request_id_hash: string | null;
   expires_at: Timestamp;
   revoked: boolean;
-  created_at: Timestamp;
+  created_at: GeneratedTimestamp;
 }
 
 export interface IamApiTokenTable {
@@ -85,7 +79,7 @@ export interface IamApiTokenTable {
   name: string;
   hash: string;
   last_used_at: Timestamp | null;
-  created_at: Timestamp;
+  created_at: GeneratedTimestamp;
 }
 
 export interface IamSshPublicKeyTable {
@@ -94,16 +88,7 @@ export interface IamSshPublicKeyTable {
   name: string;
   key_text: string;
   fingerprint: string;
-  created_at: Timestamp;
-}
-
-export interface IamUserInternalSshKeyTable {
-  user_id: string;
-  encrypted_private_key: string;
-  public_key: string;
-  fingerprint: string;
-  generation: number;
-  rotated_at: Timestamp;
+  created_at: GeneratedTimestamp;
 }
 
 export interface InteractionSshProxyHostKeyTable {
@@ -115,13 +100,18 @@ export interface InteractionSshProxyHostKeyTable {
   rotated_at: Timestamp;
 }
 
+export interface ReconcileBusyStrikeTable {
+  resource_type: string;
+  resource_id: string;
+  observed_at: GeneratedTimestamp;
+}
+
 export interface NyabaseDatabase
   extends AuditDatabase,
     IamAuthorizationDatabase,
     InfrastructureDatabase,
     StorageDatabase,
     ContainerControlDatabase,
-    WorkflowDatabase,
     HttpProxyDatabase,
     SystemSettingsDatabase {
   'system.schema_migrations': SchemaMigrationTable;
@@ -132,6 +122,6 @@ export interface NyabaseDatabase
   'iam.refresh_tokens': IamRefreshTokenTable;
   'iam.api_tokens': IamApiTokenTable;
   'iam.ssh_public_keys': IamSshPublicKeyTable;
-  'iam.user_internal_ssh_keys': IamUserInternalSshKeyTable;
   'interaction.ssh_proxy_host_keys': InteractionSshProxyHostKeyTable;
+  'control.reconcile_busy_strikes': ReconcileBusyStrikeTable;
 }

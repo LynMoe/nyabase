@@ -1,18 +1,41 @@
 import { Injectable, Logger, OnModuleDestroy } from '@nestjs/common';
 import {
-  MAX_AGENT_WS_FRAME_BYTES,
+  MAX_METRIC_LABEL_KEY_LENGTH,
+  MAX_METRIC_LABELS_PER_POINT,
+  MAX_METRIC_NAME_LENGTH,
+  MAX_METRIC_LABEL_VALUE_LENGTH,
   MAX_METRIC_POINTS_PER_BATCH,
-  zMetricPoint,
-  type MetricPoint,
+  MAX_NODE_METRICS_BODY_BYTES,
+  NODE_METRIC_NAMES,
+  validateNodeMetricSample,
 } from '@nyabase/common';
 import { NyabaseConfigService } from '../config/nyabase-config.service.js';
 import { RuntimeRoleService } from '../runtime/runtime-role.service.js';
 
-/** A single batch enqueued by an agent. */
+export interface MetricPoint {
+  name: string;
+  labels: Readonly<Record<string, string>>;
+  value: number;
+  ts: number;
+}
+
+export interface MetricsWriteOptions {
+  readonly guard?: () => Promise<boolean>;
+}
+
 interface QueuedBatch {
   serverId: string;
   points: MetricPoint[];
   estimatedBytes: number;
+  guard?: () => Promise<boolean>;
+}
+
+interface FlushOperation {
+  readonly batch: QueuedBatch[];
+  readonly controller: AbortController;
+  promise: Promise<void>;
+  droppedBatches: number;
+  countedAsDropped: boolean;
 }
 
 export interface MetricsWriterStats {
@@ -27,131 +50,89 @@ export interface MetricsWriterStats {
 
 const DEFAULT_QUEUE_LIMIT = 1_024;
 const MAX_QUEUED_POINTS = MAX_METRIC_POINTS_PER_BATCH * 4;
-const MAX_QUEUED_BYTES = MAX_AGENT_WS_FRAME_BYTES * 2;
+const MAX_QUEUED_BYTES = MAX_NODE_METRICS_BODY_BYTES * 2;
 const MAX_FLUSH_POINTS = MAX_METRIC_POINTS_PER_BATCH * 2;
-const MAX_FLUSH_BYTES = MAX_AGENT_WS_FRAME_BYTES;
+const MAX_FLUSH_BYTES = MAX_NODE_METRICS_BODY_BYTES;
 const DEFAULT_FLUSH_INTERVAL_MS = 1_000;
-const DEFAULT_MAX_CONCURRENT_FLUSHES = 1;
 const DEFAULT_BATCH_FLUSH_SIZE = 64;
-const INITIAL_FAILURE_BACKOFF_MS = 10_000;
-const MAX_FAILURE_BACKOFF_MS = 60_000;
+const FLUSH_REQUEST_TIMEOUT_MS = 2_000;
 const SHUTDOWN_DRAIN_TIMEOUT_MS = 5_000;
 
-/**
- * MetricsWriter buffers samples in-memory and flushes them to vmagent
- * in batches. Backpressure semantics:
- *   - When the queue grows beyond `queueLimit`, we drop the OLDEST batches
- *     (so live metrics keep flowing) and increment `dropped`.
- *   - The flush loop runs on a fixed interval AND is triggered on every
- *     enqueue, with `maxConcurrentFlushes` cap.
- *   - A failed vmagent request opens a bounded exponential backoff. This is
- *     also a DNS-isolation boundary: aborting fetch does not necessarily
- *     cancel an in-flight getaddrinfo worker for an unavailable hostname.
- *   - On shutdown the queue is drained synchronously up to a deadline.
- *
- * No durable application retry queue exists here: vmagent owns persistence and
- * retry. This process-local queue is deliberately bounded and lossy.
- */
 @Injectable()
 export class MetricsWriter implements OnModuleDestroy {
   private readonly logger = new Logger(MetricsWriter.name);
   private readonly vmUrl: string;
-
   private readonly queue: QueuedBatch[] = [];
   private readonly queueLimit = DEFAULT_QUEUE_LIMIT;
-  private readonly flushIntervalMs = DEFAULT_FLUSH_INTERVAL_MS;
-  private readonly maxConcurrentFlushes = DEFAULT_MAX_CONCURRENT_FLUSHES;
-  private readonly batchFlushSize = DEFAULT_BATCH_FLUSH_SIZE;
-
   private dropped = 0;
   private queuedPoints = 0;
   private queuedBytes = 0;
   private inFlight = 0;
   private lastFlushAt: number | null = null;
   private lastError: string | null = null;
-  private consecutiveFailures = 0;
-  private retryNotBeforeMonotonic = 0;
+  private timer: NodeJS.Timeout | null = null;
   private shuttingDown = false;
-  private flushTimer: NodeJS.Timeout | null = null;
-  private monotonicNowMs = (): number => performance.now();
+  private activeFlush: FlushOperation | null = null;
+  private shutdownPromise: Promise<void> | null = null;
 
   constructor(
-    private config: NyabaseConfigService,
+    config: NyabaseConfigService,
     runtimeRole?: RuntimeRoleService,
   ) {
     this.vmUrl = config.get<string>('metrics.vmagentUrl');
-    if (!runtimeRole || runtimeRole.servesGateway()) {
-      this.flushTimer = setInterval(() => {
-        void this.flushLoop();
-      }, this.flushIntervalMs);
-      // Don't keep the event loop alive only for metrics flushes.
-      this.flushTimer.unref?.();
+    if (!runtimeRole || runtimeRole.servesProxySockets()) {
+      this.timer = setInterval(() => {
+        void this.flush();
+      }, DEFAULT_FLUSH_INTERVAL_MS);
+      this.timer.unref?.();
     }
   }
 
-  /**
-   * Normalize identity labels and enqueue a batch of metric points. The actual
-   * VictoriaMetrics write happens in the background flush loop.
-   */
-  async writeBatch(serverId: string, points: MetricPoint[]): Promise<void> {
-    if (points.length === 0 || this.shuttingDown) return;
-    if (points.length > MAX_METRIC_POINTS_PER_BATCH) {
+  async writeBatch(
+    serverId: string,
+    points: MetricPoint[],
+    options: MetricsWriteOptions = {},
+  ): Promise<void> {
+    if (this.shuttingDown || points.length === 0) return;
+    if (points.length > MAX_METRIC_POINTS_PER_BATCH
+      || points.some((point) => !validPoint(point))) {
       this.dropped += 1;
-      this.logger.warn(
-        `Rejected metrics batch with ${points.length} points; maximum is `
-        + `${MAX_METRIC_POINTS_PER_BATCH}`,
-      );
       return;
     }
-
-    points = points.map((point) => ({
+    if (options.guard && !(await this.evaluateGuard(options.guard))) {
+      this.dropped += 1;
+      return;
+    }
+    if (this.shuttingDown) return;
+    const normalized = points.map((point) => ({
       ...point,
-      labels: { ...point.labels, server: serverId },
+      labels: { ...point.labels, server_id: serverId },
     }));
-    if (points.some((point) => !zMetricPoint.safeParse(point).success)) {
+    const estimatedBytes = Buffer.byteLength(JSON.stringify({ serverId, points: normalized }));
+    if (estimatedBytes > MAX_NODE_METRICS_BODY_BYTES) {
       this.dropped += 1;
-      this.logger.warn('Rejected metrics batch outside the bounded metric name/label contract');
       return;
     }
-
-    const estimatedBytes = Buffer.byteLength(JSON.stringify({ serverId, points }));
-    if (estimatedBytes > MAX_FLUSH_BYTES) {
-      this.dropped += 1;
-      this.logger.warn(
-        `Rejected metrics batch of ${estimatedBytes} bytes; queue byte limit is `
-        + `${MAX_FLUSH_BYTES}`,
-      );
-      return;
-    }
-
     while (
-      this.queue.length > 0
-      && (this.queue.length >= this.queueLimit
-        || this.queuedPoints + points.length > MAX_QUEUED_POINTS
-        || this.queuedBytes + estimatedBytes > MAX_QUEUED_BYTES)
+      this.queue.length >= this.queueLimit
+      || this.queuedPoints + normalized.length > MAX_QUEUED_POINTS
+      || this.queuedBytes + estimatedBytes > MAX_QUEUED_BYTES
     ) {
-      // Drop the oldest batch to make room. We log at warn the first time per
-      // contiguous burst so we don't spam logs when the upstream is wedged.
-      const droppedBatch = this.queue.shift();
+      const removed = this.queue.shift();
+      if (!removed) break;
       this.dropped += 1;
-      if (droppedBatch) {
-        this.queuedPoints -= droppedBatch.points.length;
-        this.queuedBytes -= droppedBatch.estimatedBytes;
-        this.logger.warn(
-          `Metrics queue full (limit=${this.queueLimit}); dropped 1 batch ` +
-            `(${droppedBatch.points.length} points from server ${droppedBatch.serverId}). ` +
-            `total dropped=${this.dropped}`,
-        );
-      }
+      this.queuedPoints -= removed.points.length;
+      this.queuedBytes -= removed.estimatedBytes;
     }
-
-    this.queue.push({ serverId, points, estimatedBytes });
-    this.queuedPoints += points.length;
+    this.queue.push({
+      serverId,
+      points: normalized,
+      estimatedBytes,
+      guard: options.guard,
+    });
+    this.queuedPoints += normalized.length;
     this.queuedBytes += estimatedBytes;
-
-    // Trigger an immediate flush if we have capacity. The interval timer is a
-    // safety net for the steady-state case.
-    void this.flushLoop();
+    await this.flush();
   }
 
   getStats(): MetricsWriterStats {
@@ -167,58 +148,54 @@ export class MetricsWriter implements OnModuleDestroy {
   }
 
   async onModuleDestroy(): Promise<void> {
+    if (this.shutdownPromise) return this.shutdownPromise;
     this.shuttingDown = true;
-    if (this.flushTimer) {
-      clearInterval(this.flushTimer);
-      this.flushTimer = null;
-    }
+    if (this.timer) clearInterval(this.timer);
+    this.timer = null;
+    this.shutdownPromise = this.drain();
+    return this.shutdownPromise;
+  }
 
-    const deadline = this.monotonicNowMs() + SHUTDOWN_DRAIN_TIMEOUT_MS;
-    while (
-      (this.queue.length > 0 || this.inFlight > 0)
-      && this.monotonicNowMs() < deadline
-    ) {
-      await this.flushLoop();
-      if (this.queue.length === 0 && this.inFlight === 0) break;
-      await new Promise((resolve) => setTimeout(resolve, 50));
-    }
-    if (this.queue.length > 0) {
-      this.logger.warn(
-        `Shutdown drain timed out with ${this.queue.length} batches still queued`,
-      );
+  private flush(): Promise<void> {
+    if (this.activeFlush) return this.activeFlush.promise;
+    const batch = this.takeBatch();
+    if (!batch) return Promise.resolve();
+    const operation: FlushOperation = {
+      batch,
+      controller: new AbortController(),
+      droppedBatches: 0,
+      countedAsDropped: false,
+      promise: Promise.resolve(),
+    };
+    this.activeFlush = operation;
+    this.inFlight = 1;
+    operation.promise = Promise.resolve()
+      .then(() => this.flushOne(operation))
+      .finally(() => this.finishFlush(operation));
+    return operation.promise;
+  }
+
+  private async drain(): Promise<void> {
+    const deadline = performance.now() + SHUTDOWN_DRAIN_TIMEOUT_MS;
+    while (this.queue.length > 0 || this.activeFlush) {
+      const promise = this.activeFlush?.promise ?? this.flush();
+      const remaining = deadline - performance.now();
+      if (remaining <= 0 || !(await this.waitFor(promise, remaining))) {
+        this.markDrainTimeout();
+        return;
+      }
     }
   }
 
-  // ---------------------------------------------------------------------------
-  // Internals
-  // ---------------------------------------------------------------------------
-
-  private async flushLoop(): Promise<void> {
-    if (this.monotonicNowMs() < this.retryNotBeforeMonotonic) return;
-    while (
-      this.queue.length > 0 &&
-      this.inFlight < this.maxConcurrentFlushes
-    ) {
-      const batch = this.takeBatch();
-      if (!batch) return;
-      this.inFlight += 1;
-      void this.flushOne(batch).finally(() => {
-        this.inFlight -= 1;
-      });
-    }
-  }
-
-  /**
-   * Coalesce up to `batchFlushSize` queued batches into a single HTTP request.
-   * Different `serverId`s are flushed together; the per-point label encodes
-   * the server already.
-   */
   private takeBatch(): QueuedBatch[] | null {
     if (this.queue.length === 0) return null;
     const result: QueuedBatch[] = [];
     let points = 0;
     let bytes = 0;
-    while (result.length < this.batchFlushSize && this.queue.length > 0) {
+    while (
+      result.length < DEFAULT_BATCH_FLUSH_SIZE
+      && this.queue.length > 0
+    ) {
       const next = this.queue[0];
       if (
         result.length > 0
@@ -235,60 +212,145 @@ export class MetricsWriter implements OnModuleDestroy {
     return result;
   }
 
-  private async flushOne(batches: QueuedBatch[]): Promise<void> {
+  private async flushOne(operation: FlushOperation): Promise<void> {
+    const batches: QueuedBatch[] = [];
+    for (const batch of operation.batch) {
+      if (
+        batch.guard
+        && !(await this.evaluateGuard(batch.guard))
+      ) {
+        operation.droppedBatches += 1;
+        if (!operation.countedAsDropped) this.dropped += 1;
+        continue;
+      }
+      batches.push(batch);
+    }
+    if (batches.length === 0) return;
+
     const lines: string[] = [];
     for (const batch of batches) {
-      for (const p of batch.points) {
-        const labelParts = Object.entries({ ...p.labels, server: batch.serverId })
-          .map(([k, v]) => `${k}="${escapePrometheusLabelValue(v)}"`)
+      for (const point of batch.points) {
+        const labels = Object.entries(point.labels)
+          .map(([key, value]) => `${key}="${escapeLabel(value)}"`)
           .join(',');
-        const labelStr = labelParts ? `{${labelParts}}` : '';
-        lines.push(`${p.name}${labelStr} ${p.value} ${p.ts}`);
+        lines.push(`${point.name}{${labels}} ${point.value} ${point.ts}`);
       }
     }
     if (lines.length === 0) return;
 
     const body = lines.join('\n');
+    const requestTimeout = AbortSignal.timeout(FLUSH_REQUEST_TIMEOUT_MS);
+    const signal = AbortSignal.any([operation.controller.signal, requestTimeout]);
     try {
-      const res = await fetch(`${this.vmUrl}/api/v1/import/prometheus`, {
+      const response = await fetch(`${this.vmUrl}/api/v1/import/prometheus`, {
         method: 'POST',
-        headers: { 'Content-Type': 'text/plain' },
+        headers: { 'content-type': 'text/plain' },
         body,
-        signal: AbortSignal.timeout(2_000),
+        signal,
       });
-      if (!res.ok) {
-        const text = await res.text().catch(() => '<no body>');
-        const msg = `vmagent write failed: ${res.status} ${text}`;
-        this.dropped += batches.length;
-        this.recordFailure(msg);
-        this.logger.warn(msg);
-      } else {
-        this.consecutiveFailures = 0;
-        this.retryNotBeforeMonotonic = 0;
-        this.lastError = null;
+      if (!response.ok) {
+        throw new Error(`metrics endpoint returned ${response.status}`);
       }
-    } catch (err) {
-      const msg = `vmagent write error: ${err}`;
+      if (!operation.countedAsDropped) this.lastError = null;
+    } catch (error) {
+      if (operation.countedAsDropped) return;
+      operation.droppedBatches += batches.length;
       this.dropped += batches.length;
-      this.recordFailure(msg);
-      this.logger.error(msg);
+      this.lastError = error instanceof Error ? error.message : String(error);
+      this.logger.warn(`Metrics flush failed: ${this.lastError}`);
     } finally {
       this.lastFlushAt = Date.now();
     }
   }
 
-  private recordFailure(message: string): void {
-    const multiplier = 2 ** Math.min(this.consecutiveFailures, 3);
-    const backoffMs = Math.min(
-      INITIAL_FAILURE_BACKOFF_MS * multiplier,
-      MAX_FAILURE_BACKOFF_MS,
-    );
-    this.consecutiveFailures += 1;
-    this.retryNotBeforeMonotonic = this.monotonicNowMs() + backoffMs;
-    this.lastError = message;
+  private finishFlush(operation: FlushOperation): void {
+    if (this.activeFlush !== operation) return;
+    this.activeFlush = null;
+    this.inFlight = 0;
+    if (!this.shuttingDown && this.queue.length > 0) {
+      void this.flush();
+    }
+  }
+
+  private async evaluateGuard(guard: () => Promise<boolean>): Promise<boolean> {
+    try {
+      return await guard();
+    } catch (error) {
+      this.logger.warn(
+        `Metrics configuration guard failed: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+      return false;
+    }
+  }
+
+  private async waitFor(promise: Promise<void>, timeoutMs: number): Promise<boolean> {
+    let timeoutHandle: NodeJS.Timeout | undefined;
+    const timeout = new Promise<boolean>((resolve) => {
+      timeoutHandle = setTimeout(() => resolve(false), timeoutMs);
+    });
+    const result = await Promise.race([
+      promise.then(() => true, () => true),
+      timeout,
+    ]);
+    if (timeoutHandle) clearTimeout(timeoutHandle);
+    return result;
+  }
+
+  private markDrainTimeout(): void {
+    const queued = this.queue.length;
+    if (queued > 0) {
+      this.dropped += queued;
+      this.queue.length = 0;
+      this.queuedPoints = 0;
+      this.queuedBytes = 0;
+    }
+    const active = this.activeFlush;
+    if (active && !active.countedAsDropped) {
+      const remaining = active.batch.length - active.droppedBatches;
+      if (remaining > 0) this.dropped += remaining;
+      active.countedAsDropped = true;
+      active.controller.abort();
+    }
+    this.lastError =
+      `Metrics shutdown drain timed out with ${queued} queued batches`;
+    this.logger.warn(this.lastError);
   }
 }
 
-function escapePrometheusLabelValue(value: string): string {
-  return value.replace(/\\/g, '\\\\').replace(/\n/g, '\\n').replace(/"/g, '\\"');
+function validPoint(point: MetricPoint): boolean {
+  if (
+    point.name !== 'nyabase_node_scrape_up'
+    && !(NODE_METRIC_NAMES as readonly string[]).includes(point.name)
+  ) return false;
+  if (
+    point.name === 'nyabase_node_scrape_up'
+    && Object.keys(point.labels).length !== 0
+  ) return false;
+  if (point.name !== 'nyabase_node_scrape_up') {
+    try {
+      validateNodeMetricSample({
+        name: point.name as (typeof NODE_METRIC_NAMES)[number],
+        labels: point.labels,
+        value: point.value,
+      });
+    } catch {
+      return false;
+    }
+  }
+  return point.name.length > 0
+    && point.name.length <= MAX_METRIC_NAME_LENGTH
+    && Number.isFinite(point.value)
+    && Number.isFinite(point.ts)
+    && Object.keys(point.labels).length <= MAX_METRIC_LABELS_PER_POINT
+    && Object.entries(point.labels).every(([key, value]) =>
+      key.length > 0
+      && key.length <= MAX_METRIC_LABEL_KEY_LENGTH
+      && value.length <= MAX_METRIC_LABEL_VALUE_LENGTH,
+    );
+}
+
+function escapeLabel(value: string): string {
+  return value.replaceAll('\\', '\\\\').replaceAll('"', '\\"').replaceAll('\n', '\\n');
 }

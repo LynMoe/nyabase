@@ -6,14 +6,17 @@ import {
 } from 'node:fs';
 import { dirname, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import type { APIRequestContext, APIResponse, TestInfo } from '@playwright/test';
+import type {
+  APIRequestContext,
+  APIResponse,
+  TestInfo,
+} from '@playwright/test';
 import { currentRunId, requireRuntimeEnv } from './runtime-env.js';
 
 type ApiMethod = 'delete' | 'fetch' | 'get' | 'head' | 'patch' | 'post' | 'put';
 
 interface LedgerCase {
   caseId: string;
-  kind: 'behavioral' | 'evidence' | 'fixture';
   persona: string;
   httpSurfaces: string[];
 }
@@ -31,36 +34,48 @@ export interface CoverageRecorder {
 }
 
 const e2eRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
-const ledger = JSON.parse(readFileSync(join(e2eRoot, 'coverage', 'features.yaml'), 'utf8')) as {
-  features: Array<{ cases: LedgerCase[]; httpSurfaces: string[] }>;
-};
+const ledger = JSON.parse(readFileSync(
+  join(e2eRoot, 'coverage', 'features.yaml'),
+  'utf8',
+)) as { features: Array<{ cases: LedgerCase[]; httpSurfaces: string[] }> };
 const caseById = new Map(
-  ledger.features.flatMap((feature) => feature.cases).map((entry) => [entry.caseId, entry]),
+  ledger.features.flatMap((feature) => feature.cases)
+    .map((entry) => [entry.caseId, entry]),
 );
-const surfaceMatchers = ledger.features.flatMap((feature) => feature.httpSurfaces.map((surface) => {
-  const [, method, path] = surface.split('|');
-  const segments = path.split('/').filter(Boolean);
-  const pattern = new RegExp(`^/${segments.map((segment) => (
-    segment.startsWith(':') ? '[^/]+' : escapeRegExp(segment)
-  )).join('/')}/?$`);
-  return {
-    method,
-    surface,
-    pattern,
-    staticSegments: segments.filter((segment) => !segment.startsWith(':')).length,
-  } satisfies SurfaceMatcher;
-})).sort((left, right) => right.staticSegments - left.staticSegments);
+const surfaceMatchers = Array.from(new Map(
+  ledger.features.flatMap((feature) => (
+    (feature.cases ?? []).flatMap((entry) => entry.httpSurfaces ?? [])
+  )).map((surface) => {
+    const [method, path] = surface.split('|');
+    const segments = path.split('/').filter(Boolean);
+    return [surface, {
+      method,
+      surface,
+      pattern: new RegExp(`^/${segments.map((segment) => (
+        segment.startsWith(':') ? '[^/]+' : escapeRegExp(segment)
+      )).join('/')}/?$`),
+      staticSegments: segments.filter((segment) => !segment.startsWith(':')).length,
+    } satisfies SurfaceMatcher] as const;
+  }),
+).values()).sort((left, right) => right.staticSegments - left.staticSegments);
 
 export function createCoverageRecorder(testInfo: TestInfo): CoverageRecorder {
   const caseId = annotation(testInfo, 'nyabase.coverage.case');
   const specTestId = annotation(testInfo, 'nyabase.coverage.test-id');
   const coverageCase = caseById.get(caseId);
-  if (!coverageCase) throw new Error(`coverage runtime references unknown case ${caseId}`);
+  if (!coverageCase) {
+    throw new Error(`coverage runtime references unknown case ${caseId}`);
+  }
   const runId = currentRunId();
   const profile = requireRuntimeEnv('E2E_PROFILE');
   const runtimeRoot = resolve(requireRuntimeEnv('E2E_RUNTIME_ROOT'));
+  const coverageNonce = requireRuntimeEnv('E2E_COVERAGE_RUN_NONCE');
   const httpEventsPath = join(runtimeRoot, 'coverage-http-events.jsonl');
   const caseEventsPath = join(runtimeRoot, 'coverage-case-events.jsonl');
+  const marker = readFileSync(join(runtimeRoot, 'coverage-run.marker'), 'utf8').trim();
+  if (marker !== `${runId}:${coverageNonce}`) {
+    throw new Error('coverage artifacts belong to a different run invocation');
+  }
   const observedSurfaces = new Set<string>();
 
   mkdirSync(runtimeRoot, { recursive: true, mode: 0o700 });
@@ -76,15 +91,16 @@ export function createCoverageRecorder(testInfo: TestInfo): CoverageRecorder {
       : matches.filter((candidate) => candidate.staticSegments === matches[0].staticSegments);
     if (mostSpecific.length !== 1) {
       throw new Error(
-        `coverage runtime mapped ${method} ${parsed.pathname} to ${mostSpecific.length} most-specific surfaces`,
+        `coverage runtime mapped ${method} ${parsed.pathname} to ${mostSpecific.length} surfaces`,
       );
     }
     const surface = mostSpecific[0].surface;
     const countsForCase = coverageCase.httpSurfaces.includes(surface);
     if (countsForCase) observedSurfaces.add(surface);
     appendJsonLine(httpEventsPath, {
-      schemaVersion: 1,
+      schemaVersion: 2,
       runId,
+      coverageNonce,
       profile,
       caseId,
       specTestId,
@@ -122,11 +138,11 @@ export function createCoverageRecorder(testInfo: TestInfo): CoverageRecorder {
     },
     finish() {
       appendJsonLine(caseEventsPath, {
-        schemaVersion: 1,
+        schemaVersion: 2,
         runId,
+        coverageNonce,
         profile,
         caseId,
-        kind: coverageCase.kind,
         source: 'playwright',
         status: testInfo.status === 'passed' ? 'passed' : 'failed',
         observedAt: new Date().toISOString(),
@@ -141,12 +157,15 @@ export function createCoverageRecorder(testInfo: TestInfo): CoverageRecorder {
 
 function annotation(testInfo: TestInfo, type: string): string {
   const value = testInfo.annotations.find((entry) => entry.type === type)?.description;
-  if (!value) throw new Error(`live test ${testInfo.title} lacks ${type} annotation`);
+  if (!value) throw new Error(`live test lacks ${type} annotation`);
   return value;
 }
 
 function appendJsonLine(path: string, value: unknown): void {
-  appendFileSync(path, `${JSON.stringify(value)}\n`, { encoding: 'utf8', mode: 0o600 });
+  appendFileSync(path, `${JSON.stringify(value)}\n`, {
+    encoding: 'utf8',
+    mode: 0o600,
+  });
   chmodSync(path, 0o600);
 }
 

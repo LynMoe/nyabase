@@ -7,6 +7,7 @@ export const DEFAULT_PUBLIC_SETTINGS: PublicSettingsDto = {
     title: 'nyabase',
     description: '开发容器管理平台',
   },
+  sshProxy: null,
 };
 
 export function usePublicSettings() {

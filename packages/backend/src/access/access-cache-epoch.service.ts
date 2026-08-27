@@ -13,8 +13,7 @@ import { PG_DATABASE } from '../persistence-pg/tokens.js';
 
 /**
  * Process-local invalidation fence shared by authorization readers and
- * post-commit task finalizers. It deliberately contains no repositories, so
- * AgentTasksModule never needs to depend on AccessModule.
+ * post-commit intent handlers. It deliberately contains no repositories.
  */
 @Injectable()
 export class AccessCacheEpochService implements OnModuleInit, OnModuleDestroy {

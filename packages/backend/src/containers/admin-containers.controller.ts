@@ -3,93 +3,138 @@ import {
   Controller,
   Get,
   Param,
+  Patch,
   Post,
   Query,
   Req,
-  UseGuards,
   ForbiddenException,
+  HttpCode,
+  HttpStatus,
+  UseGuards,
 } from '@nestjs/common';
+import {
+  Capability,
+  zCreateContainerRequest,
+  zCreateExecSessionRequest,
+  zPatchContainerGpuRequest,
+  zPatchContainerLimitsRequest,
+  zPatchContainerRootSizeRequest,
+} from '@nyabase/common';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard.js';
 import { CapabilitiesGuard } from '../auth/guards/capabilities.guard.js';
 import { RequireCaps } from '../auth/decorators/require-caps.decorator.js';
 import { CurrentUser } from '../auth/decorators/current-user.decorator.js';
 import type { UserRecord } from '../domain/domain-records.js';
-import { Capability, zExecSessionRequest, zUpdateContainerMountsRequest } from '@nyabase/common';
-import { ContainerControlService } from './container-control.service.js';
 import type { RequestAuthContext } from '../auth/guards/jwt-auth.guard.js';
+import { ContainerControlService } from './container-control.service.js';
 
-@Controller('admin/v2/containers')
+@Controller('admin/containers')
 @UseGuards(JwtAuthGuard, CapabilitiesGuard)
 @RequireCaps(Capability.ManageContainersAny)
 export class AdminContainersController {
-  constructor(private containerControl: ContainerControlService) {}
+  constructor(private readonly containers: ContainerControlService) {}
 
   @Get()
-  async list(@Query('serverId') serverId?: string) {
-    return this.containerControl.listForAdmin({ serverId });
+  list(@Query('serverId') serverId?: string) {
+    return this.containers.listForAdmin({ serverId });
   }
 
   @Get(':containerId')
-  async get(@Param('containerId') containerId: string, @CurrentUser() user: UserRecord) {
-    return this.containerControl.getForAdmin(containerId, user.id);
+  get(@Param('containerId') id: string, @CurrentUser() user: UserRecord) {
+    return this.containers.getForAdmin(id, user.id);
+  }
+
+  @Post()
+  @HttpCode(HttpStatus.ACCEPTED)
+  create(@CurrentUser() user: UserRecord, @Body() body: unknown) {
+    return this.containers.createForAdmin(user.id, zCreateContainerRequest.parse(body));
   }
 
   @Post(':containerId/actions/start')
-  async start(@Param('containerId') containerId: string, @CurrentUser() user: UserRecord) {
-    return this.containerControl.actionForAdmin(containerId, 'start', user.id);
+  @HttpCode(HttpStatus.ACCEPTED)
+  start(@Param('containerId') id: string, @CurrentUser() user: UserRecord) {
+    return this.containers.actionForAdmin(id, 'start', user.id);
   }
 
   @Post(':containerId/actions/stop')
-  async stop(@Param('containerId') containerId: string, @CurrentUser() user: UserRecord) {
-    return this.containerControl.actionForAdmin(containerId, 'stop', user.id);
+  @HttpCode(HttpStatus.ACCEPTED)
+  stop(@Param('containerId') id: string, @CurrentUser() user: UserRecord) {
+    return this.containers.actionForAdmin(id, 'stop', user.id);
   }
 
   @Post(':containerId/actions/restart')
-  async restart(@Param('containerId') containerId: string, @CurrentUser() user: UserRecord) {
-    return this.containerControl.actionForAdmin(containerId, 'restart', user.id);
+  @HttpCode(HttpStatus.ACCEPTED)
+  restart(@Param('containerId') id: string, @CurrentUser() user: UserRecord) {
+    return this.containers.actionForAdmin(id, 'restart', user.id);
+  }
+
+  @Post(':containerId/actions/repair-ssh')
+  @HttpCode(HttpStatus.ACCEPTED)
+  repairSsh(@Param('containerId') id: string, @CurrentUser() user: UserRecord) {
+    return this.containers.repairSshForAdmin(id, user.id);
   }
 
   @Post(':containerId/actions/delete')
-  async delete(@Param('containerId') containerId: string, @CurrentUser() user: UserRecord) {
-    return this.containerControl.actionForAdmin(containerId, 'delete', user.id);
+  @HttpCode(HttpStatus.ACCEPTED)
+  delete(@Param('containerId') id: string, @CurrentUser() user: UserRecord) {
+    return this.containers.actionForAdmin(id, 'delete', user.id);
   }
 
-  @Post(':containerId/actions/update-mounts')
-  async updateMounts(
-    @Param('containerId') containerId: string,
-    @Body() body: unknown,
-    @CurrentUser() user: UserRecord,
-  ) {
-    const mounts = zUpdateContainerMountsRequest.parse(body);
-    return this.containerControl.actionForAdmin(containerId, 'updateMounts', user.id, mounts);
+  @Patch(':containerId/limits')
+  @HttpCode(HttpStatus.ACCEPTED)
+  limits(@Param('containerId') id: string, @CurrentUser() user: UserRecord, @Body() body: unknown) {
+    return this.containers.updateLimitsForAdmin(
+      id,
+      user.id,
+      zPatchContainerLimitsRequest.parse(body),
+    );
   }
 
-  @Post(':containerId/actions/reconcile-ssh')
-  async reconcileSsh(@Param('containerId') containerId: string, @CurrentUser() user: UserRecord) {
-    return this.containerControl.actionForAdmin(containerId, 'reconcileSsh', user.id);
+  @Patch(':containerId/root-size')
+  @HttpCode(HttpStatus.ACCEPTED)
+  rootSize(@Param('containerId') id: string, @CurrentUser() user: UserRecord, @Body() body: unknown) {
+    return this.containers.resizeRootForAdmin(
+      id,
+      user.id,
+      zPatchContainerRootSizeRequest.parse(body),
+    );
+  }
+
+  @Patch(':containerId/gpu')
+  @HttpCode(HttpStatus.ACCEPTED)
+  gpu(@Param('containerId') id: string, @CurrentUser() user: UserRecord, @Body() body: unknown) {
+    return this.containers.updateGpuForAdmin(
+      id,
+      user.id,
+      zPatchContainerGpuRequest.parse(body),
+    );
+  }
+
+  @Get(':containerId/volumes')
+  volumes(@Param('containerId') id: string) {
+    return this.containers.listVolumesForAdmin(id);
   }
 
   @Get(':containerId/stats')
-  async stats(@Param('containerId') containerId: string, @CurrentUser() user: UserRecord) {
-    return this.containerControl.getStatsForAdmin(containerId, user.id);
+  stats(@Param('containerId') id: string, @CurrentUser() user: UserRecord) {
+    return this.containers.getStatsForAdmin(id, user.id);
   }
 
   @Post(':containerId/exec-sessions')
-  async execSession(
-    @Param('containerId') containerId: string,
+  execSession(
+    @Param('containerId') id: string,
     @Body() body: unknown,
     @CurrentUser() user: UserRecord,
-    @Req() httpRequest: { authContext?: RequestAuthContext },
+    @Req() request: { authContext?: RequestAuthContext },
   ) {
-    const request = zExecSessionRequest.parse(body);
-    if (httpRequest.authContext?.kind !== 'jwt') {
+    if (request.authContext?.kind !== 'jwt') {
       throw new ForbiddenException('Container console admission requires a browser JWT');
     }
-    return this.containerControl.createExecSessionForAdmin(
-      containerId,
+    return this.containers.createExecSessionForAdmin(
+      id,
       user.id,
-      httpRequest.authContext.authVersion,
-      request,
+      request.authContext.authVersion,
+      zCreateExecSessionRequest.parse(body),
     );
   }
 }

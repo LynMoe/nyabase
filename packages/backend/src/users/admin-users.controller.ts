@@ -6,7 +6,6 @@ import {
   Delete,
   Param,
   Body,
-  Query,
   UseGuards,
   HttpCode,
   ForbiddenException,
@@ -15,7 +14,7 @@ import {
 import { UsersService } from './users.service.js';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard.js';
 import { CapabilitiesGuard } from '../auth/guards/capabilities.guard.js';
-import { RequireCaps } from '../auth/decorators/require-caps.decorator.js';
+import { RequireAnyCaps, RequireCaps } from '../auth/decorators/require-caps.decorator.js';
 import { CurrentUser } from '../auth/decorators/current-user.decorator.js';
 import { GroupsService } from '../groups/groups.service.js';
 import type { UserRecord } from '../domain/domain-records.js';
@@ -30,7 +29,8 @@ export class AdminUsersController {
   ) {}
 
   @Get()
-  @RequireCaps(Capability.ManageUsers)
+  @RequireCaps()
+  @RequireAnyCaps(Capability.ManageUsers, Capability.ManageGrants)
   async listUsers() {
     return this.usersService.listDtos();
   }
@@ -58,25 +58,6 @@ export class AdminUsersController {
   async listSshKeys(@Param('id') id: string) {
     await this.usersService.findById(id);
     return this.usersService.listSshKeys(id);
-  }
-
-  @Get(':id/internal-ssh-key')
-  @RequireCaps(Capability.ManageUsers)
-  async getInternalSshKey(
-    @Param('id') id: string,
-    @Query('includePrivate') includePrivate: string | undefined,
-    @CurrentUser() currentUser: UserRecord,
-  ) {
-    return this.usersService.getInternalSshKey(currentUser.id, id, includePrivate === 'true');
-  }
-
-  @Post(':id/internal-ssh-key/rotate')
-  @RequireCaps(Capability.ManageUsers)
-  async rotateInternalSshKey(
-    @Param('id') id: string,
-    @CurrentUser() currentUser: UserRecord,
-  ) {
-    return this.usersService.rotateInternalSshKey(currentUser.id, id);
   }
 
   @Patch(':id')

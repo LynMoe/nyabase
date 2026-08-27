@@ -90,8 +90,8 @@ describe('auth session coordination', () => {
 
   it('resets access-derived caches only when the current principal is affected', () => {
     queryClient.setQueryData(['servers', 'user'], [{ id: 's1' }]);
-    queryClient.setQueryData(['disks', 'user', 's1'], [{ id: 'd1' }]);
-    queryClient.setQueryData(['metrics-container-detail', 'user', 'c1'], { cpu: [] });
+    queryClient.setQueryData(['volumes', 'user'], [{ id: 'v1' }]);
+    queryClient.setQueryData(['container', 'user', 'c1'], { id: 'c1' });
     queryClient.setQueryData(['servers', 'admin'], [{ id: 'admin-s1' }]);
     queryClient.setQueryData(['users', 'admin'], [{ id: 'u2' }]);
     expect(notifyAccessChangedForSubject({ type: 'user', id: 'someone-else' })).toBe(false);
@@ -99,8 +99,8 @@ describe('auth session coordination', () => {
 
     expect(notifyAccessChangedForSubject({ type: 'user', id: user.id })).toBe(true);
     expect(queryClient.getQueryData(['servers', 'user'])).toBeUndefined();
-    expect(queryClient.getQueryData(['disks', 'user', 's1'])).toBeUndefined();
-    expect(queryClient.getQueryData(['metrics-container-detail', 'user', 'c1'])).toBeUndefined();
+    expect(queryClient.getQueryData(['volumes', 'user'])).toBeUndefined();
+    expect(queryClient.getQueryData(['container', 'user', 'c1'])).toBeUndefined();
     expect(queryClient.getQueryData(['servers', 'admin'])).toBeDefined();
     expect(queryClient.getQueryData(['users', 'admin'])).toBeDefined();
   });
@@ -111,11 +111,11 @@ describe('auth session coordination', () => {
       groups: [{ id: 'g-current', name: 'Current', priority: 10, isSystem: false }],
     };
     installLoginSession('member-A', 'member-R', member);
-    queryClient.setQueryData(['mount-sources', 'user'], [{ id: 'm1' }]);
+    queryClient.setQueryData(['shared-backends', 'user'], [{ id: 'b1' }]);
     expect(notifyAccessChangedForSubject({ type: 'group', id: 'g-other' })).toBe(false);
-    expect(queryClient.getQueryData(['mount-sources', 'user'])).toBeDefined();
+    expect(queryClient.getQueryData(['shared-backends', 'user'])).toBeDefined();
     expect(notifyAccessChangedForSubject({ type: 'group', id: 'g-current' })).toBe(true);
-    expect(queryClient.getQueryData(['mount-sources', 'user'])).toBeUndefined();
+    expect(queryClient.getQueryData(['shared-backends', 'user'])).toBeUndefined();
   });
 
   it('uses immediate membership transitions while the refreshed user projection is still in flight', () => {

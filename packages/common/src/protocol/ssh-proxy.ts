@@ -1,24 +1,21 @@
 import { z } from 'zod';
-import { ContainerStatus, UserStatus } from '../enums.js';
+import { ContainerStatus, ServerStatus, UserStatus } from '../enums.js';
 import {
-  SSH_PROXY_SNAPSHOT_STALE_MAX_MS,
-  SSH_PROXY_SNAPSHOT_STALE_MIN_MS,
   MAX_PLATFORM_ACTIVE_USERS,
-  MAX_PLATFORM_SERVERS,
   MAX_PLATFORM_IMAGES,
+  MAX_PLATFORM_SERVERS,
   MAX_SSH_PUBLIC_KEYS_PER_USER,
   MAX_SSH_PUBLIC_KEY_TEXT_LENGTH,
   MAX_SSH_PROXY_CONTAINERS,
   MAX_SSH_PROXY_STATUS_CONNECTIONS,
   PROXY_SNAPSHOT_MAX_CLOCK_SKEW_MS,
+  SSH_PROXY_SNAPSHOT_STALE_MAX_MS,
+  SSH_PROXY_SNAPSHOT_STALE_MIN_MS,
 } from '../constants.js';
 
 const zAscii = (max: number) => z.string().min(1).max(max).regex(/^[\x20-\x7e]+$/);
 const zAsciiText = (max: number) => z.string().min(1).max(max)
   .regex(/^[\x09\x0a\x0d\x20-\x7e]+$/);
-// All proxy identities are generated UUIDs. Keeping a small ASCII-only wire
-// domain prevents Zod's UTF-16 length accounting from underestimating the
-// actual UTF-8 WebSocket frame size.
 const zId = zAscii(64);
 const zSafeCounter = z.number().int().min(0).max(Number.MAX_SAFE_INTEGER);
 const zProxyTimestampMs = zSafeCounter.refine(
@@ -28,7 +25,7 @@ const zProxyTimestampMs = zSafeCounter.refine(
 
 export const zSshProxyEndpoint = z.object({
   host: zAscii(253),
-  port: z.number().int().min(1).max(65535),
+  port: z.number().int().min(1).max(65_535),
 }).strict();
 
 export const zSshProxyHostKey = z.object({
@@ -44,22 +41,18 @@ export const zSshProxyUserSnapshot = z.object({
   status: z.nativeEnum(UserStatus),
   publicKeys: z.array(zAsciiText(MAX_SSH_PUBLIC_KEY_TEXT_LENGTH))
     .max(MAX_SSH_PUBLIC_KEYS_PER_USER),
-  internalPrivateKey: zAsciiText(4 * 1024),
-  internalPublicKey: zAsciiText(2 * 1024),
-  internalKeyFingerprint: zAscii(128),
-  internalKeyGeneration: z.number().int().nonnegative(),
 }).strict();
 
 export const zSshProxyServerSnapshot = z.object({
   id: zId,
   slug: zAscii(64),
   name: z.string().min(1).max(128),
-  online: z.boolean(),
+  status: z.nativeEnum(ServerStatus),
 }).strict();
 
 export const zSshProxyImageSnapshot = z.object({
   id: zId,
-  disableSsh: z.boolean(),
+  sshEnabled: z.boolean(),
 }).strict();
 
 export const zSshProxyContainerSnapshot = z.object({
@@ -68,16 +61,16 @@ export const zSshProxyContainerSnapshot = z.object({
   serverId: zId,
   imageId: zId,
   name: zAscii(64),
+  instanceName: zAscii(63),
 }).strict();
 
-export const zSshProxyRuntimeRouteSnapshot = z.object({
+export const zSshProxyInstanceRouteSnapshot = z.object({
   containerId: zId,
   serverId: zId,
-  runtimeId: zAscii(128),
-  macvlanIp: zAscii(15).nullable(),
-  runtimeStatus: z.nativeEnum(ContainerStatus),
+  instanceName: zAscii(63),
+  routedIp: zAscii(15).nullable(),
+  status: z.nativeEnum(ContainerStatus),
   sshStatus: z.enum(['disabled', 'container_stopped', 'running', 'error', 'unknown']),
-  appliedInternalKeyGeneration: z.number().int().nonnegative().nullable(),
   containerHostKeyFingerprint: zAscii(128).nullable(),
   observedAt: zAscii(64),
 }).strict();
@@ -95,30 +88,30 @@ export const zSshProxySnapshot = z.object({
   servers: z.array(zSshProxyServerSnapshot).max(MAX_PLATFORM_SERVERS),
   images: z.array(zSshProxyImageSnapshot).max(MAX_PLATFORM_IMAGES),
   containers: z.array(zSshProxyContainerSnapshot).max(MAX_SSH_PROXY_CONTAINERS),
-  routes: z.array(zSshProxyRuntimeRouteSnapshot).max(MAX_SSH_PROXY_CONTAINERS),
+  routes: z.array(zSshProxyInstanceRouteSnapshot).max(MAX_SSH_PROXY_CONTAINERS),
 }).strict();
 
 export const zSshProxyClientAck = z.object({
   generation: z.number().int().nonnegative(),
-});
+}).strict();
 
 export const zSshProxyMetric = z.object({
-  name: z.string(),
+  name: z.string().min(1).max(128),
   labels: z.record(z.string()),
-  value: z.number(),
-  ts: z.number(),
-});
+  value: z.number().finite(),
+  ts: z.number().finite(),
+}).strict();
 
 export const zSshProxyAuditEvent = z.object({
   userId: z.string().optional(),
   username: z.string().optional(),
   containerId: z.string().optional(),
   serverId: z.string().optional(),
-  action: z.string(),
+  action: z.string().min(1).max(128),
   ok: z.boolean(),
   reason: z.string().optional(),
-  ts: z.number(),
-});
+  ts: z.number().finite(),
+}).strict();
 
 export const zSshProxyConnectionInfo = z.object({
   id: zAscii(64),
@@ -129,7 +122,8 @@ export const zSshProxyConnectionInfo = z.object({
   serverId: zId.nullable(),
   containerName: zAscii(64).nullable(),
   containerId: zId.nullable(),
-  runtimeId: zAscii(128).nullable(),
+  instanceName: zAscii(63).nullable(),
+  routedIp: zAscii(15).nullable(),
   connectedAt: zProxyTimestampMs,
   authenticatedAt: zProxyTimestampMs.nullable(),
   bytesFromClient: zSafeCounter,
@@ -165,16 +159,12 @@ export const zSshProxyStatusReport = z.object({
 });
 
 export const zSshProxyDisconnectAllCommand = z.object({
-  // Backend-generated 96-bit correlation id. Exact syntax prevents an
-  // authenticated peer from manufacturing attacker-sized pending-map probes.
   requestId: z.string().length(24).regex(/^[a-f0-9]{24}$/),
   reason: zAsciiText(512).optional(),
 }).strict();
 
 export const zSshProxyDisconnectAllResult = z.object({
   requestId: z.string().length(24).regex(/^[a-f0-9]{24}$/),
-  // One standalone proxy cannot own more sessions than its configured hard
-  // cap. This also makes aggregation across the bounded proxy client set safe.
   disconnected: z.number().int().min(0).max(MAX_SSH_PROXY_STATUS_CONNECTIONS),
 }).strict();
 
@@ -184,7 +174,7 @@ export type SshProxyUserSnapshot = z.infer<typeof zSshProxyUserSnapshot>;
 export type SshProxyServerSnapshot = z.infer<typeof zSshProxyServerSnapshot>;
 export type SshProxyImageSnapshot = z.infer<typeof zSshProxyImageSnapshot>;
 export type SshProxyContainerSnapshot = z.infer<typeof zSshProxyContainerSnapshot>;
-export type SshProxyRuntimeRouteSnapshot = z.infer<typeof zSshProxyRuntimeRouteSnapshot>;
+export type SshProxyInstanceRouteSnapshot = z.infer<typeof zSshProxyInstanceRouteSnapshot>;
 export type SshProxySnapshot = z.infer<typeof zSshProxySnapshot>;
 export type SshProxyClientAck = z.infer<typeof zSshProxyClientAck>;
 export type SshProxyMetric = z.infer<typeof zSshProxyMetric>;
@@ -219,22 +209,23 @@ export type SshProxyRouteResolution =
     user: SshProxyUserSnapshot;
     server: SshProxyServerSnapshot;
     container: SshProxyContainerSnapshot;
-    route: SshProxyRuntimeRouteSnapshot;
+    route: SshProxyInstanceRouteSnapshot;
   }
   | {
     ok: false;
     login: ParsedSshProxyLogin | null;
-    reason: 'invalid_login' | 'user_not_found' | 'user_disabled' | 'server_not_found' | 'route_not_found' | 'ambiguous_container';
+    reason: 'invalid_login' | 'user_not_found' | 'user_disabled' | 'server_not_found'
+      | 'route_not_found' | 'ambiguous_container';
     candidates?: Array<{ serverSlug: string; containerName: string }>;
   };
 
 export function parseSshProxyLogin(value: string): ParsedSshProxyLogin | null {
   const parts = value.trim().toLowerCase().split('.').filter((part) => part.length > 0);
   if (parts.length === 2) {
-    return { username: parts[0], serverSlug: null, containerName: parts[1] };
+    return { username: parts[0]!, serverSlug: null, containerName: parts[1]! };
   }
   if (parts.length === 3) {
-    return { username: parts[0], serverSlug: parts[1], containerName: parts[2] };
+    return { username: parts[0]!, serverSlug: parts[1]!, containerName: parts[2]! };
   }
   return null;
 }
@@ -257,14 +248,15 @@ export function resolveSshProxyRoute(
   const active = snapshot.containers
     .filter((container) => container.ownerId === user.id)
     .filter((container) => container.name.toLowerCase() === login.containerName)
-    .filter((container) => imagesById.get(container.imageId)?.disableSsh !== true)
+    .filter((container) => imagesById.get(container.imageId)?.sshEnabled === true)
     .map((container) => {
       const server = serversById.get(container.serverId);
       const route = routesByContainerId.get(container.id);
       return server
-        && server.online
+        && server.status === ServerStatus.Online
         && route
         && route.serverId === container.serverId
+        && route.instanceName === container.instanceName
         && isActiveSshProxyRoute(route)
         ? { container, server, route }
         : null;
@@ -291,7 +283,7 @@ export function resolveSshProxyRoute(
     };
   }
 
-  const selected = candidates[0];
+  const selected = candidates[0]!;
   return {
     ok: true,
     login,
@@ -302,8 +294,22 @@ export function resolveSshProxyRoute(
   };
 }
 
-export function isActiveSshProxyRoute(route: SshProxyRuntimeRouteSnapshot): boolean {
-  return Boolean(route.macvlanIp)
-    && route.runtimeStatus === ContainerStatus.Running
+export function isActiveSshProxyRoute(route: SshProxyInstanceRouteSnapshot): boolean {
+  return Boolean(route.instanceName && route.routedIp)
+    && route.status === ContainerStatus.Running
     && route.sshStatus === 'running';
+}
+
+/** Jump destination helpers for client UX (ProxyJump). */
+export function formatSshProxyJumpLogin(input: {
+  username: string;
+  containerName: string;
+  serverSlug?: string | null;
+}): string {
+  const username = input.username.trim().toLowerCase();
+  const containerName = input.containerName.trim().toLowerCase();
+  const serverSlug = input.serverSlug?.trim().toLowerCase() || null;
+  return serverSlug
+    ? `${username}.${serverSlug}.${containerName}`
+    : `${username}.${containerName}`;
 }

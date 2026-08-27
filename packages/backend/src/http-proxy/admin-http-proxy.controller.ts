@@ -2,7 +2,7 @@ import { Body, Controller, Delete, Get, HttpCode, Param, Patch, Post, UseGuards 
 import { Capability } from '@nyabase/common';
 import { CurrentUser } from '../auth/decorators/current-user.decorator.js';
 import type { UserRecord } from '../domain/domain-records.js';
-import { RequireCaps } from '../auth/decorators/require-caps.decorator.js';
+import { RequireAnyCaps, RequireCaps } from '../auth/decorators/require-caps.decorator.js';
 import { CapabilitiesGuard } from '../auth/guards/capabilities.guard.js';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard.js';
 import { HttpProxyGateway } from './http-proxy-gateway.js';
@@ -17,9 +17,19 @@ export class AdminHttpProxyController {
   ) {}
 
   @Get('status')
-  @RequireCaps(Capability.ViewMetricsAll)
+  @RequireAnyCaps(
+    Capability.ViewMetricsAll,
+    Capability.ViewAudit,
+    Capability.ManageSystemSettings,
+  )
   status() {
     return this.gateway.getStatus();
+  }
+
+  @Get('bindings')
+  @RequireCaps(Capability.ManageSystemSettings)
+  listBindings(@CurrentUser() actor: UserRecord) {
+    return this.service.listBindingsForAdmin(actor.id, this.gateway.isOnline());
   }
 
   @Get('domain-pools')

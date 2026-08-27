@@ -15,9 +15,6 @@ export interface UsersPgFixture {
   audit: any;
   proxySnapshots: any;
   convergence: any;
-  identities: any;
-  prepareUserKey: any;
-  savePreparedUserKeyInTransaction: any;
   actorId: string;
   userId: string;
   actorGroupId: string;
@@ -36,7 +33,6 @@ export async function usersPgFixture(
   const access = new AccessResolverService(
     fixture.database,
     transactions,
-    { stateCache: { get: vi.fn() } } as never,
     new AccessCacheEpochService(fixture.database),
   );
   const actorId = randomUUID();
@@ -53,64 +49,12 @@ export async function usersPgFixture(
   });
   const proxySnapshots = { notify: vi.fn().mockResolvedValue(undefined) };
   const convergence = { reconcileUser: vi.fn().mockResolvedValue(undefined) };
-  const prepareUserKey = vi.fn(async (user: { id: string }) => ({
-    userId: user.id,
-    encryptedPrivateKey: 'enc:private-created',
-    publicKey: 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITest created',
-    fingerprint: 'SHA256:created',
-    generation: 1,
-    rotatedAt: new Date(),
-  }));
-  const savePreparedUserKeyInTransaction = vi.fn(async (
-    transaction: Parameters<Parameters<PgTransactionManager['run']>[0]>[0],
-    user: { id: string },
-    key: {
-      encryptedPrivateKey: string;
-      publicKey: string;
-      fingerprint: string;
-      generation: number;
-      rotatedAt: Date;
-    },
-  ) => {
-    await transaction.insertInto('iam.user_internal_ssh_keys').values({
-      user_id: user.id,
-      encrypted_private_key: key.encryptedPrivateKey,
-      public_key: key.publicKey,
-      fingerprint: key.fingerprint,
-      generation: key.generation,
-      rotated_at: key.rotatedAt,
-    }).executeTakeFirstOrThrow();
-  });
-  const identities = {
-    prepareUserKey,
-    savePreparedUserKeyInTransaction,
-    getUserKeyDto: vi.fn(async (
-      targetId: string,
-      actor: string,
-      _includePrivate: boolean,
-      authorize: (transaction: Parameters<Parameters<PgTransactionManager['run']>[0]>[0])
-        => Promise<void>,
-    ) => transactions.run(async (transaction) => {
-      await authorize(transaction);
-      return { userId: targetId, actorId: actor, privateKey: 'must-not-leak' };
-    })),
-    rotateUserKey: vi.fn(async (
-      targetId: string,
-      actor: string,
-      authorize: (transaction: Parameters<Parameters<PgTransactionManager['run']>[0]>[0])
-        => Promise<void>,
-    ) => transactions.run(async (transaction) => {
-      await authorize(transaction);
-      return { userId: targetId, actorId: actor, generation: 2 };
-    })),
-  };
   const users = new UsersService(
     fixture.database,
     transactions,
     auth as never,
     access,
     convergence as never,
-    identities as never,
     proxySnapshots as never,
     { get: vi.fn((key: string) => key === 'runtime.nodeEnv' ? 'test' : 'admin123') } as never,
     audit as never,
@@ -143,6 +87,10 @@ export async function usersPgFixture(
       user_id: actorId,
     }).execute();
   }
+  await fixture.database.insertInto('iam.policy_state')
+    .values({ singleton: true, policy_epoch: 0 })
+    .onConflict((conflict) => conflict.column('singleton').doNothing())
+    .execute();
   return {
     users,
     transactions,
@@ -151,9 +99,6 @@ export async function usersPgFixture(
     audit,
     proxySnapshots,
     convergence,
-    identities,
-    prepareUserKey,
-    savePreparedUserKeyInTransaction,
     actorId,
     userId,
     actorGroupId,

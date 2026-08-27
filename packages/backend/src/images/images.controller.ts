@@ -22,7 +22,7 @@ export class ImagesController {
     @CurrentUser() user: UserRecord,
     @Query('activeOnly') activeOnly?: string,
   ) {
-    return this.imagesService.findAccessibleForUser(user.id, activeOnly === 'true', this.accessResolver);
+    return this.imagesService.findAccessibleForUser(user.id, activeOnly === 'true');
   }
 
   @Get(':id')

@@ -1,711 +1,332 @@
+import { useEffect, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { AlertTriangle, CheckCircle2, Edit, Globe2, Plus, RefreshCw, Save, Trash2, XCircle } from 'lucide-react';
-import { useMemo, useState } from 'react';
+import { Link } from '@tanstack/react-router';
+import { Globe, Pencil, Plus, RefreshCw, Trash2 } from 'lucide-react';
 import {
-  Capability,
-  type ContainerStatus,
-  type HttpProxyBindingStatus,
-  type HttpProxyWarningReason,
+  zCreateHttpProxyBindingRequest,
+  type ContainerDto,
+  type HttpDomainPoolPublicDto,
+  type HttpProxyBindingDto,
 } from '@nyabase/common';
-import { api, ApiError } from '../lib/api.js';
-import {
-  AlertDialog,
-  AlertDialogCancel,
-  AlertDialogContent,
-  AlertDialogDescription,
-  AlertDialogFooter,
-  AlertDialogHeader,
-  AlertDialogTitle,
-} from '../components/ui/alert-dialog.js';
+import { api } from '../lib/api.js';
+import { ApiError } from '../lib/api-error.js';
 import { Badge } from '../components/ui/badge.js';
 import { Button } from '../components/ui/button.js';
+import { Card, CardContent, CardHeader, CardTitle } from '../components/ui/card.js';
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '../components/ui/dialog.js';
 import { Input } from '../components/ui/input.js';
 import { Label } from '../components/ui/label.js';
+import { QueryErrorState, QueryLoadingState } from '../components/query-state.js';
+import { queryKeys } from '../lib/query-keys.js';
 import { toast } from '../hooks/use-toast.js';
-import { useAuthStore } from '../store/auth.js';
 import {
-  emptyBindingForm,
-  emptyPoolForm,
-  validateBindingForm,
-  validatePoolForm,
-  type BindingField,
-  type BindingFormErrors,
-  type ContainerOption,
-  type PoolFormErrors,
-  type SaveBindingPayload,
-  type SavePoolPayload,
-} from '../lib/http-proxy-form.js';
-import { queryPollInterval } from '../lib/query-lifecycle.js';
-import { queryPresentationState } from '../lib/query-presentation.js';
-
-interface Binding {
-  id: string;
-  mine: boolean;
-  ownerId: string;
-  ownerUsername: string;
-  hostname: string;
-  domainPoolId: string;
-  domainPool: string;
-  targetUrl: string | null;
-  containerId: string;
-  containerName: string | null;
-  containerStatus: ContainerStatus | 'missing' | null;
-  targetPort: number;
-  entryHttpsEnabled: boolean;
-  status: HttpProxyBindingStatus;
-  warningReasons: HttpProxyWarningReason[];
-  warningMessage: string;
-}
-
-interface DomainPool {
-  id: string;
-  wildcardDomain: string;
-  enabled: boolean;
-  httpsEnabled: boolean;
-  certificateFingerprint: string | null;
-  certificateNotAfter: string | null;
-}
-
-interface ProxyStatus {
-  connectedProxies: number;
-  totalRequests: number;
-  totalRejectedRequests: number;
-  updatedAt: string | null;
-}
+  emptyIfNotFound,
+  httpProxyBindingStatusLabel,
+  httpProxyErrorMessage,
+  httpProxyWarningLabel,
+} from '../lib/http-proxy.js';
 
 export default function HttpProxyPage() {
-  const qc = useQueryClient();
-  const user = useAuthStore((state) => state.user);
-  const canManageSettings = user?.capabilities.includes(Capability.ManageSystemSettings) ?? false;
-  const canViewMetrics = user?.capabilities.includes(Capability.ViewMetricsAll) ?? false;
-  const [bindingForm, setBindingForm] = useState(emptyBindingForm);
-  const [bindingErrors, setBindingErrors] = useState<BindingFormErrors>({});
-  const [editingBindingId, setEditingBindingId] = useState<string | null>(null);
-  const [deletingBinding, setDeletingBinding] = useState<Binding | null>(null);
-  const [poolForm, setPoolForm] = useState(emptyPoolForm);
-  const [poolErrors, setPoolErrors] = useState<PoolFormErrors>({});
-  const [editingPoolId, setEditingPoolId] = useState<string | null>(null);
-  const [deletingPool, setDeletingPool] = useState<DomainPool | null>(null);
-
-  const bindings = useQuery({
-    queryKey: ['http-proxy-bindings'],
-    queryFn: () => api.get<Binding[]>('/v2/http-proxy/bindings'),
-    refetchInterval: (query) => queryPollInterval(query.state, {
-      activeIntervalMs: 5_000,
-      transientBaseIntervalMs: 5_000,
-      transientMaxIntervalMs: 30_000,
-    }),
+  const queryClient = useQueryClient();
+  const [createOpen, setCreateOpen] = useState(false);
+  const [editTarget, setEditTarget] = useState<HttpProxyBindingDto | null>(null);
+  const [deleteTarget, setDeleteTarget] = useState<HttpProxyBindingDto | null>(null);
+  const bindingsQuery = useQuery({
+    queryKey: queryKeys.httpProxy.bindings,
+    queryFn: () => api.get<HttpProxyBindingDto[]>('/http-proxy/bindings'),
   });
-  const pools = useQuery({
-    queryKey: ['http-proxy-domain-pools'],
-    queryFn: () => api.get<DomainPool[]>('/admin/http-proxy/domain-pools'),
-    enabled: canManageSettings,
-  });
-  const status = useQuery({
-    queryKey: ['http-proxy-status'],
-    queryFn: () => api.get<ProxyStatus>('/admin/http-proxy/status'),
-    refetchInterval: (query) => queryPollInterval(query.state, {
-      activeIntervalMs: 2_000,
-      transientBaseIntervalMs: 2_000,
-      transientMaxIntervalMs: 30_000,
-    }),
-    enabled: canViewMetrics,
-  });
-  const containers = useQuery({
-    queryKey: ['containers-for-http-proxy'],
-    queryFn: () => api.get<ContainerOption[]>('/v2/containers'),
-  });
-
-  const containerOptions = useMemo(() => (containers.data ?? []).map((row) => ({
-    id: row.id,
-    name: row.name,
-  })), [containers.data]);
-
-  const saveBinding = useMutation({
-    mutationFn: async (payload: SaveBindingPayload) => {
-      return editingBindingId
-        ? api.patch<Binding>(`/v2/http-proxy/bindings/${editingBindingId}`, payload)
-        : api.post<Binding>('/v2/http-proxy/bindings', payload);
-    },
+  const remove = useMutation({
+    mutationFn: (id: string) => api.delete<unknown>(`/http-proxy/bindings/${id}`),
     onSuccess: () => {
-      setBindingForm(emptyBindingForm);
-      setBindingErrors({});
-      setEditingBindingId(null);
-      qc.invalidateQueries({ queryKey: ['http-proxy-bindings'] });
-      toast({ title: '域名绑定已保存' });
+      toast({ title: '发布已删除' });
+      setDeleteTarget(null);
+      void queryClient.invalidateQueries({ queryKey: queryKeys.httpProxy.bindings });
     },
-    onError: (error) => toast({
-      title: '保存失败',
-      description: bindingErrorMessage(error),
-      variant: 'destructive',
-    }),
+    onError: (error) => toast({ title: '删除失败', description: httpProxyErrorMessage(error), variant: 'destructive' }),
   });
-
-  const deleteBinding = useMutation({
-    mutationFn: (id: string) => api.delete(`/v2/http-proxy/bindings/${id}`),
-    onSuccess: () => {
-      setDeletingBinding(null);
-      qc.invalidateQueries({ queryKey: ['http-proxy-bindings'] });
-      toast({ title: '域名绑定已删除' });
-    },
-    onError: (error) => toast({ title: '删除失败', description: errorMessage(error), variant: 'destructive' }),
-  });
-
-  const savePool = useMutation({
-    mutationFn: async (payload: SavePoolPayload) => {
-      return editingPoolId
-        ? api.patch<DomainPool>(`/admin/http-proxy/domain-pools/${editingPoolId}`, payload)
-        : api.post<DomainPool>('/admin/http-proxy/domain-pools', payload);
-    },
-    onSuccess: () => {
-      setPoolForm(emptyPoolForm);
-      setPoolErrors({});
-      setEditingPoolId(null);
-      qc.invalidateQueries({ queryKey: ['http-proxy-domain-pools'] });
-      qc.invalidateQueries({ queryKey: ['http-proxy-bindings'] });
-      toast({ title: '域名池已保存' });
-    },
-    onError: (error) => toast({ title: '保存失败', description: errorMessage(error), variant: 'destructive' }),
-  });
-
-  const deletePool = useMutation({
-    mutationFn: (id: string) => api.delete(`/admin/http-proxy/domain-pools/${id}`),
-    onSuccess: () => {
-      setDeletingPool(null);
-      qc.invalidateQueries({ queryKey: ['http-proxy-domain-pools'] });
-      qc.invalidateQueries({ queryKey: ['http-proxy-bindings'] });
-      toast({ title: '域名池已删除' });
-    },
-    onError: (error) => toast({ title: '删除失败', description: errorMessage(error), variant: 'destructive' }),
-  });
-
-  const rows = bindings.data ?? [];
-  const poolRows = pools.data ?? [];
-  const bindingPresentation = queryPresentationState({
-    hasData: bindings.data !== undefined,
-    isPending: bindings.isPending,
-    isError: bindings.isError,
-  });
-  const poolPresentation = queryPresentationState({
-    hasData: pools.data !== undefined,
-    isPending: pools.isPending,
-    isError: pools.isError,
-  });
-  const statusPresentation = queryPresentationState({
-    hasData: status.data !== undefined,
-    isPending: status.isPending,
-    isError: status.isError,
-  });
-
-  const setBindingField = (field: BindingField, value: string) => {
-    setBindingForm((form) => ({ ...form, [field]: value }));
-    setBindingErrors((errors) => withoutFieldError(errors, field));
-  };
-
-  const setPoolField = (field: keyof typeof emptyPoolForm, value: string | boolean) => {
-    setPoolForm((form) => ({ ...form, [field]: value }));
-    if (field === 'wildcardDomain' || field === 'certificatePem' || field === 'privateKeyPem') {
-      setPoolErrors((errors) => withoutFieldError(errors, field));
-    }
-  };
-
-  const handleSaveBinding = () => {
-    const catalog = containers.isPending || containers.isError || containers.data === undefined
-      ? null
-      : containerOptions;
-    const result = validateBindingForm(bindingForm, catalog);
-    setBindingErrors(result.errors);
-    if (!result.payload) {
-      toast({
-        title: '请检查绑定字段',
-        description: firstError(result.errors),
-        variant: 'destructive',
-      });
-      return;
-    }
-    saveBinding.mutate(result.payload);
-  };
-
-  const handleSavePool = () => {
-    const editingPool = editingPoolId
-      ? poolRows.find((pool) => pool.id === editingPoolId)
-      : null;
-    const result = validatePoolForm(poolForm, {
-      isEditing: editingPoolId !== null,
-      existingCertificate: editingPool?.certificateFingerprint
-        ? {
-            fingerprint: editingPool.certificateFingerprint,
-            wildcardDomain: editingPool.wildcardDomain,
-            notAfter: editingPool.certificateNotAfter,
-          }
-        : null,
-    });
-    setPoolErrors(result.errors);
-    if (!result.payload) {
-      toast({
-        title: '请检查域名池字段',
-        description: firstError(result.errors),
-        variant: 'destructive',
-      });
-      return;
-    }
-    savePool.mutate(result.payload);
-  };
+  const bindings = bindingsQuery.data ?? [];
 
   return (
-    <div className="px-4 py-4 md:px-6 space-y-5 w-full">
-      <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+    <div className="space-y-5 px-4 py-4 md:px-6" data-testid="http-proxy">
+      <div className="flex flex-wrap items-start justify-between gap-3">
         <div>
-          <h1 className="text-2xl font-semibold tracking-tight text-foreground">HTTP 反代</h1>
-          <p className="text-sm text-muted-foreground mt-0.5">
-            {canViewMetrics && status.data?.updatedAt
-              ? `最后更新 ${formatTime(status.data.updatedAt)}`
-              : bindings.data
-                ? `${rows.length} 个域名绑定`
-                : bindings.isError ? '域名绑定加载失败' : '正在加载域名绑定'}
+          <h1 className="text-2xl font-semibold tracking-tight">HTTP 发布</h1>
+          <p className="text-sm text-muted-foreground">
+            把容器端口发布到域名。主机名必须匹配管理员已启用的通配域名。
           </p>
         </div>
-        <Button variant="ghost" size="icon" className="h-8 w-8 text-muted-foreground" aria-label="刷新 HTTP 反代绑定" onClick={() => bindings.refetch()} disabled={bindings.isFetching}>
-          <RefreshCw className={`h-4 w-4 ${bindings.isFetching ? 'animate-spin' : ''}`} />
-        </Button>
-      </div>
-
-      {canViewMetrics && (
-        <>
-          {statusPresentation === 'loading' ? (
-            <QueryLoadingNotice label="正在加载代理状态..." />
-          ) : statusPresentation === 'error' ? (
-            <QueryErrorNotice
-              title="代理状态加载失败"
-              error={status.error}
-              onRetry={() => status.refetch()}
-              isRetrying={status.isFetching}
-            />
-          ) : status.data ? (
-            <>
-              {statusPresentation === 'stale-error' && (
-                <QueryErrorNotice
-                  title="代理状态刷新失败，以下为上次成功数据"
-                  error={status.error}
-                  onRetry={() => { void status.refetch(); }}
-                  isRetrying={status.isFetching}
-                />
-              )}
-              <section className="grid gap-3 sm:grid-cols-3">
-                <Metric label="在线代理" value={status.data.connectedProxies.toString()} />
-                <Metric label="累计请求" value={status.data.totalRequests.toString()} />
-                <Metric label="拒绝请求" value={status.data.totalRejectedRequests.toString()} />
-              </section>
-            </>
-          ) : null}
-        </>
-      )}
-
-      <section className="grid gap-4 xl:grid-cols-[360px_1fr]">
-        <div className="rounded-lg border border-border bg-card p-4 space-y-3">
-          <div className="flex items-center justify-between">
-            <h2 className="text-base font-semibold text-foreground">{editingBindingId ? '编辑绑定' : '新增绑定'}</h2>
-            {editingBindingId && (
-              <Button variant="ghost" size="sm" onClick={() => { setEditingBindingId(null); setBindingForm(emptyBindingForm); setBindingErrors({}); }}>
-                <XCircle className="h-4 w-4" />
-                取消
-              </Button>
-            )}
-          </div>
-          <FormField id="http-binding-hostname" label="域名" error={bindingErrors.hostname}>
-            <Input
-              id="http-binding-hostname"
-              value={bindingForm.hostname}
-              onChange={(event) => setBindingField('hostname', event.target.value)}
-              placeholder="app.apps.example.com"
-              aria-invalid={!!bindingErrors.hostname}
-              aria-describedby={bindingErrors.hostname ? 'http-binding-hostname-error' : undefined}
-              className={bindingErrors.hostname ? 'border-destructive focus-visible:ring-destructive' : undefined}
-            />
-          </FormField>
-          <FormField id="http-binding-container" label="目标容器" error={bindingErrors.containerId}>
-            <select
-              id="http-binding-container"
-              className={`h-9 w-full rounded-md border bg-background px-3 text-sm ${bindingErrors.containerId ? 'border-destructive' : 'border-input'}`}
-              value={bindingForm.containerId}
-              disabled={containers.isPending || containers.isError}
-              onChange={(event) => setBindingField('containerId', event.target.value)}
-              aria-invalid={!!bindingErrors.containerId}
-              aria-describedby={bindingErrors.containerId ? 'http-binding-container-error' : undefined}
-            >
-              <option value="">
-                {containers.isPending ? '正在加载容器...' : containers.isError ? '容器列表加载失败' : '选择容器'}
-              </option>
-              {containerOptions.map((container) => <option key={container.id} value={container.id}>{container.name}</option>)}
-            </select>
-            {containers.isError && (
-              <InlineErrorNotice
-                title="容器列表加载失败"
-                error={containers.error}
-                onRetry={() => containers.refetch()}
-                isRetrying={containers.isFetching}
-              />
-            )}
-          </FormField>
-          <FormField id="http-binding-port" label="HTTP 上游端口" error={bindingErrors.targetPort}>
-            <Input
-              id="http-binding-port"
-              type="number"
-              min={1}
-              max={65535}
-              value={bindingForm.targetPort}
-              onChange={(event) => setBindingField('targetPort', event.target.value)}
-              aria-invalid={!!bindingErrors.targetPort}
-              aria-describedby={bindingErrors.targetPort ? 'http-binding-port-error' : undefined}
-              className={bindingErrors.targetPort ? 'border-destructive focus-visible:ring-destructive' : undefined}
-            />
-          </FormField>
-          <Button className="w-full" onClick={handleSaveBinding} disabled={saveBinding.isPending || containers.isPending || containers.isError}>
-            <Save className="h-4 w-4" />
-            保存绑定
+        <div className="flex gap-2">
+          <Button variant="outline" size="icon" onClick={() => { void bindingsQuery.refetch(); }} aria-label="刷新 HTTP 发布">
+            <RefreshCw className="h-4 w-4" />
           </Button>
+          <Button onClick={() => setCreateOpen(true)}><Plus className="h-4 w-4" />新建发布</Button>
         </div>
-
-        <div className="overflow-hidden rounded-lg border border-border bg-card">
-          {bindingPresentation === 'loading' ? (
-            <QueryLoadingNotice label="正在加载域名绑定..." />
-          ) : (
-            <>
-          {(bindingPresentation === 'error' || bindingPresentation === 'stale-error') && (
-            <div className="p-4">
-              <QueryErrorNotice
-                title={bindingPresentation === 'stale-error' ? '域名绑定刷新失败，以下为上次成功数据' : '域名绑定加载失败'}
-                error={bindings.error}
-                onRetry={() => { void bindings.refetch(); }}
-                isRetrying={bindings.isFetching}
-              />
-            </div>
-          )}
-          {bindings.data && (
-            <table className="w-full text-sm">
-              <thead className="bg-muted/60 text-xs text-muted-foreground">
-                <tr>
-                  <th className="text-left font-medium px-3 py-2">域名</th>
-                  <th className="text-left font-medium px-3 py-2">占用者</th>
-                  <th className="text-left font-medium px-3 py-2">目标</th>
-                  <th className="text-left font-medium px-3 py-2">协议</th>
-                  <th className="text-left font-medium px-3 py-2">入口 HTTPS</th>
-                  <th className="text-left font-medium px-3 py-2">状态</th>
-                  <th className="text-right font-medium px-3 py-2">操作</th>
-                </tr>
-              </thead>
-              <tbody>
-                {rows.length === 0 ? (
-                  <tr><td className="px-3 py-8 text-center text-muted-foreground" colSpan={7}>暂无域名绑定</td></tr>
-                ) : rows.map((binding) => (
-                  <tr key={binding.id} className="border-t border-border">
-                    <td className="px-3 py-2">
-                      <div className="flex items-center gap-2 font-medium text-foreground">
-                        <Globe2 className="h-4 w-4 text-muted-foreground" />
-                        {binding.hostname}
-                        {binding.status === 'warning' && <AlertTriangle className="h-4 w-4 text-amber-500" />}
-                      </div>
-                      <div className="text-xs text-muted-foreground">{binding.domainPool}</div>
-                      {binding.warningMessage && <div className="text-xs text-amber-600 mt-1">{binding.warningMessage}</div>}
-                    </td>
-                    <td className="px-3 py-2">{binding.ownerUsername}</td>
-                    <td className="px-3 py-2">
-                      <div>{binding.containerName ?? binding.containerId}</div>
-                      <div className="font-mono text-xs text-muted-foreground">{binding.targetUrl ?? '-'}</div>
-                    </td>
-                    <td className="px-3 py-2 uppercase">HTTP:{binding.targetPort}</td>
-                    <td className="px-3 py-2">{binding.entryHttpsEnabled ? '开启' : '关闭'}</td>
-                    <td className="px-3 py-2"><StatusBadge status={binding.status} /></td>
-                    <td className="px-3 py-2">
-                      <div className="flex justify-end gap-1">
-                        <Button variant="ghost" size="icon" className="h-8 w-8" aria-label={`编辑绑定 ${binding.hostname}`} disabled={!binding.mine} onClick={() => {
-                          setEditingBindingId(binding.id);
-                          setBindingErrors({});
-                          setBindingForm({
-                            hostname: binding.hostname,
-                            containerId: binding.containerId,
-                            targetPort: String(binding.targetPort),
-                          });
-                        }}>
-                          <Edit className="h-4 w-4" />
-                        </Button>
-                        <Button variant="ghost" size="icon" className="h-8 w-8 text-destructive" aria-label={`删除绑定 ${binding.hostname}`} disabled={!binding.mine || deleteBinding.isPending} onClick={() => setDeletingBinding(binding)}>
-                          <Trash2 className="h-4 w-4" />
-                        </Button>
-                      </div>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          )}
-            </>
-          )}
+      </div>
+      {bindingsQuery.isLoading ? (
+        <QueryLoadingState label="加载 HTTP 发布..." />
+      ) : bindingsQuery.isError ? (
+        <QueryErrorState error={bindingsQuery.error} resourceName="HTTP 发布" onRetry={() => { void bindingsQuery.refetch(); }} />
+      ) : bindings.length === 0 ? (
+        <Card>
+          <CardContent className="flex flex-col items-center gap-3 py-12 text-center">
+            <Globe className="h-10 w-10 text-muted-foreground/40" />
+            <p className="text-sm text-muted-foreground">
+              暂无 HTTP 发布。创建后即可把容器端口发布到域名。
+            </p>
+            <Button onClick={() => setCreateOpen(true)}><Plus className="h-4 w-4" />新建发布</Button>
+          </CardContent>
+        </Card>
+      ) : (
+        <div className="grid gap-4 xl:grid-cols-2">
+          {bindings.map((binding) => (
+            <BindingCard
+              key={binding.id}
+              binding={binding}
+              onEdit={() => setEditTarget(binding)}
+              onDelete={() => setDeleteTarget(binding)}
+            />
+          ))}
         </div>
-      </section>
-
-      {canManageSettings && (
-        <section className="grid gap-4 xl:grid-cols-[360px_1fr]">
-          <div className="rounded-lg border border-border bg-card p-4 space-y-3">
-            <div className="flex items-center justify-between">
-              <h2 className="text-base font-semibold text-foreground">{editingPoolId ? '编辑域名池' : '新增域名池'}</h2>
-              {editingPoolId && (
-                <Button variant="ghost" size="sm" onClick={() => { setEditingPoolId(null); setPoolForm(emptyPoolForm); setPoolErrors({}); }}>
-                  <XCircle className="h-4 w-4" />
-                  取消
-                </Button>
-              )}
-            </div>
-            <FormField id="http-pool-wildcard-domain" label="通配根域" error={poolErrors.wildcardDomain}>
-              <Input
-                id="http-pool-wildcard-domain"
-                value={poolForm.wildcardDomain}
-                onChange={(event) => setPoolField('wildcardDomain', event.target.value)}
-                placeholder="*.apps.example.com"
-                aria-invalid={!!poolErrors.wildcardDomain}
-                aria-describedby={poolErrors.wildcardDomain ? 'http-pool-wildcard-domain-error' : undefined}
-                className={poolErrors.wildcardDomain ? 'border-destructive focus-visible:ring-destructive' : undefined}
-              />
-            </FormField>
-            <div className="grid grid-cols-2 gap-3 text-sm">
-              <Label htmlFor="http-pool-enabled" className="flex items-center gap-2 text-sm font-normal">
-                <input id="http-pool-enabled" type="checkbox" checked={poolForm.enabled} onChange={(event) => setPoolField('enabled', event.target.checked)} />
-                启用
-              </Label>
-              <Label htmlFor="http-pool-https-enabled" className="flex items-center gap-2 text-sm font-normal">
-                <input id="http-pool-https-enabled" type="checkbox" checked={poolForm.httpsEnabled} onChange={(event) => setPoolField('httpsEnabled', event.target.checked)} />
-                入口 HTTPS
-              </Label>
-            </div>
-            <FormField id="http-pool-certificate-pem" label="证书 PEM" error={poolErrors.certificatePem}>
-              <textarea
-                id="http-pool-certificate-pem"
-                className={`min-h-24 w-full rounded-md border bg-background px-3 py-2 text-xs font-mono ${poolErrors.certificatePem ? 'border-destructive' : 'border-input'}`}
-                value={poolForm.certificatePem}
-                onChange={(event) => setPoolField('certificatePem', event.target.value)}
-                aria-invalid={!!poolErrors.certificatePem}
-                aria-describedby={poolErrors.certificatePem ? 'http-pool-certificate-pem-error' : undefined}
-              />
-            </FormField>
-            <FormField id="http-pool-private-key-pem" label="私钥 PEM" error={poolErrors.privateKeyPem}>
-              <textarea
-                id="http-pool-private-key-pem"
-                className={`min-h-24 w-full rounded-md border bg-background px-3 py-2 text-xs font-mono ${poolErrors.privateKeyPem ? 'border-destructive' : 'border-input'}`}
-                value={poolForm.privateKeyPem}
-                onChange={(event) => setPoolField('privateKeyPem', event.target.value)}
-                aria-invalid={!!poolErrors.privateKeyPem}
-                aria-describedby={poolErrors.privateKeyPem ? 'http-pool-private-key-pem-error' : undefined}
-              />
-            </FormField>
-            <Button className="w-full" onClick={handleSavePool} disabled={savePool.isPending}>
-              <Plus className="h-4 w-4" />
-              保存域名池
-            </Button>
-          </div>
-
-          <div className="overflow-hidden rounded-lg border border-border bg-card">
-            {poolPresentation === 'loading' ? (
-              <QueryLoadingNotice label="正在加载域名池..." />
-            ) : (
-              <>
-            {(poolPresentation === 'error' || poolPresentation === 'stale-error') && (
-              <div className="p-4">
-                <QueryErrorNotice
-                  title={poolPresentation === 'stale-error' ? '域名池刷新失败，以下为上次成功数据' : '域名池加载失败'}
-                  error={pools.error}
-                  onRetry={() => { void pools.refetch(); }}
-                  isRetrying={pools.isFetching}
-                />
-              </div>
-            )}
-            {pools.data && (
-              <table className="w-full text-sm">
-                <thead className="bg-muted/60 text-xs text-muted-foreground">
-                  <tr>
-                    <th className="text-left font-medium px-3 py-2">通配根域</th>
-                    <th className="text-left font-medium px-3 py-2">状态</th>
-                    <th className="text-left font-medium px-3 py-2">证书</th>
-                    <th className="text-right font-medium px-3 py-2">操作</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {poolRows.length === 0 ? (
-                    <tr><td className="px-3 py-8 text-center text-muted-foreground" colSpan={4}>暂无域名池</td></tr>
-                  ) : poolRows.map((pool) => (
-                    <tr key={pool.id} className="border-t border-border">
-                      <td className="px-3 py-2 font-medium">{pool.wildcardDomain}</td>
-                      <td className="px-3 py-2">
-                        <div className="flex gap-2">
-                          <Badge variant={pool.enabled ? 'success' : 'outline'}>{pool.enabled ? '启用' : '禁用'}</Badge>
-                          <Badge variant={pool.httpsEnabled ? 'secondary' : 'outline'}>{pool.httpsEnabled ? 'HTTPS' : 'HTTP'}</Badge>
-                        </div>
-                      </td>
-                      <td className="px-3 py-2">
-                        <div className="font-mono text-xs break-all">{pool.certificateFingerprint ?? '-'}</div>
-                        <div className="text-xs text-muted-foreground">{pool.certificateNotAfter ? `过期 ${formatTime(pool.certificateNotAfter)}` : '未配置证书'}</div>
-                      </td>
-                      <td className="px-3 py-2">
-                        <div className="flex justify-end gap-1">
-                          <Button variant="ghost" size="icon" className="h-8 w-8" aria-label={`编辑域名池 ${pool.wildcardDomain}`} onClick={() => {
-                            setEditingPoolId(pool.id);
-                            setPoolErrors({});
-                            setPoolForm({
-                              wildcardDomain: pool.wildcardDomain,
-                              enabled: pool.enabled,
-                              httpsEnabled: pool.httpsEnabled,
-                              certificatePem: '',
-                              privateKeyPem: '',
-                            });
-                          }}>
-                            <Edit className="h-4 w-4" />
-                          </Button>
-                          <Button variant="ghost" size="icon" className="h-8 w-8 text-destructive" aria-label={`删除域名池 ${pool.wildcardDomain}`} onClick={() => setDeletingPool(pool)} disabled={deletePool.isPending}>
-                            <Trash2 className="h-4 w-4" />
-                          </Button>
-                        </div>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            )}
-              </>
-            )}
-          </div>
-        </section>
       )}
-
-      <AlertDialog open={deletingBinding !== null} onOpenChange={(open) => {
-        if (!open && !deleteBinding.isPending) setDeletingBinding(null);
-      }}>
-        <AlertDialogContent>
-          <AlertDialogHeader>
-            <AlertDialogTitle>删除域名绑定？</AlertDialogTitle>
-            <AlertDialogDescription>
-              删除后 {deletingBinding?.hostname ?? '该域名'} 将不再转发到目标容器。
-            </AlertDialogDescription>
-          </AlertDialogHeader>
-          <AlertDialogFooter>
-            <AlertDialogCancel disabled={deleteBinding.isPending}>取消</AlertDialogCancel>
+      <BindingFormDialog open={createOpen} onOpenChange={setCreateOpen} />
+      {editTarget && (
+        <BindingFormDialog
+          binding={editTarget}
+          open
+          onOpenChange={(open) => { if (!open) setEditTarget(null); }}
+        />
+      )}
+      <Dialog open={Boolean(deleteTarget)} onOpenChange={(open) => { if (!open) setDeleteTarget(null); }}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>删除 HTTP 发布？</DialogTitle>
+            <DialogDescription>
+              将删除主机名「{deleteTarget?.hostname}」的发布绑定。域名将不再转发到该容器端口。
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setDeleteTarget(null)}>取消</Button>
             <Button
-              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
-              onClick={() => deletingBinding && deleteBinding.mutate(deletingBinding.id)}
-              disabled={deleteBinding.isPending || !deletingBinding}
+              variant="destructive"
+              onClick={() => { if (deleteTarget) remove.mutate(deleteTarget.id); }}
+              disabled={remove.isPending}
             >
-              {deleteBinding.isPending ? '删除中...' : '删除'}
+              {remove.isPending ? '删除中...' : '确认删除'}
             </Button>
-          </AlertDialogFooter>
-        </AlertDialogContent>
-      </AlertDialog>
-
-      <AlertDialog open={deletingPool !== null} onOpenChange={(open) => {
-        if (!open && !deletePool.isPending) setDeletingPool(null);
-      }}>
-        <AlertDialogContent>
-          <AlertDialogHeader>
-            <AlertDialogTitle>删除域名池？</AlertDialogTitle>
-            <AlertDialogDescription>
-              删除 {deletingPool?.wildcardDomain ?? '该域名池'} 后，依赖它的绑定将无法继续匹配入口域名。
-            </AlertDialogDescription>
-          </AlertDialogHeader>
-          <AlertDialogFooter>
-            <AlertDialogCancel disabled={deletePool.isPending}>取消</AlertDialogCancel>
-            <Button
-              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
-              onClick={() => deletingPool && deletePool.mutate(deletingPool.id)}
-              disabled={deletePool.isPending || !deletingPool}
-            >
-              {deletePool.isPending ? '删除中...' : '删除'}
-            </Button>
-          </AlertDialogFooter>
-        </AlertDialogContent>
-      </AlertDialog>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }
 
-function Metric({ label, value }: { label: string; value: string }) {
+function BindingCard({
+  binding,
+  onEdit,
+  onDelete,
+}: {
+  binding: HttpProxyBindingDto;
+  onEdit: () => void;
+  onDelete: () => void;
+}) {
+  const warning = httpProxyWarningLabel(binding.warningReasons);
   return (
-    <div className="rounded-lg border border-border bg-card p-4">
-      <div className="text-xs text-muted-foreground">{label}</div>
-      <div className="mt-1 text-2xl font-semibold text-foreground">{value}</div>
-    </div>
-  );
-}
-
-function FormField({ id, label, error, children }: { id: string; label: string; error?: string; children: React.ReactNode }) {
-  return (
-    <div className="space-y-1.5">
-      <Label htmlFor={id} className="text-xs text-muted-foreground">{label}</Label>
-      {children}
-      {error && <p id={`${id}-error`} className="text-xs text-destructive">{error}</p>}
-    </div>
-  );
-}
-
-function StatusBadge({ status }: { status: HttpProxyBindingStatus }) {
-  if (status === 'ready') return <Badge variant="success"><CheckCircle2 className="h-3 w-3" />正常</Badge>;
-  if (status === 'disabled') return <Badge variant="outline">禁用</Badge>;
-  return <Badge variant="warning"><AlertTriangle className="h-3 w-3" />警告</Badge>;
-}
-
-function bindingErrorMessage(error: unknown): string {
-  if (error instanceof ApiError && error.status === 409) return '域名已被占用';
-  return errorMessage(error);
-}
-
-function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : '请稍后重试';
-}
-
-function formatTime(value: string): string {
-  return new Date(value).toLocaleString();
-}
-
-function QueryLoadingNotice({ label }: { label: string }) {
-  return (
-    <div className="p-6 text-center text-sm text-muted-foreground" role="status">
-      {label}
-    </div>
-  );
-}
-
-function QueryErrorNotice({ title, error, onRetry, isRetrying }: { title: string; error: unknown; onRetry: () => void; isRetrying: boolean }) {
-  return (
-    <div className="rounded-lg border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive">
-      <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
-        <div>
-          <div className="font-medium">{title}</div>
-          <div className="text-xs opacity-90">{errorMessage(error)}</div>
+    <Card>
+      <CardHeader className="pb-3">
+        <div className="flex items-start justify-between gap-3">
+          <CardTitle className="flex min-w-0 items-center gap-2 text-base">
+            <Globe className="h-4 w-4 shrink-0" />
+            <span className="truncate font-mono text-sm">{binding.hostname}</span>
+          </CardTitle>
+          <Badge variant={binding.status === 'ready' ? 'success' : binding.status === 'warning' ? 'warning' : 'secondary'}>
+            {httpProxyBindingStatusLabel(binding.status)}
+          </Badge>
         </div>
-        <Button type="button" variant="outline" size="sm" onClick={onRetry} disabled={isRetrying}>
-          <RefreshCw className={`h-3.5 w-3.5 ${isRetrying ? 'animate-spin' : ''}`} />
-          重试
-        </Button>
-      </div>
-    </div>
+      </CardHeader>
+      <CardContent className="space-y-3">
+        <div className="grid gap-3 sm:grid-cols-2">
+          <Info label="容器" value={binding.containerName ?? binding.containerId} />
+          <Info label="目标端口" value={String(binding.targetPort)} />
+          <Info label="HTTPS" value={binding.entryHttpsEnabled ? '已启用' : '未启用'} />
+          <Info label="域名池" value={binding.domainPool} mono />
+        </div>
+        {(warning || binding.warningMessage) && (
+          <p className="text-xs text-destructive">{warning || binding.warningMessage}</p>
+        )}
+        <div className="flex justify-end gap-2">
+          <Button size="sm" variant="outline" onClick={onEdit}><Pencil className="h-3.5 w-3.5" />编辑</Button>
+          <Button size="sm" variant="destructive" onClick={onDelete}><Trash2 className="h-3.5 w-3.5" />删除</Button>
+        </div>
+      </CardContent>
+    </Card>
   );
 }
 
-function InlineErrorNotice({ title, error, onRetry, isRetrying }: { title: string; error: unknown; onRetry: () => void; isRetrying: boolean }) {
+function BindingFormDialog({
+  binding,
+  open,
+  onOpenChange,
+}: {
+  binding?: HttpProxyBindingDto;
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+}) {
+  const queryClient = useQueryClient();
+  const [hostname, setHostname] = useState(binding?.hostname ?? '');
+  const [containerId, setContainerId] = useState(binding?.containerId ?? '');
+  const [targetPort, setTargetPort] = useState(binding ? String(binding.targetPort) : '80');
+  const [error, setError] = useState<string | null>(null);
+  const containersQuery = useQuery({
+    queryKey: queryKeys.containers.userList,
+    queryFn: () => api.get<ContainerDto[]>('/containers'),
+    enabled: open,
+  });
+  const poolsQuery = useQuery({
+    queryKey: queryKeys.httpProxy.domainPools,
+    queryFn: () => api.get<HttpDomainPoolPublicDto[]>('/http-proxy/domain-pools')
+      .catch(emptyIfNotFound<HttpDomainPoolPublicDto[]>([])),
+    enabled: open,
+    retry: (count, queryError) => (queryError instanceof ApiError && queryError.status === 404 ? false : count < 2),
+  });
+  const create = useMutation({
+    mutationFn: (body: { hostname: string; containerId: string; targetPort: number }) =>
+      api.post<HttpProxyBindingDto>('/http-proxy/bindings', body),
+    onSuccess: () => {
+      toast({ title: '发布已创建' });
+      void queryClient.invalidateQueries({ queryKey: queryKeys.httpProxy.bindings });
+      onOpenChange(false);
+    },
+    onError: (mutationError) => setError(httpProxyErrorMessage(mutationError)),
+  });
+  const patch = useMutation({
+    mutationFn: (body: { hostname: string; containerId: string; targetPort: number }) =>
+      api.patch<HttpProxyBindingDto>(`/http-proxy/bindings/${binding?.id ?? ''}`, body),
+    onSuccess: () => {
+      toast({ title: '发布已更新' });
+      void queryClient.invalidateQueries({ queryKey: queryKeys.httpProxy.bindings });
+      onOpenChange(false);
+    },
+    onError: (mutationError) => setError(httpProxyErrorMessage(mutationError)),
+  });
+  useEffect(() => {
+    if (!open) return;
+    setHostname(binding?.hostname ?? '');
+    setContainerId(binding?.containerId ?? '');
+    setTargetPort(binding ? String(binding.targetPort) : '80');
+    setError(null);
+  }, [binding, open]);
+  const containers = containersQuery.data ?? [];
+  const pools = poolsQuery.data ?? [];
+  const submit = () => {
+    setError(null);
+    const port = Number(targetPort);
+    if (!hostname.trim()) {
+      setError('请输入主机名');
+      return;
+    }
+    if (!containerId) {
+      setError('请选择容器');
+      return;
+    }
+    if (!Number.isInteger(port) || port < 1 || port > 65535) {
+      setError('目标端口必须是 1 到 65535 的整数');
+      return;
+    }
+    const parsed = zCreateHttpProxyBindingRequest.safeParse({
+      hostname: hostname.trim(),
+      containerId,
+      targetPort: port,
+    });
+    if (!parsed.success) {
+      setError(parsed.error.issues[0]?.message ?? '请检查发布参数');
+      return;
+    }
+    if (binding) patch.mutate(parsed.data);
+    else create.mutate(parsed.data);
+  };
+
   return (
-    <div className="rounded-md border border-destructive/30 bg-destructive/10 px-2 py-1.5 text-xs text-destructive">
-      <div className="flex items-center justify-between gap-2">
-        <span>{title}：{errorMessage(error)}</span>
-        <Button type="button" variant="ghost" size="sm" className="h-7 px-2 text-destructive" onClick={onRetry} disabled={isRetrying}>
-          重试
-        </Button>
-      </div>
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent data-testid="http-proxy-binding-form">
+        <DialogHeader>
+          <DialogTitle>{binding ? '编辑 HTTP 发布' : '新建 HTTP 发布'}</DialogTitle>
+          <DialogDescription>
+            主机名必须匹配已启用的通配域名（例如 *.example.com 对应 app.example.com）。
+          </DialogDescription>
+        </DialogHeader>
+        <div className="space-y-3">
+          <div className="space-y-1.5">
+            <Label htmlFor="http-proxy-hostname">主机名</Label>
+            <Input
+              id="http-proxy-hostname"
+              className="font-mono"
+              value={hostname}
+              placeholder="app.example.com"
+              onChange={(event) => { setHostname(event.target.value); setError(null); }}
+            />
+          </div>
+          {pools.length > 0 ? (
+            <p className="text-xs text-muted-foreground">
+              已启用通配域名：{pools.map((pool) => pool.wildcardDomain).join('、')}
+            </p>
+          ) : (
+            <p className="text-xs text-muted-foreground">
+              {poolsQuery.isLoading
+                ? '正在加载通配域名…'
+                : '当前没有已启用的通配域名，请联系管理员在「HTTP 代理」中创建。'}
+            </p>
+          )}
+          <div className="space-y-1.5">
+            <Label htmlFor="http-proxy-container">容器</Label>
+            <select
+              id="http-proxy-container"
+              className="h-10 w-full rounded-md border border-input bg-background px-3 text-sm"
+              value={containerId}
+              onChange={(event) => { setContainerId(event.target.value); setError(null); }}
+            >
+              <option value="">{containersQuery.isLoading ? '加载容器…' : '选择容器'}</option>
+              {containers.map((container) => (
+                <option key={container.id} value={container.id}>
+                  {container.name} · {container.serverName}
+                </option>
+              ))}
+            </select>
+            {!containersQuery.isLoading && containers.length === 0 && (
+              <p className="text-xs text-muted-foreground">
+                还没有容器。<Link to="/containers" className="underline">去创建容器</Link>
+              </p>
+            )}
+          </div>
+          <div className="space-y-1.5">
+            <Label htmlFor="http-proxy-port">目标端口</Label>
+            <Input
+              id="http-proxy-port"
+              type="number"
+              min="1"
+              max="65535"
+              value={targetPort}
+              onChange={(event) => { setTargetPort(event.target.value); setError(null); }}
+            />
+          </div>
+          {error && <p className="text-sm text-destructive">{error}</p>}
+        </div>
+        <DialogFooter>
+          <Button variant="outline" onClick={() => onOpenChange(false)}>取消</Button>
+          <Button onClick={submit} disabled={create.isPending || patch.isPending}>
+            {create.isPending || patch.isPending ? '提交中...' : '保存'}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+function Info({ label, value, mono = false }: { label: string; value: string; mono?: boolean }) {
+  return (
+    <div>
+      <p className="text-xs text-muted-foreground">{label}</p>
+      <p className={mono ? 'break-all font-mono text-xs' : 'break-all text-sm'}>{value}</p>
     </div>
   );
 }
 
-function withoutFieldError<T extends string>(errors: Partial<Record<T, string>>, field: T): Partial<Record<T, string>> {
-  const next = { ...errors };
-  delete next[field];
-  return next;
-}
-
-function firstError(errors: Record<string, string | undefined>): string {
-  return Object.values(errors).find(Boolean) ?? '请修正高亮字段后再保存';
-}

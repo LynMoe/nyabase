@@ -1,40 +1,34 @@
-/** Docker labels that remain authoritative identity/discovery hints. */
-export const LABEL = {
-  MANAGED: 'nyabase.managed',
-  CONTAINER_ID: 'nyabase.container_id',
-  SERVER_ID: 'nyabase.server_id',
-  SPEC_GENERATION: 'nyabase.spec_generation',
-  RUNTIME_SPEC_HASH: 'nyabase.runtime_spec_hash',
+export const INCUS_USER_KEYS = {
+  managed: 'user.nyabase.managed',
+  containerId: 'user.nyabase.container_id',
+  serverId: 'user.nyabase.server_id',
+  generation: 'user.nyabase.generation',
+  preflight: 'user.nyabase.preflight',
 } as const;
 
-export const NYABASE_NETWORK = 'nyabase_net';
+export const INCUS_INSTANCE_NAME_PREFIX = 'nyc-';
+export const INCUS_VOLUME_NAME_PREFIX = 'nyv-';
+export const INCUS_DEVICE_NAME_PREFIX = 'nyd-';
+export const INCUS_DEFAULT_PROJECT = 'default';
+export const INCUS_API_DEFAULT_PORT = 8_443;
 
-/** One bounded inventory shape shared by admission, Agent mutation and wire validation. */
-// One full report inspects every runtime several times inside a 90s fail-stop
-// deadline. Keep one bounded 64-way batch so the public maximum is actually
-// observable under the slowest supported Docker read deadlines.
-export const MAX_MANAGED_CONTAINERS_PER_AGENT = 64;
-export const MAX_ACTIVE_RUNTIME_CLEANUP_CLAIMS_PER_SERVER =
-  MAX_MANAGED_CONTAINERS_PER_AGENT * 2;
-export const MAX_AGENT_MACVLAN_RESERVED_IPS = 4_096;
-/** Small fixed product caps keep complete proxy snapshots comfortably bounded. */
+export const MAX_MANAGED_CONTAINERS_PER_SERVER = 64;
+export const MAX_SERVER_CONCURRENCY = 8;
 export const MAX_PLATFORM_ACTIVE_USERS = 128;
 export const MAX_PLATFORM_SERVERS = 16;
 export const MAX_PLATFORM_IMAGES = 256;
 export const MAX_PLATFORM_GROUPS = 256;
-/** Bounds embedded group catalogs and synchronous authorization fan-out. */
 export const MAX_GROUP_MEMBERS = 64;
-/** Bounds each direct/group mount grant catalog and revocation cross-product. */
-export const MAX_MOUNT_SOURCE_GRANTS_PER_SCOPE = 64;
-/** Maximum quota workflows admitted by one caller-owned business transaction. */
-export const MAX_SYNCHRONOUS_QUOTA_INTENTS_PER_MUTATION = 8;
+export const MAX_STORAGE_POOLS_PER_SERVER = 64;
+export const MAX_SHARED_BACKENDS = 256;
+export const MAX_VOLUMES_PER_USER = 1_024;
+export const MAX_VOLUME_ATTACHMENTS = 64;
 export const MAX_SSH_PUBLIC_KEYS_PER_USER = 4;
 export const MAX_SSH_PUBLIC_KEY_TEXT_LENGTH = 1_024;
+
 export const MAX_SSH_PROXY_CONTAINERS =
-  MAX_PLATFORM_SERVERS * MAX_MANAGED_CONTAINERS_PER_AGENT;
-/** Standalone proxy hard cap; status payloads may describe at most this many live sessions. */
+  MAX_PLATFORM_SERVERS * MAX_MANAGED_CONTAINERS_PER_SERVER;
 export const MAX_SSH_PROXY_STATUS_CONNECTIONS = 1_024;
-/** Standalone HTTP proxy semaphore cap mirrored on its status wire. */
 export const MAX_HTTP_PROXY_ACTIVE_CONNECTIONS = 32;
 export const MAX_SSH_PROXY_SNAPSHOT_BYTES = 4 * 1024 * 1024;
 export const MAX_HTTP_PROXY_ROUTES = MAX_SSH_PROXY_CONTAINERS;
@@ -42,76 +36,73 @@ export const MAX_HTTP_PROXY_DOMAIN_POOLS = 16;
 export const MAX_HTTP_PROXY_CERTIFICATE_PEM_LENGTH = 64 * 1024;
 export const MAX_HTTP_PROXY_PRIVATE_KEY_PEM_LENGTH = 16 * 1024;
 export const MAX_HTTP_PROXY_SNAPSHOT_BYTES = 8 * 1024 * 1024;
-export const MAX_CONTAINER_MOUNTS = 64;
-export const MAX_MANAGED_DATA_DIRS_PER_AGENT = 4_096;
-export const MAX_AGENT_LOCAL_DATA_SOURCES = 128;
-/** Keeps the worst-case RemoteFS bootstrap well below the shared WS frame cap. */
-export const MAX_AGENT_REMOTE_FS_MOUNTS = 128;
-export const MAX_PLATFORM_REMOTE_FS_MOUNTS =
-  MAX_PLATFORM_SERVERS * MAX_AGENT_REMOTE_FS_MOUNTS;
-export const MAX_AGENT_XFS_PROJECTS = 4_096;
-/** XFS project identity is a deterministic, protocol-visible user mapping. */
-export const XFS_PROJECT_ID_OFFSET = 10_000;
-export const XFS_PROJECT_ID_MAX = 0xffff_ffff;
-export const MAX_AGENT_LOCAL_IMAGES = 8_192;
-export const MAX_AGENT_DISKS = 128;
-export const MAX_AGENT_GPU_DEVICES = 256;
-/**
- * Resource grants cross JSON, PostgreSQL bigint and Docker's signed integer API. Keep
- * every value exactly representable in JavaScript, including the NanoCPU
- * conversion performed by the Agent.
- */
+
+export const MAX_GPU_DEVICES = 256;
 export const MAX_RESOURCE_CPU_MILLIS = Math.floor(Number.MAX_SAFE_INTEGER / 1_000_000);
 export const MAX_RESOURCE_BYTES = Number.MAX_SAFE_INTEGER;
 export const MAX_GROUP_PRIORITY = Number.MAX_SAFE_INTEGER;
-/** Days of continued (degraded) access retained after a server grant expires. */
+export const MAX_STORAGE_OVERCOMMIT_RATIO = 100;
 export const GRANT_EXPIRY_GRACE_DAYS = 14;
-/** Lossy telemetry is intentionally much smaller than authoritative inventory. */
+
 export const MAX_METRIC_POINTS_PER_BATCH = 4_096;
 export const MAX_METRIC_NAME_LENGTH = 128;
 export const MAX_METRIC_LABELS_PER_POINT = 16;
 export const MAX_METRIC_LABEL_KEY_LENGTH = 64;
 export const MAX_METRIC_LABEL_VALUE_LENGTH = 512;
-/** Exact WebSocket frame ceiling shared by Agent encoding and Backend parsing. */
-export const MAX_AGENT_WS_FRAME_BYTES = 8 * 1024 * 1024;
-/** Durable task outcomes are control evidence, never bulk log transport. */
-export const MAX_AGENT_TASK_RESULT_BYTES = 64 * 1024;
-/**
- * Covers the bounded pre-bootstrap Docker quiesce, systemd convergence and
- * macvlan reconciliation budget with margin. Heartbeats remain active after
- * hello while this RPC is pending.
- */
-export const AGENT_BOOTSTRAP_RPC_TIMEOUT_MS = 15 * 60_000;
-/**
- * Initial inventory collection itself is bounded to 90s on the Agent. Leave a
- * further bounded window for validating and atomically applying the largest
- * supported inventory before the Backend retires the connection.
- */
-export const AGENT_INITIAL_STATE_REPORT_TIMEOUT_MS = 5 * 60_000;
-/** Longest normal physical task is a 30 minute image pull, then a 90s report. */
-export const AGENT_STEADY_STATE_REPORT_TIMEOUT_MS = 35 * 60_000;
+export const MAX_NODE_METRICS_BODY_BYTES = 4 * 1024 * 1024;
+export const NODE_METRICS_ENDPOINT_PATH = '/metrics';
+export const NODE_METRICS_CONNECT_TIMEOUT_MS = 500;
+export const NODE_METRICS_RESPONSE_HEADER_TIMEOUT_MS = 1_000;
+export const NODE_METRICS_REQUEST_TIMEOUT_MS = 2_000;
+export const NODE_METRICS_PARSE_TIMEOUT_MS = 250;
+export const NODE_METRICS_SCRAPE_INTERVAL_MS = 15_000;
+export const NODE_METRICS_FRESHNESS_MS = 45_000;
+export const NODE_METRICS_FAILURE_THRESHOLD = 3;
+export const ECMASCRIPT_DATE_MAX_EPOCH_MS = 8_640_000_000_000_000;
+export const NODE_METRIC_NAMES = [
+  'nyabase_node_cpu_usage_ratio',
+  'nyabase_node_cpu_psi_ratio',
+  'nyabase_node_disk_io_read_bytes_total',
+  'nyabase_node_disk_io_write_bytes_total',
+  'nyabase_node_disk_io_read_seconds_total',
+  'nyabase_node_disk_io_write_seconds_total',
+  'nyabase_node_disk_smart_health',
+  'nyabase_node_network_forwarding',
+  'nyabase_node_network_rp_filter',
+  'nyabase_node_network_fib_rule_present',
+  'nyabase_node_gpu_util_ratio',
+  'nyabase_node_gpu_mem_used_bytes',
+  'nyabase_node_gpu_mem_total_bytes',
+  'nyabase_node_gpu_temperature_celsius',
+  'nyabase_node_gpu_power_watts',
+  'nyabase_node_gpu_smi_index',
+  'nyabase_node_gpu_process_mem_used_bytes',
+] as const;
 
-/**
- * SSH proxy snapshots are an independent, short fail-closed route lease. They
- * intentionally expire well before the longer Agent report watchdog used to
- * accommodate a serialized 30-minute image pull.
- */
+export const INCUS_CONNECT_TIMEOUT_MS = 500;
+export const INCUS_RESPONSE_HEADER_TIMEOUT_MS = 1_000;
+export const INCUS_REQUEST_TIMEOUT_MS = 10_000;
+export const INCUS_OPERATION_WAIT_TIMEOUT_MS = 120_000;
+export const INCUS_EVENT_RECONNECT_DELAY_MS = 1_000;
+export const INCUS_BUSY_ATTENTION_RETRY_COUNT = 5;
+export const INCUS_BUSY_ATTENTION_WINDOW_MS = 5 * 60_000;
+
+export const INTENT_CLAIM_LEASE_MS = 60_000;
+export const INTENT_CLAIM_RENEW_INTERVAL_MS = 20_000;
+export const INTENT_MAX_FAILURE_DETAILS_BYTES = 16 * 1024;
+export const INTENT_MAX_REQUEST_SUMMARY_BYTES = 16 * 1024;
+export const MAX_INTENT_LIST_PAGE_SIZE = 100;
+export const MAX_CONSOLE_COMMAND_ARGUMENTS = 32;
+export const MAX_CONSOLE_COMMAND_ARGUMENT_BYTES = 4_096;
+export const CONSOLE_DEFAULT_COLS = 100;
+export const CONSOLE_DEFAULT_ROWS = 30;
+export const CONSOLE_UNCLAIMED_TTL_MS = 60_000;
+export const CONSOLE_CLAIMED_IDLE_TTL_MS = 30 * 60_000;
+
 export const SSH_PROXY_SNAPSHOT_STALE_MIN_MS = 120_000;
 export const SSH_PROXY_SNAPSHOT_STALE_MAX_MS = 300_000;
-
-/**
- * Backend and standalone proxy wall clocks must stay within this bound.
- * Snapshots carry an absolute validUntil, so a delayed old control frame can
- * never acquire a fresh receive-time lease. A proxy whose clock is ahead
- * fails closed early; a clock behind by at most this amount is covered by the
- * container-delete drain barrier.
- */
 export const PROXY_SNAPSHOT_MAX_CLOCK_SKEW_MS = 30_000;
-
-/** Time for lease-expiry cancellation and socket teardown to settle. */
 export const PROXY_SNAPSHOT_DRAIN_MARGIN_MS = 30_000;
-
-/** Physical address reuse waits past every old proxy lease and clock skew. */
 export const CONTAINER_DELETE_PROXY_DRAIN_MS =
   SSH_PROXY_SNAPSHOT_STALE_MAX_MS
   + PROXY_SNAPSHOT_MAX_CLOCK_SKEW_MS

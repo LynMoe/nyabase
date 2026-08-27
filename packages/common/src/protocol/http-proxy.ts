@@ -1,8 +1,8 @@
 import { z } from 'zod';
 import { ContainerStatus } from '../enums.js';
 import {
-  MAX_HTTP_PROXY_CERTIFICATE_PEM_LENGTH,
   MAX_HTTP_PROXY_ACTIVE_CONNECTIONS,
+  MAX_HTTP_PROXY_CERTIFICATE_PEM_LENGTH,
   MAX_HTTP_PROXY_DOMAIN_POOLS,
   MAX_HTTP_PROXY_PRIVATE_KEY_PEM_LENGTH,
   MAX_HTTP_PROXY_ROUTES,
@@ -19,16 +19,14 @@ const zProxyTimestampMs = zSafeCounter.refine(
   'Proxy timestamp exceeds the allowed clock-skew window',
 );
 
-// Long enough to remain online after subtracting the shared 30s clock-skew
-// allowance while still renewing well before expiry.
 export const HTTP_PROXY_SNAPSHOT_STALE_AFTER_MS = 120_000;
 export const HTTP_PROXY_SNAPSHOT_MAX_STALE_AFTER_MS = 300_000;
 
 export const HTTP_PROXY_WARNING_REASONS = [
   'container_deleted',
   'container_not_running',
-  'container_runtime_missing',
-  'container_runtime_stale',
+  'container_instance_missing',
+  'container_stale',
   'container_ip_missing',
   'domain_pool_disabled',
   'https_not_configured',
@@ -54,13 +52,13 @@ export const zHttpProxyRouteSnapshot = z.object({
   bindingId: zId,
   hostname: zAscii(253),
   domainPoolId: zId,
-  targetIp: zAscii(15),
-  targetPort: z.number().int().min(1).max(65535),
+  routedIp: zAscii(15),
+  targetPort: z.number().int().min(1).max(65_535),
   ownerId: zId,
   containerId: zId,
   containerName: zAscii(64),
-  runtimeId: zAscii(128),
-  runtimeStatus: z.nativeEnum(ContainerStatus),
+  instanceName: zAscii(63),
+  status: z.nativeEnum(ContainerStatus),
 }).strict();
 
 export const zHttpProxySnapshot = z.object({
@@ -88,7 +86,46 @@ export const zHttpProxyStatusReport = z.object({
 
 export const zHttpProxyClientAck = z.object({
   generation: z.number().int().nonnegative(),
+}).strict();
+
+const zNullablePem = (max: number) => z.union([
+  z.null(),
+  z.string().max(max),
+]).transform((value) => {
+  if (value === null) return null;
+  const trimmed = value.trim();
+  return trimmed.length === 0 ? null : trimmed;
 });
+
+export const zCreateHttpProxyBindingRequest = z.object({
+  hostname: z.string().trim().min(1).max(253),
+  containerId: z.string().trim().min(1).max(64),
+  targetPort: z.number().int().min(1).max(65_535),
+}).strict();
+
+export const zPatchHttpProxyBindingRequest = zCreateHttpProxyBindingRequest.partial().strict().refine(
+  (value) => Object.keys(value).length > 0,
+  'At least one binding field must be updated',
+);
+
+export const zCreateHttpDomainPoolRequest = z.object({
+  wildcardDomain: z.string().trim().min(1).max(255),
+  enabled: z.boolean().optional(),
+  httpsEnabled: z.boolean().optional(),
+  certificatePem: zNullablePem(MAX_HTTP_PROXY_CERTIFICATE_PEM_LENGTH).optional(),
+  privateKeyPem: zNullablePem(MAX_HTTP_PROXY_PRIVATE_KEY_PEM_LENGTH).optional(),
+}).strict();
+
+export const zPatchHttpDomainPoolRequest = z.object({
+  wildcardDomain: z.string().trim().min(1).max(255).optional(),
+  enabled: z.boolean().optional(),
+  httpsEnabled: z.boolean().optional(),
+  certificatePem: zNullablePem(MAX_HTTP_PROXY_CERTIFICATE_PEM_LENGTH).optional(),
+  privateKeyPem: zNullablePem(MAX_HTTP_PROXY_PRIVATE_KEY_PEM_LENGTH).optional(),
+}).strict().refine(
+  (value) => Object.keys(value).length > 0,
+  'At least one domain pool field must be updated',
+);
 
 export type HttpProxyWarningReason = z.infer<typeof zHttpProxyWarningReason>;
 export type HttpProxyBindingStatus = z.infer<typeof zHttpProxyBindingStatus>;
@@ -97,6 +134,48 @@ export type HttpProxyRouteSnapshot = z.infer<typeof zHttpProxyRouteSnapshot>;
 export type HttpProxySnapshot = z.infer<typeof zHttpProxySnapshot>;
 export type HttpProxyStatusReport = z.infer<typeof zHttpProxyStatusReport>;
 export type HttpProxyClientAck = z.infer<typeof zHttpProxyClientAck>;
+export type CreateHttpProxyBindingRequest = z.infer<typeof zCreateHttpProxyBindingRequest>;
+export type PatchHttpProxyBindingRequest = z.infer<typeof zPatchHttpProxyBindingRequest>;
+export type CreateHttpDomainPoolRequest = z.infer<typeof zCreateHttpDomainPoolRequest>;
+export type PatchHttpDomainPoolRequest = z.infer<typeof zPatchHttpDomainPoolRequest>;
+
+export interface HttpProxyBindingDto {
+  id: string;
+  mine: boolean;
+  ownerId: string;
+  ownerUsername: string;
+  hostname: string;
+  domainPoolId: string;
+  domainPool: string;
+  targetUrl: string | null;
+  containerId: string;
+  containerName: string | null;
+  containerStatus: ContainerStatus | 'missing' | null;
+  targetPort: number;
+  entryHttpsEnabled: boolean;
+  status: HttpProxyBindingStatus;
+  warningReasons: HttpProxyWarningReason[];
+  warningMessage: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface HttpDomainPoolDto {
+  id: string;
+  wildcardDomain: string;
+  enabled: boolean;
+  httpsEnabled: boolean;
+  certificateFingerprint: string | null;
+  certificateNotAfter: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface HttpDomainPoolPublicDto {
+  id: string;
+  wildcardDomain: string;
+  httpsEnabled: boolean;
+}
 
 export type HttpProxyBackendMessage =
   | { kind: 'snapshot'; payload: HttpProxySnapshot }
@@ -122,8 +201,7 @@ export function normalizeHttpProxyWildcardDomain(value: string): string {
 }
 
 export function httpProxyWildcardSuffix(wildcardDomain: string): string {
-  const normalized = normalizeHttpProxyWildcardDomain(wildcardDomain);
-  return normalized.slice(1);
+  return normalizeHttpProxyWildcardDomain(wildcardDomain).slice(1);
 }
 
 export function hostnameMatchesHttpProxyWildcard(hostname: string, wildcardDomain: string): boolean {
@@ -151,30 +229,27 @@ export function resolveHttpProxyRoute(
   } catch {
     return null;
   }
-  if (!hostname) return null;
-  return snapshot.routes.find((route) => route.hostname === hostname) ?? null;
+  return hostname ? snapshot.routes.find((route) => route.hostname === hostname) ?? null : null;
 }
 
 export function isValidAsciiDnsName(value: string): boolean {
   if (value.length < 1 || value.length > 253 || value.includes('..')) return false;
-  const labels = value.split('.');
-  return labels.every((label) => label.length >= 1
+  return value.split('.').every((label) => label.length >= 1
     && label.length <= 63
     && /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(label));
 }
 
 export function httpProxyWarningMessage(reasons: HttpProxyWarningReason[]): string {
-  if (reasons.length === 0) return '';
   const labels: Record<HttpProxyWarningReason, string> = {
-    container_deleted: '容器已删除',
-    container_not_running: '容器未运行',
-    container_runtime_missing: '运行时未绑定',
-    container_runtime_stale: '运行态已过期',
-    container_ip_missing: '容器 IP 缺失',
-    domain_pool_disabled: '域名池已禁用',
-    https_not_configured: '入口 HTTPS 未配置证书',
-    route_missing: '代理路由缺失',
-    proxy_offline: 'HTTP 代理离线',
+    container_deleted: 'Container deleted',
+    container_not_running: 'Container is not running',
+    container_instance_missing: 'Incus instance identity is missing',
+    container_stale: 'Container observation is stale',
+    container_ip_missing: 'Routed IP is missing',
+    domain_pool_disabled: 'Domain pool is disabled',
+    https_not_configured: 'HTTPS certificate is not configured',
+    route_missing: 'Proxy route is missing',
+    proxy_offline: 'HTTP proxy is offline',
   };
-  return reasons.map((reason) => labels[reason]).join('、');
+  return reasons.map((reason) => labels[reason]).join(', ');
 }

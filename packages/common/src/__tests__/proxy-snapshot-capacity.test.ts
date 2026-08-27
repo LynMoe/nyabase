@@ -13,18 +13,79 @@ import {
   MAX_SSH_PUBLIC_KEY_TEXT_LENGTH,
   MAX_SSH_PROXY_CONTAINERS,
   MAX_SSH_PROXY_SNAPSHOT_BYTES,
+  ServerStatus,
   UserStatus,
   zHttpProxySnapshot,
   zSshProxySnapshot,
 } from '../index.js';
 
-const repeated = (char: string, length: number): string => char.repeat(length);
+const repeated = (character: string, length: number): string => character.repeat(length);
 const encodedBytes = (value: unknown): number => new TextEncoder()
   .encode(JSON.stringify(value)).byteLength;
+const id = repeated('i', 64);
 
-describe('bounded proxy snapshot product capacities', () => {
-  it('keeps the largest legal SSH snapshot below its wire buffer', () => {
-    const id = repeated('i', 64);
+describe('bounded SSH proxy snapshots', () => {
+  it('uses routed address and Incus instance identity', () => {
+    const parsed = zSshProxySnapshot.parse({
+      generation: 1,
+      createdAt: new Date(0).toISOString(),
+      staleAfterMs: 120_000,
+      validUntil: 120_000,
+      endpoint: null,
+      hostKey: {
+        privateKey: 'key',
+        publicKey: 'key',
+        fingerprint: 'fingerprint',
+        generation: 1,
+      },
+      users: [],
+      servers: [{
+        id,
+        slug: 'incus-one',
+        name: 'Incus one',
+        status: ServerStatus.Online,
+      }],
+      images: [{ id, sshEnabled: true }],
+      containers: [{
+        id,
+        ownerId: id,
+        serverId: id,
+        imageId: id,
+        name: 'work',
+        instanceName: 'nyc-11111111111141118111111111111111',
+      }],
+      routes: [{
+        containerId: id,
+        serverId: id,
+        instanceName: 'nyc-11111111111141118111111111111111',
+        routedIp: '192.0.2.10',
+        status: ContainerStatus.Running,
+        sshStatus: 'running',
+        containerHostKeyFingerprint: null,
+        observedAt: new Date(0).toISOString(),
+      }],
+    });
+    expect(parsed.routes[0]?.routedIp).toBe('192.0.2.10');
+    expect(parsed.routes[0]?.instanceName).toMatch(/^nyc-/);
+  });
+
+  it('rejects multibyte data from ASCII-bounded snapshot fields', () => {
+    expect(() => zSshProxySnapshot.parse({
+      generation: 1,
+      createdAt: new Date(0).toISOString(),
+      staleAfterMs: 120_000,
+      validUntil: 120_000,
+      endpoint: null,
+      hostKey: { privateKey: 'key', publicKey: 'key', fingerprint: 'fingerprint', generation: 1 },
+      users: [],
+      servers: [],
+      images: [{ id: '😀'.repeat(32), sshEnabled: true }],
+      containers: [],
+      routes: [],
+    })).toThrow();
+  });
+
+  it('keeps the legal snapshot below its wire buffer', () => {
     const snapshot = zSshProxySnapshot.parse({
       generation: 1,
       createdAt: new Date(0).toISOString(),
@@ -45,96 +106,62 @@ describe('bounded proxy snapshot product capacities', () => {
           { length: MAX_SSH_PUBLIC_KEYS_PER_USER },
           () => repeated('k', MAX_SSH_PUBLIC_KEY_TEXT_LENGTH),
         ),
-        internalPrivateKey: repeated('q', 4 * 1024),
-        internalPublicKey: repeated('v', 2 * 1024),
-        internalKeyFingerprint: repeated('g', 128),
-        internalKeyGeneration: 1,
       })),
       servers: Array.from({ length: MAX_PLATFORM_SERVERS }, () => ({
-        id, slug: repeated('s', 64), name: '😀'.repeat(64), online: true,
+        id,
+        slug: repeated('s', 64),
+        name: 'Incus',
+        status: ServerStatus.Online,
       })),
-      images: Array.from({ length: MAX_PLATFORM_IMAGES }, () => ({ id, disableSsh: false })),
+      images: Array.from({ length: MAX_PLATFORM_IMAGES }, () => ({ id, sshEnabled: true })),
       containers: Array.from({ length: MAX_SSH_PROXY_CONTAINERS }, () => ({
         id,
         ownerId: id,
         serverId: id,
         imageId: id,
         name: repeated('c', 64),
+        instanceName: 'nyc-11111111111141118111111111111111',
       })),
       routes: Array.from({ length: MAX_SSH_PROXY_CONTAINERS }, () => ({
         containerId: id,
         serverId: id,
-        runtimeId: repeated('r', 128),
-        macvlanIp: '255.255.255.25',
-        runtimeStatus: ContainerStatus.Running,
+        instanceName: 'nyc-11111111111141118111111111111111',
+        routedIp: '192.0.2.10',
+        status: ContainerStatus.Running,
         sshStatus: 'running',
-        appliedInternalKeyGeneration: 1,
         containerHostKeyFingerprint: repeated('f', 128),
         observedAt: repeated('o', 64),
       })),
     });
-
     expect(encodedBytes({ ts: Number.MAX_SAFE_INTEGER, kind: 'snapshot', payload: snapshot }))
       .toBeLessThan(MAX_SSH_PROXY_SNAPSHOT_BYTES);
   });
+});
 
-  it('rejects multibyte data from fields whose capacity proof assumes one byte per character', () => {
-    expect(() => zSshProxySnapshot.parse({
+describe('bounded HTTP proxy snapshots', () => {
+  it('uses routed IP and instance name in every route', () => {
+    expect(zHttpProxySnapshot.parse({
       generation: 1,
       createdAt: new Date(0).toISOString(),
       staleAfterMs: 120_000,
       validUntil: 120_000,
-      endpoint: null,
-      hostKey: {
-        privateKey: 'key', publicKey: 'key', fingerprint: 'fingerprint', generation: 1,
-      },
-      users: [],
-      servers: [],
-      images: [{ id: '😀'.repeat(32), disableSsh: false }],
-      containers: [],
-      routes: [],
-    })).toThrow();
-  });
-
-  it('accepts bounded multiline ASCII key material without weakening byte accounting', () => {
-    expect(() => zSshProxySnapshot.parse({
-      generation: 1,
-      createdAt: new Date(0).toISOString(),
-      staleAfterMs: 120_000,
-      validUntil: 120_000,
-      endpoint: null,
-      hostKey: {
-        privateKey: '-----BEGIN KEY-----\nbody\n-----END KEY-----\n',
-        publicKey: 'ssh-ed25519 AAAA\n',
-        fingerprint: 'SHA256:fingerprint',
-        generation: 1,
-      },
-      users: [{
-        id: 'user-a', username: 'user-a', status: UserStatus.Active, publicKeys: [],
-        internalPrivateKey: '-----BEGIN KEY-----\nbody\n-----END KEY-----\n',
-        internalPublicKey: 'ssh-ed25519 AAAA\n',
-        internalKeyFingerprint: 'fingerprint', internalKeyGeneration: 1,
+      routes: [{
+        bindingId: id,
+        hostname: 'app.example.test',
+        domainPoolId: id,
+        routedIp: '192.0.2.10',
+        targetPort: 8080,
+        ownerId: id,
+        containerId: id,
+        containerName: 'work',
+        instanceName: 'nyc-11111111111141118111111111111111',
+        status: ContainerStatus.Running,
       }],
-      servers: [], images: [], containers: [], routes: [],
-    })).not.toThrow();
-
-    expect(() => zHttpProxySnapshot.parse({
-      generation: 1,
-      createdAt: new Date(0).toISOString(),
-      staleAfterMs: 120_000,
-      validUntil: 120_000,
-      routes: [],
-      domainPools: [{
-        id: 'pool-a', wildcardDomain: '*.example.test', enabled: true, httpsEnabled: true,
-        certificatePem: '-----BEGIN CERTIFICATE-----\nbody\n-----END CERTIFICATE-----\n',
-        privateKeyPem: '-----BEGIN PRIVATE KEY-----\nbody\n-----END PRIVATE KEY-----\n',
-        certificateFingerprint: 'fingerprint', certificateNotAfter: null,
-      }],
-    })).not.toThrow();
+      domainPools: [],
+    }).routes[0]?.instanceName).toMatch(/^nyc-/);
   });
 
   it('keeps the largest legal HTTP snapshot below its wire buffer', () => {
-    const id = repeated('i', 64);
     const snapshot = zHttpProxySnapshot.parse({
       generation: 1,
       createdAt: new Date(0).toISOString(),
@@ -144,13 +171,13 @@ describe('bounded proxy snapshot product capacities', () => {
         bindingId: id,
         hostname: repeated('h', 253),
         domainPoolId: id,
-        targetIp: '255.255.255.25',
-        targetPort: 65535,
+        routedIp: '255.255.255.25',
+        targetPort: 65_535,
         ownerId: id,
         containerId: id,
         containerName: repeated('c', 64),
-        runtimeId: repeated('r', 128),
-        runtimeStatus: ContainerStatus.Running,
+        instanceName: 'nyc-11111111111141118111111111111111',
+        status: ContainerStatus.Running,
       })),
       domainPools: Array.from({ length: MAX_HTTP_PROXY_DOMAIN_POOLS }, () => ({
         id,
@@ -163,7 +190,6 @@ describe('bounded proxy snapshot product capacities', () => {
         certificateNotAfter: repeated('d', 64),
       })),
     });
-
     expect(encodedBytes({ ts: Number.MAX_SAFE_INTEGER, kind: 'snapshot', payload: snapshot }))
       .toBeLessThan(MAX_HTTP_PROXY_SNAPSHOT_BYTES);
   });

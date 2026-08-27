@@ -180,15 +180,35 @@ export default function SshProxyPage() {
               <Button variant="ghost" size="icon" className="h-8 w-8 text-muted-foreground" onClick={() => refetchHostKey()} disabled={hostKeyFetching}>
                 <RefreshCw className={`h-4 w-4 ${hostKeyFetching ? 'animate-spin' : ''}`} />
               </Button>
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={() => rotateHostKey.mutate()}
-                disabled={rotateHostKey.isPending}
-              >
-                <RotateCcw className="h-4 w-4" />
-                轮换
-              </Button>
+              <AlertDialog>
+                <AlertDialogTrigger asChild>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    disabled={rotateHostKey.isPending}
+                  >
+                    <RotateCcw className="h-4 w-4" />
+                    轮换
+                  </Button>
+                </AlertDialogTrigger>
+                <AlertDialogContent>
+                  <AlertDialogHeader>
+                    <AlertDialogTitle>轮换 SSH 主机密钥？</AlertDialogTitle>
+                    <AlertDialogDescription>
+                      轮换后所有客户端将失去对当前主机密钥的信任，需要更新 known_hosts 后才能再次连接。确认继续？
+                    </AlertDialogDescription>
+                  </AlertDialogHeader>
+                  <AlertDialogFooter>
+                    <AlertDialogCancel>取消</AlertDialogCancel>
+                    <AlertDialogAction
+                      onClick={() => rotateHostKey.mutate()}
+                      className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+                    >
+                      确认轮换
+                    </AlertDialogAction>
+                  </AlertDialogFooter>
+                </AlertDialogContent>
+              </AlertDialog>
             </div>
           </div>
           {hostKeyQuery.isLoading ? (
@@ -276,7 +296,7 @@ export default function SshProxyPage() {
                       </td>
                       <td className="px-3 py-2">
                         <div>{connection.serverSlug && connection.containerName ? `${connection.serverSlug}.${connection.containerName}` : '-'}</div>
-                        <div className="font-mono text-xs text-muted-foreground break-all">{connection.containerId ?? connection.runtimeId ?? '-'}</div>
+                        <div className="font-mono text-xs text-muted-foreground break-all">{connection.containerId ?? connection.instanceName ?? '-'}</div>
                       </td>
                       <td className="px-3 py-2">
                         <div className="font-mono text-xs">{connection.peer}</div>

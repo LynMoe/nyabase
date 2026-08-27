@@ -21,3 +21,12 @@ export function apiErrorCurrent<T>(
   const current = (error.body as Record<string, unknown>).current;
   return validate(current) ? current : null;
 }
+
+/** Structured `details` from Nest conflict/error envelopes when present. */
+export function apiErrorDetails(error: unknown): Record<string, unknown> | null {
+  if (!(error instanceof ApiError)) return null;
+  if (!error.body || typeof error.body !== 'object' || Array.isArray(error.body)) return null;
+  const details = (error.body as Record<string, unknown>).details;
+  if (!details || typeof details !== 'object' || Array.isArray(details)) return null;
+  return details as Record<string, unknown>;
+}

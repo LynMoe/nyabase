@@ -16,14 +16,40 @@ require_command() {
 require_command docker
 require_command node
 
+for obsolete_path in \
+  deploy/install-agent.sh \
+  deploy/agent.systemd.service \
+  deploy/agent.example.yaml \
+  scripts/build-agent-binary.sh \
+  scripts/check-agent-task-conformance.sh \
+  scripts/check-agent-embedded-helpers.mjs; do
+  if [[ -e "$obsolete_path" ]]; then
+    echo "obsolete clean-cutover path still exists: $obsolete_path" >&2
+    exit 1
+  fi
+done
+
 contract_root="$(mktemp -d)"
 trap 'rm -rf "$contract_root"' EXIT
 rendered="$contract_root/compose.json"
+incus_client_cert_source="$contract_root/incus-client-cert"
+incus_client_key_source="$contract_root/incus-client-key"
+incus_ca_source="$contract_root/incus-ca"
+for secret_source in \
+  "$incus_client_cert_source" \
+  "$incus_client_key_source" \
+  "$incus_ca_source"; do
+  : >"$secret_source"
+  chmod 600 "$secret_source"
+done
 
 POSTGRES_PASSWORD=contract-test \
 DATABASE_URL=postgresql://nyabase:contract-test@postgres:5432/nyabase \
 REDIS_PASSWORD=contract-test \
 REDIS_URL=redis://nyabase:contract-test@redis:6379/0 \
+INCUS_CLIENT_CERT_SOURCE="$incus_client_cert_source" \
+INCUS_CLIENT_KEY_SOURCE="$incus_client_key_source" \
+INCUS_CA_SOURCE="$incus_ca_source" \
   docker compose -f deploy/docker-compose.yml config --format json >"$rendered"
 
 node - "$rendered" <<'NODE'
@@ -31,6 +57,33 @@ const { readFileSync } = require('node:fs');
 const config = JSON.parse(readFileSync(process.argv[2], 'utf8'));
 const backend = config.services?.backend;
 if (!backend) throw new Error('rendered Compose config has no backend service');
+const serviceNames = Object.keys(config.services ?? {}).sort();
+const expectedServices = ['backend', 'postgres', 'redis', 'victoriametrics', 'vmagent'];
+if (JSON.stringify(serviceNames) !== JSON.stringify(expectedServices)) {
+  throw new Error(
+    `Compose services must be exactly ${expectedServices.join(', ')}, got ${serviceNames.join(', ')}`,
+  );
+}
+const renderedText = JSON.stringify(config);
+for (const forbidden of [
+  'backend-gateway',
+  'NYABASE_RUNTIME_ROLE',
+  'NYABASE_CONSOLE_PUBLIC_URL',
+  'dockerd',
+  'dockerRoot',
+  'macvlan',
+  'remote-fs',
+  'data-dir',
+  'workflow',
+  'agent-task',
+]) {
+  if (renderedText.toLowerCase().includes(forbidden.toLowerCase())) {
+    throw new Error(`Compose still contains obsolete runtime path: ${forbidden}`);
+  }
+}
+if (/(^|[^a-z0-9_])agent([^a-z0-9_]|$)/i.test(renderedText)) {
+  throw new Error('Compose still contains the retired host control process');
+}
 for (const serviceName of ['postgres', 'redis', 'victoriametrics', 'vmagent']) {
   const image = config.services?.[serviceName]?.image ?? '';
   if (!/^[^@\s]+@sha256:[0-9a-f]{64}$/.test(image)) {
@@ -73,6 +126,10 @@ for (const envName of [
   'PG_IDLE_IN_TRANSACTION_TIMEOUT_MS',
   'PG_READINESS_TIMEOUT_MS',
   'PG_SSL_MODE',
+  'INCUS_PREFLIGHT_IMAGE_ALIAS',
+  'INCUS_PREFLIGHT_EGRESS_URL',
+  'INCUS_REQUEST_TIMEOUT_MS',
+  'INCUS_OPERATION_WAIT_TIMEOUT_MS',
 ]) {
   if (!(envName in backend.environment)) throw new Error(`backend is missing ${envName}`);
 }
@@ -90,10 +147,28 @@ for (const expected of ['rw', 'nosuid', 'nodev', 'noexec', 'uid=10001', 'gid=100
 }
 NODE
 
-grep -Eq '^FROM node:22-slim@sha256:[0-9a-f]{64} AS builder$' deploy/Dockerfile.backend
-grep -Eq '^FROM node:22-slim@sha256:[0-9a-f]{64} AS runner$' deploy/Dockerfile.backend
-grep -Eq '^USER 10001:10001$' deploy/Dockerfile.backend
-grep -Eq 'disableClientInfo:[[:space:]]*true' packages/backend/src/runtime/redis-runtime.module.ts
-grep -Eq 'image: postgres:18\.4-bookworm@sha256:[0-9a-f]{64}' .github/workflows/ci.yml
-grep -Eq 'image: redis:8\.2-bookworm@sha256:[0-9a-f]{64}' .github/workflows/ci.yml
+rg -q '^FROM node:22-slim@sha256:[0-9a-f]{64} AS builder$' deploy/Dockerfile.backend
+rg -q '^FROM node:22-slim@sha256:[0-9a-f]{64} AS runner$' deploy/Dockerfile.backend
+rg -q '^USER 10001:10001$' deploy/Dockerfile.backend
+if rg -n 'packages/agent|dockerd|dockerRoot|nyabase-agent' deploy/Dockerfile.backend; then
+  echo "Backend image still contains the retired host runtime" >&2
+  exit 1
+fi
+rg -q 'disableClientInfo:[[:space:]]*true' packages/backend/src/runtime/redis-runtime.module.ts
+rg -q 'image: postgres:18\.4-bookworm@sha256:[0-9a-f]{64}' .github/workflows/ci.yml
+rg -q 'image: redis:8\.2-bookworm@sha256:[0-9a-f]{64}' .github/workflows/ci.yml
+for deployment_file in \
+  deploy/docker-compose.yml \
+  deploy/Dockerfile.backend \
+  deploy/config.example.yaml \
+  deploy/.env.example \
+  deploy/nginx.conf \
+  deploy/OPERATIONS.md; do
+  if rg -n -i \
+    '(^|[^[:alnum:]_])agent([^[:alnum:]_]|$)|(^|[^[:alnum:]_])gateway([^[:alnum:]_]|$)|dockerd|dockerRoot|remote[-_]fs|data[-_]dir|workflow|agent[-_]task' \
+    "$deployment_file"; then
+    echo "obsolete runtime terminology remains in $deployment_file" >&2
+    exit 1
+  fi
+done
 echo "deployment hardening contract tests passed"

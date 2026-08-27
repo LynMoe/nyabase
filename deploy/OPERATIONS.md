@@ -1,8 +1,15 @@
-# Nyabase production data services
+# Nyabase production control plane
 
-The default deployment uses PostgreSQL as the only authoritative database,
-Redis for disposable acceleration plus addressed split-role RPC, and
-VictoriaMetrics Single behind vmagent's bounded persistent queue.
+The default deployment uses PostgreSQL as the authoritative control-plane
+database, Redis for disposable acceleration and wake state, and VictoriaMetrics
+Single behind vmagent's bounded persistent queue. Workloads run as Incus system
+containers; Compose is only the control-plane infrastructure and smoke-test
+boundary.
+
+The Backend connects directly to each Incus server over HTTPS with mutual TLS.
+Each server also exposes the read-only node-exporter metrics endpoint. The
+node-exporter has no control or Incus mutation capability; durable desired state,
+intents, and reconciliation claims remain in PostgreSQL.
 
 ## Prepare
 
@@ -16,13 +23,22 @@ sudo chown 10001:10001 config.yaml
 sudo chmod 0400 config.yaml
 ```
 
-Replace every `CHANGE_ME` value. `POSTGRES_PASSWORD` must match the password in
+Replace every `CHANGE_ME` value in `.env` (and keep matching passwords in the
+YAML connection URLs). `POSTGRES_PASSWORD` must match the password in
 `DATABASE_URL`; `REDIS_PASSWORD` must match the password in `REDIS_URL`.
 Percent-encode reserved URI characters in connection URLs.
+`config.example.yaml` does **not** use `CHANGE_ME` for boot secrets:
+`auth.jwtSecret`, `ssh.keyEncryptionSecret`, `http.proxyToken`, and
+`ssh.proxyToken` are empty strings. Empty values fail closed at production
+boot; copy the example and fill them before `up`. See **Boot secrets, Incus
+reachability, and proxies** below.
 The Backend runs as UID/GID `10001:10001`; a root-owned mode-0600 bind-mounted
 configuration is unreadable to it. Keep the file owned by `10001:10001` with
 mode 0400, or use a deployment secret mechanism that presents the file
-read-only to that identity.
+read-only to that identity. Production Backend boot also asserts that the
+file is owned by the process uid and is not group/other-readable (mode
+`0400` or `0600` with no `0o077` bits). Compose cannot chmod the host
+bind-mount; set the mode on the host before `docker compose up`.
 
 Validate before starting:
 
@@ -37,12 +53,9 @@ existing loopback-only endpoint on `127.0.0.1:8428`. PostgreSQL, Redis and
 vmagent have no host-published ports.
 
 The default `runtime.role=all` Backend starts after healthy PostgreSQL and
-treats Redis as optional acceleration. Split `api` and `gateway` processes
-report unready while Redis is unavailable because interactive cross-role Agent
-RPC depends on it. Redis, VictoriaMetrics and vmagent retain service
-healthchecks; vmagent starts independently of
-VictoriaMetrics so its bounded disk queue can accept samples while the remote
-store is unavailable.
+treats Redis as optional acceleration. Redis, VictoriaMetrics and vmagent
+retain service healthchecks; vmagent starts independently of VictoriaMetrics so
+its bounded disk queue can accept samples while the remote store is unavailable.
 
 Useful probes:
 
@@ -55,23 +68,96 @@ docker compose --env-file .env exec vmagent \
 ```
 
 `/api/health/live` proves only that the Backend process is alive.
-`/api/health/ready` also proves exact PostgreSQL schema readiness. For split
-`api`/`gateway` roles it additionally proves Redis connectivity. VictoriaMetrics
+`/api/health/ready` also proves exact PostgreSQL schema readiness. VictoriaMetrics
 failure must not make the Backend unready; metric queries degrade independently.
-Readiness is held closed until role-specific WebSocket gateways are attached
+Readiness is held closed until the control-plane process is accepting traffic
 and is closed again before dependency shutdown. Authenticated administrators
 with `ViewMetricsAll` can query `/api/admin/metrics/runtime` for aggregate
 PostgreSQL pool pressure, Redis readiness, and bounded telemetry queue health;
 the response intentionally contains no SQL, keys, identities, or raw errors.
 
+## Boot secrets, Incus reachability, and proxies
+
+### Required YAML secrets
+
+These four fields gate production boot. They are empty in `config.example.yaml`
+(not `CHANGE_ME`). Empty values fail closed. Generate four independent secrets;
+do not reuse one value across fields:
+
+```bash
+openssl rand -hex 32   # auth.jwtSecret (>= 32 characters)
+openssl rand -hex 32   # ssh.keyEncryptionSecret
+openssl rand -hex 32   # http.proxyToken
+openssl rand -hex 32   # ssh.proxyToken
+```
+
+- `auth.jwtSecret`: at least 32 characters.
+- `ssh.keyEncryptionSecret`: dedicated secret; production must not fall back to
+  `auth.jwtSecret`.
+- `http.proxyToken` and `ssh.proxyToken`: 32–1024 character ASCII using only
+  letters, digits, `_`, or `-`. `openssl rand -hex 32` is valid. The HTTP and
+  SSH WebSocket handlers refuse to start with an empty token.
+
+### Incus reachability
+
+The Backend must inbound-reach every Incus API at `https://<host>:8443` over
+mTLS. NAT'd Incus servers are unsupported unless a VPN or tunnel presents a
+stable address the Backend can open. Do not use `https://127.0.0.1:8443` from a
+containerized Backend unless you have proven host routing for that path.
+`127.0.0.1` inside the container is the container itself. The Compose Backend
+service is not host-network by default.
+
+### SSH and HTTP proxies
+
+SSH and HTTP proxies are independent binaries under `tools/ssh-proxy` and
+`tools/http-proxy`. They are not Compose services. Prefer installing them on a
+host or netns that can reach both the Backend WebSocket and the guest LAN;
+do not add them to the default Compose file.
+
+```bash
+cargo build --release --locked --manifest-path tools/ssh-proxy/Cargo.toml
+cargo build --release --locked --manifest-path tools/http-proxy/Cargo.toml
+# binaries:
+#   tools/ssh-proxy/target/release/nyabase-ssh-proxy
+#   tools/http-proxy/target/release/nyabase-http-proxy
+```
+
+Listen addresses (env overrides):
+
+- SSH: `NYABASE_SSH_LISTEN`, default `0.0.0.0:2222`
+- HTTP: `NYABASE_HTTP_LISTEN`, default `0.0.0.0:8080`
+- HTTPS (optional): `NYABASE_HTTPS_LISTEN` (unset means HTTPS listen is off)
+
+`NYABASE_BACKEND_WS` must target Backend port **3001**, not 3000. The Rust
+defaults of `ws://127.0.0.1:3000/ws/ssh-proxy` and
+`ws://127.0.0.1:3000/ws/http-proxy` are wrong for this product:
+
+```bash
+# SSH proxy
+export NYABASE_BACKEND_WS='ws://<backend-host>:3001/ws/ssh-proxy'
+export SSH_PROXY_TOKEN='<same value as ssh.proxyToken>'
+export NYABASE_SSH_LISTEN='0.0.0.0:2222'
+
+# HTTP proxy
+export NYABASE_BACKEND_WS='ws://<backend-host>:3001/ws/http-proxy'
+export HTTP_PROXY_TOKEN='<same value as http.proxyToken>'
+export NYABASE_HTTP_LISTEN='0.0.0.0:8080'
+```
+
+Product instance NICs are macvlan. A macvlan child is unreachable from the
+Incus parent host that owns the parent interface. Run the proxies on a
+different machine or netns that can reach the LAN (and still reach Backend
+`:3001`). Do not assume localhost on the Incus parent can open SSH/HTTP to
+guest macvlan addresses.
+
 ## Data ownership and failure behavior
 
 - PostgreSQL is the sole source of truth. A PostgreSQL outage must stop new
-  control mutations and task dispatch instead of falling back to Redis.
+  control mutations and reconciliation instead of falling back to Redis.
 - Redis persistence is intentionally disabled. Keys are bounded and
-  reconstructable; durable Agent socket ownership remains in PostgreSQL.
-  Redis loss must not change authorization or task outcomes, but it makes split
-  API/Gateway interactive Agent RPC unavailable until Redis recovers.
+  reconstructable; durable intents and reconciliation claims remain in PostgreSQL.
+  Redis loss must not change authorization or intent outcomes. Disposable wake
+  and acceleration state becomes unavailable until Redis recovers.
 - Redis uses `noeviction`: memory pressure fails writes instead of silently
   evicting live login-limit windows. The process-local limiter remains active
   as defense in depth. Alert on `used_memory/maxmemory`, rejected commands and
@@ -79,16 +165,16 @@ the response intentionally contains no SQL, keys, identities, or raw errors.
 - vmagent stores unsent metrics in `vmagent-data`, up to
   `VMAGENT_MAX_DISK_USAGE_PER_URL`. It drops the oldest buffered metrics after
   the bound is reached.
-- VictoriaMetrics data lives in `vm-data`. Its outage must not block Agent
-  sessions or control-plane writes.
+- VictoriaMetrics data lives in `vm-data`. Its outage must not block control-plane
+  writes or Incus reconciliation.
 
 After Redis loss, flush, or restart, validate local login limiting and durable
-task convergence through PostgreSQL polling. In split roles, readiness and
-interactive RPC must fail closed during the outage and recover afterward.
+intent convergence through PostgreSQL polling. The control plane must remain
+available while disposable wake state recovers.
 During a VictoriaMetrics outage, monitor
 `vm_persistentqueue_bytes_pending` on vmagent: it should grow and then decrease
 after VictoriaMetrics returns. During a vmagent outage, PostgreSQL control
-mutations and Agent task dispatch must remain responsive; metric ingestion is
+mutations and Incus reconciliation must remain responsive; metric ingestion is
 bounded and lossy until vmagent returns.
 
 Do not place PostgreSQL, VictoriaMetrics and vmagent data in the same host
@@ -116,12 +202,8 @@ cluster only when a single instance cannot meet measured capacity or the
 metrics availability SLO requires instance-level failover.
 
 Budget PostgreSQL connections per Backend process. Every process uses its
-configured `database.poolMax` business pool, and every process serving the
-Gateway role reserves up to four additional connections for Agent session
-advisory locks. Keep
-`sum(database.poolMax) + 4 * gateway_processes + migration/operations headroom`
-below PostgreSQL `max_connections`. This extra pool is intentional: a slow
-session fence must not exhaust the business transaction pool.
+configured `database.poolMax` business pool. Keep the sum of those pools plus
+migration and operations headroom below PostgreSQL `max_connections`.
 
 Compose sets CPU, memory and PID ceilings for every service. Treat the example
 values as safety bounds, not reservations or sizing claims. Override them from
@@ -215,10 +297,10 @@ deploy/postgres-ops.sh restore-logical \
 The restore refuses PostgreSQL maintenance databases, checks the exact
 database name, and refuses every non-empty target without modifying it. There
 is no in-script replace mode. Provisioning or replacing a target database is a
-separate operator-owned workflow that must first verify its own backup,
+separate operator-owned procedure that must first verify its own backup,
 database owner, encoding, locale provider/collation/ctype, tablespace,
 connection limit, database ACL, comments, and `ALTER DATABASE` settings. Only
-after that workflow has produced and independently confirmed an empty database
+after that procedure has produced and independently confirmed an empty database
 should `restore-logical` be invoked. The logical archive and this helper do not
 claim to preserve database-level ACL, comments, or settings.
 
@@ -344,7 +426,145 @@ from the product SLO and measured baseline, not from this example deployment.
   `REDIS_TLS_SERVERNAME` when endpoint discovery uses a name different from the
   certificate identity. Verification is always enabled; there is no insecure
   skip-verify option. Do not downgrade to plaintext on a routed network.
-- The Compose Redis is single-node and is not HA. Split-role production
-  deployments must use a managed HA endpoint or tested Sentinel/failover setup,
+- The Compose Redis is single-node and is not HA. Production deployments that
+  require HA must use a managed endpoint or tested Sentinel/failover setup,
   with reconnect/readiness alarms and a failover drill. Add a VictoriaMetrics
   auth proxy only when telemetry endpoints cross a trust boundary.
+
+## Incus 客户端证书（10 年寿命与自动轮换）
+
+控制平面使用一张**共享**的 Incus 客户端证书，以 mTLS 调用每台 Incus。
+`openssl req -x509` 签发时使用 `-days 3650`（约 10 年）。不要把这张证
+书当成短期工作负载身份。
+
+### 90 天持续告警
+
+自 `notAfter` 剩余寿命 ≤ 90 天起，管理面**每一处**管理员布局都持续展示
+告警横幅，而不是只在打开某台服务器详情时才提示。服务器详情仍显示
+`notAfter`，以及暂存轮换向导状态：信任新证书 → 切换生效 → 吊销旧证书。
+
+### 自动与手动轮换
+
+- 自动：`runtime.role=all|worker` 约每 60 秒（带抖动）检查一次。进入 90 天窗口、没有暂存证书、也没有 pending `certificate.rotate` 意图时，以登录禁用的 `nyabase-system` 身份入队；找不到该用户则本轮跳过并记日志，不得冒充人类管理员。
+- 手动：具备 `ManageCertificates` 的管理员调用
+  `POST /api/admin/incus-client-certificate/rotate`（需 `expectedGeneration`）。
+  当前生效证书见 `GET /api/admin/incus-client-certificate`（`ManageCertificates` 或 `ManageServers` 只读）；轮换进度见
+  `GET /api/admin/incus-client-certificate/rotations/:id`。
+
+顺序必须是：**持久化暂存证书 → 在可达服务器上信任新证书 → 切换为生效行
+→ 吊销旧证书**（Incus `DELETE /1.0/certificates/{fingerprint}`）。信任行
+状态包含 `pending` / `trusted` / `verified` / `revoked` / `cleanup_failed`。
+Incus HTTP（信任 / 校验 / 吊销）必须在 `lockServerOnboarding` 事务之外执行，
+否则会撞上 `PG_IDLE_IN_TRANSACTION_TIMEOUT_MS`（30s）。
+
+从未上线、未知或不可达的服务器**不得**无限期阻塞整集群切换。对非在线主机
+最多重试 3 次，标记 `needs_attention`，一旦**当前在线**的每台服务器都已验证候选
+证书即可激活。吊销失败不回滚激活，后续调和再试，直到成功或 `cleanup_failed`。
+
+### 控制平面被锁在外面时的恢复
+
+在**每一台** Incus 主机上以 root 执行：
+
+```bash
+incus config trust list
+incus config trust add /path/to/new-nyabase-client.crt
+```
+
+先确认新客户端证书已作为受信任的 root 客户端加入，再让控制平面用新身份
+重试。不要在未把新证书加入 trust store 的情况下吊销旧指纹。
+
+### 引导 PEM 与数据库生效行
+
+`INCUS_CLIENT_CERT_FILE` / `INCUS_CLIENT_KEY_FILE`（以及 Compose secrets
+`incus_client_cert` / `incus_client_key`）只用于**引导第 1 代**：
+`DatabaseIncusClientFactory` 在库中尚无 `state=active` 行时读取这些文件，
+插入 `generation=1` 的加密私钥行。第 1 代之后，运行时客户端**只**使用数据
+库中的生效行；轮换不会回写引导 PEM。不要假设磁盘上的 bootstrap 文件仍与
+当前客户端身份一致。
+
+## 在每台 Incus 主机安装 node-exporter
+
+node-exporter 是独立进程（`packages/node-exporter`），**不是** Nest
+`runtime.role`。它只提供只读 HTTPS `/metrics`，没有 Incus 变更能力。仓库
+单元文件为 `deploy/nyabase-node-exporter.service`（e2e 停机演练使用
+`E2E_NODE_EXPORTER_UNIT`；与单元名对齐：
+`E2E_NODE_EXPORTER_UNIT=nyabase-node-exporter.service`）。
+
+### 构建与安装
+
+```bash
+pnpm --filter @nyabase/common build
+pnpm --filter @nyabase/node-exporter build
+sudo install -d -o nyabase-node -g nyabase-node /opt/nyabase/node-exporter
+# Copy packages/node-exporter/dist and production node_modules
+# (workspace package @nyabase/common must resolve).
+sudo install -D -m 0644 deploy/nyabase-node-exporter.service \
+  /etc/systemd/system/nyabase-node-exporter.service
+```
+
+进程用户使用 `nyabase-node`，不要用 root。CPU / PSI / sysctl 指标不需要
+特权。`nvidia-smi`（GPU 显示序号）通常只需 `video` / `render` 组；若进程
+跑不了 `nvidia-smi`，GPU 指标会被省略而不是崩溃。`smartctl` 与 `nft` 是
+可选采集，权限不足时静默省略。
+
+### TLS、token、监听地址
+
+```bash
+sudo useradd --system --no-create-home --home-dir /nonexistent \
+  --shell /usr/sbin/nologin nyabase-node
+sudo install -d -o nyabase-node -g nyabase-node -m 0750 /etc/nyabase/node-exporter
+# Issue a server certificate whose leaf fingerprint will be pinned on the
+# Server object (nodeMetrics.serverCertFingerprint).
+sudo openssl req -x509 -newkey rsa:3072 -nodes -days 365 \
+  -subj "/CN=$(hostname -f)" \
+  -keyout /etc/nyabase/node-exporter/tls.key \
+  -out /etc/nyabase/node-exporter/tls.crt
+sudo chmod 0400 /etc/nyabase/node-exporter/tls.key
+sudo chmod 0440 /etc/nyabase/node-exporter/tls.crt
+sudo chown nyabase-node:nyabase-node /etc/nyabase/node-exporter/tls.*
+```
+
+`/etc/nyabase/node-exporter.env`（mode 0600，属主 `nyabase-node`）：
+
+```bash
+NODE_EXPORTER_TOKEN=<openssl rand -base64 48，32–1024 字符且无空白>
+NODE_EXPORTER_TLS_KEY=/etc/nyabase/node-exporter/tls.key
+NODE_EXPORTER_TLS_CERT=/etc/nyabase/node-exporter/tls.crt
+NODE_EXPORTER_HOST=0.0.0.0
+NODE_EXPORTER_PORT=9109
+# Optional macvlan parent name for network evidence:
+# NODE_EXPORTER_PARENT_INTERFACE=eth0
+```
+
+启动命令与软件包 `scripts.start` 相同：`node dist/main.js`（需要 Node.js 22+）。
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable --now nyabase-node-exporter.service
+sudo systemctl status nyabase-node-exporter.service
+```
+
+防火墙只允许控制平面主机访问 TCP `9109`（或你设置的 `NODE_EXPORTER_PORT`）。
+不要把该端口暴露到宾客 / 公网网段。若主机有独立管理地址，把
+`NODE_EXPORTER_HOST` 绑到该地址。
+
+### 控制平面如何 scrape / pull
+
+在 Server 对象上配置（创建或 PATCH）：
+
+- `nodeMetrics.endpoint`：固定 HTTPS URL，路径必须是 `/metrics`，例如
+  `https://incus-host.example:9109/metrics`（对应库列
+  `node_metrics_endpoint`）。
+- `nodeMetrics.token`：与 `NODE_EXPORTER_TOKEN` 相同的 bearer；入库后加密，
+  API 只回 `tokenFingerprint`。
+- `nodeMetrics.serverCertFingerprint`：exporter 叶子证书指纹（TLS pin）。
+
+`runtime.role` 为 `all` 或 `worker` 的 Backend 由 `NodeMetricsScrapeService`
+每隔 15 秒（`NODE_METRICS_SCRAPE_INTERVAL_MS`）通过
+`AuthenticatedNodeMetricsPullAdapter` 拉取：HTTPS Bearer + 证书钉扎，写入
+VictoriaMetrics，并更新 `nodeMetrics.health`（`online` /
+`unreachable` / `unknown` / `unconfigured`）。服务器预检也会拉一次同一端
+点；GPU 的 nvidia-smi 序号来自这些只读样本，而不是 Incus。
+
+e2e 停机演练：`systemctl stop/start "$E2E_NODE_EXPORTER_UNIT"`。把该变量
+设为 `nyabase-node-exporter.service`。

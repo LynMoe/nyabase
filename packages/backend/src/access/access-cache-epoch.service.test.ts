@@ -10,7 +10,7 @@ describe('AccessCacheEpochService', () => {
     expect(epoch.current()).toBe(2);
   });
 
-  it('publishes post-commit invalidation and applies only remote Redis hints', async () => {
+  it('publishes invalidation and applies only remote Redis hints', async () => {
     let subscribed: ((payload: string) => void) | undefined;
     const redis = {
       gatewayId: 'process-a',
@@ -25,10 +25,7 @@ describe('AccessCacheEpochService', () => {
     await Promise.resolve();
 
     expect(epoch.bump()).toBe(1);
-    expect(redis.publish).toHaveBeenCalledWith(
-      'cache-invalidation',
-      'access:process-a',
-    );
+    expect(redis.publish).toHaveBeenCalledWith('cache-invalidation', 'access:process-a');
     subscribed?.('access:process-a');
     expect(epoch.current()).toBe(1);
     subscribed?.('access:process-b');
@@ -54,12 +51,10 @@ describe('AccessCacheEpochService', () => {
     await destroyed;
 
     expect(unsubscribe).toHaveBeenCalledOnce();
-    expect((epoch as unknown as {
-      unsubscribeRedis: unknown;
-    }).unsubscribeRedis).toBeNull();
+    expect((epoch as unknown as { unsubscribeRedis: unknown }).unsubscribeRedis).toBeNull();
   });
 
-  it('contains a rejected Redis subscription without an unhandled rejection', async () => {
+  it('contains a rejected Redis subscription', async () => {
     const redis = {
       subscribe: vi.fn().mockRejectedValue(new Error('redis unavailable')),
     };

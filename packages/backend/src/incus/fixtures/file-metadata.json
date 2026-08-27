@@ -1,0 +1,10 @@
+{
+  "headers": {
+    "x-incus-uid": "1000",
+    "x-incus-gid": "1000",
+    "x-incus-mode": "384",
+    "x-incus-type": "file",
+    "x-incus-modified": "2026-08-06T17:00:00Z"
+  },
+  "body": "authorized-key-fixture"
+}

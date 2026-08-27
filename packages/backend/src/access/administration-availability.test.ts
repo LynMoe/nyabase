@@ -138,7 +138,7 @@ describe('authoritative administration action projection', () => {
     expect(withAlternative.groups.admins?.canRemoveMembers['admin-b']?.allowed).toBe(true);
   });
 
-  it('does not treat a non-system group reusing the administrator system key as the built-in group', () => {
+  it('does not treat a non-system group reusing the administrator key as built-in', () => {
     const projected = projectAdministrationActions({
       actorId: 'actor',
       actorCapabilities: new Set([Capability.ManageUsers, Capability.ManageGroups]),
@@ -154,7 +154,7 @@ describe('authoritative administration action projection', () => {
     expect(projected.groups.imposter?.canRemoveMembers.target?.allowed).toBe(true);
   });
 
-  it('recomputes the final-administrator decision after a concurrent membership snapshot change', () => {
+  it('recomputes final-administrator decisions after a membership snapshot change', () => {
     const adminGroup = {
       id: 'admins', isSystem: true, systemKey: SystemGroupKey.Administrators,
       capabilities: [] as Capability[], hasResourceGrants: false,
@@ -167,30 +167,25 @@ describe('authoritative administration action projection', () => {
       id: 'alternative', status: UserStatus.Active, groupIds: ['admins'], hasDirectResourceGrants: false,
     };
 
-    const beforeMembershipChange = projectAdministrationActions({
+    const before = projectAdministrationActions({
       actorId: 'actor',
       actorCapabilities,
       groups: [adminGroup],
       users: [target, alternative],
     });
-    expect(beforeMembershipChange.users.target?.canDelete.allowed).toBe(true);
-    expect(beforeMembershipChange.groups.admins?.canRemoveMembers.target?.allowed).toBe(true);
+    expect(before.users.target?.canDelete.allowed).toBe(true);
 
-    // Another administrator leaves after the first UI snapshot. A refreshed
-    // serialized projection must fail closed; the mutation transaction's
-    // LAST_ACTIVE_ADMINISTRATOR assertion remains the authority if the UI has
-    // not refreshed yet.
-    const afterMembershipChange = projectAdministrationActions({
+    const after = projectAdministrationActions({
       actorId: 'actor',
       actorCapabilities,
       groups: [adminGroup],
       users: [target],
     });
-    expect(afterMembershipChange.users.target?.canDelete).toMatchObject({
+    expect(after.users.target?.canDelete).toMatchObject({
       allowed: false,
       reason: '不能删除最后一个活跃管理员',
     });
-    expect(afterMembershipChange.groups.admins?.canRemoveMembers.target).toMatchObject({
+    expect(after.groups.admins?.canRemoveMembers.target).toMatchObject({
       allowed: false,
       reason: '不能移出最后一个活跃管理员',
     });

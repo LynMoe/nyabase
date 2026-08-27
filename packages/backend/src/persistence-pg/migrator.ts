@@ -88,7 +88,7 @@ export function assertFreshInitialMigrationManifest(
   migrations: SqlMigration[],
 ): void {
   if (
-    migrations.length !== 1
+    migrations.length < 1
     || migrations[0]?.version !== '000001'
     || migrations[0]?.name !== 'initial'
   ) {

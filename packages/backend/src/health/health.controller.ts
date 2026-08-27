@@ -3,13 +3,12 @@ import { PgSchemaReadiness } from '../persistence-pg/persistence-pg.module.js';
 import { RedisDisposableAdapter } from '../runtime/redis-disposable.adapter.js';
 import { RuntimeRoleService } from '../runtime/runtime-role.service.js';
 import { RuntimeLifecycleService } from './runtime-lifecycle.service.js';
-import { StateCache } from '../gateway/state-cache.js';
 
 /**
  * Unauthenticated process probes. Liveness deliberately avoids dependencies;
  * readiness verifies authoritative PostgreSQL. Redis is additionally required
- * by split API/Gateway roles because addressed cross-role RPC cannot operate
- * without it; `all` and worker roles retain PostgreSQL-only correctness.
+ * by split API/Gateway roles because the disposable runtime boundary is used
+ * by the console bridge and other ephemeral sessions.
  */
 @Controller('health')
 export class HealthController {
@@ -18,7 +17,6 @@ export class HealthController {
     private readonly redis: RedisDisposableAdapter,
     private readonly runtimeRole: RuntimeRoleService,
     private readonly lifecycle: RuntimeLifecycleService,
-    private readonly stateCache: StateCache,
   ) {}
 
   @Get('live')
@@ -41,17 +39,11 @@ export class HealthController {
     }
     if (
       this.runtimeRole.requiresRedisAvailability()
-      && !this.redis.isAddressedRpcReady()
+      && !this.redis.isAvailable()
     ) {
       throw new ServiceUnavailableException({
         code: 'REDIS_NOT_READY',
-        message: 'Redis is required for split-role Agent RPC',
-      });
-    }
-    if (!this.stateCache.isProjectionReady()) {
-      throw new ServiceUnavailableException({
-        code: 'AGENT_PROJECTION_NOT_READY',
-        message: 'Durable Agent state projection is not ready',
+        message: 'Redis is required for disposable runtime state',
       });
     }
     return { status: 'ok' as const, database: 'ok' as const };

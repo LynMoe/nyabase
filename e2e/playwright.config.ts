@@ -9,7 +9,7 @@ import {
 
 interface E2eProfile {
   name: string;
-  cpuOnly: true;
+  runtime: 'incus';
   groups: string[];
   requiredEnv: string[];
   requiredCapabilities: unknown;
@@ -22,8 +22,8 @@ const profileName = process.env.E2E_PROFILE ?? 'smoke';
 const profilePath = join(e2eRoot, 'profiles', `${profileName}.yaml`);
 const profile = JSON.parse(readFileSync(profilePath, 'utf8')) as E2eProfile;
 
-if (profile.name !== profileName || profile.cpuOnly !== true) {
-  throw new Error(`Invalid CPU E2E profile contract: ${profilePath}`);
+if (profile.name !== profileName || profile.runtime !== 'incus') {
+  throw new Error(`Invalid Incus E2E profile: ${profilePath}`);
 }
 
 const topologyProvider = resolveTopologyProvider();
@@ -58,10 +58,6 @@ export default defineConfig({
   forbidOnly: true,
   preserveOutput: 'failures-only',
   reporter: [
-    // Console reporters can emit thrown errors and DOM-derived matcher
-    // context before the orchestrator has a chance to redact artifacts.
-    // Keep runner output secret-free and retain only the structured reports
-    // that the post-run sanitizer rewrites under the closed allowlist.
     ['./support/secret-safe-reporter.ts'],
     ['json', { outputFile: join(runtimeRoot, 'reports', 'playwright.json') }],
     ['junit', { outputFile: join(runtimeRoot, 'reports', 'junit.xml') }],
@@ -74,14 +70,9 @@ export default defineConfig({
     },
     actionTimeout: 15_000,
     navigationTimeout: 30_000,
-    // Playwright traces include request headers/bodies and DOM input values.
-    // The suite authenticates with per-run credentials and creates API-token
-    // secrets, so an unsanitized trace would violate the artifact contract.
     trace: 'off',
     screenshot: 'off',
     video: 'off',
-    // Chromium does not consume NODE_EXTRA_CA_CERTS. Trust only the per-run
-    // edge certificate's SPKI instead of disabling TLS verification globally.
     launchOptions: edgeSpki
       ? { args: [`--ignore-certificate-errors-spki-list=${edgeSpki}`] }
       : undefined,
@@ -89,7 +80,7 @@ export default defineConfig({
   metadata: {
     profile: profileName,
     runId,
-    cpuOnly: true,
+    runtime: 'incus',
     topologyProvider: topologyProvider.id,
     topologyEvidenceBoundary: topologyProvider.evidenceBoundary,
     requiredTopologyCapabilities: requiredCapabilities.join(','),

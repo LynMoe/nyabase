@@ -64,6 +64,13 @@ export interface AuditPage {
   total: number;
 }
 
+export interface AuditRetentionOptions {
+  retentionDays: number;
+  maxEntries: number;
+  enforceAge: boolean;
+  enforceCount: boolean;
+}
+
 @Injectable()
 export class AuditRepository {
   constructor(
@@ -161,38 +168,44 @@ export class AuditRepository {
     return row ? toAuditEvent(row) : null;
   }
 
-  enforceRetention(options: {
-    retentionDays: number;
-    maxEntries: number;
-    enforceAge: boolean;
-    enforceCount: boolean;
-  }): Promise<void> {
+  enforceRetention(options: AuditRetentionOptions): Promise<void> {
     return this.enforceRetentionWithClock(options);
+  }
+
+  /**
+   * Enforces retention in a caller-owned transaction so domain changes,
+   * audit insertion, and cleanup share one commit or rollback boundary.
+   */
+  enforceRetentionInTransaction(
+    transaction: Transaction<NyabaseDatabase>,
+    options: AuditRetentionOptions,
+  ): Promise<void> {
+    return this.enforceRetentionWithClock(options, undefined, transaction);
   }
 
   /** Test-only deterministic clock override; production uses PostgreSQL time. */
   enforceRetentionAtForTest(
-    options: {
-      retentionDays: number;
-      maxEntries: number;
-      enforceAge: boolean;
-      enforceCount: boolean;
-    },
+    options: AuditRetentionOptions,
     now: Date,
   ): Promise<void> {
     return this.enforceRetentionWithClock(options, now);
   }
 
-  private enforceRetentionWithClock(
-    options: {
-      retentionDays: number;
-      maxEntries: number;
-      enforceAge: boolean;
-      enforceCount: boolean;
-    },
-    nowOverride?: Date,
+  /** Test-only deterministic clock override for a caller-owned transaction. */
+  enforceRetentionInTransactionAtForTest(
+    transaction: Transaction<NyabaseDatabase>,
+    options: AuditRetentionOptions,
+    now: Date,
   ): Promise<void> {
-    return this.transactions.run(async (transaction) => {
+    return this.enforceRetentionWithClock(options, now, transaction);
+  }
+
+  private enforceRetentionWithClock(
+    options: AuditRetentionOptions,
+    nowOverride?: Date,
+    existingTransaction?: Transaction<NyabaseDatabase>,
+  ): Promise<void> {
+    const work = async (transaction: Transaction<NyabaseDatabase>): Promise<void> => {
       await sql`select pg_advisory_xact_lock(
         ${RETENTION_ADVISORY_LOCK},
         ${RETENTION_ADVISORY_KEY}
@@ -248,7 +261,8 @@ export class AuditRepository {
         .deleteFrom('audit.events')
         .where('id', 'in', ids.map((row) => row.id))
         .execute();
-    });
+    };
+    return existingTransaction ? work(existingTransaction) : this.transactions.run(work);
   }
 
   private async databaseClock(

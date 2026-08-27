@@ -1,128 +1,123 @@
 import {
-  Controller,
-  Get,
-  Post,
-  Delete,
-  Param,
   Body,
+  Controller,
+  Delete,
+  Get,
+  Param,
+  Put,
   UseGuards,
-  HttpCode,
-  Query,
 } from '@nestjs/common';
-import { GroupsService } from './groups.service.js';
-import { AccessResolverService } from '../access/access-resolver.service.js';
+import {
+  Capability,
+  zPutServerGrantRequest,
+  zPutSharedBackendGrantRequest,
+  zPutStoragePoolGrantRequest,
+  type EffectiveAccessDto,
+} from '@nyabase/common';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard.js';
 import { CapabilitiesGuard } from '../auth/guards/capabilities.guard.js';
 import { RequireCaps } from '../auth/decorators/require-caps.decorator.js';
 import { CurrentUser } from '../auth/decorators/current-user.decorator.js';
 import type { UserRecord } from '../domain/domain-records.js';
-import { Capability, zUpsertServerGrantRequest, zAddImageGrantRequest, EffectiveAccessDto } from '@nyabase/common';
-import {
-  parseMountSourceGrantTarget,
-  zMountSourceGrantTarget,
-} from '../mount-sources/mount-source-grant-target.js';
+import { AccessResolverService } from '../access/access-resolver.service.js';
+import { GroupsService } from './groups.service.js';
 
 @Controller('admin/users/:userId')
 @UseGuards(JwtAuthGuard, CapabilitiesGuard)
 export class UserGrantsController {
   constructor(
-    private groupsService: GroupsService,
-    private accessResolver: AccessResolverService,
+    private readonly groups: GroupsService,
+    private readonly access: AccessResolverService,
   ) {}
 
   @Get('server-grants')
   @RequireCaps(Capability.ManageGrants)
-  async listUserServerGrants(@Param('userId') userId: string) {
-    return this.groupsService.listUserServerGrants(userId);
+  listServerGrants(@Param('userId') userId: string) {
+    return this.groups.listUserServerGrants(userId);
   }
 
-  @Post('server-grants/:serverId')
+  @Put('server-grants/:serverId')
   @RequireCaps(Capability.ManageGrants)
-  async upsertUserServerGrant(
+  upsertServerGrant(
     @Param('userId') userId: string,
     @Param('serverId') serverId: string,
     @Body() body: unknown,
     @CurrentUser() actor: UserRecord,
   ) {
-    const dto = zUpsertServerGrantRequest.parse(body);
-    return this.groupsService.upsertUserServerGrant(userId, serverId, dto, actor.id);
+    return this.groups.upsertUserServerGrant(
+      userId,
+      serverId,
+      zPutServerGrantRequest.parse(body),
+      actor.id,
+    );
   }
 
   @Delete('server-grants/:serverId')
   @RequireCaps(Capability.ManageGrants)
-  async deleteUserServerGrant(
-    @Param('userId') userId: string,
-    @Param('serverId') serverId: string,
-    @CurrentUser() actor: UserRecord,
-  ) {
-    return this.groupsService.deleteUserServerGrant(userId, serverId, actor.id);
+  deleteServerGrant(@Param('userId') userId: string, @Param('serverId') serverId: string, @CurrentUser() actor: UserRecord) {
+    return this.groups.deleteUserServerGrant(userId, serverId, actor.id);
   }
 
-  @Get('image-grants')
+  @Get('storage-pool-grants')
   @RequireCaps(Capability.ManageGrants)
-  async listUserImageGrants(@Param('userId') userId: string) {
-    return this.groupsService.listUserImageGrants(userId);
+  listStoragePoolGrants(@Param('userId') userId: string) {
+    return this.groups.listUserStoragePoolGrants(userId);
   }
 
-  @Post('image-grants')
+  @Put('storage-pool-grants/:poolId')
   @RequireCaps(Capability.ManageGrants)
-  async addUserImageGrant(
+  upsertStoragePoolGrant(
     @Param('userId') userId: string,
+    @Param('poolId') poolId: string,
     @Body() body: unknown,
     @CurrentUser() actor: UserRecord,
   ) {
-    const { imageId, serverId } = zAddImageGrantRequest.parse(body);
-    return this.groupsService.addUserImageGrant(userId, imageId, serverId, actor.id);
+    return this.groups.upsertUserStoragePoolGrant(
+      userId,
+      poolId,
+      zPutStoragePoolGrantRequest.parse(body).expiresAt,
+      actor.id,
+    );
   }
 
-  @Delete('image-grants/:imageId/:serverId')
+  @Delete('storage-pool-grants/:poolId')
   @RequireCaps(Capability.ManageGrants)
-  @HttpCode(204)
-  async deleteUserImageGrant(
+  deleteStoragePoolGrant(@Param('userId') userId: string, @Param('poolId') poolId: string, @CurrentUser() actor: UserRecord) {
+    return this.groups.deleteUserStoragePoolGrant(userId, poolId, actor.id);
+  }
+
+  @Get('shared-backend-grants')
+  @RequireCaps(Capability.ManageGrants)
+  listSharedBackendGrants(@Param('userId') userId: string) {
+    return this.groups.listUserSharedBackendGrants(userId);
+  }
+
+  @Put('shared-backend-grants/:backendId')
+  @RequireCaps(Capability.ManageGrants)
+  upsertSharedBackendGrant(
     @Param('userId') userId: string,
-    @Param('imageId') imageId: string,
-    @Param('serverId') serverId: string,
-    @CurrentUser() actor: UserRecord,
-  ) {
-    await this.groupsService.deleteUserImageGrant(userId, imageId, serverId, actor.id);
-  }
-
-  @Get('mount-source-grants')
-  @RequireCaps(Capability.ManageGrants)
-  async listUserMountSourceGrants(@Param('userId') userId: string) {
-    return this.groupsService.listUserMountSourceGrants(userId);
-  }
-
-  @Post('mount-source-grants')
-  @RequireCaps(Capability.ManageGrants)
-  async upsertUserMountSourceGrant(
-    @Param('userId') userId: string,
+    @Param('backendId') backendId: string,
     @Body() body: unknown,
     @CurrentUser() actor: UserRecord,
   ) {
-    const target = zMountSourceGrantTarget.parse(body);
-    return this.groupsService.upsertUserMountSourceGrant(actor.id, userId, target);
+    return this.groups.upsertUserSharedBackendGrant(
+      userId,
+      backendId,
+      zPutSharedBackendGrantRequest.parse(body),
+      actor.id,
+    );
   }
 
-  @Delete('mount-source-grants/:sourceKind/:sourceId')
+  @Delete('shared-backend-grants/:backendId')
   @RequireCaps(Capability.ManageGrants)
-  @HttpCode(204)
-  async deleteUserMountSourceGrant(
-    @Param('userId') userId: string,
-    @Param('sourceKind') sourceKind: string,
-    @Param('sourceId') sourceId: string,
-    @Query('serverId') serverId: string | undefined,
-    @CurrentUser() actor: UserRecord,
-  ) {
-    const target = parseMountSourceGrantTarget(sourceKind, sourceId, serverId);
-    await this.groupsService.deleteUserMountSourceGrant(actor.id, userId, target);
+  deleteSharedBackendGrant(@Param('userId') userId: string, @Param('backendId') backendId: string, @CurrentUser() actor: UserRecord) {
+    return this.groups.deleteUserSharedBackendGrant(userId, backendId, actor.id);
   }
 
   @Get('effective-access')
   @RequireCaps(Capability.ManageGrants)
   async effectiveAccess(@Param('userId') userId: string): Promise<EffectiveAccessDto> {
-    await this.groupsService.assertUserScopeExists(userId);
-    const servers = await this.accessResolver.getEffectiveAccess(userId);
-    return { servers };
+    await this.groups.assertUserScopeExists(userId);
+    return { servers: await this.access.getEffectiveAccess(userId) };
   }
 }

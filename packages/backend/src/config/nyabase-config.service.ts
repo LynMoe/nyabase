@@ -1,4 +1,5 @@
 import { Injectable, OnModuleInit } from '@nestjs/common';
+import { statSync } from 'node:fs';
 import {
   controlPlaneConfigDefinitions,
   type ConfigSourceName,
@@ -71,6 +72,25 @@ export class NyabaseConfigService implements OnModuleInit {
     return this.field<T>(key).effectiveValue;
   }
 
+  /**
+   * Dedicated secret for SSH host keys, Incus client keys, and HTTP-proxy TLS
+   * material. Production never falls back to auth.jwtSecret.
+   */
+  keyEncryptionSecret(): string {
+    const dedicated = this.get<string>('ssh.keyEncryptionSecret')?.trim() ?? '';
+    if (dedicated) return dedicated;
+    if (this.get<string>('runtime.nodeEnv') === 'production') {
+      throw new Error(
+        'ssh.keyEncryptionSecret must be set to a dedicated secret in production',
+      );
+    }
+    const fallback = this.get<string>('auth.jwtSecret')?.trim() ?? '';
+    if (!fallback) {
+      throw new Error('ssh.keyEncryptionSecret is empty and auth.jwtSecret is unavailable');
+    }
+    return fallback;
+  }
+
   source(key: ControlPlaneConfigKey): ConfigSourceName {
     return this.field(key).source;
   }
@@ -99,11 +119,14 @@ export class NyabaseConfigService implements OnModuleInit {
   }
 
   publicSettings(): PublicSettingsDto {
+    const host = this.get<string>('ssh.proxyPublicHost')?.trim() ?? '';
+    const port = this.get<number>('ssh.proxyPublicPort');
     return {
       branding: {
         title: this.get<string>('branding.title'),
         description: this.get<string>('branding.description'),
       },
+      sshProxy: host && port ? { host, port } : null,
     };
   }
 
@@ -202,12 +225,33 @@ export class NyabaseConfigService implements OnModuleInit {
   }
 
   validateProductionSecrets(): void {
-    if (
-      this.get<string>('runtime.nodeEnv') === 'production'
-      && this.get<string>('auth.jwtSecret') === 'change-me-in-production'
-    ) {
+    if (this.get<string>('runtime.nodeEnv') !== 'production') return;
+    if (this.get<string>('auth.jwtSecret') === 'change-me-in-production') {
       throw new Error('auth.jwtSecret must be set to a strong secret in production');
     }
+    const keySecret = this.get<string>('ssh.keyEncryptionSecret')?.trim() ?? '';
+    if (!keySecret) {
+      throw new Error(
+        'ssh.keyEncryptionSecret must be set to a dedicated secret in production',
+      );
+    }
+    this.assertProductionConfigFileMode();
+  }
+
+  private assertProductionConfigFileMode(): void {
+    if (!this.snapshot.configFileIdentity.exists) return;
+    const path = this.snapshot.configFile;
+    const stat = statSync(path);
+    const uid = typeof process.getuid === 'function' ? process.getuid() : undefined;
+    const groupOtherBits = stat.mode & 0o077;
+    const ownerMismatch = uid !== undefined && stat.uid !== uid;
+    if (groupOtherBits === 0 && !ownerMismatch) return;
+    throw new Error(
+      `Production config file ${path} must be owned by the backend uid`
+      + (uid !== undefined ? ` (${uid})` : '')
+      + ' and chmod 0400 (not group/other-accessible). '
+      + 'chown it to the backend uid and chmod 0400.',
+    );
   }
 }
 

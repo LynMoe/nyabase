@@ -49,7 +49,7 @@ const FIELD_LABELS: Record<string, { label: string; description: string }> = {
   },
   'runtime.role': {
     label: '运行职责',
-    description: '当前进程承担全部、API、Agent 网关或后台 Worker 职责。',
+    description: '当前进程承担控制面 API 或后台 Worker 职责。',
   },
   'server.port': {
     label: 'HTTP 端口',
@@ -127,13 +127,9 @@ const FIELD_LABELS: Record<string, { label: string; description: string }> = {
     label: 'vmagent 地址',
     description: '指标写入使用的 vmagent 地址；持久缓冲和重试由 vmagent 负责。',
   },
-  'http.proxyToken': {
-    label: 'HTTP 代理令牌',
-    description: 'HTTP 代理进程连接后端时使用的 Bearer 令牌。',
-  },
   'ssh.keyEncryptionSecret': {
-    label: 'SSH 密钥加密密钥',
-    description: '用于加密数据库中内部 SSH 密钥的密钥。',
+    label: '密钥加密密钥',
+    description: '用于加密 SSH 代理主机密钥和 HTTP 代理 TLS 材料。',
   },
   'ssh.proxyToken': {
     label: 'SSH 代理令牌',

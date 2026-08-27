@@ -7,7 +7,7 @@ import {
 } from '@nestjs/common';
 import { randomUUID } from 'node:crypto';
 import { sql, type Kysely } from 'kysely';
-import { AuditAction, UserStatus } from '@nyabase/common';
+import { AuditAction } from '@nyabase/common';
 import { AuditService } from '../audit/audit.service.js';
 import type { NyabaseDatabase } from '../persistence-pg/database.types.js';
 import { PG_DATABASE } from '../persistence-pg/tokens.js';
@@ -23,6 +23,7 @@ import {
 } from './grant-expiry-enforcement.repository.js';
 import { UserServerResourcePurgeService } from './user-server-resource-purge.service.js';
 import { RuntimeRoleService } from '../runtime/runtime-role.service.js';
+import { SYSTEM_ACTOR_USERNAME } from '../groups/groups.service.js';
 
 const EXPIRY_INTERVAL_MS = 60_000;
 const EXPIRY_INTERVAL_JITTER_MS = 15_000;
@@ -39,7 +40,7 @@ interface CoveringGrantRow {
   mem_bytes: string | null;
   disk_bytes: string | null;
   gpu_mode: string | null;
-  gpu_indices: number[] | null;
+  gpu_pci_addresses: string[];
 }
 
 interface ExpiryPair {
@@ -50,10 +51,33 @@ interface ExpiryPair {
   needsWork: boolean;
 }
 
+type ResourceGrantKind = 'storage_pool' | 'shared_backend';
+
+interface ResourceGrantCandidate {
+  userId: string;
+  resourceId: string;
+  kind: ResourceGrantKind;
+  scopeRank: number;
+  priority: number;
+  tieBreaker: string;
+  expiresAt: Date | string | null;
+}
+
+interface ResourceExpiryPair {
+  userId: string;
+  resourceId: string;
+  kind: ResourceGrantKind;
+  phase: 'grace' | 'lost';
+  coveringExpiresAt: Date;
+  needsWork: boolean;
+}
+
 /**
  * Periodically enforces grant expiry:
  * - grace entry: lease-claimed one-shot stop + GrantExpired audit
- * - lost: lease-claimed purge of local containers and local data directories
+ * - lost server grants: lease-claimed purge of local containers and volumes
+ * - shared-backend/pool grace grants: lease per-container stop intents using retained volumes
+ * - lost shared-backend/pool grants: idempotent desired-state volume cleanup
  *
  * Multi-replica safety comes from PostgreSQL claim_token leases, not from
  * single-process assumptions.
@@ -132,7 +156,9 @@ export class GrantExpiryWorkerService implements OnModuleInit, OnModuleDestroy {
     try {
       const systemActorId = await this.resolveSystemActorId();
       if (!systemActorId) {
-        this.logger.warn('Grant expiry worker skipped: no active administrator');
+        this.logger.warn(
+          'Grant expiry worker skipped: nyabase-system actor is missing',
+        );
         return;
       }
       const phases = await this.scanAccessPhases();
@@ -158,6 +184,15 @@ export class GrantExpiryWorkerService implements OnModuleInit, OnModuleDestroy {
           if (didWork) handled += 1;
         }
       }
+      const resourcePhases = await this.scanResourceGrantPhases();
+      for (const pair of resourcePhases) {
+        if (this.stopped || handled >= MAX_PAIRS_PER_PASS) break;
+        if (!pair.needsWork) continue;
+        const didWork = pair.phase === 'grace'
+          ? await this.enforceResourceGraceStop(pair, systemActorId)
+          : await this.enforceResourceLostPurge(pair, systemActorId);
+        if (didWork) handled += 1;
+      }
     } catch (error) {
       this.logger.error(
         `Grant expiry worker pass failed: ${
@@ -169,12 +204,8 @@ export class GrantExpiryWorkerService implements OnModuleInit, OnModuleDestroy {
 
   private async resolveSystemActorId(): Promise<string | null> {
     const row = await this.database.selectFrom('iam.users as user')
-      .innerJoin('iam.group_members as membership', 'membership.user_id', 'user.id')
-      .innerJoin('iam.groups as group', 'group.id', 'membership.group_id')
       .select('user.id')
-      .where('user.status', '=', UserStatus.Active)
-      .where('group.system_key', '=', 'administrators')
-      .orderBy('user.numeric_id')
+      .where('user.username', '=', SYSTEM_ACTOR_USERNAME)
       .executeTakeFirst();
     return row?.id ?? null;
   }
@@ -192,7 +223,7 @@ export class GrantExpiryWorkerService implements OnModuleInit, OnModuleDestroy {
         direct_grant.mem_bytes,
         direct_grant.disk_bytes,
         direct_grant.gpu_mode,
-        direct_grant.gpu_indices
+        direct_grant.gpu_pci_addresses
       FROM iam.server_grants AS direct_grant
       WHERE direct_grant.user_id IS NOT NULL
       UNION ALL
@@ -207,7 +238,7 @@ export class GrantExpiryWorkerService implements OnModuleInit, OnModuleDestroy {
         inherited_grant.mem_bytes,
         inherited_grant.disk_bytes,
         inherited_grant.gpu_mode,
-        inherited_grant.gpu_indices
+        inherited_grant.gpu_pci_addresses
       FROM iam.group_members AS membership
       INNER JOIN iam.groups AS inherited_group
         ON inherited_group.id = membership.group_id
@@ -283,13 +314,7 @@ export class GrantExpiryWorkerService implements OnModuleInit, OnModuleDestroy {
             expression('server_id', '=', pair.serverId),
           ])),
         ))
-        .where((expression) => expression.or([
-          expression('dependency_kind', '=', 'container'),
-          expression.and([
-            expression('dependency_kind', '=', 'data_directory'),
-            expression('source_kind', '=', 'local'),
-          ]),
-        ]))
+        .where('dependency_kind', 'in', ['container', 'volume', 'volume_attachment'])
         .execute();
       for (const row of localDeps) {
         localResourceKeys.add(`${row.user_id}\0${row.server_id}`);
@@ -362,6 +387,13 @@ export class GrantExpiryWorkerService implements OnModuleInit, OnModuleDestroy {
           error instanceof Error ? error.message : String(error)
         }`,
       );
+      await this.enforcement.release(claim).catch((releaseError) => {
+        this.logger.warn(
+          `Grace stop lease release failed for ${userId}/${serverId}: ${
+            releaseError instanceof Error ? releaseError.message : String(releaseError)
+          }`,
+        );
+      });
       return false;
     }
   }
@@ -385,16 +417,172 @@ export class GrantExpiryWorkerService implements OnModuleInit, OnModuleDestroy {
       if (remaining) {
         await this.purge.purge(userId, serverId, actorId, 'expiry');
       }
+      if (await this.hasLocalRuntimeResources(userId, serverId)) {
+        return false;
+      }
       const completed = await this.enforcement.completeLost(claim);
-      return completed && remaining;
+      return completed;
     } catch (error) {
       this.logger.error(
         `Lost purge failed for ${userId}/${serverId}: ${
           error instanceof Error ? error.message : String(error)
         }`,
       );
+      await this.enforcement.release(claim).catch((releaseError) => {
+        this.logger.warn(
+          `Lost purge lease release failed for ${userId}/${serverId}: ${
+            releaseError instanceof Error ? releaseError.message : String(releaseError)
+          }`,
+        );
+      });
       return false;
     }
+  }
+
+  private async scanResourceGrantPhases(): Promise<ResourceExpiryPair[]> {
+    const [poolRows, backendRows] = await Promise.all([
+      this.database.selectFrom('iam.storage_pool_grants as grant')
+        .leftJoin('iam.group_members as member', 'member.group_id', 'grant.group_id')
+        .leftJoin('iam.groups as group', 'group.id', 'grant.group_id')
+        .select([
+          'grant.user_id',
+          'member.user_id as member_user_id',
+          'grant.pool_id as resource_id',
+          'grant.expires_at',
+          'grant.id',
+          'group.priority',
+        ])
+        .execute(),
+      this.database.selectFrom('iam.shared_backend_grants as grant')
+        .leftJoin('iam.group_members as member', 'member.group_id', 'grant.group_id')
+        .leftJoin('iam.groups as group', 'group.id', 'grant.group_id')
+        .select([
+          'grant.user_id',
+          'member.user_id as member_user_id',
+          'grant.shared_backend_id as resource_id',
+          'grant.expires_at',
+          'grant.id',
+          'group.priority',
+        ])
+        .execute(),
+    ]);
+    const candidates: ResourceGrantCandidate[] = [
+      ...poolRows.flatMap((row) => row.user_id || row.member_user_id
+        ? [{
+          userId: row.user_id ?? row.member_user_id!,
+          resourceId: row.resource_id,
+          kind: 'storage_pool' as const,
+          scopeRank: row.user_id ? 0 : 1,
+          priority: row.priority ?? 0,
+          tieBreaker: row.id,
+          expiresAt: row.expires_at,
+        }]
+        : []),
+      ...backendRows.flatMap((row) => row.user_id || row.member_user_id
+        ? [{
+          userId: row.user_id ?? row.member_user_id!,
+          resourceId: row.resource_id,
+          kind: 'shared_backend' as const,
+          scopeRank: row.user_id ? 0 : 1,
+          priority: row.priority ?? 0,
+          tieBreaker: row.id,
+          expiresAt: row.expires_at,
+        }]
+        : []),
+    ];
+    const byResource = new Map<string, ResourceGrantCandidate[]>();
+    for (const candidate of candidates) {
+      const key = `${candidate.kind}\0${candidate.userId}\0${candidate.resourceId}`;
+      const list = byResource.get(key) ?? [];
+      list.push(candidate);
+      byResource.set(key, list);
+    }
+    const now = new Date();
+    const result: ResourceExpiryPair[] = [];
+    for (const [key, resourceCandidates] of byResource) {
+      const [kind, userId, resourceId] = key.split('\0') as [
+        ResourceGrantKind,
+        string,
+        string,
+      ];
+      const winning = selectWinningResourceGrant(resourceCandidates, now);
+      const lostCandidates = resourceCandidates.filter(
+        (candidate) => classifyGrantExpiry(candidate.expiresAt, now) === 'lost',
+      );
+      if (winning) {
+        if (classifyGrantExpiry(winning.expiresAt, now) !== 'grace') continue;
+        const coveringExpiresAt = asCoveringExpiresAt(winning.expiresAt);
+        if (!coveringExpiresAt || !await this.hasResourceVolumes(userId, kind, resourceId)) continue;
+        result.push({
+          userId,
+          resourceId,
+          kind,
+          phase: 'grace',
+          coveringExpiresAt,
+          needsWork: true,
+        });
+        continue;
+      }
+      if (lostCandidates.length === 0) continue;
+      const coveringExpiresAt = latestCoveringExpiresAt(lostCandidates);
+      if (!coveringExpiresAt) continue;
+      if (!await this.hasResourceVolumes(userId, kind, resourceId)) continue;
+      result.push({
+        userId,
+        resourceId,
+        kind,
+        phase: 'lost',
+        coveringExpiresAt,
+        needsWork: true,
+      });
+    }
+    result.sort((left, right) =>
+      left.coveringExpiresAt.getTime() - right.coveringExpiresAt.getTime());
+    return result;
+  }
+
+  private async hasResourceVolumes(
+    userId: string,
+    kind: ResourceGrantKind,
+    resourceId: string,
+  ): Promise<boolean> {
+    let query = this.database.selectFrom('control.volumes')
+      .select('id')
+      .where('owner_id', '=', userId);
+    query = kind === 'storage_pool'
+      ? query.where('pool_id', '=', resourceId).where('shared_backend_id', 'is', null)
+      : query.where('shared_backend_id', '=', resourceId);
+    return Boolean(await query.executeTakeFirst());
+  }
+
+  private async enforceResourceLostPurge(
+    pair: ResourceExpiryPair,
+    actorId: string,
+  ): Promise<boolean> {
+    const result = pair.kind === 'storage_pool'
+      ? await this.purge.purgeStoragePoolVolumes(pair.userId, pair.resourceId, actorId)
+      : await this.purge.purgeSharedBackendVolumes(pair.userId, pair.resourceId, actorId);
+    return result.volumeIds.length > 0;
+  }
+
+  private async enforceResourceGraceStop(
+    pair: ResourceExpiryPair,
+    actorId: string,
+  ): Promise<boolean> {
+    const result = pair.kind === 'storage_pool'
+      ? await this.purge.stopRunningContainersForStoragePool(
+        pair.userId,
+        pair.resourceId,
+        actorId,
+        this.workerId,
+      )
+      : await this.purge.stopRunningContainersForSharedBackend(
+        pair.userId,
+        pair.resourceId,
+        actorId,
+        this.workerId,
+      );
+    return result.intentIds.length > 0;
   }
 
   private async hasLocalRuntimeResources(
@@ -406,16 +594,28 @@ export class GrantExpiryWorkerService implements OnModuleInit, OnModuleDestroy {
       .select('id')
       .where('user_id', '=', userId)
       .where('server_id', '=', serverId)
-      .where((expression) => expression.or([
-        expression('dependency_kind', '=', 'container'),
-        expression.and([
-          expression('dependency_kind', '=', 'data_directory'),
-          expression('source_kind', '=', 'local'),
-        ]),
-      ]))
+      .where('dependency_kind', 'in', ['container', 'volume', 'volume_attachment'])
       .executeTakeFirst();
     return Boolean(dependency);
   }
+}
+
+function selectWinningResourceGrant(
+  candidates: readonly ResourceGrantCandidate[],
+  now: Date,
+): ResourceGrantCandidate | null {
+  const live = candidates.filter((candidate) => classifyGrantExpiry(candidate.expiresAt, now) === 'live');
+  const grace = candidates.filter((candidate) => classifyGrantExpiry(candidate.expiresAt, now) === 'grace');
+  const pool = live.length > 0 ? live : grace;
+  if (pool.length === 0) return null;
+  return [...pool].sort((left, right) => {
+    if (left.scopeRank !== right.scopeRank) return left.scopeRank - right.scopeRank;
+    const leftExpires = expiresAtSortKey(left.expiresAt);
+    const rightExpires = expiresAtSortKey(right.expiresAt);
+    if (leftExpires !== rightExpires) return rightExpires > leftExpires ? 1 : -1;
+    if (left.priority !== right.priority) return right.priority - left.priority;
+    return right.tieBreaker.localeCompare(left.tieBreaker);
+  })[0] ?? null;
 }
 
 function enforcementKey(
@@ -433,7 +633,7 @@ function asCoveringExpiresAt(value: Date | string | null | undefined): Date | nu
 }
 
 function latestCoveringExpiresAt(
-  candidates: readonly GrantExpiryCandidate[],
+  candidates: readonly { expiresAt: Date | string | null }[],
 ): Date | null {
   let best: Date | null = null;
   let bestKey = Number.NEGATIVE_INFINITY;

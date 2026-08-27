@@ -8,7 +8,7 @@ describe('CapabilitiesGuard', () => {
   it('allows authenticated non-admin routes without capability metadata', async () => {
     const guard = makeGuard(undefined);
 
-    await expect(guard.canActivate(makeContext('/api/v2/containers'))).resolves.toBe(true);
+    await expect(guard.canActivate(makeContext('/api/containers'))).resolves.toBe(true);
   });
 
   it('denies admin routes when capability metadata is missing', async () => {
@@ -42,6 +42,16 @@ describe('CapabilitiesGuard', () => {
     });
 
     await expect(guard.canActivate(makeContext('/api/admin/catalog'))).rejects.toBeInstanceOf(ForbiddenException);
+  });
+
+  it('treats method-level empty RequireCaps as an override so anyCaps can authorize', async () => {
+    const guard = makeGuard({
+      all: [],
+      any: [Capability.ManageUsers, Capability.ManageGrants],
+      userCaps: new Set([Capability.ManageGrants]),
+    });
+
+    await expect(guard.canActivate(makeContext('/api/admin/users'))).resolves.toBe(true);
   });
 
   it('enforces both AND and OR metadata when both are present', async () => {

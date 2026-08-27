@@ -1,203 +1,135 @@
+import { useState } from 'react';
 import { Link } from '@tanstack/react-router';
-import { AlertTriangle, Loader2, Play, Square, RotateCw, Trash2, Terminal } from 'lucide-react';
-import { AgentTaskStatus, ContainerStatus } from '@nyabase/common';
-import type { ContainerAction, ContainerView } from '@nyabase/common';
+import { ChevronRight, Play, RotateCw, Square, TriangleAlert } from 'lucide-react';
+import type { ContainerAction, ContainerDto } from '@nyabase/common';
 import { Badge } from '../ui/badge.js';
 import { Button } from '../ui/button.js';
-import { formatBytesLimit, formatCpu } from '../../lib/utils.js';
-import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '../ui/tooltip.js';
-import { isPendingAgentTaskStatus } from '../../hooks/use-agent-task-tracker.js';
-
-export const STATUS_VARIANT: Record<string, 'success' | 'destructive' | 'warning' | 'secondary' | 'outline'> = {
-  [ContainerStatus.Running]: 'success',
-  [ContainerStatus.Exited]: 'secondary',
-  [ContainerStatus.Creating]: 'warning',
-  [ContainerStatus.Paused]: 'warning',
-  [ContainerStatus.Restarting]: 'warning',
-  [ContainerStatus.Dead]: 'destructive',
-  [ContainerStatus.Unknown]: 'outline',
-};
-
-const TASK_STATUS_LABELS: Record<AgentTaskStatus, string> = {
-  [AgentTaskStatus.Pending]: '任务处理中',
-  [AgentTaskStatus.Succeeded]: '已完成',
-  [AgentTaskStatus.Failed]: '失败',
-};
-
-function actionTitle(c: ContainerView, action: ContainerAction): string | undefined {
-  const availability = c.actions[action];
-  return availability.enabled ? undefined : availability.message ?? availability.reason;
-}
-
-function taskStatusLabel(status: AgentTaskStatus | string | null | undefined): string {
-  return status ? TASK_STATUS_LABELS[status as AgentTaskStatus] ?? String(status) : '任务';
-}
-
-function taskBadgeTitle(task: ContainerView['activeTask']): string | undefined {
-  if (!task) return undefined;
-  return `${task.kind} · ${taskStatusLabel(task.status)}`;
-}
-
-function taskVariant(status: AgentTaskStatus | string | null | undefined): 'success' | 'destructive' | 'warning' | 'secondary' | 'outline' {
-  if (status === AgentTaskStatus.Failed) return 'destructive';
-  if (status === AgentTaskStatus.Succeeded) return 'success';
-  if (isPendingAgentTaskStatus(status)) return 'warning';
-  return 'outline';
-}
-
-function taskErrorMessage(task: ContainerView['activeTask']): string | null {
-  if (!task || typeof task.error !== 'object' || task.error === null) return null;
-  const message = (task.error as { message?: unknown }).message;
-  return typeof message === 'string' && message.trim() ? message : null;
-}
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from '../ui/dialog.js';
+import { formatBytes, formatCpu } from '../../lib/utils.js';
+import { containerStatusLabel, lifecyclePhaseLabel } from '../../lib/status-labels.js';
 
 export function ContainerRow({
-  container: c,
+  container,
+  admin = false,
   onAction,
-  linkToDetail = true,
-  detailTo = '/containers/$containerId',
+  actionPending = false,
 }: {
-  container: ContainerView;
-  onAction: (action: ContainerAction, containerId: string, name: string) => void;
-  linkToDetail?: boolean;
-  detailTo?: '/containers/$containerId' | '/manage/containers/$containerId';
+  container: ContainerDto;
+  admin?: boolean;
+  onAction: (action: ContainerAction, container: ContainerDto) => void;
+  actionPending?: boolean;
 }) {
-  const running = c.runtime.status === ContainerStatus.Running;
-  const showRuntimeStatus = c.runtime.bound && c.runtime.status !== ContainerStatus.Unknown;
-  const task = c.activeTask;
-  const pendingTask = isPendingAgentTaskStatus(task?.status) ? task : null;
-  const domainFailed = !task && Boolean(c.failureReason?.trim() || c.failureCode);
-  const statusLabel = task
-    ? taskStatusLabel(task.status)
-    : domainFailed
-    ? '失败'
-    : showRuntimeStatus
-    ? (c.runtime.status ?? ContainerStatus.Unknown)
-    : '未绑定';
-  const statusVariant = task
-    ? taskVariant(task.status)
-    : domainFailed
-    ? 'destructive'
-    : showRuntimeStatus
-    ? STATUS_VARIANT[String(c.runtime.status)] ?? 'outline'
-    : 'outline';
-  const detailItems = [
-    c.runtime.ip ? { key: 'ip', value: c.runtime.ip, className: 'font-mono' } : null,
-    { key: 'cpu', value: formatCpu(c.resources.cpuMillis) },
-    { key: 'mem', value: formatBytesLimit(c.resources.memBytes) },
-    c.resources.gpuIndices.length > 0 ? { key: 'gpu', value: `GPU ${c.resources.gpuIndices.join(',')}` } : null,
-  ].filter((item): item is { key: string; value: string; className?: string } => item !== null);
-  const taskFailure = taskErrorMessage(task);
-  const failureInfo = c.failureReason?.trim()
-    ? c.failureReason
-    : taskFailure
-    ? taskFailure
-    : c.failureCode ?? null;
+  const detailTo = admin ? '/manage/containers/$containerId' : '/containers/$containerId';
+  const status = container.actual.status;
+  const [confirmAction, setConfirmAction] = useState<'stop' | 'restart' | null>(null);
+
+  const requestAction = (action: Extract<ContainerAction, 'start' | 'stop' | 'restart'>) => {
+    if (action === 'stop' || action === 'restart') {
+      setConfirmAction(action);
+      return;
+    }
+    onAction(action, container);
+  };
+
+  const confirmPendingAction = () => {
+    if (!confirmAction) return;
+    onAction(confirmAction, container);
+    setConfirmAction(null);
+  };
 
   return (
-    <div className="flex items-center gap-4 px-4 py-3">
-      <div className="flex-1 min-w-0 space-y-1">
-        <div className="flex items-center gap-2 flex-wrap">
-          {linkToDetail ? (
-            <Link
-              to={detailTo}
-              params={{ containerId: c.id }}
-              search={{ tab: 'overview' }}
-              className="font-medium text-sm hover:underline"
-            >
-              {c.name}
-            </Link>
-          ) : (
-            <span className="font-medium text-sm">{c.name}</span>
-          )}
-          <Badge variant={statusVariant} title={taskBadgeTitle(task)}>
-            {pendingTask && <Loader2 className="mr-1 h-3 w-3 animate-spin" />}
-            {statusLabel}
+    <div className="flex flex-wrap items-center justify-between gap-3 px-4 py-3">
+      <Link to={detailTo} params={{ containerId: container.id }} search={{ tab: 'overview' }} className="min-w-0 flex-1">
+        <div className="flex min-w-0 items-center gap-2">
+          <span className="truncate text-sm font-medium">{container.name}</span>
+          <Badge
+            variant={status === 'running' ? 'success' : container.needsAttention ? 'destructive' : 'secondary'}
+            title={status}
+          >
+            {containerStatusLabel(status)}
           </Badge>
-          {failureInfo && (
-            <TooltipProvider>
-              <Tooltip>
-                <TooltipTrigger asChild>
-                  <button
-                    type="button"
-                    className="inline-flex h-4 w-4 items-center justify-center rounded-full text-destructive transition-colors hover:text-destructive/80 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-                    aria-label="失败信息"
-                  >
-                    <AlertTriangle className="h-3.5 w-3.5" />
-                  </button>
-                </TooltipTrigger>
-                <TooltipContent>
-                  <p className="max-w-xs break-words">{failureInfo}</p>
-                </TooltipContent>
-              </Tooltip>
-            </TooltipProvider>
+          {container.lifecyclePhase !== 'active' && (
+            <Badge variant="warning" title={container.lifecyclePhase}>
+              {lifecyclePhaseLabel(container.lifecyclePhase)}
+            </Badge>
           )}
+          {container.needsAttention && <TriangleAlert className="h-3.5 w-3.5 text-destructive" aria-label="需要关注" />}
         </div>
-        {detailItems.length > 0 && (
-          <div className="flex items-center gap-3 text-xs text-muted-foreground">
-            {detailItems.map((item) => (
-              <span key={item.key} className={item.className}>{item.value}</span>
-            ))}
-          </div>
-        )}
+        <p className="mt-1 truncate text-xs text-muted-foreground">
+          {admin && (container.ownerName ?? container.ownerId) ? `${container.ownerName ?? container.ownerId} · ` : ''}
+          {container.serverName} · {container.routedIp ?? '等待容器 IP'} · {formatCpu(container.cpuMillis)} · {formatBytes(container.memBytes)}
+        </p>
+      </Link>
+      <div className="flex shrink-0 gap-1">
+        <ActionButton action="start" icon={Play} container={container} onClick={() => requestAction('start')} label="启动" pending={actionPending} />
+        <ActionButton action="stop" icon={Square} container={container} onClick={() => requestAction('stop')} label="停止" pending={actionPending} />
+        <ActionButton action="restart" icon={RotateCw} container={container} onClick={() => requestAction('restart')} label="重启" pending={actionPending} />
+        <Button size="icon" variant="ghost" asChild aria-label="详情">
+          <Link to={detailTo} params={{ containerId: container.id }} search={{ tab: 'overview' }}>
+            <ChevronRight className="h-4 w-4" />
+          </Link>
+        </Button>
       </div>
 
-      <div className="flex items-center gap-1 shrink-0">
-        {running ? (
-          <Button
-            size="icon"
-            variant="ghost"
-            className="h-8 w-8"
-            title={actionTitle(c, 'stop')}
-            disabled={!c.actions.stop.enabled}
-            onClick={() => onAction('stop', c.id, c.name)}
-          >
-            <Square className="h-3.5 w-3.5" />
-          </Button>
-        ) : (
-          <Button
-            size="icon"
-            variant="ghost"
-            className="h-8 w-8"
-            title={actionTitle(c, 'start')}
-            disabled={!c.actions.start.enabled}
-            onClick={() => onAction('start', c.id, c.name)}
-          >
-            <Play className="h-3.5 w-3.5" />
-          </Button>
-        )}
-        <Button
-          size="icon"
-          variant="ghost"
-          className="h-8 w-8"
-          title={actionTitle(c, 'restart')}
-          disabled={!c.actions.restart.enabled}
-          onClick={() => onAction('restart', c.id, c.name)}
-        >
-          <RotateCw className="h-3.5 w-3.5" />
-        </Button>
-        {c.actions.console.enabled && linkToDetail ? (
-          <Button size="icon" variant="ghost" className="h-8 w-8" asChild>
-            <Link to={detailTo} params={{ containerId: c.id }} search={{ tab: 'console' }}>
-              <Terminal className="h-3.5 w-3.5" />
-            </Link>
-          </Button>
-        ) : (
-          <Button size="icon" variant="ghost" className="h-8 w-8" disabled title={actionTitle(c, 'console')}>
-            <Terminal className="h-3.5 w-3.5" />
-          </Button>
-        )}
-        <Button
-          size="icon"
-          variant="ghost"
-          className="h-8 w-8 text-destructive hover:text-destructive"
-          title={actionTitle(c, 'delete')}
-          disabled={!c.actions.delete.enabled}
-          onClick={() => onAction('delete', c.id, c.name)}
-        >
-          <Trash2 className="h-3.5 w-3.5" />
-        </Button>
-      </div>
+      <Dialog open={Boolean(confirmAction)} onOpenChange={(open) => { if (!open) setConfirmAction(null); }}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>{confirmAction === 'stop' ? '停止容器？' : '重启容器？'}</DialogTitle>
+            <DialogDescription>
+              {confirmAction === 'stop'
+                ? `将停止容器「${container.name}」。运行中的进程与 SSH 会话会中断。`
+                : `将重启容器「${container.name}」。运行中的进程与 SSH 会话会短暂中断。`}
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setConfirmAction(null)}>取消</Button>
+            <Button
+              variant={confirmAction === 'stop' ? 'destructive' : 'default'}
+              onClick={confirmPendingAction}
+              disabled={actionPending}
+            >
+              {actionPending ? '提交中...' : confirmAction === 'stop' ? '确认停止' : '确认重启'}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
+  );
+}
+
+function ActionButton({
+  action,
+  icon: Icon,
+  container,
+  onClick,
+  label,
+  pending,
+}: {
+  action: Extract<ContainerAction, 'start' | 'stop' | 'restart'>;
+  icon: typeof Play;
+  container: ContainerDto;
+  onClick: () => void;
+  label: string;
+  pending: boolean;
+}) {
+  const availability = container.actions[action];
+  return (
+    <Button
+      size="icon"
+      variant="ghost"
+      aria-label={label}
+      title={availability.enabled ? label : availability.message ?? availability.reason}
+      disabled={!availability.enabled || pending}
+      onClick={onClick}
+    >
+      <Icon className="h-4 w-4" />
+    </Button>
   );
 }

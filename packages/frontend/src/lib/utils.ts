@@ -5,6 +5,8 @@ export function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs));
 }
 
+export const GIB = 1024 ** 3;
+
 export function formatBytes(bytes: number, decimals = 2): string {
   if (bytes === 0) return '0 B';
   const k = 1024;
@@ -13,10 +15,73 @@ export function formatBytes(bytes: number, decimals = 2): string {
   return `${parseFloat((bytes / Math.pow(k, i)).toFixed(decimals))} ${sizes[i]}`;
 }
 
+/** Human-friendly GiB string for number inputs (strips trailing zeros). */
+export function formatGibInput(bytes: number): string {
+  const gib = bytes / GIB;
+  return Number.isInteger(gib) ? String(gib) : parseFloat(gib.toFixed(3)).toString();
+}
+
+/** Human-friendly vCPU string for number inputs (millis → cores). */
+export function formatVcpuInput(millis: number): string {
+  const vcpu = millis / 1000;
+  return Number.isInteger(vcpu) ? String(vcpu) : parseFloat(vcpu.toFixed(3)).toString();
+}
+
+export function gibToBytes(gib: number): number {
+  return Math.round(gib * GIB);
+}
+
+export function vcpuToMillis(vcpu: number): number {
+  return Math.round(vcpu * 1000);
+}
+
 export function formatCpu(millis: number): string {
   if (millis === 0) return '不限制';
-  if (millis >= 1000) return `${(millis / 1000).toFixed(1)} vCPU`;
+  if (millis >= 1000) {
+    const cores = millis / 1000;
+    const label = Number.isInteger(cores) ? String(cores) : cores.toFixed(1);
+    return `${label} 核`;
+  }
   return `${millis}m`;
+}
+
+/** Soft hint under GiB inputs — avoid raw byte clutter. */
+export function approxGibHint(bytes: number): string {
+  const gib = bytes / GIB;
+  const label = Number.isInteger(gib) ? String(gib) : parseFloat(gib.toFixed(2)).toString();
+  return `约 ${label} GiB`;
+}
+
+/**
+ * Capacity "available" label for grant-backed storage.
+ * Unlimited grant + null available ⇒ 「不限」 (not 「未知」).
+ */
+export function grantAvailableLabel(
+  availableBytes: number | null,
+  grantLimitBytes: number | null,
+): string {
+  const unlimited = grantLimitBytes === null || grantLimitBytes === 0;
+  if (availableBytes === null && unlimited) return '不限';
+  if (availableBytes === null) return '未知';
+  return approxGibHint(availableBytes).replace(/^约 /, '');
+}
+
+/** Shared-backend available bytes: total × overcommit − used when computable. */
+export function sharedBackendAvailableBytes(backend: {
+  totalBytes: number | null;
+  usedBytes: number | null;
+  overcommitRatio: number;
+}): number | null {
+  if (backend.totalBytes === null || backend.usedBytes === null) return null;
+  if (!Number.isFinite(backend.overcommitRatio) || backend.overcommitRatio < 1) return null;
+  return Math.max(0, backend.totalBytes * backend.overcommitRatio - backend.usedBytes);
+}
+
+/** used / total display; 「未知」 only when values are truly missing. */
+export function usedTotalLabel(usedBytes: number | null, totalBytes: number | null): string {
+  if (totalBytes === null && usedBytes === null) return '未知';
+  if (totalBytes === null) return `${formatBytes(usedBytes ?? 0)} / 未知`;
+  return `${formatBytes(usedBytes ?? 0)} / ${formatBytes(totalBytes)}`;
 }
 
 export function formatBytesLimit(bytes: number): string {
@@ -33,15 +98,6 @@ export function formatBytesCompact(bytes: number): string {
   if (bytes >= 1024 ** 2) return `${(bytes / 1024 ** 2).toFixed(0)}M`;
   if (bytes >= 1024) return `${Math.round(bytes / 1024)}K`;
   return `${bytes}B`;
-}
-
-/** Human-readable data disk title: prefer admin label, else last path segment (no leading slash). */
-export function dataDiskDisplayName(mountPoint: string, label?: string | null): string {
-  const t = label?.trim();
-  if (t) return t;
-  const trimmed = mountPoint.replace(/\/+$/, '');
-  const seg = trimmed.split('/').filter(Boolean).pop();
-  return seg ?? mountPoint;
 }
 
 /**

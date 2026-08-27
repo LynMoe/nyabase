@@ -13,6 +13,8 @@ export class CapabilitiesGuard implements CanActivate {
   ) {}
 
   async canActivate(context: ExecutionContext): Promise<boolean> {
+    // Method-level @RequireCaps() (including an empty list) overrides class CAPS_KEY
+    // so allSatisfied is true and method-level @RequireAnyCaps can authorize catalog GETs.
     const requiredCaps = this.reflector.getAllAndOverride<Capability[]>(CAPS_KEY, [
       context.getHandler(),
       context.getClass(),

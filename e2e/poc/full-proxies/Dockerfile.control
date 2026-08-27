@@ -1,7 +1,0 @@
-FROM node:22-bookworm
-
-WORKDIR /app
-COPY control-server.mjs /app/control-server.mjs
-
-USER 65532:65532
-ENTRYPOINT ["node", "/app/control-server.mjs"]

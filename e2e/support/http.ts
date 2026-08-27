@@ -10,7 +10,7 @@ export async function expectJson<T>(
   const expectedStatuses = Array.isArray(status) ? status : [status];
   expect(
     expectedStatuses.includes(response.status()),
-    `${response.url()} returned ${response.status()}, expected ${expectedStatuses.join(' or ')}; response body withheld`,
+    `${response.url()} returned ${response.status()}, expected ${expectedStatuses.join(' or ')}; body=${body.slice(0, 800)}`,
   ).toBe(true);
   expect(response.headers()['content-type'] ?? '').toContain('application/json');
   try {

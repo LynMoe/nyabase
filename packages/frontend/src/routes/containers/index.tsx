@@ -1,293 +1,144 @@
 import { createFileRoute } from '@tanstack/react-router';
-import { useQuery, useQueryClient } from '@tanstack/react-query';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useMemo, useState } from 'react';
+import { Plus, RefreshCw, Server } from 'lucide-react';
+import type { ContainerAction, ContainerDto, IntentAcceptedDto, UserServerDto } from '@nyabase/common';
 import { api } from '../../lib/api.js';
+import { Badge } from '../../components/ui/badge.js';
+import { Button } from '../../components/ui/button.js';
 import { Card, CardContent } from '../../components/ui/card.js';
-import { Button, buttonVariants } from '../../components/ui/button.js';
-import { Separator } from '../../components/ui/separator.js';
-import {
-  AlertDialog,
-  AlertDialogContent,
-  AlertDialogHeader,
-  AlertDialogTitle,
-  AlertDialogDescription,
-  AlertDialogFooter,
-  AlertDialogCancel,
-  AlertDialogAction,
-} from '../../components/ui/alert-dialog.js';
-import { Plus, Container, RefreshCw, Server } from 'lucide-react';
-import type {
-  ContainerView,
-  EffectiveAccessDto,
-  UserServerDto,
-} from '@nyabase/common';
 import { ContainerRow } from '../../components/containers/container-row.js';
 import { CreateContainerDialog } from '../../components/containers/create-container-dialog.js';
-import { useContainerActions } from '../../hooks/use-container-actions.js';
-import { cn } from '../../lib/utils.js';
+import { QueryErrorState, QueryLoadingState } from '../../components/query-state.js';
 import { queryKeys } from '../../lib/query-keys.js';
-import { QueryErrorState } from '../../components/query-state.js';
-import { queryPollInterval } from '../../lib/query-lifecycle.js';
-
-function ServerContainersSection({
-  server,
-  items,
-  onCreate,
-  onAction,
-}: {
-  server: UserServerDto;
-  items: ContainerView[];
-  onCreate: () => void;
-  onAction: (action: import('@nyabase/common').ContainerAction, containerId: string, name: string) => void;
-}) {
-  const online = server.status === 'online';
-  return (
-    <div className="space-y-3">
-      <div className="flex items-center justify-between">
-        <div className="flex items-center gap-2">
-          <Server className="h-4 w-4 text-muted-foreground" />
-          <span className="font-semibold text-foreground">{server.name}</span>
-          <span
-            className={`text-xs px-1.5 py-0.5 rounded-full font-medium ${
-              online ? 'bg-green-50 text-green-700' : 'bg-muted text-muted-foreground'
-            }`}
-          >
-            {online ? '在线' : '离线'}
-          </span>
-          <span className="text-xs text-muted-foreground">{items.length} 个容器</span>
-        </div>
-        <Button size="sm" variant="outline" onClick={onCreate}>
-          <Plus className="h-4 w-4" />
-          新建
-        </Button>
-      </div>
-
-      {items.length === 0 ? (
-        <div className="bg-card rounded-lg border border-dashed px-5 py-6 text-center">
-          <Container className="h-6 w-6 text-muted-foreground/40 mx-auto mb-2" />
-          <div className="text-sm text-muted-foreground">该服务器暂无容器</div>
-        </div>
-      ) : (
-        <Card>
-          <CardContent className="p-0">
-            {items.map((c, i) => (
-              <div key={c.id}>
-                <ContainerRow
-                  container={c}
-                  onAction={onAction}
-                />
-                {i < items.length - 1 && <Separator />}
-              </div>
-            ))}
-          </CardContent>
-        </Card>
-      )}
-    </div>
-  );
-}
-
-function OrphanContainersSection({
-  serverName,
-  items,
-  onAction,
-}: {
-  serverName: string;
-  items: ContainerView[];
-  onAction: (action: import('@nyabase/common').ContainerAction, containerId: string, name: string) => void;
-}) {
-  return (
-    <div className="space-y-3">
-      <div className="flex items-center gap-2">
-        <Server className="h-4 w-4 text-muted-foreground" />
-        <span className="font-semibold text-foreground">{serverName}</span>
-        <span className="text-xs text-muted-foreground">{items.length} 个容器</span>
-        <span className="text-xs text-muted-foreground/60">（已不在服务器列表中）</span>
-      </div>
-      <Card>
-        <CardContent className="p-0">
-          {items.map((c, i) => (
-            <div key={c.id}>
-              <ContainerRow
-                container={c}
-                onAction={onAction}
-              />
-              {i < items.length - 1 && <Separator />}
-            </div>
-          ))}
-        </CardContent>
-      </Card>
-    </div>
-  );
-}
+import { actionProgressHint, containerActionSubmittedTitle, serverStatusLabel } from '../../lib/status-labels.js';
+import { toast } from '../../hooks/use-toast.js';
 
 function ContainersPage() {
-  const [showCreate, setShowCreate] = useState(false);
-  const [createDefaultServerId, setCreateDefaultServerId] = useState<string | undefined>();
-  const qc = useQueryClient();
-
-  const { doAction, confirmState, handleConfirm, handleCancel } =
-    useContainerActions();
-
-  const serversQuery = useQuery({
-    queryKey: queryKeys.servers.user,
-    queryFn: () => api.get<UserServerDto[]>('/servers'),
-  });
-  const servers = serversQuery.data ?? [];
-  const { isLoading: serversLoading, isFetching: serversFetching } = serversQuery;
-
-  const containersQuery = useQuery({
-    queryKey: queryKeys.containers.userList,
-    queryFn: () => api.get<ContainerView[]>('/v2/containers'),
-    refetchInterval: (query) => queryPollInterval(query.state, { activeIntervalMs: 8_000 }),
+  const queryClient = useQueryClient();
+  const [createOpen, setCreateOpen] = useState(false);
+  const [defaultServerId, setDefaultServerId] = useState<string | undefined>();
+  const serversQuery = useQuery({ queryKey: queryKeys.servers.user, queryFn: () => api.get<UserServerDto[]>('/servers') });
+  const containersQuery = useQuery({ queryKey: queryKeys.containers.userList, queryFn: () => api.get<ContainerDto[]>('/containers'), refetchInterval: 5_000 });
+  const action = useMutation({
+    mutationFn: ({ actionName, containerId }: { actionName: Extract<ContainerAction, 'start' | 'stop' | 'restart'>; containerId: string }) =>
+      api.post<IntentAcceptedDto>(`/containers/${containerId}/actions/${actionName}`),
+    onSuccess: (_intent, variables) => {
+      toast({
+        title: containerActionSubmittedTitle(variables.actionName),
+        description: actionProgressHint('list'),
+      });
+      void queryClient.invalidateQueries({ queryKey: queryKeys.containers.userList });
+    },
+    onError: (error) => toast({ title: '容器操作失败', description: error instanceof Error ? error.message : '请稍后重试', variant: 'destructive' }),
   });
   const containers = containersQuery.data ?? [];
-  const { isLoading: containersLoading, isFetching, refetch } = containersQuery;
+  const grouped = useMemo(() => {
+    const map = new Map<string, ContainerDto[]>();
+    for (const container of containers) map.set(container.serverId, [...(map.get(container.serverId) ?? []), container]);
+    return map;
+  }, [containers]);
 
-  const accessQuery = useQuery({
-    queryKey: ['me', 'access'],
-    queryFn: () => api.get<EffectiveAccessDto>('/me/access'),
-    refetchInterval: (query) => queryPollInterval(query.state, { activeIntervalMs: 30_000 }),
-  });
-  const graceServers = useMemo(() => {
-    const byId = new Map(servers.map((server) => [server.id, server.name]));
-    return (accessQuery.data?.servers ?? [])
-      .filter((access) => access.accessPhase === 'grace')
-      .map((access) => ({
-        serverId: access.serverId,
-        serverName: byId.get(access.serverId) ?? access.serverId.slice(0, 8),
-        purgeAt: access.purgeAt,
-      }));
-  }, [accessQuery.data, servers]);
-
-  const orphanGroups = useMemo(() => {
-    const known = new Set(servers.map((s) => s.id));
-    const m = new Map<string, ContainerView[]>();
-    for (const c of containers) {
-      if (known.has(c.serverId)) continue;
-      const arr = m.get(c.serverId);
-      if (arr) arr.push(c);
-      else m.set(c.serverId, [c]);
-    }
-    return [...m.entries()];
-  }, [servers, containers]);
-
-  const listLoading = serversLoading || containersLoading;
-  const isRefreshing = isFetching || serversFetching;
-
-  const handleRefresh = () => {
-    void qc.invalidateQueries({ queryKey: queryKeys.servers.user });
-    void qc.invalidateQueries({ queryKey: ['me', 'access'] });
-    void refetch();
-  };
-
-  const openCreate = (serverId?: string) => {
-    const canUseServer = serverId !== undefined && servers.some((server) => server.id === serverId && server.status === 'online');
-    setCreateDefaultServerId(canUseServer ? serverId : undefined);
-    setShowCreate(true);
-  };
-
-  const onCreateOpenChange = (open: boolean) => {
-    setShowCreate(open);
-    if (!open) setCreateDefaultServerId(undefined);
-  };
+  if (serversQuery.isLoading || containersQuery.isLoading) return <QueryLoadingState label="加载容器..." />;
+  if (serversQuery.isError) return <QueryErrorState error={serversQuery.error} resourceName="服务器" onRetry={() => { void serversQuery.refetch(); }} />;
+  if (containersQuery.isError) return <QueryErrorState error={containersQuery.error} resourceName="容器" onRetry={() => { void containersQuery.refetch(); }} />;
+  const servers = serversQuery.data ?? [];
 
   return (
-    <div className="px-4 py-4 md:px-6 space-y-5 w-full">
-      <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+    <div className="space-y-5 px-4 py-4 md:px-6">
+      <div className="flex flex-wrap items-start justify-between gap-3">
         <div>
-          <h1 className="text-2xl font-semibold tracking-tight text-foreground">容器</h1>
-          <p className="text-muted-foreground text-sm">
-            {containersQuery.data ? `${containers.length} 个容器` : '容器数量尚未加载'}
-          </p>
+          <h1 className="text-2xl font-semibold tracking-tight">容器</h1>
+          <p className="text-sm text-muted-foreground">{containers.length} 个容器 · 运行时状态来自后端观测</p>
         </div>
-        <div className="flex items-center gap-2">
-          <Button variant="ghost" size="icon" className="h-8 w-8 text-muted-foreground" onClick={handleRefresh} disabled={isRefreshing}>
-            <RefreshCw className={`h-4 w-4 ${isRefreshing ? 'animate-spin' : ''}`} />
+        <div className="flex gap-2">
+          <Button variant="outline" size="icon" onClick={() => { void Promise.all([serversQuery.refetch(), containersQuery.refetch()]); }} aria-label="刷新容器">
+            <RefreshCw className="h-4 w-4" />
           </Button>
-          <Button onClick={() => openCreate()}>
+          <Button onClick={() => { setDefaultServerId(undefined); setCreateOpen(true); }}>
             <Plus className="h-4 w-4" />新建容器
           </Button>
         </div>
       </div>
-
-      {graceServers.length > 0 && (
-        <div className="rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900 space-y-1">
-          {graceServers.map((server) => (
-            <p key={server.serverId}>
-              服务器「{server.serverName}」授权已到期，容器已被停止；可再启动以迁移数据
-              {server.purgeAt
-                ? `，窗口至 ${new Date(server.purgeAt).toLocaleString()}`
-                : ''}
-              ；窗口结束后本地资源将被删除。
-            </p>
-          ))}
-        </div>
-      )}
-
-      {listLoading ? (
-        <Card><CardContent className="h-32 animate-pulse bg-muted/50 rounded-lg mt-6" /></Card>
-      ) : serversQuery.isError || containersQuery.isError ? (
-        <QueryErrorState
-          error={serversQuery.error ?? containersQuery.error}
-          resourceName="容器与服务器目录"
-          onRetry={() => { void Promise.all([serversQuery.refetch(), containersQuery.refetch()]); }}
-        />
-      ) : servers.length === 0 && containers.length === 0 ? (
-        <div className="bg-card rounded-lg border border-dashed p-10 text-center text-muted-foreground">
-          暂无可访问的服务器。请联系管理员为你分配服务器和镜像权限。
-        </div>
+      {servers.length === 0 && containers.length === 0 ? (
+        <Card><CardContent className="py-12 text-center text-sm text-muted-foreground">暂无可访问的服务器或容器。</CardContent></Card>
       ) : (
-        <div className="space-y-6">
-          {servers.map((s) => {
-            const items = containers.filter((c) => c.serverId === s.id);
-            return (
-              <ServerContainersSection
-                key={s.id}
-                server={s}
-                items={items}
-                onCreate={() => openCreate(s.id)}
-                onAction={doAction}
-              />
-            );
-          })}
-          {orphanGroups.map(([serverId, items]) => (
-            <OrphanContainersSection
-              key={serverId}
-              serverName={items[0]?.serverName ?? serverId}
-              items={items}
-              onAction={doAction}
+        <div className="space-y-5">
+          {servers.map((server) => (
+            <ServerContainerGroup
+              key={server.id}
+              server={server}
+              containers={grouped.get(server.id) ?? []}
+              onCreate={() => { setDefaultServerId(server.id); setCreateOpen(true); }}
+              onAction={(actionName, container) => {
+                if (isPowerAction(actionName)) action.mutate({ actionName, containerId: container.id });
+              }}
+              actionPending={action.isPending}
             />
           ))}
+          {containers
+            .filter((container) => !servers.some((server) => server.id === container.serverId))
+            .map((container) => (
+              <Card key={container.id}>
+                <ContainerRow
+                  container={container}
+                  actionPending={action.isPending}
+                  onAction={(actionName, item) => {
+                    if (isPowerAction(actionName)) action.mutate({ actionName, containerId: item.id });
+                  }}
+                />
+              </Card>
+            ))}
         </div>
       )}
-
-      <CreateContainerDialog
-        open={showCreate}
-        onOpenChange={onCreateOpenChange}
-        defaultServerId={createDefaultServerId}
-      />
-
-      <AlertDialog open={!!confirmState} onOpenChange={(open) => { if (!open) handleCancel(); }}>
-        <AlertDialogContent>
-          <AlertDialogHeader>
-            <AlertDialogTitle>{confirmState?.title}</AlertDialogTitle>
-            <AlertDialogDescription>{confirmState?.description}</AlertDialogDescription>
-          </AlertDialogHeader>
-          <AlertDialogFooter>
-            <AlertDialogCancel onClick={handleCancel}>取消</AlertDialogCancel>
-            <AlertDialogAction
-              className={cn(
-                confirmState?.variant === 'destructive' && buttonVariants({ variant: 'destructive' }),
-              )}
-              onClick={() => void handleConfirm()}
-            >
-              {confirmState?.confirmLabel}
-            </AlertDialogAction>
-          </AlertDialogFooter>
-        </AlertDialogContent>
-      </AlertDialog>
+      <CreateContainerDialog open={createOpen} onOpenChange={setCreateOpen} defaultServerId={defaultServerId} />
     </div>
   );
+}
+
+function ServerContainerGroup({
+  server,
+  containers,
+  onCreate,
+  onAction,
+  actionPending,
+}: {
+  server: UserServerDto;
+  containers: ContainerDto[];
+  onCreate: () => void;
+  onAction: (action: ContainerAction, container: ContainerDto) => void;
+  actionPending: boolean;
+}) {
+  return (
+    <section className="space-y-2">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div className="flex items-center gap-2">
+          <Server className="h-4 w-4 text-muted-foreground" />
+          <span className="font-medium">{server.name}</span>
+          <Badge variant={server.status === 'online' ? 'success' : 'secondary'} title={server.status}>
+            {serverStatusLabel(server.status)}
+          </Badge>
+          <span className="text-xs text-muted-foreground">{containers.length} 个</span>
+        </div>
+        <Button size="sm" variant="outline" onClick={onCreate}><Plus className="h-4 w-4" />新建</Button>
+      </div>
+      <Card>
+        <CardContent className="divide-y p-0">
+          {containers.length === 0 ? (
+            <p className="px-4 py-6 text-center text-sm text-muted-foreground">该服务器暂无容器。</p>
+          ) : (
+            containers.map((container) => (
+              <ContainerRow key={container.id} container={container} onAction={onAction} actionPending={actionPending} />
+            ))
+          )}
+        </CardContent>
+      </Card>
+    </section>
+  );
+}
+
+function isPowerAction(action: ContainerAction): action is Extract<ContainerAction, 'start' | 'stop' | 'restart'> {
+  return action === 'start' || action === 'stop' || action === 'restart';
 }
 
 export const Route = createFileRoute('/containers/')({ component: ContainersPage });

@@ -26,18 +26,38 @@ describe('SQL migration discovery', () => {
     const migrations = await discoverSqlMigrations(resolve(__dirname, 'migrations'));
     expect(migrations.map(({ version, name }) => ({ version, name }))).toEqual([
       { version: '000001', name: 'initial' },
+      { version: '000002', name: 'reconcile-busy-strikes' },
+      { version: '000003', name: 'container-root-used-bytes' },
     ]);
     const [initial] = migrations;
     expect(initial.sql).toContain('CREATE TABLE iam.users');
     expect(initial.sql).toContain('CREATE TABLE iam.server_grants');
+    expect(initial.sql).toContain('CREATE TABLE iam.storage_pool_grants');
+    expect(initial.sql).toContain('CREATE TABLE iam.shared_backend_grants');
     expect(initial.sql).toContain('CREATE TABLE control.containers');
-    expect(initial.sql).toContain('CREATE TABLE workflow.tasks');
+    expect(initial.sql).toContain('CREATE TABLE control.volumes');
+    expect(initial.sql).toContain('CREATE TABLE control.volume_attachments');
+    expect(initial.sql).toContain('CREATE TABLE control.intents');
+    expect(initial.sql).toContain('CREATE TABLE control.reconcile_claims');
+    expect(initial.sql).toContain('CREATE TABLE infra.storage_pools');
+    expect(initial.sql).toContain('CREATE TABLE infra.shared_backends');
+    expect(initial.sql).toContain('CREATE TABLE infra.image_server_assignments');
+    expect(initial.sql).toContain('CREATE TABLE system.incus_client_certificates');
+    expect(initial.sql).toContain('CREATE TABLE system.incus_client_certificate_trusts');
     expect(initial.sql).toContain('CREATE TABLE interaction.ssh_proxy_host_keys');
     expect(initial.sql).toContain('CREATE TABLE interaction.http_proxy_bindings');
     expect(initial.sql).toContain('CREATE TABLE system.settings');
-    expect(initial.sql).toContain('CREATE TABLE workflow.exec_sessions');
-    expect(initial.sql).toContain('console_public_url');
+    expect(initial.sql).toContain('storage_pools_shared_backend_server_unique');
+    expect(initial.sql).toContain('volume_attachments_backend_visibility');
+    expect(initial.sql).toContain('incus_client_certificates_active_unique');
+    expect(initial.sql).toContain('intents_settled_shape_check');
     expect(initial.sql).toContain('lock_policy_state_before_mutation');
+    expect(initial.sql).not.toMatch(/\bCREATE\s+SCHEMA\s+workflow\b/i);
+    expect(initial.sql).not.toMatch(/\bworkflow\./i);
+    expect(initial.sql).not.toMatch(/\b(agent|docker|macvlan|xfs|quarantine)\b/i);
+    expect(initial.sql).not.toMatch(/\b(gpu_indices|agent_token_hash|bridge_parent)\b/i);
+    expect(initial.sql).not.toMatch(/\b(remote_fs|data_directories|container_mounts|quota_desired)\b/i);
+    expect(initial.sql).not.toMatch(/\b(image_grants|mount_source_grants)\b/i);
     expect(initial.sql).not.toContain('published_at timestamp');
     expect(initial.sql).not.toContain('outbox_attempt_count_check');
     expect(initial.sql).not.toMatch(/\bADD\s+COLUMN\b/i);

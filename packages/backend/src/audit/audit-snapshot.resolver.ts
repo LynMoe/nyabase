@@ -1,6 +1,5 @@
 import { Injectable } from '@nestjs/common';
 import type { AuditResourceSnapshotDto } from '@nyabase/common';
-import { validate as isUuid } from 'uuid';
 import type { AuditExecutor } from './audit.repository.js';
 
 export const AUDIT_SNAPSHOT_RESOLVER = Symbol('AUDIT_SNAPSHOT_RESOLVER');
@@ -14,11 +13,6 @@ export interface AuditSnapshotResolver {
   ): Promise<AuditResourceSnapshotDto | null>;
 }
 
-/**
- * Resolves every durable control-plane resource from the caller's PostgreSQL
- * executor. When Audit append participates in a domain transaction this keeps
- * the resource mutation and its immutable snapshot on one visibility boundary.
- */
 @Injectable()
 export class PgAuditSnapshotResolver implements AuditSnapshotResolver {
   async resolve(
@@ -28,288 +22,141 @@ export class PgAuditSnapshotResolver implements AuditSnapshotResolver {
     payload?: unknown,
   ): Promise<AuditResourceSnapshotDto | null> {
     if (!id) return null;
-    const type = normalizeResourceType(rawType);
     try {
-      switch (type) {
-        case 'user':
-          return await this.userSnapshot(executor, id);
-        case 'group':
-          return await this.groupSnapshot(executor, id);
-        case 'server':
-          return await this.serverSnapshot(executor, id);
-        case 'image':
-          return await this.imageSnapshot(executor, id);
-        case 'container':
-          return await this.containerSnapshot(executor, id);
-        case 'remote_fs_mount':
-          return await this.remoteFsSnapshot(executor, id);
-        case 'datadir':
-          return await this.dataDirectorySnapshot(executor, id);
-        case 'mount_source':
-          return await this.mountSourceSnapshot(executor, id, payload);
-        case 'data_disk':
-          return fallbackSnapshot('mount_source', id, payload);
-        default:
-          return fallbackSnapshot(rawType, id, payload);
+      switch (normalizeResourceType(rawType)) {
+        case 'user': return this.user(executor, id);
+        case 'group': return this.group(executor, id);
+        case 'server': return this.server(executor, id);
+        case 'image': return this.image(executor, id);
+        case 'container': return this.container(executor, id);
+        case 'storage_pool': return this.storagePool(executor, id);
+        case 'shared_backend': return this.sharedBackend(executor, id);
+        case 'volume': return this.volume(executor, id);
+        default: return fallbackSnapshot(rawType, id, payload);
       }
     } catch {
       return fallbackSnapshot(rawType, id, payload);
     }
   }
 
-  private async containerSnapshot(
-    executor: AuditExecutor,
-    id: string,
-  ): Promise<AuditResourceSnapshotDto | null> {
-    const container = await executor
-      .selectFrom('control.containers')
-      .select(['name', 'server_id', 'owner_id', 'image_id', 'created_by'])
-      .where('id', '=', id)
-      .executeTakeFirst();
-    return container
-      ? {
-            id,
-            type: 'container',
-            name: container.name,
-            labels: {
-              serverId: container.server_id,
-              ownerId: container.owner_id,
-              imageId: container.image_id,
-              createdBy: container.created_by,
-            },
-          }
-      : null;
-  }
-
-  private async remoteFsSnapshot(
-    executor: AuditExecutor,
-    id: string,
-  ): Promise<AuditResourceSnapshotDto | null> {
-    const mount = await executor
-      .selectFrom('infra.remote_fs_mounts')
-      .select([
-        'name',
-        'display_name',
-        'type',
-        'host_mount_point',
-        'desired_state',
-      ])
-      .where('id', '=', id)
-      .executeTakeFirst();
-    return mount
-      ? {
-            id,
-            type: 'remote_fs_mount',
-            name: mount.display_name?.trim() || mount.name,
-            labels: {
-              name: mount.name,
-              displayName: mount.display_name,
-              type: mount.type,
-              hostMountPoint: mount.host_mount_point,
-              desiredState: mount.desired_state,
-            },
-          }
-      : null;
-  }
-
-  private async dataDirectorySnapshot(
-    executor: AuditExecutor,
-    id: string,
-  ): Promise<AuditResourceSnapshotDto | null> {
-    const directory = await executor
-      .selectFrom('control.data_directories')
-      .select([
-        'name',
-        'user_id',
-        'source_kind',
-        'source_id',
-        'server_id',
-        'desired_state',
-      ])
-      .where('id', '=', id)
-      .executeTakeFirst();
-    return directory
-      ? {
-            id,
-            type: 'datadir',
-            name: directory.name,
-            labels: {
-              userId: directory.user_id,
-              sourceKind: directory.source_kind,
-              sourceId: directory.source_id,
-              serverId: directory.server_id,
-              desiredState: directory.desired_state,
-            },
-          }
-      : null;
-  }
-
-  private async userSnapshot(
-    executor: AuditExecutor,
-    id: string,
-  ): Promise<AuditResourceSnapshotDto | null> {
-    const user = await executor
-      .selectFrom('iam.users')
+  private async user(executor: AuditExecutor, id: string) {
+    const row = await executor.selectFrom('iam.users')
       .select(['username', 'display_name', 'status', 'numeric_id'])
       .where('id', '=', id)
       .executeTakeFirst();
-    if (!user) return null;
-    return {
-      id,
-      type: 'user',
-      name: user.display_name && user.display_name !== user.username
-        ? `${user.display_name} (${user.username})`
-        : user.username,
-      labels: {
-        username: user.username,
-        displayName: user.display_name,
-        status: user.status,
-        numericId: user.numeric_id,
-      },
-    };
+    return row ? snapshot(id, 'user', row.display_name || row.username, {
+      username: row.username,
+      displayName: row.display_name,
+      status: row.status,
+      numericId: row.numeric_id,
+    }) : null;
   }
 
-  private async serverSnapshot(
-    executor: AuditExecutor,
-    id: string,
-  ): Promise<AuditResourceSnapshotDto | null> {
-    const server = await executor
-      .selectFrom('infra.servers')
-      .select(['name', 'slug', 'status'])
-      .where('id', '=', id)
-      .executeTakeFirst();
-    return server ? {
-      id,
-      type: 'server',
-      name: server.name,
-      labels: { slug: server.slug, status: server.status },
-    } : null;
-  }
-
-  private async imageSnapshot(
-    executor: AuditExecutor,
-    id: string,
-  ): Promise<AuditResourceSnapshotDto | null> {
-    const image = await executor
-      .selectFrom('infra.images')
-      .select(['name', 'docker_image', 'is_active', 'description'])
-      .where('id', '=', id)
-      .executeTakeFirst();
-    return image ? {
-      id,
-      type: 'image',
-      name: image.name,
-      labels: {
-        dockerImage: image.docker_image,
-        isActive: image.is_active,
-        description: image.description,
-      },
-    } : null;
-  }
-
-  private async groupSnapshot(
-    executor: AuditExecutor,
-    id: string,
-  ): Promise<AuditResourceSnapshotDto | null> {
-    const group = await executor
-      .selectFrom('iam.groups')
+  private async group(executor: AuditExecutor, id: string) {
+    const row = await executor.selectFrom('iam.groups')
       .select(['name', 'description', 'priority', 'is_system'])
       .where('id', '=', id)
       .executeTakeFirst();
-    if (!group) return null;
-    return {
-      id,
-      type: 'group',
-      name: group.name,
-      labels: {
-        description: group.description,
-        priority: group.priority,
-        isSystem: group.is_system,
-      },
-    };
+    return row ? snapshot(id, 'group', row.name, {
+      description: row.description,
+      priority: row.priority,
+      isSystem: row.is_system,
+    }) : null;
   }
 
-  private async mountSourceSnapshot(
-    executor: AuditExecutor,
-    id: string,
-    payload: unknown,
-  ): Promise<AuditResourceSnapshotDto | null> {
-    // Mount-source audit targets are intentionally polymorphic: grant upserts
-    // use the UUID grant id, while deletes use the source's natural id. Avoid
-    // comparing a non-UUID disk id with PostgreSQL's UUID grant primary key;
-    // catching that database error would still leave the caller transaction
-    // aborted.
-    const grant = isUuid(id)
-      ? await executor
-          .selectFrom('iam.mount_source_grants')
-          .select(['id', 'user_id', 'group_id', 'source_kind', 'source_id'])
-          .where('id', '=', id)
-          .executeTakeFirst()
-      : undefined;
-    if (grant) {
-      const scope = grant.user_id
-        ? { type: 'user', id: grant.user_id }
-        : { type: 'group', id: grant.group_id! };
-      const source = await this.sourceSnapshot(
-        executor,
-        grant.source_kind,
-        grant.source_id,
-      );
-      const scopeSnapshot = await this.resolve(executor, scope.type, scope.id);
-      return {
-        id: grant.id,
-        type: 'mount_source_grant',
-        name: `${scopeSnapshot?.name ?? scope.id} -> ${source?.name ?? grant.source_id}`,
-        labels: {
-          scope: scope.type,
-          scopeId: scope.id,
-          sourceKind: grant.source_kind,
-          sourceId: grant.source_id,
-        },
-      };
-    }
-
-    if (isRecord(payload)) {
-      const sourceKind = stringValue(payload.sourceKind);
-      const sourceId = stringValue(payload.sourceId) ?? id;
-      const source = await this.sourceSnapshot(executor, sourceKind, sourceId);
-      if (source) return source;
-    }
-    return fallbackSnapshot('mount_source', id, payload);
+  private async server(executor: AuditExecutor, id: string) {
+    const row = await executor.selectFrom('infra.servers')
+      .select(['name', 'slug', 'status'])
+      .where('id', '=', id)
+      .executeTakeFirst();
+    return row ? snapshot(id, 'server', row.name, { slug: row.slug, status: row.status }) : null;
   }
 
-  private sourceSnapshot(
-    executor: AuditExecutor,
-    sourceKind: string | null,
-    sourceId: string,
-  ): Promise<AuditResourceSnapshotDto | null> {
-    if (sourceKind === 'remote') {
-      return this.resolve(executor, 'remote_fs_mount', sourceId);
-    }
-    return Promise.resolve(fallbackSnapshot('mount_source', sourceId));
+  private async image(executor: AuditExecutor, id: string) {
+    const row = await executor.selectFrom('infra.images')
+      .select(['name', 'alias', 'fingerprint', 'is_active', 'description'])
+      .where('id', '=', id)
+      .executeTakeFirst();
+    return row ? snapshot(id, 'image', row.name, {
+      alias: row.alias,
+      fingerprint: row.fingerprint,
+      isActive: row.is_active,
+      description: row.description,
+    }) : null;
   }
 
+  private async container(executor: AuditExecutor, id: string) {
+    const row = await executor.selectFrom('control.containers')
+      .select(['name', 'server_id', 'owner_id', 'image_id', 'created_by'])
+      .where('id', '=', id)
+      .executeTakeFirst();
+    return row ? snapshot(id, 'container', row.name, {
+      serverId: row.server_id,
+      ownerId: row.owner_id,
+      imageId: row.image_id,
+      createdBy: row.created_by,
+    }) : null;
+  }
+
+  private async storagePool(executor: AuditExecutor, id: string) {
+    const row = await executor.selectFrom('infra.storage_pools')
+      .select(['incus_name', 'display_name', 'server_id', 'driver', 'registered'])
+      .where('id', '=', id)
+      .executeTakeFirst();
+    return row ? snapshot(id, 'storage_pool', row.display_name || row.incus_name, {
+      incusName: row.incus_name,
+      serverId: row.server_id,
+      driver: row.driver,
+      registered: row.registered,
+    }) : null;
+  }
+
+  private async sharedBackend(executor: AuditExecutor, id: string) {
+    const row = await executor.selectFrom('infra.shared_backends')
+      .select(['name', 'identity_key', 'ceph_fsid'])
+      .where('id', '=', id)
+      .executeTakeFirst();
+    return row ? snapshot(id, 'shared_backend', row.name, {
+      identityKey: row.identity_key,
+      cephFsid: row.ceph_fsid,
+    }) : null;
+  }
+
+  private async volume(executor: AuditExecutor, id: string) {
+    const row = await executor.selectFrom('control.volumes')
+      .select(['name', 'owner_id', 'server_id', 'pool_id', 'shared_backend_id', 'size_bytes'])
+      .where('id', '=', id)
+      .executeTakeFirst();
+    return row ? snapshot(id, 'volume', row.name, {
+      ownerId: row.owner_id,
+      serverId: row.server_id,
+      poolId: row.pool_id,
+      sharedBackendId: row.shared_backend_id,
+      sizeBytes: Number(row.size_bytes),
+    }) : null;
+  }
 }
 
-export function normalizeResourceType(
-  type: string | null | undefined,
-): string | null {
+function snapshot(
+  id: string,
+  type: string,
+  name: string,
+  labels: Record<string, string | number | boolean | null>,
+): AuditResourceSnapshotDto {
+  return { id, type, name, labels };
+}
+
+export function normalizeResourceType(type: string | null | undefined): string | null {
   if (!type) return null;
   const normalized = type.trim().toLowerCase();
-  if (['users', 'account'].includes(normalized)) return 'user';
+  if (normalized === 'users' || normalized === 'account') return 'user';
   if (normalized === 'groups') return 'group';
   if (normalized === 'servers') return 'server';
   if (normalized === 'images') return 'image';
   if (normalized === 'containers') return 'container';
-  if (
-    ['remote_fs', 'remote_fs_mount', 'remote-fs', 'remotefsmount']
-      .includes(normalized)
-  ) return 'remote_fs_mount';
-  if (['disk', 'data_disk', 'data-disk'].includes(normalized)) return 'data_disk';
-  if (['data_dir', 'data-directory', 'datadir'].includes(normalized)) return 'datadir';
-  if (
-    ['mount_source', 'mount-source', 'mount_source_grant'].includes(normalized)
-  ) return 'mount_source';
+  if (normalized === 'storage-pools' || normalized === 'storagepools') return 'storage_pool';
+  if (normalized === 'shared-backends' || normalized === 'sharedbackends') return 'shared_backend';
+  if (normalized === 'volumes') return 'volume';
   return normalized;
 }
 
@@ -327,26 +174,13 @@ export function fallbackSnapshot(
 
 export function fallbackNameFromPayload(payload: unknown): string | null {
   if (!isRecord(payload)) return null;
-  for (
-    const key of [
-      'displayName',
-      'name',
-      'username',
-      'label',
-      'mountPoint',
-      'hostMountPoint',
-    ]
-  ) {
-    const value = stringValue(payload[key]);
-    if (value) return value;
+  for (const key of ['displayName', 'name', 'username', 'label']) {
+    const value = payload[key];
+    if (typeof value === 'string' && value.trim()) return value;
   }
   return null;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value && typeof value === 'object' && !Array.isArray(value));
-}
-
-function stringValue(value: unknown): string | null {
-  return typeof value === 'string' && value.trim() ? value : null;
 }

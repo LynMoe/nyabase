@@ -1,43 +1,65 @@
 import { readFileSync } from 'node:fs';
 import { currentRunId, requireRuntimeEnv } from './runtime-env.js';
 
-export interface SeedServer {
-  key: 'node1' | 'node2';
-  serverId: string;
-  outerIp: string;
-}
-
 export interface SeedState {
+  schemaVersion: 3;
   runId: string;
+  profile: 'smoke' | 'core' | 'full' | 'recovery';
   adminUserId: string;
+  server: {
+    id: string;
+    createdByRun: boolean;
+    name: string;
+    endpoint: string;
+    certificateFingerprint: string;
+    routedParent: string;
+    routedSubnet: string;
+    routedGateway: string;
+    ipPoolId: string;
+    systemPoolId: string;
+    nodeMetrics: {
+      endpoint: string;
+      serverCertFingerprint: string;
+      tokenFingerprint: string;
+    };
+  };
   image: {
     id: string;
-    dockerImage: string;
-    registryDigest: string;
+    alias: string;
+    fingerprint: string;
+    sourceUrl: string;
+    sshdWithoutDhcp: true;
+    createdByRun: boolean;
+    assignmentId: string;
+    assignmentCreatedByRun: boolean;
   };
-  uiImage: {
-    dockerImage: string;
-    registryDigest: string;
-    sourceImageId: string;
+  preflight: {
+    imageAlias: string;
+    imageFingerprint: string;
+    poolName: string;
+    sourceServer: string;
+    egressUrl: string;
+    status: string;
+    report: Record<string, unknown>;
   };
-  proxyImage?: {
-    id: string;
-    dockerImage: string;
-    registryDigest: string;
-    sourceImageId: string;
-    disableSsh: false;
+  storagePools: {
+    dirQuotaOnline: {
+      id: string;
+      name: string;
+      driver: 'dir';
+      quotaOnline: true;
+    };
+    lvmBlockBacked: {
+      id: string;
+      name: string;
+      driver: 'lvm';
+      blockBacked: true;
+    };
   };
-  servers: SeedServer[];
-  mountSourceGrants: Array<{
-    grantId: string;
-    serverId: string;
-    diskId: string;
-    sourceIdentity: string;
-  }>;
-  taskIds: {
-    quota: string[];
-    imagePull: string[];
-    proxyImagePull?: string[];
+  sharedBackendId?: string;
+  blocked: {
+    gpu: string;
+    cephfs: string;
   };
 }
 
@@ -45,68 +67,79 @@ export function readSeedState(): SeedState {
   const path = requireRuntimeEnv('E2E_SEED_STATE');
   const parsed = JSON.parse(readFileSync(path, 'utf8')) as Partial<SeedState>;
   const runId = currentRunId();
-
   if (parsed.runId !== runId) {
     throw new Error(`Seed state belongs to ${String(parsed.runId)}, expected ${runId}`);
   }
   if (
-    !parsed.adminUserId
-    || !parsed.image?.id
-    || !parsed.image.dockerImage
-    || !parsed.image.registryDigest
+    parsed.schemaVersion !== 3
+    || !parsed.profile
+    || !parsed.adminUserId
+    || !parsed.server?.id
   ) {
-    throw new Error('Seed state is missing admin or immutable workload identity');
+    throw new Error('Seed state is missing the connected Incus server identity');
   }
   if (
-    !parsed.uiImage?.dockerImage
-    || !parsed.uiImage.registryDigest
-    || !parsed.uiImage.sourceImageId
+    !parsed.server.endpoint?.startsWith('https://')
+    || !parsed.server.certificateFingerprint
+    || !parsed.server.routedParent
+    || !parsed.server.routedSubnet
+    || !parsed.server.routedGateway
+    || !parsed.server.ipPoolId
+    || !parsed.server.systemPoolId
+    || !parsed.server.nodeMetrics?.endpoint?.startsWith('https://')
+    || !parsed.server.nodeMetrics.serverCertFingerprint
+    || !parsed.server.nodeMetrics.tokenFingerprint
   ) {
-    throw new Error('Seed state is missing the real UI image fixture identity');
-  }
-  if (!Array.isArray(parsed.servers) || parsed.servers.length !== 2) {
-    throw new Error('Seed state must contain exactly two real CPU servers');
-  }
-  const serverIds = new Set(parsed.servers.map((server) => server.serverId));
-  const serverKeys = new Set(parsed.servers.map((server) => server.key));
-  if (serverIds.size !== 2 || serverKeys.size !== 2 || !serverKeys.has('node1') || !serverKeys.has('node2')) {
-    throw new Error('Seed server identities are missing or duplicated');
+    throw new Error('Seed state does not prove the HTTPS, routed, and metrics server contract');
   }
   if (
-    !Array.isArray(parsed.mountSourceGrants)
-    || parsed.mountSourceGrants.length !== 2
-    || new Set(parsed.mountSourceGrants.map((grant) => grant.serverId)).size !== 2
-    || parsed.mountSourceGrants.some((grant) => (
-      !serverIds.has(grant.serverId)
-      || !grant.grantId
-      || !grant.diskId
-      || !grant.sourceIdentity
-    ))
+    !parsed.image?.id
+    || !parsed.image.alias
+    || !/^[a-f0-9]{64}$/i.test(parsed.image.fingerprint)
+    || !parsed.image.sourceUrl?.startsWith('https://')
+    || parsed.image.sshdWithoutDhcp !== true
+    || typeof parsed.image.createdByRun !== 'boolean'
+    || !parsed.image.assignmentId
+    || typeof parsed.image.assignmentCreatedByRun !== 'boolean'
   ) {
-    throw new Error('Seed state must contain one real local mount-source grant per CPU server');
+    throw new Error('Seed state is missing the immutable SSHD image ownership and assignment');
   }
   if (
-    !parsed.taskIds
-    || !Array.isArray(parsed.taskIds.quota)
-    || parsed.taskIds.quota.length !== 2
-    || !Array.isArray(parsed.taskIds.imagePull)
-    || parsed.taskIds.imagePull.length !== 2
+    !parsed.preflight?.imageAlias
+    || !/^[a-f0-9]{64}$/i.test(parsed.preflight.imageFingerprint)
+    || !parsed.preflight.poolName
+    || !parsed.preflight.sourceServer?.startsWith('https://')
+    || !parsed.preflight.egressUrl?.startsWith('https://')
+    || parsed.preflight.status !== 'passed'
+    || parsed.preflight.report?.status !== 'passed'
+    || parsed.preflight.report.controlReady !== true
   ) {
-    throw new Error('Seed state must contain two quota and two image-pull durable tasks');
+    throw new Error('Seed state is missing a control-ready preflight report');
   }
-  if (process.env.E2E_PROFILE === 'full') {
-    if (
-      !parsed.proxyImage?.id
-      || !parsed.proxyImage.dockerImage
-      || !parsed.proxyImage.registryDigest
-      || !parsed.proxyImage.sourceImageId
-      || parsed.proxyImage.disableSsh !== false
-      || !Array.isArray(parsed.taskIds.proxyImagePull)
-      || parsed.taskIds.proxyImagePull.length !== 2
-    ) {
-      throw new Error('Full seed state is missing the real SSH/HTTP proxy target image');
-    }
+  const dir = parsed.storagePools?.dirQuotaOnline;
+  const lvm = parsed.storagePools?.lvmBlockBacked;
+  if (
+    !dir?.id
+    || !dir.name
+    || dir.driver !== 'dir'
+    || dir.quotaOnline !== true
+    || !lvm?.id
+    || !lvm.name
+    || lvm.driver !== 'lvm'
+    || lvm.blockBacked !== true
+  ) {
+    throw new Error('Seed state must contain both verified storage capability families');
   }
-
+  if (
+    !parsed.blocked?.cephfs?.startsWith('BLOCKED:')
+    && !parsed.blocked?.cephfs?.startsWith('ENABLED:')
+  ) {
+    throw new Error('Seed state must mark CephFS as BLOCKED: or ENABLED:');
+  }
+  const gpuBlocked = parsed.blocked?.gpu?.startsWith('BLOCKED:') === true;
+  const gpuProven = parsed.blocked?.gpu?.startsWith('PROVEN:') === true;
+  if (!gpuBlocked && !gpuProven) {
+    throw new Error('Seed state must mark GPU as BLOCKED: or PROVEN:');
+  }
   return parsed as SeedState;
 }

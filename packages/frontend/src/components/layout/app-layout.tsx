@@ -1,32 +1,40 @@
 import { Link, useRouterState } from '@tanstack/react-router';
 import React, { type ReactNode } from 'react';
+import { useQuery } from '@tanstack/react-query';
 import {
-  LayoutDashboard, Server, Container, Layers, Users, ImageIcon,
-  ScrollText, FolderOpen, LogOut, Shield, UserCircle, Network, Settings, Cable, Globe,
+  LayoutDashboard, Server, Container, Database, HardDrive, Layers, Users, ImageIcon,
+  ScrollText, LogOut, Shield, UserCircle, Settings, Cable, Network, Globe, TriangleAlert,
 } from 'lucide-react';
 import { cn } from '../../lib/utils.js';
 import { useAuthStore } from '../../store/auth.js';
 import { Button } from '../ui/button.js';
 import { Separator } from '../ui/separator.js';
-import { Capability } from '@nyabase/common';
+import { Capability, type IncusClientCertificateDto } from '@nyabase/common';
 import { ThemeToggle } from '../theme-toggle.js';
 import { usePublicSettings } from '../../hooks/use-public-settings.js';
 import { terminateBrowserSession } from '../../lib/session-termination.js';
 import { SSH_PROXY_STATUS_CAPABILITIES } from '../../lib/ssh-proxy-access.js';
+import { HTTP_PROXY_STATUS_CAPABILITIES } from '../../lib/http-proxy-access.js';
+import { api } from '../../lib/api.js';
+import { certExpiryBannerText, certExpiryWarning } from '../../lib/cert-expiry.js';
 
 const userNavItems = [
-  { to: '/', icon: LayoutDashboard, label: '监控大屏' },
+  { to: '/', icon: LayoutDashboard, label: '资源概览' },
   { to: '/containers', icon: Container, label: '容器' },
-  { to: '/http-proxy', icon: Globe, label: 'HTTP 反代' },
-  { to: '/data-dirs', icon: FolderOpen, label: '数据目录' },
+  { to: '/volumes', icon: Database, label: '数据卷' },
+  { to: '/http-proxy', icon: Globe, label: 'HTTP 发布' },
 ];
 
 const adminNavItems = [
   { to: '/servers', icon: Server, label: '服务器', caps: [Capability.ManageServers] },
+  { to: '/ip-pools', icon: Network, label: 'IP 池', caps: [Capability.ManageIpPools] },
+  { to: '/storage-pools', icon: HardDrive, label: '存储池', caps: [Capability.ManageStoragePools] },
+  { to: '/shared-backends', icon: Database, label: '共享存储', caps: [Capability.ManageSharedBackends] },
   { to: '/images', icon: ImageIcon, label: '镜像', caps: [Capability.ManageImages] },
   { to: '/manage/containers', icon: Layers, label: '容器管理', caps: [Capability.ManageContainersAny] },
-  { to: '/manage/remote-fs', icon: Network, label: '远程文件系统', caps: [Capability.ManageServers] },
+  { to: '/manage/volumes', icon: Database, label: '数据卷管理', caps: [Capability.ManageVolumes] },
   { to: '/ssh-proxy', icon: Cable, label: 'SSH 代理', caps: SSH_PROXY_STATUS_CAPABILITIES },
+  { to: '/http-proxy-ops', icon: Globe, label: 'HTTP 代理', caps: HTTP_PROXY_STATUS_CAPABILITIES },
   { to: '/users', icon: Users, label: '用户', caps: [Capability.ManageUsers, Capability.ManageGrants] },
   { to: '/groups', icon: Shield, label: '用户组', caps: [Capability.ManageGroups, Capability.ManageGrants] },
   { to: '/audit', icon: ScrollText, label: '审计', caps: [Capability.ViewAudit] },
@@ -36,7 +44,8 @@ const adminNavItems = [
 type NavItemDef = { to: string; icon: React.ComponentType<{ className?: string }>; label: string };
 
 function NavItem({ item, pathname }: { item: NavItemDef; pathname: string }) {
-  const isActive = pathname === item.to || (item.to !== '/' && pathname.startsWith(item.to));
+  const isActive = pathname === item.to
+    || (item.to !== '/' && (pathname === `${item.to}/` || pathname.startsWith(`${item.to}/`)));
   return (
     <Link
       to={item.to}
@@ -63,6 +72,17 @@ export function AppLayout({ children }: { children: ReactNode }) {
   };
 
   const userCaps = new Set(user?.capabilities ?? []);
+  const canManageCertificates = userCaps.has(Capability.ManageCertificates);
+  const canViewCertificate = canManageCertificates || userCaps.has(Capability.ManageServers);
+  const certificateQuery = useQuery({
+    queryKey: ['incus-client-certificate'],
+    queryFn: () => api.get<IncusClientCertificateDto>('/admin/incus-client-certificate'),
+    enabled: canViewCertificate,
+    staleTime: 60_000,
+  });
+  const certificate = certificateQuery.data;
+  const certWarning = certificate ? certExpiryWarning(certificate.notAfter) : null;
+  const certBannerServerId = certificate?.servers[0]?.serverId;
 
   const visibleAdminNav = adminNavItems.filter((item) => item.caps.some((capability) => userCaps.has(capability)));
 
@@ -108,6 +128,9 @@ export function AppLayout({ children }: { children: ReactNode }) {
           {visibleAdminNav.length > 0 && (
             <>
               <div className="my-2 border-t border-border" />
+              <p className="px-3 pb-1 pt-1 text-[11px] font-medium tracking-wide text-muted-foreground">
+                管理
+              </p>
               <div className="space-y-0.5">
                 {visibleAdminNav.map((item) => (
                   <NavItem key={item.to} item={item} pathname={pathname} />
@@ -135,6 +158,22 @@ export function AppLayout({ children }: { children: ReactNode }) {
 
       {/* Main content */}
       <main className="flex-1 overflow-auto">
+        {certWarning && certificate && (
+          <div
+            className="flex flex-wrap items-center gap-2 border-b border-destructive/30 bg-destructive/10 px-4 py-2 text-sm text-destructive"
+            data-testid="cert-expiry-banner"
+          >
+            <TriangleAlert className="h-4 w-4 shrink-0" />
+            <span>{certExpiryBannerText(certificate.notAfter)}</span>
+            {certBannerServerId ? (
+              <Link to="/servers/$id" params={{ id: certBannerServerId }} className="underline">
+                前往轮换
+              </Link>
+            ) : (
+              <Link to="/servers" className="underline">前往服务器</Link>
+            )}
+          </div>
+        )}
         {children}
       </main>
     </div>

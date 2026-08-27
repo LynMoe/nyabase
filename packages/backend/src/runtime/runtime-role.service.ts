@@ -1,22 +1,34 @@
 import { Injectable } from '@nestjs/common';
 import { NyabaseConfigService } from '../config/nyabase-config.service.js';
 
-export type RuntimeRole = 'all' | 'api' | 'gateway' | 'worker';
+const NEST_RUNTIME_ROLES = ['all', 'api', 'worker'] as const;
+
+export type RuntimeRole = (typeof NEST_RUNTIME_ROLES)[number];
+
+function isNestRuntimeRole(value: string): value is RuntimeRole {
+  return (NEST_RUNTIME_ROLES as readonly string[]).includes(value);
+}
 
 @Injectable()
 export class RuntimeRoleService {
   readonly role: RuntimeRole;
 
   constructor(config: NyabaseConfigService) {
-    this.role = config.get<RuntimeRole>('runtime.role');
+    const role = config.get<string>('runtime.role');
+    if (!isNestRuntimeRole(role)) {
+      throw new Error(
+        `Unsupported Nest runtime.role=${role}; expected all, api, or worker`,
+      );
+    }
+    this.role = role;
   }
 
   servesApi(): boolean {
     return this.role === 'all' || this.role === 'api';
   }
 
-  servesGateway(): boolean {
-    return this.role === 'all' || this.role === 'gateway';
+  servesProxySockets(): boolean {
+    return this.role === 'all' || this.role === 'api';
   }
 
   runsWorker(): boolean {
@@ -24,15 +36,10 @@ export class RuntimeRoleService {
   }
 
   requiresRedisAvailability(): boolean {
-    return this.role === 'api' || this.role === 'gateway';
+    return this.role === 'api';
   }
 
   allowsHttpPath(path: string): boolean {
-    if (this.servesApi() || path === '/api/health/live' || path === '/api/health/ready') {
-      return true;
-    }
-    if (!this.servesGateway()) return false;
-    return path.startsWith('/api/admin/ssh-proxy/')
-      || path === '/api/admin/http-proxy/status';
+    return this.servesApi() || path === '/api/health/live' || path === '/api/health/ready';
   }
 }

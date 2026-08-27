@@ -214,6 +214,19 @@ export class AuthService {
     return user;
   }
 
+  async validateAccessToken(token: string): Promise<AuthUser> {
+    if (!/^[A-Za-z0-9._-]{20,4096}$/.test(token)) {
+      throw new UnauthorizedException('Invalid access token');
+    }
+    let payload: JwtPayload;
+    try {
+      payload = await this.jwtService.verifyAsync<JwtPayload>(token);
+    } catch {
+      throw new UnauthorizedException('Invalid access token');
+    }
+    return this.validateJwtPayload(payload);
+  }
+
   /** Throttle window for lastUsedAt updates: skip writes within this interval. */
   private static readonly LAST_USED_UPDATE_INTERVAL_MS = 60_000;
 
@@ -399,7 +412,6 @@ export class AuthService {
       },
     ];
     const reservations: LoginAttemptReservation[] = [];
-    let redisAvailable = Boolean(this.redis);
     for (const attempt of attempts) {
       const existing = this.loginAttempts.get(attempt.localKey);
       const entry = !existing || now - existing.windowStartedAt >= LOGIN_ATTEMPT_WINDOW_MS
@@ -422,29 +434,23 @@ export class AuthService {
       this.loginAttempts.set(attempt.localKey, entry);
       reservations.push({ kind: 'local', key: attempt.localKey, entry });
 
-      if (redisAvailable && this.redis) {
+      if (this.redis) {
         const result = await this.redis.consumeRateLimit(
           attempt.remoteScope,
           attempt.limit,
           LOGIN_ATTEMPT_WINDOW_MS,
         );
-        if (result.available) {
-          if (!result.allowed) {
-            throw this.tooManyRequests('Too many login attempts');
-          }
-          if (result.reservation) {
-            reservations.push({
-              kind: 'redis',
-              reservation: result.reservation,
-            });
-          }
-        }
         if (!result.available) {
-          // Once unavailable, keep the remaining shared decisions local for
-          // this request. Every attempt is charged locally even while Redis is
-          // healthy so an eviction/restart/outage cannot reset this process's
-          // live defense-in-depth window.
-          redisAvailable = false;
+          throw this.limiterUnavailable();
+        }
+        if (!result.allowed) {
+          throw this.tooManyRequests('Too many login attempts');
+        }
+        if (result.reservation) {
+          reservations.push({
+            kind: 'redis',
+            reservation: result.reservation,
+          });
         }
       }
     }
@@ -502,5 +508,15 @@ export class AuthService {
 
   private tooManyRequests(message: string): HttpException {
     return new HttpException({ code: 'AUTH_RATE_LIMITED', message }, HttpStatus.TOO_MANY_REQUESTS);
+  }
+
+  private limiterUnavailable(): HttpException {
+    return new HttpException(
+      {
+        code: 'AUTH_LIMITER_UNAVAILABLE',
+        message: 'Login limiter is temporarily unavailable',
+      },
+      HttpStatus.SERVICE_UNAVAILABLE,
+    );
   }
 }

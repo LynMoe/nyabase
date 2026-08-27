@@ -32,13 +32,18 @@ import {
   MAX_HTTP_PROXY_SNAPSHOT_BYTES,
   MAX_HTTP_PROXY_ROUTES,
   MAX_HTTP_PROXY_DOMAIN_POOLS,
-  MAX_HTTP_PROXY_CERTIFICATE_PEM_LENGTH,
-  MAX_HTTP_PROXY_PRIVATE_KEY_PEM_LENGTH,
   zHttpProxySnapshot,
+  zCreateHttpProxyBindingRequest,
+  zPatchHttpProxyBindingRequest,
+  zCreateHttpDomainPoolRequest,
+  zPatchHttpDomainPoolRequest,
   httpProxyWarningMessage,
   hostnameMatchesHttpProxyWildcard,
   normalizeHttpProxyHostname,
   normalizeHttpProxyWildcardDomain,
+  type HttpDomainPoolDto,
+  type HttpDomainPoolPublicDto,
+  type HttpProxyBindingDto,
   type HttpProxyBindingStatus,
   type HttpProxySnapshot,
   type HttpProxyWarningReason,
@@ -73,38 +78,6 @@ type BindingRow = Selectable<HttpProxyBindingTable>;
 type ContainerRow = Selectable<ContainerControlTable>;
 type ServerRow = Selectable<InfrastructureServerTable>;
 
-export interface HttpProxyBindingDto {
-  id: string;
-  mine: boolean;
-  ownerId: string;
-  ownerUsername: string;
-  hostname: string;
-  domainPoolId: string;
-  domainPool: string;
-  targetUrl: string | null;
-  containerId: string;
-  containerName: string | null;
-  containerStatus: ContainerStatus | 'missing' | null;
-  targetPort: number;
-  entryHttpsEnabled: boolean;
-  status: HttpProxyBindingStatus;
-  warningReasons: HttpProxyWarningReason[];
-  warningMessage: string;
-  createdAt: string;
-  updatedAt: string;
-}
-
-export interface HttpDomainPoolDto {
-  id: string;
-  wildcardDomain: string;
-  enabled: boolean;
-  httpsEnabled: boolean;
-  certificateFingerprint: string | null;
-  certificateNotAfter: string | null;
-  createdAt: string;
-  updatedAt: string;
-}
-
 @Injectable()
 export class HttpProxyService {
   constructor(
@@ -131,11 +104,23 @@ export class HttpProxyService {
     return this.bindingDtos(bindings, requesterId, proxyOnline, this.database);
   }
 
+  async listBindingsForAdmin(
+    requesterId: string,
+    proxyOnline: boolean,
+  ): Promise<HttpProxyBindingDto[]> {
+    const bindings = await this.database
+      .selectFrom('interaction.http_proxy_bindings')
+      .selectAll()
+      .orderBy('hostname')
+      .execute();
+    return this.bindingDtos(bindings, requesterId, proxyOnline, this.database);
+  }
+
   async createBinding(
     requesterId: string,
     input: unknown,
   ): Promise<HttpProxyBindingDto> {
-    const dto = parseBindingInput(input, false);
+    const dto = zCreateHttpProxyBindingRequest.parse(input);
     const hostname = parseHttpProxyHostname(dto.hostname);
     const binding = await this.runSerializable(async (transaction) => {
       await this.lock(transaction, BINDING_CAPACITY_LOCK);
@@ -196,7 +181,7 @@ export class HttpProxyService {
     id: string,
     input: unknown,
   ): Promise<HttpProxyBindingDto> {
-    const dto = parseBindingInput(input, true);
+    const dto = zPatchHttpProxyBindingRequest.parse(input);
     const saved = await this.runSerializable(async (transaction) => {
       const binding = await transaction
         .selectFrom('interaction.http_proxy_bindings')
@@ -302,11 +287,26 @@ export class HttpProxyService {
     return rows.map((row) => this.domainPoolDto(row));
   }
 
+  async listEnabledDomainPools(): Promise<HttpDomainPoolPublicDto[]> {
+    // User-facing catalog for binding UI: enabled pools only, never certificate PEMs.
+    const rows = await this.database
+      .selectFrom('interaction.http_domain_pools')
+      .select(['id', 'wildcard_domain', 'https_enabled'])
+      .where('enabled', '=', true)
+      .orderBy('wildcard_domain')
+      .execute();
+    return rows.map((row) => ({
+      id: row.id,
+      wildcardDomain: row.wildcard_domain,
+      httpsEnabled: row.https_enabled,
+    }));
+  }
+
   async createDomainPool(
     actorId: string,
     input: unknown,
   ): Promise<HttpDomainPoolDto> {
-    const dto = parseDomainPoolInput(input, false);
+    const dto = zCreateHttpDomainPoolRequest.parse(input);
     const wildcardDomain = parseHttpProxyWildcardDomain(dto.wildcardDomain);
     const certificate = this.certFields(
       dto.certificatePem,
@@ -370,7 +370,7 @@ export class HttpProxyService {
     id: string,
     input: unknown,
   ): Promise<HttpDomainPoolDto> {
-    const dto = parseDomainPoolInput(input, true);
+    const dto = zPatchHttpDomainPoolRequest.parse(input);
     try {
       const row = await this.runSerializable(async (transaction) => {
         await this.accessResolver.assertActorCapabilitiesInTransaction(
@@ -519,10 +519,7 @@ export class HttpProxyService {
         routes,
         users,
         servers,
-        runtimeReadyServers,
         addressClaims,
-        containerMounts,
-        remoteAssignments,
         usableAccess,
       ] = await Promise.all([
         transaction.selectFrom('interaction.http_proxy_bindings').selectAll().execute(),
@@ -534,29 +531,10 @@ export class HttpProxyService {
           .where('status', '=', UserStatus.Active)
           .execute(),
         transaction.selectFrom('infra.servers').selectAll().execute(),
-        transaction
-          .selectFrom('workflow.agent_runtime_projections as projection')
-          .innerJoin(
-            'workflow.agent_sessions as session',
-            'session.id',
-            'projection.session_id',
-          )
-          .select('projection.server_id')
-          .where('projection.runtime_ready', '=', true)
-          .where('session.state', '=', 'ready')
-          .where('session.lease_expires_at', '>', sql<Date>`clock_timestamp()`)
-          .whereRef('session.generation', '=', 'projection.session_generation')
-          .whereRef('session.gateway_id', '=', 'projection.gateway_id')
-          .execute(),
         transaction.selectFrom('control.container_network_claims')
           .selectAll()
           .where('state', '=', 'active')
           .execute(),
-        transaction.selectFrom('control.container_mounts')
-          .selectAll()
-          .where('source_kind', '=', 'remote')
-          .execute(),
-        transaction.selectFrom('infra.remote_fs_server_assignments').selectAll().execute(),
         loadUsableServerAccessKeys(transaction),
       ]);
       const poolsById = new Map(pools.map((row) => [row.id, row]));
@@ -571,26 +549,9 @@ export class HttpProxyService {
         claims.push(claim);
         claimsByAddress.set(claim.address, claims);
       }
-      const activeRemoteAssignments = new Set(
-        remoteAssignments
-          .filter((assignment) => assignment.desired_state === 'active')
-          .map((assignment) =>
-            `${assignment.server_id}|${assignment.remote_fs_mount_id}`),
-      );
-      const unsafeRemoteConsumerIds = new Set(
-        containerMounts
-          .filter((mount) =>
-            !activeRemoteAssignments.has(`${mount.server_id}|${mount.source_id}`))
-          .map((mount) => mount.container_id),
-      );
-      const runtimeReadyServerIds = new Set(
-        runtimeReadyServers.map((row) => row.server_id),
-      );
       const onlineServerIds = new Set(
         servers
-          .filter((server) =>
-            runtimeReadyServerIds.has(server.id)
-            && this.serverCanProxy(server))
+          .filter((server) => this.serverCanProxy(server))
           .map((server) => server.id),
       );
       const activeUserIds = new Set(users.map((user) => user.id));
@@ -611,7 +572,6 @@ export class HttpProxyService {
           !pool?.enabled
           || !container
           || !route
-          || unsafeRemoteConsumerIds.has(container.id)
           || !activeUserIds.has(binding.owner_id)
           || !onlineServerIds.has(container.server_id)
         ) return [];
@@ -625,10 +585,10 @@ export class HttpProxyService {
           pool.https_enabled
           && (!pool.certificate_pem || !pool.encrypted_private_key_pem)
         ) return [];
-        if (!route.macvlan_ip || route.runtime_status !== ContainerStatus.Running) {
+        if (!route.routed_ip || route.instance_status !== ContainerStatus.Running) {
           return [];
         }
-        const claimsForAddress = claimsByAddress.get(route.macvlan_ip) ?? [];
+        const claimsForAddress = claimsByAddress.get(route.routed_ip) ?? [];
         const exactClaim = claimsForAddress.find((claim) =>
           claim.owner_kind === 'container'
           && claim.owner_id === container.id
@@ -640,13 +600,13 @@ export class HttpProxyService {
           bindingId: binding.id,
           hostname: binding.hostname,
           domainPoolId: pool.id,
-          targetIp: route.macvlan_ip,
+          routedIp: route.routed_ip,
           targetPort: binding.target_port,
           ownerId: binding.owner_id,
           containerId: container.id,
           containerName: container.name,
-          runtimeId: route.runtime_id,
-          runtimeStatus: route.runtime_status,
+          instanceName: route.instance_name,
+          status: route.instance_status as ContainerStatus,
         }];
       });
       const nextGeneration = safeGeneration(state.generation) + 1;
@@ -881,12 +841,13 @@ export class HttpProxyService {
           hostname: binding.hostname,
           domainPoolId: binding.domain_pool_id,
           domainPool: pool?.wildcard_domain ?? binding.domain_pool_id,
-          targetUrl: route?.macvlan_ip
-            ? `http://${route.macvlan_ip}:${binding.target_port}`
+          targetUrl: route?.routed_ip
+            ? `http://${route.routed_ip}:${binding.target_port}`
             : null,
           containerId: binding.container_id,
           containerName: container?.name ?? null,
-          containerStatus: route?.runtime_status ?? (container ? null : 'missing'),
+          containerStatus: route?.instance_status as ContainerStatus
+            ?? (container ? null : 'missing'),
           targetPort: binding.target_port,
           entryHttpsEnabled: Boolean(pool?.https_enabled),
           status,
@@ -903,9 +864,9 @@ export class HttpProxyService {
     container: ContainerRow | undefined,
     route: {
       server_id: string;
-      runtime_id: string;
-      macvlan_ip: string | null;
-      runtime_status: ContainerStatus;
+      instance_name: string;
+      routed_ip: string;
+      instance_status: string;
       observed_at: Date;
     } | undefined,
     proxyOnline: boolean,
@@ -918,15 +879,15 @@ export class HttpProxyService {
     }
     if (!container) reasons.push('container_deleted');
     if (!route || (container && route.server_id !== container.server_id)) {
-      reasons.push('route_missing', 'container_runtime_missing');
+      reasons.push('route_missing', 'container_instance_missing');
     } else {
-      if (route.runtime_status !== ContainerStatus.Running) {
+      if (route.instance_status !== ContainerStatus.Running) {
         reasons.push('container_not_running');
       }
-      if (!route.runtime_id) reasons.push('container_runtime_missing');
-      if (!route.macvlan_ip) reasons.push('container_ip_missing');
+      if (!route.instance_name) reasons.push('container_instance_missing');
+      if (!route.routed_ip) reasons.push('container_ip_missing');
       if (Date.now() - route.observed_at.getTime() > ROUTE_STALE_MS) {
-        reasons.push('container_runtime_stale');
+        reasons.push('container_stale');
       }
     }
     return [...new Set(reasons)];
@@ -934,19 +895,18 @@ export class HttpProxyService {
 
   private routeMatchesContainer(
     route: {
-      runtime_id: string;
+      instance_name: string;
     },
     container: ContainerRow,
   ): boolean {
     return container.lifecycle_phase === ContainerPhase.Active
-      && container.active_task_id === null
-      && container.bound_runtime_id === route.runtime_id
+      && container.instance_name === route.instance_name
       && container.power_intent === ContainerPowerIntent.Running;
   }
 
   private serverCanProxy(server: ServerRow): boolean {
     return server.status === ServerStatus.Online
-      && Boolean(server.macvlan_cidr);
+      && Boolean(server.parent_interface);
   }
 
   private poolHasSafeTlsLease(pool: DomainPoolRow, now: number): boolean {
@@ -1088,9 +1048,7 @@ export class HttpProxyService {
   }
 
   private key(): Buffer {
-    const secret = this.config.get<string>('ssh.keyEncryptionSecret')
-      || this.config.get<string>('auth.jwtSecret');
-    return createHash('sha256').update(secret).digest();
+    return createHash('sha256').update(this.config.keyEncryptionSecret()).digest();
   }
 
   private async assertRequesterActive(
@@ -1171,143 +1129,6 @@ function safeGeneration(value: string | number | bigint): number {
     throw new Error('HTTP proxy snapshot generation exceeds the safe application range');
   }
   return generation;
-}
-
-function parseBindingInput(input: unknown, partial: boolean) {
-  const record = objectInput(input);
-  assertExactKeys(record, ['hostname', 'containerId', 'targetPort']);
-  const parsed: {
-    hostname?: string;
-    containerId?: string;
-    targetPort?: number;
-  } = {};
-  if (!partial || record.hostname !== undefined) {
-    parsed.hostname = stringField(record.hostname, 'hostname');
-  }
-  if (!partial || record.containerId !== undefined) {
-    parsed.containerId = stringField(record.containerId, 'containerId');
-  }
-  if (!partial || record.targetPort !== undefined) {
-    parsed.targetPort = portField(record.targetPort);
-  }
-  if (partial && Object.keys(parsed).length === 0) {
-    throw new BadRequestException('At least one binding field must be updated');
-  }
-  return parsed as typeof parsed & {
-    hostname: string;
-    containerId: string;
-    targetPort: number;
-  };
-}
-
-function parseDomainPoolInput(input: unknown, partial: boolean) {
-  const record = objectInput(input);
-  assertExactKeys(record, [
-    'wildcardDomain',
-    'enabled',
-    'httpsEnabled',
-    'certificatePem',
-    'privateKeyPem',
-  ]);
-  const parsed: {
-    wildcardDomain?: string;
-    enabled?: boolean;
-    httpsEnabled?: boolean;
-    certificatePem?: string | null;
-    privateKeyPem?: string | null;
-  } = {};
-  if (!partial || record.wildcardDomain !== undefined) {
-    parsed.wildcardDomain = stringField(record.wildcardDomain, 'wildcardDomain');
-  }
-  if (record.enabled !== undefined) {
-    parsed.enabled = booleanField(record.enabled, 'enabled');
-  }
-  if (record.httpsEnabled !== undefined) {
-    parsed.httpsEnabled = booleanField(record.httpsEnabled, 'httpsEnabled');
-  }
-  if (record.certificatePem !== undefined) {
-    parsed.certificatePem = nullableBoundedStringField(
-      record.certificatePem,
-      'certificatePem',
-      MAX_HTTP_PROXY_CERTIFICATE_PEM_LENGTH,
-    );
-  }
-  if (record.privateKeyPem !== undefined) {
-    parsed.privateKeyPem = nullableBoundedStringField(
-      record.privateKeyPem,
-      'privateKeyPem',
-      MAX_HTTP_PROXY_PRIVATE_KEY_PEM_LENGTH,
-    );
-  }
-  if (partial && Object.keys(parsed).length === 0) {
-    throw new BadRequestException('At least one domain pool field must be updated');
-  }
-  return parsed as typeof parsed & { wildcardDomain: string };
-}
-
-function assertExactKeys(
-  record: Record<string, unknown>,
-  allowed: readonly string[],
-): void {
-  const allowedSet = new Set(allowed);
-  const unknown = Object.keys(record).filter((key) => !allowedSet.has(key));
-  if (unknown.length > 0) {
-    throw new BadRequestException(`Unknown request field: ${unknown.sort()[0]}`);
-  }
-}
-
-function objectInput(input: unknown): Record<string, unknown> {
-  if (!input || typeof input !== 'object' || Array.isArray(input)) {
-    throw new BadRequestException('Request body must be an object');
-  }
-  return input as Record<string, unknown>;
-}
-
-function stringField(value: unknown, name: string): string {
-  if (typeof value !== 'string' || !value.trim()) {
-    throw new BadRequestException(`${name} is required`);
-  }
-  return value.trim();
-}
-
-function nullableStringField(value: unknown, name: string): string | null {
-  if (value === null || value === '') return null;
-  return stringField(value, name);
-}
-
-function nullableBoundedStringField(
-  value: unknown,
-  name: string,
-  maxLength: number,
-): string | null {
-  const parsed = nullableStringField(value, name);
-  if (parsed !== null && parsed.length > maxLength) {
-    throw new BadRequestException(
-      `${name} must not exceed ${maxLength} characters`,
-    );
-  }
-  return parsed;
-}
-
-function booleanField(value: unknown, name: string): boolean {
-  if (typeof value !== 'boolean') {
-    throw new BadRequestException(`${name} must be boolean`);
-  }
-  return value;
-}
-
-function portField(value: unknown): number {
-  if (
-    typeof value !== 'number'
-    || !Number.isInteger(value)
-    || value < 1
-    || value > 65535
-  ) {
-    throw new BadRequestException(
-      'targetPort must be an integer between 1 and 65535',
-    );
-  }
-  return value;
 }
 
 function parseHttpProxyHostname(value: string): string {

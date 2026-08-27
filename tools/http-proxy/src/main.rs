@@ -474,16 +474,21 @@ struct Route {
     hostname: String,
     #[serde(rename = "domainPoolId")]
     domain_pool_id: String,
+    #[serde(rename = "routedIp")]
+    routed_ip: String,
+    #[serde(rename = "targetPort")]
+    target_port: u16,
     #[serde(rename = "ownerId")]
     owner_id: String,
     #[serde(rename = "containerId")]
     container_id: String,
-    #[serde(rename = "runtimeId")]
-    runtime_id: String,
-    #[serde(rename = "targetIp")]
-    target_ip: String,
-    #[serde(rename = "targetPort")]
-    target_port: u16,
+    #[serde(rename = "containerName")]
+    #[allow(dead_code)]
+    container_name: String,
+    #[serde(rename = "instanceName")]
+    instance_name: String,
+    #[allow(dead_code)]
+    status: String,
 }
 
 impl Route {
@@ -493,8 +498,8 @@ impl Route {
             && self.domain_pool_id == other.domain_pool_id
             && self.owner_id == other.owner_id
             && self.container_id == other.container_id
-            && self.runtime_id == other.runtime_id
-            && self.target_ip == other.target_ip
+            && self.instance_name == other.instance_name
+            && self.routed_ip == other.routed_ip
             && self.target_port == other.target_port
     }
 }
@@ -1302,7 +1307,7 @@ async fn connect_upstream<S: AsyncWrite + Unpin>(
     runtime: &Runtime,
     route: &Route,
 ) -> Result<TcpStream> {
-    let upstream_addr = format!("{}:{}", route.target_ip, route.target_port);
+    let upstream_addr = format!("{}:{}", route.routed_ip, route.target_port);
     match time::timeout(
         UPSTREAM_CONNECT_DEADLINE,
         TcpStream::connect(&upstream_addr),
@@ -2305,11 +2310,13 @@ mod tests {
             binding_id: "binding-a".into(),
             hostname: "app.example.test".into(),
             domain_pool_id: "pool-a".into(),
+            routed_ip: "10.0.0.2".into(),
+            target_port: 8080,
             owner_id: "user-a".into(),
             container_id: "container-a".into(),
-            runtime_id: "runtime-a".into(),
-            target_ip: "10.0.0.2".into(),
-            target_port: 8080,
+            container_name: "app".into(),
+            instance_name: "instance-a".into(),
+            status: "running".into(),
         };
         assert!(store
             .store(ProxySnapshot {
@@ -2359,8 +2366,7 @@ mod tests {
             .unwrap();
         let authorization = store.authorize_route(&route.hostname).unwrap();
         let mut replacement = route;
-        replacement.container_id = "container-b".into();
-        replacement.runtime_id = "runtime-b".into();
+        replacement.instance_name = "instance-b".into();
 
         store
             .store(test_snapshot(2, 30_000, vec![replacement]))
@@ -2673,11 +2679,13 @@ mod tests {
             binding_id: "binding-a".into(),
             hostname: "app.example.test".into(),
             domain_pool_id: "pool-a".into(),
+            routed_ip: "127.0.0.1".into(),
+            target_port,
             owner_id: "user-a".into(),
             container_id: "container-a".into(),
-            runtime_id: "runtime-a".into(),
-            target_ip: "127.0.0.1".into(),
-            target_port,
+            container_name: "app".into(),
+            instance_name: "instance-a".into(),
+            status: "running".into(),
         }
     }
 

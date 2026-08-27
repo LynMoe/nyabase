@@ -1,0 +1,7 @@
+{
+  "type": "error",
+  "status": "Failure",
+  "status_code": 412,
+  "error": "The resource has changed",
+  "error_code": 412
+}

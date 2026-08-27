@@ -1,6 +1,5 @@
 import {
   Capability,
-  type AdminImageDto,
   type GroupDto,
   type SystemSettingFieldDto,
   type SystemSettingsDto,
@@ -44,31 +43,6 @@ export function isSystemSettingsDto(value: unknown): value is SystemSettingsDto 
     && Array.isArray(dto.editable) && dto.editable.every(isSystemSettingField)
     && Array.isArray(dto.readOnly) && dto.readOnly.every(isSystemSettingField)
     && record(dto.publicSettings));
-}
-
-function isRuntimeArgs(value: unknown): value is string[] | null {
-  return value === null || (Array.isArray(value) && value.every((item) => typeof item === 'string'));
-}
-
-export function isAdminImageDto(value: unknown): value is AdminImageDto {
-  const dto = record(value);
-  const runtime = record(dto?.runtimeOverrides);
-  return Boolean(dto && runtime
-    && typeof dto.id === 'string'
-    && typeof dto.name === 'string'
-    && typeof dto.dockerImage === 'string'
-    && positiveRevision(dto.revision)
-    && Number.isInteger(runtime.uid) && (runtime.uid as number) >= 0
-    && isRuntimeArgs(runtime.entrypoint)
-    && isRuntimeArgs(runtime.cmd)
-    && typeof runtime.init === 'boolean'
-    && (dto.description === null || typeof dto.description === 'string')
-    && typeof dto.isActive === 'boolean'
-    && typeof dto.disableSsh === 'boolean'
-    && typeof dto.deleting === 'boolean'
-    && Number.isInteger(dto.cleanupGeneration)
-    && typeof dto.createdAt === 'string'
-    && typeof dto.updatedAt === 'string');
 }
 
 const CAPABILITIES = new Set<string>(Object.values(Capability));

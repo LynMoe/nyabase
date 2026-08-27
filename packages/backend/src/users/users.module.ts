@@ -8,8 +8,6 @@ import { GroupsModule } from '../groups/groups.module.js';
 import { SshModule } from '../ssh/ssh.module.js';
 import { ProxySnapshotNotifierModule } from '../proxy-snapshots/proxy-snapshot-notifier.module.js';
 import { AuditModule } from '../audit/audit.module.js';
-import { QuotaModule } from '../quota/quota.module.js';
-import { UserSshIdentityService } from './user-ssh-identity.service.js';
 
 @Module({
   imports: [
@@ -19,10 +17,9 @@ import { UserSshIdentityService } from './user-ssh-identity.service.js';
     forwardRef(() => SshModule),
     ProxySnapshotNotifierModule,
     forwardRef(() => AuditModule),
-    forwardRef(() => QuotaModule),
   ],
-  providers: [UsersService, UserSshIdentityService],
+  providers: [UsersService],
   controllers: [UsersController, AdminUsersController],
-  exports: [UsersService, UserSshIdentityService],
+  exports: [UsersService],
 })
 export class UsersModule {}

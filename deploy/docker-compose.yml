@@ -134,12 +134,10 @@ services:
       context: ..
       dockerfile: deploy/Dockerfile.backend
     ports:
-      # Preserve the existing public application/API/Agent gateway entrypoint.
+      # Public control-plane HTTP and WebSocket entrypoint.
       - "3001:3001"
     environment:
       NYABASE_CONFIG_FILE: /etc/nyabase/config.yaml
-      NYABASE_RUNTIME_ROLE: ${NYABASE_RUNTIME_ROLE:-all}
-      NYABASE_CONSOLE_PUBLIC_URL: ${NYABASE_CONSOLE_PUBLIC_URL:-}
       DATABASE_URL: ${DATABASE_URL:?set DATABASE_URL in deploy/.env}
       DB_POOL_MAX: ${DB_POOL_MAX:-20}
       PG_APPLICATION_NAME: ${PG_APPLICATION_NAME:-nyabase-backend}
@@ -153,6 +151,15 @@ services:
       PG_SSL_CA_FILE: ${PG_SSL_CA_FILE:-}
       PG_SSL_SERVERNAME: ${PG_SSL_SERVERNAME:-}
       DB_MIGRATIONS_RUN: ${DB_MIGRATIONS_RUN:-true}
+      INCUS_PREFLIGHT_IMAGE_ALIAS: ${INCUS_PREFLIGHT_IMAGE_ALIAS:-}
+      INCUS_PREFLIGHT_IMAGE_FINGERPRINT: ${INCUS_PREFLIGHT_IMAGE_FINGERPRINT:-}
+      INCUS_PREFLIGHT_EGRESS_URL: ${INCUS_PREFLIGHT_EGRESS_URL:-}
+      INCUS_PREFLIGHT_SOURCE_SERVER: ${INCUS_PREFLIGHT_SOURCE_SERVER:-https://images.linuxcontainers.org}
+      INCUS_REQUEST_TIMEOUT_MS: ${INCUS_REQUEST_TIMEOUT_MS:-10000}
+      INCUS_OPERATION_WAIT_TIMEOUT_MS: ${INCUS_OPERATION_WAIT_TIMEOUT_MS:-120000}
+      INCUS_CLIENT_CERT_FILE: ${INCUS_CLIENT_CERT_FILE:-/run/secrets/incus_client_cert}
+      INCUS_CLIENT_KEY_FILE: ${INCUS_CLIENT_KEY_FILE:-/run/secrets/incus_client_key}
+      INCUS_CA_FILE: ${INCUS_CA_FILE:-/run/secrets/incus_ca}
       REDIS_URL: ${REDIS_URL:?set REDIS_URL in deploy/.env}
       REDIS_KEY_PREFIX: ${REDIS_KEY_PREFIX:-nyabase:}
       REDIS_TLS_CA_FILE: ${REDIS_TLS_CA_FILE:-}
@@ -161,7 +168,12 @@ services:
       VMAGENT_URL: http://vmagent:8429
     volumes:
       # Copy config.example.yaml to config.yaml and set production secrets first.
+      # Compose cannot chmod a host bind-mount; set host mode 0400 (see OPERATIONS.md).
       - ./config.yaml:/etc/nyabase/config.yaml:ro
+    secrets:
+      - incus_client_cert
+      - incus_client_key
+      - incus_ca
     read_only: true
     tmpfs:
       - /tmp:rw,nosuid,nodev,noexec,uid=10001,gid=10001,mode=1770,size=64m
@@ -207,3 +219,11 @@ volumes:
   postgres-data:
   vm-data:
   vmagent-data:
+
+secrets:
+  incus_client_cert:
+    file: ${INCUS_CLIENT_CERT_SOURCE:?set INCUS_CLIENT_CERT_SOURCE in deploy/.env}
+  incus_client_key:
+    file: ${INCUS_CLIENT_KEY_SOURCE:?set INCUS_CLIENT_KEY_SOURCE in deploy/.env}
+  incus_ca:
+    file: ${INCUS_CA_SOURCE:?set INCUS_CA_SOURCE in deploy/.env}

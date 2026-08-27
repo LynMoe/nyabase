@@ -7,6 +7,7 @@ import { ErrorBoundary } from '../components/error-boundary.js';
 import { bootstrapAuthSession } from '../lib/api.js';
 import { Button } from '../components/ui/button.js';
 import { sanitizeInternalRedirect } from '../lib/internal-redirect.js';
+import { takePendingLoginReason } from '../lib/pending-login-reason.js';
 import { terminateBrowserSession } from '../lib/session-termination.js';
 
 interface RouterContext {
@@ -22,9 +23,10 @@ function Root() {
 
   useEffect(() => {
     if (status === 'anonymous' && pathname !== '/login') {
+      const reason = takePendingLoginReason();
       navigate({
         to: '/login',
-        search: { redirect: sanitizeInternalRedirect(locationHref), reason: undefined },
+        search: { redirect: sanitizeInternalRedirect(locationHref), reason },
         replace: true,
       });
     }

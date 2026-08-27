@@ -9,7 +9,8 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run --maxWorkers=4",
     "migration:run": "tsx src/persistence-pg/cli.ts migrate",
-    "migration:status": "tsx src/persistence-pg/cli.ts status"
+    "migration:status": "tsx src/persistence-pg/cli.ts status",
+    "incus:generate-api-types": "node src/incus/generate-api-types.mjs"
   },
   "dependencies": {
     "@nestjs/common": "^10.4.15",
@@ -43,6 +44,8 @@
     "@types/uuid": "^10.0.0",
     "@types/ws": "^8.5.14",
     "dotenv": "^17.4.2",
+    "openapi-typescript": "^7.13.0",
+    "swagger2openapi": "^7.0.8",
     "ts-node-dev": "^2.0.0",
     "tsconfig-paths": "^4.2.0",
     "tsx": "^4.21.0"

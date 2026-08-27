@@ -1,446 +1,561 @@
+import { ConflictException, Inject, Injectable, NotFoundException, Optional } from '@nestjs/common';
+import type { Kysely, Selectable, Transaction } from 'kysely';
+import { createCipheriv, createHash, randomBytes, randomUUID } from 'node:crypto';
 import {
-  Injectable,
-  NotFoundException,
-  ConflictException,
-  BadRequestException,
-  Inject,
-  Logger,
-} from '@nestjs/common';
-import { v4 as uuidv4 } from 'uuid';
-import { randomBytes, createHash } from 'crypto';
-import type { ServerRecord } from '../domain/domain-records.js';
-import {
-  ServerStatus,
-  DataDiskDto,
-  SelfCheckResult,
-  type DockerDaemonStatus,
-  type DiskInfo,
-  type ServerDto,
-  type UserServerDto,
-  type UserDataDiskDto,
-  MAX_PLATFORM_SERVERS,
   AuditAction,
   Capability,
-  zSelfCheckResult,
+  GpuGrantMode,
+  MAX_PLATFORM_SERVERS,
+  NodeMetricsStatus,
+  PreflightStatus,
+  ServerStatus,
+  type CreateServerRequest,
+  type PatchServerRequest,
+  type ServerDto,
+  type ServerGpuDto,
+  type UserServerDto,
 } from '@nyabase/common';
-import { AgentGateway } from '../gateway/agent-gateway.js';
-import { rpcWithErrorMapping } from '../gateway/agent-errors.js';
-import { AccessResolverService } from '../access/access-resolver.service.js';
-import { SshProxyGateway } from '../ssh/ssh-proxy-gateway.js';
-import { postCommitBestEffort } from '../common/post-commit.js';
-import { ProxySnapshotNotifierService } from '../proxy-snapshots/proxy-snapshot-notifier.service.js';
-import { AuditService } from '../audit/audit.service.js';
-import { publicDataDiskDisplayName } from '../mount-sources/utils.js';
-import { safeEpochToIso } from '../common/safe-date.js';
-import { InfrastructureRepository } from '../infrastructure/infrastructure.repository.js';
+import type { InfrastructureServerTable } from '../infrastructure/infrastructure-database.types.js';
+import type { NyabaseDatabase } from '../persistence-pg/database.types.js';
+import { PG_DATABASE } from '../persistence-pg/tokens.js';
 import { PgTransactionManager } from '../persistence-pg/transaction.js';
-import { WorkflowRepository } from '../agent-tasks/workflow.repository.js';
+import { AccessResolverService } from '../access/access-resolver.service.js';
+import { AuditService } from '../audit/audit.service.js';
+import { NyabaseConfigService } from '../config/nyabase-config.service.js';
+import { numberValue, isoDate, poolLabel } from '../domain/domain-utils.js';
+import {
+  InfrastructureRepository,
+  lockServerOnboarding,
+} from '../infrastructure/infrastructure.repository.js';
+import { ProxySnapshotNotifierService } from '../proxy-snapshots/proxy-snapshot-notifier.service.js';
+import {
+  INCUS_CLIENT_FACTORY,
+  type IncusClientFactory,
+} from '../runtime/reconcile-worker.service.js';
+import {
+  NODE_METRICS_PULL,
+  type NodeMetricsPullPort,
+} from '../runtime/server-preflight-reconciler.service.js';
+import {
+  applyNvidiaSmiIndexes,
+  filterGpuInventoryByGrant,
+  nvidiaGpuInventoryFromResources,
+  nvidiaSmiIndexByPciFromSamples,
+} from './gpu-inventory.js';
 
-const SERVER_SLUG_RE = /^[a-z0-9][a-z0-9_-]*$/;
-
-interface ServerDtoOptions {
-  includeHostFingerprint?: boolean;
-}
+type ServerRow = Selectable<InfrastructureServerTable>;
 
 @Injectable()
 export class ServersService {
-  private readonly logger = new Logger(ServersService.name);
-  private readonly infrastructure: InfrastructureRepository;
-  private readonly transactions: PgTransactionManager;
-
   constructor(
-    @Inject(InfrastructureRepository)
-    infrastructure: unknown,
-    private agentGateway: AgentGateway,
-    private accessResolver: AccessResolverService,
-    private sshProxyGateway: SshProxyGateway,
-    @Inject(PgTransactionManager)
-    transactions: unknown,
-    private proxySnapshots: ProxySnapshotNotifierService,
-    private auditService: AuditService,
-    private readonly workflowRepository: WorkflowRepository,
-  ) {
-    this.infrastructure = infrastructure as InfrastructureRepository;
-    this.transactions = transactions as PgTransactionManager;
-  }
+    @Inject(PG_DATABASE) private readonly database: Kysely<NyabaseDatabase>,
+    private readonly transactions: PgTransactionManager,
+    private readonly access: AccessResolverService,
+    private readonly audit: AuditService,
+    @Optional() private readonly config?: NyabaseConfigService,
+    @Optional() private readonly infrastructure?: InfrastructureRepository,
+    @Optional() private readonly proxySnapshots?: ProxySnapshotNotifierService,
+    @Optional() @Inject(INCUS_CLIENT_FACTORY) private readonly clients?: IncusClientFactory,
+    @Optional() @Inject(NODE_METRICS_PULL) private readonly nodeMetrics?: NodeMetricsPullPort,
+  ) {}
 
-  async create(actorId: string, dto: {
-    name: string;
-    slug: string;
-  }) {
-    this.assertValidSlug(dto.slug);
-    const rawToken = randomBytes(32).toString('hex');
-    const tokenHash = createHash('sha256').update(rawToken).digest('hex');
-    const server = await this.transactions.run(async (transaction) => {
-      await this.accessResolver.assertActorCapabilitiesInTransaction(
-        transaction, actorId, [Capability.ManageServers],
-      );
-      await this.infrastructure.lockServerCapacity(transaction);
-      if (await this.infrastructure.countServers(transaction) >= MAX_PLATFORM_SERVERS) {
-        throw new ConflictException({
-          code: 'SERVER_CAPACITY_REACHED',
-          message: `At most ${MAX_PLATFORM_SERVERS} servers are supported`,
-        });
+  async create(actorId: string, input: CreateServerRequest): Promise<ServerDto> {
+    const row = await this.transactions.run(async (transaction) => {
+      await this.access.assertActorCapabilitiesInTransaction(transaction, actorId, [
+        Capability.ManageServers,
+      ]);
+      if (this.infrastructure) {
+        await this.infrastructure.lockServerCapacity(transaction);
+      } else {
+        await lockServerOnboarding(transaction);
       }
-      if (await this.infrastructure.findServerBySlug(dto.slug, transaction)) {
-        throw new ConflictException('Server slug already exists');
+      const count = await transaction
+        .selectFrom('infra.servers')
+        .select(({ fn }) => fn.countAll<number>().as('count'))
+        .executeTakeFirstOrThrow();
+      if (Number(count.count) >= MAX_PLATFORM_SERVERS) {
+        throw new ConflictException({ code: 'SERVER_CAPACITY_REACHED' });
       }
-      const deletingImage = await transaction
-        .selectFrom('infra.images')
-        .select('id')
-        .where('deleting', '=', true)
-        .executeTakeFirst();
-      if (deletingImage) {
-        throw new ConflictException('A server cannot be created while image cleanup is in progress');
-      }
-      const created = await this.infrastructure.insertServer({
-        id: uuidv4(),
-        name: dto.name,
-        slug: dto.slug,
-        agentTokenHash: tokenHash,
-        macvlanCidr: null,
-        macvlanGateway: null,
-        macvlanReservedIps: [],
-      }, transaction);
-      await this.auditService.append(
-        transaction,
-        actorId,
-        AuditAction.CreateServer,
-        created.id,
-        'server',
-        { serverId: created.id, name: created.name, slug: created.slug },
-      );
-      return created;
-    }).catch((error: unknown) => {
-      if (isPgUniqueViolation(error)) {
-        throw new ConflictException('Server slug already exists');
-      }
-      throw error;
+      const server = await transaction
+        .insertInto('infra.servers')
+        .values({
+          id: randomUUID(),
+          name: input.name,
+          slug: input.slug,
+          api_endpoint: input.apiEndpoint,
+          server_cert_fingerprint: null,
+          incus_version: null,
+          api_extensions: [],
+          system_pool_id: null,
+          storage_overcommit_ratio: 1,
+          parent_interface: input.parentInterface,
+          dns_servers: input.dnsServers,
+          gpu_runtime_available: false,
+          status: ServerStatus.Unknown,
+          last_seen_at: null,
+          last_error: null,
+          revision: 1,
+          node_metrics_endpoint: input.nodeMetrics?.endpoint ?? null,
+          node_metrics_server_cert_fingerprint: input.nodeMetrics?.serverCertFingerprint ?? null,
+          node_metrics_token_ciphertext: input.nodeMetrics
+            ? this.encryptNodeMetricsToken(input.nodeMetrics.token)
+            : null,
+          node_metrics_token_fingerprint: input.nodeMetrics
+            ? this.nodeMetricsTokenFingerprint(input.nodeMetrics.token)
+            : null,
+          node_metrics_status: input.nodeMetrics
+            ? NodeMetricsStatus.Unknown
+            : NodeMetricsStatus.Unconfigured,
+          node_metrics_last_success_at: null,
+          node_metrics_outage_since: null,
+          node_metrics_last_error: null,
+          preflight_status: PreflightStatus.NotRun,
+          preflight_checked_at: null,
+          preflight_report: null,
+        })
+        .returningAll()
+        .executeTakeFirstOrThrow();
+      await this.audit.append(transaction, actorId, AuditAction.CreateServer, server.id, 'server', {
+        name: server.name,
+        slug: server.slug,
+      });
+      return server;
     });
-    await postCommitBestEffort(
-      'Server create SSH snapshot broadcast',
-      () => this.sshProxyGateway.broadcastSnapshot(),
-      this.logger,
-    );
-    return {
-      server: await this.toDto(server, { includeHostFingerprint: true }),
-      agentToken: rawToken,
-    };
+    return (await this.toDtos([row]))[0]!;
   }
 
-  async findAll(): Promise<ServerRecord[]> {
-    return this.infrastructure.listServers();
+  async findAll(): Promise<ServerRow[]> {
+    return this.database.selectFrom('infra.servers').selectAll().orderBy('name').execute();
   }
 
-  async findAllDtos(options: ServerDtoOptions = {}): Promise<ServerDto[]> {
-    const servers = await this.infrastructure.listServers();
-    return Promise.all(servers.map((server) => this.toDto(server, options)));
+  async findAllDtos(): Promise<ServerDto[]> {
+    return this.toDtos(await this.findAll());
   }
 
-  async findByIds(ids: string[]): Promise<ServerRecord[]> {
+  async findByIds(ids: string[]): Promise<ServerRow[]> {
     if (ids.length === 0) return [];
-    const wanted = new Set(ids);
-    return (await this.infrastructure.listServers()).filter((server) => wanted.has(server.id));
+    return this.database
+      .selectFrom('infra.servers')
+      .selectAll()
+      .where('id', 'in', ids)
+      .orderBy('name')
+      .execute();
   }
 
   async findDtosByIds(ids: string[]): Promise<ServerDto[]> {
-    const servers = await this.findByIds(ids);
-    return Promise.all(servers.map((server) => this.toDto(server)));
+    return this.toDtos(await this.findByIds(ids));
   }
 
   async findUserDtosByIds(ids: string[]): Promise<UserServerDto[]> {
-    const servers = await this.findByIds(ids);
-    return servers.map((server) => this.toUserDto(server));
+    return (await this.findByIds(ids)).map((row) => this.toUserDto(row));
   }
 
-  async findById(id: string): Promise<ServerRecord> {
-    const server = await this.infrastructure.findServerById(id);
-    if (!server) throw new NotFoundException('Server not found');
-    return server;
+  async findById(
+    id: string,
+    executor: Kysely<NyabaseDatabase> | Transaction<NyabaseDatabase> = this.database,
+  ) {
+    const row = await executor
+      .selectFrom('infra.servers')
+      .selectAll()
+      .where('id', '=', id)
+      .executeTakeFirst();
+    if (!row) throw new NotFoundException('Server not found');
+    return row;
   }
 
-  async findDtoById(id: string, options: ServerDtoOptions = {}): Promise<ServerDto> {
-    return this.toDto(await this.findById(id), options);
+  async findDtoById(id: string): Promise<ServerDto> {
+    return (await this.toDtos([await this.findById(id)]))[0]!;
+  }
+
+  async prepareConnection(serverId: string, expectedFingerprint: string): Promise<number> {
+    const normalized = expectedFingerprint.replace(/[:-\s]/g, '').toLowerCase();
+    const row = await this.transactions.run(async (transaction) => {
+      const server = await transaction
+        .selectFrom('infra.servers')
+        .select(['server_cert_fingerprint', 'revision'])
+        .where('id', '=', serverId)
+        .forUpdate()
+        .executeTakeFirst();
+      if (!server) throw new NotFoundException('Server not found');
+      if (
+        server.server_cert_fingerprint &&
+        server.server_cert_fingerprint.replace(/[:-\s]/g, '').toLowerCase() !== normalized
+      ) {
+        throw new ConflictException({
+          code: 'PREFLIGHT_IDENTITY_MISMATCH',
+          message: 'Expected server certificate fingerprint does not match the registered server',
+        });
+      }
+      if (server.server_cert_fingerprint) return numberValue(server.revision);
+      // The expected fingerprint is an admission hint, not a TOFU pin.
+      // Only the mTLS transport may persist the fingerprint it observes.
+      return numberValue(server.revision);
+    });
+    return numberValue(row);
   }
 
   async findUserDtoById(id: string): Promise<UserServerDto> {
     return this.toUserDto(await this.findById(id));
   }
 
-  async findByTokenHash(hash: string): Promise<ServerRecord | null> {
-    return this.infrastructure.findServerByTokenHash(hash);
+  async listGpus(serverId: string): Promise<ServerGpuDto[]> {
+    const server = await this.findById(serverId);
+    if (!this.clients) {
+      throw new NotFoundException('Server GPU inventory is unavailable');
+    }
+    const resources = await this.clients.get(serverId).then((client) => client.getResources());
+    const cards = nvidiaGpuInventoryFromResources(resources.metadata);
+    return applyNvidiaSmiIndexes(cards, await this.nvidiaSmiIndexByPci(server));
   }
 
-  async update(
-    actorId: string,
-    id: string,
-    dto: {
-      name?: string;
-      slug?: string;
-    },
-  ) {
-    if (dto.slug !== undefined) this.assertValidSlug(dto.slug);
-    const saved = await this.transactions.run(async (transaction) => {
-      await this.accessResolver.assertActorCapabilitiesInTransaction(
-        transaction, actorId, [Capability.ManageServers],
+  async listGpusForUser(userId: string, serverId: string): Promise<ServerGpuDto[]> {
+    const grant = await this.access.resolveServer(userId, serverId);
+    if (!grant || grant.accessPhase !== 'live') {
+      throw new NotFoundException('Server not found');
+    }
+    if (grant.gpu.mode === GpuGrantMode.None) {
+      return [];
+    }
+    const items = await this.listGpus(serverId);
+    return filterGpuInventoryByGrant(items, {
+      mode: grant.gpu.mode,
+      pciAddresses: grant.gpu.pciAddresses,
+    });
+  }
+
+  private async nvidiaSmiIndexByPci(server: ServerRow): Promise<ReadonlyMap<string, number>> {
+    if (
+      !this.nodeMetrics
+      || !server.node_metrics_endpoint
+      || !server.node_metrics_token_ciphertext
+    ) {
+      return new Map();
+    }
+    try {
+      const result = await this.nodeMetrics.pull(
+        server.id,
+        server.node_metrics_endpoint,
+        server.node_metrics_token_ciphertext,
       );
-      const server = await this.infrastructure.findServerById(id, transaction);
-      if (!server) throw new NotFoundException('Server not found');
-      if (dto.slug !== undefined && dto.slug !== server.slug) {
-        const existingSlug = await this.infrastructure.findServerBySlug(dto.slug, transaction);
-        if (existingSlug && existingSlug.id !== id) {
-          throw new ConflictException('Server slug already exists');
-        }
-      }
-      const allowed: Partial<Pick<ServerRecord, 'name' | 'slug'>> = {};
-      if (dto.name !== undefined) allowed.name = dto.name;
-      if (dto.slug !== undefined) allowed.slug = dto.slug;
-      const saved = Object.keys(allowed).length > 0
-        ? await this.infrastructure.updateServerIdentity(id, allowed, transaction)
-        : server;
-      if (!saved) throw new NotFoundException('Server not found');
-      await this.auditService.append(
+      return nvidiaSmiIndexByPciFromSamples(result.report?.samples ?? []);
+    } catch {
+      return new Map();
+    }
+  }
+
+  async update(actorId: string, id: string, input: PatchServerRequest): Promise<ServerDto> {
+    const row = await this.transactions.run(async (transaction) => {
+      await this.access.assertActorCapabilitiesInTransaction(transaction, actorId, [
+        Capability.ManageServers,
+      ]);
+      const current = await transaction
+        .selectFrom('infra.servers')
+        .selectAll()
+        .where('id', '=', id)
+        .forUpdate()
+        .executeTakeFirst();
+      if (!current) throw new NotFoundException('Server not found');
+      const nodeMetrics = input.nodeMetrics;
+      const nodeMetricsPatch =
+        nodeMetrics === undefined
+          ? {}
+          : nodeMetrics === null
+            ? {
+                node_metrics_endpoint: null,
+                node_metrics_server_cert_fingerprint: null,
+                node_metrics_token_ciphertext: null,
+                node_metrics_token_fingerprint: null,
+                node_metrics_status: NodeMetricsStatus.Unconfigured,
+                node_metrics_last_success_at: null,
+                node_metrics_outage_since: null,
+                node_metrics_last_error: null,
+              }
+            : {
+                node_metrics_endpoint: nodeMetrics.endpoint,
+                node_metrics_server_cert_fingerprint: nodeMetrics.serverCertFingerprint,
+                ...(nodeMetrics.token === undefined
+                  ? current.node_metrics_token_ciphertext
+                    ? {
+                        node_metrics_token_ciphertext: current.node_metrics_token_ciphertext,
+                        node_metrics_token_fingerprint: current.node_metrics_token_fingerprint,
+                      }
+                    : (() => {
+                        throw new ConflictException({
+                          code: 'NODE_METRICS_TOKEN_REQUIRED',
+                          message: 'A node metrics token is required for first-time configuration',
+                        });
+                      })()
+                  : {
+                      node_metrics_token_ciphertext: this.encryptNodeMetricsToken(
+                        nodeMetrics.token,
+                      ),
+                      node_metrics_token_fingerprint: this.nodeMetricsTokenFingerprint(
+                        nodeMetrics.token,
+                      ),
+                    }),
+                node_metrics_status: NodeMetricsStatus.Unknown,
+                node_metrics_last_success_at: null,
+                node_metrics_outage_since: null,
+                node_metrics_last_error: null,
+              };
+      const updated = await transaction
+        .updateTable('infra.servers')
+        .set({
+          ...(input.name === undefined ? {} : { name: input.name }),
+          ...(input.slug === undefined ? {} : { slug: input.slug }),
+          ...(input.parentInterface === undefined
+            ? {}
+            : { parent_interface: input.parentInterface }),
+          ...(input.dnsServers === undefined ? {} : { dns_servers: input.dnsServers }),
+          ...(input.systemPoolId === undefined ? {} : { system_pool_id: input.systemPoolId }),
+          ...(input.storageOvercommitRatio === undefined
+            ? {}
+            : { storage_overcommit_ratio: input.storageOvercommitRatio }),
+          ...nodeMetricsPatch,
+          revision: Number(input.expectedRevision) + 1,
+          updated_at: new Date(),
+        })
+        .where('id', '=', id)
+        .where('revision', '=', String(input.expectedRevision))
+        .returningAll()
+        .executeTakeFirst();
+      if (!updated) throw new ConflictException({ code: 'REVISION_CONFLICT' });
+      await this.audit.append(
         transaction,
         actorId,
         AuditAction.UpdateServer,
-        saved.id,
+        id,
         'server',
-        {
-          serverId: saved.id,
-          previous: { name: server.name, slug: server.slug },
-          current: { name: saved.name, slug: saved.slug },
-        },
+        auditServerPatch(input),
       );
-      return saved;
-    }).catch((error: unknown) => {
-      if (isPgUniqueViolation(error)) {
-        throw new ConflictException('Server slug already exists');
-      }
-      throw error;
+      return updated;
     });
-    await postCommitBestEffort(
-      'Server update SSH snapshot broadcast',
-      () => this.sshProxyGateway.broadcastSnapshot(),
-      this.logger,
-    );
-    return this.toDto(saved, { includeHostFingerprint: true });
+    return (await this.toDtos([row]))[0]!;
   }
 
-  async delete(actorId: string, id: string) {
-    await this.workflowRepository.runWithAgentSessionMutationFence(
-      id,
-      'Server deletion started',
-      async (transaction) => {
-        await this.accessResolver.assertActorCapabilitiesInTransaction(
-          transaction, actorId, [Capability.ManageServers],
-        );
-        const server = await this.infrastructure.findServerById(id, transaction);
-        if (!server) throw new NotFoundException('Server not found');
-        const dependencies: string[] = [];
-        if (await transaction.selectFrom('iam.server_grants').select('id')
-          .where('server_id', '=', id).executeTakeFirst()) dependencies.push('server grants');
-        if (await transaction.selectFrom('iam.image_grants').select('id')
-          .where('server_id', '=', id).executeTakeFirst()) dependencies.push('image grants');
-        if (await transaction.selectFrom('iam.mount_source_grants').select('id')
-          .where('server_id', '=', id).executeTakeFirst()) {
-          dependencies.push('local mount source grants');
-        }
-        if (dependencies.length > 0) {
-          throw new ConflictException({
-            code: 'SERVER_NOT_EMPTY',
-            message: 'Server still owns durable control-plane state',
-            dependencies,
-          });
-        }
-        await this.infrastructure.deleteServer(id, transaction);
-        await this.auditService.append(
-          transaction,
-          actorId,
-          AuditAction.DeleteServer,
-          server.id,
-          'server',
-          { serverId: server.id, name: server.name, slug: server.slug },
-        );
-        return { serverId: server.id, name: server.name, slug: server.slug };
-      },
-    );
-    this.proxySnapshots.forgetServer(id, 'server deleted');
-    await postCommitBestEffort(
-      'Server delete SSH snapshot broadcast',
-      () => this.sshProxyGateway.broadcastSnapshot(),
-      this.logger,
-    );
-  }
-
-  async regenerateToken(actorId: string, id: string) {
-    const rawToken = randomBytes(32).toString('hex');
-    const agentTokenHash = createHash('sha256').update(rawToken).digest('hex');
-    await this.workflowRepository.runWithAgentSessionMutationFence(
-      id,
-      'Agent token rotation started',
-      async (transaction) => {
-        await this.accessResolver.assertActorCapabilitiesInTransaction(
-          transaction, actorId, [Capability.ManageServers],
-        );
-        const server = await this.infrastructure.findServerById(id, transaction);
-        if (!server) throw new NotFoundException('Server not found');
-        await this.infrastructure.replaceAgentTokenHash(id, agentTokenHash, transaction);
-        await this.auditService.append(
-          transaction,
-          actorId,
-          AuditAction.RotateServerAgentToken,
-          id,
-          'server',
-        );
-      },
-    );
-    return rawToken;
-  }
-
-  // ---------------------------------------------------------------------------
-  // Local data sources are owned by agent.yaml and observed through state reports.
-  // ---------------------------------------------------------------------------
-
-  async listDiskDtos(serverId: string): Promise<DataDiskDto[]> {
-    await this.findById(serverId);
-    return (this.agentGateway.stateCache.get(serverId)?.disks ?? []).map((disk) => this.toDiskDto(disk));
-  }
-
-  async listUserDiskDtos(serverId: string): Promise<UserDataDiskDto[]> {
-    await this.findById(serverId);
-    return (this.agentGateway.stateCache.get(serverId)?.disks ?? []).map((disk) => ({
-      diskId: disk.diskId,
-      displayName: publicDataDiskDisplayName(disk.diskId, disk.label),
-      totalBytes: disk.totalBytes,
-      usedBytes: disk.usedBytes,
-      pquotaEnabled: disk.pquotaEnabled,
-    }));
-  }
-
-  async listAllDisks(): Promise<Array<{
-    diskId: string;
-    serverId: string;
-    mountPoint: string;
-    sourceIdentity: string;
-    label: string | null;
-  }>> {
-    return this.agentGateway.stateCache.getAll()
-      .flatMap((snap) => snap.disks.map((disk) => ({
-        diskId: disk.diskId,
-        serverId: snap.serverId,
-        mountPoint: disk.mountPoint,
-        sourceIdentity: disk.sourceIdentity,
-        label: disk.label ?? null,
-      })))
-      .sort((a, b) => a.serverId.localeCompare(b.serverId) || a.mountPoint.localeCompare(b.mountPoint));
-  }
-
-  async selfCheck(actorId: string, serverId: string): Promise<SelfCheckResult> {
-    await this.findById(serverId);
-    if (!this.agentGateway.isOnline(serverId)) {
-      throw new BadRequestException('Agent is offline, cannot run self-check');
-    }
-    this.assertRuntimeReady(serverId);
-    const started = await this.accessResolver.startExternalWithActorCapabilities(
-      actorId,
-      [Capability.ManageServers],
-      () => rpcWithErrorMapping(() =>
-        this.agentGateway.rpc<SelfCheckResult>(serverId, 'selfCheck', {}),
-      ),
-    );
-    return zSelfCheckResult.parse(await started.completion);
-  }
-
-  async persistDockerDaemonStatus(serverId: string, status: DockerDaemonStatus): Promise<DockerDaemonStatus> {
-    if (status.serverId !== serverId) {
-      throw new BadRequestException('Docker daemon status serverId mismatch');
-    }
-    this.agentGateway.stateCache.updateDockerDaemonStatus(serverId, status);
-    return status;
-  }
-
-  async getUserQuota(serverId: string, userId: string): Promise<{ usedBytes: number; limitBytes: number }> {
-    await this.findById(serverId);
-    const grant = await this.accessResolver.resolveServer(userId, serverId);
-    const latest = this.agentGateway.stateCache.get(serverId)?.xfsProjects.find((row) => row.userId === userId) ?? null;
-    return {
-      usedBytes: latest?.usedBytes ?? 0,
-      limitBytes: grant?.diskBytes ?? 0,
-    };
-  }
-
-  private toDiskDto(disk: DiskInfo): DataDiskDto {
-    return {
-      diskId: disk.diskId,
-      mountPoint: disk.mountPoint,
-      sourceIdentity: disk.sourceIdentity,
-      label: disk.label,
-      totalBytes: disk.totalBytes,
-      usedBytes: disk.usedBytes,
-      pquotaEnabled: disk.pquotaEnabled,
-    };
-  }
-
-  private async toDto(server: ServerRecord, options: ServerDtoOptions = {}): Promise<ServerDto> {
-    const snap = this.agentGateway.stateCache.get(server.id);
-    const disks = (snap?.disks ?? []).map((disk) => this.toDiskDto(disk));
-    return {
-      id: server.id,
-      name: server.name,
-      slug: server.slug,
-      ...(options.includeHostFingerprint
-        ? { hostFingerprint: server.hostFingerprint }
-        : {}),
-      status: server.status,
-      quarantineCode: server.quarantineCode,
-      quarantineMessage: server.quarantineMessage,
-      lastSeenAt: server.lastSeenAt?.toISOString() ?? null,
-      runtimeReady:
-        server.status === ServerStatus.Online
-        && snap?.runtimeReady === true,
-      runtimeObservedAt: safeEpochToIso(snap?.lastUpdated),
-      disks,
-      gpus: snap?.gpus ?? [],
-      agentVersion: snap?.agentVersion,
-      dockerDaemon: snap?.dockerDaemon ?? null,
-    };
-  }
-
-  private toUserDto(server: ServerRecord): UserServerDto {
-    const snapshot = this.agentGateway.stateCache.get(server.id);
-    return {
-      id: server.id,
-      name: server.name,
-      slug: server.slug,
-      status: server.status,
-      lastSeenAt: server.lastSeenAt?.toISOString() ?? null,
-      runtimeReady:
-        server.status === ServerStatus.Online
-        && snapshot?.runtimeReady === true,
-    };
-  }
-
-  private assertRuntimeReady(serverId: string): void {
-    const availability = this.agentGateway.stateCache.getRuntimeBlockReason(serverId);
-    if (!availability.enabled) {
-      throw new ConflictException({
-        statusCode: 409,
-        code: 'agent_state_unready',
-        reason: 'agent_state_unready',
-        message: availability.message,
+  async delete(actorId: string, id: string, expectedRevision?: number): Promise<void> {
+    await this.transactions.run(async (transaction) => {
+      await this.access.assertActorCapabilitiesInTransaction(transaction, actorId, [
+        Capability.ManageServers,
+      ]);
+      const server = await this.findById(id, transaction);
+      if (expectedRevision !== undefined && Number(server.revision) !== expectedRevision) {
+        throw new ConflictException({ code: 'REVISION_CONFLICT' });
+      }
+      const references = await this.serverReferences(id, transaction);
+      if (references.length > 0) {
+        throw new ConflictException({
+          code: 'SERVER_NOT_EMPTY',
+          details: { references },
+        });
+      }
+      await transaction.deleteFrom('infra.servers').where('id', '=', id).execute();
+      await this.audit.append(transaction, actorId, AuditAction.DeleteServer, id, 'server', {
+        name: server.name,
       });
-    }
+    });
+    this.proxySnapshots?.forgetServer(id, 'server_deleted');
   }
 
-  private assertValidSlug(slug: string): void {
-    if (!SERVER_SLUG_RE.test(slug)) {
-      throw new BadRequestException('Server slug must be a lowercase resource name');
+  private async serverReferences(
+    serverId: string,
+    transaction: Transaction<NyabaseDatabase>,
+  ): Promise<string[]> {
+    const [
+      authorizationDependency,
+      serverGrant,
+      storagePool,
+      imageAssignment,
+      containerNetworkClaim,
+      containerGpuClaim,
+      containerSshRoute,
+      intent,
+      certificateTrust,
+      ipPoolMembership,
+    ] = await Promise.all([
+      transaction
+        .selectFrom('control.authorization_dependencies')
+        .select('id')
+        .where('server_id', '=', serverId)
+        .limit(1)
+        .executeTakeFirst(),
+      transaction
+        .selectFrom('iam.server_grants')
+        .select('id')
+        .where('server_id', '=', serverId)
+        .limit(1)
+        .executeTakeFirst(),
+      transaction
+        .selectFrom('infra.storage_pools')
+        .select('id')
+        .where('server_id', '=', serverId)
+        .limit(1)
+        .executeTakeFirst(),
+      transaction
+        .selectFrom('infra.image_server_assignments')
+        .select('id')
+        .where('server_id', '=', serverId)
+        .limit(1)
+        .executeTakeFirst(),
+      transaction
+        .selectFrom('control.container_network_claims')
+        .select('id')
+        .where('server_id', '=', serverId)
+        .limit(1)
+        .executeTakeFirst(),
+      transaction
+        .selectFrom('control.container_gpu_claims')
+        .select('id')
+        .where('server_id', '=', serverId)
+        .limit(1)
+        .executeTakeFirst(),
+      transaction
+        .selectFrom('control.container_ssh_routes')
+        .select('container_id')
+        .where('server_id', '=', serverId)
+        .limit(1)
+        .executeTakeFirst(),
+      transaction
+        .selectFrom('control.intents')
+        .select('id')
+        .where('server_id', '=', serverId)
+        .limit(1)
+        .executeTakeFirst(),
+      transaction
+        .selectFrom('system.incus_client_certificate_trusts')
+        .select('certificate_id')
+        .where('server_id', '=', serverId)
+        .limit(1)
+        .executeTakeFirst(),
+      transaction
+        .selectFrom('infra.ip_pool_servers')
+        .select('pool_id')
+        .where('server_id', '=', serverId)
+        .limit(1)
+        .executeTakeFirst(),
+    ]);
+    return [
+      authorizationDependency && 'authorization_dependencies',
+      serverGrant && 'server_grants',
+      storagePool && 'storage_pools',
+      imageAssignment && 'image_server_assignments',
+      containerNetworkClaim && 'container_network_claims',
+      containerGpuClaim && 'container_gpu_claims',
+      containerSshRoute && 'container_ssh_routes',
+      intent && 'intents',
+      certificateTrust && 'incus_client_certificate_trusts',
+      ipPoolMembership && 'ip_pool_servers',
+    ].filter((value): value is string => Boolean(value));
+  }
+
+  private encryptNodeMetricsToken(token: string): string {
+    const iv = randomBytes(12);
+    const cipher = createCipheriv('aes-256-gcm', this.nodeMetricsKey(), iv);
+    const ciphertext = Buffer.concat([cipher.update(token, 'utf8'), cipher.final()]);
+    return [
+      'rfs-v1',
+      iv.toString('base64url'),
+      cipher.getAuthTag().toString('base64url'),
+      ciphertext.toString('base64url'),
+    ].join('.');
+  }
+
+  private nodeMetricsTokenFingerprint(token: string): string {
+    return createHash('sha256').update(token, 'utf8').digest('hex');
+  }
+
+  private nodeMetricsKey(): Buffer {
+    const secret = this.config
+      ? this.config.keyEncryptionSecret()
+      : process.env.JWT_SECRET || 'nyabase-node-metrics';
+    return createHash('sha256').update(secret).digest();
+  }
+
+  private async toDtos(rows: ServerRow[]): Promise<ServerDto[]> {
+    const ids = [...new Set(
+      rows
+        .map((row) => row.system_pool_id)
+        .filter((id): id is string => typeof id === 'string' && id.length > 0),
+    )];
+    const names = new Map<string, string>();
+    if (ids.length > 0) {
+      const pools = await this.database
+        .selectFrom('infra.storage_pools')
+        .select(['id', 'display_name', 'incus_name'])
+        .where('id', 'in', ids)
+        .execute();
+      for (const pool of pools) {
+        names.set(pool.id, poolLabel(pool.display_name, pool.incus_name));
+      }
     }
+    return rows.map((row) => this.toDto(
+      row,
+      row.system_pool_id ? names.get(row.system_pool_id) ?? null : null,
+    ));
+  }
+
+  private toDto(row: ServerRow, systemPoolName: string | null = null): ServerDto {
+    return {
+      id: row.id,
+      name: row.name,
+      slug: row.slug,
+      apiEndpoint: row.api_endpoint,
+      serverCertFingerprint: row.server_cert_fingerprint,
+      incusVersion: row.incus_version,
+      apiExtensions: row.api_extensions,
+      systemPoolId: row.system_pool_id,
+      systemPoolName,
+      storageOvercommitRatio: numberValue(row.storage_overcommit_ratio),
+      parentInterface: row.parent_interface ?? '',
+      dnsServers: row.dns_servers,
+      gpuRuntimeAvailable: row.gpu_runtime_available,
+      status: row.status as ServerStatus,
+      lastSeenAt: isoDate(row.last_seen_at),
+      lastError: row.last_error,
+      revision: numberValue(row.revision),
+      preflightStatus: row.preflight_status as PreflightStatus,
+      preflightCheckedAt: isoDate(row.preflight_checked_at),
+      preflightReport: row.preflight_report as ServerDto['preflightReport'],
+      nodeMetrics: {
+        endpoint: row.node_metrics_endpoint,
+        serverCertFingerprint: row.node_metrics_server_cert_fingerprint,
+        tokenFingerprint: row.node_metrics_token_fingerprint,
+        health: {
+          status: row.node_metrics_status as NodeMetricsStatus,
+          lastSuccessAt: isoDate(row.node_metrics_last_success_at),
+          outageSince: isoDate(row.node_metrics_outage_since),
+          lastError: row.node_metrics_last_error,
+        },
+      },
+      createdAt: new Date(row.created_at).toISOString(),
+      updatedAt: new Date(row.updated_at).toISOString(),
+    };
+  }
+
+  private toUserDto(row: ServerRow): UserServerDto {
+    return {
+      id: row.id,
+      name: row.name,
+      slug: row.slug,
+      status: row.status as ServerStatus,
+      lastSeenAt: isoDate(row.last_seen_at),
+      preflightStatus: row.preflight_status as PreflightStatus,
+    };
   }
 }
 
-function isPgUniqueViolation(error: unknown): boolean {
-  return !!error
-    && typeof error === 'object'
-    && (error as { code?: unknown }).code === '23505';
+function auditServerPatch(input: PatchServerRequest): Record<string, unknown> {
+  const { nodeMetrics, ...rest } = input;
+  if (nodeMetrics === undefined) return rest;
+  return {
+    ...rest,
+    nodeMetrics:
+      nodeMetrics === null
+        ? null
+        : {
+            endpoint: nodeMetrics.endpoint,
+            serverCertFingerprint: nodeMetrics.serverCertFingerprint,
+            ...(nodeMetrics.token === undefined ? {} : { tokenConfigured: true }),
+          },
+  };
 }

@@ -1,195 +1,156 @@
 import { randomUUID } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
 import { ServerStatus } from '@nyabase/common';
-import {
-  withPostgresTestDatabase,
-} from '../persistence-pg/postgres-test-harness.js';
-import { PgTransactionManager } from '../persistence-pg/transaction.js';
+import { withPostgresTestDatabase } from '../persistence-pg/postgres-test-harness.js';
 import { InfrastructureRepository } from './infrastructure.repository.js';
 
 const describePg = process.env.NYABASE_TEST_DATABASE_URL ? describe : describe.skip;
-const runtimeOverrides = {
-  uid: 0,
-  entrypoint: null,
-  cmd: null,
-  init: false,
-};
 
-describePg('InfrastructureRepository PostgreSQL integration', () => {
-  it('enforces server identity and image ownership constraints in PostgreSQL', async () => {
+describePg('clean Incus infrastructure repository', () => {
+  it('keeps discovery observations separate from registration revisions', async () => {
     await withPostgresTestDatabase(async ({ database }) => {
       const repository = new InfrastructureRepository(database);
       const serverId = randomUUID();
       await repository.insertServer({
         id: serverId,
-        name: 'primary',
-        slug: 'primary',
-        agentTokenHash: 'a'.repeat(64),
+        name: 'Incus node',
+        slug: `incus-${serverId.slice(0, 8)}`,
+        api_endpoint: 'https://incus.example.test:8443',
+        server_cert_fingerprint: null,
+        incus_version: null,
+        api_extensions: [],
+        system_pool_id: null,
+        storage_overcommit_ratio: 1,
+        parent_interface: 'eth0',
+        dns_servers: ['10.20.0.1'],
+        gpu_runtime_available: false,
+        status: ServerStatus.Unknown,
+        last_seen_at: null,
+        last_error: null,
+        revision: 1,
+        node_metrics_endpoint: null,
+        node_metrics_server_cert_fingerprint: null,
+        node_metrics_token_ciphertext: null,
+        node_metrics_token_fingerprint: null,
+        node_metrics_status: 'unconfigured',
+        node_metrics_last_success_at: null,
+        node_metrics_outage_since: null,
+        node_metrics_last_error: null,
+        preflight_status: 'not_run',
+        preflight_checked_at: null,
+        preflight_report: null,
       });
 
-      await expect(repository.insertServer({
-        id: randomUUID(),
-        name: 'duplicate slug',
-        slug: 'primary',
-        agentTokenHash: 'b'.repeat(64),
-      })).rejects.toMatchObject({ code: '23505' });
-      await expect(repository.insertServer({
-        id: randomUUID(),
-        name: 'bad slug',
-        slug: 'Bad Slug',
-        agentTokenHash: 'c'.repeat(64),
-      })).rejects.toMatchObject({ code: '23514' });
-
-      const image = await repository.insertImage({
-        id: randomUUID(),
-        name: 'base',
-        dockerImage: 'registry.example/base:1',
-        runtimeOverrides,
-        description: null,
-        isActive: true,
-        disableSsh: false,
+      const first = await repository.upsertStoragePoolDiscovery(randomUUID(), {
+        serverId,
+        incusName: 'default',
+        driver: 'dir',
+        resizeFamily: 'quota_online',
+        rootDiskCapable: true,
+        shareable: false,
+        blockFilesystem: null,
+        totalBytes: 100,
+        usedBytes: 20,
+        quotaEffective: false,
       });
-      await expect(database.updateTable('infra.images')
-        .set({ docker_image: 'registry.example/base:2' })
-        .where('id', '=', image.id)
-        .execute()).rejects.toMatchObject({ code: '23514' });
-      await expect(repository.insertImage({
-        id: randomUUID(),
-        name: 'other',
-        dockerImage: image.dockerImage,
-        runtimeOverrides,
-        description: null,
-        isActive: true,
-        disableSsh: false,
-      })).rejects.toMatchObject({ code: '23505' });
+      expect(first.registered).toBe(false);
+
+      const registered = await repository.patchStoragePool(
+        first.id,
+        1,
+        { registered: true },
+      );
+      expect(registered?.registered).toBe(true);
+
+      const observed = await repository.upsertStoragePoolDiscovery(randomUUID(), {
+        serverId,
+        incusName: 'default',
+        driver: 'dir',
+        resizeFamily: 'quota_online',
+        rootDiskCapable: true,
+        shareable: false,
+        blockFilesystem: null,
+        totalBytes: 200,
+        usedBytes: 30,
+        quotaEffective: true,
+      });
+      expect(observed.id).toBe(first.id);
+      expect(observed.registered).toBe(true);
+      expect(Number(observed.revision)).toBe(2);
+      expect(observed.total_bytes).toBe('200');
     });
   });
 
-  it('admits exactly one host identity and persists quarantine state', async () => {
+  it('supports image assignment discovery without legacy runtime fields', async () => {
     await withPostgresTestDatabase(async ({ database }) => {
       const repository = new InfrastructureRepository(database);
-      const server = await repository.insertServer({
-        id: randomUUID(),
-        name: 'agent host',
-        slug: 'agent-host',
-        agentTokenHash: 'd'.repeat(64),
-      });
-      const attempts = await Promise.all([
-        repository.admitAgent(server.id, {
-          hostFingerprint: 'host-a',
-          agentConfigFingerprint: 'config-a',
-          status: ServerStatus.Online,
-          lastSeenAt: new Date(),
-        }),
-        repository.admitAgent(server.id, {
-          hostFingerprint: 'host-b',
-          agentConfigFingerprint: 'config-b',
-          status: ServerStatus.Online,
-          lastSeenAt: new Date(),
-        }),
-      ]);
-      expect(attempts.filter(Boolean)).toHaveLength(1);
-      const bound = await repository.findServerById(server.id);
-      expect(['host-a', 'host-b']).toContain(bound?.hostFingerprint);
-
-      const quarantined = await repository.quarantineServer(
-        server.id,
-        'AGENT_INVENTORY_FAULT',
-        'inventory rejected',
-      );
-      expect(quarantined).toMatchObject({
-        status: ServerStatus.AgentQuarantined,
-        quarantineCode: 'AGENT_INVENTORY_FAULT',
-        quarantineMessage: 'inventory rejected',
-      });
-    });
-  });
-
-  it('allows only one concurrent image CAS winner', async () => {
-    await withPostgresTestDatabase(async ({ database }) => {
-      const repository = new InfrastructureRepository(database);
-      const image = await repository.insertImage({
-        id: randomUUID(),
-        name: 'cas',
-        dockerImage: 'registry.example/cas:1',
-        runtimeOverrides,
-        description: null,
-        isActive: true,
-        disableSsh: false,
-      });
-      const results = await Promise.all([
-        repository.updateImageCas(image.id, image.revision, { description: 'first' }),
-        repository.updateImageCas(image.id, image.revision, { description: 'second' }),
-      ]);
-      expect(results.filter(Boolean)).toHaveLength(1);
-      expect((await repository.findImageById(image.id))?.revision).toBe(2);
-    });
-  });
-
-  it('coalesces liveness timestamps without churning unchanged server revisions', async () => {
-    await withPostgresTestDatabase(async ({ database }) => {
-      const repository = new InfrastructureRepository(database);
-      const server = await repository.insertServer({
-        id: randomUUID(),
-        name: 'heartbeat',
-        slug: 'heartbeat',
-        agentTokenHash: 'f'.repeat(64),
-      });
-
-      const online = await repository.updateServerLiveness(
-        server.id,
-        ServerStatus.Online,
-      );
-      const onlineRevision = Number((await database
-        .selectFrom('infra.servers')
-        .select('revision')
-        .where('id', '=', server.id)
-        .executeTakeFirstOrThrow()).revision);
-      expect(onlineRevision).toBe(2);
-      const firstSeenAt = online?.lastSeenAt?.getTime() ?? 0;
-
-      await new Promise((resolve) => setTimeout(resolve, 5));
-      const unchanged = await repository.updateServerLiveness(
-        server.id,
-        ServerStatus.Online,
-      );
-      const unchangedRevision = Number((await database
-        .selectFrom('infra.servers')
-        .select('revision')
-        .where('id', '=', server.id)
-        .executeTakeFirstOrThrow()).revision);
-      expect(unchangedRevision).toBe(onlineRevision);
-      expect(unchanged?.lastSeenAt?.getTime()).toBeGreaterThan(firstSeenAt);
-
-      const offline = await repository.updateServerLiveness(
-        server.id,
-        ServerStatus.Offline,
-      );
-      const offlineRevision = Number((await database
-        .selectFrom('infra.servers')
-        .select('revision')
-        .where('id', '=', server.id)
-        .executeTakeFirstOrThrow()).revision);
-      expect(offline?.status).toBe(ServerStatus.Offline);
-      expect(offlineRevision).toBe(unchangedRevision + 1);
-    });
-  });
-
-  it('rolls back infrastructure mutations with the caller transaction', async () => {
-    await withPostgresTestDatabase(async ({ database }) => {
-      const repository = new InfrastructureRepository(database);
-      const transactions = new PgTransactionManager(database);
+      const imageId = randomUUID();
       const serverId = randomUUID();
-      await expect(transactions.run(async (transaction) => {
-        await repository.insertServer({
-          id: serverId,
-          name: 'rollback',
-          slug: 'rollback',
-          agentTokenHash: 'e'.repeat(64),
-        }, transaction);
-        throw new Error('rollback requested');
-      })).rejects.toThrow('rollback requested');
-      expect(await repository.findServerById(serverId)).toBeNull();
+      await database.insertInto('infra.images').values({
+        id: imageId,
+        name: 'Ubuntu',
+        alias: 'ubuntu',
+        fingerprint: 'a'.repeat(64),
+        description: null,
+        login_user: 'root',
+        min_root_size_bytes: null,
+        network_managed_externally: false,
+        is_active: true,
+        deleting: false,
+        cleanup_generation: 0,
+        revision: 1,
+      }).execute();
+      await database.insertInto('infra.servers').values({
+        id: serverId,
+        name: 'Incus node',
+        slug: `node-${serverId.slice(0, 8)}`,
+        api_endpoint: 'https://incus.example.test:8443',
+        server_cert_fingerprint: null,
+        incus_version: null,
+        api_extensions: [],
+        system_pool_id: null,
+        storage_overcommit_ratio: 1,
+        parent_interface: 'eth0',
+        dns_servers: ['10.20.0.1'],
+        gpu_runtime_available: false,
+        status: ServerStatus.Unknown,
+        last_seen_at: null,
+        last_error: null,
+        revision: 1,
+        node_metrics_endpoint: null,
+        node_metrics_server_cert_fingerprint: null,
+        node_metrics_token_ciphertext: null,
+        node_metrics_token_fingerprint: null,
+        node_metrics_status: 'unconfigured',
+        node_metrics_last_success_at: null,
+        node_metrics_outage_since: null,
+        node_metrics_last_error: null,
+        preflight_status: 'not_run',
+        preflight_checked_at: null,
+        preflight_report: null,
+      }).execute();
+      const assignmentId = randomUUID();
+      await repository.insertImageAssignment({
+        id: assignmentId,
+        image_id: imageId,
+        server_id: serverId,
+        generation: 1,
+        observed_fingerprint: null,
+        managed_fingerprint: null,
+        lifecycle_phase: 'provisioning',
+        needs_attention: false,
+        failure_code: null,
+        failure_reason: null,
+        last_observed_at: null,
+      });
+
+      await expect(repository.findImageAssignmentById(assignmentId))
+        .resolves.toMatchObject({
+          id: assignmentId,
+          image_id: imageId,
+          server_id: serverId,
+          generation: 1,
+        });
     });
   });
 });

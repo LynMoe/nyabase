@@ -1,29 +1,23 @@
 import {
   ConflictException,
   ForbiddenException,
-  forwardRef,
   Inject,
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
-import type { Kysely } from 'kysely';
-import { sql } from 'kysely';
-import { v4 as uuidv4 } from 'uuid';
+import type { Kysely, Transaction } from 'kysely';
+import { randomUUID } from 'node:crypto';
 import {
   AuditAction,
   Capability,
   GpuGrantMode,
-  MAX_GROUP_MEMBERS,
-  MAX_PLATFORM_GROUPS,
-  MAX_SYNCHRONOUS_QUOTA_INTENTS_PER_MUTATION,
-  type GroupDto,
-  type GroupMemberDto,
-  type GroupSummaryDto,
-  type ImageGrantDto,
-  type MountSourceGrantDto,
-  type ServerGrantDto,
   SystemGroupKey,
   UserStatus,
+  type GroupDto,
+  type GroupMemberDto,
+  type ServerGrantDto,
+  type SharedBackendGrantDto,
+  type StoragePoolGrantDto,
 } from '@nyabase/common';
 import type { NyabaseDatabase } from '../persistence-pg/database.types.js';
 import { PG_DATABASE } from '../persistence-pg/tokens.js';
@@ -35,130 +29,104 @@ import {
 } from '../access/access-resolver.service.js';
 import { AccessRevocationGuardService } from '../access/access-revocation-guard.service.js';
 import { AuditService } from '../audit/audit.service.js';
-import { AuthService } from '../auth/auth.service.js';
-import {
-  MountSourcesService,
-  type MountSourceGrantTarget,
-} from '../mount-sources/mount-sources.service.js';
-import { ProxySnapshotNotifierService } from '../proxy-snapshots/proxy-snapshot-notifier.service.js';
-import { QuotaDispatchService } from '../quota/quota-dispatch.service.js';
 
-type TaskIdsResult = { taskIds: string[] };
-type WithTaskIds<T> = T & TaskIdsResult;
-export type UserDeleteResult = { deleted: boolean; taskIds: string[] };
 type GrantScope = 'user' | 'group';
-type ServerGrantUpsertDto = Partial<{
-  cpuMillis: number | null;
-  memBytes: number | null;
-  diskBytes: number | null;
-  gpuMode: GpuGrantMode | null;
-  gpuIndices: number[] | null;
-  expiresAt: string | null;
-}>;
+type GrantExecutor = Kysely<NyabaseDatabase> | Transaction<NyabaseDatabase>;
 
-interface ServerGrant {
-  id: string;
-  scope: GrantScope;
-  scopeId: string;
-  serverId: string;
-  cpuMillis: number | null;
-  memBytes: number | null;
-  diskBytes: number | null;
-  gpuMode: GpuGrantMode | null;
-  gpuIndices: number[] | null;
-  expiresAt: Date | null;
-  createdAt: Date;
-  updatedAt: Date;
+export const SYSTEM_ACTOR_USERNAME = 'nyabase-system';
+export const SYSTEM_ACTOR_DISPLAY_NAME = 'Nyabase System';
+export const SYSTEM_ACTOR_PREFERRED_NUMERIC_ID = 4096;
+const SYSTEM_ACTOR_NUMERIC_ID_MAX = 4096;
+/** Numeric ids commonly hardcoded in tests; skip them when 4096 is taken. */
+const TEST_RESERVED_NUMERIC_IDS = new Set([1, 100, 1001, 3001]);
+/**
+ * Same unusable Argon2id sentinel as AuthService's dummy hash. Not a login
+ * password; nyabase-system stays disabled and never joins a human group.
+ */
+const UNUSABLE_PASSWORD_HASH =
+  '$argon2id$v=19$m=65536,t=3,p=4$DCw8KRwf+V7pMnhiRFOb6g$KSjgFxwH2WqyoDT2q5Hz0Z18Zv/+eAHbnRgKiC6dI5A';
+
+export function pickSystemActorNumericId(used: Iterable<number>): number {
+  const occupied = new Set(used);
+  if (!occupied.has(SYSTEM_ACTOR_PREFERRED_NUMERIC_ID)) {
+    return SYSTEM_ACTOR_PREFERRED_NUMERIC_ID;
+  }
+  for (let id = SYSTEM_ACTOR_NUMERIC_ID_MAX; id >= 1; id -= 1) {
+    if (!occupied.has(id) && !TEST_RESERVED_NUMERIC_IDS.has(id)) return id;
+  }
+  for (let id = SYSTEM_ACTOR_NUMERIC_ID_MAX; id >= 1; id -= 1) {
+    if (!occupied.has(id)) return id;
+  }
+  throw new ConflictException({
+    code: 'USER_LIFETIME_CAPACITY_REACHED',
+    message: 'No free numeric_id remains for nyabase-system',
+  });
 }
 
-interface ImageGrant {
-  id: string;
-  scope: GrantScope;
-  scopeId: string;
-  imageId: string;
-  serverId: string;
-  createdAt: Date;
+interface ServerGrantInput {
+  cpuMillis: number | null;
+  memBytes: number | null;
+  diskBytes: number | null;
+  gpu: {
+    mode: GpuGrantMode;
+    pciAddresses: string[];
+  };
+  expiresAt: string | null;
 }
 
 @Injectable()
 export class GroupsService {
   constructor(
-    database: Kysely<NyabaseDatabase>,
-    transactions: PgTransactionManager,
-    accessResolver: AccessResolverService,
-    auditService: AuditService,
-    revocationGuard: AccessRevocationGuardService,
-    mountSources: MountSourcesService,
-    quotaDispatch: QuotaDispatchService,
-    proxySnapshots: ProxySnapshotNotifierService,
-    authService: AuthService,
-  );
-  constructor(
-    @Inject(PG_DATABASE)
-    private readonly database: Kysely<NyabaseDatabase>,
+    @Inject(PG_DATABASE) private readonly database: Kysely<NyabaseDatabase>,
     private readonly transactions: PgTransactionManager,
-    private readonly accessResolver: AccessResolverService,
-    @Inject(forwardRef(() => AuditService))
-    private readonly auditService: AuditService,
-    private readonly revocationGuard: AccessRevocationGuardService,
-    private readonly mountSources: MountSourcesService,
-    private readonly quotaDispatch: QuotaDispatchService,
-    private readonly proxySnapshots: ProxySnapshotNotifierService,
-    @Inject(forwardRef(() => AuthService))
-    private readonly authService: AuthService,
+    private readonly access: AccessResolverService,
+    private readonly audit: AuditService,
+    private readonly revocation: AccessRevocationGuardService,
   ) {}
 
   async findAll(): Promise<GroupDto[]> {
-    const [rows, members] = await Promise.all([
-      this.database.selectFrom('iam.groups').selectAll()
-        .orderBy('priority', 'desc').orderBy('name').execute(),
-      this.database.selectFrom('iam.group_members as membership')
-        .innerJoin('iam.users as user', 'user.id', 'membership.user_id')
-        .select([
-          'membership.group_id',
-          'user.id as user_id',
-          'user.username',
-          'user.display_name',
-        ])
-        .limit(MAX_PLATFORM_GROUPS * MAX_GROUP_MEMBERS + 1)
-        .execute(),
-    ]);
-    if (members.length > MAX_PLATFORM_GROUPS * MAX_GROUP_MEMBERS) {
-      throw new ConflictException({
-        code: 'GROUP_MEMBERSHIP_CAPACITY_DRIFT',
-        message: 'Stored group memberships exceed the bounded catalog contract',
-      });
-    }
+    const rows = await this.database.selectFrom('iam.groups')
+      .selectAll()
+      .orderBy('priority', 'desc')
+      .orderBy('name')
+      .execute();
+    const members = await this.database.selectFrom('iam.group_members as member')
+      .innerJoin('iam.users as user', 'user.id', 'member.user_id')
+      .select([
+        'member.group_id',
+        'user.id as user_id',
+        'user.username',
+        'user.display_name',
+      ])
+      .execute();
     const byGroup = new Map<string, GroupMemberDto[]>();
     for (const member of members) {
-      const groupMembers = byGroup.get(member.group_id) ?? [];
-      groupMembers.push({
+      const list = byGroup.get(member.group_id) ?? [];
+      list.push({
         userId: member.user_id,
         username: member.username,
         displayName: member.display_name,
       });
-      byGroup.set(member.group_id, groupMembers);
+      byGroup.set(member.group_id, list);
     }
-    return rows.map((row) => {
-      const group = this.toGroup(row);
-      const groupMembers = byGroup.get(group.id) ?? [];
-      return {
-        ...this.toDto(group),
-        members: groupMembers,
-        memberCount: groupMembers.length,
-      };
-    });
+    return rows.map((row) => ({
+      ...this.toDto(this.toGroup(row)),
+      members: byGroup.get(row.id) ?? [],
+      memberCount: byGroup.get(row.id)?.length ?? 0,
+    }));
   }
 
   async findById(id: string): Promise<IamGroup> {
     const row = await this.database.selectFrom('iam.groups')
-      .selectAll().where('id', '=', id).executeTakeFirst();
+      .selectAll()
+      .where('id', '=', id)
+      .executeTakeFirst();
     if (!row) throw new NotFoundException('Group not found');
     return this.toGroup(row);
   }
 
   async create(
-    dto: {
+    input: {
       name: string;
       description?: string;
       priority?: number;
@@ -166,58 +134,49 @@ export class GroupsService {
     },
     actorId?: string,
   ): Promise<GroupDto> {
-    this.assertOrdinaryGroupName(dto.name);
     const group = await this.transactions.run(async (transaction) => {
-      await this.lockPolicy(transaction);
       if (actorId) {
-        await this.accessResolver.assertActorCapabilitiesInTransaction(
+        await this.access.assertActorCapabilitiesInTransaction(
           transaction,
           actorId,
-          [Capability.ManageGroups, ...(dto.capabilities ?? [])],
+          [Capability.ManageGroups, ...(input.capabilities ?? [])],
         );
       }
-      const count = await transaction.selectFrom('iam.groups')
-        .select((expression) => expression.fn.countAll<number>().as('count'))
+      const duplicate = await transaction.selectFrom('iam.groups')
+        .select('id')
+        .where('name', '=', input.name)
+        .executeTakeFirst();
+      if (duplicate) throw new ConflictException('Group name already exists');
+      const row = await transaction.insertInto('iam.groups')
+        .values({
+          id: randomUUID(),
+          name: input.name,
+          description: input.description ?? null,
+          priority: input.priority ?? 0,
+          is_system: false,
+          system_key: null,
+          capabilities: input.capabilities ?? [],
+          revision: 1,
+        })
+        .returningAll()
         .executeTakeFirstOrThrow();
-      if (Number(count.count) >= MAX_PLATFORM_GROUPS) {
-        throw new ConflictException({
-          code: 'GROUP_CAPACITY_REACHED',
-          message: `At most ${MAX_PLATFORM_GROUPS} groups are supported`,
-        });
-      }
-      if (await transaction.selectFrom('iam.groups').select('id')
-        .where('name', '=', dto.name).executeTakeFirst()) {
-        throw new ConflictException('Group name already exists');
-      }
-      const row = await transaction.insertInto('iam.groups').values({
-        id: uuidv4(),
-        name: dto.name,
-        description: dto.description ?? null,
-        priority: dto.priority ?? 0,
-        is_system: false,
-        system_key: null,
-        capabilities: dto.capabilities ?? [],
-        revision: 1,
-      }).returningAll().executeTakeFirstOrThrow();
-      await sql`SELECT iam.bump_policy_epoch()`.execute(transaction);
-      const group = this.toGroup(row);
-      await this.auditService.append(
+      await this.audit.append(
         transaction,
         actorId ?? null,
         AuditAction.CreateGroup,
-        group.id,
+        row.id,
         'group',
-        { name: group.name },
+        { name: row.name },
       );
-      return group;
+      return this.toGroup(row);
     });
-    await this.accessResolver.authorizationCommitted();
+    await this.access.authorizationCommitted();
     return this.toDto(group);
   }
 
   async update(
     id: string,
-    dto: {
+    input: {
       name?: string;
       description?: string | null;
       priority?: number;
@@ -225,243 +184,170 @@ export class GroupsService {
     },
     actorId: string | undefined,
     expectedRevision: number,
-  ): Promise<WithTaskIds<GroupDto>> {
+  ): Promise<GroupDto> {
     const result = await this.transactions.run(async (transaction) => {
-      await this.lockPolicy(transaction);
-      const row = await transaction.selectFrom('iam.groups')
-        .selectAll().where('id', '=', id).forUpdate().executeTakeFirst();
-      if (!row) throw new NotFoundException('Group not found');
-      const current = this.toGroup(row);
-      const desiredCapabilities = dto.capabilities ?? current.capabilities;
-      if (actorId) {
-        await this.assertActorMayMutateGroup(
-          transaction,
-          actorId,
-          current,
-          desiredCapabilities,
-          dto.priority !== undefined && dto.priority !== current.priority,
-        );
-      }
-      if (current.revision !== expectedRevision) {
-        throw new ConflictException({
-          code: 'GROUP_REVISION_CONFLICT',
-          message: 'Group changed; reload and resolve the conflicting fields',
-          current: this.toDto(current),
+      const current = await transaction.selectFrom('iam.groups')
+        .selectAll()
+        .where('id', '=', id)
+        .forUpdate()
+        .executeTakeFirst();
+      if (!current) throw new NotFoundException('Group not found');
+      const group = this.toGroup(current);
+      if (group.isSystem && (
+        input.name !== undefined
+        || input.priority !== undefined
+        || input.capabilities !== undefined
+      )) {
+        throw new ForbiddenException({
+          code: 'SYSTEM_GROUP_METADATA_IMMUTABLE',
+          message: 'System group metadata is immutable',
         });
       }
-      if (current.isSystem || current.systemKey !== null) {
-        const metadataChanged =
-          (dto.name !== undefined && dto.name !== current.name)
-          || (dto.priority !== undefined && dto.priority !== current.priority)
-          || (dto.capabilities !== undefined
-            && !this.sameCapabilities(dto.capabilities, current.capabilities));
-        if (metadataChanged) {
-          throw new ForbiddenException({
-            code: 'SYSTEM_GROUP_METADATA_IMMUTABLE',
-            message: 'Built-in group name, priority, and capabilities are immutable',
-          });
+      if (actorId) {
+        await this.access.assertActorCapabilitiesInTransaction(
+          transaction,
+          actorId,
+          [Capability.ManageGroups, ...group.capabilities, ...(input.capabilities ?? [])],
+        );
+        if (input.priority !== undefined || input.capabilities !== undefined) {
+          const [serverGrant, poolGrant, backendGrant] = await Promise.all([
+            transaction.selectFrom('iam.server_grants').select('id')
+              .where('group_id', '=', id).executeTakeFirst(),
+            transaction.selectFrom('iam.storage_pool_grants').select('id')
+              .where('group_id', '=', id).executeTakeFirst(),
+            transaction.selectFrom('iam.shared_backend_grants').select('id')
+              .where('group_id', '=', id).executeTakeFirst(),
+          ]);
+          if (serverGrant || poolGrant || backendGrant) {
+            await this.access.assertActorCapabilitiesInTransaction(
+              transaction,
+              actorId,
+              [Capability.ManageGrants],
+            );
+          }
         }
       }
-      if (dto.name !== undefined) {
-        this.assertOrdinaryGroupName(dto.name);
-        const conflict = await transaction.selectFrom('iam.groups').select('id')
-          .where('name', '=', dto.name).where('id', '!=', id).executeTakeFirst();
-        if (conflict) throw new ConflictException('Group name already exists');
+      if (group.revision !== expectedRevision) {
+        throw new ConflictException({ code: 'REVISION_CONFLICT', current: this.toDto(group) });
       }
-      const updated = await transaction.updateTable('iam.groups').set({
-        ...(dto.name !== undefined ? { name: dto.name } : {}),
-        ...(dto.description !== undefined ? { description: dto.description ?? null } : {}),
-        ...(dto.priority !== undefined ? { priority: dto.priority } : {}),
-        ...(dto.capabilities !== undefined ? { capabilities: dto.capabilities } : {}),
-        revision: current.revision + 1,
-        updated_at: new Date(),
-      }).where('id', '=', id)
+      const row = await transaction.updateTable('iam.groups')
+        .set({
+          ...(input.name === undefined ? {} : { name: input.name }),
+          ...(input.description === undefined ? {} : { description: input.description }),
+          ...(input.priority === undefined ? {} : { priority: input.priority }),
+          ...(input.capabilities === undefined ? {} : { capabilities: input.capabilities }),
+          revision: String(expectedRevision + 1),
+        })
+        .where('id', '=', id)
         .where('revision', '=', String(expectedRevision))
         .returningAll()
         .executeTakeFirst();
-      if (!updated) {
-        throw new ConflictException({
-          code: 'GROUP_REVISION_CONFLICT',
-          message: 'Group changed; reload and resolve the conflicting fields',
-        });
-      }
-      const members = await transaction.selectFrom('iam.group_members')
-        .select('user_id').where('group_id', '=', id).execute();
-      await this.auditService.append(
-        transaction,
-        actorId ?? null,
-        AuditAction.UpdateGroup,
-        id,
-        'group',
-        dto,
-      );
-      return { group: this.toGroup(updated), userIds: members.map((m) => m.user_id) };
+      if (!row) throw new ConflictException({ code: 'REVISION_CONFLICT' });
+      const users = await this.groupUserIds(id, transaction);
+      await this.audit.append(transaction, actorId ?? null, AuditAction.UpdateGroup, id, 'group', input);
+      return { group: this.toGroup(row), users };
     });
-    await this.accessResolver.authorizationCommitted(result.userIds);
-    return this.withTaskIds(this.toDto(result.group), []);
+    await this.access.authorizationCommitted(result.users);
+    return this.toDto(result.group);
   }
 
-  async delete(id: string, actorId?: string): Promise<TaskIdsResult> {
-    const affected = await this.transactions.run(async (transaction) => {
-      await this.lockPolicy(transaction);
-      const row = await transaction.selectFrom('iam.groups')
-        .selectAll().where('id', '=', id).forUpdate().executeTakeFirst();
-      if (!row) throw new NotFoundException('Group not found');
-      const group = this.toGroup(row);
-      if (group.isSystem || group.systemKey !== null) {
-        throw new ForbiddenException('Cannot delete system group');
-      }
+  async delete(id: string, actorId?: string): Promise<{ deleted: boolean }> {
+    const result = await this.transactions.run(async (transaction) => {
+      const group = await this.requireGroup(transaction, id);
+      if (group.isSystem) throw new ForbiddenException('Cannot delete a system group');
       if (actorId) {
-        await this.assertActorMayMutateGroup(
+        await this.access.assertActorCapabilitiesInTransaction(
           transaction,
           actorId,
-          group,
-          group.capabilities,
-          true,
+          [Capability.ManageGroups, Capability.ManageGrants, ...group.capabilities],
         );
       }
-      const members = await transaction.selectFrom('iam.group_members')
-        .select('user_id').where('group_id', '=', id).execute();
+      const users = await this.groupUserIds(id, transaction);
       const grants = await transaction.selectFrom('iam.server_grants')
-        .select('server_id').where('group_id', '=', id).execute();
-      const mountGrants = await transaction.selectFrom('iam.mount_source_grants')
-        .select(['source_kind', 'source_id', 'server_id', 'source_identity'])
+        .select('server_id')
         .where('group_id', '=', id)
         .execute();
-      this.assertQuotaFanoutWithinLimit(
-        members.length * new Set(grants.map((grant) => grant.server_id)).size,
-        'delete-group',
-      );
+      const poolGrants = await transaction.selectFrom('iam.storage_pool_grants')
+        .select('pool_id')
+        .where('group_id', '=', id)
+        .execute();
+      const backendGrants = await transaction.selectFrom('iam.shared_backend_grants')
+        .select('shared_backend_id')
+        .where('group_id', '=', id)
+        .execute();
       await transaction.deleteFrom('iam.group_members').where('group_id', '=', id).execute();
       await transaction.deleteFrom('iam.server_grants').where('group_id', '=', id).execute();
-      await transaction.deleteFrom('iam.image_grants').where('group_id', '=', id).execute();
-      await transaction.deleteFrom('iam.mount_source_grants').where('group_id', '=', id).execute();
-      await transaction.deleteFrom('iam.groups').where('id', '=', id).executeTakeFirstOrThrow();
-      await this.revocationGuard.assertServerAccessRevocationSafe(
+      await transaction.deleteFrom('iam.storage_pool_grants').where('group_id', '=', id).execute();
+      await transaction.deleteFrom('iam.shared_backend_grants').where('group_id', '=', id).execute();
+      await this.revocation.assertServerAccessRevocationSafe(
         transaction,
-        members.flatMap((member) => grants.map((grant) => ({
-          userId: member.user_id,
-          serverId: grant.server_id,
+        users.flatMap((userId) => grants.map((grant) => ({ userId, serverId: grant.server_id }))),
+      );
+      await this.revocation.assertStoragePoolAccessRevocationSafe(
+        transaction,
+        users.flatMap((userId) => poolGrants.map((grant) => ({ userId, poolId: grant.pool_id }))),
+      );
+      await this.revocation.assertSharedBackendAccessRevocationSafe(
+        transaction,
+        users.flatMap((userId) => backendGrants.map((grant) => ({
+          userId,
+          sharedBackendId: grant.shared_backend_id,
         }))),
       );
-      await this.revocationGuard.assertMountSourcesRevocationSafe(
-        transaction,
-        members.map((member) => member.user_id),
-        mountGrants.map((grant) => ({
-          sourceKind: grant.source_kind === 'local' ? 'local' : 'remote',
-          sourceId: grant.source_id,
-          serverId: grant.server_id,
-          sourceIdentity: grant.source_identity,
-        })),
-      );
-      const taskIds = await this.syncUserQuotasInTransaction(
-        transaction,
-        members.flatMap((member) => grants.map((grant) => ({
-          userId: member.user_id,
-          serverId: grant.server_id,
-        }))),
-        actorId ?? null,
-      );
-      await sql`SELECT iam.bump_policy_epoch()`.execute(transaction);
-      await this.auditService.append(
-        transaction,
-        actorId ?? null,
-        AuditAction.DeleteGroup,
-        id,
-        'group',
-        { name: group.name },
-      );
-      return { group, userIds: members.map((m) => m.user_id), taskIds };
+      await transaction.deleteFrom('iam.groups').where('id', '=', id).execute();
+      await this.audit.append(transaction, actorId ?? null, AuditAction.DeleteGroup, id, 'group');
+      return { users };
     });
-    await this.accessResolver.authorizationCommitted(affected.userIds);
-    return { taskIds: affected.taskIds };
+    await this.access.authorizationCommitted(result.users);
+    return { deleted: true };
   }
 
   async listMembers(groupId: string): Promise<GroupMemberDto[]> {
     await this.findById(groupId);
-    const members = await this.database.selectFrom('iam.group_members as membership')
-      .innerJoin('iam.users as user', 'user.id', 'membership.user_id')
+    return this.database.selectFrom('iam.group_members as member')
+      .innerJoin('iam.users as user', 'user.id', 'member.user_id')
       .select([
         'user.id as userId',
         'user.username',
         'user.display_name as displayName',
       ])
-      .where('membership.group_id', '=', groupId)
-      .limit(MAX_GROUP_MEMBERS + 1)
+      .where('member.group_id', '=', groupId)
       .execute();
-    if (members.length > MAX_GROUP_MEMBERS) {
-      throw new ConflictException({
-        code: 'GROUP_MEMBERSHIP_CAPACITY_DRIFT',
-        message: 'Stored group memberships exceed the bounded group contract',
-        groupId,
-      });
-    }
-    return members;
   }
 
-  async hasActiveSystemGroupMember(
-    groupId: string,
-    excludedUserId?: string,
-  ): Promise<boolean> {
-    let query = this.database.selectFrom('iam.group_members as membership')
-      .innerJoin('iam.users as user', 'user.id', 'membership.user_id')
-      .select('user.id')
-      .where('membership.group_id', '=', groupId)
-      .where('user.status', '=', UserStatus.Active);
-    if (excludedUserId) query = query.where('user.id', '!=', excludedUserId);
-    return Boolean(await query.executeTakeFirst());
-  }
-
-  async addMember(groupId: string, userId: string, actorId?: string): Promise<TaskIdsResult> {
-    const changed = await this.transactions.run(async (transaction) => {
-      await this.lockPolicy(transaction);
+  async addMember(groupId: string, userId: string, actorId?: string): Promise<{ changed: boolean }> {
+    const result = await this.transactions.run(async (transaction) => {
       const group = await this.requireGroup(transaction, groupId);
       if (actorId) {
-        await this.assertActorMayMutateGroup(
+        await this.access.assertActorCapabilitiesInTransaction(
           transaction,
           actorId,
-          group,
-          group.capabilities,
-          true,
+          [Capability.ManageGroups, ...group.capabilities],
         );
+        const [serverGrant, poolGrant, backendGrant] = await Promise.all([
+          transaction.selectFrom('iam.server_grants').select('id')
+            .where('group_id', '=', groupId).executeTakeFirst(),
+          transaction.selectFrom('iam.storage_pool_grants').select('id')
+            .where('group_id', '=', groupId).executeTakeFirst(),
+          transaction.selectFrom('iam.shared_backend_grants').select('id')
+            .where('group_id', '=', groupId).executeTakeFirst(),
+        ]);
+        if (serverGrant || poolGrant || backendGrant) {
+          await this.access.assertActorCapabilitiesInTransaction(
+            transaction,
+            actorId,
+            [Capability.ManageGrants],
+          );
+        }
       }
       await this.requireUser(transaction, userId);
-      const membershipState = await transaction.selectFrom('iam.group_members')
-        .select((expression) => [
-          expression.fn.countAll<string>().as('count'),
-          sql<boolean>`bool_or(user_id = ${userId}::uuid)`.as('already_member'),
-        ])
-        .where('group_id', '=', groupId)
-        .executeTakeFirstOrThrow();
-      if (membershipState.already_member === true) {
-        return { changed: false, taskIds: [] };
-      }
-      if (Number(membershipState.count) >= MAX_GROUP_MEMBERS) {
-        throw new ConflictException({
-          code: 'GROUP_MEMBER_CAPACITY_REACHED',
-          message: `At most ${MAX_GROUP_MEMBERS} members are supported per group`,
-          groupId,
-          maxMembers: MAX_GROUP_MEMBERS,
-        });
-      }
-      const inserted = await transaction.insertInto('iam.group_members').values({
-        id: uuidv4(),
-        group_id: groupId,
-        user_id: userId,
-      }).onConflict((conflict) => conflict.columns(['group_id', 'user_id']).doNothing())
-        .returning('id').executeTakeFirst();
-      if (!inserted) return { changed: false, taskIds: [] };
-      const grants = await transaction.selectFrom('iam.server_grants')
-        .select('server_id')
-        .where('group_id', '=', groupId)
-        .execute();
-      this.assertQuotaFanoutWithinLimit(grants.length, 'add-group-member');
-      const taskIds = await this.syncUserQuotasInTransaction(
-        transaction,
-        grants.map((grant) => ({ userId, serverId: grant.server_id })),
-        actorId ?? null,
-      );
-      await this.auditService.append(
+      const row = await transaction.insertInto('iam.group_members')
+        .values({ id: randomUUID(), group_id: groupId, user_id: userId })
+        .onConflict((conflict) => conflict.columns(['group_id', 'user_id']).doNothing())
+        .returning('id')
+        .executeTakeFirst();
+      if (!row) return false;
+      await this.audit.append(
         transaction,
         actorId ?? null,
         AuditAction.AddGroupMember,
@@ -469,68 +355,71 @@ export class GroupsService {
         'group',
         { userId },
       );
-      return { changed: true, taskIds };
+      return true;
     });
-    if (changed.changed) {
-      await this.accessResolver.authorizationCommitted([userId]);
-    }
-    return { taskIds: changed.taskIds };
+    if (result) await this.access.authorizationCommitted([userId]);
+    return { changed: result };
   }
 
-  async removeMember(groupId: string, userId: string, actorId?: string): Promise<TaskIdsResult> {
-    const changed = await this.transactions.run(async (transaction) => {
-      await this.lockPolicy(transaction);
+  async removeMember(groupId: string, userId: string, actorId?: string): Promise<{ changed: boolean }> {
+    const result = await this.transactions.run(async (transaction) => {
       const group = await this.requireGroup(transaction, groupId);
       if (actorId) {
-        await this.assertActorMayMutateGroup(
+        await this.access.assertActorCapabilitiesInTransaction(
           transaction,
           actorId,
-          group,
-          group.capabilities,
-          true,
+          [Capability.ManageGroups, ...group.capabilities],
         );
+        const [serverGrant, poolGrant, backendGrant] = await Promise.all([
+          transaction.selectFrom('iam.server_grants').select('id')
+            .where('group_id', '=', groupId).executeTakeFirst(),
+          transaction.selectFrom('iam.storage_pool_grants').select('id')
+            .where('group_id', '=', groupId).executeTakeFirst(),
+          transaction.selectFrom('iam.shared_backend_grants').select('id')
+            .where('group_id', '=', groupId).executeTakeFirst(),
+        ]);
+        if (serverGrant || poolGrant || backendGrant) {
+          await this.access.assertActorCapabilitiesInTransaction(
+            transaction,
+            actorId,
+            [Capability.ManageGrants],
+          );
+        }
       }
-      await this.requireUser(transaction, userId, false);
-      const membership = await transaction.selectFrom('iam.group_members')
-        .select('id')
+      if (group.systemKey === SystemGroupKey.Administrators) {
+        await this.access.assertNotFinalActiveAdministratorInTransaction(transaction, userId);
+      }
+      const deleted = await transaction.deleteFrom('iam.group_members')
         .where('group_id', '=', groupId)
         .where('user_id', '=', userId)
+        .returning('id')
         .executeTakeFirst();
-      if (!membership) return { changed: false, taskIds: [] as string[] };
-      if (group.systemKey === SystemGroupKey.Administrators) {
-        await this.accessResolver.assertNotFinalActiveAdministratorInTransaction(
-          transaction,
-          userId,
-        );
-      }
-      const serverIds = await transaction.selectFrom('iam.server_grants')
-        .select('server_id').where('group_id', '=', groupId).execute();
-      const mountGrants = await transaction.selectFrom('iam.mount_source_grants')
-        .select(['source_kind', 'source_id', 'server_id', 'source_identity'])
-        .where('group_id', '=', groupId)
-        .execute();
-      this.assertQuotaFanoutWithinLimit(serverIds.length, 'remove-group-member');
-      await transaction.deleteFrom('iam.group_members').where('id', '=', membership.id).execute();
-      await this.revocationGuard.assertServerAccessRevocationSafe(
+      if (!deleted) return false;
+      await this.revocation.assertServerAccessRevocationSafe(
         transaction,
-        serverIds.map((grant) => ({ userId, serverId: grant.server_id })),
+        (await transaction.selectFrom('iam.server_grants')
+          .select('server_id')
+          .where('group_id', '=', groupId)
+          .execute()).map((grant) => ({ userId, serverId: grant.server_id })),
       );
-      await this.revocationGuard.assertMountSourcesRevocationSafe(
+      await this.revocation.assertStoragePoolAccessRevocationSafe(
         transaction,
-        [userId],
-        mountGrants.map((grant) => ({
-          sourceKind: grant.source_kind === 'local' ? 'local' : 'remote',
-          sourceId: grant.source_id,
-          serverId: grant.server_id,
-          sourceIdentity: grant.source_identity,
+        (await transaction.selectFrom('iam.storage_pool_grants')
+          .select('pool_id')
+          .where('group_id', '=', groupId)
+          .execute()).map((grant) => ({ userId, poolId: grant.pool_id })),
+      );
+      await this.revocation.assertSharedBackendAccessRevocationSafe(
+        transaction,
+        (await transaction.selectFrom('iam.shared_backend_grants')
+          .select('shared_backend_id')
+          .where('group_id', '=', groupId)
+          .execute()).map((grant) => ({
+          userId,
+          sharedBackendId: grant.shared_backend_id,
         })),
       );
-      const taskIds = await this.syncUserQuotasInTransaction(
-        transaction,
-        serverIds.map((grant) => ({ userId, serverId: grant.server_id })),
-        actorId ?? null,
-      );
-      await this.auditService.append(
+      await this.audit.append(
         transaction,
         actorId ?? null,
         AuditAction.RemoveGroupMember,
@@ -538,375 +427,206 @@ export class GroupsService {
         'group',
         { userId },
       );
-      return { changed: true, taskIds };
+      return true;
     });
-    if (changed.changed) {
-      await this.accessResolver.authorizationCommitted([userId]);
-    }
-    return {
-      taskIds: changed.taskIds,
-    };
+    if (result) await this.access.authorizationCommitted([userId]);
+    return { changed: result };
   }
 
   async ensureUserInSystemGroup(systemKey: SystemGroupKey, userId: string): Promise<void> {
     const group = await this.database.selectFrom('iam.groups')
-      .select('id').where('system_key', '=', systemKey).executeTakeFirst();
+      .select('id')
+      .where('system_key', '=', systemKey)
+      .executeTakeFirst();
     if (!group) throw new NotFoundException('System group not found');
     await this.addMember(group.id, userId);
   }
 
   async ensureUserNotInSystemGroup(systemKey: SystemGroupKey, userId: string): Promise<void> {
     const group = await this.database.selectFrom('iam.groups')
-      .select('id').where('system_key', '=', systemKey).executeTakeFirst();
-    if (!group) return;
-    await this.removeMember(group.id, userId);
+      .select('id')
+      .where('system_key', '=', systemKey)
+      .executeTakeFirst();
+    if (group) await this.removeMember(group.id, userId);
   }
 
-  async deleteUserPermanently(userId: string, actorId: string): Promise<UserDeleteResult> {
+  async deleteUserPermanently(userId: string, actorId: string): Promise<{ deleted: boolean }> {
     const result = await this.transactions.run(async (transaction) => {
-      await this.lockPolicy(transaction);
+      await this.access.assertActorMayAdministerUserInTransaction(transaction, actorId, userId);
       const user = await transaction.selectFrom('iam.users')
-        .selectAll().where('id', '=', userId).forUpdate().executeTakeFirst();
-      if (!user || user.status === UserStatus.Deleted) {
-        throw new NotFoundException('User not found');
-      }
-      await this.accessResolver.assertActorMayAdministerUserInTransaction(
-        transaction,
-        actorId,
-        userId,
-      );
-      if (user.status === UserStatus.Active) {
-        await this.accessResolver.assertNotFinalActiveAdministratorInTransaction(
-          transaction,
-          userId,
-        );
-      }
+        .select(['id', 'status'])
+        .where('id', '=', userId)
+        .forUpdate()
+        .executeTakeFirst();
+      if (!user || user.status === UserStatus.Deleted) throw new NotFoundException('User not found');
       const dependency = await transaction.selectFrom('control.authorization_dependencies')
         .select(['dependency_kind', 'dependency_id'])
         .where('user_id', '=', userId)
         .executeTakeFirst();
       if (dependency) {
         throw new ConflictException({
-          code: 'USER_DELETE_HAS_RESOURCES',
+          code: 'GRANT_REVOCATION_BLOCKED',
           message: 'Delete the user resources before deleting the account',
           dependencyKind: dependency.dependency_kind,
           dependencyId: dependency.dependency_id,
         });
       }
-
-      const pending = await transaction.selectFrom('workflow.tasks')
-        .select(['id', 'server_id', 'started_at', 'last_sent_at', 'agent_result_json'])
-        .where('kind', '=', 'quota.ensure')
-        .where('resource_type', '=', 'quota')
-        .where('resource_id', '=', userId)
-        .where('status', '=', 'pending')
-        .orderBy('id')
-        .execute();
-      if (user.status === UserStatus.Deleting && pending.length > 0) {
-        return { deleted: false, taskIds: pending.map((task) => task.id) };
-      }
-      if (user.status !== UserStatus.Deleting) {
-        const ambiguous = pending.find((task) =>
-          task.started_at !== null
-          || task.last_sent_at !== null
-          || task.agent_result_json !== null);
-        if (ambiguous) {
-          throw new ConflictException({
-            code: 'USER_DELETE_QUOTA_IN_PROGRESS',
-            message:
-              'Wait for the dispatched quota task to reach a terminal state before deleting the user',
-            userId,
-            taskId: ambiguous.id,
-          });
-        }
-      }
-
-      const desiredServers = await transaction.selectFrom('control.quota_desired')
-        .select('server_id')
-        .where('user_id', '=', userId)
-        .execute();
-      const directServers = await transaction.selectFrom('iam.server_grants')
-        .select('server_id')
-        .where('user_id', '=', userId)
-        .execute();
-      const inheritedServers = await transaction.selectFrom('iam.group_members as membership')
-        .innerJoin('iam.server_grants as grant', 'grant.group_id', 'membership.group_id')
-        .select('grant.server_id')
-        .where('membership.user_id', '=', userId)
-        .execute();
-      const serverIds = [...new Set([
-        ...desiredServers.map((row) => row.server_id),
-        ...directServers.map((row) => row.server_id),
-        ...inheritedServers.map((row) => row.server_id),
-      ])].sort();
-
-      await this.authService.deleteUserCredentialsInTransaction(transaction, userId);
+      await transaction.deleteFrom('iam.refresh_tokens').where('user_id', '=', userId).execute();
+      await transaction.deleteFrom('iam.api_tokens').where('user_id', '=', userId).execute();
       await transaction.deleteFrom('iam.ssh_public_keys').where('user_id', '=', userId).execute();
-      await transaction.deleteFrom('iam.user_internal_ssh_keys').where('user_id', '=', userId).execute();
       await transaction.deleteFrom('iam.group_members').where('user_id', '=', userId).execute();
       await transaction.deleteFrom('iam.server_grants').where('user_id', '=', userId).execute();
-      await transaction.deleteFrom('iam.image_grants').where('user_id', '=', userId).execute();
-      await transaction.deleteFrom('iam.mount_source_grants').where('user_id', '=', userId).execute();
-      const nextStatus = serverIds.length === 0 ? UserStatus.Deleted : UserStatus.Deleting;
-      await transaction.updateTable('iam.users').set({
-        status: nextStatus,
-        auth_version: user.auth_version + 1,
-        authz_version: sql`authz_version + 1`,
-        updated_at: new Date(),
-      }).where('id', '=', userId).executeTakeFirstOrThrow();
-      await sql`SELECT iam.bump_policy_epoch()`.execute(transaction);
-      if (serverIds.length === 0) {
-        await this.auditService.append(
-          transaction,
-          actorId,
-          AuditAction.DeleteUser,
-          userId,
-          'user',
-          { terminal: true },
-        );
-        return { deleted: true, taskIds: [] as string[] };
-      }
-      const taskIds: string[] = [];
-      for (const serverId of serverIds) {
-        taskIds.push(await this.quotaDispatch.applyInTransaction(transaction, {
-          serverId,
-          userId,
-          numericUserId: user.numeric_id,
-          diskBytes: 0,
-          requestedBy: actorId,
-          allowDeleting: true,
-        }));
-      }
-      return { deleted: false, taskIds };
+      await transaction.deleteFrom('iam.storage_pool_grants').where('user_id', '=', userId).execute();
+      await transaction.deleteFrom('iam.shared_backend_grants').where('user_id', '=', userId).execute();
+      await transaction.updateTable('iam.users')
+        .set({ status: UserStatus.Deleted })
+        .where('id', '=', userId)
+        .execute();
+      await this.audit.append(transaction, actorId, AuditAction.DeleteUser, userId, 'user');
+      return true;
     });
-    await this.accessResolver.authorizationCommitted([userId]);
-    if (result.deleted) {
-      await this.proxySnapshots.notify('user-deleted').catch(() => undefined);
-    }
-    return result;
-  }
-
-  listGroupServerGrants(groupId: string): Promise<ServerGrantDto[]> {
-    return this.listServerGrants('group', groupId);
-  }
-
-  upsertGroupServerGrant(
-    groupId: string,
-    serverId: string,
-    dto: ServerGrantUpsertDto,
-    actorId?: string,
-  ): Promise<WithTaskIds<ServerGrantDto>> {
-    return this.upsertServerGrant('group', groupId, serverId, dto, actorId);
-  }
-
-  deleteGroupServerGrant(
-    groupId: string,
-    serverId: string,
-    actorId?: string,
-  ): Promise<TaskIdsResult> {
-    return this.deleteServerGrant('group', groupId, serverId, actorId);
-  }
-
-  listGroupImageGrants(groupId: string): Promise<ImageGrantDto[]> {
-    return this.listImageGrants('group', groupId);
-  }
-
-  addGroupImageGrant(
-    groupId: string,
-    imageId: string,
-    serverId: string,
-    actorId?: string,
-  ): Promise<ImageGrantDto> {
-    return this.addImageGrant('group', groupId, imageId, serverId, actorId);
-  }
-
-  deleteGroupImageGrant(
-    groupId: string,
-    imageId: string,
-    serverId: string,
-    actorId?: string,
-  ): Promise<void> {
-    return this.deleteImageGrant('group', groupId, imageId, serverId, actorId);
-  }
-
-  async syncGroupImageGrantsForServers(
-    groupId: string,
-    imageId: string,
-    serverIds: string[],
-    actorId?: string,
-  ): Promise<ImageGrantDto[]> {
-    const targets = [...new Set(serverIds)];
-    const rows = await this.transactions.run(async (transaction) => {
-      await this.lockPolicy(transaction);
-      if (actorId) await this.requireGrantActor(transaction, actorId);
-      await this.requireGroup(transaction, groupId);
-      const existing = await transaction.selectFrom('iam.image_grants')
-        .selectAll()
-        .where('group_id', '=', groupId)
-        .where('image_id', '=', imageId)
-        .execute();
-      const existingIds = new Set(existing.map((row) => row.server_id));
-      await transaction.deleteFrom('iam.image_grants')
-        .where('group_id', '=', groupId)
-        .where('image_id', '=', imageId)
-        .$if(targets.length > 0, (query) => query.where('server_id', 'not in', targets))
-        .execute();
-      for (const serverId of targets) {
-        if (existingIds.has(serverId)) continue;
-        await transaction.insertInto('iam.image_grants').values({
-          id: uuidv4(),
-          user_id: null,
-          group_id: groupId,
-          image_id: imageId,
-          server_id: serverId,
-        }).execute();
-      }
-      const rows = await transaction.selectFrom('iam.image_grants').selectAll()
-        .where('group_id', '=', groupId)
-        .where('image_id', '=', imageId)
-        .execute();
-      await this.auditService.append(
-        transaction,
-        actorId ?? null,
-        AuditAction.UpsertImageGrant,
-        groupId,
-        'group',
-        { imageId, serverIds: targets, mode: 'replace_servers' },
-      );
-      return rows;
-    });
-    const userIds = await this.groupUserIds(groupId);
-    await this.accessResolver.authorizationCommitted(userIds);
-    return rows.map((row) => this.imageGrantToDto(this.toImageGrant(row)));
-  }
-
-  listUserServerGrants(userId: string): Promise<ServerGrantDto[]> {
-    return this.listServerGrants('user', userId);
+    await this.access.authorizationCommitted([userId]);
+    return { deleted: result };
   }
 
   async assertUserScopeExists(userId: string): Promise<void> {
-    await this.requireUserScope(userId);
+    await this.requireUser(this.database, userId);
+  }
+
+  listGroupServerGrants(id: string): Promise<ServerGrantDto[]> {
+    return this.listServerGrants('group', id);
+  }
+
+  upsertGroupServerGrant(
+    id: string,
+    serverId: string,
+    input: ServerGrantInput,
+    actorId?: string,
+  ): Promise<ServerGrantDto> {
+    return this.upsertServerGrant('group', id, serverId, input, actorId);
+  }
+
+  deleteGroupServerGrant(id: string, serverId: string, actorId?: string): Promise<void> {
+    return this.deleteServerGrant('group', id, serverId, actorId);
+  }
+
+  listUserServerGrants(id: string): Promise<ServerGrantDto[]> {
+    return this.listServerGrants('user', id);
   }
 
   upsertUserServerGrant(
-    userId: string,
+    id: string,
     serverId: string,
-    dto: ServerGrantUpsertDto,
+    input: ServerGrantInput,
     actorId?: string,
-  ): Promise<WithTaskIds<ServerGrantDto>> {
-    return this.upsertServerGrant('user', userId, serverId, dto, actorId);
+  ): Promise<ServerGrantDto> {
+    return this.upsertServerGrant('user', id, serverId, input, actorId);
   }
 
-  deleteUserServerGrant(
-    userId: string,
-    serverId: string,
+  deleteUserServerGrant(id: string, serverId: string, actorId?: string): Promise<void> {
+    return this.deleteServerGrant('user', id, serverId, actorId);
+  }
+
+  listGroupStoragePoolGrants(id: string): Promise<StoragePoolGrantDto[]> {
+    return this.listStoragePoolGrants('group', id);
+  }
+
+  listUserStoragePoolGrants(id: string): Promise<StoragePoolGrantDto[]> {
+    return this.listStoragePoolGrants('user', id);
+  }
+
+  upsertGroupStoragePoolGrant(id: string, poolId: string, expiresAt: string | null, actorId?: string) {
+    return this.upsertStoragePoolGrant('group', id, poolId, expiresAt, actorId);
+  }
+
+  upsertUserStoragePoolGrant(id: string, poolId: string, expiresAt: string | null, actorId?: string) {
+    return this.upsertStoragePoolGrant('user', id, poolId, expiresAt, actorId);
+  }
+
+  deleteGroupStoragePoolGrant(id: string, poolId: string, actorId?: string) {
+    return this.deleteStoragePoolGrant('group', id, poolId, actorId);
+  }
+
+  deleteUserStoragePoolGrant(id: string, poolId: string, actorId?: string) {
+    return this.deleteStoragePoolGrant('user', id, poolId, actorId);
+  }
+
+  listGroupSharedBackendGrants(id: string): Promise<SharedBackendGrantDto[]> {
+    return this.listSharedBackendGrants('group', id);
+  }
+
+  listUserSharedBackendGrants(id: string): Promise<SharedBackendGrantDto[]> {
+    return this.listSharedBackendGrants('user', id);
+  }
+
+  upsertGroupSharedBackendGrant(
+    id: string,
+    backendId: string,
+    input: { limitBytes: number; expiresAt: string | null },
     actorId?: string,
-  ): Promise<TaskIdsResult> {
-    return this.deleteServerGrant('user', userId, serverId, actorId);
+  ) {
+    return this.upsertSharedBackendGrant('group', id, backendId, input, actorId);
   }
 
-  listUserImageGrants(userId: string): Promise<ImageGrantDto[]> {
-    return this.listImageGrants('user', userId);
-  }
-
-  addUserImageGrant(
-    userId: string,
-    imageId: string,
-    serverId: string,
+  upsertUserSharedBackendGrant(
+    id: string,
+    backendId: string,
+    input: { limitBytes: number; expiresAt: string | null },
     actorId?: string,
-  ): Promise<ImageGrantDto> {
-    return this.addImageGrant('user', userId, imageId, serverId, actorId);
+  ) {
+    return this.upsertSharedBackendGrant('user', id, backendId, input, actorId);
   }
 
-  deleteUserImageGrant(
-    userId: string,
-    imageId: string,
-    serverId: string,
-    actorId?: string,
-  ): Promise<void> {
-    return this.deleteImageGrant('user', userId, imageId, serverId, actorId);
+  deleteGroupSharedBackendGrant(id: string, backendId: string, actorId?: string) {
+    return this.deleteSharedBackendGrant('group', id, backendId, actorId);
   }
 
-  async ensureSystemGroups(): Promise<{
-    admins: IamGroup;
-    operators: IamGroup;
-    users: IamGroup;
-  }> {
+  deleteUserSharedBackendGrant(id: string, backendId: string, actorId?: string) {
+    return this.deleteSharedBackendGrant('user', id, backendId, actorId);
+  }
+
+  async ensureSystemGroups(): Promise<{ admins: IamGroup; operators: IamGroup; users: IamGroup }> {
     return this.transactions.run(async (transaction) => {
-      await this.lockPolicy(transaction);
-      const admins = await this.ensureSystemGroup(
-        transaction,
-        SystemGroupKey.Administrators,
-        'Administrators',
-        1000,
-        Object.values(Capability),
-      );
-      const operators = await this.ensureSystemGroup(
-        transaction,
-        SystemGroupKey.Operators,
-        'Operators',
-        500,
-        [
-          Capability.ManageServers,
-          Capability.ManageImages,
-          Capability.ManageGrants,
-          Capability.ManageContainersAny,
-          Capability.ViewAudit,
-          Capability.ViewMetricsAll,
-          Capability.ManageSystemSettings,
-        ],
-      );
-      const users = await this.ensureSystemGroup(
-        transaction,
-        SystemGroupKey.Users,
-        'Users',
-        10,
-        [],
-      );
-      return { admins, operators, users };
+      // This row serializes IAM mutations and is required by the authorization
+      // triggers used by system-group and admin creation.
+      await transaction.insertInto('iam.policy_state')
+        .values({ singleton: true, policy_epoch: 0 })
+        .onConflict((conflict) => conflict.column('singleton').doNothing())
+        .execute();
+      const result = {
+        admins: await this.ensureSystemGroup(
+          transaction,
+          SystemGroupKey.Administrators,
+          'Administrators',
+          1000,
+          Object.values(Capability),
+        ),
+        operators: await this.ensureSystemGroup(
+          transaction,
+          SystemGroupKey.Operators,
+          'Operators',
+          500,
+          [
+            Capability.ManageServers,
+            Capability.ManageImages,
+            Capability.ManageGrants,
+            Capability.ManageContainersAny,
+            Capability.ViewAudit,
+            Capability.ViewMetricsAll,
+            Capability.ManageSystemSettings,
+          ],
+        ),
+        users: await this.ensureSystemGroup(
+          transaction,
+          SystemGroupKey.Users,
+          'Users',
+          10,
+          [],
+        ),
+      };
+      await this.ensureSystemActor(transaction);
+      return result;
     });
-  }
-
-  async listGroupMountSourceGrants(groupId: string): Promise<MountSourceGrantDto[]> {
-    await this.findById(groupId);
-    return this.mountSources.listGrantsForScope('group', groupId);
-  }
-
-  upsertGroupMountSourceGrant(
-    actorId: string,
-    groupId: string,
-    target: MountSourceGrantTarget,
-  ): Promise<MountSourceGrantDto> {
-    return this.mountSources.upsertGrant(actorId, 'group', groupId, target);
-  }
-
-  deleteGroupMountSourceGrant(
-    actorId: string,
-    groupId: string,
-    target: MountSourceGrantTarget,
-  ): Promise<void> {
-    return this.mountSources.deleteGrant(actorId, 'group', groupId, target);
-  }
-
-  async listUserMountSourceGrants(userId: string): Promise<MountSourceGrantDto[]> {
-    await this.requireUserScope(userId);
-    return this.mountSources.listGrantsForScope('user', userId);
-  }
-
-  upsertUserMountSourceGrant(
-    actorId: string,
-    userId: string,
-    target: MountSourceGrantTarget,
-  ): Promise<MountSourceGrantDto> {
-    return this.mountSources.upsertGrant(actorId, 'user', userId, target);
-  }
-
-  deleteUserMountSourceGrant(
-    actorId: string,
-    userId: string,
-    target: MountSourceGrantTarget,
-  ): Promise<void> {
-    return this.mountSources.deleteGrant(actorId, 'user', userId, target);
   }
 
   toDto(group: IamGroup): GroupDto {
@@ -923,131 +643,75 @@ export class GroupsService {
     };
   }
 
-  toSummaryDto(group: IamGroup): GroupSummaryDto {
-    return {
-      id: group.id,
-      name: group.name,
-      priority: group.priority,
-      isSystem: group.isSystem,
-    };
-  }
-
-  serverGrantToDto(grant: ServerGrant): ServerGrantDto {
-    return {
-      id: grant.id,
-      scope: grant.scope,
-      scopeId: grant.scopeId,
-      serverId: grant.serverId,
-      cpuMillis: grant.cpuMillis,
-      memBytes: grant.memBytes,
-      diskBytes: grant.diskBytes,
-      gpuMode: grant.gpuMode,
-      gpuIndices: grant.gpuIndices,
-      expiresAt: grant.expiresAt ? grant.expiresAt.toISOString() : null,
-      createdAt: grant.createdAt.toISOString(),
-      updatedAt: grant.updatedAt.toISOString(),
-    };
-  }
-
-  imageGrantToDto(grant: ImageGrant): ImageGrantDto {
-    return {
-      id: grant.id,
-      scope: grant.scope,
-      scopeId: grant.scopeId,
-      imageId: grant.imageId,
-      serverId: grant.serverId,
-      createdAt: grant.createdAt.toISOString(),
-    };
-  }
-
-  private async listServerGrants(
-    scope: GrantScope,
-    scopeId: string,
-  ): Promise<ServerGrantDto[]> {
-    await this.requireScope(scope, scopeId);
-    const rows = await this.database.selectFrom('iam.server_grants').selectAll()
-      .where(scope === 'user' ? 'user_id' : 'group_id', '=', scopeId)
-      .execute();
-    return rows.map((row) => this.serverGrantToDto(this.toServerGrant(row)));
-  }
-
   private async upsertServerGrant(
     scope: GrantScope,
     scopeId: string,
     serverId: string,
-    dto: ServerGrantUpsertDto,
+    input: ServerGrantInput,
     actorId?: string,
-  ): Promise<WithTaskIds<ServerGrantDto>> {
+  ): Promise<ServerGrantDto> {
     const result = await this.transactions.run(async (transaction) => {
-      await this.lockPolicy(transaction);
-      if (actorId) await this.requireGrantActor(transaction, actorId);
-      await this.requireScopeInTransaction(transaction, scope, scopeId);
-      if (!await transaction.selectFrom('infra.servers')
+      if (actorId) {
+        await this.access.assertActorCapabilitiesInTransaction(
+          transaction,
+          actorId,
+          [Capability.ManageGrants],
+        );
+      }
+      await this.requireScope(transaction, scope, scopeId);
+      const server = await transaction.selectFrom('infra.servers')
         .select('id')
         .where('id', '=', serverId)
-        .executeTakeFirst()) {
-        throw new NotFoundException('Server not found');
-      }
-      const existing = await transaction.selectFrom('iam.server_grants').selectAll()
-        .where(scope === 'user' ? 'user_id' : 'group_id', '=', scopeId)
-        .where('server_id', '=', serverId)
         .executeTakeFirst();
-      const gpuMode = 'gpuMode' in dto
-        ? dto.gpuMode ?? null
-        : existing?.gpu_mode ?? null;
+      if (!server) throw new NotFoundException('Server not found');
       const values = {
-        cpu_millis: 'cpuMillis' in dto ? dto.cpuMillis ?? null : existing?.cpu_millis ?? null,
-        mem_bytes: 'memBytes' in dto ? dto.memBytes ?? null : existing?.mem_bytes ?? null,
-        disk_bytes: 'diskBytes' in dto ? dto.diskBytes ?? null : existing?.disk_bytes ?? null,
-        gpu_mode: gpuMode,
-        // The public contract uses [] with `none`/`all`, while PostgreSQL
-        // stores indices only for the `indices` discriminator.
-        gpu_indices: 'gpuMode' in dto
-          ? gpuMode === GpuGrantMode.Indices
-            ? dto.gpuIndices ?? []
-            : null
-          : existing?.gpu_indices ?? null,
-        expires_at: 'expiresAt' in dto ? dto.expiresAt ?? null : existing?.expires_at ?? null,
+        cpu_millis: input.cpuMillis,
+        mem_bytes: input.memBytes,
+        disk_bytes: input.diskBytes,
+        gpu_mode: input.gpu.mode,
+        gpu_pci_addresses: input.gpu.pciAddresses,
+        expires_at: input.expiresAt,
         updated_at: new Date(),
       };
-      const row = existing
-        ? await transaction.updateTable('iam.server_grants').set(values)
-          .where('id', '=', existing.id).returningAll().executeTakeFirstOrThrow()
-        : await transaction.insertInto('iam.server_grants').values({
-          id: uuidv4(),
-          user_id: scope === 'user' ? scopeId : null,
-          group_id: scope === 'group' ? scopeId : null,
+      const row = scope === 'user'
+        ? await transaction.insertInto('iam.server_grants').values({
+          id: randomUUID(),
+          user_id: scopeId,
+          group_id: null,
           server_id: serverId,
           ...values,
-        }).returningAll().executeTakeFirstOrThrow();
-      const grant = this.toServerGrant(row);
-      const userIds = scope === 'user'
-        ? [scopeId]
-        : (await transaction.selectFrom('iam.group_members')
-            .select('user_id')
-            .where('group_id', '=', scopeId)
-            .execute()).map((member) => member.user_id);
-      this.assertQuotaFanoutWithinLimit(userIds.length, 'upsert-server-grant');
-      const taskIds = await this.syncUserQuotasInTransaction(
+        })
+          .onConflict((conflict) => conflict
+            .columns(['user_id', 'server_id'])
+            .where('user_id', 'is not', null)
+            .doUpdateSet(values))
+          .returningAll()
+          .executeTakeFirstOrThrow()
+        : await transaction.insertInto('iam.server_grants').values({
+          id: randomUUID(),
+          user_id: null,
+          group_id: scopeId,
+          server_id: serverId,
+          ...values,
+        })
+          .onConflict((conflict) => conflict
+            .columns(['group_id', 'server_id'])
+            .where('group_id', 'is not', null)
+            .doUpdateSet(values))
+          .returningAll()
+          .executeTakeFirstOrThrow();
+      const users = scope === 'user' ? [scopeId] : await this.groupUserIds(scopeId, transaction);
+      await this.revocation.assertServerAccessRevocationSafe(
         transaction,
-        userIds.map((userId) => ({ userId, serverId })),
-        actorId ?? null,
+        users.map((userId) => ({ userId, serverId })),
       );
-      await this.auditService.append(
-        transaction,
-        actorId ?? null,
-        AuditAction.UpsertServerGrant,
-        scopeId,
-        scope,
-        { serverId, ...dto },
-      );
-      return { grant, userIds, taskIds };
+      await this.audit.append(transaction, actorId ?? null, AuditAction.UpsertServerGrant, scopeId, scope, {
+        serverId,
+      });
+      return { row, users };
     });
-    await this.accessResolver.authorizationCommitted(result.userIds);
-    return this.withTaskIds(
-      this.serverGrantToDto(result.grant),
-      result.taskIds,
-    );
+    await this.access.authorizationCommitted(result.users);
+    return this.serverGrantDto(result.row);
   }
 
   private async deleteServerGrant(
@@ -1055,128 +719,405 @@ export class GroupsService {
     scopeId: string,
     serverId: string,
     actorId?: string,
-  ): Promise<TaskIdsResult> {
-    const result = await this.transactions.run(async (transaction) => {
-      await this.lockPolicy(transaction);
-      if (actorId) await this.requireGrantActor(transaction, actorId);
-      await this.requireScopeInTransaction(transaction, scope, scopeId);
-      const users = scope === 'user'
-        ? [scopeId]
-        : (await transaction.selectFrom('iam.group_members').select('user_id')
-          .where('group_id', '=', scopeId).execute()).map((row) => row.user_id);
-      this.assertQuotaFanoutWithinLimit(users.length, 'delete-server-grant');
+  ): Promise<void> {
+    const users = await this.transactions.run(async (transaction) => {
+      if (actorId) {
+        await this.access.assertActorCapabilitiesInTransaction(
+          transaction,
+          actorId,
+          [Capability.ManageGrants],
+        );
+      }
+      await this.requireScope(transaction, scope, scopeId);
+      const userIds = scope === 'user' ? [scopeId] : await this.groupUserIds(scopeId, transaction);
       const deleted = await transaction.deleteFrom('iam.server_grants')
         .where(scope === 'user' ? 'user_id' : 'group_id', '=', scopeId)
         .where('server_id', '=', serverId)
         .returning('id')
         .executeTakeFirst();
-      if (!deleted) return { changed: false, users, taskIds: [] as string[] };
-      await this.revocationGuard.assertServerAccessRevocationSafe(
+      if (!deleted) return { userIds: [], deleted: false };
+      await this.revocation.assertServerAccessRevocationSafe(
         transaction,
-        users.map((userId) => ({ userId, serverId })),
+        userIds.map((userId) => ({ userId, serverId })),
       );
-      const taskIds = await this.syncUserQuotasInTransaction(
-        transaction,
-        users.map((userId) => ({ userId, serverId })),
-        actorId ?? null,
-      );
-      await this.auditService.append(
-        transaction,
-        actorId ?? null,
-        AuditAction.DeleteServerGrant,
-        scopeId,
-        scope,
-        { serverId },
-      );
-      return { changed: true, users, taskIds };
+      await this.audit.append(transaction, actorId ?? null, AuditAction.DeleteServerGrant, scopeId, scope, {
+        serverId,
+      });
+      return { userIds, deleted: true };
     });
-    if (!result.changed) return { taskIds: [] };
-    await this.accessResolver.authorizationCommitted(result.users);
-    return { taskIds: result.taskIds };
+    if (users.deleted) await this.access.authorizationCommitted(users.userIds);
   }
 
-  private async listImageGrants(
-    scope: GrantScope,
-    scopeId: string,
-  ): Promise<ImageGrantDto[]> {
-    await this.requireScope(scope, scopeId);
-    const rows = await this.database.selectFrom('iam.image_grants').selectAll()
+  private async listServerGrants(scope: GrantScope, scopeId: string): Promise<ServerGrantDto[]> {
+    await this.requireScope(this.database, scope, scopeId);
+    const rows = await this.database.selectFrom('iam.server_grants')
+      .selectAll()
       .where(scope === 'user' ? 'user_id' : 'group_id', '=', scopeId)
       .execute();
-    return rows.map((row) => this.imageGrantToDto(this.toImageGrant(row)));
+    return rows.map((row) => this.serverGrantDto(row));
   }
 
-  private async addImageGrant(
+  private serverGrantDto(row: {
+    id: string;
+    user_id: string | null;
+    group_id: string | null;
+    server_id: string;
+    cpu_millis: number | null;
+    mem_bytes: string | number | null;
+    disk_bytes: string | number | null;
+    gpu_mode: string;
+    gpu_pci_addresses: string[];
+    expires_at: Date | string | null;
+    created_at: Date;
+    updated_at: Date;
+  }): ServerGrantDto {
+    return {
+      id: row.id,
+      scope: row.user_id ? 'user' : 'group',
+      scopeId: (row.user_id ?? row.group_id)!,
+      serverId: row.server_id,
+      cpuMillis: row.cpu_millis,
+      memBytes: row.mem_bytes === null ? null : Number(row.mem_bytes),
+      diskBytes: row.disk_bytes === null ? null : Number(row.disk_bytes),
+      gpu: {
+        mode: row.gpu_mode as GpuGrantMode,
+        pciAddresses: [...row.gpu_pci_addresses],
+      },
+      expiresAt: row.expires_at ? new Date(row.expires_at).toISOString() : null,
+      createdAt: row.created_at.toISOString(),
+      updatedAt: row.updated_at.toISOString(),
+    };
+  }
+
+  private async listStoragePoolGrants(scope: GrantScope, scopeId: string): Promise<StoragePoolGrantDto[]> {
+    await this.requireScope(this.database, scope, scopeId);
+    const rows = await this.database.selectFrom('iam.storage_pool_grants')
+      .selectAll()
+      .where(scope === 'user' ? 'user_id' : 'group_id', '=', scopeId)
+      .execute();
+    return rows.map((row) => ({
+      id: row.id,
+      scope,
+      scopeId,
+      poolId: row.pool_id,
+      expiresAt: row.expires_at ? new Date(row.expires_at).toISOString() : null,
+      createdAt: row.created_at.toISOString(),
+      updatedAt: row.updated_at.toISOString(),
+    }));
+  }
+
+  private async upsertStoragePoolGrant(
     scope: GrantScope,
     scopeId: string,
-    imageId: string,
-    serverId: string,
+    poolId: string,
+    expiresAt: string | null,
     actorId?: string,
-  ): Promise<ImageGrantDto> {
-    const grant = await this.transactions.run(async (transaction) => {
-      await this.lockPolicy(transaction);
-      if (actorId) await this.requireGrantActor(transaction, actorId);
-      await this.requireScopeInTransaction(transaction, scope, scopeId);
-      const existing = await transaction.selectFrom('iam.image_grants').selectAll()
-        .where(scope === 'user' ? 'user_id' : 'group_id', '=', scopeId)
-        .where('image_id', '=', imageId)
-        .where('server_id', '=', serverId)
+  ): Promise<StoragePoolGrantDto> {
+    const result = await this.transactions.run(async (transaction) => {
+      if (actorId) await this.access.assertActorCapabilitiesInTransaction(
+        transaction,
+        actorId,
+        [Capability.ManageGrants],
+      );
+      await this.requireScope(transaction, scope, scopeId);
+      const pool = await transaction.selectFrom('infra.storage_pools')
+        .select('id')
+        .where('id', '=', poolId)
         .executeTakeFirst();
-      const row = existing ?? await transaction.insertInto('iam.image_grants').values({
-        id: uuidv4(),
-        user_id: scope === 'user' ? scopeId : null,
-        group_id: scope === 'group' ? scopeId : null,
-        image_id: imageId,
-        server_id: serverId,
-      }).returningAll().executeTakeFirstOrThrow();
-      const grant = this.toImageGrant(row);
-      await this.auditService.append(
+      if (!pool) throw new NotFoundException('Storage pool not found');
+      const values = {
+        expires_at: expiresAt,
+        updated_at: new Date(),
+      };
+      const row = scope === 'user'
+        ? await transaction.insertInto('iam.storage_pool_grants').values({
+          id: randomUUID(),
+          user_id: scopeId,
+          group_id: null,
+          pool_id: poolId,
+          ...values,
+        })
+          .onConflict((conflict) => conflict
+            .columns(['user_id', 'pool_id'])
+            .where('user_id', 'is not', null)
+            .doUpdateSet(values))
+          .returningAll()
+          .executeTakeFirstOrThrow()
+        : await transaction.insertInto('iam.storage_pool_grants').values({
+          id: randomUUID(),
+          user_id: null,
+          group_id: scopeId,
+          pool_id: poolId,
+          ...values,
+        })
+          .onConflict((conflict) => conflict
+            .columns(['group_id', 'pool_id'])
+            .where('group_id', 'is not', null)
+            .doUpdateSet(values))
+          .returningAll()
+          .executeTakeFirstOrThrow();
+      const users = scope === 'user' ? [scopeId] : await this.groupUserIds(scopeId, transaction);
+      await this.revocation.assertStoragePoolAccessRevocationSafe(
+        transaction,
+        users.map((userId) => ({ userId, poolId })),
+      );
+      await this.audit.append(
         transaction,
         actorId ?? null,
-        AuditAction.UpsertImageGrant,
-        scopeId,
+        AuditAction.UpsertStoragePoolGrant,
+        poolId,
         scope,
-        { imageId, serverId },
+        { scopeId, poolId },
       );
-      return grant;
+      return {
+        row,
+        users,
+      };
     });
-    const userIds = scope === 'user' ? [scopeId] : await this.groupUserIds(scopeId);
-    await this.accessResolver.authorizationCommitted(userIds);
-    return this.imageGrantToDto(grant);
+    await this.access.authorizationCommitted(result.users);
+    return {
+      id: result.row.id,
+      scope,
+      scopeId,
+      poolId: result.row.pool_id,
+      expiresAt: result.row.expires_at ? new Date(result.row.expires_at).toISOString() : null,
+      createdAt: result.row.created_at.toISOString(),
+      updatedAt: result.row.updated_at.toISOString(),
+    };
   }
 
-  private async deleteImageGrant(
+  private async deleteStoragePoolGrant(scope: GrantScope, scopeId: string, poolId: string, actorId?: string): Promise<void> {
+    const result = await this.transactions.run(async (transaction) => {
+      if (actorId) await this.access.assertActorCapabilitiesInTransaction(
+        transaction,
+        actorId,
+        [Capability.ManageGrants],
+      );
+      await this.requireScope(transaction, scope, scopeId);
+      const userIds = scope === 'user' ? [scopeId] : await this.groupUserIds(scopeId, transaction);
+      const deleted = await transaction.deleteFrom('iam.storage_pool_grants')
+        .where(scope === 'user' ? 'user_id' : 'group_id', '=', scopeId)
+        .where('pool_id', '=', poolId)
+        .returning('id')
+        .executeTakeFirst();
+      if (!deleted) return { userIds: [], deleted: false };
+      await this.revocation.assertStoragePoolAccessRevocationSafe(
+        transaction,
+        userIds.map((userId) => ({ userId, poolId })),
+      );
+      await this.audit.append(
+        transaction,
+        actorId ?? null,
+        AuditAction.DeleteStoragePoolGrant,
+        poolId,
+        scope,
+        { scopeId, poolId },
+      );
+      return { userIds, deleted: true };
+    });
+    if (result.deleted) await this.access.authorizationCommitted(result.userIds);
+  }
+
+  private async listSharedBackendGrants(scope: GrantScope, scopeId: string): Promise<SharedBackendGrantDto[]> {
+    await this.requireScope(this.database, scope, scopeId);
+    const rows = await this.database.selectFrom('iam.shared_backend_grants')
+      .selectAll()
+      .where(scope === 'user' ? 'user_id' : 'group_id', '=', scopeId)
+      .execute();
+    return rows.map((row) => ({
+      id: row.id,
+      scope,
+      scopeId,
+      sharedBackendId: row.shared_backend_id,
+      limitBytes: Number(row.limit_bytes),
+      expiresAt: row.expires_at ? new Date(row.expires_at).toISOString() : null,
+      createdAt: row.created_at.toISOString(),
+      updatedAt: row.updated_at.toISOString(),
+    }));
+  }
+
+  private async upsertSharedBackendGrant(
     scope: GrantScope,
     scopeId: string,
-    imageId: string,
-    serverId: string,
+    backendId: string,
+    input: { limitBytes: number; expiresAt: string | null },
     actorId?: string,
-  ): Promise<void> {
-    const changed = await this.transactions.run(async (transaction) => {
-      await this.lockPolicy(transaction);
-      if (actorId) await this.requireGrantActor(transaction, actorId);
-      await this.requireScopeInTransaction(transaction, scope, scopeId);
-      const changed = Boolean(await transaction.deleteFrom('iam.image_grants')
-        .where(scope === 'user' ? 'user_id' : 'group_id', '=', scopeId)
-        .where('image_id', '=', imageId)
-        .where('server_id', '=', serverId)
-        .returning('id')
-        .executeTakeFirst());
-      if (changed) {
-        await this.auditService.append(
-          transaction,
-          actorId ?? null,
-          AuditAction.DeleteImageGrant,
-          scopeId,
-          scope,
-          { imageId, serverId },
-        );
-      }
-      return changed;
+  ): Promise<SharedBackendGrantDto> {
+    const result = await this.transactions.run(async (transaction) => {
+      if (actorId) await this.access.assertActorCapabilitiesInTransaction(
+        transaction,
+        actorId,
+        [Capability.ManageGrants],
+      );
+      await this.requireScope(transaction, scope, scopeId);
+      const backend = await transaction.selectFrom('infra.shared_backends')
+        .select('id')
+        .where('id', '=', backendId)
+        .executeTakeFirst();
+      if (!backend) throw new NotFoundException('Shared backend not found');
+      const values = {
+        limit_bytes: input.limitBytes,
+        expires_at: input.expiresAt,
+        updated_at: new Date(),
+      };
+      const row = scope === 'user'
+        ? await transaction.insertInto('iam.shared_backend_grants').values({
+          id: randomUUID(),
+          user_id: scopeId,
+          group_id: null,
+          shared_backend_id: backendId,
+          ...values,
+        })
+          .onConflict((conflict) => conflict
+            .columns(['user_id', 'shared_backend_id'])
+            .where('user_id', 'is not', null)
+            .doUpdateSet(values))
+          .returningAll()
+          .executeTakeFirstOrThrow()
+        : await transaction.insertInto('iam.shared_backend_grants').values({
+          id: randomUUID(),
+          user_id: null,
+          group_id: scopeId,
+          shared_backend_id: backendId,
+          ...values,
+        })
+          .onConflict((conflict) => conflict
+            .columns(['group_id', 'shared_backend_id'])
+            .where('group_id', 'is not', null)
+            .doUpdateSet(values))
+          .returningAll()
+          .executeTakeFirstOrThrow();
+      const users = scope === 'user' ? [scopeId] : await this.groupUserIds(scopeId, transaction);
+      await this.revocation.assertSharedBackendAccessRevocationSafe(
+        transaction,
+        users.map((userId) => ({ userId, sharedBackendId: backendId })),
+      );
+      await this.audit.append(
+        transaction,
+        actorId ?? null,
+        AuditAction.UpsertSharedBackendGrant,
+        backendId,
+        scope,
+        { scopeId, sharedBackendId: backendId, limitBytes: input.limitBytes },
+      );
+      return {
+        row,
+        users,
+      };
     });
-    if (!changed) return;
-    const userIds = scope === 'user' ? [scopeId] : await this.groupUserIds(scopeId);
-    await this.accessResolver.authorizationCommitted(userIds);
+    await this.access.authorizationCommitted(result.users);
+    const row = result.row;
+    return {
+      id: row.id,
+      scope,
+      scopeId,
+      sharedBackendId: row.shared_backend_id,
+      limitBytes: Number(row.limit_bytes),
+      expiresAt: row.expires_at ? new Date(row.expires_at).toISOString() : null,
+      createdAt: row.created_at.toISOString(),
+      updatedAt: row.updated_at.toISOString(),
+    };
+  }
+
+  private async deleteSharedBackendGrant(scope: GrantScope, scopeId: string, backendId: string, actorId?: string): Promise<void> {
+    const result = await this.transactions.run(async (transaction) => {
+      if (actorId) await this.access.assertActorCapabilitiesInTransaction(
+        transaction,
+        actorId,
+        [Capability.ManageGrants],
+      );
+      await this.requireScope(transaction, scope, scopeId);
+      const userIds = scope === 'user' ? [scopeId] : await this.groupUserIds(scopeId, transaction);
+      const deleted = await transaction.deleteFrom('iam.shared_backend_grants')
+        .where(scope === 'user' ? 'user_id' : 'group_id', '=', scopeId)
+        .where('shared_backend_id', '=', backendId)
+        .returning('id')
+        .executeTakeFirst();
+      if (!deleted) return { userIds: [], deleted: false };
+      await this.revocation.assertSharedBackendAccessRevocationSafe(
+        transaction,
+        userIds.map((userId) => ({ userId, sharedBackendId: backendId })),
+      );
+      await this.audit.append(
+        transaction,
+        actorId ?? null,
+        AuditAction.DeleteSharedBackendGrant,
+        backendId,
+        scope,
+        { scopeId, sharedBackendId: backendId },
+      );
+      return { userIds, deleted: true };
+    });
+    if (result.deleted) await this.access.authorizationCommitted(result.userIds);
+  }
+
+  private async ensureSystemActor(transaction: IamTransaction): Promise<string> {
+    const existing = await transaction.selectFrom('iam.users')
+      .select(['id', 'numeric_id'])
+      .where('username', '=', SYSTEM_ACTOR_USERNAME)
+      .executeTakeFirst();
+    if (existing) {
+      await transaction.updateTable('iam.users')
+        .set({
+          display_name: SYSTEM_ACTOR_DISPLAY_NAME,
+          status: UserStatus.Disabled,
+          password_hash: UNUSABLE_PASSWORD_HASH,
+          updated_at: new Date(),
+        })
+        .where('id', '=', existing.id)
+        .execute();
+      await this.stripSystemGroupMembership(transaction, existing.id);
+      return existing.id;
+    }
+
+    const occupied = await transaction.selectFrom('iam.users')
+      .select('numeric_id')
+      .execute();
+    const numericId = pickSystemActorNumericId(occupied.map((row) => row.numeric_id));
+    const now = new Date();
+    await transaction.insertInto('iam.users')
+      .values({
+        id: randomUUID(),
+        numeric_id: numericId,
+        username: SYSTEM_ACTOR_USERNAME,
+        password_hash: UNUSABLE_PASSWORD_HASH,
+        display_name: SYSTEM_ACTOR_DISPLAY_NAME,
+        status: UserStatus.Disabled,
+        auth_version: 0,
+        authz_version: 0,
+        created_at: now,
+        updated_at: now,
+      })
+      .onConflict((conflict) => conflict.column('username').doNothing())
+      .execute();
+    const created = await transaction.selectFrom('iam.users')
+      .select('id')
+      .where('username', '=', SYSTEM_ACTOR_USERNAME)
+      .executeTakeFirst();
+    if (!created) {
+      throw new ConflictException('System actor nyabase-system could not be initialized');
+    }
+    await this.stripSystemGroupMembership(transaction, created.id);
+    return created.id;
+  }
+
+  private async stripSystemGroupMembership(
+    transaction: IamTransaction,
+    userId: string,
+  ): Promise<void> {
+    const groups = await transaction.selectFrom('iam.groups')
+      .select('id')
+      .where('system_key', 'in', [
+        SystemGroupKey.Administrators,
+        SystemGroupKey.Operators,
+        SystemGroupKey.Users,
+      ])
+      .execute();
+    if (groups.length === 0) return;
+    await transaction.deleteFrom('iam.group_members')
+      .where('user_id', '=', userId)
+      .where('group_id', 'in', groups.map((group) => group.id))
+      .execute();
   }
 
   private async ensureSystemGroup(
@@ -1186,222 +1127,85 @@ export class GroupsService {
     priority: number,
     capabilities: Capability[],
   ): Promise<IamGroup> {
-    const byKey = await transaction.selectFrom('iam.groups').selectAll()
-      .where('system_key', '=', systemKey).executeTakeFirst();
-    if (byKey) {
-      const group = this.toGroup(byKey);
-      if (group.name !== name || group.priority !== priority
-        || !group.isSystem || !this.sameCapabilities(group.capabilities, capabilities)) {
-        throw new ConflictException({
-          code: 'SYSTEM_GROUP_METADATA_DRIFT',
-          message: `Built-in group ${systemKey} has invalid immutable metadata`,
-          groupId: group.id,
-        });
-      }
-      return group;
+    const row = await transaction.insertInto('iam.groups')
+      .values({
+        id: randomUUID(),
+        name,
+        description: null,
+        priority,
+        is_system: true,
+        system_key: systemKey,
+        capabilities,
+        revision: 1,
+      })
+      .onConflict((conflict) => conflict.column('system_key').doNothing())
+      .returningAll()
+      .executeTakeFirst();
+    if (row) return this.toGroup(row);
+
+    const existing = await transaction.selectFrom('iam.groups')
+      .selectAll()
+      .where('system_key', '=', systemKey)
+      .executeTakeFirst();
+    if (!existing) {
+      throw new ConflictException(`System group ${systemKey} could not be initialized`);
     }
-    const byName = await transaction.selectFrom('iam.groups').selectAll()
-      .where('name', '=', name).executeTakeFirst();
-    if (byName) {
-      throw new ConflictException({
-        code: 'SYSTEM_GROUP_NAME_CONFLICT',
-        message: `The reserved built-in group name ${name} is occupied`,
-        groupId: byName.id,
-      });
+    const desired = [...capabilities].sort();
+    const current = [...(existing.capabilities ?? [])].sort();
+    if (desired.join('\0') === current.join('\0')) {
+      return this.toGroup(existing);
     }
-    const inserted = await transaction.insertInto('iam.groups').values({
-      id: uuidv4(),
-      name,
-      description: null,
-      priority,
-      is_system: true,
-      system_key: systemKey,
-      capabilities,
-      revision: 1,
-    }).returningAll().executeTakeFirstOrThrow();
-    await sql`SELECT iam.bump_policy_epoch()`.execute(transaction);
-    return this.toGroup(inserted);
+    const updated = await transaction.updateTable('iam.groups')
+      .set({
+        capabilities,
+        revision: Number(existing.revision) + 1,
+        updated_at: new Date(),
+      })
+      .where('id', '=', existing.id)
+      .returningAll()
+      .executeTakeFirstOrThrow();
+    return this.toGroup(updated);
   }
 
-  private async assertActorMayMutateGroup(
-    transaction: IamTransaction,
-    actorId: string,
-    current: IamGroup,
-    desiredCapabilities: Capability[],
-    resourceSensitive: boolean,
-  ): Promise<void> {
-    await this.accessResolver.assertActorCapabilitiesInTransaction(
-      transaction,
-      actorId,
-      [Capability.ManageGroups, ...current.capabilities, ...desiredCapabilities],
-    );
-    if (!resourceSensitive) return;
-    const hasGrant = await Promise.all([
-      transaction.selectFrom('iam.server_grants').select('id')
-        .where('group_id', '=', current.id).executeTakeFirst(),
-      transaction.selectFrom('iam.image_grants').select('id')
-        .where('group_id', '=', current.id).executeTakeFirst(),
-      transaction.selectFrom('iam.mount_source_grants').select('id')
-        .where('group_id', '=', current.id).executeTakeFirst(),
-    ]);
-    if (hasGrant.some(Boolean)) {
-      await this.accessResolver.assertActorCapabilitiesInTransaction(
-        transaction,
-        actorId,
-        [Capability.ManageGrants],
-      );
-    }
-  }
-
-  private requireGrantActor(transaction: IamTransaction, actorId: string): Promise<Set<Capability>> {
-    return this.accessResolver.assertActorCapabilitiesInTransaction(
-      transaction,
-      actorId,
-      [Capability.ManageGrants],
-    );
-  }
-
-  private async syncUserQuotasInTransaction(
-    transaction: IamTransaction,
-    pairs: readonly { userId: string; serverId: string }[],
-    requestedBy: string | null,
-  ): Promise<string[]> {
-    const unique = [...new Map(pairs.map((pair) => [
-      `${pair.userId}\0${pair.serverId}`,
-      pair,
-    ])).values()];
-    if (unique.length === 0) return [];
-    const grants = await this.accessResolver.resolveServerPairsInTransaction(
-      transaction,
-      unique,
-    );
-    const grantedPairs = unique.flatMap((pair) => {
-      const grant = grants.get(`${pair.userId}\0${pair.serverId}`);
-      return grant ? [{ ...pair, grant }] : [];
-    });
-    if (grantedPairs.length === 0) return [];
-    const users = await transaction.selectFrom('iam.users')
-      .select(['id', 'numeric_id', 'status'])
-      .where('id', 'in', [...new Set(grantedPairs.map((pair) => pair.userId))])
-      .execute();
-    const usersById = new Map(users.map((user) => [user.id, user]));
-    const requests = grantedPairs.map(({ userId, serverId, grant }) => {
-      const user = usersById.get(userId);
-      if (!user || user.status === UserStatus.Deleted || user.status === UserStatus.Deleting) {
-        throw new ConflictException({
-          code: user?.status === UserStatus.Deleting ? 'USER_DELETING' : 'USER_DELETED',
-          message: 'A deleted or deleting user cannot receive quota intent',
-          userId,
-        });
-      }
-      if (!Number.isSafeInteger(user.numeric_id) || user.numeric_id <= 0) {
-        throw new ConflictException(`User ${userId} has no numeric quota identity`);
-      }
-      return {
-        serverId,
-        userId,
-        numericUserId: user.numeric_id,
-        diskBytes: grant.diskBytes,
-        requestedBy,
-      };
-    });
-    return this.quotaDispatch.applyManyInTransaction(
-      transaction,
-      requests,
-    );
-  }
-
-  private assertQuotaFanoutWithinLimit(count: number, operation: string): void {
-    if (count <= MAX_SYNCHRONOUS_QUOTA_INTENTS_PER_MUTATION) return;
-    throw new ConflictException({
-      code: 'QUOTA_FANOUT_LIMIT',
-      message:
-        `Operation would enqueue ${count} quota intents in one transaction; `
-        + `maximum is ${MAX_SYNCHRONOUS_QUOTA_INTENTS_PER_MUTATION}`,
-      operation,
-      requestedIntents: count,
-      maxIntents: MAX_SYNCHRONOUS_QUOTA_INTENTS_PER_MUTATION,
-    });
-  }
-
-  private async requireScope(scope: GrantScope, scopeId: string): Promise<void> {
-    await this.transactions.run((transaction) =>
-      this.requireScopeInTransaction(transaction, scope, scopeId));
-  }
-
-  private requireScopeInTransaction(
-    transaction: IamTransaction,
+  private async requireScope(
+    executor: GrantExecutor,
     scope: GrantScope,
     scopeId: string,
-  ): Promise<IamGroup | { id: string }> {
-    return scope === 'group'
-      ? this.requireGroup(transaction, scopeId)
-      : this.requireUser(transaction, scopeId);
+  ): Promise<void> {
+    if (scope === 'group') {
+      const group = await executor.selectFrom('iam.groups').select('id').where('id', '=', scopeId).executeTakeFirst();
+      if (!group) throw new NotFoundException('Group not found');
+    } else {
+      await this.requireUser(executor, scopeId);
+    }
   }
 
-  private async requireGroup(
-    transaction: IamTransaction,
-    groupId: string,
-  ): Promise<IamGroup> {
-    const row = await transaction.selectFrom('iam.groups').selectAll()
-      .where('id', '=', groupId).executeTakeFirst();
+  private async requireGroup(transaction: IamTransaction, id: string): Promise<IamGroup> {
+    const row = await transaction.selectFrom('iam.groups')
+      .selectAll()
+      .where('id', '=', id)
+      .executeTakeFirst();
     if (!row) throw new NotFoundException('Group not found');
     return this.toGroup(row);
   }
 
-  private async requireUser(
-    transaction: IamTransaction,
-    userId: string,
-    activeOnly = true,
-  ): Promise<{ id: string }> {
-    const row = await transaction.selectFrom('iam.users').select(['id', 'status'])
-      .where('id', '=', userId).executeTakeFirst();
-    if (!row || row.status === UserStatus.Deleted
-      || (activeOnly && row.status !== UserStatus.Active)) {
-      throw new NotFoundException('User not found');
-    }
+  private async requireUser(executor: GrantExecutor, id: string): Promise<{ id: string }> {
+    const row = await executor.selectFrom('iam.users')
+      .select(['id', 'status'])
+      .where('id', '=', id)
+      .executeTakeFirst();
+    if (!row || row.status === UserStatus.Deleted) throw new NotFoundException('User not found');
     return row;
   }
 
-  private async requireUserScope(userId: string): Promise<void> {
-    await this.transactions.run((transaction) => this.requireUser(transaction, userId));
-  }
-
-  private async lockPolicy(transaction: IamTransaction): Promise<void> {
-    await transaction.selectFrom('iam.policy_state').select('policy_epoch')
-      .where('singleton', '=', true).forUpdate().executeTakeFirstOrThrow();
-  }
-
-  private async groupUserIds(groupId: string): Promise<string[]> {
-    return (await this.database.selectFrom('iam.group_members').select('user_id')
-      .where('group_id', '=', groupId).execute()).map((row) => row.user_id);
-  }
-
-  private assertOrdinaryGroupName(name: string): void {
-    const trimmed = name.trim();
-    if (trimmed.length === 0 || trimmed.length > 128) {
-      throw new ConflictException('Group name must contain 1-128 non-whitespace characters');
-    }
-    if (Object.values(SystemGroupKey).includes(trimmed.toLowerCase() as SystemGroupKey)
-      || ['Administrators', 'Operators', 'Users'].includes(trimmed)) {
-      throw new ConflictException({
-        code: 'SYSTEM_GROUP_NAME_RESERVED',
-        message: 'Built-in group names are reserved',
-      });
-    }
-  }
-
-  private sameCapabilities(
-    left: readonly Capability[],
-    right: readonly Capability[],
-  ): boolean {
-    return left.length === right.length
-      && new Set(left).size === new Set(right).size
-      && left.every((capability) => right.includes(capability));
-  }
-
-  private withTaskIds<T extends object>(value: T, taskIds: string[]): T & TaskIdsResult {
-    return Object.assign(value, { taskIds: [...new Set(taskIds)] });
+  private async groupUserIds(
+    groupId: string,
+    executor: GrantExecutor,
+  ): Promise<string[]> {
+    return (await executor.selectFrom('iam.group_members')
+      .select('user_id')
+      .where('group_id', '=', groupId)
+      .execute()).map((row) => row.user_id);
   }
 
   private toGroup(row: {
@@ -1412,7 +1216,7 @@ export class GroupsService {
     is_system: boolean;
     system_key: string | null;
     capabilities: string[];
-    revision: string;
+    revision: string | number;
     created_at: Date;
     updated_at: Date;
   }): IamGroup {
@@ -1427,56 +1231,6 @@ export class GroupsService {
       revision: Number(row.revision),
       createdAt: row.created_at,
       updatedAt: row.updated_at,
-    };
-  }
-
-  private toServerGrant(row: {
-    id: string;
-    user_id: string | null;
-    group_id: string | null;
-    server_id: string;
-    cpu_millis: number | null;
-    mem_bytes: string | null;
-    disk_bytes: string | null;
-    gpu_mode: string | null;
-    gpu_indices: number[] | null;
-    expires_at: Date | null;
-    created_at: Date;
-    updated_at: Date;
-  }): ServerGrant {
-    const scope: GrantScope = row.user_id ? 'user' : 'group';
-    return {
-      id: row.id,
-      scope,
-      scopeId: (row.user_id ?? row.group_id)!,
-      serverId: row.server_id,
-      cpuMillis: row.cpu_millis,
-      memBytes: row.mem_bytes === null ? null : Number(row.mem_bytes),
-      diskBytes: row.disk_bytes === null ? null : Number(row.disk_bytes),
-      expiresAt: row.expires_at,
-      gpuMode: row.gpu_mode as GpuGrantMode | null,
-      gpuIndices: row.gpu_indices,
-      createdAt: row.created_at,
-      updatedAt: row.updated_at,
-    };
-  }
-
-  private toImageGrant(row: {
-    id: string;
-    user_id: string | null;
-    group_id: string | null;
-    image_id: string;
-    server_id: string;
-    created_at: Date;
-  }): ImageGrant {
-    const scope: GrantScope = row.user_id ? 'user' : 'group';
-    return {
-      id: row.id,
-      scope,
-      scopeId: (row.user_id ?? row.group_id)!,
-      imageId: row.image_id,
-      serverId: row.server_id,
-      createdAt: row.created_at,
     };
   }
 }

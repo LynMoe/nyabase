@@ -35,7 +35,7 @@ describePostgres('UsersService PostgreSQL SSH key durable hooks', () => {
       expect(await fixture.database.selectFrom('iam.ssh_public_keys').selectAll()
         .where('id', '=', saved.id).executeTakeFirst())
         .toMatchObject({ user_id: context.userId, key_text: VALID_ED25519_KEY });
-      expect(context.convergence.reconcileUser).not.toHaveBeenCalled();
+      expect(context.convergence.reconcileUser).toHaveBeenCalledWith(context.userId);
       expect(context.proxySnapshots.notify).toHaveBeenCalledWith('user-ssh-key-added');
       expect(context.audit.log).toHaveBeenCalledWith(
         context.userId,
@@ -112,7 +112,7 @@ describePostgres('UsersService PostgreSQL SSH key durable hooks', () => {
       )).resolves.toBeUndefined();
       expect(await fixture.database.selectFrom('iam.ssh_public_keys').select('id')
         .where('id', '=', keyId).executeTakeFirst()).toBeUndefined();
-      expect(context.convergence.reconcileUser).not.toHaveBeenCalled();
+      expect(context.convergence.reconcileUser).toHaveBeenCalledWith(context.userId);
       expect(context.proxySnapshots.notify).toHaveBeenCalledWith('user-ssh-key-deleted');
       expect(context.audit.log).toHaveBeenCalledWith(
         context.userId,
@@ -192,16 +192,6 @@ describePostgres('UsersService PostgreSQL SSH key durable hooks', () => {
       )).rejects.toBeDefined();
       expect(context.audit.log).not.toHaveBeenCalled();
       expect(context.proxySnapshots.notify).not.toHaveBeenCalled();
-    });
-  });
-
-  it('queues container convergence and proxy refresh when the internal key rotates', async () => {
-    await withPostgresTestDatabase(async (fixture) => {
-      const context = await usersPgFixture(fixture, { seedActor: false });
-      await context.users.notifyInternalSshKeyRotated(context.userId);
-      expect(context.convergence.reconcileUser).toHaveBeenCalledWith(context.userId);
-      expect(context.proxySnapshots.notify)
-        .toHaveBeenCalledWith('user-internal-ssh-key-rotated');
     });
   });
 });

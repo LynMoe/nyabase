@@ -6,7 +6,7 @@ import {
 import { controlPlaneConfigDefinitions } from './definition.js';
 
 describe('SSH proxy snapshot lease configuration', () => {
-  it('bounds leases by Agent report freshness and fail-closed recovery', () => {
+  it('bounds leases by snapshot freshness and fail-closed recovery', () => {
     const field = controlPlaneConfigDefinitions.find(
       (definition) => definition.key === 'ssh.proxySnapshotStaleMs',
     );
@@ -77,13 +77,15 @@ describe('PostgreSQL, Redis, and metrics configuration', () => {
     }
   });
 
-  it('supports a simple all-in-one default and independently scalable runtime roles', () => {
+  it('supports a simple all-in-one default and independently scalable process roles', () => {
     const schema = definition('runtime.role')?.schema;
     expect(definition('runtime.role')?.defaultValue).toBe('all');
-    for (const role of ['all', 'api', 'gateway', 'worker']) {
+    for (const role of ['all', 'api', 'worker']) {
       expect(schema?.safeParse(role).success).toBe(true);
     }
-    expect(schema?.safeParse('scheduler').success).toBe(false);
+    for (const role of ['gateway', 'node-exporter', 'ssh-proxy', 'http-proxy']) {
+      expect(schema?.safeParse(role).success).toBe(false);
+    }
   });
 
   it('accepts only an exact credential-free Console owner WebSocket URL', () => {
@@ -99,5 +101,47 @@ describe('PostgreSQL, Redis, and metrics configuration', () => {
     expect(schema?.safeParse(
       `wss://${'a'.repeat(2_048)}.example/ws/console`,
     ).success).toBe(false);
+  });
+});
+
+describe('Incus transport and preflight configuration', () => {
+  function definition(key: string) {
+    return controlPlaneConfigDefinitions.find((item) => item.key === key);
+  }
+
+  it('uses bounded configured request and operation wait timeouts', () => {
+    const request = definition('incus.requestTimeoutMs')?.schema;
+    const operation = definition('incus.operationWaitTimeoutMs')?.schema;
+    expect(request?.safeParse(10_000).success).toBe(true);
+    expect(request?.safeParse(999).success).toBe(false);
+    expect(operation?.safeParse(600_000).success).toBe(true);
+    expect(operation?.safeParse(600_001).success).toBe(false);
+  });
+
+  it('keeps image alias and immutable fingerprint as distinct settings', () => {
+    expect(definition('incus.preflightImageAlias')?.env).toBe('INCUS_PREFLIGHT_IMAGE_ALIAS');
+    expect(definition('incus.preflightImageFingerprint')?.env)
+      .toBe('INCUS_PREFLIGHT_IMAGE_FINGERPRINT');
+    expect(definition('incus.preflightImageFingerprint')?.schema.safeParse('ubuntu/24.04').success)
+      .toBe(false);
+    expect(definition('incus.preflightImageFingerprint')?.schema.safeParse('a'.repeat(64)).success)
+      .toBe(true);
+    expect(definition('incus.imageSourceServer')?.env).toBe('INCUS_IMAGE_SOURCE_URL');
+    expect(definition('incus.imageSourceServer')?.defaultValue).toBe('');
+    expect(definition('incus.imageSourceServer')?.schema.safeParse('').success).toBe(true);
+    expect(definition('incus.imageSourceServer')?.schema.safeParse('https://images.example.test').success)
+      .toBe(true);
+    expect(definition('incus.imageSourceServer')?.schema.safeParse('http://insecure.example.test').success)
+      .toBe(false);
+  });
+
+  it('provides injected mTLS file defaults and keeps inline PEM values secret', () => {
+    expect(definition('incus.clientCertificateFile')?.defaultValue)
+      .toBe('/run/secrets/incus_client_cert');
+    expect(definition('incus.clientPrivateKeyFile')?.defaultValue)
+      .toBe('/run/secrets/incus_client_key');
+    expect(definition('incus.caFile')?.defaultValue).toBe('/run/secrets/incus_ca');
+    expect(definition('incus.clientPrivateKeyPem')?.secret).toBe(true);
+    expect(definition('incus.caPem')?.secret).toBe(true);
   });
 });

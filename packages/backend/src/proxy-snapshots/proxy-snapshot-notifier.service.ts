@@ -14,9 +14,9 @@ type ServerBlockListener = (serverId: string, reason: string) => void;
 /**
  * Small dependency boundary between durable transactions and proxy gateways.
  * Domain code calls notify only after commit; gateways register their own
- * snapshot broadcaster without making AgentTasksModule depend on either proxy
- * module. A failed notification is logged and bounded by each proxy's snapshot
- * lease, and never rewrites an already committed task outcome.
+ * snapshot broadcaster without coupling proxy modules to domain workers.
+ * A failed notification is logged and bounded by each proxy's snapshot lease,
+ * and never rewrites an already committed intent outcome.
  */
 @Injectable()
 export class ProxySnapshotNotifierService implements OnModuleInit, OnModuleDestroy {
@@ -125,7 +125,7 @@ export class ProxySnapshotNotifierService implements OnModuleInit, OnModuleDestr
   }
 
   /**
-   * Keep user-facing proxy routes revoked while allowing the current Agent
+   * Keep user-facing proxy routes revoked while allowing the current recovery
    * session to execute the exact safety work which can clear that revocation.
    * Unlike a fail-stop block, this must not fence the healthy recovery socket.
    */
@@ -136,16 +136,16 @@ export class ProxySnapshotNotifierService implements OnModuleInit, OnModuleDestr
   private establishServerBlock(
     serverId: string,
     reason: string,
-    fenceAgentSession: boolean,
+    fenceRecoverySession: boolean,
   ): number {
     // Every revocation is a new fence, even if the server was already blocked.
     // A state report that observed an older fence must never be allowed to
-    // unblock a later quarantine/disconnect event.
+    // unblock a later block/disconnect event.
     const epoch = this.nextBlockEpoch++;
     this.blockEpochByServerId.set(serverId, epoch);
     const wasBlocked = this.blockedServerIds.has(serverId);
     this.blockedServerIds.add(serverId);
-    if (fenceAgentSession) {
+    if (fenceRecoverySession) {
       for (const listener of this.serverBlockListeners) listener(serverId, reason);
     }
     if (!wasBlocked) this.invalidate(reason);

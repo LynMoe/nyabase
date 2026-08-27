@@ -161,6 +161,23 @@ export class GrantExpiryEnforcementRepository {
       this.completeLostInTransaction(transaction, claim));
   }
 
+  /** Drop an in-flight lease so a failed attempt can be retried on the next pass. */
+  async release(claim: GrantExpiryClaim): Promise<void> {
+    await this.database
+      .updateTable('control.grant_expiry_enforcement')
+      .set({
+        claim_token: null,
+        claimed_by: null,
+        lease_expires_at: null,
+        updated_at: sql`clock_timestamp()`,
+      })
+      .where('user_id', '=', claim.userId)
+      .where('server_id', '=', claim.serverId)
+      .where('covering_expires_at', '=', claim.coveringExpiresAt)
+      .where('claim_token', '=', claim.claimToken)
+      .execute();
+  }
+
   /** True when incomplete and no unexpired foreign lease is held. */
   static isDueForWork(
     phase: GrantExpiryClaimPhase,

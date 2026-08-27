@@ -10,7 +10,6 @@ import * as http from 'http';
 import { performance } from 'node:perf_hooks';
 import { WebSocket, WebSocketServer } from 'ws';
 import {
-  zEnvelope,
   zSshProxyAuditEvent,
   zSshProxyClientAck,
   zSshProxyDisconnectAllResult,
@@ -38,6 +37,17 @@ export const MAX_PENDING_SSH_DISCONNECT_ALL = 16;
 const MAX_SSH_PROXY_CONTROL_FRAME_BYTES = 1024 * 1024;
 const MAX_SSH_PROXY_SNAPSHOT_RENEWAL_MS = 60_000;
 const INITIAL_CONNECTION_DEADLINE_MS = 15_000;
+
+function isSshProxyEnvelope(value: unknown): value is {
+  kind: 'ack' | 'metrics' | 'status' | 'disconnectAllResult' | 'audit';
+  payload: unknown;
+} {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const candidate = value as Record<string, unknown>;
+  return ['ack', 'metrics', 'status', 'disconnectAllResult', 'audit']
+    .includes(String(candidate.kind))
+    && 'payload' in candidate;
+}
 
 export function sshProxySnapshotRenewalMs(staleAfterMs: number): number {
   if (
@@ -96,7 +106,7 @@ export class SshProxyGateway implements OnModuleInit, OnModuleDestroy {
   }
 
   onModuleInit(): void {
-    if (this.runtimeRole && !this.runtimeRole.servesGateway()) return;
+    if (this.runtimeRole && !this.runtimeRole.servesProxySockets()) return;
     this.unregisterSnapshotListener = this.proxySnapshots.register(
       'ssh',
       () => this.broadcastSnapshot(),
@@ -377,12 +387,11 @@ export class SshProxyGateway implements OnModuleInit, OnModuleDestroy {
   }
 
   private handleMessage(ws: WebSocket, raw: string): void {
-    const parsed = zEnvelope.safeParse(this.parseJson(raw));
-    if (!parsed.success) {
+    const envelope = this.parseJson(raw);
+    if (!isSshProxyEnvelope(envelope)) {
       this.logger.warn('Invalid SSH proxy envelope');
       return;
     }
-    const envelope = parsed.data;
     if (envelope.kind === 'ack') {
       const ack = zSshProxyClientAck.safeParse(envelope.payload);
       if (ack.success) {

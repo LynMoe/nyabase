@@ -1,0 +1,15 @@
+{
+  "type": "sync",
+  "status": "Success",
+  "status_code": 200,
+  "metadata": {
+    "api_extensions": [
+      "instance_state_started_at"
+    ],
+    "api_status": "stable",
+    "api_version": "1.0",
+    "environment": "production",
+    "server_name": "incus-01",
+    "server_version": "6.0.0"
+  }
+}

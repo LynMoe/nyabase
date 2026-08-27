@@ -1,12 +1,25 @@
 runtime:
   nodeEnv: production
-  # all runs API, gateways and background workers in one process. Larger
-  # installations can split this into api, gateway and worker services.
+  # Run the HTTP control plane and the Incus reconciliation worker together.
   role: all
-  # Required on each Gateway in a multi-Gateway deployment so browsers connect
-  # directly to the process that owns the Agent socket. Keep empty for the
-  # single-Gateway same-origin default.
-  consolePublicUrl: ""
+
+incus:
+  # Fixed simplestreams image alias used by server preflight probes.
+  preflightImageAlias: ""
+  # Optional immutable image fingerprint when an alias is not used.
+  preflightImageFingerprint: ""
+  # Fixed HTTPS URL checked from the preflight instance.
+  preflightEgressUrl: ""
+  preflightSourceServer: https://images.linuxcontainers.org
+  # Dedicated simplestreams source for managed image assignment. Empty uses preflightSourceServer.
+  imageSourceServer: ""
+  # Docker Compose injects these PEM files as read-only secrets. The CA file
+  # may contain the self-signed Incus server certificate.
+  clientCertificateFile: /run/secrets/incus_client_cert
+  clientPrivateKeyFile: /run/secrets/incus_client_key
+  caFile: /run/secrets/incus_ca
+  requestTimeoutMs: 10000
+  operationWaitTimeoutMs: 120000
 
 server:
   port: 3001
@@ -14,10 +27,10 @@ server:
 
 branding:
   title: nyabase
-  description: 开发容器管理平台
+  description: Incus system-container management platform
 
 auth:
-  # Required in production. Generate with:
+  # Required in production (>= 32 chars). Empty fails closed. Generate with:
   #   openssl rand -hex 32
   jwtSecret: ""
   jwtExpiresIn: 15m
@@ -35,9 +48,8 @@ database:
   migrationsRun: true
 
 redis:
-  # PostgreSQL remains canonical. Split API/Gateway roles nevertheless require
-  # Redis availability for addressed interactive RPC. Use rediss:// with a
-  # managed/Sentinel-backed endpoint outside this single-node Compose example.
+  # PostgreSQL remains canonical. Redis is disposable acceleration and wake
+  # state; use rediss:// with a managed endpoint outside this example.
   # REDIS_URL takes precedence in the Compose deployment.
   url: "redis://nyabase:CHANGE_ME@redis:6379/0"
   keyPrefix: "nyabase:"
@@ -53,12 +65,17 @@ metrics:
   vmagentUrl: http://vmagent:8429
 
 http:
-  # Required. Generate independently with: openssl rand -hex 32
+  # Required. Empty fails closed. Generate independently with:
+  #   openssl rand -hex 32
   proxyToken: ""
 
 ssh:
+  # Required in production. Empty fails closed. Generate independently with:
+  #   openssl rand -hex 32
+  # Must not reuse auth.jwtSecret.
   keyEncryptionSecret: ""
-  # Required. Generate independently with: openssl rand -hex 32
+  # Required. Empty fails closed. Generate independently with:
+  #   openssl rand -hex 32
   proxyToken: ""
   proxyPublicHost: ""
   proxyPublicPort: 2222

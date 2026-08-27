@@ -2,7 +2,10 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { RedisClientType } from 'redis';
 import type { NyabaseConfigService } from '../config/nyabase-config.service.js';
 import type { RuntimeRoleService } from './runtime-role.service.js';
-import { RedisDisposableAdapter } from './redis-disposable.adapter.js';
+import {
+  RedisDisposableAdapter,
+  TRUST_TOKEN_TTL_MS,
+} from './redis-disposable.adapter.js';
 
 type StoredValue = { value: string; options?: Record<string, unknown> };
 
@@ -72,14 +75,14 @@ function fakeRedis() {
 }
 
 function makeAdapter(
-  role: 'all' | 'api' | 'gateway' | 'worker' = 'api',
+  role: 'all' | 'api' | 'worker' = 'api',
   fake = fakeRedis(),
 ): { adapter: RedisDisposableAdapter; fake: ReturnType<typeof fakeRedis> } {
   const config = {
     get: vi.fn((key: string) => key === 'redis.keyPrefix' ? 'test:' : undefined),
   } as unknown as NyabaseConfigService;
   const runtime = {
-    servesGateway: () => role === 'all' || role === 'gateway',
+    servesProxySockets: () => role === 'all' || role === 'api',
   } as RuntimeRoleService;
   return {
     adapter: new RedisDisposableAdapter(
@@ -104,6 +107,48 @@ describe('RedisDisposableAdapter', () => {
 
     expect(fake.values.get('test:cache:projection-a')?.options).toEqual({ PX: 5_000 });
     expect(fake.client.set).toHaveBeenCalledTimes(1);
+    await adapter.onApplicationShutdown();
+  });
+
+  it('stores trust tokens under opaque references with a ten-minute TTL', async () => {
+    const { adapter, fake } = makeAdapter();
+    const serverId = '00000000-0000-4000-8000-000000000001';
+
+    const reference = await adapter.storeTrustToken(serverId, 'one-time-secret');
+
+    expect(reference).toMatch(/^[0-9a-f-]{36}$/);
+    expect(fake.client.set).toHaveBeenCalledWith(
+      expect.stringMatching(new RegExp(`^test:trust-token:${serverId}:`)),
+      'one-time-secret',
+      { NX: true, PX: TRUST_TOKEN_TTL_MS },
+    );
+    await adapter.onApplicationShutdown();
+  });
+
+  it('atomically consumes a trust token only once and never falls back on Redis failure', async () => {
+    const fake = fakeRedis();
+    fake.client.eval
+      .mockResolvedValueOnce('one-time-secret' as never)
+      .mockResolvedValueOnce(false as never);
+    const { adapter } = makeAdapter('worker', fake);
+    const serverId = '00000000-0000-4000-8000-000000000001';
+    const reference = '00000000-0000-4000-8000-000000000002';
+
+    await expect(adapter.consumeTrustToken(serverId, reference)).resolves.toBe('one-time-secret');
+    await expect(adapter.consumeTrustToken(serverId, reference)).resolves.toBeNull();
+    expect(fake.client.eval).toHaveBeenCalledWith(
+      expect.stringContaining('GET'),
+      {
+        keys: [`test:trust-token:${serverId}:${reference}`],
+        arguments: [],
+      },
+    );
+
+    fake.setAvailable(false);
+    fake.client.isReady = false;
+    fake.client.isOpen = false;
+    await expect(adapter.consumeTrustToken(serverId, reference))
+      .rejects.toThrow('Redis ephemeral state is unavailable');
     await adapter.onApplicationShutdown();
   });
 

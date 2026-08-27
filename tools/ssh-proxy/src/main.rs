@@ -5,8 +5,10 @@ use std::future::Future;
 use std::io::{BufReader, Read};
 use std::net::{Ipv4Addr, Shutdown, SocketAddr};
 use std::path::{Path, PathBuf};
+use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
+use std::task::{Context as PollContext, Poll};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 #[cfg(unix)]
@@ -16,16 +18,12 @@ use anyhow::{Context, Result};
 use arc_swap::ArcSwapOption;
 use futures_util::future::{AbortHandle, AbortRegistration, Abortable};
 use futures_util::{Sink, SinkExt, StreamExt};
-use russh::client::Msg as ClientMsg;
-use russh::keys::key::PrivateKeyWithHashAlg;
 use russh::keys::{decode_secret_key, parse_public_key_base64, HashAlg, PrivateKey, PublicKey};
 use russh::server::{Auth, Msg as ServerMsg, Session};
-use russh::{
-    Channel, ChannelId, ChannelMsg, ChannelReadHalf, ChannelWriteHalf, MethodKind, MethodSet, Pty,
-};
+use russh::{Channel, ChannelId, MethodKind, MethodSet, Pty};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
-use tokio::io;
+use tokio::io::{self, AsyncRead, AsyncWrite, ReadBuf};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{mpsc, watch, Semaphore};
 use tokio::task::JoinSet;
@@ -45,7 +43,6 @@ const MAX_PROXY_CONNECTIONS: usize = 1024;
 const MIN_STATUS_INTERVAL_MS: u64 = 250;
 const MAX_STATUS_INTERVAL_MS: u64 = 60_000;
 const MAX_CHANNELS_PER_CONNECTION: usize = 16;
-const MAX_REMOTE_FORWARDS_PER_CONNECTION: usize = 8;
 const MAX_CHILD_TASKS_PER_CONNECTION: usize = 64;
 const MAX_BACKEND_CA_PEM_BYTES: u64 = 1024 * 1024;
 
@@ -207,6 +204,8 @@ struct ConnectionState {
     channels: AtomicUsize,
     login: Mutex<Option<String>>,
     authenticated_public_key: Mutex<Option<PublicKey>>,
+    authenticated_user_id: Mutex<Option<String>>,
+    authenticated_username: Mutex<Option<String>>,
     route: Mutex<Option<ConnectionRouteInfo>>,
     abort_handle: AbortHandle,
     revoked: AtomicBool,
@@ -265,12 +264,9 @@ struct ConnectionRouteInfo {
     server_slug: String,
     container_id: String,
     container_name: String,
-    runtime_id: String,
-    macvlan_ip: String,
-    internal_key_generation: u64,
-    internal_key_fingerprint: String,
-    internal_private_key_identity: String,
-    container_host_key_fingerprint: String,
+    instance_name: String,
+    routed_ip: String,
+    container_host_key_fingerprint: Option<String>,
 }
 
 impl ConnectionRouteInfo {
@@ -281,11 +277,8 @@ impl ConnectionRouteInfo {
             && self.server_slug == route.server_slug
             && self.container_id == route.container_id
             && self.container_name == route.container_name
-            && self.runtime_id == route.runtime_id
-            && self.macvlan_ip == route.macvlan_ip
-            && self.internal_key_generation == route.internal_key_generation
-            && self.internal_key_fingerprint == route.internal_key_fingerprint
-            && self.internal_private_key_identity == route.internal_private_key_identity
+            && self.instance_name == route.instance_name
+            && self.routed_ip == route.routed_ip
             && self.container_host_key_fingerprint == route.container_host_key_fingerprint
     }
 }
@@ -322,7 +315,8 @@ struct SshProxyConnectionInfo {
     server_id: Option<String>,
     container_name: Option<String>,
     container_id: Option<String>,
-    runtime_id: Option<String>,
+    instance_name: Option<String>,
+    routed_ip: Option<String>,
     connected_at: u64,
     authenticated_at: Option<u64>,
     bytes_from_client: u64,
@@ -533,6 +527,8 @@ impl ConnectionState {
                 channels: AtomicUsize::new(0),
                 login: Mutex::new(None),
                 authenticated_public_key: Mutex::new(None),
+                authenticated_user_id: Mutex::new(None),
+                authenticated_username: Mutex::new(None),
                 route: Mutex::new(None),
                 abort_handle,
                 revoked: AtomicBool::new(false),
@@ -595,9 +591,33 @@ impl ConnectionState {
         lock(&self.child_abort_handles).remove(&id);
     }
 
-    fn set_authenticated(&self, login: &str, public_key: &PublicKey, route: &OwnedResolvedRoute) {
+    fn set_authenticated(
+        &self,
+        login: &str,
+        public_key: &PublicKey,
+        user_id: &str,
+        username: &str,
+        route: Option<&OwnedResolvedRoute>,
+    ) {
         *lock(&self.login) = Some(login.to_string());
         *lock(&self.authenticated_public_key) = Some(public_key.clone());
+        *lock(&self.authenticated_user_id) = Some(user_id.to_string());
+        *lock(&self.authenticated_username) = Some(username.to_string());
+        *lock(&self.route) = route.map(|route| ConnectionRouteInfo {
+            user_id: route.user_id.clone(),
+            username: route.username.clone(),
+            server_id: route.server_id.clone(),
+            server_slug: route.server_slug.clone(),
+            container_id: route.container_id.clone(),
+            container_name: route.container_name.clone(),
+            instance_name: route.instance_name.clone(),
+            routed_ip: route.routed_ip.clone(),
+            container_host_key_fingerprint: route.container_host_key_fingerprint.clone(),
+        });
+        self.authenticated_at.store(now_ms(), Ordering::Relaxed);
+    }
+
+    fn set_route(&self, route: &OwnedResolvedRoute) {
         *lock(&self.route) = Some(ConnectionRouteInfo {
             user_id: route.user_id.clone(),
             username: route.username.clone(),
@@ -605,14 +625,10 @@ impl ConnectionState {
             server_slug: route.server_slug.clone(),
             container_id: route.container_id.clone(),
             container_name: route.container_name.clone(),
-            runtime_id: route.runtime_id.clone(),
-            macvlan_ip: route.macvlan_ip.clone(),
-            internal_key_generation: route.internal_key_generation,
-            internal_key_fingerprint: route.internal_key_fingerprint.clone(),
-            internal_private_key_identity: route.internal_private_key_identity.clone(),
+            instance_name: route.instance_name.clone(),
+            routed_ip: route.routed_ip.clone(),
             container_host_key_fingerprint: route.container_host_key_fingerprint.clone(),
         });
-        self.authenticated_at.store(now_ms(), Ordering::Relaxed);
     }
 
     fn authorization_matches(&self, snapshot: Option<&RoutingSnapshot>) -> bool {
@@ -628,14 +644,21 @@ impl ConnectionState {
         let Some(public_key) = lock(&self.authenticated_public_key).clone() else {
             return false;
         };
-        let Some(expected) = lock(&self.route).clone() else {
+        let Some(user_id) = lock(&self.authenticated_user_id).clone() else {
             return false;
         };
-        let login = login.expect("checked above");
-        if !snapshot.public_key_allowed(&login, &public_key) {
+        let Ok(user) = snapshot.find_active_user_by_public_key(&public_key) else {
+            return false;
+        };
+        if user.id != user_id {
             return false;
         }
-        resolve_owned_route(snapshot, &login).is_ok_and(|current| expected.matches(&current))
+        if let Some(expected) = lock(&self.route).clone() {
+            return snapshot
+                .resolve_owned_route_for_user_ip(&user_id, &expected.routed_ip)
+                .is_ok_and(|current| expected.matches(&current));
+        }
+        true
     }
 
     fn record_from_client(&self, bytes: usize) {
@@ -666,13 +689,17 @@ impl ConnectionState {
         SshProxyConnectionInfo {
             id: self.id.clone(),
             peer: self.peer.clone(),
-            username: route.as_ref().map(|route| route.username.clone()),
+            username: route
+                .as_ref()
+                .map(|route| route.username.clone())
+                .or_else(|| lock(&self.authenticated_username).clone()),
             login: lock(&self.login).clone(),
             server_slug: route.as_ref().map(|route| route.server_slug.clone()),
             server_id: route.as_ref().map(|route| route.server_id.clone()),
             container_name: route.as_ref().map(|route| route.container_name.clone()),
             container_id: route.as_ref().map(|route| route.container_id.clone()),
-            runtime_id: route.as_ref().map(|route| route.runtime_id.clone()),
+            instance_name: route.as_ref().map(|route| route.instance_name.clone()),
+            routed_ip: route.as_ref().map(|route| route.routed_ip.clone()),
             connected_at: self.connected_at,
             authenticated_at,
             bytes_from_client: self.bytes_from_client.load(Ordering::Relaxed),
@@ -1425,26 +1452,23 @@ struct ProxyUser {
     username: String,
     status: String,
     public_keys: Vec<String>,
-    internal_private_key: String,
-    internal_public_key: String,
-    internal_key_fingerprint: String,
-    internal_key_generation: u64,
 }
 
 #[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 #[allow(dead_code)]
 struct ProxyServer {
     id: String,
     slug: String,
     name: String,
-    online: bool,
+    status: String,
 }
 
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct ProxyImage {
     id: String,
-    disable_ssh: bool,
+    ssh_enabled: bool,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -1455,6 +1479,7 @@ struct ProxyContainer {
     server_id: String,
     image_id: String,
     name: String,
+    instance_name: String,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -1463,11 +1488,10 @@ struct ProxyContainer {
 struct ProxyRoute {
     container_id: String,
     server_id: String,
-    runtime_id: String,
-    macvlan_ip: Option<String>,
-    runtime_status: String,
+    instance_name: String,
+    routed_ip: Option<String>,
+    status: String,
     ssh_status: String,
-    applied_internal_key_generation: Option<u64>,
     container_host_key_fingerprint: Option<String>,
     observed_at: String,
 }
@@ -1491,29 +1515,16 @@ struct RoutingUser {
     username: String,
     status: String,
     public_keys: Vec<String>,
-    internal_private_key: Arc<PrivateKey>,
-    internal_private_key_identity: String,
-    internal_key_fingerprint: String,
-    internal_key_generation: u64,
 }
 
 impl RoutingUser {
-    fn from_proxy(user: ProxyUser) -> Result<Self> {
-        let private_key =
-            decode_secret_key(&user.internal_private_key, None).with_context(|| {
-                format!("failed to parse internal private key for user {}", user.id)
-            })?;
-        let internal_private_key_identity = ssh_sha256_fingerprint(private_key.public_key());
-        Ok(Self {
+    fn from_proxy(user: ProxyUser) -> Self {
+        Self {
             id: user.id,
             username: user.username,
             status: user.status,
             public_keys: user.public_keys,
-            internal_private_key: Arc::new(private_key),
-            internal_private_key_identity,
-            internal_key_fingerprint: user.internal_key_fingerprint,
-            internal_key_generation: user.internal_key_generation,
-        })
+        }
     }
 }
 
@@ -1530,7 +1541,7 @@ impl RoutingSnapshot {
             .users
             .into_iter()
             .map(RoutingUser::from_proxy)
-            .collect::<Result<Vec<_>>>()?;
+            .collect::<Vec<_>>();
         Ok(Self {
             generation: snapshot.generation,
             deadline,
@@ -1593,18 +1604,18 @@ impl RoutingSnapshot {
             if !container.name.eq_ignore_ascii_case(&parsed.container_name) {
                 continue;
             }
-            if self
+            if !self
                 .images_by_id
                 .get(&container.image_id)
-                .map(|image| image.disable_ssh)
-                .unwrap_or(true)
+                .map(|image| image.ssh_enabled)
+                .unwrap_or(false)
             {
                 continue;
             }
             let Some(server) = self.servers_by_id.get(&container.server_id) else {
                 continue;
             };
-            if !server.online {
+            if !server.status.eq_ignore_ascii_case("online") {
                 continue;
             }
             if let Some(server_slug) = &parsed.server_slug {
@@ -1618,7 +1629,10 @@ impl RoutingSnapshot {
             if route.server_id != container.server_id {
                 continue;
             }
-            if !route.is_active_for(user.internal_key_generation) {
+            if route.instance_name != container.instance_name {
+                continue;
+            }
+            if !route.is_active() {
                 continue;
             }
             candidates.push(ResolvedRoute {
@@ -1637,30 +1651,107 @@ impl RoutingSnapshot {
         }
     }
 
-    fn public_key_allowed(&self, login: &str, public_key: &PublicKey) -> bool {
-        let RouteResolution::Accepted(route) = self.resolve_login(login) else {
-            return false;
-        };
-        route
-            .user
-            .public_keys
+    fn public_key_allowed(&self, _login: &str, public_key: &PublicKey) -> bool {
+        self.find_active_user_by_public_key(public_key).is_ok()
+    }
+
+    fn find_active_user_by_public_key<'a>(
+        &'a self,
+        public_key: &PublicKey,
+    ) -> Result<&'a RoutingUser, RejectReason> {
+        let mut matches = self
+            .users
             .iter()
-            .any(|key| parse_authorized_key(key).is_some_and(|allowed| allowed == *public_key))
+            .filter(|user| {
+                user.status == "active"
+                    && user.public_keys.iter().any(|key| {
+                        parse_authorized_key(key).is_some_and(|allowed| allowed == *public_key)
+                    })
+            })
+            .collect::<Vec<_>>();
+        match matches.len() {
+            0 => Err(RejectReason::PublicKeyRejected),
+            1 => Ok(matches.remove(0)),
+            _ => Err(RejectReason::AmbiguousUser),
+        }
+    }
+
+    fn resolve_owned_route_for_user_ip(
+        &self,
+        user_id: &str,
+        routed_ip: &str,
+    ) -> Result<OwnedResolvedRoute, RejectReason> {
+        let mut candidates = Vec::new();
+        for container in &self.containers {
+            if container.owner_id != user_id {
+                continue;
+            }
+            if !self
+                .images_by_id
+                .get(&container.image_id)
+                .map(|image| image.ssh_enabled)
+                .unwrap_or(false)
+            {
+                continue;
+            }
+            let Some(server) = self.servers_by_id.get(&container.server_id) else {
+                continue;
+            };
+            if !server.status.eq_ignore_ascii_case("online") {
+                continue;
+            }
+            let Some(route) = self.routes_by_container_id.get(&container.id) else {
+                continue;
+            };
+            if route.server_id != container.server_id {
+                continue;
+            }
+            if route.instance_name != container.instance_name {
+                continue;
+            }
+            if !route.is_active() {
+                continue;
+            }
+            let Some(ip) = route.routed_ip.as_deref() else {
+                continue;
+            };
+            if ip != routed_ip {
+                continue;
+            }
+            candidates.push(OwnedResolvedRoute {
+                user_id: user_id.to_string(),
+                username: self
+                    .users
+                    .iter()
+                    .find(|user| user.id == user_id)
+                    .map(|user| user.username.clone())
+                    .unwrap_or_default(),
+                server_id: server.id.clone(),
+                server_slug: server.slug.clone(),
+                container_id: container.id.clone(),
+                container_name: container.name.clone(),
+                instance_name: route.instance_name.clone(),
+                routed_ip: ip.to_string(),
+                container_host_key_fingerprint: route.container_host_key_fingerprint.clone(),
+            });
+        }
+        match candidates.len() {
+            0 => Err(RejectReason::RouteNotFound),
+            1 => Ok(candidates.remove(0)),
+            _ => Err(RejectReason::AmbiguousContainer),
+        }
     }
 }
 
 impl ProxyRoute {
-    fn is_active_for(&self, expected_key_generation: u64) -> bool {
-        self.macvlan_ip
-            .as_deref()
-            .is_some_and(is_routable_container_ipv4)
-            && self.runtime_status == "running"
-            && self.ssh_status == "running"
-            && self.applied_internal_key_generation == Some(expected_key_generation)
+    fn is_active(&self) -> bool {
+        !self.instance_name.is_empty()
             && self
-                .container_host_key_fingerprint
+                .routed_ip
                 .as_deref()
-                .is_some_and(is_sha256_fingerprint)
+                .is_some_and(is_routable_container_ipv4)
+            && self.status.eq_ignore_ascii_case("running")
+            && self.ssh_status == "running"
     }
 }
 
@@ -1747,6 +1838,10 @@ enum RejectReason {
     RouteNotFound,
     #[error("ambiguous container")]
     AmbiguousContainer,
+    #[error("public key rejected")]
+    PublicKeyRejected,
+    #[error("ambiguous user")]
+    AmbiguousUser,
 }
 
 impl RejectReason {
@@ -1758,6 +1853,8 @@ impl RejectReason {
             Self::ServerNotFound => "server_not_found",
             Self::RouteNotFound => "route_not_found",
             Self::AmbiguousContainer => "ambiguous_container",
+            Self::PublicKeyRejected => "public_key_rejected",
+            Self::AmbiguousUser => "ambiguous_user",
         }
     }
 }
@@ -1777,8 +1874,6 @@ struct ProxySshSession {
     authenticated_login: Option<String>,
     authenticated_public_key: Option<PublicKey>,
     resolved_route: Option<OwnedResolvedRoute>,
-    channels: HashMap<ChannelId, UpstreamChannel>,
-    remote_forwards: HashMap<ForwardKey, russh::client::Handle<ContainerClient>>,
 }
 
 #[derive(Clone, Debug)]
@@ -1789,13 +1884,9 @@ struct OwnedResolvedRoute {
     server_slug: String,
     container_id: String,
     container_name: String,
-    runtime_id: String,
-    macvlan_ip: String,
-    internal_private_key: Arc<PrivateKey>,
-    internal_private_key_identity: String,
-    internal_key_generation: u64,
-    internal_key_fingerprint: String,
-    container_host_key_fingerprint: String,
+    instance_name: String,
+    routed_ip: String,
+    container_host_key_fingerprint: Option<String>,
 }
 
 impl OwnedResolvedRoute {
@@ -1806,11 +1897,8 @@ impl OwnedResolvedRoute {
             && self.server_slug == other.server_slug
             && self.container_id == other.container_id
             && self.container_name == other.container_name
-            && self.runtime_id == other.runtime_id
-            && self.macvlan_ip == other.macvlan_ip
-            && self.internal_private_key_identity == other.internal_private_key_identity
-            && self.internal_key_generation == other.internal_key_generation
-            && self.internal_key_fingerprint == other.internal_key_fingerprint
+            && self.instance_name == other.instance_name
+            && self.routed_ip == other.routed_ip
             && self.container_host_key_fingerprint == other.container_host_key_fingerprint
     }
 }
@@ -1827,38 +1915,12 @@ fn resolve_owned_route(
             server_slug: route.server.slug.clone(),
             container_id: route.container.id.clone(),
             container_name: route.container.name.clone(),
-            runtime_id: route.route.runtime_id.clone(),
-            macvlan_ip: route.route.macvlan_ip.clone().unwrap_or_default(),
-            internal_private_key: route.user.internal_private_key.clone(),
-            internal_private_key_identity: route.user.internal_private_key_identity.clone(),
-            internal_key_generation: route.user.internal_key_generation,
-            internal_key_fingerprint: route.user.internal_key_fingerprint.clone(),
-            container_host_key_fingerprint: route
-                .route
-                .container_host_key_fingerprint
-                .clone()
-                .expect("active SSH route must carry a validated host-key fingerprint"),
+            instance_name: route.route.instance_name.clone(),
+            routed_ip: route.route.routed_ip.clone().unwrap_or_default(),
+            container_host_key_fingerprint: route.route.container_host_key_fingerprint.clone(),
         }),
         RouteResolution::Rejected(reason) => Err(reason),
     }
-}
-
-struct UpstreamChannel {
-    upstream_handle: russh::client::Handle<ContainerClient>,
-    upstream_write: Arc<ChannelWriteHalf<ClientMsg>>,
-}
-
-#[derive(Clone, Debug, Eq, Hash, PartialEq)]
-struct ForwardKey {
-    address: String,
-    port: u32,
-}
-
-struct ContainerClient {
-    client_handle: russh::server::Handle,
-    peer: SocketAddr,
-    connection: Arc<ConnectionState>,
-    expected_host_key_fingerprint: String,
 }
 
 impl ProxySshSession {
@@ -1878,8 +1940,6 @@ impl ProxySshSession {
             authenticated_login: None,
             authenticated_public_key: None,
             resolved_route: None,
-            channels: HashMap::new(),
-            remote_forwards: HashMap::new(),
         }
     }
 
@@ -1887,166 +1947,40 @@ impl ProxySshSession {
         self.store.load().filter(|snapshot| snapshot.is_fresh())
     }
 
-    fn authorized_route(&self) -> Result<OwnedResolvedRoute> {
-        let login = self
-            .authenticated_login
-            .as_deref()
-            .context("SSH proxy session is not authenticated")?;
+    fn authorized_user_id(&self) -> Result<String> {
         let public_key = self
             .authenticated_public_key
             .as_ref()
             .context("SSH proxy session has no authenticated public key")?;
-        let expected = self
-            .resolved_route
-            .as_ref()
-            .context("SSH proxy session has no authenticated route")?;
+        let expected_user_id = lock(&self.connection.authenticated_user_id)
+            .clone()
+            .context("SSH proxy session has no authenticated user")?;
         let snapshot = self
             .latest_snapshot()
             .context("no fresh SSH proxy snapshot is installed")?;
-        if !snapshot.public_key_allowed(login, public_key) {
-            anyhow::bail!("SSH proxy authorization was revoked");
-        }
-        let current = resolve_owned_route(&snapshot, login)
+        let user = snapshot
+            .find_active_user_by_public_key(public_key)
             .map_err(|reason| anyhow::anyhow!(reason.to_string()))?;
-        if !current.same_authority(expected) {
-            anyhow::bail!("SSH proxy route authorization changed");
+        if user.id != expected_user_id {
+            anyhow::bail!("SSH proxy user authorization changed");
         }
-        Ok(current)
+        Ok(user.id.clone())
     }
 
-    async fn connect_upstream(
-        &self,
-        client_handle: russh::server::Handle,
-    ) -> Result<Option<russh::client::Handle<ContainerClient>>> {
-        let route = self.authorized_route()?;
-        let address = format!("{}:22", route.macvlan_ip);
-        let client_config = Arc::new(russh::client::Config {
-            inactivity_timeout: Some(Duration::from_secs(600)),
-            keepalive_interval: Some(Duration::from_secs(30)),
-            ..Default::default()
-        });
-        let client_handler = ContainerClient {
-            client_handle,
-            peer: self.peer,
-            connection: self.connection.clone(),
-            expected_host_key_fingerprint: route.container_host_key_fingerprint.clone(),
-        };
-        let mut upstream = tokio::time::timeout(
-            self.config.route_connect_timeout,
-            russh::client::connect(client_config, address, client_handler),
-        )
-        .await
-        .context("timed out connecting to container SSH route")??;
-        let auth = upstream
-            .authenticate_publickey(
-                "root",
-                PrivateKeyWithHashAlg::new(
-                    route.internal_private_key.clone(),
-                    upstream.best_supported_rsa_hash().await?.flatten(),
-                ),
-            )
-            .await?;
-        if !auth.success() {
-            anyhow::bail!("container internal key authentication failed");
-        }
-        if !self.authorized_route()?.same_authority(&route) {
-            let _ = upstream
-                .disconnect(
-                    russh::Disconnect::ByApplication,
-                    "SSH proxy authorization changed",
-                    "",
-                )
-                .await;
-            anyhow::bail!("SSH proxy authorization changed while connecting upstream");
-        }
-        debug!(
-            peer = %self.peer,
-            username = %route.username,
-            container_id = %route.container_id,
-            container_name = %route.container_name,
-            runtime_id = %route.runtime_id,
-            "authenticated upstream container SSH route"
-        );
-        Ok(Some(upstream))
-    }
-
-    async fn open_upstream_channel(
-        &mut self,
-        channel_id: ChannelId,
-        session: &mut Session,
-    ) -> Result<Option<Arc<ChannelWriteHalf<ClientMsg>>>> {
-        if let Some(existing) = self.channels.get(&channel_id) {
-            return Ok(Some(existing.upstream_write.clone()));
-        }
-        if self.channels.len() >= MAX_CHANNELS_PER_CONNECTION {
-            warn!(peer = %self.peer, channel = ?channel_id, "SSH session channel limit reached");
-            emit_metric(
-                &self.telemetry,
-                "ssh_proxy_channels_total",
-                vec![
-                    ("kind", "session".to_string()),
-                    ("result", "rejected_limit".to_string()),
-                ],
-                1.0,
-            );
-            let _ = session.handle().close(channel_id).await;
-            return Ok(None);
-        }
-        let Some(relay_permit) = self.connection.try_reserve_child_task() else {
-            warn!(peer = %self.peer, channel = ?channel_id, "SSH child task limit reached");
-            emit_metric(
-                &self.telemetry,
-                "ssh_proxy_channels_total",
-                vec![
-                    ("kind", "session".to_string()),
-                    ("result", "rejected_child_limit".to_string()),
-                ],
-                1.0,
-            );
-            let _ = session.handle().close(channel_id).await;
-            return Ok(None);
-        };
-
-        let Some(upstream) = self.connect_upstream(session.handle()).await? else {
-            let _ = session.handle().close(channel_id).await;
-            return Ok(None);
-        };
-        let channel = upstream.channel_open_session().await?;
-        let upstream_channel_id = channel.id();
-        let (upstream_read, upstream_write) = channel.split();
-        let upstream_write = Arc::new(upstream_write);
-        spawn_upstream_relay(
-            relay_permit,
-            channel_id,
-            session.handle(),
-            upstream_read,
-            self.connection.clone(),
-        );
-        self.channels.insert(
-            channel_id,
-            UpstreamChannel {
-                upstream_handle: upstream,
-                upstream_write: upstream_write.clone(),
-            },
-        );
-        debug!(
-            peer = %self.peer,
-            channel = ?channel_id,
-            upstream_channel = ?upstream_channel_id,
-            "opened upstream SSH channel"
-        );
-        Ok(Some(upstream_write))
-    }
-
-    fn upstream_for(&self, channel_id: ChannelId) -> Option<Arc<ChannelWriteHalf<ClientMsg>>> {
-        self.channels
-            .get(&channel_id)
-            .map(|channel| channel.upstream_write.clone())
+    fn authorized_route_for_target(&self, routed_ip: &str) -> Result<OwnedResolvedRoute> {
+        let user_id = self.authorized_user_id()?;
+        let snapshot = self
+            .latest_snapshot()
+            .context("no fresh SSH proxy snapshot is installed")?;
+        snapshot
+            .resolve_owned_route_for_user_ip(&user_id, routed_ip)
+            .map_err(|reason| anyhow::anyhow!(reason.to_string()))
     }
 
     fn emit_login_audit(
         &self,
         login: &str,
+        username: Option<&str>,
         route: Option<&OwnedResolvedRoute>,
         ok: bool,
         reason: Option<&str>,
@@ -2054,10 +1988,13 @@ impl ProxySshSession {
         emit_audit(
             &self.telemetry,
             SshProxyAuditEvent {
-                user_id: route.map(|route| route.user_id.clone()),
+                user_id: route
+                    .map(|route| route.user_id.clone())
+                    .or_else(|| lock(&self.connection.authenticated_user_id).clone()),
                 username: Some(
                     route
                         .map(|route| route.username.clone())
+                        .or_else(|| username.map(str::to_string))
                         .unwrap_or_else(|| login.to_string()),
                 ),
                 container_id: route.map(|route| route.container_id.clone()),
@@ -2111,126 +2048,108 @@ impl russh::server::Handler for ProxySshSession {
         public_key: &PublicKey,
     ) -> Result<Auth, Self::Error> {
         let Some(snapshot) = self.latest_snapshot() else {
-            self.emit_login_audit(user, None, false, Some("snapshot_unavailable"));
+            self.emit_login_audit(user, None, None, false, Some("snapshot_unavailable"));
             return Ok(Auth::reject());
         };
-        if !snapshot.public_key_allowed(user, public_key) {
-            warn!(peer = %self.peer, login = user, "SSH proxy public key rejected");
-            self.emit_login_audit(user, None, false, Some("public_key_rejected"));
-            return Ok(Auth::reject());
-        }
-        match resolve_owned_route(&snapshot, user) {
-            Ok(route) => {
-                info!(
-                    peer = %self.peer,
-                    login = user,
-                    container_id = %route.container_id,
-                    server_slug = %route.server_slug,
-                    "SSH proxy login authenticated"
-                );
-                self.emit_login_audit(user, Some(&route), true, None);
-                self.connection.set_authenticated(user, public_key, &route);
-                emit_metric(
-                    &self.telemetry,
-                    "ssh_proxy_logins_total",
-                    vec![
-                        ("result", "accepted".to_string()),
-                        ("server_slug", route.server_slug.clone()),
-                    ],
-                    1.0,
-                );
-                self.authenticated_login = Some(user.to_string());
-                self.authenticated_public_key = Some(public_key.clone());
-                self.resolved_route = Some(route);
-                Ok(Auth::Accept)
-            }
+        let user_row = match snapshot.find_active_user_by_public_key(public_key) {
+            Ok(user_row) => user_row,
             Err(reason) => {
-                warn!(peer = %self.peer, login = user, %reason, "SSH proxy route rejected");
-                self.emit_login_audit(user, None, false, Some(reason.code()));
-                emit_metric(
-                    &self.telemetry,
-                    "ssh_proxy_logins_total",
-                    vec![("result", reason.code().to_string())],
-                    1.0,
-                );
-                Ok(Auth::reject())
+                warn!(peer = %self.peer, login = user, %reason, "SSH proxy public key rejected");
+                self.emit_login_audit(user, None, None, false, Some(reason.code()));
+                return Ok(Auth::reject());
             }
-        }
+        };
+        // Prefer a jump-format login that resolves to a container owned by the
+        // key holder; otherwise accept any SSH username and bind the route later
+        // on direct-tcpip using the target IP.
+        let pinned_route = resolve_owned_route(&snapshot, user)
+            .ok()
+            .filter(|route| route.user_id == user_row.id);
+        info!(
+            peer = %self.peer,
+            login = user,
+            username = %user_row.username,
+            container_id = pinned_route
+                .as_ref()
+                .map(|route| route.container_id.as_str())
+                .unwrap_or("-"),
+            "SSH proxy login authenticated"
+        );
+        self.emit_login_audit(
+            user,
+            Some(&user_row.username),
+            pinned_route.as_ref(),
+            true,
+            None,
+        );
+        self.connection.set_authenticated(
+            user,
+            public_key,
+            &user_row.id,
+            &user_row.username,
+            pinned_route.as_ref(),
+        );
+        emit_metric(
+            &self.telemetry,
+            "ssh_proxy_logins_total",
+            vec![
+                ("result", "accepted".to_string()),
+                (
+                    "server_slug",
+                    pinned_route
+                        .as_ref()
+                        .map(|route| route.server_slug.clone())
+                        .unwrap_or_else(|| "unbound".to_string()),
+                ),
+            ],
+            1.0,
+        );
+        self.authenticated_login = Some(user.to_string());
+        self.authenticated_public_key = Some(public_key.clone());
+        self.resolved_route = pinned_route;
+        Ok(Auth::Accept)
     }
 
     async fn channel_open_session(
         &mut self,
-        channel: Channel<ServerMsg>,
-        session: &mut Session,
+        _channel: Channel<ServerMsg>,
+        _session: &mut Session,
     ) -> Result<bool, Self::Error> {
-        let channel_id = channel.id();
-        match self.open_upstream_channel(channel_id, session).await {
-            Ok(Some(_upstream)) => {
-                self.connection.channel_opened();
-                Ok(true)
-            }
-            Ok(None) => Ok(false),
-            Err(error) => {
-                warn!(peer = %self.peer, channel = ?channel_id, %error, "failed to open upstream SSH channel");
-                emit_metric(
-                    &self.telemetry,
-                    "ssh_proxy_channels_total",
-                    vec![
-                        ("kind", "session".to_string()),
-                        ("result", "open_failed".to_string()),
-                    ],
-                    1.0,
-                );
-                Ok(false)
-            }
-        }
+        emit_metric(
+            &self.telemetry,
+            "ssh_proxy_channels_total",
+            vec![
+                ("kind", "session".to_string()),
+                ("result", "rejected".to_string()),
+            ],
+            1.0,
+        );
+        Ok(false)
     }
 
     async fn pty_request(
         &mut self,
         channel: ChannelId,
-        term: &str,
-        col_width: u32,
-        row_height: u32,
-        pix_width: u32,
-        pix_height: u32,
-        modes: &[(Pty, u32)],
+        _term: &str,
+        _col_width: u32,
+        _row_height: u32,
+        _pix_width: u32,
+        _pix_height: u32,
+        _modes: &[(Pty, u32)],
         session: &mut Session,
     ) -> Result<(), Self::Error> {
-        let Some(upstream) = self.open_upstream_channel(channel, session).await? else {
-            session.channel_failure(channel)?;
-            return Ok(());
-        };
-        upstream
-            .request_pty(
-                true, term, col_width, row_height, pix_width, pix_height, modes,
-            )
-            .await?;
+        session.channel_failure(channel)?;
         Ok(())
     }
 
     async fn env_request(
         &mut self,
         channel: ChannelId,
-        variable_name: &str,
-        variable_value: &str,
+        _variable_name: &str,
+        _variable_value: &str,
         session: &mut Session,
     ) -> Result<(), Self::Error> {
-        let Some(upstream) = self.open_upstream_channel(channel, session).await? else {
-            session.channel_failure(channel)?;
-            return Ok(());
-        };
-        // OpenSSH sends SendEnv requests with want_reply=false. russh's server
-        // Handler API intentionally hides that bit and remembers it inside the
-        // Session. Asking the upstream for a reply here would therefore create
-        // an unpaired Success/Failure message. If a later exec request arrived
-        // before that message, the relay could satisfy (or fail) the exec with
-        // the environment reply. Forward env as fire-and-forget and let russh
-        // emit success only when the original client actually requested one.
-        upstream
-            .set_env(false, variable_name, variable_value)
-            .await?;
-        session.channel_success(channel)?;
+        session.channel_failure(channel)?;
         Ok(())
     }
 
@@ -2239,56 +2158,39 @@ impl russh::server::Handler for ProxySshSession {
         channel: ChannelId,
         session: &mut Session,
     ) -> Result<(), Self::Error> {
-        let Some(upstream) = self.open_upstream_channel(channel, session).await? else {
-            session.channel_failure(channel)?;
-            return Ok(());
-        };
-        upstream.request_shell(true).await?;
+        session.channel_failure(channel)?;
         Ok(())
     }
 
     async fn exec_request(
         &mut self,
         channel: ChannelId,
-        data: &[u8],
+        _data: &[u8],
         session: &mut Session,
     ) -> Result<(), Self::Error> {
-        let Some(upstream) = self.open_upstream_channel(channel, session).await? else {
-            session.channel_failure(channel)?;
-            return Ok(());
-        };
-        upstream.exec(true, data.to_vec()).await?;
+        session.channel_failure(channel)?;
         Ok(())
     }
 
     async fn subsystem_request(
         &mut self,
         channel: ChannelId,
-        name: &str,
+        _name: &str,
         session: &mut Session,
     ) -> Result<(), Self::Error> {
-        let Some(upstream) = self.open_upstream_channel(channel, session).await? else {
-            session.channel_failure(channel)?;
-            return Ok(());
-        };
-        upstream.request_subsystem(true, name).await?;
+        session.channel_failure(channel)?;
         Ok(())
     }
 
     async fn window_change_request(
         &mut self,
-        channel: ChannelId,
-        col_width: u32,
-        row_height: u32,
-        pix_width: u32,
-        pix_height: u32,
+        _channel: ChannelId,
+        _col_width: u32,
+        _row_height: u32,
+        _pix_width: u32,
+        _pix_height: u32,
         _session: &mut Session,
     ) -> Result<(), Self::Error> {
-        if let Some(upstream) = self.upstream_for(channel) {
-            upstream
-                .window_change(col_width, row_height, pix_width, pix_height)
-                .await?;
-        }
         Ok(())
     }
 
@@ -2297,69 +2199,42 @@ impl russh::server::Handler for ProxySshSession {
         channel: ChannelId,
         session: &mut Session,
     ) -> Result<bool, Self::Error> {
-        let Some(upstream) = self.open_upstream_channel(channel, session).await? else {
-            session.channel_failure(channel)?;
-            return Ok(false);
-        };
-        upstream.agent_forward(true).await?;
-        Ok(true)
+        session.channel_failure(channel)?;
+        Ok(false)
     }
 
     async fn data(
         &mut self,
-        channel: ChannelId,
-        data: &[u8],
+        _channel: ChannelId,
+        _data: &[u8],
         _session: &mut Session,
     ) -> Result<(), Self::Error> {
-        self.connection.record_from_client(data.len());
-        if let Some(upstream) = self.upstream_for(channel) {
-            let _ = upstream.data_bytes(data.to_vec()).await;
-        }
         Ok(())
     }
 
     async fn extended_data(
         &mut self,
-        channel: ChannelId,
-        code: u32,
-        data: &[u8],
+        _channel: ChannelId,
+        _code: u32,
+        _data: &[u8],
         _session: &mut Session,
     ) -> Result<(), Self::Error> {
-        self.connection.record_from_client(data.len());
-        if let Some(upstream) = self.upstream_for(channel) {
-            upstream.extended_data_bytes(code, data.to_vec()).await?;
-        }
         Ok(())
     }
 
     async fn channel_eof(
         &mut self,
-        channel: ChannelId,
+        _channel: ChannelId,
         _session: &mut Session,
     ) -> Result<(), Self::Error> {
-        if let Some(upstream) = self.upstream_for(channel) {
-            let _ = upstream.eof().await;
-        }
         Ok(())
     }
 
     async fn channel_close(
         &mut self,
-        channel: ChannelId,
+        _channel: ChannelId,
         _session: &mut Session,
     ) -> Result<(), Self::Error> {
-        if let Some(upstream) = self.channels.remove(&channel) {
-            self.connection.channel_closed();
-            let _ = upstream.upstream_write.close().await;
-            let _ = upstream
-                .upstream_handle
-                .disconnect(
-                    russh::Disconnect::ByApplication,
-                    "client channel closed",
-                    "",
-                )
-                .await;
-        }
         Ok(())
     }
 
@@ -2370,11 +2245,71 @@ impl russh::server::Handler for ProxySshSession {
         port_to_connect: u32,
         originator_address: &str,
         originator_port: u32,
-        session: &mut Session,
+        _session: &mut Session,
     ) -> Result<bool, Self::Error> {
         let peer = self.peer;
-        let Some(bridge_permit) = self.connection.try_reserve_child_task() else {
-            warn!(%peer, "SSH direct-tcpip child task limit reached");
+        if port_to_connect != 22 {
+            warn!(
+                %peer,
+                target = %format!("{host_to_connect}:{port_to_connect}"),
+                "direct-tcpip target outside PermitOpen"
+            );
+            emit_metric(
+                &self.telemetry,
+                "ssh_proxy_channels_total",
+                vec![
+                    ("kind", "direct_tcpip".to_string()),
+                    ("result", "rejected_permit".to_string()),
+                ],
+                1.0,
+            );
+            let _ = channel.close().await;
+            return Ok(false);
+        }
+
+        let route = match self.authorized_route_for_target(host_to_connect) {
+            Ok(route) => route,
+            Err(error) => {
+                warn!(%peer, %error, target = %host_to_connect, "direct-tcpip rejected: unauthorized");
+                emit_metric(
+                    &self.telemetry,
+                    "ssh_proxy_channels_total",
+                    vec![
+                        ("kind", "direct_tcpip".to_string()),
+                        ("result", "rejected_unauthorized".to_string()),
+                    ],
+                    1.0,
+                );
+                let _ = channel.close().await;
+                return Ok(false);
+            }
+        };
+        self.connection.set_route(&route);
+        self.resolved_route = Some(route.clone());
+
+        if host_to_connect != route.routed_ip {
+            warn!(
+                %peer,
+                target = %format!("{host_to_connect}:{port_to_connect}"),
+                permitted = %format!("{}:22", route.routed_ip),
+                originator = %format!("{originator_address}:{originator_port}"),
+                "direct-tcpip target outside PermitOpen"
+            );
+            emit_metric(
+                &self.telemetry,
+                "ssh_proxy_channels_total",
+                vec![
+                    ("kind", "direct_tcpip".to_string()),
+                    ("result", "rejected_permit".to_string()),
+                ],
+                1.0,
+            );
+            let _ = channel.close().await;
+            return Ok(false);
+        }
+
+        if self.connection.channels.load(Ordering::Relaxed) >= MAX_CHANNELS_PER_CONNECTION {
+            warn!(%peer, "SSH direct-tcpip channel limit reached");
             emit_metric(
                 &self.telemetry,
                 "ssh_proxy_channels_total",
@@ -2386,47 +2321,94 @@ impl russh::server::Handler for ProxySshSession {
             );
             let _ = channel.close().await;
             return Ok(false);
-        };
-        let Some(upstream) = self.connect_upstream(session.handle()).await? else {
+        }
+
+        let Some(bridge_permit) = self.connection.try_reserve_child_task() else {
+            warn!(%peer, "SSH direct-tcpip child task limit reached");
+            emit_metric(
+                &self.telemetry,
+                "ssh_proxy_channels_total",
+                vec![
+                    ("kind", "direct_tcpip".to_string()),
+                    ("result", "rejected_child_limit".to_string()),
+                ],
+                1.0,
+            );
+            let _ = channel.close().await;
             return Ok(false);
         };
-        let upstream_channel = match upstream
-            .channel_open_direct_tcpip(
-                host_to_connect.to_string(),
-                port_to_connect,
-                originator_address.to_string(),
-                originator_port,
-            )
-            .await
+
+        let address = format!("{}:22", route.routed_ip);
+        let stream = match tokio::time::timeout(
+            self.config.route_connect_timeout,
+            TcpStream::connect(&address),
+        )
+        .await
         {
-            Ok(channel) => channel,
-            Err(error) => {
+            Ok(Ok(stream)) => stream,
+            Ok(Err(error)) => {
                 warn!(
                     %peer,
-                    target = %format!("{host_to_connect}:{port_to_connect}"),
+                    target = %address,
                     originator = %format!("{originator_address}:{originator_port}"),
                     %error,
-                    "upstream direct-tcpip channel rejected"
+                    "direct-tcpip TCP connect failed"
                 );
-                let _ = upstream
-                    .disconnect(
-                        russh::Disconnect::ByApplication,
-                        "direct-tcpip rejected",
-                        "",
-                    )
-                    .await;
                 emit_metric(
                     &self.telemetry,
                     "ssh_proxy_channels_total",
                     vec![
                         ("kind", "direct_tcpip".to_string()),
-                        ("result", "open_failed".to_string()),
+                        ("result", "connect_failed".to_string()),
                     ],
                     1.0,
                 );
+                let _ = channel.close().await;
+                return Ok(false);
+            }
+            Err(_) => {
+                warn!(
+                    %peer,
+                    target = %address,
+                    originator = %format!("{originator_address}:{originator_port}"),
+                    "direct-tcpip TCP connect timed out"
+                );
+                emit_metric(
+                    &self.telemetry,
+                    "ssh_proxy_channels_total",
+                    vec![
+                        ("kind", "direct_tcpip".to_string()),
+                        ("result", "connect_timeout".to_string()),
+                    ],
+                    1.0,
+                );
+                let _ = channel.close().await;
                 return Ok(false);
             }
         };
+
+        if !self
+            .authorized_route_for_target(&route.routed_ip)?
+            .same_authority(&route)
+        {
+            warn!(
+                %peer,
+                target = %address,
+                "direct-tcpip rejected: route authorization changed during connect"
+            );
+            emit_metric(
+                &self.telemetry,
+                "ssh_proxy_channels_total",
+                vec![
+                    ("kind", "direct_tcpip".to_string()),
+                    ("result", "rejected_revoked".to_string()),
+                ],
+                1.0,
+            );
+            let _ = channel.close().await;
+            return Ok(false);
+        }
+
         emit_metric(
             &self.telemetry,
             "ssh_proxy_channels_total",
@@ -2436,13 +2418,18 @@ impl russh::server::Handler for ProxySshSession {
             ],
             1.0,
         );
-        spawn_channel_bridge(
+        debug!(
+            %peer,
+            target = %address,
+            originator = %format!("{originator_address}:{originator_port}"),
+            container_id = %route.container_id,
+            "opened direct-tcpip TCP bridge"
+        );
+        spawn_tcp_bridge(
             bridge_permit,
             peer,
-            "direct-tcpip",
             channel,
-            upstream_channel,
-            Some(upstream),
+            stream,
             self.connection.clone(),
         );
         Ok(true)
@@ -2451,101 +2438,24 @@ impl russh::server::Handler for ProxySshSession {
     async fn tcpip_forward(
         &mut self,
         address: &str,
-        port: &mut u32,
-        session: &mut Session,
+        _port: &mut u32,
+        _session: &mut Session,
     ) -> Result<bool, Self::Error> {
-        let peer = self.peer;
-        let requested_port = *port;
-        let requested_key = ForwardKey {
-            address: address.to_string(),
-            port: requested_port,
-        };
-        if self.remote_forwards.len() >= MAX_REMOTE_FORWARDS_PER_CONNECTION
-            && (requested_port == 0 || !self.remote_forwards.contains_key(&requested_key))
-        {
-            warn!(%peer, %address, requested_port, "SSH remote forward limit reached");
-            emit_metric(
-                &self.telemetry,
-                "ssh_proxy_forwards_total",
-                vec![
-                    ("kind", "remote_tcpip".to_string()),
-                    ("result", "rejected_limit".to_string()),
-                ],
-                1.0,
-            );
-            return Ok(false);
-        }
-        let Some(upstream) = self.connect_upstream(session.handle()).await? else {
-            return Ok(false);
-        };
-        match upstream
-            .tcpip_forward(address.to_string(), requested_port)
-            .await
-        {
-            Ok(returned_port) => {
-                let actual_port = if requested_port == 0 {
-                    returned_port
-                } else {
-                    requested_port
-                };
-                if actual_port == 0 {
-                    warn!(%peer, %address, requested_port, returned_port, "upstream remote forward returned no usable port");
-                    let _ = upstream
-                        .disconnect(
-                            russh::Disconnect::ByApplication,
-                            "remote forward unusable",
-                            "",
-                        )
-                        .await;
-                    return Ok(false);
-                }
-                *port = actual_port;
-                let key = ForwardKey {
-                    address: address.to_string(),
-                    port: actual_port,
-                };
-                if let Some(old) = self.remote_forwards.insert(key, upstream) {
-                    let _ = old
-                        .disconnect(
-                            russh::Disconnect::ByApplication,
-                            "remote forward replaced",
-                            "",
-                        )
-                        .await;
-                }
-                info!(%peer, %address, port = actual_port, "remote tcpip forward enabled");
-                emit_metric(
-                    &self.telemetry,
-                    "ssh_proxy_forwards_total",
-                    vec![
-                        ("kind", "remote_tcpip".to_string()),
-                        ("result", "enabled".to_string()),
-                    ],
-                    1.0,
-                );
-                Ok(true)
-            }
-            Err(error) => {
-                warn!(%peer, %address, requested_port, %error, "upstream remote tcpip forward rejected");
-                let _ = upstream
-                    .disconnect(
-                        russh::Disconnect::ByApplication,
-                        "remote forward rejected",
-                        "",
-                    )
-                    .await;
-                emit_metric(
-                    &self.telemetry,
-                    "ssh_proxy_forwards_total",
-                    vec![
-                        ("kind", "remote_tcpip".to_string()),
-                        ("result", "rejected".to_string()),
-                    ],
-                    1.0,
-                );
-                Ok(false)
-            }
-        }
+        warn!(
+            peer = %self.peer,
+            %address,
+            "SSH remote tcpip forward rejected in jump-host mode"
+        );
+        emit_metric(
+            &self.telemetry,
+            "ssh_proxy_forwards_total",
+            vec![
+                ("kind", "remote_tcpip".to_string()),
+                ("result", "rejected".to_string()),
+            ],
+            1.0,
+        );
+        Ok(false)
     }
 
     async fn cancel_tcpip_forward(
@@ -2554,136 +2464,22 @@ impl russh::server::Handler for ProxySshSession {
         port: u32,
         _session: &mut Session,
     ) -> Result<bool, Self::Error> {
-        let key = ForwardKey {
-            address: address.to_string(),
+        warn!(
+            peer = %self.peer,
+            %address,
             port,
-        };
-        let Some(upstream) = self.remote_forwards.remove(&key) else {
-            return Ok(false);
-        };
-        match upstream
-            .cancel_tcpip_forward(address.to_string(), port)
-            .await
-        {
-            Ok(()) => {
-                emit_metric(
-                    &self.telemetry,
-                    "ssh_proxy_forwards_total",
-                    vec![
-                        ("kind", "remote_tcpip".to_string()),
-                        ("result", "cancelled".to_string()),
-                    ],
-                    1.0,
-                );
-                Ok(true)
-            }
-            Err(error) => {
-                warn!(peer = %self.peer, %address, port, %error, "failed to cancel upstream remote tcpip forward");
-                emit_metric(
-                    &self.telemetry,
-                    "ssh_proxy_forwards_total",
-                    vec![
-                        ("kind", "remote_tcpip".to_string()),
-                        ("result", "cancel_failed".to_string()),
-                    ],
-                    1.0,
-                );
-                Ok(false)
-            }
-        }
-    }
-}
-
-impl russh::client::Handler for ContainerClient {
-    type Error = anyhow::Error;
-
-    async fn check_server_key(
-        &mut self,
-        server_public_key: &PublicKey,
-    ) -> Result<bool, Self::Error> {
-        Ok(host_key_matches(
-            &self.expected_host_key_fingerprint,
-            server_public_key,
-        ))
-    }
-
-    async fn server_channel_open_forwarded_tcpip(
-        &mut self,
-        channel: Channel<ClientMsg>,
-        connected_address: &str,
-        connected_port: u32,
-        originator_address: &str,
-        originator_port: u32,
-        _session: &mut russh::client::Session,
-    ) -> Result<(), Self::Error> {
-        let Some(bridge_permit) = self.connection.try_reserve_child_task() else {
-            warn!(peer = %self.peer, "SSH forwarded-tcpip child task limit reached");
-            let _ = channel.close().await;
-            return Ok(());
-        };
-        let client_channel = match self
-            .client_handle
-            .channel_open_forwarded_tcpip(
-                connected_address.to_string(),
-                connected_port,
-                originator_address.to_string(),
-                originator_port,
-            )
-            .await
-        {
-            Ok(channel) => channel,
-            Err(error) => {
-                warn!(
-                    peer = %self.peer,
-                    connected = %format!("{connected_address}:{connected_port}"),
-                    originator = %format!("{originator_address}:{originator_port}"),
-                    %error,
-                    "failed to open external forwarded-tcpip channel"
-                );
-                let _ = channel.close().await;
-                return Ok(());
-            }
-        };
-        spawn_channel_bridge(
-            bridge_permit,
-            self.peer,
-            "remote-forward",
-            client_channel,
-            channel,
-            None,
-            self.connection.clone(),
+            "SSH cancel tcpip forward rejected in jump-host mode"
         );
-        Ok(())
-    }
-
-    async fn server_channel_open_agent_forward(
-        &mut self,
-        channel: Channel<ClientMsg>,
-        _session: &mut russh::client::Session,
-    ) -> Result<(), Self::Error> {
-        let Some(bridge_permit) = self.connection.try_reserve_child_task() else {
-            warn!(peer = %self.peer, "SSH agent-forward child task limit reached");
-            let _ = channel.close().await;
-            return Ok(());
-        };
-        let client_channel = match self.client_handle.channel_open_agent().await {
-            Ok(channel) => channel,
-            Err(error) => {
-                warn!(peer = %self.peer, %error, "failed to open external agent-forward channel");
-                let _ = channel.close().await;
-                return Ok(());
-            }
-        };
-        spawn_channel_bridge(
-            bridge_permit,
-            self.peer,
-            "agent-forward",
-            client_channel,
-            channel,
-            None,
-            self.connection.clone(),
+        emit_metric(
+            &self.telemetry,
+            "ssh_proxy_forwards_total",
+            vec![
+                ("kind", "remote_tcpip".to_string()),
+                ("result", "rejected".to_string()),
+            ],
+            1.0,
         );
-        Ok(())
+        Ok(false)
     }
 }
 
@@ -2724,99 +2520,94 @@ where
     permit.spawn(future);
 }
 
-fn spawn_channel_bridge(
+/// Counts bytes as they flow so live status reports non-zero traffic mid-session.
+/// When wrapping the SSH channel side of a direct-tcpip bridge:
+/// - reads  = client → target (`bytes_from_client`)
+/// - writes = target → client (`bytes_to_client`)
+struct MeteredChannelStream<S> {
+    inner: S,
+    connection: Arc<ConnectionState>,
+}
+
+impl<S> MeteredChannelStream<S> {
+    fn new(inner: S, connection: Arc<ConnectionState>) -> Self {
+        Self { inner, connection }
+    }
+}
+
+impl<S: AsyncRead + Unpin> AsyncRead for MeteredChannelStream<S> {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut PollContext<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        let before = buf.filled().len();
+        let result = Pin::new(&mut self.inner).poll_read(cx, buf);
+        if let Poll::Ready(Ok(())) = &result {
+            let n = buf.filled().len().saturating_sub(before);
+            if n > 0 {
+                self.connection.record_from_client(n);
+            }
+        }
+        result
+    }
+}
+
+impl<S: AsyncWrite + Unpin> AsyncWrite for MeteredChannelStream<S> {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut PollContext<'_>,
+        buf: &[u8],
+    ) -> Poll<Result<usize, std::io::Error>> {
+        match Pin::new(&mut self.inner).poll_write(cx, buf) {
+            Poll::Ready(Ok(n)) => {
+                if n > 0 {
+                    self.connection.record_to_client(n);
+                }
+                Poll::Ready(Ok(n))
+            }
+            other => other,
+        }
+    }
+
+    fn poll_flush(
+        mut self: Pin<&mut Self>,
+        cx: &mut PollContext<'_>,
+    ) -> Poll<Result<(), std::io::Error>> {
+        Pin::new(&mut self.inner).poll_flush(cx)
+    }
+
+    fn poll_shutdown(
+        mut self: Pin<&mut Self>,
+        cx: &mut PollContext<'_>,
+    ) -> Poll<Result<(), std::io::Error>> {
+        Pin::new(&mut self.inner).poll_shutdown(cx)
+    }
+}
+
+fn spawn_tcp_bridge(
     permit: ChildTaskPermit,
     peer: SocketAddr,
-    kind: &'static str,
-    client_channel: Channel<ServerMsg>,
-    upstream_channel: Channel<ClientMsg>,
-    upstream_handle: Option<russh::client::Handle<ContainerClient>>,
+    channel: Channel<ServerMsg>,
+    stream: TcpStream,
     connection: Arc<ConnectionState>,
 ) {
+    connection.channel_opened();
     let task_connection = connection.clone();
     permit.spawn(async move {
-        let mut client_stream = client_channel.into_stream();
-        let mut upstream_stream = upstream_channel.into_stream();
-        match io::copy_bidirectional(&mut client_stream, &mut upstream_stream).await {
-            Ok((from_client, to_client)) => {
-                task_connection.record_from_client(from_client as usize);
-                task_connection.record_to_client(to_client as usize);
-            }
-            Err(error) => {
-                debug!(%peer, kind, %error, "SSH channel bridge ended with error");
-            }
+        let mut channel_stream =
+            MeteredChannelStream::new(channel.into_stream(), task_connection.clone());
+        let mut tcp_stream = stream;
+        if let Err(error) = io::copy_bidirectional(&mut channel_stream, &mut tcp_stream).await {
+            debug!(%peer, %error, "SSH direct-tcpip bridge ended with error");
         }
-        if let Some(upstream_handle) = upstream_handle {
-            let _ = upstream_handle
-                .disconnect(
-                    russh::Disconnect::ByApplication,
-                    "channel bridge closed",
-                    "",
-                )
-                .await;
-        }
+        task_connection.channel_closed();
     });
 }
 
 fn parse_authorized_key(text: &str) -> Option<PublicKey> {
     text.split_whitespace()
         .find_map(|part| parse_public_key_base64(part).ok())
-}
-
-fn spawn_upstream_relay(
-    permit: ChildTaskPermit,
-    client_channel_id: ChannelId,
-    client_handle: russh::server::Handle,
-    mut upstream: ChannelReadHalf,
-    connection: Arc<ConnectionState>,
-) {
-    let task_connection = connection.clone();
-    permit.spawn(async move {
-        while let Some(message) = upstream.wait().await {
-            match message {
-                ChannelMsg::Data { data } => {
-                    task_connection.record_to_client(data.len());
-                    if client_handle
-                        .data(client_channel_id, data.to_vec())
-                        .await
-                        .is_err()
-                    {
-                        break;
-                    }
-                }
-                ChannelMsg::ExtendedData { ext, data } => {
-                    task_connection.record_to_client(data.len());
-                    if client_handle
-                        .extended_data(client_channel_id, ext, data.to_vec())
-                        .await
-                        .is_err()
-                    {
-                        break;
-                    }
-                }
-                ChannelMsg::ExitStatus { exit_status } => {
-                    let _ = client_handle
-                        .exit_status_request(client_channel_id, exit_status)
-                        .await;
-                }
-                ChannelMsg::Success => {
-                    let _ = client_handle.channel_success(client_channel_id).await;
-                }
-                ChannelMsg::Failure => {
-                    let _ = client_handle.channel_failure(client_channel_id).await;
-                }
-                ChannelMsg::Eof => {
-                    let _ = client_handle.eof(client_channel_id).await;
-                }
-                ChannelMsg::Close => {
-                    let _ = client_handle.close(client_channel_id).await;
-                    break;
-                }
-                _ => {}
-            }
-        }
-        let _ = client_handle.close(client_channel_id).await;
-    });
 }
 
 fn absolute_snapshot_remaining(
@@ -2852,6 +2643,7 @@ mod tests {
     use std::io::Write as _;
     use std::sync::atomic::AtomicU64;
     use tokio::io::AsyncReadExt as _;
+    use tokio::io::AsyncWriteExt as _;
 
     static NEXT_TEST_FILE: AtomicU64 = AtomicU64::new(1);
 
@@ -2883,6 +2675,34 @@ mod tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_file(&self.path);
         }
+    }
+
+    #[tokio::test]
+    async fn metered_channel_stream_counts_bytes_while_io_is_in_flight() {
+        let (left, right) = tokio::io::duplex(1024);
+        let (state, _registration) =
+            ConnectionState::new(99, "127.0.0.1:2222".parse().unwrap());
+        let connection = Arc::new(state);
+        let mut metered = MeteredChannelStream::new(left, connection.clone());
+        let mut peer = right;
+
+        peer.write_all(b"from-client").await.unwrap();
+        let mut buf = [0_u8; 32];
+        let n = metered.read(&mut buf).await.unwrap();
+        assert_eq!(&buf[..n], b"from-client");
+        assert_eq!(
+            connection.bytes_from_client.load(Ordering::Relaxed),
+            b"from-client".len() as u64
+        );
+
+        metered.write_all(b"to-client").await.unwrap();
+        metered.flush().await.unwrap();
+        let n = peer.read(&mut buf).await.unwrap();
+        assert_eq!(&buf[..n], b"to-client");
+        assert_eq!(
+            connection.bytes_to_client.load(Ordering::Relaxed),
+            b"to-client".len() as u64
+        );
     }
 
     #[tokio::test]
@@ -3238,15 +3058,33 @@ mod tests {
     }
 
     #[test]
-    fn public_key_auth_matches_snapshot_user_keys() {
+    fn public_key_auth_matches_snapshot_user_keys_for_any_login() {
         let snapshot = fixture_snapshot();
         let allowed = parse_authorized_key(ALICE_KEY).expect("expected allowed key");
         let other = parse_authorized_key(OTHER_KEY).expect("expected other key");
 
         assert!(snapshot.public_key_allowed("alice.cpu-a.solo", &allowed));
-        assert!(snapshot.public_key_allowed("ALICE.SOLO", &allowed));
+        assert!(snapshot.public_key_allowed("literally-any-username", &allowed));
+        assert!(snapshot.public_key_allowed("root", &allowed));
         assert!(!snapshot.public_key_allowed("alice.cpu-a.solo", &other));
-        assert!(!snapshot.public_key_allowed("disabled.solo", &allowed));
+        assert_eq!(
+            snapshot.find_active_user_by_public_key(&allowed).unwrap().username,
+            "alice"
+        );
+        assert!(snapshot.find_active_user_by_public_key(&other).is_err());
+    }
+
+    #[test]
+    fn resolves_owned_route_by_user_and_target_ip() {
+        let snapshot = fixture_snapshot();
+        let route = snapshot
+            .resolve_owned_route_for_user_ip("user-a", "10.0.0.4")
+            .expect("expected solo route");
+        assert_eq!(route.container_name, "solo");
+        assert_eq!(route.routed_ip, "10.0.0.4");
+        assert!(snapshot
+            .resolve_owned_route_for_user_ip("user-a", "10.0.0.99")
+            .is_err());
     }
 
     #[test]
@@ -3264,13 +3102,13 @@ mod tests {
     }
 
     #[test]
-    fn rejects_routes_with_missing_host_identity_or_stale_internal_key_generation() {
+    fn rejects_inactive_routes_with_stopped_ssh_or_missing_instance() {
         let mut snapshot = fixture_snapshot();
         let route = snapshot
             .routes_by_container_id
             .get_mut("container-c")
             .expect("fixture route");
-        route.container_host_key_fingerprint = None;
+        route.ssh_status = "stopped".to_string();
         assert_rejects(
             snapshot.resolve_login("alice.solo"),
             RejectReason::RouteNotFound,
@@ -3280,9 +3118,8 @@ mod tests {
             .routes_by_container_id
             .get_mut("container-c")
             .expect("fixture route");
-        route.container_host_key_fingerprint =
-            Some("SHA256:UCUiLr7Pjs9wFFJMDByLgc3NrtdU344OgUM45wZPcIQ".to_string());
-        route.applied_internal_key_generation = Some(0);
+        route.ssh_status = "running".to_string();
+        route.instance_name.clear();
         assert_rejects(
             snapshot.resolve_login("alice.solo"),
             RejectReason::RouteNotFound,
@@ -3297,7 +3134,7 @@ mod tests {
             .iter_mut()
             .find(|server| server.id == "server-a")
             .unwrap()
-            .online = false;
+            .status = "unreachable".to_string();
         assert_rejects(
             RoutingSnapshot::from_snapshot(offline)
                 .unwrap()
@@ -3326,7 +3163,7 @@ mod tests {
                 .iter_mut()
                 .find(|route| route.container_id == "container-c")
                 .unwrap()
-                .macvlan_ip = Some(address.to_string());
+                .routed_ip = Some(address.to_string());
             assert_rejects(
                 RoutingSnapshot::from_snapshot(invalid_ip)
                     .unwrap()
@@ -3360,17 +3197,6 @@ mod tests {
             .await;
     }
 
-    #[tokio::test]
-    async fn bad_disabled_user_private_key_rejects_before_ack_and_revokes_current_snapshot() {
-        let mut invalid = fixture_proxy_snapshot(8);
-        invalid.users[1].internal_private_key = "not-an-openssh-private-key".to_string();
-
-        assert_invalid_key_snapshot_revokes(
-            invalid,
-            "failed to parse internal private key for user user-b",
-        )
-        .await;
-    }
 
     async fn assert_invalid_key_snapshot_revokes(invalid: ProxySnapshot, expected_error: &str) {
         let config = ProxyConfig {
@@ -3396,7 +3222,7 @@ mod tests {
         let route = resolve_owned_route(&installed, "alice.solo").expect("expected route");
         let (connection, main_registration) =
             runtime.register_connection("127.0.0.1:2206".parse().unwrap());
-        connection.set_authenticated("alice.solo", &public_key, &route);
+        connection.set_authenticated("alice.solo", &public_key, &route.user_id, &route.username, Some(&route));
         let connection_task = tokio::spawn(Abortable::new(
             std::future::pending::<()>(),
             main_registration,
@@ -3443,7 +3269,7 @@ mod tests {
         let route = resolve_owned_route(&installed, "alice.solo").expect("expected route");
         let (connection, main_registration) =
             runtime.register_connection("127.0.0.1:2204".parse().unwrap());
-        connection.set_authenticated("alice.solo", &public_key, &route);
+        connection.set_authenticated("alice.solo", &public_key, &route.user_id, &route.username, Some(&route));
         let connection_task = tokio::spawn(Abortable::new(
             std::future::pending::<()>(),
             main_registration,
@@ -3477,7 +3303,7 @@ mod tests {
         let route = resolve_owned_route(&initial, "alice.solo").expect("expected route");
         let (connection, _abort_registration) =
             ConnectionState::new(1, "127.0.0.1:2222".parse().unwrap());
-        connection.set_authenticated("alice.solo", &public_key, &route);
+        connection.set_authenticated("alice.solo", &public_key, &route.user_id, &route.username, Some(&route));
         assert!(connection.authorization_matches(Some(&initial)));
 
         // A generation-only refresh with the same authorization tuple keeps
@@ -3486,13 +3312,12 @@ mod tests {
         assert!(connection.authorization_matches(Some(&same_authorization)));
 
         let mut rotated = fixture_proxy_snapshot(9);
-        rotated.users[0].internal_key_generation = 2;
         rotated
             .routes
             .iter_mut()
             .find(|route| route.container_id == "container-c")
             .unwrap()
-            .applied_internal_key_generation = Some(2);
+            .routed_ip = Some("10.0.0.99".to_string());
         let rotated = RoutingSnapshot::from_snapshot(rotated).unwrap();
         assert!(!connection.authorization_matches(Some(&rotated)));
 
@@ -3514,7 +3339,7 @@ mod tests {
             .iter_mut()
             .find(|image| image.id == "image-a")
             .unwrap()
-            .disable_ssh = true;
+            .ssh_enabled = false;
         assert!(!connection.authorization_matches(Some(
             &RoutingSnapshot::from_snapshot(image_disabled).unwrap(),
         )));
@@ -3548,10 +3373,10 @@ mod tests {
 
         let (first, first_registration) =
             runtime.register_connection("127.0.0.1:2201".parse().unwrap());
-        first.set_authenticated("alice.solo", &public_key, &route);
+        first.set_authenticated("alice.solo", &public_key, &route.user_id, &route.username, Some(&route));
         let (second, second_registration) =
             runtime.register_connection("127.0.0.1:2202".parse().unwrap());
-        second.set_authenticated("alice.solo", &public_key, &route);
+        second.set_authenticated("alice.solo", &public_key, &route.user_id, &route.username, Some(&route));
 
         // These futures model connection tasks whose graceful protocol send
         // would never finish. Revocation cancels their owning tasks directly.
@@ -3630,7 +3455,7 @@ mod tests {
         let route = resolve_owned_route(&snapshot, "alice.solo").expect("expected route");
         let (connection, abort_registration) =
             runtime.register_connection("127.0.0.1:2203".parse().unwrap());
-        connection.set_authenticated("alice.solo", &public_key, &route);
+        connection.set_authenticated("alice.solo", &public_key, &route.user_id, &route.username, Some(&route));
         let connection_task = tokio::spawn(Abortable::new(
             std::future::pending::<()>(),
             abort_registration,
@@ -3724,20 +3549,12 @@ mod tests {
                     username: "alice".to_string(),
                     status: "active".to_string(),
                     public_keys: vec![ALICE_KEY.to_string()],
-                    internal_private_key: TEST_PRIVATE_KEY.to_string(),
-                    internal_public_key: "ssh-ed25519 INTERNAL".to_string(),
-                    internal_key_fingerprint: "SHA256:internal".to_string(),
-                    internal_key_generation: 1,
                 },
                 ProxyUser {
                     id: "user-b".to_string(),
                     username: "disabled".to_string(),
                     status: "disabled".to_string(),
                     public_keys: vec![],
-                    internal_private_key: TEST_PRIVATE_KEY.to_string(),
-                    internal_public_key: "ssh-ed25519 INTERNAL".to_string(),
-                    internal_key_fingerprint: "SHA256:internal".to_string(),
-                    internal_key_generation: 1,
                 },
             ],
             servers: vec![
@@ -3745,32 +3562,74 @@ mod tests {
                     id: "server-a".to_string(),
                     slug: "cpu-a".to_string(),
                     name: "CPU A".to_string(),
-                    online: true,
+                    status: "online".to_string(),
                 },
                 ProxyServer {
                     id: "server-b".to_string(),
                     slug: "cpu-b".to_string(),
                     name: "CPU B".to_string(),
-                    online: true,
+                    status: "online".to_string(),
                 },
             ],
             images: vec![
                 ProxyImage {
                     id: "image-a".to_string(),
-                    disable_ssh: false,
+                    ssh_enabled: true,
                 },
                 ProxyImage {
                     id: "image-b".to_string(),
-                    disable_ssh: true,
+                    ssh_enabled: false,
                 },
             ],
             containers: vec![
-                container("container-a", "user-a", "server-a", "image-a", "work"),
-                container("container-b", "user-a", "server-b", "image-a", "work"),
-                container("container-c", "user-a", "server-a", "image-a", "solo"),
-                container("container-d", "user-a", "server-a", "image-b", "gpu"),
-                container("container-e", "user-a", "server-a", "image-a", "sleeping"),
-                container("container-f", "user-b", "server-a", "image-a", "solo"),
+                container(
+                    "container-a",
+                    "user-a",
+                    "server-a",
+                    "image-a",
+                    "work",
+                    "runtime-a",
+                ),
+                container(
+                    "container-b",
+                    "user-a",
+                    "server-b",
+                    "image-a",
+                    "work",
+                    "runtime-b",
+                ),
+                container(
+                    "container-c",
+                    "user-a",
+                    "server-a",
+                    "image-a",
+                    "solo",
+                    "runtime-c",
+                ),
+                container(
+                    "container-d",
+                    "user-a",
+                    "server-a",
+                    "image-b",
+                    "gpu",
+                    "runtime-d",
+                ),
+                container(
+                    "container-e",
+                    "user-a",
+                    "server-a",
+                    "image-a",
+                    "sleeping",
+                    "runtime-e",
+                ),
+                container(
+                    "container-f",
+                    "user-b",
+                    "server-a",
+                    "image-a",
+                    "solo",
+                    "runtime-f",
+                ),
             ],
             routes: vec![
                 route(
@@ -3810,7 +3669,7 @@ mod tests {
                     "server-a",
                     "runtime-e",
                     Some("10.0.0.6"),
-                    "exited",
+                    "stopped",
                     "container_stopped",
                 ),
                 route(
@@ -3831,6 +3690,7 @@ mod tests {
         server_id: &str,
         image_id: &str,
         name: &str,
+        instance_name: &str,
     ) -> ProxyContainer {
         ProxyContainer {
             id: id.to_string(),
@@ -3838,25 +3698,25 @@ mod tests {
             server_id: server_id.to_string(),
             image_id: image_id.to_string(),
             name: name.to_string(),
+            instance_name: instance_name.to_string(),
         }
     }
 
     fn route(
         container_id: &str,
         server_id: &str,
-        runtime_id: &str,
-        macvlan_ip: Option<&str>,
-        runtime_status: &str,
+        instance_name: &str,
+        routed_ip: Option<&str>,
+        status: &str,
         ssh_status: &str,
     ) -> ProxyRoute {
         ProxyRoute {
             container_id: container_id.to_string(),
             server_id: server_id.to_string(),
-            runtime_id: runtime_id.to_string(),
-            macvlan_ip: macvlan_ip.map(ToOwned::to_owned),
-            runtime_status: runtime_status.to_string(),
+            instance_name: instance_name.to_string(),
+            routed_ip: routed_ip.map(ToOwned::to_owned),
+            status: status.to_string(),
             ssh_status: ssh_status.to_string(),
-            applied_internal_key_generation: Some(1),
             container_host_key_fingerprint: Some(
                 "SHA256:UCUiLr7Pjs9wFFJMDByLgc3NrtdU344OgUM45wZPcIQ".to_string(),
             ),

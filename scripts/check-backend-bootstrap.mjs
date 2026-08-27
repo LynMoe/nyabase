@@ -2,7 +2,14 @@
 import { createRequire } from 'node:module';
 import { randomUUID } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  existsSync,
+  mkdtempSync,
+  readdirSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -12,6 +19,8 @@ const backendRoot = join(repoRoot, 'packages', 'backend');
 const requireFromBackend = createRequire(join(backendRoot, 'package.json'));
 requireFromBackend('reflect-metadata');
 const { Pool } = requireFromBackend('pg');
+
+assertCleanCutoverArtifacts();
 
 if (process.env.NYABASE_BACKEND_BOOTSTRAP_CHILD === '1') {
   await bootstrapCompiledBackend();
@@ -53,7 +62,6 @@ try {
   writeFileSync(configPath, [
     'runtime:',
     '  nodeEnv: test',
-    '  role: all',
     'server:',
     '  port: 1',
     '  corsOrigin: ""',
@@ -62,6 +70,11 @@ try {
     '  jwtExpiresIn: 15m',
     '  refreshTokenExpiresDays: 1',
     '  adminInitPassword: "bootstrap-password"',
+    'incus:',
+    '  preflightImageAlias: bootstrap-image',
+    '  preflightEgressUrl: https://example.invalid/health',
+    '  requestTimeoutMs: 10000',
+    '  operationWaitTimeoutMs: 120000',
     'database:',
     `  url: ${JSON.stringify(databaseUrl.toString())}`,
     '  poolMax: 4',
@@ -123,9 +136,25 @@ try {
       + `applied ${appliedMigrations.join(', ')}`,
     );
   }
+  const architectureResult = await verification.query(`
+    SELECT
+      to_regclass('control.intents') AS intents,
+      to_regclass('control.reconcile_claims') AS reconcile_claims,
+      to_regclass('infra.servers') AS servers,
+      to_regclass('workflow.tasks') AS legacy_tasks
+  `);
+  const architecture = architectureResult.rows[0];
+  for (const name of ['intents', 'reconcile_claims', 'servers']) {
+    if (!architecture?.[name]) {
+      throw new Error(`Backend bootstrap is missing the ${name} control-plane table`);
+    }
+  }
+  if (architecture.legacy_tasks) {
+    throw new Error('Backend bootstrap still creates the retired workflow task table');
+  }
   console.log(
     `Backend PostgreSQL bootstrap PASS: ${appliedMigrations.length}/`
-    + `${expectedMigrations.length} fresh migrations`,
+    + `${expectedMigrations.length} fresh migrations with intents, claims, and Incus server state`,
   );
 } catch (error) {
   runError = error;
@@ -171,31 +200,64 @@ try {
 
 async function bootstrapCompiledBackend() {
   const { NestFactory } = requireFromBackend('@nestjs/core');
-  const [{ AppModule }, { RuntimeRoleService }] = await Promise.all([
-    import(pathToFileURL(join(backendRoot, 'dist', 'app.module.js'))),
-    import(pathToFileURL(join(
-      backendRoot,
-      'dist',
-      'runtime',
-      'runtime-role.service.js',
-    ))),
-  ]);
+  const { AppModule } = await import(pathToFileURL(join(backendRoot, 'dist', 'app.module.js')));
   let app;
   try {
     app = await NestFactory.createApplicationContext(AppModule, {
       logger: false,
       abortOnError: false,
     });
-    const runtimeRole = app.get(RuntimeRoleService);
-    if (runtimeRole.role !== 'all') {
-      throw new Error(
-        `Backend bootstrap resolved unexpected runtime role: ${runtimeRole.role}`,
-      );
-    }
     console.log(
-      'Backend compiled bootstrap PASS: role=all, module graph, providers, and lifecycle init',
+      'Backend compiled bootstrap PASS: module graph, Incus client, intent/reconciliation providers, and lifecycle init',
     );
   } finally {
     await app?.close();
   }
+}
+
+function assertCleanCutoverArtifacts() {
+  const requiredSourcePaths = [
+    join(backendRoot, 'src', 'incus'),
+    join(backendRoot, 'src', 'runtime', 'intent.repository.ts'),
+    join(backendRoot, 'src', 'runtime', 'reconcile-worker.service.ts'),
+    join(repoRoot, 'packages', 'node-exporter', 'package.json'),
+    join(repoRoot, 'packages', 'node-exporter', 'src'),
+  ];
+  for (const path of requiredSourcePaths) {
+    if (!existsSync(path)) {
+      throw new Error(`Clean-cutover architecture path is missing: ${path}`);
+    }
+  }
+
+  const retiredPaths = [
+    join(repoRoot, 'packages', 'agent'),
+    join(backendRoot, 'src', 'agent-tasks'),
+    join(backendRoot, 'src', 'gateway'),
+    join(backendRoot, 'src', 'datadirs'),
+    join(backendRoot, 'src', 'mount-sources'),
+    join(backendRoot, 'src', 'remote-fs'),
+    join(backendRoot, 'src', 'quota'),
+  ];
+  for (const path of retiredPaths) {
+    if (hasEntries(path)) {
+      throw new Error(`Retired control path still exists: ${path}`);
+    }
+  }
+
+  const requiredCompiledPaths = [
+    join(backendRoot, 'dist', 'incus', 'incus-client.js'),
+    join(backendRoot, 'dist', 'runtime', 'intent.repository.js'),
+    join(backendRoot, 'dist', 'runtime', 'reconcile-worker.service.js'),
+  ];
+  for (const path of requiredCompiledPaths) {
+    if (!existsSync(path)) {
+      throw new Error(`Compiled clean-cutover backend artifact is missing: ${path}`);
+    }
+  }
+}
+
+function hasEntries(path) {
+  if (!existsSync(path)) return false;
+  if (!statSync(path).isDirectory()) return true;
+  return readdirSync(path).some((entry) => hasEntries(join(path, entry)));
 }

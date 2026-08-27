@@ -28,9 +28,8 @@ export type DecryptedSshProxyHostKey = SshProxyHostKey & {
 /**
  * PostgreSQL-owned proxy host identity.
  *
- * User internal SSH identities live in UserSshIdentityService. Keeping the
- * proxy singleton here makes its external key generation/CAS boundary
- * explicit without retaining a legacy persistence transaction bridge.
+ * Keeping the proxy singleton here makes its external key generation/CAS
+ * boundary explicit without retaining a legacy persistence transaction bridge.
  */
 @Injectable()
 export class SshIdentityService {
@@ -151,15 +150,6 @@ export class SshIdentityService {
       await onRotated?.(transaction, next);
     }, { isolationLevel: 'serializable' });
     return Object.assign(next, { privateKey: generated.privateKey });
-  }
-
-  decryptUserPrivateKey(key: {
-    encryptedPrivateKey?: string;
-    encrypted_private_key?: string;
-  }): string {
-    const encrypted = key.encryptedPrivateKey ?? key.encrypted_private_key;
-    if (!encrypted) throw new Error('User internal SSH private key is missing');
-    return this.crypto.decrypt(encrypted);
   }
 
   private async selectHostKey(

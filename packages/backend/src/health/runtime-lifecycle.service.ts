@@ -4,9 +4,9 @@ import {
 } from '@nestjs/common';
 
 /**
- * Readiness admission barrier. The process becomes ready only after every
- * role-specific HTTP/WebSocket gateway has attached, and becomes unready
- * before Nest starts closing dependency connections.
+ * Readiness admission barrier. The process becomes ready after Nest has
+ * initialized the runtime worker and HTTP surface, and becomes unready before
+ * dependency connections begin closing.
  */
 @Injectable()
 export class RuntimeLifecycleService implements BeforeApplicationShutdown {

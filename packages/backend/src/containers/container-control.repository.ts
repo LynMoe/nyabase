@@ -1,781 +1,420 @@
 import { Inject, Injectable } from '@nestjs/common';
-import { ContainerPhase } from '@nyabase/common';
-import type {
-  ContainerPowerIntent,
-  ContainerStatus,
-  ImageRuntimeOverrides,
-} from '@nyabase/common';
-import type { Kysely, Selectable, Transaction, Updateable } from 'kysely';
-import { sql } from 'kysely';
+import { randomUUID } from 'node:crypto';
+import { sql, type Kysely, type Selectable, type Transaction } from 'kysely';
+import type { ContainerControlTable } from './container-control-database.types.js';
 import type { NyabaseDatabase } from '../persistence-pg/database.types.js';
 import { PG_DATABASE } from '../persistence-pg/tokens.js';
-import type { ContainerControlTable } from './container-control-database.types.js';
+import { deriveInstanceName } from '../incus/instance-spec.js';
 
-export type ContainerExecutor =
-  | Kysely<NyabaseDatabase>
-  | Transaction<NyabaseDatabase>;
+export type ContainerExecutor = Kysely<NyabaseDatabase> | Transaction<NyabaseDatabase>;
+export type ContainerRow = Selectable<ContainerControlTable>;
 
-export interface ContainerAggregate {
+export interface NewContainerInput {
   id: string;
   serverId: string;
   ownerId: string;
   imageId: string;
   createdBy: string;
   name: string;
-  revision: number;
-  desiredGeneration: number;
-  imageRef: string;
-  imageDefaultUid: number;
-  imageRuntimeOverrides: ImageRuntimeOverrides;
+  imageAlias: string;
+  imageFingerprint: string;
+  rootPoolId: string;
+  rootSizeBytes: number;
   cpuMillis: number;
   memBytes: number;
-  diskBytes: number;
-  gpuMode: 'none' | 'indices' | 'all';
-  gpuIndices: number[];
-  mountsJson: unknown[];
-  powerIntent: ContainerPowerIntent;
-  lifecyclePhase: ContainerPhase;
-  observedGeneration: number | null;
-  boundRuntimeId: string | null;
-  quotaPaths: string[];
-  runtimeSpecHash: string | null;
-  activeTaskId: string | null;
-  lastTransitionAt: Date;
-  failureReason: string | null;
-  failureCode: string | null;
-  createdAt: Date;
-  updatedAt: Date;
-}
-
-export interface ContainerMountRecord {
-  id: string;
-  containerId: string;
-  serverId: string;
-  resourceId: string;
-  sourceKind: 'local' | 'remote';
-  sourceId: string;
-  sourceIdentity: string;
-  userId: string;
-  dirName: string;
-  containerPath: string;
+  gpuPciAddresses: string[];
+  powerIntent: 'running' | 'stopped';
+  networkKey: string;
+  address: string;
 }
 
 export interface ContainerSshRouteRecord {
   containerId: string;
   serverId: string;
-  runtimeId: string;
-  macvlanIp: string | null;
-  runtimeStatus: ContainerStatus;
+  instanceName: string;
+  routedIp: string;
+  runtimeStatus: string;
   sshStatus: 'disabled' | 'container_stopped' | 'running' | 'error' | 'unknown';
-  appliedInternalKeyGeneration: number | null;
   containerHostKeyFingerprint: string | null;
   lastError: string | null;
   observedAt: Date;
 }
 
-export interface ContainerNetworkClaimRecord {
+export interface NetworkClaimRecord {
   id: string;
   containerId: string | null;
-  ownerKind: 'container' | 'runtime_cleanup';
-  ownerId: string;
   serverId: string;
   networkKey: string;
   address: string;
   state: 'active' | 'releasing';
   reusableAt: Date | null;
-  cleanupPayload: unknown | null;
-}
-
-export interface NewContainerAggregate {
-  id: string;
-  serverId: string;
+  ownerKind: 'container' | 'runtime_cleanup';
   ownerId: string;
-  imageId: string;
-  createdBy: string;
-  name: string;
-  imageRef: string;
-  imageDefaultUid: number;
-  imageRuntimeOverrides: ImageRuntimeOverrides;
-  cpuMillis: number;
-  memBytes: number;
-  diskBytes: number;
-  gpuMode: 'none' | 'indices' | 'all';
-  gpuIndices: number[];
-  mountsJson: unknown[];
-  powerIntent: ContainerPowerIntent;
-  lifecyclePhase: ContainerPhase;
-}
-
-function safeInteger(value: string | number | bigint, field: string): number {
-  const parsed = Number(value);
-  if (!Number.isSafeInteger(parsed) || parsed < 0) {
-    throw new Error(`${field} exceeds the safe application range`);
-  }
-  return parsed;
 }
 
 @Injectable()
 export class ContainerControlRepository {
-  constructor(
-    @Inject(PG_DATABASE)
-    private readonly database: Kysely<NyabaseDatabase>,
-  ) {}
+  constructor(@Inject(PG_DATABASE) private readonly database: Kysely<NyabaseDatabase>) {}
 
-  async list(
-    filters: { ownerId?: string; serverId?: string } = {},
+  list(
+    options: { ownerId?: string; serverId?: string } = {},
     executor: ContainerExecutor = this.database,
-  ): Promise<ContainerAggregate[]> {
-    let query = executor.selectFrom('control.containers').selectAll();
-    if (filters.ownerId) query = query.where('owner_id', '=', filters.ownerId);
-    if (filters.serverId) query = query.where('server_id', '=', filters.serverId);
-    return (await query.orderBy('created_at', 'desc').orderBy('id').execute())
-      .map(toContainer);
+  ) {
+    let query = executor.selectFrom('control.containers')
+      .selectAll()
+      .orderBy('created_at', 'desc');
+    if (options.ownerId) query = query.where('owner_id', '=', options.ownerId);
+    if (options.serverId) query = query.where('server_id', '=', options.serverId);
+    return query.execute();
   }
 
-  async find(
-    id: string,
-    executor: ContainerExecutor = this.database,
-  ): Promise<ContainerAggregate | null> {
-    const row = await executor.selectFrom('control.containers')
+  find(id: string, executor: ContainerExecutor = this.database) {
+    return executor.selectFrom('control.containers')
       .selectAll()
       .where('id', '=', id)
       .executeTakeFirst();
-    return row ? toContainer(row) : null;
   }
 
-  async findByIds(
-    ids: readonly string[],
-    executor: ContainerExecutor = this.database,
-  ): Promise<ContainerAggregate[]> {
-    const uniqueIds = [...new Set(ids)];
-    if (uniqueIds.length === 0) return [];
-    return (await executor.selectFrom('control.containers')
-      .selectAll()
-      .where('id', 'in', uniqueIds)
-      .execute()).map(toContainer);
-  }
-
-  async lock(
-    id: string,
-    transaction: Transaction<NyabaseDatabase>,
-  ): Promise<ContainerAggregate | null> {
-    const row = await transaction.selectFrom('control.containers')
+  lock(id: string, executor: Transaction<NyabaseDatabase>) {
+    return executor.selectFrom('control.containers')
       .selectAll()
       .where('id', '=', id)
       .forUpdate()
       .executeTakeFirst();
-    return row ? toContainer(row) : null;
   }
 
-  async countOnServer(
-    serverId: string,
-    executor: ContainerExecutor = this.database,
-  ): Promise<number> {
-    const row = await executor.selectFrom('control.containers')
-      .select((expression) => expression.fn.countAll<string>().as('count'))
-      .where('server_id', '=', serverId)
-      .executeTakeFirstOrThrow();
-    return Number(row.count);
-  }
-
-  async insert(
-    input: NewContainerAggregate,
-    transaction: Transaction<NyabaseDatabase>,
-  ): Promise<ContainerAggregate> {
-    const row = await transaction.insertInto('control.containers').values({
-      id: input.id,
-      server_id: input.serverId,
-      owner_id: input.ownerId,
-      image_id: input.imageId,
-      created_by: input.createdBy,
-      name: input.name,
-      revision: 1,
-      desired_generation: 1,
-      image_ref: input.imageRef,
-      image_default_uid: input.imageDefaultUid,
-      image_runtime_overrides: JSON.stringify(input.imageRuntimeOverrides),
-      cpu_millis: input.cpuMillis,
-      mem_bytes: input.memBytes,
-      disk_bytes: input.diskBytes,
-      gpu_mode: input.gpuMode,
-      gpu_indices: input.gpuIndices,
-      mounts_json: JSON.stringify(input.mountsJson),
-      power_intent: input.powerIntent,
-      lifecycle_phase: input.lifecyclePhase,
-      observed_generation: null,
-      bound_runtime_id: null,
-      quota_paths: [],
-      runtime_spec_hash: null,
-      active_task_id: null,
-      last_transition_at: new Date(),
-      failure_reason: null,
-      failure_code: null,
-    }).returningAll().executeTakeFirstOrThrow();
-    return toContainer(row);
-  }
-
-  async transition(
-    id: string,
-    expectedRevision: number,
-    patch: {
-      powerIntent?: ContainerPowerIntent;
-      lifecyclePhase?: ContainerPhase;
-      activeTaskId?: string | null;
-      desiredGeneration?: number;
-      observedGeneration?: number | null;
-      boundRuntimeId?: string | null;
-      quotaPaths?: string[];
-      runtimeSpecHash?: string | null;
-      failureReason?: string | null;
-      failureCode?: string | null;
-      name?: string;
-    },
-    transaction: Transaction<NyabaseDatabase>,
-  ): Promise<ContainerAggregate | null> {
-    const values: Updateable<ContainerControlTable> = {
-      last_transition_at: new Date(),
-    };
-    if (patch.powerIntent !== undefined) values.power_intent = patch.powerIntent;
-    if (patch.lifecyclePhase !== undefined) values.lifecycle_phase = patch.lifecyclePhase;
-    if (patch.activeTaskId !== undefined) values.active_task_id = patch.activeTaskId;
-    if (patch.desiredGeneration !== undefined) {
-      values.desired_generation = patch.desiredGeneration;
-    }
-    if (patch.observedGeneration !== undefined) {
-      values.observed_generation = patch.observedGeneration;
-    }
-    if (patch.boundRuntimeId !== undefined) values.bound_runtime_id = patch.boundRuntimeId;
-    if (patch.quotaPaths !== undefined) values.quota_paths = patch.quotaPaths;
-    if (patch.runtimeSpecHash !== undefined) values.runtime_spec_hash = patch.runtimeSpecHash;
-    if (patch.failureReason !== undefined) values.failure_reason = patch.failureReason;
-    if (patch.failureCode !== undefined) values.failure_code = patch.failureCode;
-    if (patch.name !== undefined) values.name = patch.name;
-    const row = await transaction.updateTable('control.containers')
-      .set(values)
-      .set('revision', sql<string>`revision + 1`)
-      .where('id', '=', id)
-      .where('revision', '=', String(expectedRevision))
-      .returningAll()
-      .executeTakeFirst();
-    return row ? toContainer(row) : null;
-  }
-
-  async delete(
-    id: string,
-    expectedRevision: number,
-    transaction: Transaction<NyabaseDatabase>,
-  ): Promise<boolean> {
-    const result = await transaction.deleteFrom('control.containers')
-      .where('id', '=', id)
-      .where('revision', '=', String(expectedRevision))
-      .executeTakeFirst();
-    return Number(result.numDeletedRows) === 1;
-  }
-
-  /**
-   * Recovery-only CAS boundary for a failed aggregate. The Workflow caller
-   * supplies the durable recovery task identity from the same transaction.
-   */
-  async recoverFailed(
-    id: string,
-    expectedRevision: number,
-    activeTaskId: string,
-    transaction: Transaction<NyabaseDatabase>,
-  ): Promise<ContainerAggregate | null> {
-    const row = await transaction.updateTable('control.containers')
-      .set({
-        lifecycle_phase: ContainerPhase.Updating,
-        active_task_id: activeTaskId,
+  insert(input: NewContainerInput, executor: ContainerExecutor) {
+    return executor.insertInto('control.containers')
+      .values({
+        id: input.id,
+        server_id: input.serverId,
+        owner_id: input.ownerId,
+        image_id: input.imageId,
+        created_by: input.createdBy,
+        name: input.name,
+        revision: 1,
+        generation: 1,
+        observed_generation: null,
+        image_alias: input.imageAlias,
+        image_fingerprint: input.imageFingerprint,
+        root_pool_id: input.rootPoolId,
+        root_size_bytes: input.rootSizeBytes,
+        root_size_pending_bytes: null,
+        root_used_bytes: null,
+        cpu_millis: input.cpuMillis,
+        mem_bytes: input.memBytes,
+        nvidia_runtime: input.gpuPciAddresses.length > 0,
+        gpu_pci_addresses: input.gpuPciAddresses,
+        nesting: true,
+        syscall_intercept: true,
+        power_intent: input.powerIntent,
+        lifecycle_phase: 'provisioning',
+        instance_name: deriveInstanceName(input.id),
+        needs_attention: false,
         failure_code: null,
         failure_reason: null,
         last_transition_at: new Date(),
       })
-      .set('revision', sql<string>`revision + 1`)
+      .returningAll()
+      .executeTakeFirstOrThrow()
+      .then(async (row) => {
+        await executor.insertInto('control.container_network_claims')
+          .values({
+            id: randomUUID(),
+            container_id: row.id,
+            server_id: input.serverId,
+            network_key: input.networkKey,
+            address: input.address,
+            state: 'active',
+            reusable_at: null,
+            owner_kind: 'container',
+            owner_id: row.id,
+            cleanup_payload_json: null,
+          })
+          .execute();
+        if (input.gpuPciAddresses.length > 0) {
+          await executor.insertInto('control.container_gpu_claims')
+            .values(input.gpuPciAddresses.map((address) => ({
+              id: randomUUID(),
+              container_id: row.id,
+              server_id: input.serverId,
+              gpu_pci_address: address,
+            })))
+            .execute();
+        }
+        await executor.insertInto('control.container_ssh_routes')
+          .values({
+            container_id: row.id,
+            server_id: input.serverId,
+            instance_name: deriveInstanceName(row.id),
+            routed_ip: input.address,
+            instance_status: 'unknown',
+            instance_started_at: null,
+            ssh_status: 'unknown',
+            container_host_key_fingerprint: null,
+            last_error: null,
+            observed_at: new Date(),
+          })
+          .execute();
+        return row;
+      });
+  }
+
+  updateDesired(
+    id: string,
+    generation: number,
+    values: {
+      cpu_millis?: number;
+      mem_bytes?: number;
+      root_size_bytes?: number;
+      root_size_pending_bytes?: number | null;
+      gpu_pci_addresses?: string[];
+      nvidia_runtime?: boolean;
+      power_intent?: 'running' | 'stopped';
+      lifecycle_phase?: 'provisioning' | 'active' | 'deleting' | 'failed';
+      failure_code?: string | null;
+      failure_reason?: string | null;
+      needs_attention?: boolean;
+    },
+    executor: ContainerExecutor,
+  ) {
+    return executor.updateTable('control.containers')
+      .set({
+        ...values,
+        revision: sql`revision + 1`,
+        generation: generation + 1,
+        last_transition_at: sql`clock_timestamp()`,
+        needs_attention: false,
+      })
       .where('id', '=', id)
-      .where('revision', '=', String(expectedRevision))
-      .where('lifecycle_phase', '=', ContainerPhase.Failed)
+      .where('generation', '=', generation)
       .returningAll()
       .executeTakeFirst();
-    return row ? toContainer(row) : null;
   }
 
-  async replaceMounts(
-    containerId: string,
-    mounts: readonly ContainerMountRecord[],
-    transaction: Transaction<NyabaseDatabase>,
-  ): Promise<void> {
-    await transaction.deleteFrom('control.container_mounts')
-      .where('container_id', '=', containerId)
-      .execute();
-    if (mounts.length === 0) return;
-    await transaction.insertInto('control.container_mounts')
-      .values(mounts.map((mount) => ({
-        id: mount.id,
-        container_id: mount.containerId,
-        server_id: mount.serverId,
-        resource_id: mount.resourceId,
-        source_kind: mount.sourceKind,
-        source_id: mount.sourceId,
-        source_identity: mount.sourceIdentity,
-        user_id: mount.userId,
-        dir_name: mount.dirName,
-        container_path: mount.containerPath,
-      })))
-      .execute();
-  }
-
-  async listMounts(
-    containerIds: readonly string[],
-    executor: ContainerExecutor = this.database,
-  ): Promise<ContainerMountRecord[]> {
-    if (containerIds.length === 0) return [];
-    return (await executor.selectFrom('control.container_mounts')
-      .selectAll()
-      .where('container_id', 'in', [...containerIds])
-      .orderBy('container_id')
-      .orderBy('container_path')
-      .execute()).map((row) => ({
-      id: row.id,
-      containerId: row.container_id,
-      serverId: row.server_id,
-      resourceId: row.resource_id,
-      sourceKind: row.source_kind,
-      sourceId: row.source_id,
-      sourceIdentity: row.source_identity,
-      userId: row.user_id,
-      dirName: row.dir_name,
-      containerPath: row.container_path,
-    }));
+  transition(
+    id: string,
+    generation: number,
+    values: {
+      lifecycle_phase?: 'provisioning' | 'active' | 'deleting' | 'failed';
+      power_intent?: 'running' | 'stopped';
+      failure_code?: string | null;
+      failure_reason?: string | null;
+      needs_attention?: boolean;
+    },
+    executor: ContainerExecutor,
+  ) {
+    return this.updateDesired(id, generation, values, executor);
   }
 
   async replaceGpuClaims(
-    containerId: string,
+    id: string,
     serverId: string,
-    gpuIndices: readonly number[],
-    transaction: Transaction<NyabaseDatabase>,
+    addresses: readonly string[],
+    executor: ContainerExecutor,
   ): Promise<void> {
-    await transaction.deleteFrom('control.container_gpu_claims')
-      .where('container_id', '=', containerId)
+    await executor.deleteFrom('control.container_gpu_claims')
+      .where('container_id', '=', id)
       .execute();
-    if (gpuIndices.length === 0) return;
-    await transaction.insertInto('control.container_gpu_claims')
-      .values(gpuIndices.map((gpuIndex) => ({
-        id: crypto.randomUUID(),
-        container_id: containerId,
+    if (addresses.length === 0) return;
+    await executor.insertInto('control.container_gpu_claims')
+      .values(addresses.map((address) => ({
+        id: randomUUID(),
+        container_id: id,
         server_id: serverId,
-        gpu_index: gpuIndex,
+        gpu_pci_address: address,
       })))
       .execute();
   }
 
-  async claimedGpuIndices(
-    serverId: string,
-    executor: ContainerExecutor = this.database,
-  ): Promise<number[]> {
-    return (await executor.selectFrom('control.container_gpu_claims')
-      .select('gpu_index')
-      .where('server_id', '=', serverId)
-      .execute()).map((row) => row.gpu_index);
+  async releaseGpuClaims(id: string, executor: ContainerExecutor): Promise<void> {
+    await executor.deleteFrom('control.container_gpu_claims')
+      .where('container_id', '=', id)
+      .execute();
   }
 
-  async listNetworkAddresses(
+  async findAvailableAddress(
     networkKey: string,
-    executor: ContainerExecutor = this.database,
-  ): Promise<string[]> {
-    return (await executor.selectFrom('control.container_network_claims')
-      .select('address')
+    allocationCidr: string,
+    reserved: readonly string[],
+    seed: string,
+    executor: ContainerExecutor,
+  ): Promise<string> {
+    await sql`SELECT pg_advisory_xact_lock(hashtextextended(${`container-network:${networkKey}`}, 0))`
+      .execute(executor);
+    await executor.deleteFrom('control.container_network_claims')
       .where('network_key', '=', networkKey)
-      .execute()).map((row) => row.address);
-  }
-
-  async insertNetworkClaim(
-    input: {
-      id: string;
-      containerId: string;
-      serverId: string;
-      networkKey: string;
-      address: string;
-    },
-    transaction: Transaction<NyabaseDatabase>,
-  ): Promise<void> {
-    await transaction.insertInto('control.container_network_claims').values({
-      id: input.id,
-      container_id: input.containerId,
-      owner_kind: 'container',
-      owner_id: input.containerId,
-      server_id: input.serverId,
-      network_key: input.networkKey,
-      address: input.address,
-      state: 'active',
-      reusable_at: null,
-      cleanup_payload_json: null,
-    }).execute();
-  }
-
-  async networkClaimForContainer(
-    containerId: string,
-    executor: ContainerExecutor = this.database,
-  ): Promise<ContainerNetworkClaimRecord | null> {
-    const row = await executor.selectFrom('control.container_network_claims')
-      .selectAll()
-      .where('container_id', '=', containerId)
-      .executeTakeFirst();
-    return row ? {
-      id: row.id,
-      containerId: row.container_id,
-      ownerKind: row.owner_kind,
-      ownerId: row.owner_id,
-      serverId: row.server_id,
-      networkKey: row.network_key,
-      address: row.address,
-      state: row.state,
-      reusableAt: row.reusable_at,
-      cleanupPayload: row.cleanup_payload_json,
-    } : null;
-  }
-
-  async activeNetworkClaims(
-    input: { serverId?: string; containerIds?: readonly string[]; addresses?: readonly string[] },
-    executor: ContainerExecutor = this.database,
-  ): Promise<ContainerNetworkClaimRecord[]> {
-    // Each supplied collection is an intersecting filter. An explicitly empty
-    // collection therefore has an empty result and must never compile to
-    // PostgreSQL's invalid `IN ()` syntax.
-    if (input.containerIds?.length === 0 || input.addresses?.length === 0) return [];
-    let query = executor.selectFrom('control.container_network_claims')
-      .selectAll()
-      .where('state', '=', 'active');
-    if (input.serverId) query = query.where('server_id', '=', input.serverId);
-    if (input.containerIds) {
-      query = query.where('container_id', 'in', [...input.containerIds]);
-    }
-    if (input.addresses) query = query.where('address', 'in', [...input.addresses]);
-    return (await query.execute()).map((row) => ({
-      id: row.id,
-      containerId: row.container_id,
-      ownerKind: row.owner_kind,
-      ownerId: row.owner_id,
-      serverId: row.server_id,
-      networkKey: row.network_key,
-      address: row.address,
-      state: row.state,
-      reusableAt: row.reusable_at,
-      cleanupPayload: row.cleanup_payload_json,
-    }));
-  }
-
-  async markNetworkClaimReleasing(
-    containerId: string,
-    reusableAt: Date,
-    transaction: Transaction<NyabaseDatabase>,
-  ): Promise<boolean> {
-    const updated = await transaction.updateTable('control.container_network_claims')
-      .set({ state: 'releasing', reusable_at: reusableAt })
-      .where('container_id', '=', containerId)
-      .where('state', '=', 'active')
-      .executeTakeFirst();
-    return Number(updated.numUpdatedRows) === 1;
-  }
-
-  currentDatabaseTime(
-    executor: ContainerExecutor = this.database,
-  ): Promise<Date> {
-    return sql<{ now: Date }>`select clock_timestamp() as now`
-      .execute(executor)
-      .then((result) => new Date(result.rows[0]!.now));
-  }
-
-  networkClaimReuseDeadline(
-    delayMs: number,
-    executor: ContainerExecutor = this.database,
-  ): Promise<Date> {
-    const boundedDelayMs = Math.max(
-      0,
-      Math.min(86_400_000, Math.trunc(delayMs)),
+      .where('state', '=', 'releasing')
+      .where('reusable_at', '<=', new Date())
+      .execute();
+    const claims = await executor.selectFrom('control.container_network_claims')
+      .select(['address', 'state', 'reusable_at'])
+      .where('network_key', '=', networkKey)
+      .forUpdate()
+      .execute();
+    const occupied = new Set(
+      claims
+        .filter((claim) => claim.state === 'active'
+          || (claim.reusable_at !== null && new Date(claim.reusable_at).getTime() > Date.now()))
+        .map((claim) => claim.address),
     );
-    return sql<{ reusableAt: Date }>`
-      select clock_timestamp()
-        + (${boundedDelayMs} * interval '1 millisecond') as "reusableAt"
-    `.execute(executor)
-      .then((result) => new Date(result.rows[0]!.reusableAt));
+    for (const value of reserved) occupied.add(value);
+    const parsed = parseIpv4Cidr(allocationCidr);
+    if (!parsed) throw new Error('Invalid IP pool CIDR');
+    const total = 2 ** (32 - parsed.prefix);
+    const start = Number.parseInt(seed.replaceAll('-', '').slice(0, 8), 16) % Math.max(total, 1);
+    for (let offset = 0; offset < Math.min(total, 65_536); offset += 1) {
+      const candidate = ipv4Text(parsed.network + ((start + offset) % total));
+      if (
+        candidate === ipv4Text(parsed.network)
+        || candidate === parsed.gateway
+        || candidate === ipv4Text(parsed.broadcast)
+        || occupied.has(candidate)
+      ) continue;
+      return candidate;
+    }
+    throw new Error('No IP address is available');
   }
 
-  async runtimeCleanupClaims(
-    serverId: string,
-    executor: ContainerExecutor = this.database,
-  ): Promise<ContainerNetworkClaimRecord[]> {
-    const rows = await executor.selectFrom('control.container_network_claims')
+  listAttachments(containerId: string, executor: ContainerExecutor = this.database) {
+    return executor.selectFrom('control.volume_attachments')
       .selectAll()
-      .where('owner_kind', '=', 'runtime_cleanup')
-      .where('server_id', '=', serverId)
-      .orderBy('owner_id')
+      .where('container_id', '=', containerId)
+      .orderBy('created_at')
       .execute();
-    return rows.map((row) => ({
-      id: row.id,
-      containerId: row.container_id,
-      ownerKind: row.owner_kind,
-      ownerId: row.owner_id,
-      serverId: row.server_id,
-      networkKey: row.network_key,
-      address: row.address,
-      state: row.state,
-      reusableAt: row.reusable_at,
-      cleanupPayload: row.cleanup_payload_json,
-    }));
   }
 
-  async allNetworkClaims(
-    executor: ContainerExecutor = this.database,
-  ): Promise<ContainerNetworkClaimRecord[]> {
-    const rows = await executor.selectFrom('control.container_network_claims')
+  currentRoute(containerId: string, executor: ContainerExecutor = this.database) {
+    return executor.selectFrom('control.container_ssh_routes')
       .selectAll()
-      .orderBy('id')
-      .execute();
-    return rows.map((row) => ({
-      id: row.id,
-      containerId: row.container_id,
-      ownerKind: row.owner_kind,
-      ownerId: row.owner_id,
-      serverId: row.server_id,
-      networkKey: row.network_key,
-      address: row.address,
-      state: row.state,
-      reusableAt: row.reusable_at,
-      cleanupPayload: row.cleanup_payload_json,
-    }));
-  }
-
-  async insertRuntimeCleanupClaim(
-    input: {
-      id: string;
-      runtimeId: string;
-      serverId: string;
-      networkKey: string;
-      address: string;
-      cleanupPayload: unknown;
-    },
-    transaction: Transaction<NyabaseDatabase>,
-  ): Promise<void> {
-    await transaction.insertInto('control.container_network_claims').values({
-      id: input.id,
-      container_id: null,
-      owner_kind: 'runtime_cleanup',
-      owner_id: input.runtimeId,
-      server_id: input.serverId,
-      network_key: input.networkKey,
-      address: input.address,
-      state: 'active',
-      reusable_at: null,
-      cleanup_payload_json: JSON.stringify(input.cleanupPayload),
-    }).execute();
-  }
-
-  async adoptReleasedContainerClaimForRuntimeCleanup(
-    input: {
-      containerId: string;
-      runtimeId: string;
-      serverId: string;
-      networkKey: string;
-      address: string;
-      cleanupPayload: unknown;
-    },
-    transaction: Transaction<NyabaseDatabase>,
-  ): Promise<boolean> {
-    const updated = await transaction.updateTable('control.container_network_claims')
-      .set({
-        owner_kind: 'runtime_cleanup',
-        owner_id: input.runtimeId,
-        state: 'active',
-        reusable_at: null,
-        cleanup_payload_json: JSON.stringify(input.cleanupPayload),
-      })
-      .where('container_id', 'is', null)
-      .where('owner_kind', '=', 'container')
-      .where('owner_id', '=', input.containerId)
-      .where('server_id', '=', input.serverId)
-      .where('network_key', '=', input.networkKey)
-      .where('address', '=', input.address)
-      .where('state', '=', 'releasing')
+      .where('container_id', '=', containerId)
       .executeTakeFirst();
-    return Number(updated.numUpdatedRows) === 1;
   }
 
-  async markRuntimeCleanupReleasing(
-    runtimeId: string,
-    serverId: string,
-    reusableAt: Date,
-    transaction: Transaction<NyabaseDatabase>,
-  ): Promise<ContainerNetworkClaimRecord | null> {
-    const row = await transaction.updateTable('control.container_network_claims')
-      .set({ state: 'releasing', reusable_at: reusableAt })
-      .where('owner_kind', '=', 'runtime_cleanup')
-      .where('owner_id', '=', runtimeId)
-      .where('server_id', '=', serverId)
-      .where('state', '=', 'active')
-      .returningAll()
-      .executeTakeFirst();
-    return row ? {
-      id: row.id,
-      containerId: row.container_id,
-      ownerKind: row.owner_kind,
-      ownerId: row.owner_id,
-      serverId: row.server_id,
-      networkKey: row.network_key,
-      address: row.address,
-      state: row.state,
-      reusableAt: row.reusable_at,
-      cleanupPayload: row.cleanup_payload_json,
-    } : null;
-  }
-
-  async reactivateRuntimeCleanupClaim(
-    id: string,
-    cleanupPayload: unknown,
-    transaction: Transaction<NyabaseDatabase>,
-  ): Promise<boolean> {
-    const updated = await transaction.updateTable('control.container_network_claims')
-      .set({
-        state: 'active',
-        reusable_at: null,
-        cleanup_payload_json: JSON.stringify(cleanupPayload),
-      })
-      .where('id', '=', id)
-      .where('owner_kind', '=', 'runtime_cleanup')
-      .where('state', '=', 'releasing')
-      .executeTakeFirst();
-    return Number(updated.numUpdatedRows) === 1;
-  }
-
-  async deleteReleasedNetworkClaim(
-    id: string,
-    reusableAt: Date,
-    transaction: Transaction<NyabaseDatabase>,
-  ): Promise<boolean> {
-    const deleted = await transaction.deleteFrom('control.container_network_claims')
-      .where('id', '=', id)
-      .where('state', '=', 'releasing')
-      .where('reusable_at', '=', reusableAt)
-      .executeTakeFirst();
-    return Number(deleted.numDeletedRows) === 1;
-  }
-
-  async releasedNetworkClaimCandidates(
-    now: Date,
-    limit: number,
+  routes(
+    containerIds: readonly string[],
     executor: ContainerExecutor = this.database,
-  ): Promise<ContainerNetworkClaimRecord[]> {
-    const rows = await executor.selectFrom('control.container_network_claims')
+  ): Promise<ContainerSshRouteRecord[]> {
+    if (containerIds.length === 0) return Promise.resolve([]);
+    return executor.selectFrom('control.container_ssh_routes')
       .selectAll()
-      .where('state', '=', 'releasing')
-      .where('reusable_at', '<=', now)
-      .orderBy('reusable_at')
-      .orderBy('id')
-      .limit(limit)
-      .execute();
-    return rows.map((row) => ({
-      id: row.id,
-      containerId: row.container_id,
-      ownerKind: row.owner_kind,
-      ownerId: row.owner_id,
-      serverId: row.server_id,
-      networkKey: row.network_key,
-      address: row.address,
-      state: row.state,
-      reusableAt: row.reusable_at,
-      cleanupPayload: row.cleanup_payload_json,
-    }));
+      .where('container_id', 'in', [...containerIds])
+      .execute()
+      .then((rows) => rows.map((row) => this.route(row)));
+  }
+
+  listRoutes(
+    options: { serverId?: string } = {},
+    executor: ContainerExecutor = this.database,
+  ): Promise<ContainerSshRouteRecord[]> {
+    let query = executor.selectFrom('control.container_ssh_routes').selectAll();
+    if (options.serverId) query = query.where('server_id', '=', options.serverId);
+    return query.execute().then((rows) => rows.map((row) => this.route(row)));
   }
 
   async replaceServerRoutes(
     serverId: string,
     routes: readonly ContainerSshRouteRecord[],
-    transaction: Transaction<NyabaseDatabase>,
+    executor: ContainerExecutor,
   ): Promise<void> {
-    await transaction.deleteFrom('control.container_ssh_routes')
+    await executor.deleteFrom('control.container_ssh_routes')
       .where('server_id', '=', serverId)
       .execute();
     if (routes.length === 0) return;
-    await transaction.insertInto('control.container_ssh_routes').values(
-      routes.map((route) => this.routeValues(route)),
-    ).execute();
-  }
-
-  async upsertRoute(
-    route: ContainerSshRouteRecord,
-    transaction: Transaction<NyabaseDatabase>,
-  ): Promise<void> {
-    await transaction.insertInto('control.container_ssh_routes')
-      .values(this.routeValues(route))
-      .onConflict((conflict) => conflict.column('container_id').doUpdateSet({
+    await executor.insertInto('control.container_ssh_routes')
+      .values(routes.map((route) => ({
+        container_id: route.containerId,
         server_id: route.serverId,
-        runtime_id: route.runtimeId,
-        macvlan_ip: route.macvlanIp,
-        runtime_status: route.runtimeStatus,
+        instance_name: route.instanceName,
+        routed_ip: route.routedIp,
+        instance_status: route.runtimeStatus,
         ssh_status: route.sshStatus,
-        applied_internal_key_generation: route.appliedInternalKeyGeneration,
         container_host_key_fingerprint: route.containerHostKeyFingerprint,
         last_error: route.lastError,
         observed_at: route.observedAt,
-      }))
+      })))
       .execute();
   }
 
   async deleteRoutes(
-    filters: { serverId?: string } = {},
+    options: { serverId?: string; containerId?: string } = {},
     executor: ContainerExecutor = this.database,
   ): Promise<void> {
     let query = executor.deleteFrom('control.container_ssh_routes');
-    if (filters.serverId) query = query.where('server_id', '=', filters.serverId);
+    if (options.serverId) query = query.where('server_id', '=', options.serverId);
+    if (options.containerId) query = query.where('container_id', '=', options.containerId);
     await query.execute();
   }
 
-  async listRoutes(
-    filters: { serverId?: string } = {},
+  activeNetworkClaims(
+    filter: { addresses?: readonly string[]; serverId?: string } = {},
     executor: ContainerExecutor = this.database,
-  ): Promise<ContainerSshRouteRecord[]> {
-    let query = executor.selectFrom('control.container_ssh_routes').selectAll();
-    if (filters.serverId) query = query.where('server_id', '=', filters.serverId);
-    return (await query.execute()).map((row) => this.toRoute(row));
-  }
-
-  async routes(
-    containerIds: readonly string[],
-    executor: ContainerExecutor = this.database,
-  ): Promise<Map<string, ContainerSshRouteRecord>> {
-    if (containerIds.length === 0) return new Map();
-    const rows = await executor.selectFrom('control.container_ssh_routes')
+  ): Promise<NetworkClaimRecord[]> {
+    let query = executor.selectFrom('control.container_network_claims')
       .selectAll()
-      .where('container_id', 'in', [...containerIds])
-      .execute();
-    return new Map(rows.map((row) => [row.container_id, this.toRoute(row)]));
+      .where('state', '=', 'active');
+    if (filter.serverId) query = query.where('server_id', '=', filter.serverId);
+    if (filter.addresses && filter.addresses.length > 0) {
+      query = query.where('address', 'in', [...filter.addresses]);
+    }
+    return query.execute().then((rows) => rows.map((row) => ({
+      id: row.id,
+      containerId: row.container_id,
+      serverId: row.server_id,
+      networkKey: row.network_key,
+      address: row.address,
+      state: row.state,
+      reusableAt: row.reusable_at ? new Date(row.reusable_at) : null,
+      ownerKind: row.owner_kind,
+      ownerId: row.owner_id,
+    })));
   }
 
-  private routeValues(route: ContainerSshRouteRecord) {
-    return {
-      container_id: route.containerId,
-      server_id: route.serverId,
-      runtime_id: route.runtimeId,
-      macvlan_ip: route.macvlanIp,
-      runtime_status: route.runtimeStatus,
-      ssh_status: route.sshStatus,
-      applied_internal_key_generation: route.appliedInternalKeyGeneration,
-      container_host_key_fingerprint: route.containerHostKeyFingerprint,
-      last_error: route.lastError,
-      observed_at: route.observedAt,
-    };
+  countOnServer(serverId: string, executor: ContainerExecutor = this.database) {
+    return executor.selectFrom('control.containers')
+      .select(sql<number>`count(*)`.as('count'))
+      .where('server_id', '=', serverId)
+      .where('lifecycle_phase', 'not in', ['failed', 'deleting'])
+      .executeTakeFirstOrThrow()
+      .then((row) => Number(row.count));
   }
 
-  private toRoute(
-    row: Selectable<import('./container-control-database.types.js').ContainerSshRouteTable>,
-  ): ContainerSshRouteRecord {
+  claimedGpuAddresses(
+    serverId: string,
+    executor: ContainerExecutor = this.database,
+    excludeContainerId?: string,
+  ) {
+    let query = executor.selectFrom('control.container_gpu_claims as gpu')
+      .innerJoin('control.containers as container', 'container.id', 'gpu.container_id')
+      .select('gpu.gpu_pci_address')
+      .where('gpu.server_id', '=', serverId)
+      .where('container.server_id', '=', serverId)
+      .where('container.lifecycle_phase', 'not in', ['failed', 'deleting']);
+    if (excludeContainerId) {
+      query = query.where('gpu.container_id', '!=', excludeContainerId);
+    }
+    return query.execute()
+      .then((rows) => rows.map((row) => row.gpu_pci_address));
+  }
+
+  private route(row: {
+    container_id: string;
+    server_id: string;
+    instance_name: string;
+    routed_ip: string;
+    instance_status: string;
+    ssh_status: 'disabled' | 'container_stopped' | 'running' | 'error' | 'unknown';
+    container_host_key_fingerprint: string | null;
+    last_error: string | null;
+    observed_at: Date;
+  }): ContainerSshRouteRecord {
     return {
       containerId: row.container_id,
       serverId: row.server_id,
-      runtimeId: row.runtime_id,
-      macvlanIp: row.macvlan_ip,
-      runtimeStatus: row.runtime_status,
+      instanceName: row.instance_name,
+      routedIp: row.routed_ip,
+      runtimeStatus: row.instance_status,
       sshStatus: row.ssh_status,
-      appliedInternalKeyGeneration: row.applied_internal_key_generation,
       containerHostKeyFingerprint: row.container_host_key_fingerprint,
       lastError: row.last_error,
       observedAt: row.observed_at,
@@ -783,36 +422,44 @@ export class ContainerControlRepository {
   }
 }
 
-function toContainer(row: Selectable<ContainerControlTable>): ContainerAggregate {
+function parseIpv4Cidr(value: string): {
+  network: number;
+  broadcast: number;
+  prefix: number;
+  gateway: string | null;
+} | null {
+  const [address, rawPrefix] = value.split('/');
+  const prefix = Number(rawPrefix);
+  if (!address || !Number.isInteger(prefix) || prefix < 0 || prefix > 32) return null;
+  const number = ipv4Number(address);
+  if (number === null) return null;
+  const mask = prefix === 0 ? 0 : (0xffffffff << (32 - prefix)) >>> 0;
+  const network = number & mask;
   return {
-    id: row.id,
-    serverId: row.server_id,
-    ownerId: row.owner_id,
-    imageId: row.image_id,
-    createdBy: row.created_by,
-    name: row.name,
-    revision: safeInteger(row.revision, 'container revision'),
-    desiredGeneration: row.desired_generation,
-    imageRef: row.image_ref,
-    imageDefaultUid: row.image_default_uid,
-    imageRuntimeOverrides: row.image_runtime_overrides,
-    cpuMillis: row.cpu_millis,
-    memBytes: safeInteger(row.mem_bytes, 'container memory'),
-    diskBytes: safeInteger(row.disk_bytes, 'container disk'),
-    gpuMode: row.gpu_mode,
-    gpuIndices: row.gpu_indices,
-    mountsJson: row.mounts_json,
-    powerIntent: row.power_intent,
-    lifecyclePhase: row.lifecycle_phase,
-    observedGeneration: row.observed_generation,
-    boundRuntimeId: row.bound_runtime_id,
-    quotaPaths: row.quota_paths,
-    runtimeSpecHash: row.runtime_spec_hash,
-    activeTaskId: row.active_task_id,
-    lastTransitionAt: row.last_transition_at,
-    failureReason: row.failure_reason,
-    failureCode: row.failure_code,
-    createdAt: row.created_at,
-    updatedAt: row.updated_at,
+    network,
+    broadcast: (network | (~mask >>> 0)) >>> 0,
+    prefix,
+    gateway: null,
   };
+}
+
+function ipv4Number(value: string): number | null {
+  const parts = value.split('.');
+  if (parts.length !== 4) return null;
+  let result = 0;
+  for (const part of parts) {
+    const octet = Number(part);
+    if (!Number.isInteger(octet) || octet < 0 || octet > 255) return null;
+    result = (result * 256 + octet) >>> 0;
+  }
+  return result;
+}
+
+function ipv4Text(value: number): string {
+  return [
+    (value >>> 24) & 255,
+    (value >>> 16) & 255,
+    (value >>> 8) & 255,
+    value & 255,
+  ].join('.');
 }

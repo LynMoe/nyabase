@@ -3,7 +3,7 @@ import { AccessModule } from '../access/access.module.js';
 import { AuthModule } from '../auth/auth.module.js';
 import { ProxySnapshotNotifierModule } from '../proxy-snapshots/proxy-snapshot-notifier.module.js';
 import { AdminHttpProxyController } from './admin-http-proxy.controller.js';
-import { HttpProxyController } from './http-proxy.controller.js';
+import { HttpProxyController, HttpProxyDomainPoolsController } from './http-proxy.controller.js';
 import { HttpProxyGateway } from './http-proxy-gateway.js';
 import { HttpProxyService } from './http-proxy.service.js';
 import { AuditModule } from '../audit/audit.module.js';
@@ -16,7 +16,7 @@ import { AuditModule } from '../audit/audit.module.js';
     AuditModule,
   ],
   providers: [HttpProxyService, HttpProxyGateway],
-  controllers: [HttpProxyController, AdminHttpProxyController],
+  controllers: [HttpProxyController, HttpProxyDomainPoolsController, AdminHttpProxyController],
   exports: [HttpProxyService, HttpProxyGateway],
 })
 export class HttpProxyModule {}

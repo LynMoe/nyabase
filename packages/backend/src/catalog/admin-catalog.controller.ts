@@ -4,7 +4,6 @@ import { RequireAnyCaps, RequireCaps } from '../auth/decorators/require-caps.dec
 import { CapabilitiesGuard } from '../auth/guards/capabilities.guard.js';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard.js';
 import type { UserRecord } from '../domain/domain-records.js';
-import { AgentGateway } from '../gateway/agent-gateway.js';
 import { CurrentUser } from '../auth/decorators/current-user.decorator.js';
 import { AccessResolverService } from '../access/access-resolver.service.js';
 import { CatalogPersistence } from './catalog.persistence.js';
@@ -19,7 +18,6 @@ import { CatalogPersistence } from './catalog.persistence.js';
 export class AdminCatalogController {
   constructor(
     private readonly persistence: CatalogPersistence,
-    private readonly agentGateway: AgentGateway,
     private readonly accessResolver: AccessResolverService,
   ) {}
 
@@ -63,39 +61,14 @@ export class AdminCatalogController {
   @RequireCaps(Capability.ManageGrants)
   async listGrantServers() {
     const rows = await this.persistence.listServers();
-    return rows.map((server) => {
-      const snapshot = this.agentGateway.stateCache.get(server.id);
-      return {
-        id: server.id,
-        name: server.name,
-        slug: server.slug,
-        status: server.status,
-        runtimeReady: snapshot?.runtimeReady === true,
-        gpus: (snapshot?.gpus ?? []).map((gpu) => ({
-          index: gpu.index,
-          model: gpu.model,
-          totalMemMiB: gpu.totalMemMiB,
-        })),
-      };
-    });
-  }
-
-  @Get('grant-images')
-  @RequireCaps(Capability.ManageGrants)
-  async listGrantImages() {
-    const rows = await this.persistence.listActiveImages();
-    return rows.map((image) => ({
-      id: image.id,
-      name: image.name,
-      description: image.description,
-      isActive: image.is_active,
+    return rows.map((server) => ({
+      id: server.id,
+      name: server.name,
+      slug: server.slug,
+      status: server.status,
+      runtimeReady: server.status === 'online' && server.preflight_status === 'passed',
+      gpus: [],
     }));
-  }
-
-  @Get('grant-remote-fs-mounts')
-  @RequireCaps(Capability.ManageGrants)
-  async listGrantRemoteFsMounts() {
-    return this.persistence.listActiveRemoteFsMounts();
   }
 
   @Get('metric-servers')
@@ -107,8 +80,8 @@ export class AdminCatalogController {
       name: server.name,
       slug: server.slug,
       status: server.status,
-      runtimeReady: this.agentGateway.stateCache.get(server.id)?.runtimeReady === true,
-      hasGpu: (this.agentGateway.stateCache.get(server.id)?.gpus.length ?? 0) > 0,
+      runtimeReady: server.status === 'online' && server.preflight_status === 'passed',
+      hasGpu: server.gpu_runtime_available,
     }));
   }
 }

@@ -1,4 +1,4 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable } from '@nestjs/common';
 import { sql } from 'kysely';
 import {
   ContainerPhase,
@@ -7,9 +7,10 @@ import {
   ServerStatus,
   UserStatus,
   MAX_SSH_PROXY_SNAPSHOT_BYTES,
+  PROXY_SNAPSHOT_MAX_CLOCK_SKEW_MS,
   zSshProxySnapshot,
   type SshProxyEndpoint,
-  type SshProxyRuntimeRouteSnapshot,
+  type SshProxyInstanceRouteSnapshot,
   type SshProxySnapshot,
 } from '@nyabase/common';
 import {
@@ -18,13 +19,20 @@ import {
 } from '../containers/container-control.repository.js';
 import { NyabaseConfigService } from '../config/nyabase-config.service.js';
 import { PgTransactionManager } from '../persistence-pg/transaction.js';
-import { ProxySnapshotNotifierService } from '../proxy-snapshots/proxy-snapshot-notifier.service.js';
 import { loadUsableServerAccessKeys } from '../access/usable-server-access.js';
 import { SshIdentityService } from './ssh-identity.service.js';
 
+function normalizeRouteRuntimeStatus(value: string | null | undefined): ContainerStatus {
+  const normalized = value?.toLowerCase();
+  if (normalized === 'running') return ContainerStatus.Running;
+  if (normalized === 'stopped') return ContainerStatus.Stopped;
+  if (normalized === 'frozen') return ContainerStatus.Frozen;
+  if (normalized === 'error') return ContainerStatus.Error;
+  return ContainerStatus.Unknown;
+}
+
 @Injectable()
 export class SshProxySnapshotService {
-  private readonly logger = new Logger(SshProxySnapshotService.name);
   private generation = 0;
 
   constructor(
@@ -32,210 +40,99 @@ export class SshProxySnapshotService {
     private readonly containers: ContainerControlRepository,
     private readonly identities: SshIdentityService,
     private readonly config: NyabaseConfigService,
-    private readonly proxySnapshots: ProxySnapshotNotifierService = {
-      isServerBlocked: () => false,
-    } as unknown as ProxySnapshotNotifierService,
   ) {}
 
-  /**
-   * All usable routing/key state is read from one PostgreSQL snapshot. Initial
-   * ssh-keygen remains outside the transaction; the persisted winning host key
-   * is then sampled inside it.
-   */
   async buildSnapshot(): Promise<SshProxySnapshot> {
-    await this.identities.ensureProxyHostKey();
+    const hostKey = await this.identities.ensureProxyHostKey();
     return this.transactions.run(async (transaction) => {
       const clock = await sql<{ now: Date }>`
         select clock_timestamp() as now
       `.execute(transaction);
-      const createdAtMs = new Date(clock.rows[0]!.now).getTime();
+      const now = new Date(clock.rows[0]!.now);
       const users = await transaction.selectFrom('iam.users')
         .select(['id', 'username', 'status'])
         .where('status', '=', UserStatus.Active)
         .execute();
       const userIds = users.map((user) => user.id);
-      const routes = await this.containers.listRoutes({}, transaction);
-      const routeIps = [...new Set(routes
-        .map((route) => route.macvlanIp)
-        .filter((ip): ip is string => Boolean(ip)))];
-      const [
-        publicKeys,
-        internalKeys,
-        servers,
-        runtimeReadyServers,
-        images,
-        aggregateRows,
-        addressClaims,
-        remoteMounts,
-        remoteAssignments,
-        hostKey,
-        usableAccess,
-      ] = await Promise.all([
-        userIds.length === 0
-          ? Promise.resolve([])
-          : transaction.selectFrom('iam.ssh_public_keys')
-            .select(['user_id', 'key_text'])
-            .where('user_id', 'in', userIds)
+      const [publicKeys, servers, images, containers, routes, access] =
+        await Promise.all([
+          userIds.length === 0
+            ? Promise.resolve([])
+            : transaction.selectFrom('iam.ssh_public_keys')
+              .select(['user_id', 'key_text'])
+              .where('user_id', 'in', userIds)
+              .execute(),
+          transaction.selectFrom('infra.servers')
+            .select(['id', 'slug', 'name', 'status', 'parent_interface'])
             .execute(),
-        userIds.length === 0
-          ? Promise.resolve([])
-          : transaction.selectFrom('iam.user_internal_ssh_keys')
-            .selectAll()
-            .where('user_id', 'in', userIds)
+          transaction.selectFrom('infra.images')
+            .select(['id'])
             .execute(),
-        transaction.selectFrom('infra.servers')
-          .select(['id', 'slug', 'name', 'status', 'macvlan_cidr'])
-          .execute(),
-        transaction
-          .selectFrom('workflow.agent_runtime_projections as projection')
-          .innerJoin(
-            'workflow.agent_sessions as session',
-            'session.id',
-            'projection.session_id',
-          )
-          .select('projection.server_id')
-          .where('projection.runtime_ready', '=', true)
-          .where('session.state', '=', 'ready')
-          .where('session.lease_expires_at', '>', sql<Date>`clock_timestamp()`)
-          .whereRef('session.generation', '=', 'projection.session_generation')
-          .whereRef('session.gateway_id', '=', 'projection.gateway_id')
-          .execute(),
-        transaction.selectFrom('infra.images')
-          .select(['id', 'disable_ssh'])
-          .execute(),
-        this.containers.list({}, transaction),
-        this.containers.activeNetworkClaims(
-          { addresses: routeIps },
-          transaction,
-        ),
-        transaction.selectFrom('control.container_mounts')
-          .select(['container_id', 'server_id', 'source_id'])
-          .where('source_kind', '=', 'remote')
-          .execute(),
-        transaction.selectFrom('infra.remote_fs_server_assignments')
-          .select(['server_id', 'remote_fs_mount_id', 'desired_state'])
-          .execute(),
-        this.identities.getProxyHostKey(transaction),
-        loadUsableServerAccessKeys(transaction),
-      ]);
-
+          this.containers.list({}, transaction),
+          this.containers.listRoutes({}, transaction),
+          loadUsableServerAccessKeys(transaction),
+        ]);
       const publicKeysByUser = new Map<string, string[]>();
       for (const key of publicKeys) {
-        const rows = publicKeysByUser.get(key.user_id) ?? [];
-        rows.push(key.key_text);
-        publicKeysByUser.set(key.user_id, rows);
+        const list = publicKeysByUser.get(key.user_id) ?? [];
+        list.push(key.key_text);
+        publicKeysByUser.set(key.user_id, list);
       }
-      const internalByUser = new Map(
-        internalKeys.map((key) => [key.user_id, key]),
-      );
       const serverById = new Map(servers.map((server) => [server.id, server]));
-      const runtimeReadyServerIds = new Set(
-        runtimeReadyServers.map((server) => server.server_id),
+      const imageIds = new Set(images.map((image) => image.id));
+      const claims = await this.containers.activeNetworkClaims(
+        {
+          addresses: routes
+            .map((route) => route.routedIp)
+            .filter((ip): ip is string => Boolean(ip)),
+        },
+        transaction,
       );
-      const imageById = new Map(images.map((image) => [image.id, image]));
-      const usableAccessKeys = usableAccess;
-      const aggregateRowsWithAccess = aggregateRows.filter((container) =>
-        usableAccessKeys.has(`${container.ownerId}\0${container.serverId}`));
-      const containerById = new Map(
-        aggregateRowsWithAccess.map((container) => [container.id, container]),
-      );
-      const claimsByAddress = new Map<string, typeof addressClaims>();
-      for (const claim of addressClaims) {
-        const claims = claimsByAddress.get(claim.address) ?? [];
-        claims.push(claim);
-        claimsByAddress.set(claim.address, claims);
-      }
-      const activeRemoteAssignments = new Set(remoteAssignments
-        .filter((assignment) => assignment.desired_state === 'active')
-        .map((assignment) =>
-          `${assignment.server_id}|${assignment.remote_fs_mount_id}`));
-      const unsafeRemoteConsumerIds = new Set(remoteMounts
-        .filter((mount) => !activeRemoteAssignments.has(
-          `${mount.server_id}|${mount.source_id}`,
-        ))
-        .map((mount) => mount.container_id));
-      const staleAfterMs = this.config.get<number>(
-        'ssh.proxySnapshotStaleMs',
-      );
+      const claimByAddress = new Map(claims.map((claim) => [claim.address, claim]));
+      const staleAfterMs = this.config.get<number>('ssh.proxySnapshotStaleMs');
+      const visibleContainers = containers.filter((container) =>
+        container.instance_name
+        && access.has(`${container.owner_id}\0${container.server_id}`));
       const safeRoutes = routes.filter((route) => {
-        const container = containerById.get(route.containerId);
-        const server = container
-          ? serverById.get(container.serverId)
-          : undefined;
-        const image = container
-          ? imageById.get(container.imageId)
-          : undefined;
-        const desiredKey = container
-          ? internalByUser.get(container.ownerId)
-          : undefined;
-        const claimsForAddress = route.macvlanIp
-          ? claimsByAddress.get(route.macvlanIp) ?? []
-          : [];
-        const exactClaim = claimsForAddress.find((claim) =>
-          claim.ownerKind === 'container'
-          && claim.containerId === route.containerId
-          && claim.serverId === route.serverId);
-        const age = createdAtMs - route.observedAt.getTime();
+        const container = visibleContainers.find((row) => row.id === route.containerId);
+        const server = container ? serverById.get(container.server_id) : undefined;
+        const claim = route.routedIp ? claimByAddress.get(route.routedIp) : undefined;
+        const age = now.getTime() - route.observedAt.getTime();
+        const runtimeStatus = normalizeRouteRuntimeStatus(route.runtimeStatus);
         return Boolean(
           container
-          && !unsafeRemoteConsumerIds.has(container.id)
-          && container.lifecyclePhase === ContainerPhase.Active
-          && container.activeTaskId === null
-          && container.boundRuntimeId === route.runtimeId
-          && container.powerIntent === ContainerPowerIntent.Running
-          && route.serverId === container.serverId
+          && container.lifecycle_phase === ContainerPhase.Active
+          && container.power_intent === ContainerPowerIntent.Running
+          && route.instanceName === container.instance_name
+          && runtimeStatus === ContainerStatus.Running
+          && route.serverId === container.server_id
           && server?.status === ServerStatus.Online
-          && runtimeReadyServerIds.has(container.serverId)
-          && Boolean(server.macvlan_cidr)
-          && image?.disable_ssh === false
-          && desiredKey?.fingerprint
-          && route.appliedInternalKeyGeneration === desiredKey.generation
-          && route.runtimeStatus === ContainerStatus.Running
+          && server.parent_interface
+          && imageIds.has(container.image_id)
           && route.sshStatus === 'running'
-          && Boolean(route.macvlanIp)
-          && claimsForAddress.length === 1
-          && exactClaim
-          && this.hasHostFingerprint(route.containerHostKeyFingerprint)
-          && age >= 0
-          && age <= staleAfterMs,
+          && route.routedIp
+          && claim?.ownerKind === 'container'
+          && claim.containerId === container.id
+          // Reject only clearly future observations; do not tie route visibility to
+          // the proxy snapshot lease window (routes refresh on reconciler notify).
+          && age >= -PROXY_SNAPSHOT_MAX_CLOCK_SKEW_MS
         );
-      }).map((route) => this.routeSnapshot(route));
-
-      const userRows: SshProxySnapshot['users'] = [];
-      for (const user of users) {
-        const key = internalByUser.get(user.id);
-        if (!key?.fingerprint) {
-          this.logger.warn(
-            `Omitting SSH proxy user ${user.id}: durable internal key is missing`,
-          );
-          continue;
-        }
-        try {
-          userRows.push({
-            id: user.id,
-            username: user.username,
-            status: user.status as UserStatus,
-            publicKeys: publicKeysByUser.get(user.id) ?? [],
-            internalPrivateKey: this.identities.decryptUserPrivateKey(key),
-            internalPublicKey: key.public_key,
-            internalKeyFingerprint: key.fingerprint,
-            internalKeyGeneration: key.generation,
-          });
-        } catch (error) {
-          this.logger.warn(
-            `Omitting SSH proxy user ${user.id}: internal key decrypt failed: ${
-              error instanceof Error ? error.message : String(error)
-            }`,
-          );
-        }
-      }
-
+      }).map((route) => this.routeSnapshot(
+        route,
+        normalizeRouteRuntimeStatus(route.runtimeStatus),
+      ));
+      const userRows: SshProxySnapshot['users'] = users.map((user) => ({
+        id: user.id,
+        username: user.username,
+        status: user.status as UserStatus,
+        publicKeys: publicKeysByUser.get(user.id) ?? [],
+      }));
       const nextGeneration = this.generation + 1;
       const snapshot = zSshProxySnapshot.parse({
         generation: nextGeneration,
-        createdAt: new Date(createdAtMs).toISOString(),
+        createdAt: now.toISOString(),
         staleAfterMs,
-        validUntil: createdAtMs + staleAfterMs,
+        validUntil: now.getTime() + staleAfterMs,
         endpoint: this.endpoint(),
         hostKey: {
           privateKey: hostKey.privateKey,
@@ -248,19 +145,19 @@ export class SshProxySnapshotService {
           id: server.id,
           slug: server.slug,
           name: server.name,
-          online: server.status === ServerStatus.Online,
+          status: server.status as ServerStatus,
         })),
-        images: images.map((image) => ({
-          id: image.id,
-          disableSsh: image.disable_ssh,
-        })),
-        containers: aggregateRowsWithAccess.map((container) => ({
-          id: container.id,
-          ownerId: container.ownerId,
-          serverId: container.serverId,
-          imageId: container.imageId,
-          name: container.name,
-        })),
+        images: images.map((image) => ({ id: image.id, sshEnabled: true })),
+        containers: visibleContainers.flatMap((container) => container.instance_name
+          ? [{
+              id: container.id,
+              ownerId: container.owner_id,
+              serverId: container.server_id,
+              imageId: container.image_id,
+              name: container.name,
+              instanceName: container.instance_name,
+            }]
+          : []),
         routes: safeRoutes,
       });
       const encodedBytes = Buffer.byteLength(JSON.stringify({
@@ -269,9 +166,7 @@ export class SshProxySnapshotService {
         payload: snapshot,
       }));
       if (encodedBytes > MAX_SSH_PROXY_SNAPSHOT_BYTES) {
-        throw new Error(
-          `SSH proxy snapshot is ${encodedBytes} bytes; maximum is ${MAX_SSH_PROXY_SNAPSHOT_BYTES}`,
-        );
+        throw new Error(`SSH proxy snapshot exceeds ${MAX_SSH_PROXY_SNAPSHOT_BYTES} bytes`);
       }
       this.generation = nextGeneration;
       return snapshot;
@@ -286,22 +181,17 @@ export class SshProxySnapshotService {
 
   private routeSnapshot(
     route: ContainerSshRouteRecord,
-  ): SshProxyRuntimeRouteSnapshot {
+    status: ContainerStatus,
+  ): SshProxyInstanceRouteSnapshot {
     return {
       containerId: route.containerId,
       serverId: route.serverId,
-      runtimeId: route.runtimeId,
-      macvlanIp: route.macvlanIp,
-      runtimeStatus: route.runtimeStatus,
+      instanceName: route.instanceName,
+      routedIp: route.routedIp || null,
+      status,
       sshStatus: route.sshStatus,
-      appliedInternalKeyGeneration: route.appliedInternalKeyGeneration,
       containerHostKeyFingerprint: route.containerHostKeyFingerprint,
       observedAt: route.observedAt.toISOString(),
     };
-  }
-
-  private hasHostFingerprint(value: string | null): boolean {
-    return typeof value === 'string'
-      && /^SHA256:[A-Za-z0-9+/]{43}$/u.test(value);
   }
 }

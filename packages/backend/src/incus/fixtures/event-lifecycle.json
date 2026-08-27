@@ -1,0 +1,8 @@
+{
+  "type": "lifecycle",
+  "timestamp": "2026-08-06T17:00:00Z",
+  "metadata": {
+    "action": "instance-started",
+    "source": "/1.0/instances/nyc-11111111111141118111111111111111"
+  }
+}

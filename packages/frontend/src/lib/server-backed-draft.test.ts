@@ -113,25 +113,6 @@ describe('server-backed draft', () => {
     expect(draft.conflictFields.size).toBe(0);
   });
 
-  it('keeps an image save on R1 before an R2 runtime merge can be observed', () => {
-    let draft = createRevisionedServerBackedDraft({
-      name: 'R1 image', uid: '0', entrypoint: '', init: false,
-    }, 1);
-    draft = editRevisionedServerBackedDraft(draft, 'name', 'local image');
-    const incomingR2 = { name: 'R1 image', uid: '1000', entrypoint: '/r2', init: true };
-
-    expect(draft.revision).toBe(1);
-    expect(draft.values.uid).toBe('0');
-    draft = mergeRevisionedServerBackedDraft(draft, incomingR2, 2);
-    expect(draft).toMatchObject({
-      revision: 2,
-      values: { name: 'local image', uid: '1000', entrypoint: '/r2', init: true },
-    });
-    expect(mergeRevisionedServerBackedDraft(draft, {
-      name: 'stale image', uid: '0', entrypoint: '', init: false,
-    }, 1)).toBe(draft);
-  });
-
   it('accepts a validated conflict response as authoritative even if its revision is lower', () => {
     let draft = createRevisionedServerBackedDraft({ name: 'R2', description: 'before' }, 2);
     draft = editRevisionedServerBackedDraft(draft, 'description', 'local');

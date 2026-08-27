@@ -27,7 +27,7 @@ describeRedis('RedisDisposableAdapter real Redis integration', () => {
       {
         get: (key: string) => key === 'redis.keyPrefix' ? prefix : undefined,
       } as NyabaseConfigService,
-      { servesGateway: () => false } as RuntimeRoleService,
+      { servesProxySockets: () => false } as RuntimeRoleService,
     );
     adapter.onModuleInit();
     const deadline = Date.now() + 5_000;
@@ -209,7 +209,7 @@ describeRedis('RedisDisposableAdapter real Redis integration', () => {
       {
         get: (key: string) => key === 'redis.keyPrefix' ? prefix : undefined,
       } as NyabaseConfigService,
-      { servesGateway: () => false } as RuntimeRoleService,
+      { servesProxySockets: () => false } as RuntimeRoleService,
     );
     const startedAt = performance.now();
     await expect(unavailable.publishAddressedRpc(

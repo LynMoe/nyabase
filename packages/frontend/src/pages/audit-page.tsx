@@ -23,6 +23,7 @@ import {
 import { cn } from '../lib/utils.js';
 import { QueryErrorState } from '../components/query-state.js';
 import { queryPollInterval } from '../lib/query-lifecycle.js';
+import { auditActionLabel, auditResourceTypeLabel } from '../lib/audit-labels.js';
 
 const PAGE_SIZES = [25, 50, 100] as const;
 
@@ -35,7 +36,7 @@ const ACTION_COLORS: Record<string, string> = {
   'container.start': 'bg-blue-500/10 text-blue-700 dark:text-blue-300',
   'container.stop': 'bg-orange-500/10 text-orange-700 dark:text-orange-300',
   'container.restart': 'bg-yellow-500/10 text-yellow-700 dark:text-yellow-300',
-  'container.exec': 'bg-sky-500/10 text-sky-700 dark:text-sky-300',
+  'container.exec_session.create': 'bg-sky-500/10 text-sky-700 dark:text-sky-300',
   'user.create': 'bg-purple-500/10 text-purple-700 dark:text-purple-300',
   'user.delete': 'bg-red-500/10 text-red-700 dark:text-red-300',
   'user.update': 'bg-violet-500/10 text-violet-700 dark:text-violet-300',
@@ -44,21 +45,18 @@ const ACTION_COLORS: Record<string, string> = {
   'server.delete': 'bg-red-500/10 text-red-700 dark:text-red-300',
   'grant.server.upsert': 'bg-teal-500/10 text-teal-700 dark:text-teal-300',
   'grant.server.delete': 'bg-red-500/10 text-red-700 dark:text-red-300',
-  'grant.mount_source.upsert': 'bg-emerald-500/10 text-emerald-700 dark:text-emerald-300',
-  'grant.mount_source.delete': 'bg-red-500/10 text-red-700 dark:text-red-300',
-};
-
-const RESOURCE_LABELS: Record<string, string> = {
-  user: '用户',
-  group: '用户组',
-  server: '服务器',
-  image: '镜像',
-  container: '容器',
-  datadir: '数据目录',
-  data_disk: '数据盘',
-  remote_fs_mount: '远程文件系统',
-  mount_source: '挂载源',
-  mount_source_grant: '挂载授权',
+  'grant.storage_pool.upsert': 'bg-emerald-500/10 text-emerald-700 dark:text-emerald-300',
+  'grant.storage_pool.delete': 'bg-red-500/10 text-red-700 dark:text-red-300',
+  'grant.shared_backend.upsert': 'bg-emerald-500/10 text-emerald-700 dark:text-emerald-300',
+  'grant.shared_backend.delete': 'bg-red-500/10 text-red-700 dark:text-red-300',
+  'volume.create': 'bg-green-500/10 text-green-700 dark:text-green-300',
+  'volume.delete': 'bg-red-500/10 text-red-700 dark:text-red-300',
+  'http_proxy.binding.create': 'bg-teal-500/10 text-teal-700 dark:text-teal-300',
+  'http_proxy.binding.delete': 'bg-red-500/10 text-red-700 dark:text-red-300',
+  'ip_pool.create': 'bg-indigo-500/10 text-indigo-700 dark:text-indigo-300',
+  'ip_pool.delete': 'bg-red-500/10 text-red-700 dark:text-red-300',
+  'ssh_proxy.sessions.disconnect_all': 'bg-orange-500/10 text-orange-700 dark:text-orange-300',
+  'ssh_proxy.host_key.rotate': 'bg-yellow-500/10 text-yellow-700 dark:text-yellow-300',
 };
 
 export default function AuditPage() {
@@ -168,7 +166,7 @@ export default function AuditPage() {
                       'inline-block max-w-full truncate text-xs px-2 py-0.5 rounded font-medium',
                       ACTION_COLORS[log.action] ?? 'bg-muted text-muted-foreground',
                     )}>
-                      {log.action}
+                      {auditActionLabel(log.action)}
                     </span>
                   </td>
                   <td className="py-3 px-4 min-w-0">
@@ -269,7 +267,7 @@ function AuditDetailDialog({
             )}
             <section className="grid gap-3 lg:grid-cols-2">
               <DetailItem label="时间" value={new Date(log.ts).toLocaleString('zh-CN')} />
-              <DetailItem label="操作" value={log.action} mono />
+              <DetailItem label="操作" value={auditActionLabel(log.action)} />
               <DetailItem label="操作者" value={actorLabel(log)} />
               <DetailItem label="操作者 ID" value={log.actorId ?? 'system'} mono />
               <DetailItem label="目标" value={targetLabel(log)} />
@@ -407,8 +405,7 @@ function targetSecondary(log: AuditLogDto): string | null {
 }
 
 function resourceTypeLabel(type: string | null | undefined): string {
-  if (!type) return '资源';
-  return RESOURCE_LABELS[type] ?? type;
+  return auditResourceTypeLabel(type);
 }
 
 function formatTimestamp(value: string): string {

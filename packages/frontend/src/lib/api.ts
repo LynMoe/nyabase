@@ -15,6 +15,7 @@ import {
   ensureAuthoritativeSessionRecord,
   withCrossTabRefreshLock,
 } from './auth-session.js';
+import { setPendingLoginReason } from './pending-login-reason.js';
 
 const BASE_URL = '/api';
 
@@ -113,7 +114,10 @@ async function tryRefresh(): Promise<string | null> {
   const expectedEpoch = captured.epoch;
   const expectedRefreshToken = captured.refreshToken;
   if (!expectedRefreshToken) {
-    if (captured.status !== 'anonymous') clearLocalSession();
+    if (captured.status !== 'anonymous') {
+      setPendingLoginReason('session-expired');
+      clearLocalSession();
+    }
     return null;
   }
 
@@ -179,7 +183,10 @@ async function tryRefresh(): Promise<string | null> {
         if (latest.epoch !== expectedEpoch || latest.refreshToken !== expectedRefreshToken) {
           return latest.accessToken;
         }
-        if (isCapturedSessionCurrent(expectedEpoch, expectedRefreshToken, expectedRefreshRequestId)) clearLocalSession();
+        if (isCapturedSessionCurrent(expectedEpoch, expectedRefreshToken, expectedRefreshRequestId)) {
+          setPendingLoginReason('session-expired');
+          clearLocalSession();
+        }
         return null;
       }
       const error = await apiErrorFromResponse(res);
@@ -246,6 +253,7 @@ async function tryRefresh(): Promise<string | null> {
           const latest = useAuthStore.getState();
           if (latest.epoch !== expectedEpoch || latest.refreshToken !== expectedRefreshToken) return latest.accessToken;
           if (isCapturedSessionCurrent(expectedEpoch, expectedRefreshToken, expectedRefreshRequestId)) {
+            setPendingLoginReason(meResponse.status === 403 ? 'account-changed' : 'session-expired');
             clearLocalSession();
             await logout({ accessToken: data.accessToken, refreshToken: data.refreshToken });
           }
@@ -476,7 +484,10 @@ async function runBootstrap(): Promise<void> {
   }
   if (res.status === 403) {
     const current = useAuthStore.getState();
-    if (current.epoch === expectedEpoch && current.accessToken === expectedAccessToken) clearLocalSession();
+    if (current.epoch === expectedEpoch && current.accessToken === expectedAccessToken) {
+      setPendingLoginReason('account-changed');
+      clearLocalSession();
+    }
     return;
   }
   const error = await apiErrorFromResponse(res);

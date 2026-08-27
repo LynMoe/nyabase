@@ -1,0 +1,13 @@
+{
+  "type": "sync",
+  "status": "Success",
+  "status_code": 200,
+  "error": "failed to resize filesystem",
+  "error_code": 500,
+  "metadata": {
+    "id": "11111111-1111-4111-8111-111111111111",
+    "status": "Failure",
+    "status_code": 500,
+    "err": "failed to resize filesystem"
+  }
+}

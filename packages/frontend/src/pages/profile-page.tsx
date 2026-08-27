@@ -13,7 +13,8 @@ import {
   AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle,
 } from '../components/ui/alert-dialog.js';
 import { toast } from '../hooks/use-toast.js';
-import { clearLocalSession } from '../lib/auth-session.js';
+import { setPendingLoginReason } from '../lib/pending-login-reason.js';
+import { terminateBrowserSession } from '../lib/session-termination.js';
 
 type PasswordErrors = Partial<Record<'currentPassword' | 'newPassword' | 'confirmPassword', string>>;
 type SshKeyErrors = Partial<Record<'name' | 'keyText', string>>;
@@ -82,8 +83,10 @@ function PasswordPanel({ userId }: { userId: string }) {
       toast({ title: '密码已修改，请使用新密码重新登录' });
       setForm({ currentPassword: '', newPassword: '', confirmPassword: '' });
       setErrors({});
-      clearLocalSession();
-      window.location.replace('/login?reason=password-changed');
+      setPendingLoginReason('password-changed');
+      void terminateBrowserSession().finally(() => {
+        window.location.replace('/login?reason=password-changed');
+      });
     },
     onError: (e) => toast({ title: '修改失败', description: e.message, variant: 'destructive' }),
   });
@@ -216,7 +219,7 @@ function SshKeysPanel({ userId }: { userId: string }) {
           <div>
             <h2 className="text-base font-semibold text-foreground">SSH 公钥</h2>
             <p className="text-xs text-muted-foreground mt-0.5">
-              这些公钥用于认证到 SSH 代理，不会直接写入容器。
+              这些公钥会同步到 SSH 代理与你的全部活跃容器，用于 Jump 与第二跳登录。
             </p>
           </div>
         </div>
@@ -333,7 +336,7 @@ function SshKeysPanel({ userId }: { userId: string }) {
             <AlertDialogTitle>删除 SSH 公钥？</AlertDialogTitle>
             <AlertDialogDescription>
               将删除公钥 <span className="font-semibold text-foreground">{deleteTarget?.name}</span>。
-              SSH 代理会在同步后不再接受这把公钥。
+              SSH 代理与容器会在同步后不再接受这把公钥。
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>

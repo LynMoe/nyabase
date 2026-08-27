@@ -9,11 +9,11 @@ export function classifyGrantExpiry(
   expiresAt: Date | string | null | undefined,
   now: Date = new Date(),
 ): GrantExpiryPhase {
-  if (expiresAt == null) return 'full';
+  if (expiresAt == null) return 'live';
   const expiresMs = expiresAt instanceof Date ? expiresAt.getTime() : Date.parse(expiresAt);
-  if (!Number.isFinite(expiresMs)) return 'full';
+  if (!Number.isFinite(expiresMs)) return 'live';
   const nowMs = now.getTime();
-  if (nowMs < expiresMs) return 'full';
+  if (nowMs < expiresMs) return 'live';
   if (nowMs < expiresMs + GRANT_EXPIRY_GRACE_MS) return 'grace';
   return 'lost';
 }
@@ -43,10 +43,10 @@ export interface GrantExpiryCandidate {
   tieBreaker: string;
   expiresAt: Date | string | null;
   cpu_millis: number | null;
-  mem_bytes: string | null;
-  disk_bytes: string | null;
+  mem_bytes: string | number | null;
+  disk_bytes: string | number | null;
   gpu_mode: string | null;
-  gpu_indices: number[] | null;
+  gpu_pci_addresses: string[];
 }
 
 /**
@@ -59,17 +59,17 @@ export interface GrantExpiryCandidate {
 export function selectWinningGrantCandidate<T extends GrantExpiryCandidate>(
   candidates: readonly T[],
   now: Date = new Date(),
-): { candidate: T; phase: 'full' | 'grace' } | null {
+): { candidate: T; phase: 'live' | 'grace' } | null {
   const live: T[] = [];
   const grace: T[] = [];
   for (const candidate of candidates) {
     const phase = classifyGrantExpiry(candidate.expiresAt, now);
-    if (phase === 'full') live.push(candidate);
+    if (phase === 'live') live.push(candidate);
     else if (phase === 'grace') grace.push(candidate);
   }
   const pool = live.length > 0 ? live : grace;
   if (pool.length === 0) return null;
-  const phase = live.length > 0 ? 'full' : 'grace';
+  const phase = live.length > 0 ? 'live' : 'grace';
   const sorted = [...pool].sort((left, right) => {
     if (left.scopeRank !== right.scopeRank) return left.scopeRank - right.scopeRank;
     const leftExpires = expiresAtSortKey(left.expiresAt);

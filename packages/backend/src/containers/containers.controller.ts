@@ -3,104 +3,123 @@ import {
   Controller,
   Get,
   Param,
+  Patch,
   Post,
   Query,
   Req,
   UseGuards,
   ForbiddenException,
+  HttpCode,
+  HttpStatus,
 } from '@nestjs/common';
+import {
+  zCreateContainerRequest,
+  zCreateExecSessionRequest,
+  zPatchContainerGpuRequest,
+  zPatchContainerLimitsRequest,
+  zPatchContainerRootSizeRequest,
+} from '@nyabase/common';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard.js';
 import { CapabilitiesGuard } from '../auth/guards/capabilities.guard.js';
 import { CurrentUser } from '../auth/decorators/current-user.decorator.js';
 import type { UserRecord } from '../domain/domain-records.js';
-import {
-  zCreateContainerRequest,
-  zExecSessionRequest,
-  zUpdateContainerMountsRequest,
-} from '@nyabase/common';
-import { ContainerControlService } from './container-control.service.js';
 import type { RequestAuthContext } from '../auth/guards/jwt-auth.guard.js';
+import { ContainerControlService } from './container-control.service.js';
 
-@Controller('v2/containers')
+@Controller('containers')
 @UseGuards(JwtAuthGuard, CapabilitiesGuard)
 export class ContainersController {
-  constructor(private containerControl: ContainerControlService) {}
+  constructor(private readonly containers: ContainerControlService) {}
 
   @Get()
-  async list(
-    @CurrentUser() user: UserRecord,
-    @Query('serverId') serverId?: string,
-  ) {
-    return this.containerControl.list(user.id, { serverId });
+  list(@CurrentUser() user: UserRecord, @Query('serverId') serverId?: string) {
+    return this.containers.list(user.id, { serverId });
   }
 
   @Post()
-  async create(@CurrentUser() user: UserRecord, @Body() body: unknown) {
-    const request = zCreateContainerRequest.parse(body);
-    return this.containerControl.create(user.id, request);
+  @HttpCode(HttpStatus.ACCEPTED)
+  create(@CurrentUser() user: UserRecord, @Body() body: unknown) {
+    return this.containers.createForUser(user.id, zCreateContainerRequest.parse(body));
   }
 
   @Get(':containerId')
-  async get(@Param('containerId') containerId: string, @CurrentUser() user: UserRecord) {
-    return this.containerControl.get(containerId, user.id);
+  get(@Param('containerId') id: string, @CurrentUser() user: UserRecord) {
+    return this.containers.get(id, user.id);
   }
 
   @Post(':containerId/actions/start')
-  async start(@Param('containerId') containerId: string, @CurrentUser() user: UserRecord) {
-    return this.containerControl.action(containerId, 'start', user.id);
+  @HttpCode(HttpStatus.ACCEPTED)
+  start(@Param('containerId') id: string, @CurrentUser() user: UserRecord) {
+    return this.containers.action(id, 'start', user.id);
   }
 
   @Post(':containerId/actions/stop')
-  async stop(@Param('containerId') containerId: string, @CurrentUser() user: UserRecord) {
-    return this.containerControl.action(containerId, 'stop', user.id);
+  @HttpCode(HttpStatus.ACCEPTED)
+  stop(@Param('containerId') id: string, @CurrentUser() user: UserRecord) {
+    return this.containers.action(id, 'stop', user.id);
   }
 
   @Post(':containerId/actions/restart')
-  async restart(@Param('containerId') containerId: string, @CurrentUser() user: UserRecord) {
-    return this.containerControl.action(containerId, 'restart', user.id);
+  @HttpCode(HttpStatus.ACCEPTED)
+  restart(@Param('containerId') id: string, @CurrentUser() user: UserRecord) {
+    return this.containers.action(id, 'restart', user.id);
+  }
+
+  @Post(':containerId/actions/repair-ssh')
+  @HttpCode(HttpStatus.ACCEPTED)
+  repairSsh(@Param('containerId') id: string, @CurrentUser() user: UserRecord) {
+    return this.containers.repairSsh(id, user.id);
   }
 
   @Post(':containerId/actions/delete')
-  async delete(@Param('containerId') containerId: string, @CurrentUser() user: UserRecord) {
-    return this.containerControl.action(containerId, 'delete', user.id);
+  @HttpCode(HttpStatus.ACCEPTED)
+  delete(@Param('containerId') id: string, @CurrentUser() user: UserRecord) {
+    return this.containers.action(id, 'delete', user.id);
   }
 
-  @Post(':containerId/actions/update-mounts')
-  async updateMounts(
-    @Param('containerId') containerId: string,
-    @Body() body: unknown,
-    @CurrentUser() user: UserRecord,
-  ) {
-    const mounts = zUpdateContainerMountsRequest.parse(body);
-    return this.containerControl.action(containerId, 'updateMounts', user.id, mounts);
+  @Patch(':containerId/limits')
+  @HttpCode(HttpStatus.ACCEPTED)
+  limits(@Param('containerId') id: string, @CurrentUser() user: UserRecord, @Body() body: unknown) {
+    return this.containers.updateLimitsForUser(id, user.id, zPatchContainerLimitsRequest.parse(body));
   }
 
-  @Post(':containerId/actions/reconcile-ssh')
-  async reconcileSsh(@Param('containerId') containerId: string, @CurrentUser() user: UserRecord) {
-    return this.containerControl.action(containerId, 'reconcileSsh', user.id);
+  @Patch(':containerId/root-size')
+  @HttpCode(HttpStatus.ACCEPTED)
+  rootSize(@Param('containerId') id: string, @CurrentUser() user: UserRecord, @Body() body: unknown) {
+    return this.containers.resizeRootForUser(id, user.id, zPatchContainerRootSizeRequest.parse(body));
+  }
+
+  @Patch(':containerId/gpu')
+  @HttpCode(HttpStatus.ACCEPTED)
+  gpu(@Param('containerId') id: string, @CurrentUser() user: UserRecord, @Body() body: unknown) {
+    return this.containers.updateGpuForUser(id, user.id, zPatchContainerGpuRequest.parse(body));
+  }
+
+  @Get(':containerId/volumes')
+  volumes(@Param('containerId') id: string, @CurrentUser() user: UserRecord) {
+    return this.containers.listVolumesForUser(id, user.id);
   }
 
   @Get(':containerId/stats')
-  async stats(@Param('containerId') containerId: string, @CurrentUser() user: UserRecord) {
-    return this.containerControl.getStats(containerId, user.id);
+  stats(@Param('containerId') id: string, @CurrentUser() user: UserRecord) {
+    return this.containers.getStats(id, user.id);
   }
 
   @Post(':containerId/exec-sessions')
-  async execSession(
-    @Param('containerId') containerId: string,
+  execSession(
+    @Param('containerId') id: string,
     @Body() body: unknown,
     @CurrentUser() user: UserRecord,
-    @Req() httpRequest: { authContext?: RequestAuthContext },
+    @Req() request: { authContext?: RequestAuthContext },
   ) {
-    const request = zExecSessionRequest.parse(body);
-    if (httpRequest.authContext?.kind !== 'jwt') {
+    if (request.authContext?.kind !== 'jwt') {
       throw new ForbiddenException('Container console admission requires a browser JWT');
     }
-    return this.containerControl.createExecSession(
-      containerId,
+    return this.containers.createExecSession(
+      id,
       user.id,
-      httpRequest.authContext.authVersion,
-      request,
+      request.authContext.authVersion,
+      zCreateExecSessionRequest.parse(body),
     );
   }
 }

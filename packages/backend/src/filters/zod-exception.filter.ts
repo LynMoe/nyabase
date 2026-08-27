@@ -10,8 +10,9 @@ import { ZodError } from 'zod';
 export class ZodExceptionFilter implements ExceptionFilter {
   catch(exception: ZodError, host: ArgumentsHost): void {
     const ctx = host.switchToHttp();
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const response = ctx.getResponse<any>();
+    const response = ctx.getResponse<{
+      status: (code: number) => { json: (body: unknown) => void };
+    }>();
 
     const first = exception.errors[0];
     const field = first?.path.join('.') ?? '';
@@ -19,7 +20,15 @@ export class ZodExceptionFilter implements ExceptionFilter {
 
     response.status(400).json({
       statusCode: 400,
+      code: 'INVALID_INPUT',
       message,
+      details: {
+        issues: exception.errors.map((issue) => ({
+          path: issue.path,
+          message: issue.message,
+          code: issue.code,
+        })),
+      },
     });
   }
 }

@@ -10,6 +10,7 @@ import { PgTransactionManager } from '../persistence-pg/transaction.js';
 import type { NyabaseDatabase } from '../persistence-pg/database.types.js';
 import {
   AuditRepository,
+  type AuditRetentionOptions,
 } from './audit.repository.js';
 import {
   AUDIT_SNAPSHOT_RESOLVER,
@@ -51,7 +52,7 @@ export class AuditService {
     targetType: string | null,
     payload?: unknown,
   ): Promise<void> {
-    await this.transactions.run((transaction) => this.append(
+    await this.transactions.run((transaction) => this.appendEvent(
       transaction,
       actorId,
       action,
@@ -63,11 +64,29 @@ export class AuditService {
   }
 
   /**
-   * Appends audit evidence to a caller-owned business transaction. A rollback
-   * removes both the domain mutation and the event; no out-of-band write or
-   * network call occurs.
+   * Appends audit evidence and enforces retention in a caller-owned business
+   * transaction. A rollback removes the domain mutation, event, and cleanup.
    */
   async append(
+    transaction: Transaction<NyabaseDatabase>,
+    actorId: string | null,
+    action: AuditAction,
+    targetId: string | null,
+    targetType: string | null,
+    payload?: unknown,
+  ): Promise<void> {
+    await this.appendEvent(
+      transaction,
+      actorId,
+      action,
+      targetId,
+      targetType,
+      payload,
+    );
+    await this.maybeEnforceRetentionInTransaction(transaction);
+  }
+
+  private async appendEvent(
     transaction: Transaction<NyabaseDatabase>,
     actorId: string | null,
     action: AuditAction,
@@ -131,31 +150,63 @@ export class AuditService {
     });
   }
 
+  private async maybeEnforceRetentionInTransaction(
+    transaction: Transaction<NyabaseDatabase>,
+  ): Promise<void> {
+    // The caller may roll back after append(), so do not advance shared
+    // cooldown state from work that is not known to have committed.
+    const retention = this.retentionRequest(true);
+    if (!retention) return;
+    await this.repository.enforceRetentionInTransaction(
+      transaction,
+      retention.options,
+    );
+  }
+
   private async maybeEnforceRetention(): Promise<void> {
-    const now = this.monotonicNow?.() ?? performance.now();
     if (this.cleanupPromise) return this.cleanupPromise;
+    const retention = this.retentionRequest();
+    if (!retention) return;
+
+    this.cleanupPromise = this.repository.enforceRetention(retention.options)
+      .then(() => {
+        if (retention.options.enforceAge) {
+          this.nextCleanupAt = retention.now + CLEANUP_INTERVAL_MS;
+        }
+      })
+      .catch((error: unknown) => {
+        this.logger.warn(
+          `Audit retention cleanup failed: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        );
+      })
+      .finally(() => {
+        this.cleanupPromise = null;
+      });
+    await this.cleanupPromise;
+  }
+
+  private retentionRequest(forceAge = false): {
+    now: number;
+    options: AuditRetentionOptions;
+  } | null {
     const retentionDays = this.config.get<number>('audit.retentionDays');
     const maxEntries = this.config.get<number>('audit.retentionMaxEntries');
-    const enforceAge = retentionDays > 0 && now >= this.nextCleanupAt;
+    const now = this.monotonicNow?.() ?? performance.now();
+    const enforceAge = retentionDays > 0
+      && (forceAge || now >= this.nextCleanupAt);
     const enforceCount = maxEntries > 0;
-    if (!enforceAge && !enforceCount) return;
-    if (enforceAge) this.nextCleanupAt = now + CLEANUP_INTERVAL_MS;
-
-    this.cleanupPromise = this.repository.enforceRetention({
-      retentionDays,
-      maxEntries,
-      enforceAge,
-      enforceCount,
-    }).catch((error: unknown) => {
-      this.logger.warn(
-        `Audit retention cleanup failed: ${
-          error instanceof Error ? error.message : String(error)
-        }`,
-      );
-    }).finally(() => {
-      this.cleanupPromise = null;
-    });
-    await this.cleanupPromise;
+    if (!enforceAge && !enforceCount) return null;
+    return {
+      now,
+      options: {
+        retentionDays,
+        maxEntries,
+        enforceAge,
+        enforceCount,
+      },
+    };
   }
 
 }
@@ -198,27 +249,15 @@ function refsFromPayload(
     ['serverId', 'server'],
     ['imageId', 'image'],
     ['containerId', 'container'],
-    ['mountId', 'remote_fs_mount'],
-    ['remoteFsMountId', 'remote_fs_mount'],
-    ['diskId', 'data_disk'],
+    ['poolId', 'storage_pool'],
+    ['sharedBackendId', 'shared_backend'],
+    ['volumeId', 'volume'],
   ];
   for (const [key, type] of mappings) {
     const id = stringValue(payload[key]);
     if (id) refs.push({ type, id });
   }
 
-  const sourceId = stringValue(payload.sourceId);
-  const sourceKind = stringValue(payload.sourceKind);
-  if (sourceId) {
-    refs.push({
-      type: sourceKind === 'local'
-        ? 'data_disk'
-        : sourceKind === 'remote'
-          ? 'remote_fs_mount'
-          : 'mount_source',
-      id: sourceId,
-    });
-  }
   return refs;
 }
 

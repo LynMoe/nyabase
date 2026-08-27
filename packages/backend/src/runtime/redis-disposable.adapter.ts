@@ -15,9 +15,19 @@ const RECONNECT_MAX_MS = 30_000;
 const COMMAND_TIMEOUT_MS = 1_000;
 const MAX_REDIS_MESSAGE_BYTES = 1024 * 1024;
 const MAX_CACHE_TTL_MS = 60_000;
+const MAX_EPHEMERAL_TTL_MS = 30 * 60_000;
+export const TRUST_TOKEN_TTL_MS = 10 * 60_000;
+const MAX_TRUST_TOKEN_BYTES = 16 * 1024;
 const MAX_RATE_LIMIT_WINDOW_MS = 15 * 60_000;
 const MAX_RATE_LIMIT_RESERVATIONS_PER_WINDOW = 10_000;
 export const DISPOSABLE_REDIS_CLIENT = Symbol('NYABASE_DISPOSABLE_REDIS_CLIENT');
+
+export class RedisEphemeralStateUnavailableError extends Error {
+  constructor() {
+    super('Redis ephemeral state is unavailable');
+    this.name = 'RedisEphemeralStateUnavailableError';
+  }
+}
 
 export type DisposableWakeTopic =
   | 'cache-invalidation'
@@ -134,6 +144,143 @@ export class RedisDisposableAdapter implements OnModuleInit, OnApplicationShutdo
       async (client) => (await client.del(this.key(`cache:${key}`))) > 0,
       false,
     );
+  }
+
+  async setEphemeral(
+    key: string,
+    value: string,
+    ttlMs: number,
+    onlyIfAbsent = false,
+  ): Promise<boolean> {
+    if (
+      !/^[a-z0-9:_-]{1,160}$/.test(key)
+      || !validMessage(value)
+      || !Number.isSafeInteger(ttlMs)
+      || ttlMs < 1
+      || ttlMs > MAX_EPHEMERAL_TTL_MS
+    ) return false;
+    return this.required(async (client) => {
+      const result = await client.set(
+        this.key(`ephemeral:${key}`),
+        value,
+        { PX: ttlMs, ...(onlyIfAbsent ? { NX: true } : {}) },
+      );
+      return result === 'OK';
+    });
+  }
+
+  async getEphemeral(key: string): Promise<string | null> {
+    if (!/^[a-z0-9:_-]{1,160}$/.test(key)) return null;
+    return this.required((client) => client.get(this.key(`ephemeral:${key}`)));
+  }
+
+  async deleteEphemeral(key: string): Promise<boolean> {
+    if (!/^[a-z0-9:_-]{1,160}$/.test(key)) return false;
+    return this.required(async (client) => (await client.del(this.key(`ephemeral:${key}`))) > 0);
+  }
+
+  async storeTrustToken(serverId: string, token: string): Promise<string> {
+    if (!isUuid(serverId) || !validSecret(token)) {
+      throw new Error('Invalid server trust-token input');
+    }
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      const reference = randomUUID();
+      const stored = await this.required(async (client) => client.set(
+        this.key(`trust-token:${serverId}:${reference}`),
+        token,
+        { NX: true, PX: TRUST_TOKEN_TTL_MS },
+      ));
+      if (stored === 'OK') return reference;
+    }
+    throw new RedisEphemeralStateUnavailableError();
+  }
+
+  async claimTrustToken(
+    serverId: string,
+    reference: string,
+    claimId: string,
+  ): Promise<string | null> {
+    if (!isUuid(serverId) || !isUuid(reference) || !isUuid(claimId)) {
+      throw new Error('Invalid server trust-token claim');
+    }
+    const value = await this.required((client) => client.eval(
+      'local value=redis.call("GET",KEYS[1]);'
+      + ' if not value then return false end;'
+      + ' local claimed=redis.call("SET",KEYS[2],ARGV[1],"NX","PX",ARGV[2]);'
+      + ' if not claimed then return false end;'
+      + ' return value',
+      {
+        keys: [
+          this.key(`trust-token:${serverId}:${reference}`),
+          this.key(`trust-token-claim:${serverId}:${reference}`),
+        ],
+        arguments: [claimId, '30000'],
+      },
+    ));
+    return typeof value === 'string' ? value : null;
+  }
+
+  async consumeClaimedTrustToken(
+    serverId: string,
+    reference: string,
+    claimId: string,
+  ): Promise<boolean> {
+    if (!isUuid(serverId) || !isUuid(reference) || !isUuid(claimId)) {
+      throw new Error('Invalid server trust-token claim');
+    }
+    const result = await this.required((client) => client.eval(
+      'if redis.call("GET",KEYS[2]) ~= ARGV[1] then return 0 end;'
+      + ' redis.call("DEL",KEYS[1],KEYS[2]);'
+      + ' return 1',
+      {
+        keys: [
+          this.key(`trust-token:${serverId}:${reference}`),
+          this.key(`trust-token-claim:${serverId}:${reference}`),
+        ],
+        arguments: [claimId],
+      },
+    ));
+    return result === 1 || result === '1';
+  }
+
+  async releaseClaimedTrustToken(
+    serverId: string,
+    reference: string,
+    claimId: string,
+  ): Promise<boolean> {
+    if (!isUuid(serverId) || !isUuid(reference) || !isUuid(claimId)) {
+      throw new Error('Invalid server trust-token claim');
+    }
+    const result = await this.required((client) => client.eval(
+      'if redis.call("GET",KEYS[2]) ~= ARGV[1] then return 0 end;'
+      + ' redis.call("DEL",KEYS[2]);'
+      + ' return 1',
+      {
+        keys: [
+          this.key(`trust-token:${serverId}:${reference}`),
+          this.key(`trust-token-claim:${serverId}:${reference}`),
+        ],
+        arguments: [claimId],
+      },
+    ));
+    return result === 1 || result === '1';
+  }
+
+  async consumeTrustToken(serverId: string, reference: string): Promise<string | null> {
+    if (!isUuid(serverId) || !isUuid(reference)) {
+      throw new Error('Invalid server trust-token reference');
+    }
+    const value = await this.required((client) => client.eval(
+      'local value=redis.call("GET",KEYS[1]);'
+      + ' if not value then return false end;'
+      + ' redis.call("DEL",KEYS[1]);'
+      + ' return value',
+      {
+        keys: [this.key(`trust-token:${serverId}:${reference}`)],
+        arguments: [],
+      },
+    ));
+    return typeof value === 'string' ? value : null;
   }
 
   async publish(topic: DisposableWakeTopic, payload: string): Promise<boolean> {
@@ -311,6 +458,26 @@ export class RedisDisposableAdapter implements OnModuleInit, OnApplicationShutdo
     } catch (error) {
       this.warnUnavailable(error);
       return fallback;
+    }
+  }
+
+  private async required<T>(
+    operation: (client: RedisClientType) => Promise<T>,
+  ): Promise<T> {
+    await this.ensureConnected();
+    if (this.stopped || !this.client.isReady) {
+      throw new RedisEphemeralStateUnavailableError();
+    }
+    const commandClient = typeof this.client.withCommandOptions === 'function'
+      ? this.client.withCommandOptions({ timeout: COMMAND_TIMEOUT_MS })
+      : this.client;
+    try {
+      const value = await operation(commandClient);
+      this.warnedUnavailable = false;
+      return value;
+    } catch (error) {
+      this.warnUnavailable(error);
+      throw new RedisEphemeralStateUnavailableError();
     }
   }
 
@@ -552,7 +719,15 @@ function validMessage(value: string): boolean {
 }
 
 function isUuid(value: string): boolean {
-  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
     value,
+  );
+}
+
+function validSecret(value: string): boolean {
+  return (
+    value.length > 0
+    && Buffer.byteLength(value, 'utf8') <= MAX_TRUST_TOKEN_BYTES
+    && !/[\u0000-\u001f\u007f]/.test(value)
   );
 }

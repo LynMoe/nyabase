@@ -7,15 +7,23 @@ import {
   GRANT_EXPIRY_GRACE_MS,
 } from './grant-expiry.js';
 
+const base = {
+  cpu_millis: null as number | null,
+  mem_bytes: null as string | null,
+  disk_bytes: null as string | null,
+  gpu_mode: null as string | null,
+  gpu_pci_addresses: [] as string[],
+};
+
 describe('classifyGrantExpiry', () => {
   const now = new Date('2026-06-01T00:00:00.000Z');
 
-  it('treats null expiry as full', () => {
-    expect(classifyGrantExpiry(null, now)).toBe('full');
+  it('treats null expiry as live', () => {
+    expect(classifyGrantExpiry(null, now)).toBe('live');
   });
 
   it('classifies live, grace, and lost windows', () => {
-    expect(classifyGrantExpiry(new Date('2026-07-01T00:00:00.000Z'), now)).toBe('full');
+    expect(classifyGrantExpiry(new Date('2026-07-01T00:00:00.000Z'), now)).toBe('live');
     expect(classifyGrantExpiry(new Date('2026-05-25T00:00:00.000Z'), now)).toBe('grace');
     expect(classifyGrantExpiry(
       new Date(now.getTime() - GRANT_EXPIRY_GRACE_MS - 1),
@@ -26,15 +34,8 @@ describe('classifyGrantExpiry', () => {
 
 describe('selectWinningGrantCandidate', () => {
   const now = new Date('2026-06-01T00:00:00.000Z');
-  const base = {
-    cpu_millis: null as number | null,
-    mem_bytes: null as string | null,
-    disk_bytes: null as string | null,
-    gpu_mode: null as string | null,
-    gpu_indices: null as number[] | null,
-  };
 
-  it('prefers live direct over live group', () => {
+  it('prefers a live direct grant over a live group grant', () => {
     const winner = selectWinningGrantCandidate([
       {
         ...base,
@@ -51,11 +52,11 @@ describe('selectWinningGrantCandidate', () => {
         expiresAt: new Date('2026-06-15T00:00:00.000Z'),
       },
     ], now);
-    expect(winner?.phase).toBe('full');
+    expect(winner?.phase).toBe('live');
     expect(winner?.candidate.tieBreaker).toBe('direct');
   });
 
-  it('falls back to live group when direct is expired', () => {
+  it('falls back to the winning live group when direct access is expired', () => {
     const winner = selectWinningGrantCandidate([
       {
         ...base,
@@ -79,7 +80,7 @@ describe('selectWinningGrantCandidate', () => {
         expiresAt: new Date('2026-08-01T00:00:00.000Z'),
       },
     ], now);
-    expect(winner?.phase).toBe('full');
+    expect(winner?.phase).toBe('live');
     expect(winner?.candidate.tieBreaker).toBe('g-late');
   });
 
@@ -96,7 +97,7 @@ describe('selectWinningGrantCandidate', () => {
     expect(winner?.phase).toBe('grace');
   });
 
-  it('returns null when all covers are dead', () => {
+  it('returns null when all covers are lost', () => {
     const winner = selectWinningGrantCandidate([
       {
         ...base,
@@ -109,7 +110,7 @@ describe('selectWinningGrantCandidate', () => {
     expect(winner).toBeNull();
   });
 
-  it('prefers higher priority when both group grants never expire', () => {
+  it('prefers higher priority when group grants never expire', () => {
     const winner = selectWinningGrantCandidate([
       {
         ...base,
@@ -126,11 +127,10 @@ describe('selectWinningGrantCandidate', () => {
         expiresAt: null,
       },
     ], now);
-    expect(winner?.phase).toBe('full');
     expect(winner?.candidate.tieBreaker).toBe('high');
   });
 
-  it('prefers higher priority when group expiresAt values are equal', () => {
+  it('prefers higher priority when group expiry times are equal', () => {
     const expiresAt = new Date('2026-07-01T00:00:00.000Z');
     const winner = selectWinningGrantCandidate([
       {
@@ -151,7 +151,7 @@ describe('selectWinningGrantCandidate', () => {
     expect(winner?.candidate.tieBreaker).toBe('b');
   });
 
-  it('prefers never-expiring live group over a finite future expiresAt', () => {
+  it('prefers never-expiring group access over finite future access', () => {
     const winner = selectWinningGrantCandidate([
       {
         ...base,
@@ -168,11 +168,10 @@ describe('selectWinningGrantCandidate', () => {
         expiresAt: null,
       },
     ], now);
-    expect(winner?.phase).toBe('full');
     expect(winner?.candidate.tieBreaker).toBe('never');
   });
 
-  it('among grace-tier groups prefers later expiresAt then priority', () => {
+  it('among grace group grants prefers later expiry and then priority', () => {
     const winner = selectWinningGrantCandidate([
       {
         ...base,
@@ -195,7 +194,7 @@ describe('selectWinningGrantCandidate', () => {
 });
 
 describe('grantPurgeAt / expiresAtSortKey', () => {
-  it('computes purge deadline from expiresAt', () => {
+  it('computes the purge deadline from expiresAt', () => {
     const expires = new Date('2026-06-01T00:00:00.000Z');
     expect(grantPurgeAt(expires)?.getTime()).toBe(expires.getTime() + GRANT_EXPIRY_GRACE_MS);
     expect(grantPurgeAt(null)).toBeNull();

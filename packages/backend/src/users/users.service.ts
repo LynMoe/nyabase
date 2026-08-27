@@ -15,7 +15,6 @@ import { v4 as uuidv4 } from 'uuid';
 import {
   AuditAction,
   Capability,
-  MAX_AGENT_XFS_PROJECTS,
   MAX_PLATFORM_ACTIVE_USERS,
   MAX_SSH_PUBLIC_KEYS_PER_USER,
   MAX_SSH_PUBLIC_KEY_TEXT_LENGTH,
@@ -33,7 +32,18 @@ import { ContainerSshConvergenceService } from '../ssh/container-ssh-convergence
 import { NyabaseConfigService } from '../config/nyabase-config.service.js';
 import { ProxySnapshotNotifierService } from '../proxy-snapshots/proxy-snapshot-notifier.service.js';
 import { AuditService } from '../audit/audit.service.js';
-import { UserSshIdentityService } from './user-ssh-identity.service.js';
+
+export const MAX_LIFETIME_USERS = 4_096;
+
+/** Lowest free id in 1..=4096. max(numeric_id)+1 is wrong once nyabase-system occupies 4096. */
+export function pickNextUserNumericId(used: Iterable<number>): number | null {
+  const occupied = new Set<number>();
+  for (const id of used) occupied.add(Number(id));
+  for (let id = 1; id <= MAX_LIFETIME_USERS; id += 1) {
+    if (!occupied.has(id)) return id;
+  }
+  return null;
+}
 
 interface CreateUserOptions {
   systemGroupKey?: SystemGroupKey;
@@ -74,7 +84,6 @@ export class UsersService {
     @Inject(forwardRef(() => AccessResolverService))
     private readonly accessResolver: AccessResolverService,
     private readonly containerSshConvergence: ContainerSshConvergenceService,
-    private readonly sshIdentities: UserSshIdentityService,
     private readonly proxySnapshots: ProxySnapshotNotifierService,
     private readonly config: NyabaseConfigService,
     @Inject(forwardRef(() => AuditService))
@@ -97,19 +106,21 @@ export class UsersService {
     }
     const passwordHash = await this.authService.hashPassword(dto.password);
     const userId = uuidv4();
-    const preparedSshKey = await this.sshIdentities.prepareUserKey({
-      id: userId,
-      username: dto.username,
-    });
 
     const user = await this.transactions.run(async (transaction) => {
       // One durable row serializes capacity and numeric identity allocation
       // across API replicas without broad SERIALIZABLE transactions.
-      const policy = await transaction.selectFrom('iam.policy_state')
-        .select(['next_numeric_user_id'])
+      await transaction.selectFrom('iam.policy_state')
+        .select(['singleton'])
         .where('singleton', '=', true)
         .forUpdate()
         .executeTakeFirstOrThrow();
+      const occupied = await transaction.selectFrom('iam.users')
+        .select('numeric_id')
+        .execute();
+      const nextNumericId = pickNextUserNumericId(
+        occupied.map((row) => row.numeric_id),
+      );
       if (typeof options.actorId === 'string') {
         await this.accessResolver.assertActorCapabilitiesInTransaction(
           transaction,
@@ -130,11 +141,10 @@ export class UsersService {
             .as('active'),
         ])
         .executeTakeFirstOrThrow();
-      if (counts.total >= MAX_AGENT_XFS_PROJECTS
-        || policy.next_numeric_user_id > MAX_AGENT_XFS_PROJECTS) {
+      if (counts.total >= MAX_LIFETIME_USERS || nextNumericId === null) {
         throw new ConflictException({
           code: 'USER_LIFETIME_CAPACITY_REACHED',
-          message: `At most ${MAX_AGENT_XFS_PROJECTS} lifetime users are supported`,
+          message: `At most ${MAX_LIFETIME_USERS} lifetime users are supported`,
         });
       }
       if (counts.active >= MAX_PLATFORM_ACTIVE_USERS) {
@@ -146,7 +156,7 @@ export class UsersService {
       const now = new Date();
       const inserted = await transaction.insertInto('iam.users').values({
         id: userId,
-        numeric_id: policy.next_numeric_user_id,
+        numeric_id: nextNumericId,
         username: dto.username,
         password_hash: passwordHash,
         display_name: displayName,
@@ -157,14 +167,9 @@ export class UsersService {
         updated_at: now,
       }).returningAll().executeTakeFirstOrThrow();
       await transaction.updateTable('iam.policy_state').set({
-        next_numeric_user_id: policy.next_numeric_user_id + 1,
+        policy_epoch: sql`policy_epoch + 1`,
         updated_at: now,
       }).where('singleton', '=', true).executeTakeFirstOrThrow();
-      await this.sshIdentities.savePreparedUserKeyInTransaction(
-        transaction,
-        { id: userId },
-        preparedSshKey,
-      );
       if (options.systemGroupKey) {
         const group = await transaction.selectFrom('iam.groups')
           .select(['id', 'capabilities'])
@@ -180,9 +185,9 @@ export class UsersService {
         const grantCounts = await Promise.all([
           transaction.selectFrom('iam.server_grants').select('id')
             .where('group_id', '=', group.id).execute(),
-          transaction.selectFrom('iam.image_grants').select('id')
+          transaction.selectFrom('iam.storage_pool_grants').select('id')
             .where('group_id', '=', group.id).execute(),
-          transaction.selectFrom('iam.mount_source_grants').select('id')
+          transaction.selectFrom('iam.shared_backend_grants').select('id')
             .where('group_id', '=', group.id).execute(),
         ]);
         if (typeof options.actorId === 'string') {
@@ -222,26 +227,6 @@ export class UsersService {
     });
     await this.accessResolver.authorizationCommitted([user.id]);
     return user;
-  }
-
-  async getNumericIdsByUserIds(uuids: string[]): Promise<Map<string, number>> {
-    const ids = [...new Set(uuids)];
-    if (ids.length === 0) return new Map();
-    const rows = await this.database.selectFrom('iam.users')
-      .select(['id', 'numeric_id'])
-      .where('id', 'in', ids)
-      .execute();
-    return new Map(rows.map((row) => [row.id, row.numeric_id]));
-  }
-
-  async getUserIdsByNumericIds(numericIds: number[]): Promise<Map<number, string>> {
-    const ids = [...new Set(numericIds)];
-    if (ids.length === 0) return new Map();
-    const rows = await this.database.selectFrom('iam.users')
-      .select(['id', 'numeric_id'])
-      .where('numeric_id', 'in', ids)
-      .execute();
-    return new Map(rows.map((row) => [row.numeric_id, row.id]));
   }
 
   async findById(id: string): Promise<IamUser> {
@@ -329,33 +314,6 @@ export class UsersService {
       .where('id', 'in', [...new Set(ids)])
       .execute();
     return rows.map((row) => this.toUser(row));
-  }
-
-  getInternalSshKey(actorId: string, targetUserId: string, includePrivate: boolean) {
-    return this.sshIdentities.getUserKeyDto(
-      targetUserId,
-      actorId,
-      includePrivate,
-      (transaction) => this.accessResolver.assertActorMayAdministerUserInTransaction(
-        transaction,
-        actorId,
-        targetUserId,
-      ),
-    );
-  }
-
-  async rotateInternalSshKey(actorId: string, targetUserId: string) {
-    const rotated = await this.sshIdentities.rotateUserKey(
-      targetUserId,
-      actorId,
-      (transaction) => this.accessResolver.assertActorMayAdministerUserInTransaction(
-        transaction,
-        actorId,
-        targetUserId,
-      ),
-    );
-    await this.notifyInternalSshKeyRotated(targetUserId);
-    return rotated;
   }
 
   async updateUser(
@@ -534,8 +492,7 @@ export class UsersService {
   }
 
   async ensureAdminExists(
-    addToAdminsGroup: (userId: string) => Promise<void>,
-    hasAlternativeAdministrator: (excludedUserId?: string) => Promise<boolean>,
+    ensureAdministratorMembership: (userId: string) => Promise<void>,
   ): Promise<void> {
     let admin = await this.database.selectFrom('iam.users')
       .selectAll()
@@ -543,7 +500,7 @@ export class UsersService {
       .executeTakeFirst();
     if (admin) {
       if (admin.status !== UserStatus.Active) {
-        if (!await hasAlternativeAdministrator(admin.id)) {
+        if (!await this.hasAlternativeAdministrator(admin.id)) {
           throw new ConflictException({
             code: 'ADMIN_BOOTSTRAP_UNAVAILABLE',
             message: 'The reserved admin account is inactive and no alternative active administrator exists',
@@ -551,22 +508,23 @@ export class UsersService {
         }
         return;
       }
-      await addToAdminsGroup(admin.id);
+      await ensureAdministratorMembership(admin.id);
       return;
     }
     const isProd = this.config.get<string>('runtime.nodeEnv') === 'production';
     let initPassword = this.config.get<string>('auth.adminInitPassword');
+    let generatedInitPassword = false;
     if (!initPassword) {
       if (isProd) {
         const { randomBytes } = await import('crypto');
         initPassword = randomBytes(12).toString('hex');
-        this.logger.warn(`Generated one-time admin password: ${initPassword}`);
+        generatedInitPassword = true;
       } else {
         initPassword = 'admin123';
       }
     }
     try {
-      const created = await this.createUser({
+      await this.createUser({
         username: 'admin',
         password: initPassword,
         displayName: 'Administrator',
@@ -574,14 +532,16 @@ export class UsersService {
         systemGroupKey: SystemGroupKey.Administrators,
         actorId: null,
       });
-      await addToAdminsGroup(created.id);
+      if (generatedInitPassword) {
+        this.logger.warn(`Generated one-time admin password: ${initPassword}`);
+      }
       return;
     } catch (error) {
-      if (!this.isUniqueViolation(error)) throw error;
+      if (!this.isUniqueViolation(error) && !this.isUsernameConflict(error)) throw error;
       admin = await this.database.selectFrom('iam.users')
         .selectAll().where('username', '=', 'admin').executeTakeFirst();
       if (!admin || admin.status !== UserStatus.Active) throw error;
-      await addToAdminsGroup(admin.id);
+      await ensureAdministratorMembership(admin.id);
     }
   }
 
@@ -658,6 +618,15 @@ export class UsersService {
       return saved;
     });
     await this.notifyProxySnapshotsChanged('user-ssh-key-added');
+    try {
+      await this.containerSshConvergence.reconcileUser(userId);
+    } catch (error) {
+      this.logger.warn(
+        `SSH key change hook enqueue failed for ${userId}: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    }
     return saved;
   }
 
@@ -703,13 +672,6 @@ export class UsersService {
       return deleted;
     });
     await this.notifyProxySnapshotsChanged('user-ssh-key-deleted');
-  }
-
-  async getUserSshKeyTexts(userId: string): Promise<string[]> {
-    return (await this.listSshKeys(userId)).map((key) => key.keyText);
-  }
-
-  async notifyInternalSshKeyRotated(userId: string): Promise<void> {
     try {
       await this.containerSshConvergence.reconcileUser(userId);
     } catch (error) {
@@ -719,7 +681,10 @@ export class UsersService {
         }`,
       );
     }
-    await this.notifyProxySnapshotsChanged('user-internal-ssh-key-rotated');
+  }
+
+  async getUserSshKeyTexts(userId: string): Promise<string[]> {
+    return (await this.listSshKeys(userId)).map((key) => key.keyText);
   }
 
   async toDto(user: IamUser): Promise<UserDto> {
@@ -789,6 +754,20 @@ export class UsersService {
     return normalized;
   }
 
+  private async hasAlternativeAdministrator(excludedUserId?: string): Promise<boolean> {
+    const query = this.database.selectFrom('iam.group_members as member')
+      .innerJoin('iam.groups as group', 'group.id', 'member.group_id')
+      .innerJoin('iam.users as user', 'user.id', 'member.user_id')
+      .select('user.id')
+      .where('group.system_key', '=', SystemGroupKey.Administrators)
+      .where('group.is_system', '=', true)
+      .where('user.status', '=', UserStatus.Active);
+    const row = excludedUserId
+      ? await query.where('user.id', '!=', excludedUserId).executeTakeFirst()
+      : await query.executeTakeFirst();
+    return row !== undefined;
+  }
+
   private toUser(row: {
     id: string;
     numeric_id: number;
@@ -836,5 +815,9 @@ export class UsersService {
   private isUniqueViolation(error: unknown): boolean {
     return Boolean(error && typeof error === 'object'
       && (error as { code?: unknown }).code === '23505');
+  }
+
+  private isUsernameConflict(error: unknown): boolean {
+    return error instanceof ConflictException && error.message === 'Username already exists';
   }
 }

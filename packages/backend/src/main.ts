@@ -5,15 +5,14 @@ import type { NestExpressApplication } from '@nestjs/platform-express';
 import { existsSync } from 'fs';
 import { join } from 'path';
 import { AppModule } from './app.module.js';
-import { AgentGateway } from './gateway/agent-gateway.js';
-import { ConsoleGateway } from './gateway/console-gateway.js';
-import { SshProxyGateway } from './ssh/ssh-proxy-gateway.js';
-import { HttpProxyGateway } from './http-proxy/http-proxy-gateway.js';
 import { NyabaseConfigService } from './config/nyabase-config.service.js';
 import { SpaFallbackFilter } from './filters/spa-fallback.filter.js';
 import { ZodExceptionFilter } from './filters/zod-exception.filter.js';
 import { RuntimeRoleService } from './runtime/runtime-role.service.js';
 import { RuntimeLifecycleService } from './health/runtime-lifecycle.service.js';
+import { ConsoleBridgeGateway } from './runtime/console-bridge.gateway.js';
+import { SshProxyGateway } from './ssh/ssh-proxy-gateway.js';
+import { HttpProxyGateway } from './http-proxy/http-proxy-gateway.js';
 
 async function bootstrap() {
   const logger = new Logger('Bootstrap');
@@ -22,7 +21,7 @@ async function bootstrap() {
     logger: ['error', 'warn', 'log', 'debug'],
   });
   // Let Nest stop HTTP admission and invoke module destroy hooks on SIGTERM
-  // and SIGINT, allowing gateways, task workers, and metric flushing to drain.
+  // and SIGINT, allowing runtime workers and metric flushing to drain.
   app.enableShutdownHooks(['SIGTERM', 'SIGINT']);
   const config = app.get(NyabaseConfigService);
   const runtimeRole = app.get(RuntimeRoleService);
@@ -84,17 +83,10 @@ async function bootstrap() {
   const server = await app.listen(port);
 
   const httpServer = server as import('http').Server;
-  const websocketPaths = runtimeRole.servesGateway()
-    ? new Set(['/ws/agent', '/ws/console', '/ws/ssh-proxy', '/ws/http-proxy'])
-    : new Set<string>();
-  if (runtimeRole.servesGateway()) {
-    app.get(AgentGateway).attachToHttpServer(httpServer);
-    app.get(ConsoleGateway).attachToHttpServer(httpServer);
-    app.get(SshProxyGateway).attachToHttpServer(httpServer);
-    app.get(HttpProxyGateway).attachToHttpServer(httpServer);
-  }
-  // noServer gateways intentionally ignore paths they do not own. The final
-  // listener closes every unknown upgrade so raw sockets cannot remain open.
+  app.get(ConsoleBridgeGateway).attachToHttpServer(httpServer);
+  app.get(SshProxyGateway).attachToHttpServer(httpServer);
+  app.get(HttpProxyGateway).attachToHttpServer(httpServer);
+  const websocketPaths = new Set(['/ws/console', '/ws/ssh-proxy', '/ws/http-proxy']);
   httpServer.on('upgrade', (request, socket) => {
     const path = request.url?.split('?')[0] ?? '';
     if (!websocketPaths.has(path)) socket.destroy();

@@ -1,0 +1,29 @@
+[Unit]
+Description=Nyabase node-exporter (read-only HTTPS metrics)
+Documentation=file:/opt/nyabase/deploy/OPERATIONS.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Dedicated unprivileged user. CPU/PSI/sysctl metrics work without root.
+# nvidia-smi (GPU display index) typically needs membership in video/render,
+# not root; add those groups on GPU hosts. smartctl and nft metrics are
+# optional and omitted when the process cannot read them.
+User=nyabase-node
+Group=nyabase-node
+EnvironmentFile=/etc/nyabase/node-exporter.env
+WorkingDirectory=/opt/nyabase/node-exporter
+# Documented package start command: `node dist/main.js`
+# (packages/node-exporter/package.json scripts.start). Use Node.js 22+.
+ExecStart=/usr/bin/env node dist/main.js
+Restart=on-failure
+RestartSec=5s
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ReadOnlyPaths=/etc/nyabase/node-exporter.env /etc/nyabase/node-exporter
+
+[Install]
+WantedBy=multi-user.target
