@@ -23,7 +23,7 @@ test(
 
 test(
   'the runtime seed proves the Incus boundary and explicit blocked gaps',
-  { ...coverageCase('canonical-route-inventory', 'foundation-incus-boundary') },
+  { ...coverageCase('contract-http-inventory', 'foundation-incus-boundary') },
   async ({ seedState, topologyProvider }) => {
     expect(topologyProvider.id).toBe('incus-standalone');
     expect(seedState.server.endpoint).toMatch(/^https:\/\//);

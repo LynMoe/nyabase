@@ -2,10 +2,10 @@ export type QueryPresentationState = 'loading' | 'error' | 'success' | 'stale-er
 
 export function queryPresentationState(input: {
   hasData: boolean;
-  isPending: boolean;
+  isLoading: boolean; // caller passes isPending && isFetching
   isError: boolean;
 }): QueryPresentationState {
-  if (!input.hasData && input.isPending) return 'loading';
+  if (!input.hasData && input.isLoading) return 'loading';
   if (!input.hasData && input.isError) return 'error';
   if (input.hasData && input.isError) return 'stale-error';
   return 'success';

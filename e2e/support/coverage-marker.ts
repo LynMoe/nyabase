@@ -13,7 +13,7 @@ interface Feature {
 }
 
 const ledger = JSON.parse(readFileSync(
-  join(dirname(fileURLToPath(import.meta.url)), '..', 'coverage', 'features.yaml'),
+  join(dirname(fileURLToPath(import.meta.url)), '..', 'coverage', 'features.json'),
   'utf8',
 )) as { features: Feature[] };
 
@@ -35,7 +35,10 @@ export function coverageCase(caseId: string, specTestId: string): {
   }
   return {
     tag: entry.status === 'implemented'
-      ? entry.profiles.map((profile) => `@nyabase-profile-${profile}`)
+      ? [
+        ...entry.profiles.map((profile) => `@nyabase-profile-${profile}`),
+        `@case-${caseId}`,
+      ]
       : ['@nyabase-profile-never'],
     annotation: [
       { type: 'nyabase.coverage.case', description: caseId },

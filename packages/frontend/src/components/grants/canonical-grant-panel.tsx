@@ -14,24 +14,25 @@ import {
   type UserDto,
 } from '@nyabase/common';
 import { api } from '../../lib/api.js';
+import { errorMessage } from '../../lib/api-error.js';
+import { queryKeys } from '../../lib/query-keys.js';
 import { grantExpiryPhaseLabel } from '../../lib/display-labels.js';
 import { formatCpu, approxGibHint } from '../../lib/utils.js';
 import { toast } from '../../hooks/use-toast.js';
-import {
-  AlertDialog,
-  AlertDialogAction,
-  AlertDialogCancel,
-  AlertDialogContent,
-  AlertDialogDescription,
-  AlertDialogFooter,
-  AlertDialogHeader,
-  AlertDialogTitle,
-} from '../ui/alert-dialog.js';
+import { ConfirmDialog } from '../layout/confirm-dialog.js';
 import { Badge } from '../ui/badge.js';
 import { Button } from '../ui/button.js';
-import { Card, CardContent, CardHeader, CardTitle } from '../ui/card.js';
 import { Input } from '../ui/input.js';
-import { Label } from '../ui/label.js';
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '../ui/select.js';
+import { Switch } from '../ui/switch.js';
+import { Tabs, TabsContent, TabsList, TabsTrigger } from '../ui/tabs.js';
+import { FormField } from '../layout/form-field.js';
 import {
   GpuPicker,
   type GpuPickerMode,
@@ -47,9 +48,9 @@ const GIB = 1024 ** 3;
 export function CanonicalGrantPanel({ subject, kind }: { subject: Subject; kind: SubjectKind }) {
   const queryClient = useQueryClient();
   const prefix = `/admin/${kind}/${subject.id}`;
-  const serversQuery = useQuery({ queryKey: ['grant-targets', 'servers'], queryFn: () => api.get<ServerDto[]>('/admin/servers') });
+  const serversQuery = useQuery({ queryKey: queryKeys.grants.targets.servers, queryFn: () => api.get<ServerDto[]>('/admin/servers') });
   const poolsQuery = useQuery({
-    queryKey: ['grant-targets', 'pools'],
+    queryKey: queryKeys.grants.targets.pools,
     queryFn: async () => {
       const servers = serversQuery.data ?? [];
       const rows = await Promise.all(servers.map(async (server) => api.get<StoragePoolDto[]>(`/admin/servers/${server.id}/storage-pools`)));
@@ -57,12 +58,12 @@ export function CanonicalGrantPanel({ subject, kind }: { subject: Subject; kind:
     },
     enabled: serversQuery.isSuccess,
   });
-  const backendsQuery = useQuery({ queryKey: ['grant-targets', 'backends'], queryFn: () => api.get<SharedBackendDto[]>('/admin/shared-backends') });
-  const serverGrantsQuery = useQuery({ queryKey: ['grants', kind, subject.id, 'servers'], queryFn: () => api.get<ServerGrantDto[]>(`${prefix}/server-grants`) });
-  const poolGrantsQuery = useQuery({ queryKey: ['grants', kind, subject.id, 'pools'], queryFn: () => api.get<StoragePoolGrantDto[]>(`${prefix}/storage-pool-grants`) });
-  const backendGrantsQuery = useQuery({ queryKey: ['grants', kind, subject.id, 'backends'], queryFn: () => api.get<SharedBackendGrantDto[]>(`${prefix}/shared-backend-grants`) });
+  const backendsQuery = useQuery({ queryKey: queryKeys.grants.targets.backends, queryFn: () => api.get<SharedBackendDto[]>('/admin/shared-backends') });
+  const serverGrantsQuery = useQuery({ queryKey: queryKeys.grants.subjectList(kind, subject.id, 'servers'), queryFn: () => api.get<ServerGrantDto[]>(`${prefix}/server-grants`) });
+  const poolGrantsQuery = useQuery({ queryKey: queryKeys.grants.subjectList(kind, subject.id, 'pools'), queryFn: () => api.get<StoragePoolGrantDto[]>(`${prefix}/storage-pool-grants`) });
+  const backendGrantsQuery = useQuery({ queryKey: queryKeys.grants.subjectList(kind, subject.id, 'backends'), queryFn: () => api.get<SharedBackendGrantDto[]>(`${prefix}/shared-backend-grants`) });
   const effectiveAccessQuery = useQuery({
-    queryKey: ['grants', kind, subject.id, 'effective-access'],
+    queryKey: queryKeys.grants.subjectList(kind, subject.id, 'effective-access'),
     queryFn: () => api.get<EffectiveAccessDto>(`${prefix}/effective-access`),
     enabled: kind === 'users',
   });
@@ -101,8 +102,8 @@ export function CanonicalGrantPanel({ subject, kind }: { subject: Subject; kind:
   const backends = backendsQuery.data ?? [];
 
   const invalidate = () => {
-    void queryClient.invalidateQueries({ queryKey: ['grants', kind, subject.id] });
-    void queryClient.invalidateQueries({ queryKey: ['me', 'access'] });
+    void queryClient.invalidateQueries({ queryKey: queryKeys.grants.subject(kind, subject.id) });
+    void queryClient.invalidateQueries({ queryKey: queryKeys.meAccess });
   };
 
   const serverMutation = useMutation({
@@ -151,14 +152,26 @@ export function CanonicalGrantPanel({ subject, kind }: { subject: Subject; kind:
     onError: (error) => toast({ title: '删除授权失败', description: errorMessage(error), variant: 'destructive' }),
   });
 
+  const serverGrantCount = serverGrantsQuery.data?.length ?? 0;
+  const poolGrantCount = poolGrantsQuery.data?.length ?? 0;
+  const backendGrantCount = backendGrantsQuery.data?.length ?? 0;
+
   return (
-    <div className="space-y-4" data-testid="canonical-grants">
-      <Card>
-        <CardHeader>
-          <CardTitle className="text-base">服务器授权</CardTitle>
-        </CardHeader>
-        <CardContent className="space-y-3">
-          <GrantExpiryInput id="grant-server-expires-at" value={serverExpiresAt} onChange={setServerExpiresAt} />
+    <div className="space-y-3" data-testid="canonical-grants">
+      <Tabs defaultValue="servers">
+        <TabsList className="grid h-auto w-full grid-cols-3 flex-nowrap">
+          <TabsTrigger value="servers" className="px-2">
+            服务器{serverGrantCount > 0 ? ` · ${serverGrantCount}` : ''}
+          </TabsTrigger>
+          <TabsTrigger value="pools" className="px-2">
+            存储池{poolGrantCount > 0 ? ` · ${poolGrantCount}` : ''}
+          </TabsTrigger>
+          <TabsTrigger value="backends" className="px-2">
+            共享存储{backendGrantCount > 0 ? ` · ${backendGrantCount}` : ''}
+          </TabsTrigger>
+        </TabsList>
+
+        <TabsContent value="servers" className="space-y-3">
           <div className="grid gap-3 sm:grid-cols-2">
             <SelectField
               id="grant-server"
@@ -171,25 +184,23 @@ export function CanonicalGrantPanel({ subject, kind }: { subject: Subject; kind:
               }}
               options={servers.map((server) => [server.id, server.name])}
             />
-            <div className="space-y-1.5">
-              <Label>GPU 授权</Label>
-              <GpuPicker
-                serverId={serverId}
-                admin
-                mode={pickerMode}
-                onModeChange={setPickerMode}
-                value={gpuPciAddresses}
-                onChange={setGpuPciAddresses}
-                idPrefix="grant-gpu"
-              />
-            </div>
+            <GpuPicker
+              serverId={serverId}
+              admin
+              mode={pickerMode}
+              onModeChange={setPickerMode}
+              value={gpuPciAddresses}
+              onChange={setGpuPciAddresses}
+              idPrefix="grant-gpu"
+              label="GPU 授权"
+            />
           </div>
           <div className="grid gap-3 sm:grid-cols-3">
             <NumberField id="grant-cpu" label="CPU（核，空=不限）" value={cpuCores} onChange={setCpuCores} />
             <NumberField id="grant-memory" label="内存（G，空=不限）" value={memGib} onChange={setMemGib} hint={gibHint(memGib)} />
-            <NumberField id="grant-disk" label="磁盘（G，空=不限）" value={diskGib} onChange={setDiskGib} hint={gibHint(diskGib)} />
+            <NumberField id="grant-disk" label="磁盘（G，空=不限，不含共享卷）" value={diskGib} onChange={setDiskGib} hint={gibHint(diskGib)} />
           </div>
-          <p className="text-xs text-muted-foreground">保存后到期时间：{expirySummary(serverExpiresAt)}</p>
+          <GrantExpiryInput id="grant-server-expires-at" value={serverExpiresAt} onChange={setServerExpiresAt} />
           <Button onClick={() => serverMutation.mutate()} disabled={!serverId || serverMutation.isPending}>
             保存服务器授权
           </Button>
@@ -203,28 +214,20 @@ export function CanonicalGrantPanel({ subject, kind }: { subject: Subject; kind:
               onDelete={(id, label) => setDeleteTarget({ resource: 'server-grants', id, label })}
             />
           </div>
-        </CardContent>
-      </Card>
+        </TabsContent>
 
-      <Card>
-        <CardHeader>
-          <CardTitle className="text-base">存储池授权</CardTitle>
-        </CardHeader>
-        <CardContent className="space-y-3">
-          <div className="grid gap-3 sm:grid-cols-2">
-            <SelectField
-              id="grant-pool"
-              label="存储池"
-              value={poolId}
-              onChange={setPoolId}
-              options={pools.filter((pool) => pool.registered).map((pool) => [
-                pool.id,
-                `${pool.displayName ?? pool.incusName} · ${serverName(pool.serverId, servers)}`,
-              ])}
-            />
-            <GrantExpiryInput id="grant-pool-expires-at" value={poolExpiresAt} onChange={setPoolExpiresAt} />
-          </div>
-          <p className="text-xs text-muted-foreground">保存后到期时间：{expirySummary(poolExpiresAt)}</p>
+        <TabsContent value="pools" className="space-y-3">
+          <SelectField
+            id="grant-pool"
+            label="存储池"
+            value={poolId}
+            onChange={setPoolId}
+            options={pools.filter((pool) => pool.registered).map((pool) => [
+              pool.id,
+              `${pool.displayName ?? pool.incusName} · ${serverName(pool.serverId, servers)}`,
+            ])}
+          />
+          <GrantExpiryInput id="grant-pool-expires-at" value={poolExpiresAt} onChange={setPoolExpiresAt} />
           <Button onClick={() => poolMutation.mutate()} disabled={!poolId || poolMutation.isPending}>
             保存存储池授权
           </Button>
@@ -237,14 +240,9 @@ export function CanonicalGrantPanel({ subject, kind }: { subject: Subject; kind:
               onDelete={(id, label) => setDeleteTarget({ resource: 'storage-pool-grants', id, label })}
             />
           </div>
-        </CardContent>
-      </Card>
+        </TabsContent>
 
-      <Card>
-        <CardHeader>
-          <CardTitle className="text-base">共享存储授权</CardTitle>
-        </CardHeader>
-        <CardContent className="space-y-3">
+        <TabsContent value="backends" className="space-y-3">
           <div className="grid gap-3 sm:grid-cols-2">
             <SelectField
               id="grant-backend"
@@ -256,7 +254,6 @@ export function CanonicalGrantPanel({ subject, kind }: { subject: Subject; kind:
             <NumberField id="grant-shared-limit" label="额度（G）" value={sharedLimitGib} onChange={setSharedLimitGib} hint={gibHint(sharedLimitGib)} />
           </div>
           <GrantExpiryInput id="grant-backend-expires-at" value={backendExpiresAt} onChange={setBackendExpiresAt} />
-          <p className="text-xs text-muted-foreground">保存后到期时间：{expirySummary(backendExpiresAt)}</p>
           <Button
             onClick={() => backendMutation.mutate()}
             disabled={!backendId || !sharedLimitGib || backendMutation.isPending}
@@ -272,42 +269,62 @@ export function CanonicalGrantPanel({ subject, kind }: { subject: Subject; kind:
               onDelete={(id, label) => setDeleteTarget({ resource: 'shared-backend-grants', id, label })}
             />
           </div>
-        </CardContent>
-      </Card>
+        </TabsContent>
+      </Tabs>
 
-      <AlertDialog open={Boolean(deleteTarget)} onOpenChange={(open) => { if (!open) setDeleteTarget(null); }}>
-        <AlertDialogContent>
-          <AlertDialogHeader>
-            <AlertDialogTitle>删除授权？</AlertDialogTitle>
-            <AlertDialogDescription>
-              将删除「{deleteTarget?.label}」。删除后该主体将立即失去对应资源访问权（若仍在宽限期内，以服务端状态为准）。
-            </AlertDialogDescription>
-          </AlertDialogHeader>
-          <AlertDialogFooter>
-            <AlertDialogCancel>取消</AlertDialogCancel>
-            <AlertDialogAction
-              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
-              onClick={() => {
-                if (deleteTarget) remove.mutate({ resource: deleteTarget.resource, id: deleteTarget.id });
-              }}
-              disabled={remove.isPending}
-            >
-              {remove.isPending ? '删除中...' : '确认删除'}
-            </AlertDialogAction>
-          </AlertDialogFooter>
-        </AlertDialogContent>
-      </AlertDialog>
+      <ConfirmDialog
+        open={Boolean(deleteTarget)}
+        title="删除授权？"
+        description={`将删除「${deleteTarget?.label}」。删除后该主体将立即失去对应资源访问权（若仍在宽限期内，以服务端状态为准）。`}
+        confirmLabel="确认删除"
+        pendingLabel="删除中..."
+        pending={remove.isPending}
+        onConfirm={() => {
+          if (deleteTarget) remove.mutate({ resource: deleteTarget.resource, id: deleteTarget.id });
+        }}
+        onOpenChange={(open) => { if (!open) setDeleteTarget(null); }}
+      />
     </div>
   );
 }
 
 function GrantExpiryInput({ id, value, onChange }: { id: string; value: string; onChange: (value: string) => void }) {
+  const enabled = value.length > 0;
   return (
-    <div className="space-y-1.5">
-      <Label htmlFor={id}>到期时间（留空=不设期限）</Label>
-      <Input id={id} type="datetime-local" value={value} onChange={(event) => onChange(event.target.value)} />
+    <div className="space-y-2">
+      <div className="flex items-center justify-between gap-3 rounded-md border px-3 py-2">
+        <div className="min-w-0">
+          <p className="text-sm font-medium">到期时间</p>
+          <p className="text-xs text-muted-foreground">{enabled ? expirySummary(value) : '不设期限'}</p>
+        </div>
+        <Switch
+          id={id}
+          checked={enabled}
+          onCheckedChange={(checked) => onChange(checked ? defaultExpiryLocal() : '')}
+          aria-label="设置到期时间"
+        />
+      </div>
+      {enabled && (
+        <FormField id={`${id}-at`} label="具体时间（本地时区）">
+          <Input
+            id={`${id}-at`}
+            type="datetime-local"
+            value={value}
+            onChange={(event) => onChange(event.target.value)}
+          />
+        </FormField>
+      )}
     </div>
   );
+}
+
+export function toDatetimeLocalValue(date: Date): string {
+  const pad = (n: number) => String(n).padStart(2, '0');
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`;
+}
+
+function defaultExpiryLocal(): string {
+  return toDatetimeLocalValue(new Date(Date.now() + 30 * 24 * 60 * 60 * 1000));
 }
 
 function GrantList<T extends { id: string; expiresAt: string | null }>({
@@ -366,21 +383,18 @@ function SelectField({
   disabled?: boolean;
 }) {
   return (
-    <div className="space-y-1.5">
-      <Label htmlFor={id}>{label}</Label>
-      <select
-        id={id}
-        className="h-10 w-full rounded-md border border-input bg-background px-3 text-sm"
-        value={value}
-        onChange={(event) => onChange(event.target.value)}
-        disabled={disabled}
-      >
-        <option value="">请选择</option>
-        {options.map(([optionValue, optionLabel]) => (
-          <option key={optionValue} value={optionValue}>{optionLabel}</option>
-        ))}
-      </select>
-    </div>
+    <FormField id={id} label={label}>
+      <Select key={value || 'empty'} value={value || undefined} onValueChange={onChange} disabled={disabled}>
+        <SelectTrigger id={id}>
+          <SelectValue placeholder="请选择" />
+        </SelectTrigger>
+        <SelectContent>
+          {options.map(([optionValue, optionLabel]) => (
+            <SelectItem key={optionValue} value={optionValue}>{optionLabel}</SelectItem>
+          ))}
+        </SelectContent>
+      </Select>
+    </FormField>
   );
 }
 
@@ -398,11 +412,9 @@ function NumberField({
   hint?: string;
 }) {
   return (
-    <div className="space-y-1.5">
-      <Label htmlFor={id}>{label}</Label>
+    <FormField id={id} label={label} hint={hint}>
       <Input id={id} type="number" min="0" step="any" value={value} onChange={(event) => onChange(event.target.value)} />
-      {hint && <p className="text-[11px] text-muted-foreground">{hint}</p>}
-    </div>
+    </FormField>
   );
 }
 
@@ -461,8 +473,4 @@ function expiryLabel(value: string | null): string {
 
 function expirySummary(value: string): string {
   return value ? expiryLabel(isoOrNull(value)) : '不设期限';
-}
-
-function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : '请稍后重试';
 }

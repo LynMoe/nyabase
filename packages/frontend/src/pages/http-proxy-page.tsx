@@ -15,8 +15,20 @@ import { Button } from '../components/ui/button.js';
 import { Card, CardContent, CardHeader, CardTitle } from '../components/ui/card.js';
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '../components/ui/dialog.js';
 import { Input } from '../components/ui/input.js';
-import { Label } from '../components/ui/label.js';
-import { QueryErrorState, QueryLoadingState } from '../components/query-state.js';
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '../components/ui/select.js';
+import { ConfirmDialog } from '../components/layout/confirm-dialog.js';
+import { FormField } from '../components/layout/form-field.js';
+import { EmptyState } from '../components/layout/empty-state.js';
+import { Page } from '../components/layout/page.js';
+import { PageHeader } from '../components/layout/page-header.js';
+import { QueryView } from '../components/layout/query-view.js';
+import { ResourceGrid } from '../components/layout/resource-grid.js';
 import { queryKeys } from '../lib/query-keys.js';
 import { toast } from '../hooks/use-toast.js';
 import {
@@ -44,50 +56,46 @@ export default function HttpProxyPage() {
     },
     onError: (error) => toast({ title: '删除失败', description: httpProxyErrorMessage(error), variant: 'destructive' }),
   });
-  const bindings = bindingsQuery.data ?? [];
-
   return (
-    <div className="space-y-5 px-4 py-4 md:px-6" data-testid="http-proxy">
-      <div className="flex flex-wrap items-start justify-between gap-3">
-        <div>
-          <h1 className="text-2xl font-semibold tracking-tight">HTTP 发布</h1>
-          <p className="text-sm text-muted-foreground">
-            把容器端口发布到域名。主机名必须匹配管理员已启用的通配域名。
-          </p>
-        </div>
-        <div className="flex gap-2">
-          <Button variant="outline" size="icon" onClick={() => { void bindingsQuery.refetch(); }} aria-label="刷新 HTTP 发布">
-            <RefreshCw className="h-4 w-4" />
-          </Button>
-          <Button onClick={() => setCreateOpen(true)}><Plus className="h-4 w-4" />新建发布</Button>
-        </div>
-      </div>
-      {bindingsQuery.isLoading ? (
-        <QueryLoadingState label="加载 HTTP 发布..." />
-      ) : bindingsQuery.isError ? (
-        <QueryErrorState error={bindingsQuery.error} resourceName="HTTP 发布" onRetry={() => { void bindingsQuery.refetch(); }} />
-      ) : bindings.length === 0 ? (
-        <Card>
-          <CardContent className="flex flex-col items-center gap-3 py-12 text-center">
-            <Globe className="h-10 w-10 text-muted-foreground/40" />
-            <p className="text-sm text-muted-foreground">
-              暂无 HTTP 发布。创建后即可把容器端口发布到域名。
-            </p>
+    <Page testId="http-proxy">
+      <PageHeader
+        title="HTTP 发布"
+        description="把容器端口发布到域名。主机名必须匹配管理员已启用的通配域名。"
+        actions={
+          <>
+            <Button variant="outline" size="icon" onClick={() => { void bindingsQuery.refetch(); }} aria-label="刷新 HTTP 发布">
+              <RefreshCw className="h-4 w-4" />
+            </Button>
             <Button onClick={() => setCreateOpen(true)}><Plus className="h-4 w-4" />新建发布</Button>
-          </CardContent>
-        </Card>
-      ) : (
-        <div className="grid gap-4 xl:grid-cols-2">
-          {bindings.map((binding) => (
-            <BindingCard
-              key={binding.id}
-              binding={binding}
-              onEdit={() => setEditTarget(binding)}
-              onDelete={() => setDeleteTarget(binding)}
-            />
-          ))}
-        </div>
-      )}
+          </>
+        }
+      />
+      <QueryView
+        query={bindingsQuery}
+        resourceName="HTTP 发布"
+        loadingLabel="加载 HTTP 发布..."
+        showEmpty={bindingsQuery.data?.length === 0}
+        empty={
+          <EmptyState
+            icon={Globe}
+            title="暂无 HTTP 发布。创建后即可把容器端口发布到域名。"
+            action={<Button onClick={() => setCreateOpen(true)}><Plus className="h-4 w-4" />新建发布</Button>}
+          />
+        }
+      >
+        {(items) => (
+          <ResourceGrid>
+            {items.map((binding) => (
+              <BindingCard
+                key={binding.id}
+                binding={binding}
+                onEdit={() => setEditTarget(binding)}
+                onDelete={() => setDeleteTarget(binding)}
+              />
+            ))}
+          </ResourceGrid>
+        )}
+      </QueryView>
       <BindingFormDialog open={createOpen} onOpenChange={setCreateOpen} />
       {editTarget && (
         <BindingFormDialog
@@ -96,27 +104,17 @@ export default function HttpProxyPage() {
           onOpenChange={(open) => { if (!open) setEditTarget(null); }}
         />
       )}
-      <Dialog open={Boolean(deleteTarget)} onOpenChange={(open) => { if (!open) setDeleteTarget(null); }}>
-        <DialogContent>
-          <DialogHeader>
-            <DialogTitle>删除 HTTP 发布？</DialogTitle>
-            <DialogDescription>
-              将删除主机名「{deleteTarget?.hostname}」的发布绑定。域名将不再转发到该容器端口。
-            </DialogDescription>
-          </DialogHeader>
-          <DialogFooter>
-            <Button variant="outline" onClick={() => setDeleteTarget(null)}>取消</Button>
-            <Button
-              variant="destructive"
-              onClick={() => { if (deleteTarget) remove.mutate(deleteTarget.id); }}
-              disabled={remove.isPending}
-            >
-              {remove.isPending ? '删除中...' : '确认删除'}
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
-    </div>
+      <ConfirmDialog
+        open={Boolean(deleteTarget)}
+        title="删除 HTTP 发布？"
+        description={`将删除主机名「${deleteTarget?.hostname}」的发布绑定。域名将不再转发到该容器端口。`}
+        confirmLabel="确认删除"
+        pendingLabel="删除中..."
+        pending={remove.isPending}
+        onConfirm={() => { if (deleteTarget) remove.mutate(deleteTarget.id); }}
+        onOpenChange={(open) => { if (!open) setDeleteTarget(null); }}
+      />
+    </Page>
   );
 }
 
@@ -255,8 +253,7 @@ function BindingFormDialog({
           </DialogDescription>
         </DialogHeader>
         <div className="space-y-3">
-          <div className="space-y-1.5">
-            <Label htmlFor="http-proxy-hostname">主机名</Label>
+          <FormField id="http-proxy-hostname" label="主机名">
             <Input
               id="http-proxy-hostname"
               className="font-mono"
@@ -264,7 +261,7 @@ function BindingFormDialog({
               placeholder="app.example.com"
               onChange={(event) => { setHostname(event.target.value); setError(null); }}
             />
-          </div>
+          </FormField>
           {pools.length > 0 ? (
             <p className="text-xs text-muted-foreground">
               已启用通配域名：{pools.map((pool) => pool.wildcardDomain).join('、')}
@@ -276,29 +273,29 @@ function BindingFormDialog({
                 : '当前没有已启用的通配域名，请联系管理员在「HTTP 代理」中创建。'}
             </p>
           )}
-          <div className="space-y-1.5">
-            <Label htmlFor="http-proxy-container">容器</Label>
-            <select
-              id="http-proxy-container"
-              className="h-10 w-full rounded-md border border-input bg-background px-3 text-sm"
-              value={containerId}
-              onChange={(event) => { setContainerId(event.target.value); setError(null); }}
+          <FormField id="http-proxy-container" label="容器">
+            <Select
+              value={containerId || undefined}
+              onValueChange={(value) => { setContainerId(value); setError(null); }}
             >
-              <option value="">{containersQuery.isLoading ? '加载容器…' : '选择容器'}</option>
-              {containers.map((container) => (
-                <option key={container.id} value={container.id}>
-                  {container.name} · {container.serverName}
-                </option>
-              ))}
-            </select>
+              <SelectTrigger id="http-proxy-container">
+                <SelectValue placeholder={containersQuery.isLoading ? '加载容器…' : '选择容器'} />
+              </SelectTrigger>
+              <SelectContent>
+                {containers.map((container) => (
+                  <SelectItem key={container.id} value={container.id}>
+                    {container.name} · {container.serverName}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
             {!containersQuery.isLoading && containers.length === 0 && (
               <p className="text-xs text-muted-foreground">
                 还没有容器。<Link to="/containers" className="underline">去创建容器</Link>
               </p>
             )}
-          </div>
-          <div className="space-y-1.5">
-            <Label htmlFor="http-proxy-port">目标端口</Label>
+          </FormField>
+          <FormField id="http-proxy-port" label="目标端口">
             <Input
               id="http-proxy-port"
               type="number"
@@ -307,7 +304,7 @@ function BindingFormDialog({
               value={targetPort}
               onChange={(event) => { setTargetPort(event.target.value); setError(null); }}
             />
-          </div>
+          </FormField>
           {error && <p className="text-sm text-destructive">{error}</p>}
         </div>
         <DialogFooter>

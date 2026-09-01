@@ -115,6 +115,11 @@ export class AdminContainersController {
     return this.containers.listVolumesForAdmin(id);
   }
 
+  @Get(':containerId/shared-volumes')
+  sharedVolumes(@Param('containerId') id: string) {
+    return this.containers.listSharedVolumesForAdmin(id);
+  }
+
   @Get(':containerId/stats')
   stats(@Param('containerId') id: string, @CurrentUser() user: UserRecord) {
     return this.containers.getStatsForAdmin(id, user.id);

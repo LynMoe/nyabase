@@ -3,10 +3,12 @@ import { useEffect, useState } from 'react';
 import { api } from '../lib/api.js';
 import { loginFailureMessage } from '../lib/login-form-error.js';
 import { useAuthStore } from '../store/auth.js';
+import { TriangleAlert } from 'lucide-react';
+import { Alert, AlertDescription } from '../components/ui/alert.js';
 import { Button } from '../components/ui/button.js';
 import { Input } from '../components/ui/input.js';
-import { Label } from '../components/ui/label.js';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '../components/ui/card.js';
+import { FormField } from '../components/layout/form-field.js';
 import { zLoginRequest } from '@nyabase/common';
 import { usePublicSettings } from '../hooks/use-public-settings.js';
 import { sanitizeInternalRedirect } from '../lib/internal-redirect.js';
@@ -67,7 +69,7 @@ function LoginPage() {
   };
 
   return (
-    <div className="min-h-screen flex items-center justify-center bg-muted/40">
+    <div className="flex min-h-dvh items-center justify-center bg-muted/40 px-4 py-8">
       <Card className="w-full max-w-sm">
         <CardHeader className="text-center space-y-1">
           <CardTitle className="text-2xl">{settings.branding.title}</CardTitle>
@@ -75,18 +77,18 @@ function LoginPage() {
         </CardHeader>
         <CardContent>
           {reasonBanner && (
-            <div className="mb-4 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-800">
-              {reasonBanner}
-            </div>
+            <Alert className="mb-4 bg-muted/50">
+              <TriangleAlert className="h-4 w-4" />
+              <AlertDescription>{reasonBanner}</AlertDescription>
+            </Alert>
           )}
           <form onSubmit={handleLogin} className="space-y-4">
             {formError && (
-              <div className="rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive" role="alert">
-                {formError}
-              </div>
+              <Alert variant="destructive">
+                <AlertDescription>{formError}</AlertDescription>
+              </Alert>
             )}
-            <div className="space-y-2">
-              <Label htmlFor="username">用户名</Label>
+            <FormField id="username" label="用户名" error={fieldErr.username}>
               <Input
                 id="username"
                 value={username}
@@ -99,10 +101,8 @@ function LoginPage() {
                 required
                 autoFocus
               />
-              {fieldErr.username && <p className="text-xs text-destructive">{fieldErr.username}</p>}
-            </div>
-            <div className="space-y-2">
-              <Label htmlFor="password">密码</Label>
+            </FormField>
+            <FormField id="password" label="密码" error={fieldErr.password}>
               <Input
                 id="password"
                 type="password"
@@ -111,12 +111,11 @@ function LoginPage() {
                   setPassword(e.target.value);
                   setFormError(null);
                 }}
-                placeholder="••••••••"
+                placeholder="请输入密码"
                 aria-invalid={!!fieldErr.password}
                 required
               />
-              {fieldErr.password && <p className="text-xs text-destructive">{fieldErr.password}</p>}
-            </div>
+            </FormField>
             <Button type="submit" className="w-full" disabled={loading}>
               {loading ? '登录中...' : '登录'}
             </Button>

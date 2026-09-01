@@ -190,7 +190,7 @@ describePg('volume capacity locking and scope exclusions', () => {
         {
           id: sharedVolumeId,
           owner_id: userId,
-          pool_id: sharedPoolId,
+          pool_id: null,
           server_id: null,
           shared_backend_id: backendId,
           name: 'shared-capacity',
@@ -202,6 +202,22 @@ describePg('volume capacity locking and scope exclusions', () => {
           lifecycle_phase: 'active',
           needs_attention: false,
           failure_code: null,
+        },
+      ]).execute();
+      await database.insertInto('control.volume_placements').values([
+        {
+          volume_id: localVolumeId,
+          server_id: serverId,
+          pool_id: recreatedLocalPoolId,
+          catalog_state: 'present' as const,
+          observed_generation: 1,
+        },
+        {
+          volume_id: sharedVolumeId,
+          server_id: serverId,
+          pool_id: sharedPoolId,
+          catalog_state: 'present' as const,
+          observed_generation: 1,
         },
       ]).execute();
 
@@ -231,7 +247,15 @@ describePg('volume capacity locking and scope exclusions', () => {
         resourceId: localVolumeId,
       });
       expect(first.items).toHaveLength(1);
-      expect(second.items).toHaveLength(1);
+      expect(second.items).toHaveLength(2);
+
+      await database.updateTable('control.volumes')
+        .set({ pool_id: null })
+        .where('id', '=', sharedVolumeId)
+        .execute();
+      const afterNullPool = await makeService(database).capacityForUser(userId, serverId);
+      expect(afterNullPool.usedByLocalVolumesBytes).toBe(100);
+      expect(afterNullPool.pools[0]!.committedBytes).toBe(100);
     });
   });
 
@@ -413,6 +437,13 @@ describePg('volume capacity locking and scope exclusions', () => {
         lifecycle_phase: 'active' as const,
         needs_attention: false,
         failure_code: null,
+      }))).execute();
+      await database.insertInto('control.volume_placements').values(volumeIds.map((id) => ({
+        volume_id: id,
+        server_id: serverId,
+        pool_id: poolId,
+        catalog_state: 'present' as const,
+        observed_generation: 1,
       }))).execute();
 
       const service = makeService(database);
@@ -666,10 +697,10 @@ describePg('volume capacity locking and scope exclusions', () => {
       );
 
       const results = await Promise.allSettled([
-        volumeService.createForUser(userId, {
+        volumeService.createSharedForUser(userId, {
           name: 'shared-lock-order-volume',
           sizeBytes: 600,
-          scope: { kind: 'shared', sharedBackendId: backendId, poolId },
+          scope: { kind: 'shared', sharedBackendId: backendId },
         }),
         storageService.patch(poolId, {
           expectedRevision: 1,

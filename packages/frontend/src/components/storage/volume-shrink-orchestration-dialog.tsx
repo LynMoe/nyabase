@@ -7,7 +7,7 @@ import {
   type VolumeDto,
 } from '@nyabase/common';
 import { api } from '../../lib/api.js';
-import { ApiError } from '../../lib/api-error.js';
+import { ApiError, errorMessage } from '../../lib/api-error.js';
 import {
   formatDetachProgress,
   parseVolumeShrinkAttachments,
@@ -390,6 +390,4 @@ async function loadAttachmentsForVolume(
   }));
 }
 
-function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : '请稍后重试';
-}
+

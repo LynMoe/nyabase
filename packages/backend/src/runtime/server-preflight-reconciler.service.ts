@@ -1,17 +1,22 @@
 import { Inject, Injectable } from '@nestjs/common';
 import { createHash, randomUUID } from 'node:crypto';
+import { isIP } from 'node:net';
 import {
   CertificateState,
   CertificateTrustState,
   FailureCode,
   PreflightStatus,
+  isUsableHostInCidr,
   type NodeMetricSample,
   type PreflightReport,
 } from '@nyabase/common';
 import { Kysely, sql, type Transaction } from 'kysely';
 import type { NyabaseDatabase } from '../persistence-pg/database.types.js';
 import { PG_DATABASE } from '../persistence-pg/tokens.js';
-import { lockServerOnboarding } from '../infrastructure/infrastructure.repository.js';
+import {
+  INFRASTRUCTURE_ADVISORY_NAMESPACE,
+  lockServerOnboarding,
+} from '../infrastructure/infrastructure.repository.js';
 import {
   IncusError,
   deriveInstanceHwaddr,
@@ -66,6 +71,13 @@ export interface PreflightChecksPort {
     serverId: string,
     client: IncusClientPort,
     probeName: string,
+    signal?: AbortSignal,
+  ): Promise<Record<string, unknown>>;
+  checkGuestCanReachHost(
+    serverId: string,
+    client: IncusClientPort,
+    probeName: string,
+    hostAddress: string,
     signal?: AbortSignal,
   ): Promise<Record<string, unknown>>;
 }
@@ -148,15 +160,28 @@ interface ReportChecks {
   api: 'pass' | 'fail';
   parentInterface: 'pass' | 'fail';
   gpuRuntime: 'pass' | 'fail' | 'not_applicable';
-  forwarding: 'pass' | 'fail';
   nftables: 'pass' | 'fail';
-  rpFilter: 'pass' | 'fail';
+  ipv4Filtering: 'pass' | 'fail';
+  guestCanReachHost: 'pass' | 'fail';
   networkPrerequisites: 'pass' | 'fail';
   storagePool: 'pass' | 'fail';
   simplestreamsImage: 'pass' | 'fail';
-  routedAddress: 'pass' | 'fail';
+  guestAddress: 'pass' | 'fail';
   egress: 'pass' | 'fail';
   nodeMetrics: 'pass' | 'warn' | 'fail';
+}
+
+interface IpPoolNetwork {
+  readonly gateway: string;
+  readonly cidr: string;
+  readonly prefixLength: number;
+}
+
+interface ParentNetworkLookup {
+  readonly network?: IncusSchema<'Network'>;
+  readonly networkMissing: boolean;
+  readonly state?: IncusSchema<'NetworkState'>;
+  readonly stateMissing: boolean;
 }
 
 class ServerRevisionChangedError extends Error {
@@ -264,6 +289,38 @@ export class ServerPreflightReconciler implements ManagedReconciler {
   }
 
   private async connectWithTrustToken(
+    client: IncusClientPort,
+    server: ServerRow,
+    intent: IntentRecord,
+    signal: AbortSignal,
+  ): Promise<void> {
+    await this.withServerConnectLock(server.id, () => (
+      this.connectWithClaimedTrustToken(client, server, intent, signal)
+    ));
+  }
+
+  private async withServerConnectLock<T>(serverId: string, work: () => Promise<T>): Promise<T> {
+    const acquireConnection = this.database.connection;
+    if (typeof acquireConnection !== 'function') {
+      return work();
+    }
+    return acquireConnection.call(this.database).execute(async (connection) => {
+      await sql`select pg_advisory_lock(
+        ${INFRASTRUCTURE_ADVISORY_NAMESPACE},
+        hashtext(${serverId})
+      )`.execute(connection);
+      try {
+        return await work();
+      } finally {
+        await sql`select pg_advisory_unlock(
+          ${INFRASTRUCTURE_ADVISORY_NAMESPACE},
+          hashtext(${serverId})
+        )`.execute(connection);
+      }
+    });
+  }
+
+  private async connectWithClaimedTrustToken(
     client: IncusClientPort,
     server: ServerRow,
     intent: IntentRecord,
@@ -653,6 +710,7 @@ export class ServerPreflightReconciler implements ManagedReconciler {
       };
     }
     const metricEvidence = nodeMetricsFailure ? undefined : nodeMetrics.report;
+    const firstSamples = metricSamplesFrom(metricEvidence);
     const network = await this.checks.checkNetworkPrerequisites(server.id, metricEvidence);
     const gpu =
       metricEvidence || server.preflight_status !== 'passed'
@@ -667,15 +725,35 @@ export class ServerPreflightReconciler implements ManagedReconciler {
             gpuRuntime: 'unknown',
             gpuCount: resources.metadata.gpu?.cards?.length ?? 0,
           };
-    if (
-      server.preflight_status !== 'passed' &&
-      (network.networkPrerequisites !== true || gpu.gpuRuntime === 'fail')
-    ) {
+    const poolNetworks = await this.listIpPoolNetworks(server.id);
+    const parentInterface = server.parent_interface?.trim() || '';
+    const parentLookup = parentInterface
+      ? await this.lookupParentNetwork(client, parentInterface, signal)
+      : { networkMissing: true, stateMissing: true };
+    const extraHostAddresses = await this.listHostLanAddresses(
+      client,
+      parentInterface,
+      parentLookup,
+      signal,
+    );
+    const lan = this.evaluateLanBridge({
+      parentInterface,
+      network,
+      lookup: parentLookup,
+      pools: poolNetworks,
+      samples: firstSamples,
+      extraHostAddresses,
+    });
+    if (lan.reason) {
       throw new IncusError('PREFLIGHT_FAILED', 'managed_failure', {
-        reason:
-          gpu.gpuRuntime === 'fail'
-            ? 'gpu_toolkit_not_available'
-            : 'network_prerequisites_not_satisfied',
+        reason: lan.reason,
+        network: JSON.stringify(network).slice(0, 2048),
+        gpu: JSON.stringify(gpu).slice(0, 2048),
+      });
+    }
+    if (gpu.gpuRuntime === 'fail') {
+      throw new IncusError('PREFLIGHT_FAILED', 'managed_failure', {
+        reason: 'gpu_toolkit_not_available',
         network: JSON.stringify(network).slice(0, 2048),
         gpu: JSON.stringify(gpu).slice(0, 2048),
       });
@@ -689,6 +767,7 @@ export class ServerPreflightReconciler implements ManagedReconciler {
       })),
       network,
       gpu,
+      firewall: environment?.firewall ?? null,
       nodeMetricsWarning: nodeMetricsFailure
         ? nodeMetricsFailure instanceof Error
           ? nodeMetricsFailure.message
@@ -699,20 +778,20 @@ export class ServerPreflightReconciler implements ManagedReconciler {
     reportEvidence.nodeMetrics = nodeMetrics;
     const checks: ReportChecks = {
       api: 'pass',
-      parentInterface: server.parent_interface ? 'pass' : 'fail',
+      parentInterface: 'pass',
       gpuRuntime:
         gpu.gpuRuntime === 'not_applicable'
           ? 'not_applicable'
           : gpu.gpuRuntime === 'pass'
             ? 'pass'
             : 'fail',
-      forwarding: network.forwarding === true ? 'pass' : 'fail',
-      nftables: environment?.firewall === 'nftables' ? 'pass' : 'fail',
-      rpFilter: network.rpFilter === true ? 'pass' : 'fail',
-      networkPrerequisites: network.networkPrerequisites === true ? 'pass' : 'fail',
+      nftables: 'pass',
+      ipv4Filtering: 'fail',
+      guestCanReachHost: 'fail',
+      networkPrerequisites: 'pass',
       storagePool: 'pass',
       simplestreamsImage: 'fail',
-      routedAddress: 'fail',
+      guestAddress: 'fail',
       egress: 'fail',
       nodeMetrics: nodeMetricsFailure ? 'warn' : nodeMetrics.status === 'online' ? 'pass' : 'fail',
     };
@@ -733,22 +812,12 @@ export class ServerPreflightReconciler implements ManagedReconciler {
       probeOptions.probePoolName
     ) {
       const probeName = `nyabase-preflight-${normalized(server.id)}`;
-      const parentInterface = server.parent_interface;
-      if (!parentInterface) {
-        throw new IncusError('PREFLIGHT_FAILED', 'managed_failure', {
-          reason: 'preflight_macvlan_parent_missing',
-        });
-      }
+      const hostIpv4 = lan.hostIpv4!;
+      const poolNetwork = poolNetworks[0]!;
       await this.cleanupStaleProbe(client, probeName, server.id, signal);
       let created = false;
       let cleanupError: unknown;
       let confirmedProbe: IncusSchema<'InstanceFull'> | undefined;
-      const poolNetwork = await this.lookupIpPoolNetwork(server.id);
-      if (!poolNetwork) {
-        throw new IncusError('PREFLIGHT_FAILED', 'managed_failure', {
-          reason: 'preflight_ip_pool_missing',
-        });
-      }
       try {
         const confirmProbeIdentity = async (): Promise<IncusSchema<'InstanceFull'>> => {
           const probe = (await client.getInstanceFull(probeName, { signal })).metadata;
@@ -786,11 +855,13 @@ export class ServerPreflightReconciler implements ManagedReconciler {
                   profiles: [],
                   source: {
                     type: 'image',
-                    ...(probeOptions.probeImageAlias
-                      ? { alias: probeOptions.probeImageAlias }
-                      : { fingerprint: probeOptions.probeImageFingerprint }),
-                    server: probeOptions.sourceServer,
-                    protocol: probeOptions.sourceServer ? 'simplestreams' : undefined,
+                    ...(probeOptions.probeImageFingerprint
+                      ? { fingerprint: probeOptions.probeImageFingerprint }
+                      : {
+                        alias: probeOptions.probeImageAlias,
+                        server: probeOptions.sourceServer,
+                        protocol: probeOptions.sourceServer ? 'simplestreams' : undefined,
+                      }),
                   },
                   config: {
                     [MANAGED_PROBE_KEY]: 'true',
@@ -808,11 +879,13 @@ export class ServerPreflightReconciler implements ManagedReconciler {
                     },
                     eth0: {
                       type: 'nic',
-                      nictype: 'macvlan',
-                      mode: 'bridge',
+                      nictype: 'bridged',
                       name: 'eth0',
                       parent: parentInterface,
                       hwaddr: deriveInstanceHwaddr(probeHardwareId(server.id)),
+                      'ipv4.address': probeOptions.probeAddress,
+                      'security.ipv4_filtering': 'true',
+                      'security.mac_filtering': 'true',
                     },
                   },
                   start: false,
@@ -868,8 +941,38 @@ export class ServerPreflightReconciler implements ManagedReconciler {
           },
           signal,
         );
-        checks.routedAddress =
+        checks.guestAddress =
           probe.config?.[PROBE_SERVER_KEY] === normalized(server.id) ? 'pass' : 'fail';
+        const secondPull = await this.secondNodeMetricsPull(server, signal);
+        const secondSamples = metricSamplesFrom(secondPull.report);
+        if (unlabeledGauge(secondSamples, 'nyabase_node_network_nft_available') !== 1) {
+          throw new IncusError('PREFLIGHT_FAILED', 'managed_failure', {
+            reason: 'preflight_nft_unavailable',
+            serverId: server.id,
+          });
+        }
+        checks.nftables = 'pass';
+        if (
+          labeledGauge(secondSamples, 'nyabase_node_network_bridge_filter_address', {
+            address: probeOptions.probeAddress,
+          }) !== 1
+        ) {
+          throw new IncusError('PREFLIGHT_FAILED', 'managed_failure', {
+            reason: 'preflight_ipv4_filter_not_applied',
+            serverId: server.id,
+            probeAddress: probeOptions.probeAddress,
+          });
+        }
+        checks.ipv4Filtering = 'pass';
+        const reach = await this.checks.checkGuestCanReachHost(
+          server.id,
+          client,
+          probeName,
+          hostIpv4,
+          signal,
+        );
+        if (reach.status === 'pass') checks.guestCanReachHost = 'pass';
+        reportEvidence.guestCanReachHost = reach;
         const egress = await this.checks.checkEgress(server.id, client, probeName, signal);
         if (egress.status === 'pass') checks.egress = 'pass';
         reportEvidence.egress = egress;
@@ -1090,7 +1193,6 @@ export class ServerPreflightReconciler implements ManagedReconciler {
     const controlReady = Object.entries(checks).every(([name, value]) => {
       if (name === 'gpuRuntime') return value === 'pass' || value === 'not_applicable';
       if (name === 'nodeMetrics') return value === 'pass' || value === 'warn';
-      if (name === 'forwarding' || name === 'rpFilter') return true;
       return value === 'pass';
     });
     return {
@@ -1116,13 +1218,13 @@ export class ServerPreflightReconciler implements ManagedReconciler {
         api: 'fail',
         parentInterface: 'fail',
         gpuRuntime: 'fail',
-        forwarding: 'fail',
         nftables: 'fail',
-        rpFilter: 'fail',
+        ipv4Filtering: 'fail',
+        guestCanReachHost: 'fail',
         networkPrerequisites: 'fail',
         storagePool: 'fail',
         simplestreamsImage: 'fail',
-        routedAddress: 'fail',
+        guestAddress: 'fail',
         egress: 'fail',
         nodeMetrics: 'fail',
       },
@@ -1139,22 +1241,190 @@ export class ServerPreflightReconciler implements ManagedReconciler {
     };
   }
 
-  private async lookupIpPoolNetwork(
-    serverId: string,
-  ): Promise<{ readonly gateway: string; readonly prefixLength: number } | undefined> {
-    const row = await this.database
+  private async listIpPoolNetworks(serverId: string): Promise<IpPoolNetwork[]> {
+    const rows = await this.database
       .selectFrom('infra.ip_pool_servers as binding')
       .innerJoin('infra.ip_pools as pool', 'pool.id', 'binding.pool_id')
       .select(['pool.gateway', 'pool.cidr'])
       .where('binding.server_id', '=', serverId)
       .orderBy('pool.created_at', 'asc')
       .orderBy('pool.id', 'asc')
-      .executeTakeFirst();
-    const gateway = typeof row?.gateway === 'string' ? row.gateway.trim() : '';
-    const cidr = typeof row?.cidr === 'string' ? row.cidr.trim() : '';
-    const prefixLength = parseCidrPrefix(cidr);
-    if (!gateway || prefixLength === undefined) return undefined;
-    return { gateway: gateway.includes('/') ? gateway.split('/')[0]! : gateway, prefixLength };
+      .execute();
+    const networks: IpPoolNetwork[] = [];
+    for (const row of rows) {
+      const gateway = typeof row.gateway === 'string' ? row.gateway.trim() : '';
+      const cidr = typeof row.cidr === 'string' ? row.cidr.trim() : '';
+      const prefixLength = parseCidrPrefix(cidr);
+      if (!gateway || !cidr || prefixLength === undefined) continue;
+      networks.push({
+        gateway: gateway.includes('/') ? gateway.split('/')[0]! : gateway,
+        cidr,
+        prefixLength,
+      });
+    }
+    return networks;
+  }
+
+  private async lookupParentNetwork(
+    client: IncusClientPort,
+    parentInterface: string,
+    signal: AbortSignal,
+  ): Promise<ParentNetworkLookup> {
+    let network: IncusSchema<'Network'> | undefined;
+    let networkMissing = false;
+    try {
+      network = (await client.getNetwork(parentInterface, { signal })).metadata;
+    } catch (error) {
+      if (!(error instanceof IncusError) || error.code !== 'INCUS_NOT_FOUND') throw error;
+      networkMissing = true;
+    }
+    let state: IncusSchema<'NetworkState'> | undefined;
+    let stateMissing = false;
+    if (networkMissing) {
+      stateMissing = true;
+    } else {
+      try {
+        state = (await client.getNetworkState(parentInterface, { signal })).metadata;
+      } catch (error) {
+        if (!(error instanceof IncusError) || error.code !== 'INCUS_NOT_FOUND') throw error;
+        stateMissing = true;
+      }
+    }
+    return { network, networkMissing, state, stateMissing };
+  }
+
+  private async listHostLanAddresses(
+    client: IncusClientPort,
+    parentInterface: string,
+    parentLookup: ParentNetworkLookup,
+    signal: AbortSignal,
+  ): Promise<string[]> {
+    const names = new Set<string>();
+    if (parentInterface) names.add(parentInterface);
+    try {
+      const listed = (await client.listNetworks({ signal })).metadata ?? [];
+      for (const entry of listed) {
+        const name = networkNameFromListEntry(entry);
+        if (name && !isIgnoredHostInterface(name)) names.add(name);
+      }
+    } catch {
+      // Parent state plus exporter evidence still have to prove a pool address.
+    }
+    const addresses: string[] = [];
+    for (const name of names) {
+      if (name === parentInterface && parentLookup.state?.addresses) {
+        addresses.push(...inetGlobalAddresses(parentLookup.state.addresses));
+        continue;
+      }
+      try {
+        const state = (await client.getNetworkState(name, { signal })).metadata;
+        addresses.push(...inetGlobalAddresses(state?.addresses));
+      } catch {
+        continue;
+      }
+    }
+    return [...new Set(addresses)];
+  }
+
+  private evaluateLanBridge(input: {
+    readonly parentInterface: string;
+    readonly network: Record<string, unknown>;
+    readonly lookup: ParentNetworkLookup;
+    readonly pools: readonly IpPoolNetwork[];
+    readonly samples: readonly NodeMetricSample[];
+    readonly extraHostAddresses?: readonly string[];
+  }): { readonly reason?: string; readonly hostIpv4?: string } {
+    const { parentInterface, network, lookup, pools, samples } = input;
+    if (!parentInterface) {
+      return { reason: 'preflight_lan_bridge_missing' };
+    }
+    if (pools.length === 0) {
+      return { reason: 'preflight_ip_pool_missing' };
+    }
+    const exporterIsBridge = network.isBridge === true
+      || unlabeledOrInterfaceGauge(samples, 'nyabase_node_network_is_bridge', parentInterface) === 1;
+    const parentExists = parentInterfaceExists(samples, parentInterface, network);
+    if (lookup.networkMissing) {
+      if (!exporterIsBridge) {
+        return {
+          reason: parentExists ? 'preflight_parent_not_bridge' : 'preflight_lan_bridge_missing',
+        };
+      }
+    } else {
+      if (lookup.network?.type !== 'bridge') {
+        return { reason: 'preflight_parent_not_bridge' };
+      }
+      if (lookup.network.managed === true) {
+        return { reason: 'preflight_parent_is_managed' };
+      }
+    }
+    const incusSlaves = lookup.state?.bridge?.upper_devices ?? [];
+    const exporterSlaves = Array.isArray(network.slaves)
+      ? network.slaves.filter((value): value is string => typeof value === 'string')
+      : [];
+    const slaves = incusSlaves.length > 0 ? incusSlaves : exporterSlaves;
+    if (slaves.length === 0) {
+      return { reason: 'preflight_bridge_has_no_uplink' };
+    }
+    const ipv4Present = isRecord(network.ipv4Present) ? network.ipv4Present : {};
+    for (const slave of slaves) {
+      if (!(slave in ipv4Present)) {
+        return { reason: 'preflight_slave_ipv4_unproven' };
+      }
+      if (ipv4Present[slave] !== false) {
+        return { reason: 'preflight_host_ip_still_on_uplink' };
+      }
+    }
+    if (network.nftAvailable !== true) {
+      return { reason: 'preflight_nft_unavailable' };
+    }
+    const hostIpv4 = pickHostIpv4FromList(
+      [
+        ...inetGlobalAddresses(lookup.state?.addresses),
+        ...(input.extraHostAddresses ?? []),
+      ],
+      pools,
+    );
+    if (!hostIpv4) {
+      return { reason: 'preflight_host_ip_not_in_pool' };
+    }
+    return { hostIpv4 };
+  }
+
+  private async secondNodeMetricsPull(
+    server: ServerRow,
+    signal: AbortSignal,
+  ): Promise<{
+    readonly status: 'online' | 'unreachable' | 'unknown';
+    readonly report?: Record<string, unknown> & {
+      readonly samples?: readonly NodeMetricSample[];
+    };
+  }> {
+    if (!server.node_metrics_endpoint || !server.node_metrics_token_ciphertext) {
+      throw new IncusError('PREFLIGHT_FAILED', 'managed_failure', {
+        reason: 'preflight_nft_unavailable',
+      });
+    }
+    try {
+      const result = await this.nodeMetrics.pull(
+        server.id,
+        server.node_metrics_endpoint,
+        server.node_metrics_token_ciphertext,
+        signal,
+      );
+      if (result.status !== 'online') {
+        throw new IncusError('PREFLIGHT_FAILED', 'managed_failure', {
+          reason: 'preflight_nft_unavailable',
+          status: result.status,
+        });
+      }
+      return result;
+    } catch (error) {
+      if (error instanceof IncusError) throw error;
+      throw new IncusError('PREFLIGHT_FAILED', 'managed_failure', {
+        reason: 'preflight_nft_unavailable',
+      });
+    }
   }
 
   private async projectServer(
@@ -1233,4 +1503,100 @@ function revisionNumber(value: string | number | bigint | undefined): number | u
   if (value === undefined) return undefined;
   const revision = Number(value);
   return Number.isSafeInteger(revision) && revision > 0 ? revision : undefined;
+}
+
+function metricSamplesFrom(
+  evidence: Record<string, unknown> | undefined,
+): readonly NodeMetricSample[] {
+  const samples = evidence?.samples;
+  if (!Array.isArray(samples)) return [];
+  return samples.filter((sample): sample is NodeMetricSample => (
+    typeof sample === 'object'
+    && sample !== null
+    && !Array.isArray(sample)
+    && typeof (sample as Record<string, unknown>).name === 'string'
+    && typeof (sample as Record<string, unknown>).value === 'number'
+    && Number.isFinite((sample as Record<string, unknown>).value)
+    && typeof (sample as Record<string, unknown>).labels === 'object'
+    && (sample as Record<string, unknown>).labels !== null
+  ));
+}
+
+function unlabeledGauge(samples: readonly NodeMetricSample[], name: string): number | undefined {
+  return samples.find((sample) => sample.name === name && Object.keys(sample.labels).length === 0)
+    ?.value;
+}
+
+function labeledGauge(
+  samples: readonly NodeMetricSample[],
+  name: string,
+  labels: Readonly<Record<string, string>>,
+): number | undefined {
+  return samples.find((sample) => {
+    if (sample.name !== name) return false;
+    return Object.entries(labels).every(([key, value]) => sample.labels[key] === value);
+  })?.value;
+}
+
+function unlabeledOrInterfaceGauge(
+  samples: readonly NodeMetricSample[],
+  name: string,
+  iface: string,
+): number | undefined {
+  return labeledGauge(samples, name, { interface: iface });
+}
+
+function parentInterfaceExists(
+  samples: readonly NodeMetricSample[],
+  parentInterface: string,
+  network: Record<string, unknown>,
+): boolean {
+  if (network.parentInterface === parentInterface) return true;
+  return samples.some((sample) => sample.labels.interface === parentInterface);
+}
+
+function isExcludedIpv4(address: string): boolean {
+  const parts = address.split('.').map(Number);
+  if (parts.length !== 4 || parts.some((part) => !Number.isInteger(part))) return true;
+  if (parts[0] === 127) return true;
+  if (parts[0] === 169 && parts[1] === 254) return true;
+  return false;
+}
+
+function inetGlobalAddresses(
+  addresses: IncusSchema<'NetworkState'>['addresses'] | undefined,
+): string[] {
+  if (!addresses) return [];
+  const result: string[] = [];
+  for (const entry of addresses) {
+    if (entry.family !== 'inet' || entry.scope !== 'global') continue;
+    const raw = typeof entry.address === 'string' ? entry.address.trim() : '';
+    const address = raw.includes('/') ? raw.split('/')[0]! : raw;
+    if (isIP(address) !== 4 || isExcludedIpv4(address)) continue;
+    result.push(address);
+  }
+  return result;
+}
+
+function pickHostIpv4FromList(
+  addresses: readonly string[],
+  pools: readonly IpPoolNetwork[],
+): string | undefined {
+  for (const address of addresses) {
+    if (pools.some((pool) => isUsableHostInCidr(pool.cidr, address))) {
+      return address;
+    }
+  }
+  return undefined;
+}
+
+function networkNameFromListEntry(entry: string): string {
+  const trimmed = entry.trim();
+  const match = /\/1\.0\/networks\/([^/]+)$/.exec(trimmed);
+  return decodeURIComponent(match?.[1] ?? trimmed);
+}
+
+function isIgnoredHostInterface(name: string): boolean {
+  return /^(lo|docker0|cni.*|flannel.*|calico.*|veth.*|wg\d*|tun.*|tap.*|gre.*|gretap.*|erspan.*|dummy.*|virbr.*|incusbr.*|lxcbr.*|fwbr.*|br-.+)$/i
+    .test(name);
 }

@@ -41,9 +41,11 @@ import {
   AdminImageAssignmentIntentsController,
   AdminImageIntentsController,
   AdminServerIntentsController,
+  AdminSharedVolumeIntentsController,
   AdminVolumeIntentsController,
   ContainerIntentsController,
   IntentsController,
+  SharedVolumeIntentsController,
   VolumeIntentsController,
 } from './intents.controller.js';
 import { ConsoleSessionService } from './console-session.service.js';
@@ -151,7 +153,9 @@ import {
     AdminServerIntentsController,
     IntentsController,
     VolumeIntentsController,
+    SharedVolumeIntentsController,
     AdminVolumeIntentsController,
+    AdminSharedVolumeIntentsController,
   ],
   exports: [
     INCUS_CLIENT_FACTORY,

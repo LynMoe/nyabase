@@ -4,13 +4,18 @@ import { Link } from '@tanstack/react-router';
 import { Plus, Shield, Trash2 } from 'lucide-react';
 import { Capability, zCreateGroupRequest, type CreateGroupRequest, type GroupDto } from '@nyabase/common';
 import { api } from '../lib/api.js';
+import { errorMessage } from '../lib/api-error.js';
 import { Badge } from '../components/ui/badge.js';
 import { Button } from '../components/ui/button.js';
-import { Card, CardContent } from '../components/ui/card.js';
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '../components/ui/dialog.js';
 import { Input } from '../components/ui/input.js';
-import { Label } from '../components/ui/label.js';
-import { QueryErrorState, QueryLoadingState } from '../components/query-state.js';
+import { ConfirmDialog } from '../components/layout/confirm-dialog.js';
+import { FormField } from '../components/layout/form-field.js';
+import { EmptyState } from '../components/layout/empty-state.js';
+import { Page } from '../components/layout/page.js';
+import { PageHeader } from '../components/layout/page-header.js';
+import { QueryView } from '../components/layout/query-view.js';
+import { ResourceList, ResourceListRow } from '../components/layout/resource-list.js';
 import { CanonicalGrantPanel } from '../components/grants/canonical-grant-panel.js';
 import { SubjectGrantSummary } from '../components/grants/subject-grant-summary.js';
 import { capabilityLabel } from '../lib/display-labels.js';
@@ -40,34 +45,41 @@ export default function GroupsPage() {
     },
     onError: (error) => toast({ title: '删除用户组失败', description: errorMessage(error), variant: 'destructive' }),
   });
-  if (groupsQuery.isLoading) return <QueryLoadingState label="加载用户组..." />;
-  if (groupsQuery.isError) return <QueryErrorState error={groupsQuery.error} resourceName="用户组" onRetry={() => { void groupsQuery.refetch(); }} />;
-  const groups = groupsQuery.data ?? [];
   return (
-    <div className="space-y-5 px-4 py-4 md:px-6" data-testid="groups-management">
-      <div className="flex flex-wrap items-start justify-between gap-3">
-        <div>
-          <h1 className="text-2xl font-semibold tracking-tight">用户组</h1>
-          <p className="text-sm text-muted-foreground">{groups.length} 个用户组 · 授权按资源范围管理</p>
-        </div>
-        {canManageGroups && (
-          <Button onClick={() => setCreateOpen(true)}><Plus className="h-4 w-4" />新建用户组</Button>
-        )}
-      </div>
-      {groups.length === 0 ? (
-        <Card>
-          <CardContent className="space-y-3 py-12 text-center">
-            <p className="text-sm text-muted-foreground">暂无用户组。</p>
-            {canManageGroups && (
-              <Button onClick={() => setCreateOpen(true)}><Plus className="h-4 w-4" />新建用户组</Button>
-            )}
-          </CardContent>
-        </Card>
-      ) : (
-        <div className="space-y-3">
-          {groups.map((group) => (
-            <Card key={group.id}>
-              <CardContent className="flex flex-wrap items-center justify-between gap-4 p-4">
+    <Page testId="groups-management">
+      <PageHeader
+        title="用户组"
+        description={
+          groupsQuery.data
+            ? `${groupsQuery.data.length} 个用户组 · 授权按资源范围管理`
+            : '授权按资源范围管理'
+        }
+        actions={
+          canManageGroups ? (
+            <Button onClick={() => setCreateOpen(true)}><Plus className="h-4 w-4" />新建用户组</Button>
+          ) : undefined
+        }
+      />
+      <QueryView
+        query={groupsQuery}
+        resourceName="用户组"
+        loadingLabel="加载用户组..."
+        showEmpty={groupsQuery.data?.length === 0}
+        empty={
+          <EmptyState
+            title="暂无用户组。"
+            action={
+              canManageGroups ? (
+                <Button onClick={() => setCreateOpen(true)}><Plus className="h-4 w-4" />新建用户组</Button>
+              ) : undefined
+            }
+          />
+        }
+      >
+        {(groups) => (
+          <ResourceList>
+            {groups.map((group) => (
+              <ResourceListRow key={group.id}>
                 <Link to="/groups/$id" params={{ id: group.id }} className="flex min-w-0 flex-1 items-center gap-3 rounded-md outline-none hover:bg-muted/40 focus-visible:ring-2 focus-visible:ring-ring">
                   <Shield className="h-5 w-5 shrink-0 text-muted-foreground" />
                   <div className="min-w-0">
@@ -83,7 +95,7 @@ export default function GroupsPage() {
                     {canManageGrants && <SubjectGrantSummary kind="groups" subjectId={group.id} />}
                   </div>
                 </Link>
-                <div className="flex gap-2">
+                <div className="flex shrink-0 flex-wrap justify-end gap-2">
                   {canManageGrants && (
                     <Button size="sm" variant="outline" onClick={() => setGrantGroup(group)}>授权</Button>
                   )}
@@ -93,44 +105,37 @@ export default function GroupsPage() {
                     </Button>
                   )}
                 </div>
-              </CardContent>
-            </Card>
-          ))}
-        </div>
-      )}
+              </ResourceListRow>
+            ))}
+          </ResourceList>
+        )}
+      </QueryView>
       {canManageGroups && <CreateGroupDialog open={createOpen} onOpenChange={setCreateOpen} />}
       {grantGroup && (
         <Dialog open onOpenChange={(open) => { if (!open) setGrantGroup(null); }}>
-          <DialogContent className="max-h-[90vh] max-w-5xl overflow-y-auto">
+          <DialogContent className="max-w-3xl">
             <DialogHeader>
-              <DialogTitle>管理 {grantGroup.name} 的授权</DialogTitle>
+              <DialogTitle>管理「{grantGroup.name}」的授权</DialogTitle>
               <DialogDescription>按服务器 / 存储池 / 共享存储分别设置额度与到期时间。</DialogDescription>
             </DialogHeader>
             <CanonicalGrantPanel subject={grantGroup} kind="groups" />
+            <DialogFooter>
+              <Button variant="outline" onClick={() => setGrantGroup(null)}>完成</Button>
+            </DialogFooter>
           </DialogContent>
         </Dialog>
       )}
-      <Dialog open={Boolean(deleteGroup)} onOpenChange={(open) => { if (!open) setDeleteGroup(null); }}>
-        <DialogContent>
-          <DialogHeader>
-            <DialogTitle>删除用户组？</DialogTitle>
-            <DialogDescription>
-              系统组不可删除。删除后成员关系与资源授权会一并清理，且不可恢复。
-            </DialogDescription>
-          </DialogHeader>
-          <DialogFooter>
-            <Button variant="outline" onClick={() => setDeleteGroup(null)}>取消</Button>
-            <Button
-              variant="destructive"
-              onClick={() => { if (deleteGroup) remove.mutate(deleteGroup.id); }}
-              disabled={remove.isPending}
-            >
-              确认删除
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
-    </div>
+      <ConfirmDialog
+        open={Boolean(deleteGroup)}
+        title="删除用户组？"
+        description="系统组不可删除。删除后成员关系与资源授权会一并清理，且不可恢复。"
+        confirmLabel="确认删除"
+        pendingLabel="确认删除"
+        pending={remove.isPending}
+        onConfirm={() => { if (deleteGroup) remove.mutate(deleteGroup.id); }}
+        onOpenChange={(open) => { if (!open) setDeleteGroup(null); }}
+      />
+    </Page>
   );
 }
 
@@ -164,14 +169,12 @@ function CreateGroupDialog({ open, onOpenChange }: { open: boolean; onOpenChange
           <DialogDescription>创建后可在授权面板设置资源范围。</DialogDescription>
         </DialogHeader>
         <div className="space-y-3">
-          <div className="space-y-1.5">
-            <Label htmlFor="new-group-name">名称</Label>
+          <FormField id="new-group-name" label="名称">
             <Input id="new-group-name" value={name} onChange={(event) => setName(event.target.value)} />
-          </div>
-          <div className="space-y-1.5">
-            <Label htmlFor="new-group-description">描述</Label>
+          </FormField>
+          <FormField id="new-group-description" label="描述">
             <Input id="new-group-description" value={description} onChange={(event) => setDescription(event.target.value)} />
-          </div>
+          </FormField>
           {error && <p className="text-sm text-destructive">{error}</p>}
         </div>
         <DialogFooter>
@@ -181,8 +184,4 @@ function CreateGroupDialog({ open, onOpenChange }: { open: boolean; onOpenChange
       </DialogContent>
     </Dialog>
   );
-}
-
-function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : '请稍后重试';
 }

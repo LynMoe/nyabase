@@ -145,21 +145,116 @@ describe('compareManagedFields', () => {
     expect(missing.kind).toBe('managed_failure');
     expect(missing.error?.code).toBe('MISSING_MANAGED_NETWORK_ADDRESS');
 
-    const nonMacvlan = compareManagedFields(
+    const leftoverMacvlan = compareManagedFields(
       actualWith(
         {},
         {
           eth0: {
-            ...desired().devices?.eth0,
-            nictype: 'bridged',
+            type: 'nic',
+            nictype: 'macvlan',
+            mode: 'bridge',
+            parent: 'ens3',
+            name: 'eth0',
           },
         },
       ),
       desired(),
     );
-    expect(nonMacvlan.kind).toBe('managed_failure');
-    expect(nonMacvlan.error?.code).toBe('INVALID_MANAGED_NETWORK_TYPE');
-    expect(nonMacvlan.empty).toBe(false);
+    expect(leftoverMacvlan.kind).toBe('managed_failure');
+    expect(leftoverMacvlan.error?.code).toBe('INVALID_MANAGED_NETWORK_TYPE');
+    expect(leftoverMacvlan.empty).toBe(false);
+
+    const leftoverRouted = compareManagedFields(
+      actualWith(
+        {},
+        {
+          eth0: {
+            type: 'nic',
+            nictype: 'routed',
+            parent: 'ens3',
+            name: 'eth0',
+          },
+        },
+      ),
+      desired(),
+    );
+    expect(leftoverRouted.kind).toBe('managed_failure');
+    expect(leftoverRouted.error?.code).toBe('INVALID_MANAGED_NETWORK_TYPE');
+
+    const missingHwaddr = compareManagedFields(
+      actualWith(
+        {},
+        {
+          eth0: {
+            type: 'nic',
+            nictype: 'bridged',
+            parent: 'ens3',
+            name: 'eth0',
+            'ipv4.address': '198.51.100.10',
+            'security.ipv4_filtering': 'true',
+            'security.mac_filtering': 'true',
+          },
+        },
+      ),
+      desired(),
+    );
+    expect(missingHwaddr.kind).toBe('diff');
+    expect(missingHwaddr.error).toBeUndefined();
+
+    const missingFilterOnActual = compareManagedFields(
+      actualWith(
+        {},
+        {
+          eth0: {
+            type: 'nic',
+            nictype: 'bridged',
+            parent: 'ens3',
+            name: 'eth0',
+            hwaddr: desired().devices?.eth0?.hwaddr ?? '',
+          },
+        },
+      ),
+      desired(),
+    );
+    expect(missingFilterOnActual.kind).toBe('diff');
+    expect(missingFilterOnActual.error).toBeUndefined();
+
+    const desiredWithoutHwaddr = {
+      ...desired(),
+      devices: {
+        ...desired().devices,
+        eth0: {
+          type: 'nic',
+          nictype: 'bridged',
+          parent: 'ens3',
+          name: 'eth0',
+          'ipv4.address': '198.51.100.10',
+          'security.ipv4_filtering': 'true',
+          'security.mac_filtering': 'true',
+        },
+      },
+    };
+    const desiredHwaddrOmit = compareManagedFields(actualWith(), desiredWithoutHwaddr);
+    expect(desiredHwaddrOmit.kind).toBe('managed_failure');
+    expect(desiredHwaddrOmit.error?.code).toBe('INVALID_MANAGED_NETWORK_TYPE');
+    expect(desiredHwaddrOmit.error?.details).toMatchObject({ key: 'hwaddr' });
+
+    const desiredWithoutFilter = {
+      ...desired(),
+      devices: {
+        ...desired().devices,
+        eth0: {
+          type: 'nic',
+          nictype: 'bridged',
+          parent: 'ens3',
+          name: 'eth0',
+          hwaddr: desired().devices?.eth0?.hwaddr ?? '',
+        },
+      },
+    };
+    const desiredFilterOmit = compareManagedFields(actualWith(), desiredWithoutFilter);
+    expect(desiredFilterOmit.kind).toBe('managed_failure');
+    expect(desiredFilterOmit.error?.code).toBe('INVALID_MANAGED_FILTER_IDENTITY');
   });
 
   it('applies managed fields, preserves operator config, and preserves unmanaged devices', () => {

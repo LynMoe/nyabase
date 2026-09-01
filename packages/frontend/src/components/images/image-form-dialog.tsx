@@ -9,9 +9,10 @@ import {
 } from '@nyabase/common';
 import { api } from '../../lib/api.js';
 import { Button } from '../ui/button.js';
+import { Checkbox } from '../ui/checkbox.js';
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '../ui/dialog.js';
 import { Input } from '../ui/input.js';
-import { Label } from '../ui/label.js';
+import { FormField } from '../layout/form-field.js';
 import { toast } from '../../hooks/use-toast.js';
 import { queryKeys } from '../../lib/query-keys.js';
 import { formatGibInput, gibToBytes } from '../../lib/utils.js';
@@ -111,15 +112,14 @@ export function ImageFormDialog({
   };
 
   const field = (key: keyof ImageForm, label: string, placeholder: string) => (
-    <div className="space-y-1.5">
-      <Label htmlFor={`image-${key}`}>{label}</Label>
+    <FormField id={`image-${key}`} label={label}>
       <Input
         id={`image-${key}`}
         value={typeof form[key] === 'boolean' ? '' : String(form[key])}
         placeholder={placeholder}
         onChange={(event) => update(key, event.target.value as ImageForm[typeof key])}
       />
-    </div>
+    </FormField>
   );
 
   return (
@@ -134,8 +134,7 @@ export function ImageFormDialog({
             {field('name', '名称', 'Ubuntu 24.04')}
             {field('alias', '别名', 'ubuntu-24.04')}
             {field('loginUser', '登录用户', 'ubuntu')}
-            <div className="space-y-1.5">
-              <Label htmlFor="image-minRootSizeGib">最小系统盘容量（GiB）</Label>
+            <FormField id="image-minRootSizeGib" label="最小系统盘容量（GiB）">
               <Input
                 id="image-minRootSizeGib"
                 type="number"
@@ -145,13 +144,16 @@ export function ImageFormDialog({
                 placeholder="20"
                 onChange={(event) => update('minRootSizeGib', event.target.value)}
               />
-            </div>
+            </FormField>
           </div>
-          <div className="space-y-1.5">{field('description', '描述', '可选描述')}</div>
-          <label className="flex items-center gap-2 text-sm">
-            <input type="checkbox" checked={form.networkManagedExternally} onChange={(event) => update('networkManagedExternally', event.target.checked)} />
-            网络由平台管理
-          </label>
+          {field('description', '描述', '可选描述')}
+          <FormField id="image-networkManagedExternally" label="网络由平台管理" orientation="inline">
+            <Checkbox
+              id="image-networkManagedExternally"
+              checked={form.networkManagedExternally}
+              onCheckedChange={(checked) => update('networkManagedExternally', checked === true)}
+            />
+          </FormField>
           <p className="text-xs text-muted-foreground">由平台写入容器 IP；取消勾选的镜像不能用于创建容器</p>
           {error && <p className="text-sm text-destructive">{error}</p>}
         </div>

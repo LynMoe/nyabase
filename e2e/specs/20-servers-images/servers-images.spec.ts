@@ -101,13 +101,13 @@ test(
         checks: {
           api: 'pass',
           parentInterface: 'pass',
-          forwarding: 'pass',
           nftables: 'pass',
-          rpFilter: 'pass',
+          ipv4Filtering: 'pass',
+          guestCanReachHost: 'pass',
           networkPrerequisites: 'pass',
           storagePool: 'pass',
           simplestreamsImage: 'pass',
-          routedAddress: 'pass',
+          guestAddress: 'pass',
           egress: 'pass',
           nodeMetrics: 'pass',
         },
@@ -156,6 +156,31 @@ test(
   'assigns the immutable simplestreams image fingerprint to the server',
   { ...coverageCase('image-assignment-fingerprint', 'image-assignment-live') },
   async ({ adminApi, seedState }) => {
+    const catalog = await expectJson<JsonRecord[]>(await adminApi.get('/api/admin/images'));
+    expect(catalog.some((entry) => entry.id === seedState.image.id)).toBe(true);
+    const userCatalog = await expectJson<JsonRecord[]>(await adminApi.get('/api/images'));
+    expect(Array.isArray(userCatalog)).toBe(true);
+    const userImage = await adminApi.get(`/api/images/${seedState.image.id}`);
+    expect([200, 403, 404]).toContain(userImage.status());
+    if (userImage.status() === 200) {
+      const body = await userImage.json() as JsonRecord;
+      expect(body.id).toBe(seedState.image.id);
+    }
+    await expectJson(await adminApi.get(`/api/admin/images/${seedState.image.id}/status`));
+    await expectJson(
+      await adminApi.get(`/api/admin/images/${seedState.image.id}/assignments/status`),
+    );
+    await expectJson(await adminApi.get(`/api/admin/images/${seedState.image.id}/intents`));
+    await expectJson(
+      await adminApi.get(
+        `/api/admin/images/${seedState.image.id}/assignments/${seedState.server.id}/intents`,
+      ),
+    );
+    const missingAssignment = await adminApi.delete(
+      `/api/admin/images/${seedState.image.id}/assignments/00000000-0000-4000-8000-0000000000aa`,
+    );
+    expect([202, 400, 404, 409]).toContain(missingAssignment.status());
+
     const image = await expectJson<JsonRecord>(
       await adminApi.get(`/api/admin/images/${seedState.image.id}`),
     );

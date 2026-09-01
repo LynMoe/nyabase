@@ -6,12 +6,25 @@ import {
   type SystemSettingsDto,
 } from '@nyabase/common';
 import { api, ApiError, apiErrorCurrent } from '../lib/api.js';
+import { errorMessage } from '../lib/api-error.js';
+import { Alert, AlertDescription } from '../components/ui/alert.js';
 import { Button } from '../components/ui/button.js';
 import { Input } from '../components/ui/input.js';
 import { Label } from '../components/ui/label.js';
+import { Switch } from '../components/ui/switch.js';
 import { Badge } from '../components/ui/badge.js';
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from '../components/ui/table.js';
+import { Page } from '../components/layout/page.js';
+import { PageHeader } from '../components/layout/page-header.js';
+import { QueryView } from '../components/layout/query-view.js';
 import { toast } from '../hooks/use-toast.js';
-import { QueryErrorState, QueryLoadingState } from '../components/query-state.js';
 import { parseSystemSettingDraft } from '../lib/system-setting-draft.js';
 import {
   createRevisionedServerBackedDraft,
@@ -22,6 +35,7 @@ import {
   type RevisionedServerBackedDraft,
 } from '../lib/server-backed-draft.js';
 import { isSystemSettingsDto } from '../lib/conflict-snapshots.js';
+import { queryKeys } from '../lib/query-keys.js';
 
 const SOURCE_LABELS = {
   default: '默认值',
@@ -75,6 +89,10 @@ const FIELD_LABELS: Record<string, { label: string; description: string }> = {
     label: 'JWT 有效期',
     description: '访问令牌传给 JWT 签发器的有效时间。',
   },
+  'auth.sessionHours': {
+    label: '会话时长',
+    description: '登录会话在无操作后保持有效的小时数。',
+  },
   'auth.refreshTokenExpiresDays': {
     label: '刷新令牌有效天数',
     description: '刷新令牌过期前可使用的天数。',
@@ -126,6 +144,10 @@ const FIELD_LABELS: Record<string, { label: string; description: string }> = {
   'metrics.vmagentUrl': {
     label: 'vmagent 地址',
     description: '指标写入使用的 vmagent 地址；持久缓冲和重试由 vmagent 负责。',
+  },
+  'ssh.enabled': {
+    label: '启用 SSH 代理',
+    description: '关闭后用户无法通过平台 SSH 代理 Jump 到容器。',
   },
   'ssh.keyEncryptionSecret': {
     label: '密钥加密密钥',
@@ -192,7 +214,7 @@ function groupFields(fields: SystemSettingFieldDto[]): Array<{
 export default function SystemSettingsPage() {
   const qc = useQueryClient();
   const settingsQuery = useQuery({
-    queryKey: ['system-settings'],
+    queryKey: queryKeys.systemSettings,
     queryFn: () => api.get<SystemSettingsDto>('/admin/system-settings'),
   });
   const { data, isFetching, refetch } = settingsQuery;
@@ -242,7 +264,7 @@ export default function SystemSettingsPage() {
       expectedSnapshotToken,
     }),
     onSuccess: (updated) => {
-      qc.setQueryData(['system-settings'], updated);
+      qc.setQueryData(queryKeys.systemSettings, updated);
       const incoming = Object.fromEntries(
         updated.editable
           .filter((field) => !field.restartRequired)
@@ -253,7 +275,7 @@ export default function SystemSettingsPage() {
         updated.revision,
         updated.snapshotToken,
       ));
-      qc.invalidateQueries({ queryKey: ['public-settings'] });
+      qc.invalidateQueries({ queryKey: queryKeys.publicSettings });
       toast({ title: '系统设置已保存' });
     },
     onError: async (error) => {
@@ -264,7 +286,7 @@ export default function SystemSettingsPage() {
           isSystemSettingsDto,
         );
         if (current) {
-          qc.setQueryData(['system-settings'], current);
+          qc.setQueryData(queryKeys.systemSettings, current);
           const incoming = Object.fromEntries(
             current.editable
               .filter((field) => !field.restartRequired)
@@ -283,14 +305,14 @@ export default function SystemSettingsPage() {
                 current.snapshotToken,
               ));
         } else {
-          await qc.refetchQueries({ queryKey: ['system-settings'], type: 'active' });
+          await qc.refetchQueries({ queryKey: queryKeys.systemSettings, type: 'active' });
         }
       }
       toast({
         title: error instanceof ApiError && error.code === 'SYSTEM_SETTINGS_REVISION_CONFLICT'
           ? '服务器设置已变化'
           : '保存失败',
-        description: error instanceof Error ? error.message : '请检查配置值',
+        description: errorMessage(error, '请检查配置值'),
         variant: 'destructive',
       });
     },
@@ -302,57 +324,57 @@ export default function SystemSettingsPage() {
   const effectiveGroups = useMemo(() => groupFields(data?.fields ?? []), [data?.fields]);
 
   return (
-    <div className="px-4 py-4 md:px-6 space-y-5 w-full">
-      <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-        <div>
-          <h1 className="text-2xl font-semibold tracking-tight text-foreground">系统设置</h1>
-          <p className="text-sm text-muted-foreground mt-0.5">
-            {data?.configFile ?? '配置路径尚未加载'}
-          </p>
-        </div>
-        <div className="flex items-center gap-2">
-          <Button
-            variant="ghost"
-            size="icon"
-            className="h-8 w-8 text-muted-foreground"
-            onClick={() => {
-              if ((draftState?.dirtyFields.size ?? 0) > 0
-                && !window.confirm('刷新会保留本地修改，并标记与服务器同时修改的冲突。继续刷新？')) return;
-              void refetch();
-            }}
-            disabled={isFetching}
-            title="刷新服务器配置"
-          >
-            <RefreshCw className={`h-4 w-4 ${isFetching ? 'animate-spin' : ''}`} />
-          </Button>
-          <Button type="submit" form="system-settings-form" disabled={!hasChanges || hasValidationErrors || hasConflicts || saveSettings.isPending}>
-            <Save className="h-4 w-4" />
-            保存
-          </Button>
-        </div>
-      </div>
+    <Page>
+      <PageHeader
+        title="系统设置"
+        description={data?.configFile ?? '配置路径尚未加载'}
+        actions={
+          <>
+            <Button
+              variant="ghost"
+              size="icon"
+              className="h-8 w-8 text-muted-foreground"
+              onClick={() => {
+                if ((draftState?.dirtyFields.size ?? 0) > 0
+                  && !window.confirm('刷新会保留本地修改，并标记与服务器同时修改的冲突。继续刷新？')) return;
+                void refetch();
+              }}
+              disabled={isFetching}
+              title="刷新服务器配置"
+            >
+              <RefreshCw className={`h-4 w-4 ${isFetching ? 'animate-spin' : ''}`} />
+            </Button>
+            <Button type="submit" form="system-settings-form" disabled={!hasChanges || hasValidationErrors || hasConflicts || saveSettings.isPending}>
+              <Save className="h-4 w-4" />
+              保存
+            </Button>
+          </>
+        }
+      />
 
-      {settingsQuery.isLoading ? (
-        <QueryLoadingState label="加载系统设置..." />
-      ) : settingsQuery.isError ? (
-        <QueryErrorState error={settingsQuery.error} resourceName="系统设置" onRetry={() => { void settingsQuery.refetch(); }} />
-      ) : (
-        <>
-
+      <QueryView
+        query={settingsQuery}
+        resourceName="系统设置"
+        loadingLabel="加载系统设置..."
+      >
+        {() => (
+          <>
       <section className="space-y-3">
         <h2 className="text-base font-semibold text-foreground">配置修改</h2>
         {hasConflicts && draftState && (
-          <div className="flex flex-col gap-3 rounded-md border border-amber-300 bg-amber-50 px-4 py-3 text-sm text-amber-900 sm:flex-row sm:items-center sm:justify-between">
-            <span>服务器同时修改了 {draftState.conflictFields.size} 个字段；本地输入已保留，请选择处理方式。</span>
-            <div className="flex gap-2">
-              <Button size="sm" variant="outline" onClick={() => setDraftState(resolveRevisionedDraftConflicts(draftState, 'use-server'))}>
-                使用服务器值
-              </Button>
-              <Button size="sm" onClick={() => setDraftState(resolveRevisionedDraftConflicts(draftState, 'keep-local'))}>
-                保留本地并覆盖
-              </Button>
-            </div>
-          </div>
+          <Alert>
+            <AlertDescription className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+              <span>服务器同时修改了 {draftState.conflictFields.size} 个字段；本地输入已保留，请选择处理方式。</span>
+              <div className="flex gap-2">
+                <Button size="sm" variant="outline" onClick={() => setDraftState(resolveRevisionedDraftConflicts(draftState, 'use-server'))}>
+                  使用服务器值
+                </Button>
+                <Button size="sm" onClick={() => setDraftState(resolveRevisionedDraftConflicts(draftState, 'keep-local'))}>
+                  保留本地并覆盖
+                </Button>
+              </div>
+            </AlertDescription>
+          </Alert>
         )}
         <form
           id="system-settings-form"
@@ -412,45 +434,46 @@ export default function SystemSettingsPage() {
                 </div>
                 <Badge variant="outline">{group.fields.length} 项</Badge>
               </div>
-              <table className="w-full text-sm">
-                <thead className="bg-muted/30 text-xs text-muted-foreground">
-                  <tr>
-                    <th className="text-left font-medium px-3 py-2">配置项</th>
-                    <th className="text-left font-medium px-3 py-2">有效值</th>
-                    <th className="text-left font-medium px-3 py-2">来源</th>
-                    <th className="text-left font-medium px-3 py-2">配置文件值</th>
-                    <th className="text-left font-medium px-3 py-2">环境变量</th>
-                  </tr>
-                </thead>
-                <tbody>
+              <Table>
+                <TableHeader>
+                  <TableRow className="bg-muted/30 hover:bg-muted/30">
+                    <TableHead>配置项</TableHead>
+                    <TableHead>有效值</TableHead>
+                    <TableHead>来源</TableHead>
+                    <TableHead>配置文件值</TableHead>
+                    <TableHead>环境变量</TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
                   {group.fields.map((field) => (
-                    <tr key={field.key} className="border-t border-border">
-                      <td className="px-3 py-2">
+                    <TableRow key={field.key}>
+                      <TableCell>
                         <div className="font-mono text-xs text-foreground">{field.key}</div>
                         <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
                           <span>{fieldLabel(field)}</span>
                           {field.restartRequired && <Badge variant="outline">需要重启</Badge>}
                         </div>
-                      </td>
-                      <td className="px-3 py-2 break-all">{displayValue(field, field.effectiveValue)}</td>
-                      <td className="px-3 py-2">
+                      </TableCell>
+                      <TableCell className="break-all">{displayValue(field, field.effectiveValue)}</TableCell>
+                      <TableCell>
                         <Badge variant={field.source === 'env' ? 'warning' : field.source === 'yaml' ? 'secondary' : 'outline'}>
                           {SOURCE_LABELS[field.source]}
                         </Badge>
-                      </td>
-                      <td className="px-3 py-2 break-all text-muted-foreground">{displayValue(field, field.yamlValue)}</td>
-                      <td className="px-3 py-2 break-all text-muted-foreground">{field.envValuePresent ? field.env : '-'}</td>
-                    </tr>
+                      </TableCell>
+                      <TableCell className="break-all text-muted-foreground">{displayValue(field, field.yamlValue)}</TableCell>
+                      <TableCell className="break-all text-muted-foreground">{field.envValuePresent ? field.env : '-'}</TableCell>
+                    </TableRow>
                   ))}
-                </tbody>
-              </table>
+                </TableBody>
+              </Table>
             </div>
           ))}
         </div>
       </section>
-        </>
-      )}
-    </div>
+          </>
+        )}
+      </QueryView>
+    </Page>
   );
 }
 
@@ -466,16 +489,12 @@ function SettingInput({
   const disabled = field.source === 'env';
   if (field.valueKind === 'boolean') {
     return (
-      <select
+      <Switch
         id={`setting-${field.key}`}
-        value={value}
+        checked={value === 'true'}
         disabled={disabled}
-        onChange={(event) => onChange(event.target.value)}
-        className="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background disabled:cursor-not-allowed disabled:opacity-50"
-      >
-        <option value="true">是</option>
-        <option value="false">否</option>
-      </select>
+        onCheckedChange={(checked) => onChange(checked ? 'true' : 'false')}
+      />
     );
   }
   return (

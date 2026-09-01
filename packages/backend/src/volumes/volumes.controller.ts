@@ -43,6 +43,13 @@ export class VolumesController {
   @Post()
   @HttpCode(HttpStatus.ACCEPTED)
   create(@CurrentUser() user: UserRecord, @Body() body: unknown) {
+    const kind = (body as { scope?: { kind?: string } } | null)?.scope?.kind;
+    if (kind === 'shared') {
+      throw new BadRequestException({
+        code: FailureCode.InvalidInput,
+        message: 'Shared volumes must be created via /shared-volumes',
+      });
+    }
     const input = zCreateVolumeRequest.parse(body);
     if (input.ownerId) {
       throw new BadRequestException({
@@ -93,7 +100,12 @@ export class ContainerVolumesController {
     @CurrentUser() user: UserRecord,
     @Body() body: unknown,
   ) {
-    return this.service.attachForUser(user.id, containerId, zAttachVolumeRequest.parse(body));
+    return this.service.attachForUser(
+      user.id,
+      containerId,
+      zAttachVolumeRequest.parse(body),
+      'local',
+    );
   }
 
   @Delete(':attachmentId')
@@ -103,7 +115,7 @@ export class ContainerVolumesController {
     @Param('attachmentId') attachmentId: string,
     @CurrentUser() user: UserRecord,
   ) {
-    return this.service.detachForUser(user.id, attachmentId, containerId);
+    return this.service.detachForUser(user.id, attachmentId, containerId, 'local');
   }
 }
 
@@ -120,7 +132,12 @@ export class AdminContainerVolumesController {
     @CurrentUser() user: UserRecord,
     @Body() body: unknown,
   ) {
-    return this.service.attachForAdmin(user.id, containerId, zAttachVolumeRequest.parse(body));
+    return this.service.attachForAdmin(
+      user.id,
+      containerId,
+      zAttachVolumeRequest.parse(body),
+      'local',
+    );
   }
 
   @Delete(':attachmentId')
@@ -130,7 +147,7 @@ export class AdminContainerVolumesController {
     @Param('attachmentId') attachmentId: string,
     @CurrentUser() user: UserRecord,
   ) {
-    return this.service.detachForAdmin(user.id, attachmentId, containerId);
+    return this.service.detachForAdmin(user.id, attachmentId, containerId, 'local');
   }
 }
 
@@ -148,6 +165,13 @@ export class AdminVolumesController {
   @Post()
   @HttpCode(HttpStatus.ACCEPTED)
   create(@CurrentUser() user: UserRecord, @Body() body: unknown) {
+    const kind = (body as { scope?: { kind?: string } } | null)?.scope?.kind;
+    if (kind === 'shared') {
+      throw new BadRequestException({
+        code: FailureCode.InvalidInput,
+        message: 'Shared volumes must be created via /shared-volumes',
+      });
+    }
     const input = zCreateVolumeRequest.parse(body);
     if (!input.ownerId) {
       throw new BadRequestException('Admin volume creation requires ownerId');

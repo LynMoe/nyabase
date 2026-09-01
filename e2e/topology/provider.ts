@@ -5,9 +5,8 @@ export const topologyCapabilities = [
   'certificate-rotation',
   'storage-dir-quota-online',
   'storage-lvm-block-backed',
-  'macvlan-parent',
-  'rp-filter',
-  'fib-anti-spoof',
+  'lan-bridge',
+  'bridge-ipv4-filter',
   'private-simplestreams',
   'sshd-no-dhcp-image',
   'node-exporter-authenticated-pull',
@@ -16,6 +15,7 @@ export const topologyCapabilities = [
   'ssh-reachability',
   'gpu-pci',
   'cephfs-cluster',
+  'multi-server',
 ] as const;
 
 export type TopologyCapability = (typeof topologyCapabilities)[number];

@@ -40,6 +40,8 @@ import type {
   ReconcileRunContext,
 } from './reconcile-worker.service.js';
 import { ProxySnapshotNotifierService } from '../proxy-snapshots/proxy-snapshot-notifier.service.js';
+import { ensureSharedCatalogOnServer } from '../volumes/shared-catalog.js';
+import { VOLUME_ADOPT_FAIL_AFTER_ATTEMPTS } from '../volumes/volume-placement.js';
 
 type InstanceFull = IncusSchema<'InstanceFull'>;
 type InstanceState = IncusSchema<'InstanceState'>;
@@ -81,6 +83,9 @@ interface ContainerAttachment {
   volume_id: string;
   incus_name: string;
   pool_name: string;
+  size_bytes: string;
+  shared: boolean;
+  bind_state: 'attaching' | 'attached' | 'detaching';
 }
 
 interface ActualInstance {
@@ -179,10 +184,16 @@ function running(state: InstanceState | undefined): boolean {
   return state?.status?.toLowerCase() === 'running';
 }
 
-function bytes(value: unknown): bigint | null {
-  if (typeof value === 'number' && Number.isSafeInteger(value)) return BigInt(value);
+export function observedDiskUsageBytes(value: unknown): bigint | null {
+  if (typeof value === 'number' && Number.isSafeInteger(value) && value >= 0) {
+    return BigInt(value);
+  }
   if (typeof value === 'string' && /^\d+$/.test(value)) return BigInt(value);
   return null;
+}
+
+function bytes(value: unknown): bigint | null {
+  return observedDiskUsageBytes(value);
 }
 
 export function sshFileMetadataMatches(
@@ -263,12 +274,18 @@ export class ContainerReconciler implements ManagedReconciler {
         failure: failure('CONTAINER_SERVER_MISMATCH', 'The intent server does not own the container'),
       };
     }
+    if (context.intent.targetGeneration < row.generation) {
+      return {
+        outcome: 'succeeded',
+        observedGeneration: context.intent.targetGeneration,
+      };
+    }
     if (!row.parent_interface || !row.routed_ip || !row.network_key || !row.gateway) {
       return {
         outcome: 'failed',
         failure: failure(
           'MISSING_MANAGED_NETWORK_ADDRESS',
-          'The container has no macvlan network address, parent interface, or IP pool gateway',
+          'The container has no LAN bridge / claim / gateway',
         ),
       };
     }
@@ -282,12 +299,34 @@ export class ContainerReconciler implements ManagedReconciler {
         ),
       };
     }
-    const attachments = await this.readAttachments(row.id, row.server_id);
     const shouldDelete =
       row.lifecycle_phase === 'deleting'
       || context.intent.kind === 'container.delete';
-    if (!shouldDelete && attachments.length > 0) {
-      await this.assertCustomVolumesPresent(context.client, attachments, row.server_id);
+    let desiredAttachments: ContainerAttachment[] = [];
+    if (!shouldDelete) {
+      const beforeMkdir = await this.rereadDesired(
+        row.id,
+        row.server_id,
+        context.intent.targetGeneration,
+      );
+      if (beforeMkdir.stale) {
+        return {
+          outcome: 'succeeded',
+          observedGeneration: context.intent.targetGeneration,
+        };
+      }
+      const catalogOutcome = await this.ensureDesiredCatalogs(
+        context,
+        beforeMkdir.desired,
+        row.server_id,
+      );
+      if (catalogOutcome) return catalogOutcome;
+      const beforePut = await this.rereadDesired(
+        row.id,
+        row.server_id,
+        context.intent.targetGeneration,
+      );
+      desiredAttachments = beforePut.desired;
     }
     const desired = buildDesiredInstanceSpec({
       container: {
@@ -309,7 +348,7 @@ export class ContainerReconciler implements ManagedReconciler {
         id: row.server_id,
         parentInterface: row.parent_interface,
       },
-      attachments: attachments.map<InstanceSpecAttachmentInput>((attachment) => ({
+      attachments: desiredAttachments.map<InstanceSpecAttachmentInput>((attachment) => ({
         id: attachment.id,
         containerPath: attachment.container_path,
         readOnly: attachment.read_only,
@@ -437,7 +476,7 @@ export class ContainerReconciler implements ManagedReconciler {
           },
         );
       } catch (error) {
-        if (isMissingCustomVolumeError(error)) {
+        if (isMissingCustomVolumeError(error) && desiredAttachments.length > 0) {
           throw new IncusError('VOLUME_PLACEMENT_PENDING', 'retry', {
             reason: 'put_toctou',
           });
@@ -520,6 +559,7 @@ export class ContainerReconciler implements ManagedReconciler {
         retryAfterMs: 2_000,
       };
     }
+    await this.settleVolumeBinds(row.id, expectedName, verified.document);
     return { outcome: 'succeeded', observedGeneration: row.generation };
   }
 
@@ -651,7 +691,9 @@ export class ContainerReconciler implements ManagedReconciler {
         id: full.server_id,
         parentInterface: full.parent_interface,
       },
-      attachments: attachments.map<InstanceSpecAttachmentInput>((attachment) => ({
+      attachments: attachments
+        .filter((attachment) => attachment.bind_state !== 'detaching')
+        .map<InstanceSpecAttachmentInput>((attachment) => ({
         id: attachment.id,
         containerPath: attachment.container_path,
         readOnly: attachment.read_only,
@@ -747,87 +789,105 @@ export class ContainerReconciler implements ManagedReconciler {
       : undefined;
   }
 
-  private async readAttachments(
+  private async settleVolumeBinds(
     containerId: string,
-    serverId: string,
-  ): Promise<ContainerAttachment[]> {
+    instanceName: string,
+    document: InstanceFull,
+  ): Promise<void> {
+    const devices = document.devices ?? {};
     const rows = await this.database
-      .selectFrom('control.volume_attachments as a')
-      .innerJoin('control.volumes as v', 'v.id', 'a.volume_id')
-      .select([
-        'a.id as id',
-        'a.container_path as container_path',
-        'a.read_only as read_only',
-        'a.volume_id as volume_id',
-        'v.incus_name as incus_name',
-        'v.pool_id as pool_id',
-        'v.server_id as volume_server_id',
-        'v.shared_backend_id as shared_backend_id',
-      ])
-      .where('a.container_id', '=', containerId)
-      .orderBy('a.id')
+      .selectFrom('control.volume_attachments')
+      .select(['id', 'bind_state', 'device_name'])
+      .where('container_id', '=', containerId)
       .execute();
-    const result: ContainerAttachment[] = [];
     for (const row of rows) {
-      const pool = row.volume_server_id
-        ? await this.database
-          .selectFrom('infra.storage_pools')
-          .select('incus_name')
-          .where('id', '=', row.pool_id)
-          .where('server_id', '=', serverId)
-          .where('registered', '=', true)
-          .executeTakeFirst()
-        : await this.database
-          .selectFrom('infra.storage_pools')
-          .select('incus_name')
-          .where('shared_backend_id', '=', row.shared_backend_id)
-          .where('server_id', '=', serverId)
-          .where('registered', '=', true)
-          .executeTakeFirst();
-      if (!pool) {
-        throw new IncusError('MISSING_STORAGE_POOL', 'managed_failure', {
-          volumeId: row.volume_id,
-          serverId,
-        });
+      const present = Object.prototype.hasOwnProperty.call(devices, row.device_name);
+      if (row.bind_state === 'attaching' && present) {
+        await this.database
+          .updateTable('control.volume_attachments')
+          .set({ bind_state: 'attached' })
+          .where('id', '=', row.id)
+          .where('bind_state', '=', 'attaching')
+          .execute();
+      } else if (row.bind_state === 'detaching' && !present) {
+        await this.database
+          .deleteFrom('control.volume_attachments')
+          .where('id', '=', row.id)
+          .where('bind_state', '=', 'detaching')
+          .execute();
       }
-      result.push({
-        id: row.id,
-        container_path: row.container_path,
-        read_only: row.read_only,
-        volume_id: row.volume_id,
-        incus_name: row.incus_name,
-        pool_name: pool.incus_name,
-      });
     }
-    return result;
+    void instanceName;
   }
 
-  private async assertCustomVolumesPresent(
-    client: IncusClientPort,
+  private async rereadDesired(
+    containerId: string,
+    serverId: string,
+    targetGeneration: number,
+  ): Promise<{ stale: boolean; desired: ContainerAttachment[] }> {
+    const current = await this.database
+      .selectFrom('control.containers')
+      .select('generation')
+      .where('id', '=', containerId)
+      .executeTakeFirst();
+    const attachments = await this.readAttachments(containerId, serverId);
+    const desired = attachments.filter((attachment) => attachment.bind_state !== 'detaching');
+    return {
+      stale: (current?.generation ?? targetGeneration) > targetGeneration,
+      desired,
+    };
+  }
+
+  private async ensureDesiredCatalogs(
+    context: ReconcileRunContext,
     attachments: readonly ContainerAttachment[],
     serverId: string,
-  ): Promise<void> {
+  ): Promise<ReconcileOutcome | undefined> {
+    if (!context.client) {
+      throw new IncusError('SERVER_UNREACHABLE', 'retry', { reason: 'missing_client' });
+    }
     for (const attachment of attachments) {
+      if (!attachment.pool_name) {
+        throw new IncusError(
+          attachment.shared ? 'VOLUME_PLACEMENT_PENDING' : 'MISSING_STORAGE_POOL',
+          attachment.shared ? 'retry' : 'managed_failure',
+          { volumeId: attachment.volume_id, serverId },
+        );
+      }
+      if (attachment.shared) {
+        const result = await ensureSharedCatalogOnServer(context.client, {
+          poolName: attachment.pool_name,
+          incusName: attachment.incus_name,
+          sizeBytes: attachment.size_bytes,
+        });
+        if (result === 'missing') {
+          if (context.intent.attemptCount >= VOLUME_ADOPT_FAIL_AFTER_ATTEMPTS) {
+            return {
+              outcome: 'failed',
+              failure: failure(
+                'VOLUME_CATALOG_ADOPT_FAILED',
+                'Incus did not adopt the existing CephFS directory into this daemon catalog',
+                { volumeId: attachment.volume_id, serverId },
+              ),
+            };
+          }
+          throw new IncusError('VOLUME_CATALOG_ADOPT_PENDING', 'retry', {
+            volumeId: attachment.volume_id,
+            serverId,
+          });
+        }
+        await this.markCatalogPresent(attachment.volume_id, serverId);
+        this.logger.log(
+          `container=${context.intent.resourceId} ensure shared catalog volume=${attachment.volume_id} `
+          + `server=${serverId} result=${result}`,
+        );
+        continue;
+      }
       try {
-        await client.getStorageVolume(attachment.pool_name, 'custom', attachment.incus_name);
+        await context.client.getStorageVolume(attachment.pool_name, 'custom', attachment.incus_name);
+        await this.markCatalogPresent(attachment.volume_id, serverId);
       } catch (error) {
         if (error instanceof IncusError && error.code === 'MISSING_STORAGE_POOL') {
-          const registered = await this.database
-            .selectFrom('infra.storage_pools')
-            .select('id')
-            .where('incus_name', '=', attachment.pool_name)
-            .where('server_id', '=', serverId)
-            .where('registered', '=', true)
-            .executeTakeFirst();
-          if (registered) {
-            this.logger.log(
-              `Custom volume ${attachment.incus_name} pool ${attachment.pool_name} is registered but missing on Incus`,
-            );
-            throw new IncusError('VOLUME_PLACEMENT_PENDING', 'retry', {
-              volumeId: attachment.volume_id,
-              reason: 'pool_pending',
-            });
-          }
           throw error;
         }
         if (isNotFound(error) || isMissingCustomVolumeError(error)) {
@@ -842,6 +902,105 @@ export class ContainerReconciler implements ManagedReconciler {
         throw error;
       }
     }
+  }
+
+  private async markCatalogPresent(volumeId: string, serverId: string): Promise<void> {
+    await this.database
+      .updateTable('control.volume_placements')
+      .set({ catalog_state: 'present' })
+      .where('volume_id', '=', volumeId)
+      .where('server_id', '=', serverId)
+      .execute();
+    await this.database
+      .updateTable('control.volumes')
+      .set({ dir_ensured: true })
+      .where('id', '=', volumeId)
+      .execute();
+  }
+
+  private async readAttachments(
+    containerId: string,
+    serverId: string,
+  ): Promise<ContainerAttachment[]> {
+    const rows = await this.database
+      .selectFrom('control.volume_attachments as a')
+      .innerJoin('control.volumes as v', 'v.id', 'a.volume_id')
+      .leftJoin('control.volume_placements as pl', (join) => join
+        .onRef('pl.volume_id', '=', 'a.volume_id')
+        .on('pl.server_id', '=', serverId))
+      .leftJoin('infra.storage_pools as pp', 'pp.id', 'pl.pool_id')
+      .select([
+        'a.id as id',
+        'a.container_path as container_path',
+        'a.read_only as read_only',
+        'a.bind_state as bind_state',
+        'a.volume_id as volume_id',
+        'v.incus_name as incus_name',
+        'v.size_bytes as size_bytes',
+        'v.pool_id as volume_pool_id',
+        'v.server_id as volume_server_id',
+        'v.shared_backend_id as shared_backend_id',
+        'pl.pool_id as placement_pool_id',
+        'pp.incus_name as placement_pool_name',
+      ])
+      .where('a.container_id', '=', containerId)
+      .orderBy('a.id')
+      .execute();
+    const result: ContainerAttachment[] = [];
+    for (const row of rows) {
+      const shared = row.shared_backend_id !== null;
+      if (row.bind_state === 'detaching') {
+        result.push({
+          id: row.id,
+          container_path: row.container_path,
+          read_only: row.read_only,
+          volume_id: row.volume_id,
+          incus_name: row.incus_name,
+          pool_name: '',
+          size_bytes: String(row.size_bytes),
+          shared,
+          bind_state: row.bind_state ?? 'attached',
+        });
+        continue;
+      }
+      let poolName: string | undefined;
+      if (shared) {
+        if (!row.placement_pool_id || !row.placement_pool_name) {
+          throw new IncusError('VOLUME_PLACEMENT_PENDING', 'retry', {
+            volumeId: row.volume_id,
+            serverId,
+          });
+        }
+        poolName = row.placement_pool_name;
+      } else {
+        const pool = await this.database
+          .selectFrom('infra.storage_pools')
+          .select('incus_name')
+          .where('id', '=', row.volume_pool_id)
+          .where('server_id', '=', serverId)
+          .where('registered', '=', true)
+          .executeTakeFirst();
+        if (!pool) {
+          throw new IncusError('MISSING_STORAGE_POOL', 'managed_failure', {
+            volumeId: row.volume_id,
+            serverId,
+          });
+        }
+        poolName = pool.incus_name;
+      }
+      result.push({
+        id: row.id,
+        container_path: row.container_path,
+        read_only: row.read_only,
+        volume_id: row.volume_id,
+        incus_name: row.incus_name,
+        pool_name: poolName,
+        size_bytes: String(row.size_bytes),
+        shared,
+        bind_state: row.bind_state ?? 'attached',
+      });
+    }
+    return result;
   }
 
   private async findExpectedOrIdentity(

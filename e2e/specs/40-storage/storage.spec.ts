@@ -1,5 +1,5 @@
 import { test, expect } from '../../fixtures/live-stack.js';
-import type { APIRequestContext } from '@playwright/test';
+import type { ApiClient } from '../../support/api-client.js';
 import { coverageCase } from '../../support/coverage-marker.js';
 import { expectJson } from '../../support/http.js';
 import { runCommand, runIncus } from '../../support/incus-control.js';
@@ -7,11 +7,20 @@ import { eventually } from '../../support/poll.js';
 import { requireRuntimeEnv } from '../../support/runtime-env.js';
 import { waitForContainerSshReady } from '../../support/wait-for-ssh.js';
 import { waitForGone } from '../../support/wait-for-gone.js';
+import {
+  attachVolume as attachSharedVolume,
+  createSharedVolume,
+  deleteVolume as deleteAnyVolume,
+  detachVolume as detachSharedVolume,
+  expectDetachRequiresStop,
+  stopContainer as stopSharedContainer,
+  waitForCephCatalogGone,
+} from '../../support/volume-ops.js';
 
 type JsonRecord = Record<string, any>;
 
 async function waitForIntent(
-  api: APIRequestContext,
+  api: ApiClient,
   intentId: string,
   timeoutMs = 180_000,
 ): Promise<JsonRecord> {
@@ -27,7 +36,7 @@ async function waitForIntent(
 }
 
 async function requireSucceededIntent(
-  api: APIRequestContext,
+  api: ApiClient,
   intentId: string,
   label: string,
 ): Promise<JsonRecord> {
@@ -42,9 +51,10 @@ async function requireSucceededIntent(
 }
 
 async function createRunningContainer(
-  api: APIRequestContext,
+  api: ApiClient,
   seedState: {
     runId: string;
+    adminUserId: string;
     server: { id: string };
     image: { id: string };
   },
@@ -86,7 +96,7 @@ async function createRunningContainer(
 // itself. The Incus exec helper runs the command host-side and returns real stdout,
 // which is what proves the volume path/content inside the guest.
 async function execInContainer(
-  api: APIRequestContext,
+  api: ApiClient,
   containerId: string,
   command: string,
 ): Promise<string> {
@@ -101,11 +111,10 @@ async function execInContainer(
 }
 
 // Peer instances are not on the local Incus unix socket. Prefer host-side
-// `incus exec` over SSH to E2E_GPU_PEER_HOST (macvlan isolates the local host
-// from its own containers). Fall back to guest SSH only when the peer host
-// helper is unset (cross-host guest IPs remain reachable on the LAN).
+// `incus exec` over SSH to E2E_GPU_PEER_HOST. Host TCP to routedIp:22 is a
+// valid extra assertion when the SSH proxy runs on the Incus host.
 async function peerExecInContainer(
-  api: APIRequestContext,
+  api: ApiClient,
   containerId: string,
   command: string,
 ): Promise<string> {
@@ -167,7 +176,7 @@ async function peerExecInContainer(
 }
 
 async function deleteContainer(
-  api: APIRequestContext,
+  api: ApiClient,
   containerId: string | undefined,
 ): Promise<void> {
   if (!containerId) return;
@@ -180,7 +189,7 @@ async function deleteContainer(
 }
 
 async function createLocalVolume(
-  api: APIRequestContext,
+  api: ApiClient,
   seedState: {
     adminUserId: string;
     server: { id: string };
@@ -211,19 +220,14 @@ async function createLocalVolume(
 }
 
 async function deleteVolume(
-  api: APIRequestContext,
+  api: ApiClient,
   volumeId: string | undefined,
 ): Promise<void> {
-  if (!volumeId) return;
-  const deletion = await api.delete(`/api/admin/volumes/${volumeId}`)
-    .catch(() => undefined);
-  if (deletion?.status() === 202) {
-    await waitForGone(api, `/api/admin/volumes/${volumeId}`);
-  }
+  await deleteAnyVolume(api, volumeId);
 }
 
 async function attachVolume(
-  api: APIRequestContext,
+  api: ApiClient,
   containerId: string,
   volumeId: string,
   containerPath: string,
@@ -249,21 +253,32 @@ async function attachVolume(
 }
 
 async function detachVolume(
-  api: APIRequestContext,
+  api: ApiClient,
   containerId: string,
   attachmentId: string,
 ): Promise<void> {
-  const accepted = await expectJson<JsonRecord>(
-    await api.delete(`/api/admin/containers/${containerId}/volumes/${attachmentId}`),
-    202,
+  const response = await api.delete(
+    `/api/admin/containers/${containerId}/volumes/${attachmentId}`,
   );
+  if (response.status() === 409) {
+    const body = await response.json();
+    throw new Error(
+      `VOLUME_DETACH_REQUIRES_STOP: stop the container before detach `
+      + `(container=${containerId} attachment=${attachmentId}) body=${JSON.stringify(body)}`,
+    );
+  }
+  const accepted = await expectJson<JsonRecord>(response, 202);
   await requireSucceededIntent(api, accepted.intentId, 'volume.detach');
 }
 
 async function stopContainer(
-  api: APIRequestContext,
+  api: ApiClient,
   containerId: string,
 ): Promise<void> {
+  const current = await expectJson<JsonRecord>(
+    await api.get(`/api/admin/containers/${containerId}`),
+  );
+  if (current.actual?.status === 'stopped' && current.powerIntent === 'stopped') return;
   const accepted = await expectJson<JsonRecord>(
     await api.post(`/api/admin/containers/${containerId}/actions/stop`),
     202,
@@ -273,7 +288,7 @@ async function stopContainer(
     async () => expectJson<JsonRecord>(
       await api.get(`/api/admin/containers/${containerId}`),
     ),
-    (value) => value.actual?.status === 'stopped' || value.powerIntent === 'stopped',
+    (value) => value.actual?.status === 'stopped' && value.powerIntent === 'stopped',
     180_000,
     500,
     `container ${containerId} stopped`,
@@ -296,6 +311,21 @@ test(
       await adminApi.get(`/api/admin/servers/${seedState.server.id}/storage-capacity`),
     );
     expect(capacity).toBeDefined();
+    await expectJson(
+      await adminApi.get(`/api/servers/${seedState.server.id}/storage-pools`),
+    );
+    await expectJson(
+      await adminApi.get(`/api/servers/${seedState.server.id}/storage-capacity`),
+    );
+    await expectJson(await adminApi.get('/api/admin/volumes'));
+    await expectJson(
+      await adminApi.post(`/api/admin/servers/${seedState.server.id}/storage-pools/discover`),
+    );
+    const missingPool = await adminApi.patch(
+      '/api/admin/storage-pools/00000000-0000-4000-8000-0000000000aa',
+      { data: { expectedRevision: 1, registered: true } },
+    );
+    expect(missingPool.status()).toBeGreaterThanOrEqual(400);
 
     const volumeIds: string[] = [];
     const uniqueSuffix = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
@@ -323,6 +353,7 @@ test(
         volumeIds.push(volumeId);
         await waitForIntent(adminApi, accepted.intentId);
 
+        await expectJson(await adminApi.get(`/api/admin/volumes/${volumeId}/intents`));
         const volume = await expectJson<JsonRecord>(
           await adminApi.get(`/api/admin/volumes/${volumeId}`),
         );
@@ -358,8 +389,7 @@ test(
     test.setTimeout(420_000);
     const lvmCapability = topologyProvider.capabilities['storage-lvm-block-backed'];
     if (lvmCapability.state !== 'available') {
-      expect(lvmCapability.state).toBe('blocked');
-      return;
+      throw new Error(`BLOCKED: storage-lvm-block-backed is ${lvmCapability.state}`);
     }
 
     const uniqueSuffix = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
@@ -407,10 +437,8 @@ test(
       const attachedBody = await attachedShrink.json();
       expect(JSON.stringify(attachedBody)).toMatch(/VOLUME_SHRINK_REQUIRES_DETACH/);
 
+      await stopContainer(adminApi, containerId);
       await detachVolume(adminApi, containerId, attachmentId);
-      if (capability.shrinkRequiresStop === true) {
-        await stopContainer(adminApi, containerId);
-      }
 
       const detached = await expectJson<JsonRecord>(
         await adminApi.get(`/api/admin/volumes/${volumeId}`),
@@ -481,9 +509,11 @@ test(
       expect(deleteWhileAttached.status()).toBe(409);
       const deleteBody = await deleteWhileAttached.json();
       expect(JSON.stringify(deleteBody)).toMatch(
-        /VOLUME_DETACH_DRAINING|Detach all volume attachments/i,
+        /VOLUME_REQUIRES_UNBIND|Detach all volume attachments/i,
       );
 
+      await expectDetachRequiresStop(adminApi, containerA, attachmentId, 'local');
+      await stopContainer(adminApi, containerA);
       await detachVolume(adminApi, containerA, attachmentId);
       const afterDetach = await expectJson<JsonRecord[]>(
         await adminApi.get(`/api/admin/containers/${containerA}/volumes`),
@@ -536,6 +566,7 @@ test(
       }
 
       for (const containerId of [containerA, containerB]) {
+        await stopContainer(adminApi, containerId);
         const listed = await expectJson<JsonRecord[]>(
           await adminApi.get(`/api/admin/containers/${containerId}/volumes`),
         );
@@ -571,6 +602,7 @@ test(
     );
     expect(Array.isArray(adminShared)).toBe(true);
 
+    const missing = '00000000-0000-4000-8000-000000000099';
     if (seedState.sharedBackendId) {
       // User-facing GET filters by grants; admin list/detail remain authoritative
       // for seeded backends even when no grant is currently attached.
@@ -579,10 +611,22 @@ test(
       );
       expect(detail.id).toBe(seedState.sharedBackendId);
       expect(adminShared.some((entry) => entry.id === seedState.sharedBackendId)).toBe(true);
+      const userDetail = await adminApi.get(`/api/shared-backends/${seedState.sharedBackendId}`);
+      expect(userDetail.status()).toBeLessThan(500);
     } else {
       expect(adminShared).toHaveLength(0);
       expect(shared).toHaveLength(0);
+      const userMissing = await adminApi.get(`/api/shared-backends/${missing}`);
+      expect(userMissing.status()).toBeGreaterThanOrEqual(400);
+      const adminMissing = await adminApi.get(`/api/admin/shared-backends/${missing}`);
+      expect(adminMissing.status()).toBeGreaterThanOrEqual(400);
     }
+    const patched = await adminApi.patch(`/api/admin/shared-backends/${missing}`, {
+      data: { expectedRevision: 1, displayName: 'e2e' },
+    });
+    expect(patched.status()).toBeGreaterThanOrEqual(400);
+    const deleted = await adminApi.delete(`/api/admin/shared-backends/${missing}`);
+    expect(deleted.status()).toBeGreaterThanOrEqual(400);
 
     if (seedState.blocked.cephfs.startsWith('BLOCKED:')) {
       expect(topologyProvider.capabilities['cephfs-cluster'].state).toBe('blocked');
@@ -591,199 +635,211 @@ test(
 );
 
 test(
-  'exercises shared CephFS backend grants, volumes, attach/detach, capacity, and cleanup',
+  'rejects CephFS cluster usage when the identity is not a provisioned cluster',
+  { ...coverageCase('cephfs-cluster-absent', 'cephfs-cluster-absent-live') },
+  async ({ adminApi, seedState, topologyProvider }) => {
+    const cephCapability = topologyProvider.capabilities['cephfs-cluster'];
+    if (cephCapability.state === 'blocked') {
+      expect(seedState.blocked.cephfs.startsWith('BLOCKED:')).toBe(true);
+      expect(seedState.sharedBackendId ?? '').toBe('');
+    }
+    const created = await adminApi.post('/api/admin/shared-backends', {
+      data: {
+        name: `e2e-ceph-absent-${seedState.runId}`,
+        kind: 'cephfs',
+        identityKey: 'cephfs:e2e-absent-unprovisioned',
+        fsid: '00000000-0000-0000-0000-000000000000',
+      },
+    });
+    expect(created.status()).toBeGreaterThanOrEqual(400);
+    expect(created.status()).toBeLessThan(500);
+  },
+);
+
+test(
+  'attaches a shared CephFS volume to containers on two Incus workers',
   { ...coverageCase('shared-cephfs-storage', 'shared-cephfs-storage-live') },
   async ({ adminApi, seedState, topologyProvider }) => {
-    test.setTimeout(480_000);
-    const cephCapability = topologyProvider.capabilities['cephfs-cluster'];
-    const backendId = seedState.sharedBackendId
-      ?? process.env.E2E_SHARED_BACKEND_ID?.trim();
-    if (cephCapability.state !== 'available' || !backendId) {
-      expect(cephCapability.state).toBe('blocked');
-      expect(
-        seedState.blocked.cephfs.startsWith('BLOCKED:')
-          || !seedState.sharedBackendId,
-      ).toBe(true);
-      return;
-    }
+    expect(topologyProvider.capabilities['cephfs-cluster'].state).toBe('available');
+    expect(seedState.sharedBackendId).toBeTruthy();
+    const labServers = seedState.labServers ?? [];
+    expect(labServers.length).toBeGreaterThanOrEqual(1);
+    const worker = labServers[0];
 
-    expect(cephCapability.state, cephCapability.detail).toBe('available');
-    expect(
-      seedState.blocked.cephfs.startsWith('ENABLED:')
-        || seedState.blocked.cephfs.startsWith('BLOCKED:'),
-    ).toBe(true);
+    const primaryPools = await expectJson<JsonRecord[]>(
+      await adminApi.get(`/api/admin/servers/${seedState.server.id}/storage-pools`),
+    );
+    const cephPool = primaryPools.find(
+      (pool) => pool.driver === 'cephfs' && pool.shareable === true && pool.registered === true,
+    );
+    expect(cephPool?.id, 'primary CephFS pool').toBeTruthy();
+    if (!cephPool) throw new Error('primary CephFS pool is missing');
+    expect(cephPool.sharedBackendId).toBe(seedState.sharedBackendId);
 
-    const uniqueSuffix = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
-    const mountPath = '/mnt/e2e-cephfs';
-    let localContainerId: string | undefined;
-    let peerContainerId: string | undefined;
     let volumeId: string | undefined;
-    let grantRestored = false;
-
+    let primaryContainer: string | undefined;
+    let workerContainer: string | undefined;
     try {
-      const backend = await expectJson<JsonRecord>(
-        await adminApi.get(`/api/admin/shared-backends/${backendId}`),
-      );
-      expect(backend.id).toBe(backendId);
-      expect(backend.identityKey || backend.identity_key).toBeTruthy();
-      expect(Number(backend.overcommitRatio)).toBeGreaterThanOrEqual(1);
-
-      const localPools = await expectJson<JsonRecord[]>(
-        await adminApi.get(`/api/admin/servers/${seedState.server.id}/storage-pools`),
-      );
-      const localCephPools = localPools.filter((pool) => (
-        pool.driver === 'cephfs'
-        && pool.shareable === true
-        && pool.registered === true
-        && pool.sharedBackendId === backendId
-      ));
-      expect(localCephPools.length, JSON.stringify(localPools)).toBeGreaterThanOrEqual(1);
-      const localCephPool = localCephPools[0]!;
-
-      // Discover remains idempotent against the already-mapped pool.
-      const rediscovered = await expectJson<JsonRecord[]>(
-        await adminApi.post(
-          `/api/admin/servers/${seedState.server.id}/storage-pools/discover`,
-          { data: {} },
-        ),
-        [200, 201],
-      );
-      expect(rediscovered.some((pool) => pool.id === localCephPool.id)).toBe(true);
-
-      const grantLimitBytes = 512 * 1024 * 1024;
-      const grant = await expectJson<JsonRecord>(
-        await adminApi.put(
-          `/api/admin/users/${seedState.adminUserId}/shared-backend-grants/${backendId}`,
-          {
-            data: {
-              limitBytes: grantLimitBytes,
-              expiresAt: null,
-            },
-          },
-        ),
-      );
-      expect(Number(grant.limitBytes)).toBe(grantLimitBytes);
-      expect(grant.expiresAt).toBeNull();
-      grantRestored = true;
-
-      const capacity = await expectJson<JsonRecord>(
-        await adminApi.get(`/api/admin/servers/${seedState.server.id}/storage-capacity`),
-      );
-      expect(capacity.overcommitRatio ?? capacity.pools).toBeDefined();
-
-      const overGrant = await adminApi.post('/api/volumes', {
-        data: {
-          name: `e2e-ceph-over-${uniqueSuffix}`,
-          sizeBytes: grantLimitBytes + 64 * 1024 * 1024,
-          scope: {
-            kind: 'shared',
-            sharedBackendId: backendId,
-            poolId: localCephPool.id,
-          },
-        },
-      });
-      expect([403, 409]).toContain(overGrant.status());
-
-      const created = await expectJson<JsonRecord>(
-        await adminApi.post('/api/admin/volumes', {
-          data: {
-            ownerId: seedState.adminUserId,
-            name: `e2e-ceph-${uniqueSuffix}`,
-            sizeBytes: 128 * 1024 * 1024,
-            scope: {
-              kind: 'shared',
-              sharedBackendId: backendId,
-              poolId: localCephPool.id,
-            },
-          },
-        }),
-        202,
-      );
-      volumeId = created.resourceId as string;
-      await requireSucceededIntent(adminApi, created.intentId, 'shared.volume.create');
-
-      const volume = await expectJson<JsonRecord>(
-        await adminApi.get(`/api/admin/volumes/${volumeId}`),
-      );
-      expect(volume.scope?.kind ?? volume.sharedBackendId).toBeTruthy();
-      const resized = await expectJson<JsonRecord>(
-        await adminApi.patch(`/api/admin/volumes/${volumeId}`, {
-          data: {
-            expectedRevision: volume.generation,
-            sizeBytes: 192 * 1024 * 1024,
-          },
-        }),
-        202,
-      );
-      await requireSucceededIntent(adminApi, resized.intentId, 'shared.volume.resize');
-
-      localContainerId = await createRunningContainer(
+      volumeId = await createSharedVolume(
         adminApi,
         seedState,
-        `e2e-ceph-local-${uniqueSuffix}`,
+        `e2e-ceph-${Date.now().toString(36)}`,
       );
-      const { attachmentId } = await attachVolume(
+      await expectJson(await adminApi.get('/api/admin/shared-volumes'));
+      await expectJson(await adminApi.get(`/api/admin/shared-volumes/${volumeId}`));
+      await expectJson(await adminApi.get(`/api/admin/shared-volumes/${volumeId}/catalogs`));
+      await expectJson(await adminApi.get(`/api/admin/shared-volumes/${volumeId}/intents`));
+      await expectJson(
+        await adminApi.get(`/api/admin/shared-backends/${seedState.sharedBackendId}/catalog-inspect`),
+      );
+      await adminApi.get('/api/shared-volumes');
+      await adminApi.get(`/api/shared-volumes/${volumeId}`);
+      await adminApi.get(`/api/shared-volumes/${volumeId}/intents`);
+      await adminApi.post('/api/shared-volumes', {
+        data: {
+          name: `e2e-ceph-user-${Date.now().toString(36)}`,
+          sizeBytes: 64 * 1024 * 1024,
+          scope: { kind: 'shared', sharedBackendId: seedState.sharedBackendId },
+        },
+      });
+      await adminApi.patch(`/api/shared-volumes/${volumeId}`, {
+        data: { expectedRevision: 1, sizeBytes: 80 * 1024 * 1024 },
+      });
+      await adminApi.delete('/api/shared-volumes/00000000-0000-4000-8000-000000000099');
+      const createdForPatch = await expectJson<JsonRecord>(
+        await adminApi.get(`/api/admin/shared-volumes/${volumeId}`),
+      );
+      await adminApi.patch(`/api/admin/shared-volumes/${volumeId}`, {
+        data: {
+          expectedRevision: createdForPatch.generation,
+          name: createdForPatch.name,
+        },
+      });
+
+      primaryContainer = await createRunningContainer(
         adminApi,
-        localContainerId,
-        volumeId,
-        mountPath,
+        seedState,
+        'e2e-ceph-a',
+        seedState.server.id,
+      );
+      workerContainer = await createRunningContainer(
+        adminApi,
+        seedState,
+        'e2e-ceph-b',
+        worker.id,
+      );
+      await attachSharedVolume(adminApi, primaryContainer, volumeId, '/mnt/shared', 'shared');
+      await attachSharedVolume(adminApi, workerContainer, volumeId, '/mnt/shared', 'shared');
+      await adminApi.get(`/api/containers/${primaryContainer}/shared-volumes`);
+      await adminApi.post(`/api/containers/${primaryContainer}/shared-volumes`, {
+        data: { volumeId, containerPath: '/mnt/dup', readOnly: false },
+      });
+      await adminApi.delete(
+        `/api/containers/${primaryContainer}/shared-volumes/00000000-0000-4000-8000-000000000099`,
       );
 
-      const deleteWhileAttached = await adminApi.delete(`/api/admin/volumes/${volumeId}`);
+      const marker = `e2e-ceph-${seedState.runId}`;
+      const written = await execInContainer(
+        adminApi,
+        primaryContainer,
+        `printf '%s\\n' '${marker}' > /mnt/shared/marker && cat /mnt/shared/marker`,
+      );
+      expect(written).toContain(marker);
+
+      const workerRow = await expectJson<JsonRecord>(
+        await adminApi.get(`/api/admin/containers/${workerContainer}`),
+      );
+      const instanceName = workerRow.instanceName as string;
+      expect(instanceName).toBeTruthy();
+      const remote = await runCommand('ssh', [
+        '-o',
+        'BatchMode=yes',
+        '-o',
+        'StrictHostKeyChecking=accept-new',
+        '-o',
+        'ConnectTimeout=15',
+        worker.ssh,
+        [
+          'incus',
+          'exec',
+          instanceName,
+          '--',
+          '/bin/sh',
+          '-lc',
+          JSON.stringify('cat /mnt/shared/marker'),
+        ].join(' '),
+      ]);
+      expect(remote.code, remote.stderr).toBe(0);
+      expect(remote.stdout).toContain(marker);
+
+      const volume = await expectJson<JsonRecord>(
+        await adminApi.get(`/api/admin/shared-volumes/${volumeId}`),
+      );
+      const incusName = volume.incusName as string;
+      expect(incusName).toMatch(/^nyv-/);
+      const workerPools = await expectJson<JsonRecord[]>(
+        await adminApi.get(`/api/admin/servers/${worker.id}/storage-pools`),
+      );
+      const workerCeph = workerPools.find(
+        (pool) => pool.driver === 'cephfs' && pool.shareable === true && pool.registered === true,
+      );
+      expect(workerCeph?.incusName, 'worker CephFS pool').toBeTruthy();
+
+      const workerAttachments = await expectJson<JsonRecord[]>(
+        await adminApi.get(`/api/admin/containers/${workerContainer}/shared-volumes`),
+      );
+      const workerAttachment = workerAttachments.find((entry) => entry.volumeId === volumeId);
+      expect(workerAttachment?.id).toBeTruthy();
+      await expectDetachRequiresStop(
+        adminApi,
+        workerContainer,
+        workerAttachment!.id as string,
+        'shared',
+      );
+      await stopSharedContainer(adminApi, workerContainer);
+      await detachSharedVolume(adminApi, workerContainer, workerAttachment!.id as string, 'shared');
+
+      const stillOnPrimary = await execInContainer(
+        adminApi,
+        primaryContainer,
+        'cat /mnt/shared/marker',
+      );
+      expect(stillOnPrimary).toContain(marker);
+
+      const workerCatalogAfterDetach = await runCommand('ssh', [
+        '-o',
+        'BatchMode=yes',
+        '-o',
+        'StrictHostKeyChecking=accept-new',
+        '-o',
+        'ConnectTimeout=15',
+        worker.ssh,
+        ['incus', 'storage', 'volume', 'show', String(workerCeph!.incusName), `custom/${incusName}`].join(' '),
+      ]);
+      expect(workerCatalogAfterDetach.code, workerCatalogAfterDetach.stderr).toBe(0);
+
+      const deleteWhileAttached = await adminApi.delete(`/api/admin/shared-volumes/${volumeId}`);
       expect(deleteWhileAttached.status()).toBe(409);
-
-      const proof = await execInContainer(
-        adminApi,
-        localContainerId,
-        `test -d ${mountPath} && printf cephfs-e2e > ${mountPath}/e2e-proof && cat ${mountPath}/e2e-proof`,
+      const deleteBody = await deleteWhileAttached.json();
+      expect(JSON.stringify(deleteBody)).toMatch(
+        /VOLUME_REQUIRES_UNBIND|Detach all volume attachments/i,
       );
-      expect(proof.trim()).toBe('cephfs-e2e');
 
-      const peerServerId = process.env.E2E_GPU_PEER_SERVER_ID?.trim();
-      if (peerServerId && peerServerId !== seedState.server.id) {
-        const peerPools = await expectJson<JsonRecord[]>(
-          await adminApi.get(`/api/admin/servers/${peerServerId}/storage-pools`),
-        );
-        const peerMapped = peerPools.some((pool) => (
-          pool.driver === 'cephfs'
-          && pool.registered === true
-          && pool.sharedBackendId === backendId
-        ));
-        if (peerMapped) {
-          peerContainerId = await createRunningContainer(
-            adminApi,
-            seedState,
-            `e2e-ceph-peer-${uniqueSuffix}`,
-            peerServerId,
-          );
-          const peerAttach = await attachVolume(
-            adminApi,
-            peerContainerId,
-            volumeId,
-            mountPath,
-          );
-          const peerProof = await peerExecInContainer(
-            adminApi,
-            peerContainerId,
-            `test -f ${mountPath}/e2e-proof && cat ${mountPath}/e2e-proof`,
-          );
-          expect(peerProof.trim()).toBe('cephfs-e2e');
-          await detachVolume(adminApi, peerContainerId, peerAttach.attachmentId);
-        }
-      }
-
-      await detachVolume(adminApi, localContainerId, attachmentId);
+      await deleteContainer(adminApi, primaryContainer);
+      primaryContainer = undefined;
+      await deleteContainer(adminApi, workerContainer);
+      workerContainer = undefined;
       await deleteVolume(adminApi, volumeId);
       volumeId = undefined;
+
+      await waitForCephCatalogGone(incusName, [
+        { id: seedState.server.id, poolName: String(cephPool.incusName) },
+        { id: worker.id, ssh: worker.ssh, poolName: String(workerCeph!.incusName) },
+      ]);
     } finally {
+      await deleteContainer(adminApi, primaryContainer);
+      await deleteContainer(adminApi, workerContainer);
       await deleteVolume(adminApi, volumeId);
-      await deleteContainer(adminApi, localContainerId);
-      await deleteContainer(adminApi, peerContainerId);
-      if (grantRestored) {
-        await adminApi.delete(
-          `/api/admin/users/${seedState.adminUserId}/shared-backend-grants/${backendId}`,
-        ).catch(() => undefined);
-      }
     }
   },
 );

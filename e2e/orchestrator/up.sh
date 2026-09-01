@@ -5,6 +5,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck disable=SC1091
 source "$SCRIPT_DIR/common.sh"
 
+maybe_source_lab_cluster
 run_id="$(require_run_id "${1:-}")"
 profile="${2:-${E2E_PROFILE:-smoke}}"
 validate_profile "$profile"
@@ -26,7 +27,27 @@ trap cleanup_failed_up EXIT INT TERM HUP
 rg -Fq "profile=$profile" "$runtime_dir/build.evidence" \
   || die "build evidence was produced for another profile; rebuild with $profile"
 
+bash "$SCRIPT_DIR/sweep-incus-leftovers.sh" "$run_id"
+
 E2E_RUN_ID="$run_id" bash "$SCRIPT_DIR/provision-incus.sh" apply "$run_id"
+if [[ -n "${E2E_CEPHFS_FSID:-}" && -n "${E2E_CEPHFS_IDENTITY_KEY:-}" && -n "${E2E_CEPHFS_INCUS_POOL:-}" ]]; then
+  umask 077
+  {
+    printf 'E2E_CEPHFS_FS_NAME=%s\n' "${E2E_CEPHFS_FS_NAME:-}"
+    printf 'E2E_CEPHFS_FSID=%s\n' "${E2E_CEPHFS_FSID:-}"
+    printf 'E2E_CEPHFS_CLIENT_NAME=%s\n' "${E2E_CEPHFS_CLIENT_NAME:-}"
+    printf 'E2E_CEPHFS_CLUSTER_NAME=%s\n' "${E2E_CEPHFS_CLUSTER_NAME:-}"
+    printf 'E2E_CEPHFS_MOUNT_PATH=%s\n' "${E2E_CEPHFS_MOUNT_PATH:-}"
+    printf 'E2E_CEPHFS_QUOTA_BYTES=%s\n' "${E2E_CEPHFS_QUOTA_BYTES:-}"
+    printf 'E2E_CEPHFS_MON_HOSTS=%s\n' "${E2E_CEPHFS_MON_HOSTS:-}"
+    printf 'E2E_CEPHFS_META_POOL=%s\n' "${E2E_CEPHFS_META_POOL:-}"
+    printf 'E2E_CEPHFS_DATA_POOL=%s\n' "${E2E_CEPHFS_DATA_POOL:-}"
+    printf 'E2E_CEPHFS_INCUS_POOL=%s\n' "${E2E_CEPHFS_INCUS_POOL:-}"
+    printf 'E2E_CEPHFS_IDENTITY_KEY=%s\n' "${E2E_CEPHFS_IDENTITY_KEY:-}"
+    printf 'E2E_CEPHFS_KEY=%s\n' "${E2E_CEPHFS_KEY:-}"
+  } > "$runtime_dir/cephfs-nbdev-test.env"
+  chmod 600 "$runtime_dir/cephfs-nbdev-test.env"
+fi
 maybe_source_cephfs_fixture "$runtime_dir"
 doctor_output="$(
   E2E_PROFILE="$profile" E2E_RUN_ID="$run_id" \
@@ -91,33 +112,7 @@ chmod 0600 "$runtime_dir/control-plane-wiring.evidence"
   NODE_ENV=test pnpm --filter @nyabase/backend migration:run
 )
 
-health_url="${E2E_BASE_URL%/}/api/health/live"
-if ! curl --fail --silent --show-error --max-time 5 \
-  --cacert "$E2E_EDGE_CA_FILE" "$health_url" >/dev/null 2>&1; then
-  [[ "${E2E_BACKEND_AUTOSTART:-0}" == "1" ]] \
-    || die "control plane is not healthy; set E2E_BACKEND_AUTOSTART=1 after preflight"
-  log "starting the built control plane"
-  install -m 0600 /dev/null "$runtime_dir/control-plane.log"
-  (
-    cd "$E2E_ROOT"
-    export_control_plane_environment "$profile"
-    export NODE_ENV=test
-    nohup pnpm --filter @nyabase/backend start \
-      > "$runtime_dir/control-plane.log" 2>&1 &
-    printf '%s\n' "$!" > "$runtime_dir/control-plane.pid"
-  )
-  chmod 0600 "$runtime_dir/control-plane.log" "$runtime_dir/control-plane.pid"
-  for _ in $(seq 1 90); do
-    if curl --fail --silent --show-error --max-time 5 \
-      --cacert "${E2E_EDGE_CA_FILE:-}" "$health_url" >/dev/null 2>&1; then
-      break
-    fi
-    sleep 1
-  done
-  curl --fail --silent --show-error --max-time 5 \
-    --cacert "$E2E_EDGE_CA_FILE" "$health_url" >/dev/null 2>&1 \
-    || die "control plane did not become healthy; inspect the private runtime log"
-fi
+bash "$SCRIPT_DIR/start-control-plane.sh" "$run_id" "$profile"
 
 node "$SCRIPT_DIR/seed.mjs" "$runtime_dir" "$run_id" "$profile"
 server_id="$(
@@ -129,7 +124,7 @@ server_id="$(
   ' "$runtime_dir/seed-state.json"
 )" || die "seed state did not contain a valid registered server id"
 export E2E_INCUS_SERVER_ID="$server_id"
-# Ensure CephFS fixture (if present) is reflected in the durable context for Playwright.
+# Ensure CephFS fixture (if present) is reflected in the durable context for the API runner.
 maybe_source_cephfs_fixture "$runtime_dir"
 capability_csv="${capability_csv},intent-reconciliation,exec-bridge,ssh-reachability"
 if [[ -n "${E2E_SHARED_BACKEND_ID:-}" \

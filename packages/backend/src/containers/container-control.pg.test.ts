@@ -201,7 +201,7 @@ describePg('PostgreSQL container create admission and capacity', () => {
         'container',
         created.resourceId,
         1,
-        { outcome: 'succeeded' },
+        { outcome: 'succeeded', placementServerId: fixture.serverId },
       );
       const reconciler = new ContainerReconciler(database, intents);
       const client = {
@@ -214,7 +214,7 @@ describePg('PostgreSQL container create admission and capacity', () => {
       expect(await database.selectFrom('control.intents')
         .select('id')
         .where('resource_id', '=', created.resourceId)
-        .execute()).toHaveLength(1);
+        .execute()).toHaveLength(2);
     });
   });
 
@@ -825,7 +825,7 @@ async function seedSharedVolume(
   await database.insertInto('control.volumes').values({
     id: volumeId,
     owner_id: fixture.userId,
-    pool_id: poolId,
+    pool_id: null,
     server_id: null,
     shared_backend_id: backendId,
     name: `shared-volume-${volumeId.slice(0, 8)}`,

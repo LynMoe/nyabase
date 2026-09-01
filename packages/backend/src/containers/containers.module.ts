@@ -10,6 +10,7 @@ import { AuditModule } from '../audit/audit.module.js';
 import { RuntimeModule } from '../runtime/runtime.module.js';
 import { IpPoolsModule } from '../ip-pools/ip-pools.module.js';
 import { SshModule } from '../ssh/ssh.module.js';
+import { VolumesModule } from '../volumes/volumes.module.js';
 
 @Module({
   imports: [
@@ -19,6 +20,7 @@ import { SshModule } from '../ssh/ssh.module.js';
     RuntimeModule,
     IpPoolsModule,
     forwardRef(() => SshModule),
+    forwardRef(() => VolumesModule),
   ],
   providers: [
     ContainerActionPolicyService,

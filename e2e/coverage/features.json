@@ -1,0 +1,1267 @@
+{
+  "schemaVersion": 4,
+  "architecture": {
+    "runtime": "incus",
+    "controlBoundary": "api-to-incus-https",
+    "httpPrefix": "/api",
+    "routeSource": "packages/backend/src/**/*.controller.ts",
+    "websocketSource": "packages/backend/src/main.ts",
+    "intentSource": "packages/common/src/enums.ts",
+    "forbiddenCompatibility": [
+      "legacy route aliases",
+      "in-process runtime simulators",
+      "static pass in place of live evidence",
+      "browser journeys",
+      "recovery profile"
+    ],
+    "testClient": "node-fetch-api"
+  },
+  "topology": {
+    "provider": "incus-standalone",
+    "storageFamilies": [
+      {
+        "name": "dir-quota-online",
+        "driver": "dir",
+        "resizeFamily": "quota_online",
+        "requirement": "real Incus storage pool with effective quota and online resize"
+      },
+      {
+        "name": "lvm-block-backed",
+        "driver": "lvm",
+        "resizeFamily": "block_backed",
+        "requirement": "real Incus LVM pool with block-backed volume resize"
+      },
+      {
+        "name": "cephfs-shared",
+        "driver": "cephfs",
+        "resizeFamily": "quota_online",
+        "requirement": "real CephFS pool bound to a shared backend on every Incus worker"
+      }
+    ],
+    "network": [
+      "LAN bridge parent (vmbr)",
+      "shared LAN IP pool",
+      "guest static address via reconciler",
+      "host\u2194guest L2 reachability",
+      "nft ipv4/ARP anti-spoof evidence",
+      "cleanup after bridged probe"
+    ],
+    "images": [
+      "private HTTPS simplestreams source",
+      "SSHD image without DHCP dependency",
+      "immutable image fingerprint assignment"
+    ],
+    "telemetry": [
+      "authenticated node-exporter pull",
+      "explicit outage and recovery observation"
+    ],
+    "blocked": []
+  },
+  "intentKinds": [
+    "container.create",
+    "container.update",
+    "container.power",
+    "container.delete",
+    "volume.ensure",
+    "volume.resize",
+    "volume.destroy",
+    "image_assignment.ensure",
+    "image_assignment.delete",
+    "server.connect",
+    "server.preflight",
+    "certificate.rotate"
+  ],
+  "websocketPaths": [
+    "/ws/console",
+    "/ws/ssh-proxy",
+    "/ws/http-proxy"
+  ],
+  "inventory": {
+    "controllerFileCount": 28,
+    "httpDecoratorCount": 198,
+    "httpSurfaceCount": 196,
+    "intentKindCount": 12,
+    "websocketPathCount": 3,
+    "canonicalHttpSurfaceCount": 196,
+    "maxUnmapped": 0
+  },
+  "features": [
+    {
+      "featureId": "foundation",
+      "title": "TLS edge and control-plane readiness",
+      "cases": [
+        {
+          "caseId": "foundation-health-tls",
+          "kind": "behavioral",
+          "persona": "anonymous",
+          "status": "implemented",
+          "profiles": [
+            "smoke",
+            "core",
+            "full"
+          ],
+          "httpSurfaces": [
+            "GET|/api/health/live",
+            "GET|/api/health/ready",
+            "GET|/api/public/settings"
+          ]
+        },
+        {
+          "caseId": "contract-http-inventory",
+          "kind": "static-contract",
+          "persona": "maintainer",
+          "status": "implemented",
+          "profiles": [
+            "smoke",
+            "core",
+            "full"
+          ],
+          "httpSurfaces": []
+        }
+      ]
+    },
+    {
+      "featureId": "servers-images",
+      "title": "Incus onboarding, preflight, certificate rotation, and image assignment",
+      "cases": [
+        {
+          "caseId": "server-mtls-trust-onboarding",
+          "kind": "behavioral",
+          "persona": "administrator",
+          "status": "implemented",
+          "profiles": [
+            "core",
+            "full"
+          ],
+          "httpSurfaces": [
+            "GET|/api/admin/servers/:id",
+            "GET|/api/admin/servers/:id/preflight",
+            "POST|/api/admin/servers/:id/preflight",
+            "GET|/api/admin/servers/:serverId/intents"
+          ]
+        },
+        {
+          "caseId": "server-certificate-rotation",
+          "kind": "behavioral",
+          "persona": "administrator",
+          "status": "implemented",
+          "profiles": [
+            "core",
+            "full"
+          ],
+          "httpSurfaces": [
+            "GET|/api/admin/incus-client-certificate",
+            "POST|/api/admin/incus-client-certificate/rotate",
+            "GET|/api/admin/incus-client-certificate/rotations/:id"
+          ]
+        },
+        {
+          "caseId": "image-assignment-fingerprint",
+          "kind": "behavioral",
+          "persona": "administrator",
+          "status": "implemented",
+          "profiles": [
+            "core",
+            "full"
+          ],
+          "httpSurfaces": [
+            "GET|/api/admin/images",
+            "GET|/api/admin/images/:id",
+            "GET|/api/admin/images/:id/status",
+            "GET|/api/admin/images/:id/assignments",
+            "GET|/api/admin/images/:id/assignments/status",
+            "GET|/api/admin/images/:id/intents",
+            "GET|/api/admin/images/:id/assignments/:serverId/intents",
+            "PUT|/api/admin/images/:id/assignments/:serverId",
+            "DELETE|/api/admin/images/:id/assignments/:serverId",
+            "GET|/api/images",
+            "GET|/api/images/:id"
+          ]
+        },
+        {
+          "caseId": "multi-server-management",
+          "kind": "behavioral",
+          "persona": "administrator",
+          "status": "implemented",
+          "profiles": [
+            "core",
+            "full"
+          ],
+          "httpSurfaces": []
+        }
+      ]
+    },
+    {
+      "featureId": "containers",
+      "title": "Containers, intents, Incus exec, and SSH reachability",
+      "cases": [
+        {
+          "caseId": "container-intent-exec-ssh",
+          "kind": "behavioral",
+          "persona": "administrator",
+          "status": "implemented",
+          "profiles": [
+            "core",
+            "full"
+          ],
+          "httpSurfaces": [
+            "POST|/api/admin/containers",
+            "GET|/api/admin/containers/:containerId",
+            "POST|/api/admin/containers/:containerId/actions/repair-ssh",
+            "POST|/api/admin/containers/:containerId/actions/delete",
+            "POST|/api/admin/containers/:containerId/exec-sessions",
+            "GET|/api/intents/:intentId"
+          ]
+        },
+        {
+          "caseId": "container-gpu-absent-reject",
+          "kind": "behavioral",
+          "persona": "administrator",
+          "status": "implemented",
+          "profiles": [
+            "core",
+            "full"
+          ],
+          "httpSurfaces": []
+        },
+        {
+          "caseId": "container-gpu-pci-claim",
+          "kind": "behavioral",
+          "persona": "administrator",
+          "status": "implemented",
+          "group": "30-containers",
+          "profiles": [
+            "core",
+            "full"
+          ],
+          "httpSurfaces": []
+        }
+      ]
+    },
+    {
+      "featureId": "storage",
+      "title": "Storage pools, shared backends, volumes, attach/detach, capacity, and resize",
+      "cases": [
+        {
+          "caseId": "storage-capability-families",
+          "kind": "behavioral",
+          "persona": "administrator",
+          "status": "implemented",
+          "profiles": [
+            "core",
+            "full"
+          ],
+          "httpSurfaces": [
+            "GET|/api/admin/servers/:id/storage-pools",
+            "POST|/api/admin/servers/:id/storage-pools/discover",
+            "PATCH|/api/admin/storage-pools/:id",
+            "GET|/api/servers/:serverId/storage-pools",
+            "GET|/api/admin/servers/:id/storage-capacity",
+            "GET|/api/servers/:serverId/storage-capacity",
+            "GET|/api/admin/volumes",
+            "POST|/api/admin/volumes",
+            "GET|/api/admin/volumes/:id",
+            "PATCH|/api/admin/volumes/:id",
+            "DELETE|/api/admin/volumes/:id",
+            "GET|/api/admin/intents/:intentId",
+            "GET|/api/admin/volumes/:volumeId/intents"
+          ]
+        },
+        {
+          "caseId": "storage-lvm-block-backed-shrink",
+          "kind": "behavioral",
+          "persona": "administrator",
+          "status": "implemented",
+          "profiles": [
+            "core",
+            "full"
+          ],
+          "httpSurfaces": []
+        },
+        {
+          "caseId": "local-volume-attach-detach",
+          "kind": "behavioral",
+          "persona": "administrator",
+          "status": "implemented",
+          "profiles": [
+            "core",
+            "full"
+          ],
+          "httpSurfaces": [
+            "POST|/api/admin/containers/:containerId/volumes",
+            "DELETE|/api/admin/containers/:containerId/volumes/:attachmentId"
+          ]
+        },
+        {
+          "caseId": "shared-backend-contract",
+          "kind": "behavioral",
+          "persona": "administrator",
+          "status": "implemented",
+          "profiles": [
+            "core",
+            "full"
+          ],
+          "httpSurfaces": [
+            "GET|/api/shared-backends",
+            "GET|/api/shared-backends/:id",
+            "GET|/api/admin/shared-backends",
+            "GET|/api/admin/shared-backends/:id",
+            "PATCH|/api/admin/shared-backends/:id",
+            "DELETE|/api/admin/shared-backends/:id"
+          ]
+        },
+        {
+          "caseId": "cephfs-cluster-absent",
+          "kind": "behavioral",
+          "persona": "administrator",
+          "status": "implemented",
+          "profiles": [
+            "core",
+            "full"
+          ],
+          "httpSurfaces": [
+            "POST|/api/admin/shared-backends"
+          ]
+        },
+        {
+          "caseId": "shared-cephfs-storage",
+          "kind": "behavioral",
+          "persona": "administrator",
+          "status": "implemented",
+          "profiles": [
+            "core",
+            "full"
+          ],
+          "httpSurfaces": [
+            "GET|/api/shared-volumes",
+            "POST|/api/shared-volumes",
+            "GET|/api/shared-volumes/:id",
+            "PATCH|/api/shared-volumes/:id",
+            "DELETE|/api/shared-volumes/:id",
+            "GET|/api/admin/shared-volumes",
+            "POST|/api/admin/shared-volumes",
+            "GET|/api/admin/shared-volumes/:id",
+            "GET|/api/admin/shared-volumes/:id/catalogs",
+            "PATCH|/api/admin/shared-volumes/:id",
+            "DELETE|/api/admin/shared-volumes/:id",
+            "GET|/api/admin/shared-backends/:id/catalog-inspect",
+            "GET|/api/shared-volumes/:volumeId/intents",
+            "GET|/api/admin/shared-volumes/:volumeId/intents",
+            "GET|/api/containers/:containerId/shared-volumes",
+            "POST|/api/containers/:containerId/shared-volumes",
+            "DELETE|/api/containers/:containerId/shared-volumes/:attachmentId",
+            "GET|/api/admin/containers/:containerId/shared-volumes",
+            "POST|/api/admin/containers/:containerId/shared-volumes",
+            "DELETE|/api/admin/containers/:containerId/shared-volumes/:attachmentId"
+          ]
+        },
+        {
+          "caseId": "shared-cephfs-legal-ops",
+          "kind": "behavioral",
+          "persona": "administrator",
+          "status": "implemented",
+          "group": "40-storage",
+          "profiles": [
+            "core",
+            "full"
+          ],
+          "httpSurfaces": []
+        },
+        {
+          "caseId": "shared-cephfs-concurrency",
+          "kind": "behavioral",
+          "persona": "administrator",
+          "status": "implemented",
+          "group": "40-storage",
+          "profiles": [
+            "core",
+            "full"
+          ],
+          "httpSurfaces": []
+        },
+        {
+          "caseId": "shared-cephfs-inflight-unbind",
+          "kind": "behavioral",
+          "persona": "administrator",
+          "status": "implemented",
+          "group": "40-storage",
+          "profiles": [
+            "core",
+            "full"
+          ],
+          "httpSurfaces": []
+        },
+        {
+          "caseId": "shared-cephfs-scan-no-spread",
+          "kind": "behavioral",
+          "persona": "administrator",
+          "status": "implemented",
+          "group": "40-storage",
+          "profiles": [
+            "core",
+            "full"
+          ],
+          "httpSurfaces": []
+        },
+        {
+          "caseId": "shared-cephfs-offline-delete",
+          "kind": "behavioral",
+          "persona": "administrator",
+          "status": "implemented",
+          "group": "40-storage",
+          "profiles": [
+            "core",
+            "full"
+          ],
+          "httpSurfaces": []
+        },
+        {
+          "caseId": "shared-cephfs-server-cascade",
+          "kind": "behavioral",
+          "persona": "administrator",
+          "status": "implemented",
+          "group": "40-storage",
+          "profiles": [
+            "core",
+            "full"
+          ],
+          "httpSurfaces": []
+        },
+        {
+          "caseId": "shared-cephfs-never-mounted",
+          "kind": "behavioral",
+          "persona": "administrator",
+          "status": "implemented",
+          "group": "40-storage",
+          "profiles": [
+            "core",
+            "full"
+          ],
+          "httpSurfaces": []
+        },
+        {
+          "caseId": "shared-cephfs-detach-requires-stop",
+          "kind": "behavioral",
+          "persona": "administrator",
+          "status": "implemented",
+          "group": "40-storage",
+          "profiles": [
+            "core",
+            "full"
+          ],
+          "httpSurfaces": []
+        },
+        {
+          "caseId": "shared-cephfs-quota-enforcement",
+          "kind": "behavioral",
+          "persona": "administrator",
+          "status": "implemented",
+          "group": "40-storage",
+          "profiles": [
+            "core",
+            "full"
+          ],
+          "httpSurfaces": []
+        },
+        {
+          "caseId": "shared-cephfs-resize-catalog-sync",
+          "kind": "behavioral",
+          "persona": "administrator",
+          "status": "implemented",
+          "group": "40-storage",
+          "profiles": [
+            "core",
+            "full"
+          ],
+          "httpSurfaces": []
+        },
+        {
+          "caseId": "shared-cephfs-resize-then-attach",
+          "kind": "behavioral",
+          "persona": "administrator",
+          "status": "implemented",
+          "group": "40-storage",
+          "profiles": [
+            "core",
+            "full"
+          ],
+          "httpSurfaces": []
+        },
+        {
+          "caseId": "shared-cephfs-create-with-disks",
+          "kind": "behavioral",
+          "persona": "administrator",
+          "status": "implemented",
+          "group": "40-storage",
+          "profiles": [
+            "core",
+            "full"
+          ],
+          "httpSurfaces": []
+        },
+        {
+          "caseId": "shared-cephfs-cross-server-denied",
+          "kind": "behavioral",
+          "persona": "administrator",
+          "status": "implemented",
+          "group": "40-storage",
+          "profiles": [
+            "core",
+            "full"
+          ],
+          "httpSurfaces": []
+        },
+        {
+          "caseId": "shared-cephfs-backend-unreachable",
+          "kind": "behavioral",
+          "persona": "administrator",
+          "status": "implemented",
+          "group": "40-storage",
+          "profiles": [
+            "core",
+            "full"
+          ],
+          "httpSurfaces": []
+        },
+        {
+          "caseId": "shared-cephfs-inspect-occupancy",
+          "kind": "behavioral",
+          "persona": "administrator",
+          "status": "implemented",
+          "group": "40-storage",
+          "profiles": [
+            "core",
+            "full"
+          ],
+          "httpSurfaces": []
+        },
+        {
+          "caseId": "shared-cephfs-two-containers-same-server",
+          "kind": "behavioral",
+          "persona": "administrator",
+          "status": "implemented",
+          "group": "40-storage",
+          "profiles": [
+            "core",
+            "full"
+          ],
+          "httpSurfaces": []
+        }
+      ]
+    },
+    {
+      "featureId": "access",
+      "title": "Grant lifecycle and expiry",
+      "cases": [
+        {
+          "caseId": "grant-revoke-expiry",
+          "kind": "behavioral",
+          "persona": "administrator",
+          "status": "implemented",
+          "profiles": [
+            "core",
+            "full"
+          ],
+          "httpSurfaces": [
+            "GET|/api/admin/users/:userId/server-grants",
+            "PUT|/api/admin/users/:userId/server-grants/:serverId",
+            "DELETE|/api/admin/users/:userId/server-grants/:serverId",
+            "GET|/api/admin/users/:userId/storage-pool-grants",
+            "PUT|/api/admin/users/:userId/storage-pool-grants/:poolId",
+            "DELETE|/api/admin/users/:userId/storage-pool-grants/:poolId",
+            "GET|/api/admin/users/:userId/shared-backend-grants",
+            "PUT|/api/admin/users/:userId/shared-backend-grants/:backendId",
+            "DELETE|/api/admin/users/:userId/shared-backend-grants/:backendId",
+            "GET|/api/admin/users/:userId/effective-access"
+          ]
+        },
+        {
+          "caseId": "shared-volume-grant-split",
+          "kind": "behavioral",
+          "persona": "normal-user",
+          "status": "implemented",
+          "group": "50-access",
+          "profiles": [
+            "core",
+            "full"
+          ],
+          "httpSurfaces": []
+        },
+        {
+          "caseId": "grant-expiry-enforcement-live",
+          "kind": "behavioral",
+          "persona": "grant-expired",
+          "status": "implemented",
+          "profiles": [
+            "core",
+            "full"
+          ],
+          "httpSurfaces": []
+        }
+      ]
+    },
+    {
+      "featureId": "auth-rbac",
+      "title": "Personas, unauthorized intercepts, and mutation abuse recovery",
+      "cases": [
+        {
+          "caseId": "persona-normal-user-happy-path",
+          "kind": "behavioral",
+          "persona": "normal-user",
+          "status": "implemented",
+          "profiles": [
+            "core",
+            "full"
+          ],
+          "httpSurfaces": [
+            "POST|/api/auth/login",
+            "POST|/api/auth/logout",
+            "POST|/api/admin/users",
+            "DELETE|/api/admin/users/:id",
+            "GET|/api/me/access",
+            "POST|/api/containers",
+            "GET|/api/containers/:containerId",
+            "POST|/api/containers/:containerId/actions/delete",
+            "GET|/api/containers/:containerId/intents"
+          ]
+        },
+        {
+          "caseId": "abuse-unauthorized-admin-and-user-mutations",
+          "kind": "behavioral",
+          "persona": "attacker",
+          "status": "implemented",
+          "profiles": [
+            "core",
+            "full"
+          ],
+          "httpSurfaces": []
+        },
+        {
+          "caseId": "abuse-cross-user-resource-access",
+          "kind": "behavioral",
+          "persona": "attacker",
+          "status": "implemented",
+          "profiles": [
+            "core",
+            "full"
+          ],
+          "httpSurfaces": []
+        },
+        {
+          "caseId": "quota-limited-user-compute-and-storage",
+          "kind": "behavioral",
+          "persona": "quota-limited",
+          "status": "implemented",
+          "profiles": [
+            "core",
+            "full"
+          ],
+          "httpSurfaces": []
+        },
+        {
+          "caseId": "abuse-revision-conflict-and-malformed",
+          "kind": "behavioral",
+          "persona": "attacker",
+          "status": "implemented",
+          "profiles": [
+            "core",
+            "full"
+          ],
+          "httpSurfaces": []
+        },
+        {
+          "caseId": "abuse-auth-refresh-replay-and-intent-retry",
+          "kind": "behavioral",
+          "persona": "attacker",
+          "status": "implemented",
+          "profiles": [
+            "core",
+            "full"
+          ],
+          "httpSurfaces": [
+            "POST|/api/auth/refresh",
+            "GET|/api/auth/me",
+            "POST|/api/intents/:intentId/retry"
+          ]
+        },
+        {
+          "caseId": "abuse-container-double-submit-and-reject-recovery",
+          "kind": "behavioral",
+          "persona": "normal-user",
+          "status": "implemented",
+          "profiles": [
+            "core",
+            "full"
+          ],
+          "httpSurfaces": []
+        },
+        {
+          "caseId": "user-ungranted-scope",
+          "kind": "behavioral",
+          "persona": "normal-user",
+          "status": "implemented",
+          "group": "10-auth-rbac",
+          "profiles": [
+            "core",
+            "full"
+          ],
+          "httpSurfaces": []
+        }
+      ]
+    },
+    {
+      "featureId": "user-ops",
+      "title": "Ordinary-user volume/container operations and concurrency",
+      "cases": [
+        {
+          "caseId": "user-volume-grow-success",
+          "kind": "behavioral",
+          "persona": "normal-user",
+          "status": "implemented",
+          "profiles": [
+            "core",
+            "full"
+          ],
+          "httpSurfaces": [
+            "POST|/api/volumes",
+            "GET|/api/volumes/:id",
+            "PATCH|/api/volumes/:id",
+            "GET|/api/volumes/:volumeId/intents"
+          ]
+        },
+        {
+          "caseId": "user-volume-shrink-success",
+          "kind": "behavioral",
+          "persona": "normal-user",
+          "status": "implemented",
+          "profiles": [
+            "core",
+            "full"
+          ],
+          "httpSurfaces": []
+        },
+        {
+          "caseId": "user-container-adjust-limits",
+          "kind": "behavioral",
+          "persona": "normal-user",
+          "status": "implemented",
+          "profiles": [
+            "core",
+            "full"
+          ],
+          "httpSurfaces": [
+            "PATCH|/api/containers/:containerId/limits"
+          ]
+        },
+        {
+          "caseId": "user-container-root-size-grow",
+          "kind": "behavioral",
+          "persona": "normal-user",
+          "status": "implemented",
+          "profiles": [
+            "core",
+            "full"
+          ],
+          "httpSurfaces": [
+            "PATCH|/api/containers/:containerId/root-size"
+          ]
+        },
+        {
+          "caseId": "user-volume-hot-attach-detach",
+          "kind": "behavioral",
+          "persona": "normal-user",
+          "status": "implemented",
+          "profiles": [
+            "core",
+            "full"
+          ],
+          "httpSurfaces": [
+            "GET|/api/containers/:containerId/volumes",
+            "POST|/api/containers/:containerId/volumes",
+            "DELETE|/api/containers/:containerId/volumes/:attachmentId",
+            "DELETE|/api/volumes/:id"
+          ]
+        },
+        {
+          "caseId": "user-container-power-cycle",
+          "kind": "behavioral",
+          "persona": "normal-user",
+          "status": "implemented",
+          "profiles": [
+            "core",
+            "full"
+          ],
+          "httpSurfaces": [
+            "POST|/api/containers/:containerId/actions/start",
+            "POST|/api/containers/:containerId/actions/stop",
+            "POST|/api/containers/:containerId/actions/restart",
+            "POST|/api/containers/:containerId/actions/repair-ssh"
+          ]
+        },
+        {
+          "caseId": "user-volume-attach-resize-race",
+          "kind": "behavioral",
+          "persona": "normal-user",
+          "status": "implemented",
+          "profiles": [
+            "core",
+            "full"
+          ],
+          "httpSurfaces": []
+        },
+        {
+          "caseId": "user-config-double-submit",
+          "kind": "behavioral",
+          "persona": "normal-user",
+          "status": "implemented",
+          "profiles": [
+            "core",
+            "full"
+          ],
+          "httpSurfaces": []
+        },
+        {
+          "caseId": "user-volume-readonly-attach",
+          "kind": "behavioral",
+          "persona": "normal-user",
+          "status": "implemented",
+          "group": "35-user-ops",
+          "profiles": [
+            "core",
+            "full"
+          ],
+          "httpSurfaces": []
+        },
+        {
+          "caseId": "user-create-double-submit",
+          "kind": "behavioral",
+          "persona": "normal-user",
+          "status": "implemented",
+          "profiles": [
+            "core",
+            "full"
+          ],
+          "httpSurfaces": [
+            "GET|/api/containers",
+            "GET|/api/volumes"
+          ]
+        }
+      ]
+    },
+    {
+      "featureId": "observability",
+      "title": "Authenticated metrics pull and outage recovery",
+      "cases": [
+        {
+          "caseId": "metrics-authenticated-outage",
+          "kind": "behavioral",
+          "persona": "administrator",
+          "status": "implemented",
+          "profiles": [
+            "full"
+          ],
+          "httpSurfaces": [
+            "GET|/api/admin/metrics/runtime",
+            "GET|/api/audit",
+            "GET|/api/audit/:id"
+          ]
+        }
+      ]
+    },
+    {
+      "featureId": "network",
+      "title": "Bridged LAN addressing and cleanup",
+      "cases": [
+        {
+          "caseId": "bridged-lan-cleanup",
+          "kind": "behavioral",
+          "persona": "administrator",
+          "status": "implemented",
+          "profiles": [
+            "core",
+            "full"
+          ],
+          "httpSurfaces": [
+            "GET|/api/admin/ip-pools",
+            "GET|/api/admin/ip-pools/:id",
+            "POST|/api/admin/ip-pools",
+            "PATCH|/api/admin/ip-pools/:id",
+            "DELETE|/api/admin/ip-pools/:id"
+          ]
+        }
+      ]
+    },
+    {
+      "featureId": "recovery",
+      "title": "Restart, reconcile, and clean teardown",
+      "cases": [
+        {
+          "caseId": "recovery-reconcile-cleanup",
+          "kind": "behavioral",
+          "persona": "administrator",
+          "status": "implemented",
+          "profiles": [
+            "full"
+          ],
+          "httpSurfaces": []
+        },
+        {
+          "caseId": "recovery-shared-volume-restart",
+          "kind": "behavioral",
+          "persona": "administrator",
+          "status": "implemented",
+          "group": "80-recovery",
+          "profiles": [
+            "full"
+          ],
+          "httpSurfaces": []
+        }
+      ]
+    },
+    {
+      "featureId": "cleanup",
+      "title": "Incus resource and secret cleanup",
+      "cases": [
+        {
+          "caseId": "cleanup-resource-proof",
+          "kind": "behavioral",
+          "persona": "administrator",
+          "status": "implemented",
+          "profiles": [
+            "full"
+          ],
+          "httpSurfaces": []
+        }
+      ]
+    },
+    {
+      "featureId": "iam-api",
+      "title": "Admin IAM, catalog, settings, and tokens (API only)",
+      "cases": [
+        {
+          "caseId": "iam-admin-users",
+          "kind": "behavioral",
+          "persona": "administrator",
+          "status": "implemented",
+          "group": "15-iam",
+          "profiles": [
+            "smoke",
+            "core",
+            "full"
+          ],
+          "httpSurfaces": [
+            "GET|/api/admin/users",
+            "GET|/api/admin/users/:id",
+            "PATCH|/api/admin/users/:id",
+            "GET|/api/admin/users/:id/ssh-keys",
+            "DELETE|/api/admin/users/:id/ssh-keys/:keyId"
+          ]
+        },
+        {
+          "caseId": "iam-self-user",
+          "kind": "behavioral",
+          "persona": "administrator",
+          "status": "implemented",
+          "group": "15-iam",
+          "profiles": [
+            "smoke",
+            "core",
+            "full"
+          ],
+          "httpSurfaces": [
+            "GET|/api/users/:id",
+            "PATCH|/api/users/:id",
+            "GET|/api/users/:id/ssh-keys",
+            "POST|/api/users/:id/ssh-keys",
+            "DELETE|/api/users/:id/ssh-keys/:keyId"
+          ]
+        },
+        {
+          "caseId": "iam-admin-groups",
+          "kind": "behavioral",
+          "persona": "administrator",
+          "status": "implemented",
+          "group": "15-iam",
+          "profiles": [
+            "smoke",
+            "core",
+            "full"
+          ],
+          "httpSurfaces": [
+            "GET|/api/admin/groups",
+            "POST|/api/admin/groups",
+            "GET|/api/admin/groups/:id",
+            "PATCH|/api/admin/groups/:id",
+            "DELETE|/api/admin/groups/:id",
+            "GET|/api/admin/groups/:id/members",
+            "POST|/api/admin/groups/:id/members",
+            "DELETE|/api/admin/groups/:id/members/:userId",
+            "GET|/api/admin/groups/:id/server-grants",
+            "PUT|/api/admin/groups/:id/server-grants/:serverId",
+            "DELETE|/api/admin/groups/:id/server-grants/:serverId",
+            "GET|/api/admin/groups/:id/storage-pool-grants",
+            "PUT|/api/admin/groups/:id/storage-pool-grants/:poolId",
+            "DELETE|/api/admin/groups/:id/storage-pool-grants/:poolId",
+            "GET|/api/admin/groups/:id/shared-backend-grants",
+            "PUT|/api/admin/groups/:id/shared-backend-grants/:backendId",
+            "DELETE|/api/admin/groups/:id/shared-backend-grants/:backendId"
+          ]
+        },
+        {
+          "caseId": "iam-catalog",
+          "kind": "behavioral",
+          "persona": "administrator",
+          "status": "implemented",
+          "group": "15-iam",
+          "profiles": [
+            "smoke",
+            "core",
+            "full"
+          ],
+          "httpSurfaces": [
+            "GET|/api/admin/catalog/administration-actions",
+            "GET|/api/admin/catalog/grant-servers",
+            "GET|/api/admin/catalog/groups",
+            "GET|/api/admin/catalog/metric-servers",
+            "GET|/api/admin/catalog/users"
+          ]
+        },
+        {
+          "caseId": "iam-system-settings",
+          "kind": "behavioral",
+          "persona": "administrator",
+          "status": "implemented",
+          "group": "15-iam",
+          "profiles": [
+            "smoke",
+            "core",
+            "full"
+          ],
+          "httpSurfaces": [
+            "GET|/api/admin/system-settings",
+            "PATCH|/api/admin/system-settings"
+          ]
+        },
+        {
+          "caseId": "iam-auth-tokens",
+          "kind": "behavioral",
+          "persona": "administrator",
+          "status": "implemented",
+          "group": "15-iam",
+          "profiles": [
+            "smoke",
+            "core",
+            "full"
+          ],
+          "httpSurfaces": [
+            "GET|/api/auth/tokens",
+            "POST|/api/auth/tokens",
+            "DELETE|/api/auth/tokens/:id"
+          ]
+        },
+        {
+          "caseId": "iam-purge-resources",
+          "kind": "behavioral",
+          "persona": "administrator",
+          "status": "implemented",
+          "group": "15-iam",
+          "profiles": [
+            "smoke",
+            "core",
+            "full"
+          ],
+          "httpSurfaces": [
+            "POST|/api/admin/users/:userId/servers/:serverId/purge-resources"
+          ]
+        },
+        {
+          "caseId": "admin-disable-user-blocks-login",
+          "kind": "behavioral",
+          "persona": "administrator",
+          "status": "implemented",
+          "group": "15-iam",
+          "profiles": [
+            "smoke",
+            "core",
+            "full"
+          ],
+          "httpSurfaces": []
+        },
+        {
+          "caseId": "group-capability-elevation",
+          "kind": "behavioral",
+          "persona": "administrator",
+          "status": "implemented",
+          "group": "15-iam",
+          "profiles": [
+            "smoke",
+            "core",
+            "full"
+          ],
+          "httpSurfaces": []
+        }
+      ]
+    },
+    {
+      "featureId": "servers-read-mutate",
+      "title": "User server reads and admin mutate/delete",
+      "cases": [
+        {
+          "caseId": "servers-user-read",
+          "kind": "behavioral",
+          "persona": "administrator",
+          "status": "implemented",
+          "group": "20-servers-images",
+          "profiles": [
+            "core",
+            "full"
+          ],
+          "httpSurfaces": [
+            "GET|/api/servers",
+            "GET|/api/servers/:id",
+            "GET|/api/servers/:id/gpus",
+            "GET|/api/admin/servers/:id/gpus",
+            "GET|/api/servers/:serverId/storage-pools/:id",
+            "POST|/api/admin/servers",
+            "GET|/api/admin/servers",
+            "POST|/api/admin/servers/:id/connect"
+          ]
+        },
+        {
+          "caseId": "admin-server-image-mutate",
+          "kind": "behavioral",
+          "persona": "administrator",
+          "status": "implemented",
+          "group": "20-servers-images",
+          "profiles": [
+            "core",
+            "full"
+          ],
+          "httpSurfaces": [
+            "PATCH|/api/admin/servers/:id",
+            "DELETE|/api/admin/servers/:id",
+            "POST|/api/admin/images",
+            "PATCH|/api/admin/images/:id",
+            "DELETE|/api/admin/images/:id"
+          ]
+        }
+      ]
+    },
+    {
+      "featureId": "intents-control",
+      "title": "Admin intent list and retry",
+      "cases": [
+        {
+          "caseId": "admin-intents-list-retry",
+          "kind": "behavioral",
+          "persona": "administrator",
+          "status": "implemented",
+          "group": "30-containers",
+          "profiles": [
+            "core",
+            "full"
+          ],
+          "httpSurfaces": [
+            "GET|/api/admin/intents",
+            "POST|/api/admin/intents/:intentId/retry"
+          ]
+        }
+      ]
+    },
+    {
+      "featureId": "container-api-extras",
+      "title": "Container stats, GPU patch, exec sessions",
+      "cases": [
+        {
+          "caseId": "container-stats-gpu-exec",
+          "kind": "behavioral",
+          "persona": "administrator",
+          "status": "implemented",
+          "group": "30-containers",
+          "profiles": [
+            "core",
+            "full"
+          ],
+          "httpSurfaces": [
+            "GET|/api/containers/:containerId/stats",
+            "PATCH|/api/containers/:containerId/gpu",
+            "POST|/api/containers/:containerId/exec-sessions",
+            "GET|/api/admin/containers",
+            "POST|/api/admin/containers/:containerId/actions/start",
+            "POST|/api/admin/containers/:containerId/actions/stop",
+            "POST|/api/admin/containers/:containerId/actions/restart",
+            "PATCH|/api/admin/containers/:containerId/limits",
+            "PATCH|/api/admin/containers/:containerId/root-size",
+            "PATCH|/api/admin/containers/:containerId/gpu",
+            "GET|/api/admin/containers/:containerId/volumes",
+            "GET|/api/admin/containers/:containerId/stats",
+            "GET|/api/admin/containers/:containerId/intents"
+          ]
+        }
+      ]
+    },
+    {
+      "featureId": "proxies-api",
+      "title": "HTTP and SSH proxy control-plane APIs",
+      "cases": [
+        {
+          "caseId": "http-proxy-api",
+          "kind": "behavioral",
+          "persona": "administrator",
+          "status": "implemented",
+          "group": "55-proxies",
+          "profiles": [
+            "core",
+            "full"
+          ],
+          "httpSurfaces": [
+            "GET|/api/admin/http-proxy/status",
+            "GET|/api/admin/http-proxy/bindings",
+            "GET|/api/admin/http-proxy/domain-pools",
+            "POST|/api/admin/http-proxy/domain-pools",
+            "PATCH|/api/admin/http-proxy/domain-pools/:id",
+            "DELETE|/api/admin/http-proxy/domain-pools/:id",
+            "GET|/api/http-proxy/bindings",
+            "POST|/api/http-proxy/bindings",
+            "PATCH|/api/http-proxy/bindings/:id",
+            "DELETE|/api/http-proxy/bindings/:id",
+            "GET|/api/http-proxy/domain-pools"
+          ]
+        },
+        {
+          "caseId": "user-http-proxy-own-container",
+          "kind": "behavioral",
+          "persona": "normal-user",
+          "status": "implemented",
+          "group": "55-proxies",
+          "profiles": [
+            "core",
+            "full"
+          ],
+          "httpSurfaces": []
+        },
+        {
+          "caseId": "ssh-proxy-admin",
+          "kind": "behavioral",
+          "persona": "administrator",
+          "status": "implemented",
+          "group": "55-proxies",
+          "profiles": [
+            "core",
+            "full"
+          ],
+          "httpSurfaces": [
+            "GET|/api/admin/ssh-proxy/status",
+            "GET|/api/admin/ssh-proxy/host-key",
+            "POST|/api/admin/ssh-proxy/host-key/rotate",
+            "POST|/api/admin/ssh-proxy/disconnect-all"
+          ]
+        }
+      ]
+    }
+  ],
+  "surfaceAliases": {
+    "GET|/api/admin/images/:imageId/intents": "GET|/api/admin/images/:id/intents",
+    "GET|/api/admin/images/:imageId/assignments/:serverId/intents": "GET|/api/admin/images/:id/assignments/:serverId/intents"
+  }
+}

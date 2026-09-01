@@ -35,10 +35,14 @@ function database(
               ? undefined
               : { state: currentTrustState }
             : String(table).includes('ip_pool')
-              ? { gateway: '169.254.0.1', cidr: '169.254.0.0/24' }
+              ? { gateway: '192.0.2.1', cidr: '192.0.2.0/24' }
               : selectResult,
       );
-    query.execute = vi.fn().mockResolvedValue([]);
+    query.execute = vi.fn().mockResolvedValue(
+      String(table).includes('ip_pool')
+        ? [{ gateway: '192.0.2.1', cidr: '192.0.2.0/24' }]
+        : [],
+    );
     return query;
   };
   const database: {
@@ -89,6 +93,56 @@ function database(
   return database;
 }
 
+function passingLanNetwork() {
+  return {
+    parentInterface: 'eth0',
+    isBridge: true,
+    nftAvailable: true,
+    slaves: ['bond0'],
+    ipv4Present: { eth0: true, bond0: false },
+    slavesWithIpv4: [],
+    hasUplink: true,
+    networkPrerequisites: true,
+  };
+}
+
+function lanSamples(probeAddress = '169.254.255.254') {
+  return [
+    { name: 'nyabase_node_network_is_bridge', labels: { interface: 'eth0' }, value: 1 },
+    { name: 'nyabase_node_network_ipv4_present', labels: { interface: 'eth0' }, value: 1 },
+    { name: 'nyabase_node_network_ipv4_present', labels: { interface: 'bond0' }, value: 0 },
+    {
+      name: 'nyabase_node_network_bridge_slave',
+      labels: { bridge: 'eth0', interface: 'bond0' },
+      value: 1,
+    },
+    { name: 'nyabase_node_network_nft_available', labels: {}, value: 1 },
+    {
+      name: 'nyabase_node_network_bridge_filter_address',
+      labels: { address: probeAddress },
+      value: 1,
+    },
+  ];
+}
+
+function lanClient(extra: Record<string, unknown> = {}) {
+  return {
+    getNetwork: vi.fn().mockResolvedValue({
+      metadata: { type: 'bridge', managed: false, name: 'eth0' },
+    }),
+    getNetworkState: vi.fn().mockResolvedValue({
+      metadata: {
+        addresses: [{ family: 'inet', scope: 'global', address: '192.0.2.1' }],
+        bridge: { upper_devices: ['bond0'] },
+      },
+    }),
+    listNetworks: vi.fn().mockResolvedValue({
+      metadata: ['eth0'],
+    }),
+    ...extra,
+  };
+}
+
 function server() {
   return {
     id: serverId,
@@ -122,6 +176,7 @@ function reconciler(
       checkNetworkPrerequisites: vi.fn(),
       checkGpuToolkit: vi.fn(),
       checkEgress: vi.fn(),
+      checkGuestCanReachHost: vi.fn(),
     } as never,
     trustTokens,
     {
@@ -768,6 +823,7 @@ describe('ServerPreflightReconciler', () => {
         checkNetworkPrerequisites: ReturnType<typeof vi.fn>;
         checkGpuToolkit: ReturnType<typeof vi.fn>;
         checkEgress: ReturnType<typeof vi.fn>;
+        checkGuestCanReachHost: ReturnType<typeof vi.fn>;
       };
       nodeMetrics: {
         pull: ReturnType<typeof vi.fn>;
@@ -778,16 +834,13 @@ describe('ServerPreflightReconciler', () => {
         environment: { firewall: 'nftables' },
       },
     });
-    internals.checks.checkNetworkPrerequisites.mockResolvedValue({
-      forwarding: true,
-      rpFilter: true,
-      networkPrerequisites: true,
-    });
+    internals.checks.checkNetworkPrerequisites.mockResolvedValue(passingLanNetwork());
     internals.checks.checkGpuToolkit.mockResolvedValue({ gpuRuntime: 'not_applicable' });
     internals.checks.checkEgress.mockResolvedValue({ status: 'pass' });
+    internals.checks.checkGuestCanReachHost.mockResolvedValue({ status: 'pass' });
     internals.nodeMetrics.pull.mockResolvedValue({
       status: 'online',
-      report: { samples: [] },
+      report: { samples: lanSamples() },
     });
 
     const probeName = `nyabase-preflight-${serverId.replaceAll('-', '')}`;
@@ -866,7 +919,7 @@ describe('ServerPreflightReconciler', () => {
       envelope: { type: 'sync', status_code: 200, metadata: { return: 0 } },
       metadata: { return: 0 },
     });
-    const client = {
+    const client = lanClient({
       listStoragePools: vi.fn().mockResolvedValue({
         metadata: [{ name: 'default' }],
       }),
@@ -880,7 +933,7 @@ describe('ServerPreflightReconciler', () => {
       updateInstanceState,
       deleteInstance,
       execInstance,
-    };
+    });
 
     const result = await (
       instance as unknown as {
@@ -936,11 +989,13 @@ describe('ServerPreflightReconciler', () => {
           },
           eth0: {
             type: 'nic',
-            nictype: 'macvlan',
-            mode: 'bridge',
+            nictype: 'bridged',
             name: 'eth0',
             parent: 'eth0',
             hwaddr: probeHwaddr,
+            'ipv4.address': '169.254.255.254',
+            'security.ipv4_filtering': 'true',
+            'security.mac_filtering': 'true',
           },
         },
         start: false,
@@ -963,6 +1018,14 @@ describe('ServerPreflightReconciler', () => {
     );
     expect(deleteInstance).toHaveBeenCalledWith(probeName, { signal: expect.any(AbortSignal) });
     expect(getInstanceFull).toHaveBeenCalledTimes(4);
+    expect(internals.nodeMetrics.pull).toHaveBeenCalledTimes(2);
+    expect(internals.checks.checkGuestCanReachHost).toHaveBeenCalledWith(
+      serverId,
+      expect.anything(),
+      probeName,
+      '192.0.2.1',
+      expect.any(AbortSignal),
+    );
   });
 
   it('records a retryable preflight failure as running', async () => {
@@ -1071,26 +1134,21 @@ describe('ServerPreflightReconciler', () => {
       },
     });
     const checks = internals.checks;
-    checks.checkNetworkPrerequisites.mockResolvedValue({
-      forwarding: true,
-      rpFilter: true,
-      fib: false,
-      networkPrerequisites: true,
-    });
+    checks.checkNetworkPrerequisites.mockResolvedValue(passingLanNetwork());
     checks.checkGpuToolkit.mockResolvedValue({ gpuRuntime: 'not_applicable' });
     const nodeMetrics = internals.nodeMetrics;
     nodeMetrics.pull.mockResolvedValue({
       status: 'online',
-      report: { samples: [] },
+      report: { samples: lanSamples() },
     });
-    const client = {
+    const client = lanClient({
       listStoragePools: vi.fn().mockResolvedValue({
         metadata: [{ name: 'default' }],
       }),
       getResources: vi.fn().mockResolvedValue({
         metadata: { gpu: { cards: [] }, storage: {}, system: {} },
       }),
-    };
+    });
 
     await expect(
       (
@@ -1124,7 +1182,7 @@ describe('ServerPreflightReconciler', () => {
     });
   });
 
-  it('warns and continues first preflight when node metrics pull fails', async () => {
+  it('fails closed when node metrics pull cannot prove nft availability', async () => {
     const db = database({
       incus_name: 'default',
       server_id: serverId,
@@ -1147,10 +1205,9 @@ describe('ServerPreflightReconciler', () => {
       },
     });
     internals.checks.checkNetworkPrerequisites.mockResolvedValue({
-      forwarding: false,
-      rpFilter: false,
-      fib: false,
-      networkPrerequisites: true,
+      ...passingLanNetwork(),
+      nftAvailable: false,
+      networkPrerequisites: false,
     });
     internals.checks.checkGpuToolkit.mockResolvedValue({ gpuRuntime: 'not_applicable' });
     internals.nodeMetrics.pull.mockRejectedValue(
@@ -1158,14 +1215,14 @@ describe('ServerPreflightReconciler', () => {
         reason: 'node_metrics_pull_not_online',
       }),
     );
-    const client = {
+    const client = lanClient({
       listStoragePools: vi.fn().mockResolvedValue({
         metadata: [{ name: 'default' }],
       }),
       getResources: vi.fn().mockResolvedValue({
         metadata: { gpu: { cards: [] }, storage: {}, system: {} },
       }),
-    };
+    });
 
     await expect(
       (
@@ -1196,8 +1253,154 @@ describe('ServerPreflightReconciler', () => {
       ),
     ).rejects.toMatchObject({
       code: 'PREFLIGHT_FAILED',
-      details: { reason: 'preflight_probe_options_missing' },
+      details: { reason: 'preflight_nft_unavailable' },
     });
     expect(internals.checks.checkNetworkPrerequisites).toHaveBeenCalled();
+  });
+
+  it('fails closed when no host IPv4 in a bound pool cidr can be proven', async () => {
+    const db = database({
+      incus_name: 'default',
+      server_id: serverId,
+      registered: true,
+    });
+    const instance = reconciler(db);
+    const internals = instance as unknown as {
+      connect: ReturnType<typeof vi.fn>;
+      checks: {
+        checkNetworkPrerequisites: ReturnType<typeof vi.fn>;
+        checkGpuToolkit: ReturnType<typeof vi.fn>;
+      };
+      nodeMetrics: {
+        pull: ReturnType<typeof vi.fn>;
+      };
+    };
+    internals.connect = vi.fn().mockResolvedValue({
+      metadata: { environment: { firewall: 'nftables' } },
+    });
+    internals.checks.checkNetworkPrerequisites.mockResolvedValue(passingLanNetwork());
+    internals.checks.checkGpuToolkit.mockResolvedValue({ gpuRuntime: 'not_applicable' });
+    internals.nodeMetrics.pull.mockResolvedValue({
+      status: 'online',
+      report: { samples: lanSamples() },
+    });
+    const client = lanClient({
+      listStoragePools: vi.fn().mockResolvedValue({
+        metadata: [{ name: 'default' }],
+      }),
+      getResources: vi.fn().mockResolvedValue({
+        metadata: { gpu: { cards: [] }, storage: {}, system: {} },
+      }),
+    });
+    client.getNetwork.mockRejectedValue(new IncusError('INCUS_NOT_FOUND', 'managed_failure'));
+    client.getNetworkState.mockRejectedValue(new IncusError('INCUS_NOT_FOUND', 'managed_failure'));
+    client.listNetworks.mockResolvedValue({ metadata: [] });
+
+    await expect(
+      (
+        instance as unknown as {
+          runPreflight: (
+            client: unknown,
+            server: unknown,
+            options: unknown,
+            signal: AbortSignal,
+          ) => Promise<unknown>;
+        }
+      ).runPreflight(
+        client,
+        {
+          ...server(),
+          system_pool_id: 'pool-1',
+          node_metrics_endpoint: 'https://metrics.example.test/metrics',
+          node_metrics_token_ciphertext: 'encrypted-token',
+        },
+        {
+          probeImageAlias: 'ubuntu/24.04',
+          probeImageFingerprint: '',
+          probePoolName: 'default',
+          probeAddress: '169.254.255.254',
+        },
+        new AbortController().signal,
+      ),
+    ).rejects.toMatchObject({
+      code: 'PREFLIGHT_FAILED',
+      details: { reason: 'preflight_host_ip_not_in_pool' },
+    });
+  });
+
+  it('accepts host IPv4 on a management NIC while vmbr0 is a dedicated container uplink', () => {
+    const instance = reconciler(database());
+    const result = (
+      instance as unknown as {
+        evaluateLanBridge: (input: Record<string, unknown>) => {
+          readonly reason?: string;
+          readonly hostIpv4?: string;
+        };
+      }
+    ).evaluateLanBridge({
+      parentInterface: 'vmbr0',
+      network: {
+        parentInterface: 'vmbr0',
+        isBridge: true,
+        nftAvailable: true,
+        slaves: ['eth1'],
+        ipv4Present: { eth1: false, eth0: true },
+        slavesWithIpv4: [],
+        hasUplink: true,
+        networkPrerequisites: true,
+      },
+      lookup: {
+        networkMissing: false,
+        stateMissing: false,
+        network: { type: 'bridge', managed: false, name: 'vmbr0' },
+        state: { addresses: [], bridge: { upper_devices: ['eth1'] } },
+      },
+      pools: [{ gateway: '192.0.2.1', cidr: '192.0.2.0/24', prefixLength: 24 }],
+      samples: [
+        { name: 'nyabase_node_network_is_bridge', labels: { interface: 'vmbr0' }, value: 1 },
+        { name: 'nyabase_node_network_ipv4_present', labels: { interface: 'eth1' }, value: 0 },
+        { name: 'nyabase_node_network_nft_available', labels: {}, value: 1 },
+      ],
+      extraHostAddresses: ['192.0.2.8'],
+    });
+    expect(result.reason).toBeUndefined();
+    expect(result.hostIpv4).toBe('192.0.2.8');
+  });
+
+  it('fails closed when a bridge slave has no ipv4_present sample', () => {
+    const instance = reconciler(database());
+    const result = (
+      instance as unknown as {
+        evaluateLanBridge: (input: Record<string, unknown>) => {
+          readonly reason?: string;
+          readonly hostIpv4?: string;
+        };
+      }
+    ).evaluateLanBridge({
+      parentInterface: 'vmbr0',
+      network: {
+        parentInterface: 'vmbr0',
+        isBridge: true,
+        nftAvailable: true,
+        slaves: ['eth1'],
+        ipv4Present: { eth0: true },
+        slavesWithIpv4: [],
+        hasUplink: true,
+        networkPrerequisites: true,
+      },
+      lookup: {
+        networkMissing: false,
+        stateMissing: false,
+        network: { type: 'bridge', managed: false, name: 'vmbr0' },
+        state: { addresses: [], bridge: { upper_devices: ['eth1'] } },
+      },
+      pools: [{ gateway: '192.0.2.1', cidr: '192.0.2.0/24', prefixLength: 24 }],
+      samples: [
+        { name: 'nyabase_node_network_is_bridge', labels: { interface: 'vmbr0' }, value: 1 },
+        { name: 'nyabase_node_network_nft_available', labels: {}, value: 1 },
+      ],
+      extraHostAddresses: ['192.0.2.8'],
+    });
+    expect(result).toMatchObject({ reason: 'preflight_slave_ipv4_unproven' });
   });
 });

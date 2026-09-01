@@ -29,6 +29,7 @@ import {
 } from './intent.repository.js';
 import {
   NO_PLACEMENT_SERVER_ID,
+  VOLUME_DESTROY_PLACEMENT_ID,
   ReconcileClaimRepository,
   type LeaseGuard,
   type ReconcileClaim,
@@ -511,7 +512,9 @@ export class ReconcileWorkerService implements OnModuleInit, OnModuleDestroy {
       return;
     }
     const serverId = await this.claimServerId(intent);
-    const placementServerId = intent.serverId ?? NO_PLACEMENT_SERVER_ID;
+    const placementServerId = intent.kind === 'volume.destroy'
+      ? VOLUME_DESTROY_PLACEMENT_ID
+      : (intent.serverId ?? NO_PLACEMENT_SERVER_ID);
     const claim = await this.claims.claim({
       resourceType: intent.resourceType,
       resourceId: intent.resourceId,

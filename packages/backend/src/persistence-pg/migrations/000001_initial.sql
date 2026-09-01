@@ -198,6 +198,8 @@ CREATE TABLE infra.servers (
     api_extensions text[] DEFAULT ARRAY[]::text[] NOT NULL,
     system_pool_id uuid,
     storage_overcommit_ratio numeric(6,3) DEFAULT 1.000 NOT NULL,
+    -- Unmanaged Linux bridge ifname used as Incus NIC parent (e.g. vmbr0).
+    -- Not a physical/bond NIC. nyabase never creates this device.
     parent_interface text,
     dns_servers text[] DEFAULT ARRAY[]::text[] NOT NULL,
     gpu_runtime_available boolean DEFAULT false NOT NULL,
@@ -492,7 +494,7 @@ COMMENT ON TABLE control.containers IS
 CREATE TABLE control.volumes (
     id uuid NOT NULL,
     owner_id uuid NOT NULL REFERENCES iam.users(id) ON DELETE RESTRICT,
-    pool_id uuid NOT NULL REFERENCES infra.storage_pools(id) ON DELETE RESTRICT,
+    pool_id uuid REFERENCES infra.storage_pools(id) ON DELETE SET NULL,
     server_id uuid REFERENCES infra.servers(id) ON DELETE RESTRICT,
     shared_backend_id uuid REFERENCES infra.shared_backends(id) ON DELETE RESTRICT,
     name text NOT NULL,
@@ -504,6 +506,9 @@ CREATE TABLE control.volumes (
     lifecycle_phase text DEFAULT 'provisioning'::text NOT NULL,
     needs_attention boolean DEFAULT false NOT NULL,
     failure_code text,
+    dir_ensured boolean DEFAULT false NOT NULL,
+    remove_all_committed boolean DEFAULT false NOT NULL,
+    remove_all_server_id uuid REFERENCES infra.servers(id) ON DELETE SET NULL,
     created_at timestamp with time zone DEFAULT clock_timestamp() NOT NULL,
     updated_at timestamp with time zone DEFAULT clock_timestamp() NOT NULL,
     CONSTRAINT volumes_name_check CHECK (length(btrim(name)) > 0),
@@ -516,8 +521,13 @@ CREATE TABLE control.volumes (
     CONSTRAINT volumes_lifecycle_check
         CHECK (lifecycle_phase = ANY (ARRAY['provisioning', 'active', 'deleting', 'failed'])),
     CONSTRAINT volumes_scope_check
-        CHECK ((server_id IS NOT NULL AND shared_backend_id IS NULL)
-            OR (server_id IS NULL AND shared_backend_id IS NOT NULL)),
+        CHECK ((server_id IS NOT NULL AND shared_backend_id IS NULL AND pool_id IS NOT NULL)
+            OR (server_id IS NULL AND shared_backend_id IS NOT NULL AND pool_id IS NULL)),
+    CONSTRAINT volumes_remove_all_shape_check
+        CHECK ((lifecycle_phase <> 'deleting'
+            AND NOT remove_all_committed
+            AND remove_all_server_id IS NULL)
+            OR lifecycle_phase = 'deleting'),
     CONSTRAINT volumes_failure_shape_check
         CHECK (lifecycle_phase <> 'failed' OR failure_code IS NOT NULL),
     PRIMARY KEY (id)
@@ -530,47 +540,36 @@ CREATE TABLE control.volume_attachments (
     device_name text NOT NULL,
     container_path text NOT NULL,
     read_only boolean DEFAULT false NOT NULL,
-    detach_drained_at timestamp with time zone,
+    bind_state text DEFAULT 'attaching'::text NOT NULL,
     created_at timestamp with time zone DEFAULT clock_timestamp() NOT NULL,
     updated_at timestamp with time zone DEFAULT clock_timestamp() NOT NULL,
     CONSTRAINT volume_attachments_path_check
         CHECK (container_path ~~ '/%' AND container_path <> '/' AND container_path !~ '[\000\r\n]'),
     CONSTRAINT volume_attachments_device_name_check
         CHECK (device_name ~ '^nyd-[0-9a-f]{32}$'),
-    CONSTRAINT volume_attachments_drain_check
-        CHECK (detach_drained_at IS NULL OR detach_drained_at >= created_at)
+    CONSTRAINT volume_attachments_bind_state_check
+        CHECK (bind_state = ANY (ARRAY['attaching', 'attached', 'detaching']))
 );
 
-CREATE TABLE control.volume_detach_drains (
-    volume_id uuid NOT NULL REFERENCES control.volumes(id) ON DELETE CASCADE,
-    drained_at timestamp with time zone NOT NULL,
-    created_at timestamp with time zone DEFAULT clock_timestamp() NOT NULL,
-    PRIMARY KEY (volume_id),
-    CONSTRAINT volume_detach_drains_time_check
-        CHECK (drained_at >= created_at)
-);
-
--- Per-Incus catalog for a logical volume. Shared CephFS catalogs are grow-only
--- until logical delete; home is volumes.pool_id's server.
+-- Per-Incus catalog registration for a logical volume. Nodes are equal; catalog
+-- rows stick until volume destroy or control-plane server delete.
 CREATE TABLE control.volume_placements (
     volume_id uuid NOT NULL REFERENCES control.volumes(id) ON DELETE CASCADE,
     server_id uuid NOT NULL REFERENCES infra.servers(id) ON DELETE RESTRICT,
     pool_id uuid NOT NULL REFERENCES infra.storage_pools(id) ON DELETE RESTRICT,
-    desired_present boolean NOT NULL,
-    observed_present boolean DEFAULT false NOT NULL,
+    catalog_state text NOT NULL,
     observed_generation integer,
-    unused_confirmed_at timestamp with time zone,
     created_at timestamp with time zone DEFAULT clock_timestamp() NOT NULL,
     updated_at timestamp with time zone DEFAULT clock_timestamp() NOT NULL,
     PRIMARY KEY (volume_id, server_id),
+    CONSTRAINT volume_placements_state_check
+        CHECK (catalog_state = ANY (ARRAY['ensuring', 'present'])),
     CONSTRAINT volume_placements_observed_generation_check
         CHECK (observed_generation IS NULL OR observed_generation > 0)
 );
 
 COMMENT ON TABLE control.volume_placements IS
-  'desired_present is the only authority for volume catalog reconcile/scan';
-COMMENT ON COLUMN control.volume_placements.unused_confirmed_at IS
-  'Set when this catalog reported empty used_by during logical delete';
+  'Equal-node Incus catalog tracking; destroy phase lives on control.volumes';
 
 CREATE TABLE control.container_network_claims (
     id uuid NOT NULL,
@@ -691,7 +690,7 @@ CREATE TABLE control.intents (
     failure_json jsonb,
     attempt_count integer DEFAULT 0 NOT NULL,
     next_attempt_at timestamp with time zone,
-    blocked_by_intent_id uuid REFERENCES control.intents(id) ON DELETE SET NULL,
+    blocked_by_intent_id uuid,
     created_at timestamp with time zone DEFAULT clock_timestamp() NOT NULL,
     settled_at timestamp with time zone,
     CONSTRAINT intents_kind_check
@@ -702,6 +701,7 @@ CREATE TABLE control.intents (
             'container.delete',
             'volume.ensure',
             'volume.resize',
+            'volume.destroy',
             'image_assignment.ensure',
             'image_assignment.delete',
             'server.connect',
@@ -723,8 +723,11 @@ CREATE TABLE control.intents (
             OR (kind LIKE 'server.%' AND resource_type = 'server')
             OR (kind = 'certificate.rotate' AND resource_type = 'certificate_rotation')),
     CONSTRAINT intents_resource_shape_check
-        CHECK ((resource_type IN ('container', 'volume', 'image_assignment', 'server')
+        CHECK ((resource_type IN ('container', 'image_assignment', 'server')
                 AND server_id IS NOT NULL)
+            OR (resource_type = 'volume' AND kind IN ('volume.ensure', 'volume.resize')
+                AND server_id IS NOT NULL)
+            OR (resource_type = 'volume' AND kind = 'volume.destroy' AND server_id IS NULL)
             OR (resource_type = 'certificate_rotation' AND server_id IS NULL)),
     CONSTRAINT intents_blocked_by_check
         CHECK (blocked_by_intent_id IS NULL OR blocked_by_intent_id <> id),
@@ -772,14 +775,18 @@ CREATE TABLE control.reconcile_claims (
             (placement_server_id = '00000000-0000-4000-8000-000000000000'
                 AND server_id IS NULL
                 AND resource_type = 'certificate_rotation')
+            OR (placement_server_id = '00000000-0000-4000-8000-000000000001'
+                AND server_id IS NULL
+                AND resource_type = 'volume')
             OR (placement_server_id <> '00000000-0000-4000-8000-000000000000'
+                AND placement_server_id <> '00000000-0000-4000-8000-000000000001'
                 AND server_id = placement_server_id)
         ),
     PRIMARY KEY (resource_type, resource_id, placement_server_id)
 );
 
 COMMENT ON COLUMN control.reconcile_claims.placement_server_id IS
-  'Incus catalog/server for the claim; certificate_rotation uses sentinel 00000000-0000-4000-8000-000000000000';
+  'Incus catalog/server for the claim; certificate_rotation uses …0000, volume.destroy uses …0001';
 
 CREATE TABLE system.settings (
     singleton boolean DEFAULT true NOT NULL,
@@ -1004,6 +1011,8 @@ ALTER TABLE control.authorization_dependencies ADD CONSTRAINT authorization_depe
 ALTER TABLE control.grant_expiry_enforcement ADD CONSTRAINT grant_expiry_enforcement_pkey
     PRIMARY KEY (user_id, server_id, covering_expires_at);
 ALTER TABLE control.intents ADD CONSTRAINT intents_pkey PRIMARY KEY (id);
+ALTER TABLE control.intents ADD CONSTRAINT intents_blocked_by_intent_id_fkey
+    FOREIGN KEY (blocked_by_intent_id) REFERENCES control.intents(id) ON DELETE SET NULL;
 
 ALTER TABLE system.settings ADD CONSTRAINT settings_pkey PRIMARY KEY (singleton);
 ALTER TABLE interaction.http_domain_pools ADD CONSTRAINT http_domain_pools_wildcard_domain_key
@@ -1088,6 +1097,8 @@ CREATE INDEX volumes_shared_backend_fk_idx ON control.volumes (shared_backend_id
 CREATE INDEX volumes_shared_backend_idx
     ON control.volumes (shared_backend_id, lifecycle_phase, id)
     WHERE shared_backend_id IS NOT NULL;
+CREATE INDEX volumes_remove_all_server_fk_idx
+    ON control.volumes (remove_all_server_id);
 CREATE INDEX volume_attachments_container_idx
     ON control.volume_attachments (container_id, id);
 CREATE INDEX volume_attachments_volume_idx
@@ -1096,12 +1107,10 @@ CREATE UNIQUE INDEX volume_attachments_path_unique
     ON control.volume_attachments (container_id, container_path);
 CREATE UNIQUE INDEX volume_attachments_pair_unique
     ON control.volume_attachments (container_id, volume_id);
-CREATE INDEX volume_detach_drains_expiry_idx
-    ON control.volume_detach_drains (drained_at, volume_id);
 CREATE INDEX volume_placements_server_idx
-    ON control.volume_placements (server_id, desired_present);
-CREATE INDEX volume_placements_volume_desired_idx
-    ON control.volume_placements (volume_id) WHERE desired_present;
+    ON control.volume_placements (server_id, catalog_state);
+CREATE INDEX volume_placements_volume_idx
+    ON control.volume_placements (volume_id);
 CREATE INDEX volume_placements_pool_fk_idx
     ON control.volume_placements (pool_id);
 CREATE INDEX container_network_claims_reusable_idx
@@ -1153,8 +1162,7 @@ CREATE INDEX intents_pending_resource_idx
     ON control.intents (resource_type, resource_id, target_generation, created_at ASC, id ASC)
     WHERE status = 'pending';
 CREATE INDEX intents_blocked_by_idx
-    ON control.intents (blocked_by_intent_id)
-    WHERE blocked_by_intent_id IS NOT NULL;
+    ON control.intents (blocked_by_intent_id);
 CREATE INDEX intents_history_idx
     ON control.intents (resource_type, resource_id, created_at DESC, id DESC);
 CREATE INDEX intents_server_idx
@@ -1562,13 +1570,15 @@ CREATE FUNCTION control.assert_volume_pool_scope() RETURNS trigger
     AS $$
 DECLARE
   pool_server_id uuid;
-  pool_driver text;
-  pool_shareable boolean;
   pool_backend_id uuid;
   pool_registered boolean;
 BEGIN
-  SELECT server_id, driver, shareable, shared_backend_id, registered
-  INTO pool_server_id, pool_driver, pool_shareable, pool_backend_id, pool_registered
+  IF NEW.pool_id IS NULL THEN
+    RETURN NEW;
+  END IF;
+
+  SELECT server_id, shared_backend_id, registered
+  INTO pool_server_id, pool_backend_id, pool_registered
   FROM infra.storage_pools
   WHERE id = NEW.pool_id;
 
@@ -1580,13 +1590,6 @@ BEGIN
       RAISE EXCEPTION 'local volume pool must belong to its volume server'
         USING ERRCODE = '23514', CONSTRAINT = 'volumes_local_pool_scope';
     END IF;
-  ELSIF pool_driver IS DISTINCT FROM 'cephfs'
-    OR NOT COALESCE(pool_shareable, false)
-    OR pool_backend_id IS DISTINCT FROM NEW.shared_backend_id
-    OR NOT COALESCE(pool_registered, false)
-  THEN
-    RAISE EXCEPTION 'shared volume must use a shareable cephfs anchor pool'
-      USING ERRCODE = '23514', CONSTRAINT = 'volumes_shared_pool_scope';
   END IF;
   RETURN NEW;
 END;

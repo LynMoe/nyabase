@@ -7,7 +7,15 @@ import {
   type ServerGrantGpu,
 } from '@nyabase/common';
 import { api } from '../../lib/api.js';
-import { Label } from '../ui/label.js';
+import { Checkbox } from '../ui/checkbox.js';
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '../ui/select.js';
+import { FormField } from '../layout/form-field.js';
 import { queryKeys } from '../../lib/query-keys.js';
 
 export type GpuPickerMode = 'none' | 'all' | 'specific';
@@ -88,6 +96,7 @@ export function GpuPicker({
   disabled = false,
   showModeSelect = true,
   idPrefix = 'gpu',
+  label = 'GPU',
 }: {
   serverId: string;
   admin?: boolean;
@@ -100,6 +109,7 @@ export function GpuPicker({
   disabled?: boolean;
   showModeSelect?: boolean;
   idPrefix?: string;
+  label?: string;
 }) {
   const gpusQuery = useServerGpus(serverId, admin, Boolean(serverId));
   const inventory = gpusQuery.data?.items ?? [];
@@ -117,26 +127,28 @@ export function GpuPicker({
   return (
     <div className="space-y-2" data-testid="gpu-picker">
       {showModeSelect && (
-        <div className="space-y-1.5">
-          <Label htmlFor={`${idPrefix}-mode`}>GPU</Label>
-          <select
-            id={`${idPrefix}-mode`}
-            className="h-10 w-full rounded-md border border-input bg-background px-3 text-sm"
+        <FormField id={`${idPrefix}-mode`} label={label}>
+          <Select
             value={mode}
             disabled={disabled || !serverId}
-            onChange={(event) => {
-              const next = event.target.value as GpuPickerMode;
+            onValueChange={(value) => {
+              const next = value as GpuPickerMode;
               onModeChange(next);
               if (next === 'none') onChange([]);
               else if (next === 'all') onChange(available.map((gpu) => gpu.pciAddress));
               else if (mode === 'all') onChange([]);
             }}
           >
-            {modeOptions.map(([optionValue, optionLabel]) => (
-              <option key={optionValue} value={optionValue}>{optionLabel}</option>
-            ))}
-          </select>
-        </div>
+            <SelectTrigger id={`${idPrefix}-mode`}>
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              {modeOptions.map(([optionValue, optionLabel]) => (
+                <SelectItem key={optionValue} value={optionValue}>{optionLabel}</SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </FormField>
       )}
 
       {!serverId && (
@@ -166,14 +178,13 @@ export function GpuPicker({
             {available.map((gpu) => {
               const checked = value.some((pci) => normalizePci(pci) === normalizePci(gpu.pciAddress));
               return (
-                <label key={gpu.pciAddress} className="flex items-start gap-2 text-sm">
-                  <input
-                    type="checkbox"
-                    className="mt-1"
+                <label key={gpu.pciAddress} className="flex items-center gap-2 text-sm">
+                  <Checkbox
+                    id={`${idPrefix}-${gpu.pciAddress}`}
                     checked={checked}
                     disabled={disabled}
-                    onChange={(event) => {
-                      if (event.target.checked) {
+                    onCheckedChange={(nextChecked) => {
+                      if (nextChecked === true) {
                         onChange([
                           ...value.filter((pci) => normalizePci(pci) !== normalizePci(gpu.pciAddress)),
                           gpu.pciAddress,

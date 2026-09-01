@@ -18,11 +18,17 @@ source "$TOKEN_FILE"
 set +a
 unset E2E_RUN_ID E2E_RUNTIME_ROOT E2E_SEED_STATE E2E_CAPABILITIES || true
 
-# Shared DB keeps a single SSHD image alias; seed requires the DB name to match this run.
+# Shared DB keeps a single SSHD image alias and primary Incus server;
+# seed requires those identities to match this run.
 if [[ -n "${E2E_DATABASE_URL:-}" && -n "${E2E_INCUS_IMAGE_ALIAS:-}" ]]; then
   echo "=== ALIGN IMAGE NAME for $RUN_ID ==="
   psql "$E2E_DATABASE_URL" -v ON_ERROR_STOP=1 -c \
     "UPDATE infra.images SET name = 'e2e-${RUN_ID}-sshd', updated_at = clock_timestamp() WHERE alias = '${E2E_INCUS_IMAGE_ALIAS}';"
+fi
+if [[ -n "${E2E_DATABASE_URL:-}" && -n "${E2E_INCUS_API_ENDPOINT:-}" ]]; then
+  echo "=== ALIGN SERVER SLUG for $RUN_ID ==="
+  psql "$E2E_DATABASE_URL" -v ON_ERROR_STOP=1 -c \
+    "UPDATE infra.servers SET slug = 'e2e-${RUN_ID}', updated_at = clock_timestamp() WHERE api_endpoint = '${E2E_INCUS_API_ENDPOINT}';"
 fi
 
 # Drop stale control-plane / ssh-proxy listeners from prior interrupted runs.
@@ -50,7 +56,17 @@ set -a
 source "$RT/context.env"
 set +a
 
-# Peer Incus can drift off the active CP client cert; re-admit it before Playwright.
+# Peer Incus can drift off the active CP client cert; re-admit it before the API run.
+if [[ -z "${E2E_GPU_PEER_SERVER_ID:-}" && -f "$RT/seed-state.json" ]]; then
+  E2E_GPU_PEER_SERVER_ID="$(python3 - <<PY
+import json
+from pathlib import Path
+data = json.loads(Path("$RT/seed-state.json").read_text())
+print((data.get("gpuServer") or {}).get("id") or "")
+PY
+)"
+  export E2E_GPU_PEER_SERVER_ID
+fi
 if [[ -n "${E2E_DATABASE_URL:-}" && -n "${E2E_INCUS_KEY_ENCRYPTION_SECRET:-}" && -n "${E2E_GPU_PEER_SERVER_ID:-}" ]]; then
   echo "=== PEER RETRUST $(date -u +%FT%TZ) ==="
   python3 "$ROOT/e2e/orchestrator/peer-retrust-active.py" \
@@ -60,14 +76,11 @@ if [[ -n "${E2E_DATABASE_URL:-}" && -n "${E2E_INCUS_KEY_ENCRYPTION_SECRET:-}" &&
     || echo "WARN: peer retrust failed; cert rotation may hang"
 fi
 
-echo "=== SSH PROXY MACVLAN REACHABILITY $(date -u +%FT%TZ) ==="
-REACHABILITY_ENV="$RT/ssh-proxy-reachability.env"
-bash "$ROOT/e2e/orchestrator/ssh-proxy-macvlan-reachability.sh" | tee "$REACHABILITY_ENV"
-# shellcheck disable=SC1090
-set -a; source <(grep -E '^E2E_SSH_PROXY_' "$REACHABILITY_ENV"); set +a
-: "${E2E_SSH_PROXY_HOST:?missing E2E_SSH_PROXY_HOST from reachability}"
-: "${E2E_SSH_PROXY_BACKEND_WS:?missing E2E_SSH_PROXY_BACKEND_WS from reachability}"
-: "${E2E_SSH_PROXY_NETNS:?missing E2E_SSH_PROXY_NETNS from reachability}"
+echo "=== SSH PROXY ON INCUS HOST $(date -u +%FT%TZ) ==="
+# After the vmbr cutover the Incus host can TCP to guest :22.
+E2E_SSH_PROXY_HOST="${E2E_SSH_PROXY_HOST:-127.0.0.1}"
+E2E_SSH_PROXY_BACKEND_WS="${E2E_SSH_PROXY_BACKEND_WS:-ws://127.0.0.1:3001/ws/ssh-proxy}"
+export E2E_SSH_PROXY_HOST E2E_SSH_PROXY_BACKEND_WS
 
 # Prefer ssh.proxyToken — a bare proxyToken match hits http.proxyToken first.
 TOKEN="$(python3 - <<PY
@@ -88,22 +101,16 @@ for _port in 2222; do
     kill "$pid" 2>/dev/null || true
   done < <(ss -lntp "sport = :${_port}" 2>/dev/null | sed -n "s/.*pid=\([0-9]\+\).*/\1/p" | sort -u)
 done
-# Also clear any proxy left inside the reachability netns.
-ip netns pids "$E2E_SSH_PROXY_NETNS" 2>/dev/null | while read -r pid; do
-  kill "$pid" 2>/dev/null || true
-done
 sleep 1
-PROXY_PID="$(ip netns exec "$E2E_SSH_PROXY_NETNS" bash -c "
-  nohup env \
-    RUST_LOG='${RUST_LOG:-info}' \
-    NYABASE_BACKEND_WS='$E2E_SSH_PROXY_BACKEND_WS' \
-    NYABASE_SSH_LISTEN=0.0.0.0:2222 \
-    SSH_PROXY_TOKEN='$TOKEN' \
-    NYABASE_SSH_PROXY_ID='e2e-${RUN_ID}-ssh-proxy' \
-    '$ROOT/tools/ssh-proxy/target/release/nyabase-ssh-proxy' \
-    >'$RT/ssh-proxy.log' 2>&1 &
-  echo \$!
-")"
+nohup env \
+  RUST_LOG="${RUST_LOG:-info}" \
+  NYABASE_BACKEND_WS="$E2E_SSH_PROXY_BACKEND_WS" \
+  NYABASE_SSH_LISTEN=0.0.0.0:2222 \
+  SSH_PROXY_TOKEN="$TOKEN" \
+  NYABASE_SSH_PROXY_ID="e2e-${RUN_ID}-ssh-proxy" \
+  "$ROOT/tools/ssh-proxy/target/release/nyabase-ssh-proxy" \
+  >"$RT/ssh-proxy.log" 2>&1 &
+PROXY_PID="$!"
 echo "$PROXY_PID" >"$RT/ssh-proxy.pid"
 # Wait until the proxy has an installed routing snapshot from the control plane.
 for _i in $(seq 1 30); do

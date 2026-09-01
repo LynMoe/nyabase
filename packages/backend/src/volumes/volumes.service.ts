@@ -5,6 +5,7 @@ import {
   Inject,
   Injectable,
   NotFoundException,
+  Optional,
 } from '@nestjs/common';
 import { randomUUID } from 'node:crypto';
 import { sql, type Kysely, type Transaction } from 'kysely';
@@ -14,11 +15,17 @@ import {
   IntentKind,
   IntentResourceType,
   StoragePoolResizeFamily,
+  type AttachVolumeRequest,
+  type CreateSharedVolumeRequest,
+  type LocalVolumeScope,
+  type SharedBackendCatalogInspectDto,
+  type SharedVolumeCatalogInspectDto,
+  type SharedVolumeDto,
+  type SharedVolumeScope,
   type StorageCapacityDto,
   type VolumeAttachmentDto,
   type VolumeAttachmentSummaryDto,
   type VolumeDto,
-  type VolumeScope,
   type IntentAcceptedDto,
 } from '@nyabase/common';
 import { PG_DATABASE } from '../persistence-pg/tokens.js';
@@ -30,9 +37,16 @@ import { acceptedIntent, isoDate, lifecyclePhase, numberValue, deterministicName
 import { StoragePoolsRepository } from '../storage-pools/storage-pools.repository.js';
 import { storagePoolCapability } from '../storage-pools/storage-pools.service.js';
 import { VolumesRepository, type VolumeExecutor } from './volumes.repository.js';
-import { placementServersToDesire } from './volume-placement.js';
 import { AuditService } from '../audit/audit.service.js';
 import { classifyGrantExpiry, expiresAtSortKey } from '../access/grant-expiry.js';
+import { NyabaseConfigService } from '../config/nyabase-config.service.js';
+import { listEligibleDestroyExecutors } from './eligible-destroy-executors.js';
+import { occupancyForCatalogItem } from './shared-volume-inspect.js';
+import {
+  INCUS_CLIENT_FACTORY,
+  type IncusClientFactory,
+} from '../runtime/reconcile-worker.service.js';
+import { IncusError } from '../incus/index.js';
 
 type GrantRow = {
   disk_bytes: string | number | null;
@@ -46,7 +60,7 @@ type GrantRow = {
 type VolumeRow = {
   id: string;
   owner_id: string;
-  pool_id: string;
+  pool_id: string | null;
   server_id: string | null;
   shared_backend_id: string | null;
   name: string;
@@ -58,9 +72,16 @@ type VolumeRow = {
   lifecycle_phase: string;
   needs_attention: boolean;
   failure_code: string | null;
+  dir_ensured: boolean;
   created_at: Date | string;
   updated_at: Date | string;
 };
+
+export function isIntentAccepted(
+  result: VolumeDto | SharedVolumeDto | IntentAcceptedDto,
+): result is IntentAcceptedDto {
+  return 'intentId' in result;
+}
 
 type SharedGrantRow = {
   limit_bytes: string | number | bigint;
@@ -224,33 +245,73 @@ export class VolumesService {
     private readonly wake: ReconcileWakeService,
     @Inject(PG_DATABASE) private readonly database: Kysely<NyabaseDatabase>,
     private readonly audit: AuditService,
+    @Optional() private readonly config?: NyabaseConfigService,
+    @Optional() @Inject(INCUS_CLIENT_FACTORY) private readonly clients?: IncusClientFactory,
   ) {}
 
+  private async lockVolumeQuota(
+    volume: { server_id: string | null; pool_id: string | null; shared_backend_id: string | null },
+    transaction: Transaction<NyabaseDatabase>,
+  ): Promise<void> {
+    if (volume.server_id !== null) {
+      if (!volume.pool_id) throw new ConflictException({ code: FailureCode.InvalidInput });
+      await this.pools.lockCapacityScope(volume.pool_id, volume.server_id, [], transaction);
+      return;
+    }
+    await this.pools.lockSharedBackends([volume.shared_backend_id], transaction);
+  }
+
   async listForUser(ownerId: string): Promise<VolumeDto[]> {
-    const rows = await this.repository.list(ownerId);
+    const rows = await this.repository.listByKind('local', ownerId);
     return this.toDtos(rows);
   }
 
   async listForAdmin(): Promise<VolumeDto[]> {
-    const rows = await this.repository.list();
+    const rows = await this.repository.listByKind('local');
     return this.toDtos(rows);
+  }
+
+  async listSharedForUser(ownerId: string, attachableOnServerId?: string): Promise<SharedVolumeDto[]> {
+    const rows = await this.repository.listByKind('shared', ownerId);
+    const filtered = attachableOnServerId
+      ? await this.filterAttachableShared(rows, attachableOnServerId)
+      : rows;
+    return this.toSharedDtos(filtered);
+  }
+
+  async listSharedForAdmin(attachableOnServerId?: string): Promise<SharedVolumeDto[]> {
+    const rows = await this.repository.listByKind('shared');
+    const filtered = attachableOnServerId
+      ? await this.filterAttachableShared(rows, attachableOnServerId)
+      : rows;
+    return this.toSharedDtos(filtered);
   }
 
   async getForUser(id: string, actorId: string): Promise<VolumeDto> {
     const row = await this.repository.findById(id);
-    if (!row || row.owner_id !== actorId) {
-      throw new NotFoundException('Volume not found');
-    }
-    const [dto] = await this.toDtos([row]);
+    this.requireLocal(row, actorId, 'user');
+    const [dto] = await this.toDtos([row!]);
     return dto!;
   }
 
   async getForAdmin(id: string): Promise<VolumeDto> {
     const row = await this.repository.findById(id);
-    if (!row) {
-      throw new NotFoundException('Volume not found');
-    }
-    const [dto] = await this.toDtos([row]);
+    this.requireLocal(row, undefined, 'admin');
+    const [dto] = await this.toDtos([row!]);
+    return dto!;
+  }
+
+  async getSharedForUser(id: string, actorId: string): Promise<SharedVolumeDto> {
+    const row = await this.repository.findById(id);
+    this.requireShared(row, actorId, 'user');
+    const [dto] = await this.toSharedDtos([row!]);
+    return dto!;
+  }
+
+  async getSharedForAdmin(id: string): Promise<SharedVolumeDto> {
+    const row = await this.repository.findById(id);
+    this.requireShared(row, undefined, 'admin');
+    const [dto] = await this.toSharedDtos([row!]);
     return dto!;
   }
 
@@ -345,13 +406,19 @@ export class VolumesService {
       ownerId?: string;
       name: string;
       sizeBytes: number;
-      scope: VolumeScope;
+      scope: LocalVolumeScope;
     },
   ): Promise<IntentAcceptedDto> {
     if (input.ownerId) {
       throw new BadRequestException({
         code: FailureCode.InvalidInput,
         message: 'User volume creation cannot specify ownerId',
+      });
+    }
+    if (input.scope.kind !== 'local') {
+      throw new BadRequestException({
+        code: FailureCode.InvalidInput,
+        message: 'Shared volumes must be created via /shared-volumes',
       });
     }
     return this.createVolume(actorId, actorId, input, 'user');
@@ -363,13 +430,121 @@ export class VolumesService {
       ownerId: string;
       name: string;
       sizeBytes: number;
-      scope: VolumeScope;
+      scope: LocalVolumeScope;
     },
   ): Promise<IntentAcceptedDto> {
     if (!input.ownerId) {
       throw new BadRequestException('Admin volume creation requires ownerId');
     }
+    if (input.scope.kind !== 'local') {
+      throw new BadRequestException({
+        code: FailureCode.InvalidInput,
+        message: 'Shared volumes must be created via /shared-volumes',
+      });
+    }
     return this.createVolume(actorId, input.ownerId, input, 'admin');
+  }
+
+  async createSharedForUser(
+    actorId: string,
+    input: CreateSharedVolumeRequest,
+  ): Promise<SharedVolumeDto> {
+    if (input.ownerId) {
+      throw new BadRequestException({
+        code: FailureCode.InvalidInput,
+        message: 'User volume creation cannot specify ownerId',
+      });
+    }
+    return this.createSharedVolume(actorId, actorId, input, 'user');
+  }
+
+  async createSharedForAdmin(
+    actorId: string,
+    input: CreateSharedVolumeRequest & { ownerId: string },
+  ): Promise<SharedVolumeDto> {
+    if (!input.ownerId) {
+      throw new BadRequestException('Admin volume creation requires ownerId');
+    }
+    return this.createSharedVolume(actorId, input.ownerId, input, 'admin');
+  }
+
+  private async createSharedVolume(
+    actorId: string,
+    ownerId: string,
+    input: {
+      name: string;
+      sizeBytes: number;
+      scope: SharedVolumeScope;
+    },
+    access: 'user' | 'admin',
+  ): Promise<SharedVolumeDto> {
+    if (!Number.isSafeInteger(input.sizeBytes) || input.sizeBytes <= 0) {
+      throw new BadRequestException({
+        code: FailureCode.InvalidInput,
+        message: 'Volume size must be a positive safe integer',
+      });
+    }
+    const id = randomUUID();
+    const incusName = deterministicName('nyv', id);
+    let row: VolumeRow;
+    try {
+      row = await this.transactions.run(
+        async (transaction) => {
+          if (access === 'user') {
+            await this.assertSharedGrant(ownerId, input.scope.sharedBackendId, transaction);
+          }
+          await this.pools.lockSharedBackends([input.scope.sharedBackendId], transaction);
+          await this.assertSharedCreateHealth(input.scope.sharedBackendId, transaction);
+          if (access === 'admin') {
+            await this.assertSharedCapacityForDeltaForAdmin(
+              transaction,
+              input.scope.sharedBackendId,
+              input.sizeBytes,
+            );
+          } else {
+            await this.assertSharedCapacityForDeltaForUser(
+              transaction,
+              ownerId,
+              input.scope.sharedBackendId,
+              input.sizeBytes,
+            );
+          }
+          const created = await this.repository.insert({
+            id,
+            ownerId,
+            poolId: null,
+            serverId: null,
+            sharedBackendId: input.scope.sharedBackendId,
+            name: input.name,
+            incusName,
+            sizeBytes: input.sizeBytes,
+            lifecyclePhase: 'active',
+            dirEnsured: false,
+          }, transaction);
+          await this.audit.append(
+            transaction,
+            actorId,
+            AuditAction.CreateVolume,
+            created.id,
+            'volume',
+            { sizeBytes: input.sizeBytes, scope: input.scope },
+          );
+          return created;
+        },
+        { isolationLevel: 'serializable', maxAttempts: 5 },
+      );
+    } catch (error) {
+      if (isUniqueViolation(error)) {
+        throw new ConflictException({
+          code: FailureCode.InvalidInput,
+          message: 'A volume with this name already exists in the storage scope',
+          details: { name: input.name },
+        });
+      }
+      throw error;
+    }
+    const [dto] = await this.toSharedDtos([row]);
+    return dto!;
   }
 
   private async createVolume(
@@ -378,7 +553,7 @@ export class VolumesService {
     input: {
       name: string;
       sizeBytes: number;
-      scope: VolumeScope;
+      scope: LocalVolumeScope;
     },
     access: 'user' | 'admin',
   ): Promise<IntentAcceptedDto> {
@@ -429,7 +604,7 @@ export class VolumesService {
             volumeId: row.id,
             serverId: scope.anchorServerId,
             poolId: scope.poolId,
-            desiredPresent: true,
+            catalogState: 'ensuring',
           }, transaction);
           const intent = await this.intents.createPending({
             kind: IntentKind.VolumeEnsure,
@@ -491,6 +666,22 @@ export class VolumesService {
     return this.patchVolume(actorId, id, input, 'admin');
   }
 
+  async patchSharedForUser(
+    actorId: string,
+    id: string,
+    input: { expectedRevision: number; name?: string; sizeBytes?: number },
+  ): Promise<SharedVolumeDto | IntentAcceptedDto> {
+    return this.patchSharedVolume(actorId, id, input, 'user');
+  }
+
+  async patchSharedForAdmin(
+    actorId: string,
+    id: string,
+    input: { expectedRevision: number; name?: string; sizeBytes?: number },
+  ): Promise<SharedVolumeDto | IntentAcceptedDto> {
+    return this.patchSharedVolume(actorId, id, input, 'admin');
+  }
+
   private async patchVolume(
     actorId: string,
     id: string,
@@ -498,9 +689,7 @@ export class VolumesService {
     access: 'user' | 'admin',
   ): Promise<VolumeDto | IntentAcceptedDto> {
     const current = await this.repository.findById(id);
-    if (!current || (access === 'user' && current.owner_id !== actorId)) {
-      throw new NotFoundException('Volume not found');
-    }
+    this.requireLocal(current, actorId, access);
     if (current.generation !== input.expectedRevision) {
       throw new ConflictException({ code: FailureCode.RevisionConflict });
     }
@@ -551,7 +740,9 @@ export class VolumesService {
       return dto!;
     }
     const delta = input.sizeBytes - numberValue(current.size_bytes);
-    const pool = await this.pools.findById(current.pool_id);
+    const pool = current.pool_id
+      ? await this.pools.findById(current.pool_id)
+      : null;
     if (!pool) throw new NotFoundException('Volume pool not found');
     const precheckAttachments = delta < 0
       && pool.resize_family === StoragePoolResizeFamily.BlockBacked
@@ -563,7 +754,7 @@ export class VolumesService {
       : [];
     const precheckFailure = checkVolumeResize({
       volumeId: id,
-      poolId: current.pool_id,
+      poolId: pool.id,
       currentSizeBytes: numberValue(current.size_bytes),
       requestedSizeBytes: input.sizeBytes,
       usedBytes: current.used_bytes === null ? null : numberValue(current.used_bytes),
@@ -580,12 +771,18 @@ export class VolumesService {
         throw new ConflictException({ code: FailureCode.RevisionConflict });
       }
       const lockedDelta = input.sizeBytes! - numberValue(locked.size_bytes);
-      const lockedPool = await this.pools.lockCapacityScope(
-        locked.pool_id,
-        locked.server_id,
-        [locked.shared_backend_id],
-        transaction,
-      );
+      await this.lockVolumeQuota(locked, transaction);
+      const representativePoolId = locked.pool_id
+        ?? (await this.repository.listPlacements(id, transaction))[0]?.pool_id
+        ?? null;
+      if (!representativePoolId) {
+        throw new ConflictException({
+          code: FailureCode.InvalidInput,
+          message: 'A volume with no catalog registration cannot be resized',
+        });
+      }
+      const lockedPool = await this.pools.findById(representativePoolId, transaction);
+      if (!lockedPool) throw new NotFoundException('Volume pool not found');
       const scopeMatches = locked.server_id === null
         ? lockedPool.registered
           && lockedPool.shared_backend_id === locked.shared_backend_id
@@ -611,7 +808,7 @@ export class VolumesService {
         : [];
       const lockedFailure = checkVolumeResize({
         volumeId: id,
-        poolId: locked.pool_id,
+        poolId: lockedPool.id,
         currentSizeBytes: numberValue(locked.size_bytes),
         requestedSizeBytes: input.sizeBytes!,
         usedBytes: locked.used_bytes === null ? null : numberValue(locked.used_bytes),
@@ -627,7 +824,7 @@ export class VolumesService {
           await this.assertCapacityForDeltaForAdmin(
             transaction,
             locked.server_id,
-            locked.pool_id,
+            representativePoolId,
             locked.shared_backend_id,
             lockedDelta,
           );
@@ -636,7 +833,7 @@ export class VolumesService {
             transaction,
             locked.owner_id,
             locked.server_id,
-            locked.pool_id,
+            representativePoolId,
             locked.shared_backend_id,
             lockedDelta,
           );
@@ -649,15 +846,12 @@ export class VolumesService {
         transaction,
       );
       if (!row) throw new ConflictException({ code: FailureCode.RevisionConflict });
-      let placements = await this.repository.listDesiredPlacements(id, transaction);
+      const placements = await this.repository.listPlacements(id, transaction);
       if (placements.length === 0) {
-        await this.repository.upsertPlacement({
-          volumeId: id,
-          serverId: lockedPool.server_id,
-          poolId: locked.pool_id,
-          desiredPresent: true,
-        }, transaction);
-        placements = await this.repository.listDesiredPlacements(id, transaction);
+        throw new ConflictException({
+          code: FailureCode.InvalidInput,
+          message: 'A volume with no catalog registration cannot be resized',
+        });
       }
       const intents = [];
       for (const placement of placements) {
@@ -695,20 +889,196 @@ export class VolumesService {
     return acceptedIntent(changed.intent);
   }
 
+  private async patchSharedVolume(
+    actorId: string,
+    id: string,
+    input: { expectedRevision: number; name?: string; sizeBytes?: number },
+    access: 'user' | 'admin',
+  ): Promise<SharedVolumeDto | IntentAcceptedDto> {
+    const current = await this.repository.findById(id);
+    this.requireShared(current, actorId, access);
+    if (current.generation !== input.expectedRevision) {
+      throw new ConflictException({ code: FailureCode.RevisionConflict });
+    }
+    if (current.lifecycle_phase === 'deleting') {
+      throw new ConflictException({
+        code: FailureCode.InvalidInput,
+        message: 'A deleting volume cannot be modified',
+        details: { volumeId: id, lifecyclePhase: current.lifecycle_phase },
+      });
+    }
+    if (
+      input.sizeBytes !== undefined
+      && (!Number.isSafeInteger(input.sizeBytes) || input.sizeBytes <= 0)
+    ) {
+      throw new BadRequestException({
+        code: FailureCode.InvalidInput,
+        message: 'Volume size must be a positive safe integer',
+      });
+    }
+    if (input.sizeBytes === undefined || input.sizeBytes === numberValue(current.size_bytes)) {
+      if (input.name === undefined || input.name === current.name) {
+        const [dto] = await this.toSharedDtos([current]);
+        return dto!;
+      }
+      const updated = await this.transactions.run(async (transaction) => {
+        const locked = await this.repository.findById(id, transaction);
+        this.requireShared(locked, actorId, access);
+        if (locked.generation !== input.expectedRevision) {
+          throw new ConflictException({ code: FailureCode.RevisionConflict });
+        }
+        const row = await this.repository.updateDesired(
+          id,
+          locked.generation,
+          { name: input.name },
+          transaction,
+        );
+        if (!row) throw new ConflictException({ code: FailureCode.RevisionConflict });
+        await this.audit.append(
+          transaction,
+          actorId,
+          AuditAction.UpdateVolume,
+          id,
+          'volume',
+          { name: input.name },
+        );
+        return row;
+      }, { isolationLevel: 'serializable', maxAttempts: 5 });
+      const [dto] = await this.toSharedDtos([updated]);
+      return dto!;
+    }
+    const changed = await this.transactions.run(async (transaction) => {
+      const locked = await this.repository.findById(id, transaction);
+      this.requireShared(locked, actorId, access);
+      if (locked.generation !== input.expectedRevision) {
+        throw new ConflictException({ code: FailureCode.RevisionConflict });
+      }
+      if (access === 'user') {
+        await this.assertSharedGrant(locked.owner_id, locked.shared_backend_id!, transaction);
+      }
+      const lockedDelta = input.sizeBytes! - numberValue(locked.size_bytes);
+      await this.lockVolumeQuota(locked, transaction);
+      const placements = await this.repository.listPlacements(id, transaction);
+      const representativePoolId = placements[0]?.pool_id ?? null;
+      const lockedPool = representativePoolId
+        ? await this.pools.findById(representativePoolId, transaction)
+        : null;
+      const quotaEffective = lockedPool?.quota_effective ?? true;
+      const precheckFailure = checkVolumeResize({
+        volumeId: id,
+        poolId: representativePoolId ?? id,
+        currentSizeBytes: numberValue(locked.size_bytes),
+        requestedSizeBytes: input.sizeBytes!,
+        usedBytes: locked.used_bytes === null ? null : numberValue(locked.used_bytes),
+        resizeFamily: StoragePoolResizeFamily.QuotaOnline,
+        blockFilesystem: null,
+        attachments: [],
+      });
+      if (precheckFailure && quotaEffective) {
+        throw new ConflictException(precheckFailure);
+      }
+      if (lockedDelta > 0) {
+        if (access === 'admin') {
+          await this.assertSharedCapacityForDeltaForAdmin(
+            transaction,
+            locked.shared_backend_id!,
+            lockedDelta,
+          );
+        } else {
+          await this.assertSharedCapacityForDeltaForUser(
+            transaction,
+            locked.owner_id,
+            locked.shared_backend_id!,
+            lockedDelta,
+          );
+        }
+      }
+      const row = await this.repository.updateDesired(
+        id,
+        locked.generation,
+        { ...(input.name === undefined ? {} : { name: input.name }), size_bytes: input.sizeBytes },
+        transaction,
+      );
+      if (!row) throw new ConflictException({ code: FailureCode.RevisionConflict });
+      if (placements.length === 0) {
+        await this.audit.append(
+          transaction,
+          actorId,
+          AuditAction.ResizeVolume,
+          id,
+          'volume',
+          { sizeBytes: input.sizeBytes },
+        );
+        return { row, intent: null, serverIds: [] as string[] };
+      }
+      const intents = [];
+      for (const placement of placements) {
+        intents.push(await this.intents.createPending({
+          kind: IntentKind.VolumeResize,
+          resourceType: IntentResourceType.Volume,
+          resourceId: id,
+          serverId: placement.server_id,
+          requestedBy: actorId,
+          targetGeneration: row.generation,
+          request: {
+            operation: 'resize',
+            idempotencyKey: 'resize',
+            sizeBytes: input.sizeBytes,
+          },
+        }, transaction));
+      }
+      const intent = intents[0]!;
+      await this.audit.append(
+        transaction,
+        actorId,
+        AuditAction.ResizeVolume,
+        id,
+        'volume',
+        { sizeBytes: input.sizeBytes },
+      );
+      return { row, intent, serverIds: [...new Set(intents.map((item) => item.serverId).filter((value): value is string => Boolean(value)))] };
+    }, { isolationLevel: 'serializable', maxAttempts: 5 });
+    if (!changed.intent) {
+      const [dto] = await this.toSharedDtos([changed.row]);
+      return dto!;
+    }
+    for (const serverId of changed.serverIds.length > 0 ? changed.serverIds : [changed.intent.serverId]) {
+      this.wake.wake({
+        resourceType: IntentResourceType.Volume,
+        resourceId: id,
+        serverId,
+        reason: 'intent',
+      });
+    }
+    return acceptedIntent(changed.intent);
+  }
+
   async deleteForUser(actorId: string, id: string) {
-    return this.deleteVolume(actorId, id, 'user');
+    return this.deleteVolume(actorId, id, 'user', 'local');
   }
 
   async deleteForAdmin(actorId: string, id: string) {
-    return this.deleteVolume(actorId, id, 'admin');
+    return this.deleteVolume(actorId, id, 'admin', 'local');
   }
 
-  private async deleteVolume(actorId: string, id: string, access: 'user' | 'admin') {
+  async deleteSharedForUser(actorId: string, id: string) {
+    return this.deleteVolume(actorId, id, 'user', 'shared');
+  }
+
+  async deleteSharedForAdmin(actorId: string, id: string) {
+    return this.deleteVolume(actorId, id, 'admin', 'shared');
+  }
+
+  private async deleteVolume(
+    actorId: string,
+    id: string,
+    access: 'user' | 'admin',
+    kind: 'local' | 'shared',
+  ) {
     const result = await this.transactions.run(async (transaction) => {
       const current = await this.repository.findById(id, transaction);
-      if (!current || (access === 'user' && current.owner_id !== actorId)) {
-        throw new NotFoundException('Volume not found');
-      }
+      if (kind === 'local') this.requireLocal(current, actorId, access);
+      else this.requireShared(current, actorId, access);
       if (current.lifecycle_phase === 'deleting') {
         throw new ConflictException({
           code: FailureCode.InvalidInput,
@@ -716,36 +1086,83 @@ export class VolumesService {
           details: { volumeId: id },
         });
       }
+      await this.lockVolumeQuota(current, transaction);
       if (await this.repository.hasAttachments(id, transaction)) {
         throw new ConflictException({
-          code: FailureCode.VolumeDetachDraining,
+          code: FailureCode.VolumeRequiresUnbind,
           message: 'Detach all volume attachments before deleting the volume',
         });
       }
-      await this.pools.lockCapacityScope(
-        current.pool_id,
-        current.server_id,
-        [current.shared_backend_id],
-        transaction,
-      );
-      const anchorPool = await transaction.selectFrom('infra.storage_pools')
-        .select(['server_id'])
-        .where('id', '=', current.pool_id)
-        .executeTakeFirstOrThrow();
       const placements = await this.repository.listPlacements(id, transaction);
-      if (placements.length === 0) {
+      if (kind === 'local') {
+        if (placements.length > 0) {
+          const server = await transaction.selectFrom('infra.servers')
+            .select(['id', 'name', 'status'])
+            .where('id', '=', current.server_id)
+            .executeTakeFirst();
+          if (!server || server.status !== 'online') {
+            throw new ConflictException({
+              code: FailureCode.ServerUnreachable,
+              message: 'The volume server is unreachable; contact an administrator',
+              details: {
+                serverId: server?.id ?? current.server_id,
+                serverName: server?.name ?? current.server_id,
+              },
+            });
+          }
+        }
+      } else {
+        if (!current.dir_ensured && placements.length === 0) {
+          await this.settlePendingVolumeIntents(id, transaction);
+          await this.repository.deleteVolumeRow(id, transaction);
+          const intent = await this.intents.createPending({
+            kind: IntentKind.VolumeDestroy,
+            resourceType: IntentResourceType.Volume,
+            resourceId: id,
+            requestedBy: actorId,
+            targetGeneration: current.generation,
+            request: {
+              operation: 'destroy',
+              idempotencyKey: 'destroy',
+              note: 'never_mounted',
+            },
+          }, transaction);
+          await this.intents.settleOne(intent.id, { outcome: 'succeeded' }, transaction);
+          await this.audit.append(transaction, actorId, AuditAction.DeleteVolume, id, 'volume', {
+            reason: 'never_mounted',
+          });
+          return { row: current, intent, deleted: true as const };
+        }
+        const eligible = current.shared_backend_id
+          ? await listEligibleDestroyExecutors(transaction, current.shared_backend_id)
+          : [];
+        if (eligible.length === 0) {
+          throw new ConflictException({
+            code: FailureCode.VolumeDeleteBackendUnreachable,
+            message: '没有在线服务器可以访问该共享存储，请联系管理员。',
+            details: { sharedBackendId: current.shared_backend_id },
+          });
+        }
+      }
+      if (kind === 'local' && placements.length === 0) {
+        await this.settlePendingVolumeIntents(id, transaction);
         await this.repository.deleteVolumeRow(id, transaction);
         const intent = await this.intents.createPending({
-          kind: IntentKind.VolumeEnsure,
+          kind: IntentKind.VolumeDestroy,
           resourceType: IntentResourceType.Volume,
           resourceId: id,
-          serverId: anchorPool.server_id,
           requestedBy: actorId,
           targetGeneration: current.generation,
-          request: { operation: 'delete', idempotencyKey: 'delete' },
+          request: {
+            operation: 'destroy',
+            idempotencyKey: 'destroy',
+            note: 'empty_tracking',
+          },
         }, transaction);
         await this.intents.settleOne(intent.id, { outcome: 'succeeded' }, transaction);
-        await this.audit.append(transaction, actorId, AuditAction.DeleteVolume, id, 'volume');
+        await this.audit.append(transaction, actorId, AuditAction.DeleteVolume, id, 'volume', {
+          reason: 'empty_tracking',
+        });
         return { row: current, intent, deleted: true as const };
       }
       const row = await this.repository.updateDesired(
@@ -755,23 +1172,14 @@ export class VolumesService {
         transaction,
       );
       if (!row) throw new ConflictException({ code: FailureCode.RevisionConflict });
-      await this.repository.setAllDesiredPresent(id, false, transaction);
-      const intents = [];
-      for (const placement of placements) {
-        intents.push(await this.intents.createPending({
-          kind: IntentKind.VolumeEnsure,
-          resourceType: IntentResourceType.Volume,
-          resourceId: id,
-          serverId: placement.server_id,
-          requestedBy: actorId,
-          targetGeneration: row.generation,
-          request: {
-            operation: 'delete',
-            idempotencyKey: 'delete',
-          },
-        }, transaction));
-      }
-      const intent = intents[0]!;
+      const intent = await this.intents.createPending({
+        kind: IntentKind.VolumeDestroy,
+        resourceType: IntentResourceType.Volume,
+        resourceId: id,
+        requestedBy: actorId,
+        targetGeneration: row.generation,
+        request: { operation: 'destroy', idempotencyKey: 'destroy' },
+      }, transaction);
       await this.audit.append(transaction, actorId, AuditAction.DeleteVolume, id, 'volume');
       return { row, intent, deleted: false as const };
     }, { isolationLevel: 'serializable', maxAttempts: 5 });
@@ -784,156 +1192,108 @@ export class VolumesService {
     return acceptedIntent(result.intent);
   }
 
+  private async settlePendingVolumeIntents(
+    volumeId: string,
+    transaction: Transaction<NyabaseDatabase>,
+  ): Promise<void> {
+    const pending = await transaction
+      .selectFrom('control.intents')
+      .select('id')
+      .where('resource_type', '=', 'volume')
+      .where('resource_id', '=', volumeId)
+      .where('status', '=', 'pending')
+      .execute();
+    for (const row of pending) {
+      await this.intents.settleOne(row.id, { outcome: 'succeeded' }, transaction);
+    }
+  }
+
   async listAttachmentsForUser(
     actorId: string,
     containerId: string,
+    kind: 'local' | 'shared',
   ): Promise<VolumeAttachmentDto[]> {
     const container = await this.database.selectFrom('control.containers')
-      .select(['id', 'owner_id'])
+      .select(['id', 'owner_id', 'server_id'])
       .where('id', '=', containerId)
       .executeTakeFirst();
     if (!container || container.owner_id !== actorId) {
       throw new NotFoundException('Container not found');
     }
-    const rows = await this.repository.listAttachments(containerId);
-    const names = await this.namesForVolumeIds(rows.map((row) => row.volume_id));
-    return rows.map((row) => this.toAttachmentDto(row, names.get(row.volume_id) ?? row.volume_id));
+    return this.listAttachmentDtos(containerId, container.server_id, kind);
   }
 
-  async listAttachmentsForAdmin(containerId: string): Promise<VolumeAttachmentDto[]> {
+  async listAttachmentsForAdmin(
+    containerId: string,
+    kind: 'local' | 'shared',
+  ): Promise<VolumeAttachmentDto[]> {
     const container = await this.database.selectFrom('control.containers')
-      .select(['id', 'owner_id'])
+      .select(['id', 'owner_id', 'server_id'])
       .where('id', '=', containerId)
       .executeTakeFirst();
     if (!container) {
       throw new NotFoundException('Container not found');
     }
-    const rows = await this.repository.listAttachments(containerId);
-    const names = await this.namesForVolumeIds(rows.map((row) => row.volume_id));
-    return rows.map((row) => this.toAttachmentDto(row, names.get(row.volume_id) ?? row.volume_id));
+    return this.listAttachmentDtos(containerId, container.server_id, kind);
   }
 
-  async attachForUser(actorId: string, containerId: string, input: {
-    volumeId: string;
-    containerPath: string;
-    readOnly: boolean;
-  }): Promise<IntentAcceptedDto> {
-    return this.attachVolume(actorId, containerId, input, 'user');
+  async attachForUser(
+    actorId: string,
+    containerId: string,
+    input: AttachVolumeRequest,
+    kind: 'local' | 'shared',
+  ): Promise<IntentAcceptedDto> {
+    return this.attachVolume(actorId, containerId, input, 'user', kind);
   }
 
-  async attachForAdmin(actorId: string, containerId: string, input: {
-    volumeId: string;
-    containerPath: string;
-    readOnly: boolean;
-  }): Promise<IntentAcceptedDto> {
-    return this.attachVolume(actorId, containerId, input, 'admin');
+  async attachForAdmin(
+    actorId: string,
+    containerId: string,
+    input: AttachVolumeRequest,
+    kind: 'local' | 'shared',
+  ): Promise<IntentAcceptedDto> {
+    return this.attachVolume(actorId, containerId, input, 'admin', kind);
   }
 
-  private async attachVolume(actorId: string, containerId: string, input: {
-    volumeId: string;
-    containerPath: string;
-    readOnly: boolean;
-  }, access: 'user' | 'admin'): Promise<IntentAcceptedDto> {
+  async bindCreateTimeVolumes(
+    transaction: Transaction<NyabaseDatabase>,
+    actorId: string,
+    access: 'user' | 'admin',
+    container: { id: string; owner_id: string; server_id: string },
+    volumes: readonly AttachVolumeRequest[],
+  ): Promise<void> {
+    for (const input of volumes) {
+      await this.bindAttachmentRow(transaction, actorId, access, container, input, null);
+    }
+  }
+
+  private async attachVolume(
+    actorId: string,
+    containerId: string,
+    input: AttachVolumeRequest,
+    access: 'user' | 'admin',
+    kind: 'local' | 'shared',
+  ): Promise<IntentAcceptedDto> {
     const result = await this.transactions.run(async (transaction) => {
       const container = await transaction.selectFrom('control.containers').selectAll()
         .where('id', '=', containerId).forUpdate().executeTakeFirst();
-      const volume = await transaction.selectFrom('control.volumes').selectAll()
-        .where('id', '=', input.volumeId).forUpdate().executeTakeFirst();
       if (!container || (access === 'user' && container.owner_id !== actorId)) {
         throw new NotFoundException('Container not found');
       }
-      if (!volume || (access === 'user' && volume.owner_id !== actorId)) {
-        throw new NotFoundException('Volume not found');
-      }
-      if (volume && volume.owner_id !== container.owner_id) {
-        throw new ForbiddenException('A volume may only attach to its owner container');
-      }
-      if (volume.lifecycle_phase === 'deleting' || volume.lifecycle_phase === 'failed') {
-        throw new ConflictException({
-          code: FailureCode.InvalidInput,
-          message: 'A deleting or failed volume cannot be attached',
-          details: { volumeId: volume.id, lifecyclePhase: volume.lifecycle_phase },
-        });
-      }
-      const drain = await this.repository.findDetachDrain(volume.id, transaction);
-      if (drain && new Date(drain.drained_at).getTime() > Date.now()) {
-        throw new ConflictException({
-          code: FailureCode.VolumeDetachDraining,
-          message: 'Volume attachment is still draining after a detach',
-          details: { drainedAt: new Date(drain.drained_at).toISOString() },
-        });
-      }
-      await this.repository.clearExpiredDetachDrain(volume.id, new Date(), transaction);
-      if (volume.server_id !== null && volume.server_id !== container.server_id) {
-        throw new ConflictException({
-          code: FailureCode.VolumeCrossServerDenied,
-          message: 'A local volume can only attach on its pool server',
-          details: {
-            volumeId: volume.id,
-            serverId: container.server_id,
-            reason: 'local_pool_server_mismatch',
-          },
-        });
-      }
-      let placementPoolId = volume.pool_id;
-      if (volume.shared_backend_id !== null) {
-        const visible = await transaction.selectFrom('infra.storage_pools')
-          .select('id')
-          .where('shared_backend_id', '=', volume.shared_backend_id)
-          .where('server_id', '=', container.server_id)
-          .where('driver', '=', 'cephfs')
-          .where('shareable', '=', true)
-          .where('registered', '=', true)
-          .execute();
-        if (visible.length !== 1) throw new ConflictException({
-          code: FailureCode.VolumeCrossServerDenied,
-          message: 'The shared backend is not registered on the target server',
-          details: {
-            volumeId: volume.id,
-            serverId: container.server_id,
-            reason: 'backend_not_reachable',
-          },
-        });
-        placementPoolId = visible[0]!.id;
-      }
-      const attachmentId = randomUUID();
-      const attachment = await this.repository.insertAttachment({
-        id: attachmentId,
-        containerId,
-        volumeId: volume.id,
-        deviceName: deterministicName('nyd', attachmentId),
-        containerPath: input.containerPath,
-        readOnly: input.readOnly,
-      }, transaction);
       const generation = Number(container.generation) + 1;
       await transaction.updateTable('control.containers')
         .set({ generation, needs_attention: false })
         .where('id', '=', containerId)
         .where('generation', '=', container.generation)
         .executeTakeFirstOrThrow();
-      await this.repository.upsertPlacement({
-        volumeId: volume.id,
-        serverId: container.server_id,
-        poolId: placementPoolId,
-        desiredPresent: true,
-      }, transaction);
-      let blockedByIntentId: string | null = null;
-      if (volume.shared_backend_id) {
-        const ensure = await this.intents.ensurePending({
-          kind: IntentKind.VolumeEnsure,
-          resourceType: IntentResourceType.Volume,
-          resourceId: volume.id,
-          serverId: container.server_id,
-          requestedBy: actorId,
-          targetGeneration: volume.generation,
-          reuseSettled: false,
-          request: {
-            operation: 'ensure_attachment',
-            idempotencyKey: 'ensure_attachment',
-          },
-        }, transaction);
-        if (ensure.status === 'pending') blockedByIntentId = ensure.id;
-      }
+      const attachment = await this.bindAttachmentRow(
+        transaction,
+        actorId,
+        access,
+        container,
+        input,
+        kind,
+      );
       const intent = await this.intents.createPending({
         kind: IntentKind.ContainerUpdate,
         resourceType: IntentResourceType.Container,
@@ -941,8 +1301,8 @@ export class VolumesService {
         serverId: container.server_id,
         requestedBy: actorId,
         targetGeneration: generation,
-        blockedByIntentId,
-        request: { operation: 'attach_volume', volumeId: volume.id, attachmentId: attachment.id },
+        blockedByIntentId: null,
+        request: { operation: 'attach_volume', volumeId: input.volumeId, attachmentId: attachment.id },
       }, transaction);
       await this.audit.append(
         transaction,
@@ -950,15 +1310,18 @@ export class VolumesService {
         AuditAction.AttachVolume,
         attachment.id,
         'volume_attachment',
-        { containerId, volumeId: volume.id },
+        { containerId, volumeId: input.volumeId },
       );
-      return { attachment, intent, volumeId: volume.id };
-    }, { isolationLevel: 'serializable', maxAttempts: 5 });
-    this.wake.wake({
-      resourceType: IntentResourceType.Volume,
-      resourceId: result.volumeId,
-      serverId: result.intent.serverId,
-      reason: 'intent',
+      return { intent };
+    }, { isolationLevel: 'serializable', maxAttempts: 5 }).catch((error: unknown) => {
+      if (isUniqueViolation(error)) {
+        throw new ConflictException({
+          code: FailureCode.InvalidInput,
+          message: 'The volume is already attached to this container or the path is in use',
+          details: { containerId, volumeId: input.volumeId, containerPath: input.containerPath },
+        });
+      }
+      throw error;
     });
     this.wake.wake({
       resourceType: IntentResourceType.Container,
@@ -969,73 +1332,184 @@ export class VolumesService {
     return acceptedIntent(result.intent);
   }
 
+  private async bindAttachmentRow(
+    transaction: Transaction<NyabaseDatabase>,
+    actorId: string,
+    access: 'user' | 'admin',
+    container: { id: string; owner_id: string; server_id: string },
+    input: AttachVolumeRequest,
+    expectedKind: 'local' | 'shared' | null,
+  ): Promise<{ id: string }> {
+    const volume = await transaction.selectFrom('control.volumes').selectAll()
+      .where('id', '=', input.volumeId).forUpdate().executeTakeFirst();
+    const volumeKind: 'local' | 'shared' | null = !volume
+      ? null
+      : volume.shared_backend_id !== null ? 'shared' : 'local';
+    if (
+      !volume
+      || (access === 'user' && volume.owner_id !== actorId)
+      || (expectedKind !== null && volumeKind !== expectedKind)
+    ) {
+      throw new NotFoundException('Volume not found');
+    }
+    if (volume.owner_id !== container.owner_id) {
+      throw new ForbiddenException('A volume may only attach to its owner container');
+    }
+    if (volume.lifecycle_phase === 'deleting' || volume.lifecycle_phase === 'failed') {
+      throw new ConflictException({
+        code: FailureCode.InvalidInput,
+        message: 'A deleting or failed volume cannot be attached',
+        details: { volumeId: volume.id, lifecyclePhase: volume.lifecycle_phase },
+      });
+    }
+    if (volume.shared_backend_id !== null && access === 'user') {
+      await this.assertSharedGrant(volume.owner_id, volume.shared_backend_id, transaction);
+    }
+    if (volume.server_id !== null && volume.server_id !== container.server_id) {
+      throw new ConflictException({
+        code: FailureCode.VolumeCrossServerDenied,
+        message: 'A local volume can only attach on its pool server',
+        details: {
+          volumeId: volume.id,
+          serverId: container.server_id,
+          reason: 'local_pool_server_mismatch',
+        },
+      });
+    }
+    let placementPoolId = volume.pool_id;
+    if (volume.shared_backend_id !== null) {
+      const visible = await transaction.selectFrom('infra.storage_pools')
+        .select('id')
+        .where('shared_backend_id', '=', volume.shared_backend_id)
+        .where('server_id', '=', container.server_id)
+        .where('driver', '=', 'cephfs')
+        .where('shareable', '=', true)
+        .where('registered', '=', true)
+        .execute();
+      if (visible.length !== 1) throw new ConflictException({
+        code: FailureCode.VolumeCrossServerDenied,
+        message: 'The shared backend is not registered on the target server',
+        details: {
+          volumeId: volume.id,
+          serverId: container.server_id,
+          reason: 'backend_not_reachable',
+        },
+      });
+      placementPoolId = visible[0]!.id;
+    }
+    if (!placementPoolId) {
+      throw new ConflictException({
+        code: FailureCode.VolumeCrossServerDenied,
+        message: 'A local volume is missing its pool',
+      });
+    }
+    const occupied = await transaction.selectFrom('control.volume_attachments')
+      .select(['id', 'volume_id', 'container_path'])
+      .where('container_id', '=', container.id)
+      .where((expression) => expression.or([
+        expression('volume_id', '=', volume.id),
+        expression('container_path', '=', input.containerPath),
+      ]))
+      .executeTakeFirst();
+    if (occupied) {
+      throw new ConflictException({
+        code: FailureCode.InvalidInput,
+        message: 'The volume is already attached to this container or the path is in use',
+        details: {
+          containerId: container.id,
+          volumeId: volume.id,
+          containerPath: input.containerPath,
+          attachmentId: occupied.id,
+        },
+      });
+    }
+    const attachmentId = randomUUID();
+    const attachment = await this.repository.insertAttachment({
+      id: attachmentId,
+      containerId: container.id,
+      volumeId: volume.id,
+      deviceName: deterministicName('nyd', attachmentId),
+      containerPath: input.containerPath,
+      readOnly: input.readOnly,
+      bindState: 'attaching',
+    }, transaction);
+    await this.repository.upsertPlacement({
+      volumeId: volume.id,
+      serverId: container.server_id,
+      poolId: placementPoolId,
+      catalogState: 'ensuring',
+    }, transaction);
+    return attachment;
+  }
+
   async detachForUser(
     actorId: string,
     attachmentId: string,
-    expectedContainerId?: string,
+    expectedContainerId: string,
+    kind: 'local' | 'shared',
   ): Promise<unknown> {
-    return this.detachVolume(actorId, attachmentId, 'user', expectedContainerId);
+    return this.detachVolume(actorId, attachmentId, 'user', expectedContainerId, kind);
   }
 
   async detachForAdmin(
     actorId: string,
     attachmentId: string,
-    expectedContainerId?: string,
+    expectedContainerId: string,
+    kind: 'local' | 'shared',
   ): Promise<unknown> {
-    return this.detachVolume(actorId, attachmentId, 'admin', expectedContainerId);
+    return this.detachVolume(actorId, attachmentId, 'admin', expectedContainerId, kind);
   }
 
   private async detachVolume(
     actorId: string,
     attachmentId: string,
     access: 'user' | 'admin',
-    expectedContainerId?: string,
+    expectedContainerId: string,
+    kind: 'local' | 'shared',
   ): Promise<unknown> {
     const result = await this.transactions.run(async (transaction) => {
-      const found = await this.repository.findAttachment(attachmentId, transaction);
-      if (!found) throw new NotFoundException('Volume attachment not found');
-      if (expectedContainerId && found.container_id !== expectedContainerId) {
+      const attachment = await transaction
+        .selectFrom('control.volume_attachments as a')
+        .innerJoin('control.volumes as v', 'v.id', 'a.volume_id')
+        .selectAll('a')
+        .select('v.shared_backend_id as shared_backend_id')
+        .where('a.id', '=', attachmentId)
+        .forUpdate('a')
+        .executeTakeFirst();
+      if (!attachment || attachment.container_id !== expectedContainerId) {
+        throw new NotFoundException('Volume attachment not found');
+      }
+      const attachmentKind = attachment.shared_backend_id !== null ? 'shared' : 'local';
+      if (attachmentKind !== kind) {
         throw new NotFoundException('Volume attachment not found');
       }
       const container = await transaction.selectFrom('control.containers').selectAll()
-        .where('id', '=', found.container_id).forUpdate().executeTakeFirst();
+        .where('id', '=', attachment.container_id).forUpdate().executeTakeFirst();
       if (!container || (access === 'user' && container.owner_id !== actorId)) {
         throw new NotFoundException('Container not found');
       }
-      const attachment = await transaction
-        .selectFrom('control.volume_attachments')
-        .selectAll()
-        .where('id', '=', attachmentId)
-        .forUpdate()
-        .executeTakeFirst();
-      if (!attachment) throw new NotFoundException('Volume attachment not found');
-      const volume = await transaction.selectFrom('control.volumes')
-        .selectAll()
-        .where('id', '=', attachment.volume_id)
-        .forUpdate()
-        .executeTakeFirstOrThrow();
-      await this.repository.setDetachDrain(
+      const placement = await this.repository.findPlacement(
         attachment.volume_id,
-        new Date(Date.now() + 360_000),
+        container.server_id,
         transaction,
       );
-      await this.repository.deleteAttachment(attachmentId, transaction);
-      const homePool = await transaction.selectFrom('infra.storage_pools')
-        .select('server_id')
-        .where('id', '=', volume.pool_id)
-        .executeTakeFirstOrThrow();
-      const desiredServers = placementServersToDesire({
-        lifecyclePhase: volume.lifecycle_phase,
-        serverId: volume.server_id,
-        homeServerId: homePool.server_id,
-        liveAttachmentServerIds: await this.repository.liveAttachmentServerIds(
-          volume.id,
-          transaction,
-        ),
-      });
-      if (!desiredServers.has(container.server_id) && container.server_id !== homePool.server_id) {
-        await this.repository.setDesiredPresent(volume.id, container.server_id, false, transaction);
+      const catalogPresent = placement?.catalog_state === 'present';
+      const route = await transaction.selectFrom('control.container_ssh_routes')
+        .select('instance_status')
+        .where('container_id', '=', container.id)
+        .executeTakeFirst();
+      const observedStopped = (route?.instance_status ?? '').toLowerCase() === 'stopped';
+      const powerStopped = container.power_intent === 'stopped';
+      const requiresStop = attachment.bind_state === 'attached'
+        || (attachment.bind_state === 'attaching' && catalogPresent);
+      if (requiresStop && !(observedStopped && powerStopped)) {
+        throw new ConflictException({
+          code: FailureCode.VolumeDetachRequiresStop,
+          message: '请先停止容器',
+          details: { containerId: container.id, attachmentId },
+        });
       }
+      await this.repository.setAttachmentBindState(attachmentId, 'detaching', transaction);
       const generation = Number(container.generation) + 1;
       const updated = await transaction.updateTable('control.containers').set({
         generation,
@@ -1067,36 +1541,38 @@ export class VolumesService {
       );
       return intent;
     }, { isolationLevel: 'serializable', maxAttempts: 5 });
+    this.wake.wake({
+      resourceType: IntentResourceType.Container,
+      resourceId: expectedContainerId,
+      serverId: result.serverId,
+      reason: 'intent',
+    });
     return acceptedIntent(result);
   }
 
   private async resolveScopeForUser(
     transaction: Transaction<NyabaseDatabase>,
     ownerId: string,
-    scope: VolumeScope,
+    scope: LocalVolumeScope,
   ): Promise<{
     poolId: string;
-    serverId: string | null;
-    sharedBackendId: string | null;
+    serverId: string;
+    sharedBackendId: null;
     anchorServerId: string;
   }> {
     const resolved = await this.resolveScopeCore(transaction, scope);
-    if (scope.kind === 'local') {
-      await this.assertServerGrant(ownerId, scope.serverId, transaction);
-      await this.assertPoolGrant(ownerId, resolved.poolId, transaction);
-    } else {
-      await this.assertSharedGrant(ownerId, scope.sharedBackendId, transaction);
-    }
+    await this.assertServerGrant(ownerId, scope.serverId, transaction);
+    await this.assertPoolGrant(ownerId, resolved.poolId, transaction);
     return resolved;
   }
 
   private async resolveScopeForAdmin(
     transaction: Transaction<NyabaseDatabase>,
-    scope: VolumeScope,
+    scope: LocalVolumeScope,
   ): Promise<{
     poolId: string;
-    serverId: string | null;
-    sharedBackendId: string | null;
+    serverId: string;
+    sharedBackendId: null;
     anchorServerId: string;
   }> {
     return this.resolveScopeCore(transaction, scope);
@@ -1104,104 +1580,61 @@ export class VolumesService {
 
   private async resolveScopeCore(
     transaction: Transaction<NyabaseDatabase>,
-    scope: VolumeScope,
+    scope: LocalVolumeScope,
   ): Promise<{
     poolId: string;
-    serverId: string | null;
-    sharedBackendId: string | null;
+    serverId: string;
+    sharedBackendId: null;
     anchorServerId: string;
   }> {
     const pool = await transaction.selectFrom('infra.storage_pools')
       .selectAll().where('id', '=', scope.poolId).executeTakeFirst();
     if (!pool || !pool.registered) throw new NotFoundException('Registered storage pool not found');
-    if (scope.kind === 'local') {
-      if (
-        pool.server_id !== scope.serverId
-        || pool.shared_backend_id !== null
-        || pool.shareable
-      ) {
-        throw new BadRequestException('Local volume scope does not match the pool');
-      }
-      if (
-        pool.resize_family === StoragePoolResizeFamily.QuotaOnline
-        && pool.quota_effective === false
-      ) {
-        throw new ConflictException({
-          code: FailureCode.StoragePoolQuotaIneffective,
-          message: 'This storage pool cannot enforce custom volume quotas',
-          details: { poolId: pool.id },
-        });
-      }
-      const lockedPool = await this.pools.lockCapacityScope(
-        pool.id,
-        scope.serverId,
-        [null],
-        transaction,
-      );
-      if (
-        !lockedPool.registered
-        || lockedPool.server_id !== scope.serverId
-        || lockedPool.shared_backend_id !== null
-        || lockedPool.shareable
-      ) {
-        throw new BadRequestException('Local volume scope does not match the pool');
-      }
-      if (
-        lockedPool.resize_family === StoragePoolResizeFamily.QuotaOnline
-        && lockedPool.quota_effective === false
-      ) {
-        throw new ConflictException({
-          code: FailureCode.StoragePoolQuotaIneffective,
-          message: 'This storage pool cannot enforce custom volume quotas',
-          details: { poolId: lockedPool.id },
-        });
-      }
-      return {
-        poolId: lockedPool.id,
-        serverId: scope.serverId,
-        sharedBackendId: null,
-        anchorServerId: lockedPool.server_id,
-      };
+    if (
+      pool.server_id !== scope.serverId
+      || pool.shared_backend_id !== null
+      || pool.shareable
+    ) {
+      throw new BadRequestException('Local volume scope does not match the pool');
     }
     if (
-      pool.driver !== 'cephfs'
-      || !pool.shareable
-      || pool.shared_backend_id !== scope.sharedBackendId
+      pool.resize_family === StoragePoolResizeFamily.QuotaOnline
+      && pool.quota_effective === false
     ) {
-      throw new BadRequestException('Shared volumes require a shareable CephFS pool');
-    }
-    if (pool.quota_effective === false) {
       throw new ConflictException({
         code: FailureCode.StoragePoolQuotaIneffective,
-        message: 'This shared CephFS pool cannot enforce custom volume quotas',
+        message: 'This storage pool cannot enforce custom volume quotas',
         details: { poolId: pool.id },
       });
     }
     const lockedPool = await this.pools.lockCapacityScope(
       pool.id,
-      null,
-      [scope.sharedBackendId],
+      scope.serverId,
+      [null],
       transaction,
     );
     if (
       !lockedPool.registered
-      || lockedPool.driver !== 'cephfs'
-      || !lockedPool.shareable
-      || lockedPool.shared_backend_id !== scope.sharedBackendId
+      || lockedPool.server_id !== scope.serverId
+      || lockedPool.shared_backend_id !== null
+      || lockedPool.shareable
     ) {
-      throw new BadRequestException('Shared volumes require a shareable CephFS pool');
+      throw new BadRequestException('Local volume scope does not match the pool');
     }
-    if (lockedPool.quota_effective === false) {
+    if (
+      lockedPool.resize_family === StoragePoolResizeFamily.QuotaOnline
+      && lockedPool.quota_effective === false
+    ) {
       throw new ConflictException({
         code: FailureCode.StoragePoolQuotaIneffective,
-        message: 'This shared CephFS pool cannot enforce custom volume quotas',
+        message: 'This storage pool cannot enforce custom volume quotas',
         details: { poolId: lockedPool.id },
       });
     }
     return {
       poolId: lockedPool.id,
-      serverId: null,
-      sharedBackendId: scope.sharedBackendId,
+      serverId: scope.serverId,
+      sharedBackendId: null,
       anchorServerId: lockedPool.server_id,
     };
   }
@@ -1252,7 +1685,7 @@ export class VolumesService {
           },
         });
       }
-      await this.assertSharedBackendPhysicalCapacity(backend, sharedBackendId, pool.id, delta, transaction);
+      await this.assertSharedBackendPhysicalCapacity(backend, sharedBackendId, delta, transaction);
       return;
     }
     if (!serverId) throw new BadRequestException('Local capacity requires a server');
@@ -1296,11 +1729,89 @@ export class VolumesService {
     if (sharedBackendId) {
       const backend = await transaction.selectFrom('infra.shared_backends')
         .selectAll().where('id', '=', sharedBackendId).executeTakeFirstOrThrow();
-      await this.assertSharedBackendPhysicalCapacity(backend, sharedBackendId, pool.id, delta, transaction);
+      await this.assertSharedBackendPhysicalCapacity(backend, sharedBackendId, delta, transaction);
       return;
     }
     if (!serverId) throw new BadRequestException('Local capacity requires a server');
     await this.assertLocalPoolPhysicalCapacity(pool, poolId, serverId, delta, transaction);
+  }
+
+  private async assertSharedCreateHealth(
+    sharedBackendId: string,
+    transaction: Transaction<NyabaseDatabase>,
+  ): Promise<void> {
+    const pools = await transaction.selectFrom('infra.storage_pools')
+      .select(['id', 'quota_effective'])
+      .where('shared_backend_id', '=', sharedBackendId)
+      .where('driver', '=', 'cephfs')
+      .where('shareable', '=', true)
+      .where('registered', '=', true)
+      .execute();
+    if (pools.length === 0) {
+      throw new ConflictException({
+        code: FailureCode.InvalidInput,
+        message: '该共享后端尚未在任何服务器上登记可写配额的 CephFS 池',
+        details: { sharedBackendId },
+      });
+    }
+    if (!pools.some((pool) => pool.quota_effective === true)) {
+      throw new ConflictException({
+        code: FailureCode.StoragePoolQuotaIneffective,
+        message: 'This shared CephFS pool cannot enforce custom volume quotas',
+        details: { sharedBackendId },
+      });
+    }
+  }
+
+  private async assertSharedCapacityForDeltaForUser(
+    transaction: Transaction<NyabaseDatabase>,
+    ownerId: string,
+    sharedBackendId: string,
+    delta: number,
+  ): Promise<void> {
+    if (delta <= 0) return;
+    await this.pools.lockSharedBackends([sharedBackendId], transaction);
+    const backend = await transaction.selectFrom('infra.shared_backends')
+      .selectAll().where('id', '=', sharedBackendId).executeTakeFirstOrThrow();
+    const grant = await this.effectiveSharedGrant(ownerId, sharedBackendId, transaction);
+    if (grant === undefined) {
+      throw new ForbiddenException('Shared backend access is not granted');
+    }
+    const userUsed = await transaction.selectFrom('control.volumes')
+      .select(sql<string>`coalesce(sum(size_bytes), 0)`.as('used'))
+      .where('owner_id', '=', ownerId)
+      .where('shared_backend_id', '=', sharedBackendId)
+      .where('lifecycle_phase', 'not in', ['failed', 'deleting'])
+      .executeTakeFirstOrThrow();
+    if (
+      grant !== null
+      && grant > 0
+      && numberValue(userUsed.used) + delta > grant
+    ) {
+      throw new ConflictException({
+        code: FailureCode.SharedBackendQuotaExceeded,
+        message: 'Shared backend grant quota exceeded',
+        details: {
+          sharedBackendId,
+          requestedBytes: delta,
+          availableBytes: Math.max(0, grant - numberValue(userUsed.used)),
+          grantLimitBytes: grant,
+        },
+      });
+    }
+    await this.assertSharedBackendPhysicalCapacity(backend, sharedBackendId, delta, transaction);
+  }
+
+  private async assertSharedCapacityForDeltaForAdmin(
+    transaction: Transaction<NyabaseDatabase>,
+    sharedBackendId: string,
+    delta: number,
+  ): Promise<void> {
+    if (delta <= 0) return;
+    await this.pools.lockSharedBackends([sharedBackendId], transaction);
+    const backend = await transaction.selectFrom('infra.shared_backends')
+      .selectAll().where('id', '=', sharedBackendId).executeTakeFirstOrThrow();
+    await this.assertSharedBackendPhysicalCapacity(backend, sharedBackendId, delta, transaction);
   }
 
   private async assertSharedBackendPhysicalCapacity(
@@ -1309,7 +1820,6 @@ export class VolumesService {
       overcommit_ratio: string | number;
     },
     sharedBackendId: string,
-    anchorPoolId: string,
     delta: number,
     transaction: Transaction<NyabaseDatabase>,
   ): Promise<void> {
@@ -1328,7 +1838,6 @@ export class VolumesService {
         message: 'Shared backend capacity exhausted',
         details: {
           sharedBackendId,
-          anchorPoolId,
           requestedBytes: delta,
           availableBytes: Math.max(
             0,
@@ -1567,6 +2076,200 @@ export class VolumesService {
     return result;
   }
 
+  async inspectSharedVolumeCatalogs(volumeId: string): Promise<SharedVolumeCatalogInspectDto> {
+    const volume = await this.repository.findById(volumeId);
+    this.requireShared(volume, undefined, 'admin');
+    const pools = await this.database
+      .selectFrom('infra.storage_pools as p')
+      .innerJoin('infra.servers as s', 's.id', 'p.server_id')
+      .select([
+        's.id as server_id',
+        's.name as server_name',
+        's.status as server_status',
+        'p.id as pool_id',
+        'p.incus_name as pool_name',
+      ])
+      .where('p.shared_backend_id', '=', volume.shared_backend_id)
+      .where('p.driver', '=', 'cephfs')
+      .where('p.shareable', '=', true)
+      .where('p.registered', '=', true)
+      .where('s.status', '=', 'online')
+      .orderBy('s.id', 'asc')
+      .orderBy('p.id', 'asc')
+      .execute();
+    const placements = await this.repository.listPlacements(volumeId);
+    const placementByServer = new Map(placements.map((row) => [row.server_id, row]));
+    const attachments = await this.repository.listAttachments(undefined, volumeId);
+    const attachedServers = new Set(
+      (await this.database.selectFrom('control.containers')
+        .select(['id', 'server_id'])
+        .where('id', 'in', attachments.length === 0 ? ['00000000-0000-4000-8000-000000000000'] : attachments.map((row) => row.container_id))
+        .execute()).map((row) => row.server_id),
+    );
+    const items: SharedVolumeCatalogInspectDto['items'] = [];
+    for (const pool of pools) {
+      const placement = placementByServer.get(pool.server_id);
+      const pgCatalogState = placement?.catalog_state === 'present' || placement?.catalog_state === 'ensuring'
+        ? placement.catalog_state
+        : 'absent';
+      let incusPresent: boolean | null = null;
+      try {
+        const client = await this.clients?.get(pool.server_id);
+        if (!client) {
+          incusPresent = null;
+        } else {
+          const controller = new AbortController();
+          const timer = setTimeout(() => controller.abort(), 5_000);
+          try {
+            await client.getStorageVolume(pool.pool_name, 'custom', volume.incus_name, {
+              signal: controller.signal,
+            });
+            incusPresent = true;
+          } catch (error) {
+            incusPresent = error instanceof IncusError && error.code === 'INCUS_NOT_FOUND'
+              ? false
+              : null;
+          } finally {
+            clearTimeout(timer);
+          }
+        }
+      } catch {
+        incusPresent = null;
+      }
+      const occupancy = occupancyForCatalogItem({
+        pgCatalogState,
+        incusPresent,
+        hasAttachment: attachedServers.has(pool.server_id),
+      });
+      if (occupancy === 'skip') continue;
+      items.push({
+        serverId: pool.server_id,
+        serverName: pool.server_name,
+        serverStatus: pool.server_status as SharedVolumeCatalogInspectDto['items'][number]['serverStatus'],
+        poolId: pool.pool_id,
+        poolName: pool.pool_name,
+        pgCatalogState,
+        incusPresent,
+        occupancy,
+      });
+    }
+    return {
+      volumeId: volume.id,
+      incusName: volume.incus_name,
+      sharedBackendId: volume.shared_backend_id!,
+      items,
+    };
+  }
+
+  async inspectSharedBackendCatalogs(backendId: string): Promise<SharedBackendCatalogInspectDto> {
+    const backend = await this.database.selectFrom('infra.shared_backends')
+      .select('id')
+      .where('id', '=', backendId)
+      .executeTakeFirst();
+    if (!backend) throw new NotFoundException('Shared backend not found');
+    const pools = await this.database
+      .selectFrom('infra.storage_pools as p')
+      .innerJoin('infra.servers as s', 's.id', 'p.server_id')
+      .select([
+        's.id as server_id',
+        's.name as server_name',
+        'p.id as pool_id',
+        'p.incus_name as pool_name',
+      ])
+      .where('p.shared_backend_id', '=', backendId)
+      .where('p.driver', '=', 'cephfs')
+      .where('p.shareable', '=', true)
+      .where('p.registered', '=', true)
+      .where('s.status', '=', 'online')
+      .orderBy('s.id', 'asc')
+      .execute();
+    const volumes = await this.database
+      .selectFrom('control.volumes')
+      .select(['id', 'incus_name'])
+      .where('shared_backend_id', '=', backendId)
+      .execute();
+    const volumeByName = new Map(volumes.map((row) => [row.incus_name, row.id]));
+    const attachments = volumes.length === 0
+      ? []
+      : await this.database.selectFrom('control.volume_attachments as a')
+        .innerJoin('control.containers as c', 'c.id', 'a.container_id')
+        .select(['a.volume_id as volume_id', 'c.server_id as server_id'])
+        .where('a.volume_id', 'in', volumes.map((row) => row.id))
+        .execute();
+    const inUse = new Set(attachments.map((row) => `${row.volume_id}:${row.server_id}`));
+    const items: SharedBackendCatalogInspectDto['items'] = [];
+    const managedName = /^nyv-[0-9a-f]{32}$/;
+    for (const pool of pools) {
+      let listed: Array<{ name?: string } | string> = [];
+      try {
+        const client = await this.clients?.get(pool.server_id);
+        if (!client) continue;
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), 5_000);
+        try {
+          listed = (await client.listStorageVolumes(pool.pool_name, 'custom', 1, {
+            signal: controller.signal,
+          })).metadata as Array<{ name?: string } | string>;
+        } finally {
+          clearTimeout(timer);
+        }
+      } catch {
+        continue;
+      }
+      for (const entry of listed) {
+        const name = typeof entry === 'string'
+          ? (entry.split('/').filter(Boolean).at(-1) ?? '')
+          : (entry.name ?? '');
+        if (!managedName.test(name)) continue;
+        const volumeId = volumeByName.get(name) ?? null;
+        const occupancy = volumeId === null
+          ? 'dangling_incus'
+          : inUse.has(`${volumeId}:${pool.server_id}`)
+            ? 'in_use'
+            : 'cache';
+        items.push({
+          serverId: pool.server_id,
+          serverName: pool.server_name,
+          poolId: pool.pool_id,
+          poolName: pool.pool_name,
+          incusName: name,
+          volumeId,
+          occupancy,
+        });
+      }
+    }
+    return { sharedBackendId: backendId, items };
+  }
+
+  private async listAttachmentDtos(
+    containerId: string,
+    serverId: string,
+    kind: 'local' | 'shared',
+  ): Promise<VolumeAttachmentDto[]> {
+    const rows = await this.database
+      .selectFrom('control.volume_attachments as a')
+      .innerJoin('control.volumes as v', 'v.id', 'a.volume_id')
+      .leftJoin('control.volume_placements as p', (join) => join
+        .onRef('p.volume_id', '=', 'a.volume_id')
+        .on('p.server_id', '=', serverId))
+      .selectAll('a')
+      .select([
+        'v.name as volume_name',
+        'v.shared_backend_id as shared_backend_id',
+        'p.catalog_state as catalog_state',
+      ])
+      .where('a.container_id', '=', containerId)
+      .orderBy('a.created_at')
+      .execute();
+    const filtered = rows.filter((row) => (
+      kind === 'shared' ? row.shared_backend_id !== null : row.shared_backend_id === null
+    ));
+    return filtered.map((row) => this.toAttachmentDto(row, row.volume_name, {
+      kind,
+      catalogState: row.catalog_state,
+    }));
+  }
+
   private async namesForVolumeIds(volumeIds: readonly string[]): Promise<Map<string, string>> {
     const ids = [...new Set(volumeIds)];
     const result = new Map<string, string>();
@@ -1582,11 +2285,13 @@ export class VolumesService {
 
   private async toDtos(rows: readonly VolumeRow[]): Promise<VolumeDto[]> {
     if (rows.length === 0) return [];
-    const descriptors = await this.poolDescriptors(rows.map((row) => row.pool_id));
+    const descriptors = await this.poolDescriptors(
+      rows.flatMap((row) => row.pool_id ? [row.pool_id] : []),
+    );
     const attachments = await this.attachmentSummariesByVolumeIds(rows.map((row) => row.id));
     return rows.map((row) => this.toDto(
       row,
-      descriptors.get(row.pool_id),
+      row.pool_id ? descriptors.get(row.pool_id) : undefined,
       attachments.get(row.id) ?? [],
     ));
   }
@@ -1605,6 +2310,7 @@ export class VolumesService {
         'attachment.volume_id',
         'attachment.container_id',
         'attachment.container_path',
+        'attachment.bind_state',
         'container.name',
       ])
       .where('attachment.volume_id', 'in', ids)
@@ -1617,10 +2323,148 @@ export class VolumesService {
         containerId: row.container_id,
         containerName: row.name,
         containerPath: row.container_path,
+        bindState: row.bind_state as VolumeAttachmentSummaryDto['bindState'],
       });
       result.set(row.volume_id, list);
     }
     return result;
+  }
+
+  private requireLocal(
+    row: VolumeRow | undefined,
+    actorId: string | undefined,
+    access: 'user' | 'admin',
+  ): asserts row is VolumeRow {
+    if (
+      !row
+      || (access === 'user' && row.owner_id !== actorId)
+      || row.shared_backend_id !== null
+      || row.server_id === null
+      || row.pool_id === null
+    ) {
+      throw new NotFoundException('Volume not found');
+    }
+  }
+
+  private requireShared(
+    row: VolumeRow | undefined,
+    actorId: string | undefined,
+    access: 'user' | 'admin',
+  ): asserts row is VolumeRow {
+    if (
+      !row
+      || (access === 'user' && row.owner_id !== actorId)
+      || row.shared_backend_id === null
+      || row.server_id !== null
+    ) {
+      throw new NotFoundException('Volume not found');
+    }
+  }
+
+  private async filterAttachableShared(
+    rows: readonly VolumeRow[],
+    serverId: string,
+  ): Promise<VolumeRow[]> {
+    if (rows.length === 0) return [];
+    const pools = await this.database
+      .selectFrom('infra.storage_pools')
+      .select('shared_backend_id')
+      .where('server_id', '=', serverId)
+      .where('driver', '=', 'cephfs')
+      .where('shareable', '=', true)
+      .where('registered', '=', true)
+      .where('shared_backend_id', 'is not', null)
+      .execute();
+    const counts = new Map<string, number>();
+    for (const pool of pools) {
+      if (!pool.shared_backend_id) continue;
+      counts.set(pool.shared_backend_id, (counts.get(pool.shared_backend_id) ?? 0) + 1);
+    }
+    const attachable = new Set(
+      [...counts.entries()].filter(([, count]) => count === 1).map(([backendId]) => backendId),
+    );
+    return rows.filter((row) => row.shared_backend_id !== null && attachable.has(row.shared_backend_id));
+  }
+
+  private async toSharedDtos(rows: readonly VolumeRow[]): Promise<SharedVolumeDto[]> {
+    if (rows.length === 0) return [];
+    const backends = await this.sharedBackendDescriptors(
+      rows.flatMap((row) => row.shared_backend_id ? [row.shared_backend_id] : []),
+    );
+    const attachments = await this.attachmentSummariesByVolumeIds(rows.map((row) => row.id));
+    return rows.map((row) => this.toSharedDto(
+      row,
+      row.shared_backend_id ? backends.get(row.shared_backend_id) : undefined,
+      attachments.get(row.id) ?? [],
+    ));
+  }
+
+  private async sharedBackendDescriptors(
+    backendIds: readonly string[],
+  ): Promise<Map<string, { name: string; capability: SharedVolumeDto['capability'] }>> {
+    const ids = [...new Set(backendIds)];
+    const result = new Map<string, { name: string; capability: SharedVolumeDto['capability'] }>();
+    if (ids.length === 0) return result;
+    const backends = await this.database
+      .selectFrom('infra.shared_backends')
+      .select(['id', 'name', 'display_name'])
+      .where('id', 'in', ids)
+      .execute();
+    const pools = await this.database
+      .selectFrom('infra.storage_pools')
+      .select(['shared_backend_id', 'quota_effective'])
+      .where('shared_backend_id', 'in', ids)
+      .where('driver', '=', 'cephfs')
+      .where('shareable', '=', true)
+      .where('registered', '=', true)
+      .execute();
+    const quotaByBackend = new Map<string, boolean>();
+    for (const pool of pools) {
+      if (!pool.shared_backend_id) continue;
+      if (pool.quota_effective === true) quotaByBackend.set(pool.shared_backend_id, true);
+      else if (!quotaByBackend.has(pool.shared_backend_id)) {
+        quotaByBackend.set(pool.shared_backend_id, false);
+      }
+    }
+    for (const backend of backends) {
+      const hasPool = quotaByBackend.has(backend.id);
+      const quotaEffective = hasPool ? quotaByBackend.get(backend.id) === true : true;
+      result.set(backend.id, {
+        name: poolLabel(backend.display_name, backend.name),
+        capability: storagePoolCapability(StoragePoolResizeFamily.QuotaOnline, quotaEffective),
+      });
+    }
+    return result;
+  }
+
+  private toSharedDto(
+    row: VolumeRow,
+    descriptor: { name: string; capability: SharedVolumeDto['capability'] } | undefined,
+    attachments: VolumeAttachmentSummaryDto[],
+  ): SharedVolumeDto {
+    return {
+      id: row.id,
+      ownerId: row.owner_id,
+      sharedBackendId: row.shared_backend_id!,
+      sharedBackendName: descriptor?.name ?? row.shared_backend_id ?? row.name,
+      name: row.name,
+      incusName: row.incus_name,
+      sizeBytes: numberValue(row.size_bytes),
+      usedBytes: row.used_bytes === null ? null : numberValue(row.used_bytes),
+      capability: descriptor?.capability ?? storagePoolCapability(
+        StoragePoolResizeFamily.QuotaOnline,
+        true,
+      ),
+      lifecyclePhase: lifecyclePhase(row.lifecycle_phase),
+      generation: row.generation,
+      observedGeneration: row.observed_generation,
+      needsAttention: row.needs_attention,
+      failureCode: row.failure_code,
+      dirEnsured: row.dir_ensured,
+      createdAt: isoDate(row.created_at) ?? new Date(0).toISOString(),
+      updatedAt: isoDate(row.updated_at) ?? new Date(0).toISOString(),
+      attachments,
+    };
   }
 
   private toDto(
@@ -1628,21 +2472,17 @@ export class VolumesService {
     descriptor: { capability: VolumeDto['capability']; poolName: string } | undefined,
     attachments: VolumeAttachmentSummaryDto[],
   ): VolumeDto {
-    const scope: VolumeScope = row.server_id !== null
-      ? { kind: 'local', serverId: row.server_id, poolId: row.pool_id }
-      : { kind: 'shared', sharedBackendId: row.shared_backend_id!, poolId: row.pool_id };
     return {
       id: row.id,
       ownerId: row.owner_id,
-      poolId: row.pool_id,
-      poolName: descriptor?.poolName ?? row.pool_id,
-      serverId: row.server_id,
-      sharedBackendId: row.shared_backend_id,
+      poolId: row.pool_id!,
+      poolName: descriptor?.poolName ?? row.pool_id ?? row.name,
+      serverId: row.server_id!,
       name: row.name,
       incusName: row.incus_name,
       sizeBytes: numberValue(row.size_bytes),
       usedBytes: row.used_bytes === null ? null : numberValue(row.used_bytes),
-      scope,
+      scope: { kind: 'local', serverId: row.server_id!, poolId: row.pool_id! },
       capability: descriptor?.capability ?? {
         growOnline: true,
         shrinkOnline: false,
@@ -1661,17 +2501,21 @@ export class VolumesService {
     };
   }
 
-  private toAttachmentDto(row: {
-    id: string;
-    container_id: string;
-    volume_id: string;
-    device_name: string;
-    container_path: string;
-    read_only: boolean;
-    detach_drained_at: Date | string | null;
-    created_at: Date | string;
-    updated_at: Date | string;
-  }, volumeName: string): VolumeAttachmentDto {
+  private toAttachmentDto(
+    row: {
+      id: string;
+      container_id: string;
+      volume_id: string;
+      device_name: string;
+      container_path: string;
+      read_only: boolean;
+      bind_state: VolumeAttachmentSummaryDto['bindState'];
+      created_at: Date | string;
+      updated_at: Date | string;
+    },
+    volumeName: string,
+    extra: { kind: 'local' | 'shared'; catalogState: string | null },
+  ): VolumeAttachmentDto {
     return {
       id: row.id,
       containerId: row.container_id,
@@ -1680,7 +2524,9 @@ export class VolumesService {
       deviceName: row.device_name,
       containerPath: row.container_path,
       readOnly: row.read_only,
-      detachDrainedAt: isoDate(row.detach_drained_at),
+      bindState: row.bind_state,
+      kind: extra.kind,
+      onlineCancelAllowed: row.bind_state === 'attaching' && extra.catalogState !== 'present',
       createdAt: isoDate(row.created_at) ?? new Date(0).toISOString(),
       updatedAt: isoDate(row.updated_at) ?? new Date(0).toISOString(),
     };

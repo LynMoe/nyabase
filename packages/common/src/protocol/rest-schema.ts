@@ -354,8 +354,6 @@ export const zRunPreflightRequest = z.object({
   expectedServerRevision: zExpectedRevision,
   poolId: zResourceIdentity,
   probeAddress: zIpv4Address,
-  /** Optional; ignored for macvlan (guest address is applied via exec). */
-  probeHostAddress: zIpv4Address.optional(),
 }).strict();
 
 // Storage pools, shared backends, volumes, and attachments.
@@ -431,7 +429,6 @@ export const zLocalVolumeScope = z.object({
 export const zSharedVolumeScope = z.object({
   kind: z.literal('shared'),
   sharedBackendId: zResourceIdentity,
-  poolId: zResourceIdentity,
 }).strict();
 
 export const zVolumeScope = z.discriminatedUnion('kind', [
@@ -443,7 +440,18 @@ export const zCreateVolumeRequest = z.object({
   ownerId: zResourceIdentity.optional(),
   name: zName,
   sizeBytes: zPositiveBytes,
-  scope: zVolumeScope,
+  scope: zLocalVolumeScope,
+}).strict();
+
+export const zCreateSharedVolumeRequest = z.object({
+  ownerId: zResourceIdentity.optional(),
+  name: zName,
+  sizeBytes: zPositiveBytes,
+  scope: zSharedVolumeScope,
+}).strict();
+
+export const zListSharedVolumesQuery = z.object({
+  attachableOnServerId: zResourceIdentity.optional(),
 }).strict();
 
 export const zPatchVolumeRequest = z.object({
@@ -477,6 +485,7 @@ export const zCreateContainerRequest = z.object({
   gpuPciAddresses: zGpuPciAddresses,
   powerIntent: z.nativeEnum(ContainerPowerIntent),
   ownerId: zResourceIdentity.optional(),
+  volumes: z.array(zAttachVolumeRequest).max(32).optional(),
 }).strict();
 
 export const zPatchContainerLimitsRequest = z.object({
@@ -639,13 +648,13 @@ export const zPreflightReport = z.object({
     api: z.enum(['pass', 'fail']),
     parentInterface: z.enum(['pass', 'fail']),
     gpuRuntime: z.enum(['pass', 'fail', 'not_applicable']),
-    forwarding: z.enum(['pass', 'fail']),
     nftables: z.enum(['pass', 'fail']),
-    rpFilter: z.enum(['pass', 'fail']),
+    ipv4Filtering: z.enum(['pass', 'fail']),
+    guestCanReachHost: z.enum(['pass', 'fail']),
     networkPrerequisites: z.enum(['pass', 'fail']),
     storagePool: z.enum(['pass', 'fail']),
     simplestreamsImage: z.enum(['pass', 'fail']),
-    routedAddress: z.enum(['pass', 'fail']),
+    guestAddress: z.enum(['pass', 'fail']),
     egress: z.enum(['pass', 'fail']),
     nodeMetrics: z.enum(['pass', 'warn', 'fail']),
   }).strict(),
@@ -767,6 +776,8 @@ export type LocalVolumeScope = z.infer<typeof zLocalVolumeScope>;
 export type SharedVolumeScope = z.infer<typeof zSharedVolumeScope>;
 export type VolumeScope = z.infer<typeof zVolumeScope>;
 export type CreateVolumeRequest = z.infer<typeof zCreateVolumeRequest>;
+export type CreateSharedVolumeRequest = z.infer<typeof zCreateSharedVolumeRequest>;
+export type ListSharedVolumesQuery = z.infer<typeof zListSharedVolumesQuery>;
 export type PatchVolumeRequest = z.infer<typeof zPatchVolumeRequest>;
 export type AttachVolumeRequest = z.infer<typeof zAttachVolumeRequest>;
 export type CreateContainerRequest = z.infer<typeof zCreateContainerRequest>;

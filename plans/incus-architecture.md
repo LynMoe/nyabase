@@ -26,8 +26,8 @@
 4. 容器支持 nesting（容器内跑 Docker）与 NVIDIA GPU 直通。
 5. 删除镜像的独立授权，镜像跟随服务器。
 6. 容量双重约束：用户额度 + 池超分系数。
-7. 容器在物理局域网拿到真实可路由 IP：`nictype=macvlan`，控制面分配地址，worker 写入容器。**不使用 `nictype=routed`。**
-8. **删除 Agent**；不为 Docker 保留任务派发。macvlan 拒绝 `ipv4.address`，地址由 guest exec 写入——这是 Incus 约束下的现行方案，不是 routed。
+7. 容器在物理局域网拿到真实可路由 IP：`nictype=bridged` on 未托管 `vmbr`，控制面分配地址，worker 写入容器。**不使用 `nictype=routed`。**
+8. **删除 Agent**；不为 Docker 保留任务派发。`ipv4.address` 是 nft 过滤身份；客户机地址由 guest exec 写入。
 
 ### 1.2 非目标
 
@@ -58,12 +58,12 @@
 
 | # | 议题 | 决策 |
 | --- | --- | --- |
-| N1 | NIC 类型 | **`nictype=macvlan`**，`mode=bridge`，parent 是宿主机现有的物理网卡。**不建网桥、不动宿主机网络配置。不使用 `nictype=routed`。** |
-| N2 | 地址 | Incus macvlan **拒绝** `ipv4.address`。控制面分配 IP（N4），worker 对运行中的实例 `exec` 写入 `ip addr`。DTO 字段 `routedIp` 是历史命名，表示已分配的局域网地址，**不是** routed NIC。 |
-| N3 | 防伪 | macvlan 与父网卡共享 L2。本版不安装 routed 的 rp_filter/FIB 表。IP 唯一性靠 `container_network_claims` + 排空窗口。宿主机无法直接访问自己的 macvlan 子接口（内核限制）。 |
+| N1 | NIC 类型 | **`nictype=bridged`**，parent 是运维自建的**未托管** Linux 网桥（`vmbr0` / `vmbr100`）。产品**不**创建网桥、**不** `incus network create`、**不**使用 `nictype=routed` 或 macvlan。两种合法宿主布局见 §9.6。 |
+| N2 | 地址 | Bridged **接受** `ipv4.address` 作为 **nft 过滤身份**（不是客户机配置）。控制面分配 IP（N4），worker 对运行中的实例 `exec` 写入 `ip addr`。DTO 字段 `routedIp` 是历史命名，表示已分配的局域网地址，**不是** routed NIC。 |
+| N3 | 防伪 | nft `bridge` family：ARP sender / IPv4 saddr / MAC 绑定。claims + 排空窗口仍是集群级 IPAM 唯一性。**宿主机可以访问自己的客户机。** 宿主 IPv4 证明是任一宿主 iface 的 inet/global ∈ 绑定池 `cidr`（`preflight_host_ip_not_in_pool`），不要求地址必须在 `vmbr0` 上。Rogue DHCP 仍是已知缺口。 |
 | N4 | IP 分配 | 控制面分配，沿用现有的 `container_network_claims` + 排空窗口 |
-| N5 | 二层能力 | 已确认**不需要**广播/组播/独立 MAC/容器内 DHCP 客户端。routed 是 L3 转发，这些都不可用 |
-| N6 | 改 IP | 技术上可行（设备 remove + re-add，会闪断），但**本版 UI 不提供**，需换网段就重建（§9.8） |
+| N5 | 二层能力 | 容器是局域网上一等 L2 对等体（独立 MAC、ARP、广播）。**不因此打开容器内 DHCP。** 镜像必须 `network_managed_externally=true`；地址由控制面 `exec` 写入。禁止容器内 DHCP 客户端 / NetworkManager 冲掉该地址。 |
+| N6 | 改 IP | **本版 UI 不提供。** Bridged 的过滤身份 `ipv4.address` **是**热更新字段；客户机仍需 `exec`。见 §9.8。 |
 
 ### 2.3 存储
 
@@ -104,7 +104,7 @@
 | # | 议题 | 决策 |
 | --- | --- | --- |
 | E1 | grant-expiry | 已于 `d594a15` 单独提交；本次保留并适配（「清理 datadir」→「清理 incus 卷」） |
-| E2 | e2e | 完整覆盖：宿主机装 incus + 预建两种能力族的池 + routed 网络 + 私有镜像源；`features.yaml` 重写 |
+| E2 | e2e | 完整覆盖：宿主机装 incus + 预建两种能力族的池 + unmanaged `vmbr`（布局 A/B）+ 私有镜像源；`features.yaml` 重写 |
 
 ---
 
@@ -1092,10 +1092,12 @@ POST /1.0/instances
   },
   devices: {
     root: { type: "disk", path: "/", pool: "<系统盘池>", size: "<rootSizeBytes>" },
-    eth0: { type: "nic", nictype: "routed", parent: "<宿主机物理网卡>",
-            "ipv4.address": "<控制面分配的 IP>",
-            "ipv4.gateway": "auto",
-            hwaddr: "<由容器 UUID 派生>" },        // §9.2
+    eth0: { type: "nic", nictype: "bridged", parent: "<未托管 Linux 网桥，如 vmbr0>",
+            name: "eth0",
+            hwaddr: "<由容器 UUID 派生>",
+            "ipv4.address": "<控制面分配的 IP，nft 过滤身份>",
+            "security.ipv4_filtering": "true",
+            "security.mac_filtering": "true" },    // §9.2
     "gpu0": { type: "gpu", gputype: "physical", pci: "0000:41:00.0" },
     "nyd-<uuid32>": { type: "disk", pool: "<池>", source: "<卷 incus_name>", path: "/data/foo" }
   }
@@ -1139,43 +1141,42 @@ POST /1.0/instances
 
 ## 9. 网络
 
-### 9.1 产品决策：macvlan
+### 9.1 产品决策：未托管 bridged `vmbr`
 
-**现行决策是 `nictype=macvlan`（`mode=bridge`）。不使用 `nictype=routed`。**
+**现行决策是 `nictype=bridged`，parent 为运维自建的未托管 Linux 网桥（PVE `vmbr0` 形态）。不使用 `nictype=macvlan` 或 `nictype=routed`。不 `incus network create`。**
 
-已源码级确认：macvlan **拒绝** `ipv4.address`（400，不是被忽略）。地址由控制面分配，
-reconciler `exec` 写入容器。下面对照表是选型调研，**不是现行实施依据**。
+`ipv4.address` 在 bridged 上是 **nft 过滤身份**，不配置系统容器的客户机地址。地址仍由控制面分配，
+reconciler `exec` 写入容器。SSH/HTTP 代理可以跑在 Incus 宿主机上并 TCP 到客户机。
 
-四种曾评估的候选：
+对照（选型调研，现行实施是 bridged 列）：
 
-| 需求 | macvlan | ipvlan | bridged | **routed** |
+| 需求 | macvlan | ipvlan | **bridged（现行）** | routed |
 | --- | --- | --- | --- | --- |
-| 控制面指定静态 IP | ✗ 拒绝该选项 | ✓ | 仅作过滤身份 | **✓ 真正写进容器** |
-| 局域网其它主机可访问 | ✓ | ✓ | ✓ | ✓ proxy ARP |
-| 宿主机能访问自己的容器 | ✗ | ✗ | ✓ | ✓ |
-| 宿主侧防伪 | ✗ | ✗ | ✓ 显式过滤 | **✓ 结构性 + rp_filter + FIB** |
-| 需要 cloud-init 才有地址 | 需要 | 需要 | **需要** | **不需要** |
-| 热插拔 | ✓ | ✗ | ✓ | ✓ |
-| 真 L2（广播、独立 MAC） | ✓ | 共享父 MAC | ✓ | **✗** |
+| 控制面指定静态 IP | ✗ 拒绝该选项 | ✓ | 仅作过滤身份；guest `exec` 写地址 | 真正写进容器 |
+| 局域网其它主机可访问 | ✓ | ✓ | **✓** | ✓ proxy ARP |
+| 宿主机能访问自己的容器 | ✗ | ✗ | **✓** | ✓ |
+| 宿主侧防伪 | ✗ | ✗ | **✓ nft ARP/IPv4/MAC** | 结构性 + rp_filter + FIB |
+| 需要 cloud-init 才有地址 | 需要 | 需要 | guest `exec`（不依赖 cloud-init） | 不需要 |
+| 真 L2（广播、独立 MAC） | ✓ | 共享父 MAC | **✓** | ✗ |
 
-`macvlan` 与 `ipvlan` 都有「父接口无法与子接口通信」的内核限制。产品接受该限制：SSH/HTTP 代理不依赖宿主机直连容器。
+**不使用 routed。** 用户要的是 PVE `vmbr` 的真 L2，不是 host proxy-ARP。
 
-**不使用 routed。** 下面曾评估过 routed 的防伪/地址写入优势，但现行实现是 macvlan + guest exec。
-
-### 9.2 现行设备形态（macvlan）
+### 9.2 现行设备形态（bridged）
 
 ```
 eth0: {
   type: "nic",
-  nictype: "macvlan",
-  mode: "bridge",
-  parent: "<宿主机物理网卡，如 eno1>",
+  nictype: "bridged",
+  parent: "<未托管 Linux 网桥，如 vmbr0>",
   name: "eth0",
-  hwaddr: "<由容器 UUID 确定性派生>"
+  hwaddr: "<由容器 UUID 确定性派生>",
+  "ipv4.address": "<控制面分配的 IP>",
+  "security.ipv4_filtering": "true",
+  "security.mac_filtering": "true"
 }
 ```
 
-Incus macvlan 拒绝 `ipv4.address`。控制面把地址记在 `container_network_claims` / DTO `routedIp`（历史字段名）。
+`ipv4.address` 是 nft allowlist 身份。控制面把地址记在 `container_network_claims` / DTO `routedIp`（历史字段名）。
 容器 Running 后，reconciler `exec`：
 
 ```
@@ -1184,12 +1185,14 @@ ip addr replace <addr>/<prefix> dev eth0
 ip route replace default via <gateway> dev eth0
 ```
 
-**显式钉住 `hwaddr`**，不依赖 `volatile.<nic>.hwaddr`。
+**显式钉住 `hwaddr`**，不依赖 `volatile.<nic>.hwaddr`。`validateEth0` 对实际非 bridged NIC fail-close，不写 Incus（无转换器）。
 
 ### 9.3 防伪（现行）
 
-macvlan 与父网卡共享 L2，ARP 欺骗在结构上可能。本版不安装 routed 的 rp_filter/FIB 表。
-IP 唯一性靠控制面 claims + 排空窗口（N4）。宿主机无法直接访问自己的 macvlan 子接口。
+nft `bridge` family 表 `incus`：`arp saddr ip`、`ip saddr`、`ether saddr` 绑定 claim IPv4 + 钉死的 MAC。
+IPAM 唯一性仍靠控制面 claims + 排空窗口（N4）。宿主机可以访问自己的客户机。
+Rogue DHCP 不被 `security.ipv4_filtering` 拦截，是已知缺口。
+`nft` 缺失时 Incus 只打日志，过滤静默失效 —— 前置检查必须实证 `bridge_filter_address{address}`。
 
 
 ### 9.4 SSH 密钥注入（C9）
@@ -1209,7 +1212,7 @@ IP 唯一性靠控制面 claims + 排空窗口（N4）。宿主机无法直接�
 
 ### 9.5 DNS 与容器内网络配置
 
-⚠️ **routed 只配置地址、网关与路由，不管 DNS。** 没有 cloud-init 也就没有人写
+⚠️ **bridged 的 `ipv4.address` 只是过滤身份，不管 DNS。** 没有 cloud-init 也就没有人写
 `/etc/resolv.conf`。两条路径：
 
 | 方案 | 说明 |
@@ -1220,40 +1223,41 @@ IP 唯一性靠控制面 claims + 排空窗口（N4）。宿主机无法直接�
 方案取**镜像内置 + 服务器级可覆盖**：`infra.servers` 增加可选的 `dns_servers`，
 非空时在容器首次启动后连同 authorized_keys 一起写进去。
 
-同样需要确认容器内的网络栈**不会覆盖 Incus 写入的地址**：若镜像里跑着 DHCP 客户端或
-NetworkManager，它可能把 Incus 配好的地址冲掉。私有镜像源里的镜像必须**禁用 DHCP 客户端**，
+同样需要确认容器内的网络栈**不会覆盖控制面写入的地址**：若镜像里跑着 DHCP 客户端或
+NetworkManager，它可能把 `exec` 配好的地址冲掉。私有镜像源里的镜像必须**禁用 DHCP 客户端**，
 这是镜像的准入条件（`infra.images` 用一个 `network_managed_externally` 标记，登记时校验）。
 
 ### 9.6 运维前置
 
-服务器接入前必须完成（与存储池同属「发现而非管理」的同一原则）：
+服务器接入前必须完成（与存储池同属「发现而非管理」的同一原则）。**网桥是运维前置，产品不创建。**
 
 ```
-1. sysctl -w net.ipv4.conf.<parent>.forwarding=1        ← 不设则容器【拒绝启动】（fail-closed）
-   持久化到 /etc/sysctl.d/
-   ⚠️ Incus 只对自己创建的父接口自动设 sysctl，物理网卡必须运维手工设
-2. 确认 nftables 可用（nft 在 PATH）—— FIB 那一层依赖它
+1. 原子创建未托管 Linux 网桥 vmbr0，二选一（见 deploy/OPERATIONS.md）：
+   (A) PVE 经典：上联 slave 无 IPv4，宿主 IPv4 / 默认路由 / DNS 落在 vmbr0。
+   (B) 专用容器 NIC：e1000/eth1 等上联挂在 vmbr0；桥和 slave 均无全局 IPv4；
+       宿主 IPv4 留在非 slave 管理口（如 virtio eth0）。
+   布局 A 必须在带外通道下把管理地址迁到桥上。布局 B 不要动管理口。
+2. 确认 nft 可用（nft 在 PATH；node-exporter 需 CAP_NET_ADMIN 才能 list bridge 表）
 3. 有 GPU 的机器：装 NVIDIA driver + nvidia-container-toolkit
-   （否则 nvidia.runtime 的容器起不来，且 /1.0/resources 拿不到 GPU UUID）
 4. incus config set core.https_address :8443
 5. incus config trust add --name nyabase
+6. 删除遗留 nyc-* / nyabase-preflight-* 再启动 worker（无 macvlan→bridged 转换器）
 ```
 
-比 bridged 少了最危险的一步 —— **不需要建网桥、不需要把物理网卡 enslave、
-不需要把宿主机 IP 迁到网桥上**。那一步会短暂断网且做错会把自己锁在机器外面，
-必须在带外通道下操作。routed 直接用现有的物理网卡，宿主机网络配置**完全不动**。
-
-后端在服务器登记时**实证校验**：
+后端在服务器登记时**实证校验，永不改宿主机网络**：
 - 读 `/1.0`、`/1.0/resources` 确认连通与硬件。
-- 确认 `parent` 网卡存在。
-- **创建一个探针实例，确认它能启动**（forwarding 没设的话这一步会直接失败，正是我们要的）
-  并从容器内验证出网，然后删除。
+- `GET /1.0/networks/{parent}`：`type=bridge` 且 `managed=false`。
+- 宿主 IPv4：任一宿主 iface 的 inet/global ∈ 绑定池 `cidr`（`preflight_host_ip_not_in_pool`）。
+  不要求地址在 `vmbr0` 上。slave 上无全局 IPv4。
+- **创建一个探针实例**（bridged + filtering），guest exec 写地址，guest ping 宿主，
+  第二次 OpenMetrics pull 上 `bridge_filter_address{address=probe}`=1，然后删除。
 
 不满足则在管理页明确指出缺哪一项和对应的宿主机命令，而不是让用户在创建容器时才撞墙。
+产品**绝不**执行 `ip link` / netplan / `incus network create`。
 
 ### 9.7 IP 分配与回收
 
-沿用现有机制，只改名（`macvlan_*` → `lan_*`）：
+沿用现有机制（claims 表名保持不变）：
 
 - `control.container_network_claims`：`UNIQUE (network_key, address)`，一个地址一个所有者。
 - 分配：在创建事务内持 `pg_advisory_xact_lock('container-network:<cidr>')`，
@@ -1265,14 +1269,11 @@ NetworkManager，它可能把 Incus 配好的地址冲掉。私有镜像源里�
 
 ### 9.8 IP 的可变性
 
-`ipv4.address` **不在 routed 的 `UpdatableFields` 里**（只有 `limits.*` 和 `connected` 在），
-所以改地址会触发**设备 remove + re-add**：宿主侧路由与 proxy-ARP 条目完整重建，
-容器内接口消失再出现并带上新地址 —— 链路闪断，但**地址确实会变**。
+Bridged 的过滤身份 `ipv4.address` **在 Incus `UpdatableFields` 里**，可以热更新 allowlist
+而不 remove/add 设备。客户机地址仍然需要 `exec`；顺序风险仍在（旧地址会立刻从过滤集里消失）。
+**本版 UI 不提供「改 IP」。** N6 不变。
 
-这比 bridged 好（bridged 改地址后容器内地址根本不会变，只能重建容器），
-但仍然是一次可感知的中断。
-
-**决策：本版 UI 不提供「改 IP」。** 理由不是技术上做不到，而是：
+理由不是技术上做不到，而是：
 - 改 IP 会打断该容器上所有 SSH 会话与 HTTP 代理路由。
 - 与旧架构一致（旧的 `assignedIp` 进 spec hash，改了就要重建）。
 - 需要换网段的场景罕见，重建容器是可接受的答案。
@@ -1402,9 +1403,9 @@ shrinkNever         → 按钮禁用，tooltip 说明「该池使用 XFS，文�
 GET    /servers/:id/storage-pools              # 用户视角：我能用的池
 GET    /admin/servers/:id/storage-pools        # 管理员视角：含未登记的发现结果
 PATCH  /admin/storage-pools/:id                # 登记 / 改显示名
-PATCH  /admin/servers/:id                      # systemPoolId、storageOvercommitRatio、bridgeParent
+PATCH  /admin/servers/:id                      # systemPoolId、storageOvercommitRatio、parentInterface
 POST   /admin/servers/:id/connect              # 粘贴 trust token 完成互信（§4.5）
-GET    /admin/servers/:id/preflight            # 前置检查：forwarding sysctl/nftables/GPU toolkit/池/探针实例
+GET    /admin/servers/:id/preflight            # 前置检查：LAN 网桥/nftables 防伪/GPU toolkit/池/探针实例
 
 GET    /admin/shared-backends                  # + POST / PATCH / DELETE
 GET    /volumes                                # + POST / PATCH / DELETE
@@ -1471,7 +1472,7 @@ INSTANCE_BUSY                 { containerId }          # Incus 实例锁冲突�
 `effective | groups | overrides | storage-pools | shared-backends | ssh | password`。
 
 **新增**：
-- **服务器接入向导**：粘贴 token → 连通性检查 → 前置检查（forwarding sysctl/nftables/GPU toolkit/探针实例）
+- **服务器接入向导**：粘贴 token → 连通性检查 → 前置检查（LAN 网桥 / nftables 防伪 / GPU toolkit / 探针实例）
   → 池发现与登记 → 指定系统盘池。每一步的失败都给出具体的宿主机命令。
 - **存储池管理**（服务器详情页新标签）：驱动、容量、已提交、超分后可用、能力标记
   （可否在线缩 / 可否做系统盘 / 是否共享 / 配额是否生效）。未登记的池灰色列出带「登记」按钮。
@@ -1799,8 +1800,9 @@ ceph(RBD) 池                        → shareable=false，跨服务器挂载被
      e2e-lvm  driver=lvm, volume.block.filesystem=ext4  → block_backed（缩容需停机）
      e2e-dir  driver=dir, 底层 fs 开 project quota       → quota_online（在线缩容）
    两个都必须有 —— §15.3 的能力矩阵要求两族都能跑
-3. dummy 物理网卡作为 routed 的 parent；设好 forwarding sysctl；
-   验证 rp_filter=1 与 FIB 规则真的生成了
+3. 运维自建未托管 `vmbr0`（布局 A：host IP 在网桥上；布局 B：专用上联 NIC，
+   host IP 留在管理口）；验证 parent 是 linux bridge 且有 slave；
+   验证 nft `bridge incus` 过滤、host↔guest ping、guest→gateway ping
 4. 私有 simplestreams 源（静态文件 + 自签 HTTPS，e2e 的 CA 已有），
    放一个带 sshd、且不跑 DHCP 客户端的最小系统镜像
 5. 无 GPU：GPU 用例走「服务器无 GPU → nvidia_runtime 不启用」分支
@@ -1812,10 +1814,11 @@ ceph(RBD) 池                        → shareable=false，跨服务器挂载被
   「两台服务器挂同一个 cephfs 卷」进**人工验收清单**。
 - **多服务器并发**：e2e 环境只有一台宿主机，跨服务器的容量核算与共享卷语义靠单测覆盖。
 
-### 15.6 网络验证（macvlan）
+### 15.6 网络验证（bridged vmbr）
 
-产品 NIC 是 macvlan。e2e 验证父网卡存在、claim 地址能在容器内生效、探针清理。
-不要求 routed FIB/rp_filter 防伪实证（N3 现行是 claims，不是结构性隔离）。
+产品 NIC 是 unmanaged bridged。e2e 验证 parent 是 linux bridge、实例 nictype=bridged、
+guest 地址仍由 reconciler 写入、**宿主机能 ping 客户机**、nft `bridge_filter_address`
+含 claim（及第二地址被丢弃）。前置检查的 L2 是 guest→host，不能替代 host→guest。
 
 
 ---
@@ -1826,7 +1829,7 @@ ceph(RBD) 池                        → shareable=false，跨服务器挂载被
 
 | # | 验证内容 | 若为否 |
 | --- | --- | --- |
-| **1** | **macvlan 全链路**：父网卡存在；容器 eth0 为 macvlan；guest exec 写入 claim 地址后局域网可达；探针清理 | 父网卡或地址写入失败则不能上线该服务器 |
+| **1** | **bridged 全链路**：parent 是未托管 linux bridge；容器 eth0 为 bridged + filtering；guest exec 写入 claim；宿主机能 ping 客户机；nft 含 claim | 网桥或过滤未实证则不能上线该服务器 |
 | **2** | 镜像内的网络栈会不会冲掉 guest 写入的地址 | `network_managed_externally` 门控是必须实现的；reconciler 周期性重写地址 |
 | 3 | `PUT` 后 `volatile.*` 是否保留（用读回-改副本-写回的方式）；ETag/`If-Match` 的覆盖范围 | 收敛必须改用 `PATCH` 并放弃删键能力 |
 | 4 | 配置回显保真度：`limits.memory: "1GiB"` 会不会被归一成字节；Incus 往 `config` 注入哪些自己的键 | `compareManagedFields` 的归一化规则照此定稿 |
@@ -1856,9 +1859,9 @@ ceph(RBD) 池                        → shareable=false，跨服务器挂载被
 | Incus 实例锁**无超时**，卡住的操作无限期持有 | 单个容器永久不可操作 | 有界 context + N 次后标 `needs_attention` 停止重试，交给人 |
 | 锁冲突返回 **500 而非 409** | 误判为服务器故障 | 按错误文本匹配；检查异步操作的 error 字段而非只看 POST 响应码 |
 | 镜像内的网络栈可能冲掉 Incus 写入的地址 | 容器失去网络 | 私有镜像源里的镜像必须禁用 DHCP 客户端；`network_managed_externally` 登记校验 + 创建门控 |
-| ⚠️ `nft` 缺失导致 FIB 那一层静默消失 | 防伪降一档（结构性隔离与 rp_filter 仍在） | 前置检查实证 `nft` 可用；探针实例验证规则真的生成 |
-| **IP 不可变** | 用户不能改容器 IP | UI 不提供该操作；与旧架构一致，不是退步 |
-| **无广播/组播** | mDNS、服务自发现、VRRP/keepalived、容器内 DHCP 客户端都不可用 | 已确认不是需求（N5）。若将来需要，只能换回 bridged 并接受 cloud-init 依赖与 nft 静默失效 |
+| ⚠️ `nft` 缺失导致 bridged 过滤静默失效 | 客户机可 ARP/IPv4 欺骗 | 前置检查实证 `nft` + `bridge_filter_address{address=probe}`；exporter `CAP_NET_ADMIN` |
+| Rogue DHCP 从容器发出 | 局域网 DHCP 被劫持 | 已知缺口；不在本切中关闭。后续 `security.acls` 或运维 nft |
+| **IP 不可变（UI）** | 用户不能改容器 IP | N6：UI 不提供该操作；过滤身份 technically 可热更新 |
 | 一次性重构面极大（删除整个 agent 包 + workflow schema + 全新存储域与收敛引擎） | 中途卡住 | 分阶段交付，每阶段仓库自洽；协议冻结后三条 lane 并行 |
 | 自建 Incus 客户端的成熟度 | 边缘错误处理不完备 | 类型从官方 yaml 生成；只封装用到的端点；错误映射写单测；变更后坚持重读实际状态 |
 | 系统容器语义与用户预期的落差 | 用户按 Docker 习惯用会困惑 | 镜像自带 init 与 sshd，体验接近轻量 VM；文档与 UI 明确说明 |
@@ -1877,7 +1880,7 @@ ceph(RBD) 池                        → shareable=false，跨服务器挂载被
 | Agent | 保留，重写驱动层 | **整体删除**，控制面直连 Incus API |
 | 执行模型 | 不可变任务 + WS 派发 + 无状态 Agent + finalizer | 期望态 + 持久意图 + 后端直接收敛 |
 | 任务种类 | 12 种 | 无「任务种类」概念，只有资源收敛器 3 个 |
-| 网络 | 保留 macvlan + 静态 IP | **macvlan + 控制面分配 + guest exec 写地址**（不使用 routed；`routedIp` 仅为地址字段名） |
+| 网络 | 保留 macvlan + 静态 IP | **bridged on unmanaged vmbr + 控制面分配 + guest exec 写地址**（`ipv4.address` 为过滤身份；宿主布局 A/B，见 §9.6；`routedIp` 仅为地址字段名；不使用 routed） |
 | 不确定性处理 | 不确定性边界 → 隔离服务器 | 调用超时就重读实际状态；无服务器隔离 |
 | 故障隔离粒度 | 服务器级（一个容器出问题冻结整台） | 资源级 `needs_attention` |
 | 删除量 | ~10k 行 | ~25k 行（含整个 agent 包与 workflow schema） |

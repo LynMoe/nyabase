@@ -22,6 +22,10 @@ export function apiErrorCurrent<T>(
   return validate(current) ? current : null;
 }
 
+export function errorMessage(error: unknown, fallback = '请稍后重试'): string {
+  return error instanceof Error ? error.message : fallback;
+}
+
 /** Structured `details` from Nest conflict/error envelopes when present. */
 export function apiErrorDetails(error: unknown): Record<string, unknown> | null {
   if (!(error instanceof ApiError)) return null;

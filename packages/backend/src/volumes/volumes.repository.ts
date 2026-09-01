@@ -4,6 +4,8 @@ import type { NyabaseDatabase } from '../persistence-pg/database.types.js';
 import { PG_DATABASE } from '../persistence-pg/tokens.js';
 
 export type VolumeExecutor = Kysely<NyabaseDatabase> | Transaction<NyabaseDatabase>;
+export type VolumeCatalogState = 'ensuring' | 'present';
+export type VolumeBindState = 'attaching' | 'attached' | 'detaching';
 
 @Injectable()
 export class VolumesRepository {
@@ -14,6 +16,19 @@ export class VolumesRepository {
 
   list(ownerId?: string, executor: VolumeExecutor = this.database) {
     let query = executor.selectFrom('control.volumes').selectAll().orderBy('created_at', 'desc');
+    if (ownerId) query = query.where('owner_id', '=', ownerId);
+    return query.execute();
+  }
+
+  listByKind(
+    kind: 'local' | 'shared',
+    ownerId?: string,
+    executor: VolumeExecutor = this.database,
+  ) {
+    let query = executor.selectFrom('control.volumes').selectAll().orderBy('created_at', 'desc');
+    query = kind === 'local'
+      ? query.where('shared_backend_id', 'is', null)
+      : query.where('shared_backend_id', 'is not', null);
     if (ownerId) query = query.where('owner_id', '=', ownerId);
     return query.execute();
   }
@@ -29,12 +44,14 @@ export class VolumesRepository {
   insert(input: {
     id: string;
     ownerId: string;
-    poolId: string;
+    poolId: string | null;
     serverId: string | null;
     sharedBackendId: string | null;
     name: string;
     incusName: string;
     sizeBytes: number;
+    lifecyclePhase?: 'provisioning' | 'active' | 'deleting' | 'failed';
+    dirEnsured?: boolean;
   }, executor: VolumeExecutor) {
     return executor
       .insertInto('control.volumes')
@@ -50,9 +67,12 @@ export class VolumesRepository {
         used_bytes: null,
         generation: 1,
         observed_generation: null,
-        lifecycle_phase: 'provisioning',
+        lifecycle_phase: input.lifecyclePhase ?? 'provisioning',
         needs_attention: false,
         failure_code: null,
+        dir_ensured: input.dirEnsured ?? false,
+        remove_all_committed: false,
+        remove_all_server_id: null,
       })
       .returningAll()
       .executeTakeFirstOrThrow();
@@ -108,6 +128,7 @@ export class VolumesRepository {
     deviceName: string;
     containerPath: string;
     readOnly: boolean;
+    bindState?: VolumeBindState;
   }, executor: VolumeExecutor) {
     return executor
       .insertInto('control.volume_attachments')
@@ -118,10 +139,23 @@ export class VolumesRepository {
         device_name: input.deviceName,
         container_path: input.containerPath,
         read_only: input.readOnly,
-        detach_drained_at: null,
+        bind_state: input.bindState ?? 'attaching',
       })
       .returningAll()
       .executeTakeFirstOrThrow();
+  }
+
+  setAttachmentBindState(
+    id: string,
+    bindState: VolumeBindState,
+    executor: VolumeExecutor,
+  ) {
+    return executor
+      .updateTable('control.volume_attachments')
+      .set({ bind_state: bindState })
+      .where('id', '=', id)
+      .returningAll()
+      .executeTakeFirst();
   }
 
   deleteAttachment(id: string, executor: VolumeExecutor) {
@@ -130,41 +164,6 @@ export class VolumesRepository {
       .where('id', '=', id)
       .returningAll()
       .executeTakeFirst();
-  }
-
-  findDetachDrain(volumeId: string, executor: VolumeExecutor = this.database) {
-    return executor.selectFrom('control.volume_detach_drains')
-      .selectAll()
-      .where('volume_id', '=', volumeId)
-      .executeTakeFirst();
-  }
-
-  async setDetachDrain(
-    volumeId: string,
-    drainedAt: Date,
-    executor: VolumeExecutor,
-  ): Promise<void> {
-    await executor.insertInto('control.volume_detach_drains')
-      .values({
-        volume_id: volumeId,
-        drained_at: drainedAt,
-        created_at: new Date(),
-      })
-      .onConflict((conflict) => conflict
-        .column('volume_id')
-        .doUpdateSet({ drained_at: drainedAt }))
-      .execute();
-  }
-
-  async clearExpiredDetachDrain(
-    volumeId: string,
-    now: Date,
-    executor: VolumeExecutor = this.database,
-  ): Promise<void> {
-    await executor.deleteFrom('control.volume_detach_drains')
-      .where('volume_id', '=', volumeId)
-      .where('drained_at', '<=', now)
-      .execute();
   }
 
   async hasAttachments(volumeId: string, executor: VolumeExecutor = this.database) {
@@ -202,20 +201,12 @@ export class VolumesRepository {
       .executeTakeFirst();
   }
 
-  listDesiredPlacements(volumeId: string, executor: VolumeExecutor = this.database) {
-    return executor.selectFrom('control.volume_placements')
-      .selectAll()
-      .where('volume_id', '=', volumeId)
-      .where('desired_present', '=', true)
-      .execute();
-  }
-
   async upsertPlacement(
     input: {
       volumeId: string;
       serverId: string;
       poolId: string;
-      desiredPresent: boolean;
+      catalogState: VolumeCatalogState;
     },
     executor: VolumeExecutor,
   ): Promise<void> {
@@ -224,54 +215,27 @@ export class VolumesRepository {
         volume_id: input.volumeId,
         server_id: input.serverId,
         pool_id: input.poolId,
-        desired_present: input.desiredPresent,
-        observed_present: false,
+        catalog_state: input.catalogState,
         observed_generation: null,
-        unused_confirmed_at: null,
       })
       .onConflict((conflict) => conflict
         .columns(['volume_id', 'server_id'])
         .doUpdateSet({
           pool_id: input.poolId,
-          desired_present: input.desiredPresent,
         }))
       .execute();
   }
 
-  async setDesiredPresent(
+  async setCatalogState(
     volumeId: string,
     serverId: string,
-    desiredPresent: boolean,
+    catalogState: VolumeCatalogState,
     executor: VolumeExecutor,
   ): Promise<void> {
     await executor.updateTable('control.volume_placements')
-      .set({ desired_present: desiredPresent })
+      .set({ catalog_state: catalogState })
       .where('volume_id', '=', volumeId)
       .where('server_id', '=', serverId)
-      .execute();
-  }
-
-  async setAllDesiredPresent(
-    volumeId: string,
-    desiredPresent: boolean,
-    executor: VolumeExecutor,
-  ): Promise<void> {
-    await executor.updateTable('control.volume_placements')
-      .set({ desired_present: desiredPresent })
-      .where('volume_id', '=', volumeId)
-      .execute();
-  }
-
-  async stampUnusedConfirmed(
-    volumeId: string,
-    serverId: string,
-    executor: VolumeExecutor = this.database,
-  ): Promise<void> {
-    await executor.updateTable('control.volume_placements')
-      .set({ unused_confirmed_at: new Date() })
-      .where('volume_id', '=', volumeId)
-      .where('server_id', '=', serverId)
-      .where('unused_confirmed_at', 'is', null)
       .execute();
   }
 
@@ -279,14 +243,14 @@ export class VolumesRepository {
     input: {
       volumeId: string;
       serverId: string;
-      observedPresent: boolean;
+      catalogState: VolumeCatalogState;
       observedGeneration?: number | null;
     },
     executor: VolumeExecutor = this.database,
   ): Promise<void> {
     await executor.updateTable('control.volume_placements')
       .set({
-        observed_present: input.observedPresent,
+        catalog_state: input.catalogState,
         ...(input.observedGeneration === undefined
           ? {}
           : { observed_generation: input.observedGeneration }),
@@ -307,22 +271,29 @@ export class VolumesRepository {
       .execute();
   }
 
-  async deleteVolumeRow(volumeId: string, executor: VolumeExecutor): Promise<void> {
-    await executor.deleteFrom('control.volumes').where('id', '=', volumeId).execute();
+  async dropAllPlacements(volumeId: string, executor: VolumeExecutor = this.database): Promise<void> {
+    await executor.deleteFrom('control.volume_placements')
+      .where('volume_id', '=', volumeId)
+      .execute();
   }
 
-  async liveAttachmentServerIds(
+  async markCatalogPresent(
     volumeId: string,
+    serverId: string,
     executor: VolumeExecutor = this.database,
-  ): Promise<string[]> {
-    const rows = await executor
-      .selectFrom('control.volume_attachments as a')
-      .innerJoin('control.containers as c', 'c.id', 'a.container_id')
-      .select('c.server_id as server_id')
-      .where('a.volume_id', '=', volumeId)
-      .where('a.detach_drained_at', 'is', null)
-      .where('c.lifecycle_phase', 'not in', ['failed', 'deleting'])
+  ): Promise<void> {
+    await executor.updateTable('control.volume_placements')
+      .set({ catalog_state: 'present' })
+      .where('volume_id', '=', volumeId)
+      .where('server_id', '=', serverId)
       .execute();
-    return [...new Set(rows.map((row) => row.server_id))];
+    await executor.updateTable('control.volumes')
+      .set({ dir_ensured: true })
+      .where('id', '=', volumeId)
+      .execute();
+  }
+
+  async deleteVolumeRow(volumeId: string, executor: VolumeExecutor): Promise<void> {
+    await executor.deleteFrom('control.volumes').where('id', '=', volumeId).execute();
   }
 }

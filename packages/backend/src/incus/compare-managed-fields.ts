@@ -1,3 +1,4 @@
+import { isIP } from 'node:net';
 import type { DesiredInstanceSpec } from './instance-spec.js';
 import { IncusError, type IncusErrorDetails, type IncusFailureCode } from './incus-errors.js';
 
@@ -260,11 +261,55 @@ function validateEth0(
       device: 'eth0',
     });
   }
-  if (eth0.nictype !== 'macvlan') {
+  if (eth0.nictype !== 'bridged') {
     return managedFailure('INVALID_MANAGED_NETWORK_TYPE', {
       source,
       device: 'eth0',
       nictype: eth0.nictype ?? '',
+    });
+  }
+  if (source !== 'desired') return undefined;
+  if (!eth0.parent) {
+    return managedFailure('INVALID_MANAGED_NETWORK_TYPE', {
+      source,
+      device: 'eth0',
+      key: 'parent',
+    });
+  }
+  if (eth0.name !== 'eth0') {
+    return managedFailure('INVALID_MANAGED_NETWORK_TYPE', {
+      source,
+      device: 'eth0',
+      key: 'name',
+    });
+  }
+  if (!eth0.hwaddr) {
+    return managedFailure('INVALID_MANAGED_NETWORK_TYPE', {
+      source,
+      device: 'eth0',
+      key: 'hwaddr',
+    });
+  }
+  const address = eth0['ipv4.address'];
+  if (!address || isIP(address) !== 4 || address.includes('/')) {
+    return managedFailure('INVALID_MANAGED_FILTER_IDENTITY', {
+      source,
+      device: 'eth0',
+      key: 'ipv4.address',
+    });
+  }
+  if (eth0['security.ipv4_filtering'] !== 'true') {
+    return managedFailure('INVALID_MANAGED_FILTER_IDENTITY', {
+      source,
+      device: 'eth0',
+      key: 'security.ipv4_filtering',
+    });
+  }
+  if (eth0['security.mac_filtering'] !== 'true') {
+    return managedFailure('INVALID_MANAGED_FILTER_IDENTITY', {
+      source,
+      device: 'eth0',
+      key: 'security.mac_filtering',
     });
   }
   return undefined;
@@ -323,8 +368,8 @@ export function applyManagedFields(
   }
   for (const [name, device] of Object.entries(expected.devices)) {
     if (isManagedDeviceName(name)) {
-      // eth0 must not retain leftover routed keys (ipv4.address/host_address).
-      // Extra operator devices are preserved; only managed names are replaced.
+      // Replace eth0 wholesale so filter identity is complete and extra keys
+      // cannot survive a merge. Other managed devices still merge.
       devices[name] = name === 'eth0'
         ? { ...device }
         : { ...actual.devices[name], ...device };

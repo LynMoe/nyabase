@@ -16,8 +16,11 @@ usage() {
     '  e2e.sh health <run-id>' \
     '  e2e.sh diagnose <run-id>' \
     '  e2e.sh run <profile> <run-id>' \
+    '  e2e.sh replay <run-id> <profile> [grep]' \
     '  e2e.sh down <run-id>' \
-    '  e2e.sh release <run-id>'
+    '  e2e.sh release <run-id>' \
+    '  e2e.sh start-control-plane <run-id> [profile]' \
+    '  e2e.sh stop-control-plane <run-id>'
 }
 
 command_name="${1:-}"
@@ -48,6 +51,15 @@ case "$command_name" in
     ;;
   run)
     bash "$SCRIPT_DIR/run.sh" "${2:-smoke}" "${3:-}"
+    ;;
+  replay)
+    bash "$SCRIPT_DIR/replay.sh" "${3:-${E2E_PROFILE:-smoke}}" "${2:-}" "${4:-}"
+    ;;
+  start-control-plane)
+    bash "$SCRIPT_DIR/start-control-plane.sh" "${2:-}" "${3:-${E2E_PROFILE:-smoke}}"
+    ;;
+  stop-control-plane)
+    bash "$SCRIPT_DIR/stop-control-plane.sh" "${2:-}"
     ;;
   down)
     bash "$SCRIPT_DIR/down.sh" "${2:-}"

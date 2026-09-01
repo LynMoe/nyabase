@@ -53,7 +53,7 @@ if (state.blocked.cephfs?.startsWith('BLOCKED:') !== true
 }
 NODE
 
-if [[ "$E2E_PROFILE" == "full" || "$E2E_PROFILE" == "recovery" ]]; then
+if [[ "$E2E_PROFILE" == "full" ]]; then
   require_env E2E_NODE_EXPORTER_URL
   require_env E2E_NODE_EXPORTER_TOKEN
   metrics_ca="${E2E_NODE_EXPORTER_CA_FILE:-$E2E_EDGE_CA_FILE}"

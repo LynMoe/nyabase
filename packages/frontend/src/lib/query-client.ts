@@ -28,14 +28,20 @@ export function clearPrincipalQueryState(): void {
   queryClient.clear();
 }
 
-function isCurrentPrincipalAccessQuery(queryKey: readonly unknown[]): boolean {
+export function isCurrentPrincipalAccessQuery(queryKey: readonly unknown[]): boolean {
   const root = String(queryKey[0] ?? '');
-  if (root === 'me-access') return true;
-  if (root === 'servers' || root === 'images' || root === 'containers'
-    || root === 'container' || root === 'volumes' || root === 'shared-backends'
-    || root === 'storage-pools' || root === 'container-intents') {
-    return queryKey[1] === 'user';
-  }
+  const a = queryKey[1];
+  const b = queryKey[2];
+  if (root === 'me' && a === 'access') return true;
+  if (
+    (root === 'servers' || root === 'images' || root === 'containers'
+      || root === 'container' || root === 'volumes' || root === 'shared-backends'
+      || root === 'storage-pools' || root === 'container-intents'
+      || root === 'container-attachments' || root === 'resource-intent-failures'
+      || root === 'volume-intents' || root === 'server-gpus')
+    && a === 'user'
+  ) return true;
+  if (root === 'http-proxy' && b === 'user') return true;
   return false;
 }
 

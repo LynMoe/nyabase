@@ -15,11 +15,24 @@ import { api } from '../lib/api.js';
 import { ApiError } from '../lib/api-error.js';
 import { Badge } from '../components/ui/badge.js';
 import { Button } from '../components/ui/button.js';
-import { Card, CardContent } from '../components/ui/card.js';
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '../components/ui/dialog.js';
 import { Input } from '../components/ui/input.js';
-import { Label } from '../components/ui/label.js';
-import { QueryErrorState, QueryLoadingState } from '../components/query-state.js';
+import { Switch } from '../components/ui/switch.js';
+import { Textarea } from '../components/ui/textarea.js';
+import { FormField } from '../components/layout/form-field.js';
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from '../components/ui/table.js';
+import { ConfirmDialog } from '../components/layout/confirm-dialog.js';
+import { EmptyState } from '../components/layout/empty-state.js';
+import { Page } from '../components/layout/page.js';
+import { PageHeader } from '../components/layout/page-header.js';
+import { QueryView } from '../components/layout/query-view.js';
 import { toast } from '../hooks/use-toast.js';
 import { useAuthStore } from '../store/auth.js';
 import { queryKeys } from '../lib/query-keys.js';
@@ -96,79 +109,28 @@ export default function HttpProxyOpsPage() {
   const status = statusQuery.data ?? emptyStatus;
   const pools = poolsQuery.data ?? [];
   const allBindings = bindingsQuery.data;
+  const statusDescription = !canViewStatus
+    ? undefined
+    : statusQuery.isError
+      ? '代理状态加载失败'
+      : status.updatedAt ? `最后更新 ${formatTime(status.updatedAt)}` : '等待代理上报实时状态';
 
   return (
-    <div className="px-4 py-4 md:px-6 space-y-5 w-full" data-testid="http-proxy-ops">
-      <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
-        <div>
-          <h1 className="text-2xl font-semibold tracking-tight text-foreground">HTTP 代理</h1>
-          {canViewStatus && (
-            <p className="text-sm text-muted-foreground mt-0.5">
-              {statusQuery.isError
-                ? '代理状态加载失败'
-                : status.updatedAt ? `最后更新 ${formatTime(status.updatedAt)}` : '等待代理上报实时状态'}
-            </p>
-          )}
-        </div>
-        {canViewStatus && (
+    <Page testId="http-proxy-ops">
+      <PageHeader
+        title="HTTP 代理"
+        description={statusDescription}
+        actions={canViewStatus ? (
           <Button variant="ghost" size="icon" className="h-8 w-8 text-muted-foreground" onClick={() => { void statusQuery.refetch(); }} disabled={statusQuery.isFetching}>
             <RefreshCw className={`h-4 w-4 ${statusQuery.isFetching ? 'animate-spin' : ''}`} />
           </Button>
-        )}
-      </div>
+        ) : undefined}
+      />
 
-      {canViewStatus && statusQuery.isLoading && <QueryLoadingState label="加载 HTTP 代理状态..." />}
-      {canViewStatus && statusQuery.isError && (
-        <QueryErrorState error={statusQuery.error} resourceName="HTTP 代理状态" onRetry={() => { void statusQuery.refetch(); }} />
-      )}
-      {canViewStatus && statusQuery.isSuccess && (
-        <>
-          <section className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
-            <MetricTile icon={Wifi} label="在线代理" value={status.connectedProxies.toString()} sub={`${status.proxies.length} 个实例上报`} />
-            <MetricTile icon={Activity} label="活跃连接" value={status.activeConnections.toString()} sub={`累计请求 ${status.totalRequests}`} />
-            <MetricTile icon={Globe} label="累计请求" value={status.totalRequests.toString()} sub={`拒绝 ${status.totalRejectedRequests}`} />
-            <MetricTile icon={Activity} label="拒绝请求" value={status.totalRejectedRequests.toString()} sub="累计" />
-          </section>
-          <section className="space-y-3">
-            <div className="flex items-center justify-between gap-4">
-              <h2 className="text-base font-semibold text-foreground">代理实例</h2>
-              <Badge variant={status.connectedProxies > 0 ? 'success' : 'outline'}>
-                {status.connectedProxies > 0 ? '在线' : '离线'}
-              </Badge>
-            </div>
-            <div className="overflow-hidden rounded-lg border border-border bg-card">
-              <table className="w-full text-sm">
-                <thead className="bg-muted/60 text-xs text-muted-foreground">
-                  <tr>
-                    <th className="text-left font-medium px-3 py-2">代理</th>
-                    <th className="text-left font-medium px-3 py-2">HTTP</th>
-                    <th className="text-left font-medium px-3 py-2">HTTPS</th>
-                    <th className="text-left font-medium px-3 py-2">连接</th>
-                    <th className="text-left font-medium px-3 py-2">请求</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {status.proxies.length === 0 ? (
-                    <tr>
-                      <td className="px-3 py-8 text-center text-muted-foreground" colSpan={5}>暂无在线 HTTP 代理</td>
-                    </tr>
-                  ) : status.proxies.map((proxy) => (
-                    <tr key={proxy.proxyId} className="border-t border-border">
-                      <td className="px-3 py-2">
-                        <div className="font-medium text-foreground">{proxy.hostname ?? proxy.proxyId}</div>
-                        <div className="font-mono text-xs text-muted-foreground break-all">{proxy.proxyId}</div>
-                      </td>
-                      <td className="px-3 py-2 font-mono text-xs">{proxy.httpListen}</td>
-                      <td className="px-3 py-2 font-mono text-xs">{proxy.httpsListen ?? '-'}</td>
-                      <td className="px-3 py-2">{proxy.activeConnections}</td>
-                      <td className="px-3 py-2">{proxy.totalRequests} / 拒绝 {proxy.totalRejectedRequests}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          </section>
-        </>
+      {canViewStatus && (
+        <QueryView query={statusQuery} resourceName="HTTP 代理状态" loadingLabel="加载 HTTP 代理状态...">
+          {(loaded) => <HttpStatusSections status={loaded} />}
+        </QueryView>
       )}
 
       {canManagePools && (
@@ -182,97 +144,98 @@ export default function HttpProxyOpsPage() {
               <Button size="sm" onClick={() => setPoolForm('create')}><Plus className="h-4 w-4" />新建域名池</Button>
             </div>
           </div>
-          {poolsQuery.isLoading ? (
-            <QueryLoadingState label="加载域名池..." />
-          ) : poolsQuery.isError ? (
-            <QueryErrorState error={poolsQuery.error} resourceName="域名池" onRetry={() => { void poolsQuery.refetch(); }} />
-          ) : pools.length === 0 ? (
-            <Card>
-              <CardContent className="py-8 text-center text-sm text-muted-foreground">
-                暂无域名池。登记通配域名后，用户才能把容器端口发布到匹配的主机名。
-              </CardContent>
-            </Card>
-          ) : (
-            <div className="overflow-hidden rounded-lg border border-border bg-card">
-              <table className="w-full text-sm">
-                <thead className="bg-muted/60 text-xs text-muted-foreground">
-                  <tr>
-                    <th className="text-left font-medium px-3 py-2">通配域名</th>
-                    <th className="text-left font-medium px-3 py-2">启用</th>
-                    <th className="text-left font-medium px-3 py-2">HTTPS</th>
-                    <th className="text-left font-medium px-3 py-2">证书</th>
-                    <th className="text-right font-medium px-3 py-2">操作</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {pools.map((pool) => (
-                    <tr key={pool.id} className="border-t border-border">
-                      <td className="px-3 py-2 font-mono text-xs">{pool.wildcardDomain}</td>
-                      <td className="px-3 py-2">{pool.enabled ? '是' : '否'}</td>
-                      <td className="px-3 py-2">{pool.httpsEnabled ? '是' : '否'}</td>
-                      <td className="px-3 py-2 font-mono text-xs break-all">{pool.certificateFingerprint ?? '未配置'}</td>
-                      <td className="px-3 py-2">
-                        <div className="flex justify-end gap-2">
-                          <Button size="sm" variant="outline" onClick={() => setPoolForm(pool)}>
-                            <Pencil className="h-3.5 w-3.5" />编辑
-                          </Button>
-                          <Button size="sm" variant="destructive" onClick={() => setDeletePool(pool)}>
-                            <Trash2 className="h-3.5 w-3.5" />删除
-                          </Button>
-                        </div>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          )}
-        </section>
-      )}
-
-      {canManagePools && bindingsQuery.isError && !(bindingsQuery.error instanceof ApiError && bindingsQuery.error.status === 404) && (
-        <QueryErrorState error={bindingsQuery.error} resourceName="HTTP 发布绑定" onRetry={() => { void bindingsQuery.refetch(); }} />
-      )}
-      {canManagePools && Array.isArray(allBindings) && (
-        <section className="space-y-3">
-          <h2 className="text-base font-semibold text-foreground">全部发布绑定</h2>
-          {allBindings.length === 0 ? (
-            <p className="text-sm text-muted-foreground">暂无用户发布绑定。</p>
-          ) : (
-            <div className="overflow-hidden rounded-lg border border-border bg-card">
-              <table className="w-full text-sm">
-                <thead className="bg-muted/60 text-xs text-muted-foreground">
-                  <tr>
-                    <th className="text-left font-medium px-3 py-2">所有者</th>
-                    <th className="text-left font-medium px-3 py-2">主机名</th>
-                    <th className="text-left font-medium px-3 py-2">容器</th>
-                    <th className="text-left font-medium px-3 py-2">端口</th>
-                    <th className="text-left font-medium px-3 py-2">HTTPS</th>
-                    <th className="text-left font-medium px-3 py-2">状态</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {allBindings.map((binding) => (
-                    <tr key={binding.id} className="border-t border-border">
-                      <td className="px-3 py-2">{binding.ownerUsername}</td>
-                      <td className="px-3 py-2 font-mono text-xs">{binding.hostname}</td>
-                      <td className="px-3 py-2">{binding.containerName ?? binding.containerId}</td>
-                      <td className="px-3 py-2">{binding.targetPort}</td>
-                      <td className="px-3 py-2">{binding.entryHttpsEnabled ? '是' : '否'}</td>
-                      <td className="px-3 py-2">
-                        <Badge variant={binding.status === 'ready' ? 'success' : binding.status === 'warning' ? 'warning' : 'secondary'}>
-                          {httpProxyBindingStatusLabel(binding.status)}
-                        </Badge>
-                        {binding.warningReasons.length > 0 && (
-                          <p className="mt-1 text-xs text-destructive">{httpProxyWarningLabel(binding.warningReasons)}</p>
-                        )}
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          )}
+          <QueryView
+            queries={[poolsQuery, bindingsQuery]}
+            resourceNames={['域名池', 'HTTP 发布绑定']}
+            loadingLabel="加载域名池..."
+          >
+            {() => (
+              <>
+                {pools.length === 0 ? (
+                  <EmptyState
+                    title="暂无域名池。"
+                    description="登记通配域名后，用户才能把容器端口发布到匹配的主机名。"
+                  />
+                ) : (
+                  <div className="rounded-lg border border-border bg-card">
+                    <Table className="min-w-[640px]">
+                      <TableHeader>
+                        <TableRow className="bg-muted/60 hover:bg-muted/60">
+                          <TableHead>通配域名</TableHead>
+                          <TableHead>启用</TableHead>
+                          <TableHead>HTTPS</TableHead>
+                          <TableHead>证书</TableHead>
+                          <TableHead className="text-right">操作</TableHead>
+                        </TableRow>
+                      </TableHeader>
+                      <TableBody>
+                        {pools.map((pool) => (
+                          <TableRow key={pool.id}>
+                            <TableCell className="font-mono text-xs">{pool.wildcardDomain}</TableCell>
+                            <TableCell>{pool.enabled ? '是' : '否'}</TableCell>
+                            <TableCell>{pool.httpsEnabled ? '是' : '否'}</TableCell>
+                            <TableCell className="font-mono text-xs break-all">{pool.certificateFingerprint ?? '未配置'}</TableCell>
+                            <TableCell>
+                              <div className="flex justify-end gap-2">
+                                <Button size="sm" variant="outline" onClick={() => setPoolForm(pool)}>
+                                  <Pencil className="h-3.5 w-3.5" />编辑
+                                </Button>
+                                <Button size="sm" variant="destructive" onClick={() => setDeletePool(pool)}>
+                                  <Trash2 className="h-3.5 w-3.5" />删除
+                                </Button>
+                              </div>
+                            </TableCell>
+                          </TableRow>
+                        ))}
+                      </TableBody>
+                    </Table>
+                  </div>
+                )}
+                {Array.isArray(allBindings) && (
+                  <section className="space-y-3">
+                    <h2 className="text-base font-semibold text-foreground">全部发布绑定</h2>
+                    {allBindings.length === 0 ? (
+                      <p className="text-sm text-muted-foreground">暂无用户发布绑定。</p>
+                    ) : (
+                      <div className="rounded-lg border border-border bg-card">
+                        <Table className="min-w-[720px]">
+                          <TableHeader>
+                            <TableRow className="bg-muted/60 hover:bg-muted/60">
+                              <TableHead>所有者</TableHead>
+                              <TableHead>主机名</TableHead>
+                              <TableHead>容器</TableHead>
+                              <TableHead>端口</TableHead>
+                              <TableHead>HTTPS</TableHead>
+                              <TableHead>状态</TableHead>
+                            </TableRow>
+                          </TableHeader>
+                          <TableBody>
+                            {allBindings.map((binding) => (
+                              <TableRow key={binding.id}>
+                                <TableCell>{binding.ownerUsername}</TableCell>
+                                <TableCell className="font-mono text-xs">{binding.hostname}</TableCell>
+                                <TableCell>{binding.containerName ?? binding.containerId}</TableCell>
+                                <TableCell>{binding.targetPort}</TableCell>
+                                <TableCell>{binding.entryHttpsEnabled ? '是' : '否'}</TableCell>
+                                <TableCell>
+                                  <Badge variant={binding.status === 'ready' ? 'success' : binding.status === 'warning' ? 'warning' : 'secondary'}>
+                                    {httpProxyBindingStatusLabel(binding.status)}
+                                  </Badge>
+                                  {binding.warningReasons.length > 0 && (
+                                    <p className="mt-1 text-xs text-destructive">{httpProxyWarningLabel(binding.warningReasons)}</p>
+                                  )}
+                                </TableCell>
+                              </TableRow>
+                            ))}
+                          </TableBody>
+                        </Table>
+                      </div>
+                    )}
+                  </section>
+                )}
+              </>
+            )}
+          </QueryView>
         </section>
       )}
 
@@ -283,27 +246,69 @@ export default function HttpProxyOpsPage() {
           onOpenChange={(open) => { if (!open) setPoolForm(null); }}
         />
       )}
-      <Dialog open={Boolean(deletePool)} onOpenChange={(open) => { if (!open) setDeletePool(null); }}>
-        <DialogContent>
-          <DialogHeader>
-            <DialogTitle>删除域名池？</DialogTitle>
-            <DialogDescription>
-              将删除通配域名「{deletePool?.wildcardDomain}」。若仍有 HTTP 发布使用该池，删除会被拒绝。请先停用该池，或让用户删除相关发布。
-            </DialogDescription>
-          </DialogHeader>
-          <DialogFooter>
-            <Button variant="outline" onClick={() => setDeletePool(null)}>取消</Button>
-            <Button
-              variant="destructive"
-              disabled={removePool.isPending}
-              onClick={() => { if (deletePool) removePool.mutate(deletePool.id); }}
-            >
-              {removePool.isPending ? '删除中...' : '确认删除'}
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
-    </div>
+      <ConfirmDialog
+        open={Boolean(deletePool)}
+        onOpenChange={(open) => { if (!open) setDeletePool(null); }}
+        title="删除域名池？"
+        description={`将删除通配域名「${deletePool?.wildcardDomain}」。若仍有 HTTP 发布使用该池，删除会被拒绝。请先停用该池，或让用户删除相关发布。`}
+        confirmLabel="确认删除"
+        pendingLabel="删除中..."
+        pending={removePool.isPending}
+        onConfirm={() => { if (deletePool) removePool.mutate(deletePool.id); }}
+      />
+    </Page>
+  );
+}
+
+function HttpStatusSections({ status }: { status: HttpProxyAdminStatus }) {
+  return (
+    <>
+      <section className="grid grid-cols-2 gap-3 xl:grid-cols-4">
+        <MetricTile icon={Wifi} label="在线代理" value={status.connectedProxies.toString()} sub={`${(status.proxies ?? []).length} 个实例上报`} />
+        <MetricTile icon={Activity} label="活跃连接" value={status.activeConnections.toString()} sub={`累计请求 ${status.totalRequests}`} />
+        <MetricTile icon={Globe} label="累计请求" value={status.totalRequests.toString()} sub={`拒绝 ${status.totalRejectedRequests}`} />
+        <MetricTile icon={Activity} label="拒绝请求" value={status.totalRejectedRequests.toString()} sub="累计拒绝" />
+      </section>
+      <section className="space-y-3">
+        <div className="flex items-center justify-between gap-4">
+          <h2 className="text-base font-semibold text-foreground">代理实例</h2>
+          <Badge variant={status.connectedProxies > 0 ? 'success' : 'outline'}>
+            {status.connectedProxies > 0 ? '在线' : '离线'}
+          </Badge>
+        </div>
+        <div className="rounded-lg border border-border bg-card">
+          <Table className="min-w-[640px]">
+            <TableHeader>
+              <TableRow className="bg-muted/60 hover:bg-muted/60">
+                <TableHead>代理</TableHead>
+                <TableHead>HTTP</TableHead>
+                <TableHead>HTTPS</TableHead>
+                <TableHead>连接</TableHead>
+                <TableHead>请求</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {(status.proxies ?? []).length === 0 ? (
+                <TableRow>
+                  <TableCell className="py-8 text-center text-muted-foreground" colSpan={5}>暂无在线 HTTP 代理</TableCell>
+                </TableRow>
+              ) : (status.proxies ?? []).map((proxy) => (
+                <TableRow key={proxy.proxyId}>
+                  <TableCell>
+                    <div className="font-medium text-foreground">{proxy.hostname || proxy.proxyId}</div>
+                    <div className="whitespace-normal break-all font-mono text-xs text-muted-foreground">{proxy.proxyId}</div>
+                  </TableCell>
+                  <TableCell className="font-mono text-xs">{formatListen(proxy.httpListen)}</TableCell>
+                  <TableCell className="font-mono text-xs">{formatListen(proxy.httpsListen)}</TableCell>
+                  <TableCell>{proxy.activeConnections}</TableCell>
+                  <TableCell className="whitespace-nowrap">{proxy.totalRequests} / 拒绝 {proxy.totalRejectedRequests}</TableCell>
+                </TableRow>
+              ))}
+            </TableBody>
+          </Table>
+        </div>
+      </section>
+    </>
   );
 }
 
@@ -388,16 +393,15 @@ function DomainPoolFormDialog({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-h-[90vh] overflow-y-auto" data-testid="http-domain-pool-form">
+      <DialogContent data-testid="http-domain-pool-form">
         <DialogHeader>
           <DialogTitle>{pool ? '编辑域名池' : '新建域名池'}</DialogTitle>
           <DialogDescription>
-            通配域名形如 *.example.com。启用 HTTPS 时需要提供证书与私钥 PEM。
+            通配域名形如 *.example.com。HTTPS 开启后再填写证书。
           </DialogDescription>
         </DialogHeader>
         <div className="space-y-3">
-          <div className="space-y-1.5">
-            <Label htmlFor="http-pool-wildcard">通配域名</Label>
+          <FormField id="http-pool-wildcard" label="通配域名">
             <Input
               id="http-pool-wildcard"
               className="font-mono"
@@ -405,41 +409,41 @@ function DomainPoolFormDialog({
               placeholder="*.example.com"
               onChange={(event) => { setWildcardDomain(event.target.value); setError(null); }}
             />
-          </div>
-          <label className="flex items-center gap-2 text-sm">
-            <input type="checkbox" checked={enabled} onChange={(event) => setEnabled(event.target.checked)} />
-            启用
-          </label>
-          <label className="flex items-center gap-2 text-sm">
-            <input type="checkbox" checked={httpsEnabled} onChange={(event) => setHttpsEnabled(event.target.checked)} />
-            启用 HTTPS
-          </label>
+          </FormField>
+          <FormField id="http-pool-enabled" label="启用" orientation="inline">
+            <Switch id="http-pool-enabled" checked={enabled} onCheckedChange={setEnabled} />
+          </FormField>
+          <FormField id="http-pool-https" label="启用 HTTPS" orientation="inline">
+            <Switch id="http-pool-https" checked={httpsEnabled} onCheckedChange={setHttpsEnabled} />
+          </FormField>
           {httpsPemIncomplete && (
             <p className="text-xs text-destructive">启用 HTTPS 时请同时提供证书和私钥 PEM。</p>
           )}
           {pool?.certificateFingerprint && (
             <p className="text-xs text-muted-foreground">当前证书指纹：{pool.certificateFingerprint}</p>
           )}
-          <div className="space-y-1.5">
-            <Label htmlFor="http-pool-cert">证书 PEM</Label>
-            <textarea
-              id="http-pool-cert"
-              className="min-h-28 w-full rounded-md border border-input bg-background px-3 py-2 font-mono text-xs"
-              value={certificatePem}
-              placeholder={pool ? '留空则保留现有证书' : '-----BEGIN CERTIFICATE-----'}
-              onChange={(event) => { setCertificatePem(event.target.value); setError(null); }}
-            />
-          </div>
-          <div className="space-y-1.5">
-            <Label htmlFor="http-pool-key">私钥 PEM</Label>
-            <textarea
-              id="http-pool-key"
-              className="min-h-28 w-full rounded-md border border-input bg-background px-3 py-2 font-mono text-xs"
-              value={privateKeyPem}
-              placeholder={pool ? '留空则保留现有私钥' : '-----BEGIN PRIVATE KEY-----'}
-              onChange={(event) => { setPrivateKeyPem(event.target.value); setError(null); }}
-            />
-          </div>
+          {httpsEnabled && (
+            <>
+              <FormField id="http-pool-cert" label="证书 PEM">
+                <Textarea
+                  id="http-pool-cert"
+                  className="max-h-32 min-h-24 overflow-y-auto font-mono text-xs"
+                  value={certificatePem}
+                  placeholder={pool ? '留空则保留现有证书' : '-----BEGIN CERTIFICATE-----'}
+                  onChange={(event) => { setCertificatePem(event.target.value); setError(null); }}
+                />
+              </FormField>
+              <FormField id="http-pool-key" label="私钥 PEM">
+                <Textarea
+                  id="http-pool-key"
+                  className="max-h-32 min-h-24 overflow-y-auto font-mono text-xs"
+                  value={privateKeyPem}
+                  placeholder={pool ? '留空则保留现有私钥' : '-----BEGIN PRIVATE KEY-----'}
+                  onChange={(event) => { setPrivateKeyPem(event.target.value); setError(null); }}
+                />
+              </FormField>
+            </>
+          )}
           {error && <p className="text-sm text-destructive">{error}</p>}
         </div>
         <DialogFooter>
@@ -476,9 +480,13 @@ function MetricTile({
   );
 }
 
+function formatListen(value: string | null | undefined): string {
+  if (!value) return '—';
+  return value.startsWith(':') ? `0.0.0.0${value}` : value;
+}
+
 function formatTime(value: string | number): string {
   const date = typeof value === 'number' ? new Date(value) : new Date(value);
   if (Number.isNaN(date.getTime())) return '-';
   return date.toLocaleString();
 }
-

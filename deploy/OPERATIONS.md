@@ -144,11 +144,144 @@ export HTTP_PROXY_TOKEN='<same value as http.proxyToken>'
 export NYABASE_HTTP_LISTEN='0.0.0.0:8080'
 ```
 
-Product instance NICs are macvlan. A macvlan child is unreachable from the
-Incus parent host that owns the parent interface. Run the proxies on a
-different machine or netns that can reach the LAN (and still reach Backend
-`:3001`). Do not assume localhost on the Incus parent can open SSH/HTTP to
-guest macvlan addresses.
+Product instance NICs are Incus `nictype=bridged` on an operator-owned
+unmanaged Linux bridge (`vmbr0`). SSH and HTTP proxies **may run on the
+Incus host** and TCP to guest `:22` / HTTP. Host IPv4 may live on `vmbr0`
+or on a separate management NIC; see the two layouts below. The snapshot
+field remains `routedIp`. Do not use `incus network create`.
+
+## Operator-owned LAN bridge (`vmbr0`)
+
+Product NICs are bridged on an **operator-owned unmanaged Linux bridge**.
+nyabase never creates the bridge, enslaves `bond0`, or moves the host IP.
+Preflight fail-closes and prints the missing command. Delete leftover
+`nyc-*` and `nyabase-preflight-*` instances **before** starting workers on
+the bridged spec (`validateEth0` will not convert leftover macvlan NICs).
+
+Do this on console/IPMI, not over the in-band SSH address being moved. One
+declarative apply. `parentInterface` in nyabase is the bridge name (`vmbr0`).
+
+**netplan** (typical Ubuntu; `bond0` already exists as a bond):
+
+```yaml
+network:
+  version: 2
+  renderer: networkd
+  bonds:
+    bond0:
+      interfaces: [eno1, eno2]
+      parameters:
+        mode: 802.3ad
+        lacp-rate: fast
+        mii-monitor-interval: 100
+      dhcp4: false
+      accept-ra: no
+  bridges:
+    vmbr0:
+      interfaces: [bond0]
+      addresses: [<HOST_IPV4>/<PREFIX>]
+      routes:
+        - to: default
+          via: <GATEWAY>
+      nameservers:
+        addresses: [<DNS>, ...]
+      parameters:
+        stp: false
+        forward-delay: 0
+      dhcp4: false
+```
+
+Apply atomically: `netplan try` then `netplan apply`.
+
+**systemd-networkd:** `bond0.network` with `Bridge=vmbr0` and no `Address=`;
+`vmbr0.netdev` `Kind=bridge`; `vmbr0.network` holds `Address=` / `Gateway=` /
+`DNS=`. `networkctl reload` (or reboot). Do not `ip addr del` on `bond0` as a
+separate SSH step.
+
+**ifupdown** (Debian/PVE style): `bond0 inet manual` with `bridge-ports` on
+`vmbr0 inet static`. `ifreload -a` (ifupdown2) or a reboot.
+`ifdown bond0 && ifup vmbr0` as two steps **will** drop the session.
+
+Single-NIC: enslave `eno1` the same way; it must have no IPv4 after apply.
+VLAN: `bond0.100` → `vmbr100`; set nyabase `parentInterface=vmbr100`.
+Product NICs never set `vlan` / `vlan.tagged` (mutually exclusive with IP
+filtering).
+
+After apply: `ip -d link show vmbr0` is a bridge, `bridge link` shows the
+uplink slave, host IPv4 is on `vmbr0`, `bond0` has none, default route is
+`dev vmbr0`. `nft list table bridge incus` may be empty until a filtered
+instance starts.
+
+**Do not put the host IPv4 on `vmbr0` until all of these are true:**
+
+1. `bridge link` shows the uplink (`eth0` / `bond0`) as `master vmbr0`.
+2. `/sys/class/net/vmbr0/carrier` is `1` (`LOWER_UP`, not `NO-CARRIER`).
+3. The uplink has no global IPv4.
+
+A `NO-CARRIER` bridge with the management address is a lockout: default
+route is `linkdown`, SSH dies. `netplan apply` will still do this if
+systemd-networkd fails to enslave the uplink (`Failed to set master
+interface: Device or resource busy`) while it happily configures
+`Address=` on `vmbr0`.
+
+Do **not** `ip link add vmbr0` and then `netplan apply`: networkd logs
+`Failed to create netdev: File exists` and skips enslaving. Do **not**
+copy the uplink MAC onto `vmbr0` if netplan matches the NIC by
+`macaddress:` — both interfaces then match and you get `Cannot find
+unique matching interface`.
+
+`EBUSY` on `ip link set <uplink> master vmbr0` is usually one of:
+
+- A **macvlan/macvtap child still exists**, including in another netns
+  (legacy e2e `e2e-sshproxy` / `mv-sshproxy@eth0`). `ip link show type
+  macvlan` in the host ns is not enough; check `ip netns exec <ns> ip
+  link`. Delete leftovers before enslaving. A parent with macvlan
+  children cannot join a Linux bridge.
+- Some **virtio_net** NICs (observed on Debian 13 `6.12.*-cloud-amd64`
+  inside a PVE VM): `br_add_if` rolls back at allmulticast even with no
+  macvlan child (`entered allmulticast mode` then immediately `left`).
+  Dummy devices enslave fine; macvlan on the same NIC still works. That
+  NIC cannot be a guest-side `vmbr` uplink — use a NIC that can be a
+  bridge port (`e1000`, a non-cloud virtio, or build `vmbr` on the
+  hypervisor and pass a dedicated tap), not a nested bridge on this
+  virtio.
+
+**Dedicated container NIC** (host IP stays on the management interface):
+enslave only the extra NIC (`e1000` / `eth1`) to `vmbr0` and put **no**
+IPv4 on the bridge or the uplink. Host default route stays on `eth0`.
+`parentInterface` is still `vmbr0`. Preflight accepts a host global IPv4
+in a bound pool `cidr` on **any** host interface (typically `eth0`), not
+only on the bridge. Do not move the management address onto `vmbr0` in
+this layout.
+
+```yaml
+network:
+  version: 2
+  renderer: networkd
+  ethernets:
+    eth1:
+      match:
+        driver: e1000
+      set-name: eth1
+      dhcp4: false
+      optional: true
+  bridges:
+    vmbr0:
+      interfaces: [eth1]
+      dhcp4: false
+      optional: true
+      parameters:
+        stp: false
+        forward-delay: 0
+```
+
+Debian **cloud** kernels often omit `e1000`. Use `linux-image-amd64` (generic)
+if `modprobe e1000` says the module is missing.
+
+If `ufw` / firewalld is active, allow in/route on `vmbr0` (see
+linuxcontainers.org firewalld/ufw notes). nyabase does not configure host
+firewall. If guest ping of the host IP fails, check ufw/firewalld **before**
+rebuilding vmbr.
 
 ## Data ownership and failure behavior
 
@@ -504,8 +637,12 @@ sudo install -D -m 0644 deploy/nyabase-node-exporter.service \
 
 进程用户使用 `nyabase-node`，不要用 root。CPU / PSI / sysctl 指标不需要
 特权。`nvidia-smi`（GPU 显示序号）通常只需 `video` / `render` 组；若进程
-跑不了 `nvidia-smi`，GPU 指标会被省略而不是崩溃。`smartctl` 与 `nft` 是
-可选采集，权限不足时静默省略。
+跑不了 `nvidia-smi`，GPU 指标会被省略而不是崩溃。`smartctl` 权限不足时省略。
+`nft list table bridge incus` 需要 `CAP_NET_ADMIN`（unit 的
+`AmbientCapabilities` + `CapabilityBoundingSet`，保持 `NoNewPrivileges=true`）。
+**不要写 sudoers**——与 `NoNewPrivileges` 不兼容。`CAP_NET_ADMIN` 比 `nft list`
+更宽（可以改宿主机网络），bounding set 仅此一项。nft 不可用时 exporter 必须
+显式输出 `nyabase_node_network_nft_available 0`，不能静默省略。
 
 ### TLS、token、监听地址
 
@@ -532,8 +669,10 @@ NODE_EXPORTER_TLS_KEY=/etc/nyabase/node-exporter/tls.key
 NODE_EXPORTER_TLS_CERT=/etc/nyabase/node-exporter/tls.crt
 NODE_EXPORTER_HOST=0.0.0.0
 NODE_EXPORTER_PORT=9109
-# Optional macvlan parent name for network evidence:
-# NODE_EXPORTER_PARENT_INTERFACE=eth0
+# Optional LAN bridge name (vmbr0) used only as a fallback if
+# /proc/sys/net/ipv4/conf cannot be listed. Prefer scanning all
+# interfaces so bridge slaves are visible.
+# NODE_EXPORTER_PARENT_INTERFACE=vmbr0
 ```
 
 启动命令与软件包 `scripts.start` 相同：`node dist/main.js`（需要 Node.js 22+）。

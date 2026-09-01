@@ -1,6 +1,8 @@
 import { useMutation, useQuery } from '@tanstack/react-query';
 import { type CursorPaginatedResponse, type IntentDto } from '@nyabase/common';
 import { api } from '../../lib/api.js';
+import { errorMessage } from '../../lib/api-error.js';
+import { queryKeys } from '../../lib/query-keys.js';
 import {
   formatIntentAttempt,
   formatIntentFailureMessage,
@@ -22,7 +24,7 @@ export function ResourceIntentFailures({
   enabled?: boolean;
 }) {
   const query = useQuery({
-    queryKey: ['resource-intent-failures', admin ? 'admin' : 'user', listPath],
+    queryKey: queryKeys.resourceIntentFailures(admin ? 'admin' : 'user', listPath),
     queryFn: () => api.get<CursorPaginatedResponse<IntentDto>>(
       `${listPath}${listPath.includes('?') ? '&' : '?'}limit=20`,
     ),
@@ -36,7 +38,7 @@ export function ResourceIntentFailures({
     },
     onError: (error) => toast({
       title: '重试失败',
-      description: error instanceof Error ? error.message : '请稍后重试',
+      description: errorMessage(error),
       variant: 'destructive',
     }),
   });

@@ -21,7 +21,7 @@ describe('cert expiry warning', () => {
     const notAfter = new Date(now + 12 * 86_400_000).toISOString();
     expect(certRemainingDays(notAfter, now)).toBe(12);
     expect(formatCertRemainingLabel(notAfter, now)).toMatch(/剩余 12 天/);
-    expect(certExpiryBannerText(notAfter)).toMatch(/客户端证书将于 .* 过期，请轮换/);
-    expect(certExpiryBannerText(new Date(now - 86_400_000).toISOString())).toMatch(/已于 .* 过期，请轮换/);
+    expect(certExpiryBannerText(notAfter, now)).toMatch(/客户端证书将于 .* 过期，请轮换/);
+    expect(certExpiryBannerText(new Date(now - 86_400_000).toISOString(), now)).toMatch(/已于 .* 过期，请轮换/);
   });
 });

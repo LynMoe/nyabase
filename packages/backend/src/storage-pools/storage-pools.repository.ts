@@ -1,4 +1,4 @@
-import { Inject, Injectable } from '@nestjs/common';
+import { Inject, Injectable, NotFoundException } from '@nestjs/common';
 import type { Kysely, Transaction } from 'kysely';
 import type { NyabaseDatabase } from '../persistence-pg/database.types.js';
 import { PG_DATABASE } from '../persistence-pg/tokens.js';
@@ -76,13 +76,16 @@ export class StoragePoolsRepository {
   ): Promise<void> {
     const ids = [...new Set(backendIds.filter((id): id is string => id !== null))].sort();
     if (ids.length === 0) return;
-    await executor
+    const rows = await executor
       .selectFrom('infra.shared_backends')
       .select('id')
       .where('id', 'in', ids)
       .orderBy('id')
       .forUpdate()
       .execute();
+    if (rows.length !== ids.length) {
+      throw new NotFoundException('Shared backend not found');
+    }
   }
 
   async lockCapacityScope(

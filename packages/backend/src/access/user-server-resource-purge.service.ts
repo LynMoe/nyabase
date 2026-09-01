@@ -1,4 +1,5 @@
 import { Injectable } from '@nestjs/common';
+import { sql } from 'kysely';
 import {
   AuditAction,
   ContainerPhase,
@@ -12,6 +13,8 @@ import { ContainerControlService } from '../containers/container-control.service
 import { PgTransactionManager } from '../persistence-pg/transaction.js';
 import { IntentRepository } from '../runtime/intent.repository.js';
 import { ReconcileClaimRepository } from '../runtime/reconcile-claim.repository.js';
+import { VOLUME_DESTROY_PLACEMENT_ID } from '../runtime/reconcile-claim.repository.js';
+import { listEligibleDestroyExecutors } from '../volumes/eligible-destroy-executors.js';
 import { VolumesRepository } from '../volumes/volumes.repository.js';
 import { AccessResolverService } from './access-resolver.service.js';
 
@@ -223,7 +226,7 @@ export class UserServerResourcePurgeService {
     matches: (volume: {
       id: string;
       owner_id: string;
-      pool_id: string;
+      pool_id: string | null;
       server_id: string | null;
       shared_backend_id: string | null;
     }) => boolean,
@@ -294,28 +297,111 @@ export class UserServerResourcePurgeService {
     matches: (volume: {
       id: string;
       owner_id: string;
-      pool_id: string;
+      pool_id: string | null;
       server_id: string | null;
       shared_backend_id: string | null;
     }) => boolean,
     actorId: string,
     deleteAttachedContainers = false,
   ): Promise<{ intentIds: string[]; containerIntentIds: string[]; volumeIds: string[] }> {
+    const owned = (await this.volumes.list(userId)).filter(matches);
+    const containerIds = new Set<string>();
+    for (const volume of owned) {
+      for (const attachment of await this.volumes.listAttachments(undefined, volume.id)) {
+        containerIds.add(attachment.container_id);
+      }
+    }
+    const containerIntentIds: string[] = [];
+    if (deleteAttachedContainers) {
+      for (const containerId of containerIds) {
+        const container = await this.containerRepository.find(containerId);
+        if (!container || container.lifecycle_phase === ContainerPhase.Deleting) continue;
+        const accepted = await this.containers.actionForSystem(containerId, 'delete', actorId);
+        containerIntentIds.push(accepted.intentId);
+      }
+    }
     const result = await this.transactions.run(async (transaction) => {
-      const owned = (await this.volumes.list(userId, transaction)).filter(matches);
       const intentIds: string[] = [];
-      const containerIds = new Set<string>();
       const volumeIds: string[] = [];
       for (const volume of owned) {
-        for (const attachment of await this.volumes.listAttachments(undefined, volume.id, transaction)) {
-          containerIds.add(attachment.container_id);
-        }
         const locked = await transaction.selectFrom('control.volumes')
           .selectAll()
           .where('id', '=', volume.id)
           .forUpdate()
           .executeTakeFirst();
         if (!locked) continue;
+        const sentinel = await transaction
+          .selectFrom('control.reconcile_claims')
+          .select('resource_id')
+          .where('resource_type', '=', 'volume')
+          .where('resource_id', '=', locked.id)
+          .where('placement_server_id', '=', VOLUME_DESTROY_PLACEMENT_ID)
+          .where('lease_expires_at', '>', sql<Date>`clock_timestamp()`)
+          .executeTakeFirst();
+        if (sentinel) continue;
+        const attachments = await this.volumes.listAttachments(undefined, locked.id, transaction);
+        const placements = await this.volumes.listPlacements(locked.id, transaction);
+        const eligible = locked.shared_backend_id
+          ? await listEligibleDestroyExecutors(transaction, locked.shared_backend_id)
+          : [];
+        if (attachments.length > 0) {
+          let desired = locked;
+          if (locked.lifecycle_phase !== 'deleting') {
+            const updated = await this.volumes.updateDesired(
+              locked.id,
+              locked.generation,
+              {
+                lifecycle_phase: 'deleting',
+                failure_code: null,
+                needs_attention: false,
+              },
+              transaction,
+            );
+            if (!updated) continue;
+            desired = updated;
+          }
+          const intent = await this.intents.ensurePending({
+            kind: IntentKind.VolumeDestroy,
+            resourceType: IntentResourceType.Volume,
+            resourceId: desired.id,
+            requestedBy: actorId,
+            targetGeneration: desired.generation,
+            request: {
+              operation: 'destroy',
+              idempotencyKey: 'destroy',
+            },
+          }, transaction);
+          intentIds.push(intent.id);
+          volumeIds.push(desired.id);
+          continue;
+        }
+        if (placements.length === 0) {
+          if (!locked.dir_ensured || eligible.length === 0) {
+            const pending = await transaction
+              .selectFrom('control.intents')
+              .select('id')
+              .where('resource_type', '=', 'volume')
+              .where('resource_id', '=', locked.id)
+              .where('status', '=', 'pending')
+              .execute();
+            for (const row of pending) {
+              await this.intents.settleOne(row.id, { outcome: 'succeeded' }, transaction);
+            }
+            await this.volumes.deleteVolumeRow(locked.id, transaction);
+            if (locked.dir_ensured && eligible.length === 0) {
+              await this.audit.append(
+                transaction,
+                actorId,
+                AuditAction.DeleteVolume,
+                locked.id,
+                'volume',
+                { reason: 'destroy_executor_gone' },
+              );
+            }
+            volumeIds.push(locked.id);
+            continue;
+          }
+        }
         let desired = locked;
         if (locked.lifecycle_phase !== 'deleting') {
           const updated = await this.volumes.updateDesired(
@@ -331,41 +417,22 @@ export class UserServerResourcePurgeService {
           if (!updated) continue;
           desired = updated;
         }
-        await this.volumes.setAllDesiredPresent(desired.id, false, transaction);
-        const placements = await this.volumes.listPlacements(desired.id, transaction);
-        if (placements.length === 0) {
-          await this.volumes.deleteVolumeRow(desired.id, transaction);
-          volumeIds.push(desired.id);
-          continue;
-        }
-        for (const placement of placements) {
-          const intent = await this.intents.ensurePending({
-            kind: IntentKind.VolumeEnsure,
-            resourceType: IntentResourceType.Volume,
-            resourceId: desired.id,
-            serverId: placement.server_id,
-            requestedBy: actorId,
-            targetGeneration: desired.generation,
-            request: {
-              operation: 'delete',
-              idempotencyKey: 'delete',
-            },
-          }, transaction);
-          intentIds.push(intent.id);
-        }
+        const intent = await this.intents.ensurePending({
+          kind: IntentKind.VolumeDestroy,
+          resourceType: IntentResourceType.Volume,
+          resourceId: desired.id,
+          requestedBy: actorId,
+          targetGeneration: desired.generation,
+          request: {
+            operation: 'destroy',
+            idempotencyKey: 'destroy',
+          },
+        }, transaction);
+        intentIds.push(intent.id);
         volumeIds.push(desired.id);
       }
-      return { intentIds, containerIds: [...containerIds], volumeIds };
+      return { intentIds, volumeIds };
     }, { isolationLevel: 'serializable', maxAttempts: 5 });
-    const containerIntentIds: string[] = [];
-    if (deleteAttachedContainers) {
-      for (const containerId of result.containerIds) {
-        const container = await this.containerRepository.find(containerId);
-        if (!container || container.lifecycle_phase === ContainerPhase.Deleting) continue;
-        const accepted = await this.containers.actionForSystem(containerId, 'delete', actorId);
-        containerIntentIds.push(accepted.intentId);
-      }
-    }
     return {
       intentIds: result.intentIds,
       containerIntentIds,

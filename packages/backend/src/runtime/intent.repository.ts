@@ -114,6 +114,7 @@ const KIND_RESOURCES: Readonly<Record<TypedIntentKind, readonly IntentResource[]
   [IntentKind.ContainerDelete]: [IntentResourceType.Container],
   [IntentKind.VolumeEnsure]: [IntentResourceType.Volume],
   [IntentKind.VolumeResize]: [IntentResourceType.Volume],
+  [IntentKind.VolumeDestroy]: [IntentResourceType.Volume],
   [IntentKind.ImageAssignmentEnsure]: [IntentResourceType.ImageAssignment],
   [IntentKind.ImageAssignmentDelete]: [IntentResourceType.ImageAssignment],
   [IntentKind.ServerConnect]: [IntentResourceType.Server],
@@ -359,26 +360,35 @@ export class IntentRepository {
       throw new Error('Certificate rotation intents cannot carry a server id');
     }
     if (input.resourceType === IntentResourceType.Volume) {
-      if (!input.serverId) {
-        throw new Error('Volume intents require a server id');
-      }
-      const volume = await executor
-        .selectFrom('control.volumes')
-        .select(['server_id', 'shared_backend_id'])
-        .where('id', '=', input.resourceId)
-        .executeTakeFirst();
-      if (volume && !volume.shared_backend_id && input.serverId !== volume.server_id) {
-        throw new Error('Local volume intent server does not match the volume');
-      }
-      if (volume?.shared_backend_id) {
-        const placement = await executor
-          .selectFrom('control.volume_placements')
-          .select('server_id')
-          .where('volume_id', '=', input.resourceId)
-          .where('server_id', '=', input.serverId)
+      if (input.kind === IntentKind.VolumeDestroy) {
+        if (input.serverId) {
+          throw new Error('Volume destroy intents cannot carry a server id');
+        }
+      } else {
+        if (!input.serverId) {
+          throw new Error('Volume intents require a server id');
+        }
+        const volume = await executor
+          .selectFrom('control.volumes')
+          .select(['server_id', 'shared_backend_id'])
+          .where('id', '=', input.resourceId)
           .executeTakeFirst();
-        if (!placement) {
-          throw new Error('Shared volume intent server does not match a placement');
+        if (volume?.shared_backend_id && input.kind === IntentKind.VolumeEnsure) {
+          throw new Error('Shared volumes cannot enqueue volume.ensure');
+        }
+        if (volume && !volume.shared_backend_id && input.serverId !== volume.server_id) {
+          throw new Error('Local volume intent server does not match the volume');
+        }
+        if (volume?.shared_backend_id) {
+          const placement = await executor
+            .selectFrom('control.volume_placements')
+            .select('server_id')
+            .where('volume_id', '=', input.resourceId)
+            .where('server_id', '=', input.serverId)
+            .executeTakeFirst();
+          if (!placement) {
+            throw new Error('Shared volume intent server does not match a placement');
+          }
         }
       }
     }

@@ -10,6 +10,7 @@ import { RuntimeLifecycleService } from './health/runtime-lifecycle.service.js';
 import { AccessModule } from './access/access.module.js';
 import { AuditModule } from './audit/audit.module.js';
 import { AuthModule } from './auth/auth.module.js';
+import { CatalogModule } from './catalog/catalog.module.js';
 import { ContainersModule } from './containers/containers.module.js';
 import { GroupsModule } from './groups/groups.module.js';
 import { HttpProxyModule } from './http-proxy/http-proxy.module.js';
@@ -34,6 +35,7 @@ import { GrantExpiryModule } from './access/grant-expiry.module.js';
     AccessModule,
     AuditModule,
     AuthModule,
+    CatalogModule,
     ContainersModule,
     GroupsModule,
     HttpProxyModule,

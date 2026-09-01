@@ -7,11 +7,11 @@ import { api } from '../lib/api.js';
 import { useAuthStore } from '../store/auth.js';
 import { Button } from '../components/ui/button.js';
 import { Input } from '../components/ui/input.js';
-import { Label } from '../components/ui/label.js';
-import {
-  AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent,
-  AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle,
-} from '../components/ui/alert-dialog.js';
+import { Textarea } from '../components/ui/textarea.js';
+import { ConfirmDialog } from '../components/layout/confirm-dialog.js';
+import { FormField } from '../components/layout/form-field.js';
+import { Page } from '../components/layout/page.js';
+import { PageHeader } from '../components/layout/page-header.js';
 import { toast } from '../hooks/use-toast.js';
 import { setPendingLoginReason } from '../lib/pending-login-reason.js';
 import { terminateBrowserSession } from '../lib/session-termination.js';
@@ -25,28 +25,26 @@ export default function ProfilePage() {
   if (!user) return null;
 
   return (
-    <div className="px-4 py-4 md:px-6 space-y-5 w-full">
-      <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-        <div>
-          <h1 className="text-2xl font-semibold tracking-tight text-foreground">用户中心</h1>
-          <p className="text-sm text-muted-foreground mt-0.5">
-            管理账号密码和用于 SSH 代理登录的公钥
-          </p>
-        </div>
-        <div className="flex items-center gap-2 rounded-md border border-border bg-card px-3 py-2">
-          <UserCircle className="h-4 w-4 text-muted-foreground shrink-0" />
-          <div className="min-w-0">
-            <p className="text-sm font-medium text-foreground truncate">{user.displayName}</p>
-            <p className="text-xs text-muted-foreground font-mono truncate">@{user.username}</p>
+    <Page>
+      <PageHeader
+        title="用户中心"
+        description="管理账号密码和用于 SSH 代理登录的公钥"
+        actions={
+          <div className="flex items-center gap-2 rounded-md border border-border bg-card px-3 py-2">
+            <UserCircle className="h-4 w-4 text-muted-foreground shrink-0" />
+            <div className="min-w-0">
+              <p className="text-sm font-medium text-foreground truncate">{user.displayName}</p>
+              <p className="text-xs text-muted-foreground font-mono truncate">@{user.username}</p>
+            </div>
           </div>
-        </div>
-      </div>
+        }
+      />
 
-      <div className="grid grid-cols-1 xl:grid-cols-[minmax(0,0.9fr)_minmax(0,1.4fr)] gap-4">
+      <div className="grid grid-cols-1 items-start gap-4 xl:grid-cols-[minmax(0,0.9fr)_minmax(0,1.4fr)]">
         <PasswordPanel userId={user.id} />
         <SshKeysPanel userId={user.id} />
       </div>
-    </div>
+    </Page>
   );
 }
 
@@ -102,8 +100,7 @@ function PasswordPanel({ userId }: { userId: string }) {
       </div>
 
       <div className="space-y-3">
-        <div className="space-y-1.5">
-          <Label htmlFor={curId} className="text-sm">当前密码</Label>
+        <FormField id={curId} label="当前密码" error={errors.currentPassword}>
           <Input
             id={curId}
             type="password"
@@ -112,10 +109,8 @@ function PasswordPanel({ userId }: { userId: string }) {
             aria-invalid={!!errors.currentPassword}
             autoComplete="current-password"
           />
-          {errors.currentPassword && <p className="text-xs text-destructive">{errors.currentPassword}</p>}
-        </div>
-        <div className="space-y-1.5">
-          <Label htmlFor={newId} className="text-sm">新密码</Label>
+        </FormField>
+        <FormField id={newId} label="新密码" error={errors.newPassword}>
           <Input
             id={newId}
             type="password"
@@ -124,10 +119,8 @@ function PasswordPanel({ userId }: { userId: string }) {
             aria-invalid={!!errors.newPassword}
             autoComplete="new-password"
           />
-          {errors.newPassword && <p className="text-xs text-destructive">{errors.newPassword}</p>}
-        </div>
-        <div className="space-y-1.5">
-          <Label htmlFor={confirmId} className="text-sm">确认新密码</Label>
+        </FormField>
+        <FormField id={confirmId} label="确认新密码" error={errors.confirmPassword}>
           <Input
             id={confirmId}
             type="password"
@@ -136,8 +129,7 @@ function PasswordPanel({ userId }: { userId: string }) {
             aria-invalid={!!errors.confirmPassword}
             autoComplete="new-password"
           />
-          {errors.confirmPassword && <p className="text-xs text-destructive">{errors.confirmPassword}</p>}
-        </div>
+        </FormField>
       </div>
 
       <div className="flex justify-end">
@@ -213,12 +205,12 @@ function SshKeysPanel({ userId }: { userId: string }) {
 
   return (
     <section className="rounded-lg border border-border bg-card p-4 space-y-4">
-      <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
-        <div className="flex items-start gap-2">
+      <div className="flex items-start justify-between gap-3">
+        <div className="flex min-w-0 items-start gap-2">
           <KeyRound className="h-4 w-4 text-primary mt-1 shrink-0" />
-          <div>
+          <div className="min-w-0">
             <h2 className="text-base font-semibold text-foreground">SSH 公钥</h2>
-            <p className="text-xs text-muted-foreground mt-0.5">
+            <p className="mt-0.5 break-keep text-xs text-muted-foreground">
               这些公钥会同步到 SSH 代理与你的全部活跃容器，用于 Jump 与第二跳登录。
             </p>
           </div>
@@ -226,7 +218,7 @@ function SshKeysPanel({ userId }: { userId: string }) {
         <Button
           variant="ghost"
           size="icon"
-          className="h-8 w-8 text-muted-foreground self-end sm:self-auto"
+          className="h-8 w-8 shrink-0 text-muted-foreground"
           onClick={() => refetch()}
           disabled={isFetching}
           aria-label="刷新 SSH 公钥"
@@ -281,9 +273,8 @@ function SshKeysPanel({ userId }: { userId: string }) {
           <h3 className="text-sm font-medium text-foreground">添加公钥</h3>
         </div>
         <div className="space-y-3">
-          <div className="space-y-1.5">
-            <Label htmlFor="ssh-key-text" className="text-sm">公钥内容</Label>
-            <textarea
+          <FormField id="ssh-key-text" label="公钥内容" error={errors.keyText}>
+            <Textarea
               id="ssh-key-text"
               value={form.keyText}
               onChange={(e) => {
@@ -300,12 +291,10 @@ function SshKeysPanel({ userId }: { userId: string }) {
               placeholder="ssh-ed25519 AAAA..."
               rows={3}
               aria-invalid={!!errors.keyText}
-              className="flex min-h-20 w-full rounded-md border border-input bg-background px-3 py-2 text-sm font-mono ring-offset-background placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50"
+              className="min-h-20 font-mono"
             />
-            {errors.keyText && <p className="text-xs text-destructive">{errors.keyText}</p>}
-          </div>
-          <div className="space-y-1.5">
-            <Label htmlFor="ssh-key-name" className="text-sm">名称</Label>
+          </FormField>
+          <FormField id="ssh-key-name" label="名称" error={errors.name}>
             <Input
               id="ssh-key-name"
               value={form.name}
@@ -316,8 +305,7 @@ function SshKeysPanel({ userId }: { userId: string }) {
               placeholder="留空则从公钥注释提取，或自动生成"
               aria-invalid={!!errors.name}
             />
-            {errors.name && <p className="text-xs text-destructive">{errors.name}</p>}
-          </div>
+          </FormField>
         </div>
         <div className="flex justify-end">
           <Button
@@ -330,26 +318,21 @@ function SshKeysPanel({ userId }: { userId: string }) {
         </div>
       </div>
 
-      <AlertDialog open={!!deleteTarget} onOpenChange={(open) => { if (!open) setDeleteTarget(null); }}>
-        <AlertDialogContent>
-          <AlertDialogHeader>
-            <AlertDialogTitle>删除 SSH 公钥？</AlertDialogTitle>
-            <AlertDialogDescription>
-              将删除公钥 <span className="font-semibold text-foreground">{deleteTarget?.name}</span>。
-              SSH 代理与容器会在同步后不再接受这把公钥。
-            </AlertDialogDescription>
-          </AlertDialogHeader>
-          <AlertDialogFooter>
-            <AlertDialogCancel>取消</AlertDialogCancel>
-            <AlertDialogAction
-              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
-              onClick={() => { if (deleteTarget) deleteKey.mutate(deleteTarget.id); }}
-            >
-              删除
-            </AlertDialogAction>
-          </AlertDialogFooter>
-        </AlertDialogContent>
-      </AlertDialog>
+      <ConfirmDialog
+        open={Boolean(deleteTarget)}
+        title="删除 SSH 公钥？"
+        description={
+          <>
+            将删除公钥「<span className="font-semibold text-foreground">{deleteTarget?.name}</span>」。
+            SSH 代理与容器会在同步后不再接受这把公钥。
+          </>
+        }
+        confirmLabel="删除"
+        pendingLabel="删除"
+        pending={deleteKey.isPending}
+        onConfirm={() => { if (deleteTarget) deleteKey.mutate(deleteTarget.id); }}
+        onOpenChange={(open) => { if (!open) setDeleteTarget(null); }}
+      />
     </section>
   );
 }

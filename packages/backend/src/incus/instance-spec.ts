@@ -233,9 +233,9 @@ export function buildDesiredInstanceSpec(input: InstanceSpecInput): DesiredInsta
   const memBytes = positiveInteger(container.memBytes, 'INVALID_INSTANCE_SPEC', 'mem_bytes');
   const rootPool = validateName(container.rootPool, 'root_pool');
   const parentInterface = validateName(server.parentInterface, 'parent_interface');
-  // Primary IPv4 is applied inside the guest by the reconciler (macvlan has no
-  // host-managed ipv4.address). Still validate allocation exists at spec build.
-  validateIpv4(container.routedIp, 'routed_ip');
+  // ipv4.address is nft filter identity on bridged NICs, not guest config.
+  // Guest addressing is still applied by exec. Validate the claim is bare IPv4.
+  const routedIp = validateIpv4(container.routedIp, 'routed_ip');
   const name = `nyc-${containerId}`;
   const config: Record<string, string> = {
     ...cpuConfig(container.cpuMillis),
@@ -259,11 +259,13 @@ export function buildDesiredInstanceSpec(input: InstanceSpecInput): DesiredInsta
     },
     eth0: {
       type: 'nic',
-      nictype: 'macvlan',
-      mode: 'bridge',
+      nictype: 'bridged',
       parent: parentInterface,
       name: 'eth0',
       hwaddr: deriveInstanceHwaddr(containerId),
+      'ipv4.address': routedIp,
+      'security.ipv4_filtering': 'true',
+      'security.mac_filtering': 'true',
     },
     ...gpuDevices(container.gpuPciAddresses, container.nvidiaRuntime),
   };

@@ -4,6 +4,8 @@ import {
   NODE_METRIC_NAMES,
 } from '../constants.js';
 import { canonicalPciAddress } from './rest-schema.js';
+
+const IPV4_PATTERN = /^(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)(?:\.(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)){3}$/;
 export type NodeMetricFamily = typeof NODE_METRIC_NAMES[number];
 
 export interface NodeMetricSample {
@@ -28,6 +30,12 @@ export const NODE_METRIC_DEFINITIONS: Readonly<Record<NodeMetricFamily, NodeMetr
   nyabase_node_network_forwarding: { type: 'gauge', labels: ['interface'] },
   nyabase_node_network_rp_filter: { type: 'gauge', labels: ['interface'] },
   nyabase_node_network_fib_rule_present: { type: 'gauge', labels: ['interface'] },
+  nyabase_node_network_is_bridge: { type: 'gauge', labels: ['interface'] },
+  nyabase_node_network_ipv4_present: { type: 'gauge', labels: ['interface'] },
+  nyabase_node_network_bridge_slave: { type: 'gauge', labels: ['bridge', 'interface'] },
+  nyabase_node_network_nft_available: { type: 'gauge', labels: [] },
+  nyabase_node_network_bridge_filter_present: { type: 'gauge', labels: [] },
+  nyabase_node_network_bridge_filter_address: { type: 'gauge', labels: ['address'] },
   nyabase_node_gpu_util_ratio: { type: 'gauge', labels: ['gpu_pci'] },
   nyabase_node_gpu_mem_used_bytes: { type: 'gauge', labels: ['gpu_pci'] },
   nyabase_node_gpu_mem_total_bytes: { type: 'gauge', labels: ['gpu_pci'] },
@@ -224,8 +232,14 @@ function validateLabelValue(name: NodeMetricFamily, key: string, value: string):
   if (key === 'cpu' && !CPU_LABEL_PATTERN.test(value)) {
     throw new OpenMetricsSchemaError('CPU labels are invalid');
   }
+  if (key === 'address') {
+    if (!IPV4_PATTERN.test(value)) {
+      throw new OpenMetricsSchemaError('Address labels must be IPv4');
+    }
+    return value;
+  }
   if (
-    (key === 'device_id' || key === 'interface')
+    (key === 'device_id' || key === 'interface' || key === 'bridge')
     && !STABLE_ID_PATTERN.test(value)
   ) {
     throw new OpenMetricsSchemaError('Device and interface labels are invalid');

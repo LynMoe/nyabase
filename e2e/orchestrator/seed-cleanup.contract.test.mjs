@@ -9,6 +9,7 @@ import {
   resolveIncusServerName,
 } from './server-registration.mjs';
 import {
+  isE2eResourceName,
   readTlsOptions,
   removeRunOwnedServer,
   shouldCleanupRunAssignment,
@@ -795,6 +796,10 @@ test('cleanup reads PEM contents and deletes only a run-owned server', async () 
       server: { id: 'server-2', createdByRun: false },
       image: { id: 'image-1' },
     };
+    assert.equal(isE2eResourceName(`e2e-${runId}-container`, runId), true);
+    assert.equal(isE2eResourceName('e2e-lvm-shrink-abc', runId), true);
+    assert.equal(isE2eResourceName('prod-container', runId), false);
+    assert.equal(isE2eResourceName('', runId), false);
     assert.equal(shouldDeleteRunServer(preExistingState, runId), false);
     await removeRunOwnedServer(
       async (...args) => {

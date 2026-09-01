@@ -14,6 +14,7 @@ import {
   readErrorBody,
   requireSucceededIntent,
   settleAcceptedIntent,
+  stopUserContainer,
 } from '../../support/persona.js';
 
 type JsonRecord = Record<string, any>;
@@ -96,6 +97,7 @@ test(
       expect(size === 96 * MiB || size === 160 * MiB).toBe(true);
 
       for (const containerId of [containerA, containerB]) {
+        await stopUserContainer(userApi, containerId);
         const listed = await expectJson<JsonRecord[]>(
           await userApi.get(`/api/containers/${containerId}/volumes`),
         );
@@ -111,20 +113,28 @@ test(
       if (userApi && volumeId) {
         for (const containerId of [containerA, containerB]) {
           if (!containerId) continue;
+          await stopUserContainer(userApi, containerId).catch(() => undefined);
           const listed = await userApi.get(`/api/containers/${containerId}/volumes`)
             .then(async (response) => (response.status() === 200
               ? await response.json() as JsonRecord[]
               : []))
             .catch(() => [] as JsonRecord[]);
           for (const attachment of listed.filter((entry) => entry.volumeId === volumeId)) {
-            await userApi.delete(`/api/containers/${containerId}/volumes/${attachment.id}`)
-              .catch(() => undefined);
+            const detach = await userApi.delete(
+              `/api/containers/${containerId}/volumes/${attachment.id}`,
+            ).catch(() => undefined);
+            if (detach?.status() === 202) {
+              const body = await detach.json() as JsonRecord;
+              if (typeof body.intentId === 'string') {
+                await requireSucceededIntent(userApi, body.intentId, 'user.race.detach.finally');
+              }
+            }
           }
         }
       }
-      await deleteUserVolume(userApi ?? adminApi, adminApi, volumeId);
       await deleteUserContainer(userApi ?? adminApi, adminApi, containerA);
       await deleteUserContainer(userApi ?? adminApi, adminApi, containerB);
+      await deleteUserVolume(userApi ?? adminApi, adminApi, volumeId);
       if (refreshToken) {
         await (await trackedApiFactory()).post('/api/auth/logout', {
           data: { refreshToken },
@@ -228,8 +238,8 @@ test(
       expect(Number(volumeAfter.sizeBytes)).toBe(winnerSize);
       await assertNoActiveIntents(userApi, `/api/volumes/${volumeId}/intents`);
     } finally {
-      await deleteUserVolume(userApi ?? adminApi, adminApi, volumeId);
       await deleteUserContainer(userApi ?? adminApi, adminApi, containerId);
+      await deleteUserVolume(userApi ?? adminApi, adminApi, volumeId);
       if (refreshToken) {
         await (await trackedApiFactory()).post('/api/auth/logout', {
           data: { refreshToken },

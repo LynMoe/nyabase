@@ -11,6 +11,7 @@ import {
 import {
   ContainerReconciler,
   managedContainerIdentity,
+  observedDiskUsageBytes,
   powerTransition,
   restartTransition,
   sshFileMetadataMatches,
@@ -34,6 +35,15 @@ const PARENT = 'ens3';
 const ROOT_POOL = 'default';
 
 describe('container reconciliation identity and power policy', () => {
+  it('treats unknown or negative Incus disk usage as unset', () => {
+    expect(observedDiskUsageBytes(-1)).toBeNull();
+    expect(observedDiskUsageBytes(Number.NaN)).toBeNull();
+    expect(observedDiskUsageBytes('')).toBeNull();
+    expect(observedDiskUsageBytes(0)).toBe(0n);
+    expect(observedDiskUsageBytes(1_000_000_000)).toBe(1_000_000_000n);
+    expect(observedDiskUsageBytes('42')).toBe(42n);
+  });
+
   it('requires the three managed identity fields before treating an instance as owned', () => {
     expect(managedContainerIdentity({
       config: {
@@ -277,6 +287,156 @@ describe('container reconciler §15.1 fixture-driven Incus mocks', () => {
     });
   });
 
+  it('adopts a missing shared catalog instead of VOLUME_PLACEMENT_PENDING', async () => {
+    const { reconciler, client } = await harness({
+      status: 'Stopped',
+      powerIntent: 'stopped',
+      attachments: [attachment(ATTACH_ADD, VOLUME_ADD, '/data/add', 'attaching', true)],
+    });
+    client.getStorageVolume
+      .mockRejectedValueOnce(new IncusError('INCUS_NOT_FOUND', 'managed_failure'))
+      .mockResolvedValue(syncResponse({ name: 'volume' }));
+
+    const outcome = await reconciler.reconcile(context(client));
+    expect(outcome).toEqual({ outcome: 'succeeded', observedGeneration: 3 });
+    expect(client.createStorageVolume).toHaveBeenCalledWith(
+      ROOT_POOL,
+      expect.objectContaining({
+        name: deriveVolumeName(VOLUME_ADD),
+        config: expect.objectContaining({
+          'security.shifted': 'true',
+        }),
+      }),
+      expect.anything(),
+    );
+  });
+
+  it('skips nyd-* PUT when cancel happens after mkdir and before present write', async () => {
+    const addName = deriveAttachmentDeviceName(ATTACH_ADD);
+    const rows = [
+      attachment(ATTACH_ADD, VOLUME_ADD, '/data/add', 'attaching', true),
+    ];
+    const { reconciler, client, putBodies } = await harness({
+      status: 'Running',
+      powerIntent: 'running',
+      attachments: rows,
+    });
+    let generation = 3;
+    vi.spyOn(
+      reconciler as unknown as { readContainer: () => Promise<unknown> },
+      'readContainer',
+    ).mockImplementation(async () => containerRow({
+      status: 'Running',
+      powerIntent: 'running',
+    }));
+    vi.spyOn(
+      reconciler as unknown as { rereadDesired: () => Promise<unknown> },
+      'rereadDesired',
+    ).mockImplementation(async () => {
+      const desired = rows
+        .filter((item) => item.bindState !== 'detaching')
+        .map((item) => attachmentRows([item])[0]);
+      return { stale: generation > 3, desired };
+    });
+    client.getStorageVolume.mockRejectedValueOnce(
+      new IncusError('INCUS_NOT_FOUND', 'managed_failure'),
+    );
+    client.createStorageVolume.mockImplementation(async () => {
+      rows[0] = { ...rows[0]!, bindState: 'detaching' };
+      generation = 4;
+      return syncResponse({});
+    });
+
+    const outcome = await reconciler.reconcile(context(client));
+    expect(outcome).toEqual({ outcome: 'succeeded', observedGeneration: 3 });
+    expect(client.createStorageVolume).toHaveBeenCalled();
+    const nydPuts = putBodies.filter((body) => body.devices[addName]);
+    expect(nydPuts).toHaveLength(0);
+  });
+
+  it('retries attaching catalogs that are missing, but not detaching-only updates', async () => {
+    const addName = deriveAttachmentDeviceName(ATTACH_ADD);
+    const removeName = deriveAttachmentDeviceName(ATTACH_REMOVE);
+    const attaching = await harness({
+      status: 'Stopped',
+      powerIntent: 'stopped',
+      attachments: [attachment(ATTACH_ADD, VOLUME_ADD, '/data/add', 'attaching')],
+    });
+    attaching.client.getStorageVolume.mockRejectedValueOnce(
+      new IncusError('INCUS_NOT_FOUND', 'managed_failure'),
+    );
+    await expect(attaching.reconciler.reconcile(context(attaching.client))).rejects.toMatchObject({
+      code: 'VOLUME_PLACEMENT_PENDING',
+      disposition: 'retry',
+    });
+    expect(attaching.client.readModifyWriteInstance).not.toHaveBeenCalled();
+
+    const detaching = await harness({
+      status: 'Stopped',
+      powerIntent: 'stopped',
+      attachments: [attachment(ATTACH_REMOVE, VOLUME_REMOVE, '/data/remove', 'detaching')],
+      documentExtras: {
+        devices: {
+          [removeName]: diskDevice(VOLUME_REMOVE, '/data/remove'),
+        },
+      },
+    });
+    detaching.client.getStorageVolume.mockRejectedValue(
+      new IncusError('INCUS_NOT_FOUND', 'managed_failure'),
+    );
+    const outcome = await detaching.reconciler.reconcile(context(detaching.client));
+    expect(outcome).toEqual({ outcome: 'succeeded', observedGeneration: 3 });
+    expect(detaching.client.readModifyWriteInstance).toHaveBeenCalledTimes(1);
+    expect(detaching.putBodies[0]!.devices[removeName]).toBeUndefined();
+    expect(detaching.putBodies[0]!.devices[addName]).toBeUndefined();
+  });
+
+  it('succeeds a stale container.update without PUT or bind settlement', async () => {
+    const { reconciler, client } = await harness({
+      status: 'Stopped',
+      powerIntent: 'stopped',
+      attachments: [attachment(ATTACH_ADD, VOLUME_ADD, '/data/add', 'attaching')],
+    });
+    const outcome = await reconciler.reconcile(context(client, { targetGeneration: 2 }));
+    expect(outcome).toEqual({ outcome: 'succeeded', observedGeneration: 2 });
+    expect(client.readModifyWriteInstance).not.toHaveBeenCalled();
+    expect(client.getStorageVolume).not.toHaveBeenCalled();
+  });
+
+  it('settles attaching to attached after the device is present and drops detaching after it is gone', async () => {
+    const addName = deriveAttachmentDeviceName(ATTACH_ADD);
+    const removeName = deriveAttachmentDeviceName(ATTACH_REMOVE);
+    const binds = volumeBindDb([
+      { id: ATTACH_ADD, bind_state: 'attaching', device_name: addName },
+      { id: ATTACH_REMOVE, bind_state: 'detaching', device_name: removeName },
+    ]);
+    const { reconciler, client, putBodies } = await harness({
+      status: 'Stopped',
+      powerIntent: 'stopped',
+      database: binds.db,
+      attachments: [
+        attachment(ATTACH_ADD, VOLUME_ADD, '/data/add', 'attaching'),
+        attachment(ATTACH_REMOVE, VOLUME_REMOVE, '/data/remove', 'detaching'),
+      ],
+      documentExtras: {
+        devices: {
+          [removeName]: diskDevice(VOLUME_REMOVE, '/data/remove'),
+        },
+      },
+    });
+
+    const outcome = await reconciler.reconcile(context(client));
+    expect(outcome).toEqual({ outcome: 'succeeded', observedGeneration: 3 });
+    expect(putBodies[0]!.devices[addName]).toMatchObject({
+      type: 'disk',
+      path: '/data/add',
+      source: deriveVolumeName(VOLUME_ADD),
+    });
+    expect(putBodies[0]!.devices[removeName]).toBeUndefined();
+    expect(binds.updated).toContain(ATTACH_ADD);
+    expect(binds.deleted).toContain(ATTACH_REMOVE);
+  });
+
   it('does not create a second instance for the same container_id after a crash window', async () => {
     const { reconciler, client, expectedName } = await harness({
       status: 'Stopped',
@@ -314,7 +474,7 @@ describe('container reconciler §15.1 fixture-driven Incus mocks', () => {
     expect(client.readModifyWriteInstance).not.toHaveBeenCalled();
   });
 
-  it('fails closed when eth0 is not macvlan and never writes Incus', async () => {
+  it('fails closed when eth0 is not bridged and never writes Incus', async () => {
     const { reconciler, client, putBodies } = await harness({
       status: 'Stopped',
       powerIntent: 'stopped',
@@ -338,6 +498,64 @@ describe('container reconciler §15.1 fixture-driven Incus mocks', () => {
     expect(client.readModifyWriteInstance).not.toHaveBeenCalled();
     expect(client.updateInstance).not.toHaveBeenCalled();
     expect(putBodies).toHaveLength(0);
+  });
+
+  it('fails closed when leftover eth0 is macvlan and never writes Incus', async () => {
+    const { reconciler, client, putBodies } = await harness({
+      status: 'Stopped',
+      powerIntent: 'stopped',
+      documentExtras: {
+        devices: {
+          eth0: {
+            type: 'nic',
+            nictype: 'macvlan',
+            mode: 'bridge',
+            parent: PARENT,
+            name: 'eth0',
+          },
+        },
+      },
+    });
+
+    const outcome = await reconciler.reconcile(context(client));
+    expect(outcome).toMatchObject({
+      outcome: 'failed',
+      failure: { code: 'INVALID_MANAGED_NETWORK_TYPE' },
+    });
+    expect(client.readModifyWriteInstance).not.toHaveBeenCalled();
+    expect(putBodies).toHaveLength(0);
+  });
+
+  it('repairs a bridged eth0 missing hwaddr or filter keys', async () => {
+    const { reconciler, client, putBodies } = await harness({
+      status: 'Stopped',
+      powerIntent: 'stopped',
+      documentExtras: {
+        devices: {
+          eth0: {
+            type: 'nic',
+            nictype: 'bridged',
+            parent: PARENT,
+            name: 'eth0',
+            'ipv4.address': ROUTED_IP,
+            'security.ipv4_filtering': 'true',
+            'security.mac_filtering': 'true',
+          },
+        },
+      },
+    });
+
+    const outcome = await reconciler.reconcile(context(client));
+    expect(outcome).toEqual({ outcome: 'succeeded', observedGeneration: 3 });
+    expect(client.readModifyWriteInstance).toHaveBeenCalled();
+    expect(putBodies.length).toBeGreaterThan(0);
+    expect(putBodies[0]?.devices.eth0).toMatchObject({
+      nictype: 'bridged',
+      hwaddr: expect.any(String),
+      'ipv4.address': ROUTED_IP,
+      'security.ipv4_filtering': 'true',
+      'security.mac_filtering': 'true',
+    });
   });
 
   it('never emits Incus resize/PUT when block_backed running root shrink is requested', async () => {
@@ -445,6 +663,8 @@ interface AttachmentFixture {
   readonly id: string;
   readonly volumeId: string;
   readonly containerPath: string;
+  readonly bindState?: 'attaching' | 'attached' | 'detaching';
+  readonly shared?: boolean;
 }
 
 interface HarnessOptions {
@@ -461,10 +681,17 @@ interface HarnessOptions {
   };
   readonly missingInstance?: boolean;
   readonly audit?: { log: ReturnType<typeof vi.fn> };
+  readonly database?: unknown;
 }
 
-function attachment(id: string, volumeId: string, containerPath: string): AttachmentFixture {
-  return { id, volumeId, containerPath };
+function attachment(
+  id: string,
+  volumeId: string,
+  containerPath: string,
+  bindState: AttachmentFixture['bindState'] = 'attached',
+  shared = false,
+): AttachmentFixture {
+  return { id, volumeId, containerPath, bindState, shared };
 }
 
 function diskDevice(volumeId: string, path: string): Record<string, string> {
@@ -513,6 +740,9 @@ function attachmentRows(attachments: readonly AttachmentFixture[]) {
     volume_id: item.volumeId,
     incus_name: deriveVolumeName(item.volumeId),
     pool_name: ROOT_POOL,
+    size_bytes: '10',
+    shared: item.shared === true,
+    bind_state: item.bindState ?? 'attached',
   }));
 }
 
@@ -618,10 +848,44 @@ function syncResponse<T>(metadata: T, etag = '"etag-1"') {
   };
 }
 
+function volumeBindDb(rows: Array<{ id: string; bind_state: string; device_name: string }>) {
+  const updated: string[] = [];
+  const deleted: string[] = [];
+  const makeQuery = (kind: 'select' | 'update' | 'delete') => {
+    const query: Record<string, unknown> = {};
+    let idFilter: string | undefined;
+    for (const method of ['select', 'selectAll', 'innerJoin', 'orderBy', 'set', 'values']) {
+      query[method] = vi.fn(() => query);
+    }
+    query.where = vi.fn((column: string, _op: string, value: unknown) => {
+      if (column === 'id') idFilter = String(value);
+      return query;
+    });
+    query.execute = vi.fn(async () => {
+      if (kind === 'select') return rows;
+      if (kind === 'update' && idFilter) updated.push(idFilter);
+      if (kind === 'delete' && idFilter) deleted.push(idFilter);
+      return [];
+    });
+    query.executeTakeFirst = vi.fn().mockResolvedValue(undefined);
+    return query;
+  };
+  return {
+    updated,
+    deleted,
+    db: {
+      updateTable: vi.fn(() => makeQuery('update')),
+      selectFrom: vi.fn(() => makeQuery('select')),
+      deleteFrom: vi.fn(() => makeQuery('delete')),
+      insertInto: vi.fn(() => makeQuery('select')),
+    },
+  };
+}
+
 function noopDb() {
   const chain = (): Record<string, unknown> => {
     const query: Record<string, unknown> = {};
-    for (const method of ['select', 'selectAll', 'where', 'set', 'values', 'innerJoin', 'orderBy']) {
+    for (const method of ['select', 'selectAll', 'where', 'set', 'values', 'innerJoin', 'leftJoin', 'orderBy']) {
       query[method] = vi.fn(() => query);
     }
     query.execute = vi.fn().mockResolvedValue([]);
@@ -664,6 +928,8 @@ async function harness(options: HarnessOptions) {
     deleteInstance: vi.fn(async () => syncResponse({})),
     execInstance: vi.fn(async () => syncResponse({ return: 0 })),
     getStorageVolume: vi.fn(async () => syncResponse({ name: 'volume' })),
+    createStorageVolume: vi.fn(async () => syncResponse({})),
+    getStorageVolumeState: vi.fn(async () => syncResponse({ usage: {} })),
     getOperationWait: vi.fn(),
     readModifyWriteInstance: vi.fn(async (
       _name: string,
@@ -705,7 +971,7 @@ async function harness(options: HarnessOptions) {
   };
 
   const reconciler = new ContainerReconciler(
-    noopDb() as never,
+    (options.database ?? noopDb()) as never,
     undefined,
     undefined,
     undefined,
@@ -755,7 +1021,7 @@ function scanHarness(options: {
   let executeCount = 0;
   const chain = (): Record<string, unknown> => {
     const query: Record<string, unknown> = {};
-    for (const method of ['select', 'selectAll', 'where', 'set', 'values', 'innerJoin', 'orderBy']) {
+    for (const method of ['select', 'selectAll', 'where', 'set', 'values', 'innerJoin', 'leftJoin', 'orderBy']) {
       query[method] = vi.fn(() => query);
     }
     query.execute = vi.fn(async () => {
@@ -785,7 +1051,7 @@ function scanHarness(options: {
   return { reconciler, client, ensurePending };
 }
 
-function context(client: unknown): ReconcileRunContext {
+function context(client: unknown, intentOverrides: Partial<IntentRecord> = {}): ReconcileRunContext {
   const intent: IntentRecord = {
     id: '55555555-5555-4555-8555-555555555555',
     kind: IntentKind.ContainerUpdate,
@@ -804,6 +1070,7 @@ function context(client: unknown): ReconcileRunContext {
     nextAttemptAt: null,
     createdAt: '2026-08-07T15:00:00.000Z',
     settledAt: null,
+    ...intentOverrides,
   };
   return {
     intent,

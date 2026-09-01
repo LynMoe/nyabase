@@ -7,6 +7,7 @@ import { IntentRepository } from './intent.repository.js';
 import {
   MAX_ACTIVE_CLAIMS_PER_SERVER,
   ReconcileClaimRepository,
+  VOLUME_DESTROY_PLACEMENT_ID,
 } from './reconcile-claim.repository.js';
 
 const describePg = process.env.NYABASE_TEST_DATABASE_URL ? describe : describe.skip;
@@ -61,6 +62,7 @@ describePg('Incus reconciliation intent and lease repositories', () => {
         1,
         {
           outcome: 'failed',
+          placementServerId: serverId,
           failure: {
             code: 'INSTANCE_BUSY',
             message: 'Retryable busy state',
@@ -108,6 +110,7 @@ describePg('Incus reconciliation intent and lease repositories', () => {
         3,
         {
           outcome: 'failed',
+          placementServerId: serverId,
           failure: {
             code: 'GPU_CHANGE_REQUIRES_STOP',
             message: 'The instance must be stopped',
@@ -188,7 +191,7 @@ describePg('Incus reconciliation intent and lease repositories', () => {
         IntentResourceType.Container,
         resourceId,
         2,
-        { outcome: 'succeeded' },
+        { outcome: 'succeeded', placementServerId: serverId },
       );
       expect(result.succeeded).toBe(1);
       const rows = await database
@@ -307,7 +310,7 @@ describePg('Incus reconciliation intent and lease repositories', () => {
         IntentResourceType.Container,
         resourceId,
         1,
-        { outcome: 'succeeded' },
+        { outcome: 'succeeded', placementServerId: serverId },
       );
 
       const reused = await repository.ensurePending({
@@ -397,7 +400,7 @@ describePg('Incus reconciliation intent and lease repositories', () => {
         IntentResourceType.Container,
         resourceId,
         1,
-        { outcome: 'succeeded' },
+        { outcome: 'succeeded', placementServerId: serverId },
       );
 
       const rescan = await repository.ensurePending({
@@ -417,7 +420,7 @@ describePg('Incus reconciliation intent and lease repositories', () => {
         IntentResourceType.Container,
         resourceId,
         1,
-        { outcome: 'succeeded' },
+        { outcome: 'succeeded', placementServerId: serverId },
       );
       const secondScan = await repository.ensurePending({
         kind: IntentKind.ContainerUpdate,
@@ -697,6 +700,119 @@ describePg('Incus reconciliation intent and lease repositories', () => {
         resourceId: volumeId,
         placementServerId: serverB,
         workerId: 'worker-b',
+      })).toBeNull();
+    });
+  });
+
+  it('makes volume.destroy sentinel claims exclusive with placement claims', async () => {
+    await withPostgresTestDatabase(async ({ database }) => {
+      const serverA = randomUUID();
+      const serverB = randomUUID();
+      const volumeId = randomUUID();
+      await database.insertInto('infra.servers').values([
+        {
+          id: serverA,
+          name: 'destroy-a',
+          slug: 'destroy-a',
+          api_endpoint: 'https://127.0.0.1:8443',
+          parent_interface: null,
+          dns_servers: [],
+          gpu_runtime_available: false,
+          status: 'unknown',
+          api_extensions: [],
+          storage_overcommit_ratio: 1,
+          system_pool_id: null,
+          server_cert_fingerprint: null,
+          incus_version: null,
+          last_seen_at: null,
+          last_error: null,
+          revision: 1,
+          node_metrics_endpoint: null,
+          node_metrics_server_cert_fingerprint: null,
+          node_metrics_token_ciphertext: null,
+          node_metrics_token_fingerprint: null,
+          node_metrics_status: 'unconfigured',
+          node_metrics_last_success_at: null,
+          node_metrics_outage_since: null,
+          node_metrics_last_error: null,
+          preflight_status: 'not_run',
+          preflight_checked_at: null,
+          preflight_report: null,
+        },
+        {
+          id: serverB,
+          name: 'destroy-b',
+          slug: 'destroy-b',
+          api_endpoint: 'https://127.0.0.1:8444',
+          parent_interface: null,
+          dns_servers: [],
+          gpu_runtime_available: false,
+          status: 'unknown',
+          api_extensions: [],
+          storage_overcommit_ratio: 1,
+          system_pool_id: null,
+          server_cert_fingerprint: null,
+          incus_version: null,
+          last_seen_at: null,
+          last_error: null,
+          revision: 1,
+          node_metrics_endpoint: null,
+          node_metrics_server_cert_fingerprint: null,
+          node_metrics_token_ciphertext: null,
+          node_metrics_token_fingerprint: null,
+          node_metrics_status: 'unconfigured',
+          node_metrics_last_success_at: null,
+          node_metrics_outage_since: null,
+          node_metrics_last_error: null,
+          preflight_status: 'not_run',
+          preflight_checked_at: null,
+          preflight_report: null,
+        },
+      ]).execute();
+      const repository = new ReconcileClaimRepository(database);
+      const destroy = await repository.claim({
+        resourceType: IntentResourceType.Volume,
+        resourceId: volumeId,
+        placementServerId: VOLUME_DESTROY_PLACEMENT_ID,
+        workerId: 'destroy-worker',
+      });
+      expect(destroy?.placementServerId).toBe(VOLUME_DESTROY_PLACEMENT_ID);
+      expect(await repository.claim({
+        resourceType: IntentResourceType.Volume,
+        resourceId: volumeId,
+        placementServerId: serverA,
+        serverId: serverA,
+        workerId: 'ensure-a',
+      })).toBeNull();
+
+      expect(await repository.release({
+        resourceType: IntentResourceType.Volume,
+        resourceId: volumeId,
+        placementServerId: VOLUME_DESTROY_PLACEMENT_ID,
+        workerId: 'destroy-worker',
+      })).toBe(true);
+
+      const first = await repository.claim({
+        resourceType: IntentResourceType.Volume,
+        resourceId: volumeId,
+        placementServerId: serverA,
+        serverId: serverA,
+        workerId: 'ensure-a',
+      });
+      const second = await repository.claim({
+        resourceType: IntentResourceType.Volume,
+        resourceId: volumeId,
+        placementServerId: serverB,
+        serverId: serverB,
+        workerId: 'ensure-b',
+      });
+      expect(first?.placementServerId).toBe(serverA);
+      expect(second?.placementServerId).toBe(serverB);
+      expect(await repository.claim({
+        resourceType: IntentResourceType.Volume,
+        resourceId: volumeId,
+        placementServerId: VOLUME_DESTROY_PLACEMENT_ID,
+        workerId: 'destroy-worker',
       })).toBeNull();
     });
   });

@@ -18,6 +18,8 @@ test('runtime evidence and release proof are separate lifecycle steps', () => {
   const release = readFileSync(join(root, 'orchestrator', 'release-proof.mjs'), 'utf8');
   assert.match(evidence, /coverage-case-events/);
   assert.match(evidence, /status !== 'passed'/);
+  assert.match(evidence, /listed HTTP surfaces were not observed/);
+  assert.match(evidence, /observedHttpSurfaces/);
   assert.match(release, /blockedCapabilities/);
   assert.match(release, /cleanup/);
 });

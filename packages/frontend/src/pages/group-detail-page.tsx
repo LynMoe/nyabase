@@ -1,22 +1,26 @@
 import { useMemo, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { getRouteApi, Link } from '@tanstack/react-router';
-import { ArrowLeft } from 'lucide-react';
+import { getRouteApi } from '@tanstack/react-router';
 import { Capability, type GroupDto, type UpdateGroupRequest } from '@nyabase/common';
 import { api } from '../lib/api.js';
+import { errorMessage } from '../lib/api-error.js';
 import { Button } from '../components/ui/button.js';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '../components/ui/card.js';
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from '../components/ui/dialog.js';
+import { Checkbox } from '../components/ui/checkbox.js';
 import { Input } from '../components/ui/input.js';
-import { Label } from '../components/ui/label.js';
-import { QueryErrorState, QueryLoadingState } from '../components/query-state.js';
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '../components/ui/select.js';
+import { ConfirmDialog } from '../components/layout/confirm-dialog.js';
+import { FormField } from '../components/layout/form-field.js';
+import { Page } from '../components/layout/page.js';
+import { PageHeader } from '../components/layout/page-header.js';
+import { QueryView } from '../components/layout/query-view.js';
+import { ResourceGrid } from '../components/layout/resource-grid.js';
 import { CanonicalGrantPanel } from '../components/grants/canonical-grant-panel.js';
 import { useAuthStore } from '../store/auth.js';
 import { toast } from '../hooks/use-toast.js';
@@ -45,15 +49,15 @@ export default function GroupDetailPage() {
   const [memberUserId, setMemberUserId] = useState('');
   const [removeMember, setRemoveMember] = useState<{ userId: string; label: string } | null>(null);
 
-  const groupQuery = useQuery({ queryKey: ['group', id], queryFn: () => api.get<GroupDto>(`/admin/groups/${id}`) });
+  const groupQuery = useQuery({ queryKey: queryKeys.groups.detail(id), queryFn: () => api.get<GroupDto>(`/admin/groups/${id}`) });
   const usersQuery = useQuery({
-    queryKey: ['catalog', 'users'],
+    queryKey: queryKeys.catalog.users,
     queryFn: () => api.get<CatalogUser[]>('/admin/catalog/users'),
     enabled: canManageGroups,
   });
 
   const invalidate = () => {
-    void queryClient.invalidateQueries({ queryKey: ['group', id] });
+    void queryClient.invalidateQueries({ queryKey: queryKeys.groups.detail(id) });
     void queryClient.invalidateQueries({ queryKey: queryKeys.groups.admin });
   };
 
@@ -66,7 +70,7 @@ export default function GroupDetailPage() {
     },
     onError: (error) => toast({
       title: '添加成员失败',
-      description: error instanceof Error ? error.message : '请稍后重试',
+      description: errorMessage(error),
       variant: 'destructive',
     }),
   });
@@ -80,7 +84,7 @@ export default function GroupDetailPage() {
     },
     onError: (error) => toast({
       title: '移除成员失败',
-      description: error instanceof Error ? error.message : '请稍后重试',
+      description: errorMessage(error),
       variant: 'destructive',
     }),
   });
@@ -91,154 +95,146 @@ export default function GroupDetailPage() {
   );
   const candidateUsers = (usersQuery.data ?? []).filter((user) => !memberIds.has(user.id));
 
-  if (groupQuery.isLoading) return <QueryLoadingState label="加载用户组..." />;
-  if (groupQuery.isError) {
-    return (
-      <QueryErrorState
-        error={groupQuery.error}
-        resourceName="用户组"
-        onRetry={() => { void groupQuery.refetch(); }}
-        onBack={() => window.history.back()}
-      />
-    );
-  }
-  const group = groupQuery.data;
-  if (!group) return null;
-
   return (
-    <div className="space-y-5 px-4 py-4 md:px-6">
-      <div className="flex items-start gap-3">
-        <Link to="/groups">
-          <Button variant="outline" size="icon" aria-label="返回用户组">
-            <ArrowLeft className="h-4 w-4" />
-          </Button>
-        </Link>
-        <div>
-          <h1 className="text-2xl font-semibold tracking-tight">{group.name}</h1>
-          <p className="text-sm text-muted-foreground">
-            {group.description ?? '无描述'} · {group.memberCount ?? group.members?.length ?? 0} 名成员
-          </p>
-        </div>
-      </div>
+    <Page>
+      <PageHeader
+        title={groupQuery.data?.name ?? '用户组'}
+        description={
+          groupQuery.data
+            ? `${groupQuery.data.description ?? '无描述'} · ${groupQuery.data.memberCount ?? groupQuery.data.members?.length ?? 0} 名成员`
+            : undefined
+        }
+        crumbs={[
+          { label: '用户组', to: '/groups' },
+          { label: groupQuery.data?.name ?? '…' },
+        ]}
+      />
+      <QueryView
+        query={groupQuery}
+        resourceName="用户组"
+        loadingLabel="加载用户组..."
+        onBack={() => window.history.back()}
+      >
+        {(group) => (
+          <>
+            {canManageGrants && <CanonicalGrantPanel subject={group} kind="groups" />}
 
-      {canManageGroups && <GroupEditCard key={`${group.id}:${group.revision}`} group={group} onSaved={invalidate} />}
+            <ResourceGrid>
+            {canManageGroups && <GroupEditCard key={`${group.id}:${group.revision}`} group={group} onSaved={invalidate} />}
 
-      <Card>
-        <CardHeader>
-          <CardTitle className="text-base">成员</CardTitle>
-          <CardDescription>
-            {canManageGroups
-              ? '添加或移除成员后，其有效授权会按组成员身份立即变化。'
-              : '成员列表只读；需要「管理用户组」权限才能增删成员。'}
-          </CardDescription>
-        </CardHeader>
-        <CardContent className="space-y-3">
-          {canManageGroups && (
-            <div className="space-y-2">
-              {usersQuery.isError && (
-                <p className="text-sm text-destructive">
-                  无法加载可选用户列表。
-                  <button
-                    type="button"
-                    className="ml-2 underline"
-                    onClick={() => { void usersQuery.refetch(); }}
-                  >
-                    重试
-                  </button>
-                </p>
-              )}
-              <div className="flex flex-col gap-2 sm:flex-row sm:items-end">
-                <div className="min-w-0 flex-1 space-y-1.5">
-                  <Label htmlFor="group-add-member">添加成员</Label>
-                  <select
-                    id="group-add-member"
-                    className="h-10 w-full rounded-md border border-input bg-background px-3 text-sm"
-                    value={memberUserId}
-                    onChange={(event) => setMemberUserId(event.target.value)}
-                    disabled={usersQuery.isLoading || usersQuery.isError || addMember.isPending}
-                  >
-                    <option value="">
-                      {usersQuery.isLoading
-                        ? '加载用户…'
-                        : usersQuery.isError
-                          ? '用户列表不可用'
-                          : candidateUsers.length === 0
-                            ? '没有可添加的用户'
-                            : '选择用户'}
-                    </option>
-                    {candidateUsers.map((user) => (
-                      <option key={user.id} value={user.id}>
-                        {user.displayName} (@{user.username})
-                      </option>
-                    ))}
-                  </select>
-                </div>
-                <Button
-                  onClick={() => addMember.mutate(memberUserId)}
-                  disabled={!memberUserId || addMember.isPending || usersQuery.isError}
-                >
-                  {addMember.isPending ? '添加中...' : '添加'}
-                </Button>
-              </div>
-            </div>
-          )}
-
-          {group.members?.length ? (
-            <div className="divide-y rounded-md border">
-              {group.members.map((member) => (
-                <div key={member.userId} className="flex items-center justify-between gap-3 px-3 py-2 text-sm">
-                  <div className="min-w-0">
-                    <p>{member.displayName}</p>
-                    <p className="font-mono text-xs text-muted-foreground">@{member.username}</p>
+            <Card>
+              <CardHeader>
+                <CardTitle className="text-base">成员</CardTitle>
+                <CardDescription>
+                  {canManageGroups
+                    ? '添加或移除成员后，其有效授权会按组成员身份立即变化。'
+                    : '成员列表只读；需要「管理用户组」权限才能增删成员。'}
+                </CardDescription>
+              </CardHeader>
+              <CardContent className="space-y-3">
+                {canManageGroups && (
+                  <div className="space-y-2">
+                    {usersQuery.isError && (
+                      <p className="text-sm text-destructive">
+                        无法加载可选用户列表。
+                        <button
+                          type="button"
+                          className="ml-2 underline"
+                          onClick={() => { void usersQuery.refetch(); }}
+                        >
+                          重试
+                        </button>
+                      </p>
+                    )}
+                    <div className="flex flex-col gap-2 sm:flex-row sm:items-end">
+                      <div className="min-w-0 flex-1">
+                        <FormField id="group-add-member" label="添加成员">
+                          <Select
+                            key={memberUserId || 'empty'}
+                            value={memberUserId || undefined}
+                            onValueChange={setMemberUserId}
+                            disabled={usersQuery.isLoading || usersQuery.isError || addMember.isPending}
+                          >
+                            <SelectTrigger id="group-add-member">
+                              <SelectValue
+                                placeholder={
+                                  usersQuery.isLoading
+                                    ? '加载用户…'
+                                    : usersQuery.isError
+                                      ? '用户列表不可用'
+                                      : candidateUsers.length === 0
+                                        ? '没有可添加的用户'
+                                        : '选择用户'
+                                }
+                              />
+                            </SelectTrigger>
+                            <SelectContent>
+                              {candidateUsers.map((user) => (
+                                <SelectItem key={user.id} value={user.id}>
+                                  {user.displayName} (@{user.username})
+                                </SelectItem>
+                              ))}
+                            </SelectContent>
+                          </Select>
+                        </FormField>
+                      </div>
+                      <Button
+                        onClick={() => addMember.mutate(memberUserId)}
+                        disabled={!memberUserId || addMember.isPending || usersQuery.isError}
+                      >
+                        {addMember.isPending ? '添加中...' : '添加'}
+                      </Button>
+                    </div>
                   </div>
-                  {canManageGroups && (
-                    <Button
-                      size="sm"
-                      variant="ghost"
-                      onClick={() => setRemoveMember({
-                        userId: member.userId,
-                        label: `${member.displayName} (@${member.username})`,
-                      })}
-                    >
-                      移除
-                    </Button>
-                  )}
-                </div>
-              ))}
-            </div>
-          ) : (
-            <p className="text-sm text-muted-foreground">
-              {canManageGroups ? '暂无成员。请从上方选择用户添加。' : '暂无成员。'}
-            </p>
-          )}
-        </CardContent>
-      </Card>
+                )}
 
-      {canManageGrants && <CanonicalGrantPanel subject={group} kind="groups" />}
-
-      <Dialog open={Boolean(removeMember)} onOpenChange={(open) => { if (!open) setRemoveMember(null); }}>
-        <DialogContent>
-          <DialogHeader>
-            <DialogTitle>移除成员？</DialogTitle>
-            <DialogDescription>
-              将把「{removeMember?.label}」移出本组。该用户将立即失去本组带来的授权（若仍有其他授权则不受影响）。
-            </DialogDescription>
-          </DialogHeader>
-          <DialogFooter>
-            <Button variant="outline" onClick={() => setRemoveMember(null)}>取消</Button>
-            <Button
-              variant="destructive"
-              disabled={removeMemberMutation.isPending}
-              onClick={() => {
-                if (removeMember) removeMemberMutation.mutate(removeMember.userId);
-              }}
-            >
-              {removeMemberMutation.isPending ? '移除中...' : '确认移除'}
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
-    </div>
+                {group.members?.length ? (
+                  <div className="divide-y rounded-md border">
+                    {group.members.map((member) => (
+                      <div key={member.userId} className="flex items-center justify-between gap-3 px-3 py-2 text-sm">
+                        <div className="min-w-0">
+                          <p>{member.displayName}</p>
+                          <p className="font-mono text-xs text-muted-foreground">@{member.username}</p>
+                        </div>
+                        {canManageGroups && (
+                          <Button
+                            size="sm"
+                            variant="ghost"
+                            onClick={() => setRemoveMember({
+                              userId: member.userId,
+                              label: `${member.displayName} (@${member.username})`,
+                            })}
+                          >
+                            移除
+                          </Button>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <p className="text-sm text-muted-foreground">
+                    {canManageGroups ? '暂无成员。请从上方选择用户添加。' : '暂无成员。'}
+                  </p>
+                )}
+              </CardContent>
+            </Card>
+            </ResourceGrid>
+          </>
+        )}
+      </QueryView>
+      <ConfirmDialog
+        open={Boolean(removeMember)}
+        title="移除成员？"
+        description={`将把「${removeMember?.label}」移出本组。该用户将立即失去本组带来的授权（若仍有其他授权则不受影响）。`}
+        confirmLabel="确认移除"
+        pendingLabel="移除中..."
+        pending={removeMemberMutation.isPending}
+        onConfirm={() => {
+          if (removeMember) removeMemberMutation.mutate(removeMember.userId);
+        }}
+        onOpenChange={(open) => { if (!open) setRemoveMember(null); }}
+      />
+    </Page>
   );
 }
 
@@ -258,7 +254,7 @@ function GroupEditCard({ group, onSaved }: { group: GroupDto; onSaved: () => voi
       onSaved();
     },
     onError: (mutationError) => {
-      const message = mutationError instanceof Error ? mutationError.message : '请稍后重试';
+      const message = errorMessage(mutationError);
       setError(message);
       toast({ title: '更新用户组失败', description: message, variant: 'destructive' });
     },
@@ -299,11 +295,11 @@ function GroupEditCard({ group, onSaved }: { group: GroupDto; onSaved: () => voi
     save.mutate({ expectedRevision: group.revision, ...payload.data });
   };
 
-  const toggleCapability = (capability: Capability) => {
+  const toggleCapability = (capability: Capability, checked: boolean) => {
     setCapabilities((current) => (
-      current.includes(capability)
-        ? current.filter((item) => item !== capability)
-        : [...current, capability]
+      checked
+        ? (current.includes(capability) ? current : [...current, capability])
+        : current.filter((item) => item !== capability)
     ));
   };
 
@@ -317,26 +313,25 @@ function GroupEditCard({ group, onSaved }: { group: GroupDto; onSaved: () => voi
           </CardDescription>
         </CardHeader>
         <CardContent className="space-y-3">
-          <div className="space-y-1.5">
-            <Label htmlFor="group-description">描述</Label>
+          <FormField id="group-description" label="描述">
             <Input
               id="group-description"
               value={description}
               onChange={(event) => setDescription(event.target.value)}
             />
-          </div>
+          </FormField>
           {!group.isSystem && (
             <fieldset className="space-y-2">
               <legend className="text-sm font-medium">能力</legend>
               <div className="grid gap-2 sm:grid-cols-2">
                 {Object.values(Capability).map((capability) => (
                   <label key={capability} className="flex items-center gap-2 text-sm">
-                    <input
-                      type="checkbox"
+                    <Checkbox
+                      id={`group-capability-${capability}`}
                       checked={capabilities.includes(capability)}
-                      onChange={() => toggleCapability(capability)}
+                      onCheckedChange={(checked) => toggleCapability(capability, checked === true)}
                     />
-                    {capabilityLabel(capability)}
+                    <span>{capabilityLabel(capability)}</span>
                   </label>
                 ))}
               </div>
@@ -350,23 +345,16 @@ function GroupEditCard({ group, onSaved }: { group: GroupDto; onSaved: () => voi
           </div>
         </CardContent>
       </Card>
-      <Dialog open={Boolean(confirmRemoval)} onOpenChange={(open) => { if (!open) setConfirmRemoval(null); }}>
-        <DialogContent>
-          <DialogHeader>
-            <DialogTitle>移除用户组能力？</DialogTitle>
-            <DialogDescription>
-              将移除：{(confirmRemoval ?? []).map((capability) => capabilityLabel(capability)).join('、')}。
-              该组成员会立即失去这些能力。
-            </DialogDescription>
-          </DialogHeader>
-          <DialogFooter>
-            <Button variant="outline" onClick={() => setConfirmRemoval(null)}>取消</Button>
-            <Button variant="destructive" disabled={save.isPending} onClick={() => submit(true)}>
-              {save.isPending ? '保存中...' : '确认移除并保存'}
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+      <ConfirmDialog
+        open={Boolean(confirmRemoval)}
+        title="移除用户组能力？"
+        description={`将移除：${(confirmRemoval ?? []).map((capability) => capabilityLabel(capability)).join('、')}。该组成员会立即失去这些能力。`}
+        confirmLabel="确认移除并保存"
+        pendingLabel="保存中..."
+        pending={save.isPending}
+        onConfirm={() => submit(true)}
+        onOpenChange={(open) => { if (!open) setConfirmRemoval(null); }}
+      />
     </>
   );
 }

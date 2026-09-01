@@ -50,7 +50,7 @@ export function SubjectGrantSummary({
     queryFn: () => api.get<SharedBackendDto[]>('/admin/shared-backends'),
   });
   const poolsQuery = useQuery({
-    queryKey: ['grant-targets', 'pools'],
+    queryKey: queryKeys.grants.targets.pools,
     queryFn: async () => {
       const servers = serversQuery.data ?? [];
       const rows = await Promise.all(
@@ -64,15 +64,15 @@ export function SubjectGrantSummary({
   const [serverGrantsQuery, poolGrantsQuery, backendGrantsQuery] = useQueries({
     queries: [
       {
-        queryKey: [...queryKeys.grants.subject(kind, subjectId), 'servers'],
+        queryKey: queryKeys.grants.subjectList(kind, subjectId, 'servers'),
         queryFn: () => api.get<ServerGrantDto[]>(`${prefix}/server-grants`),
       },
       {
-        queryKey: [...queryKeys.grants.subject(kind, subjectId), 'pools'],
+        queryKey: queryKeys.grants.subjectList(kind, subjectId, 'pools'),
         queryFn: () => api.get<StoragePoolGrantDto[]>(`${prefix}/storage-pool-grants`),
       },
       {
-        queryKey: [...queryKeys.grants.subject(kind, subjectId), 'backends'],
+        queryKey: queryKeys.grants.subjectList(kind, subjectId, 'backends'),
         queryFn: () => api.get<SharedBackendGrantDto[]>(`${prefix}/shared-backend-grants`),
       },
     ],

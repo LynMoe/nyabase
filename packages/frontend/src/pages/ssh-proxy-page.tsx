@@ -1,3 +1,4 @@
+import { useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import type { ComponentType } from 'react';
 import {
@@ -11,24 +12,26 @@ import {
 } from 'lucide-react';
 import { Capability, type SshProxyHostKeySummaryDto, type SshProxyStatusReport } from '@nyabase/common';
 import { api } from '../lib/api.js';
+import { errorMessage } from '../lib/api-error.js';
 import { Badge } from '../components/ui/badge.js';
 import { Button } from '../components/ui/button.js';
 import {
-  AlertDialog,
-  AlertDialogAction,
-  AlertDialogCancel,
-  AlertDialogContent,
-  AlertDialogDescription,
-  AlertDialogFooter,
-  AlertDialogHeader,
-  AlertDialogTitle,
-  AlertDialogTrigger,
-} from '../components/ui/alert-dialog.js';
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from '../components/ui/table.js';
+import { ConfirmDialog } from '../components/layout/confirm-dialog.js';
+import { Page } from '../components/layout/page.js';
+import { PageHeader } from '../components/layout/page-header.js';
+import { QueryView } from '../components/layout/query-view.js';
 import { toast } from '../hooks/use-toast.js';
 import { useAuthStore } from '../store/auth.js';
-import { QueryErrorState, QueryLoadingState } from '../components/query-state.js';
 import { canViewSshProxyStatus } from '../lib/ssh-proxy-access.js';
 import { queryPollInterval } from '../lib/query-lifecycle.js';
+import { queryKeys } from '../lib/query-keys.js';
 
 interface SshProxyAdminStatus {
   connectedProxies: number;
@@ -55,8 +58,10 @@ export default function SshProxyPage() {
   const user = useAuthStore((state) => state.user);
   const canViewStatus = canViewSshProxyStatus(user?.capabilities ?? []);
   const canManageSettings = user?.capabilities.includes(Capability.ManageSystemSettings) ?? false;
+  const [disconnectOpen, setDisconnectOpen] = useState(false);
+  const [rotateOpen, setRotateOpen] = useState(false);
   const statusQuery = useQuery({
-    queryKey: ['ssh-proxy-status'],
+    queryKey: queryKeys.sshProxy.status,
     queryFn: () => api.get<SshProxyAdminStatus>('/admin/ssh-proxy/status'),
     refetchInterval: (query) => queryPollInterval(query.state, {
       activeIntervalMs: 1_000,
@@ -66,17 +71,18 @@ export default function SshProxyPage() {
     enabled: canViewStatus,
   });
   const hostKeyQuery = useQuery({
-    queryKey: ['ssh-proxy-host-key'],
+    queryKey: queryKeys.sshProxy.hostKey,
     queryFn: () => api.get<SshProxyHostKeySummaryDto>('/admin/ssh-proxy/host-key'),
     enabled: canManageSettings,
   });
   const { data, isFetching, refetch } = statusQuery;
-  const { data: hostKey, isFetching: hostKeyFetching, refetch: refetchHostKey } = hostKeyQuery;
+  const { isFetching: hostKeyFetching, refetch: refetchHostKey } = hostKeyQuery;
 
   const disconnectAll = useMutation({
     mutationFn: () => api.post<DisconnectAllResult>('/admin/ssh-proxy/disconnect-all'),
     onSuccess: (result) => {
-      qc.invalidateQueries({ queryKey: ['ssh-proxy-status'] });
+      setDisconnectOpen(false);
+      qc.invalidateQueries({ queryKey: queryKeys.sshProxy.status });
       toast({
         title: '已发送断开命令',
         description: `已断开 ${result.disconnected} 个会话，目标代理 ${result.requested} 个。`,
@@ -84,7 +90,7 @@ export default function SshProxyPage() {
     },
     onError: (error) => toast({
       title: '断开失败',
-      description: error instanceof Error ? error.message : '请稍后重试',
+      description: errorMessage(error),
       variant: 'destructive',
     }),
   });
@@ -92,84 +98,55 @@ export default function SshProxyPage() {
   const rotateHostKey = useMutation({
     mutationFn: () => api.post<SshProxyHostKeySummaryDto>('/admin/ssh-proxy/host-key/rotate'),
     onSuccess: (updated) => {
-      qc.setQueryData(['ssh-proxy-host-key'], updated);
-      qc.invalidateQueries({ queryKey: ['ssh-proxy-status'] });
+      setRotateOpen(false);
+      qc.setQueryData(queryKeys.sshProxy.hostKey, updated);
+      qc.invalidateQueries({ queryKey: queryKeys.sshProxy.status });
       toast({ title: 'SSH 主机密钥已轮换' });
     },
     onError: (error) => toast({
       title: '轮换失败',
-      description: error instanceof Error ? error.message : '请稍后重试',
+      description: errorMessage(error),
       variant: 'destructive',
     }),
   });
 
   const status = data ?? emptyStatus;
-  const connections = status.proxies.flatMap((proxy) => proxy.connections.map((connection) => ({
-    ...connection,
-    proxyId: proxy.proxyId,
-  })));
+  const statusDescription = !canViewStatus
+    ? undefined
+    : statusQuery.isError
+      ? '代理状态加载失败'
+      : status.updatedAt ? `最后更新 ${formatTime(status.updatedAt)}` : '等待代理上报实时状态';
 
   return (
-    <div className="px-4 py-4 md:px-6 space-y-5 w-full">
-      <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
-        <div>
-          <h1 className="text-2xl font-semibold tracking-tight text-foreground">SSH 代理</h1>
-          {canViewStatus && (
-            <p className="text-sm text-muted-foreground mt-0.5">
-              {statusQuery.isError
-                ? '代理状态加载失败'
-                : status.updatedAt ? `最后更新 ${formatTime(status.updatedAt)}` : '等待代理上报实时状态'}
-            </p>
-          )}
-        </div>
-        <div className="flex items-center gap-2">
-          {canViewStatus && (
-            <Button variant="ghost" size="icon" className="h-8 w-8 text-muted-foreground" onClick={() => refetch()} disabled={isFetching}>
-              <RefreshCw className={`h-4 w-4 ${isFetching ? 'animate-spin' : ''}`} />
-            </Button>
-          )}
-          {canManageSettings && (
-            <AlertDialog>
-              <AlertDialogTrigger asChild>
-                <Button variant="destructive" disabled={(canViewStatus && Boolean(data) && status.activeConnections === 0) || disconnectAll.isPending}>
-                  <Unplug className="h-4 w-4" />
-                  断开全部
-                </Button>
-              </AlertDialogTrigger>
-              <AlertDialogContent>
-                <AlertDialogHeader>
-                  <AlertDialogTitle>断开所有 SSH 代理会话？</AlertDialogTitle>
-                  <AlertDialogDescription>
-                    {canViewStatus && data
-                      ? `当前有 ${status.activeConnections} 个活跃连接。`
-                      : '当前连接数不可见或尚未加载。'}
-                    确认后会向所有在线 SSH 代理实例发送断开命令。
-                  </AlertDialogDescription>
-                </AlertDialogHeader>
-                <AlertDialogFooter>
-                  <AlertDialogCancel>取消</AlertDialogCancel>
-                  <AlertDialogAction onClick={() => disconnectAll.mutate()} className="bg-destructive text-destructive-foreground hover:bg-destructive/90">
-                    断开全部
-                  </AlertDialogAction>
-                </AlertDialogFooter>
-              </AlertDialogContent>
-            </AlertDialog>
-          )}
-        </div>
-      </div>
+    <Page>
+      <PageHeader
+        title="SSH 代理"
+        description={statusDescription}
+        actions={
+          <>
+            {canViewStatus && (
+              <Button variant="ghost" size="icon" className="h-8 w-8 text-muted-foreground" onClick={() => refetch()} disabled={isFetching}>
+                <RefreshCw className={`h-4 w-4 ${isFetching ? 'animate-spin' : ''}`} />
+              </Button>
+            )}
+            {canManageSettings && (
+              <Button
+                variant="destructive"
+                disabled={(canViewStatus && Boolean(data) && status.activeConnections === 0) || disconnectAll.isPending}
+                onClick={() => setDisconnectOpen(true)}
+              >
+                <Unplug className="h-4 w-4" />
+                断开全部
+              </Button>
+            )}
+          </>
+        }
+      />
 
-      {canViewStatus && statusQuery.isLoading && <QueryLoadingState label="加载 SSH 代理状态..." />}
-      {canViewStatus && statusQuery.isError && (
-        <QueryErrorState error={statusQuery.error} resourceName="SSH 代理状态" onRetry={() => { void statusQuery.refetch(); }} />
-      )}
-
-      {canViewStatus && statusQuery.isSuccess && (
-        <section className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
-          <MetricTile icon={Wifi} label="在线代理" value={status.connectedProxies.toString()} sub={`${status.proxies.length} 个实例上报`} />
-          <MetricTile icon={Activity} label="活跃连接" value={status.activeConnections.toString()} sub={`累计 ${status.totalConnections} 次`} />
-          <MetricTile icon={Gauge} label="实时带宽" value={`${formatRate(status.bandwidthInBps)} / ${formatRate(status.bandwidthOutBps)}`} sub="入站 / 出站" />
-          <MetricTile icon={PlugZap} label="累计流量" value={`${formatBytes(status.totalBytesFromClient + status.totalBytesToClient)}`} sub={`入 ${formatBytes(status.totalBytesFromClient)} 出 ${formatBytes(status.totalBytesToClient)}`} />
-        </section>
+      {canViewStatus && (
+        <QueryView query={statusQuery} resourceName="SSH 代理状态" loadingLabel="加载 SSH 代理状态...">
+          {(loaded) => <SshStatusSections status={loaded} />}
+        </QueryView>
       )}
 
       {canManageSettings && (
@@ -180,140 +157,170 @@ export default function SshProxyPage() {
               <Button variant="ghost" size="icon" className="h-8 w-8 text-muted-foreground" onClick={() => refetchHostKey()} disabled={hostKeyFetching}>
                 <RefreshCw className={`h-4 w-4 ${hostKeyFetching ? 'animate-spin' : ''}`} />
               </Button>
-              <AlertDialog>
-                <AlertDialogTrigger asChild>
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    disabled={rotateHostKey.isPending}
-                  >
-                    <RotateCcw className="h-4 w-4" />
-                    轮换
-                  </Button>
-                </AlertDialogTrigger>
-                <AlertDialogContent>
-                  <AlertDialogHeader>
-                    <AlertDialogTitle>轮换 SSH 主机密钥？</AlertDialogTitle>
-                    <AlertDialogDescription>
-                      轮换后所有客户端将失去对当前主机密钥的信任，需要更新 known_hosts 后才能再次连接。确认继续？
-                    </AlertDialogDescription>
-                  </AlertDialogHeader>
-                  <AlertDialogFooter>
-                    <AlertDialogCancel>取消</AlertDialogCancel>
-                    <AlertDialogAction
-                      onClick={() => rotateHostKey.mutate()}
-                      className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
-                    >
-                      确认轮换
-                    </AlertDialogAction>
-                  </AlertDialogFooter>
-                </AlertDialogContent>
-              </AlertDialog>
+              <Button
+                variant="outline"
+                size="sm"
+                disabled={rotateHostKey.isPending}
+                onClick={() => setRotateOpen(true)}
+              >
+                <RotateCcw className="h-4 w-4" />
+                轮换
+              </Button>
             </div>
           </div>
-          {hostKeyQuery.isLoading ? (
-            <QueryLoadingState label="加载 SSH 主机密钥..." />
-          ) : hostKeyQuery.isError ? (
-            <QueryErrorState error={hostKeyQuery.error} resourceName="SSH 主机密钥" onRetry={() => { void hostKeyQuery.refetch(); }} />
-          ) : hostKey ? (
-            <div className="rounded-lg border border-border bg-card p-4 grid gap-3 sm:grid-cols-3">
-              <InfoCell label="指纹" value={hostKey.fingerprint ?? '未配置'} mono />
-              <InfoCell label="版本" value={hostKey.generation?.toString() ?? '未配置'} />
-              <InfoCell label="轮换时间" value={hostKey.rotatedAt ? formatTime(hostKey.rotatedAt) : '从未轮换'} />
-            </div>
-          ) : null}
+          <QueryView query={hostKeyQuery} resourceName="SSH 主机密钥" loadingLabel="加载 SSH 主机密钥...">
+            {(hostKey) => (
+              <div className="rounded-lg border border-border bg-card p-4 grid gap-3 sm:grid-cols-3">
+                <InfoCell label="指纹" value={hostKey.fingerprint ?? '未配置'} mono />
+                <InfoCell label="版本" value={hostKey.generation?.toString() ?? '未配置'} />
+                <InfoCell label="轮换时间" value={hostKey.rotatedAt ? formatTime(hostKey.rotatedAt) : '从未轮换'} />
+              </div>
+            )}
+          </QueryView>
         </section>
       )}
 
-      {canViewStatus && statusQuery.isSuccess && (
-        <>
-          <section className="space-y-3">
-            <div className="flex items-center justify-between gap-4">
-              <h2 className="text-base font-semibold text-foreground">代理实例</h2>
-              <Badge variant={status.connectedProxies > 0 ? 'success' : 'outline'}>
-                {status.connectedProxies > 0 ? '在线' : '离线'}
-              </Badge>
-            </div>
-            <div className="overflow-hidden rounded-lg border border-border bg-card">
-              <table className="w-full text-sm">
-                <thead className="bg-muted/60 text-xs text-muted-foreground">
-                  <tr>
-                    <th className="text-left font-medium px-3 py-2">代理</th>
-                    <th className="text-left font-medium px-3 py-2">监听</th>
-                    <th className="text-left font-medium px-3 py-2">连接</th>
-                    <th className="text-left font-medium px-3 py-2">带宽</th>
-                    <th className="text-left font-medium px-3 py-2">流量</th>
-                    <th className="text-left font-medium px-3 py-2">快照</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {status.proxies.length === 0 ? (
-                    <tr>
-                      <td className="px-3 py-8 text-center text-muted-foreground" colSpan={6}>暂无在线 SSH 代理</td>
-                    </tr>
-                  ) : status.proxies.map((proxy) => (
-                    <tr key={proxy.proxyId} className="border-t border-border">
-                      <td className="px-3 py-2">
-                        <div className="font-medium text-foreground">{proxy.hostname ?? proxy.proxyId}</div>
-                        <div className="font-mono text-xs text-muted-foreground break-all">{proxy.proxyId}</div>
-                      </td>
-                      <td className="px-3 py-2 font-mono text-xs">{proxy.listen}</td>
-                      <td className="px-3 py-2">{proxy.activeConnections} / {proxy.totalConnections}</td>
-                      <td className="px-3 py-2">{formatRate(proxy.bandwidthInBps)} / {formatRate(proxy.bandwidthOutBps)}</td>
-                      <td className="px-3 py-2">{formatBytes(proxy.totalBytesFromClient + proxy.totalBytesToClient)}</td>
-                      <td className="px-3 py-2">{proxy.lastSnapshotGeneration ?? '-'}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          </section>
-
-          <section className="space-y-3">
-            <h2 className="text-base font-semibold text-foreground">当前连接</h2>
-            <div className="overflow-hidden rounded-lg border border-border bg-card">
-              <table className="w-full text-sm">
-                <thead className="bg-muted/60 text-xs text-muted-foreground">
-                  <tr>
-                    <th className="text-left font-medium px-3 py-2">登录</th>
-                    <th className="text-left font-medium px-3 py-2">目标</th>
-                    <th className="text-left font-medium px-3 py-2">来源</th>
-                    <th className="text-left font-medium px-3 py-2">通道</th>
-                    <th className="text-left font-medium px-3 py-2">流量</th>
-                    <th className="text-left font-medium px-3 py-2">连接时间</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {connections.length === 0 ? (
-                    <tr>
-                      <td className="px-3 py-8 text-center text-muted-foreground" colSpan={6}>暂无活跃连接</td>
-                    </tr>
-                  ) : connections.map((connection) => (
-                    <tr key={`${connection.proxyId}:${connection.id}`} className="border-t border-border">
-                      <td className="px-3 py-2">
-                        <div className="font-medium text-foreground">{connection.login ?? '未认证'}</div>
-                        <div className="text-xs text-muted-foreground">{connection.username ?? '-'}</div>
-                      </td>
-                      <td className="px-3 py-2">
-                        <div>{connection.serverSlug && connection.containerName ? `${connection.serverSlug}.${connection.containerName}` : '-'}</div>
-                        <div className="font-mono text-xs text-muted-foreground break-all">{connection.containerId ?? connection.instanceName ?? '-'}</div>
-                      </td>
-                      <td className="px-3 py-2">
-                        <div className="font-mono text-xs">{connection.peer}</div>
-                        <div className="text-xs text-muted-foreground truncate max-w-56">{connection.proxyId}</div>
-                      </td>
-                      <td className="px-3 py-2">{connection.channels}</td>
-                      <td className="px-3 py-2">入 {formatBytes(connection.bytesFromClient)} / 出 {formatBytes(connection.bytesToClient)}</td>
-                      <td className="px-3 py-2">{formatTime(connection.connectedAt)}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          </section>
-        </>
+      {canManageSettings && (
+        <ConfirmDialog
+          open={disconnectOpen}
+          onOpenChange={setDisconnectOpen}
+          title="断开所有 SSH 代理会话？"
+          description={`${canViewStatus && data ? `当前有 ${status.activeConnections} 个活跃连接。` : '当前连接数不可见或尚未加载。'} 确认后会向所有在线 SSH 代理实例发送断开命令。`}
+          confirmLabel="断开全部"
+          pendingLabel="断开全部"
+          pending={disconnectAll.isPending}
+          onConfirm={() => disconnectAll.mutate()}
+        />
       )}
-    </div>
+      {canManageSettings && (
+        <ConfirmDialog
+          open={rotateOpen}
+          onOpenChange={setRotateOpen}
+          title="轮换 SSH 主机密钥？"
+          description="轮换后所有客户端将失去对当前主机密钥的信任，需要更新 known_hosts 后才能再次连接。确认继续？"
+          confirmLabel="确认轮换"
+          pendingLabel="确认轮换"
+          pending={rotateHostKey.isPending}
+          onConfirm={() => rotateHostKey.mutate()}
+        />
+      )}
+    </Page>
+  );
+}
+
+function SshStatusSections({ status }: { status: SshProxyAdminStatus }) {
+  const proxies = status.proxies ?? [];
+  const connections = proxies.flatMap((proxy) => (proxy.connections ?? []).map((connection) => ({
+    ...connection,
+    proxyId: proxy.proxyId,
+  })));
+
+  return (
+    <>
+      <section className="grid grid-cols-2 gap-3 xl:grid-cols-4">
+        <MetricTile icon={Wifi} label="在线代理" value={status.connectedProxies.toString()} sub={`${proxies.length} 个实例上报`} />
+        <MetricTile icon={Activity} label="活跃连接" value={status.activeConnections.toString()} sub={`累计 ${status.totalConnections} 次`} />
+        <MetricTile icon={Gauge} label="实时带宽" value={`${formatRate(status.bandwidthInBps)} / ${formatRate(status.bandwidthOutBps)}`} sub="入站 / 出站" />
+        <MetricTile icon={PlugZap} label="累计流量" value={`${formatBytes(status.totalBytesFromClient + status.totalBytesToClient)}`} sub={`入 ${formatBytes(status.totalBytesFromClient)} 出 ${formatBytes(status.totalBytesToClient)}`} />
+      </section>
+
+      <section className="space-y-3">
+        <div className="flex items-center justify-between gap-4">
+          <h2 className="text-base font-semibold text-foreground">代理实例</h2>
+          <Badge variant={status.connectedProxies > 0 ? 'success' : 'outline'}>
+            {status.connectedProxies > 0 ? '在线' : '离线'}
+          </Badge>
+        </div>
+        <div className="rounded-lg border border-border bg-card">
+          <Table className="min-w-[720px]">
+            <TableHeader>
+              <TableRow className="bg-muted/60 hover:bg-muted/60">
+                <TableHead>代理</TableHead>
+                <TableHead>监听</TableHead>
+                <TableHead>连接</TableHead>
+                <TableHead>带宽</TableHead>
+                <TableHead>流量</TableHead>
+                <TableHead>快照</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {proxies.length === 0 ? (
+                <TableRow>
+                  <TableCell className="py-8 text-center text-muted-foreground" colSpan={6}>暂无在线 SSH 代理</TableCell>
+                </TableRow>
+              ) : proxies.map((proxy) => (
+                <TableRow key={proxy.proxyId}>
+                  <TableCell>
+                    <div className="font-medium text-foreground">{proxy.hostname || proxy.proxyId}</div>
+                    <div className="whitespace-normal break-all font-mono text-xs text-muted-foreground">{proxy.proxyId}</div>
+                  </TableCell>
+                  <TableCell className="font-mono text-xs">{proxy.listen}</TableCell>
+                  <TableCell>{proxy.activeConnections} / {proxy.totalConnections}</TableCell>
+                  <TableCell>{formatRate(proxy.bandwidthInBps)} / {formatRate(proxy.bandwidthOutBps)}</TableCell>
+                  <TableCell>{formatBytes(proxy.totalBytesFromClient + proxy.totalBytesToClient)}</TableCell>
+                  <TableCell>{proxy.lastSnapshotGeneration ?? '-'}</TableCell>
+                </TableRow>
+              ))}
+            </TableBody>
+          </Table>
+        </div>
+      </section>
+
+      <section className="space-y-3">
+        <h2 className="text-base font-semibold text-foreground">当前连接</h2>
+        <div className="rounded-lg border border-border bg-card">
+          <Table className="min-w-[720px]">
+            <TableHeader>
+              <TableRow className="bg-muted/60 hover:bg-muted/60">
+                <TableHead>登录</TableHead>
+                <TableHead>目标</TableHead>
+                <TableHead>来源</TableHead>
+                <TableHead>通道</TableHead>
+                <TableHead>流量</TableHead>
+                <TableHead>连接时间</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {connections.length === 0 ? (
+                <TableRow>
+                  <TableCell className="py-8 text-center text-muted-foreground" colSpan={6}>暂无活跃连接</TableCell>
+                </TableRow>
+              ) : connections.map((connection) => (
+                <TableRow key={`${connection.proxyId}:${connection.id}`}>
+                  <TableCell>
+                    <div className="font-medium text-foreground">{connection.login ?? '未认证'}</div>
+                    {connection.username ? (
+                      <div className="text-xs text-muted-foreground">{connection.username}</div>
+                    ) : null}
+                  </TableCell>
+                  <TableCell>
+                    {connection.serverSlug && connection.containerName ? (
+                      <>
+                        <div>{`${connection.serverSlug}.${connection.containerName}`}</div>
+                        {connection.containerId || connection.instanceName ? (
+                          <div className="break-all font-mono text-xs text-muted-foreground">
+                            {connection.containerId ?? connection.instanceName}
+                          </div>
+                        ) : null}
+                      </>
+                    ) : (
+                      <span className="text-muted-foreground">未绑定容器</span>
+                    )}
+                  </TableCell>
+                  <TableCell>
+                    <div className="font-mono text-xs">{connection.peer}</div>
+                    <div className="text-xs text-muted-foreground truncate max-w-56">{connection.proxyId}</div>
+                  </TableCell>
+                  <TableCell>{connection.channels ?? '无'}</TableCell>
+                  <TableCell>入 {formatBytes(connection.bytesFromClient)} / 出 {formatBytes(connection.bytesToClient)}</TableCell>
+                  <TableCell>{formatTime(connection.connectedAt)}</TableCell>
+                </TableRow>
+              ))}
+            </TableBody>
+          </Table>
+        </div>
+      </section>
+    </>
   );
 }
 
@@ -367,7 +374,7 @@ function formatRate(value: number): string {
 
 function formatTime(value: string | number): string {
   const date = typeof value === 'number' ? new Date(value) : new Date(value);
-  if (Number.isNaN(date.getTime())) return '-';
+  if (Number.isNaN(date.getTime())) return '未知';
   return date.toLocaleString();
 }
 

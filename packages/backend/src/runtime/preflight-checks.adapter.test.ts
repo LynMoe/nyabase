@@ -8,7 +8,7 @@ function database() {
       select: vi.fn(() => ({
         where: vi.fn(() => ({
           executeTakeFirst: vi.fn().mockResolvedValue({
-            parent_interface: 'eth0',
+            parent_interface: 'vmbr0',
           }),
         })),
       })),
@@ -38,28 +38,52 @@ function config(overrides: Record<string, unknown> = {}) {
   };
 }
 
+function lanSamples() {
+  return [
+    {
+      name: 'nyabase_node_network_is_bridge',
+      labels: { interface: 'vmbr0' },
+      value: 1,
+    },
+    {
+      name: 'nyabase_node_network_ipv4_present',
+      labels: { interface: 'vmbr0' },
+      value: 1,
+    },
+    {
+      name: 'nyabase_node_network_ipv4_present',
+      labels: { interface: 'bond0' },
+      value: 0,
+    },
+    {
+      name: 'nyabase_node_network_bridge_slave',
+      labels: { bridge: 'vmbr0', interface: 'bond0' },
+      value: 1,
+    },
+    {
+      name: 'nyabase_node_network_nft_available',
+      labels: {},
+      value: 1,
+    },
+  ];
+}
+
 describe('IncusPreflightChecksAdapter', () => {
-  it('keeps forwarding and rp_filter diagnostic when parent_interface is present', async () => {
+  it('passes the bridge/nft/ipv4_present conjunction when parent is an unmanaged LAN bridge', async () => {
     const adapter = new IncusPreflightChecksAdapter(database() as never, config() as never);
 
     await expect(adapter.checkNetworkPrerequisites('server-a', {
-      samples: [
-        {
-          name: 'nyabase_node_network_forwarding',
-          labels: { interface: 'eth0' },
-          value: 1,
-        },
-        {
-          name: 'nyabase_node_network_rp_filter',
-          labels: { interface: 'eth0' },
-          value: 0,
-        },
-      ],
+      samples: lanSamples(),
     })).resolves.toEqual({
       serverId: 'server-a',
-      forwarding: true,
-      rpFilter: false,
-      fib: false,
+      parentInterface: 'vmbr0',
+      isBridge: true,
+      nftAvailable: true,
+      slaves: ['bond0'],
+      ipv4Present: { vmbr0: true, bond0: false },
+      slavesWithIpv4: [],
+      slavesWithUnknownIpv4: [],
+      hasUplink: true,
       networkPrerequisites: true,
     });
   });
@@ -80,40 +104,44 @@ describe('IncusPreflightChecksAdapter', () => {
 
     await expect(adapter.checkNetworkPrerequisites('server-a', { samples: [] })).resolves.toMatchObject({
       networkPrerequisites: false,
+      isBridge: false,
+      nftAvailable: false,
     });
   });
 
-  it('treats rp_filter loose mode (2) as enabled alongside strict (1)', async () => {
+  it('fails the conjunction when nft is unavailable or a slave still has IPv4', async () => {
     const adapter = new IncusPreflightChecksAdapter(database() as never, config() as never);
-    const samplesFor = (rpFilter: number) => ([
-      {
-        name: 'nyabase_node_network_forwarding',
-        labels: { interface: 'eth0' },
-        value: 1,
-      },
-      {
-        name: 'nyabase_node_network_rp_filter',
-        labels: { interface: 'eth0' },
-        value: rpFilter,
-      },
-      {
-        name: 'nyabase_node_network_fib_rule_present',
-        labels: { interface: 'eth0' },
-        value: 1,
-      },
-    ]);
-
     await expect(adapter.checkNetworkPrerequisites('server-a', {
-      samples: samplesFor(1),
+      samples: lanSamples().map((sample) => (
+        sample.name === 'nyabase_node_network_nft_available'
+          ? { ...sample, value: 0 }
+          : sample
+      )),
     })).resolves.toMatchObject({
-      rpFilter: true,
-      networkPrerequisites: true,
+      nftAvailable: false,
+      networkPrerequisites: false,
     });
     await expect(adapter.checkNetworkPrerequisites('server-a', {
-      samples: samplesFor(2),
+      samples: lanSamples().map((sample) => (
+        sample.name === 'nyabase_node_network_ipv4_present'
+          && sample.labels.interface === 'bond0'
+          ? { ...sample, value: 1 }
+          : sample
+      )),
     })).resolves.toMatchObject({
-      rpFilter: true,
-      networkPrerequisites: true,
+      slavesWithIpv4: ['bond0'],
+      slavesWithUnknownIpv4: [],
+      networkPrerequisites: false,
+    });
+    await expect(adapter.checkNetworkPrerequisites('server-a', {
+      samples: lanSamples().filter((sample) => (
+        sample.name !== 'nyabase_node_network_ipv4_present'
+        || sample.labels.interface !== 'bond0'
+      )),
+    })).resolves.toMatchObject({
+      slavesWithIpv4: [],
+      slavesWithUnknownIpv4: ['bond0'],
+      networkPrerequisites: false,
     });
   });
 
@@ -281,6 +309,62 @@ describe('IncusPreflightChecksAdapter', () => {
     )).rejects.toMatchObject({
       code: 'PREFLIGHT_FAILED',
       details: { reason: 'preflight_egress_target_unconfigured' },
+    });
+  });
+
+  it('pings the host IPv4 from the probe and maps missing ping to a typed failure', async () => {
+    const execInstance = vi.fn().mockResolvedValue({
+      status: 202,
+      envelope: {
+        type: 'async',
+        operation: '/1.0/operations/ping-op',
+      },
+    });
+    const getOperationWait = vi.fn().mockResolvedValue({
+      status: 200,
+      envelope: { type: 'sync' },
+      metadata: {
+        status: 'Success',
+        status_code: 200,
+        metadata: { return: 0 },
+      },
+    });
+    const adapter = new IncusPreflightChecksAdapter(database() as never, config() as never);
+    const client = { execInstance, getOperationWait } as never;
+
+    await expect(adapter.checkGuestCanReachHost(
+      'server-a',
+      client,
+      'probe-a',
+      '192.0.2.1',
+    )).resolves.toMatchObject({
+      status: 'pass',
+      hostAddress: '192.0.2.1',
+    });
+    expect(execInstance).toHaveBeenCalledWith(
+      'probe-a',
+      expect.objectContaining({
+        command: ['ping', '-c', '1', '-W', '3', '192.0.2.1'],
+      }),
+      expect.anything(),
+    );
+
+    getOperationWait.mockResolvedValue({
+      status: 200,
+      envelope: { type: 'sync' },
+      metadata: {
+        status: 'Success',
+        status_code: 200,
+        metadata: { return: 127 },
+      },
+    });
+    await expect(adapter.checkGuestCanReachHost(
+      'server-a',
+      client,
+      'probe-a',
+      '192.0.2.1',
+    )).rejects.toMatchObject({
+      details: { reason: 'preflight_probe_ping_missing' },
     });
   });
 });

@@ -20,10 +20,9 @@ import {
   type ReconcileOutcome,
   type ReconcileRunContext,
 } from './reconcile-worker.service.js';
-import {
-  VOLUME_ADOPT_FAIL_AFTER_ATTEMPTS,
-  placementServersToDesire,
-} from '../volumes/volume-placement.js';
+import { VOLUME_ADOPT_FAIL_AFTER_ATTEMPTS } from '../volumes/volume-placement.js';
+import { listEligibleDestroyExecutors } from '../volumes/eligible-destroy-executors.js';
+import { ensureSharedCatalogOnServer } from '../volumes/shared-catalog.js';
 
 type StorageVolume = IncusSchema<'StorageVolume'>;
 type StorageVolumeState = IncusSchema<'StorageVolumeState'>;
@@ -91,24 +90,28 @@ export function capacityScope(
   return { kind: 'server', id: volume.server_id };
 }
 
-interface VolumeRow {
+interface VolumeRecord {
   id: string;
-  pool_id: string;
-  pool_server_id: string;
+  pool_id: string | null;
   server_id: string | null;
   shared_backend_id: string | null;
   incus_name: string;
   size_bytes: string;
+  used_bytes: string | null;
   generation: number;
   lifecycle_phase: 'provisioning' | 'active' | 'deleting' | 'failed';
   needs_attention: boolean;
-  pool_name: string;
+  dir_ensured: boolean;
+  remove_all_committed: boolean;
+  remove_all_server_id: string | null;
+}
+
+interface VolumeRow extends VolumeRecord {
   driver: 'dir' | 'btrfs' | 'zfs' | 'lvm' | 'lvmcluster' | 'ceph' | 'cephfs';
   resize_family: 'quota_online' | 'block_backed';
   block_filesystem: string | null;
   target_server_id: string;
-  desired_present: boolean;
-  unused_confirmed_at: Date | string | null;
+  catalog_state: 'ensuring' | 'present';
   placement_pool_id: string;
   placement_pool_name: string;
 }
@@ -116,15 +119,18 @@ interface VolumeRow {
 interface VolumeAttachmentRow {
   id: string;
   container_id: string;
-  detach_drained_at: Date | string | null;
   power_intent: 'running' | 'stopped';
 }
 
-interface PlacementPeer {
+interface CatalogRow {
   server_id: string;
   pool_id: string;
-  unused_confirmed_at: Date | string | null;
+  pool_name: string;
+  catalog_state: 'ensuring' | 'present';
+  server_status: 'online' | 'unreachable' | 'unknown';
 }
+
+type CatalogGetStatus = 'present' | 'missing' | 'error';
 
 function isNotFound(error: unknown): boolean {
   return error instanceof IncusError && error.code === 'INCUS_NOT_FOUND';
@@ -156,6 +162,17 @@ function volumeFailure(
   details: Record<string, unknown> = {},
 ): IntentFailure {
   return { code, message, details };
+}
+
+function destroyRetry(
+  code: string,
+  message: string,
+  details: Record<string, unknown> = {},
+): ReconcileOutcome {
+  return {
+    outcome: 'retry',
+    failure: volumeFailure(code, message, details),
+  };
 }
 
 async function auditIncusMutate(
@@ -200,9 +217,20 @@ export class VolumeReconciler implements ManagedReconciler {
 
   async scan(serverId: string, client?: IncusClientPort, signal?: AbortSignal): Promise<void> {
     if (!this.intents) return;
-    const rows = await this.database
+    const pools = await this.database
+      .selectFrom('infra.storage_pools')
+      .select(['id', 'incus_name', 'shared_backend_id', 'server_id', 'registered', 'driver', 'shareable'])
+      .where('server_id', '=', serverId)
+      .where('registered', '=', true)
+      .execute();
+    const shareableBackendIds = [...new Set(
+      pools
+        .filter((pool) => pool.driver === 'cephfs' && pool.shareable && pool.shared_backend_id)
+        .map((pool) => pool.shared_backend_id)
+        .filter((id): id is string => typeof id === 'string' && id.length > 0),
+    )];
+    let volumeQuery = this.database
       .selectFrom('control.volumes as v')
-      .innerJoin('infra.storage_pools as home_pool', 'home_pool.id', 'v.pool_id')
       .select([
         'v.id as id',
         'v.generation as generation',
@@ -213,21 +241,20 @@ export class VolumeReconciler implements ManagedReconciler {
         'v.incus_name as incus_name',
         'v.size_bytes as size_bytes',
         'v.pool_id as pool_id',
-        'home_pool.server_id as home_server_id',
-      ])
+      ]);
+    volumeQuery = volumeQuery.where((expression) => {
+      const clauses = [expression('v.server_id', '=', serverId)];
+      if (shareableBackendIds.length > 0) {
+        clauses.push(expression('v.shared_backend_id', 'in', shareableBackendIds));
+      }
+      return expression.or(clauses);
+    });
+    const rows = await volumeQuery.execute();
+    const knownNameRows = await this.database
+      .selectFrom('control.volumes')
+      .select('incus_name')
       .execute();
-    const pools = await this.database
-      .selectFrom('infra.storage_pools')
-      .select(['id', 'incus_name', 'shared_backend_id', 'server_id', 'registered'])
-      .where('server_id', '=', serverId)
-      .where('registered', '=', true)
-      .execute();
-    const sharedBackendsHere = new Set(
-      pools
-        .map((pool) => pool.shared_backend_id)
-        .filter((id): id is string => typeof id === 'string' && id.length > 0),
-    );
-    const knownNames = new Set<string>();
+    const knownNames = new Set(knownNameRows.map((row) => row.incus_name));
     const listedByPool = new Map<string, readonly (StorageVolume | string)[]>();
     const listedByName = new Map<string, StorageVolume | string>();
     if (client) {
@@ -239,67 +266,47 @@ export class VolumeReconciler implements ManagedReconciler {
         }
       }
     }
-    for (const row of rows) {
-      const localHere = row.server_id === serverId;
-      const sharedHere = row.shared_backend_id !== null
-        && sharedBackendsHere.has(row.shared_backend_id);
-      if (localHere || sharedHere) knownNames.add(row.incus_name);
-    }
     const placements = await this.database
       .selectFrom('control.volume_placements')
       .selectAll()
       .where('server_id', '=', serverId)
       .execute();
     const placementByVolume = new Map(placements.map((row) => [row.volume_id, row]));
-    const liveServersByVolume = await this.liveAttachmentServers(
-      rows.map((row) => row.id),
+    const placedNames = new Set(
+      rows
+        .filter((row) => placementByVolume.has(row.id))
+        .map((row) => row.incus_name),
     );
 
     for (const row of rows) {
-      const localHere = row.server_id === serverId;
-      const sharedHere = row.shared_backend_id !== null
-        && sharedBackendsHere.has(row.shared_backend_id);
-      if (!localHere && !sharedHere) continue;
-      const desiredServers = placementServersToDesire({
-        lifecyclePhase: row.lifecycle_phase,
-        serverId: row.server_id,
-        homeServerId: row.home_server_id,
-        liveAttachmentServerIds: liveServersByVolume.get(row.id) ?? [],
-      });
-      const placement = placementByVolume.get(row.id);
-      if (!placement && desiredServers.has(serverId)
-        && !row.needs_attention
-        && row.lifecycle_phase !== 'failed'
-        && row.lifecycle_phase !== 'deleting') {
-        const pool = this.poolForVolumeOnServer(row, pools, serverId);
-        if (pool) {
-          await this.upsertPlacement(row.id, serverId, pool.id, true);
-          await this.enqueueEnsure(row, serverId, row.home_server_id === serverId ? 'create' : 'ensure_attachment');
-        }
+      if (row.lifecycle_phase === 'deleting') {
+        await this.enqueueDestroy(row);
         continue;
       }
+      const placement = placementByVolume.get(row.id);
       if (!placement) continue;
       const listed = listedByName.get(row.incus_name);
-      if (row.lifecycle_phase === 'deleting') {
-        await this.enqueueEnsure(row, serverId, 'delete');
+      const shared = row.shared_backend_id !== null;
+      if (shared && listed === undefined) {
+        this.logger.warn(`dangling_pg volume=${row.id} server=${serverId}`);
         continue;
       }
-      if (placement.desired_present) {
-        if (!row.needs_attention && scanNeedsEnsure(row, listed)) {
-          await this.enqueueEnsure(
-            row,
-            serverId,
-            row.home_server_id === serverId ? 'create' : 'ensure_attachment',
-          );
+      if (shared && listed !== undefined && placement.catalog_state === 'present' && client) {
+        await this.observeSharedUsage(client, poolNameForPlacement(pools, placement.pool_id), row);
+      }
+      if (shared) {
+        if (listed !== undefined && scanNeedsEnsure(row, listed)) {
+          await this.enqueueResize(row, serverId);
         }
         continue;
       }
-      await this.database
-        .updateTable('control.volume_placements')
-        .set({ observed_present: listed !== undefined })
-        .where('volume_id', '=', row.id)
-        .where('server_id', '=', serverId)
-        .execute();
+      if (scanNeedsEnsure(row, listed)) {
+        await this.enqueueEnsure(
+          row,
+          serverId,
+          placement.catalog_state === 'present' ? 'ensure_attachment' : 'create',
+        );
+      }
     }
 
     if (!client) return;
@@ -307,7 +314,15 @@ export class VolumeReconciler implements ManagedReconciler {
     for (const pool of pools) {
       for (const volume of listedByPool.get(pool.incus_name) ?? []) {
         const name = storageVolumeName(volume);
-        if (!managedVolumeName.test(name) || knownNames.has(name)) continue;
+        if (!managedVolumeName.test(name)) continue;
+        if (knownNames.has(name)) {
+          if (!placedNames.has(name)) {
+            this.logger.warn(
+              `Listed ${name} on server ${serverId} has no catalog placement; not deleting`,
+            );
+          }
+          continue;
+        }
         if (typeof volume !== 'string' && (volume.used_by ?? []).length > 0) continue;
         await this.deleteOrphanVolume(client, pool.incus_name, name, signal);
       }
@@ -315,6 +330,15 @@ export class VolumeReconciler implements ManagedReconciler {
   }
 
   async reconcile(context: ReconcileRunContext): Promise<ReconcileOutcome> {
+    if (context.intent.kind === 'volume.destroy') {
+      return this.reconcileDestroy(context);
+    }
+    if (context.intent.kind !== 'volume.ensure' && context.intent.kind !== 'volume.resize') {
+      return {
+        outcome: 'failed',
+        failure: volumeFailure('VOLUME_INTENT_UNSUPPORTED', 'Unsupported volume intent kind'),
+      };
+    }
     if (!context.client) {
       throw new IncusError('SERVER_UNREACHABLE', 'retry', { reason: 'missing_client' });
     }
@@ -325,30 +349,30 @@ export class VolumeReconciler implements ManagedReconciler {
         failure: volumeFailure('VOLUME_NOT_FOUND', 'Volume intents require a server id'),
       };
     }
-    const volumeExists = await this.database
-      .selectFrom('control.volumes')
-      .select(['id', 'lifecycle_phase'])
-      .where('id', '=', context.intent.resourceId)
-      .executeTakeFirst();
+    const volumeExists = await this.readVolumeRow(context.intent.resourceId);
     if (!volumeExists) {
       return {
         outcome: 'failed',
         failure: volumeFailure('VOLUME_NOT_FOUND', 'The desired volume no longer exists'),
       };
     }
+    if (volumeExists.lifecycle_phase === 'deleting') {
+      return destroyRetry(
+        'VOLUME_DESTROY_PENDING',
+        'Volume destroy is in progress',
+        { volumeId: volumeExists.id },
+      );
+    }
     const row = await this.readVolume(context.intent.resourceId, targetServerId);
     if (!row) {
-      if (volumeExists.lifecycle_phase === 'deleting') {
-        return { outcome: 'succeeded', observedGeneration: context.intent.targetGeneration };
-      }
       return {
         outcome: 'failed',
         failure: volumeFailure('VOLUME_NOT_FOUND', 'The desired volume no longer exists'),
       };
     }
     this.logger.log(
-      `volume=${row.id} server=${targetServerId} desired_present=${row.desired_present} `
-      + `phase=${row.lifecycle_phase} destroyer=${row.pool_server_id === targetServerId}`,
+      `volume=${row.id} server=${targetServerId} catalog_state=${row.catalog_state} `
+      + `phase=${row.lifecycle_phase}`,
     );
     const attachments = await this.readAttachments(row.id, row.target_server_id);
     let actual: StorageVolume | undefined;
@@ -362,23 +386,10 @@ export class VolumeReconciler implements ManagedReconciler {
       if (!isNotFound(error)) throw error;
     }
 
-    if (row.lifecycle_phase === 'deleting') {
-      return this.reconcileDelete(context, row, actual, attachments);
-    }
-
-    if (!row.desired_present) {
-      if (row.shared_backend_id) {
-        await this.database
-          .updateTable('control.volume_placements')
-          .set({ observed_present: actual !== undefined })
-          .where('volume_id', '=', row.id)
-          .where('server_id', '=', targetServerId)
-          .execute();
+    if (!actual) {
+      if (context.intent.kind === 'volume.resize' && row.shared_backend_id) {
         return { outcome: 'succeeded', observedGeneration: row.generation };
       }
-    }
-
-    if (!actual) {
       actual = await this.adoptOrCreate(context, row);
       if (!actual) {
         if (context.intent.attemptCount >= VOLUME_ADOPT_FAIL_AFTER_ATTEMPTS) {
@@ -405,137 +416,171 @@ export class VolumeReconciler implements ManagedReconciler {
     return this.alignSizeAndShifted(context, row, actual, attachments);
   }
 
-  private async reconcileDelete(
-    context: ReconcileRunContext,
-    row: VolumeRow,
-    actual: StorageVolume | undefined,
-    attachments: VolumeAttachmentRow[],
-  ): Promise<ReconcileOutcome> {
-    const drain = await this.database
-      .selectFrom('control.volume_detach_drains')
-      .selectAll()
-      .where('volume_id', '=', row.id)
-      .executeTakeFirst();
-    if (drain && new Date(drain.drained_at).getTime() > Date.now()) {
-      return {
-        outcome: 'retry',
-        failure: volumeFailure('VOLUME_DETACH_DRAINING', 'Volume detach drain has not expired'),
-        retryAfterMs: Math.max(1_000, new Date(drain.drained_at).getTime() - Date.now()),
-      };
+  private async reconcileDestroy(context: ReconcileRunContext): Promise<ReconcileOutcome> {
+    const volume = await this.readVolumeRow(context.intent.resourceId);
+    if (!volume) {
+      return { outcome: 'succeeded', observedGeneration: context.intent.targetGeneration };
     }
-    if (attachments.some((item) => !item.detach_drained_at) || (actual?.used_by ?? []).length > 0) {
-      return {
-        outcome: 'retry',
-        failure: volumeFailure(
-          'VOLUME_REQUIRES_DETACH',
-          'The volume cannot be deleted while it is attached or in use',
-        ),
-      };
+    if (volume.lifecycle_phase !== 'deleting') {
+      return { outcome: 'succeeded', observedGeneration: volume.generation };
     }
-    await this.database
-      .updateTable('control.volume_placements')
-      .set({ unused_confirmed_at: sql<Date>`coalesce(unused_confirmed_at, clock_timestamp())` })
-      .where('volume_id', '=', row.id)
-      .where('server_id', '=', row.target_server_id)
-      .execute();
+    if (await this.hasAnyAttachments(volume.id)) {
+      return destroyRetry(
+        'VOLUME_REQUIRES_UNBIND',
+        'The volume cannot be deleted while attachments remain',
+        { volumeId: volume.id },
+      );
+    }
+    await this.lockVolumeQuota(volume);
 
-    const isHome = row.pool_server_id === row.target_server_id;
-    if (isHome) {
-      const peers = await this.listPlacementPeers(row.id);
-      for (const peer of peers) {
-        const peerClient = peer.server_id === row.target_server_id
-          ? context.client!
-          : await this.clients?.get(peer.server_id);
-        if (!peerClient) {
-          return {
-            outcome: 'retry',
-            failure: volumeFailure(
-              'VOLUME_DELETE_WAITING_IDLE',
-              'Home delete is waiting to inspect a peer catalog',
-              { serverId: peer.server_id },
-            ),
-          };
+    const catalogs = await this.listCatalogs(volume.id);
+    if (!volume.dir_ensured && catalogs.length === 0) {
+      await this.finishEmptyTracking(volume.id, 'never_mounted');
+      return { outcome: 'succeeded', observedGeneration: volume.generation };
+    }
+
+    const eligible = await this.listDestroyExecutors(volume);
+    if (eligible.length === 0) {
+      await this.dropAllPlacements(volume.id);
+      await this.finishEmptyTracking(volume.id, 'destroy_executor_gone');
+      return { outcome: 'succeeded', observedGeneration: volume.generation };
+    }
+
+    if (!volume.remove_all_committed) {
+      let executor: { server_id: string; pool_name: string } | null = null;
+      const pin = volume.remove_all_server_id;
+      const pinStillEligible = pin ? eligible.find((item) => item.server_id === pin) : undefined;
+      if (pin) {
+        if (pinStillEligible) {
+          executor = pinStillEligible;
+        } else {
+          return destroyRetry(
+            'VOLUME_DESTROY_RETRY',
+            'Pinned destroy executor is unreachable',
+            { serverId: pin },
+          );
         }
-        const peerPool = peer.server_id === row.target_server_id
-          ? row.placement_pool_name
-          : await this.poolName(peer.pool_id);
-        let peerActual: StorageVolume | undefined;
+      } else if (!volume.dir_ensured && catalogs.length > 0) {
+        const online = catalogs.filter((catalog) => catalog.server_status === 'online');
+        const present: CatalogRow[] = [];
+        for (const catalog of online) {
+          let client: IncusClientPort | undefined;
+          try {
+            client = await this.clientFor(catalog.server_id, context);
+          } catch (error) {
+            return destroyRetryFromError(error, catalog.server_id);
+          }
+          if (!client) {
+            return destroyRetry(
+              'SERVER_UNREACHABLE',
+              'Destroy cannot reach a catalog Incus',
+              { serverId: catalog.server_id },
+            );
+          }
+          const status = await this.classifyCatalogGet(
+            client,
+            catalog.pool_name,
+            volume.incus_name,
+            context.signal,
+          );
+          if (status === 'error') {
+            return destroyRetry(
+              'VOLUME_DESTROY_RETRY',
+              'Destroy tracking GET did not complete with only 200/404',
+              { serverId: catalog.server_id },
+            );
+          }
+          if (status === 'present') present.push(catalog);
+        }
+        if (present.length > 0) {
+          present.sort((left, right) => left.server_id.localeCompare(right.server_id));
+          executor = present[0]!;
+          await this.pinRemoveAllServer(volume.id, executor.server_id);
+        } else {
+          context.lease?.assertOwned();
+          await this.markRemoveAllCommitted(volume.id, null);
+          volume.remove_all_committed = true;
+        }
+      } else {
+        executor = eligible[0]!;
+        await this.pinRemoveAllServer(volume.id, executor.server_id);
+      }
+
+      if (!volume.remove_all_committed && executor) {
+        let client: IncusClientPort | undefined;
         try {
-          peerActual = (await peerClient.getStorageVolume(peerPool, 'custom', row.incus_name)).metadata;
+          client = await this.clientFor(executor.server_id, context);
         } catch (error) {
-          if (!isNotFound(error)) throw error;
+          return destroyRetryFromError(error, executor.server_id);
         }
-        if ((peerActual?.used_by ?? []).length > 0) {
-          return {
-            outcome: 'retry',
-            failure: volumeFailure(
-              'VOLUME_REQUIRES_DETACH',
-              'A tracked catalog still reports volume consumers',
-              { serverId: peer.server_id },
-            ),
-          };
+        if (!client) {
+          return destroyRetry(
+            'SERVER_UNREACHABLE',
+            'Destroy cannot reach the pinned executor',
+            { serverId: executor.server_id },
+          );
         }
-        if (peer.unused_confirmed_at == null && peer.server_id !== row.target_server_id) {
-          return {
-            outcome: 'retry',
-            failure: volumeFailure(
-              'VOLUME_DELETE_WAITING_IDLE',
-              'Home delete is waiting for every tracked catalog to confirm idle',
-              { serverId: peer.server_id },
-            ),
-          };
+        const status = await this.classifyCatalogGet(
+          client,
+          executor.pool_name,
+          volume.incus_name,
+          context.signal,
+        );
+        if (status === 'error') {
+          return destroyRetry(
+            'VOLUME_DESTROY_RETRY',
+            'Destroy executor GET failed',
+            { serverId: executor.server_id },
+          );
         }
+        if (status === 'missing' && volume.dir_ensured && volume.shared_backend_id) {
+          const adopted = await ensureSharedCatalogOnServer(client, {
+            poolName: executor.pool_name,
+            incusName: volume.incus_name,
+            sizeBytes: volume.size_bytes,
+          });
+          if (adopted === 'missing') {
+            return destroyRetry(
+              'VOLUME_DESTROY_RETRY',
+              'Destroy adopt did not create a catalog',
+              { serverId: executor.server_id },
+            );
+          }
+        } else if (status === 'missing' && !volume.dir_ensured) {
+          return destroyRetry(
+            'VOLUME_DESTROY_RETRY',
+            'Destroy must not commit from a single executor 404',
+            { serverId: executor.server_id },
+          );
+        }
+        if (status === 'present' || (status === 'missing' && volume.dir_ensured)) {
+          try {
+            await this.deleteCatalog(
+              client,
+              context.intent,
+              executor.pool_name,
+              volume.incus_name,
+            );
+          } catch {
+            return destroyRetry(
+              'VOLUME_DESTROY_RETRY',
+              'Destroy RemoveAll was not confirmed with GET 404',
+              { serverId: executor.server_id },
+            );
+          }
+        }
+        context.lease?.assertOwned();
+        await this.markRemoveAllCommitted(volume.id, executor.server_id);
+        this.logger.log(
+          `volume=${volume.id} destroy pin=${executor.server_id} committed=true `
+          + `eligible=${eligible.length} dir_ensured=${volume.dir_ensured}`,
+        );
       }
-      if (actual) {
-        await this.deleteCatalog(context, row);
-      }
-      await this.dropPlacementAndMaybeVolume(row.id, row.target_server_id);
-      return { outcome: 'succeeded', observedGeneration: row.generation };
     }
 
-    const homePlacement = await this.database
-      .selectFrom('control.volume_placements')
-      .select(['server_id', 'pool_id'])
-      .where('volume_id', '=', row.id)
-      .where('server_id', '=', row.pool_server_id)
-      .executeTakeFirst();
-    if (homePlacement) {
-      return {
-        outcome: 'retry',
-        failure: volumeFailure(
-          'VOLUME_DELETE_WAITING_HOME',
-          'Non-home catalog cleanup is waiting for home RemoveAll',
-        ),
-      };
-    }
-    const homePoolName = await this.poolName(row.pool_id);
-    const homeClient = await this.clients?.get(row.pool_server_id);
-    if (!homeClient) {
-      return {
-        outcome: 'retry',
-        failure: volumeFailure(
-          'VOLUME_DELETE_WAITING_HOME',
-          'Non-home catalog cleanup cannot reach the home Incus',
-        ),
-      };
-    }
-    try {
-      await homeClient.getStorageVolume(homePoolName, 'custom', row.incus_name);
-      return {
-        outcome: 'retry',
-        failure: volumeFailure(
-          'VOLUME_DELETE_WAITING_HOME',
-          'Home catalog is still present after the placement row was dropped',
-        ),
-      };
-    } catch (error) {
-      if (!isNotFound(error)) throw error;
-    }
-    if (actual) {
-      await this.deleteCatalog(context, row);
-    }
-    await this.dropPlacementAndMaybeVolume(row.id, row.target_server_id);
-    return { outcome: 'succeeded', observedGeneration: row.generation };
+    await this.dropAllPlacements(volume.id);
+    await this.finishEmptyTracking(volume.id);
+    return { outcome: 'succeeded', observedGeneration: volume.generation };
   }
 
   private async adoptOrCreate(
@@ -592,7 +637,7 @@ export class VolumeReconciler implements ManagedReconciler {
     attachments: VolumeAttachmentRow[],
   ): Promise<ReconcileOutcome> {
     const config = { ...(actual.config ?? {}) };
-    const attached = attachments.some((item) => !item.detach_drained_at);
+    const attached = attachments.length > 0;
     if (config['security.shifted'] !== 'true') {
       if (attached) {
         return {
@@ -634,7 +679,7 @@ export class VolumeReconciler implements ManagedReconciler {
       currentSizeBytes: currentSize,
       desiredSizeBytes: desiredSize,
       usedBytes,
-      attached: attachments.some((item) => !item.detach_drained_at),
+      attached,
       allConsumersStopped: attachments.every((item) => item.power_intent !== 'running'),
     });
     if (decision.action === 'blocked') {
@@ -725,32 +770,41 @@ export class VolumeReconciler implements ManagedReconciler {
     await this.database
       .updateTable('control.volume_placements')
       .set({
-        observed_present: true,
+        catalog_state: 'present',
         observed_generation: row.generation,
       })
       .where('volume_id', '=', row.id)
       .where('server_id', '=', row.target_server_id)
       .execute();
+    await this.database
+      .updateTable('control.volumes')
+      .set({ dir_ensured: true })
+      .where('id', '=', row.id)
+      .execute();
     const lagging = await this.database
       .selectFrom('control.volume_placements')
       .select('server_id')
       .where('volume_id', '=', row.id)
-      .where('desired_present', '=', true)
       .where((expression) => expression.or([
+        expression('catalog_state', '!=', 'present'),
         expression('observed_generation', 'is', null),
         expression('observed_generation', '!=', row.generation),
       ]))
       .executeTakeFirst();
     if (!lagging) {
-      const homeUsed = row.pool_server_id === row.target_server_id ? usedBytes : undefined;
       await this.database
         .updateTable('control.volumes')
         .set({
           observed_generation: row.generation,
           lifecycle_phase: row.lifecycle_phase === 'provisioning' ? 'active' : row.lifecycle_phase,
-          ...(homeUsed === undefined
+          ...(usedBytes === null
             ? {}
-            : { used_bytes: homeUsed === null ? null : homeUsed.toString() }),
+            : {
+              used_bytes: sql<string>`case
+                when used_bytes is null then ${usedBytes.toString()}::bigint
+                else greatest(used_bytes, ${usedBytes.toString()}::bigint)
+              end`,
+            }),
           failure_code: null,
           needs_attention: false,
         })
@@ -758,42 +812,63 @@ export class VolumeReconciler implements ManagedReconciler {
         .where('generation', '=', row.generation)
         .where('lifecycle_phase', 'not in', ['deleting', 'failed'])
         .execute();
+    } else if (usedBytes !== null) {
+      await this.database
+        .updateTable('control.volumes')
+        .set({
+          used_bytes: sql<string>`case
+            when used_bytes is null then ${usedBytes.toString()}::bigint
+            else greatest(used_bytes, ${usedBytes.toString()}::bigint)
+          end`,
+        })
+        .where('id', '=', row.id)
+        .where('lifecycle_phase', 'not in', ['deleting', 'failed'])
+        .execute();
     }
     return { outcome: 'succeeded', observedGeneration: row.generation };
+  }
+
+  private async readVolumeRow(volumeId: string): Promise<VolumeRecord | undefined> {
+    const volume = await this.database
+      .selectFrom('control.volumes')
+      .select([
+        'id',
+        'pool_id',
+        'server_id',
+        'shared_backend_id',
+        'incus_name',
+        'size_bytes',
+        'used_bytes',
+        'generation',
+        'lifecycle_phase',
+        'needs_attention',
+        'dir_ensured',
+        'remove_all_committed',
+        'remove_all_server_id',
+      ])
+      .where('id', '=', volumeId)
+      .executeTakeFirst();
+    if (!volume) return undefined;
+    return {
+      ...volume,
+      size_bytes: String(volume.size_bytes),
+      used_bytes: volume.used_bytes === null || volume.used_bytes === undefined
+        ? null
+        : String(volume.used_bytes),
+    };
   }
 
   private async readVolume(
     volumeId: string,
     intentServerId: string,
   ): Promise<VolumeRow | undefined> {
-    const volume = await this.database
-      .selectFrom('control.volumes as v')
-      .innerJoin('infra.storage_pools as p', 'p.id', 'v.pool_id')
-      .select([
-        'v.id as id',
-        'v.pool_id as pool_id',
-        'p.server_id as pool_server_id',
-        'v.server_id as server_id',
-        'v.shared_backend_id as shared_backend_id',
-        'v.incus_name as incus_name',
-        'v.size_bytes as size_bytes',
-        'v.generation as generation',
-        'v.lifecycle_phase as lifecycle_phase',
-        'v.needs_attention as needs_attention',
-        'p.incus_name as pool_name',
-        'p.driver as driver',
-        'p.resize_family as resize_family',
-        'p.block_filesystem as block_filesystem',
-      ])
-      .where('v.id', '=', volumeId)
-      .executeTakeFirst();
+    const volume = await this.readVolumeRow(volumeId);
     if (!volume) return undefined;
     const placement = await this.database
       .selectFrom('control.volume_placements as pl')
       .innerJoin('infra.storage_pools as pp', 'pp.id', 'pl.pool_id')
       .select([
-        'pl.desired_present as desired_present',
-        'pl.unused_confirmed_at as unused_confirmed_at',
+        'pl.catalog_state as catalog_state',
         'pl.pool_id as placement_pool_id',
         'pp.incus_name as placement_pool_name',
         'pp.driver as driver',
@@ -804,9 +879,9 @@ export class VolumeReconciler implements ManagedReconciler {
       .where('pl.server_id', '=', intentServerId)
       .executeTakeFirst();
     if (!placement) return undefined;
-    if (!volume.shared_backend_id && volume.pool_server_id !== intentServerId) {
+    if (!volume.shared_backend_id && volume.server_id !== intentServerId) {
       throw new IncusError('MISSING_STORAGE_POOL', 'managed_failure', {
-        poolId: volume.pool_id,
+        poolId: volume.pool_id ?? '',
         serverId: intentServerId,
       });
     }
@@ -815,10 +890,8 @@ export class VolumeReconciler implements ManagedReconciler {
       driver: placement.driver,
       resize_family: placement.resize_family,
       block_filesystem: placement.block_filesystem,
-      size_bytes: String(volume.size_bytes),
       target_server_id: intentServerId,
-      desired_present: placement.desired_present,
-      unused_confirmed_at: placement.unused_confirmed_at,
+      catalog_state: placement.catalog_state,
       placement_pool_id: placement.placement_pool_id,
       placement_pool_name: placement.placement_pool_name,
     };
@@ -834,7 +907,6 @@ export class VolumeReconciler implements ManagedReconciler {
       .select([
         'a.id as id',
         'a.container_id as container_id',
-        'a.detach_drained_at as detach_drained_at',
         'c.power_intent as power_intent',
       ])
       .where('a.volume_id', '=', volumeId)
@@ -842,29 +914,75 @@ export class VolumeReconciler implements ManagedReconciler {
       .execute();
   }
 
-  private async deleteCatalog(context: ReconcileRunContext, row: VolumeRow): Promise<void> {
-    await auditIncusMutate(this.audit, context.intent, {
+  private async hasAnyAttachments(volumeId: string): Promise<boolean> {
+    const row = await this.database
+      .selectFrom('control.volume_attachments')
+      .select('id')
+      .where('volume_id', '=', volumeId)
+      .limit(1)
+      .executeTakeFirst();
+    return Boolean(row);
+  }
+
+  private listCatalogs(volumeId: string): Promise<CatalogRow[]> {
+    return this.database
+      .selectFrom('control.volume_placements as pl')
+      .innerJoin('infra.storage_pools as pp', 'pp.id', 'pl.pool_id')
+      .innerJoin('infra.servers as s', 's.id', 'pl.server_id')
+      .select([
+        'pl.server_id as server_id',
+        'pl.pool_id as pool_id',
+        'pl.catalog_state as catalog_state',
+        'pp.incus_name as pool_name',
+        's.status as server_status',
+      ])
+      .where('pl.volume_id', '=', volumeId)
+      .orderBy('pl.server_id', 'asc')
+      .execute();
+  }
+
+  private async classifyCatalogGet(
+    client: IncusClientPort,
+    poolName: string,
+    incusName: string,
+    signal?: AbortSignal,
+  ): Promise<CatalogGetStatus> {
+    try {
+      await client.getStorageVolume(poolName, 'custom', incusName, signal ? { signal } : undefined);
+      return 'present';
+    } catch (error) {
+      if (isNotFound(error)) return 'missing';
+      return 'error';
+    }
+  }
+
+  private async clientFor(
+    serverId: string,
+    context: ReconcileRunContext,
+  ): Promise<IncusClientPort | undefined> {
+    if (context.client && context.intent.serverId === serverId) return context.client;
+    return this.clients?.get(serverId);
+  }
+
+  private async deleteCatalog(
+    client: IncusClientPort,
+    intent: IntentRecord,
+    poolName: string,
+    incusName: string,
+  ): Promise<void> {
+    await auditIncusMutate(this.audit, intent, {
       method: 'DELETE',
-      path: `/1.0/storage-pools/${row.placement_pool_name}/volumes/custom/${row.incus_name}`,
-      instanceName: row.incus_name,
+      path: `/1.0/storage-pools/${poolName}/volumes/custom/${incusName}`,
+      instanceName: incusName,
     });
     await readAfterTimeout(
       () => requestAndWait(
-        context.client!,
-        (options) => context.client!.deleteStorageVolume(
-          row.placement_pool_name,
-          'custom',
-          row.incus_name,
-          options,
-        ),
+        client,
+        (options) => client.deleteStorageVolume(poolName, 'custom', incusName, options),
       ),
       async () => {
         try {
-          await context.client!.getStorageVolume(
-            row.placement_pool_name,
-            'custom',
-            row.incus_name,
-          );
+          await client.getStorageVolume(poolName, 'custom', incusName);
         } catch (error) {
           if (isNotFound(error)) return undefined;
           throw error;
@@ -872,10 +990,126 @@ export class VolumeReconciler implements ManagedReconciler {
         throw new Error('VOLUME_DELETE_NOT_CONFIRMED');
       },
     );
-    await this.verifyAbsent(context.client!, row);
+    await this.verifyAbsent(client, poolName, incusName);
   }
 
-  private async dropPlacementAndMaybeVolume(volumeId: string, serverId: string): Promise<void> {
+  private async markRemoveAllCommitted(
+    volumeId: string,
+    executorServerId: string | null,
+  ): Promise<void> {
+    await this.database
+      .updateTable('control.volumes')
+      .set({
+        remove_all_committed: true,
+        remove_all_server_id: executorServerId,
+      })
+      .where('id', '=', volumeId)
+      .where('lifecycle_phase', '=', 'deleting')
+      .execute();
+  }
+
+  private async pinRemoveAllServer(volumeId: string, serverId: string): Promise<void> {
+    await this.database
+      .updateTable('control.volumes')
+      .set({ remove_all_server_id: serverId })
+      .where('id', '=', volumeId)
+      .where('lifecycle_phase', '=', 'deleting')
+      .where('remove_all_committed', '=', false)
+      .execute();
+  }
+
+  private async dropPlacement(volumeId: string, serverId: string): Promise<void> {
+    await this.database
+      .deleteFrom('control.volume_placements')
+      .where('volume_id', '=', volumeId)
+      .where('server_id', '=', serverId)
+      .execute();
+  }
+
+  private async dropAllPlacements(volumeId: string): Promise<void> {
+    await this.database
+      .deleteFrom('control.volume_placements')
+      .where('volume_id', '=', volumeId)
+      .execute();
+  }
+
+  private async lockVolumeQuota(volume: VolumeRecord): Promise<void> {
+    if (volume.server_id && volume.pool_id) {
+      await this.database
+        .selectFrom('infra.storage_pools')
+        .select('id')
+        .where('id', '=', volume.pool_id)
+        .forUpdate()
+        .executeTakeFirst();
+      return;
+    }
+    if (volume.shared_backend_id) {
+      await this.database
+        .selectFrom('infra.shared_backends')
+        .select('id')
+        .where('id', '=', volume.shared_backend_id)
+        .forUpdate()
+        .executeTakeFirst();
+    }
+  }
+
+  private async listDestroyExecutors(
+    volume: VolumeRecord,
+  ): Promise<Array<{ server_id: string; pool_name: string }>> {
+    if (volume.shared_backend_id) {
+      const rows = await listEligibleDestroyExecutors(this.database, volume.shared_backend_id);
+      return rows.map((row) => ({ server_id: row.server_id, pool_name: row.pool_name }));
+    }
+    if (!volume.server_id) return [];
+    const server = await this.database
+      .selectFrom('infra.servers')
+      .select(['id', 'status'])
+      .where('id', '=', volume.server_id)
+      .executeTakeFirst();
+    if (!server || server.status !== 'online') return [];
+    const pool = volume.pool_id
+      ? await this.database
+        .selectFrom('infra.storage_pools')
+        .select('incus_name')
+        .where('id', '=', volume.pool_id)
+        .executeTakeFirst()
+      : undefined;
+    if (!pool) return [];
+    return [{ server_id: volume.server_id, pool_name: pool.incus_name }];
+  }
+
+  private async observeSharedUsage(
+    client: IncusClientPort,
+    poolName: string | undefined,
+    row: { id: string; incus_name: string; size_bytes: string | number },
+  ): Promise<void> {
+    if (!poolName) return;
+    try {
+      const state = (await client.getStorageVolumeState(poolName, 'custom', row.incus_name)).metadata;
+      const used = normalizeObservedVolumeUsage({
+        resizeFamily: 'quota_online',
+        driver: 'cephfs',
+        usedBytes: asBytes(state.usage?.used) ?? null,
+        totalBytes: asBytes(state.usage?.total) ?? null,
+        currentSizeBytes: asBytes(row.size_bytes) ?? 0n,
+      });
+      if (used === null) return;
+      await this.database
+        .updateTable('control.volumes')
+        .set({
+          used_bytes: sql<string>`greatest(coalesce(used_bytes, 0), ${used.toString()}::bigint)`,
+        })
+        .where('id', '=', row.id)
+        .where('lifecycle_phase', 'not in', ['failed', 'deleting'])
+        .execute();
+    } catch (error) {
+      if (!isNotFound(error)) {
+        this.logger.warn(`volume=${row.id} used_bytes scan failed: ${String(error)}`);
+      }
+    }
+  }
+
+  private async finishEmptyTracking(volumeId: string, reason?: string): Promise<void> {
     await this.database.transaction().execute(async (transaction) => {
       const volume = await transaction
         .selectFrom('control.volumes')
@@ -884,26 +1118,52 @@ export class VolumeReconciler implements ManagedReconciler {
         .forUpdate()
         .executeTakeFirst();
       if (!volume) return;
-      await transaction
-        .deleteFrom('control.volume_placements')
-        .where('volume_id', '=', volumeId)
-        .where('server_id', '=', serverId)
-        .execute();
-      if (volume.lifecycle_phase !== 'deleting') return;
       const remaining = await transaction
         .selectFrom('control.volume_placements')
         .select('server_id')
         .where('volume_id', '=', volumeId)
         .executeTakeFirst();
       if (remaining) return;
+      const pending = await transaction
+        .selectFrom('control.intents')
+        .select('id')
+        .where('resource_type', '=', 'volume')
+        .where('resource_id', '=', volumeId)
+        .where('status', '=', 'pending')
+        .execute();
+      if (this.intents) {
+        for (const row of pending) {
+          await this.intents.settleOne(row.id, { outcome: 'succeeded' }, transaction);
+        }
+      } else if (pending.length > 0) {
+        await transaction
+          .updateTable('control.intents')
+          .set({
+            status: 'succeeded',
+            failure_code: null,
+            failure_json: null,
+            next_attempt_at: null,
+            settled_at: sql<Date>`clock_timestamp()`,
+          })
+          .where('id', 'in', pending.map((row) => row.id))
+          .where('status', '=', 'pending')
+          .execute();
+      }
       await transaction.deleteFrom('control.volumes').where('id', '=', volumeId).execute();
-      this.logger.log(`Deleted logical volume ${volumeId} after last placement dropped`);
+      this.logger.log(
+        `Deleted logical volume ${volumeId} after empty tracking`
+        + (reason ? ` reason=${reason}` : ''),
+      );
     });
   }
 
-  private async verifyAbsent(client: IncusClientPort, row: VolumeRow): Promise<void> {
+  private async verifyAbsent(
+    client: IncusClientPort,
+    poolName: string,
+    incusName: string,
+  ): Promise<void> {
     try {
-      await client.getStorageVolume(row.placement_pool_name, 'custom', row.incus_name);
+      await client.getStorageVolume(poolName, 'custom', incusName);
     } catch (error) {
       if (isNotFound(error)) return;
       throw error;
@@ -939,10 +1199,30 @@ export class VolumeReconciler implements ManagedReconciler {
     );
   }
 
+  private async enqueueResize(
+    row: { id: string; generation: number },
+    serverId: string,
+  ): Promise<void> {
+    if (!this.intents) return;
+    await this.intents.ensurePending({
+      kind: 'volume.resize',
+      resourceType: 'volume',
+      resourceId: row.id,
+      serverId,
+      targetGeneration: row.generation,
+      reuseSettled: false,
+      request: {
+        source: 'full_scan',
+        operation: 'resize',
+        idempotencyKey: 'resize',
+      },
+    });
+  }
+
   private async enqueueEnsure(
     row: { id: string; generation: number },
     serverId: string,
-    operation: 'create' | 'ensure_attachment' | 'delete',
+    operation: 'create' | 'ensure_attachment',
   ): Promise<void> {
     if (!this.intents) return;
     await this.intents.ensurePending({
@@ -960,75 +1240,32 @@ export class VolumeReconciler implements ManagedReconciler {
     });
   }
 
-  private async upsertPlacement(
-    volumeId: string,
-    serverId: string,
-    poolId: string,
-    desiredPresent: boolean,
-  ): Promise<void> {
-    await this.database
-      .insertInto('control.volume_placements')
-      .values({
-        volume_id: volumeId,
-        server_id: serverId,
-        pool_id: poolId,
-        desired_present: desiredPresent,
-        observed_present: false,
-        observed_generation: null,
-        unused_confirmed_at: null,
-      })
-      .onConflict((conflict) => conflict
-        .columns(['volume_id', 'server_id'])
-        .doUpdateSet({ desired_present: desiredPresent, pool_id: poolId }))
-      .execute();
+  private async enqueueDestroy(row: { id: string; generation: number }): Promise<void> {
+    if (!this.intents) return;
+    await this.intents.ensurePending({
+      kind: 'volume.destroy',
+      resourceType: 'volume',
+      resourceId: row.id,
+      targetGeneration: row.generation,
+      reuseSettled: false,
+      request: {
+        source: 'full_scan',
+        operation: 'destroy',
+        idempotencyKey: 'destroy',
+      },
+    });
   }
+}
 
-  private poolForVolumeOnServer(
-    row: { pool_id: string; shared_backend_id: string | null },
-    pools: ReadonlyArray<{ id: string; shared_backend_id: string | null }>,
-    _serverId: string,
-  ): { id: string } | undefined {
-    if (!row.shared_backend_id) {
-      return pools.find((pool) => pool.id === row.pool_id);
-    }
-    return pools.find((pool) => pool.shared_backend_id === row.shared_backend_id);
+function destroyRetryFromError(error: unknown, serverId: string): ReconcileOutcome {
+  if (error instanceof IncusError) {
+    return destroyRetry(error.code, error.message, { serverId });
   }
-
-  private async liveAttachmentServers(volumeIds: readonly string[]): Promise<Map<string, string[]>> {
-    const result = new Map<string, string[]>();
-    if (volumeIds.length === 0) return result;
-    const rows = await this.database
-      .selectFrom('control.volume_attachments as a')
-      .innerJoin('control.containers as c', 'c.id', 'a.container_id')
-      .select(['a.volume_id as volume_id', 'c.server_id as server_id'])
-      .where('a.volume_id', 'in', [...volumeIds])
-      .where('a.detach_drained_at', 'is', null)
-      .where('c.lifecycle_phase', 'not in', ['failed', 'deleting'])
-      .execute();
-    for (const row of rows) {
-      const list = result.get(row.volume_id) ?? [];
-      if (!list.includes(row.server_id)) list.push(row.server_id);
-      result.set(row.volume_id, list);
-    }
-    return result;
-  }
-
-  private listPlacementPeers(volumeId: string): Promise<PlacementPeer[]> {
-    return this.database
-      .selectFrom('control.volume_placements')
-      .select(['server_id', 'pool_id', 'unused_confirmed_at'])
-      .where('volume_id', '=', volumeId)
-      .execute();
-  }
-
-  private async poolName(poolId: string): Promise<string> {
-    const pool = await this.database
-      .selectFrom('infra.storage_pools')
-      .select('incus_name')
-      .where('id', '=', poolId)
-      .executeTakeFirstOrThrow();
-    return pool.incus_name;
-  }
+  return destroyRetry(
+    'SERVER_UNREACHABLE',
+    'Destroy cannot reach a catalog Incus',
+    { serverId },
+  );
 }
 
 function scanNeedsEnsure(
@@ -1045,6 +1282,13 @@ function scanNeedsEnsure(
   if (listed.config?.['security.shifted'] !== 'true') return true;
   if (actualSize === null || desiredSize === null) return false;
   return actualSize !== desiredSize;
+}
+
+function poolNameForPlacement(
+  pools: ReadonlyArray<{ id: string; incus_name: string }>,
+  poolId: string,
+): string | undefined {
+  return pools.find((pool) => pool.id === poolId)?.incus_name;
 }
 
 function storageVolumeName(volume: StorageVolume | string): string {

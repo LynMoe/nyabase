@@ -54,7 +54,9 @@ validate_network_inputs() {
     valid_ipv4 "${!name:-}" || die "$name must be an IPv4 address"
   done
   ip link show "$parent" >/dev/null 2>&1 \
-    || die "macvlan parent interface does not exist: $parent"
+    || die "LAN bridge interface does not exist: $parent"
+  [[ -d "/sys/class/net/${parent}/bridge" ]] \
+    || die "E2E_INCUS_PARENT_INTERFACE is not a linux bridge: $parent"
 }
 
 write_ownership() {
@@ -65,7 +67,7 @@ write_ownership() {
   {
     printf 'run_id=%s\n' "$run_id"
     printf 'state=%s\n' "$state"
-    printf 'mode=macvlan\n'
+    printf 'mode=bridged\n'
     printf 'nft_table=%s\n' "$table"
     printf 'parent_interface=%s\n' "$parent"
     printf 'routed_subnet=%s\n' "$subnet"
@@ -254,7 +256,7 @@ cleanup_network() {
   local owner_run_id
   owner_run_id="$(read_owned_value "$ownership" run_id)"
   if [[ -z "$owner_run_id" ]]; then
-    [[ "$(read_owned_value "$ownership" parent_interface)" == "${E2E_INCUS_PARENT_INTERFACE:-eth0}" ]] \
+    [[ "$(read_owned_value "$ownership" parent_interface)" == "${E2E_INCUS_PARENT_INTERFACE:-vmbr0}" ]] \
       || die "legacy network ownership metadata does not match the configured parent"
     [[ "$(read_owned_value "$ownership" routed_subnet)" == "${E2E_INCUS_ROUTED_SUBNET:-}" ]] \
       || die "legacy network ownership metadata does not match the configured subnet"
@@ -279,8 +281,9 @@ cleanup_network() {
   if [[ "$state" == active ]]; then
     local mode
     mode="$(read_owned_value "$ownership" mode)"
-    # macvlan provision does not mutate host forwarding sysctls.
-    if [[ "$mode" != macvlan ]]; then
+    # Bridged L2 does not mutate host forwarding sysctls. The routed FIB/SNAT
+    # restore path stays dead (never write mode=routed).
+    if [[ "$mode" == routed ]]; then
       local parent before_ip before_parent before_rp current_ip current_parent current_rp
       parent="$(read_owned_value "$ownership" parent_interface)"
       if [[ -f "$sysctl_before" && ! -L "$sysctl_before" ]]; then
@@ -316,7 +319,7 @@ cleanup_network() {
       "$(read_owned_value "$ownership" probe_address)" cleaned \
       "$filter_chain" ""
   fi
-  printf 'network_cleanup=passed\nrun_id=%s\nnft_table=%s\nfilter_chain=%s\nmode=macvlan\n' \
+  printf 'network_cleanup=passed\nrun_id=%s\nnft_table=%s\nfilter_chain=%s\nmode=bridged\n' \
     "$run_id" "$table" "$filter_chain" >"$runtime_dir/network-cleanup-proof"
   chmod 0600 "$runtime_dir/network-cleanup-proof"
 }
@@ -344,8 +347,9 @@ apply_network() {
     die "network ownership metadata is not a safe regular file"
   fi
 
-  # macvlan attaches to the LAN parent directly. Do not install routed FIB/SNAT
-  # rules against the real LAN CIDR (that would hijack host LAN forwarding).
+  # Bridged NICs attach to the operator-owned vmbr. Do not create the bridge,
+  # do not install routed FIB/SNAT against the real LAN CIDR, and do not use
+  # `incus network create`.
   if nft list chain ip filter "$table" >/dev/null 2>&1; then
     delete_owned_filter "$table"
   fi
@@ -360,10 +364,10 @@ apply_network() {
 
   write_ownership "$ownership" "$run_id" "$table" "$parent" "$subnet" "$probe" \
     active "" ""
-  printf 'mode=macvlan\nnft_table=%s\nrouted_subnet=%s\nprobe_address=%s\nparent_interface=%s\n' \
+  printf 'mode=bridged\nnft_table=%s\nrouted_subnet=%s\nprobe_address=%s\nparent_interface=%s\n' \
     "$table" "$subnet" "$probe" "$parent" >"$runtime_dir/nft-table"
   chmod 0600 "$runtime_dir/nft-table"
-  printf 'macvlan parent=%s subnet=%s probe=%s\n' "$parent" "$subnet" "$probe" \
+  printf 'bridged parent=%s subnet=%s probe=%s\n' "$parent" "$subnet" "$probe" \
     >"$runtime_dir/nft-proof"
   chmod 0600 "$runtime_dir/nft-proof"
 }
@@ -386,7 +390,7 @@ case "$action" in
     if [[ -n "${E2E_INCUS_LVM_POOL:-}" ]]; then
       ensure_lvm_activation_skip "$run_id"
     fi
-    log "Incus macvlan LAN network provisioned for $run_id"
+    log "Incus bridged LAN network provisioned for $run_id"
     ;;
   ensure-lvm)
     ensure_lvm_activation_skip "$run_id"
@@ -394,7 +398,7 @@ case "$action" in
   cleanup)
     require_command nft
     cleanup_network "$run_id"
-    log "Incus macvlan LAN network cleaned for $run_id"
+    log "Incus bridged LAN network cleaned for $run_id"
     ;;
   *)
     usage >&2

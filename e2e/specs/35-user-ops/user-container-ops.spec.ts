@@ -162,6 +162,14 @@ test(
       );
       await requireSucceededIntent(userApi, restart.intentId, 'user.container.restart');
       await waitForUserContainerPower(userApi, containerId, 'running');
+      const repair = await expectJson<JsonRecord>(
+        await userApi.post(`/api/containers/${containerId}/actions/repair-ssh`),
+        202,
+      );
+      expect(repair.intentId ?? repair.woken).toBeTruthy();
+      if (repair.intentId) {
+        await requireSucceededIntent(userApi, repair.intentId, 'user.container.repair-ssh');
+      }
 
       const finalState = await expectJson<JsonRecord>(
         await userApi.get(`/api/containers/${containerId}`),

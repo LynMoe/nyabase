@@ -5,6 +5,7 @@ import {
   Inject,
   Injectable,
   NotFoundException,
+  Optional,
 } from '@nestjs/common';
 import type { Kysely, Transaction } from 'kysely';
 import { sql } from 'kysely';
@@ -22,6 +23,7 @@ import {
   StoragePoolResizeFamily,
   canonicalPciAddress,
   type ContainerDto,
+  type AttachVolumeRequest,
   type CreateContainerRequest,
   type CreateExecSessionRequest,
   type IntentAcceptedDto,
@@ -52,6 +54,7 @@ import {
   missingStoragePoolCapability,
   storagePoolCapability,
 } from '../storage-pools/storage-pools.service.js';
+import { VolumesService } from '../volumes/volumes.service.js';
 
 type ContainerAction = 'start' | 'stop' | 'restart' | 'delete';
 
@@ -186,6 +189,7 @@ export class ContainerControlService {
     private readonly ipPools: IpPoolsRepository,
     private readonly config: NyabaseConfigService,
     private readonly sshConvergence: ContainerSshConvergenceService,
+    @Optional() private readonly volumes?: VolumesService,
   ) {}
 
   async list(userId: string, filters: { serverId?: string } = {}): Promise<ContainerDto[]> {
@@ -272,7 +276,7 @@ export class ContainerControlService {
         });
       }
       // network_managed_externally=true means the guest does not run DHCP/NM;
-      // The platform owns networking: IP pool allocation + guest macvlan config.
+      // The platform owns networking: IP pool allocation + bridged guest config.
       if (!image.network_managed_externally) {
         throw new ConflictException({
           code: FailureCode.ImageManagesOwnNetwork,
@@ -346,7 +350,7 @@ export class ContainerControlService {
       if (!server.parent_interface) {
         throw new ConflictException({
           code: FailureCode.PreflightFailed,
-          message: 'The server has no parent interface for macvlan',
+          message: 'The server has no LAN bridge (parent interface)',
         });
       }
       const pools = await this.ipPools.listForServer(request.serverId, transaction);
@@ -489,6 +493,21 @@ export class ContainerControlService {
       } catch (error) {
         if (isUniqueViolation(error, 'container_gpu_claims')) throw gpuAlreadyClaimed();
         throw error;
+      }
+      if (request.volumes && request.volumes.length > 0) {
+        if (!this.volumes) {
+          throw new ConflictException({
+            code: FailureCode.InternalError,
+            message: 'Volume binding is unavailable',
+          });
+        }
+        await this.volumes.bindCreateTimeVolumes(
+          transaction,
+          userId,
+          admin ? 'admin' : 'user',
+          { id: row.id, owner_id: row.owner_id, server_id: row.server_id },
+          request.volumes as AttachVolumeRequest[],
+        );
       }
       const intent = await this.intents.createPending({
         kind: IntentKind.ContainerCreate,
@@ -836,23 +855,56 @@ export class ContainerControlService {
   async listVolumesForUser(containerId: string, actorId: string): Promise<VolumeAttachmentDto[]> {
     const row = await this.requireContainer(containerId);
     if (row.owner_id !== actorId) throw new ForbiddenException();
-    return this.listVolumeAttachments(containerId);
+    if (this.volumes) return this.volumes.listAttachmentsForUser(actorId, containerId, 'local');
+    return this.listVolumeAttachments(containerId, row.server_id, 'local');
   }
 
   async listVolumesForAdmin(containerId: string): Promise<VolumeAttachmentDto[]> {
-    await this.requireContainer(containerId);
-    return this.listVolumeAttachments(containerId);
+    const row = await this.requireContainer(containerId);
+    if (this.volumes) return this.volumes.listAttachmentsForAdmin(containerId, 'local');
+    return this.listVolumeAttachments(containerId, row.server_id, 'local');
   }
 
-  private async listVolumeAttachments(containerId: string): Promise<VolumeAttachmentDto[]> {
+  async listSharedVolumesForUser(containerId: string, actorId: string): Promise<VolumeAttachmentDto[]> {
+    const row = await this.requireContainer(containerId);
+    if (row.owner_id !== actorId) throw new ForbiddenException();
+    if (this.volumes) return this.volumes.listAttachmentsForUser(actorId, containerId, 'shared');
+    return this.listVolumeAttachments(containerId, row.server_id, 'shared');
+  }
+
+  async listSharedVolumesForAdmin(containerId: string): Promise<VolumeAttachmentDto[]> {
+    const row = await this.requireContainer(containerId);
+    if (this.volumes) return this.volumes.listAttachmentsForAdmin(containerId, 'shared');
+    return this.listVolumeAttachments(containerId, row.server_id, 'shared');
+  }
+
+  private async listVolumeAttachments(
+    containerId: string,
+    serverId: string,
+    kind: 'local' | 'shared',
+  ): Promise<VolumeAttachmentDto[]> {
     const attachments = await this.database.selectFrom('control.volume_attachments as attachment')
       .innerJoin('control.volumes as volume', 'volume.id', 'attachment.volume_id')
+      .leftJoin('control.volume_placements as placement', (join) => join
+        .onRef('placement.volume_id', '=', 'attachment.volume_id')
+        .on('placement.server_id', '=', serverId))
       .selectAll('attachment')
-      .select('volume.name as volume_name')
+      .select([
+        'volume.name as volume_name',
+        'volume.shared_backend_id as shared_backend_id',
+        'placement.catalog_state as catalog_state',
+      ])
       .where('attachment.container_id', '=', containerId)
       .orderBy('attachment.created_at')
       .execute();
-    return attachments.map((attachment) => this.toAttachmentDto(attachment, attachment.volume_name));
+    return attachments
+      .filter((attachment) => (
+        kind === 'shared' ? attachment.shared_backend_id !== null : attachment.shared_backend_id === null
+      ))
+      .map((attachment) => this.toAttachmentDto(attachment, attachment.volume_name, {
+        kind,
+        catalogState: attachment.catalog_state,
+      }));
   }
 
   async getStats(containerId: string, userId: string) {
@@ -977,6 +1029,20 @@ export class ContainerControlService {
           code: FailureCode.InstanceBusy,
           message: 'Restart requires a running container',
         });
+      }
+      if (action === 'start' || action === 'restart') {
+        const detaching = await transaction.selectFrom('control.volume_attachments')
+          .select('id')
+          .where('container_id', '=', containerId)
+          .where('bind_state', '=', 'detaching')
+          .executeTakeFirst();
+        if (detaching) {
+          throw new ConflictException({
+            code: FailureCode.InstanceBusy,
+            message: '等待卸载完成后再启动',
+            details: { containerId, attachmentId: detaching.id },
+          });
+        }
       }
       const nextPhase = action === 'delete' ? ContainerPhase.Deleting : current.lifecycle_phase;
       const nextPower = action === 'stop'
@@ -1259,16 +1325,31 @@ export class ContainerControlService {
     for (const route of routeRows) routes.set(route.containerId, route);
     const attachments = await this.database.selectFrom('control.volume_attachments as attachment')
       .innerJoin('control.volumes as volume', 'volume.id', 'attachment.volume_id')
+      .leftJoin('control.containers as container', 'container.id', 'attachment.container_id')
+      .leftJoin('control.volume_placements as placement', (join) => join
+        .onRef('placement.volume_id', '=', 'attachment.volume_id')
+        .onRef('placement.server_id', '=', 'container.server_id'))
       .selectAll('attachment')
-      .select('volume.name as volume_name')
+      .select([
+        'volume.name as volume_name',
+        'volume.shared_backend_id as shared_backend_id',
+        'placement.catalog_state as catalog_state',
+      ])
       .where('attachment.container_id', 'in', rows.map((row) => row.id))
       .orderBy('attachment.created_at')
       .execute();
     const attachmentsByContainer = new Map<string, VolumeAttachmentDto[]>();
+    const sharedByContainer = new Map<string, VolumeAttachmentDto[]>();
     for (const attachment of attachments) {
-      const list = attachmentsByContainer.get(attachment.container_id) ?? [];
-      list.push(this.toAttachmentDto(attachment, attachment.volume_name));
-      attachmentsByContainer.set(attachment.container_id, list);
+      const kind = attachment.shared_backend_id !== null ? 'shared' : 'local';
+      const dto = this.toAttachmentDto(attachment, attachment.volume_name, {
+        kind,
+        catalogState: attachment.catalog_state,
+      });
+      const target = kind === 'shared' ? sharedByContainer : attachmentsByContainer;
+      const list = target.get(attachment.container_id) ?? [];
+      list.push(dto);
+      target.set(attachment.container_id, list);
     }
     const owners = new Map<string, string>();
     const ownerIds = [...new Set(rows.map((row) => row.owner_id))];
@@ -1352,6 +1433,7 @@ export class ContainerControlService {
           lastError: route?.lastError ?? null,
         },
         volumes: attachmentsByContainer.get(row.id) ?? [],
+        sharedVolumes: sharedByContainer.get(row.id) ?? [],
         needsAttention: row.needs_attention,
         failureCode: row.failure_code,
         failureReason: row.failure_reason,
@@ -1437,11 +1519,12 @@ export class ContainerControlService {
       device_name: string;
       container_path: string;
       read_only: boolean;
-      detach_drained_at: Date | string | null;
+      bind_state: VolumeAttachmentDto['bindState'];
       created_at: Date | string;
       updated_at: Date | string;
     },
     volumeName: string,
+    extra: { kind: 'local' | 'shared'; catalogState: string | null },
   ): VolumeAttachmentDto {
     return {
       id: attachment.id,
@@ -1451,7 +1534,9 @@ export class ContainerControlService {
       deviceName: attachment.device_name,
       containerPath: attachment.container_path,
       readOnly: attachment.read_only,
-      detachDrainedAt: date(attachment.detach_drained_at),
+      bindState: attachment.bind_state,
+      kind: extra.kind,
+      onlineCancelAllowed: extra.catalogState !== 'present' && attachment.bind_state === 'attaching',
       createdAt: new Date(attachment.created_at).toISOString(),
       updatedAt: new Date(attachment.updated_at).toISOString(),
     };

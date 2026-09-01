@@ -6,6 +6,13 @@ import { DatabaseModule } from '../database/database.module.js';
 import { RuntimeModule } from '../runtime/runtime.module.js';
 import { StoragePoolsModule } from '../storage-pools/storage-pools.module.js';
 import {
+  AdminContainerSharedVolumesController,
+  AdminSharedBackendCatalogInspectController,
+  AdminSharedVolumesController,
+  ContainerSharedVolumesController,
+  SharedVolumesController,
+} from './shared-volumes.controller.js';
+import {
   AdminVolumesController,
   AdminContainerVolumesController,
   ContainerVolumesController,
@@ -27,9 +34,14 @@ import { VolumesService } from './volumes.service.js';
   providers: [VolumesRepository, VolumesService],
   controllers: [
     VolumesController,
+    SharedVolumesController,
     ContainerVolumesController,
+    ContainerSharedVolumesController,
     AdminContainerVolumesController,
+    AdminContainerSharedVolumesController,
     AdminVolumesController,
+    AdminSharedVolumesController,
+    AdminSharedBackendCatalogInspectController,
     StorageCapacityController,
   ],
   exports: [VolumesRepository, VolumesService],

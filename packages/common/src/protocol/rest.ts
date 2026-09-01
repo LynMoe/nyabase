@@ -17,10 +17,10 @@ import {
   UserStatus,
 } from '../enums.js';
 import type {
+  LocalVolumeScope,
   NodeMetricsHealth,
   PreflightReport,
   ServerGrantGpu,
-  VolumeScope,
 } from './rest-schema.js';
 import type { ConfigSourceName, ConfigValueKind } from '../config/definition.js';
 
@@ -38,9 +38,11 @@ export type {
   CreateSharedBackendRequest,
   CreateUserRequest,
   CreateVolumeRequest,
+  CreateSharedVolumeRequest,
   ErrorResponse,
   CreateExecSessionRequest,
   IntentListQuery,
+  ListSharedVolumesQuery,
   LocalVolumeScope,
   LoginRequest,
   NodeMetricsCreateConfig,
@@ -392,6 +394,8 @@ export interface SharedBackendDto {
   usedBytes: number | null;
   overcommitRatio: number;
   serverIds: string[];
+  /** True when any registered shareable cephfs pool's server is online. */
+  hasOnlineExecutor: boolean;
   revision: number;
   createdAt: string;
   updatedAt: string;
@@ -414,19 +418,20 @@ export interface IpPoolDto {
   updatedAt: string;
 }
 
+export type VolumeBindState = 'attaching' | 'attached' | 'detaching';
+
 export interface VolumeDto {
   id: string;
   ownerId: string;
   poolId: string;
   /** displayName or Incus pool name; UI must not fall back to the pool UUID. */
   poolName: string;
-  serverId: string | null;
-  sharedBackendId: string | null;
+  serverId: string;
   name: string;
   incusName: string;
   sizeBytes: number;
   usedBytes: number | null;
-  scope: VolumeScope;
+  scope: LocalVolumeScope;
   /** Pool capability descriptor; UI must not hardcode driver tables. */
   capability: StoragePoolCapabilityDto;
   lifecyclePhase: ResourceLifecyclePhase;
@@ -440,12 +445,75 @@ export interface VolumeDto {
   attachments: VolumeAttachmentSummaryDto[];
 }
 
+export interface SharedVolumeDto {
+  id: string;
+  ownerId: string;
+  sharedBackendId: string;
+  sharedBackendName: string;
+  name: string;
+  incusName: string;
+  sizeBytes: number;
+  usedBytes: number | null;
+  capability: StoragePoolCapabilityDto;
+  lifecyclePhase: ResourceLifecyclePhase;
+  generation: number;
+  observedGeneration: number | null;
+  needsAttention: boolean;
+  failureCode: string | null;
+  dirEnsured: boolean;
+  createdAt: string;
+  updatedAt: string;
+  attachments: VolumeAttachmentSummaryDto[];
+}
+
+export type SharedVolumeCatalogOccupancy =
+  | 'in_use'
+  | 'cache'
+  | 'ensuring'
+  | 'dangling_incus'
+  | 'dangling_pg'
+  | 'unreachable';
+
+export interface SharedVolumeCatalogInspectItemDto {
+  serverId: string;
+  serverName: string;
+  serverStatus: ServerStatus;
+  poolId: string | null;
+  poolName: string | null;
+  pgCatalogState: 'ensuring' | 'present' | 'absent';
+  incusPresent: boolean | null;
+  occupancy: SharedVolumeCatalogOccupancy;
+}
+
+export interface SharedVolumeCatalogInspectDto {
+  volumeId: string;
+  incusName: string;
+  sharedBackendId: string;
+  items: SharedVolumeCatalogInspectItemDto[];
+}
+
+export interface SharedBackendCatalogInspectItemDto {
+  serverId: string;
+  serverName: string;
+  poolId: string;
+  poolName: string;
+  incusName: string;
+  volumeId: string | null;
+  occupancy: 'in_use' | 'cache' | 'dangling_incus';
+}
+
+export interface SharedBackendCatalogInspectDto {
+  sharedBackendId: string;
+  items: SharedBackendCatalogInspectItemDto[];
+}
+
 /** Compact mount row on VolumeDto; containerName is joined in one batch query. */
 export interface VolumeAttachmentSummaryDto {
   attachmentId: string;
   containerId: string;
   containerName: string;
   containerPath: string;
+  bindState: VolumeBindState;
 }
 
 export interface VolumeAttachmentDto {
@@ -456,7 +524,9 @@ export interface VolumeAttachmentDto {
   deviceName: string;
   containerPath: string;
   readOnly: boolean;
-  detachDrainedAt: string | null;
+  bindState: VolumeBindState;
+  kind: 'local' | 'shared';
+  onlineCancelAllowed: boolean;
   createdAt: string;
   updatedAt: string;
 }
@@ -616,6 +686,7 @@ export interface ContainerDto {
   actual: ContainerActualDto;
   ssh: ContainerSshDto;
   volumes: VolumeAttachmentDto[];
+  sharedVolumes: VolumeAttachmentDto[];
   needsAttention: boolean;
   failureCode: string | null;
   failureReason: string | null;

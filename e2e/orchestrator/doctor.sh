@@ -30,6 +30,7 @@ block() {
   evidence+=("BLOCKED :: $detail")
 }
 
+maybe_source_lab_cluster
 if [[ -n "$run_id" ]]; then
   # Load optional CephFS fixture from the run runtime (secrets stay untracked).
   maybe_source_cephfs_fixture "$(runtime_dir_for "$run_id")"
@@ -49,9 +50,29 @@ if [[ -n "${E2E_SHARED_BACKEND_ID:-}" \
   && -n "${E2E_CEPHFS_INCUS_POOL:-}" ]]; then
   pass cephfs-cluster \
     "shared backend ${E2E_SHARED_BACKEND_ID} identity ${E2E_CEPHFS_IDENTITY_KEY} pool ${E2E_CEPHFS_INCUS_POOL}"
+elif [[ -n "${E2E_CEPHFS_FSID:-}" \
+  && -n "${E2E_CEPHFS_IDENTITY_KEY:-}" \
+  && -n "${E2E_CEPHFS_INCUS_POOL:-}" ]]; then
+  evidence+=(
+    "INFO cephfs-cluster :: fixture present; shared backend id is assigned at seed"
+  )
 else
   evidence+=(
     "BLOCKED capability :: cephfs-cluster :: no multi-node CephFS cluster is provisioned"
+  )
+fi
+
+lab_servers_file="${E2E_LAB_SERVERS_FILE:-}"
+if [[ -n "$lab_servers_file" && -f "$lab_servers_file" && ! -L "$lab_servers_file" ]]; then
+  lab_count="$(node -e 'const v=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")); if(!Array.isArray(v)||v.length<1) process.exit(2); process.stdout.write(String(v.length));' "$lab_servers_file" 2>/dev/null || true)"
+  if [[ -n "$lab_count" ]]; then
+    pass multi-server "E2E_LAB_SERVERS_FILE lists ${lab_count} extra Incus worker(s)"
+  else
+    block "E2E_LAB_SERVERS_FILE is not a JSON array of extra Incus workers"
+  fi
+else
+  evidence+=(
+    "BLOCKED capability :: multi-server :: E2E_LAB_SERVERS_FILE is not configured"
   )
 fi
 
@@ -76,14 +97,14 @@ need_env() {
 for command in incus pg_isready psql curl openssl node pnpm rg ip sysctl nft ssh; do
   need_command "$command"
 done
-if [[ "$profile" == "full" || "$profile" == "recovery" ]]; then
+if [[ "$profile" == "full" ]]; then
   need_command systemctl
 fi
 
-if [[ "$profile" == "core" || "$profile" == "full" || "$profile" == "recovery" ]]; then
+if [[ "$profile" == "core" || "$profile" == "full" ]]; then
   [[ "${E2E_ENABLE_NETWORK_MUTATION:-}" == "1" ]] \
     && evidence+=("PASS input :: E2E_ENABLE_NETWORK_MUTATION") \
-    || block "set E2E_ENABLE_NETWORK_MUTATION=1 to authorize the routed spoof probe"
+    || block "set E2E_ENABLE_NETWORK_MUTATION=1 to authorize the bridged spoof probe"
 fi
 
 for name in \
@@ -228,41 +249,54 @@ fi
 
 parent="${E2E_INCUS_PARENT_INTERFACE:-}"
 filter_value="$(sysctl -n "net.ipv4.conf.${parent}.rp_filter" 2>/dev/null || true)"
-if ip link show "$parent" >/dev/null 2>&1; then
+if [[ -d "/sys/class/net/${parent}/bridge" ]]; then
   parent_addresses="$(ip -o -4 addr show dev "$parent" 2>/dev/null | awk '{print $4}' | tr '\n' ' ' | sed 's/[[:space:]]*$//')"
   parent_routes="$(ip -4 route show dev "$parent" 2>/dev/null | tr '\n' ';' | sed 's/;$//')"
   gateway_route="$(ip -4 route get "${E2E_INCUS_ROUTED_GATEWAY:-0.0.0.0}" 2>/dev/null | tr '\n' ' ' | sed 's/[[:space:]]*$//')"
-  evidence+=("INFO host-lan :: interface=$parent addresses=$parent_addresses routes=$parent_routes gateway_route=$gateway_route")
-  evidence+=("INFO macvlan-mode :: parent=$parent subnet=${E2E_INCUS_ROUTED_SUBNET:-} (host↔local-container isolation accepted)")
-  if [[ -n "$parent_addresses" ]]; then
-    pass macvlan-parent "macvlan parent interface $parent exists with IPv4 addresses $parent_addresses"
+  brif="$(bridge link 2>/dev/null || true)"
+  host_lan_addresses="$(ip -o -4 addr show scope global 2>/dev/null | awk '{print $4}' | grep -Ev '^(127\.|169\.254\.)' | tr '\n' ' ' | sed 's/[[:space:]]*$//')"
+  evidence+=("INFO host-lan :: interface=$parent addresses=$parent_addresses routes=$parent_routes gateway_route=$gateway_route host_lan=$host_lan_addresses")
+  evidence+=("INFO lan-bridge :: parent=$parent subnet=${E2E_INCUS_ROUTED_SUBNET:-}")
+  evidence+=("INFO rp-filter :: parent=$parent rp_filter=${filter_value:-unset} (leftover observation, not admission)")
+  if ! echo "$brif" | grep -Eq "master[[:space:]]+${parent}([[:space:]]|$)"; then
+    block "LAN bridge $parent has no uplink slave"
+  elif [[ -n "$host_lan_addresses" ]]; then
+    pass lan-bridge "LAN bridge $parent has an uplink; host LAN IPv4 $host_lan_addresses (need not live on the bridge)"
   else
-    block "macvlan parent $parent has no IPv4 address"
+    block "host has no global IPv4 in the LAN (bridge $parent may be a dedicated container uplink)"
   fi
-  if [[ "$filter_value" == "1" || "$filter_value" == "2" ]]; then
-    pass rp-filter "parent rp_filter=$filter_value is enabled (>=1)"
+  if ! command -v nft >/dev/null 2>&1 || ! nft list tables >/dev/null 2>&1; then
+    block "nft is missing or cannot list tables (bridge-family anti-spoof cannot be proven)"
   else
-    evidence+=("INFO rp-filter-policy :: parent=$parent rp_filter=${filter_value:-unset}")
-    pass rp-filter "parent rp_filter=${filter_value:-unset} observed for macvlan (not enforced for LAN L2)"
+    nft_table="$(nft list table bridge incus 2>/dev/null || true)"
+    if echo "$nft_table" | grep -Eq 'arp[[:space:]]+saddr[[:space:]]+ip' \
+      && echo "$nft_table" | grep -Eq 'ip[[:space:]]+saddr'; then
+      pass bridge-ipv4-filter "nft table bridge incus has ARP and IPv4 source drops on $parent"
+    elif [[ -z "$nft_table" ]] || ! echo "$nft_table" | grep -Eq '(^|[[:space:]])(arp|ip)[[:space:]]'; then
+      evidence+=("INFO bridge-ipv4-filter :: nft works; table bridge incus fills in with the first filtered NIC")
+      pass bridge-ipv4-filter "nft can list tables on $parent (filter table created with the first bridged NIC)"
+    else
+      block "nft table bridge incus exists but lacks arp saddr ip / ip saddr drops"
+    fi
   fi
+elif ip link show "$parent" >/dev/null 2>&1; then
+  block "parent $parent exists but is not a linux bridge"
 else
-  block "macvlan parent missing: '${parent:-unset}'"
+  block "LAN bridge missing: '${parent:-unset}'"
 fi
-
-# macvlan containers egress via the LAN gateway; host forward/NAT tables are unused.
 
 if [[ -n "$run_id" ]]; then
   ownership="$(runtime_dir_for "$run_id")/network-ownership"
   if [[ -f "$ownership" ]] \
     && rg -Fq "parent_interface=$parent" "$ownership" \
     && rg -Fq "routed_subnet=${E2E_INCUS_ROUTED_SUBNET:-}" "$ownership" \
-    && rg -Fq 'mode=macvlan' "$ownership"; then
+    && rg -Fq 'mode=bridged' "$ownership"; then
     evidence+=("INFO network-ownership :: $(tr '\n' ' ' <"$ownership")")
   else
-    block "run-owned macvlan network ownership metadata is missing or mismatched"
+    block "run-owned bridged network ownership metadata is missing or mismatched"
   fi
 else
-  block "an explicit run id is required to validate macvlan network ownership"
+  block "an explicit run id is required to validate bridged network ownership"
 fi
 
 source_url="${E2E_INCUS_IMAGE_SOURCE_URL:-}"
@@ -322,7 +356,7 @@ else
   block "authenticated node-exporter pull is not configured or reachable"
 fi
 
-if [[ "$profile" == "full" || "$profile" == "recovery" ]]; then
+if [[ "$profile" == "full" ]]; then
   for name in E2E_NODE_EXPORTER_UNIT; do
     need_env "$name"
   done
@@ -336,7 +370,7 @@ if [[ "$profile" == "full" || "$profile" == "recovery" ]]; then
     block "node-exporter unit is not installed and active"
   fi
 else
-  evidence+=("INFO node-exporter-outage :: required by full and recovery profiles")
+  evidence+=("INFO node-exporter-outage :: required by the full profile")
 fi
 
 if [[ -n "${E2E_INCUS_API_ENDPOINT:-}" && -f "${E2E_INCUS_CA_FILE:-}" \

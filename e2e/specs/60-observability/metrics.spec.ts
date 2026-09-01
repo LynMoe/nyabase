@@ -44,6 +44,10 @@ test(
     );
     expect(runtime.postgres).toBeDefined();
     expect(runtime.telemetry).toBeDefined();
+    const audit = await expectJson<unknown>(await adminApi.get('/api/audit'));
+    expect(audit).toBeDefined();
+    const missingAudit = await adminApi.get('/api/audit/00000000-0000-4000-8000-0000000000ee');
+    expect(missingAudit.status()).toBeGreaterThanOrEqual(400);
 
     if (process.env.E2E_ENABLE_OUTAGE_MUTATION !== '1') {
       throw new Error(

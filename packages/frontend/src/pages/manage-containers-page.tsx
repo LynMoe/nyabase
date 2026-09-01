@@ -12,14 +12,27 @@ import {
   type UserDto,
 } from '@nyabase/common';
 import { api } from '../lib/api.js';
+import { errorMessage } from '../lib/api-error.js';
 import { Button } from '../components/ui/button.js';
 import { Card, CardContent } from '../components/ui/card.js';
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '../components/ui/dialog.js';
 import { Input } from '../components/ui/input.js';
-import { Label } from '../components/ui/label.js';
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '../components/ui/select.js';
 import { ContainerRow } from '../components/containers/container-row.js';
-import { QueryErrorState, QueryLoadingState } from '../components/query-state.js';
+import { FormField } from '../components/layout/form-field.js';
+import { EmptyState } from '../components/layout/empty-state.js';
+import { Page } from '../components/layout/page.js';
+import { PageHeader } from '../components/layout/page-header.js';
+import { QueryView } from '../components/layout/query-view.js';
 import { queryKeys } from '../lib/query-keys.js';
+import { queryPollInterval } from '../lib/query-lifecycle.js';
+import { runGatedMutation } from '../lib/resource-mutation-gate.js';
 import { actionProgressHint, containerActionSubmittedTitle } from '../lib/status-labels.js';
 import { toast } from '../hooks/use-toast.js';
 
@@ -29,7 +42,7 @@ export default function ManageContainersPage() {
   const containersQuery = useQuery({
     queryKey: queryKeys.containers.adminList,
     queryFn: () => api.get<ContainerDto[]>('/admin/containers'),
-    refetchInterval: 5_000,
+    refetchInterval: (query) => queryPollInterval(query.state, { activeIntervalMs: 5_000 }),
   });
   const action = useMutation({
     mutationFn: ({ actionName, containerId }: { actionName: Extract<ContainerAction, 'start' | 'stop' | 'restart'>; containerId: string }) =>
@@ -41,7 +54,7 @@ export default function ManageContainersPage() {
       });
       void queryClient.invalidateQueries({ queryKey: queryKeys.containers.adminList });
     },
-    onError: (error) => toast({ title: '容器操作失败', description: error instanceof Error ? error.message : '请稍后重试', variant: 'destructive' }),
+    onError: (error) => toast({ title: '容器操作失败', description: errorMessage(error), variant: 'destructive' }),
   });
   const groups = useMemo(() => {
     const map = new Map<string, ContainerDto[]>();
@@ -49,55 +62,60 @@ export default function ManageContainersPage() {
     return [...map.entries()];
   }, [containersQuery.data]);
 
-  if (containersQuery.isLoading) return <QueryLoadingState label="加载全局容器..." />;
-  if (containersQuery.isError) {
-    return <QueryErrorState error={containersQuery.error} resourceName="全局容器" onRetry={() => { void containersQuery.refetch(); }} />;
-  }
+  const onPowerAction = async (actionName: ContainerAction, container: ContainerDto) => {
+    if (actionName === 'start' || actionName === 'stop' || actionName === 'restart') {
+      const ran = await runGatedMutation(container.id, () =>
+        action.mutateAsync({ actionName, containerId: container.id }).then(() => undefined),
+      );
+      if (!ran) return Promise.reject();
+    }
+  };
 
   return (
-    <div className="space-y-5 px-4 py-4 md:px-6">
-      <div className="flex flex-wrap items-start justify-between gap-3">
-        <div>
-          <h1 className="text-2xl font-semibold tracking-tight">容器管理</h1>
-          <p className="text-sm text-muted-foreground">全部用户的容器（管理面）。你自己的容器仍在「容器」。</p>
-        </div>
-        <Button onClick={() => setCreateOpen(true)}>
-          <Plus className="h-4 w-4" />
-          代建容器
-        </Button>
-      </div>
-      {groups.length === 0 ? (
-        <Card><CardContent className="py-12 text-center text-sm text-muted-foreground">暂无容器。</CardContent></Card>
-      ) : (
-        <div className="space-y-5">
-          {groups.map(([ownerId, containers]) => (
-            <section key={ownerId} className="space-y-2">
-              <div className="flex items-center gap-2 text-sm font-medium">
-                <UserRound className="h-4 w-4 text-muted-foreground" />
-                {containers[0]?.ownerName ?? ownerId}
-                <span className="text-xs text-muted-foreground">{containers.length} 个</span>
-              </div>
-              <Card>
-                <CardContent className="divide-y p-0">
-                  {containers.map((container) => (
-                    <ContainerRow
-                      key={container.id}
-                      container={container}
-                      admin
-                      actionPending={action.isPending}
-                      onAction={(actionName, item) => {
-                        if (actionName === 'start' || actionName === 'stop' || actionName === 'restart') {
-                          action.mutate({ actionName, containerId: item.id });
-                        }
-                      }}
-                    />
-                  ))}
-                </CardContent>
-              </Card>
-            </section>
-          ))}
-        </div>
-      )}
+    <Page>
+      <PageHeader
+        title="容器管理"
+        description="全部用户的容器（管理面）。你自己的容器仍在「容器」。"
+        actions={
+          <Button onClick={() => setCreateOpen(true)}>
+            <Plus className="h-4 w-4" />
+            代建容器
+          </Button>
+        }
+      />
+      <QueryView
+        query={containersQuery}
+        resourceName="全局容器"
+        loadingLabel="加载全局容器..."
+        showEmpty={containersQuery.data?.length === 0}
+        empty={<EmptyState title="暂无容器。" />}
+      >
+        {(_containers) => (
+          <div className="space-y-5">
+            {groups.map(([ownerId, containers]) => (
+              <section key={ownerId} className="space-y-2">
+                <div className="flex items-center gap-2 text-sm font-medium">
+                  <UserRound className="h-4 w-4 text-muted-foreground" />
+                  {containers[0]?.ownerName ?? ownerId}
+                  <span className="text-xs text-muted-foreground">{containers.length} 个</span>
+                </div>
+                <Card>
+                  <CardContent className="divide-y p-0">
+                    {containers.map((container) => (
+                      <ContainerRow
+                        key={container.id}
+                        container={container}
+                        admin
+                        onAction={onPowerAction}
+                      />
+                    ))}
+                  </CardContent>
+                </Card>
+              </section>
+            ))}
+          </div>
+        )}
+      </QueryView>
       <AdminCreateContainerDialog
         open={createOpen}
         onOpenChange={setCreateOpen}
@@ -105,7 +123,7 @@ export default function ManageContainersPage() {
           void queryClient.invalidateQueries({ queryKey: queryKeys.containers.adminList });
         }}
       />
-    </div>
+    </Page>
   );
 }
 
@@ -160,7 +178,7 @@ function AdminCreateContainerDialog({
     },
     onError: (error) => toast({
       title: '代建失败',
-      description: error instanceof Error ? error.message : '请稍后重试',
+      description: errorMessage(error),
       variant: 'destructive',
     }),
   });
@@ -177,10 +195,9 @@ function AdminCreateContainerDialog({
           <Field id="admin-owner" label="所有者" value={ownerId} onChange={setOwnerId} options={owners.map((user) => [user.id, user.displayName || user.username])} />
           <Field id="admin-server" label="服务器" value={serverId} onChange={setServerId} options={(serversQuery.data ?? []).map((server) => [server.id, server.name])} />
           <Field id="admin-image" label="镜像" value={imageId} onChange={setImageId} options={images.map((image) => [image.id, image.name])} />
-          <div className="space-y-1.5">
-            <Label htmlFor="admin-container-name">名称</Label>
+          <FormField id="admin-container-name" label="名称">
             <Input id="admin-container-name" value={name} onChange={(event) => setName(event.target.value)} />
-          </div>
+          </FormField>
         </div>
         <DialogFooter>
           <Button
@@ -209,19 +226,17 @@ function Field({
   options: Array<[string, string]>;
 }) {
   return (
-    <div className="space-y-1.5">
-      <Label htmlFor={id}>{label}</Label>
-      <select
-        id={id}
-        className="h-10 w-full rounded-md border border-input bg-background px-3 text-sm"
-        value={value}
-        onChange={(event) => onChange(event.target.value)}
-      >
-        <option value="">请选择</option>
-        {options.map(([optionValue, optionLabel]) => (
-          <option key={optionValue} value={optionValue}>{optionLabel}</option>
-        ))}
-      </select>
-    </div>
+    <FormField id={id} label={label}>
+      <Select key={value || 'empty'} value={value || undefined} onValueChange={onChange}>
+        <SelectTrigger id={id}>
+          <SelectValue placeholder="请选择" />
+        </SelectTrigger>
+        <SelectContent>
+          {options.map(([optionValue, optionLabel]) => (
+            <SelectItem key={optionValue} value={optionValue}>{optionLabel}</SelectItem>
+          ))}
+        </SelectContent>
+      </Select>
+    </FormField>
   );
 }

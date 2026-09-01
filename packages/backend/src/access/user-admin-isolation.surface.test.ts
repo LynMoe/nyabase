@@ -15,8 +15,12 @@ describe('user/admin isolation API surface', () => {
     const src = readSrc('volumes/volumes.service.ts');
     expect(src).toMatch(/async listForUser\(/);
     expect(src).toMatch(/async listForAdmin\(/);
+    expect(src).toMatch(/async listSharedForUser\(/);
+    expect(src).toMatch(/async listSharedForAdmin\(/);
     expect(src).toMatch(/async createForUser\(/);
     expect(src).toMatch(/async createForAdmin\(/);
+    expect(src).toMatch(/async createSharedForUser\(/);
+    expect(src).toMatch(/async createSharedForAdmin\(/);
     expect(src).not.toMatch(/includeAll\s*=/);
     expect(src).not.toMatch(/async\s+\w+\([^)]*\badmin\s*=\s*false/);
     expect(src).not.toMatch(/async\s+\w+\([^)]*\bincludeAll\b/);
@@ -45,8 +49,15 @@ describe('user/admin isolation API surface', () => {
     const volumesController = readSrc('volumes/volumes.controller.ts');
     expect(volumesController).toMatch(/listForUser/);
     expect(volumesController).toMatch(/createForAdmin/);
+    expect(volumesController).not.toMatch(/createShared/);
     expect(volumesController).not.toMatch(/\.create\([^)]+,\s*true\s*\)/);
     expect(volumesController).not.toMatch(/\.list\([^)]+,\s*true\s*\)/);
+
+    const sharedVolumesController = readSrc('volumes/shared-volumes.controller.ts');
+    expect(sharedVolumesController).toMatch(/ManageSharedVolumes/);
+    expect(sharedVolumesController).toMatch(/createSharedForAdmin/);
+    expect(sharedVolumesController).toMatch(/listSharedForUser/);
+    expect(sharedVolumesController).not.toMatch(/RequireCaps\(Capability\.ManageVolumes\)/);
 
     const adminContainers = readSrc('containers/admin-containers.controller.ts');
     expect(adminContainers).toMatch(/createForAdmin/);

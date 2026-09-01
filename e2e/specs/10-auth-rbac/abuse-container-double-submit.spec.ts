@@ -98,7 +98,7 @@ test(
       );
       expect(deleteWhileAttached.status).toBe(409);
       expect(
-        errorCode(deleteWhileAttached.body) === 'VOLUME_DETACH_DRAINING'
+        errorCode(deleteWhileAttached.body) === 'VOLUME_REQUIRES_UNBIND'
           || /Detach|attached|in use|VOLUME/i.test(errorMessageText(deleteWhileAttached.body)),
       ).toBe(true);
 

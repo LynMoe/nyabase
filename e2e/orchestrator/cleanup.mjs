@@ -46,11 +46,24 @@ export function readTlsOptions(env = process.env) {
   };
 }
 
+export function isE2eResourceName(name, runId) {
+  if (typeof name !== 'string' || name.length === 0) return false;
+  if (name.startsWith('e2e-')) return true;
+  return typeof runId === 'string' && runId.length > 0 && name.includes(runId);
+}
+
 export function shouldDeleteRunServer(seedState, runId) {
   return seedState?.runId === runId
     && seedState.server?.createdByRun === true
     && typeof seedState.server.id === 'string'
     && seedState.server.id.length > 0;
+}
+
+export function labServersToDelete(seedState, runId) {
+  if (seedState?.runId !== runId || !Array.isArray(seedState.labServers)) return [];
+  return seedState.labServers.filter((entry) => (
+    entry?.createdByRun === true && typeof entry.id === 'string' && entry.id.length > 0
+  ));
 }
 
 export function shouldCleanupRunAssignment(seedState, runId) {
@@ -319,6 +332,33 @@ export async function removeRunOwnedServer(
     `/api/admin/servers/${encodeURIComponent(serverId)}`,
     token,
   );
+  for (const extra of labServersToDelete(seedState, runId)) {
+    if (imageId) {
+      try {
+        await jsonRequest(
+          `/api/admin/images/${encodeURIComponent(imageId)}/assignments/${encodeURIComponent(extra.id)}`,
+          { method: 'DELETE', token },
+        );
+      } catch (error) {
+        if (error?.statusCode !== 404) throw error;
+      }
+    }
+    await cleanupDatabase(extra.id);
+    try {
+      await jsonRequest(`/api/admin/servers/${encodeURIComponent(extra.id)}`, {
+        method: 'DELETE',
+        token,
+      });
+    } catch (error) {
+      if (error?.statusCode !== 404) throw error;
+      continue;
+    }
+    await waitGone(
+      jsonRequest,
+      `/api/admin/servers/${encodeURIComponent(extra.id)}`,
+      token,
+    );
+  }
 }
 
 async function main() {
@@ -339,7 +379,7 @@ async function main() {
   });
   const token = session.accessToken;
   const containers = await jsonRequest('/api/admin/containers', { token });
-  for (const container of containers.filter((entry) => entry.name?.startsWith(`e2e-${runId}`))) {
+  for (const container of containers.filter((entry) => isE2eResourceName(entry.name, runId))) {
     await jsonRequest(`/api/admin/containers/${container.id}/actions/delete`, {
       method: 'POST',
       token,
@@ -347,12 +387,20 @@ async function main() {
     await waitGone(jsonRequest, `/api/admin/containers/${container.id}`, token);
   }
   const volumes = await jsonRequest('/api/admin/volumes', { token });
-  for (const volume of volumes.filter((entry) => entry.name?.startsWith(`e2e-${runId}`))) {
+  for (const volume of volumes.filter((entry) => isE2eResourceName(entry.name, runId))) {
     await jsonRequest(`/api/admin/volumes/${volume.id}`, {
       method: 'DELETE',
       token,
     });
     await waitGone(jsonRequest, `/api/admin/volumes/${volume.id}`, token);
+  }
+  const sharedVolumes = await jsonRequest('/api/admin/shared-volumes', { token });
+  for (const volume of sharedVolumes.filter((entry) => isE2eResourceName(entry.name, runId))) {
+    await jsonRequest(`/api/admin/shared-volumes/${volume.id}`, {
+      method: 'DELETE',
+      token,
+    });
+    await waitGone(jsonRequest, `/api/admin/shared-volumes/${volume.id}`, token);
   }
   await removeRunOwnedServer(
     jsonRequest,

@@ -24,10 +24,10 @@ export function formatCertRemainingLabel(notAfter: string, now = Date.now()): st
   return `已过期 ${Math.abs(days)} 天`;
 }
 
-export function certExpiryBannerText(notAfter: string): string {
+export function certExpiryBannerText(notAfter: string, now = Date.now()): string {
   const when = new Date(notAfter);
   const dateLabel = Number.isNaN(when.getTime()) ? '未知时间' : when.toLocaleDateString();
-  if (certExpiryWarning(notAfter) === 'expired') {
+  if (certExpiryWarning(notAfter, now) === 'expired') {
     return `客户端证书已于 ${dateLabel} 过期，请轮换`;
   }
   return `客户端证书将于 ${dateLabel} 过期，请轮换`;

@@ -15,7 +15,10 @@ const serverId = 'server-1';
 const actorId = 'user-1';
 
 function makeHarness() {
-  const transaction = { transaction: true };
+  const transaction: {
+    transaction: boolean;
+    selectFrom?: (table: string) => unknown;
+  } = { transaction: true };
   const serverQuery = {
     select: vi.fn(),
     where: vi.fn(),
@@ -76,8 +79,17 @@ function makeHarness() {
   const transactions = {
     run: vi.fn(async (work: (value: unknown) => Promise<unknown>) => work(transaction)),
   };
+  const attachmentQuery = {
+    select: vi.fn(),
+    where: vi.fn(),
+    executeTakeFirst: vi.fn().mockResolvedValue(undefined),
+  };
+  attachmentQuery.select.mockReturnValue(attachmentQuery);
+  attachmentQuery.where.mockReturnValue(attachmentQuery);
   Object.assign(transaction, {
-    selectFrom: vi.fn().mockReturnValue(serverQuery),
+    selectFrom: vi.fn((table: string) => (
+      table === 'control.volume_attachments' ? attachmentQuery : serverQuery
+    )),
   });
   const consoleSessions = {
     create: vi.fn().mockResolvedValue({
@@ -201,6 +213,23 @@ describe('ContainerControlService intent boundary', () => {
       harness.transaction,
     );
     expect(result).toMatchObject({ intentId: 'intent-1', status: 'pending' });
+  });
+
+  it('rejects start and restart while a volume is detaching', async () => {
+    const harness = makeHarness();
+    const attachmentQuery = harness.transaction.selectFrom!('control.volume_attachments') as {
+      executeTakeFirst: ReturnType<typeof vi.fn>;
+    };
+    attachmentQuery.executeTakeFirst.mockResolvedValue({ id: 'att-1' });
+
+    await expect(harness.service.action(containerId, 'start', actorId)).rejects.toMatchObject({
+      response: { code: 'INSTANCE_BUSY' },
+    });
+    await expect(harness.service.action(containerId, 'restart', actorId)).rejects.toMatchObject({
+      response: { code: 'INSTANCE_BUSY' },
+    });
+    expect(harness.repository.updateDesired).not.toHaveBeenCalled();
+    expect(harness.intents.createPending).not.toHaveBeenCalled();
   });
 
   it('lets nyabase-system stop a container without ManageContainersAny', async () => {

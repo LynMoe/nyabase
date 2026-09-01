@@ -16,7 +16,11 @@ import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, D
 import { Input } from '../components/ui/input.js';
 import { Label } from '../components/ui/label.js';
 import { Badge } from '../components/ui/badge.js';
-import { QueryErrorState, QueryLoadingState } from '../components/query-state.js';
+import { EmptyState } from '../components/layout/empty-state.js';
+import { Page } from '../components/layout/page.js';
+import { PageHeader } from '../components/layout/page-header.js';
+import { QueryView } from '../components/layout/query-view.js';
+import { ResourceGrid } from '../components/layout/resource-grid.js';
 import {
   nodeMetricsStatusZh,
   preflightCheckLabel,
@@ -35,47 +39,45 @@ export default function ServersPage() {
     queryKey: queryKeys.servers.admin,
     queryFn: () => api.get<ServerDto[]>('/admin/servers'),
   });
-  const servers = serversQuery.data ?? [];
-
   const refresh = () => {
     void queryClient.invalidateQueries({ queryKey: queryKeys.servers.admin });
   };
 
   return (
-    <div className="space-y-5 px-4 py-4 md:px-6" data-testid="server-onboarding-page">
-      <div className="flex flex-wrap items-start justify-between gap-3">
-        <div>
-          <h1 className="text-2xl font-semibold tracking-tight">服务器</h1>
-          <p className="text-sm text-muted-foreground">注册 Incus endpoint，完成互信、前置检查与存储池登记。</p>
-        </div>
-        <div className="flex gap-2">
-          <Button variant="outline" size="icon" onClick={refresh} disabled={serversQuery.isFetching} aria-label="刷新服务器">
-            <RefreshCw className={serversQuery.isFetching ? 'h-4 w-4 animate-spin' : 'h-4 w-4'} />
-          </Button>
-          <Button onClick={() => setOnboardingOpen(true)}>
-            <Plus className="h-4 w-4" />添加服务器
-          </Button>
-        </div>
-      </div>
-
-      {serversQuery.isLoading ? (
-        <QueryLoadingState label="加载服务器..." />
-      ) : serversQuery.isError ? (
-        <QueryErrorState error={serversQuery.error} resourceName="服务器目录" onRetry={() => { void serversQuery.refetch(); }} />
-      ) : servers.length === 0 ? (
-        <Card>
-          <CardContent className="flex flex-col items-center gap-3 py-12 text-center">
-            <Server className="h-10 w-10 text-muted-foreground/40" />
-            <p className="text-sm text-muted-foreground">还没有注册服务器。</p>
-            <Button onClick={() => setOnboardingOpen(true)}><Plus className="h-4 w-4" />开始接入</Button>
-          </CardContent>
-        </Card>
-      ) : (
-        <div className="grid gap-4 md:grid-cols-2">
-          {servers.map((server) => <ServerCard key={server.id} server={server} />)}
-        </div>
-      )}
-
+    <Page testId="server-onboarding-page">
+      <PageHeader
+        title="服务器"
+        description="注册 Incus endpoint，完成互信、前置检查与存储池登记。"
+        actions={
+          <>
+            <Button variant="outline" size="icon" onClick={refresh} disabled={serversQuery.isFetching} aria-label="刷新服务器">
+              <RefreshCw className={serversQuery.isFetching ? 'h-4 w-4 animate-spin' : 'h-4 w-4'} />
+            </Button>
+            <Button onClick={() => setOnboardingOpen(true)}>
+              <Plus className="h-4 w-4" />添加服务器
+            </Button>
+          </>
+        }
+      />
+      <QueryView
+        query={serversQuery}
+        resourceName="服务器目录"
+        loadingLabel="加载服务器..."
+        showEmpty={serversQuery.data?.length === 0}
+        empty={
+          <EmptyState
+            icon={Server}
+            title="还没有注册服务器。"
+            action={<Button onClick={() => setOnboardingOpen(true)}><Plus className="h-4 w-4" />开始接入</Button>}
+          />
+        }
+      >
+        {(items) => (
+          <ResourceGrid>
+            {items.map((server) => <ServerCard key={server.id} server={server} />)}
+          </ResourceGrid>
+        )}
+      </QueryView>
       <ServerOnboardingDialog
         open={onboardingOpen}
         onOpenChange={setOnboardingOpen}
@@ -85,13 +87,17 @@ export default function ServersPage() {
           void navigate({ to: '/servers/$id', params: { id: serverId } });
         }}
       />
-    </div>
+    </Page>
   );
 }
 
 function ServerCard({ server }: { server: ServerDto }) {
   const online = server.status === 'online';
-  const capacity = server.preflightReport?.checks.storagePool === 'pass' ? '存储检查通过' : '等待前置检查';
+  const capacity = server.preflightStatus === 'passed'
+    ? '前置检查已通过'
+    : server.preflightReport?.checks.storagePool === 'pass'
+      ? '存储检查通过'
+      : '等待前置检查';
   return (
     <Link to="/servers/$id" params={{ id: server.id }}>
       <Card className="h-full transition-colors hover:bg-accent/50">
@@ -99,7 +105,9 @@ function ServerCard({ server }: { server: ServerDto }) {
           <div className="flex items-start justify-between gap-3">
             <div className="min-w-0">
               <CardTitle className="truncate text-base">{server.name}</CardTitle>
-              <CardDescription className="mt-1 truncate font-mono">{server.slug}</CardDescription>
+              <CardDescription className="mt-1 truncate font-mono">
+                {server.slug && server.slug !== server.name ? server.slug : server.apiEndpoint}
+              </CardDescription>
             </div>
             <Badge variant={online ? 'success' : 'secondary'}>
               {online ? <Wifi className="h-3 w-3" /> : <WifiOff className="h-3 w-3" />}
@@ -232,58 +240,59 @@ function ServerOnboardingDialog({
     ['name', '显示名称', 'prod-incus-1'],
     ['slug', '标识', 'prod-incus-1'],
     ['apiEndpoint', 'Incus HTTPS endpoint', 'https://incus.example:8443'],
-    ['parentInterface', '父接口', 'eth0'],
+    ['parentInterface', 'LAN 网桥 (vmbr)', 'vmbr0'],
     ['dnsServers', 'DNS（逗号分隔）', '1.1.1.1,8.8.8.8'],
   ];
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-h-[90vh] max-w-2xl overflow-y-auto" data-testid="server-onboarding">
+      <DialogContent className="max-w-2xl" data-testid="server-onboarding">
         <DialogHeader>
           <DialogTitle>服务器接入</DialogTitle>
           <DialogDescription>登记连接参数后，在详情页粘贴 trust token 并执行前置检查。</DialogDescription>
         </DialogHeader>
         <div className="grid gap-3 sm:grid-cols-2">
           {fields.map(([key, label, placeholder]) => (
-            <div key={key} className="space-y-1.5">
+            <div
+              key={key}
+              className={key === 'name' || key === 'slug' ? 'space-y-1.5' : 'space-y-1.5 sm:col-span-2'}
+            >
               <Label htmlFor={`server-onboarding-${key}`}>{label}</Label>
               <Input
                 id={`server-onboarding-${key}`}
                 value={form[key]}
                 placeholder={placeholder}
-                className={key === 'apiEndpoint' || key === 'slug' ? 'font-mono' : undefined}
+                className={key === 'apiEndpoint' || key === 'slug' ? 'truncate font-mono' : undefined}
                 onChange={(event) => update(key, event.target.value)}
               />
             </div>
           ))}
         </div>
-        <div className="space-y-3 rounded-md border bg-muted/20 p-3">
-          <div>
-            <p className="text-sm font-medium">node-exporter 指标（可选）</p>
-            <p className="text-xs text-muted-foreground">token 只写入服务端，不会回显；留空表示稍后在详情页配置。</p>
-          </div>
-          <div className="grid gap-3 sm:grid-cols-2">
-            <div className="space-y-1.5 sm:col-span-2">
+        <details className="rounded-md border bg-muted/20 p-3">
+          <summary className="cursor-pointer text-sm font-medium">node-exporter 指标（可选）</summary>
+          <p className="mt-1 text-xs text-muted-foreground">token 只写入服务端，不会回显；留空表示稍后在详情页配置。</p>
+          <div className="mt-3 grid gap-3">
+            <div className="space-y-1.5">
               <Label htmlFor="server-onboarding-node-metrics-endpoint">指标 endpoint</Label>
               <Input
                 id="server-onboarding-node-metrics-endpoint"
                 value={form.nodeMetricsEndpoint}
                 placeholder="https://node.example:9100/metrics"
-                className="font-mono"
+                className="truncate font-mono"
                 onChange={(event) => update('nodeMetricsEndpoint', event.target.value)}
               />
             </div>
-            <div className="space-y-1.5 sm:col-span-2">
+            <div className="space-y-1.5">
               <Label htmlFor="server-onboarding-node-metrics-cert">证书 pin（SHA-256）</Label>
               <Input
                 id="server-onboarding-node-metrics-cert"
                 value={form.nodeMetricsCertFingerprint}
                 placeholder="64 位十六进制指纹"
-                className="font-mono"
+                className="truncate font-mono"
                 onChange={(event) => update('nodeMetricsCertFingerprint', event.target.value)}
               />
             </div>
-            <div className="space-y-1.5 sm:col-span-2">
+            <div className="space-y-1.5">
               <Label htmlFor="server-onboarding-node-metrics-token">Bearer token</Label>
               <Input
                 id="server-onboarding-node-metrics-token"
@@ -295,7 +304,7 @@ function ServerOnboardingDialog({
               />
             </div>
           </div>
-        </div>
+        </details>
         {error && <p className="text-sm text-destructive">{error}</p>}
         <DialogFooter>
           <Button variant="outline" onClick={() => onOpenChange(false)}>取消</Button>

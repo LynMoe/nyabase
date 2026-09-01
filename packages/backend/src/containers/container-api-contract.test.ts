@@ -101,6 +101,7 @@ describe('container API contract', () => {
       rootSize: ':containerId/root-size',
       gpu: ':containerId/gpu',
       volumes: ':containerId/volumes',
+      sharedVolumes: ':containerId/shared-volumes',
       stats: ':containerId/stats',
       execSession: ':containerId/exec-sessions',
     };

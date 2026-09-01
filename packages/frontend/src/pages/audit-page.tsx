@@ -1,11 +1,7 @@
 import { useMemo, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
-import {
-  ChevronLeft,
-  ChevronRight,
-  Eye,
-  RefreshCw,
-} from 'lucide-react';
+import { getRouteApi, useNavigate } from '@tanstack/react-router';
+import { Eye, RefreshCw } from 'lucide-react';
 import type {
   AuditListResponse,
   AuditLogDto,
@@ -17,15 +13,33 @@ import { Badge } from '../components/ui/badge.js';
 import {
   Dialog,
   DialogContent,
+  DialogDescription,
+  DialogFooter,
   DialogHeader,
   DialogTitle,
 } from '../components/ui/dialog.js';
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from '../components/ui/table.js';
+import { Pagination } from '../components/ui/pagination.js';
+import { Page } from '../components/layout/page.js';
+import { PageHeader } from '../components/layout/page-header.js';
+import { QueryView } from '../components/layout/query-view.js';
+import { EmptyState } from '../components/layout/empty-state.js';
 import { cn } from '../lib/utils.js';
-import { QueryErrorState } from '../components/query-state.js';
 import { queryPollInterval } from '../lib/query-lifecycle.js';
+import { queryKeys } from '../lib/query-keys.js';
+import { errorMessage } from '../lib/api-error.js';
 import { auditActionLabel, auditResourceTypeLabel } from '../lib/audit-labels.js';
 
 const PAGE_SIZES = [25, 50, 100] as const;
+type AuditPageSize = (typeof PAGE_SIZES)[number];
+const auditRouteApi = getRouteApi('/audit/');
 
 // Action badges keep semantic colour buckets — these are state pills, not generic grays.
 // Tinted backgrounds use the /10 token so they read correctly in both themes;
@@ -60,20 +74,19 @@ const ACTION_COLORS: Record<string, string> = {
 };
 
 export default function AuditPage() {
-  const [page, setPage] = useState(0);
-  const [pageSize, setPageSize] = useState<(typeof PAGE_SIZES)[number]>(50);
+  const { page, pageSize } = auditRouteApi.useSearch();
+  const navigate = useNavigate({ from: '/audit/' });
   const [detailId, setDetailId] = useState<string | null>(null);
   const offset = page * pageSize;
 
   const auditQuery = useQuery({
-    queryKey: ['audit', pageSize, offset],
+    queryKey: queryKeys.audit.list(pageSize, offset),
     queryFn: () => api.get<AuditListResponse>(`/audit?limit=${pageSize}&offset=${offset}`),
     refetchInterval: (query) => queryPollInterval(query.state, { activeIntervalMs: 30_000 }),
   });
-  const { data, isLoading, isFetching, refetch } = auditQuery;
+  const { data, isFetching, refetch } = auditQuery;
   const logs = data?.items ?? [];
   const total = data?.total ?? 0;
-  const totalPages = Math.max(1, Math.ceil(total / pageSize));
   const currentStart = total === 0 ? 0 : offset + 1;
   const currentEnd = Math.min(offset + logs.length, total);
   const selectedLog = useMemo(
@@ -86,7 +99,7 @@ export default function AuditPage() {
     isFetching: isDetailFetching,
     isLoading: isDetailLoading,
   } = useQuery({
-    queryKey: ['audit-detail', detailId],
+    queryKey: queryKeys.audit.detail(detailId ?? ''),
     queryFn: () => {
       if (!detailId) throw new Error('Missing audit log id');
       return api.get<AuditLogDto>(`/audit/${encodeURIComponent(detailId)}`);
@@ -95,141 +108,115 @@ export default function AuditPage() {
   });
   const dialogLog = detailLog ?? selectedLog;
 
+  const setSearch = (next: { page: number; pageSize: AuditPageSize }) => {
+    void navigate({ search: next });
+  };
+
   return (
-    <div className="px-4 py-4 md:px-6 space-y-5 w-full">
-      <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
-        <div>
-          <h1 className="text-2xl font-semibold tracking-tight text-foreground">审计日志</h1>
-          <p className="text-sm text-muted-foreground mt-0.5">
-            {data ? `共 ${total} 条，当前显示 ${currentStart}-${currentEnd}` : '审计记录数量尚未加载'}
-          </p>
-        </div>
-        <div className="flex flex-wrap items-center gap-2">
-          <label className="flex items-center gap-2 text-sm text-muted-foreground">
-            每页
-            <select
-              value={pageSize}
-              onChange={(event) => {
-                setPageSize(Number(event.target.value) as (typeof PAGE_SIZES)[number]);
-                setPage(0);
-              }}
-              className="h-9 rounded-md border border-input bg-background px-2 text-sm text-foreground"
-            >
-              {PAGE_SIZES.map((size) => (
-                <option key={size} value={size}>{size}</option>
-              ))}
-            </select>
-          </label>
+    <Page>
+      <PageHeader
+        title="审计日志"
+        description={data ? `共 ${total} 条，当前显示 ${currentStart}-${currentEnd}` : '审计记录数量尚未加载'}
+        actions={
           <Button variant="ghost" size="icon" className="h-8 w-8 text-muted-foreground" onClick={() => refetch()} disabled={isFetching}>
             <RefreshCw className={cn('h-4 w-4', isFetching && 'animate-spin')} />
           </Button>
-        </div>
-      </div>
+        }
+      />
 
-      {isLoading ? (
-        <div className="space-y-2">
-          {[1, 2, 3].map((i) => <div key={i} className="h-14 bg-muted rounded-lg animate-pulse" />)}
-        </div>
-      ) : auditQuery.isError ? (
-        <QueryErrorState error={auditQuery.error} resourceName="审计记录" onRetry={() => { void auditQuery.refetch(); }} />
-      ) : logs.length === 0 ? (
-        <div className="bg-card rounded-lg border border-border p-10 text-center text-muted-foreground/70">
-          暂无审计记录
-        </div>
-      ) : (
-        <div className="overflow-hidden rounded-lg border border-border bg-card">
-          <div className="overflow-x-auto">
-          <table className="w-full min-w-[760px] table-fixed text-sm">
-            <thead>
-              <tr className="bg-muted/50 border-b border-border">
-                <th className="text-left py-3 px-4 font-medium text-muted-foreground w-44">时间</th>
-                <th className="text-left py-3 px-4 font-medium text-muted-foreground w-48">操作者</th>
-                <th className="text-left py-3 px-4 font-medium text-muted-foreground w-48">操作</th>
-                <th className="text-left py-3 px-4 font-medium text-muted-foreground">目标</th>
-                <th className="text-right py-3 px-4 font-medium text-muted-foreground w-28">查看</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-border">
-              {logs.map((log) => (
-                <tr key={log.id} className="hover:bg-accent/50">
-                  <td className="py-3 px-4 text-muted-foreground/70 text-xs whitespace-nowrap">
-                    {formatTimestamp(log.ts)}
-                  </td>
-                  <td className="py-3 px-4 min-w-0">
-                    <ResourceSummary
-                      primary={actorLabel(log)}
-                      secondary={log.actorId}
-                    />
-                  </td>
-                  <td className="py-3 px-4">
-                    <span className={cn(
-                      'inline-block max-w-full truncate text-xs px-2 py-0.5 rounded font-medium',
-                      ACTION_COLORS[log.action] ?? 'bg-muted text-muted-foreground',
-                    )}>
-                      {auditActionLabel(log.action)}
-                    </span>
-                  </td>
-                  <td className="py-3 px-4 min-w-0">
-                    <ResourceSummary
-                      primary={targetLabel(log)}
-                      secondary={targetSecondary(log)}
-                    />
-                  </td>
-                  <td className="py-3 px-4 text-right">
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      className="h-8 gap-1.5"
-                      onClick={() => setDetailId(log.id)}
-                      title="原始 JSON"
-                    >
-                      <Eye className="h-4 w-4" />
-                      查看
-                    </Button>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
+      <QueryView
+        query={auditQuery}
+        resourceName="审计记录"
+        loadingLabel="加载审计记录..."
+        skeleton={
+          <div className="space-y-2">
+            {[1, 2, 3].map((i) => <div key={i} className="h-14 bg-muted rounded-lg animate-pulse" />)}
           </div>
-        </div>
-      )}
+        }
+        showEmpty={logs.length === 0}
+        empty={<EmptyState title="暂无审计记录" />}
+      >
+        {(list) => (
+          <div className="rounded-lg border border-border bg-card">
+            <Table className="min-w-[760px]">
+              <TableHeader>
+                <TableRow className="bg-muted/50 hover:bg-muted/50">
+                  <TableHead className="w-44">时间</TableHead>
+                  <TableHead className="w-48">操作者</TableHead>
+                  <TableHead className="w-48">操作</TableHead>
+                  <TableHead>目标</TableHead>
+                  <TableHead className="w-28 text-right">查看</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {list.items.map((log) => (
+                  <TableRow key={log.id} className="hover:bg-accent/50">
+                    <TableCell className="text-muted-foreground/70 text-xs whitespace-nowrap">
+                      {formatTimestamp(log.ts)}
+                    </TableCell>
+                    <TableCell className="min-w-0">
+                      <ResourceSummary
+                        primary={actorLabel(log)}
+                        secondary={log.actorId}
+                      />
+                    </TableCell>
+                    <TableCell>
+                      <span className={cn(
+                        'inline-block max-w-full truncate text-xs px-2 py-0.5 rounded font-medium',
+                        ACTION_COLORS[log.action] ?? 'bg-muted text-muted-foreground',
+                      )}>
+                        {auditActionLabel(log.action)}
+                      </span>
+                    </TableCell>
+                    <TableCell className="min-w-0">
+                      <ResourceSummary
+                        primary={targetLabel(log)}
+                        secondary={targetSecondary(log)}
+                      />
+                    </TableCell>
+                    <TableCell className="text-right">
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        className="h-8 gap-1.5"
+                        onClick={() => setDetailId(log.id)}
+                        title="原始 JSON"
+                      >
+                        <Eye className="h-4 w-4" />
+                        查看
+                      </Button>
+                    </TableCell>
+                  </TableRow>
+                ))}
+              </TableBody>
+            </Table>
+          </div>
+        )}
+      </QueryView>
 
-      <div className="flex flex-col gap-3 rounded-lg border border-border bg-background px-4 py-3 text-sm text-muted-foreground sm:flex-row sm:items-center sm:justify-between">
-        <span>第 {Math.min(page + 1, totalPages)} / {totalPages} 页</span>
-        <div className="flex items-center gap-2">
-          <Button
-            variant="outline"
-            size="sm"
-            disabled={page === 0 || isFetching}
-            onClick={() => setPage((value) => Math.max(0, value - 1))}
-          >
-            <ChevronLeft className="h-4 w-4" />
-            上一页
-          </Button>
-          <Button
-            variant="outline"
-            size="sm"
-            disabled={page + 1 >= totalPages || isFetching}
-            onClick={() => setPage((value) => value + 1)}
-          >
-            下一页
-            <ChevronRight className="h-4 w-4" />
-          </Button>
-        </div>
-      </div>
+      <Pagination
+        page={page}
+        pageSize={pageSize}
+        total={total}
+        pageSizes={PAGE_SIZES}
+        onPageChange={(nextPage) => setSearch({ page: Math.max(0, nextPage), pageSize })}
+        onPageSizeChange={(nextSize) => {
+          const parsed: AuditPageSize = nextSize === 25 || nextSize === 50 || nextSize === 100 ? nextSize : 50;
+          setSearch({ page: 0, pageSize: parsed });
+        }}
+      />
 
       <AuditDetailDialog
         log={dialogLog}
         loading={isDetailLoading && !dialogLog}
         refreshing={isDetailFetching && Boolean(dialogLog)}
-        error={detailError ? errorMessage(detailError) : null}
+        error={detailError ? errorMessage(detailError, '加载审计详情失败') : null}
         open={detailId !== null}
         onOpenChange={(open) => {
           if (!open) setDetailId(null);
         }}
       />
-    </div>
+    </Page>
   );
 }
 
@@ -250,16 +237,17 @@ function AuditDetailDialog({
 }) {
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-h-[90vh] max-w-4xl overflow-hidden bg-background">
+      <DialogContent className="max-w-4xl">
         <DialogHeader>
           <DialogTitle>审计详情</DialogTitle>
+          <DialogDescription>查看该条操作的主体、目标和原始记录。</DialogDescription>
         </DialogHeader>
         {loading ? (
           <div className="py-8 text-center text-sm text-muted-foreground">正在加载详情...</div>
         ) : error && !log ? (
           <div className="py-8 text-center text-sm text-destructive">{error}</div>
         ) : log ? (
-          <div className="max-h-[calc(90vh-5rem)] space-y-5 overflow-y-auto pr-1">
+          <div className="space-y-5">
             {error && (
               <div className="rounded-lg border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive">
                 {error}
@@ -271,20 +259,20 @@ function AuditDetailDialog({
               <DetailItem label="操作者" value={actorLabel(log)} />
               <DetailItem label="操作者 ID" value={log.actorId ?? 'system'} mono />
               <DetailItem label="目标" value={targetLabel(log)} />
-              <DetailItem label="目标 ID" value={log.targetId ?? '-'} mono />
+              <DetailItem label="目标 ID" value={log.targetId ?? '无'} mono />
             </section>
 
             <section className="space-y-2">
               <h3 className="text-sm font-semibold text-foreground">资源快照</h3>
-              <div className="grid gap-3 lg:grid-cols-2">
+              <div className="grid items-start gap-3 lg:grid-cols-2">
                 <SnapshotPanel title="操作者" snapshot={log.actorSnapshot} fallback={log.actorId ? { id: log.actorId, type: 'user', name: log.actorName } : null} />
-                <SnapshotPanel title="目标" snapshot={log.targetSnapshot} fallback={log.targetId ? { id: log.targetId, type: log.targetType, name: log.targetName } : null} />
+                <SnapshotPanel title="目标" snapshot={log.targetSnapshot} fallback={targetFallback(log)} />
               </div>
-              {log.related.length > 0 && (
+              {(log.related ?? []).length > 0 && (
                 <div className="rounded-lg border border-border bg-muted/20 p-3">
                   <div className="mb-2 text-xs font-medium text-muted-foreground">相关资源</div>
                   <div className="flex flex-wrap gap-2">
-                    {log.related.map((snapshot, index) => (
+                    {(log.related ?? []).map((snapshot, index) => (
                       <Badge key={`${snapshot.type}:${snapshot.id}:${index}`} variant="outline" className="max-w-full gap-1 rounded-md">
                         <span>{resourceTypeLabel(snapshot.type)}</span>
                         <span className="min-w-0 truncate font-normal text-muted-foreground">{snapshot.name ?? snapshot.id ?? '-'}</span>
@@ -302,7 +290,7 @@ function AuditDetailDialog({
                   <span className="text-xs text-muted-foreground">刷新中...</span>
                 )}
               </div>
-              <pre className="max-h-96 overflow-auto rounded-lg border border-border bg-muted/30 p-3 text-xs leading-5 text-foreground">
+              <pre className="overflow-auto rounded-lg border border-border bg-muted/30 p-3 text-xs leading-5 text-foreground">
                 {JSON.stringify(log, null, 2)}
               </pre>
             </section>
@@ -310,6 +298,9 @@ function AuditDetailDialog({
         ) : (
           <div className="py-8 text-center text-sm text-muted-foreground">记录不在当前页</div>
         )}
+        <DialogFooter>
+          <Button variant="outline" onClick={() => onOpenChange(false)}>关闭</Button>
+        </DialogFooter>
       </DialogContent>
     </Dialog>
   );
@@ -344,8 +335,9 @@ function SnapshotPanel({
   const value = snapshot ?? fallback;
   if (!value) {
     return (
-      <div className="rounded-lg border border-border bg-muted/20 p-3 text-sm text-muted-foreground">
-        {title}：-
+      <div className="rounded-lg border border-border bg-muted/20 p-3">
+        <div className="text-xs font-medium text-muted-foreground">{title}</div>
+        <div className="mt-1 text-sm text-muted-foreground">无</div>
       </div>
     );
   }
@@ -396,7 +388,14 @@ function actorLabel(log: AuditLogDto): string {
 }
 
 function targetLabel(log: AuditLogDto): string {
-  return log.targetName ?? log.targetSnapshot?.name ?? (log.targetId ? `${resourceTypeLabel(log.targetType)} ${shortId(log.targetId)}` : '-');
+  return log.targetName
+    ?? log.targetSnapshot?.name
+    ?? (log.targetId ? `${resourceTypeLabel(log.targetType)} ${shortId(log.targetId)}` : '无目标');
+}
+
+function targetFallback(log: AuditLogDto): Pick<AuditResourceSnapshotDto, 'id' | 'type' | 'name'> | null {
+  if (!log.targetId && !log.targetName) return null;
+  return { id: log.targetId, type: log.targetType, name: log.targetName };
 }
 
 function targetSecondary(log: AuditLogDto): string | null {
@@ -422,6 +421,4 @@ function shortId(id: string): string {
   return id.slice(0, 8);
 }
 
-function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : '加载审计详情失败';
-}
+

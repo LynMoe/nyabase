@@ -1,6 +1,7 @@
 import { useQuery } from '@tanstack/react-query';
 import type { PublicSettingsDto } from '@nyabase/common';
 import { api } from '../lib/api.js';
+import { queryKeys } from '../lib/query-keys.js';
 
 export const DEFAULT_PUBLIC_SETTINGS: PublicSettingsDto = {
   branding: {
@@ -12,7 +13,7 @@ export const DEFAULT_PUBLIC_SETTINGS: PublicSettingsDto = {
 
 export function usePublicSettings() {
   const query = useQuery({
-    queryKey: ['public-settings'],
+    queryKey: queryKeys.publicSettings,
     queryFn: async () => {
       try {
         return await api.get<PublicSettingsDto>('/public/settings');

@@ -26,15 +26,14 @@ export E2E_COVERAGE_RUN_NONCE="$(date -u +%s%N)-$BASHPID"
   rm -f \
     "$E2E_RUNTIME_ROOT/coverage-case-events.jsonl" \
     "$E2E_RUNTIME_ROOT/coverage-http-events.jsonl" \
-    "$E2E_RUNTIME_ROOT/reports/playwright.json" \
-    "$E2E_RUNTIME_ROOT/reports/junit.xml"
+    "$E2E_RUNTIME_ROOT/reports/api-tests.json"
   printf '%s\n' "$E2E_RUN_ID:$E2E_COVERAGE_RUN_NONCE" \
     > "$E2E_RUNTIME_ROOT/coverage-run.marker"
   chmod 0600 "$E2E_RUNTIME_ROOT/coverage-run.marker"
   pnpm --dir e2e exec node coverage/validate.mjs "--require-profile=$profile"
   E2E_PROFILE="$profile" NODE_EXTRA_CA_CERTS="$E2E_EDGE_CA_FILE" \
-    pnpm --dir e2e exec playwright test
+    pnpm --dir e2e exec tsx run.mjs
 )
 node "$SCRIPT_DIR/evidence.mjs" "$E2E_RUNTIME_ROOT" "$profile"
-record_phase "$run_id" run passed "Playwright runtime and post-run evidence passed for $profile"
+record_phase "$run_id" run passed "API runtime and post-run evidence passed for $profile"
 log "profile $profile passed for $run_id"

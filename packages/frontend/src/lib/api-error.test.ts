@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { ApiError, apiErrorCurrent } from './api-error.js';
+import { ApiError, apiErrorCurrent, errorMessage } from './api-error.js';
 
 describe('ApiError conflict envelope', () => {
   const isSnapshot = (value: unknown): value is { revision: number; name: string } => {
@@ -34,5 +34,20 @@ describe('apiErrorDetails', () => {
     });
     expect(apiErrorDetails(error)).toEqual({ identityKey: 'cephfs:a', expectedFsid: 'aaa' });
     expect(apiErrorDetails(new Error('nope'))).toBeNull();
+  });
+});
+
+describe('errorMessage', () => {
+  it('returns Error.message', () => {
+    expect(errorMessage(new Error('boom'))).toBe('boom');
+  });
+
+  it('uses the period-free fallback for non-Error values', () => {
+    expect(errorMessage('not-an-error')).toBe('请稍后重试');
+    expect(errorMessage(null)).toBe('请稍后重试');
+  });
+
+  it('accepts a custom fallback', () => {
+    expect(errorMessage(undefined, '自定义兜底')).toBe('自定义兜底');
   });
 });

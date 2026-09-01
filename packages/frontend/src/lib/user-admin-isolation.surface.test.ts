@@ -25,6 +25,20 @@ describe('user panel pages stay on user API plane', () => {
     expect(src).not.toMatch(/api\.get<VolumeDto\[\]>\('\/volumes'\)/);
   });
 
+  it('shared-volumes-page never calls /admin/*', () => {
+    const src = readPage('shared-volumes-page.tsx');
+    expect(src).not.toMatch(/['`]\/admin\//);
+    expect(src).toMatch(/api\.get<SharedVolumeDto\[\]>\('\/shared-volumes'\)/);
+    expect(src).not.toMatch(/ownerId/);
+  });
+
+  it('manage-shared-volumes-page stays on admin shared-volumes API', () => {
+    const src = readPage('manage-shared-volumes-page.tsx');
+    expect(src).toMatch(/api\.get<SharedVolumeDto\[\]>\('\/admin\/shared-volumes'\)/);
+    expect(src).not.toMatch(/api\.get<SharedVolumeDto\[\]>\('\/shared-volumes'\)/);
+    expect(src).toMatch(/SharedVolumeCatalogInspectDialog/);
+  });
+
   it('dashboard-page never calls /admin/* or capability plane switch', () => {
     const src = readPage('dashboard-page.tsx');
     expect(src).not.toMatch(/['`]\/admin\//);

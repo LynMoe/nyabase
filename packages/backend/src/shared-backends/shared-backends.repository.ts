@@ -17,6 +17,7 @@ export class SharedBackendsRepository {
     return executor
       .selectFrom('infra.shared_backends as backend')
       .leftJoin('infra.storage_pools as pool', 'pool.shared_backend_id', 'backend.id')
+      .leftJoin('infra.servers as server', 'server.id', 'pool.server_id')
       .select([
         'backend.id',
         'backend.name',
@@ -35,6 +36,15 @@ export class SharedBackendsRepository {
           FILTER (WHERE pool.server_id IS NOT NULL),
         ARRAY[]::uuid[]
       )`.as('server_ids'))
+      .select(sql<boolean>`coalesce(
+        bool_or(
+          pool.registered
+          AND pool.shareable
+          AND pool.driver = 'cephfs'
+          AND server.status = 'online'
+        ),
+        false
+      )`.as('has_online_executor'))
       .groupBy([
         'backend.id',
         'backend.name',

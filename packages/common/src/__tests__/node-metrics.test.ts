@@ -50,6 +50,40 @@ describe('node metrics GPU PCI schema', () => {
     }
   });
 
+  it('accepts unlabeled nft gauges and IPv4 address labels', () => {
+    expect(validateNodeMetricSample({
+      name: 'nyabase_node_network_nft_available',
+      labels: {},
+      value: 1,
+    })).toEqual({
+      name: 'nyabase_node_network_nft_available',
+      labels: {},
+      value: 1,
+    });
+    expect(renderOpenMetrics([{
+      name: 'nyabase_node_network_nft_available',
+      labels: {},
+      value: 1,
+    }])).toContain('nyabase_node_network_nft_available{} 1');
+    expect(validateNodeMetricSample({
+      name: 'nyabase_node_network_bridge_filter_address',
+      labels: { address: '192.0.2.10' },
+      value: 1,
+    }).labels.address).toBe('192.0.2.10');
+    expect(() => validateNodeMetricSample({
+      name: 'nyabase_node_network_bridge_filter_address',
+      labels: { address: 'not-an-ip' },
+      value: 1,
+    })).toThrow(OpenMetricsSchemaError);
+    expect(validateNodeMetricSample({
+      name: 'nyabase_node_network_bridge_slave',
+      labels: { bridge: 'vmbr0', interface: 'bond0' },
+      value: 1,
+    })).toMatchObject({
+      labels: { bridge: 'vmbr0', interface: 'bond0' },
+    });
+  });
+
   it('treats four- and eight-digit domains as the same metric identity', () => {
     expect(() => parseOpenMetrics([
       'nyabase_node_gpu_util_ratio{gpu_pci="0000:41:00.0"} 0.25',

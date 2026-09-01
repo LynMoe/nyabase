@@ -129,12 +129,12 @@ GPU：`control.container_gpu_claims` 只有 `UNIQUE (container_id, gpu_pci_addre
 - Capability vs grant 两层 IAM。
 - 撤销拦截 vs 到期清理。
 - Incus instance PUT 的 RMW / If-Match 机制本身。
-- macvlan + guest exec 写 IP。
+- 控制面 IPAM + guest exec 写 IP（N1 现为 unmanaged bridged vmbr，见 `plans/incus-architecture.md`；不要复活 routed）。
 - 重新引入 Agent。
 - 本地卷 create/resize/attach/detach 的语义（除非共享卷改动碰到同一段代码）。
 - Feature flag / 双路径 / 兼容别名。
 - Incus cluster、VM、快照、OCI 镜像。
-- 把 macvlan 换成 routed。
+- 把 bridged vmbr 换成 routed。
 - Worker 每次 reconcile 重新检查 grant。
 - 通用工作流引擎（没有任意 DAG、没有多级补偿事务）。
 

@@ -55,6 +55,18 @@ maybe_source_trust_token() {
   done
 }
 
+maybe_source_lab_cluster() {
+  local lab_env="$E2E_ROOT/lab/e2e-cluster.env"
+  [[ -f "$lab_env" && ! -L "$lab_env" ]] || return 0
+  [[ "$(stat -c '%a' "$lab_env")" == "600" || "$(stat -c '%a' "$lab_env")" == "640" \
+    || "$(stat -c '%a' "$lab_env")" == "644" ]] \
+    || die "lab/e2e-cluster.env permissions must be 0600/0640/0644"
+  # shellcheck disable=SC1090
+  set -a
+  source "$lab_env"
+  set +a
+}
+
 maybe_source_cephfs_fixture() {
   local runtime_dir="${1:-}"
   local env_file backend_id_file
@@ -205,7 +217,7 @@ require_control_plane_inputs() {
   [[ "$E2E_NODE_EXPORTER_URL" == https://* ]] \
     || die "E2E_NODE_EXPORTER_URL must be an HTTPS URL"
 
-  if [[ "$profile" == "full" || "$profile" == "recovery" ]]; then
+  if [[ "$profile" == "full" ]]; then
     for name in E2E_NODE_EXPORTER_UNIT E2E_ENABLE_OUTAGE_MUTATION; do
       require_env "$name"
     done
@@ -267,7 +279,7 @@ validate_run_id() {
 
 validate_profile() {
   case "${1:-}" in
-    smoke|core|full|recovery) ;;
+    smoke|core|full) ;;
     *) die "unknown profile: ${1:-}" ;;
   esac
 }
@@ -391,7 +403,8 @@ write_context() {
       E2E_GPU_PCI_PROOF \
       E2E_GPU_PCI_ADDRESS \
       E2E_GPU_PEER_HOST \
-      E2E_GPU_PEER_SERVER_ID; do
+      E2E_GPU_PEER_SERVER_ID \
+      E2E_LAB_SERVERS_FILE; do
       printf '%s=%q\n' "$name" "${!name:-}"
     done
   } > "$tmp"
@@ -480,7 +493,8 @@ load_context() {
     E2E_GPU_PCI_PROOF \
     E2E_GPU_PCI_ADDRESS \
     E2E_GPU_PEER_HOST \
-    E2E_GPU_PEER_SERVER_ID; do
+    E2E_GPU_PEER_SERVER_ID \
+    E2E_LAB_SERVERS_FILE; do
     export "$name"
   done
 }

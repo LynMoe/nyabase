@@ -4,7 +4,7 @@ import { currentRunId, requireRuntimeEnv } from './runtime-env.js';
 export interface SeedState {
   schemaVersion: 3;
   runId: string;
-  profile: 'smoke' | 'core' | 'full' | 'recovery';
+  profile: 'smoke' | 'core' | 'full';
   adminUserId: string;
   server: {
     id: string;
@@ -57,6 +57,28 @@ export interface SeedState {
     };
   };
   sharedBackendId?: string;
+  labServers?: Array<{
+    id: string;
+    createdByRun: boolean;
+    name: string;
+    endpoint: string;
+    certificateFingerprint: string;
+    ssh: string;
+    parentInterface: string;
+    dirPoolId: string;
+    cephfsPoolId?: string;
+    role?: string;
+  }>;
+  gpuServer?: {
+    id: string;
+    name: string;
+    slug?: string;
+    endpoint: string;
+    ssh: string;
+    parentInterface: string;
+    dirPoolId: string;
+    pciAddress: string;
+  };
   blocked: {
     gpu: string;
     cephfs: string;
@@ -140,6 +162,17 @@ export function readSeedState(): SeedState {
   const gpuProven = parsed.blocked?.gpu?.startsWith('PROVEN:') === true;
   if (!gpuBlocked && !gpuProven) {
     throw new Error('Seed state must mark GPU as BLOCKED: or PROVEN:');
+  }
+  if (gpuProven) {
+    if (
+      !parsed.gpuServer?.id
+      || !parsed.gpuServer.endpoint?.startsWith('https://')
+      || !parsed.gpuServer.ssh
+      || !parsed.gpuServer.pciAddress
+      || !parsed.gpuServer.dirPoolId
+    ) {
+      throw new Error('Seed state marks GPU as PROVEN but has no gpuServer identity');
+    }
   }
   return parsed as SeedState;
 }

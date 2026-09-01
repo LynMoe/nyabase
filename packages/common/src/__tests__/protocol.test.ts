@@ -17,6 +17,7 @@ import {
   zCreateImageRequest,
   zCreateIpPoolRequest,
   zCreateServerRequest,
+  zCreateSharedVolumeRequest,
   zCreateVolumeRequest,
   zErrorResponse,
   zCreateExecSessionRequest,
@@ -29,6 +30,7 @@ import {
   zSshProxyInstanceRouteSnapshot,
   formatSshProxyJumpLogin,
   isActiveSshProxyRoute,
+  zSharedVolumeScope,
   zVolumeScope,
 } from '@nyabase/common';
 import type {
@@ -36,6 +38,7 @@ import type {
   ErrorResponse,
   IntentAcceptedDto,
   ServerDto,
+  SharedVolumeDto,
   VolumeDto,
 } from '@nyabase/common';
 
@@ -59,7 +62,7 @@ describe('canonical server network contract', () => {
     });
   });
 
-  it('rejects bridge-era network fields and unknown server fields', () => {
+  it('rejects unknown extra server fields', () => {
     const legacyParentField = ['bridge', 'Parent'].join('');
     expect(zPatchServerRequest.safeParse({
       expectedRevision: 1,
@@ -137,6 +140,17 @@ describe('canonical container, GPU, and volume contracts', () => {
       powerIntent: ContainerPowerIntent.Running,
       ownerId: id,
     }).ownerId).toBe(id);
+    expect(zCreateContainerRequest.parse({
+      serverId,
+      imageId,
+      name: 'work',
+      rootSizeBytes: 10_000,
+      cpuMillis: 2_000,
+      memBytes: 2_000_000_000,
+      gpuPciAddresses: [],
+      powerIntent: ContainerPowerIntent.Running,
+      volumes: [{ volumeId: id, containerPath: '/data', readOnly: false }],
+    }).volumes).toEqual([{ volumeId: id, containerPath: '/data', readOnly: false }]);
   });
 
   it('rejects display indexes as GPU identity', () => {
@@ -206,6 +220,34 @@ describe('canonical container, GPU, and volume contracts', () => {
       serverId,
       poolId: id,
     });
+    expect(zSharedVolumeScope.parse({ kind: 'shared', sharedBackendId: id })).toEqual({
+      kind: 'shared',
+      sharedBackendId: id,
+    });
+    expect(zSharedVolumeScope.safeParse({
+      kind: 'shared',
+      sharedBackendId: id,
+      poolId: id,
+    }).success).toBe(false);
+    expect(zCreateVolumeRequest.safeParse({
+      name: 'data',
+      sizeBytes: 1_024,
+      scope: { kind: 'shared', sharedBackendId: id },
+    }).success).toBe(false);
+    expect(zCreateSharedVolumeRequest.parse({
+      name: 'data',
+      sizeBytes: 1_024,
+      scope: { kind: 'shared', sharedBackendId: id },
+    })).toEqual({
+      name: 'data',
+      sizeBytes: 1_024,
+      scope: { kind: 'shared', sharedBackendId: id },
+    });
+    expect(zCreateSharedVolumeRequest.safeParse({
+      name: 'data',
+      sizeBytes: 1_024,
+      scope: { kind: 'shared', sharedBackendId: id, poolId: id },
+    }).success).toBe(false);
     const legacySourceField = ['source', 'Kind'].join('');
     expect(zCreateVolumeRequest.safeParse({
       name: 'data',
@@ -222,7 +264,6 @@ describe('canonical container, GPU, and volume contracts', () => {
       poolId: id,
       poolName: 'local-pool',
       serverId,
-      sharedBackendId: null,
       name: 'data',
       incusName: 'nyv-data',
       sizeBytes: 1_024,
@@ -247,6 +288,7 @@ describe('canonical container, GPU, and volume contracts', () => {
         containerId: id,
         containerName: 'web',
         containerPath: '/data',
+        bindState: 'attached',
       }],
     };
     expect(volume.attachments).toEqual([{
@@ -254,7 +296,39 @@ describe('canonical container, GPU, and volume contracts', () => {
       containerId: id,
       containerName: 'web',
       containerPath: '/data',
+      bindState: 'attached',
     }]);
+  });
+
+  it('represents a shared volume as a quota reservation without a pool', () => {
+    const volume: SharedVolumeDto = {
+      id,
+      ownerId: id,
+      sharedBackendId: id,
+      sharedBackendName: 'ceph',
+      name: 'data',
+      incusName: 'nyv-data',
+      sizeBytes: 1_024,
+      usedBytes: null,
+      capability: {
+        growOnline: true,
+        shrinkOnline: true,
+        shrinkRequiresStop: false,
+        shrinkNever: false,
+        enforceUsageFloor: true,
+      },
+      lifecyclePhase: ResourceLifecyclePhase.Active,
+      generation: 1,
+      observedGeneration: null,
+      needsAttention: false,
+      failureCode: null,
+      dirEnsured: false,
+      createdAt: '2026-08-07T00:00:00.000Z',
+      updatedAt: '2026-08-07T00:00:00.000Z',
+      attachments: [],
+    };
+    expect(volume.dirEnsured).toBe(false);
+    expect(volume.usedBytes).toBeNull();
   });
 });
 
@@ -301,13 +375,13 @@ describe('preflight and console contracts', () => {
         api: 'pass' as const,
         parentInterface: 'pass' as const,
         gpuRuntime: 'not_applicable' as const,
-        forwarding: 'pass' as const,
         nftables: 'pass' as const,
-        rpFilter: 'pass' as const,
+        ipv4Filtering: 'pass' as const,
+        guestCanReachHost: 'pass' as const,
         networkPrerequisites: 'pass' as const,
         storagePool: 'pass' as const,
         simplestreamsImage: 'pass' as const,
-        routedAddress: 'pass' as const,
+        guestAddress: 'pass' as const,
         egress: 'pass' as const,
         nodeMetrics: 'warn' as const,
       },
@@ -423,6 +497,7 @@ describe('canonical DTO shapes', () => {
         lastError: null,
       },
       volumes: [],
+      sharedVolumes: [],
       needsAttention: false,
       failureCode: null,
       failureReason: null,

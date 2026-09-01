@@ -282,8 +282,11 @@ export class StoragePoolsService {
           quotaEffective = false;
         } else {
           const state = await client.getStorageVolumeState(name, 'custom', probe.name);
-          quotaEffective = state.metadata.usage !== null
-            && state.metadata.usage !== undefined;
+          const sized = Boolean(probe.config?.size?.trim());
+          quotaEffective = (
+            state.metadata.usage !== null
+            && state.metadata.usage !== undefined
+          ) || sized;
         }
       }
       const config = pool.config;

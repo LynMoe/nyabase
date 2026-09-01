@@ -5,11 +5,10 @@
     "moduleResolution": "NodeNext",
     "strict": true,
     "noEmit": true,
-    "types": ["node", "@playwright/test"],
+    "types": ["node"],
     "skipLibCheck": true
   },
   "include": [
-    "playwright.config.ts",
     "fixtures/**/*.ts",
     "support/**/*.ts",
     "specs/**/*.ts",

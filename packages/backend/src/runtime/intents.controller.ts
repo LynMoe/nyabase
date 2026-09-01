@@ -34,12 +34,15 @@ import {
   type IntentRecord,
 } from './intent.repository.js';
 
-function adminCapabilityForIntent(resourceType: IntentRecord['resourceType']): Capability | null {
+function adminCapabilityForIntent(
+  resourceType: IntentRecord['resourceType'],
+  sharedVolume = false,
+): Capability | null {
   switch (resourceType) {
     case IntentResourceType.Container:
       return Capability.ManageContainersAny;
     case IntentResourceType.Volume:
-      return Capability.ManageVolumes;
+      return sharedVolume ? Capability.ManageSharedVolumes : Capability.ManageVolumes;
     case IntentResourceType.Server:
       return Capability.ManageServers;
     case IntentResourceType.ImageAssignment:
@@ -161,8 +164,32 @@ export class VolumeIntentsController {
     @Query() query: Record<string, unknown>,
   ) {
     const volume = await this.database.selectFrom('control.volumes')
-      .select('owner_id').where('id', '=', volumeId).executeTakeFirst();
-    if (!volume || volume.owner_id !== user.id) {
+      .select(['owner_id', 'shared_backend_id']).where('id', '=', volumeId).executeTakeFirst();
+    if (!volume || volume.owner_id !== user.id || volume.shared_backend_id !== null) {
+      throw new NotFoundException('Volume not found');
+    }
+    const page = await this.intents.listForResource('volume', volumeId, listOptions(query));
+    return { items: page.items.map(toDto), nextCursor: page.nextCursor };
+  }
+}
+
+@Controller('shared-volumes/:volumeId/intents')
+@UseGuards(JwtAuthGuard, CapabilitiesGuard)
+export class SharedVolumeIntentsController {
+  constructor(
+    private readonly intents: IntentRepository,
+    @Inject(PG_DATABASE) private readonly database: Kysely<NyabaseDatabase>,
+  ) {}
+
+  @Get()
+  async list(
+    @Param('volumeId') volumeId: string,
+    @CurrentUser() user: UserRecord,
+    @Query() query: Record<string, unknown>,
+  ) {
+    const volume = await this.database.selectFrom('control.volumes')
+      .select(['owner_id', 'shared_backend_id']).where('id', '=', volumeId).executeTakeFirst();
+    if (!volume || volume.owner_id !== user.id || volume.shared_backend_id === null) {
       throw new NotFoundException('Volume not found');
     }
     const page = await this.intents.listForResource('volume', volumeId, listOptions(query));
@@ -174,13 +201,45 @@ export class VolumeIntentsController {
 @UseGuards(JwtAuthGuard, CapabilitiesGuard)
 @RequireCaps(Capability.ManageVolumes)
 export class AdminVolumeIntentsController {
-  constructor(private readonly intents: IntentRepository) {}
+  constructor(
+    private readonly intents: IntentRepository,
+    @Inject(PG_DATABASE) private readonly database: Kysely<NyabaseDatabase>,
+  ) {}
 
   @Get()
   async list(
     @Param('volumeId') volumeId: string,
     @Query() query: Record<string, unknown>,
   ) {
+    const volume = await this.database.selectFrom('control.volumes')
+      .select('shared_backend_id').where('id', '=', volumeId).executeTakeFirst();
+    if (!volume || volume.shared_backend_id !== null) {
+      throw new NotFoundException('Volume not found');
+    }
+    const page = await this.intents.listForResource('volume', volumeId, listOptions(query));
+    return { items: page.items.map(toDto), nextCursor: page.nextCursor };
+  }
+}
+
+@Controller('admin/shared-volumes/:volumeId/intents')
+@UseGuards(JwtAuthGuard, CapabilitiesGuard)
+@RequireCaps(Capability.ManageSharedVolumes)
+export class AdminSharedVolumeIntentsController {
+  constructor(
+    private readonly intents: IntentRepository,
+    @Inject(PG_DATABASE) private readonly database: Kysely<NyabaseDatabase>,
+  ) {}
+
+  @Get()
+  async list(
+    @Param('volumeId') volumeId: string,
+    @Query() query: Record<string, unknown>,
+  ) {
+    const volume = await this.database.selectFrom('control.volumes')
+      .select('shared_backend_id').where('id', '=', volumeId).executeTakeFirst();
+    if (!volume || volume.shared_backend_id === null) {
+      throw new NotFoundException('Volume not found');
+    }
     const page = await this.intents.listForResource('volume', volumeId, listOptions(query));
     return { items: page.items.map(toDto), nextCursor: page.nextCursor };
   }
@@ -189,6 +248,7 @@ export class AdminVolumeIntentsController {
 const ADMIN_INTENT_CAPABILITIES = [
   Capability.ManageContainersAny,
   Capability.ManageVolumes,
+  Capability.ManageSharedVolumes,
   Capability.ManageServers,
   Capability.ManageImages,
   Capability.ManageCertificates,
@@ -201,6 +261,7 @@ export class AdminIntentsController {
   constructor(
     private readonly intents: IntentRepository,
     private readonly access: AccessResolverService,
+    @Inject(PG_DATABASE) private readonly database: Kysely<NyabaseDatabase>,
   ) {}
 
   @Get()
@@ -217,8 +278,9 @@ export class AdminIntentsController {
       ...options,
       resourceTypes: options.resourceType ? undefined : allowedTypes,
     });
+    const items = await this.filterVolumeIntents(user.id, page.items);
     return {
-      items: page.items.map(toDto),
+      items: items.map(toDto),
       nextCursor: page.nextCursor,
     };
   }
@@ -240,7 +302,7 @@ export class AdminIntentsController {
     zRetryIntentRequest.parse(body);
     const intent = await this.intents.findById(intentId);
     if (!intent) throw new NotFoundException('Intent not found');
-    const required = adminCapabilityForIntent(intent.resourceType);
+    const required = await this.capabilityFor(intent);
     if (!required) throw new NotFoundException('Intent not found');
     try {
       return await this.access.runWithActorCapabilities(
@@ -249,7 +311,7 @@ export class AdminIntentsController {
         async (transaction) => {
           const current = await this.intents.findById(intentId, transaction);
           if (!current) throw new NotFoundException('Intent not found');
-          const currentRequired = adminCapabilityForIntent(current.resourceType);
+          const currentRequired = await this.capabilityFor(current);
           if (currentRequired !== required) {
             throw new NotFoundException('Intent not found');
           }
@@ -271,23 +333,64 @@ export class AdminIntentsController {
     actorId: string,
   ): Promise<IntentRecord['resourceType'][]> {
     const capabilities = await this.access.userCapabilitiesCurrent(actorId);
-    return (Object.values(IntentResourceType) as IntentRecord['resourceType'][])
+    const types = (Object.values(IntentResourceType) as IntentRecord['resourceType'][])
       .filter((type) => {
+        if (type === IntentResourceType.Volume) {
+          return capabilities.has(Capability.ManageVolumes)
+            || capabilities.has(Capability.ManageSharedVolumes);
+        }
         const capability = adminCapabilityForIntent(type);
         return capability != null && capabilities.has(capability);
       });
+    return types;
   }
 
   private async assertIntentCapability(
     actorId: string,
     intent: IntentRecord,
   ): Promise<void> {
-    const required = adminCapabilityForIntent(intent.resourceType);
+    const required = await this.capabilityFor(intent);
     if (!required) throw new NotFoundException('Intent not found');
     const capabilities = await this.access.userCapabilitiesCurrent(actorId);
     if (!capabilities.has(required)) {
       throw new NotFoundException('Intent not found');
     }
+  }
+
+  private async capabilityFor(intent: IntentRecord): Promise<Capability | null> {
+    if (intent.resourceType !== IntentResourceType.Volume) {
+      return adminCapabilityForIntent(intent.resourceType);
+    }
+    const volume = await this.database.selectFrom('control.volumes')
+      .select('shared_backend_id')
+      .where('id', '=', intent.resourceId)
+      .executeTakeFirst();
+    return adminCapabilityForIntent(intent.resourceType, volume?.shared_backend_id != null);
+  }
+
+  private async filterVolumeIntents(
+    actorId: string,
+    items: readonly IntentRecord[],
+  ): Promise<IntentRecord[]> {
+    const volumeIds = items
+      .filter((item) => item.resourceType === IntentResourceType.Volume)
+      .map((item) => item.resourceId);
+    if (volumeIds.length === 0) return [...items];
+    const capabilities = await this.access.userCapabilitiesCurrent(actorId);
+    const volumes = await this.database.selectFrom('control.volumes')
+      .select(['id', 'shared_backend_id'])
+      .where('id', 'in', volumeIds)
+      .execute();
+    const shared = new Set(
+      volumes.filter((row) => row.shared_backend_id !== null).map((row) => row.id),
+    );
+    return items.filter((item) => {
+      if (item.resourceType !== IntentResourceType.Volume) return true;
+      const required = shared.has(item.resourceId)
+        ? Capability.ManageSharedVolumes
+        : Capability.ManageVolumes;
+      return capabilities.has(required);
+    });
   }
 }
 

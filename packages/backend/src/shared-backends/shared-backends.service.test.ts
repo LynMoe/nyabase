@@ -71,6 +71,22 @@ function createService(
 }
 
 describe('SharedBackendsService registration guards', () => {
+  it('maps hasOnlineExecutor from the list aggregate', async () => {
+    const { service } = createService({
+      list: vi.fn().mockResolvedValue([
+        { ...baseRow, server_ids: ['22222222-2222-4222-8222-222222222222'], has_online_executor: true },
+      ]),
+    });
+    const [online] = await service.list();
+    expect(online?.hasOnlineExecutor).toBe(true);
+
+    const offline = createService({
+      list: vi.fn().mockResolvedValue([{ ...baseRow, server_ids: [], has_online_executor: false }]),
+    });
+    const [empty] = await offline.service.list();
+    expect(empty?.hasOnlineExecutor).toBe(false);
+  });
+
   it('normalizes registration identity and FSID before persistence', async () => {
     const { service, repository } = createService();
 

@@ -3,11 +3,15 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Plus, RefreshCw } from 'lucide-react';
 import type { AdminImageDto } from '@nyabase/common';
 import { api } from '../lib/api.js';
+import { errorMessage } from '../lib/api-error.js';
 import { Button } from '../components/ui/button.js';
-import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from '../components/ui/alert-dialog.js';
+import { ConfirmDialog } from '../components/layout/confirm-dialog.js';
+import { EmptyState } from '../components/layout/empty-state.js';
+import { Page } from '../components/layout/page.js';
+import { PageHeader } from '../components/layout/page-header.js';
+import { QueryView } from '../components/layout/query-view.js';
 import { ImageFormDialog } from '../components/images/image-form-dialog.js';
 import { ImageList } from '../components/images/image-list.js';
-import { QueryErrorState, QueryLoadingState } from '../components/query-state.js';
 import { queryKeys } from '../lib/query-keys.js';
 import { toast } from '../hooks/use-toast.js';
 
@@ -31,38 +35,52 @@ export default function ImagesPage() {
   });
 
   return (
-    <div className="space-y-5 px-4 py-4 md:px-6">
-      <div className="flex flex-wrap items-start justify-between gap-3">
-        <div><h1 className="text-2xl font-semibold tracking-tight">镜像</h1><p className="text-sm text-muted-foreground">管理镜像元数据与每台服务器的指纹分配。</p></div>
-        <div className="flex gap-2">
-          <Button variant="outline" size="icon" onClick={() => { void imagesQuery.refetch(); }} disabled={imagesQuery.isFetching} aria-label="刷新镜像">
-            <RefreshCw className={imagesQuery.isFetching ? 'h-4 w-4 animate-spin' : 'h-4 w-4'} />
-          </Button>
-          <Button onClick={() => setCreateOpen(true)}><Plus className="h-4 w-4" />添加镜像</Button>
-        </div>
-      </div>
-      {imagesQuery.isLoading ? <QueryLoadingState label="加载镜像..." /> : imagesQuery.isError ? (
-        <QueryErrorState error={imagesQuery.error} resourceName="镜像目录" onRetry={() => { void imagesQuery.refetch(); }} />
-      ) : (
-        <ImageList
-          images={imagesQuery.data ?? []}
-          onEdit={setEditTarget}
-          onDelete={setDeleteTarget}
-          onCreate={() => setCreateOpen(true)}
-        />
-      )}
+    <Page>
+      <PageHeader
+        title="镜像"
+        description="管理镜像元数据与每台服务器的指纹分配。"
+        actions={
+          <>
+            <Button variant="outline" size="icon" onClick={() => { void imagesQuery.refetch(); }} disabled={imagesQuery.isFetching} aria-label="刷新镜像">
+              <RefreshCw className={imagesQuery.isFetching ? 'h-4 w-4 animate-spin' : 'h-4 w-4'} />
+            </Button>
+            <Button onClick={() => setCreateOpen(true)}><Plus className="h-4 w-4" />添加镜像</Button>
+          </>
+        }
+      />
+      <QueryView
+        query={imagesQuery}
+        resourceName="镜像目录"
+        loadingLabel="加载镜像..."
+        showEmpty={imagesQuery.data?.length === 0}
+        empty={
+          <EmptyState
+            title="暂无镜像。"
+            action={<Button onClick={() => setCreateOpen(true)}><Plus className="h-4 w-4" />添加镜像</Button>}
+          />
+        }
+      >
+        {(images) => (
+          <ImageList
+            images={images}
+            onEdit={setEditTarget}
+            onDelete={setDeleteTarget}
+            onCreate={() => setCreateOpen(true)}
+          />
+        )}
+      </QueryView>
       <ImageFormDialog mode="create" open={createOpen} onOpenChange={setCreateOpen} />
       {editTarget && <ImageFormDialog mode="edit" image={editTarget} open onOpenChange={(open) => { if (!open) setEditTarget(null); }} />}
-      <AlertDialog open={Boolean(deleteTarget)} onOpenChange={(open) => { if (!open) setDeleteTarget(null); }}>
-        <AlertDialogContent>
-          <AlertDialogHeader><AlertDialogTitle>删除镜像？</AlertDialogTitle><AlertDialogDescription>删除会先移除服务器上的指纹分配；仍被容器引用的镜像会由后端拒绝。</AlertDialogDescription></AlertDialogHeader>
-          <AlertDialogFooter><AlertDialogCancel>取消</AlertDialogCancel><AlertDialogAction className="bg-destructive text-destructive-foreground hover:bg-destructive/90" onClick={() => { if (deleteTarget) deleteImage.mutate(deleteTarget.id); }} disabled={deleteImage.isPending}>{deleteImage.isPending ? '提交中...' : '确认删除'}</AlertDialogAction></AlertDialogFooter>
-        </AlertDialogContent>
-      </AlertDialog>
-    </div>
+      <ConfirmDialog
+        open={Boolean(deleteTarget)}
+        title="删除镜像？"
+        description="删除会先移除服务器上的指纹分配；仍被容器引用的镜像会由后端拒绝。"
+        confirmLabel="确认删除"
+        pendingLabel="提交中..."
+        pending={deleteImage.isPending}
+        onConfirm={() => { if (deleteTarget) deleteImage.mutate(deleteTarget.id); }}
+        onOpenChange={(open) => { if (!open) setDeleteTarget(null); }}
+      />
+    </Page>
   );
-}
-
-function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : '请稍后重试';
 }

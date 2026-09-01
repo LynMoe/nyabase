@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { ResourceLifecyclePhase, type VolumeDto } from '@nyabase/common';
-import { filterAttachableVolumes } from './attachable-volumes.js';
+import { ResourceLifecyclePhase, type SharedVolumeDto, type VolumeDto } from '@nyabase/common';
+import { filterAttachableSharedVolumes, filterAttachableVolumes } from './attachable-volumes.js';
 
 const capability: VolumeDto['capability'] = {
   growOnline: true,
@@ -14,14 +14,11 @@ function volume(overrides: Partial<VolumeDto> & Pick<VolumeDto, 'id' | 'ownerId'
   return {
     poolId: 'pool',
     poolName: 'pool',
-    sharedBackendId: null,
     name: overrides.id,
     incusName: overrides.id,
     sizeBytes: 10,
     usedBytes: 1,
-    scope: overrides.serverId
-      ? { kind: 'local', serverId: overrides.serverId, poolId: 'pool' }
-      : { kind: 'shared', sharedBackendId: 'backend', poolId: 'pool' },
+    scope: { kind: 'local', serverId: overrides.serverId, poolId: 'pool' },
     capability,
     lifecyclePhase: ResourceLifecyclePhase.Active,
     generation: 1,
@@ -51,8 +48,43 @@ describe('filterAttachableVolumes', () => {
         lifecyclePhase: ResourceLifecyclePhase.Deleting,
       }),
       volume({ id: 'other-server', ownerId: 'owner-a', serverId: 'server-2' }),
-      volume({ id: 'shared', ownerId: 'owner-a', serverId: null }),
     ], container, attached);
-    expect(filtered.map((item) => item.id)).toEqual(['ok', 'shared']);
+    expect(filtered.map((item) => item.id)).toEqual(['ok']);
+  });
+});
+
+describe('filterAttachableSharedVolumes', () => {
+  it('keeps owner-matching shared volumes that are not attached or deleting', () => {
+    const attached = new Set(['attached']);
+    const shared = (overrides: Partial<SharedVolumeDto> & Pick<SharedVolumeDto, 'id' | 'ownerId'>): SharedVolumeDto => ({
+      sharedBackendId: 'backend',
+      sharedBackendName: 'ceph',
+      name: overrides.id,
+      incusName: overrides.id,
+      sizeBytes: 10,
+      usedBytes: null,
+      capability,
+      lifecyclePhase: ResourceLifecyclePhase.Active,
+      generation: 1,
+      observedGeneration: null,
+      needsAttention: false,
+      failureCode: null,
+      dirEnsured: false,
+      createdAt: '2026-08-13T00:00:00.000Z',
+      updatedAt: '2026-08-13T00:00:00.000Z',
+      attachments: [],
+      ...overrides,
+    });
+    const filtered = filterAttachableSharedVolumes([
+      shared({ id: 'ok', ownerId: 'owner-a' }),
+      shared({ id: 'other-owner', ownerId: 'owner-b' }),
+      shared({ id: 'attached', ownerId: 'owner-a' }),
+      shared({
+        id: 'deleting',
+        ownerId: 'owner-a',
+        lifecyclePhase: ResourceLifecyclePhase.Deleting,
+      }),
+    ], { ownerId: 'owner-a' }, attached);
+    expect(filtered.map((item) => item.id)).toEqual(['ok']);
   });
 });

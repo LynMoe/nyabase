@@ -9,13 +9,13 @@ type ContainerSshView = {
 /**
  * Wait until the control-plane reports ssh.ready.
  *
- * Host TCP probes to the container IP are intentionally skipped: macvlan isolates
- * the Incus host from its own containers, so :22 is not reachable from the host.
- * Guest SSH readiness is proven inside the instance via Incus exec by the reconciler.
+ * Guest SSH readiness is proven inside the instance via Incus exec by the
+ * reconciler. After the vmbr cutover the Incus host can TCP to routedIp:22;
+ * callers may add that extra assertion once ssh.ready is true.
  */
 export async function waitForContainerSshReady<T extends ContainerSshView>(
   load: () => Promise<T>,
-  timeoutMs = 180_000,
+  timeoutMs = 90_000,
   intervalMs = 500,
 ): Promise<T> {
   return eventually(

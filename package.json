@@ -40,10 +40,10 @@
     "e2e:up": "bash e2e/orchestrator/e2e.sh up",
     "e2e:health": "bash e2e/orchestrator/e2e.sh health",
     "e2e:down": "bash e2e/orchestrator/e2e.sh down",
+    "e2e:replay": "bash e2e/orchestrator/e2e.sh replay",
     "test:e2e:smoke": "bash e2e/orchestrator/e2e.sh run smoke",
     "test:e2e:core": "bash e2e/orchestrator/e2e.sh run core",
     "test:e2e:full": "bash e2e/orchestrator/e2e.sh run full",
-    "test:e2e:recovery": "bash e2e/orchestrator/e2e.sh run recovery",
     "test:e2e:release": "bash e2e/orchestrator/e2e.sh release"
   },
   "devDependencies": {

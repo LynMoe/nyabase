@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs';
 import {
   defineTopologyProvider,
   type TopologyCapability,
@@ -24,14 +25,13 @@ const capabilityInputs: Partial<Record<TopologyCapability, string[]>> = {
   'certificate-rotation': ['E2E_EDGE_CA_FILE'],
   'storage-dir-quota-online': ['E2E_INCUS_DIR_POOL'],
   'storage-lvm-block-backed': ['E2E_INCUS_LVM_POOL'],
-  'macvlan-parent': [
+  'lan-bridge': [
     'E2E_INCUS_PARENT_INTERFACE',
     'E2E_INCUS_ROUTED_SUBNET',
     'E2E_INCUS_ROUTED_ADDRESS',
     'E2E_INCUS_ROUTED_GATEWAY',
   ],
-  'rp-filter': ['E2E_INCUS_PARENT_INTERFACE'],
-  'fib-anti-spoof': [
+  'bridge-ipv4-filter': [
     'E2E_INCUS_PARENT_INTERFACE',
     'E2E_INCUS_ROUTED_SUBNET',
     'E2E_INCUS_SPOOF_ADDRESS',
@@ -70,9 +70,8 @@ const capabilityDetails: Record<TopologyCapability, string> = {
   'certificate-rotation': 'The edge CA and the rotation endpoint must be configured',
   'storage-dir-quota-online': 'A verified dir pool with quota= true and online resize is required',
   'storage-lvm-block-backed': 'A verified LVM pool with block-backed volumes is required',
-  'macvlan-parent': 'The macvlan parent interface and LAN subnet must be verified',
-  'rp-filter': 'The parent interface rp_filter setting is observed; macvlan does not require host FIB anti-spoof',
-  'fib-anti-spoof': 'BLOCKED: the product network is macvlan and does not install routed FIB anti-spoof tables',
+  'lan-bridge': 'The unmanaged LAN bridge (vmbr) and LAN subnet must be verified',
+  'bridge-ipv4-filter': 'nft bridge-family IPv4/ARP anti-spoof inputs must be present',
   'private-simplestreams': 'The image source must be private HTTPS simplestreams',
   'sshd-no-dhcp-image': 'The selected SSHD image must prove that DHCP is not required',
   'node-exporter-authenticated-pull': 'The exporter URL and bearer token must be configured',
@@ -81,6 +80,7 @@ const capabilityDetails: Record<TopologyCapability, string> = {
   'ssh-reachability': 'A live control-plane URL and a seeded SSHD image are required',
   'gpu-pci': 'BLOCKED: no GPU PCI device is claimed by the local Incus host',
   'cephfs-cluster': 'BLOCKED: a multi-node CephFS cluster is not provisioned locally',
+  'multi-server': 'BLOCKED: extra Incus workers are not listed in E2E_LAB_SERVERS_FILE',
 };
 
 function cephfsFixturePresent(): boolean {
@@ -91,10 +91,18 @@ function cephfsFixturePresent(): boolean {
   return Boolean(sharedBackendId && fsid && identityKey && pool);
 }
 
-function declaration(capability: TopologyCapability): TopologyCapabilityDeclaration {
-  if (capability === 'fib-anti-spoof') {
-    return { state: 'blocked', detail: capabilityDetails['fib-anti-spoof'] };
+function labServerCount(): number {
+  const path = process.env.E2E_LAB_SERVERS_FILE?.trim();
+  if (!path) return 0;
+  try {
+    const listed = JSON.parse(readFileSync(path, 'utf8'));
+    return Array.isArray(listed) ? listed.length : 0;
+  } catch {
+    return 0;
   }
+}
+
+function declaration(capability: TopologyCapability): TopologyCapabilityDeclaration {
   if (capability === 'gpu-pci') {
     const peerPci = process.env.E2E_GPU_PCI_ADDRESS?.trim();
     const peerProof = process.env.E2E_GPU_PCI_PROOF?.trim();
@@ -123,6 +131,22 @@ function declaration(capability: TopologyCapability): TopologyCapabilityDeclarat
       };
     }
     return { state: 'blocked', detail: capabilityDetails['cephfs-cluster'] };
+  }
+  if (capability === 'multi-server') {
+    const extra = labServerCount();
+    if (extra > 0) {
+      return {
+        state: 'available',
+        detail: `${extra} extra Incus worker(s) listed in E2E_LAB_SERVERS_FILE`,
+      };
+    }
+    if (declared.size > 0 && declared.has('multi-server')) {
+      return {
+        state: 'available',
+        detail: 'doctor verified extra Incus workers for the current run',
+      };
+    }
+    return { state: 'blocked', detail: capabilityDetails['multi-server'] };
   }
   if (declared.size > 0) {
     return declared.has(capability)
@@ -165,12 +189,13 @@ export default defineTopologyProvider({
   id: 'incus-standalone',
   displayName: 'Incus standalone host',
   evidenceBoundary: 'host-kernel',
-  nodeCount: 1,
+  nodeCount: 1 + labServerCount(),
   capabilities,
   limitations: [
     'gpu-pci is available only when E2E_GPU_PCI_PROOF=1 and E2E_GPU_PCI_ADDRESS are set from real hardware evidence',
     'cephfs-cluster is available only when E2E_SHARED_BACKEND_ID and E2E_CEPHFS_* fixture inputs are present',
-    'fib-anti-spoof is blocked: the product NIC is macvlan and does not install routed FIB tables',
+    'multi-server is available when E2E_LAB_SERVERS_FILE lists extra Incus workers',
+    'bridge-ipv4-filter is available when the operator-owned vmbr and spoof address inputs are present',
     'The provider never fabricates a storage, network, image, or telemetry capability',
     'The provider requires real HTTPS/mTLS and PostgreSQL endpoints',
   ],

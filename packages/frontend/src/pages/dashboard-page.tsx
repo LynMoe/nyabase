@@ -12,51 +12,57 @@ import {
   type UserServerDto,
 } from '@nyabase/common';
 import { api } from '../lib/api.js';
+import { SummaryCard } from '../components/dashboard/summary-card.js';
+import { Page } from '../components/layout/page.js';
+import { PageHeader } from '../components/layout/page-header.js';
+import { QueryView } from '../components/layout/query-view.js';
 import { Card, CardContent, CardHeader, CardTitle } from '../components/ui/card.js';
 import { Badge } from '../components/ui/badge.js';
-import { QueryErrorState, QueryLoadingState } from '../components/query-state.js';
 import { formatBytes, formatCpu, relativeTime } from '../lib/utils.js';
 import { containerStatusLabel, serverStatusLabel } from '../lib/status-labels.js';
 import { queryPollInterval } from '../lib/query-lifecycle.js';
+import { queryKeys } from '../lib/query-keys.js';
 
 export default function DashboardPage() {
   const serversQuery = useQuery({
-    queryKey: ['dashboard', 'servers', 'user'],
+    queryKey: queryKeys.servers.user,
     queryFn: () => api.get<UserServerDto[]>('/servers'),
     refetchInterval: (query) => queryPollInterval(query.state, { activeIntervalMs: 30_000 }),
   });
   const containersQuery = useQuery({
-    queryKey: ['dashboard', 'containers', 'user'],
+    queryKey: queryKeys.containers.userList,
     queryFn: () => api.get<ContainerDto[]>('/containers'),
     refetchInterval: (query) => queryPollInterval(query.state, { activeIntervalMs: 15_000 }),
   });
 
-  if (serversQuery.isLoading || containersQuery.isLoading) {
-    return <QueryLoadingState label="加载资源..." />;
-  }
-  if (serversQuery.isError) {
-    return <QueryErrorState error={serversQuery.error} resourceName="服务器资源" onRetry={() => { void serversQuery.refetch(); }} />;
-  }
-  if (containersQuery.isError) {
-    return <QueryErrorState error={containersQuery.error} resourceName="容器资源" onRetry={() => { void containersQuery.refetch(); }} />;
-  }
+  return (
+    <Page testId="incus-resource-dashboard">
+      <PageHeader title="资源概览" description="当前用户可见的服务器与容器状态。" />
+      <QueryView
+        queries={[serversQuery, containersQuery]}
+        resourceNames={['服务器资源', '容器资源']}
+        loadingLabel="加载资源..."
+      >
+        {() => <DashboardBody servers={serversQuery.data ?? []} containers={containersQuery.data ?? []} />}
+      </QueryView>
+    </Page>
+  );
+}
 
-  const servers = serversQuery.data ?? [];
-  const containers = containersQuery.data ?? [];
+function DashboardBody({
+  servers,
+  containers,
+}: {
+  servers: UserServerDto[];
+  containers: ContainerDto[];
+}) {
   const running = containers.filter((container) => container.actual.status === 'running').length;
   const stopped = containers.filter((container) => container.actual.status !== 'running').length;
   const attention = containers.filter((container) => container.needsAttention).length;
   const online = servers.filter((server) => server.status === 'online').length;
 
   return (
-    <div className="space-y-5 px-4 py-4 md:px-6" data-testid="incus-resource-dashboard">
-      <div>
-        <h1 className="text-2xl font-semibold tracking-tight">资源概览</h1>
-        <p className="text-sm text-muted-foreground">
-          当前用户可见的服务器与容器状态。
-        </p>
-      </div>
-
+    <>
       <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
         <SummaryCard icon={Server} label="服务器" value={`${online} / ${servers.length}`} detail="在线 / 可见" />
         <SummaryCard icon={Container} label="容器" value={`${running} / ${containers.length}`} detail="运行中 / 可见" />
@@ -64,7 +70,7 @@ export default function DashboardPage() {
         <SummaryCard icon={Activity} label="非运行中" value={String(stopped)} detail="停止或其他状态" />
       </div>
 
-      <div className="grid gap-4 xl:grid-cols-2">
+      <div className="grid items-start gap-4 xl:grid-cols-2">
         <Card data-testid="incus-server-resources">
           <CardHeader>
             <CardTitle className="flex items-center gap-2 text-base">
@@ -97,32 +103,7 @@ export default function DashboardPage() {
           </CardContent>
         </Card>
       </div>
-    </div>
-  );
-}
-
-function SummaryCard({
-  icon: Icon,
-  label,
-  value,
-  detail,
-}: {
-  icon: typeof Server;
-  label: string;
-  value: string;
-  detail: string;
-}) {
-  return (
-    <Card>
-      <CardContent className="p-4">
-        <div className="flex items-center justify-between text-muted-foreground">
-          <span className="text-sm">{label}</span>
-          <Icon className="h-4 w-4" />
-        </div>
-        <p className="mt-2 text-2xl font-semibold">{value}</p>
-        <p className="mt-1 text-xs text-muted-foreground">{detail}</p>
-      </CardContent>
-    </Card>
+    </>
   );
 }
 
@@ -133,7 +114,9 @@ function ServerHealthRow({ server }: { server: UserServerDto }) {
     <div className="flex items-start justify-between gap-3 rounded-md border p-3">
       <div className="min-w-0">
         <p className="truncate text-sm font-medium">{server.name}</p>
-        <p className="truncate font-mono text-xs text-muted-foreground">{server.slug}</p>
+        {server.slug && server.slug !== server.name && (
+          <p className="truncate font-mono text-xs text-muted-foreground">{server.slug}</p>
+        )}
         <p className="mt-1 text-xs text-muted-foreground">
           最近观测 {relativeTime(server.lastSeenAt)}
         </p>
@@ -162,7 +145,7 @@ function ContainerResourceRow({ container }: { container: ContainerDto }) {
       </div>
       <div className="shrink-0 text-right text-xs text-muted-foreground">
         <div className="flex items-center justify-end gap-1">
-          {status === 'running' ? <CircleCheck className="h-3.5 w-3.5 text-green-600" /> : <CircleAlert className="h-3.5 w-3.5" />}
+          {status === 'running' ? <CircleCheck className="h-3.5 w-3.5 text-emerald-600 dark:text-emerald-300" /> : <CircleAlert className="h-3.5 w-3.5" />}
           <span title={status}>{containerStatusLabel(status)}</span>
         </div>
         <div>{formatCpu(container.cpuMillis)} · {formatBytes(container.memBytes)}</div>

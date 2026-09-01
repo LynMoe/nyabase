@@ -183,7 +183,7 @@ describePg('ReconcileWorkerService PostgreSQL busy breaker and inventory', () =>
       const containerId = randomUUID();
       await database.insertInto('iam.users').values({
         id: userId,
-        numeric_id: 4_200_001,
+        numeric_id: 42,
         username: `busy-${userId.slice(0, 8)}`,
         password_hash: 'unused',
         display_name: 'Busy Strike User',
@@ -247,7 +247,7 @@ describePg('ReconcileWorkerService PostgreSQL busy breaker and inventory', () =>
         syscall_intercept: true,
         power_intent: 'running',
         lifecycle_phase: 'active',
-        instance_name: 'nyc-busy',
+        instance_name: `nyc-${containerId.replaceAll('-', '')}`,
         needs_attention: false,
         failure_code: null,
         failure_reason: null,

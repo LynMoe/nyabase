@@ -100,6 +100,11 @@ export class ContainersController {
     return this.containers.listVolumesForUser(id, user.id);
   }
 
+  @Get(':containerId/shared-volumes')
+  sharedVolumes(@Param('containerId') id: string, @CurrentUser() user: UserRecord) {
+    return this.containers.listSharedVolumesForUser(id, user.id);
+  }
+
   @Get(':containerId/stats')
   stats(@Param('containerId') id: string, @CurrentUser() user: UserRecord) {
     return this.containers.getStats(id, user.id);

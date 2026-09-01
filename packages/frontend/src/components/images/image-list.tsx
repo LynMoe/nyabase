@@ -1,14 +1,24 @@
+import { useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Check, CircleAlert, Fingerprint, Plus, RefreshCw, Server, Trash2 } from 'lucide-react';
 import type { AdminImageDto, ImageAssignmentDto, IntentAcceptedDto, ServerDto } from '@nyabase/common';
 import { api } from '../../lib/api.js';
+import { errorMessage } from '../../lib/api-error.js';
 import { Badge } from '../ui/badge.js';
 import { Button } from '../ui/button.js';
 import { Card, CardContent, CardHeader, CardTitle } from '../ui/card.js';
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '../ui/select.js';
 import { formatBytes, relativeTime } from '../../lib/utils.js';
 import { lifecyclePhaseLabel } from '../../lib/display-labels.js';
 import { toast } from '../../hooks/use-toast.js';
 import { queryKeys } from '../../lib/query-keys.js';
+import { ResourceGrid } from '../layout/resource-grid.js';
 import { ResourceIntentFailures } from '../intents/resource-intent-failures.js';
 
 type AssignmentResponse = {
@@ -66,7 +76,7 @@ export function ImageList({
   }
 
   return (
-    <div className="grid gap-4 xl:grid-cols-2">
+    <ResourceGrid>
       {images.map((image) => (
         <Card key={image.id} data-testid="image-fingerprint-assignment">
           <CardHeader className="pb-3">
@@ -87,22 +97,14 @@ export function ImageList({
             </div>
             <ResourceIntentFailures listPath={`/admin/images/${image.id}/intents`} admin />
             <div className="rounded-md border">
-              <div className="flex items-center justify-between gap-2 border-b px-3 py-2">
+              <div className="flex flex-col gap-2 border-b px-3 py-2 sm:flex-row sm:items-center sm:justify-between">
                 <span className="text-sm font-medium">服务器分配</span>
-                <select
-                  className="h-8 max-w-[220px] rounded-md border border-input bg-background px-2 text-xs"
-                  value=""
-                  onChange={(event) => {
-                    if (event.target.value) assign.mutate({ imageId: image.id, serverId: event.target.value });
-                  }}
+                <ImageAssignSelect
+                  imageName={image.name}
+                  servers={servers.filter((server) => !image.assignments.some((assignment) => assignment.serverId === server.id))}
                   disabled={assign.isPending || servers.length === 0 || image.deleting}
-                  aria-label={`为 ${image.name} 分配服务器`}
-                >
-                  <option value="">添加服务器...</option>
-                  {servers.filter((server) => !image.assignments.some((assignment) => assignment.serverId === server.id)).map((server) => (
-                    <option key={server.id} value={server.id}>{server.name}</option>
-                  ))}
-                </select>
+                  onAssign={(serverId) => assign.mutate({ imageId: image.id, serverId })}
+                />
               </div>
               <div className="divide-y">
                 {image.assignments.length === 0 ? (
@@ -126,7 +128,40 @@ export function ImageList({
           </CardContent>
         </Card>
       ))}
-    </div>
+    </ResourceGrid>
+  );
+}
+
+function ImageAssignSelect({
+  imageName,
+  servers,
+  disabled,
+  onAssign,
+}: {
+  imageName: string;
+  servers: Array<{ id: string; name: string }>;
+  disabled: boolean;
+  onAssign: (serverId: string) => void;
+}) {
+  const [resetKey, setResetKey] = useState(0);
+  return (
+    <Select
+      key={resetKey}
+      onValueChange={(serverId) => {
+        onAssign(serverId);
+        setResetKey((key) => key + 1);
+      }}
+      disabled={disabled}
+    >
+      <SelectTrigger className="h-8 max-w-[220px] text-xs" aria-label={`为 ${imageName} 分配服务器`}>
+        <SelectValue placeholder="添加服务器..." />
+      </SelectTrigger>
+      <SelectContent>
+        {servers.map((server) => (
+          <SelectItem key={server.id} value={server.id}>{server.name}</SelectItem>
+        ))}
+      </SelectContent>
+    </Select>
   );
 }
 
@@ -178,6 +213,4 @@ function InfoRow({ label, value, mono = false }: { label: string; value: string;
   return <div><p className="text-xs text-muted-foreground">{label}</p><p className={mono ? 'break-all font-mono text-xs' : 'text-sm'}>{value}</p></div>;
 }
 
-function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : '请稍后重试';
-}
+

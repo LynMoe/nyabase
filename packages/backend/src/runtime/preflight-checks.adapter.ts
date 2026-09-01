@@ -16,9 +16,10 @@ import type {
 } from './server-preflight-reconciler.service.js';
 
 const NETWORK_METRICS = {
-  forwarding: 'nyabase_node_network_forwarding',
-  rpFilter: 'nyabase_node_network_rp_filter',
-  fib: 'nyabase_node_network_fib_rule_present',
+  isBridge: 'nyabase_node_network_is_bridge',
+  ipv4Present: 'nyabase_node_network_ipv4_present',
+  bridgeSlave: 'nyabase_node_network_bridge_slave',
+  nftAvailable: 'nyabase_node_network_nft_available',
 } as const;
 
 const GPU_RUNTIME_METRIC = 'nyabase_node_gpu_util_ratio';
@@ -38,25 +39,52 @@ export class IncusPreflightChecksAdapter implements PreflightChecksPort {
       .select('parent_interface')
       .where('id', '=', serverId)
       .executeTakeFirst();
-    const parentInterface = server?.parent_interface;
+    const parentInterface = server?.parent_interface?.trim() || null;
     const samples = metricSamples(evidence);
-    const forwarding = metricPasses(
-      matchingNetworkSample(samples, NETWORK_METRICS.forwarding, parentInterface),
-    );
-    const rpFilter = metricPasses(
-      matchingNetworkSample(samples, NETWORK_METRICS.rpFilter, parentInterface),
-    );
-    const fib = metricPasses(
-      matchingNetworkSample(samples, NETWORK_METRICS.fib, parentInterface),
+    const isBridge = parentInterface
+      ? matchingNetworkSample(samples, NETWORK_METRICS.isBridge, parentInterface) === 1
+      : false;
+    const nftAvailable = unlabeledSample(samples, NETWORK_METRICS.nftAvailable) === 1;
+    const slaves = parentInterface
+      ? samples
+        .filter((sample) => (
+          sample.name === NETWORK_METRICS.bridgeSlave
+          && sample.labels.bridge === parentInterface
+          && sample.value === 1
+          && typeof sample.labels.interface === 'string'
+          && sample.labels.interface.length > 0
+        ))
+        .map((sample) => sample.labels.interface)
+      : [];
+    const ipv4Present: Record<string, boolean> = {};
+    for (const sample of samples) {
+      if (sample.name !== NETWORK_METRICS.ipv4Present) continue;
+      const iface = sample.labels.interface;
+      if (!iface) continue;
+      ipv4Present[iface] = sample.value === 1;
+    }
+    const slavesWithIpv4 = slaves.filter((iface) => ipv4Present[iface] === true);
+    const slavesWithUnknownIpv4 = slaves.filter((iface) => !(iface in ipv4Present));
+    const hasUplink = slaves.length > 0;
+    const networkPrerequisites = Boolean(
+      parentInterface
+      && isBridge
+      && nftAvailable
+      && hasUplink
+      && slavesWithIpv4.length === 0
+      && slavesWithUnknownIpv4.length === 0,
     );
     return {
       serverId,
-      forwarding,
-      rpFilter,
-      fib,
-      // Macvlan LAN mode uses parent_interface as the control gate. forwarding,
-      // rp_filter, and FIB remain diagnostic and must not fail first admission.
-      networkPrerequisites: Boolean(parentInterface),
+      parentInterface,
+      isBridge,
+      nftAvailable,
+      slaves,
+      ipv4Present,
+      slavesWithIpv4,
+      slavesWithUnknownIpv4,
+      hasUplink,
+      networkPrerequisites,
     };
   }
 
@@ -164,14 +192,7 @@ export class IncusPreflightChecksAdapter implements PreflightChecksPort {
         serverId,
       });
     }
-    const operation = result.metadata as unknown as Record<string, unknown>;
-    const nestedMetadata = operation.metadata;
-    const returnCode = operation.return
-      ?? (
-        nestedMetadata && typeof nestedMetadata === 'object' && !Array.isArray(nestedMetadata)
-          ? (nestedMetadata as Record<string, unknown>).return
-          : undefined
-      );
+    const returnCode = operationReturnCode(result.metadata);
     if (typeof returnCode !== 'number' || returnCode !== 0) {
       throw new IncusError('PREFLIGHT_FAILED', 'managed_failure', {
         reason: 'preflight_egress_failed',
@@ -184,6 +205,57 @@ export class IncusPreflightChecksAdapter implements PreflightChecksPort {
       status: 'pass',
       target: `${url.protocol}//${url.host}${url.pathname || '/'}`,
       responseBytesLimit: MAX_NODE_METRICS_BODY_BYTES,
+    };
+  }
+
+  async checkGuestCanReachHost(
+    serverId: string,
+    client: IncusClientPort,
+    probeName: string,
+    hostAddress: string,
+    signal?: AbortSignal,
+  ): Promise<Record<string, unknown>> {
+    const result = await requestAndWait(
+      client,
+      (options) => client.execInstance(
+        probeName,
+        {
+          command: ['ping', '-c', '1', '-W', '3', hostAddress],
+          'record-output': true,
+        },
+        options,
+      ),
+      {
+        signal,
+        timeoutMs: this.config.get<number>('incus.operationWaitTimeoutMs'),
+      },
+    );
+    if (result.kind !== 'completed') {
+      throw new IncusError('PREFLIGHT_FAILED', 'managed_failure', {
+        reason: 'preflight_guest_cannot_reach_host',
+        serverId,
+      });
+    }
+    const returnCode = operationReturnCode(result.metadata);
+    const output = operationOutputText(result.metadata);
+    if (returnCode === 127 || /ping: not found|command not found/i.test(output)) {
+      throw new IncusError('PREFLIGHT_FAILED', 'managed_failure', {
+        reason: 'preflight_probe_ping_missing',
+        serverId,
+        returnCode: returnCode ?? null,
+      });
+    }
+    if (typeof returnCode !== 'number' || returnCode !== 0) {
+      throw new IncusError('PREFLIGHT_FAILED', 'managed_failure', {
+        reason: 'preflight_guest_cannot_reach_host',
+        serverId,
+        returnCode: typeof returnCode === 'number' ? returnCode : null,
+      });
+    }
+    return {
+      serverId,
+      status: 'pass',
+      hostAddress,
     };
   }
 }
@@ -215,17 +287,39 @@ function matchingNetworkSample(
   ))?.value;
 }
 
-/**
- * Network sysctl / FIB gauges pass when the metric is present and >= 1.
- *
- * For `nyabase_node_network_rp_filter` this means "enabled" (strict=1 or
- * loose=2), never disabled (0). Plan N3 text says prefer =1; Incus 6.0.4
- * phase-0 measured new routed veths at 2 even with all/default/parent=1, and
- * forged sources were still blocked by structural isolation + FIB (+ loose).
- * Product therefore accepts >=1; see session rp-filter-policy.md.
- */
-function metricPasses(value: number | undefined): boolean {
-  return value !== undefined && value >= 1;
+function unlabeledSample(
+  samples: readonly NodeMetricSample[],
+  name: string,
+): number | undefined {
+  return samples.find((sample) => (
+    sample.name === name
+    && Object.keys(sample.labels).length === 0
+  ))?.value;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function operationReturnCode(value: unknown): number | undefined {
+  if (!isRecord(value)) return undefined;
+  if (typeof value.return === 'number' && Number.isSafeInteger(value.return)) {
+    return value.return;
+  }
+  return operationReturnCode(value.metadata);
+}
+
+function operationOutputText(value: unknown): string {
+  if (!isRecord(value)) return '';
+  const parts: string[] = [];
+  for (const key of ['output', 'stdout', 'stderr', 'err', 'error']) {
+    const child = value[key];
+    if (typeof child === 'string') parts.push(child);
+  }
+  if (isRecord(value.metadata)) {
+    parts.push(operationOutputText(value.metadata));
+  }
+  return parts.join('\n');
 }
 
 function normalizeGpuPci(value: string): string | null {

@@ -1,12 +1,13 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
-const [, , runtimeRoot, profile] = process.argv;
-if (!runtimeRoot || !profile) throw new Error('usage: evidence.mjs <runtime-root> <profile>');
+const [, , runtimeRoot, profile, ...flags] = process.argv;
+if (!runtimeRoot || !profile) throw new Error('usage: evidence.mjs <runtime-root> <profile> [--allow-subset]');
+const allowSubset = flags.includes('--allow-subset');
 const casePath = join(runtimeRoot, 'coverage-case-events.jsonl');
-if (!existsSync(casePath)) throw new Error('BLOCKED: Playwright produced no coverage case evidence');
+if (!existsSync(casePath)) throw new Error('BLOCKED: API runner produced no coverage case evidence');
 const ledger = JSON.parse(readFileSync(
-  join(new URL('.', import.meta.url).pathname, '..', 'coverage', 'features.yaml'),
+  join(new URL('.', import.meta.url).pathname, '..', 'coverage', 'features.json'),
   'utf8',
 ));
 
@@ -25,7 +26,7 @@ const expected = new Set(
 );
 const observed = new Set(selected.map((event) => event.caseId));
 const missing = [...expected].filter((caseId) => !observed.has(caseId));
-if (missing.length > 0) {
+if (missing.length > 0 && !allowSubset) {
   throw new Error(
     `BLOCKED: profile ${profile} did not execute expected coverage cases: ${missing.join(', ')}`,
   );
@@ -38,7 +39,7 @@ if (unexpected.length > 0) {
 }
 const runId = process.env.E2E_RUN_ID;
 const coverageNonce = process.env.E2E_COVERAGE_RUN_NONCE;
-if (runId && selected.some((event) => event.runId !== runId || event.source !== 'playwright')) {
+if (runId && selected.some((event) => event.runId !== runId || event.source !== 'api-http')) {
   throw new Error(`E2E runtime evidence contains events from another run or source`);
 }
 if (
@@ -50,6 +51,28 @@ if (
 const failed = selected.filter((event) => event.status !== 'passed');
 if (failed.length > 0) {
   throw new Error(`E2E runtime evidence contains ${failed.length} failed case(s)`);
+}
+const aliases = ledger.surfaceAliases ?? {};
+const listedByCase = new Map(
+  ledger.features.flatMap((feature) => feature.cases ?? [])
+    .filter((entry) => entry.status === 'implemented' && entry.kind !== 'static-contract')
+    .map((entry) => [
+      entry.caseId,
+      new Set((entry.httpSurfaces ?? []).map((surface) => aliases[surface] ?? surface)),
+    ]),
+);
+const uncovered = [];
+for (const event of selected.filter((entry) => entry.status === 'passed')) {
+  const listed = listedByCase.get(event.caseId);
+  if (!listed || listed.size === 0) continue;
+  const observed = new Set(event.observedHttpSurfaces ?? []);
+  const missingSurfaces = [...listed].filter((surface) => !observed.has(surface)).sort();
+  if (missingSurfaces.length > 0) {
+    uncovered.push(`${event.caseId}: ${missingSurfaces.join(', ')}`);
+  }
+}
+if (uncovered.length > 0) {
+  throw new Error(`BLOCKED: listed HTTP surfaces were not observed: ${uncovered.join('; ')}`);
 }
 const uniqueCases = new Set(selected.map((event) => event.caseId));
 console.log(`runtime-evidence=passed profile=${profile} cases=${uniqueCases.size}/${expected.size}`);

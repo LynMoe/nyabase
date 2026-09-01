@@ -54,7 +54,7 @@ function input(overrides: Partial<InstanceSpecInput['container']> = {}): Instanc
 }
 
 describe('buildDesiredInstanceSpec', () => {
-  it('builds a complete deterministic macvlan container document', () => {
+  it('builds a complete deterministic bridged container document', () => {
     const first = buildDesiredInstanceSpec(input());
     const second = buildDesiredInstanceSpec(input());
 
@@ -90,11 +90,13 @@ describe('buildDesiredInstanceSpec', () => {
       devices: {
         eth0: {
           type: 'nic',
-          nictype: 'macvlan',
-          mode: 'bridge',
+          nictype: 'bridged',
           parent: 'eno1',
           name: 'eth0',
           hwaddr: deriveInstanceHwaddr(containerId),
+          'ipv4.address': '192.0.2.20',
+          'security.ipv4_filtering': 'true',
+          'security.mac_filtering': 'true',
         },
         [`gpu0`]: {
           type: 'gpu',

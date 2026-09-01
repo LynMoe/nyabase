@@ -25,7 +25,7 @@ function serverValues(id: string, suffix: string) {
     parent_interface: null,
     dns_servers: [],
     gpu_runtime_available: false,
-    status: 'unknown' as const,
+    status: 'online' as const,
     last_seen_at: null,
     last_error: null,
     revision: 1,
@@ -122,7 +122,7 @@ async function insertContainer(
 async function insertVolume(
   database: any,
   ownerId: string,
-  poolId: string,
+  poolId: string | null,
   serverId: string | null,
   sharedBackendId: string | null,
   name: string,
@@ -131,7 +131,7 @@ async function insertVolume(
   await database.insertInto('control.volumes').values({
     id,
     owner_id: ownerId,
-    pool_id: poolId,
+    pool_id: sharedBackendId ? null : poolId,
     server_id: serverId,
     shared_backend_id: sharedBackendId,
     name,
@@ -145,6 +145,21 @@ async function insertVolume(
     failure_code: null,
   }).execute();
   return id;
+}
+
+async function insertStoppedRoute(database: any, containerId: string, serverId: string) {
+  await database.insertInto('control.container_ssh_routes').values({
+    container_id: containerId,
+    server_id: serverId,
+    instance_name: `nyc-${containerId.replaceAll('-', '')}`,
+    routed_ip: '10.0.0.8',
+    instance_status: 'Stopped',
+    instance_started_at: null,
+    ssh_status: 'container_stopped',
+    container_host_key_fingerprint: null,
+    last_error: null,
+    observed_at: new Date(),
+  }).execute();
 }
 
 function makeService(database: any) {
@@ -205,33 +220,38 @@ describePg('volume attachment ownership, visibility, and drain guards', () => {
         volumeId,
         containerPath: '/data',
         readOnly: false,
-      });
+      }, 'local');
       await expect(service.deleteForUser(userId, volumeId)).rejects.toMatchObject({
-        response: expect.objectContaining({ code: FailureCode.VolumeDetachDraining }),
+        response: expect.objectContaining({ code: FailureCode.VolumeRequiresUnbind }),
       });
       const attachment = await database.selectFrom('control.volume_attachments')
         .selectAll()
         .where('volume_id', '=', volumeId)
         .executeTakeFirstOrThrow();
 
-      await service.detachForUser(userId, attachment.id, containerOne);
-      const drain = await database.selectFrom('control.volume_detach_drains')
-        .select('drained_at')
+      await service.detachForUser(userId, attachment.id, containerOne, 'local');
+      const detaching = await database.selectFrom('control.volume_attachments')
+        .select(['bind_state', 'container_id'])
         .where('volume_id', '=', volumeId)
         .executeTakeFirstOrThrow();
-      expect(new Date(drain.drained_at).getTime()).toBeGreaterThan(Date.now() + 359_000);
+      expect(detaching.bind_state).toBe('detaching');
+      expect(detaching.container_id).toBe(containerOne);
 
+      await expect(service.deleteForUser(userId, volumeId)).rejects.toMatchObject({
+        response: expect.objectContaining({ code: FailureCode.VolumeRequiresUnbind }),
+      });
       await expect(service.attachForUser(userId, containerTwo, {
         volumeId,
         containerPath: '/data',
         readOnly: false,
-      })).rejects.toMatchObject({
-        response: expect.objectContaining({ code: FailureCode.VolumeDetachDraining }),
+      }, 'local')).resolves.toMatchObject({ intentId: expect.any(String) });
+      await expect(service.attachForUser(userId, containerOne, {
+        volumeId,
+        containerPath: '/data',
+        readOnly: false,
+      }, 'local')).rejects.toMatchObject({
+        response: expect.objectContaining({ code: FailureCode.InvalidInput }),
       });
-      expect(await database.selectFrom('control.volume_attachments')
-        .select('id')
-        .where('volume_id', '=', volumeId)
-        .execute()).toHaveLength(0);
     });
   });
 
@@ -323,7 +343,7 @@ describePg('volume attachment ownership, visibility, and drain guards', () => {
         volumeId,
         containerPath: '/shared',
         readOnly: false,
-      })).rejects.toMatchObject({
+      }, 'shared')).rejects.toMatchObject({
         response: expect.objectContaining({ code: FailureCode.VolumeCrossServerDenied }),
       });
       expect(await database.selectFrom('control.volume_attachments')
@@ -373,7 +393,7 @@ describePg('volume attachment ownership, visibility, and drain guards', () => {
         volumeId,
         containerPath: '/data',
         readOnly: false,
-      });
+      }, 'local');
       const listed = await service.listForUser(userId);
       const volume = listed.find((item) => item.id === volumeId);
       expect(volume?.usedBytes).toBe(0);
@@ -391,7 +411,7 @@ describePg('volume attachment ownership, visibility, and drain guards', () => {
     });
   });
 
-  it('blocks container.update on a pending shared volume ensure and keeps the placement row after detach', async () => {
+  it('attaches a shared volume without blocked_by ensure and keeps the placement row after detach', async () => {
     await withPostgresTestDatabase(async ({ database }) => {
       const userId = randomUUID();
       const serverId = randomUUID();
@@ -450,8 +470,7 @@ describePg('volume attachment ownership, visibility, and drain guards', () => {
         volume_id: volumeId,
         server_id: serverId,
         pool_id: sharedPoolId,
-        desired_present: true,
-        observed_present: true,
+        catalog_state: 'present',
       }).execute();
       await database.insertInto('iam.shared_backend_grants').values({
         id: randomUUID(),
@@ -466,30 +485,34 @@ describePg('volume attachment ownership, visibility, and drain guards', () => {
         volumeId,
         containerPath: '/shared',
         readOnly: false,
-      });
+      }, 'shared');
       const update = await database.selectFrom('control.intents')
         .selectAll()
         .where('id', '=', accepted.intentId)
         .executeTakeFirstOrThrow();
-      expect(update.blocked_by_intent_id).toBeTruthy();
-      const pending = await new IntentRepository(database).listPending({ limit: 50 });
-      expect(pending.items.some((item) => item.id === accepted.intentId)).toBe(false);
+      expect(update.blocked_by_intent_id).toBeNull();
+      expect(await database.selectFrom('control.intents')
+        .select('id')
+        .where('kind', '=', 'volume.ensure')
+        .where('resource_id', '=', volumeId)
+        .execute()).toHaveLength(0);
 
       const attachment = await database.selectFrom('control.volume_attachments')
         .select('id')
         .where('volume_id', '=', volumeId)
         .executeTakeFirstOrThrow();
-      await service.detachForUser(userId, attachment.id, containerId);
+      await insertStoppedRoute(database, containerId, serverId);
+      await service.detachForUser(userId, attachment.id, containerId, 'shared');
       const placement = await database.selectFrom('control.volume_placements')
-        .select(['desired_present', 'server_id'])
+        .select(['catalog_state', 'server_id'])
         .where('volume_id', '=', volumeId)
         .where('server_id', '=', serverId)
         .executeTakeFirstOrThrow();
-      expect(placement.desired_present).toBe(true);
+      expect(placement.catalog_state).toBe('present');
     });
   });
 
-  it('keeps a non-home placement after last detach and drain blocks home RemoveAll', async () => {
+  it('keeps sticky catalogs after detach and does not drop the attachment row until settle', async () => {
     await withPostgresTestDatabase(async ({ database }) => {
       const userId = randomUUID();
       const homeServer = randomUUID();
@@ -574,8 +597,7 @@ describePg('volume attachment ownership, visibility, and drain guards', () => {
         volume_id: volumeId,
         server_id: homeServer,
         pool_id: homePool,
-        desired_present: true,
-        observed_present: true,
+        catalog_state: 'present',
       }).execute();
       await database.insertInto('iam.shared_backend_grants').values({
         id: randomUUID(),
@@ -590,64 +612,22 @@ describePg('volume attachment ownership, visibility, and drain guards', () => {
         volumeId,
         containerPath: '/shared',
         readOnly: false,
-      });
+      }, 'shared');
       const attachment = await database.selectFrom('control.volume_attachments')
         .select('id')
         .where('volume_id', '=', volumeId)
         .executeTakeFirstOrThrow();
-      await service.detachForUser(userId, attachment.id, containerId);
+      await service.detachForUser(userId, attachment.id, containerId, 'shared');
       const peerPlacement = await database.selectFrom('control.volume_placements')
-        .select(['desired_present', 'server_id'])
+        .select(['catalog_state', 'server_id'])
         .where('volume_id', '=', volumeId)
         .where('server_id', '=', peerServer)
         .executeTakeFirstOrThrow();
-      expect(peerPlacement.desired_present).toBe(false);
-      expect(await database.selectFrom('control.volume_detach_drains')
-        .select('volume_id')
+      expect(peerPlacement.catalog_state).toBe('ensuring');
+      expect(await database.selectFrom('control.volume_attachments')
+        .select('bind_state')
         .where('volume_id', '=', volumeId)
-        .execute()).toHaveLength(1);
-
-      await database.updateTable('control.volumes')
-        .set({ lifecycle_phase: 'deleting' })
-        .where('id', '=', volumeId)
-        .execute();
-      await database.updateTable('control.volume_placements')
-        .set({ desired_present: false })
-        .where('volume_id', '=', volumeId)
-        .execute();
-      const homeDelete = vi.fn();
-      const reconciler = new VolumeReconciler(
-        database,
-        new IntentRepository(database),
-        undefined,
-        {
-          get: vi.fn(async (id: string) => ({
-            getStorageVolume: vi.fn().mockResolvedValue({
-              metadata: { used_by: id === peerServer ? ['/1.0/instances/x'] : [] },
-            }),
-          })),
-        } as never,
-      );
-      const outcome = await reconciler.reconcile({
-        intent: {
-          id: randomUUID(),
-          kind: 'volume.ensure',
-          resourceType: 'volume',
-          resourceId: volumeId,
-          serverId: homeServer,
-          request: { operation: 'delete' },
-          attemptCount: 0,
-        } as never,
-        client: {
-          getStorageVolume: vi.fn().mockResolvedValue({ metadata: { used_by: [] } }),
-          deleteStorageVolume: homeDelete,
-        } as never,
-        claim: {} as never,
-        lease: {} as never,
-        signal: new AbortController().signal,
-      });
-      expect(outcome.outcome).toBe('retry');
-      expect(homeDelete).not.toHaveBeenCalled();
+        .executeTakeFirst()).toEqual({ bind_state: 'detaching' });
     });
   });
 });

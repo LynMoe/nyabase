@@ -52,7 +52,9 @@ export function capabilityLabel(capability: string): string {
     case Capability.ManageSharedBackends:
       return '管理共享存储';
     case Capability.ManageVolumes:
-      return '管理数据卷';
+      return '管理本地数据卷';
+    case Capability.ManageSharedVolumes:
+      return '管理共享卷';
     case Capability.ManageGrants:
       return '管理授权';
     case Capability.ManageContainersAny:
@@ -109,15 +111,15 @@ export function preflightStatusLabel(status: string): string {
 export function preflightCheckLabel(name: string): string {
   const labels: Record<string, string> = {
     api: 'API 连通',
-    parentInterface: '父网卡',
+    parentInterface: 'LAN 网桥 (vmbr)',
     gpuRuntime: 'GPU 运行时',
-    forwarding: '网络转发',
     nftables: 'nftables',
-    rpFilter: 'rp_filter',
+    ipv4Filtering: 'IPv4 防伪',
+    guestCanReachHost: '容器可达宿主',
     networkPrerequisites: '网络前置条件',
     storagePool: '存储池',
     simplestreamsImage: '镜像源',
-    routedAddress: '容器 IP',
+    guestAddress: '容器 IP',
     egress: '出站网络',
     nodeMetrics: '节点指标',
   };

@@ -1,7 +1,7 @@
-import type { APIRequestContext } from '@playwright/test';
+import type { ApiClient } from './api-client.js';
 
 export async function waitForGone(
-  api: APIRequestContext,
+  api: ApiClient,
   path: string,
   timeoutMs = 120_000,
 ): Promise<void> {

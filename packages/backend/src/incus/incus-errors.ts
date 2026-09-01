@@ -19,6 +19,7 @@ export type IncusFailureCode =
   | 'INVALID_ENDPOINT'
   | 'MISSING_MANAGED_NETWORK_ADDRESS'
   | 'INVALID_MANAGED_NETWORK_TYPE'
+  | 'INVALID_MANAGED_FILTER_IDENTITY'
   | 'WILDCARD_GPU_SELECTOR'
   | 'GPU_RUNTIME_UNAVAILABLE'
   | 'INVALID_INSTANCE_SPEC'
@@ -49,9 +50,7 @@ export type IncusFailureCode =
   | 'MISSING_STORAGE_POOL'
   | 'RESOURCE_NEEDS_ATTENTION'
   | 'VOLUME_PLACEMENT_PENDING'
-  | 'VOLUME_CATALOG_ADOPT_PENDING'
-  | 'VOLUME_DELETE_WAITING_HOME'
-  | 'VOLUME_DELETE_WAITING_IDLE';
+  | 'VOLUME_CATALOG_ADOPT_PENDING';
 
 export type IncusErrorDetailValue =
   | string
@@ -81,7 +80,8 @@ const FAILURE_MESSAGES: Record<IncusFailureCode, string> = {
   TLS_PIN_MISMATCH: 'The Incus server certificate did not match its pin',
   INVALID_ENDPOINT: 'The Incus endpoint is invalid',
   MISSING_MANAGED_NETWORK_ADDRESS: 'The managed Incus network device is missing',
-  INVALID_MANAGED_NETWORK_TYPE: 'The managed Incus network device is not macvlan',
+  INVALID_MANAGED_NETWORK_TYPE: 'The managed Incus network device is not bridged',
+  INVALID_MANAGED_FILTER_IDENTITY: 'The managed Incus network filter identity is invalid',
   WILDCARD_GPU_SELECTOR: 'The managed Incus GPU selector is not pinned to a PCI address',
   GPU_RUNTIME_UNAVAILABLE: 'The NVIDIA runtime is not available on the Incus server',
   INVALID_INSTANCE_SPEC: 'The managed Incus instance specification is invalid',
@@ -113,8 +113,6 @@ const FAILURE_MESSAGES: Record<IncusFailureCode, string> = {
   RESOURCE_NEEDS_ATTENTION: 'The resource requires operator attention',
   VOLUME_PLACEMENT_PENDING: 'The custom volume is not yet present on this Incus',
   VOLUME_CATALOG_ADOPT_PENDING: 'Incus has not adopted the existing CephFS directory into this catalog',
-  VOLUME_DELETE_WAITING_HOME: 'Shared volume catalog cleanup is waiting for home RemoveAll',
-  VOLUME_DELETE_WAITING_IDLE: 'Shared volume delete is waiting for every catalog to report idle',
 };
 
 export class IncusError extends Error {

@@ -179,6 +179,15 @@ export interface IncusClientPort {
     options?: IncusRequestOptions,
   ): Promise<IncusResponse<unknown>>;
   getResources(options?: IncusRequestOptions): Promise<IncusResponse<IncusSchema<'Resources'>>>;
+  getNetwork(
+    name: string,
+    options?: IncusRequestOptions,
+  ): Promise<IncusResponse<IncusSchema<'Network'>>>;
+  getNetworkState(
+    name: string,
+    options?: IncusRequestOptions,
+  ): Promise<IncusResponse<IncusSchema<'NetworkState'>>>;
+  listNetworks(options?: IncusRequestOptions): Promise<IncusResponse<string[]>>;
   listInstances(
     recursion?: 1 | 2,
     options?: IncusRequestOptions,
@@ -764,6 +773,32 @@ export class IncusClient implements IncusClientPort {
 
   getResources(options?: IncusRequestOptions): Promise<IncusResponse<IncusSchema<'Resources'>>> {
     return this.requestJson('GET', '/1.0/resources', options);
+  }
+
+  getNetwork(
+    name: string,
+    options?: IncusRequestOptions,
+  ): Promise<IncusResponse<IncusSchema<'Network'>>> {
+    return this.requestJson(
+      'GET',
+      `/1.0/networks/${encodeSegment(name, 'network_name')}`,
+      options,
+    );
+  }
+
+  getNetworkState(
+    name: string,
+    options?: IncusRequestOptions,
+  ): Promise<IncusResponse<IncusSchema<'NetworkState'>>> {
+    return this.requestJson(
+      'GET',
+      `/1.0/networks/${encodeSegment(name, 'network_name')}/state`,
+      options,
+    );
+  }
+
+  listNetworks(options?: IncusRequestOptions): Promise<IncusResponse<string[]>> {
+    return this.requestJson('GET', '/1.0/networks', options);
   }
 
   listInstances(

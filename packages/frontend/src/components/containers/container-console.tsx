@@ -146,12 +146,17 @@ export function ContainerConsole({
   };
   return (
     <div className="overflow-hidden rounded-lg border bg-card">
-      <div className="flex items-center justify-between gap-3 border-b px-4 py-3">
-        <div className="flex min-w-0 items-center gap-2"><TerminalIcon className="h-4 w-4 text-muted-foreground" /><span className="text-sm font-medium">网页终端</span><Badge variant={status === 'connected' ? 'success' : status === 'error' ? 'destructive' : 'secondary'}>{statusLabel[status]}</Badge><span className="font-mono text-xs text-muted-foreground">{container.routedIp ?? '等待容器 IP'}</span></div>
-        <Button size="sm" variant="outline" onClick={() => setReload((value) => value + 1)} disabled={status === 'connecting'}>{status === 'connecting' ? <Loader2 className="h-4 w-4 animate-spin" /> : <RotateCw className="h-4 w-4" />}重连</Button>
+      <div className="flex flex-wrap items-center justify-between gap-3 border-b px-4 py-3">
+        <div className="flex min-w-0 flex-wrap items-center gap-2">
+          <TerminalIcon className="h-4 w-4 shrink-0 text-muted-foreground" />
+          <span className="text-sm font-medium">网页终端</span>
+          <Badge variant={status === 'connected' ? 'success' : status === 'error' ? 'destructive' : 'secondary'}>{statusLabel[status]}</Badge>
+          <span className="truncate font-mono text-xs text-muted-foreground">{container.routedIp ?? '等待容器 IP'}</span>
+        </div>
+        <Button size="sm" variant="outline" className="shrink-0" onClick={() => setReload((value) => value + 1)} disabled={status === 'connecting'}>{status === 'connecting' ? <Loader2 className="h-4 w-4 animate-spin" /> : <RotateCw className="h-4 w-4" />}重连</Button>
       </div>
-      {error && <div className="border-b bg-destructive/10 px-4 py-2 text-xs text-destructive">{error}</div>}
-      <div ref={mountRef} aria-label="网页终端" className="h-[520px] bg-zinc-950 p-2" />
+      {error && <div className="break-words border-b bg-destructive/10 px-4 py-2 text-xs text-destructive">{error}</div>}
+      <div ref={mountRef} aria-label="网页终端" className="h-[min(24rem,70dvh)] max-w-full overflow-hidden bg-zinc-950 p-2 md:h-[520px]" />
     </div>
   );
 }

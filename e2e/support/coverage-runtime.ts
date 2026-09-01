@@ -6,12 +6,10 @@ import {
 } from 'node:fs';
 import { dirname, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import type {
-  APIRequestContext,
-  APIResponse,
-  TestInfo,
-} from '@playwright/test';
+import type { ApiClient, ApiRequestOptions, ApiResponse } from './api-client.js';
 import { currentRunId, requireRuntimeEnv } from './runtime-env.js';
+import { registerControlPlaneNamesFromJson } from './incus-control.js';
+import { readSeedState } from './seed-state.js';
 
 type ApiMethod = 'delete' | 'fetch' | 'get' | 'head' | 'patch' | 'post' | 'put';
 
@@ -28,24 +26,34 @@ interface SurfaceMatcher {
   staticSegments: number;
 }
 
+export interface CoverageTestInfo {
+  file: string;
+  annotations: Array<{ type: string; description: string }>;
+}
+
 export interface CoverageRecorder {
-  wrap(api: APIRequestContext): APIRequestContext;
-  finish(): void;
+  wrap(api: ApiClient): ApiClient;
+  finish(status: 'passed' | 'failed'): void;
 }
 
 const e2eRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const ledger = JSON.parse(readFileSync(
-  join(e2eRoot, 'coverage', 'features.yaml'),
+  join(e2eRoot, 'coverage', 'features.json'),
   'utf8',
-)) as { features: Array<{ cases: LedgerCase[]; httpSurfaces: string[] }> };
+)) as {
+  surfaceAliases?: Record<string, string>;
+  features: Array<{ cases: LedgerCase[]; httpSurfaces: string[] }>;
+};
 const caseById = new Map(
   ledger.features.flatMap((feature) => feature.cases)
     .map((entry) => [entry.caseId, entry]),
 );
+const surfaceAliases = ledger.surfaceAliases ?? {};
+const listedSurfaces = ledger.features.flatMap((feature) => (
+  (feature.cases ?? []).flatMap((entry) => entry.httpSurfaces ?? [])
+)).map((surface) => surfaceAliases[surface] ?? surface);
 const surfaceMatchers = Array.from(new Map(
-  ledger.features.flatMap((feature) => (
-    (feature.cases ?? []).flatMap((entry) => entry.httpSurfaces ?? [])
-  )).map((surface) => {
+  listedSurfaces.map((surface) => {
     const [method, path] = surface.split('|');
     const segments = path.split('/').filter(Boolean);
     return [surface, {
@@ -59,7 +67,7 @@ const surfaceMatchers = Array.from(new Map(
   }),
 ).values()).sort((left, right) => right.staticSegments - left.staticSegments);
 
-export function createCoverageRecorder(testInfo: TestInfo): CoverageRecorder {
+export function createCoverageRecorder(testInfo: CoverageTestInfo): CoverageRecorder {
   const caseId = annotation(testInfo, 'nyabase.coverage.case');
   const specTestId = annotation(testInfo, 'nyabase.coverage.test-id');
   const coverageCase = caseById.get(caseId);
@@ -80,7 +88,7 @@ export function createCoverageRecorder(testInfo: TestInfo): CoverageRecorder {
 
   mkdirSync(runtimeRoot, { recursive: true, mode: 0o700 });
 
-  const record = (method: string, url: string, response: APIResponse) => {
+  const record = async (method: string, url: string, response: ApiResponse) => {
     const parsed = new URL(url, requireRuntimeEnv('E2E_BASE_URL'));
     if (!parsed.pathname.startsWith('/api/')) return;
     const matches = surfaceMatchers.filter((candidate) => (
@@ -95,8 +103,17 @@ export function createCoverageRecorder(testInfo: TestInfo): CoverageRecorder {
       );
     }
     const surface = mostSpecific[0].surface;
-    const countsForCase = coverageCase.httpSurfaces.includes(surface);
+    const caseSurfaces = new Set(
+      (coverageCase.httpSurfaces ?? []).map((entry) => surfaceAliases[entry] ?? entry),
+    );
+    const countsForCase = caseSurfaces.has(surface);
     if (countsForCase) observedSurfaces.add(surface);
+    const status = response.status();
+    assertNoSeedAdminGrantMutation(method, parsed.pathname, status);
+    if (status >= 200 && status < 300) {
+      const body = await response.json().catch(() => undefined);
+      registerControlPlaneNamesFromJson(body);
+    }
     appendJsonLine(httpEventsPath, {
       schemaVersion: 2,
       runId,
@@ -109,7 +126,7 @@ export function createCoverageRecorder(testInfo: TestInfo): CoverageRecorder {
       requestPath: parsed.pathname,
       normalizedSurface: surface,
       countsForCase,
-      status: response.status(),
+      status,
       observedAt: new Date().toISOString(),
     });
   };
@@ -119,15 +136,16 @@ export function createCoverageRecorder(testInfo: TestInfo): CoverageRecorder {
       return new Proxy(api, {
         get(target, property, receiver) {
           if (typeof property === 'string' && isApiMethod(property)) {
-            return async (url: string, options?: Record<string, unknown>) => {
+            return async (url: string, options?: ApiRequestOptions & { method?: string }) => {
               const method = property === 'fetch'
                 ? String(options?.method ?? 'GET').toUpperCase()
                 : property.toUpperCase();
-              const response = await (target[property] as (
+              const methodFn = (target as unknown as Record<string, (
                 requestUrl: string,
-                requestOptions?: Record<string, unknown>,
-              ) => Promise<APIResponse>).call(target, url, options);
-              record(method, response.url(), response);
+                requestOptions?: ApiRequestOptions,
+              ) => Promise<ApiResponse>>)[property];
+              const response = await methodFn.call(target, url, options);
+              await record(method, response.url(), response);
               return response;
             };
           }
@@ -136,15 +154,15 @@ export function createCoverageRecorder(testInfo: TestInfo): CoverageRecorder {
         },
       });
     },
-    finish() {
+    finish(status) {
       appendJsonLine(caseEventsPath, {
         schemaVersion: 2,
         runId,
         coverageNonce,
         profile,
         caseId,
-        source: 'playwright',
-        status: testInfo.status === 'passed' ? 'passed' : 'failed',
+        source: 'api-http',
+        status,
         observedAt: new Date().toISOString(),
         specPath: slash(relative(e2eRoot, testInfo.file)),
         specTestId,
@@ -155,7 +173,7 @@ export function createCoverageRecorder(testInfo: TestInfo): CoverageRecorder {
   };
 }
 
-function annotation(testInfo: TestInfo, type: string): string {
+function annotation(testInfo: CoverageTestInfo, type: string): string {
   const value = testInfo.annotations.find((entry) => entry.type === type)?.description;
   if (!value) throw new Error(`live test lacks ${type} annotation`);
   return value;
@@ -171,6 +189,20 @@ function appendJsonLine(path: string, value: unknown): void {
 
 function isApiMethod(value: string): value is ApiMethod {
   return ['delete', 'fetch', 'get', 'head', 'patch', 'post', 'put'].includes(value);
+}
+
+function assertNoSeedAdminGrantMutation(method: string, pathname: string, status: number): void {
+  if (method !== 'PUT' && method !== 'DELETE') return;
+  if (status < 200 || status >= 300) return;
+  const adminUserId = readSeedState().adminUserId;
+  const pattern = new RegExp(
+    `^/api/admin/users/${escapeRegExp(adminUserId)}/(server-grants|storage-pool-grants|shared-backend-grants)/`,
+  );
+  if (pattern.test(pathname)) {
+    throw new Error(
+      `seed admin grant mutation is forbidden: ${method} ${pathname} returned ${status}`,
+    );
+  }
 }
 
 function escapeRegExp(value: string): string {

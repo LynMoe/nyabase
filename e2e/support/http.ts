@@ -1,9 +1,10 @@
-import { expect, type APIResponse } from '@playwright/test';
+import { expect } from './expect.js';
+import type { ApiResponse } from './api-client.js';
 
 type ExpectedStatus = number | readonly number[];
 
 export async function expectJson<T>(
-  response: APIResponse,
+  response: ApiResponse,
   status: ExpectedStatus = 200,
 ): Promise<T> {
   const body = await response.text();
@@ -22,7 +23,7 @@ export async function expectJson<T>(
   }
 }
 
-export async function expectSuccess(response: APIResponse): Promise<void> {
+export async function expectSuccess(response: ApiResponse): Promise<void> {
   expect(
     response.ok(),
     `${response.url()} returned ${response.status()}; response body withheld`,

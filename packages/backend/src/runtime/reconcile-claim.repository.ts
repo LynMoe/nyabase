@@ -14,6 +14,7 @@ export const RECONCILE_LEASE_MS = 60_000;
 export const RECONCILE_RENEWAL_MS = 20_000;
 export const MAX_ACTIVE_CLAIMS_PER_SERVER = 8;
 export const NO_PLACEMENT_SERVER_ID = '00000000-0000-4000-8000-000000000000';
+export const VOLUME_DESTROY_PLACEMENT_ID = '00000000-0000-4000-8000-000000000001';
 
 export interface ClaimInput {
   readonly resourceType: IntentResource;
@@ -98,12 +99,40 @@ export class ReconcileClaimRepository {
     input: ClaimInput,
     executor: ClaimExecutor,
   ): Promise<ReconcileClaim | null> {
+    if (input.resourceType === 'volume') {
+      await sql`SELECT pg_advisory_xact_lock(hashtextextended(${`volume-lifecycle:${input.resourceId}`}, 0))`
+        .execute(executor);
+    }
     if (input.serverId) {
       await sql`SELECT pg_advisory_xact_lock(hashtextextended(${`reconcile-server:${input.serverId}`}, 0))`
         .execute(executor);
     }
     const placementLock = `reconcile-placement:${input.resourceType}:${input.resourceId}:${input.placementServerId}`;
     await sql`SELECT pg_advisory_xact_lock(hashtextextended(${placementLock}, 0))`.execute(executor);
+    if (input.resourceType === 'volume') {
+      const now = sql<Date>`clock_timestamp()`;
+      if (input.placementServerId === VOLUME_DESTROY_PLACEMENT_ID) {
+        const other = await executor
+          .selectFrom('control.reconcile_claims')
+          .select('placement_server_id')
+          .where('resource_type', '=', 'volume')
+          .where('resource_id', '=', input.resourceId)
+          .where('placement_server_id', '<>', VOLUME_DESTROY_PLACEMENT_ID)
+          .where('lease_expires_at', '>', now)
+          .executeTakeFirst();
+        if (other) return null;
+      } else {
+        const destroy = await executor
+          .selectFrom('control.reconcile_claims')
+          .select('placement_server_id')
+          .where('resource_type', '=', 'volume')
+          .where('resource_id', '=', input.resourceId)
+          .where('placement_server_id', '=', VOLUME_DESTROY_PLACEMENT_ID)
+          .where('lease_expires_at', '>', now)
+          .executeTakeFirst();
+        if (destroy) return null;
+      }
+    }
     const current = await executor
       .selectFrom('control.reconcile_claims')
       .selectAll()

@@ -117,6 +117,7 @@ export class AdminServersController {
   }
 
   @Post(':id/storage-pools/discover')
+  @HttpCode(HttpStatus.OK)
   discoverStoragePools(@Param('id') id: string) {
     return this.storagePools.discover(id);
   }

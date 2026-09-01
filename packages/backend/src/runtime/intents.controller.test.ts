@@ -77,10 +77,19 @@ function controller(options: {
       return work({});
     }),
   };
+  const database = {
+    selectFrom: vi.fn(() => ({
+      select: vi.fn().mockReturnThis(),
+      where: vi.fn().mockReturnThis(),
+      executeTakeFirst: vi.fn().mockResolvedValue({ shared_backend_id: null }),
+      execute: vi.fn().mockResolvedValue([]),
+    })),
+  };
   return {
     controller: new AdminIntentsController(
       intents as unknown as IntentRepository,
       access as unknown as AccessResolverService,
+      database as never,
     ),
     intents,
   };
@@ -91,6 +100,7 @@ describe('AdminIntentsController capabilities', () => {
     expect(Reflect.getMetadata(ANY_CAPS_KEY, AdminIntentsController)).toEqual([
       Capability.ManageContainersAny,
       Capability.ManageVolumes,
+      Capability.ManageSharedVolumes,
       Capability.ManageServers,
       Capability.ManageImages,
       Capability.ManageCertificates,

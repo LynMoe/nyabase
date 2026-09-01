@@ -1,10 +1,13 @@
 import { execFile as childExecFile } from 'node:child_process';
 import { readFile as fsReadFile, readdir as fsReaddir } from 'node:fs/promises';
+import { isIP } from 'node:net';
 import { promisify } from 'node:util';
 import { canonicalPciAddress, type NodeMetricSample } from '@nyabase/common';
 
 const execFile = promisify(childExecFile);
 const COMMAND_TIMEOUT_MS = 1_000;
+const NFT_TIMEOUT_MS = 400;
+const IP_ADDR_TIMEOUT_MS = 250;
 const COMMAND_MAX_BUFFER_BYTES = 256 * 1024;
 const BYTES_PER_DISK_SECTOR = 512;
 const BYTES_PER_MIB = 1024 * 1024;
@@ -54,7 +57,9 @@ const defaultFileSystem: ReadOnlyNodeFileSystem = {
   readFile: (path) => fsReadFile(path, 'utf8'),
   readdir: async (path) => {
     const entries = await fsReaddir(path, { withFileTypes: true });
-    return entries.filter((entry) => entry.isDirectory()).map((entry) => entry.name);
+    return entries
+      .filter((entry) => !entry.name.startsWith('.'))
+      .map((entry) => entry.name);
   },
 };
 
@@ -329,14 +334,37 @@ export class LinuxNodeMetricsCollector {
   }
 
   private async collectNetworkEvidence(): Promise<NodeMetricSample[]> {
-    let interfaces: string[];
-    try {
-      interfaces = await this.fileSystem.readdir('/proc/sys/net/ipv4/conf');
-    } catch {
-      interfaces = this.options.parentInterface ? [this.options.parentInterface] : [];
+    const confInterfaces = await this.listInterfaceNames('/proc/sys/net/ipv4/conf');
+    const sysfsInterfaces = await this.listInterfaceNames('/sys/class/net');
+    const names = new Set<string>([...confInterfaces, ...sysfsInterfaces]);
+    if (names.size === 0 && this.options.parentInterface && isSafeInterface(this.options.parentInterface)) {
+      names.add(this.options.parentInterface);
     }
-    interfaces = interfaces.filter(isSafeInterface).sort();
     const samples: NodeMetricSample[] = [];
+    const bridges: string[] = [];
+    for (const name of [...names].sort()) {
+      if (!isSysctlAggregate(name)) {
+        const isBridge = await this.directoryExists(`/sys/class/net/${name}/bridge`);
+        samples.push({
+          name: 'nyabase_node_network_is_bridge',
+          labels: { interface: name },
+          value: isBridge ? 1 : 0,
+        });
+        if (isBridge) bridges.push(name);
+      }
+    }
+    for (const bridge of bridges) {
+      const slaves = await this.listInterfaceNames(`/sys/class/net/${bridge}/brif`);
+      for (const slave of slaves.sort()) {
+        names.add(slave);
+        samples.push({
+          name: 'nyabase_node_network_bridge_slave',
+          labels: { bridge, interface: slave },
+          value: 1,
+        });
+      }
+    }
+    const interfaces = [...names].filter(isSafeInterface).sort();
     for (const name of interfaces) {
       const forwarding = await this.readSysctl(name, 'forwarding');
       if (forwarding !== undefined) {
@@ -355,25 +383,113 @@ export class LinuxNodeMetricsCollector {
         });
       }
     }
-    let ruleset: string;
-    try {
-      ({ stdout: ruleset } = await this.command(
-        'nft',
-        ['list', 'ruleset'],
-        { timeout: COMMAND_TIMEOUT_MS, maxBuffer: COMMAND_MAX_BUFFER_BYTES },
-      ));
-    } catch {
-      return samples;
+    const ipv4Present = await this.collectIpv4Present();
+    if (ipv4Present) {
+      for (const name of interfaces) {
+        if (isSysctlAggregate(name)) continue;
+        samples.push({
+          name: 'nyabase_node_network_ipv4_present',
+          labels: { interface: name },
+          value: ipv4Present.has(name) ? 1 : 0,
+        });
+      }
     }
-    const rulePresent = /fib\s+saddr\s*\.\s*iif\s+oif\s+(?:missing|0)\s+drop/i.test(ruleset);
+    await this.collectFibRule(samples, interfaces);
+    await this.collectNftBridgeFilters(samples);
+    return samples;
+  }
+
+  private async listInterfaceNames(path: string): Promise<string[]> {
+    try {
+      return (await this.fileSystem.readdir(path)).filter(isSafeInterface);
+    } catch {
+      return [];
+    }
+  }
+
+  private async directoryExists(path: string): Promise<boolean> {
+    try {
+      await this.fileSystem.readdir(path);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  private async collectIpv4Present(): Promise<Set<string> | undefined> {
+    try {
+      const { stdout } = await this.command(
+        'ip',
+        ['-4', '-o', 'addr', 'show'],
+        { timeout: IP_ADDR_TIMEOUT_MS, maxBuffer: COMMAND_MAX_BUFFER_BYTES },
+      );
+      return parseGlobalIpv4Interfaces(stdout);
+    } catch {
+      return undefined;
+    }
+  }
+
+  private async collectFibRule(
+    samples: NodeMetricSample[],
+    interfaces: readonly string[],
+  ): Promise<void> {
+    // Leftover routed-NIC diagnostic. Bridged anti-spoof is nft bridge-family,
+    // not FIB; keep emitting 0 so the allowlist does not drop accidentally.
     for (const name of interfaces) {
       samples.push({
         name: 'nyabase_node_network_fib_rule_present',
         labels: { interface: name },
-        value: rulePresent ? 1 : 0,
+        value: 0,
       });
     }
-    return samples;
+  }
+
+  private async collectNftBridgeFilters(samples: NodeMetricSample[]): Promise<void> {
+    try {
+      const { stdout } = await this.command(
+        'nft',
+        ['list', 'table', 'bridge', 'incus'],
+        { timeout: NFT_TIMEOUT_MS, maxBuffer: COMMAND_MAX_BUFFER_BYTES },
+      );
+      samples.push({
+        name: 'nyabase_node_network_nft_available',
+        labels: {},
+        value: 1,
+      });
+      const parsed = parseNftBridgeFilters(stdout);
+      samples.push({
+        name: 'nyabase_node_network_bridge_filter_present',
+        labels: {},
+        value: parsed.present ? 1 : 0,
+      });
+      for (const address of parsed.addresses) {
+        samples.push({
+          name: 'nyabase_node_network_bridge_filter_address',
+          labels: { address },
+          value: 1,
+        });
+      }
+    } catch (error) {
+      const details = commandErrorDetails(error);
+      if (isMissingNftTable(details.stderr)) {
+        samples.push({
+          name: 'nyabase_node_network_nft_available',
+          labels: {},
+          value: 1,
+        });
+        samples.push({
+          name: 'nyabase_node_network_bridge_filter_present',
+          labels: {},
+          value: 0,
+        });
+        return;
+      }
+      samples.push({
+        name: 'nyabase_node_network_nft_available',
+        labels: {},
+        value: 0,
+      });
+    }
   }
 
   private async readSysctl(interfaceName: string, field: string): Promise<number | undefined> {
@@ -511,4 +627,82 @@ function isVirtualBlockDevice(name: string): boolean {
 
 function isSafeInterface(value: string): boolean {
   return /^[A-Za-z0-9_.:-]{1,64}$/.test(value);
+}
+
+function isSysctlAggregate(value: string): boolean {
+  return value === 'all' || value === 'default';
+}
+
+function isExcludedIpv4(address: string): boolean {
+  if (isIP(address) !== 4) return true;
+  const parts = address.split('.').map(Number);
+  if (parts[0] === 127) return true;
+  if (parts[0] === 169 && parts[1] === 254) return true;
+  return false;
+}
+
+export function parseGlobalIpv4Interfaces(stdout: string): Set<string> {
+  const present = new Set<string>();
+  for (const line of stdout.split(/\r?\n/)) {
+    const match = /^\d+:\s+([^\s@]+)(?:@\S+)?\s+inet\s+(\d+\.\d+\.\d+\.\d+)\/\d+.*\bscope\s+global\b/
+      .exec(line.trim());
+    if (!match) continue;
+    const iface = match[1];
+    const address = match[2];
+    if (!isSafeInterface(iface) || isExcludedIpv4(address)) continue;
+    present.add(iface);
+  }
+  return present;
+}
+
+export function parseNftBridgeFilters(stdout: string): {
+  readonly addresses: readonly string[];
+  readonly present: boolean;
+} {
+  const addresses = new Set<string>();
+  let arpDrop = false;
+  let ipDrop = false;
+  for (const line of stdout.split(/\r?\n/)) {
+    const trimmed = line.trim();
+    const isArp = /\barp\s+saddr\s+ip\b/i.test(trimmed);
+    const isIp = !isArp && /\bip\s+saddr\b/i.test(trimmed);
+    if ((!isArp && !isIp) || !/\bdrop\b/i.test(trimmed)) continue;
+    if (isArp) arpDrop = true;
+    if (isIp) ipDrop = true;
+    const setMatch = /\{([^}]+)\}/.exec(trimmed);
+    const tokens = setMatch
+      ? setMatch[1].split(/[\s,]+/)
+      : [...trimmed.matchAll(/\b(\d{1,3}(?:\.\d{1,3}){3})(?:\/32)?\b/g)].map((match) => match[1]);
+    for (const token of tokens) {
+      const bare = token.replace(/\/32$/, '');
+      if (isIP(bare) === 4 && !isExcludedIpv4(bare) && bare !== '0.0.0.0' && bare !== '255.255.255.255') {
+        addresses.add(bare);
+      }
+    }
+  }
+  return { addresses: [...addresses].sort(), present: arpDrop && ipDrop };
+}
+
+function isMissingNftTable(stderr: string): boolean {
+  return /no such (file or directory|table)/i.test(stderr);
+}
+
+function commandErrorDetails(error: unknown): {
+  readonly code?: string | number;
+  readonly killed?: boolean;
+  readonly stderr: string;
+} {
+  if (typeof error !== 'object' || error === null) {
+    return { stderr: String(error) };
+  }
+  const record = error as {
+    code?: string | number;
+    killed?: boolean;
+    stderr?: unknown;
+  };
+  return {
+    code: record.code,
+    killed: record.killed,
+    stderr: typeof record.stderr === 'string' ? record.stderr : '',
+  };
 }

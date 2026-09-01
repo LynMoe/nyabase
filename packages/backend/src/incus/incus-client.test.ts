@@ -348,7 +348,7 @@ describe('IncusClient', () => {
   });
 
   it('covers the canonical server, instance, storage, image, and operation endpoints', async () => {
-    const responsePlans = Array.from({ length: 28 }, () => ({
+    const responsePlans = Array.from({ length: 31 }, () => ({
       status: 200,
       body: fixture(serverResponse),
     }));
@@ -361,6 +361,9 @@ describe('IncusClient', () => {
     await incus.updateServer({ config: { 'core.https_address': ':8443' } });
     await incus.patchServer({ config: { 'core.https_address': ':8443' } });
     await incus.getResources();
+    await incus.getNetwork('vmbr0');
+    await incus.getNetworkState('vmbr0');
+    await incus.listNetworks();
     await incus.listInstances();
     await incus.getInstance(instanceName);
     await incus.getInstanceFull(instanceName);
@@ -401,6 +404,9 @@ describe('IncusClient', () => {
       { method: 'PUT', path: '/1.0' },
       { method: 'PATCH', path: '/1.0' },
       { method: 'GET', path: '/1.0/resources' },
+      { method: 'GET', path: '/1.0/networks/vmbr0' },
+      { method: 'GET', path: '/1.0/networks/vmbr0/state' },
+      { method: 'GET', path: '/1.0/networks' },
       { method: 'GET', path: '/1.0/instances?recursion=2' },
       { method: 'GET', path: `/1.0/instances/${instanceName}` },
       { method: 'GET', path: `/1.0/instances/${instanceName}?recursion=1` },

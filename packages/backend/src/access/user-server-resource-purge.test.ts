@@ -24,11 +24,11 @@ function createService() {
     listAttachments: vi.fn(),
     updateDesired: vi.fn(),
     listPlacements: vi.fn().mockResolvedValue([]),
-    setAllDesiredPresent: vi.fn(),
     deleteVolumeRow: vi.fn(),
   };
   const intents = {
     ensurePending: vi.fn(),
+    settleOne: vi.fn(),
   };
   const reconcileClaims = {
     claim: vi.fn().mockResolvedValue({
@@ -201,11 +201,17 @@ describe('UserServerResourcePurgeService grant expiry actions', () => {
     };
     const updatedVolume = { ...volume, generation: 2, lifecycle_phase: 'deleting' };
     const transaction = {
-      selectFrom: vi.fn(() => ({
+      selectFrom: vi.fn((table: string) => ({
         selectAll: vi.fn().mockReturnThis(),
+        select: vi.fn().mockReturnThis(),
+        innerJoin: vi.fn().mockReturnThis(),
         where: vi.fn().mockReturnThis(),
+        orderBy: vi.fn().mockReturnThis(),
         forUpdate: vi.fn().mockReturnThis(),
-        executeTakeFirst: vi.fn().mockResolvedValue(volume),
+        execute: vi.fn().mockResolvedValue([]),
+        executeTakeFirst: vi.fn().mockResolvedValue(
+          String(table).startsWith('control.volumes') ? volume : undefined,
+        ),
       })),
     };
     fixture.transactions.run.mockImplementation(async (
@@ -239,13 +245,12 @@ describe('UserServerResourcePurgeService grant expiry actions', () => {
     });
     expect(fixture.intents.ensurePending).toHaveBeenCalledWith(
       expect.objectContaining({
-        kind: IntentKind.VolumeEnsure,
+        kind: IntentKind.VolumeDestroy,
         resourceId: 'volume-1',
         targetGeneration: 2,
-        serverId: 'server-1',
         request: {
-          operation: 'delete',
-          idempotencyKey: 'delete',
+          operation: 'destroy',
+          idempotencyKey: 'destroy',
         },
       }),
       transaction,
@@ -267,6 +272,73 @@ describe('UserServerResourcePurgeService grant expiry actions', () => {
       }),
     );
     expect(fixture.access.authorizationCommitted).toHaveBeenCalledWith(['user-1']);
+    expect(fixture.containers.actionForSystem.mock.invocationCallOrder[0])
+      .toBeLessThan(fixture.intents.ensurePending.mock.invocationCallOrder[0]);
+  });
+
+  it('does not deleteVolumeRow while attachments remain on empty tracking', async () => {
+    const fixture = createService();
+    const volume = {
+      id: 'volume-1',
+      owner_id: 'user-1',
+      pool_id: null,
+      server_id: null,
+      shared_backend_id: 'backend-1',
+      generation: 1,
+      lifecycle_phase: 'active',
+      dir_ensured: false,
+    };
+    const transaction = {
+      selectFrom: vi.fn((table: string) => ({
+        selectAll: vi.fn().mockReturnThis(),
+        select: vi.fn().mockReturnThis(),
+        innerJoin: vi.fn().mockReturnThis(),
+        where: vi.fn().mockReturnThis(),
+        orderBy: vi.fn().mockReturnThis(),
+        forUpdate: vi.fn().mockReturnThis(),
+        execute: vi.fn().mockResolvedValue([]),
+        executeTakeFirst: vi.fn().mockResolvedValue(
+          String(table).startsWith('control.volumes') ? volume : undefined,
+        ),
+      })),
+    };
+    fixture.transactions.run.mockImplementation(async (
+      work: (transaction: unknown) => Promise<unknown>,
+    ) => work(transaction));
+    fixture.volumes.list.mockResolvedValue([volume]);
+    fixture.volumes.listAttachments.mockResolvedValue([
+      { container_id: 'container-1' },
+    ]);
+    fixture.volumes.listPlacements.mockResolvedValue([]);
+    fixture.volumes.updateDesired.mockResolvedValue({
+      ...volume,
+      generation: 2,
+      lifecycle_phase: 'deleting',
+    });
+    fixture.intents.ensurePending.mockResolvedValue({ id: 'destroy-1' });
+    fixture.containerRepository.find.mockResolvedValue({
+      id: 'container-1',
+      lifecycle_phase: ContainerPhase.Active,
+      power_intent: ContainerPowerIntent.Stopped,
+    });
+    fixture.containers.actionForSystem.mockResolvedValue({ intentId: 'container-delete-intent' });
+
+    const result = await fixture.service.purgeSharedBackendVolumes(
+      'user-1',
+      'backend-1',
+      'system-actor',
+    );
+
+    expect(result.volumeIds).toEqual(['volume-1']);
+    expect(fixture.volumes.deleteVolumeRow).not.toHaveBeenCalled();
+    expect(fixture.intents.ensurePending).toHaveBeenCalled();
+    expect(fixture.containers.actionForSystem).toHaveBeenCalledWith(
+      'container-1',
+      'delete',
+      'system-actor',
+    );
+    expect(fixture.containers.actionForSystem.mock.invocationCallOrder[0])
+      .toBeLessThan(fixture.intents.ensurePending.mock.invocationCallOrder[0]);
   });
 
   it('audits operator purges separately from expiry cleanup', async () => {
@@ -298,6 +370,95 @@ describe('UserServerResourcePurgeService grant expiry actions', () => {
       'user-1',
       'user',
       expect.objectContaining({ reason: 'expiry' }),
+    );
+  });
+
+  it('grant-expiry empty placements follow dir_ensured and eligible executors', async () => {
+    async function purge(volume: Record<string, unknown>, eligible: boolean) {
+      const fixture = createService();
+      const transaction = {
+        selectFrom: vi.fn((table: string) => ({
+          selectAll: vi.fn().mockReturnThis(),
+          select: vi.fn().mockReturnThis(),
+          innerJoin: vi.fn().mockReturnThis(),
+          where: vi.fn().mockReturnThis(),
+          orderBy: vi.fn().mockReturnThis(),
+          forUpdate: vi.fn().mockReturnThis(),
+          execute: vi.fn().mockResolvedValue(eligible
+            ? [{ server_id: 'server-1', server_name: 's', pool_id: 'p', pool_name: 'cephfs' }]
+            : []),
+          executeTakeFirst: vi.fn().mockResolvedValue(
+            String(table).startsWith('control.volumes') ? volume : undefined,
+          ),
+        })),
+      };
+      fixture.transactions.run.mockImplementation(async (
+        work: (transaction: unknown) => Promise<unknown>,
+      ) => work(transaction));
+      fixture.volumes.list.mockResolvedValue([volume]);
+      fixture.volumes.listAttachments.mockResolvedValue([]);
+      fixture.volumes.listPlacements.mockResolvedValue([]);
+      fixture.volumes.updateDesired.mockResolvedValue({
+        ...volume,
+        generation: 2,
+        lifecycle_phase: 'deleting',
+      });
+      fixture.intents.ensurePending.mockResolvedValue({ id: 'destroy-1' });
+      const result = await fixture.service.purgeSharedBackendVolumes(
+        'user-1',
+        'backend-1',
+        'system-actor',
+      );
+      return { fixture, result };
+    }
+
+    const neverMounted = await purge({
+      id: 'volume-1',
+      owner_id: 'user-1',
+      pool_id: null,
+      server_id: null,
+      shared_backend_id: 'backend-1',
+      generation: 1,
+      lifecycle_phase: 'active',
+      dir_ensured: false,
+    }, true);
+    expect(neverMounted.fixture.volumes.deleteVolumeRow).toHaveBeenCalled();
+    expect(neverMounted.fixture.intents.ensurePending).not.toHaveBeenCalled();
+
+    const destroy = await purge({
+      id: 'volume-2',
+      owner_id: 'user-1',
+      pool_id: null,
+      server_id: null,
+      shared_backend_id: 'backend-1',
+      generation: 1,
+      lifecycle_phase: 'active',
+      dir_ensured: true,
+    }, true);
+    expect(destroy.fixture.intents.ensurePending).toHaveBeenCalledWith(
+      expect.objectContaining({ kind: IntentKind.VolumeDestroy }),
+      expect.anything(),
+    );
+
+    const leaked = await purge({
+      id: 'volume-3',
+      owner_id: 'user-1',
+      pool_id: null,
+      server_id: null,
+      shared_backend_id: 'backend-1',
+      generation: 1,
+      lifecycle_phase: 'active',
+      dir_ensured: true,
+    }, false);
+    expect(leaked.fixture.volumes.deleteVolumeRow).toHaveBeenCalled();
+    expect(leaked.fixture.intents.ensurePending).not.toHaveBeenCalled();
+    expect(leaked.fixture.audit.append).toHaveBeenCalledWith(
+      expect.anything(),
+      'system-actor',
+      AuditAction.DeleteVolume,
+      'volume-3',
+      'volume',
+      { reason: 'destroy_executor_gone' },
     );
   });
 });

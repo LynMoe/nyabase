@@ -14,6 +14,7 @@ import {
   provisionGrantedUser,
   readErrorBody,
   requireSucceededIntent,
+  stopUserContainer,
 } from '../../support/persona.js';
 
 type JsonRecord = Record<string, any>;
@@ -193,6 +194,12 @@ test(
       expect(attachment?.containerPath).toBe('/mnt/e2e-uatt');
       attachmentId = attachment!.id as string;
 
+      const runningDetach = await userApi.delete(
+        `/api/containers/${containerId}/volumes/${attachmentId}`,
+      );
+      expect(runningDetach.status()).toBe(409);
+      expect(JSON.stringify(await runningDetach.json())).toMatch(/VOLUME_DETACH_REQUIRES_STOP/);
+      await stopUserContainer(userApi, containerId);
       const detach = await expectJson<JsonRecord>(
         await userApi.delete(`/api/containers/${containerId}/volumes/${attachmentId}`),
         202,
@@ -214,12 +221,22 @@ test(
 
       await assertNoActiveIntents(userApi, `/api/containers/${containerId}/intents`);
     } finally {
-      if (attachmentId && containerId && userApi) {
-        await userApi.delete(`/api/containers/${containerId}/volumes/${attachmentId}`)
-          .catch(() => undefined);
+      if (containerId && userApi) {
+        await stopUserContainer(userApi, containerId).catch(() => undefined);
+        if (attachmentId) {
+          const detach = await userApi.delete(
+            `/api/containers/${containerId}/volumes/${attachmentId}`,
+          ).catch(() => undefined);
+          if (detach?.status() === 202) {
+            const body = await detach.json() as JsonRecord;
+            if (typeof body.intentId === 'string') {
+              await requireSucceededIntent(userApi, body.intentId, 'cleanup.detach');
+            }
+          }
+        }
       }
-      await deleteUserVolume(userApi ?? adminApi, adminApi, volumeId);
       await deleteUserContainer(userApi ?? adminApi, adminApi, containerId);
+      await deleteUserVolume(userApi ?? adminApi, adminApi, volumeId);
       if (refreshToken) {
         await (await trackedApiFactory()).post('/api/auth/logout', {
           data: { refreshToken },

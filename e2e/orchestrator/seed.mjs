@@ -20,6 +20,7 @@ import {
   ensureIpPoolForServer,
   ensureServerRegistration,
   resolveIncusServerName,
+  validateIncusServerName,
 } from './server-registration.mjs';
 import { parseConnectIntentId } from './connect-intent.mjs';
 import {
@@ -38,7 +39,7 @@ if (!runtimeRoot || !runId) {
 if (!/^[a-z0-9][a-z0-9-]{5,63}$/.test(runId)) {
   throw new Error('unsafe run id');
 }
-if (!/^(smoke|core|full|recovery)$/.test(profile)) {
+if (!/^(smoke|core|full)$/.test(profile)) {
   throw new Error(`unsupported profile: ${profile}`);
 }
 
@@ -327,6 +328,256 @@ function httpsJson(url, options, runHeader) {
   });
 }
 
+function loadLabServerDefs() {
+  const path = process.env.E2E_LAB_SERVERS_FILE?.trim();
+  if (!path) return [];
+  if (!existsSync(path) || lstatSync(path).isSymbolicLink()) {
+    blocked(`E2E_LAB_SERVERS_FILE is missing: ${path}`);
+  }
+  let listed;
+  try {
+    listed = JSON.parse(readFileSync(path, 'utf8'));
+  } catch {
+    blocked('E2E_LAB_SERVERS_FILE is not valid JSON');
+  }
+  if (!Array.isArray(listed) || listed.length === 0) {
+    blocked('E2E_LAB_SERVERS_FILE must list at least one extra Incus worker');
+  }
+  return listed.map((entry, index) => {
+    const ssh = String(entry?.ssh ?? '').trim();
+    const apiEndpoint = String(entry?.apiEndpoint ?? '').trim().replace(/\/$/, '');
+    const parentInterface = String(entry?.parentInterface ?? '').trim();
+    const slug = String(entry?.slug ?? '').trim();
+    if (!ssh || !apiEndpoint.startsWith('https://') || !parentInterface || !slug) {
+      blocked(`E2E_LAB_SERVERS_FILE[${index}] requires ssh, https apiEndpoint, parentInterface, slug`);
+    }
+    if (!/^[a-z0-9][a-z0-9_-]*$/.test(slug) || slug.length > 64) {
+      blocked(`E2E_LAB_SERVERS_FILE[${index}] slug is not a valid server slug`);
+    }
+    const dirPool = String(entry?.dirPool ?? '').trim();
+    const lvmPool = String(entry?.lvmPool ?? '').trim();
+    const nodeExporterToken = String(entry?.nodeExporterToken ?? '').trim();
+    const role = String(entry?.role ?? '').trim();
+    return {
+      ssh,
+      apiEndpoint,
+      parentInterface,
+      slug,
+      ...(dirPool ? { dirPool } : {}),
+      ...(lvmPool ? { lvmPool } : {}),
+      ...(nodeExporterToken ? { nodeExporterToken } : {}),
+      ...(role ? { role } : {}),
+    };
+  });
+}
+
+async function sshCapture(target, command) {
+  try {
+    const result = await execFileAsync(
+      'ssh',
+      [
+        '-o',
+        'BatchMode=yes',
+        '-o',
+        'StrictHostKeyChecking=accept-new',
+        '-o',
+        'ConnectTimeout=15',
+        target,
+        command,
+      ],
+      { timeout: 60_000, maxBuffer: 256 * 1024 },
+    );
+    return String(result.stdout ?? '').trim();
+  } catch (error) {
+    blocked(`ssh ${target} failed: ${error?.stderr?.trim() || error?.message || 'unknown'}`);
+  }
+}
+
+async function fingerprintForEndpoint(endpoint) {
+  const host = new URL(endpoint);
+  const connect = `${host.hostname}:${host.port || 8443}`;
+  try {
+    const result = await execFileAsync(
+      'bash',
+      [
+        '-lc',
+        `echo | openssl s_client -connect ${JSON.stringify(connect)} 2>/dev/null | openssl x509 -noout -fingerprint -sha256`,
+      ],
+      { timeout: 15_000, maxBuffer: 16 * 1024 },
+    );
+    const value = String(result.stdout ?? '').split('=').pop()?.trim();
+    if (!/^[0-9A-Fa-f:]{32,95}$/.test(value ?? '')) {
+      blocked(`could not read Incus fingerprint from ${endpoint}`);
+    }
+    return value;
+  } catch (error) {
+    blocked(`could not read Incus fingerprint from ${endpoint}: ${error?.message ?? 'unknown'}`);
+  }
+}
+
+function parseTrustToken(raw) {
+  const lines = String(raw ?? '').split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+  const token = [...lines].reverse().find((line) => line.length >= 32 && !line.includes(' '));
+  if (!token) blocked('Incus trust add did not print a token');
+  return token;
+}
+
+async function seedLabServer(token, definition, image, selectedShared, routedNetwork, dnsServers) {
+  const info = await sshCapture(definition.ssh, 'incus query /1.0');
+  let parsed;
+  try {
+    parsed = JSON.parse(info);
+  } catch {
+    blocked(`${definition.ssh} did not return Incus /1.0 JSON`);
+  }
+  const name = validateIncusServerName(
+    parsed?.metadata?.environment?.server_name
+      ?? parsed?.environment?.server_name,
+  );
+  const fingerprint = await fingerprintForEndpoint(definition.apiEndpoint);
+  const tokenName = `e2e-${runId}`.slice(0, 40);
+  const trustRaw = await sshCapture(definition.ssh, `incus config trust add ${tokenName}`);
+  const trustToken = parseTrustToken(trustRaw);
+  const registration = {
+    name,
+    slug: definition.slug,
+    apiEndpoint: definition.apiEndpoint,
+    parentInterface: definition.parentInterface,
+    dnsServers,
+  };
+  const registrationResult = await ensureServerRegistration({
+    listServers: () => jsonRequest('/api/admin/servers', { token }),
+    createServer: (body) => jsonRequest('/api/admin/servers', {
+      method: 'POST',
+      token,
+      body,
+    }),
+    registration,
+    priorServer: previousSeedState?.labServers?.find((entry) => entry.slug === definition.slug),
+  });
+  const extra = registrationResult.server;
+  await ensureIpPoolForServer({
+    listPools: () => jsonRequest('/api/admin/ip-pools', { token }),
+    createPool: (body) => jsonRequest('/api/admin/ip-pools', {
+      method: 'POST',
+      token,
+      body,
+    }),
+    patchPool: (id, body) => jsonRequest(`/api/admin/ip-pools/${id}`, {
+      method: 'PATCH',
+      token,
+      body,
+    }),
+    serverId: extra.id,
+    serverSlug: definition.slug,
+    network: routedNetwork,
+  });
+  const labConnect = await jsonRequest(`/api/admin/servers/${extra.id}/connect`, {
+    method: 'POST',
+    token,
+    body: {
+      trustToken,
+      expectedServerCertFingerprint: fingerprint,
+    },
+  });
+  await waitForIntent(token, parseConnectIntentId(labConnect), `lab server connect ${definition.slug}`);
+  let current = await jsonRequest(`/api/admin/servers/${extra.id}`, { token });
+  if (current.status !== 'online') {
+    blocked(`lab server ${definition.slug} connected without becoming online: ${current.status}`);
+  }
+  await discoverStoragePools(jsonRequest, extra.id, token);
+  const labPools = validateStoragePoolDtos(
+    await jsonRequest(`/api/admin/servers/${extra.id}/storage-pools`, { token }),
+    extra.id,
+    `lab ${definition.slug} storage pool listing`,
+  );
+  const dirName = definition.dirPool || process.env.E2E_INCUS_DIR_POOL;
+  const lvmName = definition.lvmPool || process.env.E2E_INCUS_LVM_POOL;
+  const labDir = labPools.find(
+    (pool) =>
+      pool.incusName === dirName
+      && pool.driver === 'dir'
+      && pool.resizeFamily === 'quota_online'
+      && pool.quotaEffective === true,
+  );
+  const labLvm = labPools.find(
+    (pool) =>
+      pool.incusName === lvmName
+      && pool.driver === 'lvm'
+      && pool.resizeFamily === 'block_backed',
+  );
+  if (!labDir || !labLvm) {
+    blocked(`lab server ${definition.slug} is missing dir quota_online and lvm block_backed pools`);
+  }
+  await registerStoragePools(jsonRequest, extra.id, token, [labDir, labLvm]);
+  if (selectedShared && process.env.E2E_CEPHFS_INCUS_POOL?.trim()) {
+    const latest = validateStoragePoolDtos(
+      await jsonRequest(`/api/admin/servers/${extra.id}/storage-pools`, { token }),
+      extra.id,
+      `lab ${definition.slug} cephfs listing`,
+    );
+    const cephPool = latest.find(
+      (pool) =>
+        pool.driver === 'cephfs'
+        && pool.incusName === process.env.E2E_CEPHFS_INCUS_POOL
+        && pool.shareable === true,
+    );
+    if (!cephPool) {
+      blocked(`lab server ${definition.slug} is missing CephFS pool ${process.env.E2E_CEPHFS_INCUS_POOL}`);
+    }
+    if (!cephPool.registered || cephPool.sharedBackendId !== selectedShared.id) {
+      await jsonRequest(`/api/admin/storage-pools/${cephPool.id}`, {
+        method: 'PATCH',
+        token,
+        body: {
+          expectedRevision: cephPool.revision,
+          registered: true,
+          sharedBackendId: selectedShared.id,
+        },
+      });
+    }
+  }
+  const workerHost = new URL(definition.apiEndpoint).hostname;
+  const workerExporter = `https://${workerHost}:19181/metrics`;
+  const workerFingerprint = await fingerprintForEndpoint(workerExporter);
+  current = await ensureNodeMetrics(token, current, {
+    endpoint: workerExporter,
+    serverCertFingerprint: workerFingerprint,
+    token: definition.nodeExporterToken,
+  });
+  await runPsql(
+    `
+UPDATE infra.servers
+SET system_pool_id=:'dir_id'::uuid
+WHERE id = :'server_id'::uuid;
+`,
+    {
+      dir_id: labDir.id,
+      server_id: extra.id,
+    },
+  );
+  current = await jsonRequest(`/api/admin/servers/${extra.id}`, { token });
+  await ensurePreflight(token, current, labDir.id);
+  await ensureAssignment(token, image, extra.id, previousSeedState?.image);
+  const cephRow = selectedShared
+    ? (await jsonRequest(`/api/admin/servers/${extra.id}/storage-pools`, { token }))
+      .find((pool) => pool.incusName === process.env.E2E_CEPHFS_INCUS_POOL)
+    : undefined;
+  return {
+    id: extra.id,
+    createdByRun: registrationResult.createdByRun,
+    name: current.name,
+    slug: definition.slug,
+    endpoint: current.apiEndpoint,
+    certificateFingerprint: fingerprint,
+    ssh: definition.ssh,
+    parentInterface: definition.parentInterface,
+    dirPoolId: labDir.id,
+    cephfsPoolId: cephRow?.id,
+    role: definition.role || undefined,
+  };
+}
+
 const edgeTls = {
   ca: readRegularFile('E2E_EDGE_CA_FILE'),
   cert: readOptionalFile('E2E_EDGE_CLIENT_CERT'),
@@ -373,18 +624,20 @@ async function waitForIntent(token, intentId, label) {
   blocked(`${label} intent did not settle within 180 seconds`);
 }
 
-async function ensureNodeMetrics(token, server) {
-  const endpoint = new URL(process.env.E2E_NODE_EXPORTER_URL);
+async function ensureNodeMetrics(token, server, metrics = {}) {
+  const endpoint = new URL(metrics.endpoint ?? process.env.E2E_NODE_EXPORTER_URL);
   if (endpoint.protocol !== 'https:' || endpoint.username || endpoint.password) {
     blocked('E2E_NODE_EXPORTER_URL must be an HTTPS URL without embedded credentials');
   }
+  const secret = metrics.token ?? process.env.E2E_NODE_EXPORTER_TOKEN;
   const tokenFingerprint = createHash('sha256')
-    .update(process.env.E2E_NODE_EXPORTER_TOKEN, 'utf8')
+    .update(secret, 'utf8')
     .digest('hex');
   const desired = {
     endpoint: endpoint.toString(),
-    serverCertFingerprint: process.env.E2E_NODE_EXPORTER_SERVER_CERT_FINGERPRINT,
-    token: process.env.E2E_NODE_EXPORTER_TOKEN,
+    serverCertFingerprint: metrics.serverCertFingerprint
+      ?? process.env.E2E_NODE_EXPORTER_SERVER_CERT_FINGERPRINT,
+    token: secret,
   };
   if (
     server.nodeMetrics?.endpoint === desired.endpoint &&
@@ -775,6 +1028,7 @@ await installCertificateFixture(
   'pending',
 );
 
+let currentServer = await jsonRequest(`/api/admin/servers/${server.id}`, { token });
 const connectResult = await jsonRequest(`/api/admin/servers/${server.id}/connect`, {
   method: 'POST',
   token,
@@ -785,8 +1039,7 @@ const connectResult = await jsonRequest(`/api/admin/servers/${server.id}/connect
 });
 const connectIntentId = parseConnectIntentId(connectResult);
 await waitForIntent(token, connectIntentId, 'server connect');
-
-let currentServer = await jsonRequest(`/api/admin/servers/${server.id}`, { token });
+currentServer = await jsonRequest(`/api/admin/servers/${server.id}`, { token });
 if (currentServer.status !== 'online') {
   blocked(`server connect intent settled without an online server: ${currentServer.status}`);
 }
@@ -965,33 +1218,33 @@ if (
 // Admin inventory is authoritative for fixture binding; the user-facing list is
 // grant-filtered and would hide an ungranted seeded backend.
 const sharedBackends = await jsonRequest('/api/admin/shared-backends', { token });
+const fixtureFsid = process.env.E2E_CEPHFS_FSID?.trim();
+const fixtureIdentity = process.env.E2E_CEPHFS_IDENTITY_KEY?.trim();
 let selectedShared = process.env.E2E_SHARED_BACKEND_ID
   ? sharedBackends.find((entry) => entry.id === process.env.E2E_SHARED_BACKEND_ID)
   : undefined;
-if (process.env.E2E_SHARED_BACKEND_ID?.trim() && !selectedShared) {
-  // Fresh databases do not retain prior shared-backend IDs. Recreate from the
-  // CephFS fixture when present; otherwise fail closed.
-  if (
-    process.env.E2E_CEPHFS_FSID?.trim()
-    && process.env.E2E_CEPHFS_IDENTITY_KEY?.trim()
-  ) {
-    selectedShared = await jsonRequest('/api/admin/shared-backends', {
-      method: 'POST',
-      token,
-      body: {
-        name: `e2e-cephfs-${runId}`.slice(0, 128),
-        identityKey: process.env.E2E_CEPHFS_IDENTITY_KEY.trim(),
-        cephFsid: process.env.E2E_CEPHFS_FSID.trim(),
-        overcommitRatio: 1,
-      },
-    });
-    process.env.E2E_SHARED_BACKEND_ID = selectedShared.id;
-    writeFileSync(join(runtimeRoot, 'cephfs-backend.id'), `${selectedShared.id}\n`, {
-      mode: 0o600,
-    });
-  } else {
-    blocked(`E2E_SHARED_BACKEND_ID ${process.env.E2E_SHARED_BACKEND_ID} is not visible to the control plane`);
-  }
+if (!selectedShared && fixtureIdentity) {
+  selectedShared = sharedBackends.find((entry) => entry.identityKey === fixtureIdentity);
+}
+if (!selectedShared && fixtureFsid && fixtureIdentity) {
+  selectedShared = await jsonRequest('/api/admin/shared-backends', {
+    method: 'POST',
+    token,
+    body: {
+      name: `e2e-cephfs-${runId}`.slice(0, 128),
+      identityKey: fixtureIdentity,
+      cephFsid: fixtureFsid,
+      overcommitRatio: 1,
+    },
+  });
+} else if (process.env.E2E_SHARED_BACKEND_ID?.trim() && !selectedShared) {
+  blocked(`E2E_SHARED_BACKEND_ID ${process.env.E2E_SHARED_BACKEND_ID} is not visible to the control plane`);
+}
+if (selectedShared?.id) {
+  process.env.E2E_SHARED_BACKEND_ID = selectedShared.id;
+  writeFileSync(join(runtimeRoot, 'cephfs-backend.id'), `${selectedShared.id}\n`, {
+    mode: 0o600,
+  });
 }
 
 const cephfsEnabled = Boolean(
@@ -1039,9 +1292,22 @@ const cephfsStatus = cephfsEnabled
   : 'BLOCKED: no multi-node CephFS cluster is provisioned for this run';
 const gpuStatus = process.env.E2E_GPU_PCI_PROOF === '1' && process.env.E2E_GPU_PCI_ADDRESS?.trim()
   ? `PROVEN: PCI ${process.env.E2E_GPU_PCI_ADDRESS}`
-  : (previousSeedState?.blocked?.gpu?.startsWith('PROVEN:')
-    ? previousSeedState.blocked.gpu
-    : 'BLOCKED: GPU PCI hardware is not claimed by this standalone host');
+  : 'BLOCKED: GPU PCI hardware is not claimed by this lab';
+
+const labServerDefs = loadLabServerDefs();
+const labServers = [];
+for (const definition of labServerDefs) {
+  labServers.push(
+    await seedLabServer(
+      token,
+      definition,
+      image,
+      selectedShared,
+      routedNetwork,
+      registration.dnsServers,
+    ),
+  );
+}
 
 const e2eSshPublicKeyFile = process.env.E2E_SSH_PRIVATE_KEY_FILE
   ? `${process.env.E2E_SSH_PRIVATE_KEY_FILE}.pub`
@@ -1073,6 +1339,59 @@ if (!alreadyRegistered) {
     },
   });
 }
+
+const gpuPci = process.env.E2E_GPU_PCI_ADDRESS?.trim() ?? '';
+for (const extra of [{ id: server.id, role: undefined }, ...labServers]) {
+  const gpuGrant = extra.role === 'gpu' && gpuPci
+    ? { mode: 'pci', pciAddresses: [gpuPci] }
+    : { mode: 'none', pciAddresses: [] };
+  await jsonRequest(`/api/admin/users/${session.user.id}/server-grants/${extra.id}`, {
+    method: 'PUT',
+    token,
+    body: {
+      cpuMillis: 16_000,
+      memBytes: 16 * 1024 * 1024 * 1024,
+      diskBytes: 128 * 1024 * 1024 * 1024,
+      gpu: gpuGrant,
+      expiresAt: null,
+    },
+  });
+}
+await jsonRequest(
+  `/api/admin/users/${session.user.id}/storage-pool-grants/${registeredDir.id}`,
+  {
+    method: 'PUT',
+    token,
+    body: { expiresAt: null },
+  },
+);
+const gpuPeerRow = labServers.find((entry) => entry.role === 'gpu')
+  ?? labServers.find((entry) => String(entry.endpoint ?? '').includes('10.8.1.12'));
+if (gpuPci && !gpuPeerRow) {
+  blocked('E2E_GPU_PCI_ADDRESS is set but no GPU Incus worker was seeded');
+}
+if (gpuPeerRow?.dirPoolId) {
+  await jsonRequest(
+    `/api/admin/users/${session.user.id}/storage-pool-grants/${gpuPeerRow.dirPoolId}`,
+    {
+      method: 'PUT',
+      token,
+      body: { expiresAt: null },
+    },
+  );
+}
+const gpuPeer = gpuPeerRow && gpuPci
+  ? {
+    id: gpuPeerRow.id,
+    name: gpuPeerRow.name,
+    slug: gpuPeerRow.slug,
+    endpoint: gpuPeerRow.endpoint,
+    ssh: gpuPeerRow.ssh,
+    parentInterface: gpuPeerRow.parentInterface,
+    dirPoolId: gpuPeerRow.dirPoolId,
+    pciAddress: gpuPci,
+  }
+  : undefined;
 
 const state = {
   schemaVersion: 3,
@@ -1130,6 +1449,8 @@ const state = {
     },
   },
   ...(selectedShared ? { sharedBackendId: selectedShared.id } : {}),
+  labServers,
+  ...(gpuPeer ? { gpuServer: gpuPeer } : {}),
   blocked: {
     gpu: gpuStatus,
     cephfs: cephfsStatus,

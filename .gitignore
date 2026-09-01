@@ -22,5 +22,11 @@ packages/common/src/**/*.d.ts.map
 .codex/skills/harness/docs/
 docs/plan/
 
-# CPU-only real E2E runtime, secrets, diagnostics, and Playwright artifacts
+# Live E2E runtime, secrets, diagnostics, and API runner artifacts
 e2e/.runtime/
+
+# Local lab inventory, Ceph keyrings, and host credentials
+/lab/
+
+# Local visual QA screenshots (Playwright, not product e2e)
+packages/frontend/visual/shots/

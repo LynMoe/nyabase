@@ -29,31 +29,11 @@ trap cleanup_exit EXIT INT TERM HUP
 
 node "$SCRIPT_DIR/cleanup.mjs" "$run_id"
 
-if [[ -s "$E2E_RUNTIME_ROOT/control-plane.pid" ]]; then
-  pid="$(tr -d '\n' < "$E2E_RUNTIME_ROOT/control-plane.pid")"
-  if [[ "$pid" =~ ^[0-9]+$ ]] && kill -0 "$pid" 2>/dev/null; then
-    command_line="$(ps -p "$pid" -o args= 2>/dev/null || true)"
-    [[ "$command_line" == *"backend"* || "$command_line" == *"dist/main.js"* ]] \
-      || die "refusing to stop an unrelated process from the PID file"
-    kill "$pid"
-    for _ in $(seq 1 30); do
-      kill -0 "$pid" 2>/dev/null || break
-      sleep 1
-    done
-    kill -0 "$pid" 2>/dev/null && kill -KILL "$pid"
-  fi
-  rm -f "$E2E_RUNTIME_ROOT/control-plane.pid"
-fi
+bash "$SCRIPT_DIR/sweep-incus-leftovers.sh" "$run_id"
 
-node --input-type=module - "$E2E_RUN_ID" <<'NODE'
-import { execFileSync } from 'node:child_process';
-const runId = process.argv[2];
-const output = execFileSync('incus', ['list', '--format', 'json'], { encoding: 'utf8' });
-const resources = JSON.parse(output);
-if (resources.some((entry) => entry.name?.startsWith(`e2e-${runId}`))) {
-  throw new Error('Incus cleanup is incomplete');
-}
-NODE
+bash "$SCRIPT_DIR/stop-control-plane.sh" "$run_id"
+
+node "$SCRIPT_DIR/leftover-inventory.mjs"
 
 cleanup_run_owned_incus_connect_client "$E2E_RUNTIME_ROOT" "$run_id"
 record_phase "$run_id" down passed "run resources removed and owned control plane stopped"

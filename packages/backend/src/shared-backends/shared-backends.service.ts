@@ -77,6 +77,7 @@ export class SharedBackendsService {
     return this.toDto({
       ...row,
       server_ids: aggregate?.server_ids ?? [],
+      has_online_executor: aggregate?.has_online_executor ?? false,
     }, committed.get(id) ?? 0);
   }
 
@@ -166,7 +167,7 @@ export class SharedBackendsService {
       }
       throw error;
     }
-    if (result.created) return this.toDto({ ...result.row, server_ids: [] }, 0);
+    if (result.created) return this.toDto({ ...result.row, server_ids: [], has_online_executor: false }, 0);
     return this.get(result.row.id);
   }
 
@@ -281,6 +282,7 @@ export class SharedBackendsService {
     created_at: Date | string;
     updated_at: Date | string;
     server_ids?: string[] | null;
+    has_online_executor?: boolean | null;
   }, committedUsedBytes?: number): SharedBackendDto {
     const dbUsed = row.used_bytes === null ? null : numberValue(row.used_bytes);
     const usedBytes = committedUsedBytes !== undefined
@@ -296,6 +298,7 @@ export class SharedBackendsService {
       usedBytes,
       overcommitRatio: numberValue(row.overcommit_ratio),
       serverIds: row.server_ids ?? [],
+      hasOnlineExecutor: row.has_online_executor === true,
       revision: numberValue(row.revision),
       createdAt: isoDate(row.created_at) ?? new Date(0).toISOString(),
       updatedAt: isoDate(row.updated_at) ?? new Date(0).toISOString(),

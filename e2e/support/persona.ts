@@ -1,4 +1,5 @@
-import { expect, type APIRequestContext } from '@playwright/test';
+import type { ApiClient } from './api-client.js';
+import { expect } from './expect.js';
 import { expectJson } from './http.js';
 import { eventually } from './poll.js';
 import { waitForGone } from './wait-for-gone.js';
@@ -33,7 +34,7 @@ export function uniquePersonaUsername(label: string): string {
 }
 
 export async function createPersonaUser(
-  adminApi: APIRequestContext,
+  adminApi: ApiClient,
   label: string,
 ): Promise<PersonaCredentials> {
   const username = uniquePersonaUsername(label);
@@ -55,7 +56,7 @@ export async function createPersonaUser(
 }
 
 export async function upsertServerGrant(
-  adminApi: APIRequestContext,
+  adminApi: ApiClient,
   userId: string,
   serverId: string,
   grant: ServerGrantInput = DEFAULT_GRANT,
@@ -74,7 +75,7 @@ export async function upsertServerGrant(
 }
 
 export async function upsertStoragePoolGrant(
-  adminApi: APIRequestContext,
+  adminApi: ApiClient,
   userId: string,
   poolId: string,
   expiresAt: string | null = null,
@@ -87,7 +88,7 @@ export async function upsertStoragePoolGrant(
 }
 
 export async function deleteServerGrant(
-  adminApi: APIRequestContext,
+  adminApi: ApiClient,
   userId: string,
   serverId: string,
 ): Promise<void> {
@@ -98,7 +99,7 @@ export async function deleteServerGrant(
 }
 
 export async function deleteStoragePoolGrant(
-  adminApi: APIRequestContext,
+  adminApi: ApiClient,
   userId: string,
   poolId: string,
 ): Promise<void> {
@@ -106,8 +107,35 @@ export async function deleteStoragePoolGrant(
   expect([200, 204, 404, 409]).toContain(response.status());
 }
 
+export async function upsertSharedBackendGrant(
+  adminApi: ApiClient,
+  userId: string,
+  backendId: string,
+  grant: { limitBytes: number; expiresAt?: string | null } = { limitBytes: 1024 * 1024 * 1024 },
+): Promise<JsonRecord> {
+  return expectJson<JsonRecord>(
+    await adminApi.put(`/api/admin/users/${userId}/shared-backend-grants/${backendId}`, {
+      data: {
+        limitBytes: grant.limitBytes,
+        expiresAt: grant.expiresAt === undefined ? null : grant.expiresAt,
+      },
+    }),
+  );
+}
+
+export async function deleteSharedBackendGrant(
+  adminApi: ApiClient,
+  userId: string,
+  backendId: string,
+): Promise<void> {
+  const response = await adminApi.delete(
+    `/api/admin/users/${userId}/shared-backend-grants/${backendId}`,
+  );
+  expect([200, 204, 404, 409]).toContain(response.status());
+}
+
 export async function loginPersona(
-  api: APIRequestContext,
+  api: ApiClient,
   credentials: Pick<PersonaCredentials, 'username' | 'password'>,
 ): Promise<{ accessToken: string; refreshToken: string; user: JsonRecord }> {
   const session = await expectJson<JsonRecord>(
@@ -128,7 +156,7 @@ export async function loginPersona(
 }
 
 export async function waitForIntent(
-  api: APIRequestContext,
+  api: ApiClient,
   intentId: string,
   timeoutMs = 180_000,
 ): Promise<JsonRecord> {
@@ -142,7 +170,7 @@ export async function waitForIntent(
 }
 
 export async function requireSucceededIntent(
-  api: APIRequestContext,
+  api: ApiClient,
   intentId: string,
   label: string,
 ): Promise<JsonRecord> {
@@ -157,7 +185,7 @@ export async function requireSucceededIntent(
 }
 
 export async function createUserContainer(
-  api: APIRequestContext,
+  api: ApiClient,
   seedState: Pick<SeedState, 'runId' | 'server' | 'image'>,
   options: {
     namePrefix?: string;
@@ -198,8 +226,98 @@ export async function createUserContainer(
   return { containerId, intentId };
 }
 
+export async function stopUserContainer(
+  api: ApiClient,
+  containerId: string,
+): Promise<void> {
+  const current = await expectJson<JsonRecord>(
+    await api.get(`/api/containers/${containerId}`),
+  );
+  if (current.actual?.status === 'stopped' && current.powerIntent === 'stopped') return;
+  const accepted = await expectJson<JsonRecord>(
+    await api.post(`/api/containers/${containerId}/actions/stop`),
+    202,
+  );
+  await requireSucceededIntent(api, accepted.intentId, 'container.power.stop');
+  await eventually(
+    async () => expectJson<JsonRecord>(await api.get(`/api/containers/${containerId}`)),
+    (value) => value.actual?.status === 'stopped' && value.powerIntent === 'stopped',
+    180_000,
+    500,
+    `user container ${containerId} stopped`,
+  );
+}
+
+export async function createUserSharedVolume(
+  api: ApiClient,
+  seedState: Pick<SeedState, 'sharedBackendId'>,
+  name: string,
+  sizeBytes = 64 * 1024 * 1024,
+): Promise<string> {
+  expect(seedState.sharedBackendId).toBeTruthy();
+  const created = await expectJson<JsonRecord>(
+    await api.post('/api/shared-volumes', {
+      data: {
+        name,
+        sizeBytes,
+        scope: {
+          kind: 'shared',
+          sharedBackendId: seedState.sharedBackendId,
+        },
+      },
+    }),
+    201,
+  );
+  const volumeId = created.id as string;
+  expect(volumeId).toBeTruthy();
+  expect(created.dirEnsured).toBe(false);
+  return volumeId;
+}
+
+export async function deleteUserSharedVolume(
+  api: ApiClient,
+  adminApi: ApiClient,
+  volumeId: string | undefined,
+): Promise<void> {
+  if (!volumeId) return;
+  const userPath = `/api/shared-volumes/${volumeId}`;
+  const adminPath = `/api/admin/shared-volumes/${volumeId}`;
+  const userExists = await resourceExists(api, userPath);
+  const adminExists = await resourceExists(adminApi, adminPath);
+  if (!userExists && !adminExists) return;
+
+  if (userExists) {
+    const userDelete = await api.delete(userPath).catch(() => undefined);
+    const status = userDelete?.status();
+    if (status === 202) {
+      await waitForGone(api, userPath).catch(async () => {
+        await waitForGone(adminApi, adminPath);
+      });
+    } else if (status === 200 || status === 204) {
+      // PG-only delete
+    }
+    if (!(await resourceExists(adminApi, adminPath))
+      && !(await resourceExists(api, userPath))) {
+      return;
+    }
+  }
+
+  const stillAdmin = await resourceExists(adminApi, adminPath);
+  if (!stillAdmin && !(await resourceExists(api, userPath))) return;
+  const adminDelete = await adminApi.delete(adminPath).catch(() => undefined);
+  const adminStatus = adminDelete?.status();
+  if (adminStatus === 202) {
+    await waitForGone(adminApi, adminPath);
+    return;
+  }
+  if (adminStatus === 200 || adminStatus === 204 || adminStatus === 404) {
+    if (!(await resourceExists(adminApi, adminPath))) return;
+  }
+  throw new Error(`failed to delete shared volume ${volumeId}`);
+}
+
 export async function createUserVolume(
-  api: APIRequestContext,
+  api: ApiClient,
   seedState: Pick<SeedState, 'server' | 'storagePools'>,
   name: string,
   sizeBytes: number,
@@ -224,48 +342,119 @@ export async function createUserVolume(
   return { volumeId, intentId };
 }
 
+async function resourceExists(api: ApiClient, path: string): Promise<boolean> {
+  const response = await api.get(path).catch(() => undefined);
+  return response !== undefined && response.status() !== 404;
+}
+
+async function settleDelete(
+  response: { status(): number; json(): Promise<unknown> } | undefined,
+  wait: () => Promise<void>,
+): Promise<boolean> {
+  if (!response) return false;
+  if (response.status() === 404) return true;
+  if (response.status() !== 202) return false;
+  await wait();
+  return true;
+}
+
 export async function deleteUserContainer(
-  api: APIRequestContext,
-  adminApi: APIRequestContext,
+  api: ApiClient,
+  adminApi: ApiClient,
   containerId: string | undefined,
 ): Promise<void> {
   if (!containerId) return;
-  const userDelete = await api.post(`/api/containers/${containerId}/actions/delete`)
-    .catch(() => undefined);
-  if (userDelete?.status() === 202) {
-    await waitForGone(api, `/api/containers/${containerId}`).catch(async () => {
-      await waitForGone(adminApi, `/api/admin/containers/${containerId}`);
-    });
+  const userPath = `/api/containers/${containerId}`;
+  const adminPath = `/api/admin/containers/${containerId}`;
+  if (
+    !(await resourceExists(api, userPath))
+    && !(await resourceExists(adminApi, adminPath))
+  ) {
     return;
   }
-  const adminDelete = await adminApi.post(`/api/admin/containers/${containerId}/actions/delete`)
-    .catch(() => undefined);
-  if (adminDelete?.status() === 202) {
-    await waitForGone(adminApi, `/api/admin/containers/${containerId}`);
+
+  const stop = await adminApi.post(`${adminPath}/actions/stop`).catch(() => undefined);
+  if (stop?.status() === 202) {
+    const body = await stop.json() as JsonRecord;
+    if (typeof body.intentId === 'string') {
+      await requireSucceededIntent(adminApi, body.intentId, 'cleanup.stop').catch(() => undefined);
+    }
   }
+  for (const kindPath of [`${adminPath}/volumes`, `${adminPath}/shared-volumes`]) {
+    const listed = await adminApi.get(kindPath)
+      .then(async (response) => (response.status() === 200
+        ? await response.json() as JsonRecord[]
+        : []))
+      .catch(() => [] as JsonRecord[]);
+    for (const attachment of listed) {
+      if (typeof attachment.id !== 'string') continue;
+      const detach = await adminApi.delete(`${kindPath}/${attachment.id}`)
+        .catch(() => undefined);
+      if (detach?.status() === 202) {
+        const body = await detach.json() as JsonRecord;
+        if (typeof body.intentId === 'string') {
+          await requireSucceededIntent(adminApi, body.intentId, 'cleanup.detach');
+        }
+      }
+    }
+  }
+
+  const gone = await settleDelete(
+    await api.post(`${userPath}/actions/delete`).catch(() => undefined),
+    async () => {
+      await waitForGone(api, userPath).catch(async () => {
+        await waitForGone(adminApi, adminPath);
+      });
+    },
+  ) || await settleDelete(
+    await adminApi.post(`${adminPath}/actions/delete`).catch(() => undefined),
+    async () => waitForGone(adminApi, adminPath),
+  );
+  if (
+    gone
+    || (!(await resourceExists(api, userPath)) && !(await resourceExists(adminApi, adminPath)))
+  ) {
+    return;
+  }
+  throw new Error(`failed to delete container ${containerId}`);
 }
 
 export async function deleteUserVolume(
-  api: APIRequestContext,
-  adminApi: APIRequestContext,
+  api: ApiClient,
+  adminApi: ApiClient,
   volumeId: string | undefined,
 ): Promise<void> {
   if (!volumeId) return;
-  const userDelete = await api.delete(`/api/volumes/${volumeId}`).catch(() => undefined);
-  if (userDelete?.status() === 202) {
-    await waitForGone(api, `/api/volumes/${volumeId}`).catch(async () => {
-      await waitForGone(adminApi, `/api/admin/volumes/${volumeId}`);
-    });
+  const userPath = `/api/volumes/${volumeId}`;
+  const adminPath = `/api/admin/volumes/${volumeId}`;
+  if (
+    !(await resourceExists(api, userPath))
+    && !(await resourceExists(adminApi, adminPath))
+  ) {
     return;
   }
-  const adminDelete = await adminApi.delete(`/api/admin/volumes/${volumeId}`).catch(() => undefined);
-  if (adminDelete?.status() === 202) {
-    await waitForGone(adminApi, `/api/admin/volumes/${volumeId}`);
+  const gone = await settleDelete(
+    await api.delete(userPath).catch(() => undefined),
+    async () => {
+      await waitForGone(api, userPath).catch(async () => {
+        await waitForGone(adminApi, adminPath);
+      });
+    },
+  ) || await settleDelete(
+    await adminApi.delete(adminPath).catch(() => undefined),
+    async () => waitForGone(adminApi, adminPath),
+  );
+  if (
+    gone
+    || (!(await resourceExists(api, userPath)) && !(await resourceExists(adminApi, adminPath)))
+  ) {
+    return;
   }
+  throw new Error(`failed to delete volume ${volumeId}`);
 }
 
 export async function deletePersonaUser(
-  adminApi: APIRequestContext,
+  adminApi: ApiClient,
   userId: string | undefined,
 ): Promise<void> {
   if (!userId) return;
@@ -277,21 +466,29 @@ export async function deletePersonaUser(
 }
 
 export async function assertNoActiveIntents(
-  api: APIRequestContext,
+  api: ApiClient,
   resourcePath: string,
+  timeoutMs = 60_000,
 ): Promise<void> {
-  const intents = await expectJson<JsonRecord[] | { items?: JsonRecord[] }>(
-    await api.get(resourcePath),
+  await eventually(
+    async () => {
+      const intents = await expectJson<JsonRecord[] | { items?: JsonRecord[] }>(
+        await api.get(resourcePath),
+      );
+      const items = Array.isArray(intents) ? intents : (intents.items ?? []);
+      return items.filter((intent) => (
+        intent.status === 'pending' || intent.status === 'running'
+      ));
+    },
+    (active) => active.length === 0,
+    timeoutMs,
+    500,
+    `no active intents on ${resourcePath}`,
   );
-  const items = Array.isArray(intents) ? intents : (intents.items ?? []);
-  const active = items.filter((intent) => (
-    intent.status === 'pending' || intent.status === 'running'
-  ));
-  expect(active, JSON.stringify(active)).toEqual([]);
 }
 
 export async function waitForUserContainerPower(
-  api: APIRequestContext,
+  api: ApiClient,
   containerId: string,
   power: 'running' | 'stopped',
   timeoutMs = 180_000,
@@ -308,7 +505,7 @@ export async function waitForUserContainerPower(
 }
 
 export async function settleAcceptedIntent(
-  api: APIRequestContext,
+  api: ApiClient,
   response: { status: () => number; json: () => Promise<any> },
   label: string,
 ): Promise<JsonRecord | null> {
@@ -354,7 +551,7 @@ export function errorCode(body: JsonRecord): string | undefined {
 }
 
 export async function provisionGrantedUser(
-  adminApi: APIRequestContext,
+  adminApi: ApiClient,
   seedState: SeedState,
   label: string,
   grant: ServerGrantInput = DEFAULT_GRANT,

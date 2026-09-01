@@ -14,7 +14,14 @@ import { api } from '../../lib/api.js';
 import { Button } from '../ui/button.js';
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '../ui/dialog.js';
 import { Input } from '../ui/input.js';
-import { Label } from '../ui/label.js';
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '../ui/select.js';
+import { FormField } from '../layout/form-field.js';
 import { toast } from '../../hooks/use-toast.js';
 import {
   approxGibHint,
@@ -73,9 +80,9 @@ export function CreateContainerDialog({
   const [error, setError] = useState<string | null>(null);
   const serversQuery = useQuery({ queryKey: queryKeys.servers.user, queryFn: () => api.get<UserServerDto[]>('/servers'), enabled: open });
   const imagesQuery = useQuery({ queryKey: queryKeys.images.userActive, queryFn: () => api.get<ImageDto[]>('/images?activeOnly=true'), enabled: open });
-  const accessQuery = useQuery({ queryKey: ['me', 'access'], queryFn: () => api.get<EffectiveAccessDto>('/me/access'), enabled: open });
+  const accessQuery = useQuery({ queryKey: queryKeys.meAccess, queryFn: () => api.get<EffectiveAccessDto>('/me/access'), enabled: open });
   const capacityQuery = useQuery({
-    queryKey: ['storage-capacity', form.serverId],
+    queryKey: queryKeys.storageCapacity(form.serverId),
     queryFn: () => api.get<StorageCapacityDto>(`/servers/${form.serverId}/storage-capacity`),
     enabled: open && form.serverId.length > 0,
   });
@@ -151,38 +158,41 @@ export function CreateContainerDialog({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-h-[90vh] max-w-2xl overflow-y-auto" data-testid="container-create-canonical">
+      <DialogContent className="max-w-2xl" data-testid="container-create-canonical">
         <DialogHeader>
           <DialogTitle>新建容器</DialogTitle>
-          <DialogDescription>创建请求会固定镜像、系统盘池与规格；容量会在提交前由后端再次校验。</DialogDescription>
+          <DialogDescription>镜像与规格创建后固定，提交前会再次校验容量。</DialogDescription>
         </DialogHeader>
         <div className="space-y-4">
           <div className="grid gap-3 sm:grid-cols-2">
-            <div className="space-y-1.5">
-              <Label htmlFor="container-server">服务器</Label>
-              <select
-                id="container-server"
-                className="h-10 w-full rounded-md border border-input bg-background px-3 text-sm"
-                value={form.serverId}
-                onChange={(event) => {
-                  update('serverId', event.target.value);
+            <FormField id="container-server" label="服务器">
+              <Select
+                value={form.serverId || undefined}
+                onValueChange={(value) => {
+                  update('serverId', value);
                   update('imageId', '');
                   update('gpuMode', 'none');
                   update('gpuPciAddresses', []);
                 }}
                 disabled={serversLoading || servers.length === 0}
               >
-                <option value="">
-                  {serversLoading
-                    ? '加载可用服务器…'
-                    : servers.length === 0
-                      ? '暂无可用服务器'
-                      : '选择服务器'}
-                </option>
-                {servers.map((server) => (
-                  <option key={server.id} value={server.id}>{server.name}</option>
-                ))}
-              </select>
+                <SelectTrigger id="container-server">
+                  <SelectValue
+                    placeholder={
+                      serversLoading
+                        ? '加载可用服务器…'
+                        : servers.length === 0
+                          ? '暂无可用服务器'
+                          : '选择服务器'
+                    }
+                  />
+                </SelectTrigger>
+                <SelectContent>
+                  {servers.map((server) => (
+                    <SelectItem key={server.id} value={server.id}>{server.name}</SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
               {serversLoading ? (
                 <p className="text-xs text-muted-foreground">加载可用服务器…</p>
               ) : servers.length === 0 ? (
@@ -190,8 +200,9 @@ export function CreateContainerDialog({
                   当前没有可创建容器的服务器（需有效授权且服务器在线）
                 </p>
               ) : null}
-            </div>
+            </FormField>
             <SelectField
+              key={form.serverId || 'no-server'}
               id="container-image"
               label="镜像"
               value={form.imageId}
@@ -210,7 +221,9 @@ export function CreateContainerDialog({
           {noImagesForServer && (
             <p className="text-xs text-muted-foreground">该服务器没有可用镜像，请联系管理员分配</p>
           )}
-          <div className="space-y-1.5"><Label htmlFor="container-name">容器名称</Label><Input id="container-name" value={form.name} onChange={(event) => update('name', event.target.value)} placeholder="dev-ubuntu" /></div>
+          <FormField id="container-name" label="容器名称">
+            <Input id="container-name" value={form.name} onChange={(event) => update('name', event.target.value)} placeholder="dev-ubuntu" />
+          </FormField>
           <div className="grid gap-3 sm:grid-cols-3">
             <UnitField
               id="container-root-size"
@@ -290,7 +303,20 @@ function SelectField({
   placeholder?: string;
   disabled?: boolean;
 }) {
-  return <div className="space-y-1.5"><Label htmlFor={id}>{label}</Label><select id={id} className="h-10 w-full rounded-md border border-input bg-background px-3 text-sm" value={value} onChange={(event) => onChange(event.target.value)} disabled={disabled}><option value="">{placeholder ?? '请选择'}</option>{options.map(([optionValue, optionLabel]) => <option key={optionValue} value={optionValue}>{optionLabel}</option>)}</select></div>;
+  return (
+    <FormField id={id} label={label}>
+      <Select key={value || 'empty'} value={value || undefined} onValueChange={onChange} disabled={disabled}>
+        <SelectTrigger id={id}>
+          <SelectValue placeholder={placeholder ?? '请选择'} />
+        </SelectTrigger>
+        <SelectContent>
+          {options.map(([optionValue, optionLabel]) => (
+            <SelectItem key={optionValue} value={optionValue}>{optionLabel}</SelectItem>
+          ))}
+        </SelectContent>
+      </Select>
+    </FormField>
+  );
 }
 
 function UnitField({
@@ -309,11 +335,9 @@ function UnitField({
   step?: string;
 }) {
   return (
-    <div className="space-y-1.5">
-      <Label htmlFor={id}>{label}</Label>
+    <FormField id={id} label={label} hint={hint}>
       <Input id={id} type="number" min="0" step={step} value={value} onChange={(event) => onChange(event.target.value)} />
-      {hint && <p className="text-xs text-muted-foreground">{hint}</p>}
-    </div>
+    </FormField>
   );
 }
 

@@ -8,8 +8,9 @@ Wants=network-online.target
 Type=simple
 # Dedicated unprivileged user. CPU/PSI/sysctl metrics work without root.
 # nvidia-smi (GPU display index) typically needs membership in video/render,
-# not root; add those groups on GPU hosts. smartctl and nft metrics are
-# optional and omitted when the process cannot read them.
+# not root; add those groups on GPU hosts. smartctl is omitted when unreadable.
+# nft list table bridge incus requires CAP_NET_ADMIN (see AmbientCapabilities);
+# unavailability is emitted as nyabase_node_network_nft_available=0.
 User=nyabase-node
 Group=nyabase-node
 EnvironmentFile=/etc/nyabase/node-exporter.env
@@ -20,6 +21,8 @@ ExecStart=/usr/bin/env node dist/main.js
 Restart=on-failure
 RestartSec=5s
 NoNewPrivileges=true
+AmbientCapabilities=CAP_NET_ADMIN
+CapabilityBoundingSet=CAP_NET_ADMIN
 PrivateTmp=true
 ProtectHome=true
 ProtectSystem=strict

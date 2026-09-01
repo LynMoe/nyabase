@@ -9,13 +9,28 @@ import { fileURLToPath } from 'node:url';
 
 const e2eRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const repoRoot = resolve(e2eRoot, '..');
-const ledgerPath = join(e2eRoot, 'coverage', 'features.yaml');
+const ledgerPath = join(e2eRoot, 'coverage', 'features.json');
 const ledger = JSON.parse(readFileSync(ledgerPath, 'utf8'));
 const errors = [];
 const warnings = [];
 
 const requiredProfile = process.argv.find((value) => value.startsWith('--require-profile='))
   ?.split('=', 2)[1];
+const maxUnmappedArg = process.argv.find((value) => value.startsWith('--max-unmapped='))
+  ?.split('=', 2)[1];
+
+const ALLOWED_KINDS = new Set(['behavioral', 'ws-behavioral', 'static-contract']);
+const ALLOWED_STATUSES = new Set(['implemented', 'blocked']);
+const ALLOWED_PROFILES = new Set(['smoke', 'core', 'full']);
+const ALLOWED_PERSONAS = new Set([
+  'anonymous',
+  'maintainer',
+  'administrator',
+  'normal-user',
+  'quota-limited',
+  'grant-expired',
+  'attacker',
+]);
 
 function fail(message) {
   errors.push(message);
@@ -113,14 +128,7 @@ function parseWebsocketPaths() {
     .sort();
 }
 
-function parseFrontendRoutes() {
-  const files = walk(join(repoRoot, 'packages', 'frontend', 'src', 'routes'))
-    .filter((path) => path.endsWith('.tsx'));
-  return [...new Set(files.flatMap((file) => (
-    [...readText(file).matchAll(/createFileRoute\(\s*(['"])(.*?)\1\s*\)/g)]
-      .map((match) => match[2])
-  )))].sort();
-}
+
 
 function allCases() {
   return ledger.features.flatMap((feature) => feature.cases ?? []);
@@ -128,6 +136,10 @@ function allCases() {
 
 function caseMap() {
   return new Map(allCases().map((entry) => [entry.caseId, entry]));
+}
+
+function canonicalizeSurface(surface) {
+  return ledger.surfaceAliases?.[surface] ?? surface;
 }
 
 function markerInventory() {
@@ -141,20 +153,44 @@ function markerInventory() {
         caseId: match[1],
         specTestId: match[2],
         file: relative(repoRoot, file).replaceAll('\\', '/'),
+        group: groupFromSpecFile(file),
       });
     }
   }
   return markers;
 }
 
+function groupFromSpecFile(file) {
+  const rel = relative(join(e2eRoot, 'specs'), file).replaceAll('\\', '/');
+  const group = rel.split('/')[0];
+  return group || undefined;
+}
+
+function parseMaxUnmapped() {
+  const fromCli = maxUnmappedArg === undefined ? undefined : Number(maxUnmappedArg);
+  const fromLedger = ledger.inventory?.maxUnmapped;
+  if (fromCli !== undefined) {
+    assert(Number.isInteger(fromCli) && fromCli >= 0, '--max-unmapped must be a non-negative integer');
+    return fromCli;
+  }
+  assert(
+    Number.isInteger(fromLedger) && fromLedger >= 0,
+    'inventory.maxUnmapped must pin a non-negative integer unmapped budget',
+  );
+  return fromLedger;
+}
+
 function validateLedger(
   httpDeclarations,
-  canonicalRoutes,
+  decoratorSurfaces,
+  canonicalSurfaces,
   intentKinds,
   websocketPaths,
-  frontendRoutes,
 ) {
-  assert(ledger.schemaVersion === 3, 'coverage ledger schemaVersion must be 3');
+  assert(ledger.schemaVersion === 4, 'coverage ledger schemaVersion must be 4');
+  assert(!existsSync(join(e2eRoot, 'coverage', 'features.yaml')),
+    'retired coverage/features.yaml must be removed');
+  assert(ledger.routeOwners === undefined, 'schema v4 forbids blanket routeOwners');
   assert(ledger.architecture?.runtime === 'incus', 'ledger must declare the Incus runtime');
   assert(ledger.architecture?.httpPrefix === '/api', 'ledger must declare the /api prefix');
   assert(
@@ -181,37 +217,82 @@ function validateLedger(
     )),
     'ledger must declare the lvm block_backed storage family',
   );
-  assert(
-    ledger.topology.blocked?.some((entry) => entry.capability === 'gpu-pci'
-      && entry.status === 'BLOCKED'),
-    'GPU coverage must be explicitly BLOCKED',
-  );
-  assert(
-    ledger.topology.blocked?.some((entry) => entry.capability === 'cephfs-cluster'
-      && entry.status === 'BLOCKED'),
-    'CephFS coverage must be explicitly BLOCKED',
-  );
+  const gpuBlocked = ledger.topology.blocked?.some((entry) => (
+    entry.capability === 'gpu-pci' && entry.status === 'BLOCKED'
+  ));
+  const gpuClaim = allCases().find((entry) => entry.caseId === 'container-gpu-pci-claim');
+  assert(gpuClaim, 'container-gpu-pci-claim case is required');
+  if (gpuBlocked) {
+    assert(gpuClaim.status === 'blocked', 'blocked GPU must keep container-gpu-pci-claim blocked');
+  } else {
+    assert(
+      gpuClaim.status === 'implemented',
+      'an available GPU lab must implement container-gpu-pci-claim',
+    );
+  }
+  const cephBlocked = ledger.topology.blocked?.some((entry) => (
+    entry.capability === 'cephfs-cluster' && entry.status === 'BLOCKED'
+  ));
+  const sharedCeph = allCases().find((entry) => entry.caseId === 'shared-cephfs-storage');
+  assert(sharedCeph, 'shared-cephfs-storage case is required');
+  if (cephBlocked) {
+    assert(sharedCeph.status === 'blocked', 'blocked CephFS must keep shared-cephfs-storage blocked');
+  } else {
+    assert(
+      sharedCeph.status === 'implemented',
+      'an available CephFS lab must implement shared-cephfs-storage',
+    );
+  }
 
-  const actualSurfaces = new Set(canonicalRoutes.map((entry) => entry.surface));
-  const listedSurfaces = new Set(
-    ledger.features.flatMap((feature) => feature.cases ?? [])
-      .flatMap((entry) => entry.httpSurfaces ?? []),
-  );
-  const listedSurfaceValues = ledger.features.flatMap((feature) => feature.cases ?? [])
-    .flatMap((entry) => entry.httpSurfaces ?? []);
+  const aliases = ledger.surfaceAliases ?? {};
+  const aliasEntries = Object.entries(aliases);
+  assert(aliasEntries.length === 2, 'surfaceAliases must declare the two :imageId decorator collisions');
+  for (const [source, target] of aliasEntries) {
+    assert(decoratorSurfaces.has(source), `surface alias source is not a decorator: ${source}`);
+    assert(decoratorSurfaces.has(target), `surface alias target is not a decorator: ${target}`);
+    assert(canonicalSurfaces.has(target), `surface alias target is not canonical: ${target}`);
+    assert(!canonicalSurfaces.has(source), `surface alias source must not remain canonical: ${source}`);
+  }
+
+  const listedSurfaceValues = allCases()
+    .filter((entry) => entry.kind !== 'static-contract')
+    .flatMap((entry) => (entry.httpSurfaces ?? []).map(canonicalizeSurface));
+  const listedSurfaces = new Set(listedSurfaceValues);
+  const ownersBySurface = new Map();
+  for (const entry of allCases()) {
+    if (entry.kind === 'static-contract') {
+      assert(
+        (entry.httpSurfaces ?? []).length === 0,
+        `static-contract case ${entry.caseId} must have empty httpSurfaces`,
+      );
+      continue;
+    }
+    for (const raw of entry.httpSurfaces ?? []) {
+      assert(
+        aliases[raw] === undefined,
+        `case ${entry.caseId} lists alias surface ${raw}; use canonical ${aliases[raw]}`,
+      );
+      const surface = canonicalizeSurface(raw);
+      const owners = ownersBySurface.get(surface) ?? [];
+      owners.push(entry.caseId);
+      ownersBySurface.set(surface, owners);
+    }
+  }
+  for (const [surface, owners] of ownersBySurface) {
+    assert(owners.length === 1, `canonical HTTP surface has ${owners.length} owners: ${surface} (${owners.join(', ')})`);
+    assert(canonicalSurfaces.has(surface), `listed HTTP surface is not canonical: ${surface}`);
+  }
   assert(
     listedSurfaceValues.length === listedSurfaces.size,
     'coverage ledger assigns one HTTP surface to multiple cases',
   );
-  for (const surface of listedSurfaces) {
-    assert(actualSurfaces.has(surface), `listed HTTP surface is not canonical: ${surface}`);
-  }
-  for (const surface of actualSurfaces) {
-    const owners = (ledger.routeOwners ?? []).filter((owner) => (
-      surface.split('|')[1].startsWith(owner.prefix)
-    ));
-    assert(owners.length === 1, `canonical HTTP surface has ${owners.length} owners: ${surface}`);
-    assert(caseMap().has(owners[0]?.caseId), `route owner case is unknown: ${surface}`);
+
+  const unmapped = [...canonicalSurfaces].filter((surface) => !listedSurfaces.has(surface)).sort();
+  const budget = parseMaxUnmapped();
+  if (unmapped.length > budget) {
+    fail(
+      `canonical unmapped ${unmapped.length} exceeds budget ${budget}: ${unmapped.join(', ')}`,
+    );
   }
 
   const expectedWebsockets = [...new Set(ledger.websocketPaths ?? [])].sort();
@@ -219,11 +300,16 @@ function validateLedger(
     JSON.stringify(expectedWebsockets) === JSON.stringify(websocketPaths),
     `WebSocket inventory drifted: expected ${websocketPaths.join(',')}, ledger ${expectedWebsockets.join(',')}`,
   );
+  assert(ledger.frontendRoutes === undefined, 'API-only ledger must not list frontendRoutes');
   assert(
-    JSON.stringify([...ledger.frontendRoutes].sort()) === JSON.stringify(frontendRoutes),
-    `frontend route inventory drifted: expected ${frontendRoutes.join(',')}, ledger ${
-      [...ledger.frontendRoutes].sort().join(',')
-    }`,
+    ledger.architecture?.testClient === 'node-fetch-api',
+    'ledger must declare the node-fetch API client',
+  );
+  assert(
+    Array.isArray(ledger.architecture?.forbiddenCompatibility)
+      && ledger.architecture.forbiddenCompatibility.includes('browser journeys')
+      && ledger.architecture.forbiddenCompatibility.includes('recovery profile'),
+    'ledger must forbid browser journeys and the recovery profile',
   );
   assert(
     JSON.stringify([...ledger.intentKinds].sort()) === JSON.stringify([...intentKinds].sort()),
@@ -232,40 +318,71 @@ function validateLedger(
 
   const inventory = ledger.inventory;
   if (inventory) {
-    assert(inventory.controllerFileCount === new Set(canonicalRoutes.map((entry) => entry.file)).size,
-      'controller file inventory drifted');
+    assert(inventory.controllerFileCount === new Set(
+      httpDeclarations.filter((entry) => !isRetiredRoute(entry.surface)).map((entry) => entry.file),
+    ).size, 'controller file inventory drifted');
     assert(inventory.httpDecoratorCount === httpDeclarations.length,
       'HTTP decorator inventory drifted');
-    assert(inventory.httpSurfaceCount === actualSurfaces.size,
+    assert(inventory.canonicalHttpSurfaceCount === canonicalSurfaces.size,
+      'canonical HTTP surface inventory drifted');
+    assert(inventory.httpSurfaceCount === canonicalSurfaces.size,
       'HTTP surface inventory drifted');
     assert(inventory.intentKindCount === intentKinds.length,
       'IntentKind count drifted');
     assert(inventory.websocketPathCount === websocketPaths.length,
       'WebSocket path count drifted');
+    assert(Number.isInteger(inventory.maxUnmapped) && inventory.maxUnmapped >= 0,
+      'inventory.maxUnmapped must be a non-negative integer');
+    if (maxUnmappedArg === undefined) {
+      assert(unmapped.length <= inventory.maxUnmapped,
+        `inventory.maxUnmapped ${inventory.maxUnmapped} is below canonical unmapped ${unmapped.length}`);
+    }
   } else {
     warn('ledger.inventory is absent; run the validator once after route changes to freeze counts');
   }
+
+  return { unmapped, listedCount: listedSurfaces.size };
 }
 
 function validateCases() {
   const cases = allCases();
   const ids = new Set();
+  const markers = markerInventory();
   for (const entry of cases) {
     assert(!ids.has(entry.caseId), `duplicate coverage case ${entry.caseId}`);
     ids.add(entry.caseId);
-    assert(['implemented', 'blocked'].includes(entry.status),
-      `invalid status for ${entry.caseId}`);
+    assert(ALLOWED_KINDS.has(entry.kind), `invalid kind for ${entry.caseId}`);
+    assert(ALLOWED_STATUSES.has(entry.status), `invalid status for ${entry.caseId}`);
+    assert(ALLOWED_PERSONAS.has(entry.persona), `invalid persona for ${entry.caseId}`);
     assert(Array.isArray(entry.profiles) && entry.profiles.length > 0,
       `case ${entry.caseId} must name at least one profile`);
-    assert(Array.isArray(entry.httpSurfaces),
-      `case ${entry.caseId} must declare httpSurfaces`);
+    assert(entry.httpSurfaces === undefined || Array.isArray(entry.httpSurfaces),
+      `case ${entry.caseId} httpSurfaces must be an array when present`);
+    assert(entry.websocketPaths === undefined || Array.isArray(entry.websocketPaths),
+      `case ${entry.caseId} websocketPaths must be an array when present`);
+    assert(entry.intentKinds === undefined || Array.isArray(entry.intentKinds),
+      `case ${entry.caseId} intentKinds must be an array when present`);
+    assert(entry.frontendRoutes === undefined,
+      `API-only case ${entry.caseId} must not list frontendRoutes`);
+    assert(entry.requiredCapabilities === undefined || Array.isArray(entry.requiredCapabilities),
+      `case ${entry.caseId} requiredCapabilities must be an array when present`);
     for (const profile of entry.profiles) {
-      assert(['smoke', 'core', 'full', 'recovery'].includes(profile),
+      assert(ALLOWED_PROFILES.has(profile),
         `case ${entry.caseId} names unknown profile ${profile}`);
+    }
+    const markerGroup = markers.find((marker) => marker.caseId === entry.caseId)?.group;
+    const group = entry.group ?? markerGroup;
+    if (entry.group) {
+      assert(
+        existsSync(join(e2eRoot, 'specs', entry.group)),
+        `case ${entry.caseId} group ${entry.group} is not a specs directory`,
+      );
+    }
+    if (entry.status === 'implemented' && entry.kind !== 'static-contract') {
+      assert(Boolean(group), `implemented case ${entry.caseId} has no group (set group or add a marker)`);
     }
   }
 
-  const markers = markerInventory();
   const markersByCase = new Map();
   for (const marker of markers) {
     if (!caseMap().has(marker.caseId)) {
@@ -279,7 +396,10 @@ function validateCases() {
   for (const entry of cases) {
     const markersForCase = markersByCase.get(entry.caseId) ?? [];
     if (entry.status === 'implemented') {
-      assert(markersForCase.length > 0, `implemented case has no marker: ${entry.caseId}`);
+      assert(
+        markersForCase.length === 1,
+        `implemented case ${entry.caseId} must have exactly one marker, found ${markersForCase.length}`,
+      );
     } else {
       assert(markersForCase.length === 0, `blocked case has a live marker: ${entry.caseId}`);
     }
@@ -288,19 +408,85 @@ function validateCases() {
   for (const file of walk(join(e2eRoot, 'specs')).filter((path) => path.endsWith('.spec.ts'))) {
     const source = readText(file);
     assert(!/\.(skip|fixme|only)\s*\(/.test(source), `forbidden test modifier in ${file}`);
-    assert(!/page\.(route|screenshot|video)|snapshot\(/.test(source),
-      `mocking or snapshot evidence in ${file}`);
+    assert(!/page\.(goto|locator|click|fill|route|screenshot|video|setContent)|snapshot\(/.test(source),
+      `browser, mocking, or snapshot evidence in ${file}`);
+    assert(!/async\s*\(\s*\{[^}]*\bpage\b/.test(source),
+      `page fixture is forbidden in API-only spec ${file}`);
+    assert(
+      !/@playwright\/test|playwright\.request/.test(source),
+      `Playwright is forbidden in API-only spec ${file}`,
+    );
+    assert(
+      !/runCommand\(\s*['"]incus['"]/.test(source),
+      `spec must use runIncus/execGuest instead of runCommand('incus'): ${file}`,
+    );
+    assert(
+      !/startsWith\(['"]BLOCKED:['"]\)[\s\S]{0,400}\breturn\s*;/.test(source),
+      `skip-as-pass blocked return is forbidden in ${file}`,
+    );
   }
 }
 
+function validateSpecTree() {
+  const specsRoot = join(e2eRoot, 'specs');
+  assert(existsSync(specsRoot), 'e2e/specs is missing');
+  const groups = readdirSync(specsRoot, { withFileTypes: true });
+  const prefixes = [];
+  for (const entry of groups) {
+    if (!entry.isDirectory()) {
+      fail(`specs root must only contain group directories: ${entry.name}`);
+      continue;
+    }
+    const prefix = entry.name.match(/^(\d+)/)?.[1];
+    if (prefix) prefixes.push(prefix);
+    const specFiles = walk(join(specsRoot, entry.name)).filter((file) => file.endsWith('.spec.ts'));
+    assert(
+      specFiles.length > 0,
+      `empty spec group ${entry.name} (every specs/<group> must contain a .spec.ts)`,
+    );
+  }
+  assert(
+    new Set(prefixes).size === prefixes.length,
+    `duplicate numbered spec groups: ${prefixes.join(', ')}`,
+  );
+  assert(!existsSync(join(e2eRoot, 'e2e')), 'nested e2e/e2e/ must be removed');
+  assert(!existsSync(join(e2eRoot, 'playwright.config.ts')),
+    'retired playwright.config.ts must be removed');
+  for (const file of [
+    ...walk(join(e2eRoot, 'support')),
+    ...walk(join(e2eRoot, 'fixtures')),
+    join(e2eRoot, 'run.mjs'),
+  ]) {
+    const source = existsSync(file) ? readText(file) : '';
+    assert(
+      !/@playwright\/test/.test(source),
+      `Playwright import is forbidden in ${relative(repoRoot, file)}`,
+    );
+  }
+  assert(!existsSync(join(specsRoot, '70-browser')), 'retired specs/70-browser must be removed');
+  assert(!existsSync(join(specsRoot, '75-browser')), 'retired specs/75-browser must be removed');
+}
+
 function validateProfiles() {
-  for (const profileName of ['smoke', 'core', 'full', 'recovery']) {
-    const path = join(e2eRoot, 'profiles', `${profileName}.yaml`);
-    assert(existsSync(path), `profile file missing: ${profileName}`);
-    if (!existsSync(path)) continue;
+  const profilesDir = join(e2eRoot, 'profiles');
+  const profileFiles = readdirSync(profilesDir).sort();
+  assert(
+    JSON.stringify(profileFiles) === JSON.stringify(['core.json', 'full.json', 'smoke.json']),
+    `profiles/ must only contain smoke, core, and full JSON; found ${profileFiles.join(', ')}`,
+  );
+  assert(!existsSync(join(profilesDir, 'recovery.json')),
+    'retired recovery profile must be removed');
+  const markers = markerInventory();
+  const loaded = {};
+  for (const profileName of ['smoke', 'core', 'full']) {
+    const yamlPath = join(profilesDir, `${profileName}.yaml`);
+    assert(!existsSync(yamlPath), `retired profile yaml must be removed: ${profileName}.yaml`);
+    const path = join(profilesDir, `${profileName}.json`);
     const profile = JSON.parse(readText(path));
+    loaded[profileName] = profile;
     assert(profile.name === profileName, `profile name mismatch: ${profileName}`);
     assert(profile.runtime === 'incus', `profile ${profileName} must use Incus`);
+    assert(profile.workers === 1, `profile ${profileName} must pin workers=1`);
     assert(Array.isArray(profile.groups) && profile.groups.length > 0,
       `profile ${profileName} has no spec groups`);
     assert(Array.isArray(profile.requiredCapabilities)
@@ -320,9 +506,22 @@ function validateProfiles() {
     }
     const profileCases = allCases().filter((entry) => entry.profiles.includes(profileName));
     assert(profileCases.length > 0, `profile ${profileName} owns no cases`);
+    for (const entry of profileCases) {
+      if (entry.status !== 'implemented' || entry.kind === 'static-contract') continue;
+      const group = entry.group ?? markers.find((marker) => marker.caseId === entry.caseId)?.group;
+      assert(Boolean(group), `implemented case ${entry.caseId} has no group for profile ${profileName}`);
+      assert(
+        profile.groups.includes(group),
+        `case ${entry.caseId} is on profile ${profileName} but group ${group} is not in that profile`,
+      );
+    }
   }
+  assert(
+    JSON.stringify(loaded.smoke.groups) === JSON.stringify(['00-foundation', '15-iam']),
+    'smoke must be API-only groups 00-foundation and 15-iam',
+  );
   if (requiredProfile) {
-    assert(['smoke', 'core', 'full', 'recovery'].includes(requiredProfile),
+    assert(ALLOWED_PROFILES.has(requiredProfile),
       `unknown required profile ${requiredProfile}`);
   }
 }
@@ -334,15 +533,17 @@ const topologyCapabilityNames = new Set([
   'certificate-rotation',
   'storage-dir-quota-online',
   'storage-lvm-block-backed',
-  'macvlan-parent',
-  'rp-filter',
-  'fib-anti-spoof',
+  'lan-bridge',
+  'bridge-ipv4-filter',
   'private-simplestreams',
   'sshd-no-dhcp-image',
   'node-exporter-authenticated-pull',
   'intent-reconciliation',
   'exec-bridge',
   'ssh-reachability',
+  'gpu-pci',
+  'cephfs-cluster',
+  'multi-server',
 ]);
 
 function validateForbiddenTerms() {
@@ -372,20 +573,25 @@ function validateForbiddenTerms() {
 }
 
 const declarations = parseHttpRoutes();
-const canonicalDeclarations = declarations.filter((entry) => !isRetiredRoute(entry.surface));
-const canonicalSurfaces = new Set(canonicalDeclarations.map((entry) => entry.surface));
+const decoratorSurfaces = new Set(
+  declarations.filter((entry) => !isRetiredRoute(entry.surface)).map((entry) => entry.surface),
+);
+const aliases = ledger.surfaceAliases ?? {};
+const canonicalSurfaces = new Set(
+  [...decoratorSurfaces].map((surface) => aliases[surface] ?? surface),
+);
 const intentKinds = parseIntentKinds();
 const websocketPaths = parseWebsocketPaths();
-const frontendRoutes = parseFrontendRoutes();
 
-validateLedger(
+const coverage = validateLedger(
   declarations,
-  canonicalDeclarations,
+  decoratorSurfaces,
+  canonicalSurfaces,
   intentKinds,
   websocketPaths,
-  frontendRoutes,
 );
 validateCases();
+validateSpecTree();
 validateProfiles();
 validateForbiddenTerms();
 
@@ -400,7 +606,9 @@ if (errors.length > 0) {
 
 console.log(
   `E2E validation passed: ${canonicalSurfaces.size} canonical HTTP surfaces, `
-  + `${declarations.length} HTTP decorators, ${new Set(canonicalDeclarations.map((entry) => entry.file)).size} controller files, `
+  + `${declarations.length} HTTP decorators, ${new Set(declarations.filter((entry) => !isRetiredRoute(entry.surface)).map((entry) => entry.file)).size} controller files, `
   + `${intentKinds.length} intent kinds, ${websocketPaths.length} WebSocket paths, `
-  + `${allCases().length} coverage cases`,
+  + `${allCases().length} coverage cases, `
+  + `${coverage.listedCount} mapped / ${coverage.unmapped.length} unmapped `
+  + `(budget ${ledger.inventory.maxUnmapped})`,
 );
