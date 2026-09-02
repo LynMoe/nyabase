@@ -66,11 +66,11 @@ function SpecSlot({
   host: FrontendExtensionHost;
   ctx: SlotContextMap['container.spec'];
 }) {
-  if (!enabledOn(ctx.enabledExtensions)) return null;
   const current = pciFromValue(ctx.value[NVIDIA_GPU_EXTENSION_ID]);
+  const [mode, setMode] = useState<GpuPickerMode>(() => gpuModeFromPciList(current));
+  if (!enabledOn(ctx.enabledExtensions)) return null;
   const runtime = runtimeFromValue(ctx.value[NVIDIA_GPU_EXTENSION_ID]);
   const canEdit = ctx.observedStatus === 'stopped';
-  const [mode, setMode] = useState<GpuPickerMode>(() => gpuModeFromPciList(current));
   const {
     Card,
     CardHeader,
@@ -141,10 +141,10 @@ function GrantSlot({
   host: FrontendExtensionHost;
   ctx: SlotContextMap['grant.server'];
 }) {
+  const latestGrant = useRef({ mode: GpuGrantMode.None, pciAddresses: [] as string[] });
   if (!enabledOn(ctx.enabledExtensions)) return null;
   const grant = parseGrant(ctx.value[NVIDIA_GPU_EXTENSION_ID])
     ?? { mode: GpuGrantMode.None, pciAddresses: [] };
-  const latestGrant = useRef(grant);
   latestGrant.current = grant;
   const pickerMode: GpuPickerMode = grant.mode === GpuGrantMode.None
     ? 'none'
