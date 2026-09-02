@@ -77,12 +77,12 @@
     "/ws/http-proxy"
   ],
   "inventory": {
-    "controllerFileCount": 28,
-    "httpDecoratorCount": 198,
-    "httpSurfaceCount": 196,
+    "controllerFileCount": 29,
+    "httpDecoratorCount": 200,
+    "httpSurfaceCount": 198,
     "intentKindCount": 12,
     "websocketPathCount": 3,
-    "canonicalHttpSurfaceCount": 196,
+    "canonicalHttpSurfaceCount": 198,
     "maxUnmapped": 0
   },
   "features": [
@@ -237,6 +237,66 @@
           "httpSurfaces": [
             "PUT|/api/admin/servers/:serverId/extensions/:extensionId"
           ]
+        },
+        {
+          "caseId": "container-nvidia-gpu-occupancy-disable",
+          "kind": "behavioral",
+          "persona": "administrator",
+          "status": "implemented",
+          "group": "30-containers",
+          "profiles": [
+            "core",
+            "full"
+          ],
+          "httpSurfaces": []
+        },
+        {
+          "caseId": "container-nvidia-gpu-late-add",
+          "kind": "behavioral",
+          "persona": "administrator",
+          "status": "implemented",
+          "group": "30-containers",
+          "profiles": [
+            "core",
+            "full"
+          ],
+          "httpSurfaces": []
+        },
+        {
+          "caseId": "container-nvidia-gpu-cpu-only-runtime",
+          "kind": "behavioral",
+          "persona": "normal-user",
+          "status": "implemented",
+          "group": "30-containers",
+          "profiles": [
+            "core",
+            "full"
+          ],
+          "httpSurfaces": []
+        },
+        {
+          "caseId": "container-nvidia-gpu-not-enabled-reject",
+          "kind": "behavioral",
+          "persona": "administrator",
+          "status": "implemented",
+          "group": "30-containers",
+          "profiles": [
+            "core",
+            "full"
+          ],
+          "httpSurfaces": []
+        },
+        {
+          "caseId": "container-nvidia-gpu-mutation-requires-stop",
+          "kind": "behavioral",
+          "persona": "administrator",
+          "status": "implemented",
+          "group": "30-containers",
+          "profiles": [
+            "core",
+            "full"
+          ],
+          "httpSurfaces": []
         }
       ]
     },

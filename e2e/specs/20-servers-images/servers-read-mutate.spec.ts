@@ -16,6 +16,10 @@ test(
       `/api/servers/${seedState.server.id}/extensions/nvidia-gpu/devices`,
     );
     expect([200, 403, 404]).toContain(userDevices.status());
+    const adminExtensions = await expectJson<JsonRecord[]>(
+      await adminApi.get(`/api/admin/servers/${seedState.server.id}/extensions`),
+    );
+    expect(Array.isArray(adminExtensions)).toBe(true);
     const adminDevices = await expectJson<JsonRecord>(
       await adminApi.get(`/api/admin/servers/${seedState.server.id}/extensions/nvidia-gpu/devices`),
     );
