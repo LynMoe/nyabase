@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  mergeNodeMetricCatalog,
   OpenMetricsSchemaError,
   parseOpenMetrics,
   renderOpenMetrics,
@@ -89,5 +90,26 @@ describe('node metrics GPU PCI schema', () => {
       'nyabase_node_gpu_util_ratio{gpu_pci="0000:41:00.0"} 0.25',
       'nyabase_node_gpu_util_ratio{gpu_pci="00000000:41:00.0"} 0.5',
     ].join('\n'))).toThrow('Duplicate metric sample');
+  });
+});
+
+describe('mergeNodeMetricCatalog', () => {
+  it('merges disjoint families and rejects collisions', () => {
+    const merged = mergeNodeMetricCatalog(
+      { definitions: { a: { type: 'gauge', labels: [] } }, validators: {} },
+      {
+        definitions: { b: { type: 'counter', labels: ['id'] } },
+        validators: { b: (labels) => ({ ...labels }) },
+      },
+    );
+    expect(merged.definitions).toEqual({
+      a: { type: 'gauge', labels: [] },
+      b: { type: 'counter', labels: ['id'] },
+    });
+    expect(merged.validators.b).toEqual(expect.any(Function));
+    expect(() => mergeNodeMetricCatalog(
+      { definitions: { a: { type: 'gauge', labels: [] } }, validators: {} },
+      { definitions: { a: { type: 'gauge', labels: [] } }, validators: {} },
+    )).toThrow('node metric catalog collision: a');
   });
 });

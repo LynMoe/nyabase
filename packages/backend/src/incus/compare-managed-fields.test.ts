@@ -1,10 +1,36 @@
 import { describe, expect, it } from 'vitest';
 import {
-  applyManagedFields,
-  compareManagedFields,
+  applyManagedFields as applyManagedFieldsOwned,
+  compareManagedFields as compareManagedFieldsOwned,
+  CORE_MANAGED_FIELD_OWNERSHIP,
   observeRootQuotaPending,
+  TEMPORARY_MANAGED_FIELD_OWNERSHIP,
+  type ManagedFieldOwnership,
+  type ManagedInstanceDocument,
 } from './compare-managed-fields.js';
-import { buildDesiredInstanceSpec, type InstanceSpecInput } from './instance-spec.js';
+import {
+  buildDesiredInstanceSpec,
+  type DesiredInstanceSpec,
+  type InstanceSpecInput,
+} from './instance-spec.js';
+
+const ownership = TEMPORARY_MANAGED_FIELD_OWNERSHIP;
+
+function compareManagedFields(
+  actual: ManagedInstanceDocument,
+  desired: DesiredInstanceSpec,
+  owned: ManagedFieldOwnership = ownership,
+) {
+  return compareManagedFieldsOwned(actual, desired, owned);
+}
+
+function applyManagedFields(
+  actual: ManagedInstanceDocument,
+  desired: DesiredInstanceSpec,
+  owned: ManagedFieldOwnership = ownership,
+) {
+  return applyManagedFieldsOwned(actual, desired, owned);
+}
 
 const baseInput: InstanceSpecInput = {
   container: {
@@ -304,5 +330,44 @@ describe('compareManagedFields', () => {
       pendingSizeBytes: '21474836480',
     });
     expect(observeRootQuotaPending(actualWith(), 1n).pending).toBe(false);
+  });
+
+  it('requires ownership prefixes to treat card config and devices as managed', () => {
+    const spec = desired();
+    const actual = actualWith(
+      { 'nvidia.runtime': 'true' },
+      {
+        gpu0: {
+          type: 'gpu',
+          gputype: 'physical',
+          pci: '0000:41:00.0',
+        },
+      },
+    );
+
+    const unmanaged = compareManagedFields(actual, spec, CORE_MANAGED_FIELD_OWNERSHIP);
+    expect(unmanaged.empty).toBe(true);
+    const preserved = applyManagedFields(actual, spec, CORE_MANAGED_FIELD_OWNERSHIP);
+    expect(preserved.config?.['nvidia.runtime']).toBe('true');
+    expect(preserved.devices?.gpu0).toEqual({
+      type: 'gpu',
+      gputype: 'physical',
+      pci: '0000:41:00.0',
+    });
+
+    const managed = compareManagedFields(actual, spec, TEMPORARY_MANAGED_FIELD_OWNERSHIP);
+    expect(managed.empty).toBe(false);
+    expect(managed.config['nvidia.runtime']).toEqual({
+      actual: 'true',
+      desired: spec.config?.['nvidia.runtime'],
+    });
+    expect(managed.devices.gpu0?.actual).toEqual({
+      type: 'gpu',
+      gputype: 'physical',
+      pci: '0000:41:00.0',
+    });
+    const stripped = applyManagedFields(actual, spec, TEMPORARY_MANAGED_FIELD_OWNERSHIP);
+    expect(stripped.config?.['nvidia.runtime']).toBe(spec.config?.['nvidia.runtime']);
+    expect(stripped.devices?.gpu0).toBeUndefined();
   });
 });

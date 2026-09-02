@@ -167,17 +167,34 @@ export function normalizeManagedValue(key: string, value: string | undefined): s
   return value;
 }
 
-function isManagedConfigKey(key: string): boolean {
-  return (
-    key.startsWith('limits.') ||
-    key.startsWith('security.') ||
-    key.startsWith('nvidia.') ||
-    key.startsWith('user.nyabase.')
-  );
+export interface ManagedFieldOwnership {
+  readonly configPrefixes: readonly string[];
+  readonly deviceNames: readonly string[];
+  readonly devicePrefixes: readonly string[];
 }
 
-function isManagedDeviceName(name: string): boolean {
-  return name === 'root' || name === 'eth0' || name.startsWith('gpu') || name.startsWith('nyd-');
+export const CORE_MANAGED_FIELD_OWNERSHIP: ManagedFieldOwnership = {
+  configPrefixes: ['limits.', 'security.', 'user.nyabase.'],
+  deviceNames: ['root', 'eth0'],
+  devicePrefixes: ['nyd-'],
+};
+
+/** Temporary: keep today's card prefixes until the extension registry supplies them. */
+export const TEMPORARY_MANAGED_FIELD_OWNERSHIP: ManagedFieldOwnership = {
+  configPrefixes: [...CORE_MANAGED_FIELD_OWNERSHIP.configPrefixes, 'nvidia.'],
+  deviceNames: CORE_MANAGED_FIELD_OWNERSHIP.deviceNames,
+  devicePrefixes: [...CORE_MANAGED_FIELD_OWNERSHIP.devicePrefixes, 'gpu'],
+};
+
+function isManagedConfigKey(key: string, ownership: ManagedFieldOwnership): boolean {
+  return ownership.configPrefixes.some((prefix) => key.startsWith(prefix));
+}
+
+function isManagedDeviceName(name: string, ownership: ManagedFieldOwnership): boolean {
+  return (
+    ownership.deviceNames.includes(name)
+    || ownership.devicePrefixes.some((prefix) => name.startsWith(prefix))
+  );
 }
 
 function managedFailure(code: IncusFailureCode, details: IncusErrorDetails): ManagedFieldsDiff {
@@ -194,13 +211,14 @@ function managedFailure(code: IncusFailureCode, details: IncusErrorDetails): Man
 function compareConfig(
   actual: ManagedStringMap,
   desired: ManagedStringMap,
+  ownership: ManagedFieldOwnership,
 ): Readonly<Record<string, ManagedValueDiff>> {
   const keys = new Set<string>();
   for (const key of Object.keys(actual)) {
-    if (isManagedConfigKey(key)) keys.add(key);
+    if (isManagedConfigKey(key, ownership)) keys.add(key);
   }
   for (const key of Object.keys(desired)) {
-    if (isManagedConfigKey(key)) keys.add(key);
+    if (isManagedConfigKey(key, ownership)) keys.add(key);
   }
   const result: Record<string, ManagedValueDiff> = {};
   for (const key of [...keys].sort()) {
@@ -227,13 +245,14 @@ function deviceMatches(
 function compareDevices(
   actual: ManagedDeviceMap,
   desired: ManagedDeviceMap,
+  ownership: ManagedFieldOwnership,
 ): Readonly<Record<string, ManagedDeviceDiff>> {
   const names = new Set<string>();
   for (const name of Object.keys(actual)) {
-    if (isManagedDeviceName(name)) names.add(name);
+    if (isManagedDeviceName(name, ownership)) names.add(name);
   }
   for (const name of Object.keys(desired)) {
-    if (isManagedDeviceName(name)) names.add(name);
+    if (isManagedDeviceName(name, ownership)) names.add(name);
   }
   const result: Record<string, ManagedDeviceDiff> = {};
   for (const name of [...names].sort()) {
@@ -318,6 +337,7 @@ function validateEth0(
 export function compareManagedFields(
   actualInput: ManagedInstanceDocument,
   desired: DesiredInstanceSpec,
+  ownership: ManagedFieldOwnership,
 ): ManagedFieldsDiff {
   const actual = asManagedDocument(actualInput);
   const expected: ManagedInstanceDocument = {
@@ -330,8 +350,8 @@ export function compareManagedFields(
   const desiredNetworkFailure = validateEth0(expectedDocument.devices, 'desired');
   if (desiredNetworkFailure) return desiredNetworkFailure;
 
-  const config = compareConfig(actual.config, expectedDocument.config);
-  const devices = compareDevices(actual.devices, expectedDocument.devices);
+  const config = compareConfig(actual.config, expectedDocument.config, ownership);
+  const devices = compareDevices(actual.devices, expectedDocument.devices, ownership);
   const empty = Object.keys(config).length === 0 && Object.keys(devices).length === 0;
   return {
     kind: empty ? 'empty' : 'diff',
@@ -344,6 +364,7 @@ export function compareManagedFields(
 export function applyManagedFields(
   actualInput: ManagedInstanceDocument,
   desired: DesiredInstanceSpec,
+  ownership: ManagedFieldOwnership,
 ): ManagedInstanceDocument {
   const actual = asManagedDocument(actualInput);
   const expected = asManagedDocument({
@@ -352,22 +373,22 @@ export function applyManagedFields(
   });
   const config: Record<string, string> = { ...actual.config };
   for (const key of Object.keys(config)) {
-    if (isManagedConfigKey(key) && expected.config[key] === undefined) {
+    if (isManagedConfigKey(key, ownership) && expected.config[key] === undefined) {
       delete config[key];
     }
   }
   for (const [key, value] of Object.entries(expected.config)) {
-    if (isManagedConfigKey(key)) config[key] = value;
+    if (isManagedConfigKey(key, ownership)) config[key] = value;
   }
 
   const devices: Record<string, ManagedStringMap> = {};
   for (const [name, device] of Object.entries(actual.devices)) {
-    if (!isManagedDeviceName(name)) {
+    if (!isManagedDeviceName(name, ownership)) {
       devices[name] = device;
     }
   }
   for (const [name, device] of Object.entries(expected.devices)) {
-    if (isManagedDeviceName(name)) {
+    if (isManagedDeviceName(name, ownership)) {
       // Replace eth0 wholesale so filter identity is complete and extra keys
       // cannot survive a merge. Other managed devices still merge.
       devices[name] = name === 'eth0'

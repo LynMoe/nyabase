@@ -10,3 +10,4 @@ export * from './protocol/node-metrics.js';
 export * from './protocol/ssh-public-key.js';
 export * from './protocol/ssh-proxy.js';
 export * from './protocol/http-proxy.js';
+export * from './protocol/server-card-extensions.js';

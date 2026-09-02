@@ -8,6 +8,7 @@ import { AppModule } from './app.module.js';
 import { NyabaseConfigService } from './config/nyabase-config.service.js';
 import { SpaFallbackFilter } from './filters/spa-fallback.filter.js';
 import { ZodExceptionFilter } from './filters/zod-exception.filter.js';
+import { PackageHttpErrorFilter } from './server-card-extensions/package-http-error.filter.js';
 import { RuntimeRoleService } from './runtime/runtime-role.service.js';
 import { RuntimeLifecycleService } from './health/runtime-lifecycle.service.js';
 import { ConsoleBridgeGateway } from './runtime/console-bridge.gateway.js';
@@ -43,7 +44,7 @@ async function bootstrap() {
       message: 'Not Found',
     });
   });
-  app.useGlobalFilters(new ZodExceptionFilter());
+  app.useGlobalFilters(new ZodExceptionFilter(), new PackageHttpErrorFilter());
   // forbidNonWhitelisted: throw 400 on extra properties so clients learn
   // about typos / dropped fields instead of silently having them ignored.
   // Note: most request DTOs are validated via zod (see Body() handlers); the

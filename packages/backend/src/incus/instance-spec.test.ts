@@ -7,7 +7,11 @@ import {
   deriveVolumeName,
   type InstanceSpecInput,
 } from './instance-spec.js';
-import { compareManagedFields, applyManagedFields } from './compare-managed-fields.js';
+import {
+  applyManagedFields,
+  compareManagedFields,
+  TEMPORARY_MANAGED_FIELD_OWNERSHIP,
+} from './compare-managed-fields.js';
 
 const containerId = '11111111-1111-4111-8111-111111111111';
 const serverId = '22222222-2222-4222-8222-222222222222';
@@ -179,11 +183,12 @@ describe('buildDesiredInstanceSpec', () => {
         devices: one.devices,
       },
       two,
+      TEMPORARY_MANAGED_FIELD_OWNERSHIP,
     );
     expect(actual.devices?.[deriveAttachmentDeviceName(attachmentId)]).toBeDefined();
     expect(actual.devices?.['nyd-55555555555545558555555555555555']).toBeDefined();
-    const backToOne = applyManagedFields(actual, one);
+    const backToOne = applyManagedFields(actual, one, TEMPORARY_MANAGED_FIELD_OWNERSHIP);
     expect(backToOne.devices?.['nyd-55555555555545558555555555555555']).toBeUndefined();
-    expect(compareManagedFields(backToOne, one).empty).toBe(true);
+    expect(compareManagedFields(backToOne, one, TEMPORARY_MANAGED_FIELD_OWNERSHIP).empty).toBe(true);
   });
 });

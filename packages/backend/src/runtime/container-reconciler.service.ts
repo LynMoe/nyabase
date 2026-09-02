@@ -14,6 +14,7 @@ import {
   observeRootQuotaPending,
   requestAndWait,
   readAfterTimeout,
+  TEMPORARY_MANAGED_FIELD_OWNERSHIP,
   type IncusClientPort,
   type IncusSchema,
   type ManagedInstanceDocument,
@@ -418,7 +419,7 @@ export class ContainerReconciler implements ManagedReconciler {
     }
 
     const state = await this.readState(context.client, expectedName, actual.document.state);
-    const diff = compareManagedFields(actual.document, desired);
+    const diff = compareManagedFields(actual.document, desired, TEMPORARY_MANAGED_FIELD_OWNERSHIP);
     if (diff.kind === 'managed_failure') {
       return {
         outcome: 'failed',
@@ -458,7 +459,11 @@ export class ContainerReconciler implements ManagedReconciler {
             (options) => client.readModifyWriteInstance(
               expectedName,
               (document) => {
-                const merged = applyManagedFields(document as ManagedInstanceDocument, desired);
+                const merged = applyManagedFields(
+                  document as ManagedInstanceDocument,
+                  desired,
+                  TEMPORARY_MANAGED_FIELD_OWNERSHIP,
+                );
                 document.config = merged.config;
                 document.devices = merged.devices;
                 return document;
@@ -468,7 +473,11 @@ export class ContainerReconciler implements ManagedReconciler {
           ),
           async () => {
             const after = await this.readRequired(client, expectedName);
-            const afterDiff = compareManagedFields(after.document, desired);
+            const afterDiff = compareManagedFields(
+              after.document,
+              desired,
+              TEMPORARY_MANAGED_FIELD_OWNERSHIP,
+            );
             if (afterDiff.kind !== 'empty') {
               throw new Error('INSTANCE_UPDATE_NOT_CONFIRMED');
             }
@@ -515,7 +524,11 @@ export class ContainerReconciler implements ManagedReconciler {
     );
     const verified = await this.readRequired(context.client, expectedName);
     const verifiedState = await this.readState(context.client, expectedName, verified.document.state);
-    const verificationDiff = compareManagedFields(verified.document, desired);
+    const verificationDiff = compareManagedFields(
+      verified.document,
+      desired,
+      TEMPORARY_MANAGED_FIELD_OWNERSHIP,
+    );
     if (verificationDiff.kind !== 'empty') {
       return {
         outcome: 'failed',
@@ -704,7 +717,11 @@ export class ContainerReconciler implements ManagedReconciler {
         },
       })),
     });
-    return compareManagedFields(actual.document, desired).kind !== 'empty';
+    return compareManagedFields(
+      actual.document,
+      desired,
+      TEMPORARY_MANAGED_FIELD_OWNERSHIP,
+    ).kind !== 'empty';
   }
 
   private async readContainer(id: string): Promise<ContainerRow | undefined> {

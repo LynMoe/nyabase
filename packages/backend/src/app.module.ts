@@ -24,10 +24,12 @@ import { UsersModule } from './users/users.module.js';
 import { VolumesModule } from './volumes/volumes.module.js';
 import { SystemSettingsModule } from './system-settings/system-settings.module.js';
 import { GrantExpiryModule } from './access/grant-expiry.module.js';
+import { ServerCardExtensionsModule } from './server-card-extensions/server-card-extensions.module.js';
 
 @Module({
   imports: [
     NyabaseConfigModule,
+    ServerCardExtensionsModule.register([]),
     RedisRuntimeModule,
     RuntimeModule,
     DatabaseModule,

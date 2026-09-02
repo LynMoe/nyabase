@@ -19,6 +19,39 @@ export interface NodeMetricDefinition {
   readonly labels: readonly string[];
 }
 
+export type NodeMetricLabelValidator = (
+  labels: Readonly<Record<string, string>>,
+) => Record<string, string>;
+
+export interface NodeMetricCatalog {
+  readonly definitions: Readonly<Record<string, NodeMetricDefinition>>;
+  readonly validators: Readonly<Record<string, NodeMetricLabelValidator>>;
+}
+
+export const CORE_LABEL_VALIDATORS: NodeMetricCatalog['validators'] = {};
+
+export function mergeNodeMetricCatalog(
+  ...parts: readonly NodeMetricCatalog[]
+): NodeMetricCatalog {
+  const definitions: Record<string, NodeMetricDefinition> = {};
+  const validators: Record<string, NodeMetricLabelValidator> = {};
+  for (const part of parts) {
+    for (const [name, definition] of Object.entries(part.definitions)) {
+      if (Object.prototype.hasOwnProperty.call(definitions, name)) {
+        throw new Error(`node metric catalog collision: ${name}`);
+      }
+      definitions[name] = definition;
+    }
+    for (const [name, validator] of Object.entries(part.validators)) {
+      if (Object.prototype.hasOwnProperty.call(validators, name)) {
+        throw new Error(`node metric validator collision: ${name}`);
+      }
+      validators[name] = validator;
+    }
+  }
+  return { definitions, validators };
+}
+
 export const NODE_METRIC_DEFINITIONS: Readonly<Record<NodeMetricFamily, NodeMetricDefinition>> = {
   nyabase_node_cpu_usage_ratio: { type: 'gauge', labels: ['cpu'] },
   nyabase_node_cpu_psi_ratio: { type: 'gauge', labels: ['scope', 'window'] },
