@@ -4,7 +4,9 @@ import {
   NVIDIA_GPU_INVALID_PCI,
   NVIDIA_GPU_RUNTIME_UNAVAILABLE,
   NVIDIA_GPU_WILDCARD_FORBIDDEN,
+  isPackageHttpError,
   nvidiaGpuFormatError,
+  PackageHttpError,
 } from './errors.js';
 
 describe('nvidiaGpuFormatError', () => {
@@ -17,5 +19,20 @@ describe('nvidiaGpuFormatError', () => {
 
   it('returns undefined for unknown codes', () => {
     expect(nvidiaGpuFormatError('EXTENSION_UNKNOWN')).toBeUndefined();
+  });
+});
+
+describe('isPackageHttpError', () => {
+  it('duck-types statusCode/code/details without requiring instanceof', () => {
+    const thrown = new PackageHttpError(400, NVIDIA_GPU_INVALID_PCI, 'nope');
+    expect(isPackageHttpError(thrown)).toBe(true);
+    expect(isPackageHttpError({
+      name: 'PackageHttpError',
+      statusCode: 409,
+      code: 'EXTENSION_OCCUPIED',
+      details: {},
+      message: 'occupied',
+    })).toBe(true);
+    expect(isPackageHttpError(new Error('nope'))).toBe(false);
   });
 });

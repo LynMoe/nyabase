@@ -156,11 +156,22 @@ export async function mutateNvidiaGpuContainer(
   }
 
   const pciAddresses = parseMutatePciAddresses(ctx.payload);
-  const current = parseContainerState(ctx.currentExtensions[NVIDIA_GPU_EXTENSION_ID])
-    ?? { nvidiaRuntime: false, pciAddresses: [] satisfies string[] };
-  const nextRuntime = pciAddresses.length > 0 ? true : current.nvidiaRuntime;
-  const assignmentChanged = current.nvidiaRuntime !== nextRuntime
-    || !pciListsEqual(current.pciAddresses, pciAddresses);
+  const current = parseContainerState(ctx.currentExtensions[NVIDIA_GPU_EXTENSION_ID]);
+  if (!current && pciAddresses.length === 0) {
+    await ctx.claims.replace([]);
+    return {
+      state: {},
+      requestSummary: {
+        extensionId: NVIDIA_GPU_EXTENSION_ID,
+        operation: 'devices',
+        pciAddresses: [],
+      },
+    };
+  }
+  const previous = current ?? { nvidiaRuntime: false, pciAddresses: [] satisfies string[] };
+  const nextRuntime = pciAddresses.length > 0 ? true : previous.nvidiaRuntime;
+  const assignmentChanged = previous.nvidiaRuntime !== nextRuntime
+    || !pciListsEqual(previous.pciAddresses, pciAddresses);
 
   if (assignmentChanged && ctx.observedStatus !== 'stopped') {
     throw new PackageHttpError(

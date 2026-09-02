@@ -11,5 +11,5 @@
     "composite": false,
     "skipLibCheck": true
   },
-  "include": ["./**/*.ts", "./**/*.tsx", "../id.ts", "../schema.ts", "../pci.ts", "../errors.ts"]
+  "include": ["./**/*.ts", "./**/*.tsx", "../id.ts", "../schema.ts", "../pci.ts", "../errors.ts", "../grant-state.ts"]
 }

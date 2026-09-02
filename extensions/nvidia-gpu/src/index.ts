@@ -16,6 +16,7 @@ export {
   NVIDIA_GPU_RUNTIME_UNAVAILABLE,
   NVIDIA_GPU_WILDCARD_FORBIDDEN,
   nvidiaGpuFormatError,
+  isPackageHttpError,
   PackageHttpError,
 } from './errors.js';
 export {

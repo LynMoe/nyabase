@@ -51,7 +51,15 @@ export const zGpuPciAddresses = z.array(zPciAddress)
 export const zNvidiaGpuContainerState = z.object({
   nvidiaRuntime: z.boolean(),
   pciAddresses: zGpuPciAddresses,
-}).strict();
+}).strict().superRefine((value, context) => {
+  if (value.pciAddresses.length > 0 && value.nvidiaRuntime !== true) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['nvidiaRuntime'],
+      message: 'PCI assignments require nvidiaRuntime',
+    });
+  }
+});
 
 export const zNvidiaGpuCreatePayload = z.object({
   pciAddresses: zGpuPciAddresses.optional(),

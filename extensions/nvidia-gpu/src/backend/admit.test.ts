@@ -219,6 +219,23 @@ describe('mutateNvidiaGpuContainer', () => {
     }
   });
 
+  it('returns empty state for a missing key and empty PCI even while running', async () => {
+    const result = await mutateNvidiaGpuContainer(mutateCtx({
+      observedStatus: 'running',
+      currentExtensions: {},
+      payload: { pciAddresses: [] },
+    }));
+    expect(result.state).toEqual({});
+  });
+
+  it('does not materialize runtime-false from a no-op mutate of a missing key', async () => {
+    const result = await mutateNvidiaGpuContainer(mutateCtx({
+      currentExtensions: {},
+      payload: { pciAddresses: [] },
+    }));
+    expect(result.state).toEqual({});
+  });
+
   it('does not throw when the assignment is unchanged while running', async () => {
     const result = await mutateNvidiaGpuContainer(mutateCtx({
       observedStatus: 'running',

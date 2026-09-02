@@ -14,7 +14,6 @@ export function nvidiaGpuFormatError(code: string): string | undefined {
   return NVIDIA_GPU_ERROR_ZH[code];
 }
 
-/** Matches the host PackageHttpError shape without importing Nest. */
 export class PackageHttpError extends Error {
   readonly statusCode: number;
   readonly code: string;
@@ -32,4 +31,20 @@ export class PackageHttpError extends Error {
     this.code = code;
     this.details = details;
   }
+}
+
+/** Host filters must duck-type statusCode/code/details; instanceof will not match across packages. */
+export function isPackageHttpError(error: unknown): error is PackageHttpError {
+  if (typeof error !== 'object' || error === null) return false;
+  const record = error as {
+    name?: unknown;
+    statusCode?: unknown;
+    code?: unknown;
+    details?: unknown;
+  };
+  return record.name === 'PackageHttpError'
+    && typeof record.statusCode === 'number'
+    && typeof record.code === 'string'
+    && typeof record.details === 'object'
+    && record.details !== null;
 }

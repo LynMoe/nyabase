@@ -49,6 +49,13 @@ describe('zNvidiaGpuContainerState', () => {
       extra: true,
     }).success).toBe(false);
   });
+
+  it('rejects PCI assignments without nvidiaRuntime', () => {
+    expect(zNvidiaGpuContainerState.safeParse({
+      nvidiaRuntime: false,
+      pciAddresses: ['0000:41:00.0'],
+    }).success).toBe(false);
+  });
 });
 
 describe('zNvidiaGpuGrant', () => {

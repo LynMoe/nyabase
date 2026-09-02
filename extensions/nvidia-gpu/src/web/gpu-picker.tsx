@@ -1,10 +1,12 @@
 import { useEffect, useMemo, useState } from 'react';
+import type { GpuPickerMode } from '../grant-state.js';
 import { NVIDIA_GPU_EXTENSION_ID } from '../id.js';
 import { GpuGrantMode, type NvidiaGpuDeviceDto, type NvidiaGpuGrant } from '../schema.js';
 import { canonicalPciAddress } from '../pci.js';
 import type { FrontendExtensionHost } from './types.js';
 
-export type GpuPickerMode = 'none' | 'all' | 'specific';
+export type { GpuPickerMode } from '../grant-state.js';
+export { parseGrant } from '../grant-state.js';
 
 export function gpuModeFromPciList(
   pciAddresses: readonly string[],
@@ -60,23 +62,6 @@ export function permittedGpus(
 
 function normalizePci(value: string): string {
   return canonicalPciAddress(value) ?? value.trim().toLowerCase();
-}
-
-function parseGrant(value: unknown): NvidiaGpuGrant | null {
-  if (typeof value !== 'object' || value === null) return null;
-  const record = value as Record<string, unknown>;
-  const mode = record.mode === 'none'
-    ? GpuGrantMode.None
-    : record.mode === 'all'
-      ? GpuGrantMode.All
-      : record.mode === 'pci'
-        ? GpuGrantMode.Pci
-        : null;
-  if (mode === null) return null;
-  const pciAddresses = Array.isArray(record.pciAddresses)
-    ? record.pciAddresses.filter((item): item is string => typeof item === 'string')
-    : [];
-  return { mode, pciAddresses };
 }
 
 export function GpuPicker({
@@ -247,5 +232,3 @@ export function GpuPicker({
     </div>
   );
 }
-
-export { parseGrant };

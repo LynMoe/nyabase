@@ -1,12 +1,15 @@
-import { useState } from 'react';
+import { useRef, useState } from 'react';
+import {
+  parseGrant,
+  reduceNvidiaGpuGrant,
+  type GpuPickerMode,
+} from '../grant-state.js';
 import { NVIDIA_GPU_EXTENSION_ID } from '../id.js';
 import { GpuGrantMode } from '../schema.js';
 import {
   formatGpuSelectionLabel,
   GpuPicker,
   gpuModeFromPciList,
-  parseGrant,
-  type GpuPickerMode,
 } from './gpu-picker.js';
 import type { FrontendExtensionHost, ServerCardWebExtension, SlotContextMap } from './types.js';
 
@@ -141,6 +144,8 @@ function GrantSlot({
   if (!enabledOn(ctx.enabledExtensions)) return null;
   const grant = parseGrant(ctx.value[NVIDIA_GPU_EXTENSION_ID])
     ?? { mode: GpuGrantMode.None, pciAddresses: [] };
+  const latestGrant = useRef(grant);
+  latestGrant.current = grant;
   const pickerMode: GpuPickerMode = grant.mode === GpuGrantMode.None
     ? 'none'
     : grant.mode === GpuGrantMode.All
@@ -153,24 +158,15 @@ function GrantSlot({
       admin
       mode={pickerMode}
       onModeChange={(next) => {
-        const mode = next === 'none' ? GpuGrantMode.None : next === 'all' ? GpuGrantMode.All : GpuGrantMode.Pci;
-        ctx.onChange({
-          ...ctx.value,
-          [NVIDIA_GPU_EXTENSION_ID]: {
-            mode,
-            pciAddresses: next === 'specific' ? grant.pciAddresses : [],
-          },
-        });
+        const nextGrant = reduceNvidiaGpuGrant(latestGrant.current, { type: 'mode', mode: next });
+        latestGrant.current = nextGrant;
+        ctx.onChange({ ...ctx.value, [NVIDIA_GPU_EXTENSION_ID]: nextGrant });
       }}
       value={grant.pciAddresses}
       onChange={(pciAddresses) => {
-        ctx.onChange({
-          ...ctx.value,
-          [NVIDIA_GPU_EXTENSION_ID]: {
-            mode: GpuGrantMode.Pci,
-            pciAddresses,
-          },
-        });
+        const nextGrant = reduceNvidiaGpuGrant(latestGrant.current, { type: 'pci', pciAddresses });
+        latestGrant.current = nextGrant;
+        ctx.onChange({ ...ctx.value, [NVIDIA_GPU_EXTENSION_ID]: nextGrant });
       }}
       idPrefix="grant-gpu"
       label="NVIDIA GPU 授权"
