@@ -455,6 +455,7 @@ test(
     await enableNvidiaGpu(adminApi, gpuServer.id);
 
     let containerId: string | undefined;
+    let instanceName: string | undefined;
     try {
       const created = await createAdminContainer(adminApi, seedState, gpuServer.id, {
         namePrefix: 'e2e-nvfrz',
@@ -462,8 +463,9 @@ test(
         extensions: {},
       });
       containerId = created.containerId;
+      instanceName = created.container.instanceName as string;
       expect(nvidiaState(created.container).nvidiaRuntime).toBe(true);
-      expect(created.container.instanceName).toBeTruthy();
+      expect(instanceName).toBeTruthy();
 
       const runningDenied = await readErrorBody(
         await adminApi.patch(`/api/admin/containers/${containerId}/extensions/${NVIDIA_GPU}`, {
@@ -473,12 +475,31 @@ test(
       expect(runningDenied.status).toBe(409);
       expect(errorCode(runningDenied.body)).toBe('EXTENSION_MUTATION_REQUIRES_STOP');
 
-      const paused = await peerIncus(gpuServer.ssh, [
-        'pause',
-        created.container.instanceName as string,
-      ]);
+      // Frozen + powerIntent running is reconciled as start. Pause, then flip
+      // desired power immediately so powerTransition is none and persist can
+      // record instance_status=frozen.
+      const paused = await peerIncus(gpuServer.ssh, ['pause', instanceName]);
       expect(paused.code, `${paused.stdout}\n${paused.stderr}`).toBe(0);
-      await waitStatus(adminApi, containerId, 'frozen');
+      const stop = await expectJson<JsonRecord>(
+        await adminApi.post(`/api/admin/containers/${containerId}/actions/stop`),
+        202,
+      );
+      await requireSucceededIntent(adminApi, stop.intentId, 'nvidia-gpu.freeze.stop');
+      const frozen = await eventually(
+        async () => expectJson<JsonRecord>(
+          await adminApi.get(`/api/admin/containers/${containerId}`),
+        ),
+        (value) => value.lifecyclePhase === 'active'
+          && value.powerIntent === 'stopped'
+          && (value.actual?.status === 'frozen' || value.actual?.status === 'stopped'),
+        180_000,
+        500,
+        `nvidia-gpu container ${containerId} settled after freeze+stop`,
+      );
+      expect(
+        frozen.actual?.status,
+        JSON.stringify({ actual: frozen.actual, powerIntent: frozen.powerIntent }),
+      ).toBe('frozen');
 
       const frozenDenied = await readErrorBody(
         await adminApi.patch(`/api/admin/containers/${containerId}/extensions/${NVIDIA_GPU}`, {
@@ -488,6 +509,10 @@ test(
       expect(frozenDenied.status).toBe(409);
       expect(errorCode(frozenDenied.body)).toBe('EXTENSION_MUTATION_REQUIRES_STOP');
     } finally {
+      if (instanceName) {
+        await peerIncus(gpuServer.ssh, ['stop', '--force', instanceName])
+          .catch(() => undefined);
+      }
       await deleteAdminContainer(adminApi, containerId);
     }
   },
