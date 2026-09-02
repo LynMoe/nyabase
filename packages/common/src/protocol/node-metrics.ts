@@ -3,13 +3,12 @@ import {
   MAX_METRIC_LABEL_VALUE_LENGTH,
   NODE_METRIC_NAMES,
 } from '../constants.js';
-import { canonicalPciAddress } from './rest-schema.js';
 
 const IPV4_PATTERN = /^(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)(?:\.(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)){3}$/;
 export type NodeMetricFamily = typeof NODE_METRIC_NAMES[number];
 
 export interface NodeMetricSample {
-  readonly name: NodeMetricFamily;
+  readonly name: string;
   readonly labels: Readonly<Record<string, string>>;
   readonly value: number;
 }
@@ -28,7 +27,19 @@ export interface NodeMetricCatalog {
   readonly validators: Readonly<Record<string, NodeMetricLabelValidator>>;
 }
 
-export const CORE_LABEL_VALIDATORS: NodeMetricCatalog['validators'] = {};
+function validateCoreLabels(
+  labels: Readonly<Record<string, string>>,
+): Record<string, string> {
+  const normalized: Record<string, string> = {};
+  for (const [key, value] of Object.entries(labels)) {
+    normalized[key] = validateCoreLabelValue(key, value);
+  }
+  return normalized;
+}
+
+export const CORE_LABEL_VALIDATORS: NodeMetricCatalog['validators'] = Object.fromEntries(
+  NODE_METRIC_NAMES.map((name) => [name, validateCoreLabels]),
+);
 
 export function mergeNodeMetricCatalog(
   ...parts: readonly NodeMetricCatalog[]
@@ -69,16 +80,11 @@ export const NODE_METRIC_DEFINITIONS: Readonly<Record<NodeMetricFamily, NodeMetr
   nyabase_node_network_nft_available: { type: 'gauge', labels: [] },
   nyabase_node_network_bridge_filter_present: { type: 'gauge', labels: [] },
   nyabase_node_network_bridge_filter_address: { type: 'gauge', labels: ['address'] },
-  nyabase_node_gpu_util_ratio: { type: 'gauge', labels: ['gpu_pci'] },
-  nyabase_node_gpu_mem_used_bytes: { type: 'gauge', labels: ['gpu_pci'] },
-  nyabase_node_gpu_mem_total_bytes: { type: 'gauge', labels: ['gpu_pci'] },
-  nyabase_node_gpu_temperature_celsius: { type: 'gauge', labels: ['gpu_pci'] },
-  nyabase_node_gpu_power_watts: { type: 'gauge', labels: ['gpu_pci'] },
-  nyabase_node_gpu_smi_index: { type: 'gauge', labels: ['gpu_pci'] },
-  nyabase_node_gpu_process_mem_used_bytes: {
-    type: 'gauge',
-    labels: ['gpu_pci', 'container_id'],
-  },
+};
+
+export const CORE_NODE_METRIC_CATALOG: NodeMetricCatalog = {
+  definitions: NODE_METRIC_DEFINITIONS,
+  validators: CORE_LABEL_VALIDATORS,
 };
 
 const METRIC_NAME_PATTERN = /^[a-zA-Z_:][a-zA-Z0-9_:]*$/;
@@ -95,15 +101,18 @@ export class OpenMetricsSchemaError extends Error {
   }
 }
 
-export function validateNodeMetricSample(sample: NodeMetricSample): NodeMetricSample {
-  if (!METRIC_NAME_PATTERN.test(sample.name) || !isNodeMetricName(sample.name)) {
+export function validateNodeMetricSample(
+  sample: NodeMetricSample,
+  catalog: NodeMetricCatalog,
+): NodeMetricSample {
+  if (!METRIC_NAME_PATTERN.test(sample.name) || !(sample.name in catalog.definitions)) {
     throw new OpenMetricsSchemaError('Metric family is not allowlisted');
   }
   if (!Number.isFinite(sample.value)) {
     throw new OpenMetricsSchemaError('Metric value must be finite');
   }
 
-  const definition = NODE_METRIC_DEFINITIONS[sample.name];
+  const definition = catalog.definitions[sample.name];
   const labels = Object.keys(sample.labels);
   const expectedLabels = [...definition.labels].sort();
   const actualLabels = [...labels].sort();
@@ -113,18 +122,18 @@ export function validateNodeMetricSample(sample: NodeMetricSample): NodeMetricSa
   ) {
     throw new OpenMetricsSchemaError('Metric labels do not match the allowlist');
   }
-  const normalizedLabels: Record<string, string> = {};
-  let changed = false;
   for (const [key, value] of Object.entries(sample.labels)) {
     validateLabel(key, value);
-    const normalized = validateLabelValue(sample.name, key, value);
-    normalizedLabels[key] = normalized;
-    changed ||= normalized !== value;
   }
+  const validator = catalog.validators[sample.name];
+  const normalizedLabels = validator ? validator(sample.labels) : { ...sample.labels };
+  const changed = Object.keys(normalizedLabels).some(
+    (key) => normalizedLabels[key] !== sample.labels[key],
+  ) || Object.keys(sample.labels).length !== Object.keys(normalizedLabels).length;
   return changed ? { ...sample, labels: normalizedLabels } : sample;
 }
 
-export function parseOpenMetrics(text: string): NodeMetricSample[] {
+export function parseOpenMetrics(text: string, catalog: NodeMetricCatalog): NodeMetricSample[] {
   const samples: NodeMetricSample[] = [];
   const seen = new Set<string>();
   for (const line of text.split(/\r?\n/)) {
@@ -138,12 +147,12 @@ export function parseOpenMetrics(text: string): NodeMetricSample[] {
       throw new OpenMetricsSchemaError('OpenMetrics sample syntax is invalid');
     }
     const name = match[1];
-    if (!isNodeMetricName(name)) {
+    if (!(name in catalog.definitions)) {
       throw new OpenMetricsSchemaError('Metric family is not allowlisted');
     }
     const labels = parseLabels(match[2] ?? '');
     const value = Number(match[3]);
-    const sample = validateNodeMetricSample({ name, labels, value });
+    const sample = validateNodeMetricSample({ name, labels, value }, catalog);
     const identity = `${name}|${JSON.stringify(
       Object.entries(sample.labels).sort(([left], [right]) => left.localeCompare(right)),
     )}`;
@@ -159,14 +168,18 @@ export function parseOpenMetrics(text: string): NodeMetricSample[] {
   return samples;
 }
 
-export function renderOpenMetrics(samples: readonly NodeMetricSample[]): string {
+export function renderOpenMetrics(
+  samples: readonly NodeMetricSample[],
+  catalog: NodeMetricCatalog,
+): string {
   const lines: string[] = [];
   const emittedTypes = new Set<string>();
   for (const sample of samples) {
-    const normalized = validateNodeMetricSample(sample);
+    const normalized = validateNodeMetricSample(sample, catalog);
+    const definition = catalog.definitions[normalized.name];
     if (!emittedTypes.has(normalized.name)) {
       emittedTypes.add(normalized.name);
-      lines.push(`# TYPE ${normalized.name} ${NODE_METRIC_DEFINITIONS[normalized.name].type}`);
+      lines.push(`# TYPE ${normalized.name} ${definition.type}`);
     }
     const labels = Object.entries(normalized.labels)
       .sort(([left], [right]) => left.localeCompare(right))
@@ -242,14 +255,7 @@ function validateLabel(key: string, value: string): void {
   }
 }
 
-function validateLabelValue(name: NodeMetricFamily, key: string, value: string): string {
-  if (key === 'gpu_pci') {
-    const normalized = canonicalPciAddress(value);
-    if (!normalized) {
-      throw new OpenMetricsSchemaError('GPU labels must use PCI addresses');
-    }
-    return normalized;
-  }
+function validateCoreLabelValue(key: string, value: string): string {
   if (key === 'container_id') {
     if (value !== '__unattributed__' && !UUID_PATTERN.test(value)) {
       throw new OpenMetricsSchemaError('Container labels must use nyabase UUIDs');
@@ -277,14 +283,7 @@ function validateLabelValue(name: NodeMetricFamily, key: string, value: string):
   ) {
     throw new OpenMetricsSchemaError('Device and interface labels are invalid');
   }
-  if (name.startsWith('nyabase_node_gpu_') && key !== 'gpu_pci' && key !== 'container_id') {
-    throw new OpenMetricsSchemaError('GPU labels must use PCI addresses');
-  }
   return value;
-}
-
-function isNodeMetricName(value: string): value is NodeMetricFamily {
-  return (NODE_METRIC_NAMES as readonly string[]).includes(value);
 }
 
 function escapeLabel(value: string): string {

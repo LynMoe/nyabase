@@ -14,37 +14,4 @@ export function nvidiaGpuFormatError(code: string): string | undefined {
   return NVIDIA_GPU_ERROR_ZH[code];
 }
 
-export class PackageHttpError extends Error {
-  readonly statusCode: number;
-  readonly code: string;
-  readonly details: Record<string, unknown>;
-
-  constructor(
-    statusCode: number,
-    code: string,
-    message: string,
-    details: Record<string, unknown> = {},
-  ) {
-    super(message);
-    this.name = 'PackageHttpError';
-    this.statusCode = statusCode;
-    this.code = code;
-    this.details = details;
-  }
-}
-
-/** Host filters must duck-type statusCode/code/details; instanceof will not match across packages. */
-export function isPackageHttpError(error: unknown): error is PackageHttpError {
-  if (typeof error !== 'object' || error === null) return false;
-  const record = error as {
-    name?: unknown;
-    statusCode?: unknown;
-    code?: unknown;
-    details?: unknown;
-  };
-  return record.name === 'PackageHttpError'
-    && typeof record.statusCode === 'number'
-    && typeof record.code === 'string'
-    && typeof record.details === 'object'
-    && record.details !== null;
-}
+export { isPackageHttpError, PackageHttpError } from '@nyabase/common';

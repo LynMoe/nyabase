@@ -14,6 +14,7 @@ import {
   type RunPreflightRequest,
   type ServerPreflightDto,
   type ServerDto,
+  type ServerExtensionEnablementDto,
   type StoragePoolDto,
 } from '@nyabase/common';
 import { api } from '../lib/api.js';
@@ -39,6 +40,8 @@ import {
   parseSharedBackendFsidConflict,
   type SharedBackendFsidConflict,
 } from '../lib/storage-shrink.js';
+import { ExtensionSlots } from '../extensions/slots.js';
+import { Switch } from '../components/ui/switch.js';
 
 const routeApi = getRouteApi('/servers/$id');
 
@@ -72,6 +75,22 @@ export default function ServerDetailPage() {
   const poolsQuery = useQuery({
     queryKey: queryKeys.servers.pools(id, true),
     queryFn: () => api.get<StoragePoolDto[]>(`/admin/servers/${id}/storage-pools`),
+  });
+  const extensionsQuery = useQuery({
+    queryKey: queryKeys.servers.extensions(id),
+    queryFn: () => api.get<ServerExtensionEnablementDto[]>(`/admin/servers/${id}/extensions`),
+    enabled: canManageServers,
+  });
+  const putExtension = useMutation({
+    mutationFn: (item: { extensionId: string; enabled: boolean }) =>
+      api.put<ServerExtensionEnablementDto>(`/admin/servers/${id}/extensions/${item.extensionId}`, {
+        enabled: item.enabled,
+      }),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: queryKeys.servers.extensions(id) });
+      void queryClient.invalidateQueries({ queryKey: queryKeys.servers.detail(id) });
+    },
+    onError: (error) => toast({ title: '扩展更新失败', description: errorMessage(error), variant: 'destructive' }),
   });
   const preflightQuery = useQuery({
     queryKey: queryKeys.servers.preflight(id),
@@ -294,6 +313,37 @@ export default function ServerDetailPage() {
                 </ol>
               </CardContent>
             </Card>
+
+            {canManageServers && (extensionsQuery.data?.length ?? 0) > 0 ? (
+              <Card>
+                <CardHeader>
+                  <CardTitle className="text-base">服务器卡扩展</CardTitle>
+                  <CardDescription>启用后才允许把该卡分配给容器。占用中的扩展不能取消。</CardDescription>
+                </CardHeader>
+                <CardContent className="space-y-3">
+                  {(extensionsQuery.data ?? []).map((item) => (
+                    <div key={item.extensionId} className="space-y-1 rounded-md border p-3">
+                      <div className="flex items-center justify-between gap-3">
+                        <div>
+                          <p className="text-sm font-medium">{item.displayName}</p>
+                          <p className="text-xs text-muted-foreground">{item.extensionId}</p>
+                        </div>
+                        <Switch
+                          checked={item.enabled}
+                          disabled={putExtension.isPending}
+                          onCheckedChange={(enabled) => putExtension.mutate({
+                            extensionId: item.extensionId,
+                            enabled,
+                          })}
+                        />
+                      </div>
+                      <ExtensionSlots area="server.detail.enablement" ctx={{ serverId: id, item }} />
+                      <ExtensionSlots area="server.detail.health" ctx={{ serverId: id, item }} />
+                    </div>
+                  ))}
+                </CardContent>
+              </Card>
+            ) : null}
 
             <div className="grid items-start gap-4 xl:grid-cols-2">
               <ConnectCard

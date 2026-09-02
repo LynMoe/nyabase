@@ -17,7 +17,7 @@ import {
   type IncusClientPort,
   type IncusFailureCode,
 } from '../incus/index.js';
-import { nvidiaGpuInventoryFromResources } from '../servers/gpu-inventory.js';
+import { ServerCardExtensionsService } from '../server-card-extensions/server-extensions.service.js';
 import { RuntimeRoleService } from './runtime-role.service.js';
 import {
   IntentRepository,
@@ -380,6 +380,7 @@ export class ReconcileWorkerService implements OnModuleInit, OnModuleDestroy {
     private readonly wake?: ReconcileWakeService,
     @Optional() @Inject(PG_DATABASE)
     private readonly database?: Kysely<NyabaseDatabase>,
+    @Optional() private readonly serverExtensions?: ServerCardExtensionsService,
   ) {}
 
   onModuleInit(): void {
@@ -1017,12 +1018,7 @@ export class ReconcileWorkerService implements OnModuleInit, OnModuleDestroy {
   ): Promise<void> {
     if (!this.database) return;
     const resources = await client.getResources({ signal });
-    const gpuRuntimeAvailable = nvidiaGpuInventoryFromResources(resources.metadata).length > 0;
-    await this.database
-      .updateTable('infra.servers')
-      .set({ gpu_runtime_available: gpuRuntimeAvailable })
-      .where('id', '=', serverId)
-      .execute();
+    await this.serverExtensions?.refreshExistingHealth(serverId, resources.metadata, []);
 
     const pools = await this.database
       .selectFrom('infra.storage_pools')

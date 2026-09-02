@@ -6,14 +6,13 @@ import {
 import type { Kysely, Transaction } from 'kysely';
 import {
   Capability,
-  GpuGrantMode,
   SystemGroupKey,
   UserStatus,
   type AdministrationActionsDto,
   type EffectiveServerAccessDto,
   type GroupSummaryDto,
-  type ServerGrantGpu,
 } from '@nyabase/common';
+import { asJsonObject } from '../server-card-extensions/json.js';
 import type { NyabaseDatabase } from '../persistence-pg/database.types.js';
 import { PG_DATABASE } from '../persistence-pg/tokens.js';
 import { PgTransactionManager } from '../persistence-pg/transaction.js';
@@ -33,7 +32,7 @@ export interface ResolvedServerGrant {
   cpuMillis: number | null;
   memBytes: number | null;
   diskBytes: number | null;
-  gpu: ServerGrantGpu;
+  extensionGrants: Record<string, unknown>;
   expiresAt: Date | null;
   purgeAt: Date | null;
   accessPhase: 'live' | 'grace';
@@ -361,7 +360,7 @@ export class AccessResolverService {
       cpuMillis: grant.cpuMillis,
       memBytes: grant.memBytes,
       diskBytes: grant.diskBytes,
-      gpu: grant.gpu,
+      extensionGrants: grant.extensionGrants,
       expiresAt: grant.expiresAt?.toISOString() ?? null,
       purgeAt: grant.purgeAt?.toISOString() ?? null,
       accessPhase: grant.accessPhase,
@@ -530,8 +529,7 @@ export class AccessResolverService {
           'grant.cpu_millis',
           'grant.mem_bytes',
           'grant.disk_bytes',
-          'grant.gpu_mode',
-          'grant.gpu_pci_addresses',
+          'grant.extension_grants',
           'grant.expires_at',
           'grant.id',
           'group.priority',
@@ -551,8 +549,7 @@ export class AccessResolverService {
           cpu_millis: row.cpu_millis,
           mem_bytes: row.mem_bytes,
           disk_bytes: row.disk_bytes,
-          gpu_mode: row.gpu_mode,
-          gpu_pci_addresses: row.gpu_pci_addresses,
+          extension_grants: row.extension_grants,
           expiresAt: row.expires_at,
           scopeRank: row.user_id ? 0 : 1,
           priority: row.priority ?? 0,
@@ -615,8 +612,7 @@ export class AccessResolverService {
         'grant.cpu_millis',
         'grant.mem_bytes',
         'grant.disk_bytes',
-        'grant.gpu_mode',
-        'grant.gpu_pci_addresses',
+        'grant.extension_grants',
         'grant.expires_at',
         'grant.id',
         'group.priority',
@@ -635,8 +631,7 @@ export class AccessResolverService {
       cpu_millis: row.cpu_millis,
       mem_bytes: row.mem_bytes,
       disk_bytes: row.disk_bytes,
-      gpu_mode: row.gpu_mode,
-      gpu_pci_addresses: row.gpu_pci_addresses,
+      extension_grants: row.extension_grants,
       expiresAt: row.expires_at,
       scopeRank: row.user_id ? 0 : 1,
       priority: row.priority ?? 0,
@@ -655,10 +650,7 @@ export class AccessResolverService {
       cpuMillis: selected.cpu_millis,
       memBytes: integer(selected.mem_bytes),
       diskBytes: integer(selected.disk_bytes),
-      gpu: {
-        mode: selected.gpu_mode as GpuGrantMode,
-        pciAddresses: [...selected.gpu_pci_addresses],
-      },
+      extensionGrants: asJsonObject(selected.extension_grants),
       expiresAt: selected.expiresAt ? new Date(selected.expiresAt) : null,
       purgeAt: grantPurgeAt(selected.expiresAt),
       accessPhase: winning.phase,

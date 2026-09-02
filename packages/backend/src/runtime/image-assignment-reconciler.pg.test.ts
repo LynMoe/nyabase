@@ -21,7 +21,6 @@ function serverValues(id: string) {
     storage_overcommit_ratio: 1,
     parent_interface: null,
     dns_servers: [],
-    gpu_runtime_available: false,
     status: 'online' as const,
     last_seen_at: new Date(),
     last_error: null,

@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { Capability, GpuGrantMode, UserStatus } from '@nyabase/common';
+import { Capability, UserStatus } from '@nyabase/common';
 import { AccessResolverService } from './access-resolver.service.js';
 
 describe('AccessResolverService cache invalidation fences', () => {
@@ -89,8 +89,7 @@ describe('AccessResolverService cache invalidation fences', () => {
               cpu_millis: 1,
               mem_bytes: '2',
               disk_bytes: '3',
-              gpu_mode: GpuGrantMode.None,
-              gpu_pci_addresses: [],
+              extension_grants: {},
               expires_at: null,
               id: 'grant-1',
               priority: null,

@@ -28,7 +28,7 @@ test(
             rootSizeBytes: 4 * 1024 * 1024 * 1024,
             cpuMillis: 500,
             memBytes: 512 * 1024 * 1024,
-            gpuPciAddresses: [],
+            extensions: {},
             powerIntent: 'running',
           },
         }),
@@ -88,7 +88,7 @@ test(
         500,
       );
       expect(container.imageFingerprint).toBe(seedState.image.fingerprint);
-      expect(container.gpuPciAddresses).toEqual([]);
+      expect(container.extensions ?? {}).toEqual({});
       expect(container.ssh?.ready).toBe(true);
       expect(container.ssh?.status).toBe('running');
 
@@ -153,7 +153,7 @@ test(
 );
 
 test(
-  'rejects GPU assignment when the Incus server has no GPU runtime',
+  'rejects NVIDIA GPU assignment when the server extension is not enabled',
   { ...coverageCase('container-gpu-absent-reject', 'container-gpu-absent-reject-live') },
   async ({ adminApi, seedState }) => {
     const servers = await expectJson<JsonRecord[]>(
@@ -170,18 +170,13 @@ test(
         rootSizeBytes: 4 * 1024 * 1024 * 1024,
         cpuMillis: 500,
         memBytes: 512 * 1024 * 1024,
-        gpuPciAddresses: ['0000:00:00.0'],
+        extensions: { 'nvidia-gpu': { pciAddresses: ['0000:00:00.0'] } },
         powerIntent: 'running',
       },
     });
     expect(response.status()).toBe(409);
     const body = await response.json() as JsonRecord;
     const code = body.code ?? body.message?.code;
-    if (seedServer?.gpuRuntimeAvailable === true) {
-      expect(code).toBeTruthy();
-      expect(code).not.toBeUndefined();
-    } else {
-      expect(code).toBe('GPU_RUNTIME_UNAVAILABLE');
-    }
+    expect(code).toBe('EXTENSION_NOT_ENABLED');
   },
 );

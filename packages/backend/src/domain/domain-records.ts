@@ -32,7 +32,6 @@ export interface ServerRecord {
   storageOvercommitRatio: number;
   parentInterface: string | null;
   dnsServers: string[];
-  gpuRuntimeAvailable: boolean;
   status: ServerStatus;
   lastSeenAt: Date | null;
   lastError: string | null;

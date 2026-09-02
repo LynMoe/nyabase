@@ -179,12 +179,6 @@ export const CORE_MANAGED_FIELD_OWNERSHIP: ManagedFieldOwnership = {
   devicePrefixes: ['nyd-'],
 };
 
-export const TEMPORARY_MANAGED_FIELD_OWNERSHIP: ManagedFieldOwnership = {
-  configPrefixes: [...CORE_MANAGED_FIELD_OWNERSHIP.configPrefixes, 'nvidia.'],
-  deviceNames: CORE_MANAGED_FIELD_OWNERSHIP.deviceNames,
-  devicePrefixes: [...CORE_MANAGED_FIELD_OWNERSHIP.devicePrefixes, 'gpu'],
-};
-
 function isManagedConfigKey(key: string, ownership: ManagedFieldOwnership): boolean {
   return ownership.configPrefixes.some((prefix) => key.startsWith(prefix));
 }

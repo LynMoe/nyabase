@@ -2,9 +2,11 @@ import { createServer, type Server as HttpsServer } from 'node:https';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { timingSafeEqual } from 'node:crypto';
 import {
+  CORE_NODE_METRIC_CATALOG,
   MAX_NODE_METRICS_BODY_BYTES,
   NODE_METRICS_ENDPOINT_PATH,
   renderOpenMetrics,
+  type NodeMetricCatalog,
   type NodeMetricSample,
 } from '@nyabase/common';
 
@@ -17,6 +19,7 @@ export interface NodeExporterServerOptions {
   readonly key: string | Buffer;
   readonly cert: string | Buffer;
   readonly collector: NodeMetricsCollector;
+  readonly catalog?: NodeMetricCatalog;
   readonly collectionTimeoutMs?: number;
 }
 
@@ -41,11 +44,12 @@ export function createNodeExporterServer(options: NodeExporterServerOptions): Ht
 }
 
 export function createMetricsRequestHandler(
-  options: Pick<NodeExporterServerOptions, 'token' | 'collector' | 'collectionTimeoutMs'>,
+  options: Pick<NodeExporterServerOptions, 'token' | 'collector' | 'catalog' | 'collectionTimeoutMs'>,
 ): (request: IncomingMessage, response: ServerResponse) => void {
   const timeoutMs = options.collectionTimeoutMs ?? DEFAULT_COLLECTION_TIMEOUT_MS;
+  const catalog = options.catalog ?? CORE_NODE_METRIC_CATALOG;
   return (request, response) => {
-    void handleMetricsRequest(request, response, options.token, options.collector, timeoutMs);
+    void handleMetricsRequest(request, response, options.token, options.collector, timeoutMs, catalog);
   };
 }
 
@@ -55,6 +59,7 @@ async function handleMetricsRequest(
   token: string,
   collector: NodeMetricsCollector,
   timeoutMs: number,
+  catalog: NodeMetricCatalog,
 ): Promise<void> {
   const url = parseRequestUrl(request.url);
   if (!url || url.pathname !== NODE_METRICS_ENDPOINT_PATH || url.search || url.hash) {
@@ -74,7 +79,7 @@ async function handleMetricsRequest(
 
   try {
     const samples = await withTimeout(collector.collect(), timeoutMs);
-    const body = renderOpenMetrics(samples);
+    const body = renderOpenMetrics(samples, catalog);
     if (Buffer.byteLength(body, 'utf8') > MAX_NODE_METRICS_BODY_BYTES) {
       sendText(response, 503, 'metrics_unavailable');
       return;

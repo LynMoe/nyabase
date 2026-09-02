@@ -16,7 +16,6 @@ import {
   Capability,
   zCreateContainerRequest,
   zCreateExecSessionRequest,
-  zPatchContainerGpuRequest,
   zPatchContainerLimitsRequest,
   zPatchContainerRootSizeRequest,
 } from '@nyabase/common';
@@ -100,14 +99,15 @@ export class AdminContainersController {
     );
   }
 
-  @Patch(':containerId/gpu')
+  @Patch(':containerId/extensions/:extensionId')
   @HttpCode(HttpStatus.ACCEPTED)
-  gpu(@Param('containerId') id: string, @CurrentUser() user: UserRecord, @Body() body: unknown) {
-    return this.containers.updateGpuForAdmin(
-      id,
-      user.id,
-      zPatchContainerGpuRequest.parse(body),
-    );
+  extension(
+    @Param('containerId') id: string,
+    @Param('extensionId') extensionId: string,
+    @CurrentUser() user: UserRecord,
+    @Body() body: unknown,
+  ) {
+    return this.containers.mutateExtensionForAdmin(id, user.id, extensionId, body);
   }
 
   @Get(':containerId/volumes')

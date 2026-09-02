@@ -29,7 +29,6 @@ function serverValues(id: string) {
     storage_overcommit_ratio: 1,
     parent_interface: 'eth0',
     dns_servers: [],
-    gpu_runtime_available: false,
     status: 'unknown' as const,
     last_seen_at: null,
     last_error: null,

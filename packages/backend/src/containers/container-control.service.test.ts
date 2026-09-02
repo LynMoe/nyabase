@@ -4,7 +4,6 @@ import {
   Capability,
   ContainerPhase,
   ContainerPowerIntent,
-  GpuGrantMode,
   IntentKind,
   IntentResourceType,
 } from '@nyabase/common';
@@ -23,7 +22,7 @@ function makeHarness() {
     select: vi.fn(),
     where: vi.fn(),
     forUpdate: vi.fn(),
-    executeTakeFirst: vi.fn().mockResolvedValue({ gpu_runtime_available: true }),
+    executeTakeFirst: vi.fn().mockResolvedValue({}),
   };
   serverQuery.select.mockReturnValue(serverQuery);
   serverQuery.where.mockReturnValue(serverQuery);
@@ -39,7 +38,6 @@ function makeHarness() {
     root_size_pending_bytes: null,
     root_pool_id: 'pool-1',
     image_id: 'image-1',
-    nvidia_runtime: true,
   };
   const repository = {
     lock: vi.fn().mockResolvedValue(row),
@@ -49,8 +47,7 @@ function makeHarness() {
       instance_started_at: new Date('2026-08-07T03:00:00.000Z'),
     }),
     updateDesired: vi.fn().mockResolvedValue({ ...row, generation: 2 }),
-    claimedGpuAddresses: vi.fn().mockResolvedValue([]),
-    replaceGpuClaims: vi.fn(),
+
   };
   const access = {
     resolveServerInTransaction: vi.fn().mockResolvedValue({
@@ -58,7 +55,7 @@ function makeHarness() {
       cpuMillis: 2_000,
       memBytes: 4_000_000_000,
       diskBytes: 8_000_000_000,
-      gpu: { mode: GpuGrantMode.All, pciAddresses: [] },
+      extensionGrants: {},
     }),
     assertActorCapabilitiesInTransaction: vi.fn(),
   };
@@ -259,34 +256,6 @@ describe('ContainerControlService intent boundary', () => {
     );
   });
 
-  it('requires a stopped container and an enabled runtime for GPU changes', async () => {
-    const harness = makeHarness();
-    harness.repository.currentRoute.mockResolvedValueOnce({
-      instance_status: 'stopped',
-      instance_started_at: null,
-    });
-
-    await harness.service.updateGpuForUser(containerId, actorId, {
-      gpuPciAddresses: ['0000:01:00.0'],
-    });
-
-    expect(harness.repository.updateDesired).toHaveBeenCalledWith(
-      containerId,
-      1,
-      {
-        gpu_pci_addresses: ['00000000:01:00.0'],
-        nvidia_runtime: true,
-      },
-      harness.transaction,
-    );
-    expect(harness.repository.replaceGpuClaims).toHaveBeenCalledWith(
-      containerId,
-      serverId,
-      ['00000000:01:00.0'],
-      harness.transaction,
-    );
-  });
-
   it('blocks root changes while a quota application is pending', async () => {
     const harness = makeHarness();
     Object.assign(harness.row, { root_size_pending_bytes: '2147483648' });
@@ -330,7 +299,7 @@ describe('ContainerControlService intent boundary', () => {
           quota_effective: true,
         });
       } else {
-        query.executeTakeFirst.mockResolvedValue({ gpu_runtime_available: true });
+        query.executeTakeFirst.mockResolvedValue({});
       }
       return query;
     });

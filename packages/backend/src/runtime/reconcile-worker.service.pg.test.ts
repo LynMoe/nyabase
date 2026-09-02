@@ -26,7 +26,6 @@ function serverValues(
     storage_overcommit_ratio: 1,
     parent_interface: 'eth0',
     dns_servers: [],
-    gpu_runtime_available: false,
     status,
     last_seen_at: null,
     last_error: null,
@@ -241,8 +240,7 @@ describePg('ReconcileWorkerService PostgreSQL busy breaker and inventory', () =>
         root_size_pending_bytes: null,
         cpu_millis: 1000,
         mem_bytes: 256,
-        nvidia_runtime: false,
-        gpu_pci_addresses: [],
+        extensions: {},
         nesting: true,
         syscall_intercept: true,
         power_intent: 'running',
@@ -272,7 +270,7 @@ describePg('ReconcileWorkerService PostgreSQL busy breaker and inventory', () =>
     });
   });
 
-  it('writes gpu_runtime_available and pool used/total during a full scan', async () => {
+  it('writes pool used/total during a full scan', async () => {
     await withPostgresTestDatabase(async ({ database }) => {
       const serverId = randomUUID();
       const poolId = randomUUID();
@@ -296,11 +294,7 @@ describePg('ReconcileWorkerService PostgreSQL busy breaker and inventory', () =>
         revision: 1,
       }).execute();
 
-      const getResources = vi.fn().mockResolvedValue({
-        metadata: {
-          gpu: { cards: [{ pci_address: '0000:41:00.0', nvidia: { model: 'RTX' } }] },
-        },
-      });
+      const getResources = vi.fn().mockResolvedValue({ metadata: {} });
       const getStoragePoolResources = vi.fn().mockResolvedValue({
         metadata: { space: { used: 250, total: 4000 } },
       });
@@ -324,17 +318,11 @@ describePg('ReconcileWorkerService PostgreSQL busy breaker and inventory', () =>
 
       await (worker as unknown as { fullScan: () => Promise<void> }).fullScan();
 
-      const server = await database
-        .selectFrom('infra.servers')
-        .select('gpu_runtime_available')
-        .where('id', '=', serverId)
-        .executeTakeFirstOrThrow();
       const pool = await database
         .selectFrom('infra.storage_pools')
         .select(['used_bytes', 'total_bytes'])
         .where('id', '=', poolId)
         .executeTakeFirstOrThrow();
-      expect(server.gpu_runtime_available).toBe(true);
       expect(pool.used_bytes).toBe('250');
       expect(pool.total_bytes).toBe('4000');
     });

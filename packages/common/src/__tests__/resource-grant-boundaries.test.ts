@@ -1,12 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import {
   FailureCode,
-  GpuGrantMode,
   MAX_RESOURCE_BYTES,
   MAX_RESOURCE_CPU_MILLIS,
   zCreateContainerRequest,
   zCreateSharedBackendRequest,
-  zPatchContainerGpuRequest,
   zPatchSharedBackendRequest,
   zPutServerGrantRequest,
   zPutSharedBackendGrantRequest,
@@ -18,35 +16,17 @@ const poolId = '33333333-3333-4333-8333-333333333333';
 const backendId = '44444444-4444-4444-8444-444444444444';
 
 describe('grant resource bounds', () => {
-  it('accepts complete PCI grants at the safe numeric limits', () => {
+  it('accepts opaque extension grants at the safe numeric limits', () => {
     expect(zPutServerGrantRequest.parse({
       cpuMillis: MAX_RESOURCE_CPU_MILLIS,
       memBytes: MAX_RESOURCE_BYTES,
       diskBytes: MAX_RESOURCE_BYTES,
-      gpu: { mode: GpuGrantMode.Pci, pciAddresses: ['0000:41:00.0'] },
+      extensionGrants: {},
       expiresAt: null,
     })).toMatchObject({
       cpuMillis: MAX_RESOURCE_CPU_MILLIS,
-      gpu: { mode: 'pci', pciAddresses: ['00000000:41:00.0'] },
+      extensionGrants: {},
     });
-  });
-
-  it('requires a coherent GPU mode and PCI address set', () => {
-    for (const gpu of [
-      { mode: GpuGrantMode.Pci, pciAddresses: [] },
-      { mode: GpuGrantMode.None, pciAddresses: ['0000:41:00.0'] },
-      { mode: GpuGrantMode.All, pciAddresses: ['0000:41:00.0'] },
-      { mode: GpuGrantMode.Pci, pciAddresses: ['0000:41:00.0', '0000:41:00.0'] },
-      { mode: GpuGrantMode.Pci, pciAddresses: ['0000:41:00.0', '00000000:41:00.0'] },
-    ]) {
-      expect(zPutServerGrantRequest.safeParse({
-        cpuMillis: null,
-        memBytes: null,
-        diskBytes: null,
-        gpu,
-        expiresAt: null,
-      }).success).toBe(false);
-    }
   });
 
   it('uses independent pool and shared-backend grant bodies', () => {
@@ -65,8 +45,6 @@ describe('grant resource bounds', () => {
 
 describe('canonical resource mutation boundaries', () => {
   it('rejects old display-index and volume source fields', () => {
-    const oldGpuField = ['gpu', 'Indices'].join('');
-    expect(zPatchContainerGpuRequest.safeParse({ [oldGpuField]: [0] }).success).toBe(false);
     expect(zCreateContainerRequest.safeParse({
       serverId,
       imageId: poolId,
@@ -74,8 +52,7 @@ describe('canonical resource mutation boundaries', () => {
       rootSizeBytes: 1_024,
       cpuMillis: 1_000,
       memBytes: 1_024,
-      gpuPciAddresses: [],
-      powerIntent: 'running',
+            powerIntent: 'running',
       volumeSource: backendId,
     }).success).toBe(false);
   });

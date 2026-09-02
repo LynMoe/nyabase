@@ -18,6 +18,7 @@ export interface ServerGrantInput {
   cpuMillis: number | null;
   memBytes: number | null;
   diskBytes: number | null;
+  extensionGrants?: Record<string, unknown>;
   expiresAt?: string | null;
 }
 
@@ -67,7 +68,7 @@ export async function upsertServerGrant(
         cpuMillis: grant.cpuMillis,
         memBytes: grant.memBytes,
         diskBytes: grant.diskBytes,
-        gpu: { mode: 'none', pciAddresses: [] },
+        extensionGrants: grant.extensionGrants ?? {},
         expiresAt: grant.expiresAt === undefined ? null : grant.expiresAt,
       },
     }),
@@ -204,7 +205,7 @@ export async function createUserContainer(
         rootSizeBytes: options.rootSizeBytes ?? 2 * 1024 * 1024 * 1024,
         cpuMillis: options.cpuMillis ?? 500,
         memBytes: options.memBytes ?? 512 * 1024 * 1024,
-        gpuPciAddresses: [],
+        extensions: {},
         powerIntent: options.powerIntent ?? 'running',
       },
     }),

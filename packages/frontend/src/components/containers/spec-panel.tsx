@@ -1,14 +1,11 @@
-import type { ContainerDto, StoragePoolCapabilityDto } from '@nyabase/common';
+import type { ContainerDto, OpaqueExtensionMap, StoragePoolCapabilityDto } from '@nyabase/common';
 import { Button } from '../ui/button.js';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '../ui/card.js';
 import { Input } from '../ui/input.js';
 import { Label } from '../ui/label.js';
 import { approxGibHint } from '../../lib/utils.js';
 import { classifySizeChange, shrinkNeverTooltip } from '../../lib/storage-shrink.js';
-import {
-  GpuPicker,
-  type GpuPickerMode,
-} from './gpu-picker.js';
+import { ExtensionSlots } from '../../extensions/slots.js';
 
 export function SpecPanel({
   container,
@@ -17,22 +14,20 @@ export function SpecPanel({
   cpuVcpus,
   memGib,
   rootSizeGib,
-  gpuMode,
-  gpuPciAddresses,
   memBytes,
   rootSizeBytes,
+  enabledExtensions,
+  extensions,
   onCpuVcpus,
   onMemGib,
   onRootSizeGib,
-  onGpuMode,
-  onGpuPciAddresses,
+  onExtensions,
+  onExtensionSubmit,
   onLimits,
   onRoot,
-  onGpu,
   limitsPending,
   rootPending,
-  gpuPending,
-  canEditGpu,
+  extensionPending,
 }: {
   container: ContainerDto;
   admin: boolean;
@@ -40,22 +35,20 @@ export function SpecPanel({
   cpuVcpus: string;
   memGib: string;
   rootSizeGib: string;
-  gpuMode: GpuPickerMode;
-  gpuPciAddresses: string[];
   memBytes: number;
   rootSizeBytes: number;
+  enabledExtensions: string[];
+  extensions: OpaqueExtensionMap;
   onCpuVcpus: (value: string) => void;
   onMemGib: (value: string) => void;
   onRootSizeGib: (value: string) => void;
-  onGpuMode: (value: GpuPickerMode) => void;
-  onGpuPciAddresses: (value: string[]) => void;
+  onExtensions: (value: OpaqueExtensionMap) => void;
+  onExtensionSubmit: (extensionId: string, payload: unknown) => void;
   onLimits: () => void;
   onRoot: () => void;
-  onGpu: () => void;
   limitsPending: boolean;
   rootPending: boolean;
-  gpuPending: boolean;
-  canEditGpu: boolean;
+  extensionPending: boolean;
 }) {
   const path = Number.isFinite(rootSizeBytes)
     ? classifySizeChange(rootCapability, container.rootSizeBytes, rootSizeBytes)
@@ -119,36 +112,20 @@ export function SpecPanel({
           </Button>
         </CardContent>
       </Card>
-      <Card className="lg:col-span-2">
-        <CardHeader>
-          <CardTitle className="text-base">GPU</CardTitle>
-          <CardDescription data-testid="gpu-runtime-rebuild">
-            {!container.nvidiaRuntime
-              ? '该容器创建时未启用 NVIDIA runtime，无法热添加 GPU，请删除后重建。'
-              : canEditGpu
-                ? '容器已停止，可以修改 GPU。'
-                : 'GPU 修改要求容器停止。'}
-          </CardDescription>
-        </CardHeader>
-        <CardContent className="space-y-3">
-          <GpuPicker
-            serverId={container.serverId}
-            admin={admin}
-            mode={gpuMode}
-            onModeChange={onGpuMode}
-            value={gpuPciAddresses}
-            onChange={onGpuPciAddresses}
-            disabled={!container.nvidiaRuntime || !canEditGpu}
-            idPrefix="container-detail-gpu"
-          />
-          <Button
-            onClick={onGpu}
-            disabled={gpuPending || !container.nvidiaRuntime || !canEditGpu}
-          >
-            {gpuPending ? '提交中...' : '应用 GPU'}
-          </Button>
-        </CardContent>
-      </Card>
+      <ExtensionSlots
+        area="container.spec"
+        ctx={{
+          containerId: container.id,
+          serverId: container.serverId,
+          enabledExtensions,
+          admin,
+          observedStatus: container.actual.status,
+          value: extensions,
+          onChange: onExtensions,
+          onSubmit: onExtensionSubmit,
+          pending: extensionPending,
+        }}
+      />
     </div>
   );
 }

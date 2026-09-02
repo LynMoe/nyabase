@@ -20,14 +20,11 @@ export type IncusFailureCode =
   | 'MISSING_MANAGED_NETWORK_ADDRESS'
   | 'INVALID_MANAGED_NETWORK_TYPE'
   | 'INVALID_MANAGED_FILTER_IDENTITY'
-  | 'WILDCARD_GPU_SELECTOR'
-  | 'GPU_RUNTIME_UNAVAILABLE'
   | 'INVALID_INSTANCE_SPEC'
   | 'INVALID_INSTANCE_ID'
   | 'INVALID_IMAGE_FINGERPRINT'
   | 'INVALID_VOLUME_NAME'
   | 'INVALID_ATTACHMENT_PATH'
-  | 'GPU_CHANGE_REQUIRES_STOP'
   | 'IMAGE_NOT_AVAILABLE'
   | 'VOLUME_SECURITY_SHIFTED_MISMATCH'
   | 'VOLUME_SHRINK_BELOW_USAGE'
@@ -82,14 +79,11 @@ const FAILURE_MESSAGES: Record<IncusFailureCode, string> = {
   MISSING_MANAGED_NETWORK_ADDRESS: 'The managed Incus network device is missing',
   INVALID_MANAGED_NETWORK_TYPE: 'The managed Incus network device is not bridged',
   INVALID_MANAGED_FILTER_IDENTITY: 'The managed Incus network filter identity is invalid',
-  WILDCARD_GPU_SELECTOR: 'The managed Incus GPU selector is not pinned to a PCI address',
-  GPU_RUNTIME_UNAVAILABLE: 'The NVIDIA runtime is not available on the Incus server',
   INVALID_INSTANCE_SPEC: 'The managed Incus instance specification is invalid',
   INVALID_INSTANCE_ID: 'The managed Incus instance ID is invalid',
   INVALID_IMAGE_FINGERPRINT: 'The managed Incus image fingerprint is invalid',
   INVALID_VOLUME_NAME: 'The managed Incus volume name is invalid',
   INVALID_ATTACHMENT_PATH: 'The managed Incus attachment path is invalid',
-  GPU_CHANGE_REQUIRES_STOP: 'The GPU runtime cannot be changed while the instance is running',
   IMAGE_NOT_AVAILABLE: 'The requested image is not available',
   VOLUME_SECURITY_SHIFTED_MISMATCH: 'The managed volume does not have security.shifted enabled',
   VOLUME_SHRINK_BELOW_USAGE: 'The requested volume size is below current usage',

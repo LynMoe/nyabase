@@ -174,7 +174,6 @@ function reconciler(
     } as never,
     {
       checkNetworkPrerequisites: vi.fn(),
-      checkGpuToolkit: vi.fn(),
       checkEgress: vi.fn(),
       checkGuestCanReachHost: vi.fn(),
     } as never,
@@ -821,7 +820,6 @@ describe('ServerPreflightReconciler', () => {
       connect: ReturnType<typeof vi.fn>;
       checks: {
         checkNetworkPrerequisites: ReturnType<typeof vi.fn>;
-        checkGpuToolkit: ReturnType<typeof vi.fn>;
         checkEgress: ReturnType<typeof vi.fn>;
         checkGuestCanReachHost: ReturnType<typeof vi.fn>;
       };
@@ -835,7 +833,6 @@ describe('ServerPreflightReconciler', () => {
       },
     });
     internals.checks.checkNetworkPrerequisites.mockResolvedValue(passingLanNetwork());
-    internals.checks.checkGpuToolkit.mockResolvedValue({ gpuRuntime: 'not_applicable' });
     internals.checks.checkEgress.mockResolvedValue({ status: 'pass' });
     internals.checks.checkGuestCanReachHost.mockResolvedValue({ status: 'pass' });
     internals.nodeMetrics.pull.mockResolvedValue({
@@ -1037,7 +1034,6 @@ describe('ServerPreflightReconciler', () => {
       connect: ReturnType<typeof vi.fn>;
       checks: {
         checkNetworkPrerequisites: ReturnType<typeof vi.fn>;
-        checkGpuToolkit: ReturnType<typeof vi.fn>;
       };
       nodeMetrics: {
         pull: ReturnType<typeof vi.fn>;
@@ -1122,7 +1118,6 @@ describe('ServerPreflightReconciler', () => {
       connect: ReturnType<typeof vi.fn>;
       checks: {
         checkNetworkPrerequisites: ReturnType<typeof vi.fn>;
-        checkGpuToolkit: ReturnType<typeof vi.fn>;
       };
       nodeMetrics: {
         pull: ReturnType<typeof vi.fn>;
@@ -1135,7 +1130,6 @@ describe('ServerPreflightReconciler', () => {
     });
     const checks = internals.checks;
     checks.checkNetworkPrerequisites.mockResolvedValue(passingLanNetwork());
-    checks.checkGpuToolkit.mockResolvedValue({ gpuRuntime: 'not_applicable' });
     const nodeMetrics = internals.nodeMetrics;
     nodeMetrics.pull.mockResolvedValue({
       status: 'online',
@@ -1193,7 +1187,6 @@ describe('ServerPreflightReconciler', () => {
       connect: ReturnType<typeof vi.fn>;
       checks: {
         checkNetworkPrerequisites: ReturnType<typeof vi.fn>;
-        checkGpuToolkit: ReturnType<typeof vi.fn>;
       };
       nodeMetrics: {
         pull: ReturnType<typeof vi.fn>;
@@ -1209,7 +1202,6 @@ describe('ServerPreflightReconciler', () => {
       nftAvailable: false,
       networkPrerequisites: false,
     });
-    internals.checks.checkGpuToolkit.mockResolvedValue({ gpuRuntime: 'not_applicable' });
     internals.nodeMetrics.pull.mockRejectedValue(
       new IncusError('PREFLIGHT_FAILED', 'managed_failure', {
         reason: 'node_metrics_pull_not_online',
@@ -1269,7 +1261,6 @@ describe('ServerPreflightReconciler', () => {
       connect: ReturnType<typeof vi.fn>;
       checks: {
         checkNetworkPrerequisites: ReturnType<typeof vi.fn>;
-        checkGpuToolkit: ReturnType<typeof vi.fn>;
       };
       nodeMetrics: {
         pull: ReturnType<typeof vi.fn>;
@@ -1279,7 +1270,6 @@ describe('ServerPreflightReconciler', () => {
       metadata: { environment: { firewall: 'nftables' } },
     });
     internals.checks.checkNetworkPrerequisites.mockResolvedValue(passingLanNetwork());
-    internals.checks.checkGpuToolkit.mockResolvedValue({ gpuRuntime: 'not_applicable' });
     internals.nodeMetrics.pull.mockResolvedValue({
       status: 'online',
       report: { samples: lanSamples() },

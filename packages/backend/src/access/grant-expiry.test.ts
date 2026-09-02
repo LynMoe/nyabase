@@ -11,8 +11,6 @@ const base = {
   cpu_millis: null as number | null,
   mem_bytes: null as string | null,
   disk_bytes: null as string | null,
-  gpu_mode: null as string | null,
-  gpu_pci_addresses: [] as string[],
 };
 
 describe('classifyGrantExpiry', () => {

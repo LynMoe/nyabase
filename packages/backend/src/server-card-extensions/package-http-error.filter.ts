@@ -1,9 +1,10 @@
 import { Catch, type ArgumentsHost, type ExceptionFilter } from '@nestjs/common';
-import { PackageHttpError } from '@nyabase/common';
+import { isPackageHttpError, PackageHttpError } from '@nyabase/common';
 
 @Catch(PackageHttpError)
 export class PackageHttpErrorFilter implements ExceptionFilter {
   catch(exception: PackageHttpError, host: ArgumentsHost): void {
+    if (!isPackageHttpError(exception)) return;
     const ctx = host.switchToHttp();
     const response = ctx.getResponse<{
       status: (code: number) => { json: (body: unknown) => void };

@@ -127,11 +127,6 @@ export class AdminServersController {
     return this.volumes.capacityForAdmin(id);
   }
 
-  @Get(':id/gpus')
-  async gpus(@Param('id') id: string) {
-    return { items: await this.servers.listGpus(id) };
-  }
-
   @Patch(':id')
   update(
     @Param('id') id: string,

@@ -17,18 +17,6 @@ COMMENT ON SCHEMA control IS 'Desired state and authoritative control-plane proj
 COMMENT ON SCHEMA iam IS 'Identity, authentication, authorization, and grants';
 COMMENT ON SCHEMA infra IS 'Managed servers, images, storage pools, and shared backends';
 
-CREATE FUNCTION control.valid_pci_addresses(addresses text[]) RETURNS boolean
-    LANGUAGE sql
-    IMMUTABLE
-    AS $$
-  SELECT addresses IS NOT NULL
-    AND array_position(addresses, NULL::text) IS NULL
-    AND COALESCE((
-      SELECT bool_and(address ~ '^[0-9a-f]{8}:[0-9a-f]{2}:[0-9a-f]{2}\.[0-7]$')
-      FROM unnest(addresses) AS address
-    ), true)
-$$;
-
 CREATE TABLE audit.events (
     id uuid NOT NULL,
     actor_id text,
@@ -202,7 +190,6 @@ CREATE TABLE infra.servers (
     -- Not a physical/bond NIC. nyabase never creates this device.
     parent_interface text,
     dns_servers text[] DEFAULT ARRAY[]::text[] NOT NULL,
-    gpu_runtime_available boolean DEFAULT false NOT NULL,
     status text DEFAULT 'unknown'::text NOT NULL,
     last_seen_at timestamp with time zone,
     last_error text,
@@ -251,6 +238,21 @@ CREATE TABLE infra.servers (
         CHECK (preflight_report IS NULL OR jsonb_typeof(preflight_report) = 'object'),
     CONSTRAINT servers_revision_check CHECK (revision > 0),
     PRIMARY KEY (id)
+);
+
+CREATE TABLE infra.server_extensions (
+    server_id uuid NOT NULL REFERENCES infra.servers(id) ON DELETE CASCADE,
+    extension_id text NOT NULL,
+    enabled boolean NOT NULL DEFAULT false,
+    health jsonb NOT NULL DEFAULT '{}'::jsonb,
+    enabled_by uuid REFERENCES iam.users(id) ON DELETE SET NULL,
+    enabled_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+    updated_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+    PRIMARY KEY (server_id, extension_id),
+    CONSTRAINT server_extensions_id_check
+        CHECK (extension_id ~ '^[a-z][a-z0-9-]{0,62}$'),
+    CONSTRAINT server_extensions_health_object
+        CHECK (jsonb_typeof(health) = 'object')
 );
 
 CREATE TABLE infra.ip_pools (
@@ -386,8 +388,7 @@ CREATE TABLE iam.server_grants (
     cpu_millis integer,
     mem_bytes bigint,
     disk_bytes bigint,
-    gpu_mode text NOT NULL,
-    gpu_pci_addresses text[] DEFAULT ARRAY[]::text[] NOT NULL,
+    extension_grants jsonb NOT NULL DEFAULT '{}'::jsonb,
     expires_at timestamp with time zone,
     created_at timestamp with time zone DEFAULT clock_timestamp() NOT NULL,
     updated_at timestamp with time zone DEFAULT clock_timestamp() NOT NULL,
@@ -396,13 +397,8 @@ CREATE TABLE iam.server_grants (
     CONSTRAINT server_grants_cpu_millis_check CHECK (cpu_millis IS NULL OR cpu_millis >= 0),
     CONSTRAINT server_grants_mem_bytes_check CHECK (mem_bytes IS NULL OR mem_bytes >= 0),
     CONSTRAINT server_grants_disk_bytes_check CHECK (disk_bytes IS NULL OR disk_bytes >= 0),
-    CONSTRAINT server_grants_gpu_mode_check
-        CHECK (gpu_mode = ANY (ARRAY['none', 'all', 'pci'])),
-    CONSTRAINT server_grants_gpu_shape_check
-        CHECK ((gpu_mode = 'pci' AND cardinality(gpu_pci_addresses) > 0)
-            OR (gpu_mode IN ('none', 'all') AND cardinality(gpu_pci_addresses) = 0)),
-    CONSTRAINT server_grants_gpu_pci_shape_check
-        CHECK (control.valid_pci_addresses(gpu_pci_addresses))
+    CONSTRAINT server_grants_extension_grants_object
+        CHECK (jsonb_typeof(extension_grants) = 'object')
 );
 
 CREATE TABLE iam.storage_pool_grants (
@@ -448,8 +444,7 @@ CREATE TABLE control.containers (
     root_size_pending_bytes bigint,
     cpu_millis integer DEFAULT 0 NOT NULL,
     mem_bytes bigint DEFAULT 0 NOT NULL,
-    nvidia_runtime boolean DEFAULT false NOT NULL,
-    gpu_pci_addresses text[] DEFAULT ARRAY[]::text[] NOT NULL,
+    extensions jsonb NOT NULL DEFAULT '{}'::jsonb,
     nesting boolean DEFAULT true NOT NULL,
     syscall_intercept boolean DEFAULT true NOT NULL,
     power_intent text DEFAULT 'running'::text NOT NULL,
@@ -473,10 +468,8 @@ CREATE TABLE control.containers (
         CHECK (root_size_pending_bytes IS NULL OR root_size_pending_bytes > 0),
     CONSTRAINT containers_cpu_millis_check CHECK (cpu_millis >= 0),
     CONSTRAINT containers_mem_bytes_check CHECK (mem_bytes >= 0),
-    CONSTRAINT containers_gpu_pci_shape_check
-        CHECK (control.valid_pci_addresses(gpu_pci_addresses)),
-    CONSTRAINT containers_gpu_runtime_shape_check
-        CHECK (cardinality(gpu_pci_addresses) = 0 OR nvidia_runtime),
+    CONSTRAINT containers_extensions_object
+        CHECK (jsonb_typeof(extensions) = 'object'),
     CONSTRAINT containers_power_intent_check
         CHECK (power_intent = ANY (ARRAY['running', 'stopped'])),
     CONSTRAINT containers_lifecycle_phase_check
@@ -608,14 +601,22 @@ COMMENT ON COLUMN control.container_network_claims.owner_id IS
 COMMENT ON COLUMN control.container_network_claims.cleanup_payload_json IS
   'Bounded cleanup evidence for a releasing address reservation';
 
-CREATE TABLE control.container_gpu_claims (
+CREATE TABLE control.extension_device_claims (
     id uuid NOT NULL,
-    container_id uuid NOT NULL REFERENCES control.containers(id) ON DELETE CASCADE,
+    extension_id text NOT NULL,
     server_id uuid NOT NULL REFERENCES infra.servers(id) ON DELETE RESTRICT,
-    gpu_pci_address text NOT NULL,
+    container_id uuid NOT NULL REFERENCES control.containers(id) ON DELETE CASCADE,
+    device_key text NOT NULL,
     created_at timestamp with time zone DEFAULT clock_timestamp() NOT NULL,
-    CONSTRAINT container_gpu_claims_pci_check
-        CHECK (gpu_pci_address ~ '^[0-9a-f]{8}:[0-9a-f]{2}:[0-9a-f]{2}\.[0-7]$')
+    PRIMARY KEY (id),
+    CONSTRAINT extension_device_claims_id_check
+        CHECK (extension_id ~ '^[a-z][a-z0-9-]{0,62}$'),
+    CONSTRAINT extension_device_claims_key_check
+        CHECK (length(device_key) BETWEEN 1 AND 256 AND device_key !~ '[[:space:]]'),
+    CONSTRAINT extension_device_claims_container_device_key
+        UNIQUE (container_id, extension_id, device_key),
+    CONSTRAINT extension_device_claims_server_device_key
+        UNIQUE (extension_id, server_id, device_key)
 );
 
 CREATE TABLE control.container_ssh_routes (
@@ -997,11 +998,6 @@ ALTER TABLE control.container_network_claims ADD CONSTRAINT container_network_cl
     PRIMARY KEY (id);
 ALTER TABLE control.container_network_claims ADD CONSTRAINT container_network_claims_network_key_address_key
     UNIQUE (network_key, address);
-ALTER TABLE control.container_gpu_claims ADD CONSTRAINT container_gpu_claims_pkey PRIMARY KEY (id);
-ALTER TABLE control.container_gpu_claims ADD CONSTRAINT container_gpu_claims_container_pci_key
-    UNIQUE (container_id, gpu_pci_address);
-ALTER TABLE control.container_gpu_claims ADD CONSTRAINT container_gpu_claims_server_pci_key
-    UNIQUE (server_id, gpu_pci_address);
 ALTER TABLE control.container_ssh_routes ADD CONSTRAINT container_ssh_routes_pkey
     PRIMARY KEY (container_id);
 ALTER TABLE control.authorization_dependencies ADD CONSTRAINT authorization_dependencies_pkey
@@ -1124,8 +1120,13 @@ CREATE UNIQUE INDEX container_network_claims_container_owner_idx
     WHERE owner_kind = 'container' AND container_id IS NOT NULL;
 CREATE UNIQUE INDEX container_network_claims_owner_idx
     ON control.container_network_claims (owner_kind, owner_id);
-CREATE INDEX container_gpu_claims_server_idx
-    ON control.container_gpu_claims (server_id, gpu_pci_address);
+CREATE INDEX extension_device_claims_server_idx
+    ON control.extension_device_claims (server_id, extension_id, device_key);
+CREATE INDEX extension_device_claims_container_idx
+    ON control.extension_device_claims (container_id);
+CREATE INDEX server_extensions_enabled_idx
+    ON infra.server_extensions (extension_id)
+    WHERE enabled;
 CREATE INDEX container_ssh_routes_ip_idx
     ON control.container_ssh_routes (routed_ip);
 CREATE INDEX container_ssh_routes_server_idx
@@ -1350,15 +1351,48 @@ BEGIN
 END;
 $$;
 
-CREATE FUNCTION control.release_gpu_claims_on_terminal_phase() RETURNS trigger
+CREATE FUNCTION control.release_extension_device_claims_on_terminal_phase() RETURNS trigger
     LANGUAGE plpgsql
     AS $$
 BEGIN
   IF NEW.lifecycle_phase = ANY (ARRAY['failed', 'deleting'])
      AND OLD.lifecycle_phase IS DISTINCT FROM NEW.lifecycle_phase THEN
-    DELETE FROM control.container_gpu_claims WHERE container_id = NEW.id;
+    DELETE FROM control.extension_device_claims WHERE container_id = NEW.id;
   END IF;
   RETURN NEW;
+END;
+$$;
+
+CREATE FUNCTION infra.reject_disable_extension_with_claims() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+  IF NEW.enabled = false AND OLD.enabled IS DISTINCT FROM false THEN
+    IF EXISTS (
+      SELECT 1 FROM control.extension_device_claims
+      WHERE server_id = NEW.server_id AND extension_id = NEW.extension_id
+    ) THEN
+      RAISE EXCEPTION 'server extension % is occupied', NEW.extension_id
+        USING ERRCODE = 'P0001',
+              HINT = 'EXTENSION_OCCUPIED';
+    END IF;
+  END IF;
+  RETURN NEW;
+END;
+$$;
+
+CREATE FUNCTION infra.reject_delete_extension_with_claims() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+  IF EXISTS (
+    SELECT 1 FROM control.extension_device_claims
+    WHERE server_id = OLD.server_id AND extension_id = OLD.extension_id
+  ) THEN
+    RAISE EXCEPTION 'server extension % is occupied', OLD.extension_id
+      USING ERRCODE = 'P0001', HINT = 'EXTENSION_OCCUPIED';
+  END IF;
+  RETURN OLD;
 END;
 $$;
 
@@ -1837,9 +1871,18 @@ FOR EACH ROW EXECUTE FUNCTION control.reject_container_identity_change();
 CREATE TRIGGER containers_touch_updated_at
 BEFORE UPDATE ON control.containers
 FOR EACH ROW EXECUTE FUNCTION control.touch_updated_at();
-CREATE TRIGGER containers_release_gpu_claims
+CREATE TRIGGER containers_release_extension_device_claims
 AFTER UPDATE OF lifecycle_phase ON control.containers
-FOR EACH ROW EXECUTE FUNCTION control.release_gpu_claims_on_terminal_phase();
+FOR EACH ROW EXECUTE FUNCTION control.release_extension_device_claims_on_terminal_phase();
+CREATE TRIGGER server_extensions_touch_updated_at
+BEFORE UPDATE ON infra.server_extensions
+FOR EACH ROW EXECUTE FUNCTION infra.touch_updated_at();
+CREATE TRIGGER server_extensions_reject_occupied_disable
+BEFORE UPDATE OF enabled ON infra.server_extensions
+FOR EACH ROW EXECUTE FUNCTION infra.reject_disable_extension_with_claims();
+CREATE TRIGGER server_extensions_reject_occupied_delete
+BEFORE DELETE ON infra.server_extensions
+FOR EACH ROW EXECUTE FUNCTION infra.reject_delete_extension_with_claims();
 CREATE TRIGGER volumes_touch_updated_at
 BEFORE UPDATE ON control.volumes
 FOR EACH ROW EXECUTE FUNCTION control.touch_updated_at();

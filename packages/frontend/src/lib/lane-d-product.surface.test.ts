@@ -26,13 +26,14 @@ describe('lane D product UI copy', () => {
     expect(src).toMatch(/撤销旧证书/);
   });
 
-  it('prompts rebuild when NVIDIA runtime is off and retries failed intents', () => {
+  it('retries failed intents without importing card-extension packages on container pages', () => {
     const src = [
       read('pages/container-detail-page.tsx'),
       read('components/containers/spec-panel.tsx'),
       read('components/containers/intents-panel.tsx'),
     ].join('\n');
-    expect(src).toMatch(/该容器创建时未启用 NVIDIA runtime，无法热添加 GPU，请删除后重建/);
+    expect(src).not.toMatch(/@nyabase\/[a-z0-9-]+-web/);
+    expect(src).toMatch(/ExtensionSlots/);
     expect(src).toMatch(/挂载与卸载本地数据卷需要「管理本地数据卷」权限/);
     expect(src).toMatch(/挂载与卸载共享卷需要「管理共享卷」权限/);
     expect(src).toMatch(/retryIntent/);

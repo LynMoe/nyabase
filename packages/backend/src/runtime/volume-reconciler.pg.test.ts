@@ -20,7 +20,6 @@ function serverValues(id: string, suffix: string, status: 'online' | 'unreachabl
     storage_overcommit_ratio: 1,
     parent_interface: null,
     dns_servers: [],
-    gpu_runtime_available: false,
     status,
     last_seen_at: null,
     last_error: null,

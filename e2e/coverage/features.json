@@ -234,7 +234,9 @@
             "core",
             "full"
           ],
-          "httpSurfaces": []
+          "httpSurfaces": [
+            "PUT|/api/admin/servers/:serverId/extensions/:extensionId"
+          ]
         }
       ]
     },
@@ -1119,8 +1121,9 @@
           "httpSurfaces": [
             "GET|/api/servers",
             "GET|/api/servers/:id",
-            "GET|/api/servers/:id/gpus",
-            "GET|/api/admin/servers/:id/gpus",
+            "GET|/api/servers/:serverId/extensions/:extensionId/devices",
+            "GET|/api/admin/servers/:serverId/extensions",
+            "GET|/api/admin/servers/:serverId/extensions/:extensionId/devices",
             "GET|/api/servers/:serverId/storage-pools/:id",
             "POST|/api/admin/servers",
             "GET|/api/admin/servers",
@@ -1170,7 +1173,7 @@
     },
     {
       "featureId": "container-api-extras",
-      "title": "Container stats, GPU patch, exec sessions",
+      "title": "Container stats, extension patch, exec sessions",
       "cases": [
         {
           "caseId": "container-stats-gpu-exec",
@@ -1184,7 +1187,7 @@
           ],
           "httpSurfaces": [
             "GET|/api/containers/:containerId/stats",
-            "PATCH|/api/containers/:containerId/gpu",
+            "PATCH|/api/containers/:containerId/extensions/:extensionId",
             "POST|/api/containers/:containerId/exec-sessions",
             "GET|/api/admin/containers",
             "POST|/api/admin/containers/:containerId/actions/start",
@@ -1192,7 +1195,7 @@
             "POST|/api/admin/containers/:containerId/actions/restart",
             "PATCH|/api/admin/containers/:containerId/limits",
             "PATCH|/api/admin/containers/:containerId/root-size",
-            "PATCH|/api/admin/containers/:containerId/gpu",
+            "PATCH|/api/admin/containers/:containerId/extensions/:extensionId",
             "GET|/api/admin/containers/:containerId/volumes",
             "GET|/api/admin/containers/:containerId/stats",
             "GET|/api/admin/containers/:containerId/intents"

@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { Capability, GpuGrantMode } from '@nyabase/common';
+import { Capability } from '@nyabase/common';
 import {
   AccessResolverService,
   type ResolvedServerGrant,
@@ -10,7 +10,7 @@ describe('AccessResolverService effective access projections', () => {
     cpuMillis: 1_000,
     memBytes: 2_000,
     diskBytes: 3_000,
-    gpu: { mode: GpuGrantMode.None, pciAddresses: [] },
+    extensionGrants: {},
     expiresAt: null,
     purgeAt: null,
     accessPhase: 'live',
@@ -52,7 +52,7 @@ describe('AccessResolverService effective access projections', () => {
       cpuMillis: 1_000,
       memBytes: 2_000,
       diskBytes: 3_000,
-      gpu: grant.gpu,
+      extensionGrants: {},
       expiresAt: null,
       purgeAt: null,
       accessPhase: 'live',

@@ -17,17 +17,14 @@ import {
   ContainerPowerIntent,
   ContainerStatus,
   FailureCode,
-  GpuGrantMode,
   IntentKind,
   IntentResourceType,
   StoragePoolResizeFamily,
-  canonicalPciAddress,
   type ContainerDto,
   type AttachVolumeRequest,
   type CreateContainerRequest,
   type CreateExecSessionRequest,
   type IntentAcceptedDto,
-  type PatchContainerGpuRequest,
   type PatchContainerLimitsRequest,
   type PatchContainerRootSizeRequest,
   type VolumeAttachmentDto,
@@ -55,6 +52,10 @@ import {
   storagePoolCapability,
 } from '../storage-pools/storage-pools.service.js';
 import { VolumesService } from '../volumes/volumes.service.js';
+import { ExtensionDeviceClaimsRepository } from '../server-card-extensions/claims.repository.js';
+import { asJsonObject } from '../server-card-extensions/json.js';
+import { ServerCardExtensionRegistry } from '../server-card-extensions/registry.js';
+import type { ExtensionGrantView } from '../server-card-extensions/types.js';
 
 type ContainerAction = 'start' | 'stop' | 'restart' | 'delete';
 
@@ -77,7 +78,6 @@ interface ServerRow {
   status: string;
   system_pool_id: string | null;
   parent_interface: string | null;
-  gpu_runtime_available: boolean;
   preflight_status: string;
 }
 
@@ -112,23 +112,6 @@ export function assertContainerName(name: string): void {
   }
 }
 
-export function normalizeGpuAddresses(addresses: readonly string[]): string[] {
-  const normalized = addresses.map((address) => canonicalPciAddress(address));
-  if (normalized.some((address) => address === null)) {
-    throw new BadRequestException({
-      code: FailureCode.InvalidInput,
-      message: 'GPU addresses must be PCI addresses',
-    });
-  }
-  if (new Set(normalized).size !== normalized.length) {
-    throw new BadRequestException({
-      code: FailureCode.InvalidInput,
-      message: 'GPU addresses must be unique',
-    });
-  }
-  return normalized as string[];
-}
-
 function isUniqueViolation(error: unknown, constraint?: string): boolean {
   let current: unknown = error;
   const visited = new Set<unknown>();
@@ -144,11 +127,11 @@ function isUniqueViolation(error: unknown, constraint?: string): boolean {
   return false;
 }
 
-function gpuAlreadyClaimed(pciAddress?: string): ConflictException {
+function extensionDeviceClaimed(deviceKey?: string): ConflictException {
   return new ConflictException({
-    code: FailureCode.GpuAlreadyClaimed,
-    message: 'A requested GPU is already claimed',
-    details: pciAddress ? { pciAddress } : {},
+    code: FailureCode.ExtensionDeviceClaimed,
+    message: 'A requested extension device is already claimed',
+    details: deviceKey ? { deviceKey } : {},
   });
 }
 
@@ -190,6 +173,8 @@ export class ContainerControlService {
     private readonly config: NyabaseConfigService,
     private readonly sshConvergence: ContainerSshConvergenceService,
     @Optional() private readonly volumes?: VolumesService,
+    @Optional() private readonly extensions?: ServerCardExtensionRegistry,
+    @Optional() private readonly extensionClaims?: ExtensionDeviceClaimsRepository,
   ) {}
 
   async list(userId: string, filters: { serverId?: string } = {}): Promise<ContainerDto[]> {
@@ -246,7 +231,16 @@ export class ContainerControlService {
       });
     }
     const ownerId = admin ? request.ownerId! : userId;
-    const gpuPciAddresses = normalizeGpuAddresses(request.gpuPciAddresses);
+    const requestedExtensions = request.extensions ?? {};
+    for (const extensionId of Object.keys(requestedExtensions)) {
+      if (!this.extensions?.get(extensionId)) {
+        throw new BadRequestException({
+          code: FailureCode.ExtensionUnknown,
+          message: 'Unknown server-card extension',
+          details: { extensionId },
+        });
+      }
+    }
     const id = randomUUID();
     const result = await this.transactions.run(async (transaction) => {
       const server = await transaction.selectFrom('infra.servers')
@@ -414,25 +408,46 @@ export class ContainerControlService {
         request.rootSizeBytes,
         admin ? null : access?.grant.diskBytes ?? null,
       );
-      if (request.gpuPciAddresses.length > 0) {
-        if (!admin && access) this.assertGpuGrant(access.grant.gpu, gpuPciAddresses);
-        if (!server.gpu_runtime_available) {
+      const extensionBag: Record<string, unknown> = {};
+      const grantView: ExtensionGrantView = {
+        extensionGrants: access?.grant.extensionGrants ?? null,
+      };
+      for (const ext of this.extensions?.all() ?? []) {
+        const enabled = this.extensionClaims
+          ? await this.extensionClaims.isEnabled(request.serverId, ext.id, transaction)
+          : false;
+        const payload = requestedExtensions[ext.id];
+        if (!enabled && payload !== undefined) {
           throw new ConflictException({
-            code: FailureCode.GpuRuntimeUnavailable,
-            message: 'GPU runtime is not enabled on the server',
-            details: { serverId: request.serverId },
+            code: FailureCode.ExtensionNotEnabled,
+            message: 'The server extension is not enabled',
+            details: { extensionId: ext.id },
           });
         }
-        const claimed = await this.repository.claimedGpuAddresses(request.serverId, transaction);
-        const claimedSet = new Set(
-          claimed.flatMap((address) => {
-            const canonical = canonicalPciAddress(address);
-            return canonical ? [canonical] : [];
-          }),
-        );
-        const collision = gpuPciAddresses.find((address) =>
-          claimedSet.has(address));
-        if (collision) throw gpuAlreadyClaimed(collision);
+        try {
+          const { state } = await ext.admitCreate({
+            serverId: request.serverId,
+            actor: { userId, admin },
+            grant: grantView,
+            claims: this.extensionClaims
+              ? this.extensionClaims.for(ext.id, request.serverId, id, transaction)
+              : {
+                replace: async () => undefined,
+                listOccupiedKeys: async () => [],
+                count: async () => 0,
+              },
+            health: this.extensionClaims
+              ? this.extensionClaims.health(request.serverId, ext.id, transaction)
+              : { read: async () => ({}), write: async () => undefined },
+            containerId: id,
+            payload,
+            enabled,
+          });
+          if (Object.keys(state).length > 0) extensionBag[ext.id] = state;
+        } catch (error) {
+          if (isUniqueViolation(error, 'extension_device_claims')) throw extensionDeviceClaimed();
+          throw error;
+        }
       }
       let networkKey: string | null = null;
       let address: string | null = null;
@@ -485,13 +500,13 @@ export class ContainerControlService {
           rootSizeBytes: request.rootSizeBytes,
           cpuMillis: request.cpuMillis,
           memBytes: request.memBytes,
-          gpuPciAddresses,
+          extensions: extensionBag,
           powerIntent: request.powerIntent,
           networkKey,
           address,
         }, transaction);
       } catch (error) {
-        if (isUniqueViolation(error, 'container_gpu_claims')) throw gpuAlreadyClaimed();
+        if (isUniqueViolation(error, 'extension_device_claims')) throw extensionDeviceClaimed();
         throw error;
       }
       if (request.volumes && request.volumes.length > 0) {
@@ -724,29 +739,39 @@ export class ContainerControlService {
     );
   }
 
-  async updateGpuForUser(
+  async mutateExtensionForUser(
     containerId: string,
     actorId: string,
-    input: PatchContainerGpuRequest,
+    extensionId: string,
+    payload: unknown,
   ): Promise<IntentAcceptedDto> {
-    return this.updateGpuInternal(containerId, actorId, input, false);
+    return this.mutateExtensionInternal(containerId, actorId, extensionId, payload, false);
   }
 
-  async updateGpuForAdmin(
+  async mutateExtensionForAdmin(
     containerId: string,
     actorId: string,
-    input: PatchContainerGpuRequest,
+    extensionId: string,
+    payload: unknown,
   ): Promise<IntentAcceptedDto> {
-    return this.updateGpuInternal(containerId, actorId, input, true);
+    return this.mutateExtensionInternal(containerId, actorId, extensionId, payload, true);
   }
 
-  private async updateGpuInternal(
+  private async mutateExtensionInternal(
     containerId: string,
     actorId: string,
-    input: PatchContainerGpuRequest,
+    extensionId: string,
+    payload: unknown,
     admin: boolean,
   ): Promise<IntentAcceptedDto> {
-    const gpuPciAddresses = normalizeGpuAddresses(input.gpuPciAddresses);
+    const ext = this.extensions?.get(extensionId);
+    if (!ext) {
+      throw new NotFoundException({
+        code: FailureCode.ExtensionUnknown,
+        message: 'Unknown server-card extension',
+        details: { extensionId },
+      });
+    }
     return this.transactions.run(async (transaction) => {
       const current = await this.repository.lock(containerId, transaction);
       if (!current || (!admin && current.owner_id !== actorId)) throw new NotFoundException('Container not found');
@@ -763,73 +788,66 @@ export class ContainerControlService {
           [Capability.ManageContainersAny],
         );
       }
+      const enabled = this.extensionClaims
+        ? await this.extensionClaims.isEnabled(current.server_id, extensionId, transaction)
+        : false;
+      if (!enabled) {
+        throw new ConflictException({
+          code: FailureCode.ExtensionNotEnabled,
+          message: 'The server extension is not enabled',
+          details: { extensionId },
+        });
+      }
       const route = await this.repository.currentRoute(containerId, transaction);
-      if (containerStatus(route?.instance_status, current.power_intent as ContainerPowerIntent)
-        !== ContainerStatus.Stopped) {
-        throw new ConflictException({
-          code: FailureCode.GpuChangeRequiresStop,
-          message: 'GPU assignment changes require a stopped container',
-        });
-      }
-      if (gpuPciAddresses.length > 0 && !current.nvidia_runtime) {
-        throw new ConflictException({
-          code: FailureCode.GpuRuntimeNotEnabled,
-          message: 'This container was created without the NVIDIA runtime; recreate it to add GPUs',
-          details: { containerId },
-        });
-      }
-      const server = await transaction.selectFrom('infra.servers')
-        .select(['gpu_runtime_available'])
-        .where('id', '=', current.server_id)
-        .forUpdate()
-        .executeTakeFirst();
-      if (!server) throw new NotFoundException('Server not found');
-      if (!server.gpu_runtime_available && gpuPciAddresses.length > 0) {
-        throw new ConflictException({
-          code: FailureCode.GpuRuntimeUnavailable,
-          message: 'GPU runtime is not enabled on the server',
-          details: { serverId: current.server_id },
-        });
-      }
+      const observedStatus = containerStatus(
+        route?.instance_status,
+        current.power_intent as ContainerPowerIntent,
+      );
+      let grantView: ExtensionGrantView = { extensionGrants: null };
       if (!admin) {
         const grant = await this.access.resolveServerInTransaction(transaction, actorId, current.server_id);
         if (!grant || grant.accessPhase !== 'live') throw new ForbiddenException('Server access was revoked');
-        this.assertGpuGrant(grant.gpu, gpuPciAddresses);
+        grantView = { extensionGrants: grant.extensionGrants };
       }
-      const claimed = await this.repository.claimedGpuAddresses(
-        current.server_id,
-        transaction,
-        current.id,
-      );
-      const claimedSet = new Set(
-        claimed.flatMap((address) => {
-          const canonical = canonicalPciAddress(address);
-          return canonical ? [canonical] : [];
-        }),
-      );
-      const collision = gpuPciAddresses.find((address) => claimedSet.has(address));
-      if (collision) throw gpuAlreadyClaimed(collision);
+      const currentExtensions = asJsonObject(current.extensions);
+      let mutated;
+      try {
+        mutated = await ext.mutateContainer({
+          serverId: current.server_id,
+          actor: { userId: actorId, admin },
+          grant: grantView,
+          claims: this.extensionClaims
+            ? this.extensionClaims.for(extensionId, current.server_id, containerId, transaction)
+            : {
+              replace: async () => undefined,
+              listOccupiedKeys: async () => [],
+              count: async () => 0,
+            },
+          health: this.extensionClaims
+            ? this.extensionClaims.health(current.server_id, extensionId, transaction)
+            : { read: async () => ({}), write: async () => undefined },
+          containerId,
+          lifecyclePhase: current.lifecycle_phase,
+          powerIntent: current.power_intent,
+          observedStatus: observedStatus === 'creating' ? 'unknown' : observedStatus,
+          currentExtensions,
+          payload,
+          enabled,
+        });
+      } catch (error) {
+        if (isUniqueViolation(error, 'extension_device_claims')) throw extensionDeviceClaimed();
+        throw error;
+      }
+      const nextBag = { ...currentExtensions };
+      if (Object.keys(mutated.state).length === 0) delete nextBag[extensionId];
+      else nextBag[extensionId] = mutated.state;
       const updated = await this.repository.updateDesired(
         containerId,
         current.generation,
-        {
-          gpu_pci_addresses: gpuPciAddresses,
-          nvidia_runtime: current.nvidia_runtime,
-        },
+        { extensions: nextBag },
         transaction,
       );
       if (!updated) throw new ConflictException({ code: FailureCode.RevisionConflict });
-      try {
-        await this.repository.replaceGpuClaims(
-          containerId,
-          current.server_id,
-          gpuPciAddresses,
-          transaction,
-        );
-      } catch (error) {
-        if (isUniqueViolation(error, 'container_gpu_claims')) throw gpuAlreadyClaimed();
-        throw error;
-      }
       const intent = await this.intents.createPending({
         kind: IntentKind.ContainerUpdate,
         resourceType: IntentResourceType.Container,
@@ -837,11 +855,18 @@ export class ContainerControlService {
         serverId: current.server_id,
         requestedBy: actorId,
         targetGeneration: updated.generation,
-        request: { operation: 'gpu' },
+        request: mutated.requestSummary,
       }, transaction);
-      await this.audit.append(transaction, actorId, AuditAction.UpdateContainerGpu, containerId, 'container');
+      await this.audit.append(
+        transaction,
+        actorId,
+        AuditAction.UpdateContainerExtension,
+        containerId,
+        'container',
+        { extensionId, ...mutated.requestSummary },
+      );
       return { intent, serverId: current.server_id };
-    }).then((result) => {
+    }, { isolationLevel: 'serializable', maxAttempts: 5 }).then((result) => {
       this.wake.wake({
         resourceType: IntentResourceType.Container,
         resourceId: containerId,
@@ -1058,7 +1083,7 @@ export class ContainerControlService {
       );
       if (!updated) throw new ConflictException({ code: FailureCode.RevisionConflict });
       if (nextPhase === ContainerPhase.Deleting || nextPhase === ContainerPhase.Failed) {
-        await this.repository.releaseGpuClaims(containerId, transaction);
+        await this.extensionClaims?.releaseContainerClaims(containerId, transaction);
       }
       const kind = action === 'delete'
         ? IntentKind.ContainerDelete
@@ -1140,7 +1165,7 @@ export class ContainerControlService {
       if (!updated) throw new ConflictException({ code: FailureCode.RevisionConflict });
       if (values.lifecycle_phase === ContainerPhase.Deleting
         || values.lifecycle_phase === ContainerPhase.Failed) {
-        await this.repository.releaseGpuClaims(containerId, transaction);
+        await this.extensionClaims?.releaseContainerClaims(containerId, transaction);
       }
       const intent = await this.intents.createPending({
         kind: IntentKind.ContainerUpdate,
@@ -1249,33 +1274,6 @@ export class ContainerControlService {
           ),
           overcommitRatio: numberValue(server.storage_overcommit_ratio),
         },
-      });
-    }
-  }
-
-  private assertGpuGrant(
-    grant: { mode: GpuGrantMode; pciAddresses: string[] },
-    addresses: readonly string[],
-  ): void {
-    if (addresses.length === 0 || grant.mode === GpuGrantMode.All) return;
-    if (grant.mode === GpuGrantMode.None) {
-      throw new ForbiddenException({
-        code: FailureCode.PermissionDenied,
-        message: 'The server grant does not include GPU access',
-      });
-    }
-    const allowed = new Set(
-      grant.pciAddresses.flatMap((address) => {
-        const canonical = canonicalPciAddress(address);
-        return canonical ? [canonical] : [];
-      }),
-    );
-    const denied = addresses.find((address) => !allowed.has(address));
-    if (denied) {
-      throw new ForbiddenException({
-        code: FailureCode.PermissionDenied,
-        message: 'The requested GPU is outside the server grant',
-        details: { pciAddress: denied },
       });
     }
   }
@@ -1410,8 +1408,7 @@ export class ContainerControlService {
           : missingStoragePoolCapability(),
         cpuMillis: row.cpu_millis,
         memBytes: numberValue(row.mem_bytes),
-        gpuPciAddresses: [...row.gpu_pci_addresses],
-        nvidiaRuntime: row.nvidia_runtime,
+        extensions: asJsonObject(row.extensions),
         powerIntent: row.power_intent as ContainerPowerIntent,
         lifecyclePhase: phase(row.lifecycle_phase),
         routedIp: route?.routedIp ?? null,

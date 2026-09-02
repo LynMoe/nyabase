@@ -4,7 +4,6 @@ import {
   ContainerPhase,
   ContainerStatus,
   FailureCode,
-  GpuGrantMode,
   IntentKind,
   IntentResourceType,
   IntentStatus,
@@ -22,11 +21,10 @@ import {
   zErrorResponse,
   zCreateExecSessionRequest,
   zIntentAcceptedDto,
-  zPatchContainerGpuRequest,
   zPatchImageRequest,
   zPatchServerRequest,
   zPreflightReport,
-  zServerGrantGpu,
+  zPutServerGrantRequest,
   zSshProxyInstanceRouteSnapshot,
   formatSshProxyJumpLogin,
   isActiveSshProxyRoute,
@@ -117,7 +115,7 @@ describe('canonical IP pool contract', () => {
   });
 });
 
-describe('canonical container, GPU, and volume contracts', () => {
+describe('canonical container and volume contracts', () => {
   it('requires routed-compatible container creation fields', () => {
     expect(zCreateContainerRequest.parse({
       serverId,
@@ -126,9 +124,9 @@ describe('canonical container, GPU, and volume contracts', () => {
       rootSizeBytes: 10_000,
       cpuMillis: 2_000,
       memBytes: 2_000_000_000,
-      gpuPciAddresses: ['0000:41:00.0'],
+      extensions: {},
       powerIntent: ContainerPowerIntent.Running,
-    })).toMatchObject({ gpuPciAddresses: ['00000000:41:00.0'] });
+    })).toMatchObject({ extensions: {} });
     expect(zCreateContainerRequest.parse({
       serverId,
       imageId,
@@ -136,8 +134,7 @@ describe('canonical container, GPU, and volume contracts', () => {
       rootSizeBytes: 10_000,
       cpuMillis: 2_000,
       memBytes: 2_000_000_000,
-      gpuPciAddresses: [],
-      powerIntent: ContainerPowerIntent.Running,
+            powerIntent: ContainerPowerIntent.Running,
       ownerId: id,
     }).ownerId).toBe(id);
     expect(zCreateContainerRequest.parse({
@@ -147,22 +144,19 @@ describe('canonical container, GPU, and volume contracts', () => {
       rootSizeBytes: 10_000,
       cpuMillis: 2_000,
       memBytes: 2_000_000_000,
-      gpuPciAddresses: [],
-      powerIntent: ContainerPowerIntent.Running,
+            powerIntent: ContainerPowerIntent.Running,
       volumes: [{ volumeId: id, containerPath: '/data', readOnly: false }],
     }).volumes).toEqual([{ volumeId: id, containerPath: '/data', readOnly: false }]);
   });
 
-  it('rejects display indexes as GPU identity', () => {
-    const legacyGpuField = ['gpu', 'Indices'].join('');
-    expect(zPatchContainerGpuRequest.safeParse({
-      [legacyGpuField]: [0],
-    }).success).toBe(false);
-    expect(zServerGrantGpu.parse({
-      mode: GpuGrantMode.Pci,
-      pciAddresses: ['0000:41:00.0'],
-    })).toMatchObject({ pciAddresses: ['00000000:41:00.0'] });
-    expect(zServerGrantGpu.safeParse({ mode: GpuGrantMode.Pci, pciAddresses: [] }).success).toBe(false);
+  it('accepts opaque extension bags on grants', () => {
+    expect(zPutServerGrantRequest.parse({
+      cpuMillis: null,
+      memBytes: null,
+      diskBytes: null,
+      extensionGrants: {},
+      expiresAt: null,
+    }).extensionGrants).toEqual({});
   });
 
   it('rejects old physical identity and address fields', () => {
@@ -175,8 +169,7 @@ describe('canonical container, GPU, and volume contracts', () => {
       rootSizeBytes: 1_024,
       cpuMillis: 1_000,
       memBytes: 1_024,
-      gpuPciAddresses: [],
-      powerIntent: ContainerPowerIntent.Stopped,
+            powerIntent: ContainerPowerIntent.Stopped,
       [legacyIdentityField]: 'instance',
     }).success).toBe(false);
     expect(zSshProxyInstanceRouteSnapshot.safeParse({
@@ -355,8 +348,8 @@ describe('intent and structured failure contracts', () => {
   it('validates bounded error responses without operation references', () => {
     const response: ErrorResponse = {
       statusCode: 409,
-      code: FailureCode.GpuChangeRequiresStop,
-      message: 'The container must be stopped before changing GPU devices.',
+      code: FailureCode.ExtensionMutationRequiresStop,
+      message: 'The container must be stopped before changing extension devices.',
       requestId: id,
       details: { containerId: id },
     };
@@ -374,7 +367,6 @@ describe('preflight and console contracts', () => {
       checks: {
         api: 'pass' as const,
         parentInterface: 'pass' as const,
-        gpuRuntime: 'not_applicable' as const,
         nftables: 'pass' as const,
         ipv4Filtering: 'pass' as const,
         guestCanReachHost: 'pass' as const,
@@ -429,7 +421,8 @@ describe('canonical DTO shapes', () => {
       storageOvercommitRatio: 1,
       parentInterface: 'eno1',
       dnsServers: [],
-      gpuRuntimeAvailable: false,
+      enabledExtensions: [],
+      extensionHealth: {},
       status: ServerStatus.Unknown,
       lastSeenAt: null,
       lastError: null,
@@ -474,8 +467,7 @@ describe('canonical DTO shapes', () => {
       },
       cpuMillis: 2_000,
       memBytes: 2_000_000_000,
-      gpuPciAddresses: [],
-      nvidiaRuntime: false,
+      extensions: {},
       powerIntent: ContainerPowerIntent.Running,
       lifecyclePhase: ContainerPhase.Active,
       routedIp: '192.0.2.10',

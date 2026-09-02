@@ -49,7 +49,6 @@ function claim() {
 type ScanServer = {
   id: string;
   status: 'online' | 'unreachable' | 'unknown';
-  gpu_runtime_available?: boolean;
 };
 
 type StoragePoolRow = {
@@ -178,9 +177,6 @@ function database(
           where: vi.fn((column: unknown, _operator?: string, value?: unknown) => {
             if (table === 'infra.servers' && column === 'id' && typeof value === 'string') {
               const row = rows.find((item) => item.id === value);
-              if (row && typeof values.gpu_runtime_available === 'boolean') {
-                row.gpu_runtime_available = values.gpu_runtime_available;
-              }
             }
             if (table === 'infra.storage_pools' && column === 'id' && typeof value === 'string') {
               const pool = pools.find((item) => item.id === value);
@@ -749,7 +745,7 @@ describe('ReconcileWorkerService', () => {
     }
   });
 
-  it('refreshes GPU runtime availability and pool used/total during a full scan', async () => {
+  it('refreshes pool used/total during a full scan', async () => {
     const poolId = '00000000-0000-4000-8000-000000000021';
     const db = database([serverId], {
       pools: [{
@@ -761,16 +757,7 @@ describe('ReconcileWorkerService', () => {
         total_bytes: null,
       }],
     });
-    const getResources = vi.fn().mockResolvedValue({
-      metadata: {
-        gpu: {
-          cards: [
-            { pci_address: '0000:01:00.0', product: 'AST' },
-            { pci_address: '0000:41:00.0', nvidia: { model: 'RTX' } },
-          ],
-        },
-      },
-    });
+    const getResources = vi.fn().mockResolvedValue({ metadata: {} });
     const getStoragePoolResources = vi.fn().mockResolvedValue({
       metadata: { space: { used: 100, total: 1000 } },
     });
@@ -789,14 +776,9 @@ describe('ReconcileWorkerService', () => {
     expect(getStoragePoolResources).toHaveBeenCalledWith('default', {
       signal: expect.any(AbortSignal),
     });
-    expect(db.rows[0]?.gpu_runtime_available).toBe(true);
     expect(db.pools[0]?.used_bytes).toBe('100');
     expect(db.pools[0]?.total_bytes).toBe('1000');
     expect(db.tableUpdates).toEqual(expect.arrayContaining([
-      expect.objectContaining({
-        table: 'infra.servers',
-        values: { gpu_runtime_available: true },
-      }),
       expect.objectContaining({
         table: 'infra.storage_pools',
         values: expect.objectContaining({

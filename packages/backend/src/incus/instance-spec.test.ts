@@ -10,7 +10,7 @@ import {
 import {
   applyManagedFields,
   compareManagedFields,
-  TEMPORARY_MANAGED_FIELD_OWNERSHIP,
+  CORE_MANAGED_FIELD_OWNERSHIP,
 } from './compare-managed-fields.js';
 
 const containerId = '11111111-1111-4111-8111-111111111111';
@@ -31,8 +31,6 @@ function input(overrides: Partial<InstanceSpecInput['container']> = {}): Instanc
       },
       cpuMillis: 2500,
       memBytes: 1073741824n,
-      nvidiaRuntime: true,
-      gpuPciAddresses: ['0000:41:00.0'],
       rootPool: 'default',
       rootSizeBytes: 21474836480n,
       routedIp: '192.0.2.20',
@@ -85,7 +83,6 @@ describe('buildDesiredInstanceSpec', () => {
         'security.nesting': 'true',
         'security.syscalls.intercept.mknod': 'true',
         'security.syscalls.intercept.setxattr': 'true',
-        'nvidia.runtime': 'true',
         'user.nyabase.managed': 'true',
         'user.nyabase.container_id': containerId.replaceAll('-', ''),
         'user.nyabase.server_id': serverId.replaceAll('-', ''),
@@ -101,11 +98,6 @@ describe('buildDesiredInstanceSpec', () => {
           'ipv4.address': '192.0.2.20',
           'security.ipv4_filtering': 'true',
           'security.mac_filtering': 'true',
-        },
-        [`gpu0`]: {
-          type: 'gpu',
-          gputype: 'physical',
-          pci: '0000:41:00.0',
         },
         [deriveAttachmentDeviceName(attachmentId)]: {
           type: 'disk',
@@ -137,28 +129,6 @@ describe('buildDesiredInstanceSpec', () => {
     expect(buildDesiredInstanceSpec(input({ cpuMillis: 0 })).config?.['limits.cpu']).toBeUndefined();
   });
 
-  it('emits Incus 4-hex PCI domain while accepting 8-hex product form', () => {
-    expect(buildDesiredInstanceSpec(input({
-      gpuPciAddresses: ['00000000:41:00.0'],
-    })).devices?.gpu0?.pci).toBe('0000:41:00.0');
-    expect(buildDesiredInstanceSpec(input({
-      gpuPciAddresses: ['0000:a1:00.0'],
-    })).devices?.gpu0?.pci).toBe('0000:a1:00.0');
-  });
-
-  it('rejects wildcard GPU selectors', () => {
-    expect(() =>
-      buildDesiredInstanceSpec(input({ gpuPciAddresses: ['0000:41:00.*'] })),
-    ).toThrowError('managed Incus GPU selector');
-  });
-
-  it('rejects unsupported PCI functions', () => {
-    for (const address of ['0000:41:00.8', '00000000:41:00.f']) {
-      expect(() => buildDesiredInstanceSpec(input({ gpuPciAddresses: [address] })))
-        .toThrowError('managed Incus GPU selector');
-    }
-  });
-
   it('keeps attachment add and remove changes in one desired document', () => {
     const one = buildDesiredInstanceSpec(input());
     const two = buildDesiredInstanceSpec({
@@ -183,12 +153,12 @@ describe('buildDesiredInstanceSpec', () => {
         devices: one.devices,
       },
       two,
-      TEMPORARY_MANAGED_FIELD_OWNERSHIP,
+      CORE_MANAGED_FIELD_OWNERSHIP,
     );
     expect(actual.devices?.[deriveAttachmentDeviceName(attachmentId)]).toBeDefined();
     expect(actual.devices?.['nyd-55555555555545558555555555555555']).toBeDefined();
-    const backToOne = applyManagedFields(actual, one, TEMPORARY_MANAGED_FIELD_OWNERSHIP);
+    const backToOne = applyManagedFields(actual, one, CORE_MANAGED_FIELD_OWNERSHIP);
     expect(backToOne.devices?.['nyd-55555555555545558555555555555555']).toBeUndefined();
-    expect(compareManagedFields(backToOne, one, TEMPORARY_MANAGED_FIELD_OWNERSHIP).empty).toBe(true);
+    expect(compareManagedFields(backToOne, one, CORE_MANAGED_FIELD_OWNERSHIP).empty).toBe(true);
   });
 });

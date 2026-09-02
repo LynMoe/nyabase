@@ -1,5 +1,6 @@
 import type { ContainerPhase, ContainerPowerIntent, ContainerStatus, ServerStatus } from '@nyabase/common';
 import { FailureCode } from '@nyabase/common';
+import { formatRegisteredExtensionError } from '../extensions/registry.js';
 
 type ContainerSshStatus =
   | 'disabled'
@@ -65,10 +66,12 @@ const FAILURE_CODE_ZH: Partial<Record<string, string>> = {
   [FailureCode.RootShrinkRequiresStop]: '缩容前需先停止容器',
   [FailureCode.RootQuotaPending]: '系统盘配额变更待收敛',
   [FailureCode.RootSizeBelowImageMinimum]: '小于镜像要求的最小系统盘',
-  [FailureCode.GpuChangeRequiresStop]: '变更 GPU 前需先停止容器',
-  [FailureCode.GpuRuntimeNotEnabled]: 'GPU 运行时未启用',
-  [FailureCode.GpuRuntimeUnavailable]: 'GPU 运行时不可用',
-  [FailureCode.GpuAlreadyClaimed]: '该 GPU 已被占用',
+  [FailureCode.ExtensionUnknown]: '未知扩展',
+  [FailureCode.ExtensionNotEnabled]: '服务器扩展未启用',
+  [FailureCode.ExtensionOccupied]: '扩展仍有设备占用',
+  [FailureCode.ExtensionDeviceClaimed]: '扩展设备已被占用',
+  [FailureCode.ExtensionMutationRequiresStop]: '变更扩展前需先停止容器',
+  [FailureCode.ExtensionGrantNotApplicable]: '该扩展授权不适用于此服务器',
   [FailureCode.VolumeCatalogAdoptFailed]: '共享卷未能登记到本机 Incus',
   [FailureCode.VolumePlacementFailed]: '卷尚未在目标服务器就绪',
   [FailureCode.ImageManagesOwnNetwork]: '镜像自行管理网络',
@@ -120,7 +123,7 @@ export function serverStatusLabel(status: ServerStatus | string): string {
 
 export function failureCodeLabel(code: string | null | undefined): string | null {
   if (!code) return null;
-  return FAILURE_CODE_ZH[code] ?? code;
+  return FAILURE_CODE_ZH[code] ?? formatRegisteredExtensionError(code) ?? code;
 }
 
 export function volumeAttentionHint(failureCode: string | null | undefined): string {

@@ -1,14 +1,16 @@
-import { Injectable, Logger, OnModuleDestroy } from '@nestjs/common';
+import { Inject, Injectable, Logger, OnModuleDestroy, Optional } from '@nestjs/common';
 import {
+  CORE_NODE_METRIC_CATALOG,
   MAX_METRIC_LABEL_KEY_LENGTH,
   MAX_METRIC_LABELS_PER_POINT,
   MAX_METRIC_NAME_LENGTH,
   MAX_METRIC_LABEL_VALUE_LENGTH,
   MAX_METRIC_POINTS_PER_BATCH,
   MAX_NODE_METRICS_BODY_BYTES,
-  NODE_METRIC_NAMES,
   validateNodeMetricSample,
+  type NodeMetricCatalog,
 } from '@nyabase/common';
+import { NODE_METRIC_CATALOG } from '../server-card-extensions/types.js';
 import { NyabaseConfigService } from '../config/nyabase-config.service.js';
 import { RuntimeRoleService } from '../runtime/runtime-role.service.js';
 
@@ -61,6 +63,7 @@ const SHUTDOWN_DRAIN_TIMEOUT_MS = 5_000;
 @Injectable()
 export class MetricsWriter implements OnModuleDestroy {
   private readonly logger = new Logger(MetricsWriter.name);
+  private readonly catalog: NodeMetricCatalog;
   private readonly vmUrl: string;
   private readonly queue: QueuedBatch[] = [];
   private readonly queueLimit = DEFAULT_QUEUE_LIMIT;
@@ -78,7 +81,9 @@ export class MetricsWriter implements OnModuleDestroy {
   constructor(
     config: NyabaseConfigService,
     runtimeRole?: RuntimeRoleService,
+    @Optional() @Inject(NODE_METRIC_CATALOG) catalog?: NodeMetricCatalog,
   ) {
+    this.catalog = catalog ?? CORE_NODE_METRIC_CATALOG;
     this.vmUrl = config.get<string>('metrics.vmagentUrl');
     if (!runtimeRole || runtimeRole.servesProxySockets()) {
       this.timer = setInterval(() => {
@@ -95,7 +100,7 @@ export class MetricsWriter implements OnModuleDestroy {
   ): Promise<void> {
     if (this.shuttingDown || points.length === 0) return;
     if (points.length > MAX_METRIC_POINTS_PER_BATCH
-      || points.some((point) => !validPoint(point))) {
+      || points.some((point) => !validPoint(point, this.catalog))) {
       this.dropped += 1;
       return;
     }
@@ -319,10 +324,10 @@ export class MetricsWriter implements OnModuleDestroy {
   }
 }
 
-function validPoint(point: MetricPoint): boolean {
+function validPoint(point: MetricPoint, catalog: NodeMetricCatalog): boolean {
   if (
     point.name !== 'nyabase_node_scrape_up'
-    && !(NODE_METRIC_NAMES as readonly string[]).includes(point.name)
+    && !(point.name in catalog.definitions)
   ) return false;
   if (
     point.name === 'nyabase_node_scrape_up'
@@ -331,10 +336,10 @@ function validPoint(point: MetricPoint): boolean {
   if (point.name !== 'nyabase_node_scrape_up') {
     try {
       validateNodeMetricSample({
-        name: point.name as (typeof NODE_METRIC_NAMES)[number],
+        name: point.name,
         labels: point.labels,
         value: point.value,
-      });
+      }, catalog);
     } catch {
       return false;
     }

@@ -1,6 +1,5 @@
 import { createHash } from 'node:crypto';
 import { isIP } from 'node:net';
-import { canonicalPciAddress } from '@nyabase/common';
 import type { IncusSchema } from './incus-client.js';
 import { IncusError } from './incus-errors.js';
 
@@ -20,10 +19,8 @@ export interface InstanceSpecContainerInput {
   readonly imageSource?: InstanceImageSourceInput;
   readonly cpuMillis: number;
   readonly memBytes: InstanceSpecInteger;
-  readonly nvidiaRuntime: boolean;
   readonly nesting?: boolean;
   readonly syscallIntercept?: boolean;
-  readonly gpuPciAddresses: readonly string[];
   readonly rootPool: string;
   readonly rootSizeBytes: InstanceSpecInteger;
   readonly routedIp: string;
@@ -183,38 +180,35 @@ export function deriveInstanceHwaddr(containerId: string): string {
   return bytes.map((byte) => byte.toString(16).padStart(2, '0')).join(':');
 }
 
-/** Incus physical GPU `pci` option uses a 4-hex domain (sysfs style), not the 8-hex product form. */
-function toIncusPciAddress(canonical: string): string {
-  const domainEnd = canonical.indexOf(':');
-  if (domainEnd <= 0) return canonical;
-  return `${canonical.slice(0, domainEnd).slice(-4)}${canonical.slice(domainEnd)}`;
+export interface InstanceSpecContribution {
+  readonly config: Readonly<Record<string, string>>;
+  readonly devices: Readonly<Record<string, Readonly<Record<string, string>>>>;
 }
 
-function gpuDevices(
-  addresses: readonly string[],
-  nvidiaRuntime: boolean,
-): Record<string, Record<string, string>> {
-  if (addresses.length > 0 && !nvidiaRuntime) {
-    fail('INVALID_INSTANCE_SPEC', 'gpu_requires_nvidia_runtime');
-  }
+export function mergeInstanceSpecContributions(
+  base: DesiredInstanceSpec,
+  contributions: readonly InstanceSpecContribution[],
+): DesiredInstanceSpec {
+  const config: Record<string, string> = { ...(base.config ?? {}) };
   const devices: Record<string, Record<string, string>> = {};
-  const seen = new Set<string>();
-  addresses.forEach((address, index) => {
-    const normalized = canonicalPciAddress(address);
-    if (!normalized || address.includes('*')) {
-      fail('WILDCARD_GPU_SELECTOR', `gpu_${index}`);
+  for (const [name, device] of Object.entries(base.devices ?? {})) {
+    devices[name] = { ...device };
+  }
+  for (const contribution of contributions) {
+    for (const [key, value] of Object.entries(contribution.config)) {
+      if (Object.prototype.hasOwnProperty.call(config, key)) {
+        fail('INVALID_INSTANCE_SPEC', `config_collision_${key}`);
+      }
+      config[key] = value;
     }
-    if (seen.has(normalized)) {
-      fail('INVALID_INSTANCE_SPEC', `duplicate_gpu_${normalized}`);
+    for (const [name, device] of Object.entries(contribution.devices)) {
+      if (Object.prototype.hasOwnProperty.call(devices, name)) {
+        fail('INVALID_INSTANCE_SPEC', `device_collision_${name}`);
+      }
+      devices[name] = { ...device };
     }
-    seen.add(normalized);
-    devices[`gpu${index}`] = {
-      type: 'gpu',
-      gputype: 'physical',
-      pci: toIncusPciAddress(normalized),
-    };
-  });
-  return devices;
+  }
+  return { ...base, config, devices };
 }
 
 export function buildDesiredInstanceSpec(input: InstanceSpecInput): DesiredInstanceSpec {
@@ -244,7 +238,6 @@ export function buildDesiredInstanceSpec(input: InstanceSpecInput): DesiredInsta
     'security.nesting': String(container.nesting ?? true),
     'security.syscalls.intercept.mknod': String(container.syscallIntercept ?? true),
     'security.syscalls.intercept.setxattr': String(container.syscallIntercept ?? true),
-    'nvidia.runtime': String(container.nvidiaRuntime),
     'user.nyabase.managed': 'true',
     'user.nyabase.container_id': containerId,
     'user.nyabase.server_id': serverId,
@@ -267,7 +260,6 @@ export function buildDesiredInstanceSpec(input: InstanceSpecInput): DesiredInsta
       'security.ipv4_filtering': 'true',
       'security.mac_filtering': 'true',
     },
-    ...gpuDevices(container.gpuPciAddresses, container.nvidiaRuntime),
   };
 
   for (const attachment of input.attachments) {

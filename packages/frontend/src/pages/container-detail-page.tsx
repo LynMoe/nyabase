@@ -11,10 +11,10 @@ import {
   type CursorPaginatedResponse,
   type IntentAcceptedDto,
   type IntentDto,
-  type PatchContainerGpuRequest,
   type PatchContainerLimitsRequest,
   type PatchContainerRootSizeRequest,
   type SharedVolumeDto,
+  type UserServerDto,
   type VolumeAttachmentDto,
   type VolumeDto,
 } from '@nyabase/common';
@@ -46,12 +46,7 @@ import { queryKeys } from '../lib/query-keys.js';
 import { queryPollInterval } from '../lib/query-lifecycle.js';
 import { runGatedMutation } from '../lib/resource-mutation-gate.js';
 import { useResourceMutationPending } from '../hooks/use-resource-mutation-gate.js';
-import {
-  gpuModeFromPciList,
-  resolveGpuPciAddresses,
-  useServerGpus,
-  type GpuPickerMode,
-} from '../components/containers/gpu-picker.js';
+
 import {
   classifySizeChange,
   observedRootUsedBytes,
@@ -109,8 +104,7 @@ function ContainerDetailContent({
   const [rootSizeGib, setRootSizeGib] = useState('');
   const [cpuVcpus, setCpuVcpus] = useState('');
   const [memGib, setMemGib] = useState('');
-  const [gpuMode, setGpuMode] = useState<GpuPickerMode>('none');
-  const [gpuPciAddresses, setGpuPciAddresses] = useState<string[]>([]);
+  const [extensions, setExtensions] = useState<Record<string, unknown>>({});
   const [localVolumeId, setLocalVolumeId] = useState('');
   const [sharedVolumeId, setSharedVolumeId] = useState('');
   const [localPath, setLocalPath] = useState('/data');
@@ -165,11 +159,15 @@ function ContainerDetailContent({
     },
     enabled: tab === 'storage',
   });
-  const gpusQuery = useServerGpus(
-    containerQuery.data?.serverId,
-    admin,
-    Boolean(containerQuery.data?.serverId) && (tab === 'spec' || tab === 'overview'),
-  );
+  const serverQuery = useQuery({
+    queryKey: queryKeys.servers.detail(containerQuery.data?.serverId ?? ''),
+    queryFn: () => (
+      admin
+        ? api.get<UserServerDto>(`/admin/servers/${containerQuery.data!.serverId}`)
+        : api.get<UserServerDto>(`/servers/${containerQuery.data!.serverId}`)
+    ),
+    enabled: Boolean(containerQuery.data?.serverId),
+  });
   const c = containerQuery.data;
 
   useEffect(() => {
@@ -177,9 +175,8 @@ function ContainerDetailContent({
     setRootSizeGib(formatGibInput(c.rootSizeBytes));
     setCpuVcpus(formatVcpuInput(c.cpuMillis));
     setMemGib(formatGibInput(c.memBytes));
-    setGpuPciAddresses(c.gpuPciAddresses);
-    setGpuMode(gpuModeFromPciList(c.gpuPciAddresses, gpusQuery.data?.items.length));
-  }, [c, gpusQuery.data?.items.length]);
+    setExtensions(c.extensions ?? {});
+  }, [c]);
 
   const selectTab = (next: DetailTab) => {
     void navigate({ search: (prev) => ({ ...prev, tab: next }), replace: true });
@@ -218,10 +215,11 @@ function ContainerDetailContent({
     onSuccess: (intent) => { intentToast('已提交系统盘调整，正在生效', intent); invalidate(); },
     onError: (error) => toast({ title: '系统盘调整失败', description: errorMessage(error), variant: 'destructive' }),
   });
-  const updateGpu = useMutation({
-    mutationFn: (body: PatchContainerGpuRequest) => api.patch<IntentAcceptedDto>(`${base}/gpu`, body),
-    onSuccess: (intent) => { intentToast('已提交 GPU 更新，正在生效', intent); invalidate(); },
-    onError: (error) => toast({ title: 'GPU 更新失败', description: errorMessage(error), variant: 'destructive' }),
+  const updateExtension = useMutation({
+    mutationFn: ({ extensionId, payload }: { extensionId: string; payload: unknown }) =>
+      api.patch<IntentAcceptedDto>(`${base}/extensions/${extensionId}`, payload),
+    onSuccess: (intent) => { intentToast('已提交扩展更新，正在生效', intent); invalidate(); },
+    onError: (error) => toast({ title: '扩展更新失败', description: errorMessage(error), variant: 'destructive' }),
   });
   const attachLocal = useMutation({
     mutationFn: (body: AttachVolumeRequest) => api.post<IntentAcceptedDto>(`${base}/volumes`, body),
@@ -283,7 +281,7 @@ function ContainerDetailContent({
   };
 
   const running = c?.actual.status === ContainerStatus.Running;
-  const canEditGpu = Boolean(c && !running && c.actions.start.enabled);
+
   const rootSizeBytes = Number.isFinite(Number(rootSizeGib)) ? gibToBytes(Number(rootSizeGib)) : NaN;
   const cpuMillis = Number.isFinite(Number(cpuVcpus)) ? vcpuToMillis(Number(cpuVcpus)) : NaN;
   const memBytes = Number.isFinite(Number(memGib)) ? gibToBytes(Number(memGib)) : NaN;
@@ -393,7 +391,6 @@ function ContainerDetailContent({
               <TabsContent value="overview">
                 <OverviewPanel
                   container={container}
-                  gpuInventory={gpusQuery.data?.items ?? []}
                   onRepairSsh={() => repairSsh.mutate()}
                   repairPending={repairSsh.isPending}
                 />
@@ -429,15 +426,15 @@ function ContainerDetailContent({
                   cpuVcpus={cpuVcpus}
                   memGib={memGib}
                   rootSizeGib={rootSizeGib}
-                  gpuMode={gpuMode}
-                  gpuPciAddresses={gpuPciAddresses}
                   memBytes={memBytes}
                   rootSizeBytes={rootSizeBytes}
+                  enabledExtensions={serverQuery.data?.enabledExtensions ?? []}
+                  extensions={extensions}
                   onCpuVcpus={setCpuVcpus}
                   onMemGib={setMemGib}
                   onRootSizeGib={setRootSizeGib}
-                  onGpuMode={setGpuMode}
-                  onGpuPciAddresses={setGpuPciAddresses}
+                  onExtensions={setExtensions}
+                  onExtensionSubmit={(extensionId, payload) => updateExtension.mutate({ extensionId, payload })}
                   onLimits={() => {
                     if (!Number.isFinite(cpuMillis) || !Number.isFinite(memBytes)) {
                       toast({ title: '请输入有效的 CPU / 内存', variant: 'destructive' });
@@ -467,16 +464,9 @@ function ContainerDetailContent({
                     }
                     resizeRoot.mutate({ sizeBytes: rootSizeBytes });
                   }}
-                  onGpu={() => {
-                    const inventory = gpusQuery.data?.items ?? [];
-                    updateGpu.mutate({
-                      gpuPciAddresses: resolveGpuPciAddresses(gpuMode, gpuPciAddresses, inventory),
-                    });
-                  }}
                   limitsPending={updateLimits.isPending}
                   rootPending={resizeRoot.isPending}
-                  gpuPending={updateGpu.isPending}
-                  canEditGpu={canEditGpu}
+                  extensionPending={updateExtension.isPending}
                 />
               </TabsContent>
               <TabsContent value="intents">

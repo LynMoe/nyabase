@@ -7,6 +7,7 @@ import type { UserRecord } from '../domain/domain-records.js';
 import { CurrentUser } from '../auth/decorators/current-user.decorator.js';
 import { AccessResolverService } from '../access/access-resolver.service.js';
 import { CatalogPersistence } from './catalog.persistence.js';
+import { ServerCardExtensionsService } from '../server-card-extensions/server-extensions.service.js';
 
 /**
  * Purpose-safe selector data. These endpoints deliberately avoid reusing full
@@ -19,6 +20,7 @@ export class AdminCatalogController {
   constructor(
     private readonly persistence: CatalogPersistence,
     private readonly accessResolver: AccessResolverService,
+    private readonly serverExtensions: ServerCardExtensionsService,
   ) {}
 
   @Get('administration-actions')
@@ -75,13 +77,14 @@ export class AdminCatalogController {
   @RequireCaps(Capability.ViewMetricsAll)
   async listMetricServers() {
     const rows = await this.persistence.listServers();
+    const enabled = await this.serverExtensions.enabledIdsForServers(rows.map((row) => row.id));
     return rows.map((server) => ({
       id: server.id,
       name: server.name,
       slug: server.slug,
       status: server.status,
       runtimeReady: server.status === 'online' && server.preflight_status === 'passed',
-      hasGpu: server.gpu_runtime_available,
+      enabledExtensions: enabled.get(server.id) ?? [],
     }));
   }
 }

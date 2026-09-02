@@ -2,7 +2,7 @@ import { execFile as childExecFile } from 'node:child_process';
 import { readFile as fsReadFile, readdir as fsReaddir } from 'node:fs/promises';
 import { isIP } from 'node:net';
 import { promisify } from 'node:util';
-import { canonicalPciAddress, type NodeMetricSample } from '@nyabase/common';
+import type { NodeMetricSample } from '@nyabase/common';
 
 const execFile = promisify(childExecFile);
 const COMMAND_TIMEOUT_MS = 1_000;
@@ -10,9 +10,6 @@ const NFT_TIMEOUT_MS = 400;
 const IP_ADDR_TIMEOUT_MS = 250;
 const COMMAND_MAX_BUFFER_BYTES = 256 * 1024;
 const BYTES_PER_DISK_SECTOR = 512;
-const BYTES_PER_MIB = 1024 * 1024;
-const UUID_PATTERN =
-  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 export interface ReadOnlyNodeFileSystem {
   readFile(path: string): Promise<string>;
@@ -30,27 +27,16 @@ export type ReadOnlyCommand = (
   options: ReadOnlyCommandOptions,
 ) => Promise<{ readonly stdout: string; readonly stderr?: string }>;
 
+export type ExtraMetricCollector = (input: {
+  readonly fileSystem: ReadOnlyNodeFileSystem;
+  readonly command: ReadOnlyCommand;
+}) => Promise<readonly NodeMetricSample[]>;
+
 export interface LinuxNodeMetricsCollectorOptions {
   readonly parentInterface?: string;
   readonly fileSystem?: ReadOnlyNodeFileSystem;
   readonly command?: ReadOnlyCommand;
-}
-
-export interface GpuMetricRecord {
-  readonly index: number;
-  readonly pci: string;
-  readonly uuid: string;
-  readonly utilizationRatio?: number;
-  readonly memoryUsedBytes?: number;
-  readonly memoryTotalBytes?: number;
-  readonly temperatureCelsius?: number;
-  readonly powerWatts?: number;
-}
-
-export interface GpuProcessMetricRecord {
-  readonly gpuUuid: string;
-  readonly memoryUsedBytes: number;
-  readonly containerId: string;
+  readonly extraCollectors?: readonly ExtraMetricCollector[];
 }
 
 const defaultFileSystem: ReadOnlyNodeFileSystem = {
@@ -93,12 +79,16 @@ export class LinuxNodeMetricsCollector {
   }
 
   async collect(): Promise<NodeMetricSample[]> {
+    const extras = (this.options.extraCollectors ?? []).map((collector) => collector({
+      fileSystem: this.fileSystem,
+      command: this.command,
+    }));
     const groups = await Promise.all([
       this.collectCpu(),
       this.collectPsi(),
       this.collectDiskMetrics(),
-      this.collectGpuMetrics(),
       this.collectNetworkEvidence(),
+      ...extras,
     ]);
     return groups.flat();
   }
@@ -248,89 +238,6 @@ export class LinuxNodeMetricsCollector {
     } catch {
       return undefined;
     }
-  }
-
-  private async collectGpuMetrics(): Promise<NodeMetricSample[]> {
-    let gpuStdout: string;
-    try {
-      ({ stdout: gpuStdout } = await this.command(
-        'nvidia-smi',
-        [
-          '--query-gpu=index,pci.bus_id,uuid,utilization.gpu,memory.used,memory.total,temperature.gpu,power.draw',
-          '--format=csv,noheader,nounits',
-        ],
-        { timeout: COMMAND_TIMEOUT_MS, maxBuffer: COMMAND_MAX_BUFFER_BYTES },
-      ));
-    } catch {
-      return [];
-    }
-    const gpus = parseGpuStats(gpuStdout);
-    if (gpus.length === 0) return [];
-    const samples: NodeMetricSample[] = [];
-    for (const gpu of gpus) {
-      const labels = { gpu_pci: gpu.pci };
-      addSample(samples, 'nyabase_node_gpu_smi_index', labels, gpu.index);
-      addSample(samples, 'nyabase_node_gpu_util_ratio', labels, gpu.utilizationRatio);
-      addSample(samples, 'nyabase_node_gpu_mem_used_bytes', labels, gpu.memoryUsedBytes);
-      addSample(samples, 'nyabase_node_gpu_mem_total_bytes', labels, gpu.memoryTotalBytes);
-      addSample(samples, 'nyabase_node_gpu_temperature_celsius', labels, gpu.temperatureCelsius);
-      addSample(samples, 'nyabase_node_gpu_power_watts', labels, gpu.powerWatts);
-    }
-    samples.push(...await this.collectGpuProcessMetrics(gpus));
-    return samples;
-  }
-
-  private async collectGpuProcessMetrics(gpus: readonly GpuMetricRecord[]): Promise<NodeMetricSample[]> {
-    let stdout: string;
-    try {
-      ({ stdout } = await this.command(
-        'nvidia-smi',
-        [
-          '--query-compute-apps=pid,used_memory,gpu_uuid',
-          '--format=csv,noheader,nounits',
-        ],
-        { timeout: COMMAND_TIMEOUT_MS, maxBuffer: COMMAND_MAX_BUFFER_BYTES },
-      ));
-    } catch {
-      return [];
-    }
-    const processes: GpuProcessMetricRecord[] = [];
-    for (const line of stdout.split(/\r?\n/).map((value) => value.trim()).filter(Boolean)) {
-      const fields = line.split(',').map((value) => value.trim());
-      const pid = Number(fields[0]);
-      const memoryMiB = Number(fields[1]);
-      const gpuUuid = fields[2] ?? '';
-      if (!Number.isSafeInteger(pid) || pid <= 0 || !Number.isFinite(memoryMiB) || memoryMiB < 0) {
-        continue;
-      }
-      const containerId = await this.pidContainerId(pid);
-      processes.push({
-        gpuUuid,
-        memoryUsedBytes: memoryMiB * BYTES_PER_MIB,
-        containerId,
-      });
-    }
-    return joinGpuProcesses(gpus, processes).map((process) => ({
-      name: 'nyabase_node_gpu_process_mem_used_bytes',
-      labels: {
-        gpu_pci: process.pci,
-        container_id: process.containerId,
-      },
-      value: process.memoryUsedBytes,
-    }));
-  }
-
-  private async pidContainerId(pid: number): Promise<string> {
-    try {
-      const content = await this.fileSystem.readFile(`/proc/${pid}/cgroup`);
-      const match = content.match(
-        /[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}/i,
-      );
-      if (match && UUID_PATTERN.test(match[0])) return match[0].toLowerCase();
-    } catch {
-      // A process can disappear between nvidia-smi and the cgroup read.
-    }
-    return '__unattributed__';
   }
 
   private async collectNetworkEvidence(): Promise<NodeMetricSample[]> {
@@ -534,81 +441,6 @@ export function parseDiskStats(content: string): Array<{
     });
   }
   return devices;
-}
-
-export function parseGpuStats(content: string): GpuMetricRecord[] {
-  const gpus: GpuMetricRecord[] = [];
-  for (const line of content.split(/\r?\n/).map((value) => value.trim()).filter(Boolean)) {
-    const fields = line.split(',').map((value) => value.trim());
-    const index = Number(fields[0]);
-    const pci = fields[1] ? canonicalPciAddress(fields[1]) : null;
-    const uuid = fields[2] ?? '';
-    if (!Number.isInteger(index) || index < 0 || !pci || uuid.length === 0) continue;
-    gpus.push({
-      index,
-      pci,
-      uuid,
-      utilizationRatio: boundedPercent(fields[3]),
-      memoryUsedBytes: mibBytes(fields[4]),
-      memoryTotalBytes: mibBytes(fields[5]),
-      temperatureCelsius: nonNegativeNumber(fields[6]),
-      powerWatts: nonNegativeNumber(fields[7]),
-    });
-  }
-  return gpus;
-}
-
-export function joinGpuProcesses(
-  gpus: readonly GpuMetricRecord[],
-  processes: readonly GpuProcessMetricRecord[],
-): Array<GpuProcessMetricRecord & { readonly pci: string }> {
-  const pciByUuid = new Map(
-    gpus.flatMap((gpu) => {
-      const pci = canonicalPciAddress(gpu.pci);
-      return pci ? [[gpu.uuid, pci] as const] : [];
-    }),
-  );
-  const totals = new Map<string, GpuProcessMetricRecord & { pci: string }>();
-  for (const process of processes) {
-    const pci = pciByUuid.get(process.gpuUuid);
-    if (!pci) continue;
-    const key = `${pci}\0${process.containerId}`;
-    const current = totals.get(key);
-    if (current) {
-      totals.set(key, {
-        ...current,
-        memoryUsedBytes: current.memoryUsedBytes + process.memoryUsedBytes,
-      });
-    } else {
-      totals.set(key, { ...process, pci });
-    }
-  }
-  return [...totals.values()];
-}
-
-function addSample(
-  samples: NodeMetricSample[],
-  name: NodeMetricSample['name'],
-  labels: Readonly<Record<string, string>>,
-  value: number | undefined,
-): void {
-  if (value !== undefined) samples.push({ name, labels, value });
-}
-
-function boundedPercent(value: string | undefined): number | undefined {
-  const parsed = nonNegativeNumber(value);
-  return parsed === undefined || parsed > 100 ? undefined : parsed / 100;
-}
-
-function mibBytes(value: string | undefined): number | undefined {
-  const parsed = nonNegativeNumber(value);
-  return parsed === undefined ? undefined : parsed * BYTES_PER_MIB;
-}
-
-function nonNegativeNumber(value: string | undefined): number | undefined {
-  if (!value || value === 'N/A' || /unknown/i.test(value)) return undefined;
-  const parsed = Number(value);
-  return Number.isFinite(parsed) && parsed >= 0 ? parsed : undefined;
 }
 
 function clampRatio(value: number): number {

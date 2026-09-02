@@ -45,8 +45,7 @@ export interface GrantExpiryCandidate {
   cpu_millis: number | null;
   mem_bytes: string | number | null;
   disk_bytes: string | number | null;
-  gpu_mode: string | null;
-  gpu_pci_addresses: string[];
+  extension_grants?: unknown;
 }
 
 /**

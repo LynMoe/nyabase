@@ -21,7 +21,7 @@ test(
 );
 
 test(
-  'stats, GPU, exec, power, and limit routes reject an unknown container',
+  'stats, extension, exec, power, and limit routes reject an unknown container',
   { ...coverageCase('container-stats-gpu-exec', 'container-stats-gpu-exec-live') },
   async ({ adminApi }) => {
     const listed = await expectJson<unknown>(await adminApi.get('/api/admin/containers'));
@@ -36,14 +36,14 @@ test(
     const intents = await adminApi.get(`/api/admin/containers/${missing}/intents`);
     expect([200, 400, 403, 404]).toContain(intents.status());
 
-    const userGpu = await adminApi.patch(`/api/containers/${missing}/gpu`, {
-      data: { gpuPciAddresses: [] },
+    const userExtension = await adminApi.patch(`/api/containers/${missing}/extensions/nvidia-gpu`, {
+      data: { pciAddresses: [] },
     });
-    expect(userGpu.status()).toBeGreaterThanOrEqual(400);
-    const adminGpu = await adminApi.patch(`/api/admin/containers/${missing}/gpu`, {
-      data: { gpuPciAddresses: [] },
+    expect(userExtension.status()).toBeGreaterThanOrEqual(400);
+    const adminExtension = await adminApi.patch(`/api/admin/containers/${missing}/extensions/nvidia-gpu`, {
+      data: { pciAddresses: [] },
     });
-    expect(adminGpu.status()).toBeGreaterThanOrEqual(400);
+    expect(adminExtension.status()).toBeGreaterThanOrEqual(400);
     const limits = await adminApi.patch(`/api/admin/containers/${missing}/limits`, {
       data: { cpuMillis: 500, memBytes: 512 * 1024 * 1024 },
     });

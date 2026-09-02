@@ -112,7 +112,6 @@ export function preflightCheckLabel(name: string): string {
   const labels: Record<string, string> = {
     api: 'API 连通',
     parentInterface: 'LAN 网桥 (vmbr)',
-    gpuRuntime: 'GPU 运行时',
     nftables: 'nftables',
     ipv4Filtering: 'IPv4 防伪',
     guestCanReachHost: '容器可达宿主',

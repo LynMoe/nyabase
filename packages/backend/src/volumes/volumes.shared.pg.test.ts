@@ -22,7 +22,6 @@ function serverValues(id: string, status: 'online' | 'unknown' = 'unknown') {
     storage_overcommit_ratio: 1,
     parent_interface: null,
     dns_servers: [],
-    gpu_runtime_available: false,
     status,
     last_seen_at: null,
     last_error: null,
@@ -293,8 +292,7 @@ describePg('shared volume quota reservations', () => {
         cpu_millis: null,
         mem_bytes: null,
         disk_bytes: 5_000,
-        gpu_mode: 'none',
-        gpu_pci_addresses: [],
+        extension_grants: {},
         expires_at: null,
       }).execute();
       await database.insertInto('iam.storage_pool_grants').values({

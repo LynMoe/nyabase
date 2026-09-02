@@ -37,7 +37,6 @@ export const MAX_HTTP_PROXY_CERTIFICATE_PEM_LENGTH = 64 * 1024;
 export const MAX_HTTP_PROXY_PRIVATE_KEY_PEM_LENGTH = 16 * 1024;
 export const MAX_HTTP_PROXY_SNAPSHOT_BYTES = 8 * 1024 * 1024;
 
-export const MAX_GPU_DEVICES = 256;
 export const MAX_RESOURCE_CPU_MILLIS = Math.floor(Number.MAX_SAFE_INTEGER / 1_000_000);
 export const MAX_RESOURCE_BYTES = Number.MAX_SAFE_INTEGER;
 export const MAX_GROUP_PRIORITY = Number.MAX_SAFE_INTEGER;
@@ -76,13 +75,6 @@ export const NODE_METRIC_NAMES = [
   'nyabase_node_network_nft_available',
   'nyabase_node_network_bridge_filter_present',
   'nyabase_node_network_bridge_filter_address',
-  'nyabase_node_gpu_util_ratio',
-  'nyabase_node_gpu_mem_used_bytes',
-  'nyabase_node_gpu_mem_total_bytes',
-  'nyabase_node_gpu_temperature_celsius',
-  'nyabase_node_gpu_power_watts',
-  'nyabase_node_gpu_smi_index',
-  'nyabase_node_gpu_process_mem_used_bytes',
 ] as const;
 
 export const INCUS_CONNECT_TIMEOUT_MS = 500;

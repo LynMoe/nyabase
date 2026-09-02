@@ -164,7 +164,7 @@ function AdminCreateContainerDialog({
       rootSizeBytes: 20 * 1024 ** 3,
       cpuMillis: 1000,
       memBytes: 2 * 1024 ** 3,
-      gpuPciAddresses: [],
+      extensions: {},
       powerIntent: ContainerPowerIntent.Running,
     }),
     onSuccess: () => {

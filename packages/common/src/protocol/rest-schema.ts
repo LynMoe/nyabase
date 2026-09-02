@@ -7,7 +7,6 @@ import {
   ContainerPhase,
   ContainerPowerIntent,
   FailureCode,
-  GpuGrantMode,
   IntentKind,
   IntentResourceType,
   IntentStatus,
@@ -24,7 +23,6 @@ import {
   CONSOLE_DEFAULT_ROWS,
   MAX_CONSOLE_COMMAND_ARGUMENT_BYTES,
   MAX_CONSOLE_COMMAND_ARGUMENTS,
-  MAX_GPU_DEVICES,
   MAX_GROUP_PRIORITY,
   MAX_INTENT_LIST_PAGE_SIZE,
   MAX_PLATFORM_SERVERS,
@@ -42,13 +40,13 @@ import {
   parseCidr,
 } from '../utils.js';
 import { normalizeOpenSshPublicKey } from './ssh-public-key.js';
+import { SERVER_CARD_EXTENSION_ID_RE } from './server-card-extensions.js';
 
 const USERNAME_RE = /^[a-z0-9_-]+$/;
 const RESOURCE_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9-]*$/;
 const SERVER_SLUG_RE = /^[a-z0-9][a-z0-9_-]*$/;
 const NETWORK_INTERFACE_RE = /^[A-Za-z0-9_.:-]+$/;
 const LOGIN_USER_RE = /^[a-z_][a-z0-9_-]{0,31}$/;
-const PCI_ADDRESS_RE = /^(?:[0-9a-f]{4}|[0-9a-f]{8}):[0-9a-f]{2}:[0-9a-f]{2}\.[0-7]$/i;
 const SHA256_RE = /^[0-9a-f]{64}$/;
 const FINGERPRINT_RE = /^[0-9A-Fa-f:]{32,95}$/;
 
@@ -68,7 +66,6 @@ export const zCertificateRotationStatus = z.nativeEnum(CertificateRotationStatus
 export const zStoragePoolDriver = z.nativeEnum(StoragePoolDriver);
 export const zStoragePoolResizeFamily = z.nativeEnum(StoragePoolResizeFamily);
 export const zCapability = z.nativeEnum(Capability);
-export const zGpuGrantMode = z.nativeEnum(GpuGrantMode);
 export const zFailureCode = z.nativeEnum(FailureCode);
 
 export const zExpectedRevision = z.number().int().positive().safe();
@@ -82,22 +79,12 @@ export const zUuid = z.string().uuid();
 export const zPositiveBytes = z.number().int().positive().safe().max(MAX_RESOURCE_BYTES);
 export const zNonNegativeBytes = z.number().int().nonnegative().safe().max(MAX_RESOURCE_BYTES);
 export const zCpuMillis = z.number().int().nonnegative().safe().max(MAX_RESOURCE_CPU_MILLIS);
-export function canonicalPciAddress(value: string): string | null {
-  const normalized = value.toLowerCase();
-  if (!PCI_ADDRESS_RE.test(normalized)) return null;
-  const domainEnd = normalized.indexOf(':');
-  const domain = normalized.slice(0, domainEnd).padStart(8, '0');
-  return `${domain}${normalized.slice(domainEnd)}`;
-}
-
-export const zPciAddress = z.string()
-  .refine((value) => canonicalPciAddress(value) !== null, 'GPU PCI address is invalid')
-  .transform((value) => canonicalPciAddress(value)!);
-export const zGpuPciAddresses = z.array(zPciAddress)
-  .max(MAX_GPU_DEVICES)
-  .refine((addresses) => new Set(addresses).size === addresses.length,
-    'GPU PCI addresses must be unique');
 export const zIsoDateTime = z.string().datetime({ offset: true });
+export const zOpaqueExtensionMap = z.record(z.unknown());
+export const zPatchContainerExtensionRequest = z.record(z.unknown());
+export const zPatchServerExtensionRequest = z.object({
+  enabled: z.boolean(),
+}).strict();
 
 export const zIpv4Address = z.string().superRefine((value, context) => {
   try {
@@ -482,7 +469,10 @@ export const zCreateContainerRequest = z.object({
   rootSizeBytes: zPositiveBytes,
   cpuMillis: zCpuMillis,
   memBytes: zNonNegativeBytes,
-  gpuPciAddresses: zGpuPciAddresses,
+  extensions: z.record(
+    z.string().regex(SERVER_CARD_EXTENSION_ID_RE),
+    z.unknown(),
+  ).default({}),
   powerIntent: z.nativeEnum(ContainerPowerIntent),
   ownerId: zResourceIdentity.optional(),
   volumes: z.array(zAttachVolumeRequest).max(32).optional(),
@@ -495,10 +485,6 @@ export const zPatchContainerLimitsRequest = z.object({
 
 export const zPatchContainerRootSizeRequest = z.object({
   sizeBytes: zPositiveBytes,
-}).strict();
-
-export const zPatchContainerGpuRequest = z.object({
-  gpuPciAddresses: zGpuPciAddresses,
 }).strict();
 
 export const zCreateExecSessionRequest = z.object({
@@ -546,31 +532,14 @@ export const zPutImageAssignmentRequest = z.object({
 const zNullableCpuMillis = zCpuMillis.nullable();
 const zNullableBytes = zNonNegativeBytes.nullable();
 
-export const zServerGrantGpu = z.object({
-  mode: z.nativeEnum(GpuGrantMode),
-  pciAddresses: zGpuPciAddresses,
-}).strict().superRefine((value, context) => {
-  if (value.mode !== GpuGrantMode.Pci && value.pciAddresses.length > 0) {
-    context.addIssue({
-      code: z.ZodIssueCode.custom,
-      path: ['pciAddresses'],
-      message: 'Only PCI GPU grants may contain PCI addresses',
-    });
-  }
-  if (value.mode === GpuGrantMode.Pci && value.pciAddresses.length === 0) {
-    context.addIssue({
-      code: z.ZodIssueCode.custom,
-      path: ['pciAddresses'],
-      message: 'PCI GPU grants require at least one PCI address',
-    });
-  }
-});
-
 export const zPutServerGrantRequest = z.object({
   cpuMillis: zNullableCpuMillis,
   memBytes: zNullableBytes,
   diskBytes: zNullableBytes,
-  gpu: zServerGrantGpu,
+  extensionGrants: z.record(
+    z.string().regex(SERVER_CARD_EXTENSION_ID_RE),
+    z.unknown(),
+  ).default({}),
   expiresAt: zIsoDateTime.nullable(),
 }).strict();
 
@@ -647,7 +616,6 @@ export const zPreflightReport = z.object({
   checks: z.object({
     api: z.enum(['pass', 'fail']),
     parentInterface: z.enum(['pass', 'fail']),
-    gpuRuntime: z.enum(['pass', 'fail', 'not_applicable']),
     nftables: z.enum(['pass', 'fail']),
     ipv4Filtering: z.enum(['pass', 'fail']),
     guestCanReachHost: z.enum(['pass', 'fail']),
@@ -660,6 +628,7 @@ export const zPreflightReport = z.object({
   }).strict(),
   failureCode: z.nativeEnum(FailureCode).nullable(),
   checkedAt: zIsoDateTime.nullable(),
+  extensions: z.record(z.unknown()).optional(),
 }).strict().superRefine((report, context) => {
   if (report.controlReady && report.checks.networkPrerequisites !== 'pass') {
     context.addIssue({
@@ -783,12 +752,12 @@ export type AttachVolumeRequest = z.infer<typeof zAttachVolumeRequest>;
 export type CreateContainerRequest = z.infer<typeof zCreateContainerRequest>;
 export type PatchContainerLimitsRequest = z.infer<typeof zPatchContainerLimitsRequest>;
 export type PatchContainerRootSizeRequest = z.infer<typeof zPatchContainerRootSizeRequest>;
-export type PatchContainerGpuRequest = z.infer<typeof zPatchContainerGpuRequest>;
+export type PatchContainerExtensionRequest = z.infer<typeof zPatchContainerExtensionRequest>;
+export type PatchServerExtensionRequest = z.infer<typeof zPatchServerExtensionRequest>;
 export type CreateExecSessionRequest = z.infer<typeof zCreateExecSessionRequest>;
 export type CreateImageRequest = z.infer<typeof zCreateImageRequest>;
 export type PatchImageRequest = z.infer<typeof zPatchImageRequest>;
 export type PutImageAssignmentRequest = z.infer<typeof zPutImageAssignmentRequest>;
-export type ServerGrantGpu = z.infer<typeof zServerGrantGpu>;
 export type PutServerGrantRequest = z.infer<typeof zPutServerGrantRequest>;
 export type PutStoragePoolGrantRequest = z.infer<typeof zPutStoragePoolGrantRequest>;
 export type PutSharedBackendGrantRequest = z.infer<typeof zPutSharedBackendGrantRequest>;

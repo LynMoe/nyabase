@@ -24,7 +24,6 @@ import {
 import {
   assertContainerName,
   containerStatus,
-  normalizeGpuAddresses,
 } from './container-control.service.js';
 
 describe('container API contract', () => {
@@ -36,12 +35,12 @@ describe('container API contract', () => {
       rootSizeBytes: 1_073_741_824,
       cpuMillis: 500,
       memBytes: 536_870_912,
-      gpuPciAddresses: ['0000:01:00.0'],
+      extensions: {},
       powerIntent: ContainerPowerIntent.Stopped,
     };
     expect(zCreateContainerRequest.parse(valid)).toMatchObject({
       ...valid,
-      gpuPciAddresses: ['00000000:01:00.0'],
+      extensions: {},
     });
     const legacyTaskField = ['task', 'Id'].join('');
     const legacyMountField = ['m', 'ounts'].join('');
@@ -61,19 +60,7 @@ describe('container API contract', () => {
     }
   });
 
-  it('normalizes and validates PCI assignments without compatibility fields', () => {
-    expect(normalizeGpuAddresses(['0000:01:00.0', '00000000:02:00.7', '0000:0A:00.1']))
-      .toEqual(['00000000:01:00.0', '00000000:02:00.7', '00000000:0a:00.1']);
-    expect(() => normalizeGpuAddresses(['0000:01:00.0', '0000:01:00.0']))
-      .toThrow(BadRequestException);
-    expect(() => normalizeGpuAddresses(['0000:01:00.0', '00000000:01:00.0']))
-      .toThrow(BadRequestException);
-    expect(() => normalizeGpuAddresses(['01:00.0']))
-      .toThrow(BadRequestException);
-    expect(() => normalizeGpuAddresses(['0000:01:00.8']))
-      .toThrow(BadRequestException);
-    expect(() => normalizeGpuAddresses(['00000000:01:00.f']))
-      .toThrow(BadRequestException);
+  it('rejects invalid container names', () => {
     expect(() => assertContainerName('bad/name')).toThrow(BadRequestException);
   });
 
@@ -99,7 +86,7 @@ describe('container API contract', () => {
       delete: ':containerId/actions/delete',
       limits: ':containerId/limits',
       rootSize: ':containerId/root-size',
-      gpu: ':containerId/gpu',
+      extension: ':containerId/extensions/:extensionId',
       volumes: ':containerId/volumes',
       sharedVolumes: ':containerId/shared-volumes',
       stats: ':containerId/stats',
@@ -134,8 +121,8 @@ describe('container API contract', () => {
 
     const error: ErrorResponse = {
       statusCode: 409,
-      code: FailureCode.GpuChangeRequiresStop,
-      message: 'The container must be stopped before changing GPU devices.',
+      code: FailureCode.ExtensionMutationRequiresStop,
+      message: 'The container must be stopped before changing extension devices.',
       requestId: 'request-1',
       details: { containerId: 'container-1' },
     };

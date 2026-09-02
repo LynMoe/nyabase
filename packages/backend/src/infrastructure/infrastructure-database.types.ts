@@ -22,7 +22,6 @@ export interface InfrastructureServerTable {
   storage_overcommit_ratio: InfrastructureNumeric;
   parent_interface: string | null;
   dns_servers: string[];
-  gpu_runtime_available: boolean;
   status: 'online' | 'unreachable' | 'unknown';
   last_seen_at: InfrastructureTimestamp | null;
   last_error: string | null;
@@ -95,6 +94,16 @@ export interface InfrastructureSharedBackendTable {
   updated_at: InfrastructureGeneratedTimestamp;
 }
 
+export interface InfrastructureServerExtensionTable {
+  server_id: string;
+  extension_id: string;
+  enabled: boolean;
+  health: InfrastructureJson<Record<string, unknown>>;
+  enabled_by: string | null;
+  enabled_at: InfrastructureGeneratedTimestamp;
+  updated_at: InfrastructureGeneratedTimestamp;
+}
+
 export interface InfrastructureImageTable {
   id: string;
   name: string;
@@ -130,6 +139,7 @@ export interface InfrastructureImageServerAssignmentTable {
 
 export interface InfrastructureDatabase {
   'infra.servers': InfrastructureServerTable;
+  'infra.server_extensions': InfrastructureServerExtensionTable;
   'infra.ip_pools': InfrastructureIpPoolTable;
   'infra.ip_pool_servers': InfrastructureIpPoolServerTable;
   'infra.storage_pools': InfrastructureStoragePoolTable;

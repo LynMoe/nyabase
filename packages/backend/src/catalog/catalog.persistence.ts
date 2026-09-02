@@ -40,7 +40,6 @@ export class CatalogPersistence {
         'slug',
         'status',
         'preflight_status',
-        'gpu_runtime_available',
       ])
       .orderBy('name')
       .orderBy('id')

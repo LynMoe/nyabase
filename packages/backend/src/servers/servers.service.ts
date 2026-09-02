@@ -4,7 +4,6 @@ import { createCipheriv, createHash, randomBytes, randomUUID } from 'node:crypto
 import {
   AuditAction,
   Capability,
-  GpuGrantMode,
   MAX_PLATFORM_SERVERS,
   NodeMetricsStatus,
   PreflightStatus,
@@ -12,7 +11,6 @@ import {
   type CreateServerRequest,
   type PatchServerRequest,
   type ServerDto,
-  type ServerGpuDto,
   type UserServerDto,
 } from '@nyabase/common';
 import type { InfrastructureServerTable } from '../infrastructure/infrastructure-database.types.js';
@@ -39,12 +37,7 @@ import {
   NODE_METRICS_PULL,
   type NodeMetricsPullPort,
 } from '../runtime/server-preflight-reconciler.service.js';
-import {
-  applyNvidiaSmiIndexes,
-  filterGpuInventoryByGrant,
-  nvidiaGpuInventoryFromResources,
-  nvidiaSmiIndexByPciFromSamples,
-} from './gpu-inventory.js';
+import { ServerCardExtensionsService } from '../server-card-extensions/server-extensions.service.js';
 
 type ServerRow = Selectable<InfrastructureServerTable>;
 
@@ -60,6 +53,7 @@ export class ServersService {
     @Optional() private readonly proxySnapshots?: ProxySnapshotNotifierService,
     @Optional() @Inject(INCUS_CLIENT_FACTORY) private readonly clients?: IncusClientFactory,
     @Optional() @Inject(NODE_METRICS_PULL) private readonly nodeMetrics?: NodeMetricsPullPort,
+    @Optional() private readonly serverExtensions?: ServerCardExtensionsService,
   ) {}
 
   async create(actorId: string, input: CreateServerRequest): Promise<ServerDto> {
@@ -93,7 +87,6 @@ export class ServersService {
           storage_overcommit_ratio: 1,
           parent_interface: input.parentInterface,
           dns_servers: input.dnsServers,
-          gpu_runtime_available: false,
           status: ServerStatus.Unknown,
           last_seen_at: null,
           last_error: null,
@@ -150,7 +143,7 @@ export class ServersService {
   }
 
   async findUserDtosByIds(ids: string[]): Promise<UserServerDto[]> {
-    return (await this.findByIds(ids)).map((row) => this.toUserDto(row));
+    return this.toUserDtos(await this.findByIds(ids));
   }
 
   async findById(
@@ -198,52 +191,7 @@ export class ServersService {
   }
 
   async findUserDtoById(id: string): Promise<UserServerDto> {
-    return this.toUserDto(await this.findById(id));
-  }
-
-  async listGpus(serverId: string): Promise<ServerGpuDto[]> {
-    const server = await this.findById(serverId);
-    if (!this.clients) {
-      throw new NotFoundException('Server GPU inventory is unavailable');
-    }
-    const resources = await this.clients.get(serverId).then((client) => client.getResources());
-    const cards = nvidiaGpuInventoryFromResources(resources.metadata);
-    return applyNvidiaSmiIndexes(cards, await this.nvidiaSmiIndexByPci(server));
-  }
-
-  async listGpusForUser(userId: string, serverId: string): Promise<ServerGpuDto[]> {
-    const grant = await this.access.resolveServer(userId, serverId);
-    if (!grant || grant.accessPhase !== 'live') {
-      throw new NotFoundException('Server not found');
-    }
-    if (grant.gpu.mode === GpuGrantMode.None) {
-      return [];
-    }
-    const items = await this.listGpus(serverId);
-    return filterGpuInventoryByGrant(items, {
-      mode: grant.gpu.mode,
-      pciAddresses: grant.gpu.pciAddresses,
-    });
-  }
-
-  private async nvidiaSmiIndexByPci(server: ServerRow): Promise<ReadonlyMap<string, number>> {
-    if (
-      !this.nodeMetrics
-      || !server.node_metrics_endpoint
-      || !server.node_metrics_token_ciphertext
-    ) {
-      return new Map();
-    }
-    try {
-      const result = await this.nodeMetrics.pull(
-        server.id,
-        server.node_metrics_endpoint,
-        server.node_metrics_token_ciphertext,
-      );
-      return nvidiaSmiIndexByPciFromSamples(result.report?.samples ?? []);
-    } catch {
-      return new Map();
-    }
+    return (await this.toUserDtos([await this.findById(id)]))[0]!;
   }
 
   async update(actorId: string, id: string, input: PatchServerRequest): Promise<ServerDto> {
@@ -382,6 +330,11 @@ export class ServersService {
         .where('server_id', '=', serverId))
       .execute();
     await transaction.deleteFrom('control.containers').where('server_id', '=', serverId).execute();
+    if (this.serverExtensions) {
+      await this.serverExtensions.purgeServerExtensions(serverId, transaction);
+    } else {
+      await transaction.deleteFrom('infra.server_extensions').where('server_id', '=', serverId).execute();
+    }
     const localVolumes = await transaction
       .selectFrom('control.volumes')
       .select('id')
@@ -511,7 +464,7 @@ export class ServersService {
       storagePool,
       imageAssignment,
       containerNetworkClaim,
-      containerGpuClaim,
+      extensionDeviceClaim,
       containerSshRoute,
       intent,
       certificateTrust,
@@ -548,7 +501,7 @@ export class ServersService {
         .limit(1)
         .executeTakeFirst(),
       transaction
-        .selectFrom('control.container_gpu_claims')
+        .selectFrom('control.extension_device_claims')
         .select('id')
         .where('server_id', '=', serverId)
         .limit(1)
@@ -584,7 +537,7 @@ export class ServersService {
       storagePool && 'storage_pools',
       imageAssignment && 'image_server_assignments',
       containerNetworkClaim && 'container_network_claims',
-      containerGpuClaim && 'container_gpu_claims',
+      extensionDeviceClaim && 'extension_device_claims',
       containerSshRoute && 'container_ssh_routes',
       intent && 'intents',
       certificateTrust && 'incus_client_certificate_trusts',
@@ -632,13 +585,27 @@ export class ServersService {
         names.set(pool.id, poolLabel(pool.display_name, pool.incus_name));
       }
     }
+    const serverIds = rows.map((row) => row.id);
+    const enabled = this.serverExtensions
+      ? await this.serverExtensions.enabledIdsForServers(serverIds)
+      : new Map<string, string[]>();
+    const health = this.serverExtensions
+      ? await this.serverExtensions.healthByServer(serverIds)
+      : new Map<string, Record<string, Record<string, unknown>>>();
     return rows.map((row) => this.toDto(
       row,
       row.system_pool_id ? names.get(row.system_pool_id) ?? null : null,
+      enabled.get(row.id) ?? [],
+      health.get(row.id) ?? {},
     ));
   }
 
-  private toDto(row: ServerRow, systemPoolName: string | null = null): ServerDto {
+  private toDto(
+    row: ServerRow,
+    systemPoolName: string | null = null,
+    enabledExtensions: string[] = [],
+    extensionHealth: Record<string, Record<string, unknown>> = {},
+  ): ServerDto {
     return {
       id: row.id,
       name: row.name,
@@ -652,7 +619,8 @@ export class ServersService {
       storageOvercommitRatio: numberValue(row.storage_overcommit_ratio),
       parentInterface: row.parent_interface ?? '',
       dnsServers: row.dns_servers,
-      gpuRuntimeAvailable: row.gpu_runtime_available,
+      enabledExtensions,
+      extensionHealth,
       status: row.status as ServerStatus,
       lastSeenAt: isoDate(row.last_seen_at),
       lastError: row.last_error,
@@ -676,7 +644,14 @@ export class ServersService {
     };
   }
 
-  private toUserDto(row: ServerRow): UserServerDto {
+  private async toUserDtos(rows: ServerRow[]): Promise<UserServerDto[]> {
+    const enabled = this.serverExtensions
+      ? await this.serverExtensions.enabledIdsForServers(rows.map((row) => row.id))
+      : new Map<string, string[]>();
+    return rows.map((row) => this.toUserDto(row, enabled.get(row.id) ?? []));
+  }
+
+  private toUserDto(row: ServerRow, enabledExtensions: string[] = []): UserServerDto {
     return {
       id: row.id,
       name: row.name,
@@ -684,6 +659,7 @@ export class ServersService {
       status: row.status as ServerStatus,
       lastSeenAt: isoDate(row.last_seen_at),
       preflightStatus: row.preflight_status as PreflightStatus,
+      enabledExtensions,
     };
   }
 }

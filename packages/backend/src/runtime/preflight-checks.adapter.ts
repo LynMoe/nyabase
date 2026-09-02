@@ -1,5 +1,5 @@
 import { Inject, Injectable } from '@nestjs/common';
-import { canonicalPciAddress, MAX_NODE_METRICS_BODY_BYTES } from '@nyabase/common';
+import { MAX_NODE_METRICS_BODY_BYTES } from '@nyabase/common';
 import type { NodeMetricSample } from '@nyabase/common';
 import type { Kysely } from 'kysely';
 import type { NyabaseDatabase } from '../persistence-pg/database.types.js';
@@ -22,7 +22,6 @@ const NETWORK_METRICS = {
   nftAvailable: 'nyabase_node_network_nft_available',
 } as const;
 
-const GPU_RUNTIME_METRIC = 'nyabase_node_gpu_util_ratio';
 @Injectable()
 export class IncusPreflightChecksAdapter implements PreflightChecksPort {
   constructor(
@@ -85,67 +84,6 @@ export class IncusPreflightChecksAdapter implements PreflightChecksPort {
       slavesWithUnknownIpv4,
       hasUplink,
       networkPrerequisites,
-    };
-  }
-
-  async checkGpuToolkit(
-    serverId: string,
-    resources: IncusSchema<'Resources'>,
-    evidence?: Record<string, unknown>,
-    expectedRevision?: number,
-  ): Promise<Record<string, unknown>> {
-    const cards = resources.gpu?.cards ?? [];
-    const updateRuntimeAvailability = async (available: boolean): Promise<void> => {
-      const query = this.database
-        .updateTable('infra.servers')
-        .set({ gpu_runtime_available: available })
-        .where((expression) => expectedRevision === undefined
-          ? expression('id', '=', serverId)
-          : expression.and([
-            expression('id', '=', serverId),
-            expression('revision', '=', String(expectedRevision)),
-          ]));
-      await query.execute();
-    };
-    // Only NVIDIA cards participate in the GPU runtime gate. Hosts commonly
-    // also expose AST/display adapters that Incus lists without nvidia.*.
-    const nvidiaCards = cards.filter((card) => card.nvidia !== undefined);
-    if (nvidiaCards.length === 0) {
-      await updateRuntimeAvailability(false);
-      return {
-        serverId,
-        gpuRuntime: 'not_applicable',
-        gpuCount: cards.length,
-        nvidiaCards: 0,
-      };
-    }
-    const healthyGpuPci = new Set(
-      metricSamples(evidence)
-        .filter((sample) => (
-          sample.name === GPU_RUNTIME_METRIC
-          && Number.isFinite(sample.value)
-          && typeof sample.labels.gpu_pci === 'string'
-        ))
-        .map((sample) => normalizeGpuPci(sample.labels.gpu_pci))
-        .filter((address): address is string => address !== null),
-    );
-    const missingGpuPci = nvidiaCards
-      .map((card) => card.pci_address)
-      .filter((address): address is string => typeof address === 'string')
-      .map(normalizeGpuPci)
-      .filter((address): address is string => address !== null)
-      .filter((address) => !healthyGpuPci.has(address));
-    const cardsWithoutPci = nvidiaCards.filter((card) => typeof card.pci_address !== 'string').length;
-    const exporterGpuSamples = healthyGpuPci.size > 0;
-    await updateRuntimeAvailability(true);
-    return {
-      serverId,
-      gpuRuntime: 'pass',
-      gpuCount: cards.length,
-      nvidiaCards: nvidiaCards.length,
-      missingGpuPci,
-      cardsWithoutPci,
-      exporterGpuSamples,
     };
   }
 
@@ -320,10 +258,6 @@ function operationOutputText(value: unknown): string {
     parts.push(operationOutputText(value.metadata));
   }
   return parts.join('\n');
-}
-
-function normalizeGpuPci(value: string): string | null {
-  return canonicalPciAddress(value.trim());
 }
 
 function parseEgressTarget(value: string): URL {

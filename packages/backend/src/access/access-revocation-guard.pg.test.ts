@@ -98,7 +98,6 @@ async function seedServer(database: import('kysely').Kysely<NyabaseDatabase>): P
     storage_overcommit_ratio: 1,
     parent_interface: 'eth0',
     dns_servers: ['10.20.0.1'],
-    gpu_runtime_available: false,
     status: ServerStatus.Unknown,
     last_seen_at: null,
     last_error: null,

@@ -40,7 +40,7 @@ test(
           rootSizeBytes: 2 * 1024 * 1024 * 1024,
           cpuMillis: 500,
           memBytes: 512 * 1024 * 1024,
-          gpuPciAddresses: [],
+          extensions: {},
           powerIntent: 'running',
         },
       }),

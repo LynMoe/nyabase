@@ -4,7 +4,6 @@ import {
   compareManagedFields as compareManagedFieldsOwned,
   CORE_MANAGED_FIELD_OWNERSHIP,
   observeRootQuotaPending,
-  TEMPORARY_MANAGED_FIELD_OWNERSHIP,
   type ManagedFieldOwnership,
   type ManagedInstanceDocument,
 } from './compare-managed-fields.js';
@@ -14,7 +13,7 @@ import {
   type InstanceSpecInput,
 } from './instance-spec.js';
 
-const ownership = TEMPORARY_MANAGED_FIELD_OWNERSHIP;
+const ownership = CORE_MANAGED_FIELD_OWNERSHIP;
 
 function compareManagedFields(
   actual: ManagedInstanceDocument,
@@ -40,9 +39,7 @@ const baseInput: InstanceSpecInput = {
     imageFingerprint: 'b'.repeat(64),
     cpuMillis: 2000,
     memBytes: 1073741824n,
-    nvidiaRuntime: false,
-    gpuPciAddresses: [],
-    rootPool: 'default',
+            rootPool: 'default',
     rootSizeBytes: 10737418240n,
     routedIp: '198.51.100.10',
   },
@@ -292,10 +289,9 @@ describe('compareManagedFields', () => {
         'limits.processes': '100',
       },
       {
-        gpu0: {
-          type: 'gpu',
-          gputype: 'physical',
-          pci: '0000:41:00.0',
+        ext0: {
+          type: 'unix-char',
+          path: '/dev/ext0',
         },
         operatorDisk: {
           type: 'disk',
@@ -304,7 +300,10 @@ describe('compareManagedFields', () => {
         },
       },
     );
-    const updated = applyManagedFields(actual, spec);
+    const updated = applyManagedFields(actual, spec, {
+      ...CORE_MANAGED_FIELD_OWNERSHIP,
+      devicePrefixes: [...CORE_MANAGED_FIELD_OWNERSHIP.devicePrefixes, 'ext'],
+    });
     expect(updated.config?.['volatile.eth0.hwaddr']).toBe('02:aa:bb:cc:dd:ee');
     expect(updated.config?.['operator.note']).toBe('preserve');
     expect(updated.config?.['limits.processes']).toBeUndefined();
@@ -314,7 +313,7 @@ describe('compareManagedFields', () => {
       source: 'operator-volume',
       path: '/operator',
     });
-    expect(updated.devices?.gpu0).toBeUndefined();
+    expect(updated.devices?.ext0).toBeUndefined();
     expect(updated.devices?.root).toEqual(spec.devices?.root);
     expect(updated.devices?.eth0).toEqual(spec.devices?.eth0);
   });
@@ -334,13 +333,17 @@ describe('compareManagedFields', () => {
 
   it('requires ownership prefixes to treat card config and devices as managed', () => {
     const spec = desired();
+    const owned: ManagedFieldOwnership = {
+      configPrefixes: [...CORE_MANAGED_FIELD_OWNERSHIP.configPrefixes, 'example.'],
+      deviceNames: CORE_MANAGED_FIELD_OWNERSHIP.deviceNames,
+      devicePrefixes: [...CORE_MANAGED_FIELD_OWNERSHIP.devicePrefixes, 'ext'],
+    };
     const actual = actualWith(
-      { 'nvidia.runtime': 'true' },
+      { 'example.runtime': 'true' },
       {
-        gpu0: {
-          type: 'gpu',
-          gputype: 'physical',
-          pci: '0000:41:00.0',
+        ext0: {
+          type: 'unix-char',
+          path: '/dev/example',
         },
       },
     );
@@ -348,26 +351,24 @@ describe('compareManagedFields', () => {
     const unmanaged = compareManagedFields(actual, spec, CORE_MANAGED_FIELD_OWNERSHIP);
     expect(unmanaged.empty).toBe(true);
     const preserved = applyManagedFields(actual, spec, CORE_MANAGED_FIELD_OWNERSHIP);
-    expect(preserved.config?.['nvidia.runtime']).toBe('true');
-    expect(preserved.devices?.gpu0).toEqual({
-      type: 'gpu',
-      gputype: 'physical',
-      pci: '0000:41:00.0',
+    expect(preserved.config?.['example.runtime']).toBe('true');
+    expect(preserved.devices?.ext0).toEqual({
+      type: 'unix-char',
+      path: '/dev/example',
     });
 
-    const managed = compareManagedFields(actual, spec, TEMPORARY_MANAGED_FIELD_OWNERSHIP);
+    const managed = compareManagedFields(actual, spec, owned);
     expect(managed.empty).toBe(false);
-    expect(managed.config['nvidia.runtime']).toEqual({
+    expect(managed.config['example.runtime']).toEqual({
       actual: 'true',
-      desired: spec.config?.['nvidia.runtime'],
+      desired: spec.config?.['example.runtime'],
     });
-    expect(managed.devices.gpu0?.actual).toEqual({
-      type: 'gpu',
-      gputype: 'physical',
-      pci: '0000:41:00.0',
+    expect(managed.devices.ext0?.actual).toEqual({
+      type: 'unix-char',
+      path: '/dev/example',
     });
-    const stripped = applyManagedFields(actual, spec, TEMPORARY_MANAGED_FIELD_OWNERSHIP);
-    expect(stripped.config?.['nvidia.runtime']).toBe(spec.config?.['nvidia.runtime']);
-    expect(stripped.devices?.gpu0).toBeUndefined();
+    const stripped = applyManagedFields(actual, spec, owned);
+    expect(stripped.config?.['example.runtime']).toBe(spec.config?.['example.runtime']);
+    expect(stripped.devices?.ext0).toBeUndefined();
   });
 });

@@ -7802,7 +7802,6 @@ export interface components {
              * @example 0
              */
             numa_node?: number;
-            nvidia?: components["schemas"]["ResourcesGPUCardNvidia"];
             /**
              * @description PCI address
              * @example 0000:00:02.0
@@ -7907,53 +7906,6 @@ export interface components {
              * @example i915-GVTg_V5_8
              */
             name?: string;
-        };
-        /** @description ResourcesGPUCardNvidia represents additional information for NVIDIA GPUs */
-        ResourcesGPUCardNvidia: {
-            /**
-             * @description Architecture (generation)
-             * @example 3.5
-             */
-            architecture?: string;
-            /**
-             * @description Brand name
-             * @example GeForce
-             */
-            brand?: string;
-            /**
-             * @description Card device number
-             *
-             *     API extension: resources_v2
-             * @example 195:0
-             */
-            card_device?: string;
-            /**
-             * @description Card device name
-             *
-             *     API extension: resources_v2
-             * @example nvidia0
-             */
-            card_name?: string;
-            /**
-             * @description Version of the CUDA API
-             * @example 11.0
-             */
-            cuda_version?: string;
-            /**
-             * @description Model name
-             * @example GeForce GT 730
-             */
-            model?: string;
-            /**
-             * @description Version of the NVRM (usually driver version)
-             * @example 450.102.04
-             */
-            nvrm_version?: string;
-            /**
-             * @description GPU UUID
-             * @example GPU-6ddadebd-dafe-2db9-f10f-125719770fd3
-             */
-            uuid?: string;
         };
         /** @description ResourcesGPUCardSRIOV represents the SRIOV configuration of the GPU */
         ResourcesGPUCardSRIOV: {

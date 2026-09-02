@@ -21,10 +21,6 @@ export interface ServerExtensionEnablementDto {
   readonly occupiedDeviceCount: number;
 }
 
-export interface PatchServerExtensionRequest {
-  readonly enabled: boolean;
-}
-
 export interface ExtensionDevicesResponseDto {
   readonly items: unknown[];
   readonly enabled: boolean;
@@ -52,6 +48,21 @@ export class PackageHttpError extends Error {
     this.details = details;
     Object.setPrototypeOf(this, new.target.prototype);
   }
+}
+
+export function isPackageHttpError(error: unknown): error is PackageHttpError {
+  if (typeof error !== 'object' || error === null) return false;
+  const record = error as {
+    name?: unknown;
+    statusCode?: unknown;
+    code?: unknown;
+    details?: unknown;
+  };
+  return record.name === 'PackageHttpError'
+    && typeof record.statusCode === 'number'
+    && typeof record.code === 'string'
+    && typeof record.details === 'object'
+    && record.details !== null;
 }
 
 export type ExtensionErrorFormatter = (code: string) => string | undefined;

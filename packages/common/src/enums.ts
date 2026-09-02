@@ -107,13 +107,6 @@ export enum NodeMetricName {
   NetworkNftAvailable = 'nyabase_node_network_nft_available',
   NetworkBridgeFilterPresent = 'nyabase_node_network_bridge_filter_present',
   NetworkBridgeFilterAddress = 'nyabase_node_network_bridge_filter_address',
-  GpuUtilRatio = 'nyabase_node_gpu_util_ratio',
-  GpuMemoryUsedBytes = 'nyabase_node_gpu_mem_used_bytes',
-  GpuMemoryTotalBytes = 'nyabase_node_gpu_mem_total_bytes',
-  GpuTemperatureCelsius = 'nyabase_node_gpu_temperature_celsius',
-  GpuPowerWatts = 'nyabase_node_gpu_power_watts',
-  GpuSmiIndex = 'nyabase_node_gpu_smi_index',
-  GpuProcessMemoryUsedBytes = 'nyabase_node_gpu_process_mem_used_bytes',
 }
 
 export enum PreflightStatus {
@@ -169,12 +162,6 @@ export enum SystemGroupKey {
   Users = 'users',
 }
 
-export enum GpuGrantMode {
-  None = 'none',
-  All = 'all',
-  Pci = 'pci',
-}
-
 export enum FailureCode {
   RevisionConflict = 'REVISION_CONFLICT',
   StorageGrantExceeded = 'STORAGE_GRANT_EXCEEDED',
@@ -199,10 +186,6 @@ export enum FailureCode {
   RootShrinkRequiresStop = 'ROOT_SHRINK_REQUIRES_STOP',
   RootQuotaPending = 'ROOT_QUOTA_PENDING',
   RootSizeBelowImageMinimum = 'ROOT_SIZE_BELOW_IMAGE_MINIMUM',
-  GpuChangeRequiresStop = 'GPU_CHANGE_REQUIRES_STOP',
-  GpuRuntimeNotEnabled = 'GPU_RUNTIME_NOT_ENABLED',
-  GpuRuntimeUnavailable = 'GPU_RUNTIME_UNAVAILABLE',
-  GpuAlreadyClaimed = 'GPU_ALREADY_CLAIMED',
   ExtensionUnknown = 'EXTENSION_UNKNOWN',
   ExtensionNotEnabled = 'EXTENSION_NOT_ENABLED',
   ExtensionOccupied = 'EXTENSION_OCCUPIED',
@@ -236,12 +219,13 @@ export enum AuditAction {
   DeleteContainer = 'container.delete',
   UpdateContainerLimits = 'container.limits.update',
   ResizeContainerRoot = 'container.root_size.update',
-  UpdateContainerGpu = 'container.gpu.update',
+  UpdateContainerExtension = 'container.extension.update',
   AttachVolume = 'container.volume.attach',
   DetachVolume = 'container.volume.detach',
   CreateExecSession = 'container.exec_session.create',
   CreateServer = 'server.create',
   UpdateServer = 'server.update',
+  UpdateServerExtension = 'server.extension.update',
   DeleteServer = 'server.delete',
   ConnectServer = 'server.connect',
   RunServerPreflight = 'server.preflight',

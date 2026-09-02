@@ -1,7 +1,6 @@
 import { useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
-  GpuGrantMode,
   type EffectiveAccessDto,
   type GrantExpiryPhase,
   type GroupDto,
@@ -33,12 +32,7 @@ import {
 import { Switch } from '../ui/switch.js';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '../ui/tabs.js';
 import { FormField } from '../layout/form-field.js';
-import {
-  GpuPicker,
-  type GpuPickerMode,
-  resolveGpuPciAddresses,
-  useServerGpus,
-} from '../containers/gpu-picker.js';
+import { ExtensionSlots } from '../../extensions/slots.js';
 
 type Subject = UserDto | GroupDto;
 type SubjectKind = 'users' | 'groups';
@@ -74,20 +68,8 @@ export function CanonicalGrantPanel({ subject, kind }: { subject: Subject; kind:
   const [cpuCores, setCpuCores] = useState('');
   const [memGib, setMemGib] = useState('');
   const [diskGib, setDiskGib] = useState('');
-  const [gpuMode, setGpuMode] = useState<GpuGrantMode>(GpuGrantMode.None);
-  const [gpuPciAddresses, setGpuPciAddresses] = useState<string[]>([]);
+  const [extensionGrants, setExtensionGrants] = useState<Record<string, unknown>>({});
   const [sharedLimitGib, setSharedLimitGib] = useState('');
-  const gpusQuery = useServerGpus(serverId, true, Boolean(serverId));
-  const pickerMode: GpuPickerMode = gpuMode === GpuGrantMode.None
-    ? 'none'
-    : gpuMode === GpuGrantMode.All
-      ? 'all'
-      : 'specific';
-  const setPickerMode = (mode: GpuPickerMode) => {
-    if (mode === 'none') setGpuMode(GpuGrantMode.None);
-    else if (mode === 'all') setGpuMode(GpuGrantMode.All);
-    else setGpuMode(GpuGrantMode.Pci);
-  };
   const [serverExpiresAt, setServerExpiresAt] = useState('');
   const [poolExpiresAt, setPoolExpiresAt] = useState('');
   const [backendExpiresAt, setBackendExpiresAt] = useState('');
@@ -108,16 +90,11 @@ export function CanonicalGrantPanel({ subject, kind }: { subject: Subject; kind:
 
   const serverMutation = useMutation({
     mutationFn: () => {
-      const inventory = gpusQuery.data?.items ?? [];
-      const pciAddresses = resolveGpuPciAddresses(pickerMode, gpuPciAddresses, inventory);
       return api.put<ServerGrantDto>(`${prefix}/server-grants/${serverId}`, {
         cpuMillis: coresToMillis(cpuCores),
         memBytes: gibToBytes(memGib),
         diskBytes: gibToBytes(diskGib),
-        gpu: {
-          mode: gpuMode,
-          pciAddresses: gpuMode === GpuGrantMode.Pci ? pciAddresses : [],
-        },
+        extensionGrants,
         expiresAt: isoOrNull(serverExpiresAt),
       });
     },
@@ -179,20 +156,18 @@ export function CanonicalGrantPanel({ subject, kind }: { subject: Subject; kind:
               value={serverId}
               onChange={(value) => {
                 setServerId(value);
-                setGpuPciAddresses([]);
-                setGpuMode(GpuGrantMode.None);
+                setExtensionGrants({});
               }}
               options={servers.map((server) => [server.id, server.name])}
             />
-            <GpuPicker
-              serverId={serverId}
-              admin
-              mode={pickerMode}
-              onModeChange={setPickerMode}
-              value={gpuPciAddresses}
-              onChange={setGpuPciAddresses}
-              idPrefix="grant-gpu"
-              label="GPU 授权"
+            <ExtensionSlots
+              area="grant.server"
+              ctx={{
+                serverId,
+                enabledExtensions: servers.find((server) => server.id === serverId)?.enabledExtensions ?? [],
+                value: extensionGrants,
+                onChange: setExtensionGrants,
+              }}
             />
           </div>
           <div className="grid gap-3 sm:grid-cols-3">

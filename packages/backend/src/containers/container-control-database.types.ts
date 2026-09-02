@@ -27,8 +27,7 @@ export interface ContainerControlTable {
   root_used_bytes: ColumnType<string | null, string | number | bigint | null | undefined, string | number | bigint | null>;
   cpu_millis: number;
   mem_bytes: ContainerBigInt;
-  nvidia_runtime: boolean;
-  gpu_pci_addresses: string[];
+  extensions: ContainerJson<Record<string, unknown>>;
   nesting: boolean;
   syscall_intercept: boolean;
   power_intent: 'running' | 'stopped';
@@ -42,11 +41,12 @@ export interface ContainerControlTable {
   updated_at: ContainerGeneratedTimestamp;
 }
 
-export interface ContainerGpuClaimTable {
+export interface ExtensionDeviceClaimTable {
   id: string;
-  container_id: string;
+  extension_id: string;
   server_id: string;
-  gpu_pci_address: string;
+  container_id: string;
+  device_key: string;
   created_at: ContainerGeneratedTimestamp;
 }
 
@@ -110,7 +110,7 @@ export interface ReconcileClaimTable {
 
 export interface ContainerControlDatabase {
   'control.containers': ContainerControlTable;
-  'control.container_gpu_claims': ContainerGpuClaimTable;
+  'control.extension_device_claims': ExtensionDeviceClaimTable;
   'control.container_network_claims': ContainerNetworkClaimTable;
   'control.container_ssh_routes': ContainerSshRouteTable;
   'control.intents': IntentTable;

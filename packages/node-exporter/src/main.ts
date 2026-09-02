@@ -1,17 +1,33 @@
+import {
+  collectNvidiaGpuMetrics,
+  NVIDIA_GPU_LABEL_VALIDATORS,
+  NVIDIA_GPU_METRIC_DEFINITIONS,
+} from '@nyabase/nvidia-gpu';
+import {
+  CORE_LABEL_VALIDATORS,
+  mergeNodeMetricCatalog,
+  NODE_METRIC_DEFINITIONS,
+} from '@nyabase/common';
 import { LinuxNodeMetricsCollector } from './collector.js';
 import { loadNodeExporterConfig } from './config.js';
 import { createNodeExporterServer } from './server.js';
 
 async function main(): Promise<void> {
   const config = await loadNodeExporterConfig();
+  const catalog = mergeNodeMetricCatalog(
+    { definitions: NODE_METRIC_DEFINITIONS, validators: CORE_LABEL_VALIDATORS },
+    { definitions: NVIDIA_GPU_METRIC_DEFINITIONS, validators: NVIDIA_GPU_LABEL_VALIDATORS },
+  );
   const collector = new LinuxNodeMetricsCollector({
     parentInterface: config.parentInterface,
+    extraCollectors: [collectNvidiaGpuMetrics],
   });
   const server = createNodeExporterServer({
     token: config.token,
     key: config.tlsKey,
     cert: config.tlsCertificate,
     collector,
+    catalog,
   });
   await new Promise<void>((resolve, reject) => {
     server.once('error', reject);

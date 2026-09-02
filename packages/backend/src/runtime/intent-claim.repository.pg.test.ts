@@ -23,7 +23,6 @@ describePg('Incus reconciliation intent and lease repositories', () => {
         api_endpoint: 'https://127.0.0.1:8443',
         parent_interface: null,
         dns_servers: [],
-        gpu_runtime_available: false,
         status: 'unknown',
         api_extensions: [],
         storage_overcommit_ratio: 1,
@@ -112,7 +111,7 @@ describePg('Incus reconciliation intent and lease repositories', () => {
           outcome: 'failed',
           placementServerId: serverId,
           failure: {
-            code: 'GPU_CHANGE_REQUIRES_STOP',
+            code: 'EXTENSION_MUTATION_REQUIRES_STOP',
             message: 'The instance must be stopped',
             details: { bounded: true },
           },
@@ -130,7 +129,7 @@ describePg('Incus reconciliation intent and lease repositories', () => {
       expect(rows.map((row) => row.status)).toEqual(['failed', 'failed', 'failed']);
       expect(rows[0]?.failure_code).toBe('INSTANCE_BUSY');
       expect(rows[1]?.failure_code).toBe('SUPERSEDED_BY_FAILED_GENERATION');
-      expect(rows[2]?.failure_code).toBe('GPU_CHANGE_REQUIRES_STOP');
+      expect(rows[2]?.failure_code).toBe('EXTENSION_MUTATION_REQUIRES_STOP');
     });
   });
 
@@ -144,7 +143,6 @@ describePg('Incus reconciliation intent and lease repositories', () => {
         api_endpoint: 'https://127.0.0.1:8443',
         parent_interface: null,
         dns_servers: [],
-        gpu_runtime_available: false,
         status: 'unknown',
         api_extensions: [],
         storage_overcommit_ratio: 1,
@@ -214,7 +212,6 @@ describePg('Incus reconciliation intent and lease repositories', () => {
         api_endpoint: 'https://127.0.0.1:8443',
         parent_interface: null,
         dns_servers: [],
-        gpu_runtime_available: false,
         status: 'unknown',
         api_extensions: [],
         storage_overcommit_ratio: 1,
@@ -273,7 +270,6 @@ describePg('Incus reconciliation intent and lease repositories', () => {
         api_endpoint: 'https://127.0.0.1:8443',
         parent_interface: null,
         dns_servers: [],
-        gpu_runtime_available: false,
         status: 'unknown',
         api_extensions: [],
         storage_overcommit_ratio: 1,
@@ -363,7 +359,6 @@ describePg('Incus reconciliation intent and lease repositories', () => {
         api_endpoint: 'https://127.0.0.1:8443',
         parent_interface: null,
         dns_servers: [],
-        gpu_runtime_available: false,
         status: 'unknown',
         api_extensions: [],
         storage_overcommit_ratio: 1,
@@ -449,7 +444,6 @@ describePg('Incus reconciliation intent and lease repositories', () => {
           api_endpoint: 'https://127.0.0.1:8443',
           parent_interface: null,
           dns_servers: [],
-          gpu_runtime_available: false,
           status: 'unknown',
           api_extensions: [],
           storage_overcommit_ratio: 1,
@@ -478,7 +472,6 @@ describePg('Incus reconciliation intent and lease repositories', () => {
           api_endpoint: 'https://127.0.0.1:8444',
           parent_interface: null,
           dns_servers: [],
-          gpu_runtime_available: false,
           status: 'unknown',
           api_extensions: [],
           storage_overcommit_ratio: 1,
@@ -543,7 +536,6 @@ describePg('Incus reconciliation intent and lease repositories', () => {
         api_endpoint: 'https://127.0.0.1:8443',
         parent_interface: null,
         dns_servers: [],
-        gpu_runtime_available: false,
         status: 'unknown',
         api_extensions: [],
         storage_overcommit_ratio: 1,
@@ -611,7 +603,6 @@ describePg('Incus reconciliation intent and lease repositories', () => {
           api_endpoint: 'https://127.0.0.1:8443',
           parent_interface: null,
           dns_servers: [],
-          gpu_runtime_available: false,
           status: 'unknown',
           api_extensions: [],
           storage_overcommit_ratio: 1,
@@ -640,7 +631,6 @@ describePg('Incus reconciliation intent and lease repositories', () => {
           api_endpoint: 'https://127.0.0.1:8444',
           parent_interface: null,
           dns_servers: [],
-          gpu_runtime_available: false,
           status: 'unknown',
           api_extensions: [],
           storage_overcommit_ratio: 1,
@@ -717,7 +707,6 @@ describePg('Incus reconciliation intent and lease repositories', () => {
           api_endpoint: 'https://127.0.0.1:8443',
           parent_interface: null,
           dns_servers: [],
-          gpu_runtime_available: false,
           status: 'unknown',
           api_extensions: [],
           storage_overcommit_ratio: 1,
@@ -746,7 +735,6 @@ describePg('Incus reconciliation intent and lease repositories', () => {
           api_endpoint: 'https://127.0.0.1:8444',
           parent_interface: null,
           dns_servers: [],
-          gpu_runtime_available: false,
           status: 'unknown',
           api_extensions: [],
           storage_overcommit_ratio: 1,

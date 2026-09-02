@@ -26,7 +26,7 @@ describe('user/admin isolation API surface', () => {
     expect(src).not.toMatch(/async\s+\w+\([^)]*\bincludeAll\b/);
   });
 
-  it('ContainerControlService create/limits/root/gpu/listVolumes use ForUser/ForAdmin', () => {
+  it('ContainerControlService create/limits/root/extension/listVolumes use ForUser/ForAdmin', () => {
     const src = readSrc('containers/container-control.service.ts');
     expect(src).toMatch(/async createForUser\(/);
     expect(src).toMatch(/async createForAdmin\(/);
@@ -34,14 +34,14 @@ describe('user/admin isolation API surface', () => {
     expect(src).toMatch(/async updateLimitsForAdmin\(/);
     expect(src).toMatch(/async resizeRootForUser\(/);
     expect(src).toMatch(/async resizeRootForAdmin\(/);
-    expect(src).toMatch(/async updateGpuForUser\(/);
-    expect(src).toMatch(/async updateGpuForAdmin\(/);
+    expect(src).toMatch(/async mutateExtensionForUser\(/);
+    expect(src).toMatch(/async mutateExtensionForAdmin\(/);
     expect(src).toMatch(/async listVolumesForUser\(/);
     expect(src).toMatch(/async listVolumesForAdmin\(/);
     expect(src).not.toMatch(/async create\([\s\S]*?admin\s*=\s*false/);
     expect(src).not.toMatch(/async updateLimits\([\s\S]*?admin\s*=\s*false/);
     expect(src).not.toMatch(/async resizeRoot\([\s\S]*?admin\s*=\s*false/);
-    expect(src).not.toMatch(/async updateGpu\([\s\S]*?admin\s*=\s*false/);
+    expect(src).not.toMatch(/async mutateExtension\([\s\S]*?admin\s*=\s*false/);
     expect(src).not.toMatch(/async listVolumes\([\s\S]*?admin\s*=\s*false/);
   });
 

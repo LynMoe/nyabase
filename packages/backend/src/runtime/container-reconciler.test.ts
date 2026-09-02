@@ -183,31 +183,6 @@ describe('container reconciler §15.1 fixture-driven Incus mocks', () => {
     });
   });
 
-  it('fails GPU / nvidia.runtime changes while running without any Incus write', async () => {
-    const { reconciler, client, putBodies } = await harness({
-      status: 'Running',
-      powerIntent: 'running',
-      nvidiaRuntime: true,
-      gpuPciAddresses: ['0000:01:00.0'],
-      documentExtras: {
-        config: {
-          'nvidia.runtime': 'false',
-        },
-        devices: {},
-      },
-    });
-
-    const outcome = await reconciler.reconcile(context(client));
-    expect(outcome).toMatchObject({
-      outcome: 'failed',
-      failure: { code: 'GPU_CHANGE_REQUIRES_STOP' },
-    });
-    expect(client.readModifyWriteInstance).not.toHaveBeenCalled();
-    expect(client.updateInstance).not.toHaveBeenCalled();
-    expect(client.createInstance).not.toHaveBeenCalled();
-    expect(putBodies).toHaveLength(0);
-  });
-
   it('applies add-device and remove-device in the same reconcile PUT', async () => {
     const removeName = deriveAttachmentDeviceName(ATTACH_REMOVE);
     const addName = deriveAttachmentDeviceName(ATTACH_ADD);
@@ -670,8 +645,6 @@ interface AttachmentFixture {
 interface HarnessOptions {
   readonly status: 'Running' | 'Stopped';
   readonly powerIntent: 'running' | 'stopped';
-  readonly nvidiaRuntime?: boolean;
-  readonly gpuPciAddresses?: string[];
   readonly rootResizeFamily?: 'quota_online' | 'block_backed';
   readonly rootSizeBytes?: number;
   readonly attachments?: readonly AttachmentFixture[];
@@ -714,8 +687,6 @@ function containerRow(options: HarnessOptions) {
     root_size_bytes: String(options.rootSizeBytes ?? 10_737_418_240),
     cpu_millis: 2000,
     mem_bytes: '1073741824',
-    nvidia_runtime: options.nvidiaRuntime ?? false,
-    gpu_pci_addresses: options.gpuPciAddresses ?? [],
     nesting: true,
     syscall_intercept: true,
     power_intent: options.powerIntent,
@@ -755,10 +726,8 @@ function desiredFrom(options: HarnessOptions): DesiredInstanceSpec {
       imageFingerprint: IMAGE_FINGERPRINT,
       cpuMillis: 2000,
       memBytes: 1_073_741_824,
-      nvidiaRuntime: options.nvidiaRuntime ?? false,
       nesting: true,
       syscallIntercept: true,
-      gpuPciAddresses: options.gpuPciAddresses ?? [],
       rootPool: ROOT_POOL,
       rootSizeBytes: options.rootSizeBytes ?? 10_737_418_240,
       routedIp: ROUTED_IP,
@@ -802,15 +771,6 @@ function actualDocument(options: HarnessOptions) {
   }
   for (const [name, device] of Object.entries(extrasDevices)) {
     devices[name] = { ...device };
-  }
-  // GPU fixtures often need "no gpu devices" while desired still has them.
-  if (Object.prototype.hasOwnProperty.call(extrasDevices, 'gpu0') === false
-    && extras.config
-    && Object.prototype.hasOwnProperty.call(extras.config, 'nvidia.runtime')
-    && extras.config['nvidia.runtime'] === 'false') {
-    for (const name of Object.keys(devices)) {
-      if (name.startsWith('gpu')) delete devices[name];
-    }
   }
   return {
     name: deriveInstanceName(CONTAINER_ID),

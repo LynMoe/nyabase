@@ -34,13 +34,7 @@ import {
 } from '../../lib/utils.js';
 import { actionProgressHint, containerActionSubmittedTitle } from '../../lib/status-labels.js';
 import { queryKeys } from '../../lib/query-keys.js';
-import {
-  GpuPicker,
-  type GpuPickerMode,
-  permittedGpus,
-  resolveGpuPciAddresses,
-  useServerGpus,
-} from './gpu-picker.js';
+import { ExtensionSlots } from '../../extensions/slots.js';
 
 type FormState = {
   serverId: string;
@@ -49,8 +43,6 @@ type FormState = {
   rootSizeGib: string;
   cpuVcpus: string;
   memGib: string;
-  gpuMode: GpuPickerMode;
-  gpuPciAddresses: string[];
   powerIntent: ContainerPowerIntent;
 };
 
@@ -61,8 +53,6 @@ const emptyForm: FormState = {
   rootSizeGib: '20',
   cpuVcpus: '1',
   memGib: '2',
-  gpuMode: 'none',
-  gpuPciAddresses: [],
   powerIntent: ContainerPowerIntent.Running,
 };
 
@@ -77,6 +67,7 @@ export function CreateContainerDialog({
 }) {
   const queryClient = useQueryClient();
   const [form, setForm] = useState<FormState>(emptyForm);
+  const [extensions, setExtensions] = useState<Record<string, unknown>>({});
   const [error, setError] = useState<string | null>(null);
   const serversQuery = useQuery({ queryKey: queryKeys.servers.user, queryFn: () => api.get<UserServerDto[]>('/servers'), enabled: open });
   const imagesQuery = useQuery({ queryKey: queryKeys.images.userActive, queryFn: () => api.get<ImageDto[]>('/images?activeOnly=true'), enabled: open });
@@ -86,14 +77,14 @@ export function CreateContainerDialog({
     queryFn: () => api.get<StorageCapacityDto>(`/servers/${form.serverId}/storage-capacity`),
     enabled: open && form.serverId.length > 0,
   });
-  const gpusQuery = useServerGpus(form.serverId, false, open && form.serverId.length > 0);
-
   useEffect(() => {
     if (!open) {
       setForm(emptyForm);
+      setExtensions({});
       setError(null);
     } else if (defaultServerId) {
-      setForm((current) => ({ ...current, serverId: defaultServerId, imageId: '', gpuMode: 'none', gpuPciAddresses: [] }));
+      setForm((current) => ({ ...current, serverId: defaultServerId, imageId: '' }));
+      setExtensions({});
     }
   }, [defaultServerId, open]);
 
@@ -105,11 +96,7 @@ export function CreateContainerDialog({
   const selectedAccess = accessQuery.data?.servers.find((server) => server.serverId === form.serverId);
   const allowedImages = new Set(selectedAccess?.allowedImageIds ?? []);
   const images = (imagesQuery.data ?? []).filter((image) => allowedImages.has(image.id));
-  const availableGpus = useMemo(
-    () => permittedGpus(gpusQuery.data?.items ?? [], selectedAccess?.gpu, false),
-    [gpusQuery.data?.items, selectedAccess?.gpu],
-  );
-
+  const selected = servers.find((server) => server.id === form.serverId);
   const rootSizeBytes = Number.isFinite(Number(form.rootSizeGib)) ? gibToBytes(Number(form.rootSizeGib)) : NaN;
   const cpuMillis = Number.isFinite(Number(form.cpuVcpus)) ? vcpuToMillis(Number(form.cpuVcpus)) : NaN;
   const memBytes = Number.isFinite(Number(form.memGib)) ? gibToBytes(Number(form.memGib)) : NaN;
@@ -145,7 +132,7 @@ export function CreateContainerDialog({
       rootSizeBytes,
       cpuMillis,
       memBytes,
-      gpuPciAddresses: resolveGpuPciAddresses(form.gpuMode, form.gpuPciAddresses, availableGpus),
+      extensions,
       powerIntent: form.powerIntent,
     };
     const parsed = zCreateContainerRequest.safeParse(input);
@@ -171,8 +158,7 @@ export function CreateContainerDialog({
                 onValueChange={(value) => {
                   update('serverId', value);
                   update('imageId', '');
-                  update('gpuMode', 'none');
-                  update('gpuPciAddresses', []);
+                  setExtensions({});
                 }}
                 disabled={serversLoading || servers.length === 0}
               >
@@ -256,16 +242,17 @@ export function CreateContainerDialog({
               磁盘 {resourceVal(selectedAccess.diskBytes, formatBytes)}
             </p>
           )}
+          <ExtensionSlots
+            area="container.create"
+            ctx={{
+              serverId: form.serverId,
+              enabledExtensions: selected?.enabledExtensions ?? [],
+              grant: selectedAccess?.extensionGrants ?? null,
+              value: extensions,
+              onChange: setExtensions,
+            }}
+          />
           <div className="grid gap-3 sm:grid-cols-2">
-            <GpuPicker
-              serverId={form.serverId}
-              mode={form.gpuMode}
-              onModeChange={(mode) => update('gpuMode', mode)}
-              value={form.gpuPciAddresses}
-              onChange={(pciAddresses) => update('gpuPciAddresses', pciAddresses)}
-              grant={selectedAccess?.gpu}
-              idPrefix="container-gpu"
-            />
             <SelectField id="container-power-intent" label="期望电源状态" value={form.powerIntent} onChange={(value) => update('powerIntent', value as ContainerPowerIntent)} options={[[ContainerPowerIntent.Running, '运行'], [ContainerPowerIntent.Stopped, '停止']]} />
           </div>
           {capacityQuery.data && Number.isFinite(rootSizeBytes) && <CapacityNotice capacity={capacityQuery.data} requested={rootSizeBytes} />}

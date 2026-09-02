@@ -3,7 +3,6 @@ import type { Kysely } from 'kysely';
 import {
   ContainerPowerIntent,
   FailureCode,
-  GpuGrantMode,
   ServerStatus,
   UserStatus,
   type CreateContainerRequest,
@@ -25,8 +24,6 @@ import { ContainerSshConvergenceService } from '../ssh/container-ssh-convergence
 
 const describePg = process.env.NYABASE_TEST_DATABASE_URL ? describe : describe.skip;
 const IMAGE_FINGERPRINT = 'a'.repeat(64);
-const GPU_PCI_ADDRESS = '00000000:01:00.0';
-const SHORT_GPU_PCI_ADDRESS = '0000:01:00.0';
 
 interface Fixture {
   userId: string;
@@ -42,7 +39,6 @@ interface SeedOptions {
   reservedIps?: string[];
   preflightStatus?: 'not_run' | 'running' | 'passed' | 'failed';
   serverStatus?: ServerStatus;
-  gpuRuntimeAvailable?: boolean;
   poolTotalBytes?: number;
   overcommitRatio?: number;
   minimumRootSizeBytes?: number;
@@ -50,8 +46,6 @@ interface SeedOptions {
 
 interface GrantOptions {
   diskBytes: number | null;
-  gpuMode?: GpuGrantMode;
-  gpuPciAddresses?: string[];
 }
 
 describePg('PostgreSQL container create admission and capacity', () => {
@@ -124,70 +118,6 @@ describePg('PostgreSQL container create admission and capacity', () => {
     });
   });
 
-  it('resolves the server and PCI grant from PostgreSQL before admitting a GPU create', async () => {
-    await withPostgresTestDatabase(async ({ database }) => {
-      const fixture = await seedFixture(database);
-      await seedServerGrant(database, fixture, {
-        diskBytes: 10_000,
-        gpuMode: GpuGrantMode.None,
-        gpuPciAddresses: [],
-      });
-      const service = databaseAccessContainerService(database);
-
-      await expectCode(
-        service.createForUser(fixture.userId, request(fixture, 'database-gpu-denied', {
-          gpuPciAddresses: [GPU_PCI_ADDRESS],
-        })),
-        FailureCode.PermissionDenied,
-      );
-
-      await database.updateTable('iam.server_grants')
-        .set({
-          gpu_mode: GpuGrantMode.Pci,
-          gpu_pci_addresses: [GPU_PCI_ADDRESS],
-        })
-        .where('user_id', '=', fixture.userId)
-        .where('server_id', '=', fixture.serverId)
-        .execute();
-      await expect(service.createForUser(fixture.userId, request(fixture, 'database-gpu-accepted', {
-        gpuPciAddresses: [GPU_PCI_ADDRESS],
-      }))).resolves.toMatchObject({ status: 'pending' });
-    });
-  });
-
-  it('releases GPU admission claims when a container becomes failed or deleting', async () => {
-    await withPostgresTestDatabase(async ({ database }) => {
-      const fixture = await seedFixture(database);
-      const service = containerService(database, { diskBytes: 10_000 });
-
-      const failed = await service.service.createForUser(
-        fixture.userId,
-        request(fixture, 'failed-gpu', { gpuPciAddresses: [GPU_PCI_ADDRESS] }),
-      );
-      await database.updateTable('control.containers')
-        .set({ lifecycle_phase: 'failed', failure_code: 'TEST_TERMINAL' })
-        .where('id', '=', failed.resourceId)
-        .execute();
-
-      const deleting = await service.service.createForUser(
-        fixture.userId,
-        request(fixture, 'deleting-gpu', { gpuPciAddresses: [GPU_PCI_ADDRESS] }),
-      );
-      await database.updateTable('control.containers')
-        .set({ lifecycle_phase: 'deleting' })
-        .where('id', '=', deleting.resourceId)
-        .execute();
-
-      await expect(service.service.createForUser(
-        fixture.userId,
-        request(fixture, 'reused-gpu', { gpuPciAddresses: [GPU_PCI_ADDRESS] }),
-      )).resolves.toMatchObject({ status: 'pending' });
-      expect(await database.selectFrom('control.containers')
-        .select('id')
-        .execute()).toHaveLength(3);
-    });
-  });
-
   it('does not grow settled container intents across repeated full scans', async () => {
     await withPostgresTestDatabase(async ({ database }) => {
       const fixture = await seedFixture(database);
@@ -215,154 +145,6 @@ describePg('PostgreSQL container create admission and capacity', () => {
         .select('id')
         .where('resource_id', '=', created.resourceId)
         .execute()).toHaveLength(2);
-    });
-  });
-
-  it('enforces GPU grants, server runtime readiness, routed IP claims, and drain-safe allocation', async () => {
-    await withPostgresTestDatabase(async ({ database }) => {
-      const fixture = await seedFixture(database, {
-        cidr: '10.40.0.0/30',
-        gateway: '10.40.0.1',
-        reservedIps: ['10.40.0.1'],
-        gpuRuntimeAvailable: true,
-      });
-      const access = {
-        grant: grant({ diskBytes: 10_000, gpuMode: GpuGrantMode.None }),
-        imageAvailable: true,
-      };
-      const service = containerService(database, { diskBytes: 10_000 }, access);
-
-      await expectCode(
-        service.service.createForUser(fixture.userId, request(fixture, 'gpu-denied', {
-          gpuPciAddresses: [GPU_PCI_ADDRESS],
-        })),
-        FailureCode.PermissionDenied,
-      );
-
-      access.grant.gpu = {
-        mode: GpuGrantMode.Pci,
-        pciAddresses: [GPU_PCI_ADDRESS],
-      };
-      const accepted = await service.service.createForUser(fixture.userId, request(fixture, 'first-address', {
-        gpuPciAddresses: [SHORT_GPU_PCI_ADDRESS],
-      }));
-      expect(accepted.status).toBe('pending');
-      expect(await database.selectFrom('control.container_gpu_claims')
-        .select('gpu_pci_address')
-        .execute()).toEqual([{ gpu_pci_address: GPU_PCI_ADDRESS }]);
-      await expect(database.insertInto('control.container_gpu_claims').values({
-        id: randomUUID(),
-        container_id: accepted.resourceId,
-        server_id: fixture.serverId,
-        gpu_pci_address: SHORT_GPU_PCI_ADDRESS,
-      }).execute()).rejects.toMatchObject({ code: '23514' });
-
-      await expectCode(
-        service.service.createForUser(fixture.userId, request(fixture, 'address-exhausted')),
-        FailureCode.NetworkAddressExhausted,
-      );
-      expect(await database.selectFrom('control.container_network_claims')
-        .select(['address', 'state'])
-        .execute()).toMatchObject([{ address: '10.40.0.2', state: 'active' }]);
-    });
-
-    await withPostgresTestDatabase(async ({ database }) => {
-      const fixture = await seedFixture(database, { gpuRuntimeAvailable: false });
-      const service = containerService(database, {
-        diskBytes: 10_000,
-        gpuMode: GpuGrantMode.All,
-      });
-      await expectCode(
-        service.service.createForUser(fixture.userId, request(fixture, 'runtime-unavailable', {
-          gpuPciAddresses: [GPU_PCI_ADDRESS],
-        })),
-        FailureCode.GpuRuntimeUnavailable,
-      );
-    });
-  });
-
-  it('enforces UNIQUE GPU claims and admin ownerId', async () => {
-    await withPostgresTestDatabase(async ({ database }) => {
-      const fixture = await seedFixture(database);
-      const service = containerService(database, { diskBytes: 10_000, gpuMode: GpuGrantMode.All });
-      await service.service.createForUser(fixture.userId, request(fixture, 'gpu-first', {
-        gpuPciAddresses: [GPU_PCI_ADDRESS],
-      }));
-      await expectCode(
-        service.service.createForUser(fixture.userId, request(fixture, 'gpu-second', {
-          gpuPciAddresses: [GPU_PCI_ADDRESS],
-        })),
-        FailureCode.GpuAlreadyClaimed,
-      );
-      const second = await service.service.createForUser(fixture.userId, request(fixture, 'gpu-empty'));
-      await expect(database.insertInto('control.container_gpu_claims').values({
-        id: randomUUID(),
-        container_id: second.resourceId,
-        server_id: fixture.serverId,
-        gpu_pci_address: GPU_PCI_ADDRESS,
-      }).execute()).rejects.toMatchObject({ code: '23505' });
-
-      const first = await database.selectFrom('control.containers')
-        .select('id')
-        .where('name', '=', 'gpu-first')
-        .executeTakeFirstOrThrow();
-      await database.updateTable('control.containers')
-        .set({ lifecycle_phase: 'failed', failure_code: 'TEST' })
-        .where('id', '=', first.id)
-        .execute();
-      expect(await database.selectFrom('control.container_gpu_claims')
-        .select('gpu_pci_address')
-        .where('gpu_pci_address', '=', GPU_PCI_ADDRESS)
-        .execute()).toEqual([]);
-    });
-
-    await withPostgresTestDatabase(async ({ database }) => {
-      const fixture = await seedFixture(database);
-      const service = containerService(database, { diskBytes: 10_000 });
-      await expectCode(
-        service.service.createForAdmin(fixture.userId, request(fixture, 'admin-no-owner')),
-        FailureCode.InvalidInput,
-      );
-      await expectCode(
-        service.service.createForUser(fixture.userId, request(fixture, 'user-owner', {
-          ownerId: fixture.userId,
-        })),
-        FailureCode.InvalidInput,
-      );
-      const ownerId = cryptoId();
-      await database.insertInto('iam.users').values({
-        id: ownerId,
-        numeric_id: 1002,
-        username: `owner-${ownerId.slice(0, 8)}`,
-        password_hash: 'unused',
-        display_name: 'Owner',
-        status: UserStatus.Active,
-        auth_version: 1,
-        authz_version: 1,
-      }).execute();
-      const accepted = await service.service.createForAdmin(fixture.userId, request(fixture, 'admin-owned', {
-        ownerId,
-      }));
-      const row = await database.selectFrom('control.containers')
-        .select(['owner_id', 'created_by'])
-        .where('id', '=', accepted.resourceId)
-        .executeTakeFirstOrThrow();
-      expect(row).toEqual({ owner_id: ownerId, created_by: fixture.userId });
-
-      const disabledId = cryptoId();
-      await database.insertInto('iam.users').values({
-        id: disabledId,
-        numeric_id: 1003,
-        username: `disabled-${disabledId.slice(0, 8)}`,
-        password_hash: 'unused',
-        display_name: 'Disabled',
-        status: UserStatus.Disabled,
-        auth_version: 1,
-        authz_version: 1,
-      }).execute();
-      await expect(service.service.createForAdmin(fixture.userId, request(fixture, 'disabled-owner', {
-        ownerId: disabledId,
-      }))).rejects.toMatchObject({ status: 404 });
     });
   });
 
@@ -606,17 +388,14 @@ function grant(options: GrantOptions): {
   cpuMillis: number;
   memBytes: number;
   diskBytes: number | null;
-  gpu: { mode: GpuGrantMode; pciAddresses: string[] };
+  extensionGrants: Record<string, unknown>;
 } {
   return {
     accessPhase: 'live',
     cpuMillis: 10_000,
     memBytes: 10_000,
     diskBytes: options.diskBytes,
-    gpu: {
-      mode: options.gpuMode ?? GpuGrantMode.All,
-      pciAddresses: options.gpuPciAddresses ?? [],
-    },
+    extensionGrants: {},
   };
 }
 
@@ -632,7 +411,7 @@ function request(
     rootSizeBytes: 100,
     cpuMillis: 500,
     memBytes: 500,
-    gpuPciAddresses: [],
+    extensions: {},
     powerIntent: ContainerPowerIntent.Stopped,
     ...overrides,
   };
@@ -679,7 +458,6 @@ async function seedFixture(
     storage_overcommit_ratio: options.overcommitRatio ?? 1,
     parent_interface: 'eth0',
     dns_servers: [gateway],
-    gpu_runtime_available: options.gpuRuntimeAvailable ?? true,
     status: options.serverStatus ?? ServerStatus.Online,
     last_seen_at: new Date(),
     last_error: null,
@@ -767,8 +545,6 @@ async function seedServerGrant(
   fixture: Fixture,
   options: {
     diskBytes: number;
-    gpuMode: GpuGrantMode;
-    gpuPciAddresses: string[];
   },
 ): Promise<void> {
   await database.insertInto('iam.server_grants').values({
@@ -779,8 +555,7 @@ async function seedServerGrant(
     cpu_millis: 10_000,
     mem_bytes: 10_000,
     disk_bytes: options.diskBytes,
-    gpu_mode: options.gpuMode,
-    gpu_pci_addresses: options.gpuPciAddresses,
+    extension_grants: {},
     expires_at: null,
   }).execute();
 }

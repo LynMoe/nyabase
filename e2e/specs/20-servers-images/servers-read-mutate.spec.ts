@@ -5,19 +5,21 @@ import { expectJson } from '../../support/http.js';
 type JsonRecord = Record<string, any>;
 
 test(
-  'user server catalog, GPU list, and storage-pool get are readable',
+  'user server catalog, extension devices, and storage-pool get are readable',
   { ...coverageCase('servers-user-read', 'servers-user-read-live') },
   async ({ adminApi, seedState }) => {
     const servers = await expectJson<JsonRecord[]>(await adminApi.get('/api/servers'));
     expect(Array.isArray(servers)).toBe(true);
     const detail = await adminApi.get(`/api/servers/${seedState.server.id}`);
     expect([200, 403, 404]).toContain(detail.status());
-    const userGpus = await adminApi.get(`/api/servers/${seedState.server.id}/gpus`);
-    expect([200, 403, 404]).toContain(userGpus.status());
-    const adminGpus = await expectJson<JsonRecord>(
-      await adminApi.get(`/api/admin/servers/${seedState.server.id}/gpus`),
+    const userDevices = await adminApi.get(
+      `/api/servers/${seedState.server.id}/extensions/nvidia-gpu/devices`,
     );
-    expect(adminGpus.items ?? adminGpus).toBeDefined();
+    expect([200, 403, 404]).toContain(userDevices.status());
+    const adminDevices = await expectJson<JsonRecord>(
+      await adminApi.get(`/api/admin/servers/${seedState.server.id}/extensions/nvidia-gpu/devices`),
+    );
+    expect(adminDevices.items ?? adminDevices).toBeDefined();
     const pool = await adminApi.get(
       `/api/servers/${seedState.server.id}/storage-pools/${seedState.storagePools.dirQuotaOnline.id}`,
     );

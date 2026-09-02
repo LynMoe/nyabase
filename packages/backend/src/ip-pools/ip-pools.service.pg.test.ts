@@ -106,7 +106,6 @@ async function seedServer(
     storage_overcommit_ratio: 1,
     parent_interface: 'eth0',
     dns_servers: [],
-    gpu_runtime_available: false,
     status: 'online',
     last_seen_at: null,
     last_error: null,

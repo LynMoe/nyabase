@@ -1,4 +1,4 @@
-import { Inject, Injectable } from '@nestjs/common';
+import { Inject, Injectable, Optional } from '@nestjs/common';
 import { createHash, randomUUID } from 'node:crypto';
 import { isIP } from 'node:net';
 import {
@@ -37,6 +37,8 @@ import type {
   ReconcileOutcome,
   ReconcileRunContext,
 } from './reconcile-worker.service.js';
+import { ExtensionDeviceClaimsRepository } from '../server-card-extensions/claims.repository.js';
+import { ServerCardExtensionRegistry } from '../server-card-extensions/registry.js';
 
 export const NODE_METRICS_PULL = Symbol('NODE_METRICS_PULL');
 export const PREFLIGHT_CHECKS = Symbol('PREFLIGHT_CHECKS');
@@ -60,12 +62,6 @@ export interface PreflightChecksPort {
   checkNetworkPrerequisites(
     serverId: string,
     evidence?: Record<string, unknown>,
-  ): Promise<Record<string, unknown>>;
-  checkGpuToolkit(
-    serverId: string,
-    resources: IncusSchema<'Resources'>,
-    evidence?: Record<string, unknown>,
-    expectedRevision?: number,
   ): Promise<Record<string, unknown>>;
   checkEgress(
     serverId: string,
@@ -159,7 +155,6 @@ function trustTokenReference(request: Record<string, unknown> | null): string | 
 interface ReportChecks {
   api: 'pass' | 'fail';
   parentInterface: 'pass' | 'fail';
-  gpuRuntime: 'pass' | 'fail' | 'not_applicable';
   nftables: 'pass' | 'fail';
   ipv4Filtering: 'pass' | 'fail';
   guestCanReachHost: 'pass' | 'fail';
@@ -199,6 +194,8 @@ export class ServerPreflightReconciler implements ManagedReconciler {
     @Inject(PREFLIGHT_CHECKS) private readonly checks: PreflightChecksPort,
     @Inject(SERVER_TRUST_TOKEN) private readonly trustTokens: ServerTrustTokenPort,
     private readonly config: NyabaseConfigService,
+    @Optional() private readonly extensions?: ServerCardExtensionRegistry,
+    @Optional() private readonly extensionClaims?: ExtensionDeviceClaimsRepository,
   ) {}
 
   supports(intent: IntentRecord): boolean {
@@ -712,19 +709,28 @@ export class ServerPreflightReconciler implements ManagedReconciler {
     const metricEvidence = nodeMetricsFailure ? undefined : nodeMetrics.report;
     const firstSamples = metricSamplesFrom(metricEvidence);
     const network = await this.checks.checkNetworkPrerequisites(server.id, metricEvidence);
-    const gpu =
-      metricEvidence || server.preflight_status !== 'passed'
-        ? await this.checks.checkGpuToolkit(
-            server.id,
-            resources.metadata,
-            metricEvidence,
-            expectedRevision,
-          )
-        : {
-            serverId: server.id,
-            gpuRuntime: 'unknown',
-            gpuCount: resources.metadata.gpu?.cards?.length ?? 0,
-          };
+    const extensionEvidence: Record<string, unknown> = {};
+    for (const ext of this.extensions?.all() ?? []) {
+      const enabled = this.extensionClaims
+        ? await this.extensionClaims.isEnabled(server.id, ext.id)
+        : false;
+      const contribution = await ext.contributePreflight({
+        serverId: server.id,
+        resources: resources.metadata,
+        metricSamples: firstSamples,
+        enabled,
+      });
+      extensionEvidence[ext.id] = contribution.evidence;
+      const existing = await this.database
+        .selectFrom('infra.server_extensions')
+        .select('extension_id')
+        .where('server_id', '=', server.id)
+        .where('extension_id', '=', ext.id)
+        .executeTakeFirst();
+      if (existing) {
+        await this.extensionClaims?.health(server.id, ext.id).write({ ...contribution.health });
+      }
+    }
     const poolNetworks = await this.listIpPoolNetworks(server.id);
     const parentInterface = server.parent_interface?.trim() || '';
     const parentLookup = parentInterface
@@ -748,14 +754,6 @@ export class ServerPreflightReconciler implements ManagedReconciler {
       throw new IncusError('PREFLIGHT_FAILED', 'managed_failure', {
         reason: lan.reason,
         network: JSON.stringify(network).slice(0, 2048),
-        gpu: JSON.stringify(gpu).slice(0, 2048),
-      });
-    }
-    if (gpu.gpuRuntime === 'fail') {
-      throw new IncusError('PREFLIGHT_FAILED', 'managed_failure', {
-        reason: 'gpu_toolkit_not_available',
-        network: JSON.stringify(network).slice(0, 2048),
-        gpu: JSON.stringify(gpu).slice(0, 2048),
       });
     }
     const reportEvidence: Record<string, unknown> = {
@@ -766,7 +764,7 @@ export class ServerPreflightReconciler implements ManagedReconciler {
         status: pool.status,
       })),
       network,
-      gpu,
+      extensions: extensionEvidence,
       firewall: environment?.firewall ?? null,
       nodeMetricsWarning: nodeMetricsFailure
         ? nodeMetricsFailure instanceof Error
@@ -779,12 +777,6 @@ export class ServerPreflightReconciler implements ManagedReconciler {
     const checks: ReportChecks = {
       api: 'pass',
       parentInterface: 'pass',
-      gpuRuntime:
-        gpu.gpuRuntime === 'not_applicable'
-          ? 'not_applicable'
-          : gpu.gpuRuntime === 'pass'
-            ? 'pass'
-            : 'fail',
       nftables: 'pass',
       ipv4Filtering: 'fail',
       guestCanReachHost: 'fail',
@@ -1007,7 +999,7 @@ export class ServerPreflightReconciler implements ManagedReconciler {
         });
       }
     }
-    return this.successReport(checks);
+    return this.successReport(checks, extensionEvidence);
   }
 
   private async pullNodeMetrics(
@@ -1189,9 +1181,8 @@ export class ServerPreflightReconciler implements ManagedReconciler {
     };
   }
 
-  private successReport(checks: ReportChecks): PreflightReport {
+  private successReport(checks: ReportChecks, extensions?: Record<string, unknown>): PreflightReport {
     const controlReady = Object.entries(checks).every(([name, value]) => {
-      if (name === 'gpuRuntime') return value === 'pass' || value === 'not_applicable';
       if (name === 'nodeMetrics') return value === 'pass' || value === 'warn';
       return value === 'pass';
     });
@@ -1201,6 +1192,7 @@ export class ServerPreflightReconciler implements ManagedReconciler {
       checks,
       failureCode: null,
       checkedAt: new Date().toISOString(),
+      ...(extensions ? { extensions } : {}),
     };
   }
 
@@ -1217,7 +1209,6 @@ export class ServerPreflightReconciler implements ManagedReconciler {
       checks: {
         api: 'fail',
         parentInterface: 'fail',
-        gpuRuntime: 'fail',
         nftables: 'fail',
         ipv4Filtering: 'fail',
         guestCanReachHost: 'fail',

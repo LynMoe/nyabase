@@ -4,13 +4,14 @@ import {
   Inject,
   Injectable,
   NotFoundException,
+  Optional,
 } from '@nestjs/common';
 import type { Kysely, Transaction } from 'kysely';
 import { randomUUID } from 'node:crypto';
 import {
   AuditAction,
   Capability,
-  GpuGrantMode,
+  FailureCode,
   SystemGroupKey,
   UserStatus,
   type GroupDto,
@@ -29,6 +30,9 @@ import {
 } from '../access/access-resolver.service.js';
 import { AccessRevocationGuardService } from '../access/access-revocation-guard.service.js';
 import { AuditService } from '../audit/audit.service.js';
+import { ExtensionDeviceClaimsRepository } from '../server-card-extensions/claims.repository.js';
+import { asJsonObject } from '../server-card-extensions/json.js';
+import { ServerCardExtensionRegistry } from '../server-card-extensions/registry.js';
 
 type GrantScope = 'user' | 'group';
 type GrantExecutor = Kysely<NyabaseDatabase> | Transaction<NyabaseDatabase>;
@@ -67,10 +71,7 @@ interface ServerGrantInput {
   cpuMillis: number | null;
   memBytes: number | null;
   diskBytes: number | null;
-  gpu: {
-    mode: GpuGrantMode;
-    pciAddresses: string[];
-  };
+  extensionGrants: Record<string, unknown>;
   expiresAt: string | null;
 }
 
@@ -82,6 +83,8 @@ export class GroupsService {
     private readonly access: AccessResolverService,
     private readonly audit: AuditService,
     private readonly revocation: AccessRevocationGuardService,
+    @Optional() private readonly extensions?: ServerCardExtensionRegistry,
+    @Optional() private readonly extensionClaims?: ExtensionDeviceClaimsRepository,
   ) {}
 
   async findAll(): Promise<GroupDto[]> {
@@ -664,12 +667,33 @@ export class GroupsService {
         .where('id', '=', serverId)
         .executeTakeFirst();
       if (!server) throw new NotFoundException('Server not found');
+      const parsedGrants: Record<string, unknown> = {};
+      for (const [extensionId, payload] of Object.entries(input.extensionGrants ?? {})) {
+        const ext = this.extensions?.get(extensionId);
+        if (!ext) {
+          throw new NotFoundException({
+            code: FailureCode.ExtensionUnknown,
+            message: 'Unknown server-card extension',
+            details: { extensionId },
+          });
+        }
+        const enabled = this.extensionClaims
+          ? await this.extensionClaims.isEnabled(serverId, extensionId, transaction)
+          : false;
+        if (!enabled) {
+          throw new ConflictException({
+            code: FailureCode.ExtensionGrantNotApplicable,
+            message: 'The server extension is not enabled',
+            details: { extensionId, serverId },
+          });
+        }
+        parsedGrants[extensionId] = ext.parseGrantPayload(payload);
+      }
       const values = {
         cpu_millis: input.cpuMillis,
         mem_bytes: input.memBytes,
         disk_bytes: input.diskBytes,
-        gpu_mode: input.gpu.mode,
-        gpu_pci_addresses: input.gpu.pciAddresses,
+        extension_grants: parsedGrants,
         expires_at: input.expiresAt,
         updated_at: new Date(),
       };
@@ -765,8 +789,7 @@ export class GroupsService {
     cpu_millis: number | null;
     mem_bytes: string | number | null;
     disk_bytes: string | number | null;
-    gpu_mode: string;
-    gpu_pci_addresses: string[];
+    extension_grants: unknown;
     expires_at: Date | string | null;
     created_at: Date;
     updated_at: Date;
@@ -779,10 +802,7 @@ export class GroupsService {
       cpuMillis: row.cpu_millis,
       memBytes: row.mem_bytes === null ? null : Number(row.mem_bytes),
       diskBytes: row.disk_bytes === null ? null : Number(row.disk_bytes),
-      gpu: {
-        mode: row.gpu_mode as GpuGrantMode,
-        pciAddresses: [...row.gpu_pci_addresses],
-      },
+      extensionGrants: asJsonObject(row.extension_grants),
       expiresAt: row.expires_at ? new Date(row.expires_at).toISOString() : null,
       createdAt: row.created_at.toISOString(),
       updatedAt: row.updated_at.toISOString(),

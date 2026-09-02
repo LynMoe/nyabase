@@ -15,7 +15,6 @@ import {
 import {
   zCreateContainerRequest,
   zCreateExecSessionRequest,
-  zPatchContainerGpuRequest,
   zPatchContainerLimitsRequest,
   zPatchContainerRootSizeRequest,
 } from '@nyabase/common';
@@ -89,10 +88,15 @@ export class ContainersController {
     return this.containers.resizeRootForUser(id, user.id, zPatchContainerRootSizeRequest.parse(body));
   }
 
-  @Patch(':containerId/gpu')
+  @Patch(':containerId/extensions/:extensionId')
   @HttpCode(HttpStatus.ACCEPTED)
-  gpu(@Param('containerId') id: string, @CurrentUser() user: UserRecord, @Body() body: unknown) {
-    return this.containers.updateGpuForUser(id, user.id, zPatchContainerGpuRequest.parse(body));
+  extension(
+    @Param('containerId') id: string,
+    @Param('extensionId') extensionId: string,
+    @CurrentUser() user: UserRecord,
+    @Body() body: unknown,
+  ) {
+    return this.containers.mutateExtensionForUser(id, user.id, extensionId, body);
   }
 
   @Get(':containerId/volumes')

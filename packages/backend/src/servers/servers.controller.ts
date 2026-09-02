@@ -33,11 +33,6 @@ export class ServersController {
     return this.servers.findUserDtoById(id);
   }
 
-  @Get(':id/gpus')
-  async gpus(@Param('id') id: string, @CurrentUser() user: UserRecord) {
-    return { items: await this.servers.listGpusForUser(user.id, id) };
-  }
-
   private async requireAccess(userId: string, serverId: string): Promise<void> {
     if (!(await this.access.listAccessibleServers(userId)).includes(serverId)) {
       throw new NotFoundException('Server not found');

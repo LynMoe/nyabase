@@ -38,9 +38,10 @@ export function isCurrentPrincipalAccessQuery(queryKey: readonly unknown[]): boo
       || root === 'container' || root === 'volumes' || root === 'shared-backends'
       || root === 'storage-pools' || root === 'container-intents'
       || root === 'container-attachments' || root === 'resource-intent-failures'
-      || root === 'volume-intents' || root === 'server-gpus')
+      || root === 'volume-intents')
     && a === 'user'
   ) return true;
+  if (root === 'server-card-extension' && queryKey[3] === 'user') return true;
   if (root === 'http-proxy' && b === 'user') return true;
   return false;
 }

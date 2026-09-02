@@ -8,22 +8,28 @@ import { AuditService } from '../audit/audit.service.js';
 import {
   applyManagedFields,
   compareManagedFields,
+  CORE_MANAGED_FIELD_OWNERSHIP,
   deriveInstanceName,
   IncusError,
   isMissingCustomVolumeError,
   observeRootQuotaPending,
   requestAndWait,
   readAfterTimeout,
-  TEMPORARY_MANAGED_FIELD_OWNERSHIP,
   type IncusClientPort,
   type IncusSchema,
+  type ManagedFieldOwnership,
   type ManagedInstanceDocument,
 } from '../incus/index.js';
 import {
   buildDesiredInstanceSpec,
+  mergeInstanceSpecContributions,
   type DesiredInstanceSpec,
   type InstanceSpecAttachmentInput,
 } from '../incus/instance-spec.js';
+import { FailureCode, isPackageHttpError } from '@nyabase/common';
+import { asJsonObject } from '../server-card-extensions/json.js';
+import { ServerCardExtensionRegistry } from '../server-card-extensions/registry.js';
+import { ExtensionDeviceClaimsRepository } from '../server-card-extensions/claims.repository.js';
 import {
   CONTAINER_SSH_STATE,
   IncusContainerSshStateAdapter,
@@ -61,8 +67,7 @@ interface ContainerRow {
   root_size_bytes: string | number;
   cpu_millis: number;
   mem_bytes: string | number;
-  nvidia_runtime: boolean;
-  gpu_pci_addresses: string[];
+  extensions: unknown;
   nesting: boolean;
   syscall_intercept: boolean;
   power_intent: 'running' | 'stopped';
@@ -250,8 +255,68 @@ export class ContainerReconciler implements ManagedReconciler {
     @Optional() @Inject(CONTAINER_SSH_STATE) sshState?: ContainerSshStatePort,
     @Optional() private readonly proxySnapshots?: ProxySnapshotNotifierService,
     @Optional() private readonly audit?: AuditService,
+    @Optional() private readonly extensions?: ServerCardExtensionRegistry,
+    @Optional() private readonly extensionClaims?: ExtensionDeviceClaimsRepository,
   ) {
     this.sshState = sshState ?? new IncusContainerSshStateAdapter();
+  }
+
+  private ownership(): ManagedFieldOwnership {
+    return this.extensions?.managedFieldOwnership() ?? CORE_MANAGED_FIELD_OWNERSHIP;
+  }
+
+  private async desiredSpec(
+    row: ContainerRow,
+    attachments: readonly InstanceSpecAttachmentInput[],
+  ): Promise<DesiredInstanceSpec> {
+    const base = buildDesiredInstanceSpec({
+      container: {
+        id: row.id,
+        serverId: row.server_id,
+        generation: row.generation,
+        imageFingerprint: row.image_fingerprint,
+        cpuMillis: row.cpu_millis,
+        memBytes: row.mem_bytes,
+        nesting: row.nesting,
+        syscallIntercept: row.syscall_intercept,
+        rootPool: row.root_pool_name,
+        rootSizeBytes: row.root_size_bytes,
+        routedIp: row.routed_ip ?? '',
+      },
+      server: {
+        id: row.server_id,
+        parentInterface: row.parent_interface ?? '',
+      },
+      attachments,
+    });
+    const bag = asJsonObject(row.extensions);
+    const contributions = [];
+    for (const ext of this.extensions?.all() ?? []) {
+      const enabled = this.extensionClaims
+        ? await this.extensionClaims.isEnabled(row.server_id, ext.id)
+        : false;
+      if (!enabled) continue;
+      if (bag[ext.id] !== undefined && (typeof bag[ext.id] !== 'object' || bag[ext.id] === null)) {
+        this.logger.warn(`Ignoring unknown extension state shape for ${ext.id} on ${row.id}`);
+        continue;
+      }
+      try {
+        contributions.push(ext.contributeInstanceSpec({
+          containerId: row.id,
+          serverId: row.server_id,
+          state: bag[ext.id],
+        }));
+      } catch (error) {
+        if (isPackageHttpError(error)) throw error;
+        throw error;
+      }
+    }
+    for (const key of Object.keys(bag)) {
+      if (!this.extensions?.get(key)) {
+        this.logger.warn(`Ignoring unknown extension key ${key} on container ${row.id}`);
+      }
+    }
+    return mergeInstanceSpecContributions(base, contributions);
   }
 
   supports(intent: IntentRecord): boolean {
@@ -329,37 +394,30 @@ export class ContainerReconciler implements ManagedReconciler {
       );
       desiredAttachments = beforePut.desired;
     }
-    const desired = buildDesiredInstanceSpec({
-      container: {
-        id: row.id,
-        serverId: row.server_id,
-        generation: row.generation,
-        imageFingerprint: row.image_fingerprint,
-        cpuMillis: row.cpu_millis,
-        memBytes: row.mem_bytes,
-        nvidiaRuntime: row.nvidia_runtime,
-        nesting: row.nesting,
-        syscallIntercept: row.syscall_intercept,
-        gpuPciAddresses: row.gpu_pci_addresses,
-        rootPool: row.root_pool_name,
-        rootSizeBytes: row.root_size_bytes,
-        routedIp: row.routed_ip,
-      },
-      server: {
-        id: row.server_id,
-        parentInterface: row.parent_interface,
-      },
-      attachments: desiredAttachments.map<InstanceSpecAttachmentInput>((attachment) => ({
-        id: attachment.id,
-        containerPath: attachment.container_path,
-        readOnly: attachment.read_only,
-        volume: {
-          id: attachment.volume_id,
-          incusName: attachment.incus_name,
-          poolName: attachment.pool_name,
-        },
-      })),
-    });
+    let desired: DesiredInstanceSpec;
+    try {
+      desired = await this.desiredSpec(
+        row,
+        desiredAttachments.map<InstanceSpecAttachmentInput>((attachment) => ({
+          id: attachment.id,
+          containerPath: attachment.container_path,
+          readOnly: attachment.read_only,
+          volume: {
+            id: attachment.volume_id,
+            incusName: attachment.incus_name,
+            poolName: attachment.pool_name,
+          },
+        })),
+      );
+    } catch (error) {
+      if (isPackageHttpError(error)) {
+        return {
+          outcome: 'failed',
+          failure: failure(error.code, error.message, error.details),
+        };
+      }
+      throw error;
+    }
     const expectedName = deriveInstanceName(row.id);
     let actual = await this.findExpectedOrIdentity(context.client, expectedName, row);
     if (shouldDelete) {
@@ -419,7 +477,7 @@ export class ContainerReconciler implements ManagedReconciler {
     }
 
     const state = await this.readState(context.client, expectedName, actual.document.state);
-    const diff = compareManagedFields(actual.document, desired, TEMPORARY_MANAGED_FIELD_OWNERSHIP);
+    const diff = compareManagedFields(actual.document, desired, this.ownership());
     if (diff.kind === 'managed_failure') {
       return {
         outcome: 'failed',
@@ -434,12 +492,12 @@ export class ContainerReconciler implements ManagedReconciler {
     }
     this.assertRootResizeAllowed(row, actual.document, state, desired);
     if (!diff.empty) {
-      if (running(state) && this.gpuRuntimeChanged(diff)) {
+      if (running(state) && this.extensions?.requiresStop(diff)) {
         return {
           outcome: 'failed',
           failure: failure(
-            'GPU_CHANGE_REQUIRES_STOP',
-            'NVIDIA runtime or GPU assignment changes require a stopped instance',
+            FailureCode.ExtensionMutationRequiresStop,
+            'Extension assignment changes require a stopped instance',
           ),
         };
       }
@@ -462,7 +520,7 @@ export class ContainerReconciler implements ManagedReconciler {
                 const merged = applyManagedFields(
                   document as ManagedInstanceDocument,
                   desired,
-                  TEMPORARY_MANAGED_FIELD_OWNERSHIP,
+                  this.ownership(),
                 );
                 document.config = merged.config;
                 document.devices = merged.devices;
@@ -476,7 +534,7 @@ export class ContainerReconciler implements ManagedReconciler {
             const afterDiff = compareManagedFields(
               after.document,
               desired,
-              TEMPORARY_MANAGED_FIELD_OWNERSHIP,
+              this.ownership(),
             );
             if (afterDiff.kind !== 'empty') {
               throw new Error('INSTANCE_UPDATE_NOT_CONFIRMED');
@@ -527,7 +585,7 @@ export class ContainerReconciler implements ManagedReconciler {
     const verificationDiff = compareManagedFields(
       verified.document,
       desired,
-      TEMPORARY_MANAGED_FIELD_OWNERSHIP,
+      this.ownership(),
     );
     if (verificationDiff.kind !== 'empty') {
       return {
@@ -684,27 +742,9 @@ export class ContainerReconciler implements ManagedReconciler {
       return true;
     }
     const attachments = await this.readAttachments(row.id, row.server_id);
-    const desired = buildDesiredInstanceSpec({
-      container: {
-        id: full.id,
-        serverId: full.server_id,
-        generation: full.generation,
-        imageFingerprint: full.image_fingerprint,
-        cpuMillis: full.cpu_millis,
-        memBytes: full.mem_bytes,
-        nvidiaRuntime: full.nvidia_runtime,
-        nesting: full.nesting,
-        syscallIntercept: full.syscall_intercept,
-        gpuPciAddresses: full.gpu_pci_addresses,
-        rootPool: full.root_pool_name,
-        rootSizeBytes: full.root_size_bytes,
-        routedIp: full.routed_ip,
-      },
-      server: {
-        id: full.server_id,
-        parentInterface: full.parent_interface,
-      },
-      attachments: attachments
+    const desired = await this.desiredSpec(
+      full,
+      attachments
         .filter((attachment) => attachment.bind_state !== 'detaching')
         .map<InstanceSpecAttachmentInput>((attachment) => ({
         id: attachment.id,
@@ -716,11 +756,11 @@ export class ContainerReconciler implements ManagedReconciler {
           poolName: attachment.pool_name,
         },
       })),
-    });
+    );
     return compareManagedFields(
       actual.document,
       desired,
-      TEMPORARY_MANAGED_FIELD_OWNERSHIP,
+      this.ownership(),
     ).kind !== 'empty';
   }
 
@@ -740,8 +780,7 @@ export class ContainerReconciler implements ManagedReconciler {
         'c.root_size_bytes as root_size_bytes',
         'c.cpu_millis as cpu_millis',
         'c.mem_bytes as mem_bytes',
-        'c.nvidia_runtime as nvidia_runtime',
-        'c.gpu_pci_addresses as gpu_pci_addresses',
+        'c.extensions as extensions',
         'c.nesting as nesting',
         'c.syscall_intercept as syscall_intercept',
         'c.power_intent as power_intent',
@@ -1254,11 +1293,6 @@ export class ContainerReconciler implements ManagedReconciler {
     // (create starts stopped; reconcilePower then starts), and reusing it marks SSH as
     // container_stopped while the instance is already Running.
     return (await client.getInstanceState(name)).metadata;
-  }
-
-  private gpuRuntimeChanged(diff: ReturnType<typeof compareManagedFields>): boolean {
-    if (Object.prototype.hasOwnProperty.call(diff.config, 'nvidia.runtime')) return true;
-    return Object.keys(diff.devices).some((name) => name.startsWith('gpu'));
   }
 
   private assertRootResizeAllowed(

@@ -22,7 +22,7 @@ export interface NewContainerInput {
   rootSizeBytes: number;
   cpuMillis: number;
   memBytes: number;
-  gpuPciAddresses: string[];
+  extensions: Record<string, unknown>;
   powerIntent: 'running' | 'stopped';
   networkKey: string;
   address: string;
@@ -103,8 +103,7 @@ export class ContainerControlRepository {
         root_used_bytes: null,
         cpu_millis: input.cpuMillis,
         mem_bytes: input.memBytes,
-        nvidia_runtime: input.gpuPciAddresses.length > 0,
-        gpu_pci_addresses: input.gpuPciAddresses,
+        extensions: input.extensions,
         nesting: true,
         syscall_intercept: true,
         power_intent: input.powerIntent,
@@ -132,16 +131,6 @@ export class ContainerControlRepository {
             cleanup_payload_json: null,
           })
           .execute();
-        if (input.gpuPciAddresses.length > 0) {
-          await executor.insertInto('control.container_gpu_claims')
-            .values(input.gpuPciAddresses.map((address) => ({
-              id: randomUUID(),
-              container_id: row.id,
-              server_id: input.serverId,
-              gpu_pci_address: address,
-            })))
-            .execute();
-        }
         await executor.insertInto('control.container_ssh_routes')
           .values({
             container_id: row.id,
@@ -168,8 +157,7 @@ export class ContainerControlRepository {
       mem_bytes?: number;
       root_size_bytes?: number;
       root_size_pending_bytes?: number | null;
-      gpu_pci_addresses?: string[];
-      nvidia_runtime?: boolean;
+      extensions?: Record<string, unknown>;
       power_intent?: 'running' | 'stopped';
       lifecycle_phase?: 'provisioning' | 'active' | 'deleting' | 'failed';
       failure_code?: string | null;
@@ -205,32 +193,6 @@ export class ContainerControlRepository {
     executor: ContainerExecutor,
   ) {
     return this.updateDesired(id, generation, values, executor);
-  }
-
-  async replaceGpuClaims(
-    id: string,
-    serverId: string,
-    addresses: readonly string[],
-    executor: ContainerExecutor,
-  ): Promise<void> {
-    await executor.deleteFrom('control.container_gpu_claims')
-      .where('container_id', '=', id)
-      .execute();
-    if (addresses.length === 0) return;
-    await executor.insertInto('control.container_gpu_claims')
-      .values(addresses.map((address) => ({
-        id: randomUUID(),
-        container_id: id,
-        server_id: serverId,
-        gpu_pci_address: address,
-      })))
-      .execute();
-  }
-
-  async releaseGpuClaims(id: string, executor: ContainerExecutor): Promise<void> {
-    await executor.deleteFrom('control.container_gpu_claims')
-      .where('container_id', '=', id)
-      .execute();
   }
 
   async findAvailableAddress(
@@ -377,24 +339,6 @@ export class ContainerControlRepository {
       .where('lifecycle_phase', 'not in', ['failed', 'deleting'])
       .executeTakeFirstOrThrow()
       .then((row) => Number(row.count));
-  }
-
-  claimedGpuAddresses(
-    serverId: string,
-    executor: ContainerExecutor = this.database,
-    excludeContainerId?: string,
-  ) {
-    let query = executor.selectFrom('control.container_gpu_claims as gpu')
-      .innerJoin('control.containers as container', 'container.id', 'gpu.container_id')
-      .select('gpu.gpu_pci_address')
-      .where('gpu.server_id', '=', serverId)
-      .where('container.server_id', '=', serverId)
-      .where('container.lifecycle_phase', 'not in', ['failed', 'deleting']);
-    if (excludeContainerId) {
-      query = query.where('gpu.container_id', '!=', excludeContainerId);
-    }
-    return query.execute()
-      .then((rows) => rows.map((row) => row.gpu_pci_address));
   }
 
   private route(row: {

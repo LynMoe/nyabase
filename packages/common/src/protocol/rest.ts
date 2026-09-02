@@ -20,8 +20,8 @@ import type {
   LocalVolumeScope,
   NodeMetricsHealth,
   PreflightReport,
-  ServerGrantGpu,
 } from './rest-schema.js';
+import type { OpaqueExtensionMap } from './server-card-extensions.js';
 import type { ConfigSourceName, ConfigValueKind } from '../config/definition.js';
 
 export type {
@@ -48,7 +48,7 @@ export type {
   NodeMetricsCreateConfig,
   NodeMetricsPatchConfig,
   PatchAdminGroupRequest,
-  PatchContainerGpuRequest,
+  PatchContainerExtensionRequest,
   PatchContainerLimitsRequest,
   PatchContainerRootSizeRequest,
   PatchImageRequest,
@@ -57,6 +57,7 @@ export type {
   PatchSharedBackendRequest,
   PatchStoragePoolRequest,
   PatchSystemSettingsRequest,
+  PatchServerExtensionRequest,
   PatchVolumeRequest,
   PreflightReport,
   PutImageAssignmentRequest,
@@ -68,7 +69,6 @@ export type {
   RotateIncusClientCertificateRequest,
   RotateRefreshTokenRequest,
   RunPreflightRequest,
-  ServerGrantGpu,
   ServerNetworkFields,
   SharedVolumeScope,
   UpdateGroupRequest,
@@ -284,7 +284,8 @@ export interface ServerDto {
   storageOvercommitRatio: number;
   parentInterface: string;
   dnsServers: string[];
-  gpuRuntimeAvailable: boolean;
+  enabledExtensions: string[];
+  extensionHealth: Record<string, OpaqueExtensionMap>;
   status: ServerStatus;
   lastSeenAt: string | null;
   lastError: string | null;
@@ -297,17 +298,6 @@ export interface ServerDto {
   updatedAt: string;
 }
 
-export interface ServerGpuDto {
-  /** nvidia-smi index; null when node-exporter has not reported this PCI address. */
-  index: number | null;
-  pciAddress: string;
-  model: string;
-}
-
-export interface ServerGpusResponseDto {
-  items: ServerGpuDto[];
-}
-
 export interface UserServerDto {
   id: string;
   name: string;
@@ -315,6 +305,7 @@ export interface UserServerDto {
   status: ServerStatus;
   lastSeenAt: string | null;
   preflightStatus: PreflightStatus;
+  enabledExtensions: string[];
 }
 
 export interface ServerConnectionDto {
@@ -576,7 +567,7 @@ export interface ServerGrantDto {
   cpuMillis: number | null;
   memBytes: number | null;
   diskBytes: number | null;
-  gpu: ServerGrantGpu;
+  extensionGrants: OpaqueExtensionMap;
   expiresAt: string | null;
   createdAt: string;
   updatedAt: string;
@@ -610,7 +601,7 @@ export interface EffectiveServerAccessDto {
   cpuMillis: number | null;
   memBytes: number | null;
   diskBytes: number | null;
-  gpu: ServerGrantGpu;
+  extensionGrants: OpaqueExtensionMap;
   expiresAt: string | null;
   purgeAt: string | null;
   accessPhase: 'live' | 'grace';
@@ -630,7 +621,6 @@ export type ActionBlockedReason =
   | 'instance_missing'
   | 'permission_denied'
   | 'storage_capacity'
-  | 'gpu_inventory_unavailable'
   | 'image_not_available';
 
 export interface ActionAvailability {
@@ -678,8 +668,7 @@ export interface ContainerDto {
   rootCapability: StoragePoolCapabilityDto;
   cpuMillis: number;
   memBytes: number;
-  gpuPciAddresses: string[];
-  nvidiaRuntime: boolean;
+  extensions: OpaqueExtensionMap;
   powerIntent: ContainerPowerIntent;
   lifecyclePhase: ContainerPhase;
   routedIp: string | null;
@@ -786,30 +775,12 @@ export interface HostMetricsDto {
   disks: HostDiskMetrics[];
 }
 
-export interface GpuMetrics {
-  gpuPciAddress: string;
-  gpuUuid: string | null;
-  displayIndex: number | null;
-  model: string;
-  memoryTotalBytes: number;
-  utilization: MetricSeries;
-  memoryUsed: MetricSeries;
-  temperature: MetricSeries;
-  power: MetricSeries;
-}
-
-export interface GpuMetricsDto {
-  source: NodeMetricsHealthDto;
-  gpus: GpuMetrics[];
-}
-
 export interface UserMetrics {
   userId: string;
   username: string;
   displayName: string;
   cpu: MetricSeries;
   memoryUsed: MetricSeries;
-  gpuMemoryUsed: MetricSeries;
   diskBytesPerSecond: MetricSeries;
   networkBytesPerSecond: MetricSeries;
 }
@@ -824,7 +795,6 @@ export interface ContainerMetrics {
   ownerId: string;
   cpu: MetricSeries;
   memoryUsed: MetricSeries;
-  gpuMemoryUsed: MetricSeries;
   diskBytesPerSecond: MetricSeries;
   networkBytesPerSecond: MetricSeries;
 }

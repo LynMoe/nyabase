@@ -12,16 +12,14 @@ import {
   sshStatusLabel,
 } from '../../lib/status-labels.js';
 import { useAuthStore } from '../../store/auth.js';
-import { formatGpuSelectionLabel } from './gpu-picker.js';
+import { ExtensionSlots } from '../../extensions/slots.js';
 
 export function OverviewPanel({
   container,
-  gpuInventory,
   onRepairSsh,
   repairPending,
 }: {
   container: ContainerDto;
-  gpuInventory: Array<{ index: number | null; pciAddress: string; model: string }>;
   onRepairSsh: () => void;
   repairPending: boolean;
 }) {
@@ -133,7 +131,10 @@ export function OverviewPanel({
         <CardContent className="grid gap-3 sm:grid-cols-2">
           <Info label="CPU" value={formatCpu(container.cpuMillis)} />
           <Info label="内存" value={approxGibHint(container.memBytes).replace(/^约 /, '')} />
-          <Info label="GPU" value={formatGpuSelectionLabel(container.gpuPciAddresses, gpuInventory)} />
+          <ExtensionSlots
+            area="container.overview"
+            ctx={{ value: container.extensions, serverId: container.serverId }}
+          />
           <Info
             label="系统盘"
             value={`${approxGibHint(container.rootSizeBytes).replace(/^约 /, '')}${container.rootSizePendingBytes === null ? '' : `（待应用 ${approxGibHint(container.rootSizePendingBytes).replace(/^约 /, '')}）`}`}

@@ -65,7 +65,8 @@ const server = {
   storageOvercommitRatio: 1,
   parentInterface: 'vmbr0',
   dnsServers: ['1.1.1.1'],
-  gpuRuntimeAvailable: true,
+  enabledExtensions: ['nvidia-gpu'],
+  extensionHealth: { 'nvidia-gpu': { runtimeReady: true } },
   status: 'online',
   lastSeenAt: ISO,
   lastError: null,
@@ -90,6 +91,7 @@ const userServer = {
   status: server.status,
   lastSeenAt: server.lastSeenAt,
   preflightStatus: server.preflightStatus,
+  enabledExtensions: server.enabledExtensions,
 };
 
 const pool = {
@@ -131,8 +133,7 @@ const container = {
   rootCapability: capability,
   cpuMillis: 2000,
   memBytes: 4 * 1024 ** 3,
-  gpuPciAddresses: [],
-  nvidiaRuntime: false,
+  extensions: {},
   powerIntent: 'running',
   lifecyclePhase: 'active',
   routedIp: '10.20.0.15',
@@ -288,8 +289,20 @@ function mockApi(urlString, method) {
       report: { controlReady: true, checks: { incus: 'pass', bridge: 'pass' }, failureCode: null },
     });
   }
-  if (p === '/admin/servers/srv-1/gpus' || p === '/servers/srv-1/gpus') {
-    return json({ items: [{ index: 0, pciAddress: '0000:01:00.0', model: 'RTX 4090' }] });
+  if (p === '/admin/servers/srv-1/extensions') {
+    return json([{
+      extensionId: 'nvidia-gpu',
+      displayName: 'NVIDIA GPU',
+      enabled: true,
+      health: { runtimeReady: true },
+      occupiedDeviceCount: 0,
+    }]);
+  }
+  if (
+    p === '/admin/servers/srv-1/extensions/nvidia-gpu/devices'
+    || p === '/servers/srv-1/extensions/nvidia-gpu/devices'
+  ) {
+    return json({ items: [{ pciAddress: '0000:01:00.0', model: 'RTX 4090' }], enabled: true });
   }
 
   if (p === '/containers' || p === '/admin/containers') return json([container]);

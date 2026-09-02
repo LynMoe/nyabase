@@ -5,8 +5,9 @@ import {
   type TLSSocket,
 } from 'node:tls';
 import { request } from 'node:https';
-import { Inject, Injectable } from '@nestjs/common';
+import { Inject, Injectable, Optional } from '@nestjs/common';
 import {
+  CORE_NODE_METRIC_CATALOG,
   MAX_NODE_METRICS_BODY_BYTES,
   NODE_METRICS_CONNECT_TIMEOUT_MS,
   NODE_METRICS_ENDPOINT_PATH,
@@ -14,8 +15,10 @@ import {
   NODE_METRICS_REQUEST_TIMEOUT_MS,
   NODE_METRICS_RESPONSE_HEADER_TIMEOUT_MS,
   parseOpenMetrics,
+  type NodeMetricCatalog,
   type NodeMetricSample,
 } from '@nyabase/common';
+import { NODE_METRIC_CATALOG } from '../server-card-extensions/types.js';
 import type { Kysely } from 'kysely';
 import type { NyabaseDatabase } from '../persistence-pg/database.types.js';
 import { PG_DATABASE } from '../persistence-pg/tokens.js';
@@ -53,7 +56,12 @@ export class AuthenticatedNodeMetricsPullAdapter implements NodeMetricsPullPort 
   constructor(
     @Inject(PG_DATABASE) private readonly database: Kysely<NyabaseDatabase>,
     private readonly config: NyabaseConfigService,
-  ) {}
+    @Optional() @Inject(NODE_METRIC_CATALOG) catalog?: NodeMetricCatalog,
+  ) {
+    this.catalog = catalog ?? CORE_NODE_METRIC_CATALOG;
+  }
+
+  private readonly catalog: NodeMetricCatalog;
 
   async pull(
     serverId: string,
@@ -80,7 +88,7 @@ export class AuthenticatedNodeMetricsPullAdapter implements NodeMetricsPullPort 
     const normalizedExpectedFingerprint = normalizePinnedFingerprint(expectedFingerprint);
     const token = decryptSecret(tokenCiphertext, this.config);
     const body = await this.fetch(url, token, normalizedExpectedFingerprint, signal);
-    const samples = parseMetrics(body);
+    const samples = parseMetrics(body, this.catalog);
     return {
       status: 'online',
       report: {
@@ -310,10 +318,10 @@ function normalizePinnedFingerprint(value: string | null): string {
   }
 }
 
-function parseMetrics(body: string): NodeMetricSample[] {
+function parseMetrics(body: string, catalog: NodeMetricCatalog): NodeMetricSample[] {
   try {
     const startedAt = Date.now();
-    const samples = parseOpenMetrics(body);
+    const samples = parseOpenMetrics(body, catalog);
     if (Date.now() - startedAt > NODE_METRICS_PARSE_TIMEOUT_MS) {
       throw new Error('OpenMetrics parsing exceeded its time budget');
     }

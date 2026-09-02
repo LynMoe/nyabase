@@ -273,7 +273,7 @@ test(
         rootSizeBytes: 2 * 1024 * 1024 * 1024,
         cpuMillis: 500,
         memBytes: 512 * MiB,
-        gpuPciAddresses: [],
+        extensions: {},
         powerIntent: 'stopped' as const,
       };
       const [createA, createB] = await Promise.all([

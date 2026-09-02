@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { ConflictException, ForbiddenException } from '@nestjs/common';
 import type { Kysely } from 'kysely';
-import { Capability, GpuGrantMode, ServerStatus, UserStatus } from '@nyabase/common';
+import { Capability, ServerStatus, UserStatus } from '@nyabase/common';
 import { describe, expect, it } from 'vitest';
 import { InfrastructureRepository } from '../infrastructure/infrastructure.repository.js';
 import type { NyabaseDatabase } from '../persistence-pg/database.types.js';
@@ -134,7 +134,7 @@ describePg('PostgreSQL canonical authorization', () => {
         cpuMillis: null,
         memBytes: null,
         diskBytes: 10,
-        gpu: { mode: GpuGrantMode.None, pciAddresses: [] },
+        extensionGrants: {},
         expiresAt: null,
       };
 
@@ -200,7 +200,6 @@ async function seedServer(database: Kysely<NyabaseDatabase>, name: string): Prom
     storage_overcommit_ratio: 1,
     parent_interface: 'eth0',
     dns_servers: ['10.20.0.1'],
-    gpu_runtime_available: false,
     status: ServerStatus.Unknown,
     last_seen_at: null,
     last_error: null,
@@ -234,8 +233,7 @@ function grant(input: {
     cpu_millis: null,
     mem_bytes: null,
     disk_bytes: input.disk_bytes,
-    gpu_mode: GpuGrantMode.None,
-    gpu_pci_addresses: [],
+    extension_grants: {},
     expires_at: null,
   };
 }
