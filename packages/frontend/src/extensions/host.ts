@@ -1,3 +1,4 @@
+import { useQuery } from '@tanstack/react-query';
 import { api } from '../lib/api.js';
 import { toast } from '../hooks/use-toast.js';
 import { FormField } from '../components/layout/form-field.js';
@@ -24,6 +25,7 @@ export const frontendExtensionHost: FrontendExtensionHost = {
   extensionDevicesKey(extensionId, serverId, admin) {
     return ['server-card-extension', extensionId, 'devices', admin ? 'admin' : 'user', serverId];
   },
+  useQuery,
   toast(opts) {
     toast({
       title: opts.title,

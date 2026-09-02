@@ -3,6 +3,7 @@ import { NODE_METRIC_DEFINITIONS } from '@nyabase/common';
 import { CORE_MANAGED_FIELD_OWNERSHIP } from '../incus/compare-managed-fields.js';
 import { assertNoPrefixCollision } from './ownership.js';
 import { ServerCardExtensionRegistry } from './registry.js';
+import { RuntimeModule } from '../runtime/runtime.module.js';
 import { ServerCardExtensionsModule } from './server-card-extensions.module.js';
 import { NODE_METRIC_CATALOG, SERVER_CARD_EXTENSIONS, type ServerCardExtension } from './types.js';
 
@@ -130,6 +131,18 @@ describe('assertNoPrefixCollision', () => {
 });
 
 describe('ServerCardExtensionsModule.register', () => {
+  it('imports RuntimeModule so inventory tokens resolve', () => {
+    const mod = ServerCardExtensionsModule.register([]);
+    const imported = (mod.imports ?? []).map((entry) => {
+      if (entry && typeof entry === 'object' && 'forwardRef' in entry) {
+        const ref = (entry as { forwardRef?: () => unknown }).forwardRef;
+        return typeof ref === 'function' ? ref() : entry;
+      }
+      return entry;
+    });
+    expect(imported).toContain(RuntimeModule);
+  });
+
   it('registers an empty host and merges the core metric catalog', () => {
     const mod = ServerCardExtensionsModule.register([]);
     expect(mod.global).toBe(true);

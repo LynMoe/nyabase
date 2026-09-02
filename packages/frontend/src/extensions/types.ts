@@ -27,6 +27,11 @@ import type {
 export interface FrontendExtensionHost {
   readonly api: typeof api;
   extensionDevicesKey(extensionId: string, serverId: string, admin: boolean): readonly unknown[];
+  useQuery: <T>(options: {
+    queryKey: readonly unknown[];
+    queryFn: () => Promise<T>;
+    enabled?: boolean;
+  }) => { data: T | undefined; isPending: boolean; isError: boolean };
   toast: (opts: { title?: string; description?: string; variant?: string }) => void;
   readonly ui: {
     FormField: typeof FormField;

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useMemo } from 'react';
 import type { GpuPickerMode } from '../grant-state.js';
 import { NVIDIA_GPU_EXTENSION_ID } from '../id.js';
 import { GpuGrantMode, type NvidiaGpuDeviceDto, type NvidiaGpuGrant } from '../schema.js';
@@ -91,36 +91,17 @@ export function GpuPicker({
   idPrefix?: string;
   label?: string;
 }) {
-  const [inventory, setInventory] = useState<NvidiaGpuDeviceDto[]>([]);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState(false);
-
-  useEffect(() => {
-    if (!serverId) return;
-    let cancelled = false;
-    setLoading(true);
-    setError(false);
-    void host.extensionDevicesKey(NVIDIA_GPU_EXTENSION_ID, serverId, admin);
-    const path = admin
-      ? `/admin/servers/${serverId}/extensions/${NVIDIA_GPU_EXTENSION_ID}/devices`
-      : `/servers/${serverId}/extensions/${NVIDIA_GPU_EXTENSION_ID}/devices`;
-    host.api.get<{ items?: NvidiaGpuDeviceDto[] }>(path).then(
-      (data) => {
-        if (cancelled) return;
-        setInventory(Array.isArray(data.items) ? data.items : []);
-        setLoading(false);
-      },
-      () => {
-        if (cancelled) return;
-        setInventory([]);
-        setLoading(false);
-        setError(true);
-      },
-    );
-    return () => {
-      cancelled = true;
-    };
-  }, [admin, host, serverId]);
+  const path = admin
+    ? `/admin/servers/${serverId}/extensions/${NVIDIA_GPU_EXTENSION_ID}/devices`
+    : `/servers/${serverId}/extensions/${NVIDIA_GPU_EXTENSION_ID}/devices`;
+  const query = host.useQuery({
+    queryKey: host.extensionDevicesKey(NVIDIA_GPU_EXTENSION_ID, serverId, admin),
+    queryFn: () => host.api.get<{ items?: NvidiaGpuDeviceDto[] }>(path),
+    enabled: Boolean(serverId),
+  });
+  const inventory = Array.isArray(query.data?.items) ? query.data.items : [];
+  const loading = query.isPending;
+  const error = query.isError;
 
   const available = useMemo(
     () => permittedGpus(inventory, grant, admin),

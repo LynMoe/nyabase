@@ -126,7 +126,9 @@ function OverviewSlot({
   host: FrontendExtensionHost;
   ctx: SlotContextMap['container.overview'];
 }) {
-  const current = pciFromValue(ctx.value[NVIDIA_GPU_EXTENSION_ID]);
+  const state = ctx.value[NVIDIA_GPU_EXTENSION_ID];
+  if (typeof state !== 'object' || state === null || Object.keys(state).length === 0) return null;
+  const current = pciFromValue(state);
   return (
     <p className="text-sm">
       GPU：{formatGpuSelectionLabel(current, [])}

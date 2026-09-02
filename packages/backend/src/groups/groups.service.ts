@@ -1,4 +1,5 @@
 import {
+  BadRequestException,
   ConflictException,
   ForbiddenException,
   Inject,
@@ -671,7 +672,7 @@ export class GroupsService {
       for (const [extensionId, payload] of Object.entries(input.extensionGrants ?? {})) {
         const ext = this.extensions?.get(extensionId);
         if (!ext) {
-          throw new NotFoundException({
+          throw new BadRequestException({
             code: FailureCode.ExtensionUnknown,
             message: 'Unknown server-card extension',
             details: { extensionId },

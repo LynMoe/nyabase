@@ -149,6 +149,18 @@ export class ContainerControlRepository {
       });
   }
 
+  setExtensions(
+    id: string,
+    extensions: Record<string, unknown>,
+    executor: ContainerExecutor,
+  ) {
+    return executor.updateTable('control.containers')
+      .set({ extensions })
+      .where('id', '=', id)
+      .returningAll()
+      .executeTakeFirstOrThrow();
+  }
+
   updateDesired(
     id: string,
     generation: number,

@@ -1,4 +1,4 @@
-import { Global, Module, type DynamicModule } from '@nestjs/common';
+import { forwardRef, Global, Module, type DynamicModule } from '@nestjs/common';
 import {
   CORE_NODE_METRIC_CATALOG,
   mergeNodeMetricCatalog,
@@ -6,6 +6,7 @@ import {
 import { AccessModule } from '../access/access.module.js';
 import { AuditModule } from '../audit/audit.module.js';
 import { AuthModule } from '../auth/auth.module.js';
+import { RuntimeModule } from '../runtime/runtime.module.js';
 import { ExtensionDeviceClaimsRepository } from './claims.repository.js';
 import { assertNoPrefixCollision } from './ownership.js';
 import { ServerCardExtensionRegistry } from './registry.js';
@@ -28,7 +29,7 @@ export class ServerCardExtensionsModule {
     return {
       module: ServerCardExtensionsModule,
       global: true,
-      imports: [AuthModule, AccessModule, AuditModule],
+      imports: [AuthModule, AccessModule, AuditModule, forwardRef(() => RuntimeModule)],
       controllers: [AdminServerExtensionsController, UserServerExtensionsController],
       providers: [
         { provide: SERVER_CARD_EXTENSIONS, useValue: extensions },

@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import type { Kysely } from 'kysely';
 import {
+  CORE_NODE_METRIC_CATALOG,
   ContainerPowerIntent,
   FailureCode,
   ServerStatus,
@@ -21,6 +22,10 @@ import { ContainerControlService } from './container-control.service.js';
 import { ImagesService } from '../images/images.service.js';
 import { IpPoolsRepository } from '../ip-pools/ip-pools.repository.js';
 import { ContainerSshConvergenceService } from '../ssh/container-ssh-convergence.service.js';
+import { ExtensionDeviceClaimsRepository } from '../server-card-extensions/claims.repository.js';
+import { asJsonObject } from '../server-card-extensions/json.js';
+import { ServerCardExtensionRegistry } from '../server-card-extensions/registry.js';
+import type { ServerCardExtension } from '../server-card-extensions/types.js';
 
 const describePg = process.env.NYABASE_TEST_DATABASE_URL ? describe : describe.skip;
 const IMAGE_FINGERPRINT = 'a'.repeat(64);
@@ -319,12 +324,161 @@ describePg('PostgreSQL container create admission and capacity', () => {
   });
 });
 
+const STUB_EXTENSION_ID = 'example-card';
+
+describePg('PostgreSQL extension device claims', () => {
+  it('inserts the container before claims and maps UNIQUE collisions', async () => {
+    await withPostgresTestDatabase(async ({ database }) => {
+      const fixture = await seedFixture(database, { poolTotalBytes: 10_000 });
+      const harness = extensionHarness(database, { diskBytes: 10_000 });
+      await enableStubExtension(database, fixture);
+
+      const first = await harness.service.createForUser(
+        fixture.userId,
+        request(fixture, 'claim-first', {
+          extensions: { [STUB_EXTENSION_ID]: { deviceKey: 'dev-a' } },
+        }),
+      );
+      const container = await database.selectFrom('control.containers')
+        .select(['id', 'extensions'])
+        .where('id', '=', first.resourceId)
+        .executeTakeFirstOrThrow();
+      const claims = await database.selectFrom('control.extension_device_claims')
+        .select(['container_id', 'device_key', 'extension_id'])
+        .where('server_id', '=', fixture.serverId)
+        .execute();
+      expect(claims).toEqual([{
+        container_id: container.id,
+        device_key: 'dev-a',
+        extension_id: STUB_EXTENSION_ID,
+      }]);
+      expect(asJsonObject(container.extensions)[STUB_EXTENSION_ID]).toEqual({ deviceKey: 'dev-a' });
+
+      await expectCode(
+        harness.service.createForUser(
+          fixture.userId,
+          request(fixture, 'claim-collision', {
+            extensions: { [STUB_EXTENSION_ID]: { deviceKey: 'dev-a' } },
+          }),
+        ),
+        FailureCode.ExtensionDeviceClaimed,
+      );
+    });
+  });
+
+  it('rejects payload for a disabled extension and occupancy-blocks disable', async () => {
+    await withPostgresTestDatabase(async ({ database }) => {
+      const fixture = await seedFixture(database, { poolTotalBytes: 10_000 });
+      const harness = extensionHarness(database, { diskBytes: 10_000 });
+
+      await expectCode(
+        harness.service.createForUser(
+          fixture.userId,
+          request(fixture, 'not-enabled', {
+            extensions: { [STUB_EXTENSION_ID]: { deviceKey: 'dev-a' } },
+          }),
+        ),
+        FailureCode.ExtensionNotEnabled,
+      );
+
+      await enableStubExtension(database, fixture);
+      const created = await harness.service.createForUser(
+        fixture.userId,
+        request(fixture, 'occupied-disable', {
+          extensions: { [STUB_EXTENSION_ID]: { deviceKey: 'dev-b' } },
+        }),
+      );
+      expect(created.resourceId).toBeTruthy();
+      try {
+        await database.updateTable('infra.server_extensions')
+          .set({ enabled: false })
+          .where('server_id', '=', fixture.serverId)
+          .where('extension_id', '=', STUB_EXTENSION_ID)
+          .execute();
+        throw new Error('expected occupancy block');
+      } catch (error) {
+        expect(occupancyBlocked(error)).toBe(true);
+      }
+    });
+  });
+
+  it('releases claims on failed phase so a later create can reuse the key', async () => {
+    await withPostgresTestDatabase(async ({ database }) => {
+      const fixture = await seedFixture(database, { poolTotalBytes: 10_000 });
+      const harness = extensionHarness(database, { diskBytes: 10_000 });
+      await enableStubExtension(database, fixture);
+
+      const first = await harness.service.createForUser(
+        fixture.userId,
+        request(fixture, 'failed-release', {
+          extensions: { [STUB_EXTENSION_ID]: { deviceKey: 'dev-c' } },
+        }),
+      );
+      await database.updateTable('control.containers')
+        .set({ lifecycle_phase: 'failed' })
+        .where('id', '=', first.resourceId)
+        .execute();
+      expect(
+        await database.selectFrom('control.extension_device_claims')
+          .select('id')
+          .where('container_id', '=', first.resourceId)
+          .execute(),
+      ).toEqual([]);
+
+      const reused = await harness.service.createForUser(
+        fixture.userId,
+        request(fixture, 'failed-reuse', {
+          extensions: { [STUB_EXTENSION_ID]: { deviceKey: 'dev-c' } },
+        }),
+      );
+      const claims = await database.selectFrom('control.extension_device_claims')
+        .select(['container_id', 'device_key'])
+        .where('device_key', '=', 'dev-c')
+        .execute();
+      expect(claims).toEqual([{ container_id: reused.resourceId, device_key: 'dev-c' }]);
+    });
+  });
+
+  it('mutates claims for a stopped container', async () => {
+    await withPostgresTestDatabase(async ({ database }) => {
+      const fixture = await seedFixture(database, { poolTotalBytes: 10_000 });
+      const harness = extensionHarness(database, { diskBytes: 10_000 });
+      await enableStubExtension(database, fixture);
+
+      const created = await harness.service.createForUser(
+        fixture.userId,
+        request(fixture, 'mutate-later', { extensions: {} }),
+      );
+      await database.updateTable('control.container_ssh_routes')
+        .set({ instance_status: 'Stopped' })
+        .where('container_id', '=', created.resourceId)
+        .execute();
+
+      await harness.service.mutateExtensionForAdmin(
+        created.resourceId,
+        fixture.userId,
+        STUB_EXTENSION_ID,
+        { deviceKey: 'dev-d' },
+      );
+      const claims = await database.selectFrom('control.extension_device_claims')
+        .select(['container_id', 'device_key'])
+        .where('container_id', '=', created.resourceId)
+        .execute();
+      expect(claims).toEqual([{ container_id: created.resourceId, device_key: 'dev-d' }]);
+    });
+  });
+});
+
 function containerService(
   database: Kysely<NyabaseDatabase>,
   options: GrantOptions,
   accessState?: {
     grant: ReturnType<typeof grant>;
     imageAvailable: boolean;
+  },
+  extensions?: {
+    registry: ServerCardExtensionRegistry;
+    claims: ExtensionDeviceClaimsRepository;
   },
 ): {
   service: ContainerControlService;
@@ -356,8 +510,89 @@ function containerService(
     new IpPoolsRepository(database),
     { get: vi.fn().mockReturnValue(null) } as never,
     new ContainerSshConvergenceService(database, intents, wake),
+    undefined,
+    extensions?.registry,
+    extensions?.claims,
   );
   return { service, access };
+}
+
+function deviceKeyFrom(payload: unknown): string | undefined {
+  if (typeof payload !== 'object' || payload === null) return undefined;
+  const value = (payload as { deviceKey?: unknown }).deviceKey;
+  return typeof value === 'string' ? value : undefined;
+}
+
+function claimingExtension(): ServerCardExtension {
+  return {
+    id: STUB_EXTENSION_ID,
+    displayName: 'Example',
+    ownedIncusConfigKeyPrefixes: ['example.'],
+    ownedIncusDeviceNamePrefixes: ['ext'],
+    errorFormatter: () => undefined,
+    admitCreate: async (ctx) => {
+      const deviceKey = deviceKeyFrom(ctx.payload);
+      if (!ctx.enabled) return { state: {} };
+      await ctx.claims.replace(deviceKey ? [deviceKey] : []);
+      return { state: deviceKey ? { deviceKey } : { assigned: false } };
+    },
+    mutateContainer: async (ctx) => {
+      const deviceKey = deviceKeyFrom(ctx.payload);
+      await ctx.claims.replace(deviceKey ? [deviceKey] : []);
+      return {
+        state: deviceKey ? { deviceKey } : {},
+        requestSummary: { deviceKey: deviceKey ?? null },
+      };
+    },
+    requiresStop: () => false,
+    contributeInstanceSpec: () => ({ config: {}, devices: {} }),
+    contributePreflight: async () => ({ evidence: {}, health: {} }),
+    refreshHealth: async () => undefined,
+    parseGrantPayload: (payload) => payload,
+    effectiveGrantDevices: () => [],
+    listDevices: async () => ({ items: [] }),
+    assertCanDisable: async () => undefined,
+    purgeServer: async () => undefined,
+  };
+}
+
+function extensionHarness(
+  database: Kysely<NyabaseDatabase>,
+  options: GrantOptions,
+) {
+  const claims = new ExtensionDeviceClaimsRepository(database);
+  const registry = new ServerCardExtensionRegistry(
+    [claimingExtension()],
+    CORE_NODE_METRIC_CATALOG,
+  );
+  return containerService(database, options, undefined, { registry, claims });
+}
+
+async function enableStubExtension(
+  database: Kysely<NyabaseDatabase>,
+  fixture: Fixture,
+): Promise<void> {
+  await database.insertInto('infra.server_extensions').values({
+    server_id: fixture.serverId,
+    extension_id: STUB_EXTENSION_ID,
+    enabled: true,
+    health: {},
+    enabled_by: fixture.userId,
+  }).execute();
+}
+
+function occupancyBlocked(error: unknown): boolean {
+  let current: unknown = error;
+  const visited = new Set<unknown>();
+  while (current && typeof current === 'object' && !visited.has(current)) {
+    visited.add(current);
+    const record = current as { code?: unknown; hint?: unknown; cause?: unknown };
+    if (record.code === 'P0001' && String(record.hint ?? '') === FailureCode.ExtensionOccupied) {
+      return true;
+    }
+    current = record.cause;
+  }
+  return false;
 }
 
 function databaseAccessContainerService(database: Kysely<NyabaseDatabase>): ContainerControlService {

@@ -8,6 +8,11 @@ export interface FrontendExtensionHost {
     patch(path: string, body: unknown): Promise<unknown>;
   };
   extensionDevicesKey(extensionId: string, serverId: string, admin: boolean): readonly unknown[];
+  useQuery: <T>(options: {
+    queryKey: readonly unknown[];
+    queryFn: () => Promise<T>;
+    enabled?: boolean;
+  }) => { data: T | undefined; isPending: boolean; isError: boolean };
   toast: (opts: { title?: string; description?: string; variant?: string }) => void;
   readonly ui: {
     FormField: ComponentType<{ id: string; label: string; children?: ReactNode }>;

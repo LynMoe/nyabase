@@ -408,6 +408,60 @@ export class ContainerControlService {
         request.rootSizeBytes,
         admin ? null : access?.grant.diskBytes ?? null,
       );
+      let networkKey: string | null = null;
+      let address: string | null = null;
+      let lastExhaustedKey: string | null = null;
+      for (const pool of pools) {
+        try {
+          address = await this.repository.findAvailableAddress(
+            pool.cidr,
+            pool.allocation_cidr,
+            [pool.gateway, ...stringArray(pool.reserved_ips)],
+            id,
+            transaction,
+          );
+          networkKey = pool.cidr;
+          break;
+        } catch (error) {
+          if (error instanceof Error && error.message === 'No IP address is available') {
+            lastExhaustedKey = pool.cidr;
+            continue;
+          }
+          if (error instanceof Error && error.message === 'Invalid IP pool CIDR') {
+            throw new ConflictException({
+              code: FailureCode.PreflightFailed,
+              message: 'The IP pool CIDR is invalid',
+              details: { poolId: pool.id, networkKey: pool.cidr },
+            });
+          }
+          throw error;
+        }
+      }
+      if (!networkKey || !address) {
+        throw new ConflictException({
+          code: FailureCode.NetworkAddressExhausted,
+          message: 'No IP address is available in the server IP pools',
+          details: { serverId: request.serverId, networkKey: lastExhaustedKey },
+        });
+      }
+      let row = await this.repository.insert({
+        id,
+        serverId: request.serverId,
+        ownerId,
+        imageId: request.imageId,
+        createdBy: userId,
+        name: request.name,
+        imageAlias: image.alias,
+        imageFingerprint: image.fingerprint,
+        rootPoolId,
+        rootSizeBytes: request.rootSizeBytes,
+        cpuMillis: request.cpuMillis,
+        memBytes: request.memBytes,
+        extensions: {},
+        powerIntent: request.powerIntent,
+        networkKey,
+        address,
+      }, transaction);
       const extensionBag: Record<string, unknown> = {};
       const grantView: ExtensionGrantView = {
         extensionGrants: access?.grant.extensionGrants ?? null,
@@ -449,65 +503,8 @@ export class ContainerControlService {
           throw error;
         }
       }
-      let networkKey: string | null = null;
-      let address: string | null = null;
-      let lastExhaustedKey: string | null = null;
-      for (const pool of pools) {
-        try {
-          address = await this.repository.findAvailableAddress(
-            pool.cidr,
-            pool.allocation_cidr,
-            [pool.gateway, ...stringArray(pool.reserved_ips)],
-            id,
-            transaction,
-          );
-          networkKey = pool.cidr;
-          break;
-        } catch (error) {
-          if (error instanceof Error && error.message === 'No IP address is available') {
-            lastExhaustedKey = pool.cidr;
-            continue;
-          }
-          if (error instanceof Error && error.message === 'Invalid IP pool CIDR') {
-            throw new ConflictException({
-              code: FailureCode.PreflightFailed,
-              message: 'The IP pool CIDR is invalid',
-              details: { poolId: pool.id, networkKey: pool.cidr },
-            });
-          }
-          throw error;
-        }
-      }
-      if (!networkKey || !address) {
-        throw new ConflictException({
-          code: FailureCode.NetworkAddressExhausted,
-          message: 'No IP address is available in the server IP pools',
-          details: { serverId: request.serverId, networkKey: lastExhaustedKey },
-        });
-      }
-      let row;
-      try {
-        row = await this.repository.insert({
-          id,
-          serverId: request.serverId,
-          ownerId,
-          imageId: request.imageId,
-          createdBy: userId,
-          name: request.name,
-          imageAlias: image.alias,
-          imageFingerprint: image.fingerprint,
-          rootPoolId,
-          rootSizeBytes: request.rootSizeBytes,
-          cpuMillis: request.cpuMillis,
-          memBytes: request.memBytes,
-          extensions: extensionBag,
-          powerIntent: request.powerIntent,
-          networkKey,
-          address,
-        }, transaction);
-      } catch (error) {
-        if (isUniqueViolation(error, 'extension_device_claims')) throw extensionDeviceClaimed();
-        throw error;
+      if (Object.keys(extensionBag).length > 0) {
+        row = await this.repository.setExtensions(row.id, extensionBag, transaction);
       }
       if (request.volumes && request.volumes.length > 0) {
         if (!this.volumes) {

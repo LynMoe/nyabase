@@ -5,6 +5,7 @@ import {
   OnModuleDestroy,
   OnModuleInit,
   Optional,
+  forwardRef,
 } from '@nestjs/common';
 import type { Kysely } from 'kysely';
 import { sql } from 'kysely';
@@ -380,7 +381,8 @@ export class ReconcileWorkerService implements OnModuleInit, OnModuleDestroy {
     private readonly wake?: ReconcileWakeService,
     @Optional() @Inject(PG_DATABASE)
     private readonly database?: Kysely<NyabaseDatabase>,
-    @Optional() private readonly serverExtensions?: ServerCardExtensionsService,
+    @Optional() @Inject(forwardRef(() => ServerCardExtensionsService))
+    private readonly serverExtensions?: ServerCardExtensionsService,
   ) {}
 
   onModuleInit(): void {

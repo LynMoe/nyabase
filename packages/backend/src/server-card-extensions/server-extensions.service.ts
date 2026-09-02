@@ -5,6 +5,7 @@ import {
   Injectable,
   NotFoundException,
   Optional,
+  forwardRef,
 } from '@nestjs/common';
 import {
   AuditAction,
@@ -64,8 +65,8 @@ export class ServerCardExtensionsService {
     private readonly claims: ExtensionDeviceClaimsRepository,
     private readonly access: AccessResolverService,
     private readonly audit: AuditService,
-    @Optional() @Inject(INCUS_CLIENT_FACTORY) private readonly clients?: IncusClientFactory,
-    @Optional() @Inject(NODE_METRICS_PULL) private readonly nodeMetrics?: NodeMetricsPullPort,
+    @Optional() @Inject(forwardRef(() => INCUS_CLIENT_FACTORY)) private readonly clients?: IncusClientFactory,
+    @Optional() @Inject(forwardRef(() => NODE_METRICS_PULL)) private readonly nodeMetrics?: NodeMetricsPullPort,
   ) {}
 
   requireRegistered(extensionId: string, path: boolean) {
@@ -361,7 +362,7 @@ export class ServerCardExtensionsService {
     resources: unknown;
     metricSamples: readonly { name: string; labels: Readonly<Record<string, string>>; value: number }[];
   }> {
-    let resources: unknown = {};
+    let resources: unknown = null;
     if (this.clients) {
       try {
         resources = (await this.clients.get(serverId).then((client) => client.getResources())).metadata;

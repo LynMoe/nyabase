@@ -326,11 +326,14 @@ export default function ServerDetailPage() {
                       <div className="flex items-center justify-between gap-3">
                         <div>
                           <p className="text-sm font-medium">{item.displayName}</p>
-                          <p className="text-xs text-muted-foreground">{item.extensionId}</p>
+                          <p className="text-xs text-muted-foreground">
+                            {item.extensionId}
+                            {item.occupiedDeviceCount > 0 ? ` · ${item.occupiedDeviceCount} 占用` : ''}
+                          </p>
                         </div>
                         <Switch
                           checked={item.enabled}
-                          disabled={putExtension.isPending}
+                          disabled={putExtension.isPending || (item.enabled && item.occupiedDeviceCount > 0)}
                           onCheckedChange={(enabled) => putExtension.mutate({
                             extensionId: item.extensionId,
                             enabled,
