@@ -16,6 +16,8 @@
     "noUnusedParameters": true,
     "paths": {
       "@nyabase/common": ["../common/src/index.ts"],
+      "@nyabase/nvidia-gpu": ["../../extensions/nvidia-gpu/src/index.ts"],
+      "@nyabase/nvidia-gpu-web": ["../../extensions/nvidia-gpu/src/web/index.ts"],
       "@/*": ["./src/*"]
     }
   },

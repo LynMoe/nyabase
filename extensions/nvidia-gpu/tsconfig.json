@@ -1,0 +1,22 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "outDir": "./dist",
+    "rootDir": "./src",
+    "lib": ["ES2022"],
+    "composite": true
+  },
+  "include": [
+    "src/index.ts",
+    "src/schema.ts",
+    "src/pci.ts",
+    "src/id.ts",
+    "src/errors.ts",
+    "src/metrics.ts",
+    "src/types.ts",
+    "src/**/*.test.ts",
+    "src/backend/**/*.ts",
+    "src/agent/**/*.ts"
+  ],
+  "exclude": ["src/web"]
+}
