@@ -285,12 +285,12 @@ Incus 远程 API 覆盖不到的只剩两类东西：**宿主机 OS 的可观测
 
 ⚠️ **`nvidia-smi` 的枚举 index 不是其中任何一个。** `nvidia.card_name` 是
 `/dev/nvidiaN` 的 device minor，不保证等于 nvidia-smi/CUDA 的序号（序号受枚举顺序和
-`CUDA_DEVICE_ORDER` 影响）。因此：
+`CUDA_DEVICE_ORDER` 影响）。因此（C8 / §8.5，**nvidia-gpu 包策略**；核心不做 PCI 知识）：
 
-- **控制面内部一律用 PCI 地址**作为 GPU 的主键。分配、授权、`gpu` 设备的 `pci=` 选择器全用它。
+- **nvidia-gpu 内部一律用规范 PCI 地址**作为卡主键：jsonb `pciAddresses`、claims `device_key`、Incus `gpu` 设备的 `pci=` 选择器全用它。核心只存不透明 `device_key` / `extension_grants`，不认识 PCI。
 - 面向用户展示的「index」由 `nyabase-node` 上报的 `nvidia-smi` 输出提供
   （它同时给出 index、UUID、pci.bus_id），仅作展示与选择的人类可读标签。
-- 指标按 **PCI 地址或 UUID** 与硬件清单 join，**绝不按 index join**。
+- 指标按 **PCI 地址或 UUID** 与硬件清单 join，**绝不按 index join**（join 在包内完成）。
 
 ⚠️ **另一个装机依赖**：`/1.0/resources` 的 GPU UUID / 驱动版本 / CUDA 版本字段依赖宿主机装了
 `nvidia-container-cli`。没装则退化到只解析 `/proc`，丢失 UUID 与版本（PCI 地址与 DRM id
@@ -486,7 +486,8 @@ CREATE INDEX reconcile_claims_lease_idx ON control.reconcile_claims (lease_expir
 3. actual  = GET /1.0/instances/<name>            （一次调用拿到 config + devices + state）
 4. 身份校验：user.nyabase.{managed,container_id,server_id} 必须匹配
               不匹配 → 不是我们的实例，走孤儿路径，绝不修改
-5. diff = compareManagedFields(actual, desired)   （子集比对，排除 volatile.* / image.*）
+5. ownership = CORE_MANAGED_FIELD_OWNERSHIP ∪ 已注册包前缀
+   diff = compareManagedFields(actual, desired, ownership)   （子集比对，排除 volatile.* / image.*；无默认 ownership，漏包前缀会让扩展设备变成未托管）
 6. 若 diff 非空：
      - 包 `requiresStop(diff)` 为真（nvidia-gpu：nvidia.runtime / GPU 设备）且实例运行中 → 结算为 failed，
        结构化错误 EXTENSION_MUTATION_REQUIRES_STOP。【不能靠 Incus 报错兜底：它会静默延迟到下次启动】
@@ -494,7 +495,7 @@ CREATE INDEX reconcile_claims_lease_idx ON control.reconcile_claims (lease_expir
        【绝不构造一个只含期望键的 PUT —— 那会摧毁 volatile.*，光丢 volatile.<nic>.hwaddr
          就会把每个容器的 MAC 悄悄换掉】
 7. 电源状态：desired.power_intent vs actual.status，必要时 PUT .../state
-8. verify：重新 GET，要求 compareManagedFields 为空、状态符合期望
+8. verify：重新 GET，要求 compareManagedFields(actual, desired, ownership) 为空、状态符合期望
 9. 写回 observed_generation、observed 快照；结算所有 target_generation <= generation 的意图
 10. 释放声明
 ```
