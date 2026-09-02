@@ -92,9 +92,9 @@
 | C3 | 镜像授权 | **删除**。有服务器授权 + 镜像在该服务器上 present + 镜像 active ⟹ 可用 |
 | C4 | nesting | 所有容器默认 `security.nesting=true` |
 | C5 | 容器内 Docker | 开启 `security.syscalls.intercept.mknod` + `.setxattr`；**坚决不开** `.mount.allowed`；容器保持 unprivileged |
-| C6 | GPU 启用 | 按授权跟服务器：用户只有 CPU 授权、或服务器无 GPU，则不启用 `nvidia.runtime`；否则启用 |
-| C7 | GPU 修改 | 卡只能在**停止状态**修改（`nvidia.runtime` 本身也不可热改） |
-| C8 | GPU 选择 | 对用户暴露 nvidia index；内部一律翻译成 **PCI 地址**钉死（Incus 无 UUID 选择器，未设的选择器是通配符） |
+| C6 | GPU runtime | NVIDIA GPU **不是**核心一等字段。本期只落地 `extensions/nvidia-gpu`。管理员在服务器上**显式启用**该扩展；启用且 runtime ready 时，创建容器无论是否选卡、无论用户 grant 是否含 GPU，都打开 `nvidia.runtime`（以便日后停机加卡）。**CPU-only 授权不再跳过 runtime。** 该策略属于包，核心不知道 `nvidia.runtime` |
+| C7 | GPU 修改 | **nvidia-gpu 包策略**：卡只能在**停止状态**修改（`nvidia.runtime` 本身也不可热改）。包 `requiresStop`；核心 reconciler 在运行中触及包前缀时结算 failed，禁止静默 Incus PUT |
+| C8 | GPU 选择 | **nvidia-gpu 包策略**：对用户暴露 nvidia index；内部一律翻译成 **PCI 地址**钉死（Incus 无 UUID 选择器，未设的选择器是通配符）。通配符由包拒绝；核心不做 PCI 知识 |
 | C9 | SSH 接入 | **镜像自带 sshd**，nyabase 只注入 `authorized_keys`。删除整套 dropbear 嵌入逻辑 |
 | C10 | 规格热改 | CPU/内存**在线调整**，不断服 |
 | C11 | 挂载热插拔 | 运行中直接加/减数据盘，不重启 |
@@ -488,8 +488,8 @@ CREATE INDEX reconcile_claims_lease_idx ON control.reconcile_claims (lease_expir
               不匹配 → 不是我们的实例，走孤儿路径，绝不修改
 5. diff = compareManagedFields(actual, desired)   （子集比对，排除 volatile.* / image.*）
 6. 若 diff 非空：
-     - 触及非热改键（nvidia.runtime / GPU 设备）且实例运行中 → 结算为 failed，
-       结构化错误 GPU_CHANGE_REQUIRES_STOP。【不能靠 Incus 报错兜底：它会静默延迟到下次启动】
+     - 包 `requiresStop(diff)` 为真（nvidia-gpu：nvidia.runtime / GPU 设备）且实例运行中 → 结算为 failed，
+       结构化错误 EXTENSION_MUTATION_REQUIRES_STOP。【不能靠 Incus 报错兜底：它会静默延迟到下次启动】
      - 否则：读回 actual 的完整 config → 在副本上应用 diff → 带 If-Match 的 PUT
        【绝不构造一个只含期望键的 PUT —— 那会摧毁 volatile.*，光丢 volatile.<nic>.hwaddr
          就会把每个容器的 MAC 悄悄换掉】
@@ -583,7 +583,7 @@ infra.servers ──< infra.storage_pools >── infra.shared_backends   (仅�
 
 infra.shared_backends ──< iam.shared_backend_grants >── iam.users / iam.groups
 infra.images ──< infra.image_server_assignments >── infra.servers
-iam.users / iam.groups ──< iam.server_grants >── infra.servers   (CPU/内存/磁盘/GPU/到期)
+iam.users / iam.groups ──< iam.server_grants >── infra.servers   (CPU/内存/磁盘/extension_grants/到期)
 ```
 
 ### 6.3 容量核算
@@ -630,7 +630,8 @@ iam.users / iam.groups ──< iam.server_grants >── infra.servers   (CPU/�
 重写 `packages/backend/src/persistence-pg/migrations/000001_initial.sql`。
 下面只列新增与改写；未提及的表（`audit.*`、`iam.users/groups/api_tokens/...`、
 `interaction.*`、`system.settings`、`control.container_network_claims`、
-`control.container_gpu_claims`、`control.container_ssh_routes`）保持现状。
+`control.extension_device_claims`、`control.container_ssh_routes`）保持现状。
+`control.container_gpu_claims` 已由通用 claims 取代（§8.5）。
 
 ### 7.1 删除的表
 
@@ -680,8 +681,8 @@ CREATE TABLE infra.servers (
     lan_gateway inet,
     lan_reserved_ips jsonb DEFAULT '[]'::jsonb NOT NULL,
 
-    -- 能力（Agent 与 /1.0/resources 共同上报）
-    gpu_runtime_available boolean DEFAULT false NOT NULL,   -- 宿主机有 nvidia-container-cli
+    -- GPU toolkit 不是核心列。nvidia-gpu 把 runtimeReady 写在
+    -- infra.server_extensions.health（§8.5），不自动启用扩展。
 
     status text DEFAULT 'unknown'::text NOT NULL,   -- online | unreachable | unknown
     last_seen_at timestamp with time zone,
@@ -810,9 +811,9 @@ CREATE TABLE control.containers (
     cpu_millis integer DEFAULT 0 NOT NULL,
     mem_bytes bigint DEFAULT 0 NOT NULL,
 
-    -- GPU：nvidia_runtime 不可热改，卡只能停机改
-    nvidia_runtime boolean DEFAULT false NOT NULL,
-    gpu_pci_addresses text[] DEFAULT '{}'::text[] NOT NULL,
+    -- 服务器卡扩展不透明状态（本期 nvidia-gpu）。PCI / nvidiaRuntime 只活在
+    -- extensions['nvidia-gpu']，核心无 GPU 一等列（C6 / §8.5）。
+    extensions jsonb DEFAULT '{}'::jsonb NOT NULL,
 
     -- 安全开关（当前全局恒为 true，落库为将来可按容器降级留位）
     nesting boolean DEFAULT true NOT NULL,
@@ -836,12 +837,8 @@ CREATE TABLE control.containers (
     CONSTRAINT containers_root_size_check CHECK (root_size_bytes > 0),
     CONSTRAINT containers_cpu_millis_check CHECK (cpu_millis >= 0),
     CONSTRAINT containers_mem_bytes_check CHECK (mem_bytes >= 0),
-    -- GPU 一律用 PCI 地址（§4.4）
-    CONSTRAINT containers_gpu_pci_check
-        CHECK (array_position(gpu_pci_addresses, NULL::text) IS NULL),
-    -- 有卡就必须有 runtime
-    CONSTRAINT containers_gpu_runtime_shape_check
-        CHECK ((cardinality(gpu_pci_addresses) = 0) OR nvidia_runtime),
+    CONSTRAINT containers_extensions_object
+        CHECK (jsonb_typeof(extensions) = 'object'),
     CONSTRAINT containers_power_intent_check CHECK (power_intent = ANY (ARRAY['running','stopped'])),
     CONSTRAINT containers_lifecycle_phase_check
         CHECK (lifecycle_phase = ANY (ARRAY['provisioning','active','deleting','failed'])),
@@ -1084,7 +1081,7 @@ POST /1.0/instances
     "security.nesting": "true",                    // C4，热改
     "security.syscalls.intercept.mknod":    "true", // C5
     "security.syscalls.intercept.setxattr": "true", // C5
-    "nvidia.runtime": "<true|false>",              // C6，【不可热改】
+    "nvidia.runtime": "<true|false>",              // 非核心：nvidia-gpu contributeInstanceSpec（C6，【不可热改】）
     "user.nyabase.managed":      "true",
     "user.nyabase.container_id": "<uuid>",
     "user.nyabase.server_id":    "<uuid>",
@@ -1098,17 +1095,21 @@ POST /1.0/instances
             "ipv4.address": "<控制面分配的 IP，nft 过滤身份>",
             "security.ipv4_filtering": "true",
             "security.mac_filtering": "true" },    // §9.2
-    "gpu0": { type: "gpu", gputype: "physical", pci: "0000:41:00.0" },
+    "gpu0": { type: "gpu", gputype: "physical", pci: "0000:41:00.0" },  // 同上，包贡献；核心不写 gpu*
     "nyd-<uuid32>": { type: "disk", pool: "<池>", source: "<卷 incus_name>", path: "/data/foo" }
   }
 }
 ```
 
+核心 `buildDesiredInstanceSpec` **不**写 `nvidia.runtime` / `gpuN`。启用 nvidia-gpu 时 reconciler 把包 `contributeInstanceSpec` 的纯投影并入期望文档；缺 jsonb key 或空对象 ⇒ 不写 runtime、不加设备。
+
 ### 8.3 比对规则
 
-`compareManagedFields(actual, desired)` 只比对 **nyabase 管理的键**：
-`limits.*`、`security.*`、`nvidia.*`、`user.nyabase.*`，
-以及 devices 里的 `root` / `eth0` / `gpu*` / `nyd-*`。
+`compareManagedFields(actual, desired, ownership)` 只比对 **nyabase 管理的键**。
+核心 `CORE_MANAGED_FIELD_OWNERSHIP`：`limits.*`、`security.*`、`user.nyabase.*`，
+以及 devices 里的 `root` / `eth0` / `nyd-*`。
+已注册扩展把自己的 config/device 前缀并入 `ownership`（nvidia-gpu：`nvidia.*`、`gpu*`）。
+核心类型与 `CORE_MANAGED_FIELD_OWNERSHIP` **不得**出现包前缀字面量。
 
 **忽略 `volatile.*`、`image.*`，以及运维手工加的其它键与设备。**
 这一条不是宽容，是必需：一个「期望文档即全部真相」的天真实现会抹掉运维加的东西，
@@ -1127,15 +1128,23 @@ POST /1.0/instances
 ⚠️ **不能用「操作 ID 重新挂接」**：Incus 的操作只保留 **5 秒**，且不持久化结果。
 基线机制是唯一可靠的重启证明。
 
-### 8.5 GPU
+### 8.5 GPU（nvidia-gpu 包策略）
 
-- 控制面内部一律用 **PCI 地址**（§4.4）。`gpu` 设备用 `pci=` 钉死，**永不使用通配符**
-  —— 未设的选择器是通配符，一个 `gpu` 设备可能匹配多张卡。
+NVIDIA GPU 是 compile-time 服务器卡扩展，不是核心一等字段。本期只落地 `nvidia-gpu`。
+核心保留启用表、通用 claims、不透明 jsonb、admit/reconcile/`requiresStop` 钩子与通用 REST；
+PCI、`nvidia.runtime`、通配符拒绝、创建时是否开 runtime 全部住在包里。
+
+- 启用是管理员显式勾选。预检/扫描只更新该行的 `health`（`runtimeReady` 等），不自动启用。
+- **C6（有意反转旧决策）**：扩展已启用 **且** runtime ready 时，创建容器无论是否选卡、无论 grant 是否含 GPU，都写入 `nvidiaRuntime: true`（`containers.extensions['nvidia-gpu']`），以便日后停机加卡。**CPU-only 授权不再跳过 `nvidia.runtime`。** 未启用、或启用但 not ready：包不打开 runtime；not ready 且请求了卡 → `NVIDIA_GPU_RUNTIME_UNAVAILABLE`。
+- `contributeInstanceSpec` 是已存 jsonb 的纯投影。缺 key / 空对象 ⇒ `{ config: {}, devices: {} }`。**禁止**把创建默认泄漏进 contribute。对从未写过该 key 的已有 CPU 容器，启用扩展不改变其实例。
+- 包内一律用 **PCI 地址**（§4.4）。`gpu` 设备用 `pci=` 钉死，**永不使用通配符**
+  —— 未设的选择器是通配符，一个 `gpu` 设备可能匹配多张卡。通配符由包拒绝。
 - 面向用户展示的 index 由 `nyabase-node` 的 `nvidia-smi` 输出提供，仅作人类可读标签。
 - `nvidia.runtime` **不可热改**，GPU 设备变更**要求实例已停止**（C7）。
   收敛前必须自己确认已停止 —— **不能靠 Incus 报错兜底，它会静默延迟到下次启动**。
-- 服务器无 `nvidia-container-cli` 时，开了 `nvidia.runtime` 的容器**根本起不来**。
-  创建时用 `servers.gpu_runtime_available` 门控。
+  因此 reconciler 的 `requiresStop` 不得依赖 Incus 错误：运行中 diff 触及包前缀 → `EXTENSION_MUTATION_REQUIRES_STOP`，**禁止静默 PUT**。
+- 停机 PATCH 可加/减/换卡；若旧容器 `nvidiaRuntime=false`，停机加卡时包会打开 runtime。空数组清 claims，保留 runtime。运行中（含 frozen）改卡由 API 与 reconciler 双门闩拒绝。
+- 停用后不再 contribute spec。jsonb 可残留；停机收敛清掉 Incus 上的包设备/config；运行中 `needs_attention` + `EXTENSION_MUTATION_REQUIRES_STOP`，不 PUT。
 
 ---
 
@@ -1395,6 +1404,8 @@ shrinkNever         → 按钮禁用，tooltip 说明「该池使用 XFS，文�
 /agent-tasks, /admin/agent-tasks                      ← 没有 agent，没有 agent task
 /admin/servers/:id/agent-token/rotate                 ← 没有 agent token
 /admin/servers/:id/agent-quarantine/retry             ← 没有服务器隔离
+/servers/:id/gpus, /admin/servers/:id/gpus            ← 改为 /extensions/:extensionId/devices
+/containers/:id/gpu, /admin/containers/:id/gpu        ← 改为 /extensions/:extensionId
 ```
 
 ### 11.2 新增的端点
@@ -1405,7 +1416,11 @@ GET    /admin/servers/:id/storage-pools        # 管理员视角：含未登记�
 PATCH  /admin/storage-pools/:id                # 登记 / 改显示名
 PATCH  /admin/servers/:id                      # systemPoolId、storageOvercommitRatio、parentInterface
 POST   /admin/servers/:id/connect              # 粘贴 trust token 完成互信（§4.5）
-GET    /admin/servers/:id/preflight            # 前置检查：LAN 网桥/nftables 防伪/GPU toolkit/池/探针实例
+GET    /admin/servers/:id/preflight            # 前置检查：LAN 网桥/nftables 防伪/扩展 health/池/探针实例
+GET    /admin/servers/:id/extensions           # 已注册扩展 + enabled + health + occupancy
+PUT    /admin/servers/:id/extensions/:extensionId  # 启用/停用；占用中 409
+GET    /admin/servers/:id/extensions/:extensionId/devices
+GET    /servers/:id/extensions/:extensionId/devices  # 用户库存；未启用 404
 
 GET    /admin/shared-backends                  # + POST / PATCH / DELETE
 GET    /volumes                                # + POST / PATCH / DELETE
@@ -1415,16 +1430,17 @@ POST   /containers/:id/volumes                 # 热挂载
 DELETE /containers/:id/volumes/:attachmentId   # 热卸载
 PATCH  /containers/:id/limits                  # 在线改 CPU/内存
 PATCH  /containers/:id/root-size               # 扩缩系统盘
-PATCH  /containers/:id/gpu                     # 改 GPU（要求已停止）
+PATCH  /containers/:id/extensions/:extensionId       # 改服务器卡扩展（nvidia-gpu 要求已停止）
+PATCH  /admin/containers/:id/extensions/:extensionId
 
 GET    /users/:id/storage-pool-grants          # 取代 mount-source-grants
 GET    /users/:id/shared-backend-grants
 GET    /containers/:id/intents                 # 该容器上的意图历史（取代任务历史）
 ```
 
-**这五个改容器的端点内部都只改期望态 + 建一个意图。** 端点保持细分是为了让用户意图明确、
+**这些改容器的端点内部都只改期望态 + 建一个意图。** 端点保持细分是为了让用户意图明确、
 审计精确、前置条件可分别校验；但执行侧只有一条「收敛这个容器」的码路（§5.5）。
-不要因为 REST 分了五个动词，就在收敛侧也分五种流程 ——
+不要因为 REST 分了多个动词，就在收敛侧也分多种流程 ——
 那是把 API 的表达粒度错当成执行粒度。
 
 ### 11.3 容量预检端点
@@ -1453,9 +1469,11 @@ ROOT_SHRINK_BELOW_USAGE       { containerId, requestedBytes, usedBytes }
 ROOT_SHRINK_REQUIRES_STOP     { containerId }
 ROOT_SIZE_BELOW_IMAGE_MINIMUM { imageId, requestedBytes, minimumBytes }
 VOLUME_CROSS_SERVER_DENIED    { volumeId, serverId, reason: 'backend_not_reachable' }
-GPU_CHANGE_REQUIRES_STOP      { containerId }
-GPU_RUNTIME_NOT_ENABLED       { containerId }          # 建时未开，需重建
-GPU_RUNTIME_UNAVAILABLE       { serverId }             # 宿主机没装 toolkit
+EXTENSION_MUTATION_REQUIRES_STOP { containerId, extensionId }  # 运行中改包字段；禁止静默 PUT
+EXTENSION_NOT_ENABLED            { extensionId }               # 未启用扩展上的写 / 用户 GET devices
+EXTENSION_DEVICE_CLAIMED         { extensionId, deviceKey }    # 占用 UNIQUE
+EXTENSION_OCCUPIED               { extensionId }               # 取消启用时仍有 claims
+NVIDIA_GPU_RUNTIME_UNAVAILABLE   { serverId }                  # 包码：启用但 toolkit/卡未就绪且请求了卡
 IMAGE_MANAGES_OWN_NETWORK     { imageId }              # 镜像内跑 DHCP 客户端，会冲掉地址
 SERVER_UNREACHABLE            { serverId, lastError }
 INSTANCE_BUSY                 { containerId }          # Incus 实例锁冲突，需人工介入
@@ -1472,8 +1490,8 @@ INSTANCE_BUSY                 { containerId }          # Incus 实例锁冲突�
 `effective | groups | overrides | storage-pools | shared-backends | ssh | password`。
 
 **新增**：
-- **服务器接入向导**：粘贴 token → 连通性检查 → 前置检查（LAN 网桥 / nftables 防伪 / GPU toolkit / 探针实例）
-  → 池发现与登记 → 指定系统盘池。每一步的失败都给出具体的宿主机命令。
+- **服务器接入向导**：粘贴 token → 连通性检查 → 前置检查（LAN 网桥 / nftables 防伪 / 扩展 health / 探针实例）
+  → 池发现与登记 → 指定系统盘池。NVIDIA toolkit 是 nvidia-gpu 的 health，不自动启用扩展。每一步的失败都给出具体的宿主机命令。
 - **存储池管理**（服务器详情页新标签）：驱动、容量、已提交、超分后可用、能力标记
   （可否在线缩 / 可否做系统盘 / 是否共享 / 配额是否生效）。未登记的池灰色列出带「登记」按钮。
 - **共享后端管理**：列出后端、被哪些服务器看到、容量、各用户额度。
@@ -1481,8 +1499,9 @@ INSTANCE_BUSY                 { containerId }          # Incus 实例锁冲突�
 - **数据卷页**：名称、所在池、大小、已用、共享标记、挂到哪些容器。新建/改名/扩容/缩容/删除。
 - **容器详情页「存储」区**：系统盘（池、容量、已用、扩缩）；数据盘（已挂载列表 + 路径，
   **运行中直接加减，不提示重启**）。
-- **容器详情页「规格」区**：CPU/内存滑块**在线生效不提示重启**；
-  GPU 选择器**要求已停止**才可编辑；未开 `nvidia.runtime` 的容器提示需重建。
+- **容器详情页「规格」区**：CPU/内存滑块**在线生效不提示重启**。
+  GPU 由 `<ExtensionSlots area="container.spec">` 注入；核心页不持有 PCI / `nvidiaRuntime`。
+  Slot 在停机且扩展已启用时可编辑；停机 PATCH 可打开 runtime，不再提示「建时未开需重建」。
 - **意图历史**：取代任务历史。每条显示发起人、时间、请求内容、结果、结构化错误。
 
 ---
@@ -1579,8 +1598,11 @@ INSTANCE_BUSY                 { containerId }          # Incus 实例锁冲突�
 | 镜像在某服务器上还没拉下来 | 创建前置条件不满足，拒绝 |
 | 镜像不带 sshd | 公钥注入成功，SSH 状态 `key_applied_sshd_missing`，前端显式提示。**不是静默失败** |
 | 容器重建后 SSH 主机密钥变化 | 主机密钥由容器内 sshd 自己生成，SSH 代理层与前端需提示指纹已变 |
-| 用户想给建时未开 `nvidia.runtime` 的容器加卡 | 拒绝，`GPU_RUNTIME_NOT_ENABLED`，提示需重建 |
-| 服务器没装 nvidia-container-toolkit 但容器要开 `nvidia.runtime` | 创建时用 `gpu_runtime_available` 门控拒绝。否则容器根本起不来 |
+| 启用+ready 上创建，CPU-only grant / 零卡 | 包仍写 `nvidiaRuntime: true`。日后停机 PATCH 可加卡（C6） |
+| 用户想给 `nvidiaRuntime=false` 的已停容器加卡 | 允许（扩展已启用）。停机 PATCH 由包打开 runtime，**不再要求重建** |
+| 运行中（含 frozen）改卡 | 拒绝，`EXTENSION_MUTATION_REQUIRES_STOP`。Reconciler 同样不得静默 PUT |
+| 服务器没装 nvidia-container-toolkit 但请求了卡 | 包拒绝 `NVIDIA_GPU_RUNTIME_UNAVAILABLE`。未启用 → `EXTENSION_NOT_ENABLED`。启用但 not ready、零卡创建：允许且不打开 runtime |
+| 未启用服务器上提交 `extensions['nvidia-gpu']` | `EXTENSION_NOT_ENABLED` |
 | 用户想改容器 IP | **不提供**。IP 是不可变属性（§9.3），需换网段就重建 |
 
 ### 12.8 网络安全
@@ -1805,7 +1827,7 @@ ceph(RBD) 池                        → shareable=false，跨服务器挂载被
    验证 nft `bridge incus` 过滤、host↔guest ping、guest→gateway ping
 4. 私有 simplestreams 源（静态文件 + 自签 HTTPS，e2e 的 CA 已有），
    放一个带 sshd、且不跑 DHCP 客户端的最小系统镜像
-5. 无 GPU：GPU 用例走「服务器无 GPU → nvidia_runtime 不启用」分支
+5. 无 GPU：不启用 nvidia-gpu 扩展；GPU 用例走未启用 → `EXTENSION_NOT_ENABLED`。有 toolkit 的机器可显式启用；启用+ready 后零卡/CPU-only 创建仍开 runtime（C6）
 6. Incus 的 HTTPS API + trust token 流程，验证服务器接入向导
 ```
 
@@ -1837,7 +1859,7 @@ guest 地址仍由 reconciler 写入、**宿主机能 ping 客户机**、nft `br
 | 6 | root disk 延迟缩容：对运行中容器设更小 size，确认返回 200 且 `volatile.root.apply_quota=true` | §10.3 的 pending 机制可简化 |
 | 7 | `dir` 池缩容到低于已用量：确认返回 200、后续写入 `EDQUOT`、读取仍正常 | §3.2 规则 1 的守卫可放宽 |
 | 8 | `dir` 池无 project quota 时 `size=` 被静默忽略，`volumes/<t>/<v>/state` 的 `usage` 为 null | `quota_effective` 探测方式要换 |
-| 9 | `nvidia.runtime=true` 但宿主机没装 toolkit：确认容器启动失败的具体错误 | `gpu_runtime_available` 门控方式要调整 |
+| 9 | `nvidia.runtime=true` 但宿主机没装 toolkit：确认容器启动失败的具体错误 | 包 health `runtimeReady` 门控方式要调整 |
 | 10 | GPU 热插拔：对建时开了 runtime 但没带卡的运行中容器热加一张卡，容器内 `nvidia-smi` 是否立刻可用 | C7「卡只能停机改」的限制是对的；若可用则可放宽 |
 | 11 | 热卸载 while busy：持有 fd 和 cwd，卸载后确认 (a) API 成功 (b) 容器内路径消失 (c) 旧 fd 的写入仍落到卷上 | §12.6 的排空窗口可取消 |
 | 12 | 真实块设备 LVM 池扩容：`pvresize` 之后 Incus 是否自动感知 | 运维手册要写清楚 |

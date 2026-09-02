@@ -61,7 +61,7 @@ Nyabase 前端是 Incus 控制面的运营控制台：服务器接入、容器/�
    - `routes/containers/index.tsx:42`（用户容器列表）
    
    `servers-page.tsx` / `volumes-page.tsx` / `images-page.tsx` 则保留页头、只替换内容区。两种模式并存。
-3. **原生控件复刻 Input 的 class 字符串。** `<select>` **14** 处（含 `create-container-dialog.tsx:293` 本地 `NativeSelect`）。裸 checkbox **7** 处：`gpu-picker.tsx`、`ip-pools-page.tsx`、`group-detail-page.tsx` 能力勾选、`container-detail-page.tsx` 只读挂载、`image-form-dialog.tsx` 网络、`http-proxy-ops-page.tsx` 的 enabled / httpsEnabled。手写 `<table>` 9 处。容器详情 Tab 是一排 `Button variant={tab===key?'default':'ghost'}`，不是 Tabs。
+3. **原生控件复刻 Input 的 class 字符串。** `<select>` **14** 处（含 `create-container-dialog.tsx:293` 本地 `NativeSelect`）。裸 checkbox：GPU 多选已迁出核心（`extensions/nvidia-gpu` slot，页状态只有不透明 `extensions` 袋）；其余在 `ip-pools-page.tsx`、`group-detail-page.tsx` 能力勾选、`container-detail-page.tsx` 只读挂载、`image-form-dialog.tsx` 网络、`http-proxy-ops-page.tsx` 的 enabled / httpsEnabled。手写 `<table>` 9 处。容器详情 Tab 是一排 `Button variant={tab===key?'default':'ghost'}`，不是 Tabs。
 4. **确认框语义混乱。** 镜像删除 / 授权删除 / 公钥删除 / 证书轮换等走 `AlertDialog`（Radix Action **点击即关**，pending 文案来不及显示）。用户/组/数据卷/HTTP 绑定/IP 池/共享后端/域名池/存储池取消登记/容器停重启删除卸载走受控 `Dialog`，失败时留在框内。两套 UX。完整清单见 2.2 ConfirmDialog。
 5. **列表密度与呈现不一致。** 用户/组是纵向大卡片；容器是分组 + `divide-y` 行；服务器/数据卷是卡片网格；审计/存储池/SSH/HTTP ops 是手写 table。
 6. **上帝组件。** `container-detail-page.tsx` 1060 行。`server-detail-page.tsx` 856 行。`volumes-page.tsx` 578 行。`canonical-grant-panel.tsx` 468 行。本方案按边界拆分这些文件；**不把「pages/ ≤250 行」当成硬门槛**（`users-page` 393 行四个对话框、`system-settings` 490、`http-proxy-ops` 484、`audit` 427、`ssh-proxy` 386 在本轮不必为行数再拆）。
@@ -549,7 +549,8 @@ export function FormField({
 
 每处转换的 PR checklist：placeholder 文案不变、`disabled` 条件不变、提交 `if (!id)` 仍在。
 
-**Checkbox 行（IP 池绑服务器、组能力、GPU 多选）不是 FormField stack：**
+**Checkbox 行（IP 池绑服务器、组能力、扩展 slot 多选）不是 FormField stack：**
+GPU 多选住在 nvidia-gpu slot，经 `host.ui.Checkbox` 渲染；核心页不持有 `pciAddresses`。
 
 ```tsx
 <label className="flex items-center gap-2 text-sm">
@@ -679,8 +680,8 @@ export const queryKeys = {
     detail: (serverId: string) => ['server', serverId] as const,
     pools: (serverId: string, admin: boolean) =>
       ['storage-pools', admin ? 'admin' : 'user', serverId] as const,
-    gpus: (serverId: string, admin: boolean) =>
-      ['server-gpus', admin ? 'admin' : 'user', serverId] as const,
+    extensions: (serverId: string) =>
+      ['server-extensions', 'admin', serverId] as const,
     preflight: (serverId: string) => ['server-preflight', serverId] as const,
   },
   images: {
@@ -744,6 +745,12 @@ export const queryKeys = {
 } as const;
 ```
 
+GPU 库存不再走 `queryKeys.servers.gpus` / `server-gpus`。包通过 `host.extensionDevicesKey(ext.id, serverId, admin)` 得到
+`['server-card-extension', ext.id, 'devices', admin ? 'admin' : 'user', serverId]`；
+页不写扩展 id 字面量。容器/授权页状态只有不透明 `extensions` / `extensionGrants` 袋；
+`<ExtensionSlots>` 用 `value`/`onChange` 写回。核心 `pages/` 与 `components/containers/`
+不得 import nvidia-gpu，也不得持有 `pciAddresses`。
+
 测试（node）：四个 `subjectList(..., slice)` 互不相等；`subject(...)` 是它们的公共前缀；`invalidateQueries({ queryKey: subject(...) })` 的匹配语义用 shape 断言，**不要** `toBe` 同一数组引用。
 
 PR 3 必带对照表（节选）：
@@ -788,9 +795,10 @@ function isCurrentPrincipalAccessQuery(queryKey: readonly unknown[]): boolean {
       || root === 'container' || root === 'volumes' || root === 'shared-backends'
       || root === 'storage-pools' || root === 'container-intents'
       || root === 'container-attachments' || root === 'resource-intent-failures'
-      || root === 'volume-intents' || root === 'server-gpus')
+      || root === 'volume-intents')
     && a === 'user'
   ) return true;
+  if (root === 'server-card-extension' && queryKey[3] === 'user') return true;
   // ['http-proxy', 'bindings' | 'domain-pools', 'user']
   if (root === 'http-proxy' && b === 'user') return true;
   return false;
@@ -807,9 +815,9 @@ PR 3 单测（shape，不是引用）：
 | `queryKeys.containers.intents('user', id)` | true |
 | `queryKeys.resourceIntentFailures('user', path)` | true |
 | `queryKeys.volumes.intents(id, false)` | true |
-| `queryKeys.servers.gpus(id, false)` | true |
+| `host.extensionDevicesKey(id, serverId, false)`（`['server-card-extension', …, 'user', …]`） | true |
 | `queryKeys.httpProxy.bindings` / `domainPools` | true |
-| `queryKeys.servers.admin` / `httpProxy.adminBindings` / `attachments('admin', id)` / `gpus(id, true)` | **false** |
+| `queryKeys.servers.admin` / `httpProxy.adminBindings` / `attachments('admin', id)` / admin devices key | **false** |
 
 **不**把无平面标记的 key（`storage-capacity`、`volume-form.*`）塞进 predicate——那些 tuple 没有 `user` 段，扩大没有稳定规则。Logout 仍走 `clearPrincipalQueryState`（全清）。
 
@@ -901,6 +909,7 @@ Zustand **只**保留 auth + theme。对话框、tab、草稿不进全局 store�
 按 Tab/卡片切，不设 250 行 KPI。
 
 `container-detail-page.tsx` → 编排器 + `overview-panel` / `storage-panel` / `spec-panel` / `intents-panel` + 已有 console + `container-action-bar`（`layout` prop）。
+规格/概览/创建对话框的 GPU UI 只渲染 `<ExtensionSlots>`；页状态是不透明 `extensions` 袋，不 import nvidia-gpu。
 
 `server-detail-page.tsx` → `components/servers/{connect-card,preflight-card,node-metrics-card,pools-card,certificate-card}.tsx`。**PR 8 禁止改 select/checkbox**；允许把两处 `AlertDialogTrigger` 提成受控 ConfirmDialog（见清单 Owner）。
 
@@ -1214,7 +1223,7 @@ persist key 仍是 `nyabase-theme` / `nyabase-auth`。
 5. **不做完整 shadcn Sidebar。** 同一 nav 数据，aside + Sheet 两种呈现；Sheet portal 不进 `h-screen` 行。
 6. **不做 react-hook-form / TanStack Form。** `FormField` + `safeParse`。
 7. **Intent 写操作禁止乐观更新。**
-8. **Query key 唯一目录。** `grants.subject` 是 invalidate 前缀；查询必须 `subjectList(..., slice)`。Dashboard 与列表共享 user 面 key，**不**统一 5s/15s interval。Predicate 在 PR 3 **扩大**到目录中所有带 `user`/`me` 平面标记的 key（attachments、http-proxy user 切片、resource-intent-failures、volume-intents、**`server-gpus`**），并修 `'me-access'` 死分支。
+8. **Query key 唯一目录。** `grants.subject` 是 invalidate 前缀；查询必须 `subjectList(..., slice)`。Dashboard 与列表共享 user 面 key，**不**统一 5s/15s interval。Predicate 在 PR 3 **扩大**到目录中所有带 `user`/`me` 平面标记的 key（attachments、http-proxy user 切片、resource-intent-failures、volume-intents、**`server-card-extension` user-plane devices**），并修 `'me-access'` 死分支。
 9. **`routes/` 保持薄。** 容器列表迁回 `pages/`。
 10. **页面 loading 不再吃掉页头。** QueryView 只替换内容槽。loading 用 TanStack **`isLoading`（`isPending && isFetching`）**，不用 raw `isPending`。禁止把 `enabled: false` 的 query 传入。多 query 重载仅限始终同时启用的组合；capability/Tab 分段用并列 QueryView。空态由调用方 `showEmpty`。`loadingLabel: string` 必填。详情保留 `onBack`。PR 5/6/7/8 都执行同一句壳配方。
 11. **破坏性确认 = 受控 ConfirmDialog。** Action `preventDefault`；只在父级 `open=false`（通常 `onSuccess`）时关；pending 禁用双按钮。`pendingLabel` 必传。清单每行有 Owner PR。Trigger 站点先 lift `open`。
@@ -1328,7 +1337,7 @@ persist key 仍是 `nyabase-theme` / `nyabase-auth`。
 ### PR 9 — 机械替换 Select / Checkbox / Switch（含系统设置 boolean）
 
 - **标题：** `frontend: replace native select/checkbox with Radix wrappers`
-- **影响文件：** `create-container-dialog.tsx`、`gpu-picker.tsx`、`components/storage/volume-form-dialog.tsx`（PR 5 已抽出）、`group-detail-page.tsx`、`canonical-grant-panel.tsx`、`http-proxy-page.tsx`、`http-proxy-ops-page.tsx`、`manage-containers-page.tsx`、`image-form-dialog.tsx`、`image-list.tsx`、`system-settings-page.tsx`（boolean Switch 字符串映射）、`server` cards 上的 pool select、`container` storage-panel（若 PR 7 未换）
+- **影响文件：** `create-container-dialog.tsx`、`extensions/nvidia-gpu` GpuPicker（slot；核心无 `gpu-picker.tsx`）、`components/storage/volume-form-dialog.tsx`（PR 5 已抽出）、`group-detail-page.tsx`、`canonical-grant-panel.tsx`、`http-proxy-page.tsx`、`http-proxy-ops-page.tsx`、`manage-containers-page.tsx`、`image-form-dialog.tsx`、`image-list.tsx`、`system-settings-page.tsx`（boolean Switch 字符串映射）、`server` cards 上的 pool select、`container` storage-panel（若 PR 7 未换）
 - **依赖：** PR 1、PR 6（设置页已是 Table；Pagination 已用 Select）、PR 7、PR 8
 - **说明：** 按 cookbook。空值 placeholder + 提交守卫。系统设置 `onChange(checked ? 'true' : 'false')`，**零 CAS 改动**。门禁：`rg "<select" packages/frontend/src` 与 `type="checkbox"` 在 src 内为空（测试/注释除外）。`components/ui/pagination.tsx` 已用 Select，不会误伤。审计 pageSize 不再单独出现原生 select。
 
