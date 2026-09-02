@@ -40,10 +40,7 @@ export interface ContainerExtensionContext extends ServerCardExtensionContext {
   readonly containerId: string;
   readonly lifecyclePhase: 'provisioning' | 'active' | 'deleting' | 'failed';
   readonly powerIntent: 'running' | 'stopped';
-  /**
-   * Same as today's `containerStatus(route, powerIntent)`.
-   * API stop gating is `observedStatus !== 'stopped'` (includes frozen).
-   */
+  /** API stop gating is `observedStatus !== 'stopped'` (includes frozen). */
   readonly observedStatus: 'running' | 'stopped' | 'frozen' | 'error' | 'unknown';
   readonly currentExtensions: Readonly<Record<string, unknown>>;
 }

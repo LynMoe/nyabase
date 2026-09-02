@@ -179,7 +179,6 @@ export const CORE_MANAGED_FIELD_OWNERSHIP: ManagedFieldOwnership = {
   devicePrefixes: ['nyd-'],
 };
 
-/** Temporary: keep today's card prefixes until the extension registry supplies them. */
 export const TEMPORARY_MANAGED_FIELD_OWNERSHIP: ManagedFieldOwnership = {
   configPrefixes: [...CORE_MANAGED_FIELD_OWNERSHIP.configPrefixes, 'nvidia.'],
   deviceNames: CORE_MANAGED_FIELD_OWNERSHIP.deviceNames,
