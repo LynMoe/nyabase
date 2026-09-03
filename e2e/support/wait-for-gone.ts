@@ -9,6 +9,9 @@ export async function waitForGone(
   do {
     const response = await api.get(path);
     if (response.status() === 404) return;
+    if (response.status() === 401 || response.status() === 403) {
+      throw new Error(`auth lost while waiting for gone: ${path} status=${response.status()}`);
+    }
     await new Promise((resolve) => setTimeout(resolve, 500));
   } while (Date.now() < deadline);
   throw new Error(`resource was not removed: ${path}`);

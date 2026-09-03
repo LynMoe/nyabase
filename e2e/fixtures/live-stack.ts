@@ -96,9 +96,19 @@ export const test: TestFn = Object.assign(
 
 let adminSession: { accessToken: string; refreshToken: string; user: LoginResponse['user'] } | undefined;
 let adminLoginClient: ApiClient | undefined;
+let adminSessionIssuedAt = 0;
+const ADMIN_SESSION_REFRESH_MS = 8 * 60_000;
 
 async function ensureAdminSession(): Promise<{ accessToken: string; user: LoginResponse['user'] }> {
-  if (adminSession) return adminSession;
+  if (adminSession && Date.now() - adminSessionIssuedAt < ADMIN_SESSION_REFRESH_MS) {
+    return adminSession;
+  }
+  if (adminSession && adminLoginClient) {
+    await adminLoginClient.post('/api/auth/logout', {
+      data: { refreshToken: adminSession.refreshToken },
+    }).catch(() => undefined);
+    adminSession = undefined;
+  }
   adminLoginClient = createApiClient({
     baseURL: requireRuntimeEnv('E2E_BASE_URL'),
     extraHTTPHeaders: {
@@ -119,6 +129,7 @@ async function ensureAdminSession(): Promise<{ accessToken: string; user: LoginR
     refreshToken: session.refreshToken,
     user: session.user,
   };
+  adminSessionIssuedAt = Date.now();
   return adminSession;
 }
 
@@ -130,6 +141,7 @@ export async function closeAdminSession(): Promise<void> {
   }
   adminSession = undefined;
   adminLoginClient = undefined;
+  adminSessionIssuedAt = 0;
 }
 
 export async function runLiveTest(entry: RegisteredTest): Promise<void> {
