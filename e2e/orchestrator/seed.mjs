@@ -557,8 +557,8 @@ WHERE id = :'server_id'::uuid;
     },
   );
   current = await jsonRequest(`/api/admin/servers/${extra.id}`, { token });
-  await ensurePreflight(token, current, labDir.id);
   await ensureAssignment(token, image, extra.id, previousSeedState?.image);
+  await ensurePreflight(token, current, labDir.id);
   const cephRow = selectedShared
     ? (await jsonRequest(`/api/admin/servers/${extra.id}/storage-pools`, { token }))
       .find((pool) => pool.incusName === process.env.E2E_CEPHFS_INCUS_POOL)
