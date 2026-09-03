@@ -218,7 +218,7 @@ SELECT
   (SELECT COUNT(*) FROM control.container_network_claims
     WHERE server_id = :'server_id'::uuid AND container_id IS NOT NULL) || '|' ||
   (SELECT COUNT(*) FROM control.container_ssh_routes WHERE server_id = :'server_id'::uuid) || '|' ||
-  (SELECT COUNT(*) FROM control.container_gpu_claims WHERE server_id = :'server_id'::uuid) || '|' ||
+  (SELECT COUNT(*) FROM control.extension_device_claims WHERE server_id = :'server_id'::uuid) || '|' ||
   (SELECT COUNT(*) FROM infra.image_server_assignments WHERE server_id = :'server_id'::uuid);
 `, { ...env, E2E_CLEANUP_SERVER_ID: serverId }, runId);
   const counts = countResult.stdout.trim().split('|').map((value) => Number(value));
@@ -236,7 +236,9 @@ DELETE FROM control.container_network_claims
 WHERE server_id = :'server_id'::uuid AND container_id IS NULL;
 DELETE FROM control.container_ssh_routes
 WHERE server_id = :'server_id'::uuid;
-DELETE FROM control.container_gpu_claims
+DELETE FROM control.extension_device_claims
+WHERE server_id = :'server_id'::uuid;
+DELETE FROM infra.server_extensions
 WHERE server_id = :'server_id'::uuid;
 DELETE FROM iam.storage_pool_grants
 WHERE pool_id IN (
