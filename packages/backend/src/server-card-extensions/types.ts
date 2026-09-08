@@ -1,4 +1,9 @@
-import type { ExtensionErrorFormatter, NodeMetricCatalog, NodeMetricSample } from '@nyabase/common';
+import type {
+  ExtensionErrorFormatter,
+  ExtensionSupportDto,
+  NodeMetricCatalog,
+  NodeMetricSample,
+} from '@nyabase/common';
 import type { ManagedFieldsDiff } from '../incus/compare-managed-fields.js';
 
 /** Incus GET /1.0/resources metadata. Core passes it through unchanged. */
@@ -55,6 +60,11 @@ export interface PreflightContribution {
   readonly health: Readonly<Record<string, unknown>>;
 }
 
+/**
+ * Compile-time server-card package ABI.
+ * Three orthogonal states: registered (this object), supported (`probeSupport`),
+ * enabled (admin checkbox). Persisted `health` is operational, not a prerequisite.
+ */
 export interface ServerCardExtension {
   readonly id: string;
   readonly displayName: string;
@@ -108,6 +118,17 @@ export interface ServerCardExtension {
     readonly metricSamples: readonly NodeMetricSample[];
     readonly enabled: boolean;
   }): Promise<PreflightContribution>;
+
+  /**
+   * Host prerequisite probe. Independent of `enabled` and persisted health.
+   * Core lists it on every registered module, including disabled ones, and
+   * never auto-enables from a passing result.
+   */
+  probeSupport(input: {
+    readonly serverId: string;
+    readonly resources: IncusResourcesMetadata;
+    readonly metricSamples: readonly NodeMetricSample[];
+  }): Promise<ExtensionSupportDto>;
 
   /**
    * Scan, preflight, and PUT-enablement call this in the same request.

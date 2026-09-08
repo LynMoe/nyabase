@@ -29,6 +29,7 @@ export type IncusFailureCode =
   | 'VOLUME_SECURITY_SHIFTED_MISMATCH'
   | 'VOLUME_SHRINK_BELOW_USAGE'
   | 'ROOT_SHRINK_BELOW_USAGE'
+  | 'ROOT_USAGE_UNKNOWN'
   | 'VOLUME_SHRINK_REQUIRES_DETACH'
   | 'VOLUME_SHRINK_REQUIRES_STOP'
   | 'VOLUME_RESIZE_UNSUPPORTED'
@@ -88,6 +89,7 @@ const FAILURE_MESSAGES: Record<IncusFailureCode, string> = {
   VOLUME_SECURITY_SHIFTED_MISMATCH: 'The managed volume does not have security.shifted enabled',
   VOLUME_SHRINK_BELOW_USAGE: 'The requested volume size is below current usage',
   ROOT_SHRINK_BELOW_USAGE: 'The requested root disk size is below current usage',
+  ROOT_USAGE_UNKNOWN: 'Root disk usage is unknown; shrink is not allowed until usage is observed',
   VOLUME_SHRINK_REQUIRES_DETACH: 'A block-backed volume must be detached before shrinking',
   VOLUME_SHRINK_REQUIRES_STOP: 'A block-backed volume consumer must be stopped before shrinking',
   VOLUME_RESIZE_UNSUPPORTED: 'The storage driver does not support the requested resize',

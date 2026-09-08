@@ -30,6 +30,9 @@ describe('queryKeys catalog', () => {
     expect(queryKeys.containers.adminList).toEqual(['containers', 'admin']);
     expect(queryKeys.volumes.user).toEqual(['volumes', 'user']);
     expect(queryKeys.volumes.admin).toEqual(['volumes', 'admin']);
+    expect(queryKeys.volumes.adminByServer('s1')).toEqual(['volumes', 'admin', 's1']);
+    expect(queryKeys.volumes.adminByServer('s1').slice(0, queryKeys.volumes.admin.length))
+      .toEqual(queryKeys.volumes.admin);
     expect(queryKeys.sharedVolumes.all).toEqual(['shared-volumes']);
     expect(queryKeys.sharedVolumes.user).toEqual(['shared-volumes', 'user']);
     expect(queryKeys.sharedVolumes.admin).toEqual(['shared-volumes', 'admin']);
@@ -38,14 +41,20 @@ describe('queryKeys catalog', () => {
     expect(queryKeys.sharedVolumes.attachable('s1').slice(0, queryKeys.sharedVolumes.all.length))
       .toEqual(queryKeys.sharedVolumes.all);
     expect(queryKeys.images.userActive).toEqual(['images', 'user', 'active']);
+    expect(queryKeys.images.detail('i1')).toEqual(['images', 'admin', 'i1']);
+    expect(queryKeys.users.admin).toEqual(['users', 'admin']);
+    expect(queryKeys.users.detail('u1')).toEqual(['users', 'admin', 'u1']);
+    expect(queryKeys.users.detail('u1').slice(0, queryKeys.users.admin.length))
+      .toEqual(queryKeys.users.admin);
     expect(queryKeys.grants.subject('users', 'abc')).toEqual(['grants', 'users', 'abc']);
     expect(queryKeys.meAccess).toEqual(['me', 'access']);
     expect(queryKeys.publicSettings).toEqual(['public-settings']);
     expect(queryKeys.certificate).toEqual(['incus-client-certificate']);
     expect(queryKeys.systemSettings).toEqual(['system-settings']);
-    expect(queryKeys.storagePools.adminIndex).toEqual(['storage-pools', 'admin']);
     expect(queryKeys.catalog.users).toEqual(['catalog', 'users']);
     expect(queryKeys.sshProxy.status).toEqual(['ssh-proxy-status']);
     expect(queryKeys.sshProxy.hostKey).toEqual(['ssh-proxy-host-key']);
+    expect(queryKeys.sharedBackends.admin).toEqual(['shared-backends', 'admin']);
+    expect(queryKeys.sharedBackends.detail('b1')).toEqual(['shared-backends', 'admin', 'b1']);
   });
 });

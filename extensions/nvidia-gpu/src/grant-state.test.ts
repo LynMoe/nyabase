@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
+import { NVIDIA_GPU_EXTENSION_ID } from './id.js';
 import { GpuGrantMode } from './schema.js';
-import { reduceNvidiaGpuGrant, type NvidiaGpuGrant } from './grant-state.js';
+import { formatGrantSummary, reduceNvidiaGpuGrant, type NvidiaGpuGrant } from './grant-state.js';
 
 const pciGrant: NvidiaGpuGrant = {
   mode: GpuGrantMode.Pci,
@@ -10,6 +11,34 @@ const pciGrant: NvidiaGpuGrant = {
 function apply(current: NvidiaGpuGrant, ...events: Parameters<typeof reduceNvidiaGpuGrant>[1][]): NvidiaGpuGrant {
   return events.reduce(reduceNvidiaGpuGrant, current);
 }
+
+describe('formatGrantSummary', () => {
+  it('omits none, missing grants, and empty pci lists', () => {
+    expect(formatGrantSummary(undefined)).toBeNull();
+    expect(formatGrantSummary({})).toBeNull();
+    expect(formatGrantSummary({
+      [NVIDIA_GPU_EXTENSION_ID]: { mode: GpuGrantMode.None, pciAddresses: [] },
+    })).toBeNull();
+    expect(formatGrantSummary({
+      [NVIDIA_GPU_EXTENSION_ID]: { mode: GpuGrantMode.Pci, pciAddresses: [] },
+    })).toBeNull();
+    expect(formatGrantSummary({
+      [NVIDIA_GPU_EXTENSION_ID]: { mode: GpuGrantMode.Pci, pciAddresses: [] },
+    })).not.toBe('0GPU');
+  });
+
+  it('renders all GPUs and pci counts', () => {
+    expect(formatGrantSummary({
+      [NVIDIA_GPU_EXTENSION_ID]: { mode: GpuGrantMode.All, pciAddresses: [] },
+    })).toBe('全部GPU');
+    expect(formatGrantSummary({
+      [NVIDIA_GPU_EXTENSION_ID]: {
+        mode: GpuGrantMode.Pci,
+        pciAddresses: ['00000000:41:00.0', '00000000:a1:00.0'],
+      },
+    })).toBe('2GPU');
+  });
+});
 
 describe('reduceNvidiaGpuGrant', () => {
   it('keeps none after GpuPicker onModeChange then onChange([])', () => {

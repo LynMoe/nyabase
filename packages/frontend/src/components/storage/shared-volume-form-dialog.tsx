@@ -4,6 +4,8 @@ import {
   zCreateSharedVolumeRequest,
   zPatchVolumeRequest,
   type CreateSharedVolumeRequest,
+  type EffectiveAccessDto,
+  type IntentAcceptedDto,
   type PatchVolumeRequest,
   type SharedBackendDto,
   type SharedVolumeDto,
@@ -16,9 +18,11 @@ import { Input } from '../ui/input.js';
 import { FormField } from '../layout/form-field.js';
 import { bytesToGiBInput, GIB, SelectField } from './volume-form-fields.js';
 import { approxGibHint } from '../../lib/utils.js';
+import { formatGrantBytes, formatRemainingBytes } from '../../lib/grant-quota.js';
 import { queryKeys } from '../../lib/query-keys.js';
 import { backendLacksOnlineExecutor } from '../../lib/shared-backend-executor.js';
 import { toast } from '../../hooks/use-toast.js';
+import { isIntentAccepted, waitForResourceIntent } from '../../lib/intent-visibility.js';
 import {
   classifySizeChange,
   isQuotaIneffectiveCapability,
@@ -49,6 +53,11 @@ export function SharedVolumeFormDialog({
     queryFn: () => api.get<SharedBackendDto[]>('/shared-backends'),
     enabled: open && !editing,
   });
+  const accessQuery = useQuery({
+    queryKey: queryKeys.meAccess,
+    queryFn: () => api.get<EffectiveAccessDto>('/me/access'),
+    enabled: open,
+  });
   const createShared = useMutation({
     mutationFn: (body: CreateSharedVolumeRequest) => api.post<unknown>('/shared-volumes', body),
     onSuccess: () => {
@@ -59,19 +68,32 @@ export function SharedVolumeFormDialog({
     onError: (mutationError) => setError(errorMessage(mutationError)),
   });
   const patch = useMutation({
-    mutationFn: (body: PatchVolumeRequest) => api.patch<unknown>(
-      `/shared-volumes/${sharedVolume?.id ?? ''}`,
-      body,
-    ),
+    mutationFn: async (body: PatchVolumeRequest) => {
+      const volumeId = sharedVolume?.id ?? '';
+      const accepted = await api.patch<IntentAcceptedDto | SharedVolumeDto>(
+        `/shared-volumes/${volumeId}`,
+        body,
+      );
+      if (isIntentAccepted(accepted)) {
+        await waitForResourceIntent(`/shared-volumes/${volumeId}/intents`, accepted.intentId);
+      }
+    },
     onSuccess: () => {
       toast({ title: '已保存' });
       void queryClient.invalidateQueries({ queryKey: queryKeys.sharedVolumes.all });
+      void queryClient.invalidateQueries({ queryKey: ['resource-intent-failures'] });
       onOpenChange(false);
     },
-    onError: (mutationError) => setError(errorMessage(mutationError)),
+    onError: (mutationError) => {
+      setError(errorMessage(mutationError));
+      void queryClient.invalidateQueries({ queryKey: queryKeys.sharedVolumes.all });
+      void queryClient.invalidateQueries({ queryKey: ['resource-intent-failures'] });
+    },
   });
   const backends = backendsQuery.data ?? [];
   const selectedBackend = backends.find((backend) => backend.id === sharedBackendId);
+  const liveSharedAccess = (accessQuery.data?.sharedBackends ?? [])
+    .find((item) => item.sharedBackendId === sharedBackendId);
   const noOnlineExecutor = editing
     ? false
     : selectedBackend
@@ -198,6 +220,13 @@ export function SharedVolumeFormDialog({
               onChange={setSharedBackendId}
               options={backends.map((backend) => [backend.id, backend.displayName ?? backend.name])}
             />
+          )}
+          {liveSharedAccess && (
+            <p className="text-xs text-muted-foreground">
+              剩余 {formatRemainingBytes(liveSharedAccess.limitBytes, liveSharedAccess.usedBytes)}
+              {' / '}
+              额度 {formatGrantBytes(liveSharedAccess.limitBytes)}
+            </p>
           )}
           {noOnlineExecutor && (
             <p className="text-xs text-muted-foreground" data-testid="shared-volume-no-executor">

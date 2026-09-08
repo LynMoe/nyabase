@@ -25,6 +25,7 @@ import {
 import { parseConnectIntentId } from './connect-intent.mjs';
 import {
   discoverStoragePools,
+  findAndRegisterCephExecutor,
   registerStoragePools,
   validateRegisteredStoragePoolDto,
   validateStoragePoolDtos,
@@ -510,32 +511,16 @@ async function seedLabServer(token, definition, image, selectedShared, routedNet
     blocked(`lab server ${definition.slug} is missing dir quota_online and lvm block_backed pools`);
   }
   await registerStoragePools(jsonRequest, extra.id, token, [labDir, labLvm]);
+  let labCephExecutor;
   if (selectedShared && process.env.E2E_CEPHFS_INCUS_POOL?.trim()) {
-    const latest = validateStoragePoolDtos(
-      await jsonRequest(`/api/admin/servers/${extra.id}/storage-pools`, { token }),
+    labCephExecutor = await findAndRegisterCephExecutor(
+      jsonRequest,
+      selectedShared.id,
       extra.id,
-      `lab ${definition.slug} cephfs listing`,
+      process.env.E2E_CEPHFS_INCUS_POOL,
+      token,
+      `lab ${definition.slug} CephFS executor`,
     );
-    const cephPool = latest.find(
-      (pool) =>
-        pool.driver === 'cephfs'
-        && pool.incusName === process.env.E2E_CEPHFS_INCUS_POOL
-        && pool.shareable === true,
-    );
-    if (!cephPool) {
-      blocked(`lab server ${definition.slug} is missing CephFS pool ${process.env.E2E_CEPHFS_INCUS_POOL}`);
-    }
-    if (!cephPool.registered || cephPool.sharedBackendId !== selectedShared.id) {
-      await jsonRequest(`/api/admin/storage-pools/${cephPool.id}`, {
-        method: 'PATCH',
-        token,
-        body: {
-          expectedRevision: cephPool.revision,
-          registered: true,
-          sharedBackendId: selectedShared.id,
-        },
-      });
-    }
   }
   const workerHost = new URL(definition.apiEndpoint).hostname;
   const workerExporter = `https://${workerHost}:19181/metrics`;
@@ -559,10 +544,6 @@ WHERE id = :'server_id'::uuid;
   current = await jsonRequest(`/api/admin/servers/${extra.id}`, { token });
   await ensureAssignment(token, image, extra.id, previousSeedState?.image);
   await ensurePreflight(token, current, labDir.id);
-  const cephRow = selectedShared
-    ? (await jsonRequest(`/api/admin/servers/${extra.id}/storage-pools`, { token }))
-      .find((pool) => pool.incusName === process.env.E2E_CEPHFS_INCUS_POOL)
-    : undefined;
   return {
     id: extra.id,
     createdByRun: registrationResult.createdByRun,
@@ -573,7 +554,7 @@ WHERE id = :'server_id'::uuid;
     ssh: definition.ssh,
     parentInterface: definition.parentInterface,
     dirPoolId: labDir.id,
-    cephfsPoolId: cephRow?.id,
+    cephfsPoolId: labCephExecutor?.id,
     role: definition.role || undefined,
   };
 }
@@ -1255,31 +1236,14 @@ const cephfsEnabled = Boolean(
 );
 if (cephfsEnabled) {
   await discoverStoragePools(jsonRequest, server.id, token);
-  const latestPools = validateStoragePoolDtos(
-    await jsonRequest(`/api/admin/servers/${server.id}/storage-pools`, { token }),
+  await findAndRegisterCephExecutor(
+    jsonRequest,
+    selectedShared.id,
     server.id,
-    'cephfs storage pool listing',
+    process.env.E2E_CEPHFS_INCUS_POOL,
+    token,
+    'primary CephFS executor',
   );
-  const cephPool = latestPools.find(
-    (pool) =>
-      pool.driver === 'cephfs'
-      && pool.incusName === process.env.E2E_CEPHFS_INCUS_POOL
-      && pool.shareable === true,
-  );
-  if (!cephPool) {
-    blocked('configured CephFS Incus pool was not discovered on the seeded server');
-  }
-  if (!cephPool.registered || cephPool.sharedBackendId !== selectedShared.id) {
-    await jsonRequest(`/api/admin/storage-pools/${cephPool.id}`, {
-      method: 'PATCH',
-      token,
-      body: {
-        expectedRevision: cephPool.revision,
-        registered: true,
-        sharedBackendId: selectedShared.id,
-      },
-    });
-  }
 }
 const cephfsStatus = cephfsEnabled
   ? [
@@ -1363,28 +1327,39 @@ for (const extra of [{ id: server.id, role: undefined }, ...labServers]) {
     },
   });
 }
-await jsonRequest(
-  `/api/admin/users/${session.user.id}/storage-pool-grants/${registeredDir.id}`,
-  {
-    method: 'PUT',
-    token,
-    body: { expiresAt: null },
-  },
-);
-const gpuPeerRow = labServers.find((entry) => entry.role === 'gpu')
-  ?? labServers.find((entry) => String(entry.endpoint ?? '').includes('10.8.1.12'));
-if (gpuPci && !gpuPeerRow) {
-  blocked('E2E_GPU_PCI_ADDRESS is set but no GPU Incus worker was seeded');
-}
-if (gpuPeerRow?.dirPoolId) {
+if (selectedShared?.id) {
   await jsonRequest(
-    `/api/admin/users/${session.user.id}/storage-pool-grants/${gpuPeerRow.dirPoolId}`,
+    `/api/admin/users/${session.user.id}/shared-backend-grants/${selectedShared.id}`,
+    {
+      method: 'PUT',
+      token,
+      body: {
+        limitBytes: 128 * 1024 * 1024 * 1024,
+        expiresAt: null,
+      },
+    },
+  );
+}
+const dirPoolIds = new Set();
+if (registeredDir?.id) dirPoolIds.add(registeredDir.id);
+if (registeredLvm?.id) dirPoolIds.add(registeredLvm.id);
+for (const extra of labServers) {
+  if (extra.dirPoolId) dirPoolIds.add(extra.dirPoolId);
+}
+for (const poolId of dirPoolIds) {
+  await jsonRequest(
+    `/api/admin/users/${session.user.id}/storage-pool-grants/${poolId}`,
     {
       method: 'PUT',
       token,
       body: { expiresAt: null },
     },
   );
+}
+const gpuPeerRow = labServers.find((entry) => entry.role === 'gpu')
+  ?? labServers.find((entry) => String(entry.endpoint ?? '').includes('10.8.1.12'));
+if (gpuPci && !gpuPeerRow) {
+  blocked('E2E_GPU_PCI_ADDRESS is set but no GPU Incus worker was seeded');
 }
 const gpuPeer = gpuPeerRow && gpuPci
   ? {

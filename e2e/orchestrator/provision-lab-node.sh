@@ -135,12 +135,30 @@ if incus network show incusbr0 >/dev/null 2>&1; then
   fi
 fi
 # Dir pool with a quota probe volume. Source must sit outside /var/lib/incus.
+# Project quota must be on the backing ext4 or Incus silently ignores size=.
+enable_ext4_prjquota() {
+  local target="\$1"
+  local src
+  src=\$(findmnt -n -o SOURCE --target "\$target" 2>/dev/null || true)
+  [[ -n "\$src" ]] || return 0
+  src=\${src%%[*}
+  tune2fs -O quota,project "\$src" >/dev/null 2>&1 || true
+  mount -o remount,prjquota "\$target" 2>/dev/null || true
+}
+install -d -m 0755 /mnt/incus-dir/${dir_pool}
+enable_ext4_prjquota /mnt/incus-dir
+enable_ext4_prjquota /
 if ! incus storage show ${dir_pool} >/dev/null 2>&1; then
-  install -d -m 0755 /mnt/incus-dir/${dir_pool}
   incus storage create ${dir_pool} dir source=/mnt/incus-dir/${dir_pool}
 fi
 if ! incus storage volume show ${dir_pool} nyabase-e2e-quota-probe >/dev/null 2>&1; then
   incus storage volume create ${dir_pool} nyabase-e2e-quota-probe size=32MiB
+fi
+# Empty dir volumes report usage={total:0} without used. A 4KiB file makes
+# GET .../state expose usage.used so discover can tell quota is real.
+probe_dir=\$(incus storage get ${dir_pool} source)/custom/default_nyabase-e2e-quota-probe
+if [[ -d \"\$probe_dir\" ]]; then
+  dd if=/dev/zero of=\"\$probe_dir/.nyabase-quota-probe\" bs=4096 count=1 conv=fsync >/dev/null 2>&1 || true
 fi
 # Loop-backed LVM, same shape as the runner.
 if ! incus storage show ${lvm_pool} >/dev/null 2>&1; then

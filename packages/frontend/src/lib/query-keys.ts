@@ -27,9 +27,13 @@ export const queryKeys = {
   images: {
     admin: ['images', 'admin'] as const,
     userActive: ['images', 'user', 'active'] as const,
+    detail: (imageId: string) => ['images', 'admin', imageId] as const,
     assignments: (imageId: string) => ['image-assignments', imageId] as const,
   },
-  users: { admin: ['users', 'admin'] as const },
+  users: {
+    admin: ['users', 'admin'] as const,
+    detail: (userId: string) => ['users', 'admin', userId] as const,
+  },
   groups: {
     admin: ['groups', 'admin'] as const,
     detail: (id: string) => ['group', id] as const,
@@ -46,6 +50,7 @@ export const queryKeys = {
   volumes: {
     user: ['volumes', 'user'] as const,
     admin: ['volumes', 'admin'] as const,
+    adminByServer: (serverId: string) => ['volumes', 'admin', serverId] as const,
     intents: (volumeId: string, admin: boolean) => ['volume-intents', admin ? 'admin' : 'user', volumeId] as const,
   },
   sharedVolumes: {
@@ -63,6 +68,7 @@ export const queryKeys = {
   sharedBackends: {
     user: ['shared-backends', 'user'] as const,
     admin: ['shared-backends', 'admin'] as const,
+    detail: (backendId: string) => ['shared-backends', 'admin', backendId] as const,
   },
   ipPools: { admin: ['ip-pools', 'admin'] as const },
   httpProxy: {
@@ -72,12 +78,16 @@ export const queryKeys = {
     adminDomainPools: ['http-proxy', 'admin', 'domain-pools'] as const,
     adminBindings: ['http-proxy', 'admin', 'bindings'] as const,
   },
-  storagePools: {
-    adminIndex: ['storage-pools', 'admin'] as const,
-  },
   storageCapacity: (serverId: string) => ['storage-capacity', serverId] as const,
   resourceIntentFailures: (plane: Plane, listPath: string) =>
     ['resource-intent-failures', plane, listPath] as const,
+  adminIntents: (filters: {
+    status?: string;
+    kind?: string;
+    resourceType?: string;
+    serverId?: string;
+  }) => ['admin-intents', filters] as const,
+  adminIntent: (id: string) => ['admin-intent', id] as const,
   grants: {
     subject: (kind: GrantKind, subjectId: string) => ['grants', kind, subjectId] as const,
     subjectList: (kind: GrantKind, subjectId: string, slice: GrantSlice) =>

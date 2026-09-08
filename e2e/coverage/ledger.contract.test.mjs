@@ -54,6 +54,7 @@ test('schema v4 pins aliases, forbids routeOwners, and records the unmapped budg
   assert.equal(ledger.topology.storageFamilies.find((entry) => entry.driver === 'lvm')
     ?.resizeFamily, 'block_backed');
   assert.equal(ledger.inventory.httpDecoratorCount, 200);
+  assert.equal(ledger.inventory.httpSurfaceCount, 198);
   assert.equal(ledger.inventory.canonicalHttpSurfaceCount, 198);
   assert.equal(ledger.inventory.maxUnmapped, 0);
   assert.deepEqual([...profiles].sort(), ['core', 'full', 'smoke']);

@@ -4,8 +4,10 @@ import { ApiError } from './api-error.js';
 import {
   classifySizeChange,
   formatDetachProgress,
+  formatObservedUsage,
   isQuotaIneffectiveCapability,
   observedRootUsedBytes,
+  identityConflictFromDiscoverIssue,
   parseSharedBackendFsidConflict,
   parseVolumeShrinkAttachments,
   quotaIneffectiveCreateHint,
@@ -80,6 +82,24 @@ describe('validateShrinkFloor', () => {
   it('rejects quota-online used===size as real usage, not phantom empty', () => {
     expect(validateShrinkFloor(online, 4, 10, 10)).toMatch(/已用量/);
   });
+
+  it('rejects quota-online shrink when used bytes are unknown', () => {
+    expect(validateShrinkFloor(online, 4, null)).toMatch(/已用量未知/);
+    expect(validateShrinkFloor(quotaOnlineIneffective, 4, null)).toBeNull();
+  });
+
+  it('treats used=0 as a known empty floor, not unknown', () => {
+    expect(validateShrinkFloor(online, 4, 0)).toBeNull();
+  });
+});
+
+describe('formatObservedUsage', () => {
+  it('prints 未知 for null and never coalesces to 0B', () => {
+    expect(formatObservedUsage(null)).toBe('未知');
+    expect(formatObservedUsage(null)).not.toMatch(/0\s*B|0\s*GiB/);
+    expect(formatObservedUsage(0)).toMatch(/0/);
+    expect(formatObservedUsage(0)).not.toBe('未知');
+  });
 });
 
 describe('shrinkNeverTooltip', () => {
@@ -129,6 +149,50 @@ describe('parseSharedBackendFsidConflict', () => {
         discoveredFsid: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',
       },
     });
+  });
+});
+
+describe('identityConflictFromDiscoverIssue', () => {
+  it('maps a sidecar identity conflict onto the FSID alert shape', () => {
+    expect(identityConflictFromDiscoverIssue({
+      code: FailureCode.SharedBackendIdentityConflict,
+      message: 'The discovered CephFS identity is bound to another FSID',
+      identityKey: 'cephfs:ceph/fs/data',
+      expectedFsid: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+      discoveredFsid: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',
+      existingIdentityKey: null,
+      serverId: '11111111-1111-4111-8111-111111111111',
+      incusName: 'cephfs-a',
+      poolId: null,
+    })).toEqual({
+      identityKey: 'cephfs:ceph/fs/data',
+      expectedFsid: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+      conflictingFsid: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',
+      message: 'The discovered CephFS identity is bound to another FSID',
+      details: {
+        identityKey: 'cephfs:ceph/fs/data',
+        expectedFsid: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+        discoveredFsid: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',
+        existingIdentityKey: null,
+        serverId: '11111111-1111-4111-8111-111111111111',
+        incusName: 'cephfs-a',
+        poolId: null,
+      },
+    });
+  });
+
+  it('ignores non-identity sidecar codes', () => {
+    expect(identityConflictFromDiscoverIssue({
+      code: FailureCode.StoragePoolInUse,
+      message: 'in use',
+      identityKey: null,
+      expectedFsid: null,
+      discoveredFsid: null,
+      existingIdentityKey: null,
+      serverId: null,
+      incusName: null,
+      poolId: null,
+    })).toBeNull();
   });
 });
 

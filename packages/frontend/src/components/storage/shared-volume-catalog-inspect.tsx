@@ -45,7 +45,7 @@ export function SharedVolumeCatalogInspectDialog({
   });
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-4xl" data-testid="shared-volume-catalog-inspect">
+      <DialogContent className="sm:max-w-4xl" data-testid="shared-volume-catalog-inspect">
         <DialogHeader>
           <DialogTitle>Catalog 查看</DialogTitle>
           <DialogDescription>

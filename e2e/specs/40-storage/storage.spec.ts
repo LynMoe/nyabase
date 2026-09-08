@@ -6,6 +6,7 @@ import { runCommand, runIncus } from '../../support/incus-control.js';
 import { eventually } from '../../support/poll.js';
 import { requireRuntimeEnv } from '../../support/runtime-env.js';
 import { waitForContainerSshReady } from '../../support/wait-for-ssh.js';
+import { setVolumeUsedBytes } from '../../support/pg.js';
 import { waitForGone } from '../../support/wait-for-gone.js';
 import {
   attachVolume as attachSharedVolume,
@@ -50,11 +51,30 @@ async function requireSucceededIntent(
   return intent;
 }
 
+async function requireFailedIntent(
+  api: ApiClient,
+  intentId: string,
+  label: string,
+  code: RegExp,
+): Promise<JsonRecord> {
+  const intent = await waitForIntent(api, intentId, 90_000);
+  expect(intent.status, JSON.stringify({
+    label,
+    intentId,
+    failureCode: intent.failureCode,
+    failure: intent.failure,
+  })).toBe('failed');
+  expect(
+    `${intent.failureCode ?? ''} ${JSON.stringify(intent.failure ?? {})}`,
+    JSON.stringify(intent),
+  ).toMatch(code);
+  return intent;
+}
+
 async function createRunningContainer(
   api: ApiClient,
   seedState: {
     runId: string;
-    adminUserId: string;
     server: { id: string };
     image: { id: string };
   },
@@ -62,9 +82,8 @@ async function createRunningContainer(
   serverId = seedState.server.id,
 ): Promise<string> {
   const accepted = await expectJson<JsonRecord>(
-    await api.post('/api/admin/containers', {
+    await api.post('/api/containers', {
       data: {
-        ownerId: seedState.adminUserId,
         serverId,
         imageId: seedState.image.id,
         name: `${namePrefix}-${Date.now().toString(36)}`,
@@ -81,7 +100,7 @@ async function createRunningContainer(
   await requireSucceededIntent(api, accepted.intentId, 'container.create');
   await eventually(
     async () => expectJson<JsonRecord>(
-      await api.get(`/api/admin/containers/${containerId}`),
+      await api.get(`/api/containers/${containerId}`),
     ),
     (value) => value.lifecyclePhase === 'active' && value.actual?.status === 'running',
     180_000,
@@ -191,7 +210,6 @@ async function deleteContainer(
 async function createLocalVolume(
   api: ApiClient,
   seedState: {
-    adminUserId: string;
     server: { id: string };
     storagePools: { dirQuotaOnline: { id: string } };
   },
@@ -200,9 +218,8 @@ async function createLocalVolume(
   poolId = seedState.storagePools.dirQuotaOnline.id,
 ): Promise<string> {
   const accepted = await expectJson<JsonRecord>(
-    await api.post('/api/admin/volumes', {
+    await api.post('/api/volumes', {
       data: {
-        ownerId: seedState.adminUserId,
         name,
         sizeBytes,
         scope: {
@@ -306,6 +323,7 @@ test(
       && pool.driver === 'dir')).toBe(true);
     expect(pools.some((pool) => pool.id === seedState.storagePools.lvmBlockBacked.id
       && pool.driver === 'lvm')).toBe(true);
+    expect(pools.every((pool) => pool.driver !== 'cephfs' && pool.shareable !== true)).toBe(true);
 
     const capacity = await expectJson<JsonRecord>(
       await adminApi.get(`/api/admin/servers/${seedState.server.id}/storage-capacity`),
@@ -317,10 +335,40 @@ test(
     await expectJson(
       await adminApi.get(`/api/servers/${seedState.server.id}/storage-capacity`),
     );
-    await expectJson(await adminApi.get('/api/admin/volumes'));
-    await expectJson(
+    const allLocalVolumes = await expectJson<JsonRecord[]>(
+      await adminApi.get('/api/admin/volumes'),
+    );
+    expect(Array.isArray(allLocalVolumes)).toBe(true);
+    const seedServerVolumes = await expectJson<JsonRecord[]>(
+      await adminApi.get(`/api/admin/volumes?serverId=${seedState.server.id}`),
+    );
+    expect(seedServerVolumes.every((volume) => volume.serverId === seedState.server.id)).toBe(true);
+    expect(seedServerVolumes.every((volume) => volume.scope?.kind === 'local')).toBe(true);
+    expect([...seedServerVolumes.map((volume) => volume.id)].sort()).toEqual(
+      allLocalVolumes
+        .filter((volume) => volume.serverId === seedState.server.id)
+        .map((volume) => volume.id)
+        .sort(),
+    );
+    const sharedVolumes = await expectJson<JsonRecord[]>(
+      await adminApi.get('/api/admin/shared-volumes'),
+    );
+    const sharedIds = new Set(sharedVolumes.map((volume) => volume.id));
+    expect(seedServerVolumes.every((volume) => !sharedIds.has(volume.id))).toBe(true);
+    const extraQuery = await adminApi.get(
+      `/api/admin/volumes?serverId=${seedState.server.id}&foo=bar`,
+    );
+    expect(extraQuery.status()).toBe(400);
+    const discovered = await expectJson<JsonRecord>(
       await adminApi.post(`/api/admin/servers/${seedState.server.id}/storage-pools/discover`),
     );
+    expect(Array.isArray(discovered.pools)).toBe(true);
+    expect(Array.isArray(discovered.identityConflicts)).toBe(true);
+    expect(
+      (discovered.pools as JsonRecord[]).every(
+        (pool) => pool.driver !== 'cephfs' && pool.shareable !== true,
+      ),
+    ).toBe(true);
     const missingPool = await adminApi.patch(
       '/api/admin/storage-pools/00000000-0000-4000-8000-0000000000aa',
       { data: { expectedRevision: 1, registered: true } },
@@ -335,9 +383,8 @@ test(
         ['lvm', seedState.storagePools.lvmBlockBacked.id],
       ] as const) {
         const accepted = await expectJson<JsonRecord>(
-          await adminApi.post('/api/admin/volumes', {
+          await adminApi.post('/api/volumes', {
             data: {
-              ownerId: seedState.adminUserId,
               name: `e2e-${label}-${uniqueSuffix}`,
               sizeBytes: 128 * 1024 * 1024,
               scope: {
@@ -460,6 +507,298 @@ test(
       expect(Number(updated.sizeBytes)).toBeLessThan(initialSize);
     } finally {
       await deleteContainer(adminApi, containerId);
+      await deleteVolume(adminApi, volumeId);
+    }
+  },
+);
+
+test(
+  'LVM attached volume is a distinct guest filesystem of the requested size',
+  { ...coverageCase('lvm-volume-guest-capacity', 'lvm-volume-guest-capacity-live') },
+  async ({ adminApi, seedState, topologyProvider }) => {
+    test.setTimeout(420_000);
+    const lvmCapability = topologyProvider.capabilities['storage-lvm-block-backed'];
+    if (lvmCapability.state !== 'available') {
+      throw new Error(`BLOCKED: storage-lvm-block-backed is ${lvmCapability.state}`);
+    }
+    const uniqueSuffix = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+    const sizeBytes = 128 * 1024 * 1024;
+    let containerId: string | undefined;
+    let volumeId: string | undefined;
+    try {
+      volumeId = await createLocalVolume(
+        adminApi,
+        seedState,
+        `e2e-lvm-cap-${uniqueSuffix}`,
+        sizeBytes,
+        seedState.storagePools.lvmBlockBacked.id,
+      );
+      containerId = await createRunningContainer(
+        adminApi,
+        seedState,
+        `e2e-lvm-cap-${uniqueSuffix}`,
+      );
+      await attachVolume(adminApi, containerId, volumeId, '/mnt/e2e-lvm-cap');
+      const mounted = await execInContainer(
+        adminApi,
+        containerId,
+        'findmnt -n -o SOURCE,FSTYPE,SIZE /mnt/e2e-lvm-cap; echo ---; findmnt -n -o SOURCE /; df -B1 --output=size,target /mnt/e2e-lvm-cap | tail -n 1',
+      );
+      const [volumeLine, , rootSource, dfLine] = mounted.split('\n').map((line) => line.trim());
+      expect(volumeLine, mounted).toBeTruthy();
+      expect(rootSource, mounted).toBeTruthy();
+      expect(volumeLine.split(/\s+/)[0], mounted).not.toBe(rootSource);
+      const dfSize = Number((dfLine ?? '').split(/\s+/)[0]);
+      expect(Number.isFinite(dfSize), mounted).toBe(true);
+      expect(dfSize, mounted).toBeGreaterThan(sizeBytes * 0.7);
+      expect(dfSize, mounted).toBeLessThanOrEqual(sizeBytes);
+    } finally {
+      if (containerId) {
+        await stopContainer(adminApi, containerId).catch(() => undefined);
+        const attachments = await expectJson<JsonRecord[]>(
+          await adminApi.get(`/api/admin/containers/${containerId}/volumes`),
+        ).catch(() => []);
+        for (const row of attachments) {
+          await detachVolume(adminApi, containerId, row.id as string).catch(() => undefined);
+        }
+        await deleteContainer(adminApi, containerId);
+      }
+      await deleteVolume(adminApi, volumeId);
+    }
+  },
+);
+
+test(
+  'dir quota reports used bytes, rejects shrink below usage, and stops guest writes',
+  { ...coverageCase('dir-quota-usage-enforcement', 'dir-quota-usage-enforcement-live') },
+  async ({ adminApi, seedState }) => {
+    test.setTimeout(420_000);
+    const uniqueSuffix = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+    const quotaBytes = 32 * 1024 * 1024;
+    const fillBytes = 8 * 1024 * 1024;
+    let containerId: string | undefined;
+    let volumeId: string | undefined;
+    try {
+      const pools = await expectJson<JsonRecord[]>(
+        await adminApi.get(`/api/admin/servers/${seedState.server.id}/storage-pools`),
+      );
+      const dirPool = pools.find((pool) => pool.id === seedState.storagePools.dirQuotaOnline.id);
+      expect(dirPool?.quotaEffective, JSON.stringify(dirPool)).toBe(true);
+
+      volumeId = await createLocalVolume(
+        adminApi,
+        seedState,
+        `e2e-dir-quota-${uniqueSuffix}`,
+        quotaBytes,
+      );
+      containerId = await createRunningContainer(
+        adminApi,
+        seedState,
+        `e2e-dir-quota-${uniqueSuffix}`,
+      );
+      await attachVolume(adminApi, containerId, volumeId, '/mnt/e2e-dir-quota');
+      await execInContainer(
+        adminApi,
+        containerId,
+        `dd if=/dev/zero of=/mnt/e2e-dir-quota/fill bs=${fillBytes} count=1 conv=fsync oflag=sync`,
+      );
+
+      const observed = await eventually(
+        async () => expectJson<JsonRecord>(await adminApi.get(`/api/admin/volumes/${volumeId}`)),
+        (volume) => typeof volume.usedBytes === 'number' && volume.usedBytes >= fillBytes * 0.5,
+        90_000,
+        1_000,
+        'dir volume usedBytes after guest write',
+      );
+      expect(Number(observed.usedBytes)).toBeGreaterThanOrEqual(fillBytes * 0.5);
+      expect(Number(observed.usedBytes)).toBeLessThanOrEqual(quotaBytes);
+
+      const tooSmall = await adminApi.patch(`/api/admin/volumes/${volumeId}`, {
+        data: {
+          expectedRevision: observed.generation,
+          sizeBytes: Math.max(1024 * 1024, Math.floor(Number(observed.usedBytes) / 2)),
+        },
+      });
+      expect(tooSmall.status()).toBe(409);
+      const tooSmallBody = await tooSmall.json();
+      expect(JSON.stringify(tooSmallBody)).toMatch(/VOLUME_SHRINK_BELOW_USAGE/);
+
+      const probe = parseDirQuotaProbe(await execInContainer(
+        adminApi,
+        containerId,
+        dirQuotaProbeScript('overflow'),
+      ));
+      expect(probe.exit, JSON.stringify(probe)).not.toBe(0);
+      expect(probe.raw, JSON.stringify(probe)).toMatch(/quota exceeded|No space left|ENOSPC|EDQUOT/i);
+      expect(probe.bytes, JSON.stringify(probe)).toBeGreaterThan(0);
+      expect(probe.bytes, JSON.stringify(probe)).toBeLessThanOrEqual(quotaBytes * 1.25);
+    } finally {
+      if (containerId) {
+        await stopContainer(adminApi, containerId).catch(() => undefined);
+        const attachments = await expectJson<JsonRecord[]>(
+          await adminApi.get(`/api/admin/containers/${containerId}/volumes`),
+        ).catch(() => []);
+        for (const row of attachments) {
+          await detachVolume(adminApi, containerId, row.id as string).catch(() => undefined);
+        }
+        await deleteContainer(adminApi, containerId);
+      }
+      await deleteVolume(adminApi, volumeId);
+    }
+  },
+);
+
+test(
+  'stale occupancy cannot shrink a dir volume; failed resize reverts, stays failed, and retry does not hang',
+  { ...coverageCase('volume-shrink-stale-usage-fails-closed', 'volume-shrink-stale-usage-fails-closed-live') },
+  async ({ adminApi, seedState }) => {
+    test.setTimeout(420_000);
+    const uniqueSuffix = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+    const quotaBytes = 32 * 1024 * 1024;
+    const fillBytes = 8 * 1024 * 1024;
+    const tooSmallBytes = 2 * 1024 * 1024;
+    const mount = '/mnt/e2e-stale-vol';
+    let containerId: string | undefined;
+    let volumeId: string | undefined;
+    try {
+      volumeId = await createLocalVolume(
+        adminApi,
+        seedState,
+        `e2e-stale-shrink-${uniqueSuffix}`,
+        quotaBytes,
+      );
+      containerId = await createRunningContainer(
+        adminApi,
+        seedState,
+        `e2e-stale-shrink-${uniqueSuffix}`,
+      );
+      await attachVolume(adminApi, containerId, volumeId, mount);
+      await execInContainer(
+        adminApi,
+        containerId,
+        `dd if=/dev/zero of=${mount}/fill bs=${fillBytes} count=1 conv=fsync oflag=sync`,
+      );
+      const observed = await eventually(
+        async () => expectJson<JsonRecord>(await adminApi.get(`/api/admin/volumes/${volumeId}`)),
+        (volume) => typeof volume.usedBytes === 'number' && volume.usedBytes >= fillBytes * 0.5,
+        90_000,
+        1_000,
+        'dir volume usedBytes after guest write',
+      );
+      const originalSize = Number(observed.sizeBytes);
+      expect(originalSize).toBe(quotaBytes);
+
+      await setVolumeUsedBytes(volumeId as string, 4096);
+      const stale = await expectJson<JsonRecord>(
+        await adminApi.get(`/api/admin/volumes/${volumeId}`),
+      );
+      expect(Number(stale.usedBytes)).toBe(4096);
+
+      const accepted = await expectJson<JsonRecord>(
+        await adminApi.patch(`/api/admin/volumes/${volumeId}`, {
+          data: {
+            expectedRevision: stale.generation,
+            sizeBytes: tooSmallBytes,
+          },
+        }),
+        202,
+      );
+      const failed = await requireFailedIntent(
+        adminApi,
+        accepted.intentId as string,
+        'volume.resize.stale-usage',
+        /VOLUME_SHRINK_BELOW_USAGE/,
+      );
+      expect(failed.status).toBe('failed');
+
+      const afterFail = await expectJson<JsonRecord>(
+        await adminApi.get(`/api/admin/volumes/${volumeId}`),
+      );
+      expect(Number(afterFail.sizeBytes)).toBe(originalSize);
+      expect(afterFail.needsAttention).toBe(true);
+      expect(String(afterFail.failureCode)).toMatch(/VOLUME_SHRINK_BELOW_USAGE/);
+      expect(Number(afterFail.usedBytes)).toBeGreaterThanOrEqual(fillBytes * 0.5);
+
+      const history = await expectJson<{ items: JsonRecord[] }>(
+        await adminApi.get(`/api/admin/volumes/${volumeId}/intents?limit=20`),
+      );
+      expect(history.items.some((intent) => intent.id === accepted.intentId && intent.status === 'failed')).toBe(true);
+      expect(history.items.filter((intent) => intent.status === 'pending')).toEqual([]);
+
+      const retried = await expectJson<JsonRecord>(
+        await adminApi.post(`/api/admin/intents/${accepted.intentId}/retry`, { data: {} }),
+        [200, 201],
+      );
+      expect(retried.id).toBeTruthy();
+      expect(retried.status).toBe('pending');
+      const retrySettled = await requireFailedIntent(
+        adminApi,
+        retried.id as string,
+        'volume.resize.stale-usage.retry',
+        /VOLUME_SHRINK_BELOW_USAGE/,
+      );
+      expect(retrySettled.status).toBe('failed');
+
+      const afterRetry = await expectJson<JsonRecord>(
+        await adminApi.get(`/api/admin/volumes/${volumeId}`),
+      );
+      expect(Number(afterRetry.sizeBytes)).toBe(originalSize);
+      const afterRetryHistory = await expectJson<{ items: JsonRecord[] }>(
+        await adminApi.get(`/api/admin/volumes/${volumeId}/intents?limit=20`),
+      );
+      expect(afterRetryHistory.items.filter((intent) => intent.status === 'pending')).toEqual([]);
+
+      const overflowOut = await execInContainer(
+        adminApi,
+        containerId,
+        [
+          `rm -f ${mount}/overflow`,
+          `dd if=/dev/zero of=${mount}/overflow bs=1048576 count=64 conv=fsync oflag=sync 2>/tmp/dd.err`,
+          'echo EXIT:$?',
+          `du -sb ${mount}/overflow 2>/dev/null || echo 0 ${mount}/overflow`,
+          'cat /tmp/dd.err 2>/dev/null || true',
+        ].join('; '),
+      );
+      const overflowExit = Number(overflowOut.match(/EXIT:(\d+)/)?.[1] ?? -1);
+      expect(overflowExit, overflowOut.slice(0, 800)).not.toBe(0);
+
+      const beforePhantom = await expectJson<JsonRecord>(
+        await adminApi.get(`/api/admin/volumes/${volumeId}`),
+      );
+      await setVolumeUsedBytes(volumeId as string, 4096);
+      const phantomShrink = await expectJson<JsonRecord>(
+        await adminApi.patch(`/api/admin/volumes/${volumeId}`, {
+          data: {
+            expectedRevision: beforePhantom.generation,
+            sizeBytes: tooSmallBytes,
+          },
+        }),
+        202,
+      );
+      await requireFailedIntent(
+        adminApi,
+        phantomShrink.intentId as string,
+        'volume.resize.dir-full-not-phantom',
+        /VOLUME_SHRINK_BELOW_USAGE/,
+      );
+      const afterPhantom = await expectJson<JsonRecord>(
+        await adminApi.get(`/api/admin/volumes/${volumeId}`),
+      );
+      expect(Number(afterPhantom.sizeBytes), JSON.stringify({
+        overflowOut: overflowOut.slice(0, 400),
+        afterPhantom,
+      })).toBe(originalSize);
+    } finally {
+      if (containerId) {
+        await stopContainer(adminApi, containerId).catch(() => undefined);
+        const attachments = await expectJson<JsonRecord[]>(
+          await adminApi.get(`/api/admin/containers/${containerId}/volumes`),
+        ).catch(() => []);
+        for (const row of attachments) {
+          await detachVolume(adminApi, containerId, row.id as string).catch(() => undefined);
+        }
+        await deleteContainer(adminApi, containerId);
+      }
       await deleteVolume(adminApi, volumeId);
     }
   },
@@ -613,6 +952,39 @@ test(
       expect(adminShared.some((entry) => entry.id === seedState.sharedBackendId)).toBe(true);
       const userDetail = await adminApi.get(`/api/shared-backends/${seedState.sharedBackendId}`);
       expect(userDetail.status()).toBeLessThan(500);
+      if (userDetail.status() === 200) {
+        const userBody = await userDetail.json() as JsonRecord;
+        expect('executors' in userBody).toBe(false);
+      }
+      const executors = await expectJson<JsonRecord[]>(
+        await adminApi.get(`/api/admin/shared-backends/${seedState.sharedBackendId}/executors`),
+      );
+      expect(Array.isArray(executors)).toBe(true);
+      const discovered = await expectJson<JsonRecord>(
+        await adminApi.post(
+          `/api/admin/shared-backends/${seedState.sharedBackendId}/executors/discover`,
+          { data: {} },
+        ),
+      );
+      expect(Array.isArray(discovered.executors)).toBe(true);
+      expect(Array.isArray(discovered.identityConflicts)).toBe(true);
+      const target = (discovered.executors as JsonRecord[]).find((row) => row.registered === true)
+        ?? (discovered.executors as JsonRecord[])[0];
+      expect(target?.id, 'shared backend executor').toBeTruthy();
+      if (!target) throw new Error('shared backend executor is missing');
+      const patchedExecutor = await expectJson<JsonRecord>(
+        await adminApi.patch(
+          `/api/admin/shared-backends/${seedState.sharedBackendId}/executors/${target.id}`,
+          {
+            data: {
+              expectedRevision: target.revision,
+              registered: Boolean(target.registered),
+            },
+          },
+        ),
+      );
+      expect(patchedExecutor.id).toBe(target.id);
+      expect(patchedExecutor.registered).toBe(Boolean(target.registered));
     } else {
       expect(adminShared).toHaveLength(0);
       expect(shared).toHaveLength(0);
@@ -620,6 +992,11 @@ test(
       expect(userMissing.status()).toBeGreaterThanOrEqual(400);
       const adminMissing = await adminApi.get(`/api/admin/shared-backends/${missing}`);
       expect(adminMissing.status()).toBeGreaterThanOrEqual(400);
+      await adminApi.get(`/api/admin/shared-backends/${missing}/executors`);
+      await adminApi.post(`/api/admin/shared-backends/${missing}/executors/discover`, { data: {} });
+      await adminApi.patch(`/api/admin/shared-backends/${missing}/executors/${missing}`, {
+        data: { expectedRevision: 1, registered: true },
+      });
     }
     const patched = await adminApi.patch(`/api/admin/shared-backends/${missing}`, {
       data: { expectedRevision: 1, displayName: 'e2e' },
@@ -669,12 +1046,16 @@ test(
     const primaryPools = await expectJson<JsonRecord[]>(
       await adminApi.get(`/api/admin/servers/${seedState.server.id}/storage-pools`),
     );
-    const cephPool = primaryPools.find(
-      (pool) => pool.driver === 'cephfs' && pool.shareable === true && pool.registered === true,
+    expect(primaryPools.every((pool) => pool.driver !== 'cephfs' && pool.shareable !== true)).toBe(true);
+    const executors = await expectJson<JsonRecord[]>(
+      await adminApi.get(`/api/admin/shared-backends/${seedState.sharedBackendId}/executors`),
     );
-    expect(cephPool?.id, 'primary CephFS pool').toBeTruthy();
-    if (!cephPool) throw new Error('primary CephFS pool is missing');
-    expect(cephPool.sharedBackendId).toBe(seedState.sharedBackendId);
+    const cephPool = executors.find(
+      (row) => row.serverId === seedState.server.id && row.registered === true,
+    );
+    expect(cephPool?.id, 'primary CephFS executor').toBeTruthy();
+    if (!cephPool) throw new Error('primary CephFS executor is missing');
+    expect(cephPool.backendId).toBe(seedState.sharedBackendId);
 
     let volumeId: string | undefined;
     let primaryContainer: string | undefined;
@@ -780,10 +1161,14 @@ test(
       const workerPools = await expectJson<JsonRecord[]>(
         await adminApi.get(`/api/admin/servers/${worker.id}/storage-pools`),
       );
-      const workerCeph = workerPools.find(
-        (pool) => pool.driver === 'cephfs' && pool.shareable === true && pool.registered === true,
+      expect(workerPools.every((pool) => pool.driver !== 'cephfs')).toBe(true);
+      const workerExecutors = await expectJson<JsonRecord[]>(
+        await adminApi.get(`/api/admin/shared-backends/${seedState.sharedBackendId}/executors`),
       );
-      expect(workerCeph?.incusName, 'worker CephFS pool').toBeTruthy();
+      const workerCeph = workerExecutors.find(
+        (row) => row.serverId === worker.id && row.registered === true,
+      );
+      expect(workerCeph?.incusName, 'worker CephFS executor').toBeTruthy();
 
       const workerAttachments = await expectJson<JsonRecord[]>(
         await adminApi.get(`/api/admin/containers/${workerContainer}/shared-volumes`),
@@ -843,3 +1228,27 @@ test(
     }
   },
 );
+
+function dirQuotaProbeScript(filename: string): string {
+  return [
+    `rm -f /mnt/e2e-dir-quota/${filename}`,
+    `dd if=/dev/zero of=/mnt/e2e-dir-quota/${filename} bs=1048576 count=64 conv=fsync oflag=sync 2>/tmp/dd.err`,
+    'echo EXIT:$?',
+    `du -sb /mnt/e2e-dir-quota/${filename} 2>/dev/null || echo 0 /mnt/e2e-dir-quota/${filename}`,
+    'cat /tmp/dd.err 2>/dev/null || true',
+  ].join('; ');
+}
+
+function parseDirQuotaProbe(output: string): {
+  exit: number;
+  bytes: number;
+  raw: string;
+} {
+  const exitMatch = output.match(/EXIT:(\d+)/);
+  const duMatch = output.match(/^(\d+)\s+\/mnt\/e2e-dir-quota\//m);
+  return {
+    exit: exitMatch ? Number(exitMatch[1]) : -1,
+    bytes: duMatch ? Number(duMatch[1]) : 0,
+    raw: output.slice(0, 800),
+  };
+}

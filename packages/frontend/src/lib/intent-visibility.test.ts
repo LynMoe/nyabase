@@ -3,6 +3,7 @@ import { IntentKind, IntentResourceType, IntentStatus, type IntentDto } from '@n
 import {
   formatIntentAttempt,
   formatIntentFailureMessage,
+  isIntentAccepted,
   isOutstandingIntent,
   isRetryableIntent,
   retryIntentPath,
@@ -42,9 +43,14 @@ describe('intent visibility helpers', () => {
     expect(isRetryableIntent(failed)).toBe(true);
     expect(isOutstandingIntent(failed)).toBe(true);
     expect(formatIntentFailureMessage(failed)).toBe(
-      'VOLUME_SHRINK_BELOW_USAGE: Volume cannot shrink below observed usage',
+      '目标容量小于已用量（VOLUME_SHRINK_BELOW_USAGE）',
     );
     expect(formatIntentAttempt(failed)).toMatch(/已尝试 3 次/);
     expect(isRetryableIntent(intent({ status: IntentStatus.Pending }))).toBe(false);
+  });
+
+  it('detects an accepted intent payload', () => {
+    expect(isIntentAccepted({ intentId: 'abc' })).toBe(true);
+    expect(isIntentAccepted({ id: 'volume' })).toBe(false);
   });
 });

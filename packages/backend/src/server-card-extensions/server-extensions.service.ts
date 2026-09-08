@@ -13,6 +13,7 @@ import {
   FailureCode,
   zPatchServerExtensionRequest,
   type ExtensionDevicesResponseDto,
+  type ExtensionSupportDto,
   type ServerExtensionEnablementDto,
 } from '@nyabase/common';
 import type { Kysely, Transaction } from 'kysely';
@@ -32,7 +33,17 @@ import {
 import { ExtensionDeviceClaimsRepository } from './claims.repository.js';
 import { asJsonObject } from './json.js';
 import { ServerCardExtensionRegistry } from './registry.js';
-import type { ExtensionActor, ExtensionGrantView } from './types.js';
+import type { ExtensionActor, ExtensionGrantView, ServerCardExtension } from './types.js';
+
+const FAILED_HOST_PROBE: ExtensionSupportDto = {
+  supported: null,
+  checks: [{
+    id: 'probe',
+    label: '模块自检',
+    status: 'unknown',
+    detail: '自检失败',
+  }],
+};
 
 function occupiedError(extensionId: string): ConflictException {
   return new ConflictException({
@@ -94,18 +105,23 @@ export class ServerCardExtensionsService {
       .where('server_id', '=', serverId)
       .execute();
     const byId = new Map(rows.map((row) => [row.extension_id, row]));
-    const items: ServerExtensionEnablementDto[] = [];
-    for (const ext of this.registry.all()) {
+    const { resources, metricSamples } = await this.loadInventory(serverId);
+    const occupiedById = await this.claims.countsForServer(serverId);
+    const extensions = this.registry.all();
+    const support = await Promise.all(
+      extensions.map((ext) => this.probeSupportSafe(ext, serverId, resources, metricSamples)),
+    );
+    return extensions.map((ext, index) => {
       const row = byId.get(ext.id);
-      items.push({
+      return {
         extensionId: ext.id,
         displayName: ext.displayName,
         enabled: row?.enabled === true,
         health: asJsonObject(row?.health),
-        occupiedDeviceCount: await this.claims.countForServerExtension(ext.id, serverId),
-      });
-    }
-    return items;
+        occupiedDeviceCount: occupiedById.get(ext.id) ?? 0,
+        support: support[index] ?? FAILED_HOST_PROBE,
+      };
+    });
   }
 
   async putEnablement(
@@ -218,6 +234,7 @@ export class ServerCardExtensionsService {
       enabled: input.enabled,
       health: {},
       occupiedDeviceCount: 0,
+      support: FAILED_HOST_PROBE,
     };
   }
 
@@ -346,6 +363,19 @@ export class ServerCardExtensionsService {
         resources,
         metricSamples,
       });
+    }
+  }
+
+  private async probeSupportSafe(
+    ext: ServerCardExtension,
+    serverId: string,
+    resources: unknown,
+    metricSamples: readonly { name: string; labels: Readonly<Record<string, string>>; value: number }[],
+  ): Promise<ExtensionSupportDto> {
+    try {
+      return await ext.probeSupport({ serverId, resources, metricSamples });
+    } catch {
+      return FAILED_HOST_PROBE;
     }
   }
 

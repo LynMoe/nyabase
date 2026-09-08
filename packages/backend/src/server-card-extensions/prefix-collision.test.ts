@@ -20,6 +20,7 @@ function stubExtension(
     requiresStop: () => false,
     contributeInstanceSpec: () => ({ config: {}, devices: {} }),
     contributePreflight: async () => ({ evidence: {}, health: {} }),
+    probeSupport: async () => ({ supported: true, checks: [] }),
     refreshHealth: async () => undefined,
     parseGrantPayload: (payload) => payload,
     effectiveGrantDevices: () => [],

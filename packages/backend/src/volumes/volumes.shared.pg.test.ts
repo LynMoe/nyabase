@@ -1,8 +1,10 @@
 import { randomUUID } from 'node:crypto';
 import { describe, expect, it, vi } from 'vitest';
+import { FailureCode } from '@nyabase/common';
 import { withPostgresTestDatabase } from '../persistence-pg/postgres-test-harness.js';
 import { PgTransactionManager } from '../persistence-pg/transaction.js';
 import { IntentRepository } from '../runtime/intent.repository.js';
+import type { IncusClientFactory } from '../runtime/reconcile-worker.service.js';
 import { StoragePoolsRepository } from '../storage-pools/storage-pools.repository.js';
 import { VolumesRepository } from './volumes.repository.js';
 import { VolumesService } from './volumes.service.js';
@@ -53,7 +55,7 @@ function userValues(id: string, numericId = 1) {
   };
 }
 
-function makeService(database: any) {
+function makeService(database: any, clients?: IncusClientFactory) {
   return new VolumesService(
     new VolumesRepository(database),
     new StoragePoolsRepository(database),
@@ -62,19 +64,26 @@ function makeService(database: any) {
     { wake: vi.fn() } as never,
     database,
     { append: vi.fn().mockResolvedValue(undefined) } as never,
+    undefined,
+    clients,
   );
 }
 
 async function seedSharedBackend(
   database: any,
-  options?: { quotaEffective?: boolean; grantLimit?: number | null; expiresAt?: Date | null },
+  options?: {
+    quotaEffective?: boolean;
+    grantLimit?: number | null;
+    expiresAt?: Date | null;
+    serverStatus?: 'online' | 'unknown';
+  },
 ) {
   const userId = randomUUID();
   const serverId = randomUUID();
   const backendId = randomUUID();
   const poolId = randomUUID();
   await database.insertInto('iam.users').values(userValues(userId)).execute();
-  await database.insertInto('infra.servers').values(serverValues(serverId)).execute();
+  await database.insertInto('infra.servers').values(serverValues(serverId, options?.serverStatus)).execute();
   await database.insertInto('infra.shared_backends').values({
     id: backendId,
     name: 'shared-quota',
@@ -353,20 +362,16 @@ describePg('shared volume quota reservations', () => {
     });
   });
 
-  it('404s admin create when the shared backend is missing', async () => {
+  it('rejects user create when the shared backend is missing', async () => {
     await withPostgresTestDatabase(async ({ database }) => {
       const ownerId = randomUUID();
       await database.insertInto('iam.users').values(userValues(ownerId)).execute();
       const service = makeService(database);
-      await expect(service.createSharedForAdmin(ownerId, {
-        ownerId,
+      await expect(service.createSharedForUser(ownerId, {
         name: 'missing-backend',
         sizeBytes: 100,
         scope: { kind: 'shared', sharedBackendId: randomUUID() },
-      })).rejects.toMatchObject({
-        status: 404,
-        message: 'Shared backend not found',
-      });
+      })).rejects.toThrow(/Shared backend access is not granted/);
     });
   });
 
@@ -386,9 +391,16 @@ describePg('shared volume quota reservations', () => {
         overcommit_ratio: 1,
         revision: 1,
       }).execute();
+      await database.insertInto('iam.shared_backend_grants').values({
+        id: randomUUID(),
+        user_id: ownerId,
+        group_id: null,
+        shared_backend_id: backendId,
+        limit_bytes: 0,
+        expires_at: null,
+      }).execute();
       const service = makeService(database);
-      await expect(service.createSharedForAdmin(ownerId, {
-        ownerId,
+      await expect(service.createSharedForUser(ownerId, {
         name: 'no-pool',
         sizeBytes: 100,
         scope: { kind: 'shared', sharedBackendId: backendId },
@@ -399,6 +411,261 @@ describePg('shared volume quota reservations', () => {
           details: { sharedBackendId: backendId },
         },
       });
+    });
+  });
+
+  it('rejects never-mounted shared shrink as unknown without calling Incus', async () => {
+    await withPostgresTestDatabase(async ({ database }) => {
+      const getStorageVolumeState = vi.fn();
+      const getStorageVolume = vi.fn();
+      const { userId, backendId } = await seedSharedBackend(database);
+      const service = makeService(database, {
+        get: vi.fn(async () => ({ getStorageVolumeState, getStorageVolume })),
+      } as never);
+      const created = await service.createSharedForUser(userId, {
+        name: 'never-mounted-shrink',
+        sizeBytes: 100,
+        scope: { kind: 'shared', sharedBackendId: backendId },
+      });
+      await expect(service.patchSharedForUser(userId, created.id, {
+        expectedRevision: created.generation,
+        sizeBytes: 50,
+      })).rejects.toMatchObject({
+        response: { code: FailureCode.VolumeUsageUnknown },
+      });
+      const grown = await service.patchSharedForUser(userId, created.id, {
+        expectedRevision: created.generation,
+        sizeBytes: 200,
+      });
+      expect('intentId' in grown).toBe(false);
+      expect(grown).toMatchObject({ id: created.id, sizeBytes: 200, dirEnsured: false });
+      expect(getStorageVolumeState).not.toHaveBeenCalled();
+      expect(getStorageVolume).not.toHaveBeenCalled();
+      expect(await database.selectFrom('control.intents')
+        .select('id')
+        .where('resource_id', '=', created.id)
+        .execute()).toHaveLength(0);
+    });
+  });
+
+  it('persists NULL and 409s unknown on a phantom CephFS live-GET', async () => {
+    await withPostgresTestDatabase(async ({ database }) => {
+      const getStorageVolumeState = vi.fn().mockResolvedValue({
+        metadata: { usage: { used: 100, total: 0 } },
+      });
+      const getStorageVolume = vi.fn();
+      const { userId, serverId, backendId, poolId } = await seedSharedBackend(database, {
+        serverStatus: 'online',
+      });
+      const service = makeService(database, {
+        get: vi.fn(async () => ({ getStorageVolumeState, getStorageVolume })),
+      } as never);
+      const created = await service.createSharedForUser(userId, {
+        name: 'phantom-shrink',
+        sizeBytes: 100,
+        scope: { kind: 'shared', sharedBackendId: backendId },
+      });
+      await database.updateTable('control.volumes')
+        .set({ dir_ensured: true, used_bytes: 0 })
+        .where('id', '=', created.id)
+        .execute();
+      await database.insertInto('control.volume_placements').values({
+        volume_id: created.id,
+        server_id: serverId,
+        pool_id: poolId,
+        catalog_state: 'present',
+        observed_generation: 1,
+      }).execute();
+      await expect(service.patchSharedForUser(userId, created.id, {
+        expectedRevision: created.generation,
+        sizeBytes: 50,
+      })).rejects.toMatchObject({
+        response: { code: FailureCode.VolumeUsageUnknown },
+      });
+      const row = await database.selectFrom('control.volumes')
+        .select(['used_bytes', 'size_bytes', 'dir_ensured'])
+        .where('id', '=', created.id)
+        .executeTakeFirstOrThrow();
+      expect(row.used_bytes).toBeNull();
+      expect(Number(row.size_bytes)).toBe(100);
+      expect(row.dir_ensured).toBe(true);
+      expect(getStorageVolume).not.toHaveBeenCalled();
+      expect(await database.selectFrom('control.intents')
+        .select('id')
+        .where('resource_id', '=', created.id)
+        .execute()).toHaveLength(0);
+    });
+  });
+
+  it('persists live used and 409s below-usage without an intent', async () => {
+    await withPostgresTestDatabase(async ({ database }) => {
+      const getStorageVolumeState = vi.fn().mockResolvedValue({
+        metadata: { usage: { used: 80, total: 100 } },
+      });
+      const { userId, serverId, backendId, poolId } = await seedSharedBackend(database, {
+        serverStatus: 'online',
+      });
+      const service = makeService(database, {
+        get: vi.fn(async () => ({ getStorageVolumeState })),
+      } as never);
+      const created = await service.createSharedForUser(userId, {
+        name: 'below-usage',
+        sizeBytes: 100,
+        scope: { kind: 'shared', sharedBackendId: backendId },
+      });
+      await database.updateTable('control.volumes')
+        .set({ dir_ensured: true, used_bytes: 0 })
+        .where('id', '=', created.id)
+        .execute();
+      await database.insertInto('control.volume_placements').values({
+        volume_id: created.id,
+        server_id: serverId,
+        pool_id: poolId,
+        catalog_state: 'ensuring',
+        observed_generation: null,
+      }).execute();
+      await expect(service.patchSharedForUser(userId, created.id, {
+        expectedRevision: created.generation,
+        sizeBytes: 50,
+      })).rejects.toMatchObject({
+        response: { code: FailureCode.VolumeShrinkBelowUsage },
+      });
+      const row = await database.selectFrom('control.volumes')
+        .select('used_bytes')
+        .where('id', '=', created.id)
+        .executeTakeFirstOrThrow();
+      expect(Number(row.used_bytes)).toBe(80);
+      expect(await database.selectFrom('control.intents')
+        .select('id')
+        .where('resource_id', '=', created.id)
+        .execute()).toHaveLength(0);
+    });
+  });
+
+  it('creates volume.resize when live used is below the requested size', async () => {
+    await withPostgresTestDatabase(async ({ database }) => {
+      const getStorageVolumeState = vi.fn().mockResolvedValue({
+        metadata: { usage: { used: 40, total: 0 } },
+      });
+      const { userId, serverId, backendId, poolId } = await seedSharedBackend(database, {
+        serverStatus: 'online',
+      });
+      const service = makeService(database, {
+        get: vi.fn(async () => ({ getStorageVolumeState })),
+      } as never);
+      const created = await service.createSharedForUser(userId, {
+        name: 'trusted-used',
+        sizeBytes: 100,
+        scope: { kind: 'shared', sharedBackendId: backendId },
+      });
+      await database.updateTable('control.volumes')
+        .set({ dir_ensured: true, used_bytes: 0 })
+        .where('id', '=', created.id)
+        .execute();
+      await database.insertInto('control.volume_placements').values({
+        volume_id: created.id,
+        server_id: serverId,
+        pool_id: poolId,
+        catalog_state: 'present',
+        observed_generation: 1,
+      }).execute();
+      const patched = await service.patchSharedForUser(userId, created.id, {
+        expectedRevision: created.generation,
+        sizeBytes: 50,
+      });
+      expect('intentId' in patched).toBe(true);
+      const row = await database.selectFrom('control.volumes')
+        .select(['used_bytes', 'size_bytes'])
+        .where('id', '=', created.id)
+        .executeTakeFirstOrThrow();
+      expect(Number(row.used_bytes)).toBe(40);
+      expect(Number(row.size_bytes)).toBe(50);
+      const intents = await database.selectFrom('control.intents')
+        .select(['kind', 'status'])
+        .where('resource_id', '=', created.id)
+        .execute();
+      expect(intents).toEqual(expect.arrayContaining([
+        expect.objectContaining({ kind: 'volume.resize', status: 'pending' }),
+      ]));
+    });
+  });
+
+  it('does not rewrite seeded used_bytes when live-GET fails', async () => {
+    await withPostgresTestDatabase(async ({ database }) => {
+      const getStorageVolumeState = vi.fn().mockRejectedValue(new Error('incus down'));
+      const { userId, serverId, backendId, poolId } = await seedSharedBackend(database, {
+        serverStatus: 'online',
+      });
+      const service = makeService(database, {
+        get: vi.fn(async () => ({ getStorageVolumeState })),
+      } as never);
+      const created = await service.createSharedForUser(userId, {
+        name: 'get-fail',
+        sizeBytes: 100,
+        scope: { kind: 'shared', sharedBackendId: backendId },
+      });
+      await database.updateTable('control.volumes')
+        .set({ dir_ensured: true, used_bytes: 0 })
+        .where('id', '=', created.id)
+        .execute();
+      await database.insertInto('control.volume_placements').values({
+        volume_id: created.id,
+        server_id: serverId,
+        pool_id: poolId,
+        catalog_state: 'present',
+        observed_generation: 1,
+      }).execute();
+      await expect(service.patchSharedForUser(userId, created.id, {
+        expectedRevision: created.generation,
+        sizeBytes: 50,
+      })).rejects.toMatchObject({
+        response: { code: FailureCode.VolumeUsageUnknown },
+      });
+      const row = await database.selectFrom('control.volumes')
+        .select('used_bytes')
+        .where('id', '=', created.id)
+        .executeTakeFirstOrThrow();
+      expect(Number(row.used_bytes)).toBe(0);
+      expect(await database.selectFrom('control.intents')
+        .select('id')
+        .where('resource_id', '=', created.id)
+        .execute()).toHaveLength(0);
+    });
+  });
+
+  it('does not rewrite seeded used_bytes when the Incus factory is missing', async () => {
+    await withPostgresTestDatabase(async ({ database }) => {
+      const { userId, serverId, backendId, poolId } = await seedSharedBackend(database, {
+        serverStatus: 'online',
+      });
+      const service = makeService(database);
+      const created = await service.createSharedForUser(userId, {
+        name: 'no-factory',
+        sizeBytes: 100,
+        scope: { kind: 'shared', sharedBackendId: backendId },
+      });
+      await database.updateTable('control.volumes')
+        .set({ dir_ensured: true, used_bytes: 0 })
+        .where('id', '=', created.id)
+        .execute();
+      await database.insertInto('control.volume_placements').values({
+        volume_id: created.id,
+        server_id: serverId,
+        pool_id: poolId,
+        catalog_state: 'present',
+        observed_generation: 1,
+      }).execute();
+      await expect(service.patchSharedForUser(userId, created.id, {
+        expectedRevision: created.generation,
+        sizeBytes: 50,
+      })).rejects.toMatchObject({
+        response: { code: FailureCode.VolumeUsageUnknown },
+      });
+      const row = await database.selectFrom('control.volumes')
+        .select('used_bytes')
+        .where('id', '=', created.id)
+        .executeTakeFirstOrThrow();
+      expect(Number(row.used_bytes)).toBe(0);
     });
   });
 });

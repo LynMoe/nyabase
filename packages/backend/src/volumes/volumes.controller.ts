@@ -9,6 +9,7 @@ import {
   Param,
   Patch,
   Post,
+  Query,
   UseGuards,
 } from '@nestjs/common';
 import {
@@ -16,6 +17,7 @@ import {
   FailureCode,
   zAttachVolumeRequest,
   zCreateVolumeRequest,
+  zListVolumesQuery,
   zPatchVolumeRequest,
 } from '@nyabase/common';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard.js';
@@ -51,12 +53,6 @@ export class VolumesController {
       });
     }
     const input = zCreateVolumeRequest.parse(body);
-    if (input.ownerId) {
-      throw new BadRequestException({
-        code: FailureCode.InvalidInput,
-        message: 'User volume creation cannot specify ownerId',
-      });
-    }
     return this.service.createForUser(user.id, input);
   }
 
@@ -158,25 +154,9 @@ export class AdminVolumesController {
   constructor(private readonly service: VolumesService) {}
 
   @Get()
-  list() {
-    return this.service.listForAdmin();
-  }
-
-  @Post()
-  @HttpCode(HttpStatus.ACCEPTED)
-  create(@CurrentUser() user: UserRecord, @Body() body: unknown) {
-    const kind = (body as { scope?: { kind?: string } } | null)?.scope?.kind;
-    if (kind === 'shared') {
-      throw new BadRequestException({
-        code: FailureCode.InvalidInput,
-        message: 'Shared volumes must be created via /shared-volumes',
-      });
-    }
-    const input = zCreateVolumeRequest.parse(body);
-    if (!input.ownerId) {
-      throw new BadRequestException('Admin volume creation requires ownerId');
-    }
-    return this.service.createForAdmin(user.id, { ...input, ownerId: input.ownerId });
+  list(@Query() query: Record<string, unknown>) {
+    const parsed = zListVolumesQuery.parse(query);
+    return this.service.listForAdmin(parsed.serverId);
   }
 
   @Get(':id')

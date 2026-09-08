@@ -14,7 +14,6 @@ import {
 } from '@nestjs/common';
 import {
   Capability,
-  zCreateContainerRequest,
   zCreateExecSessionRequest,
   zPatchContainerLimitsRequest,
   zPatchContainerRootSizeRequest,
@@ -41,12 +40,6 @@ export class AdminContainersController {
   @Get(':containerId')
   get(@Param('containerId') id: string, @CurrentUser() user: UserRecord) {
     return this.containers.getForAdmin(id, user.id);
-  }
-
-  @Post()
-  @HttpCode(HttpStatus.ACCEPTED)
-  create(@CurrentUser() user: UserRecord, @Body() body: unknown) {
-    return this.containers.createForAdmin(user.id, zCreateContainerRequest.parse(body));
   }
 
   @Post(':containerId/actions/start')

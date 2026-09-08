@@ -1,6 +1,5 @@
 import {
   Body,
-  BadRequestException,
   Controller,
   Delete,
   Get,
@@ -15,7 +14,6 @@ import {
 } from '@nestjs/common';
 import {
   Capability,
-  FailureCode,
   zAttachVolumeRequest,
   zCreateSharedVolumeRequest,
   zListSharedVolumesQuery,
@@ -48,12 +46,6 @@ export class SharedVolumesController {
   @HttpCode(HttpStatus.CREATED)
   create(@CurrentUser() user: UserRecord, @Body() body: unknown) {
     const input = zCreateSharedVolumeRequest.parse(body);
-    if (input.ownerId) {
-      throw new BadRequestException({
-        code: FailureCode.InvalidInput,
-        message: 'User volume creation cannot specify ownerId',
-      });
-    }
     return this.service.createSharedForUser(user.id, input);
   }
 
@@ -90,16 +82,6 @@ export class AdminSharedVolumesController {
   list(@Query() query: Record<string, unknown>) {
     const parsed = zListSharedVolumesQuery.parse(query);
     return this.service.listSharedForAdmin(parsed.attachableOnServerId);
-  }
-
-  @Post()
-  @HttpCode(HttpStatus.CREATED)
-  create(@CurrentUser() user: UserRecord, @Body() body: unknown) {
-    const input = zCreateSharedVolumeRequest.parse(body);
-    if (!input.ownerId) {
-      throw new BadRequestException('Admin volume creation requires ownerId');
-    }
-    return this.service.createSharedForAdmin(user.id, { ...input, ownerId: input.ownerId });
   }
 
   @Get(':id/catalogs')

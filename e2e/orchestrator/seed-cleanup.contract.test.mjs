@@ -297,7 +297,7 @@ test('storage-pool discovery uses the authenticated public admin endpoint', asyn
   const result = await discoverStoragePools(
     async (path, options) => {
       calls.push({ path, ...options });
-      return [storagePoolDto()];
+      return { pools: [storagePoolDto()], identityConflicts: [] };
     },
     'server-1',
     'admin-token',
@@ -308,13 +308,17 @@ test('storage-pool discovery uses the authenticated public admin endpoint', asyn
     method: 'POST',
     token: 'admin-token',
   }]);
-  assert.equal(result[0].serverId, 'server-1');
+  assert.equal(result.pools[0].serverId, 'server-1');
 });
 
 test('storage-pool discovery blocks empty or malformed DTO responses', () => {
   assert.throws(
     () => validateStoragePoolDtos([], 'server-1'),
     /BLOCKED: storage pool discovery response was empty/,
+  );
+  assert.throws(
+    () => validateStoragePoolDtos([storagePoolDto({ driver: 'cephfs', shareable: true })], 'server-1'),
+    /BLOCKED: storage pool discovery local pools contained a CephFS/,
   );
   for (const response of [
     undefined,

@@ -2,6 +2,10 @@ import { execFile as childExecFile } from 'node:child_process';
 import { readFile as fsReadFile } from 'node:fs/promises';
 import { promisify } from 'node:util';
 import type { NodeMetricSample } from '@nyabase/common';
+import {
+  NVIDIA_GPU_DRIVER_PRESENT_METRIC,
+  NVIDIA_GPU_TOOLKIT_PRESENT_METRIC,
+} from '../metrics.js';
 import { canonicalPciAddress } from '../pci.js';
 
 const execFile = promisify(childExecFile);
@@ -73,13 +77,27 @@ function commandOptions(): ReadOnlyCommandOptions {
   return { timeout: COMMAND_TIMEOUT_MS, maxBuffer: COMMAND_MAX_BUFFER_BYTES };
 }
 
+async function commandSucceeds(
+  command: ReadOnlyCommand,
+  file: string,
+  args: readonly string[],
+): Promise<boolean> {
+  try {
+    await command(file, args, commandOptions());
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 /** Catch-all: missing nvidia-smi must not crash the exporter. */
 export async function collectNvidiaGpuMetrics(
   options: NvidiaGpuCollectorOptions = {},
 ): Promise<NodeMetricSample[]> {
   const fileSystem = options.fileSystem ?? defaultFileSystem;
   const command = options.command ?? defaultCommand;
-  let gpuStdout: string;
+  const samples: NodeMetricSample[] = [];
+  let gpuStdout: string | undefined;
   try {
     ({ stdout: gpuStdout } = await command(
       'nvidia-smi',
@@ -90,11 +108,23 @@ export async function collectNvidiaGpuMetrics(
       commandOptions(),
     ));
   } catch {
-    return [];
+    gpuStdout = undefined;
   }
+  const toolkitPresent = await commandSucceeds(command, 'nvidia-container-cli', ['--version'])
+    || await commandSucceeds(command, 'nvidia-container-runtime', ['--version']);
+  samples.push({
+    name: NVIDIA_GPU_DRIVER_PRESENT_METRIC,
+    labels: {},
+    value: gpuStdout === undefined ? 0 : 1,
+  });
+  samples.push({
+    name: NVIDIA_GPU_TOOLKIT_PRESENT_METRIC,
+    labels: {},
+    value: toolkitPresent ? 1 : 0,
+  });
+  if (gpuStdout === undefined) return samples;
   const gpus = parseGpuStats(gpuStdout);
-  if (gpus.length === 0) return [];
-  const samples: NodeMetricSample[] = [];
+  if (gpus.length === 0) return samples;
   for (const gpu of gpus) {
     const labels = { gpu_pci: gpu.pci };
     addSample(samples, 'nyabase_node_gpu_smi_index', labels, gpu.index);

@@ -27,6 +27,7 @@ import { ConfirmDialog } from '../components/layout/confirm-dialog.js';
 import { Page } from '../components/layout/page.js';
 import { PageHeader } from '../components/layout/page-header.js';
 import { QueryView } from '../components/layout/query-view.js';
+import { SectionCard } from '../components/layout/section-card.js';
 import { toast } from '../hooks/use-toast.js';
 import { useAuthStore } from '../store/auth.js';
 import { canViewSshProxyStatus } from '../lib/ssh-proxy-access.js';
@@ -216,7 +217,7 @@ function SshStatusSections({ status }: { status: SshProxyAdminStatus }) {
   })));
 
   return (
-    <>
+    <div className="space-y-6">
       <section className="grid grid-cols-2 gap-3 xl:grid-cols-4">
         <MetricTile icon={Wifi} label="在线代理" value={status.connectedProxies.toString()} sub={`${proxies.length} 个实例上报`} />
         <MetricTile icon={Activity} label="活跃连接" value={status.activeConnections.toString()} sub={`累计 ${status.totalConnections} 次`} />
@@ -224,17 +225,18 @@ function SshStatusSections({ status }: { status: SshProxyAdminStatus }) {
         <MetricTile icon={PlugZap} label="累计流量" value={`${formatBytes(status.totalBytesFromClient + status.totalBytesToClient)}`} sub={`入 ${formatBytes(status.totalBytesFromClient)} 出 ${formatBytes(status.totalBytesToClient)}`} />
       </section>
 
-      <section className="space-y-3">
-        <div className="flex items-center justify-between gap-4">
-          <h2 className="text-base font-semibold text-foreground">代理实例</h2>
+      <SectionCard
+        title="代理实例"
+        actions={
           <Badge variant={status.connectedProxies > 0 ? 'success' : 'outline'}>
             {status.connectedProxies > 0 ? '在线' : '离线'}
           </Badge>
-        </div>
-        <div className="rounded-lg border border-border bg-card">
+        }
+        flush
+      >
           <Table className="min-w-[720px]">
             <TableHeader>
-              <TableRow className="bg-muted/60 hover:bg-muted/60">
+              <TableRow>
                 <TableHead>代理</TableHead>
                 <TableHead>监听</TableHead>
                 <TableHead>连接</TableHead>
@@ -263,15 +265,12 @@ function SshStatusSections({ status }: { status: SshProxyAdminStatus }) {
               ))}
             </TableBody>
           </Table>
-        </div>
-      </section>
+      </SectionCard>
 
-      <section className="space-y-3">
-        <h2 className="text-base font-semibold text-foreground">当前连接</h2>
-        <div className="rounded-lg border border-border bg-card">
+      <SectionCard title="当前连接" flush>
           <Table className="min-w-[720px]">
             <TableHeader>
-              <TableRow className="bg-muted/60 hover:bg-muted/60">
+              <TableRow>
                 <TableHead>登录</TableHead>
                 <TableHead>目标</TableHead>
                 <TableHead>来源</TableHead>
@@ -318,9 +317,8 @@ function SshStatusSections({ status }: { status: SshProxyAdminStatus }) {
               ))}
             </TableBody>
           </Table>
-        </div>
-      </section>
-    </>
+      </SectionCard>
+    </div>
   );
 }
 

@@ -4,11 +4,10 @@ RUN npm install -g pnpm@9.15.0 --no-update-notifier
 COPY package.json pnpm-workspace.yaml pnpm-lock.yaml ./
 COPY packages/common/package.json packages/common/
 COPY packages/frontend/package.json packages/frontend/
-COPY extensions/nvidia-gpu/package.json extensions/nvidia-gpu/
+COPY extensions ./extensions
 RUN pnpm install --frozen-lockfile
 COPY packages/common packages/common
 COPY packages/frontend packages/frontend
-COPY extensions/nvidia-gpu extensions/nvidia-gpu
 COPY tsconfig.base.json ./
 RUN pnpm --filter @nyabase/frontend build
 

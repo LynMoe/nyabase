@@ -3,6 +3,10 @@ import type { ApiClient } from './api-client.js';
 import { expect } from './expect.js';
 import { expectJson } from './http.js';
 import { runCommand, runIncus } from './incus-control.js';
+import {
+  createUserContainer,
+  createUserSharedVolume,
+} from './persona.js';
 import { eventually } from './poll.js';
 import { currentRunId, requireRuntimeEnv } from './runtime-env.js';
 import type { SeedState } from './seed-state.js';
@@ -64,93 +68,59 @@ export function nonGpuLabServers(seedState: SeedState): LabServer[] {
   return (seedState.labServers ?? []).filter((server) => server.role !== 'gpu');
 }
 
+export async function listSharedExecutors(
+  api: ApiClient,
+  backendId: string,
+): Promise<JsonRecord[]> {
+  return expectJson<JsonRecord[]>(
+    await api.get(`/api/admin/shared-backends/${backendId}/executors`),
+  );
+}
+
 export async function registeredCephPool(
   api: ApiClient,
+  seedState: Pick<SeedState, 'sharedBackendId'>,
   serverId: string,
 ): Promise<JsonRecord> {
-  const pools = await expectJson<JsonRecord[]>(
-    await api.get(`/api/admin/servers/${serverId}/storage-pools`),
+  expect(seedState.sharedBackendId, 'shared backend id').toBeTruthy();
+  const executors = await listSharedExecutors(api, String(seedState.sharedBackendId));
+  const executor = executors.find(
+    (row) => row.serverId === serverId && row.registered === true,
   );
-  const cephPool = pools.find(
-    (pool) => pool.driver === 'cephfs' && pool.shareable === true && pool.registered === true,
-  );
-  expect(cephPool?.id, `CephFS pool on ${serverId}`).toBeTruthy();
-  if (!cephPool) throw new Error(`CephFS pool missing on ${serverId}`);
-  return cephPool;
+  expect(executor?.id, `CephFS executor on ${serverId}`).toBeTruthy();
+  if (!executor) throw new Error(`CephFS executor missing on ${serverId}`);
+  return executor;
 }
 
 export async function createRunningContainer(
   api: ApiClient,
-  seedState: Pick<SeedState, 'adminUserId' | 'server' | 'image'>,
+  seedState: Pick<SeedState, 'server' | 'image'>,
   namePrefix: string,
   serverId = seedState.server.id,
+  options: {
+    extensions?: Record<string, unknown>;
+    volumes?: Array<{ volumeId: string; containerPath: string; readOnly: boolean }>;
+    powerIntent?: 'running' | 'stopped';
+  } = {},
 ): Promise<string> {
-  const accepted = await expectJson<JsonRecord>(
-    await api.post('/api/admin/containers', {
-      data: {
-        ownerId: seedState.adminUserId,
-        serverId,
-        imageId: seedState.image.id,
-        name: `${namePrefix}-${Date.now().toString(36)}`,
-        rootSizeBytes: 2 * 1024 * 1024 * 1024,
-        cpuMillis: 500,
-        memBytes: 512 * 1024 * 1024,
-        extensions: {},
-        powerIntent: 'running',
-      },
-    }),
-    202,
-  );
-  const containerId = accepted.resourceId as string;
-  await requireSucceededIntent(api, accepted.intentId, 'container.create');
-  await eventually(
-    async () => expectJson<JsonRecord>(
-      await api.get(`/api/admin/containers/${containerId}`),
-    ),
-    (value) => value.lifecyclePhase === 'active' && value.actual?.status === 'running',
-    180_000,
-    500,
-    `container ${containerId} running`,
-  );
-  return containerId;
+  const created = await createUserContainer(api, seedState, {
+    namePrefix,
+    serverId,
+    extensions: options.extensions,
+    volumes: options.volumes,
+    powerIntent: options.powerIntent ?? 'running',
+  });
+  return created.containerId;
 }
 
 export async function createRunningContainerWithVolumes(
   api: ApiClient,
-  seedState: Pick<SeedState, 'adminUserId' | 'server' | 'image'>,
+  seedState: Pick<SeedState, 'server' | 'image'>,
   namePrefix: string,
   volumes: Array<{ volumeId: string; containerPath: string; readOnly: boolean }>,
   serverId = seedState.server.id,
 ): Promise<string> {
-  const accepted = await expectJson<JsonRecord>(
-    await api.post('/api/admin/containers', {
-      data: {
-        ownerId: seedState.adminUserId,
-        serverId,
-        imageId: seedState.image.id,
-        name: `${namePrefix}-${Date.now().toString(36)}`,
-        rootSizeBytes: 2 * 1024 * 1024 * 1024,
-        cpuMillis: 500,
-        memBytes: 512 * 1024 * 1024,
-        extensions: {},
-        powerIntent: 'running',
-        volumes,
-      },
-    }),
-    202,
-  );
-  const containerId = accepted.resourceId as string;
-  await requireSucceededIntent(api, accepted.intentId, 'container.create with volumes');
-  await eventually(
-    async () => expectJson<JsonRecord>(
-      await api.get(`/api/admin/containers/${containerId}`),
-    ),
-    (value) => value.lifecyclePhase === 'active' && value.actual?.status === 'running',
-    180_000,
-    500,
-    `container ${containerId} running with volumes`,
-  );
-  return containerId;
+  return createRunningContainer(api, seedState, namePrefix, serverId, { volumes });
 }
 
 export async function execInContainer(
@@ -261,27 +231,14 @@ export async function listContainerVolumes(
 
 export async function createSharedVolume(
   api: ApiClient,
-  seedState: Pick<SeedState, 'adminUserId' | 'sharedBackendId'>,
+  seedState: Pick<SeedState, 'sharedBackendId'>,
   name: string,
   sizeBytes = 64 * 1024 * 1024,
 ): Promise<string> {
-  expect(seedState.sharedBackendId).toBeTruthy();
+  const volumeId = await createUserSharedVolume(api, seedState, name, sizeBytes);
   const created = await expectJson<JsonRecord>(
-    await api.post('/api/admin/shared-volumes', {
-      data: {
-        ownerId: seedState.adminUserId,
-        name,
-        sizeBytes,
-        scope: {
-          kind: 'shared',
-          sharedBackendId: seedState.sharedBackendId,
-        },
-      },
-    }),
-    201,
+    await api.get(`/api/shared-volumes/${volumeId}`),
   );
-  const volumeId = created.id as string;
-  expect(volumeId).toBeTruthy();
   expect(created.lifecyclePhase).toBe('active');
   expect(created.dirEnsured).toBe(false);
   expect(created.poolId).toBeUndefined();
@@ -290,16 +247,15 @@ export async function createSharedVolume(
 
 export async function createLocalVolumeOnServer(
   api: ApiClient,
-  seedState: Pick<SeedState, 'adminUserId'>,
+  _seedState: Pick<SeedState, 'adminUserId' | 'server' | 'storagePools'>,
   serverId: string,
   poolId: string,
   name: string,
   sizeBytes = 64 * 1024 * 1024,
 ): Promise<{ volumeId: string; intentId: string }> {
   const accepted = await expectJson<JsonRecord>(
-    await api.post('/api/admin/volumes', {
+    await api.post('/api/volumes', {
       data: {
-        ownerId: seedState.adminUserId,
         name,
         sizeBytes,
         scope: {
@@ -546,12 +502,11 @@ export async function listCephCatalogServers(
     ...(seedState.labServers ?? []).map((server) => ({ id: server.id, ssh: server.ssh })),
   ];
   const found: CephCatalogServer[] = [];
+  expect(seedState.sharedBackendId, 'shared backend id').toBeTruthy();
+  const executors = await listSharedExecutors(api, String(seedState.sharedBackendId));
   for (const server of candidates) {
-    const pools = await expectJson<JsonRecord[]>(
-      await api.get(`/api/admin/servers/${server.id}/storage-pools`),
-    );
-    const ceph = pools.find(
-      (pool) => pool.driver === 'cephfs' && pool.shareable === true && pool.registered === true,
+    const ceph = executors.find(
+      (row) => row.serverId === server.id && row.registered === true && row.incusName,
     );
     if (ceph?.incusName) {
       found.push({ id: server.id, ssh: server.ssh, poolName: String(ceph.incusName) });
@@ -704,24 +659,38 @@ export async function restoreLabServer(
   );
   const dirPool = pools.find((pool) => pool.id === server.dirPoolId)
     ?? pools.find((pool) => pool.driver === 'dir' && pool.resizeFamily === 'quota_online');
-  const cephPool = pools.find((pool) => pool.driver === 'cephfs' && pool.shareable === true);
   const lvmPool = pools.find((pool) => pool.driver === 'lvm');
-  for (const pool of [dirPool, cephPool, lvmPool]) {
+  for (const pool of [dirPool, lvmPool]) {
     if (!pool || pool.registered) continue;
     await api.patch(`/api/admin/storage-pools/${pool.id}`, {
       data: {
         expectedRevision: pool.revision,
         registered: true,
-        ...(pool.driver === 'cephfs' && seedState.sharedBackendId
-          ? { sharedBackendId: seedState.sharedBackendId }
-          : {}),
       },
     });
+  }
+  let cephExecutor: JsonRecord | undefined;
+  if (seedState.sharedBackendId) {
+    await api.post(
+      `/api/admin/shared-backends/${seedState.sharedBackendId}/executors/discover`,
+      { data: { serverId } },
+    );
+    const executors = await listSharedExecutors(api, seedState.sharedBackendId);
+    cephExecutor = executors.find((row) => row.serverId === serverId);
+    if (cephExecutor && !cephExecutor.registered) {
+      await patchExecutorRegistered(
+        api,
+        seedState.sharedBackendId,
+        String(cephExecutor.id),
+        Number(cephExecutor.revision),
+        true,
+      );
+    }
   }
   persistLabServerIdentity(seedState, server, {
     id: serverId!,
     dirPoolId: dirPool?.id as string | undefined,
-    cephfsPoolId: cephPool?.id as string | undefined,
+    cephfsPoolId: cephExecutor?.id as string | undefined,
   });
   await ensureLabServerReady(api, seedState, serverId!, dirPool?.id as string | undefined);
   await eventually(
@@ -902,13 +871,17 @@ export async function liveLabServer(
     await api.get(`/api/admin/servers/${match!.id}/storage-pools`),
   );
   const dirPool = pools.find((pool) => pool.driver === 'dir' && pool.registered === true);
-  const cephPool = pools.find(
-    (pool) => pool.driver === 'cephfs' && pool.shareable === true && pool.registered === true,
-  );
+  let cephExecutor: JsonRecord | undefined;
+  if (seedState.sharedBackendId) {
+    const executors = await listSharedExecutors(api, seedState.sharedBackendId);
+    cephExecutor = executors.find(
+      (row) => row.serverId === match!.id && row.registered === true,
+    );
+  }
   persistLabServerIdentity(seedState, server, {
     id: match!.id as string,
     dirPoolId: dirPool?.id as string | undefined,
-    cephfsPoolId: cephPool?.id as string | undefined,
+    cephfsPoolId: cephExecutor?.id as string | undefined,
   });
   return server;
 }
@@ -942,27 +915,8 @@ export async function listShareableCephPools(
   api: ApiClient,
   seedState: SeedState,
 ): Promise<JsonRecord[]> {
-  const serverIds = [
-    seedState.server.id,
-    ...(seedState.labServers ?? []).map((server) => server.id),
-    seedState.gpuServer?.id,
-  ].filter((id): id is string => Boolean(id));
-  const pools: JsonRecord[] = [];
-  for (const serverId of [...new Set(serverIds)]) {
-    const listed = await expectJson<JsonRecord[]>(
-      await api.get(`/api/admin/servers/${serverId}/storage-pools`),
-    );
-    for (const pool of listed) {
-      if (
-        pool.driver === 'cephfs'
-        && pool.shareable === true
-        && pool.sharedBackendId === seedState.sharedBackendId
-      ) {
-        pools.push({ ...pool, serverId });
-      }
-    }
-  }
-  return pools;
+  expect(seedState.sharedBackendId, 'shared backend id').toBeTruthy();
+  return listSharedExecutors(api, String(seedState.sharedBackendId));
 }
 
 export async function patchPoolRegistered(
@@ -979,6 +933,21 @@ export async function patchPoolRegistered(
   );
 }
 
+export async function patchExecutorRegistered(
+  api: ApiClient,
+  backendId: string,
+  executorId: string,
+  expectedRevision: number,
+  registered: boolean,
+): Promise<JsonRecord> {
+  return expectJson<JsonRecord>(
+    await api.patch(`/api/admin/shared-backends/${backendId}/executors/${executorId}`, {
+      data: { expectedRevision, registered },
+    }),
+    200,
+  );
+}
+
 export async function withCephPoolsUnregistered<T>(
   api: ApiClient,
   pools: JsonRecord[],
@@ -988,23 +957,27 @@ export async function withCephPoolsUnregistered<T>(
     .filter((pool) => pool.registered === true)
     .map((pool) => ({
       id: pool.id as string,
-      serverId: pool.serverId as string,
+      backendId: String(pool.backendId),
       revision: Number(pool.revision),
     }));
   try {
     for (const pool of snapshot) {
-      await patchPoolRegistered(api, pool.id, pool.revision, false);
+      await patchExecutorRegistered(api, pool.backendId, pool.id, pool.revision, false);
     }
     return await work();
   } finally {
     for (const pool of [...snapshot].reverse()) {
-      const listed = await expectJson<JsonRecord[]>(
-        await api.get(`/api/admin/servers/${pool.serverId}/storage-pools`),
-      );
+      const listed = await listSharedExecutors(api, pool.backendId);
       const current = listed.find((row) => row.id === pool.id);
       if (!current) throw new Error(`pool ${pool.id} missing while restoring registration`);
       if (current.registered === true) continue;
-      await patchPoolRegistered(api, pool.id, Number(current.revision), true);
+      await patchExecutorRegistered(
+        api,
+        pool.backendId,
+        pool.id,
+        Number(current.revision),
+        true,
+      );
     }
   }
 }

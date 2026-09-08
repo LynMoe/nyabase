@@ -75,9 +75,8 @@ describe('container API contract', () => {
       const descriptor = Object.getOwnPropertyDescriptor(prototype, method);
       return Reflect.getMetadata(PATH_METADATA, descriptor?.value);
     };
-    const expected = {
+    const shared = {
       list: '/',
-      create: '/',
       get: ':containerId',
       start: ':containerId/actions/start',
       stop: ':containerId/actions/stop',
@@ -92,10 +91,13 @@ describe('container API contract', () => {
       stats: ':containerId/stats',
       execSession: ':containerId/exec-sessions',
     };
-    for (const [method, path] of Object.entries(expected)) {
+    for (const [method, path] of Object.entries(shared)) {
       expect(methodPath(ContainersController.prototype, method)).toBe(path);
       expect(methodPath(AdminContainersController.prototype, method)).toBe(path);
     }
+    expect(methodPath(ContainersController.prototype, 'create')).toBe('/');
+    expect(Object.getOwnPropertyDescriptor(AdminContainersController.prototype, 'create'))
+      .toBeUndefined();
     expect(Reflect.getMetadata(PATH_METADATA, ContainersController)).toBe('containers');
     expect(Reflect.getMetadata(PATH_METADATA, AdminContainersController)).toBe('admin/containers');
     expect(Reflect.getMetadata(PATH_METADATA, ContainerIntentsController))
@@ -104,7 +106,7 @@ describe('container API contract', () => {
       .toBe('admin/containers/:containerId/intents');
     expect(methodPath(ContainerIntentsController.prototype, 'list')).toBe('/');
     expect(methodPath(AdminContainerIntentsController.prototype, 'list')).toBe('/');
-    expect(Object.values(expected).some((path) => path.includes('/v2'))).toBe(false);
+    expect(Object.values(shared).some((path) => path.includes('/v2'))).toBe(false);
   });
 
   it('validates accepted-intent and structured-error DTOs without legacy fields', () => {

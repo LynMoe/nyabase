@@ -17,6 +17,8 @@ import {
 } from './extensions/registry.js';
 
 initializeAuthSync();
+// Compile-time composition: also register the package in
+// packages/backend/src/app.module.ts and packages/node-exporter/src/main.ts.
 registerExtensionErrorFormatters([nvidiaGpuFormatError]);
 registerServerCardExtensions([
   createNvidiaGpuWebExtension(frontendExtensionHost as never) as never,

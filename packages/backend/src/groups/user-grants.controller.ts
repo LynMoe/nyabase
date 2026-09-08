@@ -118,6 +118,9 @@ export class UserGrantsController {
   @RequireCaps(Capability.ManageGrants)
   async effectiveAccess(@Param('userId') userId: string): Promise<EffectiveAccessDto> {
     await this.groups.assertUserScopeExists(userId);
-    return { servers: await this.access.getEffectiveAccess(userId) };
+    return {
+      servers: await this.access.getEffectiveAccess(userId),
+      sharedBackends: await this.access.getEffectiveSharedAccess(userId),
+    };
   }
 }

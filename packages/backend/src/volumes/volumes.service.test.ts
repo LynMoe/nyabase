@@ -65,6 +65,27 @@ describe('custom volume resize policy', () => {
     })).toBeNull();
   });
 
+  it('rejects quota-online shrink when usage has not been observed', () => {
+    expect(checkVolumeResize({
+      ...base,
+      usedBytes: null,
+      requestedSizeBytes: 80,
+    })).toEqual({
+      code: FailureCode.VolumeUsageUnknown,
+      message: 'Volume usage is unknown; shrink is not allowed until usage is observed',
+      details: {
+        volumeId: base.volumeId,
+        requestedBytes: 80,
+        usedBytes: null,
+      },
+    });
+    expect(checkVolumeResize({
+      ...base,
+      usedBytes: null,
+      requestedSizeBytes: 120,
+    })).toBeNull();
+  });
+
   it('uses observed quota-online usedBytes as the shrink floor, including used===size', () => {
     expect(effectiveUsageForShrinkFloor({
       usedBytes: 100,
@@ -172,18 +193,6 @@ function makeVolumesService(overrides: {
 }
 
 describe('volume API placement paths', () => {
-  it('rejects user create with ownerId', async () => {
-    const { service } = makeVolumesService({});
-    await expect(service.createForUser(actorId, {
-      ownerId: actorId,
-      name: 'data',
-      sizeBytes: 100,
-      scope: { kind: 'local', serverId: homeServer, poolId },
-    })).rejects.toMatchObject({
-      response: { code: FailureCode.InvalidInput },
-    });
-  });
-
   it('rejects shared create on the local volume API', async () => {
     const { service } = makeVolumesService({});
     await expect(service.createForUser(actorId, {

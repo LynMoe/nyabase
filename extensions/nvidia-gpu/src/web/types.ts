@@ -1,4 +1,5 @@
 import type { ComponentType, ReactNode } from 'react';
+import type { OpaqueExtensionMap, ServerExtensionEnablementDto } from '@nyabase/common';
 import type { nvidiaGpuFormatError } from '../errors.js';
 import type { NvidiaGpuDeviceDto } from '../schema.js';
 
@@ -48,8 +49,6 @@ export interface FrontendExtensionHost {
   };
 }
 
-export type OpaqueExtensionMap = Record<string, unknown>;
-
 export interface SlotContextMap {
   'container.create': {
     serverId: string;
@@ -81,23 +80,11 @@ export interface SlotContextMap {
   };
   'server.detail.enablement': {
     serverId: string;
-    item: {
-      extensionId: string;
-      displayName: string;
-      enabled: boolean;
-      health: OpaqueExtensionMap;
-      occupiedDeviceCount: number;
-    };
+    item: ServerExtensionEnablementDto;
   };
   'server.detail.health': {
     serverId: string;
-    item: {
-      extensionId: string;
-      displayName: string;
-      enabled: boolean;
-      health: OpaqueExtensionMap;
-      occupiedDeviceCount: number;
-    };
+    item: ServerExtensionEnablementDto;
   };
   'server.preflight': {
     evidence: OpaqueExtensionMap;
@@ -113,6 +100,7 @@ export interface ServerCardWebExtension {
     }) => ReactNode;
   }>;
   readonly formatError: typeof nvidiaGpuFormatError;
+  readonly formatGrantSummary?: (grants: OpaqueExtensionMap) => string | null;
 }
 
 export type NvidiaGpuInventoryItem = NvidiaGpuDeviceDto;

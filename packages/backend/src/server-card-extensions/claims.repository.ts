@@ -122,6 +122,20 @@ export class ExtensionDeviceClaimsRepository {
     return Number(row?.count ?? 0);
   }
 
+  async countsForServer(
+    serverId: string,
+    executor: ExtensionExecutor = this.database,
+  ): Promise<Map<string, number>> {
+    const rows = await executor
+      .selectFrom('control.extension_device_claims')
+      .select('extension_id')
+      .select((eb) => eb.fn.countAll<number>().as('count'))
+      .where('server_id', '=', serverId)
+      .groupBy('extension_id')
+      .execute();
+    return new Map(rows.map((row) => [row.extension_id, Number(row.count)]));
+  }
+
   async listEnabledIds(
     serverId: string,
     executor: ExtensionExecutor = this.database,

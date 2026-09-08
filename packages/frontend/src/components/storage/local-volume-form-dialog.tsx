@@ -1,11 +1,13 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   zCreateVolumeRequest,
   zPatchVolumeRequest,
   type CreateVolumeRequest,
+  type IntentAcceptedDto,
   type PatchVolumeRequest,
   type ServerDto,
+  type StorageCapacityDto,
   type StoragePoolDto,
   type UserServerDto,
   type VolumeDto,
@@ -18,9 +20,11 @@ import { Input } from '../ui/input.js';
 import { FormField } from '../layout/form-field.js';
 import { VolumeShrinkOrchestrationDialog } from './volume-shrink-orchestration-dialog.js';
 import { bytesToGiBInput, GIB, SelectField } from './volume-form-fields.js';
-import { approxGibHint } from '../../lib/utils.js';
+import { approxGibHint, grantAvailableLabel } from '../../lib/utils.js';
+import { formatGrantBytes } from '../../lib/grant-quota.js';
 import { queryKeys } from '../../lib/query-keys.js';
 import { toast } from '../../hooks/use-toast.js';
+import { isIntentAccepted, waitForResourceIntent } from '../../lib/intent-visibility.js';
 import {
   classifySizeChange,
   isQuotaIneffectiveCapability,
@@ -30,32 +34,87 @@ import {
   validateShrinkFloor,
 } from '../../lib/storage-shrink.js';
 
+function volumeItemPath(plane: 'user' | 'admin', volumeId: string): string {
+  if (plane === 'admin') return `/admin/volumes/${volumeId}`;
+  return `/volumes/${volumeId}`;
+}
+
+function volumeIntentsPath(plane: 'user' | 'admin', volumeId: string): string {
+  if (plane === 'admin') return `/admin/volumes/${volumeId}/intents`;
+  return `/volumes/${volumeId}/intents`;
+}
+
+function storagePoolsPath(plane: 'user' | 'admin', serverId: string): string {
+  if (plane === 'admin') return `/admin/servers/${serverId}/storage-pools`;
+  return `/servers/${serverId}/storage-pools`;
+}
+
+function storageCapacityPath(plane: 'user' | 'admin', serverId: string): string {
+  if (plane === 'admin') return `/admin/servers/${serverId}/storage-capacity`;
+  return `/servers/${serverId}/storage-capacity`;
+}
+
 export function LocalVolumeFormDialog({
   volume,
   open,
   onOpenChange,
+  plane = 'user',
+  lockedServerId,
+  lockedPoolId,
 }: {
   volume?: VolumeDto;
   open: boolean;
   onOpenChange: (open: boolean) => void;
+  plane?: 'user' | 'admin';
+  lockedServerId?: string;
+  lockedPoolId?: string;
 }) {
   const queryClient = useQueryClient();
   const editing = volume;
   const [name, setName] = useState(editing?.name ?? '');
   const [sizeGiB, setSizeGiB] = useState(editing ? bytesToGiBInput(editing.sizeBytes) : '10');
-  const [serverId, setServerId] = useState(volume?.serverId ?? '');
-  const [poolId, setPoolId] = useState(volume?.poolId ?? '');
+  const [serverId, setServerId] = useState(volume?.serverId ?? lockedServerId ?? '');
+  const [poolId, setPoolId] = useState(volume?.poolId ?? lockedPoolId ?? '');
   const [error, setError] = useState<string | null>(null);
   const [orchestrate, setOrchestrate] = useState(false);
+
+  useEffect(() => {
+    if (!open) return;
+    setName(volume?.name ?? '');
+    setSizeGiB(volume ? bytesToGiBInput(volume.sizeBytes) : '10');
+    setServerId(volume?.serverId ?? lockedServerId ?? '');
+    setPoolId(volume?.poolId ?? lockedPoolId ?? '');
+    setError(null);
+    setOrchestrate(false);
+  }, [open, volume, lockedServerId, lockedPoolId]);
+
+  const invalidateVolumeLists = () => {
+    if (plane === 'admin') {
+      void queryClient.invalidateQueries({ queryKey: queryKeys.volumes.admin });
+    } else {
+      void queryClient.invalidateQueries({ queryKey: queryKeys.volumes.user });
+    }
+    void queryClient.invalidateQueries({ queryKey: ['resource-intent-failures'] });
+  };
+
   const serversQuery = useQuery({
     queryKey: queryKeys.volumeForm.servers,
     queryFn: () => api.get<Array<ServerDto | UserServerDto>>('/servers'),
-    enabled: open && !editing,
+    enabled: open && !editing && plane !== 'admin',
   });
   const poolsQuery = useQuery({
-    queryKey: queryKeys.volumeForm.pools(serverId),
-    queryFn: () => api.get<StoragePoolDto[]>(`/servers/${serverId}/storage-pools`),
+    queryKey: plane === 'admin'
+      ? queryKeys.servers.pools(serverId, true)
+      : queryKeys.volumeForm.pools(serverId),
+    queryFn: () => api.get<StoragePoolDto[]>(storagePoolsPath(plane, serverId)),
     enabled: open && !editing && serverId.length > 0,
+  });
+  const capacityQuery = useQuery({
+    queryKey: plane === 'admin'
+      ? (['storage-capacity', 'admin', serverId] as const)
+      : queryKeys.storageCapacity(serverId),
+    queryFn: () => api.get<StorageCapacityDto>(storageCapacityPath(plane, serverId)),
+    enabled: open && serverId.length > 0,
   });
   const createLocal = useMutation({
     mutationFn: (body: CreateVolumeRequest) => api.post<unknown>('/volumes', body),
@@ -64,26 +123,33 @@ export function LocalVolumeFormDialog({
         title: '创建已提交',
         description: '列表状态稍后更新；若出现「需要关注」，请查看卡片上的说明。',
       });
-      void queryClient.invalidateQueries({ queryKey: queryKeys.volumes.user });
+      invalidateVolumeLists();
       onOpenChange(false);
     },
     onError: (mutationError) => setError(errorMessage(mutationError)),
   });
   const patch = useMutation({
-    mutationFn: (body: PatchVolumeRequest) => api.patch<unknown>(`/volumes/${volume?.id ?? ''}`, body),
+    mutationFn: async (body: PatchVolumeRequest) => {
+      const volumeId = volume?.id ?? '';
+      const accepted = await api.patch<IntentAcceptedDto | VolumeDto>(volumeItemPath(plane, volumeId), body);
+      if (isIntentAccepted(accepted)) {
+        await waitForResourceIntent(volumeIntentsPath(plane, volumeId), accepted.intentId);
+      }
+    },
     onSuccess: () => {
-      toast({
-        title: '更新已提交',
-        description: '列表状态稍后更新；若出现「需要关注」，请查看卡片上的说明。',
-      });
-      void queryClient.invalidateQueries({ queryKey: queryKeys.volumes.user });
+      toast({ title: '已更新' });
+      invalidateVolumeLists();
       onOpenChange(false);
     },
-    onError: (mutationError) => setError(errorMessage(mutationError)),
+    onError: (mutationError) => {
+      setError(errorMessage(mutationError));
+      invalidateVolumeLists();
+    },
   });
   const servers = serversQuery.data ?? [];
-  const localPools = (poolsQuery.data ?? []).filter((pool) => pool.registered && !pool.sharedBackendId);
+  const localPools = (poolsQuery.data ?? []).filter((pool) => pool.registered);
   const selectedPool = localPools.find((pool) => pool.id === poolId);
+  const selectedCapacityPool = (capacityQuery.data?.pools ?? []).find((pool) => pool.poolId === poolId);
   const parsedGiB = Number(sizeGiB);
   const nextSize = Number.isFinite(parsedGiB) && parsedGiB > 0
     ? Math.round(parsedGiB * GIB)
@@ -105,6 +171,9 @@ export function LocalVolumeFormDialog({
       ? quotaIneffectiveResizeHint()
       : null;
   const pending = createLocal.isPending || patch.isPending;
+  const serverLocked = Boolean(lockedServerId);
+  const poolLocked = Boolean(lockedPoolId);
+  const serverOptions: Array<[string, string]> = servers.map((server) => [server.id, server.name]);
 
   const submit = () => {
     setError(null);
@@ -145,6 +214,7 @@ export function LocalVolumeFormDialog({
       patch.mutate(parsed.data);
       return;
     }
+    if (plane === 'admin') return;
     if (!poolId) {
       setError('请选择存储池');
       return;
@@ -203,6 +273,27 @@ export function LocalVolumeFormDialog({
                   ? approxGibHint(nextSize)
                   : '请输入正数 GiB'}
               </p>
+              {plane === 'admin' ? (
+                <div className="space-y-1">
+                  <p className="text-xs text-muted-foreground">
+                    池剩余（物理，含超分；不是该用户的磁盘额度）。
+                  </p>
+                  {selectedCapacityPool ? (
+                    <p className="text-xs text-muted-foreground">
+                      {selectedCapacityPool.availableBytes === null
+                        ? '物理剩余未知'
+                        : `物理剩余 ${approxGibHint(selectedCapacityPool.availableBytes).replace(/^约 /, '')}`}
+                      {selectedCapacityPool.quotaEffective === true ? ' · 配额生效' : ' · 配额未生效'}
+                    </p>
+                  ) : null}
+                </div>
+              ) : capacityQuery.data ? (
+                <p className="text-xs text-muted-foreground">
+                  {capacityQuery.data.grantLimitBytes === null || capacityQuery.data.grantLimitBytes === 0
+                    ? '额度不限'
+                    : `剩余 ${grantAvailableLabel(capacityQuery.data.availableBytes, capacityQuery.data.grantLimitBytes)} / 额度 ${formatGrantBytes(capacityQuery.data.grantLimitBytes)}`}
+                </p>
+              ) : null}
               {shrinkBlocked && (
                 <p className="text-xs text-muted-foreground" title={shrinkNeverTooltip()}>
                   {shrinkNeverTooltip()}
@@ -216,8 +307,9 @@ export function LocalVolumeFormDialog({
                     id="volume-server"
                     label="服务器"
                     value={serverId}
-                    onChange={(value) => { setServerId(value); setPoolId(''); }}
-                    options={servers.map((server) => [server.id, server.name])}
+                    onChange={(value) => { setServerId(value); setPoolId(poolLocked ? (lockedPoolId ?? '') : ''); }}
+                    options={serverOptions}
+                    disabled={serverLocked}
                   />
                   <SelectField
                     key={serverId || 'no-server'}
@@ -226,7 +318,7 @@ export function LocalVolumeFormDialog({
                     value={poolId}
                     onChange={setPoolId}
                     options={localPools.map((pool) => [pool.id, pool.displayName ?? pool.incusName])}
-                    disabled={!serverId}
+                    disabled={!serverId || poolLocked}
                   />
                 </div>
                 {selectedPool && (
@@ -268,7 +360,7 @@ export function LocalVolumeFormDialog({
             if (!next) onOpenChange(false);
           }}
           onComplete={() => {
-            void queryClient.invalidateQueries({ queryKey: queryKeys.volumes.user });
+            invalidateVolumeLists();
           }}
         />
       )}

@@ -21,6 +21,7 @@ import {
 import {
   CONSOLE_DEFAULT_COLS,
   CONSOLE_DEFAULT_ROWS,
+  ADMIN_INTENT_LIST_MAX,
   MAX_CONSOLE_COMMAND_ARGUMENT_BYTES,
   MAX_CONSOLE_COMMAND_ARGUMENTS,
   MAX_GROUP_PRIORITY,
@@ -348,7 +349,41 @@ export const zPatchStoragePoolRequest = z.object({
   expectedRevision: zExpectedRevision,
   registered: z.boolean(),
   displayName: zOptionalText(128),
-  sharedBackendId: zResourceIdentity.nullable().optional(),
+}).strict();
+
+export const zPatchSharedBackendExecutorRequest = z.object({
+  expectedRevision: zExpectedRevision,
+  registered: z.boolean(),
+}).strict();
+
+export const zDiscoverSharedExecutorsRequest = z.object({
+  serverId: zUuid.optional(),
+}).strict();
+
+export const zStorageDiscoverIssueDto = z.object({
+  code: z.enum([
+    FailureCode.SharedBackendIdentityConflict,
+    FailureCode.StoragePoolInUse,
+    FailureCode.ServerUnreachable,
+  ]),
+  message: z.string(),
+  identityKey: z.string().nullable(),
+  expectedFsid: z.string().nullable(),
+  discoveredFsid: z.string().nullable(),
+  existingIdentityKey: z.string().nullable(),
+  serverId: z.string().nullable(),
+  incusName: z.string().nullable(),
+  poolId: z.string().nullable(),
+}).strict();
+
+export const zStoragePoolDiscoverResult = z.object({
+  pools: z.array(z.record(z.unknown())),
+  identityConflicts: z.array(zStorageDiscoverIssueDto),
+}).strict();
+
+export const zSharedBackendExecutorDiscoverResult = z.object({
+  executors: z.array(z.record(z.unknown())),
+  identityConflicts: z.array(zStorageDiscoverIssueDto),
 }).strict();
 
 export const zCreateSharedBackendRequest = z.object({
@@ -424,14 +459,12 @@ export const zVolumeScope = z.discriminatedUnion('kind', [
 ]);
 
 export const zCreateVolumeRequest = z.object({
-  ownerId: zResourceIdentity.optional(),
   name: zName,
   sizeBytes: zPositiveBytes,
   scope: zLocalVolumeScope,
 }).strict();
 
 export const zCreateSharedVolumeRequest = z.object({
-  ownerId: zResourceIdentity.optional(),
   name: zName,
   sizeBytes: zPositiveBytes,
   scope: zSharedVolumeScope,
@@ -439,6 +472,10 @@ export const zCreateSharedVolumeRequest = z.object({
 
 export const zListSharedVolumesQuery = z.object({
   attachableOnServerId: zResourceIdentity.optional(),
+}).strict();
+
+export const zListVolumesQuery = z.object({
+  serverId: zResourceIdentity.optional(),
 }).strict();
 
 export const zPatchVolumeRequest = z.object({
@@ -474,7 +511,6 @@ export const zCreateContainerRequest = z.object({
     z.unknown(),
   ).default({}),
   powerIntent: z.nativeEnum(ContainerPowerIntent),
-  ownerId: zResourceIdentity.optional(),
   volumes: z.array(zAttachVolumeRequest).max(32).optional(),
 }).strict();
 
@@ -558,6 +594,12 @@ export const zIntentListQuery = z.object({
   cursor: z.string().min(1).max(512).optional(),
   status: z.nativeEnum(IntentStatus).optional(),
   kind: z.nativeEnum(IntentKind).optional(),
+  resourceType: z.nativeEnum(IntentResourceType).optional(),
+  serverId: zResourceIdentity.optional(),
+}).strict();
+
+export const zAdminIntentListQuery = zIntentListQuery.extend({
+  limit: z.coerce.number().int().min(1).max(ADMIN_INTENT_LIST_MAX).default(ADMIN_INTENT_LIST_MAX),
 }).strict();
 
 export const zRetryIntentRequest = zEmptyRequest;
@@ -737,6 +779,8 @@ export type PatchServerRequest = z.infer<typeof zPatchServerRequest>;
 export type ConnectServerRequest = z.infer<typeof zConnectServerRequest>;
 export type RunPreflightRequest = z.infer<typeof zRunPreflightRequest>;
 export type PatchStoragePoolRequest = z.infer<typeof zPatchStoragePoolRequest>;
+export type PatchSharedBackendExecutorRequest = z.infer<typeof zPatchSharedBackendExecutorRequest>;
+export type DiscoverSharedExecutorsRequest = z.infer<typeof zDiscoverSharedExecutorsRequest>;
 export type CreateSharedBackendRequest = z.infer<typeof zCreateSharedBackendRequest>;
 export type PatchSharedBackendRequest = z.infer<typeof zPatchSharedBackendRequest>;
 export type CreateIpPoolRequest = z.infer<typeof zCreateIpPoolRequest>;
@@ -747,6 +791,7 @@ export type VolumeScope = z.infer<typeof zVolumeScope>;
 export type CreateVolumeRequest = z.infer<typeof zCreateVolumeRequest>;
 export type CreateSharedVolumeRequest = z.infer<typeof zCreateSharedVolumeRequest>;
 export type ListSharedVolumesQuery = z.infer<typeof zListSharedVolumesQuery>;
+export type ListVolumesQuery = z.infer<typeof zListVolumesQuery>;
 export type PatchVolumeRequest = z.infer<typeof zPatchVolumeRequest>;
 export type AttachVolumeRequest = z.infer<typeof zAttachVolumeRequest>;
 export type CreateContainerRequest = z.infer<typeof zCreateContainerRequest>;
@@ -762,6 +807,7 @@ export type PutServerGrantRequest = z.infer<typeof zPutServerGrantRequest>;
 export type PutStoragePoolGrantRequest = z.infer<typeof zPutStoragePoolGrantRequest>;
 export type PutSharedBackendGrantRequest = z.infer<typeof zPutSharedBackendGrantRequest>;
 export type IntentListQuery = z.infer<typeof zIntentListQuery>;
+export type AdminIntentListQuery = z.infer<typeof zAdminIntentListQuery>;
 export type RetryIntentRequest = z.infer<typeof zRetryIntentRequest>;
 export type NodeMetricsHealth = z.infer<typeof zNodeMetricsHealth>;
 export type PreflightReport = z.infer<typeof zPreflightReport>;

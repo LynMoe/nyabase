@@ -18,7 +18,6 @@ import { toast } from '../hooks/use-toast.js';
 export default function ImagesPage() {
   const queryClient = useQueryClient();
   const [createOpen, setCreateOpen] = useState(false);
-  const [editTarget, setEditTarget] = useState<AdminImageDto | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<AdminImageDto | null>(null);
   const imagesQuery = useQuery({
     queryKey: queryKeys.images.admin,
@@ -63,14 +62,11 @@ export default function ImagesPage() {
         {(images) => (
           <ImageList
             images={images}
-            onEdit={setEditTarget}
             onDelete={setDeleteTarget}
-            onCreate={() => setCreateOpen(true)}
           />
         )}
       </QueryView>
       <ImageFormDialog mode="create" open={createOpen} onOpenChange={setCreateOpen} />
-      {editTarget && <ImageFormDialog mode="edit" image={editTarget} open onOpenChange={(open) => { if (!open) setEditTarget(null); }} />}
       <ConfirmDialog
         open={Boolean(deleteTarget)}
         title="删除镜像？"

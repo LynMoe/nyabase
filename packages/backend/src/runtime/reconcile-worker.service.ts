@@ -23,6 +23,7 @@ import { RuntimeRoleService } from './runtime-role.service.js';
 import {
   IntentRepository,
   isRestartIntent,
+  isUserRetryIntent,
   type IntentRecord,
   type IntentResource,
   type IntentFailure,
@@ -315,7 +316,10 @@ export class PgResourceStatusRepository implements ResourceStatusPort {
           lifecycle_phase: 'failed' as const,
         }
         : {
-          needs_attention: false,
+          // Shrink/ensure failures must surface on the volume card. Leaving
+          // needs_attention false made failed resizes look "active" while scan
+          // kept retrying the already-written desired size.
+          needs_attention: true,
           failure_code: code,
         };
       await this.database
@@ -511,7 +515,10 @@ export class ReconcileWorkerService implements OnModuleInit, OnModuleDestroy {
 
   private async processIntent(intent: IntentRecord): Promise<void> {
     if (this.controller.signal.aborted) return;
-    if (await this.resourceStatus?.needsAttention?.(intent.resourceType, intent.resourceId)) {
+    if (
+      !isUserRetryIntent(intent.request)
+      && await this.resourceStatus?.needsAttention?.(intent.resourceType, intent.resourceId)
+    ) {
       return;
     }
     const serverId = await this.claimServerId(intent);

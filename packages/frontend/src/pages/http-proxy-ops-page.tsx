@@ -29,10 +29,10 @@ import {
   TableRow,
 } from '../components/ui/table.js';
 import { ConfirmDialog } from '../components/layout/confirm-dialog.js';
-import { EmptyState } from '../components/layout/empty-state.js';
 import { Page } from '../components/layout/page.js';
 import { PageHeader } from '../components/layout/page-header.js';
 import { QueryView } from '../components/layout/query-view.js';
+import { SectionCard } from '../components/layout/section-card.js';
 import { toast } from '../hooks/use-toast.js';
 import { useAuthStore } from '../store/auth.js';
 import { queryKeys } from '../lib/query-keys.js';
@@ -134,109 +134,105 @@ export default function HttpProxyOpsPage() {
       )}
 
       {canManagePools && (
-        <section className="space-y-3">
-          <div className="flex flex-wrap items-center justify-between gap-3">
-            <h2 className="text-base font-semibold text-foreground">域名池</h2>
-            <div className="flex gap-2">
-              <Button variant="ghost" size="icon" className="h-8 w-8 text-muted-foreground" onClick={() => { void poolsQuery.refetch(); }} disabled={poolsQuery.isFetching}>
-                <RefreshCw className={`h-4 w-4 ${poolsQuery.isFetching ? 'animate-spin' : ''}`} />
-              </Button>
-              <Button size="sm" onClick={() => setPoolForm('create')}><Plus className="h-4 w-4" />新建域名池</Button>
-            </div>
-          </div>
-          <QueryView
-            queries={[poolsQuery, bindingsQuery]}
-            resourceNames={['域名池', 'HTTP 发布绑定']}
-            loadingLabel="加载域名池..."
-          >
-            {() => (
-              <>
+        <QueryView
+          queries={[poolsQuery, bindingsQuery]}
+          resourceNames={['域名池', 'HTTP 发布绑定']}
+          loadingLabel="加载域名池..."
+        >
+          {() => (
+            <div className="space-y-6">
+              <SectionCard
+                title="域名池"
+                actions={
+                  <>
+                    <Button variant="ghost" size="icon" className="h-8 w-8 text-muted-foreground" onClick={() => { void poolsQuery.refetch(); }} disabled={poolsQuery.isFetching}>
+                      <RefreshCw className={`h-4 w-4 ${poolsQuery.isFetching ? 'animate-spin' : ''}`} />
+                    </Button>
+                    <Button size="sm" onClick={() => setPoolForm('create')}><Plus className="h-4 w-4" />新建域名池</Button>
+                  </>
+                }
+                flush={pools.length > 0}
+              >
                 {pools.length === 0 ? (
-                  <EmptyState
-                    title="暂无域名池。"
-                    description="登记通配域名后，用户才能把容器端口发布到匹配的主机名。"
-                  />
+                  <p className="text-sm text-muted-foreground">
+                    暂无域名池。登记通配域名后，用户才能把容器端口发布到匹配的主机名。
+                  </p>
                 ) : (
-                  <div className="rounded-lg border border-border bg-card">
-                    <Table className="min-w-[640px]">
+                  <Table className="min-w-[640px]">
+                    <TableHeader>
+                      <TableRow>
+                        <TableHead>通配域名</TableHead>
+                        <TableHead>启用</TableHead>
+                        <TableHead>HTTPS</TableHead>
+                        <TableHead>证书</TableHead>
+                        <TableHead className="text-right">操作</TableHead>
+                      </TableRow>
+                    </TableHeader>
+                    <TableBody>
+                      {pools.map((pool) => (
+                        <TableRow key={pool.id}>
+                          <TableCell className="font-mono text-xs">{pool.wildcardDomain}</TableCell>
+                          <TableCell>{pool.enabled ? '是' : '否'}</TableCell>
+                          <TableCell>{pool.httpsEnabled ? '是' : '否'}</TableCell>
+                          <TableCell className="font-mono text-xs break-all">{pool.certificateFingerprint ?? '未配置'}</TableCell>
+                          <TableCell>
+                            <div className="flex justify-end gap-2">
+                              <Button size="sm" variant="outline" onClick={() => setPoolForm(pool)}>
+                                <Pencil className="h-3.5 w-3.5" />编辑
+                              </Button>
+                              <Button size="sm" variant="destructive" onClick={() => setDeletePool(pool)}>
+                                <Trash2 className="h-3.5 w-3.5" />删除
+                              </Button>
+                            </div>
+                          </TableCell>
+                        </TableRow>
+                      ))}
+                    </TableBody>
+                  </Table>
+                )}
+              </SectionCard>
+              {Array.isArray(allBindings) ? (
+                <SectionCard title="全部发布绑定" flush={allBindings.length > 0}>
+                  {allBindings.length === 0 ? (
+                    <p className="text-sm text-muted-foreground">暂无用户发布绑定。</p>
+                  ) : (
+                    <Table className="min-w-[720px]">
                       <TableHeader>
-                        <TableRow className="bg-muted/60 hover:bg-muted/60">
-                          <TableHead>通配域名</TableHead>
-                          <TableHead>启用</TableHead>
+                        <TableRow>
+                          <TableHead>所有者</TableHead>
+                          <TableHead>主机名</TableHead>
+                          <TableHead>容器</TableHead>
+                          <TableHead>端口</TableHead>
                           <TableHead>HTTPS</TableHead>
-                          <TableHead>证书</TableHead>
-                          <TableHead className="text-right">操作</TableHead>
+                          <TableHead>状态</TableHead>
                         </TableRow>
                       </TableHeader>
                       <TableBody>
-                        {pools.map((pool) => (
-                          <TableRow key={pool.id}>
-                            <TableCell className="font-mono text-xs">{pool.wildcardDomain}</TableCell>
-                            <TableCell>{pool.enabled ? '是' : '否'}</TableCell>
-                            <TableCell>{pool.httpsEnabled ? '是' : '否'}</TableCell>
-                            <TableCell className="font-mono text-xs break-all">{pool.certificateFingerprint ?? '未配置'}</TableCell>
+                        {allBindings.map((binding) => (
+                          <TableRow key={binding.id}>
+                            <TableCell>{binding.ownerUsername}</TableCell>
+                            <TableCell className="font-mono text-xs">{binding.hostname}</TableCell>
+                            <TableCell>{binding.containerName ?? binding.containerId}</TableCell>
+                            <TableCell>{binding.targetPort}</TableCell>
+                            <TableCell>{binding.entryHttpsEnabled ? '是' : '否'}</TableCell>
                             <TableCell>
-                              <div className="flex justify-end gap-2">
-                                <Button size="sm" variant="outline" onClick={() => setPoolForm(pool)}>
-                                  <Pencil className="h-3.5 w-3.5" />编辑
-                                </Button>
-                                <Button size="sm" variant="destructive" onClick={() => setDeletePool(pool)}>
-                                  <Trash2 className="h-3.5 w-3.5" />删除
-                                </Button>
-                              </div>
+                              <Badge variant={binding.status === 'ready' ? 'success' : binding.status === 'warning' ? 'warning' : 'secondary'}>
+                                {httpProxyBindingStatusLabel(binding.status)}
+                              </Badge>
+                              {binding.warningReasons.length > 0 && (
+                                <p className="mt-1 text-xs text-destructive">{httpProxyWarningLabel(binding.warningReasons)}</p>
+                              )}
                             </TableCell>
                           </TableRow>
                         ))}
                       </TableBody>
                     </Table>
-                  </div>
-                )}
-                {Array.isArray(allBindings) && (
-                  <section className="space-y-3">
-                    <h2 className="text-base font-semibold text-foreground">全部发布绑定</h2>
-                    {allBindings.length === 0 ? (
-                      <p className="text-sm text-muted-foreground">暂无用户发布绑定。</p>
-                    ) : (
-                      <div className="rounded-lg border border-border bg-card">
-                        <Table className="min-w-[720px]">
-                          <TableHeader>
-                            <TableRow className="bg-muted/60 hover:bg-muted/60">
-                              <TableHead>所有者</TableHead>
-                              <TableHead>主机名</TableHead>
-                              <TableHead>容器</TableHead>
-                              <TableHead>端口</TableHead>
-                              <TableHead>HTTPS</TableHead>
-                              <TableHead>状态</TableHead>
-                            </TableRow>
-                          </TableHeader>
-                          <TableBody>
-                            {allBindings.map((binding) => (
-                              <TableRow key={binding.id}>
-                                <TableCell>{binding.ownerUsername}</TableCell>
-                                <TableCell className="font-mono text-xs">{binding.hostname}</TableCell>
-                                <TableCell>{binding.containerName ?? binding.containerId}</TableCell>
-                                <TableCell>{binding.targetPort}</TableCell>
-                                <TableCell>{binding.entryHttpsEnabled ? '是' : '否'}</TableCell>
-                                <TableCell>
-                                  <Badge variant={binding.status === 'ready' ? 'success' : binding.status === 'warning' ? 'warning' : 'secondary'}>
-                                    {httpProxyBindingStatusLabel(binding.status)}
-                                  </Badge>
-                                  {binding.warningReasons.length > 0 && (
-                                    <p className="mt-1 text-xs text-destructive">{httpProxyWarningLabel(binding.warningReasons)}</p>
-                                  )}
-                                </TableCell>
-                              </TableRow>
-                            ))}
-                          </TableBody>
-                        </Table>
-                      </div>
-                    )}
-                  </section>
-                )}
-              </>
-            )}
-          </QueryView>
-        </section>
+                  )}
+                </SectionCard>
+              ) : null}
+            </div>
+          )}
+        </QueryView>
       )}
 
       {poolForm && (
@@ -262,24 +258,25 @@ export default function HttpProxyOpsPage() {
 
 function HttpStatusSections({ status }: { status: HttpProxyAdminStatus }) {
   return (
-    <>
+    <div className="space-y-6">
       <section className="grid grid-cols-2 gap-3 xl:grid-cols-4">
         <MetricTile icon={Wifi} label="在线代理" value={status.connectedProxies.toString()} sub={`${(status.proxies ?? []).length} 个实例上报`} />
         <MetricTile icon={Activity} label="活跃连接" value={status.activeConnections.toString()} sub={`累计请求 ${status.totalRequests}`} />
         <MetricTile icon={Globe} label="累计请求" value={status.totalRequests.toString()} sub={`拒绝 ${status.totalRejectedRequests}`} />
         <MetricTile icon={Activity} label="拒绝请求" value={status.totalRejectedRequests.toString()} sub="累计拒绝" />
       </section>
-      <section className="space-y-3">
-        <div className="flex items-center justify-between gap-4">
-          <h2 className="text-base font-semibold text-foreground">代理实例</h2>
+      <SectionCard
+        title="代理实例"
+        actions={
           <Badge variant={status.connectedProxies > 0 ? 'success' : 'outline'}>
             {status.connectedProxies > 0 ? '在线' : '离线'}
           </Badge>
-        </div>
-        <div className="rounded-lg border border-border bg-card">
+        }
+        flush
+      >
           <Table className="min-w-[640px]">
             <TableHeader>
-              <TableRow className="bg-muted/60 hover:bg-muted/60">
+              <TableRow>
                 <TableHead>代理</TableHead>
                 <TableHead>HTTP</TableHead>
                 <TableHead>HTTPS</TableHead>
@@ -306,9 +303,8 @@ function HttpStatusSections({ status }: { status: HttpProxyAdminStatus }) {
               ))}
             </TableBody>
           </Table>
-        </div>
-      </section>
-    </>
+      </SectionCard>
+    </div>
   );
 }
 

@@ -91,9 +91,8 @@ test(
     const persona = await provisionGrantedUser(adminApi, seedState, 'gpci');
     try {
       const accepted = await expectJson<JsonRecord>(
-        await adminApi.post('/api/admin/containers', {
+        await adminApi.post('/api/containers', {
           data: {
-            ownerId: seedState.adminUserId,
             serverId: gpuServer.id,
             imageId: seedState.image.id,
             name: `e2e-gpu-${seedState.runId}-${Date.now().toString(36)}`.slice(0, 63),
@@ -122,9 +121,8 @@ test(
       expect(guest.stdout).toContain('nvidia_ok');
       expect(guest.stdout).toMatch(/nvidia[0-9]/);
 
-      const collision = await adminApi.post('/api/admin/containers', {
+      const collision = await adminApi.post('/api/containers', {
         data: {
-          ownerId: seedState.adminUserId,
           serverId: gpuServer.id,
           imageId: seedState.image.id,
           name: `e2e-gpucol-${Date.now().toString(36)}`.slice(0, 63),

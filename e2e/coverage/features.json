@@ -205,7 +205,6 @@
             "full"
           ],
           "httpSurfaces": [
-            "POST|/api/admin/containers",
             "GET|/api/admin/containers/:containerId",
             "POST|/api/admin/containers/:containerId/actions/repair-ssh",
             "POST|/api/admin/containers/:containerId/actions/delete",
@@ -321,7 +320,6 @@
             "GET|/api/admin/servers/:id/storage-capacity",
             "GET|/api/servers/:serverId/storage-capacity",
             "GET|/api/admin/volumes",
-            "POST|/api/admin/volumes",
             "GET|/api/admin/volumes/:id",
             "PATCH|/api/admin/volumes/:id",
             "DELETE|/api/admin/volumes/:id",
@@ -334,6 +332,54 @@
           "kind": "behavioral",
           "persona": "administrator",
           "status": "implemented",
+          "profiles": [
+            "core",
+            "full"
+          ],
+          "httpSurfaces": []
+        },
+        {
+          "caseId": "dir-quota-usage-enforcement",
+          "kind": "behavioral",
+          "persona": "administrator",
+          "status": "implemented",
+          "group": "40-storage",
+          "profiles": [
+            "core",
+            "full"
+          ],
+          "httpSurfaces": []
+        },
+        {
+          "caseId": "volume-shrink-stale-usage-fails-closed",
+          "kind": "behavioral",
+          "persona": "administrator",
+          "status": "implemented",
+          "group": "40-storage",
+          "profiles": [
+            "core",
+            "full"
+          ],
+          "httpSurfaces": []
+        },
+        {
+          "caseId": "lvm-volume-guest-capacity",
+          "kind": "behavioral",
+          "persona": "administrator",
+          "status": "implemented",
+          "group": "40-storage",
+          "profiles": [
+            "core",
+            "full"
+          ],
+          "httpSurfaces": []
+        },
+        {
+          "caseId": "shared-volume-shrink-below-usage",
+          "kind": "behavioral",
+          "persona": "administrator",
+          "status": "implemented",
+          "group": "40-storage",
           "profiles": [
             "core",
             "full"
@@ -369,7 +415,10 @@
             "GET|/api/admin/shared-backends",
             "GET|/api/admin/shared-backends/:id",
             "PATCH|/api/admin/shared-backends/:id",
-            "DELETE|/api/admin/shared-backends/:id"
+            "DELETE|/api/admin/shared-backends/:id",
+            "GET|/api/admin/shared-backends/:id/executors",
+            "POST|/api/admin/shared-backends/:id/executors/discover",
+            "PATCH|/api/admin/shared-backends/:id/executors/:executorId"
           ]
         },
         {
@@ -401,7 +450,6 @@
             "PATCH|/api/shared-volumes/:id",
             "DELETE|/api/shared-volumes/:id",
             "GET|/api/admin/shared-volumes",
-            "POST|/api/admin/shared-volumes",
             "GET|/api/admin/shared-volumes/:id",
             "GET|/api/admin/shared-volumes/:id/catalogs",
             "PATCH|/api/admin/shared-volumes/:id",
@@ -816,6 +864,18 @@
           ]
         },
         {
+          "caseId": "container-limits-applied-incus",
+          "kind": "behavioral",
+          "persona": "normal-user",
+          "status": "implemented",
+          "group": "35-user-ops",
+          "profiles": [
+            "core",
+            "full"
+          ],
+          "httpSurfaces": []
+        },
+        {
           "caseId": "user-container-root-size-grow",
           "kind": "behavioral",
           "persona": "normal-user",
@@ -827,6 +887,18 @@
           "httpSurfaces": [
             "PATCH|/api/containers/:containerId/root-size"
           ]
+        },
+        {
+          "caseId": "dir-root-quota-enforcement",
+          "kind": "behavioral",
+          "persona": "normal-user",
+          "status": "implemented",
+          "group": "35-user-ops",
+          "profiles": [
+            "core",
+            "full"
+          ],
+          "httpSurfaces": []
         },
         {
           "caseId": "user-volume-hot-attach-detach",

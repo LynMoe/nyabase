@@ -27,6 +27,9 @@ import { GrantExpiryModule } from './access/grant-expiry.module.js';
 import { ServerCardExtensionsModule } from './server-card-extensions/server-card-extensions.module.js';
 import { createNvidiaGpuExtension } from '@nyabase/nvidia-gpu';
 
+// Compile-time composition: also register the package in
+// packages/frontend/src/main.tsx and packages/node-exporter/src/main.ts.
+
 @Module({
   imports: [
     NyabaseConfigModule,

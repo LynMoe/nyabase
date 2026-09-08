@@ -346,6 +346,29 @@ describe('ReconcileWorkerService', () => {
     expect(setup.clients.get).not.toHaveBeenCalled();
   });
 
+  it('still processes an explicit retry when the resource needs attention', async () => {
+    const setup = makeWorker({
+      resourceStatus: {
+        markNeedsAttention: vi.fn().mockResolvedValue(undefined),
+        markFailure: vi.fn().mockResolvedValue(undefined),
+        markSucceeded: vi.fn().mockResolvedValue(undefined),
+        needsAttention: vi.fn().mockResolvedValue(true),
+      },
+    });
+    setup.listPending.mockResolvedValue({
+      items: [{
+        ...intent(),
+        kind: 'volume.resize',
+        resourceType: 'volume',
+        request: { retryOf: '00000000-0000-4000-8000-000000000099', operation: 'resize' },
+      }],
+      nextCursor: null,
+    });
+    await setup.worker.runOnce();
+    expect(setup.claims.claim).toHaveBeenCalled();
+    expect(setup.reconciler.reconcile).toHaveBeenCalled();
+  });
+
   it.each(['SSH_DAEMON_PENDING', 'GUEST_NOT_READY'] as const)(
     'does not count %s as Incus lock busy strikes',
     async (code) => {
@@ -430,6 +453,44 @@ describe('ReconcileWorkerService', () => {
     });
 
     expect(volumeSets).toEqual([{ failure_code: 'VOLUME_REQUIRES_DETACH' }]);
+  });
+
+  it('marks an active volume as needing attention when shrink/ensure fails', async () => {
+    const volumeSets: Record<string, unknown>[] = [];
+    const repo = new PgResourceStatusRepository({
+      selectFrom: vi.fn(() => ({
+        select: vi.fn(() => ({
+          where: vi.fn(() => ({
+            executeTakeFirst: vi.fn().mockResolvedValue({ lifecycle_phase: 'active' }),
+          })),
+        })),
+      })),
+      updateTable: vi.fn(() => ({
+        set: vi.fn((values: Record<string, unknown>) => {
+          volumeSets.push(values);
+          return {
+            where: vi.fn(() => ({
+              where: vi.fn(() => ({
+                execute: vi.fn().mockResolvedValue(undefined),
+              })),
+              execute: vi.fn().mockResolvedValue(undefined),
+            })),
+          };
+        }),
+      })),
+    } as never);
+
+    await repo.markFailure('volume', resourceId, {
+      code: 'VOLUME_SHRINK_BELOW_USAGE',
+      message: 'Volume cannot shrink below observed usage',
+      details: {},
+    });
+
+    expect(volumeSets).toEqual([{
+      needs_attention: true,
+      failure_code: 'VOLUME_SHRINK_BELOW_USAGE',
+    }]);
+    expect(volumeSets[0]).not.toHaveProperty('lifecycle_phase');
   });
 
   it('does not skip deleting volumes that still have needs_attention', async () => {

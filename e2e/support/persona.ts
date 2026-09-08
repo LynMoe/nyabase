@@ -187,26 +187,30 @@ export async function requireSucceededIntent(
 
 export async function createUserContainer(
   api: ApiClient,
-  seedState: Pick<SeedState, 'runId' | 'server' | 'image'>,
+  seedState: Pick<SeedState, 'server' | 'image'>,
   options: {
     namePrefix?: string;
     cpuMillis?: number;
     memBytes?: number;
     rootSizeBytes?: number;
     powerIntent?: 'running' | 'stopped';
+    serverId?: string;
+    extensions?: Record<string, unknown>;
+    volumes?: Array<{ volumeId: string; containerPath: string; readOnly: boolean }>;
   } = {},
 ): Promise<{ containerId: string; intentId: string }> {
   const accepted = await expectJson<JsonRecord>(
     await api.post('/api/containers', {
       data: {
-        serverId: seedState.server.id,
+        serverId: options.serverId ?? seedState.server.id,
         imageId: seedState.image.id,
         name: `${options.namePrefix ?? 'e2e-u'}-${Date.now().toString(36)}`.slice(0, 63),
         rootSizeBytes: options.rootSizeBytes ?? 2 * 1024 * 1024 * 1024,
         cpuMillis: options.cpuMillis ?? 500,
         memBytes: options.memBytes ?? 512 * 1024 * 1024,
-        extensions: {},
+        extensions: options.extensions ?? {},
         powerIntent: options.powerIntent ?? 'running',
+        ...(options.volumes ? { volumes: options.volumes } : {}),
       },
     }),
     202,
@@ -254,8 +258,10 @@ export async function createUserSharedVolume(
   seedState: Pick<SeedState, 'sharedBackendId'>,
   name: string,
   sizeBytes = 64 * 1024 * 1024,
+  options: { sharedBackendId?: string } = {},
 ): Promise<string> {
-  expect(seedState.sharedBackendId).toBeTruthy();
+  const sharedBackendId = options.sharedBackendId ?? seedState.sharedBackendId;
+  expect(sharedBackendId).toBeTruthy();
   const created = await expectJson<JsonRecord>(
     await api.post('/api/shared-volumes', {
       data: {
@@ -263,7 +269,7 @@ export async function createUserSharedVolume(
         sizeBytes,
         scope: {
           kind: 'shared',
-          sharedBackendId: seedState.sharedBackendId,
+          sharedBackendId,
         },
       },
     }),
@@ -322,6 +328,7 @@ export async function createUserVolume(
   seedState: Pick<SeedState, 'server' | 'storagePools'>,
   name: string,
   sizeBytes: number,
+  options: { serverId?: string; poolId?: string } = {},
 ): Promise<{ volumeId: string; intentId: string }> {
   const accepted = await expectJson<JsonRecord>(
     await api.post('/api/volumes', {
@@ -330,8 +337,8 @@ export async function createUserVolume(
         sizeBytes,
         scope: {
           kind: 'local',
-          serverId: seedState.server.id,
-          poolId: seedState.storagePools.dirQuotaOnline.id,
+          serverId: options.serverId ?? seedState.server.id,
+          poolId: options.poolId ?? seedState.storagePools.dirQuotaOnline.id,
         },
       },
     }),

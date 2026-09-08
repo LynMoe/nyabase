@@ -22,14 +22,15 @@ export class VolumesRepository {
 
   listByKind(
     kind: 'local' | 'shared',
-    ownerId?: string,
+    options: { ownerId?: string; serverId?: string } = {},
     executor: VolumeExecutor = this.database,
   ) {
     let query = executor.selectFrom('control.volumes').selectAll().orderBy('created_at', 'desc');
     query = kind === 'local'
       ? query.where('shared_backend_id', 'is', null)
       : query.where('shared_backend_id', 'is not', null);
-    if (ownerId) query = query.where('owner_id', '=', ownerId);
+    if (options.ownerId) query = query.where('owner_id', '=', options.ownerId);
+    if (options.serverId) query = query.where('server_id', '=', options.serverId);
     return query.execute();
   }
 

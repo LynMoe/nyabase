@@ -47,7 +47,8 @@ export class AdminUsersController {
   }
 
   @Get(':id')
-  @RequireCaps(Capability.ManageUsers)
+  @RequireCaps()
+  @RequireAnyCaps(Capability.ManageUsers, Capability.ManageGrants)
   async getUser(@Param('id') id: string) {
     const user = await this.usersService.findById(id);
     return this.usersService.toDto(user);

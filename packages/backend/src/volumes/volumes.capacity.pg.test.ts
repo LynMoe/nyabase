@@ -696,11 +696,9 @@ describePg('volume capacity locking and scope exclusions', () => {
           sizeBytes: 600,
           scope: { kind: 'shared', sharedBackendId: backendId },
         }),
-        storageService.patch(poolId, {
+        storageService.patchExecutor(backendId, poolId, {
           expectedRevision: 1,
           registered: true,
-          displayName: 'patched-concurrently',
-          sharedBackendId: backendId,
         }),
       ]);
 
@@ -711,27 +709,21 @@ describePg('volume capacity locking and scope exclusions', () => {
         .where('shared_backend_id', '=', backendId)
         .execute()).toHaveLength(1);
       const patchedPool = await database.selectFrom('infra.storage_pools')
-        .select(['display_name', 'revision'])
+        .select(['registered', 'revision'])
         .where('id', '=', poolId)
         .executeTakeFirstOrThrow();
       expect(patchedPool).toMatchObject({
-        display_name: 'patched-concurrently',
+        registered: true,
         revision: '2',
       });
     });
   });
 
-  it('createForUser requires server grant; createForAdmin does not', async () => {
+  it('createForUser requires server grant', async () => {
     await withPostgresTestDatabase(async ({ database }) => {
       const ownerId = randomUUID();
-      const adminActorId = randomUUID();
       const serverId = randomUUID();
       await database.insertInto('iam.users').values(userValues(ownerId)).execute();
-      await database.insertInto('iam.users').values({
-        ...userValues(adminActorId),
-        numeric_id: 2,
-        username: `admin-${adminActorId.slice(0, 8)}`,
-      }).execute();
       await database.insertInto('infra.servers').values(serverValues(serverId)).execute();
       const poolId = await insertLocalPool(database, serverId);
       const service = makeService(database);
@@ -742,37 +734,11 @@ describePg('volume capacity locking and scope exclusions', () => {
         scope: { kind: 'local', serverId, poolId },
       })).rejects.toThrow(/Server storage access is not granted/);
 
-      await expect(service.createForAdmin(adminActorId, {
-        ownerId,
-        name: 'admin-no-grant',
-        sizeBytes: 100,
-        scope: { kind: 'local', serverId, poolId },
-      })).resolves.toMatchObject({ resourceType: 'volume' });
-
       const rows = await database.selectFrom('control.volumes')
         .select(['name', 'owner_id'])
         .where('pool_id', '=', poolId)
         .execute();
-      expect(rows).toEqual([{ name: 'admin-no-grant', owner_id: ownerId }]);
-    });
-  });
-
-  it('rejects user create with ownerId', async () => {
-    await withPostgresTestDatabase(async ({ database }) => {
-      const ownerId = randomUUID();
-      const serverId = randomUUID();
-      await database.insertInto('iam.users').values(userValues(ownerId)).execute();
-      await database.insertInto('infra.servers').values(serverValues(serverId)).execute();
-      const poolId = await insertLocalPool(database, serverId);
-      const service = makeService(database);
-      await expect(service.createForUser(ownerId, {
-        ownerId,
-        name: 'user-owner',
-        sizeBytes: 100,
-        scope: { kind: 'local', serverId, poolId },
-      })).rejects.toMatchObject({
-        response: { code: FailureCode.InvalidInput },
-      });
+      expect(rows).toEqual([]);
     });
   });
 });

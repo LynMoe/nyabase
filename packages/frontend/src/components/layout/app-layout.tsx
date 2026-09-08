@@ -2,6 +2,7 @@ import { Link, useRouterState } from '@tanstack/react-router';
 import React, { useState, type ReactNode } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import {
+  Activity,
   LayoutDashboard, Server, Container, Database, HardDrive, Layers, Users, ImageIcon,
   ScrollText, LogOut, Shield, UserCircle, Settings, Cable, Network, Globe, TriangleAlert,
   Menu,
@@ -17,7 +18,7 @@ import {
   Sheet, SheetContent, SheetDescription, SheetTitle,
 } from '../ui/sheet.js';
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '../ui/tooltip.js';
-import { Capability, type IncusClientCertificateDto } from '@nyabase/common';
+import { ADMIN_INTENT_CAPABILITIES, Capability, type IncusClientCertificateDto } from '@nyabase/common';
 import { ThemeToggle } from '../theme-toggle.js';
 import { usePublicSettings } from '../../hooks/use-public-settings.js';
 import { terminateBrowserSession } from '../../lib/session-termination.js';
@@ -38,12 +39,10 @@ const userNavItems = [
 const adminNavItems = [
   { to: '/servers', icon: Server, label: '服务器', caps: [Capability.ManageServers] },
   { to: '/ip-pools', icon: Network, label: 'IP 池', caps: [Capability.ManageIpPools] },
-  { to: '/storage-pools', icon: HardDrive, label: '存储池', caps: [Capability.ManageStoragePools] },
   { to: '/shared-backends', icon: Database, label: '共享存储', caps: [Capability.ManageSharedBackends] },
   { to: '/images', icon: ImageIcon, label: '镜像', caps: [Capability.ManageImages] },
+  { to: '/ops', icon: Activity, label: '运维', caps: ADMIN_INTENT_CAPABILITIES },
   { to: '/manage/containers', icon: Layers, label: '容器管理', caps: [Capability.ManageContainersAny] },
-  { to: '/manage/volumes', icon: Database, label: '数据卷管理', caps: [Capability.ManageVolumes] },
-  { to: '/manage/shared-volumes', icon: HardDrive, label: '共享卷管理', caps: [Capability.ManageSharedVolumes] },
   { to: '/ssh-proxy', icon: Cable, label: 'SSH 代理', caps: SSH_PROXY_STATUS_CAPABILITIES },
   { to: '/http-proxy-ops', icon: Globe, label: 'HTTP 代理', caps: HTTP_PROXY_STATUS_CAPABILITIES },
   { to: '/users', icon: Users, label: '用户', caps: [Capability.ManageUsers, Capability.ManageGrants] },
@@ -275,7 +274,7 @@ export function AppLayout({ children }: { children: ReactNode }) {
                 <AlertDescription className="flex flex-wrap items-center gap-2">
                   <span>{certExpiryBannerText(certificate.notAfter)}</span>
                   {certBannerServerId ? (
-                    <Link to="/servers/$id" params={{ id: certBannerServerId }} className="underline">
+                    <Link to="/servers/$id" params={{ id: certBannerServerId }} search={{ tab: 'connect' }} className="underline">
                       前往轮换
                     </Link>
                   ) : (

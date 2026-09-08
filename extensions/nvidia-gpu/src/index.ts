@@ -40,12 +40,15 @@ export type {
   NvidiaGpuMutatePayload,
 } from './schema.js';
 export {
+  NVIDIA_GPU_DRIVER_PRESENT_METRIC,
   NVIDIA_GPU_LABEL_VALIDATORS,
   NVIDIA_GPU_METRIC_DEFINITIONS,
   NVIDIA_GPU_SMI_INDEX_METRIC,
+  NVIDIA_GPU_TOOLKIT_PRESENT_METRIC,
   validateNvidiaGpuLabels,
 } from './metrics.js';
 export { createNvidiaGpuExtension } from './backend/extension.js';
+export { probeNvidiaGpuSupport } from './backend/support.js';
 export { contributeNvidiaGpuInstanceSpec, nvidiaGpuRequiresStop } from './backend/instance-spec.js';
 export {
   applyNvidiaSmiIndexes,

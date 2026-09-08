@@ -35,10 +35,16 @@ import { IntentRepository } from '../runtime/intent.repository.js';
 import { ReconcileWakeService } from '../runtime/reconcile-wake.service.js';
 import { acceptedIntent, isoDate, lifecyclePhase, numberValue, deterministicName, poolLabel } from '../domain/domain-utils.js';
 import { StoragePoolsRepository } from '../storage-pools/storage-pools.repository.js';
-import { storagePoolCapability } from '../storage-pools/storage-pools.service.js';
+import { isLocalPoolRow, storagePoolCapability } from '../storage-pools/storage-pools.service.js';
 import { VolumesRepository, type VolumeExecutor } from './volumes.repository.js';
 import { AuditService } from '../audit/audit.service.js';
-import { classifyGrantExpiry, expiresAtSortKey } from '../access/grant-expiry.js';
+import {
+  classifyGrantExpiry,
+  compareGrantCandidates,
+  liveExpiry,
+  selectLiveGrantCandidate,
+  type GrantWinnerCandidate,
+} from '../access/grant-expiry.js';
 import { NyabaseConfigService } from '../config/nyabase-config.service.js';
 import { listEligibleDestroyExecutors } from './eligible-destroy-executors.js';
 import { occupancyForCatalogItem } from './shared-volume-inspect.js';
@@ -47,6 +53,7 @@ import {
   type IncusClientFactory,
 } from '../runtime/reconcile-worker.service.js';
 import { IncusError } from '../incus/index.js';
+import { normalizeObservedVolumeUsage } from '../runtime/volume-reconciler.service.js';
 
 type GrantRow = {
   disk_bytes: string | number | null;
@@ -83,50 +90,25 @@ export function isIntentAccepted(
   return 'intentId' in result;
 }
 
-type SharedGrantRow = {
-  limit_bytes: string | number | bigint;
-  expires_at: Date | string | null;
-  user_id: string | null;
-  group_id: string | null;
-  group_priority: number | null;
-  id: string;
-};
-
 function activeExpiry(value: Date | string | null): boolean {
   return classifyGrantExpiry(value) !== 'lost';
 }
 
-function liveExpiry(value: Date | string | null): boolean {
-  return classifyGrantExpiry(value) === 'live';
-}
-
-type GrantCandidate = {
-  user_id: string | null;
-  group_id: string | null;
-  group_priority: number | null;
-  id: string;
-  expires_at: Date | string | null;
-};
-
-function compareGrantCandidates(
+function asWinnerCandidate(
   ownerId: string,
-  left: GrantCandidate,
-  right: GrantCandidate,
-): number {
-  const leftPhase = classifyGrantExpiry(left.expires_at) === 'live' ? 0 : 1;
-  const rightPhase = classifyGrantExpiry(right.expires_at) === 'live' ? 0 : 1;
-  if (leftPhase !== rightPhase) return leftPhase - rightPhase;
-  const leftScope = left.user_id === ownerId ? 0 : 1;
-  const rightScope = right.user_id === ownerId ? 0 : 1;
-  if (leftScope !== rightScope) return leftScope - rightScope;
-  if (leftScope === 1) {
-    const leftExpires = expiresAtSortKey(left.expires_at);
-    const rightExpires = expiresAtSortKey(right.expires_at);
-    if (leftExpires !== rightExpires) return rightExpires > leftExpires ? 1 : -1;
-    const priority = (right.group_priority ?? 0) - (left.group_priority ?? 0);
-    if (priority !== 0) return priority;
-  }
-  return right.id.localeCompare(left.id);
+  row: {
+    user_id: string | null;
+    group_priority: number | null;
+    id: string;
+    expires_at: Date | string | null;
+  },
+): GrantWinnerCandidate {
+  return {
+    scopeRank: row.user_id === ownerId ? 0 : 1,
+    priority: row.group_priority ?? 0,
+    tieBreaker: row.id,
+    expiresAt: row.expires_at,
+  };
 }
 
 function maxNullable(values: Array<number | null>): number | null {
@@ -165,7 +147,8 @@ export interface VolumeResizeCheckFailure {
   code:
     | FailureCode.VolumeShrinkBelowUsage
     | FailureCode.VolumeShrinkRequiresDetach
-    | FailureCode.VolumeShrinkUnsupported;
+    | FailureCode.VolumeShrinkUnsupported
+    | FailureCode.VolumeUsageUnknown;
   message: string;
   details: Record<string, unknown>;
 }
@@ -180,6 +163,29 @@ export function effectiveUsageForShrinkFloor(input: {
   resizeFamily: StoragePoolResizeFamily | string;
 }): number | null {
   return input.usedBytes;
+}
+
+function incusUsageToBigint(value: unknown): bigint | null {
+  if (typeof value === 'number' && Number.isSafeInteger(value) && value >= 0) return BigInt(value);
+  if (typeof value === 'string' && /^(?:0|[1-9][0-9]*)$/.test(value.trim())) {
+    return BigInt(value.trim());
+  }
+  return null;
+}
+
+function volumeUsageUnknownFailure(
+  volumeId: string,
+  requestedBytes: number,
+): VolumeResizeCheckFailure {
+  return {
+    code: FailureCode.VolumeUsageUnknown,
+    message: 'Volume usage is unknown; shrink is not allowed until usage is observed',
+    details: {
+      volumeId,
+      requestedBytes,
+      usedBytes: null,
+    },
+  };
 }
 
 /**
@@ -197,6 +203,20 @@ export function checkVolumeResize(
     currentSizeBytes: input.currentSizeBytes,
     resizeFamily: input.resizeFamily,
   });
+  if (
+    input.resizeFamily === StoragePoolResizeFamily.QuotaOnline
+    && effectiveUsed === null
+  ) {
+    return {
+      code: FailureCode.VolumeUsageUnknown,
+      message: 'Volume usage is unknown; shrink is not allowed until usage is observed',
+      details: {
+        volumeId: input.volumeId,
+        requestedBytes: input.requestedSizeBytes,
+        usedBytes: null,
+      },
+    };
+  }
   if (effectiveUsed !== null && effectiveUsed > input.requestedSizeBytes) {
     return {
       code: FailureCode.VolumeShrinkBelowUsage,
@@ -262,17 +282,16 @@ export class VolumesService {
   }
 
   async listForUser(ownerId: string): Promise<VolumeDto[]> {
-    const rows = await this.repository.listByKind('local', ownerId);
+    const rows = await this.repository.listByKind('local', { ownerId });
     return this.toDtos(rows);
   }
 
-  async listForAdmin(): Promise<VolumeDto[]> {
-    const rows = await this.repository.listByKind('local');
-    return this.toDtos(rows);
+  async listForAdmin(serverId?: string): Promise<VolumeDto[]> {
+    return this.toDtos(await this.repository.listByKind('local', { serverId }));
   }
 
   async listSharedForUser(ownerId: string, attachableOnServerId?: string): Promise<SharedVolumeDto[]> {
-    const rows = await this.repository.listByKind('shared', ownerId);
+    const rows = await this.repository.listByKind('shared', { ownerId });
     const filtered = attachableOnServerId
       ? await this.filterAttachableShared(rows, attachableOnServerId)
       : rows;
@@ -280,7 +299,7 @@ export class VolumesService {
   }
 
   async listSharedForAdmin(attachableOnServerId?: string): Promise<SharedVolumeDto[]> {
-    const rows = await this.repository.listByKind('shared');
+    const rows = await this.repository.listByKind('shared', {});
     const filtered = attachableOnServerId
       ? await this.filterAttachableShared(rows, attachableOnServerId)
       : rows;
@@ -318,7 +337,7 @@ export class VolumesService {
   async capacityForUser(ownerId: string, serverId: string): Promise<StorageCapacityDto> {
     await this.assertServerGrant(ownerId, serverId);
     const grant = await this.effectiveServerGrant(ownerId, serverId);
-    const pools = (await this.pools.list(serverId)).filter((pool) => pool.shared_backend_id === null);
+    const pools = (await this.pools.list(serverId)).filter(isLocalPoolRow);
     const overcommitRatio = await this.serverOvercommit(serverId);
     const poolDtos = [];
     const sums = await this.ownerServerCommittedBytes(ownerId, serverId, undefined);
@@ -366,7 +385,7 @@ export class VolumesService {
   }
 
   async capacityForAdmin(serverId: string): Promise<StorageCapacityDto> {
-    const pools = (await this.pools.list(serverId)).filter((pool) => pool.shared_backend_id === null);
+    const pools = (await this.pools.list(serverId)).filter(isLocalPoolRow);
     const overcommitRatio = await this.serverOvercommit(serverId);
     const poolDtos = [];
     for (const pool of pools) {
@@ -403,69 +422,25 @@ export class VolumesService {
   async createForUser(
     actorId: string,
     input: {
-      ownerId?: string;
       name: string;
       sizeBytes: number;
       scope: LocalVolumeScope;
     },
   ): Promise<IntentAcceptedDto> {
-    if (input.ownerId) {
-      throw new BadRequestException({
-        code: FailureCode.InvalidInput,
-        message: 'User volume creation cannot specify ownerId',
-      });
-    }
     if (input.scope.kind !== 'local') {
       throw new BadRequestException({
         code: FailureCode.InvalidInput,
         message: 'Shared volumes must be created via /shared-volumes',
       });
     }
-    return this.createVolume(actorId, actorId, input, 'user');
-  }
-
-  async createForAdmin(
-    actorId: string,
-    input: {
-      ownerId: string;
-      name: string;
-      sizeBytes: number;
-      scope: LocalVolumeScope;
-    },
-  ): Promise<IntentAcceptedDto> {
-    if (!input.ownerId) {
-      throw new BadRequestException('Admin volume creation requires ownerId');
-    }
-    if (input.scope.kind !== 'local') {
-      throw new BadRequestException({
-        code: FailureCode.InvalidInput,
-        message: 'Shared volumes must be created via /shared-volumes',
-      });
-    }
-    return this.createVolume(actorId, input.ownerId, input, 'admin');
+    return this.createVolume(actorId, actorId, input);
   }
 
   async createSharedForUser(
     actorId: string,
     input: CreateSharedVolumeRequest,
   ): Promise<SharedVolumeDto> {
-    if (input.ownerId) {
-      throw new BadRequestException({
-        code: FailureCode.InvalidInput,
-        message: 'User volume creation cannot specify ownerId',
-      });
-    }
-    return this.createSharedVolume(actorId, actorId, input, 'user');
-  }
-
-  async createSharedForAdmin(
-    actorId: string,
-    input: CreateSharedVolumeRequest & { ownerId: string },
-  ): Promise<SharedVolumeDto> {
-    if (!input.ownerId) {
-      throw new BadRequestException('Admin volume creation requires ownerId');
-    }
-    return this.createSharedVolume(actorId, input.ownerId, input, 'admin');
+    return this.createSharedVolume(actorId, actorId, input);
   }
 
   private async createSharedVolume(
@@ -476,7 +451,6 @@ export class VolumesService {
       sizeBytes: number;
       scope: SharedVolumeScope;
     },
-    access: 'user' | 'admin',
   ): Promise<SharedVolumeDto> {
     if (!Number.isSafeInteger(input.sizeBytes) || input.sizeBytes <= 0) {
       throw new BadRequestException({
@@ -490,25 +464,15 @@ export class VolumesService {
     try {
       row = await this.transactions.run(
         async (transaction) => {
-          if (access === 'user') {
-            await this.assertSharedGrant(ownerId, input.scope.sharedBackendId, transaction);
-          }
+          await this.assertSharedGrant(ownerId, input.scope.sharedBackendId, transaction);
           await this.pools.lockSharedBackends([input.scope.sharedBackendId], transaction);
           await this.assertSharedCreateHealth(input.scope.sharedBackendId, transaction);
-          if (access === 'admin') {
-            await this.assertSharedCapacityForDeltaForAdmin(
-              transaction,
-              input.scope.sharedBackendId,
-              input.sizeBytes,
-            );
-          } else {
-            await this.assertSharedCapacityForDeltaForUser(
-              transaction,
-              ownerId,
-              input.scope.sharedBackendId,
-              input.sizeBytes,
-            );
-          }
+          await this.assertSharedCapacityForDeltaForUser(
+            transaction,
+            ownerId,
+            input.scope.sharedBackendId,
+            input.sizeBytes,
+          );
           const created = await this.repository.insert({
             id,
             ownerId,
@@ -555,7 +519,6 @@ export class VolumesService {
       sizeBytes: number;
       scope: LocalVolumeScope;
     },
-    access: 'user' | 'admin',
   ): Promise<IntentAcceptedDto> {
     if (!Number.isSafeInteger(input.sizeBytes) || input.sizeBytes <= 0) {
       throw new BadRequestException({
@@ -569,27 +532,15 @@ export class VolumesService {
     try {
       created = await this.transactions.run(
         async (transaction) => {
-          const scope = access === 'admin'
-            ? await this.resolveScopeForAdmin(transaction, input.scope)
-            : await this.resolveScopeForUser(transaction, ownerId, input.scope);
-          if (access === 'admin') {
-            await this.assertCapacityForDeltaForAdmin(
-              transaction,
-              scope.serverId,
-              scope.poolId,
-              scope.sharedBackendId,
-              input.sizeBytes,
-            );
-          } else {
-            await this.assertCapacityForDeltaForUser(
-              transaction,
-              ownerId,
-              scope.serverId,
-              scope.poolId,
-              scope.sharedBackendId,
-              input.sizeBytes,
-            );
-          }
+          const scope = await this.resolveScopeForUser(transaction, ownerId, input.scope);
+          await this.assertCapacityForDeltaForUser(
+            transaction,
+            ownerId,
+            scope.serverId,
+            scope.poolId,
+            scope.sharedBackendId,
+            input.sizeBytes,
+          );
           const row = await this.repository.insert({
             id,
             ownerId,
@@ -947,6 +898,39 @@ export class VolumesService {
       const [dto] = await this.toSharedDtos([updated]);
       return dto!;
     }
+    const requestedSize = input.sizeBytes!;
+    const currentSize = numberValue(current.size_bytes);
+    const delta = requestedSize - currentSize;
+    const placementsPreview = await this.repository.listPlacements(id);
+    let liveUsedBytes: number | undefined;
+    if (placementsPreview.length > 0 && delta < 0) {
+      const previewPool = placementsPreview[0]?.pool_id
+        ? await this.pools.findById(placementsPreview[0].pool_id)
+        : null;
+      const quotaEffective = previewPool?.quota_effective ?? true;
+      const observed = await this.liveGetSharedVolumeUsage(current);
+      if (observed.status === 'unavailable') {
+        throw new ConflictException(volumeUsageUnknownFailure(id, requestedSize));
+      }
+      const usedNumber = observed.usedBytes === null ? null : Number(observed.usedBytes);
+      await this.persistObservedUsedBytes(id, usedNumber);
+      const liveFailure = usedNumber === null
+        ? volumeUsageUnknownFailure(id, requestedSize)
+        : checkVolumeResize({
+          volumeId: id,
+          poolId: placementsPreview[0]?.pool_id ?? id,
+          currentSizeBytes: currentSize,
+          requestedSizeBytes: requestedSize,
+          usedBytes: usedNumber,
+          resizeFamily: StoragePoolResizeFamily.QuotaOnline,
+          blockFilesystem: null,
+          attachments: [],
+        });
+      if (liveFailure && quotaEffective) {
+        throw new ConflictException(liveFailure);
+      }
+      if (usedNumber !== null) liveUsedBytes = usedNumber;
+    }
     const changed = await this.transactions.run(async (transaction) => {
       const locked = await this.repository.findById(id, transaction);
       this.requireShared(locked, actorId, access);
@@ -969,7 +953,9 @@ export class VolumesService {
         poolId: representativePoolId ?? id,
         currentSizeBytes: numberValue(locked.size_bytes),
         requestedSizeBytes: input.sizeBytes!,
-        usedBytes: locked.used_bytes === null ? null : numberValue(locked.used_bytes),
+        usedBytes: liveUsedBytes !== undefined
+          ? liveUsedBytes
+          : locked.used_bytes === null ? null : numberValue(locked.used_bytes),
         resizeFamily: StoragePoolResizeFamily.QuotaOnline,
         blockFilesystem: null,
         attachments: [],
@@ -1051,6 +1037,120 @@ export class VolumesService {
       });
     }
     return acceptedIntent(changed.intent);
+  }
+
+  private async persistObservedUsedBytes(volumeId: string, usedBytes: number | null): Promise<void> {
+    await this.database
+      .updateTable('control.volumes')
+      .set({ used_bytes: usedBytes })
+      .where('id', '=', volumeId)
+      .where('lifecycle_phase', 'not in', ['failed', 'deleting'])
+      .execute();
+  }
+
+  private async liveGetSharedVolumeUsage(
+    volume: VolumeRow,
+  ): Promise<{ status: 'unavailable' } | { status: 'observed'; usedBytes: bigint | null }> {
+    type UsageCandidate = {
+      serverId: string;
+      poolName: string;
+      driver: 'dir' | 'btrfs' | 'zfs' | 'lvm' | 'lvmcluster' | 'ceph' | 'cephfs';
+      resizeFamily: 'quota_online' | 'block_backed';
+    };
+    const candidates: UsageCandidate[] = [];
+    const seen = new Set<string>();
+    const placementRows = await this.database
+      .selectFrom('control.volume_placements as pl')
+      .innerJoin('infra.storage_pools as p', 'p.id', 'pl.pool_id')
+      .innerJoin('infra.servers as s', 's.id', 'pl.server_id')
+      .select([
+        'pl.server_id as server_id',
+        'pl.catalog_state as catalog_state',
+        'p.incus_name as pool_name',
+        'p.driver as driver',
+        'p.resize_family as resize_family',
+        's.status as server_status',
+      ])
+      .where('pl.volume_id', '=', volume.id)
+      .orderBy('pl.server_id', 'asc')
+      .execute();
+    for (const row of placementRows) {
+      if (
+        (row.catalog_state === 'present' || row.catalog_state === 'ensuring')
+        && row.server_status === 'online'
+      ) {
+        candidates.push({
+          serverId: row.server_id,
+          poolName: row.pool_name,
+          driver: row.driver,
+          resizeFamily: row.resize_family === 'block_backed' ? 'block_backed' : 'quota_online',
+        });
+        seen.add(row.server_id);
+      }
+    }
+    if (volume.shared_backend_id) {
+      const eligible = await listEligibleDestroyExecutors(this.database, volume.shared_backend_id);
+      for (const executor of eligible) {
+        if (seen.has(executor.server_id)) continue;
+        candidates.push({
+          serverId: executor.server_id,
+          poolName: executor.pool_name,
+          driver: 'cephfs',
+          resizeFamily: 'quota_online',
+        });
+        seen.add(executor.server_id);
+      }
+    }
+    if (candidates.length === 0 || !this.clients) {
+      return { status: 'unavailable' };
+    }
+    for (const candidate of candidates) {
+      const result = await this.getSharedVolumeStateUsage(candidate, volume);
+      if (result.status === 'observed') return result;
+    }
+    return { status: 'unavailable' };
+  }
+
+  private async getSharedVolumeStateUsage(
+    candidate: {
+      serverId: string;
+      poolName: string;
+      driver: 'dir' | 'btrfs' | 'zfs' | 'lvm' | 'lvmcluster' | 'ceph' | 'cephfs';
+      resizeFamily: 'quota_online' | 'block_backed';
+    },
+    volume: VolumeRow,
+  ): Promise<{ status: 'observed'; usedBytes: bigint | null } | { status: 'error' }> {
+    let client;
+    try {
+      client = await this.clients?.get(candidate.serverId);
+    } catch {
+      return { status: 'error' };
+    }
+    if (!client) return { status: 'error' };
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 5_000);
+    try {
+      const state = (await client.getStorageVolumeState(
+        candidate.poolName,
+        'custom',
+        volume.incus_name,
+        { signal: controller.signal },
+      )).metadata;
+      return {
+        status: 'observed',
+        usedBytes: normalizeObservedVolumeUsage({
+          resizeFamily: candidate.resizeFamily,
+          driver: candidate.driver,
+          usedBytes: incusUsageToBigint(state.usage?.used),
+          totalBytes: incusUsageToBigint(state.usage?.total),
+          currentSizeBytes: BigInt(numberValue(volume.size_bytes)),
+        }),
+      };
+    } catch {
+      return { status: 'error' };
+    } finally {
+      clearTimeout(timer);
+    }
   }
 
   async deleteForUser(actorId: string, id: string) {
@@ -1258,12 +1358,11 @@ export class VolumesService {
   async bindCreateTimeVolumes(
     transaction: Transaction<NyabaseDatabase>,
     actorId: string,
-    access: 'user' | 'admin',
     container: { id: string; owner_id: string; server_id: string },
     volumes: readonly AttachVolumeRequest[],
   ): Promise<void> {
     for (const input of volumes) {
-      await this.bindAttachmentRow(transaction, actorId, access, container, input, null);
+      await this.bindAttachmentRow(transaction, actorId, 'user', container, input, null);
     }
   }
 
@@ -1564,18 +1663,6 @@ export class VolumesService {
     await this.assertServerGrant(ownerId, scope.serverId, transaction);
     await this.assertPoolGrant(ownerId, resolved.poolId, transaction);
     return resolved;
-  }
-
-  private async resolveScopeForAdmin(
-    transaction: Transaction<NyabaseDatabase>,
-    scope: LocalVolumeScope,
-  ): Promise<{
-    poolId: string;
-    serverId: string;
-    sharedBackendId: null;
-    anchorServerId: string;
-  }> {
-    return this.resolveScopeCore(transaction, scope);
   }
 
   private async resolveScopeCore(
@@ -1898,7 +1985,12 @@ export class VolumesService {
       .forUpdate('grant')
       .execute();
     const active = rows.filter((row) => activeExpiry(row.expires_at));
-    active.sort((left, right) => compareGrantCandidates(ownerId, left, right));
+    const now = new Date();
+    active.sort((left, right) => compareGrantCandidates(
+      asWinnerCandidate(ownerId, left),
+      asWinnerCandidate(ownerId, right),
+      now,
+    ));
     return (active[0] ?? null) as GrantRow | null;
   }
 
@@ -1956,9 +2048,10 @@ export class VolumesService {
       ]))
       .forUpdate('grant')
       .execute();
-    const active = rows.filter((row) => liveExpiry(row.expires_at));
-    active.sort((left, right) => compareGrantCandidates(ownerId, left, right));
-    const winner = active[0] as SharedGrantRow | undefined;
+    const winner = selectLiveGrantCandidate(rows.map((row) => ({
+      ...asWinnerCandidate(ownerId, row),
+      limit_bytes: row.limit_bytes,
+    })));
     if (!winner) return undefined;
     return numberValue(winner.limit_bytes) === 0 ? null : numberValue(winner.limit_bytes);
   }

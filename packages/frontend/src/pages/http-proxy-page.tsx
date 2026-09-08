@@ -12,7 +12,6 @@ import { api } from '../lib/api.js';
 import { ApiError } from '../lib/api-error.js';
 import { Badge } from '../components/ui/badge.js';
 import { Button } from '../components/ui/button.js';
-import { Card, CardContent, CardHeader, CardTitle } from '../components/ui/card.js';
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '../components/ui/dialog.js';
 import { Input } from '../components/ui/input.js';
 import {
@@ -22,13 +21,21 @@ import {
   SelectTrigger,
   SelectValue,
 } from '../components/ui/select.js';
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from '../components/ui/table.js';
 import { ConfirmDialog } from '../components/layout/confirm-dialog.js';
 import { FormField } from '../components/layout/form-field.js';
 import { EmptyState } from '../components/layout/empty-state.js';
 import { Page } from '../components/layout/page.js';
 import { PageHeader } from '../components/layout/page-header.js';
 import { QueryView } from '../components/layout/query-view.js';
-import { ResourceGrid } from '../components/layout/resource-grid.js';
+import { SectionCard } from '../components/layout/section-card.js';
 import { queryKeys } from '../lib/query-keys.js';
 import { toast } from '../hooks/use-toast.js';
 import {
@@ -84,16 +91,31 @@ export default function HttpProxyPage() {
         }
       >
         {(items) => (
-          <ResourceGrid>
-            {items.map((binding) => (
-              <BindingCard
-                key={binding.id}
-                binding={binding}
-                onEdit={() => setEditTarget(binding)}
-                onDelete={() => setDeleteTarget(binding)}
-              />
-            ))}
-          </ResourceGrid>
+          <SectionCard flush>
+          <Table className="min-w-[720px]">
+            <TableHeader>
+              <TableRow>
+                <TableHead>主机名</TableHead>
+                <TableHead>状态</TableHead>
+                <TableHead>容器</TableHead>
+                <TableHead>端口</TableHead>
+                <TableHead>HTTPS</TableHead>
+                <TableHead>域名池</TableHead>
+                <TableHead className="text-right">操作</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {items.map((binding) => (
+                <BindingRow
+                  key={binding.id}
+                  binding={binding}
+                  onEdit={() => setEditTarget(binding)}
+                  onDelete={() => setDeleteTarget(binding)}
+                />
+              ))}
+            </TableBody>
+          </Table>
+          </SectionCard>
         )}
       </QueryView>
       <BindingFormDialog open={createOpen} onOpenChange={setCreateOpen} />
@@ -118,7 +140,7 @@ export default function HttpProxyPage() {
   );
 }
 
-function BindingCard({
+function BindingRow({
   binding,
   onEdit,
   onDelete,
@@ -129,34 +151,27 @@ function BindingCard({
 }) {
   const warning = httpProxyWarningLabel(binding.warningReasons);
   return (
-    <Card>
-      <CardHeader className="pb-3">
-        <div className="flex items-start justify-between gap-3">
-          <CardTitle className="flex min-w-0 items-center gap-2 text-base">
-            <Globe className="h-4 w-4 shrink-0" />
-            <span className="truncate font-mono text-sm">{binding.hostname}</span>
-          </CardTitle>
-          <Badge variant={binding.status === 'ready' ? 'success' : binding.status === 'warning' ? 'warning' : 'secondary'}>
-            {httpProxyBindingStatusLabel(binding.status)}
-          </Badge>
-        </div>
-      </CardHeader>
-      <CardContent className="space-y-3">
-        <div className="grid gap-3 sm:grid-cols-2">
-          <Info label="容器" value={binding.containerName ?? binding.containerId} />
-          <Info label="目标端口" value={String(binding.targetPort)} />
-          <Info label="HTTPS" value={binding.entryHttpsEnabled ? '已启用' : '未启用'} />
-          <Info label="域名池" value={binding.domainPool} mono />
-        </div>
-        {(warning || binding.warningMessage) && (
-          <p className="text-xs text-destructive">{warning || binding.warningMessage}</p>
-        )}
+    <TableRow className="cursor-pointer" onClick={onEdit}>
+      <TableCell className="font-mono">{binding.hostname}</TableCell>
+      <TableCell className="whitespace-normal">
+        <Badge variant={binding.status === 'ready' ? 'success' : binding.status === 'warning' ? 'warning' : 'secondary'}>
+          {httpProxyBindingStatusLabel(binding.status)}
+        </Badge>
+        {(warning || binding.warningMessage) ? (
+          <p className="mt-1 text-xs text-destructive">{warning || binding.warningMessage}</p>
+        ) : null}
+      </TableCell>
+      <TableCell>{binding.containerName ?? binding.containerId}</TableCell>
+      <TableCell>{binding.targetPort}</TableCell>
+      <TableCell>{binding.entryHttpsEnabled ? '已启用' : '未启用'}</TableCell>
+      <TableCell className="font-mono">{binding.domainPool}</TableCell>
+      <TableCell className="text-right" onClick={(event) => event.stopPropagation()}>
         <div className="flex justify-end gap-2">
           <Button size="sm" variant="outline" onClick={onEdit}><Pencil className="h-3.5 w-3.5" />编辑</Button>
           <Button size="sm" variant="destructive" onClick={onDelete}><Trash2 className="h-3.5 w-3.5" />删除</Button>
         </div>
-      </CardContent>
-    </Card>
+      </TableCell>
+    </TableRow>
   );
 }
 
@@ -318,12 +333,5 @@ function BindingFormDialog({
   );
 }
 
-function Info({ label, value, mono = false }: { label: string; value: string; mono?: boolean }) {
-  return (
-    <div>
-      <p className="text-xs text-muted-foreground">{label}</p>
-      <p className={mono ? 'break-all font-mono text-xs' : 'break-all text-sm'}>{value}</p>
-    </div>
-  );
-}
+
 

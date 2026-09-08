@@ -14,6 +14,8 @@ import { createNodeExporterServer } from './server.js';
 
 async function main(): Promise<void> {
   const config = await loadNodeExporterConfig();
+  // Compile-time composition: also register the package in
+  // packages/backend/src/app.module.ts and packages/frontend/src/main.tsx.
   const catalog = mergeNodeMetricCatalog(
     { definitions: NODE_METRIC_DEFINITIONS, validators: CORE_LABEL_VALIDATORS },
     { definitions: NVIDIA_GPU_METRIC_DEFINITIONS, validators: NVIDIA_GPU_LABEL_VALIDATORS },

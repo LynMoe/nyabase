@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { Inject, Injectable, Optional } from '@nestjs/common';
 import { sql, type Kysely, type Transaction } from 'kysely';
 import {
+  ADMIN_INTENT_LIST_MAX,
   IntentKind,
   IntentResourceType,
   IntentStatus,
@@ -122,7 +123,7 @@ const KIND_RESOURCES: Readonly<Record<TypedIntentKind, readonly IntentResource[]
   [IntentKind.CertificateRotate]: [IntentResourceType.CertificateRotation],
 };
 
-const MAX_PAGE_SIZE = 100;
+const MAX_PAGE_SIZE = ADMIN_INTENT_LIST_MAX;
 const MAX_JSON_BYTES = 8 * 1024;
 const MAX_JSON_DEPTH = 5;
 const MAX_JSON_KEYS = 64;
@@ -132,6 +133,12 @@ export function isRestartIntent(
   request: Record<string, unknown> | null | undefined,
 ): boolean {
   return kind === IntentKind.ContainerPower && request?.action === 'restart';
+}
+
+export function isUserRetryIntent(
+  request: Record<string, unknown> | null | undefined,
+): boolean {
+  return typeof request?.retryOf === 'string' && request.retryOf.length > 0;
 }
 
 function assertKindResource(kind: TypedIntentKind, resourceType: IntentResource): void {
@@ -473,14 +480,18 @@ export class IntentRepository {
     executor: IntentExecutor = this.database,
   ): Promise<IntentRecord> {
     assertUuidLike(input.sourceIntentId, 'Source intent id');
-    return this.assertRetryable(input.sourceIntentId, executor).then(() => this.createPending({
-      ...input,
-      id: randomUUID(),
-      request: {
-        ...(input.request ?? {}),
-        retryOf: input.sourceIntentId,
-      },
-    }, executor));
+    return this.assertRetryable(input.sourceIntentId, executor).then(async () => {
+      await this.releaseAttention(input.resourceType, input.resourceId, executor);
+      await this.restoreVolumeResizeSize(input.kind, input.resourceId, input.request, executor);
+      return this.createPending({
+        ...input,
+        id: randomUUID(),
+        request: {
+          ...(input.request ?? {}),
+          retryOf: input.sourceIntentId,
+        },
+      }, executor);
+    });
   }
 
   async retry(
@@ -502,6 +513,9 @@ export class IntentRepository {
     }
     const targetGeneration = await this.currentGeneration(source.resource_type, source.resource_id, executor)
       ?? source.target_generation;
+    const request = objectValue(source.request_json) ?? {};
+    await this.releaseAttention(source.resource_type, source.resource_id, executor);
+    await this.restoreVolumeResizeSize(source.kind, source.resource_id, request, executor);
     return this.createPending({
       kind: source.kind as TypedIntentKind,
       resourceType: source.resource_type,
@@ -509,12 +523,62 @@ export class IntentRepository {
       serverId: source.server_id,
       requestedBy: source.requested_by,
       request: {
-        ...(objectValue(source.request_json) ?? {}),
+        ...request,
         retryOf: sourceIntentId,
       },
       targetGeneration,
       baseline: objectValue(source.baseline_json),
     }, executor);
+  }
+
+  private async restoreVolumeResizeSize(
+    kind: string,
+    resourceId: string,
+    request: Record<string, unknown> | null | undefined,
+    executor: IntentExecutor,
+  ): Promise<void> {
+    if (kind !== IntentKind.VolumeResize) return;
+    const sizeBytes = request?.sizeBytes;
+    if (typeof sizeBytes !== 'number' || !Number.isSafeInteger(sizeBytes) || sizeBytes <= 0) {
+      return;
+    }
+    await executor
+      .updateTable('control.volumes')
+      .set({ size_bytes: sizeBytes })
+      .where('id', '=', resourceId)
+      .where('lifecycle_phase', 'not in', ['deleting', 'failed'])
+      .execute();
+  }
+
+  private async releaseAttention(
+    resourceType: string,
+    resourceId: string,
+    executor: IntentExecutor,
+  ): Promise<void> {
+    if (resourceType === IntentResourceType.Volume) {
+      await executor
+        .updateTable('control.volumes')
+        .set({ needs_attention: false, failure_code: null })
+        .where('id', '=', resourceId)
+        .where('lifecycle_phase', '!=', 'deleting')
+        .execute();
+      return;
+    }
+    if (resourceType === IntentResourceType.Container) {
+      await executor
+        .updateTable('control.containers')
+        .set({ needs_attention: false, failure_code: null, failure_reason: null })
+        .where('id', '=', resourceId)
+        .execute();
+      return;
+    }
+    if (resourceType === IntentResourceType.ImageAssignment) {
+      await executor
+        .updateTable('infra.image_server_assignments')
+        .set({ needs_attention: false, failure_code: null, failure_reason: null })
+        .where('id', '=', resourceId)
+        .execute();
+    }
   }
 
   private async currentGeneration(

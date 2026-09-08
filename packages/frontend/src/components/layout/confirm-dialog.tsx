@@ -20,6 +20,7 @@ export function ConfirmDialog({
   confirmVariant = 'destructive',
   pending = false,
   testId,
+  className,
   onConfirm,
   onOpenChange,
 }: {
@@ -32,6 +33,7 @@ export function ConfirmDialog({
   confirmVariant?: 'destructive' | 'default';
   pending?: boolean;
   testId?: string;
+  className?: string;
   onConfirm: () => void;
   onOpenChange: (open: boolean) => void;
 }) {
@@ -43,7 +45,7 @@ export function ConfirmDialog({
         onOpenChange(next);
       }}
     >
-      <AlertDialogContent data-testid={testId}>
+      <AlertDialogContent className={className} data-testid={testId}>
         <AlertDialogHeader>
           <AlertDialogTitle>{title}</AlertDialogTitle>
           <AlertDialogDescription asChild>

@@ -137,6 +137,11 @@ export function expect(actual: unknown, message?: string) {
         fail(`${prefix}expected ${stringify(actual)} < ${expected}`);
       }
     },
+    toBeLessThanOrEqual(expected: number) {
+      if (!(typeof actual === 'number' && actual <= expected)) {
+        fail(`${prefix}expected ${stringify(actual)} <= ${expected}`);
+      }
+    },
     toMatchObject(expected: Record<string, unknown>) {
       if (!matches(actual, { __expect: 'objectContaining', value: expected })) {
         fail(`${prefix}expected ${stringify(actual)} to match ${stringify(expected)}`);

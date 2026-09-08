@@ -1,5 +1,4 @@
-import type { ExtensionErrorFormatter } from '@nyabase/common';
-import type { ServerCardUiArea } from '@nyabase/common';
+import type { ExtensionErrorFormatter, OpaqueExtensionMap, ServerCardUiArea } from '@nyabase/common';
 import { frontendExtensionHost } from './host.js';
 import type { ServerCardWebExtension, SlotContextMap } from './types.js';
 
@@ -24,6 +23,17 @@ export function formatRegisteredExtensionError(code: string): string | undefined
     if (label) return label;
   }
   return undefined;
+}
+
+export function formatExtensionGrantSummaries(
+  grants: OpaqueExtensionMap | null | undefined,
+): string[] {
+  const out: string[] = [];
+  for (const ext of extensions) {
+    const chip = ext.formatGrantSummary?.(grants ?? {});
+    if (chip) out.push(chip);
+  }
+  return out;
 }
 
 export function renderExtensionSlots<A extends ServerCardUiArea>(

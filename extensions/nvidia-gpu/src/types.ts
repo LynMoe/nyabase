@@ -1,4 +1,8 @@
-import type { NodeMetricDefinition, NodeMetricSample } from '@nyabase/common';
+import type {
+  ExtensionSupportDto,
+  NodeMetricDefinition,
+  NodeMetricSample,
+} from '@nyabase/common';
 import type { nvidiaGpuFormatError } from './errors.js';
 
 /** Incus GET /1.0/resources metadata. Parsed inside the package. */
@@ -62,6 +66,7 @@ export interface PreflightContribution {
   readonly health: Readonly<Record<string, unknown>>;
 }
 
+/** Registered / supported / enabled are orthogonal; health is operational. */
 export interface ServerCardExtension {
   readonly id: string;
   readonly displayName: string;
@@ -102,6 +107,12 @@ export interface ServerCardExtension {
     readonly metricSamples: readonly NodeMetricSample[];
     readonly enabled: boolean;
   }): Promise<PreflightContribution>;
+
+  probeSupport(input: {
+    readonly serverId: string;
+    readonly resources: IncusResourcesMetadata;
+    readonly metricSamples: readonly NodeMetricSample[];
+  }): Promise<ExtensionSupportDto>;
 
   refreshHealth(input: {
     readonly health: ExtensionHealthPort;

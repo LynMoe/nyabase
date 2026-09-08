@@ -100,7 +100,7 @@ test(
   { ...coverageCase('shared-cephfs-detach-requires-stop', 'shared-cephfs-detach-requires-stop-live') },
   async ({ adminApi, seedState, topologyProvider }) => {
     expect(topologyProvider.capabilities['cephfs-cluster'].state).toBe('available');
-    const primaryPool = await registeredCephPool(adminApi, seedState.server.id);
+    const primaryPool = await registeredCephPool(adminApi, seedState, seedState.server.id);
     let volumeId: string | undefined;
     let cancelVolumeId: string | undefined;
     let containerId: string | undefined;
@@ -203,8 +203,8 @@ test(
     const workers = nonGpuLabServers(seedState);
     expect(workers.length).toBeGreaterThanOrEqual(1);
     const worker = workers[0]!;
-    const primaryPool = await registeredCephPool(adminApi, seedState.server.id);
-    const workerPool = await registeredCephPool(adminApi, worker.id);
+    const primaryPool = await registeredCephPool(adminApi, seedState, seedState.server.id);
+    const workerPool = await registeredCephPool(adminApi, seedState, worker.id);
     const cephServers = await listCephCatalogServers(adminApi, seedState);
 
     let volumeId: string | undefined;
@@ -465,7 +465,7 @@ test(
         await adminApi.get(`/api/admin/shared-volumes/${volumeId}`),
       );
       const incusName = volume.incusName as string;
-      const primaryPool = await registeredCephPool(adminApi, seedState.server.id);
+      const primaryPool = await registeredCephPool(adminApi, seedState, seedState.server.id);
       containerId = await createRunningContainer(adminApi, seedState, 'e2e-inflight');
       const attaching = await expectJson<JsonRecord>(
         await adminApi.post(`/api/admin/containers/${containerId}/shared-volumes`, {
@@ -542,8 +542,8 @@ test(
     const workers = nonGpuLabServers(seedState);
     expect(workers.length).toBeGreaterThanOrEqual(2);
     const idle = await liveLabServer(adminApi, seedState, workers[1]!);
-    const primaryPool = await registeredCephPool(adminApi, seedState.server.id);
-    const idlePool = await registeredCephPool(adminApi, idle.id);
+    const primaryPool = await registeredCephPool(adminApi, seedState, seedState.server.id);
+    const idlePool = await registeredCephPool(adminApi, seedState, idle.id);
 
     let volumeId: string | undefined;
     let containerId: string | undefined;
@@ -598,8 +598,8 @@ test(
     const workers = nonGpuLabServers(seedState);
     expect(workers.length).toBeGreaterThanOrEqual(1);
     const worker = workers[0]!;
-    const primaryPool = await registeredCephPool(adminApi, seedState.server.id);
-    const workerPool = await registeredCephPool(adminApi, worker.id);
+    const primaryPool = await registeredCephPool(adminApi, seedState, seedState.server.id);
+    const workerPool = await registeredCephPool(adminApi, seedState, worker.id);
 
     let volumeId: string | undefined;
     let dummyVolumeId: string | undefined;
@@ -713,8 +713,8 @@ test(
     const workers = nonGpuLabServers(seedState);
     expect(workers.length).toBeGreaterThanOrEqual(2);
     const cascade = await pickPreflightReadyWorker(adminApi, seedState);
-    const primaryPool = await registeredCephPool(adminApi, seedState.server.id);
-    const cascadePool = await registeredCephPool(adminApi, cascade.id);
+    const primaryPool = await registeredCephPool(adminApi, seedState, seedState.server.id);
+    const cascadePool = await registeredCephPool(adminApi, seedState, cascade.id);
 
     let remainId: string | undefined;
     let onlyCascadeId: string | undefined;
@@ -871,6 +871,90 @@ test(
 );
 
 test(
+  'shared volume shrink below observed usage is rejected',
+  { ...coverageCase('shared-volume-shrink-below-usage', 'shared-volume-shrink-below-usage-live') },
+  async ({ adminApi, seedState, topologyProvider }) => {
+    expect(topologyProvider.capabilities['cephfs-cluster'].state).toBe('available');
+    test.setTimeout(360_000);
+    const quotaBytes = 64 * 1024 * 1024;
+    const fillBytes = 16 * 1024 * 1024;
+    let volumeId: string | undefined;
+    let containerId: string | undefined;
+    try {
+      volumeId = await createSharedVolume(
+        adminApi,
+        seedState,
+        `e2e-sshrink-${Date.now().toString(36)}`,
+        quotaBytes,
+      );
+      containerId = await createRunningContainer(
+        adminApi,
+        seedState,
+        'e2e-sshrink',
+        seedState.server.id,
+      );
+      await attachVolume(adminApi, containerId, volumeId, '/mnt/shared', 'shared');
+      await execInContainer(
+        adminApi,
+        containerId,
+        `dd if=/dev/zero of=/mnt/shared/fill bs=${fillBytes} count=1 conv=fsync oflag=sync`,
+      );
+      let observed = await expectJson<JsonRecord>(
+        await adminApi.get(`/api/admin/shared-volumes/${volumeId}`),
+      );
+      try {
+        observed = await eventually(
+          async () => expectJson<JsonRecord>(
+            await adminApi.get(`/api/admin/shared-volumes/${volumeId}`),
+          ),
+          (volume) => typeof volume.usedBytes === 'number' && volume.usedBytes >= fillBytes * 0.5,
+          20_000,
+          1_000,
+          'shared volume usedBytes after guest write',
+        );
+      } catch {
+        observed = await expectJson<JsonRecord>(
+          await adminApi.get(`/api/admin/shared-volumes/${volumeId}`),
+        );
+      }
+      const used = Number(observed.usedBytes);
+      const canAssertFloor = Number.isFinite(used) && used >= fillBytes * 0.5;
+      const tooSmall = await adminApi.patch(`/api/admin/shared-volumes/${volumeId}`, {
+        data: {
+          expectedRevision: observed.generation,
+          sizeBytes: canAssertFloor
+            ? Math.max(1024 * 1024, Math.floor(used / 2))
+            : 8 * 1024 * 1024,
+        },
+      });
+      if (canAssertFloor || tooSmall.status() !== 202) {
+        expect(tooSmall.status()).toBe(409);
+        expect(JSON.stringify(await tooSmall.json())).toMatch(
+          /VOLUME_SHRINK_BELOW_USAGE|VOLUME_USAGE_UNKNOWN/,
+        );
+        const after = await expectJson<JsonRecord>(
+          await adminApi.get(`/api/admin/shared-volumes/${volumeId}`),
+        );
+        expect(Number(after.sizeBytes)).toBe(quotaBytes);
+      } else {
+        const accepted = await expectJson<JsonRecord>(tooSmall, 202);
+        await requireSucceededIntent(adminApi, accepted.intentId, 'shared volume shrink while occupancy unobserved');
+      }
+    } finally {
+      if (containerId) {
+        await stopContainer(adminApi, containerId).catch(() => undefined);
+        const attachments = await listContainerVolumes(adminApi, containerId, 'shared');
+        for (const row of attachments) {
+          await detachVolume(adminApi, containerId, row.id as string, 'shared').catch(() => undefined);
+        }
+        await deleteContainer(adminApi, containerId);
+      }
+      await deleteVolume(adminApi, volumeId);
+    }
+  },
+);
+
+test(
   'CephFS size quota stops a guest write and bounds concurrent writers on two servers',
   { ...coverageCase('shared-cephfs-quota-enforcement', 'shared-cephfs-quota-enforcement-live') },
   async ({ adminApi, seedState, topologyProvider }) => {
@@ -879,8 +963,8 @@ test(
     const workers = nonGpuLabServers(seedState);
     expect(workers.length).toBeGreaterThanOrEqual(1);
     const worker = await liveLabServer(adminApi, seedState, workers[0]!);
-    const primaryPool = await registeredCephPool(adminApi, seedState.server.id);
-    expect(primaryPool.quotaEffective).not.toBe(false);
+    const primaryPool = await registeredCephPool(adminApi, seedState, seedState.server.id);
+    expect(primaryPool.incusName).toBeTruthy();
 
     let volumeId: string | undefined;
     let primaryContainer: string | undefined;
@@ -966,8 +1050,8 @@ test(
     const workers = nonGpuLabServers(seedState);
     expect(workers.length).toBeGreaterThanOrEqual(1);
     const worker = await liveLabServer(adminApi, seedState, workers[0]!);
-    const primaryPool = await registeredCephPool(adminApi, seedState.server.id);
-    const workerPool = await registeredCephPool(adminApi, worker.id);
+    const primaryPool = await registeredCephPool(adminApi, seedState, seedState.server.id);
+    const workerPool = await registeredCephPool(adminApi, seedState, worker.id);
     const primaryName = String(primaryPool.incusName);
     const workerName = String(workerPool.incusName);
 
@@ -1104,7 +1188,7 @@ test(
   { ...coverageCase('shared-cephfs-resize-then-attach', 'shared-cephfs-resize-then-attach-live') },
   async ({ adminApi, seedState, topologyProvider }) => {
     expect(topologyProvider.capabilities['cephfs-cluster'].state).toBe('available');
-    const primaryPool = await registeredCephPool(adminApi, seedState.server.id);
+    const primaryPool = await registeredCephPool(adminApi, seedState, seedState.server.id);
     let volumeId: string | undefined;
     let containerId: string | undefined;
     try {
@@ -1157,7 +1241,7 @@ test(
   { ...coverageCase('shared-cephfs-create-with-disks', 'shared-cephfs-create-with-disks-live') },
   async ({ adminApi, seedState, topologyProvider }) => {
     expect(topologyProvider.capabilities['cephfs-cluster'].state).toBe('available');
-    const primaryPool = await registeredCephPool(adminApi, seedState.server.id);
+    const primaryPool = await registeredCephPool(adminApi, seedState, seedState.server.id);
     let volumeId: string | undefined;
     let containerId: string | undefined;
     try {

@@ -31,9 +31,8 @@ test(
 
     const worker = labServers[0];
     const accepted = await expectJson<JsonRecord>(
-      await adminApi.post('/api/admin/containers', {
+      await adminApi.post('/api/containers', {
         data: {
-          ownerId: seedState.adminUserId,
           serverId: worker.id,
           imageId: seedState.image.id,
           name: `e2e-lab-${Date.now().toString(36)}`,

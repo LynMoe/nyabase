@@ -93,36 +93,16 @@ test(
     });
     const probes: Array<{ label: string; run: () => Promise<{ status: () => number }> }> = [
       {
-        label: 'anonymous admin create container',
-        run: () => anonymousApi.post('/api/admin/containers', {
-          data: {
-            ownerId: seedState.adminUserId,
-            serverId: seedState.server.id,
-            imageId: seedState.image.id,
-            name: `e2e-anon-${Date.now().toString(36)}`,
-            rootSizeBytes: 2 * 1024 * 1024 * 1024,
-            cpuMillis: 500,
-            memBytes: 512 * 1024 * 1024,
-            extensions: {},
-            powerIntent: 'stopped',
-          },
-        }),
+        label: 'anonymous admin stop container',
+        run: () => anonymousApi.post(
+          '/api/admin/containers/00000000-0000-4000-8000-000000000001/actions/stop',
+        ),
       },
       {
-        label: 'forged admin create container',
-        run: () => forged.post('/api/admin/containers', {
-          data: {
-            ownerId: seedState.adminUserId,
-            serverId: seedState.server.id,
-            imageId: seedState.image.id,
-            name: `e2e-forge-${Date.now().toString(36)}`,
-            rootSizeBytes: 2 * 1024 * 1024 * 1024,
-            cpuMillis: 500,
-            memBytes: 512 * 1024 * 1024,
-            extensions: {},
-            powerIntent: 'stopped',
-          },
-        }),
+        label: 'forged admin stop container',
+        run: () => forged.post(
+          '/api/admin/containers/00000000-0000-4000-8000-000000000001/actions/stop',
+        ),
       },
       {
         label: 'anonymous user create container',
@@ -183,7 +163,6 @@ test(
       });
       const adminBlocked = await userApi.post('/api/admin/containers', {
         data: {
-          ownerId: seedState.adminUserId,
           serverId: seedState.server.id,
           imageId: seedState.image.id,
           name: `e2e-priv-${Date.now().toString(36)}`,
@@ -194,7 +173,7 @@ test(
           powerIntent: 'stopped',
         },
       });
-      expect(adminBlocked.status()).toBe(403);
+      expect(adminBlocked.status()).toBe(404);
       const grantBlocked = await userApi.put(
         `/api/admin/users/${seedState.adminUserId}/server-grants/${seedState.server.id}`,
         {

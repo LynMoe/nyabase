@@ -30,6 +30,10 @@ export class StoragePoolsRepository {
     private readonly database: Kysely<NyabaseDatabase>,
   ) {}
 
+  /**
+   * Internal inventory of every storage_pools row, including shareable CephFS
+   * executors. Product surfaces must filter via StoragePoolsService.
+   */
   list(
     serverId?: string,
     includeUnregistered = false,
@@ -42,6 +46,49 @@ export class StoragePoolsRepository {
     if (serverId) query = query.where('server_id', '=', serverId);
     if (!includeUnregistered) query = query.where('registered', '=', true);
     return query.execute();
+  }
+
+  listExecutorsByBackendIds(
+    backendIds: readonly string[],
+    executor: StorageExecutor = this.database,
+  ) {
+    if (backendIds.length === 0) {
+      return Promise.resolve([] as Array<{
+        id: string;
+        shared_backend_id: string | null;
+        server_id: string;
+        server_name: string;
+        server_status: string;
+        incus_name: string;
+        registered: boolean;
+        total_bytes: string | number | null;
+        used_bytes: string | number | null;
+        last_observed_at: Date | string | null;
+        revision: string | number;
+      }>);
+    }
+    return executor
+      .selectFrom('infra.storage_pools as pool')
+      .innerJoin('infra.servers as server', 'server.id', 'pool.server_id')
+      .select([
+        'pool.id',
+        'pool.shared_backend_id',
+        'pool.server_id',
+        'server.name as server_name',
+        'server.status as server_status',
+        'pool.incus_name',
+        'pool.registered',
+        'pool.total_bytes',
+        'pool.used_bytes',
+        'pool.last_observed_at',
+        'pool.revision',
+      ])
+      .where('pool.shareable', '=', true)
+      .where('pool.driver', '=', 'cephfs')
+      .where('pool.shared_backend_id', 'in', [...backendIds])
+      .orderBy('server.name')
+      .orderBy('pool.incus_name')
+      .execute();
   }
 
   findById(id: string, executor: StorageExecutor = this.database) {

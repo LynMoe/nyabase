@@ -44,9 +44,10 @@ export class GroupsController {
   }
 
   @Get(':id')
-  @RequireCaps(Capability.ManageGroups)
-  async get(@Param('id') id: string) {
-    return this.groups.toDto(await this.groups.findById(id));
+  @RequireCaps()
+  @RequireAnyCaps(Capability.ManageGroups, Capability.ManageGrants)
+  get(@Param('id') id: string) {
+    return this.groups.getDto(id);
   }
 
   @Patch(':id')

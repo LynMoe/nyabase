@@ -93,6 +93,7 @@ export interface ServerCardWebExtension {
     }) => ReactNode;
   }>;
   readonly formatError: ExtensionErrorFormatter;
+  readonly formatGrantSummary?: (grants: OpaqueExtensionMap) => string | null;
 }
 
 export type { ComponentType };

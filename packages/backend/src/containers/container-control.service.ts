@@ -59,6 +59,58 @@ import type { ExtensionGrantView } from '../server-card-extensions/types.js';
 
 type ContainerAction = 'start' | 'stop' | 'restart' | 'delete';
 
+export interface RootResizeCheckInput {
+  readonly containerId: string;
+  readonly requestedBytes: number;
+  readonly currentBytes: number;
+  readonly usedBytes: number | null;
+  readonly resizeFamily: string;
+  readonly observedStatus: ContainerStatus;
+}
+
+/**
+ * Quota-online roots with no observed usage (including Incus reporting 0)
+ * cannot shrink. A booted image is never an empty filesystem.
+ */
+export function checkRootResize(
+  input: RootResizeCheckInput,
+): { code: FailureCode; message: string; details: Record<string, unknown> } | null {
+  if (input.requestedBytes >= input.currentBytes) return null;
+  if (input.resizeFamily === StoragePoolResizeFamily.BlockBacked
+    && input.observedStatus !== ContainerStatus.Stopped) {
+    return {
+      code: FailureCode.RootShrinkRequiresStop,
+      message: 'Block-backed root shrink requires a stopped container',
+      details: { containerId: input.containerId },
+    };
+  }
+  if (input.resizeFamily === StoragePoolResizeFamily.QuotaOnline) {
+    if (input.usedBytes === null || input.usedBytes <= 0) {
+      return {
+        code: FailureCode.RootUsageUnknown,
+        message: 'Root disk usage is unknown; shrink is not allowed until usage is observed',
+        details: {
+          containerId: input.containerId,
+          requestedBytes: input.requestedBytes,
+          usedBytes: input.usedBytes,
+        },
+      };
+    }
+  }
+  if (input.usedBytes !== null && input.usedBytes > input.requestedBytes) {
+    return {
+      code: FailureCode.RootShrinkBelowUsage,
+      message: 'The requested root disk size is below current usage',
+      details: {
+        containerId: input.containerId,
+        requestedBytes: input.requestedBytes,
+        usedBytes: input.usedBytes,
+      },
+    };
+  }
+  return null;
+}
+
 interface ImageRow {
   id: string;
   name: string;
@@ -200,37 +252,16 @@ export class ContainerControlService {
     userId: string,
     request: CreateContainerRequest,
   ): Promise<IntentAcceptedDto> {
-    return this.createInternal(userId, request, false);
-  }
-
-  async createForAdmin(
-    actorId: string,
-    request: CreateContainerRequest,
-  ): Promise<IntentAcceptedDto> {
-    return this.createInternal(actorId, request, true);
+    return this.createInternal(userId, request);
   }
 
   private async createInternal(
     userId: string,
     request: CreateContainerRequest,
-    admin: boolean,
   ): Promise<IntentAcceptedDto> {
     assertContainerName(request.name);
     assertCreateNumbers(request);
-    if (admin) {
-      if (!request.ownerId) {
-        throw new BadRequestException({
-          code: FailureCode.InvalidInput,
-          message: 'Admin container creation requires ownerId',
-        });
-      }
-    } else if (request.ownerId) {
-      throw new BadRequestException({
-        code: FailureCode.InvalidInput,
-        message: 'User container creation cannot specify ownerId',
-      });
-    }
-    const ownerId = admin ? request.ownerId! : userId;
+    const ownerId = userId;
     const requestedExtensions = request.extensions ?? {};
     for (const extensionId of Object.keys(requestedExtensions)) {
       if (!this.extensions?.get(extensionId)) {
@@ -278,30 +309,13 @@ export class ContainerControlService {
           details: { imageId: request.imageId },
         });
       }
-      if (admin) {
-        const owner = await transaction.selectFrom('iam.users')
-          .select(['id', 'status'])
-          .where('id', '=', ownerId)
-          .executeTakeFirst();
-        if (!owner || owner.status !== 'active') {
-          throw new NotFoundException('Owner user not found');
-        }
-      }
-      const access = admin
-        ? null
-        : await this.access.resolveContainerCreateAccessInTransaction(
-          transaction,
-          userId,
-          request.serverId,
-          request.imageId,
-        );
-      if (admin) {
-        await this.access.assertActorCapabilitiesInTransaction(
-          transaction,
-          userId,
-          [Capability.ManageContainersAny],
-        );
-      } else if (!access?.imageAvailable) {
+      const access = await this.access.resolveContainerCreateAccessInTransaction(
+        transaction,
+        userId,
+        request.serverId,
+        request.imageId,
+      );
+      if (!access?.imageAvailable) {
         throw new ForbiddenException({
           code: FailureCode.ImageNotAvailable,
           message: 'The image has no active assignment on this server',
@@ -326,15 +340,13 @@ export class ContainerControlService {
           },
         });
       }
-      if (!admin && access?.grant.accessPhase !== 'live') {
+      if (access.grant.accessPhase !== 'live') {
         throw new ForbiddenException({
           code: FailureCode.PermissionDenied,
           message: 'Server access is in expiry grace',
         });
       }
-      if (!admin && access) {
-        this.assertComputeGrant(access.grant, request.cpuMillis, request.memBytes);
-      }
+      this.assertComputeGrant(access.grant, request.cpuMillis, request.memBytes);
       if (server.status !== 'online' || server.preflight_status !== 'passed') {
         throw new ConflictException({
           code: FailureCode.PreflightFailed,
@@ -406,7 +418,7 @@ export class ContainerControlService {
         request.serverId,
         rootPoolId,
         request.rootSizeBytes,
-        admin ? null : access?.grant.diskBytes ?? null,
+        access.grant.diskBytes ?? null,
       );
       let networkKey: string | null = null;
       let address: string | null = null;
@@ -481,7 +493,7 @@ export class ContainerControlService {
         try {
           const { state } = await ext.admitCreate({
             serverId: request.serverId,
-            actor: { userId, admin },
+            actor: { userId, admin: false },
             grant: grantView,
             claims: this.extensionClaims
               ? this.extensionClaims.for(ext.id, request.serverId, id, transaction)
@@ -516,7 +528,6 @@ export class ContainerControlService {
         await this.volumes.bindCreateTimeVolumes(
           transaction,
           userId,
-          admin ? 'admin' : 'user',
           { id: row.id, owner_id: row.owner_id, server_id: row.server_id },
           request.volumes as AttachVolumeRequest[],
         );
@@ -721,17 +732,19 @@ export class ContainerControlService {
             details: { poolId: locked.root_pool_id },
           });
         }
-        if (pool.resize_family === 'block_backed') {
-          const route = await this.repository.currentRoute(containerId, transaction);
-          if (containerStatus(route?.instance_status, locked.power_intent as ContainerPowerIntent)
-            !== ContainerStatus.Stopped) {
-            throw new ConflictException({
-              code: FailureCode.RootShrinkRequiresStop,
-              message: 'Block-backed root shrink requires a stopped container',
-              details: { containerId },
-            });
-          }
-        }
+        const route = await this.repository.currentRoute(containerId, transaction);
+        const failure = checkRootResize({
+          containerId,
+          requestedBytes: size,
+          currentBytes: current,
+          usedBytes: nullableNumber(locked.root_used_bytes),
+          resizeFamily: pool.resize_family,
+          observedStatus: containerStatus(
+            route?.instance_status,
+            locked.power_intent as ContainerPowerIntent,
+          ),
+        });
+        if (failure) throw new ConflictException(failure);
       },
     );
   }

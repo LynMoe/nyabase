@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { Capability } from '@nyabase/common';
+import { Capability, UserStatus } from '@nyabase/common';
 import {
   AccessResolverService,
   type ResolvedServerGrant,
@@ -58,5 +58,40 @@ describe('AccessResolverService effective access projections', () => {
       accessPhase: 'live',
       allowedImageIds: ['image-a'],
     }]);
+  });
+
+  it('returns an empty shared-backend projection when the user has no grants', async () => {
+    const chain: {
+      selectFrom: ReturnType<typeof vi.fn>;
+      leftJoin: ReturnType<typeof vi.fn>;
+      select: ReturnType<typeof vi.fn>;
+      where: ReturnType<typeof vi.fn>;
+      groupBy: ReturnType<typeof vi.fn>;
+      forUpdate: ReturnType<typeof vi.fn>;
+      execute: ReturnType<typeof vi.fn>;
+      executeTakeFirst: ReturnType<typeof vi.fn>;
+    } = {
+      selectFrom: vi.fn(),
+      leftJoin: vi.fn(),
+      select: vi.fn(),
+      where: vi.fn(),
+      groupBy: vi.fn(),
+      forUpdate: vi.fn(),
+      execute: vi.fn().mockResolvedValue([]),
+      executeTakeFirst: vi.fn().mockResolvedValue({ status: UserStatus.Active }),
+    };
+    chain.selectFrom.mockReturnValue(chain);
+    chain.leftJoin.mockReturnValue(chain);
+    chain.select.mockReturnValue(chain);
+    chain.where.mockReturnValue(chain);
+    chain.groupBy.mockReturnValue(chain);
+    chain.forUpdate.mockReturnValue(chain);
+    const resolver = new AccessResolverService(
+      chain as never,
+      undefined as never,
+      { refresh: vi.fn().mockResolvedValue(1) } as never,
+    );
+    await expect(resolver.getEffectiveSharedAccess('user-a')).resolves.toEqual([]);
+    expect(chain.forUpdate).not.toHaveBeenCalled();
   });
 });

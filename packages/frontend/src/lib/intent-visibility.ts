@@ -1,5 +1,7 @@
-import { IntentStatus, type IntentDto } from '@nyabase/common';
+import { IntentStatus, type CursorPaginatedResponse, type IntentAcceptedDto, type IntentDto } from '@nyabase/common';
 import { api } from './api.js';
+import { waitUntil } from './storage-shrink.js';
+import { failureCodeLabel } from './status-labels.js';
 
 export function retryIntentPath(intentId: string, admin: boolean): string {
   return admin ? `/admin/intents/${intentId}/retry` : `/intents/${intentId}/retry`;
@@ -20,11 +22,14 @@ export function formatIntentAttempt(intent: Pick<IntentDto, 'attemptCount' | 'ne
 export function formatIntentFailureMessage(
   intent: Pick<IntentDto, 'failure' | 'failureCode'>,
 ): string | null {
-  if (intent.failure) {
-    return `${intent.failure.code}: ${intent.failure.message}`;
+  const code = intent.failure?.code ?? intent.failureCode ?? null;
+  const zh = failureCodeLabel(code);
+  const message = intent.failure?.message ?? null;
+  if (zh && code && zh !== code) {
+    return message ? `${zh}（${code}）` : zh;
   }
-  if (intent.failureCode) return intent.failureCode;
-  return null;
+  if (code && message) return `${code}: ${message}`;
+  return message ?? code;
 }
 
 export function isOutstandingIntent(intent: IntentDto): boolean {
@@ -34,6 +39,40 @@ export function isOutstandingIntent(intent: IntentDto): boolean {
 
 export async function retryIntent(intentId: string, admin: boolean): Promise<IntentDto> {
   return api.post<IntentDto>(retryIntentPath(intentId, admin), {});
+}
+
+export function isIntentAccepted(value: unknown): value is IntentAcceptedDto {
+  return Boolean(
+    value
+    && typeof value === 'object'
+    && typeof (value as IntentAcceptedDto).intentId === 'string'
+    && (value as IntentAcceptedDto).intentId.length > 0,
+  );
+}
+
+export async function waitForResourceIntent(
+  listPath: string,
+  intentId: string,
+): Promise<IntentDto> {
+  let latest: IntentDto | null = null;
+  await waitUntil(async () => {
+    const page = await api.get<CursorPaginatedResponse<IntentDto>>(
+      `${listPath}${listPath.includes('?') ? '&' : '?'}limit=50`,
+    );
+    latest = (page.items ?? []).find((intent) => intent.id === intentId) ?? null;
+    if (!latest) return false;
+    if (latest.status === IntentStatus.Failed) {
+      throw new Error(formatIntentFailureMessage(latest) ?? '操作失败');
+    }
+    return latest.status === IntentStatus.Succeeded;
+  }, {
+    timeoutMs: 120_000,
+    intervalMs: 1_000,
+    label: '数据卷操作',
+    onTimeout: async () => lookupLatestIntentFailure(listPath),
+  });
+  if (!latest) throw new Error('操作未返回意图结果');
+  return latest;
 }
 
 export async function lookupLatestIntentFailure(listPath: string): Promise<string | null> {

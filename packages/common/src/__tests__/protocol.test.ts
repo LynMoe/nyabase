@@ -21,6 +21,9 @@ import {
   zErrorResponse,
   zCreateExecSessionRequest,
   zIntentAcceptedDto,
+  zAdminIntentListQuery,
+  zIntentListQuery,
+  zListVolumesQuery,
   zPatchImageRequest,
   zPatchServerRequest,
   zPreflightReport,
@@ -30,6 +33,8 @@ import {
   isActiveSshProxyRoute,
   zSharedVolumeScope,
   zVolumeScope,
+  ADMIN_INTENT_LIST_MAX,
+  MAX_INTENT_LIST_PAGE_SIZE,
 } from '@nyabase/common';
 import type {
   ContainerDto,
@@ -127,16 +132,16 @@ describe('canonical container and volume contracts', () => {
       extensions: {},
       powerIntent: ContainerPowerIntent.Running,
     })).toMatchObject({ extensions: {} });
-    expect(zCreateContainerRequest.parse({
+    expect(zCreateContainerRequest.safeParse({
       serverId,
       imageId,
       name: 'work',
       rootSizeBytes: 10_000,
       cpuMillis: 2_000,
       memBytes: 2_000_000_000,
-            powerIntent: ContainerPowerIntent.Running,
+      powerIntent: ContainerPowerIntent.Running,
       ownerId: id,
-    }).ownerId).toBe(id);
+    }).success).toBe(false);
     expect(zCreateContainerRequest.parse({
       serverId,
       imageId,
@@ -236,6 +241,18 @@ describe('canonical container and volume contracts', () => {
       sizeBytes: 1_024,
       scope: { kind: 'shared', sharedBackendId: id },
     });
+    expect(zCreateVolumeRequest.safeParse({
+      ownerId: id,
+      name: 'data',
+      sizeBytes: 1_024,
+      scope: { kind: 'local', serverId, poolId: id },
+    }).success).toBe(false);
+    expect(zCreateSharedVolumeRequest.safeParse({
+      ownerId: id,
+      name: 'data',
+      sizeBytes: 1_024,
+      scope: { kind: 'shared', sharedBackendId: id },
+    }).success).toBe(false);
     expect(zCreateSharedVolumeRequest.safeParse({
       name: 'data',
       sizeBytes: 1_024,
@@ -544,5 +561,61 @@ describe('canonical DTO shapes', () => {
       expectedRevision: 1,
       minRootSizeBytes: null,
     }).success).toBe(true);
+  });
+});
+
+describe('intent list query', () => {
+  it('accepts optional resourceType and serverId', () => {
+    expect(zIntentListQuery.parse({
+      resourceType: IntentResourceType.Volume,
+      serverId,
+    })).toMatchObject({
+      limit: 50,
+      resourceType: IntentResourceType.Volume,
+      serverId,
+    });
+    expect(zIntentListQuery.parse({
+      status: IntentStatus.Pending,
+      kind: IntentKind.ContainerCreate,
+    })).toMatchObject({
+      status: IntentStatus.Pending,
+      kind: IntentKind.ContainerCreate,
+    });
+  });
+
+  it('rejects unknown keys', () => {
+    expect(zIntentListQuery.safeParse({ foo: 'bar' }).success).toBe(false);
+    expect(zIntentListQuery.safeParse({
+      resourceType: IntentResourceType.Volume,
+      extra: true,
+    }).success).toBe(false);
+  });
+
+  it('keeps resource-scoped max at 100 and admin global max at 500', () => {
+    expect(MAX_INTENT_LIST_PAGE_SIZE).toBe(100);
+    expect(ADMIN_INTENT_LIST_MAX).toBe(500);
+    expect(zIntentListQuery.parse({}).limit).toBe(50);
+    expect(zIntentListQuery.safeParse({ limit: 100 }).success).toBe(true);
+    expect(zIntentListQuery.safeParse({ limit: 500 }).success).toBe(false);
+    expect(zAdminIntentListQuery.parse({}).limit).toBe(500);
+    expect(zAdminIntentListQuery.safeParse({ limit: 50 }).success).toBe(true);
+    expect(zAdminIntentListQuery.safeParse({ limit: 500 }).success).toBe(true);
+    expect(zAdminIntentListQuery.safeParse({ limit: 501 }).success).toBe(false);
+  });
+});
+
+describe('admin local volume list query', () => {
+  it('accepts an empty object and a resource identity serverId', () => {
+    expect(zListVolumesQuery.parse({})).toEqual({});
+    expect(zListVolumesQuery.parse({ serverId: 'srv-1' })).toEqual({ serverId: 'srv-1' });
+    expect(zListVolumesQuery.parse({ serverId: 'not-a-uuid' })).toEqual({ serverId: 'not-a-uuid' });
+    expect(zListVolumesQuery.parse({ serverId })).toEqual({ serverId });
+  });
+
+  it('rejects extra keys and empty serverId', () => {
+    expect(zListVolumesQuery.safeParse({ serverId: 'srv-1', extra: 'x' }).success).toBe(false);
+    expect(zListVolumesQuery.safeParse({ foo: 'bar' }).success).toBe(false);
+    expect(zListVolumesQuery.safeParse({ serverId: '' }).success).toBe(false);
+    expect(zListVolumesQuery.safeParse({ serverId: 'not a uuid' }).success).toBe(false);
   });
 });

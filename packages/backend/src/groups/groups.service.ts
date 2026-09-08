@@ -34,6 +34,7 @@ import { AuditService } from '../audit/audit.service.js';
 import { ExtensionDeviceClaimsRepository } from '../server-card-extensions/claims.repository.js';
 import { asJsonObject } from '../server-card-extensions/json.js';
 import { ServerCardExtensionRegistry } from '../server-card-extensions/registry.js';
+import { isLocalPoolRow } from '../storage-pools/storage-pools.service.js';
 
 type GrantScope = 'user' | 'group';
 type GrantExecutor = Kysely<NyabaseDatabase> | Transaction<NyabaseDatabase>;
@@ -127,6 +128,16 @@ export class GroupsService {
       .executeTakeFirst();
     if (!row) throw new NotFoundException('Group not found');
     return this.toGroup(row);
+  }
+
+  async getDto(id: string): Promise<GroupDto> {
+    const group = await this.findById(id);
+    const members = await this.listMembers(id);
+    return {
+      ...this.toDto(group),
+      members,
+      memberCount: members.length,
+    };
   }
 
   async create(
@@ -842,10 +853,12 @@ export class GroupsService {
       );
       await this.requireScope(transaction, scope, scopeId);
       const pool = await transaction.selectFrom('infra.storage_pools')
-        .select('id')
+        .select(['id', 'shareable', 'driver', 'shared_backend_id'])
         .where('id', '=', poolId)
         .executeTakeFirst();
-      if (!pool) throw new NotFoundException('Storage pool not found');
+      if (!pool || !isLocalPoolRow(pool)) {
+        throw new NotFoundException('Storage pool not found');
+      }
       const values = {
         expires_at: expiresAt,
         updated_at: new Date(),

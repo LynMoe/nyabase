@@ -15,28 +15,49 @@ const serverB = '11111111-1111-4111-8111-111111111111';
 const incusName = `nyv-${'a'.repeat(32)}`;
 
 describe('volume reconciliation policy', () => {
-  it('normalizes false-full CephFS / quota_online usage reports', () => {
+  it('normalizes false-full CephFS usage reports without rewriting dir occupancy', () => {
     expect(normalizeObservedVolumeUsage({
       resizeFamily: 'quota_online',
       driver: 'cephfs',
       usedBytes: 100n,
       totalBytes: 0n,
       currentSizeBytes: 100n,
-    })).toBe(0n);
+    })).toBeNull();
+    expect(normalizeObservedVolumeUsage({
+      resizeFamily: 'quota_online',
+      driver: 'cephfs',
+      usedBytes: 100n,
+      totalBytes: null,
+      currentSizeBytes: 100n,
+    })).toBeNull();
     expect(normalizeObservedVolumeUsage({
       resizeFamily: 'quota_online',
       driver: 'dir',
       usedBytes: 100n,
       totalBytes: null,
       currentSizeBytes: 100n,
+    })).toBe(100n);
+    expect(normalizeObservedVolumeUsage({
+      resizeFamily: 'quota_online',
+      driver: 'dir',
+      usedBytes: null,
+      totalBytes: 0n,
+      currentSizeBytes: 192n,
     })).toBe(0n);
+    expect(normalizeObservedVolumeUsage({
+      resizeFamily: 'quota_online',
+      driver: 'dir',
+      usedBytes: null,
+      totalBytes: null,
+      currentSizeBytes: 192n,
+    })).toBeNull();
     expect(normalizeObservedVolumeUsage({
       resizeFamily: 'block_backed',
       driver: 'cephfs',
       usedBytes: 100n,
       totalBytes: null,
       currentSizeBytes: 100n,
-    })).toBe(0n);
+    })).toBeNull();
     expect(normalizeObservedVolumeUsage({
       resizeFamily: 'quota_online',
       driver: 'cephfs',
@@ -44,6 +65,13 @@ describe('volume reconciliation policy', () => {
       totalBytes: 0n,
       currentSizeBytes: 100n,
     })).toBe(40n);
+    expect(normalizeObservedVolumeUsage({
+      resizeFamily: 'quota_online',
+      driver: 'cephfs',
+      usedBytes: 0n,
+      totalBytes: null,
+      currentSizeBytes: 100n,
+    })).toBe(0n);
     expect(normalizeObservedVolumeUsage({
       resizeFamily: 'quota_online',
       driver: 'cephfs',
@@ -60,7 +88,7 @@ describe('volume reconciliation policy', () => {
     })).toBe(100n);
   });
 
-  it('allows quota-online shrink after normalizing a false-full usage report', () => {
+  it('blocks CephFS shrink when a false-full usage report cannot be distinguished from empty', () => {
     const usedBytes = normalizeObservedVolumeUsage({
       resizeFamily: 'quota_online',
       driver: 'cephfs',
@@ -68,6 +96,7 @@ describe('volume reconciliation policy', () => {
       totalBytes: 0n,
       currentSizeBytes: 20n,
     });
+    expect(usedBytes).toBeNull();
     expect(decideVolumeResize({
       resizeFamily: 'quota_online',
       currentSizeBytes: 20n,
@@ -75,7 +104,41 @@ describe('volume reconciliation policy', () => {
       usedBytes,
       attached: true,
       allConsumersStopped: false,
+    })).toEqual({ action: 'blocked', reason: 'usage_unknown' });
+  });
+
+  it('allows CephFS shrink when used is below size even if total is missing', () => {
+    expect(decideVolumeResize({
+      resizeFamily: 'quota_online',
+      currentSizeBytes: 100n,
+      desiredSizeBytes: 50n,
+      usedBytes: normalizeObservedVolumeUsage({
+        resizeFamily: 'quota_online',
+        driver: 'cephfs',
+        usedBytes: 0n,
+        totalBytes: null,
+        currentSizeBytes: 100n,
+      }),
+      attached: true,
+      allConsumersStopped: false,
     })).toEqual({ action: 'shrink' });
+  });
+
+  it('keeps dir occupancy when used equals size and total is missing', () => {
+    expect(decideVolumeResize({
+      resizeFamily: 'quota_online',
+      currentSizeBytes: 20n,
+      desiredSizeBytes: 8n,
+      usedBytes: normalizeObservedVolumeUsage({
+        resizeFamily: 'quota_online',
+        driver: 'dir',
+        usedBytes: 20n,
+        totalBytes: 0n,
+        currentSizeBytes: 20n,
+      }),
+      attached: true,
+      allConsumersStopped: false,
+    })).toEqual({ action: 'blocked', reason: 'usage_floor' });
   });
 
   it('allows quota-online growth and enforces the usage floor before shrink', () => {
@@ -95,6 +158,14 @@ describe('volume reconciliation policy', () => {
       attached: false,
       allConsumersStopped: true,
     })).toEqual({ action: 'blocked', reason: 'usage_floor' });
+    expect(decideVolumeResize({
+      resizeFamily: 'quota_online',
+      currentSizeBytes: 20n,
+      desiredSizeBytes: 8n,
+      usedBytes: null,
+      attached: true,
+      allConsumersStopped: false,
+    })).toEqual({ action: 'blocked', reason: 'usage_unknown' });
   });
 
   it('requires detach and stop preconditions for block-backed shrink', () => {
@@ -169,6 +240,36 @@ describe('volume reconciler scan and shifted policy', () => {
       request: expect.objectContaining({ idempotencyKey: 'ensure_attachment' }),
     }));
     expect(db.insertInto).not.toHaveBeenCalled();
+  });
+
+  it('does not enqueue ensure/resize for volumes that already need attention', async () => {
+    const ensurePending = vi.fn();
+    const listedName = `nyv-${'a'.repeat(32)}`;
+    const db = selectDb({
+      volumes: [
+        localVolume({
+          id: volumeId,
+          serverId,
+          incusName: listedName,
+          needs_attention: true,
+        }),
+      ],
+      pools: [localPool(serverId)],
+      placements: [
+        { volume_id: volumeId, server_id: serverId, catalog_state: 'present', pool_id: 'pool-1' },
+      ],
+    });
+    const reconciler = new VolumeReconciler(db as never, { ensurePending } as never);
+    await reconciler.scan(serverId, {
+      listStorageVolumes: vi.fn().mockResolvedValue({
+        metadata: [{ name: listedName, config: { size: '99', 'security.shifted': 'true' } }],
+      }),
+      getStorageVolumeState: vi.fn().mockResolvedValue({
+        metadata: { usage: { used: '4', total: '10' } },
+      }),
+      deleteStorageVolume: vi.fn(),
+    } as never, new AbortController().signal);
+    expect(ensurePending).not.toHaveBeenCalled();
   });
 
   it('does not Incus-DELETE a live logical nyv-* and enqueues volume.destroy for deleting volumes', async () => {
@@ -442,6 +543,49 @@ describe('volume reconciler scan and shifted policy', () => {
     expect(db.updateTable).toHaveBeenCalled();
   });
 
+  it('writes local dir used_bytes from GET /state without enqueueing volume.ensure', async () => {
+    const listedName = `nyv-${'a'.repeat(32)}`;
+    const ensurePending = vi.fn();
+    const db = selectDb({
+      volumes: [{
+        id: volumeId,
+        generation: 2,
+        server_id: serverId,
+        shared_backend_id: null,
+        lifecycle_phase: 'active',
+        needs_attention: false,
+        incus_name: listedName,
+        size_bytes: 10,
+        pool_id: 'pool-t',
+      }],
+      pools: [{
+        id: 'pool-t',
+        incus_name: 'dir',
+        shared_backend_id: null,
+        server_id: serverId,
+        registered: true,
+        driver: 'dir',
+        shareable: false,
+        resize_family: 'quota_online',
+      }],
+      placements: [
+        { volume_id: volumeId, server_id: serverId, catalog_state: 'present', pool_id: 'pool-t' },
+      ],
+    });
+    const reconciler = new VolumeReconciler(db as never, { ensurePending } as never);
+    await reconciler.scan(serverId, {
+      listStorageVolumes: vi.fn().mockResolvedValue({
+        metadata: [{ name: listedName, config: { size: '10', 'security.shifted': 'true' } }],
+      }),
+      getStorageVolumeState: vi.fn().mockResolvedValue({
+        metadata: { usage: { used: '4', total: '10' } },
+      }),
+      deleteStorageVolume: vi.fn(),
+    } as never, new AbortController().signal);
+    expect(ensurePending).not.toHaveBeenCalled();
+    expect(db.updateTable).toHaveBeenCalled();
+  });
+
   it('does not POST a shared 404 placement', async () => {
     const backendId = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
     const listedName = `nyv-${'a'.repeat(32)}`;
@@ -516,6 +660,157 @@ describe('volume reconciler scan and shifted policy', () => {
       failure: { code: 'VOLUME_SECURITY_SHIFTED_MISMATCH' },
     });
     expect(updateStorageVolume).not.toHaveBeenCalled();
+  });
+
+  it('reverts desired size and fails when shrink is below observed usage', async () => {
+    const db = volumeExistsDb();
+    const reconciler = new VolumeReconciler(db as never);
+    vi.spyOn(
+      reconciler as unknown as { readVolume: () => Promise<unknown> },
+      'readVolume',
+    ).mockResolvedValue({
+      ...ensureRow(),
+      size_bytes: '5',
+    });
+    vi.spyOn(
+      reconciler as unknown as { readAttachments: () => Promise<unknown[]> },
+      'readAttachments',
+    ).mockResolvedValue([]);
+    const updateStorageVolume = vi.fn();
+    const outcome = await reconciler.reconcile(runContext({
+      kind: 'volume.resize',
+      client: {
+        getStorageVolume: vi.fn().mockResolvedValue({
+          metadata: {
+            config: { size: '20', 'security.shifted': 'true' },
+            content_type: 'filesystem',
+          },
+        }),
+        getStorageVolumeState: vi.fn().mockResolvedValue({
+          metadata: { usage: { used: '9', total: '20' } },
+        }),
+        updateStorageVolume,
+      },
+    }));
+
+    expect(outcome).toMatchObject({
+      outcome: 'failed',
+      failure: { code: 'VOLUME_SHRINK_BELOW_USAGE' },
+    });
+    expect(updateStorageVolume).not.toHaveBeenCalled();
+    const sets = (db.updateTable as ReturnType<typeof vi.fn>).mock.results.flatMap((result) => {
+      const query = result.value as { set: ReturnType<typeof vi.fn> };
+      return query.set.mock.calls.map((call) => call[0] as Record<string, unknown>);
+    });
+    expect(sets).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        size_bytes: '20',
+        needs_attention: true,
+        failure_code: 'VOLUME_SHRINK_BELOW_USAGE',
+      }),
+    ]));
+  });
+
+  it('reverts desired size and writes used_bytes NULL when CephFS usage is phantom', async () => {
+    const db = volumeExistsDb();
+    const reconciler = new VolumeReconciler(db as never);
+    vi.spyOn(
+      reconciler as unknown as { readVolume: () => Promise<unknown> },
+      'readVolume',
+    ).mockResolvedValue({
+      ...ensureRow(),
+      size_bytes: '5',
+      driver: 'cephfs',
+    });
+    vi.spyOn(
+      reconciler as unknown as { readAttachments: () => Promise<unknown[]> },
+      'readAttachments',
+    ).mockResolvedValue([]);
+    const updateStorageVolume = vi.fn();
+    const outcome = await reconciler.reconcile(runContext({
+      kind: 'volume.resize',
+      client: {
+        getStorageVolume: vi.fn().mockResolvedValue({
+          metadata: {
+            config: { size: '20', 'security.shifted': 'true' },
+            content_type: 'filesystem',
+          },
+        }),
+        getStorageVolumeState: vi.fn().mockResolvedValue({
+          metadata: { usage: { used: '20', total: '0' } },
+        }),
+        updateStorageVolume,
+      },
+    }));
+
+    expect(outcome).toMatchObject({
+      outcome: 'failed',
+      failure: { code: 'VOLUME_USAGE_UNKNOWN' },
+    });
+    expect(updateStorageVolume).not.toHaveBeenCalled();
+    const sets = (db.updateTable as ReturnType<typeof vi.fn>).mock.results.flatMap((result) => {
+      const query = result.value as { set: ReturnType<typeof vi.fn> };
+      return query.set.mock.calls.map((call) => call[0] as Record<string, unknown>);
+    });
+    expect(sets).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        size_bytes: '20',
+        used_bytes: null,
+        needs_attention: true,
+        failure_code: 'VOLUME_USAGE_UNKNOWN',
+      }),
+    ]));
+  });
+
+  it('does not revert desired size when block-backed shrink needs detach', async () => {
+    const db = volumeExistsDb();
+    const reconciler = new VolumeReconciler(db as never);
+    vi.spyOn(
+      reconciler as unknown as { readVolume: () => Promise<unknown> },
+      'readVolume',
+    ).mockResolvedValue({
+      ...ensureRow(),
+      size_bytes: '5',
+      resize_family: 'block_backed',
+      driver: 'lvm',
+    });
+    vi.spyOn(
+      reconciler as unknown as { readAttachments: () => Promise<unknown> },
+      'readAttachments',
+    ).mockResolvedValue([{
+      id: 'att-1',
+      container_id: 'ctr-1',
+      power_intent: 'stopped',
+    }]);
+    const updateStorageVolume = vi.fn();
+    const outcome = await reconciler.reconcile(runContext({
+      kind: 'volume.resize',
+      client: {
+        getStorageVolume: vi.fn().mockResolvedValue({
+          metadata: {
+            config: { size: '20', 'security.shifted': 'true' },
+            content_type: 'filesystem',
+          },
+        }),
+        getStorageVolumeState: vi.fn().mockResolvedValue({
+          metadata: { usage: { used: '4', total: '20' } },
+        }),
+        updateStorageVolume,
+      },
+    }));
+
+    expect(outcome).toMatchObject({
+      outcome: 'failed',
+      failure: { code: 'VOLUME_SHRINK_REQUIRES_DETACH' },
+    });
+    expect(updateStorageVolume).not.toHaveBeenCalled();
+    const sets = (db.updateTable as ReturnType<typeof vi.fn>).mock.results.flatMap((result) => {
+      const query = result.value as { set: ReturnType<typeof vi.fn> };
+      return query.set.mock.calls.map((call) => call[0] as Record<string, unknown>);
+    });
+    expect(sets).not.toEqual(expect.arrayContaining([
+      expect.objectContaining({ size_bytes: '20' }),
+    ]));
   });
 
   it('fails adopt on the 8th GET 404 and retries earlier attempts', async () => {
@@ -694,7 +989,7 @@ describe('volume.destroy eligible-node D', () => {
 
     expect(outcome).toMatchObject({ outcome: 'succeeded' });
     expect(clientB.deleteStorageVolume).toHaveBeenCalledTimes(1);
-    expect(clientA.deleteStorageVolume).not.toHaveBeenCalled();
+    expect(clientA.deleteStorageVolume).toHaveBeenCalledTimes(1);
     expect(spies.mark).toHaveBeenCalledTimes(1);
     expect(spies.pin).toHaveBeenCalledWith(volumeId, serverB);
     expect(spies.dropAll).toHaveBeenCalledWith(volumeId);
@@ -730,7 +1025,7 @@ describe('volume.destroy eligible-node D', () => {
 
     expect(outcome).toMatchObject({ outcome: 'succeeded' });
     expect(spies.mark).not.toHaveBeenCalled();
-    expect(clientA.deleteStorageVolume).not.toHaveBeenCalled();
+    expect(clientA.deleteStorageVolume).toHaveBeenCalledTimes(1);
     expect(clientB.deleteStorageVolume).not.toHaveBeenCalled();
     expect(spies.dropAll).toHaveBeenCalledWith(volumeId);
   });

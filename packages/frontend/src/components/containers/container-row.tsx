@@ -6,6 +6,7 @@ import { Button } from '../ui/button.js';
 import { useResourceMutationPending } from '../../hooks/use-resource-mutation-gate.js';
 import { formatBytes, formatCpu } from '../../lib/utils.js';
 import { containerStatusLabel, lifecyclePhaseLabel } from '../../lib/status-labels.js';
+import { ResourceRef } from '../refs/resource-ref.js';
 import { ContainerActionBar } from './container-action-bar.js';
 
 export function ContainerRow({
@@ -41,7 +42,12 @@ export function ContainerRow({
           {container.needsAttention && <TriangleAlert className="h-3.5 w-3.5 text-destructive" aria-label="需要关注" />}
         </div>
         <p className="mt-1 truncate text-xs text-muted-foreground">
-          {admin && (container.ownerName ?? container.ownerId) ? `${container.ownerName ?? container.ownerId} · ` : ''}
+          {admin && container.ownerId ? (
+            <>
+              <ResourceRef kind="user" id={container.ownerId} name={container.ownerName} />
+              {' · '}
+            </>
+          ) : null}
           {container.serverName} · {container.routedIp ?? '等待容器 IP'} · {formatCpu(container.cpuMillis)} · {formatBytes(container.memBytes)}
         </p>
       </Link>

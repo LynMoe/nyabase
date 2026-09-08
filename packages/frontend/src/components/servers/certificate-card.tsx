@@ -14,9 +14,11 @@ import {
   formatCertRemainingLabel,
 } from '../../lib/cert-expiry.js';
 import { relativeTime } from '../../lib/utils.js';
+import { ResourceRef } from '../refs/resource-ref.js';
 
 export function CertificateCard({
   serverId,
+  serverName,
   canViewCertificate,
   canManageCertificates,
   certificateQuery,
@@ -26,6 +28,7 @@ export function CertificateCard({
   onRotate,
 }: {
   serverId: string;
+  serverName?: string;
   canViewCertificate: boolean;
   canManageCertificates: boolean;
   certificateQuery?: QueryLike<IncusClientCertificateDto>;
@@ -81,6 +84,7 @@ export function CertificateCard({
               {(loaded) => (
                 <CertificateDetails
                   serverId={serverId}
+                  serverName={serverName}
                   certificate={loaded}
                   showIntentFailures={canManageCertificates}
                 />
@@ -111,10 +115,12 @@ function InfoRow({ label, value, mono = false }: { label: string; value: string;
 
 function CertificateDetails({
   serverId,
+  serverName,
   certificate,
   showIntentFailures,
 }: {
   serverId: string;
+  serverName?: string;
   certificate: IncusClientCertificateDto;
   showIntentFailures: boolean;
 }) {
@@ -149,6 +155,7 @@ function CertificateDetails({
           <CertificateTrustWizard
             key={trust.serverId}
             currentServerId={serverId}
+            currentServerName={serverName}
             trust={trust}
           />
         ))}
@@ -159,9 +166,11 @@ function CertificateDetails({
 
 function CertificateTrustWizard({
   currentServerId,
+  currentServerName,
   trust,
 }: {
   currentServerId: string;
+  currentServerName?: string;
   trust: IncusClientCertificateDto['servers'][number];
 }) {
   const steps = [
@@ -175,7 +184,13 @@ function CertificateTrustWizard({
     <div className="space-y-2 rounded-md border p-3 text-sm" data-testid="certificate-trust-wizard">
       <div className="flex items-start justify-between gap-3">
         <div>
-          <p className="font-mono text-xs">{trust.serverId}</p>
+          <p>
+            <ResourceRef
+              kind="server"
+              id={trust.serverId}
+              name={trust.serverId === currentServerId ? currentServerName : undefined}
+            />
+          </p>
           <p className="text-xs text-muted-foreground">{trust.lastError ?? relativeTime(trust.observedAt)}</p>
         </div>
         <Badge variant={

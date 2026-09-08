@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   deriveStoragePoolDiscovery,
   deriveSharedBackendIdentity,
+  dirQuotaEffectiveFromVolumeState,
   storagePoolCapability,
 } from './storage-pools.service.js';
 import { StoragePoolResizeFamily } from '@nyabase/common';
@@ -82,6 +83,15 @@ describe('storage pool capability matrix', () => {
       source: 'cephfs_a',
       'cephfs.path': '/volumes',
     })).toBeNull();
+  });
+
+  it('treats dir usage.used as the only quota-effective signal', () => {
+    expect(dirQuotaEffectiveFromVolumeState(null)).toBe(false);
+    expect(dirQuotaEffectiveFromVolumeState(undefined)).toBe(false);
+    expect(dirQuotaEffectiveFromVolumeState({ total: 0 })).toBe(false);
+    expect(dirQuotaEffectiveFromVolumeState({ total: 32 })).toBe(false);
+    expect(dirQuotaEffectiveFromVolumeState({ used: 0 })).toBe(true);
+    expect(dirQuotaEffectiveFromVolumeState({ used: '4096', total: '32MiB' })).toBe(true);
   });
 
   it('marks a dir pool with null usage as quota-ineffective', () => {

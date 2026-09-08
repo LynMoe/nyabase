@@ -3,6 +3,7 @@ import { coverageCase } from '../../support/coverage-marker.js';
 import { expectJson, expectSuccess } from '../../support/http.js';
 import {
   createPersonaUser,
+  createUserContainer,
   createUserSharedVolume,
   deletePersonaUser,
   deleteServerGrant,
@@ -12,9 +13,9 @@ import {
   deleteUserSharedVolume,
   loginPersona,
   provisionGrantedUser,
+  upsertServerGrant,
   upsertSharedBackendGrant,
 } from '../../support/persona.js';
-import { requireSucceededIntent } from '../../support/volume-ops.js';
 
 type JsonRecord = Record<string, any>;
 
@@ -61,6 +62,7 @@ test(
         await adminApi.get(`${base}/effective-access`),
       );
       expect(effective.servers).toBeDefined();
+      expect(Array.isArray(effective.sharedBackends)).toBe(true);
 
       await expectJson(await adminApi.get(`${base}/shared-backend-grants`));
       const missingBackend = '00000000-0000-4000-8000-000000000099';
@@ -148,24 +150,12 @@ test(
         seedState,
         `e2e-sexp-${Date.now().toString(36)}`,
       );
-      const createdContainer = await expectJson<JsonRecord>(
-        await adminApi.post('/api/admin/containers', {
-          data: {
-            ownerId: backendOnly.userId,
-            serverId: seedState.server.id,
-            imageId: seedState.image.id,
-            name: `e2e-sbe-c-${Date.now().toString(36)}`,
-            rootSizeBytes: 2 * 1024 * 1024 * 1024,
-            cpuMillis: 500,
-            memBytes: 512 * 1024 * 1024,
-            extensions: {},
-            powerIntent: 'stopped',
-          },
-        }),
-        202,
-      );
-      containerId = createdContainer.resourceId as string;
-      await requireSucceededIntent(adminApi, createdContainer.intentId, 'grant-split container');
+      await upsertServerGrant(adminApi, backendOnly.userId, seedState.server.id);
+      const createdContainer = await createUserContainer(backendApi, seedState, {
+        namePrefix: 'e2e-sbe-c',
+        powerIntent: 'stopped',
+      });
+      containerId = createdContainer.containerId;
 
       await upsertSharedBackendGrant(adminApi, backendOnly.userId, backendId, {
         limitBytes: 256 * 1024 * 1024,
@@ -209,6 +199,7 @@ test(
       await deleteUserContainer(backendApi ?? adminApi, adminApi, containerId);
       await deleteUserSharedVolume(backendApi ?? adminApi, adminApi, backendVolumeId);
       await deleteUserSharedVolume(backendApi ?? adminApi, adminApi, expiredVolumeId);
+      await deleteServerGrant(adminApi, backendOnly.userId, seedState.server.id);
       await deleteSharedBackendGrant(adminApi, backendOnly.userId, backendId);
       await deletePersonaUser(adminApi, backendOnly.userId);
       await deleteStoragePoolGrant(

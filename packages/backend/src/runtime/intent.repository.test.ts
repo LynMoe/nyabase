@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { IntentKind, IntentResourceType, IntentStatus } from '@nyabase/common';
-import { IntentRepository, isRestartIntent } from './intent.repository.js';
+import { IntentRepository, isRestartIntent, isUserRetryIntent } from './intent.repository.js';
 
 describe('isRestartIntent', () => {
   it('is only container.power with action restart', () => {
@@ -19,6 +19,15 @@ const updateId = '55555555-5555-4555-8555-555555555555';
 const olderId = '66666666-6666-4666-8666-666666666666';
 const newerId = '77777777-7777-4777-8777-777777777777';
 const retryId = '88888888-8888-4888-8888-888888888888';
+
+describe('isUserRetryIntent', () => {
+  it('detects retryOf on the request payload', () => {
+    expect(isUserRetryIntent({ retryOf: retryId })).toBe(true);
+    expect(isUserRetryIntent({ operation: 'resize' })).toBe(false);
+    expect(isUserRetryIntent({ retryOf: '' })).toBe(false);
+    expect(isUserRetryIntent(null)).toBe(false);
+  });
+});
 
 type IntentRow = {
   id: string;

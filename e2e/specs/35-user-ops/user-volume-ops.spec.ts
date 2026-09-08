@@ -1,6 +1,7 @@
 import { test, expect } from '../../fixtures/live-stack.js';
 import { coverageCase } from '../../support/coverage-marker.js';
 import { expectJson } from '../../support/http.js';
+import { eventually } from '../../support/poll.js';
 import {
   assertNoActiveIntents,
   createUserContainer,
@@ -88,36 +89,51 @@ test(
       const session = await loginPersona(await trackedApiFactory(), persona);
       refreshToken = session.refreshToken;
       userApi = await authedApiFactory(session.accessToken);
+      const api = userApi;
 
       const initialSize = 192 * MiB;
       const targetSize = 128 * MiB;
       const created = await createUserVolume(
-        userApi,
+        api,
         seedState,
         `e2e-ushrk-${Date.now().toString(36)}`,
         initialSize,
       );
       volumeId = created.volumeId;
-      const before = await expectJson<JsonRecord>(await userApi.get(`/api/volumes/${volumeId}`));
+      const before = await expectJson<JsonRecord>(await api.get(`/api/volumes/${volumeId}`));
       const generation = Number(before.generation);
       const capability = before.capability ?? {};
       expect(Number(before.sizeBytes)).toBe(initialSize);
 
-      const response = await userApi.patch(`/api/volumes/${volumeId}`, {
-        data: {
-          expectedRevision: generation,
-          sizeBytes: targetSize,
-        },
-      });
-
       if (capability.shrinkOnline === true) {
-        const accepted = await expectJson<JsonRecord>(response, 202);
-        await requireSucceededIntent(userApi, accepted.intentId, 'user.volume.resize.shrink');
-        const after = await expectJson<JsonRecord>(await userApi.get(`/api/volumes/${volumeId}`));
+        const observed = await eventually(
+          async () => expectJson<JsonRecord>(await api.get(`/api/volumes/${volumeId}`)),
+          (volume) => volume.usedBytes !== null && Number(volume.usedBytes) < targetSize,
+          90_000,
+          1_000,
+          'dir volume usedBytes before empty shrink',
+        );
+        const accepted = await expectJson<JsonRecord>(
+          await api.patch(`/api/volumes/${volumeId}`, {
+            data: {
+              expectedRevision: observed.generation,
+              sizeBytes: targetSize,
+            },
+          }),
+          202,
+        );
+        await requireSucceededIntent(api, accepted.intentId, 'user.volume.resize.shrink');
+        const after = await expectJson<JsonRecord>(await api.get(`/api/volumes/${volumeId}`));
         expect(Number(after.sizeBytes)).toBe(targetSize);
         expect(Number(after.generation)).toBeGreaterThan(generation);
       } else {
         // Prefer not hanging: product must reject online shrink clearly when unsupported.
+        const response = await api.patch(`/api/volumes/${volumeId}`, {
+          data: {
+            expectedRevision: generation,
+            sizeBytes: targetSize,
+          },
+        });
         const error = await readErrorBody(response);
         expect(
           [400, 409].includes(error.status),
@@ -127,12 +143,13 @@ test(
           errorCode(error.body) === 'VOLUME_SHRINK_REQUIRES_DETACH'
             || errorCode(error.body) === 'VOLUME_SHRINK_UNSUPPORTED'
             || errorCode(error.body) === 'VOLUME_SHRINK_BELOW_USAGE'
+            || errorCode(error.body) === 'VOLUME_USAGE_UNKNOWN'
             || /shrink|detach|unsupported|usage/i.test(errorMessageText(error.body)),
         ).toBe(true);
-        const after = await expectJson<JsonRecord>(await userApi.get(`/api/volumes/${volumeId}`));
+        const after = await expectJson<JsonRecord>(await api.get(`/api/volumes/${volumeId}`));
         expect(Number(after.sizeBytes)).toBe(initialSize);
       }
-      await assertNoActiveIntents(userApi, `/api/volumes/${volumeId}/intents`);
+      await assertNoActiveIntents(api, `/api/volumes/${volumeId}/intents`);
     } finally {
       await deleteUserVolume(userApi ?? adminApi, adminApi, volumeId);
       if (refreshToken) {

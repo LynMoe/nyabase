@@ -4,10 +4,13 @@ import {
   Capability,
   ContainerPhase,
   ContainerPowerIntent,
+  ContainerStatus,
+  FailureCode,
   IntentKind,
   IntentResourceType,
+  StoragePoolResizeFamily,
 } from '@nyabase/common';
-import { ContainerControlService } from './container-control.service.js';
+import { checkRootResize, ContainerControlService } from './container-control.service.js';
 
 const containerId = 'container-1';
 const serverId = 'server-1';
@@ -126,6 +129,38 @@ function makeHarness() {
     consoleSessions,
   };
 }
+
+describe('checkRootResize', () => {
+  it('blocks quota-online shrink when usage is missing or zero', () => {
+    expect(checkRootResize({
+      containerId: 'c',
+      requestedBytes: 64,
+      currentBytes: 256,
+      usedBytes: null,
+      resizeFamily: StoragePoolResizeFamily.QuotaOnline,
+      observedStatus: ContainerStatus.Running,
+    })?.code).toBe(FailureCode.RootUsageUnknown);
+    expect(checkRootResize({
+      containerId: 'c',
+      requestedBytes: 64,
+      currentBytes: 256,
+      usedBytes: 0,
+      resizeFamily: StoragePoolResizeFamily.QuotaOnline,
+      observedStatus: ContainerStatus.Running,
+    })?.code).toBe(FailureCode.RootUsageUnknown);
+  });
+
+  it('blocks shrink below the observed usage floor', () => {
+    expect(checkRootResize({
+      containerId: 'c',
+      requestedBytes: 64,
+      currentBytes: 256,
+      usedBytes: 100,
+      resizeFamily: StoragePoolResizeFamily.QuotaOnline,
+      observedStatus: ContainerStatus.Running,
+    })?.code).toBe(FailureCode.RootShrinkBelowUsage);
+  });
+});
 
 describe('ContainerControlService intent boundary', () => {
   it('updates limits online and creates the intent atomically', async () => {
@@ -313,6 +348,84 @@ describe('ContainerControlService intent boundary', () => {
     expect(harness.repository.updateDesired).not.toHaveBeenCalled();
     expect(harness.intents.createPending).not.toHaveBeenCalled();
     expect(harness.wake.wake).not.toHaveBeenCalled();
+  });
+
+  it('rejects quota-online root shrink below observed usage without writing desired state', async () => {
+    const harness = makeHarness();
+    Object.assign(harness.row, {
+      root_size_bytes: '2147483648',
+      root_used_bytes: '400000000',
+    });
+    const selectFrom = vi.fn((table: string) => {
+      const query = {
+        select: vi.fn(),
+        selectAll: vi.fn(),
+        where: vi.fn(),
+        forUpdate: vi.fn(),
+        executeTakeFirst: vi.fn(),
+      };
+      query.select.mockReturnValue(query);
+      query.selectAll.mockReturnValue(query);
+      query.where.mockReturnValue(query);
+      query.forUpdate.mockReturnValue(query);
+      if (table === 'infra.images') {
+        query.executeTakeFirst.mockResolvedValue({ min_root_size_bytes: 1 });
+      } else if (table === 'infra.storage_pools') {
+        query.executeTakeFirst.mockResolvedValue({
+          resize_family: 'quota_online',
+          quota_effective: true,
+        });
+      } else {
+        query.executeTakeFirst.mockResolvedValue({});
+      }
+      return query;
+    });
+    Object.assign(harness.transaction, { selectFrom });
+
+    await expect(harness.service.resizeRootForUser(containerId, actorId, {
+      sizeBytes: 67_108_864,
+    })).rejects.toMatchObject({
+      response: { code: FailureCode.RootShrinkBelowUsage },
+    });
+    expect(harness.repository.updateDesired).not.toHaveBeenCalled();
+    expect(harness.intents.createPending).not.toHaveBeenCalled();
+  });
+
+  it('rejects quota-online root shrink when usage has not been observed', async () => {
+    const harness = makeHarness();
+    Object.assign(harness.row, { root_size_bytes: '2147483648', root_used_bytes: null });
+    const selectFrom = vi.fn((table: string) => {
+      const query = {
+        select: vi.fn(),
+        selectAll: vi.fn(),
+        where: vi.fn(),
+        forUpdate: vi.fn(),
+        executeTakeFirst: vi.fn(),
+      };
+      query.select.mockReturnValue(query);
+      query.selectAll.mockReturnValue(query);
+      query.where.mockReturnValue(query);
+      query.forUpdate.mockReturnValue(query);
+      if (table === 'infra.images') {
+        query.executeTakeFirst.mockResolvedValue({ min_root_size_bytes: 1 });
+      } else if (table === 'infra.storage_pools') {
+        query.executeTakeFirst.mockResolvedValue({
+          resize_family: 'quota_online',
+          quota_effective: true,
+        });
+      } else {
+        query.executeTakeFirst.mockResolvedValue({});
+      }
+      return query;
+    });
+    Object.assign(harness.transaction, { selectFrom });
+
+    await expect(harness.service.resizeRootForUser(containerId, actorId, {
+      sizeBytes: 67_108_864,
+    })).rejects.toMatchObject({
+      response: { code: FailureCode.RootUsageUnknown },
+    });
+    expect(harness.repository.updateDesired).not.toHaveBeenCalled();
   });
 
   it('authorizes exec through the current server grant and never audits the command', async () => {

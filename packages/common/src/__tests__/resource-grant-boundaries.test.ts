@@ -73,5 +73,7 @@ describe('canonical resource mutation boundaries', () => {
 
   it('keeps structured failure codes stable', () => {
     expect(FailureCode.VolumeShrinkRequiresDetach).toBe('VOLUME_SHRINK_REQUIRES_DETACH');
+    expect(FailureCode.VolumeUsageUnknown).toBe('VOLUME_USAGE_UNKNOWN');
+    expect(FailureCode.RootUsageUnknown).toBe('ROOT_USAGE_UNKNOWN');
   });
 });

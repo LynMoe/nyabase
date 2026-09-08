@@ -19,9 +19,8 @@ test(
     let containerId: string | undefined;
     try {
       const accepted = await expectJson<JsonRecord>(
-        await adminApi.post('/api/admin/containers', {
+        await adminApi.post('/api/containers', {
           data: {
-            ownerId: seedState.adminUserId,
             serverId: seedState.server.id,
             imageId: seedState.image.id,
             name: `e2e-${seedState.runId}-${Date.now().toString(36)}`,
@@ -161,9 +160,8 @@ test(
     );
     const seedServer = servers.find((server) => server.id === seedState.server.id);
     expect(seedServer, 'seed server missing from control plane').toBeTruthy();
-    const response = await adminApi.post('/api/admin/containers', {
+    const response = await adminApi.post('/api/containers', {
       data: {
-        ownerId: seedState.adminUserId,
         serverId: seedState.server.id,
         imageId: seedState.image.id,
         name: `e2e-gpu-${seedState.runId}-${Date.now().toString(36)}`,

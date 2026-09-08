@@ -202,6 +202,24 @@ function bytes(value: unknown): bigint | null {
   return observedDiskUsageBytes(value);
 }
 
+export type RootShrinkBlock = 'usage_unknown' | 'usage_floor' | 'requires_stop';
+
+export function decideRootShrink(input: {
+  readonly resizeFamily: 'quota_online' | 'block_backed';
+  readonly actualRootBytes: bigint;
+  readonly desiredRootBytes: bigint;
+  readonly usedBytes: bigint | null;
+  readonly running: boolean;
+}): 'allow' | RootShrinkBlock {
+  if (input.desiredRootBytes >= input.actualRootBytes) return 'allow';
+  if (input.resizeFamily === 'block_backed' && input.running) return 'requires_stop';
+  if (input.resizeFamily === 'quota_online' && (input.usedBytes === null || input.usedBytes <= 0n)) {
+    return 'usage_unknown';
+  }
+  if (input.usedBytes !== null && input.desiredRootBytes < input.usedBytes) return 'usage_floor';
+  return 'allow';
+}
+
 export function sshFileMetadataMatches(
   actual: {
     readonly uid?: number;
@@ -490,7 +508,38 @@ export class ContainerReconciler implements ManagedReconciler {
           : failure('MANAGED_COMPARATOR_FAILURE', 'Managed field comparison failed'),
       };
     }
-    this.assertRootResizeAllowed(row, actual.document, state, desired);
+    const actualRoot = bytes((actual.document.devices?.root as Record<string, unknown> | undefined)?.size);
+    const desiredRoot = bytes((desired.devices?.root as Record<string, unknown> | undefined)?.size);
+    const usedBytes = await this.observeRootUsage(
+      context.client,
+      row.root_pool_name,
+      expectedName,
+      state,
+    );
+    if (actualRoot !== null && desiredRoot !== null) {
+      const decision = decideRootShrink({
+        resizeFamily: row.root_resize_family,
+        actualRootBytes: actualRoot,
+        desiredRootBytes: desiredRoot,
+        usedBytes,
+        running: running(state),
+      });
+      if (decision !== 'allow') {
+        const code = decision === 'requires_stop'
+          ? 'ROOT_SHRINK_REQUIRES_STOP'
+          : decision === 'usage_unknown'
+            ? 'ROOT_USAGE_UNKNOWN'
+            : 'ROOT_SHRINK_BELOW_USAGE';
+        if (decision === 'usage_floor' || decision === 'usage_unknown') {
+          await this.revertImpossibleRootShrink(row.id, actualRoot, usedBytes, code);
+        }
+        throw new IncusError(code, 'managed_failure', {
+          containerId: row.id,
+          requestedBytes: desiredRoot.toString(),
+          usedBytes: usedBytes?.toString() ?? null,
+        });
+      }
+    }
     if (!diff.empty) {
       if (running(state) && this.extensions?.requiresStop(diff)) {
         return {
@@ -601,7 +650,20 @@ export class ContainerReconciler implements ManagedReconciler {
       };
     }
     const quota = observeRootQuotaPending(verified.document, row.root_size_bytes);
-    await this.persistObservation(row, verified.document, verifiedState, quota.pending, ssh);
+    const observedUsage = await this.observeRootUsage(
+      context.client,
+      row.root_pool_name,
+      expectedName,
+      verifiedState,
+    );
+    await this.persistObservation(
+      row,
+      verified.document,
+      verifiedState,
+      quota.pending,
+      ssh,
+      observedUsage,
+    );
     if (quota.pending) {
       return {
         outcome: 'retry',
@@ -1295,28 +1357,42 @@ export class ContainerReconciler implements ManagedReconciler {
     return (await client.getInstanceState(name)).metadata;
   }
 
-  private assertRootResizeAllowed(
-    row: ContainerRow,
-    actual: InstanceFull,
+  private async observeRootUsage(
+    client: IncusClientPort | undefined,
+    poolName: string,
+    instanceName: string,
     state: InstanceState,
-    desired: DesiredInstanceSpec,
-  ): void {
-    const actualRoot = bytes((actual.devices?.root as Record<string, unknown> | undefined)?.size);
-    const desiredRoot = bytes((desired.devices?.root as Record<string, unknown> | undefined)?.size);
-    if (actualRoot === null || desiredRoot === null || desiredRoot >= actualRoot) return;
-    if (running(state) && row.root_resize_family === 'block_backed') {
-      throw new IncusError('ROOT_SHRINK_REQUIRES_STOP', 'managed_failure', {
-        containerId: row.id,
-      });
+  ): Promise<bigint | null> {
+    const fromState = bytes(state.disk?.root?.usage);
+    if (fromState !== null && fromState > 0n) return fromState;
+    if (!client) return fromState;
+    try {
+      const volumeState = await client.getStorageVolumeState(poolName, 'container', instanceName);
+      const fromVolume = bytes(volumeState.metadata.usage?.used);
+      if (fromVolume !== null && fromVolume > 0n) return fromVolume;
+    } catch {
+      // Best-effort: missing instance-volume usage still blocks quota-online shrink.
     }
-    const usage = bytes(state.disk?.root?.usage);
-    if (usage !== null && usage > desiredRoot) {
-      throw new IncusError('ROOT_SHRINK_BELOW_USAGE', 'managed_failure', {
-        containerId: row.id,
-        requestedBytes: desiredRoot.toString(),
-        usedBytes: usage.toString(),
-      });
-    }
+    return fromState;
+  }
+
+  private async revertImpossibleRootShrink(
+    containerId: string,
+    actualRootBytes: bigint,
+    usedBytes: bigint | null,
+    failureCode: string,
+  ): Promise<void> {
+    await this.database
+      .updateTable('control.containers')
+      .set({
+        root_size_bytes: actualRootBytes.toString(),
+        ...(usedBytes === null ? {} : { root_used_bytes: usedBytes.toString() }),
+        needs_attention: true,
+        failure_code: failureCode.slice(0, 128),
+      })
+      .where('id', '=', containerId)
+      .where('lifecycle_phase', 'not in', ['deleting', 'failed'])
+      .execute();
   }
 
   private async reconcilePower(
@@ -1487,8 +1563,8 @@ export class ContainerReconciler implements ManagedReconciler {
     state: InstanceState,
     quotaPending: boolean,
     ssh: SshFileObservation,
+    usedBytes: bigint | null = bytes(state.disk?.root?.usage),
   ): Promise<void> {
-    const usedBytes = bytes(state.disk?.root?.usage);
     await this.database
       .updateTable('control.containers')
       .set({

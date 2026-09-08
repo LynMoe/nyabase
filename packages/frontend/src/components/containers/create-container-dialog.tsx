@@ -3,8 +3,10 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   ContainerPowerIntent,
   zCreateContainerRequest,
+  type ContainerDto,
   type CreateContainerRequest,
   type EffectiveAccessDto,
+  type EffectiveServerAccessDto,
   type ImageDto,
   type IntentAcceptedDto,
   type StorageCapacityDto,
@@ -25,13 +27,16 @@ import { FormField } from '../layout/form-field.js';
 import { toast } from '../../hooks/use-toast.js';
 import {
   approxGibHint,
-  formatBytes,
-  formatCpu,
   gibToBytes,
   grantAvailableLabel,
   resourceVal,
   vcpuToMillis,
 } from '../../lib/utils.js';
+import {
+  formatConsumedQuotaParts,
+  formatGrantQuotaLine,
+} from '../../lib/grant-quota.js';
+import { formatExtensionGrantSummaries } from '../../extensions/registry.js';
 import { actionProgressHint, containerActionSubmittedTitle } from '../../lib/status-labels.js';
 import { queryKeys } from '../../lib/query-keys.js';
 import { ExtensionSlots } from '../../extensions/slots.js';
@@ -72,6 +77,11 @@ export function CreateContainerDialog({
   const serversQuery = useQuery({ queryKey: queryKeys.servers.user, queryFn: () => api.get<UserServerDto[]>('/servers'), enabled: open });
   const imagesQuery = useQuery({ queryKey: queryKeys.images.userActive, queryFn: () => api.get<ImageDto[]>('/images?activeOnly=true'), enabled: open });
   const accessQuery = useQuery({ queryKey: queryKeys.meAccess, queryFn: () => api.get<EffectiveAccessDto>('/me/access'), enabled: open });
+  const containersQuery = useQuery({
+    queryKey: queryKeys.containers.userList,
+    queryFn: () => api.get<ContainerDto[]>('/containers'),
+    enabled: open,
+  });
   const capacityQuery = useQuery({
     queryKey: queryKeys.storageCapacity(form.serverId),
     queryFn: () => api.get<StorageCapacityDto>(`/servers/${form.serverId}/storage-capacity`),
@@ -145,7 +155,7 @@ export function CreateContainerDialog({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-2xl" data-testid="container-create-canonical">
+      <DialogContent data-testid="container-create-canonical">
         <DialogHeader>
           <DialogTitle>新建容器</DialogTitle>
           <DialogDescription>镜像与规格创建后固定，提交前会再次校验容量。</DialogDescription>
@@ -234,13 +244,21 @@ export function CreateContainerDialog({
             />
           </div>
           {selectedAccess && (
-            <p className="text-xs text-muted-foreground">
-              授权额度：CPU {resourceVal(selectedAccess.cpuMillis, formatCpu)}
-              {' · '}
-              内存 {resourceVal(selectedAccess.memBytes, formatBytes)}
-              {' · '}
-              磁盘 {resourceVal(selectedAccess.diskBytes, formatBytes)}
-            </p>
+            <div className="space-y-0.5 text-xs text-muted-foreground">
+              <p>
+                额度 {formatGrantQuotaLine(
+                  selectedAccess,
+                  formatExtensionGrantSummaries(selectedAccess.extensionGrants),
+                )}
+              </p>
+              <CreateRemainingLine
+                grant={selectedAccess}
+                containers={containersQuery.isSuccess
+                  ? (containersQuery.data ?? []).filter((container) => container.serverId === form.serverId)
+                  : undefined}
+                capacity={capacityQuery.data}
+              />
+            </div>
           )}
           <ExtensionSlots
             area="container.create"
@@ -326,6 +344,42 @@ function UnitField({
       <Input id={id} type="number" min="0" step={step} value={value} onChange={(event) => onChange(event.target.value)} />
     </FormField>
   );
+}
+
+function remainingPart(grant: number | null, used: number, kind: 'cpu' | 'bytes'): string {
+  if (grant === null || grant === 0) return '不限';
+  const left = Math.max(0, grant - used);
+  const parts = kind === 'cpu'
+    ? formatConsumedQuotaParts({ cpuMillis: left, memBytes: null, diskBytes: null })
+    : formatConsumedQuotaParts({ cpuMillis: null, memBytes: left, diskBytes: null });
+  return parts[0] ?? '不限';
+}
+
+function CreateRemainingLine({
+  grant,
+  containers,
+  capacity,
+}: {
+  grant: EffectiveServerAccessDto;
+  containers: ContainerDto[] | undefined;
+  capacity: StorageCapacityDto | undefined;
+}) {
+  const parts: string[] = [];
+  if (containers) {
+    const cpuUsed = containers.reduce((sum, item) => sum + item.cpuMillis, 0);
+    const memUsed = containers.reduce((sum, item) => sum + item.memBytes, 0);
+    parts.push(`CPU ${remainingPart(grant.cpuMillis, cpuUsed, 'cpu')}`);
+    parts.push(`内存 ${remainingPart(grant.memBytes, memUsed, 'bytes')}`);
+  }
+  if (capacity) {
+    parts.push(`磁盘 ${remainingPart(
+      capacity.grantLimitBytes,
+      capacity.usedByRootDisksBytes + capacity.usedByLocalVolumesBytes,
+      'bytes',
+    )}`);
+  }
+  if (parts.length === 0) return null;
+  return <p>剩余 {parts.join(' · ')}</p>;
 }
 
 function CapacityNotice({ capacity, requested }: { capacity: StorageCapacityDto; requested: number }) {

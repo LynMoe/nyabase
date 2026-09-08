@@ -58,11 +58,13 @@ const FAILURE_CODE_ZH: Partial<Record<string, string>> = {
   [FailureCode.VolumeShrinkBelowUsage]: '目标容量小于已用量',
   [FailureCode.VolumeShrinkRequiresDetach]: '缩容前需先卸载挂载',
   [FailureCode.VolumeShrinkUnsupported]: '该池不支持缩容',
+  [FailureCode.VolumeUsageUnknown]: '已用量未知，无法缩容',
   [FailureCode.VolumeRequiresUnbind]: '请先从容器卸载该卷',
   [FailureCode.VolumeDeleteBackendUnreachable]: '没有在线服务器可以访问该共享存储，请联系管理员',
   [FailureCode.VolumeDetachRequiresStop]: '请先停止容器',
   [FailureCode.VolumeCrossServerDenied]: '不允许跨服务器挂载该卷',
   [FailureCode.RootShrinkBelowUsage]: '系统盘目标小于已用量',
+  [FailureCode.RootUsageUnknown]: '系统盘已用量未知，无法缩容',
   [FailureCode.RootShrinkRequiresStop]: '缩容前需先停止容器',
   [FailureCode.RootQuotaPending]: '系统盘配额变更待收敛',
   [FailureCode.RootSizeBelowImageMinimum]: '小于镜像要求的最小系统盘',
@@ -127,6 +129,12 @@ export function failureCodeLabel(code: string | null | undefined): string | null
 }
 
 export function volumeAttentionHint(failureCode: string | null | undefined): string {
+  if (failureCode === FailureCode.VolumeShrinkBelowUsage) {
+    return '缩容失败：目标容量小于已用量。期望容量已恢复为当前容量，不会自动重试。请查看操作历史。';
+  }
+  if (failureCode === FailureCode.VolumeUsageUnknown) {
+    return '缩容失败：已用量未知。期望容量已恢复为当前容量，不会自动重试。请查看操作历史。';
+  }
   const codeHint = failureCodeLabel(failureCode);
   if (codeHint && codeHint !== failureCode) {
     return `收敛失败：${codeHint}。可重试操作或联系管理员。`;
@@ -163,11 +171,20 @@ const INTENT_KIND_ZH: Record<string, string> = {
   'container.delete': '删除容器',
   'volume.ensure': '确保数据卷',
   'volume.resize': '调整数据卷',
+  'volume.destroy': '销毁数据卷',
   'image_assignment.ensure': '分配镜像',
   'image_assignment.delete': '取消镜像分配',
   'server.connect': '连接服务器',
   'server.preflight': '服务器预检',
   'certificate.rotate': '轮换证书',
+};
+
+const INTENT_RESOURCE_TYPE_ZH: Record<string, string> = {
+  container: '容器',
+  volume: '数据卷',
+  image_assignment: '镜像分配',
+  server: '服务器',
+  certificate_rotation: '证书轮换',
 };
 
 export function intentStatusLabel(status: string): string {
@@ -176,6 +193,10 @@ export function intentStatusLabel(status: string): string {
 
 export function intentKindLabel(kind: string): string {
   return labelOrRaw(INTENT_KIND_ZH, kind);
+}
+
+export function intentResourceTypeLabel(resourceType: string): string {
+  return labelOrRaw(INTENT_RESOURCE_TYPE_ZH, resourceType);
 }
 
 /** User-facing toast description for submitted container/volume work. */

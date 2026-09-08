@@ -12,7 +12,9 @@ export class MeAccessController {
 
   @Get('access')
   async getMyAccess(@CurrentUser() user: UserRecord): Promise<EffectiveAccessDto> {
-    const servers = await this.accessResolver.getEffectiveAccess(user.id);
-    return { servers };
+    return {
+      servers: await this.accessResolver.getEffectiveAccess(user.id),
+      sharedBackends: await this.accessResolver.getEffectiveSharedAccess(user.id),
+    };
   }
 }

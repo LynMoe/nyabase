@@ -12,9 +12,11 @@ import {
   UseGuards,
 } from '@nestjs/common';
 import {
+  ADMIN_INTENT_CAPABILITIES,
   Capability,
   IntentResourceType,
   IntentStatus,
+  zAdminIntentListQuery,
   zIntentListQuery,
   zRetryIntentRequest,
   type IntentDto,
@@ -82,13 +84,27 @@ function toDto(intent: IntentRecord): IntentDto {
   };
 }
 
-function listOptions(query: Record<string, unknown>): IntentListOptions {
+export function listOptions(
+  query: Record<string, unknown>,
+): Pick<IntentListOptions, 'limit' | 'cursor' | 'status' | 'kind'> {
   const parsed = zIntentListQuery.parse(query);
   return {
     limit: parsed.limit,
     cursor: parsed.cursor,
     status: parsed.status as IntentListOptions['status'],
     kind: parsed.kind as IntentListOptions['kind'],
+  };
+}
+
+export function adminIntentListOptions(query: Record<string, unknown>): IntentListOptions {
+  const parsed = zAdminIntentListQuery.parse(query);
+  return {
+    limit: parsed.limit,
+    cursor: parsed.cursor,
+    status: parsed.status as IntentListOptions['status'],
+    kind: parsed.kind as IntentListOptions['kind'],
+    resourceType: parsed.resourceType,
+    serverId: parsed.serverId,
   };
 }
 
@@ -245,15 +261,6 @@ export class AdminSharedVolumeIntentsController {
   }
 }
 
-const ADMIN_INTENT_CAPABILITIES = [
-  Capability.ManageContainersAny,
-  Capability.ManageVolumes,
-  Capability.ManageSharedVolumes,
-  Capability.ManageServers,
-  Capability.ManageImages,
-  Capability.ManageCertificates,
-] as const;
-
 @Controller('admin/intents')
 @UseGuards(JwtAuthGuard, CapabilitiesGuard)
 @RequireAnyCaps(...ADMIN_INTENT_CAPABILITIES)
@@ -270,7 +277,7 @@ export class AdminIntentsController {
     if (allowedTypes.length === 0) {
       return { items: [], nextCursor: null };
     }
-    const options = listOptions(query);
+    const options = adminIntentListOptions(query);
     if (options.resourceType && !allowedTypes.includes(options.resourceType)) {
       return { items: [], nextCursor: null };
     }

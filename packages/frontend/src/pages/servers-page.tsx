@@ -11,16 +11,23 @@ import {
 } from '@nyabase/common';
 import { api } from '../lib/api.js';
 import { Button } from '../components/ui/button.js';
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '../components/ui/card.js';
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '../components/ui/dialog.js';
 import { Input } from '../components/ui/input.js';
 import { Label } from '../components/ui/label.js';
 import { Badge } from '../components/ui/badge.js';
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from '../components/ui/table.js';
 import { EmptyState } from '../components/layout/empty-state.js';
 import { Page } from '../components/layout/page.js';
 import { PageHeader } from '../components/layout/page-header.js';
 import { QueryView } from '../components/layout/query-view.js';
-import { ResourceGrid } from '../components/layout/resource-grid.js';
+import { SectionCard } from '../components/layout/section-card.js';
 import {
   nodeMetricsStatusZh,
   preflightCheckLabel,
@@ -73,9 +80,24 @@ export default function ServersPage() {
         }
       >
         {(items) => (
-          <ResourceGrid>
-            {items.map((server) => <ServerCard key={server.id} server={server} />)}
-          </ResourceGrid>
+          <SectionCard flush>
+          <Table className="min-w-[860px]">
+            <TableHeader>
+              <TableRow>
+                <TableHead>名称</TableHead>
+                <TableHead>状态</TableHead>
+                <TableHead>Incus</TableHead>
+                <TableHead>系统盘池</TableHead>
+                <TableHead>前置检查</TableHead>
+                <TableHead>指标</TableHead>
+                <TableHead>最近观测</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {items.map((server) => <ServerRow key={server.id} server={server} />)}
+            </TableBody>
+          </Table>
+          </SectionCard>
         )}
       </QueryView>
       <ServerOnboardingDialog
@@ -84,63 +106,57 @@ export default function ServersPage() {
         onCreated={(serverId) => {
           refresh();
           setOnboardingOpen(false);
-          void navigate({ to: '/servers/$id', params: { id: serverId } });
+          void navigate({ to: '/servers/$id', params: { id: serverId }, search: { tab: 'connect' } });
         }}
       />
     </Page>
   );
 }
 
-function ServerCard({ server }: { server: ServerDto }) {
+function ServerRow({ server }: { server: ServerDto }) {
   const online = server.status === 'online';
-  const capacity = server.preflightStatus === 'passed'
-    ? '前置检查已通过'
-    : server.preflightReport?.checks.storagePool === 'pass'
-      ? '存储检查通过'
-      : '等待前置检查';
   return (
-    <Link to="/servers/$id" params={{ id: server.id }}>
-      <Card className="h-full transition-colors hover:bg-accent/50">
-        <CardHeader className="pb-3">
-          <div className="flex items-start justify-between gap-3">
-            <div className="min-w-0">
-              <CardTitle className="truncate text-base">{server.name}</CardTitle>
-              <CardDescription className="mt-1 truncate font-mono">
-                {server.slug && server.slug !== server.name ? server.slug : server.apiEndpoint}
-              </CardDescription>
-            </div>
-            <Badge variant={online ? 'success' : 'secondary'}>
-              {online ? <Wifi className="h-3 w-3" /> : <WifiOff className="h-3 w-3" />}
-              {serverStatusLabel(server.status)}
-            </Badge>
-          </div>
-        </CardHeader>
-        <CardContent className="space-y-2 text-sm">
-          <div className="flex justify-between gap-3"><span className="text-muted-foreground">Incus</span><span>{server.incusVersion ?? '未连接'}</span></div>
-          <div className="flex justify-between gap-3"><span className="text-muted-foreground">系统盘池</span><span className={server.systemPoolName ? '' : 'font-mono text-xs'}>{server.systemPoolName ?? server.systemPoolId ?? '未指定'}</span></div>
-          <div className="flex justify-between gap-3"><span className="text-muted-foreground">前置检查</span><span>{preflightStatusLabel(server.preflightStatus)}</span></div>
-          <div className="flex justify-between gap-3">
-            <span className="text-muted-foreground">指标</span>
-            <span>{nodeMetricsStatusLabel(server.nodeMetrics.health.status)}</span>
-          </div>
-          {server.nodeMetrics.health.outageSince && (
-            <p className="text-xs text-destructive">
-              数据中断自 {new Date(server.nodeMetrics.health.outageSince).toLocaleString()}
-            </p>
-          )}
-          <p className="text-xs text-muted-foreground">{capacity} · 最近观测 {relativeTime(server.lastSeenAt)}</p>
-          {server.preflightReport?.checks && (
-            <div className="flex flex-wrap gap-1 pt-1">
-              {Object.entries(server.preflightReport.checks).slice(0, 5).map(([name, result]) => (
-                <Badge key={name} variant={result === 'pass' ? 'success' : result === 'warn' ? 'warning' : 'destructive'}>
-                  {preflightCheckLabel(name)}
-                </Badge>
-              ))}
-            </div>
-          )}
-        </CardContent>
-      </Card>
-    </Link>
+    <TableRow className="cursor-pointer">
+      <TableCell className="whitespace-normal">
+        <Link to="/servers/$id" params={{ id: server.id }} search={{ tab: 'overview' }} className="block min-w-0">
+          <p className="font-medium">{server.name}</p>
+          <p className="mt-0.5 truncate font-mono text-xs text-muted-foreground">
+            {server.slug && server.slug !== server.name ? server.slug : server.apiEndpoint}
+          </p>
+        </Link>
+      </TableCell>
+      <TableCell>
+        <Badge variant={online ? 'success' : 'secondary'}>
+          {online ? <Wifi className="h-3 w-3" /> : <WifiOff className="h-3 w-3" />}
+          {serverStatusLabel(server.status)}
+        </Badge>
+      </TableCell>
+      <TableCell>{server.incusVersion ?? '未连接'}</TableCell>
+      <TableCell className={server.systemPoolName ? '' : 'font-mono'}>
+        {server.systemPoolName ?? server.systemPoolId ?? '未指定'}
+      </TableCell>
+      <TableCell className="whitespace-normal">
+        <div className="flex flex-wrap items-center gap-1">
+          <span>{preflightStatusLabel(server.preflightStatus)}</span>
+          {server.preflightReport?.checks
+            ? Object.entries(server.preflightReport.checks).slice(0, 5).map(([name, result]) => (
+              <Badge key={name} variant={result === 'pass' ? 'success' : result === 'warn' ? 'warning' : 'destructive'}>
+                {preflightCheckLabel(name)}
+              </Badge>
+            ))
+            : null}
+        </div>
+      </TableCell>
+      <TableCell className="whitespace-normal">
+        {nodeMetricsStatusLabel(server.nodeMetrics.health.status)}
+        {server.nodeMetrics.health.outageSince ? (
+          <p className="mt-1 text-xs text-destructive">
+            中断自 {new Date(server.nodeMetrics.health.outageSince).toLocaleString()}
+          </p>
+        ) : null}
+      </TableCell>
+      <TableCell>{relativeTime(server.lastSeenAt)}</TableCell>
+    </TableRow>
   );
 }
 
@@ -246,7 +262,7 @@ function ServerOnboardingDialog({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-2xl" data-testid="server-onboarding">
+      <DialogContent data-testid="server-onboarding">
         <DialogHeader>
           <DialogTitle>服务器接入</DialogTitle>
           <DialogDescription>登记连接参数后，在详情页粘贴 trust token 并执行前置检查。</DialogDescription>

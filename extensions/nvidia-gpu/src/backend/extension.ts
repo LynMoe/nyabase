@@ -19,6 +19,7 @@ import {
 import { contributeNvidiaGpuInstanceSpec, nvidiaGpuRequiresStop } from './instance-spec.js';
 import { filterGpuInventoryByGrant, listNvidiaGpuDevices } from './inventory.js';
 import { contributeNvidiaGpuPreflight, refreshNvidiaGpuHealth } from './preflight.js';
+import { probeNvidiaGpuSupport } from './support.js';
 
 export function createNvidiaGpuExtension(): ServerCardExtension {
   return {
@@ -38,6 +39,7 @@ export function createNvidiaGpuExtension(): ServerCardExtension {
     contributeInstanceSpec: (input) => contributeNvidiaGpuInstanceSpec(input.state),
 
     contributePreflight: async (input) => contributeNvidiaGpuPreflight(input),
+    probeSupport: async (input) => probeNvidiaGpuSupport(input),
     refreshHealth: refreshNvidiaGpuHealth,
 
     parseGrantPayload: parseNvidiaGpuGrant,

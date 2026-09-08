@@ -3,6 +3,7 @@ import {
   Controller,
   Delete,
   Get,
+  HttpCode,
   Param,
   Patch,
   Post,
@@ -11,6 +12,8 @@ import {
 import {
   Capability,
   zCreateSharedBackendRequest,
+  zDiscoverSharedExecutorsRequest,
+  zPatchSharedBackendExecutorRequest,
   zPatchSharedBackendRequest,
 } from '@nyabase/common';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard.js';
@@ -49,6 +52,31 @@ export class AdminSharedBackendsController {
     return this.service.list();
   }
 
+  @Get(':id/executors')
+  listExecutors(@Param('id') id: string) {
+    return this.service.listExecutors(id);
+  }
+
+  @Post(':id/executors/discover')
+  @HttpCode(200)
+  discoverExecutors(@Param('id') id: string, @Body() body: unknown) {
+    const input = zDiscoverSharedExecutorsRequest.parse(body ?? {});
+    return this.service.discoverExecutors(id, input.serverId);
+  }
+
+  @Patch(':id/executors/:executorId')
+  patchExecutor(
+    @Param('id') id: string,
+    @Param('executorId') executorId: string,
+    @Body() body: unknown,
+  ) {
+    return this.service.patchExecutor(
+      id,
+      executorId,
+      zPatchSharedBackendExecutorRequest.parse(body),
+    );
+  }
+
   @Get(':id')
   get(@Param('id') id: string) {
     return this.service.get(id);
@@ -65,7 +93,8 @@ export class AdminSharedBackendsController {
   }
 
   @Delete(':id')
-  delete(@Param('id') id: string) {
-    return this.service.delete(id);
+  @HttpCode(204)
+  async delete(@Param('id') id: string) {
+    await this.service.delete(id);
   }
 }

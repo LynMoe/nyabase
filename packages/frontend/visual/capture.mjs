@@ -318,6 +318,8 @@ function mockApi(urlString, method) {
   if (p === '/volumes' || p === '/admin/volumes') return json([volume]);
   if (p === '/images' || p === '/admin/images') return json([image]);
   if (p === '/admin/users') return json([user, otherUser]);
+  if (p === '/admin/users/user-admin') return json(user);
+  if (p === '/admin/users/user-alice') return json(otherUser);
   if (p === '/admin/catalog/users') return json([user, otherUser]);
   if (p === '/admin/groups') return json([group]);
   if (p === '/admin/groups/grp-users') return json(group);
@@ -520,25 +522,30 @@ const PAGES = [
   { name: 'profile', path: '/profile' },
   { name: 'servers', path: '/servers' },
   { name: 'server-detail', path: '/servers/srv-1' },
+  { name: 'server-detail-connect', path: '/servers/srv-1?tab=connect' },
+  { name: 'server-detail-storage', path: '/servers/srv-1?tab=storage' },
+  { name: 'server-detail-preflight', path: '/servers/srv-1?tab=preflight' },
+  { name: 'server-detail-metrics', path: '/servers/srv-1?tab=metrics' },
   { name: 'ip-pools', path: '/ip-pools' },
-  { name: 'storage-pools', path: '/storage-pools' },
   { name: 'shared-backends', path: '/shared-backends' },
   { name: 'images', path: '/images' },
   { name: 'manage-containers', path: '/manage/containers' },
-  { name: 'manage-volumes', path: '/manage/volumes' },
   { name: 'ssh-proxy', path: '/ssh-proxy' },
   { name: 'http-proxy-ops', path: '/http-proxy-ops' },
   { name: 'users', path: '/users' },
+  { name: 'user-detail', path: '/users/user-alice' },
+  { name: 'user-detail-grants', path: '/users/user-alice?tab=grants' },
   { name: 'groups', path: '/groups' },
   { name: 'group-detail', path: '/groups/grp-users' },
+  { name: 'group-detail-members', path: '/groups/grp-users?tab=members' },
+  { name: 'group-detail-grants', path: '/groups/grp-users?tab=grants' },
   { name: 'audit', path: '/audit' },
   { name: 'system-settings', path: '/system-settings' },
 ];
 
 const DIALOGS = [
   { name: 'dialog-create-user', path: '/users', open: (p) => clickByText(p, '新建用户') },
-  { name: 'dialog-user-grants', path: '/users', open: (p) => clickByText(p, '授权') },
-  { name: 'dialog-disable-user', path: '/users', open: (p) => clickByText(p, '停用') },
+  { name: 'dialog-disable-user', path: '/users/user-alice', open: (p) => clickByText(p, '停用') },
   { name: 'dialog-create-group', path: '/groups', open: (p) => clickByText(p, '新建用户组') },
   { name: 'dialog-create-container', path: '/containers', open: (p) => clickByText(p, '新建容器') },
   { name: 'dialog-create-volume', path: '/volumes', open: (p) => clickByText(p, '新建数据卷') },

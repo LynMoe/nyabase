@@ -63,6 +63,18 @@ describe('createNvidiaGpuExtension', () => {
     expect(await health.read()).toMatchObject({ runtimeReady: null, nvidiaCardCount: 0 });
   });
 
+  it('probes host support independently of enablement', async () => {
+    const result = await createNvidiaGpuExtension().probeSupport({
+      serverId: '22222222-2222-4222-8222-222222222222',
+      resources: { gpu: { cards: [{ pci_address: '0000:41:00.0', nvidia: { model: 'A' } }] } },
+      metricSamples: [
+        { name: 'nyabase_node_gpu_driver_present', labels: {}, value: 1 },
+        { name: 'nyabase_node_gpu_toolkit_present', labels: {}, value: 1 },
+      ],
+    });
+    expect(result.supported).toBe(true);
+  });
+
   it('blocks disable while claims remain', async () => {
     const ext = createNvidiaGpuExtension();
     await expect(ext.assertCanDisable({

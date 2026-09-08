@@ -5,7 +5,6 @@ import type { StoragePoolDto } from '@nyabase/common';
 import { api } from '../../lib/api.js';
 import { errorMessage } from '../../lib/api-error.js';
 import { QueryErrorState } from '../query-state.js';
-import { FsidConflictAlert } from '../storage/fsid-conflict-alert.js';
 import { Badge } from '../ui/badge.js';
 import { Button } from '../ui/button.js';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '../ui/card.js';
@@ -29,7 +28,6 @@ import {
 import { FormField } from '../layout/form-field.js';
 import { toast } from '../../hooks/use-toast.js';
 import { usedTotalLabel } from '../../lib/utils.js';
-import type { SharedBackendFsidConflict } from '../../lib/storage-shrink.js';
 
 export function PoolsCard({
   pools,
@@ -41,12 +39,10 @@ export function PoolsCard({
   currentSystemPool,
   overcommitRatio,
   storageOvercommitRatio,
-  fsidConflict,
   discoverPending,
   updatePending,
   onSystemPoolIdChange,
   onOvercommitRatioChange,
-  onDismissFsidConflict,
   onDiscover,
   onSaveStorage,
   onUpdated,
@@ -60,12 +56,10 @@ export function PoolsCard({
   currentSystemPool: string;
   overcommitRatio: string;
   storageOvercommitRatio: number;
-  fsidConflict: SharedBackendFsidConflict | null;
   discoverPending: boolean;
   updatePending: boolean;
   onSystemPoolIdChange: (value: string) => void;
   onOvercommitRatioChange: (value: string) => void;
-  onDismissFsidConflict: () => void;
   onDiscover: () => void;
   onSaveStorage: () => void;
   onUpdated: () => void;
@@ -76,7 +70,7 @@ export function PoolsCard({
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div>
             <CardTitle className="flex items-center gap-2 text-base"><HardDriveIcon />存储池能力</CardTitle>
-            <CardDescription>前端只读取后端下发的能力，不根据驱动名称推断扩缩容行为。此处只管理本机存储池，不列出逻辑共享卷。</CardDescription>
+            <CardDescription>此处只管理本机 dir/lvm 等本地池。CephFS 执行端请到「共享存储」登记。</CardDescription>
           </div>
           <Button variant="outline" size="sm" onClick={onDiscover} disabled={discoverPending}>
             <RefreshCw className={discoverPending ? 'h-4 w-4 animate-spin' : 'h-4 w-4'} />发现存储池
@@ -84,9 +78,6 @@ export function PoolsCard({
         </div>
       </CardHeader>
       <CardContent className="space-y-3">
-        {fsidConflict && (
-          <FsidConflictAlert conflict={fsidConflict} onDismiss={onDismissFsidConflict} />
-        )}
         <div className="grid gap-3 rounded-md border bg-muted/20 p-3 md:grid-cols-3">
           <FormField id="server-system-pool" label="系统盘池">
             <Select
@@ -123,7 +114,7 @@ export function PoolsCard({
         {poolsError ? (
           <QueryErrorState error={poolsError} resourceName="存储池" onRetry={onRetryPools} />
         ) : pools.length === 0 ? (
-          <p className="text-sm text-muted-foreground">尚未发现存储池。</p>
+          <p className="text-sm text-muted-foreground">尚未发现本地存储池。CephFS 执行端请到「共享存储」登记。</p>
         ) : (
           <div className="rounded-md border overflow-x-auto">
             <table className="w-full min-w-[760px] text-sm">
@@ -169,7 +160,6 @@ function StoragePoolRow({
       expectedRevision: pool.revision,
       registered,
       displayName: pool.displayName,
-      sharedBackendId: pool.sharedBackendId,
     }),
     onSuccess: () => {
       setConfirmUnregister(false);
@@ -182,7 +172,7 @@ function StoragePoolRow({
     <tr className="border-t">
       <td className="px-3 py-2"><div className="font-medium">{pool.displayName ?? pool.incusName}</div><div className="font-mono text-xs text-muted-foreground">{pool.driver} · {pool.resizeFamily}</div></td>
       <td className="px-3 py-2">{usedTotalLabel(pool.usedBytes, pool.totalBytes)}<div className="text-xs text-muted-foreground">{pool.quotaEffective === null ? '配额未知' : pool.quotaEffective ? '配额生效' : '配额未生效'}</div></td>
-      <td className="px-3 py-2"><div className="flex flex-wrap gap-1"><Badge variant={capability.growOnline ? 'success' : 'secondary'}>在线扩容</Badge><Badge variant={capability.shrinkOnline ? 'success' : capability.shrinkNever ? 'destructive' : 'warning'}>{capability.shrinkOnline ? '在线缩容' : capability.shrinkNever ? '不可缩容' : '需停机/卸载'}</Badge>{pool.rootDiskCapable && <Badge variant="outline">系统盘</Badge>}{pool.shareable && <Badge variant="outline">共享</Badge>}</div></td>
+      <td className="px-3 py-2"><div className="flex flex-wrap gap-1"><Badge variant={capability.growOnline ? 'success' : 'secondary'}>在线扩容</Badge><Badge variant={capability.shrinkOnline ? 'success' : capability.shrinkNever ? 'destructive' : 'warning'}>{capability.shrinkOnline ? '在线缩容' : capability.shrinkNever ? '不可缩容' : '需停机/卸载'}</Badge>{pool.rootDiskCapable && <Badge variant="outline">系统盘</Badge>}</div></td>
       <td className="px-3 py-2">{pool.registered ? '已登记' : '未登记'}</td>
       <td className="px-3 py-2">
         <Button

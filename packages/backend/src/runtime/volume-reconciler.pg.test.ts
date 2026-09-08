@@ -123,7 +123,7 @@ describePg('volume reconciler equal-node destroy', () => {
       expect([
         clientA.deleteStorageVolume.mock.calls.length,
         clientB.deleteStorageVolume.mock.calls.length,
-      ].sort()).toEqual([0, 1]);
+      ]).toEqual([1, 1]);
       expect(
         await database.selectFrom('control.volumes').select('id').where('id', '=', fixture.volumeId).execute(),
       ).toHaveLength(0);

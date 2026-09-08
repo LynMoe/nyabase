@@ -28,6 +28,7 @@ import {
 } from '../components/ui/table.js';
 import { Pagination } from '../components/ui/pagination.js';
 import { Page } from '../components/layout/page.js';
+import { SectionCard } from '../components/layout/section-card.js';
 import { PageHeader } from '../components/layout/page-header.js';
 import { QueryView } from '../components/layout/query-view.js';
 import { EmptyState } from '../components/layout/empty-state.js';
@@ -137,10 +138,10 @@ export default function AuditPage() {
         empty={<EmptyState title="暂无审计记录" />}
       >
         {(list) => (
-          <div className="rounded-lg border border-border bg-card">
+          <SectionCard flush>
             <Table className="min-w-[760px]">
               <TableHeader>
-                <TableRow className="bg-muted/50 hover:bg-muted/50">
+                <TableRow>
                   <TableHead className="w-44">时间</TableHead>
                   <TableHead className="w-48">操作者</TableHead>
                   <TableHead className="w-48">操作</TableHead>
@@ -190,7 +191,7 @@ export default function AuditPage() {
                 ))}
               </TableBody>
             </Table>
-          </div>
+          </SectionCard>
         )}
       </QueryView>
 
@@ -237,7 +238,7 @@ function AuditDetailDialog({
 }) {
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-4xl">
+      <DialogContent className="sm:max-w-4xl">
         <DialogHeader>
           <DialogTitle>审计详情</DialogTitle>
           <DialogDescription>查看该条操作的主体、目标和原始记录。</DialogDescription>
@@ -348,8 +349,9 @@ function SnapshotPanel({
         <span className="text-xs font-medium text-muted-foreground">{title}</span>
         <Badge variant="outline" className="rounded-md">{resourceTypeLabel(value.type)}</Badge>
       </div>
-      <div className="truncate text-sm font-medium text-foreground">{value.name ?? value.id ?? '-'}</div>
-      {value.id && <div className="mt-1 break-all font-mono text-xs text-muted-foreground">{value.id}</div>}
+      <div className="truncate text-sm font-medium text-foreground" title={value.id ?? undefined}>
+        {value.name ?? value.id ?? '-'}
+      </div>
       {snapshot?.labels && Object.keys(snapshot.labels).length > 0 && (
         <dl className="mt-3 grid gap-2 text-xs">
           {Object.entries(snapshot.labels).map(([key, labelValue]) => (

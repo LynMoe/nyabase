@@ -1,3 +1,4 @@
+import { NVIDIA_GPU_EXTENSION_ID } from './id.js';
 import { GpuGrantMode, type NvidiaGpuGrant } from './schema.js';
 
 export type { NvidiaGpuGrant };
@@ -7,6 +8,17 @@ export type GpuPickerMode = 'none' | 'all' | 'specific';
 export type NvidiaGpuGrantPickerEvent =
   | { readonly type: 'mode'; readonly mode: GpuPickerMode }
   | { readonly type: 'pci'; readonly pciAddresses: readonly string[] };
+
+/** Compact grant chip. none / missing / empty pci → omit (never `0GPU`). */
+export function formatGrantSummary(
+  grants: Record<string, unknown> | null | undefined,
+): string | null {
+  const parsed = parseGrant(grants?.[NVIDIA_GPU_EXTENSION_ID]);
+  if (!parsed || parsed.mode === GpuGrantMode.None) return null;
+  if (parsed.mode === GpuGrantMode.All) return '全部GPU';
+  if (parsed.pciAddresses.length === 0) return null;
+  return `${parsed.pciAddresses.length}GPU`;
+}
 
 export function parseGrant(value: unknown): NvidiaGpuGrant | null {
   if (typeof value !== 'object' || value === null) return null;

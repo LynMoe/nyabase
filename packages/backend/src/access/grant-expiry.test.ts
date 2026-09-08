@@ -1,8 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import {
   classifyGrantExpiry,
+  compareGrantCandidates,
   expiresAtSortKey,
   grantPurgeAt,
+  selectLiveGrantCandidate,
   selectWinningGrantCandidate,
   GRANT_EXPIRY_GRACE_MS,
 } from './grant-expiry.js';
@@ -188,6 +190,85 @@ describe('selectWinningGrantCandidate', () => {
     ], now);
     expect(winner?.phase).toBe('grace');
     expect(winner?.candidate.tieBreaker).toBe('later-low-priority');
+  });
+});
+
+describe('selectLiveGrantCandidate', () => {
+  const now = new Date('2026-06-01T00:00:00.000Z');
+
+  it('ignores grace covers and returns null when nothing is live', () => {
+    expect(selectLiveGrantCandidate([
+      {
+        ...base,
+        scopeRank: 0,
+        priority: 0,
+        tieBreaker: 'direct',
+        expiresAt: new Date('2026-05-20T00:00:00.000Z'),
+      },
+    ], now)).toBeNull();
+  });
+
+  it('prefers a live direct grant over a later live group grant', () => {
+    const winner = selectLiveGrantCandidate([
+      {
+        ...base,
+        scopeRank: 1,
+        priority: 100,
+        tieBreaker: 'g-late',
+        expiresAt: new Date('2026-08-01T00:00:00.000Z'),
+      },
+      {
+        ...base,
+        scopeRank: 0,
+        priority: 0,
+        tieBreaker: 'direct',
+        expiresAt: new Date('2026-06-15T00:00:00.000Z'),
+      },
+    ], now);
+    expect(winner?.tieBreaker).toBe('direct');
+  });
+
+  it('among live groups prefers later expiry then priority', () => {
+    const winner = selectLiveGrantCandidate([
+      {
+        ...base,
+        scopeRank: 1,
+        priority: 100,
+        tieBreaker: 'early-high',
+        expiresAt: new Date('2026-06-10T00:00:00.000Z'),
+      },
+      {
+        ...base,
+        scopeRank: 1,
+        priority: 1,
+        tieBreaker: 'late-low',
+        expiresAt: new Date('2026-08-01T00:00:00.000Z'),
+      },
+    ], now);
+    expect(winner?.tieBreaker).toBe('late-low');
+  });
+});
+
+describe('compareGrantCandidates', () => {
+  const now = new Date('2026-06-01T00:00:00.000Z');
+
+  it('ranks live ahead of grace before scope', () => {
+    const order = compareGrantCandidates(
+      {
+        scopeRank: 0,
+        priority: 0,
+        tieBreaker: 'grace-direct',
+        expiresAt: new Date('2026-05-20T00:00:00.000Z'),
+      },
+      {
+        scopeRank: 1,
+        priority: 1,
+        tieBreaker: 'live-group',
+        expiresAt: new Date('2026-07-01T00:00:00.000Z'),
+      },
+      now,
+    );
+    expect(order).toBeGreaterThan(0);
   });
 });
 

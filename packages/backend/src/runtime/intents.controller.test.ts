@@ -9,7 +9,11 @@ import {
 import { describe, expect, it, vi } from 'vitest';
 import { ANY_CAPS_KEY } from '../auth/decorators/require-caps.decorator.js';
 import type { UserRecord } from '../domain/domain-records.js';
-import { AdminIntentsController } from './intents.controller.js';
+import {
+  AdminIntentsController,
+  adminIntentListOptions,
+  listOptions,
+} from './intents.controller.js';
 import type { IntentRecord, IntentRepository } from './intent.repository.js';
 import type { AccessResolverService } from '../access/access-resolver.service.js';
 
@@ -119,16 +123,87 @@ describe('AdminIntentsController capabilities', () => {
     await admin.list({}, actor);
 
     expect(intents.list).toHaveBeenCalledWith({
-      limit: 50,
+      limit: 500,
       cursor: undefined,
       status: undefined,
       kind: undefined,
+      resourceType: undefined,
+      serverId: undefined,
       resourceTypes: [
         IntentResourceType.Container,
         IntentResourceType.ImageAssignment,
         IntentResourceType.Server,
       ],
     });
+  });
+
+  it('forwards query resourceType and serverId only through adminIntentListOptions', async () => {
+    const serverId = '00000000-0000-4000-8000-000000000003';
+    const query = {
+      resourceType: IntentResourceType.Container,
+      serverId,
+      status: IntentStatus.Pending,
+    };
+    expect(listOptions(query)).toEqual({
+      limit: 50,
+      cursor: undefined,
+      status: IntentStatus.Pending,
+      kind: undefined,
+    });
+    expect(listOptions({})).toEqual({
+      limit: 50,
+      cursor: undefined,
+      status: undefined,
+      kind: undefined,
+    });
+    expect(listOptions(query)).not.toHaveProperty('resourceType');
+    expect(listOptions(query)).not.toHaveProperty('serverId');
+    expect(() => listOptions({ ...query, limit: 500 })).toThrow();
+    expect(adminIntentListOptions({ limit: 500 }).limit).toBe(500);
+    expect(adminIntentListOptions(query)).toEqual({
+      limit: 500,
+      cursor: undefined,
+      status: IntentStatus.Pending,
+      kind: undefined,
+      resourceType: IntentResourceType.Container,
+      serverId,
+    });
+    expect(adminIntentListOptions({ ...query, limit: 50 })).toEqual({
+      limit: 50,
+      cursor: undefined,
+      status: IntentStatus.Pending,
+      kind: undefined,
+      resourceType: IntentResourceType.Container,
+      serverId,
+    });
+
+    const { controller: admin, intents } = controller({
+      capabilities: new Set([
+        Capability.ManageContainersAny,
+        Capability.ManageServers,
+      ]),
+    });
+    await admin.list(query, actor);
+    expect(intents.list).toHaveBeenCalledWith({
+      limit: 500,
+      cursor: undefined,
+      status: IntentStatus.Pending,
+      kind: undefined,
+      resourceType: IntentResourceType.Container,
+      serverId,
+      resourceTypes: undefined,
+    });
+  });
+
+  it('returns an empty page when the actor cannot administer the requested resourceType', async () => {
+    const { controller: admin, intents } = controller({
+      capabilities: new Set([Capability.ManageContainersAny]),
+    });
+
+    const result = await admin.list({ resourceType: IntentResourceType.Volume }, actor);
+
+    expect(result).toEqual({ items: [], nextCursor: null });
+    expect(intents.list).not.toHaveBeenCalled();
   });
 
   it('hides get and retry for intents outside the actor capabilities', async () => {

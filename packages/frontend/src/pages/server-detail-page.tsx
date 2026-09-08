@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { getRouteApi, Link, useNavigate } from '@tanstack/react-router';
-import { Trash2 } from 'lucide-react';
+import { Activity, Cpu, Gauge, HardDrive, History, KeyRound, ListChecks, Trash2 } from 'lucide-react';
 import {
   Capability,
   PreflightStatus,
@@ -15,6 +15,7 @@ import {
   type ServerPreflightDto,
   type ServerDto,
   type ServerExtensionEnablementDto,
+  type StoragePoolDiscoverResult,
   type StoragePoolDto,
 } from '@nyabase/common';
 import { api } from '../lib/api.js';
@@ -26,28 +27,49 @@ import { ConfirmDialog } from '../components/layout/confirm-dialog.js';
 import { Page } from '../components/layout/page.js';
 import { PageHeader } from '../components/layout/page-header.js';
 import { QueryView } from '../components/layout/query-view.js';
+import { Tabs, TabsContent, TabsList, TabsTrigger } from '../components/ui/tabs.js';
 import { ConnectCard } from '../components/servers/connect-card.js';
 import { PreflightCard } from '../components/servers/preflight-card.js';
 import { NodeMetricsCard } from '../components/servers/node-metrics-card.js';
 import { PoolsCard } from '../components/servers/pools-card.js';
+import { ServerStorageTab } from '../components/servers/server-storage-tab.js';
 import { CertificateCard } from '../components/servers/certificate-card.js';
 import { serverStatusLabel } from '../lib/display-labels.js';
 import { queryKeys } from '../lib/query-keys.js';
 import { toast } from '../hooks/use-toast.js';
 import { useAuthStore } from '../store/auth.js';
 import { ResourceIntentFailures } from '../components/intents/resource-intent-failures.js';
-import {
-  parseSharedBackendFsidConflict,
-  type SharedBackendFsidConflict,
-} from '../lib/storage-shrink.js';
 import { ExtensionSlots } from '../extensions/slots.js';
+import { ServerExtensionSupport } from '../components/servers/server-extension-support.js';
 import { Switch } from '../components/ui/switch.js';
 
 const routeApi = getRouteApi('/servers/$id');
 
+export const SERVER_DETAIL_TABS = [
+  'overview', 'connect', 'storage', 'preflight', 'metrics', 'extensions', 'activity',
+] as const;
+export type ServerDetailTab = (typeof SERVER_DETAIL_TABS)[number];
+
+const SERVER_DETAIL_TAB_ITEMS = [
+  ['overview', '概览', Gauge],
+  ['connect', '接入', KeyRound],
+  ['storage', '存储', HardDrive],
+  ['preflight', '检查', ListChecks],
+  ['metrics', '监控', Activity],
+  ['extensions', '扩展', Cpu],
+  ['activity', '活动', History],
+] as const;
+
+export function parseServerDetailTab(value: unknown): ServerDetailTab {
+  return SERVER_DETAIL_TABS.includes(value as ServerDetailTab)
+    ? (value as ServerDetailTab)
+    : 'overview';
+}
+
 export default function ServerDetailPage() {
   const { id } = routeApi.useParams();
-  const navigate = useNavigate();
+  const { tab } = routeApi.useSearch();
+  const navigate = useNavigate({ from: '/servers/$id' });
   const queryClient = useQueryClient();
   const [trustToken, setTrustToken] = useState('');
   const [expectedFingerprint, setExpectedFingerprint] = useState('');
@@ -58,7 +80,6 @@ export default function ServerDetailPage() {
   const [nodeMetricsEndpoint, setNodeMetricsEndpoint] = useState('');
   const [nodeMetricsCertFingerprint, setNodeMetricsCertFingerprint] = useState('');
   const [nodeMetricsToken, setNodeMetricsToken] = useState('');
-  const [fsidConflict, setFsidConflict] = useState<SharedBackendFsidConflict | null>(null);
   const [clearMetricsOpen, setClearMetricsOpen] = useState(false);
   const [rotateOpen, setRotateOpen] = useState(false);
   const [deleteOpen, setDeleteOpen] = useState(false);
@@ -67,6 +88,10 @@ export default function ServerDetailPage() {
   const canManageCertificates = capabilities.includes(Capability.ManageCertificates);
   const canManageServers = capabilities.includes(Capability.ManageServers);
   const canViewCertificate = canManageCertificates || canManageServers;
+
+  const selectTab = (next: ServerDetailTab) => {
+    void navigate({ search: (prev) => ({ ...prev, tab: next }) });
+  };
 
   const serverQuery = useQuery({
     queryKey: queryKeys.servers.detail(id),
@@ -79,22 +104,29 @@ export default function ServerDetailPage() {
   const extensionsQuery = useQuery({
     queryKey: queryKeys.servers.extensions(id),
     queryFn: () => api.get<ServerExtensionEnablementDto[]>(`/admin/servers/${id}/extensions`),
-    enabled: canManageServers,
+    enabled: tab === 'extensions' && canManageServers,
   });
   const putExtension = useMutation({
     mutationFn: (item: { extensionId: string; enabled: boolean }) =>
       api.put<ServerExtensionEnablementDto>(`/admin/servers/${id}/extensions/${item.extensionId}`, {
         enabled: item.enabled,
       }),
-    onSuccess: () => {
+    onSuccess: (result) => {
       void queryClient.invalidateQueries({ queryKey: queryKeys.servers.extensions(id) });
       void queryClient.invalidateQueries({ queryKey: queryKeys.servers.detail(id) });
+      if (result.enabled && result.support.supported === false) {
+        toast({
+          title: '扩展已启用',
+          description: '本机检测未通过，启用后仍可能无法把该卡分配给容器。',
+        });
+      }
     },
     onError: (error) => toast({ title: '扩展更新失败', description: errorMessage(error), variant: 'destructive' }),
   });
   const preflightQuery = useQuery({
     queryKey: queryKeys.servers.preflight(id),
     queryFn: () => api.get<ServerPreflightDto>(`/admin/servers/${id}/preflight`),
+    enabled: tab === 'preflight',
   });
   const certificateQuery = useQuery({
     queryKey: queryKeys.certificate,
@@ -115,6 +147,7 @@ export default function ServerDetailPage() {
     void queryClient.invalidateQueries({ queryKey: queryKeys.servers.pools(id, true) });
     void queryClient.invalidateQueries({ queryKey: queryKeys.servers.preflight(id) });
     void queryClient.invalidateQueries({ queryKey: queryKeys.certificate });
+    void queryClient.invalidateQueries({ queryKey: queryKeys.sharedBackends.admin });
   };
 
   const connect = useMutation({
@@ -150,15 +183,12 @@ export default function ServerDetailPage() {
   });
 
   const discoverPools = useMutation({
-    mutationFn: () => api.post<StoragePoolDto[]>(`/admin/servers/${id}/storage-pools/discover`),
-    onSuccess: (pools) => {
-      setFsidConflict(null);
-      toast({ title: '存储池已刷新', description: `发现 ${pools.length} 个池。` });
+    mutationFn: () => api.post<StoragePoolDiscoverResult>(`/admin/servers/${id}/storage-pools/discover`),
+    onSuccess: (result) => {
+      toast({ title: '存储池已刷新', description: `发现 ${result.pools.length} 个本地池。` });
       invalidateServer();
     },
     onError: (error) => {
-      const conflict = parseSharedBackendFsidConflict(error);
-      if (conflict) setFsidConflict(conflict);
       toast({ title: '发现存储池失败', description: errorMessage(error), variant: 'destructive' });
     },
   });
@@ -246,6 +276,8 @@ export default function ServerDetailPage() {
   const preflight = preflightQuery.data;
   const selectedPool = pools.find((pool) => pool.id === selectedPoolId);
   const currentSystemPool = server?.systemPoolId ?? '';
+  const registeredPoolCount = pools.filter((pool) => pool.registered).length;
+  const extensions = extensionsQuery.data ?? [];
 
   return (
     <Page testId="server-connect-preflight">
@@ -282,82 +314,112 @@ export default function ServerDetailPage() {
         onBack={() => window.history.back()}
       >
         {(loaded) => (
-          <>
-            <Card>
-              <CardHeader>
-                <CardTitle className="text-base">接入清单</CardTitle>
-                <CardDescription>按顺序完成登记、互信、存储池、前置检查，再到 IP 池绑定。</CardDescription>
-              </CardHeader>
-              <CardContent>
-                <ol className="list-decimal space-y-1.5 pl-5 text-sm">
-                  <li>登记服务器（已完成）</li>
-                  <li>
-                    互信
-                    {loaded.incusVersion || loaded.serverCertFingerprint
-                      ? ' · 已连接'
-                      : ' · 在下方粘贴 trust token 并连接'}
-                  </li>
-                  <li>
-                    发现并登记存储池
-                    {pools.some((pool) => pool.registered)
-                      ? ` · 已登记 ${pools.filter((pool) => pool.registered).length} 个`
-                      : ' · 发现后点击登记'}
-                  </li>
-                  <li>
-                    前置检查
-                    {loaded.preflightStatus === PreflightStatus.Passed ? ' · 已通过' : ' · 选择探针池与地址后运行'}
-                  </li>
-                  <li>
-                    <Link to="/ip-pools" className="underline">去 IP 池绑定</Link>
-                  </li>
-                </ol>
-              </CardContent>
-            </Card>
-
-            {canManageServers && (extensionsQuery.data?.length ?? 0) > 0 ? (
+          <Tabs
+            value={tab}
+            onValueChange={(value) => selectTab(value as ServerDetailTab)}
+            data-testid="server-detail-tabs"
+          >
+            <TabsList>
+              {SERVER_DETAIL_TAB_ITEMS.map(([key, label, Icon]) => (
+                <TabsTrigger key={key} value={key} className="gap-1.5" data-testid={`server-tab-${key}`}>
+                  <Icon className="h-4 w-4" />{label}
+                </TabsTrigger>
+              ))}
+            </TabsList>
+            <TabsContent value="overview" className="space-y-6">
               <Card>
                 <CardHeader>
-                  <CardTitle className="text-base">服务器卡扩展</CardTitle>
-                  <CardDescription>启用后才允许把该卡分配给容器。占用中的扩展不能取消。</CardDescription>
+                  <CardTitle className="text-base">身份</CardTitle>
                 </CardHeader>
-                <CardContent className="space-y-3">
-                  {(extensionsQuery.data ?? []).map((item) => (
-                    <div key={item.extensionId} className="space-y-1 rounded-md border p-3">
-                      <div className="flex items-center justify-between gap-3">
-                        <div>
-                          <p className="text-sm font-medium">{item.displayName}</p>
-                          <p className="text-xs text-muted-foreground">
-                            {item.extensionId}
-                            {item.occupiedDeviceCount > 0 ? ` · ${item.occupiedDeviceCount} 占用` : ''}
-                          </p>
-                        </div>
-                        <Switch
-                          checked={item.enabled}
-                          disabled={putExtension.isPending || (item.enabled && item.occupiedDeviceCount > 0)}
-                          onCheckedChange={(enabled) => putExtension.mutate({
-                            extensionId: item.extensionId,
-                            enabled,
-                          })}
-                        />
-                      </div>
-                      <ExtensionSlots area="server.detail.enablement" ctx={{ serverId: id, item }} />
-                      <ExtensionSlots area="server.detail.health" ctx={{ serverId: id, item }} />
-                    </div>
-                  ))}
+                <CardContent className="grid gap-3 text-sm sm:grid-cols-2">
+                  <IdentityRow label="slug" value={loaded.slug} mono />
+                  <IdentityRow label="接入地址" value={loaded.apiEndpoint} mono />
+                  <IdentityRow label="Incus 版本" value={loaded.incusVersion ?? '未连接'} />
+                  <IdentityRow label="系统盘池" value={loaded.systemPoolName ?? loaded.systemPoolId ?? '未指定'} />
+                  <IdentityRow label="存储超分" value={String(loaded.storageOvercommitRatio)} />
                 </CardContent>
               </Card>
-            ) : null}
-
-            <div className="grid items-start gap-4 xl:grid-cols-2">
-              <ConnectCard
-                server={loaded}
-                trustToken={trustToken}
-                expectedFingerprint={expectedFingerprint}
-                connectPending={connect.isPending}
-                onTrustTokenChange={setTrustToken}
-                onExpectedFingerprintChange={setExpectedFingerprint}
-                onConnect={() => connect.mutate()}
-              />
+              <Card>
+                <CardHeader>
+                  <CardTitle className="text-base">接入清单</CardTitle>
+                  <CardDescription>按顺序完成互信、存储池、前置检查，再到 IP 池绑定。</CardDescription>
+                </CardHeader>
+                <CardContent>
+                  <ol className="list-decimal space-y-1.5 pl-5 text-sm">
+                    <li>
+                      <button type="button" className="underline" onClick={() => selectTab('connect')}>互信</button>
+                      {loaded.incusVersion || loaded.serverCertFingerprint
+                        ? ' · 已连接'
+                        : ' · 在接入页粘贴 trust token 并连接'}
+                    </li>
+                    <li>
+                      <button type="button" className="underline" onClick={() => selectTab('storage')}>存储池</button>
+                      {registeredPoolCount > 0
+                        ? ` · 已登记 ${registeredPoolCount} 个`
+                        : ' · 发现后点击登记'}
+                    </li>
+                    <li>
+                      <button type="button" className="underline" onClick={() => selectTab('preflight')}>前置检查</button>
+                      {loaded.preflightStatus === PreflightStatus.Passed ? ' · 已通过' : ' · 选择探针池与地址后运行'}
+                    </li>
+                    <li>
+                      <Link to="/ip-pools" className="underline">去 IP 池绑定</Link>
+                    </li>
+                  </ol>
+                </CardContent>
+              </Card>
+            </TabsContent>
+            <TabsContent value="connect" className="space-y-6">
+              <div className="grid items-start gap-4 xl:grid-cols-2">
+                <ConnectCard
+                  server={loaded}
+                  trustToken={trustToken}
+                  expectedFingerprint={expectedFingerprint}
+                  connectPending={connect.isPending}
+                  onTrustTokenChange={setTrustToken}
+                  onExpectedFingerprintChange={setExpectedFingerprint}
+                  onConnect={() => connect.mutate()}
+                />
+                <CertificateCard
+                  serverId={id}
+                  serverName={loaded.name}
+                  canViewCertificate={canViewCertificate}
+                  canManageCertificates={canManageCertificates}
+                  certificateQuery={canViewCertificate ? certificateQuery : undefined}
+                  rotatePending={rotateCertificate.isPending}
+                  rotateOpen={rotateOpen}
+                  onRotateOpenChange={setRotateOpen}
+                  onRotate={() => rotateCertificate.mutate()}
+                />
+              </div>
+            </TabsContent>
+            <TabsContent value="storage" className="space-y-6" data-testid="server-storage-tab">
+              <ServerStorageTab serverId={id} pools={pools}>
+                <PoolsCard
+                  pools={pools}
+                  poolsError={poolsQuery.isError ? poolsQuery.error : null}
+                  onRetryPools={() => { void poolsQuery.refetch(); }}
+                  canManageStoragePools={canManageStoragePools}
+                  selectedPool={selectedPool}
+                  systemPoolId={systemPoolId}
+                  currentSystemPool={currentSystemPool}
+                  overcommitRatio={overcommitRatio}
+                  storageOvercommitRatio={loaded.storageOvercommitRatio}
+                  discoverPending={discoverPools.isPending}
+                  updatePending={updateServer.isPending}
+                  onSystemPoolIdChange={setSystemPoolId}
+                  onOvercommitRatioChange={setOvercommitRatio}
+                  onDiscover={() => discoverPools.mutate()}
+                  onSaveStorage={() => updateServer.mutate({
+                    expectedRevision: loaded.revision,
+                    systemPoolId: (systemPoolId || currentSystemPool) || null,
+                    storageOvercommitRatio: Number(overcommitRatio || loaded.storageOvercommitRatio),
+                  })}
+                  onUpdated={invalidateServer}
+                />
+              </ServerStorageTab>
+            </TabsContent>
+            <TabsContent value="preflight">
               <PreflightCard
                 pools={pools}
                 selectedPoolId={selectedPoolId}
@@ -369,60 +431,89 @@ export default function ServerDetailPage() {
                 onProbeAddressChange={setProbeAddress}
                 onRunPreflight={() => runPreflight.mutate()}
               />
-            </div>
-
-            <NodeMetricsCard
-              server={loaded}
-              endpoint={nodeMetricsEndpoint}
-              certFingerprint={nodeMetricsCertFingerprint}
-              token={nodeMetricsToken}
-              updatePending={updateServer.isPending}
-              clearOpen={clearMetricsOpen}
-              onEndpointChange={setNodeMetricsEndpoint}
-              onCertFingerprintChange={setNodeMetricsCertFingerprint}
-              onTokenChange={setNodeMetricsToken}
-              onSave={saveNodeMetrics}
-              onClear={clearNodeMetrics}
-              onClearOpenChange={setClearMetricsOpen}
-            />
-
-            <PoolsCard
-              pools={pools}
-              poolsError={poolsQuery.isError ? poolsQuery.error : null}
-              onRetryPools={() => { void poolsQuery.refetch(); }}
-              canManageStoragePools={canManageStoragePools}
-              selectedPool={selectedPool}
-              systemPoolId={systemPoolId}
-              currentSystemPool={currentSystemPool}
-              overcommitRatio={overcommitRatio}
-              storageOvercommitRatio={loaded.storageOvercommitRatio}
-              fsidConflict={fsidConflict}
-              discoverPending={discoverPools.isPending}
-              updatePending={updateServer.isPending}
-              onSystemPoolIdChange={setSystemPoolId}
-              onOvercommitRatioChange={setOvercommitRatio}
-              onDismissFsidConflict={() => setFsidConflict(null)}
-              onDiscover={() => discoverPools.mutate()}
-              onSaveStorage={() => updateServer.mutate({
-                expectedRevision: loaded.revision,
-                systemPoolId: (systemPoolId || currentSystemPool) || null,
-                storageOvercommitRatio: Number(overcommitRatio || loaded.storageOvercommitRatio),
-              })}
-              onUpdated={invalidateServer}
-            />
-
-            <CertificateCard
-              serverId={id}
-              canViewCertificate={canViewCertificate}
-              canManageCertificates={canManageCertificates}
-              certificateQuery={canViewCertificate ? certificateQuery : undefined}
-              rotatePending={rotateCertificate.isPending}
-              rotateOpen={rotateOpen}
-              onRotateOpenChange={setRotateOpen}
-              onRotate={() => rotateCertificate.mutate()}
-            />
-            <ResourceIntentFailures listPath={`/admin/servers/${id}/intents`} admin />
-          </>
+            </TabsContent>
+            <TabsContent value="metrics">
+              <NodeMetricsCard
+                server={loaded}
+                endpoint={nodeMetricsEndpoint}
+                certFingerprint={nodeMetricsCertFingerprint}
+                token={nodeMetricsToken}
+                updatePending={updateServer.isPending}
+                clearOpen={clearMetricsOpen}
+                onEndpointChange={setNodeMetricsEndpoint}
+                onCertFingerprintChange={setNodeMetricsCertFingerprint}
+                onTokenChange={setNodeMetricsToken}
+                onSave={saveNodeMetrics}
+                onClear={clearNodeMetrics}
+                onClearOpenChange={setClearMetricsOpen}
+              />
+            </TabsContent>
+            <TabsContent value="extensions">
+              {extensionsQuery.isLoading ? (
+                <p className="text-sm text-muted-foreground">加载扩展...</p>
+              ) : canManageServers && extensions.length > 0 ? (
+                <Card>
+                  <CardHeader className="flex flex-col gap-3 space-y-0 sm:flex-row sm:items-start sm:justify-between">
+                    <div className="space-y-1.5">
+                      <CardTitle className="text-base">服务器卡扩展</CardTitle>
+                      <CardDescription>
+                        启用后才允许把该卡分配给容器。占用中的扩展不能取消。本机检测只反映驱动与前置条件，不阻止启用。
+                      </CardDescription>
+                    </div>
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      disabled={extensionsQuery.isFetching}
+                      onClick={() => { void extensionsQuery.refetch(); }}
+                    >
+                      重新检测
+                    </Button>
+                  </CardHeader>
+                  <CardContent className="space-y-3">
+                    {extensions.map((item) => (
+                      <div key={item.extensionId} className="space-y-2 rounded-md border p-3">
+                        <div className="flex items-center justify-between gap-3">
+                          <div>
+                            <p className="text-sm font-medium">{item.displayName}</p>
+                            <p className="text-xs text-muted-foreground">
+                              {item.extensionId}
+                              {item.occupiedDeviceCount > 0 ? ` · ${item.occupiedDeviceCount} 占用` : ''}
+                            </p>
+                          </div>
+                          <Switch
+                            checked={item.enabled}
+                            disabled={putExtension.isPending || (item.enabled && item.occupiedDeviceCount > 0)}
+                            onCheckedChange={(enabled) => putExtension.mutate({
+                              extensionId: item.extensionId,
+                              enabled,
+                            })}
+                          />
+                        </div>
+                        <ServerExtensionSupport support={item.support} />
+                        <ExtensionSlots area="server.detail.enablement" ctx={{ serverId: id, item }} />
+                        <ExtensionSlots area="server.detail.health" ctx={{ serverId: id, item }} />
+                      </div>
+                    ))}
+                  </CardContent>
+                </Card>
+              ) : (
+                <Card>
+                  <CardHeader>
+                    <CardTitle className="text-base">服务器卡扩展</CardTitle>
+                    <CardDescription>此服务器没有可启用的卡扩展</CardDescription>
+                  </CardHeader>
+                </Card>
+              )}
+            </TabsContent>
+            <TabsContent value="activity">
+              <ResourceIntentFailures
+                listPath={`/admin/servers/${id}/intents`}
+                admin
+                enabled={tab === 'activity'}
+              />
+            </TabsContent>
+          </Tabs>
         )}
       </QueryView>
       <ConfirmDialog
@@ -436,5 +527,14 @@ export default function ServerDetailPage() {
         onOpenChange={setDeleteOpen}
       />
     </Page>
+  );
+}
+
+function IdentityRow({ label, value, mono = false }: { label: string; value: string; mono?: boolean }) {
+  return (
+    <div className="min-w-0">
+      <p className="text-xs text-muted-foreground">{label}</p>
+      <p className={mono ? 'break-all font-mono text-xs' : 'break-all text-sm'}>{value}</p>
+    </div>
   );
 }

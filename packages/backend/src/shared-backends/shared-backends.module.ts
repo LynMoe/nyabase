@@ -8,9 +8,10 @@ import {
 } from './shared-backends.controller.js';
 import { SharedBackendsRepository } from './shared-backends.repository.js';
 import { SharedBackendsService } from './shared-backends.service.js';
+import { StoragePoolsModule } from '../storage-pools/storage-pools.module.js';
 
 @Module({
-  imports: [AuthModule, AccessModule, DatabaseModule],
+  imports: [AuthModule, AccessModule, DatabaseModule, StoragePoolsModule],
   providers: [SharedBackendsRepository, SharedBackendsService],
   controllers: [SharedBackendsController, AdminSharedBackendsController],
   exports: [SharedBackendsRepository, SharedBackendsService],

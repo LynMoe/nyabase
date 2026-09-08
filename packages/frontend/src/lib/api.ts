@@ -380,9 +380,17 @@ async function request<T>(
   }
 
   if (!res.ok) throw await apiErrorFromResponse(res);
-  if (res.status === 204) return undefined as T;
+  const text = res.status === 204 || res.status === 205 ? '' : await res.text();
+  return parseSuccessfulResponseBody<T>(res.status, text);
+}
+
+/** Empty 200/204 is a valid void result; only malformed JSON is INVALID_RESPONSE. */
+export function parseSuccessfulResponseBody<T>(status: number, text: string): T {
+  if (status === 204 || status === 205) return undefined as T;
+  const trimmed = text.trim();
+  if (trimmed === '') return undefined as T;
   try {
-    return await res.json() as T;
+    return JSON.parse(trimmed) as T;
   } catch {
     throw new ApiError(502, 'INVALID_RESPONSE', '服务器响应格式无效，请稍后重试');
   }

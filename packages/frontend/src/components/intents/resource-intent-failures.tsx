@@ -1,5 +1,7 @@
+import { useEffect, useState } from 'react';
 import { useMutation, useQuery } from '@tanstack/react-query';
-import { type CursorPaginatedResponse, type IntentDto } from '@nyabase/common';
+import { IntentStatus, type CursorPaginatedResponse, type IntentDto } from '@nyabase/common';
+import { ChevronDown, ChevronRight, History } from 'lucide-react';
 import { api } from '../../lib/api.js';
 import { errorMessage } from '../../lib/api-error.js';
 import { queryKeys } from '../../lib/query-keys.js';
@@ -13,6 +15,63 @@ import {
 import { intentKindLabel, intentStatusLabel } from '../../lib/status-labels.js';
 import { Button } from '../ui/button.js';
 import { toast } from '../../hooks/use-toast.js';
+import { IntentsPanel } from '../containers/intents-panel.js';
+
+export function ResourceIntentHistory({
+  listPath,
+  admin,
+  enabled = true,
+  defaultOpen = false,
+}: {
+  listPath: string;
+  admin: boolean;
+  enabled?: boolean;
+  defaultOpen?: boolean;
+}) {
+  const query = useQuery({
+    queryKey: queryKeys.resourceIntentFailures(admin ? 'admin' : 'user', listPath),
+    queryFn: () => api.get<CursorPaginatedResponse<IntentDto>>(
+      `${listPath}${listPath.includes('?') ? '&' : '?'}limit=50`,
+    ),
+    enabled,
+  });
+  const items = query.data?.items ?? [];
+  const failedCount = items.filter((intent) => intent.status === IntentStatus.Failed).length;
+  const [open, setOpen] = useState(defaultOpen);
+  useEffect(() => {
+    if (failedCount > 0) setOpen(true);
+  }, [failedCount]);
+  if (!enabled) return null;
+  if (query.isLoading) {
+    return <p className="text-xs text-muted-foreground">加载操作历史...</p>;
+  }
+  return (
+    <div className="min-w-0 space-y-2" data-testid="volume-intent-history">
+      <Button
+        type="button"
+        size="sm"
+        variant="ghost"
+        className="h-auto px-0 text-xs"
+        onClick={() => setOpen((current) => !current)}
+        aria-expanded={open}
+      >
+        {open ? <ChevronDown className="h-3.5 w-3.5" /> : <ChevronRight className="h-3.5 w-3.5" />}
+        <History className="h-3.5 w-3.5" />
+        操作历史
+        {items.length > 0 ? `（${items.length}）` : ''}
+        {failedCount > 0 ? ` · ${failedCount} 失败` : ''}
+      </Button>
+      {open && (
+        <IntentsPanel
+          intents={items}
+          admin={admin}
+          embedded
+          onRetry={() => { void query.refetch(); }}
+        />
+      )}
+    </div>
+  );
+}
 
 export function ResourceIntentFailures({
   listPath,

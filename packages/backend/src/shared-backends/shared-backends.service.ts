@@ -9,8 +9,10 @@ import { randomUUID } from 'node:crypto';
 import {
   FailureCode,
   type SharedBackendDto,
+  type SharedBackendExecutorDto,
 } from '@nyabase/common';
 import { SharedBackendsRepository } from './shared-backends.repository.js';
+import { StoragePoolsService } from '../storage-pools/storage-pools.service.js';
 import { isoDate, numberValue } from '../domain/domain-utils.js';
 import { sql, type Kysely } from 'kysely';
 import type { NyabaseDatabase } from '../persistence-pg/database.types.js';
@@ -60,12 +62,14 @@ export class SharedBackendsService {
     private readonly repository: SharedBackendsRepository,
     private readonly transactions: PgTransactionManager,
     @Inject(PG_DATABASE) private readonly database: Kysely<NyabaseDatabase>,
+    private readonly storagePools: StoragePoolsService,
   ) {}
 
   async list(): Promise<SharedBackendDto[]> {
     const rows = await this.repository.list();
     const committed = await this.committedUsedByBackendIds(rows.map((row) => row.id));
-    return rows.map((row) => this.toDto(row, committed.get(row.id) ?? 0));
+    const executors = await this.storagePools.listExecutorsByBackendIds(rows.map((row) => row.id));
+    return rows.map((row) => this.toDto(row, committed.get(row.id) ?? 0, executors.get(row.id) ?? []));
   }
 
   async get(id: string): Promise<SharedBackendDto> {
@@ -74,11 +78,12 @@ export class SharedBackendsService {
     const pools = await this.repository.list();
     const aggregate = pools.find((candidate) => candidate.id === id);
     const committed = await this.committedUsedByBackendIds([id]);
+    const executors = await this.storagePools.listExecutorsByBackendIds([id]);
     return this.toDto({
       ...row,
       server_ids: aggregate?.server_ids ?? [],
       has_online_executor: aggregate?.has_online_executor ?? false,
-    }, committed.get(id) ?? 0);
+    }, committed.get(id) ?? 0, executors.get(id) ?? []);
   }
 
   async listForUser(userId: string): Promise<SharedBackendDto[]> {
@@ -94,7 +99,27 @@ export class SharedBackendsService {
     const ids = new Set(grants
       .filter((grant) => classifyGrantExpiry(grant.expires_at) !== 'lost')
       .map((grant) => grant.shared_backend_id));
-    return (await this.list()).filter((backend) => ids.has(backend.id));
+    const rows = await this.repository.list();
+    const committed = await this.committedUsedByBackendIds(rows.map((row) => row.id));
+    return rows
+      .filter((row) => ids.has(row.id))
+      .map((row) => this.toDto(row, committed.get(row.id) ?? 0));
+  }
+
+  listExecutors(backendId: string) {
+    return this.storagePools.listExecutors(backendId);
+  }
+
+  discoverExecutors(backendId: string, serverId?: string) {
+    return this.storagePools.discoverExecutors(backendId, serverId);
+  }
+
+  patchExecutor(
+    backendId: string,
+    executorId: string,
+    input: { expectedRevision: number; registered: boolean },
+  ) {
+    return this.storagePools.patchExecutor(backendId, executorId, input);
   }
 
   async getForUser(id: string, userId: string): Promise<SharedBackendDto> {
@@ -167,7 +192,13 @@ export class SharedBackendsService {
       }
       throw error;
     }
-    if (result.created) return this.toDto({ ...result.row, server_ids: [], has_online_executor: false }, 0);
+    if (result.created) {
+      return this.toDto(
+        { ...result.row, server_ids: [], has_online_executor: false },
+        0,
+        [],
+      );
+    }
     return this.get(result.row.id);
   }
 
@@ -283,12 +314,12 @@ export class SharedBackendsService {
     updated_at: Date | string;
     server_ids?: string[] | null;
     has_online_executor?: boolean | null;
-  }, committedUsedBytes?: number): SharedBackendDto {
+  }, committedUsedBytes?: number, executors?: SharedBackendExecutorDto[]): SharedBackendDto {
     const dbUsed = row.used_bytes === null ? null : numberValue(row.used_bytes);
     const usedBytes = committedUsedBytes !== undefined
       ? committedUsedBytes
       : dbUsed;
-    return {
+    const dto: SharedBackendDto = {
       id: row.id,
       name: row.name,
       displayName: row.display_name,
@@ -303,5 +334,7 @@ export class SharedBackendsService {
       createdAt: isoDate(row.created_at) ?? new Date(0).toISOString(),
       updatedAt: isoDate(row.updated_at) ?? new Date(0).toISOString(),
     };
+    if (executors !== undefined) dto.executors = executors;
+    return dto;
   }
 }

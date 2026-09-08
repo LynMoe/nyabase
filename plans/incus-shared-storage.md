@@ -2,9 +2,9 @@
 
 | 字段 | 值 |
 | --- | --- |
-| 状态 | Draft |
+| 状态 | Implementing |
 | 作者 | TBD |
-| 日期 | 2026-08-31 |
+| 日期 | 2026-09-07 |
 | 仓库 | `/root/nyabase` |
 | 基线 | equal-node 已在 main 落地（粘性 catalog、`volume.destroy`、`bind_state`、occupancy=PG、`purgeServerControlPlane`）。本文是其上的 **下一刀切**，不是从零重写 Incus 架构。 |
 | 取代 | `plans/incus-shared-volume-equal-nodes.md`（保留文件；本文 Overview/References 标明取代。实现以本文为准。） |
@@ -17,6 +17,8 @@
 equal-node 切掉了假 home：共享卷不再绑死 `volumes.pool_id` 所在服务器，catalog 粘性保留到卷销毁或该机控制面 cascade，`volume.destroy` 用 sentinel claim 做至多一次 `DeleteVolume`（`os.RemoveAll`）。这套已经在 main 上跑。
 
 它仍把共享卷做成「本地卷的跨机变体」：创建要选一台服务器上的池并立刻 `volume.ensure` mkdir；销毁门闩看 **跟踪集成员** 是否 `online`（`VOLUME_DELETE_SERVER_OFFLINE`）；list/create/admin cap/`ManageVolumes`/「数据卷」页把两种产品混在一起。物理事实与产品意图都不是这样。
+
+**本轮落地（2026-09-07）**：equal-node 与共享 create=PG / 惰性 catalog / 对等销毁已在树里。本轮把 **CephFS 执行端从「存储池」产品拿掉**：存储池页与服务器池表只列本地盘；执行端登记改到「共享存储」卡片；授权「存储池」页只授本地池。不引入 Incus cluster、Agent、libcephfs。
 
 本方案把它们做成 **两个产品**：
 

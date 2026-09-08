@@ -71,7 +71,40 @@ export function validateStoragePoolDtos(value, serverId, label = 'storage pool d
   if (value.some((pool) => !isStoragePoolDto(pool, serverId))) {
     blocked(`${label} response contained a malformed storage pool DTO`);
   }
+  if (value.some((pool) => pool.driver === 'cephfs' || pool.shareable === true)) {
+    blocked(`${label} local pools contained a CephFS/shareable executor`);
+  }
   return value;
+}
+
+function isDiscoverIssue(value) {
+  return isRecord(value)
+    && typeof value.code === 'string'
+    && typeof value.message === 'string'
+    && isNullableString(value.identityKey)
+    && isNullableString(value.expectedFsid)
+    && isNullableString(value.discoveredFsid)
+    && isNullableString(value.existingIdentityKey)
+    && isNullableString(value.serverId)
+    && isNullableString(value.incusName)
+    && isNullableString(value.poolId);
+}
+
+export function validateStoragePoolDiscoverResult(
+  value,
+  serverId,
+  label = 'storage pool discovery',
+) {
+  if (!isRecord(value) || !Array.isArray(value.pools) || !Array.isArray(value.identityConflicts)) {
+    blocked(`${label} response was not a discover envelope`);
+  }
+  if (value.identityConflicts.some((issue) => !isDiscoverIssue(issue))) {
+    blocked(`${label} response contained a malformed discover issue`);
+  }
+  return {
+    pools: validateStoragePoolDtos(value.pools, serverId, label),
+    identityConflicts: value.identityConflicts,
+  };
 }
 
 const STORAGE_POOL_IDENTITY_FIELDS = [
@@ -196,5 +229,101 @@ export async function discoverStoragePools(request, serverId, token) {
   } catch {
     blocked('storage pool discovery request failed');
   }
-  return validateStoragePoolDtos(response, serverId);
+  return validateStoragePoolDiscoverResult(response, serverId);
+}
+
+export async function listSharedExecutors(request, backendId, token) {
+  if (typeof request !== 'function') {
+    blocked('shared executor list request client is unavailable');
+  }
+  let response;
+  try {
+    response = await request(
+      `/api/admin/shared-backends/${encodeURIComponent(backendId)}/executors`,
+      { token },
+    );
+  } catch {
+    blocked('shared executor list request failed');
+  }
+  if (!Array.isArray(response)) {
+    blocked('shared executor list response was not an array');
+  }
+  return response;
+}
+
+export async function discoverSharedExecutors(request, backendId, token, serverId) {
+  if (typeof request !== 'function') {
+    blocked('shared executor discovery request client is unavailable');
+  }
+  let response;
+  try {
+    response = await request(
+      `/api/admin/shared-backends/${encodeURIComponent(backendId)}/executors/discover`,
+      {
+        method: 'POST',
+        token,
+        body: serverId ? { serverId } : {},
+      },
+    );
+  } catch {
+    blocked('shared executor discovery request failed');
+  }
+  if (!isRecord(response) || !Array.isArray(response.executors) || !Array.isArray(response.identityConflicts)) {
+    blocked('shared executor discovery response was not a discover envelope');
+  }
+  return response;
+}
+
+export async function registerSharedExecutor(request, backendId, executor, token) {
+  if (typeof request !== 'function') {
+    blocked('shared executor registration request client is unavailable');
+  }
+  if (!isRecord(executor) || !isResourceId(executor.id)) {
+    blocked('shared executor registration input was malformed');
+  }
+  if (executor.registered === true) return executor;
+  let response;
+  try {
+    response = await request(
+      `/api/admin/shared-backends/${encodeURIComponent(backendId)}/executors/${encodeURIComponent(executor.id)}`,
+      {
+        method: 'PATCH',
+        token,
+        body: {
+          expectedRevision: executor.revision,
+          registered: true,
+        },
+      },
+    );
+  } catch {
+    blocked('shared executor registration request failed');
+  }
+  if (!isRecord(response) || response.registered !== true) {
+    blocked('shared executor registration response was not registered');
+  }
+  return response;
+}
+
+export async function findAndRegisterCephExecutor(
+  request,
+  backendId,
+  serverId,
+  incusName,
+  token,
+  label = 'shared executor',
+) {
+  let executors = await listSharedExecutors(request, backendId, token);
+  let found = executors.find((row) => row.serverId === serverId && row.incusName === incusName);
+  if (!found) {
+    await discoverSharedExecutors(request, backendId, token, serverId);
+    executors = await listSharedExecutors(request, backendId, token);
+    found = executors.find((row) => row.serverId === serverId && row.incusName === incusName);
+  }
+  if (!found) {
+    blocked(`${label} ${incusName} was not mapped on ${serverId}`);
+  }
+  if (!found.registered) {
+    found = await registerSharedExecutor(request, backendId, found, token);
+  }
+  return found;
 }

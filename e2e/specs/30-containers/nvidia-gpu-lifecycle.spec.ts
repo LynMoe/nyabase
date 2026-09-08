@@ -6,6 +6,7 @@ import { runCommand } from '../../support/incus-control.js';
 import { eventually } from '../../support/poll.js';
 import {
   createPersonaUser,
+  createUserContainer,
   deletePersonaUser,
   deleteUserContainer,
   errorCode,
@@ -67,6 +68,9 @@ async function enableNvidiaGpu(
     enablement.health?.runtimeReady,
     JSON.stringify(enablement.health),
   ).toBe(true);
+  const checks = Array.isArray(enablement.support?.checks) ? enablement.support.checks : [];
+  const cards = checks.find((check: { id?: string }) => check.id === 'nvidia-cards');
+  expect(cards?.status, JSON.stringify(enablement.support)).toBe('pass');
   return enablement;
 }
 
@@ -112,29 +116,17 @@ async function createAdminContainer(
     namePrefix: string;
     powerIntent: 'running' | 'stopped';
     extensions?: Record<string, unknown>;
-    ownerId?: string;
   },
 ): Promise<{ containerId: string; container: JsonRecord }> {
-  const accepted = await expectJson<JsonRecord>(
-    await adminApi.post('/api/admin/containers', {
-      data: {
-        ownerId: options.ownerId ?? seedState.adminUserId,
-        serverId,
-        imageId: seedState.image.id,
-        name: `${options.namePrefix}-${seedState.runId}-${Date.now().toString(36)}`.slice(0, 63),
-        rootSizeBytes: 2 * GiB,
-        cpuMillis: 500,
-        memBytes: 512 * 1024 * 1024,
-        extensions: options.extensions ?? {},
-        powerIntent: options.powerIntent,
-      },
-    }),
-    202,
-  );
-  const containerId = accepted.resourceId as string;
-  await requireSucceededIntent(adminApi, accepted.intentId, `${options.namePrefix}.create`);
-  const container = await waitStatus(adminApi, containerId, options.powerIntent);
-  return { containerId, container };
+  const created = await createUserContainer(adminApi, seedState, {
+    namePrefix: options.namePrefix,
+    serverId,
+    rootSizeBytes: 2 * GiB,
+    extensions: options.extensions ?? {},
+    powerIntent: options.powerIntent,
+  });
+  const container = await waitStatus(adminApi, created.containerId, options.powerIntent);
+  return { containerId: created.containerId, container };
 }
 
 async function stopAdminContainer(adminApi: ApiClient, containerId: string): Promise<JsonRecord> {
@@ -405,9 +397,8 @@ test(
     await disableNvidiaGpu(adminApi, seedState.server.id);
 
     const createDenied = await readErrorBody(
-      await adminApi.post('/api/admin/containers', {
+      await adminApi.post('/api/containers', {
         data: {
-          ownerId: seedState.adminUserId,
           serverId: seedState.server.id,
           imageId: seedState.image.id,
           name: `e2e-nvoffc-${seedState.runId}-${Date.now().toString(36)}`.slice(0, 63),

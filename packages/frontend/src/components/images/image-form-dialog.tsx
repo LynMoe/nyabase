@@ -70,6 +70,7 @@ export function ImageFormDialog({
     onSuccess: () => {
       toast({ title: mode === 'create' ? '镜像已创建' : '镜像已更新' });
       void queryClient.invalidateQueries({ queryKey: queryKeys.images.admin });
+      if (image?.id) void queryClient.invalidateQueries({ queryKey: queryKeys.images.detail(image.id) });
       onOpenChange(false);
     },
     onError: (mutationError) => setError(mutationError instanceof Error ? mutationError.message : '镜像保存失败'),

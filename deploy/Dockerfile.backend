@@ -16,7 +16,7 @@ COPY package.json pnpm-workspace.yaml pnpm-lock.yaml ./
 COPY packages/common/package.json   packages/common/
 COPY packages/backend/package.json  packages/backend/
 COPY packages/frontend/package.json packages/frontend/
-COPY extensions/nvidia-gpu/package.json extensions/nvidia-gpu/
+COPY extensions ./extensions
 RUN pnpm install --frozen-lockfile
 
 # ── Compile the backend and bundled frontend in dependency order ──
@@ -24,16 +24,22 @@ COPY tsconfig.base.json ./
 COPY packages/common    packages/common
 COPY packages/backend   packages/backend
 COPY packages/frontend  packages/frontend
-COPY extensions/nvidia-gpu extensions/nvidia-gpu
 RUN pnpm --filter @nyabase/common     build && \
-    pnpm --filter @nyabase/nvidia-gpu build && \
+    pnpm --filter "./extensions/*"    build && \
     pnpm --filter @nyabase/frontend   build && \
     pnpm --filter @nyabase/backend    build
 
 # Create a self-contained production deployment:
 # resolves workspace deps and retains only production node_modules
 # (native .node binaries are copied from the already-installed store)
-RUN pnpm --filter @nyabase/backend deploy --prod /deploy
+RUN pnpm --filter @nyabase/backend deploy --prod /deploy \
+ && for pkg in /app/extensions/*; do \
+      [ -d "$pkg/dist" ] || continue; \
+      name=$(basename "$pkg"); \
+      dest="/deploy/node_modules/@nyabase/$name"; \
+      mkdir -p "$dest"; \
+      cp -a "$pkg/dist" "$dest/dist"; \
+    done
 
 # ─────────────────────────────────────────────────────────────────
 # Stage 2 – runner: minimal production image (~no build tools)
@@ -59,7 +65,6 @@ COPY --chown=10001:10001 --from=builder /deploy .
 # overlay the compiled TypeScript output explicitly.
 COPY --chown=10001:10001 --from=builder /app/packages/backend/dist          ./dist
 COPY --chown=10001:10001 --from=builder /app/packages/common/dist           ./node_modules/@nyabase/common/dist
-COPY --chown=10001:10001 --from=builder /app/extensions/nvidia-gpu/dist     ./node_modules/@nyabase/nvidia-gpu/dist
 
 # Bundle the Vite-compiled frontend; NestJS serves it as static assets
 # at process.cwd()/public (→ /app/public) with SPA fallback.

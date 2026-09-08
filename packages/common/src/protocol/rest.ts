@@ -6,6 +6,7 @@ import {
   ContainerPhase,
   ContainerPowerIntent,
   ContainerStatus,
+  FailureCode,
   IntentKind,
   IntentResourceType,
   IntentStatus,
@@ -42,6 +43,7 @@ export type {
   ErrorResponse,
   CreateExecSessionRequest,
   IntentListQuery,
+  AdminIntentListQuery,
   ListSharedVolumesQuery,
   LocalVolumeScope,
   LoginRequest,
@@ -55,7 +57,9 @@ export type {
   PatchIpPoolRequest,
   PatchServerRequest,
   PatchSharedBackendRequest,
+  PatchSharedBackendExecutorRequest,
   PatchStoragePoolRequest,
+  DiscoverSharedExecutorsRequest,
   PatchSystemSettingsRequest,
   PatchServerExtensionRequest,
   PatchVolumeRequest,
@@ -375,6 +379,45 @@ export interface StorageCapacityDto {
   pools: StorageCapacityPoolDto[];
 }
 
+export interface SharedBackendExecutorDto {
+  id: string;
+  backendId: string;
+  serverId: string;
+  serverName: string;
+  serverStatus: ServerStatus;
+  incusName: string;
+  registered: boolean;
+  totalBytes: number | null;
+  usedBytes: number | null;
+  lastObservedAt: string | null;
+  revision: number;
+}
+
+export interface StorageDiscoverIssueDto {
+  code:
+    | typeof FailureCode.SharedBackendIdentityConflict
+    | typeof FailureCode.StoragePoolInUse
+    | typeof FailureCode.ServerUnreachable;
+  message: string;
+  identityKey: string | null;
+  expectedFsid: string | null;
+  discoveredFsid: string | null;
+  existingIdentityKey: string | null;
+  serverId: string | null;
+  incusName: string | null;
+  poolId: string | null;
+}
+
+export interface StoragePoolDiscoverResult {
+  pools: StoragePoolDto[];
+  identityConflicts: StorageDiscoverIssueDto[];
+}
+
+export interface SharedBackendExecutorDiscoverResult {
+  executors: SharedBackendExecutorDto[];
+  identityConflicts: StorageDiscoverIssueDto[];
+}
+
 export interface SharedBackendDto {
   id: string;
   name: string;
@@ -387,6 +430,8 @@ export interface SharedBackendDto {
   serverIds: string[];
   /** True when any registered shareable cephfs pool's server is online. */
   hasOnlineExecutor: boolean;
+  /** Admin GET list/get only; omit the key on user GET. */
+  executors?: SharedBackendExecutorDto[];
   revision: number;
   createdAt: string;
   updatedAt: string;
@@ -608,8 +653,19 @@ export interface EffectiveServerAccessDto {
   allowedImageIds: string[];
 }
 
+export interface EffectiveSharedBackendAccessDto {
+  sharedBackendId: string;
+  /** null = unlimited (effectiveSharedGrant folds 0 into null). */
+  limitBytes: number | null;
+  /** Committed sum(size_bytes); 0 = nothing booked, not unlimited. */
+  usedBytes: number;
+  expiresAt: string | null;
+}
+
 export interface EffectiveAccessDto {
   servers: EffectiveServerAccessDto[];
+  /** Live shared-backend grants only; grace backends are omitted. */
+  sharedBackends: EffectiveSharedBackendAccessDto[];
 }
 
 export type ContainerAction = 'start' | 'stop' | 'restart' | 'delete' | 'stats' | 'console';

@@ -34,7 +34,8 @@ export function expiresAtSortKey(expiresAt: Date | string | null | undefined): n
   return Number.isFinite(expiresMs) ? expiresMs : Number.POSITIVE_INFINITY;
 }
 
-export interface GrantExpiryCandidate {
+/** Fields needed to pick a live winner (shared + server mutate paths). */
+export interface GrantWinnerCandidate {
   /** 0 = direct user grant, 1 = inherited group grant */
   scopeRank: number;
   /** Group priority; unused for direct grants */
@@ -42,10 +43,55 @@ export interface GrantExpiryCandidate {
   /** Group id (or grant id) for stable tie-break */
   tieBreaker: string;
   expiresAt: Date | string | null;
+}
+
+export interface GrantExpiryCandidate extends GrantWinnerCandidate {
   cpu_millis: number | null;
   mem_bytes: string | number | null;
   disk_bytes: string | number | null;
   extension_grants?: unknown;
+}
+
+export function liveExpiry(
+  expiresAt: Date | string | null | undefined,
+  now: Date = new Date(),
+): boolean {
+  return classifyGrantExpiry(expiresAt, now) === 'live';
+}
+
+/**
+ * Live before grace; direct before group; among groups later expires_at
+ * (null = never) then priority DESC then tieBreaker DESC. Direct grants skip
+ * expires/priority and fall through to tieBreaker. Does not include grace in
+ * the live-only winner — filter with liveExpiry / selectLiveGrantCandidate.
+ */
+export function compareGrantCandidates<T extends GrantWinnerCandidate>(
+  left: T,
+  right: T,
+  now: Date = new Date(),
+): number {
+  const leftPhase = classifyGrantExpiry(left.expiresAt, now) === 'live' ? 0 : 1;
+  const rightPhase = classifyGrantExpiry(right.expiresAt, now) === 'live' ? 0 : 1;
+  if (leftPhase !== rightPhase) return leftPhase - rightPhase;
+  if (left.scopeRank !== right.scopeRank) return left.scopeRank - right.scopeRank;
+  if (left.scopeRank === 1) {
+    const leftExpires = expiresAtSortKey(left.expiresAt);
+    const rightExpires = expiresAtSortKey(right.expiresAt);
+    if (leftExpires !== rightExpires) return rightExpires > leftExpires ? 1 : -1;
+    if (left.priority !== right.priority) return right.priority - left.priority;
+  }
+  return right.tieBreaker.localeCompare(left.tieBreaker);
+}
+
+/** Live-only winner. Grace is ignored even if it would win under selectWinningGrantCandidate. */
+export function selectLiveGrantCandidate<T extends GrantWinnerCandidate>(
+  candidates: readonly T[],
+  now: Date = new Date(),
+): T | null {
+  const live = candidates.filter((candidate) => liveExpiry(candidate.expiresAt, now));
+  if (live.length === 0) return null;
+  const sorted = [...live].sort((left, right) => compareGrantCandidates(left, right, now));
+  return sorted[0] ?? null;
 }
 
 /**

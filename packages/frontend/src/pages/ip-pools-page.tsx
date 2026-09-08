@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { Network, Plus, RefreshCw } from 'lucide-react';
+import { Pencil, Plus, RefreshCw, Trash2 } from 'lucide-react';
 import {
   zCreateIpPoolRequest,
   zPatchIpPoolRequest,
@@ -11,14 +11,20 @@ import {
 } from '@nyabase/common';
 import { api } from '../lib/api.js';
 import { errorMessage } from '../lib/api-error.js';
-import { Badge } from '../components/ui/badge.js';
 import { Button } from '../components/ui/button.js';
-import { Card, CardContent, CardHeader, CardTitle } from '../components/ui/card.js';
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '../components/ui/dialog.js';
 import { Checkbox } from '../components/ui/checkbox.js';
 import { Input } from '../components/ui/input.js';
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from '../components/ui/table.js';
 import { ConfirmDialog } from '../components/layout/confirm-dialog.js';
-import { ResourceGrid } from '../components/layout/resource-grid.js';
+import { SectionCard } from '../components/layout/section-card.js';
 import { FormField } from '../components/layout/form-field.js';
 import { EmptyState } from '../components/layout/empty-state.js';
 import { Page } from '../components/layout/page.js';
@@ -88,45 +94,58 @@ export default function IpPoolsPage() {
         }
       >
         {(pools) => (
-          <ResourceGrid>
-            {pools.map((pool) => (
-              <Card key={pool.id}>
-                <CardHeader>
-                  <div className="flex items-start justify-between gap-3">
-                    <CardTitle className="flex min-w-0 items-center gap-2 text-base">
-                      <Network className="h-4 w-4 shrink-0" />
-                      <span className="truncate">{pool.name}</span>
-                    </CardTitle>
-                    <Badge variant="outline">{pool.serverIds.length} 台服务器</Badge>
-                  </div>
-                </CardHeader>
-                <CardContent className="space-y-3">
-                  <div className="grid gap-3 sm:grid-cols-2">
-                    <Info label="局域网 CIDR" value={pool.cidr} mono />
-                    <Info label="可分配 CIDR" value={pool.allocationCidr} mono />
-                    <Info label="网关" value={pool.gateway} mono />
-                    <Info label="已分配 / 可用" value={`${pool.allocatedCount} / ${pool.usableCount}`} />
-                    <Info label="保留地址" value={pool.reservedIps.join(', ') || '无'} mono />
-                    <Info
-                      label="绑定服务器"
-                      value={pool.serverIds.map((id) => serverNameById.get(id) ?? id).join(', ') || '未绑定'}
-                    />
-                  </div>
-                  <div className="flex justify-end gap-2">
-                    <Button size="sm" variant="outline" onClick={() => setEditTarget(pool)}>编辑</Button>
-                    <Button
-                      size="sm"
-                      variant="destructive"
-                      onClick={() => setDeleteTarget(pool)}
-                      disabled={deletePool.isPending}
-                    >
-                      删除
-                    </Button>
-                  </div>
-                </CardContent>
-              </Card>
-            ))}
-          </ResourceGrid>
+          <SectionCard flush>
+          <Table className="min-w-[880px]">
+            <TableHeader>
+              <TableRow>
+                <TableHead>名称</TableHead>
+                <TableHead>局域网</TableHead>
+                <TableHead>可分配</TableHead>
+                <TableHead>网关</TableHead>
+                <TableHead>已分配 / 可用</TableHead>
+                <TableHead>保留</TableHead>
+                <TableHead>绑定服务器</TableHead>
+                <TableHead className="text-right">操作</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {pools.map((pool) => (
+                <TableRow
+                  key={pool.id}
+                  className="cursor-pointer"
+                  onClick={() => setEditTarget(pool)}
+                >
+                  <TableCell className="font-medium">{pool.name}</TableCell>
+                  <TableCell className="font-mono">{pool.cidr}</TableCell>
+                  <TableCell className="font-mono">{pool.allocationCidr}</TableCell>
+                  <TableCell className="font-mono">{pool.gateway}</TableCell>
+                  <TableCell>{pool.allocatedCount} / {pool.usableCount}</TableCell>
+                  <TableCell className="max-w-[10rem] truncate font-mono" title={pool.reservedIps.join(', ') || '无'}>
+                    {pool.reservedIps.join(', ') || '无'}
+                  </TableCell>
+                  <TableCell className="max-w-[12rem] truncate whitespace-normal">
+                    {pool.serverIds.map((id) => serverNameById.get(id) ?? id).join('、') || '未绑定'}
+                  </TableCell>
+                  <TableCell className="text-right" onClick={(event) => event.stopPropagation()}>
+                    <div className="flex justify-end gap-2">
+                      <Button size="sm" variant="outline" onClick={() => setEditTarget(pool)}>
+                        <Pencil className="h-3.5 w-3.5" />编辑
+                      </Button>
+                      <Button
+                        size="sm"
+                        variant="destructive"
+                        onClick={() => setDeleteTarget(pool)}
+                        disabled={deletePool.isPending}
+                      >
+                        <Trash2 className="h-3.5 w-3.5" />删除
+                      </Button>
+                    </div>
+                  </TableCell>
+                </TableRow>
+              ))}
+            </TableBody>
+          </Table>
+          </SectionCard>
         )}
       </QueryView>
       <IpPoolEditorDialog
@@ -272,7 +291,7 @@ function IpPoolEditorDialog({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-2xl" data-testid="ip-pool-editor">
+      <DialogContent data-testid="ip-pool-editor">
         <DialogHeader>
           <DialogTitle>{mode === 'create' ? '创建 IP 池' : '编辑 IP 池'}</DialogTitle>
           <DialogDescription>
@@ -333,11 +352,4 @@ function IpPoolEditorDialog({
   );
 }
 
-function Info({ label, value, mono = false }: { label: string; value: string; mono?: boolean }) {
-  return (
-    <div>
-      <p className="text-xs text-muted-foreground">{label}</p>
-      <p className={mono ? 'break-all font-mono text-sm' : 'text-sm'}>{value}</p>
-    </div>
-  );
-}
+

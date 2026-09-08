@@ -1,7 +1,7 @@
-import type { StoragePoolCapabilityDto } from '@nyabase/common';
+import type { StorageDiscoverIssueDto, StoragePoolCapabilityDto } from '@nyabase/common';
 import { FailureCode } from '@nyabase/common';
 import { ApiError, apiErrorDetails } from './api-error.js';
-import { formatBytes } from './utils.js';
+import { approxGibHint, formatBytes } from './utils.js';
 
 export type ShrinkPath = 'grow' | 'unchanged' | 'online' | 'requires_stop' | 'never';
 
@@ -58,6 +58,11 @@ export function observedRootUsedBytes(container: {
     : null;
 }
 
+export function formatObservedUsage(usedBytes: number | null): string {
+  if (usedBytes === null) return '未知';
+  return approxGibHint(usedBytes).replace(/^约 /, '');
+}
+
 export function validateShrinkFloor(
   capability: StoragePoolCapabilityDto,
   nextBytes: number,
@@ -65,9 +70,11 @@ export function validateShrinkFloor(
   currentSizeBytes?: number,
 ): string | null {
   void currentSizeBytes;
-  if (usedBytes === null) return null;
   if (!capability.enforceUsageFloor && !capability.shrinkOnline) return null;
-  if (nextBytes < usedBytes) {
+  if (capability.enforceUsageFloor && usedBytes === null) {
+    return '已用量未知，无法缩容';
+  }
+  if (usedBytes !== null && nextBytes < usedBytes) {
     return `目标容量不能小于已用量（${formatBytes(usedBytes)}）`;
   }
   return null;
@@ -132,6 +139,27 @@ export function parseSharedBackendFsidConflict(error: unknown): SharedBackendFsi
     conflictingFsid,
     message: error.message,
     details,
+  };
+}
+
+export function identityConflictFromDiscoverIssue(
+  issue: StorageDiscoverIssueDto,
+): SharedBackendFsidConflict | null {
+  if (issue.code !== FailureCode.SharedBackendIdentityConflict) return null;
+  return {
+    identityKey: issue.identityKey ?? issue.existingIdentityKey,
+    expectedFsid: issue.expectedFsid,
+    conflictingFsid: issue.discoveredFsid,
+    message: issue.message,
+    details: {
+      identityKey: issue.identityKey,
+      expectedFsid: issue.expectedFsid,
+      discoveredFsid: issue.discoveredFsid,
+      existingIdentityKey: issue.existingIdentityKey,
+      serverId: issue.serverId,
+      incusName: issue.incusName,
+      poolId: issue.poolId,
+    },
   };
 }
 

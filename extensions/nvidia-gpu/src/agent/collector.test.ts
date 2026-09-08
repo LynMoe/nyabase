@@ -72,6 +72,16 @@ describe('collectNvidiaGpuMetrics', () => {
     });
     expect(samples).toEqual(expect.arrayContaining([
       expect.objectContaining({
+        name: 'nyabase_node_gpu_driver_present',
+        labels: {},
+        value: 1,
+      }),
+      expect.objectContaining({
+        name: 'nyabase_node_gpu_toolkit_present',
+        labels: {},
+        value: 0,
+      }),
+      expect.objectContaining({
         name: 'nyabase_node_gpu_smi_index',
         labels: { gpu_pci: '00000000:41:00.0' },
         value: 0,
@@ -84,13 +94,30 @@ describe('collectNvidiaGpuMetrics', () => {
     ]));
   });
 
-  it('returns an empty list when nvidia-smi is missing', async () => {
+  it('still emits presence gauges when nvidia-smi is missing', async () => {
     const samples = await collectNvidiaGpuMetrics({
       fileSystem: new FakeFileSystem({}),
       command: async () => {
         throw new Error('ENOENT');
       },
     });
-    expect(samples).toEqual([]);
+    expect(samples).toEqual([
+      { name: 'nyabase_node_gpu_driver_present', labels: {}, value: 0 },
+      { name: 'nyabase_node_gpu_toolkit_present', labels: {}, value: 0 },
+    ]);
+  });
+
+  it('marks the toolkit present when nvidia-container-cli answers', async () => {
+    const samples = await collectNvidiaGpuMetrics({
+      fileSystem: new FakeFileSystem({}),
+      command: async (file) => {
+        if (file === 'nvidia-container-cli') return { stdout: '1.0.0' };
+        throw new Error('ENOENT');
+      },
+    });
+    expect(samples).toEqual([
+      { name: 'nyabase_node_gpu_driver_present', labels: {}, value: 0 },
+      { name: 'nyabase_node_gpu_toolkit_present', labels: {}, value: 1 },
+    ]);
   });
 });

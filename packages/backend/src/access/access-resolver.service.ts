@@ -3,16 +3,18 @@ import {
   Inject,
   Injectable,
 } from '@nestjs/common';
-import type { Kysely, Transaction } from 'kysely';
+import { sql, type Kysely, type Transaction } from 'kysely';
 import {
   Capability,
   SystemGroupKey,
   UserStatus,
   type AdministrationActionsDto,
   type EffectiveServerAccessDto,
+  type EffectiveSharedBackendAccessDto,
   type GroupSummaryDto,
 } from '@nyabase/common';
 import { asJsonObject } from '../server-card-extensions/json.js';
+import { numberValue } from '../domain/domain-utils.js';
 import type { NyabaseDatabase } from '../persistence-pg/database.types.js';
 import { PG_DATABASE } from '../persistence-pg/tokens.js';
 import { PgTransactionManager } from '../persistence-pg/transaction.js';
@@ -21,8 +23,10 @@ import { projectAdministrationActions } from './administration-availability.js';
 import {
   classifyGrantExpiry,
   grantPurgeAt,
+  selectLiveGrantCandidate,
   selectWinningGrantCandidate,
   type GrantExpiryCandidate,
+  type GrantWinnerCandidate,
 } from './grant-expiry.js';
 
 export type IamTransaction = Transaction<NyabaseDatabase>;
@@ -365,6 +369,83 @@ export class AccessResolverService {
       purgeAt: grant.purgeAt?.toISOString() ?? null,
       accessPhase: grant.accessPhase,
       allowedImageIds: [...(cache.imageAssignments.get(serverId) ?? [])],
+    }));
+  }
+
+  async getEffectiveSharedAccess(userId: string): Promise<EffectiveSharedBackendAccessDto[]> {
+    const user = await this.database.selectFrom('iam.users')
+      .select('status')
+      .where('id', '=', userId)
+      .executeTakeFirst();
+    if (!user || user.status !== UserStatus.Active) return [];
+
+    const rows = await this.database.selectFrom('iam.shared_backend_grants as grant')
+      .leftJoin('iam.group_members as member', 'member.group_id', 'grant.group_id')
+      .leftJoin('iam.groups as group', 'group.id', 'grant.group_id')
+      .select([
+        'grant.shared_backend_id',
+        'grant.limit_bytes',
+        'grant.expires_at',
+        'grant.user_id',
+        'grant.id',
+        'group.priority',
+      ])
+      .where((expression) => expression.or([
+        expression('grant.user_id', '=', userId),
+        expression('member.user_id', '=', userId),
+      ]))
+      .execute();
+
+    const byBackend = new Map<string, Array<GrantWinnerCandidate & {
+      sharedBackendId: string;
+      limit_bytes: string | number | bigint;
+    }>>();
+    for (const row of rows) {
+      const candidate = {
+        sharedBackendId: row.shared_backend_id,
+        limit_bytes: row.limit_bytes,
+        expiresAt: row.expires_at,
+        scopeRank: row.user_id ? 0 : 1,
+        priority: row.priority ?? 0,
+        tieBreaker: row.id,
+      };
+      const list = byBackend.get(row.shared_backend_id) ?? [];
+      list.push(candidate);
+      byBackend.set(row.shared_backend_id, list);
+    }
+
+    const winners: EffectiveSharedBackendAccessDto[] = [];
+    for (const [sharedBackendId, candidates] of byBackend) {
+      const winner = selectLiveGrantCandidate(candidates);
+      if (!winner) continue;
+      const limit = numberValue(winner.limit_bytes);
+      winners.push({
+        sharedBackendId,
+        limitBytes: limit === 0 ? null : limit,
+        usedBytes: 0,
+        expiresAt: winner.expiresAt ? new Date(winner.expiresAt).toISOString() : null,
+      });
+    }
+    if (winners.length === 0) return [];
+
+    const usedRows = await this.database.selectFrom('control.volumes')
+      .select([
+        'shared_backend_id',
+        sql<string>`coalesce(sum(size_bytes), 0)`.as('used'),
+      ])
+      .where('owner_id', '=', userId)
+      .where('shared_backend_id', 'in', winners.map((row) => row.sharedBackendId))
+      .where('lifecycle_phase', 'not in', ['failed', 'deleting'])
+      .groupBy('shared_backend_id')
+      .execute();
+    const usedByBackend = new Map(usedRows.flatMap((row) => (
+      row.shared_backend_id
+        ? [[row.shared_backend_id, numberValue(row.used)] as const]
+        : []
+    )));
+    return winners.map((row) => ({
+      ...row,
+      usedBytes: usedByBackend.get(row.sharedBackendId) ?? 0,
     }));
   }
 

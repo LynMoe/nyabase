@@ -156,6 +156,16 @@ export enum Capability {
   ManageSystemSettings = 'manage_system_settings',
 }
 
+/** AnyCaps for GET /admin/intents and the admin 运维 page. Do not expand Operators to match. */
+export const ADMIN_INTENT_CAPABILITIES = [
+  Capability.ManageContainersAny,
+  Capability.ManageVolumes,
+  Capability.ManageSharedVolumes,
+  Capability.ManageServers,
+  Capability.ManageImages,
+  Capability.ManageCertificates,
+] as const satisfies readonly Capability[];
+
 export enum SystemGroupKey {
   Administrators = 'administrators',
   Operators = 'operators',
@@ -178,6 +188,7 @@ export enum FailureCode {
   VolumeShrinkBelowUsage = 'VOLUME_SHRINK_BELOW_USAGE',
   VolumeShrinkRequiresDetach = 'VOLUME_SHRINK_REQUIRES_DETACH',
   VolumeShrinkUnsupported = 'VOLUME_SHRINK_UNSUPPORTED',
+  VolumeUsageUnknown = 'VOLUME_USAGE_UNKNOWN',
   VolumeRequiresUnbind = 'VOLUME_REQUIRES_UNBIND',
   VolumeDeleteBackendUnreachable = 'VOLUME_DELETE_BACKEND_UNREACHABLE',
   VolumeDetachRequiresStop = 'VOLUME_DETACH_REQUIRES_STOP',
@@ -186,6 +197,7 @@ export enum FailureCode {
   RootShrinkRequiresStop = 'ROOT_SHRINK_REQUIRES_STOP',
   RootQuotaPending = 'ROOT_QUOTA_PENDING',
   RootSizeBelowImageMinimum = 'ROOT_SIZE_BELOW_IMAGE_MINIMUM',
+  RootUsageUnknown = 'ROOT_USAGE_UNKNOWN',
   ExtensionUnknown = 'EXTENSION_UNKNOWN',
   ExtensionNotEnabled = 'EXTENSION_NOT_ENABLED',
   ExtensionOccupied = 'EXTENSION_OCCUPIED',

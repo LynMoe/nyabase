@@ -10,6 +10,7 @@ import {
 } from '../incus/index.js';
 import {
   ContainerReconciler,
+  decideRootShrink,
   managedContainerIdentity,
   observedDiskUsageBytes,
   powerTransition,
@@ -531,6 +532,55 @@ describe('container reconciler §15.1 fixture-driven Incus mocks', () => {
       'security.ipv4_filtering': 'true',
       'security.mac_filtering': 'true',
     });
+  });
+
+  it('decides quota-online root shrink from observed usage', () => {
+    expect(decideRootShrink({
+      resizeFamily: 'quota_online',
+      actualRootBytes: 200n,
+      desiredRootBytes: 50n,
+      usedBytes: null,
+      running: true,
+    })).toBe('usage_unknown');
+    expect(decideRootShrink({
+      resizeFamily: 'quota_online',
+      actualRootBytes: 200n,
+      desiredRootBytes: 50n,
+      usedBytes: 80n,
+      running: true,
+    })).toBe('usage_floor');
+    expect(decideRootShrink({
+      resizeFamily: 'quota_online',
+      actualRootBytes: 200n,
+      desiredRootBytes: 120n,
+      usedBytes: 80n,
+      running: true,
+    })).toBe('allow');
+  });
+
+  it('never emits Incus resize/PUT when quota-online shrink is below usage', async () => {
+    const { reconciler, client, putBodies } = await harness({
+      status: 'Running',
+      powerIntent: 'running',
+      rootResizeFamily: 'quota_online',
+      rootSizeBytes: 50_000_000,
+      documentExtras: {
+        devices: {
+          root: {
+            type: 'disk',
+            path: '/',
+            pool: ROOT_POOL,
+            size: '2000000000',
+          },
+        },
+      },
+    });
+
+    await expect(reconciler.reconcile(context(client))).rejects.toMatchObject({
+      code: 'ROOT_SHRINK_BELOW_USAGE',
+    });
+    expect(client.readModifyWriteInstance).not.toHaveBeenCalled();
+    expect(putBodies).toHaveLength(0);
   });
 
   it('never emits Incus resize/PUT when block_backed running root shrink is requested', async () => {

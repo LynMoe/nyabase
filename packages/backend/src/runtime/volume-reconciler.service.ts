@@ -38,11 +38,14 @@ export interface VolumeResizeInput {
 
 export type VolumeResizeDecision =
   | { readonly action: 'none' | 'grow' | 'shrink'; readonly reason?: undefined }
-  | { readonly action: 'blocked'; readonly reason: 'usage_floor' | 'detach' | 'stop' };
+  | { readonly action: 'blocked'; readonly reason: 'usage_floor' | 'usage_unknown' | 'detach' | 'stop' };
 
 export function decideVolumeResize(input: VolumeResizeInput): VolumeResizeDecision {
   if (input.desiredSizeBytes === input.currentSizeBytes) return { action: 'none' };
   if (input.desiredSizeBytes > input.currentSizeBytes) return { action: 'grow' };
+  if (input.resizeFamily === 'quota_online' && input.usedBytes === null) {
+    return { action: 'blocked', reason: 'usage_unknown' };
+  }
   if (
     input.usedBytes !== null
     && input.desiredSizeBytes < input.usedBytes
@@ -58,10 +61,20 @@ export function decideVolumeResize(input: VolumeResizeInput): VolumeResizeDecisi
   return { action: 'shrink' };
 }
 
+/** CephFS Incus echoes `used === size` with total missing for both empty and full. */
+export function isPhantomCephfsUsage(
+  usedBytes: bigint | null,
+  totalBytes: bigint | null,
+  currentSizeBytes: bigint,
+): boolean {
+  if (usedBytes === null) return false;
+  const totalMissing = totalBytes === null || totalBytes === 0n;
+  return totalMissing && usedBytes >= currentSizeBytes;
+}
+
 /**
- * CephFS / quota_online volumes often report `usage.used === config.size` with
- * `usage.total` missing or zero even when empty, which falsely blocks shrink.
- * Treat that phantom as unused for floor checks and persistence.
+ * CephFS `used === size` with total missing cannot tell empty from full, so
+ * that shape is unknown. Dir/btrfs/zfs keep occupancy, including used===size.
  */
 export function normalizeObservedVolumeUsage(input: {
   readonly resizeFamily: 'quota_online' | 'block_backed';
@@ -70,12 +83,20 @@ export function normalizeObservedVolumeUsage(input: {
   readonly totalBytes: bigint | null;
   readonly currentSizeBytes: bigint;
 }): bigint | null {
-  if (input.usedBytes === null) return null;
-  const applies = input.resizeFamily === 'quota_online' || input.driver === 'cephfs';
-  if (!applies) return input.usedBytes;
-  const totalMissing = input.totalBytes === null || input.totalBytes === 0n;
-  if (totalMissing && input.usedBytes >= input.currentSizeBytes) {
-    return 0n;
+  if (input.usedBytes === null) {
+    // Empty dir/btrfs/zfs quota volumes report `{ total: 0 }` without `used`.
+    if (
+      input.resizeFamily === 'quota_online'
+      && input.driver !== 'cephfs'
+      && input.totalBytes === 0n
+    ) {
+      return 0n;
+    }
+    return null;
+  }
+  if (input.driver !== 'cephfs') return input.usedBytes;
+  if (isPhantomCephfsUsage(input.usedBytes, input.totalBytes, input.currentSizeBytes)) {
+    return null;
   }
   return input.usedBytes;
 }
@@ -219,7 +240,7 @@ export class VolumeReconciler implements ManagedReconciler {
     if (!this.intents) return;
     const pools = await this.database
       .selectFrom('infra.storage_pools')
-      .select(['id', 'incus_name', 'shared_backend_id', 'server_id', 'registered', 'driver', 'shareable'])
+      .select(['id', 'incus_name', 'shared_backend_id', 'server_id', 'registered', 'driver', 'shareable', 'resize_family'])
       .where('server_id', '=', serverId)
       .where('registered', '=', true)
       .execute();
@@ -291,8 +312,15 @@ export class VolumeReconciler implements ManagedReconciler {
         this.logger.warn(`dangling_pg volume=${row.id} server=${serverId}`);
         continue;
       }
-      if (shared && listed !== undefined && placement.catalog_state === 'present' && client) {
-        await this.observeSharedUsage(client, poolNameForPlacement(pools, placement.pool_id), row);
+      if (listed !== undefined && placement.catalog_state === 'present' && client) {
+        await this.observeVolumeUsage(
+          client,
+          poolForPlacement(pools, placement.pool_id),
+          row,
+        );
+      }
+      if (row.needs_attention) {
+        continue;
       }
       if (shared) {
         if (listed !== undefined && scanNeedsEnsure(row, listed)) {
@@ -578,6 +606,8 @@ export class VolumeReconciler implements ManagedReconciler {
       }
     }
 
+    const stale = await this.purgeStaleCatalogs(volume, catalogs, context);
+    if (stale) return stale;
     await this.dropAllPlacements(volume.id);
     await this.finishEmptyTracking(volume.id);
     return { outcome: 'succeeded', observedGeneration: volume.generation };
@@ -692,14 +722,17 @@ export class VolumeReconciler implements ManagedReconciler {
           containerId: attachment.container_id,
         })),
       };
-      return {
-        outcome: 'failed',
-        failure: decision.reason === 'usage_floor'
+      const failure = decision.reason === 'usage_unknown'
+        ? volumeFailure('VOLUME_USAGE_UNKNOWN', 'Volume usage is unknown; shrink is not allowed until usage is observed', details)
+        : decision.reason === 'usage_floor'
           ? volumeFailure('VOLUME_SHRINK_BELOW_USAGE', 'The requested size is below volume usage', details)
           : decision.reason === 'detach'
             ? volumeFailure('VOLUME_SHRINK_REQUIRES_DETACH', 'The block-backed volume must be detached before shrinking', details)
-            : volumeFailure('VOLUME_SHRINK_REQUIRES_STOP', 'The block-backed volume consumers must be stopped before shrinking', details),
-      };
+            : volumeFailure('VOLUME_SHRINK_REQUIRES_STOP', 'The block-backed volume consumers must be stopped before shrinking', details);
+      if (decision.reason === 'usage_floor' || decision.reason === 'usage_unknown') {
+        await this.revertImpossibleShrink(row.id, currentSize, usedBytes, failure.code);
+      }
+      return { outcome: 'failed', failure };
     }
     if (decision.action !== 'none' || config['security.shifted'] !== actual.config?.['security.shifted']) {
       await auditIncusMutate(this.audit, context.intent, {
@@ -964,6 +997,69 @@ export class VolumeReconciler implements ManagedReconciler {
     return this.clients?.get(serverId);
   }
 
+  /**
+   * RemoveAll deletes backing data on one executor. Sticky catalogs on other
+   * daemons stay as Incus metadata until purged; leftover inventory treats
+   * those as run-owned volumes.
+   */
+  private async purgeStaleCatalogs(
+    volume: VolumeRecord,
+    catalogs: CatalogRow[],
+    context: ReconcileRunContext,
+  ): Promise<ReconcileOutcome | null> {
+    for (const catalog of catalogs) {
+      if (catalog.server_status !== 'online') {
+        this.logger.warn(
+          `volume=${volume.id} skip catalog purge on ${catalog.server_id} `
+          + `status=${catalog.server_status}`,
+        );
+        continue;
+      }
+      let client: IncusClientPort | undefined;
+      try {
+        client = await this.clientFor(catalog.server_id, context);
+      } catch (error) {
+        return destroyRetryFromError(error, catalog.server_id);
+      }
+      if (!client) {
+        return destroyRetry(
+          'SERVER_UNREACHABLE',
+          'Destroy cannot reach a catalog Incus',
+          { serverId: catalog.server_id },
+        );
+      }
+      const status = await this.classifyCatalogGet(
+        client,
+        catalog.pool_name,
+        volume.incus_name,
+        context.signal,
+      );
+      if (status === 'error') {
+        return destroyRetry(
+          'VOLUME_DESTROY_RETRY',
+          'Destroy catalog purge GET failed',
+          { serverId: catalog.server_id },
+        );
+      }
+      if (status === 'missing') continue;
+      try {
+        await this.deleteCatalog(
+          client,
+          context.intent,
+          catalog.pool_name,
+          volume.incus_name,
+        );
+      } catch {
+        return destroyRetry(
+          'VOLUME_DESTROY_RETRY',
+          'Destroy catalog purge was not confirmed with GET 404',
+          { serverId: catalog.server_id },
+        );
+      }
+    }
+    return null;
+  }
+
   private async deleteCatalog(
     client: IncusClientPort,
     intent: IntentRecord,
@@ -1078,26 +1174,45 @@ export class VolumeReconciler implements ManagedReconciler {
     return [{ server_id: volume.server_id, pool_name: pool.incus_name }];
   }
 
-  private async observeSharedUsage(
+  private async revertImpossibleShrink(
+    volumeId: string,
+    actualSizeBytes: bigint,
+    usedBytes: bigint | null,
+    failureCode: string,
+  ): Promise<void> {
+    await this.database
+      .updateTable('control.volumes')
+      .set({
+        size_bytes: actualSizeBytes.toString(),
+        used_bytes: usedBytes === null ? null : usedBytes.toString(),
+        needs_attention: true,
+        failure_code: failureCode.slice(0, 128),
+      })
+      .where('id', '=', volumeId)
+      .where('lifecycle_phase', 'not in', ['deleting', 'failed'])
+      .execute();
+  }
+
+  private async observeVolumeUsage(
     client: IncusClientPort,
-    poolName: string | undefined,
+    pool: { incus_name: string; driver: string; resize_family: string } | undefined,
     row: { id: string; incus_name: string; size_bytes: string | number },
   ): Promise<void> {
-    if (!poolName) return;
+    if (!pool) return;
+    const resizeFamily = pool.resize_family === 'block_backed' ? 'block_backed' : 'quota_online';
     try {
-      const state = (await client.getStorageVolumeState(poolName, 'custom', row.incus_name)).metadata;
+      const state = (await client.getStorageVolumeState(pool.incus_name, 'custom', row.incus_name)).metadata;
       const used = normalizeObservedVolumeUsage({
-        resizeFamily: 'quota_online',
-        driver: 'cephfs',
+        resizeFamily,
+        driver: pool.driver as VolumeRow['driver'],
         usedBytes: asBytes(state.usage?.used) ?? null,
         totalBytes: asBytes(state.usage?.total) ?? null,
         currentSizeBytes: asBytes(row.size_bytes) ?? 0n,
       });
-      if (used === null) return;
       await this.database
         .updateTable('control.volumes')
         .set({
-          used_bytes: sql<string>`greatest(coalesce(used_bytes, 0), ${used.toString()}::bigint)`,
+          used_bytes: used === null ? null : used.toString(),
         })
         .where('id', '=', row.id)
         .where('lifecycle_phase', 'not in', ['failed', 'deleting'])
@@ -1284,11 +1399,11 @@ function scanNeedsEnsure(
   return actualSize !== desiredSize;
 }
 
-function poolNameForPlacement(
-  pools: ReadonlyArray<{ id: string; incus_name: string }>,
+function poolForPlacement<T extends { id: string }>(
+  pools: readonly T[],
   poolId: string,
-): string | undefined {
-  return pools.find((pool) => pool.id === poolId)?.incus_name;
+): T | undefined {
+  return pools.find((pool) => pool.id === poolId);
 }
 
 function storageVolumeName(volume: StorageVolume | string): string {

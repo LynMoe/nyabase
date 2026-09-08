@@ -61,4 +61,18 @@ describe('ConfirmDialog', () => {
     expect(onConfirm).not.toHaveBeenCalled();
     expect(screen.getByTestId('confirm-dialog').getAttribute('data-state')).toBe('open');
   });
+
+  it('forwards className to AlertDialogContent', () => {
+    render(
+      <ConfirmDialog
+        {...baseProps}
+        open
+        className="sm:max-w-lg"
+        onConfirm={() => undefined}
+        onOpenChange={() => undefined}
+      />,
+    );
+
+    expect(screen.getByTestId('confirm-dialog').className).toContain('sm:max-w-lg');
+  });
 });
