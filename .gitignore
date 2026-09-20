@@ -18,15 +18,8 @@ packages/common/src/**/*.js.map
 packages/common/src/**/*.d.ts
 packages/common/src/**/*.d.ts.map
 
-# Local agent planning/worklog artifacts
-.codex/skills/harness/docs/
-docs/plan/
-
-# Live E2E runtime, secrets, diagnostics, and API runner artifacts
-e2e/.runtime/
-
-# Local lab inventory, Ceph keyrings, and host credentials
-/lab/
+# Local-only trees: harness, plans, docs, lab inventory, e2e
+.local/
 
 # Local visual QA screenshots (Playwright, not product e2e)
 packages/frontend/visual/shots/

@@ -1,4 +1,0 @@
-
-> @nyabase/backend@0.1.0 typecheck /root/nyabase/packages/backend
-> tsc --noEmit
-

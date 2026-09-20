@@ -1,5 +1,0 @@
-QUERY select id,username,isActive from users where username like 'ult-%' or username like 'ultui-%'
-ERR no such column: isActive
-QUERY select id,name,lifecyclePhase,deletedAt from containers where name like 'ult-%' or name like 'ultui-%'
-COUNT 1
-{'id': '8b016495-e7b5-48ef-b18e-939d72da93a8', 'name': 'ult-20260604152403-902297-ctr', 'lifecyclePhase': 'deleted', 'deletedAt': '2026-06-04 15:26:27.917'}

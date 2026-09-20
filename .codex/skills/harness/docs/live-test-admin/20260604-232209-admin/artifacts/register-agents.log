@@ -1,6 +1,0 @@
-$ node test/scripts/register-agents.mjs
-Registered 2 agents.
-cpu: 1b9c08fa-32e1-4943-8dc5-d83772cd52f9 (nyabase-test-cpu)
-gpu: 343488f6-2689-488a-8bf8-8c02caf25989 (nyabase-test-gpu)
-Metadata: /root/nyabase/test/runtime/agents/servers.json
-Secrets:  /root/nyabase/test/runtime/agents/agent-secrets.json

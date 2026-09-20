@@ -1,9 +1,0 @@
-prefix=mount-20260604t213521z-74a393
-DB-active-containers:
-DB-data-dirs:
-DB-remote-mounts:
-DB-images:
-DB-users:
-host-docker:
-host-dirs:
-current-env:absent

@@ -85,8 +85,6 @@ bash scripts/postgres-ops.test.sh
 bash scripts/deploy-contract.test.sh
 bash scripts/check-nest-sse-advisory.test.sh
 bash scripts/check-nest-sse-advisory.sh
-pnpm --filter @nyabase/e2e validate
-pnpm --filter @nyabase/e2e test:evidence
 bash scripts/check-rust-proxies.sh
 pnpm build
 node scripts/check-backend-bootstrap.mjs

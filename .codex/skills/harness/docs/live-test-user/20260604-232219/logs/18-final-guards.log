@@ -1,4 +1,0 @@
-common artifact guard final:
-temp product files:
-created ult users residual:
-QUERY select id,username,deletedAt from users where username like 'ult-%' or username like 'ultui-%'
