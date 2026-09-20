@@ -11,6 +11,8 @@ export const INCUS_VOLUME_NAME_PREFIX = 'nyv-';
 export const INCUS_DEVICE_NAME_PREFIX = 'nyd-';
 export const INCUS_DEFAULT_PROJECT = 'default';
 export const INCUS_API_DEFAULT_PORT = 8_443;
+export const DEFAULT_IMAGE_SOURCE_SERVER =
+  'https://nyabase-images.nyabase-lxc-images.workers.dev';
 
 export const MAX_MANAGED_CONTAINERS_PER_SERVER = 64;
 export const MAX_SERVER_CONCURRENCY = 8;

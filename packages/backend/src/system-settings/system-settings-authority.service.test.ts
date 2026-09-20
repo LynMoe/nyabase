@@ -10,7 +10,8 @@ describe('fillMissingOnlineEditableDefaults', () => {
     const values: Record<string, unknown> = { 'branding.title': 'Keep' };
     const filled = fillMissingOnlineEditableDefaults(values);
     expect(filled).toContain('incus.imageSourceServer');
-    expect(values['incus.imageSourceServer']).toBe('');
+    expect(values['incus.imageSourceServer'])
+      .toBe('https://nyabase-images.nyabase-lxc-images.workers.dev');
     expect(values['branding.title']).toBe('Keep');
     expect(fillMissingOnlineEditableDefaults(values)).toEqual([]);
   });

@@ -13,6 +13,7 @@ import {
   ServerStatus,
   zBrowserToConsole,
   zCreateContainerRequest,
+  zAddCatalogImageRequest,
   zCreateImageRequest,
   zCreateIpPoolRequest,
   zCreateServerRequest,
@@ -539,6 +540,13 @@ describe('canonical DTO shapes', () => {
       networkManagedExternally: true,
       [legacyImageField]: 'debian:12',
     }).success).toBe(false);
+    expect(zAddCatalogImageRequest.safeParse({ alias: 'ubuntu/24.04' }).success).toBe(true);
+    expect(zCreateImageRequest.safeParse({
+      name: 'Ubuntu 24.04',
+      alias: 'ubuntu/24.04',
+      loginUser: 'root',
+      networkManagedExternally: true,
+    }).success).toBe(true);
   });
 
   it('accepts admin-filled minRootSizeBytes and rejects non-positive values', () => {

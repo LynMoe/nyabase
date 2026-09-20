@@ -33,6 +33,7 @@ export type {
   CreateApiTokenRequest,
   CreateContainerRequest,
   CreateGroupRequest,
+  AddCatalogImageRequest,
   CreateImageRequest,
   CreateIpPoolRequest,
   CreateServerRequest,
@@ -602,6 +603,19 @@ export interface ImageAssignmentDto {
 
 export interface AdminImageDto extends ImageDto {
   assignments: ImageAssignmentDto[];
+}
+
+export interface CatalogImageDto {
+  alias: string;
+  aliases: string[];
+  fingerprint: string;
+  os: string;
+  release: string;
+  variant: string;
+  version: string;
+  sizeBytes: number | null;
+  description: string;
+  added: boolean;
 }
 
 export interface ServerGrantDto {

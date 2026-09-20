@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import {
+  DEFAULT_IMAGE_SOURCE_SERVER,
   SSH_PROXY_SNAPSHOT_STALE_MAX_MS,
   SSH_PROXY_SNAPSHOT_STALE_MIN_MS,
 } from '../constants.js';
@@ -409,7 +410,7 @@ export const controlPlaneConfigDefinitions = [
     key: 'incus.imageSourceServer',
     yamlPath: 'incus.imageSourceServer',
     env: 'INCUS_IMAGE_SOURCE_URL',
-    defaultValue: '',
+    defaultValue: DEFAULT_IMAGE_SOURCE_SERVER,
     schema: optionalString.max(2_048).refine(
       (value) => {
         if (value === '') return true;

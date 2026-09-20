@@ -537,9 +537,15 @@ export const zCreateExecSessionRequest = z.object({
 export const zEmptyRequest = z.object({}).strict();
 
 // Images and per-server image assignments.
+const SIMPLESTREAMS_ALIAS_RE = /^[A-Za-z0-9][A-Za-z0-9._/-]{0,254}$/;
+
+export const zAddCatalogImageRequest = z.object({
+  alias: z.string().trim().min(1).max(256).regex(SIMPLESTREAMS_ALIAS_RE),
+}).strict();
+
 export const zCreateImageRequest = z.object({
   name: zName,
-  alias: z.string().trim().min(1).max(256).regex(/^[A-Za-z0-9][A-Za-z0-9._-]*$/),
+  alias: z.string().trim().min(1).max(256).regex(SIMPLESTREAMS_ALIAS_RE),
   description: z.string().max(4_096).nullable().optional(),
   loginUser: z.string().regex(LOGIN_USER_RE),
   minRootSizeBytes: zPositiveBytes.nullable().optional(),
@@ -549,7 +555,7 @@ export const zCreateImageRequest = z.object({
 export const zPatchImageRequest = z.object({
   expectedRevision: zExpectedRevision,
   name: zName.optional(),
-  alias: z.string().trim().min(1).max(256).regex(/^[A-Za-z0-9][A-Za-z0-9._-]*$/).optional(),
+  alias: z.string().trim().min(1).max(256).regex(SIMPLESTREAMS_ALIAS_RE).optional(),
   description: z.string().max(4_096).nullable().optional(),
   loginUser: z.string().regex(LOGIN_USER_RE).optional(),
   minRootSizeBytes: zPositiveBytes.nullable().optional(),
@@ -800,6 +806,7 @@ export type PatchContainerRootSizeRequest = z.infer<typeof zPatchContainerRootSi
 export type PatchContainerExtensionRequest = z.infer<typeof zPatchContainerExtensionRequest>;
 export type PatchServerExtensionRequest = z.infer<typeof zPatchServerExtensionRequest>;
 export type CreateExecSessionRequest = z.infer<typeof zCreateExecSessionRequest>;
+export type AddCatalogImageRequest = z.infer<typeof zAddCatalogImageRequest>;
 export type CreateImageRequest = z.infer<typeof zCreateImageRequest>;
 export type PatchImageRequest = z.infer<typeof zPatchImageRequest>;
 export type PutImageAssignmentRequest = z.infer<typeof zPutImageAssignmentRequest>;

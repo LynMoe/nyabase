@@ -10,7 +10,7 @@ import { EmptyState } from '../components/layout/empty-state.js';
 import { Page } from '../components/layout/page.js';
 import { PageHeader } from '../components/layout/page-header.js';
 import { QueryView } from '../components/layout/query-view.js';
-import { ImageFormDialog } from '../components/images/image-form-dialog.js';
+import { ImageCatalogDialog } from '../components/images/image-catalog-dialog.js';
 import { ImageList } from '../components/images/image-list.js';
 import { queryKeys } from '../lib/query-keys.js';
 import { toast } from '../hooks/use-toast.js';
@@ -23,21 +23,33 @@ export default function ImagesPage() {
     queryKey: queryKeys.images.admin,
     queryFn: () => api.get<AdminImageDto[]>('/admin/images'),
   });
+  const invalidate = () => {
+    void queryClient.invalidateQueries({ queryKey: queryKeys.images.admin });
+    void queryClient.invalidateQueries({ queryKey: queryKeys.images.catalog });
+  };
+  const repullImage = useMutation({
+    mutationFn: (imageId: string) => api.post<unknown>(`/admin/images/${imageId}/repull`),
+    onSuccess: () => {
+      toast({ title: '已从镜像源重新拉取' });
+      invalidate();
+    },
+    onError: (error) => toast({ title: '重新拉取失败', description: errorMessage(error), variant: 'destructive' }),
+  });
   const deleteImage = useMutation({
     mutationFn: (imageId: string) => api.delete<unknown>(`/admin/images/${imageId}`),
     onSuccess: () => {
-      toast({ title: '镜像删除意图已提交' });
+      toast({ title: '镜像移除意图已提交' });
       setDeleteTarget(null);
-      void queryClient.invalidateQueries({ queryKey: queryKeys.images.admin });
+      invalidate();
     },
-    onError: (error) => toast({ title: '删除失败', description: errorMessage(error), variant: 'destructive' }),
+    onError: (error) => toast({ title: '移除失败', description: errorMessage(error), variant: 'destructive' }),
   });
 
   return (
     <Page>
       <PageHeader
         title="镜像"
-        description="管理镜像元数据与每台服务器的指纹分配。"
+        description="从镜像源列出并添加系统镜像，再按服务器拉取指纹。"
         actions={
           <>
             <Button variant="outline" size="icon" onClick={() => { void imagesQuery.refetch(); }} disabled={imagesQuery.isFetching} aria-label="刷新镜像">
@@ -62,16 +74,18 @@ export default function ImagesPage() {
         {(images) => (
           <ImageList
             images={images}
+            onRepull={(image) => repullImage.mutate(image.id)}
             onDelete={setDeleteTarget}
+            busyId={repullImage.isPending ? repullImage.variables : null}
           />
         )}
       </QueryView>
-      <ImageFormDialog mode="create" open={createOpen} onOpenChange={setCreateOpen} />
+      <ImageCatalogDialog open={createOpen} onOpenChange={setCreateOpen} />
       <ConfirmDialog
         open={Boolean(deleteTarget)}
-        title="删除镜像？"
-        description="删除会先移除服务器上的指纹分配；仍被容器引用的镜像会由后端拒绝。"
-        confirmLabel="确认删除"
+        title="移除镜像？"
+        description="移除会先去掉各服务器上的指纹分配；仍被容器引用的镜像会由后端拒绝。"
+        confirmLabel="确认移除"
         pendingLabel="提交中..."
         pending={deleteImage.isPending}
         onConfirm={() => { if (deleteTarget) deleteImage.mutate(deleteTarget.id); }}

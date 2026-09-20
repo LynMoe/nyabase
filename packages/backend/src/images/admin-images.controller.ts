@@ -15,7 +15,7 @@ import {
 } from '@nestjs/common';
 import {
   Capability,
-  zCreateImageRequest,
+  zAddCatalogImageRequest,
   zIntentListQuery,
   zPatchImageRequest,
   zPutImageAssignmentRequest,
@@ -39,9 +39,24 @@ export class AdminImagesController {
     return this.images.findAllAdmin(activeOnly === 'true');
   }
 
+  @Get('catalog')
+  catalog() {
+    return this.images.listCatalog();
+  }
+
   @Post()
   create(@Body() body: unknown, @CurrentUser() actor: UserRecord) {
-    return this.images.create(actor.id, zCreateImageRequest.parse(body));
+    return this.images.addFromCatalog(actor.id, zAddCatalogImageRequest.parse(body));
+  }
+
+  @Post(':id/repull')
+  @HttpCode(HttpStatus.ACCEPTED)
+  async repull(@Param('id') id: string, @CurrentUser() actor: UserRecord) {
+    const result = await this.images.repull(actor.id, id);
+    return {
+      image: result.image,
+      intents: result.intents.map(acceptedIntent),
+    };
   }
 
   @Get(':id')

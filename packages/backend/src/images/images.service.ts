@@ -14,6 +14,8 @@ import {
   IntentResourceType,
   MAX_PLATFORM_IMAGES,
   type AdminImageDto,
+  type AddCatalogImageRequest,
+  type CatalogImageDto,
   type CreateImageRequest,
   type ImageAssignmentDto,
   type ImageDto,
@@ -30,6 +32,7 @@ import { InfrastructureRepository } from '../infrastructure/infrastructure.repos
 import { IntentRepository } from '../runtime/intent.repository.js';
 import { ReconcileWakeService } from '../runtime/reconcile-wake.service.js';
 import { isoDate, numberValue, acceptedIntent } from '../domain/domain-utils.js';
+import { displayNameForCatalog, ImageCatalogService } from './image-catalog.js';
 
 type ImageRow = Awaited<ReturnType<ImagesService['findById']>>;
 type ImageAssignmentRow = Awaited<ReturnType<ImagesService['assignments']>>[number];
@@ -44,9 +47,137 @@ export class ImagesService {
     private readonly intents: IntentRepository,
     private readonly wake: ReconcileWakeService,
     @Optional() private readonly infrastructure?: InfrastructureRepository,
+    @Optional() private readonly catalog?: ImageCatalogService,
   ) {}
 
-  async create(actorId: string, input: CreateImageRequest): Promise<AdminImageDto> {
+  async listCatalog(): Promise<CatalogImageDto[]> {
+    if (!this.catalog) {
+      throw new ConflictException({ code: 'IMAGE_CATALOG_UNAVAILABLE', message: 'Image catalog is not configured' });
+    }
+    const entries = await this.catalog.list();
+    const existing = await this.database.selectFrom('infra.images').select(['alias', 'deleting']).execute();
+    const added = new Set(existing.filter((row) => !row.deleting).map((row) => row.alias));
+    return entries.map((entry) => ({
+      ...entry,
+      added: added.has(entry.alias) || entry.aliases.some((alias) => added.has(alias)),
+    }));
+  }
+
+  async addFromCatalog(actorId: string, input: AddCatalogImageRequest): Promise<AdminImageDto> {
+    if (!this.catalog) {
+      throw new ConflictException({ code: 'IMAGE_CATALOG_UNAVAILABLE', message: 'Image catalog is not configured' });
+    }
+    const entry = await this.catalog.requireAlias(input.alias);
+    const existing = await this.database.selectFrom('infra.images')
+      .select('id')
+      .where('alias', '=', entry.alias)
+      .where('deleting', '=', false)
+      .executeTakeFirst();
+    if (existing) {
+      throw new ConflictException({
+        code: 'IMAGE_ALIAS_EXISTS',
+        message: `Image alias ${entry.alias} is already in the catalog`,
+      });
+    }
+    return this.create(actorId, {
+      name: displayNameForCatalog(entry),
+      alias: entry.alias,
+      description: entry.description,
+      loginUser: 'root',
+      minRootSizeBytes: null,
+      networkManagedExternally: true,
+    }, entry.fingerprint);
+  }
+
+  async repull(actorId: string, imageId: string): Promise<{
+    image: AdminImageDto;
+    intents: Array<Awaited<ReturnType<IntentRepository['ensurePending']>>>;
+  }> {
+    if (!this.catalog) {
+      throw new ConflictException({ code: 'IMAGE_CATALOG_UNAVAILABLE', message: 'Image catalog is not configured' });
+    }
+    const current = await this.findById(imageId);
+    const entry = await this.catalog.requireAlias(current.alias);
+    const result = await this.transactions.run(async (transaction) => {
+      await this.access.assertActorCapabilitiesInTransaction(
+        transaction,
+        actorId,
+        [Capability.ManageImages],
+      );
+      const image = await this.lockById(imageId, transaction);
+      if (!image.is_active || image.deleting) {
+        throw new ConflictException({
+          code: 'IMAGE_NOT_ASSIGNABLE',
+          message: 'A deleting or inactive image cannot be pulled',
+        });
+      }
+      const updated = await transaction.updateTable('infra.images')
+        .set({
+          fingerprint: entry.fingerprint,
+          description: entry.description,
+          revision: Number(image.revision) + 1,
+          updated_at: new Date(),
+        })
+        .where('id', '=', imageId)
+        .where('revision', '=', image.revision)
+        .returningAll()
+        .executeTakeFirstOrThrow();
+      const assignments = await transaction
+        .selectFrom('infra.image_server_assignments')
+        .selectAll()
+        .where('image_id', '=', imageId)
+        .where('lifecycle_phase', '!=', 'deleting')
+        .forUpdate()
+        .execute();
+      const intents = [];
+      for (const assignment of assignments) {
+        const next = await transaction
+          .updateTable('infra.image_server_assignments')
+          .set({
+            generation: assignment.generation + 1,
+            lifecycle_phase: 'provisioning',
+            needs_attention: false,
+            failure_code: null,
+            failure_reason: null,
+            updated_at: new Date(),
+          })
+          .where('id', '=', assignment.id)
+          .where('generation', '=', assignment.generation)
+          .returningAll()
+          .executeTakeFirstOrThrow();
+        intents.push(await this.intents.ensurePending({
+          kind: IntentKind.ImageAssignmentEnsure,
+          resourceType: IntentResourceType.ImageAssignment,
+          resourceId: next.id,
+          serverId: next.server_id,
+          requestedBy: actorId,
+          targetGeneration: next.generation,
+          request: { operation: 'repull', imageId, serverId: next.server_id },
+        }, transaction));
+      }
+      await this.audit.append(transaction, actorId, AuditAction.UpdateImage, updated.id, 'image', {
+        alias: updated.alias,
+        fingerprint: updated.fingerprint,
+        assignmentCount: assignments.length,
+      });
+      return { image: updated, intents };
+    });
+    for (const intent of result.intents) {
+      if (!intent.serverId) continue;
+      this.wake.wake({
+        resourceType: IntentResourceType.ImageAssignment,
+        resourceId: intent.resourceId,
+        serverId: intent.serverId,
+        reason: 'intent',
+      });
+    }
+    return {
+      image: await this.toAdminDto(result.image),
+      intents: result.intents,
+    };
+  }
+
+  async create(actorId: string, input: CreateImageRequest, fingerprint: string | null = null): Promise<AdminImageDto> {
     const row = await this.transactions.run(async (transaction) => {
       await this.access.assertActorCapabilitiesInTransaction(
         transaction,
@@ -68,7 +199,7 @@ export class ImagesService {
           id: randomUUID(),
           name: input.name,
           alias: input.alias,
-          fingerprint: null,
+          fingerprint,
           description: input.description ?? null,
           login_user: input.loginUser,
           min_root_size_bytes: input.minRootSizeBytes ?? null,

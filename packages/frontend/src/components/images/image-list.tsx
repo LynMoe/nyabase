@@ -1,5 +1,5 @@
 import { Link } from '@tanstack/react-router';
-import { Trash2 } from 'lucide-react';
+import { RefreshCw, Trash2 } from 'lucide-react';
 import type { AdminImageDto } from '@nyabase/common';
 import { Badge } from '../ui/badge.js';
 import { Button } from '../ui/button.js';
@@ -15,10 +15,14 @@ import { SectionCard } from '../layout/section-card.js';
 
 export function ImageList({
   images,
+  onRepull,
   onDelete,
+  busyId,
 }: {
   images: AdminImageDto[];
+  onRepull: (image: AdminImageDto) => void;
   onDelete: (image: AdminImageDto) => void;
+  busyId?: string | null;
 }) {
   return (
     <SectionCard flush>
@@ -56,14 +60,24 @@ export function ImageList({
               </TableCell>
               <TableCell>{image.assignments.length} 台</TableCell>
               <TableCell className="text-right">
-                <Button
-                  size="sm"
-                  variant="destructive"
-                  disabled={image.deleting}
-                  onClick={() => onDelete(image)}
-                >
-                  <Trash2 className="h-3.5 w-3.5" />删除
-                </Button>
+                <div className="flex justify-end gap-2">
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    disabled={image.deleting || busyId === image.id}
+                    onClick={() => onRepull(image)}
+                  >
+                    <RefreshCw className="h-3.5 w-3.5" />重新拉取
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="destructive"
+                    disabled={image.deleting || busyId === image.id}
+                    onClick={() => onDelete(image)}
+                  >
+                    <Trash2 className="h-3.5 w-3.5" />移除
+                  </Button>
+                </div>
               </TableCell>
             </TableRow>
           ))}

@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { getRouteApi, useNavigate } from '@tanstack/react-router';
-import { Check, CircleAlert, Fingerprint, Gauge, Pencil, RefreshCw, Server, Trash2 } from 'lucide-react';
+import { Check, CircleAlert, Fingerprint, Gauge, RefreshCw, Server, Trash2 } from 'lucide-react';
 import type { AdminImageDto, ImageAssignmentDto, IntentAcceptedDto, ServerDto } from '@nyabase/common';
 import { api } from '../lib/api.js';
 import { errorMessage } from '../lib/api-error.js';
@@ -29,7 +29,6 @@ import { PageHeader } from '../components/layout/page-header.js';
 import { QueryView } from '../components/layout/query-view.js';
 import { SectionCard } from '../components/layout/section-card.js';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '../components/ui/tabs.js';
-import { ImageFormDialog } from '../components/images/image-form-dialog.js';
 import { ResourceIntentFailures, ResourceIntentHistory } from '../components/intents/resource-intent-failures.js';
 import { formatBytes, relativeTime } from '../lib/utils.js';
 import { lifecyclePhaseLabel } from '../lib/display-labels.js';
@@ -54,7 +53,6 @@ export default function ImageDetailPage() {
   const { tab } = routeApi.useSearch();
   const navigate = useNavigate({ from: '/images/$id' });
   const queryClient = useQueryClient();
-  const [editOpen, setEditOpen] = useState(false);
   const [deleteOpen, setDeleteOpen] = useState(false);
 
   const selectTab = (next: ImageDetailTab) => {
@@ -94,6 +92,14 @@ export default function ImageDetailPage() {
     },
     onError: (error) => toast({ title: '取消分配失败', description: errorMessage(error), variant: 'destructive' }),
   });
+  const repullImage = useMutation({
+    mutationFn: () => api.post<unknown>(`/admin/images/${id}/repull`),
+    onSuccess: () => {
+      toast({ title: '已从镜像源重新拉取' });
+      invalidate();
+    },
+    onError: (error) => toast({ title: '重新拉取失败', description: errorMessage(error), variant: 'destructive' }),
+  });
   const deleteImage = useMutation({
     mutationFn: () => api.delete<unknown>(`/admin/images/${id}`),
     onSuccess: () => {
@@ -119,9 +125,14 @@ export default function ImageDetailPage() {
         ]}
         actions={
           image && !image.deleting ? (
-            <Button variant="destructive" onClick={() => setDeleteOpen(true)}>
-              <Trash2 className="h-4 w-4" />删除镜像
-            </Button>
+            <>
+              <Button variant="outline" onClick={() => repullImage.mutate()} disabled={repullImage.isPending}>
+                <RefreshCw className="h-4 w-4" />重新拉取
+              </Button>
+              <Button variant="destructive" onClick={() => setDeleteOpen(true)}>
+                <Trash2 className="h-4 w-4" />移除
+              </Button>
+            </>
           ) : undefined
         }
       />
@@ -150,11 +161,6 @@ export default function ImageDetailPage() {
                 <Card>
                   <CardHeader className="flex flex-row items-start justify-between space-y-0">
                     <CardTitle className="text-base">身份</CardTitle>
-                    {!loaded.deleting ? (
-                      <Button size="sm" variant="outline" onClick={() => setEditOpen(true)}>
-                        <Pencil className="h-3.5 w-3.5" />编辑
-                      </Button>
-                    ) : null}
                   </CardHeader>
                   <CardContent className="grid gap-3 text-sm sm:grid-cols-2">
                     <Info label="名称" value={loaded.name} />
@@ -237,19 +243,11 @@ export default function ImageDetailPage() {
           );
         }}
       </QueryView>
-      {image ? (
-        <ImageFormDialog
-          mode="edit"
-          image={image}
-          open={editOpen}
-          onOpenChange={setEditOpen}
-        />
-      ) : null}
       <ConfirmDialog
         open={deleteOpen}
-        title="删除镜像？"
-        description="删除会先移除服务器上的指纹分配；仍被容器引用的镜像会由后端拒绝。"
-        confirmLabel="确认删除"
+        title="移除镜像？"
+        description="移除会先去掉各服务器上的指纹分配；仍被容器引用的镜像会由后端拒绝。"
+        confirmLabel="确认移除"
         pendingLabel="提交中..."
         pending={deleteImage.isPending}
         onConfirm={() => deleteImage.mutate()}

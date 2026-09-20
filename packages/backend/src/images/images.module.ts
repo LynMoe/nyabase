@@ -1,4 +1,5 @@
 import { Module } from '@nestjs/common';
+import { ImageCatalogService } from './image-catalog.js';
 import { ImagesService } from './images.service.js';
 import { ImagesController } from './images.controller.js';
 import { AdminImagesController } from './admin-images.controller.js';
@@ -18,7 +19,7 @@ import { RuntimeModule } from '../runtime/runtime.module.js';
     InfrastructureModule,
     RuntimeModule,
   ],
-  providers: [ImagesService],
+  providers: [ImageCatalogService, ImagesService],
   controllers: [ImagesController, AdminImagesController],
   exports: [ImagesService],
 })

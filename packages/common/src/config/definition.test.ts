@@ -127,7 +127,8 @@ describe('Incus transport and preflight configuration', () => {
     expect(definition('incus.preflightImageFingerprint')?.schema.safeParse('a'.repeat(64)).success)
       .toBe(true);
     expect(definition('incus.imageSourceServer')?.env).toBe('INCUS_IMAGE_SOURCE_URL');
-    expect(definition('incus.imageSourceServer')?.defaultValue).toBe('');
+    expect(definition('incus.imageSourceServer')?.defaultValue)
+      .toBe('https://nyabase-images.nyabase-lxc-images.workers.dev');
     expect(definition('incus.imageSourceServer')?.schema.safeParse('').success).toBe(true);
     expect(definition('incus.imageSourceServer')?.schema.safeParse('https://images.example.test').success)
       .toBe(true);

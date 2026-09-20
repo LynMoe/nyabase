@@ -40,6 +40,7 @@ describe('queryKeys catalog', () => {
     expect(queryKeys.sharedVolumes.catalogs('v1')).toEqual(['shared-volumes', 'catalogs', 'v1']);
     expect(queryKeys.sharedVolumes.attachable('s1').slice(0, queryKeys.sharedVolumes.all.length))
       .toEqual(queryKeys.sharedVolumes.all);
+    expect(queryKeys.images.catalog).toEqual(['images', 'admin', 'catalog']);
     expect(queryKeys.images.userActive).toEqual(['images', 'user', 'active']);
     expect(queryKeys.images.detail('i1')).toEqual(['images', 'admin', 'i1']);
     expect(queryKeys.users.admin).toEqual(['users', 'admin']);
