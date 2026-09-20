@@ -390,7 +390,7 @@ export const controlPlaneConfigDefinitions = [
     key: 'incus.preflightSourceServer',
     yamlPath: 'incus.preflightSourceServer',
     env: 'INCUS_PREFLIGHT_SOURCE_SERVER',
-    defaultValue: 'https://images.linuxcontainers.org',
+    defaultValue: DEFAULT_IMAGE_SOURCE_SERVER,
     schema: z.string().trim().url().refine((value) => {
       try {
         return new URL(value).protocol === 'https:';

@@ -184,7 +184,7 @@ function reconciler(
           ({
             'incus.preflightImageAlias': 'ubuntu/24.04',
             'incus.preflightImageFingerprint': '',
-            'incus.preflightSourceServer': 'https://images.linuxcontainers.org',
+            'incus.preflightSourceServer': 'https://nyabase-images.nyabase-lxc-images.workers.dev',
           })[key],
       ),
     } as never,

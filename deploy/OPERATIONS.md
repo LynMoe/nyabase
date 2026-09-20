@@ -278,8 +278,7 @@ network:
 Debian **cloud** kernels often omit `e1000`. Use `linux-image-amd64` (generic)
 if `modprobe e1000` says the module is missing.
 
-If `ufw` / firewalld is active, allow in/route on `vmbr0` (see
-linuxcontainers.org firewalld/ufw notes). nyabase does not configure host
+If `ufw` / firewalld is active, allow in/route on `vmbr0`. nyabase does not configure host
 firewall. If guest ping of the host IP fails, check ufw/firewalld **before**
 rebuilding vmbr.
 

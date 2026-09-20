@@ -1,5 +1,5 @@
 import { Inject, Injectable, Optional } from '@nestjs/common';
-import { AuditAction } from '@nyabase/common';
+import { AuditAction, DEFAULT_IMAGE_SOURCE_SERVER } from '@nyabase/common';
 import { Kysely, sql } from 'kysely';
 import type { NyabaseDatabase } from '../persistence-pg/database.types.js';
 import { PG_DATABASE } from '../persistence-pg/tokens.js';
@@ -162,7 +162,7 @@ export class ImageAssignmentReconciler implements ManagedReconciler {
     this.source = source ?? {
       alias: '',
       fingerprint: null,
-      sourceServer: 'https://images.linuxcontainers.org',
+      sourceServer: DEFAULT_IMAGE_SOURCE_SERVER,
     };
   }
 
