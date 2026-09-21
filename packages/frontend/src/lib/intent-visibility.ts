@@ -37,6 +37,28 @@ export function isOutstandingIntent(intent: IntentDto): boolean {
   return intent.status !== IntentStatus.Succeeded && Boolean(intent.failure || intent.failureCode);
 }
 
+export function outstandingIntentKey(intent: Pick<IntentDto, 'kind' | 'resourceId'>): string {
+  return `${intent.kind}:${intent.resourceId}`;
+}
+
+/** Newest-first. One current failure per kind+resource; a later success hides older failures. */
+export function currentOutstandingIntents(items: readonly IntentDto[]): IntentDto[] {
+  return latestIntentsByResource(items).filter((intent) => isOutstandingIntent(intent));
+}
+
+/** Newest-first. Keep the current row for each kind+resource; drop superseded scans. */
+export function latestIntentsByResource(items: readonly IntentDto[]): IntentDto[] {
+  const seen = new Set<string>();
+  const latest: IntentDto[] = [];
+  for (const intent of items) {
+    const key = outstandingIntentKey(intent);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    latest.push(intent);
+  }
+  return latest;
+}
+
 export async function retryIntent(intentId: string, admin: boolean): Promise<IntentDto> {
   return api.post<IntentDto>(retryIntentPath(intentId, admin), {});
 }

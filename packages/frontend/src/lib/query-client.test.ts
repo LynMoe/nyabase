@@ -11,7 +11,7 @@ describe('isCurrentPrincipalAccessQuery', () => {
     [queryKeys.volumes.user, true],
     [queryKeys.containers.attachments('user', 'c1'), true],
     [queryKeys.containers.intents('user', 'c1'), true],
-    [queryKeys.resourceIntentFailures('user', '/containers/c1/intents'), true],
+    [queryKeys.resourceIntentFailures('user', '/containers/c1/intents', 20), true],
     [queryKeys.volumes.intents('v1', false), true],
     [frontendExtensionHost.extensionDevicesKey('example-card', 's1', false), true],
     [queryKeys.httpProxy.bindings, true],

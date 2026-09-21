@@ -76,6 +76,7 @@ export interface RetryIntentInput {
 
 export type EnsurePendingIntentInput = CreatePendingIntentInput & {
   readonly reuseSettled?: boolean;
+  readonly reuseFailed?: boolean;
 };
 
 export interface IntentPage {
@@ -624,6 +625,9 @@ export class IntentRepository {
     if (options.resourceTypes && options.resourceTypes.length === 0) {
       return { items: [], nextCursor: null };
     }
+    if (options.resourceIds && options.resourceIds.length === 0) {
+      return { items: [], nextCursor: null };
+    }
     let query = executor
       .selectFrom('control.intents')
       .selectAll()
@@ -706,6 +710,9 @@ export class IntentRepository {
     if (options.resourceTypes && options.resourceTypes.length === 0) {
       return { items: [], nextCursor: null };
     }
+    if (options.resourceIds && options.resourceIds.length === 0) {
+      return { items: [], nextCursor: null };
+    }
     let query = executor
       .selectFrom('control.intents')
       .selectAll()
@@ -762,6 +769,12 @@ export class IntentRepository {
     assertKindResource(input.kind, input.resourceType);
     assertUuidLike(input.resourceId, 'Intent resource id');
     const reuseSettled = input.reuseSettled !== false;
+    const reuseFailed = input.reuseFailed === true;
+    const reuseStatuses = [
+      IntentStatus.Pending,
+      ...(reuseSettled ? [IntentStatus.Succeeded] : []),
+      ...(reuseFailed ? [IntentStatus.Failed] : []),
+    ];
     let existingQuery = executor
       .selectFrom('control.intents')
       .selectAll()
@@ -769,13 +782,7 @@ export class IntentRepository {
       .where('resource_type', '=', input.resourceType)
       .where('resource_id', '=', input.resourceId)
       .where('target_generation', '=', input.targetGeneration)
-      .where(
-        'status',
-        'in',
-        reuseSettled
-          ? [IntentStatus.Pending, IntentStatus.Succeeded]
-          : [IntentStatus.Pending],
-      )
+      .where('status', 'in', reuseStatuses)
       .orderBy('created_at', 'desc')
       .orderBy('id', 'desc');
     if (input.serverId) {
@@ -790,6 +797,9 @@ export class IntentRepository {
     const existing = matches.find((row) => row.status === IntentStatus.Pending)
       ?? (reuseSettled
         ? matches.find((row) => row.status === IntentStatus.Succeeded)
+        : undefined)
+      ?? (reuseFailed
+        ? matches.find((row) => row.status === IntentStatus.Failed)
         : undefined);
     if (existing) return mapRow(existing);
     return this.createPending(input, executor);

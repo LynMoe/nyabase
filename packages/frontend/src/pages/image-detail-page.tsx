@@ -72,6 +72,12 @@ export default function ImageDetailPage() {
   const invalidate = () => {
     void queryClient.invalidateQueries({ queryKey: queryKeys.images.detail(id) });
     void queryClient.invalidateQueries({ queryKey: queryKeys.images.admin });
+    void queryClient.invalidateQueries({
+      queryKey: queryKeys.resourceIntentFailures('admin', `/admin/images/${id}/intents`, 20),
+    });
+    void queryClient.invalidateQueries({
+      queryKey: queryKeys.resourceIntentFailures('admin', `/admin/images/${id}/intents`, 50),
+    });
   };
 
   const assign = useMutation({
@@ -103,7 +109,7 @@ export default function ImageDetailPage() {
   const deleteImage = useMutation({
     mutationFn: () => api.delete<unknown>(`/admin/images/${id}`),
     onSuccess: () => {
-      toast({ title: '镜像删除意图已提交' });
+      toast({ title: '镜像移除意图已提交' });
       setDeleteOpen(false);
       invalidate();
       void navigate({ to: '/images' });
@@ -235,7 +241,7 @@ export default function ImageDetailPage() {
                   </CardHeader>
                   <CardContent>
                     <ResourceIntentFailures listPath={`/admin/images/${loaded.id}/intents`} admin />
-                    <ResourceIntentHistory listPath={`/admin/images/${loaded.id}/intents`} admin defaultOpen />
+                    <ResourceIntentHistory listPath={`/admin/images/${loaded.id}/intents`} admin />
                   </CardContent>
                 </Card>
               </TabsContent>

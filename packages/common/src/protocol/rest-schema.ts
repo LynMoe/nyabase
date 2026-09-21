@@ -555,9 +555,7 @@ export const zCreateImageRequest = z.object({
 export const zPatchImageRequest = z.object({
   expectedRevision: zExpectedRevision,
   name: zName.optional(),
-  alias: z.string().trim().min(1).max(256).regex(SIMPLESTREAMS_ALIAS_RE).optional(),
   description: z.string().max(4_096).nullable().optional(),
-  loginUser: z.string().regex(LOGIN_USER_RE).optional(),
   minRootSizeBytes: zPositiveBytes.nullable().optional(),
   networkManagedExternally: z.boolean().optional(),
   isActive: z.boolean().optional(),

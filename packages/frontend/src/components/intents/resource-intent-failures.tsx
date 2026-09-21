@@ -1,14 +1,14 @@
 import { useEffect, useState } from 'react';
 import { useMutation, useQuery } from '@tanstack/react-query';
-import { IntentStatus, type CursorPaginatedResponse, type IntentDto } from '@nyabase/common';
+import { type CursorPaginatedResponse, type IntentDto } from '@nyabase/common';
 import { ChevronDown, ChevronRight, History } from 'lucide-react';
 import { api } from '../../lib/api.js';
 import { errorMessage } from '../../lib/api-error.js';
 import { queryKeys } from '../../lib/query-keys.js';
 import {
+  currentOutstandingIntents,
   formatIntentAttempt,
   formatIntentFailureMessage,
-  isOutstandingIntent,
   isRetryableIntent,
   retryIntent,
 } from '../../lib/intent-visibility.js';
@@ -16,6 +16,7 @@ import { intentKindLabel, intentStatusLabel } from '../../lib/status-labels.js';
 import { Button } from '../ui/button.js';
 import { toast } from '../../hooks/use-toast.js';
 import { IntentsPanel } from '../containers/intents-panel.js';
+import { queryPollInterval } from '../../lib/query-lifecycle.js';
 
 export function ResourceIntentHistory({
   listPath,
@@ -29,21 +30,28 @@ export function ResourceIntentHistory({
   defaultOpen?: boolean;
 }) {
   const query = useQuery({
-    queryKey: queryKeys.resourceIntentFailures(admin ? 'admin' : 'user', listPath),
+    queryKey: queryKeys.resourceIntentFailures(admin ? 'admin' : 'user', listPath, 50),
     queryFn: () => api.get<CursorPaginatedResponse<IntentDto>>(
       `${listPath}${listPath.includes('?') ? '&' : '?'}limit=50`,
     ),
     enabled,
+    refetchInterval: (queryState) => queryPollInterval(queryState.state, {
+      activeIntervalMs: 5_000,
+      isTerminal: (page) => currentOutstandingIntents(page.items ?? []).length === 0,
+    }),
   });
   const items = query.data?.items ?? [];
-  const failedCount = items.filter((intent) => intent.status === IntentStatus.Failed).length;
+  const outstandingCount = currentOutstandingIntents(items).length;
   const [open, setOpen] = useState(defaultOpen);
   useEffect(() => {
-    if (failedCount > 0) setOpen(true);
-  }, [failedCount]);
+    if (outstandingCount > 0) setOpen(true);
+  }, [outstandingCount]);
   if (!enabled) return null;
   if (query.isLoading) {
     return <p className="text-xs text-muted-foreground">加载操作历史...</p>;
+  }
+  if (query.isError) {
+    return <p className="text-xs text-destructive">操作历史加载失败：{errorMessage(query.error)}</p>;
   }
   return (
     <div className="min-w-0 space-y-2" data-testid="volume-intent-history">
@@ -59,7 +67,7 @@ export function ResourceIntentHistory({
         <History className="h-3.5 w-3.5" />
         操作历史
         {items.length > 0 ? `（${items.length}）` : ''}
-        {failedCount > 0 ? ` · ${failedCount} 失败` : ''}
+        {outstandingCount > 0 ? ` · ${outstandingCount} 待处理` : ''}
       </Button>
       {open && (
         <IntentsPanel
@@ -83,11 +91,15 @@ export function ResourceIntentFailures({
   enabled?: boolean;
 }) {
   const query = useQuery({
-    queryKey: queryKeys.resourceIntentFailures(admin ? 'admin' : 'user', listPath),
+    queryKey: queryKeys.resourceIntentFailures(admin ? 'admin' : 'user', listPath, 20),
     queryFn: () => api.get<CursorPaginatedResponse<IntentDto>>(
       `${listPath}${listPath.includes('?') ? '&' : '?'}limit=20`,
     ),
     enabled,
+    refetchInterval: (queryState) => queryPollInterval(queryState.state, {
+      activeIntervalMs: 5_000,
+      isTerminal: (page) => currentOutstandingIntents(page.items ?? []).length === 0,
+    }),
   });
   const retry = useMutation({
     mutationFn: (intentId: string) => retryIntent(intentId, admin),
@@ -101,8 +113,16 @@ export function ResourceIntentFailures({
       variant: 'destructive',
     }),
   });
-  const outstanding = (query.data?.items ?? []).filter(isOutstandingIntent);
-  if (!enabled || query.isLoading || outstanding.length === 0) return null;
+  const outstanding = currentOutstandingIntents(query.data?.items ?? []);
+  if (!enabled || query.isLoading) return null;
+  if (query.isError) {
+    return (
+      <div className="space-y-2 rounded-md border border-destructive/30 bg-destructive/5 p-3" data-testid="resource-intent-failures">
+        <p className="text-sm text-destructive">操作失败记录加载失败：{errorMessage(query.error)}</p>
+      </div>
+    );
+  }
+  if (outstanding.length === 0) return null;
   return (
     <div className="space-y-2 rounded-md border border-destructive/30 bg-destructive/5 p-3" data-testid="resource-intent-failures">
       {outstanding.map((intent) => {

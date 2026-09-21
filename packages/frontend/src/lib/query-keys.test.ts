@@ -43,6 +43,10 @@ describe('queryKeys catalog', () => {
     expect(queryKeys.images.catalog).toEqual(['images', 'admin', 'catalog']);
     expect(queryKeys.images.userActive).toEqual(['images', 'user', 'active']);
     expect(queryKeys.images.detail('i1')).toEqual(['images', 'admin', 'i1']);
+    expect(queryKeys.resourceIntentFailures('admin', '/admin/images/i1/intents', 20))
+      .toEqual(['resource-intent-failures', 'admin', '/admin/images/i1/intents', 20]);
+    expect(queryKeys.resourceIntentFailures('admin', '/admin/images/i1/intents', 50))
+      .not.toEqual(queryKeys.resourceIntentFailures('admin', '/admin/images/i1/intents', 20));
     expect(queryKeys.users.admin).toEqual(['users', 'admin']);
     expect(queryKeys.users.detail('u1')).toEqual(['users', 'admin', 'u1']);
     expect(queryKeys.users.detail('u1').slice(0, queryKeys.users.admin.length))

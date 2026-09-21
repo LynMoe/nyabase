@@ -1,11 +1,13 @@
 import { describe, expect, it } from 'vitest';
 import { IntentKind, IntentResourceType, IntentStatus, type IntentDto } from '@nyabase/common';
 import {
+  currentOutstandingIntents,
   formatIntentAttempt,
   formatIntentFailureMessage,
   isIntentAccepted,
   isOutstandingIntent,
   isRetryableIntent,
+  latestIntentsByResource,
   retryIntentPath,
 } from './intent-visibility.js';
 
@@ -52,5 +54,37 @@ describe('intent visibility helpers', () => {
   it('detects an accepted intent payload', () => {
     expect(isIntentAccepted({ intentId: 'abc' })).toBe(true);
     expect(isIntentAccepted({ id: 'volume' })).toBe(false);
+  });
+
+  it('keeps one current failure per resource and drops it after a later success', () => {
+    const assignment = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+    const olderFail = intent({
+      id: '11111111-1111-4111-8111-111111111111',
+      kind: IntentKind.ImageAssignmentEnsure,
+      resourceId: assignment,
+      createdAt: '2026-09-21T03:31:00.000Z',
+    });
+    const newerFail = intent({
+      id: '22222222-2222-4222-8222-222222222222',
+      kind: IntentKind.ImageAssignmentEnsure,
+      resourceId: assignment,
+      createdAt: '2026-09-21T03:38:00.000Z',
+    });
+    const success = intent({
+      id: '33333333-3333-4333-8333-333333333333',
+      kind: IntentKind.ImageAssignmentEnsure,
+      resourceId: assignment,
+      status: IntentStatus.Succeeded,
+      failureCode: null,
+      failure: null,
+      createdAt: '2026-09-21T03:52:00.000Z',
+    });
+    expect(currentOutstandingIntents([newerFail, olderFail]).map((item) => item.id))
+      .toEqual([newerFail.id]);
+    expect(currentOutstandingIntents([success, newerFail, olderFail])).toEqual([]);
+    expect(latestIntentsByResource([newerFail, olderFail]).map((item) => item.id))
+      .toEqual([newerFail.id]);
+    expect(latestIntentsByResource([success, newerFail, olderFail]).map((item) => item.id))
+      .toEqual([success.id]);
   });
 });

@@ -8,6 +8,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '../ui
 import { toast } from '../../hooks/use-toast.js';
 import { intentKindLabel, intentStatusLabel } from '../../lib/status-labels.js';
 import {
+  currentOutstandingIntents,
   formatIntentAttempt,
   formatIntentFailureMessage,
   isRetryableIntent,
@@ -43,6 +44,7 @@ export function IntentRow({
   showRequestSummary = false,
   resourceLabel,
   serverLabel,
+  retryable = false,
 }: {
   intent: IntentDto;
   admin: boolean;
@@ -50,6 +52,7 @@ export function IntentRow({
   showRequestSummary?: boolean;
   resourceLabel?: string;
   serverLabel?: string | null;
+  retryable?: boolean;
 }) {
   const currentUser = useAuthStore((state) => state.user);
   const retry = useMutation({
@@ -98,7 +101,7 @@ export function IntentRow({
       {failure && (
         <p className="break-all text-xs text-destructive">{failure}</p>
       )}
-      {isRetryableIntent(intent) && (
+      {retryable && isRetryableIntent(intent) && (
         <Button
           size="sm"
           variant="outline"
@@ -123,6 +126,7 @@ export function IntentsPanel({
   onRetry: () => void;
   embedded?: boolean;
 }) {
+  const retryableIds = new Set(currentOutstandingIntents(intents).map((intent) => intent.id));
   const list = intents.length === 0 ? (
     <p className="text-sm text-muted-foreground">暂无操作记录。</p>
   ) : (
@@ -134,6 +138,7 @@ export function IntentsPanel({
           admin={admin}
           onRetried={onRetry}
           showRequestSummary
+          retryable={retryableIds.has(intent.id)}
         />
       ))}
     </div>

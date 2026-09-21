@@ -463,10 +463,18 @@ export class AdminImageIntentsController {
     @Query() query: Record<string, unknown>,
   ) {
     const options = listOptions(query);
+    const image = await this.database.selectFrom('infra.images')
+      .select('id')
+      .where('id', '=', imageId)
+      .executeTakeFirst();
+    if (!image) throw new NotFoundException('Image not found');
     const assignments = await this.database.selectFrom('infra.image_server_assignments')
       .select('id')
       .where('image_id', '=', imageId)
       .execute();
+    if (assignments.length === 0) {
+      return { items: [], nextCursor: null };
+    }
     const page = await this.intents.list({
       ...options,
       resourceType: 'image_assignment',

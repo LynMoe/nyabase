@@ -66,7 +66,7 @@ Reviewed 15 of 16 requested mobile dialog shots at 390×844 (PNGs are 780×1688 
 - Status: open
 
 ### Issue 9 -- Severity: suggestion
-- File: packages/frontend/visual/shots/mobile/dialog-create-image.png
+- File: packages/frontend/visual/shots/mobile/dialog-add-catalog-image.png
 - Description: 添加镜像 currently fits (buttons visible, ~80 px remaining) but `DialogContent` has **no** `max-h` / `overflow-y-auto`. A validation message or an extra field would overflow the viewport with nowhere to scroll. Same for `dialog-create-volume.png` (fits at ~624 CSS px / 110 px remaining, also no max-height).
 - Suggestion: Put max-height + scrolling body + sticky footer on the shared `DialogContent` primitive instead of opting in per page.
 - Status: open

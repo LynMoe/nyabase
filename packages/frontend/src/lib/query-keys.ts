@@ -80,8 +80,8 @@ export const queryKeys = {
     adminBindings: ['http-proxy', 'admin', 'bindings'] as const,
   },
   storageCapacity: (serverId: string) => ['storage-capacity', serverId] as const,
-  resourceIntentFailures: (plane: Plane, listPath: string) =>
-    ['resource-intent-failures', plane, listPath] as const,
+  resourceIntentFailures: (plane: Plane, listPath: string, limit: number) =>
+    ['resource-intent-failures', plane, listPath, limit] as const,
   adminIntents: (filters: {
     status?: string;
     kind?: string;

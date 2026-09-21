@@ -25,5 +25,21 @@ describe('image catalog UI', () => {
     expect(list).toMatch(/移除/);
     expect(detail).not.toMatch(/ImageFormDialog/);
     expect(detail).toMatch(/重新拉取/);
+    expect(detail).toMatch(/\/admin\/images\/\$\{loaded\.id\}\/intents/);
+    expect(detail).toMatch(/镜像移除意图已提交/);
+    expect(detail).not.toMatch(/镜像删除意图已提交/);
+  });
+
+  it('renders intent history errors and does not share limit=20/50 query keys', () => {
+    const intents = read('components/intents/resource-intent-failures.tsx');
+    const keys = read('lib/query-keys.ts');
+    expect(intents).toMatch(/query\.isError/);
+    expect(intents).toMatch(/limit=20/);
+    expect(intents).toMatch(/limit=50/);
+    expect(intents).toMatch(/resourceIntentFailures\(admin \? 'admin' : 'user', listPath, 20\)/);
+    expect(intents).toMatch(/resourceIntentFailures\(admin \? 'admin' : 'user', listPath, 50\)/);
+    expect(intents).toMatch(/currentOutstandingIntents/);
+    expect(intents).not.toMatch(/latestIntentsByResource/);
+    expect(keys).toMatch(/resourceIntentFailures: \(plane: Plane, listPath: string, limit: number\)/);
   });
 });

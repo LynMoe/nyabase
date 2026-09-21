@@ -16,7 +16,6 @@ import {
 import {
   Capability,
   zAddCatalogImageRequest,
-  zIntentListQuery,
   zPatchImageRequest,
   zPutImageAssignmentRequest,
 } from '@nyabase/common';
@@ -95,23 +94,6 @@ export class AdminImagesController {
   @Get(':id/assignments/status')
   async statusAssignments(@Param('id') id: string) {
     return this.images.getServerStatuses(await this.images.findById(id));
-  }
-
-  @Get(':id/intents')
-  intents(
-    @Param('id') id: string,
-    @Query() query: Record<string, unknown>,
-  ) {
-    return this.images.listAssignmentIntents(id, undefined, zIntentListQuery.parse(query));
-  }
-
-  @Get(':id/assignments/:serverId/intents')
-  assignmentIntents(
-    @Param('id') id: string,
-    @Param('serverId') serverId: string,
-    @Query() query: Record<string, unknown>,
-  ) {
-    return this.images.listAssignmentIntents(id, serverId, zIntentListQuery.parse(query));
   }
 
   @Put(':id/assignments/:serverId')

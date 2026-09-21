@@ -569,6 +569,14 @@ describe('canonical DTO shapes', () => {
       expectedRevision: 1,
       minRootSizeBytes: null,
     }).success).toBe(true);
+    expect(zPatchImageRequest.safeParse({
+      expectedRevision: 1,
+      alias: 'ubuntu/24.04',
+    }).success).toBe(false);
+    expect(zPatchImageRequest.safeParse({
+      expectedRevision: 1,
+      loginUser: 'root',
+    }).success).toBe(false);
   });
 });
 

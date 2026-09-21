@@ -35,9 +35,40 @@ type SimplestreamsImages = {
   products?: Record<string, SimplestreamsProduct>;
 };
 
+export function isIncusSimplestreamsVersion(name: string): boolean {
+  if (name.length < 8) return false;
+  const day = name.slice(0, 8);
+  if (!/^\d{8}$/.test(day)) return false;
+  const year = Number(day.slice(0, 4));
+  const month = Number(day.slice(4, 6));
+  const date = Number(day.slice(6, 8));
+  const parsed = new Date(Date.UTC(year, month - 1, date));
+  return parsed.getUTCFullYear() === year
+    && parsed.getUTCMonth() === month - 1
+    && parsed.getUTCDate() === date;
+}
+
+export function pickSimplestreamsVersion(versionIds: readonly string[]): string | undefined {
+  if (versionIds.length === 0) return undefined;
+  const visible = versionIds.filter((name) => isIncusSimplestreamsVersion(name));
+  const pool = visible.length > 0 ? visible : [...versionIds];
+  return pool.slice().sort((left, right) => {
+    const leftDay = isIncusSimplestreamsVersion(left) ? left.slice(0, 8) : '';
+    const rightDay = isIncusSimplestreamsVersion(right) ? right.slice(0, 8) : '';
+    if (leftDay !== rightDay) return leftDay.localeCompare(rightDay);
+    return left.localeCompare(right, undefined, { numeric: true });
+  }).at(-1);
+}
+
+function catalogFingerprint(value: string | undefined): string | undefined {
+  if (!value) return undefined;
+  const fingerprint = value.trim().toLowerCase();
+  return /^[0-9a-f]{64}$/.test(fingerprint) ? fingerprint : undefined;
+}
+
 export function parseSimplestreamsProducts(body: unknown): CatalogEntry[] {
   const products = (body as SimplestreamsImages | null)?.products;
-  if (!products || typeof products !== 'object') {
+  if (!products || typeof products !== 'object' || Array.isArray(products)) {
     throw new BadGatewayException({
       code: 'IMAGE_CATALOG_INVALID',
       message: 'The image source did not return a simplestreams product catalog',
@@ -50,15 +81,15 @@ export function parseSimplestreamsProducts(body: unknown): CatalogEntry[] {
       .map((item) => item.trim())
       .filter(Boolean);
     const versions = product.versions ?? {};
-    const versionIds = Object.keys(versions).sort();
-    const version = versionIds[versionIds.length - 1];
+    const version = pickSimplestreamsVersion(Object.keys(versions));
     if (!version) continue;
     const items = versions[version]?.items ?? {};
     const meta = items['incus.tar.xz'] ?? items['lxd.tar.xz'];
     const squash = Object.values(items).find((item) => item.ftype === 'squashfs')
       ?? items['root.squashfs'];
-    const fingerprint = meta?.combined_squashfs_sha256 ?? squash?.sha256;
-    if (!fingerprint || !/^[0-9a-f]{64}$/.test(fingerprint)) continue;
+    const fingerprint = catalogFingerprint(meta?.combined_squashfs_sha256)
+      ?? catalogFingerprint(squash?.sha256);
+    if (!fingerprint) continue;
     const alias = aliases[0];
     if (!alias) continue;
     const os = String(product.os ?? 'linux');
@@ -113,7 +144,16 @@ export class ImageCatalogService {
         message: `Image source returned HTTP ${response.status}`,
       });
     }
-    return parseSimplestreamsProducts(await response.json());
+    let body: unknown;
+    try {
+      body = await response.json();
+    } catch {
+      throw new BadGatewayException({
+        code: 'IMAGE_CATALOG_INVALID',
+        message: 'The image source did not return a simplestreams product catalog',
+      });
+    }
+    return parseSimplestreamsProducts(body);
   }
 
   async requireAlias(alias: string): Promise<CatalogEntry> {

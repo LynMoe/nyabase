@@ -11,7 +11,7 @@ Two real problems stand out:
 
 Confirm dialogs (disable user, delete volume, stop container, delete SSH key) are a consistent `max-w-lg` width — neither oversized nor tiny. The only confirm nit is an awkward last-line wrap on delete-volume.
 
-**Looks good (no layout issues found):** `dialog-create-user.png`, `dialog-create-group.png`, `dialog-create-container.png`, `dialog-create-volume.png`, `dialog-create-image.png`, `dialog-ip-pool.png`, `dialog-http-binding.png`, `dialog-domain-pool.png`, `dialog-disable-user.png`, `dialog-stop-container.png`, `dialog-delete-ssh-key.png`.
+**Looks good (no layout issues found):** `dialog-create-user.png`, `dialog-create-group.png`, `dialog-create-container.png`, `dialog-create-volume.png`, `dialog-add-catalog-image.png`, `dialog-ip-pool.png`, `dialog-http-binding.png`, `dialog-domain-pool.png`, `dialog-disable-user.png`, `dialog-stop-container.png`, `dialog-delete-ssh-key.png`.
 
 ## Issues
 

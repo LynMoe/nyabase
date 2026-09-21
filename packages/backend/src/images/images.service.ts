@@ -19,7 +19,6 @@ import {
   type CreateImageRequest,
   type ImageAssignmentDto,
   type ImageDto,
-  type IntentListQuery,
   type PatchImageRequest,
   type ResourceLifecyclePhase,
 } from '@nyabase/common';
@@ -36,6 +35,18 @@ import { displayNameForCatalog, ImageCatalogService } from './image-catalog.js';
 
 type ImageRow = Awaited<ReturnType<ImagesService['findById']>>;
 type ImageAssignmentRow = Awaited<ReturnType<ImagesService['assignments']>>[number];
+
+function isUniqueViolation(error: unknown): boolean {
+  let current: unknown = error;
+  const visited = new Set<unknown>();
+  while (current && typeof current === 'object' && !visited.has(current)) {
+    visited.add(current);
+    const record = current as { code?: unknown; cause?: unknown };
+    if (record.code === '23505') return true;
+    current = record.cause;
+  }
+  return false;
+}
 
 @Injectable()
 export class ImagesService {
@@ -55,11 +66,11 @@ export class ImagesService {
       throw new ConflictException({ code: 'IMAGE_CATALOG_UNAVAILABLE', message: 'Image catalog is not configured' });
     }
     const entries = await this.catalog.list();
-    const existing = await this.database.selectFrom('infra.images').select(['alias', 'deleting']).execute();
-    const added = new Set(existing.filter((row) => !row.deleting).map((row) => row.alias));
+    const existing = await this.database.selectFrom('infra.images').select(['alias']).execute();
+    const occupied = new Set(existing.map((row) => row.alias));
     return entries.map((entry) => ({
       ...entry,
-      added: added.has(entry.alias) || entry.aliases.some((alias) => added.has(alias)),
+      added: occupied.has(entry.alias) || entry.aliases.some((alias) => occupied.has(alias)),
     }));
   }
 
@@ -69,24 +80,33 @@ export class ImagesService {
     }
     const entry = await this.catalog.requireAlias(input.alias);
     const existing = await this.database.selectFrom('infra.images')
-      .select('id')
+      .select(['id', 'deleting'])
       .where('alias', '=', entry.alias)
-      .where('deleting', '=', false)
       .executeTakeFirst();
     if (existing) {
+      throw new ConflictException({
+        code: existing.deleting ? 'IMAGE_ALIAS_DELETING' : 'IMAGE_ALIAS_EXISTS',
+        message: existing.deleting
+          ? `Image alias ${entry.alias} is still being removed`
+          : `Image alias ${entry.alias} is already in the catalog`,
+      });
+    }
+    try {
+      return await this.create(actorId, {
+        name: displayNameForCatalog(entry),
+        alias: entry.alias,
+        description: entry.description,
+        loginUser: 'root',
+        minRootSizeBytes: null,
+        networkManagedExternally: true,
+      }, entry.fingerprint);
+    } catch (error) {
+      if (!isUniqueViolation(error)) throw error;
       throw new ConflictException({
         code: 'IMAGE_ALIAS_EXISTS',
         message: `Image alias ${entry.alias} is already in the catalog`,
       });
     }
-    return this.create(actorId, {
-      name: displayNameForCatalog(entry),
-      alias: entry.alias,
-      description: entry.description,
-      loginUser: 'root',
-      minRootSizeBytes: null,
-      networkManagedExternally: true,
-    }, entry.fingerprint);
   }
 
   async repull(actorId: string, imageId: string): Promise<{
@@ -194,23 +214,32 @@ export class ImagesService {
           message: `At most ${MAX_PLATFORM_IMAGES} images are supported`,
         });
       }
-      const created = await transaction.insertInto('infra.images')
-        .values({
-          id: randomUUID(),
-          name: input.name,
-          alias: input.alias,
-          fingerprint,
-          description: input.description ?? null,
-          login_user: input.loginUser,
-          min_root_size_bytes: input.minRootSizeBytes ?? null,
-          network_managed_externally: input.networkManagedExternally,
-          is_active: true,
-          deleting: false,
-          cleanup_generation: 0,
-          revision: 1,
-        })
-        .returningAll()
-        .executeTakeFirstOrThrow();
+      let created;
+      try {
+        created = await transaction.insertInto('infra.images')
+          .values({
+            id: randomUUID(),
+            name: input.name,
+            alias: input.alias,
+            fingerprint,
+            description: input.description ?? null,
+            login_user: input.loginUser,
+            min_root_size_bytes: input.minRootSizeBytes ?? null,
+            network_managed_externally: input.networkManagedExternally,
+            is_active: true,
+            deleting: false,
+            cleanup_generation: 0,
+            revision: 1,
+          })
+          .returningAll()
+          .executeTakeFirstOrThrow();
+      } catch (error) {
+        if (!isUniqueViolation(error)) throw error;
+        throw new ConflictException({
+          code: 'IMAGE_ALIAS_EXISTS',
+          message: `Image alias ${input.alias} is already in the catalog`,
+        });
+      }
       await this.audit.append(transaction, actorId, AuditAction.CreateImage, created.id, 'image', {
         name: created.name,
         alias: created.alias,
@@ -301,9 +330,7 @@ export class ImagesService {
       const updated = await transaction.updateTable('infra.images')
         .set({
           ...(input.name === undefined ? {} : { name: input.name }),
-          ...(input.alias === undefined ? {} : { alias: input.alias }),
           ...(input.description === undefined ? {} : { description: input.description }),
-          ...(input.loginUser === undefined ? {} : { login_user: input.loginUser }),
           ...(input.minRootSizeBytes === undefined
             ? {}
             : { min_root_size_bytes: input.minRootSizeBytes }),
@@ -600,27 +627,6 @@ export class ImagesService {
       assignment: result.assignment ? this.assignmentDto(result.assignment) : null,
       intents: result.intents,
     };
-  }
-
-  async listAssignmentIntents(
-    imageId: string,
-    serverId: string | undefined,
-    query: IntentListQuery,
-  ) {
-    await this.findById(imageId);
-    const assignments = await this.assignments(imageId);
-    const assignmentIds = assignments
-      .filter((assignment) => !serverId || assignment.server_id === serverId)
-      .map((assignment) => assignment.id);
-    if (assignmentIds.length === 0) return { items: [], nextCursor: null };
-    return this.intents.list({
-      limit: query.limit,
-      cursor: query.cursor,
-      status: query.status,
-      kind: query.kind,
-      resourceType: IntentResourceType.ImageAssignment,
-      resourceIds: assignmentIds,
-    });
   }
 
   private async toAdminDto(image: ImageRow): Promise<AdminImageDto> {

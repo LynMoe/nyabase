@@ -224,6 +224,7 @@ export class ImageAssignmentReconciler implements ManagedReconciler {
         resourceId: row.id,
         serverId,
         targetGeneration: row.generation,
+        reuseFailed: true,
         request: {
           source: 'full_scan',
           ...(idempotencyKey ? { idempotencyKey } : {}),

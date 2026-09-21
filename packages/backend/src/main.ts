@@ -81,7 +81,10 @@ async function bootstrap() {
   }
 
   const port = config.get<number>('server.port');
-  const server = await app.listen(port);
+  const listenAddress = config.get<string>('server.listenAddress').trim();
+  const server = listenAddress
+    ? await app.listen(port, listenAddress)
+    : await app.listen(port);
 
   const httpServer = server as import('http').Server;
   app.get(ConsoleBridgeGateway).attachToHttpServer(httpServer);
@@ -94,7 +97,9 @@ async function bootstrap() {
   });
 
   app.get(RuntimeLifecycleService).markReady();
-  logger.log(`Backend role=${runtimeRole.role} listening on port ${port}`);
+  logger.log(
+    `Backend role=${runtimeRole.role} listening on ${listenAddress || '*'}:${port}`,
+  );
 }
 
 bootstrap().catch(console.error);

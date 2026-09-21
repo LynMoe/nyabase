@@ -77,6 +77,14 @@ describe('PostgreSQL, Redis, and metrics configuration', () => {
     }
   });
 
+  it('keeps the HTTP listen address off the public settings surface', () => {
+    const field = definition('server.listenAddress');
+    expect(field?.defaultValue).toBe('');
+    expect(field?.editable).toBe(false);
+    expect(field?.schema.safeParse('127.0.0.1').success).toBe(true);
+    expect(field?.schema.safeParse('').success).toBe(true);
+  });
+
   it('supports a simple all-in-one default and independently scalable process roles', () => {
     const schema = definition('runtime.role')?.schema;
     expect(definition('runtime.role')?.defaultValue).toBe('all');

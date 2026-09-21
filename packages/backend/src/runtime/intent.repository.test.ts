@@ -362,4 +362,61 @@ describe('intent pending queue and settle wake', () => {
     }, db as never);
     expect(reused.id).toBe(created.id);
   });
+
+  it('reuses a failed scan intent when reuseFailed is set', async () => {
+    const { db, store } = makeExecutor([
+      row({
+        id: olderId,
+        kind: IntentKind.ImageAssignmentEnsure,
+        resource_type: IntentResourceType.ImageAssignment,
+        resource_id: volumeId,
+        request_json: { source: 'full_scan', idempotencyKey: 'image-scan:missing' },
+        status: IntentStatus.Failed,
+      }),
+    ]);
+    const repository = new IntentRepository(db as never);
+    const reused = await repository.ensurePending({
+      kind: IntentKind.ImageAssignmentEnsure,
+      resourceType: IntentResourceType.ImageAssignment,
+      resourceId: volumeId,
+      serverId,
+      targetGeneration: 1,
+      reuseFailed: true,
+      request: { source: 'full_scan', idempotencyKey: 'image-scan:missing' },
+    }, db as never);
+    expect(reused.id).toBe(olderId);
+    expect(store.intents).toHaveLength(1);
+  });
+
+  it('returns an empty page without querying when resourceIds is empty', async () => {
+    const { db } = makeExecutor([]);
+    const selectFrom = vi.fn(db.selectFrom);
+    db.selectFrom = selectFrom;
+    const repository = new IntentRepository(db as never);
+    await expect(repository.list({ resourceIds: [] })).resolves.toEqual({
+      items: [],
+      nextCursor: null,
+    });
+    await expect(repository.listPending({ resourceIds: [] })).resolves.toEqual({
+      items: [],
+      nextCursor: null,
+    });
+    expect(selectFrom).not.toHaveBeenCalled();
+  });
+
+  it('filters list and listPending by a non-empty resourceIds IN list', async () => {
+    const otherId = '99999999-9999-4999-8999-999999999999';
+    const { db } = makeExecutor([
+      row({ id: olderId, resource_id: volumeId }),
+      row({ id: newerId, resource_id: otherId, created_at: new Date('2026-01-01T00:00:03.000Z') }),
+    ]);
+    const selectFrom = vi.fn(db.selectFrom);
+    db.selectFrom = selectFrom;
+    const repository = new IntentRepository(db as never);
+    const history = await repository.list({ resourceIds: [volumeId] });
+    expect(history.items.map((item) => item.id)).toEqual([olderId]);
+    const pending = await repository.listPending({ resourceIds: [volumeId] });
+    expect(pending.items.map((item) => item.id)).toEqual([olderId]);
+    expect(selectFrom).toHaveBeenCalled();
+  });
 });
