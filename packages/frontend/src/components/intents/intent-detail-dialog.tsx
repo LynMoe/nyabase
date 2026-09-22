@@ -12,7 +12,9 @@ import {
 import { api } from '../../lib/api.js';
 import { errorMessage } from '../../lib/api-error.js';
 import { toast } from '../../hooks/use-toast.js';
+import { intentPending } from '../../lib/in-progress.js';
 import { queryKeys } from '../../lib/query-keys.js';
+import { refetchWhileInProgress } from '../../lib/query-lifecycle.js';
 import {
   formatIntentAttempt,
   isRetryableIntent,
@@ -26,7 +28,7 @@ import {
 } from '../../lib/status-labels.js';
 import { useAuthStore } from '../../store/auth.js';
 import { ResourceRef } from '../refs/resource-ref.js';
-import { Badge } from '../ui/badge.js';
+import { StatusBadge } from '../layout/status-badge.js';
 import { Button } from '../ui/button.js';
 import {
   Dialog,
@@ -152,6 +154,10 @@ export function IntentDetailDialog({
       return api.get<IntentDto>(`/admin/intents/${intent.id}`);
     },
     enabled: open && Boolean(intent?.id),
+    refetchInterval: (query) => refetchWhileInProgress(query.state, {
+      steadyIntervalMs: false,
+      isSettled: (item) => !intentPending(item.status),
+    }),
   });
   const view = detailQuery.data ?? intent;
   const retry = useMutation({
@@ -184,9 +190,12 @@ export function IntentDetailDialog({
               <DetailItem
                 label="状态"
                 value={(
-                  <Badge title={view.status} variant={statusBadgeVariant(view.status)}>
-                    {intentStatusLabel(view.status)}
-                  </Badge>
+                  <StatusBadge
+                    label={intentStatusLabel(view.status)}
+                    raw={view.status}
+                    pending={detailQuery.data != null && intentPending(view.status)}
+                    variant={statusBadgeVariant(view.status)}
+                  />
                 )}
               />
               <DetailItem label="时间" value={new Date(view.createdAt).toLocaleString()} />

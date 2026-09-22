@@ -4,6 +4,7 @@ import { Link, useNavigate } from '@tanstack/react-router';
 import { Plus, RefreshCw, Server, Wifi, WifiOff } from 'lucide-react';
 import {
   NodeMetricsStatus,
+  PreflightStatus,
   zCreateServerRequest,
   zNodeMetricsCreateConfig,
   type CreateServerRequest,
@@ -11,7 +12,7 @@ import {
 } from '@nyabase/common';
 import { api } from '../lib/api.js';
 import { Button } from '../components/ui/button.js';
-import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '../components/ui/dialog.js';
+import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from '../components/ui/dialog.js';
 import { Input } from '../components/ui/input.js';
 import { Label } from '../components/ui/label.js';
 import { Badge } from '../components/ui/badge.js';
@@ -28,13 +29,17 @@ import { Page } from '../components/layout/page.js';
 import { PageHeader } from '../components/layout/page-header.js';
 import { QueryView } from '../components/layout/query-view.js';
 import { SectionCard } from '../components/layout/section-card.js';
+import { StatusBadge } from '../components/layout/status-badge.js';
+import { TechnicalId } from '../components/refs/technical-id.js';
 import {
   nodeMetricsStatusZh,
   preflightCheckLabel,
   preflightStatusLabel,
   serverStatusLabel,
 } from '../lib/display-labels.js';
+import { preflightPending } from '../lib/in-progress.js';
 import { queryKeys } from '../lib/query-keys.js';
+import { refetchWhileInProgress } from '../lib/query-lifecycle.js';
 import { toast } from '../hooks/use-toast.js';
 import { relativeTime } from '../lib/utils.js';
 
@@ -45,6 +50,10 @@ export default function ServersPage() {
   const serversQuery = useQuery({
     queryKey: queryKeys.servers.admin,
     queryFn: () => api.get<ServerDto[]>('/admin/servers'),
+    refetchInterval: (query) => refetchWhileInProgress(query.state, {
+      steadyIntervalMs: false,
+      isSettled: (servers) => servers.every((server) => !preflightPending(server.preflightStatus)),
+    }),
   });
   const refresh = () => {
     void queryClient.invalidateQueries({ queryKey: queryKeys.servers.admin });
@@ -54,7 +63,6 @@ export default function ServersPage() {
     <Page testId="server-onboarding-page">
       <PageHeader
         title="服务器"
-        description="注册 Incus endpoint，完成互信、前置检查与存储池登记。"
         actions={
           <>
             <Button variant="outline" size="icon" onClick={refresh} disabled={serversQuery.isFetching} aria-label="刷新服务器">
@@ -120,10 +128,13 @@ function ServerRow({ server }: { server: ServerDto }) {
       <TableCell className="whitespace-normal">
         <Link to="/servers/$id" params={{ id: server.id }} search={{ tab: 'overview' }} className="block min-w-0">
           <p className="font-medium">{server.name}</p>
-          <p className="mt-0.5 truncate font-mono text-xs text-muted-foreground">
-            {server.slug && server.slug !== server.name ? server.slug : server.apiEndpoint}
-          </p>
         </Link>
+        <div className="mt-0.5">
+          <TechnicalId
+            label={server.slug && server.slug !== server.name ? 'slug' : '接入地址'}
+            value={server.slug && server.slug !== server.name ? server.slug : server.apiEndpoint}
+          />
+        </div>
       </TableCell>
       <TableCell>
         <Badge variant={online ? 'success' : 'secondary'}>
@@ -137,7 +148,11 @@ function ServerRow({ server }: { server: ServerDto }) {
       </TableCell>
       <TableCell className="whitespace-normal">
         <div className="flex flex-wrap items-center gap-1">
-          <span>{preflightStatusLabel(server.preflightStatus)}</span>
+          <StatusBadge
+            label={preflightStatusLabel(server.preflightStatus)}
+            pending={preflightPending(server.preflightStatus)}
+            variant={preflightBadgeVariant(server.preflightStatus)}
+          />
           {server.preflightReport?.checks
             ? Object.entries(server.preflightReport.checks).slice(0, 5).map(([name, result]) => (
               <Badge key={name} variant={result === 'pass' ? 'success' : result === 'warn' ? 'warning' : 'destructive'}>
@@ -196,7 +211,7 @@ function ServerOnboardingDialog({
   const create = useMutation({
     mutationFn: (body: CreateServerRequest) => api.post<ServerDto>('/admin/servers', body),
     onSuccess: (server) => {
-      toast({ title: '服务器已登记', description: '请继续完成互信、存储池与前置检查。' });
+      toast({ title: '服务器已登记' });
       setForm(emptyOnboardingForm);
       setError(null);
       onCreated(server.id);
@@ -265,7 +280,6 @@ function ServerOnboardingDialog({
       <DialogContent data-testid="server-onboarding">
         <DialogHeader>
           <DialogTitle>服务器接入</DialogTitle>
-          <DialogDescription>登记连接参数后，在详情页粘贴 trust token 并执行前置检查。</DialogDescription>
         </DialogHeader>
         <div className="grid gap-3 sm:grid-cols-2">
           {fields.map(([key, label, placeholder]) => (
@@ -333,6 +347,13 @@ function ServerOnboardingDialog({
 
 function splitList(value: string): string[] {
   return value.split(',').map((item) => item.trim()).filter((item) => item.length > 0);
+}
+
+function preflightBadgeVariant(status: string): 'success' | 'secondary' | 'destructive' | 'warning' {
+  if (status === PreflightStatus.Passed) return 'success';
+  if (status === PreflightStatus.Failed) return 'destructive';
+  if (status === PreflightStatus.Running) return 'warning';
+  return 'secondary';
 }
 
 function nodeMetricsStatusLabel(status: NodeMetricsStatus): string {

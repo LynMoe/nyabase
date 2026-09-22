@@ -18,7 +18,7 @@ use anyhow::{Context, Result};
 use arc_swap::ArcSwapOption;
 use futures_util::future::{AbortHandle, AbortRegistration, Abortable};
 use futures_util::{Sink, SinkExt, StreamExt};
-use russh::keys::{decode_secret_key, parse_public_key_base64, HashAlg, PrivateKey, PublicKey};
+use russh::keys::{decode_secret_key, parse_public_key_base64, PrivateKey, PublicKey};
 use russh::server::{Auth, Msg as ServerMsg, Session};
 use russh::{Channel, ChannelId, MethodKind, MethodSet, Pty};
 use serde::{Deserialize, Serialize};
@@ -266,7 +266,6 @@ struct ConnectionRouteInfo {
     container_name: String,
     instance_name: String,
     routed_ip: String,
-    container_host_key_fingerprint: Option<String>,
 }
 
 impl ConnectionRouteInfo {
@@ -279,7 +278,6 @@ impl ConnectionRouteInfo {
             && self.container_name == route.container_name
             && self.instance_name == route.instance_name
             && self.routed_ip == route.routed_ip
-            && self.container_host_key_fingerprint == route.container_host_key_fingerprint
     }
 }
 
@@ -612,7 +610,6 @@ impl ConnectionState {
             container_name: route.container_name.clone(),
             instance_name: route.instance_name.clone(),
             routed_ip: route.routed_ip.clone(),
-            container_host_key_fingerprint: route.container_host_key_fingerprint.clone(),
         });
         self.authenticated_at.store(now_ms(), Ordering::Relaxed);
     }
@@ -627,7 +624,6 @@ impl ConnectionState {
             container_name: route.container_name.clone(),
             instance_name: route.instance_name.clone(),
             routed_ip: route.routed_ip.clone(),
-            container_host_key_fingerprint: route.container_host_key_fingerprint.clone(),
         });
     }
 
@@ -1492,7 +1488,6 @@ struct ProxyRoute {
     routed_ip: Option<String>,
     status: String,
     ssh_status: String,
-    container_host_key_fingerprint: Option<String>,
     observed_at: String,
 }
 
@@ -1732,7 +1727,6 @@ impl RoutingSnapshot {
                 container_name: container.name.clone(),
                 instance_name: route.instance_name.clone(),
                 routed_ip: ip.to_string(),
-                container_host_key_fingerprint: route.container_host_key_fingerprint.clone(),
             });
         }
         match candidates.len() {
@@ -1762,24 +1756,6 @@ fn is_routable_container_ipv4(value: &str) -> bool {
             && !address.is_multicast()
             && address != Ipv4Addr::BROADCAST
     })
-}
-
-fn is_sha256_fingerprint(value: &str) -> bool {
-    let Some(encoded) = value.strip_prefix("SHA256:") else {
-        return false;
-    };
-    encoded.len() == 43
-        && encoded
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'+' || byte == b'/')
-}
-
-fn ssh_sha256_fingerprint(public_key: &PublicKey) -> String {
-    public_key.fingerprint(HashAlg::Sha256).to_string()
-}
-
-fn host_key_matches(expected_fingerprint: &str, public_key: &PublicKey) -> bool {
-    ssh_sha256_fingerprint(public_key) == expected_fingerprint
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1886,7 +1862,6 @@ struct OwnedResolvedRoute {
     container_name: String,
     instance_name: String,
     routed_ip: String,
-    container_host_key_fingerprint: Option<String>,
 }
 
 impl OwnedResolvedRoute {
@@ -1899,7 +1874,6 @@ impl OwnedResolvedRoute {
             && self.container_name == other.container_name
             && self.instance_name == other.instance_name
             && self.routed_ip == other.routed_ip
-            && self.container_host_key_fingerprint == other.container_host_key_fingerprint
     }
 }
 
@@ -1917,7 +1891,6 @@ fn resolve_owned_route(
             container_name: route.container.name.clone(),
             instance_name: route.route.instance_name.clone(),
             routed_ip: route.route.routed_ip.clone().unwrap_or_default(),
-            container_host_key_fingerprint: route.route.container_host_key_fingerprint.clone(),
         }),
         RouteResolution::Rejected(reason) => Err(reason),
     }
@@ -3088,20 +3061,6 @@ mod tests {
     }
 
     #[test]
-    fn computes_and_enforces_standard_sha256_container_host_key_fingerprints() {
-        let key = parse_authorized_key(ALICE_KEY).expect("expected public key");
-        let expected = "SHA256:UCUiLr7Pjs9wFFJMDByLgc3NrtdU344OgUM45wZPcIQ";
-        assert_eq!(ssh_sha256_fingerprint(&key), expected);
-        assert!(host_key_matches(expected, &key));
-        assert!(!host_key_matches(
-            "SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
-            &key,
-        ));
-        assert!(is_sha256_fingerprint(expected));
-        assert!(!is_sha256_fingerprint("SHA256:private-file-hash"));
-    }
-
-    #[test]
     fn rejects_inactive_routes_with_stopped_ssh_or_missing_instance() {
         let mut snapshot = fixture_snapshot();
         let route = snapshot
@@ -3717,9 +3676,6 @@ mod tests {
             routed_ip: routed_ip.map(ToOwned::to_owned),
             status: status.to_string(),
             ssh_status: ssh_status.to_string(),
-            container_host_key_fingerprint: Some(
-                "SHA256:UCUiLr7Pjs9wFFJMDByLgc3NrtdU344OgUM45wZPcIQ".to_string(),
-            ),
             observed_at: "2026-06-08T00:00:00.000Z".to_string(),
         }
     }

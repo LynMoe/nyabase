@@ -107,12 +107,10 @@ export class IncusPreflightChecksAdapter implements PreflightChecksPort {
         probeName,
         {
           command: [
-            'wget',
-            '-q',
-            '-T',
-            '10',
-            '-O',
-            '/dev/null',
+            '/bin/sh',
+            '-c',
+            'if command -v wget >/dev/null 2>&1; then wget -q -T 10 -O /dev/null "$1"; else curl -fsS -m 10 -o /dev/null "$1"; fi',
+            'preflight-egress',
             url.toString(),
           ],
           'record-output': true,

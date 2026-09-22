@@ -4,7 +4,6 @@ import {
   NVIDIA_GPU_RUNTIME_UNAVAILABLE,
   PackageHttpError,
 } from '../errors.js';
-import { GpuGrantMode } from '../schema.js';
 import { admitNvidiaGpuCreate, mutateNvidiaGpuContainer } from './admit.js';
 import type {
   ContainerExtensionContext,
@@ -114,7 +113,7 @@ describe('admitNvidiaGpuCreate', () => {
     try {
       await admitNvidiaGpuCreate({
         ...baseCtx({
-          grant: { extensionGrants: { [NVIDIA_GPU_EXTENSION_ID]: { mode: 'none', pciAddresses: [] } } },
+          grant: { extensionGrants: { [NVIDIA_GPU_EXTENSION_ID]: { pciAddresses: [] } } },
         }),
         containerId: '33333333-3333-4333-8333-333333333333',
         payload: { pciAddresses: ['0000:41:00.0'] },
@@ -255,10 +254,4 @@ describe('mutateNvidiaGpuContainer', () => {
   });
 });
 
-describe('grant mode', () => {
-  it('exports none/all/pci', () => {
-    expect(GpuGrantMode.None).toBe('none');
-    expect(GpuGrantMode.All).toBe('all');
-    expect(GpuGrantMode.Pci).toBe('pci');
-  });
-});
+

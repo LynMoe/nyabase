@@ -2,8 +2,8 @@ import { useState } from 'react';
 import { Link } from '@tanstack/react-router';
 import { Pencil, Trash2 } from 'lucide-react';
 import type { VolumeDto } from '@nyabase/common';
-import { Badge } from '../ui/badge.js';
 import { Button } from '../ui/button.js';
+import { StatusBadge } from '../layout/status-badge.js';
 import {
   Table,
   TableBody,
@@ -15,6 +15,7 @@ import {
 import { ResourceRef } from '../refs/resource-ref.js';
 import { LocalVolumeDetailDialog } from './local-volume-detail-dialog.js';
 import { approxGibHint } from '../../lib/utils.js';
+import { volumeInProgress } from '../../lib/in-progress.js';
 import { failureCodeLabel, volumeAttentionHint, volumeLifecycleLabel } from '../../lib/status-labels.js';
 
 function adminContainerDetailTo(plane: 'user' | 'admin') {
@@ -154,9 +155,11 @@ function VolumeRow({
         />
       </TableCell>
       <TableCell className="whitespace-normal">
-        <Badge variant={volume.needsAttention ? 'destructive' : volume.lifecyclePhase === 'active' ? 'success' : 'secondary'}>
-          {phaseLabel}
-        </Badge>
+        <StatusBadge
+          label={phaseLabel}
+          pending={volumeInProgress(volume)}
+          variant={volume.needsAttention ? 'destructive' : volume.lifecyclePhase === 'active' ? 'success' : 'secondary'}
+        />
         {volume.needsAttention ? (
           <p className="mt-1 text-xs text-destructive">{volumeAttentionHint(volume.failureCode)}</p>
         ) : volume.failureCode ? (
@@ -210,7 +213,7 @@ function VolumeAttachmentsCell({
               <Link
                 to={adminTo}
                 params={{ containerId: item.containerId }}
-                search={{ tab: 'storage' }}
+                search={{ tab: 'overview' }}
                 className="underline"
                 onClick={(event) => event.stopPropagation()}
               >
@@ -227,13 +230,7 @@ function VolumeAttachmentsCell({
 
   if (plane === 'user') {
     if (volume.attachments.length === 0) {
-      return (
-        <span className="text-muted-foreground">
-          请打开目标容器详情 → 存储 → 挂载
-          {' '}
-          <Link to="/containers" className="underline" onClick={(event) => event.stopPropagation()}>到容器</Link>
-        </span>
-      );
+      return <span className="text-muted-foreground">未挂载</span>;
     }
     return (
       <span data-testid="volume-attachments">

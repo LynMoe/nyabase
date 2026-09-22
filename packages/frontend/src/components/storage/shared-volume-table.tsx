@@ -1,8 +1,7 @@
 import { useState } from 'react';
-import { Link } from '@tanstack/react-router';
 import { Pencil, Search, Trash2 } from 'lucide-react';
 import type { SharedVolumeDto } from '@nyabase/common';
-import { Badge } from '../ui/badge.js';
+import { StatusBadge } from '../layout/status-badge.js';
 import { Button } from '../ui/button.js';
 import {
   Table,
@@ -16,6 +15,7 @@ import { ResourceRef } from '../refs/resource-ref.js';
 import { SharedVolumeDetailDialog } from './shared-volume-detail-dialog.js';
 import { formatObservedUsage } from '../../lib/storage-shrink.js';
 import { approxGibHint } from '../../lib/utils.js';
+import { volumeInProgress } from '../../lib/in-progress.js';
 import { failureCodeLabel, volumeAttentionHint, volumeLifecycleLabel } from '../../lib/status-labels.js';
 
 export function SharedVolumeTable({
@@ -131,15 +131,7 @@ function SharedVolumeRow({
       <TableCell>{formatObservedUsage(volume.usedBytes)}</TableCell>
       <TableCell className="max-w-[16rem] whitespace-normal">
         {volume.attachments.length === 0 ? (
-          <span className="text-muted-foreground">
-            {plane === 'user' ? (
-              <>
-                请打开目标容器详情 → 存储 → 挂载
-                {' '}
-                <Link to="/containers" className="underline" onClick={(event) => event.stopPropagation()}>到容器</Link>
-              </>
-            ) : '未挂载'}
-          </span>
+          <span className="text-muted-foreground">未挂载</span>
         ) : (
           <span data-testid="shared-volume-attachments">
             挂载于 {volume.attachments.map((item) => `${item.containerName}（${item.containerPath}）`).join('、')}
@@ -147,9 +139,11 @@ function SharedVolumeRow({
         )}
       </TableCell>
       <TableCell className="whitespace-normal">
-        <Badge variant={volume.needsAttention ? 'destructive' : volume.lifecyclePhase === 'active' ? 'success' : 'secondary'}>
-          {phaseLabel}
-        </Badge>
+        <StatusBadge
+          label={phaseLabel}
+          pending={volumeInProgress(volume)}
+          variant={volume.needsAttention ? 'destructive' : volume.lifecyclePhase === 'active' ? 'success' : 'secondary'}
+        />
         {volume.needsAttention ? (
           <p className="mt-1 text-xs text-destructive">{volumeAttentionHint(volume.failureCode)}</p>
         ) : volume.failureCode ? (

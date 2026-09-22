@@ -570,7 +570,6 @@ export interface VolumeAttachmentDto {
 
 export interface ImageDto {
   id: string;
-  name: string;
   alias: string;
   fingerprint: string | null;
   description: string | null;
@@ -713,7 +712,6 @@ export interface ContainerSshDto {
   loginUser: string;
   proxyHost: string | null;
   proxyPort: number | null;
-  hostKeyFingerprint: string | null;
   observedAt: string | null;
   lastError: string | null;
 }

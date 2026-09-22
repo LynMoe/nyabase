@@ -496,7 +496,6 @@ describePg('volume capacity locking and scope exclusions', () => {
       }).execute();
       await database.insertInto('infra.images').values({
         id: imageId,
-        name: 'cross-capacity-image',
         alias: 'cross-capacity',
         fingerprint: 'a'.repeat(64),
         description: null,

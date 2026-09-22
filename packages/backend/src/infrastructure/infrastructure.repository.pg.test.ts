@@ -87,7 +87,6 @@ describePg('clean Incus infrastructure repository', () => {
       const serverId = randomUUID();
       await database.insertInto('infra.images').values({
         id: imageId,
-        name: 'Ubuntu',
         alias: 'ubuntu',
         fingerprint: 'a'.repeat(64),
         description: null,

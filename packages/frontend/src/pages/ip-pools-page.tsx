@@ -30,6 +30,7 @@ import { EmptyState } from '../components/layout/empty-state.js';
 import { Page } from '../components/layout/page.js';
 import { PageHeader } from '../components/layout/page-header.js';
 import { QueryView } from '../components/layout/query-view.js';
+import { TechnicalId } from '../components/refs/technical-id.js';
 import { toast } from '../hooks/use-toast.js';
 import { queryKeys } from '../lib/query-keys.js';
 
@@ -71,7 +72,6 @@ export default function IpPoolsPage() {
     <Page testId="ip-pools">
       <PageHeader
         title="IP 池"
-        description="管理局域网段与可分配子网。可将同一局域网绑定到多台服务器，创建容器时只从可分配子网取地址，销毁后自动释放。"
         actions={
           <>
             <Button variant="outline" size="icon" onClick={() => { void poolsQuery.refetch(); }} aria-label="刷新 IP 池">
@@ -120,8 +120,12 @@ export default function IpPoolsPage() {
                   <TableCell className="font-mono">{pool.allocationCidr}</TableCell>
                   <TableCell className="font-mono">{pool.gateway}</TableCell>
                   <TableCell>{pool.allocatedCount} / {pool.usableCount}</TableCell>
-                  <TableCell className="max-w-[10rem] truncate font-mono" title={pool.reservedIps.join(', ') || '无'}>
-                    {pool.reservedIps.join(', ') || '无'}
+                  <TableCell>
+                    {pool.reservedIps.length > 0 ? (
+                      <TechnicalId label="保留地址" value={pool.reservedIps.join(', ')} kind="opaque" />
+                    ) : (
+                      '无'
+                    )}
                   </TableCell>
                   <TableCell className="max-w-[12rem] truncate whitespace-normal">
                     {pool.serverIds.map((id) => serverNameById.get(id) ?? id).join('、') || '未绑定'}

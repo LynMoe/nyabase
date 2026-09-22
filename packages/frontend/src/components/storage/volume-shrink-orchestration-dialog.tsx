@@ -271,7 +271,7 @@ export function VolumeShrinkOrchestrationDialog({
           {phase === 'done' && (
             <p className="text-sm text-muted-foreground">
               {shrinkSubmitted
-                ? '缩容已提交，挂载已处理完毕。列表容量稍后更新。'
+                ? '缩容已提交，挂载已处理完毕。'
                 : '已挂回；缩容未提交，容量未变。'}
             </p>
           )}

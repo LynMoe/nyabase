@@ -1,7 +1,6 @@
 import type { ReactNode } from 'react';
-import { Link } from '@tanstack/react-router';
 import type { VolumeDto } from '@nyabase/common';
-import { Badge } from '../ui/badge.js';
+import { StatusBadge } from '../layout/status-badge.js';
 import { Button } from '../ui/button.js';
 import {
   Dialog,
@@ -14,6 +13,7 @@ import {
 import { ResourceIntentFailures, ResourceIntentHistory } from '../intents/resource-intent-failures.js';
 import { ResourceRef } from '../refs/resource-ref.js';
 import { approxGibHint, relativeTime } from '../../lib/utils.js';
+import { volumeInProgress } from '../../lib/in-progress.js';
 import { failureCodeLabel, volumeAttentionHint, volumeLifecycleLabel } from '../../lib/status-labels.js';
 
 function bytesLabel(bytes: number): string {
@@ -71,9 +71,11 @@ export function LocalVolumeDetailDialog({
           <div className="sm:col-span-2">
             <p className="text-xs text-muted-foreground">状态</p>
             <div className="mt-1">
-              <Badge variant={volume.needsAttention ? 'destructive' : volume.lifecyclePhase === 'active' ? 'success' : 'secondary'}>
-                {phaseLabel}
-              </Badge>
+              <StatusBadge
+                label={phaseLabel}
+                pending={volumeInProgress(volume)}
+                variant={volume.needsAttention ? 'destructive' : volume.lifecyclePhase === 'active' ? 'success' : 'secondary'}
+              />
               {volume.needsAttention ? (
                 <p className="mt-1 text-xs text-destructive">{volumeAttentionHint(volume.failureCode)}</p>
               ) : volume.failureCode ? (
@@ -88,15 +90,7 @@ export function LocalVolumeDetailDialog({
             <p className="text-xs text-muted-foreground">挂载</p>
             <p className="mt-1">
               {volume.attachments.length === 0 ? (
-                <span className="text-muted-foreground">
-                  {plane === 'user' ? (
-                    <>
-                      请打开目标容器详情 → 存储 → 挂载
-                      {' '}
-                      <Link to="/containers" className="underline">到容器</Link>
-                    </>
-                  ) : '未挂载'}
-                </span>
+                <span className="text-muted-foreground">未挂载</span>
               ) : (
                 <span data-testid="volume-attachments">
                   挂载于 {volume.attachments.map((item) => `${item.containerName}（${item.containerPath}）`).join('、')}

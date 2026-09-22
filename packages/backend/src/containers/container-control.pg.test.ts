@@ -748,7 +748,6 @@ async function seedFixture(
     .execute();
   await database.insertInto('infra.images').values({
     id: imageId,
-    name: `Test Image ${imageId.slice(0, 8)}`,
     alias: `test-${imageId.slice(0, 8)}`,
     fingerprint,
     description: null,

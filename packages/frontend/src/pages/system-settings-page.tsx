@@ -24,6 +24,7 @@ import {
 import { Page } from '../components/layout/page.js';
 import { PageHeader } from '../components/layout/page-header.js';
 import { QueryView } from '../components/layout/query-view.js';
+import { TechnicalId } from '../components/refs/technical-id.js';
 import { toast } from '../hooks/use-toast.js';
 import { parseSystemSettingDraft } from '../lib/system-setting-draft.js';
 import {
@@ -327,7 +328,9 @@ export default function SystemSettingsPage() {
     <Page>
       <PageHeader
         title="系统设置"
-        description={data?.configFile ?? '配置路径尚未加载'}
+        description={data?.configFile
+          ? <TechnicalId label="配置路径" value={data.configFile} kind="opaque" />
+          : '配置路径尚未加载'}
         actions={
           <>
             <Button
@@ -404,7 +407,9 @@ export default function SystemSettingsPage() {
                   {draftState?.conflictFields.has(field.key) && <Badge variant="warning">服务器冲突</Badge>}
                     {field.restartRequired && <Badge variant="outline">需要重启</Badge>}
                 </div>
-                <p className="mt-1 font-mono text-xs text-muted-foreground">{field.yamlPath}</p>
+                <div className="mt-1">
+                  <TechnicalId label="配置路径" value={field.yamlPath} kind="opaque" />
+                </div>
                 <p className="mt-2 text-xs leading-5 text-muted-foreground">{fieldDescription(field)}</p>
               </div>
               <SettingInput

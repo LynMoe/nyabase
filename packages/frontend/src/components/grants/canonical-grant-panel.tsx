@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { Plus } from 'lucide-react';
 import {
   type EffectiveAccessDto,
   type GrantExpiryPhase,
@@ -21,10 +22,12 @@ import { GIB, approxGibHint, formatGibInput, formatVcpuInput } from '../../lib/u
 import { toast } from '../../hooks/use-toast.js';
 import { ConfirmDialog } from '../layout/confirm-dialog.js';
 import { FormField } from '../layout/form-field.js';
+import { isQueryLoading } from '../layout/query-view.js';
 import { SectionCard } from '../layout/section-card.js';
+import { QueryErrorState, QueryLoadingState } from '../query-state.js';
 import { Badge } from '../ui/badge.js';
 import { Button } from '../ui/button.js';
-import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '../ui/dialog.js';
+import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from '../ui/dialog.js';
 import { Input } from '../ui/input.js';
 import {
   Select,
@@ -73,18 +76,10 @@ export function CanonicalGrantPanel({ subject, kind }: { subject: Subject; kind:
     enabled: kind === 'users',
   });
 
-  const [serverId, setServerId] = useState('');
-  const [poolId, setPoolId] = useState('');
-  const [backendId, setBackendId] = useState('');
-  const [cpuCores, setCpuCores] = useState('');
-  const [memGib, setMemGib] = useState('');
-  const [diskGib, setDiskGib] = useState('');
-  const [extensionGrants, setExtensionGrants] = useState<Record<string, unknown>>({});
-  const [sharedLimitGib, setSharedLimitGib] = useState('');
-  const [serverExpiresAt, setServerExpiresAt] = useState('');
-  const [poolExpiresAt, setPoolExpiresAt] = useState('');
-  const [backendExpiresAt, setBackendExpiresAt] = useState('');
+  const [createKind, setCreateKind] = useState<'server' | 'pool' | 'backend' | null>(null);
   const [editGrant, setEditGrant] = useState<ServerGrantDto | null>(null);
+  const [editPoolGrant, setEditPoolGrant] = useState<StoragePoolGrantDto | null>(null);
+  const [editBackendGrant, setEditBackendGrant] = useState<SharedBackendGrantDto | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<{
     resource: 'server-grants' | 'storage-pool-grants' | 'shared-backend-grants';
     id: string;
@@ -117,52 +112,6 @@ export function CanonicalGrantPanel({ subject, kind }: { subject: Subject; kind:
     void queryClient.invalidateQueries({ queryKey: queryKeys.meAccess });
   };
 
-  const serverMutation = useMutation({
-    mutationFn: () => {
-      return api.put<ServerGrantDto>(`${prefix}/server-grants/${serverId}`, {
-        cpuMillis: coresToMillis(cpuCores),
-        memBytes: gibToBytes(memGib),
-        diskBytes: gibToBytes(diskGib),
-        extensionGrants,
-        expiresAt: isoOrNull(serverExpiresAt),
-      });
-    },
-    onSuccess: () => {
-      toast({ title: '服务器授权已保存' });
-      setServerId('');
-      setExtensionGrants({});
-      invalidate();
-    },
-    onError: (error) => toast({ title: '服务器授权失败', description: errorMessage(error), variant: 'destructive' }),
-  });
-  const poolMutation = useMutation({
-    mutationFn: (nextPoolId: string) => api.put<StoragePoolGrantDto>(`${prefix}/storage-pool-grants/${nextPoolId}`, {
-      expiresAt: isoOrNull(poolExpiresAt),
-    }),
-    onSuccess: () => {
-      toast({ title: '存储池授权已保存' });
-      setPoolId('');
-      invalidate();
-    },
-    onError: (error) => toast({ title: '存储池授权失败', description: errorMessage(error), variant: 'destructive' }),
-  });
-  const backendMutation = useMutation({
-    mutationFn: () => {
-      const limitBytes = gibToBytes(sharedLimitGib);
-      if (limitBytes === null) throw new Error('请填写额度');
-      return api.put<SharedBackendGrantDto>(`${prefix}/shared-backend-grants/${backendId}`, {
-        limitBytes,
-        expiresAt: isoOrNull(backendExpiresAt),
-      });
-    },
-    onSuccess: () => {
-      toast({ title: '共享存储授权已保存' });
-      setBackendId('');
-      setSharedLimitGib('');
-      invalidate();
-    },
-    onError: (error) => toast({ title: '共享存储授权失败', description: errorMessage(error), variant: 'destructive' }),
-  });
   const remove = useMutation({
     mutationFn: ({ resource, id }: { resource: 'server-grants' | 'storage-pool-grants' | 'shared-backend-grants'; id: string }) =>
       api.delete<void>(`${prefix}/${resource}/${id}`),
@@ -174,46 +123,36 @@ export function CanonicalGrantPanel({ subject, kind }: { subject: Subject; kind:
     onError: (error) => toast({ title: '删除授权失败', description: errorMessage(error), variant: 'destructive' }),
   });
 
+  const closeCreate = () => setCreateKind(null);
+  const grantLists = [serverGrantsQuery, poolGrantsQuery, backendGrantsQuery];
+  if (grantLists.some(isQueryLoading)) {
+    return (
+      <div data-testid="canonical-grants">
+        <QueryLoadingState label="加载授权..." />
+      </div>
+    );
+  }
+  const failedList = grantLists.find((query) => query.isError && query.data === undefined);
+  if (failedList) {
+    return (
+      <div data-testid="canonical-grants">
+        <QueryErrorState
+          error={failedList.error}
+          resourceName="授权"
+          onRetry={() => { void failedList.refetch(); }}
+        />
+      </div>
+    );
+  }
+
   return (
     <div className="space-y-6" data-testid="canonical-grants">
       <SectionCard
         title="服务器授权"
-        description="按服务器设置 CPU、内存和本地盘额度。扩展卡额度随服务器授权一起保存。"
-        toolbar={(
-          <div className="space-y-3">
-            <div className="grid gap-3 sm:grid-cols-2">
-              <SelectField
-                id="grant-server"
-                label="服务器"
-                value={serverId}
-                onChange={(value) => {
-                  setServerId(value);
-                  setExtensionGrants({});
-                }}
-                options={ungrantedServers.map((server) => [server.id, server.name])}
-                placeholder={ungrantedServers.length === 0 ? '没有可添加的服务器' : '选择服务器'}
-                disabled={ungrantedServers.length === 0 || serverMutation.isPending}
-              />
-              <ExtensionSlots
-                area="grant.server"
-                ctx={{
-                  serverId,
-                  enabledExtensions: servers.find((server) => server.id === serverId)?.enabledExtensions ?? [],
-                  value: extensionGrants,
-                  onChange: setExtensionGrants,
-                }}
-              />
-            </div>
-            <div className="grid gap-3 sm:grid-cols-3">
-              <NumberField id="grant-cpu" label="CPU（核，空=不限）" value={cpuCores} onChange={setCpuCores} />
-              <NumberField id="grant-memory" label="内存（G，空=不限）" value={memGib} onChange={setMemGib} hint={gibHint(memGib)} />
-              <NumberField id="grant-disk" label="磁盘（G，空=不限，不含共享卷）" value={diskGib} onChange={setDiskGib} hint={gibHint(diskGib)} />
-            </div>
-            <GrantExpiryInput id="grant-server-expires-at" value={serverExpiresAt} onChange={setServerExpiresAt} />
-            <Button onClick={() => serverMutation.mutate()} disabled={!serverId || serverMutation.isPending}>
-              {serverMutation.isPending ? '保存中...' : '保存服务器授权'}
-            </Button>
-          </div>
+        actions={(
+          <Button size="sm" onClick={() => setCreateKind('server')} data-testid="grant-add-server">
+            <Plus className="h-4 w-4" />授权
+          </Button>
         )}
         flush={serverGrants.length > 0}
         testId="grant-servers"
@@ -278,38 +217,12 @@ export function CanonicalGrantPanel({ subject, kind }: { subject: Subject; kind:
         description={
           orphanPoolGrants.length > 0
             ? '只能授权已有服务器授权的机器上的存储池。存储池（无服务器授权）仍会列在表中，需先补上对应服务器授权。'
-            : '只能授权已有服务器授权的机器上的存储池。'
+            : undefined
         }
-        toolbar={(
-          <div className="space-y-3">
-            <div className="grid gap-3 sm:grid-cols-2">
-              <SelectField
-                id="grant-pool"
-                label="存储池"
-                value={poolId}
-                onChange={setPoolId}
-                options={grantablePools.map((pool) => [
-                  pool.id,
-                  `${pool.displayName ?? pool.incusName} · ${serverName(pool.serverId, servers)}`,
-                ])}
-                placeholder={
-                  grantedServerIds.size === 0
-                    ? '先添加服务器授权'
-                    : grantablePools.length === 0
-                      ? '没有可添加的存储池'
-                      : '选择存储池'
-                }
-                disabled={grantablePools.length === 0 || poolMutation.isPending}
-              />
-              <GrantExpiryInput id="grant-pool-expires-at" value={poolExpiresAt} onChange={setPoolExpiresAt} />
-            </div>
-            <Button
-              onClick={() => poolMutation.mutate(poolId)}
-              disabled={!poolId || poolMutation.isPending}
-            >
-              {poolMutation.isPending ? '保存中...' : '保存存储池授权'}
-            </Button>
-          </div>
+        actions={(
+          <Button size="sm" onClick={() => setCreateKind('pool')} data-testid="grant-add-pool">
+            <Plus className="h-4 w-4" />授权
+          </Button>
         )}
         flush={poolGrants.length > 0}
         testId="grant-pools"
@@ -352,17 +265,20 @@ export function CanonicalGrantPanel({ subject, kind }: { subject: Subject; kind:
                       <PhaseBadge phase={phase} />
                     </TableCell>
                     <TableCell className="text-right">
-                      <Button
-                        size="sm"
-                        variant="ghost"
-                        onClick={() => setDeleteTarget({
-                          resource: 'storage-pool-grants',
-                          id: grant.poolId,
-                          label: `${poolName(grant.poolId, pools, servers)} · 到期 ${expiryLabel(grant.expiresAt)}`,
-                        })}
-                      >
-                        删除
-                      </Button>
+                      <div className="flex justify-end gap-2">
+                        <Button size="sm" variant="outline" onClick={() => setEditPoolGrant(grant)}>编辑</Button>
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          onClick={() => setDeleteTarget({
+                            resource: 'storage-pool-grants',
+                            id: grant.poolId,
+                            label: `${poolName(grant.poolId, pools, servers)} · 到期 ${expiryLabel(grant.expiresAt)}`,
+                          })}
+                        >
+                          删除
+                        </Button>
+                      </div>
                     </TableCell>
                   </TableRow>
                 );
@@ -374,29 +290,10 @@ export function CanonicalGrantPanel({ subject, kind }: { subject: Subject; kind:
 
       <SectionCard
         title="共享存储授权"
-        description="额度按共享后端计算，不含服务器本地盘。"
-        toolbar={(
-          <div className="space-y-3">
-            <div className="grid gap-3 sm:grid-cols-2">
-              <SelectField
-                id="grant-backend"
-                label="共享存储"
-                value={backendId}
-                onChange={setBackendId}
-                options={ungrantedBackends.map((backend) => [backend.id, backend.displayName ?? backend.name])}
-                placeholder={ungrantedBackends.length === 0 ? '没有可添加的共享存储' : '选择共享存储'}
-                disabled={ungrantedBackends.length === 0 || backendMutation.isPending}
-              />
-              <NumberField id="grant-shared-limit" label="额度（G）" value={sharedLimitGib} onChange={setSharedLimitGib} hint={gibHint(sharedLimitGib)} />
-            </div>
-            <GrantExpiryInput id="grant-backend-expires-at" value={backendExpiresAt} onChange={setBackendExpiresAt} />
-            <Button
-              onClick={() => backendMutation.mutate()}
-              disabled={!backendId || !sharedLimitGib || backendMutation.isPending}
-            >
-              {backendMutation.isPending ? '保存中...' : '保存共享存储授权'}
-            </Button>
-          </div>
+        actions={(
+          <Button size="sm" onClick={() => setCreateKind('backend')} data-testid="grant-add-backend">
+            <Plus className="h-4 w-4" />授权
+          </Button>
         )}
         flush={backendGrants.length > 0}
         testId="grant-backends"
@@ -432,17 +329,20 @@ export function CanonicalGrantPanel({ subject, kind }: { subject: Subject; kind:
                       <PhaseBadge phase={phase} />
                     </TableCell>
                     <TableCell className="text-right">
-                      <Button
-                        size="sm"
-                        variant="ghost"
-                        onClick={() => setDeleteTarget({
-                          resource: 'shared-backend-grants',
-                          id: grant.sharedBackendId,
-                          label: `${backendName(grant.sharedBackendId, backends)} · ${formatGrantBytes(grant.limitBytes)} · 到期 ${expiryLabel(grant.expiresAt)}`,
-                        })}
-                      >
-                        删除
-                      </Button>
+                      <div className="flex justify-end gap-2">
+                        <Button size="sm" variant="outline" onClick={() => setEditBackendGrant(grant)}>编辑</Button>
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          onClick={() => setDeleteTarget({
+                            resource: 'shared-backend-grants',
+                            id: grant.sharedBackendId,
+                            label: `${backendName(grant.sharedBackendId, backends)} · ${formatGrantBytes(grant.limitBytes)} · 到期 ${expiryLabel(grant.expiresAt)}`,
+                          })}
+                        >
+                          删除
+                        </Button>
+                      </div>
                     </TableCell>
                   </TableRow>
                 );
@@ -451,6 +351,56 @@ export function CanonicalGrantPanel({ subject, kind }: { subject: Subject; kind:
           </Table>
         )}
       </SectionCard>
+
+      {createKind === 'server' ? (
+        <ServerGrantCreateDialog
+          prefix={prefix}
+          servers={ungrantedServers}
+          loading={serversQuery.isLoading}
+          error={serversQuery.isError}
+          onRetry={() => { void serversQuery.refetch(); }}
+          onSaved={() => {
+            closeCreate();
+            invalidate();
+          }}
+          onOpenChange={(open) => { if (!open) closeCreate(); }}
+        />
+      ) : null}
+
+      {createKind === 'pool' ? (
+        <PoolGrantCreateDialog
+          prefix={prefix}
+          pools={grantablePools}
+          servers={servers}
+          hasServerGrants={grantedServerIds.size > 0}
+          loading={serversQuery.isLoading || poolsQuery.isLoading}
+          error={serversQuery.isError || poolsQuery.isError}
+          onRetry={() => {
+            void serversQuery.refetch();
+            void poolsQuery.refetch();
+          }}
+          onSaved={() => {
+            closeCreate();
+            invalidate();
+          }}
+          onOpenChange={(open) => { if (!open) closeCreate(); }}
+        />
+      ) : null}
+
+      {createKind === 'backend' ? (
+        <BackendGrantCreateDialog
+          prefix={prefix}
+          backends={ungrantedBackends}
+          loading={backendsQuery.isLoading}
+          error={backendsQuery.isError}
+          onRetry={() => { void backendsQuery.refetch(); }}
+          onSaved={() => {
+            closeCreate();
+            invalidate();
+          }}
+          onOpenChange={(open) => { if (!open) closeCreate(); }}
+        />
+      ) : null}
 
       {editGrant ? (
         <ServerGrantEditDialog
@@ -462,6 +412,32 @@ export function CanonicalGrantPanel({ subject, kind }: { subject: Subject; kind:
             invalidate();
           }}
           onOpenChange={(open) => { if (!open) setEditGrant(null); }}
+        />
+      ) : null}
+
+      {editPoolGrant ? (
+        <PoolGrantEditDialog
+          grant={editPoolGrant}
+          title={poolName(editPoolGrant.poolId, pools, servers)}
+          prefix={prefix}
+          onSaved={() => {
+            setEditPoolGrant(null);
+            invalidate();
+          }}
+          onOpenChange={(open) => { if (!open) setEditPoolGrant(null); }}
+        />
+      ) : null}
+
+      {editBackendGrant ? (
+        <BackendGrantEditDialog
+          grant={editBackendGrant}
+          title={backendName(editBackendGrant.sharedBackendId, backends)}
+          prefix={prefix}
+          onSaved={() => {
+            setEditBackendGrant(null);
+            invalidate();
+          }}
+          onOpenChange={(open) => { if (!open) setEditBackendGrant(null); }}
         />
       ) : null}
 
@@ -478,6 +454,377 @@ export function CanonicalGrantPanel({ subject, kind }: { subject: Subject; kind:
         onOpenChange={(open) => { if (!open) setDeleteTarget(null); }}
       />
     </div>
+  );
+}
+
+function ChoiceUnavailable({
+  loading,
+  error,
+  onRetry,
+  empty,
+}: {
+  loading?: boolean;
+  error?: boolean;
+  onRetry?: () => void;
+  empty: string;
+}) {
+  if (loading) return <QueryLoadingState label="加载可选项..." />;
+  if (error) {
+    return (
+      <p className="text-sm text-destructive">
+        无法加载可选项。
+        {onRetry ? (
+          <button type="button" className="ml-2 underline" onClick={onRetry}>重试</button>
+        ) : null}
+      </p>
+    );
+  }
+  return <p className="text-sm text-muted-foreground">{empty}</p>;
+}
+
+function ServerGrantCreateDialog({
+  prefix,
+  servers,
+  loading,
+  error,
+  onRetry,
+  onSaved,
+  onOpenChange,
+}: {
+  prefix: string;
+  servers: ServerDto[];
+  loading?: boolean;
+  error?: boolean;
+  onRetry?: () => void;
+  onSaved: () => void;
+  onOpenChange: (open: boolean) => void;
+}) {
+  const [serverId, setServerId] = useState('');
+  const [cpuCores, setCpuCores] = useState('');
+  const [memGib, setMemGib] = useState('');
+  const [diskGib, setDiskGib] = useState('');
+  const [extensionGrants, setExtensionGrants] = useState<Record<string, unknown>>({});
+  const [expiresAt, setExpiresAt] = useState('');
+  const canChoose = !loading && !error && servers.length > 0;
+
+  const save = useMutation({
+    mutationFn: () => api.put<ServerGrantDto>(`${prefix}/server-grants/${serverId}`, {
+      cpuMillis: coresToMillis(cpuCores),
+      memBytes: gibToBytes(memGib),
+      diskBytes: gibToBytes(diskGib),
+      extensionGrants,
+      expiresAt: isoOrNull(expiresAt),
+    }),
+    onSuccess: () => {
+      toast({ title: '服务器授权已保存' });
+      onSaved();
+    },
+    onError: (saveError) => toast({ title: '服务器授权失败', description: errorMessage(saveError), variant: 'destructive' }),
+  });
+
+  return (
+    <Dialog open onOpenChange={onOpenChange}>
+      <DialogContent className="sm:max-w-3xl">
+        <DialogHeader>
+          <DialogTitle>添加服务器授权</DialogTitle>
+        </DialogHeader>
+        {canChoose ? (
+          <div className="space-y-3">
+            <SelectField
+              id="grant-server"
+              label="服务器"
+              value={serverId}
+              onChange={(value) => {
+                setServerId(value);
+                setExtensionGrants({});
+              }}
+              options={servers.map((server) => [server.id, server.name])}
+              placeholder="选择服务器"
+              disabled={save.isPending}
+            />
+            {serverId ? (
+              <ExtensionSlots
+                area="grant.server"
+                ctx={{
+                  serverId,
+                  enabledExtensions: servers.find((server) => server.id === serverId)?.enabledExtensions ?? [],
+                  value: extensionGrants,
+                  onChange: setExtensionGrants,
+                }}
+              />
+            ) : null}
+            <div className="grid gap-3 sm:grid-cols-3">
+              <NumberField id="grant-cpu" label="CPU（核，空=不限）" value={cpuCores} onChange={setCpuCores} />
+              <NumberField id="grant-memory" label="内存（G，空=不限）" value={memGib} onChange={setMemGib} hint={gibHint(memGib)} />
+              <NumberField id="grant-disk" label="磁盘（G，空=不限，不含共享卷）" value={diskGib} onChange={setDiskGib} hint={gibHint(diskGib)} />
+            </div>
+            <GrantExpiryInput id="grant-server-expires-at" value={expiresAt} onChange={setExpiresAt} />
+          </div>
+        ) : (
+          <ChoiceUnavailable loading={loading} error={error} onRetry={onRetry} empty="没有可添加的服务器。" />
+        )}
+        <DialogFooter>
+          <Button variant="outline" onClick={() => onOpenChange(false)}>{canChoose ? '取消' : '关闭'}</Button>
+          {canChoose ? (
+            <Button onClick={() => save.mutate()} disabled={!serverId || save.isPending}>
+              {save.isPending ? '保存中...' : '保存'}
+            </Button>
+          ) : null}
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+function PoolGrantCreateDialog({
+  prefix,
+  pools,
+  servers,
+  hasServerGrants,
+  loading,
+  error,
+  onRetry,
+  onSaved,
+  onOpenChange,
+}: {
+  prefix: string;
+  pools: StoragePoolDto[];
+  servers: ServerDto[];
+  hasServerGrants: boolean;
+  loading?: boolean;
+  error?: boolean;
+  onRetry?: () => void;
+  onSaved: () => void;
+  onOpenChange: (open: boolean) => void;
+}) {
+  const [poolId, setPoolId] = useState('');
+  const [expiresAt, setExpiresAt] = useState('');
+  const canChoose = !loading && !error && pools.length > 0;
+
+  const save = useMutation({
+    mutationFn: () => api.put<StoragePoolGrantDto>(`${prefix}/storage-pool-grants/${poolId}`, {
+      expiresAt: isoOrNull(expiresAt),
+    }),
+    onSuccess: () => {
+      toast({ title: '存储池授权已保存' });
+      onSaved();
+    },
+    onError: (saveError) => toast({ title: '存储池授权失败', description: errorMessage(saveError), variant: 'destructive' }),
+  });
+
+  return (
+    <Dialog open onOpenChange={onOpenChange}>
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>添加存储池授权</DialogTitle>
+        </DialogHeader>
+        {canChoose ? (
+          <div className="space-y-3">
+            <SelectField
+              id="grant-pool"
+              label="存储池"
+              value={poolId}
+              onChange={setPoolId}
+              options={pools.map((pool) => [
+                pool.id,
+                `${pool.displayName ?? pool.incusName} · ${serverName(pool.serverId, servers)}`,
+              ])}
+              placeholder="选择存储池"
+              disabled={save.isPending}
+            />
+            <GrantExpiryInput id="grant-pool-expires-at" value={expiresAt} onChange={setExpiresAt} />
+          </div>
+        ) : (
+          <ChoiceUnavailable
+            loading={loading}
+            error={error}
+            onRetry={onRetry}
+            empty={hasServerGrants ? '没有可添加的存储池。' : '请先添加服务器授权。'}
+          />
+        )}
+        <DialogFooter>
+          <Button variant="outline" onClick={() => onOpenChange(false)}>{canChoose ? '取消' : '关闭'}</Button>
+          {canChoose ? (
+            <Button onClick={() => save.mutate()} disabled={!poolId || save.isPending}>
+              {save.isPending ? '保存中...' : '保存'}
+            </Button>
+          ) : null}
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+function BackendGrantCreateDialog({
+  prefix,
+  backends,
+  loading,
+  error,
+  onRetry,
+  onSaved,
+  onOpenChange,
+}: {
+  prefix: string;
+  backends: SharedBackendDto[];
+  loading?: boolean;
+  error?: boolean;
+  onRetry?: () => void;
+  onSaved: () => void;
+  onOpenChange: (open: boolean) => void;
+}) {
+  const [backendId, setBackendId] = useState('');
+  const [sharedLimitGib, setSharedLimitGib] = useState('');
+  const [expiresAt, setExpiresAt] = useState('');
+  const canChoose = !loading && !error && backends.length > 0;
+
+  const save = useMutation({
+    mutationFn: () => {
+      const limitBytes = gibToBytes(sharedLimitGib);
+      if (limitBytes === null) throw new Error('请填写额度');
+      return api.put<SharedBackendGrantDto>(`${prefix}/shared-backend-grants/${backendId}`, {
+        limitBytes,
+        expiresAt: isoOrNull(expiresAt),
+      });
+    },
+    onSuccess: () => {
+      toast({ title: '共享存储授权已保存' });
+      onSaved();
+    },
+    onError: (saveError) => toast({ title: '共享存储授权失败', description: errorMessage(saveError), variant: 'destructive' }),
+  });
+
+  return (
+    <Dialog open onOpenChange={onOpenChange}>
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>添加共享存储授权</DialogTitle>
+        </DialogHeader>
+        {canChoose ? (
+          <div className="space-y-3">
+            <SelectField
+              id="grant-backend"
+              label="共享存储"
+              value={backendId}
+              onChange={setBackendId}
+              options={backends.map((backend) => [backend.id, backend.displayName ?? backend.name])}
+              placeholder="选择共享存储"
+              disabled={save.isPending}
+            />
+            <NumberField id="grant-shared-limit" label="额度（G）" value={sharedLimitGib} onChange={setSharedLimitGib} hint={gibHint(sharedLimitGib)} />
+            <GrantExpiryInput id="grant-backend-expires-at" value={expiresAt} onChange={setExpiresAt} />
+          </div>
+        ) : (
+          <ChoiceUnavailable loading={loading} error={error} onRetry={onRetry} empty="没有可添加的共享存储。" />
+        )}
+        <DialogFooter>
+          <Button variant="outline" onClick={() => onOpenChange(false)}>{canChoose ? '取消' : '关闭'}</Button>
+          {canChoose ? (
+            <Button onClick={() => save.mutate()} disabled={!backendId || !sharedLimitGib || save.isPending}>
+              {save.isPending ? '保存中...' : '保存'}
+            </Button>
+          ) : null}
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+function PoolGrantEditDialog({
+  grant,
+  title,
+  prefix,
+  onSaved,
+  onOpenChange,
+}: {
+  grant: StoragePoolGrantDto;
+  title: string;
+  prefix: string;
+  onSaved: () => void;
+  onOpenChange: (open: boolean) => void;
+}) {
+  const [expiresAt, setExpiresAt] = useState(() => grant.expiresAt ? toDatetimeLocalValue(new Date(grant.expiresAt)) : '');
+  const save = useMutation({
+    mutationFn: () => api.put<StoragePoolGrantDto>(`${prefix}/storage-pool-grants/${grant.poolId}`, {
+      expiresAt: isoOrNull(expiresAt),
+    }),
+    onSuccess: () => {
+      toast({ title: '存储池授权已保存' });
+      onSaved();
+    },
+    onError: (saveError) => toast({ title: '存储池授权失败', description: errorMessage(saveError), variant: 'destructive' }),
+  });
+  return (
+    <Dialog open onOpenChange={onOpenChange}>
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>编辑「{title}」的存储池授权</DialogTitle>
+        </DialogHeader>
+        <GrantExpiryInput id={`grant-pool-expires-at-${grant.poolId}`} value={expiresAt} onChange={setExpiresAt} />
+        <DialogFooter>
+          <Button variant="outline" onClick={() => onOpenChange(false)}>取消</Button>
+          <Button onClick={() => save.mutate()} disabled={save.isPending}>
+            {save.isPending ? '保存中...' : '保存'}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+function BackendGrantEditDialog({
+  grant,
+  title,
+  prefix,
+  onSaved,
+  onOpenChange,
+}: {
+  grant: SharedBackendGrantDto;
+  title: string;
+  prefix: string;
+  onSaved: () => void;
+  onOpenChange: (open: boolean) => void;
+}) {
+  const [sharedLimitGib, setSharedLimitGib] = useState(() => formatGibInput(grant.limitBytes));
+  const [expiresAt, setExpiresAt] = useState(() => grant.expiresAt ? toDatetimeLocalValue(new Date(grant.expiresAt)) : '');
+  const save = useMutation({
+    mutationFn: () => {
+      const limitBytes = gibToBytes(sharedLimitGib);
+      if (limitBytes === null) throw new Error('请填写额度');
+      return api.put<SharedBackendGrantDto>(`${prefix}/shared-backend-grants/${grant.sharedBackendId}`, {
+        limitBytes,
+        expiresAt: isoOrNull(expiresAt),
+      });
+    },
+    onSuccess: () => {
+      toast({ title: '共享存储授权已保存' });
+      onSaved();
+    },
+    onError: (saveError) => toast({ title: '共享存储授权失败', description: errorMessage(saveError), variant: 'destructive' }),
+  });
+  return (
+    <Dialog open onOpenChange={onOpenChange}>
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>编辑「{title}」的共享存储授权</DialogTitle>
+        </DialogHeader>
+        <div className="space-y-3">
+          <NumberField
+            id={`grant-shared-limit-${grant.sharedBackendId}`}
+            label="额度（G）"
+            value={sharedLimitGib}
+            onChange={setSharedLimitGib}
+            hint={gibHint(sharedLimitGib)}
+          />
+          <GrantExpiryInput id={`grant-backend-expires-at-${grant.sharedBackendId}`} value={expiresAt} onChange={setExpiresAt} />
+        </div>
+        <DialogFooter>
+          <Button variant="outline" onClick={() => onOpenChange(false)}>取消</Button>
+          <Button onClick={() => save.mutate()} disabled={!sharedLimitGib || save.isPending}>
+            {save.isPending ? '保存中...' : '保存'}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   );
 }
 
@@ -521,7 +868,6 @@ function ServerGrantEditDialog({
       <DialogContent className="sm:max-w-3xl">
         <DialogHeader>
           <DialogTitle>编辑「{title}」的服务器授权</DialogTitle>
-          <DialogDescription>调整 CPU、内存、本地盘和扩展卡额度。存储池授权在本页另一张卡片里管理。</DialogDescription>
         </DialogHeader>
         <div className="space-y-3">
           <div className="grid gap-3 sm:grid-cols-3">

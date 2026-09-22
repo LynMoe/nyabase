@@ -1,20 +1,24 @@
+import type { ReactNode } from 'react';
 import { RotateCw } from 'lucide-react';
 import {
+  CertificateState,
   CertificateTrustState,
   type IncusClientCertificateDto,
 } from '@nyabase/common';
 import { ConfirmDialog } from '../layout/confirm-dialog.js';
 import { QueryView, type QueryLike } from '../layout/query-view.js';
+import { StatusBadge } from '../layout/status-badge.js';
 import { ResourceIntentFailures } from '../intents/resource-intent-failures.js';
-import { Badge } from '../ui/badge.js';
 import { Button } from '../ui/button.js';
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '../ui/card.js';
+import { Card, CardContent, CardHeader, CardTitle } from '../ui/card.js';
 import {
   certExpiryWarning,
   formatCertRemainingLabel,
 } from '../../lib/cert-expiry.js';
+import { certificateStatePending, certificateTrustPending } from '../../lib/in-progress.js';
 import { relativeTime } from '../../lib/utils.js';
 import { ResourceRef } from '../refs/resource-ref.js';
+import { TechnicalId } from '../refs/technical-id.js';
 
 export function CertificateCard({
   serverId,
@@ -45,7 +49,6 @@ export function CertificateCard({
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div>
             <CardTitle className="flex items-center gap-2 text-base"><RotateCw className="h-4 w-4" />Incus 客户端证书</CardTitle>
-            <CardDescription>轮换会生成收敛意图，各服务器 trust 状态在此处可见。</CardDescription>
           </div>
           {canManageCertificates ? (
             <Button
@@ -109,8 +112,20 @@ export function CertificateCard({
   );
 }
 
-function InfoRow({ label, value, mono = false }: { label: string; value: string; mono?: boolean }) {
-  return <div className="min-w-0"><p className="text-xs text-muted-foreground">{label}</p><p className={mono ? 'break-all font-mono text-xs' : 'break-all text-sm'}>{value}</p></div>;
+function InfoRow({ label, value }: { label: string; value: ReactNode }) {
+  return (
+    <div className="min-w-0">
+      <p className="text-xs text-muted-foreground">{label}</p>
+      {typeof value === 'string' ? <p className="break-all text-sm">{value}</p> : <div className="mt-1">{value}</div>}
+    </div>
+  );
+}
+
+function certificateStateVariant(state: string): 'success' | 'secondary' | 'destructive' | 'warning' {
+  if (state === CertificateState.Active) return 'success';
+  if (state === CertificateState.Failed) return 'destructive';
+  if (state === CertificateState.Staged) return 'warning';
+  return 'secondary';
 }
 
 function CertificateDetails({
@@ -128,8 +143,17 @@ function CertificateDetails({
     <div className="space-y-3">
       <div className="grid gap-3 sm:grid-cols-3">
         <InfoRow label="代次" value={String(certificate.generation)} />
-        <InfoRow label="指纹" value={certificate.fingerprint} mono />
-        <InfoRow label="状态" value={certificate.state} />
+        <InfoRow label="指纹" value={<TechnicalId label="指纹" value={certificate.fingerprint} />} />
+        <InfoRow
+          label="状态"
+          value={(
+            <StatusBadge
+              label={certificate.state}
+              pending={certificateStatePending(certificate.state)}
+              variant={certificateStateVariant(certificate.state)}
+            />
+          )}
+        />
         <InfoRow label="生效时间" value={new Date(certificate.notBefore).toLocaleString()} />
         <InfoRow label="过期时间" value={new Date(certificate.notAfter).toLocaleString()} />
         <InfoRow
@@ -193,17 +217,19 @@ function CertificateTrustWizard({
           </p>
           <p className="text-xs text-muted-foreground">{trust.lastError ?? relativeTime(trust.observedAt)}</p>
         </div>
-        <Badge variant={
-          trust.serverId === currentServerId && trust.trustState === CertificateTrustState.Verified
-            ? 'success'
-            : trust.trustState === CertificateTrustState.Revoked
+        <StatusBadge
+          label={certTrustStateLabel(trust.trustState)}
+          pending={certificateTrustPending(trust.trustState)}
+          variant={
+            trust.serverId === currentServerId && trust.trustState === CertificateTrustState.Verified
               ? 'success'
-              : trust.trustState === CertificateTrustState.CleanupFailed
-                ? 'destructive'
-                : 'secondary'
-        }>
-          {certTrustStateLabel(trust.trustState)}
-        </Badge>
+              : trust.trustState === CertificateTrustState.Revoked
+                ? 'success'
+                : trust.trustState === CertificateTrustState.CleanupFailed
+                  ? 'destructive'
+                  : 'secondary'
+          }
+        />
       </div>
       <ol className="flex flex-wrap gap-1 text-[11px]">
         {steps.map((step, index) => {

@@ -681,6 +681,8 @@ export class ContainerReconciler implements ManagedReconciler {
       && ssh.status !== 'running'
       && ssh.status !== 'disabled'
       && ssh.status !== 'container_stopped'
+      // Image-owned sshd absence is durable; retrying will not install the binary.
+      && ssh.lastError !== 'key_applied_sshd_missing'
     ) {
       return {
         outcome: 'retry',

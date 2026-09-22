@@ -1,15 +1,10 @@
-import { useRef, useState } from 'react';
-import {
-  parseGrant,
-  reduceNvidiaGpuGrant,
-  type GpuPickerMode,
-} from '../grant-state.js';
+import { parseGrant } from '../grant-state.js';
 import { NVIDIA_GPU_EXTENSION_ID } from '../id.js';
-import { GpuGrantMode } from '../schema.js';
+import { canonicalPciAddress } from '../pci.js';
+import type { NvidiaGpuDeviceDto } from '../schema.js';
 import {
   formatGpuSelectionLabel,
   GpuPicker,
-  gpuModeFromPciList,
 } from './gpu-picker.js';
 import type { FrontendExtensionHost, ServerCardWebExtension, SlotContextMap } from './types.js';
 
@@ -38,17 +33,11 @@ function CreateSlot({
   if (!enabledOn(ctx.enabledExtensions)) return null;
   const current = pciFromValue(ctx.value[NVIDIA_GPU_EXTENSION_ID]);
   const grant = parseGrant(ctx.grant?.[NVIDIA_GPU_EXTENSION_ID]);
-  const mode = gpuModeFromPciList(current);
   return (
     <GpuPicker
       host={host}
       serverId={ctx.serverId}
-      mode={mode}
-      onModeChange={(next) => {
-        if (next === 'none') {
-          ctx.onChange({ ...ctx.value, [NVIDIA_GPU_EXTENSION_ID]: { pciAddresses: [] } });
-        }
-      }}
+      defaultAll
       value={current}
       onChange={(pciAddresses) => {
         ctx.onChange({ ...ctx.value, [NVIDIA_GPU_EXTENSION_ID]: { pciAddresses } });
@@ -67,60 +56,41 @@ function SpecSlot({
   ctx: SlotContextMap['container.spec'];
 }) {
   const current = pciFromValue(ctx.value[NVIDIA_GPU_EXTENSION_ID]);
-  const [mode, setMode] = useState<GpuPickerMode>(() => gpuModeFromPciList(current));
   if (!enabledOn(ctx.enabledExtensions)) return null;
   const runtime = runtimeFromValue(ctx.value[NVIDIA_GPU_EXTENSION_ID]);
   const canEdit = ctx.observedStatus === 'stopped';
-  const {
-    Card,
-    CardHeader,
-    CardTitle,
-    CardDescription,
-    CardContent,
-    Button,
-  } = host.ui;
+  const grant = parseGrant(ctx.grant?.[NVIDIA_GPU_EXTENSION_ID]);
+  const { Button } = host.ui;
   return (
-    <Card className="lg:col-span-2">
-      <CardHeader>
-        <CardTitle className="text-base">GPU</CardTitle>
-        <CardDescription data-testid="gpu-runtime-rebuild">
-          {canEdit ? '容器已停止，可以修改 GPU。' : 'GPU 修改要求容器停止。'}
-        </CardDescription>
-      </CardHeader>
-      <CardContent className="space-y-3">
-        <GpuPicker
-          host={host}
-          serverId={ctx.serverId}
-          admin={ctx.admin}
-          mode={mode}
-          onModeChange={(next) => {
-            setMode(next);
-            if (next === 'none') {
-              ctx.onChange({ ...ctx.value, [NVIDIA_GPU_EXTENSION_ID]: { nvidiaRuntime: runtime, pciAddresses: [] } });
-            }
-          }}
-          value={current}
-          onChange={(pciAddresses) => {
-            ctx.onChange({
-              ...ctx.value,
-              [NVIDIA_GPU_EXTENSION_ID]: { nvidiaRuntime: runtime, pciAddresses },
-            });
-          }}
-          disabled={!canEdit}
-          idPrefix="container-detail-gpu"
-        />
-        <Button
-          onClick={() => ctx.onSubmit(NVIDIA_GPU_EXTENSION_ID, { pciAddresses: current })}
-          disabled={ctx.pending || !canEdit}
-        >
-          {ctx.pending ? '提交中...' : '应用 GPU'}
-        </Button>
-      </CardContent>
-    </Card>
+    <div className="space-y-3 border-t pt-4">
+      <GpuPicker
+        host={host}
+        serverId={ctx.serverId}
+        admin={ctx.admin}
+        grant={grant}
+        value={current}
+        onChange={(pciAddresses) => {
+          ctx.onChange({
+            ...ctx.value,
+            [NVIDIA_GPU_EXTENSION_ID]: { nvidiaRuntime: runtime, pciAddresses },
+          });
+        }}
+        disabled={!canEdit}
+        idPrefix="container-detail-gpu"
+      />
+      <Button
+        onClick={() => ctx.onSubmit(NVIDIA_GPU_EXTENSION_ID, { pciAddresses: current })}
+        disabled={ctx.pending || !canEdit}
+        title={canEdit ? undefined : '容器未停止'}
+      >
+        {ctx.pending ? '提交中...' : '应用 GPU'}
+      </Button>
+    </div>
   );
 }
 
 function OverviewSlot({
+  host,
   ctx,
 }: {
   host: FrontendExtensionHost;
@@ -129,11 +99,70 @@ function OverviewSlot({
   const state = ctx.value[NVIDIA_GPU_EXTENSION_ID];
   if (typeof state !== 'object' || state === null || Object.keys(state).length === 0) return null;
   const current = pciFromValue(state);
+  const path = ctx.admin
+    ? `/admin/servers/${ctx.serverId}/extensions/${NVIDIA_GPU_EXTENSION_ID}/devices`
+    : `/servers/${ctx.serverId}/extensions/${NVIDIA_GPU_EXTENSION_ID}/devices`;
+  const query = host.useQuery({
+    queryKey: host.extensionDevicesKey(NVIDIA_GPU_EXTENSION_ID, ctx.serverId, ctx.admin),
+    queryFn: () => host.api.get<{ items?: NvidiaGpuDeviceDto[] }>(path),
+    enabled: Boolean(ctx.serverId) && current.length > 0,
+  });
+  const inventory = Array.isArray(query.data?.items) ? query.data.items : [];
+  const { TechnicalId } = host.ui;
+  const groups = query.data ? gpuModelGroups(current, inventory) : [];
   return (
-    <p className="text-sm">
-      GPU：{formatGpuSelectionLabel(current, [])}
-    </p>
+    <div>
+      <p className="text-xs text-muted-foreground">GPU</p>
+      {current.length === 0 ? (
+        <p className="text-sm">{formatGpuSelectionLabel(current, [])}</p>
+      ) : groups.length === 0 ? (
+        <p className="text-sm">
+          <TechnicalId label="GPU" value={current.join(', ')} visible={`${current.length} 张`} />
+        </p>
+      ) : (
+        <p className="flex flex-wrap gap-x-3 text-sm">
+          {groups.map((group) => (
+            <TechnicalId
+              key={group.model}
+              label="GPU"
+              value={group.addresses.join(', ')}
+              visible={group.label}
+            />
+          ))}
+        </p>
+      )}
+    </div>
   );
+}
+
+function gpuModelGroups(
+  addresses: readonly string[],
+  inventory: readonly NvidiaGpuDeviceDto[],
+): { model: string; label: string; addresses: string[] }[] {
+  const models = new Map(inventory.map((device) => [pciKey(device.pciAddress), device.model.trim() || '未知型号']));
+  const order: string[] = [];
+  const grouped = new Map<string, string[]>();
+  for (const address of addresses) {
+    const model = models.get(pciKey(address)) ?? '未知型号';
+    const list = grouped.get(model);
+    if (list) list.push(address);
+    else {
+      grouped.set(model, [address]);
+      order.push(model);
+    }
+  }
+  return order.map((model) => {
+    const group = grouped.get(model) ?? [];
+    return {
+      model,
+      addresses: group,
+      label: `${group.length} × ${model}`,
+    };
+  });
+}
+
+function pciKey(value: string): string {
+  return canonicalPciAddress(value) ?? value.trim().toLowerCase();
 }
 
 function GrantSlot({
@@ -143,32 +172,16 @@ function GrantSlot({
   host: FrontendExtensionHost;
   ctx: SlotContextMap['grant.server'];
 }) {
-  const latestGrant = useRef({ mode: GpuGrantMode.None, pciAddresses: [] as string[] });
   if (!enabledOn(ctx.enabledExtensions)) return null;
-  const grant = parseGrant(ctx.value[NVIDIA_GPU_EXTENSION_ID])
-    ?? { mode: GpuGrantMode.None, pciAddresses: [] };
-  latestGrant.current = grant;
-  const pickerMode: GpuPickerMode = grant.mode === GpuGrantMode.None
-    ? 'none'
-    : grant.mode === GpuGrantMode.All
-      ? 'all'
-      : 'specific';
+  const grant = parseGrant(ctx.value[NVIDIA_GPU_EXTENSION_ID]);
   return (
     <GpuPicker
       host={host}
       serverId={ctx.serverId}
       admin
-      mode={pickerMode}
-      onModeChange={(next) => {
-        const nextGrant = reduceNvidiaGpuGrant(latestGrant.current, { type: 'mode', mode: next });
-        latestGrant.current = nextGrant;
-        ctx.onChange({ ...ctx.value, [NVIDIA_GPU_EXTENSION_ID]: nextGrant });
-      }}
-      value={grant.pciAddresses}
+      value={grant?.pciAddresses ?? []}
       onChange={(pciAddresses) => {
-        const nextGrant = reduceNvidiaGpuGrant(latestGrant.current, { type: 'pci', pciAddresses });
-        latestGrant.current = nextGrant;
-        ctx.onChange({ ...ctx.value, [NVIDIA_GPU_EXTENSION_ID]: nextGrant });
+        ctx.onChange({ ...ctx.value, [NVIDIA_GPU_EXTENSION_ID]: { pciAddresses } });
       }}
       idPrefix="grant-gpu"
       label="NVIDIA GPU 授权"

@@ -33,6 +33,7 @@ import { Page } from '../components/layout/page.js';
 import { PageHeader } from '../components/layout/page-header.js';
 import { QueryView } from '../components/layout/query-view.js';
 import { SectionCard } from '../components/layout/section-card.js';
+import { TechnicalId } from '../components/refs/technical-id.js';
 import { toast } from '../hooks/use-toast.js';
 import { useAuthStore } from '../store/auth.js';
 import { queryKeys } from '../lib/query-keys.js';
@@ -174,7 +175,13 @@ export default function HttpProxyOpsPage() {
                           <TableCell className="font-mono text-xs">{pool.wildcardDomain}</TableCell>
                           <TableCell>{pool.enabled ? '是' : '否'}</TableCell>
                           <TableCell>{pool.httpsEnabled ? '是' : '否'}</TableCell>
-                          <TableCell className="font-mono text-xs break-all">{pool.certificateFingerprint ?? '未配置'}</TableCell>
+                          <TableCell>
+                            {pool.certificateFingerprint ? (
+                              <TechnicalId label="证书指纹" value={pool.certificateFingerprint} kind="opaque" />
+                            ) : (
+                              <span className="text-sm">未配置</span>
+                            )}
+                          </TableCell>
                           <TableCell>
                             <div className="flex justify-end gap-2">
                               <Button size="sm" variant="outline" onClick={() => setPoolForm(pool)}>
@@ -292,8 +299,10 @@ function HttpStatusSections({ status }: { status: HttpProxyAdminStatus }) {
               ) : (status.proxies ?? []).map((proxy) => (
                 <TableRow key={proxy.proxyId}>
                   <TableCell>
-                    <div className="font-medium text-foreground">{proxy.hostname || proxy.proxyId}</div>
-                    <div className="whitespace-normal break-all font-mono text-xs text-muted-foreground">{proxy.proxyId}</div>
+                    {proxy.hostname ? (
+                      <div className="font-medium text-foreground">{proxy.hostname}</div>
+                    ) : null}
+                    <TechnicalId label="代理" value={proxy.proxyId} kind="opaque" />
                   </TableCell>
                   <TableCell className="font-mono text-xs">{formatListen(proxy.httpListen)}</TableCell>
                   <TableCell className="font-mono text-xs">{formatListen(proxy.httpsListen)}</TableCell>
@@ -415,9 +424,12 @@ function DomainPoolFormDialog({
           {httpsPemIncomplete && (
             <p className="text-xs text-destructive">启用 HTTPS 时请同时提供证书和私钥 PEM。</p>
           )}
-          {pool?.certificateFingerprint && (
-            <p className="text-xs text-muted-foreground">当前证书指纹：{pool.certificateFingerprint}</p>
-          )}
+          {pool?.certificateFingerprint ? (
+            <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
+              <span>当前证书指纹：</span>
+              <TechnicalId label="证书指纹" value={pool.certificateFingerprint} kind="opaque" />
+            </div>
+          ) : null}
           {httpsEnabled && (
             <>
               <FormField id="http-pool-cert" label="证书 PEM">

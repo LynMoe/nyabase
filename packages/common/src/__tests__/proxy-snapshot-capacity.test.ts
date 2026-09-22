@@ -61,7 +61,6 @@ describe('bounded SSH proxy snapshots', () => {
         routedIp: '192.0.2.10',
         status: ContainerStatus.Running,
         sshStatus: 'running',
-        containerHostKeyFingerprint: null,
         observedAt: new Date(0).toISOString(),
       }],
     });
@@ -129,7 +128,6 @@ describe('bounded SSH proxy snapshots', () => {
         routedIp: '192.0.2.10',
         status: ContainerStatus.Running,
         sshStatus: 'running',
-        containerHostKeyFingerprint: repeated('f', 128),
         observedAt: repeated('o', 64),
       })),
     });

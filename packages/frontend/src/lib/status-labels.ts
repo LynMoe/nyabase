@@ -198,10 +198,3 @@ export function intentKindLabel(kind: string): string {
 export function intentResourceTypeLabel(resourceType: string): string {
   return labelOrRaw(INTENT_RESOURCE_TYPE_ZH, resourceType);
 }
-
-/** User-facing toast description for submitted container/volume work. */
-export function actionProgressHint(scope: 'detail' | 'list' = 'detail'): string {
-  return scope === 'list'
-    ? '列表状态稍后更新；可打开容器详情查看进度与「意图历史」。'
-    : '可在本页状态或「意图历史」查看进度。';
-}

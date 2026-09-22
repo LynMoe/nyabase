@@ -6,12 +6,14 @@ import type { SshPublicKeyDto } from '@nyabase/common';
 import { api } from '../lib/api.js';
 import { useAuthStore } from '../store/auth.js';
 import { Button } from '../components/ui/button.js';
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '../components/ui/dialog.js';
 import { Input } from '../components/ui/input.js';
 import { Textarea } from '../components/ui/textarea.js';
 import { ConfirmDialog } from '../components/layout/confirm-dialog.js';
 import { FormField } from '../components/layout/form-field.js';
 import { Page } from '../components/layout/page.js';
 import { PageHeader } from '../components/layout/page-header.js';
+import { TechnicalId } from '../components/refs/technical-id.js';
 import { toast } from '../hooks/use-toast.js';
 import { setPendingLoginReason } from '../lib/pending-login-reason.js';
 import { terminateBrowserSession } from '../lib/session-termination.js';
@@ -28,7 +30,6 @@ export default function ProfilePage() {
     <Page>
       <PageHeader
         title="用户中心"
-        description="管理账号密码和用于 SSH 代理登录的公钥"
         actions={
           <div className="flex items-center gap-2 rounded-md border border-border bg-card px-3 py-2">
             <UserCircle className="h-4 w-4 text-muted-foreground shrink-0" />
@@ -49,6 +50,38 @@ export default function ProfilePage() {
 }
 
 function PasswordPanel({ userId }: { userId: string }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <section className="rounded-lg border border-border bg-card p-4 space-y-4">
+      <div className="flex items-start justify-between gap-3">
+        <div className="flex items-start gap-2">
+          <ShieldCheck className="h-4 w-4 text-primary mt-1 shrink-0" />
+          <div>
+            <h2 className="text-base font-semibold text-foreground">登录密码</h2>
+            <p className="text-xs text-muted-foreground mt-0.5">修改后需要使用新密码重新登录。</p>
+          </div>
+        </div>
+        <Button size="sm" variant="outline" onClick={() => setOpen(true)} data-testid="change-password">
+          修改密码
+        </Button>
+      </div>
+      {open ? (
+        <ChangePasswordDialog
+          userId={userId}
+          onOpenChange={(next) => { if (!next) setOpen(false); }}
+        />
+      ) : null}
+    </section>
+  );
+}
+
+function ChangePasswordDialog({
+  userId,
+  onOpenChange,
+}: {
+  userId: string;
+  onOpenChange: (open: boolean) => void;
+}) {
   const curId = 'profile-current-password';
   const newId = 'profile-new-password';
   const confirmId = 'profile-confirm-password';
@@ -90,63 +123,59 @@ function PasswordPanel({ userId }: { userId: string }) {
   });
 
   return (
-    <section className="rounded-lg border border-border bg-card p-4 space-y-4">
-      <div className="flex items-start gap-2">
-        <ShieldCheck className="h-4 w-4 text-primary mt-1 shrink-0" />
-        <div>
-          <h2 className="text-base font-semibold text-foreground">修改密码</h2>
-          <p className="text-xs text-muted-foreground mt-0.5">修改当前账号密码需要验证旧密码。</p>
+    <Dialog open onOpenChange={onOpenChange}>
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>修改密码</DialogTitle>
+          <DialogDescription>修改当前账号密码需要验证旧密码。成功后会退出并要求重新登录。</DialogDescription>
+        </DialogHeader>
+        <div className="space-y-3">
+          <FormField id={curId} label="当前密码" error={errors.currentPassword}>
+            <Input
+              id={curId}
+              type="password"
+              value={form.currentPassword}
+              onChange={(e) => setForm((f) => ({ ...f, currentPassword: e.target.value }))}
+              aria-invalid={!!errors.currentPassword}
+              autoComplete="current-password"
+            />
+          </FormField>
+          <FormField id={newId} label="新密码" error={errors.newPassword}>
+            <Input
+              id={newId}
+              type="password"
+              value={form.newPassword}
+              onChange={(e) => setForm((f) => ({ ...f, newPassword: e.target.value }))}
+              aria-invalid={!!errors.newPassword}
+              autoComplete="new-password"
+            />
+          </FormField>
+          <FormField id={confirmId} label="确认新密码" error={errors.confirmPassword}>
+            <Input
+              id={confirmId}
+              type="password"
+              value={form.confirmPassword}
+              onChange={(e) => setForm((f) => ({ ...f, confirmPassword: e.target.value }))}
+              aria-invalid={!!errors.confirmPassword}
+              autoComplete="new-password"
+            />
+          </FormField>
         </div>
-      </div>
-
-      <div className="space-y-3">
-        <FormField id={curId} label="当前密码" error={errors.currentPassword}>
-          <Input
-            id={curId}
-            type="password"
-            value={form.currentPassword}
-            onChange={(e) => setForm((f) => ({ ...f, currentPassword: e.target.value }))}
-            aria-invalid={!!errors.currentPassword}
-            autoComplete="current-password"
-          />
-        </FormField>
-        <FormField id={newId} label="新密码" error={errors.newPassword}>
-          <Input
-            id={newId}
-            type="password"
-            value={form.newPassword}
-            onChange={(e) => setForm((f) => ({ ...f, newPassword: e.target.value }))}
-            aria-invalid={!!errors.newPassword}
-            autoComplete="new-password"
-          />
-        </FormField>
-        <FormField id={confirmId} label="确认新密码" error={errors.confirmPassword}>
-          <Input
-            id={confirmId}
-            type="password"
-            value={form.confirmPassword}
-            onChange={(e) => setForm((f) => ({ ...f, confirmPassword: e.target.value }))}
-            aria-invalid={!!errors.confirmPassword}
-            autoComplete="new-password"
-          />
-        </FormField>
-      </div>
-
-      <div className="flex justify-end">
-        <Button onClick={() => { if (validate()) mutate(); }} disabled={isPending}>
-          {isPending ? '修改中...' : '确认修改'}
-        </Button>
-      </div>
-    </section>
+        <DialogFooter>
+          <Button variant="outline" onClick={() => onOpenChange(false)}>取消</Button>
+          <Button onClick={() => { if (validate()) mutate(); }} disabled={isPending}>
+            {isPending ? '修改中...' : '确认修改'}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   );
 }
 
 function SshKeysPanel({ userId }: { userId: string }) {
   const qc = useQueryClient();
-  const [form, setForm] = useState({ name: '', keyText: '' });
-  const [errors, setErrors] = useState<SshKeyErrors>({});
+  const [addOpen, setAddOpen] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState<SshPublicKeyDto | null>(null);
-  const [nameTouched, setNameTouched] = useState(false);
 
   const queryKey = ['ssh-keys', userId];
   const keysQuery = useQuery({
@@ -155,6 +184,128 @@ function SshKeysPanel({ userId }: { userId: string }) {
   });
   const keys = keysQuery.data ?? [];
   const { isFetching, refetch } = keysQuery;
+
+  const deleteKey = useMutation({
+    mutationFn: (keyId: string) => api.delete(`/users/${userId}/ssh-keys/${keyId}`),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey });
+      toast({ title: 'SSH 公钥已删除' });
+      setDeleteTarget(null);
+    },
+    onError: (e) => toast({ title: '删除失败', description: e.message, variant: 'destructive' }),
+  });
+
+  return (
+    <section className="rounded-lg border border-border bg-card p-4 space-y-4">
+      <div className="flex items-start justify-between gap-3">
+        <div className="flex min-w-0 items-center gap-2">
+          <KeyRound className="h-4 w-4 shrink-0 text-primary" />
+          <h2 className="text-base font-semibold text-foreground">SSH 公钥</h2>
+        </div>
+        <div className="flex shrink-0 items-center gap-2">
+          <Button
+            variant="ghost"
+            size="icon"
+            className="h-8 w-8 text-muted-foreground"
+            onClick={() => refetch()}
+            disabled={isFetching}
+            aria-label="刷新 SSH 公钥"
+          >
+            <RefreshCw className={`h-4 w-4 ${isFetching ? 'animate-spin' : ''}`} />
+          </Button>
+          <Button
+            size="sm"
+            onClick={() => setAddOpen(true)}
+            disabled={keysQuery.isError}
+            data-testid="ssh-key-add"
+          >
+            <Plus className="h-4 w-4" />添加公钥
+          </Button>
+        </div>
+      </div>
+
+      <div className="rounded-lg border border-border bg-background overflow-hidden">
+        {keysQuery.isLoading ? (
+          <div className="px-4 py-8 text-center text-sm text-muted-foreground">正在加载 SSH 公钥...</div>
+        ) : keysQuery.isError ? (
+          <div className="px-4 py-6 space-y-2 text-center">
+            <p className="text-sm text-destructive">SSH 公钥加载失败，当前列表不可用</p>
+            <Button size="sm" variant="outline" onClick={() => { void refetch(); }}>重试</Button>
+          </div>
+        ) : keys.length === 0 ? (
+          <div className="px-4 py-8 text-center">
+            <KeyRound className="h-8 w-8 mx-auto text-muted-foreground/30" />
+            <p className="text-sm text-muted-foreground mt-2">暂无 SSH 公钥</p>
+          </div>
+        ) : (
+          <div className="divide-y divide-border max-h-80 overflow-y-auto">
+            {keys.map((key) => (
+              <div key={key.id} className="flex items-start justify-between gap-3 px-3 py-3">
+                <div className="min-w-0 space-y-1">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className="text-sm font-medium text-foreground">{key.name}</span>
+                    <span className="text-xs text-muted-foreground">{formatCreatedAt(key.createdAt)}</span>
+                  </div>
+                  <TechnicalId label="公钥" value={key.keyText} kind="opaque" visible={previewKey(key.keyText)} />
+                </div>
+                <Button
+                  size="icon"
+                  variant="ghost"
+                  className="h-8 w-8 text-red-400 hover:text-red-600 shrink-0"
+                  onClick={() => setDeleteTarget(key)}
+                  aria-label={`删除 SSH 公钥 ${key.name}`}
+                >
+                  <Trash2 className="h-3.5 w-3.5" />
+                </Button>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
+      {addOpen ? (
+        <AddSshKeyDialog
+          userId={userId}
+          queryKey={queryKey}
+          onSaved={() => setAddOpen(false)}
+          onOpenChange={(open) => { if (!open) setAddOpen(false); }}
+        />
+      ) : null}
+
+      <ConfirmDialog
+        open={Boolean(deleteTarget)}
+        title="删除 SSH 公钥？"
+        description={
+          <>
+            将删除公钥「<span className="font-semibold text-foreground">{deleteTarget?.name}</span>」。
+            SSH 代理与容器会在同步后不再接受这把公钥。
+          </>
+        }
+        confirmLabel="删除"
+        pendingLabel="删除"
+        pending={deleteKey.isPending}
+        onConfirm={() => { if (deleteTarget) deleteKey.mutate(deleteTarget.id); }}
+        onOpenChange={(open) => { if (!open) setDeleteTarget(null); }}
+      />
+    </section>
+  );
+}
+
+function AddSshKeyDialog({
+  userId,
+  queryKey,
+  onSaved,
+  onOpenChange,
+}: {
+  userId: string;
+  queryKey: readonly unknown[];
+  onSaved: () => void;
+  onOpenChange: (open: boolean) => void;
+}) {
+  const qc = useQueryClient();
+  const [form, setForm] = useState({ name: '', keyText: '' });
+  const [errors, setErrors] = useState<SshKeyErrors>({});
+  const [nameTouched, setNameTouched] = useState(false);
 
   const validate = () => {
     const resolvedName = resolveKeyName(form.name, form.keyText);
@@ -186,92 +337,17 @@ function SshKeysPanel({ userId }: { userId: string }) {
     onSuccess: () => {
       qc.invalidateQueries({ queryKey });
       toast({ title: 'SSH 公钥已添加' });
-      setForm({ name: '', keyText: '' });
-      setErrors({});
-      setNameTouched(false);
+      onSaved();
     },
     onError: (e) => toast({ title: '添加失败', description: e.message, variant: 'destructive' }),
   });
 
-  const deleteKey = useMutation({
-    mutationFn: (keyId: string) => api.delete(`/users/${userId}/ssh-keys/${keyId}`),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey });
-      toast({ title: 'SSH 公钥已删除' });
-      setDeleteTarget(null);
-    },
-    onError: (e) => toast({ title: '删除失败', description: e.message, variant: 'destructive' }),
-  });
-
   return (
-    <section className="rounded-lg border border-border bg-card p-4 space-y-4">
-      <div className="flex items-start justify-between gap-3">
-        <div className="flex min-w-0 items-start gap-2">
-          <KeyRound className="h-4 w-4 text-primary mt-1 shrink-0" />
-          <div className="min-w-0">
-            <h2 className="text-base font-semibold text-foreground">SSH 公钥</h2>
-            <p className="mt-0.5 break-keep text-xs text-muted-foreground">
-              这些公钥会同步到 SSH 代理与你的全部活跃容器，用于 Jump 与第二跳登录。
-            </p>
-          </div>
-        </div>
-        <Button
-          variant="ghost"
-          size="icon"
-          className="h-8 w-8 shrink-0 text-muted-foreground"
-          onClick={() => refetch()}
-          disabled={isFetching}
-          aria-label="刷新 SSH 公钥"
-        >
-          <RefreshCw className={`h-4 w-4 ${isFetching ? 'animate-spin' : ''}`} />
-        </Button>
-      </div>
-
-      <div className="rounded-lg border border-border bg-background overflow-hidden">
-        {keysQuery.isLoading ? (
-          <div className="px-4 py-8 text-center text-sm text-muted-foreground">正在加载 SSH 公钥...</div>
-        ) : keysQuery.isError ? (
-          <div className="px-4 py-6 space-y-2 text-center">
-            <p className="text-sm text-destructive">SSH 公钥加载失败，当前列表不可用</p>
-            <Button size="sm" variant="outline" onClick={() => { void refetch(); }}>重试</Button>
-          </div>
-        ) : keys.length === 0 ? (
-          <div className="px-4 py-8 text-center">
-            <KeyRound className="h-8 w-8 mx-auto text-muted-foreground/30" />
-            <p className="text-sm text-muted-foreground mt-2">暂无 SSH 公钥</p>
-            <p className="text-xs text-muted-foreground/70 mt-1">添加公钥后即可用于 SSH 代理登录。</p>
-          </div>
-        ) : (
-          <div className="divide-y divide-border max-h-80 overflow-y-auto">
-            {keys.map((key) => (
-              <div key={key.id} className="flex items-start justify-between gap-3 px-3 py-3">
-                <div className="min-w-0 space-y-1">
-                  <div className="flex flex-wrap items-center gap-2">
-                    <span className="text-sm font-medium text-foreground">{key.name}</span>
-                    <span className="text-xs text-muted-foreground">{formatCreatedAt(key.createdAt)}</span>
-                  </div>
-                  <p className="font-mono text-xs text-muted-foreground break-all">{previewKey(key.keyText)}</p>
-                </div>
-                <Button
-                  size="icon"
-                  variant="ghost"
-                  className="h-8 w-8 text-red-400 hover:text-red-600 shrink-0"
-                  onClick={() => setDeleteTarget(key)}
-                  aria-label={`删除 SSH 公钥 ${key.name}`}
-                >
-                  <Trash2 className="h-3.5 w-3.5" />
-                </Button>
-              </div>
-            ))}
-          </div>
-        )}
-      </div>
-
-      <div className="rounded-lg border border-border bg-background p-3 space-y-3">
-        <div className="flex items-center gap-2">
-          <Plus className="h-4 w-4 text-muted-foreground" />
-          <h3 className="text-sm font-medium text-foreground">添加公钥</h3>
-        </div>
+    <Dialog open onOpenChange={onOpenChange}>
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>添加公钥</DialogTitle>
+        </DialogHeader>
         <div className="space-y-3">
           <FormField id="ssh-key-text" label="公钥内容" error={errors.keyText}>
             <Textarea
@@ -307,33 +383,14 @@ function SshKeysPanel({ userId }: { userId: string }) {
             />
           </FormField>
         </div>
-        <div className="flex justify-end">
-          <Button
-            onClick={() => { if (validate()) addKey.mutate(); }}
-            disabled={addKey.isPending || keysQuery.isError}
-          >
-            <Plus className="h-4 w-4" />
-            {addKey.isPending ? '添加中...' : '添加公钥'}
+        <DialogFooter>
+          <Button variant="outline" onClick={() => onOpenChange(false)}>取消</Button>
+          <Button onClick={() => { if (validate()) addKey.mutate(); }} disabled={addKey.isPending}>
+            {addKey.isPending ? '添加中...' : '添加'}
           </Button>
-        </div>
-      </div>
-
-      <ConfirmDialog
-        open={Boolean(deleteTarget)}
-        title="删除 SSH 公钥？"
-        description={
-          <>
-            将删除公钥「<span className="font-semibold text-foreground">{deleteTarget?.name}</span>」。
-            SSH 代理与容器会在同步后不再接受这把公钥。
-          </>
-        }
-        confirmLabel="删除"
-        pendingLabel="删除"
-        pending={deleteKey.isPending}
-        onConfirm={() => { if (deleteTarget) deleteKey.mutate(deleteTarget.id); }}
-        onOpenChange={(open) => { if (!open) setDeleteTarget(null); }}
-      />
-    </section>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   );
 }
 

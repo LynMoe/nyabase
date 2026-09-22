@@ -73,7 +73,6 @@ export interface ContainerSshRouteTable {
   instance_status: string;
   instance_started_at: ContainerTimestamp | null;
   ssh_status: 'disabled' | 'container_stopped' | 'running' | 'error' | 'unknown';
-  container_host_key_fingerprint: string | null;
   last_error: string | null;
   observed_at: ContainerTimestamp;
 }

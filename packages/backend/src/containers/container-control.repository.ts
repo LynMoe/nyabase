@@ -35,7 +35,6 @@ export interface ContainerSshRouteRecord {
   routedIp: string;
   runtimeStatus: string;
   sshStatus: 'disabled' | 'container_stopped' | 'running' | 'error' | 'unknown';
-  containerHostKeyFingerprint: string | null;
   lastError: string | null;
   observedAt: Date;
 }
@@ -140,7 +139,6 @@ export class ContainerControlRepository {
             instance_status: 'unknown',
             instance_started_at: null,
             ssh_status: 'unknown',
-            container_host_key_fingerprint: null,
             last_error: null,
             observed_at: new Date(),
           })
@@ -303,7 +301,6 @@ export class ContainerControlRepository {
         routed_ip: route.routedIp,
         instance_status: route.runtimeStatus,
         ssh_status: route.sshStatus,
-        container_host_key_fingerprint: route.containerHostKeyFingerprint,
         last_error: route.lastError,
         observed_at: route.observedAt,
       })))
@@ -360,7 +357,6 @@ export class ContainerControlRepository {
     routed_ip: string;
     instance_status: string;
     ssh_status: 'disabled' | 'container_stopped' | 'running' | 'error' | 'unknown';
-    container_host_key_fingerprint: string | null;
     last_error: string | null;
     observed_at: Date;
   }): ContainerSshRouteRecord {
@@ -371,7 +367,6 @@ export class ContainerControlRepository {
       routedIp: row.routed_ip,
       runtimeStatus: row.instance_status,
       sshStatus: row.ssh_status,
-      containerHostKeyFingerprint: row.container_host_key_fingerprint,
       lastError: row.last_error,
       observedAt: row.observed_at,
     };

@@ -27,6 +27,7 @@ describe('guest network adapter', () => {
     expect(script).toContain("Address=$ADDR");
     expect(script).toContain('nameserver 1.1.1.1');
     expect(script).toContain('nameserver 8.8.8.8');
+    expect(script).toContain('rm -f /etc/resolv.conf');
   });
 
   it('rejects malformed addresses', () => {

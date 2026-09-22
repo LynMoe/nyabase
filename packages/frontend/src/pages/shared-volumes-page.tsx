@@ -1,7 +1,8 @@
 import { useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { Link } from '@tanstack/react-router';
 import { Plus, RefreshCw } from 'lucide-react';
-import type { EffectiveAccessDto, SharedBackendDto, SharedVolumeDto } from '@nyabase/common';
+import type { SharedVolumeDto } from '@nyabase/common';
 import { api } from '../lib/api.js';
 import { errorMessage } from '../lib/api-error.js';
 import { Button } from '../components/ui/button.js';
@@ -10,11 +11,12 @@ import { EmptyState } from '../components/layout/empty-state.js';
 import { Page } from '../components/layout/page.js';
 import { PageHeader } from '../components/layout/page-header.js';
 import { QueryView } from '../components/layout/query-view.js';
-import { MetaChip, SectionCard } from '../components/layout/section-card.js';
+import { SectionCard } from '../components/layout/section-card.js';
 import { SharedVolumeFormDialog } from '../components/storage/shared-volume-form-dialog.js';
 import { SharedVolumeTable } from '../components/storage/shared-volume-table.js';
-import { formatGrantBytes, formatRemainingBytes } from '../lib/grant-quota.js';
+import { volumeInProgress } from '../lib/in-progress.js';
 import { queryKeys } from '../lib/query-keys.js';
+import { refetchWhileInProgress } from '../lib/query-lifecycle.js';
 import { toast } from '../hooks/use-toast.js';
 
 export default function SharedVolumesPage() {
@@ -25,15 +27,10 @@ export default function SharedVolumesPage() {
   const volumesQuery = useQuery({
     queryKey: queryKeys.sharedVolumes.user,
     queryFn: () => api.get<SharedVolumeDto[]>('/shared-volumes'),
-  });
-  const accessQuery = useQuery({
-    queryKey: queryKeys.meAccess,
-    queryFn: () => api.get<EffectiveAccessDto>('/me/access'),
-  });
-  const backendsQuery = useQuery({
-    queryKey: queryKeys.sharedBackends.user,
-    queryFn: () => api.get<SharedBackendDto[]>('/shared-backends'),
-    enabled: (accessQuery.data?.sharedBackends.length ?? 0) > 0,
+    refetchInterval: (query) => refetchWhileInProgress(query.state, {
+      steadyIntervalMs: false,
+      isSettled: (volumes) => volumes.every((volume) => !volumeInProgress(volume)),
+    }),
   });
   const deleteVolume = useMutation({
     mutationFn: (volumeId: string) => api.delete<unknown>(`/shared-volumes/${volumeId}`),
@@ -51,11 +48,13 @@ export default function SharedVolumesPage() {
     <Page testId="shared-volumes">
       <PageHeader
         title="共享卷"
-        description="绑定共享存储后端的配额预订。创建时不会立刻在机器上建目录。"
         actions={
           <>
             <Button variant="outline" size="icon" onClick={() => { void volumesQuery.refetch(); }} aria-label="刷新共享卷">
               <RefreshCw className="h-4 w-4" />
+            </Button>
+            <Button variant="outline" asChild>
+              <Link to="/quota">配额</Link>
             </Button>
             <Button onClick={() => setCreateOpen(true)}><Plus className="h-4 w-4" />新建共享卷</Button>
           </>
@@ -68,21 +67,13 @@ export default function SharedVolumesPage() {
         showEmpty={volumesQuery.data?.length === 0}
         empty={
           <EmptyState
-            title="暂无共享卷。创建后即可挂载到能看见该后端的容器。"
+            title="暂无共享卷。"
             action={<Button onClick={() => setCreateOpen(true)}><Plus className="h-4 w-4" />新建共享卷</Button>}
           />
         }
       >
         {(volumes) => (
-          <SectionCard
-            flush
-            toolbar={(accessQuery.data?.sharedBackends.length ?? 0) > 0 ? (
-              <SharedBackendRemainingRow
-                access={accessQuery.data?.sharedBackends ?? []}
-                backends={backendsQuery.data ?? []}
-              />
-            ) : undefined}
-          >
+          <SectionCard flush>
             <SharedVolumeTable
               volumes={volumes}
               plane="user"
@@ -117,32 +108,5 @@ export default function SharedVolumesPage() {
         onOpenChange={(open) => { if (!open) setDeleteTarget(null); }}
       />
     </Page>
-  );
-}
-
-function SharedBackendRemainingRow({
-  access,
-  backends,
-}: {
-  access: EffectiveAccessDto['sharedBackends'];
-  backends: SharedBackendDto[];
-}) {
-  if (access.length === 0) return null;
-  return (
-    <div className="flex flex-wrap gap-2">
-      {access.map((item) => {
-        const backend = backends.find((row) => row.id === item.sharedBackendId);
-        const name = backend?.displayName ?? backend?.name ?? item.sharedBackendId;
-        const unlimited = item.limitBytes === null || item.limitBytes === 0;
-        return (
-          <MetaChip key={item.sharedBackendId}>
-            {name}
-            {unlimited
-              ? ' · 额度不限'
-              : ` · 剩余 ${formatRemainingBytes(item.limitBytes, item.usedBytes)} / 额度 ${formatGrantBytes(item.limitBytes)}`}
-          </MetaChip>
-        );
-      })}
-    </div>
   );
 }

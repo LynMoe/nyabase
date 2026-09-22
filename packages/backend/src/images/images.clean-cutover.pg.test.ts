@@ -13,7 +13,6 @@ describePg('clean Incus image assignment contract', () => {
       const imageId = randomUUID();
       await database.insertInto('infra.images').values({
         id: imageId,
-        name: 'Admin filled root',
         alias: 'admin-min-root',
         fingerprint: null,
         description: null,
@@ -62,7 +61,6 @@ describePg('clean Incus image assignment contract', () => {
       const serverId = randomUUID();
       await database.insertInto('infra.images').values({
         id: imageId,
-        name: 'Ubuntu',
         alias: 'ubuntu',
         fingerprint: 'a'.repeat(64),
         description: null,
@@ -183,7 +181,6 @@ describePg('clean Incus image assignment contract', () => {
       const serverId = randomUUID();
       await database.insertInto('infra.images').values({
         id: imageId,
-        name: 'Concurrent image',
         alias: 'concurrent-image',
         fingerprint: 'b'.repeat(64),
         description: null,

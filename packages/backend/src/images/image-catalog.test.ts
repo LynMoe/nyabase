@@ -1,7 +1,6 @@
 import { BadGatewayException, NotFoundException } from '@nestjs/common';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
-  displayNameForCatalog,
   ImageCatalogService,
   parseSimplestreamsProducts,
   pickSimplestreamsVersion,
@@ -45,7 +44,6 @@ describe('parseSimplestreamsProducts', () => {
         sizeBytes: 140283904,
       }),
     ]);
-    expect(displayNameForCatalog(entries[0]!)).toBe('Ubuntu 24.04');
   });
 
   it('skips products without a squashfs fingerprint', () => {

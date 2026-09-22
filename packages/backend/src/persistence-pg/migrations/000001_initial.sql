@@ -627,7 +627,6 @@ CREATE TABLE control.container_ssh_routes (
     instance_status text NOT NULL,
     instance_started_at timestamp with time zone,
     ssh_status text NOT NULL,
-    container_host_key_fingerprint text,
     last_error text,
     observed_at timestamp with time zone NOT NULL,
     CONSTRAINT container_ssh_routes_instance_name_check

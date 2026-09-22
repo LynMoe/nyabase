@@ -36,7 +36,15 @@ export interface FrontendExtensionHost {
     Button: ComponentType<{
       onClick?: () => void;
       disabled?: boolean;
+      title?: string;
       children?: ReactNode;
+    }>;
+    TechnicalId: ComponentType<{
+      label: string;
+      value: string;
+      kind?: 'opaque' | 'fingerprint';
+      alias?: string | null;
+      visible?: string;
     }>;
     Card: ComponentType<{ className?: string; children?: ReactNode }>;
     CardHeader: ComponentType<{ children?: ReactNode }>;
@@ -63,6 +71,7 @@ export interface SlotContextMap {
     enabledExtensions: string[];
     admin: boolean;
     observedStatus: string;
+    grant: OpaqueExtensionMap | null;
     value: OpaqueExtensionMap;
     onChange: (next: OpaqueExtensionMap) => void;
     onSubmit: (extensionId: string, payload: unknown) => void;
@@ -71,6 +80,7 @@ export interface SlotContextMap {
   'container.overview': {
     value: OpaqueExtensionMap;
     serverId: string;
+    admin: boolean;
   };
   'grant.server': {
     serverId: string;

@@ -11,7 +11,6 @@ import {
 } from '@nyabase/common';
 import { Activity } from 'lucide-react';
 import { api } from '../lib/api.js';
-import { Badge } from '../components/ui/badge.js';
 import { Button } from '../components/ui/button.js';
 import {
   Select,
@@ -38,9 +37,11 @@ import { Page } from '../components/layout/page.js';
 import { PageHeader } from '../components/layout/page-header.js';
 import { QueryView } from '../components/layout/query-view.js';
 import { SectionCard } from '../components/layout/section-card.js';
+import { StatusBadge } from '../components/layout/status-badge.js';
 import { useAuthStore } from '../store/auth.js';
+import { intentPending } from '../lib/in-progress.js';
 import { queryKeys } from '../lib/query-keys.js';
-import { queryPollInterval } from '../lib/query-lifecycle.js';
+import { refetchWhileInProgress } from '../lib/query-lifecycle.js';
 import {
   failureCodeLabel,
   intentKindLabel,
@@ -113,12 +114,15 @@ export default function OpsPage() {
     })),
     initialPageParam: undefined as string | undefined,
     getNextPageParam: (lastPage) => lastPage.nextCursor ?? undefined,
-    refetchInterval: (query) => queryPollInterval(query.state, { activeIntervalMs: 15_000 }),
+    refetchInterval: (query) => refetchWhileInProgress(query.state, {
+      steadyIntervalMs: 15_000,
+      isSettled: (data) => data.pages.every((page) => page.items.every((item) => !intentPending(item.status))),
+    }),
   });
 
   return (
     <Page testId="ops-page">
-      <PageHeader title="运维" description="意图列表默认加载全部，可按状态筛选。" />
+      <PageHeader title="运维" />
 
       <SectionCard
         title="意图"
@@ -223,9 +227,12 @@ export default function OpsPage() {
                         <TableCell>{new Date(intent.createdAt).toLocaleString()}</TableCell>
                         <TableCell>{intentKindLabel(intent.kind)}</TableCell>
                         <TableCell>
-                          <Badge title={intent.status} variant={statusBadgeVariant(intent.status)}>
-                            {intentStatusLabel(intent.status)}
-                          </Badge>
+                          <StatusBadge
+                            label={intentStatusLabel(intent.status)}
+                            raw={intent.status}
+                            pending={intentPending(intent.status)}
+                            variant={statusBadgeVariant(intent.status)}
+                          />
                         </TableCell>
                         <TableCell>{intentResourceTypeLabel(intent.resourceType)}</TableCell>
                         <TableCell title={intent.resourceId}>

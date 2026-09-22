@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { truncateId } from './truncate-id.js';
+import { shortFingerprint, truncateId } from './truncate-id.js';
 
 describe('truncateId', () => {
   it('keeps the first 8 characters of a UUID', () => {
@@ -14,5 +14,15 @@ describe('truncateId', () => {
 
   it('accepts a custom length', () => {
     expect(truncateId('abcdefghij', 4)).toBe('abcd');
+  });
+});
+
+describe('shortFingerprint', () => {
+  it('keeps the first 6 hex characters, lowercased', () => {
+    expect(shortFingerprint('AB'.repeat(32))).toBe('ababab');
+  });
+
+  it('strips a sha256 prefix before slicing', () => {
+    expect(shortFingerprint(`sha256:${'CD'.repeat(32)}`)).toBe('cdcdcd');
   });
 });

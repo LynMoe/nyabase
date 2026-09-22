@@ -32,6 +32,7 @@ import { SectionCard } from '../components/layout/section-card.js';
 import { PageHeader } from '../components/layout/page-header.js';
 import { QueryView } from '../components/layout/query-view.js';
 import { EmptyState } from '../components/layout/empty-state.js';
+import { TechnicalId } from '../components/refs/technical-id.js';
 import { cn } from '../lib/utils.js';
 import { queryPollInterval } from '../lib/query-lifecycle.js';
 import { queryKeys } from '../lib/query-keys.js';
@@ -159,6 +160,7 @@ export default function AuditPage() {
                       <ResourceSummary
                         primary={actorLabel(log)}
                         secondary={log.actorId}
+                        secondaryLabel="操作者 ID"
                       />
                     </TableCell>
                     <TableCell>
@@ -173,6 +175,7 @@ export default function AuditPage() {
                       <ResourceSummary
                         primary={targetLabel(log)}
                         secondary={targetSecondary(log)}
+                        secondaryLabel="目标"
                       />
                     </TableCell>
                     <TableCell className="text-right">
@@ -276,7 +279,7 @@ function AuditDetailDialog({
                     {(log.related ?? []).map((snapshot, index) => (
                       <Badge key={`${snapshot.type}:${snapshot.id}:${index}`} variant="outline" className="max-w-full gap-1 rounded-md">
                         <span>{resourceTypeLabel(snapshot.type)}</span>
-                        <span className="min-w-0 truncate font-normal text-muted-foreground">{snapshot.name ?? snapshot.id ?? '-'}</span>
+                        <span className="min-w-0 break-all font-normal text-muted-foreground">{snapshot.name ?? snapshot.id ?? '-'}</span>
                       </Badge>
                     ))}
                   </div>
@@ -310,16 +313,20 @@ function AuditDetailDialog({
 function ResourceSummary({
   primary,
   secondary,
+  secondaryLabel,
 }: {
   primary: string;
   secondary: string | null;
+  secondaryLabel: string;
 }) {
   return (
     <div className="min-w-0">
       <div className="truncate text-sm text-foreground">{primary}</div>
-      {secondary && (
-        <div className="mt-0.5 truncate font-mono text-xs text-muted-foreground">{secondary}</div>
-      )}
+      {secondary ? (
+        <div className="mt-0.5">
+          <TechnicalId label={secondaryLabel} value={secondary} kind="opaque" />
+        </div>
+      ) : null}
     </div>
   );
 }
@@ -349,7 +356,7 @@ function SnapshotPanel({
         <span className="text-xs font-medium text-muted-foreground">{title}</span>
         <Badge variant="outline" className="rounded-md">{resourceTypeLabel(value.type)}</Badge>
       </div>
-      <div className="truncate text-sm font-medium text-foreground" title={value.id ?? undefined}>
+      <div className="break-all text-sm font-medium text-foreground" title={value.id ?? undefined}>
         {value.name ?? value.id ?? '-'}
       </div>
       {snapshot?.labels && Object.keys(snapshot.labels).length > 0 && (

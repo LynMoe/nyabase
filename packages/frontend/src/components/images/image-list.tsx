@@ -1,7 +1,6 @@
 import { Link } from '@tanstack/react-router';
 import { RefreshCw, Trash2 } from 'lucide-react';
 import type { AdminImageDto } from '@nyabase/common';
-import { Badge } from '../ui/badge.js';
 import { Button } from '../ui/button.js';
 import {
   Table,
@@ -12,6 +11,9 @@ import {
   TableRow,
 } from '../ui/table.js';
 import { SectionCard } from '../layout/section-card.js';
+import { StatusBadge } from '../layout/status-badge.js';
+import { TechnicalId } from '../refs/technical-id.js';
+import { imageInProgress } from '../../lib/in-progress.js';
 
 export function ImageList({
   images,
@@ -29,7 +31,7 @@ export function ImageList({
       <Table className="min-w-[720px]">
         <TableHeader>
           <TableRow>
-            <TableHead>名称</TableHead>
+            <TableHead>别名</TableHead>
             <TableHead>状态</TableHead>
             <TableHead>指纹</TableHead>
             <TableHead>分配</TableHead>
@@ -40,23 +42,40 @@ export function ImageList({
           {images.map((image) => (
             <TableRow key={image.id}>
               <TableCell className="whitespace-normal">
-                <Link
-                  to="/images/$id"
-                  params={{ id: image.id }}
-                  search={{ tab: 'overview' }}
-                  className="block min-w-0"
-                >
-                  <p className="font-medium">{image.name}</p>
-                  <p className="mt-0.5 font-mono text-xs text-muted-foreground">{image.alias}</p>
-                </Link>
+                {image.alias.length > 64 ? (
+                  <div className="flex min-w-0 flex-col items-start gap-1">
+                    <TechnicalId label="别名" value={image.alias} kind="opaque" />
+                    <Link
+                      to="/images/$id"
+                      params={{ id: image.id }}
+                      search={{ tab: 'overview' }}
+                      className="text-xs text-muted-foreground hover:underline"
+                    >
+                      打开
+                    </Link>
+                  </div>
+                ) : (
+                  <Link
+                    to="/images/$id"
+                    params={{ id: image.id }}
+                    search={{ tab: 'overview' }}
+                    className="block min-w-0"
+                  >
+                    <p className="font-mono text-sm">{image.alias}</p>
+                  </Link>
+                )}
               </TableCell>
               <TableCell>
-                <Badge variant={image.isActive && !image.deleting ? 'success' : 'secondary'}>
-                  {image.deleting ? '清理中' : image.isActive ? '可用' : '停用'}
-                </Badge>
+                <StatusBadge
+                  label={image.deleting ? '清理中' : image.isActive ? '可用' : '停用'}
+                  pending={imageInProgress(image)}
+                  variant={image.isActive && !image.deleting ? 'success' : 'secondary'}
+                />
               </TableCell>
-              <TableCell className="max-w-[12rem] truncate font-mono" title={image.fingerprint ?? undefined}>
-                {image.fingerprint ?? '尚未收敛'}
+              <TableCell>
+                {image.fingerprint
+                  ? <TechnicalId label="指纹" value={image.fingerprint} kind="fingerprint" />
+                  : <span className="text-sm">尚未收敛</span>}
               </TableCell>
               <TableCell>{image.assignments.length} 台</TableCell>
               <TableCell className="text-right">

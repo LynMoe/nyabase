@@ -16,6 +16,7 @@ import { Page } from '../components/layout/page.js';
 import { PageHeader } from '../components/layout/page-header.js';
 import { QueryView } from '../components/layout/query-view.js';
 import { SectionCard } from '../components/layout/section-card.js';
+import { StatusBadge } from '../components/layout/status-badge.js';
 import {
   Table,
   TableBody,
@@ -25,11 +26,12 @@ import {
   TableRow,
 } from '../components/ui/table.js';
 import { userStatusLabel } from '../lib/display-labels.js';
+import { userDeleting } from '../lib/in-progress.js';
 import { queryKeys } from '../lib/query-keys.js';
 import { toast } from '../hooks/use-toast.js';
 import { useAuthStore } from '../store/auth.js';
 import { copyOneTimeSecret } from '../lib/one-time-secret.js';
-import { isPermanentQueryError } from '../lib/query-lifecycle.js';
+import { isPermanentQueryError, refetchWhileInProgress } from '../lib/query-lifecycle.js';
 
 export default function UsersPage() {
   const currentUserId = useAuthStore((state) => state.user?.id);
@@ -41,6 +43,10 @@ export default function UsersPage() {
     queryKey: queryKeys.users.admin,
     queryFn: () => api.get<UserDto[]>('/admin/users'),
     retry: (count, error) => !isPermanentQueryError(error) && count < 1,
+    refetchInterval: (query) => refetchWhileInProgress(query.state, {
+      steadyIntervalMs: false,
+      isSettled: (users) => users.every((user) => !userDeleting(user.status)),
+    }),
   });
   const remove = useMutation({
     mutationFn: (id: string) => api.delete<unknown>(`/admin/users/${id}`),
@@ -56,9 +62,9 @@ export default function UsersPage() {
       <PageHeader
         title="用户"
         description={
-          usersQuery.data
-            ? `${usersQuery.data.length} 个用户 · 点进详情查看身份与授权`
-            : '点进详情查看身份与授权'
+          usersQuery.data && usersQuery.data.length > 0
+            ? `${usersQuery.data.length} 个用户`
+            : undefined
         }
         actions={
           canManageUsers ? (
@@ -108,9 +114,11 @@ export default function UsersPage() {
                       </Link>
                     </TableCell>
                     <TableCell>
-                      <Badge variant={user.status === 'active' ? 'success' : 'secondary'}>
-                        {userStatusLabel(user.status)}
-                      </Badge>
+                      <StatusBadge
+                        label={userStatusLabel(user.status)}
+                        pending={userDeleting(user.status)}
+                        variant={user.status === 'active' ? 'success' : 'secondary'}
+                      />
                     </TableCell>
                     <TableCell className="whitespace-normal">
                       <div className="flex flex-wrap gap-1">
@@ -232,7 +240,6 @@ function CreateUserDialog({ open, onOpenChange }: { open: boolean; onOpenChange:
           <>
             <DialogHeader>
               <DialogTitle>新建用户</DialogTitle>
-              <DialogDescription>创建后可在用户详情中设置授权。</DialogDescription>
             </DialogHeader>
             <div className="space-y-3">
               {(['username', 'displayName', 'password'] as const).map((key) => {

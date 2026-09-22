@@ -196,6 +196,13 @@ export class IncusContainerSshStateAdapter implements ContainerSshStatePort {
       ) {
         return 'unknown';
       }
+      // Incus marks guest exec 127 as operation Failure "Command not found".
+      // That is sshd absence, not an Incus transport failure.
+      if (error instanceof IncusError && error.code === 'OPERATION_FAILED') {
+        const code = operationReturnCode(error.details);
+        if (code === 127) return 'missing';
+        if (code === 2) return 'unknown';
+      }
       throw error;
     }
     if (result.kind !== 'completed') return 'unknown';

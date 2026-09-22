@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useState, type ReactNode } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { getRouteApi, useNavigate } from '@tanstack/react-router';
 import { Gauge, HardDrive, Pencil, RefreshCw, Server, Trash2 } from 'lucide-react';
@@ -14,7 +14,8 @@ import {
 import { api } from '../lib/api.js';
 import { errorMessage } from '../lib/api-error.js';
 import { Button } from '../components/ui/button.js';
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '../components/ui/card.js';
+import { Card, CardContent, CardHeader, CardTitle } from '../components/ui/card.js';
+import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from '../components/ui/dialog.js';
 import { Input } from '../components/ui/input.js';
 import { ConfirmDialog } from '../components/layout/confirm-dialog.js';
 import { FormField } from '../components/layout/form-field.js';
@@ -34,10 +35,12 @@ import {
 import { FsidConflictAlert } from '../components/storage/fsid-conflict-alert.js';
 import { SharedVolumeCatalogInspectDialog } from '../components/storage/shared-volume-catalog-inspect.js';
 import { SharedVolumeTable } from '../components/storage/shared-volume-table.js';
+import { TechnicalId } from '../components/refs/technical-id.js';
 import { approxGibHint, formatPercent, relativeTime, sharedBackendAvailableBytes } from '../lib/utils.js';
 import { toast } from '../hooks/use-toast.js';
+import { volumeInProgress } from '../lib/in-progress.js';
 import { queryKeys } from '../lib/query-keys.js';
-import { queryPollInterval } from '../lib/query-lifecycle.js';
+import { refetchWhileInProgress } from '../lib/query-lifecycle.js';
 import { failureCodeLabel } from '../lib/status-labels.js';
 import {
   identityConflictFromDiscoverIssue,
@@ -72,7 +75,7 @@ export default function SharedBackendDetailPage() {
   const [deleteOpen, setDeleteOpen] = useState(false);
   const [inspectTarget, setInspectTarget] = useState<SharedVolumeDto | null>(null);
   const [pageConflict, setPageConflict] = useState<SharedBackendFsidConflict | null>(null);
-  const [editingIdentity, setEditingIdentity] = useState(false);
+  const [identityOpen, setIdentityOpen] = useState(false);
   const [displayName, setDisplayName] = useState('');
   const [overcommitRatio, setOvercommitRatio] = useState('');
 
@@ -88,7 +91,10 @@ export default function SharedBackendDetailPage() {
     queryKey: queryKeys.sharedVolumes.admin,
     queryFn: () => api.get<SharedVolumeDto[]>('/admin/shared-volumes'),
     enabled: tab === 'volumes' && canManageSharedVolumes,
-    refetchInterval: (query) => queryPollInterval(query.state, { activeIntervalMs: 5_000 }),
+    refetchInterval: (query) => refetchWhileInProgress(query.state, {
+      steadyIntervalMs: 5_000,
+      isSettled: (volumes) => volumes.every((volume) => !volumeInProgress(volume)),
+    }),
   });
 
   useEffect(() => {
@@ -108,7 +114,7 @@ export default function SharedBackendDetailPage() {
       api.patch<SharedBackendDto>(`/admin/shared-backends/${id}`, body),
     onSuccess: () => {
       toast({ title: '共享后端已更新' });
-      setEditingIdentity(false);
+      setIdentityOpen(false);
       invalidate();
     },
     onError: (error) => {
@@ -212,7 +218,6 @@ export default function SharedBackendDetailPage() {
     <Page testId="shared-backend-detail">
       <PageHeader
         title={title}
-        description={backend ? backend.identityKey : undefined}
         crumbs={[
           { label: '共享存储', to: '/shared-backends' },
           { label: title === '共享存储' ? '…' : title },
@@ -252,75 +257,34 @@ export default function SharedBackendDetailPage() {
                 ))}
               </TabsList>
               <TabsContent value="overview" className="space-y-6">
-                <Card>
-                  <CardHeader className="flex flex-row items-start justify-between space-y-0">
-                    <CardTitle className="text-base">身份</CardTitle>
-                    {canManageSharedBackends && !editingIdentity ? (
-                      <Button
-                        size="sm"
-                        variant="outline"
-                        onClick={() => {
-                          setDisplayName(loaded.displayName ?? '');
-                          setOvercommitRatio(String(loaded.overcommitRatio));
-                          setEditingIdentity(true);
-                        }}
-                      >
-                        <Pencil className="h-3.5 w-3.5" />编辑
-                      </Button>
-                    ) : null}
-                  </CardHeader>
-                  <CardContent className="grid gap-3 text-sm sm:grid-cols-2">
+                <SectionCard
+                  title="身份"
+                  actions={canManageSharedBackends ? (
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      onClick={() => {
+                        setDisplayName(loaded.displayName ?? '');
+                        setOvercommitRatio(String(loaded.overcommitRatio));
+                        setIdentityOpen(true);
+                      }}
+                    >
+                      <Pencil className="h-3.5 w-3.5" />编辑
+                    </Button>
+                  ) : undefined}
+                >
+                  <div className="grid gap-3 text-sm sm:grid-cols-2">
                     <IdentityRow label="名称" value={loaded.name} />
-                    {editingIdentity ? (
-                      <FormField id="shared-backend-display-name" label="显示名称">
-                        <Input
-                          id="shared-backend-display-name"
-                          value={displayName}
-                          placeholder={loaded.name}
-                          onChange={(event) => setDisplayName(event.target.value)}
-                        />
-                      </FormField>
-                    ) : (
-                      <IdentityRow label="显示名称" value={loaded.displayName ?? '—'} />
-                    )}
-                    <IdentityRow label="identity key" value={loaded.identityKey} mono />
-                    <IdentityRow label="Ceph FSID" value={loaded.cephFsid} mono />
-                    {editingIdentity ? (
-                      <FormField id="shared-backend-overcommit" label="超分比例">
-                        <Input
-                          id="shared-backend-overcommit"
-                          value={overcommitRatio}
-                          onChange={(event) => setOvercommitRatio(event.target.value)}
-                        />
-                      </FormField>
-                    ) : (
-                      <IdentityRow label="超分比例" value={formatPercent(loaded.overcommitRatio)} />
-                    )}
+                    <IdentityRow label="显示名称" value={loaded.displayName ?? '—'} />
+                    <IdentityRow label="identity key" value={<TechnicalId label="identity key" value={loaded.identityKey} />} />
+                    <IdentityRow label="Ceph FSID" value={<TechnicalId label="Ceph FSID" value={loaded.cephFsid} />} />
+                    <IdentityRow label="超分比例" value={formatPercent(loaded.overcommitRatio)} />
                     <IdentityRow label="最近更新" value={relativeTime(loaded.updatedAt)} />
-                    {editingIdentity ? (
-                      <div className="flex flex-wrap gap-2 sm:col-span-2">
-                        <Button onClick={saveOverview} disabled={patchBackend.isPending}>
-                          {patchBackend.isPending ? '保存中...' : '保存'}
-                        </Button>
-                        <Button
-                          variant="outline"
-                          onClick={() => {
-                            setDisplayName(loaded.displayName ?? '');
-                            setOvercommitRatio(String(loaded.overcommitRatio));
-                            setEditingIdentity(false);
-                          }}
-                          disabled={patchBackend.isPending}
-                        >
-                          取消
-                        </Button>
-                      </div>
-                    ) : null}
-                  </CardContent>
-                </Card>
+                  </div>
+                </SectionCard>
                 <Card>
                   <CardHeader>
                     <CardTitle className="text-base">容量</CardTitle>
-                    <CardDescription>总量与已用来自执行端观测；可用按超分计算。</CardDescription>
                   </CardHeader>
                   <CardContent className="grid gap-3 text-sm sm:grid-cols-2 lg:grid-cols-3">
                     <IdentityRow label="容量" value={bytesLabel(loaded.totalBytes)} />
@@ -334,7 +298,6 @@ export default function SharedBackendDetailPage() {
               <TabsContent value="executors" className="space-y-6">
                 <SectionCard
                   title="执行端"
-                  description="点「发现执行端」刷新各机 mapping。FSID 冲突在本页以红色告警展示。"
                   actions={
                     canManageSharedBackends ? (
                       <Button
@@ -421,6 +384,36 @@ export default function SharedBackendDetailPage() {
           );
         }}
       </QueryView>
+      {identityOpen ? (
+        <Dialog open onOpenChange={(open) => { if (!open) setIdentityOpen(false); }}>
+          <DialogContent>
+            <DialogHeader>
+              <DialogTitle>编辑共享后端</DialogTitle>
+            </DialogHeader>
+            <FormField id="shared-backend-display-name" label="显示名称">
+              <Input
+                id="shared-backend-display-name"
+                value={displayName}
+                placeholder={backend?.name}
+                onChange={(event) => setDisplayName(event.target.value)}
+              />
+            </FormField>
+            <FormField id="shared-backend-overcommit" label="超分比例">
+              <Input
+                id="shared-backend-overcommit"
+                value={overcommitRatio}
+                onChange={(event) => setOvercommitRatio(event.target.value)}
+              />
+            </FormField>
+            <DialogFooter>
+              <Button variant="outline" onClick={() => setIdentityOpen(false)} disabled={patchBackend.isPending}>取消</Button>
+              <Button onClick={saveOverview} disabled={patchBackend.isPending}>
+                {patchBackend.isPending ? '保存中...' : '保存'}
+              </Button>
+            </DialogFooter>
+          </DialogContent>
+        </Dialog>
+      ) : null}
       <SharedVolumeCatalogInspectDialog
         volume={inspectTarget}
         open={Boolean(inspectTarget)}
@@ -461,11 +454,11 @@ export default function SharedBackendDetailPage() {
   );
 }
 
-function IdentityRow({ label, value, mono = false }: { label: string; value: string; mono?: boolean }) {
+function IdentityRow({ label, value }: { label: string; value: ReactNode }) {
   return (
     <div>
       <p className="text-xs text-muted-foreground">{label}</p>
-      <p className={mono ? 'break-all font-mono text-xs' : 'break-all'}>{value}</p>
+      {typeof value === 'string' ? <p className="break-all">{value}</p> : value}
     </div>
   );
 }

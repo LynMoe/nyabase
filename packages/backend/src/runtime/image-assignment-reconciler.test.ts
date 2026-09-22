@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
+import { IncusError } from '../incus/incus-errors.js';
 import {
   canDeleteManagedImage,
   ImageAssignmentReconciler,
@@ -73,6 +74,7 @@ describe('image assignment reconciliation policy', () => {
       innerJoin: vi.fn().mockReturnThis(),
       select: vi.fn().mockReturnThis(),
       where: vi.fn().mockReturnThis(),
+      execute: vi.fn().mockResolvedValue([]),
       executeTakeFirst: selectTakeFirst,
     };
     const updateQuery = {
@@ -112,7 +114,231 @@ describe('image assignment reconciliation policy', () => {
     });
 
     expect(createImage).not.toHaveBeenCalled();
-    expect(client.listImages).toHaveBeenCalledTimes(2);
+    expect(client.listImages).toHaveBeenCalledTimes(4);
+  });
+
+  it('cuts over A to B then does not delete B on a second ensure', async () => {
+    const fingerprintA = 'a'.repeat(64);
+    const fingerprintB = 'b'.repeat(64);
+    const imageA = { fingerprint: fingerprintA, aliases: [{ name: 'ubuntu/24.04' }], used_by: [] };
+    const imageB = { fingerprint: fingerprintB, aliases: [], used_by: [] };
+    const assignment = {
+      id: 'assignment-1',
+      image_id: 'image-1',
+      server_id: 'server-1',
+      generation: 2,
+      observed_fingerprint: fingerprintA,
+      managed_fingerprint: fingerprintA,
+      lifecycle_phase: 'active',
+      alias: 'ubuntu/24.04',
+      desired_fingerprint: fingerprintB,
+      cleanup_generation: 0,
+    };
+    const selectQuery = {
+      innerJoin: vi.fn().mockReturnThis(),
+      select: vi.fn().mockReturnThis(),
+      where: vi.fn().mockReturnThis(),
+      execute: vi.fn().mockResolvedValue([]),
+      executeTakeFirst: vi.fn().mockResolvedValue(assignment),
+    };
+    const updateQuery = {
+      set: vi.fn().mockReturnThis(),
+      where: vi.fn().mockReturnThis(),
+      execute: vi.fn().mockResolvedValue([]),
+    };
+    const database = {
+      selectFrom: vi.fn(() => selectQuery),
+      updateTable: vi.fn(() => updateQuery),
+    };
+    const client = {
+      listImages: vi.fn()
+        .mockResolvedValueOnce({ metadata: [imageA] })
+        .mockResolvedValueOnce({ metadata: [imageA, imageB] })
+        .mockResolvedValueOnce({ metadata: [imageB] }),
+      createImage: vi.fn().mockResolvedValue({
+        status: 202,
+        envelope: { type: 'async', operation: '/1.0/operations/op-1' },
+        metadata: undefined,
+      }),
+      getOperationWait: vi.fn().mockResolvedValue({
+        status: 200,
+        envelope: { type: 'sync' },
+        metadata: { status: 'Success', status_code: 200 },
+      }),
+      deleteImageAlias: vi.fn().mockResolvedValue({ status: 200, metadata: {} }),
+      createImageAlias: vi.fn().mockResolvedValue({ status: 200, metadata: {} }),
+      getImage: vi.fn(),
+      deleteImage: vi.fn().mockResolvedValue({
+        status: 202,
+        envelope: { type: 'async', operation: '/1.0/operations/op-2' },
+        metadata: undefined,
+      }),
+    };
+    let previousGets = 0;
+    client.getImage.mockImplementation(async (fingerprint: string) => {
+      if (fingerprint === fingerprintA) {
+        previousGets += 1;
+        if (previousGets === 1) return { metadata: imageA };
+        throw new IncusError('INCUS_NOT_FOUND', 'retry', { reason: 'missing' });
+      }
+      return { metadata: imageB };
+    });
+    const reconciler = new ImageAssignmentReconciler(database as never);
+    const context = {
+      intent: {
+        resourceType: 'image_assignment',
+        resourceId: 'assignment-1',
+        serverId: 'server-1',
+      },
+      client,
+      claim: {},
+      lease: {},
+      signal: new AbortController().signal,
+    };
+    await expect(reconciler.reconcile(context as never)).resolves.toEqual({
+      outcome: 'succeeded',
+      observedGeneration: 2,
+    });
+    expect(client.createImage).toHaveBeenCalledWith(
+      expect.objectContaining({ aliases: [] }),
+      expect.anything(),
+    );
+    expect(client.deleteImage).toHaveBeenCalledWith(fingerprintA, expect.anything());
+    expect(client.createImageAlias).toHaveBeenCalledWith(
+      expect.objectContaining({ name: 'ubuntu/24.04', target: fingerprintB }),
+    );
+
+    assignment.managed_fingerprint = fingerprintB;
+    assignment.observed_fingerprint = fingerprintB;
+    assignment.desired_fingerprint = fingerprintB;
+    client.listImages.mockResolvedValue({ metadata: [{ ...imageB, aliases: [{ name: 'ubuntu/24.04' }] }] });
+    client.deleteImage.mockClear();
+    await expect(reconciler.reconcile(context as never)).resolves.toEqual({
+      outcome: 'succeeded',
+      observedGeneration: 2,
+    });
+    expect(client.deleteImage).not.toHaveBeenCalled();
+  });
+
+  it('fails IMAGE_IN_USE when a container is still pinned to the previous fingerprint', async () => {
+    const fingerprintA = 'a'.repeat(64);
+    const fingerprintB = 'b'.repeat(64);
+    const assignment = {
+      id: 'assignment-1',
+      image_id: 'image-1',
+      server_id: 'server-1',
+      generation: 2,
+      observed_fingerprint: fingerprintA,
+      managed_fingerprint: fingerprintA,
+      lifecycle_phase: 'active',
+      alias: 'ubuntu/24.04',
+      desired_fingerprint: fingerprintB,
+      cleanup_generation: 0,
+    };
+    let fromTable = '';
+    const selectQuery = {
+      innerJoin: vi.fn().mockReturnThis(),
+      select: vi.fn().mockReturnThis(),
+      where: vi.fn().mockReturnThis(),
+      execute: vi.fn(async () => (
+        fromTable === 'control.containers'
+          ? [{ image_fingerprint: fingerprintA }]
+          : []
+      )),
+      executeTakeFirst: vi.fn(async () => (
+        fromTable === 'control.containers' ? undefined : assignment
+      )),
+    };
+    const database = {
+      selectFrom: vi.fn((table: string) => {
+        fromTable = table;
+        return selectQuery;
+      }),
+      updateTable: vi.fn(),
+    };
+    const client = {
+      listImages: vi.fn().mockResolvedValue({ metadata: [] }),
+    };
+    const reconciler = new ImageAssignmentReconciler(database as never);
+    const outcome = await reconciler.reconcile({
+      intent: {
+        resourceType: 'image_assignment',
+        resourceId: 'assignment-1',
+        serverId: 'server-1',
+      },
+      client,
+      claim: {},
+      lease: {},
+      signal: new AbortController().signal,
+    } as never);
+    expect(outcome.outcome).toBe('failed');
+    expect(outcome).toMatchObject({
+      failure: { code: 'IMAGE_IN_USE' },
+    });
+  });
+
+  it('does not treat another image fingerprint on the same server as leftover', async () => {
+    const fingerprintA = 'a'.repeat(64);
+    const fingerprintB = 'b'.repeat(64);
+    const fingerprintC = 'c'.repeat(64);
+    const imageB = { fingerprint: fingerprintB, aliases: [{ name: 'ubuntu/24.04' }], used_by: [] };
+    const assignment = {
+      id: 'assignment-1',
+      image_id: 'image-1',
+      server_id: 'server-1',
+      generation: 2,
+      observed_fingerprint: fingerprintB,
+      managed_fingerprint: fingerprintB,
+      lifecycle_phase: 'active',
+      alias: 'ubuntu/24.04',
+      desired_fingerprint: fingerprintB,
+      cleanup_generation: 0,
+    };
+    const whereClauses: unknown[][] = [];
+    const selectQuery = {
+      innerJoin: vi.fn().mockReturnThis(),
+      select: vi.fn().mockReturnThis(),
+      where: vi.fn((...args: unknown[]) => {
+        whereClauses.push(args);
+        return selectQuery;
+      }),
+      execute: vi.fn().mockResolvedValue([]),
+      executeTakeFirst: vi.fn().mockResolvedValue(assignment),
+    };
+    const updateQuery = {
+      set: vi.fn().mockReturnThis(),
+      where: vi.fn().mockReturnThis(),
+      execute: vi.fn().mockResolvedValue([]),
+    };
+    const database = {
+      selectFrom: vi.fn(() => selectQuery),
+      updateTable: vi.fn(() => updateQuery),
+    };
+    const client = {
+      listImages: vi.fn().mockResolvedValue({ metadata: [imageB] }),
+      createImage: vi.fn(),
+      deleteImage: vi.fn(),
+      deleteImageAlias: vi.fn(),
+      createImageAlias: vi.fn(),
+    };
+    const reconciler = new ImageAssignmentReconciler(database as never);
+    await expect(reconciler.reconcile({
+      intent: {
+        resourceType: 'image_assignment',
+        resourceId: 'assignment-1',
+        serverId: 'server-1',
+      },
+      client,
+      claim: {},
+      lease: {},
+      signal: new AbortController().signal,
+    } as never)).resolves.toEqual({
+      outcome: 'succeeded',
+      observedGeneration: 2,
+    });
+    expect(whereClauses).toContainEqual(['image_id', '=', 'image-1']);
+    expect(client.deleteImage).not.toHaveBeenCalled();
+    expect(client.createImage).not.toHaveBeenCalled();
   });
 
   it('uses the observed image fingerprint as the full-scan idempotency key', async () => {

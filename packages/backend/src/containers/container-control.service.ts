@@ -113,7 +113,6 @@ export function checkRootResize(
 
 interface ImageRow {
   id: string;
-  name: string;
   alias: string;
   fingerprint: string | null;
   login_user: string;
@@ -1400,7 +1399,7 @@ export class ContainerControlService {
         name: row.name,
         instanceName: route?.instanceName ?? row.instance_name,
         imageId: row.image_id,
-        imageName: image?.name,
+        imageName: image?.alias,
         imageFingerprint: row.image_fingerprint,
         rootPoolId: row.root_pool_id,
         rootPoolName: pool ? poolLabel(pool.display_name, pool.incus_name) : row.root_pool_id,
@@ -1435,7 +1434,6 @@ export class ContainerControlService {
           loginUser: image?.login_user ?? 'root',
           proxyHost,
           proxyPort,
-          hostKeyFingerprint: route?.containerHostKeyFingerprint ?? null,
           observedAt: date(route?.observedAt),
           lastError: route?.lastError ?? null,
         },

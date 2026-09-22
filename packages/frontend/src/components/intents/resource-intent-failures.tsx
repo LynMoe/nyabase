@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { useMutation, useQuery } from '@tanstack/react-query';
-import { type CursorPaginatedResponse, type IntentDto } from '@nyabase/common';
+import { IntentStatus, type CursorPaginatedResponse, type IntentDto } from '@nyabase/common';
 import { ChevronDown, ChevronRight, History } from 'lucide-react';
 import { api } from '../../lib/api.js';
 import { errorMessage } from '../../lib/api-error.js';
@@ -12,11 +12,13 @@ import {
   isRetryableIntent,
   retryIntent,
 } from '../../lib/intent-visibility.js';
+import { intentListSettled, intentPending } from '../../lib/in-progress.js';
 import { intentKindLabel, intentStatusLabel } from '../../lib/status-labels.js';
 import { Button } from '../ui/button.js';
 import { toast } from '../../hooks/use-toast.js';
 import { IntentsPanel } from '../containers/intents-panel.js';
-import { queryPollInterval } from '../../lib/query-lifecycle.js';
+import { StatusBadge } from '../layout/status-badge.js';
+import { refetchWhileInProgress } from '../../lib/query-lifecycle.js';
 
 export function ResourceIntentHistory({
   listPath,
@@ -35,9 +37,9 @@ export function ResourceIntentHistory({
       `${listPath}${listPath.includes('?') ? '&' : '?'}limit=50`,
     ),
     enabled,
-    refetchInterval: (queryState) => queryPollInterval(queryState.state, {
-      activeIntervalMs: 5_000,
-      isTerminal: (page) => currentOutstandingIntents(page.items ?? []).length === 0,
+    refetchInterval: (queryState) => refetchWhileInProgress(queryState.state, {
+      steadyIntervalMs: false,
+      isSettled: (page) => intentListSettled(page.items),
     }),
   });
   const items = query.data?.items ?? [];
@@ -96,9 +98,9 @@ export function ResourceIntentFailures({
       `${listPath}${listPath.includes('?') ? '&' : '?'}limit=20`,
     ),
     enabled,
-    refetchInterval: (queryState) => queryPollInterval(queryState.state, {
-      activeIntervalMs: 5_000,
-      isTerminal: (page) => currentOutstandingIntents(page.items ?? []).length === 0,
+    refetchInterval: (queryState) => refetchWhileInProgress(queryState.state, {
+      steadyIntervalMs: false,
+      isSettled: (page) => intentListSettled(page.items),
     }),
   });
   const retry = useMutation({
@@ -131,8 +133,18 @@ export function ResourceIntentFailures({
           <div key={intent.id} className="space-y-1 text-sm">
             <div className="flex flex-wrap items-center justify-between gap-2">
               <span className="font-medium">{intentKindLabel(intent.kind)}</span>
-              <span className="text-xs text-muted-foreground">
-                {intentStatusLabel(intent.status)} · {formatIntentAttempt(intent)}
+              <span className="inline-flex flex-wrap items-center gap-1 text-xs text-muted-foreground">
+                <StatusBadge
+                  label={intentStatusLabel(intent.status)}
+                  raw={intent.status}
+                  pending={intentPending(intent.status)}
+                  variant={intent.status === IntentStatus.Succeeded
+                    ? 'success'
+                    : intent.status === IntentStatus.Failed
+                      ? 'destructive'
+                      : 'warning'}
+                />
+                <span>· {formatIntentAttempt(intent)}</span>
               </span>
             </div>
             {failure && <p className="break-all text-xs text-destructive">{failure}</p>}

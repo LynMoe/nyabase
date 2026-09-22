@@ -42,10 +42,15 @@ describe('lane D product UI copy', () => {
     const src = [
       read('pages/container-detail-page.tsx'),
       read('components/containers/spec-panel.tsx'),
+      read('components/containers/overview-panel.tsx'),
+      read('components/containers/storage-panel.tsx'),
       read('components/containers/intents-panel.tsx'),
     ].join('\n');
     expect(src).not.toMatch(/@nyabase\/[a-z0-9-]+-web/);
     expect(src).toMatch(/ExtensionSlots/);
+    expect(src).toMatch(/编辑规格/);
+    expect(src).toMatch(/调整容量/);
+    expect(src).not.toMatch(/\['spec', '规格'/);
     expect(src).toMatch(/挂载与卸载本地数据卷需要「管理本地数据卷」权限/);
     expect(src).toMatch(/挂载与卸载共享卷需要「管理共享卷」权限/);
     expect(src).toMatch(/retryIntent/);
@@ -61,7 +66,7 @@ describe('lane D product UI copy', () => {
     const volumes = [page, table, dialog].join('\n');
     expect(volumes).toMatch(/volume\.attachments/);
     expect(volumes).toMatch(/挂载于/);
-    expect(volumes).toMatch(/请打开目标容器详情/);
+    expect(volumes).toMatch(/未挂载/);
     expect(volumes).toMatch(/ResourceIntentFailures/);
     expect(volumes).toMatch(/ResourceIntentHistory/);
     expect(volumes).toMatch(/\/volumes\/\$\{volume\.id\}\/intents/);
@@ -83,6 +88,25 @@ describe('lane D product UI copy', () => {
     const openBlock = src.match(/addEventListener\('open', \(\) => \{[\s\S]*?\}\);/);
     expect(openBlock?.[0]).toMatch(/type: 'auth'/);
     expect(openBlock?.[0]).not.toMatch(/setStatus\('connected'\)/);
+  });
+
+  it('image catalog is list/add/repull/remove without free-form fields', () => {
+    const page = read('pages/images-page.tsx');
+    const catalog = read('components/images/image-catalog-dialog.tsx');
+    const list = read('components/images/image-list.tsx');
+    const detail = read('pages/image-detail-page.tsx');
+    expect(page).toMatch(/ImageCatalogDialog/);
+    expect(page).not.toMatch(/ImageFormDialog/);
+    expect(catalog).toMatch(/\/admin\/images\/catalog/);
+    expect(catalog).toMatch(/\{ alias \}/);
+    expect(catalog).not.toMatch(/loginUser/);
+    expect(list).toMatch(/重新拉取/);
+    expect(list).toMatch(/移除/);
+    expect(list).toMatch(/image\.alias/);
+    expect(list).not.toMatch(/image\.name/);
+    expect(detail).not.toMatch(/ImageFormDialog/);
+    expect(detail).not.toMatch(/loaded\.name/);
+    expect(detail).toMatch(/重新拉取/);
   });
 
   it('admin volumes nav requires ManageVolumes', () => {
@@ -118,7 +142,11 @@ describe('lane D product UI copy', () => {
     ].join('\n');
     expect(volumes).toMatch(/quotaEffective !== true/);
     expect(volumes).toMatch(/quotaIneffectiveCreateHint/);
-    const detail = read('pages/container-detail-page.tsx');
+    const detail = [
+      read('pages/container-detail-page.tsx'),
+      read('components/containers/spec-panel.tsx'),
+      read('components/containers/storage-panel.tsx'),
+    ].join('\n');
     expect(detail).not.toMatch(/已用\/待应用/);
     expect(detail).toMatch(/observedRootUsedBytes/);
   });
@@ -148,9 +176,10 @@ describe('lane D product UI copy', () => {
       read('components/storage/shared-volume-table.tsx'),
       read('components/storage/shared-volume-detail-dialog.tsx'),
     ].join('\n');
-    const pools = read('components/servers/pools-card.tsx');
     const detail = read('pages/container-detail-page.tsx');
-    expect(volumes).toMatch(/服务器本地盘/);
+    expect(read('pages/volumes-page.tsx')).toMatch(/testId="volumes"/);
+    expect(read('pages/volumes-page.tsx')).toMatch(/LocalVolumeTable/);
+    expect(read('pages/shared-volumes-page.tsx')).toMatch(/testId="shared-volumes"/);
     expect(volumes).not.toMatch(/锚定存储池/);
     expect(volumes).toMatch(/ResourceIntentHistory/);
     expect(shared).toMatch(/SharedVolumeFormDialog/);
@@ -197,7 +226,6 @@ describe('lane D product UI copy', () => {
     expect(detail).not.toMatch(/卸载前请先停止容器/);
     expect(backends).toMatch(/排障/);
     expect(backends).toMatch(/SharedVolumeCatalogInspectDialog/);
-    expect(pools).toMatch(/CephFS 执行端/);
     expect(read('pages/shared-backend-detail-page.tsx')).toMatch(/shared-backend-executors/);
     expect(read('pages/shared-backends-page.tsx')).toMatch(/to: '\/shared-backends\/\$id'/);
     expect(read('pages/image-detail-page.tsx')).toMatch(/image-fingerprint-assignment/);
@@ -218,6 +246,10 @@ describe('lane D product UI copy', () => {
     expect(read('pages/group-detail-page.tsx')).toMatch(/kind="groups"/);
     expect(read('pages/group-detail-page.tsx')).toMatch(/title="能力"/);
     expect(read('pages/group-detail-page.tsx')).toMatch(/title="成员"/);
+    expect(read('pages/group-detail-page.tsx')).not.toMatch(/\btoolbar=/);
+    expect(read('pages/group-detail-page.tsx')).toMatch(/添加成员/);
+    expect(read('pages/profile-page.tsx')).toMatch(/ssh-key-add/);
+    expect(read('pages/profile-page.tsx')).toMatch(/添加公钥/);
     expect(read('pages/group-detail-page.tsx')).toMatch(/to="\/users\/\$id"/);
     expect(read('lib/user-detail.ts')).toMatch(/parseUserDetailTab/);
     expect(read('lib/group-detail.ts')).toMatch(/parseGroupDetailTab/);
@@ -269,6 +301,13 @@ describe('lane D product UI copy', () => {
     expect(grants).toMatch(/grant-servers/);
     expect(grants).toMatch(/grant-pools/);
     expect(grants).toMatch(/grant-backends/);
+    expect(grants).toMatch(/grant-add-server/);
+    expect(grants).toMatch(/grant-add-pool/);
+    expect(grants).toMatch(/grant-add-backend/);
+    expect(grants).toMatch(/添加服务器授权/);
+    expect(grants).toMatch(/添加存储池授权/);
+    expect(grants).toMatch(/添加共享存储授权/);
+    expect(grants).not.toMatch(/\btoolbar=/);
     expect(grants).not.toMatch(/aria-expanded/);
     expect(grants).not.toMatch(/isLocalStoragePool/);
     expect(summary).toMatch(/formatGrantQuotaLine/);
@@ -322,18 +361,30 @@ describe('lane D product UI copy', () => {
   });
 
   it('shows grant ceilings and remaining on user surfaces', () => {
+    const layout = read('components/layout/app-layout.tsx');
+    const quotaPage = read('pages/quota-page.tsx');
     const dashboard = read('pages/dashboard-page.tsx');
     const create = read('components/containers/create-container-dialog.tsx');
     const local = read('components/storage/local-volume-form-dialog.tsx');
     const shared = read('components/storage/shared-volume-form-dialog.tsx');
     const volumes = read('pages/volumes-page.tsx');
     const sharedPage = read('pages/shared-volumes-page.tsx');
-    expect(dashboard).toMatch(/额度/);
-    expect(dashboard).toMatch(/已分配/);
-    expect(dashboard).toMatch(/已预订/);
-    expect(dashboard).toMatch(/formatGrantQuotaLine/);
-    expect(dashboard).toMatch(/formatConsumedQuotaParts/);
-    expect(dashboard).toMatch(/formatExtensionGrantSummaries/);
+    expect(layout).toMatch(/to: '\/quota'/);
+    expect(layout).toMatch(/配额/);
+    expect(quotaPage).toMatch(/formatQuotaDimension/);
+    expect(quotaPage).toMatch(/formatExtensionGrantSummaries/);
+    expect(quotaPage).toMatch(/storage-capacity/);
+    expect(quotaPage).toMatch(/sharedBackends/);
+    expect(quotaPage).toMatch(/额度/);
+    expect(quotaPage).toMatch(/已预订/);
+    expect(quotaPage).toMatch(/剩余/);
+    expect(quotaPage).not.toMatch(/nvidia-gpu/);
+    expect(quotaPage).not.toMatch(/pciAddresses/);
+    expect(quotaPage).not.toMatch(/GpuGrantMode/);
+    expect(quotaPage).not.toMatch(/['`]\/admin\//);
+    expect(dashboard).toMatch(/to="\/quota"/);
+    expect(dashboard).not.toMatch(/formatGrantQuotaLine/);
+    expect(dashboard).not.toMatch(/formatConsumedQuotaParts/);
     expect(dashboard).not.toMatch(/nvidia-gpu/);
     expect(dashboard).not.toMatch(/pciAddresses/);
     expect(dashboard).not.toMatch(/GpuGrantMode/);
@@ -349,8 +400,11 @@ describe('lane D product UI copy', () => {
     expect(shared).toMatch(/剩余/);
     expect(shared).toMatch(/额度/);
     expect(shared).toMatch(/sharedBackends/);
-    expect(volumes).toMatch(/queryKeys\.storageCapacity/);
-    expect(volumes).toMatch(/storage-capacity/);
-    expect(sharedPage).toMatch(/sharedBackends/);
+    expect(volumes).toMatch(/to="\/quota"/);
+    expect(volumes).not.toMatch(/queryKeys\.storageCapacity/);
+    expect(volumes).not.toMatch(/storage-capacity/);
+    expect(sharedPage).toMatch(/to="\/quota"/);
+    expect(sharedPage).not.toMatch(/sharedBackends/);
+    expect(sharedPage).not.toMatch(/formatRemainingBytes/);
   });
 });

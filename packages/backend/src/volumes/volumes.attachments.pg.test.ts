@@ -154,7 +154,6 @@ async function insertStoppedRoute(database: any, containerId: string, serverId: 
     instance_status: 'Stopped',
     instance_started_at: null,
     ssh_status: 'container_stopped',
-    container_host_key_fingerprint: null,
     last_error: null,
     observed_at: new Date(),
   }).execute();
@@ -183,7 +182,6 @@ describePg('volume attachment ownership, visibility, and drain guards', () => {
       const poolId = await insertPool(database, serverId, `pool-${serverId.slice(0, 8)}`);
       await database.insertInto('infra.images').values({
         id: imageId,
-        name: 'attachment-image',
         alias: 'base',
         fingerprint: null,
         description: null,
@@ -299,7 +297,6 @@ describePg('volume attachment ownership, visibility, and drain guards', () => {
       }).execute();
       await database.insertInto('infra.images').values({
         id: imageId,
-        name: 'shared-attachment-image',
         alias: 'base',
         fingerprint: null,
         description: null,
@@ -365,7 +362,6 @@ describePg('volume attachment ownership, visibility, and drain guards', () => {
       const poolId = await insertPool(database, serverId, `pool-dto-${serverId.slice(0, 8)}`);
       await database.insertInto('infra.images').values({
         id: imageId,
-        name: 'attachment-dto-image',
         alias: 'base',
         fingerprint: null,
         description: null,
@@ -450,7 +446,6 @@ describePg('volume attachment ownership, visibility, and drain guards', () => {
       }).execute();
       await database.insertInto('infra.images').values({
         id: imageId,
-        name: 'blocked-image',
         alias: 'base',
         fingerprint: null,
         description: null,
@@ -577,7 +572,6 @@ describePg('volume attachment ownership, visibility, and drain guards', () => {
       ]).execute();
       await database.insertInto('infra.images').values({
         id: imageId,
-        name: 'retract-image',
         alias: 'base',
         fingerprint: null,
         description: null,

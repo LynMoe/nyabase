@@ -1,7 +1,8 @@
 import { useMemo, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { Link } from '@tanstack/react-router';
 import { Plus, RefreshCw } from 'lucide-react';
-import type { StorageCapacityDto, UserServerDto, VolumeDto } from '@nyabase/common';
+import type { UserServerDto, VolumeDto } from '@nyabase/common';
 import { api } from '../lib/api.js';
 import { errorMessage } from '../lib/api-error.js';
 import { Button } from '../components/ui/button.js';
@@ -10,12 +11,12 @@ import { EmptyState } from '../components/layout/empty-state.js';
 import { Page } from '../components/layout/page.js';
 import { PageHeader } from '../components/layout/page-header.js';
 import { QueryView } from '../components/layout/query-view.js';
-import { MetaChip, SectionCard } from '../components/layout/section-card.js';
+import { SectionCard } from '../components/layout/section-card.js';
 import { LocalVolumeFormDialog } from '../components/storage/local-volume-form-dialog.js';
 import { LocalVolumeTable } from '../components/storage/local-volume-table.js';
-import { grantAvailableLabel } from '../lib/utils.js';
-import { formatGrantBytes } from '../lib/grant-quota.js';
+import { volumeInProgress } from '../lib/in-progress.js';
 import { queryKeys } from '../lib/query-keys.js';
+import { refetchWhileInProgress } from '../lib/query-lifecycle.js';
 import { toast } from '../hooks/use-toast.js';
 
 export default function VolumesPage() {
@@ -27,6 +28,10 @@ export default function VolumesPage() {
   const volumesQuery = useQuery({
     queryKey: queryKeys.volumes.user,
     queryFn: () => api.get<VolumeDto[]>('/volumes'),
+    refetchInterval: (query) => refetchWhileInProgress(query.state, {
+      steadyIntervalMs: false,
+      isSettled: (volumes) => volumes.every((volume) => !volumeInProgress(volume)),
+    }),
   });
   const serversQuery = useQuery({
     queryKey: queryKeys.servers.user,
@@ -35,10 +40,7 @@ export default function VolumesPage() {
   const deleteVolume = useMutation({
     mutationFn: (volumeId: string) => api.delete<unknown>(`/volumes/${volumeId}`),
     onSuccess: () => {
-      toast({
-        title: '删除已提交',
-        description: '列表状态稍后更新；若出现「需要关注」，请查看行内说明。',
-      });
+      toast({ title: '删除已提交' });
       setDeleteTarget(null);
       void queryClient.invalidateQueries({ queryKey: queryKeys.volumes.user });
     },
@@ -54,7 +56,6 @@ export default function VolumesPage() {
     <Page testId="volumes">
       <PageHeader
         title="数据卷"
-        description="服务器本地盘。共享卷请到「共享卷」。扩缩容是否需先卸载，取决于所选存储池的能力。"
         actions={
           <>
             <Button
@@ -67,6 +68,9 @@ export default function VolumesPage() {
               aria-label="刷新数据卷"
             >
               <RefreshCw className="h-4 w-4" />
+            </Button>
+            <Button variant="outline" asChild>
+              <Link to="/quota">配额</Link>
             </Button>
             <Button onClick={() => openCreate()}><Plus className="h-4 w-4" />新建数据卷</Button>
           </>
@@ -149,18 +153,8 @@ function VolumeList({
     );
   }
 
-  const chips = servers.filter((server) => server.status === 'online');
   return (
-    <SectionCard
-      flush
-      toolbar={chips.length > 0 ? (
-        <div className="flex flex-wrap gap-2">
-          {chips.map((server) => (
-            <ServerDiskRemainingChip key={server.id} server={server} />
-          ))}
-        </div>
-      ) : undefined}
-    >
+    <SectionCard flush>
       <LocalVolumeTable
         volumes={volumes}
         plane="user"
@@ -172,23 +166,5 @@ function VolumeList({
         testId="volume-server-table"
       />
     </SectionCard>
-  );
-}
-
-function ServerDiskRemainingChip({ server }: { server: UserServerDto }) {
-  const capacityQuery = useQuery({
-    queryKey: queryKeys.storageCapacity(server.id),
-    queryFn: () => api.get<StorageCapacityDto>(`/servers/${server.id}/storage-capacity`),
-  });
-  if (!capacityQuery.data) return null;
-  const capacity = capacityQuery.data;
-  const unlimited = capacity.grantLimitBytes === null || capacity.grantLimitBytes === 0;
-  return (
-    <MetaChip>
-      {server.name}
-      {unlimited
-        ? ' · 额度不限'
-        : ` · 剩余 ${grantAvailableLabel(capacity.availableBytes, capacity.grantLimitBytes)} / 额度 ${formatGrantBytes(capacity.grantLimitBytes)}`}
-    </MetaChip>
   );
 }

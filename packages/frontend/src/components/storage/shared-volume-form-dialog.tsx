@@ -168,23 +168,19 @@ export function SharedVolumeFormDialog({
   };
 
   const description = !editing
-    ? '选择共享后端并预订容量。创建后即可挂载到能看见该后端的容器。'
+    ? null
     : editQuotaBlocked
       ? quotaIneffectiveResizeHint()
       : path === 'never'
         ? shrinkNeverTooltip()
-        : path === 'requires_stop'
-          ? '缩容需要先卸载全部挂载。'
-          : path === 'online'
-            ? '在线缩容：仅校验目标容量不小于已用量。'
-            : '扩容在线执行；同名或同容量保存会直接更新。';
+        : null;
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent data-testid="shared-volume-form">
         <DialogHeader>
           <DialogTitle>{editing ? '编辑共享卷' : '新建共享卷'}</DialogTitle>
-          <DialogDescription>{description}</DialogDescription>
+          {description ? <DialogDescription>{description}</DialogDescription> : null}
         </DialogHeader>
         <div className="space-y-3">
           <FormField id="shared-volume-name" label="名称">

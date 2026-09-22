@@ -88,3 +88,20 @@ export function formatRemainingCpu(grantMillis: number | null, usedMillis: numbe
 export function formatRemainingBytes(grantBytes: number | null, usedBytes: number): string {
   return remainingOf(grantBytes, usedBytes, 'bytes');
 }
+
+export function formatQuotaDimension(
+  grant: number | null,
+  used: number,
+  kind: 'cpu' | 'bytes',
+): { used: string; limit: string; remaining: string } {
+  const usedLabel = kind === 'cpu'
+    ? (formatConsumedQuotaParts({ cpuMillis: used, memBytes: null, diskBytes: null })[0] ?? '0C')
+    : (formatConsumedQuotaParts({ cpuMillis: null, memBytes: used, diskBytes: null })[0] ?? '0G');
+  return {
+    used: usedLabel,
+    limit: kind === 'cpu'
+      ? (formatGrantQuotaParts({ cpuMillis: grant, memBytes: null, diskBytes: null })[0] ?? '不限')
+      : formatGrantBytes(grant),
+    remaining: kind === 'cpu' ? formatRemainingCpu(grant, used) : formatRemainingBytes(grant, used),
+  };
+}

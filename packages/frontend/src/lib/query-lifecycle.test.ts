@@ -5,6 +5,7 @@ import {
   classifyQueryLifecycle,
   isPermanentQueryError,
   queryPollInterval,
+  refetchWhileInProgress,
 } from './query-lifecycle.js';
 
 describe('query lifecycle polling', () => {
@@ -26,6 +27,19 @@ describe('query lifecycle polling', () => {
       { activeIntervalMs: 1_000, transientBaseIntervalMs: 2_000, transientMaxIntervalMs: 8_000 },
     )).toBe(8_000);
     expect(boundedPollBackoff(100, 1_000, 30_000)).toBe(30_000);
+  });
+
+  it('polls faster while work is in progress and can return to a steady interval', () => {
+    const pending = { pages: [{ items: [{ status: 'pending' }] }, { items: [{ status: 'succeeded' }] }] };
+    const settled = { pages: [{ items: [{ status: 'succeeded' }] }, { items: [{ status: 'failed' }] }] };
+    const isSettled = (data: { pages: { items: { status: string }[] }[] }) => (
+      data.pages.every((page) => page.items.every((item) => item.status !== 'pending'))
+    );
+    expect(refetchWhileInProgress({ data: pending }, { steadyIntervalMs: 15_000, isSettled })).toBe(5_000);
+    expect(refetchWhileInProgress({ data: settled }, { steadyIntervalMs: false, isSettled })).toBe(false);
+    expect(refetchWhileInProgress({ data: settled }, { steadyIntervalMs: 5_000, isSettled })).toBe(5_000);
+    const denied = new ApiError(403, 'DENIED', 'denied');
+    expect(refetchWhileInProgress({ data: pending, error: denied }, { steadyIntervalMs: 5_000, isSettled })).toBe(false);
   });
 
   it('stops immediately when the resource reports a terminal state', () => {

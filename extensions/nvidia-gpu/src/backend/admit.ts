@@ -5,7 +5,6 @@ import {
 } from '../errors.js';
 import { canonicalPciAddress } from '../pci.js';
 import {
-  GpuGrantMode,
   parseContainerState,
   parseCreatePciAddresses,
   parseMutatePciAddresses,
@@ -34,7 +33,7 @@ function pciListsEqual(left: readonly string[], right: readonly string[]): boole
 export function grantFromView(grant: ExtensionGrantView): NvidiaGpuGrant {
   const payload = grant.extensionGrants?.[NVIDIA_GPU_EXTENSION_ID];
   if (payload === undefined) {
-    return { mode: GpuGrantMode.None, pciAddresses: [] };
+    return { pciAddresses: [] };
   }
   return parseNvidiaGpuGrant(payload);
 }
@@ -51,8 +50,8 @@ export function assertNvidiaGpuGrant(
   grant: NvidiaGpuGrant,
   addresses: readonly string[],
 ): void {
-  if (addresses.length === 0 || grant.mode === GpuGrantMode.All) return;
-  if (grant.mode === GpuGrantMode.None) {
+  if (addresses.length === 0) return;
+  if (grant.pciAddresses.length === 0) {
     throw new PackageHttpError(
       403,
       'PERMISSION_DENIED',

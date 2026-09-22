@@ -1,28 +1,51 @@
-import { Copy, KeyRound } from 'lucide-react';
-import { formatSshProxyJumpLogin, type ContainerDto } from '@nyabase/common';
+import { useState, type ReactNode } from 'react';
+import { Copy, Info as InfoIcon, KeyRound, Pencil, Terminal } from 'lucide-react';
+import {
+  formatSshProxyJumpLogin,
+  type ContainerDto,
+  type OpaqueExtensionMap,
+  type PatchContainerLimitsRequest,
+} from '@nyabase/common';
 import { Button } from '../ui/button.js';
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '../ui/card.js';
+import { Dialog, DialogContent, DialogHeader, DialogTitle } from '../ui/dialog.js';
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '../ui/tooltip.js';
+import { Separator } from '../ui/separator.js';
+import { SectionCard } from '../layout/section-card.js';
+import { TechnicalId } from '../refs/technical-id.js';
 import { usePublicSettings } from '../../hooks/use-public-settings.js';
 import { toast } from '../../hooks/use-toast.js';
 import { copyOneTimeSecret } from '../../lib/one-time-secret.js';
-import { approxGibHint, formatCpu, relativeTime } from '../../lib/utils.js';
-import {
-  containerStatusLabel,
-  powerIntentLabel,
-  sshStatusLabel,
-} from '../../lib/status-labels.js';
+import { approxGibHint, formatCpu } from '../../lib/utils.js';
+import { powerIntentLabel } from '../../lib/status-labels.js';
 import { useAuthStore } from '../../store/auth.js';
 import { ExtensionSlots } from '../../extensions/slots.js';
+import { LimitsDialog } from './spec-panel.js';
 
 export function OverviewPanel({
   container,
+  admin,
+  enabledExtensions,
+  grant,
   onRepairSsh,
   repairPending,
+  onLimits,
+  limitsPending,
+  onExtensionSubmit,
+  extensionPending,
 }: {
   container: ContainerDto;
+  admin: boolean;
+  enabledExtensions: string[];
+  grant: OpaqueExtensionMap | null;
   onRepairSsh: () => void;
   repairPending: boolean;
+  onLimits: (body: PatchContainerLimitsRequest) => Promise<unknown>;
+  limitsPending: boolean;
+  onExtensionSubmit: (extensionId: string, payload: unknown) => Promise<unknown>;
+  extensionPending: boolean;
 }) {
+  const [limitsOpen, setLimitsOpen] = useState(false);
+  const [sshOpen, setSshOpen] = useState(false);
   const { settings } = usePublicSettings();
   const authUser = useAuthStore((state) => state.user);
   const username = container.ownerName ?? authUser?.username ?? '<username>';
@@ -64,38 +87,99 @@ export function OverviewPanel({
   };
 
   return (
-    <div className="grid items-start gap-4 lg:grid-cols-2" data-testid="container-overview">
-      <Card>
-        <CardHeader><CardTitle className="text-base">容器信息</CardTitle></CardHeader>
-        <CardContent className="grid gap-3 sm:grid-cols-2">
-          <Info label="镜像指纹" value={container.imageFingerprint} mono />
-          <Info label="实例名" value={container.instanceName ?? '等待收敛'} mono />
-          <Info label="容器 IP" value={container.routedIp ?? '等待容器 IP'} mono />
-          <Info label="期望电源" value={powerIntentLabel(container.powerIntent)} title={container.powerIntent} />
-          <Info label="实际状态" value={containerStatusLabel(container.actual.status)} title={container.actual.status} />
-          <Info label="观测时间" value={relativeTime(container.actual.observedAt)} />
-        </CardContent>
-      </Card>
-      <Card data-testid="ssh-routed-instance-identity">
-        <CardHeader>
-          <CardTitle className="text-base">SSH 登录信息</CardTitle>
-          <CardDescription className="break-keep">
-            通过 SSH 代理 Jump 到容器：第一跳校验平台公钥与路由，第二跳由客户端与容器 sshd 端到端验钥。
-          </CardDescription>
-        </CardHeader>
-        <CardContent className="space-y-3">
-          <Info label="登录用户" value={container.ssh.loginUser} mono />
-          <Info label="SSH 状态" value={sshStatusLabel(container.ssh.status)} title={container.ssh.status} />
-          <Info label="容器主机密钥指纹" value={container.ssh.hostKeyFingerprint ?? '尚未观测'} mono />
+    <div data-testid="container-overview">
+      <SectionCard title="容器信息" testId="ssh-routed-instance-identity">
+        <div className="space-y-4">
+          <InfoCategory
+            title="规格"
+            actions={
+              <CategoryButton onClick={() => setLimitsOpen(true)} testId="edit-container-spec">
+                <Pencil />编辑
+              </CategoryButton>
+            }
+          >
+            <Info
+              label="镜像"
+              value={container.imageFingerprint
+                ? (
+                  <TechnicalId
+                    label="镜像"
+                    kind="fingerprint"
+                    alias={container.imageName}
+                    value={container.imageFingerprint}
+                    visible={container.imageName?.trim() || undefined}
+                  />
+                )
+                : (container.imageName ?? '尚未收敛')}
+            />
+            <Info label="CPU" value={formatCpu(container.cpuMillis)} />
+            <Info label="内存" value={approxGibHint(container.memBytes).replace(/^约 /, '')} />
+            <Info label="期望电源" value={powerIntentLabel(container.powerIntent)} title={container.powerIntent} />
+            <ExtensionSlots
+              area="container.overview"
+              ctx={{ value: container.extensions, serverId: container.serverId, admin }}
+            />
+          </InfoCategory>
+          <Separator />
+          <InfoCategory
+            title="登录"
+            actions={
+              <>
+                <CategoryButton onClick={() => setSshOpen(true)} testId="open-ssh-login">
+                  <Terminal />登录命令
+                </CategoryButton>
+                <CategoryButton
+                  onClick={onRepairSsh}
+                  disabled={repairPending || container.lifecyclePhase !== 'active'}
+                  testId="repair-ssh"
+                >
+                  <KeyRound />
+                  {repairPending ? '修复中…' : '修复'}
+                </CategoryButton>
+              </>
+            }
+          >
+            <Info
+              label="容器 IP"
+              value={
+                <span className="inline-flex items-center gap-1">
+                  <span className="font-mono">{container.routedIp ?? '等待容器 IP'}</span>
+                  <TooltipProvider delayDuration={200}>
+                    <Tooltip>
+                      <TooltipTrigger asChild>
+                        <button
+                          type="button"
+                          className="inline-flex size-4 items-center justify-center p-0 leading-none text-muted-foreground"
+                          aria-label="内网 IP 说明"
+                        >
+                          <InfoIcon className="size-3.5" />
+                        </button>
+                      </TooltipTrigger>
+                      <TooltipContent>这是内网 IP，需要通过跳板机连接。</TooltipContent>
+                    </Tooltip>
+                  </TooltipProvider>
+                </span>
+              }
+            />
+            <Info label="登录用户" value={container.ssh.loginUser} mono />
+          </InfoCategory>
+          {container.ssh.lastError ? <p className="break-all text-xs text-destructive">{container.ssh.lastError}</p> : null}
+        </div>
+      </SectionCard>
+      <Dialog open={sshOpen} onOpenChange={setSshOpen}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>SSH 登录</DialogTitle>
+          </DialogHeader>
           {!proxyHost ? (
             <p className="text-sm text-muted-foreground">管理员尚未配置 SSH 代理公网地址</p>
           ) : !routedIp ? (
             <p className="text-sm text-muted-foreground">等待容器地址</p>
           ) : (
-            <>
+            <div className="space-y-4">
               <div className="space-y-1">
                 <div className="flex items-center justify-between gap-2">
-                  <p className="text-xs text-muted-foreground">Jump 命令</p>
+                  <p className="text-sm font-medium">Jump 命令</p>
                   <Button size="sm" variant="outline" onClick={() => { void copyText(jumpCommand!, 'Jump 命令已复制'); }}>
                     <Copy className="h-3.5 w-3.5" />复制
                   </Button>
@@ -104,52 +188,101 @@ export function OverviewPanel({
               </div>
               <div className="space-y-1">
                 <div className="flex items-center justify-between gap-2">
-                  <p className="text-xs text-muted-foreground">~/.ssh/config 片段</p>
+                  <p className="text-sm font-medium">~/.ssh/config 片段</p>
                   <Button size="sm" variant="outline" onClick={() => { void copyText(configSnippet!, 'SSH 配置已复制'); }}>
                     <Copy className="h-3.5 w-3.5" />复制
                   </Button>
                 </div>
                 <pre className="overflow-x-auto rounded-md border bg-muted/40 px-2 py-1.5 font-mono text-xs" data-testid="ssh-jump-config">{configSnippet}</pre>
               </div>
-            </>
+            </div>
           )}
-          {container.ssh.lastError && <p className="break-all text-xs text-destructive">{container.ssh.lastError}</p>}
-          <Button
-            size="sm"
-            variant="outline"
-            disabled={repairPending || container.lifecyclePhase !== 'active'}
-            onClick={onRepairSsh}
-            data-testid="repair-ssh"
-          >
-            <KeyRound className="h-4 w-4" />
-            {repairPending ? '修复中…' : '修复 SSH'}
-          </Button>
-        </CardContent>
-      </Card>
-      <Card>
-        <CardHeader><CardTitle className="text-base">资源</CardTitle></CardHeader>
-        <CardContent className="grid gap-3 sm:grid-cols-2">
-          <Info label="CPU" value={formatCpu(container.cpuMillis)} />
-          <Info label="内存" value={approxGibHint(container.memBytes).replace(/^约 /, '')} />
-          <ExtensionSlots
-            area="container.overview"
-            ctx={{ value: container.extensions, serverId: container.serverId }}
-          />
-          <Info
-            label="系统盘"
-            value={`${approxGibHint(container.rootSizeBytes).replace(/^约 /, '')}${container.rootSizePendingBytes === null ? '' : `（待应用 ${approxGibHint(container.rootSizePendingBytes).replace(/^约 /, '')}）`}`}
-          />
-        </CardContent>
-      </Card>
+        </DialogContent>
+      </Dialog>
+      {limitsOpen ? (
+        <LimitsDialog
+          container={container}
+          admin={admin}
+          enabledExtensions={enabledExtensions}
+          grant={grant}
+          pending={limitsPending}
+          extensionPending={extensionPending}
+          onLimits={onLimits}
+          onExtensionSubmit={onExtensionSubmit}
+          onOpenChange={(open) => { if (!open) setLimitsOpen(false); }}
+        />
+      ) : null}
     </div>
   );
 }
 
-export function Info({ label, value, mono = false, title }: { label: string; value: string; mono?: boolean; title?: string }) {
+function InfoCategory({
+  title,
+  actions,
+  children,
+}: {
+  title: string;
+  actions?: ReactNode;
+  children: ReactNode;
+}) {
   return (
-    <div>
-      <p className="text-xs text-muted-foreground">{label}</p>
-      <p className={mono ? 'break-all font-mono text-xs' : 'break-all text-sm'} title={title}>{value}</p>
+    <section className="space-y-3">
+      <div className="flex flex-wrap items-center gap-1">
+        <h4 className="mr-1 text-sm font-medium">{title}</h4>
+        {actions}
+      </div>
+      <div className="flex flex-wrap gap-x-6 gap-y-3">{children}</div>
+    </section>
+  );
+}
+
+function CategoryButton({
+  children,
+  onClick,
+  disabled,
+  testId,
+}: {
+  children: ReactNode;
+  onClick: () => void;
+  disabled?: boolean;
+  testId?: string;
+}) {
+  return (
+    <Button
+      type="button"
+      variant="ghost"
+      size="sm"
+      className="h-6 gap-1 px-1.5 text-xs text-muted-foreground [&_svg]:size-3"
+      onClick={onClick}
+      disabled={disabled}
+      data-testid={testId}
+    >
+      {children}
+    </Button>
+  );
+}
+
+export function Info({
+  label,
+  value,
+  mono = false,
+  title,
+  className,
+}: {
+  label: string;
+  value: ReactNode;
+  mono?: boolean;
+  title?: string;
+  className?: string;
+}) {
+  return (
+    <div className={className ? `shrink-0 ${className}` : 'shrink-0'}>
+      <p className="text-xs leading-4 text-muted-foreground">{label}</p>
+      <div className="flex h-5 items-center gap-1 text-sm leading-5" title={title}>
+        {typeof value === 'string' ? (
+          <span className={mono ? 'font-mono' : undefined}>{value}</span>
+        ) : value}
+      </div>
     </div>
   );
 }

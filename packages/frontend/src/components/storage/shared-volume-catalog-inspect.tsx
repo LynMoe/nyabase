@@ -1,11 +1,14 @@
 import { useQuery } from '@tanstack/react-query';
+import { Loader2 } from 'lucide-react';
 import type { SharedVolumeCatalogInspectDto, SharedVolumeDto } from '@nyabase/common';
 import { api } from '../../lib/api.js';
 import { catalogOccupancyLabel, shouldSkipCatalogInspectRow } from '../../lib/catalog-occupancy.js';
+import { catalogOccupancyPending, catalogPgPending } from '../../lib/in-progress.js';
 import { queryKeys } from '../../lib/query-keys.js';
+import { refetchWhileInProgress } from '../../lib/query-lifecycle.js';
 import { serverStatusLabel } from '../../lib/status-labels.js';
 import { QueryView } from '../layout/query-view.js';
-import { Badge } from '../ui/badge.js';
+import { StatusBadge } from '../layout/status-badge.js';
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '../ui/dialog.js';
 import {
   Table,
@@ -42,6 +45,11 @@ export function SharedVolumeCatalogInspectDialog({
     queryKey: queryKeys.sharedVolumes.catalogs(volume?.id ?? ''),
     queryFn: () => api.get<SharedVolumeCatalogInspectDto>(`/admin/shared-volumes/${volume!.id}/catalogs`),
     enabled: open && Boolean(volume),
+    refetchInterval: (queryState) => refetchWhileInProgress(queryState.state, {
+      steadyIntervalMs: false,
+      isSettled: (inspect) => inspect.items.every((item) =>
+        !catalogPgPending(item.pgCatalogState) && !catalogOccupancyPending(item.occupancy)),
+    }),
   });
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -88,17 +96,25 @@ export function SharedVolumeCatalogInspectDialog({
                           <div className="text-xs text-muted-foreground">{serverStatusLabel(item.serverStatus)}</div>
                         </TableCell>
                         <TableCell>{item.poolName ?? '—'}</TableCell>
-                        <TableCell>{PG_STATE_LABEL[item.pgCatalogState]}</TableCell>
+                        <TableCell>
+                          <span className="inline-flex items-center">
+                            {catalogPgPending(item.pgCatalogState) ? (
+                              <Loader2 className="mr-1 h-3 w-3 animate-spin" aria-hidden />
+                            ) : null}
+                            {PG_STATE_LABEL[item.pgCatalogState]}
+                          </span>
+                        </TableCell>
                         <TableCell>
                           {item.incusPresent === null ? '超时' : item.incusPresent ? '有' : '无'}
                         </TableCell>
                         <TableCell>
-                          <Badge
-                            variant={occupancyVariant(item.occupancy)}
-                            data-testid="catalog-occupancy"
-                          >
-                            {catalogOccupancyLabel(item.occupancy)}
-                          </Badge>
+                          <span data-testid="catalog-occupancy">
+                            <StatusBadge
+                              label={catalogOccupancyLabel(item.occupancy)}
+                              pending={catalogOccupancyPending(item.occupancy)}
+                              variant={occupancyVariant(item.occupancy)}
+                            />
+                          </span>
                         </TableCell>
                       </TableRow>
                     ))}

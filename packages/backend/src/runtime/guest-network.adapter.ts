@@ -40,7 +40,7 @@ export function buildGuestNetworkScript(config: GuestNetworkConfig): string {
   const dnsIpv4 = config.dnsServers.filter((server) => isIP(server) === 4);
   const dnsLines = dnsIpv4.map((server) => `nameserver ${server}`);
   const resolv = dnsLines.length > 0
-    ? `printf '%s\\n' ${dnsLines.map((line) => shellQuote(line)).join(' ')} > /etc/resolv.conf`
+    ? `rm -f /etc/resolv.conf && printf '%s\\n' ${dnsLines.map((line) => shellQuote(line)).join(' ')} > /etc/resolv.conf`
     : 'true';
   const networkdDns = dnsIpv4.map((server) => `DNS=${server}`);
   return [

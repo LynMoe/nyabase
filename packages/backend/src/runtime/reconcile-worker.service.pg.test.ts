@@ -211,7 +211,6 @@ describePg('ReconcileWorkerService PostgreSQL busy breaker and inventory', () =>
       }).execute();
       await database.insertInto('infra.images').values({
         id: imageId,
-        name: 'Busy Image',
         alias: `busy-${imageId.slice(0, 8)}`,
         fingerprint: 'ab'.repeat(32),
         description: null,

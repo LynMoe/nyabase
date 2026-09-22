@@ -68,7 +68,6 @@ describePg('PostgreSQL image assignment cleanup and scan idempotency', () => {
       await database.insertInto('infra.servers').values(serverValues(serverId)).execute();
       await database.insertInto('infra.images').values({
         id: imageId,
-        name: 'image-reconciler-image',
         alias: 'ubuntu',
         fingerprint,
         description: null,
@@ -191,7 +190,6 @@ describePg('PostgreSQL image assignment cleanup and scan idempotency', () => {
       await database.insertInto('infra.servers').values(serverValues(serverId)).execute();
       await database.insertInto('infra.images').values({
         id: imageId,
-        name: 'orphaned-image',
         alias: 'orphaned',
         fingerprint: null,
         description: null,

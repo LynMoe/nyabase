@@ -66,3 +66,23 @@ export function queryPollInterval<T>(
   }
   return options.activeIntervalMs;
 }
+
+export const IN_PROGRESS_INTERVAL_MS = 5_000;
+
+export function refetchWhileInProgress<T>(
+  state: PollableQueryState<T>,
+  options: {
+    /** false: stop once settled. A number: return to the steady keepalive interval. */
+    steadyIntervalMs: number | false;
+    inProgressIntervalMs?: number;
+    isSettled: (data: T) => boolean;
+  },
+): number | false {
+  const settled = state.data !== undefined && options.isSettled(state.data);
+  return queryPollInterval(state, {
+    activeIntervalMs: settled
+      ? options.steadyIntervalMs
+      : (options.inProgressIntervalMs ?? IN_PROGRESS_INTERVAL_MS),
+    isTerminal: (data) => options.steadyIntervalMs === false && options.isSettled(data),
+  });
+}

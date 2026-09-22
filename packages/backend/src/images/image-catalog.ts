@@ -112,12 +112,6 @@ export function parseSimplestreamsProducts(body: unknown): CatalogEntry[] {
   return entries.sort((left, right) => left.alias.localeCompare(right.alias));
 }
 
-export function displayNameForCatalog(entry: CatalogEntry): string {
-  const os = entry.os.trim() || 'Image';
-  const titled = os.charAt(0).toUpperCase() + os.slice(1);
-  return entry.release ? `${titled} ${entry.release}` : titled;
-}
-
 @Injectable()
 export class ImageCatalogService {
   constructor(private readonly config: NyabaseConfigService) {}

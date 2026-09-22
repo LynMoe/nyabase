@@ -1,64 +1,20 @@
-import { useMemo } from 'react';
-import type { GpuPickerMode } from '../grant-state.js';
+import { useEffect, useMemo, useRef } from 'react';
 import { NVIDIA_GPU_EXTENSION_ID } from '../id.js';
-import { GpuGrantMode, type NvidiaGpuDeviceDto, type NvidiaGpuGrant } from '../schema.js';
 import { canonicalPciAddress } from '../pci.js';
+import {
+  gpuDisplayLabel,
+  nextDefaultGpuSelection,
+  permittedGpus,
+} from '../selection.js';
+import type { NvidiaGpuDeviceDto, NvidiaGpuGrant } from '../schema.js';
 import type { FrontendExtensionHost } from './types.js';
 
-export type { GpuPickerMode } from '../grant-state.js';
 export { parseGrant } from '../grant-state.js';
-
-export function gpuModeFromPciList(
-  pciAddresses: readonly string[],
-  availableCount?: number,
-): GpuPickerMode {
-  if (pciAddresses.length === 0) return 'none';
-  if (availableCount !== undefined && availableCount > 0 && pciAddresses.length === availableCount) {
-    return 'all';
-  }
-  return 'specific';
-}
-
-export function resolveGpuPciAddresses(
-  mode: GpuPickerMode,
-  selected: readonly string[],
-  available: ReadonlyArray<{ pciAddress: string }>,
-): string[] {
-  if (mode === 'none') return [];
-  if (mode === 'all') return available.map((gpu) => gpu.pciAddress);
-  return [...selected];
-}
-
-export function gpuDisplayLabel(
-  gpu: { index: number | null; pciAddress: string },
-): string {
-  return gpu.index === null ? gpu.pciAddress : `GPU ${gpu.index}`;
-}
-
-export function formatGpuSelectionLabel(
-  pciAddresses: readonly string[],
-  inventory: ReadonlyArray<{ index: number | null; pciAddress: string; model: string }>,
-): string {
-  if (pciAddresses.length === 0) return '无';
-  const byPci = new Map(inventory.map((gpu) => [normalizePci(gpu.pciAddress), gpu]));
-  const labels = pciAddresses.map((pci) => {
-    const gpu = byPci.get(normalizePci(pci));
-    return gpu ? gpuDisplayLabel(gpu) : pci;
-  });
-  return labels.join(', ');
-}
-
-export function permittedGpus(
-  inventory: readonly NvidiaGpuDeviceDto[],
-  grant: NvidiaGpuGrant | null | undefined,
-  admin = false,
-): NvidiaGpuDeviceDto[] {
-  if (admin && !grant) return [...inventory];
-  if (!grant || grant.mode === GpuGrantMode.None) return [];
-  if (grant.mode === GpuGrantMode.All) return [...inventory];
-  const allowed = new Set(grant.pciAddresses.map(normalizePci));
-  return inventory.filter((gpu) => allowed.has(normalizePci(gpu.pciAddress)));
-}
+export {
+  formatGpuSelectionLabel,
+  gpuDisplayLabel,
+  permittedGpus,
+} from '../selection.js';
 
 function normalizePci(value: string): string {
   return canonicalPciAddress(value) ?? value.trim().toLowerCase();
@@ -68,28 +24,24 @@ export function GpuPicker({
   host,
   serverId,
   admin = false,
-  mode,
-  onModeChange,
   value,
   onChange,
   grant,
   disabled = false,
-  showModeSelect = true,
   idPrefix = 'gpu',
   label = 'GPU',
+  defaultAll = false,
 }: {
   host: FrontendExtensionHost;
   serverId: string;
   admin?: boolean;
-  mode: GpuPickerMode;
-  onModeChange: (mode: GpuPickerMode) => void;
   value: string[];
   onChange: (pciAddresses: string[]) => void;
   grant?: NvidiaGpuGrant | null;
   disabled?: boolean;
-  showModeSelect?: boolean;
   idPrefix?: string;
   label?: string;
+  defaultAll?: boolean;
 }) {
   const path = admin
     ? `/admin/servers/${serverId}/extensions/${NVIDIA_GPU_EXTENSION_ID}/devices`
@@ -104,52 +56,38 @@ export function GpuPicker({
   const error = query.isError;
 
   const available = useMemo(
-    () => permittedGpus(inventory, grant, admin),
-    [admin, grant, inventory],
+    () => permittedGpus(inventory, grant),
+    [grant, inventory],
   );
+  const availableKey = available.map((gpu) => gpu.pciAddress).join('\n');
+  const valueKey = value.join('\n');
+  const seed = useRef<{ serverId: string; addresses: string[] } | null>(null);
 
-  const {
-    FormField,
-    Checkbox,
-    Select,
-    SelectContent,
-    SelectItem,
-    SelectTrigger,
-    SelectValue,
-  } = host.ui;
+  useEffect(() => {
+    if (!defaultAll || !serverId || loading || error) return;
+    const addresses = availableKey ? availableKey.split('\n') : [];
+    const next = nextDefaultGpuSelection(
+      serverId,
+      addresses,
+      valueKey ? valueKey.split('\n') : [],
+      seed.current,
+    );
+    if (!next) return;
+    seed.current = { serverId, addresses: next };
+    onChange(next);
+  }, [availableKey, defaultAll, error, loading, onChange, serverId, valueKey]);
 
-  const modeOptions: Array<[GpuPickerMode, string]> = [
-    ['none', '无'],
-    ['all', '全部（有权限的全部）'],
-    ['specific', '指定卡'],
-  ];
+  const { Checkbox } = host.ui;
+  const emptyBecauseGrant = Boolean(grant && grant.pciAddresses.length === 0);
 
   return (
     <div className="space-y-2" data-testid="gpu-picker">
-      {showModeSelect && (
-        <FormField id={`${idPrefix}-mode`} label={label}>
-          <Select
-            value={mode}
-            disabled={disabled || !serverId}
-            onValueChange={(nextValue) => {
-              const next = nextValue as GpuPickerMode;
-              onModeChange(next);
-              if (next === 'none') onChange([]);
-              else if (next === 'all') onChange(available.map((gpu) => gpu.pciAddress));
-              else if (mode === 'all') onChange([]);
-            }}
-          >
-            <SelectTrigger id={`${idPrefix}-mode`}>
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              {modeOptions.map(([optionValue, optionLabel]) => (
-                <SelectItem key={optionValue} value={optionValue}>{optionLabel}</SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
-        </FormField>
-      )}
+      <div className="flex items-center gap-2">
+        <p className="text-sm font-medium">{label}</p>
+        {value.length === 0 && available.length > 0 ? (
+          <span className="text-xs text-muted-foreground">未选择</span>
+        ) : null}
+      </div>
 
       {!serverId && (
         <p className="text-xs text-muted-foreground">请先选择服务器</p>
@@ -165,15 +103,14 @@ export function GpuPicker({
         </p>
       )}
 
-      {serverId && !loading && available.length === 0 && mode !== 'none' && (
+      {serverId && !loading && !error && available.length === 0 && (
         <p className="text-xs text-muted-foreground">
-          {grant?.mode === GpuGrantMode.None ? '当前授权不含 GPU' : '此服务器暂无可用 GPU'}
+          {emptyBecauseGrant ? '当前授权不含 GPU' : '此服务器暂无可用 GPU'}
         </p>
       )}
 
-      {mode === 'specific' && available.length > 0 && (
-        <div className="space-y-1.5 rounded-md border px-3 py-2">
-          <p className="text-xs text-muted-foreground">选择 GPU 卡（nvidia-smi 序号；提交时使用 PCI）</p>
+      {available.length > 0 && (
+        <div className="rounded-md border px-3 py-2">
           <div className="grid gap-1.5 sm:grid-cols-2">
             {available.map((gpu) => {
               const checked = value.some((pci) => normalizePci(pci) === normalizePci(gpu.pciAddress));
@@ -203,12 +140,6 @@ export function GpuPicker({
             })}
           </div>
         </div>
-      )}
-
-      {mode === 'all' && available.length > 0 && (
-        <p className="text-xs text-muted-foreground">
-          将使用：{available.map((gpu) => gpuDisplayLabel(gpu)).join(', ')}
-        </p>
       )}
     </div>
   );

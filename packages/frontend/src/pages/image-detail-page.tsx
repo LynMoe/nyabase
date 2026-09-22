@@ -1,12 +1,13 @@
-import { useState } from 'react';
+import { useState, type ReactNode } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { getRouteApi, useNavigate } from '@tanstack/react-router';
-import { Check, CircleAlert, Fingerprint, Gauge, RefreshCw, Server, Trash2 } from 'lucide-react';
+import { CircleAlert, Gauge, RefreshCw, Server, Trash2 } from 'lucide-react';
 import type { AdminImageDto, ImageAssignmentDto, IntentAcceptedDto, ServerDto } from '@nyabase/common';
 import { api } from '../lib/api.js';
 import { errorMessage } from '../lib/api-error.js';
-import { Badge } from '../components/ui/badge.js';
 import { Button } from '../components/ui/button.js';
+import { StatusBadge } from '../components/layout/status-badge.js';
+import { TechnicalId } from '../components/refs/technical-id.js';
 import { Card, CardContent, CardHeader, CardTitle } from '../components/ui/card.js';
 import {
   Select,
@@ -31,9 +32,11 @@ import { SectionCard } from '../components/layout/section-card.js';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '../components/ui/tabs.js';
 import { ResourceIntentFailures, ResourceIntentHistory } from '../components/intents/resource-intent-failures.js';
 import { formatBytes, relativeTime } from '../lib/utils.js';
+import { assignmentInProgress, imageInProgress } from '../lib/in-progress.js';
 import { lifecyclePhaseLabel } from '../lib/display-labels.js';
 import { toast } from '../hooks/use-toast.js';
 import { queryKeys } from '../lib/query-keys.js';
+import { refetchWhileInProgress } from '../lib/query-lifecycle.js';
 import { type ImageDetailTab } from '../lib/image-detail.js';
 
 const routeApi = getRouteApi('/images/$id');
@@ -62,6 +65,11 @@ export default function ImageDetailPage() {
   const imageQuery = useQuery({
     queryKey: queryKeys.images.detail(id),
     queryFn: () => api.get<AdminImageDto>(`/admin/images/${id}`),
+    refetchInterval: (query) => refetchWhileInProgress(query.state, {
+      steadyIntervalMs: false,
+      isSettled: (image) => !imageInProgress(image)
+        && image.assignments.every((assignment) => !assignmentInProgress(assignment)),
+    }),
   });
   const serversQuery = useQuery({
     queryKey: queryKeys.servers.admin,
@@ -123,11 +131,10 @@ export default function ImageDetailPage() {
   return (
     <Page testId="image-detail">
       <PageHeader
-        title={image?.name ?? '镜像'}
-        description={image?.alias}
+        title={image?.alias ?? '镜像'}
         crumbs={[
           { label: '镜像', to: '/images' },
-          { label: image?.name ?? '…' },
+          { label: image?.alias ?? '…' },
         ]}
         actions={
           image && !image.deleting ? (
@@ -169,13 +176,31 @@ export default function ImageDetailPage() {
                     <CardTitle className="text-base">身份</CardTitle>
                   </CardHeader>
                   <CardContent className="grid gap-3 text-sm sm:grid-cols-2">
-                    <Info label="名称" value={loaded.name} />
-                    <Info label="别名" value={loaded.alias} mono />
+                    <Info
+                      label="别名"
+                      value={loaded.alias.length > 64
+                        ? <TechnicalId label="别名" value={loaded.alias} kind="opaque" />
+                        : <span className="font-mono text-xs">{loaded.alias}</span>}
+                    />
                     <Info label="登录用户" value={loaded.loginUser} mono />
                     <Info label="最小系统盘" value={loaded.minRootSizeBytes === null ? '未设置' : formatBytes(loaded.minRootSizeBytes)} />
                     <Info label="网络由平台管理" value={loaded.networkManagedExternally ? '是' : '否'} />
-                    <Info label="指纹" value={loaded.fingerprint ?? '尚未收敛'} mono />
-                    <Info label="状态" value={loaded.deleting ? '清理中' : loaded.isActive ? '可用' : '停用'} />
+                    <Info
+                      label="指纹"
+                      value={loaded.fingerprint
+                        ? <TechnicalId label="指纹" value={loaded.fingerprint} kind="fingerprint" />
+                        : '尚未收敛'}
+                    />
+                    <Info
+                      label="状态"
+                      value={
+                        <StatusBadge
+                          label={loaded.deleting ? '清理中' : loaded.isActive ? '可用' : '停用'}
+                          pending={imageInProgress(loaded)}
+                          variant={loaded.isActive && !loaded.deleting ? 'success' : 'secondary'}
+                        />
+                      }
+                    />
                     <Info label="最近更新" value={relativeTime(loaded.updatedAt)} />
                     {loaded.description ? (
                       <div className="sm:col-span-2">
@@ -188,10 +213,9 @@ export default function ImageDetailPage() {
               <TabsContent value="assignments" className="space-y-6">
                 <SectionCard
                   title="服务器分配"
-                  description="把镜像指纹收敛到选定服务器。分配与取消都会生成意图。"
                   actions={
                     <ImageAssignSelect
-                      imageName={loaded.name}
+                      imageAlias={loaded.alias}
                       servers={servers.filter((server) => !assignments.some((assignment) => assignment.serverId === server.id))}
                       disabled={assign.isPending || unassign.isPending || servers.length === 0 || loaded.deleting}
                       onAssign={(serverId) => assign.mutate({ serverId })}
@@ -263,22 +287,26 @@ export default function ImageDetailPage() {
   );
 }
 
-function Info({ label, value, mono = false }: { label: string; value: string; mono?: boolean }) {
+function Info({ label, value, mono = false }: { label: string; value: ReactNode; mono?: boolean }) {
   return (
     <div>
       <p className="text-xs text-muted-foreground">{label}</p>
-      <p className={mono ? 'mt-1 break-all font-mono text-xs' : 'mt-1 break-all'}>{value}</p>
+      {typeof value === 'string' ? (
+        <p className={mono ? 'mt-1 break-all font-mono text-xs' : 'mt-1 break-all'}>{value}</p>
+      ) : (
+        <div className="mt-1">{value}</div>
+      )}
     </div>
   );
 }
 
 function ImageAssignSelect({
-  imageName,
+  imageAlias,
   servers,
   disabled,
   onAssign,
 }: {
-  imageName: string;
+  imageAlias: string;
   servers: Array<{ id: string; name: string }>;
   disabled: boolean;
   onAssign: (serverId: string) => void;
@@ -293,7 +321,7 @@ function ImageAssignSelect({
       }}
       disabled={disabled}
     >
-      <SelectTrigger className="h-8 w-[220px] text-xs" aria-label={`为 ${imageName} 分配服务器`}>
+      <SelectTrigger className="h-8 w-[220px] text-xs" aria-label={`为 ${imageAlias} 分配服务器`}>
         <SelectValue placeholder="添加服务器..." />
       </SelectTrigger>
       <SelectContent>
@@ -319,13 +347,16 @@ function AssignmentRow({
   busy: boolean;
 }) {
   const ready = assignment.lifecyclePhase === 'active' && !assignment.needsAttention && assignment.managedFingerprint === assignment.observedFingerprint;
+  const fingerprint = assignment.observedFingerprint ?? assignment.managedFingerprint;
   return (
     <TableRow>
       <TableCell>{serverName}</TableCell>
       <TableCell className="whitespace-normal">
-        <Badge variant={ready ? 'success' : assignment.needsAttention ? 'destructive' : 'warning'}>
-          {ready ? <><Check className="h-3 w-3" />已同步</> : lifecyclePhaseLabel(assignment.lifecyclePhase)}
-        </Badge>
+        <StatusBadge
+          label={ready ? '已同步' : lifecyclePhaseLabel(assignment.lifecyclePhase)}
+          pending={assignmentInProgress(assignment)}
+          variant={ready ? 'success' : assignment.needsAttention ? 'destructive' : 'warning'}
+        />
         {assignment.failureReason || assignment.failureCode ? (
           <p className="mt-1 flex items-center gap-1 text-xs text-destructive">
             <CircleAlert className="h-3 w-3" />
@@ -333,11 +364,10 @@ function AssignmentRow({
           </p>
         ) : null}
       </TableCell>
-      <TableCell className="max-w-[14rem] truncate font-mono">
-        <span className="inline-flex items-center gap-1">
-          <Fingerprint className="h-3 w-3 shrink-0" />
-          {assignment.observedFingerprint ?? assignment.managedFingerprint ?? '等待指纹'}
-        </span>
+      <TableCell>
+        {fingerprint
+          ? <TechnicalId label="指纹" value={fingerprint} kind="fingerprint" />
+          : <span className="text-sm">等待指纹</span>}
       </TableCell>
       <TableCell>{relativeTime(assignment.lastObservedAt)}</TableCell>
       <TableCell className="text-right">

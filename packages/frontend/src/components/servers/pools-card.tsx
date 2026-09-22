@@ -1,13 +1,13 @@
 import { useState } from 'react';
 import { useMutation } from '@tanstack/react-query';
-import { RefreshCw, Server } from 'lucide-react';
+import { Pencil, RefreshCw, Server } from 'lucide-react';
 import type { StoragePoolDto } from '@nyabase/common';
 import { api } from '../../lib/api.js';
 import { errorMessage } from '../../lib/api-error.js';
 import { QueryErrorState } from '../query-state.js';
 import { Badge } from '../ui/badge.js';
 import { Button } from '../ui/button.js';
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '../ui/card.js';
+import { Card, CardContent, CardHeader, CardTitle } from '../ui/card.js';
 import {
   Dialog,
   DialogContent,
@@ -28,6 +28,10 @@ import {
 import { FormField } from '../layout/form-field.js';
 import { toast } from '../../hooks/use-toast.js';
 import { usedTotalLabel } from '../../lib/utils.js';
+
+function poolLabel(pool: StoragePoolDto): string {
+  return pool.displayName ?? pool.incusName;
+}
 
 export function PoolsCard({
   pools,
@@ -64,57 +68,90 @@ export function PoolsCard({
   onSaveStorage: () => void;
   onUpdated: () => void;
 }) {
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const selectedSystemPool = pools.find((pool) => pool.id === (systemPoolId || currentSystemPool));
   return (
     <Card data-testid="storage-pool-capabilities">
       <CardHeader>
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div>
             <CardTitle className="flex items-center gap-2 text-base"><HardDriveIcon />存储池能力</CardTitle>
-            <CardDescription>此处只管理本机 dir/lvm 等本地池。CephFS 执行端请到「共享存储」登记。</CardDescription>
           </div>
-          <Button variant="outline" size="sm" onClick={onDiscover} disabled={discoverPending}>
-            <RefreshCw className={discoverPending ? 'h-4 w-4 animate-spin' : 'h-4 w-4'} />发现存储池
-          </Button>
-        </div>
-      </CardHeader>
-      <CardContent className="space-y-3">
-        <div className="grid gap-3 rounded-md border bg-muted/20 p-3 md:grid-cols-3">
-          <FormField id="server-system-pool" label="系统盘池">
-            <Select
-              value={(systemPoolId || currentSystemPool) || undefined}
-              onValueChange={onSystemPoolIdChange}
-            >
-              <SelectTrigger id="server-system-pool" className="h-9">
-                <SelectValue placeholder="未指定" />
-              </SelectTrigger>
-              <SelectContent>
-                {pools.filter((pool) => pool.registered && pool.rootDiskCapable).map((pool) => (
-                  <SelectItem key={pool.id} value={pool.id}>{pool.displayName ?? pool.incusName}</SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-            <p className="text-xs text-muted-foreground" data-testid="system-pool-new-containers-hint">
-              更改系统盘池只影响之后新建的容器，不会改动已有容器。
-            </p>
-          </FormField>
-          <div className="space-y-1.5">
-            <Label htmlFor="server-overcommit">存储超分比例</Label>
-            <Input id="server-overcommit" type="number" min="1" step="0.1" value={overcommitRatio || String(storageOvercommitRatio)} onChange={(event) => onOvercommitRatioChange(event.target.value)} />
-          </div>
-          <div className="flex items-end">
-            <Button
-              className="w-full"
-              onClick={onSaveStorage}
-              disabled={updatePending}
-            >
-              保存服务器存储设置
+          <div className="flex flex-wrap items-center gap-2">
+            <Button size="sm" variant="outline" onClick={() => setSettingsOpen(true)}>
+              <Pencil className="h-3.5 w-3.5" />编辑存储设置
+            </Button>
+            <Button variant="outline" size="sm" onClick={onDiscover} disabled={discoverPending}>
+              <RefreshCw className={discoverPending ? 'h-4 w-4 animate-spin' : 'h-4 w-4'} />发现存储池
             </Button>
           </div>
         </div>
+      </CardHeader>
+      <CardContent className="space-y-3">
+        <div className="grid gap-3 sm:grid-cols-2">
+          <div>
+            <p className="text-xs text-muted-foreground">系统盘池</p>
+            <p className="text-sm">{selectedSystemPool ? poolLabel(selectedSystemPool) : '未指定'}</p>
+          </div>
+          <div>
+            <p className="text-xs text-muted-foreground">存储超分比例</p>
+            <p className="text-sm">{overcommitRatio || String(storageOvercommitRatio)}</p>
+          </div>
+        </div>
+        {settingsOpen ? (
+          <Dialog open onOpenChange={(open) => { if (!open) setSettingsOpen(false); }}>
+            <DialogContent>
+              <DialogHeader>
+                <DialogTitle>编辑存储设置</DialogTitle>
+                <DialogDescription data-testid="system-pool-new-containers-hint">
+                  更改系统盘池只影响之后新建的容器，不会改动已有容器。
+                </DialogDescription>
+              </DialogHeader>
+              <FormField id="server-system-pool" label="系统盘池">
+                <Select
+                  value={(systemPoolId || currentSystemPool) || undefined}
+                  onValueChange={onSystemPoolIdChange}
+                >
+                  <SelectTrigger id="server-system-pool">
+                    <SelectValue placeholder="未指定" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {pools.filter((pool) => pool.registered && pool.rootDiskCapable).map((pool) => (
+                      <SelectItem key={pool.id} value={pool.id}>{poolLabel(pool)}</SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </FormField>
+              <div className="space-y-1.5">
+                <Label htmlFor="server-overcommit">存储超分比例</Label>
+                <Input
+                  id="server-overcommit"
+                  type="number"
+                  min="1"
+                  step="0.1"
+                  value={overcommitRatio || String(storageOvercommitRatio)}
+                  onChange={(event) => onOvercommitRatioChange(event.target.value)}
+                />
+              </div>
+              <DialogFooter>
+                <Button variant="outline" onClick={() => setSettingsOpen(false)}>取消</Button>
+                <Button
+                  onClick={() => {
+                    onSaveStorage();
+                    setSettingsOpen(false);
+                  }}
+                  disabled={updatePending}
+                >
+                  {updatePending ? '保存中...' : '保存'}
+                </Button>
+              </DialogFooter>
+            </DialogContent>
+          </Dialog>
+        ) : null}
         {poolsError ? (
           <QueryErrorState error={poolsError} resourceName="存储池" onRetry={onRetryPools} />
         ) : pools.length === 0 ? (
-          <p className="text-sm text-muted-foreground">尚未发现本地存储池。CephFS 执行端请到「共享存储」登记。</p>
+          <p className="text-sm text-muted-foreground">尚未发现本地存储池。</p>
         ) : (
           <div className="rounded-md border overflow-x-auto">
             <table className="w-full min-w-[760px] text-sm">

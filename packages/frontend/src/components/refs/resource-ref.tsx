@@ -15,7 +15,7 @@ import {
 import { api } from '../../lib/api.js';
 import { queryKeys } from '../../lib/query-keys.js';
 import { useAuthStore } from '../../store/auth.js';
-import { truncateId } from './truncate-id.js';
+import { TechnicalId } from './technical-id.js';
 import type { ResourceRefProps } from './types.js';
 
 type CatalogUser = {
@@ -53,8 +53,18 @@ function providedName(name: string | undefined): string | undefined {
 
 function RefLabel({ id, name }: { id: string; name: string | undefined }) {
   if (!id) return <span>—</span>;
-  if (name) return <span title={id}>{name}</span>;
-  return <span title={id} className="font-mono text-xs">{truncateId(id)}</span>;
+  if (name) {
+    return (
+      <TechnicalId
+        label={name}
+        value={id}
+        kind="opaque"
+        visible={name}
+        className="inline-flex max-w-full truncate text-left"
+      />
+    );
+  }
+  return <TechnicalId label="标识" value={id} kind="opaque" />;
 }
 
 function useCapabilities(): readonly string[] {
@@ -212,7 +222,7 @@ function ImageRef({ id, name }: { id: string; name?: string }) {
     queryFn: () => api.get<AdminImageDto[]>('/admin/images'),
     enabled: Boolean(id) && !explicit && hasAny(caps, Capability.ManageImages),
   });
-  return <RefLabel id={id} name={explicit ?? query.data?.find((row) => row.id === id)?.name} />;
+  return <RefLabel id={id} name={explicit ?? query.data?.find((row) => row.id === id)?.alias} />;
 }
 
 function PoolRef({ id, name }: { id: string; name?: string }) {

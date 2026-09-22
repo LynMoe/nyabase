@@ -28,6 +28,7 @@ import { Page } from '../components/layout/page.js';
 import { PageHeader } from '../components/layout/page-header.js';
 import { QueryView } from '../components/layout/query-view.js';
 import { SectionCard } from '../components/layout/section-card.js';
+import { TechnicalId } from '../components/refs/technical-id.js';
 import { toast } from '../hooks/use-toast.js';
 import { useAuthStore } from '../store/auth.js';
 import { canViewSshProxyStatus } from '../lib/ssh-proxy-access.js';
@@ -172,7 +173,16 @@ export default function SshProxyPage() {
           <QueryView query={hostKeyQuery} resourceName="SSH 主机密钥" loadingLabel="加载 SSH 主机密钥...">
             {(hostKey) => (
               <div className="rounded-lg border border-border bg-card p-4 grid gap-3 sm:grid-cols-3">
-                <InfoCell label="指纹" value={hostKey.fingerprint ?? '未配置'} mono />
+                <div className="min-w-0">
+                  <p className="text-xs text-muted-foreground">指纹</p>
+                  {hostKey.fingerprint ? (
+                    <div className="mt-1">
+                      <TechnicalId label="指纹" value={hostKey.fingerprint} kind="opaque" />
+                    </div>
+                  ) : (
+                    <p className="mt-1 text-sm text-foreground">未配置</p>
+                  )}
+                </div>
                 <InfoCell label="版本" value={hostKey.generation?.toString() ?? '未配置'} />
                 <InfoCell label="轮换时间" value={hostKey.rotatedAt ? formatTime(hostKey.rotatedAt) : '从未轮换'} />
               </div>
@@ -253,8 +263,10 @@ function SshStatusSections({ status }: { status: SshProxyAdminStatus }) {
               ) : proxies.map((proxy) => (
                 <TableRow key={proxy.proxyId}>
                   <TableCell>
-                    <div className="font-medium text-foreground">{proxy.hostname || proxy.proxyId}</div>
-                    <div className="whitespace-normal break-all font-mono text-xs text-muted-foreground">{proxy.proxyId}</div>
+                    {proxy.hostname ? (
+                      <div className="font-medium text-foreground">{proxy.hostname}</div>
+                    ) : null}
+                    <TechnicalId label="代理" value={proxy.proxyId} kind="opaque" />
                   </TableCell>
                   <TableCell className="font-mono text-xs">{proxy.listen}</TableCell>
                   <TableCell>{proxy.activeConnections} / {proxy.totalConnections}</TableCell>
@@ -284,37 +296,42 @@ function SshStatusSections({ status }: { status: SshProxyAdminStatus }) {
                 <TableRow>
                   <TableCell className="py-8 text-center text-muted-foreground" colSpan={6}>暂无活跃连接</TableCell>
                 </TableRow>
-              ) : connections.map((connection) => (
-                <TableRow key={`${connection.proxyId}:${connection.id}`}>
-                  <TableCell>
-                    <div className="font-medium text-foreground">{connection.login ?? '未认证'}</div>
-                    {connection.username ? (
-                      <div className="text-xs text-muted-foreground">{connection.username}</div>
-                    ) : null}
-                  </TableCell>
-                  <TableCell>
-                    {connection.serverSlug && connection.containerName ? (
-                      <>
-                        <div>{`${connection.serverSlug}.${connection.containerName}`}</div>
-                        {connection.containerId || connection.instanceName ? (
-                          <div className="break-all font-mono text-xs text-muted-foreground">
-                            {connection.containerId ?? connection.instanceName}
-                          </div>
-                        ) : null}
-                      </>
-                    ) : (
-                      <span className="text-muted-foreground">未绑定容器</span>
-                    )}
-                  </TableCell>
-                  <TableCell>
-                    <div className="font-mono text-xs">{connection.peer}</div>
-                    <div className="text-xs text-muted-foreground truncate max-w-56">{connection.proxyId}</div>
-                  </TableCell>
-                  <TableCell>{connection.channels ?? '无'}</TableCell>
-                  <TableCell>入 {formatBytes(connection.bytesFromClient)} / 出 {formatBytes(connection.bytesToClient)}</TableCell>
-                  <TableCell>{formatTime(connection.connectedAt)}</TableCell>
-                </TableRow>
-              ))}
+              ) : connections.map((connection) => {
+                const targetId = connection.containerId ?? connection.instanceName;
+                return (
+                  <TableRow key={`${connection.proxyId}:${connection.id}`}>
+                    <TableCell>
+                      <div className="font-medium text-foreground">{connection.login ?? '未认证'}</div>
+                      {connection.username ? (
+                        <div className="text-xs text-muted-foreground">{connection.username}</div>
+                      ) : null}
+                    </TableCell>
+                    <TableCell>
+                      {connection.serverSlug && connection.containerName ? (
+                        <>
+                          <div>{`${connection.serverSlug}.${connection.containerName}`}</div>
+                          {targetId ? (
+                            <TechnicalId
+                              label={connection.containerId ? '容器' : '实例名'}
+                              value={targetId}
+                              kind="opaque"
+                            />
+                          ) : null}
+                        </>
+                      ) : (
+                        <span className="text-muted-foreground">未绑定容器</span>
+                      )}
+                    </TableCell>
+                    <TableCell>
+                      <div className="font-mono text-xs">{connection.peer}</div>
+                      <TechnicalId label="代理" value={connection.proxyId} kind="opaque" />
+                    </TableCell>
+                    <TableCell>{connection.channels ?? '无'}</TableCell>
+                    <TableCell>入 {formatBytes(connection.bytesFromClient)} / 出 {formatBytes(connection.bytesToClient)}</TableCell>
+                    <TableCell>{formatTime(connection.connectedAt)}</TableCell>
+                  </TableRow>
+                );
+              })}
             </TableBody>
           </Table>
       </SectionCard>
@@ -345,11 +362,11 @@ function MetricTile({
   );
 }
 
-function InfoCell({ label, value, mono = false }: { label: string; value: string; mono?: boolean }) {
+function InfoCell({ label, value }: { label: string; value: string }) {
   return (
     <div className="min-w-0">
       <p className="text-xs text-muted-foreground">{label}</p>
-      <p className={`mt-1 text-sm break-all ${mono ? 'font-mono' : 'font-medium text-foreground'}`}>{value}</p>
+      <p className="mt-1 break-all text-sm font-medium text-foreground">{value}</p>
     </div>
   );
 }

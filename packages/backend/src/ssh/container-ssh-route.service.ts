@@ -37,7 +37,6 @@ export class ContainerSshRouteService {
       routedIp: row.routedIp || null,
       status: row.runtimeStatus as SshProxyInstanceRouteSnapshot['status'],
       sshStatus: row.sshStatus,
-      containerHostKeyFingerprint: row.containerHostKeyFingerprint,
       observedAt: row.observedAt.toISOString(),
     }));
   }

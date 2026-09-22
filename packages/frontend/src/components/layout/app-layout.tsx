@@ -5,7 +5,7 @@ import {
   Activity,
   LayoutDashboard, Server, Container, Database, HardDrive, Layers, Users, ImageIcon,
   ScrollText, LogOut, Shield, UserCircle, Settings, Cable, Network, Globe, TriangleAlert,
-  Menu,
+  Menu, Gauge,
 } from 'lucide-react';
 import { cn } from '../../lib/utils.js';
 import { useAuthStore } from '../../store/auth.js';
@@ -30,6 +30,7 @@ import { certExpiryBannerText, certExpiryWarning } from '../../lib/cert-expiry.j
 
 const userNavItems = [
   { to: '/', icon: LayoutDashboard, label: '资源概览' },
+  { to: '/quota', icon: Gauge, label: '配额' },
   { to: '/containers', icon: Container, label: '容器' },
   { to: '/volumes', icon: Database, label: '数据卷' },
   { to: '/shared-volumes', icon: HardDrive, label: '共享卷' },

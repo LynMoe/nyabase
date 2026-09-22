@@ -89,6 +89,7 @@ interface ServerRow {
   id: string;
   name: string;
   parent_interface: string | null;
+  dns_servers: string[] | null;
   server_cert_fingerprint: string | null;
   node_metrics_endpoint: string | null;
   node_metrics_token_ciphertext: string | null;
@@ -922,6 +923,7 @@ export class ServerPreflightReconciler implements ManagedReconciler {
         const probe =
           confirmedProbe ?? (await client.getInstanceFull(probeName, { signal })).metadata;
         checks.simplestreamsImage = 'pass';
+        const probeDns = (server.dns_servers ?? []).filter((value) => value.trim().length > 0);
         await applyGuestNetwork(
           client,
           probeName,
@@ -929,7 +931,7 @@ export class ServerPreflightReconciler implements ManagedReconciler {
             address: probeOptions.probeAddress,
             prefixLength: poolNetwork.prefixLength,
             gateway: poolNetwork.gateway,
-            dnsServers: [],
+            dnsServers: probeDns.length > 0 ? probeDns : [poolNetwork.gateway],
           },
           signal,
         );
@@ -1447,6 +1449,7 @@ export class ServerPreflightReconciler implements ManagedReconciler {
         'id',
         'name',
         'parent_interface',
+        'dns_servers',
         'server_cert_fingerprint',
         'node_metrics_endpoint',
         'node_metrics_token_ciphertext',

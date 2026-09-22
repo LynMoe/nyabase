@@ -46,6 +46,34 @@ describe('IncusContainerSshStateAdapter', () => {
     );
   });
 
+  it('maps Incus exec Failure return 127 to sshd missing', async () => {
+    const client = {
+      execInstance: vi.fn().mockResolvedValue({
+        status: 202,
+        envelope: {
+          type: 'async',
+          operation: '/1.0/operations/operation-127',
+        },
+        metadata: undefined,
+      }),
+      getOperationWait: vi.fn().mockResolvedValue({
+        status: 200,
+        envelope: { type: 'sync' },
+        metadata: {
+          status: 'Failure',
+          status_code: 400,
+          err: 'Command not found',
+          metadata: { return: 127 },
+        },
+      }),
+    };
+    const adapter = new IncusContainerSshStateAdapter();
+    await expect(adapter.probeSshd(
+      client as never,
+      instanceName,
+    )).resolves.toBe('missing');
+  });
+
   it('reports sshd as unknown while the binary exists but port 22 is closed', async () => {
     const client = {
       execInstance: vi.fn().mockResolvedValue({

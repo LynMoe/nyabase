@@ -37,7 +37,6 @@ describe('SSH proxy routed identity', () => {
         routedIp: '10.20.0.42',
         status: ContainerStatus.Running,
         sshStatus: 'running' as const,
-        containerHostKeyFingerprint: null,
         observedAt: new Date().toISOString(),
       }],
     };

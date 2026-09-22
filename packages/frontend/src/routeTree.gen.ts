@@ -19,6 +19,7 @@ import { Route as SshProxyIndexRouteImport } from './routes/ssh-proxy/index'
 import { Route as SharedVolumesIndexRouteImport } from './routes/shared-volumes/index'
 import { Route as SharedBackendsIndexRouteImport } from './routes/shared-backends/index'
 import { Route as ServersIndexRouteImport } from './routes/servers/index'
+import { Route as QuotaIndexRouteImport } from './routes/quota/index'
 import { Route as OpsIndexRouteImport } from './routes/ops/index'
 import { Route as IpPoolsIndexRouteImport } from './routes/ip-pools/index'
 import { Route as ImagesIndexRouteImport } from './routes/images/index'
@@ -84,6 +85,11 @@ const SharedBackendsIndexRoute = SharedBackendsIndexRouteImport.update({
 const ServersIndexRoute = ServersIndexRouteImport.update({
   id: '/servers/',
   path: '/servers/',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const QuotaIndexRoute = QuotaIndexRouteImport.update({
+  id: '/quota/',
+  path: '/quota/',
   getParentRoute: () => rootRouteImport,
 } as any)
 const OpsIndexRoute = OpsIndexRouteImport.update({
@@ -186,6 +192,7 @@ export interface FileRoutesByFullPath {
   '/images/': typeof ImagesIndexRoute
   '/ip-pools/': typeof IpPoolsIndexRoute
   '/ops/': typeof OpsIndexRoute
+  '/quota/': typeof QuotaIndexRoute
   '/servers/': typeof ServersIndexRoute
   '/shared-backends/': typeof SharedBackendsIndexRoute
   '/shared-volumes/': typeof SharedVolumesIndexRoute
@@ -214,6 +221,7 @@ export interface FileRoutesByTo {
   '/images': typeof ImagesIndexRoute
   '/ip-pools': typeof IpPoolsIndexRoute
   '/ops': typeof OpsIndexRoute
+  '/quota': typeof QuotaIndexRoute
   '/servers': typeof ServersIndexRoute
   '/shared-backends': typeof SharedBackendsIndexRoute
   '/shared-volumes': typeof SharedVolumesIndexRoute
@@ -243,6 +251,7 @@ export interface FileRoutesById {
   '/images/': typeof ImagesIndexRoute
   '/ip-pools/': typeof IpPoolsIndexRoute
   '/ops/': typeof OpsIndexRoute
+  '/quota/': typeof QuotaIndexRoute
   '/servers/': typeof ServersIndexRoute
   '/shared-backends/': typeof SharedBackendsIndexRoute
   '/shared-volumes/': typeof SharedVolumesIndexRoute
@@ -273,6 +282,7 @@ export interface FileRouteTypes {
     | '/images/'
     | '/ip-pools/'
     | '/ops/'
+    | '/quota/'
     | '/servers/'
     | '/shared-backends/'
     | '/shared-volumes/'
@@ -301,6 +311,7 @@ export interface FileRouteTypes {
     | '/images'
     | '/ip-pools'
     | '/ops'
+    | '/quota'
     | '/servers'
     | '/shared-backends'
     | '/shared-volumes'
@@ -329,6 +340,7 @@ export interface FileRouteTypes {
     | '/images/'
     | '/ip-pools/'
     | '/ops/'
+    | '/quota/'
     | '/servers/'
     | '/shared-backends/'
     | '/shared-volumes/'
@@ -358,6 +370,7 @@ export interface RootRouteChildren {
   ImagesIndexRoute: typeof ImagesIndexRoute
   IpPoolsIndexRoute: typeof IpPoolsIndexRoute
   OpsIndexRoute: typeof OpsIndexRoute
+  QuotaIndexRoute: typeof QuotaIndexRoute
   ServersIndexRoute: typeof ServersIndexRoute
   SharedBackendsIndexRoute: typeof SharedBackendsIndexRoute
   SharedVolumesIndexRoute: typeof SharedVolumesIndexRoute
@@ -439,6 +452,13 @@ declare module '@tanstack/react-router' {
       path: '/servers'
       fullPath: '/servers/'
       preLoaderRoute: typeof ServersIndexRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/quota/': {
+      id: '/quota/'
+      path: '/quota'
+      fullPath: '/quota/'
+      preLoaderRoute: typeof QuotaIndexRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/ops/': {
@@ -574,6 +594,7 @@ const rootRouteChildren: RootRouteChildren = {
   ImagesIndexRoute: ImagesIndexRoute,
   IpPoolsIndexRoute: IpPoolsIndexRoute,
   OpsIndexRoute: OpsIndexRoute,
+  QuotaIndexRoute: QuotaIndexRoute,
   ServersIndexRoute: ServersIndexRoute,
   SharedBackendsIndexRoute: SharedBackendsIndexRoute,
   SharedVolumesIndexRoute: SharedVolumesIndexRoute,

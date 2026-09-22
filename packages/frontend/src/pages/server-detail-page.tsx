@@ -1,10 +1,9 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useState, type ReactNode } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { getRouteApi, Link, useNavigate } from '@tanstack/react-router';
 import { Activity, Cpu, Gauge, HardDrive, History, KeyRound, ListChecks, Trash2 } from 'lucide-react';
 import {
   Capability,
-  PreflightStatus,
   zNodeMetricsPatchConfig,
   type CertificateRotationDto,
   type ConnectServerRequest,
@@ -34,8 +33,15 @@ import { NodeMetricsCard } from '../components/servers/node-metrics-card.js';
 import { PoolsCard } from '../components/servers/pools-card.js';
 import { ServerStorageTab } from '../components/servers/server-storage-tab.js';
 import { CertificateCard } from '../components/servers/certificate-card.js';
-import { serverStatusLabel } from '../lib/display-labels.js';
+import { TechnicalId } from '../components/refs/technical-id.js';
+import { preflightStatusLabel, serverStatusLabel } from '../lib/display-labels.js';
+import {
+  certificateStatePending,
+  certificateTrustPending,
+  preflightPending,
+} from '../lib/in-progress.js';
 import { queryKeys } from '../lib/query-keys.js';
+import { refetchWhileInProgress } from '../lib/query-lifecycle.js';
 import { toast } from '../hooks/use-toast.js';
 import { useAuthStore } from '../store/auth.js';
 import { ResourceIntentFailures } from '../components/intents/resource-intent-failures.js';
@@ -96,6 +102,10 @@ export default function ServerDetailPage() {
   const serverQuery = useQuery({
     queryKey: queryKeys.servers.detail(id),
     queryFn: () => api.get<ServerDto>(`/admin/servers/${id}`),
+    refetchInterval: (query) => refetchWhileInProgress(query.state, {
+      steadyIntervalMs: false,
+      isSettled: (server) => !preflightPending(server.preflightStatus),
+    }),
   });
   const poolsQuery = useQuery({
     queryKey: queryKeys.servers.pools(id, true),
@@ -127,11 +137,20 @@ export default function ServerDetailPage() {
     queryKey: queryKeys.servers.preflight(id),
     queryFn: () => api.get<ServerPreflightDto>(`/admin/servers/${id}/preflight`),
     enabled: tab === 'preflight',
+    refetchInterval: (query) => refetchWhileInProgress(query.state, {
+      steadyIntervalMs: false,
+      isSettled: (report) => !preflightPending(report.status),
+    }),
   });
   const certificateQuery = useQuery({
     queryKey: queryKeys.certificate,
     queryFn: () => api.get<IncusClientCertificateDto>('/admin/incus-client-certificate'),
     enabled: canViewCertificate,
+    refetchInterval: (query) => refetchWhileInProgress(query.state, {
+      steadyIntervalMs: false,
+      isSettled: (certificate) => !certificateStatePending(certificate.state)
+        && certificate.servers.every((trust) => !certificateTrustPending(trust.trustState)),
+    }),
   });
   const server = serverQuery.data;
 
@@ -283,11 +302,6 @@ export default function ServerDetailPage() {
     <Page testId="server-connect-preflight">
       <PageHeader
         title={serverQuery.data?.name ?? '服务器'}
-        description={
-          serverQuery.data
-            ? `${serverQuery.data.slug} · ${serverQuery.data.apiEndpoint}`
-            : undefined
-        }
         crumbs={[
           { label: '服务器', to: '/servers' },
           { label: serverQuery.data?.name ?? '…' },
@@ -332,8 +346,8 @@ export default function ServerDetailPage() {
                   <CardTitle className="text-base">身份</CardTitle>
                 </CardHeader>
                 <CardContent className="grid gap-3 text-sm sm:grid-cols-2">
-                  <IdentityRow label="slug" value={loaded.slug} mono />
-                  <IdentityRow label="接入地址" value={loaded.apiEndpoint} mono />
+                  <IdentityRow label="slug" value={<TechnicalId label="slug" value={loaded.slug} />} />
+                  <IdentityRow label="接入地址" value={<TechnicalId label="接入地址" value={loaded.apiEndpoint} />} />
                   <IdentityRow label="Incus 版本" value={loaded.incusVersion ?? '未连接'} />
                   <IdentityRow label="系统盘池" value={loaded.systemPoolName ?? loaded.systemPoolId ?? '未指定'} />
                   <IdentityRow label="存储超分" value={String(loaded.storageOvercommitRatio)} />
@@ -342,25 +356,20 @@ export default function ServerDetailPage() {
               <Card>
                 <CardHeader>
                   <CardTitle className="text-base">接入清单</CardTitle>
-                  <CardDescription>按顺序完成互信、存储池、前置检查，再到 IP 池绑定。</CardDescription>
                 </CardHeader>
                 <CardContent>
                   <ol className="list-decimal space-y-1.5 pl-5 text-sm">
                     <li>
                       <button type="button" className="underline" onClick={() => selectTab('connect')}>互信</button>
-                      {loaded.incusVersion || loaded.serverCertFingerprint
-                        ? ' · 已连接'
-                        : ' · 在接入页粘贴 trust token 并连接'}
+                      {loaded.incusVersion || loaded.serverCertFingerprint ? ' · 已连接' : ' · 未连接'}
                     </li>
                     <li>
                       <button type="button" className="underline" onClick={() => selectTab('storage')}>存储池</button>
-                      {registeredPoolCount > 0
-                        ? ` · 已登记 ${registeredPoolCount} 个`
-                        : ' · 发现后点击登记'}
+                      {` · 已登记 ${registeredPoolCount} 个`}
                     </li>
                     <li>
                       <button type="button" className="underline" onClick={() => selectTab('preflight')}>前置检查</button>
-                      {loaded.preflightStatus === PreflightStatus.Passed ? ' · 已通过' : ' · 选择探针池与地址后运行'}
+                      {` · ${preflightStatusLabel(loaded.preflightStatus)}`}
                     </li>
                     <li>
                       <Link to="/ip-pools" className="underline">去 IP 池绑定</Link>
@@ -530,11 +539,11 @@ export default function ServerDetailPage() {
   );
 }
 
-function IdentityRow({ label, value, mono = false }: { label: string; value: string; mono?: boolean }) {
+function IdentityRow({ label, value }: { label: string; value: ReactNode }) {
   return (
     <div className="min-w-0">
       <p className="text-xs text-muted-foreground">{label}</p>
-      <p className={mono ? 'break-all font-mono text-xs' : 'break-all text-sm'}>{value}</p>
+      {typeof value === 'string' ? <p className="break-all text-sm">{value}</p> : value}
     </div>
   );
 }

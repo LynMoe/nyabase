@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { Link } from '@tanstack/react-router';
 import { Plus, RefreshCw } from 'lucide-react';
 import type { ContainerAction, ContainerDto, IntentAcceptedDto } from '@nyabase/common';
 import { api } from '../lib/api.js';
@@ -15,7 +16,7 @@ import { SectionCard } from '../components/layout/section-card.js';
 import { queryKeys } from '../lib/query-keys.js';
 import { queryPollInterval } from '../lib/query-lifecycle.js';
 import { runGatedMutation } from '../lib/resource-mutation-gate.js';
-import { actionProgressHint, containerActionSubmittedTitle } from '../lib/status-labels.js';
+import { containerActionSubmittedTitle } from '../lib/status-labels.js';
 import { toast } from '../hooks/use-toast.js';
 
 export default function ContainersPage() {
@@ -32,7 +33,6 @@ export default function ContainersPage() {
     onSuccess: (_intent, variables) => {
       toast({
         title: containerActionSubmittedTitle(variables.actionName),
-        description: actionProgressHint('list'),
       });
       void queryClient.invalidateQueries({ queryKey: queryKeys.containers.userList });
     },
@@ -51,15 +51,14 @@ export default function ContainersPage() {
     <Page>
       <PageHeader
         title="容器"
-        description={
-          containersQuery.data
-            ? `${containersQuery.data.length} 个容器 · 运行时状态来自后端观测`
-            : '运行时状态来自后端观测'
-        }
+        description={containersQuery.data ? `${containersQuery.data.length} 个容器` : undefined}
         actions={
           <>
             <Button variant="outline" size="icon" onClick={() => { void containersQuery.refetch(); }} aria-label="刷新容器">
               <RefreshCw className="h-4 w-4" />
+            </Button>
+            <Button variant="outline" asChild>
+              <Link to="/quota">配额</Link>
             </Button>
             <Button onClick={() => setCreateOpen(true)}>
               <Plus className="h-4 w-4" />新建容器

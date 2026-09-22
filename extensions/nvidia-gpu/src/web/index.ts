@@ -10,11 +10,8 @@ export {
   formatGpuSelectionLabel,
   GpuPicker,
   gpuDisplayLabel,
-  gpuModeFromPciList,
   permittedGpus,
-  resolveGpuPciAddresses,
 } from './gpu-picker.js';
-export type { GpuPickerMode } from './gpu-picker.js';
 export type { FrontendExtensionHost, ServerCardWebExtension } from './types.js';
 
 export function createNvidiaGpuWebExtension(

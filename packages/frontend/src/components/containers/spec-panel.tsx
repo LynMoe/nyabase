@@ -1,136 +1,180 @@
-import type { ContainerDto, OpaqueExtensionMap, StoragePoolCapabilityDto } from '@nyabase/common';
+import { useState } from 'react';
+import type {
+  ContainerDto,
+  OpaqueExtensionMap,
+  PatchContainerLimitsRequest,
+  StoragePoolCapabilityDto,
+} from '@nyabase/common';
 import { Button } from '../ui/button.js';
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '../ui/card.js';
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '../ui/dialog.js';
 import { Input } from '../ui/input.js';
-import { Label } from '../ui/label.js';
-import { approxGibHint } from '../../lib/utils.js';
-import { classifySizeChange, shrinkNeverTooltip } from '../../lib/storage-shrink.js';
+import { FormField } from '../layout/form-field.js';
+import { approxGibHint, formatGibInput, formatVcpuInput, gibToBytes, vcpuToMillis } from '../../lib/utils.js';
+import {
+  classifySizeChange,
+  observedRootUsedBytes,
+  shrinkNeverTooltip,
+  validateShrinkFloor,
+} from '../../lib/storage-shrink.js';
 import { ExtensionSlots } from '../../extensions/slots.js';
+import { toast } from '../../hooks/use-toast.js';
 
-export function SpecPanel({
+export function LimitsDialog({
   container,
   admin,
-  rootCapability,
-  cpuVcpus,
-  memGib,
-  rootSizeGib,
-  memBytes,
-  rootSizeBytes,
   enabledExtensions,
-  extensions,
-  onCpuVcpus,
-  onMemGib,
-  onRootSizeGib,
-  onExtensions,
-  onExtensionSubmit,
-  onLimits,
-  onRoot,
-  limitsPending,
-  rootPending,
+  grant,
+  pending,
   extensionPending,
+  onLimits,
+  onExtensionSubmit,
+  onOpenChange,
 }: {
   container: ContainerDto;
   admin: boolean;
-  rootCapability: StoragePoolCapabilityDto;
-  cpuVcpus: string;
-  memGib: string;
-  rootSizeGib: string;
-  memBytes: number;
-  rootSizeBytes: number;
   enabledExtensions: string[];
-  extensions: OpaqueExtensionMap;
-  onCpuVcpus: (value: string) => void;
-  onMemGib: (value: string) => void;
-  onRootSizeGib: (value: string) => void;
-  onExtensions: (value: OpaqueExtensionMap) => void;
-  onExtensionSubmit: (extensionId: string, payload: unknown) => void;
-  onLimits: () => void;
-  onRoot: () => void;
-  limitsPending: boolean;
-  rootPending: boolean;
+  grant: OpaqueExtensionMap | null;
+  pending: boolean;
   extensionPending: boolean;
+  onLimits: (body: PatchContainerLimitsRequest) => Promise<unknown>;
+  onExtensionSubmit: (extensionId: string, payload: unknown) => Promise<unknown>;
+  onOpenChange: (open: boolean) => void;
 }) {
+  const [cpuVcpus, setCpuVcpus] = useState(formatVcpuInput(container.cpuMillis));
+  const [memGib, setMemGib] = useState(formatGibInput(container.memBytes));
+  const [extensions, setExtensions] = useState<OpaqueExtensionMap>(container.extensions ?? {});
+  const cpuMillis = Number.isFinite(Number(cpuVcpus)) ? vcpuToMillis(Number(cpuVcpus)) : NaN;
+  const memBytes = Number.isFinite(Number(memGib)) ? gibToBytes(Number(memGib)) : NaN;
+
+  return (
+    <Dialog open onOpenChange={onOpenChange}>
+      <DialogContent data-testid="container-spec">
+        <DialogHeader>
+          <DialogTitle>编辑规格</DialogTitle>
+        </DialogHeader>
+        <div className="space-y-3">
+          <div className="grid gap-3 sm:grid-cols-2">
+            <UnitField id="limit-cpu" label="CPU (核)" value={cpuVcpus} onChange={setCpuVcpus} step="0.1" />
+            <UnitField
+              id="limit-memory"
+              label="内存 (GiB)"
+              value={memGib}
+              onChange={setMemGib}
+              hint={Number.isFinite(memBytes) ? approxGibHint(memBytes) : undefined}
+            />
+          </div>
+          <Button
+            onClick={() => {
+              if (!Number.isFinite(cpuMillis) || !Number.isFinite(memBytes)) {
+                toast({ title: '请输入有效的 CPU / 内存', variant: 'destructive' });
+                return;
+              }
+              void onLimits({ cpuMillis, memBytes });
+            }}
+            disabled={pending}
+          >
+            {pending ? '提交中...' : '应用 CPU / 内存'}
+          </Button>
+        </div>
+        <ExtensionSlots
+          area="container.spec"
+          ctx={{
+            containerId: container.id,
+            serverId: container.serverId,
+            enabledExtensions,
+            admin,
+            observedStatus: container.actual.status,
+            grant,
+            value: extensions,
+            onChange: setExtensions,
+            onSubmit: (extensionId, payload) => { void onExtensionSubmit(extensionId, payload); },
+            pending: extensionPending,
+          }}
+        />
+        <DialogFooter>
+          <Button variant="outline" onClick={() => onOpenChange(false)}>关闭</Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+export function RootSizeDialog({
+  container,
+  rootCapability,
+  pending,
+  onApply,
+  onRequiresStop,
+  onOpenChange,
+}: {
+  container: ContainerDto;
+  rootCapability: StoragePoolCapabilityDto;
+  pending: boolean;
+  onApply: (sizeBytes: number) => Promise<unknown>;
+  onRequiresStop: (sizeBytes: number) => void;
+  onOpenChange: (open: boolean) => void;
+}) {
+  const [rootSizeGib, setRootSizeGib] = useState(formatGibInput(container.rootSizeBytes));
+  const rootSizeBytes = Number.isFinite(Number(rootSizeGib)) ? gibToBytes(Number(rootSizeGib)) : NaN;
   const path = Number.isFinite(rootSizeBytes)
     ? classifySizeChange(rootCapability, container.rootSizeBytes, rootSizeBytes)
     : 'unchanged';
   const shrinkBlocked = path === 'never';
-  const rootDescription = path === 'never'
-    ? shrinkNeverTooltip()
-    : path === 'requires_stop'
-      ? '缩容需要先停止容器；将引导停止 → 缩容 → 可选启动。'
-      : path === 'online'
-        ? '在线缩容：直接提交，无停机提示。'
-        : '扩容在线执行；缩容路径由池能力决定。';
 
   return (
-    <div className="grid items-start gap-4 lg:grid-cols-2" data-testid="container-spec">
-      <Card>
-        <CardHeader>
-          <CardTitle className="text-base">CPU / 内存</CardTitle>
-          <CardDescription>这两个字段支持在线变更，提交后会开始生效。</CardDescription>
-        </CardHeader>
-        <CardContent className="space-y-3">
-          <div className="grid gap-3 sm:grid-cols-2">
-            <UnitInput
-              id="limit-cpu"
-              label="CPU (核)"
-              value={cpuVcpus}
-              onChange={onCpuVcpus}
-              step="0.1"
-            />
-            <UnitInput
-              id="limit-memory"
-              label="内存 (GiB)"
-              value={memGib}
-              onChange={onMemGib}
-              hint={Number.isFinite(memBytes) ? approxGibHint(memBytes) : undefined}
-            />
-          </div>
-          <Button onClick={onLimits} disabled={limitsPending}>{limitsPending ? '提交中...' : '在线应用规格'}</Button>
-        </CardContent>
-      </Card>
-      <Card>
-        <CardHeader>
-          <CardTitle className="text-base">系统盘容量</CardTitle>
-          <CardDescription>{rootDescription}</CardDescription>
-        </CardHeader>
-        <CardContent className="space-y-3">
-          <UnitInput
-            id="root-size"
-            label="目标容量 (GiB)"
-            value={rootSizeGib}
-            onChange={onRootSizeGib}
-            hint={Number.isFinite(rootSizeBytes) ? approxGibHint(rootSizeBytes) : undefined}
-          />
-          {shrinkBlocked && <p className="text-xs text-muted-foreground">{shrinkNeverTooltip()}</p>}
+    <Dialog open onOpenChange={onOpenChange}>
+      <DialogContent data-testid="container-root-size">
+        <DialogHeader>
+          <DialogTitle>调整系统盘容量</DialogTitle>
+          {path === 'never' ? <DialogDescription>{shrinkNeverTooltip()}</DialogDescription> : null}
+        </DialogHeader>
+        <UnitField
+          id="root-size"
+          label="目标容量 (GiB)"
+          value={rootSizeGib}
+          onChange={setRootSizeGib}
+          hint={Number.isFinite(rootSizeBytes) ? approxGibHint(rootSizeBytes) : undefined}
+        />
+        {shrinkBlocked && <p className="text-xs text-muted-foreground">{shrinkNeverTooltip()}</p>}
+        <DialogFooter>
+          <Button variant="outline" onClick={() => onOpenChange(false)}>取消</Button>
           <Button
-            onClick={onRoot}
-            disabled={rootPending || shrinkBlocked}
+            onClick={() => {
+              if (!Number.isFinite(rootSizeBytes)) {
+                toast({ title: '请输入有效的系统盘容量', variant: 'destructive' });
+                return;
+              }
+              if (path === 'never') {
+                toast({ title: '无法缩容', description: shrinkNeverTooltip(), variant: 'destructive' });
+                return;
+              }
+              const floor = validateShrinkFloor(rootCapability, rootSizeBytes, observedRootUsedBytes(container));
+              if (floor) {
+                toast({ title: '容量不合法', description: floor, variant: 'destructive' });
+                return;
+              }
+              if (path === 'requires_stop') {
+                onRequiresStop(rootSizeBytes);
+                onOpenChange(false);
+                return;
+              }
+              void onApply(rootSizeBytes).then(
+                () => onOpenChange(false),
+                () => undefined,
+              );
+            }}
+            disabled={pending || shrinkBlocked}
             title={shrinkBlocked ? shrinkNeverTooltip() : undefined}
           >
-            {rootPending ? '提交中...' : path === 'requires_stop' ? '继续缩容编排' : '应用系统盘容量'}
+            {pending ? '提交中...' : path === 'requires_stop' ? '继续缩容编排' : '应用系统盘容量'}
           </Button>
-        </CardContent>
-      </Card>
-      <ExtensionSlots
-        area="container.spec"
-        ctx={{
-          containerId: container.id,
-          serverId: container.serverId,
-          enabledExtensions,
-          admin,
-          observedStatus: container.actual.status,
-          value: extensions,
-          onChange: onExtensions,
-          onSubmit: onExtensionSubmit,
-          pending: extensionPending,
-        }}
-      />
-    </div>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   );
 }
 
-function UnitInput({
+function UnitField({
   id,
   label,
   value,
@@ -146,10 +190,8 @@ function UnitInput({
   step?: string;
 }) {
   return (
-    <div className="space-y-1.5">
-      <Label htmlFor={id}>{label}</Label>
+    <FormField id={id} label={label} hint={hint}>
       <Input id={id} type="number" min="0" step={step} value={value} onChange={(event) => onChange(event.target.value)} />
-      {hint && <p className="text-xs text-muted-foreground">{hint}</p>}
-    </div>
+    </FormField>
   );
 }

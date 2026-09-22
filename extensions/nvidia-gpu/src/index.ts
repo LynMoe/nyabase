@@ -20,7 +20,6 @@ export {
   PackageHttpError,
 } from './errors.js';
 export {
-  GpuGrantMode,
   parseContainerState,
   parseCreatePciAddresses,
   parseMutatePciAddresses,

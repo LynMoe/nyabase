@@ -100,6 +100,18 @@ describe('user panel pages stay on user API plane', () => {
     expect(src).toMatch(/to="\/containers\/\$containerId"/);
   });
 
+  it('quota-page never calls /admin/* and stays on user grant APIs', () => {
+    const src = readPage('quota-page.tsx');
+    expect(src).not.toMatch(/['`]\/admin\//);
+    expect(src).not.toMatch(/ManageContainersAny/);
+    expect(src).not.toMatch(/\/manage\/containers/);
+    expect(src).toMatch(/api\.get<EffectiveAccessDto>\('\/me\/access'\)/);
+    expect(src).toMatch(/api\.get<UserServerDto\[\]>\('\/servers'\)/);
+    expect(src).toMatch(/api\.get<ContainerDto\[\]>\('\/containers'\)/);
+    expect(src).toMatch(/api\.get<SharedBackendDto\[\]>\('\/shared-backends'\)/);
+    expect(src).toMatch(/storage-capacity/);
+  });
+
   it('http-proxy-page never calls /admin/* and stays on user HTTP 发布 APIs', () => {
     const src = readPage('http-proxy-page.tsx');
     expect(src).not.toMatch(/['`]\/admin\//);

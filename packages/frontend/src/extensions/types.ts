@@ -16,6 +16,7 @@ import type {
   SelectValue,
 } from '../components/ui/select.js';
 import type { Button } from '../components/ui/button.js';
+import type { TechnicalId } from '../components/refs/technical-id.js';
 import type {
   Card,
   CardContent,
@@ -47,6 +48,7 @@ export interface FrontendExtensionHost {
     CardTitle: typeof CardTitle;
     CardContent: typeof CardContent;
     CardDescription: typeof CardDescription;
+    TechnicalId: typeof TechnicalId;
   };
 }
 
@@ -64,6 +66,7 @@ export interface SlotContextMap {
     enabledExtensions: string[];
     admin: boolean;
     observedStatus: string;
+    grant: OpaqueExtensionMap | null;
     value: OpaqueExtensionMap;
     onChange: (next: OpaqueExtensionMap) => void;
     onSubmit: (extensionId: string, payload: unknown) => void;
@@ -72,6 +75,7 @@ export interface SlotContextMap {
   'container.overview': {
     value: OpaqueExtensionMap;
     serverId: string;
+    admin: boolean;
   };
   'grant.server': {
     serverId: string;

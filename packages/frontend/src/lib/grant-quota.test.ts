@@ -6,6 +6,7 @@ import {
   formatGrantBytes,
   formatGrantQuotaLine,
   formatGrantQuotaParts,
+  formatQuotaDimension,
   formatRemainingBytes,
   formatRemainingCpu,
 } from './grant-quota.js';
@@ -100,5 +101,25 @@ describe('formatRemainingCpu / formatRemainingBytes', () => {
     expect(formatRemainingBytes(100 * GIB, 20 * GIB)).toBe('80G');
     expect(formatRemainingBytes(100 * GIB, 200 * GIB)).toBe('0G');
     expect(formatRemainingCpu(2000, 0)).toBe('2C');
+  });
+});
+
+describe('formatQuotaDimension', () => {
+  it('pairs used / limit / remaining for cpu and bytes', () => {
+    expect(formatQuotaDimension(4000, 1000, 'cpu')).toEqual({
+      used: '1C',
+      limit: '4C',
+      remaining: '3C',
+    });
+    expect(formatQuotaDimension(100 * GIB, 20 * GIB, 'bytes')).toEqual({
+      used: '20G',
+      limit: '100G',
+      remaining: '80G',
+    });
+    expect(formatQuotaDimension(null, 20 * GIB, 'bytes')).toEqual({
+      used: '20G',
+      limit: '不限',
+      remaining: '不限',
+    });
   });
 });

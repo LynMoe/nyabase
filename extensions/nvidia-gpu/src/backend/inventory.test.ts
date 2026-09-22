@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { NVIDIA_GPU_SMI_INDEX_METRIC } from '../metrics.js';
-import { GpuGrantMode } from '../schema.js';
+
 import {
   applyNvidiaSmiIndexes,
   filterGpuInventoryByGrant,
@@ -69,11 +69,9 @@ describe('filterGpuInventoryByGrant', () => {
     { index: 0, pciAddress: '00000000:a1:00.0', model: 'B' },
   ];
 
-  it('returns empty for none, all for all, and preserves nvidia-smi indices for pci', () => {
-    expect(filterGpuInventoryByGrant(items, { mode: GpuGrantMode.None, pciAddresses: [] })).toEqual([]);
-    expect(filterGpuInventoryByGrant(items, { mode: GpuGrantMode.All, pciAddresses: [] })).toEqual(items);
+  it('returns empty for an empty list and preserves nvidia-smi indices for granted cards', () => {
+    expect(filterGpuInventoryByGrant(items, { pciAddresses: [] })).toEqual([]);
     expect(filterGpuInventoryByGrant(items, {
-      mode: GpuGrantMode.Pci,
       pciAddresses: ['0000:a1:00.0'],
     })).toEqual([{ index: 0, pciAddress: '00000000:a1:00.0', model: 'B' }]);
   });

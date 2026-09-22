@@ -321,6 +321,11 @@ export interface IncusClientPort {
     options?: IncusRequestOptions,
   ): Promise<IncusResponse<unknown>>;
   deleteImage(fingerprint: string, options?: IncusRequestOptions): Promise<IncusResponse<unknown>>;
+  createImageAlias(
+    document: IncusSchema<'ImageAliasesPost'>,
+    options?: IncusRequestOptions,
+  ): Promise<IncusResponse<unknown>>;
+  deleteImageAlias(name: string, options?: IncusRequestOptions): Promise<IncusResponse<unknown>>;
   getOperationWait(
     operationId: string,
     options?: IncusOperationWaitOptions,
@@ -381,6 +386,22 @@ function headerValue(headers: IncomingHttpHeaders, name: string): string | undef
 function encodeSegment(value: string, label: string): string {
   if (!value || value === '.' || value === '..' || /[\u0000-\u001f\u007f/\\]/.test(value)) {
     throw new IncusError('INCUS_BAD_REQUEST', 'managed_failure', { reason: label });
+  }
+  return encodeURIComponent(value);
+}
+
+/** Image alias names may contain `/` (e.g. ubuntu/24.04). Do not use encodeSegment. */
+export function encodeImageAliasName(value: string): string {
+  if (
+    !value
+    || value === '.'
+    || value === '..'
+    || value.includes('//')
+    || value.startsWith('/')
+    || value.endsWith('/')
+    || /[\u0000-\u001f\u007f\\]/.test(value)
+  ) {
+    throw new IncusError('INCUS_BAD_REQUEST', 'managed_failure', { reason: 'image_alias' });
   }
   return encodeURIComponent(value);
 }
@@ -1189,6 +1210,36 @@ export class IncusClient implements IncusClientPort {
     );
   }
 
+  createImageAlias(
+    document: IncusSchema<'ImageAliasesPost'>,
+    options?: IncusRequestOptions,
+  ): Promise<IncusResponse<unknown>> {
+    return this.requestJson('POST', '/1.0/images/aliases', { ...options, body: document });
+  }
+
+  async deleteImageAlias(
+    name: string,
+    options?: IncusRequestOptions,
+  ): Promise<IncusResponse<unknown>> {
+    try {
+      return await this.requestJson(
+        'DELETE',
+        `/1.0/images/aliases/${encodeImageAliasName(name)}`,
+        options,
+      );
+    } catch (error) {
+      if (error instanceof IncusError && error.code === 'INCUS_NOT_FOUND') {
+        return {
+          status: 404,
+          headers: {},
+          envelope: { type: 'sync', status: 'Success', status_code: 200, metadata: {} },
+          metadata: {},
+        };
+      }
+      throw error;
+    }
+  }
+
   getOperationWait(
     operationId: string,
     options: IncusOperationWaitOptions = {},
@@ -1409,7 +1460,7 @@ export class IncusClient implements IncusClientPort {
       !path.startsWith('/') ||
       path.startsWith('//') ||
       /[\u0000-\u001f\u007f]/.test(path) ||
-      /%2e|%2f|%5c/i.test(rawPath)
+      /%2e|%5c/i.test(rawPath)
     ) {
       throw new IncusError('INCUS_BAD_REQUEST', 'managed_failure', { reason: 'path' });
     }

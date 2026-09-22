@@ -74,10 +74,10 @@ export class PgAuditSnapshotResolver implements AuditSnapshotResolver {
 
   private async image(executor: AuditExecutor, id: string) {
     const row = await executor.selectFrom('infra.images')
-      .select(['name', 'alias', 'fingerprint', 'is_active', 'description'])
+      .select(['alias', 'fingerprint', 'is_active', 'description'])
       .where('id', '=', id)
       .executeTakeFirst();
-    return row ? snapshot(id, 'image', row.name, {
+    return row ? snapshot(id, 'image', row.alias, {
       alias: row.alias,
       fingerprint: row.fingerprint,
       isActive: row.is_active,

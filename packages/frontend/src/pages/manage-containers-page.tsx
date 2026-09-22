@@ -15,7 +15,7 @@ import { SectionCard } from '../components/layout/section-card.js';
 import { queryKeys } from '../lib/query-keys.js';
 import { queryPollInterval } from '../lib/query-lifecycle.js';
 import { runGatedMutation } from '../lib/resource-mutation-gate.js';
-import { actionProgressHint, containerActionSubmittedTitle } from '../lib/status-labels.js';
+import { containerActionSubmittedTitle } from '../lib/status-labels.js';
 import { toast } from '../hooks/use-toast.js';
 
 export default function ManageContainersPage() {
@@ -31,7 +31,6 @@ export default function ManageContainersPage() {
     onSuccess: (_intent, variables) => {
       toast({
         title: containerActionSubmittedTitle(variables.actionName),
-        description: actionProgressHint('list'),
       });
       void queryClient.invalidateQueries({ queryKey: queryKeys.containers.adminList });
     },

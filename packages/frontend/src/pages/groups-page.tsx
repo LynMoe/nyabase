@@ -7,7 +7,7 @@ import { api } from '../lib/api.js';
 import { errorMessage } from '../lib/api-error.js';
 import { Badge } from '../components/ui/badge.js';
 import { Button } from '../components/ui/button.js';
-import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '../components/ui/dialog.js';
+import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from '../components/ui/dialog.js';
 import { Input } from '../components/ui/input.js';
 import { ConfirmDialog } from '../components/layout/confirm-dialog.js';
 import { FormField } from '../components/layout/form-field.js';
@@ -54,9 +54,9 @@ export default function GroupsPage() {
       <PageHeader
         title="用户组"
         description={
-          groupsQuery.data
-            ? `${groupsQuery.data.length} 个用户组 · 点进详情查看成员与授权`
-            : '点进详情查看成员与授权'
+          groupsQuery.data && groupsQuery.data.length > 0
+            ? `${groupsQuery.data.length} 个用户组`
+            : undefined
         }
         actions={
           canManageGroups ? (
@@ -173,7 +173,6 @@ function CreateGroupDialog({ open, onOpenChange }: { open: boolean; onOpenChange
       <DialogContent>
         <DialogHeader>
           <DialogTitle>新建用户组</DialogTitle>
-          <DialogDescription>创建后可在用户组详情中设置成员与授权。</DialogDescription>
         </DialogHeader>
         <div className="space-y-3">
           <FormField id="new-group-name" label="名称">

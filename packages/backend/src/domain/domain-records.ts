@@ -43,7 +43,6 @@ export interface ServerRecord {
 
 export interface ImageRecord {
   id: string;
-  name: string;
   alias: string;
   fingerprint: string | null;
   description: string | null;

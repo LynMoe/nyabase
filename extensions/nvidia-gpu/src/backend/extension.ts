@@ -9,7 +9,7 @@ import {
   NVIDIA_GPU_LABEL_VALIDATORS,
   NVIDIA_GPU_METRIC_DEFINITIONS,
 } from '../metrics.js';
-import { GpuGrantMode, type NvidiaGpuGrant } from '../schema.js';
+import { type NvidiaGpuGrant } from '../schema.js';
 import type { ServerCardExtension } from '../types.js';
 import {
   admitNvidiaGpuCreate,
@@ -59,7 +59,7 @@ export function createNvidiaGpuExtension(): ServerCardExtension {
       if (input.grantPayload != null) {
         grant = parseNvidiaGpuGrant(input.grantPayload);
       } else if (!input.admin) {
-        grant = { mode: GpuGrantMode.None, pciAddresses: [] };
+        grant = { pciAddresses: [] };
       }
       return {
         items: listNvidiaGpuDevices({

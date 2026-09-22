@@ -5,15 +5,12 @@ import {
   CircleAlert,
   CircleCheck,
   Container,
+  Gauge,
+  Loader2,
   Server,
 } from 'lucide-react';
 import {
   type ContainerDto,
-  type EffectiveAccessDto,
-  type EffectiveServerAccessDto,
-  type EffectiveSharedBackendAccessDto,
-  type SharedBackendDto,
-  type StorageCapacityDto,
   type UserServerDto,
 } from '@nyabase/common';
 import { api } from '../lib/api.js';
@@ -23,15 +20,11 @@ import { PageHeader } from '../components/layout/page-header.js';
 import { QueryView } from '../components/layout/query-view.js';
 import { Card, CardContent, CardHeader, CardTitle } from '../components/ui/card.js';
 import { Badge } from '../components/ui/badge.js';
+import { Button } from '../components/ui/button.js';
 import { formatBytes, formatCpu, relativeTime } from '../lib/utils.js';
-import {
-  formatConsumedQuotaParts,
-  formatGrantBytes,
-  formatGrantQuotaLine,
-} from '../lib/grant-quota.js';
-import { formatExtensionGrantSummaries } from '../extensions/registry.js';
+import { containerInProgress } from '../lib/in-progress.js';
 import { containerStatusLabel, serverStatusLabel } from '../lib/status-labels.js';
-import { queryPollInterval } from '../lib/query-lifecycle.js';
+import { queryPollInterval, refetchWhileInProgress } from '../lib/query-lifecycle.js';
 import { queryKeys } from '../lib/query-keys.js';
 
 export default function DashboardPage() {
@@ -43,22 +36,24 @@ export default function DashboardPage() {
   const containersQuery = useQuery({
     queryKey: queryKeys.containers.userList,
     queryFn: () => api.get<ContainerDto[]>('/containers'),
-    refetchInterval: (query) => queryPollInterval(query.state, { activeIntervalMs: 15_000 }),
-  });
-  const accessQuery = useQuery({
-    queryKey: queryKeys.meAccess,
-    queryFn: () => api.get<EffectiveAccessDto>('/me/access'),
-    refetchInterval: (query) => queryPollInterval(query.state, { activeIntervalMs: 30_000 }),
-  });
-  const backendsQuery = useQuery({
-    queryKey: queryKeys.sharedBackends.user,
-    queryFn: () => api.get<SharedBackendDto[]>('/shared-backends'),
-    enabled: (accessQuery.data?.sharedBackends.length ?? 0) > 0,
+    refetchInterval: (query) => refetchWhileInProgress(query.state, {
+      steadyIntervalMs: 15_000,
+      isSettled: (containers) => containers.every((container) => !containerInProgress(container)),
+    }),
   });
 
   return (
     <Page testId="incus-resource-dashboard">
-      <PageHeader title="资源概览" description="当前用户可见的服务器与容器状态。" />
+      <PageHeader
+        title="资源概览"
+        actions={
+          <Button variant="outline" asChild>
+            <Link to="/quota">
+              <Gauge className="h-4 w-4" />配额
+            </Link>
+          </Button>
+        }
+      />
       <QueryView
         queries={[serversQuery, containersQuery]}
         resourceNames={['服务器资源', '容器资源']}
@@ -68,9 +63,6 @@ export default function DashboardPage() {
           <DashboardBody
             servers={serversQuery.data ?? []}
             containers={containersQuery.data ?? []}
-            grants={accessQuery.data?.servers}
-            sharedBackends={accessQuery.data?.sharedBackends}
-            backends={backendsQuery.data}
           />
         )}
       </QueryView>
@@ -81,21 +73,14 @@ export default function DashboardPage() {
 function DashboardBody({
   servers,
   containers,
-  grants,
-  sharedBackends,
-  backends,
 }: {
   servers: UserServerDto[];
   containers: ContainerDto[];
-  grants: EffectiveServerAccessDto[] | undefined;
-  sharedBackends: EffectiveSharedBackendAccessDto[] | undefined;
-  backends: SharedBackendDto[] | undefined;
 }) {
   const running = containers.filter((container) => container.actual.status === 'running').length;
   const stopped = containers.filter((container) => container.actual.status !== 'running').length;
   const attention = containers.filter((container) => container.needsAttention).length;
   const online = servers.filter((server) => server.status === 'online').length;
-  const grantByServer = new Map((grants ?? []).map((grant) => [grant.serverId, grant]));
 
   return (
     <>
@@ -118,12 +103,7 @@ function DashboardBody({
               <p className="text-sm text-muted-foreground">暂无可见服务器。</p>
             ) : (
               servers.map((server) => (
-                <ServerHealthRow
-                  key={server.id}
-                  server={server}
-                  grant={grantByServer.get(server.id)}
-                  containers={containers.filter((container) => container.serverId === server.id)}
-                />
+                <ServerHealthRow key={server.id} server={server} />
               ))
             )}
           </CardContent>
@@ -146,54 +126,12 @@ function DashboardBody({
           </CardContent>
         </Card>
       </div>
-
-      {(sharedBackends ?? []).length > 0 && (
-        <Card data-testid="incus-shared-quota">
-          <CardHeader>
-            <CardTitle className="flex items-center gap-2 text-base">共享存储</CardTitle>
-          </CardHeader>
-          <CardContent className="space-y-2">
-            {(sharedBackends ?? []).map((access) => {
-              const backend = (backends ?? []).find((item) => item.id === access.sharedBackendId);
-              const name = backend?.displayName ?? backend?.name ?? access.sharedBackendId;
-              const booked = formatConsumedQuotaParts({
-                cpuMillis: null,
-                memBytes: access.usedBytes,
-                diskBytes: null,
-              }).join(' / ');
-              return (
-                <div key={access.sharedBackendId} className="rounded-md border p-3 text-sm">
-                  <p className="truncate font-medium">{name}</p>
-                  <p className="mt-1 text-xs text-muted-foreground">
-                    已预订 {booked} / 额度 {formatGrantBytes(access.limitBytes)}
-                  </p>
-                </div>
-              );
-            })}
-          </CardContent>
-        </Card>
-      )}
     </>
   );
 }
 
-function ServerHealthRow({
-  server,
-  grant,
-  containers,
-}: {
-  server: UserServerDto;
-  grant: EffectiveServerAccessDto | undefined;
-  containers: ContainerDto[];
-}) {
+function ServerHealthRow({ server }: { server: UserServerDto }) {
   const healthy = server.status === 'online';
-  const capacityQuery = useQuery({
-    queryKey: queryKeys.storageCapacity(server.id),
-    queryFn: () => api.get<StorageCapacityDto>(`/servers/${server.id}/storage-capacity`),
-    enabled: server.status === 'online',
-    refetchInterval: (query) => queryPollInterval(query.state, { activeIntervalMs: 30_000 }),
-  });
-
   return (
     <div className="flex items-start justify-between gap-3 rounded-md border p-3">
       <div className="min-w-0">
@@ -204,30 +142,6 @@ function ServerHealthRow({
         <p className="mt-1 text-xs text-muted-foreground">
           最近观测 {relativeTime(server.lastSeenAt)}
         </p>
-        {grant && (
-          <div className="mt-1 space-y-0.5 text-xs text-muted-foreground">
-            <p>
-              额度 {formatGrantQuotaLine(grant, formatExtensionGrantSummaries(grant.extensionGrants))}
-            </p>
-            <p>
-              已分配 {formatConsumedQuotaParts({
-                cpuMillis: containers.reduce((sum, item) => sum + item.cpuMillis, 0),
-                memBytes: containers.reduce((sum, item) => sum + item.memBytes, 0),
-                diskBytes: null,
-              }).join(' / ')}
-            </p>
-            {capacityQuery.data && (
-              <p>
-                已预订 {formatConsumedQuotaParts({
-                  cpuMillis: null,
-                  memBytes: null,
-                  diskBytes: capacityQuery.data.usedByRootDisksBytes
-                    + capacityQuery.data.usedByLocalVolumesBytes,
-                }).join(' / ')}
-              </p>
-            )}
-          </div>
-        )}
       </div>
       <Badge variant={healthy ? 'success' : 'destructive'} title={server.status}>
         {healthy ? '健康' : serverStatusLabel(server.status)}
@@ -254,6 +168,7 @@ function ContainerResourceRow({ container }: { container: ContainerDto }) {
       <div className="shrink-0 text-right text-xs text-muted-foreground">
         <div className="flex items-center justify-end gap-1">
           {status === 'running' ? <CircleCheck className="h-3.5 w-3.5 text-emerald-600 dark:text-emerald-300" /> : <CircleAlert className="h-3.5 w-3.5" />}
+          {containerInProgress(container) ? <Loader2 className="h-3 w-3 animate-spin" aria-hidden /> : null}
           <span title={status}>{containerStatusLabel(status)}</span>
         </div>
         <div>{formatCpu(container.cpuMillis)} · {formatBytes(container.memBytes)}</div>

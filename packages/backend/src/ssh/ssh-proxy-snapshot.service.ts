@@ -190,7 +190,6 @@ export class SshProxySnapshotService {
       routedIp: route.routedIp || null,
       status,
       sshStatus: route.sshStatus,
-      containerHostKeyFingerprint: route.containerHostKeyFingerprint,
       observedAt: route.observedAt.toISOString(),
     };
   }

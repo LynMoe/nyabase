@@ -4,9 +4,10 @@ runtime:
   role: all
 
 incus:
-  # Fixed simplestreams image alias used by server preflight probes.
-  preflightImageAlias: ""
-  # Optional immutable image fingerprint when an alias is not used.
+  # Nyabase workload alias from nyabase-images (baked Ubuntu, not vanilla LXC).
+  preflightImageAlias: "ubuntu/24.04"
+  # Required in production: combined squashfs fingerprint of the baked image.
+  # Empty fingerprint is not allowed before opening container create.
   preflightImageFingerprint: ""
   # Fixed HTTPS URL checked from the preflight instance.
   preflightEgressUrl: ""

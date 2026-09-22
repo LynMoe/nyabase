@@ -2,7 +2,7 @@ import { Link } from '@tanstack/react-router';
 import { TriangleAlert } from 'lucide-react';
 import type { ContainerDto } from '@nyabase/common';
 import { ContainerActionBar, type ContainerBarAction } from './container-action-bar.js';
-import { Badge } from '../ui/badge.js';
+import { StatusBadge } from '../layout/status-badge.js';
 import {
   Table,
   TableBody,
@@ -12,6 +12,7 @@ import {
   TableRow,
 } from '../ui/table.js';
 import { useResourceMutationPending } from '../../hooks/use-resource-mutation-gate.js';
+import { containerLifecyclePending, containerStatusPending } from '../../lib/in-progress.js';
 import { formatBytes, formatCpu } from '../../lib/utils.js';
 import { containerStatusLabel, lifecyclePhaseLabel } from '../../lib/status-labels.js';
 import { ResourceRef } from '../refs/resource-ref.js';
@@ -102,16 +103,19 @@ function ContainerTableRow({
       {showServerColumn ? <TableCell>{container.serverName}</TableCell> : null}
       <TableCell className="whitespace-normal">
         <div className="flex flex-wrap items-center gap-1">
-          <Badge
+          <StatusBadge
+            label={containerStatusLabel(status)}
+            raw={status}
+            pending={containerStatusPending(container)}
             variant={status === 'running' ? 'success' : container.needsAttention ? 'destructive' : 'secondary'}
-            title={status}
-          >
-            {containerStatusLabel(status)}
-          </Badge>
+          />
           {container.lifecyclePhase !== 'active' ? (
-            <Badge variant="warning" title={container.lifecyclePhase}>
-              {lifecyclePhaseLabel(container.lifecyclePhase)}
-            </Badge>
+            <StatusBadge
+              label={lifecyclePhaseLabel(container.lifecyclePhase)}
+              raw={container.lifecyclePhase}
+              pending={containerLifecyclePending(container)}
+              variant="warning"
+            />
           ) : null}
           {container.needsAttention ? <TriangleAlert className="h-3.5 w-3.5 text-destructive" aria-label="需要关注" /> : null}
         </div>

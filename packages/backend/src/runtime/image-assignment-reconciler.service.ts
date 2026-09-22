@@ -205,8 +205,7 @@ export class ImageAssignmentReconciler implements ManagedReconciler {
           imageFingerprint(image),
           row.managed_fingerprint,
         ))
-        : images?.find((image) => imageHasAlias(image, desired.alias))
-          ?? this.selectDesiredImage(images ?? [], desired);
+        : this.selectDesiredImage(images ?? [], desired);
       const idempotencyKey = images
         ? [
           'image-scan',
@@ -312,19 +311,20 @@ export class ImageAssignmentReconciler implements ManagedReconciler {
         context.intent,
       );
     }
-    if (
-      assignment.managed_fingerprint
-      && desired.fingerprint !== null
-      && desired.fingerprint !== undefined
-      && !sameFingerprint(assignment.managed_fingerprint, desired.fingerprint)
-    ) {
+    const leftover = await this.findLeftoverPinnedContainers(
+      assignment.server_id,
+      assignment.image_id,
+      desired.fingerprint,
+    );
+    if (leftover) {
       return {
         outcome: 'failed',
         failure: imageFailure(
-          'IMAGE_ASSIGNMENT_FINGERPRINT_MISMATCH',
-          'The managed image fingerprint changed without a cleanup intent',
+          'IMAGE_IN_USE',
+          'Stop and delete instances still pinned to the previous image fingerprint',
           {
-            managedFingerprint: assignment.managed_fingerprint,
+            serverId: assignment.server_id,
+            previousFingerprint: leftover,
             desiredFingerprint: desired.fingerprint,
           },
         ),
@@ -389,6 +389,34 @@ export class ImageAssignmentReconciler implements ManagedReconciler {
           'IMAGE_ASSIGNMENT_FINGERPRINT_MISMATCH',
           'The server image does not match the desired fingerprint',
           { desiredFingerprint: desired.fingerprint, observedFingerprint: fingerprint },
+        ),
+      };
+    }
+    const previous = assignment.managed_fingerprint;
+    const imagesForAlias = (await context.client.listImages(1)).metadata;
+    await this.ensureAliasOnFingerprint(
+      context.client,
+      imagesForAlias,
+      desired.alias,
+      fingerprint,
+      context.intent,
+    );
+    const previousInUse = await this.deletePreviousImageIfUnused(
+      context.client,
+      previous,
+      fingerprint,
+      context.intent,
+    );
+    if (previousInUse) {
+      return {
+        outcome: 'failed',
+        failure: imageFailure(
+          'IMAGE_IN_USE',
+          'Stop and delete instances still using the previous image fingerprint',
+          {
+            previousFingerprint: previous,
+            desiredFingerprint: fingerprint,
+          },
         ),
       };
     }
@@ -536,6 +564,90 @@ export class ImageAssignmentReconciler implements ManagedReconciler {
     };
   }
 
+  private async findLeftoverPinnedContainers(
+    serverId: string,
+    imageId: string,
+    desiredFingerprint: string | null,
+  ): Promise<string | null> {
+    if (desiredFingerprint === null || desiredFingerprint === undefined) return null;
+    const rows = await this.database
+      .selectFrom('control.containers')
+      .select('image_fingerprint')
+      .where('server_id', '=', serverId)
+      .where('image_id', '=', imageId)
+      .where('lifecycle_phase', '!=', 'deleting')
+      .where('image_fingerprint', 'is not', null)
+      .execute();
+    const leftover = rows.find((row) => (
+      row.image_fingerprint
+      && !sameFingerprint(row.image_fingerprint, desiredFingerprint)
+    ));
+    return leftover?.image_fingerprint ?? null;
+  }
+
+  private async ensureAliasOnFingerprint(
+    client: IncusClientPort,
+    images: readonly Image[],
+    alias: string,
+    fingerprint: string,
+    intent: IntentRecord,
+  ): Promise<void> {
+    const target = images.find((image) => sameFingerprint(imageFingerprint(image), fingerprint));
+    if (target && imageHasAlias(target, alias)) return;
+    await auditIncusMutate(this.audit, intent, {
+      method: 'DELETE',
+      path: `/1.0/images/aliases/${alias}`,
+      instanceName: fingerprint,
+    });
+    await client.deleteImageAlias(alias);
+    await auditIncusMutate(this.audit, intent, {
+      method: 'POST',
+      path: '/1.0/images/aliases',
+      instanceName: fingerprint,
+    });
+    await client.createImageAlias({
+      name: alias,
+      target: fingerprint,
+      type: 'container',
+    });
+  }
+
+  private async deletePreviousImageIfUnused(
+    client: IncusClientPort,
+    previous: string | null,
+    desiredFingerprint: string,
+    intent: IntentRecord,
+  ): Promise<boolean> {
+    if (!previous || sameFingerprint(previous, desiredFingerprint)) return false;
+    let image: Image | undefined;
+    try {
+      image = (await client.getImage(previous)).metadata;
+    } catch (error) {
+      if (isNotFound(error)) return false;
+      throw error;
+    }
+    const usedBy = (image as Image & { used_by?: string[] }).used_by ?? [];
+    if (usedBy.length > 0) return true;
+    await auditIncusMutate(this.audit, intent, {
+      method: 'DELETE',
+      path: `/1.0/images/${previous}`,
+      instanceName: previous,
+    });
+    await readAfterTimeout(
+      () => requestAndWait(client, (options) => client.deleteImage(previous, options)),
+      async () => {
+        try {
+          await client.getImage(previous);
+        } catch (error) {
+          if (isNotFound(error)) return undefined;
+          throw error;
+        }
+        throw new Error('IMAGE_DELETE_NOT_CONFIRMED');
+      },
+    );
+    return false;
+  }
+
   private async ensurePulled(
     client: IncusClientPort,
     desired: ImageAssignmentSource,
@@ -559,6 +671,7 @@ export class ImageAssignmentReconciler implements ManagedReconciler {
           client,
           (options) => client.createImage(
             {
+              aliases: [],
               source: {
                 type: 'image',
                 alias: desired.alias,
@@ -567,7 +680,6 @@ export class ImageAssignmentReconciler implements ManagedReconciler {
                 server: desired.sourceServer,
                 image_type: desired.imageType ?? 'container',
               },
-              aliases: [{ name: desired.alias }],
             },
             options,
           ),
@@ -617,14 +729,25 @@ export class ImageAssignmentReconciler implements ManagedReconciler {
       return { outcome: 'succeeded', observedGeneration: assignment.generation };
     }
     if (selected && !sameFingerprint(imageFingerprint(selected), managed)) {
-      return {
-        outcome: 'failed',
-        failure: imageFailure(
-          'IMAGE_ASSIGNMENT_FINGERPRINT_MISMATCH',
-          'The assignment managed fingerprint no longer identifies the selected image',
-          { managedFingerprint: managed, observedFingerprint: imageFingerprint(selected) },
-        ),
-      };
+      const managedImage = images.find((candidate) => sameFingerprint(
+        imageFingerprint(candidate),
+        managed,
+      ));
+      if (!managedImage) {
+        await this.markAssignmentDeleted(assignment, true);
+        return { outcome: 'succeeded', observedGeneration: assignment.generation };
+      }
+      const usedBy = (managedImage as Image & { used_by?: string[] }).used_by ?? [];
+      if (usedBy.length > 0) {
+        return {
+          outcome: 'failed',
+          failure: imageFailure(
+            'IMAGE_IN_USE',
+            'Stop and delete instances still using the managed image fingerprint',
+            { managedFingerprint: managed, observedFingerprint: imageFingerprint(selected) },
+          ),
+        };
+      }
     }
     const image = images.find((candidate) => sameFingerprint(imageFingerprint(candidate), managed));
     if (!image) {

@@ -15,6 +15,7 @@
     "src/metrics.ts",
     "src/types.ts",
     "src/grant-state.ts",
+    "src/selection.ts",
     "src/**/*.test.ts",
     "src/backend/**/*.ts",
     "src/agent/**/*.ts"

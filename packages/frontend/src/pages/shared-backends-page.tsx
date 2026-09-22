@@ -26,6 +26,7 @@ import { Page } from '../components/layout/page.js';
 import { PageHeader } from '../components/layout/page-header.js';
 import { QueryView } from '../components/layout/query-view.js';
 import { SectionCard } from '../components/layout/section-card.js';
+import { TechnicalId } from '../components/refs/technical-id.js';
 import { FsidConflictAlert } from '../components/storage/fsid-conflict-alert.js';
 import { approxGibHint, formatPercent, sharedBackendAvailableBytes } from '../lib/utils.js';
 import { toast } from '../hooks/use-toast.js';
@@ -53,7 +54,6 @@ export default function SharedBackendsPage() {
     <Page testId="shared-backends">
       <PageHeader
         title="共享存储"
-        description="登记 CephFS 后端。点进详情可发现执行端、查看租户共享卷。"
         actions={
           <>
             <Button
@@ -78,7 +78,7 @@ export default function SharedBackendsPage() {
         showEmpty={backendsQuery.data?.length === 0}
         empty={
           <EmptyState
-            title="暂无共享存储。登记 CephFS 后端后可在「共享卷」页预订容量。"
+            title="暂无共享存储。"
             action={<Button onClick={() => setCreateOpen(true)}><Plus className="h-4 w-4" />登记后端</Button>}
           />
         }
@@ -133,13 +133,11 @@ function BackendRow({ backend }: { backend: SharedBackendDto }) {
           to="/shared-backends/$id"
           params={{ id: backend.id }}
           search={{ tab: 'overview' }}
-          className="block min-w-0"
+          className="block min-w-0 font-medium"
         >
-          <p className="font-medium">{backend.displayName ?? backend.name}</p>
-          <p className="mt-0.5 truncate font-mono text-xs text-muted-foreground" title={backend.identityKey}>
-            {backend.identityKey}
-          </p>
+          {backend.displayName ?? backend.name}
         </Link>
+        <TechnicalId label="Identity key" value={backend.identityKey} kind="opaque" />
       </TableCell>
       <TableCell>{bytesLabel(backend.totalBytes)}</TableCell>
       <TableCell>{bytesLabel(backend.usedBytes)}</TableCell>

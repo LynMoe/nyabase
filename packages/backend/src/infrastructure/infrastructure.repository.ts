@@ -408,7 +408,7 @@ export class InfrastructureRepository {
   }
 
   listImages(executor: InfrastructureExecutor = this.database) {
-    return executor.selectFrom('infra.images').selectAll().orderBy('name').orderBy('id').execute();
+    return executor.selectFrom('infra.images').selectAll().orderBy('alias').orderBy('id').execute();
   }
 
   findImageById(id: string, executor: InfrastructureExecutor = this.database) {

@@ -12,6 +12,7 @@ import operationAcceptedResponse from './fixtures/operation-accepted.json';
 import serverResponse from './fixtures/server.json';
 import {
   IncusClient,
+  encodeImageAliasName,
   type IncusClientOptions,
   type IncusRequestFactory,
   type IncusRequestLike,
@@ -163,6 +164,20 @@ function client(driver: RequestDriver, overrides: Partial<IncusClientOptions> = 
 function fixture(value: unknown): string {
   return JSON.stringify(value);
 }
+
+describe('encodeImageAliasName', () => {
+  it('encodes slashy catalog aliases without using encodeSegment rules', () => {
+    expect(encodeImageAliasName('ubuntu/24.04')).toBe('ubuntu%2F24.04');
+    expect(encodeImageAliasName('ubuntu/noble/default')).toBe('ubuntu%2Fnoble%2Fdefault');
+  });
+
+  it('rejects empty, dot, and backslash names', () => {
+    expect(() => encodeImageAliasName('')).toThrow();
+    expect(() => encodeImageAliasName('.')).toThrow();
+    expect(() => encodeImageAliasName('..')).toThrow();
+    expect(() => encodeImageAliasName('ubuntu\\24.04')).toThrow();
+  });
+});
 
 describe('IncusClient', () => {
   it('uses the bounded mTLS request transport and preserves request semantics', async () => {
@@ -347,8 +362,36 @@ describe('IncusClient', () => {
     });
   });
 
+  it('treats deleteImageAlias 404 as success', async () => {
+    const driver = new RequestDriver([
+      {
+        status: 404,
+        body: fixture({
+          type: 'error',
+          status_code: 0,
+          error_code: 404,
+          error: 'Not Found',
+          metadata: null,
+        }),
+      },
+    ]);
+    const incus = client(driver);
+
+    await expect(incus.deleteImageAlias('ubuntu/24.04')).resolves.toMatchObject({
+      status: 404,
+      envelope: {
+        type: 'sync',
+        status_code: 200,
+      },
+    });
+    expect(driver.requests[0]!.options).toMatchObject({
+      method: 'DELETE',
+      path: '/1.0/images/aliases/ubuntu%2F24.04',
+    });
+  });
+
   it('covers the canonical server, instance, storage, image, and operation endpoints', async () => {
-    const responsePlans = Array.from({ length: 31 }, () => ({
+    const responsePlans = Array.from({ length: 33 }, () => ({
       status: 200,
       body: fixture(serverResponse),
     }));
@@ -393,6 +436,8 @@ describe('IncusClient', () => {
     await incus.createImage({});
     await incus.updateImage(fingerprint, {});
     await incus.deleteImage(fingerprint);
+    await incus.createImageAlias({ name: 'ubuntu/24.04', target: fingerprint });
+    await incus.deleteImageAlias('ubuntu/24.04');
     await incus.getOperation('11111111-1111-4111-8111-111111111111');
     await incus.getOperationWait('11111111-1111-4111-8111-111111111111', { timeoutMs: 1500 });
 
@@ -430,6 +475,8 @@ describe('IncusClient', () => {
       { method: 'POST', path: '/1.0/images' },
       { method: 'PUT', path: `/1.0/images/${fingerprint}` },
       { method: 'DELETE', path: `/1.0/images/${fingerprint}` },
+      { method: 'POST', path: '/1.0/images/aliases' },
+      { method: 'DELETE', path: '/1.0/images/aliases/ubuntu%2F24.04' },
       { method: 'GET', path: '/1.0/operations/11111111-1111-4111-8111-111111111111' },
       {
         method: 'GET',

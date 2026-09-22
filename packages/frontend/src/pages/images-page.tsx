@@ -12,7 +12,9 @@ import { PageHeader } from '../components/layout/page-header.js';
 import { QueryView } from '../components/layout/query-view.js';
 import { ImageCatalogDialog } from '../components/images/image-catalog-dialog.js';
 import { ImageList } from '../components/images/image-list.js';
+import { assignmentInProgress, imageInProgress } from '../lib/in-progress.js';
 import { queryKeys } from '../lib/query-keys.js';
+import { refetchWhileInProgress } from '../lib/query-lifecycle.js';
 import { toast } from '../hooks/use-toast.js';
 
 export default function ImagesPage() {
@@ -22,6 +24,11 @@ export default function ImagesPage() {
   const imagesQuery = useQuery({
     queryKey: queryKeys.images.admin,
     queryFn: () => api.get<AdminImageDto[]>('/admin/images'),
+    refetchInterval: (query) => refetchWhileInProgress(query.state, {
+      steadyIntervalMs: false,
+      isSettled: (images) => images.every((image) => !imageInProgress(image)
+        && image.assignments.every((assignment) => !assignmentInProgress(assignment))),
+    }),
   });
   const invalidate = () => {
     void queryClient.invalidateQueries({ queryKey: queryKeys.images.admin });
@@ -49,7 +56,6 @@ export default function ImagesPage() {
     <Page>
       <PageHeader
         title="镜像"
-        description="从镜像源列出并添加系统镜像，再按服务器拉取指纹。"
         actions={
           <>
             <Button variant="outline" size="icon" onClick={() => { void imagesQuery.refetch(); }} disabled={imagesQuery.isFetching} aria-label="刷新镜像">

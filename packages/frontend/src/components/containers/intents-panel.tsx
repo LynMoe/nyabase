@@ -2,10 +2,11 @@ import type { ReactNode } from 'react';
 import { useMutation } from '@tanstack/react-query';
 import { IntentStatus, type IntentDto, type UserDto } from '@nyabase/common';
 import { errorMessage } from '../../lib/api-error.js';
-import { Badge } from '../ui/badge.js';
 import { Button } from '../ui/button.js';
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '../ui/card.js';
+import { Card, CardContent, CardHeader, CardTitle } from '../ui/card.js';
+import { StatusBadge } from '../layout/status-badge.js';
 import { toast } from '../../hooks/use-toast.js';
+import { intentPending } from '../../lib/in-progress.js';
 import { intentKindLabel, intentStatusLabel } from '../../lib/status-labels.js';
 import {
   currentOutstandingIntents,
@@ -80,12 +81,12 @@ export function IntentRow({
     <div className="space-y-1 px-3 py-3 text-sm">
       <div className="flex flex-wrap items-center justify-between gap-2">
         <span className="font-medium">{intentKindLabel(intent.kind)}</span>
-        <Badge
-          title={intent.status}
+        <StatusBadge
+          label={intentStatusLabel(intent.status)}
+          raw={intent.status}
+          pending={intentPending(intent.status)}
           variant={intent.status === IntentStatus.Succeeded ? 'success' : intent.status === IntentStatus.Failed ? 'destructive' : 'warning'}
-        >
-          {intentStatusLabel(intent.status)}
-        </Badge>
+        />
       </div>
       <div className="text-xs text-muted-foreground">
         {meta.map((part, index) => (
@@ -150,7 +151,6 @@ export function IntentsPanel({
     <Card data-testid="intent-history">
       <CardHeader>
         <CardTitle className="text-base">意图历史</CardTitle>
-        <CardDescription>显示请求人、操作类型、尝试次数、结果与错误说明。</CardDescription>
       </CardHeader>
       <CardContent>
         {list}

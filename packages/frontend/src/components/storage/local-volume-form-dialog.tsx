@@ -119,10 +119,7 @@ export function LocalVolumeFormDialog({
   const createLocal = useMutation({
     mutationFn: (body: CreateVolumeRequest) => api.post<unknown>('/volumes', body),
     onSuccess: () => {
-      toast({
-        title: '创建已提交',
-        description: '列表状态稍后更新；若出现「需要关注」，请查看卡片上的说明。',
-      });
+      toast({ title: '创建已提交' });
       invalidateVolumeLists();
       onOpenChange(false);
     },
@@ -232,18 +229,12 @@ export function LocalVolumeFormDialog({
   };
 
   const description = !editing
-    ? (createQuotaBlocked
-      ? quotaIneffectiveCreateHint()
-      : '选择服务器和存储池创建本地数据卷。')
+    ? (createQuotaBlocked ? quotaIneffectiveCreateHint() : null)
     : editQuotaBlocked
       ? quotaIneffectiveResizeHint()
       : path === 'never'
         ? shrinkNeverTooltip()
-        : path === 'requires_stop'
-          ? '缩容需要先卸载全部挂载；将引导一键卸载 → 缩容 → 可选挂回。'
-          : path === 'online'
-            ? '在线缩容：仅校验目标容量不小于已用量。'
-            : '扩容在线执行；同名或同容量保存会直接更新。';
+        : null;
 
   return (
     <>
@@ -251,7 +242,7 @@ export function LocalVolumeFormDialog({
         <DialogContent data-testid="volume-form">
           <DialogHeader>
             <DialogTitle>{editing ? '编辑数据卷' : '新建数据卷'}</DialogTitle>
-            <DialogDescription>{description}</DialogDescription>
+            {description ? <DialogDescription>{description}</DialogDescription> : null}
           </DialogHeader>
           <div className="space-y-3">
             <FormField id="volume-name" label="名称">

@@ -71,7 +71,6 @@ export const zSshProxyInstanceRouteSnapshot = z.object({
   routedIp: zAscii(15).nullable(),
   status: z.nativeEnum(ContainerStatus),
   sshStatus: z.enum(['disabled', 'container_stopped', 'running', 'error', 'unknown']),
-  containerHostKeyFingerprint: zAscii(128).nullable(),
   observedAt: zAscii(64),
 }).strict();
 

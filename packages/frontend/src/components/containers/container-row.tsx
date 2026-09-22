@@ -1,9 +1,10 @@
 import { Link } from '@tanstack/react-router';
 import { ChevronRight, TriangleAlert } from 'lucide-react';
 import type { ContainerAction, ContainerDto } from '@nyabase/common';
-import { Badge } from '../ui/badge.js';
+import { StatusBadge } from '../layout/status-badge.js';
 import { Button } from '../ui/button.js';
 import { useResourceMutationPending } from '../../hooks/use-resource-mutation-gate.js';
+import { containerLifecyclePending, containerStatusPending } from '../../lib/in-progress.js';
 import { formatBytes, formatCpu } from '../../lib/utils.js';
 import { containerStatusLabel, lifecyclePhaseLabel } from '../../lib/status-labels.js';
 import { ResourceRef } from '../refs/resource-ref.js';
@@ -27,17 +28,21 @@ export function ContainerRow({
       <Link to={detailTo} params={{ containerId: container.id }} search={{ tab: 'overview' }} className="min-w-0 flex-1">
         <div className="flex min-w-0 items-center gap-2">
           <span className="min-w-0 flex-1 truncate text-sm font-medium">{container.name}</span>
-          <Badge
-            className="shrink-0 whitespace-nowrap"
-            variant={status === 'running' ? 'success' : container.needsAttention ? 'destructive' : 'secondary'}
-            title={status}
-          >
-            {containerStatusLabel(status)}
-          </Badge>
+          <span className="shrink-0 whitespace-nowrap">
+            <StatusBadge
+              label={containerStatusLabel(status)}
+              raw={status}
+              pending={containerStatusPending(container)}
+              variant={status === 'running' ? 'success' : container.needsAttention ? 'destructive' : 'secondary'}
+            />
+          </span>
           {container.lifecyclePhase !== 'active' && (
-            <Badge variant="warning" title={container.lifecyclePhase}>
-              {lifecyclePhaseLabel(container.lifecyclePhase)}
-            </Badge>
+            <StatusBadge
+              label={lifecyclePhaseLabel(container.lifecyclePhase)}
+              raw={container.lifecyclePhase}
+              pending={containerLifecyclePending(container)}
+              variant="warning"
+            />
           )}
           {container.needsAttention && <TriangleAlert className="h-3.5 w-3.5 text-destructive" aria-label="需要关注" />}
         </div>

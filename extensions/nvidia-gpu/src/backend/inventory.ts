@@ -1,7 +1,7 @@
 import type { NodeMetricSample } from '@nyabase/common';
 import { NVIDIA_GPU_SMI_INDEX_METRIC } from '../metrics.js';
 import { canonicalPciAddress } from '../pci.js';
-import { GpuGrantMode, type NvidiaGpuDeviceDto, type NvidiaGpuGrant } from '../schema.js';
+import { type NvidiaGpuDeviceDto, type NvidiaGpuGrant } from '../schema.js';
 
 export interface GpuInventoryCard {
   readonly pciAddress: string;
@@ -64,10 +64,9 @@ export function applyNvidiaSmiIndexes(
 
 export function filterGpuInventoryByGrant(
   items: readonly NvidiaGpuDeviceDto[],
-  grant: Pick<NvidiaGpuGrant, 'mode' | 'pciAddresses'>,
+  grant: NvidiaGpuGrant,
 ): NvidiaGpuDeviceDto[] {
-  if (grant.mode === GpuGrantMode.None) return [];
-  if (grant.mode === GpuGrantMode.All) return [...items];
+  if (grant.pciAddresses.length === 0) return [];
   const allowed = new Set(
     grant.pciAddresses
       .map((value) => canonicalPciAddress(value))
@@ -79,7 +78,7 @@ export function filterGpuInventoryByGrant(
 export function listNvidiaGpuDevices(input: {
   readonly resources: unknown;
   readonly metricSamples: readonly NodeMetricSample[];
-  readonly grant: Pick<NvidiaGpuGrant, 'mode' | 'pciAddresses'> | null;
+  readonly grant: NvidiaGpuGrant | null;
   readonly admin: boolean;
 }): NvidiaGpuDeviceDto[] {
   const cards = nvidiaGpuInventoryFromResources(input.resources);

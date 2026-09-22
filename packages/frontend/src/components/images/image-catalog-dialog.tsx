@@ -3,7 +3,8 @@ import type { CatalogImageDto } from '@nyabase/common';
 import { api } from '../../lib/api.js';
 import { errorMessage } from '../../lib/api-error.js';
 import { Button } from '../ui/button.js';
-import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '../ui/dialog.js';
+import { Dialog, DialogContent, DialogHeader, DialogTitle } from '../ui/dialog.js';
+import { TechnicalId } from '../refs/technical-id.js';
 import { formatBytes } from '../../lib/utils.js';
 import { toast } from '../../hooks/use-toast.js';
 import { queryKeys } from '../../lib/query-keys.js';
@@ -39,7 +40,6 @@ export function ImageCatalogDialog({
       <DialogContent data-testid="incus-image-catalog" className="max-w-lg">
         <DialogHeader>
           <DialogTitle>添加镜像</DialogTitle>
-          <DialogDescription>从镜像源选择已发布的系统镜像。不能手写别名。</DialogDescription>
         </DialogHeader>
         {catalogQuery.isLoading ? (
           <p className="text-sm text-muted-foreground">正在读取镜像源...</p>
@@ -54,12 +54,14 @@ export function ImageCatalogDialog({
             {available.map((entry) => (
               <li key={entry.alias} className="flex items-center justify-between gap-3 px-3 py-2">
                 <div className="min-w-0">
-                  <p className="font-medium">{entry.description}</p>
-                  <p className="font-mono text-xs text-muted-foreground">{entry.alias}</p>
+                  <p className="font-medium">{entry.alias}</p>
+                  <p className="truncate text-xs text-muted-foreground">{entry.description}</p>
                   <p className="text-xs text-muted-foreground">
                     {entry.sizeBytes ? formatBytes(entry.sizeBytes) : '大小未知'}
                     {' · '}
-                    {entry.fingerprint.slice(0, 12)}
+                    <span className="text-foreground">
+                      <TechnicalId label="指纹" value={entry.fingerprint} kind="fingerprint" />
+                    </span>
                   </p>
                 </div>
                 <Button

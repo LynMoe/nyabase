@@ -3,6 +3,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Link } from '@tanstack/react-router';
 import { Globe, Pencil, Plus, RefreshCw, Trash2 } from 'lucide-react';
 import {
+  httpProxyWildcardSuffix,
   zCreateHttpProxyBindingRequest,
   type ContainerDto,
   type HttpDomainPoolPublicDto,
@@ -39,10 +40,14 @@ import { SectionCard } from '../components/layout/section-card.js';
 import { queryKeys } from '../lib/query-keys.js';
 import { toast } from '../hooks/use-toast.js';
 import {
+  composeHttpProxyHostname,
   emptyIfNotFound,
   httpProxyBindingStatusLabel,
+  httpProxyDomainRootLabel,
   httpProxyErrorMessage,
   httpProxyWarningLabel,
+  isHttpProxyPrefixLabel,
+  splitHttpProxyHostname,
 } from '../lib/http-proxy.js';
 
 export default function HttpProxyPage() {
@@ -54,6 +59,26 @@ export default function HttpProxyPage() {
     queryKey: queryKeys.httpProxy.bindings,
     queryFn: () => api.get<HttpProxyBindingDto[]>('/http-proxy/bindings'),
   });
+  const poolsQuery = useQuery({
+    queryKey: queryKeys.httpProxy.domainPools,
+    queryFn: () => api.get<HttpDomainPoolPublicDto[]>('/http-proxy/domain-pools')
+      .catch(emptyIfNotFound<HttpDomainPoolPublicDto[]>([])),
+    retry: (count, queryError) => (queryError instanceof ApiError && queryError.status === 404 ? false : count < 2),
+  });
+  const pools = poolsQuery.data ?? [];
+  const canCreate = !poolsQuery.isLoading && pools.length > 0;
+  const createBlockedHint = poolsQuery.isLoading
+    ? '正在加载域名…'
+    : '管理员尚未配置通配域名';
+  const createButton = (
+    <Button
+      onClick={() => setCreateOpen(true)}
+      disabled={!canCreate}
+      title={canCreate ? undefined : createBlockedHint}
+    >
+      <Plus className="h-4 w-4" />新建发布
+    </Button>
+  );
   const remove = useMutation({
     mutationFn: (id: string) => api.delete<unknown>(`/http-proxy/bindings/${id}`),
     onSuccess: () => {
@@ -67,13 +92,12 @@ export default function HttpProxyPage() {
     <Page testId="http-proxy">
       <PageHeader
         title="HTTP 发布"
-        description="把容器端口发布到域名。主机名必须匹配管理员已启用的通配域名。"
         actions={
           <>
             <Button variant="outline" size="icon" onClick={() => { void bindingsQuery.refetch(); }} aria-label="刷新 HTTP 发布">
               <RefreshCw className="h-4 w-4" />
             </Button>
-            <Button onClick={() => setCreateOpen(true)}><Plus className="h-4 w-4" />新建发布</Button>
+            {createButton}
           </>
         }
       />
@@ -85,8 +109,8 @@ export default function HttpProxyPage() {
         empty={
           <EmptyState
             icon={Globe}
-            title="暂无 HTTP 发布。创建后即可把容器端口发布到域名。"
-            action={<Button onClick={() => setCreateOpen(true)}><Plus className="h-4 w-4" />新建发布</Button>}
+            title={canCreate ? '暂无 HTTP 发布。' : '暂无 HTTP 发布。管理员配置通配域名后才能新建。'}
+            action={createButton}
           />
         }
       >
@@ -118,10 +142,11 @@ export default function HttpProxyPage() {
           </SectionCard>
         )}
       </QueryView>
-      <BindingFormDialog open={createOpen} onOpenChange={setCreateOpen} />
+      <BindingFormDialog pools={pools} open={createOpen} onOpenChange={setCreateOpen} />
       {editTarget && (
         <BindingFormDialog
           binding={editTarget}
+          pools={pools}
           open
           onOpenChange={(open) => { if (!open) setEditTarget(null); }}
         />
@@ -177,15 +202,18 @@ function BindingRow({
 
 function BindingFormDialog({
   binding,
+  pools,
   open,
   onOpenChange,
 }: {
   binding?: HttpProxyBindingDto;
+  pools: HttpDomainPoolPublicDto[];
   open: boolean;
   onOpenChange: (open: boolean) => void;
 }) {
   const queryClient = useQueryClient();
-  const [hostname, setHostname] = useState(binding?.hostname ?? '');
+  const [prefix, setPrefix] = useState('');
+  const [poolId, setPoolId] = useState('');
   const [containerId, setContainerId] = useState(binding?.containerId ?? '');
   const [targetPort, setTargetPort] = useState(binding ? String(binding.targetPort) : '80');
   const [error, setError] = useState<string | null>(null);
@@ -193,13 +221,6 @@ function BindingFormDialog({
     queryKey: queryKeys.containers.userList,
     queryFn: () => api.get<ContainerDto[]>('/containers'),
     enabled: open,
-  });
-  const poolsQuery = useQuery({
-    queryKey: queryKeys.httpProxy.domainPools,
-    queryFn: () => api.get<HttpDomainPoolPublicDto[]>('/http-proxy/domain-pools')
-      .catch(emptyIfNotFound<HttpDomainPoolPublicDto[]>([])),
-    enabled: open,
-    retry: (count, queryError) => (queryError instanceof ApiError && queryError.status === 404 ? false : count < 2),
   });
   const create = useMutation({
     mutationFn: (body: { hostname: string; containerId: string; targetPort: number }) =>
@@ -223,18 +244,33 @@ function BindingFormDialog({
   });
   useEffect(() => {
     if (!open) return;
-    setHostname(binding?.hostname ?? '');
+    const split = binding ? splitHttpProxyHostname(binding.hostname, pools) : null;
+    setPrefix(split?.prefix ?? '');
+    setPoolId(split?.poolId ?? pools[0]?.id ?? '');
     setContainerId(binding?.containerId ?? '');
     setTargetPort(binding ? String(binding.targetPort) : '80');
     setError(null);
-  }, [binding, open]);
+  }, [binding, open, pools]);
   const containers = containersQuery.data ?? [];
-  const pools = poolsQuery.data ?? [];
+  const selectedPool = pools.find((pool) => pool.id === poolId) ?? pools[0];
+  const suffix = selectedPool ? httpProxyWildcardSuffix(selectedPool.wildcardDomain) : '';
+  let hostnamePreview: string | undefined;
+  try {
+    if (selectedPool && isHttpProxyPrefixLabel(prefix)) {
+      hostnamePreview = composeHttpProxyHostname(prefix, selectedPool.wildcardDomain);
+    }
+  } catch {
+    hostnamePreview = undefined;
+  }
   const submit = () => {
     setError(null);
     const port = Number(targetPort);
-    if (!hostname.trim()) {
-      setError('请输入主机名');
+    if (!selectedPool) {
+      setError('管理员尚未配置通配域名');
+      return;
+    }
+    if (!isHttpProxyPrefixLabel(prefix)) {
+      setError('请填写单节主机前缀，例如 app');
       return;
     }
     if (!containerId) {
@@ -245,8 +281,15 @@ function BindingFormDialog({
       setError('目标端口必须是 1 到 65535 的整数');
       return;
     }
+    let hostname: string;
+    try {
+      hostname = composeHttpProxyHostname(prefix, selectedPool.wildcardDomain);
+    } catch {
+      setError('前缀与域名根无法组成有效主机名');
+      return;
+    }
     const parsed = zCreateHttpProxyBindingRequest.safeParse({
-      hostname: hostname.trim(),
+      hostname,
       containerId,
       targetPort: port,
     });
@@ -264,29 +307,54 @@ function BindingFormDialog({
         <DialogHeader>
           <DialogTitle>{binding ? '编辑 HTTP 发布' : '新建 HTTP 发布'}</DialogTitle>
           <DialogDescription>
-            主机名必须匹配已启用的通配域名（例如 *.example.com 对应 app.example.com）。
+            选择域名根，只填写前缀。完整主机名形如 app.example.com。
           </DialogDescription>
         </DialogHeader>
         <div className="space-y-3">
-          <FormField id="http-proxy-hostname" label="主机名">
-            <Input
-              id="http-proxy-hostname"
-              className="font-mono"
-              value={hostname}
-              placeholder="app.example.com"
-              onChange={(event) => { setHostname(event.target.value); setError(null); }}
-            />
-          </FormField>
-          {pools.length > 0 ? (
-            <p className="text-xs text-muted-foreground">
-              已启用通配域名：{pools.map((pool) => pool.wildcardDomain).join('、')}
+          {pools.length === 0 ? (
+            <p className="text-sm text-muted-foreground">
+              当前没有已启用的通配域名，请联系管理员在「HTTP 代理」中创建。
             </p>
           ) : (
-            <p className="text-xs text-muted-foreground">
-              {poolsQuery.isLoading
-                ? '正在加载通配域名…'
-                : '当前没有已启用的通配域名，请联系管理员在「HTTP 代理」中创建。'}
-            </p>
+            <>
+              <FormField id="http-proxy-domain-root" label="域名根">
+                <Select
+                  value={selectedPool?.id}
+                  onValueChange={(value) => { setPoolId(value); setError(null); }}
+                >
+                  <SelectTrigger id="http-proxy-domain-root">
+                    <SelectValue placeholder="选择域名根" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {pools.map((pool) => (
+                      <SelectItem key={pool.id} value={pool.id}>
+                        {httpProxyDomainRootLabel(pool.wildcardDomain)}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </FormField>
+              <FormField
+                id="http-proxy-prefix"
+                label="主机前缀"
+                hint={hostnamePreview ? `完整主机名 ${hostnamePreview}` : undefined}
+              >
+                <div className="flex items-center gap-2">
+                  <Input
+                    id="http-proxy-prefix"
+                    className="font-mono"
+                    value={prefix}
+                    placeholder="app"
+                    autoComplete="off"
+                    onChange={(event) => {
+                      setPrefix(event.target.value.toLowerCase().replace(/[^a-z0-9-]/g, ''));
+                      setError(null);
+                    }}
+                  />
+                  <span className="shrink-0 font-mono text-sm text-muted-foreground">{suffix}</span>
+                </div>
+              </FormField>
+            </>
           )}
           <FormField id="http-proxy-container" label="容器">
             <Select
@@ -324,7 +392,10 @@ function BindingFormDialog({
         </div>
         <DialogFooter>
           <Button variant="outline" onClick={() => onOpenChange(false)}>取消</Button>
-          <Button onClick={submit} disabled={create.isPending || patch.isPending}>
+          <Button
+            onClick={submit}
+            disabled={create.isPending || patch.isPending || pools.length === 0}
+          >
             {create.isPending || patch.isPending ? '提交中...' : '保存'}
           </Button>
         </DialogFooter>

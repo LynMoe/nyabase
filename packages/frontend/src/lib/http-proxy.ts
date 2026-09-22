@@ -1,4 +1,11 @@
-import type { HttpProxyBindingStatus, HttpProxyWarningReason } from '@nyabase/common';
+import {
+  hostnameMatchesHttpProxyWildcard,
+  httpProxyWildcardSuffix,
+  normalizeHttpProxyHostname,
+  type HttpDomainPoolPublicDto,
+  type HttpProxyBindingStatus,
+  type HttpProxyWarningReason,
+} from '@nyabase/common';
 import { ApiError } from './api-error.js';
 
 const WARNING_LABELS: Record<HttpProxyWarningReason, string> = {
@@ -53,4 +60,38 @@ export function httpProxyErrorMessage(error: unknown): string {
     return '证书未覆盖该通配域名';
   }
   return HTTP_PROXY_ERROR_ZH[message] ?? message;
+}
+
+export function httpProxyDomainRootLabel(wildcardDomain: string): string {
+  return httpProxyWildcardSuffix(wildcardDomain).replace(/^\./, '');
+}
+
+export function isHttpProxyPrefixLabel(value: string): boolean {
+  const label = value.trim().toLowerCase();
+  return label.length >= 1
+    && label.length <= 63
+    && !label.includes('.')
+    && /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(label);
+}
+
+export function composeHttpProxyHostname(prefix: string, wildcardDomain: string): string {
+  return normalizeHttpProxyHostname(`${prefix.trim().toLowerCase()}${httpProxyWildcardSuffix(wildcardDomain)}`);
+}
+
+export function splitHttpProxyHostname(
+  hostname: string,
+  pools: readonly Pick<HttpDomainPoolPublicDto, 'id' | 'wildcardDomain'>[],
+): { prefix: string; poolId: string } | null {
+  let host: string;
+  try {
+    host = normalizeHttpProxyHostname(hostname);
+  } catch {
+    return null;
+  }
+  for (const pool of pools) {
+    if (!hostnameMatchesHttpProxyWildcard(host, pool.wildcardDomain)) continue;
+    const suffix = httpProxyWildcardSuffix(pool.wildcardDomain);
+    return { prefix: host.slice(0, -suffix.length), poolId: pool.id };
+  }
+  return null;
 }

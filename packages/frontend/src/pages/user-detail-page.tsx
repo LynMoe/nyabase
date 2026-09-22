@@ -7,7 +7,6 @@ import { api } from '../lib/api.js';
 import { errorMessage } from '../lib/api-error.js';
 import { Badge } from '../components/ui/badge.js';
 import { Button } from '../components/ui/button.js';
-import { Card, CardContent, CardHeader, CardTitle } from '../components/ui/card.js';
 import { SectionCard } from '../components/layout/section-card.js';
 import {
   Table,
@@ -24,11 +23,14 @@ import { FormField } from '../components/layout/form-field.js';
 import { Page } from '../components/layout/page.js';
 import { PageHeader } from '../components/layout/page-header.js';
 import { QueryView } from '../components/layout/query-view.js';
+import { StatusBadge } from '../components/layout/status-badge.js';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '../components/ui/tabs.js';
 import { CanonicalGrantPanel } from '../components/grants/canonical-grant-panel.js';
 import { capabilityLabel, userStatusLabel } from '../lib/display-labels.js';
+import { userDeleting } from '../lib/in-progress.js';
 import { copyOneTimeSecret } from '../lib/one-time-secret.js';
 import { queryKeys } from '../lib/query-keys.js';
+import { refetchWhileInProgress } from '../lib/query-lifecycle.js';
 import { relativeTime } from '../lib/utils.js';
 import { toast } from '../hooks/use-toast.js';
 import { useAuthStore } from '../store/auth.js';
@@ -50,8 +52,7 @@ export default function UserDetailPage() {
   const capabilities = useAuthStore((state) => state.user?.capabilities ?? []);
   const canManageUsers = capabilities.includes(Capability.ManageUsers);
   const canManageGrants = capabilities.includes(Capability.ManageGrants);
-  const [editingIdentity, setEditingIdentity] = useState(false);
-  const [displayName, setDisplayName] = useState('');
+  const [identityOpen, setIdentityOpen] = useState(false);
   const [disableOpen, setDisableOpen] = useState(false);
   const [deleteOpen, setDeleteOpen] = useState(false);
   const [resetOpen, setResetOpen] = useState(false);
@@ -64,6 +65,10 @@ export default function UserDetailPage() {
   const userQuery = useQuery({
     queryKey: queryKeys.users.detail(id),
     queryFn: () => api.get<UserDto>(`/admin/users/${id}`),
+    refetchInterval: (query) => refetchWhileInProgress(query.state, {
+      steadyIntervalMs: false,
+      isSettled: (loaded) => !userDeleting(loaded.status),
+    }),
   });
 
   const invalidate = () => {
@@ -82,7 +87,7 @@ export default function UserDetailPage() {
         toast({ title: '用户已启用' });
       } else if (body.displayName) {
         toast({ title: '用户已更新' });
-        setEditingIdentity(false);
+        setIdentityOpen(false);
       }
     },
     onError: (error) => toast({ title: '更新用户失败', description: errorMessage(error), variant: 'destructive' }),
@@ -155,80 +160,32 @@ export default function UserDetailPage() {
               ))}
             </TabsList>
             <TabsContent value="overview" className="mt-4 space-y-6">
-              <Card>
-                <CardHeader className="flex flex-row items-start justify-between space-y-0">
-                  <CardTitle className="text-base">身份</CardTitle>
-                  {canManageUsers && !editingIdentity ? (
-                    <Button
-                      size="sm"
-                      variant="outline"
-                      onClick={() => {
-                        setDisplayName(loaded.displayName);
-                        setEditingIdentity(true);
-                      }}
-                    >
-                      <Pencil className="h-3.5 w-3.5" />编辑
-                    </Button>
-                  ) : null}
-                </CardHeader>
-                <CardContent className="grid gap-3 text-sm sm:grid-cols-2">
-                  {editingIdentity ? (
-                    <FormField id="user-display-name" label="显示名称">
-                      <Input
-                        id="user-display-name"
-                        value={displayName}
-                        onChange={(event) => setDisplayName(event.target.value)}
-                      />
-                    </FormField>
-                  ) : (
-                    <Info label="显示名称" value={loaded.displayName} />
-                  )}
+              <SectionCard
+                title="身份"
+                actions={canManageUsers ? (
+                  <Button size="sm" variant="outline" onClick={() => setIdentityOpen(true)}>
+                    <Pencil className="h-3.5 w-3.5" />编辑
+                  </Button>
+                ) : undefined}
+              >
+                <div className="grid gap-3 text-sm sm:grid-cols-2">
+                  <Info label="显示名称" value={loaded.displayName} />
                   <Info label="用户名" value={`@${loaded.username}`} mono />
                   <div>
                     <p className="text-xs text-muted-foreground">状态</p>
                     <div className="mt-1">
-                      <Badge variant={loaded.status === UserStatus.Active ? 'success' : 'secondary'}>
-                        {userStatusLabel(loaded.status)}
-                      </Badge>
+                      <StatusBadge
+                        label={userStatusLabel(loaded.status)}
+                        pending={userDeleting(loaded.status)}
+                        variant={loaded.status === UserStatus.Active ? 'success' : 'secondary'}
+                      />
                     </div>
                   </div>
                   <Info label="创建时间" value={relativeTime(loaded.createdAt)} />
-                  {editingIdentity ? (
-                    <div className="flex flex-wrap gap-2 sm:col-span-2">
-                      <Button
-                        onClick={() => {
-                          const next = displayName.trim();
-                          if (!next) {
-                            toast({ title: '显示名称不能为空', variant: 'destructive' });
-                            return;
-                          }
-                          if (next === loaded.displayName) {
-                            toast({ title: '没有需要保存的更改' });
-                            return;
-                          }
-                          patchUser.mutate({ displayName: next });
-                        }}
-                        disabled={patchUser.isPending}
-                      >
-                        {patchUser.isPending ? '保存中...' : '保存'}
-                      </Button>
-                      <Button
-                        variant="outline"
-                        disabled={patchUser.isPending}
-                        onClick={() => {
-                          setDisplayName(loaded.displayName);
-                          setEditingIdentity(false);
-                        }}
-                      >
-                        取消
-                      </Button>
-                    </div>
-                  ) : null}
-                </CardContent>
-              </Card>
+                </div>
+              </SectionCard>
               <SectionCard
                 title="用户组"
-                description="点名称打开用户组详情。组成员身份会立即改变有效授权。"
                 flush={loaded.groups.length > 0}
               >
                 {loaded.groups.length === 0 ? (
@@ -261,7 +218,7 @@ export default function UserDetailPage() {
                   </Table>
                 )}
               </SectionCard>
-              <SectionCard title="能力" description="来自所属用户组，在用户组详情中修改。">
+              <SectionCard title="能力">
                 {loaded.capabilities.length === 0 ? (
                   <p className="text-sm text-muted-foreground">无。</p>
                 ) : (
@@ -283,6 +240,24 @@ export default function UserDetailPage() {
           </Tabs>
         )}
       </QueryView>
+      {identityOpen && user ? (
+        <UserIdentityDialog
+          displayName={user.displayName}
+          pending={patchUser.isPending}
+          onSubmit={(next) => {
+            if (!next) {
+              toast({ title: '显示名称不能为空', variant: 'destructive' });
+              return;
+            }
+            if (next === user.displayName) {
+              toast({ title: '没有需要保存的更改' });
+              return;
+            }
+            patchUser.mutate({ displayName: next });
+          }}
+          onOpenChange={(open) => { if (!open) setIdentityOpen(false); }}
+        />
+      ) : null}
       <ConfirmDialog
         open={disableOpen}
         title="停用用户？"
@@ -383,6 +358,43 @@ export default function UserDetailPage() {
         </DialogContent>
       </Dialog>
     </Page>
+  );
+}
+
+function UserIdentityDialog({
+  displayName,
+  pending,
+  onSubmit,
+  onOpenChange,
+}: {
+  displayName: string;
+  pending: boolean;
+  onSubmit: (displayName: string) => void;
+  onOpenChange: (open: boolean) => void;
+}) {
+  const [value, setValue] = useState(displayName);
+  return (
+    <Dialog open onOpenChange={onOpenChange}>
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>编辑用户</DialogTitle>
+          <DialogDescription>修改显示名称。用户名创建后不可更改。</DialogDescription>
+        </DialogHeader>
+        <FormField id="user-display-name" label="显示名称">
+          <Input
+            id="user-display-name"
+            value={value}
+            onChange={(event) => setValue(event.target.value)}
+          />
+        </FormField>
+        <DialogFooter>
+          <Button variant="outline" onClick={() => onOpenChange(false)}>取消</Button>
+          <Button onClick={() => onSubmit(value.trim())} disabled={pending}>
+            {pending ? '保存中...' : '保存'}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   );
 }
 

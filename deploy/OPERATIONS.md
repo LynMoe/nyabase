@@ -706,3 +706,20 @@ VictoriaMetrics，并更新 `nodeMetrics.health`（`online` /
 
 e2e 停机演练：`systemctl stop/start "$E2E_NODE_EXPORTER_UNIT"`。把该变量
 设为 `nyabase-node-exporter.service`。
+
+## Workload images
+
+`incus.imageSourceServer` 指向 Nyabase 烘焙 catalog（`ubuntu/24.04` 不是
+linuxcontainers 原样盘）。添加镜像只提交 `{ alias }`；控制面写入
+`loginUser=root` 与 `networkManagedExternally=true`。
+
+开放 create 之前：
+
+1. 控制面已部署「assignment 只留当前指纹」的 ensure 逻辑。
+2. catalog 已发布烘焙 squashfs；`preflightImageFingerprint` **非空** 且等于
+   该 combined squashfs 指纹。
+3. 停删旧指纹容器后 `repull` / assign；`managed_fingerprint` 等于 catalog。
+4. 服务器 preflight 通过。
+
+catalog DTO 的 version 字符串是 bake serial（`v20260921_nb01`），不是项目
+`version: 2`。回滚发更新日期的新 `bake.serial`，不要复用更旧的 YYYYMMDD 键。

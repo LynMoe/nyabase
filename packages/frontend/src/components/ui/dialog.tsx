@@ -78,14 +78,13 @@ const DialogContent = React.forwardRef<
       <DialogPrimitive.Content
         ref={ref}
         className={cn(
-          'fixed z-50 grid min-h-0 border bg-background shadow-lg duration-200',
+          'fixed z-50 flex min-h-0 flex-col border bg-background shadow-lg duration-200',
           'inset-x-4 top-4 h-[calc(100dvh-2rem)] w-auto translate-x-0 translate-y-0',
-          'sm:inset-auto sm:left-[50%] sm:top-[50%] sm:h-[min(max-content,min(90dvh,calc(100dvh-2rem)))] sm:max-h-[min(90dvh,calc(100dvh-2rem))] sm:w-[calc(100%-2rem)] sm:max-w-2xl sm:translate-x-[-50%] sm:translate-y-[-50%] sm:rounded-lg',
+          'sm:inset-auto sm:left-[50%] sm:top-[50%] sm:h-auto sm:max-h-[min(90dvh,calc(100dvh-2rem))] sm:w-[calc(100%-2rem)] sm:max-w-2xl sm:translate-x-[-50%] sm:translate-y-[-50%] sm:rounded-lg',
           'data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0 data-[state=closed]:zoom-out-95 data-[state=open]:zoom-in-95 data-[state=closed]:slide-out-to-left-1/2 data-[state=closed]:slide-out-to-top-[48%] data-[state=open]:slide-in-from-left-1/2 data-[state=open]:slide-in-from-top-[48%]',
           className,
           'overflow-hidden',
         )}
-        style={{ gridTemplateRows: 'auto minmax(0, 1fr) auto' }}
         {...describedByProps}
         {...props}
       >
@@ -93,10 +92,10 @@ const DialogContent = React.forwardRef<
           <div className="shrink-0 px-6 pb-2 pt-6 pr-12">{header}</div>
         )}
         {body.length > 0 ? (
-          <div className="relative min-h-0 overflow-hidden">
+          <div className="relative min-h-0 flex-1 overflow-hidden">
             <div
               ref={bodyRef}
-              className="h-full min-h-0 space-y-4 overflow-y-auto overscroll-contain px-6 py-4 pb-8"
+              className="h-full min-h-0 space-y-4 overflow-y-auto overscroll-contain px-6 py-4"
             >
               {body}
             </div>
@@ -107,14 +106,10 @@ const DialogContent = React.forwardRef<
               <div className="pointer-events-none absolute inset-x-0 top-0 z-10 h-6 bg-gradient-to-b from-background to-transparent" />
             )}
           </div>
-        ) : (
-          <div />
-        )}
+        ) : null}
         {footer.length > 0 ? (
-          <div className="relative z-10 border-t bg-background px-6 py-4">{footer}</div>
-        ) : (
-          <div />
-        )}
+          <div className="relative z-10 shrink-0 border-t bg-background px-6 py-4">{footer}</div>
+        ) : null}
         <DialogClose className="absolute right-4 top-4 z-20 rounded-sm opacity-70 ring-offset-background transition-opacity hover:opacity-100 focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2 disabled:pointer-events-none data-[state=open]:bg-accent data-[state=open]:text-muted-foreground">
           <X className="h-4 w-4" />
           <span className="sr-only">关闭</span>

@@ -544,7 +544,6 @@ export const zAddCatalogImageRequest = z.object({
 }).strict();
 
 export const zCreateImageRequest = z.object({
-  name: zName,
   alias: z.string().trim().min(1).max(256).regex(SIMPLESTREAMS_ALIAS_RE),
   description: z.string().max(4_096).nullable().optional(),
   loginUser: z.string().regex(LOGIN_USER_RE),
@@ -554,7 +553,6 @@ export const zCreateImageRequest = z.object({
 
 export const zPatchImageRequest = z.object({
   expectedRevision: zExpectedRevision,
-  name: zName.optional(),
   description: z.string().max(4_096).nullable().optional(),
   minRootSizeBytes: zPositiveBytes.nullable().optional(),
   networkManagedExternally: z.boolean().optional(),

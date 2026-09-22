@@ -8,8 +8,9 @@ import { SectionCard } from '../layout/section-card.js';
 import { QueryErrorState, QueryLoadingState } from '../query-state.js';
 import { LocalVolumeFormDialog } from '../storage/local-volume-form-dialog.js';
 import { LocalVolumeTable } from '../storage/local-volume-table.js';
+import { volumeInProgress } from '../../lib/in-progress.js';
 import { queryKeys } from '../../lib/query-keys.js';
-import { queryPollInterval } from '../../lib/query-lifecycle.js';
+import { refetchWhileInProgress } from '../../lib/query-lifecycle.js';
 import { toast } from '../../hooks/use-toast.js';
 import { useAuthStore } from '../../store/auth.js';
 
@@ -33,16 +34,16 @@ export function ServerStorageTab({
     queryKey: queryKeys.volumes.adminByServer(serverId),
     queryFn: () => api.get<VolumeDto[]>(`/admin/volumes?serverId=${serverId}`),
     enabled: canManageVolumes,
-    refetchInterval: (query) => queryPollInterval(query.state, { activeIntervalMs: 5_000 }),
+    refetchInterval: (query) => refetchWhileInProgress(query.state, {
+      steadyIntervalMs: 5_000,
+      isSettled: (volumes) => volumes.every((volume) => !volumeInProgress(volume)),
+    }),
   });
 
   const deleteVolume = useMutation({
     mutationFn: (volumeId: string) => api.delete<unknown>(`/admin/volumes/${volumeId}`),
     onSuccess: () => {
-      toast({
-        title: '删除已提交',
-        description: '列表状态稍后更新；若出现「需要关注」，请查看行内说明。',
-      });
+      toast({ title: '删除已提交' });
       setDeleteTarget(null);
       void queryClient.invalidateQueries({ queryKey: queryKeys.volumes.admin });
     },

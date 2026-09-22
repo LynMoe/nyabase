@@ -31,7 +31,7 @@ import { InfrastructureRepository } from '../infrastructure/infrastructure.repos
 import { IntentRepository } from '../runtime/intent.repository.js';
 import { ReconcileWakeService } from '../runtime/reconcile-wake.service.js';
 import { isoDate, numberValue, acceptedIntent } from '../domain/domain-utils.js';
-import { displayNameForCatalog, ImageCatalogService } from './image-catalog.js';
+import { ImageCatalogService } from './image-catalog.js';
 
 type ImageRow = Awaited<ReturnType<ImagesService['findById']>>;
 type ImageAssignmentRow = Awaited<ReturnType<ImagesService['assignments']>>[number];
@@ -93,7 +93,6 @@ export class ImagesService {
     }
     try {
       return await this.create(actorId, {
-        name: displayNameForCatalog(entry),
         alias: entry.alias,
         description: entry.description,
         loginUser: 'root',
@@ -219,7 +218,6 @@ export class ImagesService {
         created = await transaction.insertInto('infra.images')
           .values({
             id: randomUUID(),
-            name: input.name,
             alias: input.alias,
             fingerprint,
             description: input.description ?? null,
@@ -241,7 +239,6 @@ export class ImagesService {
         });
       }
       await this.audit.append(transaction, actorId, AuditAction.CreateImage, created.id, 'image', {
-        name: created.name,
         alias: created.alias,
       });
       return created;
@@ -250,7 +247,7 @@ export class ImagesService {
   }
 
   async findAllAdmin(activeOnly = false): Promise<AdminImageDto[]> {
-    let query = this.database.selectFrom('infra.images').selectAll().orderBy('name');
+    let query = this.database.selectFrom('infra.images').selectAll().orderBy('alias');
     if (activeOnly) query = query.where('is_active', '=', true);
     const rows = await query.execute();
     return Promise.all(rows.map((row) => this.toAdminDto(row)));
@@ -297,7 +294,6 @@ export class ImagesService {
   toDto(image: ImageRow): ImageDto {
     return {
       id: image.id,
-      name: image.name,
       alias: image.alias,
       fingerprint: image.fingerprint,
       description: image.description,
@@ -329,7 +325,6 @@ export class ImagesService {
       const current = await this.lockById(id, transaction);
       const updated = await transaction.updateTable('infra.images')
         .set({
-          ...(input.name === undefined ? {} : { name: input.name }),
           ...(input.description === undefined ? {} : { description: input.description }),
           ...(input.minRootSizeBytes === undefined
             ? {}

@@ -1,80 +1,24 @@
 import { describe, expect, it } from 'vitest';
 import { NVIDIA_GPU_EXTENSION_ID } from './id.js';
-import { GpuGrantMode } from './schema.js';
-import { formatGrantSummary, reduceNvidiaGpuGrant, type NvidiaGpuGrant } from './grant-state.js';
-
-const pciGrant: NvidiaGpuGrant = {
-  mode: GpuGrantMode.Pci,
-  pciAddresses: ['00000000:41:00.0'],
-};
-
-function apply(current: NvidiaGpuGrant, ...events: Parameters<typeof reduceNvidiaGpuGrant>[1][]): NvidiaGpuGrant {
-  return events.reduce(reduceNvidiaGpuGrant, current);
-}
+import { formatGrantSummary } from './grant-state.js';
 
 describe('formatGrantSummary', () => {
-  it('omits none, missing grants, and empty pci lists', () => {
+  it('omits missing grants and empty pci lists', () => {
     expect(formatGrantSummary(undefined)).toBeNull();
     expect(formatGrantSummary({})).toBeNull();
     expect(formatGrantSummary({
-      [NVIDIA_GPU_EXTENSION_ID]: { mode: GpuGrantMode.None, pciAddresses: [] },
+      [NVIDIA_GPU_EXTENSION_ID]: { pciAddresses: [] },
     })).toBeNull();
     expect(formatGrantSummary({
-      [NVIDIA_GPU_EXTENSION_ID]: { mode: GpuGrantMode.Pci, pciAddresses: [] },
+      [NVIDIA_GPU_EXTENSION_ID]: { mode: 'all', pciAddresses: [] },
     })).toBeNull();
-    expect(formatGrantSummary({
-      [NVIDIA_GPU_EXTENSION_ID]: { mode: GpuGrantMode.Pci, pciAddresses: [] },
-    })).not.toBe('0GPU');
   });
 
-  it('renders all GPUs and pci counts', () => {
-    expect(formatGrantSummary({
-      [NVIDIA_GPU_EXTENSION_ID]: { mode: GpuGrantMode.All, pciAddresses: [] },
-    })).toBe('全部GPU');
+  it('renders the granted card count', () => {
     expect(formatGrantSummary({
       [NVIDIA_GPU_EXTENSION_ID]: {
-        mode: GpuGrantMode.Pci,
         pciAddresses: ['00000000:41:00.0', '00000000:a1:00.0'],
       },
     })).toBe('2GPU');
-  });
-});
-
-describe('reduceNvidiaGpuGrant', () => {
-  it('keeps none after GpuPicker onModeChange then onChange([])', () => {
-    expect(apply(
-      pciGrant,
-      { type: 'mode', mode: 'none' },
-      { type: 'pci', pciAddresses: [] },
-    )).toEqual({ mode: GpuGrantMode.None, pciAddresses: [] });
-  });
-
-  it('keeps all and drops PCI after onModeChange then onChange(inventory)', () => {
-    expect(apply(
-      pciGrant,
-      { type: 'mode', mode: 'all' },
-      { type: 'pci', pciAddresses: ['00000000:41:00.0', '00000000:a1:00.0'] },
-    )).toEqual({ mode: GpuGrantMode.All, pciAddresses: [] });
-  });
-
-  it('enters pci mode without inventing addresses when switching to specific', () => {
-    expect(apply(
-      { mode: GpuGrantMode.None, pciAddresses: [] },
-      { type: 'mode', mode: 'specific' },
-    )).toEqual({ mode: GpuGrantMode.Pci, pciAddresses: [] });
-  });
-
-  it('updates PCI only while mode is pci', () => {
-    expect(apply(
-      { mode: GpuGrantMode.Pci, pciAddresses: [] },
-      { type: 'pci', pciAddresses: ['00000000:41:00.0'] },
-    )).toEqual({
-      mode: GpuGrantMode.Pci,
-      pciAddresses: ['00000000:41:00.0'],
-    });
-    expect(apply(
-      { mode: GpuGrantMode.All, pciAddresses: [] },
-      { type: 'pci', pciAddresses: ['00000000:41:00.0'] },
-    )).toEqual({ mode: GpuGrantMode.All, pciAddresses: [] });
   });
 });

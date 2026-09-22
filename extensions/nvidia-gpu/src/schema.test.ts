@@ -6,7 +6,6 @@ import {
   PackageHttpError,
 } from './errors.js';
 import {
-  GpuGrantMode,
   parsePciAddressList,
   zNvidiaGpuContainerState,
   zNvidiaGpuGrant,
@@ -59,25 +58,23 @@ describe('zNvidiaGpuContainerState', () => {
 });
 
 describe('zNvidiaGpuGrant', () => {
-  it('accepts pci mode with addresses', () => {
+  it('stores a PCI list, including an empty list', () => {
+    expect(zNvidiaGpuGrant.parse({ pciAddresses: [] })).toEqual({ pciAddresses: [] });
     expect(zNvidiaGpuGrant.parse({
-      mode: GpuGrantMode.Pci,
       pciAddresses: ['0000:41:00.0'],
     })).toEqual({
-      mode: GpuGrantMode.Pci,
       pciAddresses: ['00000000:41:00.0'],
     });
   });
 
-  it('rejects incoherent mode/address combinations', () => {
-    for (const grant of [
-      { mode: GpuGrantMode.Pci, pciAddresses: [] },
-      { mode: GpuGrantMode.None, pciAddresses: ['0000:41:00.0'] },
-      { mode: GpuGrantMode.All, pciAddresses: ['0000:41:00.0'] },
-      { mode: GpuGrantMode.Pci, pciAddresses: ['0000:41:00.0', '0000:41:00.0'] },
-    ]) {
-      expect(zNvidiaGpuGrant.safeParse(grant).success).toBe(false);
-    }
+  it('rejects a mode field and duplicate addresses', () => {
+    expect(zNvidiaGpuGrant.safeParse({
+      mode: 'all',
+      pciAddresses: [],
+    }).success).toBe(false);
+    expect(zNvidiaGpuGrant.safeParse({
+      pciAddresses: ['0000:41:00.0', '0000:41:00.0'],
+    }).success).toBe(false);
   });
 });
 

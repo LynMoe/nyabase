@@ -185,13 +185,12 @@ describe('canonical container and volume contracts', () => {
       routedIp: '192.0.2.10',
       status: 'running',
       sshStatus: 'running',
-      containerHostKeyFingerprint: null,
       observedAt: '2026-08-07T00:00:00.000Z',
       [legacyAddressField]: '192.0.2.11',
     }).success).toBe(false);
   });
 
-  it('formats jump login and treats active routes without host-key fingerprints', () => {
+  it('formats jump login and accepts an active route', () => {
     expect(formatSshProxyJumpLogin({
       username: 'Alice',
       containerName: 'Work',
@@ -208,7 +207,6 @@ describe('canonical container and volume contracts', () => {
       routedIp: '192.0.2.10',
       status: ContainerStatus.Running,
       sshStatus: 'running',
-      containerHostKeyFingerprint: null,
       observedAt: '2026-08-07T00:00:00.000Z',
     })).toBe(true);
   });
@@ -502,7 +500,6 @@ describe('canonical DTO shapes', () => {
         loginUser: 'root',
         proxyHost: null,
         proxyPort: null,
-        hostKeyFingerprint: null,
         observedAt: null,
         lastError: null,
       },
@@ -526,7 +523,6 @@ describe('canonical DTO shapes', () => {
       routedIp: containerDto.routedIp,
       status: 'running',
       sshStatus: 'running',
-      containerHostKeyFingerprint: null,
       observedAt: '2026-08-07T00:00:00.000Z',
     }).routedIp).toBe('192.0.2.10');
   });
@@ -534,7 +530,6 @@ describe('canonical DTO shapes', () => {
   it('rejects legacy image reference fields', () => {
     const legacyImageField = ['d', 'ocker', 'Image'].join('');
     expect(zCreateImageRequest.safeParse({
-      name: 'debian',
       alias: 'debian-12',
       loginUser: 'root',
       networkManagedExternally: true,
@@ -542,16 +537,20 @@ describe('canonical DTO shapes', () => {
     }).success).toBe(false);
     expect(zAddCatalogImageRequest.safeParse({ alias: 'ubuntu/24.04' }).success).toBe(true);
     expect(zCreateImageRequest.safeParse({
-      name: 'Ubuntu 24.04',
       alias: 'ubuntu/24.04',
       loginUser: 'root',
       networkManagedExternally: true,
     }).success).toBe(true);
+    expect(zCreateImageRequest.safeParse({
+      name: 'Ubuntu 24.04',
+      alias: 'ubuntu/24.04',
+      loginUser: 'root',
+      networkManagedExternally: true,
+    }).success).toBe(false);
   });
 
   it('accepts admin-filled minRootSizeBytes and rejects non-positive values', () => {
     expect(zCreateImageRequest.safeParse({
-      name: 'debian',
       alias: 'debian-12',
       loginUser: 'root',
       networkManagedExternally: false,
@@ -576,6 +575,10 @@ describe('canonical DTO shapes', () => {
     expect(zPatchImageRequest.safeParse({
       expectedRevision: 1,
       loginUser: 'root',
+    }).success).toBe(false);
+    expect(zPatchImageRequest.safeParse({
+      expectedRevision: 1,
+      name: 'Ubuntu 24.04',
     }).success).toBe(false);
   });
 });

@@ -14,7 +14,7 @@ import {
 } from '@nyabase/common';
 import { api } from '../../lib/api.js';
 import { Button } from '../ui/button.js';
-import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '../ui/dialog.js';
+import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from '../ui/dialog.js';
 import { Input } from '../ui/input.js';
 import {
   Select,
@@ -37,7 +37,7 @@ import {
   formatGrantQuotaLine,
 } from '../../lib/grant-quota.js';
 import { formatExtensionGrantSummaries } from '../../extensions/registry.js';
-import { actionProgressHint, containerActionSubmittedTitle } from '../../lib/status-labels.js';
+import { containerActionSubmittedTitle } from '../../lib/status-labels.js';
 import { queryKeys } from '../../lib/query-keys.js';
 import { ExtensionSlots } from '../../extensions/slots.js';
 
@@ -121,7 +121,6 @@ export function CreateContainerDialog({
     onSuccess: () => {
       toast({
         title: containerActionSubmittedTitle('create'),
-        description: actionProgressHint('list'),
       });
       void queryClient.invalidateQueries({ queryKey: queryKeys.containers.userList });
       onOpenChange(false);
@@ -158,7 +157,6 @@ export function CreateContainerDialog({
       <DialogContent data-testid="container-create-canonical">
         <DialogHeader>
           <DialogTitle>新建容器</DialogTitle>
-          <DialogDescription>镜像与规格创建后固定，提交前会再次校验容量。</DialogDescription>
         </DialogHeader>
         <div className="space-y-4">
           <div className="grid gap-3 sm:grid-cols-2">
@@ -203,7 +201,7 @@ export function CreateContainerDialog({
               label="镜像"
               value={form.imageId}
               onChange={(value) => update('imageId', value)}
-              options={images.map((image) => [image.id, `${image.name} · ${image.fingerprint ?? '等待指纹'}`])}
+              options={images.map((image) => [image.id, image.alias])}
               placeholder={
                 !form.serverId
                   ? '先选择服务器'

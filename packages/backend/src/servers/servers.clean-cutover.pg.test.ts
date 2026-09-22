@@ -338,7 +338,6 @@ describePg('clean Incus server contract', () => {
         .execute();
       await database.insertInto('infra.images').values({
         id: imageId,
-        name: 'cascade-image',
         alias: 'base',
         fingerprint: null,
         description: null,

@@ -11,14 +11,6 @@ import {
   isWildcardPciAddress,
 } from './pci.js';
 
-export enum GpuGrantMode {
-  None = 'none',
-  All = 'all',
-  Pci = 'pci',
-}
-
-export const zGpuGrantMode = z.nativeEnum(GpuGrantMode);
-
 export const zPciAddress = z.string()
   .superRefine((value, context) => {
     if (isWildcardPciAddress(value)) {
@@ -70,24 +62,8 @@ export const zNvidiaGpuMutatePayload = z.object({
 }).strict();
 
 export const zNvidiaGpuGrant = z.object({
-  mode: z.nativeEnum(GpuGrantMode),
   pciAddresses: zGpuPciAddresses,
-}).strict().superRefine((value, context) => {
-  if (value.mode !== GpuGrantMode.Pci && value.pciAddresses.length > 0) {
-    context.addIssue({
-      code: z.ZodIssueCode.custom,
-      path: ['pciAddresses'],
-      message: 'Only PCI GPU grants may contain PCI addresses',
-    });
-  }
-  if (value.mode === GpuGrantMode.Pci && value.pciAddresses.length === 0) {
-    context.addIssue({
-      code: z.ZodIssueCode.custom,
-      path: ['pciAddresses'],
-      message: 'PCI GPU grants require at least one PCI address',
-    });
-  }
-});
+}).strict();
 
 export type NvidiaGpuContainerState = z.infer<typeof zNvidiaGpuContainerState>;
 export type NvidiaGpuCreatePayload = z.infer<typeof zNvidiaGpuCreatePayload>;

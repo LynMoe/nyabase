@@ -106,7 +106,6 @@ export interface InfrastructureServerExtensionTable {
 
 export interface InfrastructureImageTable {
   id: string;
-  name: string;
   alias: string;
   fingerprint: string | null;
   description: string | null;

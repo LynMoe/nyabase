@@ -123,7 +123,7 @@ const container = {
   name: 'dev-workspace',
   instanceName: 'c-dev-workspace',
   imageId: 'img-1',
-  imageName: 'ubuntu-24.04',
+  imageName: 'ubuntu/24.04',
   imageFingerprint: 'sha256:abcd1234',
   rootPoolId: 'pool-1',
   rootPoolName: '本地盘',
@@ -141,11 +141,12 @@ const container = {
   ssh: {
     enabled: true, status: 'running', ready: true, loginUser: 'ubuntu',
     proxyHost: 'ssh.example.test', proxyPort: 2222,
-    hostKeyFingerprint: 'SHA256:abc', observedAt: ISO, lastError: null,
+    observedAt: ISO, lastError: null,
   },
   volumes: [{
     id: 'att-1', containerId: 'ctr-1', volumeId: 'vol-1', volumeName: 'data',
     deviceName: 'vol-data', containerPath: '/data', readOnly: false,
+    kind: 'local', bindState: 'attached', onlineCancelAllowed: false,
     detachDrainedAt: null, createdAt: ISO, updatedAt: ISO,
   }],
   needsAttention: false,
@@ -280,9 +281,10 @@ function mockApi(urlString, method) {
   }
 
   if (p === '/servers') return json([userServer]);
+  if (p === '/servers/srv-1') return json(userServer);
   if (p === '/admin/servers') return json([server]);
   if (p === '/admin/servers/srv-1') return json(server);
-  if (p === '/admin/servers/srv-1/storage-pools') return json([pool]);
+  if (p === '/admin/servers/srv-1/storage-pools' || p === '/servers/srv-1/storage-pools') return json([pool]);
   if (p === '/admin/servers/srv-1/preflight') {
     return json({
       serverId: 'srv-1', status: 'passed', checkedAt: ISO,
@@ -317,6 +319,18 @@ function mockApi(urlString, method) {
 
   if (p === '/volumes' || p === '/admin/volumes') return json([volume]);
   if (p === '/images' || p === '/admin/images') return json([image]);
+  if (p === '/admin/images/catalog') return json([{
+    alias: 'ubuntu/24.04',
+    aliases: ['ubuntu/24.04', 'ubuntu/noble'],
+    fingerprint: 'b'.repeat(64),
+    os: 'Ubuntu',
+    release: '24.04',
+    variant: 'default',
+    version: '1',
+    sizeBytes: 140283904,
+    description: 'Ubuntu 24.04 default v1',
+    added: false,
+  }]);
   if (p === '/admin/users') return json([user, otherUser]);
   if (p === '/admin/users/user-admin') return json(user);
   if (p === '/admin/users/user-alice') return json(otherUser);
@@ -421,11 +435,14 @@ function mockApi(urlString, method) {
   if (p.includes('/storage-pool-grants')) return json([]);
   if (p.includes('/shared-backend-grants')) return json([]);
   if (p.includes('/effective-access')) {
-    return json({ servers: [{
-      serverId: 'srv-1', cpuMillis: 4000, memBytes: 8 * 1024 ** 3, diskBytes: 100 * 1024 ** 3,
-      gpu: { mode: 'none', pciAddresses: [] }, expiresAt: null, purgeAt: null,
-      accessPhase: 'live', allowedImageIds: ['img-1'],
-    }] });
+    return json({
+      servers: [{
+        serverId: 'srv-1', cpuMillis: 4000, memBytes: 8 * 1024 ** 3, diskBytes: 100 * 1024 ** 3,
+        gpu: { mode: 'none', pciAddresses: [] }, expiresAt: null, purgeAt: null,
+        accessPhase: 'live', allowedImageIds: ['img-1'],
+      }],
+      sharedBackends: [],
+    });
   }
 
   if (p.includes('/intents')) return json({ items: [], nextCursor: null });
@@ -441,11 +458,25 @@ function mockApi(urlString, method) {
     });
   }
   if (p === '/me/access') {
-    return json({ servers: [{
-      serverId: 'srv-1', cpuMillis: null, memBytes: null, diskBytes: null,
-      gpu: { mode: 'none', pciAddresses: [] }, expiresAt: null, purgeAt: null,
-      accessPhase: 'live', allowedImageIds: ['img-1'],
-    }] });
+    return json({
+      servers: [{
+        serverId: 'srv-1',
+        cpuMillis: 4000,
+        memBytes: 8 * 1024 ** 3,
+        diskBytes: 200 * 1024 ** 3,
+        extensionGrants: { 'nvidia-gpu': { pciAddresses: ['0000:01:00.0'] } },
+        expiresAt: null,
+        purgeAt: null,
+        accessPhase: 'live',
+        allowedImageIds: ['img-1'],
+      }],
+      sharedBackends: [{
+        sharedBackendId: 'be-1',
+        limitBytes: 500 * 1024 ** 3,
+        usedBytes: 80 * 1024 ** 3,
+        expiresAt: null,
+      }],
+    });
   }
 
   if (m !== 'GET') return json({ ok: true });
@@ -496,6 +527,13 @@ async function clickByText(page, text) {
   return true;
 }
 
+async function selectFirstOption(page, triggerId) {
+  await page.locator(`#${triggerId}`).click();
+  await page.getByRole('option').first().waitFor({ timeout: 5_000 });
+  await page.getByRole('option').first().click();
+  await waitSettled(page);
+}
+
 async function closeOverlay(page) {
   await page.keyboard.press('Escape').catch(() => {});
   await page.waitForTimeout(200);
@@ -512,12 +550,13 @@ async function login(page) {
 
 const PAGES = [
   { name: 'dashboard', path: '/' },
+  { name: 'quota', path: '/quota' },
   { name: 'containers', path: '/containers' },
   { name: 'container-overview', path: '/containers/ctr-1?tab=overview' },
   { name: 'container-storage', path: '/containers/ctr-1?tab=storage' },
-  { name: 'container-spec', path: '/containers/ctr-1?tab=spec' },
   { name: 'container-intents', path: '/containers/ctr-1?tab=intents' },
   { name: 'volumes', path: '/volumes' },
+  { name: 'shared-volumes', path: '/shared-volumes' },
   { name: 'http-proxy', path: '/http-proxy' },
   { name: 'profile', path: '/profile' },
   { name: 'servers', path: '/servers' },
@@ -548,16 +587,35 @@ const DIALOGS = [
   { name: 'dialog-disable-user', path: '/users/user-alice', open: (p) => clickByText(p, '停用') },
   { name: 'dialog-create-group', path: '/groups', open: (p) => clickByText(p, '新建用户组') },
   { name: 'dialog-create-container', path: '/containers', open: (p) => clickByText(p, '新建容器') },
-  { name: 'dialog-create-volume', path: '/volumes', open: (p) => clickByText(p, '新建数据卷') },
+  { name: 'dialog-create-volume', path: '/volumes', open: async (p) => {
+    if (!await clickByText(p, '新建数据卷')) return false;
+    await selectFirstOption(p, 'volume-server');
+    await p.getByText(/剩余|额度不限/).first().waitFor({ timeout: 5_000 });
+    return true;
+  } },
+  { name: 'dialog-create-shared-volume', path: '/shared-volumes', open: async (p) => {
+    if (!await clickByText(p, '新建共享卷')) return false;
+    await selectFirstOption(p, 'volume-shared-backend');
+    await p.getByText(/剩余 .* \/ 额度/).first().waitFor({ timeout: 5_000 });
+    return true;
+  } },
   { name: 'dialog-delete-volume', path: '/volumes', open: (p) => clickByText(p, '删除') },
   { name: 'dialog-server-onboarding', path: '/servers', open: (p) => clickByText(p, '添加服务器') },
-  { name: 'dialog-create-image', path: '/images', open: (p) => clickByText(p, '添加镜像') },
+  { name: 'dialog-add-catalog-image', path: '/images', open: (p) => clickByText(p, '添加镜像') },
   { name: 'dialog-ip-pool', path: '/ip-pools', open: (p) => clickByText(p, '创建 IP 池') },
   { name: 'dialog-http-binding', path: '/http-proxy', open: (p) => clickByText(p, '新建发布') },
   { name: 'dialog-domain-pool', path: '/http-proxy-ops', open: (p) => clickByText(p, '新建域名池') },
   { name: 'dialog-ssh-disconnect', path: '/ssh-proxy', open: (p) => clickByText(p, '断开全部') },
   { name: 'dialog-audit-detail', path: '/audit', open: (p) => clickByText(p, '查看') },
   { name: 'dialog-stop-container', path: '/containers/ctr-1?tab=overview', open: (p) => clickByText(p, '停止') },
+  { name: 'dialog-edit-container-spec', path: '/containers/ctr-1?tab=overview', open: (p) => clickByText(p, '编辑规格') },
+  { name: 'dialog-resize-root', path: '/containers/ctr-1?tab=storage', open: (p) => clickByText(p, '调整容量') },
+  { name: 'dialog-attach-volume', path: '/containers/ctr-1?tab=storage', open: (p) => clickByText(p, '挂载') },
+  { name: 'dialog-change-password', path: '/profile', open: (p) => clickByText(p, '修改密码') },
+  { name: 'dialog-edit-user', path: '/users/user-alice', open: (p) => clickByText(p, '编辑') },
+  { name: 'dialog-edit-group', path: '/groups/grp-users', open: (p) => clickByText(p, '编辑') },
+  { name: 'dialog-server-storage-settings', path: '/servers/srv-1?tab=storage', open: (p) => clickByText(p, '编辑存储设置') },
+  { name: 'dialog-server-connect', path: '/servers/srv-1?tab=connect', open: (p) => clickByText(p, '连接服务器') },
   { name: 'dialog-delete-ssh-key', path: '/profile', open: async (p) => {
     const btn = p.getByRole('button', { name: /删除 SSH 公钥/ });
     if (await btn.count() === 0) return false;
@@ -565,6 +623,29 @@ const DIALOGS = [
     await p.waitForTimeout(350);
     return true;
   } },
+  { name: 'dialog-add-ssh-key', path: '/profile', open: (p) => clickByText(p, '添加公钥') },
+  { name: 'dialog-grant-server', path: '/users/user-alice?tab=grants', open: async (p) => {
+    const btn = p.getByTestId('grant-add-server');
+    if (await btn.count() === 0) return false;
+    await btn.click();
+    await waitSettled(p);
+    return true;
+  } },
+  { name: 'dialog-grant-pool', path: '/users/user-alice?tab=grants', open: async (p) => {
+    const btn = p.getByTestId('grant-add-pool');
+    if (await btn.count() === 0) return false;
+    await btn.click();
+    await waitSettled(p);
+    return true;
+  } },
+  { name: 'dialog-grant-backend', path: '/users/user-alice?tab=grants', open: async (p) => {
+    const btn = p.getByTestId('grant-add-backend');
+    if (await btn.count() === 0) return false;
+    await btn.click();
+    await waitSettled(p);
+    return true;
+  } },
+  { name: 'dialog-add-group-member', path: '/groups/grp-users?tab=members', open: (p) => clickByText(p, '添加成员') },
 ];
 
 async function captureViewport(browser, viewport, label) {
@@ -589,13 +670,19 @@ async function captureViewport(browser, viewport, label) {
 
   await login(page);
 
-  for (const item of PAGES) {
+  const only = process.env.VISUAL_ONLY
+    ? new Set(process.env.VISUAL_ONLY.split(',').map((name) => name.trim()).filter(Boolean))
+    : null;
+  const pages = only ? PAGES.filter((item) => only.has(item.name)) : PAGES;
+  const dialogs = only ? DIALOGS.filter((item) => only.has(item.name)) : DIALOGS;
+
+  for (const item of pages) {
     await page.goto(`${BASE}${item.path}`, { waitUntil: 'domcontentloaded' });
     await waitSettled(page);
     files.push({ name: item.name, file: await shot(page, dir, item.name), kind: 'page' });
   }
 
-  if (label === 'mobile') {
+  if (label === 'mobile' && (!only || only.has('mobile-nav-sheet'))) {
     await page.goto(`${BASE}/`, { waitUntil: 'domcontentloaded' });
     await waitSettled(page);
     const menu = page.getByRole('button', { name: '打开导航' });
@@ -607,7 +694,7 @@ async function captureViewport(browser, viewport, label) {
     }
   }
 
-  for (const dialog of DIALOGS) {
+  for (const dialog of dialogs) {
     await page.goto(`${BASE}${dialog.path}`, { waitUntil: 'domcontentloaded' });
     await waitSettled(page);
     const opened = await dialog.open(page).catch(() => false);

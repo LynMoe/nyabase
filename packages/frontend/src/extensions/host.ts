@@ -18,6 +18,7 @@ import {
   CardHeader,
   CardTitle,
 } from '../components/ui/card.js';
+import { TechnicalId } from '../components/refs/technical-id.js';
 import type { FrontendExtensionHost } from './types.js';
 
 export const frontendExtensionHost: FrontendExtensionHost = {
@@ -47,5 +48,6 @@ export const frontendExtensionHost: FrontendExtensionHost = {
     CardTitle,
     CardContent,
     CardDescription,
+    TechnicalId,
   },
 };
