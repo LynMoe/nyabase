@@ -51,8 +51,10 @@ describePg('clean Incus infrastructure repository', () => {
         totalBytes: 100,
         usedBytes: 20,
         quotaEffective: false,
+        source: '/var/lib/incus/storage-pools/default',
       });
       expect(first.registered).toBe(false);
+      expect(first.source).toBe('/var/lib/incus/storage-pools/default');
 
       const registered = await repository.patchStoragePool(
         first.id,
@@ -72,11 +74,13 @@ describePg('clean Incus infrastructure repository', () => {
         totalBytes: 200,
         usedBytes: 30,
         quotaEffective: true,
+        source: '/data1/incus',
       });
       expect(observed.id).toBe(first.id);
       expect(observed.registered).toBe(true);
       expect(Number(observed.revision)).toBe(2);
       expect(observed.total_bytes).toBe('200');
+      expect(observed.source).toBe('/data1/incus');
     });
   });
 

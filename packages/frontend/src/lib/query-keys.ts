@@ -79,6 +79,24 @@ export const queryKeys = {
     adminDomainPools: ['http-proxy', 'admin', 'domain-pools'] as const,
     adminBindings: ['http-proxy', 'admin', 'bindings'] as const,
   },
+  performance: {
+    user: (serverId: string) => ['performance', 'user', serverId] as const,
+    admin: (serverId: string) => ['performance', 'admin', serverId] as const,
+    servers: (mode: Plane) => ['performance', 'servers', mode] as const,
+    scoped: (mode: Plane, serverId: string) => ['performance', 'scoped', mode, serverId] as const,
+    spark: (mode: Plane) => ['performance', 'spark', mode] as const,
+    self: (mode: Plane, containerId: string) => ['performance', 'self', mode, containerId] as const,
+    multi: (mode: Plane, serverId: string, containerId: string, range: string) =>
+      ['performance', 'multi', mode, serverId, containerId, range] as const,
+    series: (
+      mode: Plane,
+      serverId: string,
+      userId: string,
+      containerId: string,
+      metric: string,
+      range: string,
+    ) => ['performance', 'series', mode, serverId, userId, containerId, metric, range] as const,
+  },
   storageCapacity: (serverId: string) => ['storage-capacity', serverId] as const,
   resourceIntentFailures: (plane: Plane, listPath: string, limit: number) =>
     ['resource-intent-failures', plane, listPath, limit] as const,

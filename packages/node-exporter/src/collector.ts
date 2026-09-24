@@ -85,6 +85,7 @@ export class LinuxNodeMetricsCollector {
     }));
     const groups = await Promise.all([
       this.collectCpu(),
+      this.collectMemory(),
       this.collectPsi(),
       this.collectDiskMetrics(),
       this.collectNetworkEvidence(),
@@ -122,6 +123,31 @@ export class LinuxNodeMetricsCollector {
       });
     }
     return samples;
+  }
+
+  private async collectMemory(): Promise<NodeMetricSample[]> {
+    let content: string;
+    try {
+      content = await this.fileSystem.readFile('/proc/meminfo');
+    } catch {
+      return [];
+    }
+    const kib = new Map<string, number>();
+    for (const line of content.split(/\r?\n/)) {
+      const match = /^([A-Za-z]+):\s+(\d+)\s+kB$/.exec(line.trim());
+      if (!match) continue;
+      kib.set(match[1], Number(match[2]) * 1024);
+    }
+    const total = kib.get('MemTotal');
+    if (total === undefined) return [];
+    const available = kib.get('MemAvailable');
+    const used = available !== undefined
+      ? total - available
+      : total - (kib.get('MemFree') ?? 0) - (kib.get('Buffers') ?? 0) - (kib.get('Cached') ?? 0);
+    return [
+      { name: 'nyabase_node_mem_used_bytes', labels: {}, value: Math.max(0, used) },
+      { name: 'nyabase_node_mem_total_bytes', labels: {}, value: total },
+    ];
   }
 
   private async collectPsi(): Promise<NodeMetricSample[]> {

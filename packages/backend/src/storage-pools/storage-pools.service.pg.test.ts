@@ -290,4 +290,83 @@ describePg('storage pool registration and shared mapping', () => {
       ]));
     });
   });
+
+  it('persists source on discover and allows remark PATCH without registration', async () => {
+    await withPostgresTestDatabase(async ({ database }) => {
+      const serverId = randomUUID();
+      const userId = randomUUID();
+      await database.insertInto('infra.servers').values(serverValues(serverId, 'online')).execute();
+      await database.insertInto('iam.users').values({
+        id: userId,
+        numeric_id: 1,
+        username: `pool-${userId.slice(0, 8)}`,
+        password_hash: 'test-password-hash',
+        display_name: 'Pool User',
+        status: 'active',
+        auth_version: 0,
+        authz_version: 0,
+      }).execute();
+      const client = incusClient([
+        { name: 'dir-a', driver: 'dir', config: { source: '/data1/nyabase/incus' } },
+        { name: 'dir-bad', driver: 'dir', config: { source: '/bad\npath' } },
+      ]);
+      const service = makeService(database, { get: vi.fn().mockResolvedValue(client) });
+      const discovered = await service.discover(serverId);
+      const dir = discovered.pools.find((pool) => pool.incusName === 'dir-a');
+      const bad = discovered.pools.find((pool) => pool.incusName === 'dir-bad');
+      expect(dir?.source).toBe('/data1/nyabase/incus');
+      expect(dir?.displayName).toBeNull();
+      expect(bad?.source).toBeNull();
+
+      const remarked = await service.patch(dir!.id, {
+        expectedRevision: dir!.revision,
+        displayName: '系统盘',
+      });
+      expect(remarked.displayName).toBe('系统盘');
+      expect(remarked.registered).toBe(false);
+      expect(remarked.source).toBe('/data1/nyabase/incus');
+
+      const registered = await service.patch(dir!.id, {
+        expectedRevision: remarked.revision,
+        registered: true,
+      });
+      expect(registered.registered).toBe(true);
+      expect(registered.displayName).toBe('系统盘');
+
+      await database.insertInto('iam.server_grants').values({
+        id: randomUUID(),
+        user_id: userId,
+        group_id: null,
+        server_id: serverId,
+        cpu_millis: null,
+        mem_bytes: null,
+        disk_bytes: 0,
+        extension_grants: {},
+        expires_at: null,
+      }).execute();
+      await database.insertInto('iam.storage_pool_grants').values({
+        id: randomUUID(),
+        user_id: userId,
+        group_id: null,
+        pool_id: dir!.id,
+        expires_at: null,
+      }).execute();
+      const listed = await service.listForUser(userId, serverId);
+      expect(listed.find((pool) => pool.id === dir!.id)?.source).toBeNull();
+      const got = await service.getForUser(dir!.id, userId, serverId);
+      expect(got.source).toBeNull();
+
+      client.listStoragePools.mockResolvedValue({
+        metadata: [
+          { name: 'dir-a', driver: 'dir', config: { source: '/data1/moved' } },
+          { name: 'dir-bad', driver: 'dir', config: { source: '/bad\npath' } },
+        ],
+      });
+      const rediscovered = await service.discover(serverId);
+      const moved = rediscovered.pools.find((pool) => pool.incusName === 'dir-a');
+      expect(moved?.source).toBe('/data1/moved');
+      expect(moved?.displayName).toBe('系统盘');
+      expect(moved?.registered).toBe(true);
+    });
+  });
 });

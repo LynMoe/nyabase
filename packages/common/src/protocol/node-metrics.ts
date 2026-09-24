@@ -80,6 +80,25 @@ export const NODE_METRIC_DEFINITIONS: Readonly<Record<NodeMetricFamily, NodeMetr
   nyabase_node_network_nft_available: { type: 'gauge', labels: [] },
   nyabase_node_network_bridge_filter_present: { type: 'gauge', labels: [] },
   nyabase_node_network_bridge_filter_address: { type: 'gauge', labels: ['address'] },
+  nyabase_container_cpu_usage_seconds_total: { type: 'counter', labels: ['container_id'] },
+  nyabase_container_cpu_limit_cores: { type: 'gauge', labels: ['container_id'] },
+  nyabase_container_mem_used_bytes: { type: 'gauge', labels: ['container_id'] },
+  nyabase_container_mem_limit_bytes: { type: 'gauge', labels: ['container_id'] },
+  nyabase_container_disk_io_read_bytes_total: { type: 'counter', labels: ['container_id'] },
+  nyabase_container_disk_io_write_bytes_total: { type: 'counter', labels: ['container_id'] },
+  nyabase_container_cgroup_observed: { type: 'gauge', labels: [] },
+  nyabase_container_cgroup_truncated: { type: 'gauge', labels: [] },
+  nyabase_container_root_used_bytes: { type: 'gauge', labels: ['container_id'] },
+  nyabase_container_root_size_bytes: { type: 'gauge', labels: ['container_id'] },
+  nyabase_container_net_rx_bytes_total: { type: 'counter', labels: ['container_id', 'device'] },
+  nyabase_container_net_tx_bytes_total: { type: 'counter', labels: ['container_id', 'device'] },
+  nyabase_container_volume_used_bytes: { type: 'gauge', labels: ['container_id', 'volume_id'] },
+  nyabase_container_volume_size_bytes: { type: 'gauge', labels: ['container_id', 'volume_id'] },
+  nyabase_container_gpu_mem_limit_bytes: { type: 'gauge', labels: ['container_id'] },
+  nyabase_node_mem_used_bytes: { type: 'gauge', labels: [] },
+  nyabase_node_mem_total_bytes: { type: 'gauge', labels: [] },
+  nyabase_storage_pool_used_bytes: { type: 'gauge', labels: ['pool_id'] },
+  nyabase_storage_pool_size_bytes: { type: 'gauge', labels: ['pool_id'] },
 };
 
 export const CORE_NODE_METRIC_CATALOG: NodeMetricCatalog = {
@@ -91,6 +110,25 @@ const METRIC_NAME_PATTERN = /^[a-zA-Z_:][a-zA-Z0-9_:]*$/;
 const LABEL_NAME_PATTERN = /^[a-zA-Z_][a-zA-Z0-9_]*$/;
 const UUID_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+/** Hyphenate the 32 hex digits Incus stores on `nyc-<hex>` instance names. */
+export function hyphenateContainerHex(hex: string): string | null {
+  const normalized = hex.toLowerCase();
+  if (!/^[0-9a-f]{32}$/.test(normalized)) return null;
+  const id = `${normalized.slice(0, 8)}-${normalized.slice(8, 12)}-${normalized.slice(12, 16)}-${normalized.slice(16, 20)}-${normalized.slice(20)}`;
+  return UUID_PATTERN.test(id) ? id : null;
+}
+
+export function containerIdFromCgroupText(content: string): string | null {
+  const nyc = /nyc-([0-9a-f]{32})/i.exec(content);
+  if (nyc) {
+    const id = hyphenateContainerHex(nyc[1] ?? '');
+    if (id) return id;
+  }
+  const uuid = /[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}/i.exec(content);
+  if (uuid && UUID_PATTERN.test(uuid[0])) return uuid[0].toLowerCase();
+  return null;
+}
 const STABLE_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,255}$/;
 const CPU_LABEL_PATTERN = /^(?:cpu)?[0-9]+$/;
 
@@ -256,11 +294,21 @@ function validateLabel(key: string, value: string): void {
 }
 
 function validateCoreLabelValue(key: string, value: string): string {
-  if (key === 'container_id') {
-    if (value !== '__unattributed__' && !UUID_PATTERN.test(value)) {
-      throw new OpenMetricsSchemaError('Container labels must use nyabase UUIDs');
+  if (key === 'container_id' || key === 'volume_id' || key === 'pool_id') {
+    if (key === 'container_id' && value === '__unattributed__') return value;
+    if (!UUID_PATTERN.test(value)) {
+      throw new OpenMetricsSchemaError(
+        key === 'pool_id'
+          ? 'Pool labels must use nyabase UUIDs'
+          : key === 'volume_id'
+            ? 'Volume labels must use nyabase UUIDs'
+            : 'Container labels must use nyabase UUIDs',
+      );
     }
-    return value;
+    return value.toLowerCase();
+  }
+  if (key === 'device' && !/^eth[0-3]$/.test(value)) {
+    throw new OpenMetricsSchemaError('Network device labels must be eth0-eth3');
   }
   if (key === 'scope' && value !== 'some' && value !== 'full') {
     throw new OpenMetricsSchemaError('CPU PSI scope is invalid');

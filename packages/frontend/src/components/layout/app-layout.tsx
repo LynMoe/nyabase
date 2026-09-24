@@ -30,6 +30,7 @@ import { certExpiryBannerText, certExpiryWarning } from '../../lib/cert-expiry.j
 
 const userNavItems = [
   { to: '/', icon: LayoutDashboard, label: '资源概览' },
+  { to: '/usage', icon: Activity, label: '使用情况' },
   { to: '/quota', icon: Gauge, label: '配额' },
   { to: '/containers', icon: Container, label: '容器' },
   { to: '/volumes', icon: Database, label: '数据卷' },
@@ -39,6 +40,7 @@ const userNavItems = [
 
 const adminNavItems = [
   { to: '/servers', icon: Server, label: '服务器', caps: [Capability.ManageServers] },
+  { to: '/servers/usage', icon: Activity, label: '使用情况', caps: [Capability.ManageServers, Capability.ViewMetricsAll], match: 'all' as const },
   { to: '/ip-pools', icon: Network, label: 'IP 池', caps: [Capability.ManageIpPools] },
   { to: '/shared-backends', icon: Database, label: '共享存储', caps: [Capability.ManageSharedBackends] },
   { to: '/images', icon: ImageIcon, label: '镜像', caps: [Capability.ManageImages] },
@@ -52,7 +54,13 @@ const adminNavItems = [
   { to: '/system-settings', icon: Settings, label: '系统设置', caps: [Capability.ManageSystemSettings] },
 ];
 
-type NavItemDef = { to: string; icon: React.ComponentType<{ className?: string }>; label: string };
+type NavItemDef = {
+  to: string;
+  icon: React.ComponentType<{ className?: string }>;
+  label: string;
+  caps?: readonly Capability[];
+  match?: 'all';
+};
 
 function userInitials(displayName?: string, username?: string): string {
   const source = (displayName ?? '').trim() || (username ?? '').trim();
@@ -69,14 +77,16 @@ function userInitials(displayName?: string, username?: string): string {
 function NavItem({
   item,
   pathname,
+  items,
   onNavigate,
 }: {
   item: NavItemDef;
   pathname: string;
+  items: NavItemDef[];
   onNavigate?: () => void;
 }) {
-  const isActive = pathname === item.to
-    || (item.to !== '/' && (pathname === `${item.to}/` || pathname.startsWith(`${item.to}/`)));
+  const matches = (to: string) => pathname === to || (to !== '/' && pathname.startsWith(`${to}/`));
+  const isActive = matches(item.to) && !items.some((other) => other.to !== item.to && other.to.length > item.to.length && matches(other.to));
   return (
     <Tooltip>
       <TooltipTrigger asChild>
@@ -159,7 +169,7 @@ function SidebarPanel({
         <nav className="flex flex-col p-2 pb-3">
           <div className="space-y-0.5">
             {userNavItems.map((item) => (
-              <NavItem key={item.to} item={item} pathname={pathname} onNavigate={onNavigate} />
+              <NavItem key={item.to} item={item} items={userNavItems} pathname={pathname} onNavigate={onNavigate} />
             ))}
           </div>
 
@@ -171,7 +181,7 @@ function SidebarPanel({
               </p>
               <div className="space-y-0.5">
                 {visibleAdminNav.map((item) => (
-                  <NavItem key={item.to} item={item} pathname={pathname} onNavigate={onNavigate} />
+                  <NavItem key={item.to} item={item} items={visibleAdminNav} pathname={pathname} onNavigate={onNavigate} />
                 ))}
               </div>
             </>
@@ -220,7 +230,9 @@ export function AppLayout({ children }: { children: ReactNode }) {
   const certWarning = certificate ? certExpiryWarning(certificate.notAfter) : null;
   const certBannerServerId = certificate?.servers[0]?.serverId;
 
-  const visibleAdminNav = adminNavItems.filter((item) => item.caps.some((capability) => userCaps.has(capability)));
+  const visibleAdminNav = adminNavItems.filter((item) => item.match === 'all'
+    ? item.caps?.every((capability) => userCaps.has(capability))
+    : item.caps?.some((capability) => userCaps.has(capability)));
 
   const sidebarProps = {
     brandTitle: settings.branding.title,

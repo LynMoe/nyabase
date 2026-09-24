@@ -94,6 +94,62 @@ describe('collectNvidiaGpuMetrics', () => {
     ]));
   });
 
+  it('attributes a compute process inside an Incus payload cgroup', async () => {
+    const hex = '11111111111141118111111111111111';
+    const command: ReadOnlyCommand = async (file, args) => {
+      if (file === 'nvidia-smi' && args[0]?.startsWith('--query-gpu=')) {
+        return { stdout: '0, 00000000:41:00.0, GPU-a, 0, 0, 4096, 40, 10\n' };
+      }
+      if (file === 'nvidia-smi' && args[0]?.startsWith('--query-compute-apps=')) {
+        return { stdout: '42, 128, GPU-a\n' };
+      }
+      throw new Error('ENOENT');
+    };
+    const samples = await collectNvidiaGpuMetrics({
+      fileSystem: new FakeFileSystem({
+        '/proc/42/cgroup': '0::/lxc.payload.nyc-' + hex + '\n',
+      }),
+      command,
+    });
+    expect(samples).toContainEqual({
+      name: 'nyabase_node_gpu_process_mem_used_bytes',
+      labels: {
+        gpu_pci: '00000000:41:00.0',
+        container_id: '11111111-1111-4111-8111-111111111111',
+      },
+      value: 128 * 1024 * 1024,
+    });
+  });
+
+  it('keeps a hyphenated scope id and leaves unknown cgroups unattributed', async () => {
+    const command: ReadOnlyCommand = async (file, args) => {
+      if (file === 'nvidia-smi' && args[0]?.startsWith('--query-gpu=')) {
+        return { stdout: '0, 00000000:41:00.0, GPU-a, 0, 0, 1024, 40, 10\n1, 00000000:42:00.0, GPU-b, 0, 0, 1024, 40, 10\n' };
+      }
+      if (file === 'nvidia-smi' && args[0]?.startsWith('--query-compute-apps=')) {
+        return { stdout: '7, 1, GPU-a\n8, 1, GPU-b\n' };
+      }
+      throw new Error('ENOENT');
+    };
+    const samples = await collectNvidiaGpuMetrics({
+      fileSystem: new FakeFileSystem({
+        '/proc/7/cgroup': '0::/system.slice/nyabase-11111111-1111-4111-8111-111111111111.scope\n',
+        '/proc/8/cgroup': '0::/user.slice/session\n',
+      }),
+      command,
+    });
+    expect(samples).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        name: 'nyabase_node_gpu_process_mem_used_bytes',
+        labels: { gpu_pci: '00000000:41:00.0', container_id: '11111111-1111-4111-8111-111111111111' },
+      }),
+      expect.objectContaining({
+        name: 'nyabase_node_gpu_process_mem_used_bytes',
+        labels: { gpu_pci: '00000000:42:00.0', container_id: '__unattributed__' },
+      }),
+    ]));
+  });
+
   it('still emits presence gauges when nvidia-smi is missing', async () => {
     const samples = await collectNvidiaGpuMetrics({
       fileSystem: new FakeFileSystem({}),

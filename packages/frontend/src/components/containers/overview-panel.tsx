@@ -1,9 +1,11 @@
 import { useState, type ReactNode } from 'react';
+import { Link } from '@tanstack/react-router';
 import { Copy, Info as InfoIcon, KeyRound, Pencil, Terminal } from 'lucide-react';
 import {
   formatSshProxyJumpLogin,
   type ContainerDto,
   type OpaqueExtensionMap,
+  type PerformanceSelfResponse,
   type PatchContainerLimitsRequest,
 } from '@nyabase/common';
 import { Button } from '../ui/button.js';
@@ -15,7 +17,7 @@ import { TechnicalId } from '../refs/technical-id.js';
 import { usePublicSettings } from '../../hooks/use-public-settings.js';
 import { toast } from '../../hooks/use-toast.js';
 import { copyOneTimeSecret } from '../../lib/one-time-secret.js';
-import { approxGibHint, formatCpu } from '../../lib/utils.js';
+import { approxGibHint, formatBytesCompact, formatCpu, formatRate } from '../../lib/utils.js';
 import { powerIntentLabel } from '../../lib/status-labels.js';
 import { useAuthStore } from '../../store/auth.js';
 import { ExtensionSlots } from '../../extensions/slots.js';
@@ -32,6 +34,8 @@ export function OverviewPanel({
   limitsPending,
   onExtensionSubmit,
   extensionPending,
+  occupancy,
+  occupancyDenied,
 }: {
   container: ContainerDto;
   admin: boolean;
@@ -43,6 +47,8 @@ export function OverviewPanel({
   limitsPending: boolean;
   onExtensionSubmit: (extensionId: string, payload: unknown) => Promise<unknown>;
   extensionPending: boolean;
+  occupancy?: PerformanceSelfResponse;
+  occupancyDenied?: boolean;
 }) {
   const [limitsOpen, setLimitsOpen] = useState(false);
   const [sshOpen, setSshOpen] = useState(false);
@@ -86,6 +92,10 @@ export function OverviewPanel({
     });
   };
 
+  const gpuUsed = occupancy?.container.gpu.usedBytes ?? null;
+  const gpuText = occupancy && (occupancy.container.gpu.pciAddresses.length > 0 || gpuUsed !== null) && gpuUsed !== null
+    ? formatBytesCompact(gpuUsed)
+    : null;
   return (
     <div data-testid="container-overview">
       <SectionCard title="容器信息" testId="ssh-routed-instance-identity">
@@ -119,6 +129,31 @@ export function OverviewPanel({
               area="container.overview"
               ctx={{ value: container.extensions, serverId: container.serverId, admin }}
             />
+          </InfoCategory>
+          <Separator />
+          <InfoCategory
+            title="占用"
+            actions={(
+              <Button asChild variant="ghost" size="sm" className="h-6 gap-1 px-1.5 text-xs">
+                <Link
+                  to={admin ? '/manage/containers/$containerId/usage' : '/containers/$containerId/usage'}
+                  params={{ containerId: container.id }}
+                >
+                  使用情况
+                </Link>
+              </Button>
+            )}
+          >
+            {occupancyDenied ? <p className="text-xs text-muted-foreground">没有查看指标的权限</p> : (
+              <>
+                {occupancy?.stale ? <p className="text-xs text-muted-foreground">样本偏旧</p> : null}
+                <Info label="CPU" value={occupancy ? `${occupancy.container.cpu.usageCores?.toFixed(1) ?? '—'} 核` : '—'} />
+                <Info label="内存" value={occupancy ? (occupancy.container.memory.usedBytes === null ? '—' : formatBytesCompact(occupancy.container.memory.usedBytes)) : '—'} />
+                <Info label="磁盘" value={occupancy ? (occupancy.container.disk.usedBytes === null ? '—' : formatBytesCompact(occupancy.container.disk.usedBytes)) : '—'} />
+                <Info label="网络" value={occupancy ? `↓ ${occupancy.container.network.rxBytesPerSec === null ? '—' : formatRate(occupancy.container.network.rxBytesPerSec)} ↑ ${occupancy.container.network.txBytesPerSec === null ? '—' : formatRate(occupancy.container.network.txBytesPerSec)}` : '—'} />
+                {gpuText ? <Info label="显存" value={gpuText} /> : null}
+              </>
+            )}
           </InfoCategory>
           <Separator />
           <InfoCategory

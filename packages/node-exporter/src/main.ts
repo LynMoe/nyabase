@@ -8,6 +8,7 @@ import {
   mergeNodeMetricCatalog,
   NODE_METRIC_DEFINITIONS,
 } from '@nyabase/common';
+import { collectContainerCgroupMetrics } from './container-cgroup.js';
 import { LinuxNodeMetricsCollector } from './collector.js';
 import { loadNodeExporterConfig } from './config.js';
 import { createNodeExporterServer } from './server.js';
@@ -22,7 +23,7 @@ async function main(): Promise<void> {
   );
   const collector = new LinuxNodeMetricsCollector({
     parentInterface: config.parentInterface,
-    extraCollectors: [collectNvidiaGpuMetrics],
+    extraCollectors: [collectNvidiaGpuMetrics, collectContainerCgroupMetrics],
   });
   const server = createNodeExporterServer({
     token: config.token,

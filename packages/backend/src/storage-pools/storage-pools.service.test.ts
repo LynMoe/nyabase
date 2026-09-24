@@ -3,6 +3,7 @@ import {
   deriveStoragePoolDiscovery,
   deriveSharedBackendIdentity,
   dirQuotaEffectiveFromVolumeState,
+  normalizeObservedStoragePoolSource,
   storagePoolCapability,
 } from './storage-pools.service.js';
 import { StoragePoolResizeFamily } from '@nyabase/common';
@@ -131,5 +132,43 @@ describe('storage pool capability matrix', () => {
       shrinkRequiresStop: true,
       shrinkNever: false,
     });
+  });
+
+  it('persists dir and lvm config.source', () => {
+    expect(deriveStoragePoolDiscovery({
+      serverId: 'server',
+      incusName: 'dir',
+      driver: 'dir',
+      config: { source: '/data1/nyabase/incus' },
+      quotaEffective: false,
+    }).source).toBe('/data1/nyabase/incus');
+    expect(deriveStoragePoolDiscovery({
+      serverId: 'server',
+      incusName: 'lvm',
+      driver: 'lvm',
+      config: { source: 'vg0' },
+    }).source).toBe('vg0');
+  });
+
+  it('normalizes missing, oversized, and control-character sources to null', () => {
+    expect(normalizeObservedStoragePoolSource(undefined)).toMatchObject({
+      source: null, discard: null, rawLength: 0,
+    });
+    expect(normalizeObservedStoragePoolSource('   ')).toMatchObject({
+      source: null, discard: null,
+    });
+    expect(normalizeObservedStoragePoolSource(`/${'a'.repeat(1024)}`)).toMatchObject({
+      source: null, discard: 'too_long',
+    });
+    expect(normalizeObservedStoragePoolSource('/bad\npath')).toMatchObject({
+      source: null, discard: 'control_char',
+    });
+    expect(deriveStoragePoolDiscovery({
+      serverId: 'server',
+      incusName: 'dir',
+      driver: 'dir',
+      config: { source: '/bad\npath' },
+      quotaEffective: false,
+    }).source).toBeNull();
   });
 });

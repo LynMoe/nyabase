@@ -347,9 +347,12 @@ export const zRunPreflightRequest = z.object({
 // Storage pools, shared backends, volumes, and attachments.
 export const zPatchStoragePoolRequest = z.object({
   expectedRevision: zExpectedRevision,
-  registered: z.boolean(),
+  registered: z.boolean().optional(),
   displayName: zOptionalText(128),
-}).strict();
+}).strict().refine(
+  (value) => value.registered !== undefined || value.displayName !== undefined,
+  'At least one storage pool field is required',
+);
 
 export const zPatchSharedBackendExecutorRequest = z.object({
   expectedRevision: zExpectedRevision,

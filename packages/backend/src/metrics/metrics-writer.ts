@@ -23,6 +23,8 @@ export interface MetricPoint {
 
 export interface MetricsWriteOptions {
   readonly guard?: () => Promise<boolean>;
+  /** Hyphenated container id to current owner on this server. */
+  readonly containerOwners?: ReadonlyMap<string, string>;
 }
 
 interface QueuedBatch {
@@ -109,10 +111,14 @@ export class MetricsWriter implements OnModuleDestroy {
       return;
     }
     if (this.shuttingDown) return;
-    const normalized = points.map((point) => ({
-      ...point,
-      labels: { ...point.labels, server_id: serverId },
-    }));
+    const owners = options.containerOwners;
+    const normalized = points.map((point) => {
+      const labels: Record<string, string> = { ...point.labels, server_id: serverId };
+      if (labels.container_id !== undefined) {
+        labels.user_id = owners?.get(labels.container_id) ?? '__unknown__';
+      }
+      return { ...point, labels };
+    });
     const estimatedBytes = Buffer.byteLength(JSON.stringify({ serverId, points: normalized }));
     if (estimatedBytes > MAX_NODE_METRICS_BODY_BYTES) {
       this.dropped += 1;

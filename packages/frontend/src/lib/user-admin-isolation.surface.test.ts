@@ -91,6 +91,26 @@ describe('user panel pages stay on user API plane', () => {
     expect(detail).toMatch(/enabled: tab === 'volumes' && canManageSharedVolumes/);
   });
 
+  it('dashboard performance stays on the user usage API', () => {
+    const src = readPage('dashboard-page.tsx');
+    const panel = readSrc('components/performance/performance-panel.tsx');
+    expect(src).toMatch(/\/performance\/usage'/);
+    expect(src).not.toMatch(/\/admin\/performance/);
+    expect(src).not.toMatch(/PerformancePanel/);
+    expect(panel).toMatch(/\/performance\/usage/);
+    expect(panel).toMatch(/用户/);
+    expect(panel).toMatch(/磁盘/);
+    expect(panel).toMatch(/读/);
+    expect(panel).toMatch(/写/);
+  });
+
+  it('servers page mounts the admin performance panel', () => {
+    const src = readPage('servers-page.tsx');
+    expect(src).toMatch(/\/admin\/performance\/usage'/);
+    expect(src).toMatch(/ViewMetricsAll/);
+    expect(src).not.toMatch(/PerformancePanel/);
+  });
+
   it('dashboard-page never calls /admin/* or capability plane switch', () => {
     const src = readPage('dashboard-page.tsx');
     expect(src).not.toMatch(/['`]\/admin\//);

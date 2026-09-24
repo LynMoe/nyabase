@@ -3,13 +3,16 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Link, useNavigate } from '@tanstack/react-router';
 import { Plus, RefreshCw, Server, Wifi, WifiOff } from 'lucide-react';
 import {
+  Capability,
   NodeMetricsStatus,
-  PreflightStatus,
   zCreateServerRequest,
   zNodeMetricsCreateConfig,
   type CreateServerRequest,
   type ServerDto,
 } from '@nyabase/common';
+import { useAuthStore } from '../store/auth.js';
+import { hostOccupancy } from '../components/performance/host-occupancy.js';
+import type { PerformanceAdminUsageResponse } from '@nyabase/common';
 import { api } from '../lib/api.js';
 import { Button } from '../components/ui/button.js';
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from '../components/ui/dialog.js';
@@ -29,23 +32,27 @@ import { Page } from '../components/layout/page.js';
 import { PageHeader } from '../components/layout/page-header.js';
 import { QueryView } from '../components/layout/query-view.js';
 import { SectionCard } from '../components/layout/section-card.js';
-import { StatusBadge } from '../components/layout/status-badge.js';
 import { TechnicalId } from '../components/refs/technical-id.js';
 import {
   nodeMetricsStatusZh,
-  preflightCheckLabel,
-  preflightStatusLabel,
   serverStatusLabel,
 } from '../lib/display-labels.js';
 import { preflightPending } from '../lib/in-progress.js';
 import { queryKeys } from '../lib/query-keys.js';
-import { refetchWhileInProgress } from '../lib/query-lifecycle.js';
+import { queryPollInterval, refetchWhileInProgress } from '../lib/query-lifecycle.js';
 import { toast } from '../hooks/use-toast.js';
 import { relativeTime } from '../lib/utils.js';
 
 export default function ServersPage() {
   const queryClient = useQueryClient();
   const navigate = useNavigate();
+  const canViewMetrics = useAuthStore((state) => state.user?.capabilities.includes(Capability.ViewMetricsAll) ?? false);
+  const usageQuery = useQuery({
+    queryKey: queryKeys.performance.servers('admin'),
+    queryFn: () => api.get<PerformanceAdminUsageResponse>('/admin/performance/usage'),
+    enabled: canViewMetrics,
+    refetchInterval: (query) => queryPollInterval(query.state, { activeIntervalMs: 15_000 }),
+  });
   const [onboardingOpen, setOnboardingOpen] = useState(false);
   const serversQuery = useQuery({
     queryKey: queryKeys.servers.admin,
@@ -89,20 +96,35 @@ export default function ServersPage() {
       >
         {(items) => (
           <SectionCard flush>
-          <Table className="min-w-[860px]">
+          <Table className="min-w-[920px]">
             <TableHeader>
               <TableRow>
                 <TableHead>名称</TableHead>
+                {canViewMetrics ? (
+                  <>
+                    <TableHead>CPU</TableHead>
+                    <TableHead>内存</TableHead>
+                    <TableHead>磁盘</TableHead>
+                    <TableHead>网络</TableHead>
+                    {usageQuery.data?.servers.some((server) => server.host.gpus.length > 0) ? <TableHead>显存</TableHead> : null}
+                  </>
+                ) : null}
                 <TableHead>状态</TableHead>
                 <TableHead>Incus</TableHead>
-                <TableHead>系统盘池</TableHead>
-                <TableHead>前置检查</TableHead>
                 <TableHead>指标</TableHead>
                 <TableHead>最近观测</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
-              {items.map((server) => <ServerRow key={server.id} server={server} />)}
+              {items.map((server) => (
+                <ServerRow
+                  key={server.id}
+                  server={server}
+                  metrics={usageQuery.data?.servers.find((item) => item.serverId === server.id)}
+                  showMetrics={canViewMetrics}
+                  showGpu={usageQuery.data?.servers.some((item) => item.host.gpus.length > 0) ?? false}
+                />
+              ))}
             </TableBody>
           </Table>
           </SectionCard>
@@ -121,8 +143,19 @@ export default function ServersPage() {
   );
 }
 
-function ServerRow({ server }: { server: ServerDto }) {
+function ServerRow({
+  server,
+  metrics,
+  showMetrics,
+  showGpu,
+}: {
+  server: ServerDto;
+  metrics?: PerformanceAdminUsageResponse['servers'][number];
+  showMetrics: boolean;
+  showGpu: boolean;
+}) {
   const online = server.status === 'online';
+  const occupancy = metrics ? hostOccupancy(metrics.host) : null;
   return (
     <TableRow className="cursor-pointer">
       <TableCell className="whitespace-normal">
@@ -136,6 +169,15 @@ function ServerRow({ server }: { server: ServerDto }) {
           />
         </div>
       </TableCell>
+      {showMetrics ? (
+        <>
+          <TableCell className="tabular-nums whitespace-nowrap" title={occupancy?.cpuTitle}>{occupancy?.cpu ?? '—'}</TableCell>
+          <TableCell className="tabular-nums whitespace-nowrap" title={occupancy?.memoryTitle}>{occupancy?.memory ?? '—'}</TableCell>
+          <TableCell className="tabular-nums whitespace-nowrap" title={occupancy?.diskTitle}>{occupancy?.disk ?? '—'}</TableCell>
+          <TableCell className="tabular-nums whitespace-nowrap">{occupancy?.network ?? '—'}</TableCell>
+          {showGpu ? <TableCell className="tabular-nums whitespace-nowrap" title={occupancy?.gpuTitle}>{occupancy?.gpu ?? ''}</TableCell> : null}
+        </>
+      ) : null}
       <TableCell>
         <Badge variant={online ? 'success' : 'secondary'}>
           {online ? <Wifi className="h-3 w-3" /> : <WifiOff className="h-3 w-3" />}
@@ -143,25 +185,6 @@ function ServerRow({ server }: { server: ServerDto }) {
         </Badge>
       </TableCell>
       <TableCell>{server.incusVersion ?? '未连接'}</TableCell>
-      <TableCell className={server.systemPoolName ? '' : 'font-mono'}>
-        {server.systemPoolName ?? server.systemPoolId ?? '未指定'}
-      </TableCell>
-      <TableCell className="whitespace-normal">
-        <div className="flex flex-wrap items-center gap-1">
-          <StatusBadge
-            label={preflightStatusLabel(server.preflightStatus)}
-            pending={preflightPending(server.preflightStatus)}
-            variant={preflightBadgeVariant(server.preflightStatus)}
-          />
-          {server.preflightReport?.checks
-            ? Object.entries(server.preflightReport.checks).slice(0, 5).map(([name, result]) => (
-              <Badge key={name} variant={result === 'pass' ? 'success' : result === 'warn' ? 'warning' : 'destructive'}>
-                {preflightCheckLabel(name)}
-              </Badge>
-            ))
-            : null}
-        </div>
-      </TableCell>
       <TableCell className="whitespace-normal">
         {nodeMetricsStatusLabel(server.nodeMetrics.health.status)}
         {server.nodeMetrics.health.outageSince ? (
@@ -347,13 +370,6 @@ function ServerOnboardingDialog({
 
 function splitList(value: string): string[] {
   return value.split(',').map((item) => item.trim()).filter((item) => item.length > 0);
-}
-
-function preflightBadgeVariant(status: string): 'success' | 'secondary' | 'destructive' | 'warning' {
-  if (status === PreflightStatus.Passed) return 'success';
-  if (status === PreflightStatus.Failed) return 'destructive';
-  if (status === PreflightStatus.Running) return 'warning';
-  return 'secondary';
 }
 
 function nodeMetricsStatusLabel(status: NodeMetricsStatus): string {

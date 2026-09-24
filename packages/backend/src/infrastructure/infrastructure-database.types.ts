@@ -72,6 +72,7 @@ export interface InfrastructureStoragePoolTable {
   total_bytes: InfrastructureBigInt | null;
   used_bytes: InfrastructureBigInt | null;
   quota_effective: boolean | null;
+  source: ColumnType<string | null, string | null | undefined, string | null | undefined>;
   display_name: string | null;
   registered: boolean;
   last_observed_at: InfrastructureTimestamp | null;

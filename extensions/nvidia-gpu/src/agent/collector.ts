@@ -1,7 +1,7 @@
 import { execFile as childExecFile } from 'node:child_process';
 import { readFile as fsReadFile } from 'node:fs/promises';
 import { promisify } from 'node:util';
-import type { NodeMetricSample } from '@nyabase/common';
+import { containerIdFromCgroupText, type NodeMetricSample } from '@nyabase/common';
 import {
   NVIDIA_GPU_DRIVER_PRESENT_METRIC,
   NVIDIA_GPU_TOOLKIT_PRESENT_METRIC,
@@ -12,8 +12,6 @@ const execFile = promisify(childExecFile);
 const COMMAND_TIMEOUT_MS = 1_000;
 const COMMAND_MAX_BUFFER_BYTES = 256 * 1024;
 const BYTES_PER_MIB = 1024 * 1024;
-const UUID_PATTERN =
-  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 export interface ReadOnlyNodeFileSystem {
   readFile(path: string): Promise<string>;
@@ -184,10 +182,7 @@ async function collectGpuProcessMetrics(
 async function pidContainerId(fileSystem: ReadOnlyNodeFileSystem, pid: number): Promise<string> {
   try {
     const content = await fileSystem.readFile(`/proc/${pid}/cgroup`);
-    const match = content.match(
-      /[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}/i,
-    );
-    if (match && UUID_PATTERN.test(match[0])) return match[0].toLowerCase();
+    return containerIdFromCgroupText(content) ?? '__unattributed__';
   } catch {
     // A process can disappear between nvidia-smi and the cgroup read.
   }

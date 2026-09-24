@@ -1,24 +1,20 @@
 import { describe, expect, it } from 'vitest';
-import { isLocalStoragePool } from './storage-pool-product.js';
+import { StoragePoolDriver } from '@nyabase/common';
+import { storagePoolSourceKind } from './storage-pool-product.js';
 
-describe('isLocalStoragePool', () => {
-  it('keeps unmapped non-shareable pools', () => {
-    expect(isLocalStoragePool({
-      shareable: false,
-      driver: 'dir',
-      sharedBackendId: null,
-    })).toBe(true);
+describe('storagePoolSourceKind', () => {
+  it('labels dir as 挂载点', () => {
+    expect(storagePoolSourceKind(StoragePoolDriver.Dir)).toBe('挂载点');
   });
 
-  it('excludes CephFS executors even before registration', () => {
-    expect(isLocalStoragePool({ shareable: true, driver: 'cephfs', sharedBackendId: null })).toBe(false);
-  });
-
-  it('excludes pools mapped to a shared backend', () => {
-    expect(isLocalStoragePool({
-      shareable: false,
-      driver: 'dir',
-      sharedBackendId: '11111111-1111-4111-8111-111111111111',
-    })).toBe(false);
+  it.each([
+    StoragePoolDriver.Lvm,
+    StoragePoolDriver.LvmCluster,
+    StoragePoolDriver.Zfs,
+    StoragePoolDriver.Btrfs,
+    StoragePoolDriver.Ceph,
+    StoragePoolDriver.CephFs,
+  ] as const)('labels %s as 设备', (driver) => {
+    expect(storagePoolSourceKind(driver)).toBe('设备');
   });
 });

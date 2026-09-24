@@ -63,6 +63,40 @@ describe('MetricsWriter lifecycle', () => {
     });
   });
 
+  it('stamps user_id after catalog validation and leaves host series unlabeled', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true });
+    const writer = makeWriter(fetchMock);
+    const containerId = '11111111-1111-4111-8111-111111111111';
+    const ownerId = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
+    await writer.writeBatch(serverId, [
+      { name: 'nyabase_container_mem_used_bytes', labels: { container_id: containerId }, value: 4, ts: 1 },
+      { name: 'nyabase_container_mem_used_bytes', labels: { container_id: '__unattributed__' }, value: 1, ts: 1 },
+      point,
+    ], { containerOwners: new Map([[containerId, ownerId]]) });
+    const body = String(fetchMock.mock.calls[0]?.[1]?.body);
+    expect(body).toContain(`container_id="${containerId}"`);
+    expect(body).toContain(`user_id="${ownerId}"`);
+    expect(body).toContain('container_id="__unattributed__"');
+    expect(body).toContain('user_id="__unknown__"');
+    expect(body).toContain('nyabase_node_cpu_usage_ratio{');
+    expect(body).not.toMatch(/nyabase_node_cpu_usage_ratio\{[^}]*user_id=/);
+    await writer.onModuleDestroy();
+  });
+
+  it('drops a chunk that already contains user_id', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true });
+    const writer = makeWriter(fetchMock);
+    await writer.writeBatch(serverId, [{
+      name: 'nyabase_container_mem_used_bytes',
+      labels: { container_id: '11111111-1111-4111-8111-111111111111', user_id: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb' },
+      value: 1,
+      ts: 1,
+    }]);
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(writer.getStats().dropped).toBe(1);
+    await writer.onModuleDestroy();
+  });
+
   it('rechecks a queued configuration guard before sending the batch', async () => {
     const fetchMock = vi.fn().mockResolvedValue({ ok: true });
     const writer = makeWriter(fetchMock);

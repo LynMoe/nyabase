@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { NodeMetricsStatus } from '@nyabase/common';
-import { NodeMetricsScrapeService } from './node-metrics-scrape.service.js';
+import { NodeMetricsScrapeService, gpuMemoryLimitPoints } from './node-metrics-scrape.service.js';
 
 const serverId = '00000000-0000-4000-8000-000000000001';
 
@@ -410,5 +410,50 @@ describe('NodeMetricsScrapeService', () => {
     const scraper = service(db.database, vi.fn());
 
     await expect(scraper.scrapeAll()).resolves.toBeUndefined();
+  });
+
+  it('splits a scrape above 4096 points into two writes', async () => {
+    const samples = Array.from({ length: 5000 }, (_, index) => ({
+      name: 'nyabase_node_cpu_usage_ratio',
+      labels: { cpu: String(index) },
+      value: 0.1,
+    }));
+    const pull = vi.fn().mockResolvedValue({
+      status: 'online',
+      report: { samples, sampleCount: samples.length, metrics: {}, endpoint: '', contentType: 'text/plain' },
+    });
+    const db = makeDatabase({
+      id: serverId,
+      node_metrics_endpoint: 'https://node.example.test/metrics',
+      node_metrics_token_ciphertext: 'rfs-v1.cipher.tag',
+      node_metrics_status: NodeMetricsStatus.Unknown,
+      node_metrics_last_success_at: null,
+    });
+    const writeBatch = vi.fn().mockResolvedValue(undefined);
+    await service(db.database, pull, writeBatch).scrapeAll();
+    expect(writeBatch).toHaveBeenCalledTimes(2);
+    expect(writeBatch.mock.calls[0]?.[1]).toHaveLength(4096);
+    expect(db.updates.some((update) => update.node_metrics_status === NodeMetricsStatus.Online)).toBe(true);
+  });
+});
+
+describe('gpuMemoryLimitPoints', () => {
+  it('sums only claimed cards', () => {
+    const containerId = '11111111-1111-4111-8111-111111111111';
+    const points = gpuMemoryLimitPoints([
+      { name: 'nyabase_node_gpu_mem_total_bytes', labels: { gpu_pci: '0000:81:00.0' }, value: 100, ts: 1 },
+      { name: 'nyabase_node_gpu_mem_total_bytes', labels: { gpu_pci: '0000:82:00.0' }, value: 40, ts: 1 },
+      { name: 'nyabase_node_gpu_mem_total_bytes', labels: { gpu_pci: '0000:83:00.0' }, value: 7, ts: 1 },
+    ], new Map([[containerId, ['00000000:81:00.0', '00000000:82:00.0']]]), 1);
+    expect(points).toEqual([{
+      name: 'nyabase_container_gpu_mem_limit_bytes',
+      labels: { container_id: containerId },
+      value: 140,
+      ts: 1,
+    }]);
+    expect(gpuMemoryLimitPoints([], new Map(), 1)).toEqual([]);
+    expect(gpuMemoryLimitPoints([
+      { name: 'nyabase_node_gpu_mem_total_bytes', labels: { gpu_pci: '0000:81:00.0' }, value: 100, ts: 1 },
+    ], new Map([[containerId, ['00000000:81:00.0', '00000000:82:00.0']]]), 1)).toEqual([]);
   });
 });

@@ -30,6 +30,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from '../components/ui/tabs.
 import { ConnectCard } from '../components/servers/connect-card.js';
 import { PreflightCard } from '../components/servers/preflight-card.js';
 import { NodeMetricsCard } from '../components/servers/node-metrics-card.js';
+import { ServerMetricsPanel } from '../components/performance/server-metrics-panel.js';
 import { PoolsCard } from '../components/servers/pools-card.js';
 import { ServerStorageTab } from '../components/servers/server-storage-tab.js';
 import { CertificateCard } from '../components/servers/certificate-card.js';
@@ -93,6 +94,7 @@ export default function ServerDetailPage() {
   const canManageStoragePools = capabilities.includes(Capability.ManageStoragePools);
   const canManageCertificates = capabilities.includes(Capability.ManageCertificates);
   const canManageServers = capabilities.includes(Capability.ManageServers);
+  const canViewMetrics = capabilities.includes(Capability.ViewMetricsAll);
   const canViewCertificate = canManageCertificates || canManageServers;
 
   const selectTab = (next: ServerDetailTab) => {
@@ -441,7 +443,8 @@ export default function ServerDetailPage() {
                 onRunPreflight={() => runPreflight.mutate()}
               />
             </TabsContent>
-            <TabsContent value="metrics">
+            <TabsContent value="metrics" className="space-y-6">
+              {canViewMetrics ? <ServerMetricsPanel serverId={id} /> : null}
               <NodeMetricsCard
                 server={loaded}
                 endpoint={nodeMetricsEndpoint}

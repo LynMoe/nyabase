@@ -5,6 +5,8 @@ import type { StoragePoolDto } from '@nyabase/common';
 import { api } from '../../lib/api.js';
 import { errorMessage } from '../../lib/api-error.js';
 import { QueryErrorState } from '../query-state.js';
+import { TechnicalId } from '../refs/technical-id.js';
+import { storagePoolSourceKind } from '../../lib/storage-pool-product.js';
 import { Badge } from '../ui/badge.js';
 import { Button } from '../ui/button.js';
 import { Card, CardContent, CardHeader, CardTitle } from '../ui/card.js';
@@ -154,9 +156,9 @@ export function PoolsCard({
           <p className="text-sm text-muted-foreground">尚未发现本地存储池。</p>
         ) : (
           <div className="rounded-md border overflow-x-auto">
-            <table className="w-full min-w-[760px] text-sm">
+            <table className="w-full min-w-[860px] text-sm">
               <thead className="bg-muted/50 text-left text-xs text-muted-foreground">
-                <tr><th className="px-3 py-2">池</th><th className="px-3 py-2">容量</th><th className="px-3 py-2">能力</th><th className="px-3 py-2">登记</th><th className="px-3 py-2">操作</th></tr>
+                <tr><th className="px-3 py-2">池</th><th className="px-3 py-2">位置</th><th className="px-3 py-2">容量</th><th className="px-3 py-2">能力</th><th className="px-3 py-2">登记</th><th className="px-3 py-2">操作</th></tr>
               </thead>
               <tbody>
                 {pools.map((pool) => (
@@ -174,7 +176,7 @@ export function PoolsCard({
         {selectedPool && <p className="text-xs text-muted-foreground">探针池：{selectedPool.displayName ?? selectedPool.incusName}</p>}
         {!canManageStoragePools && (
           <p className="text-xs text-muted-foreground" data-testid="storage-pool-register-gated">
-            可以查看存储池，但登记与取消登记需要「管理存储池」权限。
+            可以查看存储池，但登记、取消登记与编辑备注需要「管理存储池」权限。
           </p>
         )}
       </CardContent>
@@ -192,11 +194,12 @@ function StoragePoolRow({
   onUpdated: () => void;
 }) {
   const [confirmUnregister, setConfirmUnregister] = useState(false);
+  const [remarkOpen, setRemarkOpen] = useState(false);
+  const [remark, setRemark] = useState(pool.displayName ?? '');
   const patch = useMutation({
     mutationFn: (registered: boolean) => api.patch<StoragePoolDto>(`/admin/storage-pools/${pool.id}`, {
       expectedRevision: pool.revision,
       registered,
-      displayName: pool.displayName,
     }),
     onSuccess: () => {
       setConfirmUnregister(false);
@@ -204,10 +207,49 @@ function StoragePoolRow({
     },
     onError: (error) => toast({ title: '存储池更新失败', description: errorMessage(error), variant: 'destructive' }),
   });
+  const saveRemark = useMutation({
+    mutationFn: () => api.patch<StoragePoolDto>(`/admin/storage-pools/${pool.id}`, {
+      expectedRevision: pool.revision,
+      displayName: remark.trim() || null,
+    }),
+    onSuccess: () => {
+      setRemarkOpen(false);
+      onUpdated();
+    },
+    onError: (error) => toast({ title: '存储池更新失败', description: errorMessage(error), variant: 'destructive' }),
+  });
   const capability = pool.capability;
+  const sourceKind = storagePoolSourceKind(pool.driver);
   return (
     <tr className="border-t">
-      <td className="px-3 py-2"><div className="font-medium">{pool.displayName ?? pool.incusName}</div><div className="font-mono text-xs text-muted-foreground">{pool.driver} · {pool.resizeFamily}</div></td>
+      <td className="px-3 py-2">
+        <div className="flex items-center gap-1">
+          <div className="font-medium">{pool.displayName ?? pool.incusName}</div>
+          {canManageStoragePools ? (
+            <Button
+              size="sm"
+              variant="ghost"
+              aria-label="编辑备注"
+              data-testid="storage-pool-edit-remark"
+              onClick={() => {
+                setRemark(pool.displayName ?? '');
+                setRemarkOpen(true);
+              }}
+            >
+              <Pencil className="h-3.5 w-3.5" />
+            </Button>
+          ) : null}
+        </div>
+        <div className="font-mono text-xs text-muted-foreground">{pool.driver} · {pool.resizeFamily}</div>
+      </td>
+      <td className="px-3 py-2">
+        {pool.source ? (
+          <div className="flex items-baseline gap-2">
+            <span className="text-xs text-muted-foreground">{sourceKind}</span>
+            <TechnicalId label={sourceKind} value={pool.source} />
+          </div>
+        ) : '—'}
+      </td>
       <td className="px-3 py-2">{usedTotalLabel(pool.usedBytes, pool.totalBytes)}<div className="text-xs text-muted-foreground">{pool.quotaEffective === null ? '配额未知' : pool.quotaEffective ? '配额生效' : '配额未生效'}</div></td>
       <td className="px-3 py-2"><div className="flex flex-wrap gap-1"><Badge variant={capability.growOnline ? 'success' : 'secondary'}>在线扩容</Badge><Badge variant={capability.shrinkOnline ? 'success' : capability.shrinkNever ? 'destructive' : 'warning'}>{capability.shrinkOnline ? '在线缩容' : capability.shrinkNever ? '不可缩容' : '需停机/卸载'}</Badge>{pool.rootDiskCapable && <Badge variant="outline">系统盘</Badge>}</div></td>
       <td className="px-3 py-2">{pool.registered ? '已登记' : '未登记'}</td>
@@ -232,6 +274,27 @@ function StoragePoolRow({
               <Button variant="outline" onClick={() => setConfirmUnregister(false)} disabled={patch.isPending}>取消</Button>
               <Button variant="destructive" onClick={() => patch.mutate(false)} disabled={patch.isPending}>
                 {patch.isPending ? '处理中...' : '确认取消登记'}
+              </Button>
+            </DialogFooter>
+          </DialogContent>
+        </Dialog>
+        <Dialog open={remarkOpen} onOpenChange={(open) => { if (!open) setRemarkOpen(false); }}>
+          <DialogContent>
+            <DialogHeader>
+              <DialogTitle>编辑备注</DialogTitle>
+            </DialogHeader>
+            <FormField id={`storage-pool-remark-${pool.id}`} label="备注">
+              <Input
+                id={`storage-pool-remark-${pool.id}`}
+                value={remark}
+                placeholder={pool.incusName}
+                onChange={(event) => setRemark(event.target.value)}
+              />
+            </FormField>
+            <DialogFooter>
+              <Button variant="outline" onClick={() => setRemarkOpen(false)} disabled={saveRemark.isPending}>取消</Button>
+              <Button onClick={() => saveRemark.mutate()} disabled={saveRemark.isPending}>
+                {saveRemark.isPending ? '保存中...' : '保存'}
               </Button>
             </DialogFooter>
           </DialogContent>

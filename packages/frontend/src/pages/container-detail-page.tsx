@@ -8,6 +8,7 @@ import {
   type AttachVolumeRequest,
   type ContainerAction,
   type ContainerDto,
+  type PerformanceSelfResponse,
   type CursorPaginatedResponse,
   type EffectiveAccessDto,
   type IntentAcceptedDto,
@@ -98,6 +99,7 @@ function ContainerDetailContent({
   const [intentsOpen, setIntentsOpen] = useState(false);
   const capabilities = useAuthStore((state) => state.user?.capabilities ?? []);
   const canManageVolumes = capabilities.includes(Capability.ManageVolumes);
+  const canViewMetrics = capabilities.includes(Capability.ViewMetricsAll);
   const canManageSharedVolumes = capabilities.includes(Capability.ManageSharedVolumes);
   const actionPending = useResourceMutationPending(containerId);
   const volumesEnabled = tab === 'overview' && (!admin || canManageVolumes || canManageSharedVolumes);
@@ -107,6 +109,14 @@ function ContainerDetailContent({
     queryKey: queryKeys.containers.detail(admin ? 'admin' : 'user', containerId),
     queryFn: () => api.get<ContainerDto>(base),
     refetchInterval: (query) => queryPollInterval(query.state, { activeIntervalMs: 5_000 }),
+  });
+  const occupancyQuery = useQuery({
+    queryKey: queryKeys.performance.self(admin ? 'admin' : 'user', containerId),
+    queryFn: () => api.get<PerformanceSelfResponse>(
+      `${admin ? '/admin/performance/usage' : '/performance/usage'}?containerId=${containerId}`,
+    ),
+    enabled: !admin || canViewMetrics,
+    refetchInterval: (query) => queryPollInterval(query.state, { activeIntervalMs: 15_000 }),
   });
   const volumesQuery = useQuery({
     queryKey: admin ? queryKeys.volumes.admin : queryKeys.volumes.user,
@@ -403,6 +413,8 @@ function ContainerDetailContent({
                   limitsPending={updateLimits.isPending}
                   onExtensionSubmit={(extensionId, payload) => updateExtension.mutateAsync({ extensionId, payload })}
                   extensionPending={updateExtension.isPending}
+                  occupancy={occupancyQuery.data}
+                  occupancyDenied={admin && !canViewMetrics}
                 />
                 <QueryView
                   queries={[

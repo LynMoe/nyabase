@@ -220,6 +220,7 @@ describePg('PostgreSQL runtime/type schema contract', () => {
           AND conname IN (
             'storage_pools_filesystem_check',
             'storage_pools_shared_shape_check',
+            'storage_pools_source_check',
             'volumes_scope_check',
             'intents_settled_shape_check',
             'intents_failure_shape_check',
@@ -233,6 +234,7 @@ describePg('PostgreSQL runtime/type schema contract', () => {
         'intents_settled_shape_check',
         'storage_pools_filesystem_check',
         'storage_pools_shared_shape_check',
+        'storage_pools_source_check',
         'volumes_scope_check',
       ]);
     });

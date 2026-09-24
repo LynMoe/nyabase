@@ -29,7 +29,11 @@ export default defineConfig({
         test: {
           name: 'jsdom',
           environment: 'jsdom',
-          include: ['src/components/layout/**/*.test.tsx', 'src/components/refs/**/*.test.tsx'],
+          include: [
+            'src/components/layout/**/*.test.tsx',
+            'src/components/refs/**/*.test.tsx',
+            'src/components/performance/**/*.test.tsx',
+          ],
           exclude: ['dist/**'],
         },
       },

@@ -99,6 +99,7 @@ const pool = {
   serverId: 'srv-1',
   incusName: 'local',
   displayName: '本地盘',
+  source: '/data1/nyabase/incus',
   driver: 'dir',
   resizeFamily: 'quota_online',
   rootDiskCapable: true,
@@ -284,7 +285,8 @@ function mockApi(urlString, method) {
   if (p === '/servers/srv-1') return json(userServer);
   if (p === '/admin/servers') return json([server]);
   if (p === '/admin/servers/srv-1') return json(server);
-  if (p === '/admin/servers/srv-1/storage-pools' || p === '/servers/srv-1/storage-pools') return json([pool]);
+  if (p === '/admin/servers/srv-1/storage-pools') return json([pool]);
+  if (p === '/servers/srv-1/storage-pools') return json([{ ...pool, source: null }]);
   if (p === '/admin/servers/srv-1/preflight') {
     return json({
       serverId: 'srv-1', status: 'passed', checkedAt: ISO,

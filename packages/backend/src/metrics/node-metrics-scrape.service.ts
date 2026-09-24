@@ -4,14 +4,17 @@ import {
   Logger,
   OnModuleDestroy,
   OnModuleInit,
+  Optional,
 } from '@nestjs/common';
 import {
+  MAX_METRIC_POINTS_PER_BATCH,
   NODE_METRICS_FAILURE_THRESHOLD,
   NODE_METRICS_FRESHNESS_MS,
   NODE_METRICS_SCRAPE_INTERVAL_MS,
   NodeMetricsStatus,
   type NodeMetricSample,
 } from '@nyabase/common';
+import { NVIDIA_GPU_EXTENSION_ID, canonicalPciAddress } from '@nyabase/nvidia-gpu';
 import { sql, type Kysely, type RawBuilder } from 'kysely';
 import type { NyabaseDatabase } from '../persistence-pg/database.types.js';
 import { PG_DATABASE } from '../persistence-pg/tokens.js';
@@ -19,6 +22,7 @@ import {
   NODE_METRICS_PULL,
   type NodeMetricsPullPort,
 } from '../runtime/server-preflight-reconciler.service.js';
+import { NyabaseConfigService } from '../config/nyabase-config.service.js';
 import { RuntimeRoleService } from '../runtime/runtime-role.service.js';
 import {
   type MetricPoint,
@@ -65,6 +69,7 @@ export class NodeMetricsScrapeService implements OnModuleInit, OnModuleDestroy {
     @Inject(NODE_METRICS_PULL) private readonly nodeMetrics: NodeMetricsPullPort,
     private readonly metricsWriter: MetricsWriter,
     private readonly runtimeRole: RuntimeRoleService,
+    @Optional() private readonly config?: NyabaseConfigService,
   ) {}
 
   onModuleInit(): void {
@@ -185,13 +190,19 @@ export class NodeMetricsScrapeService implements OnModuleInit, OnModuleDestroy {
         return;
       }
       const now = Date.now();
-      const points: MetricPoint[] = [
-        ...result.report.samples.map((sample: NodeMetricSample) => ({
+      const enabled = this.containerSeriesEnabled();
+      const scraped = result.report.samples
+        .filter((sample: NodeMetricSample) => enabled || !sample.name.startsWith('nyabase_container_'))
+        .map((sample: NodeMetricSample) => ({
           name: sample.name,
           labels: { ...sample.labels },
           value: sample.value,
           ts: now,
-        })),
+        }));
+      const owners = await this.loadContainerOwners(server.id);
+      const points: MetricPoint[] = [
+        ...scraped,
+        ...(enabled ? gpuMemoryLimitPoints(scraped, await this.loadGpuClaims(server.id), now) : []),
         {
           name: 'nyabase_node_scrape_up',
           labels: {},
@@ -206,8 +217,9 @@ export class NodeMetricsScrapeService implements OnModuleInit, OnModuleDestroy {
       }
       const writeOptions: MetricsWriteOptions = {
         guard: () => this.isCurrentConfiguration(server),
+        containerOwners: owners,
       };
-      await this.metricsWriter.writeBatch(server.id, points, writeOptions);
+      await this.writeChunks(server.id, points, writeOptions);
       if (this.shuttingDown || signal.aborted) return;
       const updated = await this.updateNodeMetricsHealth(server, {
         node_metrics_status: NodeMetricsStatus.Online,
@@ -332,6 +344,59 @@ export class NodeMetricsScrapeService implements OnModuleInit, OnModuleDestroy {
     }
   }
 
+  private containerSeriesEnabled(): boolean {
+    if (!this.config) return true;
+    return this.config.get<boolean>('metrics.containerSeriesEnabled') !== false;
+  }
+
+  private async writeChunks(
+    serverId: string,
+    points: MetricPoint[],
+    options: MetricsWriteOptions,
+  ): Promise<void> {
+    for (let offset = 0; offset < points.length; offset += MAX_METRIC_POINTS_PER_BATCH) {
+      await this.metricsWriter.writeBatch(
+        serverId,
+        points.slice(offset, offset + MAX_METRIC_POINTS_PER_BATCH),
+        options,
+      );
+    }
+  }
+
+  private async loadContainerOwners(serverId: string): Promise<Map<string, string>> {
+    const rows = await this.database
+      .selectFrom('control.containers')
+      .select(['id', 'owner_id'])
+      .where('server_id', '=', serverId)
+      .where('lifecycle_phase', '<>', 'deleting')
+      .execute();
+    const owners = new Map<string, string>();
+    for (const row of rows) {
+      if (typeof row.owner_id === 'string' && row.owner_id.length > 0) {
+        owners.set(row.id, row.owner_id);
+      }
+    }
+    return owners;
+  }
+
+  private async loadGpuClaims(serverId: string): Promise<Map<string, string[]>> {
+    const rows = await this.database
+      .selectFrom('control.extension_device_claims')
+      .select(['container_id', 'device_key'])
+      .where('server_id', '=', serverId)
+      .where('extension_id', '=', NVIDIA_GPU_EXTENSION_ID)
+      .execute();
+    const claims = new Map<string, string[]>();
+    for (const row of rows) {
+      const pci = typeof row.device_key === 'string' ? canonicalPciAddress(row.device_key) : null;
+      if (!pci || typeof row.container_id !== 'string') continue;
+      const list = claims.get(row.container_id) ?? [];
+      list.push(pci);
+      claims.set(row.container_id, list);
+    }
+    return claims;
+  }
+
   private async isCurrentConfiguration(server: NodeMetricsServerRow): Promise<boolean> {
     const current = await this.database
       .selectFrom('infra.servers')
@@ -374,6 +439,43 @@ export class NodeMetricsScrapeService implements OnModuleInit, OnModuleDestroy {
       }`,
     );
   }
+}
+
+export function gpuMemoryLimitPoints(
+  samples: readonly MetricPoint[],
+  claims: ReadonlyMap<string, readonly string[]>,
+  ts: number,
+): MetricPoint[] {
+  const totals = new Map<string, number>();
+  for (const sample of samples) {
+    if (sample.name !== 'nyabase_node_gpu_mem_total_bytes') continue;
+    const pci = canonicalPciAddress(sample.labels.gpu_pci ?? '');
+    if (!pci || !Number.isFinite(sample.value) || sample.value < 0) continue;
+    totals.set(pci, sample.value);
+  }
+  const points: MetricPoint[] = [];
+  for (const [containerId, addresses] of claims) {
+    if (addresses.length === 0) continue;
+    let sum = 0;
+    let complete = true;
+    for (const address of addresses) {
+      const pci = canonicalPciAddress(address);
+      const total = pci ? totals.get(pci) : undefined;
+      if (total === undefined) {
+        complete = false;
+        break;
+      }
+      sum += total;
+    }
+    if (!complete) continue;
+    points.push({
+      name: 'nyabase_container_gpu_mem_limit_bytes',
+      labels: { container_id: containerId },
+      value: sum,
+      ts,
+    });
+  }
+  return points;
 }
 
 function configurationKey(server: NodeMetricsServerRow): string {

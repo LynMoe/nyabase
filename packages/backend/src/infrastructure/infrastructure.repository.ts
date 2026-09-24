@@ -39,6 +39,7 @@ export interface StoragePoolDiscovery {
   readonly totalBytes: number | string | bigint | null;
   readonly usedBytes: number | string | bigint | null;
   readonly quotaEffective: boolean | null;
+  readonly source: string | null;
 }
 
 export interface SharedBackendInsert {
@@ -204,6 +205,7 @@ export class InfrastructureRepository {
           total_bytes: discovery.totalBytes,
           used_bytes: discovery.usedBytes,
           quota_effective: discovery.quotaEffective,
+          source: discovery.source,
           last_observed_at: new Date(),
           updated_at: new Date(),
         })
@@ -226,6 +228,7 @@ export class InfrastructureRepository {
         total_bytes: discovery.totalBytes,
         used_bytes: discovery.usedBytes,
         quota_effective: discovery.quotaEffective,
+        source: discovery.source,
         display_name: null,
         registered: false,
         last_observed_at: new Date(),

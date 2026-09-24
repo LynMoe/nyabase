@@ -27,6 +27,7 @@ import {
   zListVolumesQuery,
   zPatchImageRequest,
   zPatchServerRequest,
+  zPatchStoragePoolRequest,
   zPreflightReport,
   zPutServerGrantRequest,
   zSshProxyInstanceRouteSnapshot,
@@ -418,6 +419,40 @@ describe('preflight and console contracts', () => {
       type: 'auth',
       token: 'browser-token',
       serverId,
+    }).success).toBe(false);
+  });
+});
+
+describe('storage pool patch', () => {
+  it('accepts remark-only and register-only bodies', () => {
+    expect(zPatchStoragePoolRequest.parse({
+      expectedRevision: 2,
+      displayName: '系统盘',
+    })).toMatchObject({ displayName: '系统盘' });
+    expect(zPatchStoragePoolRequest.parse({
+      expectedRevision: 2,
+      displayName: null,
+    }).displayName).toBeNull();
+    expect(zPatchStoragePoolRequest.parse({
+      expectedRevision: 2,
+      registered: true,
+    }).registered).toBe(true);
+  });
+
+  it('rejects empty patches and unknown keys', () => {
+    expect(zPatchStoragePoolRequest.safeParse({ expectedRevision: 2 }).success).toBe(false);
+    expect(zPatchStoragePoolRequest.safeParse({
+      expectedRevision: 2,
+      registered: true,
+      extra: 1,
+    }).success).toBe(false);
+    expect(zPatchStoragePoolRequest.safeParse({
+      expectedRevision: 2,
+      displayName: 'x'.repeat(129),
+    }).success).toBe(false);
+    expect(zPatchStoragePoolRequest.safeParse({
+      expectedRevision: 2,
+      source: '/data1/incus',
     }).success).toBe(false);
   });
 });

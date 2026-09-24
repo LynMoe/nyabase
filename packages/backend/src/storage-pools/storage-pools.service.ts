@@ -16,6 +16,7 @@ import {
   type SharedBackendExecutorDto,
   type StorageDiscoverIssueDto,
   type StoragePoolCapabilityDto,
+  type PatchStoragePoolRequest,
   type StoragePoolDiscoverResult,
   type StoragePoolDto,
 } from '@nyabase/common';
@@ -49,6 +50,20 @@ export function dirQuotaEffectiveFromVolumeState(
     return match !== null;
   }
   return false;
+}
+
+export function normalizeObservedStoragePoolSource(
+  raw: string | null | undefined,
+): { source: string | null; discard: 'too_long' | 'control_char' | null; rawLength: number } {
+  const trimmed = (raw ?? '').trim();
+  if (trimmed.length === 0) return { source: null, discard: null, rawLength: 0 };
+  if (trimmed.length > 1024) {
+    return { source: null, discard: 'too_long', rawLength: trimmed.length };
+  }
+  if (/[\0\r\n]/.test(trimmed)) {
+    return { source: null, discard: 'control_char', rawLength: trimmed.length };
+  }
+  return { source: trimmed, discard: null, rawLength: trimmed.length };
 }
 
 export function deriveStoragePoolDiscovery(input: {
@@ -114,6 +129,7 @@ export function deriveStoragePoolDiscovery(input: {
     usedBytes: input.usedBytes ?? null,
     quotaEffective: input.quotaEffective
       ?? (driver === StoragePoolDriver.Dir ? false : quotaOnline),
+    source: normalizeObservedStoragePoolSource(configValue(config, 'source')).source,
   };
 }
 
@@ -277,7 +293,7 @@ export class StoragePoolsService {
 
   async list(serverId?: string, includeUnregistered = false): Promise<StoragePoolDto[]> {
     const rows = await this.repository.list(serverId, includeUnregistered);
-    return rows.map((row) => this.toDto(row)).filter(isLocalPoolDto);
+    return rows.map((row) => this.toAdminDto(row)).filter(isLocalPoolDto);
   }
 
   async listForUser(userId: string, serverId?: string): Promise<StoragePoolDto[]> {
@@ -308,7 +324,7 @@ export class StoragePoolsService {
       .map((grant) => grant.pool_id));
     return rows
       .filter((row) => serverIds.has(row.server_id) && poolIds.has(row.id))
-      .map((row) => this.toDto(row))
+      .map((row) => this.toUserDto(row))
       .filter(isLocalPoolDto);
   }
 
@@ -317,7 +333,7 @@ export class StoragePoolsService {
     if (!row || (!includeUnregistered && !row.registered) || !isLocalPoolRow(row)) {
       throw new NotFoundException('Storage pool not found');
     }
-    return this.toDto(row);
+    return this.toAdminDto(row);
   }
 
   async getForUser(
@@ -337,14 +353,14 @@ export class StoragePoolsService {
     const visible = (await this.listForUser(userId, row.server_id))
       .some((pool) => pool.id === id);
     if (!visible) throw new NotFoundException('Storage pool not found');
-    return this.toDto(row);
+    return this.toUserDto(row);
   }
 
   async discover(serverId: string): Promise<StoragePoolDiscoverResult> {
     const pending = await this.collectDiscoveries(serverId);
     const { rows, identityConflicts } = await this.applyDiscoveries(serverId, pending);
     return {
-      pools: rows.map((row) => this.toDto(row)).filter(isLocalPoolDto),
+      pools: rows.map((row) => this.toAdminDto(row)).filter(isLocalPoolDto),
       identityConflicts,
     };
   }
@@ -429,14 +445,7 @@ export class StoragePoolsService {
     };
   }
 
-  async patch(
-    id: string,
-    input: {
-      expectedRevision: number;
-      registered: boolean;
-      displayName?: string | null;
-    },
-  ): Promise<StoragePoolDto> {
+  async patch(id: string, input: PatchStoragePoolRequest): Promise<StoragePoolDto> {
     const result = await this.transactions.run(
       async (transaction) => {
         const observed = await this.repository.findById(id, transaction);
@@ -451,7 +460,7 @@ export class StoragePoolsService {
         if (Number(current.revision) !== input.expectedRevision) {
           throw new ConflictException({ code: FailureCode.RevisionConflict });
         }
-        if (input.registered !== current.registered && !input.registered) {
+        if (input.registered === false && current.registered) {
           if (await this.repository.hasDependencies(id, transaction)) {
             throw new ConflictException({
               code: FailureCode.StoragePoolInUse,
@@ -460,16 +469,18 @@ export class StoragePoolsService {
           }
         }
         const updated = await this.repository.patch(id, input.expectedRevision, {
-          registered: input.registered,
           shareable: false,
-          ...(input.displayName === undefined ? {} : { display_name: input.displayName }),
+          ...(input.registered === undefined ? {} : { registered: input.registered }),
+          ...(input.displayName === undefined
+            ? {}
+            : { display_name: input.displayName?.trim() ? input.displayName.trim() : null }),
         }, transaction);
         if (!updated) throw new ConflictException({ code: FailureCode.RevisionConflict });
         return updated;
       },
       { isolationLevel: 'serializable', maxAttempts: 5 },
     );
-    return this.toDto(result);
+    return this.toAdminDto(result);
   }
 
   async patchExecutor(
@@ -559,6 +570,13 @@ export class StoragePoolsService {
         }
       }
       const config = pool.config;
+      const observed = normalizeObservedStoragePoolSource(configValue(config ?? {}, 'source'));
+      if (observed.discard) {
+        this.logger.warn(
+          `storage pool source discarded reason=${observed.discard} `
+          + `serverId=${serverId} incusName=${name} length=${observed.rawLength}`,
+        );
+      }
       const discovery = deriveStoragePoolDiscovery({
         serverId,
         incusName: name,
@@ -879,11 +897,20 @@ export class StoragePoolsService {
       .execute();
   }
 
-  private toDto(row: {
+  private toAdminDto(row: Parameters<StoragePoolsService['toPoolDto']>[0]): StoragePoolDto {
+    return this.toPoolDto(row, row.source ?? null);
+  }
+
+  private toUserDto(row: Parameters<StoragePoolsService['toPoolDto']>[0]): StoragePoolDto {
+    return this.toPoolDto(row, null);
+  }
+
+  private toPoolDto(row: {
     id: string;
     server_id: string;
     incus_name: string;
     display_name: string | null;
+    source?: string | null;
     driver: string;
     resize_family: string;
     root_disk_capable: boolean;
@@ -896,12 +923,13 @@ export class StoragePoolsService {
     registered: boolean;
     last_observed_at: Date | string | null;
     revision: string | number;
-  }): StoragePoolDto {
+  }, source: string | null): StoragePoolDto {
     return {
       id: row.id,
       serverId: row.server_id,
       incusName: row.incus_name,
       displayName: row.display_name,
+      source,
       driver: row.driver as StoragePoolDto['driver'],
       resizeFamily: row.resize_family as StoragePoolDto['resizeFamily'],
       rootDiskCapable: row.root_disk_capable,

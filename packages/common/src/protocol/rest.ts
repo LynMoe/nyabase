@@ -344,6 +344,8 @@ export interface StoragePoolDto {
   serverId: string;
   incusName: string;
   displayName: string | null;
+  /** Incus config.source. Admin list/discover/PATCH only; user GET is always null. */
+  source: string | null;
   driver: StoragePoolDriver;
   resizeFamily: StoragePoolResizeFamily;
   rootDiskCapable: boolean;

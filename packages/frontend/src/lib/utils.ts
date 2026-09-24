@@ -93,11 +93,96 @@ export function formatPercent(ratio: number): string {
 }
 
 export function formatBytesCompact(bytes: number): string {
-  if (bytes >= 1024 ** 4) return `${(bytes / 1024 ** 4).toFixed(1)}T`;
-  if (bytes >= 1024 ** 3) return `${(bytes / 1024 ** 3).toFixed(1)}G`;
-  if (bytes >= 1024 ** 2) return `${(bytes / 1024 ** 2).toFixed(0)}M`;
-  if (bytes >= 1024) return `${Math.round(bytes / 1024)}K`;
-  return `${bytes}B`;
+  const value = Math.abs(bytes);
+  const sign = bytes < 0 ? '-' : '';
+  if (value >= 1024 ** 4) return `${sign}${(value / 1024 ** 4).toFixed(1)}T`;
+  if (value >= 1024 ** 3) return `${sign}${(value / 1024 ** 3).toFixed(1)}G`;
+  if (value >= 1024 ** 2) return `${sign}${(value / 1024 ** 2).toFixed(0)}M`;
+  if (value >= 1024) return `${sign}${Math.round(value / 1024)}K`;
+  return `${sign}${Math.round(value)}B`;
+}
+
+/** Bytes per second for performance charts and occupancy lines. */
+export function formatRate(bytesPerSec: number): string {
+  if (!Number.isFinite(bytesPerSec)) return '—';
+  const value = Math.abs(bytesPerSec);
+  const sign = bytesPerSec < 0 ? '-' : '';
+  const scaled = (amount: number, unit: string) => {
+    const text = amount < 10 ? amount.toFixed(1) : String(Math.round(amount));
+    return `${sign}${text} ${unit}`;
+  };
+  if (value >= 1024 ** 3) return scaled(value / 1024 ** 3, 'GB/s');
+  if (value >= 1024 ** 2) return scaled(value / 1024 ** 2, 'MB/s');
+  if (value >= 1024) return scaled(value / 1024, 'KB/s');
+  return `${sign}${Math.round(value)} B/s`;
+}
+
+export function formatGpuText(input: {
+  usedBytes?: number | null;
+  totalBytes?: number | null;
+  limitBytes?: number | null;
+  ratio?: number | null;
+} | null | undefined): string | null {
+  if (!input) return null;
+  const used = input.usedBytes;
+  const total = input.totalBytes ?? input.limitBytes;
+  if (typeof input.ratio === 'number' && Number.isFinite(input.ratio) && input.ratio > 0) {
+    return formatPercent(input.ratio);
+  }
+  if (typeof used === 'number' && typeof total === 'number' && total > 0) {
+    return formatPercent(used / total);
+  }
+  if (typeof used === 'number' && used > 0) return formatBytesCompact(used);
+  return null;
+}
+
+export function formatAssignedGpuText(gpu: {
+  usedBytes?: number | null;
+  totalBytes?: number | null;
+  ratio?: number | null;
+  limitBytes?: number | null;
+  pciAddresses?: readonly string[];
+  cardCount?: number;
+} | null | undefined): string | null {
+  if (!gpu) return null;
+  const assigned = (gpu.pciAddresses?.length ?? 0) > 0 || (gpu.cardCount ?? 0) > 0 || gpu.usedBytes != null;
+  return assigned ? formatGpuText(gpu) : null;
+}
+
+export function formatHostGpuText(gpus: ReadonlyArray<{
+  usedBytes: number | null;
+  totalBytes: number | null;
+}>): string | null {
+  if (gpus.length === 0) return null;
+  const finite = (value: number | null): value is number => typeof value === 'number' && Number.isFinite(value);
+  const everyUsed = gpus.every((card) => finite(card.usedBytes));
+  const everyTotal = gpus.every((card) => finite(card.totalBytes));
+  const total = everyTotal ? gpus.reduce((sum, card) => sum + (card.totalBytes as number), 0) : 0;
+  if (everyUsed && everyTotal && total > 0) {
+    const used = gpus.reduce((sum, card) => sum + (card.usedBytes as number), 0);
+    return formatGpuText({ usedBytes: used, totalBytes: total });
+  }
+  const known = gpus.flatMap((card) => (finite(card.usedBytes) ? [card.usedBytes] : []));
+  if (known.length === 0) return null;
+  return formatGpuText({ usedBytes: known.reduce((sum, value) => sum + value, 0), totalBytes: null });
+}
+
+export function formatAggregateGpuText(items: ReadonlyArray<{
+  usedBytes: number | null;
+  limitBytes: number | null;
+  pciAddresses?: readonly string[];
+}>): string | null {
+  const included = items.filter((item) => (item.pciAddresses?.length ?? 0) > 0 || item.usedBytes != null);
+  if (included.length === 0) return null;
+  const finite = (value: number | null): value is number => typeof value === 'number' && Number.isFinite(value);
+  const usedValues = included.map((item) => item.usedBytes).filter(finite);
+  const used = usedValues.length === 0 ? null : usedValues.reduce((total, value) => total + value, 0);
+  const limitsComplete = included.every((item) => finite(item.limitBytes));
+  const limit = limitsComplete ? included.reduce((total, item) => total + (item.limitBytes as number), 0) : null;
+  return formatGpuText({
+    usedBytes: used,
+    totalBytes: limit !== null && limit > 0 && used !== null ? limit : null,
+  });
 }
 
 /**

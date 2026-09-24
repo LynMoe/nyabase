@@ -16,6 +16,7 @@ export interface StoragePoolDiscovery {
   totalBytes: number | null;
   usedBytes: number | null;
   quotaEffective: boolean | null;
+  source: string | null;
   /**
    * Discovery can resolve an already registered CephFS identity.  It is
    * optional because a freshly discovered pool may still need registration.
@@ -198,6 +199,7 @@ export class StoragePoolsRepository {
           total_bytes: discovery.totalBytes,
           used_bytes: discovery.usedBytes,
           quota_effective: discovery.quotaEffective,
+          source: discovery.source,
           last_observed_at: new Date(),
           revision: Number(existing.revision) + 1,
         })
@@ -220,6 +222,7 @@ export class StoragePoolsRepository {
         total_bytes: discovery.totalBytes,
         used_bytes: discovery.usedBytes,
         quota_effective: discovery.quotaEffective,
+        source: discovery.source,
         display_name: null,
         registered: false,
         last_observed_at: new Date(),
