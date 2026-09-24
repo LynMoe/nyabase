@@ -128,6 +128,18 @@ Listen addresses (env overrides):
 - HTTP: `NYABASE_HTTP_LISTEN`, default `0.0.0.0:8080`
 - HTTPS (optional): `NYABASE_HTTPS_LISTEN` (unset means HTTPS listen is off)
 
+After the Jump proxy binary that keeps live sessions is installed on the
+manager, `upgrade-backend` (recreate Compose `backend` only) does not drop
+established `ssh -J` sessions. New Jump connections fail closed until the
+Backend is ready again. Replacing the Jump binary is copy then restart:
+`install -m 0755` the new `nyabase-ssh-proxy` to `/usr/local/bin/` (and the
+control-plane bundle `bin/`), then `maintain.sh restart-proxies`. Restart
+alone does not install the file. That one proxy restart drops Jump.
+If Backend stays down longer than the proxy hold (default 300s), Jump
+fail-closes. Override hold with `NYABASE_SSH_CONTROL_HOLD_MS` in
+`/etc/nyabase/ssh-proxy.env` (180000–600000), then restart the proxy unit.
+This is not a YAML or panel setting.
+
 `NYABASE_BACKEND_WS` must target Backend port **3001**, not 3000. The Rust
 defaults of `ws://127.0.0.1:3000/ws/ssh-proxy` and
 `ws://127.0.0.1:3000/ws/http-proxy` are wrong for this product:

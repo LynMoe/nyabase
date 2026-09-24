@@ -20,7 +20,7 @@ use futures_util::future::{AbortHandle, AbortRegistration, Abortable};
 use futures_util::{Sink, SinkExt, StreamExt};
 use russh::keys::{decode_secret_key, parse_public_key_base64, PrivateKey, PublicKey};
 use russh::server::{Auth, Msg as ServerMsg, Session};
-use russh::{Channel, ChannelId, MethodKind, MethodSet, Pty};
+use russh::{Channel, ChannelId, Disconnect, MethodKind, MethodSet, Pty};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tokio::io::{self, AsyncRead, AsyncWrite, ReadBuf};
@@ -45,6 +45,10 @@ const MAX_STATUS_INTERVAL_MS: u64 = 60_000;
 const MAX_CHANNELS_PER_CONNECTION: usize = 16;
 const MAX_CHILD_TASKS_PER_CONNECTION: usize = 64;
 const MAX_BACKEND_CA_PEM_BYTES: u64 = 1024 * 1024;
+const SSH_PROXY_CONTROL_HOLD_MIN_MS: u64 = 180_000;
+const SSH_PROXY_CONTROL_HOLD_MAX_MS: u64 = 600_000;
+const SSH_PROXY_CONTROL_HOLD_DEFAULT_MS: u64 = 300_000;
+const SSH_PROXY_PAUSE_REJECT_DESCRIPTION: &str = "Nyabase jump unavailable";
 
 fn valid_snapshot_stale_after_ms(value: u64) -> bool {
     (SSH_PROXY_SNAPSHOT_STALE_MIN_MS..=SSH_PROXY_SNAPSHOT_STALE_MAX_MS).contains(&value)
@@ -60,6 +64,7 @@ struct ProxyConfig {
     reconnect_delay: Duration,
     route_connect_timeout: Duration,
     status_interval: Duration,
+    control_hold: Duration,
 }
 
 impl ProxyConfig {
@@ -77,6 +82,10 @@ impl ProxyConfig {
         let route_connect_timeout_ms = env_u64("NYABASE_SSH_ROUTE_CONNECT_TIMEOUT_MS", 10_000)?;
         let status_interval_ms =
             validate_status_interval(env_u64("NYABASE_SSH_STATUS_INTERVAL_MS", 1_000)?)?;
+        let control_hold_ms = validate_control_hold(env_u64(
+            "NYABASE_SSH_CONTROL_HOLD_MS",
+            SSH_PROXY_CONTROL_HOLD_DEFAULT_MS,
+        )?)?;
 
         Ok(Self {
             backend_ws,
@@ -87,6 +96,7 @@ impl ProxyConfig {
             reconnect_delay: Duration::from_millis(reconnect_delay_ms),
             route_connect_timeout: Duration::from_millis(route_connect_timeout_ms),
             status_interval: Duration::from_millis(status_interval_ms),
+            control_hold: Duration::from_millis(control_hold_ms),
         })
     }
 }
@@ -109,22 +119,22 @@ impl Default for SnapshotStore {
 }
 
 impl SnapshotStore {
-    fn store(&self, snapshot: ProxySnapshot) -> Result<bool> {
+    fn store(&self, snapshot: ProxySnapshot, epoch: u64) -> Result<bool> {
         let generation = snapshot.generation;
-        let routing = RoutingSnapshot::from_snapshot(snapshot)?;
+        let routing = RoutingSnapshot::from_snapshot_in_epoch(snapshot, epoch)?;
         let _write = lock(&self.write_lock);
-        if self
-            .load()
-            .is_some_and(|current| generation <= current.generation)
-        {
-            debug!(generation, "ignored non-increasing SSH proxy snapshot");
+        if self.load().is_some_and(|current| {
+            epoch < current.epoch
+                || (epoch == current.epoch && generation <= current.generation)
+        }) {
+            debug!(epoch, generation, "ignored non-increasing SSH proxy snapshot");
             return Ok(false);
         }
         let route_count = routing.routes_by_container_id.len();
         self.current.store(Some(Arc::new(routing)));
         drop(_write);
         self.signal_change();
-        info!(generation, route_count, "installed SSH proxy snapshot");
+        info!(epoch, generation, route_count, "installed SSH proxy snapshot");
         Ok(true)
     }
 
@@ -166,6 +176,105 @@ impl SnapshotStore {
     fn signal_change(&self) {
         self.changes
             .send_modify(|revision| *revision = revision.wrapping_add(1));
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ControlMode {
+    Empty,
+    Authoritative,
+    Paused,
+}
+
+struct ControlPlane {
+    mode: Mutex<ControlMode>,
+    epoch: AtomicU64,
+    hold_deadline: Mutex<Option<Instant>>,
+    admitting: AtomicBool,
+    changes: watch::Sender<u64>,
+}
+
+impl ControlPlane {
+    fn new() -> Self {
+        let (changes, _) = watch::channel(0);
+        Self {
+            mode: Mutex::new(ControlMode::Empty),
+            epoch: AtomicU64::new(0),
+            hold_deadline: Mutex::new(None),
+            admitting: AtomicBool::new(false),
+            changes,
+        }
+    }
+
+    fn subscribe(&self) -> watch::Receiver<u64> {
+        self.changes.subscribe()
+    }
+
+    fn signal(&self) {
+        self.changes
+            .send_modify(|revision| *revision = revision.wrapping_add(1));
+    }
+
+    fn epoch(&self) -> u64 {
+        self.epoch.load(Ordering::Relaxed)
+    }
+
+    fn mode(&self) -> ControlMode {
+        *lock(&self.mode)
+    }
+
+    fn admit(&self) -> bool {
+        self.mode() == ControlMode::Authoritative && self.admitting.load(Ordering::Relaxed)
+    }
+
+    fn hold_deadline(&self) -> Option<Instant> {
+        *lock(&self.hold_deadline)
+    }
+
+    fn begin_epoch(&self) -> u64 {
+        let epoch = self.epoch.fetch_add(1, Ordering::AcqRel) + 1;
+        self.admitting.store(false, Ordering::Release);
+        self.signal();
+        epoch
+    }
+
+    /// Authoritative → Paused arms hold. Already Paused/Empty is idempotent.
+    fn pause(&self, hold: Duration) -> bool {
+        let mut mode = lock(&self.mode);
+        if *mode != ControlMode::Authoritative {
+            self.admitting.store(false, Ordering::Release);
+            return false;
+        }
+        *mode = ControlMode::Paused;
+        self.admitting.store(false, Ordering::Release);
+        *lock(&self.hold_deadline) = Some(Instant::now() + hold);
+        drop(mode);
+        self.signal();
+        true
+    }
+
+    fn resume_authoritative(&self) {
+        *lock(&self.mode) = ControlMode::Authoritative;
+        self.admitting.store(true, Ordering::Release);
+        *lock(&self.hold_deadline) = None;
+        self.signal();
+    }
+
+    fn revoke(&self) {
+        *lock(&self.mode) = ControlMode::Empty;
+        self.admitting.store(false, Ordering::Release);
+        *lock(&self.hold_deadline) = None;
+        self.signal();
+    }
+
+    fn next_deadline(&self, store: &SnapshotStore) -> Option<Instant> {
+        match self.mode() {
+            ControlMode::Authoritative if self.admitting.load(Ordering::Relaxed) => {
+                store.load().map(|snapshot| snapshot.deadline)
+            }
+            ControlMode::Paused => self.hold_deadline(),
+            ControlMode::Authoritative | ControlMode::Empty => None,
+        }
     }
 }
 
@@ -422,6 +531,23 @@ impl ProxyRuntime {
         disconnected
     }
 
+    async fn abort_unauthenticated(&self, reason: &str) -> usize {
+        let connections = {
+            let connections = lock(&self.connections);
+            connections
+                .values()
+                .filter(|connection| connection.authenticated_at.load(Ordering::Relaxed) == 0)
+                .cloned()
+                .collect::<Vec<_>>()
+        };
+        let aborted = connections
+            .into_iter()
+            .filter(|connection| connection.abort())
+            .count();
+        debug!(aborted, %reason, "aborted unauthenticated SSH proxy connections");
+        aborted
+    }
+
     async fn disconnect_invalid(&self, snapshot: Option<&RoutingSnapshot>, reason: &str) -> usize {
         let connections = {
             let connections = lock(&self.connections);
@@ -634,7 +760,7 @@ impl ConnectionState {
             // callback, so there is no pinned authorization to revoke here.
             return true;
         }
-        let Some(snapshot) = snapshot.filter(|snapshot| snapshot.is_fresh()) else {
+        let Some(snapshot) = snapshot else {
             return false;
         };
         let Some(public_key) = lock(&self.authenticated_public_key).clone() else {
@@ -896,6 +1022,15 @@ fn validate_status_interval(value: u64) -> Result<u64> {
     Ok(value)
 }
 
+fn validate_control_hold(value: u64) -> Result<u64> {
+    if !(SSH_PROXY_CONTROL_HOLD_MIN_MS..=SSH_PROXY_CONTROL_HOLD_MAX_MS).contains(&value) {
+        anyhow::bail!(
+            "NYABASE_SSH_CONTROL_HOLD_MS must be in {SSH_PROXY_CONTROL_HOLD_MIN_MS}..={SSH_PROXY_CONTROL_HOLD_MAX_MS}"
+        );
+    }
+    Ok(value)
+}
+
 fn env_u64(name: &str, fallback: u64) -> Result<u64> {
     match std::env::var(name) {
         Ok(value) => value
@@ -928,23 +1063,30 @@ async fn main() -> Result<()> {
     let config = ProxyConfig::from_env()?;
     let store = Arc::new(SnapshotStore::default());
     let runtime = Arc::new(ProxyRuntime::new(&config));
+    let control = Arc::new(ControlPlane::new());
     let (telemetry_tx, telemetry_rx) = mpsc::channel(4096);
     let mut tasks = JoinSet::new();
 
     spawn_supervised(
         &mut tasks,
         "SSH proxy backend loop",
-        run_backend_loop(config.clone(), store.clone(), runtime.clone(), telemetry_rx),
+        run_backend_loop(
+            config.clone(),
+            store.clone(),
+            runtime.clone(),
+            control.clone(),
+            telemetry_rx,
+        ),
     );
     spawn_supervised(
         &mut tasks,
-        "SSH proxy snapshot lease loop",
-        run_snapshot_expiry(store.clone(), runtime.clone()),
+        "SSH proxy control timers",
+        run_control_timers(store.clone(), runtime.clone(), control.clone()),
     );
     spawn_supervised(
         &mut tasks,
         "SSH proxy public listener",
-        run_public_listener(config, store, runtime, telemetry_tx),
+        run_public_listener(config, store, runtime, control, telemetry_tx),
     );
 
     supervise_until_shutdown(&mut tasks).await
@@ -984,54 +1126,115 @@ async fn run_backend_loop(
     config: ProxyConfig,
     store: Arc<SnapshotStore>,
     runtime: Arc<ProxyRuntime>,
+    control: Arc<ControlPlane>,
     mut telemetry_rx: mpsc::Receiver<ProxyEvent>,
 ) -> Result<()> {
     loop {
-        if let Err(error) = run_backend_once(&config, &store, &runtime, &mut telemetry_rx).await {
+        if let Err(error) =
+            run_backend_once(&config, &store, &runtime, &control, &mut telemetry_rx).await
+        {
             warn!(%error, "SSH proxy backend websocket disconnected");
         }
-        revoke_control_plane(&store, &runtime, "SSH proxy control plane disconnected").await;
+        pause_control_plane(
+            &control,
+            &runtime,
+            config.control_hold,
+            "SSH proxy control plane disconnected",
+        )
+        .await;
         tokio::time::sleep(config.reconnect_delay).await;
     }
 }
 
-async fn run_snapshot_expiry(store: Arc<SnapshotStore>, runtime: Arc<ProxyRuntime>) -> Result<()> {
-    let mut changes = store.subscribe();
+async fn run_control_timers(
+    store: Arc<SnapshotStore>,
+    runtime: Arc<ProxyRuntime>,
+    control: Arc<ControlPlane>,
+) -> Result<()> {
+    let mut store_changes = store.subscribe();
+    let mut control_changes = control.subscribe();
     loop {
-        match store.current_lease() {
-            Some((generation, deadline)) => {
-                tokio::select! {
-                    biased;
-                    changed = changes.changed() => {
-                        changed.context("SSH proxy snapshot lease notifier closed")?;
-                    }
-                    _ = tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)) => {
-                        if store.expire(generation, deadline) {
-                            runtime.clear_snapshot();
-                            runtime
-                                .disconnect_invalid(None, "SSH proxy snapshot expired")
+        let next = control.next_deadline(&store);
+        tokio::select! {
+            biased;
+            changed = store_changes.changed() => {
+                changed.context("SSH proxy snapshot lease notifier closed")?;
+            }
+            changed = control_changes.changed() => {
+                changed.context("SSH proxy control-plane notifier closed")?;
+            }
+            _ = sleep_until_deadline(next), if next.is_some() => {
+                match control.mode() {
+                    ControlMode::Authoritative if control.admit() => {
+                        if let Some((generation, deadline)) = store.current_lease() {
+                            if store.expire(generation, deadline) {
+                                revoke_control_plane(
+                                    &store,
+                                    &runtime,
+                                    &control,
+                                    "SSH proxy snapshot expired",
+                                )
                                 .await;
-                            warn!(generation, "SSH proxy snapshot lease expired");
+                                warn!(generation, "SSH proxy snapshot lease expired");
+                            }
                         }
                     }
+                    ControlMode::Paused => {
+                        if control.hold_deadline().is_some_and(|deadline| Instant::now() >= deadline)
+                        {
+                            revoke_control_plane(
+                                &store,
+                                &runtime,
+                                &control,
+                                "SSH proxy control-plane hold expired",
+                            )
+                            .await;
+                            warn!("SSH proxy control-plane hold expired");
+                        }
+                    }
+                    ControlMode::Authoritative | ControlMode::Empty => {}
                 }
-            }
-            None => {
-                changes
-                    .changed()
-                    .await
-                    .context("SSH proxy snapshot lease notifier closed")?;
             }
         }
     }
 }
 
-async fn revoke_control_plane(store: &SnapshotStore, runtime: &ProxyRuntime, reason: &str) {
-    // A disconnected or write-blocked control plane is not authoritative.
-    // Clearing first makes concurrent authentication fail closed; direct task
-    // abort then closes every already-authenticated transport and child bridge.
+async fn sleep_until_deadline(deadline: Option<Instant>) {
+    let Some(deadline) = deadline else {
+        std::future::pending::<()>().await;
+        return;
+    };
+    tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)).await;
+}
+
+async fn pause_control_plane(
+    control: &ControlPlane,
+    runtime: &ProxyRuntime,
+    hold: Duration,
+    reason: &str,
+) {
+    let transitioned = control.pause(hold);
+    let aborted_pre_auth = runtime.abort_unauthenticated(reason).await;
+    if transitioned {
+        info!(
+            epoch = control.epoch(),
+            hold_ms = hold.as_millis() as u64,
+            aborted_pre_auth,
+            %reason,
+            "paused SSH proxy admission"
+        );
+    }
+}
+
+async fn revoke_control_plane(
+    store: &SnapshotStore,
+    runtime: &ProxyRuntime,
+    control: &ControlPlane,
+    reason: &str,
+) {
     store.clear();
     runtime.clear_snapshot();
+    control.revoke();
     runtime.disconnect_invalid(None, reason).await;
 }
 
@@ -1051,6 +1254,7 @@ async fn run_backend_once(
     config: &ProxyConfig,
     store: &SnapshotStore,
     runtime: &ProxyRuntime,
+    control: &ControlPlane,
     telemetry_rx: &mut mpsc::Receiver<ProxyEvent>,
 ) -> Result<()> {
     validate_backend_ws_url(&config.backend_ws, config.backend_tls.is_some())?;
@@ -1061,13 +1265,11 @@ async fn run_backend_once(
     let connector = config.backend_tls.clone().map(Connector::Rustls);
     let (ws, _) = connect_async_tls_with_config(request, None, false, connector).await?;
     let (mut write, mut read) = ws.split();
-    // Snapshot generation is scoped to one Backend WebSocket connection. This
-    // permits a freshly restarted Backend to begin at generation 1 while still
-    // rejecting reordering within a live connection.
-    store.clear();
-    runtime.clear_snapshot();
+    // A new WebSocket is a new generation epoch. Keep the held snapshot so a
+    // restarted Backend can publish generation=1 without clearing live Jump.
+    control.begin_epoch();
     runtime.mark_backend_connected();
-    info!(backend = %config.backend_ws, "connected to backend SSH proxy websocket");
+    info!(backend = %config.backend_ws, epoch = control.epoch(), "connected to backend SSH proxy websocket");
 
     let mut status_tick = tokio::time::interval(config.status_interval);
     status_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -1098,7 +1300,8 @@ async fn run_backend_once(
                 match envelope.kind.as_str() {
                     "snapshot" | "update" => {
                         let snapshot: ProxySnapshot = serde_json::from_value(envelope.payload)?;
-                        let generation = install_backend_snapshot(store, runtime, snapshot).await?;
+                        let generation =
+                            install_backend_snapshot(store, runtime, control, snapshot).await?;
                         let ack = ClientEnvelope {
                             ts: now_ms(),
                             kind: "ack",
@@ -1109,6 +1312,19 @@ async fn run_backend_once(
                             Message::Text(serde_json::to_string(&ack)?.into()),
                             BACKEND_CONTROL_WRITE_TIMEOUT,
                         ).await?;
+                    }
+                    "pauseAdmit" => {
+                        let command: SshProxyPauseAdmitCommand =
+                            serde_json::from_value(envelope.payload).unwrap_or(SshProxyPauseAdmitCommand {
+                                reason: None,
+                            });
+                        pause_control_plane(
+                            control,
+                            runtime,
+                            config.control_hold,
+                            command.reason.as_deref().unwrap_or("backend pauseAdmit"),
+                        )
+                        .await;
                     }
                     "disconnectAll" => {
                         let command: SshProxyDisconnectAllCommand = serde_json::from_value(envelope.payload)?;
@@ -1170,6 +1386,7 @@ async fn run_backend_once(
 async fn install_backend_snapshot(
     store: &SnapshotStore,
     runtime: &ProxyRuntime,
+    control: &ControlPlane,
     snapshot: ProxySnapshot,
 ) -> Result<u64> {
     let generation = snapshot.generation;
@@ -1177,6 +1394,7 @@ async fn install_backend_snapshot(
         revoke_control_plane(
             store,
             runtime,
+            control,
             "SSH proxy snapshot lease is outside the supported bounds",
         )
         .await;
@@ -1187,17 +1405,25 @@ async fn install_backend_snapshot(
             SSH_PROXY_SNAPSHOT_STALE_MAX_MS,
         );
     }
-    match store.store(snapshot) {
+    match store.store(snapshot, control.epoch()) {
         Ok(true) => {
             runtime.mark_snapshot(generation);
             let current = store.load();
-            runtime
+            let disconnected_invalid = runtime
                 .disconnect_invalid(current.as_deref(), "SSH proxy authorization changed")
                 .await;
+            control.resume_authoritative();
+            info!(
+                epoch = control.epoch(),
+                generation,
+                disconnected_invalid,
+                "resumed SSH proxy admission"
+            );
         }
         Ok(false) => {}
         Err(error) => {
-            revoke_control_plane(store, runtime, "SSH proxy snapshot was rejected").await;
+            revoke_control_plane(store, runtime, control, "SSH proxy snapshot was rejected")
+                .await;
             return Err(error);
         }
     }
@@ -1208,6 +1434,7 @@ async fn run_public_listener(
     config: ProxyConfig,
     store: Arc<SnapshotStore>,
     runtime: Arc<ProxyRuntime>,
+    control: Arc<ControlPlane>,
     telemetry: TelemetrySender,
 ) -> Result<()> {
     let listener = TcpListener::bind(&config.listen).await?;
@@ -1230,47 +1457,98 @@ async fn run_public_listener(
                 continue;
             }
         };
-        let store = store.clone();
-        let config = config.clone();
-        let runtime = runtime.clone();
-        let telemetry = telemetry.clone();
-        tokio::spawn(async move {
-            let _permit = permit;
-            let (connection, abort_registration) = runtime.register_connection(peer);
-            let _cleanup = ConnectionCleanup {
-                runtime: runtime.clone(),
-                id: connection.id.clone(),
-            };
+        if !control.admit() && store.load().is_none() {
+            warn!(%peer, "SSH proxy rejected paused connection without host key");
+            runtime.record_rejected_connection();
             emit_metric(
                 &telemetry,
                 "ssh_proxy_connections_total",
-                vec![("result", "accepted".to_string())],
+                vec![("result", "rejected_paused".to_string())],
                 1.0,
             );
-            let connection_result = Abortable::new(
-                handle_ssh_connection(
-                    stream,
-                    peer,
-                    store,
-                    config,
-                    telemetry.clone(),
-                    connection.clone(),
-                ),
-                abort_registration,
+            let _ = stream.into_std().map(|socket| socket.shutdown(Shutdown::Both));
+            continue;
+        }
+        let store = store.clone();
+        let control = control.clone();
+        let config = config.clone();
+        let runtime = runtime.clone();
+        let telemetry = telemetry.clone();
+        let admit = control.admit();
+        tokio::spawn(async move {
+            let _permit = permit;
+            if admit {
+                let (connection, abort_registration) = runtime.register_connection(peer);
+                let _cleanup = ConnectionCleanup {
+                    runtime: runtime.clone(),
+                    id: connection.id.clone(),
+                };
+                emit_metric(
+                    &telemetry,
+                    "ssh_proxy_connections_total",
+                    vec![("result", "accepted".to_string())],
+                    1.0,
+                );
+                let connection_result = Abortable::new(
+                    handle_ssh_connection(
+                        stream,
+                        peer,
+                        store,
+                        control,
+                        config,
+                        telemetry.clone(),
+                        connection.clone(),
+                        false,
+                    ),
+                    abort_registration,
+                )
+                .await;
+                match connection_result {
+                    Ok(Err(error)) => {
+                        debug!(%peer, %error, "SSH connection closed");
+                        emit_metric(
+                            &telemetry,
+                            "ssh_proxy_connections_total",
+                            vec![("result", "closed_error".to_string())],
+                            1.0,
+                        );
+                    }
+                    Err(_) => debug!(%peer, "SSH connection was revoked and aborted"),
+                    Ok(Ok(())) => {}
+                }
+                return;
+            }
+            runtime.record_rejected_connection();
+            let (connection, _abort_registration) =
+                ConnectionState::new(0, peer);
+            let connection = Arc::new(connection);
+            match handle_ssh_connection(
+                stream,
+                peer,
+                store,
+                control,
+                config,
+                telemetry.clone(),
+                connection,
+                true,
             )
-            .await;
-            match connection_result {
-                Ok(Err(error)) => {
-                    debug!(%peer, %error, "SSH connection closed");
+            .await
+            {
+                Ok(()) => emit_metric(
+                    &telemetry,
+                    "ssh_proxy_connections_total",
+                    vec![("result", "rejected_paused".to_string())],
+                    1.0,
+                ),
+                Err(error) => {
+                    debug!(%peer, %error, "paused SSH reject path closed");
                     emit_metric(
                         &telemetry,
                         "ssh_proxy_connections_total",
-                        vec![("result", "closed_error".to_string())],
+                        vec![("result", "rejected_paused".to_string())],
                         1.0,
                     );
                 }
-                Err(_) => debug!(%peer, "SSH connection was revoked and aborted"),
-                Ok(Ok(())) => {}
             }
         });
     }
@@ -1280,9 +1558,11 @@ async fn handle_ssh_connection(
     stream: TcpStream,
     peer: SocketAddr,
     store: Arc<SnapshotStore>,
+    control: Arc<ControlPlane>,
     config: ProxyConfig,
     telemetry: TelemetrySender,
     connection: Arc<ConnectionState>,
+    reject_paused: bool,
 ) -> Result<()> {
     // russh::server::run_stream returns a RunningSession backed by an internal
     // Tokio JoinHandle. Dropping that value detaches the task, so cancelling
@@ -1291,10 +1571,16 @@ async fn handle_ssh_connection(
     // socket descriptor whose Drop performs shutdown(2) on the shared socket;
     // that wakes both halves owned by russh even if its JoinHandle is detached.
     let (stream, socket_guard) = revocable_session_stream(stream)?;
-    let snapshot = store.load().context("no routing snapshot is installed")?;
-    if !snapshot.is_fresh() {
-        anyhow::bail!("routing snapshot {} is stale", snapshot.generation);
-    }
+    let snapshot = if reject_paused {
+        store
+            .load()
+            .context("no held SSH proxy host key is installed")?
+    } else {
+        store
+            .load()
+            .filter(|snapshot| snapshot.is_fresh())
+            .context("no routing snapshot is installed")?
+    };
     let host_key = snapshot.host_private_key.clone();
     let mut methods = MethodSet::empty();
     methods.push(MethodKind::PublicKey);
@@ -1309,7 +1595,15 @@ async fn handle_ssh_connection(
         keepalive_max: 3,
         ..Default::default()
     });
-    let handler = ProxySshSession::new(store, config, peer, telemetry, connection);
+    let handler = ProxySshSession::new(
+        store,
+        control,
+        config,
+        peer,
+        telemetry,
+        connection,
+        reject_paused,
+    );
     let session = russh::server::run_stream(server_config, stream, handler).await?;
     session.await?;
     socket_guard.shutdown();
@@ -1397,6 +1691,12 @@ struct SshProxyAuditEvent {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SshProxyPauseAdmitCommand {
+    reason: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct SshProxyDisconnectAllCommand {
     request_id: String,
@@ -1491,9 +1791,10 @@ struct ProxyRoute {
     observed_at: String,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 #[allow(dead_code)]
 struct RoutingSnapshot {
+    epoch: u64,
     generation: u64,
     deadline: Instant,
     host_private_key: PrivateKey,
@@ -1504,7 +1805,7 @@ struct RoutingSnapshot {
     routes_by_container_id: HashMap<String, ProxyRoute>,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 struct RoutingUser {
     id: String,
     username: String,
@@ -1525,6 +1826,10 @@ impl RoutingUser {
 
 impl RoutingSnapshot {
     fn from_snapshot(snapshot: ProxySnapshot) -> Result<Self> {
+        Self::from_snapshot_in_epoch(snapshot, 0)
+    }
+
+    fn from_snapshot_in_epoch(snapshot: ProxySnapshot, epoch: u64) -> Result<Self> {
         let remaining =
             absolute_snapshot_remaining(snapshot.valid_until, snapshot.stale_after_ms, now_ms())?;
         let deadline = Instant::now()
@@ -1538,6 +1843,7 @@ impl RoutingSnapshot {
             .map(RoutingUser::from_proxy)
             .collect::<Vec<_>>();
         Ok(Self {
+            epoch,
             generation: snapshot.generation,
             deadline,
             host_private_key,
@@ -1843,10 +2149,12 @@ enum RouteResolution<'a> {
 
 struct ProxySshSession {
     store: Arc<SnapshotStore>,
+    control: Arc<ControlPlane>,
     config: ProxyConfig,
     peer: SocketAddr,
     telemetry: TelemetrySender,
     connection: Arc<ConnectionState>,
+    reject_paused: bool,
     authenticated_login: Option<String>,
     authenticated_public_key: Option<PublicKey>,
     resolved_route: Option<OwnedResolvedRoute>,
@@ -1899,17 +2207,21 @@ fn resolve_owned_route(
 impl ProxySshSession {
     fn new(
         store: Arc<SnapshotStore>,
+        control: Arc<ControlPlane>,
         config: ProxyConfig,
         peer: SocketAddr,
         telemetry: TelemetrySender,
         connection: Arc<ConnectionState>,
+        reject_paused: bool,
     ) -> Self {
         Self {
             store,
+            control,
             config,
             peer,
             telemetry,
             connection,
+            reject_paused,
             authenticated_login: None,
             authenticated_public_key: None,
             resolved_route: None,
@@ -1917,7 +2229,18 @@ impl ProxySshSession {
     }
 
     fn latest_snapshot(&self) -> Option<Arc<RoutingSnapshot>> {
+        if !self.control.admit() {
+            return None;
+        }
         self.store.load().filter(|snapshot| snapshot.is_fresh())
+    }
+
+    fn held_snapshot(&self) -> Option<Arc<RoutingSnapshot>> {
+        self.store.load()
+    }
+
+    fn pause_rejecting(&self) -> bool {
+        self.reject_paused || !self.control.admit() && self.held_snapshot().is_some()
     }
 
     fn authorized_user_id(&self) -> Result<String> {
@@ -1929,8 +2252,8 @@ impl ProxySshSession {
             .clone()
             .context("SSH proxy session has no authenticated user")?;
         let snapshot = self
-            .latest_snapshot()
-            .context("no fresh SSH proxy snapshot is installed")?;
+            .held_snapshot()
+            .context("no SSH proxy snapshot is installed")?;
         let user = snapshot
             .find_active_user_by_public_key(public_key)
             .map_err(|reason| anyhow::anyhow!(reason.to_string()))?;
@@ -1943,8 +2266,8 @@ impl ProxySshSession {
     fn authorized_route_for_target(&self, routed_ip: &str) -> Result<OwnedResolvedRoute> {
         let user_id = self.authorized_user_id()?;
         let snapshot = self
-            .latest_snapshot()
-            .context("no fresh SSH proxy snapshot is installed")?;
+            .held_snapshot()
+            .context("no SSH proxy snapshot is installed")?;
         snapshot
             .resolve_owned_route_for_user_ip(&user_id, routed_ip)
             .map_err(|reason| anyhow::anyhow!(reason.to_string()))
@@ -1984,8 +2307,16 @@ impl ProxySshSession {
 impl russh::server::Handler for ProxySshSession {
     type Error = anyhow::Error;
 
-    async fn auth_succeeded(&mut self, _session: &mut Session) -> Result<(), Self::Error> {
-        let current = self.store.load();
+    async fn auth_succeeded(&mut self, session: &mut Session) -> Result<(), Self::Error> {
+        if self.pause_rejecting() {
+            session.disconnect(
+                Disconnect::ServiceNotAvailable,
+                SSH_PROXY_PAUSE_REJECT_DESCRIPTION,
+                "en",
+            )?;
+            return Ok(());
+        }
+        let current = self.held_snapshot();
         if !self.connection.authorization_matches(current.as_deref()) {
             anyhow::bail!("SSH proxy authorization changed during authentication");
         }
@@ -2005,6 +2336,9 @@ impl russh::server::Handler for ProxySshSession {
         user: &str,
         public_key: &PublicKey,
     ) -> Result<Auth, Self::Error> {
+        if self.pause_rejecting() {
+            return Ok(Auth::Accept);
+        }
         if self
             .latest_snapshot()
             .is_some_and(|snapshot| snapshot.public_key_allowed(user, public_key))
@@ -2020,6 +2354,9 @@ impl russh::server::Handler for ProxySshSession {
         user: &str,
         public_key: &PublicKey,
     ) -> Result<Auth, Self::Error> {
+        if self.pause_rejecting() {
+            return Ok(Auth::Accept);
+        }
         let Some(snapshot) = self.latest_snapshot() else {
             self.emit_login_audit(user, None, None, false, Some("snapshot_unavailable"));
             return Ok(Auth::reject());
@@ -2088,6 +2425,9 @@ impl russh::server::Handler for ProxySshSession {
         _channel: Channel<ServerMsg>,
         _session: &mut Session,
     ) -> Result<bool, Self::Error> {
+        if self.pause_rejecting() {
+            return Ok(false);
+        }
         emit_metric(
             &self.telemetry,
             "ssh_proxy_channels_total",
@@ -2220,6 +2560,9 @@ impl russh::server::Handler for ProxySshSession {
         originator_port: u32,
         _session: &mut Session,
     ) -> Result<bool, Self::Error> {
+        if self.pause_rejecting() {
+            return Ok(false);
+        }
         let peer = self.peer;
         if port_to_connect != 22 {
             warn!(
@@ -2613,6 +2956,7 @@ fn now_ms() -> u64 {
 mod tests {
     use super::*;
     use pretty_assertions::assert_eq;
+    use russh::server::Handler;
     use std::io::Write as _;
     use std::sync::atomic::AtomicU64;
     use tokio::io::AsyncReadExt as _;
@@ -2856,6 +3200,10 @@ mod tests {
         assert!(validate_status_interval(MAX_STATUS_INTERVAL_MS).is_ok());
         assert!(validate_status_interval(MIN_STATUS_INTERVAL_MS - 1).is_err());
         assert!(validate_status_interval(MAX_STATUS_INTERVAL_MS + 1).is_err());
+        assert!(validate_control_hold(SSH_PROXY_CONTROL_HOLD_MIN_MS).is_ok());
+        assert!(validate_control_hold(SSH_PROXY_CONTROL_HOLD_MAX_MS).is_ok());
+        assert!(validate_control_hold(SSH_PROXY_CONTROL_HOLD_MIN_MS - 1).is_err());
+        assert!(validate_control_hold(SSH_PROXY_CONTROL_HOLD_MAX_MS + 1).is_err());
     }
 
     #[tokio::test]
@@ -2903,6 +3251,7 @@ mod tests {
             reconnect_delay: Duration::from_secs(1),
             route_connect_timeout: Duration::from_secs(1),
             status_interval: Duration::from_secs(1),
+            control_hold: Duration::from_secs(300),
         };
         let runtime = ProxyRuntime::new(&config);
         let (connection, _main_registration) =
@@ -3135,16 +3484,17 @@ mod tests {
     #[test]
     fn snapshot_store_rejects_non_increasing_generation_within_an_epoch() {
         let store = SnapshotStore::default();
-        assert!(store.store(fixture_proxy_snapshot(7)).unwrap());
-        assert!(!store.store(fixture_proxy_snapshot(6)).unwrap());
-        assert!(!store.store(fixture_proxy_snapshot(7)).unwrap());
+        assert!(store.store(fixture_proxy_snapshot(7), 0).unwrap());
+        assert!(!store.store(fixture_proxy_snapshot(6), 0).unwrap());
+        assert!(!store.store(fixture_proxy_snapshot(7), 0).unwrap());
         assert_eq!(store.load().map(|snapshot| snapshot.generation), Some(7));
 
-        // A new Backend WebSocket connection creates a new epoch, so a
-        // restarted Backend may safely begin its local generation at one.
-        store.clear();
-        assert!(store.store(fixture_proxy_snapshot(1)).unwrap());
+        let control = ControlPlane::new();
+        control.begin_epoch();
+        assert!(store.load().is_some());
+        assert!(store.store(fixture_proxy_snapshot(1), control.epoch()).unwrap());
         assert_eq!(store.load().map(|snapshot| snapshot.generation), Some(1));
+        assert_eq!(store.load().map(|snapshot| snapshot.epoch), Some(control.epoch()));
     }
 
     #[tokio::test]
@@ -3167,11 +3517,14 @@ mod tests {
             reconnect_delay: Duration::from_secs(1),
             route_connect_timeout: Duration::from_secs(1),
             status_interval: Duration::from_secs(1),
+            control_hold: Duration::from_secs(300),
         };
         let store = SnapshotStore::default();
         let runtime = ProxyRuntime::new(&config);
+        let control = ControlPlane::new();
+        control.begin_epoch();
         assert_eq!(
-            install_backend_snapshot(&store, &runtime, fixture_proxy_snapshot(7))
+            install_backend_snapshot(&store, &runtime, &control, fixture_proxy_snapshot(7))
                 .await
                 .unwrap(),
             7,
@@ -3187,7 +3540,7 @@ mod tests {
             main_registration,
         ));
 
-        let error = install_backend_snapshot(&store, &runtime, invalid)
+        let error = install_backend_snapshot(&store, &runtime, &control, invalid)
             .await
             .expect_err("invalid key snapshot must fail before ACK");
 
@@ -3215,12 +3568,16 @@ mod tests {
             reconnect_delay: Duration::from_secs(1),
             route_connect_timeout: Duration::from_secs(1),
             status_interval: Duration::from_millis(MAX_STATUS_INTERVAL_MS),
+            control_hold: Duration::from_secs(300),
         };
         let store = Arc::new(SnapshotStore::default());
         let runtime = Arc::new(ProxyRuntime::new(&config));
+        let control = Arc::new(ControlPlane::new());
+        control.begin_epoch();
         let mut snapshot = fixture_proxy_snapshot(7);
         snapshot.valid_until = now_ms() + 30;
-        assert!(store.store(snapshot).unwrap());
+        assert!(store.store(snapshot, control.epoch()).unwrap());
+        control.resume_authoritative();
         runtime.mark_snapshot(7);
 
         let installed = store.load().expect("snapshot");
@@ -3233,7 +3590,11 @@ mod tests {
             std::future::pending::<()>(),
             main_registration,
         ));
-        let expiry_task = tokio::spawn(run_snapshot_expiry(store.clone(), runtime.clone()));
+        let expiry_task = tokio::spawn(run_control_timers(
+            store.clone(),
+            runtime.clone(),
+            control.clone(),
+        ));
 
         tokio::time::timeout(Duration::from_secs(1), async {
             while store.load().is_some() {
@@ -3311,6 +3672,11 @@ mod tests {
             &RoutingSnapshot::from_snapshot(route_removed).unwrap(),
         )));
         assert!(!connection.authorization_matches(None));
+
+        let mut stale = fixture_snapshot();
+        stale.deadline = Instant::now() - Duration::from_millis(1);
+        assert!(!stale.is_fresh());
+        assert!(connection.authorization_matches(Some(&stale)));
     }
 
     #[tokio::test]
@@ -3324,6 +3690,7 @@ mod tests {
             reconnect_delay: Duration::from_secs(1),
             route_connect_timeout: Duration::from_secs(1),
             status_interval: Duration::from_secs(1),
+            control_hold: Duration::from_secs(300),
         };
         let runtime = ProxyRuntime::new(&config);
         let snapshot = fixture_snapshot();
@@ -3405,10 +3772,11 @@ mod tests {
             reconnect_delay: Duration::from_secs(1),
             route_connect_timeout: Duration::from_secs(1),
             status_interval: Duration::from_secs(1),
+            control_hold: Duration::from_secs(300),
         };
         let runtime = ProxyRuntime::new(&config);
         let store = SnapshotStore::default();
-        assert!(store.store(fixture_proxy_snapshot(7)).unwrap());
+        assert!(store.store(fixture_proxy_snapshot(7), 0).unwrap());
         let snapshot = store.load().expect("snapshot");
         let public_key = parse_authorized_key(ALICE_KEY).expect("expected public key");
         let route = resolve_owned_route(&snapshot, "alice.solo").expect("expected route");
@@ -3433,15 +3801,23 @@ mod tests {
         .expect("control write deadline must be bounded")
         .expect_err("never-ready sink must time out");
 
-        revoke_control_plane(&store, &runtime, "control write timeout").await;
-        assert!(store.load().is_none());
-        assert!(
-            tokio::time::timeout(Duration::from_millis(100), connection_task)
-                .await
-                .expect("connection task must abort")
-                .expect("connection join must succeed")
-                .is_err()
-        );
+        let control = ControlPlane::new();
+        control.begin_epoch();
+        control.resume_authoritative();
+        pause_control_plane(
+            &control,
+            &runtime,
+            Duration::from_secs(300),
+            "control write timeout",
+        )
+        .await;
+        assert!(store.load().is_some());
+        assert!(!control.admit());
+        assert_eq!(control.mode(), ControlMode::Paused);
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        assert!(!connection.revoked.load(Ordering::Acquire));
+        connection_task.abort();
+        let _ = connection_task.await;
     }
 
     #[test]
@@ -3678,6 +4054,440 @@ mod tests {
             ssh_status: ssh_status.to_string(),
             observed_at: "2026-06-08T00:00:00.000Z".to_string(),
         }
+    }
+
+    fn test_config() -> ProxyConfig {
+        ProxyConfig {
+            backend_ws: "ws://backend.invalid".to_string(),
+            backend_tls: None,
+            token: "a".repeat(32),
+            listen: "127.0.0.1:2222".to_string(),
+            max_connections: 8,
+            reconnect_delay: Duration::from_secs(1),
+            route_connect_timeout: Duration::from_secs(1),
+            status_interval: Duration::from_secs(1),
+            control_hold: Duration::from_secs(300),
+        }
+    }
+
+    fn paused_plane(store: &SnapshotStore) -> Arc<ControlPlane> {
+        let control = Arc::new(ControlPlane::new());
+        control.begin_epoch();
+        assert!(store.store(fixture_proxy_snapshot(7), control.epoch()).unwrap());
+        control.resume_authoritative();
+        assert!(control.pause(Duration::from_secs(300)));
+        control
+    }
+
+    #[tokio::test]
+    async fn ws_disconnect_pauses_admit_and_keeps_authenticated_sessions() {
+        let config = test_config();
+        let store = SnapshotStore::default();
+        let runtime = ProxyRuntime::new(&config);
+        let control = paused_plane(&store);
+        let snapshot = store.load().expect("held");
+        let public_key = parse_authorized_key(ALICE_KEY).unwrap();
+        let route = resolve_owned_route(&snapshot, "alice.solo").unwrap();
+        let (connection, registration) =
+            runtime.register_connection("127.0.0.1:2301".parse().unwrap());
+        connection.set_authenticated(
+            "alice.solo",
+            &public_key,
+            &route.user_id,
+            &route.username,
+            Some(&route),
+        );
+        let task = tokio::spawn(Abortable::new(std::future::pending::<()>(), registration));
+        pause_control_plane(
+            &control,
+            &runtime,
+            config.control_hold,
+            "SSH proxy control plane disconnected",
+        )
+        .await;
+        assert_eq!(control.mode(), ControlMode::Paused);
+        assert!(!control.admit());
+        assert!(store.load().is_some());
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        assert!(!connection.revoked.load(Ordering::Acquire));
+        task.abort();
+        let _ = task.await;
+    }
+
+    #[tokio::test]
+    async fn pause_is_idempotent_and_does_not_refresh_hold() {
+        let control = ControlPlane::new();
+        control.begin_epoch();
+        SnapshotStore::default()
+            .store(fixture_proxy_snapshot(7), control.epoch())
+            .unwrap();
+        control.resume_authoritative();
+        assert!(control.pause(Duration::from_secs(300)));
+        let first = control.hold_deadline().expect("armed");
+        assert!(!control.pause(Duration::from_secs(300)));
+        assert_eq!(control.hold_deadline(), Some(first));
+    }
+
+    #[test]
+    fn begin_epoch_while_paused_does_not_refresh_hold() {
+        let store = SnapshotStore::default();
+        let control = paused_plane(&store);
+        let first = control.hold_deadline().expect("armed");
+        let epoch = control.epoch();
+        control.begin_epoch();
+        assert_eq!(control.epoch(), epoch + 1);
+        assert!(!control.admit());
+        assert_eq!(control.mode(), ControlMode::Paused);
+        assert_eq!(control.hold_deadline(), Some(first));
+        assert!(store.load().is_some());
+    }
+
+    #[tokio::test]
+    async fn pause_hold_expiry_fail_closes_held_sessions() {
+        let mut config = test_config();
+        config.control_hold = Duration::from_millis(30);
+        let store = Arc::new(SnapshotStore::default());
+        let runtime = Arc::new(ProxyRuntime::new(&config));
+        let control = Arc::new(ControlPlane::new());
+        control.begin_epoch();
+        assert!(store.store(fixture_proxy_snapshot(7), control.epoch()).unwrap());
+        control.resume_authoritative();
+        let snapshot = store.load().unwrap();
+        let public_key = parse_authorized_key(ALICE_KEY).unwrap();
+        let route = resolve_owned_route(&snapshot, "alice.solo").unwrap();
+        let (connection, registration) =
+            runtime.register_connection("127.0.0.1:2302".parse().unwrap());
+        connection.set_authenticated(
+            "alice.solo",
+            &public_key,
+            &route.user_id,
+            &route.username,
+            Some(&route),
+        );
+        let task = tokio::spawn(Abortable::new(std::future::pending::<()>(), registration));
+        pause_control_plane(&control, &runtime, config.control_hold, "test hold").await;
+        let timers = tokio::spawn(run_control_timers(
+            store.clone(),
+            runtime.clone(),
+            control.clone(),
+        ));
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while store.load().is_some() {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("hold did not expire");
+        assert_eq!(control.mode(), ControlMode::Empty);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), task)
+                .await
+                .expect("held session was not revoked")
+                .expect("join")
+                .is_err()
+        );
+        timers.abort();
+        let _ = timers.await;
+    }
+
+    #[tokio::test]
+    async fn new_epoch_snapshot_replaces_held_and_disconnects_invalid() {
+        let config = test_config();
+        let store = SnapshotStore::default();
+        let runtime = ProxyRuntime::new(&config);
+        let control = ControlPlane::new();
+        control.begin_epoch();
+        assert_eq!(
+            install_backend_snapshot(&store, &runtime, &control, fixture_proxy_snapshot(7))
+                .await
+                .unwrap(),
+            7,
+        );
+        let snapshot = store.load().unwrap();
+        let public_key = parse_authorized_key(ALICE_KEY).unwrap();
+        let route = resolve_owned_route(&snapshot, "alice.solo").unwrap();
+        let (connection, registration) =
+            runtime.register_connection("127.0.0.1:2303".parse().unwrap());
+        connection.set_authenticated(
+            "alice.solo",
+            &public_key,
+            &route.user_id,
+            &route.username,
+            Some(&route),
+        );
+        let task = tokio::spawn(Abortable::new(std::future::pending::<()>(), registration));
+        control.begin_epoch();
+        let mut rotated = fixture_proxy_snapshot(1);
+        rotated
+            .routes
+            .iter_mut()
+            .find(|route| route.container_id == "container-c")
+            .unwrap()
+            .routed_ip = Some("10.0.0.99".to_string());
+        install_backend_snapshot(&store, &runtime, &control, rotated)
+            .await
+            .unwrap();
+        assert!(control.admit());
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), task)
+                .await
+                .expect("rotated route must disconnect")
+                .expect("join")
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn new_epoch_snapshot_keeps_still_authorized_sessions() {
+        let config = test_config();
+        let store = SnapshotStore::default();
+        let runtime = ProxyRuntime::new(&config);
+        let control = ControlPlane::new();
+        control.begin_epoch();
+        install_backend_snapshot(&store, &runtime, &control, fixture_proxy_snapshot(7))
+            .await
+            .unwrap();
+        let snapshot = store.load().unwrap();
+        let public_key = parse_authorized_key(ALICE_KEY).unwrap();
+        let route = resolve_owned_route(&snapshot, "alice.solo").unwrap();
+        let (connection, registration) =
+            runtime.register_connection("127.0.0.1:2304".parse().unwrap());
+        connection.set_authenticated(
+            "alice.solo",
+            &public_key,
+            &route.user_id,
+            &route.username,
+            Some(&route),
+        );
+        let task = tokio::spawn(Abortable::new(std::future::pending::<()>(), registration));
+        control.begin_epoch();
+        install_backend_snapshot(&store, &runtime, &control, fixture_proxy_snapshot(1))
+            .await
+            .unwrap();
+        assert!(control.admit());
+        assert_eq!(store.load().map(|s| s.generation), Some(1));
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        assert!(!connection.revoked.load(Ordering::Acquire));
+        task.abort();
+        let _ = task.await;
+    }
+
+    #[tokio::test]
+    async fn paused_new_connection_is_rejected_without_stale_auth() {
+        let config = test_config();
+        let store = Arc::new(SnapshotStore::default());
+        let control = paused_plane(store.as_ref());
+        assert!(store.load().unwrap().is_fresh());
+        let (connection, _) = ConnectionState::new(1, "127.0.0.1:2305".parse().unwrap());
+        let connection = Arc::new(connection);
+        let (tx, _rx) = mpsc::channel(8);
+        let mut session = ProxySshSession::new(
+            store.clone(),
+            control.clone(),
+            config,
+            "127.0.0.1:2305".parse().unwrap(),
+            tx,
+            connection.clone(),
+            true,
+        );
+        let key = parse_authorized_key(ALICE_KEY).unwrap();
+        assert!(session.latest_snapshot().is_none());
+        assert!(session.held_snapshot().is_some());
+        let offered = session.auth_publickey_offered("alice.solo", &key).await.unwrap();
+        assert!(matches!(offered, Auth::Accept));
+        let accepted = session.auth_publickey("alice.solo", &key).await.unwrap();
+        assert!(matches!(accepted, Auth::Accept));
+        assert!(lock(&connection.login).is_none());
+        assert_eq!(connection.authenticated_at.load(Ordering::Relaxed), 0);
+    }
+
+    struct TrustAllClient;
+
+    impl russh::client::Handler for TrustAllClient {
+        type Error = russh::Error;
+
+        async fn check_server_key(
+            &mut self,
+            _server_public_key: &russh::keys::PublicKey,
+        ) -> Result<bool, Self::Error> {
+            Ok(true)
+        }
+    }
+
+    #[tokio::test]
+    async fn paused_handle_ssh_connection_disconnects_ok() {
+        let config = test_config();
+        let store = Arc::new(SnapshotStore::default());
+        let control = paused_plane(store.as_ref());
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn({
+            let store = store.clone();
+            let control = control.clone();
+            let config = config.clone();
+            async move {
+                let (stream, peer) = listener.accept().await.unwrap();
+                let (connection, _) = ConnectionState::new(1, peer);
+                let (tx, _rx) = mpsc::channel(8);
+                handle_ssh_connection(
+                    stream,
+                    peer,
+                    store,
+                    control,
+                    config,
+                    tx,
+                    Arc::new(connection),
+                    true,
+                )
+                .await
+            }
+        });
+        let mut handle = russh::client::connect(Arc::new(russh::client::Config::default()), addr, TrustAllClient)
+            .await
+            .expect("client connect");
+        let key = decode_secret_key(TEST_PRIVATE_KEY, None).unwrap();
+        let _auth = handle
+            .authenticate_publickey(
+                "alice.solo",
+                russh::keys::PrivateKeyWithHashAlg::new(Arc::new(key), None),
+            )
+            .await;
+        let channel = handle
+            .channel_open_direct_tcpip("10.0.0.4", 22, "127.0.0.1", 1)
+            .await;
+        assert!(channel.is_err(), "paused reject must not open a forward: {channel:?}");
+        let server_result = tokio::time::timeout(Duration::from_secs(2), server)
+            .await
+            .expect("server finished")
+            .expect("join");
+        assert!(server_result.is_ok(), "{server_result:?}");
+    }
+
+    #[tokio::test]
+    async fn pre_auth_connections_are_closed_on_pause() {
+        let config = test_config();
+        let runtime = ProxyRuntime::new(&config);
+        let control = ControlPlane::new();
+        control.begin_epoch();
+        SnapshotStore::default()
+            .store(fixture_proxy_snapshot(7), control.epoch())
+            .unwrap();
+        control.resume_authoritative();
+        let (connection, registration) =
+            runtime.register_connection("127.0.0.1:2306".parse().unwrap());
+        let task = tokio::spawn(Abortable::new(std::future::pending::<()>(), registration));
+        pause_control_plane(&control, &runtime, config.control_hold, "pause").await;
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), task)
+                .await
+                .expect("pre-auth must abort")
+                .expect("join")
+                .is_err()
+        );
+        assert!(connection.revoked.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn pause_admit_kind_deserializes() {
+        let envelope: BackendEnvelope = serde_json::from_str(
+            r#"{"kind":"pauseAdmit","payload":{"reason":"backend shutting down"}}"#,
+        )
+        .unwrap();
+        assert_eq!(envelope.kind, "pauseAdmit");
+        let command: SshProxyPauseAdmitCommand = serde_json::from_value(envelope.payload).unwrap();
+        assert_eq!(command.reason.as_deref(), Some("backend shutting down"));
+    }
+
+    #[test]
+    fn unknown_backend_kind_is_ignored_without_pause_or_revoke() {
+        let store = SnapshotStore::default();
+        let control = paused_plane(&store);
+        let envelope: BackendEnvelope =
+            serde_json::from_str(r#"{"kind":"notARealKind","payload":{}}"#).unwrap();
+        assert_eq!(envelope.kind, "notARealKind");
+        assert_eq!(control.mode(), ControlMode::Paused);
+        assert!(store.load().is_some());
+    }
+
+    #[test]
+    fn direct_tcpip_on_held_snapshot_ignores_freshness_while_paused() {
+        let config = test_config();
+        let store = Arc::new(SnapshotStore::default());
+        let control = paused_plane(store.as_ref());
+        {
+            let snapshot = store.load().unwrap();
+            // Force an expired lease on a clone used for matching.
+            let mut expired = (*snapshot).clone();
+            expired.deadline = Instant::now() - Duration::from_millis(1);
+            drop(snapshot);
+            let public_key = parse_authorized_key(ALICE_KEY).unwrap();
+            let route = resolve_owned_route(&expired, "alice.solo").unwrap();
+            let (connection, _) = ConnectionState::new(1, "127.0.0.1:2307".parse().unwrap());
+            connection.set_authenticated(
+                "alice.solo",
+                &public_key,
+                &route.user_id,
+                &route.username,
+                Some(&route),
+            );
+            assert!(!expired.is_fresh());
+            assert!(connection.authorization_matches(Some(&expired)));
+        }
+        let (connection, _) = ConnectionState::new(2, "127.0.0.1:2308".parse().unwrap());
+        let connection = Arc::new(connection);
+        let (tx, _rx) = mpsc::channel(8);
+        let session = ProxySshSession::new(
+            store.clone(),
+            control.clone(),
+            config,
+            "127.0.0.1:2308".parse().unwrap(),
+            tx,
+            connection,
+            false,
+        );
+        assert!(session.held_snapshot().is_some());
+        assert!(session.latest_snapshot().is_none());
+    }
+
+    #[tokio::test]
+    async fn control_timers_retarget_on_pause_before_snapshot_deadline() {
+        let mut config = test_config();
+        config.control_hold = Duration::from_secs(30);
+        let store = Arc::new(SnapshotStore::default());
+        let runtime = Arc::new(ProxyRuntime::new(&config));
+        let control = Arc::new(ControlPlane::new());
+        control.begin_epoch();
+        let mut snapshot = fixture_proxy_snapshot(7);
+        snapshot.valid_until = now_ms() + 80;
+        assert!(store.store(snapshot, control.epoch()).unwrap());
+        control.resume_authoritative();
+        let snapshot = store.load().unwrap();
+        let public_key = parse_authorized_key(ALICE_KEY).unwrap();
+        let route = resolve_owned_route(&snapshot, "alice.solo").unwrap();
+        let (connection, registration) =
+            runtime.register_connection("127.0.0.1:2309".parse().unwrap());
+        connection.set_authenticated(
+            "alice.solo",
+            &public_key,
+            &route.user_id,
+            &route.username,
+            Some(&route),
+        );
+        let task = tokio::spawn(Abortable::new(std::future::pending::<()>(), registration));
+        let timers = tokio::spawn(run_control_timers(
+            store.clone(),
+            runtime.clone(),
+            control.clone(),
+        ));
+        pause_control_plane(&control, &runtime, config.control_hold, "pause").await;
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert!(store.load().is_some());
+        assert!(!connection.revoked.load(Ordering::Acquire));
+        assert_eq!(control.mode(), ControlMode::Paused);
+        task.abort();
+        timers.abort();
+        let _ = task.await;
+        let _ = timers.await;
     }
 
     #[test]

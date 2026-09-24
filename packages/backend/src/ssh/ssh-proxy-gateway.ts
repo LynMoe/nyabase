@@ -34,6 +34,7 @@ import { RuntimeRoleService } from '../runtime/runtime-role.service.js';
 export const MAX_SSH_PROXY_BUFFERED_BYTES = MAX_SSH_PROXY_SNAPSHOT_BYTES;
 export const MAX_SSH_PROXY_CLIENTS = 4;
 export const MAX_PENDING_SSH_DISCONNECT_ALL = 16;
+export const SSH_PROXY_PAUSE_ADMIT_FLUSH_MS = 300;
 const MAX_SSH_PROXY_CONTROL_FRAME_BYTES = 1024 * 1024;
 const MAX_SSH_PROXY_SNAPSHOT_RENEWAL_MS = 60_000;
 const INITIAL_CONNECTION_DEADLINE_MS = 15_000;
@@ -148,24 +149,45 @@ export class SshProxyGateway implements OnModuleInit, OnModuleDestroy {
     this.logger.log('SSH proxy WebSocket gateway ready at /ws/ssh-proxy');
   }
 
-  onModuleDestroy(): void {
+  async onModuleDestroy(): Promise<void> {
     this.destroyed = true;
     this.unregisterSnapshotListener?.();
     this.unregisterSnapshotListener = null;
-    if (this.snapshotRenewalTimer) clearTimeout(this.snapshotRenewalTimer);
-    this.snapshotRenewalTimer = null;
-    for (const client of this.initializingClients) client.terminate();
-    for (const client of this.clients) client.terminate();
-    this.initializingClients.clear();
-    this.clients.clear();
-    this.latestStatus.clear();
-    this.snapshotDirty = false;
-    for (const [requestId, pending] of this.pendingDisconnectAll) {
-      clearTimeout(pending.timeout);
-      pending.resolve({ requestId, requested: pending.expected, disconnected: pending.disconnected });
+    try {
+      const encoded = JSON.stringify({
+        ts: Date.now(),
+        kind: 'pauseAdmit',
+        payload: { reason: 'backend shutting down' },
+      });
+      await Promise.all(
+        Array.from(this.clients).map((client) => this.sendPauseAdmit(client, encoded)),
+      );
+    } finally {
+      for (const client of this.clients) {
+        try {
+          client.close();
+        } catch {
+          client.terminate();
+        }
+      }
+      for (const client of this.initializingClients) client.terminate();
+      if (this.snapshotRenewalTimer) clearTimeout(this.snapshotRenewalTimer);
+      this.snapshotRenewalTimer = null;
+      this.initializingClients.clear();
+      this.clients.clear();
+      this.latestStatus.clear();
+      this.snapshotDirty = false;
+      for (const [requestId, pending] of this.pendingDisconnectAll) {
+        clearTimeout(pending.timeout);
+        pending.resolve({
+          requestId,
+          requested: pending.expected,
+          disconnected: pending.disconnected,
+        });
+      }
+      this.pendingDisconnectAll.clear();
+      this.wss?.close();
     }
-    this.pendingDisconnectAll.clear();
-    this.wss?.close();
   }
 
   async broadcastSnapshot(): Promise<void> {
@@ -432,6 +454,30 @@ export class SshProxyGateway implements OnModuleInit, OnModuleDestroy {
     for (const client of this.clients) {
       this.sendOrTerminate(client, encoded, 'snapshot');
     }
+  }
+
+  private sendPauseAdmit(client: WebSocket, encoded: string): Promise<void> {
+    return new Promise((resolve) => {
+      if (client.readyState !== WebSocket.OPEN) {
+        resolve();
+        return;
+      }
+      const timer = setTimeout(() => {
+        client.terminate();
+        resolve();
+      }, SSH_PROXY_PAUSE_ADMIT_FLUSH_MS);
+      try {
+        client.send(encoded, (error) => {
+          clearTimeout(timer);
+          if (error) client.terminate();
+          resolve();
+        });
+      } catch {
+        clearTimeout(timer);
+        client.terminate();
+        resolve();
+      }
+    });
   }
 
   private sendOrTerminate(

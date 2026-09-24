@@ -31,6 +31,7 @@ import {
   zPreflightReport,
   zPutServerGrantRequest,
   zSshProxyInstanceRouteSnapshot,
+  zSshProxyPauseAdmitCommand,
   formatSshProxyJumpLogin,
   isActiveSshProxyRoute,
   zSharedVolumeScope,
@@ -454,6 +455,21 @@ describe('storage pool patch', () => {
       expectedRevision: 2,
       source: '/data1/incus',
     }).success).toBe(false);
+  });
+});
+
+describe('ssh proxy pauseAdmit', () => {
+  it('accepts an optional ASCII reason', () => {
+    expect(zSshProxyPauseAdmitCommand.parse({})).toEqual({});
+    expect(zSshProxyPauseAdmitCommand.parse({ reason: 'backend shutting down' })).toEqual({
+      reason: 'backend shutting down',
+    });
+  });
+
+  it('rejects overlong or non-ASCII reasons', () => {
+    expect(zSshProxyPauseAdmitCommand.safeParse({ reason: 'x'.repeat(513) }).success).toBe(false);
+    expect(zSshProxyPauseAdmitCommand.safeParse({ reason: '暂停' }).success).toBe(false);
+    expect(zSshProxyPauseAdmitCommand.safeParse({ extra: true }).success).toBe(false);
   });
 });
 

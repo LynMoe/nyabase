@@ -1,0 +1,99 @@
+import { describe, expect, it, vi } from 'vitest';
+import { WebSocket } from 'ws';
+import { SshProxyGateway, SSH_PROXY_PAUSE_ADMIT_FLUSH_MS } from './ssh-proxy-gateway.js';
+
+class FakeSocket {
+  readyState = WebSocket.OPEN;
+  bufferedAmount = 0;
+  sent: string[] = [];
+  closed = false;
+  terminated = false;
+  private sendImpl: (data: string, cb?: (error?: Error) => void) => void;
+
+  constructor(
+    sendImpl?: (data: string, cb?: (error?: Error) => void) => void,
+  ) {
+    this.sendImpl = sendImpl ?? ((data, cb) => {
+      this.sent.push(data);
+      cb?.();
+    });
+  }
+
+  send(data: string, cb?: (error?: Error) => void): void {
+    this.sendImpl.call(this, data, cb);
+  }
+
+  close(): void {
+    this.closed = true;
+    this.readyState = WebSocket.CLOSED;
+  }
+
+  terminate(): void {
+    this.terminated = true;
+    this.readyState = WebSocket.CLOSED;
+  }
+}
+
+function makeGateway(): SshProxyGateway {
+  return new SshProxyGateway(
+    {} as never,
+    { get: () => 'a'.repeat(32) } as never,
+    { register: () => () => undefined } as never,
+  );
+}
+
+function clientsOf(gateway: SshProxyGateway): Set<FakeSocket> {
+  return (gateway as unknown as { clients: Set<FakeSocket> }).clients;
+}
+
+function initializingOf(gateway: SshProxyGateway): Set<FakeSocket> {
+  return (gateway as unknown as { initializingClients: Set<FakeSocket> }).initializingClients;
+}
+
+describe('SshProxyGateway shutdown', () => {
+  it('sends pauseAdmit before closing admitted clients', async () => {
+    const gateway = makeGateway();
+    const client = new FakeSocket();
+    clientsOf(gateway).add(client);
+    await gateway.onModuleDestroy();
+    expect(client.sent).toHaveLength(1);
+    expect(JSON.parse(client.sent[0]!).kind).toBe('pauseAdmit');
+    expect(JSON.parse(client.sent[0]!).payload).toEqual({ reason: 'backend shutting down' });
+    expect(client.closed).toBe(true);
+  });
+
+  it('still closes admitted clients when send throws', async () => {
+    const gateway = makeGateway();
+    const client = new FakeSocket(() => {
+      throw new Error('send failed');
+    });
+    const initializing = new FakeSocket();
+    clientsOf(gateway).add(client);
+    initializingOf(gateway).add(initializing);
+    await gateway.onModuleDestroy();
+    expect(client.closed || client.terminated).toBe(true);
+    expect(initializing.terminated).toBe(true);
+  });
+
+  it('terminates a hung pauseAdmit send at the flush deadline', async () => {
+    vi.useFakeTimers();
+    const gateway = makeGateway();
+    const client = new FakeSocket(() => undefined);
+    clientsOf(gateway).add(client);
+    const done = gateway.onModuleDestroy();
+    await vi.advanceTimersByTimeAsync(SSH_PROXY_PAUSE_ADMIT_FLUSH_MS);
+    await done;
+    expect(client.terminated).toBe(true);
+    vi.useRealTimers();
+  });
+
+  it('does not broadcast snapshots after destroy', async () => {
+    const gateway = makeGateway();
+    const client = new FakeSocket();
+    clientsOf(gateway).add(client);
+    await gateway.onModuleDestroy();
+    client.sent.length = 0;
+    await gateway.broadcastSnapshot();
+    expect(client.sent).toHaveLength(0);
+  });
+});

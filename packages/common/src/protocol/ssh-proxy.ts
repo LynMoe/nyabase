@@ -162,6 +162,10 @@ export const zSshProxyDisconnectAllCommand = z.object({
   reason: zAsciiText(512).optional(),
 }).strict();
 
+export const zSshProxyPauseAdmitCommand = z.object({
+  reason: zAsciiText(512).optional(),
+}).strict();
+
 export const zSshProxyDisconnectAllResult = z.object({
   requestId: z.string().length(24).regex(/^[a-f0-9]{24}$/),
   disconnected: z.number().int().min(0).max(MAX_SSH_PROXY_STATUS_CONNECTIONS),
@@ -182,11 +186,13 @@ export type SshProxyConnectionInfo = z.infer<typeof zSshProxyConnectionInfo>;
 export type SshProxyStatusReport = z.infer<typeof zSshProxyStatusReport>;
 export type SshProxyDisconnectAllCommand = z.infer<typeof zSshProxyDisconnectAllCommand>;
 export type SshProxyDisconnectAllResult = z.infer<typeof zSshProxyDisconnectAllResult>;
+export type SshProxyPauseAdmitCommand = z.infer<typeof zSshProxyPauseAdmitCommand>;
 
 export type SshProxyBackendMessage =
   | { kind: 'snapshot'; payload: SshProxySnapshot }
   | { kind: 'update'; payload: SshProxySnapshot }
-  | { kind: 'disconnectAll'; payload: SshProxyDisconnectAllCommand };
+  | { kind: 'disconnectAll'; payload: SshProxyDisconnectAllCommand }
+  | { kind: 'pauseAdmit'; payload: SshProxyPauseAdmitCommand };
 
 export type SshProxyClientMessage =
   | { kind: 'ack'; payload: SshProxyClientAck }
