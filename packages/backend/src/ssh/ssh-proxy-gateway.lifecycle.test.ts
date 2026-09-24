@@ -3,7 +3,7 @@ import { WebSocket } from 'ws';
 import { SshProxyGateway, SSH_PROXY_PAUSE_ADMIT_FLUSH_MS } from './ssh-proxy-gateway.js';
 
 class FakeSocket {
-  readyState = WebSocket.OPEN;
+  readyState: number = WebSocket.OPEN;
   bufferedAmount = 0;
   sent: string[] = [];
   closed = false;
