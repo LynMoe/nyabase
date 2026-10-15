@@ -24,6 +24,8 @@ incus:
 
 server:
   port: 3001
+  # Browser sign-in requires the SPA and API on the same site (the bundled
+  # frontend already is). corsOrigin only serves non-cookie API clients.
   corsOrigin: ""
   # Reverse proxy addresses/CIDRs whose X-Forwarded-For is trusted, e.g.
   # "loopback" for a same-host proxy. Empty uses the TCP peer address.
@@ -41,6 +43,10 @@ auth:
   jwtSecret: ""
   jwtExpiresIn: 15m
   refreshTokenExpiresDays: 7
+  # The refresh session is an HttpOnly, SameSite=Strict cookie scoped to
+  # /api/auth. Keep Secure on; disable only for plain-HTTP development on a
+  # host other than localhost.
+  cookieSecure: true
   # Leave empty to generate a one-time password on first production boot.
   adminInitPassword: ""
 

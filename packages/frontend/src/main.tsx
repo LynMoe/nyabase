@@ -9,6 +9,7 @@ import { ErrorBoundary } from './components/error-boundary.js';
 import { ThemeApplier } from './components/theme-applier.js';
 import { queryClient } from './lib/query-client.js';
 import { initializeAuthSync } from './lib/auth-session.js';
+import { adoptPeerSession } from './lib/api.js';
 import { createNvidiaGpuWebExtension, nvidiaGpuFormatError } from '@nyabase/nvidia-gpu-web';
 import { frontendExtensionHost } from './extensions/host.js';
 import {
@@ -16,7 +17,7 @@ import {
   registerServerCardExtensions,
 } from './extensions/registry.js';
 
-initializeAuthSync();
+initializeAuthSync({ onPeerLogin: () => { void adoptPeerSession(); } });
 // Compile-time composition: also register the package in
 // packages/backend/src/app.module.ts and packages/node-exporter/src/main.ts.
 registerExtensionErrorFormatters([nvidiaGpuFormatError]);

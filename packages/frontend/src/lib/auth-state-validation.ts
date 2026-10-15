@@ -2,7 +2,6 @@ import { Capability, UserStatus, type UserDto } from '@nyabase/common';
 
 const USER_STATUSES = new Set<string>(Object.values(UserStatus));
 const CAPABILITIES = new Set<string>(Object.values(Capability));
-const AUTH_STATUSES = new Set(['checking', 'authenticated', 'anonymous', 'error']);
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value && typeof value === 'object' && !Array.isArray(value));
@@ -30,33 +29,4 @@ export function isRuntimeUserDto(value: unknown): value is UserDto {
     && isBoundedString(group.name, 128)
     && Number.isSafeInteger(group.priority)
     && typeof group.isSystem === 'boolean');
-}
-
-export function isRuntimeAuthStatus(value: unknown): value is 'checking' | 'authenticated' | 'anonymous' | 'error' {
-  return typeof value === 'string' && AUTH_STATUSES.has(value);
-}
-
-export function isRuntimeAuthError(value: unknown): value is string | null {
-  return value === null || isBoundedString(value, 4_096, true);
-}
-
-export type PersistedAuthCredentials = {
-  accessToken: string | null;
-  refreshToken: string | null;
-  refreshRequestId: string | null;
-  user: UserDto | null;
-};
-
-/** Persisted credentials are either wholly anonymous or a complete validated tuple. */
-export function isPersistedAuthCredentials(value: unknown): value is PersistedAuthCredentials {
-  if (!isRecord(value)) return false;
-  const { accessToken, refreshToken, refreshRequestId, user } = value;
-  if (accessToken === null && refreshToken === null && refreshRequestId === null && user === null) return true;
-  return isBoundedString(accessToken, 16_384)
-    && isBoundedString(refreshToken, 512)
-    // Legacy persisted sessions predate refresh request ids. They remain a
-    // complete credential tuple and are migrated synchronously before use.
-    && (refreshRequestId === null
-      || (typeof refreshRequestId === 'string' && /^[0-9a-f]{64}$/.test(refreshRequestId)))
-    && isRuntimeUserDto(user);
 }

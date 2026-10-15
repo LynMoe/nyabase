@@ -246,12 +246,9 @@ export const zLoginRequest = z.object({
   password: z.string().min(1).max(1024),
 }).strict();
 
-export const zRefreshTokenRequest = z.object({
-  refreshToken: z.string().min(1).max(256),
-}).strict();
-
+/** The refresh secret is read from the cookie; the body carries only the
+ * idempotency key that lets a lost rotation response be recovered. */
 export const zRotateRefreshTokenRequest = z.object({
-  refreshToken: z.string().min(1).max(256),
   requestId: z.string().length(64).regex(SHA256_RE),
 }).strict();
 
@@ -770,7 +767,6 @@ export const zPatchSystemSettingsRequest = z.object({
 }).strict();
 
 export type LoginRequest = z.infer<typeof zLoginRequest>;
-export type RefreshTokenRequest = z.infer<typeof zRefreshTokenRequest>;
 export type RotateRefreshTokenRequest = z.infer<typeof zRotateRefreshTokenRequest>;
 export type CreateApiTokenRequest = z.infer<typeof zCreateApiTokenRequest>;
 export type CreateUserRequest = z.infer<typeof zCreateUserRequest>;

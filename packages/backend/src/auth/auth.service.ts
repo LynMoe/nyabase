@@ -172,7 +172,12 @@ export class AuthService {
     return {
       accessToken: this.signAccessToken(result.user),
       refreshToken: successor,
+      user: result.user,
     };
+  }
+
+  refreshCookieMaxAgeMs(): number {
+    return this.refreshExpiryDurationMs();
   }
 
   /**

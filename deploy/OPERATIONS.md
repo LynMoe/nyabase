@@ -544,6 +544,15 @@ from the product SLO and measured baseline, not from this example deployment.
   so one client exhausting the per-IP login limit locks out everyone. Never
   trust a range that end users can send from directly. The proxy must
   overwrite, not append to, an untrusted inbound `X-Forwarded-For`.
+- Browser sessions keep the refresh secret in the `nyabase_refresh` cookie
+  (`HttpOnly`, `Secure`, `SameSite=Strict`, `Path=/api/auth`); the access token
+  lives only in tab memory, and nothing credential-bearing is written to web
+  storage. `/api/auth/login`, `/refresh`, and `/logout` require the
+  `X-Nyabase-Auth: 1` header, which cross-site pages cannot send without a
+  CORS preflight. Serve the SPA from the same site as the API (the bundled
+  frontend does); a frontend on another site cannot use the cookie session.
+  Upgrading from a release that stored tokens in `localStorage` signs every
+  browser out once and erases the old keys on first load.
 - The Backend sends a strict Content-Security-Policy (`script-src 'self'`,
   `frame-ancestors 'none'`), `nosniff`, and related headers on every response.
   It does not send HSTS; enable HSTS at the TLS edge once every host under the

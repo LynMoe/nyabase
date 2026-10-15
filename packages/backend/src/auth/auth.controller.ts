@@ -8,15 +8,25 @@ import {
   Delete,
   Param,
   Req,
+  Res,
+  UnauthorizedException,
 } from '@nestjs/common';
 import { AuthService } from './auth.service.js';
 import { JwtAuthGuard } from './guards/jwt-auth.guard.js';
 import { CurrentUser } from './decorators/current-user.decorator.js';
 import type { UserRecord } from '../domain/domain-records.js';
 import { AccessResolverService } from '../access/access-resolver.service.js';
+import { NyabaseConfigService } from '../config/nyabase-config.service.js';
+import {
+  clearRefreshCookie,
+  readRefreshCookie,
+  requireAuthIntent,
+  setRefreshCookie,
+  type CookieRequest,
+  type CookieResponse,
+} from './refresh-cookie.js';
 import {
   zLoginRequest,
-  zRefreshTokenRequest,
   zRotateRefreshTokenRequest,
   zCreateApiTokenRequest,
   UserDto,
@@ -27,9 +37,16 @@ export class AuthController {
   constructor(
     private authService: AuthService,
     private accessResolver: AccessResolverService,
+    private config: NyabaseConfigService,
   ) {}
 
-  private async userToDto(user: UserRecord): Promise<UserDto> {
+  private cookieSecure(): boolean {
+    return this.config.get<boolean>('auth.cookieSecure');
+  }
+
+  private async userToDto(
+    user: Pick<UserRecord, 'id' | 'username' | 'displayName' | 'status' | 'createdAt'>,
+  ): Promise<UserDto> {
     const [capabilities, groups] = await Promise.all([
       this.accessResolver.userCapabilities(user.id),
       this.accessResolver.getUserGroupSummaries(user.id),
@@ -49,31 +66,60 @@ export class AuthController {
   @HttpCode(200)
   async login(
     @Body() body: unknown,
-    @Req() request: { ip?: string },
+    @Req() request: CookieRequest & { ip?: string },
+    @Res({ passthrough: true }) response: CookieResponse,
   ) {
+    requireAuthIntent(request);
     const dto = zLoginRequest.parse(body);
     // Express derives `ip` from the socket peer unless server.trustedProxies
     // names the forwarding proxy, so X-Forwarded-For is never trusted blindly.
-    const { user, ...tokens } = await this.authService.authenticateAndLogin(
+    const { user, accessToken, refreshToken } = await this.authService.authenticateAndLogin(
       dto.username,
       dto.password,
       request.ip ?? 'unknown',
     );
-    return { ...tokens, user: await this.userToDto(user) };
+    setRefreshCookie(response, refreshToken, {
+      secure: this.cookieSecure(),
+      maxAgeMs: this.authService.refreshCookieMaxAgeMs(),
+    });
+    return { accessToken, user: await this.userToDto(user) };
   }
 
   @Post('refresh')
   @HttpCode(200)
-  async refresh(@Body() body: unknown) {
-    const { refreshToken, requestId } = zRotateRefreshTokenRequest.parse(body);
-    return this.authService.refreshTokens(refreshToken, requestId);
+  async refresh(
+    @Body() body: unknown,
+    @Req() request: CookieRequest,
+    @Res({ passthrough: true }) response: CookieResponse,
+  ) {
+    requireAuthIntent(request);
+    const { requestId } = zRotateRefreshTokenRequest.parse(body);
+    const presented = readRefreshCookie(request);
+    if (!presented) throw new UnauthorizedException('Invalid refresh token');
+    let rotated: Awaited<ReturnType<AuthService['refreshTokens']>>;
+    try {
+      rotated = await this.authService.refreshTokens(presented, requestId);
+    } catch (error) {
+      if (error instanceof UnauthorizedException) clearRefreshCookie(response, this.cookieSecure());
+      throw error;
+    }
+    setRefreshCookie(response, rotated.refreshToken, {
+      secure: this.cookieSecure(),
+      maxAgeMs: this.authService.refreshCookieMaxAgeMs(),
+    });
+    return { accessToken: rotated.accessToken, user: await this.userToDto(rotated.user) };
   }
 
   @Post('logout')
   @HttpCode(204)
-  async logout(@Body() body: unknown) {
-    const { refreshToken } = zRefreshTokenRequest.parse(body);
-    await this.authService.logout(refreshToken);
+  async logout(
+    @Req() request: CookieRequest,
+    @Res({ passthrough: true }) response: CookieResponse,
+  ) {
+    requireAuthIntent(request);
+    const presented = readRefreshCookie(request);
+    clearRefreshCookie(response, this.cookieSecure());
+    if (presented) await this.authService.logout(presented);
   }
 
   @Get('me')

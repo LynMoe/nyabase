@@ -273,12 +273,12 @@ function mockApi(urlString, method) {
     return json({ branding: { title: 'nyabase', description: '开发容器管理平台' }, sshProxy: { host: 'ssh.example.test', port: 2222 } });
   }
   if (p === '/auth/login' && m === 'POST') {
-    return json({ accessToken: 'access-token', refreshToken: 'refresh-token', user });
+    return json({ accessToken: 'access-token', user });
   }
   if (p === '/auth/me') return json(user);
   if (p === '/auth/logout') return { status: 204, body: '' };
   if (p === '/auth/refresh' && m === 'POST') {
-    return json({ accessToken: 'access-token', refreshToken: 'refresh-token', user });
+    return json({ accessToken: 'access-token', user });
   }
 
   if (p === '/servers') return json([userServer]);

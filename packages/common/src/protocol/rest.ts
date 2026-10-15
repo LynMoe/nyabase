@@ -69,7 +69,6 @@ export type {
   PutServerGrantRequest,
   PutSharedBackendGrantRequest,
   PutStoragePoolGrantRequest,
-  RefreshTokenRequest,
   RetryIntentRequest,
   RotateIncusClientCertificateRequest,
   RotateRefreshTokenRequest,
@@ -99,15 +98,15 @@ export interface CursorPaginatedResponse<T> {
   nextCursor: string | null;
 }
 
+/** The refresh secret travels only in the HttpOnly `nyabase_refresh` cookie. */
 export interface LoginResponse {
   accessToken: string;
-  refreshToken: string;
   user: UserDto;
 }
 
 export interface RefreshTokenResponse {
   accessToken: string;
-  refreshToken: string;
+  user: UserDto;
 }
 
 export interface UserDto {
