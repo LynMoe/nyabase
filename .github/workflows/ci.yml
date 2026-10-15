@@ -52,6 +52,8 @@ jobs:
         run: pnpm audit --prod --audit-level=high
       - name: Build and test
         run: pnpm check
+      - name: Typecheck live e2e suite and orchestrator contracts
+        run: pnpm e2e:check
       - name: Verify PostgreSQL operations fail-closed contracts
         run: bash scripts/postgres-ops.test.sh
       - name: Verify PostgreSQL fresh-only restore against PostgreSQL 18
