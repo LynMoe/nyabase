@@ -12,7 +12,10 @@ import { chromium } from 'playwright';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const frontendRoot = path.resolve(here, '..');
-const shotsRoot = path.join(here, 'shots');
+const shotsRoot = process.env.VISUAL_SHOTS_DIR
+  ? path.resolve(process.env.VISUAL_SHOTS_DIR)
+  : path.join(here, 'shots');
+const THEME = process.env.VISUAL_THEME === 'dark' ? 'dark' : 'light';
 const BASE = process.env.VISUAL_BASE_URL ?? 'http://127.0.0.1:5173';
 const ISO = '2026-01-15T08:00:00.000Z';
 const CERT_EXPIRY = '2026-09-20T00:00:00.000Z';
@@ -260,9 +263,48 @@ const auditLog = {
   targetName: 'dev-workspace', actorSnapshot: null, targetSnapshot: null, related: [], payload: null,
 };
 
+const hostSnapshot = {
+  cpuRatio: 0.32,
+  cpuCount: 32,
+  memory: { usedBytes: 48 * 1024 ** 3, limitBytes: 128 * 1024 ** 3, ratio: 0.375 },
+  network: { rxBytesPerSec: 2.4 * 1024 ** 2, txBytesPerSec: 0.8 * 1024 ** 2 },
+  disks: [{ id: 'pool-1', name: '本地盘', usedBytes: 120 * 1024 ** 3, sizeBytes: 500 * 1024 ** 3, ratio: 0.24 }],
+  gpus: [{ pci: '0000:01:00.0', index: 0, usedBytes: 6 * 1024 ** 3, totalBytes: 24 * 1024 ** 3, ratio: 0.25 }],
+};
+
+const ownContainerUsage = {
+  containerId: 'ctr-1',
+  name: 'dev-workspace',
+  cpu: { usageCores: 0.6, limitCores: 2, ratio: 0.3 },
+  memory: { usedBytes: 1.6 * 1024 ** 3, limitBytes: 4 * 1024 ** 3, ratio: 0.4 },
+  gpu: { usedBytes: null, limitBytes: null, ratio: null, pciAddresses: [] },
+  disk: { usedBytes: 8 * 1024 ** 3, sizeBytes: 20 * 1024 ** 3, ratio: 0.4, readBytesPerSec: 0, writeBytesPerSec: 1024 },
+  network: { rxBytesPerSec: 12 * 1024, txBytesPerSec: 4 * 1024 },
+  volumes: [],
+};
+
+const serverUsage = {
+  serverId: 'srv-1',
+  serverName: 'lab-node-a',
+  stale: false,
+  sampledAt: ISO,
+  people: [{
+    userId: 'user-admin', displayName: '平台管理员', username: 'admin', containerCount: 1, missingSamples: 0,
+    cpu: ownContainerUsage.cpu, memory: ownContainerUsage.memory,
+    gpu: { usedBytes: null, limitBytes: null, ratio: null, cardCount: 0 },
+    disk: { usedBytes: 8 * 1024 ** 3, sizeBytes: 20 * 1024 ** 3, ratio: 0.4 },
+    network: ownContainerUsage.network,
+  }],
+  host: hostSnapshot,
+  sparkline: null,
+};
+
 function json(body, status = 200) {
   return { status, contentType: 'application/json', body: JSON.stringify(body) };
 }
+
+// Per-viewport session flag: the login shot must see an anonymous session.
+let session = false;
 
 function mockApi(urlString, method) {
   const url = new URL(urlString);
@@ -273,12 +315,43 @@ function mockApi(urlString, method) {
     return json({ branding: { title: 'nyabase', description: '开发容器管理平台' }, sshProxy: { host: 'ssh.example.test', port: 2222 } });
   }
   if (p === '/auth/login' && m === 'POST') {
+    session = true;
     return json({ accessToken: 'access-token', user });
   }
+  if (p === '/auth/logout') { session = false; return { status: 204, body: '' }; }
+  if (!session && (p === '/auth/refresh' || p === '/auth/me')) {
+    return json({ statusCode: 401, message: 'Unauthorized' }, 401);
+  }
   if (p === '/auth/me') return json(user);
-  if (p === '/auth/logout') return { status: 204, body: '' };
   if (p === '/auth/refresh' && m === 'POST') {
     return json({ accessToken: 'access-token', user });
+  }
+  if (p === '/performance/usage') {
+    if (url.searchParams.get('containerId')) {
+      return json({ sampledAt: ISO, stale: false, serverId: 'srv-1', container: ownContainerUsage });
+    }
+    return json({ sampledAt: ISO, servers: [serverUsage], ownContainers: [ownContainerUsage] });
+  }
+  if (p === '/admin/performance/usage') {
+    if (url.searchParams.get('containerId')) {
+      return json({ sampledAt: ISO, stale: false, serverId: 'srv-1', container: ownContainerUsage });
+    }
+    return json({
+      sampledAt: ISO,
+      truncated: false,
+      servers: [{
+        ...serverUsage,
+        containers: [{
+          ...ownContainerUsage, userId: 'user-admin', username: 'admin', displayName: '平台管理员',
+          lifecyclePhase: 'active', powerIntent: 'running',
+        }],
+        unattributedGpu: [],
+      }],
+    });
+  }
+  if (p.endsWith('/performance/series')) {
+    const chart = { unit: 'cores', yMax: null, lines: [], otherCount: 0 };
+    return json({ range: '1h', serverId: 'srv-1', t: [], charts: { cpu: chart, memory: chart, disk: chart, network: chart }, gpus: [] });
   }
 
   if (p === '/servers') return json([userServer]);
@@ -555,8 +628,6 @@ const PAGES = [
   { name: 'quota', path: '/quota' },
   { name: 'containers', path: '/containers' },
   { name: 'container-overview', path: '/containers/ctr-1?tab=overview' },
-  { name: 'container-storage', path: '/containers/ctr-1?tab=storage' },
-  { name: 'container-intents', path: '/containers/ctr-1?tab=intents' },
   { name: 'volumes', path: '/volumes' },
   { name: 'shared-volumes', path: '/shared-volumes' },
   { name: 'http-proxy', path: '/http-proxy' },
@@ -582,6 +653,11 @@ const PAGES = [
   { name: 'group-detail-grants', path: '/groups/grp-users?tab=grants' },
   { name: 'audit', path: '/audit' },
   { name: 'system-settings', path: '/system-settings' },
+  { name: 'usage', path: '/usage' },
+  { name: 'admin-usage', path: '/servers/usage' },
+  { name: 'ops', path: '/ops' },
+  { name: 'image-detail', path: '/images/img-1' },
+  { name: 'shared-backend-detail', path: '/shared-backends/be-1' },
 ];
 
 const DIALOGS = [
@@ -610,9 +686,21 @@ const DIALOGS = [
   { name: 'dialog-ssh-disconnect', path: '/ssh-proxy', open: (p) => clickByText(p, '断开全部') },
   { name: 'dialog-audit-detail', path: '/audit', open: (p) => clickByText(p, '查看') },
   { name: 'dialog-stop-container', path: '/containers/ctr-1?tab=overview', open: (p) => clickByText(p, '停止') },
-  { name: 'dialog-edit-container-spec', path: '/containers/ctr-1?tab=overview', open: (p) => clickByText(p, '编辑规格') },
-  { name: 'dialog-resize-root', path: '/containers/ctr-1?tab=storage', open: (p) => clickByText(p, '调整容量') },
-  { name: 'dialog-attach-volume', path: '/containers/ctr-1?tab=storage', open: (p) => clickByText(p, '挂载') },
+  { name: 'dialog-edit-container-spec', path: '/containers/ctr-1?tab=overview', open: async (p) => {
+    const btn = p.getByTestId('edit-container-spec');
+    if (await btn.count() === 0) return false;
+    await btn.click();
+    await waitSettled(p);
+    return true;
+  } },
+  { name: 'dialog-container-intents', path: '/containers/ctr-1?tab=overview', open: async (p) => {
+    const btn = p.getByTestId('open-intent-history');
+    if (await btn.count() === 0) return false;
+    await btn.click();
+    await waitSettled(p);
+    return true;
+  } },
+  { name: 'dialog-attach-volume', path: '/containers/ctr-1?tab=overview', open: (p) => clickByText(p, '挂载') },
   { name: 'dialog-change-password', path: '/profile', open: (p) => clickByText(p, '修改密码') },
   { name: 'dialog-edit-user', path: '/users/user-alice', open: (p) => clickByText(p, '编辑') },
   { name: 'dialog-edit-group', path: '/groups/grp-users', open: (p) => clickByText(p, '编辑') },
@@ -657,7 +745,12 @@ async function captureViewport(browser, viewport, label) {
     viewport,
     deviceScaleFactor: label === 'mobile' ? 2 : 1,
     locale: 'zh-CN',
+    colorScheme: THEME,
   });
+  await context.addInitScript((mode) => {
+    window.localStorage.setItem('nyabase-theme', JSON.stringify({ state: { mode }, version: 0 }));
+  }, THEME);
+  session = false;
   const page = await context.newPage();
   await page.route('**/api/**', async (route) => {
     const req = route.request();
