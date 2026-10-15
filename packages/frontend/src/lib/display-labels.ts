@@ -1,4 +1,4 @@
-import { Capability, ResourceLifecyclePhase, ServerStatus, UserStatus } from '@nyabase/common';
+import { Capability, UserStatus } from '@nyabase/common';
 
 export function userStatusLabel(status: string): string {
   switch (status) {
@@ -19,21 +19,6 @@ export function userStatusLabel(status: string): string {
   }
 }
 
-export function serverStatusLabel(status: string): string {
-  switch (status) {
-    case ServerStatus.Online:
-    case 'online':
-      return '在线';
-    case ServerStatus.Unreachable:
-    case 'unreachable':
-      return '不可达';
-    case ServerStatus.Unknown:
-    case 'unknown':
-      return '未知';
-    default:
-      return status;
-  }
-}
 
 export function capabilityLabel(capability: string): string {
   switch (capability) {
@@ -74,24 +59,6 @@ export function capabilityLabel(capability: string): string {
   }
 }
 
-export function lifecyclePhaseLabel(phase: string): string {
-  switch (phase) {
-    case ResourceLifecyclePhase.Provisioning:
-    case 'provisioning':
-      return '配置中';
-    case ResourceLifecyclePhase.Active:
-    case 'active':
-      return '已生效';
-    case ResourceLifecyclePhase.Deleting:
-    case 'deleting':
-      return '删除中';
-    case ResourceLifecyclePhase.Failed:
-    case 'failed':
-      return '失败';
-    default:
-      return phase;
-  }
-}
 
 export function preflightStatusLabel(status: string): string {
   switch (status) {
@@ -167,3 +134,6 @@ export function nodeMetricsStatusZh(status: string): string {
       return status;
   }
 }
+
+// One vocabulary for lifecycle and server status across the app.
+export { lifecyclePhaseLabel, serverStatusLabel } from './status-labels.js';

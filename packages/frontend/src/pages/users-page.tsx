@@ -16,6 +16,7 @@ import { Page } from '../components/layout/page.js';
 import { PageHeader } from '../components/layout/page-header.js';
 import { QueryView } from '../components/layout/query-view.js';
 import { SectionCard } from '../components/layout/section-card.js';
+import { ListSearch, matchesSearch } from '../components/layout/list-search.js';
 import { StatusBadge } from '../components/layout/status-badge.js';
 import {
   Table,
@@ -39,6 +40,7 @@ export default function UsersPage() {
   const queryClient = useQueryClient();
   const [createOpen, setCreateOpen] = useState(false);
   const [deleteUser, setDeleteUser] = useState<UserDto | null>(null);
+  const [query, setQuery] = useState('');
   const usersQuery = useQuery({
     queryKey: queryKeys.users.admin,
     queryFn: () => api.get<UserDto[]>('/admin/users'),
@@ -88,8 +90,17 @@ export default function UsersPage() {
           />
         }
       >
-        {(users) => (
-          <SectionCard flush>
+        {(users) => {
+          const visibleUsers = users.filter((user) => matchesSearch(query, [
+            user.username,
+            user.displayName,
+            ...user.groups.map((group) => group.name),
+          ]));
+          return (
+          <SectionCard
+            flush
+            toolbar={<ListSearch value={query} onChange={setQuery} placeholder="搜索用户名、显示名、用户组" />}
+          >
             <Table className="min-w-[720px]">
               <TableHeader>
                 <TableRow>
@@ -100,7 +111,14 @@ export default function UsersPage() {
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {users.map((user) => (
+                {visibleUsers.length === 0 ? (
+                  <TableRow>
+                    <TableCell colSpan={canManageUsers ? 4 : 3} className="py-8 text-center text-muted-foreground">
+                      没有符合条件的用户
+                    </TableCell>
+                  </TableRow>
+                ) : null}
+                {visibleUsers.map((user) => (
                   <TableRow key={user.id}>
                     <TableCell className="whitespace-normal">
                       <Link
@@ -139,7 +157,12 @@ export default function UsersPage() {
                     {canManageUsers ? (
                       <TableCell className="text-right">
                         {user.id !== currentUserId ? (
-                          <Button size="sm" variant="destructive" onClick={() => setDeleteUser(user)}>
+                          <Button
+                            size="sm"
+                            variant="ghost"
+                            className="text-muted-foreground hover:bg-destructive/10 hover:text-destructive"
+                            onClick={() => setDeleteUser(user)}
+                          >
                             <Trash2 className="h-4 w-4" />删除
                           </Button>
                         ) : null}
@@ -150,7 +173,8 @@ export default function UsersPage() {
               </TableBody>
             </Table>
           </SectionCard>
-        )}
+          );
+        }}
       </QueryView>
       {canManageUsers && <CreateUserDialog open={createOpen} onOpenChange={setCreateOpen} />}
       <ConfirmDialog
@@ -158,7 +182,7 @@ export default function UsersPage() {
         title="删除用户？"
         description={`将永久删除用户「${deleteUser?.displayName}」。其登录会话会被终止，组关系与资源授权会一并清理，且不可恢复。`}
         confirmLabel="确认删除"
-        pendingLabel="确认删除"
+        pendingLabel="删除中..."
         pending={remove.isPending}
         onConfirm={() => { if (deleteUser) remove.mutate(deleteUser.id); }}
         onOpenChange={(open) => { if (!open) setDeleteUser(null); }}

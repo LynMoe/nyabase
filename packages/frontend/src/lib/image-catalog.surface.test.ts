@@ -30,7 +30,7 @@ describe('image catalog UI', () => {
     expect(detail).toMatch(/loaded\.alias/);
     expect(detail).toMatch(/重新拉取/);
     expect(detail).toMatch(/\/admin\/images\/\$\{loaded\.id\}\/intents/);
-    expect(detail).toMatch(/镜像移除意图已提交/);
+    expect(detail).toMatch(/已开始移除镜像/);
     expect(detail).not.toMatch(/镜像删除意图已提交/);
   });
 

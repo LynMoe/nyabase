@@ -45,7 +45,7 @@ export default function ImagesPage() {
   const deleteImage = useMutation({
     mutationFn: (imageId: string) => api.delete<unknown>(`/admin/images/${imageId}`),
     onSuccess: () => {
-      toast({ title: '镜像移除意图已提交' });
+      toast({ title: '已开始移除镜像' });
       setDeleteTarget(null);
       invalidate();
     },

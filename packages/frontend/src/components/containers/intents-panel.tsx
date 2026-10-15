@@ -150,7 +150,7 @@ export function IntentsPanel({
   return (
     <Card data-testid="intent-history">
       <CardHeader>
-        <CardTitle className="text-base">意图历史</CardTitle>
+        <CardTitle className="text-base">操作记录</CardTitle>
       </CardHeader>
       <CardContent>
         {list}

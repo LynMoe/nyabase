@@ -403,8 +403,10 @@ describe('lane D product UI copy', () => {
     expect(dashboard).not.toMatch(/nvidia-gpu/);
     expect(dashboard).not.toMatch(/GpuGrantMode/);
     expect(dashboard).toMatch(/gpu\.pciAddresses/);
-    expect(create).toMatch(/formatGrantQuotaLine/);
+    // One "remaining" line instead of ceiling + remaining + a capacity box.
+    expect(create).toMatch(/create-remaining/);
     expect(create).toMatch(/formatConsumedQuotaParts/);
+    expect(create).toMatch(/超出剩余/);
     expect(create).toMatch(/queryKeys\.containers\.userList/);
     expect(create).toMatch(/\/containers/);
     expect(create).not.toMatch(/nvidia-gpu/);

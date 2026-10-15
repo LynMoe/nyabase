@@ -9,7 +9,13 @@ export type AuditPageSize = (typeof PAGE_SIZES)[number];
 export type AuditSearch = {
   page: number;
   pageSize: AuditPageSize;
+  action?: string;
+  targetType?: string;
 };
+
+function parseFilterValue(value: unknown): string | undefined {
+  return typeof value === 'string' && /^[a-z][a-z0-9_.-]{0,63}$/.test(value) ? value : undefined;
+}
 
 function parseAuditPage(value: unknown): number {
   if (typeof value === 'number' && Number.isInteger(value) && value >= 0) {
@@ -41,6 +47,8 @@ export const Route = createFileRoute('/audit/')({
   validateSearch: (search: Record<string, unknown>): AuditSearch => ({
     page: parseAuditPage(search.page),
     pageSize: parseAuditPageSize(search.pageSize),
+    action: parseFilterValue(search.action),
+    targetType: parseFilterValue(search.targetType),
   }),
   component: AuditRoute,
 });

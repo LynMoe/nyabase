@@ -6,12 +6,11 @@ import {
 } from '@nyabase/common';
 import { api } from '../lib/api.js';
 import { errorMessage } from '../lib/api-error.js';
-import { ContainerTable } from '../components/containers/container-table.js';
+import { ContainerList } from '../components/containers/container-list.js';
 import { EmptyState } from '../components/layout/empty-state.js';
 import { Page } from '../components/layout/page.js';
 import { PageHeader } from '../components/layout/page-header.js';
 import { QueryView } from '../components/layout/query-view.js';
-import { SectionCard } from '../components/layout/section-card.js';
 import { queryKeys } from '../lib/query-keys.js';
 import { queryPollInterval } from '../lib/query-lifecycle.js';
 import { runGatedMutation } from '../lib/resource-mutation-gate.js';
@@ -49,8 +48,8 @@ export default function ManageContainersPage() {
   return (
     <Page>
       <PageHeader
-        title="容器管理"
-        description="全部用户的容器。创建请到用户面「容器」。"
+        title="全部容器"
+        description={containersQuery.data ? `所有用户的 ${containersQuery.data.length} 个容器。新建容器请到「容器」页。` : '所有用户的容器。'}
       />
       <QueryView
         query={containersQuery}
@@ -60,14 +59,7 @@ export default function ManageContainersPage() {
         empty={<EmptyState title="暂无容器。" />}
       >
         {(containers) => (
-          <SectionCard flush>
-            <ContainerTable
-              containers={containers}
-              admin
-              showServerColumn
-              onAction={onPowerAction}
-            />
-          </SectionCard>
+          <ContainerList containers={containers} admin onAction={onPowerAction} />
         )}
       </QueryView>
     </Page>

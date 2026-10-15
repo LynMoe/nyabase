@@ -177,7 +177,7 @@ export function IntentDetailDialog({
     <Dialog open={open && Boolean(view)} onOpenChange={onOpenChange}>
       <DialogContent className="sm:max-w-3xl" data-testid="intent-detail">
         <DialogHeader>
-          <DialogTitle>意图详情</DialogTitle>
+          <DialogTitle>操作详情</DialogTitle>
           <DialogDescription>查看请求摘要、基线与失败详情。</DialogDescription>
         </DialogHeader>
         {view ? (

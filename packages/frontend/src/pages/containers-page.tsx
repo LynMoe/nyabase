@@ -5,13 +5,12 @@ import type { ContainerAction, ContainerDto, IntentAcceptedDto } from '@nyabase/
 import { api } from '../lib/api.js';
 import { errorMessage } from '../lib/api-error.js';
 import { Button } from '../components/ui/button.js';
-import { ContainerTable } from '../components/containers/container-table.js';
+import { ContainerList } from '../components/containers/container-list.js';
 import { CreateContainerDialog } from '../components/containers/create-container-dialog.js';
 import { EmptyState } from '../components/layout/empty-state.js';
 import { Page } from '../components/layout/page.js';
 import { PageHeader } from '../components/layout/page-header.js';
 import { QueryView } from '../components/layout/query-view.js';
-import { SectionCard } from '../components/layout/section-card.js';
 import { queryKeys } from '../lib/query-keys.js';
 import { queryPollInterval } from '../lib/query-lifecycle.js';
 import { runGatedMutation } from '../lib/resource-mutation-gate.js';
@@ -66,19 +65,14 @@ export default function ContainersPage() {
         showEmpty={containersQuery.data?.length === 0}
         empty={
           <EmptyState
-            title="暂无容器。"
+            title="还没有容器"
+            description="新建一个容器，几秒钟后就能通过 SSH 登录。"
             action={<Button onClick={() => setCreateOpen(true)}><Plus className="h-4 w-4" />新建容器</Button>}
           />
         }
       >
         {(containers) => (
-          <SectionCard flush>
-            <ContainerTable
-              containers={containers}
-              showServerColumn
-              onAction={onPowerAction}
-            />
-          </SectionCard>
+          <ContainerList containers={containers} onAction={onPowerAction} />
         )}
       </QueryView>
       <CreateContainerDialog open={createOpen} onOpenChange={setCreateOpen} />

@@ -37,7 +37,7 @@ export function SectionCard({
         </CardHeader>
       ) : null}
       {toolbar ? (
-        <div className={cn('px-6 py-3', hasHeader ? 'border-t' : undefined)}>
+        <div className={cn('px-4 py-3 sm:px-6', hasHeader ? 'border-t' : undefined)}>
           {toolbar}
         </div>
       ) : null}

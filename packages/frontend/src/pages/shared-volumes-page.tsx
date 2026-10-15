@@ -36,7 +36,7 @@ export default function SharedVolumesPage() {
     onSuccess: () => {
       toast({
         title: '删除已提交',
-        description: '从未挂载的预订会立即删除；已有目录的删除稍后完成。',
+        description: '从未挂载过的卷会立即删除；已有目录的卷稍后完成删除。',
       });
       setDeleteTarget(null);
       void queryClient.invalidateQueries({ queryKey: queryKeys.sharedVolumes.all });

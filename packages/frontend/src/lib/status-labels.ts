@@ -1,4 +1,4 @@
-import type { ContainerPhase, ContainerPowerIntent, ContainerStatus, ServerStatus } from '@nyabase/common';
+import type { ContainerPhase, ContainerStatus, ServerStatus } from '@nyabase/common';
 import { FailureCode } from '@nyabase/common';
 import { formatRegisteredExtensionError } from '../extensions/registry.js';
 
@@ -20,7 +20,7 @@ const CONTAINER_STATUS_ZH: Record<string, string> = {
 };
 
 const LIFECYCLE_PHASE_ZH: Record<string, string> = {
-  provisioning: '开通中',
+  provisioning: '创建中',
   active: '正常',
   deleting: '删除中',
   failed: '失败',
@@ -33,11 +33,6 @@ const SSH_STATUS_ZH: Record<string, string> = {
   error: '异常',
   unknown: '未知',
   key_applied_sshd_missing: '密钥已下发，sshd 未就绪',
-};
-
-const POWER_INTENT_ZH: Record<string, string> = {
-  running: '期望运行',
-  stopped: '期望停止',
 };
 
 const SERVER_STATUS_ZH: Record<string, string> = {
@@ -66,7 +61,7 @@ const FAILURE_CODE_ZH: Partial<Record<string, string>> = {
   [FailureCode.RootShrinkBelowUsage]: '系统盘目标小于已用量',
   [FailureCode.RootUsageUnknown]: '系统盘已用量未知，无法缩容',
   [FailureCode.RootShrinkRequiresStop]: '缩容前需先停止容器',
-  [FailureCode.RootQuotaPending]: '系统盘配额变更待收敛',
+  [FailureCode.RootQuotaPending]: '系统盘容量调整尚未生效',
   [FailureCode.RootSizeBelowImageMinimum]: '小于镜像要求的最小系统盘',
   [FailureCode.ExtensionUnknown]: '未知扩展',
   [FailureCode.ExtensionNotEnabled]: '服务器扩展未启用',
@@ -86,7 +81,7 @@ const FAILURE_CODE_ZH: Partial<Record<string, string>> = {
   [FailureCode.InstanceBusy]: '实例忙碌，请稍后重试',
   [FailureCode.PreflightCleanupFailed]: '预检清理失败',
   [FailureCode.PreflightFailed]: '预检失败',
-  [FailureCode.GrantRevocationBlocked]: '授权回收被阻塞',
+  [FailureCode.GrantRevocationBlocked]: '仍有资源在使用，暂时无法收回授权',
   [FailureCode.PermissionDenied]: '权限不足',
   [FailureCode.NotFound]: '资源不存在',
   [FailureCode.InvalidInput]: '参数无效',
@@ -115,10 +110,6 @@ export function sshStatusLabel(status: ContainerSshStatus | string): string {
   return labelOrRaw(SSH_STATUS_ZH, status);
 }
 
-export function powerIntentLabel(intent: ContainerPowerIntent | string): string {
-  return labelOrRaw(POWER_INTENT_ZH, intent);
-}
-
 export function serverStatusLabel(status: ServerStatus | string): string {
   return labelOrRaw(SERVER_STATUS_ZH, status);
 }
@@ -130,19 +121,19 @@ export function failureCodeLabel(code: string | null | undefined): string | null
 
 export function volumeAttentionHint(failureCode: string | null | undefined): string {
   if (failureCode === FailureCode.VolumeShrinkBelowUsage) {
-    return '缩容失败：目标容量小于已用量。期望容量已恢复为当前容量，不会自动重试。请查看操作历史。';
+    return '缩容失败：目标容量小于已用量。目标容量已恢复为当前容量，不会自动重试。请查看操作历史。';
   }
   if (failureCode === FailureCode.VolumeUsageUnknown) {
-    return '缩容失败：已用量未知。期望容量已恢复为当前容量，不会自动重试。请查看操作历史。';
+    return '缩容失败：已用量未知。目标容量已恢复为当前容量，不会自动重试。请查看操作历史。';
   }
   const codeHint = failureCodeLabel(failureCode);
   if (codeHint && codeHint !== failureCode) {
-    return `收敛失败：${codeHint}。可重试操作或联系管理员。`;
+    return `操作失败：${codeHint}。可重试或联系管理员。`;
   }
   if (failureCode) {
-    return `收敛失败（${failureCode}）。可重试操作或联系管理员。`;
+    return `操作失败（${failureCode}）。可重试或联系管理员。`;
   }
-  return '收敛失败，请查看失败码后重试，或联系管理员。';
+  return '操作失败，请查看操作记录后重试，或联系管理员。';
 }
 
 export function containerActionSubmittedTitle(

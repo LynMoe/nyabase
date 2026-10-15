@@ -26,7 +26,6 @@ import { useAuthStore } from '../store/auth.js';
 import { Alert, AlertDescription } from '../components/ui/alert.js';
 import { Button } from '../components/ui/button.js';
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '../components/ui/dialog.js';
-import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '../components/ui/tooltip.js';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '../components/ui/tabs.js';
 import { StatusBadge } from '../components/layout/status-badge.js';
 import { ConfirmDialog } from '../components/layout/confirm-dialog.js';
@@ -318,16 +317,7 @@ function ContainerDetailContent({
         title={
           c ? (
             <span className="inline-flex flex-wrap items-center gap-2">
-              <TooltipProvider delayDuration={200}>
-                <Tooltip>
-                  <TooltipTrigger asChild>
-                    <span className="cursor-help underline decoration-dashed underline-offset-4">{c.name}</span>
-                  </TooltipTrigger>
-                  <TooltipContent className="max-w-md">
-                    <p className="break-all">实例名 {c.instanceName ?? '等待收敛'}</p>
-                  </TooltipContent>
-                </Tooltip>
-              </TooltipProvider>
+              <span>{c.name}</span>
               <StatusBadge
                 label={containerStatusLabel(c.actual.status)}
                 raw={c.actual.status}
@@ -348,7 +338,7 @@ function ContainerDetailContent({
         description={c ? c.serverName : undefined}
         crumbs={[
           admin
-            ? { label: '容器管理', to: '/manage/containers' }
+            ? { label: '全部容器', to: '/manage/containers' }
             : { label: '容器', to: '/containers' },
           { label: c?.name ?? '…' },
         ]}
@@ -357,14 +347,12 @@ function ContainerDetailContent({
             <Button
               type="button"
               size="sm"
-              variant="outline"
-              className="h-9 w-9 px-0"
-              aria-label="意图历史"
-              title="意图历史"
+              variant="ghost"
+              className="h-9"
               data-testid="open-intent-history"
               onClick={() => setIntentsOpen(true)}
             >
-              <History className="h-4 w-4" />
+              <History className="h-4 w-4" />操作记录
             </Button>
             <ContainerActionBar
               container={c}
@@ -455,12 +443,12 @@ function ContainerDetailContent({
             <Dialog open={intentsOpen} onOpenChange={setIntentsOpen}>
               <DialogContent>
                 <DialogHeader>
-                  <DialogTitle>意图历史</DialogTitle>
+                  <DialogTitle>操作记录</DialogTitle>
                 </DialogHeader>
                 <QueryView
                   query={intentsQuery}
-                  resourceName="意图历史"
-                  loadingLabel="加载意图历史..."
+                  resourceName="操作记录"
+                  loadingLabel="加载操作记录..."
                 >
                   {(page) => (
                     <IntentsPanel

@@ -122,10 +122,9 @@ export default function OpsPage() {
 
   return (
     <Page testId="ops-page">
-      <PageHeader title="运维" />
+      <PageHeader title="操作记录" description="控制面对容器、存储、服务器等资源发起的所有异步操作。" />
 
       <SectionCard
-        title="意图"
         toolbar={
           <div className="flex flex-wrap items-center gap-2">
             <div className="flex flex-wrap rounded-md bg-muted p-1">
@@ -146,7 +145,7 @@ export default function OpsPage() {
               value={kind ?? ALL}
               onValueChange={(value) => setKind(value === ALL ? undefined : value as IntentKind)}
             >
-              <SelectTrigger className="h-9 w-[160px]" aria-label="意图类型">
+              <SelectTrigger className="h-9 w-[160px]" aria-label="操作类型">
                 <SelectValue placeholder="全部类型" />
               </SelectTrigger>
               <SelectContent>
@@ -190,14 +189,14 @@ export default function OpsPage() {
         }
         flush
       >
-        <QueryView query={intentsQuery} resourceName="意图" loadingLabel="加载意图...">
+        <QueryView query={intentsQuery} resourceName="操作记录" loadingLabel="加载操作记录...">
           {(data) => {
             const items = data.pages.flatMap((page) => page.items);
             if (items.length === 0) {
               return (
                 <div className="flex flex-col items-center gap-2 px-6 py-12 text-center">
                   <Activity className="h-10 w-10 text-muted-foreground/40" />
-                  <p className="text-sm font-medium">暂无意图。</p>
+                  <p className="text-sm font-medium">暂无操作记录。</p>
                 </div>
               );
             }

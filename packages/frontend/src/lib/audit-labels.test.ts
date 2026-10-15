@@ -10,7 +10,7 @@ describe('audit labels', () => {
     expect(auditResourceTypeLabel('ip_pool')).toBe('IP 池');
     expect(auditResourceTypeLabel('http_proxy_binding')).toBe('HTTP 发布');
     expect(auditResourceTypeLabel('image')).toBe('镜像');
-    expect(auditResourceTypeLabel('intent')).toBe('意图');
+    expect(auditResourceTypeLabel('intent')).toBe('操作');
     expect(auditResourceTypeLabel('datadir')).toBe('datadir');
     expect(auditResourceTypeLabel('mount_source')).toBe('mount_source');
   });

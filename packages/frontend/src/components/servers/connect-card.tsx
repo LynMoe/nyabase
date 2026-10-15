@@ -60,7 +60,7 @@ export function ConnectCard({
                 placeholder="粘贴 Incus trust token"
               />
             </FormField>
-            <FormField id="server-cert-fingerprint" label="期望服务端证书指纹">
+            <FormField id="server-cert-fingerprint" label="服务端证书指纹（用于校验）">
               <Input
                 id="server-cert-fingerprint"
                 className="font-mono"

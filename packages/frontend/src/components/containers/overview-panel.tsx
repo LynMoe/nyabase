@@ -1,6 +1,6 @@
-import { useState, type ReactNode } from 'react';
+import { useState } from 'react';
 import { Link } from '@tanstack/react-router';
-import { Copy, Info as InfoIcon, KeyRound, Pencil, Terminal } from 'lucide-react';
+import { ChartLine, Copy, FileCode, KeyRound, Pencil } from 'lucide-react';
 import {
   formatSshProxyJumpLogin,
   type ContainerDto,
@@ -9,16 +9,17 @@ import {
   type PatchContainerLimitsRequest,
 } from '@nyabase/common';
 import { Button } from '../ui/button.js';
-import { Dialog, DialogContent, DialogHeader, DialogTitle } from '../ui/dialog.js';
-import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '../ui/tooltip.js';
-import { Separator } from '../ui/separator.js';
+import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '../ui/dialog.js';
+import { Hint } from '../ui/hint.js';
 import { SectionCard } from '../layout/section-card.js';
+import { Field, FieldGrid } from '../layout/field.js';
+import { StatusBadge } from '../layout/status-badge.js';
 import { TechnicalId } from '../refs/technical-id.js';
 import { usePublicSettings } from '../../hooks/use-public-settings.js';
 import { toast } from '../../hooks/use-toast.js';
 import { copyOneTimeSecret } from '../../lib/one-time-secret.js';
-import { approxGibHint, formatBytesCompact, formatCpu, formatRate } from '../../lib/utils.js';
-import { powerIntentLabel } from '../../lib/status-labels.js';
+import { formatBytesCompact, formatCpu, formatRate } from '../../lib/utils.js';
+import { sshStatusLabel } from '../../lib/status-labels.js';
 import { useAuthStore } from '../../store/auth.js';
 import { ExtensionSlots } from '../../extensions/slots.js';
 import { LimitsDialog } from './spec-panel.js';
@@ -51,7 +52,7 @@ export function OverviewPanel({
   occupancyDenied?: boolean;
 }) {
   const [limitsOpen, setLimitsOpen] = useState(false);
-  const [sshOpen, setSshOpen] = useState(false);
+  const [configOpen, setConfigOpen] = useState(false);
   const { settings } = usePublicSettings();
   const authUser = useAuthStore((state) => state.user);
   const username = container.ownerName ?? authUser?.username ?? '<username>';
@@ -91,24 +92,85 @@ export function OverviewPanel({
       variant: ok ? 'default' : 'destructive',
     });
   };
+  const sshReady = container.ssh.ready;
+  const repairDisabled = repairPending || container.lifecyclePhase !== 'active';
 
-  const gpuUsed = occupancy?.container.gpu.usedBytes ?? null;
-  const gpuText = occupancy && (occupancy.container.gpu.pciAddresses.length > 0 || gpuUsed !== null) && gpuUsed !== null
+  const usage = occupancy?.container;
+  const gpuUsed = usage?.gpu.usedBytes ?? null;
+  const gpuText = usage && (usage.gpu.pciAddresses.length > 0 || gpuUsed !== null) && gpuUsed !== null
     ? formatBytesCompact(gpuUsed)
     : null;
+  const usagePath = admin ? '/manage/containers/$containerId/usage' : '/containers/$containerId/usage';
+
   return (
-    <div data-testid="container-overview">
-      <SectionCard title="容器信息" testId="ssh-routed-instance-identity">
+    <div className="space-y-4" data-testid="container-overview">
+      <SectionCard
+        title="SSH 登录"
+        testId="ssh-routed-instance-identity"
+        actions={(
+          <StatusBadge
+            label={sshStatusLabel(container.ssh.status)}
+            raw={container.ssh.status}
+            pending={false}
+            variant={sshReady ? 'success' : container.ssh.status === 'error' ? 'destructive' : 'secondary'}
+          />
+        )}
+      >
         <div className="space-y-4">
-          <InfoCategory
-            title="规格"
-            actions={
-              <CategoryButton onClick={() => setLimitsOpen(true)} testId="edit-container-spec">
-                <Pencil />编辑
-              </CategoryButton>
-            }
-          >
-            <Info
+          {jumpCommand ? (
+            <div className="flex items-stretch gap-2">
+              <pre
+                className="min-w-0 flex-1 overflow-x-auto whitespace-pre rounded-md border bg-muted/50 px-3 py-2 font-mono text-sm"
+                data-testid="ssh-jump-command"
+              >
+                {jumpCommand}
+              </pre>
+              <Button
+                variant="outline"
+                className="h-auto shrink-0"
+                onClick={() => { void copyText(jumpCommand, '登录命令已复制'); }}
+                data-testid="open-ssh-login"
+              >
+                <Copy className="h-4 w-4" />复制
+              </Button>
+            </div>
+          ) : (
+            <p className="text-sm text-muted-foreground">
+              {!proxyHost ? '管理员尚未配置 SSH 代理的公网地址，暂时无法生成登录命令。' : '容器还没有分配 IP，启动后即可登录。'}
+            </p>
+          )}
+          <FieldGrid>
+            <Field label="容器 IP（内网，经跳板机访问）" value={routedIp} mono />
+            <Field label="登录用户" value={container.ssh.loginUser} mono />
+          </FieldGrid>
+          {container.ssh.lastError ? <p className="break-all text-xs text-destructive">{container.ssh.lastError}</p> : null}
+          <div className="flex flex-wrap gap-2">
+            <Button size="sm" variant="ghost" disabled={!configSnippet} onClick={() => setConfigOpen(true)}>
+              <FileCode className="h-4 w-4" />~/.ssh/config 片段
+            </Button>
+            <Hint
+              content={repairDisabled && !repairPending ? '容器处于创建或删除过程中，暂时无法修复。' : '重新下发你的 SSH 公钥并检查 sshd，适用于登录被拒绝时。'}
+              disabled={repairDisabled}
+            >
+              <Button size="sm" variant="ghost" onClick={onRepairSsh} disabled={repairDisabled} data-testid="repair-ssh">
+                <KeyRound className="h-4 w-4" />{repairPending ? '修复中…' : '修复 SSH'}
+              </Button>
+            </Hint>
+          </div>
+        </div>
+      </SectionCard>
+
+      <div className="grid items-start gap-4 lg:grid-cols-2">
+        <SectionCard
+          title="规格"
+          actions={(
+            <Button size="sm" variant="outline" onClick={() => setLimitsOpen(true)} data-testid="edit-container-spec">
+              <Pencil className="h-4 w-4" />编辑
+            </Button>
+          )}
+        >
+          <FieldGrid>
+            <Field
               label="镜像"
               value={container.imageFingerprint
                 ? (
@@ -120,118 +182,56 @@ export function OverviewPanel({
                     visible={container.imageName?.trim() || undefined}
                   />
                 )
-                : (container.imageName ?? '尚未收敛')}
+                : (container.imageName ?? '同步中')}
             />
-            <Info label="CPU" value={formatCpu(container.cpuMillis)} />
-            <Info label="内存" value={approxGibHint(container.memBytes).replace(/^约 /, '')} />
-            <Info label="期望电源" value={powerIntentLabel(container.powerIntent)} title={container.powerIntent} />
+            <Field label="CPU" value={formatCpu(container.cpuMillis)} />
+            <Field label="内存" value={formatBytesCompact(container.memBytes)} />
+            <Field label="系统盘" value={formatBytesCompact(container.rootSizeBytes)} />
+            <Field label="实例名" value={container.instanceName ?? '创建中'} mono />
             <ExtensionSlots
               area="container.overview"
               ctx={{ value: container.extensions, serverId: container.serverId, admin }}
             />
-          </InfoCategory>
-          <Separator />
-          <InfoCategory
-            title="占用"
-            actions={(
-              <Button asChild variant="ghost" size="sm" className="h-6 gap-1 px-1.5 text-xs">
-                <Link
-                  to={admin ? '/manage/containers/$containerId/usage' : '/containers/$containerId/usage'}
-                  params={{ containerId: container.id }}
-                >
-                  使用情况
-                </Link>
-              </Button>
-            )}
-          >
-            {occupancyDenied ? <p className="text-xs text-muted-foreground">没有查看指标的权限</p> : (
-              <>
-                {occupancy?.stale ? <p className="text-xs text-muted-foreground">样本偏旧</p> : null}
-                <Info label="CPU" value={occupancy ? `${occupancy.container.cpu.usageCores?.toFixed(1) ?? '—'} 核` : '—'} />
-                <Info label="内存" value={occupancy ? (occupancy.container.memory.usedBytes === null ? '—' : formatBytesCompact(occupancy.container.memory.usedBytes)) : '—'} />
-                <Info label="磁盘" value={occupancy ? (occupancy.container.disk.usedBytes === null ? '—' : formatBytesCompact(occupancy.container.disk.usedBytes)) : '—'} />
-                <Info label="网络" value={occupancy ? `↓ ${occupancy.container.network.rxBytesPerSec === null ? '—' : formatRate(occupancy.container.network.rxBytesPerSec)} ↑ ${occupancy.container.network.txBytesPerSec === null ? '—' : formatRate(occupancy.container.network.txBytesPerSec)}` : '—'} />
-                {gpuText ? <Info label="显存" value={gpuText} /> : null}
-              </>
-            )}
-          </InfoCategory>
-          <Separator />
-          <InfoCategory
-            title="登录"
-            actions={
-              <>
-                <CategoryButton onClick={() => setSshOpen(true)} testId="open-ssh-login">
-                  <Terminal />登录命令
-                </CategoryButton>
-                <CategoryButton
-                  onClick={onRepairSsh}
-                  disabled={repairPending || container.lifecyclePhase !== 'active'}
-                  testId="repair-ssh"
-                >
-                  <KeyRound />
-                  {repairPending ? '修复中…' : '修复'}
-                </CategoryButton>
-              </>
-            }
-          >
-            <Info
-              label="容器 IP"
-              value={
-                <span className="inline-flex items-center gap-1">
-                  <span className="font-mono">{container.routedIp ?? '等待容器 IP'}</span>
-                  <TooltipProvider delayDuration={200}>
-                    <Tooltip>
-                      <TooltipTrigger asChild>
-                        <button
-                          type="button"
-                          className="inline-flex size-4 items-center justify-center p-0 leading-none text-muted-foreground"
-                          aria-label="内网 IP 说明"
-                        >
-                          <InfoIcon className="size-3.5" />
-                        </button>
-                      </TooltipTrigger>
-                      <TooltipContent>这是内网 IP，需要通过跳板机连接。</TooltipContent>
-                    </Tooltip>
-                  </TooltipProvider>
-                </span>
-              }
-            />
-            <Info label="登录用户" value={container.ssh.loginUser} mono />
-          </InfoCategory>
-          {container.ssh.lastError ? <p className="break-all text-xs text-destructive">{container.ssh.lastError}</p> : null}
-        </div>
-      </SectionCard>
-      <Dialog open={sshOpen} onOpenChange={setSshOpen}>
+          </FieldGrid>
+        </SectionCard>
+
+        <SectionCard
+          title="实时占用"
+          description={occupancy?.stale ? '数据可能已过时' : undefined}
+          actions={(
+            <Button asChild variant="ghost" size="sm">
+              <Link to={usagePath} params={{ containerId: container.id }}>
+                <ChartLine className="h-4 w-4" />图表
+              </Link>
+            </Button>
+          )}
+        >
+          {occupancyDenied ? <p className="text-sm text-muted-foreground">没有查看指标的权限</p> : (
+            <FieldGrid>
+              <Field label="CPU" value={usage?.cpu.usageCores == null ? null : `${usage.cpu.usageCores.toFixed(1)} 核`} />
+              <Field label="内存" value={usage?.memory.usedBytes == null ? null : formatBytesCompact(usage.memory.usedBytes)} />
+              <Field label="磁盘" value={usage?.disk.usedBytes == null ? null : formatBytesCompact(usage.disk.usedBytes)} />
+              <Field label="网络 ↓ / ↑" value={usage ? `${rate(usage.network.rxBytesPerSec)} / ${rate(usage.network.txBytesPerSec)}` : null} />
+              {gpuText ? <Field label="显存" value={gpuText} /> : null}
+            </FieldGrid>
+          )}
+        </SectionCard>
+      </div>
+
+      <Dialog open={configOpen} onOpenChange={setConfigOpen}>
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>SSH 登录</DialogTitle>
+            <DialogTitle>~/.ssh/config 片段</DialogTitle>
+            <DialogDescription>加入本机 SSH 配置后，可以直接 <code className="font-mono">ssh {container.name}</code>。</DialogDescription>
           </DialogHeader>
-          {!proxyHost ? (
-            <p className="text-sm text-muted-foreground">管理员尚未配置 SSH 代理公网地址</p>
-          ) : !routedIp ? (
-            <p className="text-sm text-muted-foreground">等待容器地址</p>
-          ) : (
-            <div className="space-y-4">
-              <div className="space-y-1">
-                <div className="flex items-center justify-between gap-2">
-                  <p className="text-sm font-medium">Jump 命令</p>
-                  <Button size="sm" variant="outline" onClick={() => { void copyText(jumpCommand!, 'Jump 命令已复制'); }}>
-                    <Copy className="h-3.5 w-3.5" />复制
-                  </Button>
-                </div>
-                <pre className="overflow-x-auto whitespace-pre-wrap break-all rounded-md border bg-muted/40 px-2 py-1.5 font-mono text-xs" data-testid="ssh-jump-command">{jumpCommand}</pre>
-              </div>
-              <div className="space-y-1">
-                <div className="flex items-center justify-between gap-2">
-                  <p className="text-sm font-medium">~/.ssh/config 片段</p>
-                  <Button size="sm" variant="outline" onClick={() => { void copyText(configSnippet!, 'SSH 配置已复制'); }}>
-                    <Copy className="h-3.5 w-3.5" />复制
-                  </Button>
-                </div>
-                <pre className="overflow-x-auto rounded-md border bg-muted/40 px-2 py-1.5 font-mono text-xs" data-testid="ssh-jump-config">{configSnippet}</pre>
-              </div>
+          {configSnippet ? (
+            <div className="space-y-3">
+              <pre className="overflow-x-auto rounded-md border bg-muted/50 px-3 py-2 font-mono text-xs" data-testid="ssh-jump-config">{configSnippet}</pre>
+              <Button variant="outline" onClick={() => { void copyText(configSnippet, 'SSH 配置已复制'); }}>
+                <Copy className="h-4 w-4" />复制
+              </Button>
             </div>
-          )}
+          ) : null}
         </DialogContent>
       </Dialog>
       {limitsOpen ? (
@@ -251,73 +251,6 @@ export function OverviewPanel({
   );
 }
 
-function InfoCategory({
-  title,
-  actions,
-  children,
-}: {
-  title: string;
-  actions?: ReactNode;
-  children: ReactNode;
-}) {
-  return (
-    <section className="space-y-3">
-      <div className="flex flex-wrap items-center gap-1">
-        <h4 className="mr-1 text-sm font-medium">{title}</h4>
-        {actions}
-      </div>
-      <div className="flex flex-wrap gap-x-6 gap-y-3">{children}</div>
-    </section>
-  );
-}
-
-function CategoryButton({
-  children,
-  onClick,
-  disabled,
-  testId,
-}: {
-  children: ReactNode;
-  onClick: () => void;
-  disabled?: boolean;
-  testId?: string;
-}) {
-  return (
-    <Button
-      type="button"
-      variant="ghost"
-      size="sm"
-      className="h-6 gap-1 px-1.5 text-xs text-muted-foreground [&_svg]:size-3"
-      onClick={onClick}
-      disabled={disabled}
-      data-testid={testId}
-    >
-      {children}
-    </Button>
-  );
-}
-
-export function Info({
-  label,
-  value,
-  mono = false,
-  title,
-  className,
-}: {
-  label: string;
-  value: ReactNode;
-  mono?: boolean;
-  title?: string;
-  className?: string;
-}) {
-  return (
-    <div className={className ? `shrink-0 ${className}` : 'shrink-0'}>
-      <p className="text-xs leading-4 text-muted-foreground">{label}</p>
-      <div className="flex h-5 items-center gap-1 text-sm leading-5" title={title}>
-        {typeof value === 'string' ? (
-          <span className={mono ? 'font-mono' : undefined}>{value}</span>
-        ) : value}
-      </div>
-    </div>
-  );
+function rate(value: number | null): string {
+  return value === null ? '—' : formatRate(value);
 }

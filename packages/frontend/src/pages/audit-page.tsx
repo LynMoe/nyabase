@@ -37,7 +37,13 @@ import { cn } from '../lib/utils.js';
 import { queryPollInterval } from '../lib/query-lifecycle.js';
 import { queryKeys } from '../lib/query-keys.js';
 import { errorMessage } from '../lib/api-error.js';
-import { auditActionLabel, auditResourceTypeLabel } from '../lib/audit-labels.js';
+import {
+  auditActionLabel,
+  auditActionOptions,
+  auditResourceTypeLabel,
+  auditResourceTypeOptions,
+} from '../lib/audit-labels.js';
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '../components/ui/select.js';
 
 const PAGE_SIZES = [25, 50, 100] as const;
 type AuditPageSize = (typeof PAGE_SIZES)[number];
@@ -52,14 +58,19 @@ function auditActionTone(action: string): string {
 }
 
 export default function AuditPage() {
-  const { page, pageSize } = auditRouteApi.useSearch();
+  const { page, pageSize, action, targetType } = auditRouteApi.useSearch();
   const navigate = useNavigate({ from: '/audit/' });
   const [detailId, setDetailId] = useState<string | null>(null);
   const offset = page * pageSize;
 
   const auditQuery = useQuery({
-    queryKey: queryKeys.audit.list(pageSize, offset),
-    queryFn: () => api.get<AuditListResponse>(`/audit?limit=${pageSize}&offset=${offset}`),
+    queryKey: queryKeys.audit.list(pageSize, offset, { action, targetType }),
+    queryFn: () => {
+      const params = new URLSearchParams({ limit: String(pageSize), offset: String(offset) });
+      if (action) params.set('action', action);
+      if (targetType) params.set('targetType', targetType);
+      return api.get<AuditListResponse>(`/audit?${params.toString()}`);
+    },
     refetchInterval: (query) => queryPollInterval(query.state, { activeIntervalMs: 30_000 }),
   });
   const { data, isFetching, refetch } = auditQuery;
@@ -87,8 +98,12 @@ export default function AuditPage() {
   const dialogLog = detailLog ?? selectedLog;
 
   const setSearch = (next: { page: number; pageSize: AuditPageSize }) => {
-    void navigate({ search: next });
+    void navigate({ search: (prev) => ({ ...prev, ...next }) });
   };
+  const setFilter = (next: { action?: string; targetType?: string }) => {
+    void navigate({ search: (prev) => ({ ...prev, ...next, page: 0 }) });
+  };
+  const filtered = Boolean(action || targetType);
 
   return (
     <Page>
@@ -96,7 +111,7 @@ export default function AuditPage() {
         title="审计日志"
         description={data ? `共 ${total} 条，当前显示 ${currentStart}-${currentEnd}` : '审计记录数量尚未加载'}
         actions={
-          <Button variant="ghost" size="icon" className="h-8 w-8 text-muted-foreground" onClick={() => refetch()} disabled={isFetching}>
+          <Button variant="outline" size="icon" aria-label="刷新审计日志" onClick={() => refetch()} disabled={isFetching}>
             <RefreshCw className={cn('h-4 w-4', isFetching && 'animate-spin')} />
           </Button>
         }
@@ -111,11 +126,36 @@ export default function AuditPage() {
             {[1, 2, 3].map((i) => <div key={i} className="h-14 bg-muted rounded-lg animate-pulse" />)}
           </div>
         }
-        showEmpty={logs.length === 0}
+        showEmpty={logs.length === 0 && !filtered}
         empty={<EmptyState title="暂无审计记录" />}
       >
         {(list) => (
-          <SectionCard flush>
+          <SectionCard
+            flush
+            toolbar={(
+              <div className="flex flex-wrap items-center gap-2">
+                <FilterSelect
+                  label="操作"
+                  allLabel="全部操作"
+                  value={action}
+                  options={auditActionOptions()}
+                  onChange={(value) => setFilter({ action: value })}
+                />
+                <FilterSelect
+                  label="对象类型"
+                  allLabel="全部对象"
+                  value={targetType}
+                  options={auditResourceTypeOptions()}
+                  onChange={(value) => setFilter({ targetType: value })}
+                />
+                {filtered ? (
+                  <Button variant="ghost" size="sm" onClick={() => setFilter({ action: undefined, targetType: undefined })}>
+                    清除筛选
+                  </Button>
+                ) : null}
+              </div>
+            )}
+          >
             <Table className="min-w-[760px]">
               <TableHeader>
                 <TableRow>
@@ -127,6 +167,11 @@ export default function AuditPage() {
                 </TableRow>
               </TableHeader>
               <TableBody>
+                {list.items.length === 0 ? (
+                  <TableRow>
+                    <TableCell colSpan={5} className="py-8 text-center text-muted-foreground">没有符合条件的记录</TableCell>
+                  </TableRow>
+                ) : null}
                 {list.items.map((log) => (
                   <TableRow key={log.id} className="hover:bg-accent/50">
                     <TableCell className="text-muted-foreground/70 text-xs whitespace-nowrap">
@@ -406,4 +451,32 @@ function shortId(id: string): string {
   return id.slice(0, 8);
 }
 
+const ALL = '__all__';
 
+function FilterSelect({
+  label,
+  allLabel,
+  value,
+  options,
+  onChange,
+}: {
+  label: string;
+  allLabel: string;
+  value: string | undefined;
+  options: Array<[string, string]>;
+  onChange: (value: string | undefined) => void;
+}) {
+  return (
+    <Select value={value ?? ALL} onValueChange={(next) => onChange(next === ALL ? undefined : next)}>
+      <SelectTrigger className="h-9 w-full sm:w-[11rem]" aria-label={label}>
+        <SelectValue placeholder={allLabel} />
+      </SelectTrigger>
+      <SelectContent>
+        <SelectItem value={ALL}>{allLabel}</SelectItem>
+        {options.map(([optionValue, optionLabel]) => (
+          <SelectItem key={optionValue} value={optionValue}>{optionLabel}</SelectItem>
+        ))}
+      </SelectContent>
+    </Select>
+  );
+}

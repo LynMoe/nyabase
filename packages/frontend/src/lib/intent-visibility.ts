@@ -93,7 +93,7 @@ export async function waitForResourceIntent(
     label: '数据卷操作',
     onTimeout: async () => lookupLatestIntentFailure(listPath),
   });
-  if (!latest) throw new Error('操作未返回意图结果');
+  if (!latest) throw new Error('操作没有返回结果');
   return latest;
 }
 

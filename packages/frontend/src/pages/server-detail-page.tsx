@@ -1,7 +1,7 @@
 import { useEffect, useState, type ReactNode } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { getRouteApi, Link, useNavigate } from '@tanstack/react-router';
-import { Activity, Cpu, Gauge, HardDrive, History, KeyRound, ListChecks, Trash2 } from 'lucide-react';
+import { Activity, Cpu, Gauge, HardDrive, History, KeyRound, ListChecks, MoreHorizontal, Trash2 } from 'lucide-react';
 import {
   Capability,
   zNodeMetricsPatchConfig,
@@ -19,6 +19,12 @@ import { api } from '../lib/api.js';
 import { errorMessage } from '../lib/api-error.js';
 import { Badge } from '../components/ui/badge.js';
 import { Button } from '../components/ui/button.js';
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from '../components/ui/dropdown-menu.js';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '../components/ui/card.js';
 import { ConfirmDialog } from '../components/layout/confirm-dialog.js';
 import { Page } from '../components/layout/page.js';
@@ -162,7 +168,7 @@ export default function ServerDetailPage() {
       return api.post<IntentAcceptedDto>(`/admin/servers/${id}/connect`, body);
     },
     onSuccess: (intent) => {
-      toast({ title: '连接意图已创建', description: `意图 ${intent.intentId.slice(0, 8)} 正在收敛。` });
+      toast({ title: '已开始连接服务器', description: `操作 ${intent.intentId.slice(0, 8)} 正在执行。` });
       setTrustToken('');
       invalidateServer();
     },
@@ -179,7 +185,7 @@ export default function ServerDetailPage() {
       return api.post<IntentAcceptedDto>(`/admin/servers/${id}/preflight`, body);
     },
     onSuccess: (intent) => {
-      toast({ title: '前置检查已开始', description: `意图 ${intent.intentId.slice(0, 8)} 正在执行。` });
+      toast({ title: '前置检查已开始', description: `操作 ${intent.intentId.slice(0, 8)} 正在执行。` });
       invalidateServer();
     },
     onError: (error) => toast({ title: '前置检查失败', description: errorMessage(error), variant: 'destructive' }),
@@ -273,23 +279,32 @@ export default function ServerDetailPage() {
   return (
     <Page testId="server-connect-preflight">
       <PageHeader
-        title={serverQuery.data?.name ?? '服务器'}
+        title={serverQuery.data ? (
+          <span className="inline-flex flex-wrap items-center gap-2">
+            <span>{serverQuery.data.name}</span>
+            <Badge variant={serverQuery.data.status === 'online' ? 'success' : 'secondary'} title={serverQuery.data.status}>
+              {serverStatusLabel(serverQuery.data.status)}
+            </Badge>
+          </span>
+        ) : '服务器'}
         crumbs={[
           { label: '服务器', to: '/servers' },
           { label: serverQuery.data?.name ?? '…' },
         ]}
         actions={
-          serverQuery.data ? (
-            <>
-              <Badge variant={serverQuery.data.status === 'online' ? 'success' : 'secondary'}>
-                {serverStatusLabel(serverQuery.data.status)}
-              </Badge>
-              {canManageServers ? (
-                <Button variant="destructive" onClick={() => setDeleteOpen(true)}>
-                  <Trash2 className="h-4 w-4" />删除服务器
+          serverQuery.data && canManageServers ? (
+            <DropdownMenu modal={false}>
+              <DropdownMenuTrigger asChild>
+                <Button variant="outline" size="icon" aria-label="更多操作">
+                  <MoreHorizontal className="h-4 w-4" />
                 </Button>
-              ) : null}
-            </>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="end">
+                <DropdownMenuItem className="text-destructive focus:text-destructive" onSelect={() => setDeleteOpen(true)}>
+                  <Trash2 className="mr-2 h-4 w-4" />从控制面删除
+                </DropdownMenuItem>
+              </DropdownMenuContent>
+            </DropdownMenu>
           ) : undefined
         }
       />

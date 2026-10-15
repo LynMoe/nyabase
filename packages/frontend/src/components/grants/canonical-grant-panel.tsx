@@ -22,6 +22,7 @@ import { GIB, approxGibHint, formatGibInput, formatVcpuInput } from '../../lib/u
 import { toast } from '../../hooks/use-toast.js';
 import { ConfirmDialog } from '../layout/confirm-dialog.js';
 import { FormField } from '../layout/form-field.js';
+import { SelectField } from '../layout/select-field.js';
 import { isQueryLoading } from '../layout/query-view.js';
 import { SectionCard } from '../layout/section-card.js';
 import { QueryErrorState, QueryLoadingState } from '../query-state.js';
@@ -29,13 +30,6 @@ import { Badge } from '../ui/badge.js';
 import { Button } from '../ui/button.js';
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from '../ui/dialog.js';
 import { Input } from '../ui/input.js';
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from '../ui/select.js';
 import { Switch } from '../ui/switch.js';
 import {
   Table,
@@ -942,39 +936,6 @@ export function toDatetimeLocalValue(date: Date): string {
 
 function defaultExpiryLocal(): string {
   return toDatetimeLocalValue(new Date(Date.now() + 30 * 24 * 60 * 60 * 1000));
-}
-
-function SelectField({
-  id,
-  label,
-  value,
-  onChange,
-  options,
-  disabled = false,
-  placeholder = '请选择',
-}: {
-  id: string;
-  label: string;
-  value: string;
-  onChange: (value: string) => void;
-  options: Array<[string, string]>;
-  disabled?: boolean;
-  placeholder?: string;
-}) {
-  return (
-    <FormField id={id} label={label}>
-      <Select key={value || 'empty'} value={value || undefined} onValueChange={onChange} disabled={disabled}>
-        <SelectTrigger id={id}>
-          <SelectValue placeholder={placeholder} />
-        </SelectTrigger>
-        <SelectContent>
-          {options.map(([optionValue, optionLabel]) => (
-            <SelectItem key={optionValue} value={optionValue}>{optionLabel}</SelectItem>
-          ))}
-        </SelectContent>
-      </Select>
-    </FormField>
-  );
 }
 
 function NumberField({

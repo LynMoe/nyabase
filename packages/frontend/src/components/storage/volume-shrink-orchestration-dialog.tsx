@@ -251,7 +251,7 @@ export function VolumeShrinkOrchestrationDialog({
           {progress && <p className="text-sm text-muted-foreground" data-testid="volume-shrink-progress">{progress}</p>}
           {error && <p className="text-sm text-destructive">{error}</p>}
           {phase === 'remount' && (
-            <p className="text-sm">缩容意图已提交。是否将刚才卸载的挂载点挂回？</p>
+            <p className="text-sm">缩容已提交。是否将刚才卸载的挂载点挂回？</p>
           )}
           {phase === 'failed' && failureStage === 'detach_partial' && (
             <p className="text-sm text-muted-foreground">

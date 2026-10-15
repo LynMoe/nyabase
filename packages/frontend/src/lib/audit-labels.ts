@@ -13,7 +13,7 @@ export const AUDIT_RESOURCE_LABELS: Record<string, string> = {
   ip_pool: 'IP 池',
   http_proxy_binding: 'HTTP 发布',
   http_domain_pool: 'HTTP 域名池',
-  intent: '意图',
+  intent: '操作',
   grant: '授权',
   certificate: '证书',
   system_settings: '系统设置',
@@ -91,6 +91,15 @@ const AUDIT_ACTION_LABELS: Record<string, string> = {
   [AuditAction.DisconnectSshProxySessions]: '断开 SSH 代理会话',
   [AuditAction.RotateSshProxyHostKey]: '轮换 SSH 主机密钥',
 };
+
+/** Filter options for the audit list, in label order. */
+export function auditActionOptions(): Array<[string, string]> {
+  return Object.entries(AUDIT_ACTION_LABELS).sort((a, b) => a[1].localeCompare(b[1], 'zh-CN'));
+}
+
+export function auditResourceTypeOptions(): Array<[string, string]> {
+  return Object.entries(AUDIT_RESOURCE_LABELS);
+}
 
 export function auditActionLabel(action: string): string {
   return AUDIT_ACTION_LABELS[action] ?? action;

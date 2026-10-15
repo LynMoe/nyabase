@@ -9,7 +9,8 @@ export const queryKeys = {
   systemSettings: ['system-settings'] as const,
   catalog: { users: ['catalog', 'users'] as const },
   audit: {
-    list: (pageSize: number, offset: number) => ['audit', pageSize, offset] as const,
+    list: (pageSize: number, offset: number, filter: { action?: string; targetType?: string } = {}) =>
+      ['audit', pageSize, offset, filter.action ?? null, filter.targetType ?? null] as const,
     detail: (id: string) => ['audit-detail', id] as const,
   },
   sshProxy: {

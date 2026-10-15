@@ -75,7 +75,7 @@ export function ImageList({
               <TableCell>
                 {image.fingerprint
                   ? <TechnicalId label="指纹" value={image.fingerprint} kind="fingerprint" />
-                  : <span className="text-sm">尚未收敛</span>}
+                  : <span className="text-sm">同步中</span>}
               </TableCell>
               <TableCell>{image.assignments.length} 台</TableCell>
               <TableCell className="text-right">

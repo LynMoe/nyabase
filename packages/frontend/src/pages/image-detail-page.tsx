@@ -92,7 +92,7 @@ export default function ImageDetailPage() {
     mutationFn: ({ serverId, expectedGeneration }: { serverId: string; expectedGeneration?: number }) =>
       api.put<AssignmentResponse>(`/admin/images/${id}/assignments/${serverId}`, expectedGeneration ? { expectedGeneration } : {}),
     onSuccess: (result) => {
-      toast({ title: '镜像分配意图已创建', description: result.intent ? `意图 ${result.intent.intentId.slice(0, 8)}` : undefined });
+      toast({ title: '已开始分配镜像', description: result.intent ? `操作 ${result.intent.intentId.slice(0, 8)}` : undefined });
       invalidate();
     },
     onError: (error) => toast({ title: '镜像分配失败', description: errorMessage(error), variant: 'destructive' }),
@@ -101,7 +101,7 @@ export default function ImageDetailPage() {
     mutationFn: ({ serverId, generation }: { serverId: string; generation: number }) =>
       api.delete<AssignmentResponse>(`/admin/images/${id}/assignments/${serverId}?expectedGeneration=${generation}`),
     onSuccess: () => {
-      toast({ title: '镜像取消分配意图已创建' });
+      toast({ title: '已开始取消分配镜像' });
       invalidate();
     },
     onError: (error) => toast({ title: '取消分配失败', description: errorMessage(error), variant: 'destructive' }),
@@ -117,7 +117,7 @@ export default function ImageDetailPage() {
   const deleteImage = useMutation({
     mutationFn: () => api.delete<unknown>(`/admin/images/${id}`),
     onSuccess: () => {
-      toast({ title: '镜像移除意图已提交' });
+      toast({ title: '已开始移除镜像' });
       setDeleteOpen(false);
       invalidate();
       void navigate({ to: '/images' });
@@ -189,7 +189,7 @@ export default function ImageDetailPage() {
                       label="指纹"
                       value={loaded.fingerprint
                         ? <TechnicalId label="指纹" value={loaded.fingerprint} kind="fingerprint" />
-                        : '尚未收敛'}
+                        : '同步中'}
                     />
                     <Info
                       label="状态"
@@ -373,7 +373,7 @@ function AssignmentRow({
       <TableCell className="text-right">
         <div className="flex justify-end gap-2">
           <Button size="sm" variant="outline" onClick={onEnsure} disabled={busy}>
-            <RefreshCw className="h-3.5 w-3.5" />重新收敛
+            <RefreshCw className="h-3.5 w-3.5" />重新同步
           </Button>
           <Button size="sm" variant="ghost" onClick={onDelete} disabled={busy}>移除</Button>
         </div>

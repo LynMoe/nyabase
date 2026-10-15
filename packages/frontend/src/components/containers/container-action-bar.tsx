@@ -1,11 +1,20 @@
 import { useState } from 'react';
-import { Play, RotateCw, Square, Trash2 } from 'lucide-react';
+import { MoreHorizontal, Play, RotateCw, Square, Trash2 } from 'lucide-react';
 import type { ContainerAction, ContainerDto } from '@nyabase/common';
 import { ConfirmDialog } from '../layout/confirm-dialog.js';
 import { Button } from '../ui/button.js';
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from '../ui/dropdown-menu.js';
+import { Hint } from '../ui/hint.js';
 
 type PowerAction = Extract<ContainerAction, 'start' | 'stop' | 'restart'>;
 export type ContainerBarAction = PowerAction | 'delete';
+
+const POWER_LABEL: Record<PowerAction, string> = { start: '启动', stop: '停止', restart: '重启' };
 
 export function ContainerActionBar({
   container,
@@ -18,6 +27,7 @@ export function ContainerActionBar({
   layout: 'icons' | 'labeled';
   pending: boolean;
   onAction: (action: ContainerBarAction) => void | Promise<void>;
+  /** Puts 删除 behind a 更多 menu so it is never one stray click away. */
   showDelete?: boolean;
 }) {
   const [confirmAction, setConfirmAction] = useState<'stop' | 'restart' | 'delete' | null>(null);
@@ -29,44 +39,37 @@ export function ContainerActionBar({
     }
     void Promise.resolve(onAction(action)).then(undefined, () => undefined);
   };
+  const deleteAvailability = container.actions.delete;
 
   return (
     <>
-      <div className={layout === 'icons' ? 'contents' : 'flex flex-wrap gap-1'}>
-        <ActionButton
-          action="start"
-          icon={Play}
-          container={container}
-          layout={layout}
-          onClick={() => requestAction('start')}
-          pending={pending}
-        />
-        <ActionButton
-          action="stop"
-          icon={Square}
-          container={container}
-          layout={layout}
-          onClick={() => requestAction('stop')}
-          pending={pending}
-        />
-        <ActionButton
-          action="restart"
-          icon={RotateCw}
-          container={container}
-          layout={layout}
-          onClick={() => requestAction('restart')}
-          pending={pending}
-        />
+      <div className={layout === 'icons' ? 'contents' : 'flex flex-wrap items-center gap-1'}>
+        <ActionButton action="start" icon={Play} container={container} layout={layout} onClick={() => requestAction('start')} pending={pending} />
+        <ActionButton action="stop" icon={Square} container={container} layout={layout} onClick={() => requestAction('stop')} pending={pending} />
+        <ActionButton action="restart" icon={RotateCw} container={container} layout={layout} onClick={() => requestAction('restart')} pending={pending} />
         {showDelete && (
-          <Button
-            size="sm"
-            variant="destructive"
-            disabled={!container.actions.delete.enabled || pending}
-            title={container.actions.delete.message}
-            onClick={() => requestAction('delete')}
-          >
-            <Trash2 className="h-4 w-4" />删除
-          </Button>
+          <DropdownMenu modal={false}>
+            <DropdownMenuTrigger asChild>
+              <Button size="icon" variant="outline" className="h-9 w-9" aria-label="更多操作">
+                <MoreHorizontal className="h-4 w-4" />
+              </Button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="end" className="w-56">
+              <DropdownMenuItem
+                className="text-destructive focus:text-destructive"
+                disabled={!deleteAvailability.enabled || pending}
+                onSelect={() => requestAction('delete')}
+              >
+                <Trash2 className="mr-2 h-4 w-4" />
+                <span className="flex flex-col">
+                  <span>删除容器</span>
+                  {!deleteAvailability.enabled && deleteAvailability.message ? (
+                    <span className="text-xs text-muted-foreground">{deleteAvailability.message}</span>
+                  ) : null}
+                </span>
+              </DropdownMenuItem>
+            </DropdownMenuContent>
+          </DropdownMenu>
         )}
       </div>
       <ConfirmDialog
@@ -124,31 +127,24 @@ function ActionButton({
   pending: boolean;
 }) {
   const availability = container.actions[action];
-  const label = action === 'start' ? '启动' : action === 'stop' ? '停止' : '重启';
+  const label = POWER_LABEL[action];
+  const disabled = !availability.enabled || pending;
+  const reason = availability.enabled ? undefined : availability.message ?? availability.reason;
   if (layout === 'icons') {
     return (
-      <Button
-        size="icon"
-        variant="ghost"
-        aria-label={label}
-        title={availability.enabled ? label : availability.message ?? availability.reason}
-        disabled={!availability.enabled || pending}
-        onClick={onClick}
-      >
-        <Icon className="h-4 w-4" />
-      </Button>
+      <Hint content={reason ?? label} disabled={disabled}>
+        <Button size="icon" variant="ghost" aria-label={label} disabled={disabled} onClick={onClick}>
+          <Icon className="h-4 w-4" />
+        </Button>
+      </Hint>
     );
   }
   return (
-    <Button
-      size="sm"
-      variant="outline"
-      onClick={onClick}
-      disabled={!availability.enabled || pending}
-      title={availability.message ?? availability.reason}
-    >
-      <Icon className="h-4 w-4" />
-      {label}
-    </Button>
+    <Hint content={reason} disabled={disabled}>
+      <Button size="sm" variant="outline" className="h-9" onClick={onClick} disabled={disabled}>
+        <Icon className="h-4 w-4" />
+        {label}
+      </Button>
+    </Hint>
   );
 }

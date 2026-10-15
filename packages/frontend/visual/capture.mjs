@@ -123,7 +123,7 @@ const container = {
   serverId: 'srv-1',
   serverName: 'lab-node-a',
   ownerId: 'user-admin',
-  ownerName: '平台管理员',
+  ownerName: 'admin',
   name: 'dev-workspace',
   instanceName: 'c-dev-workspace',
   imageId: 'img-1',
@@ -379,7 +379,7 @@ function mockApi(urlString, method) {
     p === '/admin/servers/srv-1/extensions/nvidia-gpu/devices'
     || p === '/servers/srv-1/extensions/nvidia-gpu/devices'
   ) {
-    return json({ items: [{ pciAddress: '0000:01:00.0', model: 'RTX 4090' }], enabled: true });
+    return json({ items: [{ pciAddress: '0000:01:00.0', index: 0, model: 'RTX 4090' }], enabled: true });
   }
 
   if (p === '/containers' || p === '/admin/containers') return json([container]);
