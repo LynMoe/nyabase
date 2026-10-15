@@ -1,5 +1,4 @@
 import { useQuery } from '@tanstack/react-query';
-import { Gauge } from 'lucide-react';
 import {
   type ContainerDto,
   type EffectiveAccessDto,
@@ -9,12 +8,9 @@ import {
   type StorageCapacityDto,
   type UserServerDto,
 } from '@nyabase/common';
-import { api } from '../lib/api.js';
-import { EmptyState } from '../components/layout/empty-state.js';
-import { Page } from '../components/layout/page.js';
-import { PageHeader } from '../components/layout/page-header.js';
-import { QueryView } from '../components/layout/query-view.js';
-import { SectionCard } from '../components/layout/section-card.js';
+import { api } from '../../lib/api.js';
+import { QueryView } from '../layout/query-view.js';
+import { SectionCard } from '../layout/section-card.js';
 import {
   Table,
   TableBody,
@@ -22,14 +18,19 @@ import {
   TableHead,
   TableHeader,
   TableRow,
-} from '../components/ui/table.js';
-import { cn } from '../lib/utils.js';
-import { formatQuotaDimension } from '../lib/grant-quota.js';
-import { formatExtensionGrantSummaries } from '../extensions/registry.js';
-import { queryKeys } from '../lib/query-keys.js';
-import { queryPollInterval } from '../lib/query-lifecycle.js';
+} from '../ui/table.js';
+import { cn } from '../../lib/utils.js';
+import { formatQuotaDimension } from '../../lib/grant-quota.js';
+import { formatExtensionGrantSummaries } from '../../extensions/registry.js';
+import { queryKeys } from '../../lib/query-keys.js';
+import { queryPollInterval } from '../../lib/query-lifecycle.js';
 
-export default function QuotaPage() {
+/**
+ * What the signed-in user is granted and how much of it is already allocated.
+ * Allocation is what containers and volumes reserve, not live usage; live
+ * usage is on the 使用情况 page.
+ */
+export function QuotaSummary() {
   const serversQuery = useQuery({
     queryKey: queryKeys.servers.user,
     queryFn: () => api.get<UserServerDto[]>('/servers'),
@@ -52,12 +53,10 @@ export default function QuotaPage() {
   });
 
   return (
-    <Page testId="quota">
-      <PageHeader title="配额" />
-      <QueryView
+    <QueryView
         queries={[accessQuery, serversQuery, containersQuery]}
         resourceNames={['授权', '服务器', '容器']}
-        loadingLabel="加载配额..."
+        loadingLabel="加载额度..."
       >
         {() => (
           <QuotaBody
@@ -69,7 +68,6 @@ export default function QuotaPage() {
           />
         )}
       </QueryView>
-    </Page>
   );
 }
 
@@ -86,24 +84,21 @@ function QuotaBody({
   sharedBackends: EffectiveSharedBackendAccessDto[];
   backends: SharedBackendDto[];
 }) {
-  if (grants.length === 0 && sharedBackends.length === 0) {
-    return (
-      <EmptyState
-        icon={Gauge}
-        title="当前没有任何资源授权。"
-        description="管理员完成服务器或共享存储授权后，额度会显示在这里。"
-      />
-    );
-  }
+  const empty = grants.length === 0 && sharedBackends.length === 0;
   const serverName = new Map(servers.map((server) => [server.id, server.name]));
   return (
-    <div className="space-y-4">
+    <SectionCard
+      title="我的额度"
+      description={empty ? undefined : '已分配 = 容器与数据卷占用的规格，不是实时用量。'}
+      flush={!empty}
+    >
+      {empty ? (
+        <p className="text-sm text-muted-foreground">
+          还没有可用的资源额度。管理员为你分配服务器或共享存储后，额度会显示在这里。
+        </p>
+      ) : null}
       {grants.length > 0 ? (
-        <SectionCard
-          title="服务器"
-          flush
-          testId="quota-servers"
-        >
+        <div data-testid="quota-servers">
           <Table className="min-w-[720px]">
             <TableHeader>
               <TableRow>
@@ -125,19 +120,15 @@ function QuotaBody({
               ))}
             </TableBody>
           </Table>
-        </SectionCard>
+        </div>
       ) : null}
       {sharedBackends.length > 0 ? (
-        <SectionCard
-          title="共享存储"
-          flush
-          testId="quota-shared"
-        >
+        <div data-testid="quota-shared" className={grants.length > 0 ? 'border-t' : undefined}>
           <Table className="min-w-[560px]">
             <TableHeader>
               <TableRow>
-                <TableHead>后端</TableHead>
-                <TableHead>已预订 / 额度</TableHead>
+                <TableHead>共享存储</TableHead>
+                <TableHead>已分配 / 额度</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
@@ -162,9 +153,9 @@ function QuotaBody({
               })}
             </TableBody>
           </Table>
-        </SectionCard>
+        </div>
       ) : null}
-    </div>
+    </SectionCard>
   );
 }
 

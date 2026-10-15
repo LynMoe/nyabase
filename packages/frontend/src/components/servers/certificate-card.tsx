@@ -21,8 +21,7 @@ import { ResourceRef } from '../refs/resource-ref.js';
 import { TechnicalId } from '../refs/technical-id.js';
 
 export function CertificateCard({
-  serverId,
-  serverName,
+  serverNames,
   canViewCertificate,
   canManageCertificates,
   certificateQuery,
@@ -31,8 +30,8 @@ export function CertificateCard({
   onRotateOpenChange,
   onRotate,
 }: {
-  serverId: string;
-  serverName?: string;
+  /** Display names for the trust rows; ids fall back to a resource ref. */
+  serverNames?: ReadonlyMap<string, string>;
   canViewCertificate: boolean;
   canManageCertificates: boolean;
   certificateQuery?: QueryLike<IncusClientCertificateDto>;
@@ -44,7 +43,7 @@ export function CertificateCard({
   const certificate = certificateQuery?.data;
 
   return (
-    <Card data-testid="certificate-rotation">
+    <Card id="client-certificate" className="scroll-mt-6" data-testid="certificate-rotation">
       <CardHeader>
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div>
@@ -86,8 +85,7 @@ export function CertificateCard({
             >
               {(loaded) => (
                 <CertificateDetails
-                  serverId={serverId}
-                  serverName={serverName}
+                  serverNames={serverNames}
                   certificate={loaded}
                   showIntentFailures={canManageCertificates}
                 />
@@ -101,9 +99,9 @@ export function CertificateCard({
           open={rotateOpen}
           onOpenChange={onRotateOpenChange}
           title="轮换 Incus 客户端证书？"
-          description="轮换会生成新的客户端证书收敛意图，各服务器需重新完成信任校验。期间可能短暂影响与 Incus 的互信。"
+          description="会生成一张新的客户端证书，并逐台服务器完成「信任新证书 → 切换 → 撤销旧证书」。期间与 Incus 的连接可能短暂中断。"
           confirmLabel="确认轮换"
-          pendingLabel="确认轮换"
+          pendingLabel="提交中..."
           pending={rotatePending}
           onConfirm={onRotate}
         />
@@ -121,6 +119,16 @@ function InfoRow({ label, value }: { label: string; value: ReactNode }) {
   );
 }
 
+function certificateStateLabel(state: string): string {
+  switch (state) {
+    case CertificateState.Staged: return '轮换中';
+    case CertificateState.Active: return '使用中';
+    case CertificateState.Retired: return '已停用';
+    case CertificateState.Failed: return '失败';
+    default: return state;
+  }
+}
+
 function certificateStateVariant(state: string): 'success' | 'secondary' | 'destructive' | 'warning' {
   if (state === CertificateState.Active) return 'success';
   if (state === CertificateState.Failed) return 'destructive';
@@ -129,13 +137,11 @@ function certificateStateVariant(state: string): 'success' | 'secondary' | 'dest
 }
 
 function CertificateDetails({
-  serverId,
-  serverName,
+  serverNames,
   certificate,
   showIntentFailures,
 }: {
-  serverId: string;
-  serverName?: string;
+  serverNames?: ReadonlyMap<string, string>;
   certificate: IncusClientCertificateDto;
   showIntentFailures: boolean;
 }) {
@@ -148,7 +154,8 @@ function CertificateDetails({
           label="状态"
           value={(
             <StatusBadge
-              label={certificate.state}
+              label={certificateStateLabel(certificate.state)}
+              raw={certificate.state}
               pending={certificateStatePending(certificate.state)}
               variant={certificateStateVariant(certificate.state)}
             />
@@ -178,8 +185,7 @@ function CertificateDetails({
         {certificate.servers.map((trust) => (
           <CertificateTrustWizard
             key={trust.serverId}
-            currentServerId={serverId}
-            currentServerName={serverName}
+            serverName={serverNames?.get(trust.serverId)}
             trust={trust}
           />
         ))}
@@ -189,12 +195,10 @@ function CertificateDetails({
 }
 
 function CertificateTrustWizard({
-  currentServerId,
-  currentServerName,
+  serverName,
   trust,
 }: {
-  currentServerId: string;
-  currentServerName?: string;
+  serverName?: string;
   trust: IncusClientCertificateDto['servers'][number];
 }) {
   const steps = [
@@ -212,7 +216,7 @@ function CertificateTrustWizard({
             <ResourceRef
               kind="server"
               id={trust.serverId}
-              name={trust.serverId === currentServerId ? currentServerName : undefined}
+              name={serverName}
             />
           </p>
           <p className="text-xs text-muted-foreground">{trust.lastError ?? relativeTime(trust.observedAt)}</p>
@@ -221,9 +225,8 @@ function CertificateTrustWizard({
           label={certTrustStateLabel(trust.trustState)}
           pending={certificateTrustPending(trust.trustState)}
           variant={
-            trust.serverId === currentServerId && trust.trustState === CertificateTrustState.Verified
-              ? 'success'
-              : trust.trustState === CertificateTrustState.Revoked
+            trust.trustState === CertificateTrustState.Verified
+              || trust.trustState === CertificateTrustState.Revoked
                 ? 'success'
                 : trust.trustState === CertificateTrustState.CleanupFailed
                   ? 'destructive'

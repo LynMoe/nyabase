@@ -1,6 +1,6 @@
 import { createFileRoute } from '@tanstack/react-router';
-import { Capability } from '@nyabase/common';
-import { RequireCapability } from '../../../components/require-capability.js';
+import { RequireAccess } from '../../../components/require-capability.js';
+import { ACCESS } from '../../../lib/route-access.js';
 import ContainerUsagePage from '../../../pages/container-usage-page.js';
 
 export const Route = createFileRoute('/manage/containers/$containerId_/usage')({
@@ -10,8 +10,8 @@ export const Route = createFileRoute('/manage/containers/$containerId_/usage')({
 function ManageContainerUsageRoute() {
   const { containerId } = Route.useParams();
   return (
-    <RequireCapability capability={Capability.ManageContainersAny}>
+    <RequireAccess rule={ACCESS.manageContainers}>
       <ContainerUsagePage containerId={containerId} admin />
-    </RequireCapability>
+    </RequireAccess>
   );
 }

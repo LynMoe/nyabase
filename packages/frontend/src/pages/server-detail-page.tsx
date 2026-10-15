@@ -5,9 +5,7 @@ import { Activity, Cpu, Gauge, HardDrive, History, KeyRound, ListChecks, Trash2 
 import {
   Capability,
   zNodeMetricsPatchConfig,
-  type CertificateRotationDto,
   type ConnectServerRequest,
-  type IncusClientCertificateDto,
   type IntentAcceptedDto,
   type PatchServerRequest,
   type RunPreflightRequest,
@@ -33,12 +31,9 @@ import { NodeMetricsCard } from '../components/servers/node-metrics-card.js';
 import { ServerMetricsPanel } from '../components/performance/server-metrics-panel.js';
 import { PoolsCard } from '../components/servers/pools-card.js';
 import { ServerStorageTab } from '../components/servers/server-storage-tab.js';
-import { CertificateCard } from '../components/servers/certificate-card.js';
 import { TechnicalId } from '../components/refs/technical-id.js';
 import { preflightStatusLabel, serverStatusLabel } from '../lib/display-labels.js';
 import {
-  certificateStatePending,
-  certificateTrustPending,
   preflightPending,
 } from '../lib/in-progress.js';
 import { queryKeys } from '../lib/query-keys.js';
@@ -88,14 +83,11 @@ export default function ServerDetailPage() {
   const [nodeMetricsCertFingerprint, setNodeMetricsCertFingerprint] = useState('');
   const [nodeMetricsToken, setNodeMetricsToken] = useState('');
   const [clearMetricsOpen, setClearMetricsOpen] = useState(false);
-  const [rotateOpen, setRotateOpen] = useState(false);
   const [deleteOpen, setDeleteOpen] = useState(false);
   const capabilities = useAuthStore((state) => state.user?.capabilities ?? []);
   const canManageStoragePools = capabilities.includes(Capability.ManageStoragePools);
-  const canManageCertificates = capabilities.includes(Capability.ManageCertificates);
   const canManageServers = capabilities.includes(Capability.ManageServers);
   const canViewMetrics = capabilities.includes(Capability.ViewMetricsAll);
-  const canViewCertificate = canManageCertificates || canManageServers;
 
   const selectTab = (next: ServerDetailTab) => {
     void navigate({ search: (prev) => ({ ...prev, tab: next }) });
@@ -142,16 +134,6 @@ export default function ServerDetailPage() {
     refetchInterval: (query) => refetchWhileInProgress(query.state, {
       steadyIntervalMs: false,
       isSettled: (report) => !preflightPending(report.status),
-    }),
-  });
-  const certificateQuery = useQuery({
-    queryKey: queryKeys.certificate,
-    queryFn: () => api.get<IncusClientCertificateDto>('/admin/incus-client-certificate'),
-    enabled: canViewCertificate,
-    refetchInterval: (query) => refetchWhileInProgress(query.state, {
-      steadyIntervalMs: false,
-      isSettled: (certificate) => !certificateStatePending(certificate.state)
-        && certificate.servers.every((trust) => !certificateTrustPending(trust.trustState)),
     }),
   });
   const server = serverQuery.data;
@@ -281,18 +263,6 @@ export default function ServerDetailPage() {
     onError: (error) => toast({ title: '删除服务器失败', description: errorMessage(error), variant: 'destructive' }),
   });
 
-  const rotateCertificate = useMutation({
-    mutationFn: () => api.post<CertificateRotationDto>('/admin/incus-client-certificate/rotate', {
-      expectedGeneration: certificateQuery.data?.generation ?? 0,
-    }),
-    onSuccess: (result) => {
-      setRotateOpen(false);
-      toast({ title: '客户端证书轮换已提交', description: `轮换 ${result.rotationId.slice(0, 8)}：${result.status}` });
-      invalidateServer();
-    },
-    onError: (error) => toast({ title: '证书轮换失败', description: errorMessage(error), variant: 'destructive' }),
-  });
-
   const pools = poolsQuery.data ?? [];
   const preflight = preflightQuery.data;
   const selectedPool = pools.find((pool) => pool.id === selectedPoolId);
@@ -391,17 +361,16 @@ export default function ServerDetailPage() {
                   onExpectedFingerprintChange={setExpectedFingerprint}
                   onConnect={() => connect.mutate()}
                 />
-                <CertificateCard
-                  serverId={id}
-                  serverName={loaded.name}
-                  canViewCertificate={canViewCertificate}
-                  canManageCertificates={canManageCertificates}
-                  certificateQuery={canViewCertificate ? certificateQuery : undefined}
-                  rotatePending={rotateCertificate.isPending}
-                  rotateOpen={rotateOpen}
-                  onRotateOpenChange={setRotateOpen}
-                  onRotate={() => rotateCertificate.mutate()}
-                />
+                <Card>
+                  <CardHeader>
+                    <CardTitle className="text-base">客户端证书</CardTitle>
+                    <CardDescription>
+                      所有服务器共用一张 Incus 客户端证书，在
+                      <Link to="/servers" hash="client-certificate" className="mx-1 underline underline-offset-4">服务器列表</Link>
+                      统一查看与轮换。
+                    </CardDescription>
+                  </CardHeader>
+                </Card>
               </div>
             </TabsContent>
             <TabsContent value="storage" className="space-y-6" data-testid="server-storage-tab">

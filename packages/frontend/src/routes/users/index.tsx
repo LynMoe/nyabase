@@ -1,6 +1,6 @@
 import { createFileRoute, lazyRouteComponent } from '@tanstack/react-router';
-import { Capability } from '@nyabase/common';
-import { RequireAnyCapability } from '../../components/require-capability.js';
+import { RequireAccess } from '../../components/require-capability.js';
+import { ACCESS } from '../../lib/route-access.js';
 
 export const Route = createFileRoute('/users/')({
   component: UsersRoute,
@@ -10,8 +10,8 @@ const LazyUsersPage = lazyRouteComponent(() => import('../../pages/users-page.js
 
 function UsersRoute() {
   return (
-    <RequireAnyCapability capabilities={[Capability.ManageUsers, Capability.ManageGrants]}>
+    <RequireAccess rule={ACCESS.users}>
       <LazyUsersPage />
-    </RequireAnyCapability>
+    </RequireAccess>
   );
 }

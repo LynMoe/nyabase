@@ -1,9 +1,9 @@
 import type { ReactNode } from 'react';
 import { Link } from '@tanstack/react-router';
 import { ShieldOff } from 'lucide-react';
-import { Capability } from '@nyabase/common';
 import { useAuthStore } from '../store/auth.js';
 import { capabilityLabel } from '../lib/display-labels.js';
+import { canAccess, type AccessRule } from '../lib/route-access.js';
 import { Button } from './ui/button.js';
 
 export function AccessDenied({ requiredLabels }: { requiredLabels?: string[] }) {
@@ -30,32 +30,18 @@ export function AccessDenied({ requiredLabels }: { requiredLabels?: string[] }) 
   );
 }
 
-export function RequireCapability({
-  capability,
+/** Route guard; the rule comes from `ACCESS` so the sidebar agrees with it. */
+export function RequireAccess({
+  rule,
   children,
 }: {
-  capability: Capability;
+  rule: AccessRule;
   children: ReactNode;
 }) {
-  const user = useAuthStore((state) => state.user);
-  const canAccess = user?.capabilities.includes(capability) ?? false;
+  const capabilities = useAuthStore((state) => state.user?.capabilities);
 
-  if (!canAccess) return <AccessDenied requiredLabels={[capabilityLabel(capability)]} />;
-  return <>{children}</>;
-}
-
-export function RequireAnyCapability({
-  capabilities,
-  children,
-}: {
-  capabilities: readonly Capability[];
-  children: ReactNode;
-}) {
-  const user = useAuthStore((state) => state.user);
-  const canAccess = capabilities.some((capability) => user?.capabilities.includes(capability));
-
-  if (!canAccess) {
-    return <AccessDenied requiredLabels={capabilities.map((capability) => capabilityLabel(capability))} />;
+  if (!canAccess(capabilities, rule)) {
+    return <AccessDenied requiredLabels={rule.map((capability) => capabilityLabel(capability))} />;
   }
   return <>{children}</>;
 }

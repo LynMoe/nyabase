@@ -1,6 +1,5 @@
 import { useMemo, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { Link } from '@tanstack/react-router';
 import { Plus, RefreshCw } from 'lucide-react';
 import type { UserServerDto, VolumeDto } from '@nyabase/common';
 import { api } from '../lib/api.js';
@@ -68,9 +67,6 @@ export default function VolumesPage() {
               aria-label="刷新数据卷"
             >
               <RefreshCw className="h-4 w-4" />
-            </Button>
-            <Button variant="outline" asChild>
-              <Link to="/quota">配额</Link>
             </Button>
             <Button onClick={() => openCreate()}><Plus className="h-4 w-4" />新建数据卷</Button>
           </>

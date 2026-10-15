@@ -1,6 +1,6 @@
 import { createFileRoute, lazyRouteComponent } from '@tanstack/react-router';
-import { Capability } from '@nyabase/common';
-import { RequireAnyCapability } from '../../components/require-capability.js';
+import { RequireAccess } from '../../components/require-capability.js';
+import { ACCESS } from '../../lib/route-access.js';
 import { parseUserDetailTab } from '../../lib/user-detail.js';
 
 export const Route = createFileRoute('/users/$id')({
@@ -14,8 +14,8 @@ const LazyUserDetailPage = lazyRouteComponent(() => import('../../pages/user-det
 
 function UserDetailRoute() {
   return (
-    <RequireAnyCapability capabilities={[Capability.ManageUsers, Capability.ManageGrants]}>
+    <RequireAccess rule={ACCESS.users}>
       <LazyUserDetailPage />
-    </RequireAnyCapability>
+    </RequireAccess>
   );
 }

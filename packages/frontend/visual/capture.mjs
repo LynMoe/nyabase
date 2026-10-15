@@ -619,7 +619,7 @@ async function login(page) {
   await page.locator('#username').fill('admin');
   await page.locator('#password').fill('secret12');
   await page.locator('button[type="submit"]').click();
-  await page.getByRole('heading', { name: '资源概览' }).waitFor({ timeout: 20_000 });
+  await page.getByRole('heading', { name: '概览', exact: true }).waitFor({ timeout: 20_000 });
   await waitSettled(page);
 }
 

@@ -1,66 +1,37 @@
 import { Link, useRouterState } from '@tanstack/react-router';
-import React, { useState, type ReactNode } from 'react';
-import { useQuery } from '@tanstack/react-query';
-import {
-  Activity,
-  LayoutDashboard, Server, Container, Database, HardDrive, Layers, Users, ImageIcon,
-  ScrollText, LogOut, Shield, UserCircle, Settings, Cable, Network, Globe, TriangleAlert,
-  Menu, Gauge,
-} from 'lucide-react';
+import { useState, type ReactNode } from 'react';
+import { ChevronsUpDown, Laptop, LogOut, Menu, Moon, Sun, UserCircle } from 'lucide-react';
+import { Capability } from '@nyabase/common';
 import { cn } from '../../lib/utils.js';
 import { useAuthStore } from '../../store/auth.js';
+import { useThemeStore, type ThemeMode } from '../../store/theme.js';
 import { Button } from '../ui/button.js';
-import { Separator } from '../ui/separator.js';
 import { ScrollArea } from '../ui/scroll-area.js';
 import { Avatar, AvatarFallback } from '../ui/avatar.js';
-import { Alert, AlertDescription } from '../ui/alert.js';
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuRadioGroup,
+  DropdownMenuRadioItem,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from '../ui/dropdown-menu.js';
 import {
   Sheet, SheetContent, SheetDescription, SheetTitle,
 } from '../ui/sheet.js';
-import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '../ui/tooltip.js';
-import { ADMIN_INTENT_CAPABILITIES, Capability, type IncusClientCertificateDto } from '@nyabase/common';
-import { ThemeToggle } from '../theme-toggle.js';
+import { TooltipProvider } from '../ui/tooltip.js';
 import { usePublicSettings } from '../../hooks/use-public-settings.js';
 import { terminateBrowserSession } from '../../lib/session-termination.js';
-import { SSH_PROXY_STATUS_CAPABILITIES } from '../../lib/ssh-proxy-access.js';
-import { HTTP_PROXY_STATUS_CAPABILITIES } from '../../lib/http-proxy-access.js';
-import { api } from '../../lib/api.js';
-import { queryKeys } from '../../lib/query-keys.js';
-import { certExpiryBannerText, certExpiryWarning } from '../../lib/cert-expiry.js';
+import { activeNavPath, visibleNavSections, type NavSection } from '../../lib/navigation.js';
+import { CertExpiryBanner } from './cert-expiry-banner.js';
 
-const userNavItems = [
-  { to: '/', icon: LayoutDashboard, label: '资源概览' },
-  { to: '/usage', icon: Activity, label: '使用情况' },
-  { to: '/quota', icon: Gauge, label: '配额' },
-  { to: '/containers', icon: Container, label: '容器' },
-  { to: '/volumes', icon: Database, label: '数据卷' },
-  { to: '/shared-volumes', icon: HardDrive, label: '共享卷' },
-  { to: '/http-proxy', icon: Globe, label: 'HTTP 发布' },
+const THEME_OPTIONS: Array<{ value: ThemeMode; label: string; icon: typeof Sun }> = [
+  { value: 'light', label: '浅色', icon: Sun },
+  { value: 'dark', label: '深色', icon: Moon },
+  { value: 'system', label: '跟随系统', icon: Laptop },
 ];
-
-const adminNavItems = [
-  { to: '/servers', icon: Server, label: '服务器', caps: [Capability.ManageServers] },
-  { to: '/servers/usage', icon: Activity, label: '使用情况', caps: [Capability.ManageServers, Capability.ViewMetricsAll], match: 'all' as const },
-  { to: '/ip-pools', icon: Network, label: 'IP 池', caps: [Capability.ManageIpPools] },
-  { to: '/shared-backends', icon: Database, label: '共享存储', caps: [Capability.ManageSharedBackends] },
-  { to: '/images', icon: ImageIcon, label: '镜像', caps: [Capability.ManageImages] },
-  { to: '/ops', icon: Activity, label: '运维', caps: ADMIN_INTENT_CAPABILITIES },
-  { to: '/manage/containers', icon: Layers, label: '容器管理', caps: [Capability.ManageContainersAny] },
-  { to: '/ssh-proxy', icon: Cable, label: 'SSH 代理', caps: SSH_PROXY_STATUS_CAPABILITIES },
-  { to: '/http-proxy-ops', icon: Globe, label: 'HTTP 代理', caps: HTTP_PROXY_STATUS_CAPABILITIES },
-  { to: '/users', icon: Users, label: '用户', caps: [Capability.ManageUsers, Capability.ManageGrants] },
-  { to: '/groups', icon: Shield, label: '用户组', caps: [Capability.ManageGroups, Capability.ManageGrants] },
-  { to: '/audit', icon: ScrollText, label: '审计', caps: [Capability.ViewAudit] },
-  { to: '/system-settings', icon: Settings, label: '系统设置', caps: [Capability.ManageSystemSettings] },
-];
-
-type NavItemDef = {
-  to: string;
-  icon: React.ComponentType<{ className?: string }>;
-  label: string;
-  caps?: readonly Capability[];
-  match?: 'all';
-};
 
 function userInitials(displayName?: string, username?: string): string {
   const source = (displayName ?? '').trim() || (username ?? '').trim();
@@ -74,38 +45,108 @@ function userInitials(displayName?: string, username?: string): string {
   return Array.from(source).slice(0, 2).join('').toUpperCase();
 }
 
-function NavItem({
-  item,
+function SidebarNav({
+  sections,
   pathname,
-  items,
   onNavigate,
 }: {
-  item: NavItemDef;
+  sections: NavSection[];
   pathname: string;
-  items: NavItemDef[];
   onNavigate?: () => void;
 }) {
-  const matches = (to: string) => pathname === to || (to !== '/' && pathname.startsWith(`${to}/`));
-  const isActive = matches(item.to) && !items.some((other) => other.to !== item.to && other.to.length > item.to.length && matches(other.to));
+  const active = activeNavPath(pathname, sections);
   return (
-    <Tooltip>
-      <TooltipTrigger asChild>
-        <Link
-          to={item.to}
-          onClick={onNavigate}
-          className={cn(
-            'flex items-center gap-3 rounded-md px-3 py-1.5 text-sm font-medium transition-colors',
-            isActive
-              ? 'bg-accent text-accent-foreground'
-              : 'text-muted-foreground hover:bg-accent hover:text-accent-foreground',
-          )}
+    <nav className="flex flex-col gap-4 p-2 pb-4" aria-label="主导航">
+      {sections.map((section, index) => (
+        <div key={section.label ?? index} className="space-y-0.5">
+          {section.label ? (
+            <p className="px-3 pb-1 text-[11px] font-medium tracking-wide text-muted-foreground/80">
+              {section.label}
+            </p>
+          ) : null}
+          {section.items.map((item) => {
+            const isActive = item.to === active;
+            return (
+              <Link
+                key={item.to}
+                to={item.to}
+                onClick={onNavigate}
+                aria-current={isActive ? 'page' : undefined}
+                className={cn(
+                  'flex items-center gap-3 rounded-md px-3 py-1.5 text-sm transition-colors',
+                  isActive
+                    ? 'bg-accent font-medium text-accent-foreground'
+                    : 'text-muted-foreground hover:bg-accent/60 hover:text-accent-foreground',
+                )}
+              >
+                <item.icon className="h-4 w-4 shrink-0" />
+                <span className="truncate">{item.label}</span>
+              </Link>
+            );
+          })}
+        </div>
+      ))}
+    </nav>
+  );
+}
+
+/** Account, theme and sign-out live together at the bottom, always in view. */
+function AccountMenu({
+  displayName,
+  username,
+  onNavigate,
+}: {
+  displayName?: string;
+  username?: string;
+  onNavigate?: () => void;
+}) {
+  const mode = useThemeStore((state) => state.mode);
+  const setMode = useThemeStore((state) => state.setMode);
+  return (
+    <DropdownMenu modal={false}>
+      <DropdownMenuTrigger asChild>
+        <button
+          type="button"
+          className="flex w-full items-center gap-3 rounded-md px-2 py-2 text-left transition-colors hover:bg-accent/60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+          aria-label="账号菜单"
+          data-testid="account-menu"
         >
-          <item.icon className="h-4 w-4 shrink-0" />
-          <span className="truncate">{item.label}</span>
-        </Link>
-      </TooltipTrigger>
-      <TooltipContent side="right">{item.label}</TooltipContent>
-    </Tooltip>
+          <Avatar className="h-8 w-8">
+            <AvatarFallback className="text-xs">{userInitials(displayName, username)}</AvatarFallback>
+          </Avatar>
+          <span className="min-w-0 flex-1">
+            <span className="block truncate text-sm font-medium">{displayName || username}</span>
+            <span className="block truncate text-xs text-muted-foreground">@{username}</span>
+          </span>
+          <ChevronsUpDown className="h-4 w-4 shrink-0 text-muted-foreground" />
+        </button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent side="top" align="start" className="w-[var(--radix-dropdown-menu-trigger-width)] min-w-52">
+        <DropdownMenuItem asChild>
+          <Link to="/profile" onClick={onNavigate}>
+            <UserCircle className="mr-2 h-4 w-4" />用户中心
+          </Link>
+        </DropdownMenuItem>
+        <DropdownMenuSeparator />
+        <DropdownMenuLabel className="text-xs font-normal text-muted-foreground">主题</DropdownMenuLabel>
+        <DropdownMenuRadioGroup
+          value={mode}
+          onValueChange={(value) => {
+            if (value === 'light' || value === 'dark' || value === 'system') setMode(value);
+          }}
+        >
+          {THEME_OPTIONS.map((option) => (
+            <DropdownMenuRadioItem key={option.value} value={option.value}>
+              <option.icon className="mr-2 h-4 w-4" />{option.label}
+            </DropdownMenuRadioItem>
+          ))}
+        </DropdownMenuRadioGroup>
+        <DropdownMenuSeparator />
+        <DropdownMenuItem onSelect={() => { void terminateBrowserSession(); }}>
+          <LogOut className="mr-2 h-4 w-4" />退出登录
+        </DropdownMenuItem>
+      </DropdownMenuContent>
+    </DropdownMenu>
   );
 }
 
@@ -114,8 +155,7 @@ function SidebarPanel({
   displayName,
   username,
   pathname,
-  visibleAdminNav,
-  onLogout,
+  sections,
   onNavigate,
   brandClassName,
 }: {
@@ -123,84 +163,23 @@ function SidebarPanel({
   displayName?: string;
   username?: string;
   pathname: string;
-  visibleAdminNav: NavItemDef[];
-  onLogout: () => void;
+  sections: NavSection[];
   onNavigate?: () => void;
   brandClassName?: string;
 }) {
   return (
     <div className="flex h-full min-h-0 flex-col">
-      <div className={cn('flex h-14 items-center px-4', brandClassName)}>
-        <span className="truncate text-lg font-semibold">{brandTitle}</span>
-      </div>
-
-      <Separator />
-
-      <div className="px-4 py-3">
-        <div className="flex items-center gap-3">
-          <Avatar className="h-8 w-8">
-            <AvatarFallback className="text-xs">
-              {userInitials(displayName, username)}
-            </AvatarFallback>
-          </Avatar>
-          <div className="min-w-0">
-            <p className="truncate text-sm font-medium">{displayName}</p>
-            <p className="truncate text-xs text-muted-foreground">{username}</p>
-          </div>
-        </div>
-        <Link
-          to="/profile"
-          onClick={onNavigate}
-          className={cn(
-            'mt-1.5 flex items-center gap-1.5 text-xs transition-colors',
-            pathname === '/profile'
-              ? 'text-foreground'
-              : 'text-muted-foreground hover:text-foreground',
-          )}
-        >
-          <UserCircle className="h-3 w-3" />
-          用户中心
+      <div className={cn('flex h-14 shrink-0 items-center border-b px-4', brandClassName)}>
+        <Link to="/" onClick={onNavigate} className="truncate text-base font-semibold tracking-tight">
+          {brandTitle}
         </Link>
       </div>
-
-      <Separator />
-
       <ScrollArea className="min-h-0 flex-1">
-        <nav className="flex flex-col p-2 pb-3">
-          <div className="space-y-0.5">
-            {userNavItems.map((item) => (
-              <NavItem key={item.to} item={item} items={userNavItems} pathname={pathname} onNavigate={onNavigate} />
-            ))}
-          </div>
-
-          {visibleAdminNav.length > 0 && (
-            <>
-              <div className="my-2 border-t border-border" />
-              <p className="px-3 pb-1 pt-1 text-[11px] font-medium tracking-wide text-muted-foreground">
-                管理
-              </p>
-              <div className="space-y-0.5">
-                {visibleAdminNav.map((item) => (
-                  <NavItem key={item.to} item={item} items={visibleAdminNav} pathname={pathname} onNavigate={onNavigate} />
-                ))}
-              </div>
-            </>
-          )}
-
-          <div className="my-2 border-t border-border" />
-          <div className="space-y-0.5">
-            <ThemeToggle className="w-full justify-start gap-3 text-muted-foreground" />
-            <Button
-              variant="ghost"
-              className="w-full justify-start gap-3 text-muted-foreground"
-              onClick={onLogout}
-            >
-              <LogOut className="h-4 w-4" />
-              退出登录
-            </Button>
-          </div>
-        </nav>
+        <SidebarNav sections={sections} pathname={pathname} onNavigate={onNavigate} />
       </ScrollArea>
+      <div className="shrink-0 border-t p-2 pb-[max(0.5rem,env(safe-area-inset-bottom))]">
+        <AccountMenu displayName={displayName} username={username} onNavigate={onNavigate} />
+      </div>
     </div>
   );
 }
@@ -211,40 +190,19 @@ export function AppLayout({ children }: { children: ReactNode }) {
   const { settings } = usePublicSettings();
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
 
-  const handleLogout = async () => {
-    await terminateBrowserSession();
-  };
-
-  const closeMobileNav = () => setMobileNavOpen(false);
-
-  const userCaps = new Set(user?.capabilities ?? []);
-  const canManageCertificates = userCaps.has(Capability.ManageCertificates);
-  const canViewCertificate = canManageCertificates || userCaps.has(Capability.ManageServers);
-  const certificateQuery = useQuery({
-    queryKey: queryKeys.certificate,
-    queryFn: () => api.get<IncusClientCertificateDto>('/admin/incus-client-certificate'),
-    enabled: canViewCertificate,
-    staleTime: 60_000,
-  });
-  const certificate = certificateQuery.data;
-  const certWarning = certificate ? certExpiryWarning(certificate.notAfter) : null;
-  const certBannerServerId = certificate?.servers[0]?.serverId;
-
-  const visibleAdminNav = adminNavItems.filter((item) => item.match === 'all'
-    ? item.caps?.every((capability) => userCaps.has(capability))
-    : item.caps?.some((capability) => userCaps.has(capability)));
+  const sections = visibleNavSections(user?.capabilities);
+  const canManageCertificates = user?.capabilities.includes(Capability.ManageCertificates) ?? false;
 
   const sidebarProps = {
     brandTitle: settings.branding.title,
     displayName: user?.displayName,
     username: user?.username,
     pathname,
-    visibleAdminNav,
-    onLogout: () => { void handleLogout(); },
+    sections,
   };
 
   return (
-    <TooltipProvider>
+    <TooltipProvider delayDuration={200}>
       {/* Sheet portals; keep it out of the overflow-hidden chrome row. */}
       <Sheet open={mobileNavOpen} onOpenChange={setMobileNavOpen}>
         <SheetContent
@@ -253,7 +211,7 @@ export function AppLayout({ children }: { children: ReactNode }) {
         >
           <SheetTitle className="sr-only">{settings.branding.title}</SheetTitle>
           <SheetDescription className="sr-only">主导航</SheetDescription>
-          <SidebarPanel {...sidebarProps} onNavigate={closeMobileNav} brandClassName="pr-12" />
+          <SidebarPanel {...sidebarProps} onNavigate={() => setMobileNavOpen(false)} brandClassName="pr-12" />
         </SheetContent>
       </Sheet>
 
@@ -277,25 +235,7 @@ export function AppLayout({ children }: { children: ReactNode }) {
           </header>
 
           <main className="flex-1 overflow-auto">
-            {certWarning && certificate && (
-              <Alert
-                variant="destructive"
-                className="rounded-none border-x-0 border-t-0 px-4 py-3"
-                data-testid="cert-expiry-banner"
-              >
-                <TriangleAlert className="h-4 w-4" />
-                <AlertDescription className="flex flex-wrap items-center gap-2">
-                  <span>{certExpiryBannerText(certificate.notAfter)}</span>
-                  {certBannerServerId ? (
-                    <Link to="/servers/$id" params={{ id: certBannerServerId }} search={{ tab: 'connect' }} className="underline">
-                      前往轮换
-                    </Link>
-                  ) : (
-                    <Link to="/servers" className="underline">前往服务器</Link>
-                  )}
-                </AlertDescription>
-              </Alert>
-            )}
+            <CertExpiryBanner enabled={canManageCertificates} />
             {children}
           </main>
         </div>

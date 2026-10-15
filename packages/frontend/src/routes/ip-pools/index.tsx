@@ -1,6 +1,6 @@
 import { createFileRoute, lazyRouteComponent } from '@tanstack/react-router';
-import { Capability } from '@nyabase/common';
-import { RequireCapability } from '../../components/require-capability.js';
+import { RequireAccess } from '../../components/require-capability.js';
+import { ACCESS } from '../../lib/route-access.js';
 
 export const Route = createFileRoute('/ip-pools/')({
   component: IpPoolsRoute,
@@ -9,5 +9,5 @@ export const Route = createFileRoute('/ip-pools/')({
 const LazyIpPoolsPage = lazyRouteComponent(() => import('../../pages/ip-pools-page.js'));
 
 function IpPoolsRoute() {
-  return <RequireCapability capability={Capability.ManageIpPools}><LazyIpPoolsPage /></RequireCapability>;
+  return <RequireAccess rule={ACCESS.ipPools}><LazyIpPoolsPage /></RequireAccess>;
 }

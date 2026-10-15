@@ -1,6 +1,6 @@
 import { createFileRoute, lazyRouteComponent } from '@tanstack/react-router';
-import { Capability } from '@nyabase/common';
-import { RequireCapability } from '../../components/require-capability.js';
+import { RequireAccess } from '../../components/require-capability.js';
+import { ACCESS } from '../../lib/route-access.js';
 
 export const Route = createFileRoute('/images/')({
   component: ImagesRoute,
@@ -10,8 +10,8 @@ const LazyImagesPage = lazyRouteComponent(() => import('../../pages/images-page.
 
 function ImagesRoute() {
   return (
-    <RequireCapability capability={Capability.ManageImages}>
+    <RequireAccess rule={ACCESS.images}>
       <LazyImagesPage />
-    </RequireCapability>
+    </RequireAccess>
   );
 }

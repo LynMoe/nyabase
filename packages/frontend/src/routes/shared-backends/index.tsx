@@ -1,6 +1,6 @@
 import { createFileRoute, lazyRouteComponent } from '@tanstack/react-router';
-import { Capability } from '@nyabase/common';
-import { RequireCapability } from '../../components/require-capability.js';
+import { RequireAccess } from '../../components/require-capability.js';
+import { ACCESS } from '../../lib/route-access.js';
 
 export const Route = createFileRoute('/shared-backends/')({
   component: SharedBackendsRoute,
@@ -9,5 +9,5 @@ export const Route = createFileRoute('/shared-backends/')({
 const LazySharedBackendsPage = lazyRouteComponent(() => import('../../pages/shared-backends-page.js'));
 
 function SharedBackendsRoute() {
-  return <RequireCapability capability={Capability.ManageSharedBackends}><LazySharedBackendsPage /></RequireCapability>;
+  return <RequireAccess rule={ACCESS.sharedBackends}><LazySharedBackendsPage /></RequireAccess>;
 }

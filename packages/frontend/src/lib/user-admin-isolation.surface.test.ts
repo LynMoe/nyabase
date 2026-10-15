@@ -120,8 +120,8 @@ describe('user panel pages stay on user API plane', () => {
     expect(src).toMatch(/to="\/containers\/\$containerId"/);
   });
 
-  it('quota-page never calls /admin/* and stays on user grant APIs', () => {
-    const src = readPage('quota-page.tsx');
+  it('quota summary never calls /admin/* and stays on user grant APIs', () => {
+    const src = readSrc('components/quota/quota-summary.tsx');
     expect(src).not.toMatch(/['`]\/admin\//);
     expect(src).not.toMatch(/ManageContainersAny/);
     expect(src).not.toMatch(/\/manage\/containers/);

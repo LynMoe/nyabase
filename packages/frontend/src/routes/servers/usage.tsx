@@ -1,6 +1,6 @@
 import { createFileRoute } from '@tanstack/react-router';
-import { Capability } from '@nyabase/common';
-import { RequireCapability } from '../../components/require-capability.js';
+import { RequireAccess } from '../../components/require-capability.js';
+import { ACCESS } from '../../lib/route-access.js';
 import UsagePage from '../../pages/usage-page.js';
 
 export const Route = createFileRoute('/servers/usage')({
@@ -13,8 +13,8 @@ export const Route = createFileRoute('/servers/usage')({
 function AdminUsageRoute() {
   const { serverId } = Route.useSearch();
   return (
-    <RequireCapability capability={Capability.ViewMetricsAll}>
+    <RequireAccess rule={ACCESS.adminUsage}>
       <UsagePage mode="admin" initialServerId={serverId} />
-    </RequireCapability>
+    </RequireAccess>
   );
 }

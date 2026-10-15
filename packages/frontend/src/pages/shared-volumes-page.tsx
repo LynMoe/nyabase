@@ -1,6 +1,5 @@
 import { useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { Link } from '@tanstack/react-router';
 import { Plus, RefreshCw } from 'lucide-react';
 import type { SharedVolumeDto } from '@nyabase/common';
 import { api } from '../lib/api.js';
@@ -52,9 +51,6 @@ export default function SharedVolumesPage() {
           <>
             <Button variant="outline" size="icon" onClick={() => { void volumesQuery.refetch(); }} aria-label="刷新共享卷">
               <RefreshCw className="h-4 w-4" />
-            </Button>
-            <Button variant="outline" asChild>
-              <Link to="/quota">配额</Link>
             </Button>
             <Button onClick={() => setCreateOpen(true)}><Plus className="h-4 w-4" />新建共享卷</Button>
           </>

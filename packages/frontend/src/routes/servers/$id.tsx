@@ -1,6 +1,6 @@
 import { createFileRoute, lazyRouteComponent } from '@tanstack/react-router';
-import { Capability } from '@nyabase/common';
-import { RequireCapability } from '../../components/require-capability.js';
+import { RequireAccess } from '../../components/require-capability.js';
+import { ACCESS } from '../../lib/route-access.js';
 import { parseServerDetailTab } from '../../pages/server-detail-page.js';
 
 export const Route = createFileRoute('/servers/$id')({
@@ -14,8 +14,8 @@ const LazyServerDetailPage = lazyRouteComponent(() => import('../../pages/server
 
 function ServerDetailRoute() {
   return (
-    <RequireCapability capability={Capability.ManageServers}>
+    <RequireAccess rule={ACCESS.servers}>
       <LazyServerDetailPage />
-    </RequireCapability>
+    </RequireAccess>
   );
 }

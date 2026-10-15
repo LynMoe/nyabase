@@ -1,7 +1,6 @@
 import { useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { Link } from '@tanstack/react-router';
-import { Plus, RefreshCw } from 'lucide-react';
+import { Plus } from 'lucide-react';
 import type { ContainerAction, ContainerDto, IntentAcceptedDto } from '@nyabase/common';
 import { api } from '../lib/api.js';
 import { errorMessage } from '../lib/api-error.js';
@@ -54,12 +53,6 @@ export default function ContainersPage() {
         description={containersQuery.data ? `${containersQuery.data.length} 个容器` : undefined}
         actions={
           <>
-            <Button variant="outline" size="icon" onClick={() => { void containersQuery.refetch(); }} aria-label="刷新容器">
-              <RefreshCw className="h-4 w-4" />
-            </Button>
-            <Button variant="outline" asChild>
-              <Link to="/quota">配额</Link>
-            </Button>
             <Button onClick={() => setCreateOpen(true)}>
               <Plus className="h-4 w-4" />新建容器
             </Button>

@@ -1,6 +1,6 @@
 import { createFileRoute } from '@tanstack/react-router';
-import { Capability } from '@nyabase/common';
-import { RequireCapability } from '../../../components/require-capability.js';
+import { RequireAccess } from '../../../components/require-capability.js';
+import { ACCESS } from '../../../lib/route-access.js';
 import { AdminContainerDetailPage, parseDetailTab } from '../../../pages/container-detail-page.js';
 
 export const Route = createFileRoute('/manage/containers/$containerId')({
@@ -12,8 +12,8 @@ export const Route = createFileRoute('/manage/containers/$containerId')({
 
 function ManageContainerDetailRoute() {
   return (
-    <RequireCapability capability={Capability.ManageContainersAny}>
+    <RequireAccess rule={ACCESS.manageContainers}>
       <AdminContainerDetailPage />
-    </RequireCapability>
+    </RequireAccess>
   );
 }

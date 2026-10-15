@@ -1,6 +1,6 @@
 import { createFileRoute, lazyRouteComponent } from '@tanstack/react-router';
-import { RequireAnyCapability } from '../../components/require-capability.js';
-import { HTTP_PROXY_STATUS_CAPABILITIES } from '../../lib/http-proxy-access.js';
+import { RequireAccess } from '../../components/require-capability.js';
+import { ACCESS } from '../../lib/route-access.js';
 
 export const Route = createFileRoute('/http-proxy-ops/')({
   component: HttpProxyOpsRoute,
@@ -10,8 +10,8 @@ const LazyHttpProxyOpsPage = lazyRouteComponent(() => import('../../pages/http-p
 
 function HttpProxyOpsRoute() {
   return (
-    <RequireAnyCapability capabilities={HTTP_PROXY_STATUS_CAPABILITIES}>
+    <RequireAccess rule={ACCESS.httpProxyOps}>
       <LazyHttpProxyOpsPage />
-    </RequireAnyCapability>
+    </RequireAccess>
   );
 }

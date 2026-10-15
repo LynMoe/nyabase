@@ -1,6 +1,6 @@
 import { createFileRoute, lazyRouteComponent } from '@tanstack/react-router';
-import { RequireAnyCapability } from '../../components/require-capability.js';
-import { SSH_PROXY_STATUS_CAPABILITIES } from '../../lib/ssh-proxy-access.js';
+import { RequireAccess } from '../../components/require-capability.js';
+import { ACCESS } from '../../lib/route-access.js';
 
 export const Route = createFileRoute('/ssh-proxy/')({
   component: SshProxyRoute,
@@ -10,8 +10,8 @@ const LazySshProxyPage = lazyRouteComponent(() => import('../../pages/ssh-proxy-
 
 function SshProxyRoute() {
   return (
-    <RequireAnyCapability capabilities={SSH_PROXY_STATUS_CAPABILITIES}>
+    <RequireAccess rule={ACCESS.sshProxy}>
       <LazySshProxyPage />
-    </RequireAnyCapability>
+    </RequireAccess>
   );
 }

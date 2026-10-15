@@ -84,10 +84,13 @@ describe('lane D product UI copy', () => {
     expect(page).toMatch(/volume-server-table/);
     expect(page).not.toMatch(/\/admin\//);
     const layout = read('components/layout/app-layout.tsx');
-    expect(layout).toMatch(/cert-expiry-banner/);
-    expect(layout).toMatch(/certExpiryBannerText/);
-    expect(layout).toMatch(/canViewCertificate|ManageServers/);
-    expect(layout).toMatch(/前往轮换/);
+    const banner = read('components/layout/cert-expiry-banner.tsx');
+    expect(layout).toMatch(/CertExpiryBanner/);
+    expect(layout).toMatch(/ManageCertificates/);
+    expect(banner).toMatch(/cert-expiry-banner/);
+    expect(banner).toMatch(/certExpiryBannerText/);
+    expect(banner).toMatch(/去轮换/);
+    expect(banner).toMatch(/client-certificate/);
   });
 
   it('console waits for protocol ready/error instead of websocket open', () => {
@@ -129,7 +132,7 @@ describe('lane D product UI copy', () => {
   });
 
   it('admin shared volumes nav requires ManageSharedVolumes', () => {
-    const layout = read('components/layout/app-layout.tsx');
+    const layout = read('lib/navigation.ts');
     expect(layout).not.toMatch(/to: '\/manage\/shared-volumes'/);
     expect(layout).not.toMatch(/共享卷管理/);
     expect(layout).toMatch(/to: '\/shared-volumes'/);
@@ -341,13 +344,13 @@ describe('lane D product UI copy', () => {
       Capability.ManageCertificates,
     ]);
     expect(ADMIN_INTENT_CAPABILITIES).toHaveLength(6);
-    const layout = read('components/layout/app-layout.tsx');
-    expect(layout).toMatch(/to: '\/ops'/);
-    expect(layout).toMatch(/运维/);
-    expect(layout).toMatch(/ADMIN_INTENT_CAPABILITIES/);
+    const nav = read('lib/navigation.ts');
+    expect(nav).toMatch(/to: '\/ops'/);
+    expect(nav).toMatch(/操作记录/);
+    expect(nav).toMatch(/access: ACCESS\.ops/);
+    expect(read('lib/route-access.ts')).toMatch(/ops: ADMIN_INTENT_CAPABILITIES/);
     const route = read('routes/ops/index.tsx');
-    expect(route).toMatch(/ADMIN_INTENT_CAPABILITIES/);
-    expect(route).toMatch(/RequireAnyCapability/);
+    expect(route).toMatch(/RequireAccess rule=\{ACCESS\.ops\}/);
     const ops = read('pages/ops-page.tsx');
     expect(ops).toMatch(/status', 'pending'/);
     expect(ops).toMatch(/status', 'failed'/);
@@ -371,28 +374,30 @@ describe('lane D product UI copy', () => {
   });
 
   it('shows grant ceilings and remaining on user surfaces', () => {
-    const layout = read('components/layout/app-layout.tsx');
-    const quotaPage = read('pages/quota-page.tsx');
+    const nav = read('lib/navigation.ts');
+    const quotaPage = read('components/quota/quota-summary.tsx');
     const dashboard = read('pages/dashboard-page.tsx');
     const create = read('components/containers/create-container-dialog.tsx');
     const local = read('components/storage/local-volume-form-dialog.tsx');
     const shared = read('components/storage/shared-volume-form-dialog.tsx');
     const volumes = read('pages/volumes-page.tsx');
     const sharedPage = read('pages/shared-volumes-page.tsx');
-    expect(layout).toMatch(/to: '\/quota'/);
-    expect(layout).toMatch(/配额/);
+    // 配额 is a section of 概览, not a separate destination.
+    expect(nav).not.toMatch(/to: '\/quota'/);
+    expect(read('routes/quota/index.tsx')).toMatch(/redirect\(\{ to: '\/', hash: 'quota'/);
     expect(quotaPage).toMatch(/formatQuotaDimension/);
     expect(quotaPage).toMatch(/formatExtensionGrantSummaries/);
     expect(quotaPage).toMatch(/storage-capacity/);
     expect(quotaPage).toMatch(/sharedBackends/);
     expect(quotaPage).toMatch(/额度/);
-    expect(quotaPage).toMatch(/已预订/);
+    expect(quotaPage).toMatch(/已分配/);
     expect(quotaPage).toMatch(/剩余/);
     expect(quotaPage).not.toMatch(/nvidia-gpu/);
     expect(quotaPage).not.toMatch(/pciAddresses/);
     expect(quotaPage).not.toMatch(/GpuGrantMode/);
     expect(quotaPage).not.toMatch(/['`]\/admin\//);
-    expect(dashboard).toMatch(/to="\/quota"/);
+    expect(dashboard).toMatch(/<QuotaSummary \/>/);
+    expect(dashboard).toMatch(/id="quota"/);
     expect(dashboard).not.toMatch(/formatGrantQuotaLine/);
     expect(dashboard).not.toMatch(/formatConsumedQuotaParts/);
     expect(dashboard).not.toMatch(/nvidia-gpu/);
@@ -410,10 +415,8 @@ describe('lane D product UI copy', () => {
     expect(shared).toMatch(/剩余/);
     expect(shared).toMatch(/额度/);
     expect(shared).toMatch(/sharedBackends/);
-    expect(volumes).toMatch(/to="\/quota"/);
     expect(volumes).not.toMatch(/queryKeys\.storageCapacity/);
     expect(volumes).not.toMatch(/storage-capacity/);
-    expect(sharedPage).toMatch(/to="\/quota"/);
     expect(sharedPage).not.toMatch(/sharedBackends/);
     expect(sharedPage).not.toMatch(/formatRemainingBytes/);
   });

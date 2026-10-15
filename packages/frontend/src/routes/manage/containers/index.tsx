@@ -1,6 +1,6 @@
 import { createFileRoute, lazyRouteComponent } from '@tanstack/react-router';
-import { Capability } from '@nyabase/common';
-import { RequireCapability } from '../../../components/require-capability.js';
+import { RequireAccess } from '../../../components/require-capability.js';
+import { ACCESS } from '../../../lib/route-access.js';
 
 export const Route = createFileRoute('/manage/containers/')({
   component: ManageContainersRoute,
@@ -10,8 +10,8 @@ const LazyManageContainersPage = lazyRouteComponent(() => import('../../../pages
 
 function ManageContainersRoute() {
   return (
-    <RequireCapability capability={Capability.ManageContainersAny}>
+    <RequireAccess rule={ACCESS.manageContainers}>
       <LazyManageContainersPage />
-    </RequireCapability>
+    </RequireAccess>
   );
 }

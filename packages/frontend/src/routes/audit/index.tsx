@@ -1,6 +1,6 @@
 import { createFileRoute, lazyRouteComponent } from '@tanstack/react-router';
-import { Capability } from '@nyabase/common';
-import { RequireCapability } from '../../components/require-capability.js';
+import { RequireAccess } from '../../components/require-capability.js';
+import { ACCESS } from '../../lib/route-access.js';
 
 const PAGE_SIZES = [25, 50, 100] as const;
 
@@ -49,8 +49,8 @@ const LazyAuditPage = lazyRouteComponent(() => import('../../pages/audit-page.js
 
 function AuditRoute() {
   return (
-    <RequireCapability capability={Capability.ViewAudit}>
+    <RequireAccess rule={ACCESS.audit}>
       <LazyAuditPage />
-    </RequireCapability>
+    </RequireAccess>
   );
 }

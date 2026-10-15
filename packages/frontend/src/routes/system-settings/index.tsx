@@ -1,6 +1,6 @@
 import { createFileRoute, lazyRouteComponent } from '@tanstack/react-router';
-import { Capability } from '@nyabase/common';
-import { RequireCapability } from '../../components/require-capability.js';
+import { RequireAccess } from '../../components/require-capability.js';
+import { ACCESS } from '../../lib/route-access.js';
 
 export const Route = createFileRoute('/system-settings/')({
   component: SystemSettingsRoute,
@@ -10,8 +10,8 @@ const LazySystemSettingsPage = lazyRouteComponent(() => import('../../pages/syst
 
 function SystemSettingsRoute() {
   return (
-    <RequireCapability capability={Capability.ManageSystemSettings}>
+    <RequireAccess rule={ACCESS.systemSettings}>
       <LazySystemSettingsPage />
-    </RequireCapability>
+    </RequireAccess>
   );
 }
