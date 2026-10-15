@@ -1,4 +1,4 @@
-import { useState, type ReactNode } from 'react';
+import { useState } from 'react';
 import { Activity, Pencil } from 'lucide-react';
 import { NodeMetricsStatus, type ServerDto } from '@nyabase/common';
 import { ConfirmDialog } from '../layout/confirm-dialog.js';
@@ -11,6 +11,7 @@ import { Input } from '../ui/input.js';
 import { nodeMetricsStatusZh } from '../../lib/display-labels.js';
 import { relativeTime } from '../../lib/utils.js';
 import { TechnicalId } from '../refs/technical-id.js';
+import { Field } from '../layout/field.js';
 
 export function NodeMetricsCard({
   server,
@@ -58,19 +59,19 @@ export function NodeMetricsCard({
       </CardHeader>
       <CardContent className="space-y-3">
         <div className="grid gap-3 sm:grid-cols-2">
-          <InfoRow
+          <Field
             label="指标 endpoint"
             value={server.nodeMetrics.endpoint
               ? <TechnicalId label="指标 endpoint" value={server.nodeMetrics.endpoint} />
               : '未配置'}
           />
-          <InfoRow
+          <Field
             label="证书 pin"
             value={server.nodeMetrics.serverCertFingerprint
               ? <TechnicalId label="证书 pin" value={server.nodeMetrics.serverCertFingerprint} />
               : '未配置'}
           />
-          <InfoRow
+          <Field
             label="token fingerprint"
             value={server.nodeMetrics.tokenFingerprint
               ? <TechnicalId label="token fingerprint" value={server.nodeMetrics.tokenFingerprint} />
@@ -153,15 +154,6 @@ export function NodeMetricsCard({
         onConfirm={onClear}
       />
     </Card>
-  );
-}
-
-function InfoRow({ label, value }: { label: string; value: ReactNode }) {
-  return (
-    <div className="min-w-0">
-      <p className="text-xs text-muted-foreground">{label}</p>
-      {typeof value === 'string' ? <p className="text-sm">{value}</p> : <div className="mt-1">{value}</div>}
-    </div>
   );
 }
 

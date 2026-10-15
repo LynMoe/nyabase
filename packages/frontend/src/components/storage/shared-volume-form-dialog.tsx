@@ -119,7 +119,7 @@ export function SharedVolumeFormDialog({
   const submit = () => {
     setError(null);
     if (!Number.isFinite(nextSize) || nextSize <= 0) {
-      setError('请输入有效的容量（G）');
+      setError('请输入有效的容量（GiB）');
       return;
     }
     if (editing) {

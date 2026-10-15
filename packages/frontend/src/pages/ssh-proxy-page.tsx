@@ -12,6 +12,7 @@ import {
 } from 'lucide-react';
 import { Capability, type SshProxyHostKeySummaryDto, type SshProxyStatusReport } from '@nyabase/common';
 import { api } from '../lib/api.js';
+import { formatBytes, formatRate } from '../lib/utils.js';
 import { errorMessage } from '../lib/api-error.js';
 import { Badge } from '../components/ui/badge.js';
 import { Button } from '../components/ui/button.js';
@@ -127,13 +128,13 @@ export default function SshProxyPage() {
         actions={
           <>
             {canViewStatus && (
-              <Button variant="ghost" size="icon" className="h-8 w-8 text-muted-foreground" onClick={() => refetch()} disabled={isFetching}>
+              <Button variant="outline" size="icon" aria-label="刷新 SSH 代理状态" onClick={() => refetch()} disabled={isFetching}>
                 <RefreshCw className={`h-4 w-4 ${isFetching ? 'animate-spin' : ''}`} />
               </Button>
             )}
             {canManageSettings && (
               <Button
-                variant="destructive"
+                variant="outline-destructive"
                 disabled={(canViewStatus && Boolean(data) && status.activeConnections === 0) || disconnectAll.isPending}
                 onClick={() => setDisconnectOpen(true)}
               >
@@ -369,22 +370,6 @@ function InfoCell({ label, value }: { label: string; value: string }) {
       <p className="mt-1 break-all text-sm font-medium text-foreground">{value}</p>
     </div>
   );
-}
-
-function formatBytes(value: number): string {
-  if (!Number.isFinite(value) || value <= 0) return '0 B';
-  const units = ['B', 'KB', 'MB', 'GB', 'TB'];
-  let current = value;
-  let index = 0;
-  while (current >= 1024 && index < units.length - 1) {
-    current /= 1024;
-    index += 1;
-  }
-  return `${current >= 10 || index === 0 ? current.toFixed(0) : current.toFixed(1)} ${units[index]}`;
-}
-
-function formatRate(value: number): string {
-  return `${formatBytes(value)}/s`;
 }
 
 function formatTime(value: string | number): string {

@@ -1,9 +1,9 @@
 import { useState } from 'react';
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { Plus } from 'lucide-react';
 import type { ContainerAction, ContainerDto, IntentAcceptedDto } from '@nyabase/common';
 import { api } from '../lib/api.js';
-import { errorMessage } from '../lib/api-error.js';
+import { useActionMutation } from '../hooks/use-action-mutation.js';
 import { Button } from '../components/ui/button.js';
 import { ContainerList } from '../components/containers/container-list.js';
 import { CreateContainerDialog } from '../components/containers/create-container-dialog.js';
@@ -15,7 +15,6 @@ import { queryKeys } from '../lib/query-keys.js';
 import { queryPollInterval } from '../lib/query-lifecycle.js';
 import { runGatedMutation } from '../lib/resource-mutation-gate.js';
 import { containerActionSubmittedTitle } from '../lib/status-labels.js';
-import { toast } from '../hooks/use-toast.js';
 
 export default function ContainersPage() {
   const queryClient = useQueryClient();
@@ -25,16 +24,12 @@ export default function ContainersPage() {
     queryFn: () => api.get<ContainerDto[]>('/containers'),
     refetchInterval: (query) => queryPollInterval(query.state, { activeIntervalMs: 5_000 }),
   });
-  const action = useMutation({
+  const action = useActionMutation({
     mutationFn: ({ actionName, containerId }: { actionName: Extract<ContainerAction, 'start' | 'stop' | 'restart'>; containerId: string }) =>
       api.post<IntentAcceptedDto>(`/containers/${containerId}/actions/${actionName}`),
-    onSuccess: (_intent, variables) => {
-      toast({
-        title: containerActionSubmittedTitle(variables.actionName),
-      });
-      void queryClient.invalidateQueries({ queryKey: queryKeys.containers.userList });
-    },
-    onError: (error) => toast({ title: '容器操作失败', description: errorMessage(error), variant: 'destructive' }),
+    successTitle: ({ actionName }) => containerActionSubmittedTitle(actionName),
+    errorTitle: '容器操作失败',
+    onSuccess: () => { void queryClient.invalidateQueries({ queryKey: queryKeys.containers.userList }); },
   });
 
   const onPowerAction = async (actionName: ContainerAction, container: ContainerDto) => {

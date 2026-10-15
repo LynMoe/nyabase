@@ -11,15 +11,15 @@ const UNLIMITED = '不限';
 function formatCompactCpu(millis: number): string {
   const cores = millis / 1000;
   const label = Number.isInteger(cores) ? String(cores) : parseFloat(cores.toFixed(3)).toString();
-  return `${label}C`;
+  return `${label} 核`;
 }
 
 function formatCompactBytes(bytes: number): string {
-  if (bytes === 0) return '0G';
+  if (bytes === 0) return '0 GiB';
   const gib = bytes / GIB;
   if (gib >= 0.95) {
     const label = Number.isInteger(gib) ? String(gib) : parseFloat(gib.toFixed(2)).toString();
-    return `${label}G`;
+    return `${label} GiB`;
   }
   return formatBytesCompact(bytes);
 }
@@ -45,7 +45,7 @@ export function formatGrantQuotaLine(
   return [...formatGrantQuotaParts(grant), ...extensionChips].join(' / ');
 }
 
-/** Allocated/committed usage. 0 → 0C / 0G. null = no observation (omit the dim). */
+/** Allocated/committed usage. 0 → 0 核 / 0 GiB. null = no observation (omit the dim). */
 export function formatConsumedQuotaParts(consumed: CpuMemDisk): string[] {
   const parts: string[] = [];
   if (consumed.cpuMillis !== null) parts.push(formatCompactCpu(consumed.cpuMillis));
@@ -59,7 +59,7 @@ export function formatGrantBytes(bytes: number | null): string {
   return formatGrantNumber(bytes, formatCompactBytes);
 }
 
-/** Allocated CPU/mem. Empty list → 0C / 0G, never 不限. */
+/** Allocated CPU/mem. Empty list → 0 核 / 0 GiB, never 不限. */
 export function formatAllocatedCpuMem(
   containers: readonly { cpuMillis: number; memBytes: number }[],
 ): string {
@@ -95,8 +95,8 @@ export function formatQuotaDimension(
   kind: 'cpu' | 'bytes',
 ): { used: string; limit: string; remaining: string } {
   const usedLabel = kind === 'cpu'
-    ? (formatConsumedQuotaParts({ cpuMillis: used, memBytes: null, diskBytes: null })[0] ?? '0C')
-    : (formatConsumedQuotaParts({ cpuMillis: null, memBytes: used, diskBytes: null })[0] ?? '0G');
+    ? (formatConsumedQuotaParts({ cpuMillis: used, memBytes: null, diskBytes: null })[0] ?? '0 核')
+    : (formatConsumedQuotaParts({ cpuMillis: null, memBytes: used, diskBytes: null })[0] ?? '0 GiB');
   return {
     used: usedLabel,
     limit: kind === 'cpu'

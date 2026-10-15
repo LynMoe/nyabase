@@ -90,7 +90,7 @@ export function ImageList({
                   </Button>
                   <Button
                     size="sm"
-                    variant="destructive"
+                    variant="ghost-destructive"
                     disabled={image.deleting || busyId === image.id}
                     onClick={() => onDelete(image)}
                   >

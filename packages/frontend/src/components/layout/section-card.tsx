@@ -61,32 +61,3 @@ export function MetaChip({ children }: { children: React.ReactNode }) {
     </span>
   );
 }
-
-export function MetaStat({ label, value }: { label: string; value: React.ReactNode }) {
-  return (
-    <div className="min-w-0">
-      <p className="text-xs text-muted-foreground">{label}</p>
-      <p className="truncate text-sm">{value}</p>
-    </div>
-  );
-}
-
-/** Stat fields that wrap instead of leaving a reserved empty column. */
-export function InfoGrid({
-  children,
-  className,
-}: {
-  children: React.ReactNode;
-  className?: string;
-}) {
-  return (
-    <div
-      className={cn(
-        'grid gap-3 [grid-template-columns:repeat(auto-fit,minmax(min(100%,10rem),1fr))]',
-        className,
-      )}
-    >
-      {children}
-    </div>
-  );
-}

@@ -137,7 +137,7 @@ export default function IpPoolsPage() {
                       </Button>
                       <Button
                         size="sm"
-                        variant="destructive"
+                        variant="ghost-destructive"
                         onClick={() => setDeleteTarget(pool)}
                         disabled={deletePool.isPending}
                       >

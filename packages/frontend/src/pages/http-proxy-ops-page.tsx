@@ -187,7 +187,7 @@ export default function HttpProxyOpsPage() {
                               <Button size="sm" variant="outline" onClick={() => setPoolForm(pool)}>
                                 <Pencil className="h-3.5 w-3.5" />编辑
                               </Button>
-                              <Button size="sm" variant="destructive" onClick={() => setDeletePool(pool)}>
+                              <Button size="sm" variant="ghost-destructive" onClick={() => setDeletePool(pool)}>
                                 <Trash2 className="h-3.5 w-3.5" />删除
                               </Button>
                             </div>

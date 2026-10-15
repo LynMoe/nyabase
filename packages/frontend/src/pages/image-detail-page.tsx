@@ -1,4 +1,4 @@
-import { useState, type ReactNode } from 'react';
+import { useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { getRouteApi, useNavigate } from '@tanstack/react-router';
 import { CircleAlert, Gauge, RefreshCw, Server, Trash2 } from 'lucide-react';
@@ -38,6 +38,8 @@ import { toast } from '../hooks/use-toast.js';
 import { queryKeys } from '../lib/query-keys.js';
 import { refetchWhileInProgress } from '../lib/query-lifecycle.js';
 import { type ImageDetailTab } from '../lib/image-detail.js';
+import { Field } from '../components/layout/field.js';
+import { MoreActions } from '../components/layout/more-actions.js';
 
 const routeApi = getRouteApi('/images/$id');
 
@@ -142,9 +144,7 @@ export default function ImageDetailPage() {
               <Button variant="outline" onClick={() => repullImage.mutate()} disabled={repullImage.isPending}>
                 <RefreshCw className="h-4 w-4" />重新拉取
               </Button>
-              <Button variant="destructive" onClick={() => setDeleteOpen(true)}>
-                <Trash2 className="h-4 w-4" />移除
-              </Button>
+              <MoreActions actions={[{ label: '移除镜像', icon: Trash2, destructive: true, onSelect: () => setDeleteOpen(true) }]} />
             </>
           ) : undefined
         }
@@ -176,22 +176,22 @@ export default function ImageDetailPage() {
                     <CardTitle className="text-base">身份</CardTitle>
                   </CardHeader>
                   <CardContent className="grid gap-3 text-sm sm:grid-cols-2">
-                    <Info
+                    <Field
                       label="别名"
                       value={loaded.alias.length > 64
                         ? <TechnicalId label="别名" value={loaded.alias} kind="opaque" />
                         : <span className="font-mono text-xs">{loaded.alias}</span>}
                     />
-                    <Info label="登录用户" value={loaded.loginUser} mono />
-                    <Info label="最小系统盘" value={loaded.minRootSizeBytes === null ? '未设置' : formatBytes(loaded.minRootSizeBytes)} />
-                    <Info label="网络由平台管理" value={loaded.networkManagedExternally ? '是' : '否'} />
-                    <Info
+                    <Field label="登录用户" value={loaded.loginUser} mono />
+                    <Field label="最小系统盘" value={loaded.minRootSizeBytes === null ? '未设置' : formatBytes(loaded.minRootSizeBytes)} />
+                    <Field label="网络由平台管理" value={loaded.networkManagedExternally ? '是' : '否'} />
+                    <Field
                       label="指纹"
                       value={loaded.fingerprint
                         ? <TechnicalId label="指纹" value={loaded.fingerprint} kind="fingerprint" />
                         : '同步中'}
                     />
-                    <Info
+                    <Field
                       label="状态"
                       value={
                         <StatusBadge
@@ -201,10 +201,10 @@ export default function ImageDetailPage() {
                         />
                       }
                     />
-                    <Info label="最近更新" value={relativeTime(loaded.updatedAt)} />
+                    <Field label="最近更新" value={relativeTime(loaded.updatedAt)} />
                     {loaded.description ? (
                       <div className="sm:col-span-2">
-                        <Info label="描述" value={loaded.description} />
+                        <Field label="描述" value={loaded.description} />
                       </div>
                     ) : null}
                   </CardContent>
@@ -284,19 +284,6 @@ export default function ImageDetailPage() {
         onOpenChange={setDeleteOpen}
       />
     </Page>
-  );
-}
-
-function Info({ label, value, mono = false }: { label: string; value: ReactNode; mono?: boolean }) {
-  return (
-    <div>
-      <p className="text-xs text-muted-foreground">{label}</p>
-      {typeof value === 'string' ? (
-        <p className={mono ? 'mt-1 break-all font-mono text-xs' : 'mt-1 break-all'}>{value}</p>
-      ) : (
-        <div className="mt-1">{value}</div>
-      )}
-    </div>
   );
 }
 

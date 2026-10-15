@@ -1,7 +1,7 @@
-import { useEffect, useState, type ReactNode } from 'react';
+import { useEffect, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { getRouteApi, Link, useNavigate } from '@tanstack/react-router';
-import { Activity, Cpu, Gauge, HardDrive, History, KeyRound, ListChecks, MoreHorizontal, Trash2 } from 'lucide-react';
+import { Activity, Cpu, Gauge, HardDrive, History, KeyRound, ListChecks, Trash2 } from 'lucide-react';
 import {
   Capability,
   zNodeMetricsPatchConfig,
@@ -19,12 +19,7 @@ import { api } from '../lib/api.js';
 import { errorMessage } from '../lib/api-error.js';
 import { Badge } from '../components/ui/badge.js';
 import { Button } from '../components/ui/button.js';
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuTrigger,
-} from '../components/ui/dropdown-menu.js';
+import { MoreActions } from '../components/layout/more-actions.js';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '../components/ui/card.js';
 import { ConfirmDialog } from '../components/layout/confirm-dialog.js';
 import { Page } from '../components/layout/page.js';
@@ -50,6 +45,7 @@ import { ResourceIntentFailures } from '../components/intents/resource-intent-fa
 import { ExtensionSlots } from '../extensions/slots.js';
 import { ServerExtensionSupport } from '../components/servers/server-extension-support.js';
 import { Switch } from '../components/ui/switch.js';
+import { Field } from '../components/layout/field.js';
 
 const routeApi = getRouteApi('/servers/$id');
 
@@ -293,18 +289,7 @@ export default function ServerDetailPage() {
         ]}
         actions={
           serverQuery.data && canManageServers ? (
-            <DropdownMenu modal={false}>
-              <DropdownMenuTrigger asChild>
-                <Button variant="outline" size="icon" aria-label="更多操作">
-                  <MoreHorizontal className="h-4 w-4" />
-                </Button>
-              </DropdownMenuTrigger>
-              <DropdownMenuContent align="end">
-                <DropdownMenuItem className="text-destructive focus:text-destructive" onSelect={() => setDeleteOpen(true)}>
-                  <Trash2 className="mr-2 h-4 w-4" />从控制面删除
-                </DropdownMenuItem>
-              </DropdownMenuContent>
-            </DropdownMenu>
+            <MoreActions actions={[{ label: '从控制面删除', icon: Trash2, destructive: true, onSelect: () => setDeleteOpen(true) }]} />
           ) : undefined
         }
       />
@@ -333,11 +318,11 @@ export default function ServerDetailPage() {
                   <CardTitle className="text-base">身份</CardTitle>
                 </CardHeader>
                 <CardContent className="grid gap-3 text-sm sm:grid-cols-2">
-                  <IdentityRow label="slug" value={<TechnicalId label="slug" value={loaded.slug} />} />
-                  <IdentityRow label="接入地址" value={<TechnicalId label="接入地址" value={loaded.apiEndpoint} />} />
-                  <IdentityRow label="Incus 版本" value={loaded.incusVersion ?? '未连接'} />
-                  <IdentityRow label="系统盘池" value={loaded.systemPoolName ?? loaded.systemPoolId ?? '未指定'} />
-                  <IdentityRow label="存储超分" value={String(loaded.storageOvercommitRatio)} />
+                  <Field label="slug" value={<TechnicalId label="slug" value={loaded.slug} />} />
+                  <Field label="接入地址" value={<TechnicalId label="接入地址" value={loaded.apiEndpoint} />} />
+                  <Field label="Incus 版本" value={loaded.incusVersion ?? '未连接'} />
+                  <Field label="系统盘池" value={loaded.systemPoolName ?? loaded.systemPoolId ?? '未指定'} />
+                  <Field label="存储超分" value={String(loaded.storageOvercommitRatio)} />
                 </CardContent>
               </Card>
               <Card>
@@ -526,11 +511,3 @@ export default function ServerDetailPage() {
   );
 }
 
-function IdentityRow({ label, value }: { label: string; value: ReactNode }) {
-  return (
-    <div className="min-w-0">
-      <p className="text-xs text-muted-foreground">{label}</p>
-      {typeof value === 'string' ? <p className="break-all text-sm">{value}</p> : value}
-    </div>
-  );
-}

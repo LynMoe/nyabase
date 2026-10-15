@@ -10,7 +10,8 @@ export const GIB = 1024 ** 3;
 export function formatBytes(bytes: number, decimals = 2): string {
   if (bytes === 0) return '0 B';
   const k = 1024;
-  const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
+  // Binary units everywhere, matching the GiB the forms ask for.
+  const sizes = ['B', 'KiB', 'MiB', 'GiB', 'TiB'];
   const i = Math.floor(Math.log(bytes) / Math.log(k));
   return `${parseFloat((bytes / Math.pow(k, i)).toFixed(decimals))} ${sizes[i]}`;
 }
@@ -50,6 +51,11 @@ export function approxGibHint(bytes: number): string {
   const gib = bytes / GIB;
   const label = Number.isInteger(gib) ? String(gib) : parseFloat(gib.toFixed(2)).toString();
   return `约 ${label} GiB`;
+}
+
+/** Capacity as plain GiB ("12.5 GiB"); `empty` for unknown. */
+export function formatGib(bytes: number | null, empty = '未知'): string {
+  return bytes === null ? empty : approxGibHint(bytes).replace(/^约 /, '');
 }
 
 /**
@@ -95,11 +101,15 @@ export function formatPercent(ratio: number): string {
 export function formatBytesCompact(bytes: number): string {
   const value = Math.abs(bytes);
   const sign = bytes < 0 ? '-' : '';
-  if (value >= 1024 ** 4) return `${sign}${(value / 1024 ** 4).toFixed(1)}T`;
-  if (value >= 1024 ** 3) return `${sign}${(value / 1024 ** 3).toFixed(1)}G`;
-  if (value >= 1024 ** 2) return `${sign}${(value / 1024 ** 2).toFixed(0)}M`;
-  if (value >= 1024) return `${sign}${Math.round(value / 1024)}K`;
-  return `${sign}${Math.round(value)}B`;
+  const scaled = (amount: number, unit: string) => {
+    const text = Number.isInteger(amount) ? String(amount) : amount.toFixed(1);
+    return `${sign}${text} ${unit}`;
+  };
+  if (value >= 1024 ** 4) return scaled(value / 1024 ** 4, 'TiB');
+  if (value >= 1024 ** 3) return scaled(value / 1024 ** 3, 'GiB');
+  if (value >= 1024 ** 2) return `${sign}${(value / 1024 ** 2).toFixed(0)} MiB`;
+  if (value >= 1024) return `${sign}${Math.round(value / 1024)} KiB`;
+  return `${sign}${Math.round(value)} B`;
 }
 
 /** Bytes per second for performance charts and occupancy lines. */

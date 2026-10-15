@@ -13,6 +13,9 @@ const buttonVariants = cva(
         outline: 'border border-input bg-background hover:bg-accent hover:text-accent-foreground',
         secondary: 'bg-secondary text-secondary-foreground hover:bg-secondary/80',
         ghost: 'hover:bg-accent hover:text-accent-foreground',
+        // Row-level removals: quiet until hovered, so a table is not a column of red.
+        'ghost-destructive': 'text-muted-foreground hover:bg-destructive/10 hover:text-destructive',
+        'outline-destructive': 'border border-destructive/40 bg-background text-destructive hover:bg-destructive/10',
         link: 'text-primary underline-offset-4 hover:underline',
       },
       size: {

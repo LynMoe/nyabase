@@ -193,7 +193,7 @@ function BindingRow({
       <TableCell className="text-right" onClick={(event) => event.stopPropagation()}>
         <div className="flex justify-end gap-2">
           <Button size="sm" variant="outline" onClick={onEdit}><Pencil className="h-3.5 w-3.5" />编辑</Button>
-          <Button size="sm" variant="destructive" onClick={onDelete}><Trash2 className="h-3.5 w-3.5" />删除</Button>
+          <Button size="sm" variant="ghost-destructive" onClick={onDelete}><Trash2 className="h-3.5 w-3.5" />删除</Button>
         </div>
       </TableCell>
     </TableRow>

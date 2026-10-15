@@ -28,17 +28,13 @@ import { QueryView } from '../components/layout/query-view.js';
 import { SectionCard } from '../components/layout/section-card.js';
 import { TechnicalId } from '../components/refs/technical-id.js';
 import { FsidConflictAlert } from '../components/storage/fsid-conflict-alert.js';
-import { approxGibHint, formatPercent, sharedBackendAvailableBytes } from '../lib/utils.js';
+import { formatPercent, sharedBackendAvailableBytes, formatGib } from '../lib/utils.js';
 import { toast } from '../hooks/use-toast.js';
 import { queryKeys } from '../lib/query-keys.js';
 import {
   parseSharedBackendFsidConflict,
   type SharedBackendFsidConflict,
 } from '../lib/storage-shrink.js';
-
-function bytesLabel(bytes: number | null): string {
-  return bytes === null ? '未知' : approxGibHint(bytes).replace(/^约 /, '');
-}
 
 export default function SharedBackendsPage() {
   const queryClient = useQueryClient();
@@ -139,9 +135,9 @@ function BackendRow({ backend }: { backend: SharedBackendDto }) {
         </Link>
         <TechnicalId label="Identity key" value={backend.identityKey} kind="opaque" />
       </TableCell>
-      <TableCell>{bytesLabel(backend.totalBytes)}</TableCell>
-      <TableCell>{bytesLabel(backend.usedBytes)}</TableCell>
-      <TableCell>{bytesLabel(available)}</TableCell>
+      <TableCell>{formatGib(backend.totalBytes)}</TableCell>
+      <TableCell>{formatGib(backend.usedBytes)}</TableCell>
+      <TableCell>{formatGib(available)}</TableCell>
       <TableCell>{formatPercent(backend.overcommitRatio)}</TableCell>
       <TableCell>{backend.hasOnlineExecutor ? '有' : '无'}</TableCell>
       <TableCell>{backend.serverIds.length} 台</TableCell>

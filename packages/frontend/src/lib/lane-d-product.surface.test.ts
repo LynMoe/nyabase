@@ -224,7 +224,7 @@ describe('lane D product UI copy', () => {
     expect(inspect).not.toMatch(/强制/);
     expect(inspect).not.toMatch(/修复/);
     expect(inspect).not.toMatch(/mutate/);
-    expect(grants).toMatch(/磁盘（G，空=不限，不含共享卷）/);
+    expect(grants).toMatch(/磁盘（GiB，留空为不限，不含共享卷）/);
     expect(backends).toMatch(/发现执行端/);
     expect(backends).toMatch(/执行端/);
     expect(backends).not.toMatch(/查看 catalog/);
@@ -309,7 +309,7 @@ describe('lane D product UI copy', () => {
     expect(grants).toMatch(/formatGrantQuotaLine/);
     expect(grants).toMatch(/formatExtensionGrantSummaries/);
     expect(grants).toMatch(/存储池（无服务器授权）/);
-    expect(grants).toMatch(/磁盘（G，空=不限，不含共享卷）/);
+    expect(grants).toMatch(/磁盘（GiB，留空为不限，不含共享卷）/);
     expect(grants).toMatch(/SectionCard/);
     expect(grants).toMatch(/grant-servers/);
     expect(grants).toMatch(/grant-pools/);
@@ -317,9 +317,11 @@ describe('lane D product UI copy', () => {
     expect(grants).toMatch(/grant-add-server/);
     expect(grants).toMatch(/grant-add-pool/);
     expect(grants).toMatch(/grant-add-backend/);
-    expect(grants).toMatch(/添加服务器授权/);
-    expect(grants).toMatch(/添加存储池授权/);
-    expect(grants).toMatch(/添加共享存储授权/);
+    // One GrantDialog shell titles every add/edit dialog from its noun.
+    expect(grants).toMatch(/`添加\$\{noun\}`/);
+    expect(grants).toMatch(/noun="服务器授权"/);
+    expect(grants).toMatch(/noun="存储池授权"/);
+    expect(grants).toMatch(/noun="共享存储授权"/);
     expect(grants).not.toMatch(/\btoolbar=/);
     expect(grants).not.toMatch(/aria-expanded/);
     expect(grants).not.toMatch(/isLocalStoragePool/);

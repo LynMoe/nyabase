@@ -25,7 +25,7 @@ import { FormField } from '../layout/form-field.js';
 import { SectionCard } from '../layout/section-card.js';
 import { Progress } from '../ui/progress.js';
 import { bindInProgress } from '../../lib/in-progress.js';
-import { approxGibHint } from '../../lib/utils.js';
+import { formatGib } from '../../lib/utils.js';
 import { observedRootUsedBytes } from '../../lib/storage-shrink.js';
 import { TechnicalId } from '../refs/technical-id.js';
 import { RootSizeDialog } from './spec-panel.js';
@@ -360,7 +360,7 @@ function mountIdentifier(label: string, value: string) {
 }
 
 function gibLabel(bytes: number): string {
-  return approxGibHint(bytes).replace(/^约 /, '');
+  return formatGib(bytes);
 }
 
 function UsageMeter({ used, total }: { used: number | null; total: number }) {

@@ -1,7 +1,7 @@
 import type { StorageDiscoverIssueDto, StoragePoolCapabilityDto } from '@nyabase/common';
 import { FailureCode } from '@nyabase/common';
 import { ApiError, apiErrorDetails } from './api-error.js';
-import { approxGibHint, formatBytes } from './utils.js';
+import { formatBytes, formatGib } from './utils.js';
 
 export type ShrinkPath = 'grow' | 'unchanged' | 'online' | 'requires_stop' | 'never';
 
@@ -60,7 +60,7 @@ export function observedRootUsedBytes(container: {
 
 export function formatObservedUsage(usedBytes: number | null): string {
   if (usedBytes === null) return '未知';
-  return approxGibHint(usedBytes).replace(/^约 /, '');
+  return formatGib(usedBytes);
 }
 
 export function validateShrinkFloor(

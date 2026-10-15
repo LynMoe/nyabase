@@ -14,7 +14,7 @@ import {
 } from '../ui/table.js';
 import { ResourceRef } from '../refs/resource-ref.js';
 import { LocalVolumeDetailDialog } from './local-volume-detail-dialog.js';
-import { approxGibHint } from '../../lib/utils.js';
+import { formatGib } from '../../lib/utils.js';
 import { volumeInProgress } from '../../lib/in-progress.js';
 import { failureCodeLabel, volumeAttentionHint, volumeLifecycleLabel } from '../../lib/status-labels.js';
 
@@ -145,8 +145,8 @@ function VolumeRow({
       ) : null}
       {showServerColumn ? <TableCell>{serverName}</TableCell> : null}
       {showPoolColumn ? <TableCell>{volume.poolName}</TableCell> : null}
-      <TableCell>{bytesLabel(volume.sizeBytes)}</TableCell>
-      <TableCell>{volume.usedBytes === null ? '未知' : bytesLabel(volume.usedBytes)}</TableCell>
+      <TableCell>{formatGib(volume.sizeBytes)}</TableCell>
+      <TableCell>{volume.usedBytes === null ? '未知' : formatGib(volume.usedBytes)}</TableCell>
       <TableCell className="max-w-[16rem] whitespace-normal">
         <VolumeAttachmentsCell
           volume={volume}
@@ -178,7 +178,7 @@ function VolumeRow({
               </Button>
             ) : null}
             {onDelete ? (
-              <Button size="sm" variant="destructive" onClick={() => onDelete(volume)}>
+              <Button size="sm" variant="ghost-destructive" onClick={() => onDelete(volume)}>
                 <Trash2 className="h-3.5 w-3.5" />删除
               </Button>
             ) : null}
@@ -242,8 +242,4 @@ function VolumeAttachmentsCell({
   }
 
   return null;
-}
-
-function bytesLabel(bytes: number): string {
-  return approxGibHint(bytes).replace(/^约 /, '');
 }

@@ -43,6 +43,8 @@ import {
   buildMinimalGroupEditPayload,
   type GroupEditFormState,
 } from '../lib/group-edit-form.js';
+import { Field } from '../components/layout/field.js';
+import { MoreActions } from '../components/layout/more-actions.js';
 
 type CatalogUser = {
   id: string;
@@ -157,9 +159,7 @@ export default function GroupDetailPage() {
         ]}
         actions={
           canManageGroups && group && !group.isSystem ? (
-            <Button variant="destructive" onClick={() => setDeleteOpen(true)}>
-              <Trash2 className="h-4 w-4" />删除用户组
-            </Button>
+            <MoreActions actions={[{ label: '删除用户组', icon: Trash2, destructive: true, onSelect: () => setDeleteOpen(true) }]} />
           ) : undefined
         }
       />
@@ -576,14 +576,14 @@ function GroupIdentityCard({ group, onSaved }: { group: GroupDto; onSaved: () =>
 function GroupIdentityFields({ group }: { group: GroupDto }) {
   return (
     <div className="grid gap-3 text-sm sm:grid-cols-2">
-      <Info label="名称" value={group.name} />
-      <Info label="类型" value={group.isSystem ? '系统组' : '自定义组'} />
-      <Info label="优先级" value={String(group.priority)} />
-      <Info label="成员" value={`${group.memberCount ?? group.members?.length ?? 0} 人`} />
-      <Info label="创建时间" value={relativeTime(group.createdAt)} />
-      <Info label="最近更新" value={relativeTime(group.updatedAt)} />
+      <Field label="名称" value={group.name} />
+      <Field label="类型" value={group.isSystem ? '系统组' : '自定义组'} />
+      <Field label="优先级" value={String(group.priority)} />
+      <Field label="成员" value={`${group.memberCount ?? group.members?.length ?? 0} 人`} />
+      <Field label="创建时间" value={relativeTime(group.createdAt)} />
+      <Field label="最近更新" value={relativeTime(group.updatedAt)} />
       <div className="sm:col-span-2">
-        <Info label="描述" value={group.description ?? '无描述'} />
+        <Field label="描述" value={group.description ?? '无描述'} />
       </div>
     </div>
   );
@@ -609,15 +609,6 @@ function CapabilityBadges({ capabilities }: { capabilities: readonly Capability[
       {capabilities.map((capability) => (
         <Badge key={capability} variant="outline">{capabilityLabel(capability)}</Badge>
       ))}
-    </div>
-  );
-}
-
-function Info({ label, value }: { label: string; value: string }) {
-  return (
-    <div>
-      <p className="text-xs text-muted-foreground">{label}</p>
-      <p className="mt-1 break-all">{value}</p>
     </div>
   );
 }

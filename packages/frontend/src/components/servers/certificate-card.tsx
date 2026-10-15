@@ -1,4 +1,3 @@
-import type { ReactNode } from 'react';
 import { RotateCw } from 'lucide-react';
 import {
   CertificateState,
@@ -19,6 +18,7 @@ import { certificateStatePending, certificateTrustPending } from '../../lib/in-p
 import { relativeTime } from '../../lib/utils.js';
 import { ResourceRef } from '../refs/resource-ref.js';
 import { TechnicalId } from '../refs/technical-id.js';
+import { Field } from '../layout/field.js';
 
 export function CertificateCard({
   serverNames,
@@ -110,15 +110,6 @@ export function CertificateCard({
   );
 }
 
-function InfoRow({ label, value }: { label: string; value: ReactNode }) {
-  return (
-    <div className="min-w-0">
-      <p className="text-xs text-muted-foreground">{label}</p>
-      {typeof value === 'string' ? <p className="break-all text-sm">{value}</p> : <div className="mt-1">{value}</div>}
-    </div>
-  );
-}
-
 function certificateStateLabel(state: string): string {
   switch (state) {
     case CertificateState.Staged: return '轮换中';
@@ -148,9 +139,9 @@ function CertificateDetails({
   return (
     <div className="space-y-3">
       <div className="grid gap-3 sm:grid-cols-3">
-        <InfoRow label="代次" value={String(certificate.generation)} />
-        <InfoRow label="指纹" value={<TechnicalId label="指纹" value={certificate.fingerprint} />} />
-        <InfoRow
+        <Field label="代次" value={String(certificate.generation)} />
+        <Field label="指纹" value={<TechnicalId label="指纹" value={certificate.fingerprint} />} />
+        <Field
           label="状态"
           value={(
             <StatusBadge
@@ -161,9 +152,9 @@ function CertificateDetails({
             />
           )}
         />
-        <InfoRow label="生效时间" value={new Date(certificate.notBefore).toLocaleString()} />
-        <InfoRow label="过期时间" value={new Date(certificate.notAfter).toLocaleString()} />
-        <InfoRow
+        <Field label="生效时间" value={new Date(certificate.notBefore).toLocaleString()} />
+        <Field label="过期时间" value={new Date(certificate.notAfter).toLocaleString()} />
+        <Field
           label="剩余有效期"
           value={formatCertRemainingLabel(certificate.notAfter)}
         />

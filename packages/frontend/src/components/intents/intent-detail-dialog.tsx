@@ -1,4 +1,3 @@
-import type { ReactNode } from 'react';
 import { useMutation, useQuery } from '@tanstack/react-query';
 import { Link } from '@tanstack/react-router';
 import {
@@ -38,6 +37,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from '../ui/dialog.js';
+import { Field } from '../layout/field.js';
 
 function intentImageId(intent: IntentDto): string {
   const fromSummary = intent.requestSummary.imageId;
@@ -118,15 +118,6 @@ function JsonBlock({ value }: { value: unknown }) {
   );
 }
 
-function DetailItem({ label, value }: { label: string; value: ReactNode }) {
-  return (
-    <div className="space-y-1">
-      <div className="text-xs text-muted-foreground">{label}</div>
-      <div className="text-sm">{value}</div>
-    </div>
-  );
-}
-
 function statusBadgeVariant(status: string) {
   if (status === IntentStatus.Succeeded) return 'success' as const;
   if (status === IntentStatus.Failed) return 'destructive' as const;
@@ -186,8 +177,8 @@ export function IntentDetailDialog({
               <p className="text-xs text-muted-foreground">刷新中...</p>
             )}
             <section className="grid gap-3 sm:grid-cols-2">
-              <DetailItem label="类型" value={intentKindLabel(view.kind)} />
-              <DetailItem
+              <Field label="类型" value={intentKindLabel(view.kind)} />
+              <Field
                 label="状态"
                 value={(
                   <StatusBadge
@@ -198,13 +189,13 @@ export function IntentDetailDialog({
                   />
                 )}
               />
-              <DetailItem label="时间" value={new Date(view.createdAt).toLocaleString()} />
-              <DetailItem label="尝试" value={formatIntentAttempt(view)} />
-              <DetailItem
+              <Field label="时间" value={new Date(view.createdAt).toLocaleString()} />
+              <Field label="尝试" value={formatIntentAttempt(view)} />
+              <Field
                 label="下次尝试"
                 value={view.nextAttemptAt ? new Date(view.nextAttemptAt).toLocaleString() : '—'}
               />
-              <DetailItem
+              <Field
                 label="资源"
                 value={(
                   <div title={view.resourceId}>
@@ -214,11 +205,11 @@ export function IntentDetailDialog({
                   </div>
                 )}
               />
-              <DetailItem
+              <Field
                 label="服务器"
                 value={<IntentServerRef serverId={view.serverId} link={canManageServers} />}
               />
-              <DetailItem
+              <Field
                 label="请求人"
                 value={view.requestedBy
                   ? <ResourceRef kind="user" id={view.requestedBy} />

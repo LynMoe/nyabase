@@ -35,6 +35,8 @@ import { relativeTime } from '../lib/utils.js';
 import { toast } from '../hooks/use-toast.js';
 import { useAuthStore } from '../store/auth.js';
 import { type UserDetailTab } from '../lib/user-detail.js';
+import { Field } from '../components/layout/field.js';
+import { MoreActions } from '../components/layout/more-actions.js';
 
 const routeApi = getRouteApi('/users/$id');
 
@@ -133,9 +135,7 @@ export default function UserDetailPage() {
               <Button variant="outline" onClick={() => { setResetSecret(null); setResetOpen(true); }}>
                 <KeyRound className="h-4 w-4" />重置密码
               </Button>
-              <Button variant="destructive" onClick={() => setDeleteOpen(true)}>
-                <Trash2 className="h-4 w-4" />删除用户
-              </Button>
+              <MoreActions actions={[{ label: '删除用户', icon: Trash2, destructive: true, onSelect: () => setDeleteOpen(true) }]} />
             </>
           ) : undefined
         }
@@ -169,8 +169,8 @@ export default function UserDetailPage() {
                 ) : undefined}
               >
                 <div className="grid gap-3 text-sm sm:grid-cols-2">
-                  <Info label="显示名称" value={loaded.displayName} />
-                  <Info label="用户名" value={`@${loaded.username}`} mono />
+                  <Field label="显示名称" value={loaded.displayName} />
+                  <Field label="用户名" value={`@${loaded.username}`} mono />
                   <div>
                     <p className="text-xs text-muted-foreground">状态</p>
                     <div className="mt-1">
@@ -181,7 +181,7 @@ export default function UserDetailPage() {
                       />
                     </div>
                   </div>
-                  <Info label="创建时间" value={relativeTime(loaded.createdAt)} />
+                  <Field label="创建时间" value={relativeTime(loaded.createdAt)} />
                 </div>
               </SectionCard>
               <SectionCard
@@ -395,15 +395,6 @@ function UserIdentityDialog({
         </DialogFooter>
       </DialogContent>
     </Dialog>
-  );
-}
-
-function Info({ label, value, mono = false }: { label: string; value: string; mono?: boolean }) {
-  return (
-    <div>
-      <p className="text-xs text-muted-foreground">{label}</p>
-      <p className={mono ? 'mt-1 break-all font-mono text-xs' : 'mt-1 break-all'}>{value}</p>
-    </div>
   );
 }
 

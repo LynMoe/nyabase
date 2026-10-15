@@ -1,4 +1,3 @@
-import type { ReactNode } from 'react';
 import type { SharedVolumeDto } from '@nyabase/common';
 import { StatusBadge } from '../layout/status-badge.js';
 import { Button } from '../ui/button.js';
@@ -13,9 +12,10 @@ import {
 import { ResourceIntentFailures, ResourceIntentHistory } from '../intents/resource-intent-failures.js';
 import { ResourceRef } from '../refs/resource-ref.js';
 import { formatObservedUsage } from '../../lib/storage-shrink.js';
-import { approxGibHint, relativeTime } from '../../lib/utils.js';
+import { relativeTime, formatGib } from '../../lib/utils.js';
 import { volumeInProgress } from '../../lib/in-progress.js';
 import { failureCodeLabel, volumeAttentionHint, volumeLifecycleLabel } from '../../lib/status-labels.js';
+import { Field } from '../layout/field.js';
 
 function shrinkLabel(volume: SharedVolumeDto): string {
   if (volume.capability.shrinkNever) return '不可缩容';
@@ -56,16 +56,14 @@ export function SharedVolumeDetailDialog({
         </DialogHeader>
         <div className="grid gap-3 text-sm sm:grid-cols-2">
           {plane === 'admin' ? (
-            <Info label="所有者">
-              <ResourceRef kind="user" id={volume.ownerId} />
-            </Info>
+            <Field label="所有者" value={<ResourceRef kind="user" id={volume.ownerId} />} />
           ) : null}
-          <Info label="共享后端" value={volume.sharedBackendName} />
-          <Info label="容量" value={approxGibHint(volume.sizeBytes).replace(/^约 /, '')} />
-          <Info label="已用" value={formatObservedUsage(volume.usedBytes)} />
-          <Info label="缩容能力" value={shrinkLabel(volume)} />
-          <Info label="目录" value={volume.dirEnsured ? '已在机器上落地' : '尚未挂载过'} />
-          <Info label="最近更新" value={relativeTime(volume.updatedAt)} />
+          <Field label="共享后端" value={volume.sharedBackendName} />
+          <Field label="容量" value={formatGib(volume.sizeBytes)} />
+          <Field label="已用" value={formatObservedUsage(volume.usedBytes)} />
+          <Field label="缩容能力" value={shrinkLabel(volume)} />
+          <Field label="目录" value={volume.dirEnsured ? '已在机器上落地' : '尚未挂载过'} />
+          <Field label="最近更新" value={relativeTime(volume.updatedAt)} />
           <div className="sm:col-span-2">
             <p className="text-xs text-muted-foreground">状态</p>
             <div className="mt-1">
@@ -107,19 +105,3 @@ export function SharedVolumeDetailDialog({
   );
 }
 
-function Info({
-  label,
-  value,
-  children,
-}: {
-  label: string;
-  value?: string;
-  children?: ReactNode;
-}) {
-  return (
-    <div>
-      <p className="text-xs text-muted-foreground">{label}</p>
-      <div className="mt-1 break-all">{children ?? value}</div>
-    </div>
-  );
-}

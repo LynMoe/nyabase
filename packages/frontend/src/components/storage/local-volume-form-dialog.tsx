@@ -20,7 +20,7 @@ import { Input } from '../ui/input.js';
 import { FormField } from '../layout/form-field.js';
 import { VolumeShrinkOrchestrationDialog } from './volume-shrink-orchestration-dialog.js';
 import { bytesToGiBInput, GIB, SelectField } from './volume-form-fields.js';
-import { approxGibHint, grantAvailableLabel } from '../../lib/utils.js';
+import { approxGibHint, grantAvailableLabel, formatGib } from '../../lib/utils.js';
 import { formatGrantBytes } from '../../lib/grant-quota.js';
 import { queryKeys } from '../../lib/query-keys.js';
 import { toast } from '../../hooks/use-toast.js';
@@ -175,7 +175,7 @@ export function LocalVolumeFormDialog({
   const submit = () => {
     setError(null);
     if (!Number.isFinite(nextSize) || nextSize <= 0) {
-      setError('请输入有效的容量（G）');
+      setError('请输入有效的容量（GiB）');
       return;
     }
     if (createQuotaBlocked) {
@@ -273,7 +273,7 @@ export function LocalVolumeFormDialog({
                     <p className="text-xs text-muted-foreground">
                       {selectedCapacityPool.availableBytes === null
                         ? '物理剩余未知'
-                        : `物理剩余 ${approxGibHint(selectedCapacityPool.availableBytes).replace(/^约 /, '')}`}
+                        : `物理剩余 ${formatGib(selectedCapacityPool.availableBytes)}`}
                       {selectedCapacityPool.quotaEffective === true ? ' · 配额生效' : ' · 配额未生效'}
                     </p>
                   ) : null}
@@ -317,7 +317,7 @@ export function LocalVolumeFormDialog({
                     已选池：{selectedPool.displayName ?? selectedPool.incusName}
                     {selectedPool.totalBytes === null
                       ? ' · 容量未知'
-                      : ` · ${approxGibHint(selectedPool.usedBytes ?? 0).replace(/^约 /, '')} / ${approxGibHint(selectedPool.totalBytes).replace(/^约 /, '')}`}
+                      : ` · ${formatGib(selectedPool.usedBytes ?? 0)} / ${formatGib(selectedPool.totalBytes)}`}
                     {selectedPool.quotaEffective === true ? ' · 配额生效' : ' · 配额未生效'}
                   </p>
                 )}

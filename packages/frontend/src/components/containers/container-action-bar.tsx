@@ -1,14 +1,9 @@
 import { useState } from 'react';
-import { MoreHorizontal, Play, RotateCw, Square, Trash2 } from 'lucide-react';
+import { Play, RotateCw, Square, Trash2 } from 'lucide-react';
 import type { ContainerAction, ContainerDto } from '@nyabase/common';
 import { ConfirmDialog } from '../layout/confirm-dialog.js';
+import { MoreActions } from '../layout/more-actions.js';
 import { Button } from '../ui/button.js';
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuTrigger,
-} from '../ui/dropdown-menu.js';
 import { Hint } from '../ui/hint.js';
 
 type PowerAction = Extract<ContainerAction, 'start' | 'stop' | 'restart'>;
@@ -48,28 +43,16 @@ export function ContainerActionBar({
         <ActionButton action="stop" icon={Square} container={container} layout={layout} onClick={() => requestAction('stop')} pending={pending} />
         <ActionButton action="restart" icon={RotateCw} container={container} layout={layout} onClick={() => requestAction('restart')} pending={pending} />
         {showDelete && (
-          <DropdownMenu modal={false}>
-            <DropdownMenuTrigger asChild>
-              <Button size="icon" variant="outline" className="h-9 w-9" aria-label="更多操作">
-                <MoreHorizontal className="h-4 w-4" />
-              </Button>
-            </DropdownMenuTrigger>
-            <DropdownMenuContent align="end" className="w-56">
-              <DropdownMenuItem
-                className="text-destructive focus:text-destructive"
-                disabled={!deleteAvailability.enabled || pending}
-                onSelect={() => requestAction('delete')}
-              >
-                <Trash2 className="mr-2 h-4 w-4" />
-                <span className="flex flex-col">
-                  <span>删除容器</span>
-                  {!deleteAvailability.enabled && deleteAvailability.message ? (
-                    <span className="text-xs text-muted-foreground">{deleteAvailability.message}</span>
-                  ) : null}
-                </span>
-              </DropdownMenuItem>
-            </DropdownMenuContent>
-          </DropdownMenu>
+          <MoreActions
+            actions={[{
+              label: '删除容器',
+              icon: Trash2,
+              destructive: true,
+              disabled: !deleteAvailability.enabled || pending,
+              description: deleteAvailability.enabled ? undefined : deleteAvailability.message,
+              onSelect: () => requestAction('delete'),
+            }]}
+          />
         )}
       </div>
       <ConfirmDialog

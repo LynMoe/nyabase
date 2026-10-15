@@ -44,6 +44,7 @@ import {
   auditResourceTypeOptions,
 } from '../lib/audit-labels.js';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '../components/ui/select.js';
+import { Field } from '../components/layout/field.js';
 
 const PAGE_SIZES = [25, 50, 100] as const;
 type AuditPageSize = (typeof PAGE_SIZES)[number];
@@ -279,12 +280,12 @@ function AuditDetailDialog({
               </div>
             )}
             <section className="grid gap-3 lg:grid-cols-2">
-              <DetailItem label="时间" value={new Date(log.ts).toLocaleString('zh-CN')} />
-              <DetailItem label="操作" value={auditActionLabel(log.action)} />
-              <DetailItem label="操作者" value={actorLabel(log)} />
-              <DetailItem label="操作者 ID" value={log.actorId ?? 'system'} mono />
-              <DetailItem label="目标" value={targetLabel(log)} />
-              <DetailItem label="目标 ID" value={log.targetId ?? '无'} mono />
+              <Field label="时间" value={new Date(log.ts).toLocaleString('zh-CN')} />
+              <Field label="操作" value={auditActionLabel(log.action)} />
+              <Field label="操作者" value={actorLabel(log)} />
+              <Field label="操作者 ID" value={log.actorId ?? 'system'} mono />
+              <Field label="目标" value={targetLabel(log)} />
+              <Field label="目标 ID" value={log.targetId ?? '无'} mono />
             </section>
 
             <section className="space-y-2">
@@ -390,25 +391,6 @@ function SnapshotPanel({
           ))}
         </dl>
       )}
-    </div>
-  );
-}
-
-function DetailItem({
-  label,
-  value,
-  mono = false,
-}: {
-  label: string;
-  value: string;
-  mono?: boolean;
-}) {
-  return (
-    <div className="rounded-lg border border-border bg-muted/20 p-3">
-      <div className="text-xs font-medium text-muted-foreground">{label}</div>
-      <div className={cn('mt-1 break-all text-sm text-foreground', mono && 'font-mono text-xs')}>
-        {value}
-      </div>
     </div>
   );
 }

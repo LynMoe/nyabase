@@ -14,7 +14,7 @@ import {
 import { ResourceRef } from '../refs/resource-ref.js';
 import { SharedVolumeDetailDialog } from './shared-volume-detail-dialog.js';
 import { formatObservedUsage } from '../../lib/storage-shrink.js';
-import { approxGibHint } from '../../lib/utils.js';
+import { formatGib } from '../../lib/utils.js';
 import { volumeInProgress } from '../../lib/in-progress.js';
 import { failureCodeLabel, volumeAttentionHint, volumeLifecycleLabel } from '../../lib/status-labels.js';
 
@@ -127,7 +127,7 @@ function SharedVolumeRow({
         </TableCell>
       ) : null}
       {showBackendColumn ? <TableCell>{volume.sharedBackendName}</TableCell> : null}
-      <TableCell>{approxGibHint(volume.sizeBytes).replace(/^约 /, '')}</TableCell>
+      <TableCell>{formatGib(volume.sizeBytes)}</TableCell>
       <TableCell>{formatObservedUsage(volume.usedBytes)}</TableCell>
       <TableCell className="max-w-[16rem] whitespace-normal">
         {volume.attachments.length === 0 ? (
@@ -167,7 +167,7 @@ function SharedVolumeRow({
               </Button>
             ) : null}
             {onDelete ? (
-              <Button size="sm" variant="destructive" onClick={() => onDelete(volume)}>
+              <Button size="sm" variant="ghost-destructive" onClick={() => onDelete(volume)}>
                 <Trash2 className="h-3.5 w-3.5" />删除
               </Button>
             ) : null}

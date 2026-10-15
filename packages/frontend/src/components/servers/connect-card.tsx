@@ -1,4 +1,4 @@
-import { useState, type ReactNode } from 'react';
+import { useState } from 'react';
 import { KeyRound } from 'lucide-react';
 import type { ServerDto } from '@nyabase/common';
 import { Button } from '../ui/button.js';
@@ -7,6 +7,7 @@ import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from '
 import { Input } from '../ui/input.js';
 import { FormField } from '../layout/form-field.js';
 import { TechnicalId } from '../refs/technical-id.js';
+import { Field } from '../layout/field.js';
 
 export function ConnectCard({
   server,
@@ -37,13 +38,13 @@ export function ConnectCard({
         </Button>
       </CardHeader>
       <CardContent className="space-y-3">
-        <InfoRow
+        <Field
           label="已观测指纹"
           value={server.serverCertFingerprint
             ? <TechnicalId label="已观测指纹" value={server.serverCertFingerprint} />
             : '尚未观测'}
         />
-        <InfoRow label="Incus 版本" value={server.incusVersion ?? '尚未连接'} />
+        <Field label="Incus 版本" value={server.incusVersion ?? '尚未连接'} />
         {server.lastError && <p className="break-all text-xs text-destructive">{server.lastError}</p>}
       </CardContent>
       {open ? (
@@ -89,11 +90,3 @@ export function ConnectCard({
   );
 }
 
-function InfoRow({ label, value }: { label: string; value: ReactNode }) {
-  return (
-    <div className="min-w-0">
-      <p className="text-xs text-muted-foreground">{label}</p>
-      {typeof value === 'string' ? <p className="break-all text-sm">{value}</p> : <div className="mt-1">{value}</div>}
-    </div>
-  );
-}

@@ -157,12 +157,7 @@ export default function UsersPage() {
                     {canManageUsers ? (
                       <TableCell className="text-right">
                         {user.id !== currentUserId ? (
-                          <Button
-                            size="sm"
-                            variant="ghost"
-                            className="text-muted-foreground hover:bg-destructive/10 hover:text-destructive"
-                            onClick={() => setDeleteUser(user)}
-                          >
+                          <Button size="sm" variant="ghost-destructive" onClick={() => setDeleteUser(user)}>
                             <Trash2 className="h-4 w-4" />删除
                           </Button>
                         ) : null}

@@ -1,4 +1,4 @@
-import { useEffect, useState, type ReactNode } from 'react';
+import { useEffect, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { getRouteApi, useNavigate } from '@tanstack/react-router';
 import { Gauge, HardDrive, Pencil, RefreshCw, Server, Trash2 } from 'lucide-react';
@@ -36,7 +36,7 @@ import { FsidConflictAlert } from '../components/storage/fsid-conflict-alert.js'
 import { SharedVolumeCatalogInspectDialog } from '../components/storage/shared-volume-catalog-inspect.js';
 import { SharedVolumeTable } from '../components/storage/shared-volume-table.js';
 import { TechnicalId } from '../components/refs/technical-id.js';
-import { approxGibHint, formatPercent, relativeTime, sharedBackendAvailableBytes } from '../lib/utils.js';
+import { formatPercent, relativeTime, sharedBackendAvailableBytes, formatGib } from '../lib/utils.js';
 import { toast } from '../hooks/use-toast.js';
 import { volumeInProgress } from '../lib/in-progress.js';
 import { queryKeys } from '../lib/query-keys.js';
@@ -51,6 +51,8 @@ import { useAuthStore } from '../store/auth.js';
 import {
   type SharedBackendDetailTab,
 } from '../lib/shared-backend-detail.js';
+import { Field } from '../components/layout/field.js';
+import { MoreActions } from '../components/layout/more-actions.js';
 
 const routeApi = getRouteApi('/shared-backends/$id');
 
@@ -59,10 +61,6 @@ const TAB_ITEMS = [
   ['executors', '执行端', Server],
   ['volumes', '租户卷', HardDrive],
 ] as const;
-
-function bytesLabel(bytes: number | null): string {
-  return bytes === null ? '未知' : approxGibHint(bytes).replace(/^约 /, '');
-}
 
 export default function SharedBackendDetailPage() {
   const { id } = routeApi.useParams();
@@ -224,9 +222,7 @@ export default function SharedBackendDetailPage() {
         ]}
         actions={
           backend && canManageSharedBackends ? (
-            <Button variant="destructive" onClick={() => setDeleteOpen(true)}>
-              <Trash2 className="h-4 w-4" />删除后端
-            </Button>
+            <MoreActions actions={[{ label: '删除后端', icon: Trash2, destructive: true, onSelect: () => setDeleteOpen(true) }]} />
           ) : undefined
         }
       />
@@ -274,12 +270,12 @@ export default function SharedBackendDetailPage() {
                   ) : undefined}
                 >
                   <div className="grid gap-3 text-sm sm:grid-cols-2">
-                    <IdentityRow label="名称" value={loaded.name} />
-                    <IdentityRow label="显示名称" value={loaded.displayName ?? '—'} />
-                    <IdentityRow label="identity key" value={<TechnicalId label="identity key" value={loaded.identityKey} />} />
-                    <IdentityRow label="Ceph FSID" value={<TechnicalId label="Ceph FSID" value={loaded.cephFsid} />} />
-                    <IdentityRow label="超分比例" value={formatPercent(loaded.overcommitRatio)} />
-                    <IdentityRow label="最近更新" value={relativeTime(loaded.updatedAt)} />
+                    <Field label="名称" value={loaded.name} />
+                    <Field label="显示名称" value={loaded.displayName ?? '—'} />
+                    <Field label="identity key" value={<TechnicalId label="identity key" value={loaded.identityKey} />} />
+                    <Field label="Ceph FSID" value={<TechnicalId label="Ceph FSID" value={loaded.cephFsid} />} />
+                    <Field label="超分比例" value={formatPercent(loaded.overcommitRatio)} />
+                    <Field label="最近更新" value={relativeTime(loaded.updatedAt)} />
                   </div>
                 </SectionCard>
                 <Card>
@@ -287,11 +283,11 @@ export default function SharedBackendDetailPage() {
                     <CardTitle className="text-base">容量</CardTitle>
                   </CardHeader>
                   <CardContent className="grid gap-3 text-sm sm:grid-cols-2 lg:grid-cols-3">
-                    <IdentityRow label="容量" value={bytesLabel(loaded.totalBytes)} />
-                    <IdentityRow label="已用" value={bytesLabel(loaded.usedBytes)} />
-                    <IdentityRow label="可用" value={bytesLabel(available)} />
-                    <IdentityRow label="在线执行端" value={loaded.hasOnlineExecutor ? '有' : '无'} />
-                    <IdentityRow label="服务器" value={`${loaded.serverIds.length} 台`} />
+                    <Field label="容量" value={formatGib(loaded.totalBytes)} />
+                    <Field label="已用" value={formatGib(loaded.usedBytes)} />
+                    <Field label="可用" value={formatGib(available)} />
+                    <Field label="在线执行端" value={loaded.hasOnlineExecutor ? '有' : '无'} />
+                    <Field label="服务器" value={`${loaded.serverIds.length} 台`} />
                   </CardContent>
                 </Card>
               </TabsContent>
@@ -336,8 +332,8 @@ export default function SharedBackendDetailPage() {
                               <TableCell>{executor.serverName}</TableCell>
                               <TableCell className="font-mono">{executor.incusName}</TableCell>
                               <TableCell>{executor.registered ? '已登记' : '未登记'}</TableCell>
-                              <TableCell>{bytesLabel(executor.totalBytes)}</TableCell>
-                              <TableCell>{bytesLabel(executor.usedBytes)}</TableCell>
+                              <TableCell>{formatGib(executor.totalBytes)}</TableCell>
+                              <TableCell>{formatGib(executor.usedBytes)}</TableCell>
                               {canManageSharedBackends ? (
                                 <TableCell className="text-right">
                                   <Button
@@ -454,11 +450,3 @@ export default function SharedBackendDetailPage() {
   );
 }
 
-function IdentityRow({ label, value }: { label: string; value: ReactNode }) {
-  return (
-    <div>
-      <p className="text-xs text-muted-foreground">{label}</p>
-      {typeof value === 'string' ? <p className="break-all">{value}</p> : value}
-    </div>
-  );
-}

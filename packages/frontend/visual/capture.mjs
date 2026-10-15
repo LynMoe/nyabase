@@ -394,6 +394,7 @@ function mockApi(urlString, method) {
 
   if (p === '/volumes' || p === '/admin/volumes') return json([volume]);
   if (p === '/images' || p === '/admin/images') return json([image]);
+  if (p === '/admin/images/img-1') return json(image);
   if (p === '/admin/images/catalog') return json([{
     alias: 'ubuntu/24.04',
     aliases: ['ubuntu/24.04', 'ubuntu/noble'],
@@ -413,6 +414,7 @@ function mockApi(urlString, method) {
   if (p === '/admin/groups') return json([group]);
   if (p === '/admin/groups/grp-users') return json(group);
   if (p === '/admin/shared-backends' || p === '/shared-backends') return json([backend]);
+  if (p === '/admin/shared-backends/be-1') return json(backend);
   if (p === '/admin/ip-pools') return json([ipPool]);
   if (p === '/http-proxy/bindings' || p === '/admin/http-proxy/bindings') return json([binding]);
   if (p === '/http-proxy/domain-pools' || p === '/admin/http-proxy/domain-pools') return json([domainPool]);
@@ -752,6 +754,17 @@ async function captureViewport(browser, viewport, label) {
   }, THEME);
   session = false;
   const page = await context.newPage();
+  // Render crashes and uncaught errors would otherwise only show up as an
+  // error-boundary card in a screenshot nobody opens.
+  const pageErrors = [];
+  page.on('pageerror', (error) => pageErrors.push(error.message));
+  const problems = async (name) => {
+    const crashed = await page.getByText('页面出错了').count();
+    const errors = pageErrors.splice(0);
+    if (crashed) errors.push('error boundary rendered');
+    return errors.length ? { name, errors } : null;
+  };
+  const issues = [];
   await page.route('**/api/**', async (route) => {
     const req = route.request();
     const res = mockApi(req.url(), req.method());
@@ -775,6 +788,8 @@ async function captureViewport(browser, viewport, label) {
     await page.goto(`${BASE}${item.path}`, { waitUntil: 'domcontentloaded' });
     await waitSettled(page);
     files.push({ name: item.name, file: await shot(page, dir, item.name), kind: 'page' });
+    const issue = await problems(item.name);
+    if (issue) issues.push(issue);
   }
 
   if (label === 'mobile' && (!only || only.has('mobile-nav-sheet'))) {
@@ -798,10 +813,13 @@ async function captureViewport(browser, viewport, label) {
       continue;
     }
     files.push({ name: dialog.name, file: await shot(page, dir, dialog.name), kind: 'dialog' });
+    const issue = await problems(dialog.name);
+    if (issue) issues.push(issue);
     await closeOverlay(page);
   }
 
   await context.close();
+  for (const issue of issues) console.warn(`[${label}] ${issue.name}: ${issue.errors.join(' | ')}`);
   return files;
 }
 

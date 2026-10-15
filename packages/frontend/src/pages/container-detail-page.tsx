@@ -1,5 +1,5 @@
 import { useMemo, useState } from 'react';
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { getRouteApi, useNavigate } from '@tanstack/react-router';
 import { Gauge, History, Terminal, TriangleAlert } from 'lucide-react';
 import {
@@ -21,7 +21,7 @@ import {
   type VolumeDto,
 } from '@nyabase/common';
 import { api } from '../lib/api.js';
-import { errorMessage } from '../lib/api-error.js';
+import { useActionMutation } from '../hooks/use-action-mutation.js';
 import { useAuthStore } from '../store/auth.js';
 import { Alert, AlertDescription } from '../components/ui/alert.js';
 import { Button } from '../components/ui/button.js';
@@ -54,7 +54,6 @@ import {
   containerStatusLabel,
   lifecyclePhaseLabel,
 } from '../lib/status-labels.js';
-import { toast } from '../hooks/use-toast.js';
 
 const userRouteApi = getRouteApi('/containers/$containerId');
 const adminRouteApi = getRouteApi('/manage/containers/$containerId');
@@ -188,66 +187,61 @@ function ContainerDetailContent({
     void queryClient.invalidateQueries({ queryKey: queryKeys.containers.intents(admin ? 'admin' : 'user', containerId) });
   };
 
-  const intentToast = (title: string, _intent?: IntentAcceptedDto) => {
-    toast({ title });
-  };
-
-  const action = useMutation({
+  const action = useActionMutation({
     mutationFn: (name: Extract<ContainerAction, 'start' | 'stop' | 'restart' | 'delete'>) =>
       api.post<IntentAcceptedDto>(`${base}/actions/${name}`),
-    onSuccess: (intent, name) => {
-      intentToast(containerActionSubmittedTitle(name), intent);
-      invalidate();
-    },
-    onError: (error) => toast({ title: '容器操作失败', description: errorMessage(error), variant: 'destructive' }),
+    successTitle: (name) => containerActionSubmittedTitle(name),
+    errorTitle: '容器操作失败',
+    onSuccess: invalidate,
   });
-  const updateLimits = useMutation({
+  const updateLimits = useActionMutation({
     mutationFn: (body: PatchContainerLimitsRequest) => api.patch<IntentAcceptedDto>(`${base}/limits`, body),
-    onSuccess: (intent) => { intentToast('已提交规格更新，正在生效', intent); invalidate(); },
-    onError: (error) => toast({ title: '规格更新失败', description: errorMessage(error), variant: 'destructive' }),
+    successTitle: '已提交规格更新，正在生效',
+    errorTitle: '规格更新失败',
+    onSuccess: invalidate,
   });
-  const resizeRoot = useMutation({
+  const resizeRoot = useActionMutation({
     mutationFn: (body: PatchContainerRootSizeRequest) => api.patch<IntentAcceptedDto>(`${base}/root-size`, body),
-    onSuccess: (intent) => { intentToast('已提交系统盘调整，正在生效', intent); invalidate(); },
-    onError: (error) => toast({ title: '系统盘调整失败', description: errorMessage(error), variant: 'destructive' }),
+    successTitle: '已提交系统盘调整，正在生效',
+    errorTitle: '系统盘调整失败',
+    onSuccess: invalidate,
   });
-  const updateExtension = useMutation({
+  const updateExtension = useActionMutation({
     mutationFn: ({ extensionId, payload }: { extensionId: string; payload: unknown }) =>
       api.patch<IntentAcceptedDto>(`${base}/extensions/${extensionId}`, payload),
-    onSuccess: (intent) => { intentToast('已提交扩展更新，正在生效', intent); invalidate(); },
-    onError: (error) => toast({ title: '扩展更新失败', description: errorMessage(error), variant: 'destructive' }),
+    successTitle: '已提交扩展更新，正在生效',
+    errorTitle: '扩展更新失败',
+    onSuccess: invalidate,
   });
-  const attachLocal = useMutation({
+  const attachLocal = useActionMutation({
     mutationFn: (body: AttachVolumeRequest) => api.post<IntentAcceptedDto>(`${base}/volumes`, body),
-    onSuccess: (intent) => { intentToast('已提交挂载，正在生效', intent); invalidate(); },
-    onError: (error) => toast({ title: '挂载失败', description: errorMessage(error), variant: 'destructive' }),
+    successTitle: '已提交挂载，正在生效',
+    errorTitle: '挂载失败',
+    onSuccess: invalidate,
   });
-  const attachShared = useMutation({
+  const attachShared = useActionMutation({
     mutationFn: (body: AttachVolumeRequest) => api.post<IntentAcceptedDto>(`${base}/shared-volumes`, body),
-    onSuccess: (intent) => { intentToast('已提交挂载，正在生效', intent); invalidate(); },
-    onError: (error) => toast({ title: '挂载失败', description: errorMessage(error), variant: 'destructive' }),
+    successTitle: '已提交挂载，正在生效',
+    errorTitle: '挂载失败',
+    onSuccess: invalidate,
   });
-  const detach = useMutation({
+  const detach = useActionMutation({
     mutationFn: (attachmentId: string) => {
       const path = detachTarget?.kind === 'shared' ? 'shared-volumes' : 'volumes';
       return api.delete<IntentAcceptedDto>(`${base}/${path}/${attachmentId}`);
     },
-    onSuccess: (intent) => {
-      intentToast('已提交卸载，正在生效', intent);
+    successTitle: '已提交卸载，正在生效',
+    errorTitle: '卸载失败',
+    onSuccess: () => {
       setDetachTarget(null);
       invalidate();
     },
-    onError: (error) => toast({ title: '卸载失败', description: errorMessage(error), variant: 'destructive' }),
   });
-  const repairSsh = useMutation({
+  const repairSsh = useActionMutation({
     mutationFn: () => api.post<{ woken: boolean }>(`${base}/actions/repair-ssh`),
-    onSuccess: () => {
-      toast({
-        title: '已提交 SSH 修复',
-      });
-      invalidate();
-    },
-    onError: (error) => toast({ title: 'SSH 修复失败', description: errorMessage(error), variant: 'destructive' }),
+    successTitle: '已提交 SSH 修复',
+    errorTitle: 'SSH 修复失败',
+    onSuccess: invalidate,
   });
 
   const attachments = attachmentsQuery.data

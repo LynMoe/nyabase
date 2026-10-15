@@ -19,6 +19,6 @@ describe('formatGrantSummary', () => {
       [NVIDIA_GPU_EXTENSION_ID]: {
         pciAddresses: ['00000000:41:00.0', '00000000:a1:00.0'],
       },
-    })).toBe('2GPU');
+    })).toBe('2 张 GPU');
   });
 });

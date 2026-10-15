@@ -119,7 +119,7 @@ export default function GroupsPage() {
                     </TableCell>
                     {canManageGroups ? (
                       <TableCell className="text-right">
-                        <Button size="sm" variant="destructive" disabled={group.isSystem} onClick={() => setDeleteGroup(group)}>
+                        <Button size="sm" variant="ghost-destructive" disabled={group.isSystem} onClick={() => setDeleteGroup(group)}>
                           <Trash2 className="h-4 w-4" />删除
                         </Button>
                       </TableCell>
