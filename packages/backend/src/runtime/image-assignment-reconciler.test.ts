@@ -278,9 +278,7 @@ describe('image assignment reconciliation policy', () => {
   });
 
   it('does not treat another image fingerprint on the same server as leftover', async () => {
-    const fingerprintA = 'a'.repeat(64);
     const fingerprintB = 'b'.repeat(64);
-    const fingerprintC = 'c'.repeat(64);
     const imageB = { fingerprint: fingerprintB, aliases: [{ name: 'ubuntu/24.04' }], used_by: [] };
     const assignment = {
       id: 'assignment-1',

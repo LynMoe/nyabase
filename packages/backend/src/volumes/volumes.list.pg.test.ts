@@ -1,5 +1,7 @@
+import type { Kysely } from 'kysely';
 import { randomUUID } from 'node:crypto';
 import { describe, expect, it, vi } from 'vitest';
+import type { NyabaseDatabase } from '../persistence-pg/database.types.js';
 import { withPostgresTestDatabase } from '../persistence-pg/postgres-test-harness.js';
 import { PgTransactionManager } from '../persistence-pg/transaction.js';
 import { IntentRepository } from '../runtime/intent.repository.js';
@@ -53,7 +55,7 @@ function userValues(id: string) {
   };
 }
 
-function makeService(database: any) {
+function makeService(database: Kysely<NyabaseDatabase>) {
   return new VolumesService(
     new VolumesRepository(database),
     new StoragePoolsRepository(database),
@@ -65,7 +67,7 @@ function makeService(database: any) {
   );
 }
 
-async function insertLocalPool(database: any, serverId: string) {
+async function insertLocalPool(database: Kysely<NyabaseDatabase>, serverId: string) {
   const poolId = randomUUID();
   await database.insertInto('infra.storage_pools').values({
     id: poolId,
@@ -89,7 +91,7 @@ async function insertLocalPool(database: any, serverId: string) {
 }
 
 async function insertVolume(
-  database: any,
+  database: Kysely<NyabaseDatabase>,
   ownerId: string,
   poolId: string | null,
   serverId: string | null,

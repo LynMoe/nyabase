@@ -36,7 +36,7 @@ export interface ContainerControlTable {
   needs_attention: boolean;
   failure_code: string | null;
   failure_reason: string | null;
-  last_transition_at: ContainerTimestamp;
+  last_transition_at: ContainerGeneratedTimestamp;
   created_at: ContainerGeneratedTimestamp;
   updated_at: ContainerGeneratedTimestamp;
 }

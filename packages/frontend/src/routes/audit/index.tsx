@@ -30,8 +30,9 @@ function parseAuditPageSize(value: unknown): AuditPageSize {
     : typeof value === 'string'
       ? Number.parseInt(value, 10)
       : Number.NaN;
-  if (parsed === 25 || parsed === 50 || parsed === 100) {
-    return parsed;
+  const size = PAGE_SIZES.find((candidate) => candidate === parsed);
+  if (size !== undefined) {
+    return size;
   }
   return 50;
 }

@@ -1,6 +1,8 @@
+import type { Kysely } from 'kysely';
 import { randomUUID } from 'node:crypto';
 import { describe, expect, it, vi } from 'vitest';
 import { FailureCode } from '@nyabase/common';
+import type { NyabaseDatabase } from '../persistence-pg/database.types.js';
 import { withPostgresTestDatabase } from '../persistence-pg/postgres-test-harness.js';
 import { PgTransactionManager } from '../persistence-pg/transaction.js';
 import { IntentRepository } from '../runtime/intent.repository.js';
@@ -55,7 +57,7 @@ function userValues(id: string, numericId = 1) {
   };
 }
 
-function makeService(database: any, clients?: IncusClientFactory) {
+function makeService(database: Kysely<NyabaseDatabase>, clients?: IncusClientFactory) {
   return new VolumesService(
     new VolumesRepository(database),
     new StoragePoolsRepository(database),
@@ -70,7 +72,7 @@ function makeService(database: any, clients?: IncusClientFactory) {
 }
 
 async function seedSharedBackend(
-  database: any,
+  database: Kysely<NyabaseDatabase>,
   options?: {
     quotaEffective?: boolean;
     grantLimit?: number | null;

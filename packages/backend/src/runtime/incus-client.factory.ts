@@ -5,7 +5,6 @@ import {
   IncusClient,
   IncusError,
   normalizeCertificateFingerprint,
-  type IncusClientPort,
 } from '../incus/index.js';
 import {
   decryptPrivateKey,

@@ -25,6 +25,8 @@ incus:
 server:
   port: 3001
   corsOrigin: ""
+  # error | warn | log | debug | verbose
+  logLevel: log
 
 branding:
   title: nyabase

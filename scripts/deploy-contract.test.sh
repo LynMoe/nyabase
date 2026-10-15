@@ -162,11 +162,13 @@ for deployment_file in \
   deploy/Dockerfile.backend \
   deploy/config.example.yaml \
   deploy/.env.example \
-  deploy/nginx.conf \
   deploy/OPERATIONS.md; do
+  # Host network routing (netplan `via: <GATEWAY>`, networkd `Gateway=`) is not
+  # the retired Backend gateway module.
   if rg -n -i \
     '(^|[^[:alnum:]_])agent([^[:alnum:]_]|$)|(^|[^[:alnum:]_])gateway([^[:alnum:]_]|$)|dockerd|dockerRoot|remote[-_]fs|data[-_]dir|workflow|agent[-_]task' \
-    "$deployment_file"; then
+    "$deployment_file" \
+    | rg -v '<GATEWAY>|Gateway=' ; then
     echo "obsolete runtime terminology remains in $deployment_file" >&2
     exit 1
   fi

@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { Capability, UserStatus } from '@nyabase/common';
-import { vi } from 'vitest';
+import { vi, type Mock } from 'vitest';
 import { AccessCacheEpochService } from '../access/access-cache-epoch.service.js';
 import { AccessResolverService } from '../access/access-resolver.service.js';
 import type { PostgresTestDatabase } from '../persistence-pg/postgres-test-harness.js';
@@ -11,10 +11,10 @@ export interface UsersPgFixture {
   users: UsersService;
   transactions: PgTransactionManager;
   access: AccessResolverService;
-  auth: any;
-  audit: any;
-  proxySnapshots: any;
-  convergence: any;
+  auth: Record<string, Mock>;
+  audit: Record<string, Mock>;
+  proxySnapshots: Record<string, Mock>;
+  convergence: Record<string, Mock>;
   actorId: string;
   userId: string;
   actorGroupId: string;

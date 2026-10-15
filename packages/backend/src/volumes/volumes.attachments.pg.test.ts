@@ -1,10 +1,11 @@
+import type { Kysely } from 'kysely';
 import { randomUUID } from 'node:crypto';
 import { describe, expect, it, vi } from 'vitest';
 import { FailureCode } from '@nyabase/common';
+import type { NyabaseDatabase } from '../persistence-pg/database.types.js';
 import { withPostgresTestDatabase } from '../persistence-pg/postgres-test-harness.js';
 import { PgTransactionManager } from '../persistence-pg/transaction.js';
 import { IntentRepository } from '../runtime/intent.repository.js';
-import { VolumeReconciler } from '../runtime/volume-reconciler.service.js';
 import { StoragePoolsRepository } from '../storage-pools/storage-pools.repository.js';
 import { VolumesRepository } from './volumes.repository.js';
 import { VolumesService } from './volumes.service.js';
@@ -55,7 +56,7 @@ function userValues(id: string, numericId: number) {
   };
 }
 
-async function insertPool(database: any, serverId: string, name: string) {
+async function insertPool(database: Kysely<NyabaseDatabase>, serverId: string, name: string) {
   const id = randomUUID();
   await database.insertInto('infra.storage_pools').values({
     id,
@@ -79,7 +80,7 @@ async function insertPool(database: any, serverId: string, name: string) {
 }
 
 async function insertContainer(
-  database: any,
+  database: Kysely<NyabaseDatabase>,
   ownerId: string,
   serverId: string,
   poolId: string,
@@ -118,7 +119,7 @@ async function insertContainer(
 }
 
 async function insertVolume(
-  database: any,
+  database: Kysely<NyabaseDatabase>,
   ownerId: string,
   poolId: string | null,
   serverId: string | null,
@@ -145,7 +146,7 @@ async function insertVolume(
   return id;
 }
 
-async function insertStoppedRoute(database: any, containerId: string, serverId: string) {
+async function insertStoppedRoute(database: Kysely<NyabaseDatabase>, containerId: string, serverId: string) {
   await database.insertInto('control.container_ssh_routes').values({
     container_id: containerId,
     server_id: serverId,
@@ -159,7 +160,7 @@ async function insertStoppedRoute(database: any, containerId: string, serverId: 
   }).execute();
 }
 
-function makeService(database: any) {
+function makeService(database: Kysely<NyabaseDatabase>) {
   return new VolumesService(
     new VolumesRepository(database),
     new StoragePoolsRepository(database),
@@ -263,7 +264,7 @@ describePg('volume attachment ownership, visibility, and drain guards', () => {
         serverValues(serverOne, 'one'),
         serverValues(serverTwo, 'two'),
       ]).execute();
-      const poolOne = await insertPool(database, serverOne, `pool-${serverOne.slice(0, 8)}`);
+      await insertPool(database, serverOne, `pool-${serverOne.slice(0, 8)}`);
       const poolTwo = await insertPool(database, serverTwo, `pool-${serverTwo.slice(0, 8)}`);
       await database.insertInto('infra.shared_backends').values({
         id: backendId,

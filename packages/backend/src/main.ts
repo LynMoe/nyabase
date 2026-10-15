@@ -1,6 +1,6 @@
 import 'reflect-metadata';
 import { NestFactory } from '@nestjs/core';
-import { ValidationPipe, Logger } from '@nestjs/common';
+import { ValidationPipe, Logger, type LogLevel } from '@nestjs/common';
 import type { NestExpressApplication } from '@nestjs/platform-express';
 import { existsSync } from 'fs';
 import { join } from 'path';
@@ -15,16 +15,24 @@ import { ConsoleBridgeGateway } from './runtime/console-bridge.gateway.js';
 import { SshProxyGateway } from './ssh/ssh-proxy-gateway.js';
 import { HttpProxyGateway } from './http-proxy/http-proxy-gateway.js';
 
+const LOG_LEVELS_BY_VERBOSITY: readonly LogLevel[] = ['fatal', 'error', 'warn', 'log', 'debug', 'verbose'];
+
+function logLevelsUpTo(level: LogLevel): LogLevel[] {
+  return LOG_LEVELS_BY_VERBOSITY.slice(0, LOG_LEVELS_BY_VERBOSITY.indexOf(level) + 1);
+}
+
 async function bootstrap() {
   const logger = new Logger('Bootstrap');
 
+  // Buffer bootstrap logs until the configured level is known.
   const app = await NestFactory.create<NestExpressApplication>(AppModule, {
-    logger: ['error', 'warn', 'log', 'debug'],
+    bufferLogs: true,
   });
   // Let Nest stop HTTP admission and invoke module destroy hooks on SIGTERM
   // and SIGINT, allowing runtime workers and metric flushing to drain.
   app.enableShutdownHooks(['SIGTERM', 'SIGINT']);
   const config = app.get(NyabaseConfigService);
+  app.useLogger(logLevelsUpTo(config.get<LogLevel>('server.logLevel')));
   const runtimeRole = app.get(RuntimeRoleService);
 
   app.setGlobalPrefix('api');
@@ -102,4 +110,8 @@ async function bootstrap() {
   );
 }
 
-bootstrap().catch(console.error);
+bootstrap().catch((error: unknown) => {
+  // Open pools and sockets would otherwise keep a half-started process alive.
+  console.error(error);
+  process.exit(1);
+});

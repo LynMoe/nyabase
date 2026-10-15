@@ -111,11 +111,6 @@ function asWinnerCandidate(
   };
 }
 
-function maxNullable(values: Array<number | null>): number | null {
-  const finite = values.filter((value): value is number => value !== null && Number.isFinite(value));
-  return finite.length === 0 ? null : Math.max(...finite);
-}
-
 function isUniqueViolation(error: unknown): boolean {
   let current: unknown = error;
   const visited = new Set<unknown>();

@@ -9,8 +9,6 @@ import {
   type CreateContainerRequest,
 } from '@nyabase/common';
 import { describe, expect, it, vi } from 'vitest';
-import { AccessCacheEpochService } from '../access/access-cache-epoch.service.js';
-import { AccessResolverService } from '../access/access-resolver.service.js';
 import type { NyabaseDatabase } from '../persistence-pg/database.types.js';
 import { withPostgresTestDatabase } from '../persistence-pg/postgres-test-harness.js';
 import { PgTransactionManager } from '../persistence-pg/transaction.js';
@@ -415,7 +413,7 @@ describePg('PostgreSQL extension device claims', () => {
         }),
       );
       await database.updateTable('control.containers')
-        .set({ lifecycle_phase: 'failed' })
+        .set({ lifecycle_phase: 'failed', failure_code: 'RESOURCE_NEEDS_ATTENTION' })
         .where('id', '=', first.resourceId)
         .execute();
       expect(
@@ -596,29 +594,6 @@ function occupancyBlocked(error: unknown): boolean {
   return false;
 }
 
-function databaseAccessContainerService(database: Kysely<NyabaseDatabase>): ContainerControlService {
-  const intents = new IntentRepository(database);
-  const wake = { wake: vi.fn() } as never;
-  return new ContainerControlService(
-    database,
-    new PgTransactionManager(database),
-    new ContainerControlRepository(database),
-    new AccessResolverService(
-      database,
-      new PgTransactionManager(database),
-      new AccessCacheEpochService(database),
-    ),
-    intents,
-    wake,
-    {} as never,
-    { append: vi.fn().mockResolvedValue(undefined) } as never,
-    new ContainerActionPolicyService(),
-    new IpPoolsRepository(database),
-    { get: vi.fn().mockReturnValue(null) } as never,
-    new ContainerSshConvergenceService(database, intents, wake),
-  );
-}
-
 function grant(options: GrantOptions): {
   accessPhase: 'live';
   cpuMillis: number;
@@ -773,26 +748,6 @@ async function seedFixture(
     last_observed_at: new Date(),
   }).execute();
   return { userId, serverId, poolId, imageId, fingerprint };
-}
-
-async function seedServerGrant(
-  database: Kysely<NyabaseDatabase>,
-  fixture: Fixture,
-  options: {
-    diskBytes: number;
-  },
-): Promise<void> {
-  await database.insertInto('iam.server_grants').values({
-    id: cryptoId(),
-    user_id: fixture.userId,
-    group_id: null,
-    server_id: fixture.serverId,
-    cpu_millis: 10_000,
-    mem_bytes: 10_000,
-    disk_bytes: options.diskBytes,
-    extension_grants: {},
-    expires_at: null,
-  }).execute();
 }
 
 async function seedSharedVolume(

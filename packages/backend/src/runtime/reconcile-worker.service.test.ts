@@ -175,9 +175,6 @@ function database(
         if (table === 'control.containers') containerSets.push(values);
         const builder = {
           where: vi.fn((column: unknown, _operator?: string, value?: unknown) => {
-            if (table === 'infra.servers' && column === 'id' && typeof value === 'string') {
-              const row = rows.find((item) => item.id === value);
-            }
             if (table === 'infra.storage_pools' && column === 'id' && typeof value === 'string') {
               const pool = pools.find((item) => item.id === value);
               if (pool) {

@@ -9,7 +9,6 @@ import {
   IncusError,
   requestAndWait,
   type IncusClientPort,
-  type IncusSchema,
 } from '../incus/index.js';
 import type {
   PreflightChecksPort,

@@ -17,7 +17,6 @@ import { AccessResolverService } from '../access/access-resolver.service.js';
 import { isLocalPoolDto, StoragePoolsService } from '../storage-pools/storage-pools.service.js';
 import {
   absoluteChart,
-  buildChart,
   buildSeries,
   buildUsage,
   emptyHost,
