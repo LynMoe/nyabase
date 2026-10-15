@@ -1557,6 +1557,9 @@ async fn run_public_listener(
     }
 }
 
+// Per-connection state is passed explicitly so restart handoff can construct
+// it without a shared context type; revisit when main.rs is split into modules.
+#[allow(clippy::too_many_arguments)]
 async fn handle_ssh_connection(
     stream: TcpStream,
     peer: SocketAddr,
@@ -1828,6 +1831,7 @@ impl RoutingUser {
 }
 
 impl RoutingSnapshot {
+    #[cfg(test)]
     fn from_snapshot(snapshot: ProxySnapshot) -> Result<Self> {
         Self::from_snapshot_in_epoch(snapshot, 0)
     }
