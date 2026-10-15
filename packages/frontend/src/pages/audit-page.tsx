@@ -43,37 +43,13 @@ const PAGE_SIZES = [25, 50, 100] as const;
 type AuditPageSize = (typeof PAGE_SIZES)[number];
 const auditRouteApi = getRouteApi('/audit/');
 
-// Action badges keep semantic colour buckets — these are state pills, not generic grays.
-// Tinted backgrounds use the /10 token so they read correctly in both themes;
-// foreground colors gain a `dark:` variant to stay legible on dark cards.
-const ACTION_COLORS: Record<string, string> = {
-  'container.create': 'bg-green-500/10 text-green-700 dark:text-green-300',
-  'container.delete': 'bg-red-500/10 text-red-700 dark:text-red-300',
-  'container.start': 'bg-blue-500/10 text-blue-700 dark:text-blue-300',
-  'container.stop': 'bg-orange-500/10 text-orange-700 dark:text-orange-300',
-  'container.restart': 'bg-yellow-500/10 text-yellow-700 dark:text-yellow-300',
-  'container.exec_session.create': 'bg-sky-500/10 text-sky-700 dark:text-sky-300',
-  'user.create': 'bg-purple-500/10 text-purple-700 dark:text-purple-300',
-  'user.delete': 'bg-red-500/10 text-red-700 dark:text-red-300',
-  'user.update': 'bg-violet-500/10 text-violet-700 dark:text-violet-300',
-  'server.create': 'bg-indigo-500/10 text-indigo-700 dark:text-indigo-300',
-  'server.update': 'bg-blue-500/10 text-blue-700 dark:text-blue-300',
-  'server.delete': 'bg-red-500/10 text-red-700 dark:text-red-300',
-  'grant.server.upsert': 'bg-teal-500/10 text-teal-700 dark:text-teal-300',
-  'grant.server.delete': 'bg-red-500/10 text-red-700 dark:text-red-300',
-  'grant.storage_pool.upsert': 'bg-emerald-500/10 text-emerald-700 dark:text-emerald-300',
-  'grant.storage_pool.delete': 'bg-red-500/10 text-red-700 dark:text-red-300',
-  'grant.shared_backend.upsert': 'bg-emerald-500/10 text-emerald-700 dark:text-emerald-300',
-  'grant.shared_backend.delete': 'bg-red-500/10 text-red-700 dark:text-red-300',
-  'volume.create': 'bg-green-500/10 text-green-700 dark:text-green-300',
-  'volume.delete': 'bg-red-500/10 text-red-700 dark:text-red-300',
-  'http_proxy.binding.create': 'bg-teal-500/10 text-teal-700 dark:text-teal-300',
-  'http_proxy.binding.delete': 'bg-red-500/10 text-red-700 dark:text-red-300',
-  'ip_pool.create': 'bg-indigo-500/10 text-indigo-700 dark:text-indigo-300',
-  'ip_pool.delete': 'bg-red-500/10 text-red-700 dark:text-red-300',
-  'ssh_proxy.sessions.disconnect_all': 'bg-orange-500/10 text-orange-700 dark:text-orange-300',
-  'ssh_proxy.host_key.rotate': 'bg-yellow-500/10 text-yellow-700 dark:text-yellow-300',
-};
+// Action pills carry one meaning: removals read as destructive, additions as
+// success, everything else stays neutral. Per-action hues were noise.
+function auditActionTone(action: string): string {
+  if (/\.(delete|disconnect_all|revoke)$/.test(action)) return 'bg-destructive/10 text-destructive';
+  if (/\.(create|upsert)$/.test(action)) return 'bg-success/10 text-success';
+  return 'bg-muted text-muted-foreground';
+}
 
 export default function AuditPage() {
   const { page, pageSize } = auditRouteApi.useSearch();
@@ -166,7 +142,7 @@ export default function AuditPage() {
                     <TableCell>
                       <span className={cn(
                         'inline-block max-w-full truncate text-xs px-2 py-0.5 rounded font-medium',
-                        ACTION_COLORS[log.action] ?? 'bg-muted text-muted-foreground',
+                        auditActionTone(log.action),
                       )}>
                         {auditActionLabel(log.action)}
                       </span>

@@ -251,7 +251,7 @@ function SshKeysPanel({ userId }: { userId: string }) {
                 <Button
                   size="icon"
                   variant="ghost"
-                  className="h-8 w-8 text-red-400 hover:text-red-600 shrink-0"
+                  className="h-8 w-8 text-muted-foreground hover:text-destructive shrink-0"
                   onClick={() => setDeleteTarget(key)}
                   aria-label={`删除 SSH 公钥 ${key.name}`}
                 >

@@ -243,9 +243,9 @@ function CertificateTrustWizard({
                 revokeFailed
                   ? 'rounded bg-destructive/10 px-2 py-1 text-destructive'
                   : done
-                    ? 'rounded bg-emerald-500/10 px-2 py-1 text-emerald-700 dark:text-emerald-300'
+                    ? 'rounded bg-success/10 px-2 py-1 text-success'
                     : current
-                      ? 'rounded bg-amber-500/10 px-2 py-1'
+                      ? 'rounded bg-warning/10 px-2 py-1 text-warning'
                       : 'rounded bg-muted px-2 py-1 text-muted-foreground'
               }
             >

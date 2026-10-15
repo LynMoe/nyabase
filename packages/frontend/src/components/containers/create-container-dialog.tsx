@@ -385,7 +385,7 @@ function CapacityNotice({ capacity, requested }: { capacity: StorageCapacityDto;
   const enough = available === null || requested <= available;
   const availableLabel = grantAvailableLabel(available, capacity.grantLimitBytes);
   return (
-    <div className={`rounded-md border px-3 py-2 text-xs ${enough ? 'border-green-200 bg-green-50 text-green-800' : 'border-destructive/30 bg-destructive/10 text-destructive'}`}>
+    <div className={`rounded-md border px-3 py-2 text-xs ${enough ? 'border-success/30 bg-success/10 text-success' : 'border-destructive/30 bg-destructive/10 text-destructive'}`}>
       <div className="flex justify-between gap-2">
         <span>容量预检</span>
         <span>{enough ? '可提交' : '超出可用容量'}</span>

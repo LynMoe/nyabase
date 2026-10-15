@@ -28,8 +28,16 @@
     --muted-foreground: 215.4 16.3% 46.9%;
     --accent: 210 40% 96.1%;
     --accent-foreground: 222.2 47.4% 11.2%;
-    --destructive: 0 84.2% 60.2%;
-    --destructive-foreground: 210 40% 98%;
+    /* Status hues are tuned so the token itself is legible as text (>= 4.5:1)
+       and as a tinted /10–/15 background behind that same text. */
+    --destructive: 0 72.2% 50.6%;
+    --destructive-foreground: 0 0% 100%;
+    --success: 142.1 72.2% 29.2%;
+    --success-foreground: 0 0% 100%;
+    --warning: 26 90.5% 37.1%;
+    --warning-foreground: 0 0% 100%;
+    --info: 221.2 83.2% 45%;
+    --info-foreground: 0 0% 100%;
     --border: 214.3 31.8% 91.4%;
     --input: 214.3 31.8% 91.4%;
     --ring: 221.2 83.2% 53.3%;
@@ -37,11 +45,12 @@
   }
 
   .dark {
-    --background: 222.2 84% 4.9%;
+    --background: 222.2 47% 5.5%;
     --foreground: 210 40% 98%;
-    --card: 222.2 84% 4.9%;
+    /* Cards sit one step above the page so sections read as layers. */
+    --card: 222.2 40% 8.5%;
     --card-foreground: 210 40% 98%;
-    --popover: 222.2 84% 4.9%;
+    --popover: 222.2 40% 9.5%;
     --popover-foreground: 210 40% 98%;
     --primary: 217.2 91.2% 59.8%;
     --primary-foreground: 222.2 47.4% 11.2%;
@@ -51,10 +60,16 @@
     --muted-foreground: 215 20.2% 65.1%;
     --accent: 217.2 32.6% 17.5%;
     --accent-foreground: 210 40% 98%;
-    --destructive: 0 62.8% 30.6%;
-    --destructive-foreground: 210 40% 98%;
+    --destructive: 0 84.2% 62%;
+    --destructive-foreground: 0 0% 100%;
+    --success: 142.1 69.2% 58%;
+    --success-foreground: 144.9 80.4% 10%;
+    --warning: 43.3 96.4% 56.3%;
+    --warning-foreground: 26 83.3% 14.1%;
+    --info: 213.1 93.9% 67.8%;
+    --info-foreground: 222.2 47.4% 11.2%;
     --border: 217.2 32.6% 17.5%;
-    --input: 217.2 32.6% 17.5%;
+    --input: 217.2 32.6% 20%;
     --ring: 224.3 76.3% 48%;
   }
 }

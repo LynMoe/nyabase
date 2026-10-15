@@ -232,7 +232,7 @@ function ContainerResourceRow({
       </div>
       <div className="shrink-0 text-right text-xs text-muted-foreground">
         <div className="flex items-center justify-end gap-1">
-          {status === 'running' ? <CircleCheck className="h-3.5 w-3.5 text-emerald-600 dark:text-emerald-300" /> : <CircleAlert className="h-3.5 w-3.5" />}
+          {status === 'running' ? <CircleCheck className="h-3.5 w-3.5 text-success" /> : <CircleAlert className="h-3.5 w-3.5" />}
           {containerInProgress(container) ? <Loader2 className="h-3 w-3 animate-spin" aria-hidden /> : null}
           <span title={status}>{containerStatusLabel(status)}</span>
         </div>

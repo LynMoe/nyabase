@@ -143,7 +143,7 @@ function PreflightReportView({ status, report }: { status: PreflightStatus; repo
           return (
             <div key={name} className="flex items-center justify-between gap-2 text-xs">
               <span className="text-muted-foreground">{preflightCheckLabel(name)}</span>
-              <span className={value === 'pass' ? 'text-green-600' : value === 'warn' ? 'text-amber-600' : 'text-destructive'}>
+              <span className={value === 'pass' ? 'text-success' : value === 'warn' ? 'text-warning' : 'text-destructive'}>
                 {preflightResultLabel(value)}
               </span>
             </div>
