@@ -124,17 +124,22 @@ impl SnapshotStore {
         let routing = RoutingSnapshot::from_snapshot_in_epoch(snapshot, epoch)?;
         let _write = lock(&self.write_lock);
         if self.load().is_some_and(|current| {
-            epoch < current.epoch
-                || (epoch == current.epoch && generation <= current.generation)
+            epoch < current.epoch || (epoch == current.epoch && generation <= current.generation)
         }) {
-            debug!(epoch, generation, "ignored non-increasing SSH proxy snapshot");
+            debug!(
+                epoch,
+                generation, "ignored non-increasing SSH proxy snapshot"
+            );
             return Ok(false);
         }
         let route_count = routing.routes_by_container_id.len();
         self.current.store(Some(Arc::new(routing)));
         drop(_write);
         self.signal_change();
-        info!(epoch, generation, route_count, "installed SSH proxy snapshot");
+        info!(
+            epoch,
+            generation, route_count, "installed SSH proxy snapshot"
+        );
         Ok(true)
     }
 
@@ -1415,15 +1420,12 @@ async fn install_backend_snapshot(
             control.resume_authoritative();
             info!(
                 epoch = control.epoch(),
-                generation,
-                disconnected_invalid,
-                "resumed SSH proxy admission"
+                generation, disconnected_invalid, "resumed SSH proxy admission"
             );
         }
         Ok(false) => {}
         Err(error) => {
-            revoke_control_plane(store, runtime, control, "SSH proxy snapshot was rejected")
-                .await;
+            revoke_control_plane(store, runtime, control, "SSH proxy snapshot was rejected").await;
             return Err(error);
         }
     }
@@ -1466,7 +1468,9 @@ async fn run_public_listener(
                 vec![("result", "rejected_paused".to_string())],
                 1.0,
             );
-            let _ = stream.into_std().map(|socket| socket.shutdown(Shutdown::Both));
+            let _ = stream
+                .into_std()
+                .map(|socket| socket.shutdown(Shutdown::Both));
             continue;
         }
         let store = store.clone();
@@ -1519,8 +1523,7 @@ async fn run_public_listener(
                 return;
             }
             runtime.record_rejected_connection();
-            let (connection, _abort_registration) =
-                ConnectionState::new(0, peer);
+            let (connection, _abort_registration) = ConnectionState::new(0, peer);
             let connection = Arc::new(connection);
             match handle_ssh_connection(
                 stream,
@@ -2997,8 +3000,7 @@ mod tests {
     #[tokio::test]
     async fn metered_channel_stream_counts_bytes_while_io_is_in_flight() {
         let (left, right) = tokio::io::duplex(1024);
-        let (state, _registration) =
-            ConnectionState::new(99, "127.0.0.1:2222".parse().unwrap());
+        let (state, _registration) = ConnectionState::new(99, "127.0.0.1:2222".parse().unwrap());
         let connection = Arc::new(state);
         let mut metered = MeteredChannelStream::new(left, connection.clone());
         let mut peer = right;
@@ -3390,7 +3392,10 @@ mod tests {
         assert!(snapshot.public_key_allowed("root", &allowed));
         assert!(!snapshot.public_key_allowed("alice.cpu-a.solo", &other));
         assert_eq!(
-            snapshot.find_active_user_by_public_key(&allowed).unwrap().username,
+            snapshot
+                .find_active_user_by_public_key(&allowed)
+                .unwrap()
+                .username,
             "alice"
         );
         assert!(snapshot.find_active_user_by_public_key(&other).is_err());
@@ -3492,9 +3497,14 @@ mod tests {
         let control = ControlPlane::new();
         control.begin_epoch();
         assert!(store.load().is_some());
-        assert!(store.store(fixture_proxy_snapshot(1), control.epoch()).unwrap());
+        assert!(store
+            .store(fixture_proxy_snapshot(1), control.epoch())
+            .unwrap());
         assert_eq!(store.load().map(|snapshot| snapshot.generation), Some(1));
-        assert_eq!(store.load().map(|snapshot| snapshot.epoch), Some(control.epoch()));
+        assert_eq!(
+            store.load().map(|snapshot| snapshot.epoch),
+            Some(control.epoch())
+        );
     }
 
     #[tokio::test]
@@ -3505,7 +3515,6 @@ mod tests {
         assert_invalid_key_snapshot_revokes(invalid, "failed to parse SSH proxy host private key")
             .await;
     }
-
 
     async fn assert_invalid_key_snapshot_revokes(invalid: ProxySnapshot, expected_error: &str) {
         let config = ProxyConfig {
@@ -3534,7 +3543,13 @@ mod tests {
         let route = resolve_owned_route(&installed, "alice.solo").expect("expected route");
         let (connection, main_registration) =
             runtime.register_connection("127.0.0.1:2206".parse().unwrap());
-        connection.set_authenticated("alice.solo", &public_key, &route.user_id, &route.username, Some(&route));
+        connection.set_authenticated(
+            "alice.solo",
+            &public_key,
+            &route.user_id,
+            &route.username,
+            Some(&route),
+        );
         let connection_task = tokio::spawn(Abortable::new(
             std::future::pending::<()>(),
             main_registration,
@@ -3585,7 +3600,13 @@ mod tests {
         let route = resolve_owned_route(&installed, "alice.solo").expect("expected route");
         let (connection, main_registration) =
             runtime.register_connection("127.0.0.1:2204".parse().unwrap());
-        connection.set_authenticated("alice.solo", &public_key, &route.user_id, &route.username, Some(&route));
+        connection.set_authenticated(
+            "alice.solo",
+            &public_key,
+            &route.user_id,
+            &route.username,
+            Some(&route),
+        );
         let connection_task = tokio::spawn(Abortable::new(
             std::future::pending::<()>(),
             main_registration,
@@ -3623,7 +3644,13 @@ mod tests {
         let route = resolve_owned_route(&initial, "alice.solo").expect("expected route");
         let (connection, _abort_registration) =
             ConnectionState::new(1, "127.0.0.1:2222".parse().unwrap());
-        connection.set_authenticated("alice.solo", &public_key, &route.user_id, &route.username, Some(&route));
+        connection.set_authenticated(
+            "alice.solo",
+            &public_key,
+            &route.user_id,
+            &route.username,
+            Some(&route),
+        );
         assert!(connection.authorization_matches(Some(&initial)));
 
         // A generation-only refresh with the same authorization tuple keeps
@@ -3699,10 +3726,22 @@ mod tests {
 
         let (first, first_registration) =
             runtime.register_connection("127.0.0.1:2201".parse().unwrap());
-        first.set_authenticated("alice.solo", &public_key, &route.user_id, &route.username, Some(&route));
+        first.set_authenticated(
+            "alice.solo",
+            &public_key,
+            &route.user_id,
+            &route.username,
+            Some(&route),
+        );
         let (second, second_registration) =
             runtime.register_connection("127.0.0.1:2202".parse().unwrap());
-        second.set_authenticated("alice.solo", &public_key, &route.user_id, &route.username, Some(&route));
+        second.set_authenticated(
+            "alice.solo",
+            &public_key,
+            &route.user_id,
+            &route.username,
+            Some(&route),
+        );
 
         // These futures model connection tasks whose graceful protocol send
         // would never finish. Revocation cancels their owning tasks directly.
@@ -3782,7 +3821,13 @@ mod tests {
         let route = resolve_owned_route(&snapshot, "alice.solo").expect("expected route");
         let (connection, abort_registration) =
             runtime.register_connection("127.0.0.1:2203".parse().unwrap());
-        connection.set_authenticated("alice.solo", &public_key, &route.user_id, &route.username, Some(&route));
+        connection.set_authenticated(
+            "alice.solo",
+            &public_key,
+            &route.user_id,
+            &route.username,
+            Some(&route),
+        );
         let connection_task = tokio::spawn(Abortable::new(
             std::future::pending::<()>(),
             abort_registration,
@@ -4073,7 +4118,9 @@ mod tests {
     fn paused_plane(store: &SnapshotStore) -> Arc<ControlPlane> {
         let control = Arc::new(ControlPlane::new());
         control.begin_epoch();
-        assert!(store.store(fixture_proxy_snapshot(7), control.epoch()).unwrap());
+        assert!(store
+            .store(fixture_proxy_snapshot(7), control.epoch())
+            .unwrap());
         control.resume_authoritative();
         assert!(control.pause(Duration::from_secs(300)));
         control
@@ -4150,7 +4197,9 @@ mod tests {
         let runtime = Arc::new(ProxyRuntime::new(&config));
         let control = Arc::new(ControlPlane::new());
         control.begin_epoch();
-        assert!(store.store(fixture_proxy_snapshot(7), control.epoch()).unwrap());
+        assert!(store
+            .store(fixture_proxy_snapshot(7), control.epoch())
+            .unwrap());
         control.resume_authoritative();
         let snapshot = store.load().unwrap();
         let public_key = parse_authorized_key(ALICE_KEY).unwrap();
@@ -4179,13 +4228,11 @@ mod tests {
         .await
         .expect("hold did not expire");
         assert_eq!(control.mode(), ControlMode::Empty);
-        assert!(
-            tokio::time::timeout(Duration::from_millis(100), task)
-                .await
-                .expect("held session was not revoked")
-                .expect("join")
-                .is_err()
-        );
+        assert!(tokio::time::timeout(Duration::from_millis(100), task)
+            .await
+            .expect("held session was not revoked")
+            .expect("join")
+            .is_err());
         timers.abort();
         let _ = timers.await;
     }
@@ -4228,13 +4275,11 @@ mod tests {
             .await
             .unwrap();
         assert!(control.admit());
-        assert!(
-            tokio::time::timeout(Duration::from_millis(100), task)
-                .await
-                .expect("rotated route must disconnect")
-                .expect("join")
-                .is_err()
-        );
+        assert!(tokio::time::timeout(Duration::from_millis(100), task)
+            .await
+            .expect("rotated route must disconnect")
+            .expect("join")
+            .is_err());
     }
 
     #[tokio::test]
@@ -4293,7 +4338,10 @@ mod tests {
         let key = parse_authorized_key(ALICE_KEY).unwrap();
         assert!(session.latest_snapshot().is_none());
         assert!(session.held_snapshot().is_some());
-        let offered = session.auth_publickey_offered("alice.solo", &key).await.unwrap();
+        let offered = session
+            .auth_publickey_offered("alice.solo", &key)
+            .await
+            .unwrap();
         assert!(matches!(offered, Auth::Accept));
         let accepted = session.auth_publickey("alice.solo", &key).await.unwrap();
         assert!(matches!(accepted, Auth::Accept));
@@ -4342,9 +4390,13 @@ mod tests {
                 .await
             }
         });
-        let mut handle = russh::client::connect(Arc::new(russh::client::Config::default()), addr, TrustAllClient)
-            .await
-            .expect("client connect");
+        let mut handle = russh::client::connect(
+            Arc::new(russh::client::Config::default()),
+            addr,
+            TrustAllClient,
+        )
+        .await
+        .expect("client connect");
         let key = decode_secret_key(TEST_PRIVATE_KEY, None).unwrap();
         let _auth = handle
             .authenticate_publickey(
@@ -4355,7 +4407,10 @@ mod tests {
         let channel = handle
             .channel_open_direct_tcpip("10.0.0.4", 22, "127.0.0.1", 1)
             .await;
-        assert!(channel.is_err(), "paused reject must not open a forward: {channel:?}");
+        assert!(
+            channel.is_err(),
+            "paused reject must not open a forward: {channel:?}"
+        );
         let server_result = tokio::time::timeout(Duration::from_secs(2), server)
             .await
             .expect("server finished")
@@ -4377,13 +4432,11 @@ mod tests {
             runtime.register_connection("127.0.0.1:2306".parse().unwrap());
         let task = tokio::spawn(Abortable::new(std::future::pending::<()>(), registration));
         pause_control_plane(&control, &runtime, config.control_hold, "pause").await;
-        assert!(
-            tokio::time::timeout(Duration::from_millis(100), task)
-                .await
-                .expect("pre-auth must abort")
-                .expect("join")
-                .is_err()
-        );
+        assert!(tokio::time::timeout(Duration::from_millis(100), task)
+            .await
+            .expect("pre-auth must abort")
+            .expect("join")
+            .is_err());
         assert!(connection.revoked.load(Ordering::Acquire));
     }
 
