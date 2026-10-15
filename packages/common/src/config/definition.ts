@@ -49,6 +49,17 @@ const proxyToken = z.string().refine(
   (value) => value === '' || /^[A-Za-z0-9_-]{32,1024}$/.test(value),
   'Expected an empty value or a 32-1024 character ASCII token using only letters, digits, _ or -',
 );
+const ipv4Octet = '(25[0-5]|2[0-4]\\d|1\\d\\d|[1-9]?\\d)';
+const ipv4Address = new RegExp(`^${ipv4Octet}(\\.${ipv4Octet}){3}(/(3[0-2]|[12]?\\d))?$`);
+const ipv6Address = /^[0-9a-f:.]*:[0-9a-f:.]*(\/(12[0-8]|1[01]\d|[1-9]?\d))?$/i;
+const trustedProxyPresets = new Set(['loopback', 'linklocal', 'uniquelocal']);
+const trustedProxies = z.string().trim().refine(
+  (value) => value === '' || value.split(',').every((entry) => {
+    const candidate = entry.trim();
+    return trustedProxyPresets.has(candidate) || ipv4Address.test(candidate) || ipv6Address.test(candidate);
+  }),
+  'Expected comma-separated IP addresses, CIDRs, or loopback/linklocal/uniquelocal',
+);
 const port = z.coerce.number().int().min(1).max(65_535);
 const positiveInt = z.coerce.number().int().positive();
 const positiveDays = z.coerce.number().int().positive();
@@ -242,6 +253,20 @@ export const controlPlaneConfigDefinitions = [
     public: false,
     label: 'CORS origin',
     description: 'Allowed browser origin when the frontend is hosted separately.',
+  }),
+  field({
+    key: 'server.trustedProxies',
+    yamlPath: 'server.trustedProxies',
+    env: 'TRUSTED_PROXIES',
+    defaultValue: '',
+    schema: trustedProxies,
+    valueKind: 'string',
+    secret: false,
+    editable: false,
+    restartRequired: true,
+    public: false,
+    label: 'Trusted proxies',
+    description: 'Comma-separated reverse proxy addresses/CIDRs (or loopback, linklocal, uniquelocal) whose X-Forwarded-For is trusted for client IPs. Empty trusts no proxy.',
   }),
   field({
     key: 'server.logLevel',

@@ -85,6 +85,18 @@ describe('PostgreSQL, Redis, and metrics configuration', () => {
     expect(field?.schema.safeParse('').success).toBe(true);
   });
 
+  it('trusts no forwarding proxy unless explicitly configured', () => {
+    const field = definition('server.trustedProxies');
+    expect(field?.defaultValue).toBe('');
+    expect(field?.editable).toBe(false);
+    for (const value of ['', 'loopback', '10.0.0.1', '10.0.0.0/8, 192.168.1.2', '::1', 'fd00::/8,loopback']) {
+      expect(field?.schema.safeParse(value).success, value).toBe(true);
+    }
+    for (const value of ['true', '*', 'proxy.local', '10.0.0.0/33', '300.1.1.1', 'loopback,']) {
+      expect(field?.schema.safeParse(value).success, value).toBe(false);
+    }
+  });
+
   it('supports a simple all-in-one default and independently scalable process roles', () => {
     const schema = definition('runtime.role')?.schema;
     expect(definition('runtime.role')?.defaultValue).toBe('all');

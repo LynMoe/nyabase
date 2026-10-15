@@ -25,6 +25,9 @@ incus:
 server:
   port: 3001
   corsOrigin: ""
+  # Reverse proxy addresses/CIDRs whose X-Forwarded-For is trusted, e.g.
+  # "loopback" for a same-host proxy. Empty uses the TCP peer address.
+  trustedProxies: ""
   # error | warn | log | debug | verbose
   logLevel: log
 

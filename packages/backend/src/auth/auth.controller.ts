@@ -49,15 +49,15 @@ export class AuthController {
   @HttpCode(200)
   async login(
     @Body() body: unknown,
-    @Req() request: { socket: { remoteAddress?: string } },
+    @Req() request: { ip?: string },
   ) {
     const dto = zLoginRequest.parse(body);
-    // Deliberately use the actual peer address. Forwarded headers are not
-    // trusted unless the deployment has an explicit trusted-proxy policy.
+    // Express derives `ip` from the socket peer unless server.trustedProxies
+    // names the forwarding proxy, so X-Forwarded-For is never trusted blindly.
     const { user, ...tokens } = await this.authService.authenticateAndLogin(
       dto.username,
       dto.password,
-      request.socket.remoteAddress ?? 'unknown',
+      request.ip ?? 'unknown',
     );
     return { ...tokens, user: await this.userToDto(user) };
   }

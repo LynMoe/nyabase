@@ -7,6 +7,7 @@ import { join } from 'path';
 import { AppModule } from './app.module.js';
 import { NyabaseConfigService } from './config/nyabase-config.service.js';
 import { SpaFallbackFilter } from './filters/spa-fallback.filter.js';
+import { securityHeaders, trustProxySetting } from './common/http-security.js';
 import { ZodExceptionFilter } from './filters/zod-exception.filter.js';
 import { PackageHttpErrorFilter } from './server-card-extensions/package-http-error.filter.js';
 import { RuntimeRoleService } from './runtime/runtime-role.service.js';
@@ -36,6 +37,8 @@ async function bootstrap() {
   const runtimeRole = app.get(RuntimeRoleService);
 
   app.setGlobalPrefix('api');
+  app.set('trust proxy', trustProxySetting(config.get<string>('server.trustedProxies')));
+  app.use(securityHeaders());
   app.use((
     request: { path: string },
     response: {

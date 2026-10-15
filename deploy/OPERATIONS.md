@@ -538,6 +538,16 @@ from the product SLO and measured baseline, not from this example deployment.
   query DTO is flat and `.strict()`. The remaining low esbuild advisory is
   limited to its Windows development server path and is not reachable in the
   Linux production image.
+- Behind a TLS-terminating reverse proxy, set `server.trustedProxies`
+  (`TRUSTED_PROXIES`) to that proxy's address or CIDR (`loopback` when it runs
+  on the same host). Without it every login appears to come from the proxy,
+  so one client exhausting the per-IP login limit locks out everyone. Never
+  trust a range that end users can send from directly. The proxy must
+  overwrite, not append to, an untrusted inbound `X-Forwarded-For`.
+- The Backend sends a strict Content-Security-Policy (`script-src 'self'`,
+  `frame-ancestors 'none'`), `nosniff`, and related headers on every response.
+  It does not send HSTS; enable HSTS at the TLS edge once every host under the
+  chosen scope serves HTTPS.
 - Only the Backend joins both the control-plane and telemetry networks.
 - The Backend image runs as the dedicated unprivileged `10001:10001` identity.
   Writable mounts and temporary files must be owned by that identity; do not
