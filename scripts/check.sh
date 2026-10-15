@@ -83,14 +83,11 @@ assert_no_backend_legacy_persistence
 assert_clean_cutover_architecture
 bash scripts/postgres-ops.test.sh
 bash scripts/deploy-contract.test.sh
-bash scripts/check-nest-sse-advisory.test.sh
-bash scripts/check-nest-sse-advisory.sh
 bash scripts/check-rust-proxies.sh
 pnpm build
 node scripts/check-backend-bootstrap.mjs
 assert_no_common_src_artifacts
 assert_no_backend_legacy_persistence
-bash scripts/check-nest-sse-advisory.sh
 pnpm typecheck
 pnpm lint
 pnpm test:unit

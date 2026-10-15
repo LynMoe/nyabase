@@ -533,14 +533,11 @@ from the product SLO and measured baseline, not from this example deployment.
 
 ## Security
 
-- Nest 10 remains on the current major during this migration. Its moderate SSE
-  injection advisory is unreachable only while the Backend has no Nest `Sse`
-  decorator/API, `SseStream`, or `text/event-stream` response surface.
-  `scripts/check-nest-sse-advisory.sh` enforces that condition offline in local
-  checks and CI, with multi-pattern bypass self-tests. Keep this gate until
-  Nest is upgraded to at least 11.1.18 and the major upgrade is staged and
-  verified. The remaining low esbuild advisory is limited to its Windows
-  development server path and is not reachable in the Linux production image.
+- The Backend runs NestJS 11 on Express 5. Express 5 parses query strings with
+  the `simple` parser, so nested `a[b]=` query keys are not expanded; every
+  query DTO is flat and `.strict()`. The remaining low esbuild advisory is
+  limited to its Windows development server path and is not reachable in the
+  Linux production image.
 - Only the Backend joins both the control-plane and telemetry networks.
 - The Backend image runs as the dedicated unprivileged `10001:10001` identity.
   Writable mounts and temporary files must be owned by that identity; do not
