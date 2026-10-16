@@ -29,6 +29,7 @@ import { SectionCard } from '../layout/section-card.js';
 import { QueryErrorState, QueryLoadingState } from '../query-state.js';
 import { Badge } from '../ui/badge.js';
 import { Button } from '../ui/button.js';
+import { Hint } from '../ui/hint.js';
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from '../ui/dialog.js';
 import { Input } from '../ui/input.js';
 import { Switch } from '../ui/switch.js';
@@ -102,6 +103,22 @@ export function CanonicalGrantPanel({ subject, kind }: { subject: Subject; kind:
     return !pool || !grantedServerIds.has(pool.serverId);
   });
 
+  const serverBlocked = !serversQuery.isSuccess
+    ? null
+    : servers.length === 0
+      ? '还没有服务器，请先在“服务器”页添加。'
+      : ungrantedServers.length === 0 ? '所有服务器都已授权。' : null;
+  const poolBlocked = serverGrants.length === 0
+    ? '请先添加服务器授权。'
+    : poolsQuery.isSuccess && grantablePools.length === 0
+      ? '已授权服务器上没有其他可授权的存储池。'
+      : null;
+  const backendBlocked = !backendsQuery.isSuccess
+    ? null
+    : backends.length === 0
+      ? '还没有登记共享存储。'
+      : ungrantedBackends.length === 0 ? '所有共享存储都已授权。' : null;
+
   const invalidate = () => {
     void queryClient.invalidateQueries({ queryKey: queryKeys.grants.subject(kind, subject.id) });
     void queryClient.invalidateQueries({ queryKey: queryKeys.meAccess });
@@ -145,9 +162,7 @@ export function CanonicalGrantPanel({ subject, kind }: { subject: Subject; kind:
       <SectionCard
         title="服务器授权"
         actions={(
-          <Button size="sm" onClick={() => setCreateKind('server')} data-testid="grant-add-server">
-            <Plus className="h-4 w-4" />授权
-          </Button>
+          <AddGrantButton blocked={serverBlocked} onClick={() => setCreateKind('server')} testId="grant-add-server" />
         )}
         flush={serverGrants.length > 0}
         testId="grant-servers"
@@ -215,9 +230,7 @@ export function CanonicalGrantPanel({ subject, kind }: { subject: Subject; kind:
             : undefined
         }
         actions={(
-          <Button size="sm" onClick={() => setCreateKind('pool')} data-testid="grant-add-pool">
-            <Plus className="h-4 w-4" />授权
-          </Button>
+          <AddGrantButton blocked={poolBlocked} onClick={() => setCreateKind('pool')} testId="grant-add-pool" />
         )}
         flush={poolGrants.length > 0}
         testId="grant-pools"
@@ -286,9 +299,7 @@ export function CanonicalGrantPanel({ subject, kind }: { subject: Subject; kind:
       <SectionCard
         title="共享存储授权"
         actions={(
-          <Button size="sm" onClick={() => setCreateKind('backend')} data-testid="grant-add-backend">
-            <Plus className="h-4 w-4" />授权
-          </Button>
+          <AddGrantButton blocked={backendBlocked} onClick={() => setCreateKind('backend')} testId="grant-add-backend" />
         )}
         flush={backendGrants.length > 0}
         testId="grant-backends"
@@ -458,6 +469,17 @@ export function CanonicalGrantPanel({ subject, kind }: { subject: Subject; kind:
         onOpenChange={(open) => { if (!open) setDeleteTarget(null); }}
       />
     </div>
+  );
+}
+
+/** "+ 授权" that says up front when there is nothing left to grant, instead of opening an empty dialog. */
+function AddGrantButton({ blocked, onClick, testId }: { blocked: string | null; onClick: () => void; testId: string }) {
+  return (
+    <Hint content={blocked} disabled={blocked !== null}>
+      <Button size="sm" onClick={onClick} disabled={blocked !== null} data-testid={testId}>
+        <Plus className="h-4 w-4" />授权
+      </Button>
+    </Hint>
   );
 }
 

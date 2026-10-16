@@ -1,4 +1,4 @@
-import { RotateCw } from 'lucide-react';
+import { RotateCw, ShieldCheck } from 'lucide-react';
 import {
   CertificateState,
   CertificateTrustState,
@@ -47,7 +47,7 @@ export function CertificateCard({
       <CardHeader>
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div>
-            <CardTitle className="flex items-center gap-2 text-base"><RotateCw className="h-4 w-4" />Incus 客户端证书</CardTitle>
+            <CardTitle className="flex items-center gap-2 text-base"><ShieldCheck className="h-4 w-4" />Incus 客户端证书</CardTitle>
           </div>
           {canManageCertificates ? (
             <Button
@@ -110,7 +110,9 @@ export function CertificateCard({
   );
 }
 
-function certificateStateLabel(state: string): string {
+/** An active certificate past notAfter is the thing to fix, so it must not read as healthy. */
+function certificateStateLabel(state: string, notAfter: string): string {
+  if (state === CertificateState.Active && certExpiryWarning(notAfter) === 'expired') return '使用中 · 已过期';
   switch (state) {
     case CertificateState.Staged: return '轮换中';
     case CertificateState.Active: return '使用中';
@@ -120,8 +122,11 @@ function certificateStateLabel(state: string): string {
   }
 }
 
-function certificateStateVariant(state: string): 'success' | 'secondary' | 'destructive' | 'warning' {
-  if (state === CertificateState.Active) return 'success';
+function certificateStateVariant(state: string, notAfter: string): 'success' | 'secondary' | 'destructive' | 'warning' {
+  if (state === CertificateState.Active) {
+    const expiry = certExpiryWarning(notAfter);
+    return expiry === 'expired' ? 'destructive' : expiry === 'expiring' ? 'warning' : 'success';
+  }
   if (state === CertificateState.Failed) return 'destructive';
   if (state === CertificateState.Staged) return 'warning';
   return 'secondary';
@@ -140,15 +145,15 @@ function CertificateDetails({
     <div className="space-y-3">
       <div className="grid gap-3 sm:grid-cols-3">
         <Field label="代次" value={String(certificate.generation)} />
-        <Field label="指纹" value={<TechnicalId label="指纹" value={certificate.fingerprint} />} />
+        <Field label="指纹" value={<TechnicalId label="指纹" value={certificate.fingerprint} kind="fingerprint" />} />
         <Field
           label="状态"
           value={(
             <StatusBadge
-              label={certificateStateLabel(certificate.state)}
+              label={certificateStateLabel(certificate.state, certificate.notAfter)}
               raw={certificate.state}
               pending={certificateStatePending(certificate.state)}
-              variant={certificateStateVariant(certificate.state)}
+              variant={certificateStateVariant(certificate.state, certificate.notAfter)}
             />
           )}
         />

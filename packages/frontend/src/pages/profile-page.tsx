@@ -4,6 +4,7 @@ import { KeyRound, Plus, RefreshCw, ShieldCheck, Trash2, UserCircle } from 'luci
 import { zAddSshKeyRequest, zUpdateUserRequest } from '@nyabase/common';
 import type { SshPublicKeyDto } from '@nyabase/common';
 import { api } from '../lib/api.js';
+import { queryKeys } from '../lib/query-keys.js';
 import { useAuthStore } from '../store/auth.js';
 import { Button } from '../components/ui/button.js';
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '../components/ui/dialog.js';
@@ -177,7 +178,7 @@ function SshKeysPanel({ userId }: { userId: string }) {
   const [addOpen, setAddOpen] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState<SshPublicKeyDto | null>(null);
 
-  const queryKey = ['ssh-keys', userId];
+  const queryKey = queryKeys.sshKeys(userId);
   const keysQuery = useQuery({
     queryKey,
     queryFn: () => api.get<SshPublicKeyDto[]>(`/users/${userId}/ssh-keys`),

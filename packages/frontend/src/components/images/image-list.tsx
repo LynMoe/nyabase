@@ -44,7 +44,7 @@ export function ImageList({
               <TableCell className="whitespace-normal">
                 {image.alias.length > 64 ? (
                   <div className="flex min-w-0 flex-col items-start gap-1">
-                    <TechnicalId label="别名" value={image.alias} kind="opaque" />
+                    <TechnicalId label="别名" value={image.alias} kind="text" />
                     <Link
                       to="/images/$id"
                       params={{ id: image.id }}

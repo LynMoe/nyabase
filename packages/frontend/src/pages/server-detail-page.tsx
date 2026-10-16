@@ -33,7 +33,7 @@ import { ServerMetricsPanel } from '../components/performance/server-metrics-pan
 import { PoolsCard } from '../components/servers/pools-card.js';
 import { ServerStorageTab } from '../components/servers/server-storage-tab.js';
 import { TechnicalId } from '../components/refs/technical-id.js';
-import { preflightStatusLabel, serverStatusLabel } from '../lib/display-labels.js';
+import { preflightStatusLabel, serverStatusLabel, storageOvercommitLabel } from '../lib/display-labels.js';
 import {
   preflightPending,
 } from '../lib/in-progress.js';
@@ -318,11 +318,11 @@ export default function ServerDetailPage() {
                   <CardTitle className="text-base">身份</CardTitle>
                 </CardHeader>
                 <CardContent className="grid gap-3 text-sm sm:grid-cols-2">
-                  <Field label="slug" value={<TechnicalId label="slug" value={loaded.slug} />} />
-                  <Field label="接入地址" value={<TechnicalId label="接入地址" value={loaded.apiEndpoint} />} />
+                  <Field label="slug" value={<TechnicalId label="slug" value={loaded.slug} kind="text" />} />
+                  <Field label="接入地址" value={<TechnicalId label="接入地址" value={loaded.apiEndpoint} kind="text" />} />
                   <Field label="Incus 版本" value={loaded.incusVersion ?? '未连接'} />
                   <Field label="系统盘池" value={loaded.systemPoolName ?? loaded.systemPoolId ?? '未指定'} />
-                  <Field label="存储超分" value={String(loaded.storageOvercommitRatio)} />
+                  <Field label="存储超分比例" value={storageOvercommitLabel(loaded.storageOvercommitRatio)} />
                 </CardContent>
               </Card>
               <Card>
@@ -344,7 +344,8 @@ export default function ServerDetailPage() {
                       {` · ${preflightStatusLabel(loaded.preflightStatus)}`}
                     </li>
                     <li>
-                      <Link to="/ip-pools" className="underline">去 IP 池绑定</Link>
+                      <Link to="/ip-pools" className="underline">IP 池</Link>
+                      {' · 在 IP 池页把地址段绑定到这台服务器'}
                     </li>
                   </ol>
                 </CardContent>

@@ -120,9 +120,9 @@ export default function IpPoolsPage() {
                   <TableCell className="font-mono">{pool.allocationCidr}</TableCell>
                   <TableCell className="font-mono">{pool.gateway}</TableCell>
                   <TableCell>{pool.allocatedCount} / {pool.usableCount}</TableCell>
-                  <TableCell>
+                  <TableCell className="min-w-40 max-w-xs whitespace-normal">
                     {pool.reservedIps.length > 0 ? (
-                      <TechnicalId label="保留地址" value={pool.reservedIps.join(', ')} kind="opaque" />
+                      <TechnicalId label="保留地址" value={pool.reservedIps.join(', ')} kind="text" className="font-mono text-sm [overflow-wrap:anywhere]" />
                     ) : (
                       '无'
                     )}

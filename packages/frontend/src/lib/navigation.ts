@@ -31,8 +31,8 @@ export type NavItem = {
 };
 
 export type NavSection = {
-  /** Omitted for the personal workspace section at the top. */
-  label?: string;
+  /** The personal section's label only shows when admin sections follow it. */
+  label: string;
   items: NavItem[];
 };
 
@@ -43,6 +43,7 @@ export type NavSection = {
  */
 export const NAV_SECTIONS: NavSection[] = [
   {
+    label: '我的',
     items: [
       { to: '/', icon: LayoutDashboard, label: '概览' },
       { to: '/containers', icon: Box, label: '容器' },
@@ -64,9 +65,9 @@ export const NAV_SECTIONS: NavSection[] = [
   {
     label: '运行',
     items: [
-      { to: '/manage/containers', icon: Boxes, label: '全部容器', access: ACCESS.manageContainers },
+      { to: '/manage/containers', icon: Boxes, label: '全平台容器', access: ACCESS.manageContainers },
       { to: '/ops', icon: ListChecks, label: '操作记录', access: ACCESS.ops },
-      { to: '/servers/usage', icon: ChartColumn, label: '全局用量', access: ACCESS.adminUsage },
+      { to: '/servers/usage', icon: ChartColumn, label: '全平台用量', access: ACCESS.adminUsage },
       { to: '/ssh-proxy', icon: Cable, label: 'SSH 代理', access: ACCESS.sshProxy },
       { to: '/http-proxy-ops', icon: Waypoints, label: 'HTTP 代理', access: ACCESS.httpProxyOps },
     ],
@@ -93,7 +94,7 @@ export function visibleNavSections(capabilities: readonly string[] | undefined):
 
 /**
  * The item a pathname belongs to: the longest `to` that is the path itself or
- * a parent of it, so `/servers/usage` lights 全局用量 rather than 服务器.
+ * a parent of it, so `/servers/usage` lights 全平台用量 rather than 服务器.
  */
 export function activeNavPath(pathname: string, sections: NavSection[]): string | null {
   let best: string | null = null;

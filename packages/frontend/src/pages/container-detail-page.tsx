@@ -302,6 +302,7 @@ function ContainerDetailContent({
       localAttachBlockedReason={localAttachBlockedReason}
       sharedAttachBlockedReason={sharedAttachBlockedReason}
       running={running}
+      allowCreateVolume={!admin}
     />
   );
 
@@ -332,7 +333,7 @@ function ContainerDetailContent({
         description={c ? c.serverName : undefined}
         crumbs={[
           admin
-            ? { label: '全部容器', to: '/manage/containers' }
+            ? { label: '全平台容器', to: '/manage/containers' }
             : { label: '容器', to: '/containers' },
           { label: c?.name ?? '…' },
         ]}

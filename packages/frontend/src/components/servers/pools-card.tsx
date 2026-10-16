@@ -30,6 +30,7 @@ import {
 import { FormField } from '../layout/form-field.js';
 import { toast } from '../../hooks/use-toast.js';
 import { usedTotalLabel } from '../../lib/utils.js';
+import { storageOvercommitLabel } from '../../lib/display-labels.js';
 
 function poolLabel(pool: StoragePoolDto): string {
   return pool.displayName ?? pool.incusName;
@@ -97,7 +98,7 @@ export function PoolsCard({
           </div>
           <div>
             <p className="text-xs text-muted-foreground">存储超分比例</p>
-            <p className="text-sm">{overcommitRatio || String(storageOvercommitRatio)}</p>
+            <p className="text-sm">{storageOvercommitLabel(overcommitRatio || storageOvercommitRatio)}</p>
           </div>
         </div>
         {settingsOpen ? (
@@ -134,6 +135,9 @@ export function PoolsCard({
                   value={overcommitRatio || String(storageOvercommitRatio)}
                   onChange={(event) => onOvercommitRatioChange(event.target.value)}
                 />
+                <p className="text-xs text-muted-foreground">
+                  容器和数据卷可分配的总容量 = 物理容量 × 比例。1 表示不超分；大于 1 时分配总量可以超过磁盘实际大小。
+                </p>
               </div>
               <DialogFooter>
                 <Button variant="outline" onClick={() => setSettingsOpen(false)}>取消</Button>
@@ -246,7 +250,7 @@ function StoragePoolRow({
         {pool.source ? (
           <div className="flex items-baseline gap-2">
             <span className="text-xs text-muted-foreground">{sourceKind}</span>
-            <TechnicalId label={sourceKind} value={pool.source} />
+            <TechnicalId label={sourceKind} value={pool.source} kind="text" />
           </div>
         ) : '—'}
       </td>

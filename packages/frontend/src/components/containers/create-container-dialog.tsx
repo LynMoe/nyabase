@@ -26,6 +26,8 @@ import { ExtensionSlots } from '../../extensions/slots.js';
 import { containerActionSubmittedTitle } from '../../lib/status-labels.js';
 import { cn } from '../../lib/utils.js';
 import { queryKeys } from '../../lib/query-keys.js';
+import { useMySshKeys } from '../../hooks/use-my-ssh-keys.js';
+import { SshKeyNotice } from '../ssh/ssh-key-notice.js';
 
 type FormState = {
   serverId: string;
@@ -84,6 +86,7 @@ export function CreateContainerDialog({
   const [extensions, setExtensions] = useState<Record<string, unknown>>({});
   const [errors, setErrors] = useState<FieldErrors>({});
   const [submitError, setSubmitError] = useState<string | null>(null);
+  const sshKeys = useMySshKeys(open);
   const serversQuery = useQuery({ queryKey: queryKeys.servers.user, queryFn: () => api.get<UserServerDto[]>('/servers'), enabled: open });
   const imagesQuery = useQuery({ queryKey: queryKeys.images.userActive, queryFn: () => api.get<ImageDto[]>('/images?activeOnly=true'), enabled: open });
   const accessQuery = useQuery({ queryKey: queryKeys.meAccess, queryFn: () => api.get<EffectiveAccessDto>('/me/access'), enabled: open });
@@ -332,6 +335,7 @@ export function CreateContainerDialog({
               onCheckedChange={(checked) => update('startAfterCreate', checked === true)}
             />
           </FormField>
+          {sshKeys.missing ? <SshKeyNotice variant="inline" onNavigate={() => onOpenChange(false)} /> : null}
           {submitError ? <p className="text-sm text-destructive" role="alert">{submitError}</p> : null}
           <DialogFooter>
             <Button type="button" variant="outline" onClick={() => onOpenChange(false)}>取消</Button>

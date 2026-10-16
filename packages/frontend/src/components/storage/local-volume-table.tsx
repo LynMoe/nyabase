@@ -234,9 +234,22 @@ function VolumeAttachmentsCell({
     }
     return (
       <span data-testid="volume-attachments">
-        挂载于 {volume.attachments.map((item) => `${item.containerName}（${item.containerPath}）`).join('、')}
-        {' '}
-        <Link to="/containers" className="underline">到容器</Link>
+        挂载于{' '}
+        {volume.attachments.map((item, index) => (
+          <span key={item.attachmentId}>
+            {index > 0 ? '、' : null}
+            <Link
+              to="/containers/$containerId"
+              params={{ containerId: item.containerId }}
+              search={{ tab: 'overview' }}
+              className="underline underline-offset-4"
+              onClick={(event) => event.stopPropagation()}
+            >
+              {item.containerName}
+            </Link>
+            <span className="text-muted-foreground">（{item.containerPath}）</span>
+          </span>
+        ))}
       </span>
     );
   }

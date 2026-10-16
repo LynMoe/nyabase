@@ -3,13 +3,22 @@ import { cn } from '../../lib/utils.js';
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '../ui/tooltip.js';
 import { opaquePreview, shortFingerprint } from './truncate-id.js';
 
+/**
+ * opaque: ids and hashes nobody reads, folded to 8 characters.
+ * fingerprint: image or certificate hashes, folded to an alias plus 6 hex.
+ * text: values people read and compare (slugs, URLs, paths, aliases); never folded,
+ * wraps instead of overflowing.
+ */
+export type TechnicalIdKind = 'opaque' | 'fingerprint' | 'text';
+
 export function foldedTechnicalText(options: {
   value: string;
-  kind: 'opaque' | 'fingerprint';
+  kind: TechnicalIdKind;
   alias?: string | null;
   visible?: string;
 }): string {
   if (options.visible !== undefined) return options.visible;
+  if (options.kind === 'text') return options.value;
   if (options.kind === 'fingerprint') {
     const short = shortFingerprint(options.value);
     const alias = options.alias?.trim();
@@ -34,7 +43,7 @@ export function TechnicalId({
   label: string;
   /** Full raw value. Callers render their own empty state instead of passing null. */
   value: string;
-  kind?: 'opaque' | 'fingerprint';
+  kind?: TechnicalIdKind;
   /** Catalog alias for kind="fingerprint". Omit rather than inventing a name. */
   alias?: string | null;
   /** Replaces the folded text. Public-key previews pass the existing preview. */
@@ -44,7 +53,9 @@ export function TechnicalId({
 }) {
   const folded = foldedTechnicalText({ value, kind, alias, visible });
   const hinted = folded !== value;
-  const tone = className ?? 'inline max-w-full truncate text-sm text-foreground';
+  const tone = className ?? (kind === 'text'
+    ? 'inline max-w-full text-sm text-foreground [overflow-wrap:anywhere]'
+    : 'inline max-w-full truncate text-sm text-foreground');
 
   if (!hinted) {
     return <span className={tone}>{value}</span>;

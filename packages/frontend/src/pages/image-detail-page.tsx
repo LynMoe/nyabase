@@ -179,7 +179,7 @@ export default function ImageDetailPage() {
                     <Field
                       label="别名"
                       value={loaded.alias.length > 64
-                        ? <TechnicalId label="别名" value={loaded.alias} kind="opaque" />
+                        ? <TechnicalId label="别名" value={loaded.alias} kind="text" />
                         : <span className="font-mono text-xs">{loaded.alias}</span>}
                     />
                     <Field label="登录用户" value={loaded.loginUser} mono />

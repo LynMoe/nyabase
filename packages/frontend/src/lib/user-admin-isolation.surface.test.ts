@@ -53,7 +53,7 @@ describe('user panel pages stay on user API plane', () => {
     assertAdminPlaneOnly(src, /\/manage\/containers/);
     expect(src).toMatch(/plane === 'user'/);
     expect(src).toMatch(/\/volumes\/\$\{volume\.id\}\/intents/);
-    expect(src).toMatch(/to="\/containers"/);
+    expect(src).toMatch(/to="\/containers\/\$containerId"/);
   });
 
   it('local-volume-form-dialog gates /admin/volumes behind plane === admin', () => {

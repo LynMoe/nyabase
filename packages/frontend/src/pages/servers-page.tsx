@@ -172,6 +172,8 @@ function ServerRow({
           <TechnicalId
             label={server.slug && server.slug !== server.name ? 'slug' : '接入地址'}
             value={server.slug && server.slug !== server.name ? server.slug : server.apiEndpoint}
+            kind="text"
+            className="block text-xs text-muted-foreground [overflow-wrap:anywhere]"
           />
         </div>
       </TableCell>

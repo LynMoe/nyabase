@@ -135,5 +135,13 @@ export function nodeMetricsStatusZh(status: string): string {
   }
 }
 
+/** Storage overcommit as a sentence: "1" alone does not say whether that is a limit or a multiplier. */
+export function storageOvercommitLabel(ratio: number | string): string {
+  const value = Number(ratio);
+  if (!Number.isFinite(value) || value <= 0) return String(ratio);
+  if (value <= 1) return `${value}×（不超分，按物理容量分配）`;
+  return `${value}×（最多分配物理容量的 ${value} 倍）`;
+}
+
 // One vocabulary for lifecycle and server status across the app.
 export { lifecyclePhaseLabel, serverStatusLabel } from './status-labels.js';

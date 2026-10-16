@@ -17,7 +17,7 @@ const Table = React.forwardRef<HTMLTableElement, React.HTMLAttributes<HTMLTableE
           <div className="pointer-events-none absolute inset-y-0 right-0 w-8 bg-gradient-to-l from-black/15 to-transparent dark:from-white/15" />
         )}
         {overflow.end && (
-          <p className="mt-1 text-[11px] text-muted-foreground md:hidden">左右滑动查看更多列</p>
+          <p className="mt-1 px-4 pb-2 text-[11px] text-muted-foreground md:hidden">左右滑动查看更多列</p>
         )}
       </div>
     );

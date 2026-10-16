@@ -41,7 +41,7 @@ export function ConnectCard({
         <Field
           label="已观测指纹"
           value={server.serverCertFingerprint
-            ? <TechnicalId label="已观测指纹" value={server.serverCertFingerprint} />
+            ? <TechnicalId label="已观测指纹" value={server.serverCertFingerprint} kind="fingerprint" />
             : '尚未观测'}
         />
         <Field label="Incus 版本" value={server.incusVersion ?? '尚未连接'} />

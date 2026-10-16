@@ -16,7 +16,7 @@ import { containerLifecyclePending, containerStatusPending } from '../../lib/in-
 import { formatBytes, formatCpu } from '../../lib/utils.js';
 import { containerStatusLabel, lifecyclePhaseLabel } from '../../lib/status-labels.js';
 import { ResourceRef } from '../refs/resource-ref.js';
-
+import { useIsNarrow } from '../../hooks/use-media-query.js';
 
 export function ContainerTable({
   containers,
@@ -31,6 +31,18 @@ export function ContainerTable({
   emptyLabel?: string;
   onAction: (action: ContainerBarAction, container: ContainerDto) => void | Promise<void>;
 }) {
+  const narrow = useIsNarrow();
+  if (narrow) {
+    return (
+      <ul className="divide-y" data-testid="container-cards">
+        {containers.length === 0 ? (
+          <li className="px-4 py-8 text-center text-sm text-muted-foreground">{emptyLabel}</li>
+        ) : containers.map((container) => (
+          <ContainerCard key={container.id} container={container} admin={admin} onAction={onAction} />
+        ))}
+      </ul>
+    );
+  }
   const columnCount = 6 + (admin ? 1 : 0) + (showServerColumn ? 1 : 0);
   return (
     <Table className="min-w-[720px]">
@@ -79,7 +91,6 @@ function ContainerTableRow({
   onAction: (action: ContainerBarAction, container: ContainerDto) => void | Promise<void>;
 }) {
   const detailTo = admin ? '/manage/containers/$containerId' : '/containers/$containerId';
-  const status = container.actual.status;
   const pending = useResourceMutationPending(container.id);
   return (
     <TableRow>
@@ -102,23 +113,7 @@ function ContainerTableRow({
       ) : null}
       {showServerColumn ? <TableCell>{container.serverName}</TableCell> : null}
       <TableCell className="whitespace-normal">
-        <div className="flex flex-wrap items-center gap-1">
-          <StatusBadge
-            label={containerStatusLabel(status)}
-            raw={status}
-            pending={containerStatusPending(container)}
-            variant={status === 'running' ? 'success' : container.needsAttention ? 'destructive' : 'secondary'}
-          />
-          {container.lifecyclePhase !== 'active' ? (
-            <StatusBadge
-              label={lifecyclePhaseLabel(container.lifecyclePhase)}
-              raw={container.lifecyclePhase}
-              pending={containerLifecyclePending(container)}
-              variant="warning"
-            />
-          ) : null}
-          {container.needsAttention ? <TriangleAlert className="h-3.5 w-3.5 text-destructive" aria-label="需要关注" /> : null}
-        </div>
+        <ContainerStatusBadges container={container} />
       </TableCell>
       <TableCell className="font-mono">{container.routedIp ?? '等待容器 IP'}</TableCell>
       <TableCell>{formatCpu(container.cpuMillis)}</TableCell>
@@ -134,5 +129,75 @@ function ContainerTableRow({
         </div>
       </TableCell>
     </TableRow>
+  );
+}
+
+function ContainerStatusBadges({ container }: { container: ContainerDto }) {
+  const status = container.actual.status;
+  return (
+    <div className="flex flex-wrap items-center gap-1">
+      <StatusBadge
+        label={containerStatusLabel(status)}
+        raw={status}
+        pending={containerStatusPending(container)}
+        variant={status === 'running' ? 'success' : container.needsAttention ? 'destructive' : 'secondary'}
+      />
+      {container.lifecyclePhase !== 'active' ? (
+        <StatusBadge
+          label={lifecyclePhaseLabel(container.lifecyclePhase)}
+          raw={container.lifecyclePhase}
+          pending={containerLifecyclePending(container)}
+          variant="warning"
+        />
+      ) : null}
+      {container.needsAttention ? <TriangleAlert className="h-3.5 w-3.5 text-destructive" aria-label="需要关注" /> : null}
+    </div>
+  );
+}
+
+/** Phone layout: one stacked card per container, power actions always in reach. */
+function ContainerCard({
+  container,
+  admin,
+  onAction,
+}: {
+  container: ContainerDto;
+  admin: boolean;
+  onAction: (action: ContainerBarAction, container: ContainerDto) => void | Promise<void>;
+}) {
+  const detailTo = admin ? '/manage/containers/$containerId' : '/containers/$containerId';
+  const pending = useResourceMutationPending(container.id);
+  return (
+    <li className="space-y-2 px-4 py-3">
+      <div className="flex items-start justify-between gap-2">
+        <div className="min-w-0 space-y-1">
+          <Link
+            to={detailTo}
+            params={{ containerId: container.id }}
+            search={{ tab: 'overview' }}
+            className="block truncate font-medium hover:underline"
+          >
+            {container.name}
+          </Link>
+          <ContainerStatusBadges container={container} />
+        </div>
+        <div className="flex shrink-0 gap-1">
+          <ContainerActionBar
+            container={container}
+            layout="icons"
+            pending={pending}
+            onAction={(action) => onAction(action, container)}
+          />
+        </div>
+      </div>
+      <p className="text-xs text-muted-foreground">
+        {admin && container.ownerName ? `${container.ownerName} · ` : null}
+        {container.serverName}
+        {' · '}
+        <span className="font-mono">{container.routedIp ?? '等待容器 IP'}</span>
+        {' · '}
+        {formatCpu(container.cpuMillis)} / {formatBytes(container.memBytes)}
+      </p>
+    </li>
   );
 }

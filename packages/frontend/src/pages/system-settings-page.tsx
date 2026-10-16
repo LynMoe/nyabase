@@ -329,7 +329,7 @@ export default function SystemSettingsPage() {
       <PageHeader
         title="系统设置"
         description={data?.configFile
-          ? <TechnicalId label="配置路径" value={data.configFile} kind="opaque" />
+          ? <TechnicalId label="配置路径" value={data.configFile} kind="text" />
           : '配置路径尚未加载'}
         actions={
           <>
@@ -408,7 +408,7 @@ export default function SystemSettingsPage() {
                     {field.restartRequired && <Badge variant="outline">需要重启</Badge>}
                 </div>
                 <div className="mt-1">
-                  <TechnicalId label="配置路径" value={field.yamlPath} kind="opaque" />
+                  <TechnicalId label="配置路径" value={field.yamlPath} kind="text" />
                 </div>
                 <p className="mt-2 text-xs leading-5 text-muted-foreground">{fieldDescription(field)}</p>
               </div>

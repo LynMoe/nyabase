@@ -9,6 +9,8 @@ import {
 } from 'recharts';
 import type { PerformanceChartSeries, PerformanceGpuChartSeries, PerformanceMultiSeriesResponse, PerformanceSeriesLine } from '@nyabase/common';
 import { formatBytesCompact, formatPercent, formatRate } from '../../lib/utils.js';
+import { ChartLine } from 'lucide-react';
+import { EmptyState } from '../layout/empty-state.js';
 import { SectionCard } from '../layout/section-card.js';
 import { formatChartAxis } from './chart-format.js';
 import { ChartHover } from './chart-hover.js';
@@ -43,6 +45,15 @@ export function LinkedCharts({
     ['disk', '磁盘', series.charts.disk],
     ['network', '网络', series.charts.network],
   ];
+  if (series.t.length === 0) {
+    return (
+      <EmptyState
+        icon={ChartLine}
+        title="这段时间还没有性能样本"
+        description="刚接入或刚启动时需要等几分钟才有数据，也可以换一个更长的时间范围看看。"
+      />
+    );
+  }
   return (
     <div className="space-y-3">
       {main.map(([key, title, chart]) => (

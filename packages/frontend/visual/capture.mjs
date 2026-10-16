@@ -17,8 +17,12 @@ const shotsRoot = process.env.VISUAL_SHOTS_DIR
   : path.join(here, 'shots');
 const THEME = process.env.VISUAL_THEME === 'dark' ? 'dark' : 'light';
 const BASE = process.env.VISUAL_BASE_URL ?? 'http://127.0.0.1:5173';
-const ISO = '2026-01-15T08:00:00.000Z';
-const CERT_EXPIRY = '2026-09-20T00:00:00.000Z';
+// Relative to the capture time so "最近观测" and the certificate banner read like a healthy lab.
+const NOW = Date.now();
+const ISO = new Date(NOW - 10 * 60_000).toISOString();
+const CERT_EXPIRY = new Date(NOW + 30 * 86_400_000).toISOString();
+// A user who has not added an SSH key yet, to see the first-run prompts.
+const FRESH_USER = process.env.VISUAL_FRESH_USER === '1';
 
 const CAPS = [
   'manage_users', 'manage_groups', 'manage_servers', 'manage_images',
@@ -499,7 +503,7 @@ function mockApi(urlString, method) {
   }
 
   if (p === '/users/user-admin/ssh-keys') {
-    return json([{ id: 'key-1', name: 'laptop', keyText: 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIExample laptop', createdAt: ISO }]);
+    return json(FRESH_USER ? [] : [{ id: 'key-1', name: 'laptop', keyText: 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIExample laptop', createdAt: ISO }]);
   }
 
   if (p.includes('/server-grants')) {
@@ -716,10 +720,16 @@ const DIALOGS = [
     return true;
   } },
   { name: 'dialog-add-ssh-key', path: '/profile', open: (p) => clickByText(p, '添加公钥') },
-  { name: 'dialog-grant-server', path: '/users/user-alice?tab=grants', open: async (p) => {
+  // Alice already holds the only server, so the button is disabled; capture the reason it gives.
+  { name: 'grant-server-blocked', path: '/users/user-alice?tab=grants', open: async (p) => {
     const btn = p.getByTestId('grant-add-server');
     if (await btn.count() === 0) return false;
-    await btn.click();
+    if (await btn.isEnabled()) {
+      await btn.click();
+    } else {
+      await btn.locator('xpath=..').focus();
+      await p.waitForTimeout(400);
+    }
     await waitSettled(p);
     return true;
   } },

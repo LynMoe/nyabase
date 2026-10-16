@@ -62,13 +62,13 @@ export function NodeMetricsCard({
           <Field
             label="指标 endpoint"
             value={server.nodeMetrics.endpoint
-              ? <TechnicalId label="指标 endpoint" value={server.nodeMetrics.endpoint} />
+              ? <TechnicalId label="指标 endpoint" value={server.nodeMetrics.endpoint} kind="text" />
               : '未配置'}
           />
           <Field
             label="证书 pin"
             value={server.nodeMetrics.serverCertFingerprint
-              ? <TechnicalId label="证书 pin" value={server.nodeMetrics.serverCertFingerprint} />
+              ? <TechnicalId label="证书 pin" value={server.nodeMetrics.serverCertFingerprint} kind="fingerprint" />
               : '未配置'}
           />
           <Field

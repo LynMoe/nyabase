@@ -21,6 +21,8 @@ import { copyOneTimeSecret } from '../../lib/one-time-secret.js';
 import { formatBytesCompact, formatCpu, formatRate } from '../../lib/utils.js';
 import { sshStatusLabel } from '../../lib/status-labels.js';
 import { useAuthStore } from '../../store/auth.js';
+import { useMySshKeys } from '../../hooks/use-my-ssh-keys.js';
+import { SshKeyNotice } from '../ssh/ssh-key-notice.js';
 import { ExtensionSlots } from '../../extensions/slots.js';
 import { LimitsDialog } from './spec-panel.js';
 
@@ -55,6 +57,8 @@ export function OverviewPanel({
   const [configOpen, setConfigOpen] = useState(false);
   const { settings } = usePublicSettings();
   const authUser = useAuthStore((state) => state.user);
+  const ownContainer = !admin || (authUser !== null && container.ownerId === authUser.id);
+  const sshKeys = useMySshKeys(ownContainer);
   const username = container.ownerName ?? authUser?.username ?? '<username>';
   const jumpLogin = formatSshProxyJumpLogin({
     username,
@@ -117,6 +121,7 @@ export function OverviewPanel({
         )}
       >
         <div className="space-y-4">
+          {ownContainer && sshKeys.missing ? <SshKeyNotice variant="inline" /> : null}
           {jumpCommand ? (
             <div className="flex items-stretch gap-2">
               <pre

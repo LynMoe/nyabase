@@ -24,6 +24,9 @@ import { PageHeader } from '../components/layout/page-header.js';
 import { QueryView } from '../components/layout/query-view.js';
 import { SectionCard } from '../components/layout/section-card.js';
 import { QuotaSummary } from '../components/quota/quota-summary.js';
+import { SshKeyNotice } from '../components/ssh/ssh-key-notice.js';
+import { Alert, AlertDescription } from '../components/ui/alert.js';
+import { useMySshKeys } from '../hooks/use-my-ssh-keys.js';
 import { StatusBadge } from '../components/layout/status-badge.js';
 import { Button } from '../components/ui/button.js';
 import { formatBytesCompact, formatCpu, relativeTime } from '../lib/utils.js';
@@ -101,24 +104,28 @@ function DashboardBody({
   const online = servers.filter((server) => server.status === 'online').length;
   const occupancyById = new Map((usage?.ownContainers ?? []).map((item) => [item.containerId, item]));
   const serverUsageById = new Map((usage?.servers ?? []).map((item) => [item.serverId, item]));
+  const sshKeys = useMySshKeys();
 
   return (
     <>
-      <div className="grid gap-3 sm:grid-cols-3">
+      {sshKeys.missing ? <SshKeyNotice /> : null}
+      {attention > 0 ? (
+        <Alert variant="warning" data-testid="dashboard-attention">
+          <TriangleAlert className="h-4 w-4" />
+          <AlertDescription>
+            {attention} 个容器的操作失败，需要处理。
+            {' '}
+            <Link to="/containers" className="font-medium underline underline-offset-4">查看容器</Link>
+          </AlertDescription>
+        </Alert>
+      ) : null}
+      <div className="grid grid-cols-2 gap-3">
         <SummaryCard
           icon={Box}
           label="容器"
           value={String(running)}
           detail={`运行中 · 共 ${containers.length} 个`}
           to="/containers"
-        />
-        <SummaryCard
-          icon={TriangleAlert}
-          label="需要处理"
-          value={String(attention)}
-          detail={attention > 0 ? '有容器操作失败，点击查看' : '没有需要处理的容器'}
-          to={attention > 0 ? '/containers' : undefined}
-          tone={attention > 0 ? 'warning' : 'default'}
         />
         <SummaryCard
           icon={Server}
@@ -134,7 +141,7 @@ function DashboardBody({
           testId="incus-container-resources"
           actions={containers.length > 0 ? (
             <Button variant="ghost" size="sm" asChild>
-              <Link to="/containers">全部容器</Link>
+              <Link to="/containers">查看全部</Link>
             </Button>
           ) : undefined}
         >

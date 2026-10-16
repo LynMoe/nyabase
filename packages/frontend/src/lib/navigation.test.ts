@@ -24,7 +24,7 @@ describe('sidebar navigation', () => {
     ]);
   });
 
-  it('lists 全局用量 for metrics viewers even without ManageServers', () => {
+  it('lists 全平台用量 for metrics viewers even without ManageServers', () => {
     const items = visibleNavSections([Capability.ViewMetricsAll]).flatMap((section) => section.items);
     expect(items.map((item) => item.to)).toContain('/servers/usage');
     expect(items.map((item) => item.to)).not.toContain('/servers');

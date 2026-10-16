@@ -19,7 +19,7 @@ import { PageHeader } from '../components/layout/page-header.js';
 import { QueryView } from '../components/layout/query-view.js';
 import { QueryErrorState } from '../components/query-state.js';
 import { SectionCard } from '../components/layout/section-card.js';
-import { Button } from '../components/ui/button.js';
+import { SegmentedFilter } from '../components/layout/list-search.js';
 import { Progress } from '../components/ui/progress.js';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '../components/ui/select.js';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '../components/ui/table.js';
@@ -32,6 +32,10 @@ const RANGES: Array<{ id: PerformanceRange; label: string }> = [
   { id: '6h', label: '6小时' },
   { id: '24h', label: '24小时' },
 ];
+const VIEWS = [
+  { value: 'chart', label: '图表' },
+  { value: 'table', label: '表格' },
+] as const;
 const METRICS = 'cpu,memory,disk,gpu,network';
 
 export default function UsagePage({
@@ -88,7 +92,7 @@ export default function UsagePage({
 
   return (
     <Page testId={mode === 'admin' ? 'admin-usage' : 'user-usage'}>
-      <PageHeader title="使用情况" />
+      <PageHeader title={mode === 'admin' ? '全平台用量' : '使用情况'} />
       <div className="flex flex-wrap items-center gap-2">
         <Select value={serverId || undefined} onValueChange={(value) => { setServerId(value); void navigate({ search: { serverId: value } as never }); }}>
           <SelectTrigger className="h-8 w-auto min-w-32 text-sm" aria-label="服务器">
@@ -100,12 +104,13 @@ export default function UsagePage({
             ))}
           </SelectContent>
         </Select>
-        {RANGES.map((item) => (
-          <Button key={item.id} type="button" size="sm" variant={range === item.id ? 'secondary' : 'ghost'} onClick={() => setRange(item.id)}>{item.label}</Button>
-        ))}
-        <Button type="button" size="sm" variant={view === 'chart' ? 'secondary' : 'ghost'} onClick={() => setView('chart')}>图表</Button>
-        <Button type="button" size="sm" variant={view === 'table' ? 'secondary' : 'ghost'} onClick={() => setView('table')}>表格</Button>
+        {view === 'chart' ? (
+          <SegmentedFilter label="时间范围" value={range} onChange={setRange} options={RANGES.map((item) => ({ value: item.id, label: item.label }))} />
+        ) : null}
         {snapshot?.stale && snapshot.sampledAt ? <span className="text-xs text-muted-foreground">最近样本 {relativeTime(snapshot.sampledAt)}</span> : null}
+        <div className="sm:ml-auto">
+          <SegmentedFilter label="显示方式" value={view} onChange={setView} options={VIEWS} />
+        </div>
       </div>
       <QueryView query={listQuery} resourceName="使用情况" loadingLabel="加载使用情况...">
         {() => noServers ? <p className="text-sm text-muted-foreground">暂无可见服务器</p> : view === 'chart'

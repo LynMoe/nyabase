@@ -9,6 +9,7 @@ import type {
   VolumeDto,
 } from '@nyabase/common';
 import { Button } from '../ui/button.js';
+import { LocalVolumeFormDialog } from '../storage/local-volume-form-dialog.js';
 import { Checkbox } from '../ui/checkbox.js';
 import { Input } from '../ui/input.js';
 import {
@@ -27,7 +28,6 @@ import { Progress } from '../ui/progress.js';
 import { bindInProgress } from '../../lib/in-progress.js';
 import { formatGib } from '../../lib/utils.js';
 import { observedRootUsedBytes } from '../../lib/storage-shrink.js';
-import { TechnicalId } from '../refs/technical-id.js';
 import { RootSizeDialog } from './spec-panel.js';
 
 const BIND_STATE_LABEL = {
@@ -71,6 +71,7 @@ export function StoragePanel({
   localAttachBlockedReason,
   sharedAttachBlockedReason,
   running,
+  allowCreateVolume = false,
 }: {
   container: ContainerDto;
   rootCapability: StoragePoolCapabilityDto;
@@ -90,9 +91,12 @@ export function StoragePanel({
   localAttachBlockedReason: string | null;
   sharedAttachBlockedReason: string | null;
   running: boolean;
+  /** Offer "新建数据卷" when nothing is attachable; only the owner's own plane can create one. */
+  allowCreateVolume?: boolean;
 }) {
   const [rootOpen, setRootOpen] = useState(false);
   const [mountOpen, setMountOpen] = useState(false);
+  const [createVolumeOpen, setCreateVolumeOpen] = useState(false);
   const disks: MountDisk[] = [
     ...(canMutateLocal ? localVolumes.map((volume) => ({ ...volume, kind: 'local' as const })) : []),
     ...(canMutateShared ? sharedVolumes.map((volume) => ({ ...volume, kind: 'shared' as const })) : []),
@@ -174,10 +178,19 @@ export function StoragePanel({
       {mountOpen ? (
         <MountDialog
           disks={disks}
+          serverName={container.serverName}
+          onCreateVolume={allowCreateVolume && canMutateLocal ? () => setCreateVolumeOpen(true) : undefined}
           pending={pending}
           onAttachLocal={onAttachLocal}
           onAttachShared={onAttachShared}
           onOpenChange={(open) => { if (!open) setMountOpen(false); }}
+        />
+      ) : null}
+      {allowCreateVolume ? (
+        <LocalVolumeFormDialog
+          open={createVolumeOpen}
+          onOpenChange={setCreateVolumeOpen}
+          lockedServerId={container.serverId}
         />
       ) : null}
     </div>
@@ -186,12 +199,16 @@ export function StoragePanel({
 
 function MountDialog({
   disks,
+  serverName,
+  onCreateVolume,
   pending,
   onAttachLocal,
   onAttachShared,
   onOpenChange,
 }: {
   disks: MountDisk[];
+  serverName: string;
+  onCreateVolume?: () => void;
   pending: boolean;
   onAttachLocal: (body: AttachVolumeRequest) => Promise<unknown>;
   onAttachShared: (body: AttachVolumeRequest) => Promise<unknown>;
@@ -210,7 +227,18 @@ function MountDialog({
           <DialogTitle>挂载</DialogTitle>
         </DialogHeader>
         {disks.length === 0 ? (
-          <p className="text-sm text-muted-foreground">暂无可挂载的盘。</p>
+          <div className="space-y-3 text-sm" data-testid="attach-volume-empty">
+            <p>{serverName} 上没有空闲的数据卷或共享卷。</p>
+            <p className="text-muted-foreground">
+              数据卷只能挂到同一台服务器上的容器，且一次只挂一个容器。
+              {onCreateVolume ? '新建一个后，它会出现在这里。' : null}
+            </p>
+            {onCreateVolume ? (
+              <Button size="sm" variant="outline" onClick={onCreateVolume}>
+                <Plus className="h-4 w-4" />新建数据卷
+              </Button>
+            ) : null}
+          </div>
         ) : (
           <div className="space-y-4">
             <fieldset className="space-y-2">
@@ -300,7 +328,7 @@ function AttachmentRow({
     <TableRow>
       <TableCell>{attachment.volumeName}</TableCell>
       <TableCell>{attachment.kind === 'shared' ? '共享卷' : '数据卷'}</TableCell>
-      <TableCell>{mountIdentifier('挂载点', attachment.containerPath)}</TableCell>
+      <TableCell className="min-w-32 whitespace-normal">{mountIdentifier(attachment.containerPath)}</TableCell>
       <TableCell>
         {usage ? <UsageMeter used={usage.usedBytes} total={usage.sizeBytes} /> : '—'}
       </TableCell>
@@ -352,11 +380,8 @@ function diskKey(disk: MountDisk): string {
   return `${disk.kind}:${disk.id}`;
 }
 
-function mountIdentifier(label: string, value: string) {
-  if (value.length <= 32) {
-    return <span className="font-mono text-xs">{value}</span>;
-  }
-  return <TechnicalId label={label} value={value} kind="opaque" />;
+function mountIdentifier(value: string) {
+  return <span className="font-mono text-xs [overflow-wrap:anywhere]">{value}</span>;
 }
 
 function gibLabel(bytes: number): string {

@@ -56,10 +56,10 @@ function SidebarNav({
 }) {
   const active = activeNavPath(pathname, sections);
   return (
-    <nav className="flex flex-col gap-4 p-2 pb-4" aria-label="主导航">
-      {sections.map((section, index) => (
-        <div key={section.label ?? index} className="space-y-0.5">
-          {section.label ? (
+    <nav className="flex flex-col gap-3 p-2 pb-4" aria-label="主导航">
+      {sections.map((section) => (
+        <div key={section.label} className="space-y-0.5">
+          {sections.length > 1 ? (
             <p className="px-3 pb-1 text-[11px] font-medium tracking-wide text-muted-foreground/80">
               {section.label}
             </p>
@@ -73,7 +73,7 @@ function SidebarNav({
                 onClick={onNavigate}
                 aria-current={isActive ? 'page' : undefined}
                 className={cn(
-                  'flex items-center gap-3 rounded-md px-3 py-1.5 text-sm transition-colors',
+                  'flex items-center gap-3 rounded-md px-3 py-2 text-sm transition-colors md:py-1',
                   isActive
                     ? 'bg-accent font-medium text-accent-foreground'
                     : 'text-muted-foreground hover:bg-accent/60 hover:text-accent-foreground',

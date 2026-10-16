@@ -47,4 +47,11 @@ describe('TechnicalId', () => {
     expect((await screen.findByRole('tooltip')).textContent).toBe('instance-name-that-is-long');
     expect(trigger.textContent).toBe('instance…');
   });
+
+  it('never folds a readable text value', () => {
+    render(<TechnicalId label="接入地址" kind="text" value="https://10.0.0.5:8443" />);
+    const text = screen.getByText('https://10.0.0.5:8443');
+    expect(text.className).not.toContain('bg-repeat-x');
+    expect(text.className).not.toContain('truncate');
+  });
 });
