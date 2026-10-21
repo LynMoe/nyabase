@@ -3,6 +3,9 @@
 // <= 150 lines per function/method. An exception needs a one-line
 // `// size-exception: <reason>` comment: anywhere in the file for the file
 // limit, or directly above the function for the function limit.
+// Fragmentation budget (non-test files): <= 16 per backend module directory
+// (recursive; platform/ is the shared toolkit and exempt), <= 4 per frontend
+// page or component sub-folder. Split by responsibility, not by line count.
 import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
@@ -15,6 +18,9 @@ const ts = require('typescript');
 const FILE_LIMIT = 800;
 const FUNCTION_LIMIT = 150;
 const GENERATED = ['api-types.ts', 'routeTree.gen.ts'];
+const BACKEND_MODULE_FILE_LIMIT = 16;
+const BACKEND_MODULE_EXEMPT = new Set(['platform']);
+const FRONTEND_FOLDER_FILE_LIMIT = 4;
 
 const tracked = execFileSync('git', ['ls-files', 'packages/*.ts', 'packages/*.tsx'], { cwd: root, encoding: 'utf8' })
   .split('\n')
@@ -24,6 +30,18 @@ const tracked = execFileSync('git', ['ls-files', 'packages/*.ts', 'packages/*.ts
   .filter((f) => !/\.(test|spec|test-helper|pg-test-helper)\.tsx?$/.test(f) && !f.endsWith('.d.ts'));
 
 const problems = [];
+const counts = new Map();
+const bump = (key) => counts.set(key, (counts.get(key) ?? 0) + 1);
+for (const rel of tracked) {
+  const backend = /^packages\/backend\/src\/([^/]+)\//.exec(rel);
+  if (backend && !BACKEND_MODULE_EXEMPT.has(backend[1])) bump(`packages/backend/src/${backend[1]}/`);
+  const frontend = /^(packages\/frontend\/src\/(?:pages\/[^/]+|components\/[^/]+\/[^/]+)\/)[^/]+$/.exec(rel);
+  if (frontend) bump(frontend[1]);
+}
+for (const [dir, count] of counts) {
+  const limit = dir.startsWith('packages/backend/') ? BACKEND_MODULE_FILE_LIMIT : FRONTEND_FOLDER_FILE_LIMIT;
+  if (count > limit) problems.push(`${dir}: ${count} non-test files (limit ${limit})`);
+}
 for (const rel of tracked) {
   const text = readFileSync(join(root, rel), 'utf8');
   const lines = text.split('\n');
