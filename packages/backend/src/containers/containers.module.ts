@@ -8,6 +8,9 @@ import { VolumesModule } from '../volumes/volumes.module.js';
 import { ConsoleBridgeGateway } from './console-bridge.gateway.js';
 import { ConsoleSessionService } from './console-session.service.js';
 import { ContainerControlRepository } from './container-control.repository.js';
+import { ContainerCreateService } from './container-create.service.js';
+import { ContainerDtoAssembler } from './container-dtos.js';
+import { ContainerReconcileStore } from './container-reconcile.store.js';
 import { ContainerControlService } from './container-control.service.js';
 import { ContainerReconciler } from './container-reconciler.service.js';
 import { ContainerSshConvergenceService, IncusContainerSshStateAdapter } from './container-ssh.js';
@@ -26,6 +29,9 @@ import { ContainersController } from './containers.controller.js';
     ContainerControlService,
     ContainerControlRepository,
     ContainerSshConvergenceService,
+    ContainerCreateService,
+    ContainerDtoAssembler,
+    ContainerReconcileStore,
     ContainerReconciler,
     IncusContainerSshStateAdapter,
     ConsoleSessionService,

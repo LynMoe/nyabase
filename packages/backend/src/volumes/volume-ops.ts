@@ -57,6 +57,14 @@ export function volumeFailure(
   return { code, message, details };
 }
 
+export function failedOutcome(
+  code: string,
+  message: string,
+  details: Record<string, unknown> = {},
+): ReconcileOutcome {
+  return { outcome: 'failed', failure: volumeFailure(code, message, details) };
+}
+
 export function destroyRetry(
   code: string,
   message: string,
@@ -247,9 +255,7 @@ export async function verifyCustomVolume(
     || verified.config?.['security.shifted'] !== 'true'
     || verified.content_type !== 'filesystem'
   ) {
-    return {
-      outcome: 'failed',
-      failure: volumeFailure(
+    return failedOutcome(
         'VOLUME_VERIFY_FAILED',
         'The volume did not match the managed specification after reconciliation',
         {
@@ -257,8 +263,7 @@ export async function verifyCustomVolume(
           shifted: verified.config?.['security.shifted'] ?? '',
           contentType: verified.content_type ?? '',
         },
-      ),
-    };
+      );
   }
   return null;
 }

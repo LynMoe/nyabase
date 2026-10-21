@@ -1,4 +1,12 @@
-import { BadRequestException, ConflictException, ForbiddenException, NotFoundException } from '@nestjs/common';
+import {
+  BadRequestException,
+  ConflictException,
+  ForbiddenException,
+  Inject,
+  Injectable,
+  NotFoundException,
+} from '@nestjs/common';
+import { PG_DATABASE } from '../platform/persistence-pg/tokens.js';
 import {
   FailureCode,
   StoragePoolResizeFamily,
@@ -8,14 +16,14 @@ import {
 import { sql, type Kysely, type Transaction } from 'kysely';
 import { numberValue } from '../platform/domain-utils.js';
 import type { NyabaseDatabase } from '../platform/persistence-pg/database.types.js';
-import type { StoragePoolsRepository } from '../storage-pools/storage-pools.repository.js';
+import { StoragePoolsRepository } from '../storage-pools/storage-pools.repository.js';
 import { isLocalPoolRow, storagePoolCapability } from '../storage-pools/storage-pool-capability.js';
 import {
   assertPoolGrant,
   effectiveSharedGrant,
   requireServerAccess,
   type VolumeExecutor,
-  type VolumesRepository,
+  VolumesRepository,
 } from './volumes.repository.js';
 
 type Tx = Transaction<NyabaseDatabase>;
@@ -27,17 +35,9 @@ export interface ResolvedLocalScope {
   anchorServerId: string;
 }
 
-type PoolShape = {
-  id: string;
-  registered: boolean;
-  server_id: string;
-  shared_backend_id: string | null;
-  shareable: boolean;
-  resize_family: string;
-  quota_effective: boolean | null;
-};
+type PoolRow = NonNullable<Awaited<ReturnType<StoragePoolsRepository['findById']>>>;
 
-function assertPoolMatchesLocalScope(pool: PoolShape, scope: LocalVolumeScope): void {
+function assertPoolMatchesLocalScope(pool: PoolRow, scope: LocalVolumeScope): void {
   if (
     pool.server_id !== scope.serverId
     || pool.shared_backend_id !== null
@@ -88,9 +88,10 @@ type PoolCapacityDto = StorageCapacityDto['pools'][number];
  * and physical-capacity admission checks, the capacity reports, and resolving a
  * local volume's scope. Locks the capacity scope so concurrent admissions serialise.
  */
+@Injectable()
 export class VolumeCapacityService {
   constructor(
-    private readonly database: Kysely<NyabaseDatabase>,
+    @Inject(PG_DATABASE) private readonly database: Kysely<NyabaseDatabase>,
     private readonly repository: VolumesRepository,
     private readonly pools: StoragePoolsRepository,
   ) {}

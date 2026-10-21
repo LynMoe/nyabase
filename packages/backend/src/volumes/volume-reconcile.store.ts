@@ -1,9 +1,10 @@
-import type { Logger } from '@nestjs/common';
+import { Inject, Injectable, Logger } from '@nestjs/common';
 import { Capability } from '@nyabase/common';
 import { sql, type Kysely } from 'kysely';
 import { IncusError } from '../incus/index.js';
 import type { NyabaseDatabase } from '../platform/persistence-pg/database.types.js';
-import type { IntentFailure, IntentRepository } from '../reconcile/intent.repository.js';
+import { PG_DATABASE } from '../platform/persistence-pg/tokens.js';
+import { IntentRepository, type IntentFailure } from '../reconcile/intent.repository.js';
 import type { ResourceAuthority } from '../reconcile/managed-reconciler.js';
 import type { VolumeDriver } from './volume-rules.js';
 import { ensureVolumeIntent, listEligibleDestroyExecutors } from './volumes.repository.js';
@@ -49,11 +50,13 @@ export interface CatalogRow {
 }
 
 /** Every SQL statement the volume reconciler issues; the Incus-facing logic never touches Kysely. */
+@Injectable()
 export class VolumeReconcileStore {
+  private readonly logger = new Logger(VolumeReconcileStore.name);
+
   constructor(
-    private readonly database: Kysely<NyabaseDatabase>,
+    @Inject(PG_DATABASE) private readonly database: Kysely<NyabaseDatabase>,
     private readonly intents: IntentRepository,
-    private readonly logger: Logger,
   ) {}
 
   // --- ManagedReconciler state -------------------------------------------------

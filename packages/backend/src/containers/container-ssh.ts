@@ -13,6 +13,7 @@ import { PG_DATABASE } from '../platform/persistence-pg/tokens.js';
 import { retryPgTransaction } from '../platform/persistence-pg/transaction.js';
 import { executeWithPostCommit } from '../platform/post-commit.js';
 import { IntentRepository } from '../reconcile/intent.repository.js';
+import { isNotFound } from './container-instance-ops.js';
 import type { ContainerRow, SshFileObservation } from './container-reconcile.store.js';
 
 export interface SshFileMetadataExpectation {
@@ -153,10 +154,6 @@ const SSHD_PROBE_COMMAND = [
     'exit 2',
   ].join('; '),
 ] as const;
-
-function isNotFound(error: unknown): boolean {
-  return error instanceof IncusError && error.code === 'INCUS_NOT_FOUND';
-}
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);

@@ -1,9 +1,17 @@
+import { Inject, Injectable } from '@nestjs/common';
 import { Capability } from '@nyabase/common';
 import { sql, type Kysely } from 'kysely';
 import { deriveInstanceName, IncusError, type IncusSchema } from '../incus/index.js';
 import type { NyabaseDatabase } from '../platform/persistence-pg/database.types.js';
-import type { IntentFailure, IntentRepository } from '../reconcile/intent.repository.js';
+import { PG_DATABASE } from '../platform/persistence-pg/tokens.js';
+import {
+  IntentRepository,
+  type IntentFailure,
+  type IntentRecord,
+  type PhysicalSettlement,
+} from '../reconcile/intent.repository.js';
 import type { ResourceAuthority } from '../reconcile/managed-reconciler.js';
+import { settleContainerIntent } from './container-rules.js';
 
 /** The desired container joined with its server, root pool, image and network claim. */
 export interface ContainerRow {
@@ -66,13 +74,22 @@ function composeAuthorizedKeys(
 }
 
 /** Every SQL statement the container reconciler issues; the Incus-facing logic never touches Kysely. */
+@Injectable()
 export class ContainerReconcileStore {
   constructor(
-    private readonly database: Kysely<NyabaseDatabase>,
+    @Inject(PG_DATABASE) private readonly database: Kysely<NyabaseDatabase>,
     private readonly intents: IntentRepository,
   ) {}
 
   // --- ManagedReconciler state -------------------------------------------------
+
+  settleIntent(
+    intent: IntentRecord,
+    observedRevision: number,
+    settlement: PhysicalSettlement,
+  ): Promise<void> {
+    return settleContainerIntent(this.intents, intent, observedRevision, settlement);
+  }
 
   async needsAttention(containerId: string): Promise<boolean> {
     const row = await this.database

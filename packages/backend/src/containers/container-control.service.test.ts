@@ -11,7 +11,7 @@ import {
   IntentResourceType,
   StoragePoolResizeFamily,
 } from '@nyabase/common';
-import { ContainerControlService } from './container-control.service.js';
+import { makeContainerControlService } from './container-services.test-helper.js';
 import { checkRootResize } from './container-rules.js';
 import { systemActor } from '../iam/actor.js';
 import { testActor } from '../iam/actor.test-helper.js';
@@ -99,7 +99,7 @@ function makeHarness() {
     repairContainer: vi.fn().mockResolvedValue({ woken: true }),
     reconcileUser: vi.fn(),
   };
-  const service = new ContainerControlService(
+  const service = makeContainerControlService(
     {} as never,
     transactions as never,
     repository as never,

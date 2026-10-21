@@ -1,3 +1,5 @@
+import { Inject, Injectable } from '@nestjs/common';
+import { PG_DATABASE } from '../platform/persistence-pg/tokens.js';
 import {
   StoragePoolResizeFamily,
   type SharedVolumeDto,
@@ -9,10 +11,10 @@ import {
 import type { Kysely } from 'kysely';
 import { isoDate, lifecyclePhase, numberValue, poolLabel } from '../platform/domain-utils.js';
 import type { NyabaseDatabase } from '../platform/persistence-pg/database.types.js';
-import type { StoragePoolsRepository } from '../storage-pools/storage-pools.repository.js';
+import { StoragePoolsRepository } from '../storage-pools/storage-pools.repository.js';
 import { storagePoolCapability } from '../storage-pools/storage-pool-capability.js';
 import type { VolumeKind } from './volume-rules.js';
-import type { VolumesRepository } from './volumes.repository.js';
+import { VolumesRepository } from './volumes.repository.js';
 
 export type VolumeRow = {
   id: string;
@@ -139,9 +141,10 @@ export function toAttachmentDto(
 }
 
 /** Turns volume rows into DTOs, loading the pools, backends and attachments they reference. */
+@Injectable()
 export class VolumeDtoAssembler {
   constructor(
-    private readonly database: Kysely<NyabaseDatabase>,
+    @Inject(PG_DATABASE) private readonly database: Kysely<NyabaseDatabase>,
     private readonly repository: VolumesRepository,
     private readonly pools: StoragePoolsRepository,
   ) {}

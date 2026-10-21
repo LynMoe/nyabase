@@ -1,12 +1,11 @@
 import {
   BadRequestException,
   ConflictException,
-  Inject,
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
 import { randomUUID } from 'node:crypto';
-import type { Kysely, Transaction } from 'kysely';
+import type { Transaction } from 'kysely';
 import {
   AuditAction,
   Capability,
@@ -25,7 +24,6 @@ import { AuditService } from '../iam/audit.service.js';
 import { deterministicName, numberValue } from '../platform/domain-utils.js';
 import type { NyabaseDatabase } from '../platform/persistence-pg/database.types.js';
 import { PgTransactionManager } from '../platform/persistence-pg/transaction.js';
-import { PG_DATABASE } from '../platform/persistence-pg/tokens.js';
 import { acceptedIntent } from '../reconcile/accepted-intent.js';
 import { IntentRepository } from '../reconcile/intent.repository.js';
 import { StoragePoolsRepository } from '../storage-pools/storage-pools.repository.js';
@@ -50,22 +48,16 @@ type Tx = Transaction<NyabaseDatabase>;
 /** Per-server (local pool) custom volumes: list, create, resize/rename, delete and capacity. */
 @Injectable()
 export class LocalVolumesService {
-  private readonly dtos: VolumeDtoAssembler;
-  private readonly capacityRules: VolumeCapacityService;
-  private readonly lifecycle: VolumeLifecycleService;
-
   constructor(
     private readonly repository: VolumesRepository,
     private readonly pools: StoragePoolsRepository,
     private readonly transactions: PgTransactionManager,
     private readonly intents: IntentRepository,
-    @Inject(PG_DATABASE) database: Kysely<NyabaseDatabase>,
     private readonly audit: AuditService,
-  ) {
-    this.dtos = new VolumeDtoAssembler(database, repository, pools);
-    this.capacityRules = new VolumeCapacityService(database, repository, pools);
-    this.lifecycle = new VolumeLifecycleService(repository, intents, audit);
-  }
+    private readonly dtos: VolumeDtoAssembler,
+    private readonly capacityRules: VolumeCapacityService,
+    private readonly lifecycle: VolumeLifecycleService,
+  ) {}
 
   async list(
     actor: Actor,

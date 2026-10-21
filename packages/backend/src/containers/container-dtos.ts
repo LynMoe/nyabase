@@ -1,3 +1,5 @@
+import { Inject, Injectable } from '@nestjs/common';
+import { PG_DATABASE } from '../platform/persistence-pg/tokens.js';
 import {
   ContainerPhase,
   ContainerPowerIntent,
@@ -11,17 +13,18 @@ import {
 import type { Kysely } from 'kysely';
 import { isoDate, nullableNumber, numberValue, poolLabel } from '../platform/domain-utils.js';
 import type { NyabaseDatabase } from '../platform/persistence-pg/database.types.js';
-import type { NyabaseConfigService } from '../platform/config/nyabase-config.service.js';
+import { NyabaseConfigService } from '../platform/config/nyabase-config.service.js';
 import {
   missingStoragePoolCapability,
   storagePoolCapability,
 } from '../storage-pools/storage-pool-capability.js';
-import type {
+import {
   ContainerControlRepository,
-  ContainerRow,
-  ImageRow,
-  ServerRow,
+  type ContainerRow,
+  type ImageRow,
+  type ServerRow,
 } from './container-control.repository.js';
+import { toAttachmentDto } from '../volumes/volume-dtos.js';
 import { containerActionAvailability, containerStatus } from './container-rules.js';
 
 type RouteRecord = Awaited<ReturnType<ContainerControlRepository['routes']>>[number];
@@ -51,41 +54,11 @@ function phase(value: string): ContainerPhase {
   return value as ContainerPhase;
 }
 
-function toAttachmentDto(
-  attachment: {
-    id: string;
-    container_id: string;
-    volume_id: string;
-    device_name: string;
-    container_path: string;
-    read_only: boolean;
-    bind_state: VolumeAttachmentDto['bindState'];
-    created_at: Date | string;
-    updated_at: Date | string;
-  },
-  volumeName: string,
-  extra: { kind: 'local' | 'shared'; catalogState: string | null },
-): VolumeAttachmentDto {
-  return {
-    id: attachment.id,
-    containerId: attachment.container_id,
-    volumeId: attachment.volume_id,
-    volumeName,
-    deviceName: attachment.device_name,
-    containerPath: attachment.container_path,
-    readOnly: attachment.read_only,
-    bindState: attachment.bind_state,
-    kind: extra.kind,
-    onlineCancelAllowed: extra.catalogState !== 'present' && attachment.bind_state === 'attaching',
-    createdAt: new Date(attachment.created_at).toISOString(),
-    updatedAt: new Date(attachment.updated_at).toISOString(),
-  };
-}
-
 /** Turns container rows into DTOs, loading the servers, images, routes, pools and volumes they reference. */
+@Injectable()
 export class ContainerDtoAssembler {
   constructor(
-    private readonly database: Kysely<NyabaseDatabase>,
+    @Inject(PG_DATABASE) private readonly database: Kysely<NyabaseDatabase>,
     private readonly repository: ContainerControlRepository,
     private readonly config: NyabaseConfigService,
   ) {}

@@ -1,8 +1,5 @@
-import { Inject, Injectable, Logger, OnModuleInit } from '@nestjs/common';
+import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import { AuditAction, FailureCode } from '@nyabase/common';
-import type { Kysely } from 'kysely';
-import type { NyabaseDatabase } from '../platform/persistence-pg/database.types.js';
-import { PG_DATABASE } from '../platform/persistence-pg/tokens.js';
 import { AuditService } from '../iam/audit.service.js';
 import {
   compareManagedFields,
@@ -13,11 +10,10 @@ import {
   type DesiredInstanceSpec,
   type IncusClientPort,
 } from '../incus/index.js';
-import {
-  IntentRepository,
-  type IntentFailure,
-  type IntentRecord,
-  type PhysicalSettlement,
+import type {
+  IntentFailure,
+  IntentRecord,
+  PhysicalSettlement,
 } from '../reconcile/intent.repository.js';
 import type {
   ManagedReconciler,
@@ -66,7 +62,7 @@ import {
   type ContainerRow,
   type SshFileObservation,
 } from './container-reconcile.store.js';
-import { decideRootShrink, settleContainerIntent } from './container-rules.js';
+import { decideRootShrink } from './container-rules.js';
 import { IncusContainerSshStateAdapter, reconcileSshFile } from './container-ssh.js';
 
 type Loaded =
@@ -75,6 +71,10 @@ type Loaded =
 
 function failure(code: string, message: string, details: Record<string, unknown> = {}): IntentFailure {
   return { code, message, details };
+}
+
+function failed(code: string, message: string, details: Record<string, unknown> = {}): ReconcileOutcome {
+  return { outcome: 'failed', failure: failure(code, message, details) };
 }
 
 /**
@@ -87,18 +87,14 @@ function failure(code: string, message: string, details: Record<string, unknown>
 export class ContainerReconciler implements ManagedReconciler, OnModuleInit {
   readonly resourceType = 'container' as const;
   private readonly logger = new Logger(ContainerReconciler.name);
-  private readonly store: ContainerReconcileStore;
 
   constructor(
-    @Inject(PG_DATABASE) database: Kysely<NyabaseDatabase>,
-    private readonly intents: IntentRepository,
+    private readonly store: ContainerReconcileStore,
     private readonly sshState: IncusContainerSshStateAdapter,
     private readonly proxySnapshots: ProxySnapshotNotifierService,
     private readonly audit: AuditService,
     private readonly registry: ReconcilerRegistry,
-  ) {
-    this.store = new ContainerReconcileStore(database, intents);
-  }
+  ) {}
 
   onModuleInit(): void {
     this.registry.register(this);
@@ -125,7 +121,7 @@ export class ContainerReconciler implements ManagedReconciler, OnModuleInit {
     observedRevision: number,
     settlement: PhysicalSettlement,
   ): Promise<void> {
-    return settleContainerIntent(this.intents, intent, observedRevision, settlement);
+    return this.store.settleIntent(intent, observedRevision, settlement);
   }
 
   resourceAuthorities(containerIds: readonly string[]): Promise<Map<string, ResourceAuthority>> {
@@ -171,13 +167,10 @@ export class ContainerReconciler implements ManagedReconciler, OnModuleInit {
     await this.guardRootShrink(row, actual, desired, state, usedBytes);
     if (!diff.empty) {
       if (running(state) && gpuRequiresStop(diff)) {
-        return {
-          outcome: 'failed',
-          failure: failure(
+        return failed(
             FailureCode.GpuMutationRequiresStop,
             'GPU assignment changes require a stopped instance',
-          ),
-        };
+          );
       }
       await this.auditMutate(context.intent, 'PUT', `/1.0/instances/${expectedName}`, expectedName);
       await putManagedFields(client, expectedName, desired, desiredAttachments.length > 0);
@@ -223,18 +216,12 @@ export class ContainerReconciler implements ManagedReconciler, OnModuleInit {
     const row = await this.store.readContainer(context.intent.resourceId);
     if (!row) {
       return {
-        outcome: {
-          outcome: 'failed',
-          failure: failure('CONTAINER_NOT_FOUND', 'The desired container no longer exists'),
-        },
+        outcome: failed('CONTAINER_NOT_FOUND', 'The desired container no longer exists'),
       };
     }
     if (row.server_id !== context.intent.serverId) {
       return {
-        outcome: {
-          outcome: 'failed',
-          failure: failure('CONTAINER_SERVER_MISMATCH', 'The intent server does not own the container'),
-        },
+        outcome: failed('CONTAINER_SERVER_MISMATCH', 'The intent server does not own the container'),
       };
     }
     if (context.intent.targetRevision < row.revision) {
@@ -244,25 +231,19 @@ export class ContainerReconciler implements ManagedReconciler, OnModuleInit {
     }
     if (!row.parent_interface || !row.routed_ip || !row.network_key || !row.gateway) {
       return {
-        outcome: {
-          outcome: 'failed',
-          failure: failure(
+        outcome: failed(
             'MISSING_MANAGED_NETWORK_ADDRESS',
             'The container has no LAN bridge / claim / gateway',
           ),
-        },
       };
     }
     const prefixLength = parseCidrPrefix(row.network_key);
     if (prefixLength === undefined) {
       return {
-        outcome: {
-          outcome: 'failed',
-          failure: failure(
+        outcome: failed(
             'MISSING_MANAGED_NETWORK_ADDRESS',
             'The container network claim CIDR is invalid',
           ),
-        },
       };
     }
     return { row, prefixLength };
@@ -328,14 +309,11 @@ export class ContainerReconciler implements ManagedReconciler, OnModuleInit {
         });
         if (result === 'missing') {
           if (context.intent.attemptCount >= VOLUME_ADOPT_FAIL_AFTER_ATTEMPTS) {
-            return {
-              outcome: 'failed',
-              failure: failure(
+            return failed(
                 'VOLUME_CATALOG_ADOPT_FAILED',
                 'Incus did not adopt the existing CephFS directory into this daemon catalog',
                 { volumeId: attachment.volume_id, serverId },
-              ),
-            };
+              );
           }
           throw new IncusError('VOLUME_CATALOG_ADOPT_PENDING', 'retry', {
             volumeId: attachment.volume_id,
@@ -382,13 +360,10 @@ export class ContainerReconciler implements ManagedReconciler, OnModuleInit {
     const actual = await this.findInstance(client, expectedName, row);
     const deleted = await this.deleteDesiredInstance(client, actual, row, context.intent);
     if (!deleted && actual) {
-      return {
-        outcome: 'failed',
-        failure: failure(
+      return failed(
           'INSTANCE_DELETE_IDENTITY_MISMATCH',
           'The managed instance could not be safely deleted due to its identity',
-        ),
-      };
+        );
     }
     await verifyAbsent(client, expectedName);
     await this.store.releaseContainerState(row);
@@ -440,13 +415,10 @@ export class ContainerReconciler implements ManagedReconciler, OnModuleInit {
   ): ReconcileOutcome | null {
     const actualIdentity = managedContainerIdentity(actual.document);
     if (!actualIdentity.managed) {
-      return {
-        outcome: 'failed',
-        failure: failure(
+      return failed(
           'UNMANAGED_INSTANCE_NAME_COLLISION',
           `Incus instance ${expectedName} is not managed by nyabase`,
-        ),
-      };
+        );
     }
     if (
       actualIdentity.containerId !== normalized(row.id)
@@ -456,17 +428,14 @@ export class ContainerReconciler implements ManagedReconciler, OnModuleInit {
         `Refusing to modify instance ${actual.name} with identity `
         + `${actualIdentity.containerId}/${actualIdentity.serverId}`,
       );
-      return {
-        outcome: 'failed',
-        failure: failure(
+      return failed(
           'MANAGED_INSTANCE_IDENTITY_MISMATCH',
           'The managed instance identity does not match the desired container',
           {
             actualContainerId: actualIdentity.containerId,
             actualServerId: actualIdentity.serverId,
           },
-        ),
-      };
+        );
     }
     return null;
   }
@@ -620,17 +589,14 @@ export class ContainerReconciler implements ManagedReconciler, OnModuleInit {
       MANAGED_FIELD_OWNERSHIP,
     );
     if (verificationDiff.kind !== 'empty') {
-      return {
-        outcome: 'failed',
-        failure: failure(
+      return failed(
           'INSTANCE_VERIFY_FAILED',
           'The instance did not match the managed specification after reconciliation',
           {
             config: verificationDiff.config,
             devices: verificationDiff.devices,
           },
-        ),
-      };
+        );
     }
     const quota = observeRootQuotaPending(verified.document, row.root_size_bytes);
     const observedUsage = await observeRootUsage(

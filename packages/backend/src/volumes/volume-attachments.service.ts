@@ -48,8 +48,6 @@ const ALREADY_ATTACHED = 'The volume is already attached to this container or th
 /** Attaching and detaching volumes (local and shared) on containers. */
 @Injectable()
 export class VolumeAttachmentsService {
-  private readonly dtos: VolumeDtoAssembler;
-
   constructor(
     private readonly repository: VolumesRepository,
     private readonly pools: StoragePoolsRepository,
@@ -57,9 +55,8 @@ export class VolumeAttachmentsService {
     private readonly intents: IntentRepository,
     @Inject(PG_DATABASE) private readonly database: Kysely<NyabaseDatabase>,
     private readonly audit: AuditService,
-  ) {
-    this.dtos = new VolumeDtoAssembler(database, repository, pools);
-  }
+    private readonly dtos: VolumeDtoAssembler,
+  ) {}
 
   /** Attachments of a container the caller has already been authorised to see. */
   async listForContainer(containerId: string, kind: VolumeKind): Promise<VolumeAttachmentDto[]> {

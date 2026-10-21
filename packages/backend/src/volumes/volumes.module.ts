@@ -18,6 +18,10 @@ import { LocalVolumesService } from './local-volumes.service.js';
 import { SharedVolumeCatalogInspectService } from './shared-volume-catalog.service.js';
 import { SharedVolumesService } from './shared-volumes.service.js';
 import { VolumeAttachmentsService } from './volume-attachments.service.js';
+import { VolumeCapacityService } from './volume-capacity.service.js';
+import { VolumeDtoAssembler } from './volume-dtos.js';
+import { VolumeLifecycleService } from './volume-lifecycle.service.js';
+import { VolumeReconcileStore } from './volume-reconcile.store.js';
 
 @Module({
   imports: [ReconcileModule, IncusModule, StoragePoolsModule],
@@ -27,6 +31,10 @@ import { VolumeAttachmentsService } from './volume-attachments.service.js';
     SharedVolumesService,
     VolumeAttachmentsService,
     SharedVolumeCatalogInspectService,
+    VolumeDtoAssembler,
+    VolumeCapacityService,
+    VolumeLifecycleService,
+    VolumeReconcileStore,
     VolumeReconciler,
   ],
   controllers: [

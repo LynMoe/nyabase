@@ -1,15 +1,16 @@
-import { ConflictException } from '@nestjs/common';
+import { ConflictException, Injectable } from '@nestjs/common';
 import { AuditAction, FailureCode, IntentKind, IntentResourceType } from '@nyabase/common';
 import type { Transaction } from 'kysely';
-import type { AuditService } from '../iam/audit.service.js';
+import { AuditService } from '../iam/audit.service.js';
 import type { NyabaseDatabase } from '../platform/persistence-pg/database.types.js';
-import type { IntentRecord, IntentRepository } from '../reconcile/intent.repository.js';
+import { IntentRepository, type IntentRecord } from '../reconcile/intent.repository.js';
 import type { VolumeRow } from './volume-dtos.js';
-import { createVolumeIntent, type VolumesRepository } from './volumes.repository.js';
+import { createVolumeIntent, VolumesRepository } from './volumes.repository.js';
 
 type Tx = Transaction<NyabaseDatabase>;
 
 /** Desired-state changes shared by local and shared volumes: rename, resize and destroy. */
+@Injectable()
 export class VolumeLifecycleService {
   constructor(
     private readonly repository: VolumesRepository,

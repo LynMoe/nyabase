@@ -1,6 +1,6 @@
-import { ConflictException, Inject, Injectable } from '@nestjs/common';
+import { ConflictException, Injectable } from '@nestjs/common';
 import { randomUUID } from 'node:crypto';
-import type { Kysely, Transaction } from 'kysely';
+import type { Transaction } from 'kysely';
 import {
   AuditAction,
   Capability,
@@ -13,14 +13,10 @@ import {
 } from '@nyabase/common';
 import { assertListScope, type Actor } from '../iam/actor.js';
 import { AuditService } from '../iam/audit.service.js';
-import type { IncusClientFactory } from '../incus/incus-client.factory.js';
-import { INCUS_CLIENT_FACTORY } from '../incus/incus-client.factory.js';
 import { deterministicName, numberValue } from '../platform/domain-utils.js';
 import type { NyabaseDatabase } from '../platform/persistence-pg/database.types.js';
 import { PgTransactionManager } from '../platform/persistence-pg/transaction.js';
-import { PG_DATABASE } from '../platform/persistence-pg/tokens.js';
 import { acceptedIntent } from '../reconcile/accepted-intent.js';
-import { IntentRepository } from '../reconcile/intent.repository.js';
 import { StoragePoolsRepository } from '../storage-pools/storage-pools.repository.js';
 import { SharedVolumeCatalogInspectService } from './shared-volume-catalog.service.js';
 import { VolumeCapacityService } from './volume-capacity.service.js';
@@ -49,25 +45,16 @@ type Tx = Transaction<NyabaseDatabase>;
 /** CephFS-backed volumes shared across servers: list, create, resize/rename and delete. */
 @Injectable()
 export class SharedVolumesService {
-  private readonly dtos: VolumeDtoAssembler;
-  private readonly capacityRules: VolumeCapacityService;
-  private readonly lifecycle: VolumeLifecycleService;
-  private readonly catalog: SharedVolumeCatalogInspectService;
-
   constructor(
     private readonly repository: VolumesRepository,
     private readonly pools: StoragePoolsRepository,
     private readonly transactions: PgTransactionManager,
-    intents: IntentRepository,
-    @Inject(PG_DATABASE) database: Kysely<NyabaseDatabase>,
     private readonly audit: AuditService,
-    @Inject(INCUS_CLIENT_FACTORY) clients: IncusClientFactory,
-  ) {
-    this.dtos = new VolumeDtoAssembler(database, repository, pools);
-    this.capacityRules = new VolumeCapacityService(database, repository, pools);
-    this.lifecycle = new VolumeLifecycleService(repository, intents, audit);
-    this.catalog = new SharedVolumeCatalogInspectService(repository, database, clients);
-  }
+    private readonly dtos: VolumeDtoAssembler,
+    private readonly capacityRules: VolumeCapacityService,
+    private readonly lifecycle: VolumeLifecycleService,
+    private readonly catalog: SharedVolumeCatalogInspectService,
+  ) {}
 
   async list(
     actor: Actor,

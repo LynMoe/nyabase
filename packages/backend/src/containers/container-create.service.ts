@@ -1,4 +1,4 @@
-import { ConflictException, ForbiddenException, NotFoundException } from '@nestjs/common';
+import { ConflictException, ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
 import {
   AuditAction,
   FailureCode,
@@ -8,20 +8,20 @@ import {
   type CreateContainerRequest,
 } from '@nyabase/common';
 import { sql, type Transaction } from 'kysely';
-import type { AccessResolverService } from '../iam/access-resolver.service.js';
+import { AccessResolverService } from '../iam/access-resolver.service.js';
 import type { Actor } from '../iam/actor.js';
-import type { AuditService } from '../iam/audit.service.js';
+import { AuditService } from '../iam/audit.service.js';
 import { admitGpuCreate } from '../gpu/admit.js';
-import type { GpuClaimsRepository } from '../gpu/gpu-claims.repository.js';
-import type { IpPoolsRepository } from '../ip-pools/ip-pools.repository.js';
+import { GpuClaimsRepository } from '../gpu/gpu-claims.repository.js';
+import { IpPoolsRepository } from '../ip-pools/ip-pools.repository.js';
 import { numberValue } from '../platform/domain-utils.js';
 import type { NyabaseDatabase } from '../platform/persistence-pg/database.types.js';
-import type { IntentRepository } from '../reconcile/intent.repository.js';
-import type { VolumeAttachmentsService } from '../volumes/volume-attachments.service.js';
-import type {
+import { IntentRepository } from '../reconcile/intent.repository.js';
+import { VolumeAttachmentsService } from '../volumes/volume-attachments.service.js';
+import {
   ContainerControlRepository,
-  ImageRow,
-  ServerRow,
+  type ImageRow,
+  type ServerRow,
 } from './container-control.repository.js';
 import {
   assertComputeGrant,
@@ -109,6 +109,7 @@ export async function assertRootCapacity(
   }
 }
 
+@Injectable()
 export class ContainerCreateService {
   constructor(
     private readonly repository: ContainerControlRepository,

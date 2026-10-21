@@ -1,11 +1,8 @@
 import { Inject, Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import { AuditAction } from '@nyabase/common';
-import type { Kysely } from 'kysely';
-import type { NyabaseDatabase } from '../platform/persistence-pg/database.types.js';
-import { PG_DATABASE } from '../platform/persistence-pg/tokens.js';
 import { AuditService } from '../iam/audit.service.js';
 import { IncusError, type IncusClientPort } from '../incus/index.js';
-import { IntentRepository, type IntentFailure, type IntentRecord } from '../reconcile/intent.repository.js';
+import type { IntentFailure, IntentRecord } from '../reconcile/intent.repository.js';
 import type {
   ManagedReconciler,
   ReconcileOutcome,
@@ -27,6 +24,7 @@ import {
   deleteOrphanVolume,
   destroyRetry,
   destroyRetryFromError,
+  failedOutcome,
   isNotFound,
   readVolumeUsage,
   scanNeedsEnsure,
@@ -80,17 +78,13 @@ interface ScanInventory {
 export class VolumeReconciler implements ManagedReconciler, OnModuleInit {
   readonly resourceType = 'volume' as const;
   private readonly logger = new Logger(VolumeReconciler.name);
-  private readonly store: VolumeReconcileStore;
 
   constructor(
-    @Inject(PG_DATABASE) database: Kysely<NyabaseDatabase>,
-    intents: IntentRepository,
+    private readonly store: VolumeReconcileStore,
     private readonly audit: AuditService,
     @Inject(INCUS_CLIENT_FACTORY) private readonly clients: IncusClientFactory,
     private readonly registry: ReconcilerRegistry,
-  ) {
-    this.store = new VolumeReconcileStore(database, intents, this.logger);
-  }
+  ) {}
 
   onModuleInit(): void {
     this.registry.register(this);
@@ -121,27 +115,18 @@ export class VolumeReconciler implements ManagedReconciler, OnModuleInit {
       return this.reconcileDestroy(context);
     }
     if (context.intent.kind !== 'volume.ensure' && context.intent.kind !== 'volume.resize') {
-      return {
-        outcome: 'failed',
-        failure: volumeFailure('VOLUME_INTENT_UNSUPPORTED', 'Unsupported volume intent kind'),
-      };
+      return failedOutcome('VOLUME_INTENT_UNSUPPORTED', 'Unsupported volume intent kind');
     }
     if (!context.client) {
       throw new IncusError('SERVER_UNREACHABLE', 'retry', { reason: 'missing_client' });
     }
     const targetServerId = context.intent.serverId;
     if (!targetServerId) {
-      return {
-        outcome: 'failed',
-        failure: volumeFailure('VOLUME_NOT_FOUND', 'Volume intents require a server id'),
-      };
+      return failedOutcome('VOLUME_NOT_FOUND', 'Volume intents require a server id');
     }
     const volumeExists = await this.store.readVolumeRow(context.intent.resourceId);
     if (!volumeExists) {
-      return {
-        outcome: 'failed',
-        failure: volumeFailure('VOLUME_NOT_FOUND', 'The desired volume no longer exists'),
-      };
+      return failedOutcome('VOLUME_NOT_FOUND', 'The desired volume no longer exists');
     }
     if (volumeExists.lifecycle_phase === 'deleting') {
       return destroyRetry(
@@ -152,10 +137,7 @@ export class VolumeReconciler implements ManagedReconciler, OnModuleInit {
     }
     const row = await this.store.readVolume(context.intent.resourceId, targetServerId);
     if (!row) {
-      return {
-        outcome: 'failed',
-        failure: volumeFailure('VOLUME_NOT_FOUND', 'The desired volume no longer exists'),
-      };
+      return failedOutcome('VOLUME_NOT_FOUND', 'The desired volume no longer exists');
     }
     this.logger.log(
       `volume=${row.id} server=${targetServerId} catalog_state=${row.catalog_state} `
@@ -225,27 +207,21 @@ export class VolumeReconciler implements ManagedReconciler, OnModuleInit {
     const attached = attachments.length > 0;
     if (config['security.shifted'] !== 'true') {
       if (attached) {
-        return {
-          outcome: 'failed',
-          failure: volumeFailure(
+        return failedOutcome(
             'VOLUME_SECURITY_SHIFTED_MISMATCH',
             'An in-use volume is missing security.shifted and cannot be rewritten',
             { volumeId: row.id },
-          ),
-        };
+          );
       }
       config['security.shifted'] = 'true';
     }
     const currentSize = asBytes(config.size);
     const desiredSize = BigInt(row.size_bytes);
     if (currentSize === null) {
-      return {
-        outcome: 'failed',
-        failure: volumeFailure(
+      return failedOutcome(
           'VOLUME_SIZE_UNREADABLE',
           'Incus did not return a readable volume size',
-        ),
-      };
+        );
     }
     const state: StorageVolumeState = (await client.getStorageVolumeState(
       row.placement_pool_name,

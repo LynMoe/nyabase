@@ -9,6 +9,7 @@ import {
   type DesiredInstanceSpec,
 } from '../incus/index.js';
 import { ContainerReconciler } from './container-reconciler.service.js';
+import { ContainerReconcileStore } from './container-reconcile.store.js';
 import {
   managedContainerIdentity,
   observedDiskUsageBytes,
@@ -988,9 +989,7 @@ async function harness(options: HarnessOptions) {
     }),
   };
 
-  const reconciler = new ContainerReconciler(
-    (options.database ?? noopDb()) as never,
-    {} as never,
+  const reconciler = new ContainerReconciler(new ContainerReconcileStore((options.database ?? noopDb()) as never, {} as never),
     new IncusContainerSshStateAdapter(),
     { notify: vi.fn() } as never,
     (options.audit ?? { log: vi.fn().mockResolvedValue(undefined) }) as never,
@@ -1051,14 +1050,12 @@ function scanHarness(options: {
     return query;
   };
   const ensurePending = vi.fn().mockResolvedValue({ id: 'scan-intent' });
-  const reconciler = new ContainerReconciler(
-    {
+  const reconciler = new ContainerReconciler(new ContainerReconcileStore({
       updateTable: vi.fn(() => chain()),
       selectFrom: vi.fn(() => chain()),
       deleteFrom: vi.fn(() => chain()),
       insertInto: vi.fn(() => chain()),
-    } as never,
-    { ensurePending } as never,
+    } as never, { ensurePending } as never),
     new IncusContainerSshStateAdapter(),
     { notify: vi.fn() } as never,
     { log: vi.fn().mockResolvedValue(undefined) } as never,
@@ -1111,16 +1108,14 @@ function context(client: unknown, intentOverrides: Partial<IntentRecord> = {}): 
 
 describe('ContainerReconciler resource status', () => {
   function statusReconciler(sets: Record<string, unknown>[]) {
-    return new ContainerReconciler(
-      {
+    return new ContainerReconciler(new ContainerReconcileStore({
         updateTable: vi.fn(() => ({
           set: vi.fn((values: Record<string, unknown>) => {
             sets.push(values);
             return { where: vi.fn(() => ({ execute: vi.fn().mockResolvedValue(undefined) })) };
           }),
         })),
-      } as never,
-      {} as never,
+      } as never, {} as never),
       new IncusContainerSshStateAdapter(),
       { notify: vi.fn() } as never,
       { log: vi.fn() } as never,
@@ -1152,9 +1147,7 @@ describe('ContainerReconciler settlement', () => {
   it('settles a restart by id so a later desired-state success cannot cover it', async () => {
     const settleOne = vi.fn().mockResolvedValue(true);
     const settleForObservedRevision = vi.fn().mockResolvedValue({});
-    const reconciler = new ContainerReconciler(
-      {} as never,
-      { settleOne, settleForObservedRevision } as never,
+    const reconciler = new ContainerReconciler(new ContainerReconcileStore({} as never, { settleOne, settleForObservedRevision } as never),
       new IncusContainerSshStateAdapter(),
       { notify: vi.fn() } as never,
       { log: vi.fn() } as never,

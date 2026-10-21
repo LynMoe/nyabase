@@ -2,11 +2,10 @@ import {
   BadRequestException,
   ConflictException,
   ForbiddenException,
-  Inject,
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
-import type { Kysely, Transaction } from 'kysely';
+import type { Transaction } from 'kysely';
 import { randomUUID } from 'node:crypto';
 import {
   AuditAction,
@@ -27,7 +26,6 @@ import {
   type VolumeAttachmentDto,
 } from '@nyabase/common';
 import type { NyabaseDatabase } from '../platform/persistence-pg/database.types.js';
-import { PG_DATABASE } from '../platform/persistence-pg/tokens.js';
 import { nullableNumber, numberValue } from '../platform/domain-utils.js';
 import { PgTransactionManager } from '../platform/persistence-pg/transaction.js';
 import { AccessResolverService } from '../iam/access-resolver.service.js';
@@ -42,8 +40,6 @@ import {
   ContainerControlRepository,
   type ContainerRow,
 } from './container-control.repository.js';
-import { IpPoolsRepository } from '../ip-pools/ip-pools.repository.js';
-import { NyabaseConfigService } from '../platform/config/nyabase-config.service.js';
 import { VolumeAttachmentsService } from '../volumes/volume-attachments.service.js';
 import { mutateGpuContainer } from '../gpu/admit.js';
 import { GpuClaimsRepository } from '../gpu/gpu-claims.repository.js';
@@ -80,34 +76,19 @@ function auditActionFor(action: ContainerAction): AuditAction {
  */
 @Injectable()
 export class ContainerControlService {
-  private readonly dtos: ContainerDtoAssembler;
-  private readonly creator: ContainerCreateService;
-
   constructor(
-    @Inject(PG_DATABASE) database: Kysely<NyabaseDatabase>,
     private readonly transactions: PgTransactionManager,
     private readonly repository: ContainerControlRepository,
     private readonly access: AccessResolverService,
     private readonly intents: IntentRepository,
     private readonly consoleSessions: ConsoleSessionService,
     private readonly audit: AuditService,
-    ipPools: IpPoolsRepository,
-    config: NyabaseConfigService,
     private readonly sshConvergence: ContainerSshConvergenceService,
     private readonly volumes: VolumeAttachmentsService,
     private readonly gpuClaims: GpuClaimsRepository,
-  ) {
-    this.dtos = new ContainerDtoAssembler(database, repository, config);
-    this.creator = new ContainerCreateService(
-      repository,
-      access,
-      intents,
-      audit,
-      ipPools,
-      volumes,
-      gpuClaims,
-    );
-  }
+    private readonly dtos: ContainerDtoAssembler,
+    private readonly creator: ContainerCreateService,
+  ) {}
 
   async list(
     actor: Actor,

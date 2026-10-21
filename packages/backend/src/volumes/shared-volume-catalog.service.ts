@@ -8,12 +8,10 @@ import type { Kysely } from 'kysely';
 import { INCUS_CLIENT_FACTORY, type IncusClientFactory } from '../incus/incus-client.factory.js';
 import {
   IncusError,
-  isAlreadyExistsError,
-  readAfterTimeout,
-  requestAndWait,
   type IncusClientPort,
 } from '../incus/index.js';
 import { numberValue } from '../platform/domain-utils.js';
+import { createCustomVolume, isNotFound } from './volume-ops.js';
 import type { NyabaseDatabase } from '../platform/persistence-pg/database.types.js';
 import { PG_DATABASE } from '../platform/persistence-pg/tokens.js';
 import {
@@ -27,10 +25,6 @@ import { listEligibleDestroyExecutors, VolumesRepository } from './volumes.repos
 
 /** Attempts after which a volume adoption that keeps failing is given up on. */
 export const VOLUME_ADOPT_FAIL_AFTER_ATTEMPTS = 8;
-
-function isNotFound(error: unknown): boolean {
-  return error instanceof IncusError && error.code === 'INCUS_NOT_FOUND';
-}
 
 export type SharedCatalogEnsureResult = 'present' | 'posted' | 'missing';
 
@@ -48,39 +42,13 @@ export async function ensureSharedCatalogOnServer(
   } catch (error) {
     if (!isNotFound(error)) throw error;
   }
-  try {
-    await readAfterTimeout(
-      () => requestAndWait(
-        client,
-        (options) => client.createStorageVolume(
-          input.poolName,
-          {
-            name: input.incusName,
-            type: 'custom',
-            content_type: 'filesystem',
-            config: {
-              size: String(input.sizeBytes),
-              'security.shifted': 'true',
-            },
-          },
-          options,
-        ),
-      ),
-      async () => {
-        await client.getStorageVolume(input.poolName, 'custom', input.incusName);
-        return undefined;
-      },
-    );
-  } catch (error) {
-    if (!isAlreadyExistsError(error)) throw error;
-  }
-  try {
-    await client.getStorageVolume(input.poolName, 'custom', input.incusName);
-    return 'posted';
-  } catch (error) {
-    if (!isNotFound(error)) throw error;
-    return 'missing';
-  }
+  const created = await createCustomVolume(
+    client,
+    input.poolName,
+    input.incusName,
+    String(input.sizeBytes),
+  );
+  return created ? 'posted' : 'missing';
 }
 
 export type SharedCatalogPgState = 'ensuring' | 'present' | 'absent';

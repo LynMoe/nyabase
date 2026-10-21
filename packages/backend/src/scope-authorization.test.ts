@@ -90,8 +90,8 @@ describe('scope=all needs the resource capability', () => {
   });
 
   it('volumes: local needs ManageVolumes, shared needs ManageSharedVolumes, capacity needs ManageServers', async () => {
-    const volumes = bare(LocalVolumesService, 6);
-    const shared = bare(SharedVolumesService, 7);
+    const volumes = bare(LocalVolumesService, 8);
+    const shared = bare(SharedVolumesService, 8);
     await expect(volumes.list(user, { scope: 'all' })).rejects.toBeInstanceOf(ForbiddenException);
     await expect(volumes.list(testActor('s', Capability.ManageSharedVolumes), { scope: 'all' }))
       .rejects.toBeInstanceOf(ForbiddenException);
