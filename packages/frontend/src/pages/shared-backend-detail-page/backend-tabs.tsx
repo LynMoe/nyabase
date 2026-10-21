@@ -1,10 +1,13 @@
-import type { UseMutationResult } from '@tanstack/react-query';
+import { useState } from 'react';
+import { useMutation, useQuery } from '@tanstack/react-query';
 import { Pencil, RefreshCw } from 'lucide-react';
-import type {
-  SharedBackendDto,
-  SharedBackendExecutorDiscoverResult,
-  SharedBackendExecutorDto,
-  SharedVolumeDto,
+import {
+  Capability,
+  FailureCode,
+  type SharedBackendDto,
+  type SharedBackendExecutorDiscoverResult,
+  type SharedBackendExecutorDto,
+  type SharedVolumeDto,
 } from '@nyabase/common';
 import { Button } from '../../components/ui/button.js';
 import { Card, CardContent, CardHeader, CardTitle } from '../../components/ui/card.js';
@@ -18,33 +21,39 @@ import {
   TableHeader,
   TableRow,
 } from '../../components/ui/table.js';
+import { SharedVolumeCatalogInspectDialog } from '../../components/storage/shared-volume-catalog-inspect.js';
 import { SharedVolumeTable } from '../../components/storage/shared-volume-table.js';
 import { TechnicalId } from '../../components/refs/technical-id.js';
+import { toast } from '../../hooks/use-toast.js';
+import { api } from '../../lib/api.js';
+import { errorMessage } from '../../lib/api-error.js';
+import { volumeInProgress } from '../../lib/in-progress.js';
+import { queryKeys } from '../../lib/query-keys.js';
+import { refetchWhileInProgress } from '../../lib/query-lifecycle.js';
+import { failureCodeLabel } from '../../lib/status-labels.js';
+import { identityConflictFromDiscoverIssue, type SharedBackendFsidConflict } from '../../lib/storage-shrink.js';
+import { useAuthStore } from '../../store/auth.js';
+import { EditBackendDialog, reportFsidConflict, useInvalidateBackend } from './backend-dialogs.js';
 import { formatGib, formatPercent, relativeTime, sharedBackendAvailableBytes } from '../../lib/utils.js';
-
-type PatchExecutorMutation = UseMutationResult<
-  SharedBackendExecutorDto,
-  Error,
-  { executor: SharedBackendExecutorDto; registered: boolean }
->;
-type DiscoverMutation = UseMutationResult<SharedBackendExecutorDiscoverResult, Error, void>;
 
 export function BackendOverviewTab({
   backend,
-  canManage,
-  onEdit,
+  onConflict,
 }: {
   backend: SharedBackendDto;
-  canManage: boolean;
-  onEdit: () => void;
+  onConflict: (conflict: SharedBackendFsidConflict) => void;
 }) {
+  const canManage = useAuthStore(
+    (state) => state.user?.capabilities.includes(Capability.ManageSharedBackends) ?? false,
+  );
+  const [editOpen, setEditOpen] = useState(false);
   const available = sharedBackendAvailableBytes(backend);
   return (
     <>
       <SectionCard
         title="身份"
         actions={canManage ? (
-          <Button size="sm" variant="outline" onClick={onEdit}>
+          <Button size="sm" variant="outline" onClick={() => setEditOpen(true)}>
             <Pencil className="h-3.5 w-3.5" />编辑
           </Button>
         ) : undefined}
@@ -70,21 +79,65 @@ export function BackendOverviewTab({
           <Field label="服务器" value={`${backend.serverIds.length} 台`} />
         </CardContent>
       </Card>
+      {editOpen ? (
+        <EditBackendDialog backend={backend} onConflict={onConflict} onClose={() => setEditOpen(false)} />
+      ) : null}
     </>
   );
 }
 
 export function BackendExecutorsTab({
-  executors,
-  canManage,
-  discoverExecutors,
-  patchExecutor,
+  backend,
+  onConflict,
 }: {
-  executors: SharedBackendExecutorDto[];
-  canManage: boolean;
-  discoverExecutors: DiscoverMutation;
-  patchExecutor: PatchExecutorMutation;
+  backend: SharedBackendDto;
+  onConflict: (conflict: SharedBackendFsidConflict) => void;
 }) {
+  const id = backend.id;
+  const executors = backend.executors ?? [];
+  const canManage = useAuthStore(
+    (state) => state.user?.capabilities.includes(Capability.ManageSharedBackends) ?? false,
+  );
+  const invalidate = useInvalidateBackend(id);
+  const patchExecutor = useMutation({
+    mutationFn: ({ executor, registered }: { executor: SharedBackendExecutorDto; registered: boolean }) =>
+      api.patch<SharedBackendExecutorDto>(
+        `/shared-backends/${id}/executors/${executor.id}`,
+        { expectedRevision: executor.revision, registered },
+      ),
+    onSuccess: (_data, variables) => {
+      toast({ title: variables.registered ? '执行端已登记' : '已取消执行端登记' });
+      invalidate();
+    },
+    onError: (error) => toast({ title: '执行端登记失败', description: errorMessage(error), variant: 'destructive' }),
+  });
+  const discoverExecutors = useMutation({
+    mutationFn: () => api.post<SharedBackendExecutorDiscoverResult>(`/shared-backends/${id}/executors/discover`, {}),
+    onSuccess: (result) => {
+      for (const issue of result.identityConflicts) {
+        const conflict = identityConflictFromDiscoverIssue(issue);
+        if (conflict) {
+          onConflict(conflict);
+          continue;
+        }
+        if (issue.code === FailureCode.StoragePoolInUse || issue.code === FailureCode.ServerUnreachable) {
+          toast({
+            title: failureCodeLabel(issue.code) ?? issue.code,
+            description: issue.message,
+            variant: 'destructive',
+          });
+        }
+      }
+      if (result.identityConflicts.length === 0) {
+        toast({ title: '执行端发现已完成', description: `发现 ${result.executors.length} 个执行端。` });
+      }
+      invalidate();
+    },
+    onError: (error) => {
+      reportFsidConflict(error, onConflict);
+      toast({ title: '发现执行端失败', description: errorMessage(error), variant: 'destructive' });
+    },
+  });
   const busy = discoverExecutors.isPending || patchExecutor.isPending;
   return (
     <SectionCard
@@ -154,20 +207,20 @@ export function BackendExecutorsTab({
   );
 }
 
-export function BackendVolumesTab({
-  canManageVolumes,
-  loaded,
-  failed,
-  volumes,
-  onInspect,
-}: {
-  canManageVolumes: boolean;
-  /** False while the volume list has not arrived yet. */
-  loaded: boolean;
-  failed: boolean;
-  volumes: SharedVolumeDto[];
-  onInspect: (volume: SharedVolumeDto) => void;
-}) {
+export function BackendVolumesTab({ backendId }: { backendId: string }) {
+  const canManageVolumes = useAuthStore(
+    (state) => state.user?.capabilities.includes(Capability.ManageSharedVolumes) ?? false,
+  );
+  const [inspectTarget, setInspectTarget] = useState<SharedVolumeDto | null>(null);
+  const volumesQuery = useQuery({
+    queryKey: queryKeys.sharedVolumes.admin,
+    queryFn: () => api.get<SharedVolumeDto[]>('/shared-volumes?scope=all'),
+    enabled: canManageVolumes,
+    refetchInterval: (query) => refetchWhileInProgress(query.state, {
+      steadyIntervalMs: 5_000,
+      isSettled: (volumes) => volumes.every((volume) => !volumeInProgress(volume)),
+    }),
+  });
   if (!canManageVolumes) {
     return (
       <p className="text-sm text-muted-foreground">
@@ -175,11 +228,20 @@ export function BackendVolumesTab({
       </p>
     );
   }
-  if (!loaded && failed) return <p className="text-sm text-destructive">无法加载租户共享卷。</p>;
-  if (!loaded) return <p className="text-sm text-muted-foreground">加载租户共享卷...</p>;
+  if (!volumesQuery.data && volumesQuery.isError) return <p className="text-sm text-destructive">无法加载租户共享卷。</p>;
+  if (!volumesQuery.data) return <p className="text-sm text-muted-foreground">加载租户共享卷...</p>;
   return (
     <SectionCard title="租户共享卷" flush testId="shared-backend-tenant-volumes">
-      <SharedVolumeTable volumes={volumes} scope="all" onInspect={onInspect} />
+      <SharedVolumeTable
+        volumes={volumesQuery.data.filter((volume) => volume.sharedBackendId === backendId)}
+        scope="all"
+        onInspect={setInspectTarget}
+      />
+      <SharedVolumeCatalogInspectDialog
+        volume={inspectTarget}
+        open={Boolean(inspectTarget)}
+        onOpenChange={(open) => { if (!open) setInspectTarget(null); }}
+      />
     </SectionCard>
   );
 }

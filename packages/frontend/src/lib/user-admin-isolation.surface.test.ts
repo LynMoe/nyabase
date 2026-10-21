@@ -90,7 +90,7 @@ describe('user panel pages stay on scope=mine', () => {
     expect(detail).toMatch(/api\.get<SharedVolumeDto\[\]>\('\/shared-volumes\?scope=all'\)/);
     expect(detail).not.toMatch(/api\.get<SharedVolumeDto\[\]>\('\/shared-volumes'\)/);
     expect(detail).toMatch(/SharedVolumeCatalogInspectDialog/);
-    expect(detail).toMatch(/enabled: tab === 'volumes' && canManageSharedVolumes/);
+    expect(detail).toMatch(/enabled: canManageVolumes,/);
   });
 
   it('dashboard performance stays on the user usage API', () => {

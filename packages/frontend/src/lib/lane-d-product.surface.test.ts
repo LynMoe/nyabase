@@ -140,7 +140,7 @@ describe('lane D product UI copy', () => {
     ].join('\n');
     expect(page).toMatch(/\/shared-volumes\?scope=all/);
     expect(page).toMatch(/ManageSharedVolumes/);
-    expect(page).toMatch(/enabled: tab === 'volumes' && canManageSharedVolumes/);
+    expect(page).toMatch(/enabled: canManageVolumes,/);
   });
 
   it('volume remount waits for attachment after 202 and blocks quota-ineffective create', () => {
@@ -229,7 +229,7 @@ describe('lane D product UI copy', () => {
     expect(backends).not.toMatch(/\/manage\/shared-volumes/);
     expect(backends).toMatch(/ManageSharedVolumes/);
     expect(backends).toMatch(/\/shared-volumes\?scope=all/);
-    expect(backends).toMatch(/enabled: tab === 'volumes' && canManageSharedVolumes/);
+    expect(backends).toMatch(/enabled: canManageVolumes,/);
     expect(backends).not.toMatch(/api\.get<SharedVolumeDto\[\]>\('\/shared-volumes'\)/);
     expect(sharedForm).toMatch(/backendLacksOnlineExecutor/);
     expect(sharedForm).toMatch(/hasOnlineExecutor/);

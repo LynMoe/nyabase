@@ -1,11 +1,11 @@
-import { Gauge, KeyRound, Pencil, ShieldCheck, Trash2 } from 'lucide-react';
-import { type UserDto, UserStatus } from '@nyabase/common';
+import { useState } from 'react';
+import { Gauge, Pencil, ShieldCheck } from 'lucide-react';
+import { Capability, type UserDto, UserStatus } from '@nyabase/common';
 import { Link } from '@tanstack/react-router';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '../../components/ui/tabs.js';
 import { CanonicalGrantPanel } from '../../components/grants/canonical-grant-panel.js';
 import type { UserDetailTab } from '../../lib/detail-tabs.js';
 import { Button } from '../../components/ui/button.js';
-import { MoreActions } from '../../components/layout/more-actions.js';
 import { Badge } from '../../components/ui/badge.js';
 import { Field } from '../../components/layout/form-field.js';
 import { SectionCard } from '../../components/layout/section-card.js';
@@ -14,6 +14,8 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '.
 import { capabilityLabel, userStatusLabel } from '../../lib/display-labels.js';
 import { userDeleting } from '../../lib/in-progress.js';
 import { relativeTime } from '../../lib/utils.js';
+import { useAuthStore } from '../../store/auth.js';
+import { UserIdentityDialog } from './user-dialogs.js';
 
 const TAB_ITEMS = [
   ['overview', '概览', Gauge],
@@ -23,18 +25,15 @@ const TAB_ITEMS = [
 export function UserDetailTabs({
   tab,
   user,
-  canManageUsers,
-  canManageGrants,
   onTab,
-  onEditIdentity,
 }: {
   tab: UserDetailTab;
   user: UserDto;
-  canManageUsers: boolean;
-  canManageGrants: boolean;
   onTab: (tab: UserDetailTab) => void;
-  onEditIdentity: () => void;
 }) {
+  const canManageGrants = useAuthStore(
+    (state) => state.user?.capabilities.includes(Capability.ManageGrants) ?? false,
+  );
   return (
     <Tabs
       value={tab}
@@ -49,11 +48,7 @@ export function UserDetailTabs({
         ))}
       </TabsList>
       <TabsContent value="overview" className="mt-4 space-y-6">
-        <UserOverviewTab
-          user={user}
-          canManageUsers={canManageUsers}
-          onEditIdentity={onEditIdentity}
-        />
+        <UserOverviewTab user={user} />
       </TabsContent>
       <TabsContent value="grants" className="mt-4 space-y-6">
         {canManageGrants ? (
@@ -66,55 +61,18 @@ export function UserDetailTabs({
   );
 }
 
-/** Enable / disable, reset password and delete — for administrators looking at someone else. */
-export function UserHeaderActions({
-  user,
-  patchPending,
-  onEnable,
-  onDisable,
-  onReset,
-  onDelete,
-}: {
-  user: UserDto;
-  patchPending: boolean;
-  onEnable: () => void;
-  onDisable: () => void;
-  onReset: () => void;
-  onDelete: () => void;
-}) {
-  return (
-    <>
-      {user.status === UserStatus.Disabled ? (
-        <Button variant="outline" disabled={patchPending} onClick={onEnable}>
-          启用
-        </Button>
-      ) : (
-        <Button variant="outline" onClick={onDisable}>停用</Button>
-      )}
-      <Button variant="outline" onClick={onReset}>
-        <KeyRound className="h-4 w-4" />重置密码
-      </Button>
-      <MoreActions actions={[{ label: '删除用户', icon: Trash2, destructive: true, onSelect: onDelete }]} />
-    </>
-  );
-}
-
 /** Identity, group membership and effective capabilities of a user. */
-export function UserOverviewTab({
-  user,
-  canManageUsers,
-  onEditIdentity,
-}: {
-  user: UserDto;
-  canManageUsers: boolean;
-  onEditIdentity: () => void;
-}) {
+function UserOverviewTab({ user }: { user: UserDto }) {
+  const canManageUsers = useAuthStore(
+    (state) => state.user?.capabilities.includes(Capability.ManageUsers) ?? false,
+  );
+  const [identityOpen, setIdentityOpen] = useState(false);
   return (
     <>
       <SectionCard
         title="身份"
         actions={canManageUsers ? (
-          <Button size="sm" variant="outline" onClick={onEditIdentity}>
+          <Button size="sm" variant="outline" onClick={() => setIdentityOpen(true)}>
             <Pencil className="h-3.5 w-3.5" />编辑
           </Button>
         ) : undefined}
@@ -180,6 +138,7 @@ export function UserOverviewTab({
           </div>
         )}
       </SectionCard>
+      {identityOpen ? <UserIdentityDialog user={user} onClose={() => setIdentityOpen(false)} /> : null}
     </>
   );
 }

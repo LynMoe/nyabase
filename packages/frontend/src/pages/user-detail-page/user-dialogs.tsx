@@ -1,24 +1,36 @@
 import { useState } from 'react';
-import { Copy } from 'lucide-react';
+import { useMutation, useQueryClient } from '@tanstack/react-query';
+import { useNavigate } from '@tanstack/react-router';
+import { Copy, KeyRound, Trash2 } from 'lucide-react';
+import { UserStatus, type UpdateUserRequest, type UserDto } from '@nyabase/common';
 import { Button } from '../../components/ui/button.js';
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '../../components/ui/dialog.js';
 import { Input } from '../../components/ui/input.js';
 import { FormField } from '../../components/layout/form-field.js';
+import { ConfirmDialog } from '../../components/layout/confirm-dialog.js';
+import { MoreActions } from '../../components/layout/more-actions.js';
+import { api } from '../../lib/api.js';
+import { errorMessage } from '../../lib/api-error.js';
+import { queryKeys } from '../../lib/query-keys.js';
 import { copyOneTimeSecret } from '../../lib/one-time-secret.js';
 import { toast } from '../../hooks/use-toast.js';
 
-export function UserIdentityDialog({
-  displayName,
-  pending,
-  onSubmit,
-  onOpenChange,
-}: {
-  displayName: string;
-  pending: boolean;
-  onSubmit: (displayName: string) => void;
-  onOpenChange: (open: boolean) => void;
-}) {
-  const [value, setValue] = useState(displayName);
+export function UserIdentityDialog({ user, onClose }: { user: UserDto; onClose: () => void }) {
+  const patchUser = useUserPatch(user.id);
+  const submit = (next: string) => {
+    if (!next) {
+      toast({ title: '显示名称不能为空', variant: 'destructive' });
+      return;
+    }
+    if (next === user.displayName) {
+      toast({ title: '没有需要保存的更改' });
+      return;
+    }
+    patchUser.mutate({ displayName: next }, { onSuccess: onClose });
+  };
+  const pending = patchUser.isPending;
+  const onOpenChange = (open: boolean) => { if (!open) onClose(); };
+  const [value, setValue] = useState(user.displayName);
   return (
     <Dialog open onOpenChange={onOpenChange}>
       <DialogContent>
@@ -35,7 +47,7 @@ export function UserIdentityDialog({
         </FormField>
         <DialogFooter>
           <Button variant="outline" onClick={() => onOpenChange(false)}>取消</Button>
-          <Button onClick={() => onSubmit(value.trim())} disabled={pending}>
+          <Button onClick={() => submit(value.trim())} disabled={pending}>
             {pending ? '保存中...' : '保存'}
           </Button>
         </DialogFooter>
@@ -44,7 +56,7 @@ export function UserIdentityDialog({
   );
 }
 
-export function generateOneTimePassword(): string {
+function generateOneTimePassword(): string {
   const alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789';
   const bytes = new Uint8Array(16);
   crypto.getRandomValues(bytes);
@@ -52,7 +64,7 @@ export function generateOneTimePassword(): string {
 }
 
 /** Confirm a password reset, then show the new password exactly once. */
-export function ResetPasswordDialog({
+function ResetPasswordDialog({
   open,
   secret,
   username,
@@ -132,5 +144,100 @@ export function ResetPasswordDialog({
         )}
       </DialogContent>
     </Dialog>
+  );
+}
+
+/** Update mutation of one user; the caller closes its own dialog through `mutate` options. */
+export function useUserPatch(id: string) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (body: UpdateUserRequest) => api.patch<UserDto>(`/users/${id}`, body),
+    onSuccess: (_user, body) => {
+      void queryClient.invalidateQueries({ queryKey: queryKeys.users.admin });
+      void queryClient.invalidateQueries({ queryKey: queryKeys.groups.admin });
+      if (body.status === UserStatus.Disabled) toast({ title: '用户已停用' });
+      else if (body.status === UserStatus.Active) toast({ title: '用户已启用' });
+      else if (body.displayName) toast({ title: '用户已更新' });
+    },
+    onError: (error) => toast({ title: '更新用户失败', description: errorMessage(error), variant: 'destructive' }),
+  });
+}
+
+/** Enable / disable, reset password and delete — for administrators looking at someone else. */
+export function UserHeaderActions({ user }: { user: UserDto }) {
+  const navigate = useNavigate({ from: '/users/$id' });
+  const queryClient = useQueryClient();
+  const [disableOpen, setDisableOpen] = useState(false);
+  const [deleteOpen, setDeleteOpen] = useState(false);
+  const [resetOpen, setResetOpen] = useState(false);
+  const [resetSecret, setResetSecret] = useState<string | null>(null);
+  const patchUser = useUserPatch(user.id);
+  const remove = useMutation({
+    mutationFn: () => api.delete<unknown>(`/users/${user.id}`),
+    onSuccess: () => {
+      toast({ title: '用户已删除' });
+      setDeleteOpen(false);
+      void queryClient.invalidateQueries({ queryKey: queryKeys.users.admin });
+      void queryClient.invalidateQueries({ queryKey: queryKeys.groups.admin });
+      void navigate({ to: '/users' });
+    },
+    onError: (error) => toast({ title: '删除用户失败', description: errorMessage(error), variant: 'destructive' }),
+  });
+
+  return (
+    <>
+      {user.status === UserStatus.Disabled ? (
+        <Button
+          variant="outline"
+          disabled={patchUser.isPending}
+          onClick={() => patchUser.mutate({ status: UserStatus.Active })}
+        >
+          启用
+        </Button>
+      ) : (
+        <Button variant="outline" onClick={() => setDisableOpen(true)}>停用</Button>
+      )}
+      <Button variant="outline" onClick={() => { setResetSecret(null); setResetOpen(true); }}>
+        <KeyRound className="h-4 w-4" />重置密码
+      </Button>
+      <MoreActions actions={[{ label: '删除用户', icon: Trash2, destructive: true, onSelect: () => setDeleteOpen(true) }]} />
+      <ConfirmDialog
+        open={disableOpen}
+        title="停用用户？"
+        description={`将停用「${user.displayName}」。该账号将无法登录，已有会话会被终止。`}
+        confirmLabel="确认停用"
+        pendingLabel="处理中..."
+        pending={patchUser.isPending}
+        onConfirm={() => patchUser.mutate({ status: UserStatus.Disabled }, { onSuccess: () => setDisableOpen(false) })}
+        onOpenChange={setDisableOpen}
+      />
+      <ConfirmDialog
+        open={deleteOpen}
+        title="删除用户？"
+        description={`将永久删除用户「${user.displayName}」。其登录会话会被终止，组关系与资源授权会一并清理，且不可恢复。`}
+        confirmLabel="确认删除"
+        pendingLabel="确认删除"
+        pending={remove.isPending}
+        onConfirm={() => remove.mutate()}
+        onOpenChange={setDeleteOpen}
+      />
+      <ResetPasswordDialog
+        open={resetOpen}
+        secret={resetSecret}
+        username={user.username}
+        displayName={user.displayName}
+        pending={patchUser.isPending}
+        onReset={(password) => {
+          patchUser.mutate({ password }, {
+            onSuccess: () => {
+              toast({ title: '密码已重置' });
+              setResetSecret(password);
+              setResetOpen(false);
+            },
+          });
+        }}
+        onClose={() => { setResetOpen(false); setResetSecret(null); }}
+      />
+    </>
   );
 }
