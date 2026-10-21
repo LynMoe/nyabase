@@ -7,9 +7,9 @@ import {
   IntentResourceType,
   IntentStatus,
 } from '@nyabase/common';
-import type { NyabaseDatabase } from '../persistence-pg/database.types.js';
-import { retryPgTransaction } from '../persistence-pg/transaction.js';
-import { PG_DATABASE } from '../persistence-pg/tokens.js';
+import type { NyabaseDatabase } from '../platform/persistence-pg/database.types.js';
+import { retryPgTransaction } from '../platform/persistence-pg/transaction.js';
+import { PG_DATABASE } from '../platform/persistence-pg/tokens.js';
 import {
   RECONCILE_WAKE,
   type ReconcileWakePort,

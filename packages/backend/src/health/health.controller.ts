@@ -1,11 +1,13 @@
 import { Controller, Get, ServiceUnavailableException } from '@nestjs/common';
-import { PgSchemaReadiness } from '../persistence-pg/persistence-pg.module.js';
+import { Public } from '../iam/decorators/public.decorator.js';
+import { PgSchemaReadiness } from '../platform/persistence-pg/persistence-pg.module.js';
 import { RuntimeLifecycleService } from './runtime-lifecycle.service.js';
 
 /**
  * Unauthenticated process probes. Liveness deliberately avoids dependencies;
  * readiness verifies authoritative PostgreSQL.
  */
+@Public()
 @Controller('health')
 export class HealthController {
   constructor(

@@ -4,7 +4,6 @@ import {
   Controller,
   Get,
   Patch,
-  UseGuards,
 } from '@nestjs/common';
 import {
   Capability,
@@ -12,13 +11,12 @@ import {
   type PublicSettingsDto,
   type SystemSettingsDto,
 } from '@nyabase/common';
-import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard.js';
-import { CapabilitiesGuard } from '../auth/guards/capabilities.guard.js';
-import { RequireCaps } from '../auth/decorators/require-caps.decorator.js';
-import { NyabaseConfigService } from '../config/nyabase-config.service.js';
-import { CurrentUser } from '../auth/decorators/current-user.decorator.js';
-import type { UserRecord } from '../domain/domain-records.js';
-import { AccessResolverService } from '../access/access-resolver.service.js';
+import { Public } from '../iam/decorators/public.decorator.js';
+import { RequireCaps } from '../iam/decorators/require-caps.decorator.js';
+import { NyabaseConfigService } from '../platform/config/nyabase-config.service.js';
+import { CurrentUser } from '../iam/decorators/current-user.decorator.js';
+import type { UserRecord } from '../iam/user-record.js';
+import { AccessResolverService } from '../iam/access-resolver.service.js';
 import {
   SystemSettingsAuthorityService,
   SystemSettingsRevisionConflictError,
@@ -32,13 +30,13 @@ export class SystemSettingsController {
     private authority: SystemSettingsAuthorityService,
   ) {}
 
+  @Public()
   @Get('public/settings')
   publicSettings(): PublicSettingsDto {
     return this.config.publicSettings();
   }
 
   @Get('admin/system-settings')
-  @UseGuards(JwtAuthGuard, CapabilitiesGuard)
   @RequireCaps(Capability.ManageSystemSettings)
   async getSettings(): Promise<SystemSettingsDto> {
     await this.authority.refreshFromPostgres('admin-read');
@@ -46,7 +44,6 @@ export class SystemSettingsController {
   }
 
   @Patch('admin/system-settings')
-  @UseGuards(JwtAuthGuard, CapabilitiesGuard)
   @RequireCaps(Capability.ManageSystemSettings)
   async patchSettings(
     @CurrentUser() actor: UserRecord,

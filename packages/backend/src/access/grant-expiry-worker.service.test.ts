@@ -1,7 +1,7 @@
 import { Logger } from '@nestjs/common';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { GrantExpiryWorkerService } from './grant-expiry-worker.service.js';
-import { SYSTEM_ACTOR_USERNAME } from '../groups/groups.service.js';
+import { SYSTEM_ACTOR_USERNAME } from '../iam/system-actor.js';
 
 const SYSTEM_ACTOR_ID = '00000000-0000-4000-8000-000000000409';
 

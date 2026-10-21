@@ -1,9 +1,9 @@
 import { Inject, Injectable } from '@nestjs/common';
 import { IntentKind, IntentResourceType } from '@nyabase/common';
 import type { Kysely } from 'kysely';
-import type { NyabaseDatabase } from '../persistence-pg/database.types.js';
-import { PG_DATABASE } from '../persistence-pg/tokens.js';
-import { retryPgTransaction } from '../persistence-pg/transaction.js';
+import type { NyabaseDatabase } from '../platform/persistence-pg/database.types.js';
+import { PG_DATABASE } from '../platform/persistence-pg/tokens.js';
+import { retryPgTransaction } from '../platform/persistence-pg/transaction.js';
 import { IntentRepository } from '../runtime/intent.repository.js';
 import { ReconcileWakeService } from '../runtime/reconcile-wake.service.js';
 

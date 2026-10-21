@@ -6,22 +6,18 @@ import {
   Delete,
   Param,
   Body,
-  UseGuards,
   HttpCode,
   ForbiddenException,
   BadRequestException,
 } from '@nestjs/common';
 import { UsersService } from './users.service.js';
-import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard.js';
-import { CapabilitiesGuard } from '../auth/guards/capabilities.guard.js';
-import { RequireAnyCaps, RequireCaps } from '../auth/decorators/require-caps.decorator.js';
-import { CurrentUser } from '../auth/decorators/current-user.decorator.js';
+import { RequireAnyCaps, RequireCaps } from '../iam/decorators/require-caps.decorator.js';
+import { CurrentUser } from '../iam/decorators/current-user.decorator.js';
 import { GroupsService } from '../groups/groups.service.js';
-import type { UserRecord } from '../domain/domain-records.js';
+import type { UserRecord } from '../iam/user-record.js';
 import { Capability, SystemGroupKey, zCreateUserRequest, zUpdateUserRequest } from '@nyabase/common';
 
 @Controller('admin/users')
-@UseGuards(JwtAuthGuard, CapabilitiesGuard)
 export class AdminUsersController {
   constructor(
     private usersService: UsersService,

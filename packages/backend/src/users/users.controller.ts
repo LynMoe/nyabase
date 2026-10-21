@@ -6,20 +6,16 @@ import {
   Delete,
   Param,
   Body,
-  UseGuards,
   HttpCode,
   ForbiddenException,
   BadRequestException,
 } from '@nestjs/common';
 import { UsersService } from './users.service.js';
-import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard.js';
-import { CapabilitiesGuard } from '../auth/guards/capabilities.guard.js';
-import { CurrentUser } from '../auth/decorators/current-user.decorator.js';
-import type { UserRecord } from '../domain/domain-records.js';
+import { CurrentUser } from '../iam/decorators/current-user.decorator.js';
+import type { UserRecord } from '../iam/user-record.js';
 import { zUpdateUserRequest, zAddSshKeyRequest } from '@nyabase/common';
 
 @Controller('users')
-@UseGuards(JwtAuthGuard, CapabilitiesGuard)
 export class UsersController {
   constructor(
     private usersService: UsersService,

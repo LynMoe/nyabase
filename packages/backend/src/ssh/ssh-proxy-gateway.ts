@@ -23,12 +23,12 @@ import {
   type SshProxyStatusReport,
 } from '@nyabase/common';
 import { SshProxySnapshotService } from './ssh-proxy-snapshot.service.js';
-import { NyabaseConfigService } from '../config/nyabase-config.service.js';
+import { NyabaseConfigService } from '../platform/config/nyabase-config.service.js';
 import { ProxySnapshotNotifierService } from '../proxy-snapshots/proxy-snapshot-notifier.service.js';
 import {
   configuredProxyTokenDigest,
   hasValidBearerToken,
-} from '../common/proxy-bearer-auth.js';
+} from '../platform/proxy-bearer-auth.js';
 
 export const MAX_SSH_PROXY_BUFFERED_BYTES = MAX_SSH_PROXY_SNAPSHOT_BYTES;
 export const MAX_SSH_PROXY_CLIENTS = 4;

@@ -4,19 +4,15 @@ import {
   Get,
   Param,
   Patch,
-  UseGuards,
 } from '@nestjs/common';
 import { zPatchStoragePoolRequest } from '@nyabase/common';
-import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard.js';
-import { CapabilitiesGuard } from '../auth/guards/capabilities.guard.js';
-import { RequireCaps } from '../auth/decorators/require-caps.decorator.js';
-import { CurrentUser } from '../auth/decorators/current-user.decorator.js';
-import type { UserRecord } from '../domain/domain-records.js';
+import { RequireCaps } from '../iam/decorators/require-caps.decorator.js';
+import { CurrentUser } from '../iam/decorators/current-user.decorator.js';
+import type { UserRecord } from '../iam/user-record.js';
 import { Capability } from '@nyabase/common';
 import { StoragePoolsService } from './storage-pools.service.js';
 
 @Controller('servers/:serverId/storage-pools')
-@UseGuards(JwtAuthGuard, CapabilitiesGuard)
 export class StoragePoolsController {
   constructor(private readonly service: StoragePoolsService) {}
 
@@ -36,7 +32,6 @@ export class StoragePoolsController {
 }
 
 @Controller('admin/storage-pools')
-@UseGuards(JwtAuthGuard, CapabilitiesGuard)
 @RequireCaps(Capability.ManageStoragePools)
 export class AdminStoragePoolsController {
   constructor(private readonly service: StoragePoolsService) {}

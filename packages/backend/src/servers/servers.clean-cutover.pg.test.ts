@@ -1,8 +1,8 @@
 import { randomUUID } from 'node:crypto';
 import { describe, expect, it, vi } from 'vitest';
 import { ServerStatus } from '@nyabase/common';
-import { withPostgresTestDatabase } from '../persistence-pg/postgres-test-harness.js';
-import { PgTransactionManager } from '../persistence-pg/transaction.js';
+import { withPostgresTestDatabase } from '../platform/persistence-pg/postgres-test-harness.js';
+import { PgTransactionManager } from '../platform/persistence-pg/transaction.js';
 import { VOLUME_DESTROY_PLACEMENT_ID } from '../runtime/reconcile-claim.repository.js';
 import { ServersService } from './servers.service.js';
 

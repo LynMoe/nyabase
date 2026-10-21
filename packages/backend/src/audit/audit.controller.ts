@@ -5,11 +5,8 @@ import {
   NotFoundException,
   Param,
   Query,
-  UseGuards,
 } from '@nestjs/common';
-import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard.js';
-import { CapabilitiesGuard } from '../auth/guards/capabilities.guard.js';
-import { RequireCaps } from '../auth/decorators/require-caps.decorator.js';
+import { RequireCaps } from '../iam/decorators/require-caps.decorator.js';
 import {
   AuditAction,
   Capability,
@@ -23,10 +20,9 @@ import {
   MAX_AUDIT_OFFSET,
   type AuditEvent,
   type AuditListFilter,
-} from './audit.repository.js';
+} from '../iam/audit.repository.js';
 
 @Controller('audit')
-@UseGuards(JwtAuthGuard, CapabilitiesGuard)
 @RequireCaps(Capability.ViewAudit)
 export class AuditController {
   constructor(private readonly repository: AuditRepository) {}

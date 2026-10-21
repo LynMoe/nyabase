@@ -11,9 +11,9 @@ import { join } from 'node:path';
 import type { Kysely, Transaction } from 'kysely';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { AuditAction } from '@nyabase/common';
-import { NyabaseConfigService } from '../config/nyabase-config.service.js';
-import type { NyabaseDatabase } from '../persistence-pg/database.types.js';
-import { withPostgresTestDatabase } from '../persistence-pg/postgres-test-harness.js';
+import { NyabaseConfigService } from '../platform/config/nyabase-config.service.js';
+import type { NyabaseDatabase } from '../platform/persistence-pg/database.types.js';
+import { withPostgresTestDatabase } from '../platform/persistence-pg/postgres-test-harness.js';
 import {
   SystemSettingsAuthorityService,
   SystemSettingsRevisionConflictError,

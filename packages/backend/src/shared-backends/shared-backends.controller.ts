@@ -7,7 +7,6 @@ import {
   Param,
   Patch,
   Post,
-  UseGuards,
 } from '@nestjs/common';
 import {
   Capability,
@@ -16,15 +15,12 @@ import {
   zPatchSharedBackendExecutorRequest,
   zPatchSharedBackendRequest,
 } from '@nyabase/common';
-import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard.js';
-import { CapabilitiesGuard } from '../auth/guards/capabilities.guard.js';
-import { RequireAnyCaps, RequireCaps } from '../auth/decorators/require-caps.decorator.js';
-import { CurrentUser } from '../auth/decorators/current-user.decorator.js';
-import type { UserRecord } from '../domain/domain-records.js';
+import { RequireAnyCaps, RequireCaps } from '../iam/decorators/require-caps.decorator.js';
+import { CurrentUser } from '../iam/decorators/current-user.decorator.js';
+import type { UserRecord } from '../iam/user-record.js';
 import { SharedBackendsService } from './shared-backends.service.js';
 
 @Controller('shared-backends')
-@UseGuards(JwtAuthGuard, CapabilitiesGuard)
 export class SharedBackendsController {
   constructor(private readonly service: SharedBackendsService) {}
 
@@ -40,7 +36,6 @@ export class SharedBackendsController {
 }
 
 @Controller('admin/shared-backends')
-@UseGuards(JwtAuthGuard, CapabilitiesGuard)
 @RequireCaps(Capability.ManageSharedBackends)
 export class AdminSharedBackendsController {
   constructor(private readonly service: SharedBackendsService) {}

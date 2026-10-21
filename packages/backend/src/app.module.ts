@@ -1,60 +1,49 @@
 import { Module } from '@nestjs/common';
-import { DatabaseModule } from './database/database.module.js';
-import { MetricsModule } from './metrics/metrics.module.js';
-import { AppService } from './app.service.js';
-import { NyabaseConfigModule } from './config/nyabase-config.module.js';
-import { HealthController } from './health/health.controller.js';
-import { EphemeralStoreModule } from './platform/ephemeral-store.module.js';
-import { RuntimeModule } from './runtime/runtime.module.js';
-import { RuntimeLifecycleService } from './health/runtime-lifecycle.service.js';
 import { AccessModule } from './access/access.module.js';
 import { AuditModule } from './audit/audit.module.js';
-import { AuthModule } from './auth/auth.module.js';
-import { CatalogModule } from './catalog/catalog.module.js';
 import { ContainersModule } from './containers/containers.module.js';
+import { GpuModule } from './gpu/gpu.module.js';
 import { GroupsModule } from './groups/groups.module.js';
+import { HealthController } from './health/health.controller.js';
+import { RuntimeLifecycleService } from './health/runtime-lifecycle.service.js';
 import { HttpProxyModule } from './http-proxy/http-proxy.module.js';
+import { IamModule } from './iam/iam.module.js';
 import { ImagesModule } from './images/images.module.js';
+import { IpPoolsModule } from './ip-pools/ip-pools.module.js';
+import { MetricsModule } from './metrics/metrics.module.js';
+import { PlatformModule } from './platform/platform.module.js';
+import { RuntimeModule } from './runtime/runtime.module.js';
 import { ServersModule } from './servers/servers.module.js';
 import { SharedBackendsModule } from './shared-backends/shared-backends.module.js';
-import { IpPoolsModule } from './ip-pools/ip-pools.module.js';
 import { SshModule } from './ssh/ssh.module.js';
 import { StoragePoolsModule } from './storage-pools/storage-pools.module.js';
+import { SystemSettingsModule } from './system-settings/system-settings.module.js';
 import { UsersModule } from './users/users.module.js';
 import { VolumesModule } from './volumes/volumes.module.js';
-import { SystemSettingsModule } from './system-settings/system-settings.module.js';
-import { GrantExpiryModule } from './access/grant-expiry.module.js';
-import { GpuModule } from './gpu/gpu.module.js';
 
 @Module({
   imports: [
-    NyabaseConfigModule,
-    GpuModule,
-    EphemeralStoreModule,
+    PlatformModule,
+    IamModule,
     RuntimeModule,
-    DatabaseModule,
     MetricsModule,
     AccessModule,
     AuditModule,
-    AuthModule,
-    CatalogModule,
     ContainersModule,
+    GpuModule,
     GroupsModule,
     HttpProxyModule,
     ImagesModule,
+    IpPoolsModule,
     ServersModule,
     SharedBackendsModule,
-    IpPoolsModule,
     SshModule,
     StoragePoolsModule,
     SystemSettingsModule,
     UsersModule,
     VolumesModule,
-    GrantExpiryModule,
   ],
-  controllers: [
-    HealthController,
-  ],
-  providers: [AppService, RuntimeLifecycleService],
+  controllers: [HealthController],
+  providers: [RuntimeLifecycleService],
 })
 export class AppModule {}

@@ -4,9 +4,9 @@ import {
   Injectable,
 } from '@nestjs/common';
 import type { Kysely, Transaction } from 'kysely';
-import type { NyabaseDatabase } from '../persistence-pg/database.types.js';
-import { PG_DATABASE } from '../persistence-pg/tokens.js';
-import { PgTransactionManager } from '../persistence-pg/transaction.js';
+import type { NyabaseDatabase } from '../platform/persistence-pg/database.types.js';
+import { PG_DATABASE } from '../platform/persistence-pg/tokens.js';
+import { PgTransactionManager } from '../platform/persistence-pg/transaction.js';
 import { SshKeyCryptoService } from './ssh-key-crypto.service.js';
 import { SshKeygenService } from './ssh-keygen.service.js';
 

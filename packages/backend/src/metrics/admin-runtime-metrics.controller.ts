@@ -1,10 +1,8 @@
-import { Controller, Get, Inject, UseGuards } from '@nestjs/common';
+import { Controller, Get, Inject } from '@nestjs/common';
 import { Capability } from '@nyabase/common';
 import type { Pool } from 'pg';
-import { RequireCaps } from '../auth/decorators/require-caps.decorator.js';
-import { CapabilitiesGuard } from '../auth/guards/capabilities.guard.js';
-import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard.js';
-import { PG_POOL } from '../persistence-pg/tokens.js';
+import { RequireCaps } from '../iam/decorators/require-caps.decorator.js';
+import { PG_POOL } from '../platform/persistence-pg/tokens.js';
 import { MetricsWriter } from './metrics-writer.js';
 
 export interface RuntimeDependencyMetrics {
@@ -30,7 +28,6 @@ export interface RuntimeDependencyMetrics {
  * connection strings, server/user IDs, SQL text, and raw errors.
  */
 @Controller('admin/metrics')
-@UseGuards(JwtAuthGuard, CapabilitiesGuard)
 @RequireCaps(Capability.ViewMetricsAll)
 export class AdminRuntimeMetricsController {
   constructor(

@@ -20,23 +20,23 @@ import {
   type SharedBackendGrantDto,
   type StoragePoolGrantDto,
 } from '@nyabase/common';
-import type { NyabaseDatabase } from '../persistence-pg/database.types.js';
-import { PG_DATABASE } from '../persistence-pg/tokens.js';
-import { PgTransactionManager } from '../persistence-pg/transaction.js';
+import type { NyabaseDatabase } from '../platform/persistence-pg/database.types.js';
+import { PG_DATABASE } from '../platform/persistence-pg/tokens.js';
+import { PgTransactionManager } from '../platform/persistence-pg/transaction.js';
 import {
   AccessResolverService,
   type IamGroup,
   type IamTransaction,
-} from '../access/access-resolver.service.js';
-import { AccessRevocationGuardService } from '../access/access-revocation-guard.service.js';
-import { AuditService } from '../audit/audit.service.js';
+} from '../iam/access-resolver.service.js';
+import { AccessRevocationGuardService } from '../iam/access-revocation-guard.service.js';
+import { AuditService } from '../iam/audit.service.js';
+import { SYSTEM_ACTOR_USERNAME } from '../iam/system-actor.js';
 import { GpuClaimsRepository } from '../gpu/gpu-claims.repository.js';
 import { isLocalPoolRow } from '../storage-pools/storage-pools.service.js';
 
 type GrantScope = 'user' | 'group';
 type GrantExecutor = Kysely<NyabaseDatabase> | Transaction<NyabaseDatabase>;
 
-export const SYSTEM_ACTOR_USERNAME = 'nyabase-system';
 export const SYSTEM_ACTOR_DISPLAY_NAME = 'Nyabase System';
 export const SYSTEM_ACTOR_PREFERRED_NUMERIC_ID = 4096;
 const SYSTEM_ACTOR_NUMERIC_ID_MAX = 4096;

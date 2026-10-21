@@ -1,10 +1,10 @@
 import { randomUUID } from 'node:crypto';
 import { Capability, UserStatus } from '@nyabase/common';
 import { vi, type Mock } from 'vitest';
-import { AccessCacheEpochService } from '../access/access-cache-epoch.service.js';
-import { AccessResolverService } from '../access/access-resolver.service.js';
-import type { PostgresTestDatabase } from '../persistence-pg/postgres-test-harness.js';
-import { PgTransactionManager } from '../persistence-pg/transaction.js';
+import { AccessCacheEpochService } from '../iam/access-cache-epoch.service.js';
+import { AccessResolverService } from '../iam/access-resolver.service.js';
+import type { PostgresTestDatabase } from '../platform/persistence-pg/postgres-test-harness.js';
+import { PgTransactionManager } from '../platform/persistence-pg/transaction.js';
 import { UsersService } from './users.service.js';
 
 export interface UsersPgFixture {

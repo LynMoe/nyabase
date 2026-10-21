@@ -43,7 +43,7 @@ adminUrl.pathname = '/postgres';
 const databaseUrl = new URL(baseDatabaseUrl);
 databaseUrl.pathname = `/${databaseName}`;
 const expectedMigrations = readdirSync(
-  join(backendRoot, 'src', 'persistence-pg', 'migrations'),
+  join(backendRoot, 'src', 'platform', 'persistence-pg', 'migrations'),
 )
   .filter((name) => /^\d{6}_[a-z0-9][a-z0-9-]*\.sql$/.test(name))
   .map((name) => name.slice(0, -4))

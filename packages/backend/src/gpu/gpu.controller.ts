@@ -4,18 +4,14 @@ import {
   Get,
   Param,
   Patch,
-  UseGuards,
 } from '@nestjs/common';
 import { Capability } from '@nyabase/common';
-import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard.js';
-import { CapabilitiesGuard } from '../auth/guards/capabilities.guard.js';
-import { CurrentUser } from '../auth/decorators/current-user.decorator.js';
-import { RequireAnyCaps, RequireCaps } from '../auth/decorators/require-caps.decorator.js';
-import type { UserRecord } from '../domain/domain-records.js';
+import { CurrentUser } from '../iam/decorators/current-user.decorator.js';
+import { RequireAnyCaps, RequireCaps } from '../iam/decorators/require-caps.decorator.js';
+import type { UserRecord } from '../iam/user-record.js';
 import { GpuService } from './gpu.service.js';
 
 @Controller('admin/servers/:serverId')
-@UseGuards(JwtAuthGuard, CapabilitiesGuard)
 @RequireCaps(Capability.ManageServers)
 export class AdminGpuController {
   constructor(private readonly gpu: GpuService) {}
@@ -43,7 +39,6 @@ export class AdminGpuController {
 }
 
 @Controller('servers/:serverId')
-@UseGuards(JwtAuthGuard, CapabilitiesGuard)
 export class UserGpuController {
   constructor(private readonly gpu: GpuService) {}
 

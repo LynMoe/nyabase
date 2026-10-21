@@ -1,5 +1,5 @@
 import { BadGatewayException, Injectable, NotFoundException } from '@nestjs/common';
-import { NyabaseConfigService } from '../config/nyabase-config.service.js';
+import { NyabaseConfigService } from '../platform/config/nyabase-config.service.js';
 
 export type CatalogEntry = {
   alias: string;

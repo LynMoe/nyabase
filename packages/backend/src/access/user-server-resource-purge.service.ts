@@ -7,16 +7,16 @@ import {
   IntentKind,
   IntentResourceType,
 } from '@nyabase/common';
-import { AuditService } from '../audit/audit.service.js';
+import { AuditService } from '../iam/audit.service.js';
 import { ContainerControlRepository } from '../containers/container-control.repository.js';
 import { ContainerControlService } from '../containers/container-control.service.js';
-import { PgTransactionManager } from '../persistence-pg/transaction.js';
+import { PgTransactionManager } from '../platform/persistence-pg/transaction.js';
 import { IntentRepository } from '../runtime/intent.repository.js';
 import { ReconcileClaimRepository } from '../runtime/reconcile-claim.repository.js';
 import { VOLUME_DESTROY_PLACEMENT_ID } from '../runtime/reconcile-claim.repository.js';
 import { listEligibleDestroyExecutors } from '../volumes/eligible-destroy-executors.js';
 import { VolumesRepository } from '../volumes/volumes.repository.js';
-import { AccessResolverService } from './access-resolver.service.js';
+import { AccessResolverService } from '../iam/access-resolver.service.js';
 
 const OPERATOR_PURGE_AUDIT_ACTION = 'user.server.purge_resources' as AuditAction;
 

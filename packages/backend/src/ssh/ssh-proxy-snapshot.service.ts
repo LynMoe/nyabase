@@ -17,9 +17,9 @@ import {
   ContainerControlRepository,
   type ContainerSshRouteRecord,
 } from '../containers/container-control.repository.js';
-import { NyabaseConfigService } from '../config/nyabase-config.service.js';
-import { PgTransactionManager } from '../persistence-pg/transaction.js';
-import { loadUsableServerAccessKeys } from '../access/usable-server-access.js';
+import { NyabaseConfigService } from '../platform/config/nyabase-config.service.js';
+import { PgTransactionManager } from '../platform/persistence-pg/transaction.js';
+import { loadUsableServerAccessKeys } from '../iam/usable-server-access.js';
 import { SshIdentityService } from './ssh-identity.service.js';
 
 function normalizeRouteRuntimeStatus(value: string | null | undefined): ContainerStatus {

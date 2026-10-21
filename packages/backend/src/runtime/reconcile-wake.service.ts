@@ -1,6 +1,6 @@
 import { Inject, Injectable, Logger, Optional, OnModuleDestroy, OnModuleInit } from '@nestjs/common';
 import type { Pool, PoolClient } from 'pg';
-import { PG_POOL } from '../persistence-pg/tokens.js';
+import { PG_POOL } from '../platform/persistence-pg/tokens.js';
 import type { IntentResource } from './intent.repository.js';
 
 export const RECONCILE_WAKE = Symbol('RECONCILE_WAKE');

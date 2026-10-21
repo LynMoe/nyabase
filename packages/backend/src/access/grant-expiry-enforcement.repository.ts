@@ -1,9 +1,9 @@
 import { Inject, Injectable } from '@nestjs/common';
 import { randomUUID } from 'node:crypto';
 import { sql, type Kysely, type Transaction } from 'kysely';
-import type { NyabaseDatabase } from '../persistence-pg/database.types.js';
-import { PG_DATABASE } from '../persistence-pg/tokens.js';
-import { PgTransactionManager } from '../persistence-pg/transaction.js';
+import type { NyabaseDatabase } from '../platform/persistence-pg/database.types.js';
+import { PG_DATABASE } from '../platform/persistence-pg/tokens.js';
+import { PgTransactionManager } from '../platform/persistence-pg/transaction.js';
 
 /** Lease long enough for stop/purge enqueue, not full container drain. */
 export const GRANT_EXPIRY_CLAIM_LEASE_MS = 3 * 60_000;

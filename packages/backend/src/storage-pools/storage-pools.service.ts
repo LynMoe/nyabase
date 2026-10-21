@@ -27,12 +27,12 @@ import {
   type StorageExecutor,
   type StoragePoolDiscovery,
 } from './storage-pools.repository.js';
-import { numberValue, isoDate } from '../domain/domain-utils.js';
-import { PgTransactionManager } from '../persistence-pg/transaction.js';
+import { numberValue, isoDate } from '../platform/domain-utils.js';
+import { PgTransactionManager } from '../platform/persistence-pg/transaction.js';
 import { sql, type Kysely, type Transaction } from 'kysely';
-import type { NyabaseDatabase } from '../persistence-pg/database.types.js';
-import { PG_DATABASE } from '../persistence-pg/tokens.js';
-import { classifyGrantExpiry } from '../access/grant-expiry.js';
+import type { NyabaseDatabase } from '../platform/persistence-pg/database.types.js';
+import { PG_DATABASE } from '../platform/persistence-pg/tokens.js';
+import { classifyGrantExpiry } from '../iam/grant-expiry.js';
 
 /**
  * Dir-pool project quota is effective only when Incus reports `usage.used`.

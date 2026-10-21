@@ -6,22 +6,18 @@ import {
   Param,
   Patch,
   Post,
-  UseGuards,
 } from '@nestjs/common';
 import {
   Capability,
   zCreateIpPoolRequest,
   zPatchIpPoolRequest,
 } from '@nyabase/common';
-import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard.js';
-import { CapabilitiesGuard } from '../auth/guards/capabilities.guard.js';
-import { RequireCaps } from '../auth/decorators/require-caps.decorator.js';
-import { CurrentUser } from '../auth/decorators/current-user.decorator.js';
-import type { UserRecord } from '../domain/domain-records.js';
+import { RequireCaps } from '../iam/decorators/require-caps.decorator.js';
+import { CurrentUser } from '../iam/decorators/current-user.decorator.js';
+import type { UserRecord } from '../iam/user-record.js';
 import { IpPoolsService } from './ip-pools.service.js';
 
 @Controller('admin/ip-pools')
-@UseGuards(JwtAuthGuard, CapabilitiesGuard)
 @RequireCaps(Capability.ManageIpPools)
 export class AdminIpPoolsController {
   constructor(private readonly service: IpPoolsService) {}

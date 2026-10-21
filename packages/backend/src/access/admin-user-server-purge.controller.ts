@@ -1,15 +1,12 @@
-import { Controller, Param, Post, UseGuards } from '@nestjs/common';
+import { Controller, Param, Post } from '@nestjs/common';
 import { Capability } from '@nyabase/common';
-import { RequireCaps } from '../auth/decorators/require-caps.decorator.js';
-import { CurrentUser } from '../auth/decorators/current-user.decorator.js';
-import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard.js';
-import { CapabilitiesGuard } from '../auth/guards/capabilities.guard.js';
-import type { UserRecord } from '../domain/domain-records.js';
+import { RequireCaps } from '../iam/decorators/require-caps.decorator.js';
+import { CurrentUser } from '../iam/decorators/current-user.decorator.js';
+import type { UserRecord } from '../iam/user-record.js';
 import { GroupsService } from '../groups/groups.service.js';
 import { UserServerResourcePurgeService } from './user-server-resource-purge.service.js';
 
 @Controller('admin/users/:userId')
-@UseGuards(JwtAuthGuard, CapabilitiesGuard)
 export class AdminUserServerPurgeController {
   constructor(
     private readonly groupsService: GroupsService,

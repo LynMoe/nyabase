@@ -18,11 +18,11 @@ import {
   type ServerGpuDto,
 } from '@nyabase/common';
 import type { Kysely } from 'kysely';
-import type { NyabaseDatabase } from '../persistence-pg/database.types.js';
-import { PG_DATABASE } from '../persistence-pg/tokens.js';
-import { PgTransactionManager } from '../persistence-pg/transaction.js';
-import { AccessResolverService } from '../access/access-resolver.service.js';
-import { AuditService } from '../audit/audit.service.js';
+import type { NyabaseDatabase } from '../platform/persistence-pg/database.types.js';
+import { PG_DATABASE } from '../platform/persistence-pg/tokens.js';
+import { PgTransactionManager } from '../platform/persistence-pg/transaction.js';
+import { AccessResolverService } from '../iam/access-resolver.service.js';
+import { AuditService } from '../iam/audit.service.js';
 import {
   INCUS_CLIENT_FACTORY,
   type IncusClientFactory,

@@ -1,11 +1,9 @@
-import { Controller, Get, Query, UseGuards } from '@nestjs/common';
+import { Controller, Get, Query } from '@nestjs/common';
 import { z } from 'zod';
 import { BadRequestException } from '@nestjs/common';
 import type { PerformanceMetric, PerformanceRange } from '@nyabase/common';
-import { CurrentUser } from '../auth/decorators/current-user.decorator.js';
-import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard.js';
-import { CapabilitiesGuard } from '../auth/guards/capabilities.guard.js';
-import type { UserRecord } from '../domain/domain-records.js';
+import { CurrentUser } from '../iam/decorators/current-user.decorator.js';
+import type { UserRecord } from '../iam/user-record.js';
 import { PerformanceQueryService } from './performance-query.service.js';
 
 const zUsageQuery = z.object({
@@ -22,7 +20,6 @@ const zSeriesQuery = zUsageQuery.extend({
 });
 
 @Controller('performance')
-@UseGuards(JwtAuthGuard, CapabilitiesGuard)
 export class PerformanceController {
   constructor(private readonly performance: PerformanceQueryService) {}
 

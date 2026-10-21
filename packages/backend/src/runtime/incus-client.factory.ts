@@ -13,11 +13,11 @@ import {
 } from '../incus/incus-credentials.js';
 import type { IncusClientFactory } from './reconcile-worker.service.js';
 import type { Kysely, Selectable } from 'kysely';
-import type { NyabaseDatabase } from '../persistence-pg/database.types.js';
-import type { InfrastructureServerTable } from '../infrastructure/infrastructure-database.types.js';
-import type { IncusClientCertificateTable } from '../system-settings/system-settings-database.types.js';
-import { PG_DATABASE } from '../persistence-pg/tokens.js';
-import { NyabaseConfigService } from '../config/nyabase-config.service.js';
+import type { NyabaseDatabase } from '../platform/persistence-pg/database.types.js';
+import type { InfrastructureServerTable } from '../platform/persistence-pg/infrastructure-database.types.js';
+import type { IncusClientCertificateTable } from '../platform/persistence-pg/system-settings-database.types.js';
+import { PG_DATABASE } from '../platform/persistence-pg/tokens.js';
+import { NyabaseConfigService } from '../platform/config/nyabase-config.service.js';
 
 type ServerRow = Pick<
   Selectable<InfrastructureServerTable>,

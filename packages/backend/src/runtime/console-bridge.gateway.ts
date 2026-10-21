@@ -8,7 +8,7 @@ import {
 import * as http from 'node:http';
 import { URL } from 'node:url';
 import { WebSocket, WebSocketServer, type RawData } from 'ws';
-import { AuthService } from '../auth/auth.service.js';
+import { AuthService } from '../iam/auth.service.js';
 import {
   CONSOLE_BRIDGE,
   type ConsoleBridgePort,

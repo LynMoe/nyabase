@@ -10,7 +10,7 @@ import {
   validateNodeMetricSample,
   type NodeMetricCatalog,
 } from '@nyabase/common';
-import { NyabaseConfigService } from '../config/nyabase-config.service.js';
+import { NyabaseConfigService } from '../platform/config/nyabase-config.service.js';
 
 export interface MetricPoint {
   name: string;

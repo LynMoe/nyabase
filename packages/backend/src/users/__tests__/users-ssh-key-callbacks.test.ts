@@ -9,7 +9,7 @@ import { describe, expect, it } from 'vitest';
 import {
   withPostgresTestDatabase,
   type PostgresTestDatabase,
-} from '../../persistence-pg/postgres-test-harness.js';
+} from '../../platform/persistence-pg/postgres-test-harness.js';
 import { usersPgFixture } from '../users.pg-test-helper.js';
 
 const describePostgres = process.env.NYABASE_TEST_DATABASE_URL ? describe : describe.skip;

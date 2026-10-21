@@ -1,5 +1,5 @@
 import type { Kysely, Transaction } from 'kysely';
-import type { NyabaseDatabase } from '../persistence-pg/database.types.js';
+import type { NyabaseDatabase } from '../platform/persistence-pg/database.types.js';
 
 export type EligibleDestroyExecutor = {
   server_id: string;

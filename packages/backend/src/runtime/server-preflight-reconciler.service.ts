@@ -11,8 +11,8 @@ import {
   type PreflightReport,
 } from '@nyabase/common';
 import { Kysely, sql, type Transaction } from 'kysely';
-import type { NyabaseDatabase } from '../persistence-pg/database.types.js';
-import { PG_DATABASE } from '../persistence-pg/tokens.js';
+import type { NyabaseDatabase } from '../platform/persistence-pg/database.types.js';
+import { PG_DATABASE } from '../platform/persistence-pg/tokens.js';
 import {
   INFRASTRUCTURE_ADVISORY_NAMESPACE,
   lockServerOnboarding,
@@ -30,7 +30,7 @@ import {
 } from '../incus/index.js';
 import { applyGuestNetwork, parseCidrPrefix } from './guest-network.adapter.js';
 import { EphemeralStore } from '../platform/ephemeral-store.js';
-import { NyabaseConfigService } from '../config/nyabase-config.service.js';
+import { NyabaseConfigService } from '../platform/config/nyabase-config.service.js';
 import type { IntentFailure, IntentRecord } from './intent.repository.js';
 import type {
   ManagedReconciler,

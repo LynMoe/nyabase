@@ -16,13 +16,13 @@ import {
   type NodeMetricSample,
 } from '@nyabase/common';
 import { sql, type Kysely, type RawBuilder } from 'kysely';
-import type { NyabaseDatabase } from '../persistence-pg/database.types.js';
-import { PG_DATABASE } from '../persistence-pg/tokens.js';
+import type { NyabaseDatabase } from '../platform/persistence-pg/database.types.js';
+import { PG_DATABASE } from '../platform/persistence-pg/tokens.js';
 import {
   NODE_METRICS_PULL,
   type NodeMetricsPullPort,
 } from '../runtime/server-preflight-reconciler.service.js';
-import { NyabaseConfigService } from '../config/nyabase-config.service.js';
+import { NyabaseConfigService } from '../platform/config/nyabase-config.service.js';
 import {
   type MetricPoint,
   type MetricsWriteOptions,

@@ -1,7 +1,5 @@
-import { Module, forwardRef } from '@nestjs/common';
+import { Module } from '@nestjs/common';
 import { MetricsWriter } from './metrics-writer.js';
-import { AuthModule } from '../auth/auth.module.js';
-import { AccessModule } from '../access/access.module.js';
 import { AdminRuntimeMetricsController } from './admin-runtime-metrics.controller.js';
 import { AdminPerformanceController } from './admin-performance.controller.js';
 import { ContainerStateMetricsPublisher } from './container-state-metrics.service.js';
@@ -13,8 +11,6 @@ import { NodeMetricsScrapeService } from './node-metrics-scrape.service.js';
 
 @Module({
   imports: [
-    forwardRef(() => AuthModule),
-    AccessModule,
     RuntimeModule,
     StoragePoolsModule,
   ],

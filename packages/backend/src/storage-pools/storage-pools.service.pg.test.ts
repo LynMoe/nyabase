@@ -1,8 +1,8 @@
 import { randomUUID } from 'node:crypto';
 import { describe, expect, it, vi } from 'vitest';
 import { FailureCode, ServerStatus } from '@nyabase/common';
-import { withPostgresTestDatabase } from '../persistence-pg/postgres-test-harness.js';
-import { PgTransactionManager } from '../persistence-pg/transaction.js';
+import { withPostgresTestDatabase } from '../platform/persistence-pg/postgres-test-harness.js';
+import { PgTransactionManager } from '../platform/persistence-pg/transaction.js';
 import { StoragePoolsRepository } from './storage-pools.repository.js';
 import { StoragePoolsService } from './storage-pools.service.js';
 

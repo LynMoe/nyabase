@@ -1,7 +1,5 @@
 import { Module } from '@nestjs/common';
-import { DatabaseModule } from '../database/database.module.js';
-import { NyabaseConfigService } from '../config/nyabase-config.service.js';
-import { AuditModule } from '../audit/audit.module.js';
+import { NyabaseConfigService } from '../platform/config/nyabase-config.service.js';
 import { ContainerReconciler } from './container-reconciler.service.js';
 import {
   IMAGE_ASSIGNMENT_SOURCE,
@@ -29,8 +27,6 @@ import { AuthenticatedNodeMetricsPullAdapter } from './node-metrics-pull.adapter
 import { IncusPreflightChecksAdapter } from './preflight-checks.adapter.js';
 import { ServerConnectIntentService } from './server-connect-intent.service.js';
 import { ServerPreflightIntentService } from './server-preflight-intent.service.js';
-import { AuthModule } from '../auth/auth.module.js';
-import { AccessModule } from '../access/access.module.js';
 import { ProxySnapshotNotifierModule } from '../proxy-snapshots/proxy-snapshot-notifier.module.js';
 import {
   AdminContainerIntentsController,
@@ -57,7 +53,7 @@ import {
 } from './container-ssh-state.adapter.js';
 
 @Module({
-  imports: [DatabaseModule, AuthModule, AccessModule, ProxySnapshotNotifierModule, AuditModule],
+  imports: [ProxySnapshotNotifierModule],
   providers: [
     ReconcileWakeService,
     DatabaseIncusClientFactory,

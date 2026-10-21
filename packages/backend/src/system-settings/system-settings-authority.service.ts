@@ -13,13 +13,13 @@ import {
   controlPlaneConfigDefinitions,
   getControlPlaneConfigDefinition,
 } from '@nyabase/common';
-import { AuditService } from '../audit/audit.service.js';
+import { AuditService } from '../iam/audit.service.js';
 import {
   NyabaseConfigService,
   type AuthoritativeSystemSettingsSnapshot,
-} from '../config/nyabase-config.service.js';
-import type { NyabaseDatabase } from '../persistence-pg/database.types.js';
-import { PG_DATABASE } from '../persistence-pg/tokens.js';
+} from '../platform/config/nyabase-config.service.js';
+import type { NyabaseDatabase } from '../platform/persistence-pg/database.types.js';
+import { PG_DATABASE } from '../platform/persistence-pg/tokens.js';
 import { SshProxyGateway } from '../ssh/ssh-proxy-gateway.js';
 
 const POLL_INTERVAL_MS = 2_000;

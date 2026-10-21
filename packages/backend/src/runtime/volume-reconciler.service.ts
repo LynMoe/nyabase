@@ -1,9 +1,9 @@
 import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
 import { AuditAction } from '@nyabase/common';
 import { Kysely, sql } from 'kysely';
-import type { NyabaseDatabase } from '../persistence-pg/database.types.js';
-import { PG_DATABASE } from '../persistence-pg/tokens.js';
-import { AuditService } from '../audit/audit.service.js';
+import type { NyabaseDatabase } from '../platform/persistence-pg/database.types.js';
+import { PG_DATABASE } from '../platform/persistence-pg/tokens.js';
+import { AuditService } from '../iam/audit.service.js';
 import {
   IncusError,
   isAlreadyExistsError,

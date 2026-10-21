@@ -13,11 +13,11 @@ import {
 } from '@nyabase/common';
 import { HttpProxyService } from './http-proxy.service.js';
 import { ProxySnapshotNotifierService } from '../proxy-snapshots/proxy-snapshot-notifier.service.js';
-import { NyabaseConfigService } from '../config/nyabase-config.service.js';
+import { NyabaseConfigService } from '../platform/config/nyabase-config.service.js';
 import {
   configuredProxyTokenDigest,
   hasValidBearerToken,
-} from '../common/proxy-bearer-auth.js';
+} from '../platform/proxy-bearer-auth.js';
 
 const DEBOUNCE_MS = 500;
 const MAX_WAIT_MS = 2_000;

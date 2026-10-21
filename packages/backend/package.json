@@ -3,13 +3,13 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
-    "build": "tsc -b && rm -rf dist/persistence-pg/migrations && mkdir -p dist/persistence-pg && cp -R src/persistence-pg/migrations dist/persistence-pg/migrations",
+    "build": "tsc -b && rm -rf dist/platform/persistence-pg/migrations && mkdir -p dist/platform/persistence-pg && cp -R src/platform/persistence-pg/migrations dist/platform/persistence-pg/migrations",
     "dev": "tsx watch src/main.ts",
     "start": "node dist/main.js",
     "typecheck": "tsc -b",
     "test": "vitest run --maxWorkers=4",
-    "migration:run": "tsx src/persistence-pg/cli.ts migrate",
-    "migration:status": "tsx src/persistence-pg/cli.ts status",
+    "migration:run": "tsx src/platform/persistence-pg/cli.ts migrate",
+    "migration:status": "tsx src/platform/persistence-pg/cli.ts status",
     "incus:generate-api-types": "node src/incus/generate-api-types.mjs"
   },
   "dependencies": {

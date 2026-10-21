@@ -1,15 +1,15 @@
 import { Inject, Injectable } from '@nestjs/common';
 import type { Insertable, Kysely, Selectable, Transaction, Updateable } from 'kysely';
 import { sql } from 'kysely';
-import type { NyabaseDatabase } from '../persistence-pg/database.types.js';
-import { PG_DATABASE } from '../persistence-pg/tokens.js';
+import type { NyabaseDatabase } from '../platform/persistence-pg/database.types.js';
+import { PG_DATABASE } from '../platform/persistence-pg/tokens.js';
 import type {
   InfrastructureImageServerAssignmentTable,
   InfrastructureImageTable,
   InfrastructureServerTable,
   InfrastructureSharedBackendTable,
   InfrastructureStoragePoolTable,
-} from './infrastructure-database.types.js';
+} from '../platform/persistence-pg/infrastructure-database.types.js';
 
 export type InfrastructureExecutor = Kysely<NyabaseDatabase> | Transaction<NyabaseDatabase>;
 

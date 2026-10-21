@@ -8,9 +8,9 @@ import {
   type CreateContainerRequest,
 } from '@nyabase/common';
 import { describe, expect, it, vi } from 'vitest';
-import type { NyabaseDatabase } from '../persistence-pg/database.types.js';
-import { withPostgresTestDatabase } from '../persistence-pg/postgres-test-harness.js';
-import { PgTransactionManager } from '../persistence-pg/transaction.js';
+import type { NyabaseDatabase } from '../platform/persistence-pg/database.types.js';
+import { withPostgresTestDatabase } from '../platform/persistence-pg/postgres-test-harness.js';
+import { PgTransactionManager } from '../platform/persistence-pg/transaction.js';
 import { IntentRepository } from '../runtime/intent.repository.js';
 import { ContainerReconciler } from '../runtime/container-reconciler.service.js';
 import { ContainerActionPolicyService } from './container-action-policy.service.js';

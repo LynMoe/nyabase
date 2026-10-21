@@ -2,9 +2,9 @@ import { Inject, Injectable } from '@nestjs/common';
 import { randomUUID } from 'node:crypto';
 import { sql, type Kysely, type Selectable, type Transaction } from 'kysely';
 import type { GpuContainerState } from '@nyabase/common';
-import type { ContainerControlTable } from './container-control-database.types.js';
-import type { NyabaseDatabase } from '../persistence-pg/database.types.js';
-import { PG_DATABASE } from '../persistence-pg/tokens.js';
+import type { ContainerControlTable } from '../platform/persistence-pg/container-control-database.types.js';
+import type { NyabaseDatabase } from '../platform/persistence-pg/database.types.js';
+import { PG_DATABASE } from '../platform/persistence-pg/tokens.js';
 import { deriveInstanceName } from '../incus/instance-spec.js';
 
 export type ContainerExecutor = Kysely<NyabaseDatabase> | Transaction<NyabaseDatabase>;

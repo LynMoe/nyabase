@@ -7,8 +7,8 @@ import {
 import { randomUUID } from 'node:crypto';
 import type { Kysely } from 'kysely';
 import type { CreateExecSessionRequest, ExecSessionResponse } from '@nyabase/common';
-import { PG_DATABASE } from '../persistence-pg/tokens.js';
-import type { NyabaseDatabase } from '../persistence-pg/database.types.js';
+import { PG_DATABASE } from '../platform/persistence-pg/tokens.js';
+import type { NyabaseDatabase } from '../platform/persistence-pg/database.types.js';
 import { EphemeralStore } from '../platform/ephemeral-store.js';
 
 const UNCLAIMED_TTL_MS = 60_000;

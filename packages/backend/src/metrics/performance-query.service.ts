@@ -10,10 +10,10 @@ import {
   type PerformanceUsageResponse,
 } from '@nyabase/common';
 import type { Kysely } from 'kysely';
-import { NyabaseConfigService } from '../config/nyabase-config.service.js';
-import type { NyabaseDatabase } from '../persistence-pg/database.types.js';
-import { PG_DATABASE } from '../persistence-pg/tokens.js';
-import { AccessResolverService } from '../access/access-resolver.service.js';
+import { NyabaseConfigService } from '../platform/config/nyabase-config.service.js';
+import type { NyabaseDatabase } from '../platform/persistence-pg/database.types.js';
+import { PG_DATABASE } from '../platform/persistence-pg/tokens.js';
+import { AccessResolverService } from '../iam/access-resolver.service.js';
 import { isLocalPoolDto, StoragePoolsService } from '../storage-pools/storage-pools.service.js';
 import {
   absoluteChart,

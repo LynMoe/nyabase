@@ -20,11 +20,11 @@ import {
 } from '@nyabase/common';
 import type { Kysely } from 'kysely';
 import { IpPoolsRepository, type IpPoolRow } from './ip-pools.repository.js';
-import { isoDate, numberValue } from '../domain/domain-utils.js';
-import type { NyabaseDatabase } from '../persistence-pg/database.types.js';
-import { PG_DATABASE } from '../persistence-pg/tokens.js';
-import { PgTransactionManager } from '../persistence-pg/transaction.js';
-import { AuditService } from '../audit/audit.service.js';
+import { isoDate, numberValue } from '../platform/domain-utils.js';
+import type { NyabaseDatabase } from '../platform/persistence-pg/database.types.js';
+import { PG_DATABASE } from '../platform/persistence-pg/tokens.js';
+import { PgTransactionManager } from '../platform/persistence-pg/transaction.js';
+import { AuditService } from '../iam/audit.service.js';
 
 function stringArray(value: string[] | string | null | undefined): string[] {
   if (Array.isArray(value)) return value;

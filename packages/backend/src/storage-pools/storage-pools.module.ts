@@ -1,7 +1,4 @@
 import { Module } from '@nestjs/common';
-import { AuthModule } from '../auth/auth.module.js';
-import { AccessModule } from '../access/access.module.js';
-import { DatabaseModule } from '../database/database.module.js';
 import { RuntimeModule } from '../runtime/runtime.module.js';
 import {
   AdminStoragePoolsController,
@@ -11,7 +8,7 @@ import { StoragePoolsRepository } from './storage-pools.repository.js';
 import { StoragePoolsService } from './storage-pools.service.js';
 
 @Module({
-  imports: [AuthModule, AccessModule, DatabaseModule, RuntimeModule],
+  imports: [RuntimeModule],
   providers: [StoragePoolsRepository, StoragePoolsService],
   controllers: [
     StoragePoolsController,

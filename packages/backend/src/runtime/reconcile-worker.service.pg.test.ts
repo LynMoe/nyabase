@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { describe, expect, it, vi } from 'vitest';
 import { UserStatus } from '@nyabase/common';
 import { IncusError } from '../incus/index.js';
-import { withPostgresTestDatabase } from '../persistence-pg/postgres-test-harness.js';
+import { withPostgresTestDatabase } from '../platform/persistence-pg/postgres-test-harness.js';
 import {
   PgResourceStatusRepository,
   ReconcileWorkerService,

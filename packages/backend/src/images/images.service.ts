@@ -22,15 +22,15 @@ import {
   type PatchImageRequest,
   type ResourceLifecyclePhase,
 } from '@nyabase/common';
-import type { NyabaseDatabase } from '../persistence-pg/database.types.js';
-import { PG_DATABASE } from '../persistence-pg/tokens.js';
-import { PgTransactionManager } from '../persistence-pg/transaction.js';
-import { AccessResolverService } from '../access/access-resolver.service.js';
-import { AuditService } from '../audit/audit.service.js';
+import type { NyabaseDatabase } from '../platform/persistence-pg/database.types.js';
+import { PG_DATABASE } from '../platform/persistence-pg/tokens.js';
+import { PgTransactionManager } from '../platform/persistence-pg/transaction.js';
+import { AccessResolverService } from '../iam/access-resolver.service.js';
+import { AuditService } from '../iam/audit.service.js';
 import { InfrastructureRepository } from '../infrastructure/infrastructure.repository.js';
 import { IntentRepository } from '../runtime/intent.repository.js';
 import { ReconcileWakeService } from '../runtime/reconcile-wake.service.js';
-import { isoDate, numberValue, acceptedIntent } from '../domain/domain-utils.js';
+import { isoDate, numberValue, acceptedIntent } from '../platform/domain-utils.js';
 import { ImageCatalogService } from './image-catalog.js';
 
 type ImageRow = Awaited<ReturnType<ImagesService['findById']>>;

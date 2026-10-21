@@ -9,7 +9,6 @@ import {
   Param,
   Post,
   Query,
-  UseGuards,
 } from '@nestjs/common';
 import {
   ADMIN_INTENT_CAPABILITIES,
@@ -22,14 +21,12 @@ import {
   type IntentDto,
 } from '@nyabase/common';
 import type { Kysely } from 'kysely';
-import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard.js';
-import { CapabilitiesGuard } from '../auth/guards/capabilities.guard.js';
-import { RequireAnyCaps, RequireCaps } from '../auth/decorators/require-caps.decorator.js';
-import { CurrentUser } from '../auth/decorators/current-user.decorator.js';
-import type { UserRecord } from '../domain/domain-records.js';
-import { AccessResolverService } from '../access/access-resolver.service.js';
-import { PG_DATABASE } from '../persistence-pg/tokens.js';
-import type { NyabaseDatabase } from '../persistence-pg/database.types.js';
+import { RequireAnyCaps, RequireCaps } from '../iam/decorators/require-caps.decorator.js';
+import { CurrentUser } from '../iam/decorators/current-user.decorator.js';
+import type { UserRecord } from '../iam/user-record.js';
+import { AccessResolverService } from '../iam/access-resolver.service.js';
+import { PG_DATABASE } from '../platform/persistence-pg/tokens.js';
+import type { NyabaseDatabase } from '../platform/persistence-pg/database.types.js';
 import {
   IntentRepository,
   type IntentListOptions,
@@ -109,7 +106,6 @@ export function adminIntentListOptions(query: Record<string, unknown>): IntentLi
 }
 
 @Controller('containers/:containerId/intents')
-@UseGuards(JwtAuthGuard, CapabilitiesGuard)
 export class ContainerIntentsController {
   constructor(
     private readonly intents: IntentRepository,
@@ -143,7 +139,6 @@ export class ContainerIntentsController {
 }
 
 @Controller('admin/containers/:containerId/intents')
-@UseGuards(JwtAuthGuard, CapabilitiesGuard)
 @RequireCaps(Capability.ManageContainersAny)
 export class AdminContainerIntentsController {
   constructor(private readonly intents: IntentRepository) {}
@@ -166,7 +161,6 @@ export class AdminContainerIntentsController {
 }
 
 @Controller('volumes/:volumeId/intents')
-@UseGuards(JwtAuthGuard, CapabilitiesGuard)
 export class VolumeIntentsController {
   constructor(
     private readonly intents: IntentRepository,
@@ -190,7 +184,6 @@ export class VolumeIntentsController {
 }
 
 @Controller('shared-volumes/:volumeId/intents')
-@UseGuards(JwtAuthGuard, CapabilitiesGuard)
 export class SharedVolumeIntentsController {
   constructor(
     private readonly intents: IntentRepository,
@@ -214,7 +207,6 @@ export class SharedVolumeIntentsController {
 }
 
 @Controller('admin/volumes/:volumeId/intents')
-@UseGuards(JwtAuthGuard, CapabilitiesGuard)
 @RequireCaps(Capability.ManageVolumes)
 export class AdminVolumeIntentsController {
   constructor(
@@ -238,7 +230,6 @@ export class AdminVolumeIntentsController {
 }
 
 @Controller('admin/shared-volumes/:volumeId/intents')
-@UseGuards(JwtAuthGuard, CapabilitiesGuard)
 @RequireCaps(Capability.ManageSharedVolumes)
 export class AdminSharedVolumeIntentsController {
   constructor(
@@ -262,7 +253,6 @@ export class AdminSharedVolumeIntentsController {
 }
 
 @Controller('admin/intents')
-@UseGuards(JwtAuthGuard, CapabilitiesGuard)
 @RequireAnyCaps(...ADMIN_INTENT_CAPABILITIES)
 export class AdminIntentsController {
   constructor(
@@ -402,7 +392,6 @@ export class AdminIntentsController {
 }
 
 @Controller('admin/servers/:serverId/intents')
-@UseGuards(JwtAuthGuard, CapabilitiesGuard)
 @RequireCaps(Capability.ManageServers)
 export class AdminServerIntentsController {
   constructor(private readonly intents: IntentRepository) {}
@@ -419,7 +408,6 @@ export class AdminServerIntentsController {
 }
 
 @Controller('admin/images/:imageId/assignments/:serverId/intents')
-@UseGuards(JwtAuthGuard, CapabilitiesGuard)
 @RequireCaps(Capability.ManageImages)
 export class AdminImageAssignmentIntentsController {
   constructor(
@@ -449,7 +437,6 @@ export class AdminImageAssignmentIntentsController {
 }
 
 @Controller('admin/images/:imageId/intents')
-@UseGuards(JwtAuthGuard, CapabilitiesGuard)
 @RequireCaps(Capability.ManageImages)
 export class AdminImageIntentsController {
   constructor(
@@ -485,7 +472,6 @@ export class AdminImageIntentsController {
 }
 
 @Controller('intents')
-@UseGuards(JwtAuthGuard, CapabilitiesGuard)
 export class IntentsController {
   constructor(
     private readonly intents: IntentRepository,

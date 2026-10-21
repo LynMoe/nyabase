@@ -10,7 +10,6 @@ import {
   Patch,
   Post,
   Query,
-  UseGuards,
 } from '@nestjs/common';
 import {
   Capability,
@@ -20,15 +19,12 @@ import {
   zListVolumesQuery,
   zPatchVolumeRequest,
 } from '@nyabase/common';
-import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard.js';
-import { CapabilitiesGuard } from '../auth/guards/capabilities.guard.js';
-import { RequireCaps } from '../auth/decorators/require-caps.decorator.js';
-import { CurrentUser } from '../auth/decorators/current-user.decorator.js';
-import type { UserRecord } from '../domain/domain-records.js';
+import { RequireCaps } from '../iam/decorators/require-caps.decorator.js';
+import { CurrentUser } from '../iam/decorators/current-user.decorator.js';
+import type { UserRecord } from '../iam/user-record.js';
 import { VolumesService } from './volumes.service.js';
 
 @Controller('volumes')
-@UseGuards(JwtAuthGuard, CapabilitiesGuard)
 export class VolumesController {
   constructor(private readonly service: VolumesService) {}
 
@@ -74,7 +70,6 @@ export class VolumesController {
 }
 
 @Controller('servers/:serverId/storage-capacity')
-@UseGuards(JwtAuthGuard, CapabilitiesGuard)
 export class StorageCapacityController {
   constructor(private readonly service: VolumesService) {}
 
@@ -85,7 +80,6 @@ export class StorageCapacityController {
 }
 
 @Controller('containers/:containerId/volumes')
-@UseGuards(JwtAuthGuard, CapabilitiesGuard)
 export class ContainerVolumesController {
   constructor(private readonly service: VolumesService) {}
 
@@ -116,7 +110,6 @@ export class ContainerVolumesController {
 }
 
 @Controller('admin/containers/:containerId/volumes')
-@UseGuards(JwtAuthGuard, CapabilitiesGuard)
 @RequireCaps(Capability.ManageVolumes)
 export class AdminContainerVolumesController {
   constructor(private readonly service: VolumesService) {}
@@ -148,7 +141,6 @@ export class AdminContainerVolumesController {
 }
 
 @Controller('admin/volumes')
-@UseGuards(JwtAuthGuard, CapabilitiesGuard)
 @RequireCaps(Capability.ManageVolumes)
 export class AdminVolumesController {
   constructor(private readonly service: VolumesService) {}

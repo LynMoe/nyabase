@@ -48,20 +48,20 @@ import {
   type HttpProxySnapshot,
   type HttpProxyWarningReason,
 } from '@nyabase/common';
-import { AccessResolverService } from '../access/access-resolver.service.js';
-import { loadUsableServerAccessKeys } from '../access/usable-server-access.js';
-import { NyabaseConfigService } from '../config/nyabase-config.service.js';
-import type { ContainerControlTable } from '../containers/container-control-database.types.js';
-import type { InfrastructureServerTable } from '../infrastructure/infrastructure-database.types.js';
-import type { NyabaseDatabase } from '../persistence-pg/database.types.js';
-import { PG_DATABASE } from '../persistence-pg/tokens.js';
-import { PgTransactionManager } from '../persistence-pg/transaction.js';
+import { AccessResolverService } from '../iam/access-resolver.service.js';
+import { loadUsableServerAccessKeys } from '../iam/usable-server-access.js';
+import { NyabaseConfigService } from '../platform/config/nyabase-config.service.js';
+import type { ContainerControlTable } from '../platform/persistence-pg/container-control-database.types.js';
+import type { InfrastructureServerTable } from '../platform/persistence-pg/infrastructure-database.types.js';
+import type { NyabaseDatabase } from '../platform/persistence-pg/database.types.js';
+import { PG_DATABASE } from '../platform/persistence-pg/tokens.js';
+import { PgTransactionManager } from '../platform/persistence-pg/transaction.js';
 import { ProxySnapshotNotifierService } from '../proxy-snapshots/proxy-snapshot-notifier.service.js';
-import { AuditService } from '../audit/audit.service.js';
+import { AuditService } from '../iam/audit.service.js';
 import type {
   HttpDomainPoolTable,
   HttpProxyBindingTable,
-} from './http-proxy-database.types.js';
+} from '../platform/persistence-pg/http-proxy-database.types.js';
 
 const KEY_VERSION = 'v1';
 const ROUTE_STALE_MS = 120_000;

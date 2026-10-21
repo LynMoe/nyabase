@@ -1,12 +1,10 @@
-import { Controller, Get, UseGuards } from '@nestjs/common';
-import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard.js';
-import { CurrentUser } from '../auth/decorators/current-user.decorator.js';
-import { AccessResolverService } from '../access/access-resolver.service.js';
-import type { UserRecord } from '../domain/domain-records.js';
+import { Controller, Get } from '@nestjs/common';
+import { CurrentUser } from '../iam/decorators/current-user.decorator.js';
+import { AccessResolverService } from '../iam/access-resolver.service.js';
+import type { UserRecord } from '../iam/user-record.js';
 import { EffectiveAccessDto } from '@nyabase/common';
 
 @Controller('me')
-@UseGuards(JwtAuthGuard)
 export class MeAccessController {
   constructor(private accessResolver: AccessResolverService) {}
 

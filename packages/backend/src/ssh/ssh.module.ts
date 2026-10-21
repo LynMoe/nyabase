@@ -1,7 +1,4 @@
-import { Module, forwardRef } from '@nestjs/common';
-import { AuditModule } from '../audit/audit.module.js';
-import { AccessModule } from '../access/access.module.js';
-import { AuthModule } from '../auth/auth.module.js';
+import { Module } from '@nestjs/common';
 import { ContainerSshRouteService } from './container-ssh-route.service.js';
 import { AdminSshProxyController } from './admin-ssh-proxy.controller.js';
 import { SshIdentityService } from './ssh-identity.service.js';
@@ -16,10 +13,7 @@ import { RuntimeModule } from '../runtime/runtime.module.js';
 
 @Module({
   imports: [
-    forwardRef(() => AuthModule),
-    forwardRef(() => AccessModule),
     ProxySnapshotNotifierModule,
-    forwardRef(() => AuditModule),
     RuntimeModule,
   ],
   providers: [

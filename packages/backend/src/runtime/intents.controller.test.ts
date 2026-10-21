@@ -8,8 +8,8 @@ import {
   UserStatus,
 } from '@nyabase/common';
 import { describe, expect, it, vi } from 'vitest';
-import { ANY_CAPS_KEY } from '../auth/decorators/require-caps.decorator.js';
-import type { UserRecord } from '../domain/domain-records.js';
+import { ANY_CAPS_KEY } from '../iam/decorators/require-caps.decorator.js';
+import type { UserRecord } from '../iam/user-record.js';
 import {
   AdminImageIntentsController,
   AdminIntentsController,
@@ -17,7 +17,7 @@ import {
   listOptions,
 } from './intents.controller.js';
 import type { IntentRecord, IntentRepository } from './intent.repository.js';
-import type { AccessResolverService } from '../access/access-resolver.service.js';
+import type { AccessResolverService } from '../iam/access-resolver.service.js';
 
 const actor: UserRecord = {
   id: '00000000-0000-4000-8000-0000000000aa',

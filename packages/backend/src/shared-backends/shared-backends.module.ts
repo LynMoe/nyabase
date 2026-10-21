@@ -1,7 +1,4 @@
 import { Module } from '@nestjs/common';
-import { AuthModule } from '../auth/auth.module.js';
-import { AccessModule } from '../access/access.module.js';
-import { DatabaseModule } from '../database/database.module.js';
 import {
   AdminSharedBackendsController,
   SharedBackendsController,
@@ -11,7 +8,7 @@ import { SharedBackendsService } from './shared-backends.service.js';
 import { StoragePoolsModule } from '../storage-pools/storage-pools.module.js';
 
 @Module({
-  imports: [AuthModule, AccessModule, DatabaseModule, StoragePoolsModule],
+  imports: [StoragePoolsModule],
   providers: [SharedBackendsRepository, SharedBackendsService],
   controllers: [SharedBackendsController, AdminSharedBackendsController],
   exports: [SharedBackendsRepository, SharedBackendsService],

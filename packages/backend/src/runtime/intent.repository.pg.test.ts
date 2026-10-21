@@ -1,6 +1,6 @@
 import { IntentResourceType } from '@nyabase/common';
 import { describe, expect, it } from 'vitest';
-import { withPostgresTestDatabase } from '../persistence-pg/postgres-test-harness.js';
+import { withPostgresTestDatabase } from '../platform/persistence-pg/postgres-test-harness.js';
 import { IntentRepository } from './intent.repository.js';
 
 const describePg = process.env.NYABASE_TEST_DATABASE_URL ? describe : describe.skip;

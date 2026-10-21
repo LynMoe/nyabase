@@ -8,21 +8,21 @@ import {
 import { randomUUID } from 'node:crypto';
 import { sql, type Kysely } from 'kysely';
 import { AuditAction } from '@nyabase/common';
-import { AuditService } from '../audit/audit.service.js';
-import type { NyabaseDatabase } from '../persistence-pg/database.types.js';
-import { PG_DATABASE } from '../persistence-pg/tokens.js';
-import { PgTransactionManager } from '../persistence-pg/transaction.js';
+import { AuditService } from '../iam/audit.service.js';
+import type { NyabaseDatabase } from '../platform/persistence-pg/database.types.js';
+import { PG_DATABASE } from '../platform/persistence-pg/tokens.js';
+import { PgTransactionManager } from '../platform/persistence-pg/transaction.js';
 import {
   classifyGrantExpiry,
   expiresAtSortKey,
   selectWinningGrantCandidate,
   type GrantExpiryCandidate,
-} from './grant-expiry.js';
+} from '../iam/grant-expiry.js';
 import {
   GrantExpiryEnforcementRepository,
 } from './grant-expiry-enforcement.repository.js';
 import { UserServerResourcePurgeService } from './user-server-resource-purge.service.js';
-import { SYSTEM_ACTOR_USERNAME } from '../groups/groups.service.js';
+import { SYSTEM_ACTOR_USERNAME } from '../iam/system-actor.js';
 
 const EXPIRY_INTERVAL_MS = 60_000;
 const EXPIRY_INTERVAL_JITTER_MS = 15_000;

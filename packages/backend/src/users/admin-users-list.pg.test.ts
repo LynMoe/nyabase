@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { Capability, UserStatus } from '@nyabase/common';
 import { describe, expect, it } from 'vitest';
-import { withPostgresTestDatabase } from '../persistence-pg/postgres-test-harness.js';
+import { withPostgresTestDatabase } from '../platform/persistence-pg/postgres-test-harness.js';
 import { UsersService } from './users.service.js';
 import { userRow } from './users.pg-test-helper.js';
 

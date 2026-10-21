@@ -13,12 +13,12 @@ import {
 } from '@nyabase/common';
 import { SharedBackendsRepository } from './shared-backends.repository.js';
 import { StoragePoolsService } from '../storage-pools/storage-pools.service.js';
-import { isoDate, numberValue } from '../domain/domain-utils.js';
+import { isoDate, numberValue } from '../platform/domain-utils.js';
 import { sql, type Kysely } from 'kysely';
-import type { NyabaseDatabase } from '../persistence-pg/database.types.js';
-import { PG_DATABASE } from '../persistence-pg/tokens.js';
-import { PgTransactionManager } from '../persistence-pg/transaction.js';
-import { classifyGrantExpiry } from '../access/grant-expiry.js';
+import type { NyabaseDatabase } from '../platform/persistence-pg/database.types.js';
+import { PG_DATABASE } from '../platform/persistence-pg/tokens.js';
+import { PgTransactionManager } from '../platform/persistence-pg/transaction.js';
+import { classifyGrantExpiry } from '../iam/grant-expiry.js';
 
 function normalizedIdentity(value: string): string {
   const identity = value.trim();

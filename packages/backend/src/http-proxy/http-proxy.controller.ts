@@ -1,13 +1,10 @@
-import { Body, Controller, Delete, Get, HttpCode, Param, Patch, Post, UseGuards } from '@nestjs/common';
-import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard.js';
-import { CapabilitiesGuard } from '../auth/guards/capabilities.guard.js';
-import { CurrentUser } from '../auth/decorators/current-user.decorator.js';
-import type { UserRecord } from '../domain/domain-records.js';
+import { Body, Controller, Delete, Get, HttpCode, Param, Patch, Post } from '@nestjs/common';
+import { CurrentUser } from '../iam/decorators/current-user.decorator.js';
+import type { UserRecord } from '../iam/user-record.js';
 import { HttpProxyGateway } from './http-proxy-gateway.js';
 import { HttpProxyService } from './http-proxy.service.js';
 
 @Controller('http-proxy/bindings')
-@UseGuards(JwtAuthGuard, CapabilitiesGuard)
 export class HttpProxyController {
   constructor(
     private service: HttpProxyService,
@@ -42,7 +39,6 @@ export class HttpProxyController {
 }
 
 @Controller('http-proxy/domain-pools')
-@UseGuards(JwtAuthGuard, CapabilitiesGuard)
 export class HttpProxyDomainPoolsController {
   constructor(private service: HttpProxyService) {}
 

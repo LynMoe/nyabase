@@ -10,7 +10,6 @@ import {
   Post,
   Query,
   Res,
-  UseGuards,
 } from '@nestjs/common';
 import {
   Capability,
@@ -19,15 +18,12 @@ import {
   zListSharedVolumesQuery,
   zPatchVolumeRequest,
 } from '@nyabase/common';
-import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard.js';
-import { CapabilitiesGuard } from '../auth/guards/capabilities.guard.js';
-import { RequireCaps } from '../auth/decorators/require-caps.decorator.js';
-import { CurrentUser } from '../auth/decorators/current-user.decorator.js';
-import type { UserRecord } from '../domain/domain-records.js';
+import { RequireCaps } from '../iam/decorators/require-caps.decorator.js';
+import { CurrentUser } from '../iam/decorators/current-user.decorator.js';
+import type { UserRecord } from '../iam/user-record.js';
 import { isIntentAccepted, VolumesService } from './volumes.service.js';
 
 @Controller('shared-volumes')
-@UseGuards(JwtAuthGuard, CapabilitiesGuard)
 export class SharedVolumesController {
   constructor(private readonly service: VolumesService) {}
 
@@ -73,7 +69,6 @@ export class SharedVolumesController {
 }
 
 @Controller('admin/shared-volumes')
-@UseGuards(JwtAuthGuard, CapabilitiesGuard)
 @RequireCaps(Capability.ManageSharedVolumes)
 export class AdminSharedVolumesController {
   constructor(private readonly service: VolumesService) {}
@@ -118,7 +113,6 @@ export class AdminSharedVolumesController {
 }
 
 @Controller('admin/shared-backends')
-@UseGuards(JwtAuthGuard, CapabilitiesGuard)
 @RequireCaps(Capability.ManageSharedVolumes)
 export class AdminSharedBackendCatalogInspectController {
   constructor(private readonly service: VolumesService) {}
@@ -130,7 +124,6 @@ export class AdminSharedBackendCatalogInspectController {
 }
 
 @Controller('containers/:containerId/shared-volumes')
-@UseGuards(JwtAuthGuard, CapabilitiesGuard)
 export class ContainerSharedVolumesController {
   constructor(private readonly service: VolumesService) {}
 
@@ -161,7 +154,6 @@ export class ContainerSharedVolumesController {
 }
 
 @Controller('admin/containers/:containerId/shared-volumes')
-@UseGuards(JwtAuthGuard, CapabilitiesGuard)
 @RequireCaps(Capability.ManageSharedVolumes)
 export class AdminContainerSharedVolumesController {
   constructor(private readonly service: VolumesService) {}

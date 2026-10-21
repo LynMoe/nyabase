@@ -6,8 +6,8 @@ import {
   pickSystemActorNumericId,
   SYSTEM_ACTOR_DISPLAY_NAME,
   SYSTEM_ACTOR_PREFERRED_NUMERIC_ID,
-  SYSTEM_ACTOR_USERNAME,
 } from './groups.service.js';
+import { SYSTEM_ACTOR_USERNAME } from '../iam/system-actor.js';
 
 describe('pickSystemActorNumericId', () => {
   it('prefers 4096 when free', () => {

@@ -28,24 +28,24 @@ import {
   type VolumeDto,
   type IntentAcceptedDto,
 } from '@nyabase/common';
-import { PG_DATABASE } from '../persistence-pg/tokens.js';
-import type { NyabaseDatabase } from '../persistence-pg/database.types.js';
-import { PgTransactionManager } from '../persistence-pg/transaction.js';
+import { PG_DATABASE } from '../platform/persistence-pg/tokens.js';
+import type { NyabaseDatabase } from '../platform/persistence-pg/database.types.js';
+import { PgTransactionManager } from '../platform/persistence-pg/transaction.js';
 import { IntentRepository } from '../runtime/intent.repository.js';
 import { ReconcileWakeService } from '../runtime/reconcile-wake.service.js';
-import { acceptedIntent, isoDate, lifecyclePhase, numberValue, deterministicName, poolLabel } from '../domain/domain-utils.js';
+import { acceptedIntent, isoDate, lifecyclePhase, numberValue, deterministicName, poolLabel } from '../platform/domain-utils.js';
 import { StoragePoolsRepository } from '../storage-pools/storage-pools.repository.js';
 import { isLocalPoolRow, storagePoolCapability } from '../storage-pools/storage-pools.service.js';
 import { VolumesRepository, type VolumeExecutor } from './volumes.repository.js';
-import { AuditService } from '../audit/audit.service.js';
+import { AuditService } from '../iam/audit.service.js';
 import {
   classifyGrantExpiry,
   compareGrantCandidates,
   liveExpiry,
   selectLiveGrantCandidate,
   type GrantWinnerCandidate,
-} from '../access/grant-expiry.js';
-import { NyabaseConfigService } from '../config/nyabase-config.service.js';
+} from '../iam/grant-expiry.js';
+import { NyabaseConfigService } from '../platform/config/nyabase-config.service.js';
 import { listEligibleDestroyExecutors } from './eligible-destroy-executors.js';
 import { occupancyForCatalogItem } from './shared-volume-inspect.js';
 import {

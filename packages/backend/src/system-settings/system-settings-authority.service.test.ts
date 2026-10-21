@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import type { AuthoritativeSystemSettingsSnapshot } from '../config/nyabase-config.service.js';
+import type { AuthoritativeSystemSettingsSnapshot } from '../platform/config/nyabase-config.service.js';
 import {
   fillMissingOnlineEditableDefaults,
   SystemSettingsAuthorityService,

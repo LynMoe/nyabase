@@ -11,7 +11,6 @@ import {
   Post,
   Put,
   Query,
-  UseGuards,
 } from '@nestjs/common';
 import {
   Capability,
@@ -19,16 +18,13 @@ import {
   zPatchImageRequest,
   zPutImageAssignmentRequest,
 } from '@nyabase/common';
-import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard.js';
-import { CapabilitiesGuard } from '../auth/guards/capabilities.guard.js';
-import { RequireCaps } from '../auth/decorators/require-caps.decorator.js';
-import { CurrentUser } from '../auth/decorators/current-user.decorator.js';
-import type { UserRecord } from '../domain/domain-records.js';
-import { acceptedIntent } from '../domain/domain-utils.js';
+import { RequireCaps } from '../iam/decorators/require-caps.decorator.js';
+import { CurrentUser } from '../iam/decorators/current-user.decorator.js';
+import type { UserRecord } from '../iam/user-record.js';
+import { acceptedIntent } from '../platform/domain-utils.js';
 import { ImagesService } from './images.service.js';
 
 @Controller('admin/images')
-@UseGuards(JwtAuthGuard, CapabilitiesGuard)
 @RequireCaps(Capability.ManageImages)
 export class AdminImagesController {
   constructor(private readonly images: ImagesService) {}

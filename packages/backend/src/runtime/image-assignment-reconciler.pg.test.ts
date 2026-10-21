@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
 import { IncusError } from '../incus/index.js';
-import { withPostgresTestDatabase } from '../persistence-pg/postgres-test-harness.js';
+import { withPostgresTestDatabase } from '../platform/persistence-pg/postgres-test-harness.js';
 import { IntentRepository } from './intent.repository.js';
 import { ImageAssignmentReconciler } from './image-assignment-reconciler.service.js';
 

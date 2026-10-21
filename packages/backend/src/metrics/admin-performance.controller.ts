@@ -1,11 +1,9 @@
-import { Controller, Get, Query, UseGuards } from '@nestjs/common';
+import { Controller, Get, Query } from '@nestjs/common';
 import { z } from 'zod';
 import { Capability } from '@nyabase/common';
-import { RequireCaps } from '../auth/decorators/require-caps.decorator.js';
-import { CurrentUser } from '../auth/decorators/current-user.decorator.js';
-import { CapabilitiesGuard } from '../auth/guards/capabilities.guard.js';
-import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard.js';
-import type { UserRecord } from '../domain/domain-records.js';
+import { RequireCaps } from '../iam/decorators/require-caps.decorator.js';
+import { CurrentUser } from '../iam/decorators/current-user.decorator.js';
+import type { UserRecord } from '../iam/user-record.js';
 import { parseQuery } from './performance.controller.js';
 import { PerformanceQueryService } from './performance-query.service.js';
 
@@ -23,7 +21,6 @@ const zSeriesQuery = zUsageQuery.extend({
 });
 
 @Controller('admin/performance')
-@UseGuards(JwtAuthGuard, CapabilitiesGuard)
 @RequireCaps(Capability.ViewMetricsAll)
 export class AdminPerformanceController {
   constructor(private readonly performance: PerformanceQueryService) {}

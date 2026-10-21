@@ -5,21 +5,17 @@ import {
   HttpCode,
   Param,
   Post,
-  UseGuards,
 } from '@nestjs/common';
 import {
   Capability,
   zRotateIncusClientCertificateRequest,
 } from '@nyabase/common';
-import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard.js';
-import { CapabilitiesGuard } from '../auth/guards/capabilities.guard.js';
-import { RequireAnyCaps, RequireCaps } from '../auth/decorators/require-caps.decorator.js';
-import { CurrentUser } from '../auth/decorators/current-user.decorator.js';
-import type { UserRecord } from '../domain/domain-records.js';
+import { RequireAnyCaps, RequireCaps } from '../iam/decorators/require-caps.decorator.js';
+import { CurrentUser } from '../iam/decorators/current-user.decorator.js';
+import type { UserRecord } from '../iam/user-record.js';
 import { IncusClientCertificateService } from './incus-client-certificate.service.js';
 
 @Controller('admin/incus-client-certificate')
-@UseGuards(JwtAuthGuard, CapabilitiesGuard)
 export class AdminIncusClientCertificateController {
   constructor(
     private readonly certificates: IncusClientCertificateService,

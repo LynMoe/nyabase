@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { NyabaseConfigService } from '../config/nyabase-config.service.js';
+import { NyabaseConfigService } from '../platform/config/nyabase-config.service.js';
 import { IMAGE_ASSIGNMENT_SOURCE } from './image-assignment-reconciler.service.js';
 import { NODE_METRICS_PULL, PREFLIGHT_CHECKS } from './server-preflight-reconciler.service.js';
 import { AuthenticatedNodeMetricsPullAdapter } from './node-metrics-pull.adapter.js';

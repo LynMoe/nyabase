@@ -23,15 +23,15 @@ import {
   type UserDto,
   UserStatus,
 } from '@nyabase/common';
-import type { NyabaseDatabase } from '../persistence-pg/database.types.js';
-import { PG_DATABASE } from '../persistence-pg/tokens.js';
-import { PgTransactionManager } from '../persistence-pg/transaction.js';
-import { AuthService } from '../auth/auth.service.js';
-import { AccessResolverService } from '../access/access-resolver.service.js';
+import type { NyabaseDatabase } from '../platform/persistence-pg/database.types.js';
+import { PG_DATABASE } from '../platform/persistence-pg/tokens.js';
+import { PgTransactionManager } from '../platform/persistence-pg/transaction.js';
+import { AuthService } from '../iam/auth.service.js';
+import { AccessResolverService } from '../iam/access-resolver.service.js';
 import { ContainerSshConvergenceService } from '../ssh/container-ssh-convergence.service.js';
-import { NyabaseConfigService } from '../config/nyabase-config.service.js';
+import { NyabaseConfigService } from '../platform/config/nyabase-config.service.js';
 import { ProxySnapshotNotifierService } from '../proxy-snapshots/proxy-snapshot-notifier.service.js';
-import { AuditService } from '../audit/audit.service.js';
+import { AuditService } from '../iam/audit.service.js';
 
 export const MAX_LIFETIME_USERS = 4_096;
 

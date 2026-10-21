@@ -7,7 +7,6 @@ import {
   Post,
   Query,
   Req,
-  UseGuards,
   ForbiddenException,
   HttpCode,
   HttpStatus,
@@ -18,15 +17,12 @@ import {
   zPatchContainerLimitsRequest,
   zPatchContainerRootSizeRequest,
 } from '@nyabase/common';
-import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard.js';
-import { CapabilitiesGuard } from '../auth/guards/capabilities.guard.js';
-import { CurrentUser } from '../auth/decorators/current-user.decorator.js';
-import type { UserRecord } from '../domain/domain-records.js';
-import type { RequestAuthContext } from '../auth/guards/jwt-auth.guard.js';
+import { CurrentUser } from '../iam/decorators/current-user.decorator.js';
+import type { UserRecord } from '../iam/user-record.js';
+import type { RequestAuthContext } from '../iam/guards/jwt-auth.guard.js';
 import { ContainerControlService } from './container-control.service.js';
 
 @Controller('containers')
-@UseGuards(JwtAuthGuard, CapabilitiesGuard)
 export class ContainersController {
   constructor(private readonly containers: ContainerControlService) {}
 

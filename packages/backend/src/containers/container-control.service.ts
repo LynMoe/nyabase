@@ -30,12 +30,12 @@ import {
   type PatchContainerRootSizeRequest,
   type VolumeAttachmentDto,
 } from '@nyabase/common';
-import type { NyabaseDatabase } from '../persistence-pg/database.types.js';
-import { PG_DATABASE } from '../persistence-pg/tokens.js';
-import { PgTransactionManager } from '../persistence-pg/transaction.js';
-import { AccessResolverService } from '../access/access-resolver.service.js';
-import { AuditService } from '../audit/audit.service.js';
-import { acceptedIntent, isoDate, nullableNumber, numberValue, poolLabel } from '../domain/domain-utils.js';
+import type { NyabaseDatabase } from '../platform/persistence-pg/database.types.js';
+import { PG_DATABASE } from '../platform/persistence-pg/tokens.js';
+import { PgTransactionManager } from '../platform/persistence-pg/transaction.js';
+import { AccessResolverService } from '../iam/access-resolver.service.js';
+import { AuditService } from '../iam/audit.service.js';
+import { acceptedIntent, isoDate, nullableNumber, numberValue, poolLabel } from '../platform/domain-utils.js';
 import { IntentRepository } from '../runtime/intent.repository.js';
 import { ReconcileWakeService } from '../runtime/reconcile-wake.service.js';
 import { ConsoleSessionService } from '../runtime/console-session.service.js';
@@ -47,7 +47,7 @@ import {
 } from './container-control.repository.js';
 import { ContainerActionPolicyService } from './container-action-policy.service.js';
 import { IpPoolsRepository } from '../ip-pools/ip-pools.repository.js';
-import { NyabaseConfigService } from '../config/nyabase-config.service.js';
+import { NyabaseConfigService } from '../platform/config/nyabase-config.service.js';
 import {
   missingStoragePoolCapability,
   storagePoolCapability,

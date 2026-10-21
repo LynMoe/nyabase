@@ -13,8 +13,8 @@ import {
   IntentKind,
   IntentStatus,
 } from '@nyabase/common';
-import type { NyabaseDatabase } from '../persistence-pg/database.types.js';
-import { PG_DATABASE } from '../persistence-pg/tokens.js';
+import type { NyabaseDatabase } from '../platform/persistence-pg/database.types.js';
+import { PG_DATABASE } from '../platform/persistence-pg/tokens.js';
 import { IncusClientCertificateService } from '../servers/incus-client-certificate.service.js';
 
 export const CERTIFICATE_AUTO_ROTATION_CLOCK = Symbol('CERTIFICATE_AUTO_ROTATION_CLOCK');

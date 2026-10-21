@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { sql } from 'kysely';
 import { describe, expect, it } from 'vitest';
 import { IntentKind, IntentResourceType } from '@nyabase/common';
-import { withPostgresTestDatabase } from '../persistence-pg/postgres-test-harness.js';
+import { withPostgresTestDatabase } from '../platform/persistence-pg/postgres-test-harness.js';
 import { IntentRepository } from './intent.repository.js';
 import {
   MAX_ACTIVE_CLAIMS_PER_SERVER,

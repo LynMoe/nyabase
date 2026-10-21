@@ -1,8 +1,8 @@
 import { randomUUID } from 'node:crypto';
 import { describe, expect, it, vi } from 'vitest';
 import { ServerStatus } from '@nyabase/common';
-import { PgTransactionManager } from '../persistence-pg/transaction.js';
-import { withPostgresTestDatabase } from '../persistence-pg/postgres-test-harness.js';
+import { PgTransactionManager } from '../platform/persistence-pg/transaction.js';
+import { withPostgresTestDatabase } from '../platform/persistence-pg/postgres-test-harness.js';
 import { ImagesService } from './images.service.js';
 
 const describePg = process.env.NYABASE_TEST_DATABASE_URL ? describe : describe.skip;

@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { UserStatus } from '@nyabase/common';
-import type { UserRecord } from '../domain/domain-records.js';
+import type { UserRecord } from '../iam/user-record.js';
 import type { GroupsService } from '../groups/groups.service.js';
 import { AdminUsersController } from './admin-users.controller.js';
 import { UsersController } from './users.controller.js';
