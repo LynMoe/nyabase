@@ -1,6 +1,5 @@
-import type { UseQueryResult } from '@tanstack/react-query';
 import { Activity, Cpu, Gauge, HardDrive, History, KeyRound, ListChecks } from 'lucide-react';
-import type { ServerDto, ServerPreflightDto, StoragePoolDto } from '@nyabase/common';
+import { Capability, type ServerDto } from '@nyabase/common';
 import { Link } from '@tanstack/react-router';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '../../components/ui/card.js';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '../../components/ui/tabs.js';
@@ -11,11 +10,11 @@ import { PoolsCard } from '../../components/servers/pools-card.js';
 import { ServerStorageTab } from '../../components/servers/server-storage-tab.js';
 import { ResourceIntentFailures } from '../../components/intents/resource-intent-failures.js';
 import { ServerGpuCard } from '../../components/gpu/gpu-sections.js';
-import type { useNodeMetricsForm } from './use-server-detail.js';
-import type { useServerActions } from './use-server-detail.js';
 import { Field } from '../../components/layout/form-field.js';
 import { ConnectCard } from '../../components/servers/connect-card.js';
 import { TechnicalId } from '../../components/refs/technical-id.js';
+import { useServerPools } from '../../lib/server-queries.js';
+import { useAuthStore } from '../../store/auth.js';
 import { preflightStatusLabel, storageOvercommitLabel } from '../../lib/display-labels.js';
 
 export const SERVER_DETAIL_TABS = [
@@ -33,56 +32,17 @@ const SERVER_DETAIL_TAB_ITEMS = [
   ['activity', '活动', History],
 ] as const;
 
-/** The values the connect, storage and preflight forms hold across tab switches. */
-export interface ServerFormState {
-  trustToken: string;
-  expectedFingerprint: string;
-  probeAddress: string;
-  selectedPoolId: string;
-  systemPoolId: string;
-  overcommitRatio: string;
-  setTrustToken: (value: string) => void;
-  setExpectedFingerprint: (value: string) => void;
-  setProbeAddress: (value: string) => void;
-  setSelectedPoolId: (value: string) => void;
-  setSystemPoolId: (value: string) => void;
-  setOvercommitRatio: (value: string) => void;
-}
-
 export function ServerDetailTabs({
   server,
-  serverId,
   tab,
   onSelectTab,
-  forms,
-  actions,
-  nodeMetrics,
-  clearMetricsOpen,
-  onClearMetricsOpenChange,
-  poolsQuery,
-  preflight,
-  canManageStoragePools,
-  canManageServers,
-  canViewMetrics,
 }: {
   server: ServerDto;
-  serverId: string;
   tab: ServerDetailTab;
   onSelectTab: (tab: ServerDetailTab) => void;
-  forms: ServerFormState;
-  actions: ReturnType<typeof useServerActions>;
-  nodeMetrics: ReturnType<typeof useNodeMetricsForm>;
-  clearMetricsOpen: boolean;
-  onClearMetricsOpenChange: (open: boolean) => void;
-  poolsQuery: UseQueryResult<StoragePoolDto[]>;
-  preflight: ServerPreflightDto | undefined;
-  canManageStoragePools: boolean;
-  canManageServers: boolean;
-  canViewMetrics: boolean;
 }) {
-  const pools = poolsQuery.data ?? [];
-  const selectedPool = pools.find((pool) => pool.id === forms.selectedPoolId);
-  const currentSystemPool = server.systemPoolId ?? '';
+  const serverId = server.id;
+  const capabilities = useAuthStore((state) => state.user?.capabilities ?? []);
   return (
     <Tabs
       value={tab}
@@ -97,81 +57,37 @@ export function ServerDetailTabs({
         ))}
       </TabsList>
       <TabsContent value="overview" className="space-y-6">
-        <ServerOverviewTab
-          server={server}
-          registeredPoolCount={pools.filter((pool) => pool.registered).length}
-          onSelectTab={onSelectTab}
-        />
+        <ServerOverviewTab server={server} onSelectTab={onSelectTab} />
       </TabsContent>
       <TabsContent value="connect" className="space-y-6">
-        <ServerConnectTab
-          server={server}
-          trustToken={forms.trustToken}
-          expectedFingerprint={forms.expectedFingerprint}
-          connectPending={actions.connect.isPending}
-          onTrustTokenChange={forms.setTrustToken}
-          onExpectedFingerprintChange={forms.setExpectedFingerprint}
-          onConnect={() => actions.connect.mutate()}
-        />
+        <div className="grid items-start gap-4 xl:grid-cols-2">
+          <ConnectCard server={server} />
+          <Card>
+            <CardHeader>
+              <CardTitle className="text-base">客户端证书</CardTitle>
+              <CardDescription>
+                所有服务器共用一张自动生成的 Incus 客户端证书，在
+                <Link to="/servers" hash="client-identity" className="mx-1 underline underline-offset-4">服务器列表</Link>
+                查看指纹。
+              </CardDescription>
+            </CardHeader>
+          </Card>
+        </div>
       </TabsContent>
       <TabsContent value="storage" className="space-y-6" data-testid="server-storage-tab">
-        <ServerStorageTab serverId={serverId} pools={pools}>
-          <PoolsCard
-            pools={pools}
-            poolsError={poolsQuery.isError ? poolsQuery.error : null}
-            onRetryPools={() => { void poolsQuery.refetch(); }}
-            canManageStoragePools={canManageStoragePools}
-            selectedPool={selectedPool}
-            systemPoolId={forms.systemPoolId}
-            currentSystemPool={currentSystemPool}
-            overcommitRatio={forms.overcommitRatio}
-            storageOvercommitRatio={server.storageOvercommitRatio}
-            discoverPending={actions.discoverPools.isPending}
-            updatePending={actions.updateServer.isPending}
-            onSystemPoolIdChange={forms.setSystemPoolId}
-            onOvercommitRatioChange={forms.setOvercommitRatio}
-            onDiscover={() => actions.discoverPools.mutate()}
-            onSaveStorage={() => actions.updateServer.mutate({
-              expectedRevision: server.revision,
-              systemPoolId: (forms.systemPoolId || currentSystemPool) || null,
-              storageOvercommitRatio: Number(forms.overcommitRatio || server.storageOvercommitRatio),
-            })}
-            onUpdated={actions.invalidateServer}
-          />
+        <ServerStorageTab serverId={serverId}>
+          <PoolsCard server={server} />
         </ServerStorageTab>
       </TabsContent>
       <TabsContent value="preflight">
-        <PreflightCard
-          pools={pools}
-          selectedPoolId={forms.selectedPoolId}
-          probeAddress={forms.probeAddress}
-          preflightPending={actions.runPreflight.isPending}
-          status={preflight?.status ?? server.preflightStatus}
-          report={preflight?.report ?? server.preflightReport}
-          onSelectedPoolIdChange={forms.setSelectedPoolId}
-          onProbeAddressChange={forms.setProbeAddress}
-          onRunPreflight={() => actions.runPreflight.mutate()}
-        />
+        <PreflightCard server={server} />
       </TabsContent>
       <TabsContent value="metrics" className="space-y-6">
-        {canViewMetrics ? <ServerMetricsPanel serverId={serverId} /> : null}
-        <NodeMetricsCard
-          server={server}
-          endpoint={nodeMetrics.endpoint}
-          certFingerprint={nodeMetrics.certFingerprint}
-          token={nodeMetrics.token}
-          updatePending={actions.updateServer.isPending}
-          clearOpen={clearMetricsOpen}
-          onEndpointChange={nodeMetrics.setEndpoint}
-          onCertFingerprintChange={nodeMetrics.setCertFingerprint}
-          onTokenChange={nodeMetrics.setToken}
-          onSave={nodeMetrics.save}
-          onClear={nodeMetrics.clear}
-          onClearOpenChange={onClearMetricsOpenChange}
-        />
+        {capabilities.includes(Capability.ViewMetricsAll) ? <ServerMetricsPanel serverId={serverId} /> : null}
+        <NodeMetricsCard server={server} />
       </TabsContent>
       <TabsContent value="gpu">
-        {canManageServers ? (
+        {capabilities.includes(Capability.ManageServers) ? (
           <ServerGpuCard serverId={serverId} active={tab === 'gpu'} />
         ) : (
           <Card>
@@ -192,15 +108,14 @@ export function ServerDetailTabs({
   );
 }
 
-export function ServerOverviewTab({
+function ServerOverviewTab({
   server,
-  registeredPoolCount,
   onSelectTab,
 }: {
   server: ServerDto;
-  registeredPoolCount: number;
   onSelectTab: (tab: 'connect' | 'storage' | 'preflight') => void;
 }) {
+  const registeredPoolCount = (useServerPools(server.id).data ?? []).filter((pool) => pool.registered).length;
   return (
     <>
       <Card>
@@ -241,47 +156,5 @@ export function ServerOverviewTab({
         </CardContent>
       </Card>
     </>
-  );
-}
-
-export function ServerConnectTab({
-  server,
-  trustToken,
-  expectedFingerprint,
-  connectPending,
-  onTrustTokenChange,
-  onExpectedFingerprintChange,
-  onConnect,
-}: {
-  server: ServerDto;
-  trustToken: string;
-  expectedFingerprint: string;
-  connectPending: boolean;
-  onTrustTokenChange: (value: string) => void;
-  onExpectedFingerprintChange: (value: string) => void;
-  onConnect: () => void;
-}) {
-  return (
-    <div className="grid items-start gap-4 xl:grid-cols-2">
-      <ConnectCard
-        server={server}
-        trustToken={trustToken}
-        expectedFingerprint={expectedFingerprint}
-        connectPending={connectPending}
-        onTrustTokenChange={onTrustTokenChange}
-        onExpectedFingerprintChange={onExpectedFingerprintChange}
-        onConnect={onConnect}
-      />
-      <Card>
-        <CardHeader>
-          <CardTitle className="text-base">客户端证书</CardTitle>
-          <CardDescription>
-            所有服务器共用一张自动生成的 Incus 客户端证书，在
-            <Link to="/servers" hash="client-identity" className="mx-1 underline underline-offset-4">服务器列表</Link>
-            查看指纹。
-          </CardDescription>
-        </CardHeader>
-      </Card>
-    </div>
   );
 }

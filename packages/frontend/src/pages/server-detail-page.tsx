@@ -1,14 +1,11 @@
 import { useState } from 'react';
-import { useQuery } from '@tanstack/react-query';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { getRouteApi, useNavigate } from '@tanstack/react-router';
 import { Trash2 } from 'lucide-react';
-import {
-  Capability,
-  type ServerDto,
-  type ServerPreflightDto,
-  type StoragePoolDto,
-} from '@nyabase/common';
+import { Capability, type ServerDto } from '@nyabase/common';
 import { api } from '../lib/api.js';
+import { errorMessage } from '../lib/api-error.js';
+import { toast } from '../hooks/use-toast.js';
 import { Badge } from '../components/ui/badge.js';
 import { MoreActions } from '../components/layout/more-actions.js';
 import { ConfirmDialog } from '../components/layout/confirm-dialog.js';
@@ -24,10 +21,7 @@ import {
   ServerDetailTabs,
   SERVER_DETAIL_TABS,
   type ServerDetailTab,
-  type ServerFormState,
 } from './server-detail-page/server-tabs.js';
-import { useNodeMetricsForm } from './server-detail-page/use-server-detail.js';
-import { useServerActions } from './server-detail-page/use-server-detail.js';
 
 const routeApi = getRouteApi('/servers/$id');
 
@@ -39,43 +33,15 @@ export function parseServerDetailTab(value: unknown): ServerDetailTab {
     : 'overview';
 }
 
-/** Form values live here, not in the tabs, so they survive switching tabs. */
-function useServerFormState(): ServerFormState {
-  const [trustToken, setTrustToken] = useState('');
-  const [expectedFingerprint, setExpectedFingerprint] = useState('');
-  const [probeAddress, setProbeAddress] = useState('');
-  const [selectedPoolId, setSelectedPoolId] = useState('');
-  const [systemPoolId, setSystemPoolId] = useState('');
-  const [overcommitRatio, setOvercommitRatio] = useState('');
-  return {
-    trustToken,
-    expectedFingerprint,
-    probeAddress,
-    selectedPoolId,
-    systemPoolId,
-    overcommitRatio,
-    setTrustToken,
-    setExpectedFingerprint,
-    setProbeAddress,
-    setSelectedPoolId,
-    setSystemPoolId,
-    setOvercommitRatio,
-  };
-}
-
 export default function ServerDetailPage() {
   const { id } = routeApi.useParams();
   const { tab } = routeApi.useSearch();
   const navigate = useNavigate({ from: '/servers/$id' });
-  const forms = useServerFormState();
-  const [clearMetricsOpen, setClearMetricsOpen] = useState(false);
+  const queryClient = useQueryClient();
   const [deleteOpen, setDeleteOpen] = useState(false);
-  const capabilities = useAuthStore((state) => state.user?.capabilities ?? []);
-  const canManageServers = capabilities.includes(Capability.ManageServers);
-
-  const selectTab = (next: ServerDetailTab) => {
-    void navigate({ search: (prev) => ({ ...prev, tab: next }) });
-  };
+  const canManageServers = useAuthStore(
+    (state) => state.user?.capabilities.includes(Capability.ManageServers) ?? false,
+  );
 
   const serverQuery = useQuery({
     queryKey: queryKeys.servers.detail(id),
@@ -85,30 +51,17 @@ export default function ServerDetailPage() {
       isSettled: (server) => !preflightPending(server.preflightStatus),
     }),
   });
-  const poolsQuery = useQuery({
-    queryKey: queryKeys.servers.pools(id, 'all'),
-    queryFn: () => api.get<StoragePoolDto[]>(`/servers/${id}/storage-pools?scope=all`),
-  });
-  const preflightQuery = useQuery({
-    queryKey: queryKeys.servers.preflight(id),
-    queryFn: () => api.get<ServerPreflightDto>(`/servers/${id}/preflight`),
-    enabled: tab === 'preflight',
-    refetchInterval: (query) => refetchWhileInProgress(query.state, {
-      steadyIntervalMs: false,
-      isSettled: (report) => !preflightPending(report.status),
-    }),
-  });
   const server = serverQuery.data;
-
-  const actions = useServerActions({
-    id,
-    server,
-    form: forms,
-    onConnectSubmitted: () => forms.setTrustToken(''),
-    onSettingsSaved: () => setClearMetricsOpen(false),
-    onDeleted: () => setDeleteOpen(false),
+  const deleteServer = useMutation({
+    mutationFn: () => api.delete<void>(`/servers/${id}?expectedRevision=${server?.revision ?? 0}`),
+    onSuccess: () => {
+      setDeleteOpen(false);
+      toast({ title: '服务器已从控制面移除' });
+      void queryClient.invalidateQueries({ queryKey: queryKeys.servers.admin });
+      void navigate({ to: '/servers' });
+    },
+    onError: (error) => toast({ title: '删除服务器失败', description: errorMessage(error), variant: 'destructive' }),
   });
-  const nodeMetrics = useNodeMetricsForm(server, actions.updateServer);
 
   return (
     <Page testId="server-connect-preflight">
@@ -140,19 +93,8 @@ export default function ServerDetailPage() {
         {(loaded) => (
           <ServerDetailTabs
             server={loaded}
-            serverId={id}
             tab={tab}
-            onSelectTab={selectTab}
-            forms={forms}
-            actions={actions}
-            nodeMetrics={nodeMetrics}
-            clearMetricsOpen={clearMetricsOpen}
-            onClearMetricsOpenChange={setClearMetricsOpen}
-            poolsQuery={poolsQuery}
-            preflight={preflightQuery.data}
-            canManageStoragePools={capabilities.includes(Capability.ManageStoragePools)}
-            canManageServers={canManageServers}
-            canViewMetrics={capabilities.includes(Capability.ViewMetricsAll)}
+            onSelectTab={(next) => { void navigate({ search: (prev) => ({ ...prev, tab: next }) }); }}
           />
         )}
       </QueryView>
@@ -162,8 +104,8 @@ export default function ServerDetailPage() {
         description="只会清除控制面上这台服务器的对象（容器记录、本机卷、本机 catalog）。不会对这台 Incus 做任何删除。共享卷若还登记在其他服务器上会保留；若只登记在这台上，控制面卷行会消失，Ceph 目录可能残留。重新加入按全新空白服务器处理。"
         confirmLabel="确认删除"
         pendingLabel="删除中..."
-        pending={actions.deleteServer.isPending}
-        onConfirm={() => actions.deleteServer.mutate()}
+        pending={deleteServer.isPending}
+        onConfirm={() => deleteServer.mutate()}
         onOpenChange={setDeleteOpen}
       />
     </Page>

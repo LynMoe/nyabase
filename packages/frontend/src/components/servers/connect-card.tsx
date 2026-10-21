@@ -1,7 +1,13 @@
 import { useState } from 'react';
 import { KeyRound, ShieldCheck } from 'lucide-react';
-import { Capability, type IncusClientIdentityDto, type ServerDto } from '@nyabase/common';
-import { useQuery } from '@tanstack/react-query';
+import {
+  Capability,
+  type ConnectServerRequest,
+  type IncusClientIdentityDto,
+  type IntentAcceptedDto,
+  type ServerDto,
+} from '@nyabase/common';
+import { useMutation, useQuery } from '@tanstack/react-query';
 import { Button } from '../ui/button.js';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '../ui/card.js';
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from '../ui/dialog.js';
@@ -10,27 +16,32 @@ import { FormField } from '../layout/form-field.js';
 import { TechnicalId } from '../refs/technical-id.js';
 import { Field } from '../layout/form-field.js';
 import { api } from '../../lib/api.js';
+import { errorMessage } from '../../lib/api-error.js';
+import { useInvalidateServer } from '../../lib/server-queries.js';
+import { toast } from '../../hooks/use-toast.js';
 import { queryKeys } from '../../lib/query-keys.js';
 import { useAuthStore } from '../../store/auth.js';
 import { QueryView } from '../layout/query-view.js';
 
-export function ConnectCard({
-  server,
-  trustToken,
-  expectedFingerprint,
-  connectPending,
-  onTrustTokenChange,
-  onExpectedFingerprintChange,
-  onConnect,
-}: {
-  server: ServerDto;
-  trustToken: string;
-  expectedFingerprint: string;
-  connectPending: boolean;
-  onTrustTokenChange: (value: string) => void;
-  onExpectedFingerprintChange: (value: string) => void;
-  onConnect: () => void;
-}) {
+export function ConnectCard({ server }: { server: ServerDto }) {
+  const [trustToken, setTrustToken] = useState('');
+  const [expectedFingerprint, setExpectedFingerprint] = useState('');
+  const invalidate = useInvalidateServer(server.id);
+  const connect = useMutation({
+    mutationFn: () => {
+      const body: ConnectServerRequest = {
+        trustToken: trustToken.trim(),
+        expectedServerCertFingerprint: (expectedFingerprint || server.serverCertFingerprint || '').trim(),
+      };
+      return api.post<IntentAcceptedDto>(`/servers/${server.id}/connect`, body);
+    },
+    onSuccess: (intent) => {
+      toast({ title: '已开始连接服务器', description: `操作 ${intent.intentId.slice(0, 8)} 正在执行。` });
+      setTrustToken('');
+      invalidate();
+    },
+    onError: (error) => toast({ title: '连接失败', description: errorMessage(error), variant: 'destructive' }),
+  });
   const [open, setOpen] = useState(false);
   return (
     <Card>
@@ -62,7 +73,7 @@ export function ConnectCard({
               <Input
                 id="server-trust-token"
                 value={trustToken}
-                onChange={(event) => onTrustTokenChange(event.target.value)}
+                onChange={(event) => setTrustToken(event.target.value)}
                 placeholder="粘贴 Incus trust token"
               />
             </FormField>
@@ -71,7 +82,7 @@ export function ConnectCard({
                 id="server-cert-fingerprint"
                 className="font-mono"
                 value={expectedFingerprint || server.serverCertFingerprint || ''}
-                onChange={(event) => onExpectedFingerprintChange(event.target.value)}
+                onChange={(event) => setExpectedFingerprint(event.target.value)}
                 placeholder="SHA256 fingerprint"
               />
             </FormField>
@@ -80,12 +91,12 @@ export function ConnectCard({
               <Button
                 data-testid="server-connect"
                 onClick={() => {
-                  onConnect();
+                  connect.mutate();
                   setOpen(false);
                 }}
-                disabled={connectPending || !trustToken.trim() || !(expectedFingerprint || server.serverCertFingerprint)}
+                disabled={connect.isPending || !trustToken.trim() || !(expectedFingerprint || server.serverCertFingerprint)}
               >
-                {connectPending ? '提交中...' : '连接服务器'}
+                {connect.isPending ? '提交中...' : '连接服务器'}
               </Button>
             </DialogFooter>
           </DialogContent>

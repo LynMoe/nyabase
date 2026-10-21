@@ -1,6 +1,11 @@
 import { useState } from 'react';
 import { Pencil, RefreshCw, Server } from 'lucide-react';
-import type { StoragePoolDto } from '@nyabase/common';
+import {
+  Capability,
+  type ServerDto,
+  type StoragePoolDiscoverResult,
+  type StoragePoolDto,
+} from '@nyabase/common';
 import { useMutation } from '@tanstack/react-query';
 import { QueryErrorState } from '../query-state.js';
 import { Button } from '../ui/button.js';
@@ -22,6 +27,8 @@ import {
 import { Input } from '../ui/input.js';
 import { FormField } from '../layout/form-field.js';
 import { toast } from '../../hooks/use-toast.js';
+import { useInvalidateServer, useServerPools, useUpdateServer } from '../../lib/server-queries.js';
+import { useAuthStore } from '../../store/auth.js';
 import { usedTotalLabel } from '../../lib/utils.js';
 import { Label } from '../ui/label.js';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '../ui/select.js';
@@ -30,43 +37,25 @@ function poolLabel(pool: StoragePoolDto): string {
   return pool.displayName ?? pool.incusName;
 }
 
-export function PoolsCard({
-  pools,
-  poolsError,
-  onRetryPools,
-  canManageStoragePools,
-  selectedPool,
-  systemPoolId,
-  currentSystemPool,
-  overcommitRatio,
-  storageOvercommitRatio,
-  discoverPending,
-  updatePending,
-  onSystemPoolIdChange,
-  onOvercommitRatioChange,
-  onDiscover,
-  onSaveStorage,
-  onUpdated,
-}: {
-  pools: StoragePoolDto[];
-  poolsError: unknown | null;
-  onRetryPools: () => void;
-  canManageStoragePools: boolean;
-  selectedPool: StoragePoolDto | undefined;
-  systemPoolId: string;
-  currentSystemPool: string;
-  overcommitRatio: string;
-  storageOvercommitRatio: number;
-  discoverPending: boolean;
-  updatePending: boolean;
-  onSystemPoolIdChange: (value: string) => void;
-  onOvercommitRatioChange: (value: string) => void;
-  onDiscover: () => void;
-  onSaveStorage: () => void;
-  onUpdated: () => void;
-}) {
+export function PoolsCard({ server }: { server: ServerDto }) {
+  const canManageStoragePools = useAuthStore(
+    (state) => state.user?.capabilities.includes(Capability.ManageStoragePools) ?? false,
+  );
   const [settingsOpen, setSettingsOpen] = useState(false);
-  const selectedSystemPool = pools.find((pool) => pool.id === (systemPoolId || currentSystemPool));
+  const poolsQuery = useServerPools(server.id);
+  const pools = poolsQuery.data ?? [];
+  const poolsError = poolsQuery.isError ? poolsQuery.error : null;
+  const invalidate = useInvalidateServer(server.id);
+  const discover = useMutation({
+    mutationFn: () => api.post<StoragePoolDiscoverResult>(`/servers/${server.id}/storage-pools/discover`),
+    onSuccess: (result) => {
+      toast({ title: '存储池已刷新', description: `发现 ${result.pools.length} 个本地池。` });
+      invalidate();
+    },
+    onError: (error) => toast({ title: '发现存储池失败', description: errorMessage(error), variant: 'destructive' }),
+  });
+  const discoverPending = discover.isPending;
+  const selectedSystemPool = pools.find((pool) => pool.id === server.systemPoolId);
   return (
     <Card data-testid="storage-pool-capabilities">
       <CardHeader>
@@ -78,7 +67,7 @@ export function PoolsCard({
             <Button size="sm" variant="outline" onClick={() => setSettingsOpen(true)}>
               <Pencil className="h-3.5 w-3.5" />编辑存储设置
             </Button>
-            <Button variant="outline" size="sm" onClick={onDiscover} disabled={discoverPending}>
+            <Button variant="outline" size="sm" onClick={() => discover.mutate()} disabled={discoverPending}>
               <RefreshCw className={discoverPending ? 'h-4 w-4 animate-spin' : 'h-4 w-4'} />发现存储池
             </Button>
           </div>
@@ -92,28 +81,14 @@ export function PoolsCard({
           </div>
           <div>
             <p className="text-xs text-muted-foreground">存储超分比例</p>
-            <p className="text-sm">{storageOvercommitLabel(overcommitRatio || storageOvercommitRatio)}</p>
+            <p className="text-sm">{storageOvercommitLabel(server.storageOvercommitRatio)}</p>
           </div>
         </div>
         {settingsOpen ? (
-          <StorageSettingsDialog
-            pools={pools}
-            systemPoolId={systemPoolId}
-            currentSystemPool={currentSystemPool}
-            overcommitRatio={overcommitRatio}
-            storageOvercommitRatio={storageOvercommitRatio}
-            updatePending={updatePending}
-            onSystemPoolIdChange={onSystemPoolIdChange}
-            onOvercommitRatioChange={onOvercommitRatioChange}
-            onSave={() => {
-              onSaveStorage();
-              setSettingsOpen(false);
-            }}
-            onClose={() => setSettingsOpen(false)}
-          />
+          <StorageSettingsDialog server={server} pools={pools} onClose={() => setSettingsOpen(false)} />
         ) : null}
         {poolsError ? (
-          <QueryErrorState error={poolsError} resourceName="存储池" onRetry={onRetryPools} />
+          <QueryErrorState error={poolsError} resourceName="存储池" onRetry={() => { void poolsQuery.refetch(); }} />
         ) : pools.length === 0 ? (
           <p className="text-sm text-muted-foreground">尚未发现本地存储池。</p>
         ) : (
@@ -128,14 +103,13 @@ export function PoolsCard({
                     key={pool.id}
                     pool={pool}
                     canManageStoragePools={canManageStoragePools}
-                    onUpdated={onUpdated}
+                    onUpdated={invalidate}
                   />
                 ))}
               </tbody>
             </table>
           </div>
         )}
-        {selectedPool && <p className="text-xs text-muted-foreground">探针池：{selectedPool.displayName ?? selectedPool.incusName}</p>}
         {!canManageStoragePools && (
           <p className="text-xs text-muted-foreground" data-testid="storage-pool-register-gated">
             可以查看存储池，但登记、取消登记与编辑备注需要「管理存储池」权限。
@@ -270,29 +244,27 @@ export function StoragePoolRow({
   );
 }
 
-export function StorageSettingsDialog({
+function StorageSettingsDialog({
+  server,
   pools,
-  systemPoolId,
-  currentSystemPool,
-  overcommitRatio,
-  storageOvercommitRatio,
-  updatePending,
-  onSystemPoolIdChange,
-  onOvercommitRatioChange,
-  onSave,
   onClose,
 }: {
+  server: ServerDto;
   pools: StoragePoolDto[];
-  systemPoolId: string;
-  currentSystemPool: string;
-  overcommitRatio: string;
-  storageOvercommitRatio: number;
-  updatePending: boolean;
-  onSystemPoolIdChange: (value: string) => void;
-  onOvercommitRatioChange: (value: string) => void;
-  onSave: () => void;
   onClose: () => void;
 }) {
+  const currentSystemPool = server.systemPoolId ?? '';
+  const [systemPoolId, setSystemPoolId] = useState('');
+  const [overcommitRatio, setOvercommitRatio] = useState('');
+  const update = useUpdateServer(server.id);
+  const save = () => {
+    update.mutate({
+      expectedRevision: server.revision,
+      systemPoolId: (systemPoolId || currentSystemPool) || null,
+      storageOvercommitRatio: Number(overcommitRatio || server.storageOvercommitRatio),
+    });
+    onClose();
+  };
   return (
     <Dialog open onOpenChange={(open) => { if (!open) onClose(); }}>
       <DialogContent>
@@ -305,7 +277,7 @@ export function StorageSettingsDialog({
         <FormField id="server-system-pool" label="系统盘池">
           <Select
             value={(systemPoolId || currentSystemPool) || undefined}
-            onValueChange={onSystemPoolIdChange}
+            onValueChange={setSystemPoolId}
           >
             <SelectTrigger id="server-system-pool">
               <SelectValue placeholder="未指定" />
@@ -324,20 +296,20 @@ export function StorageSettingsDialog({
             type="number"
             min="1"
             step="0.1"
-            value={overcommitRatio || String(storageOvercommitRatio)}
-            onChange={(event) => onOvercommitRatioChange(event.target.value)}
+            value={overcommitRatio || String(server.storageOvercommitRatio)}
+            onChange={(event) => setOvercommitRatio(event.target.value)}
           />
           <p className="text-xs text-muted-foreground">
             容器和数据卷可分配的总容量 = 物理容量 × 比例。1 表示不超分；大于 1 时分配总量可以超过磁盘实际大小。
           </p>
         </div>
         <DialogFooter>
-          <Button variant="outline" onClick={() => onClose()}>取消</Button>
+          <Button variant="outline" onClick={onClose}>取消</Button>
           <Button
-            onClick={onSave}
-            disabled={updatePending}
+            onClick={save}
+            disabled={update.isPending}
           >
-            {updatePending ? '保存中...' : '保存'}
+            {update.isPending ? '保存中...' : '保存'}
           </Button>
         </DialogFooter>
       </DialogContent>
