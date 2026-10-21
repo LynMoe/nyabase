@@ -21,6 +21,8 @@ import type {
   ReconcileRunContext,
   ResourceAuthority,
 } from '../reconcile/managed-reconciler.js';
+import { intentFailure } from '../reconcile/intent-model.js';
+import { failedOutcome } from '../reconcile/managed-reconciler.js';
 import { ReconcilerRegistry } from '../reconcile/reconciler-registry.service.js';
 import { ProxySnapshotNotifierService } from '../proxy-snapshots/proxy-snapshot-notifier.service.js';
 import { gpuRequiresStop } from '../gpu/instance-spec.js';
@@ -68,14 +70,6 @@ import { IncusContainerSshStateAdapter, reconcileSshFile } from './container-ssh
 type Loaded =
   | { readonly outcome: ReconcileOutcome }
   | { readonly row: ContainerRow; readonly prefixLength: number };
-
-function failure(code: string, message: string, details: Record<string, unknown> = {}): IntentFailure {
-  return { code, message, details };
-}
-
-function failed(code: string, message: string, details: Record<string, unknown> = {}): ReconcileOutcome {
-  return { outcome: 'failed', failure: failure(code, message, details) };
-}
 
 /**
  * Drives container intents against Incus: converge the instance (create,
@@ -160,14 +154,14 @@ export class ContainerReconciler implements ManagedReconciler, OnModuleInit {
             message: diff.error.error.message,
             details: diff.error.details as Record<string, unknown>,
           }
-          : failure('MANAGED_COMPARATOR_FAILURE', 'Managed field comparison failed'),
+          : intentFailure('MANAGED_COMPARATOR_FAILURE', 'Managed field comparison failed'),
       };
     }
     const usedBytes = await observeRootUsage(client, row.root_pool_name, expectedName, state);
     await this.guardRootShrink(row, actual, desired, state, usedBytes);
     if (!diff.empty) {
       if (running(state) && gpuRequiresStop(diff)) {
-        return failed(
+        return failedOutcome(
             FailureCode.GpuMutationRequiresStop,
             'GPU assignment changes require a stopped instance',
           );
@@ -216,12 +210,12 @@ export class ContainerReconciler implements ManagedReconciler, OnModuleInit {
     const row = await this.store.readContainer(context.intent.resourceId);
     if (!row) {
       return {
-        outcome: failed('CONTAINER_NOT_FOUND', 'The desired container no longer exists'),
+        outcome: failedOutcome('CONTAINER_NOT_FOUND', 'The desired container no longer exists'),
       };
     }
     if (row.server_id !== context.intent.serverId) {
       return {
-        outcome: failed('CONTAINER_SERVER_MISMATCH', 'The intent server does not own the container'),
+        outcome: failedOutcome('CONTAINER_SERVER_MISMATCH', 'The intent server does not own the container'),
       };
     }
     if (context.intent.targetRevision < row.revision) {
@@ -231,7 +225,7 @@ export class ContainerReconciler implements ManagedReconciler, OnModuleInit {
     }
     if (!row.parent_interface || !row.routed_ip || !row.network_key || !row.gateway) {
       return {
-        outcome: failed(
+        outcome: failedOutcome(
             'MISSING_MANAGED_NETWORK_ADDRESS',
             'The container has no LAN bridge / claim / gateway',
           ),
@@ -240,7 +234,7 @@ export class ContainerReconciler implements ManagedReconciler, OnModuleInit {
     const prefixLength = parseCidrPrefix(row.network_key);
     if (prefixLength === undefined) {
       return {
-        outcome: failed(
+        outcome: failedOutcome(
             'MISSING_MANAGED_NETWORK_ADDRESS',
             'The container network claim CIDR is invalid',
           ),
@@ -309,7 +303,7 @@ export class ContainerReconciler implements ManagedReconciler, OnModuleInit {
         });
         if (result === 'missing') {
           if (context.intent.attemptCount >= VOLUME_ADOPT_FAIL_AFTER_ATTEMPTS) {
-            return failed(
+            return failedOutcome(
                 'VOLUME_CATALOG_ADOPT_FAILED',
                 'Incus did not adopt the existing CephFS directory into this daemon catalog',
                 { volumeId: attachment.volume_id, serverId },
@@ -360,7 +354,7 @@ export class ContainerReconciler implements ManagedReconciler, OnModuleInit {
     const actual = await this.findInstance(client, expectedName, row);
     const deleted = await this.deleteDesiredInstance(client, actual, row, context.intent);
     if (!deleted && actual) {
-      return failed(
+      return failedOutcome(
           'INSTANCE_DELETE_IDENTITY_MISMATCH',
           'The managed instance could not be safely deleted due to its identity',
         );
@@ -415,7 +409,7 @@ export class ContainerReconciler implements ManagedReconciler, OnModuleInit {
   ): ReconcileOutcome | null {
     const actualIdentity = managedContainerIdentity(actual.document);
     if (!actualIdentity.managed) {
-      return failed(
+      return failedOutcome(
           'UNMANAGED_INSTANCE_NAME_COLLISION',
           `Incus instance ${expectedName} is not managed by nyabase`,
         );
@@ -428,7 +422,7 @@ export class ContainerReconciler implements ManagedReconciler, OnModuleInit {
         `Refusing to modify instance ${actual.name} with identity `
         + `${actualIdentity.containerId}/${actualIdentity.serverId}`,
       );
-      return failed(
+      return failedOutcome(
           'MANAGED_INSTANCE_IDENTITY_MISMATCH',
           'The managed instance identity does not match the desired container',
           {
@@ -589,7 +583,7 @@ export class ContainerReconciler implements ManagedReconciler, OnModuleInit {
       MANAGED_FIELD_OWNERSHIP,
     );
     if (verificationDiff.kind !== 'empty') {
-      return failed(
+      return failedOutcome(
           'INSTANCE_VERIFY_FAILED',
           'The instance did not match the managed specification after reconciliation',
           {
@@ -616,7 +610,7 @@ export class ContainerReconciler implements ManagedReconciler, OnModuleInit {
     if (quota.pending) {
       return {
         outcome: 'retry',
-        failure: failure(
+        failure: intentFailure(
           'ROOT_QUOTA_PENDING',
           'Incus has not finished applying the root filesystem quota',
           { pendingSizeBytes: quota.pendingSizeBytes ?? row.root_size_bytes },
@@ -635,7 +629,7 @@ export class ContainerReconciler implements ManagedReconciler, OnModuleInit {
     ) {
       return {
         outcome: 'retry',
-        failure: failure(
+        failure: intentFailure(
           'SSH_DAEMON_PENDING',
           'SSH key is applied but the daemon is not accepting connections yet',
           { sshStatus: ssh.status, lastError: ssh.lastError ?? '' },

@@ -7,7 +7,8 @@ import {
   type IncusSchema,
 } from '../incus/index.js';
 import type { IntentFailure } from '../reconcile/intent.repository.js';
-import type { ReconcileOutcome } from '../reconcile/managed-reconciler.js';
+import { intentFailure } from '../reconcile/intent-model.js';
+import { failedOutcome, type ReconcileOutcome } from '../reconcile/managed-reconciler.js';
 import {
   normalizeObservedVolumeUsage,
   type VolumeDriver,
@@ -49,22 +50,6 @@ export function asBytes(value: unknown): bigint | null {
   return BigInt(match[1]) * multipliers[unit];
 }
 
-export function volumeFailure(
-  code: string,
-  message: string,
-  details: Record<string, unknown> = {},
-): IntentFailure {
-  return { code, message, details };
-}
-
-export function failedOutcome(
-  code: string,
-  message: string,
-  details: Record<string, unknown> = {},
-): ReconcileOutcome {
-  return { outcome: 'failed', failure: volumeFailure(code, message, details) };
-}
-
 export function destroyRetry(
   code: string,
   message: string,
@@ -72,7 +57,7 @@ export function destroyRetry(
 ): ReconcileOutcome {
   return {
     outcome: 'retry',
-    failure: volumeFailure(code, message, details),
+    failure: intentFailure(code, message, details),
   };
 }
 
@@ -189,13 +174,13 @@ export function blockedResizeFailure(
   };
   switch (decision.reason) {
     case 'usage_unknown':
-      return volumeFailure('VOLUME_USAGE_UNKNOWN', 'Volume usage is unknown; shrink is not allowed until usage is observed', details);
+      return intentFailure('VOLUME_USAGE_UNKNOWN', 'Volume usage is unknown; shrink is not allowed until usage is observed', details);
     case 'usage_floor':
-      return volumeFailure('VOLUME_SHRINK_BELOW_USAGE', 'The requested size is below volume usage', details);
+      return intentFailure('VOLUME_SHRINK_BELOW_USAGE', 'The requested size is below volume usage', details);
     case 'detach':
-      return volumeFailure('VOLUME_SHRINK_REQUIRES_DETACH', 'The block-backed volume must be detached before shrinking', details);
+      return intentFailure('VOLUME_SHRINK_REQUIRES_DETACH', 'The block-backed volume must be detached before shrinking', details);
     default:
-      return volumeFailure('VOLUME_SHRINK_REQUIRES_STOP', 'The block-backed volume consumers must be stopped before shrinking', details);
+      return intentFailure('VOLUME_SHRINK_REQUIRES_STOP', 'The block-backed volume consumers must be stopped before shrinking', details);
   }
 }
 

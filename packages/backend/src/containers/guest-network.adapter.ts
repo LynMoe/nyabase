@@ -4,6 +4,7 @@ import {
   requestAndWait,
   type IncusClientPort,
 } from '../incus/index.js';
+import { isRecord } from '../platform/domain-utils.js';
 
 export interface GuestNetworkConfig {
   readonly address: string;
@@ -65,10 +66,6 @@ export function buildGuestNetworkScript(config: GuestNetworkConfig): string {
 
 function shellQuote(value: string): string {
   return `'${value.replaceAll("'", `'\\''`)}'`;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
 function operationReturnCode(value: unknown): number | undefined {

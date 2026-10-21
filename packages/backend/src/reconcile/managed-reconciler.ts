@@ -7,6 +7,7 @@ import type {
   PhysicalSettlement,
 } from './intent.repository.js';
 import type { LeaseGuard, ReconcileClaim } from './reconcile-claim.repository.js';
+import { intentFailure } from './intent-model.js';
 
 export interface ReconcileRunContext {
   readonly intent: IntentRecord;
@@ -22,6 +23,15 @@ export interface ReconcileOutcome {
   readonly failure?: IntentFailure;
   readonly retryAfterMs?: number;
   readonly stale?: boolean;
+}
+
+/** A terminal `failed` outcome carrying an intent failure. */
+export function failedOutcome(
+  code: string,
+  message: string,
+  details: Record<string, unknown> = {},
+): ReconcileOutcome {
+  return { outcome: 'failed', failure: intentFailure(code, message, details) };
 }
 
 /** Who owns a resource and which administrator capability governs its intents. */

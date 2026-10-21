@@ -15,6 +15,7 @@ import { executeWithPostCommit } from '../platform/post-commit.js';
 import { IntentRepository } from '../reconcile/intent.repository.js';
 import { isNotFound } from './container-instance-ops.js';
 import type { ContainerRow, SshFileObservation } from './container-reconcile.store.js';
+import { isRecord } from '../platform/domain-utils.js';
 
 export interface SshFileMetadataExpectation {
   readonly uid?: number;
@@ -154,10 +155,6 @@ const SSHD_PROBE_COMMAND = [
     'exit 2',
   ].join('; '),
 ] as const;
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
-}
 
 function operationReturnCode(value: unknown): number | undefined {
   if (!isRecord(value)) return undefined;

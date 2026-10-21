@@ -9,6 +9,8 @@ import type {
   ReconcileRunContext,
   ResourceAuthority,
 } from '../reconcile/managed-reconciler.js';
+import { intentFailure } from '../reconcile/intent-model.js';
+import { failedOutcome } from '../reconcile/managed-reconciler.js';
 import { ReconcilerRegistry } from '../reconcile/reconciler-registry.service.js';
 import { INCUS_CLIENT_FACTORY, type IncusClientFactory } from '../incus/incus-client.factory.js';
 import {
@@ -24,14 +26,12 @@ import {
   deleteOrphanVolume,
   destroyRetry,
   destroyRetryFromError,
-  failedOutcome,
   isNotFound,
   readVolumeUsage,
   scanNeedsEnsure,
   storageVolumeName,
   updateCustomVolume,
   verifyCustomVolume,
-  volumeFailure,
   type StorageVolume,
   type StorageVolumeState,
 } from './volume-ops.js';
@@ -161,7 +161,7 @@ export class VolumeReconciler implements ManagedReconciler, OnModuleInit {
       }
       actual = await this.adoptOrCreate(context, context.client, row);
       if (!actual) {
-        const failure = volumeFailure(
+        const failure = intentFailure(
           context.intent.attemptCount >= VOLUME_ADOPT_FAIL_AFTER_ATTEMPTS
             ? 'VOLUME_CATALOG_ADOPT_FAILED'
             : 'VOLUME_CATALOG_ADOPT_PENDING',
