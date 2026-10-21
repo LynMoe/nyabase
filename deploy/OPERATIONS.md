@@ -109,17 +109,17 @@ service is not host-network by default.
 
 ### SSH and HTTP proxies
 
-SSH and HTTP proxies are independent binaries under `tools/ssh-proxy` and
-`tools/http-proxy`. They are not Compose services. Prefer installing them on a
-host or netns that can reach both the Backend WebSocket and the guest LAN;
-do not add them to the default Compose file.
+SSH and HTTP proxies are independent binaries in the `tools/` cargo workspace
+(`tools/ssh-proxy`, `tools/http-proxy`, shared code in `tools/proxy-common`).
+They are not Compose services. Prefer installing them on a host or netns
+that can reach both the Backend WebSocket and the guest LAN; do not add them
+to the default Compose file.
 
 ```bash
-cargo build --release --locked --manifest-path tools/ssh-proxy/Cargo.toml
-cargo build --release --locked --manifest-path tools/http-proxy/Cargo.toml
+cargo build --release --locked --manifest-path tools/Cargo.toml
 # binaries:
-#   tools/ssh-proxy/target/release/nyabase-ssh-proxy
-#   tools/http-proxy/target/release/nyabase-http-proxy
+#   tools/target/release/nyabase-ssh-proxy
+#   tools/target/release/nyabase-http-proxy
 ```
 
 Listen addresses (env overrides):
