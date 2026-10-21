@@ -93,6 +93,7 @@ assert_clean_cutover_architecture() {
 assert_no_common_src_artifacts
 assert_no_backend_legacy_persistence
 assert_clean_cutover_architecture
+node scripts/check-source-size.mjs
 bash scripts/postgres-ops.test.sh
 bash scripts/deploy-contract.test.sh
 bash scripts/check-rust-proxies.sh

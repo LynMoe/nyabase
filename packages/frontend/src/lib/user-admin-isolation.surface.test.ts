@@ -1,18 +1,17 @@
-import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
+import { readSource } from './read-source.test-helper.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const srcRoot = join(here, '..');
-const pages = join(srcRoot, 'pages');
 
 function readPage(name: string): string {
-  return readFileSync(join(pages, name), 'utf8');
+  return readSource(srcRoot, `pages/${name}`);
 }
 
 function readSrc(rel: string): string {
-  return readFileSync(join(srcRoot, rel), 'utf8');
+  return readSource(srcRoot, rel);
 }
 
 function assertScopeAllOnly(src: string, pattern: RegExp) {

@@ -6,6 +6,7 @@ import type { ContainerControlTable } from '../platform/persistence-pg/container
 import type { NyabaseDatabase } from '../platform/persistence-pg/database.types.js';
 import { PG_DATABASE } from '../platform/persistence-pg/tokens.js';
 import { deriveInstanceName } from '../incus/instance-spec.js';
+import { numberValue } from '../platform/domain-utils.js';
 
 export type ContainerExecutor = Kysely<NyabaseDatabase> | Transaction<NyabaseDatabase>;
 export type ContainerRow = Selectable<ContainerControlTable>;
@@ -72,6 +73,44 @@ export class ContainerControlRepository {
       .selectAll()
       .where('id', '=', id)
       .executeTakeFirst();
+  }
+
+  async nameTaken(
+    serverId: string,
+    name: string,
+    executor: ContainerExecutor = this.database,
+  ): Promise<boolean> {
+    const row = await executor
+      .selectFrom('control.containers')
+      .select('id')
+      .where('server_id', '=', serverId)
+      .where('name', '=', name)
+      .executeTakeFirst();
+    return Boolean(row);
+  }
+
+  /**
+   * Root-disk bytes committed by containers that are neither failed nor being
+   * deleted; a pending quota change counts at its larger size.
+   */
+  async sumLiveRootBytes(
+    filter: { ownerId?: string; serverId?: string; poolId?: string },
+    executor: ContainerExecutor = this.database,
+  ): Promise<number> {
+    let query = executor
+      .selectFrom('control.containers')
+      .select(sql<string>`coalesce(sum(
+        case when root_size_pending_bytes is null
+          then root_size_bytes
+          else greatest(root_size_bytes, root_size_pending_bytes)
+        end
+      ), 0)`.as('bytes'))
+      .where('lifecycle_phase', 'not in', ['failed', 'deleting']);
+    if (filter.ownerId !== undefined) query = query.where('owner_id', '=', filter.ownerId);
+    if (filter.serverId !== undefined) query = query.where('server_id', '=', filter.serverId);
+    if (filter.poolId !== undefined) query = query.where('root_pool_id', '=', filter.poolId);
+    const row = await query.executeTakeFirstOrThrow();
+    return numberValue(row.bytes);
   }
 
   lock(id: string, executor: Transaction<NyabaseDatabase>) {
@@ -252,6 +291,15 @@ export class ContainerControlRepository {
       .where('container_id', '=', containerId)
       .orderBy('created_at')
       .execute();
+  }
+
+  /** An attachment of the container that is still being unmounted, if any. */
+  findDetachingAttachment(containerId: string, executor: ContainerExecutor = this.database) {
+    return executor.selectFrom('control.volume_attachments')
+      .select('id')
+      .where('container_id', '=', containerId)
+      .where('bind_state', '=', 'detaching')
+      .executeTakeFirst();
   }
 
   currentRoute(containerId: string, executor: ContainerExecutor = this.database) {

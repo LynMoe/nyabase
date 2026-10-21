@@ -1,5 +1,4 @@
 import { Module } from '@nestjs/common';
-import { InfrastructureModule } from '../infrastructure/infrastructure.module.js';
 import { ReconcileModule } from '../reconcile/reconcile.module.js';
 import { SshModule } from '../ssh/ssh.module.js';
 import { ImageAssignmentReconciler } from './image-assignment-reconciler.service.js';
@@ -8,7 +7,7 @@ import { ImagesController } from './images.controller.js';
 import { ImagesService } from './images.service.js';
 
 @Module({
-  imports: [ReconcileModule, SshModule, InfrastructureModule],
+  imports: [ReconcileModule, SshModule],
   providers: [ImageCatalogService, ImagesService, ImageAssignmentReconciler],
   controllers: [
     ImagesController,

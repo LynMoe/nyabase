@@ -2,6 +2,8 @@ import { createHash } from 'node:crypto';
 import { describe, expect, it, vi } from 'vitest';
 import { deriveInstanceHwaddr, IncusError } from '../incus/index.js';
 import { ServerPreflightReconciler } from './server-preflight-reconciler.service.js';
+import { evaluateLanBridge } from './server-preflight-network.js';
+import { cleanupStaleProbe } from './server-preflight-probe.js';
 
 const serverId = '00000000-0000-4000-8000-000000000001';
 
@@ -65,6 +67,37 @@ function database(selectResult?: unknown) {
     ),
   }));
   return database;
+}
+
+/** The reconciler's collaborators, where the tests intercept connect/preflight/data access. */
+function partsOf(instance: ServerPreflightReconciler) {
+  return instance as unknown as {
+    connector: { connect: unknown };
+    runner: { runPreflight: unknown };
+    store: { readServer: unknown };
+    checks: unknown;
+    nodeMetrics: unknown;
+  };
+}
+
+function connectorOf(instance: ServerPreflightReconciler): object {
+  return partsOf(instance).connector as object;
+}
+
+function runnerOf(instance: ServerPreflightReconciler): object {
+  return partsOf(instance).runner as object;
+}
+
+/** One object exposing the replaceable steps under their old names. */
+function internalsOf(instance: ServerPreflightReconciler): object {
+  const parts = partsOf(instance);
+  return {
+    get checks() { return parts.checks; },
+    get nodeMetrics() { return parts.nodeMetrics; },
+    set connect(value: unknown) { parts.connector.connect = value; },
+    set runPreflight(value: unknown) { parts.runner.runPreflight = value; },
+    set readServer(value: unknown) { parts.store.readServer = value; },
+  };
 }
 
 function untrustedResponse() {
@@ -242,7 +275,7 @@ describe('ServerPreflightReconciler', () => {
     } as never;
 
     await (
-      instance as unknown as {
+      connectorOf(instance) as unknown as {
         connectWithTrustToken: (
           client: unknown,
           server: unknown,
@@ -322,7 +355,7 @@ describe('ServerPreflightReconciler', () => {
     };
 
     await (
-      instance as unknown as {
+      connectorOf(instance) as unknown as {
         connectWithTrustToken: (
           client: unknown,
           server: unknown,
@@ -382,7 +415,7 @@ describe('ServerPreflightReconciler', () => {
         }),
     };
     const connectWithTrustToken = (
-      instance as unknown as {
+      connectorOf(instance) as unknown as {
         connectWithTrustToken: (
           client: unknown,
           server: unknown,
@@ -393,7 +426,7 @@ describe('ServerPreflightReconciler', () => {
     ).connectWithTrustToken;
 
     const pending = connectWithTrustToken.call(
-      instance,
+      connectorOf(instance),
       client,
       server(),
       {
@@ -451,7 +484,7 @@ describe('ServerPreflightReconciler', () => {
     };
 
     await (
-      instance as unknown as {
+      connectorOf(instance) as unknown as {
         connectWithTrustToken: (
           client: unknown,
           server: unknown,
@@ -485,7 +518,7 @@ describe('ServerPreflightReconciler', () => {
     const instance = reconciler(fixture, trustTokens);
     const client = { trustClientCertificate: vi.fn(), getServer: vi.fn() };
     const connectWithTrustToken = (
-      instance as unknown as {
+      connectorOf(instance) as unknown as {
         connectWithTrustToken: (
           client: unknown,
           server: unknown,
@@ -497,7 +530,7 @@ describe('ServerPreflightReconciler', () => {
 
     await expect(
       connectWithTrustToken.call(
-        instance,
+        connectorOf(instance),
         client,
         server(),
         { request: { trustTokenRef: '00000000-0000-4000-8000-000000000002' } } as never,
@@ -548,7 +581,7 @@ describe('ServerPreflightReconciler', () => {
       getServer,
     };
     const connectWithTrustToken = (
-      instance as unknown as {
+      connectorOf(instance) as unknown as {
         connectWithTrustToken: (
           client: unknown,
           server: unknown,
@@ -560,7 +593,7 @@ describe('ServerPreflightReconciler', () => {
 
     await expect(
       connectWithTrustToken.call(
-        instance,
+        connectorOf(instance),
         client,
         server(),
         {
@@ -574,7 +607,7 @@ describe('ServerPreflightReconciler', () => {
     expect(trustTokens.releaseClaimedTrustToken).not.toHaveBeenCalled();
 
     await connectWithTrustToken.call(
-      instance,
+      connectorOf(instance),
       client,
       server(),
       { request: {} } as never,
@@ -618,7 +651,7 @@ describe('ServerPreflightReconciler', () => {
       getServer: vi.fn().mockResolvedValue(response),
     };
     const connectWithTrustToken = (
-      instance as unknown as {
+      connectorOf(instance) as unknown as {
         connectWithTrustToken: (
           client: unknown,
           server: unknown,
@@ -628,7 +661,7 @@ describe('ServerPreflightReconciler', () => {
       }
     ).connectWithTrustToken;
     const connect = (client: unknown, intent: unknown) =>
-      connectWithTrustToken.call(instance, client, server(), intent, new AbortController().signal);
+      connectWithTrustToken.call(connectorOf(instance), client, server(), intent, new AbortController().signal);
 
     await Promise.all([
       connect(firstClient, {
@@ -685,7 +718,7 @@ describe('ServerPreflightReconciler', () => {
 
     await expect(
       (
-        instance as unknown as {
+        connectorOf(instance) as unknown as {
           connectWithTrustToken: (
             client: unknown,
             server: unknown,
@@ -716,7 +749,6 @@ describe('ServerPreflightReconciler', () => {
   });
 
   it('cleans up a stale managed probe after stopping it and verifies absence', async () => {
-    const db = database();
     const getInstanceFull = vi
       .fn()
       .mockResolvedValueOnce({
@@ -751,18 +783,12 @@ describe('ServerPreflightReconciler', () => {
       updateInstanceState,
       deleteInstance,
     };
-    const instance = reconciler(db);
-
-    await (
-      instance as unknown as {
-        cleanupStaleProbe: (
-          client: unknown,
-          probeName: string,
-          serverId: string,
-          signal: AbortSignal,
-        ) => Promise<void>;
-      }
-    ).cleanupStaleProbe(client, 'nyabase-preflight-test', serverId, new AbortController().signal);
+    await cleanupStaleProbe(
+      client as never,
+      'nyabase-preflight-test',
+      serverId,
+      new AbortController().signal,
+    );
 
     expect(updateInstanceState).toHaveBeenCalledWith(
       'nyabase-preflight-test',
@@ -780,7 +806,7 @@ describe('ServerPreflightReconciler', () => {
       registered: true,
     });
     const instance = reconciler(db);
-    const internals = instance as unknown as {
+    const internals = internalsOf(instance) as unknown as {
       connect: ReturnType<typeof vi.fn>;
       checks: {
         checkNetworkPrerequisites: ReturnType<typeof vi.fn>;
@@ -897,7 +923,7 @@ describe('ServerPreflightReconciler', () => {
     });
 
     const result = await (
-      instance as unknown as {
+      runnerOf(instance) as unknown as {
         runPreflight: (
           client: unknown,
           server: unknown,
@@ -992,7 +1018,7 @@ describe('ServerPreflightReconciler', () => {
   it('records a retryable preflight failure as running', async () => {
     const db = database();
     const instance = reconciler(db);
-    const internals = instance as unknown as {
+    const internals = internalsOf(instance) as unknown as {
       readServer: ReturnType<typeof vi.fn>;
       runPreflight: ReturnType<typeof vi.fn>;
       connect: ReturnType<typeof vi.fn>;
@@ -1042,7 +1068,7 @@ describe('ServerPreflightReconciler', () => {
     async (resultKind) => {
       const db = revisionRaceDatabase();
       const instance = reconciler(db as never);
-      const internals = instance as unknown as {
+      const internals = internalsOf(instance) as unknown as {
         runPreflight: ReturnType<typeof vi.fn>;
       };
       internals.runPreflight =
@@ -1078,7 +1104,7 @@ describe('ServerPreflightReconciler', () => {
       registered: true,
     });
     const instance = reconciler(db);
-    const internals = instance as unknown as {
+    const internals = internalsOf(instance) as unknown as {
       connect: ReturnType<typeof vi.fn>;
       checks: {
         checkNetworkPrerequisites: ReturnType<typeof vi.fn>;
@@ -1110,7 +1136,7 @@ describe('ServerPreflightReconciler', () => {
 
     await expect(
       (
-        instance as unknown as {
+        runnerOf(instance) as unknown as {
           runPreflight: (
             client: unknown,
             server: unknown,
@@ -1147,7 +1173,7 @@ describe('ServerPreflightReconciler', () => {
       registered: true,
     });
     const instance = reconciler(db);
-    const internals = instance as unknown as {
+    const internals = internalsOf(instance) as unknown as {
       connect: ReturnType<typeof vi.fn>;
       checks: {
         checkNetworkPrerequisites: ReturnType<typeof vi.fn>;
@@ -1182,7 +1208,7 @@ describe('ServerPreflightReconciler', () => {
 
     await expect(
       (
-        instance as unknown as {
+        runnerOf(instance) as unknown as {
           runPreflight: (
             client: unknown,
             server: unknown,
@@ -1221,7 +1247,7 @@ describe('ServerPreflightReconciler', () => {
       registered: true,
     });
     const instance = reconciler(db);
-    const internals = instance as unknown as {
+    const internals = internalsOf(instance) as unknown as {
       connect: ReturnType<typeof vi.fn>;
       checks: {
         checkNetworkPrerequisites: ReturnType<typeof vi.fn>;
@@ -1252,7 +1278,7 @@ describe('ServerPreflightReconciler', () => {
 
     await expect(
       (
-        instance as unknown as {
+        runnerOf(instance) as unknown as {
           runPreflight: (
             client: unknown,
             server: unknown,
@@ -1283,15 +1309,7 @@ describe('ServerPreflightReconciler', () => {
   });
 
   it('accepts host IPv4 on a management NIC while vmbr0 is a dedicated container uplink', () => {
-    const instance = reconciler(database());
-    const result = (
-      instance as unknown as {
-        evaluateLanBridge: (input: Record<string, unknown>) => {
-          readonly reason?: string;
-          readonly hostIpv4?: string;
-        };
-      }
-    ).evaluateLanBridge({
+    const result = evaluateLanBridge({
       parentInterface: 'vmbr0',
       network: {
         parentInterface: 'vmbr0',
@@ -1322,15 +1340,7 @@ describe('ServerPreflightReconciler', () => {
   });
 
   it('fails closed when a bridge slave has no ipv4_present sample', () => {
-    const instance = reconciler(database());
-    const result = (
-      instance as unknown as {
-        evaluateLanBridge: (input: Record<string, unknown>) => {
-          readonly reason?: string;
-          readonly hostIpv4?: string;
-        };
-      }
-    ).evaluateLanBridge({
+    const result = evaluateLanBridge({
       parentInterface: 'vmbr0',
       network: {
         parentInterface: 'vmbr0',

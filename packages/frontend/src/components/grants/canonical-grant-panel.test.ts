@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { GRANT_EXPIRY_GRACE_DAYS } from '@nyabase/common';
-import { expiryPhase, toDatetimeLocalValue } from './canonical-grant-panel.js';
+import { expiryPhase, toDatetimeLocalValue } from './grant-format.js';
 
 describe('toDatetimeLocalValue', () => {
   it('formats local calendar time without seconds or timezone', () => {
@@ -24,7 +24,9 @@ describe('expiryPhase', () => {
 });
 
 describe('grant panel copy', () => {
-  const source = readFileSync(new URL('./canonical-grant-panel.tsx', import.meta.url), 'utf8');
+  const source = ['./canonical-grant-panel.tsx', './grant-cards.tsx']
+    .map((file) => readFileSync(new URL(file, import.meta.url), 'utf8'))
+    .join('\n');
 
   it('explains that several grants are merged per dimension by maximum', () => {
     expect(source).toContain('多条授权逐项取最大');

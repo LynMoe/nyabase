@@ -14,7 +14,7 @@ function providersOf(module: object): unknown[] {
 const DOMAIN_DIRECTORIES = [
   'containers', 'volumes', 'servers', 'images', 'gpu', 'access', 'users', 'groups',
   'storage-pools', 'shared-backends', 'ssh', 'http-proxy', 'ip-pools', 'metrics',
-  'system-settings', 'proxy-snapshots', 'infrastructure', 'audit', 'health',
+  'system-settings', 'proxy-snapshots', 'audit', 'health',
 ];
 
 describe('ReconcileModule boundaries', () => {

@@ -11,7 +11,8 @@ import {
   IntentResourceType,
   StoragePoolResizeFamily,
 } from '@nyabase/common';
-import { checkRootResize, ContainerControlService } from './container-control.service.js';
+import { ContainerControlService } from './container-control.service.js';
+import { checkRootResize } from './container-rules.js';
 import { systemActor } from '../iam/actor.js';
 import { testActor } from '../iam/actor.test-helper.js';
 
@@ -56,6 +57,7 @@ function makeHarness() {
       instance_started_at: new Date('2026-08-07T03:00:00.000Z'),
     }),
     updateDesired: vi.fn().mockResolvedValue({ ...row, revision: 2 }),
+    findDetachingAttachment: vi.fn().mockResolvedValue(undefined),
 
   };
   const access = {
@@ -84,18 +86,7 @@ function makeHarness() {
   const transactions = {
     run: vi.fn(async (work: (value: unknown) => Promise<unknown>) => work(transaction)),
   };
-  const attachmentQuery = {
-    select: vi.fn(),
-    where: vi.fn(),
-    executeTakeFirst: vi.fn().mockResolvedValue(undefined),
-  };
-  attachmentQuery.select.mockReturnValue(attachmentQuery);
-  attachmentQuery.where.mockReturnValue(attachmentQuery);
-  Object.assign(transaction, {
-    selectFrom: vi.fn((table: string) => (
-      table === 'control.volume_attachments' ? attachmentQuery : serverQuery
-    )),
-  });
+  Object.assign(transaction, { selectFrom: vi.fn(() => serverQuery) });
   const consoleSessions = {
     create: vi.fn().mockResolvedValue({
       sessionId: 'session-1',
@@ -250,10 +241,7 @@ describe('ContainerControlService intent boundary', () => {
 
   it('rejects start and restart while a volume is detaching', async () => {
     const harness = makeHarness();
-    const attachmentQuery = harness.transaction.selectFrom!('control.volume_attachments') as {
-      executeTakeFirst: ReturnType<typeof vi.fn>;
-    };
-    attachmentQuery.executeTakeFirst.mockResolvedValue({ id: 'att-1' });
+    harness.repository.findDetachingAttachment.mockResolvedValue({ id: 'att-1' });
 
     await expect(harness.service.action(owner, containerId, 'start')).rejects.toMatchObject({
       response: { code: 'INSTANCE_BUSY' },

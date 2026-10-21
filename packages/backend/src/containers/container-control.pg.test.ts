@@ -24,7 +24,6 @@ import { isGpuOccupiedSqlError } from '../gpu/enablement.js';
 import { GpuClaimsRepository } from '../gpu/gpu-claims.repository.js';
 import { noopWake } from '../reconcile/reconcile-wake.test-helper.js';
 import { testActor } from '../iam/actor.test-helper.js';
-import { InfrastructureRepository } from '../infrastructure/infrastructure.repository.js';
 import { IncusContainerSshStateAdapter } from './container-ssh-state.adapter.js';
 import { AccessResolverService } from '../iam/access-resolver.service.js';
 import {
@@ -263,7 +262,6 @@ describePg('PostgreSQL container create admission and capacity', () => {
         { assertActorCapabilitiesInTransaction: vi.fn() } as never,
         { append: vi.fn().mockResolvedValue(undefined) } as never,
         imageIntents as never,
-        new InfrastructureRepository(database),
         {} as never,
       );
 

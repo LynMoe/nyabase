@@ -1,6 +1,7 @@
 import { Module } from '@nestjs/common';
 import { IamBootstrapService } from './iam-bootstrap.service.js';
 import { UsersService } from './users.service.js';
+import { UserSshKeysService } from './user-ssh-keys.service.js';
 import { UsersController } from './users.controller.js';
 import { ContainersModule } from '../containers/containers.module.js';
 import { GroupsModule } from '../groups/groups.module.js';
@@ -14,7 +15,7 @@ import { ProxySnapshotNotifierModule } from '../proxy-snapshots/proxy-snapshot-n
     SshModule,
     ProxySnapshotNotifierModule,
   ],
-  providers: [UsersService, IamBootstrapService],
+  providers: [UsersService, UserSshKeysService, IamBootstrapService],
   controllers: [UsersController],
   exports: [UsersService],
 })

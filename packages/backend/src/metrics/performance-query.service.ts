@@ -17,7 +17,8 @@ import type { NyabaseDatabase } from '../platform/persistence-pg/database.types.
 import { PG_DATABASE } from '../platform/persistence-pg/tokens.js';
 import { AccessResolverService } from '../iam/access-resolver.service.js';
 import { assertListScope, type Actor } from '../iam/actor.js';
-import { isLocalPoolDto, StoragePoolsService } from '../storage-pools/storage-pools.service.js';
+import { isLocalPoolDto } from '../storage-pools/storage-pool-capability.js';
+import { StoragePoolsService } from '../storage-pools/storage-pools.service.js';
 import {
   absoluteChart,
   buildSeries,

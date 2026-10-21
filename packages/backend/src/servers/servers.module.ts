@@ -1,7 +1,6 @@
 import { Module } from '@nestjs/common';
 import { GpuModule } from '../gpu/gpu.module.js';
 import { IncusModule } from '../incus/incus.module.js';
-import { InfrastructureModule } from '../infrastructure/infrastructure.module.js';
 import { MetricsModule } from '../metrics/metrics.module.js';
 import { ProxySnapshotNotifierModule } from '../proxy-snapshots/proxy-snapshot-notifier.module.js';
 import { ReconcileModule } from '../reconcile/reconcile.module.js';
@@ -26,7 +25,6 @@ import { ServersService } from './servers.service.js';
     SshModule,
     StoragePoolsModule,
     VolumesModule,
-    InfrastructureModule,
     GpuModule,
     MetricsModule,
   ],

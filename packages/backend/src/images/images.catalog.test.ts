@@ -32,7 +32,6 @@ function service(existing: { id: string; deleting: boolean } | undefined) {
     { assertActorCapabilitiesInTransaction: vi.fn() } as never,
     { append: vi.fn() } as never,
     { ensurePending: vi.fn() } as never,
-    { lockImageCapacity: vi.fn() } as never,
     catalog as never,
   );
 }

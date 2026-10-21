@@ -11,7 +11,7 @@ import {
   type HttpProxyBackendMessage,
   type HttpProxyStatusReport,
 } from '@nyabase/common';
-import { HttpProxyService } from './http-proxy.service.js';
+import { HttpProxySnapshotService } from './http-proxy-snapshot.service.js';
 import { ProxySnapshotNotifierService } from '../proxy-snapshots/proxy-snapshot-notifier.service.js';
 import { NyabaseConfigService } from '../platform/config/nyabase-config.service.js';
 import {
@@ -59,7 +59,7 @@ export class HttpProxyGateway implements OnModuleInit, OnModuleDestroy {
   private readonly expectedTokenDigest: Buffer;
 
   constructor(
-    private service: HttpProxyService,
+    private service: HttpProxySnapshotService,
     config: NyabaseConfigService,
     private snapshotNotifier: ProxySnapshotNotifierService,
   ) {
@@ -366,7 +366,7 @@ export class HttpProxyGateway implements OnModuleInit, OnModuleDestroy {
   private async buildInitialSnapshotBefore(
     deadline: number,
     client: WebSocket,
-  ): Promise<Awaited<ReturnType<HttpProxyService['buildSnapshot']>>> {
+  ): Promise<Awaited<ReturnType<HttpProxySnapshotService['buildSnapshot']>>> {
     const remainingMs = deadline - performance.now();
     if (remainingMs <= 0) throw new Error('HTTP proxy initial snapshot deadline exceeded');
     let expired = false;

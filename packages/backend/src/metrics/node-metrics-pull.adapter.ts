@@ -4,6 +4,7 @@ import {
   type PeerCertificate,
   type TLSSocket,
 } from 'node:tls';
+import type { IncomingMessage } from 'node:http';
 import { request } from 'node:https';
 import { Inject, Injectable } from '@nestjs/common';
 import {
@@ -117,135 +118,37 @@ export class AuthenticatedNodeMetricsPullAdapter {
         requestHandle.destroy(error);
         finish(error);
       };
-      const onAbort = (): void => {
-        fail(new NodeMetricsPullError(
-          'NODE_METRICS_UNREACHABLE',
-          'Node metrics request was aborted',
-        ));
+      const timedOut = (message: string) => (): void => {
+        fail(new NodeMetricsPullError('NODE_METRICS_UNREACHABLE', message));
       };
-      const requestHandle = request({
-        protocol: url.protocol,
-        hostname: url.hostname,
-        port: url.port || undefined,
-        path: NODE_METRICS_ENDPOINT_PATH,
-        method: 'GET',
-        agent: false,
-        rejectUnauthorized: false,
-        headers: {
-          Accept: 'text/plain; version=0.0.4',
-          Authorization: `Bearer ${token}`,
-          'User-Agent': 'nyabase-node-metrics/1',
+      const onAbort = timedOut('Node metrics request was aborted');
+      const requestHandle = request(
+        metricsRequestOptions(url, token, expectedFingerprint),
+        (response) => {
+          if (headerTimer) clearTimeout(headerTimer);
+          readMetricsResponse(response, expectedFingerprint, fail, finish);
         },
-        timeout: NODE_METRICS_REQUEST_TIMEOUT_MS,
-        checkServerIdentity: (host, certificate: PeerCertificate) => {
-          const hostnameError = tlsCheckServerIdentity(host, certificate);
-          if (hostnameError) return hostnameError;
-          if (
-            !certificate.raw
-            || leafCertificateFingerprint(certificate.raw) !== expectedFingerprint
-          ) {
-            return new NodeMetricsPullError(
-              'NODE_METRICS_TLS_PIN_MISMATCH',
-              'Node metrics certificate did not match its pin',
-            );
-          }
-          return undefined;
-        },
-      }, (response) => {
-        if (headerTimer) clearTimeout(headerTimer);
-        const contentType = response.headers['content-type'];
-        if (
-          typeof contentType !== 'string'
-          || !/^text\/plain(?:;|$)/i.test(contentType.trim())
-        ) {
-          fail(new NodeMetricsPullError(
-            'NODE_METRICS_INVALID_RESPONSE',
-            'Node metrics endpoint returned an unsupported content type',
-          ));
-          return;
-        }
-        const peer = response.socket as TLSSocket | null;
-        const certificate = peer?.getPeerCertificate(true);
-        if (!certificate?.raw || leafCertificateFingerprint(certificate.raw) !== expectedFingerprint) {
-          fail(new NodeMetricsPullError(
-            'NODE_METRICS_TLS_PIN_MISMATCH',
-            'Node metrics certificate did not match its pin',
-          ));
-          return;
-        }
-        const status = response.statusCode ?? 0;
-        const chunks: Buffer[] = [];
-        let bytes = 0;
-        response.on('data', (chunk: Buffer | string) => {
-          const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
-          bytes += buffer.byteLength;
-          if (bytes > MAX_NODE_METRICS_BODY_BYTES) {
-            fail(new NodeMetricsPullError(
-              'NODE_METRICS_INVALID_RESPONSE',
-              'Node metrics response exceeded the maximum size',
-            ));
-            return;
-          }
-          chunks.push(buffer);
-        });
-        response.on('end', () => {
-          const text = Buffer.concat(chunks).toString('utf8');
-          if (status === 401 || status === 403) {
-            finish(new NodeMetricsPullError(
-              'NODE_METRICS_UNAUTHORIZED',
-              `Node metrics endpoint returned HTTP ${status}`,
-            ));
-            return;
-          }
-          if (status < 200 || status >= 300) {
-            finish(new NodeMetricsPullError(
-              status >= 500
-                ? 'NODE_METRICS_UNREACHABLE'
-                : 'NODE_METRICS_INVALID_RESPONSE',
-              `Node metrics endpoint returned HTTP ${status}`,
-            ));
-            return;
-          }
-          finish(null, text);
-        });
-        response.on('error', (error) => {
-          finish(new NodeMetricsPullError(
-            'NODE_METRICS_UNREACHABLE',
-            error.message,
-          ));
-        });
-      });
+      );
       requestHandle.on('socket', (socket) => {
-        const connectTimer = setTimeout(() => {
-          fail(new NodeMetricsPullError(
-            'NODE_METRICS_UNREACHABLE',
-            'Node metrics connection timed out',
-          ));
-        }, NODE_METRICS_CONNECT_TIMEOUT_MS);
+        const connectTimer = setTimeout(
+          timedOut('Node metrics connection timed out'),
+          NODE_METRICS_CONNECT_TIMEOUT_MS,
+        );
         const clearConnectTimer = (): void => clearTimeout(connectTimer);
         socket.once('connect', clearConnectTimer);
         socket.once('secureConnect', clearConnectTimer);
         socket.once('close', clearConnectTimer);
-        headerTimer = setTimeout(() => {
-          fail(new NodeMetricsPullError(
-            'NODE_METRICS_UNREACHABLE',
-            'Node metrics response headers timed out',
-          ));
-        }, NODE_METRICS_RESPONSE_HEADER_TIMEOUT_MS);
+        headerTimer = setTimeout(
+          timedOut('Node metrics response headers timed out'),
+          NODE_METRICS_RESPONSE_HEADER_TIMEOUT_MS,
+        );
       });
-      totalTimer = setTimeout(() => {
-        fail(new NodeMetricsPullError(
-          'NODE_METRICS_UNREACHABLE',
-          'Node metrics request timed out',
-        ));
-      }, NODE_METRICS_REQUEST_TIMEOUT_MS);
+      totalTimer = setTimeout(
+        timedOut('Node metrics request timed out'),
+        NODE_METRICS_REQUEST_TIMEOUT_MS,
+      );
       totalTimer.unref?.();
-      requestHandle.on('timeout', () => {
-        fail(new NodeMetricsPullError(
-          'NODE_METRICS_UNREACHABLE',
-          'Node metrics request timed out',
-        ));
-      });
+      requestHandle.on('timeout', timedOut('Node metrics request timed out'));
       requestHandle.on('error', (error: Error) => {
         if (error instanceof NodeMetricsPullError) finish(error);
         else finish(new NodeMetricsPullError('NODE_METRICS_UNREACHABLE', error.message));
@@ -257,6 +160,109 @@ export class AuthenticatedNodeMetricsPullAdapter {
       requestHandle.end();
     });
   }
+}
+
+/** HTTPS request options: bearer auth, and the server leaf pinned by fingerprint. */
+function metricsRequestOptions(url: URL, token: string, expectedFingerprint: string) {
+  return {
+    protocol: url.protocol,
+    hostname: url.hostname,
+    port: url.port || undefined,
+    path: NODE_METRICS_ENDPOINT_PATH,
+    method: 'GET',
+    agent: false,
+    rejectUnauthorized: false,
+    headers: {
+      Accept: 'text/plain; version=0.0.4',
+      Authorization: `Bearer ${token}`,
+      'User-Agent': 'nyabase-node-metrics/1',
+    },
+    timeout: NODE_METRICS_REQUEST_TIMEOUT_MS,
+    checkServerIdentity: (host: string, certificate: PeerCertificate) => {
+      const hostnameError = tlsCheckServerIdentity(host, certificate);
+      if (hostnameError) return hostnameError;
+      if (
+        !certificate.raw
+        || leafCertificateFingerprint(certificate.raw) !== expectedFingerprint
+      ) {
+        return new NodeMetricsPullError(
+          'NODE_METRICS_TLS_PIN_MISMATCH',
+          'Node metrics certificate did not match its pin',
+        );
+      }
+      return undefined;
+    },
+  };
+}
+
+/** Validate the response (type, pinned certificate, size, status) and deliver its body text. */
+function readMetricsResponse(
+  response: IncomingMessage,
+  expectedFingerprint: string,
+  fail: (error: NodeMetricsPullError) => void,
+  finish: (error: Error | null, value?: string) => void,
+): void {
+  const contentType = response.headers['content-type'];
+  if (
+    typeof contentType !== 'string'
+    || !/^text\/plain(?:;|$)/i.test(contentType.trim())
+  ) {
+    fail(new NodeMetricsPullError(
+      'NODE_METRICS_INVALID_RESPONSE',
+      'Node metrics endpoint returned an unsupported content type',
+    ));
+    return;
+  }
+  const peer = response.socket as TLSSocket | null;
+  const certificate = peer?.getPeerCertificate(true);
+  if (!certificate?.raw || leafCertificateFingerprint(certificate.raw) !== expectedFingerprint) {
+    fail(new NodeMetricsPullError(
+      'NODE_METRICS_TLS_PIN_MISMATCH',
+      'Node metrics certificate did not match its pin',
+    ));
+    return;
+  }
+  const status = response.statusCode ?? 0;
+  const chunks: Buffer[] = [];
+  let bytes = 0;
+  response.on('data', (chunk: Buffer | string) => {
+    const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+    bytes += buffer.byteLength;
+    if (bytes > MAX_NODE_METRICS_BODY_BYTES) {
+      fail(new NodeMetricsPullError(
+        'NODE_METRICS_INVALID_RESPONSE',
+        'Node metrics response exceeded the maximum size',
+      ));
+      return;
+    }
+    chunks.push(buffer);
+  });
+  response.on('end', () => {
+    const text = Buffer.concat(chunks).toString('utf8');
+    if (status === 401 || status === 403) {
+      finish(new NodeMetricsPullError(
+        'NODE_METRICS_UNAUTHORIZED',
+        `Node metrics endpoint returned HTTP ${status}`,
+      ));
+      return;
+    }
+    if (status < 200 || status >= 300) {
+      finish(new NodeMetricsPullError(
+        status >= 500
+          ? 'NODE_METRICS_UNREACHABLE'
+          : 'NODE_METRICS_INVALID_RESPONSE',
+        `Node metrics endpoint returned HTTP ${status}`,
+      ));
+      return;
+    }
+    finish(null, text);
+  });
+  response.on('error', (error) => {
+    finish(new NodeMetricsPullError(
+      'NODE_METRICS_UNREACHABLE',
+      error.message,
+    ));
+  });
 }
 
 export interface NodeMetricsPullReport {

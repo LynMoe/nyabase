@@ -4,12 +4,14 @@ import { describe, expect, it, vi } from 'vitest';
 import { assertListScope, isSystemActor, SYSTEM_ACTOR, systemActor } from './iam/actor.js';
 import { testActor } from './iam/actor.test-helper.js';
 import { GpuService } from './gpu/gpu.service.js';
-import { HttpProxyService } from './http-proxy/http-proxy.service.js';
+import { HttpDomainPoolsService } from './http-proxy/http-domain-pools.service.js';
+import { HttpProxyBindingsService } from './http-proxy/http-proxy-bindings.service.js';
 import { ImagesService } from './images/images.service.js';
 import { PerformanceQueryService } from './metrics/performance-query.service.js';
 import { ServersService } from './servers/servers.service.js';
 import { StoragePoolsService } from './storage-pools/storage-pools.service.js';
-import { VolumesService } from './volumes/volumes.service.js';
+import { LocalVolumesService } from './volumes/local-volumes.service.js';
+import { SharedVolumesService } from './volumes/shared-volumes.service.js';
 
 const user = testActor('user-a');
 
@@ -81,17 +83,19 @@ describe('scope=all needs the resource capability', () => {
     await expect(performance.usage(user, {}, 'all')).rejects.toBeInstanceOf(ForbiddenException);
     await expect(performance.series(testActor('m', Capability.ManageServers), {}, 'all'))
       .rejects.toBeInstanceOf(ForbiddenException);
-    const proxy = bare(HttpProxyService, 6);
-    await expect(proxy.listBindings(user, 'all', true)).rejects.toBeInstanceOf(ForbiddenException);
-    await expect(proxy.listPools(user, 'all')).rejects.toBeInstanceOf(ForbiddenException);
+    const bindings = bare(HttpProxyBindingsService, 3);
+    const pools = bare(HttpDomainPoolsService, 5);
+    await expect(bindings.listBindings(user, 'all', true)).rejects.toBeInstanceOf(ForbiddenException);
+    await expect(pools.listPools(user, 'all')).rejects.toBeInstanceOf(ForbiddenException);
   });
 
   it('volumes: local needs ManageVolumes, shared needs ManageSharedVolumes, capacity needs ManageServers', async () => {
-    const volumes = bare(VolumesService, 8);
+    const volumes = bare(LocalVolumesService, 6);
+    const shared = bare(SharedVolumesService, 7);
     await expect(volumes.list(user, { scope: 'all' })).rejects.toBeInstanceOf(ForbiddenException);
     await expect(volumes.list(testActor('s', Capability.ManageSharedVolumes), { scope: 'all' }))
       .rejects.toBeInstanceOf(ForbiddenException);
-    await expect(volumes.listShared(testActor('v', Capability.ManageVolumes), { scope: 'all' }))
+    await expect(shared.list(testActor('v', Capability.ManageVolumes), { scope: 'all' }))
       .rejects.toBeInstanceOf(ForbiddenException);
     await expect(volumes.capacity(user, 's1', 'all')).rejects.toBeInstanceOf(ForbiddenException);
   });

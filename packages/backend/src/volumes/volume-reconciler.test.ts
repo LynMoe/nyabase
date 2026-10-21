@@ -1,11 +1,13 @@
 import { describe, expect, it, vi } from 'vitest';
 import { IncusError } from '../incus/index.js';
 import type { ReconcileRunContext } from '../reconcile/managed-reconciler.js';
-import {
-  decideVolumeResize,
-  normalizeObservedVolumeUsage,
-  VolumeReconciler,
-} from './volume-reconciler.service.js';
+import { VolumeReconciler } from './volume-reconciler.service.js';
+import { decideVolumeResize, normalizeObservedVolumeUsage } from './volume-usage.js';
+
+/** The reconciler's private SQL store, where the tests intercept data access. */
+function storeOf(reconciler: VolumeReconciler): object {
+  return (reconciler as unknown as { store: object }).store;
+}
 
 const serverId = '33333333-3333-4333-8333-333333333333';
 const volumeId = '11111111-1111-4111-8111-111111111111';
@@ -682,11 +684,11 @@ describe('volume reconciler scan and shifted policy', () => {
       { register: vi.fn() } as never,
     );
     vi.spyOn(
-      reconciler as unknown as { readVolume: () => Promise<unknown> },
+      storeOf(reconciler) as unknown as { readVolume: () => Promise<unknown> },
       'readVolume',
     ).mockResolvedValue(ensureRow());
     vi.spyOn(
-      reconciler as unknown as { readAttachments: () => Promise<unknown> },
+      storeOf(reconciler) as unknown as { readAttachments: () => Promise<unknown> },
       'readAttachments',
     ).mockResolvedValue([{
       id: 'att-1',
@@ -726,14 +728,14 @@ describe('volume reconciler scan and shifted policy', () => {
       { register: vi.fn() } as never,
     );
     vi.spyOn(
-      reconciler as unknown as { readVolume: () => Promise<unknown> },
+      storeOf(reconciler) as unknown as { readVolume: () => Promise<unknown> },
       'readVolume',
     ).mockResolvedValue({
       ...ensureRow(),
       size_bytes: '5',
     });
     vi.spyOn(
-      reconciler as unknown as { readAttachments: () => Promise<unknown[]> },
+      storeOf(reconciler) as unknown as { readAttachments: () => Promise<unknown[]> },
       'readAttachments',
     ).mockResolvedValue([]);
     const updateStorageVolume = vi.fn();
@@ -781,7 +783,7 @@ describe('volume reconciler scan and shifted policy', () => {
       { register: vi.fn() } as never,
     );
     vi.spyOn(
-      reconciler as unknown as { readVolume: () => Promise<unknown> },
+      storeOf(reconciler) as unknown as { readVolume: () => Promise<unknown> },
       'readVolume',
     ).mockResolvedValue({
       ...ensureRow(),
@@ -789,7 +791,7 @@ describe('volume reconciler scan and shifted policy', () => {
       driver: 'cephfs',
     });
     vi.spyOn(
-      reconciler as unknown as { readAttachments: () => Promise<unknown[]> },
+      storeOf(reconciler) as unknown as { readAttachments: () => Promise<unknown[]> },
       'readAttachments',
     ).mockResolvedValue([]);
     const updateStorageVolume = vi.fn();
@@ -838,7 +840,7 @@ describe('volume reconciler scan and shifted policy', () => {
       { register: vi.fn() } as never,
     );
     vi.spyOn(
-      reconciler as unknown as { readVolume: () => Promise<unknown> },
+      storeOf(reconciler) as unknown as { readVolume: () => Promise<unknown> },
       'readVolume',
     ).mockResolvedValue({
       ...ensureRow(),
@@ -847,7 +849,7 @@ describe('volume reconciler scan and shifted policy', () => {
       driver: 'lvm',
     });
     vi.spyOn(
-      reconciler as unknown as { readAttachments: () => Promise<unknown> },
+      storeOf(reconciler) as unknown as { readAttachments: () => Promise<unknown> },
       'readAttachments',
     ).mockResolvedValue([{
       id: 'att-1',
@@ -894,14 +896,14 @@ describe('volume reconciler scan and shifted policy', () => {
       { register: vi.fn() } as never,
     );
     vi.spyOn(
-      reconciler as unknown as { readVolume: () => Promise<unknown> },
+      storeOf(reconciler) as unknown as { readVolume: () => Promise<unknown> },
       'readVolume',
     ).mockResolvedValue({
       ...ensureRow(),
       shared_backend_id: 'backend',
     });
     vi.spyOn(
-      reconciler as unknown as { readAttachments: () => Promise<unknown[]> },
+      storeOf(reconciler) as unknown as { readAttachments: () => Promise<unknown[]> },
       'readAttachments',
     ).mockResolvedValue([]);
     const notFound = new IncusError('INCUS_NOT_FOUND', 'managed_failure');
@@ -1129,7 +1131,7 @@ describe('volume.destroy eligible-node D', () => {
       { register: vi.fn() } as never,
     );
     vi.spyOn(
-      reconciler as unknown as { readVolumeRow: () => Promise<undefined> },
+      storeOf(reconciler) as unknown as { readVolumeRow: () => Promise<undefined> },
       'readVolumeRow',
     ).mockResolvedValue(undefined);
     const outcome = await reconciler.reconcile(destroyContext());
@@ -1358,42 +1360,42 @@ function installDestroySpies(
   state: ReturnType<typeof destroyState>,
 ) {
   vi.spyOn(
-    reconciler as unknown as { readVolumeRow: () => Promise<unknown> },
+    storeOf(reconciler) as unknown as { readVolumeRow: () => Promise<unknown> },
     'readVolumeRow',
   ).mockImplementation(async () => ({ ...state.volume }));
   vi.spyOn(
-    reconciler as unknown as { hasAnyAttachments: () => Promise<boolean> },
+    storeOf(reconciler) as unknown as { hasAnyAttachments: () => Promise<boolean> },
     'hasAnyAttachments',
   ).mockImplementation(async () => state.attachments);
   vi.spyOn(
-    reconciler as unknown as { listCatalogs: () => Promise<unknown> },
+    storeOf(reconciler) as unknown as { listCatalogs: () => Promise<unknown> },
     'listCatalogs',
   ).mockImplementation(async () => [...state.catalogs]);
   vi.spyOn(
-    reconciler as unknown as { listDestroyExecutors: () => Promise<unknown> },
+    storeOf(reconciler) as unknown as { listDestroyExecutors: () => Promise<unknown> },
     'listDestroyExecutors',
   ).mockImplementation(async () => [...state.eligible]);
   const pin = vi.spyOn(
-    reconciler as unknown as { pinRemoveAllServer: (id: string, serverId: string) => Promise<void> },
+    storeOf(reconciler) as unknown as { pinRemoveAllServer: (id: string, serverId: string) => Promise<void> },
     'pinRemoveAllServer',
   ).mockImplementation(async (_id, serverId) => {
     state.volume.remove_all_server_id = serverId;
   });
   const mark = vi.spyOn(
-    reconciler as unknown as { markRemoveAllCommitted: (id: string, executor: string | null) => Promise<void> },
+    storeOf(reconciler) as unknown as { markRemoveAllCommitted: (id: string, executor: string | null) => Promise<void> },
     'markRemoveAllCommitted',
   ).mockImplementation(async (_id, executor) => {
     state.volume.remove_all_committed = true;
     state.volume.remove_all_server_id = executor;
   });
   const dropAll = vi.spyOn(
-    reconciler as unknown as { dropAllPlacements: (id: string) => Promise<void> },
+    storeOf(reconciler) as unknown as { dropAllPlacements: (id: string) => Promise<void> },
     'dropAllPlacements',
   ).mockImplementation(async () => {
     state.catalogs = [];
   });
   const finish = vi.spyOn(
-    reconciler as unknown as { finishEmptyTracking: (id: string) => Promise<void> },
+    storeOf(reconciler) as unknown as { finishEmptyTracking: (id: string) => Promise<void> },
     'finishEmptyTracking',
   ).mockResolvedValue(undefined);
   const lease = { assertOwned: vi.fn() };

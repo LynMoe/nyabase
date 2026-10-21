@@ -6,7 +6,8 @@ import {
   IntentResourceType,
   StoragePoolResizeFamily,
 } from '@nyabase/common';
-import { checkVolumeResize, effectiveUsageForShrinkFloor, VolumesService } from './volumes.service.js';
+import { checkVolumeResize, effectiveUsageForShrinkFloor } from './volume-resize-policy.js';
+import { makeVolumeServices } from './volume-services.test-helper.js';
 
 const base = {
   volumeId: '11111111-1111-4111-8111-111111111111',
@@ -173,6 +174,7 @@ function makeVolumesService(overrides: {
     setAttachmentBindState: vi.fn(),
     deleteAttachment: vi.fn(),
     findAttachment: vi.fn(),
+    listPendingIntentIds: vi.fn().mockResolvedValue([]),
     ...overrides.repository,
   };
   const pools = {
@@ -181,7 +183,7 @@ function makeVolumesService(overrides: {
     findById: vi.fn(),
     ...overrides.pools,
   };
-  const service = new VolumesService(
+  const service = makeVolumeServices(
     repository as never,
     pools as never,
     { run: vi.fn(async (work: (value: unknown) => Promise<unknown>) => work(transaction)) } as never,
@@ -246,15 +248,6 @@ describe('volume API placement paths', () => {
         server_id: peerServer,
         revision: 1,
       })
-      .mockResolvedValueOnce({
-        id: volumeId,
-        owner_id: actorId,
-        server_id: null,
-        shared_backend_id: backendId,
-        lifecycle_phase: 'active',
-        revision: 4,
-        pool_id: null,
-      })
       // Current coverage: the server (merged view row), then the shared backend.
       .mockResolvedValueOnce({
         cpu_millis: null,
@@ -264,7 +257,6 @@ describe('volume API placement paths', () => {
         expires_at: null,
       })
       .mockResolvedValueOnce({ limit_bytes: null, expires_at: null });
-    query.execute.mockResolvedValueOnce([{ id: poolId }]);
     const transaction = {
       selectFrom: vi.fn(() => query),
       updateTable: vi.fn(() => ({
@@ -275,6 +267,19 @@ describe('volume API placement paths', () => {
     };
     const { service, intents } = makeVolumesService({
       transaction,
+      pools: { listRegisteredSharedPools: vi.fn().mockResolvedValue([{ id: poolId }]) },
+      repository: {
+        findByIdForUpdate: vi.fn().mockResolvedValue({
+          id: volumeId,
+          owner_id: actorId,
+          server_id: null,
+          shared_backend_id: backendId,
+          lifecycle_phase: 'active',
+          revision: 4,
+          pool_id: null,
+        }),
+        findConflictingAttachment: vi.fn().mockResolvedValue(undefined),
+      },
       intents: {
         ensurePending: vi.fn(),
         createPending: vi.fn().mockResolvedValue({
@@ -320,13 +325,6 @@ describe('volume API placement paths', () => {
     };
     query.executeTakeFirst
       .mockResolvedValueOnce({
-        id: attachmentId,
-        volume_id: volumeId,
-        container_id: containerId,
-        bind_state: 'attaching',
-        shared_backend_id: 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee',
-      })
-      .mockResolvedValueOnce({
         id: containerId,
         owner_id: actorId,
         server_id: peerServer,
@@ -355,10 +353,12 @@ describe('volume API placement paths', () => {
     const { service, repository, intents } = makeVolumesService({
       transaction,
       repository: {
-        findAttachment: vi.fn().mockResolvedValue({
+        findAttachmentForUpdate: vi.fn().mockResolvedValue({
           id: attachmentId,
-          container_id: containerId,
           volume_id: volumeId,
+          container_id: containerId,
+          bind_state: 'attaching',
+          shared_backend_id: 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee',
         }),
         findPlacement: vi.fn().mockResolvedValue({ catalog_state: 'ensuring' }),
         liveAttachmentServerIds: vi.fn().mockResolvedValue([]),
@@ -469,16 +469,11 @@ describe('volume API placement paths', () => {
   it('locks shared-backend quota and settles leftover intents on empty tracking', async () => {
     const backendId = 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee';
     const leftover = { id: 'ensure-leftover' };
-    const transaction = {
-      selectFrom: vi.fn((table: string) => ({
-        select: vi.fn().mockReturnThis(),
-        where: vi.fn().mockReturnThis(),
-        execute: vi.fn().mockResolvedValue(table === 'control.intents' ? [leftover] : []),
-      })),
-    };
+    const transaction = {};
     const { service, repository, intents, pools } = makeVolumesService({
       transaction,
       repository: {
+        listPendingIntentIds: vi.fn().mockResolvedValue([leftover.id]),
         findById: vi.fn().mockResolvedValue(volumeRow({
           server_id: null,
           shared_backend_id: backendId,
@@ -507,13 +502,6 @@ describe('volume API placement paths', () => {
     };
     query.executeTakeFirst
       .mockResolvedValueOnce({
-        id: attachmentId,
-        volume_id: volumeId,
-        container_id: containerId,
-        bind_state: 'attached',
-        shared_backend_id: null,
-      })
-      .mockResolvedValueOnce({
         id: containerId,
         owner_id: actorId,
         server_id: homeServer,
@@ -528,6 +516,13 @@ describe('volume API placement paths', () => {
     const { service, repository, intents } = makeVolumesService({
       transaction,
       repository: {
+        findAttachmentForUpdate: vi.fn().mockResolvedValue({
+          id: attachmentId,
+          volume_id: volumeId,
+          container_id: containerId,
+          bind_state: 'attached',
+          shared_backend_id: null,
+        }),
         findPlacement: vi.fn().mockResolvedValue({ catalog_state: 'present' }),
         setAttachmentBindState: vi.fn(),
       },

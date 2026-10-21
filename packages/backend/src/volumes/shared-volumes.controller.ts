@@ -21,34 +21,40 @@ import {
 import { RequireCaps } from '../iam/decorators/require-caps.decorator.js';
 import { CurrentActor } from '../iam/decorators/current-actor.decorator.js';
 import type { Actor } from '../iam/actor.js';
-import { isIntentAccepted, VolumesService } from './volumes.service.js';
+import { SharedVolumeCatalogInspectService } from './shared-volume-catalog-inspect.service.js';
+import { SharedVolumesService } from './shared-volumes.service.js';
+import { VolumeAttachmentsService } from './volume-attachments.service.js';
+import { isIntentAccepted } from './volume-dtos.js';
 
 /** Shared volumes: owners and `ManageSharedVolumes` holders share one surface. */
 @Controller('shared-volumes')
 export class SharedVolumesController {
-  constructor(private readonly service: VolumesService) {}
+  constructor(
+    private readonly service: SharedVolumesService,
+    private readonly inspector: SharedVolumeCatalogInspectService,
+  ) {}
 
   @Get()
   list(@CurrentActor() actor: Actor, @Query() query: Record<string, unknown>) {
-    return this.service.listShared(actor, zListSharedVolumesQuery.parse(query));
+    return this.service.list(actor, zListSharedVolumesQuery.parse(query));
   }
 
   @Get(':id/catalogs')
   @RequireCaps(Capability.ManageSharedVolumes)
   inspect(@Param('id') id: string) {
-    return this.service.inspectSharedVolumeCatalogs(id);
+    return this.inspector.inspectSharedVolumeCatalogs(id);
   }
 
   @Get(':id')
   get(@Param('id') id: string, @CurrentActor() actor: Actor) {
-    return this.service.getShared(actor, id);
+    return this.service.get(actor, id);
   }
 
   @Post()
   @HttpCode(HttpStatus.CREATED)
   create(@CurrentActor() actor: Actor, @Body() body: unknown) {
     const input = zCreateSharedVolumeRequest.parse(body);
-    return this.service.createShared(actor, input);
+    return this.service.create(actor, input);
   }
 
   @Patch(':id')
@@ -58,7 +64,7 @@ export class SharedVolumesController {
     @Body() body: unknown,
     @Res({ passthrough: true }) response: { status: (code: number) => void },
   ) {
-    const result = await this.service.patchShared(actor, id, zPatchVolumeRequest.parse(body));
+    const result = await this.service.patch(actor, id, zPatchVolumeRequest.parse(body));
     if (isIntentAccepted(result)) response.status(HttpStatus.ACCEPTED);
     return result;
   }
@@ -66,24 +72,24 @@ export class SharedVolumesController {
   @Delete(':id')
   @HttpCode(HttpStatus.ACCEPTED)
   delete(@Param('id') id: string, @CurrentActor() actor: Actor) {
-    return this.service.deleteShared(actor, id);
+    return this.service.delete(actor, id);
   }
 }
 
 @Controller('shared-backends')
 export class SharedBackendCatalogInspectController {
-  constructor(private readonly service: VolumesService) {}
+  constructor(private readonly inspector: SharedVolumeCatalogInspectService) {}
 
   @Get(':id/catalog-inspect')
   @RequireCaps(Capability.ManageSharedVolumes)
   inspect(@Param('id') id: string) {
-    return this.service.inspectSharedBackendCatalogs(id);
+    return this.inspector.inspectSharedBackendCatalogs(id);
   }
 }
 
 @Controller('containers/:containerId/shared-volumes')
 export class ContainerSharedVolumesController {
-  constructor(private readonly service: VolumesService) {}
+  constructor(private readonly service: VolumeAttachmentsService) {}
 
   @Post()
   @HttpCode(HttpStatus.ACCEPTED)

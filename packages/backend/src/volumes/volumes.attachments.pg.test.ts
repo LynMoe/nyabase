@@ -9,7 +9,7 @@ import { PgTransactionManager } from '../platform/persistence-pg/transaction.js'
 import { IntentRepository } from '../reconcile/intent.repository.js';
 import { StoragePoolsRepository } from '../storage-pools/storage-pools.repository.js';
 import { VolumesRepository } from './volumes.repository.js';
-import { VolumesService } from './volumes.service.js';
+import { makeVolumeServices } from './volume-services.test-helper.js';
 import { noopWake } from '../reconcile/reconcile-wake.test-helper.js';
 
 const describePg = process.env.NYABASE_TEST_DATABASE_URL ? describe : describe.skip;
@@ -187,7 +187,7 @@ async function insertStoppedRoute(database: Kysely<NyabaseDatabase>, containerId
 }
 
 function makeService(database: Kysely<NyabaseDatabase>) {
-  return new VolumesService(
+  return makeVolumeServices(
     new VolumesRepository(database),
     new StoragePoolsRepository(database),
     new PgTransactionManager(database),

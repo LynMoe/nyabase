@@ -24,7 +24,7 @@ import { AccessResolverService } from '../iam/access-resolver.service.js';
 import type { Actor } from '../iam/actor.js';
 import { AuditService } from '../iam/audit.service.js';
 import { GpuClaimsRepository } from '../gpu/gpu-claims.repository.js';
-import { isLocalPoolRow } from '../storage-pools/storage-pools.service.js';
+import { isLocalPoolRow } from '../storage-pools/storage-pool-capability.js';
 
 /** A grant is held by one subject: a user, or a group whose members inherit it. */
 export interface GrantSubject {

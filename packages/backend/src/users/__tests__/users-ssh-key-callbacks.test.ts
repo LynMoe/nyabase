@@ -21,7 +21,7 @@ describePostgres('UsersService PostgreSQL SSH key durable hooks', () => {
     await withPostgresTestDatabase(async (fixture) => {
       const context = await usersPgFixture(fixture, { seedActor: false });
       context.convergence.reconcileUser.mockRejectedValueOnce(new Error('queue unavailable'));
-      const saved = await context.users.addSshKey(
+      const saved = await context.sshKeys.addSshKey(
         context.userId,
         'laptop',
         ` \t ${VALID_ED25519_KEY.replaceAll(' ', '\t  ')} \t `,
@@ -58,7 +58,7 @@ describePostgres('UsersService PostgreSQL SSH key durable hooks', () => {
   it('rejects invalid public key text before persistence or hooks', async () => {
     await withPostgresTestDatabase(async (fixture) => {
       const context = await usersPgFixture(fixture, { seedActor: false });
-      await expect(context.users.addSshKey(
+      await expect(context.sshKeys.addSshKey(
         context.userId,
         'bogus',
         'not-an-ssh-public-key',
@@ -75,7 +75,7 @@ describePostgres('UsersService PostgreSQL SSH key durable hooks', () => {
     await withPostgresTestDatabase(async (fixture) => {
       const context = await usersPgFixture(fixture, { seedActor: false });
       await seedSshKeys(fixture, context.userId, MAX_SSH_PUBLIC_KEYS_PER_USER);
-      await expect(context.users.addSshKey(
+      await expect(context.sshKeys.addSshKey(
         context.userId,
         'overflow',
         VALID_ED25519_KEY,
@@ -91,7 +91,7 @@ describePostgres('UsersService PostgreSQL SSH key durable hooks', () => {
         seedActor: false,
         targetStatus: UserStatus.Deleting,
       });
-      await expect(context.users.addSshKey(
+      await expect(context.sshKeys.addSshKey(
         context.userId,
         'late-key',
         VALID_ED25519_KEY,
@@ -105,7 +105,7 @@ describePostgres('UsersService PostgreSQL SSH key durable hooks', () => {
     await withPostgresTestDatabase(async (fixture) => {
       const context = await usersPgFixture(fixture, { seedActor: false });
       const keyId = await seedSshKey(fixture, context.userId, 1);
-      await expect(context.users.deleteSshKey(
+      await expect(context.sshKeys.deleteSshKey(
         context.userId,
         keyId,
         context.userId,
@@ -128,7 +128,7 @@ describePostgres('UsersService PostgreSQL SSH key durable hooks', () => {
   it('does not run hooks when key deletion finds no owned key', async () => {
     await withPostgresTestDatabase(async (fixture) => {
       const context = await usersPgFixture(fixture, { seedActor: false });
-      await expect(context.users.deleteSshKey(
+      await expect(context.sshKeys.deleteSshKey(
         context.userId,
         randomUUID(),
         context.userId,
@@ -144,7 +144,7 @@ describePostgres('UsersService PostgreSQL SSH key durable hooks', () => {
       await withPostgresTestDatabase(async (fixture) => {
         const context = await usersPgFixture(fixture, { targetStatus: status });
         const keyId = await seedSshKey(fixture, context.userId, 1);
-        await expect(context.users.deleteSshKey(
+        await expect(context.sshKeys.deleteSshKey(
           context.userId,
           keyId,
           context.actorId,
@@ -161,7 +161,7 @@ describePostgres('UsersService PostgreSQL SSH key durable hooks', () => {
     await withPostgresTestDatabase(async (fixture) => {
       const context = await usersPgFixture(fixture, { seedActor: false });
       context.audit.log.mockRejectedValueOnce(new Error('audit unavailable'));
-      await expect(context.users.addSshKey(
+      await expect(context.sshKeys.addSshKey(
         context.userId,
         'laptop',
         VALID_ED25519_KEY,
@@ -176,7 +176,7 @@ describePostgres('UsersService PostgreSQL SSH key durable hooks', () => {
   it('does not audit or notify when persistence rejects a duplicate fingerprint', async () => {
     await withPostgresTestDatabase(async (fixture) => {
       const context = await usersPgFixture(fixture, { seedActor: false });
-      await context.users.addSshKey(
+      await context.sshKeys.addSshKey(
         context.userId,
         'first',
         VALID_ED25519_KEY,
@@ -184,7 +184,7 @@ describePostgres('UsersService PostgreSQL SSH key durable hooks', () => {
       );
       context.audit.log.mockClear();
       context.proxySnapshots.notify.mockClear();
-      await expect(context.users.addSshKey(
+      await expect(context.sshKeys.addSshKey(
         context.userId,
         'duplicate',
         VALID_ED25519_KEY,

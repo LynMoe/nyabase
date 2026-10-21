@@ -1,13 +1,13 @@
-import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { readSource } from './read-source.test-helper.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const root = join(here, '..');
 
 function read(rel: string): string {
-  return readFileSync(join(root, rel), 'utf8');
+  return readSource(root, rel);
 }
 
 describe('image catalog UI', () => {
@@ -26,8 +26,8 @@ describe('image catalog UI', () => {
     expect(list).toMatch(/image\.alias/);
     expect(list).not.toMatch(/image\.name/);
     expect(detail).not.toMatch(/ImageFormDialog/);
-    expect(detail).not.toMatch(/loaded\.name/);
-    expect(detail).toMatch(/loaded\.alias/);
+    expect(detail).not.toMatch(/\b(?:loaded|image)\.name\b/);
+    expect(detail).toMatch(/\b(?:loaded|image)\.alias/);
     expect(detail).toMatch(/重新拉取/);
     expect(detail).toMatch(/IntentResourceType\.ImageAssignment/);
     expect(detail).toMatch(/已开始移除镜像/);

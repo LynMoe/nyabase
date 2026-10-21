@@ -2,9 +2,8 @@ import { useState } from 'react';
 import { useInfiniteQuery, useQuery } from '@tanstack/react-query';
 import {
   Capability,
-  IntentKind,
-  IntentResourceType,
-  IntentStatus,
+  type IntentKind,
+  type IntentResourceType,
   type CursorPaginatedResponse,
   type IntentDto,
   type ServerDto,
@@ -12,53 +11,19 @@ import {
 import { Activity } from 'lucide-react';
 import { api } from '../lib/api.js';
 import { Button } from '../components/ui/button.js';
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from '../components/ui/select.js';
-import {
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableHeader,
-  TableRow,
-} from '../components/ui/table.js';
-import {
-  IntentDetailDialog,
-  IntentResourceName,
-  IntentServerRef,
-} from '../components/intents/intent-detail-dialog.js';
-import { ResourceRef } from '../components/refs/resource-ref.js';
+import { IntentDetailDialog } from '../components/intents/intent-detail-dialog.js';
 import { Page } from '../components/layout/page.js';
 import { PageHeader } from '../components/layout/page-header.js';
 import { QueryView } from '../components/layout/query-view.js';
 import { SectionCard } from '../components/layout/section-card.js';
-import { StatusBadge } from '../components/layout/status-badge.js';
 import { useAuthStore } from '../store/auth.js';
 import { intentPending } from '../lib/in-progress.js';
 import { queryKeys } from '../lib/query-keys.js';
 import { refetchWhileInProgress } from '../lib/query-lifecycle.js';
-import {
-  failureCodeLabel,
-  intentKindLabel,
-  intentResourceTypeLabel,
-  intentStatusLabel,
-} from '../lib/status-labels.js';
-import { formatIntentAttempt } from '../lib/intent-visibility.js';
+import { IntentFilters, type StatusSegment } from './ops-page/intent-filters.js';
+import { IntentsTable } from './ops-page/intents-table.js';
 
-const ALL = '__all__';
 const PAGE_SIZE = 50;
-const SEGMENTS = [
-  { id: 'all', label: '全部' },
-  { id: 'pending', label: '进行中' },
-  { id: 'failed', label: '失败' },
-] as const;
-
-type StatusSegment = (typeof SEGMENTS)[number]['id'];
 
 function adminIntentsPath(filters: {
   segment: StatusSegment;
@@ -76,12 +41,6 @@ function adminIntentsPath(filters: {
   if (filters.serverId) params.set('serverId', filters.serverId);
   if (filters.cursor) params.set('cursor', filters.cursor);
   return `/intents?${params.toString()}`;
-}
-
-function statusBadgeVariant(status: string) {
-  if (status === IntentStatus.Succeeded) return 'success' as const;
-  if (status === IntentStatus.Failed) return 'destructive' as const;
-  return 'warning' as const;
 }
 
 export default function OpsPage() {
@@ -126,66 +85,18 @@ export default function OpsPage() {
 
       <SectionCard
         toolbar={
-          <div className="flex flex-wrap items-center gap-2">
-            <div className="flex flex-wrap rounded-md bg-muted p-1">
-              {SEGMENTS.map((item) => (
-                <Button
-                  key={item.id}
-                  type="button"
-                  size="sm"
-                  variant={segment === item.id ? 'secondary' : 'ghost'}
-                  className="h-8"
-                  onClick={() => setSegment(item.id)}
-                >
-                  {item.label}
-                </Button>
-              ))}
-            </div>
-            <Select
-              value={kind ?? ALL}
-              onValueChange={(value) => setKind(value === ALL ? undefined : value as IntentKind)}
-            >
-              <SelectTrigger className="h-9 w-[160px]" aria-label="操作类型">
-                <SelectValue placeholder="全部类型" />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value={ALL}>全部类型</SelectItem>
-                {Object.values(IntentKind).map((value) => (
-                  <SelectItem key={value} value={value}>{intentKindLabel(value)}</SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-            <Select
-              value={resourceType ?? ALL}
-              onValueChange={(value) => setResourceType(value === ALL ? undefined : value as IntentResourceType)}
-            >
-              <SelectTrigger className="h-9 w-[160px]" aria-label="资源类型">
-                <SelectValue placeholder="全部资源" />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value={ALL}>全部资源</SelectItem>
-                {Object.values(IntentResourceType).map((value) => (
-                  <SelectItem key={value} value={value}>{intentResourceTypeLabel(value)}</SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-            {canManageServers && (
-              <Select
-                value={serverId ?? ALL}
-                onValueChange={(value) => setServerId(value === ALL ? undefined : value)}
-              >
-                <SelectTrigger className="h-9 w-[180px]" aria-label="服务器">
-                  <SelectValue placeholder="全部服务器" />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value={ALL}>全部服务器</SelectItem>
-                  {(serversQuery.data ?? []).map((server) => (
-                    <SelectItem key={server.id} value={server.id}>{server.name}</SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            )}
-          </div>
+          <IntentFilters
+            segment={segment}
+            onSegment={setSegment}
+            kind={kind}
+            onKind={setKind}
+            resourceType={resourceType}
+            onResourceType={setResourceType}
+            serverId={serverId}
+            onServerId={setServerId}
+            servers={serversQuery.data ?? []}
+            showServerFilter={canManageServers}
+          />
         }
         flush
       >
@@ -202,55 +113,7 @@ export default function OpsPage() {
             }
             return (
               <>
-                <Table>
-                  <TableHeader>
-                    <TableRow>
-                      <TableHead>时间</TableHead>
-                      <TableHead>类型</TableHead>
-                      <TableHead>状态</TableHead>
-                      <TableHead>资源类型</TableHead>
-                      <TableHead>资源名称</TableHead>
-                      <TableHead>服务器</TableHead>
-                      <TableHead>请求人</TableHead>
-                      <TableHead>尝试</TableHead>
-                      <TableHead>失败码</TableHead>
-                    </TableRow>
-                  </TableHeader>
-                  <TableBody>
-                    {items.map((intent) => (
-                      <TableRow
-                        key={intent.id}
-                        className="cursor-pointer"
-                        onClick={() => setSelected(intent)}
-                      >
-                        <TableCell>{new Date(intent.createdAt).toLocaleString()}</TableCell>
-                        <TableCell>{intentKindLabel(intent.kind)}</TableCell>
-                        <TableCell>
-                          <StatusBadge
-                            label={intentStatusLabel(intent.status)}
-                            raw={intent.status}
-                            pending={intentPending(intent.status)}
-                            variant={statusBadgeVariant(intent.status)}
-                          />
-                        </TableCell>
-                        <TableCell>{intentResourceTypeLabel(intent.resourceType)}</TableCell>
-                        <TableCell title={intent.resourceId}>
-                          <IntentResourceName intent={intent} />
-                        </TableCell>
-                        <TableCell>
-                          <IntentServerRef serverId={intent.serverId} link={canManageServers} />
-                        </TableCell>
-                        <TableCell>
-                          {intent.requestedBy
-                            ? <ResourceRef kind="user" id={intent.requestedBy} />
-                            : '系统'}
-                        </TableCell>
-                        <TableCell>{formatIntentAttempt(intent)}</TableCell>
-                        <TableCell>{failureCodeLabel(intent.failureCode) ?? '—'}</TableCell>
-                      </TableRow>
-                    ))}
-                  </TableBody>
-                </Table>
+                <IntentsTable items={items} linkServers={canManageServers} onSelect={setSelected} />
                 {intentsQuery.hasNextPage && (
                   <div className="border-t px-6 py-3">
                     <Button

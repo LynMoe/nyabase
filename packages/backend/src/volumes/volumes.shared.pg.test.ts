@@ -10,7 +10,7 @@ import { IntentRepository } from '../reconcile/intent.repository.js';
 import type { IncusClientFactory } from '../incus/incus-client.factory.js';
 import { StoragePoolsRepository } from '../storage-pools/storage-pools.repository.js';
 import { VolumesRepository } from './volumes.repository.js';
-import { VolumesService } from './volumes.service.js';
+import { makeVolumeServices } from './volume-services.test-helper.js';
 import { noopWake } from '../reconcile/reconcile-wake.test-helper.js';
 
 const describePg = process.env.NYABASE_TEST_DATABASE_URL ? describe : describe.skip;
@@ -59,7 +59,7 @@ function userValues(id: string, numericId = 1) {
 }
 
 function makeService(database: Kysely<NyabaseDatabase>, clients?: IncusClientFactory) {
-  return new VolumesService(
+  return makeVolumeServices(
     new VolumesRepository(database),
     new StoragePoolsRepository(database),
     new PgTransactionManager(database),

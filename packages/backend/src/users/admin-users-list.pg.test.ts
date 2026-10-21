@@ -42,7 +42,6 @@ describePg('Admin user bulk projection', () => {
         undefined as never,
         undefined as never,
         undefined as never,
-        undefined as never,
       );
       const listed = await service.listDtos();
       expect(listed.map((user) => user.username)).toEqual([

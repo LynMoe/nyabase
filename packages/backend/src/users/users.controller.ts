@@ -11,6 +11,7 @@ import {
   BadRequestException,
 } from '@nestjs/common';
 import { UsersService } from './users.service.js';
+import { UserSshKeysService } from './user-ssh-keys.service.js';
 import { RequireAnyCaps, RequireCaps } from '../iam/decorators/require-caps.decorator.js';
 import { CurrentActor } from '../iam/decorators/current-actor.decorator.js';
 import { holdsAny, type Actor } from '../iam/actor.js';
@@ -33,6 +34,7 @@ const VIEW_USERS = [Capability.ManageUsers, Capability.ManageGrants] as const;
 export class UsersController {
   constructor(
     private usersService: UsersService,
+    private sshKeys: UserSshKeysService,
   ) {}
 
   @Get()
@@ -97,7 +99,7 @@ export class UsersController {
       this.assertSelfOr(actor, id, [Capability.ManageUsers]);
       await this.usersService.findById(id);
     }
-    return this.usersService.listSshKeys(id);
+    return this.sshKeys.listSshKeys(id);
   }
 
   @Post(':id/ssh-keys')
@@ -108,7 +110,7 @@ export class UsersController {
   ) {
     if (actor.userId !== id) throw new ForbiddenException();
     const dto = zAddSshKeyRequest.parse(body);
-    return this.usersService.addSshKey(id, dto.name, dto.keyText, actor.userId);
+    return this.sshKeys.addSshKey(id, dto.name, dto.keyText, actor.userId);
   }
 
   @Delete(':id/ssh-keys/:keyId')
@@ -119,7 +121,7 @@ export class UsersController {
     @CurrentActor() actor: Actor,
   ) {
     this.assertSelfOr(actor, id, [Capability.ManageUsers]);
-    await this.usersService.deleteSshKey(id, keyId, actor.userId);
+    await this.sshKeys.deleteSshKey(id, keyId, actor.userId);
   }
 
   private assertSelfOr(actor: Actor, id: string, anyOf: readonly Capability[]): void {

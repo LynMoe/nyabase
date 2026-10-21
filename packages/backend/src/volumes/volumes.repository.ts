@@ -1,7 +1,8 @@
 import { Inject, Injectable } from '@nestjs/common';
-import type { Kysely, Transaction } from 'kysely';
+import { sql, type Kysely, type Transaction } from 'kysely';
 import type { NyabaseDatabase } from '../platform/persistence-pg/database.types.js';
 import { PG_DATABASE } from '../platform/persistence-pg/tokens.js';
+import { numberValue } from '../platform/domain-utils.js';
 
 export type VolumeExecutor = Kysely<NyabaseDatabase> | Transaction<NyabaseDatabase>;
 export type VolumeCatalogState = 'ensuring' | 'present';
@@ -239,5 +240,182 @@ export class VolumesRepository {
 
   async deleteVolumeRow(volumeId: string, executor: VolumeExecutor): Promise<void> {
     await executor.deleteFrom('control.volumes').where('id', '=', volumeId).execute();
+  }
+
+  /** Row lock for attach flows that must not race a concurrent delete or resize. */
+  findByIdForUpdate(id: string, executor: VolumeExecutor) {
+    return executor
+      .selectFrom('control.volumes')
+      .selectAll()
+      .where('id', '=', id)
+      .forUpdate()
+      .executeTakeFirst();
+  }
+
+  async setUsedBytes(
+    volumeId: string,
+    usedBytes: number | null,
+    executor: VolumeExecutor = this.database,
+  ): Promise<void> {
+    await executor
+      .updateTable('control.volumes')
+      .set({ used_bytes: usedBytes })
+      .where('id', '=', volumeId)
+      .where('lifecycle_phase', 'not in', ['failed', 'deleting'])
+      .execute();
+  }
+
+  /** Bytes committed by volumes that are neither failed nor being deleted. */
+  async sumLiveSizeBytes(
+    filter: {
+      kind: 'local' | 'shared';
+      ownerId?: string;
+      serverId?: string;
+      poolId?: string;
+      sharedBackendId?: string;
+    },
+    executor: VolumeExecutor = this.database,
+  ): Promise<number> {
+    let query = executor
+      .selectFrom('control.volumes')
+      .select(sql<string>`coalesce(sum(size_bytes), 0)`.as('bytes'))
+      .where('lifecycle_phase', 'not in', ['failed', 'deleting']);
+    query = filter.kind === 'local'
+      ? query.where('shared_backend_id', 'is', null)
+      : query.where('shared_backend_id', 'is not', null);
+    if (filter.ownerId !== undefined) query = query.where('owner_id', '=', filter.ownerId);
+    if (filter.serverId !== undefined) query = query.where('server_id', '=', filter.serverId);
+    if (filter.poolId !== undefined) query = query.where('pool_id', '=', filter.poolId);
+    if (filter.sharedBackendId !== undefined) {
+      query = query.where('shared_backend_id', '=', filter.sharedBackendId);
+    }
+    const row = await query.executeTakeFirstOrThrow();
+    return numberValue(row.bytes);
+  }
+
+  listSharedBackendVolumes(backendId: string, executor: VolumeExecutor = this.database) {
+    return executor
+      .selectFrom('control.volumes')
+      .select(['id', 'incus_name'])
+      .where('shared_backend_id', '=', backendId)
+      .execute();
+  }
+
+  /** Attachments of one container joined with the volume name and placement state on its server. */
+  listContainerAttachmentRows(
+    containerId: string,
+    serverId: string,
+    executor: VolumeExecutor = this.database,
+  ) {
+    return executor
+      .selectFrom('control.volume_attachments as a')
+      .innerJoin('control.volumes as v', 'v.id', 'a.volume_id')
+      .leftJoin('control.volume_placements as p', (join) => join
+        .onRef('p.volume_id', '=', 'a.volume_id')
+        .on('p.server_id', '=', serverId))
+      .selectAll('a')
+      .select([
+        'v.name as volume_name',
+        'v.shared_backend_id as shared_backend_id',
+        'p.catalog_state as catalog_state',
+      ])
+      .where('a.container_id', '=', containerId)
+      .orderBy('a.created_at')
+      .execute();
+  }
+
+  /** The attachment row locked together with its volume's backend id (kind detection). */
+  findAttachmentForUpdate(attachmentId: string, executor: VolumeExecutor) {
+    return executor
+      .selectFrom('control.volume_attachments as a')
+      .innerJoin('control.volumes as v', 'v.id', 'a.volume_id')
+      .selectAll('a')
+      .select('v.shared_backend_id as shared_backend_id')
+      .where('a.id', '=', attachmentId)
+      .forUpdate('a')
+      .executeTakeFirst();
+  }
+
+  /** An existing attachment on the container for the same volume or the same path. */
+  findConflictingAttachment(
+    containerId: string,
+    volumeId: string,
+    containerPath: string,
+    executor: VolumeExecutor,
+  ) {
+    return executor
+      .selectFrom('control.volume_attachments')
+      .select(['id', 'volume_id', 'container_path'])
+      .where('container_id', '=', containerId)
+      .where((expression) => expression.or([
+        expression('volume_id', '=', volumeId),
+        expression('container_path', '=', containerPath),
+      ]))
+      .executeTakeFirst();
+  }
+
+  /** Attachments of the given volumes with the attaching container's name. */
+  listAttachmentSummaryRows(
+    volumeIds: readonly string[],
+    executor: VolumeExecutor = this.database,
+  ) {
+    return executor
+      .selectFrom('control.volume_attachments as attachment')
+      .innerJoin('control.containers as container', 'container.id', 'attachment.container_id')
+      .select([
+        'attachment.id',
+        'attachment.volume_id',
+        'attachment.container_id',
+        'attachment.container_path',
+        'attachment.bind_state',
+        'container.name',
+      ])
+      .where('attachment.volume_id', 'in', [...volumeIds])
+      .orderBy('attachment.created_at')
+      .execute();
+  }
+
+  /** Which server each attachment's container lives on. */
+  listAttachmentContainerServers(
+    volumeIds: readonly string[],
+    executor: VolumeExecutor = this.database,
+  ) {
+    if (volumeIds.length === 0) return Promise.resolve([]);
+    return executor
+      .selectFrom('control.volume_attachments as a')
+      .innerJoin('control.containers as c', 'c.id', 'a.container_id')
+      .select(['a.volume_id as volume_id', 'c.server_id as server_id'])
+      .where('a.volume_id', 'in', [...volumeIds])
+      .execute();
+  }
+
+  /** Placements on servers that can still be asked for live usage. */
+  listPlacementsWithPool(volumeId: string, executor: VolumeExecutor = this.database) {
+    return executor
+      .selectFrom('control.volume_placements as pl')
+      .innerJoin('infra.storage_pools as p', 'p.id', 'pl.pool_id')
+      .innerJoin('infra.servers as s', 's.id', 'pl.server_id')
+      .select([
+        'pl.server_id as server_id',
+        'pl.catalog_state as catalog_state',
+        'p.incus_name as pool_name',
+        'p.driver as driver',
+        'p.resize_family as resize_family',
+        's.status as server_status',
+      ])
+      .where('pl.volume_id', '=', volumeId)
+      .orderBy('pl.server_id', 'asc')
+      .execute();
+  }
+
+  async listPendingIntentIds(volumeId: string, executor: VolumeExecutor): Promise<string[]> {
+    const rows = await executor
+      .selectFrom('control.intents')
+      .select('id')
+      .where('resource_type', '=', 'volume')
+      .where('resource_id', '=', volumeId)
+      .where('status', '=', 'pending')
+      .execute();
+    return rows.map((row) => row.id);
   }
 }

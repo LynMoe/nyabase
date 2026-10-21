@@ -1,252 +1,33 @@
-import { useState } from 'react';
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import {
-  IntentResourceType,
-  zCreateSharedVolumeRequest,
-  zPatchVolumeRequest,
-  type CreateSharedVolumeRequest,
-  type EffectiveAccessDto,
-  type IntentAcceptedDto,
-  type PatchVolumeRequest,
-  type SharedBackendDto,
-  type SharedVolumeDto,
-} from '@nyabase/common';
-import { api } from '../../lib/api.js';
-import { errorMessage } from '../../lib/api-error.js';
 import { Button } from '../ui/button.js';
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '../ui/dialog.js';
-import { Input } from '../ui/input.js';
-import { FormField } from '../layout/form-field.js';
-import { bytesToGiBInput, GIB, SelectField } from './volume-form-fields.js';
-import { approxGibHint } from '../../lib/utils.js';
-import { formatGrantBytes, formatRemainingBytes } from '../../lib/grant-quota.js';
-import { queryKeys } from '../../lib/query-keys.js';
-import { backendLacksOnlineExecutor } from '../../lib/shared-backend-executor.js';
-import { toast } from '../../hooks/use-toast.js';
-import { isIntentAccepted, resourceIntentsPath, waitForResourceIntent } from '../../lib/intent-visibility.js';
+import { shrinkNeverTooltip } from '../../lib/storage-shrink.js';
+import { SharedVolumeFields } from './shared-volume-form-dialog/shared-volume-fields.js';
 import {
-  classifySizeChange,
-  isQuotaIneffectiveCapability,
-  quotaIneffectiveResizeHint,
-  shrinkNeverTooltip,
-  validateShrinkFloor,
-} from '../../lib/storage-shrink.js';
+  useSharedVolumeForm,
+  type SharedVolumeFormProps,
+} from './shared-volume-form-dialog/use-shared-volume-form.js';
 
-const NO_ONLINE_EXECUTOR_HINT = '现在还不能挂载或销毁已有目录';
-
-export function SharedVolumeFormDialog({
-  sharedVolume,
-  open,
-  onOpenChange,
-}: {
-  sharedVolume?: SharedVolumeDto;
-  open: boolean;
-  onOpenChange: (open: boolean) => void;
-}) {
-  const queryClient = useQueryClient();
-  const editing = sharedVolume;
-  const [name, setName] = useState(editing?.name ?? '');
-  const [sizeGiB, setSizeGiB] = useState(editing ? bytesToGiBInput(editing.sizeBytes) : '10');
-  const [sharedBackendId, setSharedBackendId] = useState(sharedVolume?.sharedBackendId ?? '');
-  const [error, setError] = useState<string | null>(null);
-  const backendsQuery = useQuery({
-    queryKey: queryKeys.sharedBackends.user,
-    queryFn: () => api.get<SharedBackendDto[]>('/shared-backends'),
-    enabled: open && !editing,
-  });
-  const accessQuery = useQuery({
-    queryKey: queryKeys.meAccess,
-    queryFn: () => api.get<EffectiveAccessDto>('/me/access'),
-    enabled: open,
-  });
-  const createShared = useMutation({
-    mutationFn: (body: CreateSharedVolumeRequest) => api.post<unknown>('/shared-volumes', body),
-    onSuccess: () => {
-      toast({ title: '已创建' });
-      void queryClient.invalidateQueries({ queryKey: queryKeys.sharedVolumes.all });
-      onOpenChange(false);
-    },
-    onError: (mutationError) => setError(errorMessage(mutationError)),
-  });
-  const patch = useMutation({
-    mutationFn: async (body: PatchVolumeRequest) => {
-      const volumeId = sharedVolume?.id ?? '';
-      const accepted = await api.patch<IntentAcceptedDto | SharedVolumeDto>(
-        `/shared-volumes/${volumeId}`,
-        body,
-      );
-      if (isIntentAccepted(accepted)) {
-        await waitForResourceIntent(
-          resourceIntentsPath('mine', IntentResourceType.Volume, volumeId),
-          accepted.intentId,
-        );
-      }
-    },
-    onSuccess: () => {
-      toast({ title: '已保存' });
-      void queryClient.invalidateQueries({ queryKey: queryKeys.sharedVolumes.all });
-      void queryClient.invalidateQueries({ queryKey: ['resource-intent-failures'] });
-      onOpenChange(false);
-    },
-    onError: (mutationError) => {
-      setError(errorMessage(mutationError));
-      void queryClient.invalidateQueries({ queryKey: queryKeys.sharedVolumes.all });
-      void queryClient.invalidateQueries({ queryKey: ['resource-intent-failures'] });
-    },
-  });
-  const backends = backendsQuery.data ?? [];
-  const selectedBackend = backends.find((backend) => backend.id === sharedBackendId);
-  const liveSharedAccess = (accessQuery.data?.sharedBackends ?? [])
-    .find((item) => item.sharedBackendId === sharedBackendId);
-  const noOnlineExecutor = editing
-    ? false
-    : selectedBackend
-      ? backendLacksOnlineExecutor(selectedBackend)
-      : backends.length > 0 && backends.every((backend) => backendLacksOnlineExecutor(backend));
-  const parsedGiB = Number(sizeGiB);
-  const nextSize = Number.isFinite(parsedGiB) && parsedGiB > 0
-    ? Math.round(parsedGiB * GIB)
-    : NaN;
-  const path = editing && Number.isFinite(nextSize)
-    ? classifySizeChange(editing.capability, editing.sizeBytes, nextSize)
-    : 'unchanged';
-  const floorError = editing && (path === 'online' || path === 'requires_stop')
-    ? validateShrinkFloor(editing.capability, nextSize, editing.usedBytes, editing.sizeBytes)
-    : null;
-  const shrinkBlocked = path === 'never';
-  const editQuotaBlocked = editing != null
-    && path !== 'unchanged'
-    && isQuotaIneffectiveCapability(editing.capability);
-  const quotaError = editQuotaBlocked ? quotaIneffectiveResizeHint() : null;
-  const pending = createShared.isPending || patch.isPending;
-
-  const submit = () => {
-    setError(null);
-    if (!Number.isFinite(nextSize) || nextSize <= 0) {
-      setError('请输入有效的容量（GiB）');
-      return;
-    }
-    if (editing) {
-      if (editQuotaBlocked) {
-        setError(quotaIneffectiveResizeHint());
-        return;
-      }
-      if (path === 'never') {
-        setError(shrinkNeverTooltip());
-        return;
-      }
-      if (floorError) {
-        setError(floorError);
-        return;
-      }
-      if (path === 'requires_stop') {
-        setError('缩容需要先卸载全部挂载');
-        return;
-      }
-      const parsed = zPatchVolumeRequest.safeParse({
-        expectedRevision: editing.revision,
-        name: name.trim(),
-        sizeBytes: nextSize,
-      });
-      if (!parsed.success) {
-        setError(parsed.error.issues[0]?.message ?? '请检查共享卷参数');
-        return;
-      }
-      patch.mutate(parsed.data);
-      return;
-    }
-    if (!sharedBackendId) {
-      setError('请选择共享后端');
-      return;
-    }
-    const parsed = zCreateSharedVolumeRequest.safeParse({
-      name: name.trim(),
-      sizeBytes: nextSize,
-      scope: { kind: 'shared', sharedBackendId },
-    });
-    if (!parsed.success) {
-      setError(parsed.error.issues[0]?.message ?? '请检查共享卷参数');
-      return;
-    }
-    createShared.mutate(parsed.data);
-  };
-
-  const description = !editing
-    ? null
-    : editQuotaBlocked
-      ? quotaIneffectiveResizeHint()
-      : path === 'never'
-        ? shrinkNeverTooltip()
-        : null;
+export function SharedVolumeFormDialog(props: SharedVolumeFormProps) {
+  const { open, onOpenChange } = props;
+  const form = useSharedVolumeForm(props);
+  const { quotaError, shrinkBlocked, path } = form;
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent data-testid="shared-volume-form">
         <DialogHeader>
-          <DialogTitle>{editing ? '编辑共享卷' : '新建共享卷'}</DialogTitle>
-          {description ? <DialogDescription>{description}</DialogDescription> : null}
+          <DialogTitle>{form.editing ? '编辑共享卷' : '新建共享卷'}</DialogTitle>
+          {form.description ? <DialogDescription>{form.description}</DialogDescription> : null}
         </DialogHeader>
-        <div className="space-y-3">
-          <FormField id="shared-volume-name" label="名称">
-            <Input id="shared-volume-name" value={name} onChange={(event) => setName(event.target.value)} />
-          </FormField>
-          <FormField id="shared-volume-size" label="大小（GiB）">
-            <Input
-              id="shared-volume-size"
-              type="number"
-              min="0.001"
-              step="any"
-              value={sizeGiB}
-              onChange={(event) => setSizeGiB(event.target.value)}
-              disabled={shrinkBlocked && Number.isFinite(nextSize) && nextSize < (editing?.sizeBytes ?? 0)}
-              title={shrinkBlocked ? shrinkNeverTooltip() : undefined}
-            />
-            <p className="text-xs text-muted-foreground">
-              {Number.isFinite(nextSize) && nextSize > 0
-                ? approxGibHint(nextSize)
-                : '请输入正数 GiB'}
-            </p>
-            {shrinkBlocked && (
-              <p className="text-xs text-muted-foreground" title={shrinkNeverTooltip()}>
-                {shrinkNeverTooltip()}
-              </p>
-            )}
-          </FormField>
-          {!editing && (
-            <SelectField
-              id="volume-shared-backend"
-              label="共享后端"
-              value={sharedBackendId}
-              onChange={setSharedBackendId}
-              options={backends.map((backend) => [backend.id, backend.displayName ?? backend.name])}
-            />
-          )}
-          {liveSharedAccess && (
-            <p className="text-xs text-muted-foreground">
-              剩余 {formatRemainingBytes(liveSharedAccess.limitBytes, liveSharedAccess.usedBytes)}
-              {' / '}
-              额度 {formatGrantBytes(liveSharedAccess.limitBytes)}
-            </p>
-          )}
-          {noOnlineExecutor && (
-            <p className="text-xs text-muted-foreground" data-testid="shared-volume-no-executor">
-              {NO_ONLINE_EXECUTOR_HINT}
-            </p>
-          )}
-          {(error || floorError || quotaError) && (
-            <p className="text-sm text-destructive">
-              {error ?? floorError ?? quotaError}
-            </p>
-          )}
-        </div>
+        <SharedVolumeFields form={form} />
         <DialogFooter>
           <Button variant="outline" onClick={() => onOpenChange(false)}>取消</Button>
           <Button
-            onClick={submit}
-            disabled={pending || Boolean(floorError) || Boolean(quotaError) || (shrinkBlocked && path === 'never')}
+            onClick={form.submit}
+            disabled={form.pending || Boolean(form.floorError) || Boolean(quotaError) || (shrinkBlocked && path === 'never')}
             title={quotaError ?? (shrinkBlocked && path === 'never' ? shrinkNeverTooltip() : undefined)}
           >
-            {pending ? '提交中...' : '保存'}
+            {form.pending ? '提交中...' : '保存'}
           </Button>
         </DialogFooter>
       </DialogContent>

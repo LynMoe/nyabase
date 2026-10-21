@@ -83,7 +83,7 @@ function connect(
   reference: string,
 ): Promise<void> {
   return (
-    reconciler as unknown as {
+    (reconciler as unknown as { connector: object }).connector as unknown as {
       connectWithTrustToken: (
         client: unknown,
         server: unknown,

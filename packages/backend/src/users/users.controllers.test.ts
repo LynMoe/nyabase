@@ -3,12 +3,16 @@ import { describe, expect, it, vi } from 'vitest';
 import { Capability, UserStatus } from '@nyabase/common';
 import { testActor } from '../iam/actor.test-helper.js';
 import { UsersController } from './users.controller.js';
+import type { UserSshKeysService } from './user-ssh-keys.service.js';
 import type { UsersService } from './users.service.js';
 
 const toDto = (value: unknown) => value;
 
 function controllerWith(service: Record<string, unknown>) {
-  return new UsersController({ toDto, ...service } as unknown as UsersService);
+  return new UsersController(
+    { toDto, ...service } as unknown as UsersService,
+    service as unknown as UserSshKeysService,
+  );
 }
 
 describe('user update controller boundaries', () => {

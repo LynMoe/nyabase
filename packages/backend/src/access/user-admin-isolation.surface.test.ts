@@ -11,17 +11,23 @@ function readSrc(relativeFromBackendSrc: string): string {
  * never from a public `admin` / `includeAll` flag or a ForUser/ForAdmin pair.
  */
 describe('actor-scoped API surface', () => {
-  it('VolumesService methods take the actor first and expose no admin flags or wrappers', () => {
-    const src = readSrc('volumes/volumes.service.ts');
-    expect(src).not.toMatch(/For(User|Admin|System)\(/);
-    expect(src).not.toMatch(/'user'\s*\|\s*'admin'/);
-    for (const method of ['list', 'listShared', 'get', 'getShared', 'create', 'createShared',
-      'patch', 'patchShared', 'delete', 'deleteShared', 'attach', 'detach', 'capacity']) {
-      expect(src).toMatch(new RegExp(`async ${method}\\(\\s*actor: Actor`));
+  it('volume services take the actor first and expose no admin flags or wrappers', () => {
+    const methods: Record<string, string[]> = {
+      'volumes/local-volumes.service.ts': ['list', 'get', 'create', 'patch', 'delete', 'capacity'],
+      'volumes/shared-volumes.service.ts': ['list', 'get', 'create', 'patch', 'delete'],
+      'volumes/volume-attachments.service.ts': ['attach', 'detach'],
+    };
+    for (const [file, names] of Object.entries(methods)) {
+      const src = readSrc(file);
+      expect(src).not.toMatch(/For(User|Admin|System)\(/);
+      expect(src).not.toMatch(/'user'\s*\|\s*'admin'/);
+      for (const method of names) {
+        expect(src).toMatch(new RegExp(`async ${method}\\(\\s*actor: Actor`));
+      }
+      expect(src).not.toMatch(/includeAll\s*=/);
+      expect(src).not.toMatch(/async\s+\w+\([^)]*\badmin\s*=\s*false/);
+      expect(src).not.toMatch(/async\s+\w+\([^)]*\bincludeAll\b/);
     }
-    expect(src).not.toMatch(/includeAll\s*=/);
-    expect(src).not.toMatch(/async\s+\w+\([^)]*\badmin\s*=\s*false/);
-    expect(src).not.toMatch(/async\s+\w+\([^)]*\bincludeAll\b/);
   });
 
   it('ContainerControlService methods take the actor first and expose no admin flags or wrappers', () => {

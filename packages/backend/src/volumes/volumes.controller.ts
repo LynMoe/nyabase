@@ -21,12 +21,13 @@ import {
 } from '@nyabase/common';
 import { CurrentActor } from '../iam/decorators/current-actor.decorator.js';
 import type { Actor } from '../iam/actor.js';
-import { VolumesService } from './volumes.service.js';
+import { LocalVolumesService } from './local-volumes.service.js';
+import { VolumeAttachmentsService } from './volume-attachments.service.js';
 
 /** Local volumes: owners and `ManageVolumes` holders share one surface. */
 @Controller('volumes')
 export class VolumesController {
-  constructor(private readonly service: VolumesService) {}
+  constructor(private readonly service: LocalVolumesService) {}
 
   @Get()
   list(@CurrentActor() actor: Actor, @Query() query: Record<string, unknown>) {
@@ -71,7 +72,7 @@ export class VolumesController {
 
 @Controller('servers/:serverId/storage-capacity')
 export class StorageCapacityController {
-  constructor(private readonly service: VolumesService) {}
+  constructor(private readonly service: LocalVolumesService) {}
 
   /** `scope=mine` is the caller's grant view; `scope=all` is server-wide (`ManageServers`). */
   @Get()
@@ -86,7 +87,7 @@ export class StorageCapacityController {
 
 @Controller('containers/:containerId/volumes')
 export class ContainerVolumesController {
-  constructor(private readonly service: VolumesService) {}
+  constructor(private readonly service: VolumeAttachmentsService) {}
 
   @Post()
   @HttpCode(HttpStatus.ACCEPTED)

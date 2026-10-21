@@ -1,36 +1,12 @@
 import { Inject, Injectable, OnModuleInit } from '@nestjs/common';
-import { createHash, randomUUID } from 'node:crypto';
-import { isIP } from 'node:net';
-import {
-  Capability,
-  FailureCode,
-  PreflightStatus,
-  isUsableHostInCidr,
-  type NodeMetricSample,
-  type PreflightReport,
-} from '@nyabase/common';
+import { Capability, PreflightStatus } from '@nyabase/common';
 import { Kysely, sql } from 'kysely';
 import type { NyabaseDatabase } from '../platform/persistence-pg/database.types.js';
 import { PG_DATABASE } from '../platform/persistence-pg/tokens.js';
-import {
-  INFRASTRUCTURE_ADVISORY_NAMESPACE,
-  lockServerOnboarding,
-} from '../infrastructure/infrastructure.repository.js';
-import {
-  IncusError,
-  deriveInstanceHwaddr,
-  isOperationWaitNotFound,
-  normalizeCertificateFingerprint,
-  requestAndWait,
-  readAfterTimeout,
-  type IncusClientPort,
-  type IncusResponse,
-  type IncusSchema,
-} from '../incus/index.js';
-import { applyGuestNetwork, parseCidrPrefix } from '../containers/guest-network.adapter.js';
+import { IncusError } from '../incus/index.js';
 import { EphemeralStore } from '../platform/ephemeral-store.js';
 import { NyabaseConfigService } from '../platform/config/nyabase-config.service.js';
-import type { IntentFailure, IntentRecord } from '../reconcile/intent.repository.js';
+import type { IntentRecord } from '../reconcile/intent.repository.js';
 import type {
   ManagedReconciler,
   ReconcileOutcome,
@@ -40,110 +16,44 @@ import type {
 import { ReconcilerRegistry } from '../reconcile/reconciler-registry.service.js';
 import { AuthenticatedNodeMetricsPullAdapter } from '../metrics/node-metrics-pull.adapter.js';
 import { IncusPreflightChecksAdapter } from './preflight-checks.adapter.js';
-import { gpuPreflight } from '../gpu/preflight.js';
+import { ServerConnector } from './server-connector.js';
+import { ServerPreflightRunner } from './server-preflight-runner.js';
+import { ServerPreflightStore } from './server-preflight.store.js';
+import {
+  ServerRevisionChangedError,
+  failureReport,
+  isRecord,
+  preflightFailure,
+  revisionNumber,
+  staleOutcome,
+  type PreflightOptions,
+  type ServerRow,
+} from './server-preflight-support.js';
 
-interface ServerRow {
-  id: string;
-  name: string;
-  parent_interface: string | null;
-  dns_servers: string[] | null;
-  server_cert_fingerprint: string | null;
-  node_metrics_endpoint: string | null;
-  node_metrics_token_ciphertext: string | null;
-  status: 'online' | 'unreachable' | 'unknown';
-  system_pool_id: string | null;
-  preflight_status: 'not_run' | 'running' | 'passed' | 'failed';
-  gpu_enabled: boolean;
-  revision: string | number | bigint;
-}
-
-interface PreflightOptions {
-  readonly probeImageAlias: string;
-  readonly probeImageFingerprint: string;
-  readonly probePoolName: string;
-  readonly probeAddress: string;
-  readonly sourceServer?: string;
-}
-
-const TRUST_PROPAGATION_RETRY_DELAYS_MS = [100, 250, 500, 1_000] as const;
-
-function preflightFailure(
-  code: string,
-  message: string,
-  details: Record<string, unknown> = {},
-): IntentFailure {
-  return { code, message, details };
-}
-
-function normalized(value: string): string {
-  return value.replaceAll('-', '').toLowerCase();
-}
-
-function probeHardwareId(serverId: string): string {
-  return createHash('sha256')
-    .update(`nyabase-preflight:${normalized(serverId)}`, 'utf8')
-    .digest('hex')
-    .slice(0, 32);
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
-}
-
-function trustTokenReference(request: Record<string, unknown> | null): string | null {
-  const reference = request?.trustTokenRef;
-  return typeof reference === 'string' &&
-    /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(reference)
-    ? reference.toLowerCase()
-    : null;
-}
-
-interface ReportChecks {
-  api: 'pass' | 'fail';
-  parentInterface: 'pass' | 'fail';
-  nftables: 'pass' | 'fail';
-  ipv4Filtering: 'pass' | 'fail';
-  guestCanReachHost: 'pass' | 'fail';
-  networkPrerequisites: 'pass' | 'fail';
-  storagePool: 'pass' | 'fail';
-  simplestreamsImage: 'pass' | 'fail';
-  guestAddress: 'pass' | 'fail';
-  egress: 'pass' | 'fail';
-  nodeMetrics: 'pass' | 'warn' | 'fail';
-}
-
-interface IpPoolNetwork {
-  readonly gateway: string;
-  readonly cidr: string;
-  readonly prefixLength: number;
-}
-
-interface ParentNetworkLookup {
-  readonly network?: IncusSchema<'Network'>;
-  readonly networkMissing: boolean;
-  readonly state?: IncusSchema<'NetworkState'>;
-  readonly stateMissing: boolean;
-}
-
-class ServerRevisionChangedError extends Error {
-  constructor() {
-    super('The server configuration changed during preflight');
-    this.name = 'ServerRevisionChangedError';
-  }
-}
-
+/**
+ * Drives `server.connect` (trust + pin the Incus server) and `server.preflight`
+ * (prove the host can run guests). The work is in ServerConnector and
+ * ServerPreflightRunner; server state is written by the reconcile flow itself.
+ */
 @Injectable()
 export class ServerPreflightReconciler implements ManagedReconciler, OnModuleInit {
   readonly resourceType = 'server' as const;
+  private readonly store: ServerPreflightStore;
+  private readonly connector: ServerConnector;
+  private readonly runner: ServerPreflightRunner;
 
   constructor(
-    @Inject(PG_DATABASE) private readonly database: Kysely<NyabaseDatabase>,
+    @Inject(PG_DATABASE) database: Kysely<NyabaseDatabase>,
     private readonly nodeMetrics: AuthenticatedNodeMetricsPullAdapter,
     private readonly checks: IncusPreflightChecksAdapter,
-    private readonly ephemeral: EphemeralStore,
+    ephemeral: EphemeralStore,
     private readonly config: NyabaseConfigService,
     private readonly registry: ReconcilerRegistry,
-  ) {}
+  ) {
+    this.store = new ServerPreflightStore(database);
+    this.connector = new ServerConnector(this.store, ephemeral);
+    this.runner = new ServerPreflightRunner(this.store, this.connector, checks, nodeMetrics);
+  }
 
   onModuleInit(): void {
     this.registry.register(this);
@@ -175,7 +85,7 @@ export class ServerPreflightReconciler implements ManagedReconciler, OnModuleIni
     if (!context.client || !context.intent.serverId) {
       throw new IncusError('SERVER_UNREACHABLE', 'retry', { reason: 'missing_client' });
     }
-    const server = await this.readServer(context.intent.serverId);
+    const server = await this.store.readServer(context.intent.serverId);
     if (!server) {
       return {
         outcome: 'failed',
@@ -185,32 +95,51 @@ export class ServerPreflightReconciler implements ManagedReconciler, OnModuleIni
     const expectedRevision = context.intent.targetRevision;
     const currentRevision = revisionNumber(server.revision);
     if (currentRevision !== undefined && currentRevision !== expectedRevision) {
-      return this.staleOutcome(context.intent);
+      return staleOutcome(context.intent);
     }
     if (context.intent.kind === 'server.connect') {
       try {
-        await this.connectWithTrustToken(context.client, server, context.intent, context.signal);
+        await this.connector.connectWithTrustToken(
+          context.client,
+          server,
+          context.intent,
+          context.signal,
+        );
       } catch (error) {
         if (error instanceof ServerRevisionChangedError) {
-          return this.staleOutcome(context.intent);
+          return staleOutcome(context.intent);
         }
         throw error;
       }
       return { outcome: 'succeeded', observedRevision: context.intent.targetRevision };
     }
+    return this.reconcilePreflight(context, server, expectedRevision);
+  }
+
+  private async reconcilePreflight(
+    context: ReconcileRunContext,
+    server: ServerRow,
+    expectedRevision: number,
+  ): Promise<ReconcileOutcome> {
+    const serverId = server.id;
     const options = this.options(context.intent.request);
     if (
-      !(await this.projectServer(server.id, expectedRevision, {
+      !(await this.store.projectServer(serverId, expectedRevision, {
         preflight_status: 'running',
         status: 'unknown',
       }))
     ) {
-      return this.staleOutcome(context.intent);
+      return staleOutcome(context.intent);
     }
     try {
-      const report = await this.runPreflight(context.client, server, options, context.signal);
+      const report = await this.runner.runPreflight(
+        context.client!,
+        server,
+        options,
+        context.signal,
+      );
       if (
-        !(await this.projectServer(server.id, expectedRevision, {
+        !(await this.store.projectServer(serverId, expectedRevision, {
           status: 'online',
           last_seen_at: sql<Date>`clock_timestamp()`,
           last_error: null,
@@ -219,12 +148,12 @@ export class ServerPreflightReconciler implements ManagedReconciler, OnModuleIni
           preflight_report: JSON.stringify(report),
         }))
       ) {
-        return this.staleOutcome(context.intent);
+        return staleOutcome(context.intent);
       }
       return { outcome: 'succeeded', observedRevision: context.intent.targetRevision };
     } catch (error) {
       if (error instanceof ServerRevisionChangedError) {
-        return this.staleOutcome(context.intent);
+        return staleOutcome(context.intent);
       }
       const failure =
         error instanceof IncusError
@@ -235,788 +164,23 @@ export class ServerPreflightReconciler implements ManagedReconciler, OnModuleIni
             );
       const retryable = error instanceof IncusError && error.disposition === 'retry';
       if (
-        !(await this.projectServer(server.id, expectedRevision, {
+        !(await this.store.projectServer(serverId, expectedRevision, {
           status: failure.code === 'SERVER_UNREACHABLE' ? 'unreachable' : 'unknown',
           last_error: failure.message.slice(0, 4096),
           preflight_status: retryable ? 'running' : 'failed',
           preflight_checked_at: sql<Date>`clock_timestamp()`,
           preflight_report: JSON.stringify(
-            this.failureReport(
+            failureReport(
               retryable ? PreflightStatus.Running : PreflightStatus.Failed,
               failure.code,
             ),
           ),
         }))
       ) {
-        return this.staleOutcome(context.intent);
+        return staleOutcome(context.intent);
       }
       throw error;
     }
-  }
-
-  private async connectWithTrustToken(
-    client: IncusClientPort,
-    server: ServerRow,
-    intent: IntentRecord,
-    signal: AbortSignal,
-  ): Promise<void> {
-    await this.withServerConnectLock(server.id, () => (
-      this.connectWithClaimedTrustToken(client, server, intent, signal)
-    ));
-  }
-
-  private async withServerConnectLock<T>(serverId: string, work: () => Promise<T>): Promise<T> {
-    const acquireConnection = this.database.connection;
-    if (typeof acquireConnection !== 'function') {
-      return work();
-    }
-    return acquireConnection.call(this.database).execute(async (connection) => {
-      await sql`select pg_advisory_lock(
-        ${INFRASTRUCTURE_ADVISORY_NAMESPACE},
-        hashtext(${serverId})
-      )`.execute(connection);
-      try {
-        return await work();
-      } finally {
-        await sql`select pg_advisory_unlock(
-          ${INFRASTRUCTURE_ADVISORY_NAMESPACE},
-          hashtext(${serverId})
-        )`.execute(connection);
-      }
-    });
-  }
-
-  private async connectWithClaimedTrustToken(
-    client: IncusClientPort,
-    server: ServerRow,
-    intent: IntentRecord,
-    signal: AbortSignal,
-  ): Promise<void> {
-    const reference = trustTokenReference(intent.request);
-    const claimId = randomUUID();
-    let claimed = false;
-    let trustMutationSucceeded = false;
-    let claimConsumed = false;
-    try {
-      // Trust is a property of the Incus server, not of local state: a client
-      // that is already trusted (for example a retry after the trust call
-      // succeeded but the token commit was lost) needs no token.
-      const alreadyTrusted = await this.isClientTrusted(client, signal);
-      const trustToken = alreadyTrusted
-        ? null
-        : await this.database.transaction().execute(async (transaction) => {
-          await lockServerOnboarding(transaction);
-          if (!reference) {
-            throw new IncusError('TRUST_TOKEN_MISSING', 'managed_failure', {
-              reason: 'trust_token_reference_missing',
-            });
-          }
-          const token = this.ephemeral.claimTrustToken(server.id, reference, claimId);
-          claimed = token !== null;
-          if (!token) {
-            throw new IncusError('TRUST_TOKEN_MISSING', 'managed_failure', {
-              reason: 'trust_token_expired_or_lost_on_restart',
-            });
-          }
-          return token;
-        });
-
-      if (trustToken) {
-        try {
-          await readAfterTimeout(
-            () =>
-              requestAndWait(
-                client,
-                (options) =>
-                  client.trustClientCertificate(trustToken, `nyabase-${normalized(server.id)}`, {
-                    ...options,
-                    signal,
-                  }),
-                { signal },
-              ),
-            async () => {
-              await client.getServer({ signal });
-              return undefined;
-            },
-          );
-        } catch (error) {
-          throw this.classifyTrustMutationFailure(error);
-        }
-        trustMutationSucceeded = true;
-        const consumed = this.ephemeral.consumeClaimedTrustToken(
-          server.id,
-          reference!,
-          claimId,
-        );
-        if (!consumed) {
-          throw new IncusError('TRUST_TOKEN_UNAVAILABLE', 'retry', {
-            reason: 'trust_token_commit_lost_after_trust',
-          });
-        }
-        claimConsumed = true;
-      }
-
-      const expectedFingerprint =
-        typeof intent.request?.expectedServerCertFingerprint === 'string'
-          ? intent.request.expectedServerCertFingerprint
-          : undefined;
-      await this.connectWithPropagationRetry(
-        client,
-        server,
-        expectedFingerprint,
-        revisionNumber(server.revision),
-        signal,
-      );
-    } finally {
-      if (claimed && !claimConsumed && !trustMutationSucceeded && reference) {
-        this.ephemeral.releaseClaimedTrustToken(server.id, reference, claimId);
-      }
-    }
-  }
-
-  private async connectWithPropagationRetry(
-    client: IncusClientPort,
-    server: ServerRow,
-    expectedFingerprint: string | undefined,
-    expectedRevision: number | undefined,
-    signal: AbortSignal,
-  ): Promise<IncusResponse<IncusSchema<'Server'>>> {
-    for (let attempt = 0; ; attempt += 1) {
-      try {
-        return await this.connect(client, server, expectedFingerprint, expectedRevision, signal);
-      } catch (error) {
-        const delayMs = TRUST_PROPAGATION_RETRY_DELAYS_MS[attempt];
-        if (!(error instanceof IncusError) || error.code !== 'TLS_ERROR' || delayMs === undefined) {
-          throw error;
-        }
-        await this.waitForTrustPropagation(delayMs, signal);
-      }
-    }
-  }
-
-  private async connect(
-    client: IncusClientPort,
-    server: ServerRow,
-    expectedFingerprint?: string,
-    expectedRevision?: number,
-    signal?: AbortSignal,
-  ): Promise<IncusResponse<IncusSchema<'Server'>>> {
-    let response;
-    try {
-      response = signal ? await client.getServer({ signal }) : await client.getServer();
-    } catch (error) {
-      if (
-        error instanceof IncusError &&
-        (error.code === 'TLS_ERROR' || error.code === 'TLS_PIN_MISMATCH')
-      ) {
-        await this.markStatus(server.id, 'unknown', error.message, expectedRevision);
-      } else {
-        await this.markUnreachable(server.id, error, expectedRevision);
-      }
-      throw error;
-    }
-    const environment = response.metadata.environment;
-    const actualName = environment?.server_name;
-    const actualFingerprint = environment?.certificate_fingerprint
-      ?.replace(/[:-\s]/g, '')
-      .toLowerCase();
-    if (actualName && actualName !== server.name) {
-      await this.markStatus(
-        server.id,
-        'unknown',
-        'Incus server identity mismatch',
-        expectedRevision,
-      );
-      throw new IncusError('PREFLIGHT_IDENTITY_MISMATCH', 'managed_failure', {
-        expectedName: server.name,
-        actualName,
-      });
-    }
-    const pinnedFingerprint = expectedFingerprint ?? server.server_cert_fingerprint ?? undefined;
-    if (
-      (expectedFingerprint &&
-        (!actualFingerprint ||
-          normalizeCertificateFingerprint(expectedFingerprint) !== actualFingerprint)) ||
-      (pinnedFingerprint &&
-        (!actualFingerprint ||
-          normalizeCertificateFingerprint(pinnedFingerprint) !== actualFingerprint))
-    ) {
-      await this.markStatus(
-        server.id,
-        'unknown',
-        'Incus certificate fingerprint mismatch',
-        expectedRevision,
-      );
-      throw new IncusError('PREFLIGHT_IDENTITY_MISMATCH', 'managed_failure', {
-        ...(expectedFingerprint || pinnedFingerprint
-          ? { expectedFingerprint: expectedFingerprint ?? pinnedFingerprint }
-          : {}),
-        ...(actualFingerprint ? { actualFingerprint } : {}),
-      });
-    }
-    if (
-      !(await this.projectServer(server.id, expectedRevision, {
-        status: 'online',
-        server_cert_fingerprint: actualFingerprint ?? server.server_cert_fingerprint,
-        incus_version: environment?.server_version ?? null,
-        api_extensions: response.metadata.api_extensions ?? [],
-        last_seen_at: sql<Date>`clock_timestamp()`,
-        last_error: null,
-      }))
-    ) {
-      throw new ServerRevisionChangedError();
-    }
-    return response;
-  }
-
-  private async waitForTrustPropagation(delayMs: number, signal: AbortSignal): Promise<void> {
-    if (signal.aborted) {
-      throw new IncusError('INCUS_TIMEOUT', 'retry', {
-        phase: 'trust_propagation',
-      });
-    }
-    await new Promise<void>((resolve, reject) => {
-      let timer: NodeJS.Timeout | undefined;
-      const abort = (): void => {
-        if (timer) clearTimeout(timer);
-        signal.removeEventListener('abort', abort);
-        reject(
-          new IncusError('INCUS_TIMEOUT', 'retry', {
-            phase: 'trust_propagation',
-          }),
-        );
-      };
-      timer = setTimeout(() => {
-        signal.removeEventListener('abort', abort);
-        resolve();
-      }, delayMs);
-      timer.unref?.();
-      signal.addEventListener('abort', abort, { once: true });
-    });
-  }
-
-  private async isClientTrusted(
-    client: IncusClientPort,
-    signal: AbortSignal,
-  ): Promise<boolean> {
-    try {
-      const response = await client.getServer({ signal });
-      return response.metadata.auth === 'trusted';
-    } catch {
-      return false;
-    }
-  }
-
-  private classifyTrustMutationFailure(error: unknown): unknown {
-    if (
-      error instanceof IncusError &&
-      (error.code === 'INCUS_TIMEOUT' ||
-        error.code === 'SERVER_UNREACHABLE' ||
-        error.code === 'TLS_ERROR' ||
-        error.code === 'TLS_PIN_MISMATCH')
-    ) {
-      return error;
-    }
-    if (error instanceof IncusError) {
-      return new IncusError('TRUST_TOKEN_REJECTED', 'managed_failure', {
-        reason: error.code,
-      });
-    }
-    return error;
-  }
-
-  private async runPreflight(
-    client: IncusClientPort,
-    server: ServerRow,
-    options: PreflightOptions,
-    signal: AbortSignal,
-  ): Promise<PreflightReport> {
-    const expectedRevision = revisionNumber(server.revision);
-    const serverResponse = await this.connect(client, server, undefined, expectedRevision, signal);
-    const environment = serverResponse.metadata.environment;
-    const pools = await client.listStoragePools(1, { signal });
-    const resources = await client.getResources({ signal });
-    const storage = resources.metadata.storage ?? {};
-    const systemPool = server.system_pool_id
-      ? await this.database
-          .selectFrom('infra.storage_pools')
-          .select(['incus_name', 'server_id', 'registered'])
-          .where('id', '=', server.system_pool_id)
-          .executeTakeFirst()
-      : undefined;
-    if (
-      !systemPool ||
-      systemPool.server_id !== server.id ||
-      !systemPool.registered ||
-      !pools.metadata.some((pool) => pool.name === systemPool.incus_name)
-    ) {
-      throw new IncusError('MISSING_STORAGE_POOL', 'managed_failure', {
-        serverId: server.id,
-        systemPoolId: server.system_pool_id,
-      });
-    }
-    let nodeMetrics: {
-      readonly status: 'online' | 'unreachable' | 'unknown';
-      readonly report?: Record<string, unknown> & {
-        readonly samples?: readonly NodeMetricSample[];
-      };
-    };
-    let nodeMetricsFailure: unknown = null;
-    try {
-      nodeMetrics = await this.pullNodeMetrics(server, signal, expectedRevision);
-    } catch (error) {
-      nodeMetricsFailure = error;
-      nodeMetrics = {
-        status: 'unreachable',
-        report: {
-          warning: 'node_metrics_unavailable',
-        },
-      };
-    }
-    const metricEvidence = nodeMetricsFailure ? undefined : nodeMetrics.report;
-    const firstSamples = metricSamplesFrom(metricEvidence);
-    const network = await this.checks.checkNetworkPrerequisites(server.id, metricEvidence);
-    const gpu = gpuPreflight({
-      serverId: server.id,
-      resources: resources.metadata,
-      metricSamples: firstSamples,
-      enabled: server.gpu_enabled === true,
-    });
-    await this.database
-      .updateTable('infra.servers')
-      .set({ gpu_health: gpu.health })
-      .where('id', '=', server.id)
-      .execute();
-    const poolNetworks = await this.listIpPoolNetworks(server.id);
-    const parentInterface = server.parent_interface?.trim() || '';
-    const parentLookup = parentInterface
-      ? await this.lookupParentNetwork(client, parentInterface, signal)
-      : { networkMissing: true, stateMissing: true };
-    const extraHostAddresses = await this.listHostLanAddresses(
-      client,
-      parentInterface,
-      parentLookup,
-      signal,
-    );
-    const lan = this.evaluateLanBridge({
-      parentInterface,
-      network,
-      lookup: parentLookup,
-      pools: poolNetworks,
-      samples: firstSamples,
-      extraHostAddresses,
-    });
-    if (lan.reason) {
-      throw new IncusError('PREFLIGHT_FAILED', 'managed_failure', {
-        reason: lan.reason,
-        network: JSON.stringify(network).slice(0, 2048),
-      });
-    }
-    const reportEvidence: Record<string, unknown> = {
-      storage,
-      storagePools: pools.metadata.map((pool) => ({
-        name: pool.name,
-        driver: pool.driver,
-        status: pool.status,
-      })),
-      network,
-      gpu: gpu.evidence,
-      firewall: environment?.firewall ?? null,
-      nodeMetricsWarning: nodeMetricsFailure
-        ? nodeMetricsFailure instanceof Error
-          ? nodeMetricsFailure.message
-          : String(nodeMetricsFailure)
-        : null,
-      server: resources.metadata.system ?? {},
-    };
-    reportEvidence.nodeMetrics = nodeMetrics;
-    const checks: ReportChecks = {
-      api: 'pass',
-      parentInterface: 'pass',
-      nftables: 'pass',
-      ipv4Filtering: 'fail',
-      guestCanReachHost: 'fail',
-      networkPrerequisites: 'pass',
-      storagePool: 'pass',
-      simplestreamsImage: 'fail',
-      guestAddress: 'fail',
-      egress: 'fail',
-      nodeMetrics: nodeMetricsFailure ? 'warn' : nodeMetrics.status === 'online' ? 'pass' : 'fail',
-    };
-    const probeOptions = {
-      ...options,
-      probePoolName: options.probePoolName || systemPool?.incus_name || '',
-    };
-    if (
-      (!probeOptions.probeImageAlias && !probeOptions.probeImageFingerprint) ||
-      !probeOptions.probePoolName
-    ) {
-      throw new IncusError('PREFLIGHT_FAILED', 'managed_failure', {
-        reason: 'preflight_probe_options_missing',
-      });
-    }
-    if (
-      (probeOptions.probeImageAlias || probeOptions.probeImageFingerprint) &&
-      probeOptions.probePoolName
-    ) {
-      const probeName = `nyabase-preflight-${normalized(server.id)}`;
-      const hostIpv4 = lan.hostIpv4!;
-      const poolNetwork = poolNetworks[0]!;
-      await this.cleanupStaleProbe(client, probeName, server.id, signal);
-      let created = false;
-      let cleanupError: unknown;
-      let confirmedProbe: IncusSchema<'InstanceFull'> | undefined;
-      try {
-        const confirmProbeIdentity = async (): Promise<IncusSchema<'InstanceFull'>> => {
-          const probe = (await client.getInstanceFull(probeName, { signal })).metadata;
-          if (
-            probe.config?.[MANAGED_PROBE_KEY] !== 'true' ||
-            probe.config?.[PROBE_SERVER_KEY] !== normalized(server.id)
-          ) {
-            throw new IncusError('PREFLIGHT_IDENTITY_MISMATCH', 'managed_failure', {
-              probeName,
-            });
-          }
-          return probe;
-        };
-        const confirmProbe = async (): Promise<IncusSchema<'InstanceFull'>> => {
-          const probe = await confirmProbeIdentity();
-          // create then start is async: identity can appear while status is still Stopped.
-          // Confirm Running before egress/cleanup or cleanup skips stop and DELETE 400s.
-          const liveStatus = (
-            probe.state?.status ?? probe.status ?? ''
-          ).toLowerCase();
-          if (liveStatus !== 'running') {
-            throw new Error(`preflight probe not running yet (${liveStatus || 'unknown'})`);
-          }
-          confirmedProbe = probe;
-          return probe;
-        };
-        const createProbe = () =>
-          requestAndWait(
-            client,
-            (requestOptions) =>
-              client.createInstance(
-                {
-                  name: probeName,
-                  type: 'container',
-                  profiles: [],
-                  source: {
-                    type: 'image',
-                    ...(probeOptions.probeImageFingerprint
-                      ? { fingerprint: probeOptions.probeImageFingerprint }
-                      : {
-                        alias: probeOptions.probeImageAlias,
-                        server: probeOptions.sourceServer,
-                        protocol: probeOptions.sourceServer ? 'simplestreams' : undefined,
-                      }),
-                  },
-                  config: {
-                    [MANAGED_PROBE_KEY]: 'true',
-                    [PROBE_SERVER_KEY]: normalized(server.id),
-                    // Debian+wget TLS can SIGKILL (rc 137) under tight/default pressure.
-                    'limits.memory': PREFLIGHT_PROBE_MEMORY,
-                    'security.privileged': 'false',
-                  },
-                  devices: {
-                    root: {
-                      type: 'disk',
-                      path: '/',
-                      pool: probeOptions.probePoolName,
-                      size: '1073741824',
-                    },
-                    eth0: {
-                      type: 'nic',
-                      nictype: 'bridged',
-                      name: 'eth0',
-                      parent: parentInterface,
-                      hwaddr: deriveInstanceHwaddr(probeHardwareId(server.id)),
-                      'ipv4.address': probeOptions.probeAddress,
-                      'security.ipv4_filtering': 'true',
-                      'security.mac_filtering': 'true',
-                    },
-                  },
-                  start: false,
-                },
-                { ...requestOptions, signal },
-              ),
-            { signal },
-          );
-        try {
-          await readAfterTimeout(createProbe, async () => {
-            await confirmProbeIdentity();
-            return undefined;
-          });
-        } catch (error) {
-          if (!isOperationWaitNotFound(error)) throw error;
-          await confirmProbeIdentity();
-        }
-        created = true;
-        try {
-          await readAfterTimeout(
-            () =>
-              requestAndWait(
-                client,
-                (requestOptions) =>
-                  client.updateInstanceState(
-                    probeName,
-                    { action: 'start', force: false },
-                    { ...requestOptions, signal },
-                  ),
-                { signal },
-              ),
-            async () => {
-              await confirmProbe();
-              return undefined;
-            },
-          );
-        } catch (error) {
-          if (!isOperationWaitNotFound(error)) throw error;
-          await confirmProbe();
-        }
-        created = true;
-        const probe =
-          confirmedProbe ?? (await client.getInstanceFull(probeName, { signal })).metadata;
-        checks.simplestreamsImage = 'pass';
-        const probeDns = (server.dns_servers ?? []).filter((value) => value.trim().length > 0);
-        await applyGuestNetwork(
-          client,
-          probeName,
-          {
-            address: probeOptions.probeAddress,
-            prefixLength: poolNetwork.prefixLength,
-            gateway: poolNetwork.gateway,
-            dnsServers: probeDns.length > 0 ? probeDns : [poolNetwork.gateway],
-          },
-          signal,
-        );
-        checks.guestAddress =
-          probe.config?.[PROBE_SERVER_KEY] === normalized(server.id) ? 'pass' : 'fail';
-        const secondPull = await this.secondNodeMetricsPull(server, signal);
-        const secondSamples = metricSamplesFrom(secondPull.report);
-        if (unlabeledGauge(secondSamples, 'nyabase_node_network_nft_available') !== 1) {
-          throw new IncusError('PREFLIGHT_FAILED', 'managed_failure', {
-            reason: 'preflight_nft_unavailable',
-            serverId: server.id,
-          });
-        }
-        checks.nftables = 'pass';
-        if (
-          labeledGauge(secondSamples, 'nyabase_node_network_bridge_filter_address', {
-            address: probeOptions.probeAddress,
-          }) !== 1
-        ) {
-          throw new IncusError('PREFLIGHT_FAILED', 'managed_failure', {
-            reason: 'preflight_ipv4_filter_not_applied',
-            serverId: server.id,
-            probeAddress: probeOptions.probeAddress,
-          });
-        }
-        checks.ipv4Filtering = 'pass';
-        const reach = await this.checks.checkGuestCanReachHost(
-          server.id,
-          client,
-          probeName,
-          hostIpv4,
-          signal,
-        );
-        if (reach.status === 'pass') checks.guestCanReachHost = 'pass';
-        reportEvidence.guestCanReachHost = reach;
-        const egress = await this.checks.checkEgress(server.id, client, probeName, signal);
-        if (egress.status === 'pass') checks.egress = 'pass';
-        reportEvidence.egress = egress;
-      } finally {
-        if (created) {
-          try {
-            await this.stopAndDeleteProbe(client, probeName, signal);
-          } catch (error) {
-            cleanupError = error;
-          }
-        }
-      }
-      if (cleanupError) {
-        if (
-          !(await this.projectServer(server.id, expectedRevision, {
-            status: 'unknown',
-            last_error: `Preflight cleanup failed: ${String(cleanupError).slice(0, 3800)}`,
-            preflight_status: 'failed',
-            preflight_checked_at: sql<Date>`clock_timestamp()`,
-            preflight_report: JSON.stringify(
-              this.failureReport(PreflightStatus.Failed, FailureCode.PreflightCleanupFailed),
-            ),
-          }))
-        ) {
-          throw new ServerRevisionChangedError();
-        }
-        throw new IncusError('PREFLIGHT_CLEANUP_FAILED', 'managed_failure', {
-          error: String(cleanupError).slice(0, 1024),
-          ...(cleanupError instanceof IncusError
-            ? { code: cleanupError.code, details: cleanupError.details }
-            : {}),
-        });
-      }
-    }
-    return this.successReport(checks, gpu.evidence);
-  }
-
-  private async pullNodeMetrics(
-    server: ServerRow,
-    signal: AbortSignal,
-    expectedRevision?: number,
-  ): Promise<{
-    readonly status: 'online' | 'unreachable' | 'unknown';
-    readonly report?: Record<string, unknown>;
-  }> {
-    if (!server.node_metrics_endpoint || !server.node_metrics_token_ciphertext) {
-      if (
-        !(await this.projectServer(server.id, expectedRevision, {
-          node_metrics_status: 'unconfigured',
-          node_metrics_last_error: 'Node metrics endpoint or token is not configured',
-        }))
-      ) {
-        throw new ServerRevisionChangedError();
-      }
-      throw new IncusError('PREFLIGHT_FAILED', 'managed_failure', {
-        reason: 'node_metrics_pull_unconfigured',
-      });
-    }
-    try {
-      const result = await this.nodeMetrics.pull(
-        server.id,
-        server.node_metrics_endpoint,
-        server.node_metrics_token_ciphertext,
-        signal,
-      );
-      if (result.status !== 'online') {
-        if (
-          !(await this.projectServer(server.id, expectedRevision, {
-            node_metrics_status: result.status,
-            node_metrics_outage_since: sql<Date>`coalesce(node_metrics_outage_since, clock_timestamp())`,
-            node_metrics_last_error: `Node metrics status: ${result.status}`,
-          }))
-        ) {
-          throw new ServerRevisionChangedError();
-        }
-        throw new IncusError('PREFLIGHT_FAILED', 'managed_failure', {
-          reason: 'node_metrics_pull_not_online',
-          status: result.status,
-        });
-      }
-      if (
-        !(await this.projectServer(server.id, expectedRevision, {
-          node_metrics_status: 'online',
-          node_metrics_last_success_at: sql<Date>`clock_timestamp()`,
-          node_metrics_outage_since: null,
-          node_metrics_last_error: null,
-        }))
-      ) {
-        throw new ServerRevisionChangedError();
-      }
-      return result;
-    } catch (error) {
-      if (error instanceof ServerRevisionChangedError) throw error;
-      if (error instanceof IncusError) throw error;
-      const code =
-        typeof error === 'object' &&
-        error !== null &&
-        'code' in error &&
-        typeof error.code === 'string'
-          ? error.code
-          : 'NODE_METRICS_PULL_FAILED';
-      if (
-        !(await this.projectServer(server.id, expectedRevision, {
-          node_metrics_status: 'unknown',
-          node_metrics_outage_since: sql<Date>`coalesce(node_metrics_outage_since, clock_timestamp())`,
-          node_metrics_last_error: `Node metrics pull failed: ${code}`,
-        }))
-      ) {
-        throw new ServerRevisionChangedError();
-      }
-      throw new IncusError('PREFLIGHT_FAILED', 'managed_failure', {
-        reason: 'node_metrics_pull_failed',
-        code,
-      });
-    }
-  }
-
-  private async cleanupStaleProbe(
-    client: IncusClientPort,
-    probeName: string,
-    serverId: string,
-    signal: AbortSignal,
-  ): Promise<void> {
-    let existing: IncusSchema<'InstanceFull'>;
-    try {
-      existing = (await client.getInstanceFull(probeName, { signal })).metadata;
-    } catch (error) {
-      if (error instanceof IncusError && error.code === 'INCUS_NOT_FOUND') return;
-      throw error;
-    }
-    const config = existing.config ?? {};
-    if (config[MANAGED_PROBE_KEY] !== 'true' || config[PROBE_SERVER_KEY] !== normalized(serverId)) {
-      throw new IncusError('PREFLIGHT_IDENTITY_MISMATCH', 'managed_failure', {
-        probeName,
-      });
-    }
-    await this.stopAndDeleteProbe(client, probeName, signal);
-  }
-
-  private async stopAndDeleteProbe(
-    client: IncusClientPort,
-    probeName: string,
-    signal: AbortSignal,
-  ): Promise<void> {
-    let liveStatus = '';
-    try {
-      liveStatus = (
-        (await client.getInstanceState(probeName, { signal })).metadata.status ?? ''
-      ).toLowerCase();
-    } catch (error) {
-      if (error instanceof IncusError && error.code === 'INCUS_NOT_FOUND') return;
-      throw error;
-    }
-    if (liveStatus === 'running') {
-      await readAfterTimeout(
-        () =>
-          requestAndWait(client, (options) =>
-            client.updateInstanceState(
-              probeName,
-              { action: 'stop', force: true },
-              { ...options, signal },
-            ),
-          ),
-        async () => {
-          const state = (await client.getInstanceState(probeName, { signal })).metadata;
-          if (state.status?.toLowerCase() !== 'running') return undefined;
-          throw new Error('preflight probe stop not confirmed');
-        },
-      );
-    }
-    await readAfterTimeout(
-      () =>
-        requestAndWait(client, (options) =>
-          client.deleteInstance(probeName, { ...options, signal }),
-        ),
-      async () => {
-        try {
-          await client.getInstanceFull(probeName, { signal });
-        } catch (error) {
-          if (error instanceof IncusError && error.code === 'INCUS_NOT_FOUND') return undefined;
-          throw error;
-        }
-        throw new Error('preflight probe still exists');
-      },
-    );
-    try {
-      await client.getInstanceFull(probeName, { signal });
-    } catch (error) {
-      if (error instanceof IncusError && error.code === 'INCUS_NOT_FOUND') return;
-      throw error;
-    }
-    throw new IncusError('PREFLIGHT_CLEANUP_FAILED', 'managed_failure', {
-      probeName,
-      reason: 'probe_still_present',
-    });
   }
 
   private options(request: Record<string, unknown> | null): PreflightOptions {
@@ -1037,416 +201,4 @@ export class ServerPreflightReconciler implements ManagedReconciler, OnModuleIni
         stringValue('sourceServer') ?? this.config.get<string>('incus.preflightSourceServer'),
     };
   }
-
-  private successReport(checks: ReportChecks, gpu?: Record<string, unknown>): PreflightReport {
-    const controlReady = Object.entries(checks).every(([name, value]) => {
-      if (name === 'nodeMetrics') return value === 'pass' || value === 'warn';
-      return value === 'pass';
-    });
-    return {
-      status: PreflightStatus.Passed,
-      controlReady,
-      checks,
-      failureCode: null,
-      checkedAt: new Date().toISOString(),
-      ...(gpu ? { gpu } : {}),
-    };
-  }
-
-  private failureReport(
-    status: PreflightStatus.Running | PreflightStatus.Failed,
-    code: string,
-  ): PreflightReport {
-    const failureCode = (Object.values(FailureCode) as string[]).includes(code)
-      ? (code as FailureCode)
-      : FailureCode.PreflightFailed;
-    return {
-      status,
-      controlReady: false,
-      checks: {
-        api: 'fail',
-        parentInterface: 'fail',
-        nftables: 'fail',
-        ipv4Filtering: 'fail',
-        guestCanReachHost: 'fail',
-        networkPrerequisites: 'fail',
-        storagePool: 'fail',
-        simplestreamsImage: 'fail',
-        guestAddress: 'fail',
-        egress: 'fail',
-        nodeMetrics: 'fail',
-      },
-      failureCode,
-      checkedAt: status === PreflightStatus.Running ? null : new Date().toISOString(),
-    };
-  }
-
-  private staleOutcome(intent: IntentRecord): ReconcileOutcome {
-    return {
-      outcome: 'succeeded',
-      observedRevision: intent.targetRevision,
-      stale: true,
-    };
-  }
-
-  private async listIpPoolNetworks(serverId: string): Promise<IpPoolNetwork[]> {
-    const rows = await this.database
-      .selectFrom('infra.ip_pool_servers as binding')
-      .innerJoin('infra.ip_pools as pool', 'pool.id', 'binding.pool_id')
-      .select(['pool.gateway', 'pool.cidr'])
-      .where('binding.server_id', '=', serverId)
-      .orderBy('pool.created_at', 'asc')
-      .orderBy('pool.id', 'asc')
-      .execute();
-    const networks: IpPoolNetwork[] = [];
-    for (const row of rows) {
-      const gateway = typeof row.gateway === 'string' ? row.gateway.trim() : '';
-      const cidr = typeof row.cidr === 'string' ? row.cidr.trim() : '';
-      const prefixLength = parseCidrPrefix(cidr);
-      if (!gateway || !cidr || prefixLength === undefined) continue;
-      networks.push({
-        gateway: gateway.includes('/') ? gateway.split('/')[0]! : gateway,
-        cidr,
-        prefixLength,
-      });
-    }
-    return networks;
-  }
-
-  private async lookupParentNetwork(
-    client: IncusClientPort,
-    parentInterface: string,
-    signal: AbortSignal,
-  ): Promise<ParentNetworkLookup> {
-    let network: IncusSchema<'Network'> | undefined;
-    let networkMissing = false;
-    try {
-      network = (await client.getNetwork(parentInterface, { signal })).metadata;
-    } catch (error) {
-      if (!(error instanceof IncusError) || error.code !== 'INCUS_NOT_FOUND') throw error;
-      networkMissing = true;
-    }
-    let state: IncusSchema<'NetworkState'> | undefined;
-    let stateMissing = false;
-    if (networkMissing) {
-      stateMissing = true;
-    } else {
-      try {
-        state = (await client.getNetworkState(parentInterface, { signal })).metadata;
-      } catch (error) {
-        if (!(error instanceof IncusError) || error.code !== 'INCUS_NOT_FOUND') throw error;
-        stateMissing = true;
-      }
-    }
-    return { network, networkMissing, state, stateMissing };
-  }
-
-  private async listHostLanAddresses(
-    client: IncusClientPort,
-    parentInterface: string,
-    parentLookup: ParentNetworkLookup,
-    signal: AbortSignal,
-  ): Promise<string[]> {
-    const names = new Set<string>();
-    if (parentInterface) names.add(parentInterface);
-    try {
-      const listed = (await client.listNetworks({ signal })).metadata ?? [];
-      for (const entry of listed) {
-        const name = networkNameFromListEntry(entry);
-        if (name && !isIgnoredHostInterface(name)) names.add(name);
-      }
-    } catch {
-      // Parent state plus exporter evidence still have to prove a pool address.
-    }
-    const addresses: string[] = [];
-    for (const name of names) {
-      if (name === parentInterface && parentLookup.state?.addresses) {
-        addresses.push(...inetGlobalAddresses(parentLookup.state.addresses));
-        continue;
-      }
-      try {
-        const state = (await client.getNetworkState(name, { signal })).metadata;
-        addresses.push(...inetGlobalAddresses(state?.addresses));
-      } catch {
-        continue;
-      }
-    }
-    return [...new Set(addresses)];
-  }
-
-  private evaluateLanBridge(input: {
-    readonly parentInterface: string;
-    readonly network: Record<string, unknown>;
-    readonly lookup: ParentNetworkLookup;
-    readonly pools: readonly IpPoolNetwork[];
-    readonly samples: readonly NodeMetricSample[];
-    readonly extraHostAddresses?: readonly string[];
-  }): { readonly reason?: string; readonly hostIpv4?: string } {
-    const { parentInterface, network, lookup, pools, samples } = input;
-    if (!parentInterface) {
-      return { reason: 'preflight_lan_bridge_missing' };
-    }
-    if (pools.length === 0) {
-      return { reason: 'preflight_ip_pool_missing' };
-    }
-    const exporterIsBridge = network.isBridge === true
-      || unlabeledOrInterfaceGauge(samples, 'nyabase_node_network_is_bridge', parentInterface) === 1;
-    const parentExists = parentInterfaceExists(samples, parentInterface, network);
-    if (lookup.networkMissing) {
-      if (!exporterIsBridge) {
-        return {
-          reason: parentExists ? 'preflight_parent_not_bridge' : 'preflight_lan_bridge_missing',
-        };
-      }
-    } else {
-      if (lookup.network?.type !== 'bridge') {
-        return { reason: 'preflight_parent_not_bridge' };
-      }
-      if (lookup.network.managed === true) {
-        return { reason: 'preflight_parent_is_managed' };
-      }
-    }
-    const incusSlaves = lookup.state?.bridge?.upper_devices ?? [];
-    const exporterSlaves = Array.isArray(network.slaves)
-      ? network.slaves.filter((value): value is string => typeof value === 'string')
-      : [];
-    const slaves = incusSlaves.length > 0 ? incusSlaves : exporterSlaves;
-    if (slaves.length === 0) {
-      return { reason: 'preflight_bridge_has_no_uplink' };
-    }
-    const ipv4Present = isRecord(network.ipv4Present) ? network.ipv4Present : {};
-    for (const slave of slaves) {
-      if (!(slave in ipv4Present)) {
-        return { reason: 'preflight_slave_ipv4_unproven' };
-      }
-      if (ipv4Present[slave] !== false) {
-        return { reason: 'preflight_host_ip_still_on_uplink' };
-      }
-    }
-    if (network.nftAvailable !== true) {
-      return { reason: 'preflight_nft_unavailable' };
-    }
-    const hostIpv4 = pickHostIpv4FromList(
-      [
-        ...inetGlobalAddresses(lookup.state?.addresses),
-        ...(input.extraHostAddresses ?? []),
-      ],
-      pools,
-    );
-    if (!hostIpv4) {
-      return { reason: 'preflight_host_ip_not_in_pool' };
-    }
-    return { hostIpv4 };
-  }
-
-  private async secondNodeMetricsPull(
-    server: ServerRow,
-    signal: AbortSignal,
-  ): Promise<{
-    readonly status: 'online' | 'unreachable' | 'unknown';
-    readonly report?: Record<string, unknown> & {
-      readonly samples?: readonly NodeMetricSample[];
-    };
-  }> {
-    if (!server.node_metrics_endpoint || !server.node_metrics_token_ciphertext) {
-      throw new IncusError('PREFLIGHT_FAILED', 'managed_failure', {
-        reason: 'preflight_nft_unavailable',
-      });
-    }
-    try {
-      const result = await this.nodeMetrics.pull(
-        server.id,
-        server.node_metrics_endpoint,
-        server.node_metrics_token_ciphertext,
-        signal,
-      );
-      if (result.status !== 'online') {
-        throw new IncusError('PREFLIGHT_FAILED', 'managed_failure', {
-          reason: 'preflight_nft_unavailable',
-          status: result.status,
-        });
-      }
-      return result;
-    } catch (error) {
-      if (error instanceof IncusError) throw error;
-      throw new IncusError('PREFLIGHT_FAILED', 'managed_failure', {
-        reason: 'preflight_nft_unavailable',
-      });
-    }
-  }
-
-  private async projectServer(
-    serverId: string,
-    expectedRevision: number | undefined,
-    values: Record<string, unknown>,
-  ): Promise<boolean> {
-    const query = this.database
-      .updateTable('infra.servers')
-      .set(values as never)
-      .where((expression) =>
-        expectedRevision === undefined
-          ? expression('id', '=', serverId)
-          : expression.and([
-              expression('id', '=', serverId),
-              expression('revision', '=', String(expectedRevision)),
-            ]),
-      );
-    const result = await query.execute();
-    if (!Array.isArray(result)) return true;
-    const updateResult = result[0] as { readonly numUpdatedRows?: number | bigint } | undefined;
-    return updateResult?.numUpdatedRows === undefined || Number(updateResult.numUpdatedRows) > 0;
-  }
-
-  private readServer(id: string): Promise<ServerRow | undefined> {
-    return this.database
-      .selectFrom('infra.servers')
-      .select([
-        'id',
-        'name',
-        'parent_interface',
-        'dns_servers',
-        'server_cert_fingerprint',
-        'node_metrics_endpoint',
-        'node_metrics_token_ciphertext',
-        'status',
-        'system_pool_id',
-        'preflight_status',
-        'gpu_enabled',
-        'revision',
-      ])
-      .where('id', '=', id)
-      .executeTakeFirst();
-  }
-
-  private async markUnreachable(
-    id: string,
-    error: unknown,
-    expectedRevision?: number,
-  ): Promise<void> {
-    await this.markStatus(
-      id,
-      'unreachable',
-      error instanceof Error ? error.message : String(error),
-      expectedRevision,
-    );
-  }
-
-  private async markStatus(
-    id: string,
-    status: 'online' | 'unreachable' | 'unknown',
-    lastError: string | null,
-    expectedRevision?: number,
-  ): Promise<void> {
-    await this.projectServer(id, expectedRevision, {
-      status,
-      last_error: lastError?.slice(0, 4096) ?? null,
-    });
-  }
-}
-
-const MANAGED_PROBE_KEY = 'user.nyabase.preflight';
-const PROBE_SERVER_KEY = 'user.nyabase.server_id';
-/** Headroom for Debian probe boot + wget TLS; rc 137 was SIGKILL under pressure. */
-const PREFLIGHT_PROBE_MEMORY = '256MiB';
-
-function revisionNumber(value: string | number | bigint | undefined): number | undefined {
-  if (value === undefined) return undefined;
-  const revision = Number(value);
-  return Number.isSafeInteger(revision) && revision > 0 ? revision : undefined;
-}
-
-function metricSamplesFrom(
-  evidence: Record<string, unknown> | undefined,
-): readonly NodeMetricSample[] {
-  const samples = evidence?.samples;
-  if (!Array.isArray(samples)) return [];
-  return samples.filter((sample): sample is NodeMetricSample => (
-    typeof sample === 'object'
-    && sample !== null
-    && !Array.isArray(sample)
-    && typeof (sample as Record<string, unknown>).name === 'string'
-    && typeof (sample as Record<string, unknown>).value === 'number'
-    && Number.isFinite((sample as Record<string, unknown>).value)
-    && typeof (sample as Record<string, unknown>).labels === 'object'
-    && (sample as Record<string, unknown>).labels !== null
-  ));
-}
-
-function unlabeledGauge(samples: readonly NodeMetricSample[], name: string): number | undefined {
-  return samples.find((sample) => sample.name === name && Object.keys(sample.labels).length === 0)
-    ?.value;
-}
-
-function labeledGauge(
-  samples: readonly NodeMetricSample[],
-  name: string,
-  labels: Readonly<Record<string, string>>,
-): number | undefined {
-  return samples.find((sample) => {
-    if (sample.name !== name) return false;
-    return Object.entries(labels).every(([key, value]) => sample.labels[key] === value);
-  })?.value;
-}
-
-function unlabeledOrInterfaceGauge(
-  samples: readonly NodeMetricSample[],
-  name: string,
-  iface: string,
-): number | undefined {
-  return labeledGauge(samples, name, { interface: iface });
-}
-
-function parentInterfaceExists(
-  samples: readonly NodeMetricSample[],
-  parentInterface: string,
-  network: Record<string, unknown>,
-): boolean {
-  if (network.parentInterface === parentInterface) return true;
-  return samples.some((sample) => sample.labels.interface === parentInterface);
-}
-
-function isExcludedIpv4(address: string): boolean {
-  const parts = address.split('.').map(Number);
-  if (parts.length !== 4 || parts.some((part) => !Number.isInteger(part))) return true;
-  if (parts[0] === 127) return true;
-  if (parts[0] === 169 && parts[1] === 254) return true;
-  return false;
-}
-
-function inetGlobalAddresses(
-  addresses: IncusSchema<'NetworkState'>['addresses'] | undefined,
-): string[] {
-  if (!addresses) return [];
-  const result: string[] = [];
-  for (const entry of addresses) {
-    if (entry.family !== 'inet' || entry.scope !== 'global') continue;
-    const raw = typeof entry.address === 'string' ? entry.address.trim() : '';
-    const address = raw.includes('/') ? raw.split('/')[0]! : raw;
-    if (isIP(address) !== 4 || isExcludedIpv4(address)) continue;
-    result.push(address);
-  }
-  return result;
-}
-
-function pickHostIpv4FromList(
-  addresses: readonly string[],
-  pools: readonly IpPoolNetwork[],
-): string | undefined {
-  for (const address of addresses) {
-    if (pools.some((pool) => isUsableHostInCidr(pool.cidr, address))) {
-      return address;
-    }
-  }
-  return undefined;
-}
-
-function networkNameFromListEntry(entry: string): string {
-  const trimmed = entry.trim();
-  const match = /\/1\.0\/networks\/([^/]+)$/.exec(trimmed);
-  return decodeURIComponent(match?.[1] ?? trimmed);
-}
-
-function isIgnoredHostInterface(name: string): boolean {
-  return /^(lo|docker0|cni.*|flannel.*|calico.*|veth.*|wg\d*|tun.*|tap.*|gre.*|gretap.*|erspan.*|dummy.*|virbr.*|incusbr.*|lxcbr.*|fwbr.*|br-.+)$/i
-    .test(name);
 }

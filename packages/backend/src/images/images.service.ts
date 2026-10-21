@@ -29,7 +29,7 @@ import { PgTransactionManager } from '../platform/persistence-pg/transaction.js'
 import { AccessResolverService } from '../iam/access-resolver.service.js';
 import { AuditService } from '../iam/audit.service.js';
 import { assertListScope, type Actor } from '../iam/actor.js';
-import { InfrastructureRepository } from '../infrastructure/infrastructure.repository.js';
+import { lockImageCapacity } from '../platform/persistence-pg/advisory-locks.js';
 import { IntentRepository } from '../reconcile/intent.repository.js';
 import { isoDate, numberValue } from '../platform/domain-utils.js';
 import { acceptedIntent } from '../reconcile/accepted-intent.js';
@@ -58,7 +58,6 @@ export class ImagesService {
     private readonly access: AccessResolverService,
     private readonly audit: AuditService,
     private readonly intents: IntentRepository,
-    private readonly infrastructure: InfrastructureRepository,
     private readonly catalog: ImageCatalogService,
   ) {}
 
@@ -186,7 +185,7 @@ export class ImagesService {
         actorId,
         [Capability.ManageImages],
       );
-      await this.infrastructure.lockImageCapacity(transaction);
+      await lockImageCapacity(transaction);
       const count = await transaction.selectFrom('infra.images')
         .select(({ fn }) => fn.countAll<number>().as('count'))
         .executeTakeFirstOrThrow();

@@ -8,8 +8,8 @@ import {
   IncusError,
   type DesiredInstanceSpec,
 } from '../incus/index.js';
+import { ContainerReconciler } from './container-reconciler.service.js';
 import {
-  ContainerReconciler,
   decideRootShrink,
   managedContainerIdentity,
   observedDiskUsageBytes,
@@ -18,10 +18,15 @@ import {
   sshFileMetadataMatches,
   sshFileNeedsReconcile,
   sshObservation,
-} from './container-reconciler.service.js';
+} from './container-reconcile-support.js';
 import type { IntentRecord } from '../reconcile/intent.repository.js';
 import type { ReconcileRunContext } from '../reconcile/managed-reconciler.js';
 import { IncusContainerSshStateAdapter } from './container-ssh-state.adapter.js';
+
+/** The reconciler's private SQL store, where the tests intercept data access. */
+function storeOf(reconciler: ContainerReconciler): object {
+  return (reconciler as unknown as { store: object }).store;
+}
 
 const CONTAINER_ID = '11111111-1111-4111-8111-111111111111';
 const SERVER_ID = '22222222-2222-4222-8222-222222222222';
@@ -300,14 +305,14 @@ describe('container reconciler §15.1 fixture-driven Incus mocks', () => {
     });
     let revision = 3;
     vi.spyOn(
-      reconciler as unknown as { readContainer: () => Promise<unknown> },
+      storeOf(reconciler) as unknown as { readContainer: () => Promise<unknown> },
       'readContainer',
     ).mockImplementation(async () => containerRow({
       status: 'Running',
       powerIntent: 'running',
     }));
     vi.spyOn(
-      reconciler as unknown as { rereadDesired: () => Promise<unknown> },
+      storeOf(reconciler) as unknown as { rereadDesired: () => Promise<unknown> },
       'rereadDesired',
     ).mockImplementation(async () => {
       const desired = rows
@@ -990,11 +995,11 @@ async function harness(options: HarnessOptions) {
     { register: vi.fn() } as never,
   );
   vi.spyOn(
-    reconciler as unknown as { readContainer: () => Promise<unknown> },
+    storeOf(reconciler) as unknown as { readContainer: () => Promise<unknown> },
     'readContainer',
   ).mockResolvedValue(containerRow(options));
   vi.spyOn(
-    reconciler as unknown as { readAttachments: () => Promise<unknown> },
+    storeOf(reconciler) as unknown as { readAttachments: () => Promise<unknown> },
     'readAttachments',
   ).mockResolvedValue(attachmentRows(options.attachments ?? []));
   vi.spyOn(

@@ -18,10 +18,11 @@ import { ContainerActionPolicyService } from '../containers/container-action-pol
 import { ContainerControlRepository } from '../containers/container-control.repository.js';
 import { ContainerControlService } from '../containers/container-control.service.js';
 import { IpPoolsRepository } from '../ip-pools/ip-pools.repository.js';
-import { StoragePoolsService } from '../storage-pools/storage-pools.service.js';
+import { SharedBackendExecutorsService } from '../storage-pools/shared-backend-executors.service.js';
+import { StoragePoolDiscoveryService } from '../storage-pools/storage-pool-discovery.service.js';
 import { ContainerSshConvergenceService } from '../containers/container-ssh-convergence.service.js';
 import { VolumesRepository } from './volumes.repository.js';
-import { VolumesService } from './volumes.service.js';
+import { makeVolumeServices } from './volume-services.test-helper.js';
 import { GpuClaimsRepository } from '../gpu/gpu-claims.repository.js';
 import { noopWake } from '../reconcile/reconcile-wake.test-helper.js';
 
@@ -94,7 +95,7 @@ async function insertLocalPool(database: Kysely<NyabaseDatabase>, serverId: stri
 }
 
 function makeService(database: Kysely<NyabaseDatabase>) {
-  return new VolumesService(
+  return makeVolumeServices(
     new VolumesRepository(database),
     new StoragePoolsRepository(database),
     new PgTransactionManager(database),
@@ -553,7 +554,7 @@ describePg('volume capacity locking and scope exclusions', () => {
             options.onRetry?.(event);
           },
         }));
-      const volumeService = new VolumesService(
+      const volumeService = makeVolumeServices(
         new VolumesRepository(database),
         new StoragePoolsRepository(database),
         transactionManager,
@@ -589,7 +590,7 @@ describePg('volume capacity locking and scope exclusions', () => {
           database,
           containerIntents,
         ),
-        volumeService,
+        volumeService.attachments,
         new GpuClaimsRepository(database),
       );
 
@@ -673,7 +674,7 @@ describePg('volume capacity locking and scope exclusions', () => {
             options.onRetry?.(event);
           },
         }));
-      const volumeService = new VolumesService(
+      const volumeService = makeVolumeServices(
         new VolumesRepository(database),
         new StoragePoolsRepository(database),
         transactionManager,
@@ -682,11 +683,11 @@ describePg('volume capacity locking and scope exclusions', () => {
         { append: vi.fn().mockResolvedValue(undefined) } as never,
         { get: vi.fn().mockRejectedValue(new Error('Incus is unavailable in this test')), listServerIds: vi.fn() } as never,
       );
-      const storageService = new StoragePoolsService(
-        new StoragePoolsRepository(database),
+      const poolsRepository = new StoragePoolsRepository(database);
+      const storageService = new SharedBackendExecutorsService(
+        poolsRepository,
         transactionManager,
-        database,
-        {} as never,
+        new StoragePoolDiscoveryService(poolsRepository, transactionManager, {} as never),
       );
 
       const results = await Promise.allSettled([

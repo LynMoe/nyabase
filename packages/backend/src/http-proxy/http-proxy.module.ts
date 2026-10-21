@@ -6,14 +6,21 @@ import {
   HttpProxyStatusController,
 } from './http-proxy.controller.js';
 import { HttpProxyGateway } from './http-proxy-gateway.js';
-import { HttpProxyService } from './http-proxy.service.js';
+import { HttpDomainPoolsService } from './http-domain-pools.service.js';
+import { HttpProxyBindingsService } from './http-proxy-bindings.service.js';
+import { HttpProxySnapshotService } from './http-proxy-snapshot.service.js';
 
 @Module({
   imports: [
     ProxySnapshotNotifierModule,
   ],
-  providers: [HttpProxyService, HttpProxyGateway],
+  providers: [
+    HttpProxyBindingsService,
+    HttpDomainPoolsService,
+    HttpProxySnapshotService,
+    HttpProxyGateway,
+  ],
   controllers: [HttpProxyController, HttpProxyDomainPoolsController, HttpProxyStatusController],
-  exports: [HttpProxyService, HttpProxyGateway],
+  exports: [HttpProxyGateway],
 })
 export class HttpProxyModule {}

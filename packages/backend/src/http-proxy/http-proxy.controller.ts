@@ -14,13 +14,14 @@ import { CurrentActor } from '../iam/decorators/current-actor.decorator.js';
 import { RequireAnyCaps, RequireCaps } from '../iam/decorators/require-caps.decorator.js';
 import type { Actor } from '../iam/actor.js';
 import { HttpProxyGateway } from './http-proxy-gateway.js';
-import { HttpProxyService } from './http-proxy.service.js';
+import { HttpDomainPoolsService } from './http-domain-pools.service.js';
+import { HttpProxyBindingsService } from './http-proxy-bindings.service.js';
 
 /** HTTP proxy bindings: owners manage their own; `scope=all` lists everyone's (`ManageSystemSettings`). */
 @Controller('http-proxy/bindings')
 export class HttpProxyController {
   constructor(
-    private service: HttpProxyService,
+    private service: HttpProxyBindingsService,
     private gateway: HttpProxyGateway,
   ) {}
 
@@ -55,7 +56,7 @@ export class HttpProxyController {
 @Controller('http-proxy/domain-pools')
 export class HttpProxyDomainPoolsController {
   constructor(
-    private service: HttpProxyService,
+    private service: HttpDomainPoolsService,
     private gateway: HttpProxyGateway,
   ) {}
 

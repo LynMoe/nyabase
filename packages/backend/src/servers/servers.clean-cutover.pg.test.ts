@@ -5,7 +5,6 @@ import { withPostgresTestDatabase } from '../platform/persistence-pg/postgres-te
 import { PgTransactionManager } from '../platform/persistence-pg/transaction.js';
 import { VOLUME_DESTROY_PLACEMENT_ID } from '../reconcile/reconcile-claim.repository.js';
 import { ServersService } from './servers.service.js';
-import { InfrastructureRepository } from '../infrastructure/infrastructure.repository.js';
 
 const describePg = process.env.NYABASE_TEST_DATABASE_URL ? describe : describe.skip;
 
@@ -50,7 +49,6 @@ describePg('clean Incus server contract', () => {
         {} as never,
         {} as never,
         { keyEncryptionSecret: () => 'test-key-secret' } as never,
-        new InfrastructureRepository(database),
         { invalidate: vi.fn() } as never,
       );
 
@@ -140,7 +138,6 @@ describePg('clean Incus server contract', () => {
         { assertActorCapabilitiesInTransaction: vi.fn() } as never,
         { append: vi.fn() } as never,
         { keyEncryptionSecret: () => 'test-key-secret' } as never,
-        new InfrastructureRepository(database),
         { invalidate: vi.fn() } as never,
       );
 
@@ -513,7 +510,6 @@ describePg('clean Incus server contract', () => {
         { assertActorCapabilitiesInTransaction: vi.fn() } as never,
         { append: vi.fn() } as never,
         { keyEncryptionSecret: () => 'test-key-secret' } as never,
-        new InfrastructureRepository(database),
         { invalidate } as never,
       );
 
@@ -701,7 +697,6 @@ describePg('clean Incus server contract', () => {
         { assertActorCapabilitiesInTransaction: vi.fn() } as never,
         { append: vi.fn() } as never,
         { keyEncryptionSecret: () => 'test-key-secret' } as never,
-        new InfrastructureRepository(database),
         { invalidate: vi.fn() } as never,
       );
 

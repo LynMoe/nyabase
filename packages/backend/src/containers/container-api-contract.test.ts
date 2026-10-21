@@ -17,7 +17,7 @@ import { ContainersController } from './containers.controller.js';
 import {
   assertContainerName,
   containerStatus,
-} from './container-control.service.js';
+} from './container-rules.js';
 
 describe('container API contract', () => {
   it('accepts only the clean-cutover create payload', () => {

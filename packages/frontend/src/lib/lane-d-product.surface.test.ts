@@ -2,13 +2,18 @@ import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { readSource, readSourceDir } from './read-source.test-helper.js';
 import { ADMIN_INTENT_CAPABILITIES, Capability } from '@nyabase/common';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const root = join(here, '..');
 
 function read(rel: string): string {
-  return readFileSync(join(root, rel), 'utf8');
+  return readSource(root, rel);
+}
+
+function readDir(rel: string): string {
+  return readSourceDir(root, rel);
 }
 
 describe('lane D product UI copy', () => {
@@ -175,7 +180,7 @@ describe('lane D product UI copy', () => {
     ].join('\n');
     const storage = read('components/containers/storage-panel.tsx');
     const inspect = read('components/storage/shared-volume-catalog-inspect.tsx');
-    const grants = read('components/grants/canonical-grant-panel.tsx');
+    const grants = readDir('components/grants');
     const backends = [
       read('pages/shared-backends-page.tsx'),
       read('pages/shared-backend-detail-page.tsx'),
@@ -263,7 +268,7 @@ describe('lane D product UI copy', () => {
     expect(read('routes/groups/$id.tsx')).toMatch(/parseGroupDetailTab/);
     expect(read('components/servers/pools-card.tsx')).not.toMatch(/sharedBackendId:/);
     expect(read('components/servers/pools-card.tsx')).not.toMatch(/isLocalStoragePool/);
-    expect(read('components/grants/canonical-grant-panel.tsx')).not.toMatch(/isLocalStoragePool/);
+    expect(readDir('components/grants')).not.toMatch(/isLocalStoragePool/);
   });
 
   it('drops storage-pools nav and hosts server detail behind seven tabs', () => {
@@ -293,7 +298,7 @@ describe('lane D product UI copy', () => {
   });
 
   it('renders grant quotas as one scroll with nested pools and GPU summaries', () => {
-    const grants = read('components/grants/canonical-grant-panel.tsx');
+    const grants = readDir('components/grants');
     const quota = read('lib/grant-quota.ts');
     const coreGrant = [grants, quota].join('\n');
     expect(grants).not.toMatch(/\bTabs(Trigger|List|Content)?\b/);

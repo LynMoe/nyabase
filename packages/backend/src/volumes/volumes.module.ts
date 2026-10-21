@@ -14,11 +14,21 @@ import {
   VolumesController,
 } from './volumes.controller.js';
 import { VolumesRepository } from './volumes.repository.js';
-import { VolumesService } from './volumes.service.js';
+import { LocalVolumesService } from './local-volumes.service.js';
+import { SharedVolumeCatalogInspectService } from './shared-volume-catalog-inspect.service.js';
+import { SharedVolumesService } from './shared-volumes.service.js';
+import { VolumeAttachmentsService } from './volume-attachments.service.js';
 
 @Module({
   imports: [ReconcileModule, IncusModule, StoragePoolsModule],
-  providers: [VolumesRepository, VolumesService, VolumeReconciler],
+  providers: [
+    VolumesRepository,
+    LocalVolumesService,
+    SharedVolumesService,
+    VolumeAttachmentsService,
+    SharedVolumeCatalogInspectService,
+    VolumeReconciler,
+  ],
   controllers: [
     VolumesController,
     SharedVolumesController,
@@ -27,6 +37,6 @@ import { VolumesService } from './volumes.service.js';
     SharedBackendCatalogInspectController,
     StorageCapacityController,
   ],
-  exports: [VolumesRepository, VolumesService],
+  exports: [VolumesRepository, VolumeAttachmentsService],
 })
 export class VolumesModule {}

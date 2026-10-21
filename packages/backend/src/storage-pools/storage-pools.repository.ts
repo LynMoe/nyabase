@@ -1,5 +1,5 @@
 import { Inject, Injectable, NotFoundException } from '@nestjs/common';
-import type { Kysely, Transaction } from 'kysely';
+import { sql, type Kysely, type Transaction } from 'kysely';
 import type { NyabaseDatabase } from '../platform/persistence-pg/database.types.js';
 import { PG_DATABASE } from '../platform/persistence-pg/tokens.js';
 
@@ -98,6 +98,37 @@ export class StoragePoolsRepository {
       .selectAll()
       .where('id', '=', id)
       .executeTakeFirst();
+  }
+
+  listByIds(ids: readonly string[], executor: StorageExecutor = this.database) {
+    if (ids.length === 0) return Promise.resolve([]);
+    return executor
+      .selectFrom('infra.storage_pools')
+      .selectAll()
+      .where('id', 'in', [...ids])
+      .execute();
+  }
+
+  /**
+   * Registered, shareable CephFS pools: the executors through which a shared
+   * backend is reachable. Optionally narrowed to some backends and one server.
+   */
+  listRegisteredSharedPools(
+    filter: { backendIds?: readonly string[]; serverId?: string } = {},
+    executor: StorageExecutor = this.database,
+  ) {
+    let query = executor
+      .selectFrom('infra.storage_pools')
+      .selectAll()
+      .where('driver', '=', 'cephfs')
+      .where('shareable', '=', true)
+      .where('registered', '=', true)
+      .where('shared_backend_id', 'is not', null);
+    if (filter.backendIds !== undefined) {
+      query = query.where('shared_backend_id', 'in', [...filter.backendIds]);
+    }
+    if (filter.serverId !== undefined) query = query.where('server_id', '=', filter.serverId);
+    return query.execute();
   }
 
   findByIdForUpdate(id: string, executor: StorageExecutor) {
@@ -253,6 +284,115 @@ export class StoragePoolsRepository {
       .where('revision', '=', String(expectedRevision))
       .returningAll()
       .executeTakeFirst();
+  }
+
+  /** Record the used/total bytes Incus reports for a pool. */
+  async recordObservedSpace(
+    id: string,
+    space: { usedBytes: string | null; totalBytes: string | null },
+    executor: StorageExecutor = this.database,
+  ): Promise<void> {
+    await executor
+      .updateTable('infra.storage_pools')
+      .set({
+        used_bytes: space.usedBytes,
+        total_bytes: space.totalBytes,
+        last_observed_at: sql<Date>`clock_timestamp()`,
+      })
+      .where('id', '=', id)
+      .execute();
+  }
+
+  async serverExists(id: string, executor: StorageExecutor = this.database): Promise<boolean> {
+    const row = await executor
+      .selectFrom('infra.servers')
+      .select('id')
+      .where('id', '=', id)
+      .executeTakeFirst();
+    return Boolean(row);
+  }
+
+  async listOnlineServerIds(executor: StorageExecutor = this.database): Promise<string[]> {
+    const rows = await executor
+      .selectFrom('infra.servers')
+      .select('id')
+      .where('status', '=', 'online')
+      .execute();
+    return rows.map((row) => row.id);
+  }
+
+  async sharedBackendExists(id: string, executor: StorageExecutor = this.database): Promise<boolean> {
+    const row = await executor
+      .selectFrom('infra.shared_backends')
+      .select('id')
+      .where('id', '=', id)
+      .executeTakeFirst();
+    return Boolean(row);
+  }
+
+  findSharedBackendByIdentity(identityKey: string, executor: StorageExecutor) {
+    return executor
+      .selectFrom('infra.shared_backends')
+      .select(['id', 'identity_key', 'ceph_fsid'])
+      .where('identity_key', '=', identityKey)
+      .executeTakeFirst();
+  }
+
+  findSharedBackendById(id: string, executor: StorageExecutor) {
+    return executor
+      .selectFrom('infra.shared_backends')
+      .select(['identity_key', 'ceph_fsid'])
+      .where('id', '=', id)
+      .executeTakeFirst();
+  }
+
+  findSharedBackendByFsid(fsid: string, executor: StorageExecutor) {
+    return executor
+      .selectFrom('infra.shared_backends')
+      .select(['id', 'identity_key', 'ceph_fsid'])
+      .where(sql<boolean>`lower(ceph_fsid) = ${fsid}`)
+      .executeTakeFirst();
+  }
+
+  /** The shareable pool already mapping this backend on the server, other than `excludePoolId`. */
+  findShareableMapping(
+    sharedBackendId: string,
+    serverId: string,
+    excludePoolId: string | undefined,
+    executor: StorageExecutor,
+  ) {
+    let query = executor
+      .selectFrom('infra.storage_pools')
+      .select('id')
+      .where('shared_backend_id', '=', sharedBackendId)
+      .where('server_id', '=', serverId)
+      .where('shareable', '=', true);
+    if (excludePoolId) query = query.where('id', '!=', excludePoolId);
+    return query.orderBy('id').forUpdate().executeTakeFirst();
+  }
+
+  /** A shared backend's capacity is the largest figure any of its executors reports. */
+  async refreshSharedBackendCapacity(
+    sharedBackendId: string,
+    executor: StorageExecutor = this.database,
+  ): Promise<void> {
+    const capacity = await executor
+      .selectFrom('infra.storage_pools')
+      .select([
+        executor.fn.max('total_bytes').as('total_bytes'),
+        executor.fn.max('used_bytes').as('used_bytes'),
+      ])
+      .where('shared_backend_id', '=', sharedBackendId)
+      .where('shareable', '=', true)
+      .executeTakeFirstOrThrow();
+    await executor
+      .updateTable('infra.shared_backends')
+      .set({
+        total_bytes: capacity.total_bytes,
+        used_bytes: capacity.used_bytes,
+      })
+      .where('id', '=', sharedBackendId)
+      .execute();
   }
 
   async hasDependencies(id: string, executor: StorageExecutor = this.database): Promise<boolean> {

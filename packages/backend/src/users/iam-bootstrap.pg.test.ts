@@ -103,7 +103,6 @@ function createBootstrapContext(
     transactions,
     auth,
     access,
-    { reconcileUser: async () => undefined } as never,
     { notify: async () => undefined } as never,
     config as never,
     audit as never,

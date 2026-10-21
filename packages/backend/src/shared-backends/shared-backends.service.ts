@@ -14,7 +14,7 @@ import {
   type SharedBackendExecutorDto,
 } from '@nyabase/common';
 import { SharedBackendsRepository } from './shared-backends.repository.js';
-import { StoragePoolsService } from '../storage-pools/storage-pools.service.js';
+import { SharedBackendExecutorsService } from '../storage-pools/shared-backend-executors.service.js';
 import { isoDate, numberValue } from '../platform/domain-utils.js';
 import { sql, type Kysely } from 'kysely';
 import type { NyabaseDatabase } from '../platform/persistence-pg/database.types.js';
@@ -65,7 +65,7 @@ export class SharedBackendsService {
     private readonly repository: SharedBackendsRepository,
     private readonly transactions: PgTransactionManager,
     @Inject(PG_DATABASE) private readonly database: Kysely<NyabaseDatabase>,
-    private readonly storagePools: StoragePoolsService,
+    private readonly storagePools: SharedBackendExecutorsService,
   ) {}
 
   /**

@@ -5,10 +5,12 @@ import { AccessChangeNotifier } from '../iam/access-change-notifier.js';
 import { AccessResolverService } from '../iam/access-resolver.service.js';
 import type { PostgresTestDatabase } from '../platform/persistence-pg/postgres-test-harness.js';
 import { PgTransactionManager } from '../platform/persistence-pg/transaction.js';
+import { UserSshKeysService } from './user-ssh-keys.service.js';
 import { UsersService } from './users.service.js';
 
 export interface UsersPgFixture {
   users: UsersService;
+  sshKeys: UserSshKeysService;
   transactions: PgTransactionManager;
   access: AccessResolverService;
   changes: AccessChangeNotifier;
@@ -52,11 +54,18 @@ export async function usersPgFixture(
     transactions,
     auth as never,
     access,
-    convergence as never,
     proxySnapshots as never,
     { get: vi.fn((key: string) => key === 'runtime.nodeEnv' ? 'test' : 'admin123') } as never,
     audit as never,
     changes,
+  );
+  const sshKeys = new UserSshKeysService(
+    fixture.database,
+    transactions,
+    access,
+    convergence as never,
+    proxySnapshots as never,
+    audit as never,
   );
 
   const userRows = [];
@@ -94,6 +103,7 @@ export async function usersPgFixture(
     audit,
     proxySnapshots,
     convergence,
+    sshKeys,
     actorId,
     userId,
     actorGroupId,

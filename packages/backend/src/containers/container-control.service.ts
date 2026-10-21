@@ -7,7 +7,6 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import type { Kysely, Transaction } from 'kysely';
-import { sql } from 'kysely';
 import { randomUUID } from 'node:crypto';
 import {
   AuditAction,
@@ -18,10 +17,7 @@ import {
   FailureCode,
   IntentKind,
   IntentResourceType,
-  StoragePoolResizeFamily,
-  parseContainerState,
   type ContainerDto,
-  type AttachVolumeRequest,
   type CreateContainerRequest,
   type CreateExecSessionRequest,
   type ListScope,
@@ -37,7 +33,6 @@ import { AccessResolverService } from '../iam/access-resolver.service.js';
 import type { ServerAccess } from '../iam/effective-access.js';
 import { assertListScope, isSystemActor, type Actor } from '../iam/actor.js';
 import { AuditService } from '../iam/audit.service.js';
-import { isoDate, nullableNumber, numberValue, poolLabel } from '../platform/domain-utils.js';
 import { acceptedIntent } from '../reconcile/accepted-intent.js';
 import { IntentRepository } from '../reconcile/intent.repository.js';
 import { createContainerIntent } from './container-intents.js';
@@ -45,189 +40,71 @@ import { ConsoleSessionService } from './console-session.service.js';
 import { ContainerSshConvergenceService } from './container-ssh-convergence.service.js';
 import {
   ContainerControlRepository,
-  type ContainerExecutor,
   type ContainerRow,
 } from './container-control.repository.js';
 import { ContainerActionPolicyService } from './container-action-policy.service.js';
 import { IpPoolsRepository } from '../ip-pools/ip-pools.repository.js';
 import { NyabaseConfigService } from '../platform/config/nyabase-config.service.js';
-import {
-  missingStoragePoolCapability,
-  storagePoolCapability,
-} from '../storage-pools/storage-pools.service.js';
-import { VolumesService } from '../volumes/volumes.service.js';
-import { admitGpuCreate, mutateGpuContainer } from '../gpu/admit.js';
+import { VolumeAttachmentsService } from '../volumes/volume-attachments.service.js';
+import { mutateGpuContainer } from '../gpu/admit.js';
 import { GpuClaimsRepository } from '../gpu/gpu-claims.repository.js';
+import {
+  assertAdminInTransaction,
+  assertCanAccess,
+  enforceInTransaction,
+  requireLiveGrant,
+  type ContainerAccess,
+} from './container-access.js';
+import { admitContainer, type ContainerCreateDeps } from './container-create.js';
+import { toContainerDtos, type ContainerDtoDeps } from './container-dtos.js';
+import { validateRootResize } from './container-root-resize.js';
+import {
+  assertComputeGrant,
+  assertContainerName,
+  assertCreateNumbers,
+  containerStatus,
+  gpuDeviceClaimed,
+  isUniqueViolation,
+} from './container-rules.js';
 
 type ContainerAction = 'start' | 'stop' | 'restart' | 'delete';
-type ContainerAccess = 'owner' | 'admin' | 'system';
 
-export interface RootResizeCheckInput {
-  readonly containerId: string;
-  readonly requestedBytes: number;
-  readonly currentBytes: number;
-  readonly usedBytes: number | null;
-  readonly resizeFamily: string;
-  readonly observedStatus: ContainerStatus;
+function auditActionFor(action: ContainerAction): AuditAction {
+  switch (action) {
+    case 'start': return AuditAction.StartContainer;
+    case 'stop': return AuditAction.StopContainer;
+    case 'restart': return AuditAction.RestartContainer;
+    case 'delete': return AuditAction.DeleteContainer;
+  }
 }
 
 /**
- * Quota-online roots with no observed usage (including Incus reporting 0)
- * cannot shrink. A booted image is never an empty filesystem.
+ * Container API operations. Admission and DTO assembly live in
+ * container-create / container-dtos; authorisation in container-access.
  */
-export function checkRootResize(
-  input: RootResizeCheckInput,
-): { code: FailureCode; message: string; details: Record<string, unknown> } | null {
-  if (input.requestedBytes >= input.currentBytes) return null;
-  if (input.resizeFamily === StoragePoolResizeFamily.BlockBacked
-    && input.observedStatus !== ContainerStatus.Stopped) {
-    return {
-      code: FailureCode.RootShrinkRequiresStop,
-      message: 'Block-backed root shrink requires a stopped container',
-      details: { containerId: input.containerId },
-    };
-  }
-  if (input.resizeFamily === StoragePoolResizeFamily.QuotaOnline) {
-    if (input.usedBytes === null || input.usedBytes <= 0) {
-      return {
-        code: FailureCode.RootUsageUnknown,
-        message: 'Root disk usage is unknown; shrink is not allowed until usage is observed',
-        details: {
-          containerId: input.containerId,
-          requestedBytes: input.requestedBytes,
-          usedBytes: input.usedBytes,
-        },
-      };
-    }
-  }
-  if (input.usedBytes !== null && input.usedBytes > input.requestedBytes) {
-    return {
-      code: FailureCode.RootShrinkBelowUsage,
-      message: 'The requested root disk size is below current usage',
-      details: {
-        containerId: input.containerId,
-        requestedBytes: input.requestedBytes,
-        usedBytes: input.usedBytes,
-      },
-    };
-  }
-  return null;
-}
-
-interface ImageRow {
-  id: string;
-  alias: string;
-  fingerprint: string | null;
-  login_user: string;
-  min_root_size_bytes: string | number | null;
-  network_managed_externally: boolean;
-  is_active: boolean;
-  deleting: boolean;
-}
-
-interface ServerRow {
-  id: string;
-  name: string;
-  slug: string;
-  status: string;
-  system_pool_id: string | null;
-  parent_interface: string | null;
-  preflight_status: string;
-}
-
-function date(value: Date | string | null | undefined): string | null {
-  return isoDate(value);
-}
-
-function phase(value: string): ContainerPhase {
-  return value as ContainerPhase;
-}
-
-export function containerStatus(
-  value: string | null | undefined,
-  power: ContainerPowerIntent,
-): ContainerStatus {
-  const normalized = value?.toLowerCase();
-  if (normalized === 'running') return ContainerStatus.Running;
-  if (normalized === 'stopped') return ContainerStatus.Stopped;
-  if (normalized === 'frozen') return ContainerStatus.Frozen;
-  if (normalized === 'error') return ContainerStatus.Error;
-  if (value !== null && value !== undefined) return ContainerStatus.Unknown;
-  if (power === ContainerPowerIntent.Stopped) return ContainerStatus.Stopped;
-  return ContainerStatus.Unknown;
-}
-
-export function assertContainerName(name: string): void {
-  if (!/^[a-zA-Z0-9][a-zA-Z0-9-]{0,62}$/.test(name)) {
-    throw new BadRequestException({
-      code: FailureCode.InvalidInput,
-      message: 'Container name must be 1-63 characters and use letters, numbers, or hyphen',
-    });
-  }
-}
-
-function isUniqueViolation(error: unknown, constraint?: string): boolean {
-  let current: unknown = error;
-  const visited = new Set<unknown>();
-  while (current && typeof current === 'object' && !visited.has(current)) {
-    visited.add(current);
-    const record = current as { code?: unknown; constraint?: unknown; cause?: unknown };
-    if (record.code === '23505') {
-      if (!constraint) return true;
-      return String(record.constraint ?? '').includes(constraint);
-    }
-    current = record.cause;
-  }
-  return false;
-}
-
-function gpuDeviceClaimed(pciAddress?: string): ConflictException {
-  return new ConflictException({
-    code: FailureCode.GpuDeviceClaimed,
-    message: 'A requested GPU is already claimed',
-    details: pciAddress ? { pciAddress } : {},
-  });
-}
-
-function assertCreateNumbers(request: CreateContainerRequest): void {
-  if (!Number.isSafeInteger(request.rootSizeBytes) || request.rootSizeBytes <= 0
-    || !Number.isSafeInteger(request.cpuMillis) || request.cpuMillis < 0
-    || !Number.isSafeInteger(request.memBytes) || request.memBytes < 0) {
-    throw new BadRequestException({
-      code: FailureCode.InvalidInput,
-      message: 'Container resource limits must be non-negative safe integers with a positive root size',
-    });
-  }
-}
-
-function stringArray(value: string[] | string | null | undefined): string[] {
-  if (Array.isArray(value)) return [...value];
-  if (!value) return [];
-  try {
-    const parsed: unknown = JSON.parse(value);
-    return Array.isArray(parsed) ? parsed.filter((item): item is string => typeof item === 'string') : [];
-  } catch {
-    return [];
-  }
-}
-
 @Injectable()
 export class ContainerControlService {
+  private readonly dtoDeps: ContainerDtoDeps;
+  private readonly createDeps: ContainerCreateDeps;
+
   constructor(
-    @Inject(PG_DATABASE) private readonly database: Kysely<NyabaseDatabase>,
+    @Inject(PG_DATABASE) database: Kysely<NyabaseDatabase>,
     private readonly transactions: PgTransactionManager,
     private readonly repository: ContainerControlRepository,
     private readonly access: AccessResolverService,
     private readonly intents: IntentRepository,
     private readonly consoleSessions: ConsoleSessionService,
     private readonly audit: AuditService,
-    private readonly actions: ContainerActionPolicyService,
-    private readonly ipPools: IpPoolsRepository,
-    private readonly config: NyabaseConfigService,
+    actions: ContainerActionPolicyService,
+    ipPools: IpPoolsRepository,
+    config: NyabaseConfigService,
     private readonly sshConvergence: ContainerSshConvergenceService,
-    private readonly volumes: VolumesService,
+    private readonly volumes: VolumeAttachmentsService,
     private readonly gpuClaims: GpuClaimsRepository,
-  ) {}
+  ) {
+    this.dtoDeps = { database, repository, config, actions };
+    this.createDeps = { repository, access, intents, audit, ipPools, volumes, gpuClaims };
+  }
 
   async list(
     actor: Actor,
@@ -239,271 +116,32 @@ export class ContainerControlService {
       ownerId: scope === 'mine' ? actor.userId : undefined,
       serverId: filters.serverId,
     });
-    return this.toDtos(rows);
+    return toContainerDtos(this.dtoDeps, rows);
   }
 
   async get(actor: Actor, containerId: string): Promise<ContainerDto> {
     const row = await this.requireContainer(containerId);
-    this.assertCanAccess(actor, row);
-    return (await this.toDtos([row]))[0]!;
+    assertCanAccess(actor, row);
+    return (await toContainerDtos(this.dtoDeps, [row]))[0]!;
   }
 
   async create(
     actor: Actor,
     request: CreateContainerRequest,
   ): Promise<IntentAcceptedDto> {
-    const userId = actor.userId;
     assertContainerName(request.name);
     assertCreateNumbers(request);
-    const ownerId = userId;
     const id = randomUUID();
-    const result = await this.transactions.run(async (transaction) => {
-      const server = await transaction.selectFrom('infra.servers')
-        .selectAll()
-        .where('id', '=', request.serverId)
-        .forUpdate()
-        .executeTakeFirst() as ServerRow | undefined;
-      const nameCollision = await transaction.selectFrom('control.containers')
-        .select('id')
-        .where('server_id', '=', request.serverId)
-        .where('name', '=', request.name)
-        .executeTakeFirst();
-      if (nameCollision) {
-        throw new ConflictException({
-          code: FailureCode.InvalidInput,
-          message: 'A container with this name already exists on the server',
-          details: { serverId: request.serverId, name: request.name },
-        });
-      }
-      const image = await this.lockActiveImage(request.imageId, transaction);
-      if (!server) throw new NotFoundException('Server not found');
-      if (!image || !image.is_active || image.deleting || !image.fingerprint) {
-        throw new ConflictException({
-          code: FailureCode.ImageNotAvailable,
-          message: 'The image is not active on the target server',
-          details: { imageId: request.imageId, serverId: request.serverId },
-        });
-      }
-      // network_managed_externally=true means the guest does not run DHCP/NM;
-      // The platform owns networking: IP pool allocation + bridged guest config.
-      if (!image.network_managed_externally) {
-        throw new ConflictException({
-          code: FailureCode.ImageManagesOwnNetwork,
-          message: 'The selected image is not marked for platform-managed networking',
-          details: { imageId: request.imageId },
-        });
-      }
-      const access = await this.access.resolveContainerCreateAccessInTransaction(
-        transaction,
-        userId,
-        request.serverId,
-        request.imageId,
-      );
-      if (!access) {
-        throw new ForbiddenException({
-          code: FailureCode.PermissionDenied,
-          message: 'The user has no current access to this server',
-          details: { serverId: request.serverId },
-        });
-      }
-      if (!access.imageAvailable) {
-        throw new ForbiddenException({
-          code: FailureCode.ImageNotAvailable,
-          message: 'The image has no active assignment on this server',
-          details: { imageId: request.imageId, serverId: request.serverId },
-        });
-      }
-      const assignment = await transaction.selectFrom('infra.image_server_assignments')
-        .select(['observed_fingerprint', 'managed_fingerprint', 'lifecycle_phase', 'needs_attention'])
-        .where('image_id', '=', request.imageId)
-        .where('server_id', '=', request.serverId)
-        .where('lifecycle_phase', '=', 'active')
-        .executeTakeFirst();
-      const assignmentFingerprint = assignment?.observed_fingerprint ?? assignment?.managed_fingerprint;
-      if (!assignment || assignment.needs_attention || assignmentFingerprint !== image.fingerprint) {
-        throw new ConflictException({
-          code: FailureCode.ImageAssignmentFingerprintMismatch,
-          message: 'The assigned image fingerprint is not ready on the target server',
-          details: {
-            imageId: request.imageId,
-            serverId: request.serverId,
-            expectedFingerprint: image.fingerprint,
-          },
-        });
-      }
-      this.assertComputeGrant(access.grant, request.cpuMillis, request.memBytes);
-      if (server.status !== 'online' || server.preflight_status !== 'passed') {
-        throw new ConflictException({
-          code: FailureCode.PreflightFailed,
-          message: 'Server preflight has not passed',
-        });
-      }
-      if (!server.parent_interface) {
-        throw new ConflictException({
-          code: FailureCode.PreflightFailed,
-          message: 'The server has no LAN bridge (parent interface)',
-        });
-      }
-      const pools = await this.ipPools.listForServer(request.serverId, transaction);
-      if (pools.length === 0) {
-        throw new ConflictException({
-          code: FailureCode.IpPoolNotConfigured,
-          message: 'The server is not bound to any IP pool',
-          details: { serverId: request.serverId },
-        });
-      }
-      const rootPoolId = server.system_pool_id;
-      if (!rootPoolId) {
-        throw new ConflictException({
-          code: FailureCode.StoragePoolExhausted,
-          message: 'The server has no system root storage pool',
-        });
-      }
-      const rootPool = await transaction.selectFrom('infra.storage_pools')
-        .selectAll()
-        .where('id', '=', rootPoolId)
-        .where('registered', '=', true)
-        .forUpdate()
-        .executeTakeFirst();
-      if (
-        !rootPool
-        || rootPool.server_id !== request.serverId
-        || !rootPool.root_disk_capable
-        || Boolean(rootPool.shared_backend_id)
-      ) {
-        throw new ConflictException({
-          code: FailureCode.StoragePoolExhausted,
-          message: 'The server system storage pool is not usable',
-        });
-      }
-      if (rootPool.resize_family === 'quota_online' && rootPool.quota_effective !== true) {
-        throw new ConflictException({
-          code: FailureCode.StoragePoolQuotaIneffective,
-          message: 'The server system storage pool cannot enforce root quotas',
-          details: { poolId: rootPoolId },
-        });
-      }
-      const minimum = image.min_root_size_bytes === null
-        ? 0
-        : numberValue(image.min_root_size_bytes);
-      if (request.rootSizeBytes < minimum) {
-        throw new ConflictException({
-          code: FailureCode.RootSizeBelowImageMinimum,
-          message: 'Root size is below the image minimum',
-          details: {
-            imageId: request.imageId,
-            requestedBytes: request.rootSizeBytes,
-            minimumBytes: minimum,
-          },
-        });
-      }
-      await this.assertRootCapacity(
-        transaction,
-        ownerId,
-        request.serverId,
-        rootPoolId,
-        request.rootSizeBytes,
-        access.grant.diskBytes ?? null,
-      );
-      let networkKey: string | null = null;
-      let address: string | null = null;
-      let lastExhaustedKey: string | null = null;
-      for (const pool of pools) {
-        try {
-          address = await this.repository.findAvailableAddress(
-            pool.cidr,
-            pool.allocation_cidr,
-            [pool.gateway, ...stringArray(pool.reserved_ips)],
-            id,
-            transaction,
-          );
-          networkKey = pool.cidr;
-          break;
-        } catch (error) {
-          if (error instanceof Error && error.message === 'No IP address is available') {
-            lastExhaustedKey = pool.cidr;
-            continue;
-          }
-          if (error instanceof Error && error.message === 'Invalid IP pool CIDR') {
-            throw new ConflictException({
-              code: FailureCode.PreflightFailed,
-              message: 'The IP pool CIDR is invalid',
-              details: { poolId: pool.id, networkKey: pool.cidr },
-            });
-          }
-          throw error;
-        }
-      }
-      if (!networkKey || !address) {
-        throw new ConflictException({
-          code: FailureCode.NetworkAddressExhausted,
-          message: 'No IP address is available in the server IP pools',
-          details: { serverId: request.serverId, networkKey: lastExhaustedKey },
-        });
-      }
-      let row = await this.repository.insert({
-        id,
-        serverId: request.serverId,
-        ownerId,
-        imageId: request.imageId,
-        createdBy: userId,
-        name: request.name,
-        imageAlias: image.alias,
-        imageFingerprint: image.fingerprint,
-        rootPoolId,
-        rootSizeBytes: request.rootSizeBytes,
-        cpuMillis: request.cpuMillis,
-        memBytes: request.memBytes,
-        powerIntent: request.powerIntent,
-        networkKey,
-        address,
-      }, transaction);
-      const gpuEnabled = await this.gpuClaims.isEnabled(request.serverId, transaction);
-      try {
-        const { state } = await admitGpuCreate({
-          serverId: request.serverId,
-          actor: { userId, admin: false },
-          grantPciAddresses: access?.grant.gpuPciAddresses ?? [],
-          claims: this.gpuClaims.forContainer(request.serverId, id, transaction),
-          health: this.gpuClaims.health(request.serverId, transaction),
-          containerId: id,
-          requestedPciAddresses: request.gpuPciAddresses,
-          enabled: gpuEnabled,
-        });
-        if (state) row = await this.repository.setGpuState(row.id, state, transaction);
-      } catch (error) {
-        if (isUniqueViolation(error, 'container_gpu_claims')) throw gpuDeviceClaimed();
-        throw error;
-      }
-      if (request.volumes && request.volumes.length > 0) {
-        await this.volumes.bindCreateTimeVolumes(
-          transaction,
-          actor,
-          { id: row.id, owner_id: row.owner_id, server_id: row.server_id },
-          request.volumes as AttachVolumeRequest[],
-        );
-      }
-      const intent = await createContainerIntent(this.intents, {
-        kind: IntentKind.ContainerCreate,
-        resourceType: IntentResourceType.Container,
-        resourceId: row.id,
-        serverId: row.server_id,
-        requestedBy: userId,
-        targetRevision: row.revision,
-        request: { operation: 'create' },
-      }, transaction);
-      await this.audit.append(transaction, userId, AuditAction.CreateContainer, row.id, 'container', {
-        serverId: row.server_id,
-        imageId: row.image_id,
-      });
-      return { row, intent };
-    }, { isolationLevel: 'serializable', maxAttempts: 5 });
+    const result = await this.transactions.run(
+      (transaction) => admitContainer(this.createDeps, transaction, actor, request, id),
+      { isolationLevel: 'serializable', maxAttempts: 5 },
+    );
     return acceptedIntent(result.intent);
   }
 
   async repairSsh(actor: Actor, containerId: string): Promise<{ woken: boolean }> {
     const row = await this.requireContainer(containerId);
-    this.assertCanAccess(actor, row);
+    assertCanAccess(actor, row);
     if (row.lifecycle_phase !== 'active') {
       throw new ConflictException({
         code: FailureCode.InvalidInput,
@@ -529,7 +167,7 @@ export class ContainerControlService {
       cpu_millis: input.cpuMillis,
       mem_bytes: input.memBytes,
     }, { operation: 'limits' }, AuditAction.UpdateContainerLimits, async (_transaction, _current, grant) => {
-      if (grant) this.assertComputeGrant(grant, input.cpuMillis, input.memBytes);
+      if (grant) assertComputeGrant(grant, input.cpuMillis, input.memBytes);
     });
   }
 
@@ -551,76 +189,13 @@ export class ContainerControlService {
       { root_size_bytes: size, root_size_pending_bytes: null },
       { operation: 'root_resize', sizeBytes: size },
       AuditAction.ResizeContainerRoot,
-      async (transaction, locked, grant) => {
-        if (locked.root_size_pending_bytes !== null) {
-          throw new ConflictException({
-            code: FailureCode.RootQuotaPending,
-            message: 'A previous root quota change is still pending',
-            details: { containerId },
-          });
-        }
-        const image = await this.image(locked.image_id, transaction);
-        const minimum = image?.min_root_size_bytes === null || image?.min_root_size_bytes === undefined
-          ? 0
-          : numberValue(image.min_root_size_bytes);
-        if (size < minimum) {
-          throw new ConflictException({
-            code: FailureCode.RootSizeBelowImageMinimum,
-            message: 'Root size is below the image minimum',
-            details: {
-              imageId: locked.image_id,
-              requestedBytes: size,
-              minimumBytes: minimum,
-            },
-          });
-        }
-        const current = numberValue(locked.root_size_bytes);
-        if (size >= current) {
-          if (size === current) return;
-          await this.assertRootCapacity(
-            transaction,
-            locked.owner_id,
-            locked.server_id,
-            locked.root_pool_id,
-            size - current,
-            grant?.diskBytes ?? null,
-          );
-          return;
-        }
-        const pool = await transaction.selectFrom('infra.storage_pools')
-          .select(['resize_family', 'quota_effective'])
-          .where('id', '=', locked.root_pool_id)
-          .where('registered', '=', true)
-          .forUpdate()
-          .executeTakeFirst();
-        if (!pool) {
-          throw new ConflictException({
-            code: FailureCode.StoragePoolExhausted,
-            message: 'The root storage pool is no longer usable',
-            details: { poolId: locked.root_pool_id },
-          });
-        }
-        if (pool.resize_family === 'quota_online' && pool.quota_effective !== true) {
-          throw new ConflictException({
-            code: FailureCode.StoragePoolQuotaIneffective,
-            message: 'The root storage pool cannot enforce root quotas',
-            details: { poolId: locked.root_pool_id },
-          });
-        }
-        const route = await this.repository.currentRoute(containerId, transaction);
-        const failure = checkRootResize({
-          containerId,
-          requestedBytes: size,
-          currentBytes: current,
-          usedBytes: nullableNumber(locked.root_used_bytes),
-          resizeFamily: pool.resize_family,
-          observedStatus: containerStatus(
-            route?.instance_status,
-            locked.power_intent as ContainerPowerIntent,
-          ),
-        });
-        if (failure) throw new ConflictException(failure);
-      },
+      (transaction, locked, grant) => validateRootResize(
+        this.repository,
+        transaction,
+        locked,
+        size,
+        grant,
+      ),
     );
   }
 
@@ -632,14 +207,14 @@ export class ContainerControlService {
     return this.transactions.run(async (transaction) => {
       const current = await this.repository.lock(containerId, transaction);
       if (!current) throw new NotFoundException('Container not found');
-      const access = this.assertCanAccess(actor, current, 'not-found');
+      const access = assertCanAccess(actor, current, 'not-found');
       if (current.lifecycle_phase === ContainerPhase.Deleting) {
         throw new ConflictException({
           code: FailureCode.InstanceBusy,
           message: 'A deleting container cannot be modified',
         });
       }
-      if (access === 'admin') await this.assertAdminInTransaction(transaction, actor);
+      if (access === 'admin') await assertAdminInTransaction(this.access, transaction, actor);
       const enabled = await this.gpuClaims.isEnabled(current.server_id, transaction);
       if (!enabled) {
         throw new ConflictException({
@@ -654,7 +229,7 @@ export class ContainerControlService {
       );
       let grantPciAddresses: readonly string[] = [];
       if (access === 'owner') {
-        const grant = await this.requireLiveGrant(transaction, actor, current);
+        const grant = await requireLiveGrant(this.access, transaction, actor, current);
         grantPciAddresses = grant.gpuPciAddresses;
       }
       let mutated;
@@ -705,18 +280,18 @@ export class ContainerControlService {
 
   /** Attachments of a container the caller was already authorised to see. */
   async listVolumes(actor: Actor, containerId: string): Promise<VolumeAttachmentDto[]> {
-    this.assertCanAccess(actor, await this.requireContainer(containerId));
-    return this.volumes.listContainerAttachments(containerId, 'local');
+    assertCanAccess(actor, await this.requireContainer(containerId));
+    return this.volumes.listForContainer(containerId, 'local');
   }
 
   async listSharedVolumes(actor: Actor, containerId: string): Promise<VolumeAttachmentDto[]> {
-    this.assertCanAccess(actor, await this.requireContainer(containerId));
-    return this.volumes.listContainerAttachments(containerId, 'shared');
+    assertCanAccess(actor, await this.requireContainer(containerId));
+    return this.volumes.listForContainer(containerId, 'shared');
   }
 
   async getStats(actor: Actor, containerId: string) {
     const row = await this.requireContainer(containerId);
-    this.assertCanAccess(actor, row);
+    assertCanAccess(actor, row);
     return this.stats(row);
   }
 
@@ -729,13 +304,13 @@ export class ContainerControlService {
       throw new ForbiddenException('Container console admission requires a browser JWT');
     }
     const row = await this.requireContainer(containerId);
-    this.assertCanAccess(actor, row);
+    assertCanAccess(actor, row);
     let access: ContainerAccess = 'owner';
     await this.transactions.run(async (transaction) => {
       const current = await this.repository.lock(containerId, transaction);
       if (!current) throw new NotFoundException('Container not found');
-      access = this.assertCanAccess(actor, current, 'not-found');
-      await this.enforceInTransaction(transaction, actor, current, access);
+      access = assertCanAccess(actor, current, 'not-found');
+      await enforceInTransaction(this.access, transaction, actor, current, access);
       const currentRoute = await this.repository.currentRoute(containerId, transaction);
       if (
         containerStatus(currentRoute?.instance_status, current.power_intent as ContainerPowerIntent)
@@ -775,8 +350,8 @@ export class ContainerControlService {
     const result = await this.transactions.run(async (transaction) => {
       const current = await this.repository.lock(containerId, transaction);
       if (!current) throw new NotFoundException('Container not found');
-      const access = this.assertCanAccess(actor, current);
-      await this.enforceInTransaction(transaction, actor, current, access);
+      const access = assertCanAccess(actor, current);
+      await enforceInTransaction(this.access, transaction, actor, current, access);
       if (access === 'owner' && (action === 'start' || action === 'restart')) {
         await this.access.assertAttachedStorageCoveredInTransaction(
           transaction,
@@ -802,11 +377,7 @@ export class ContainerControlService {
         });
       }
       if (action === 'start' || action === 'restart') {
-        const detaching = await transaction.selectFrom('control.volume_attachments')
-          .select('id')
-          .where('container_id', '=', containerId)
-          .where('bind_state', '=', 'detaching')
-          .executeTakeFirst();
+        const detaching = await this.repository.findDetachingAttachment(containerId, transaction);
         if (detaching) {
           throw new ConflictException({
             code: FailureCode.InstanceBusy,
@@ -852,7 +423,7 @@ export class ContainerControlService {
           : undefined,
         request: { action, operation: action },
       }, transaction);
-      await this.audit.append(transaction, actor.userId, this.auditAction(action), containerId, 'container');
+      await this.audit.append(transaction, actor.userId, auditActionFor(action), containerId, 'container');
       return { intent, serverId: current.server_id };
     }, {
       // Expiry/system stops must not lose to concurrent reconcile observation writes.
@@ -878,14 +449,14 @@ export class ContainerControlService {
     const result = await this.transactions.run(async (transaction) => {
       const current = await this.repository.lock(containerId, transaction);
       if (!current) throw new NotFoundException('Container not found');
-      const access = this.assertCanAccess(actor, current, 'not-found');
+      const access = assertCanAccess(actor, current, 'not-found');
       if (current.lifecycle_phase === ContainerPhase.Deleting) {
         throw new ConflictException({
           code: FailureCode.InstanceBusy,
           message: 'A deleting container cannot be modified',
         });
       }
-      const grant = await this.enforceInTransaction(transaction, actor, current, access);
+      const grant = await enforceInTransaction(this.access, transaction, actor, current, access);
       await validate?.(transaction, current, grant);
       const updated = await this.repository.updateDesired(
         containerId,
@@ -913,326 +484,11 @@ export class ContainerControlService {
     return acceptedIntent(result.intent);
   }
 
-  /**
-   * The one container authorisation rule: a holder of `ManageContainersAny`
-   * (administrator rules: no server-grant limits), else the owner (owner rules:
-   * live server grant and its limits), or the system. Everyone else is refused
-   * with the status the owner-only route always used (403 for reads and power
-   * actions, 404 where the row is hidden). A holder who also owns the row keeps
-   * the administrator rules, as the old /admin route gave them.
-   */
-  private assertCanAccess(
-    actor: Actor,
-    row: { owner_id: string },
-    denied: 'forbidden' | 'not-found' = 'forbidden',
-  ): ContainerAccess {
-    if (isSystemActor(actor)) return 'system';
-    if (actor.capabilities.has(Capability.ManageContainersAny)) return 'admin';
-    if (row.owner_id === actor.userId) return 'owner';
-    if (denied === 'not-found') throw new NotFoundException('Container not found');
-    throw new ForbiddenException('Container is not owned by current user');
-  }
 
-  /** Re-checks `ManageContainersAny` against the database inside the transaction. */
-  private async assertAdminInTransaction(
-    transaction: Transaction<NyabaseDatabase>,
-    actor: Actor,
-  ): Promise<void> {
-    await this.access.assertActorCapabilitiesInTransaction(
-      transaction,
-      actor.userId,
-      [Capability.ManageContainersAny],
-    );
-  }
-
-  /** The owner must hold current coverage of the container's server. */
-  private async requireLiveGrant(
-    transaction: Transaction<NyabaseDatabase>,
-    actor: Actor,
-    container: { server_id: string },
-  ): Promise<ServerAccess> {
-    const grant = await this.access.resolveServerInTransaction(
-      transaction,
-      actor.userId,
-      container.server_id,
-    );
-    if (!grant) throw new ForbiddenException('Server access was revoked');
-    return grant;
-  }
-
-  /**
-   * Owners must still hold a live server grant, administrators must still hold
-   * the capability; the system needs neither. Returns the owner's grant.
-   */
-  private async enforceInTransaction(
-    transaction: Transaction<NyabaseDatabase>,
-    actor: Actor,
-    container: { server_id: string },
-    access: ContainerAccess,
-  ): Promise<ServerAccess | null> {
-    if (access === 'admin') await this.assertAdminInTransaction(transaction, actor);
-    if (access === 'owner') return this.requireLiveGrant(transaction, actor, container);
-    return null;
-  }
-
-  private async assertRootCapacity(
-    transaction: Transaction<NyabaseDatabase>,
-    ownerId: string,
-    serverId: string,
-    poolId: string,
-    delta: number,
-    grantLimit: number | null,
-  ): Promise<void> {
-    if (delta <= 0) return;
-    await transaction.selectFrom('infra.servers')
-      .select('id')
-      .where('id', '=', serverId)
-      .forUpdate()
-      .executeTakeFirstOrThrow();
-    const roots = await transaction.selectFrom('control.containers')
-      .select(sql<string>`coalesce(sum(
-        case when root_size_pending_bytes is null
-          then root_size_bytes
-          else greatest(root_size_bytes, root_size_pending_bytes)
-        end
-      ), 0)`.as('bytes'))
-      .where('owner_id', '=', ownerId)
-      .where('server_id', '=', serverId)
-      .where('lifecycle_phase', 'not in', ['failed', 'deleting'])
-      .executeTakeFirstOrThrow();
-    const volumes = await transaction.selectFrom('control.volumes')
-      .select(sql<string>`coalesce(sum(size_bytes), 0)`.as('bytes'))
-      .where('owner_id', '=', ownerId)
-      .where('server_id', '=', serverId)
-      .where('shared_backend_id', 'is', null)
-      .where('lifecycle_phase', 'not in', ['failed', 'deleting'])
-      .executeTakeFirstOrThrow();
-    const used = numberValue(roots.bytes) + numberValue(volumes.bytes);
-    if (grantLimit !== null && grantLimit > 0 && used + delta > grantLimit) {
-      throw new ConflictException({
-        code: FailureCode.StorageGrantExceeded,
-        message: 'Server storage grant exceeded',
-        details: {
-          requestedBytes: delta,
-          availableBytes: Math.max(0, grantLimit - used),
-          grantLimitBytes: grantLimit,
-        },
-      });
-    }
-    const pool = await transaction.selectFrom('infra.storage_pools')
-      .select(['total_bytes'])
-      .where('id', '=', poolId)
-      .forUpdate()
-      .executeTakeFirstOrThrow();
-    if (pool.total_bytes === null) return;
-    const committed = await transaction.selectFrom('control.containers')
-      .select(sql<string>`coalesce(sum(
-        case when root_size_pending_bytes is null
-          then root_size_bytes
-          else greatest(root_size_bytes, root_size_pending_bytes)
-        end
-      ), 0)`.as('bytes'))
-      .where('root_pool_id', '=', poolId)
-      .where('lifecycle_phase', 'not in', ['failed', 'deleting'])
-      .executeTakeFirstOrThrow();
-    const committedVolumes = await transaction.selectFrom('control.volumes')
-      .select(sql<string>`coalesce(sum(size_bytes), 0)`.as('bytes'))
-      .where('pool_id', '=', poolId)
-      .where('lifecycle_phase', 'not in', ['failed', 'deleting'])
-      .executeTakeFirstOrThrow();
-    const server = await transaction.selectFrom('infra.servers')
-      .select('storage_overcommit_ratio')
-      .where('id', '=', serverId)
-      .executeTakeFirstOrThrow();
-    if (
-      numberValue(committed.bytes) + numberValue(committedVolumes.bytes) + delta
-      > numberValue(pool.total_bytes) * numberValue(server.storage_overcommit_ratio)
-    ) {
-      throw new ConflictException({
-        code: FailureCode.StoragePoolExhausted,
-        message: 'Storage pool capacity exceeded',
-        details: {
-          poolId,
-          requestedBytes: delta,
-          availableBytes: Math.max(
-            0,
-            numberValue(pool.total_bytes) * numberValue(server.storage_overcommit_ratio)
-              - numberValue(committed.bytes) - numberValue(committedVolumes.bytes),
-          ),
-          overcommitRatio: numberValue(server.storage_overcommit_ratio),
-        },
-      });
-    }
-  }
-
-  private assertComputeGrant(
-    grant: { cpuMillis: number | null; memBytes: number | null },
-    cpuMillis: number,
-    memBytes: number,
-  ): void {
-    if (grant.cpuMillis !== null && cpuMillis > grant.cpuMillis) {
-      throw new ForbiddenException({
-        code: FailureCode.PermissionDenied,
-        message: 'The requested CPU exceeds the server grant',
-        details: { requestedCpuMillis: cpuMillis, grantCpuMillis: grant.cpuMillis },
-      });
-    }
-    if (grant.memBytes !== null && memBytes > grant.memBytes) {
-      throw new ForbiddenException({
-        code: FailureCode.PermissionDenied,
-        message: 'The requested memory exceeds the server grant',
-        details: { requestedMemBytes: memBytes, grantMemBytes: grant.memBytes },
-      });
-    }
-  }
-
-  private async toDtos(rows: readonly ContainerRow[]): Promise<ContainerDto[]> {
-    if (rows.length === 0) return [];
-    const servers = new Map<string, ServerRow>();
-    const images = new Map<string, ImageRow>();
-    const routes = new Map<string, Awaited<ReturnType<ContainerControlRepository['routes']>>[number]>();
-    const serverIds = [...new Set(rows.map((row) => row.server_id))];
-    const imageIds = [...new Set(rows.map((row) => row.image_id))];
-    const [serverRows, imageRows, routeRows] = await Promise.all([
-      this.database.selectFrom('infra.servers').selectAll().where('id', 'in', serverIds).execute(),
-      this.database.selectFrom('infra.images').selectAll().where('id', 'in', imageIds).execute(),
-      this.repository.routes(rows.map((row) => row.id)),
-    ]);
-    const pendingRows = await this.database.selectFrom('control.intents')
-      .select('resource_id')
-      .where('resource_type', '=', IntentResourceType.Container)
-      .where('resource_id', 'in', rows.map((row) => row.id))
-      .where('status', '=', 'pending')
-      .execute();
-    const pending = new Set(pendingRows.map((item) => item.resource_id));
-    for (const server of serverRows) servers.set(server.id, server);
-    for (const image of imageRows) images.set(image.id, image);
-    for (const route of routeRows) routes.set(route.containerId, route);
-    const attachments = await this.database.selectFrom('control.volume_attachments as attachment')
-      .innerJoin('control.volumes as volume', 'volume.id', 'attachment.volume_id')
-      .leftJoin('control.containers as container', 'container.id', 'attachment.container_id')
-      .leftJoin('control.volume_placements as placement', (join) => join
-        .onRef('placement.volume_id', '=', 'attachment.volume_id')
-        .onRef('placement.server_id', '=', 'container.server_id'))
-      .selectAll('attachment')
-      .select([
-        'volume.name as volume_name',
-        'volume.shared_backend_id as shared_backend_id',
-        'placement.catalog_state as catalog_state',
-      ])
-      .where('attachment.container_id', 'in', rows.map((row) => row.id))
-      .orderBy('attachment.created_at')
-      .execute();
-    const attachmentsByContainer = new Map<string, VolumeAttachmentDto[]>();
-    const sharedByContainer = new Map<string, VolumeAttachmentDto[]>();
-    for (const attachment of attachments) {
-      const kind = attachment.shared_backend_id !== null ? 'shared' : 'local';
-      const dto = this.toAttachmentDto(attachment, attachment.volume_name, {
-        kind,
-        catalogState: attachment.catalog_state,
-      });
-      const target = kind === 'shared' ? sharedByContainer : attachmentsByContainer;
-      const list = target.get(attachment.container_id) ?? [];
-      list.push(dto);
-      target.set(attachment.container_id, list);
-    }
-    const owners = new Map<string, string>();
-    const ownerIds = [...new Set(rows.map((row) => row.owner_id))];
-    if (ownerIds.length > 0) {
-      const ownerRows = await this.database.selectFrom('iam.users')
-        .select(['id', 'username'])
-        .where('id', 'in', ownerIds)
-        .execute();
-      for (const owner of ownerRows) owners.set(owner.id, owner.username);
-    }
-    const poolIds = [...new Set(rows.map((row) => row.root_pool_id))];
-    const poolRows = poolIds.length === 0
-      ? []
-      : await this.database.selectFrom('infra.storage_pools')
-        .select([
-          'id',
-          'display_name',
-          'incus_name',
-          'resize_family',
-          'quota_effective',
-          'block_filesystem',
-        ])
-        .where('id', 'in', poolIds)
-        .execute();
-    const pools = new Map(poolRows.map((pool) => [pool.id, pool]));
-    return rows.map((row) => {
-      const server = servers.get(row.server_id);
-      const image = images.get(row.image_id);
-      const route = routes.get(row.id);
-      const pool = pools.get(row.root_pool_id);
-      const actualStatus = containerStatus(route?.runtimeStatus, row.power_intent as ContainerPowerIntent);
-      const proxyHost = this.config.get<string>('ssh.proxyPublicHost')?.trim() || null;
-      const proxyPort = this.config.get<number>('ssh.proxyPublicPort') || null;
-      return {
-        id: row.id,
-        serverId: row.server_id,
-        serverName: server?.name ?? row.server_id,
-        ownerId: row.owner_id,
-        ownerName: owners.get(row.owner_id),
-        name: row.name,
-        instanceName: route?.instanceName ?? row.instance_name,
-        imageId: row.image_id,
-        imageName: image?.alias,
-        imageFingerprint: row.image_fingerprint,
-        rootPoolId: row.root_pool_id,
-        rootPoolName: pool ? poolLabel(pool.display_name, pool.incus_name) : row.root_pool_id,
-        rootSizeBytes: numberValue(row.root_size_bytes),
-        rootSizePendingBytes: row.root_size_pending_bytes === null
-          ? null
-          : numberValue(row.root_size_pending_bytes),
-        rootUsedBytes: nullableNumber(row.root_used_bytes),
-        rootCapability: pool
-          ? storagePoolCapability(
-            pool.resize_family as StoragePoolResizeFamily,
-            pool.quota_effective,
-            pool.block_filesystem,
-          )
-          : missingStoragePoolCapability(),
-        cpuMillis: row.cpu_millis,
-        memBytes: numberValue(row.mem_bytes),
-        gpu: parseContainerState(row.gpu_state),
-        powerIntent: row.power_intent as ContainerPowerIntent,
-        lifecyclePhase: phase(row.lifecycle_phase),
-        routedIp: route?.routedIp ?? null,
-        actual: {
-          instanceName: route?.instanceName ?? row.instance_name,
-          status: actualStatus,
-          routedIp: route?.routedIp ?? null,
-          observedAt: date(route?.observedAt),
-        },
-        ssh: {
-          enabled: true,
-          status: route?.sshStatus ?? 'unknown',
-          ready: route?.sshStatus === 'running' && actualStatus === ContainerStatus.Running,
-          loginUser: image?.login_user ?? 'root',
-          proxyHost,
-          proxyPort,
-          observedAt: date(route?.observedAt),
-          lastError: route?.lastError ?? null,
-        },
-        volumes: attachmentsByContainer.get(row.id) ?? [],
-        sharedVolumes: sharedByContainer.get(row.id) ?? [],
-        needsAttention: row.needs_attention,
-        failureCode: row.failure_code,
-        failureReason: row.failure_reason,
-        revision: row.revision,
-        observedRevision: row.observed_revision,
-        actions: this.actions.forContainer({
-          phase: phase(row.lifecycle_phase),
-          runtimeStatus: actualStatus,
-          runtimeReady: server?.status === 'online',
-          intentPending: pending.has(row.id),
-          sshEnabled: true,
-        }),
-        createdAt: new Date(row.created_at).toISOString(),
-        updatedAt: new Date(row.updated_at).toISOString(),
-      };
-    });
+  private async requireContainer(id: string): Promise<ContainerRow> {
+    const row = await this.repository.find(id);
+    if (!row) throw new NotFoundException('Container not found');
+    return row;
   }
 
   private async stats(row: ContainerRow): Promise<{
@@ -1248,80 +504,6 @@ export class ContainerControlService {
       stats: null,
       ts: observedAt.getTime(),
       lastObservedAt: observedAt.toISOString(),
-    };
-  }
-
-  private async requireContainer(id: string): Promise<ContainerRow> {
-    const row = await this.repository.find(id);
-    if (!row) throw new NotFoundException('Container not found');
-    return row;
-  }
-
-  private server(id: string, executor: ContainerExecutor = this.database): Promise<ServerRow | undefined> {
-    return executor.selectFrom('infra.servers')
-      .selectAll()
-      .where('id', '=', id)
-      .executeTakeFirst() as Promise<ServerRow | undefined>;
-  }
-
-  private image(id: string, transaction: Transaction<NyabaseDatabase>): Promise<ImageRow | undefined> {
-    return transaction.selectFrom('infra.images')
-      .selectAll()
-      .where('id', '=', id)
-      .forUpdate()
-      .executeTakeFirst() as Promise<ImageRow | undefined>;
-  }
-
-  private lockActiveImage(
-    id: string,
-    transaction: Transaction<NyabaseDatabase>,
-  ): Promise<ImageRow | undefined> {
-    return transaction.selectFrom('infra.images')
-      .selectAll()
-      .where('id', '=', id)
-      .where('is_active', '=', true)
-      .where('deleting', '=', false)
-      .forUpdate()
-      .executeTakeFirst() as Promise<ImageRow | undefined>;
-  }
-
-  private auditAction(action: ContainerAction): AuditAction {
-    switch (action) {
-      case 'start': return AuditAction.StartContainer;
-      case 'stop': return AuditAction.StopContainer;
-      case 'restart': return AuditAction.RestartContainer;
-      case 'delete': return AuditAction.DeleteContainer;
-    }
-  }
-
-  private toAttachmentDto(
-    attachment: {
-      id: string;
-      container_id: string;
-      volume_id: string;
-      device_name: string;
-      container_path: string;
-      read_only: boolean;
-      bind_state: VolumeAttachmentDto['bindState'];
-      created_at: Date | string;
-      updated_at: Date | string;
-    },
-    volumeName: string,
-    extra: { kind: 'local' | 'shared'; catalogState: string | null },
-  ): VolumeAttachmentDto {
-    return {
-      id: attachment.id,
-      containerId: attachment.container_id,
-      volumeId: attachment.volume_id,
-      volumeName,
-      deviceName: attachment.device_name,
-      containerPath: attachment.container_path,
-      readOnly: attachment.read_only,
-      bindState: attachment.bind_state,
-      kind: extra.kind,
-      onlineCancelAllowed: extra.catalogState !== 'present' && attachment.bind_state === 'attaching',
-      createdAt: new Date(attachment.created_at).toISOString(),
-      updatedAt: new Date(attachment.updated_at).toISOString(),
     };
   }
 }
