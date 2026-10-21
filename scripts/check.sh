@@ -28,8 +28,8 @@ assert_clean_cutover_architecture() {
   local required_path
   for required_path in \
     packages/backend/src/incus \
-    packages/backend/src/runtime/intent.repository.ts \
-    packages/backend/src/runtime/reconcile-worker.service.ts \
+    packages/backend/src/reconcile/intent.repository.ts \
+    packages/backend/src/reconcile/reconcile-worker.service.ts \
     packages/node-exporter/package.json \
     packages/node-exporter/src; do
     [[ -e "$required_path" ]] || {
@@ -52,7 +52,11 @@ assert_clean_cutover_architecture() {
     packages/backend/src/datadirs \
     packages/backend/src/mount-sources \
     packages/backend/src/remote-fs \
-    packages/backend/src/quota; do
+    packages/backend/src/quota \
+    packages/backend/src/runtime \
+    packages/backend/src/database \
+    packages/backend/src/storage \
+    packages/backend/src/domain; do
     if has_source_entries "$retired_path"; then
       echo "retired control path still exists: $retired_path" >&2
       exit 1
@@ -65,12 +69,17 @@ assert_clean_cutover_architecture() {
       exit 1
     }
   rg -q 'intent|reconcile' \
-    packages/backend/src/runtime/intent.repository.ts \
-    packages/backend/src/runtime/reconcile-worker.service.ts \
+    packages/backend/src/reconcile/intent.repository.ts \
+    packages/backend/src/reconcile/reconcile-worker.service.ts \
     || {
       echo "backend intent/reconciliation sources are missing" >&2
       exit 1
     }
+  if rg -n "from '\.\./(containers|volumes|servers|images|gpu|access|users|groups|storage-pools|shared-backends|ssh|http-proxy)/" \
+    packages/backend/src/reconcile; then
+    echo "the reconcile engine must not import domain modules" >&2
+    exit 1
+  fi
   rg -q 'node' packages/node-exporter/src \
     || {
       echo "node-exporter sources are missing" >&2

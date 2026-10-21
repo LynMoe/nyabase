@@ -3,8 +3,9 @@ import { describe, expect, it, vi } from 'vitest';
 import { ServerStatus } from '@nyabase/common';
 import { withPostgresTestDatabase } from '../platform/persistence-pg/postgres-test-harness.js';
 import { PgTransactionManager } from '../platform/persistence-pg/transaction.js';
-import { VOLUME_DESTROY_PLACEMENT_ID } from '../runtime/reconcile-claim.repository.js';
+import { VOLUME_DESTROY_PLACEMENT_ID } from '../reconcile/reconcile-claim.repository.js';
 import { ServersService } from './servers.service.js';
+import { InfrastructureRepository } from '../infrastructure/infrastructure.repository.js';
 
 const describePg = process.env.NYABASE_TEST_DATABASE_URL ? describe : describe.skip;
 
@@ -48,6 +49,9 @@ describePg('clean Incus server contract', () => {
         new PgTransactionManager(database),
         {} as never,
         {} as never,
+        { keyEncryptionSecret: () => 'test-key-secret' } as never,
+        new InfrastructureRepository(database),
+        { forgetServer: vi.fn() } as never,
       );
 
       await expect(service.prepareConnection(serverId, 'aa'.repeat(32))).resolves.toBe(1);
@@ -135,8 +139,8 @@ describePg('clean Incus server contract', () => {
         new PgTransactionManager(database),
         { assertActorCapabilitiesInTransaction: vi.fn() } as never,
         { append: vi.fn() } as never,
-        undefined,
-        undefined,
+        { keyEncryptionSecret: () => 'test-key-secret' } as never,
+        new InfrastructureRepository(database),
         { forgetServer: vi.fn() } as never,
       );
 
@@ -504,21 +508,18 @@ describePg('clean Incus server contract', () => {
         worker_id: 'destroy-worker',
         lease_expires_at: new Date('2099-01-01T00:00:00.000Z'),
       }).execute();
-      const clients = { get: vi.fn(async () => { throw new Error('cascade must not call Incus'); }) };
       const forgetServer = vi.fn();
       const service = new ServersService(
         database,
         new PgTransactionManager(database),
         { assertActorCapabilitiesInTransaction: vi.fn() } as never,
         { append: vi.fn() } as never,
-        undefined,
-        undefined,
+        { keyEncryptionSecret: () => 'test-key-secret' } as never,
+        new InfrastructureRepository(database),
         { forgetServer } as never,
-        clients as never,
       );
 
       await expect(service.delete('actor-1', serverS, 4)).resolves.toBeUndefined();
-      expect(clients.get).not.toHaveBeenCalled();
       expect(forgetServer).toHaveBeenCalledWith(serverS, 'server_deleted');
       expect(
         await database.selectFrom('infra.servers').select('id').where('id', '=', serverS).executeTakeFirst(),
@@ -702,10 +703,9 @@ describePg('clean Incus server contract', () => {
         new PgTransactionManager(database),
         { assertActorCapabilitiesInTransaction: vi.fn() } as never,
         { append: vi.fn() } as never,
-        undefined,
-        undefined,
+        { keyEncryptionSecret: () => 'test-key-secret' } as never,
+        new InfrastructureRepository(database),
         { forgetServer: vi.fn() } as never,
-        { get: vi.fn(async () => { throw new Error('cascade must not call Incus'); }) } as never,
       );
 
       await expect(service.delete('actor-1', unrelated, 1)).resolves.toBeUndefined();

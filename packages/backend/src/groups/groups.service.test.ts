@@ -93,6 +93,7 @@ function serviceWithIam(iam: IamState): GroupsService {
     undefined as never,
     undefined as never,
     undefined as never,
+    { isEnabled: async () => false } as never,
   );
 }
 

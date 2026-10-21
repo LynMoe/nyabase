@@ -24,9 +24,9 @@ import type { UserRecord } from '../iam/user-record.js';
 import { ServersService } from './servers.service.js';
 import { StoragePoolsService } from '../storage-pools/storage-pools.service.js';
 import { VolumesService } from '../volumes/volumes.service.js';
-import { ServerConnectIntentService } from '../runtime/server-connect-intent.service.js';
-import { ServerPreflightIntentService } from '../runtime/server-preflight-intent.service.js';
-import { acceptedIntent } from '../platform/domain-utils.js';
+import { ServerConnectIntentService } from './server-connect-intent.service.js';
+import { ServerPreflightIntentService } from './server-preflight-intent.service.js';
+import { acceptedIntent } from '../reconcile/accepted-intent.js';
 
 @Controller('admin/servers')
 @RequireCaps(Capability.ManageServers)

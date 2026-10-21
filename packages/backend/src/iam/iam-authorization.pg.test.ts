@@ -9,6 +9,7 @@ import { withPostgresTestDatabase } from '../platform/persistence-pg/postgres-te
 import { PgTransactionManager } from '../platform/persistence-pg/transaction.js';
 import { AccessCacheEpochService } from './access-cache-epoch.service.js';
 import { AccessResolverService } from './access-resolver.service.js';
+import { GpuClaimsRepository } from '../gpu/gpu-claims.repository.js';
 import { AccessRevocationGuardService } from './access-revocation-guard.service.js';
 import { GroupsService } from '../groups/groups.service.js';
 
@@ -129,6 +130,7 @@ describePg('PostgreSQL canonical authorization', () => {
         access,
         audit as never,
         new AccessRevocationGuardService(),
+        new GpuClaimsRepository(database),
       );
       const input = {
         cpuMillis: null,

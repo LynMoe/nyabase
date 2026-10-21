@@ -21,6 +21,7 @@ describe('GroupsService capability boundaries', () => {
       access as never,
       undefined as never,
       undefined as never,
+      { isEnabled: async () => false } as never,
     );
 
     await expect(service.deleteGroupServerGrant(

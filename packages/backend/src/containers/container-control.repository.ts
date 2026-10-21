@@ -67,6 +67,14 @@ export class ContainerControlRepository {
     return query.execute();
   }
 
+  async findOwnerId(id: string, executor: ContainerExecutor = this.database): Promise<string | null> {
+    const row = await executor.selectFrom('control.containers')
+      .select('owner_id')
+      .where('id', '=', id)
+      .executeTakeFirst();
+    return row?.owner_id ?? null;
+  }
+
   find(id: string, executor: ContainerExecutor = this.database) {
     return executor.selectFrom('control.containers')
       .selectAll()

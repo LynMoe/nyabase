@@ -1,4 +1,4 @@
-import { ConflictException, Inject, Injectable, NotFoundException, Optional } from '@nestjs/common';
+import { ConflictException, Inject, Injectable, NotFoundException } from '@nestjs/common';
 import type { Kysely, Selectable, Transaction } from 'kysely';
 import { createCipheriv, createHash, randomBytes, randomUUID } from 'node:crypto';
 import {
@@ -21,22 +21,11 @@ import { AccessResolverService } from '../iam/access-resolver.service.js';
 import { AuditService } from '../iam/audit.service.js';
 import { NyabaseConfigService } from '../platform/config/nyabase-config.service.js';
 import { numberValue, isoDate, poolLabel } from '../platform/domain-utils.js';
-import {
-  InfrastructureRepository,
-  lockServerOnboarding,
-} from '../infrastructure/infrastructure.repository.js';
+import { InfrastructureRepository } from '../infrastructure/infrastructure.repository.js';
 import { ProxySnapshotNotifierService } from '../proxy-snapshots/proxy-snapshot-notifier.service.js';
-import { VOLUME_DESTROY_PLACEMENT_ID } from '../runtime/reconcile-claim.repository.js';
+import { VOLUME_DESTROY_PLACEMENT_ID } from '../reconcile/reconcile-claim.repository.js';
 import { listEligibleDestroyExecutors } from '../volumes/eligible-destroy-executors.js';
 import { sql } from 'kysely';
-import {
-  INCUS_CLIENT_FACTORY,
-  type IncusClientFactory,
-} from '../runtime/reconcile-worker.service.js';
-import {
-  NODE_METRICS_PULL,
-  type NodeMetricsPullPort,
-} from '../runtime/server-preflight-reconciler.service.js';
 
 type ServerRow = Selectable<InfrastructureServerTable>;
 
@@ -47,11 +36,9 @@ export class ServersService {
     private readonly transactions: PgTransactionManager,
     private readonly access: AccessResolverService,
     private readonly audit: AuditService,
-    @Optional() private readonly config?: NyabaseConfigService,
-    @Optional() private readonly infrastructure?: InfrastructureRepository,
-    @Optional() private readonly proxySnapshots?: ProxySnapshotNotifierService,
-    @Optional() @Inject(INCUS_CLIENT_FACTORY) private readonly clients?: IncusClientFactory,
-    @Optional() @Inject(NODE_METRICS_PULL) private readonly nodeMetrics?: NodeMetricsPullPort,
+    private readonly config: NyabaseConfigService,
+    private readonly infrastructure: InfrastructureRepository,
+    private readonly proxySnapshots: ProxySnapshotNotifierService,
   ) {}
 
   async create(actorId: string, input: CreateServerRequest): Promise<ServerDto> {
@@ -59,11 +46,7 @@ export class ServersService {
       await this.access.assertActorCapabilitiesInTransaction(transaction, actorId, [
         Capability.ManageServers,
       ]);
-      if (this.infrastructure) {
-        await this.infrastructure.lockServerCapacity(transaction);
-      } else {
-        await lockServerOnboarding(transaction);
-      }
+      await this.infrastructure.lockServerCapacity(transaction);
       const count = await transaction
         .selectFrom('infra.servers')
         .select(({ fn }) => fn.countAll<number>().as('count'))
@@ -299,7 +282,7 @@ export class ServersService {
         name: server.name,
       });
     });
-    this.proxySnapshots?.forgetServer(id, 'server_deleted');
+    this.proxySnapshots.forgetServer(id, 'server_deleted');
   }
 
   private async purgeServerControlPlane(
@@ -558,10 +541,7 @@ export class ServersService {
   }
 
   private nodeMetricsKey(): Buffer {
-    const secret = this.config
-      ? this.config.keyEncryptionSecret()
-      : process.env.JWT_SECRET || 'nyabase-node-metrics';
-    return createHash('sha256').update(secret).digest();
+    return createHash('sha256').update(this.config.keyEncryptionSecret()).digest();
   }
 
   private async toDtos(rows: ServerRow[]): Promise<ServerDto[]> {

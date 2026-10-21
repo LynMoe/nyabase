@@ -1,20 +1,26 @@
 import { Module } from '@nestjs/common';
-import { ImageCatalogService } from './image-catalog.js';
-import { ImagesService } from './images.service.js';
-import { ImagesController } from './images.controller.js';
-import { AdminImagesController } from './admin-images.controller.js';
-import { SshModule } from '../ssh/ssh.module.js';
 import { InfrastructureModule } from '../infrastructure/infrastructure.module.js';
-import { RuntimeModule } from '../runtime/runtime.module.js';
+import { ReconcileModule } from '../reconcile/reconcile.module.js';
+import { SshModule } from '../ssh/ssh.module.js';
+import { AdminImagesController } from './admin-images.controller.js';
+import { ImageAssignmentReconciler } from './image-assignment-reconciler.service.js';
+import { ImageCatalogService } from './image-catalog.js';
+import {
+  AdminImageAssignmentIntentsController,
+  AdminImageIntentsController,
+} from './image-intents.controller.js';
+import { ImagesController } from './images.controller.js';
+import { ImagesService } from './images.service.js';
 
 @Module({
-  imports: [
-    SshModule,
-    InfrastructureModule,
-    RuntimeModule,
+  imports: [ReconcileModule, SshModule, InfrastructureModule],
+  providers: [ImageCatalogService, ImagesService, ImageAssignmentReconciler],
+  controllers: [
+    ImagesController,
+    AdminImagesController,
+    AdminImageAssignmentIntentsController,
+    AdminImageIntentsController,
   ],
-  providers: [ImageCatalogService, ImagesService],
-  controllers: [ImagesController, AdminImagesController],
   exports: [ImagesService],
 })
 export class ImagesModule {}

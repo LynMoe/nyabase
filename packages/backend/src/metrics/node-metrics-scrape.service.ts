@@ -4,7 +4,6 @@ import {
   Logger,
   OnModuleDestroy,
   OnModuleInit,
-  Optional,
 } from '@nestjs/common';
 import {
   MAX_METRIC_POINTS_PER_BATCH,
@@ -18,10 +17,7 @@ import {
 import { sql, type Kysely, type RawBuilder } from 'kysely';
 import type { NyabaseDatabase } from '../platform/persistence-pg/database.types.js';
 import { PG_DATABASE } from '../platform/persistence-pg/tokens.js';
-import {
-  NODE_METRICS_PULL,
-  type NodeMetricsPullPort,
-} from '../runtime/server-preflight-reconciler.service.js';
+import { AuthenticatedNodeMetricsPullAdapter } from './node-metrics-pull.adapter.js';
 import { NyabaseConfigService } from '../platform/config/nyabase-config.service.js';
 import {
   type MetricPoint,
@@ -65,9 +61,9 @@ export class NodeMetricsScrapeService implements OnModuleInit, OnModuleDestroy {
 
   constructor(
     @Inject(PG_DATABASE) private readonly database: Kysely<NyabaseDatabase>,
-    @Inject(NODE_METRICS_PULL) private readonly nodeMetrics: NodeMetricsPullPort,
+    private readonly nodeMetrics: AuthenticatedNodeMetricsPullAdapter,
     private readonly metricsWriter: MetricsWriter,
-    @Optional() private readonly config?: NyabaseConfigService,
+    private readonly config: NyabaseConfigService,
   ) {}
 
   onModuleInit(): void {
@@ -343,7 +339,6 @@ export class NodeMetricsScrapeService implements OnModuleInit, OnModuleDestroy {
   }
 
   private containerSeriesEnabled(): boolean {
-    if (!this.config) return true;
     return this.config.get<boolean>('metrics.containerSeriesEnabled') !== false;
   }
 

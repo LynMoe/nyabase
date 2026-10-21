@@ -20,7 +20,7 @@ import { ContainersController } from './containers.controller.js';
 import {
   AdminContainerIntentsController,
   ContainerIntentsController,
-} from '../runtime/intents.controller.js';
+} from './container-intents.controller.js';
 import {
   assertContainerName,
   containerStatus,

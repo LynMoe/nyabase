@@ -5,7 +5,6 @@ import {
   Inject,
   Injectable,
   NotFoundException,
-  Optional,
 } from '@nestjs/common';
 import type { Kysely, Transaction } from 'kysely';
 import { sql } from 'kysely';
@@ -35,11 +34,12 @@ import { PG_DATABASE } from '../platform/persistence-pg/tokens.js';
 import { PgTransactionManager } from '../platform/persistence-pg/transaction.js';
 import { AccessResolverService } from '../iam/access-resolver.service.js';
 import { AuditService } from '../iam/audit.service.js';
-import { acceptedIntent, isoDate, nullableNumber, numberValue, poolLabel } from '../platform/domain-utils.js';
-import { IntentRepository } from '../runtime/intent.repository.js';
-import { ReconcileWakeService } from '../runtime/reconcile-wake.service.js';
-import { ConsoleSessionService } from '../runtime/console-session.service.js';
-import { ContainerSshConvergenceService } from '../ssh/container-ssh-convergence.service.js';
+import { isoDate, nullableNumber, numberValue, poolLabel } from '../platform/domain-utils.js';
+import { acceptedIntent } from '../reconcile/accepted-intent.js';
+import { IntentRepository } from '../reconcile/intent.repository.js';
+import { ReconcileWakeService } from '../reconcile/reconcile-wake.service.js';
+import { ConsoleSessionService } from './console-session.service.js';
+import { ContainerSshConvergenceService } from './container-ssh-convergence.service.js';
 import {
   ContainerControlRepository,
   type ContainerExecutor,
@@ -222,8 +222,8 @@ export class ContainerControlService {
     private readonly ipPools: IpPoolsRepository,
     private readonly config: NyabaseConfigService,
     private readonly sshConvergence: ContainerSshConvergenceService,
-    @Optional() private readonly volumes?: VolumesService,
-    @Optional() private readonly gpuClaims?: GpuClaimsRepository,
+    private readonly volumes: VolumesService,
+    private readonly gpuClaims: GpuClaimsRepository,
   ) {}
 
   async list(userId: string, filters: { serverId?: string } = {}): Promise<ContainerDto[]> {
@@ -460,24 +460,14 @@ export class ContainerControlService {
         networkKey,
         address,
       }, transaction);
-      const gpuEnabled = this.gpuClaims
-        ? await this.gpuClaims.isEnabled(request.serverId, transaction)
-        : false;
+      const gpuEnabled = await this.gpuClaims.isEnabled(request.serverId, transaction);
       try {
         const { state } = await admitGpuCreate({
           serverId: request.serverId,
           actor: { userId, admin: false },
           grantPciAddresses: access?.grant.gpuPciAddresses ?? [],
-          claims: this.gpuClaims
-            ? this.gpuClaims.forContainer(request.serverId, id, transaction)
-            : {
-              replace: async () => undefined,
-              listOccupied: async () => [],
-              count: async () => 0,
-            },
-          health: this.gpuClaims
-            ? this.gpuClaims.health(request.serverId, transaction)
-            : { read: async () => ({}), write: async () => undefined },
+          claims: this.gpuClaims.forContainer(request.serverId, id, transaction),
+          health: this.gpuClaims.health(request.serverId, transaction),
           containerId: id,
           requestedPciAddresses: request.gpuPciAddresses,
           enabled: gpuEnabled,
@@ -488,12 +478,6 @@ export class ContainerControlService {
         throw error;
       }
       if (request.volumes && request.volumes.length > 0) {
-        if (!this.volumes) {
-          throw new ConflictException({
-            code: FailureCode.InternalError,
-            message: 'Volume binding is unavailable',
-          });
-        }
         await this.volumes.bindCreateTimeVolumes(
           transaction,
           userId,
@@ -756,9 +740,7 @@ export class ContainerControlService {
           [Capability.ManageContainersAny],
         );
       }
-      const enabled = this.gpuClaims
-        ? await this.gpuClaims.isEnabled(current.server_id, transaction)
-        : false;
+      const enabled = await this.gpuClaims.isEnabled(current.server_id, transaction);
       if (!enabled) {
         throw new ConflictException({
           code: FailureCode.GpuNotEnabled,
@@ -782,16 +764,8 @@ export class ContainerControlService {
           serverId: current.server_id,
           actor: { userId: actorId, admin },
           grantPciAddresses,
-          claims: this.gpuClaims
-            ? this.gpuClaims.forContainer(current.server_id, containerId, transaction)
-            : {
-              replace: async () => undefined,
-              listOccupied: async () => [],
-              count: async () => 0,
-            },
-          health: this.gpuClaims
-            ? this.gpuClaims.health(current.server_id, transaction)
-            : { read: async () => ({}), write: async () => undefined },
+          claims: this.gpuClaims.forContainer(current.server_id, containerId, transaction),
+          health: this.gpuClaims.health(current.server_id, transaction),
           containerId,
           observedStatus: observedStatus === 'creating' ? 'unknown' : observedStatus,
           currentState: current.gpu_state,
@@ -841,56 +815,23 @@ export class ContainerControlService {
   async listVolumesForUser(containerId: string, actorId: string): Promise<VolumeAttachmentDto[]> {
     const row = await this.requireContainer(containerId);
     if (row.owner_id !== actorId) throw new ForbiddenException();
-    if (this.volumes) return this.volumes.listAttachmentsForUser(actorId, containerId, 'local');
-    return this.listVolumeAttachments(containerId, row.server_id, 'local');
+    return this.volumes.listAttachmentsForUser(actorId, containerId, 'local');
   }
 
   async listVolumesForAdmin(containerId: string): Promise<VolumeAttachmentDto[]> {
-    const row = await this.requireContainer(containerId);
-    if (this.volumes) return this.volumes.listAttachmentsForAdmin(containerId, 'local');
-    return this.listVolumeAttachments(containerId, row.server_id, 'local');
+    await this.requireContainer(containerId);
+    return this.volumes.listAttachmentsForAdmin(containerId, 'local');
   }
 
   async listSharedVolumesForUser(containerId: string, actorId: string): Promise<VolumeAttachmentDto[]> {
     const row = await this.requireContainer(containerId);
     if (row.owner_id !== actorId) throw new ForbiddenException();
-    if (this.volumes) return this.volumes.listAttachmentsForUser(actorId, containerId, 'shared');
-    return this.listVolumeAttachments(containerId, row.server_id, 'shared');
+    return this.volumes.listAttachmentsForUser(actorId, containerId, 'shared');
   }
 
   async listSharedVolumesForAdmin(containerId: string): Promise<VolumeAttachmentDto[]> {
-    const row = await this.requireContainer(containerId);
-    if (this.volumes) return this.volumes.listAttachmentsForAdmin(containerId, 'shared');
-    return this.listVolumeAttachments(containerId, row.server_id, 'shared');
-  }
-
-  private async listVolumeAttachments(
-    containerId: string,
-    serverId: string,
-    kind: 'local' | 'shared',
-  ): Promise<VolumeAttachmentDto[]> {
-    const attachments = await this.database.selectFrom('control.volume_attachments as attachment')
-      .innerJoin('control.volumes as volume', 'volume.id', 'attachment.volume_id')
-      .leftJoin('control.volume_placements as placement', (join) => join
-        .onRef('placement.volume_id', '=', 'attachment.volume_id')
-        .on('placement.server_id', '=', serverId))
-      .selectAll('attachment')
-      .select([
-        'volume.name as volume_name',
-        'volume.shared_backend_id as shared_backend_id',
-        'placement.catalog_state as catalog_state',
-      ])
-      .where('attachment.container_id', '=', containerId)
-      .orderBy('attachment.created_at')
-      .execute();
-    return attachments
-      .filter((attachment) => (
-        kind === 'shared' ? attachment.shared_backend_id !== null : attachment.shared_backend_id === null
-      ))
-      .map((attachment) => this.toAttachmentDto(attachment, attachment.volume_name, {
-        kind,
-        catalogState: attachment.catalog_state,
-      }));
+    await this.requireContainer(containerId);
+    return this.volumes.listAttachmentsForAdmin(containerId, 'shared');
   }
 
   async getStats(containerId: string, userId: string) {
@@ -1044,7 +985,7 @@ export class ContainerControlService {
       );
       if (!updated) throw new ConflictException({ code: FailureCode.RevisionConflict });
       if (nextPhase === ContainerPhase.Deleting || nextPhase === ContainerPhase.Failed) {
-        await this.gpuClaims?.releaseContainerClaims(containerId, transaction);
+        await this.gpuClaims.releaseContainerClaims(containerId, transaction);
       }
       const kind = action === 'delete'
         ? IntentKind.ContainerDelete
@@ -1126,7 +1067,7 @@ export class ContainerControlService {
       if (!updated) throw new ConflictException({ code: FailureCode.RevisionConflict });
       if (values.lifecycle_phase === ContainerPhase.Deleting
         || values.lifecycle_phase === ContainerPhase.Failed) {
-        await this.gpuClaims?.releaseContainerClaims(containerId, transaction);
+        await this.gpuClaims.releaseContainerClaims(containerId, transaction);
       }
       const intent = await this.intents.createPending({
         kind: IntentKind.ContainerUpdate,

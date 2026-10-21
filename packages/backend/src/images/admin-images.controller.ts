@@ -21,7 +21,7 @@ import {
 import { RequireCaps } from '../iam/decorators/require-caps.decorator.js';
 import { CurrentUser } from '../iam/decorators/current-user.decorator.js';
 import type { UserRecord } from '../iam/user-record.js';
-import { acceptedIntent } from '../platform/domain-utils.js';
+import { acceptedIntent } from '../reconcile/accepted-intent.js';
 import { ImagesService } from './images.service.js';
 
 @Controller('admin/images')

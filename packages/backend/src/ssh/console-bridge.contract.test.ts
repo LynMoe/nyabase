@@ -1,7 +1,7 @@
 import { EventEmitter } from 'node:events';
 import { describe, expect, it, vi } from 'vitest';
-import { ConsoleBridgeGateway } from '../runtime/console-bridge.gateway.js';
-import { IncusConsoleBridgeAdapter } from '../runtime/incus-console-bridge.adapter.js';
+import { ConsoleBridgeGateway } from '../containers/console-bridge.gateway.js';
+import { IncusConsoleBridgeAdapter } from '../containers/incus-console-bridge.adapter.js';
 
 class FakeSocket extends EventEmitter {
   readonly readyState = 1;

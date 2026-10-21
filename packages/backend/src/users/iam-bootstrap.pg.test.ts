@@ -6,6 +6,7 @@ import { AccessCacheEpochService } from '../iam/access-cache-epoch.service.js';
 import { AccessResolverService } from '../iam/access-resolver.service.js';
 import { AccessRevocationGuardService } from '../iam/access-revocation-guard.service.js';
 import { AuthService } from '../iam/auth.service.js';
+import { GpuClaimsRepository } from '../gpu/gpu-claims.repository.js';
 import { GroupsService } from '../groups/groups.service.js';
 import { IamAuthRepository } from '../iam/iam-auth.repository.js';
 import type { NyabaseDatabase } from '../platform/persistence-pg/database.types.js';
@@ -119,6 +120,7 @@ function createBootstrapContext(
     access,
     audit as never,
     new AccessRevocationGuardService(),
+    new GpuClaimsRepository(database),
   );
   const app = new IamBootstrapService(groups, users);
   return { app, auth };

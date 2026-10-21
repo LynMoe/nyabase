@@ -33,7 +33,7 @@ function service(existing: { id: string; deleting: boolean } | undefined) {
     { append: vi.fn() } as never,
     { ensurePending: vi.fn() } as never,
     { wake: vi.fn() } as never,
-    undefined,
+    { lockImageCapacity: vi.fn() } as never,
     catalog as never,
   );
 }

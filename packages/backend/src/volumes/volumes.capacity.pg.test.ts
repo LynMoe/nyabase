@@ -10,17 +10,19 @@ import {
 import type { NyabaseDatabase } from '../platform/persistence-pg/database.types.js';
 import { withPostgresTestDatabase } from '../platform/persistence-pg/postgres-test-harness.js';
 import { PgTransactionManager } from '../platform/persistence-pg/transaction.js';
-import { IntentRepository } from '../runtime/intent.repository.js';
-import { VolumeReconciler } from '../runtime/volume-reconciler.service.js';
+import { IntentRepository } from '../reconcile/intent.repository.js';
+import { VolumeReconciler } from './volume-reconciler.service.js';
 import { StoragePoolsRepository } from '../storage-pools/storage-pools.repository.js';
 import { ContainerActionPolicyService } from '../containers/container-action-policy.service.js';
 import { ContainerControlRepository } from '../containers/container-control.repository.js';
 import { ContainerControlService } from '../containers/container-control.service.js';
 import { IpPoolsRepository } from '../ip-pools/ip-pools.repository.js';
 import { StoragePoolsService } from '../storage-pools/storage-pools.service.js';
-import { ContainerSshConvergenceService } from '../ssh/container-ssh-convergence.service.js';
+import { ContainerSshConvergenceService } from '../containers/container-ssh-convergence.service.js';
 import { VolumesRepository } from './volumes.repository.js';
 import { VolumesService } from './volumes.service.js';
+import { GpuClaimsRepository } from '../gpu/gpu-claims.repository.js';
+import { noopWake } from '../reconcile/reconcile-wake.test-helper.js';
 
 const describePg = process.env.NYABASE_TEST_DATABASE_URL ? describe : describe.skip;
 
@@ -96,10 +98,11 @@ function makeService(database: Kysely<NyabaseDatabase>) {
     new VolumesRepository(database),
     new StoragePoolsRepository(database),
     new PgTransactionManager(database),
-    new IntentRepository(database),
+    new IntentRepository(database, noopWake()),
     { wake: vi.fn() } as never,
     database,
     { append: vi.fn().mockResolvedValue(undefined) } as never,
+    { get: vi.fn().mockRejectedValue(new Error('Incus is unavailable in this test')), listServerIds: vi.fn() } as never,
   );
 }
 
@@ -227,8 +230,14 @@ describePg('volume capacity locking and scope exclusions', () => {
       expect(capacity.pools[0]!.poolId).toBe(recreatedLocalPoolId);
       expect(capacity.pools[0]!.committedBytes).toBe(100);
 
-      const intents = new IntentRepository(database);
-      const reconciler = new VolumeReconciler(database, intents);
+      const intents = new IntentRepository(database, noopWake());
+      const reconciler = new VolumeReconciler(
+        database,
+        intents,
+        { log: vi.fn().mockResolvedValue(undefined) } as never,
+        { get: vi.fn().mockResolvedValue(undefined), listServerIds: vi.fn() } as never,
+        { register: vi.fn() } as never,
+      );
       await reconciler.scan(serverId);
       const first = await intents.list({
         resourceType: 'volume',
@@ -551,12 +560,13 @@ describePg('volume capacity locking and scope exclusions', () => {
         new VolumesRepository(database),
         new StoragePoolsRepository(database),
         transactionManager,
-        new IntentRepository(database),
+        new IntentRepository(database, noopWake()),
         { wake: vi.fn() } as never,
         database,
         { append: vi.fn().mockResolvedValue(undefined) } as never,
+        { get: vi.fn().mockRejectedValue(new Error('Incus is unavailable in this test')), listServerIds: vi.fn() } as never,
       );
-      const containerIntents = new IntentRepository(database);
+      const containerIntents = new IntentRepository(database, noopWake());
       const containerWake = { wake: vi.fn() } as never;
       const containerService = new ContainerControlService(
         database,
@@ -587,6 +597,8 @@ describePg('volume capacity locking and scope exclusions', () => {
           containerIntents,
           containerWake,
         ),
+        volumeService,
+        new GpuClaimsRepository(database),
       );
 
       const results = await Promise.allSettled([
@@ -673,10 +685,11 @@ describePg('volume capacity locking and scope exclusions', () => {
         new VolumesRepository(database),
         new StoragePoolsRepository(database),
         transactionManager,
-        new IntentRepository(database),
+        new IntentRepository(database, noopWake()),
         { wake: vi.fn() } as never,
         database,
         { append: vi.fn().mockResolvedValue(undefined) } as never,
+        { get: vi.fn().mockRejectedValue(new Error('Incus is unavailable in this test')), listServerIds: vi.fn() } as never,
       );
       const storageService = new StoragePoolsService(
         new StoragePoolsRepository(database),

@@ -1,8 +1,4 @@
-import type {
-  IntentAcceptedDto,
-} from '@nyabase/common';
-import { IntentStatus, ResourceLifecyclePhase } from '@nyabase/common';
-import type { IntentRecord } from '../runtime/intent.repository.js';
+import type { ResourceLifecyclePhase } from '@nyabase/common';
 
 export function numberValue(value: string | number | bigint | null | undefined): number {
   if (value === null || value === undefined) return 0;
@@ -38,18 +34,6 @@ export function lifecyclePhase(value: string): ResourceLifecyclePhase {
     return value as ResourceLifecyclePhase;
   }
   throw new Error(`Unknown resource lifecycle phase: ${value}`);
-}
-
-export function acceptedIntent(intent: IntentRecord): IntentAcceptedDto {
-  return {
-    intentId: intent.id,
-    resourceType: intent.resourceType as IntentAcceptedDto['resourceType'],
-    resourceId: intent.resourceId,
-    serverId: intent.serverId,
-    targetGeneration: intent.targetGeneration,
-    status: 'pending' as IntentStatus.Pending,
-    createdAt: intent.createdAt,
-  };
 }
 
 export function deterministicName(prefix: 'nyc' | 'nyv' | 'nyd', id: string): string {

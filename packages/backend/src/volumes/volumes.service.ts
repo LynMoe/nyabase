@@ -5,7 +5,6 @@ import {
   Inject,
   Injectable,
   NotFoundException,
-  Optional,
 } from '@nestjs/common';
 import { randomUUID } from 'node:crypto';
 import { sql, type Kysely, type Transaction } from 'kysely';
@@ -31,9 +30,10 @@ import {
 import { PG_DATABASE } from '../platform/persistence-pg/tokens.js';
 import type { NyabaseDatabase } from '../platform/persistence-pg/database.types.js';
 import { PgTransactionManager } from '../platform/persistence-pg/transaction.js';
-import { IntentRepository } from '../runtime/intent.repository.js';
-import { ReconcileWakeService } from '../runtime/reconcile-wake.service.js';
-import { acceptedIntent, isoDate, lifecyclePhase, numberValue, deterministicName, poolLabel } from '../platform/domain-utils.js';
+import { IntentRepository } from '../reconcile/intent.repository.js';
+import { ReconcileWakeService } from '../reconcile/reconcile-wake.service.js';
+import { isoDate, lifecyclePhase, numberValue, deterministicName, poolLabel } from '../platform/domain-utils.js';
+import { acceptedIntent } from '../reconcile/accepted-intent.js';
 import { StoragePoolsRepository } from '../storage-pools/storage-pools.repository.js';
 import { isLocalPoolRow, storagePoolCapability } from '../storage-pools/storage-pools.service.js';
 import { VolumesRepository, type VolumeExecutor } from './volumes.repository.js';
@@ -45,15 +45,11 @@ import {
   selectLiveGrantCandidate,
   type GrantWinnerCandidate,
 } from '../iam/grant-expiry.js';
-import { NyabaseConfigService } from '../platform/config/nyabase-config.service.js';
 import { listEligibleDestroyExecutors } from './eligible-destroy-executors.js';
 import { occupancyForCatalogItem } from './shared-volume-inspect.js';
-import {
-  INCUS_CLIENT_FACTORY,
-  type IncusClientFactory,
-} from '../runtime/reconcile-worker.service.js';
+import { INCUS_CLIENT_FACTORY, type IncusClientFactory } from '../incus/incus-client.factory.js';
 import { IncusError } from '../incus/index.js';
-import { normalizeObservedVolumeUsage } from '../runtime/volume-reconciler.service.js';
+import { normalizeObservedVolumeUsage } from './volume-reconciler.service.js';
 
 type GrantRow = {
   disk_bytes: string | number | null;
@@ -260,8 +256,7 @@ export class VolumesService {
     private readonly wake: ReconcileWakeService,
     @Inject(PG_DATABASE) private readonly database: Kysely<NyabaseDatabase>,
     private readonly audit: AuditService,
-    @Optional() private readonly config?: NyabaseConfigService,
-    @Optional() @Inject(INCUS_CLIENT_FACTORY) private readonly clients?: IncusClientFactory,
+    @Inject(INCUS_CLIENT_FACTORY) private readonly clients: IncusClientFactory,
   ) {}
 
   private async lockVolumeQuota(
@@ -1096,7 +1091,7 @@ export class VolumesService {
         seen.add(executor.server_id);
       }
     }
-    if (candidates.length === 0 || !this.clients) {
+    if (candidates.length === 0) {
       return { status: 'unavailable' };
     }
     for (const candidate of candidates) {
@@ -1117,11 +1112,10 @@ export class VolumesService {
   ): Promise<{ status: 'observed'; usedBytes: bigint | null } | { status: 'error' }> {
     let client;
     try {
-      client = await this.clients?.get(candidate.serverId);
+      client = await this.clients.get(candidate.serverId);
     } catch {
       return { status: 'error' };
     }
-    if (!client) return { status: 'error' };
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), 5_000);
     try {
@@ -2202,24 +2196,20 @@ export class VolumesService {
         : 'absent';
       let incusPresent: boolean | null = null;
       try {
-        const client = await this.clients?.get(pool.server_id);
-        if (!client) {
-          incusPresent = null;
-        } else {
-          const controller = new AbortController();
-          const timer = setTimeout(() => controller.abort(), 5_000);
-          try {
-            await client.getStorageVolume(pool.pool_name, 'custom', volume.incus_name, {
-              signal: controller.signal,
-            });
-            incusPresent = true;
-          } catch (error) {
-            incusPresent = error instanceof IncusError && error.code === 'INCUS_NOT_FOUND'
-              ? false
-              : null;
-          } finally {
-            clearTimeout(timer);
-          }
+        const client = await this.clients.get(pool.server_id);
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), 5_000);
+        try {
+          await client.getStorageVolume(pool.pool_name, 'custom', volume.incus_name, {
+            signal: controller.signal,
+          });
+          incusPresent = true;
+        } catch (error) {
+          incusPresent = error instanceof IncusError && error.code === 'INCUS_NOT_FOUND'
+            ? false
+            : null;
+        } finally {
+          clearTimeout(timer);
         }
       } catch {
         incusPresent = null;
@@ -2290,8 +2280,7 @@ export class VolumesService {
     for (const pool of pools) {
       let listed: Array<{ name?: string } | string> = [];
       try {
-        const client = await this.clients?.get(pool.server_id);
-        if (!client) continue;
+        const client = await this.clients.get(pool.server_id);
         const controller = new AbortController();
         const timer = setTimeout(() => controller.abort(), 5_000);
         try {

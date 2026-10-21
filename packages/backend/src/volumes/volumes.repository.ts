@@ -14,6 +14,17 @@ export class VolumesRepository {
     private readonly database: Kysely<NyabaseDatabase>,
   ) {}
 
+  async findOwnership(
+    volumeId: string,
+    executor: VolumeExecutor = this.database,
+  ): Promise<{ ownerId: string; shared: boolean } | null> {
+    const row = await executor.selectFrom('control.volumes')
+      .select(['owner_id', 'shared_backend_id'])
+      .where('id', '=', volumeId)
+      .executeTakeFirst();
+    return row ? { ownerId: row.owner_id, shared: row.shared_backend_id !== null } : null;
+  }
+
   list(ownerId?: string, executor: VolumeExecutor = this.database) {
     let query = executor.selectFrom('control.volumes').selectAll().orderBy('created_at', 'desc');
     if (ownerId) query = query.where('owner_id', '=', ownerId);

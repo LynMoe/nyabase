@@ -4,6 +4,7 @@ import { ServerStatus } from '@nyabase/common';
 import { PgTransactionManager } from '../platform/persistence-pg/transaction.js';
 import { withPostgresTestDatabase } from '../platform/persistence-pg/postgres-test-harness.js';
 import { ImagesService } from './images.service.js';
+import { InfrastructureRepository } from '../infrastructure/infrastructure.repository.js';
 
 const describePg = process.env.NYABASE_TEST_DATABASE_URL ? describe : describe.skip;
 
@@ -32,6 +33,8 @@ describePg('clean Incus image assignment contract', () => {
         { append: vi.fn() } as never,
         { ensurePending: vi.fn() } as never,
         { wake: vi.fn() } as never,
+        new InfrastructureRepository(database),
+        {} as never,
       );
 
       const updated = await service.update('actor-1', imageId, {
@@ -132,6 +135,8 @@ describePg('clean Incus image assignment contract', () => {
         { append: vi.fn() } as never,
         intents as never,
         { wake: vi.fn() } as never,
+        new InfrastructureRepository(database),
+        {} as never,
       );
 
       const first = await service.ensureAssignment('actor-1', imageId, serverId);
@@ -252,6 +257,8 @@ describePg('clean Incus image assignment contract', () => {
         { append: vi.fn() } as never,
         intents as never,
         { wake: vi.fn() } as never,
+        new InfrastructureRepository(database),
+        {} as never,
       );
 
       const results = await Promise.allSettled([

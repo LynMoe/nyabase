@@ -60,6 +60,7 @@ function service(
     database as never,
     { pull } as never,
     { writeBatch } as never,
+    { get: () => undefined } as never,
   );
 }
 

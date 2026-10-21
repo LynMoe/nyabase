@@ -27,7 +27,7 @@ import { PG_DATABASE } from '../platform/persistence-pg/tokens.js';
 import { PgTransactionManager } from '../platform/persistence-pg/transaction.js';
 import { AccessResolverService } from '../iam/access-resolver.service.js';
 import { AuditService } from '../iam/audit.service.js';
-import { IntentRepository } from '../runtime/intent.repository.js';
+import { IntentRepository } from '../reconcile/intent.repository.js';
 import { numberValue } from '../platform/domain-utils.js';
 import {
   encryptPrivateKey,

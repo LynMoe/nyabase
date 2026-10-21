@@ -10,7 +10,7 @@ import { SpaFallbackFilter } from './platform/filters/spa-fallback.filter.js';
 import { securityHeaders, trustProxySetting } from './platform/http-security.js';
 import { ZodExceptionFilter } from './platform/filters/zod-exception.filter.js';
 import { RuntimeLifecycleService } from './health/runtime-lifecycle.service.js';
-import { ConsoleBridgeGateway } from './runtime/console-bridge.gateway.js';
+import { ConsoleBridgeGateway } from './containers/console-bridge.gateway.js';
 import { SshProxyGateway } from './ssh/ssh-proxy-gateway.js';
 import { HttpProxyGateway } from './http-proxy/http-proxy-gateway.js';
 

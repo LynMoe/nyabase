@@ -19,6 +19,7 @@ describe('GroupsService grant mutation authorization', () => {
       access as never,
       undefined as never,
       undefined as never,
+      { isEnabled: async () => false } as never,
     );
 
     await expect(service.deleteUserServerGrant(
@@ -50,6 +51,7 @@ describe('GroupsService grant mutation authorization', () => {
       access as never,
       undefined as never,
       undefined as never,
+      { isEnabled: async () => false } as never,
     );
 
     await expect(service.deleteUserStoragePoolGrant(

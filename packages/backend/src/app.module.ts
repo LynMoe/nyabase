@@ -12,7 +12,7 @@ import { ImagesModule } from './images/images.module.js';
 import { IpPoolsModule } from './ip-pools/ip-pools.module.js';
 import { MetricsModule } from './metrics/metrics.module.js';
 import { PlatformModule } from './platform/platform.module.js';
-import { RuntimeModule } from './runtime/runtime.module.js';
+import { ReconcileModule } from './reconcile/reconcile.module.js';
 import { ServersModule } from './servers/servers.module.js';
 import { SharedBackendsModule } from './shared-backends/shared-backends.module.js';
 import { SshModule } from './ssh/ssh.module.js';
@@ -25,7 +25,7 @@ import { VolumesModule } from './volumes/volumes.module.js';
   imports: [
     PlatformModule,
     IamModule,
-    RuntimeModule,
+    ReconcileModule,
     MetricsModule,
     AccessModule,
     AuditModule,

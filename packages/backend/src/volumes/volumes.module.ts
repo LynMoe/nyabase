@@ -1,5 +1,6 @@
 import { Module } from '@nestjs/common';
-import { RuntimeModule } from '../runtime/runtime.module.js';
+import { IncusModule } from '../incus/incus.module.js';
+import { ReconcileModule } from '../reconcile/reconcile.module.js';
 import { StoragePoolsModule } from '../storage-pools/storage-pools.module.js';
 import {
   AdminContainerSharedVolumesController,
@@ -8,6 +9,13 @@ import {
   ContainerSharedVolumesController,
   SharedVolumesController,
 } from './shared-volumes.controller.js';
+import {
+  AdminSharedVolumeIntentsController,
+  AdminVolumeIntentsController,
+  SharedVolumeIntentsController,
+  VolumeIntentsController,
+} from './volume-intents.controller.js';
+import { VolumeReconciler } from './volume-reconciler.service.js';
 import {
   AdminVolumesController,
   AdminContainerVolumesController,
@@ -19,11 +27,8 @@ import { VolumesRepository } from './volumes.repository.js';
 import { VolumesService } from './volumes.service.js';
 
 @Module({
-  imports: [
-    RuntimeModule,
-    StoragePoolsModule,
-  ],
-  providers: [VolumesRepository, VolumesService],
+  imports: [ReconcileModule, IncusModule, StoragePoolsModule],
+  providers: [VolumesRepository, VolumesService, VolumeReconciler],
   controllers: [
     VolumesController,
     SharedVolumesController,
@@ -35,6 +40,10 @@ import { VolumesService } from './volumes.service.js';
     AdminSharedVolumesController,
     AdminSharedBackendCatalogInspectController,
     StorageCapacityController,
+    VolumeIntentsController,
+    SharedVolumeIntentsController,
+    AdminVolumeIntentsController,
+    AdminSharedVolumeIntentsController,
   ],
   exports: [VolumesRepository, VolumesService],
 })

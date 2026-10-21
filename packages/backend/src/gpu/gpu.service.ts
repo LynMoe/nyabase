@@ -2,8 +2,6 @@ import {
   Inject,
   Injectable,
   NotFoundException,
-  Optional,
-  forwardRef,
 } from '@nestjs/common';
 import {
   AuditAction,
@@ -23,14 +21,8 @@ import { PG_DATABASE } from '../platform/persistence-pg/tokens.js';
 import { PgTransactionManager } from '../platform/persistence-pg/transaction.js';
 import { AccessResolverService } from '../iam/access-resolver.service.js';
 import { AuditService } from '../iam/audit.service.js';
-import {
-  INCUS_CLIENT_FACTORY,
-  type IncusClientFactory,
-} from '../runtime/reconcile-worker.service.js';
-import {
-  NODE_METRICS_PULL,
-  type NodeMetricsPullPort,
-} from '../runtime/server-preflight-reconciler.service.js';
+import { INCUS_CLIENT_FACTORY, type IncusClientFactory } from '../incus/incus-client.factory.js';
+import { AuthenticatedNodeMetricsPullAdapter } from '../metrics/node-metrics-pull.adapter.js';
 import { assertGpuCanDisable, gpuOccupiedError, isGpuOccupiedSqlError } from './enablement.js';
 import { GpuClaimsRepository } from './gpu-claims.repository.js';
 import { listGpuDevices } from './inventory.js';
@@ -55,8 +47,8 @@ export class GpuService {
     private readonly claims: GpuClaimsRepository,
     private readonly access: AccessResolverService,
     private readonly audit: AuditService,
-    @Optional() @Inject(forwardRef(() => INCUS_CLIENT_FACTORY)) private readonly clients?: IncusClientFactory,
-    @Optional() @Inject(forwardRef(() => NODE_METRICS_PULL)) private readonly nodeMetrics?: NodeMetricsPullPort,
+    @Inject(INCUS_CLIENT_FACTORY) private readonly clients: IncusClientFactory,
+    private readonly nodeMetrics: AuthenticatedNodeMetricsPullAdapter,
   ) {}
 
   /** Admin view: switch, operational health, claim count, and host prerequisites. */
@@ -198,12 +190,10 @@ export class GpuService {
     metricSamples: readonly NodeMetricSample[];
   }> {
     let resources: unknown = null;
-    if (this.clients) {
-      try {
-        resources = (await this.clients.get(serverId).then((client) => client.getResources())).metadata;
-      } catch {
-        resources = null;
-      }
+    try {
+      resources = (await this.clients.get(serverId).then((client) => client.getResources())).metadata;
+    } catch {
+      resources = null;
     }
     const server = await this.database
       .selectFrom('infra.servers')
@@ -211,11 +201,7 @@ export class GpuService {
       .where('id', '=', serverId)
       .executeTakeFirst();
     let metricSamples: NodeMetricSample[] = [];
-    if (
-      this.nodeMetrics
-      && server?.node_metrics_endpoint
-      && server.node_metrics_token_ciphertext
-    ) {
+    if (server?.node_metrics_endpoint && server.node_metrics_token_ciphertext) {
       try {
         const pulled = await this.nodeMetrics.pull(
           serverId,

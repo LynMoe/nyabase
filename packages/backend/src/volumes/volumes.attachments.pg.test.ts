@@ -5,10 +5,11 @@ import { FailureCode } from '@nyabase/common';
 import type { NyabaseDatabase } from '../platform/persistence-pg/database.types.js';
 import { withPostgresTestDatabase } from '../platform/persistence-pg/postgres-test-harness.js';
 import { PgTransactionManager } from '../platform/persistence-pg/transaction.js';
-import { IntentRepository } from '../runtime/intent.repository.js';
+import { IntentRepository } from '../reconcile/intent.repository.js';
 import { StoragePoolsRepository } from '../storage-pools/storage-pools.repository.js';
 import { VolumesRepository } from './volumes.repository.js';
 import { VolumesService } from './volumes.service.js';
+import { noopWake } from '../reconcile/reconcile-wake.test-helper.js';
 
 const describePg = process.env.NYABASE_TEST_DATABASE_URL ? describe : describe.skip;
 
@@ -164,10 +165,11 @@ function makeService(database: Kysely<NyabaseDatabase>) {
     new VolumesRepository(database),
     new StoragePoolsRepository(database),
     new PgTransactionManager(database),
-    new IntentRepository(database),
+    new IntentRepository(database, noopWake()),
     { wake: vi.fn() } as never,
     database,
     { append: vi.fn().mockResolvedValue(undefined) } as never,
+    { get: vi.fn().mockRejectedValue(new Error('Incus is unavailable in this test')), listServerIds: vi.fn() } as never,
   );
 }
 

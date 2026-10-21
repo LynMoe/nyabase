@@ -188,6 +188,7 @@ function makeVolumesService(overrides: {
     { wake: vi.fn() } as never,
     {} as never,
     { append: vi.fn() } as never,
+    { get: vi.fn().mockRejectedValue(new Error('Incus is unavailable in this test')), listServerIds: vi.fn() } as never,
   );
   return { service, repository, intents, transaction, pools };
 }

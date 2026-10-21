@@ -11,16 +11,19 @@ import { describe, expect, it, vi } from 'vitest';
 import type { NyabaseDatabase } from '../platform/persistence-pg/database.types.js';
 import { withPostgresTestDatabase } from '../platform/persistence-pg/postgres-test-harness.js';
 import { PgTransactionManager } from '../platform/persistence-pg/transaction.js';
-import { IntentRepository } from '../runtime/intent.repository.js';
-import { ContainerReconciler } from '../runtime/container-reconciler.service.js';
+import { IntentRepository } from '../reconcile/intent.repository.js';
+import { ContainerReconciler } from './container-reconciler.service.js';
 import { ContainerActionPolicyService } from './container-action-policy.service.js';
 import { ContainerControlRepository } from './container-control.repository.js';
 import { ContainerControlService } from './container-control.service.js';
 import { ImagesService } from '../images/images.service.js';
 import { IpPoolsRepository } from '../ip-pools/ip-pools.repository.js';
-import { ContainerSshConvergenceService } from '../ssh/container-ssh-convergence.service.js';
+import { ContainerSshConvergenceService } from './container-ssh-convergence.service.js';
 import { isGpuOccupiedSqlError } from '../gpu/enablement.js';
 import { GpuClaimsRepository } from '../gpu/gpu-claims.repository.js';
+import { noopWake } from '../reconcile/reconcile-wake.test-helper.js';
+import { InfrastructureRepository } from '../infrastructure/infrastructure.repository.js';
+import { IncusContainerSshStateAdapter } from './container-ssh-state.adapter.js';
 
 const describePg = process.env.NYABASE_TEST_DATABASE_URL ? describe : describe.skip;
 const IMAGE_FINGERPRINT = 'a'.repeat(64);
@@ -127,14 +130,21 @@ describePg('PostgreSQL container create admission and capacity', () => {
         fixture.userId,
         request(fixture, 'scan-idempotent'),
       );
-      const intents = new IntentRepository(database);
+      const intents = new IntentRepository(database, noopWake());
       await intents.settleForObservedGeneration(
         'container',
         created.resourceId,
         1,
         { outcome: 'succeeded', placementServerId: fixture.serverId },
       );
-      const reconciler = new ContainerReconciler(database, intents);
+      const reconciler = new ContainerReconciler(
+        database,
+        intents,
+        new IncusContainerSshStateAdapter(),
+        { notify: vi.fn() } as never,
+        { log: vi.fn() } as never,
+        { register: vi.fn() } as never,
+      );
       const client = {
         listInstances: vi.fn().mockResolvedValue({ metadata: [] }),
       };
@@ -241,6 +251,8 @@ describePg('PostgreSQL container create admission and capacity', () => {
         { append: vi.fn().mockResolvedValue(undefined) } as never,
         imageIntents as never,
         { wake: vi.fn() } as never,
+        new InfrastructureRepository(database),
+        {} as never,
       );
 
       const [deleteResult, createResult] = await Promise.all([
@@ -503,7 +515,7 @@ function containerService(
     ),
     assertActorCapabilitiesInTransaction: vi.fn(),
   };
-  const intents = new IntentRepository(database);
+  const intents = new IntentRepository(database, noopWake());
   const wake = { wake: vi.fn() } as never;
   const service = new ContainerControlService(
     database,
@@ -518,8 +530,8 @@ function containerService(
     new IpPoolsRepository(database),
     { get: vi.fn().mockReturnValue(null) } as never,
     new ContainerSshConvergenceService(database, intents, wake),
-    undefined,
-    gpuClaims,
+    {} as never,
+    gpuClaims ?? new GpuClaimsRepository(database),
   );
   return { service, access };
 }

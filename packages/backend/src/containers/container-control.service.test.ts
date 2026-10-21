@@ -116,6 +116,13 @@ function makeHarness() {
     { listForServer: vi.fn().mockResolvedValue([]) } as never,
     { get: vi.fn().mockReturnValue(null) } as never,
     sshConvergence as never,
+    {} as never,
+    {
+      isEnabled: vi.fn().mockResolvedValue(false),
+      forContainer: vi.fn(),
+      health: vi.fn(),
+      releaseContainerClaims: vi.fn().mockResolvedValue(undefined),
+    } as never,
   );
   return {
     service,

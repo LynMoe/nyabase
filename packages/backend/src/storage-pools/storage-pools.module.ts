@@ -1,5 +1,5 @@
 import { Module } from '@nestjs/common';
-import { RuntimeModule } from '../runtime/runtime.module.js';
+import { IncusModule } from '../incus/incus.module.js';
 import {
   AdminStoragePoolsController,
   StoragePoolsController,
@@ -8,7 +8,7 @@ import { StoragePoolsRepository } from './storage-pools.repository.js';
 import { StoragePoolsService } from './storage-pools.service.js';
 
 @Module({
-  imports: [RuntimeModule],
+  imports: [IncusModule],
   providers: [StoragePoolsRepository, StoragePoolsService],
   controllers: [
     StoragePoolsController,

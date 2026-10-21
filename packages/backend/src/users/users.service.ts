@@ -1,7 +1,6 @@
 import {
   BadRequestException,
   ConflictException,
-  forwardRef,
   Inject,
   Injectable,
   Logger,
@@ -28,7 +27,7 @@ import { PG_DATABASE } from '../platform/persistence-pg/tokens.js';
 import { PgTransactionManager } from '../platform/persistence-pg/transaction.js';
 import { AuthService } from '../iam/auth.service.js';
 import { AccessResolverService } from '../iam/access-resolver.service.js';
-import { ContainerSshConvergenceService } from '../ssh/container-ssh-convergence.service.js';
+import { ContainerSshConvergenceService } from '../containers/container-ssh-convergence.service.js';
 import { NyabaseConfigService } from '../platform/config/nyabase-config.service.js';
 import { ProxySnapshotNotifierService } from '../proxy-snapshots/proxy-snapshot-notifier.service.js';
 import { AuditService } from '../iam/audit.service.js';
@@ -81,12 +80,10 @@ export class UsersService {
     private readonly database: Kysely<NyabaseDatabase>,
     private readonly transactions: PgTransactionManager,
     private readonly authService: AuthService,
-    @Inject(forwardRef(() => AccessResolverService))
     private readonly accessResolver: AccessResolverService,
     private readonly containerSshConvergence: ContainerSshConvergenceService,
     private readonly proxySnapshots: ProxySnapshotNotifierService,
     private readonly config: NyabaseConfigService,
-    @Inject(forwardRef(() => AuditService))
     private readonly auditService: AuditService,
   ) {}
 

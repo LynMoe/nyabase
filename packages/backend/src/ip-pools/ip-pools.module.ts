@@ -4,7 +4,7 @@ import { IpPoolsRepository } from './ip-pools.repository.js';
 import { IpPoolsService } from './ip-pools.service.js';
 
 @Module({
-    providers: [IpPoolsRepository, IpPoolsService],
+  providers: [IpPoolsRepository, IpPoolsService],
   controllers: [AdminIpPoolsController],
   exports: [IpPoolsRepository, IpPoolsService],
 })

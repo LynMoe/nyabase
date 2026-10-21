@@ -20,8 +20,9 @@ import {
   type StoragePoolDiscoverResult,
   type StoragePoolDto,
 } from '@nyabase/common';
-import type { IncusClientFactory } from '../runtime/reconcile-worker.service.js';
-import { INCUS_CLIENT_FACTORY } from '../runtime/reconcile-worker.service.js';
+import type { IncusClientPort } from '../incus/index.js';
+import type { IncusClientFactory } from '../incus/incus-client.factory.js';
+import { INCUS_CLIENT_FACTORY } from '../incus/incus-client.factory.js';
 import {
   StoragePoolsRepository,
   type StorageExecutor,
@@ -280,6 +281,16 @@ export function missingStoragePoolCapability(): StoragePoolCapabilityDto {
   };
 }
 
+function optionalByteCount(value: unknown): string | null {
+  if (typeof value === 'number' && Number.isFinite(value) && value >= 0) {
+    return String(Math.trunc(value));
+  }
+  if (typeof value === 'string' && /^(?:0|[1-9][0-9]*)$/.test(value)) {
+    return value;
+  }
+  return null;
+}
+
 @Injectable()
 export class StoragePoolsService {
   private readonly logger = new Logger(StoragePoolsService.name);
@@ -290,6 +301,33 @@ export class StoragePoolsService {
     @Inject(PG_DATABASE) private readonly database: Kysely<NyabaseDatabase>,
     @Inject(INCUS_CLIENT_FACTORY) private readonly clients: IncusClientFactory,
   ) {}
+
+  /** Records observed used/total bytes for every registered pool of one server. */
+  async refreshObservedUsage(
+    serverId: string,
+    client: IncusClientPort,
+    signal: AbortSignal,
+  ): Promise<void> {
+    const pools = await this.database
+      .selectFrom('infra.storage_pools')
+      .select(['id', 'incus_name'])
+      .where('server_id', '=', serverId)
+      .where('registered', '=', true)
+      .execute();
+    for (const pool of pools) {
+      if (signal.aborted) return;
+      const poolResources = await client.getStoragePoolResources(pool.incus_name, { signal });
+      await this.database
+        .updateTable('infra.storage_pools')
+        .set({
+          used_bytes: optionalByteCount(poolResources.metadata.space?.used),
+          total_bytes: optionalByteCount(poolResources.metadata.space?.total),
+          last_observed_at: sql<Date>`clock_timestamp()`,
+        })
+        .where('id', '=', pool.id)
+        .execute();
+    }
+  }
 
   async list(serverId?: string, includeUnregistered = false): Promise<StoragePoolDto[]> {
     const rows = await this.repository.list(serverId, includeUnregistered);

@@ -3,7 +3,6 @@ import {
   Inject,
   Injectable,
   NotFoundException,
-  Optional,
 } from '@nestjs/common';
 import type { Kysely, Transaction } from 'kysely';
 import { randomUUID } from 'node:crypto';
@@ -28,9 +27,10 @@ import { PgTransactionManager } from '../platform/persistence-pg/transaction.js'
 import { AccessResolverService } from '../iam/access-resolver.service.js';
 import { AuditService } from '../iam/audit.service.js';
 import { InfrastructureRepository } from '../infrastructure/infrastructure.repository.js';
-import { IntentRepository } from '../runtime/intent.repository.js';
-import { ReconcileWakeService } from '../runtime/reconcile-wake.service.js';
-import { isoDate, numberValue, acceptedIntent } from '../platform/domain-utils.js';
+import { IntentRepository } from '../reconcile/intent.repository.js';
+import { ReconcileWakeService } from '../reconcile/reconcile-wake.service.js';
+import { isoDate, numberValue } from '../platform/domain-utils.js';
+import { acceptedIntent } from '../reconcile/accepted-intent.js';
 import { ImageCatalogService } from './image-catalog.js';
 
 type ImageRow = Awaited<ReturnType<ImagesService['findById']>>;
@@ -57,14 +57,11 @@ export class ImagesService {
     private readonly audit: AuditService,
     private readonly intents: IntentRepository,
     private readonly wake: ReconcileWakeService,
-    @Optional() private readonly infrastructure?: InfrastructureRepository,
-    @Optional() private readonly catalog?: ImageCatalogService,
+    private readonly infrastructure: InfrastructureRepository,
+    private readonly catalog: ImageCatalogService,
   ) {}
 
   async listCatalog(): Promise<CatalogImageDto[]> {
-    if (!this.catalog) {
-      throw new ConflictException({ code: 'IMAGE_CATALOG_UNAVAILABLE', message: 'Image catalog is not configured' });
-    }
     const entries = await this.catalog.list();
     const existing = await this.database.selectFrom('infra.images').select(['alias']).execute();
     const occupied = new Set(existing.map((row) => row.alias));
@@ -75,9 +72,6 @@ export class ImagesService {
   }
 
   async addFromCatalog(actorId: string, input: AddCatalogImageRequest): Promise<AdminImageDto> {
-    if (!this.catalog) {
-      throw new ConflictException({ code: 'IMAGE_CATALOG_UNAVAILABLE', message: 'Image catalog is not configured' });
-    }
     const entry = await this.catalog.requireAlias(input.alias);
     const existing = await this.database.selectFrom('infra.images')
       .select(['id', 'deleting'])
@@ -112,9 +106,6 @@ export class ImagesService {
     image: AdminImageDto;
     intents: Array<Awaited<ReturnType<IntentRepository['ensurePending']>>>;
   }> {
-    if (!this.catalog) {
-      throw new ConflictException({ code: 'IMAGE_CATALOG_UNAVAILABLE', message: 'Image catalog is not configured' });
-    }
     const current = await this.findById(imageId);
     const entry = await this.catalog.requireAlias(current.alias);
     const result = await this.transactions.run(async (transaction) => {
@@ -203,7 +194,7 @@ export class ImagesService {
         actorId,
         [Capability.ManageImages],
       );
-      await this.infrastructure?.lockImageCapacity(transaction);
+      await this.infrastructure.lockImageCapacity(transaction);
       const count = await transaction.selectFrom('infra.images')
         .select(({ fn }) => fn.countAll<number>().as('count'))
         .executeTakeFirstOrThrow();
@@ -285,6 +276,25 @@ export class ImagesService {
       .executeTakeFirst();
     if (!row) throw new NotFoundException('Image not found');
     return row;
+  }
+
+  async findAssignmentId(imageId: string, serverId: string): Promise<string | null> {
+    const row = await this.database.selectFrom('infra.image_server_assignments')
+      .select('id')
+      .where('image_id', '=', imageId)
+      .where('server_id', '=', serverId)
+      .executeTakeFirst();
+    return row?.id ?? null;
+  }
+
+  /** Throws 404 when the image itself does not exist. */
+  async listAssignmentIds(imageId: string): Promise<string[]> {
+    await this.findById(imageId);
+    const rows = await this.database.selectFrom('infra.image_server_assignments')
+      .select('id')
+      .where('image_id', '=', imageId)
+      .execute();
+    return rows.map((row) => row.id);
   }
 
   async findAdminDtoById(id: string): Promise<AdminImageDto> {

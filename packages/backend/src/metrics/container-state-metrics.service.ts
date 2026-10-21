@@ -4,7 +4,6 @@ import {
   Logger,
   OnModuleDestroy,
   OnModuleInit,
-  Optional,
 } from '@nestjs/common';
 import {
   CORE_NODE_METRIC_CATALOG,
@@ -22,7 +21,7 @@ import type { IncusClientPort } from '../incus/incus-client.js';
 import { isLocalPoolRow } from '../storage-pools/storage-pools.service.js';
 import type { NyabaseDatabase } from '../platform/persistence-pg/database.types.js';
 import { PG_DATABASE } from '../platform/persistence-pg/tokens.js';
-import { INCUS_CLIENT_FACTORY, type IncusClientFactory } from '../runtime/reconcile-worker.service.js';
+import { INCUS_CLIENT_FACTORY, type IncusClientFactory } from '../incus/incus-client.factory.js';
 import { type MetricPoint, type MetricsWriteOptions, MetricsWriter } from './metrics-writer.js';
 
 const PUBLISH_TIMEOUT_MS = 3_000;
@@ -116,7 +115,7 @@ export class ContainerStateMetricsPublisher implements OnModuleInit, OnModuleDes
 
   constructor(
     @Inject(PG_DATABASE) private readonly database: Kysely<NyabaseDatabase>,
-    @Optional() @Inject(INCUS_CLIENT_FACTORY) private readonly clients: IncusClientFactory | null,
+    @Inject(INCUS_CLIENT_FACTORY) private readonly clients: IncusClientFactory,
     private readonly metricsWriter: MetricsWriter,
     private readonly config: NyabaseConfigService,
   ) {}
@@ -137,7 +136,7 @@ export class ContainerStateMetricsPublisher implements OnModuleInit, OnModuleDes
   }
 
   async publishAvailableServers(): Promise<void> {
-    if (this.shuttingDown || !this.enabled() || !this.clients) return;
+    if (this.shuttingDown || !this.enabled()) return;
     let servers: Array<{ id: string }>;
     try {
       servers = await this.database
@@ -164,7 +163,7 @@ export class ContainerStateMetricsPublisher implements OnModuleInit, OnModuleDes
   }
 
   private async publishPools(onlineServerIds: readonly string[]): Promise<void> {
-    if (!this.clients || onlineServerIds.length === 0) return;
+    if (onlineServerIds.length === 0) return;
     let pools: Array<{
       id: string;
       server_id: string;
@@ -211,7 +210,7 @@ export class ContainerStateMetricsPublisher implements OnModuleInit, OnModuleDes
       const chosen = Array.from({ length: Math.min(POOL_READS_PER_TICK, ordered.length) }, (_, offset) =>
         ordered[(start + offset) % ordered.length]).filter((pool): pool is typeof ordered[number] => pool !== undefined);
       this.poolCursor.set(serverId, ordered.length === 0 ? 0 : (start + chosen.length) % ordered.length);
-      if (!this.clients || chosen.length === 0) return;
+      if (chosen.length === 0) return;
       try {
         const client = await this.clients.get(serverId);
         const ts = Date.now();
@@ -245,7 +244,7 @@ export class ContainerStateMetricsPublisher implements OnModuleInit, OnModuleDes
   }
 
   private async publishServer(serverId: string): Promise<void> {
-    if (this.inFlight.has(serverId) || !this.clients) return;
+    if (this.inFlight.has(serverId)) return;
     this.inFlight.add(serverId);
     try {
       const client = await this.clients.get(serverId);

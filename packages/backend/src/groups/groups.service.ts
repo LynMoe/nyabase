@@ -4,7 +4,6 @@ import {
   Inject,
   Injectable,
   NotFoundException,
-  Optional,
 } from '@nestjs/common';
 import type { Kysely, Transaction } from 'kysely';
 import { randomUUID } from 'node:crypto';
@@ -82,7 +81,7 @@ export class GroupsService {
     private readonly access: AccessResolverService,
     private readonly audit: AuditService,
     private readonly revocation: AccessRevocationGuardService,
-    @Optional() private readonly gpuClaims?: GpuClaimsRepository,
+    private readonly gpuClaims: GpuClaimsRepository,
   ) {}
 
   async findAll(): Promise<GroupDto[]> {
@@ -677,9 +676,7 @@ export class GroupsService {
       if (!server) throw new NotFoundException('Server not found');
       const gpuPciAddresses = input.gpuPciAddresses ?? [];
       if (gpuPciAddresses.length > 0) {
-        const enabled = this.gpuClaims
-          ? await this.gpuClaims.isEnabled(serverId, transaction)
-          : false;
+        const enabled = await this.gpuClaims.isEnabled(serverId, transaction);
         if (!enabled) {
           throw new ConflictException({
             code: FailureCode.GpuGrantNotApplicable,

@@ -1,7 +1,7 @@
 import { Module } from '@nestjs/common';
 import { ContainersModule } from '../containers/containers.module.js';
 import { GroupsModule } from '../groups/groups.module.js';
-import { RuntimeModule } from '../runtime/runtime.module.js';
+import { ReconcileModule } from '../reconcile/reconcile.module.js';
 import { VolumesModule } from '../volumes/volumes.module.js';
 import { AdminCatalogController } from './admin-catalog.controller.js';
 import { AdminUserServerPurgeController } from './admin-user-server-purge.controller.js';
@@ -12,7 +12,7 @@ import { UserServerResourcePurgeService } from './user-server-resource-purge.ser
 
 /** Administration of access: grant expiry enforcement, user-server purge and selector catalog. */
 @Module({
-  imports: [ContainersModule, GroupsModule, RuntimeModule, VolumesModule],
+  imports: [ContainersModule, GroupsModule, ReconcileModule, VolumesModule],
   controllers: [AdminUserServerPurgeController, AdminCatalogController],
   providers: [
     CatalogPersistence,

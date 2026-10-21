@@ -5,7 +5,6 @@ import {
   Inject,
   Injectable,
   NotFoundException,
-  forwardRef,
 } from '@nestjs/common';
 import {
   createCipheriv,
@@ -85,7 +84,6 @@ export class HttpProxyService {
     private readonly database: Kysely<NyabaseDatabase>,
     private readonly transactions: PgTransactionManager,
     private readonly config: NyabaseConfigService,
-    @Inject(forwardRef(() => AccessResolverService))
     private readonly accessResolver: AccessResolverService,
     private readonly proxySnapshots: ProxySnapshotNotifierService,
     private readonly audit: AuditService,

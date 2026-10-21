@@ -212,8 +212,9 @@ async function bootstrapCompiledBackend() {
 function assertCleanCutoverArtifacts() {
   const requiredSourcePaths = [
     join(backendRoot, 'src', 'incus'),
-    join(backendRoot, 'src', 'runtime', 'intent.repository.ts'),
-    join(backendRoot, 'src', 'runtime', 'reconcile-worker.service.ts'),
+    join(backendRoot, 'src', 'reconcile', 'intent.repository.ts'),
+    join(backendRoot, 'src', 'reconcile', 'reconcile-worker.service.ts'),
+    join(backendRoot, 'src', 'reconcile', 'reconciler-registry.service.ts'),
     join(repoRoot, 'packages', 'node-exporter', 'package.json'),
     join(repoRoot, 'packages', 'node-exporter', 'src'),
   ];
@@ -231,6 +232,10 @@ function assertCleanCutoverArtifacts() {
     join(backendRoot, 'src', 'mount-sources'),
     join(backendRoot, 'src', 'remote-fs'),
     join(backendRoot, 'src', 'quota'),
+    join(backendRoot, 'src', 'runtime'),
+    join(backendRoot, 'src', 'database'),
+    join(backendRoot, 'src', 'storage'),
+    join(backendRoot, 'src', 'domain'),
   ];
   for (const path of retiredPaths) {
     if (hasEntries(path)) {
@@ -240,8 +245,8 @@ function assertCleanCutoverArtifacts() {
 
   const requiredCompiledPaths = [
     join(backendRoot, 'dist', 'incus', 'incus-client.js'),
-    join(backendRoot, 'dist', 'runtime', 'intent.repository.js'),
-    join(backendRoot, 'dist', 'runtime', 'reconcile-worker.service.js'),
+    join(backendRoot, 'dist', 'reconcile', 'intent.repository.js'),
+    join(backendRoot, 'dist', 'reconcile', 'reconcile-worker.service.js'),
   ];
   for (const path of requiredCompiledPaths) {
     if (!existsSync(path)) {
