@@ -9,7 +9,7 @@ import { QueryView } from '../components/layout/query-view.js';
 import { ContainerConsole } from '../components/containers/container-console.js';
 import { RootShrinkOrchestrationDialog } from '../components/storage/root-shrink-orchestration-dialog.js';
 import { runGatedMutation } from '../lib/resource-mutation-gate.js';
-import { useResourceMutationPending } from '../hooks/use-resource-mutation-gate.js';
+import { useResourceMutationPending } from '../lib/resource-mutation-gate.js';
 import { ContainerDetailHeader } from './container-detail-page/detail-sections.js';
 import { DetachVolumeDialog, IntentHistoryDialog } from './container-detail-page/detail-dialogs.js';
 import { ContainerOverviewTab } from './container-detail-page/detail-sections.js';

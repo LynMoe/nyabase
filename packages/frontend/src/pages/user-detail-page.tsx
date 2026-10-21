@@ -16,7 +16,7 @@ import { queryKeys } from '../lib/query-keys.js';
 import { refetchWhileInProgress } from '../lib/query-lifecycle.js';
 import { toast } from '../hooks/use-toast.js';
 import { useAuthStore } from '../store/auth.js';
-import { type UserDetailTab } from '../lib/user-detail.js';
+import { type UserDetailTab } from '../lib/detail-tabs.js';
 
 const routeApi = getRouteApi('/users/$id');
 

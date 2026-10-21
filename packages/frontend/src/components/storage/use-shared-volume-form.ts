@@ -11,7 +11,7 @@ import {
   zPatchVolumeRequest,
 } from '@nyabase/common';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { backendLacksOnlineExecutor } from '../../lib/shared-backend-executor.js';
+import { backendLacksOnlineExecutor } from '../../lib/storage-shrink.js';
 import {
   classifySizeChange,
   isQuotaIneffectiveCapability,

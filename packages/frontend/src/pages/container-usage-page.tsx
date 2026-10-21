@@ -11,7 +11,7 @@ import { Page } from '../components/layout/page.js';
 import { PageHeader } from '../components/layout/page-header.js';
 import { Button } from '../components/ui/button.js';
 import { LinkedCharts } from '../components/performance/linked-charts.js';
-import { useGpuNames } from '../components/performance/gpu-names.js';
+import { useGpuNames } from '../components/performance/host-occupancy.js';
 import { QueryErrorState } from '../components/query-state.js';
 
 const RANGES: Array<{ id: PerformanceRange; label: string }> = [

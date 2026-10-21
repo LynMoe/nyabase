@@ -5,7 +5,7 @@ import type { StoragePoolDto } from '@nyabase/common';
 import { api } from '../../../lib/api.js';
 import { errorMessage } from '../../../lib/api-error.js';
 import { TechnicalId } from '../../refs/technical-id.js';
-import { storagePoolSourceKind } from '../../../lib/storage-pool-product.js';
+import { storagePoolSourceKind } from '../../../lib/storage-shrink.js';
 import { Badge } from '../../ui/badge.js';
 import { Button } from '../../ui/button.js';
 import {

@@ -3,7 +3,7 @@ import { type UserDto, UserStatus } from '@nyabase/common';
 import { Link } from '@tanstack/react-router';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '../../components/ui/tabs.js';
 import { CanonicalGrantPanel } from '../../components/grants/canonical-grant-panel.js';
-import type { UserDetailTab } from '../../lib/user-detail.js';
+import type { UserDetailTab } from '../../lib/detail-tabs.js';
 import { Button } from '../../components/ui/button.js';
 import { MoreActions } from '../../components/layout/more-actions.js';
 import { Badge } from '../../components/ui/badge.js';

@@ -5,12 +5,12 @@ import { useState } from 'react';
 import { ContainerActionBar, type ContainerBarAction } from './container-action-bar.js';
 import { StatusBadge } from '../layout/status-badge.js';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '../ui/table.js';
-import { useResourceMutationPending } from '../../hooks/use-resource-mutation-gate.js';
+import { useResourceMutationPending } from '../../lib/resource-mutation-gate.js';
 import { containerLifecyclePending, containerStatusPending } from '../../lib/in-progress.js';
 import { formatBytes, formatCpu } from '../../lib/utils.js';
 import { containerStatusLabel, lifecyclePhaseLabel } from '../../lib/status-labels.js';
 import { ResourceRef } from '../refs/resource-ref.js';
-import { useIsNarrow } from '../../hooks/use-media-query.js';
+import { useIsNarrow } from '../../hooks/use-dom-state.js';
 import { SectionCard } from '../layout/section-card.js';
 import { ListSearch, SegmentedFilter } from '../layout/list-search.js';
 import {

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { StoragePoolDriver } from '@nyabase/common';
-import { storagePoolSourceKind } from './storage-pool-product.js';
+import { storagePoolSourceKind } from './storage-shrink.js';
 
 describe('storagePoolSourceKind', () => {
   it('labels dir as 挂载点', () => {

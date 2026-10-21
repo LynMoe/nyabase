@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { ApiError } from './api-error.js';
-import { loginFailureMessage } from './login-form-error.js';
+import { loginFailureMessage } from './auth-session.js';
 
 describe('loginFailureMessage', () => {
   it('keeps 401 as a credential error', () => {

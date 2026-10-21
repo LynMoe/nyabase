@@ -13,7 +13,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from '../components/ui/tabs.
 import { CanonicalGrantPanel } from '../components/grants/canonical-grant-panel.js';
 import { useAuthStore } from '../store/auth.js';
 import { queryKeys } from '../lib/query-keys.js';
-import { type GroupDetailTab } from '../lib/group-detail.js';
+import { type GroupDetailTab } from '../lib/detail-tabs.js';
 import { GroupIdentityCard, GroupIdentityReadOnly } from './group-detail-page/group-identity.js';
 import {
   AddGroupMemberDialog,

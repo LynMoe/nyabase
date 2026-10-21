@@ -1,7 +1,7 @@
 import { createFileRoute, lazyRouteComponent } from '@tanstack/react-router';
 import { RequireAccess } from '../../components/require-capability.js';
 import { ACCESS } from '../../lib/route-access.js';
-import { parseUserDetailTab } from '../../lib/user-detail.js';
+import { parseUserDetailTab } from '../../lib/detail-tabs.js';
 
 export const Route = createFileRoute('/users/$id')({
   component: UserDetailRoute,

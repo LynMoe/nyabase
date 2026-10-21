@@ -1,6 +1,8 @@
-import type { UserDto } from '@nyabase/common';
+import { Capability, type UserDto, UserStatus } from '@nyabase/common';
 import { clearPrincipalQueryState } from './query-client.js';
 import { useAuthStore } from '../store/auth.js';
+import { api } from './api.js';
+import { ApiError } from './api-error.js';
 
 /**
  * Cross-tab session coordination.
@@ -152,4 +154,132 @@ export async function withCrossTabRefreshLock<T>(callback: () => Promise<T>): Pr
   // Every supported browser has Web Locks; without it concurrent tabs may
   // race one rotation, and the loser re-authenticates.
   return callback();
+}
+
+export async function runSessionTermination(
+  clear: () => CapturedSession,
+  revoke: (session: CapturedSession) => Promise<void>,
+): Promise<void> {
+  const captured = clear();
+  try {
+    await revoke(captured);
+  } catch {
+    // Local fail-closed termination is authoritative; revocation is best effort.
+  }
+}
+
+/** Capture the old family, fail closed locally, then revoke only that family. */
+export function terminateBrowserSession(): Promise<void> {
+  return runSessionTermination(() => clearLocalSession(), api.logout);
+}
+
+export type PendingLoginReason = 'password-changed' | 'account-changed' | 'session-expired';
+
+const STORAGE_KEY = 'nyabase.pendingLoginReason';
+
+function isPendingLoginReason(value: string | null): value is PendingLoginReason {
+  return value === 'password-changed'
+    || value === 'account-changed'
+    || value === 'session-expired';
+}
+
+export function setPendingLoginReason(reason: PendingLoginReason): void {
+  try {
+    sessionStorage.setItem(STORAGE_KEY, reason);
+  } catch {
+    // sessionStorage may be unavailable; login banner is best-effort.
+  }
+}
+
+export function peekPendingLoginReason(): PendingLoginReason | undefined {
+  try {
+    const value = sessionStorage.getItem(STORAGE_KEY);
+    return isPendingLoginReason(value) ? value : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+export function clearPendingLoginReason(): void {
+  try {
+    sessionStorage.removeItem(STORAGE_KEY);
+  } catch {
+    // ignore
+  }
+}
+
+/** Read and clear the pending login reason in one step. */
+export function takePendingLoginReason(): PendingLoginReason | undefined {
+  const reason = peekPendingLoginReason();
+  clearPendingLoginReason();
+  return reason;
+}
+
+const USER_STATUSES = new Set<string>(Object.values(UserStatus));
+const CAPABILITIES = new Set<string>(Object.values(Capability));
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value && typeof value === 'object' && !Array.isArray(value));
+}
+
+function isBoundedString(value: unknown, max: number, allowEmpty = false): value is string {
+  return typeof value === 'string' && value.length <= max && (allowEmpty || value.length > 0);
+}
+
+export function isRuntimeUserDto(value: unknown): value is UserDto {
+  if (!isRecord(value)
+    || !isBoundedString(value.id, 128)
+    || !isBoundedString(value.username, 64)
+    || !isBoundedString(value.displayName, 128, true)
+    || !isBoundedString(value.createdAt, 64)
+    || typeof value.status !== 'string'
+    || !USER_STATUSES.has(value.status)
+    || !Array.isArray(value.capabilities)
+    || value.capabilities.length > CAPABILITIES.size
+    || value.capabilities.some((capability) => typeof capability !== 'string' || !CAPABILITIES.has(capability))
+    || !Array.isArray(value.groups)
+    || value.groups.length > 10_000) return false;
+  return value.groups.every((group) => isRecord(group)
+    && isBoundedString(group.id, 128)
+    && isBoundedString(group.name, 128)
+    && typeof group.isSystem === 'boolean');
+}
+
+const DISABLED_ACCOUNT_RE = /disabled|user_disabled|account_disabled|停用/i;
+
+export function loginFailureMessage(error: unknown): string {
+  if (error instanceof ApiError && (error.code === 'NETWORK_ERROR' || error.status === 0)) {
+    return '无法连接服务器，请检查网络后重试。';
+  }
+  if (error instanceof ApiError && error.status === 401) {
+    return '用户名或密码错误';
+  }
+  if (error instanceof ApiError && error.status === 403) {
+    return isDisabledAccountError(error) ? '账号已停用' : '账号不可用';
+  }
+  return error instanceof Error ? error.message : '登录失败，请稍后重试。';
+}
+
+function isDisabledAccountError(error: ApiError): boolean {
+  return DISABLED_ACCOUNT_RE.test(`${error.code} ${error.message}`);
+}
+
+const INTERNAL_ORIGIN = 'https://nyabase.invalid';
+
+/** Accept only same-origin absolute paths; never pass attacker-controlled URLs to navigation. */
+export function sanitizeInternalRedirect(value: unknown, fallback = '/'): string {
+  if (typeof value !== 'string') return fallback;
+  const candidate = value.trim();
+  if (!candidate.startsWith('/') || candidate.startsWith('//') || candidate.includes('\\')) return fallback;
+  if (/\p{Cc}/u.test(candidate)) return fallback;
+  try {
+    let decoded = candidate;
+    for (let index = 0; index < 2; index += 1) decoded = decodeURIComponent(decoded);
+    if (decoded.startsWith('//') || decoded.includes('\\')) return fallback;
+    const parsed = new URL(candidate, INTERNAL_ORIGIN);
+    if (parsed.origin !== INTERNAL_ORIGIN) return fallback;
+    return `${parsed.pathname}${parsed.search}${parsed.hash}`;
+  } catch {
+    return fallback;
+  }
 }

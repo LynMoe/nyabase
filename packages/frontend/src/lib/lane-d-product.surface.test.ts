@@ -74,7 +74,7 @@ describe('lane D product UI copy', () => {
   it('shows typed volume attachments and a layout cert expiry banner', () => {
     const page = read('pages/volumes-page.tsx');
     const table = read('components/storage/local-volume-table.tsx');
-    const dialog = read('components/storage/local-volume-detail-dialog.tsx');
+    const dialog = read('components/storage/local-volume-table.tsx');
     const volumes = [page, table, dialog].join('\n');
     expect(volumes).toMatch(/volume\.attachments/);
     expect(volumes).toMatch(/挂载于/);
@@ -144,12 +144,12 @@ describe('lane D product UI copy', () => {
   });
 
   it('volume remount waits for attachment after 202 and blocks quota-ineffective create', () => {
-    const remount = read('components/storage/volume-shrink-orchestration-dialog.tsx');
+    const remount = [read('components/storage/volume-shrink-orchestration-dialog.tsx'), read('components/storage/use-volume-shrink-flow.ts')].join('\n');
     expect(remount).toMatch(/等待挂回/);
     expect(remount).toMatch(/lookupLatestIntentFailure/);
     const volumes = [
       read('pages/volumes-page.tsx'),
-      read('components/storage/local-volume-form-dialog.tsx'),
+      [read('components/storage/local-volume-form-dialog.tsx'), read('components/storage/use-local-volume-form.ts')].join('\n'),
     ].join('\n');
     expect(volumes).toMatch(/quotaEffective !== true/);
     expect(volumes).toMatch(/quotaIneffectiveCreateHint/);
@@ -166,17 +166,17 @@ describe('lane D product UI copy', () => {
     const volumes = [
       read('pages/volumes-page.tsx'),
       read('components/storage/local-volume-table.tsx'),
-      read('components/storage/local-volume-detail-dialog.tsx'),
+      read('components/storage/local-volume-table.tsx'),
     ].join('\n');
     const shared = [
       read('pages/shared-volumes-page.tsx'),
       read('components/storage/shared-volume-table.tsx'),
-      read('components/storage/shared-volume-detail-dialog.tsx'),
+      read('components/storage/shared-volume-table.tsx'),
     ].join('\n');
-    const localForm = read('components/storage/local-volume-form-dialog.tsx');
+    const localForm = [read('components/storage/local-volume-form-dialog.tsx'), read('components/storage/use-local-volume-form.ts')].join('\n');
     const sharedForm = [
-      read('components/storage/shared-volume-form-dialog.tsx'),
-      read('lib/shared-backend-executor.ts'),
+      [read('components/storage/shared-volume-form-dialog.tsx'), read('components/storage/use-shared-volume-form.ts')].join('\n'),
+      read('lib/storage-shrink.ts'),
     ].join('\n');
     const storage = read('components/containers/storage-panel.tsx');
     const inspect = read('components/storage/shared-volume-catalog-inspect.tsx');
@@ -185,7 +185,7 @@ describe('lane D product UI copy', () => {
       read('pages/shared-backends-page.tsx'),
       read('pages/shared-backend-detail-page.tsx'),
       read('components/storage/shared-volume-table.tsx'),
-      read('components/storage/shared-volume-detail-dialog.tsx'),
+      read('components/storage/shared-volume-table.tsx'),
     ].join('\n');
     const detail = read('pages/container-detail-page.tsx');
     expect(read('pages/volumes-page.tsx')).toMatch(/testId="volumes"/);
@@ -240,8 +240,8 @@ describe('lane D product UI copy', () => {
     expect(read('pages/shared-backend-detail-page.tsx')).toMatch(/shared-backend-executors/);
     expect(read('pages/shared-backends-page.tsx')).toMatch(/to: '\/shared-backends\/\$id'/);
     expect(read('pages/image-detail-page.tsx')).toMatch(/image-fingerprint-assignment/);
-    expect(read('lib/image-detail.ts')).toMatch(/parseImageDetailTab/);
-    expect(read('lib/shared-backend-detail.ts')).toMatch(/parseSharedBackendDetailTab/);
+    expect(read('lib/detail-tabs.ts')).toMatch(/parseImageDetailTab/);
+    expect(read('lib/detail-tabs.ts')).toMatch(/parseSharedBackendDetailTab/);
     expect(read('routes/shared-backends/$id.tsx')).toMatch(/parseSharedBackendDetailTab/);
     expect(read('pages/users-page.tsx')).toMatch(/to="\/users\/\$id"/);
     expect(read('pages/users-page.tsx')).not.toMatch(/CanonicalGrantPanel/);
@@ -262,8 +262,8 @@ describe('lane D product UI copy', () => {
     expect(read('pages/profile-page.tsx')).toMatch(/ssh-key-add/);
     expect(read('pages/profile-page.tsx')).toMatch(/添加公钥/);
     expect(read('pages/group-detail-page.tsx')).toMatch(/to="\/users\/\$id"/);
-    expect(read('lib/user-detail.ts')).toMatch(/parseUserDetailTab/);
-    expect(read('lib/group-detail.ts')).toMatch(/parseGroupDetailTab/);
+    expect(read('lib/detail-tabs.ts')).toMatch(/parseUserDetailTab/);
+    expect(read('lib/detail-tabs.ts')).toMatch(/parseGroupDetailTab/);
     expect(read('routes/users/$id.tsx')).toMatch(/parseUserDetailTab/);
     expect(read('routes/groups/$id.tsx')).toMatch(/parseGroupDetailTab/);
     expect(read('components/servers/pools-card.tsx')).not.toMatch(/sharedBackendId:/);
@@ -370,9 +370,9 @@ describe('lane D product UI copy', () => {
     const nav = read('lib/navigation.ts');
     const quotaPage = read('components/quota/quota-summary.tsx');
     const dashboard = read('pages/dashboard-page.tsx');
-    const create = read('components/containers/create-container-dialog.tsx');
-    const local = read('components/storage/local-volume-form-dialog.tsx');
-    const shared = read('components/storage/shared-volume-form-dialog.tsx');
+    const create = [read('components/containers/create-container-dialog.tsx'), read('components/containers/use-create-container-form.ts')].join('\n');
+    const local = [read('components/storage/local-volume-form-dialog.tsx'), read('components/storage/use-local-volume-form.ts')].join('\n');
+    const shared = [read('components/storage/shared-volume-form-dialog.tsx'), read('components/storage/use-shared-volume-form.ts')].join('\n');
     const volumes = read('pages/volumes-page.tsx');
     const sharedPage = read('pages/shared-volumes-page.tsx');
     // 配额 is a section of 概览, not a separate destination.

@@ -26,7 +26,7 @@ import { Progress } from '../components/ui/progress.js';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '../components/ui/select.js';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '../components/ui/table.js';
 import { LinkedCharts } from '../components/performance/linked-charts.js';
-import { useGpuNames } from '../components/performance/gpu-names.js';
+import { useGpuNames } from '../components/performance/host-occupancy.js';
 
 const RANGES: Array<{ id: PerformanceRange; label: string }> = [
   { id: '15m', label: '15分钟' },

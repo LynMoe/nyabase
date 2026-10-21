@@ -24,7 +24,7 @@ import {
   TableRow,
 } from '../ui/table.js';
 import { ResourceRef } from '../refs/resource-ref.js';
-import { truncateId } from '../refs/truncate-id.js';
+import { truncateId } from '../refs/technical-id.js';
 import {
   backendDisplayName,
   backendName,

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { formatChartAxis, formatChartStamp } from './chart-format.js';
+import { formatChartAxis, formatChartStamp } from './chart-hover.js';
 
 describe('chart time', () => {
   const iso = '2026-09-23T06:12:30.000Z';

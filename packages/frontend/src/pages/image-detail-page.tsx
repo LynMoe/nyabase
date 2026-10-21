@@ -14,7 +14,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from '../components/ui/tabs.
 import { assignmentInProgress, imageInProgress } from '../lib/in-progress.js';
 import { queryKeys } from '../lib/query-keys.js';
 import { refetchWhileInProgress } from '../lib/query-lifecycle.js';
-import { type ImageDetailTab } from '../lib/image-detail.js';
+import { type ImageDetailTab } from '../lib/detail-tabs.js';
 import { ImageAssignmentsTab, ImageOverviewTab } from './image-detail-page/image-tabs.js';
 import { useImageMutations } from './image-detail-page/use-image-mutations.js';
 

@@ -18,7 +18,7 @@ import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from '
 import { Input } from '../ui/input.js';
 import { Switch } from '../ui/switch.js';
 import { ServerGrantGpu } from '../gpu/gpu-sections.js';
-import { truncateId } from '../refs/truncate-id.js';
+import { truncateId } from '../refs/technical-id.js';
 import {
   coresToMillis,
   defaultExpiryLocal,

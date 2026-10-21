@@ -11,10 +11,10 @@ import {
   type StoragePoolGrantDto,
 } from '@nyabase/common';
 import { api } from '../../lib/api.js';
-import { grantSubjectPath } from '../../lib/grant-paths.js';
+import { grantSubjectPath } from '../../lib/scoped-paths.js';
 import { queryKeys } from '../../lib/query-keys.js';
 import { approxGibHint, GIB } from '../../lib/utils.js';
-import { truncateId } from '../refs/truncate-id.js';
+import { truncateId } from '../refs/technical-id.js';
 
 export type SubjectKind = 'users' | 'groups';
 

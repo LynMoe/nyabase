@@ -16,8 +16,8 @@ import { Page } from '../components/layout/page.js';
 import { PageHeader } from '../components/layout/page-header.js';
 import { TechnicalId } from '../components/refs/technical-id.js';
 import { toast } from '../hooks/use-toast.js';
-import { setPendingLoginReason } from '../lib/pending-login-reason.js';
-import { terminateBrowserSession } from '../lib/session-termination.js';
+import { setPendingLoginReason } from '../lib/auth-session.js';
+import { terminateBrowserSession } from '../lib/auth-session.js';
 
 type PasswordErrors = Partial<Record<'currentPassword' | 'newPassword' | 'confirmPassword', string>>;
 type SshKeyErrors = Partial<Record<'name' | 'keyText', string>>;

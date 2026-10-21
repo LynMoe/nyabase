@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { shortFingerprint, truncateId } from './truncate-id.js';
+import { shortFingerprint, truncateId } from './technical-id.js';
 
 describe('truncateId', () => {
   it('keeps the first 8 characters of a UUID', () => {

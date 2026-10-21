@@ -12,9 +12,9 @@ import {
   withCrossTabRefreshLock,
   type CapturedSession,
 } from './auth-session.js';
-import { isRuntimeUserDto } from './auth-state-validation.js';
+import { isRuntimeUserDto } from './auth-session.js';
 import { clearPrincipalQueryState } from './query-client.js';
-import { setPendingLoginReason } from './pending-login-reason.js';
+import { setPendingLoginReason } from './auth-session.js';
 
 const BASE_URL = '/api';
 /** Required by the Backend on cookie endpoints; forces a CORS preflight cross-site. */

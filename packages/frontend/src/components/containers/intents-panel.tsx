@@ -17,7 +17,7 @@ import {
 } from '../../lib/intent-visibility.js';
 import { useAuthStore } from '../../store/auth.js';
 import { ResourceRef } from '../refs/resource-ref.js';
-import { truncateId } from '../refs/truncate-id.js';
+import { truncateId } from '../refs/technical-id.js';
 
 function requestedByLabel(
   requestedBy: string | null,

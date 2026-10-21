@@ -1,7 +1,7 @@
 import { createFileRoute, lazyRouteComponent } from '@tanstack/react-router';
 import { RequireAccess } from '../../components/require-capability.js';
 import { ACCESS } from '../../lib/route-access.js';
-import { parseImageDetailTab } from '../../lib/image-detail.js';
+import { parseImageDetailTab } from '../../lib/detail-tabs.js';
 
 export const Route = createFileRoute('/images/$id')({
   component: ImageDetailRoute,

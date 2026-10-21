@@ -19,7 +19,7 @@ import { volumeInProgress } from '../lib/in-progress.js';
 import { queryKeys } from '../lib/query-keys.js';
 import { refetchWhileInProgress } from '../lib/query-lifecycle.js';
 import { type SharedBackendFsidConflict } from '../lib/storage-shrink.js';
-import { type SharedBackendDetailTab } from '../lib/shared-backend-detail.js';
+import { type SharedBackendDetailTab } from '../lib/detail-tabs.js';
 import { useAuthStore } from '../store/auth.js';
 import { DeleteBackendDialog, EditBackendDialog } from './shared-backend-detail-page/backend-dialogs.js';
 import {

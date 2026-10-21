@@ -1,5 +1,10 @@
-import type { StorageDiscoverIssueDto, StoragePoolCapabilityDto } from '@nyabase/common';
-import { FailureCode } from '@nyabase/common';
+import {
+  FailureCode,
+  type SharedBackendDto,
+  type StorageDiscoverIssueDto,
+  type StoragePoolCapabilityDto,
+  StoragePoolDriver,
+} from '@nyabase/common';
 import { ApiError, apiErrorDetails } from './api-error.js';
 import { formatBytes, formatGib } from './utils.js';
 
@@ -209,4 +214,25 @@ export function formatDetachProgress(
     return `已卸载 ${succeeded}/${total}`;
   }
   return `卸载成功 ${succeeded} 个，第 ${failureIndex + 1} 个失败${failureMessage ? `：${failureMessage}` : ''}`;
+}
+
+export function backendLacksOnlineExecutor(
+  backend: Pick<SharedBackendDto, 'hasOnlineExecutor'>,
+): boolean {
+  return backend.hasOnlineExecutor !== true;
+}
+
+export function storagePoolSourceKind(driver: StoragePoolDriver): '挂载点' | '设备' {
+  return driver === StoragePoolDriver.Dir ? '挂载点' : '设备';
+}
+
+/** Belt helper: leaked executor DTOs must still be rejected as local. */
+export function isLocalStoragePool(pool: {
+  shareable: boolean;
+  driver: string;
+  sharedBackendId: string | null;
+}): boolean {
+  return pool.shareable === false
+    && pool.driver !== StoragePoolDriver.CephFs
+    && pool.sharedBackendId === null;
 }

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { GROUP_DETAIL_TABS, parseGroupDetailTab } from './group-detail.js';
-import { USER_DETAIL_TABS, parseUserDetailTab } from './user-detail.js';
+import { GROUP_DETAIL_TABS, parseGroupDetailTab } from './detail-tabs.js';
+import { USER_DETAIL_TABS, parseUserDetailTab } from './detail-tabs.js';
 
 describe('IAM detail tabs', () => {
   it('defaults user tabs to overview', () => {

@@ -6,9 +6,9 @@ import { AppLayout } from '../components/layout/app-layout.js';
 import { ErrorBoundary } from '../components/error-boundary.js';
 import { bootstrapAuthSession } from '../lib/api.js';
 import { Button } from '../components/ui/button.js';
-import { sanitizeInternalRedirect } from '../lib/internal-redirect.js';
-import { takePendingLoginReason } from '../lib/pending-login-reason.js';
-import { terminateBrowserSession } from '../lib/session-termination.js';
+import { sanitizeInternalRedirect } from '../lib/auth-session.js';
+import { takePendingLoginReason } from '../lib/auth-session.js';
+import { terminateBrowserSession } from '../lib/auth-session.js';
 
 interface RouterContext {
   queryClient: QueryClient;
