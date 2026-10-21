@@ -5,7 +5,44 @@ import {
   INFRASTRUCTURE_ADVISORY_NAMESPACE,
   lockServerOnboarding,
 } from '../platform/persistence-pg/advisory-locks.js';
-import type { IpPoolNetwork, ServerRow } from './server-preflight-support.js';
+
+export interface ServerRow {
+  id: string;
+  name: string;
+  parent_interface: string | null;
+  dns_servers: string[] | null;
+  server_cert_fingerprint: string | null;
+  node_metrics_endpoint: string | null;
+  node_metrics_token_ciphertext: string | null;
+  status: 'online' | 'unreachable' | 'unknown';
+  system_pool_id: string | null;
+  preflight_status: 'not_run' | 'running' | 'passed' | 'failed';
+  gpu_enabled: boolean;
+  revision: string | number | bigint;
+}
+
+export interface IpPoolNetwork {
+  readonly gateway: string;
+  readonly cidr: string;
+  readonly prefixLength: number;
+}
+
+export class ServerRevisionChangedError extends Error {
+  constructor() {
+    super('The server configuration changed during preflight');
+    this.name = 'ServerRevisionChangedError';
+  }
+}
+
+export function normalized(value: string): string {
+  return value.replaceAll('-', '').toLowerCase();
+}
+
+export function revisionNumber(value: string | number | bigint | undefined): number | undefined {
+  if (value === undefined) return undefined;
+  const revision = Number(value);
+  return Number.isSafeInteger(revision) && revision > 0 ? revision : undefined;
+}
 
 /** Every SQL statement the server preflight/connect reconciler issues. */
 export class ServerPreflightStore {

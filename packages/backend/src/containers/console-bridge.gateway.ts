@@ -10,7 +10,7 @@ import { URL } from 'node:url';
 import { WebSocket, WebSocketServer, type RawData } from 'ws';
 import { AuthService } from '../iam/auth.service.js';
 import { INCUS_CLIENT_FACTORY, type IncusClientFactory } from '../incus/incus-client.factory.js';
-import type { IncusExecWebSocketSession } from '../incus/incus-client.js';
+import type { IncusExecWebSocketSession } from '../incus/index.js';
 import { IncusConsoleBridgeAdapter } from './incus-console-bridge.adapter.js';
 import { ConsoleSessionService, type ConsoleSession } from './console-session.service.js';
 

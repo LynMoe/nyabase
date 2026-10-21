@@ -1,4 +1,4 @@
-import type { IncusClientPort, IncusSchema, IncusWebSocketLike } from './incus-client.js';
+import type { IncusClientPort, IncusSchema, IncusWebSocketLike } from './incus-client-types.js';
 
 export interface IncusEventWake {
   readonly kind: 'wake';

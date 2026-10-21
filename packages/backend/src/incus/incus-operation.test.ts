@@ -3,7 +3,7 @@ import operationAccepted from './fixtures/operation-accepted.json';
 import operationBusy from './fixtures/operation-busy.json';
 import operationFailure from './fixtures/operation-failure.json';
 import operationSuccess from './fixtures/operation-success.json';
-import type { IncusEnvelope, IncusResponse } from './incus-client.js';
+import type { IncusEnvelope, IncusResponse } from './incus-client-types.js';
 import { isAsyncIncusResponse, requestAndWait, waitForIncusOperation } from './incus-operation.js';
 
 function response(payload: unknown, status = 200): IncusResponse<unknown> {

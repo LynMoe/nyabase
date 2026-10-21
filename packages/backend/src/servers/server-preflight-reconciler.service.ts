@@ -1,12 +1,18 @@
 import { Inject, Injectable, OnModuleInit } from '@nestjs/common';
-import { Capability, PreflightStatus } from '@nyabase/common';
+import {
+  Capability,
+  FailureCode,
+  PreflightStatus,
+  type NodeMetricSample,
+  type PreflightReport,
+} from '@nyabase/common';
 import { Kysely, sql } from 'kysely';
 import type { NyabaseDatabase } from '../platform/persistence-pg/database.types.js';
 import { PG_DATABASE } from '../platform/persistence-pg/tokens.js';
-import { IncusError } from '../incus/index.js';
+import { IncusError, type IncusClientPort, type IncusSchema } from '../incus/index.js';
 import { EphemeralStore } from '../platform/ephemeral-store.js';
 import { NyabaseConfigService } from '../platform/config/nyabase-config.service.js';
-import type { IntentRecord } from '../reconcile/intent.repository.js';
+import type { IntentFailure, IntentRecord } from '../reconcile/intent.repository.js';
 import type {
   ManagedReconciler,
   ReconcileOutcome,
@@ -15,32 +21,112 @@ import type {
 } from '../reconcile/managed-reconciler.js';
 import { ReconcilerRegistry } from '../reconcile/reconciler-registry.service.js';
 import { AuthenticatedNodeMetricsPullAdapter } from '../metrics/node-metrics-pull.adapter.js';
-import { IncusPreflightChecksAdapter } from './preflight-checks.adapter.js';
-import { ServerConnector } from './server-connector.js';
-import { ServerPreflightRunner } from './server-preflight-runner.js';
-import { ServerPreflightStore } from './server-preflight.store.js';
 import {
+  evaluateLanBridge,
+  listHostLanAddresses,
+  lookupParentNetwork,
+  metricSamplesFrom,
+  IncusPreflightChecksAdapter,
+} from './preflight-checks.adapter.js';
+import { ServerConnector } from './server-connector.js';
+import { runProbe, type PreflightOptions, type ProbeRun, type ReportChecks } from './server-preflight-probe.js';
+import {
+  ServerPreflightStore,
   ServerRevisionChangedError,
-  failureReport,
-  isRecord,
-  preflightFailure,
+  normalized,
   revisionNumber,
-  staleOutcome,
-  type PreflightOptions,
+  type IpPoolNetwork,
   type ServerRow,
-} from './server-preflight-support.js';
+} from './server-preflight.store.js';
+import { gpuPreflight } from '../gpu/preflight.js';
+
+/** The first node-metrics pull: its outcome, or the failure that downgrades the check to a warning. */
+interface MetricsEvidence {
+  readonly pull: NodeMetricsPull;
+  readonly failure: unknown;
+}
+
+interface NodeMetricsPull {
+  readonly status: 'online' | 'unreachable' | 'unknown';
+  readonly report?: Record<string, unknown> & {
+    readonly samples?: readonly NodeMetricSample[];
+  };
+}
+
+function preflightFailure(
+  code: string,
+  message: string,
+  details: Record<string, unknown> = {},
+): IntentFailure {
+  return { code, message, details };
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function successReport(checks: ReportChecks, gpu?: Record<string, unknown>): PreflightReport {
+  const controlReady = Object.entries(checks).every(([name, value]) => {
+    if (name === 'nodeMetrics') return value === 'pass' || value === 'warn';
+    return value === 'pass';
+  });
+  return {
+    status: PreflightStatus.Passed,
+    controlReady,
+    checks,
+    failureCode: null,
+    checkedAt: new Date().toISOString(),
+    ...(gpu ? { gpu } : {}),
+  };
+}
+
+function failureReport(
+  status: PreflightStatus.Running | PreflightStatus.Failed,
+  code: string,
+): PreflightReport {
+  const failureCode = (Object.values(FailureCode) as string[]).includes(code)
+    ? (code as FailureCode)
+    : FailureCode.PreflightFailed;
+  return {
+    status,
+    controlReady: false,
+    checks: {
+      api: 'fail',
+      parentInterface: 'fail',
+      nftables: 'fail',
+      ipv4Filtering: 'fail',
+      guestCanReachHost: 'fail',
+      networkPrerequisites: 'fail',
+      storagePool: 'fail',
+      simplestreamsImage: 'fail',
+      guestAddress: 'fail',
+      egress: 'fail',
+      nodeMetrics: 'fail',
+    },
+    failureCode,
+    checkedAt: status === PreflightStatus.Running ? null : new Date().toISOString(),
+  };
+}
+
+function staleOutcome(intent: IntentRecord): ReconcileOutcome {
+  return {
+    outcome: 'succeeded',
+    observedRevision: intent.targetRevision,
+    stale: true,
+  };
+}
 
 /**
- * Drives `server.connect` (trust + pin the Incus server) and `server.preflight`
- * (prove the host can run guests). The work is in ServerConnector and
- * ServerPreflightRunner; server state is written by the reconcile flow itself.
+ * Drives `server.connect` (trust + pin the Incus server, see ServerConnector)
+ * and `server.preflight` (prove the host can run guests): API identity, storage
+ * pool, node metrics, LAN bridge, GPU inventory and a throwaway probe container
+ * that proves guest networking. Server state is written by the reconcile flow itself.
  */
 @Injectable()
 export class ServerPreflightReconciler implements ManagedReconciler, OnModuleInit {
   readonly resourceType = 'server' as const;
   private readonly store: ServerPreflightStore;
   private readonly connector: ServerConnector;
-  private readonly runner: ServerPreflightRunner;
 
   constructor(
     @Inject(PG_DATABASE) database: Kysely<NyabaseDatabase>,
@@ -52,7 +138,6 @@ export class ServerPreflightReconciler implements ManagedReconciler, OnModuleIni
   ) {
     this.store = new ServerPreflightStore(database);
     this.connector = new ServerConnector(this.store, ephemeral);
-    this.runner = new ServerPreflightRunner(this.store, this.connector, checks, nodeMetrics);
   }
 
   onModuleInit(): void {
@@ -132,7 +217,7 @@ export class ServerPreflightReconciler implements ManagedReconciler, OnModuleIni
       return staleOutcome(context.intent);
     }
     try {
-      const report = await this.runner.runPreflight(
+      const report = await this.runPreflight(
         context.client!,
         server,
         options,
@@ -200,5 +285,277 @@ export class ServerPreflightReconciler implements ManagedReconciler, OnModuleIni
       sourceServer:
         stringValue('sourceServer') ?? this.config.get<string>('incus.preflightSourceServer'),
     };
+  }
+
+  /** The system pool must be registered on this server and exist in Incus. */
+  private async requireSystemPool(
+    server: ServerRow,
+    pools: readonly IncusSchema<'StoragePool'>[],
+  ) {
+    const systemPool = server.system_pool_id
+      ? await this.store.readSystemPool(server.system_pool_id)
+      : undefined;
+    if (
+      !systemPool ||
+      systemPool.server_id !== server.id ||
+      !systemPool.registered ||
+      !pools.some((pool) => pool.name === systemPool.incus_name)
+    ) {
+      throw new IncusError('MISSING_STORAGE_POOL', 'managed_failure', {
+        serverId: server.id,
+        systemPoolId: server.system_pool_id,
+      });
+    }
+    return systemPool;
+  }
+
+  private async collectMetrics(
+    server: ServerRow,
+    signal: AbortSignal,
+    expectedRevision: number | undefined,
+  ): Promise<MetricsEvidence> {
+    try {
+      const pull = await this.pullNodeMetrics(server, signal, expectedRevision);
+      return { pull, failure: null };
+    } catch (error) {
+      return {
+        pull: { status: 'unreachable', report: { warning: 'node_metrics_unavailable' } },
+        failure: error,
+      };
+    }
+  }
+
+  /** Probe the LAN bridge the server's guests attach to; fails the preflight with the first problem found. */
+  private async requireLanBridge(
+    client: IncusClientPort,
+    server: ServerRow,
+    network: Record<string, unknown>,
+    samples: ReturnType<typeof metricSamplesFrom>,
+    signal: AbortSignal,
+  ): Promise<{ parentInterface: string; poolNetworks: IpPoolNetwork[]; hostIpv4: string }> {
+    const poolNetworks = await this.store.listIpPoolNetworks(server.id);
+    const parentInterface = server.parent_interface?.trim() || '';
+    const parentLookup = parentInterface
+      ? await lookupParentNetwork(client, parentInterface, signal)
+      : { networkMissing: true, stateMissing: true };
+    const extraHostAddresses = await listHostLanAddresses(
+      client,
+      parentInterface,
+      parentLookup,
+      signal,
+    );
+    const lan = evaluateLanBridge({
+      parentInterface,
+      network,
+      lookup: parentLookup,
+      pools: poolNetworks,
+      samples,
+      extraHostAddresses,
+    });
+    if (lan.reason) {
+      throw new IncusError('PREFLIGHT_FAILED', 'managed_failure', {
+        reason: lan.reason,
+        network: JSON.stringify(network).slice(0, 2048),
+      });
+    }
+    return { parentInterface, poolNetworks, hostIpv4: lan.hostIpv4! };
+  }
+
+  /** The probe cannot run without an image and a pool; both may default from the system pool. */
+  private probeOptions(options: PreflightOptions, systemPoolName: string): PreflightOptions {
+    const probeOptions = {
+      ...options,
+      probePoolName: options.probePoolName || systemPoolName,
+    };
+    if (
+      (!probeOptions.probeImageAlias && !probeOptions.probeImageFingerprint) ||
+      !probeOptions.probePoolName
+    ) {
+      throw new IncusError('PREFLIGHT_FAILED', 'managed_failure', {
+        reason: 'preflight_probe_options_missing',
+      });
+    }
+    return probeOptions;
+  }
+
+  /** A probe that could not be removed fails the preflight (unless the server changed meanwhile). */
+  private async failOnCleanupError(
+    server: ServerRow,
+    expectedRevision: number | undefined,
+    cleanupError: unknown,
+  ): Promise<never> {
+    if (
+      !(await this.store.projectServer(server.id, expectedRevision, {
+        status: 'unknown',
+        last_error: `Preflight cleanup failed: ${String(cleanupError).slice(0, 3800)}`,
+        preflight_status: 'failed',
+        preflight_checked_at: sql<Date>`clock_timestamp()`,
+        preflight_report: JSON.stringify(
+          failureReport(PreflightStatus.Failed, FailureCode.PreflightCleanupFailed),
+        ),
+      }))
+    ) {
+      throw new ServerRevisionChangedError();
+    }
+    throw new IncusError('PREFLIGHT_CLEANUP_FAILED', 'managed_failure', {
+      error: String(cleanupError).slice(0, 1024),
+      ...(cleanupError instanceof IncusError
+        ? { code: cleanupError.code, details: cleanupError.details }
+        : {}),
+    });
+  }
+
+  private async runPreflight(
+    client: IncusClientPort,
+    server: ServerRow,
+    options: PreflightOptions,
+    signal: AbortSignal,
+  ): Promise<PreflightReport> {
+    const expectedRevision = revisionNumber(server.revision);
+    await this.connector.connect(client, server, undefined, expectedRevision, signal);
+    const pools = await client.listStoragePools(1, { signal });
+    const resources = await client.getResources({ signal });
+    const systemPool = await this.requireSystemPool(server, pools.metadata);
+    const metrics = await this.collectMetrics(server, signal, expectedRevision);
+    const metricEvidence = metrics.failure ? undefined : metrics.pull.report;
+    const firstSamples = metricSamplesFrom(metricEvidence);
+    const network = await this.checks.checkNetworkPrerequisites(server.id, metricEvidence);
+    const gpu = gpuPreflight({
+      serverId: server.id,
+      resources: resources.metadata,
+      metricSamples: firstSamples,
+      enabled: server.gpu_enabled === true,
+    });
+    await this.store.setGpuHealth(server.id, gpu.health);
+    const lan = await this.requireLanBridge(client, server, network, firstSamples, signal);
+    const checks: ReportChecks = {
+      api: 'pass',
+      parentInterface: 'pass',
+      nftables: 'pass',
+      ipv4Filtering: 'fail',
+      guestCanReachHost: 'fail',
+      networkPrerequisites: 'pass',
+      storagePool: 'pass',
+      simplestreamsImage: 'fail',
+      guestAddress: 'fail',
+      egress: 'fail',
+      nodeMetrics: metrics.failure ? 'warn' : metrics.pull.status === 'online' ? 'pass' : 'fail',
+    };
+    const run: ProbeRun = {
+      client,
+      server,
+      signal,
+      probeName: `nyabase-preflight-${normalized(server.id)}`,
+      options: this.probeOptions(options, systemPool.incus_name),
+      parentInterface: lan.parentInterface,
+      poolNetwork: lan.poolNetworks[0]!,
+      hostIpv4: lan.hostIpv4,
+      checks,
+      adapter: this.checks,
+      secondMetricsPull: () => this.pullNodeMetricsAfterProbe(server, signal),
+      created: false,
+    };
+    const cleanupError = await runProbe(run);
+    if (cleanupError) await this.failOnCleanupError(server, expectedRevision, cleanupError);
+    return successReport(checks, gpu.evidence);
+  }
+
+  /** Pull the server's node-exporter metrics and record the pull outcome on the server. */
+  private async pullNodeMetrics(
+    server: ServerRow,
+    signal: AbortSignal,
+    expectedRevision?: number,
+  ): Promise<NodeMetricsPull> {
+    const project = async (values: Record<string, unknown>): Promise<void> => {
+      if (!(await this.store.projectServer(server.id, expectedRevision, values))) {
+        throw new ServerRevisionChangedError();
+      }
+    };
+    if (!server.node_metrics_endpoint || !server.node_metrics_token_ciphertext) {
+      await project({
+        node_metrics_status: 'unconfigured',
+        node_metrics_last_error: 'Node metrics endpoint or token is not configured',
+      });
+      throw new IncusError('PREFLIGHT_FAILED', 'managed_failure', {
+        reason: 'node_metrics_pull_unconfigured',
+      });
+    }
+    try {
+      const result = await this.nodeMetrics.pull(
+        server.id,
+        server.node_metrics_endpoint,
+        server.node_metrics_token_ciphertext,
+        signal,
+      );
+      if (result.status !== 'online') {
+        await project({
+          node_metrics_status: result.status,
+          node_metrics_outage_since: sql<Date>`coalesce(node_metrics_outage_since, clock_timestamp())`,
+          node_metrics_last_error: `Node metrics status: ${result.status}`,
+        });
+        throw new IncusError('PREFLIGHT_FAILED', 'managed_failure', {
+          reason: 'node_metrics_pull_not_online',
+          status: result.status,
+        });
+      }
+      await project({
+        node_metrics_status: 'online',
+        node_metrics_last_success_at: sql<Date>`clock_timestamp()`,
+        node_metrics_outage_since: null,
+        node_metrics_last_error: null,
+      });
+      return result;
+    } catch (error) {
+      if (error instanceof ServerRevisionChangedError) throw error;
+      if (error instanceof IncusError) throw error;
+      const code =
+        typeof error === 'object' &&
+        error !== null &&
+        'code' in error &&
+        typeof error.code === 'string'
+          ? error.code
+          : 'NODE_METRICS_PULL_FAILED';
+      await project({
+        node_metrics_status: 'unknown',
+        node_metrics_outage_since: sql<Date>`coalesce(node_metrics_outage_since, clock_timestamp())`,
+        node_metrics_last_error: `Node metrics pull failed: ${code}`,
+      });
+      throw new IncusError('PREFLIGHT_FAILED', 'managed_failure', {
+        reason: 'node_metrics_pull_failed',
+        code,
+      });
+    }
+  }
+
+  /** The second pull, after the probe exists, which must prove nftables state. */
+  private async pullNodeMetricsAfterProbe(
+    server: ServerRow,
+    signal: AbortSignal,
+  ): Promise<NodeMetricsPull> {
+    if (!server.node_metrics_endpoint || !server.node_metrics_token_ciphertext) {
+      throw new IncusError('PREFLIGHT_FAILED', 'managed_failure', {
+        reason: 'preflight_nft_unavailable',
+      });
+    }
+    try {
+      const result = await this.nodeMetrics.pull(
+        server.id,
+        server.node_metrics_endpoint,
+        server.node_metrics_token_ciphertext,
+        signal,
+      );
+      if (result.status !== 'online') {
+        throw new IncusError('PREFLIGHT_FAILED', 'managed_failure', {
+          reason: 'preflight_nft_unavailable',
+          status: result.status,
+        });
+      }
+      return result;
+    } catch (error) {
+      if (error instanceof IncusError) throw error;
+      throw new IncusError('PREFLIGHT_FAILED', 'managed_failure', {
+        reason: 'preflight_nft_unavailable',
+      });
+    }
   }
 }

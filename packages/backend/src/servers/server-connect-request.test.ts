@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { assertPersistableConnectRequest } from './server-connect-request.js';
+import { assertPersistableConnectRequest } from './server-intents.service.js';
 
 const reference = '00000000-0000-4000-8000-000000000001';
 

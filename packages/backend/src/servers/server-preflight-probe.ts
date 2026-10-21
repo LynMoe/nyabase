@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import {
   IncusError,
   deriveInstanceHwaddr,
@@ -8,19 +9,47 @@ import {
   type IncusSchema,
 } from '../incus/index.js';
 import { applyGuestNetwork } from '../containers/guest-network.adapter.js';
-import { labeledGauge, metricSamplesFrom, unlabeledGauge } from './server-preflight-network.js';
-import type { IncusPreflightChecksAdapter } from './preflight-checks.adapter.js';
 import {
-  MANAGED_PROBE_KEY,
-  PREFLIGHT_PROBE_MEMORY,
-  PROBE_SERVER_KEY,
-  normalized,
-  probeHardwareId,
-  type IpPoolNetwork,
-  type PreflightOptions,
-  type ReportChecks,
-  type ServerRow,
-} from './server-preflight-support.js';
+  labeledGauge,
+  metricSamplesFrom,
+  unlabeledGauge,
+  type IncusPreflightChecksAdapter,
+} from './preflight-checks.adapter.js';
+import { normalized, type IpPoolNetwork, type ServerRow } from './server-preflight.store.js';
+
+export interface PreflightOptions {
+  readonly probeImageAlias: string;
+  readonly probeImageFingerprint: string;
+  readonly probePoolName: string;
+  readonly probeAddress: string;
+  readonly sourceServer?: string;
+}
+
+export interface ReportChecks {
+  api: 'pass' | 'fail';
+  parentInterface: 'pass' | 'fail';
+  nftables: 'pass' | 'fail';
+  ipv4Filtering: 'pass' | 'fail';
+  guestCanReachHost: 'pass' | 'fail';
+  networkPrerequisites: 'pass' | 'fail';
+  storagePool: 'pass' | 'fail';
+  simplestreamsImage: 'pass' | 'fail';
+  guestAddress: 'pass' | 'fail';
+  egress: 'pass' | 'fail';
+  nodeMetrics: 'pass' | 'warn' | 'fail';
+}
+
+const MANAGED_PROBE_KEY = 'user.nyabase.preflight';
+const PROBE_SERVER_KEY = 'user.nyabase.server_id';
+/** Headroom for Debian probe boot + wget TLS; rc 137 was SIGKILL under pressure. */
+const PREFLIGHT_PROBE_MEMORY = '256MiB';
+
+function probeHardwareId(serverId: string): string {
+  return createHash('sha256')
+    .update(`nyabase-preflight:${normalized(serverId)}`, 'utf8')
+    .digest('hex')
+    .slice(0, 32);
+}
 
 type InstanceFull = IncusSchema<'InstanceFull'>;
 type Metrics = { readonly report?: Record<string, unknown> };

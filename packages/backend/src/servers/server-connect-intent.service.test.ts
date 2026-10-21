@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { ServerConnectIntentService } from './server-connect-intent.service.js';
+import { ServerConnectIntentService } from './server-intents.service.js';
 
 describe('ServerConnectIntentService', () => {
   it('stores the secret in the ephemeral store before persisting only its reference', async () => {
