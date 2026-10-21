@@ -24,16 +24,12 @@ import { UsersModule } from './users/users.module.js';
 import { VolumesModule } from './volumes/volumes.module.js';
 import { SystemSettingsModule } from './system-settings/system-settings.module.js';
 import { GrantExpiryModule } from './access/grant-expiry.module.js';
-import { ServerCardExtensionsModule } from './server-card-extensions/server-card-extensions.module.js';
-import { createNvidiaGpuExtension } from '@nyabase/nvidia-gpu';
-
-// Compile-time composition: also register the package in
-// packages/frontend/src/main.tsx and packages/node-exporter/src/main.ts.
+import { GpuModule } from './gpu/gpu.module.js';
 
 @Module({
   imports: [
     NyabaseConfigModule,
-    ServerCardExtensionsModule.register([createNvidiaGpuExtension()]),
+    GpuModule,
     EphemeralStoreModule,
     RuntimeModule,
     DatabaseModule,

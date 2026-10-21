@@ -49,7 +49,7 @@ export interface GrantExpiryCandidate extends GrantWinnerCandidate {
   cpu_millis: number | null;
   mem_bytes: string | number | null;
   disk_bytes: string | number | null;
-  extension_grants?: unknown;
+  gpu_pci_addresses?: readonly string[];
 }
 
 export function liveExpiry(

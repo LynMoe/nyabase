@@ -88,15 +88,14 @@ export class ContainersController {
     return this.containers.resizeRootForUser(id, user.id, zPatchContainerRootSizeRequest.parse(body));
   }
 
-  @Patch(':containerId/extensions/:extensionId')
+  @Patch(':containerId/gpus')
   @HttpCode(HttpStatus.ACCEPTED)
-  extension(
+  gpus(
     @Param('containerId') id: string,
-    @Param('extensionId') extensionId: string,
     @CurrentUser() user: UserRecord,
     @Body() body: unknown,
   ) {
-    return this.containers.mutateExtensionForUser(id, user.id, extensionId, body);
+    return this.containers.mutateGpusForUser(id, user.id, body);
   }
 
   @Get(':containerId/volumes')

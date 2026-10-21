@@ -8,8 +8,7 @@
     "strictPropertyInitialization": false,
     "skipLibCheck": true,
     "paths": {
-      "@nyabase/common": ["../common/dist/index"],
-      "@nyabase/nvidia-gpu": ["../../extensions/nvidia-gpu/dist/index"]
+      "@nyabase/common": ["../common/dist/index"]
     }
   },
   "include": ["src"],

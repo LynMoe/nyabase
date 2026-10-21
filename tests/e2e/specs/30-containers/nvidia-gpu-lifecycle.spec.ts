@@ -22,12 +22,10 @@ import type { AvailableTopologyProvider } from '../../topology/provider.js';
 
 type JsonRecord = Record<string, any>;
 
-const NVIDIA_GPU = 'nvidia-gpu';
 const GiB = 1024 * 1024 * 1024;
 
 function nvidiaState(container: JsonRecord): JsonRecord {
-  const bag = (container.extensions ?? {}) as JsonRecord;
-  return (bag[NVIDIA_GPU] ?? {}) as JsonRecord;
+  return (container.gpu ?? {}) as JsonRecord;
 }
 
 function claimedPci(container: JsonRecord): string[] {
@@ -59,7 +57,7 @@ async function enableNvidiaGpu(
   serverId: string,
 ): Promise<JsonRecord> {
   const enablement = await expectJson<JsonRecord>(
-    await adminApi.put(`/api/admin/servers/${serverId}/extensions/${NVIDIA_GPU}`, {
+    await adminApi.patch(`/api/admin/servers/${serverId}/gpu`, {
       data: { enabled: true },
     }),
   );
@@ -76,22 +74,17 @@ async function enableNvidiaGpu(
 
 async function disableNvidiaGpu(adminApi: ApiClient, serverId: string): Promise<JsonRecord> {
   return expectJson<JsonRecord>(
-    await adminApi.put(`/api/admin/servers/${serverId}/extensions/${NVIDIA_GPU}`, {
+    await adminApi.patch(`/api/admin/servers/${serverId}/gpu`, {
       data: { enabled: false },
     }),
   );
 }
 
-async function extensionRow(
+async function gpuStatus(
   adminApi: ApiClient,
   serverId: string,
 ): Promise<JsonRecord> {
-  const listed = await expectJson<JsonRecord[]>(
-    await adminApi.get(`/api/admin/servers/${serverId}/extensions`),
-  );
-  const row = listed.find((item) => item.extensionId === NVIDIA_GPU);
-  expect(row, JSON.stringify(listed)).toBeTruthy();
-  return row!;
+  return expectJson<JsonRecord>(await adminApi.get(`/api/admin/servers/${serverId}/gpu`));
 }
 
 async function waitStatus(
@@ -115,14 +108,14 @@ async function createAdminContainer(
   options: {
     namePrefix: string;
     powerIntent: 'running' | 'stopped';
-    extensions?: Record<string, unknown>;
+    gpuPciAddresses?: string[];
   },
 ): Promise<{ containerId: string; container: JsonRecord }> {
   const created = await createUserContainer(adminApi, seedState, {
     namePrefix: options.namePrefix,
     serverId,
     rootSizeBytes: 2 * GiB,
-    extensions: options.extensions ?? {},
+    gpuPciAddresses: options.gpuPciAddresses,
     powerIntent: options.powerIntent,
   });
   const container = await waitStatus(adminApi, created.containerId, options.powerIntent);
@@ -227,24 +220,24 @@ test(
       const created = await createAdminContainer(adminApi, seedState, gpuServer.id, {
         namePrefix: 'e2e-nvocc',
         powerIntent: 'stopped',
-        extensions: { [NVIDIA_GPU]: { pciAddresses: [pci] } },
+        gpuPciAddresses: [pci],
       });
       containerId = created.containerId;
       expect(nvidiaState(created.container).nvidiaRuntime).toBe(true);
       expect(pciMatches(created.container, pci)).toBe(true);
-      expect((await extensionRow(adminApi, gpuServer.id)).occupiedDeviceCount).toBeGreaterThan(0);
+      expect((await gpuStatus(adminApi, gpuServer.id)).occupiedDeviceCount).toBeGreaterThan(0);
 
       const occupied = await readErrorBody(
-        await adminApi.put(`/api/admin/servers/${gpuServer.id}/extensions/${NVIDIA_GPU}`, {
+        await adminApi.patch(`/api/admin/servers/${gpuServer.id}/gpu`, {
           data: { enabled: false },
         }),
       );
       expect(occupied.status).toBe(409);
-      expect(errorCode(occupied.body)).toBe('EXTENSION_OCCUPIED');
+      expect(errorCode(occupied.body)).toBe('GPU_OCCUPIED');
 
       await patchNvidiaGpu(
         adminApi,
-        `/api/admin/containers/${containerId}/extensions/${NVIDIA_GPU}`,
+        `/api/admin/containers/${containerId}/gpus`,
         [],
       );
       const cleared = await expectJson<JsonRecord>(
@@ -252,13 +245,13 @@ test(
       );
       expect(nvidiaState(cleared).nvidiaRuntime).toBe(true);
       expect(claimedPci(cleared)).toEqual([]);
-      expect((await extensionRow(adminApi, gpuServer.id)).occupiedDeviceCount).toBe(0);
+      expect((await gpuStatus(adminApi, gpuServer.id)).occupiedDeviceCount).toBe(0);
 
       const disabled = await disableNvidiaGpu(adminApi, gpuServer.id);
       expect(disabled.enabled).toBe(false);
     } finally {
       await deleteAdminContainer(adminApi, containerId);
-      await adminApi.put(`/api/admin/servers/${gpuServer.id}/extensions/${NVIDIA_GPU}`, {
+      await adminApi.patch(`/api/admin/servers/${gpuServer.id}/gpu`, {
         data: { enabled: true },
       }).catch(() => undefined);
     }
@@ -279,7 +272,6 @@ test(
       const created = await createAdminContainer(adminApi, seedState, gpuServer.id, {
         namePrefix: 'e2e-nvlate',
         powerIntent: 'running',
-        extensions: {},
       });
       containerId = created.containerId;
       expect(nvidiaState(created.container).nvidiaRuntime).toBe(true);
@@ -289,7 +281,7 @@ test(
       await stopAdminContainer(adminApi, containerId);
       await patchNvidiaGpu(
         adminApi,
-        `/api/admin/containers/${containerId}/extensions/${NVIDIA_GPU}`,
+        `/api/admin/containers/${containerId}/gpus`,
         [pci],
       );
       const patched = await expectJson<JsonRecord>(
@@ -315,7 +307,7 @@ test(
 );
 
 test(
-  'CPU-only grant still opens nvidia.runtime on create when the server extension is enabled and ready',
+  'CPU-only grant still opens nvidia.runtime on create when the GPU is enabled on the server and ready',
   { ...coverageCase('container-nvidia-gpu-cpu-only-runtime', 'container-nvidia-gpu-cpu-only-runtime-live') },
   async ({ adminApi, authedApiFactory, seedState, topologyProvider }) => {
     test.setTimeout(240_000);
@@ -336,14 +328,13 @@ test(
       const session = await loginPersona(adminApi, persona);
       const userApi = await authedApiFactory(session.accessToken);
 
-      const userEnable = await userApi.put(
-        `/api/admin/servers/${gpuServer.id}/extensions/${NVIDIA_GPU}`,
+      const userEnable = await userApi.patch(`/api/admin/servers/${gpuServer.id}/gpu`,
         { data: { enabled: true } },
       );
       expect([401, 403, 404]).toContain(userEnable.status());
 
       const devices = await expectJson<{ items?: JsonRecord[]; enabled?: boolean }>(
-        await userApi.get(`/api/servers/${gpuServer.id}/extensions/${NVIDIA_GPU}/devices`),
+        await userApi.get(`/api/servers/${gpuServer.id}/gpus`),
       );
       expect(devices.enabled).toBe(true);
       expect(devices.items ?? []).toEqual([]);
@@ -357,7 +348,6 @@ test(
             rootSizeBytes: 2 * GiB,
             cpuMillis: 500,
             memBytes: 512 * 1024 * 1024,
-            extensions: {},
             powerIntent: 'stopped',
           },
         }),
@@ -376,7 +366,7 @@ test(
       expect(claimedPci(created)).toEqual([]);
 
       const denied = await readErrorBody(
-        await userApi.patch(`/api/containers/${userContainer}/extensions/${NVIDIA_GPU}`, {
+        await userApi.patch(`/api/containers/${userContainer}/gpus`, {
           data: { pciAddresses: [pci] },
         }),
       );
@@ -390,7 +380,7 @@ test(
 );
 
 test(
-  'create and PATCH with an nvidia-gpu payload fail when the server extension is not enabled',
+  'create and PATCH with a GPU payload fail when the GPU is not enabled on the server',
   { ...coverageCase('container-nvidia-gpu-not-enabled-reject', 'container-nvidia-gpu-not-enabled-reject-live') },
   async ({ adminApi, seedState }) => {
     test.setTimeout(180_000);
@@ -405,31 +395,30 @@ test(
           rootSizeBytes: 2 * GiB,
           cpuMillis: 500,
           memBytes: 512 * 1024 * 1024,
-          extensions: { [NVIDIA_GPU]: { pciAddresses: ['0000:41:00.0'] } },
+          gpuPciAddresses: ['0000:41:00.0'],
           powerIntent: 'stopped',
         },
       }),
     );
     expect(createDenied.status).toBe(409);
-    expect(errorCode(createDenied.body)).toBe('EXTENSION_NOT_ENABLED');
+    expect(errorCode(createDenied.body)).toBe('GPU_NOT_ENABLED');
 
     let containerId: string | undefined;
     try {
       const created = await createAdminContainer(adminApi, seedState, seedState.server.id, {
         namePrefix: 'e2e-nvoffp',
         powerIntent: 'stopped',
-        extensions: {},
       });
       containerId = created.containerId;
-      expect(created.container.extensions ?? {}).toEqual({});
+      expect(created.container.gpu ?? null).toBeNull();
 
       const patchDenied = await readErrorBody(
-        await adminApi.patch(`/api/admin/containers/${containerId}/extensions/${NVIDIA_GPU}`, {
+        await adminApi.patch(`/api/admin/containers/${containerId}/gpus`, {
           data: { pciAddresses: ['0000:41:00.0'] },
         }),
       );
       expect(patchDenied.status).toBe(409);
-      expect(errorCode(patchDenied.body)).toBe('EXTENSION_NOT_ENABLED');
+      expect(errorCode(patchDenied.body)).toBe('GPU_NOT_ENABLED');
     } finally {
       await deleteAdminContainer(adminApi, containerId);
     }
@@ -451,7 +440,6 @@ test(
       const created = await createAdminContainer(adminApi, seedState, gpuServer.id, {
         namePrefix: 'e2e-nvfrz',
         powerIntent: 'running',
-        extensions: {},
       });
       containerId = created.containerId;
       instanceName = created.container.instanceName as string;
@@ -459,12 +447,12 @@ test(
       expect(instanceName).toBeTruthy();
 
       const runningDenied = await readErrorBody(
-        await adminApi.patch(`/api/admin/containers/${containerId}/extensions/${NVIDIA_GPU}`, {
+        await adminApi.patch(`/api/admin/containers/${containerId}/gpus`, {
           data: { pciAddresses: [pci] },
         }),
       );
       expect(runningDenied.status).toBe(409);
-      expect(errorCode(runningDenied.body)).toBe('EXTENSION_MUTATION_REQUIRES_STOP');
+      expect(errorCode(runningDenied.body)).toBe('GPU_MUTATION_REQUIRES_STOP');
 
       // Frozen + powerIntent running is reconciled as start. Pause, then flip
       // desired power immediately so powerTransition is none and persist can
@@ -493,12 +481,12 @@ test(
       ).toBe('frozen');
 
       const frozenDenied = await readErrorBody(
-        await adminApi.patch(`/api/admin/containers/${containerId}/extensions/${NVIDIA_GPU}`, {
+        await adminApi.patch(`/api/admin/containers/${containerId}/gpus`, {
           data: { pciAddresses: [pci] },
         }),
       );
       expect(frozenDenied.status).toBe(409);
-      expect(errorCode(frozenDenied.body)).toBe('EXTENSION_MUTATION_REQUIRES_STOP');
+      expect(errorCode(frozenDenied.body)).toBe('GPU_MUTATION_REQUIRES_STOP');
     } finally {
       if (instanceName) {
         await peerIncus(gpuServer.ssh, ['stop', '--force', instanceName])

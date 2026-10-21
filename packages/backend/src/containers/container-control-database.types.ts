@@ -1,4 +1,5 @@
 import type { ColumnType } from 'kysely';
+import type { GpuContainerState } from '@nyabase/common';
 
 type ContainerTimestamp = ColumnType<Date, Date | string, Date | string>;
 type ContainerGeneratedTimestamp = ColumnType<
@@ -27,7 +28,11 @@ export interface ContainerControlTable {
   root_used_bytes: ColumnType<string | null, string | number | bigint | null | undefined, string | number | bigint | null>;
   cpu_millis: number;
   mem_bytes: ContainerBigInt;
-  extensions: ContainerJson<Record<string, unknown>>;
+  gpu_state: ColumnType<
+    GpuContainerState | null,
+    GpuContainerState | string | null | undefined,
+    GpuContainerState | string | null
+  >;
   nesting: boolean;
   syscall_intercept: boolean;
   power_intent: 'running' | 'stopped';
@@ -41,12 +46,10 @@ export interface ContainerControlTable {
   updated_at: ContainerGeneratedTimestamp;
 }
 
-export interface ExtensionDeviceClaimTable {
-  id: string;
-  extension_id: string;
-  server_id: string;
+export interface ContainerGpuClaimTable {
   container_id: string;
-  device_key: string;
+  server_id: string;
+  pci_address: string;
   created_at: ContainerGeneratedTimestamp;
 }
 
@@ -109,7 +112,7 @@ export interface ReconcileClaimTable {
 
 export interface ContainerControlDatabase {
   'control.containers': ContainerControlTable;
-  'control.extension_device_claims': ExtensionDeviceClaimTable;
+  'control.container_gpu_claims': ContainerGpuClaimTable;
   'control.container_network_claims': ContainerNetworkClaimTable;
   'control.container_ssh_routes': ContainerSshRouteTable;
   'control.intents': IntentTable;

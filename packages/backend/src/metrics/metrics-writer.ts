@@ -1,16 +1,15 @@
-import { Inject, Injectable, Logger, OnModuleDestroy, Optional } from '@nestjs/common';
+import { Injectable, Logger, OnModuleDestroy } from '@nestjs/common';
 import {
-  CORE_NODE_METRIC_CATALOG,
   MAX_METRIC_LABEL_KEY_LENGTH,
   MAX_METRIC_LABELS_PER_POINT,
   MAX_METRIC_NAME_LENGTH,
   MAX_METRIC_LABEL_VALUE_LENGTH,
   MAX_METRIC_POINTS_PER_BATCH,
   MAX_NODE_METRICS_BODY_BYTES,
+  NODE_METRIC_CATALOG,
   validateNodeMetricSample,
   type NodeMetricCatalog,
 } from '@nyabase/common';
-import { NODE_METRIC_CATALOG } from '../server-card-extensions/types.js';
 import { NyabaseConfigService } from '../config/nyabase-config.service.js';
 
 export interface MetricPoint {
@@ -64,7 +63,7 @@ const SHUTDOWN_DRAIN_TIMEOUT_MS = 5_000;
 @Injectable()
 export class MetricsWriter implements OnModuleDestroy {
   private readonly logger = new Logger(MetricsWriter.name);
-  private readonly catalog: NodeMetricCatalog;
+  private readonly catalog: NodeMetricCatalog = NODE_METRIC_CATALOG;
   private readonly vmUrl: string;
   private readonly queue: QueuedBatch[] = [];
   private readonly queueLimit = DEFAULT_QUEUE_LIMIT;
@@ -79,11 +78,7 @@ export class MetricsWriter implements OnModuleDestroy {
   private activeFlush: FlushOperation | null = null;
   private shutdownPromise: Promise<void> | null = null;
 
-  constructor(
-    config: NyabaseConfigService,
-    @Optional() @Inject(NODE_METRIC_CATALOG) catalog?: NodeMetricCatalog,
-  ) {
-    this.catalog = catalog ?? CORE_NODE_METRIC_CATALOG;
+  constructor(config: NyabaseConfigService) {
     this.vmUrl = config.get<string>('metrics.victoriaMetricsUrl');
     this.timer = setInterval(() => {
       void this.flush();

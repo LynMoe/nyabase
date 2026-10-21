@@ -132,9 +132,9 @@ describe('canonical container and volume contracts', () => {
       rootSizeBytes: 10_000,
       cpuMillis: 2_000,
       memBytes: 2_000_000_000,
-      extensions: {},
+      gpuPciAddresses: [],
       powerIntent: ContainerPowerIntent.Running,
-    })).toMatchObject({ extensions: {} });
+    })).toMatchObject({ gpuPciAddresses: [] });
     expect(zCreateContainerRequest.safeParse({
       serverId,
       imageId,
@@ -157,14 +157,27 @@ describe('canonical container and volume contracts', () => {
     }).volumes).toEqual([{ volumeId: id, containerPath: '/data', readOnly: false }]);
   });
 
-  it('accepts opaque extension bags on grants', () => {
+  it('canonicalizes GPU PCI addresses on grants and defaults to none', () => {
     expect(zPutServerGrantRequest.parse({
       cpuMillis: null,
       memBytes: null,
       diskBytes: null,
-      extensionGrants: {},
       expiresAt: null,
-    }).extensionGrants).toEqual({});
+    }).gpuPciAddresses).toEqual([]);
+    expect(zPutServerGrantRequest.parse({
+      cpuMillis: null,
+      memBytes: null,
+      diskBytes: null,
+      gpuPciAddresses: ['0000:41:00.0'],
+      expiresAt: null,
+    }).gpuPciAddresses).toEqual(['00000000:41:00.0']);
+    expect(zPutServerGrantRequest.safeParse({
+      cpuMillis: null,
+      memBytes: null,
+      diskBytes: null,
+      gpuPciAddresses: ['0000:41:00.*'],
+      expiresAt: null,
+    }).success).toBe(false);
   });
 
   it('rejects old physical identity and address fields', () => {
@@ -366,8 +379,8 @@ describe('intent and structured failure contracts', () => {
   it('validates bounded error responses without operation references', () => {
     const response: ErrorResponse = {
       statusCode: 409,
-      code: FailureCode.ExtensionMutationRequiresStop,
-      message: 'The container must be stopped before changing extension devices.',
+      code: FailureCode.GpuMutationRequiresStop,
+      message: 'The container must be stopped before changing GPU assignment.',
       requestId: id,
       details: { containerId: id },
     };
@@ -488,8 +501,8 @@ describe('canonical DTO shapes', () => {
       storageOvercommitRatio: 1,
       parentInterface: 'eno1',
       dnsServers: [],
-      enabledExtensions: [],
-      extensionHealth: {},
+      gpuEnabled: false,
+      gpuHealth: {},
       status: ServerStatus.Unknown,
       lastSeenAt: null,
       lastError: null,
@@ -534,7 +547,7 @@ describe('canonical DTO shapes', () => {
       },
       cpuMillis: 2_000,
       memBytes: 2_000_000_000,
-      extensions: {},
+      gpu: null,
       powerIntent: ContainerPowerIntent.Running,
       lifecyclePhase: ContainerPhase.Active,
       routedIp: '192.0.2.10',

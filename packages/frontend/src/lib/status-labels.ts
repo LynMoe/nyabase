@@ -1,6 +1,5 @@
 import type { ContainerPhase, ContainerStatus, ServerStatus } from '@nyabase/common';
 import { FailureCode } from '@nyabase/common';
-import { formatRegisteredExtensionError } from '../extensions/registry.js';
 
 type ContainerSshStatus =
   | 'disabled'
@@ -63,12 +62,15 @@ const FAILURE_CODE_ZH: Partial<Record<string, string>> = {
   [FailureCode.RootShrinkRequiresStop]: '缩容前需先停止容器',
   [FailureCode.RootQuotaPending]: '系统盘容量调整尚未生效',
   [FailureCode.RootSizeBelowImageMinimum]: '小于镜像要求的最小系统盘',
-  [FailureCode.ExtensionUnknown]: '未知扩展',
-  [FailureCode.ExtensionNotEnabled]: '服务器扩展未启用',
-  [FailureCode.ExtensionOccupied]: '扩展仍有设备占用',
-  [FailureCode.ExtensionDeviceClaimed]: '扩展设备已被占用',
-  [FailureCode.ExtensionMutationRequiresStop]: '变更扩展前需先停止容器',
-  [FailureCode.ExtensionGrantNotApplicable]: '该扩展授权不适用于此服务器',
+  [FailureCode.GpuNotEnabled]: '服务器未启用 GPU',
+  [FailureCode.GpuOccupied]: 'GPU 仍被容器占用',
+  [FailureCode.GpuDeviceClaimed]: 'GPU 已被占用',
+  [FailureCode.GpuMutationRequiresStop]: '变更 GPU 前需先停止容器',
+  [FailureCode.GpuGrantNotApplicable]: 'GPU 授权不适用于此服务器',
+  [FailureCode.GpuRuntimeUnavailable]: 'GPU 运行时不可用',
+  [FailureCode.GpuInvalidPci]: 'PCI 地址无效',
+  [FailureCode.GpuWildcardForbidden]: '禁止使用通配符 PCI 选择器',
+  [FailureCode.GpuDuplicatePci]: 'PCI 地址重复',
   [FailureCode.VolumeCatalogAdoptFailed]: '共享卷未能登记到本机 Incus',
   [FailureCode.VolumePlacementFailed]: '卷尚未在目标服务器就绪',
   [FailureCode.ImageManagesOwnNetwork]: '镜像自行管理网络',
@@ -116,7 +118,7 @@ export function serverStatusLabel(status: ServerStatus | string): string {
 
 export function failureCodeLabel(code: string | null | undefined): string | null {
   if (!code) return null;
-  return FAILURE_CODE_ZH[code] ?? formatRegisteredExtensionError(code) ?? code;
+  return FAILURE_CODE_ZH[code] ?? code;
 }
 
 export function volumeAttentionHint(failureCode: string | null | undefined): string {

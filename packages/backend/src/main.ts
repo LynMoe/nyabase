@@ -9,7 +9,6 @@ import { NyabaseConfigService } from './config/nyabase-config.service.js';
 import { SpaFallbackFilter } from './filters/spa-fallback.filter.js';
 import { securityHeaders, trustProxySetting } from './common/http-security.js';
 import { ZodExceptionFilter } from './filters/zod-exception.filter.js';
-import { PackageHttpErrorFilter } from './server-card-extensions/package-http-error.filter.js';
 import { RuntimeLifecycleService } from './health/runtime-lifecycle.service.js';
 import { ConsoleBridgeGateway } from './runtime/console-bridge.gateway.js';
 import { SshProxyGateway } from './ssh/ssh-proxy-gateway.js';
@@ -37,7 +36,7 @@ async function bootstrap() {
   app.setGlobalPrefix('api');
   app.set('trust proxy', trustProxySetting(config.get<string>('server.trustedProxies')));
   app.use(securityHeaders());
-  app.useGlobalFilters(new ZodExceptionFilter(), new PackageHttpErrorFilter());
+  app.useGlobalFilters(new ZodExceptionFilter());
   // forbidNonWhitelisted: throw 400 on extra properties so clients learn
   // about typos / dropped fields instead of silently having them ignored.
   // Note: most request DTOs are validated via zod (see Body() handlers); the

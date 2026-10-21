@@ -40,9 +40,9 @@ export function formatGrantQuotaParts(grant: CpuMemDisk): string[] {
 
 export function formatGrantQuotaLine(
   grant: CpuMemDisk,
-  extensionChips: readonly string[] = [],
+  gpuSummary: string | null = null,
 ): string {
-  return [...formatGrantQuotaParts(grant), ...extensionChips].join(' / ');
+  return [...formatGrantQuotaParts(grant), ...(gpuSummary ? [gpuSummary] : [])].join(' / ');
 }
 
 /** Allocated/committed usage. 0 → 0 核 / 0 GiB. null = no observation (omit the dim). */

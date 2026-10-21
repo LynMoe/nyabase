@@ -150,7 +150,6 @@ describePg('volume capacity locking and scope exclusions', () => {
         cpu_millis: null,
         mem_bytes: null,
         disk_bytes: 0,
-        extension_grants: {},
         expires_at: null,
       }).execute();
       await database.insertInto('iam.storage_pool_grants').values({
@@ -274,7 +273,6 @@ describePg('volume capacity locking and scope exclusions', () => {
         cpu_millis: null,
         mem_bytes: null,
         disk_bytes: 0,
-        extension_grants: {},
         expires_at: null,
       }).execute();
       await database.insertInto('iam.storage_pool_grants').values({
@@ -332,7 +330,6 @@ describePg('volume capacity locking and scope exclusions', () => {
         cpu_millis: null,
         mem_bytes: null,
         disk_bytes: 0,
-        extension_grants: {},
         expires_at: null,
       }).execute();
       await database.insertInto('iam.storage_pool_grants').values({
@@ -408,7 +405,6 @@ describePg('volume capacity locking and scope exclusions', () => {
         cpu_millis: null,
         mem_bytes: null,
         disk_bytes: 0,
-        extension_grants: {},
         expires_at: null,
       }).execute();
       await database.insertInto('iam.storage_pool_grants').values({
@@ -530,7 +526,6 @@ describePg('volume capacity locking and scope exclusions', () => {
         cpu_millis: 10_000,
         mem_bytes: 10_000,
         disk_bytes: 10_000,
-        extension_grants: {},
         expires_at: null,
       }).execute();
       await database.insertInto('iam.storage_pool_grants').values({
@@ -574,7 +569,7 @@ describePg('volume capacity locking and scope exclusions', () => {
               cpuMillis: 10_000,
               memBytes: 10_000,
               diskBytes: 10_000,
-              extensionGrants: {},
+              gpuPciAddresses: [],
             },
             imageAvailable: true,
           }),
@@ -602,7 +597,6 @@ describePg('volume capacity locking and scope exclusions', () => {
           rootSizeBytes: 600,
           cpuMillis: 100,
           memBytes: 100,
-          extensions: {},
           powerIntent: ContainerPowerIntent.Stopped,
         }),
         volumeService.createForUser(userId, {

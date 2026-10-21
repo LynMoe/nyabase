@@ -303,7 +303,6 @@ describePg('shared volume quota reservations', () => {
         cpu_millis: null,
         mem_bytes: null,
         disk_bytes: 5_000,
-        extension_grants: {},
         expires_at: null,
       }).execute();
       await database.insertInto('iam.storage_pool_grants').values({

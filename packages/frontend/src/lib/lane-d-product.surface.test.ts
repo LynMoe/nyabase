@@ -37,18 +37,19 @@ describe('lane D product UI copy', () => {
     expect(src).toMatch(/撤销旧证书/);
   });
 
-  it('renders generic server-card support checks without importing card packages', () => {
+  it('renders GPU support checks on the server GPU tab', () => {
     const src = [
       read('pages/server-detail-page.tsx'),
-      read('components/servers/server-extension-support.tsx'),
+      read('components/gpu/gpu-sections.tsx'),
+      read('components/gpu/gpu-support.tsx'),
     ].join('\n');
     expect(src).not.toMatch(/@nyabase\/[a-z0-9-]+-web/);
-    expect(src).toMatch(/item\.support/);
+    expect(src).toMatch(/gpu\.support/);
     expect(src).toMatch(/本机检测/);
     expect(src).toMatch(/不阻止启用/);
   });
 
-  it('retries failed intents without importing card-extension packages on container pages', () => {
+  it('retries failed intents and renders GPU sections on container pages', () => {
     const src = [
       read('pages/container-detail-page.tsx'),
       read('components/containers/spec-panel.tsx'),
@@ -57,7 +58,8 @@ describe('lane D product UI copy', () => {
       read('components/containers/intents-panel.tsx'),
     ].join('\n');
     expect(src).not.toMatch(/@nyabase\/[a-z0-9-]+-web/);
-    expect(src).toMatch(/ExtensionSlots/);
+    expect(src).toMatch(/ContainerOverviewGpu/);
+    expect(src).toMatch(/ContainerSpecGpu/);
     expect(src).toMatch(/编辑规格/);
     expect(src).toMatch(/调整容量/);
     expect(src).not.toMatch(/\['spec', '规格'/);
@@ -285,21 +287,21 @@ describe('lane D product UI copy', () => {
     expect(detail).toMatch(/'storage'/);
     expect(detail).toMatch(/'preflight'/);
     expect(detail).toMatch(/'metrics'/);
-    expect(detail).toMatch(/'extensions'/);
+    expect(detail).toMatch(/'gpu'/);
     expect(detail).toMatch(/'activity'/);
     expect(detail).toMatch(/概览/);
     expect(detail).toMatch(/接入/);
     expect(detail).toMatch(/存储/);
     expect(detail).toMatch(/检查/);
     expect(detail).toMatch(/监控/);
-    expect(detail).toMatch(/扩展/);
+    expect(detail).toMatch(/GPU/);
     expect(detail).toMatch(/活动/);
     expect(detail).toMatch(/已登记 \$\{registeredPoolCount\} 个/);
     expect(read('routes/servers/$id.tsx')).toMatch(/parseServerDetailTab/);
     expect(read('routes/servers/$id.tsx')).not.toMatch(/'overview'/);
   });
 
-  it('renders grant quotas as one scroll with nested pools and extension chips', () => {
+  it('renders grant quotas as one scroll with nested pools and GPU summaries', () => {
     const grants = read('components/grants/canonical-grant-panel.tsx');
     const summary = read('components/grants/subject-grant-summary.tsx');
     const quota = read('lib/grant-quota.ts');
@@ -307,7 +309,7 @@ describe('lane D product UI copy', () => {
     expect(grants).not.toMatch(/\bTabs(Trigger|List|Content)?\b/);
     expect(grants).not.toMatch(/from '\.\.\/ui\/tabs/);
     expect(grants).toMatch(/formatGrantQuotaLine/);
-    expect(grants).toMatch(/formatExtensionGrantSummaries/);
+    expect(grants).toMatch(/formatGpuGrantSummary/);
     expect(grants).toMatch(/存储池（无服务器授权）/);
     expect(grants).toMatch(/磁盘（GiB，留空为不限，不含共享卷）/);
     expect(grants).toMatch(/SectionCard/);
@@ -326,11 +328,10 @@ describe('lane D product UI copy', () => {
     expect(grants).not.toMatch(/aria-expanded/);
     expect(grants).not.toMatch(/isLocalStoragePool/);
     expect(summary).toMatch(/formatGrantQuotaLine/);
-    expect(summary).toMatch(/formatExtensionGrantSummaries/);
+    expect(summary).toMatch(/formatGpuGrantSummary/);
     expect(summary).toMatch(/池：/);
     expect(summary).toMatch(/存储池 /);
     expect(quota).toMatch(/formatConsumedQuotaParts/);
-    expect(quota).not.toMatch(/extensions\/registry/);
     expect(coreGrant).not.toMatch(/nvidia-gpu/);
     expect(coreGrant).not.toMatch(/pciAddresses/);
     expect(coreGrant).not.toMatch(/GpuGrantMode/);
@@ -388,7 +389,7 @@ describe('lane D product UI copy', () => {
     expect(nav).not.toMatch(/to: '\/quota'/);
     expect(read('routes/quota/index.tsx')).toMatch(/redirect\(\{ to: '\/', hash: 'quota'/);
     expect(quotaPage).toMatch(/formatQuotaDimension/);
-    expect(quotaPage).toMatch(/formatExtensionGrantSummaries/);
+    expect(quotaPage).toMatch(/formatGpuGrantSummary/);
     expect(quotaPage).toMatch(/storage-capacity/);
     expect(quotaPage).toMatch(/sharedBackends/);
     expect(quotaPage).toMatch(/额度/);

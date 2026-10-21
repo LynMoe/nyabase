@@ -4,7 +4,7 @@ import { ChartLine, Copy, FileCode, KeyRound, Pencil } from 'lucide-react';
 import {
   formatSshProxyJumpLogin,
   type ContainerDto,
-  type OpaqueExtensionMap,
+  type GpuGrant,
   type PerformanceSelfResponse,
   type PatchContainerLimitsRequest,
 } from '@nyabase/common';
@@ -23,33 +23,33 @@ import { sshStatusLabel } from '../../lib/status-labels.js';
 import { useAuthStore } from '../../store/auth.js';
 import { useMySshKeys } from '../../hooks/use-my-ssh-keys.js';
 import { SshKeyNotice } from '../ssh/ssh-key-notice.js';
-import { ExtensionSlots } from '../../extensions/slots.js';
+import { ContainerOverviewGpu } from '../gpu/gpu-sections.js';
 import { LimitsDialog } from './spec-panel.js';
 
 export function OverviewPanel({
   container,
   admin,
-  enabledExtensions,
-  grant,
+  gpuEnabled,
+  gpuGrant,
   onRepairSsh,
   repairPending,
   onLimits,
   limitsPending,
-  onExtensionSubmit,
-  extensionPending,
+  onGpuSubmit,
+  gpuPending,
   occupancy,
   occupancyDenied,
 }: {
   container: ContainerDto;
   admin: boolean;
-  enabledExtensions: string[];
-  grant: OpaqueExtensionMap | null;
+  gpuEnabled: boolean;
+  gpuGrant: GpuGrant | null;
   onRepairSsh: () => void;
   repairPending: boolean;
   onLimits: (body: PatchContainerLimitsRequest) => Promise<unknown>;
   limitsPending: boolean;
-  onExtensionSubmit: (extensionId: string, payload: unknown) => Promise<unknown>;
-  extensionPending: boolean;
+  onGpuSubmit: (pciAddresses: string[]) => Promise<unknown>;
+  gpuPending: boolean;
   occupancy?: PerformanceSelfResponse;
   occupancyDenied?: boolean;
 }) {
@@ -193,10 +193,7 @@ export function OverviewPanel({
             <Field label="内存" value={formatBytesCompact(container.memBytes)} />
             <Field label="系统盘" value={formatBytesCompact(container.rootSizeBytes)} />
             <Field label="实例名" value={container.instanceName ?? '创建中'} mono />
-            <ExtensionSlots
-              area="container.overview"
-              ctx={{ value: container.extensions, serverId: container.serverId, admin }}
-            />
+            <ContainerOverviewGpu gpu={container.gpu} serverId={container.serverId} admin={admin} />
           </FieldGrid>
         </SectionCard>
 
@@ -243,12 +240,12 @@ export function OverviewPanel({
         <LimitsDialog
           container={container}
           admin={admin}
-          enabledExtensions={enabledExtensions}
-          grant={grant}
+          gpuEnabled={gpuEnabled}
+          gpuGrant={gpuGrant}
           pending={limitsPending}
-          extensionPending={extensionPending}
+          gpuPending={gpuPending}
           onLimits={onLimits}
-          onExtensionSubmit={onExtensionSubmit}
+          onGpuSubmit={onGpuSubmit}
           onOpenChange={(open) => { if (!open) setLimitsOpen(false); }}
         />
       ) : null}

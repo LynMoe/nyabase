@@ -1,7 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import type { Kysely } from 'kysely';
 import {
-  CORE_NODE_METRIC_CATALOG,
   ContainerPowerIntent,
   FailureCode,
   ServerStatus,
@@ -20,10 +19,8 @@ import { ContainerControlService } from './container-control.service.js';
 import { ImagesService } from '../images/images.service.js';
 import { IpPoolsRepository } from '../ip-pools/ip-pools.repository.js';
 import { ContainerSshConvergenceService } from '../ssh/container-ssh-convergence.service.js';
-import { ExtensionDeviceClaimsRepository } from '../server-card-extensions/claims.repository.js';
-import { asJsonObject } from '../server-card-extensions/json.js';
-import { ServerCardExtensionRegistry } from '../server-card-extensions/registry.js';
-import type { ServerCardExtension } from '../server-card-extensions/types.js';
+import { isGpuOccupiedSqlError } from '../gpu/enablement.js';
+import { GpuClaimsRepository } from '../gpu/gpu-claims.repository.js';
 
 const describePg = process.env.NYABASE_TEST_DATABASE_URL ? describe : describe.skip;
 const IMAGE_FINGERPRINT = 'a'.repeat(64);
@@ -49,6 +46,7 @@ interface SeedOptions {
 
 interface GrantOptions {
   diskBytes: number | null;
+  gpuPciAddresses?: string[];
 }
 
 describePg('PostgreSQL container create admission and capacity', () => {
@@ -322,147 +320,162 @@ describePg('PostgreSQL container create admission and capacity', () => {
   });
 });
 
-const STUB_EXTENSION_ID = 'example-card';
+const GPU_A = '0000:41:00.0';
+const GPU_A_CANONICAL = '00000000:41:00.0';
+const GPU_B = '0000:42:00.0';
+const GPU_B_CANONICAL = '00000000:42:00.0';
 
-describePg('PostgreSQL extension device claims', () => {
+describePg('PostgreSQL GPU claims', () => {
   it('inserts the container before claims and maps UNIQUE collisions', async () => {
     await withPostgresTestDatabase(async ({ database }) => {
       const fixture = await seedFixture(database, { poolTotalBytes: 10_000 });
-      const harness = extensionHarness(database, { diskBytes: 10_000 });
-      await enableStubExtension(database, fixture);
+      const harness = gpuHarness(database, { diskBytes: 10_000, gpuPciAddresses: [GPU_A, GPU_B] });
+      await enableGpu(database, fixture);
 
       const first = await harness.service.createForUser(
         fixture.userId,
-        request(fixture, 'claim-first', {
-          extensions: { [STUB_EXTENSION_ID]: { deviceKey: 'dev-a' } },
-        }),
+        request(fixture, 'claim-first', { gpuPciAddresses: [GPU_A] }),
       );
       const container = await database.selectFrom('control.containers')
-        .select(['id', 'extensions'])
+        .select(['id', 'gpu_state'])
         .where('id', '=', first.resourceId)
         .executeTakeFirstOrThrow();
-      const claims = await database.selectFrom('control.extension_device_claims')
-        .select(['container_id', 'device_key', 'extension_id'])
+      const claims = await database.selectFrom('control.container_gpu_claims')
+        .select(['container_id', 'pci_address'])
         .where('server_id', '=', fixture.serverId)
         .execute();
       expect(claims).toEqual([{
         container_id: container.id,
-        device_key: 'dev-a',
-        extension_id: STUB_EXTENSION_ID,
+        pci_address: GPU_A_CANONICAL,
       }]);
-      expect(asJsonObject(container.extensions)[STUB_EXTENSION_ID]).toEqual({ deviceKey: 'dev-a' });
+      expect(container.gpu_state).toEqual({
+        nvidiaRuntime: true,
+        pciAddresses: [GPU_A_CANONICAL],
+      });
 
       await expectCode(
         harness.service.createForUser(
           fixture.userId,
-          request(fixture, 'claim-collision', {
-            extensions: { [STUB_EXTENSION_ID]: { deviceKey: 'dev-a' } },
-          }),
+          request(fixture, 'claim-collision', { gpuPciAddresses: [GPU_A] }),
         ),
-        FailureCode.ExtensionDeviceClaimed,
+        FailureCode.GpuDeviceClaimed,
       );
     });
   });
 
-  it('rejects payload for a disabled extension and occupancy-blocks disable', async () => {
+  it('rejects GPU payload while disabled and occupancy-blocks disable', async () => {
     await withPostgresTestDatabase(async ({ database }) => {
       const fixture = await seedFixture(database, { poolTotalBytes: 10_000 });
-      const harness = extensionHarness(database, { diskBytes: 10_000 });
+      const harness = gpuHarness(database, { diskBytes: 10_000, gpuPciAddresses: [GPU_A, GPU_B] });
 
       await expectCode(
         harness.service.createForUser(
           fixture.userId,
-          request(fixture, 'not-enabled', {
-            extensions: { [STUB_EXTENSION_ID]: { deviceKey: 'dev-a' } },
-          }),
+          request(fixture, 'not-enabled', { gpuPciAddresses: [GPU_A] }),
         ),
-        FailureCode.ExtensionNotEnabled,
+        FailureCode.GpuNotEnabled,
       );
 
-      await enableStubExtension(database, fixture);
+      await enableGpu(database, fixture);
       const created = await harness.service.createForUser(
         fixture.userId,
-        request(fixture, 'occupied-disable', {
-          extensions: { [STUB_EXTENSION_ID]: { deviceKey: 'dev-b' } },
-        }),
+        request(fixture, 'occupied-disable', { gpuPciAddresses: [GPU_B] }),
       );
       expect(created.resourceId).toBeTruthy();
       try {
-        await database.updateTable('infra.server_extensions')
-          .set({ enabled: false })
-          .where('server_id', '=', fixture.serverId)
-          .where('extension_id', '=', STUB_EXTENSION_ID)
+        await database.updateTable('infra.servers')
+          .set({ gpu_enabled: false })
+          .where('id', '=', fixture.serverId)
           .execute();
         throw new Error('expected occupancy block');
       } catch (error) {
-        expect(occupancyBlocked(error)).toBe(true);
+        expect(isGpuOccupiedSqlError(error)).toBe(true);
       }
     });
   });
 
-  it('releases claims on failed phase so a later create can reuse the key', async () => {
+  it('rejects a card outside the server grant', async () => {
     await withPostgresTestDatabase(async ({ database }) => {
       const fixture = await seedFixture(database, { poolTotalBytes: 10_000 });
-      const harness = extensionHarness(database, { diskBytes: 10_000 });
-      await enableStubExtension(database, fixture);
+      const harness = gpuHarness(database, { diskBytes: 10_000, gpuPciAddresses: [GPU_A] });
+      await enableGpu(database, fixture);
+
+      await expectCode(
+        harness.service.createForUser(
+          fixture.userId,
+          request(fixture, 'outside-grant', { gpuPciAddresses: [GPU_B] }),
+        ),
+        FailureCode.PermissionDenied,
+      );
+    });
+  });
+
+  it('releases claims on failed phase so a later create can reuse the card', async () => {
+    await withPostgresTestDatabase(async ({ database }) => {
+      const fixture = await seedFixture(database, { poolTotalBytes: 10_000 });
+      const harness = gpuHarness(database, { diskBytes: 10_000, gpuPciAddresses: [GPU_A] });
+      await enableGpu(database, fixture);
 
       const first = await harness.service.createForUser(
         fixture.userId,
-        request(fixture, 'failed-release', {
-          extensions: { [STUB_EXTENSION_ID]: { deviceKey: 'dev-c' } },
-        }),
+        request(fixture, 'failed-release', { gpuPciAddresses: [GPU_A] }),
       );
       await database.updateTable('control.containers')
         .set({ lifecycle_phase: 'failed', failure_code: 'RESOURCE_NEEDS_ATTENTION' })
         .where('id', '=', first.resourceId)
         .execute();
       expect(
-        await database.selectFrom('control.extension_device_claims')
-          .select('id')
+        await database.selectFrom('control.container_gpu_claims')
+          .select('container_id')
           .where('container_id', '=', first.resourceId)
           .execute(),
       ).toEqual([]);
 
       const reused = await harness.service.createForUser(
         fixture.userId,
-        request(fixture, 'failed-reuse', {
-          extensions: { [STUB_EXTENSION_ID]: { deviceKey: 'dev-c' } },
-        }),
+        request(fixture, 'failed-reuse', { gpuPciAddresses: [GPU_A] }),
       );
-      const claims = await database.selectFrom('control.extension_device_claims')
-        .select(['container_id', 'device_key'])
-        .where('device_key', '=', 'dev-c')
+      const claims = await database.selectFrom('control.container_gpu_claims')
+        .select(['container_id', 'pci_address'])
+        .where('pci_address', '=', GPU_A_CANONICAL)
         .execute();
-      expect(claims).toEqual([{ container_id: reused.resourceId, device_key: 'dev-c' }]);
+      expect(claims).toEqual([{ container_id: reused.resourceId, pci_address: GPU_A_CANONICAL }]);
     });
   });
 
   it('mutates claims for a stopped container', async () => {
     await withPostgresTestDatabase(async ({ database }) => {
       const fixture = await seedFixture(database, { poolTotalBytes: 10_000 });
-      const harness = extensionHarness(database, { diskBytes: 10_000 });
-      await enableStubExtension(database, fixture);
+      const harness = gpuHarness(database, { diskBytes: 10_000 });
+      await enableGpu(database, fixture);
 
       const created = await harness.service.createForUser(
         fixture.userId,
-        request(fixture, 'mutate-later', { extensions: {} }),
+        request(fixture, 'mutate-later'),
       );
       await database.updateTable('control.container_ssh_routes')
         .set({ instance_status: 'Stopped' })
         .where('container_id', '=', created.resourceId)
         .execute();
 
-      await harness.service.mutateExtensionForAdmin(
+      await harness.service.mutateGpusForAdmin(
         created.resourceId,
         fixture.userId,
-        STUB_EXTENSION_ID,
-        { deviceKey: 'dev-d' },
+        { pciAddresses: [GPU_B] },
       );
-      const claims = await database.selectFrom('control.extension_device_claims')
-        .select(['container_id', 'device_key'])
+      const claims = await database.selectFrom('control.container_gpu_claims')
+        .select(['container_id', 'pci_address'])
         .where('container_id', '=', created.resourceId)
         .execute();
-      expect(claims).toEqual([{ container_id: created.resourceId, device_key: 'dev-d' }]);
+      expect(claims).toEqual([{ container_id: created.resourceId, pci_address: GPU_B_CANONICAL }]);
+      const container = await database.selectFrom('control.containers')
+        .select('gpu_state')
+        .where('id', '=', created.resourceId)
+        .executeTakeFirstOrThrow();
+      expect(container.gpu_state).toEqual({
+        nvidiaRuntime: true,
+        pciAddresses: [GPU_B_CANONICAL],
+      });
     });
   });
 });
@@ -474,10 +487,7 @@ function containerService(
     grant: ReturnType<typeof grant>;
     imageAvailable: boolean;
   },
-  extensions?: {
-    registry: ServerCardExtensionRegistry;
-    claims: ExtensionDeviceClaimsRepository;
-  },
+  gpuClaims?: GpuClaimsRepository,
 ): {
   service: ContainerControlService;
   access: {
@@ -509,89 +519,26 @@ function containerService(
     { get: vi.fn().mockReturnValue(null) } as never,
     new ContainerSshConvergenceService(database, intents, wake),
     undefined,
-    extensions?.registry,
-    extensions?.claims,
+    gpuClaims,
   );
   return { service, access };
 }
 
-function deviceKeyFrom(payload: unknown): string | undefined {
-  if (typeof payload !== 'object' || payload === null) return undefined;
-  const value = (payload as { deviceKey?: unknown }).deviceKey;
-  return typeof value === 'string' ? value : undefined;
-}
-
-function claimingExtension(): ServerCardExtension {
-  return {
-    id: STUB_EXTENSION_ID,
-    displayName: 'Example',
-    ownedIncusConfigKeyPrefixes: ['example.'],
-    ownedIncusDeviceNamePrefixes: ['ext'],
-    errorFormatter: () => undefined,
-    admitCreate: async (ctx) => {
-      const deviceKey = deviceKeyFrom(ctx.payload);
-      if (!ctx.enabled) return { state: {} };
-      await ctx.claims.replace(deviceKey ? [deviceKey] : []);
-      return { state: deviceKey ? { deviceKey } : { assigned: false } };
-    },
-    mutateContainer: async (ctx) => {
-      const deviceKey = deviceKeyFrom(ctx.payload);
-      await ctx.claims.replace(deviceKey ? [deviceKey] : []);
-      return {
-        state: deviceKey ? { deviceKey } : {},
-        requestSummary: { deviceKey: deviceKey ?? null },
-      };
-    },
-    requiresStop: () => false,
-    contributeInstanceSpec: () => ({ config: {}, devices: {} }),
-    contributePreflight: async () => ({ evidence: {}, health: {} }),
-    probeSupport: async () => ({ supported: true, checks: [] }),
-    refreshHealth: async () => undefined,
-    parseGrantPayload: (payload) => payload,
-    effectiveGrantDevices: () => [],
-    listDevices: async () => ({ items: [] }),
-    assertCanDisable: async () => undefined,
-    purgeServer: async () => undefined,
-  };
-}
-
-function extensionHarness(
+function gpuHarness(
   database: Kysely<NyabaseDatabase>,
   options: GrantOptions,
 ) {
-  const claims = new ExtensionDeviceClaimsRepository(database);
-  const registry = new ServerCardExtensionRegistry(
-    [claimingExtension()],
-    CORE_NODE_METRIC_CATALOG,
-  );
-  return containerService(database, options, undefined, { registry, claims });
+  return containerService(database, options, undefined, new GpuClaimsRepository(database));
 }
 
-async function enableStubExtension(
+async function enableGpu(
   database: Kysely<NyabaseDatabase>,
   fixture: Fixture,
 ): Promise<void> {
-  await database.insertInto('infra.server_extensions').values({
-    server_id: fixture.serverId,
-    extension_id: STUB_EXTENSION_ID,
-    enabled: true,
-    health: {},
-    enabled_by: fixture.userId,
-  }).execute();
-}
-
-function occupancyBlocked(error: unknown): boolean {
-  let current: unknown = error;
-  const visited = new Set<unknown>();
-  while (current && typeof current === 'object' && !visited.has(current)) {
-    visited.add(current);
-    const record = current as { code?: unknown; hint?: unknown; cause?: unknown };
-    if (record.code === 'P0001' && String(record.hint ?? '') === FailureCode.ExtensionOccupied) {
-      return true;
-    }
-    current = record.cause;
-  }
-  return false;
+  await database.updateTable('infra.servers')
+    .set({ gpu_enabled: true, gpu_enabled_by: fixture.userId })
+    .where('id', '=', fixture.serverId)
+    .execute();
 }
 
 function grant(options: GrantOptions): {
@@ -599,14 +546,14 @@ function grant(options: GrantOptions): {
   cpuMillis: number;
   memBytes: number;
   diskBytes: number | null;
-  extensionGrants: Record<string, unknown>;
+  gpuPciAddresses: string[];
 } {
   return {
     accessPhase: 'live',
     cpuMillis: 10_000,
     memBytes: 10_000,
     diskBytes: options.diskBytes,
-    extensionGrants: {},
+    gpuPciAddresses: options.gpuPciAddresses ?? [],
   };
 }
 
@@ -622,7 +569,6 @@ function request(
     rootSizeBytes: 100,
     cpuMillis: 500,
     memBytes: 500,
-    extensions: {},
     powerIntent: ContainerPowerIntent.Stopped,
     ...overrides,
   };

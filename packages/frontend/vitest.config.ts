@@ -5,8 +5,6 @@ export default defineConfig({
   resolve: {
     alias: {
       '@nyabase/common': path.resolve(__dirname, '../common/src/index.ts'),
-      '@nyabase/nvidia-gpu': path.resolve(__dirname, '../../extensions/nvidia-gpu/src/index.ts'),
-      '@nyabase/nvidia-gpu-web': path.resolve(__dirname, '../../extensions/nvidia-gpu/src/web/index.ts'),
       '@': path.resolve(__dirname, './src'),
     },
     extensionAlias: {

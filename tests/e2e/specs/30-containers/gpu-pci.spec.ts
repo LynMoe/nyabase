@@ -19,11 +19,9 @@ import { waitForGone } from '../../support/wait-for-gone.js';
 
 type JsonRecord = Record<string, any>;
 
-const NVIDIA_GPU = 'nvidia-gpu';
 
 function nvidiaState(container: JsonRecord): JsonRecord {
-  const bag = (container.extensions ?? {}) as JsonRecord;
-  return (bag[NVIDIA_GPU] ?? {}) as JsonRecord;
+  return (container.gpu ?? {}) as JsonRecord;
 }
 
 function claimedPci(container: JsonRecord): string[] {
@@ -72,12 +70,12 @@ test(
     const pci = gpuServer.pciAddress;
 
     await expectJson(
-      await adminApi.put(`/api/admin/servers/${gpuServer.id}/extensions/${NVIDIA_GPU}`, {
+      await adminApi.patch(`/api/admin/servers/${gpuServer.id}/gpu`, {
         data: { enabled: true },
       }),
     );
     const devices = await expectJson<{ items?: JsonRecord[]; enabled?: boolean }>(
-      await adminApi.get(`/api/admin/servers/${gpuServer.id}/extensions/${NVIDIA_GPU}/devices`),
+      await adminApi.get(`/api/admin/servers/${gpuServer.id}/gpus`),
     );
     const items = devices.items ?? [];
     expect(
@@ -99,7 +97,7 @@ test(
             rootSizeBytes: 2 * 1024 * 1024 * 1024,
             cpuMillis: 500,
             memBytes: 512 * 1024 * 1024,
-            extensions: { [NVIDIA_GPU]: { pciAddresses: [pci] } },
+            gpuPciAddresses: [pci],
             powerIntent: 'running',
           },
         }),
@@ -129,13 +127,13 @@ test(
           rootSizeBytes: 2 * 1024 * 1024 * 1024,
           cpuMillis: 500,
           memBytes: 512 * 1024 * 1024,
-          extensions: { [NVIDIA_GPU]: { pciAddresses: [pci] } },
+          gpuPciAddresses: [pci],
           powerIntent: 'stopped',
         },
       });
       expect(collision.status()).toBe(409);
       const collisionBody = await collision.json() as JsonRecord;
-      expect(errorCode(collisionBody)).toBe('EXTENSION_DEVICE_CLAIMED');
+      expect(errorCode(collisionBody)).toBe('GPU_DEVICE_CLAIMED');
 
       const session = await loginPersona(adminApi, persona);
       const userApi = await authedApiFactory(session.accessToken);
@@ -155,7 +153,7 @@ test(
             rootSizeBytes: 2 * 1024 * 1024 * 1024,
             cpuMillis: 500,
             memBytes: 512 * 1024 * 1024,
-            extensions: { [NVIDIA_GPU]: { pciAddresses: [pci] } },
+            gpuPciAddresses: [pci],
             powerIntent: 'stopped',
           },
         }),
@@ -169,7 +167,7 @@ test(
             cpuMillis: 1_000,
             memBytes: 1_024 * 1_024 * 1_024,
             diskBytes: 8 * 1_024 * 1_024 * 1_024,
-            extensionGrants: { [NVIDIA_GPU]: { pciAddresses: [pci] } },
+            gpuPciAddresses: [pci],
             expiresAt: null,
           },
         },
@@ -189,7 +187,7 @@ test(
             rootSizeBytes: 2 * 1024 * 1024 * 1024,
             cpuMillis: 500,
             memBytes: 512 * 1024 * 1024,
-            extensions: { [NVIDIA_GPU]: { pciAddresses: [pci] } },
+            gpuPciAddresses: [pci],
             powerIntent: 'stopped',
           },
         }),

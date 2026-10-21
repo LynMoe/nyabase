@@ -18,7 +18,7 @@ export interface ServerGrantInput {
   cpuMillis: number | null;
   memBytes: number | null;
   diskBytes: number | null;
-  extensionGrants?: Record<string, unknown>;
+  gpuPciAddresses?: string[];
   expiresAt?: string | null;
 }
 
@@ -68,7 +68,7 @@ export async function upsertServerGrant(
         cpuMillis: grant.cpuMillis,
         memBytes: grant.memBytes,
         diskBytes: grant.diskBytes,
-        extensionGrants: grant.extensionGrants ?? {},
+        gpuPciAddresses: grant.gpuPciAddresses ?? [],
         expiresAt: grant.expiresAt === undefined ? null : grant.expiresAt,
       },
     }),
@@ -228,7 +228,8 @@ export async function createUserContainer(
     rootSizeBytes?: number;
     powerIntent?: 'running' | 'stopped';
     serverId?: string;
-    extensions?: Record<string, unknown>;
+    /** Omit unless the server has GPU enabled; `[]` opens the NVIDIA runtime without a card. */
+    gpuPciAddresses?: string[];
     volumes?: Array<{ volumeId: string; containerPath: string; readOnly: boolean }>;
   } = {},
 ): Promise<{ containerId: string; intentId: string }> {
@@ -241,7 +242,7 @@ export async function createUserContainer(
         rootSizeBytes: options.rootSizeBytes ?? 2 * 1024 * 1024 * 1024,
         cpuMillis: options.cpuMillis ?? 500,
         memBytes: options.memBytes ?? 512 * 1024 * 1024,
-        extensions: options.extensions ?? {},
+        ...(options.gpuPciAddresses ? { gpuPciAddresses: options.gpuPciAddresses } : {}),
         powerIntent: options.powerIntent ?? 'running',
         ...(options.volumes ? { volumes: options.volumes } : {}),
       },

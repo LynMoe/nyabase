@@ -1,0 +1,232 @@
+import {
+  Inject,
+  Injectable,
+  NotFoundException,
+  Optional,
+  forwardRef,
+} from '@nestjs/common';
+import {
+  AuditAction,
+  Capability,
+  FailureCode,
+  zPatchServerGpuRequest,
+  type GpuDevicesResponseDto,
+  type GpuGrant,
+  type GpuHealthDto,
+  type GpuSupportDto,
+  type NodeMetricSample,
+  type ServerGpuDto,
+} from '@nyabase/common';
+import type { Kysely } from 'kysely';
+import type { NyabaseDatabase } from '../persistence-pg/database.types.js';
+import { PG_DATABASE } from '../persistence-pg/tokens.js';
+import { PgTransactionManager } from '../persistence-pg/transaction.js';
+import { AccessResolverService } from '../access/access-resolver.service.js';
+import { AuditService } from '../audit/audit.service.js';
+import {
+  INCUS_CLIENT_FACTORY,
+  type IncusClientFactory,
+} from '../runtime/reconcile-worker.service.js';
+import {
+  NODE_METRICS_PULL,
+  type NodeMetricsPullPort,
+} from '../runtime/server-preflight-reconciler.service.js';
+import { assertGpuCanDisable, gpuOccupiedError, isGpuOccupiedSqlError } from './enablement.js';
+import { GpuClaimsRepository } from './gpu-claims.repository.js';
+import { listGpuDevices } from './inventory.js';
+import { refreshGpuHealth } from './preflight.js';
+import { probeGpuSupport } from './support.js';
+
+const FAILED_HOST_PROBE: GpuSupportDto = {
+  supported: null,
+  checks: [{
+    id: 'probe',
+    label: '模块自检',
+    status: 'unknown',
+    detail: '自检失败',
+  }],
+};
+
+@Injectable()
+export class GpuService {
+  constructor(
+    @Inject(PG_DATABASE) private readonly database: Kysely<NyabaseDatabase>,
+    private readonly transactions: PgTransactionManager,
+    private readonly claims: GpuClaimsRepository,
+    private readonly access: AccessResolverService,
+    private readonly audit: AuditService,
+    @Optional() @Inject(forwardRef(() => INCUS_CLIENT_FACTORY)) private readonly clients?: IncusClientFactory,
+    @Optional() @Inject(forwardRef(() => NODE_METRICS_PULL)) private readonly nodeMetrics?: NodeMetricsPullPort,
+  ) {}
+
+  /** Admin view: switch, operational health, claim count, and host prerequisites. */
+  async getServerGpu(serverId: string): Promise<ServerGpuDto> {
+    const server = await this.requireServer(serverId);
+    const { resources, metricSamples } = await this.loadInventory(serverId);
+    const occupiedDeviceCount = await this.claims.countForServer(serverId);
+    return {
+      enabled: server.gpu_enabled === true,
+      health: server.gpu_health as GpuHealthDto,
+      occupiedDeviceCount,
+      support: this.probeSupportSafe(resources, metricSamples),
+    };
+  }
+
+  async setEnabled(actorId: string, serverId: string, body: unknown): Promise<ServerGpuDto> {
+    const input = zPatchServerGpuRequest.parse(body);
+    await this.requireServer(serverId);
+    if (input.enabled) {
+      await this.transactions.run(async (transaction) => {
+        await this.access.assertActorCapabilitiesInTransaction(transaction, actorId, [
+          Capability.ManageServers,
+        ]);
+        await transaction
+          .updateTable('infra.servers')
+          .set({ gpu_enabled: true, gpu_enabled_by: actorId })
+          .where('id', '=', serverId)
+          .execute();
+        await this.audit.append(
+          transaction,
+          actorId,
+          AuditAction.UpdateServerGpu,
+          serverId,
+          'server',
+          { enabled: true },
+        );
+      });
+      const { resources, metricSamples } = await this.loadInventory(serverId);
+      await refreshGpuHealth({
+        health: this.claims.health(serverId),
+        resources,
+        metricSamples,
+      });
+    } else {
+      try {
+        await this.transactions.run(async (transaction) => {
+          await this.access.assertActorCapabilitiesInTransaction(transaction, actorId, [
+            Capability.ManageServers,
+          ]);
+          await assertGpuCanDisable({
+            count: () => this.claims.countForServer(serverId, transaction),
+          });
+          await transaction
+            .updateTable('infra.servers')
+            .set({ gpu_enabled: false })
+            .where('id', '=', serverId)
+            .execute();
+          await this.audit.append(
+            transaction,
+            actorId,
+            AuditAction.UpdateServerGpu,
+            serverId,
+            'server',
+            { enabled: false },
+          );
+        });
+      } catch (error) {
+        if (isGpuOccupiedSqlError(error)) throw gpuOccupiedError();
+        throw error;
+      }
+    }
+    return this.getServerGpu(serverId);
+  }
+
+  async listDevicesForAdmin(serverId: string): Promise<GpuDevicesResponseDto> {
+    const server = await this.requireServer(serverId);
+    const { resources, metricSamples } = await this.loadInventory(serverId);
+    return {
+      items: listGpuDevices({ resources, metricSamples, grant: null, admin: true }),
+      enabled: server.gpu_enabled === true,
+    };
+  }
+
+  /** Devices the caller's server grant allows; unavailable while GPU is disabled. */
+  async listDevicesForUser(userId: string, serverId: string): Promise<GpuDevicesResponseDto> {
+    const grant = await this.access.resolveServer(userId, serverId);
+    if (!grant || grant.accessPhase !== 'live') {
+      throw new NotFoundException('Server not found');
+    }
+    if (!(await this.claims.isEnabled(serverId))) {
+      throw new NotFoundException({
+        code: FailureCode.GpuNotEnabled,
+        message: 'GPU is not enabled on this server',
+      });
+    }
+    const { resources, metricSamples } = await this.loadInventory(serverId);
+    const allowed: GpuGrant = { pciAddresses: grant.gpuPciAddresses };
+    return {
+      items: listGpuDevices({ resources, metricSamples, grant: allowed, admin: false }),
+      enabled: true,
+    };
+  }
+
+  async refreshHealth(
+    serverId: string,
+    resources: unknown,
+    metricSamples: readonly NodeMetricSample[],
+  ): Promise<void> {
+    await refreshGpuHealth({
+      health: this.claims.health(serverId),
+      resources,
+      metricSamples,
+    });
+  }
+
+  private probeSupportSafe(
+    resources: unknown,
+    metricSamples: readonly NodeMetricSample[],
+  ): GpuSupportDto {
+    try {
+      return probeGpuSupport({ resources, metricSamples });
+    } catch {
+      return FAILED_HOST_PROBE;
+    }
+  }
+
+  private async requireServer(serverId: string) {
+    const row = await this.database
+      .selectFrom('infra.servers')
+      .select(['id', 'gpu_enabled', 'gpu_health'])
+      .where('id', '=', serverId)
+      .executeTakeFirst();
+    if (!row) throw new NotFoundException('Server not found');
+    return row;
+  }
+
+  private async loadInventory(serverId: string): Promise<{
+    resources: unknown;
+    metricSamples: readonly NodeMetricSample[];
+  }> {
+    let resources: unknown = null;
+    if (this.clients) {
+      try {
+        resources = (await this.clients.get(serverId).then((client) => client.getResources())).metadata;
+      } catch {
+        resources = null;
+      }
+    }
+    const server = await this.database
+      .selectFrom('infra.servers')
+      .select(['node_metrics_endpoint', 'node_metrics_token_ciphertext'])
+      .where('id', '=', serverId)
+      .executeTakeFirst();
+    let metricSamples: NodeMetricSample[] = [];
+    if (
+      this.nodeMetrics
+      && server?.node_metrics_endpoint
+      && server.node_metrics_token_ciphertext
+    ) {
+      try {
+        const pulled = await this.nodeMetrics.pull(
+          serverId,
+          server.node_metrics_endpoint,
+          server.node_metrics_token_ciphertext,
+        );
+        metricSamples = [...(pulled.report?.samples ?? [])];
+      } catch {
+        metricSamples = [];
+      }
+    }
+    return { resources, metricSamples };
+  }
+}

@@ -40,15 +40,15 @@ describe('formatGrantQuotaParts', () => {
 });
 
 describe('formatGrantQuotaLine', () => {
-  it('defaults extension chips to an empty list', () => {
+  it('omits the GPU summary by default', () => {
     expect(formatGrantQuotaLine({ cpuMillis: 2000, memBytes: 2 * GIB, diskBytes: 100 * GIB }))
       .toBe('2 核 / 2 GiB / 100 GiB');
   });
 
-  it('appends caller-supplied extension chips', () => {
+  it('appends the GPU summary', () => {
     expect(formatGrantQuotaLine(
       { cpuMillis: 2000, memBytes: 2 * GIB, diskBytes: 100 * GIB },
-      ['2 张 GPU'],
+      '2 张 GPU',
     )).toBe('2 核 / 2 GiB / 100 GiB / 2 张 GPU');
   });
 });

@@ -23,8 +23,11 @@ export const queryKeys = {
     user: ['servers', 'user'] as const,
     detail: (serverId: string) => ['server', serverId] as const,
     pools: (serverId: string, admin: boolean) => ['storage-pools', admin ? 'admin' : 'user', serverId] as const,
-    extensions: (serverId: string) => ['server-extensions', 'admin', serverId] as const,
     preflight: (serverId: string) => ['server-preflight', serverId] as const,
+  },
+  gpu: {
+    devices: (serverId: string, admin: boolean) => ['gpu-devices', admin ? 'admin' : 'user', serverId] as const,
+    server: (serverId: string) => ['server-gpu', 'admin', serverId] as const,
   },
   images: {
     admin: ['images', 'admin'] as const,

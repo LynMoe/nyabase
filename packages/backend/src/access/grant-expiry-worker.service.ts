@@ -38,7 +38,7 @@ interface CoveringGrantRow {
   cpu_millis: number | null;
   mem_bytes: string | null;
   disk_bytes: string | null;
-  extension_grants: unknown;
+  gpu_pci_addresses: string[];
 }
 
 interface ExpiryPair {
@@ -218,7 +218,7 @@ export class GrantExpiryWorkerService implements OnModuleInit, OnModuleDestroy {
         direct_grant.cpu_millis,
         direct_grant.mem_bytes,
         direct_grant.disk_bytes,
-        direct_grant.extension_grants
+        direct_grant.gpu_pci_addresses
       FROM iam.server_grants AS direct_grant
       WHERE direct_grant.user_id IS NOT NULL
       UNION ALL
@@ -232,7 +232,7 @@ export class GrantExpiryWorkerService implements OnModuleInit, OnModuleDestroy {
         inherited_grant.cpu_millis,
         inherited_grant.mem_bytes,
         inherited_grant.disk_bytes,
-        inherited_grant.extension_grants
+        inherited_grant.gpu_pci_addresses
       FROM iam.group_members AS membership
       INNER JOIN iam.groups AS inherited_group
         ON inherited_group.id = membership.group_id

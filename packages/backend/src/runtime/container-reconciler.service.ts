@@ -26,10 +26,20 @@ import {
   type DesiredInstanceSpec,
   type InstanceSpecAttachmentInput,
 } from '../incus/instance-spec.js';
-import { FailureCode, isPackageHttpError } from '@nyabase/common';
-import { asJsonObject } from '../server-card-extensions/json.js';
-import { ServerCardExtensionRegistry } from '../server-card-extensions/registry.js';
-import { ExtensionDeviceClaimsRepository } from '../server-card-extensions/claims.repository.js';
+import { FailureCode } from '@nyabase/common';
+import {
+  GPU_CONFIG_PREFIXES,
+  GPU_DEVICE_PREFIXES,
+  gpuInstanceSpec,
+  gpuRequiresStop,
+} from '../gpu/instance-spec.js';
+
+/** Managed Incus fields: core plus the NVIDIA GPU config and device prefixes. */
+const MANAGED_FIELD_OWNERSHIP: ManagedFieldOwnership = {
+  configPrefixes: [...CORE_MANAGED_FIELD_OWNERSHIP.configPrefixes, ...GPU_CONFIG_PREFIXES],
+  deviceNames: CORE_MANAGED_FIELD_OWNERSHIP.deviceNames,
+  devicePrefixes: [...CORE_MANAGED_FIELD_OWNERSHIP.devicePrefixes, ...GPU_DEVICE_PREFIXES],
+};
 import {
   CONTAINER_SSH_STATE,
   IncusContainerSshStateAdapter,
@@ -67,7 +77,8 @@ interface ContainerRow {
   root_size_bytes: string | number;
   cpu_millis: number;
   mem_bytes: string | number;
-  extensions: unknown;
+  gpu_enabled: boolean;
+  gpu_state: unknown;
   nesting: boolean;
   syscall_intercept: boolean;
   power_intent: 'running' | 'stopped';
@@ -273,14 +284,12 @@ export class ContainerReconciler implements ManagedReconciler {
     @Optional() @Inject(CONTAINER_SSH_STATE) sshState?: ContainerSshStatePort,
     @Optional() private readonly proxySnapshots?: ProxySnapshotNotifierService,
     @Optional() private readonly audit?: AuditService,
-    @Optional() private readonly extensions?: ServerCardExtensionRegistry,
-    @Optional() private readonly extensionClaims?: ExtensionDeviceClaimsRepository,
   ) {
     this.sshState = sshState ?? new IncusContainerSshStateAdapter();
   }
 
   private ownership(): ManagedFieldOwnership {
-    return this.extensions?.managedFieldOwnership() ?? CORE_MANAGED_FIELD_OWNERSHIP;
+    return MANAGED_FIELD_OWNERSHIP;
   }
 
   private async desiredSpec(
@@ -307,33 +316,8 @@ export class ContainerReconciler implements ManagedReconciler {
       },
       attachments,
     });
-    const bag = asJsonObject(row.extensions);
-    const contributions = [];
-    for (const ext of this.extensions?.all() ?? []) {
-      const enabled = this.extensionClaims
-        ? await this.extensionClaims.isEnabled(row.server_id, ext.id)
-        : false;
-      if (!enabled) continue;
-      if (bag[ext.id] !== undefined && (typeof bag[ext.id] !== 'object' || bag[ext.id] === null)) {
-        this.logger.warn(`Ignoring unknown extension state shape for ${ext.id} on ${row.id}`);
-        continue;
-      }
-      try {
-        contributions.push(ext.contributeInstanceSpec({
-          containerId: row.id,
-          serverId: row.server_id,
-          state: bag[ext.id],
-        }));
-      } catch (error) {
-        if (isPackageHttpError(error)) throw error;
-        throw error;
-      }
-    }
-    for (const key of Object.keys(bag)) {
-      if (!this.extensions?.get(key)) {
-        this.logger.warn(`Ignoring unknown extension key ${key} on container ${row.id}`);
-      }
-    }
+    // GPU contributes only while the server has it enabled.
+    const contributions = row.gpu_enabled ? [gpuInstanceSpec(row.gpu_state)] : [];
     return mergeInstanceSpecContributions(base, contributions);
   }
 
@@ -412,30 +396,19 @@ export class ContainerReconciler implements ManagedReconciler {
       );
       desiredAttachments = beforePut.desired;
     }
-    let desired: DesiredInstanceSpec;
-    try {
-      desired = await this.desiredSpec(
-        row,
-        desiredAttachments.map<InstanceSpecAttachmentInput>((attachment) => ({
-          id: attachment.id,
-          containerPath: attachment.container_path,
-          readOnly: attachment.read_only,
-          volume: {
-            id: attachment.volume_id,
-            incusName: attachment.incus_name,
-            poolName: attachment.pool_name,
-          },
-        })),
-      );
-    } catch (error) {
-      if (isPackageHttpError(error)) {
-        return {
-          outcome: 'failed',
-          failure: failure(error.code, error.message, error.details),
-        };
-      }
-      throw error;
-    }
+    const desired = await this.desiredSpec(
+      row,
+      desiredAttachments.map<InstanceSpecAttachmentInput>((attachment) => ({
+        id: attachment.id,
+        containerPath: attachment.container_path,
+        readOnly: attachment.read_only,
+        volume: {
+          id: attachment.volume_id,
+          incusName: attachment.incus_name,
+          poolName: attachment.pool_name,
+        },
+      })),
+    );
     const expectedName = deriveInstanceName(row.id);
     let actual = await this.findExpectedOrIdentity(context.client, expectedName, row);
     if (shouldDelete) {
@@ -541,12 +514,12 @@ export class ContainerReconciler implements ManagedReconciler {
       }
     }
     if (!diff.empty) {
-      if (running(state) && this.extensions?.requiresStop(diff)) {
+      if (running(state) && gpuRequiresStop(diff)) {
         return {
           outcome: 'failed',
           failure: failure(
-            FailureCode.ExtensionMutationRequiresStop,
-            'Extension assignment changes require a stopped instance',
+            FailureCode.GpuMutationRequiresStop,
+            'GPU assignment changes require a stopped instance',
           ),
         };
       }
@@ -844,7 +817,8 @@ export class ContainerReconciler implements ManagedReconciler {
         'c.root_size_bytes as root_size_bytes',
         'c.cpu_millis as cpu_millis',
         'c.mem_bytes as mem_bytes',
-        'c.extensions as extensions',
+        'c.gpu_state as gpu_state',
+        's.gpu_enabled as gpu_enabled',
         'c.nesting as nesting',
         'c.syscall_intercept as syscall_intercept',
         'c.power_intent as power_intent',

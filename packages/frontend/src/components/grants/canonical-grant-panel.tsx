@@ -2,6 +2,7 @@ import { useState, type ReactNode } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Plus } from 'lucide-react';
 import {
+  formatGpuGrantSummary,
   type EffectiveAccessDto,
   type GrantExpiryPhase,
   type GroupDto,
@@ -41,8 +42,7 @@ import {
   TableHeader,
   TableRow,
 } from '../ui/table.js';
-import { formatExtensionGrantSummaries } from '../../extensions/registry.js';
-import { ExtensionSlots } from '../../extensions/slots.js';
+import { ServerGrantGpu } from '../gpu/gpu-sections.js';
 import { ResourceRef } from '../refs/resource-ref.js';
 import { truncateId } from '../refs/truncate-id.js';
 
@@ -183,7 +183,7 @@ export function CanonicalGrantPanel({ subject, kind }: { subject: Subject; kind:
             <TableBody>
               {serverGrants.map((grant) => {
                 const server = servers.find((item) => item.id === grant.serverId);
-                const quotaLine = formatGrantQuotaLine(grant, formatExtensionGrantSummaries(grant.extensionGrants));
+                const quotaLine = formatGrantQuotaLine(grant, formatGpuGrantSummary(grant.gpuPciAddresses));
                 const phase = expiryPhase(
                   grant.expiresAt,
                   effectiveAccessQuery.data?.servers.find((item) => item.serverId === grant.serverId)?.accessPhase,
@@ -624,7 +624,7 @@ function ServerGrantDialog({
   const [cpuCores, setCpuCores] = useState(() => grant?.cpuMillis == null ? '' : formatVcpuInput(grant.cpuMillis));
   const [memGib, setMemGib] = useState(() => grant?.memBytes == null ? '' : formatGibInput(grant.memBytes));
   const [diskGib, setDiskGib] = useState(() => grant?.diskBytes == null ? '' : formatGibInput(grant.diskBytes));
-  const [extensionGrants, setExtensionGrants] = useState<Record<string, unknown>>(() => ({ ...(grant?.extensionGrants ?? {}) }));
+  const [gpuPciAddresses, setGpuPciAddresses] = useState<string[]>(() => [...(grant?.gpuPciAddresses ?? [])]);
   const [expiresAt, setExpiresAt] = useState(() => initialExpiry(grant?.expiresAt));
   const idPrefix = grant ? `grant-${grant.serverId}` : 'grant';
 
@@ -643,12 +643,12 @@ function ServerGrantDialog({
           empty: '没有可添加的服务器。',
           ...choice,
         }}
-      onTargetChange={() => setExtensionGrants({})}
+      onTargetChange={() => setGpuPciAddresses([])}
       save={(serverId) => api.put<ServerGrantDto>(`${prefix}/server-grants/${serverId}`, {
         cpuMillis: coresToMillis(cpuCores),
         memBytes: gibToBytes(memGib),
         diskBytes: gibToBytes(diskGib),
-        extensionGrants,
+        gpuPciAddresses,
         expiresAt: isoOrNull(expiresAt),
       })}
       onSaved={onSaved}
@@ -662,14 +662,11 @@ function ServerGrantDialog({
             <NumberField id={`${idPrefix}-disk`} label="磁盘（GiB，留空为不限，不含共享卷）" value={diskGib} onChange={setDiskGib} hint={gibHint(diskGib)} />
           </div>
           {serverId ? (
-            <ExtensionSlots
-              area="grant.server"
-              ctx={{
-                serverId,
-                enabledExtensions: servers.find((server) => server.id === serverId)?.enabledExtensions ?? [],
-                value: extensionGrants,
-                onChange: setExtensionGrants,
-              }}
+            <ServerGrantGpu
+              serverId={serverId}
+              gpuEnabled={servers.find((server) => server.id === serverId)?.gpuEnabled === true}
+              value={gpuPciAddresses}
+              onChange={setGpuPciAddresses}
             />
           ) : null}
           <GrantExpiryInput id={`${idPrefix}-expires-at`} value={expiresAt} onChange={setExpiresAt} />

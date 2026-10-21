@@ -27,7 +27,6 @@ test(
             rootSizeBytes: 4 * 1024 * 1024 * 1024,
             cpuMillis: 500,
             memBytes: 512 * 1024 * 1024,
-            extensions: {},
             powerIntent: 'running',
           },
         }),
@@ -87,7 +86,7 @@ test(
         500,
       );
       expect(container.imageFingerprint).toBe(seedState.image.fingerprint);
-      expect(container.extensions ?? {}).toEqual({});
+      expect(container.gpu ?? null).toBeNull();
       expect(container.ssh?.ready).toBe(true);
       expect(container.ssh?.status).toBe('running');
 
@@ -152,7 +151,7 @@ test(
 );
 
 test(
-  'rejects NVIDIA GPU assignment when the server extension is not enabled',
+  'rejects NVIDIA GPU assignment when GPU is not enabled on the server',
   { ...coverageCase('container-gpu-absent-reject', 'container-gpu-absent-reject-live') },
   async ({ adminApi, seedState }) => {
     const servers = await expectJson<JsonRecord[]>(
@@ -168,13 +167,13 @@ test(
         rootSizeBytes: 4 * 1024 * 1024 * 1024,
         cpuMillis: 500,
         memBytes: 512 * 1024 * 1024,
-        extensions: { 'nvidia-gpu': { pciAddresses: ['0000:00:00.0'] } },
+        gpuPciAddresses: ['0000:00:00.0'],
         powerIntent: 'running',
       },
     });
     expect(response.status()).toBe(409);
     const body = await response.json() as JsonRecord;
     const code = body.code ?? body.message?.code;
-    expect(code).toBe('EXTENSION_NOT_ENABLED');
+    expect(code).toBe('GPU_NOT_ENABLED');
   },
 );

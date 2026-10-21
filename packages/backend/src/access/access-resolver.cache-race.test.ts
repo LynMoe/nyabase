@@ -89,7 +89,7 @@ describe('AccessResolverService cache invalidation fences', () => {
               cpu_millis: 1,
               mem_bytes: '2',
               disk_bytes: '3',
-              extension_grants: {},
+              gpu_pci_addresses: [],
               expires_at: null,
               id: 'grant-1',
               priority: null,

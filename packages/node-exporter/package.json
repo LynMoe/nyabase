@@ -19,8 +19,7 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "@nyabase/common": "workspace:*",
-    "@nyabase/nvidia-gpu": "workspace:*"
+    "@nyabase/common": "workspace:*"
   },
   "devDependencies": {
     "@types/node": "^22.15.3",

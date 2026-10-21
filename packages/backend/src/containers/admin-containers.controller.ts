@@ -92,15 +92,14 @@ export class AdminContainersController {
     );
   }
 
-  @Patch(':containerId/extensions/:extensionId')
+  @Patch(':containerId/gpus')
   @HttpCode(HttpStatus.ACCEPTED)
-  extension(
+  gpus(
     @Param('containerId') id: string,
-    @Param('extensionId') extensionId: string,
     @CurrentUser() user: UserRecord,
     @Body() body: unknown,
   ) {
-    return this.containers.mutateExtensionForAdmin(id, user.id, extensionId, body);
+    return this.containers.mutateGpusForAdmin(id, user.id, body);
   }
 
   @Get(':containerId/volumes')

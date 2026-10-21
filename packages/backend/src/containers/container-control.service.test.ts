@@ -58,7 +58,7 @@ function makeHarness() {
       cpuMillis: 2_000,
       memBytes: 4_000_000_000,
       diskBytes: 8_000_000_000,
-      extensionGrants: {},
+      gpuPciAddresses: [],
     }),
     assertActorCapabilitiesInTransaction: vi.fn(),
   };

@@ -1,5 +1,6 @@
 import { BadRequestException, Inject, Injectable, Logger, NotFoundException } from '@nestjs/common';
 import {
+  canonicalPciAddress,
   type PerformanceAdminUsageResponse,
   type PerformanceMetric,
   type PerformanceRange,
@@ -8,7 +9,6 @@ import {
   type PerformanceSeriesResponse,
   type PerformanceUsageResponse,
 } from '@nyabase/common';
-import { NVIDIA_GPU_EXTENSION_ID, canonicalPciAddress } from '@nyabase/nvidia-gpu';
 import type { Kysely } from 'kysely';
 import { NyabaseConfigService } from '../config/nyabase-config.service.js';
 import type { NyabaseDatabase } from '../persistence-pg/database.types.js';
@@ -468,9 +468,8 @@ export class PerformanceQueryService {
     const [users, claims, attachments] = await Promise.all([
       this.database.selectFrom('iam.users').select(['id', 'username', 'display_name']).where('id', 'in', ownerIds).execute(),
       this.database
-        .selectFrom('control.extension_device_claims')
-        .select(['container_id', 'device_key'])
-        .where('extension_id', '=', NVIDIA_GPU_EXTENSION_ID)
+        .selectFrom('control.container_gpu_claims')
+        .select(['container_id', 'pci_address'])
         .where('container_id', 'in', containerIds)
         .execute(),
       this.database
@@ -488,7 +487,7 @@ export class PerformanceQueryService {
     const userById = new Map(users.map((user) => [user.id, user]));
     const pciByContainer = new Map<string, string[]>();
     for (const claim of claims) {
-      const pci = canonicalPciAddress(claim.device_key);
+      const pci = canonicalPciAddress(claim.pci_address);
       if (!pci) continue;
       const list = pciByContainer.get(claim.container_id) ?? [];
       list.push(pci);

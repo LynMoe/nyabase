@@ -35,13 +35,10 @@ describe('container API contract', () => {
       rootSizeBytes: 1_073_741_824,
       cpuMillis: 500,
       memBytes: 536_870_912,
-      extensions: {},
+      gpuPciAddresses: [],
       powerIntent: ContainerPowerIntent.Stopped,
     };
-    expect(zCreateContainerRequest.parse(valid)).toMatchObject({
-      ...valid,
-      extensions: {},
-    });
+    expect(zCreateContainerRequest.parse(valid)).toMatchObject(valid);
     const legacyTaskField = ['task', 'Id'].join('');
     const legacyMountField = ['m', 'ounts'].join('');
     expect(zCreateContainerRequest.safeParse({
@@ -85,7 +82,7 @@ describe('container API contract', () => {
       delete: ':containerId/actions/delete',
       limits: ':containerId/limits',
       rootSize: ':containerId/root-size',
-      extension: ':containerId/extensions/:extensionId',
+      gpus: ':containerId/gpus',
       volumes: ':containerId/volumes',
       sharedVolumes: ':containerId/shared-volumes',
       stats: ':containerId/stats',
@@ -123,8 +120,8 @@ describe('container API contract', () => {
 
     const error: ErrorResponse = {
       statusCode: 409,
-      code: FailureCode.ExtensionMutationRequiresStop,
-      message: 'The container must be stopped before changing extension devices.',
+      code: FailureCode.GpuMutationRequiresStop,
+      message: 'The container must be stopped before changing GPU assignment.',
       requestId: 'request-1',
       details: { containerId: 'container-1' },
     };

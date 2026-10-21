@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import type {
   ContainerDto,
-  OpaqueExtensionMap,
+  GpuGrant,
   PatchContainerLimitsRequest,
   StoragePoolCapabilityDto,
 } from '@nyabase/common';
@@ -16,33 +16,33 @@ import {
   shrinkNeverTooltip,
   validateShrinkFloor,
 } from '../../lib/storage-shrink.js';
-import { ExtensionSlots } from '../../extensions/slots.js';
+import { ContainerSpecGpu } from '../gpu/gpu-sections.js';
 import { toast } from '../../hooks/use-toast.js';
 
 export function LimitsDialog({
   container,
   admin,
-  enabledExtensions,
-  grant,
+  gpuEnabled,
+  gpuGrant,
   pending,
-  extensionPending,
+  gpuPending,
   onLimits,
-  onExtensionSubmit,
+  onGpuSubmit,
   onOpenChange,
 }: {
   container: ContainerDto;
   admin: boolean;
-  enabledExtensions: string[];
-  grant: OpaqueExtensionMap | null;
+  gpuEnabled: boolean;
+  gpuGrant: GpuGrant | null;
   pending: boolean;
-  extensionPending: boolean;
+  gpuPending: boolean;
   onLimits: (body: PatchContainerLimitsRequest) => Promise<unknown>;
-  onExtensionSubmit: (extensionId: string, payload: unknown) => Promise<unknown>;
+  onGpuSubmit: (pciAddresses: string[]) => Promise<unknown>;
   onOpenChange: (open: boolean) => void;
 }) {
   const [cpuVcpus, setCpuVcpus] = useState(formatVcpuInput(container.cpuMillis));
   const [memGib, setMemGib] = useState(formatGibInput(container.memBytes));
-  const [extensions, setExtensions] = useState<OpaqueExtensionMap>(container.extensions ?? {});
+  const [gpuSelection, setGpuSelection] = useState<string[]>(container.gpu?.pciAddresses ?? []);
   const cpuMillis = Number.isFinite(Number(cpuVcpus)) ? vcpuToMillis(Number(cpuVcpus)) : NaN;
   const memBytes = Number.isFinite(Number(memGib)) ? gibToBytes(Number(memGib)) : NaN;
 
@@ -76,20 +76,16 @@ export function LimitsDialog({
             {pending ? '提交中...' : '应用 CPU / 内存'}
           </Button>
         </div>
-        <ExtensionSlots
-          area="container.spec"
-          ctx={{
-            containerId: container.id,
-            serverId: container.serverId,
-            enabledExtensions,
-            admin,
-            observedStatus: container.actual.status,
-            grant,
-            value: extensions,
-            onChange: setExtensions,
-            onSubmit: (extensionId, payload) => { void onExtensionSubmit(extensionId, payload); },
-            pending: extensionPending,
-          }}
+        <ContainerSpecGpu
+          serverId={container.serverId}
+          gpuEnabled={gpuEnabled}
+          admin={admin}
+          observedStatus={container.actual.status}
+          grant={gpuGrant}
+          value={gpuSelection}
+          onChange={setGpuSelection}
+          onSubmit={(pciAddresses) => { void onGpuSubmit(pciAddresses); }}
+          pending={gpuPending}
         />
         <DialogFooter>
           <Button variant="outline" onClick={() => onOpenChange(false)}>关闭</Button>

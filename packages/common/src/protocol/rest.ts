@@ -22,7 +22,7 @@ import type {
   NodeMetricsHealth,
   PreflightReport,
 } from './rest-schema.js';
-import type { OpaqueExtensionMap } from './server-card-extensions.js';
+import type { GpuContainerState, GpuHealthDto } from '../gpu/dto.js';
 import type { ConfigSourceName, ConfigValueKind } from '../config/definition.js';
 
 export type {
@@ -51,7 +51,6 @@ export type {
   NodeMetricsCreateConfig,
   NodeMetricsPatchConfig,
   PatchAdminGroupRequest,
-  PatchContainerExtensionRequest,
   PatchContainerLimitsRequest,
   PatchContainerRootSizeRequest,
   PatchImageRequest,
@@ -62,7 +61,6 @@ export type {
   PatchStoragePoolRequest,
   DiscoverSharedExecutorsRequest,
   PatchSystemSettingsRequest,
-  PatchServerExtensionRequest,
   PatchVolumeRequest,
   PreflightReport,
   PutImageAssignmentRequest,
@@ -288,8 +286,8 @@ export interface ServerDto {
   storageOvercommitRatio: number;
   parentInterface: string;
   dnsServers: string[];
-  enabledExtensions: string[];
-  extensionHealth: Record<string, OpaqueExtensionMap>;
+  gpuEnabled: boolean;
+  gpuHealth: GpuHealthDto;
   status: ServerStatus;
   lastSeenAt: string | null;
   lastError: string | null;
@@ -309,7 +307,7 @@ export interface UserServerDto {
   status: ServerStatus;
   lastSeenAt: string | null;
   preflightStatus: PreflightStatus;
-  enabledExtensions: string[];
+  gpuEnabled: boolean;
 }
 
 export interface ServerConnectionDto {
@@ -626,7 +624,8 @@ export interface ServerGrantDto {
   cpuMillis: number | null;
   memBytes: number | null;
   diskBytes: number | null;
-  extensionGrants: OpaqueExtensionMap;
+  /** PCI addresses the grant allows; empty means no GPU access. */
+  gpuPciAddresses: string[];
   expiresAt: string | null;
   createdAt: string;
   updatedAt: string;
@@ -660,7 +659,8 @@ export interface EffectiveServerAccessDto {
   cpuMillis: number | null;
   memBytes: number | null;
   diskBytes: number | null;
-  extensionGrants: OpaqueExtensionMap;
+  /** PCI addresses the grant allows; empty means no GPU access. */
+  gpuPciAddresses: string[];
   expiresAt: string | null;
   purgeAt: string | null;
   accessPhase: 'live' | 'grace';
@@ -737,7 +737,8 @@ export interface ContainerDto {
   rootCapability: StoragePoolCapabilityDto;
   cpuMillis: number;
   memBytes: number;
-  extensions: OpaqueExtensionMap;
+  /** NVIDIA runtime and assigned cards; null when GPU was never configured. */
+  gpu: GpuContainerState | null;
   powerIntent: ContainerPowerIntent;
   lifecyclePhase: ContainerPhase;
   routedIp: string | null;

@@ -12,9 +12,9 @@ import {
   NODE_METRICS_FRESHNESS_MS,
   NODE_METRICS_SCRAPE_INTERVAL_MS,
   NodeMetricsStatus,
+  canonicalPciAddress,
   type NodeMetricSample,
 } from '@nyabase/common';
-import { NVIDIA_GPU_EXTENSION_ID, canonicalPciAddress } from '@nyabase/nvidia-gpu';
 import { sql, type Kysely, type RawBuilder } from 'kysely';
 import type { NyabaseDatabase } from '../persistence-pg/database.types.js';
 import { PG_DATABASE } from '../persistence-pg/tokens.js';
@@ -379,14 +379,13 @@ export class NodeMetricsScrapeService implements OnModuleInit, OnModuleDestroy {
 
   private async loadGpuClaims(serverId: string): Promise<Map<string, string[]>> {
     const rows = await this.database
-      .selectFrom('control.extension_device_claims')
-      .select(['container_id', 'device_key'])
+      .selectFrom('control.container_gpu_claims')
+      .select(['container_id', 'pci_address'])
       .where('server_id', '=', serverId)
-      .where('extension_id', '=', NVIDIA_GPU_EXTENSION_ID)
       .execute();
     const claims = new Map<string, string[]>();
     for (const row of rows) {
-      const pci = typeof row.device_key === 'string' ? canonicalPciAddress(row.device_key) : null;
+      const pci = typeof row.pci_address === 'string' ? canonicalPciAddress(row.pci_address) : null;
       if (!pci || typeof row.container_id !== 'string') continue;
       const list = claims.get(row.container_id) ?? [];
       list.push(pci);

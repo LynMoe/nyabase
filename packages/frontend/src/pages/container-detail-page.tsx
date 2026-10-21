@@ -172,9 +172,10 @@ function ContainerDetailContent({
     enabled: !admin && Boolean(containerQuery.data?.serverId),
   });
   const c = containerQuery.data;
-  const extensionGrant = admin
+  const gpuPciAddresses = admin
     ? null
-    : accessQuery.data?.servers.find((row) => row.serverId === c?.serverId)?.extensionGrants ?? null;
+    : accessQuery.data?.servers.find((row) => row.serverId === c?.serverId)?.gpuPciAddresses ?? null;
+  const gpuGrant = gpuPciAddresses ? { pciAddresses: gpuPciAddresses } : null;
 
   const selectTab = (next: DetailTab) => {
     void navigate({ search: (prev) => ({ ...prev, tab: next }), replace: true });
@@ -206,11 +207,11 @@ function ContainerDetailContent({
     errorTitle: '系统盘调整失败',
     onSuccess: invalidate,
   });
-  const updateExtension = useActionMutation({
-    mutationFn: ({ extensionId, payload }: { extensionId: string; payload: unknown }) =>
-      api.patch<IntentAcceptedDto>(`${base}/extensions/${extensionId}`, payload),
-    successTitle: '已提交扩展更新，正在生效',
-    errorTitle: '扩展更新失败',
+  const updateGpus = useActionMutation({
+    mutationFn: (pciAddresses: string[]) =>
+      api.patch<IntentAcceptedDto>(`${base}/gpus`, { pciAddresses }),
+    successTitle: '已提交 GPU 更新，正在生效',
+    errorTitle: 'GPU 更新失败',
     onSuccess: invalidate,
   });
   const attachLocal = useActionMutation({
@@ -388,14 +389,14 @@ function ContainerDetailContent({
                 <OverviewPanel
                   container={container}
                   admin={admin}
-                  enabledExtensions={serverQuery.data?.enabledExtensions ?? []}
-                  grant={extensionGrant}
+                  gpuEnabled={serverQuery.data?.gpuEnabled ?? false}
+                  gpuGrant={gpuGrant}
                   onRepairSsh={() => repairSsh.mutate()}
                   repairPending={repairSsh.isPending}
                   onLimits={(body) => updateLimits.mutateAsync(body)}
                   limitsPending={updateLimits.isPending}
-                  onExtensionSubmit={(extensionId, payload) => updateExtension.mutateAsync({ extensionId, payload })}
-                  extensionPending={updateExtension.isPending}
+                  onGpuSubmit={(pciAddresses) => updateGpus.mutateAsync(pciAddresses)}
+                  gpuPending={updateGpus.isPending}
                   occupancy={occupancyQuery.data}
                   occupancyDenied={admin && !canViewMetrics}
                 />

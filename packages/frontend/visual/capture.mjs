@@ -72,8 +72,8 @@ const server = {
   storageOvercommitRatio: 1,
   parentInterface: 'vmbr0',
   dnsServers: ['1.1.1.1'],
-  enabledExtensions: ['nvidia-gpu'],
-  extensionHealth: { 'nvidia-gpu': { runtimeReady: true } },
+  gpuEnabled: true,
+  gpuHealth: { runtimeReady: true },
   status: 'online',
   lastSeenAt: ISO,
   lastError: null,
@@ -98,7 +98,7 @@ const userServer = {
   status: server.status,
   lastSeenAt: server.lastSeenAt,
   preflightStatus: server.preflightStatus,
-  enabledExtensions: server.enabledExtensions,
+  gpuEnabled: server.gpuEnabled,
 };
 
 const pool = {
@@ -141,7 +141,7 @@ const container = {
   rootCapability: capability,
   cpuMillis: 2000,
   memBytes: 4 * 1024 ** 3,
-  extensions: {},
+  gpu: null,
   powerIntent: 'running',
   lifecyclePhase: 'active',
   routedIp: '10.20.0.15',
@@ -370,19 +370,15 @@ function mockApi(urlString, method) {
       report: { controlReady: true, checks: { incus: 'pass', bridge: 'pass' }, failureCode: null },
     });
   }
-  if (p === '/admin/servers/srv-1/extensions') {
-    return json([{
-      extensionId: 'nvidia-gpu',
-      displayName: 'NVIDIA GPU',
+  if (p === '/admin/servers/srv-1/gpu') {
+    return json({
       enabled: true,
       health: { runtimeReady: true },
       occupiedDeviceCount: 0,
-    }]);
+      support: { supported: true, checks: [] },
+    });
   }
-  if (
-    p === '/admin/servers/srv-1/extensions/nvidia-gpu/devices'
-    || p === '/servers/srv-1/extensions/nvidia-gpu/devices'
-  ) {
+  if (p === '/admin/servers/srv-1/gpus' || p === '/servers/srv-1/gpus') {
     return json({ items: [{ pciAddress: '0000:01:00.0', index: 0, model: 'RTX 4090' }], enabled: true });
   }
 
@@ -545,7 +541,7 @@ function mockApi(urlString, method) {
         cpuMillis: 4000,
         memBytes: 8 * 1024 ** 3,
         diskBytes: 200 * 1024 ** 3,
-        extensionGrants: { 'nvidia-gpu': { pciAddresses: ['0000:01:00.0'] } },
+        gpuPciAddresses: ['0000:01:00.0'],
         expiresAt: null,
         purgeAt: null,
         accessPhase: 'live',

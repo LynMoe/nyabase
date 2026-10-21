@@ -1,0 +1,78 @@
+import { describe, expect, it } from 'vitest';
+import { NVIDIA_GPU_SMI_INDEX_METRIC } from '@nyabase/common';
+
+import {
+  applyNvidiaSmiIndexes,
+  filterGpuInventoryByGrant,
+  gpuInventoryFromResources,
+  nvidiaSmiIndexByPciFromSamples,
+} from './inventory.js';
+
+describe('gpuInventoryFromResources', () => {
+  it('lists only nvidia cards and normalizes PCI addresses without inventing an index', () => {
+    expect(gpuInventoryFromResources({
+      gpu: {
+        cards: [
+          { pci_address: '0000:01:00.0', product: 'AST', vendor: 'ASPEED' },
+          {
+            pci_address: '00000000:41:00.0',
+            product: 'GA102',
+            nvidia: { model: 'NVIDIA RTX 3090' },
+          },
+          {
+            pci_address: '0000:a1:00.0',
+            product: 'GA104',
+            nvidia: { brand: 'GeForce' },
+          },
+        ],
+      },
+    })).toEqual([
+      { pciAddress: '00000000:41:00.0', model: 'NVIDIA RTX 3090' },
+      { pciAddress: '00000000:a1:00.0', model: 'GA104' },
+    ]);
+  });
+
+  it('returns empty for unknown resources', () => {
+    expect(gpuInventoryFromResources(undefined)).toEqual([]);
+    expect(gpuInventoryFromResources('nope')).toEqual([]);
+    expect(gpuInventoryFromResources({})).toEqual([]);
+  });
+});
+
+describe('nvidia-smi index join', () => {
+  it('joins Incus PCI inventory to nvidia-smi indexes and leaves gaps as null', () => {
+    const cards = gpuInventoryFromResources({
+      gpu: {
+        cards: [
+          { pci_address: '0000:41:00.0', nvidia: { model: 'A' } },
+          { pci_address: '0000:a1:00.0', nvidia: { model: 'B' } },
+        ],
+      },
+    });
+    const samples = nvidiaSmiIndexByPciFromSamples([
+      {
+        name: NVIDIA_GPU_SMI_INDEX_METRIC,
+        labels: { gpu_pci: '0000:a1:00.0' },
+        value: 0,
+      },
+    ]);
+    expect(applyNvidiaSmiIndexes(cards, samples)).toEqual([
+      { pciAddress: '00000000:41:00.0', model: 'A', index: null },
+      { pciAddress: '00000000:a1:00.0', model: 'B', index: 0 },
+    ]);
+  });
+});
+
+describe('filterGpuInventoryByGrant', () => {
+  const items = [
+    { index: 3, pciAddress: '00000000:41:00.0', model: 'A' },
+    { index: 0, pciAddress: '00000000:a1:00.0', model: 'B' },
+  ];
+
+  it('returns empty for an empty list and preserves nvidia-smi indices for granted cards', () => {
+    expect(filterGpuInventoryByGrant(items, { pciAddresses: [] })).toEqual([]);
+    expect(filterGpuInventoryByGrant(items, {
+      pciAddresses: ['0000:a1:00.0'],
+    })).toEqual([{ index: 0, pciAddress: '00000000:a1:00.0', model: 'B' }]);
+  });
+});

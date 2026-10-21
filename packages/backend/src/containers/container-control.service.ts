@@ -20,6 +20,7 @@ import {
   IntentKind,
   IntentResourceType,
   StoragePoolResizeFamily,
+  parseContainerState,
   type ContainerDto,
   type AttachVolumeRequest,
   type CreateContainerRequest,
@@ -52,10 +53,8 @@ import {
   storagePoolCapability,
 } from '../storage-pools/storage-pools.service.js';
 import { VolumesService } from '../volumes/volumes.service.js';
-import { ExtensionDeviceClaimsRepository } from '../server-card-extensions/claims.repository.js';
-import { asJsonObject } from '../server-card-extensions/json.js';
-import { ServerCardExtensionRegistry } from '../server-card-extensions/registry.js';
-import type { ExtensionGrantView } from '../server-card-extensions/types.js';
+import { admitGpuCreate, mutateGpuContainer } from '../gpu/admit.js';
+import { GpuClaimsRepository } from '../gpu/gpu-claims.repository.js';
 
 type ContainerAction = 'start' | 'stop' | 'restart' | 'delete';
 
@@ -178,11 +177,11 @@ function isUniqueViolation(error: unknown, constraint?: string): boolean {
   return false;
 }
 
-function extensionDeviceClaimed(deviceKey?: string): ConflictException {
+function gpuDeviceClaimed(pciAddress?: string): ConflictException {
   return new ConflictException({
-    code: FailureCode.ExtensionDeviceClaimed,
-    message: 'A requested extension device is already claimed',
-    details: deviceKey ? { deviceKey } : {},
+    code: FailureCode.GpuDeviceClaimed,
+    message: 'A requested GPU is already claimed',
+    details: pciAddress ? { pciAddress } : {},
   });
 }
 
@@ -224,8 +223,7 @@ export class ContainerControlService {
     private readonly config: NyabaseConfigService,
     private readonly sshConvergence: ContainerSshConvergenceService,
     @Optional() private readonly volumes?: VolumesService,
-    @Optional() private readonly extensions?: ServerCardExtensionRegistry,
-    @Optional() private readonly extensionClaims?: ExtensionDeviceClaimsRepository,
+    @Optional() private readonly gpuClaims?: GpuClaimsRepository,
   ) {}
 
   async list(userId: string, filters: { serverId?: string } = {}): Promise<ContainerDto[]> {
@@ -261,16 +259,6 @@ export class ContainerControlService {
     assertContainerName(request.name);
     assertCreateNumbers(request);
     const ownerId = userId;
-    const requestedExtensions = request.extensions ?? {};
-    for (const extensionId of Object.keys(requestedExtensions)) {
-      if (!this.extensions?.get(extensionId)) {
-        throw new BadRequestException({
-          code: FailureCode.ExtensionUnknown,
-          message: 'Unknown server-card extension',
-          details: { extensionId },
-        });
-      }
-    }
     const id = randomUUID();
     const result = await this.transactions.run(async (transaction) => {
       const server = await transaction.selectFrom('infra.servers')
@@ -468,54 +456,36 @@ export class ContainerControlService {
         rootSizeBytes: request.rootSizeBytes,
         cpuMillis: request.cpuMillis,
         memBytes: request.memBytes,
-        extensions: {},
         powerIntent: request.powerIntent,
         networkKey,
         address,
       }, transaction);
-      const extensionBag: Record<string, unknown> = {};
-      const grantView: ExtensionGrantView = {
-        extensionGrants: access?.grant.extensionGrants ?? null,
-      };
-      for (const ext of this.extensions?.all() ?? []) {
-        const enabled = this.extensionClaims
-          ? await this.extensionClaims.isEnabled(request.serverId, ext.id, transaction)
-          : false;
-        const payload = requestedExtensions[ext.id];
-        if (!enabled && payload !== undefined) {
-          throw new ConflictException({
-            code: FailureCode.ExtensionNotEnabled,
-            message: 'The server extension is not enabled',
-            details: { extensionId: ext.id },
-          });
-        }
-        try {
-          const { state } = await ext.admitCreate({
-            serverId: request.serverId,
-            actor: { userId, admin: false },
-            grant: grantView,
-            claims: this.extensionClaims
-              ? this.extensionClaims.for(ext.id, request.serverId, id, transaction)
-              : {
-                replace: async () => undefined,
-                listOccupiedKeys: async () => [],
-                count: async () => 0,
-              },
-            health: this.extensionClaims
-              ? this.extensionClaims.health(request.serverId, ext.id, transaction)
-              : { read: async () => ({}), write: async () => undefined },
-            containerId: id,
-            payload,
-            enabled,
-          });
-          if (Object.keys(state).length > 0) extensionBag[ext.id] = state;
-        } catch (error) {
-          if (isUniqueViolation(error, 'extension_device_claims')) throw extensionDeviceClaimed();
-          throw error;
-        }
-      }
-      if (Object.keys(extensionBag).length > 0) {
-        row = await this.repository.setExtensions(row.id, extensionBag, transaction);
+      const gpuEnabled = this.gpuClaims
+        ? await this.gpuClaims.isEnabled(request.serverId, transaction)
+        : false;
+      try {
+        const { state } = await admitGpuCreate({
+          serverId: request.serverId,
+          actor: { userId, admin: false },
+          grantPciAddresses: access?.grant.gpuPciAddresses ?? [],
+          claims: this.gpuClaims
+            ? this.gpuClaims.forContainer(request.serverId, id, transaction)
+            : {
+              replace: async () => undefined,
+              listOccupied: async () => [],
+              count: async () => 0,
+            },
+          health: this.gpuClaims
+            ? this.gpuClaims.health(request.serverId, transaction)
+            : { read: async () => ({}), write: async () => undefined },
+          containerId: id,
+          requestedPciAddresses: request.gpuPciAddresses,
+          enabled: gpuEnabled,
+        });
+        if (state) row = await this.repository.setGpuState(row.id, state, transaction);
+      } catch (error) {
+        if (isUniqueViolation(error, 'container_gpu_claims')) throw gpuDeviceClaimed();
+        throw error;
       }
       if (request.volumes && request.volumes.length > 0) {
         if (!this.volumes) {
@@ -748,39 +718,28 @@ export class ContainerControlService {
     );
   }
 
-  async mutateExtensionForUser(
+  async mutateGpusForUser(
     containerId: string,
     actorId: string,
-    extensionId: string,
     payload: unknown,
   ): Promise<IntentAcceptedDto> {
-    return this.mutateExtensionInternal(containerId, actorId, extensionId, payload, false);
+    return this.mutateGpusInternal(containerId, actorId, payload, false);
   }
 
-  async mutateExtensionForAdmin(
+  async mutateGpusForAdmin(
     containerId: string,
     actorId: string,
-    extensionId: string,
     payload: unknown,
   ): Promise<IntentAcceptedDto> {
-    return this.mutateExtensionInternal(containerId, actorId, extensionId, payload, true);
+    return this.mutateGpusInternal(containerId, actorId, payload, true);
   }
 
-  private async mutateExtensionInternal(
+  private async mutateGpusInternal(
     containerId: string,
     actorId: string,
-    extensionId: string,
     payload: unknown,
     admin: boolean,
   ): Promise<IntentAcceptedDto> {
-    const ext = this.extensions?.get(extensionId);
-    if (!ext) {
-      throw new NotFoundException({
-        code: FailureCode.ExtensionUnknown,
-        message: 'Unknown server-card extension',
-        details: { extensionId },
-      });
-    }
     return this.transactions.run(async (transaction) => {
       const current = await this.repository.lock(containerId, transaction);
       if (!current || (!admin && current.owner_id !== actorId)) throw new NotFoundException('Container not found');
@@ -797,14 +756,13 @@ export class ContainerControlService {
           [Capability.ManageContainersAny],
         );
       }
-      const enabled = this.extensionClaims
-        ? await this.extensionClaims.isEnabled(current.server_id, extensionId, transaction)
+      const enabled = this.gpuClaims
+        ? await this.gpuClaims.isEnabled(current.server_id, transaction)
         : false;
       if (!enabled) {
         throw new ConflictException({
-          code: FailureCode.ExtensionNotEnabled,
-          message: 'The server extension is not enabled',
-          details: { extensionId },
+          code: FailureCode.GpuNotEnabled,
+          message: 'GPU is not enabled on this server',
         });
       }
       const route = await this.repository.currentRoute(containerId, transaction);
@@ -812,48 +770,42 @@ export class ContainerControlService {
         route?.instance_status,
         current.power_intent as ContainerPowerIntent,
       );
-      let grantView: ExtensionGrantView = { extensionGrants: null };
+      let grantPciAddresses: readonly string[] = [];
       if (!admin) {
         const grant = await this.access.resolveServerInTransaction(transaction, actorId, current.server_id);
         if (!grant || grant.accessPhase !== 'live') throw new ForbiddenException('Server access was revoked');
-        grantView = { extensionGrants: grant.extensionGrants };
+        grantPciAddresses = grant.gpuPciAddresses;
       }
-      const currentExtensions = asJsonObject(current.extensions);
       let mutated;
       try {
-        mutated = await ext.mutateContainer({
+        mutated = await mutateGpuContainer({
           serverId: current.server_id,
           actor: { userId: actorId, admin },
-          grant: grantView,
-          claims: this.extensionClaims
-            ? this.extensionClaims.for(extensionId, current.server_id, containerId, transaction)
+          grantPciAddresses,
+          claims: this.gpuClaims
+            ? this.gpuClaims.forContainer(current.server_id, containerId, transaction)
             : {
               replace: async () => undefined,
-              listOccupiedKeys: async () => [],
+              listOccupied: async () => [],
               count: async () => 0,
             },
-          health: this.extensionClaims
-            ? this.extensionClaims.health(current.server_id, extensionId, transaction)
+          health: this.gpuClaims
+            ? this.gpuClaims.health(current.server_id, transaction)
             : { read: async () => ({}), write: async () => undefined },
           containerId,
-          lifecyclePhase: current.lifecycle_phase,
-          powerIntent: current.power_intent,
           observedStatus: observedStatus === 'creating' ? 'unknown' : observedStatus,
-          currentExtensions,
+          currentState: current.gpu_state,
           payload,
           enabled,
         });
       } catch (error) {
-        if (isUniqueViolation(error, 'extension_device_claims')) throw extensionDeviceClaimed();
+        if (isUniqueViolation(error, 'container_gpu_claims')) throw gpuDeviceClaimed();
         throw error;
       }
-      const nextBag = { ...currentExtensions };
-      if (Object.keys(mutated.state).length === 0) delete nextBag[extensionId];
-      else nextBag[extensionId] = mutated.state;
       const updated = await this.repository.updateDesired(
         containerId,
         current.generation,
-        { extensions: nextBag },
+        { gpu_state: mutated.state },
         transaction,
       );
       if (!updated) throw new ConflictException({ code: FailureCode.RevisionConflict });
@@ -869,10 +821,10 @@ export class ContainerControlService {
       await this.audit.append(
         transaction,
         actorId,
-        AuditAction.UpdateContainerExtension,
+        AuditAction.UpdateContainerGpu,
         containerId,
         'container',
-        { extensionId, ...mutated.requestSummary },
+        mutated.requestSummary,
       );
       return { intent, serverId: current.server_id };
     }, { isolationLevel: 'serializable', maxAttempts: 5 }).then((result) => {
@@ -1092,7 +1044,7 @@ export class ContainerControlService {
       );
       if (!updated) throw new ConflictException({ code: FailureCode.RevisionConflict });
       if (nextPhase === ContainerPhase.Deleting || nextPhase === ContainerPhase.Failed) {
-        await this.extensionClaims?.releaseContainerClaims(containerId, transaction);
+        await this.gpuClaims?.releaseContainerClaims(containerId, transaction);
       }
       const kind = action === 'delete'
         ? IntentKind.ContainerDelete
@@ -1174,7 +1126,7 @@ export class ContainerControlService {
       if (!updated) throw new ConflictException({ code: FailureCode.RevisionConflict });
       if (values.lifecycle_phase === ContainerPhase.Deleting
         || values.lifecycle_phase === ContainerPhase.Failed) {
-        await this.extensionClaims?.releaseContainerClaims(containerId, transaction);
+        await this.gpuClaims?.releaseContainerClaims(containerId, transaction);
       }
       const intent = await this.intents.createPending({
         kind: IntentKind.ContainerUpdate,
@@ -1417,7 +1369,7 @@ export class ContainerControlService {
           : missingStoragePoolCapability(),
         cpuMillis: row.cpu_millis,
         memBytes: numberValue(row.mem_bytes),
-        extensions: asJsonObject(row.extensions),
+        gpu: parseContainerState(row.gpu_state),
         powerIntent: row.power_intent as ContainerPowerIntent,
         lifecyclePhase: phase(row.lifecycle_phase),
         routedIp: route?.routedIp ?? null,

@@ -22,7 +22,7 @@ import { SelectField } from '../layout/select-field.js';
 import { toast } from '../../hooks/use-toast.js';
 import { gibToBytes, vcpuToMillis } from '../../lib/utils.js';
 import { formatConsumedQuotaParts } from '../../lib/grant-quota.js';
-import { ExtensionSlots } from '../../extensions/slots.js';
+import { ContainerCreateGpu } from '../gpu/gpu-sections.js';
 import { containerActionSubmittedTitle } from '../../lib/status-labels.js';
 import { cn } from '../../lib/utils.js';
 import { queryKeys } from '../../lib/query-keys.js';
@@ -83,7 +83,7 @@ export function CreateContainerDialog({
 }) {
   const queryClient = useQueryClient();
   const [form, setForm] = useState<FormState>(emptyForm);
-  const [extensions, setExtensions] = useState<Record<string, unknown>>({});
+  const [gpuPciAddresses, setGpuPciAddresses] = useState<string[] | undefined>(undefined);
   const [errors, setErrors] = useState<FieldErrors>({});
   const [submitError, setSubmitError] = useState<string | null>(null);
   const sshKeys = useMySshKeys(open);
@@ -120,12 +120,12 @@ export function CreateContainerDialog({
   useEffect(() => {
     if (!open) {
       setForm(emptyForm);
-      setExtensions({});
+      setGpuPciAddresses(undefined);
       setErrors({});
       setSubmitError(null);
     } else if (defaultServerId) {
       setForm((current) => ({ ...current, serverId: defaultServerId, imageId: '' }));
-      setExtensions({});
+      setGpuPciAddresses(undefined);
     }
   }, [defaultServerId, open]);
 
@@ -205,7 +205,7 @@ export function CreateContainerDialog({
       rootSizeBytes,
       cpuMillis,
       memBytes,
-      extensions,
+      gpuPciAddresses: selected?.gpuEnabled ? gpuPciAddresses : undefined,
       powerIntent: form.startAfterCreate ? ContainerPowerIntent.Running : ContainerPowerIntent.Stopped,
     });
     if (!parsed.success) {
@@ -259,7 +259,7 @@ export function CreateContainerDialog({
               onChange={(value) => {
                 update('serverId', value);
                 update('imageId', '');
-                setExtensions({});
+                setGpuPciAddresses(undefined);
               }}
               options={servers.map((server) => [server.id, server.name])}
               placeholder={serverPlaceholder}
@@ -318,15 +318,12 @@ export function CreateContainerDialog({
               />
             </p>
           ) : null}
-          <ExtensionSlots
-            area="container.create"
-            ctx={{
-              serverId: form.serverId,
-              enabledExtensions: selected?.enabledExtensions ?? [],
-              grant: selectedAccess?.extensionGrants ?? null,
-              value: extensions,
-              onChange: setExtensions,
-            }}
+          <ContainerCreateGpu
+            serverId={form.serverId}
+            gpuEnabled={selected?.gpuEnabled === true}
+            grantedAddresses={selectedAccess?.gpuPciAddresses ?? null}
+            value={gpuPciAddresses ?? []}
+            onChange={setGpuPciAddresses}
           />
           <FormField id="container-start" label="创建后立即启动" orientation="inline">
             <Checkbox

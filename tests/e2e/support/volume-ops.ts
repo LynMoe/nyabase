@@ -106,7 +106,7 @@ export async function createRunningContainer(
   namePrefix: string,
   serverId = seedState.server.id,
   options: {
-    extensions?: Record<string, unknown>;
+    gpuPciAddresses?: string[];
     volumes?: Array<{ volumeId: string; containerPath: string; readOnly: boolean }>;
     powerIntent?: 'running' | 'stopped';
   } = {},
@@ -114,7 +114,7 @@ export async function createRunningContainer(
   const created = await createUserContainer(api, seedState, {
     namePrefix,
     serverId,
-    extensions: options.extensions,
+    gpuPciAddresses: options.gpuPciAddresses,
     volumes: options.volumes,
     powerIntent: options.powerIntent ?? 'running',
   });

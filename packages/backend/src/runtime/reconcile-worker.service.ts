@@ -18,7 +18,7 @@ import {
   type IncusClientPort,
   type IncusFailureCode,
 } from '../incus/index.js';
-import { ServerCardExtensionsService } from '../server-card-extensions/server-extensions.service.js';
+import { GpuService } from '../gpu/gpu.service.js';
 import {
   IntentRepository,
   isRestartIntent,
@@ -383,8 +383,8 @@ export class ReconcileWorkerService implements OnModuleInit, OnModuleDestroy {
     private readonly wake?: ReconcileWakeService,
     @Optional() @Inject(PG_DATABASE)
     private readonly database?: Kysely<NyabaseDatabase>,
-    @Optional() @Inject(forwardRef(() => ServerCardExtensionsService))
-    private readonly serverExtensions?: ServerCardExtensionsService,
+    @Optional() @Inject(forwardRef(() => GpuService))
+    private readonly gpu?: GpuService,
   ) {}
 
   onModuleInit(): void {
@@ -1025,7 +1025,7 @@ export class ReconcileWorkerService implements OnModuleInit, OnModuleDestroy {
   ): Promise<void> {
     if (!this.database) return;
     const resources = await client.getResources({ signal });
-    await this.serverExtensions?.refreshExistingHealth(serverId, resources.metadata, []);
+    await this.gpu?.refreshHealth(serverId, resources.metadata, []);
 
     const pools = await this.database
       .selectFrom('infra.storage_pools')

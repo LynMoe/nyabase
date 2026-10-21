@@ -1,17 +1,17 @@
 import { useQueries, useQuery } from '@tanstack/react-query';
-import type {
-  ServerDto,
-  ServerGrantDto,
-  SharedBackendDto,
-  SharedBackendGrantDto,
-  StoragePoolDto,
-  StoragePoolGrantDto,
+import {
+  formatGpuGrantSummary,
+  type ServerDto,
+  type ServerGrantDto,
+  type SharedBackendDto,
+  type SharedBackendGrantDto,
+  type StoragePoolDto,
+  type StoragePoolGrantDto,
 } from '@nyabase/common';
 import { api } from '../../lib/api.js';
 import { Badge } from '../ui/badge.js';
 import { grantExpiryPhaseLabel } from '../../lib/display-labels.js';
 import { formatGrantBytes, formatGrantQuotaLine } from '../../lib/grant-quota.js';
-import { formatExtensionGrantSummaries } from '../../extensions/registry.js';
 import { queryKeys } from '../../lib/query-keys.js';
 
 type SubjectKind = 'users' | 'groups';
@@ -112,7 +112,7 @@ export function SubjectGrantSummary({
           const pool = pools.find((item) => item.id === grant.poolId);
           return pool?.serverId === row.serverId;
         });
-        const quota = formatGrantQuotaLine(row, formatExtensionGrantSummaries(row.extensionGrants));
+        const quota = formatGrantQuotaLine(row, formatGpuGrantSummary(row.gpuPciAddresses));
         return (
           <div key={row.id} className="space-y-0.5">
             <div className="flex flex-wrap items-center gap-1.5">

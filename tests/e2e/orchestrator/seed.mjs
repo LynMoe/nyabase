@@ -1404,8 +1404,8 @@ if (!alreadyRegistered) {
 const gpuPci = process.env.E2E_GPU_PCI_ADDRESS?.trim() ?? '';
 for (const extra of [{ id: server.id, role: undefined }, ...labServers]) {
   if (extra.role === 'gpu' && gpuPci) {
-    await jsonRequest(`/api/admin/servers/${extra.id}/extensions/nvidia-gpu`, {
-      method: 'PUT',
+    await jsonRequest(`/api/admin/servers/${extra.id}/gpu`, {
+      method: 'PATCH',
       token,
       body: { enabled: true },
     });
@@ -1417,9 +1417,7 @@ for (const extra of [{ id: server.id, role: undefined }, ...labServers]) {
       cpuMillis: 16_000,
       memBytes: 16 * 1024 * 1024 * 1024,
       diskBytes: 128 * 1024 * 1024 * 1024,
-      extensionGrants: extra.role === 'gpu' && gpuPci
-        ? { 'nvidia-gpu': { pciAddresses: [gpuPci] } }
-        : {},
+      gpuPciAddresses: extra.role === 'gpu' && gpuPci ? [gpuPci] : [],
       expiresAt: null,
     },
   });

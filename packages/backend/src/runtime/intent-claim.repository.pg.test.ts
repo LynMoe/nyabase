@@ -111,7 +111,7 @@ describePg('Incus reconciliation intent and lease repositories', () => {
           outcome: 'failed',
           placementServerId: serverId,
           failure: {
-            code: 'EXTENSION_MUTATION_REQUIRES_STOP',
+            code: 'GPU_MUTATION_REQUIRES_STOP',
             message: 'The instance must be stopped',
             details: { bounded: true },
           },
@@ -129,7 +129,7 @@ describePg('Incus reconciliation intent and lease repositories', () => {
       expect(rows.map((row) => row.status)).toEqual(['failed', 'failed', 'failed']);
       expect(rows[0]?.failure_code).toBe('INSTANCE_BUSY');
       expect(rows[1]?.failure_code).toBe('SUPERSEDED_BY_FAILED_GENERATION');
-      expect(rows[2]?.failure_code).toBe('EXTENSION_MUTATION_REQUIRES_STOP');
+      expect(rows[2]?.failure_code).toBe('GPU_MUTATION_REQUIRES_STOP');
     });
   });
 

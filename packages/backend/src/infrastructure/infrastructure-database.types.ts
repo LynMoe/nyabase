@@ -37,6 +37,13 @@ export interface InfrastructureServerTable {
   preflight_status: 'not_run' | 'running' | 'passed' | 'failed';
   preflight_checked_at: InfrastructureTimestamp | null;
   preflight_report: InfrastructureJson<Record<string, unknown>> | null;
+  gpu_enabled: ColumnType<boolean, boolean | undefined, boolean>;
+  gpu_enabled_by: string | null;
+  gpu_health: ColumnType<
+    Record<string, unknown>,
+    Record<string, unknown> | string | undefined,
+    Record<string, unknown> | string
+  >;
   created_at: InfrastructureGeneratedTimestamp;
   updated_at: InfrastructureGeneratedTimestamp;
 }
@@ -95,16 +102,6 @@ export interface InfrastructureSharedBackendTable {
   updated_at: InfrastructureGeneratedTimestamp;
 }
 
-export interface InfrastructureServerExtensionTable {
-  server_id: string;
-  extension_id: string;
-  enabled: boolean;
-  health: InfrastructureJson<Record<string, unknown>>;
-  enabled_by: string | null;
-  enabled_at: InfrastructureGeneratedTimestamp;
-  updated_at: InfrastructureGeneratedTimestamp;
-}
-
 export interface InfrastructureImageTable {
   id: string;
   alias: string;
@@ -139,7 +136,6 @@ export interface InfrastructureImageServerAssignmentTable {
 
 export interface InfrastructureDatabase {
   'infra.servers': InfrastructureServerTable;
-  'infra.server_extensions': InfrastructureServerExtensionTable;
   'infra.ip_pools': InfrastructureIpPoolTable;
   'infra.ip_pool_servers': InfrastructureIpPoolServerTable;
   'infra.storage_pools': InfrastructureStoragePoolTable;

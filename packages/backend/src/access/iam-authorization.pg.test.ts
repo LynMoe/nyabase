@@ -134,7 +134,7 @@ describePg('PostgreSQL canonical authorization', () => {
         cpuMillis: null,
         memBytes: null,
         diskBytes: 10,
-        extensionGrants: {},
+        gpuPciAddresses: [],
         expiresAt: null,
       };
 
@@ -233,7 +233,7 @@ function grant(input: {
     cpu_millis: null,
     mem_bytes: null,
     disk_bytes: input.disk_bytes,
-    extension_grants: {},
+    gpu_pci_addresses: [],
     expires_at: null,
   };
 }

@@ -33,7 +33,7 @@ test(
             cpuMillis: 500,
             memBytes: 512 * 1024 * 1024,
             diskBytes: 2 * 1024 * 1024 * 1024,
-            extensionGrants: {},
+            gpuPciAddresses: [],
             expiresAt,
           },
         }),

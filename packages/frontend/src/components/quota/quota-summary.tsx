@@ -1,5 +1,6 @@
 import { useQuery } from '@tanstack/react-query';
 import {
+  formatGpuGrantSummary,
   type ContainerDto,
   type EffectiveAccessDto,
   type EffectiveServerAccessDto,
@@ -21,7 +22,6 @@ import {
 } from '../ui/table.js';
 import { cn } from '../../lib/utils.js';
 import { formatQuotaDimension } from '../../lib/grant-quota.js';
-import { formatExtensionGrantSummaries } from '../../extensions/registry.js';
 import { queryKeys } from '../../lib/query-keys.js';
 import { queryPollInterval } from '../../lib/query-lifecycle.js';
 
@@ -106,7 +106,7 @@ function QuotaBody({
                 <TableHead>CPU</TableHead>
                 <TableHead>内存</TableHead>
                 <TableHead>磁盘</TableHead>
-                <TableHead>扩展</TableHead>
+                <TableHead>GPU</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
@@ -181,7 +181,7 @@ function ServerQuotaRow({
   const cpu = formatQuotaDimension(grant.cpuMillis, cpuUsed, 'cpu');
   const mem = formatQuotaDimension(grant.memBytes, memUsed, 'bytes');
   const disk = formatQuotaDimension(grant.diskBytes, diskUsed, 'bytes');
-  const extensions = formatExtensionGrantSummaries(grant.extensionGrants);
+  const gpu = formatGpuGrantSummary(grant.gpuPciAddresses);
   return (
     <TableRow>
       <TableCell className="font-medium">{name}</TableCell>
@@ -199,7 +199,7 @@ function ServerQuotaRow({
         )}
       </TableCell>
       <TableCell className="text-muted-foreground">
-        {extensions.length > 0 ? extensions.join('、') : '无'}
+        {gpu ?? '无'}
       </TableCell>
     </TableRow>
   );

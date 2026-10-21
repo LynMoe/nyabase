@@ -5,20 +5,19 @@ import {
   type TLSSocket,
 } from 'node:tls';
 import { request } from 'node:https';
-import { Inject, Injectable, Optional } from '@nestjs/common';
+import { Inject, Injectable } from '@nestjs/common';
 import {
-  CORE_NODE_METRIC_CATALOG,
   MAX_NODE_METRICS_BODY_BYTES,
   NODE_METRICS_CONNECT_TIMEOUT_MS,
   NODE_METRICS_ENDPOINT_PATH,
   NODE_METRICS_PARSE_TIMEOUT_MS,
   NODE_METRICS_REQUEST_TIMEOUT_MS,
   NODE_METRICS_RESPONSE_HEADER_TIMEOUT_MS,
+  NODE_METRIC_CATALOG,
   parseOpenMetrics,
   type NodeMetricCatalog,
   type NodeMetricSample,
 } from '@nyabase/common';
-import { NODE_METRIC_CATALOG } from '../server-card-extensions/types.js';
 import type { Kysely } from 'kysely';
 import type { NyabaseDatabase } from '../persistence-pg/database.types.js';
 import { PG_DATABASE } from '../persistence-pg/tokens.js';
@@ -56,12 +55,9 @@ export class AuthenticatedNodeMetricsPullAdapter implements NodeMetricsPullPort 
   constructor(
     @Inject(PG_DATABASE) private readonly database: Kysely<NyabaseDatabase>,
     private readonly config: NyabaseConfigService,
-    @Optional() @Inject(NODE_METRIC_CATALOG) catalog?: NodeMetricCatalog,
-  ) {
-    this.catalog = catalog ?? CORE_NODE_METRIC_CATALOG;
-  }
+  ) {}
 
-  private readonly catalog: NodeMetricCatalog;
+  private readonly catalog: NodeMetricCatalog = NODE_METRIC_CATALOG;
 
   async pull(
     serverId: string,

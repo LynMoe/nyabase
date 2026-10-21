@@ -341,7 +341,6 @@ describePg('storage pool registration and shared mapping', () => {
         cpu_millis: null,
         mem_bytes: null,
         disk_bytes: 0,
-        extension_grants: {},
         expires_at: null,
       }).execute();
       await database.insertInto('iam.storage_pool_grants').values({

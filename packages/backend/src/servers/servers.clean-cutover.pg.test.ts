@@ -366,7 +366,6 @@ describePg('clean Incus server contract', () => {
         root_size_pending_bytes: null,
         cpu_millis: 0,
         mem_bytes: 0,
-        extensions: {},
         nesting: true,
         syscall_intercept: true,
         power_intent: 'stopped',

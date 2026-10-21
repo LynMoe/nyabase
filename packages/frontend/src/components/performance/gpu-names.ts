@@ -1,6 +1,7 @@
 import { useQuery } from '@tanstack/react-query';
 import { Capability } from '@nyabase/common';
 import { api } from '../../lib/api.js';
+import { queryKeys } from '../../lib/query-keys.js';
 import { useAuthStore } from '../../store/auth.js';
 
 interface GpuDevice {
@@ -16,11 +17,11 @@ export function useGpuNames(serverId: string | undefined, admin: boolean): Reado
       || caps.includes(Capability.ManageGrants);
   });
   const query = useQuery({
-    queryKey: ['gpu-devices', privileged ? 'admin' : 'user', serverId ?? ''],
+    queryKey: queryKeys.gpu.devices(serverId ?? '', privileged),
     enabled: Boolean(serverId),
     staleTime: 60_000,
     queryFn: () => api.get<{ items: GpuDevice[] }>(
-      `${privileged ? '/admin' : ''}/servers/${serverId}/extensions/nvidia-gpu/devices`,
+      `${privileged ? '/admin' : ''}/servers/${serverId}/gpus`,
     ),
   });
   const names = new Map<string, string>();

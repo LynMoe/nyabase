@@ -16,16 +16,16 @@ const poolId = '33333333-3333-4333-8333-333333333333';
 const backendId = '44444444-4444-4444-8444-444444444444';
 
 describe('grant resource bounds', () => {
-  it('accepts opaque extension grants at the safe numeric limits', () => {
+  it('accepts GPU grants at the safe numeric limits', () => {
     expect(zPutServerGrantRequest.parse({
       cpuMillis: MAX_RESOURCE_CPU_MILLIS,
       memBytes: MAX_RESOURCE_BYTES,
       diskBytes: MAX_RESOURCE_BYTES,
-      extensionGrants: {},
+      gpuPciAddresses: [],
       expiresAt: null,
     })).toMatchObject({
       cpuMillis: MAX_RESOURCE_CPU_MILLIS,
-      extensionGrants: {},
+      gpuPciAddresses: [],
     });
   });
 

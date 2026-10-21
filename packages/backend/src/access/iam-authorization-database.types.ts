@@ -11,7 +11,6 @@ type IamNullableTimestamp = ColumnType<
   Date | string | null | undefined,
   Date | string | null
 >;
-type IamJson<T> = ColumnType<T, T | string, T | string>;
 
 export interface IamServerGrantTable {
   id: string;
@@ -21,7 +20,7 @@ export interface IamServerGrantTable {
   cpu_millis: number | null;
   mem_bytes: IamBigInt | null;
   disk_bytes: IamBigInt | null;
-  extension_grants: IamJson<Record<string, unknown>>;
+  gpu_pci_addresses: ColumnType<string[], string[] | undefined, string[]>;
   expires_at: IamNullableTimestamp;
   created_at: IamGeneratedTimestamp;
   updated_at: IamGeneratedTimestamp;

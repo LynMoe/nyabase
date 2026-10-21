@@ -1,5 +1,4 @@
 import {
-  BadRequestException,
   ConflictException,
   ForbiddenException,
   Inject,
@@ -31,9 +30,7 @@ import {
 } from '../access/access-resolver.service.js';
 import { AccessRevocationGuardService } from '../access/access-revocation-guard.service.js';
 import { AuditService } from '../audit/audit.service.js';
-import { ExtensionDeviceClaimsRepository } from '../server-card-extensions/claims.repository.js';
-import { asJsonObject } from '../server-card-extensions/json.js';
-import { ServerCardExtensionRegistry } from '../server-card-extensions/registry.js';
+import { GpuClaimsRepository } from '../gpu/gpu-claims.repository.js';
 import { isLocalPoolRow } from '../storage-pools/storage-pools.service.js';
 
 type GrantScope = 'user' | 'group';
@@ -73,7 +70,7 @@ interface ServerGrantInput {
   cpuMillis: number | null;
   memBytes: number | null;
   diskBytes: number | null;
-  extensionGrants: Record<string, unknown>;
+  gpuPciAddresses: string[];
   expiresAt: string | null;
 }
 
@@ -85,8 +82,7 @@ export class GroupsService {
     private readonly access: AccessResolverService,
     private readonly audit: AuditService,
     private readonly revocation: AccessRevocationGuardService,
-    @Optional() private readonly extensions?: ServerCardExtensionRegistry,
-    @Optional() private readonly extensionClaims?: ExtensionDeviceClaimsRepository,
+    @Optional() private readonly gpuClaims?: GpuClaimsRepository,
   ) {}
 
   async findAll(): Promise<GroupDto[]> {
@@ -679,33 +675,24 @@ export class GroupsService {
         .where('id', '=', serverId)
         .executeTakeFirst();
       if (!server) throw new NotFoundException('Server not found');
-      const parsedGrants: Record<string, unknown> = {};
-      for (const [extensionId, payload] of Object.entries(input.extensionGrants ?? {})) {
-        const ext = this.extensions?.get(extensionId);
-        if (!ext) {
-          throw new BadRequestException({
-            code: FailureCode.ExtensionUnknown,
-            message: 'Unknown server-card extension',
-            details: { extensionId },
-          });
-        }
-        const enabled = this.extensionClaims
-          ? await this.extensionClaims.isEnabled(serverId, extensionId, transaction)
+      const gpuPciAddresses = input.gpuPciAddresses ?? [];
+      if (gpuPciAddresses.length > 0) {
+        const enabled = this.gpuClaims
+          ? await this.gpuClaims.isEnabled(serverId, transaction)
           : false;
         if (!enabled) {
           throw new ConflictException({
-            code: FailureCode.ExtensionGrantNotApplicable,
-            message: 'The server extension is not enabled',
-            details: { extensionId, serverId },
+            code: FailureCode.GpuGrantNotApplicable,
+            message: 'GPU is not enabled on this server',
+            details: { serverId },
           });
         }
-        parsedGrants[extensionId] = ext.parseGrantPayload(payload);
       }
       const values = {
         cpu_millis: input.cpuMillis,
         mem_bytes: input.memBytes,
         disk_bytes: input.diskBytes,
-        extension_grants: parsedGrants,
+        gpu_pci_addresses: gpuPciAddresses,
         expires_at: input.expiresAt,
         updated_at: new Date(),
       };
@@ -801,7 +788,7 @@ export class GroupsService {
     cpu_millis: number | null;
     mem_bytes: string | number | null;
     disk_bytes: string | number | null;
-    extension_grants: unknown;
+    gpu_pci_addresses: string[];
     expires_at: Date | string | null;
     created_at: Date;
     updated_at: Date;
@@ -814,7 +801,7 @@ export class GroupsService {
       cpuMillis: row.cpu_millis,
       memBytes: row.mem_bytes === null ? null : Number(row.mem_bytes),
       diskBytes: row.disk_bytes === null ? null : Number(row.disk_bytes),
-      extensionGrants: asJsonObject(row.extension_grants),
+      gpuPciAddresses: [...row.gpu_pci_addresses],
       expiresAt: row.expires_at ? new Date(row.expires_at).toISOString() : null,
       createdAt: row.created_at.toISOString(),
       updatedAt: row.updated_at.toISOString(),

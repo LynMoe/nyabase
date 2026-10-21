@@ -41,7 +41,7 @@ import {
   parseCidr,
 } from '../utils.js';
 import { normalizeOpenSshPublicKey } from './ssh-public-key.js';
-import { SERVER_CARD_EXTENSION_ID_RE } from './server-card-extensions.js';
+import { zGpuPciAddresses } from '../gpu/schema.js';
 
 const USERNAME_RE = /^[a-z0-9_-]+$/;
 const RESOURCE_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9-]*$/;
@@ -81,11 +81,6 @@ export const zPositiveBytes = z.number().int().positive().safe().max(MAX_RESOURC
 export const zNonNegativeBytes = z.number().int().nonnegative().safe().max(MAX_RESOURCE_BYTES);
 export const zCpuMillis = z.number().int().nonnegative().safe().max(MAX_RESOURCE_CPU_MILLIS);
 export const zIsoDateTime = z.string().datetime({ offset: true });
-export const zOpaqueExtensionMap = z.record(z.unknown());
-export const zPatchContainerExtensionRequest = z.record(z.unknown());
-export const zPatchServerExtensionRequest = z.object({
-  enabled: z.boolean(),
-}).strict();
 
 export const zIpv4Address = z.string().superRefine((value, context) => {
   try {
@@ -506,10 +501,12 @@ export const zCreateContainerRequest = z.object({
   rootSizeBytes: zPositiveBytes,
   cpuMillis: zCpuMillis,
   memBytes: zNonNegativeBytes,
-  extensions: z.record(
-    z.string().regex(SERVER_CARD_EXTENSION_ID_RE),
-    z.unknown(),
-  ).default({}),
+  /**
+   * Requested GPUs by PCI address. Omit when the server has GPU disabled;
+   * `[]` opens the NVIDIA runtime without assigning a card. Address-level
+   * validation (wildcards, duplicates) happens at admission with GPU_* codes.
+   */
+  gpuPciAddresses: z.array(z.string()).optional(),
   powerIntent: z.nativeEnum(ContainerPowerIntent),
   volumes: z.array(zAttachVolumeRequest).max(32).optional(),
 }).strict();
@@ -574,10 +571,7 @@ export const zPutServerGrantRequest = z.object({
   cpuMillis: zNullableCpuMillis,
   memBytes: zNullableBytes,
   diskBytes: zNullableBytes,
-  extensionGrants: z.record(
-    z.string().regex(SERVER_CARD_EXTENSION_ID_RE),
-    z.unknown(),
-  ).default({}),
+  gpuPciAddresses: zGpuPciAddresses.default([]),
   expiresAt: zIsoDateTime.nullable(),
 }).strict();
 
@@ -672,7 +666,7 @@ export const zPreflightReport = z.object({
   }).strict(),
   failureCode: z.nativeEnum(FailureCode).nullable(),
   checkedAt: zIsoDateTime.nullable(),
-  extensions: z.record(z.unknown()).optional(),
+  gpu: z.record(z.unknown()).optional(),
 }).strict().superRefine((report, context) => {
   if (report.controlReady && report.checks.networkPrerequisites !== 'pass') {
     context.addIssue({
@@ -798,8 +792,6 @@ export type AttachVolumeRequest = z.infer<typeof zAttachVolumeRequest>;
 export type CreateContainerRequest = z.infer<typeof zCreateContainerRequest>;
 export type PatchContainerLimitsRequest = z.infer<typeof zPatchContainerLimitsRequest>;
 export type PatchContainerRootSizeRequest = z.infer<typeof zPatchContainerRootSizeRequest>;
-export type PatchContainerExtensionRequest = z.infer<typeof zPatchContainerExtensionRequest>;
-export type PatchServerExtensionRequest = z.infer<typeof zPatchServerExtensionRequest>;
 export type CreateExecSessionRequest = z.infer<typeof zCreateExecSessionRequest>;
 export type AddCatalogImageRequest = z.infer<typeof zAddCatalogImageRequest>;
 export type CreateImageRequest = z.infer<typeof zCreateImageRequest>;

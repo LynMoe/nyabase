@@ -11,14 +11,12 @@ import {
   type RunPreflightRequest,
   type ServerPreflightDto,
   type ServerDto,
-  type ServerExtensionEnablementDto,
   type StoragePoolDiscoverResult,
   type StoragePoolDto,
 } from '@nyabase/common';
 import { api } from '../lib/api.js';
 import { errorMessage } from '../lib/api-error.js';
 import { Badge } from '../components/ui/badge.js';
-import { Button } from '../components/ui/button.js';
 import { MoreActions } from '../components/layout/more-actions.js';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '../components/ui/card.js';
 import { ConfirmDialog } from '../components/layout/confirm-dialog.js';
@@ -42,15 +40,13 @@ import { refetchWhileInProgress } from '../lib/query-lifecycle.js';
 import { toast } from '../hooks/use-toast.js';
 import { useAuthStore } from '../store/auth.js';
 import { ResourceIntentFailures } from '../components/intents/resource-intent-failures.js';
-import { ExtensionSlots } from '../extensions/slots.js';
-import { ServerExtensionSupport } from '../components/servers/server-extension-support.js';
-import { Switch } from '../components/ui/switch.js';
+import { ServerGpuCard } from '../components/gpu/gpu-sections.js';
 import { Field } from '../components/layout/field.js';
 
 const routeApi = getRouteApi('/servers/$id');
 
 export const SERVER_DETAIL_TABS = [
-  'overview', 'connect', 'storage', 'preflight', 'metrics', 'extensions', 'activity',
+  'overview', 'connect', 'storage', 'preflight', 'metrics', 'gpu', 'activity',
 ] as const;
 export type ServerDetailTab = (typeof SERVER_DETAIL_TABS)[number];
 
@@ -60,7 +56,7 @@ const SERVER_DETAIL_TAB_ITEMS = [
   ['storage', '存储', HardDrive],
   ['preflight', '检查', ListChecks],
   ['metrics', '监控', Activity],
-  ['extensions', '扩展', Cpu],
+  ['gpu', 'GPU', Cpu],
   ['activity', '活动', History],
 ] as const;
 
@@ -106,28 +102,6 @@ export default function ServerDetailPage() {
   const poolsQuery = useQuery({
     queryKey: queryKeys.servers.pools(id, true),
     queryFn: () => api.get<StoragePoolDto[]>(`/admin/servers/${id}/storage-pools`),
-  });
-  const extensionsQuery = useQuery({
-    queryKey: queryKeys.servers.extensions(id),
-    queryFn: () => api.get<ServerExtensionEnablementDto[]>(`/admin/servers/${id}/extensions`),
-    enabled: tab === 'extensions' && canManageServers,
-  });
-  const putExtension = useMutation({
-    mutationFn: (item: { extensionId: string; enabled: boolean }) =>
-      api.put<ServerExtensionEnablementDto>(`/admin/servers/${id}/extensions/${item.extensionId}`, {
-        enabled: item.enabled,
-      }),
-    onSuccess: (result) => {
-      void queryClient.invalidateQueries({ queryKey: queryKeys.servers.extensions(id) });
-      void queryClient.invalidateQueries({ queryKey: queryKeys.servers.detail(id) });
-      if (result.enabled && result.support.supported === false) {
-        toast({
-          title: '扩展已启用',
-          description: '本机检测未通过，启用后仍可能无法把该卡分配给容器。',
-        });
-      }
-    },
-    onError: (error) => toast({ title: '扩展更新失败', description: errorMessage(error), variant: 'destructive' }),
   });
   const preflightQuery = useQuery({
     queryKey: queryKeys.servers.preflight(id),
@@ -270,7 +244,6 @@ export default function ServerDetailPage() {
   const selectedPool = pools.find((pool) => pool.id === selectedPoolId);
   const currentSystemPool = server?.systemPoolId ?? '';
   const registeredPoolCount = pools.filter((pool) => pool.registered).length;
-  const extensions = extensionsQuery.data ?? [];
 
   return (
     <Page testId="server-connect-preflight">
@@ -430,60 +403,14 @@ export default function ServerDetailPage() {
                 onClearOpenChange={setClearMetricsOpen}
               />
             </TabsContent>
-            <TabsContent value="extensions">
-              {extensionsQuery.isLoading ? (
-                <p className="text-sm text-muted-foreground">加载扩展...</p>
-              ) : canManageServers && extensions.length > 0 ? (
-                <Card>
-                  <CardHeader className="flex flex-col gap-3 space-y-0 sm:flex-row sm:items-start sm:justify-between">
-                    <div className="space-y-1.5">
-                      <CardTitle className="text-base">服务器卡扩展</CardTitle>
-                      <CardDescription>
-                        启用后才允许把该卡分配给容器。占用中的扩展不能取消。本机检测只反映驱动与前置条件，不阻止启用。
-                      </CardDescription>
-                    </div>
-                    <Button
-                      type="button"
-                      variant="outline"
-                      size="sm"
-                      disabled={extensionsQuery.isFetching}
-                      onClick={() => { void extensionsQuery.refetch(); }}
-                    >
-                      重新检测
-                    </Button>
-                  </CardHeader>
-                  <CardContent className="space-y-3">
-                    {extensions.map((item) => (
-                      <div key={item.extensionId} className="space-y-2 rounded-md border p-3">
-                        <div className="flex items-center justify-between gap-3">
-                          <div>
-                            <p className="text-sm font-medium">{item.displayName}</p>
-                            <p className="text-xs text-muted-foreground">
-                              {item.extensionId}
-                              {item.occupiedDeviceCount > 0 ? ` · ${item.occupiedDeviceCount} 占用` : ''}
-                            </p>
-                          </div>
-                          <Switch
-                            checked={item.enabled}
-                            disabled={putExtension.isPending || (item.enabled && item.occupiedDeviceCount > 0)}
-                            onCheckedChange={(enabled) => putExtension.mutate({
-                              extensionId: item.extensionId,
-                              enabled,
-                            })}
-                          />
-                        </div>
-                        <ServerExtensionSupport support={item.support} />
-                        <ExtensionSlots area="server.detail.enablement" ctx={{ serverId: id, item }} />
-                        <ExtensionSlots area="server.detail.health" ctx={{ serverId: id, item }} />
-                      </div>
-                    ))}
-                  </CardContent>
-                </Card>
+            <TabsContent value="gpu">
+              {canManageServers ? (
+                <ServerGpuCard serverId={id} active={tab === 'gpu'} />
               ) : (
                 <Card>
                   <CardHeader>
-                    <CardTitle className="text-base">服务器卡扩展</CardTitle>
-                    <CardDescription>此服务器没有可启用的卡扩展</CardDescription>
+                    <CardTitle className="text-base">GPU</CardTitle>
+                    <CardDescription>没有管理此服务器 GPU 的权限</CardDescription>
                   </CardHeader>
                 </Card>
               )}

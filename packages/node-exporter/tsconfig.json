@@ -5,10 +5,7 @@
     "rootDir": "./src",
     "module": "CommonJS",
     "moduleResolution": "Node",
-    "skipLibCheck": true,
-    "paths": {
-      "@nyabase/nvidia-gpu": ["../../extensions/nvidia-gpu/dist/index"]
-    }
+    "skipLibCheck": true
   },
   "include": ["src"]
 }

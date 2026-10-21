@@ -1,6 +1,7 @@
 import { Inject, Injectable } from '@nestjs/common';
 import { randomUUID } from 'node:crypto';
 import { sql, type Kysely, type Selectable, type Transaction } from 'kysely';
+import type { GpuContainerState } from '@nyabase/common';
 import type { ContainerControlTable } from './container-control-database.types.js';
 import type { NyabaseDatabase } from '../persistence-pg/database.types.js';
 import { PG_DATABASE } from '../persistence-pg/tokens.js';
@@ -22,7 +23,6 @@ export interface NewContainerInput {
   rootSizeBytes: number;
   cpuMillis: number;
   memBytes: number;
-  extensions: Record<string, unknown>;
   powerIntent: 'running' | 'stopped';
   networkKey: string;
   address: string;
@@ -102,7 +102,7 @@ export class ContainerControlRepository {
         root_used_bytes: null,
         cpu_millis: input.cpuMillis,
         mem_bytes: input.memBytes,
-        extensions: input.extensions,
+        gpu_state: null,
         nesting: true,
         syscall_intercept: true,
         power_intent: input.powerIntent,
@@ -147,13 +147,13 @@ export class ContainerControlRepository {
       });
   }
 
-  setExtensions(
+  setGpuState(
     id: string,
-    extensions: Record<string, unknown>,
+    gpuState: GpuContainerState | null,
     executor: ContainerExecutor,
   ) {
     return executor.updateTable('control.containers')
-      .set({ extensions })
+      .set({ gpu_state: gpuState })
       .where('id', '=', id)
       .returningAll()
       .executeTakeFirstOrThrow();
@@ -167,7 +167,7 @@ export class ContainerControlRepository {
       mem_bytes?: number;
       root_size_bytes?: number;
       root_size_pending_bytes?: number | null;
-      extensions?: Record<string, unknown>;
+      gpu_state?: GpuContainerState | null;
       power_intent?: 'running' | 'stopped';
       lifecycle_phase?: 'provisioning' | 'active' | 'deleting' | 'failed';
       failure_code?: string | null;

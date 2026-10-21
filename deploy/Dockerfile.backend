@@ -16,7 +16,6 @@ COPY package.json pnpm-workspace.yaml pnpm-lock.yaml ./
 COPY packages/common/package.json   packages/common/
 COPY packages/backend/package.json  packages/backend/
 COPY packages/frontend/package.json packages/frontend/
-COPY extensions ./extensions
 RUN pnpm install --frozen-lockfile
 
 # ── Compile the backend and bundled frontend in dependency order ──
@@ -25,21 +24,13 @@ COPY packages/common    packages/common
 COPY packages/backend   packages/backend
 COPY packages/frontend  packages/frontend
 RUN pnpm --filter @nyabase/common     build && \
-    pnpm --filter "./extensions/*"    build && \
     pnpm --filter @nyabase/frontend   build && \
     pnpm --filter @nyabase/backend    build
 
 # Create a self-contained production deployment:
 # resolves workspace deps and retains only production node_modules
 # (native .node binaries are copied from the already-installed store)
-RUN pnpm --filter @nyabase/backend deploy --prod /deploy \
- && for pkg in /app/extensions/*; do \
-      [ -d "$pkg/dist" ] || continue; \
-      name=$(basename "$pkg"); \
-      dest="/deploy/node_modules/@nyabase/$name"; \
-      mkdir -p "$dest"; \
-      cp -a "$pkg/dist" "$dest/dist"; \
-    done
+RUN pnpm --filter @nyabase/backend deploy --prod /deploy
 
 # ─────────────────────────────────────────────────────────────────
 # Stage 2 – runner: minimal production image (~no build tools)

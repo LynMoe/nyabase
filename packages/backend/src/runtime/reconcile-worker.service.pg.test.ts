@@ -237,7 +237,6 @@ describePg('ReconcileWorkerService PostgreSQL busy breaker and inventory', () =>
         root_size_pending_bytes: null,
         cpu_millis: 1000,
         mem_bytes: 256,
-        extensions: {},
         nesting: true,
         syscall_intercept: true,
         power_intent: 'running',

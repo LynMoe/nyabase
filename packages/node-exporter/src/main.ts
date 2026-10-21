@@ -1,26 +1,12 @@
-import {
-  collectNvidiaGpuMetrics,
-  NVIDIA_GPU_LABEL_VALIDATORS,
-  NVIDIA_GPU_METRIC_DEFINITIONS,
-} from '@nyabase/nvidia-gpu';
-import {
-  CORE_LABEL_VALIDATORS,
-  mergeNodeMetricCatalog,
-  NODE_METRIC_DEFINITIONS,
-} from '@nyabase/common';
+import { NODE_METRIC_CATALOG } from '@nyabase/common';
 import { collectContainerCgroupMetrics } from './container-cgroup.js';
 import { LinuxNodeMetricsCollector } from './collector.js';
 import { loadNodeExporterConfig } from './config.js';
+import { collectNvidiaGpuMetrics } from './gpu-collector.js';
 import { createNodeExporterServer } from './server.js';
 
 async function main(): Promise<void> {
   const config = await loadNodeExporterConfig();
-  // Compile-time composition: also register the package in
-  // packages/backend/src/app.module.ts and packages/frontend/src/main.tsx.
-  const catalog = mergeNodeMetricCatalog(
-    { definitions: NODE_METRIC_DEFINITIONS, validators: CORE_LABEL_VALIDATORS },
-    { definitions: NVIDIA_GPU_METRIC_DEFINITIONS, validators: NVIDIA_GPU_LABEL_VALIDATORS },
-  );
   const collector = new LinuxNodeMetricsCollector({
     parentInterface: config.parentInterface,
     extraCollectors: [collectNvidiaGpuMetrics, collectContainerCgroupMetrics],
@@ -30,7 +16,7 @@ async function main(): Promise<void> {
     key: config.tlsKey,
     cert: config.tlsCertificate,
     collector,
-    catalog,
+    catalog: NODE_METRIC_CATALOG,
   });
   await new Promise<void>((resolve, reject) => {
     server.once('error', reject);

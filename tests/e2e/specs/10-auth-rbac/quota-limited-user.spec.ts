@@ -40,7 +40,6 @@ test(
             rootSizeBytes: 2 * 1024 * 1024 * 1024,
             cpuMillis: 2_000,
             memBytes: 128 * 1024 * 1024,
-            extensions: {},
             powerIntent: 'stopped',
           },
         }),
@@ -58,7 +57,6 @@ test(
             rootSizeBytes: 2 * 1024 * 1024 * 1024,
             cpuMillis: 100,
             memBytes: 2 * 1024 * 1024 * 1024,
-            extensions: {},
             powerIntent: 'stopped',
           },
         }),
@@ -75,7 +73,6 @@ test(
           rootSizeBytes: 2 * 1024 * 1024 * 1024,
           cpuMillis: 100,
           memBytes: 128 * 1024 * 1024,
-          extensions: {},
           powerIntent: 'stopped',
         },
       });

@@ -1,4 +1,4 @@
-import { Inject, Injectable, Optional } from '@nestjs/common';
+import { Inject, Injectable } from '@nestjs/common';
 import { createHash, randomUUID } from 'node:crypto';
 import { isIP } from 'node:net';
 import {
@@ -37,8 +37,7 @@ import type {
   ReconcileOutcome,
   ReconcileRunContext,
 } from './reconcile-worker.service.js';
-import { ExtensionDeviceClaimsRepository } from '../server-card-extensions/claims.repository.js';
-import { ServerCardExtensionRegistry } from '../server-card-extensions/registry.js';
+import { gpuPreflight } from '../gpu/preflight.js';
 
 export const NODE_METRICS_PULL = Symbol('NODE_METRICS_PULL');
 export const PREFLIGHT_CHECKS = Symbol('PREFLIGHT_CHECKS');
@@ -88,6 +87,7 @@ interface ServerRow {
   status: 'online' | 'unreachable' | 'unknown';
   system_pool_id: string | null;
   preflight_status: 'not_run' | 'running' | 'passed' | 'failed';
+  gpu_enabled: boolean;
   revision: string | number | bigint;
 }
 
@@ -187,8 +187,6 @@ export class ServerPreflightReconciler implements ManagedReconciler {
     @Inject(PREFLIGHT_CHECKS) private readonly checks: PreflightChecksPort,
     private readonly ephemeral: EphemeralStore,
     private readonly config: NyabaseConfigService,
-    @Optional() private readonly extensions?: ServerCardExtensionRegistry,
-    @Optional() private readonly extensionClaims?: ExtensionDeviceClaimsRepository,
   ) {}
 
   supports(intent: IntentRecord): boolean {
@@ -676,28 +674,17 @@ export class ServerPreflightReconciler implements ManagedReconciler {
     const metricEvidence = nodeMetricsFailure ? undefined : nodeMetrics.report;
     const firstSamples = metricSamplesFrom(metricEvidence);
     const network = await this.checks.checkNetworkPrerequisites(server.id, metricEvidence);
-    const extensionEvidence: Record<string, unknown> = {};
-    for (const ext of this.extensions?.all() ?? []) {
-      const enabled = this.extensionClaims
-        ? await this.extensionClaims.isEnabled(server.id, ext.id)
-        : false;
-      const contribution = await ext.contributePreflight({
-        serverId: server.id,
-        resources: resources.metadata,
-        metricSamples: firstSamples,
-        enabled,
-      });
-      extensionEvidence[ext.id] = contribution.evidence;
-      const existing = await this.database
-        .selectFrom('infra.server_extensions')
-        .select('extension_id')
-        .where('server_id', '=', server.id)
-        .where('extension_id', '=', ext.id)
-        .executeTakeFirst();
-      if (existing) {
-        await this.extensionClaims?.health(server.id, ext.id).write({ ...contribution.health });
-      }
-    }
+    const gpu = gpuPreflight({
+      serverId: server.id,
+      resources: resources.metadata,
+      metricSamples: firstSamples,
+      enabled: server.gpu_enabled === true,
+    });
+    await this.database
+      .updateTable('infra.servers')
+      .set({ gpu_health: gpu.health })
+      .where('id', '=', server.id)
+      .execute();
     const poolNetworks = await this.listIpPoolNetworks(server.id);
     const parentInterface = server.parent_interface?.trim() || '';
     const parentLookup = parentInterface
@@ -731,7 +718,7 @@ export class ServerPreflightReconciler implements ManagedReconciler {
         status: pool.status,
       })),
       network,
-      extensions: extensionEvidence,
+      gpu: gpu.evidence,
       firewall: environment?.firewall ?? null,
       nodeMetricsWarning: nodeMetricsFailure
         ? nodeMetricsFailure instanceof Error
@@ -967,7 +954,7 @@ export class ServerPreflightReconciler implements ManagedReconciler {
         });
       }
     }
-    return this.successReport(checks, extensionEvidence);
+    return this.successReport(checks, gpu.evidence);
   }
 
   private async pullNodeMetrics(
@@ -1149,7 +1136,7 @@ export class ServerPreflightReconciler implements ManagedReconciler {
     };
   }
 
-  private successReport(checks: ReportChecks, extensions?: Record<string, unknown>): PreflightReport {
+  private successReport(checks: ReportChecks, gpu?: Record<string, unknown>): PreflightReport {
     const controlReady = Object.entries(checks).every(([name, value]) => {
       if (name === 'nodeMetrics') return value === 'pass' || value === 'warn';
       return value === 'pass';
@@ -1160,7 +1147,7 @@ export class ServerPreflightReconciler implements ManagedReconciler {
       checks,
       failureCode: null,
       checkedAt: new Date().toISOString(),
-      ...(extensions ? { extensions } : {}),
+      ...(gpu ? { gpu } : {}),
     };
   }
 
@@ -1422,6 +1409,7 @@ export class ServerPreflightReconciler implements ManagedReconciler {
         'status',
         'system_pool_id',
         'preflight_status',
+        'gpu_enabled',
         'revision',
       ])
       .where('id', '=', id)
