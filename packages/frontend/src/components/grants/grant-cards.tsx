@@ -1,12 +1,10 @@
+import { useState } from 'react';
 import { Plus } from 'lucide-react';
 import {
   formatGpuGrantSummary,
   type GrantExpiryPhase,
-  type ServerDto,
   type ServerGrantDto,
-  type SharedBackendDto,
   type SharedBackendGrantDto,
-  type StoragePoolDto,
   type StoragePoolGrantDto,
 } from '@nyabase/common';
 import { grantExpiryPhaseLabel } from '../../lib/display-labels.js';
@@ -25,13 +23,21 @@ import {
 } from '../ui/table.js';
 import { ResourceRef } from '../refs/resource-ref.js';
 import { truncateId } from '../refs/technical-id.js';
+import { BackendGrantDialog, PoolGrantDialog, ServerGrantDialog } from './grant-dialogs.js';
 import {
   backendDisplayName,
   backendName,
   expiryLabel,
   expiryPhase,
+  grantablePools,
+  type GrantSubject,
   poolName,
   serverName,
+  useGrantBackends,
+  useGrantPools,
+  useGrantServers,
+  useLapsedServers,
+  useSubjectGrants,
 } from './use-grant-panel-data.js';
 
 export const GRANT_MERGE_NOTE = '多条授权逐项取最大：同一用户在同一资源上的直接授权与所属各用户组的授权合并，额度取最大值（任一为不限则不限），GPU 白名单取并集，到期取最晚（任一不设期限则不过期）。';
@@ -88,13 +94,9 @@ function GrantTableHead({ first, second }: { first: string; second: string }) {
 }
 
 /** Servers whose access lapsed: stopped now, purged when the grace ends. */
-export function GraceCard({
-  lapsed,
-  servers,
-}: {
-  lapsed: Array<{ serverId: string; purgeAt?: string | null }>;
-  servers: ServerDto[];
-}) {
+export function GraceCard({ subject }: { subject: GrantSubject }) {
+  const lapsed = useLapsedServers(subject);
+  const servers = useGrantServers().data ?? [];
   if (lapsed.length === 0) return null;
   return (
     <SectionCard title="宽限中的服务器" testId="grant-grace">
@@ -115,25 +117,28 @@ export function GraceCard({
 }
 
 export function ServerGrantsCard({
-  grants,
-  servers,
-  blocked,
-  onAdd,
-  onEdit,
+  subject,
   onDelete,
 }: {
-  grants: ServerGrantDto[];
-  servers: ServerDto[];
-  blocked: string | null;
-  onAdd: () => void;
-  onEdit: (grant: ServerGrantDto) => void;
+  subject: GrantSubject;
   onDelete: (target: DeleteTarget) => void;
 }) {
+  const serversQuery = useGrantServers();
+  const servers = serversQuery.data ?? [];
+  const grants = useSubjectGrants(subject, 'servers').data ?? [];
+  // 'add' opens an empty dialog, a grant opens its editor.
+  const [dialog, setDialog] = useState<'add' | ServerGrantDto | null>(null);
+  const grantedIds = new Set(grants.map((row) => row.serverId));
+  const blocked = !serversQuery.isSuccess
+    ? null
+    : servers.length === 0
+      ? '还没有服务器，请先在“服务器”页添加。'
+      : servers.every((server) => grantedIds.has(server.id)) ? '所有服务器都已授权。' : null;
   return (
     <SectionCard
       title="服务器授权"
       description={GRANT_MERGE_NOTE}
-      actions={<AddGrantButton blocked={blocked} onClick={onAdd} testId="grant-add-server" />}
+      actions={<AddGrantButton blocked={blocked} onClick={() => setDialog('add')} testId="grant-add-server" />}
       flush={grants.length > 0}
       testId="grant-servers"
     >
@@ -156,7 +161,7 @@ export function ServerGrantsCard({
                   <TableCell><PhaseBadge phase={expiryPhase(grant.expiresAt)} /></TableCell>
                   <TableCell className="text-right">
                     <GrantRowActions
-                      onEdit={() => onEdit(grant)}
+                      onEdit={() => setDialog(grant)}
                       onDelete={() => onDelete({
                         resource: 'server-grants',
                         id: grant.serverId,
@@ -170,29 +175,37 @@ export function ServerGrantsCard({
           </TableBody>
         </Table>
       )}
+      {dialog ? (
+        <ServerGrantDialog
+          subject={subject}
+          grant={dialog === 'add' ? undefined : dialog}
+          onClose={() => setDialog(null)}
+        />
+      ) : null}
     </SectionCard>
   );
 }
 
 export function PoolGrantsCard({
-  grants,
-  pools,
-  servers,
-  grantedServerIds,
-  blocked,
-  onAdd,
-  onEdit,
+  subject,
   onDelete,
 }: {
-  grants: StoragePoolGrantDto[];
-  pools: StoragePoolDto[];
-  servers: ServerDto[];
-  grantedServerIds: ReadonlySet<string>;
-  blocked: string | null;
-  onAdd: () => void;
-  onEdit: (grant: StoragePoolGrantDto) => void;
+  subject: GrantSubject;
   onDelete: (target: DeleteTarget) => void;
 }) {
+  const serversQuery = useGrantServers();
+  const poolsQuery = useGrantPools();
+  const servers = serversQuery.data ?? [];
+  const pools = poolsQuery.data ?? [];
+  const grants = useSubjectGrants(subject, 'pools').data ?? [];
+  const serverGrants = useSubjectGrants(subject, 'servers').data ?? [];
+  const [dialog, setDialog] = useState<'add' | StoragePoolGrantDto | null>(null);
+  const grantedServerIds = new Set(serverGrants.map((row) => row.serverId));
+  const blocked = serverGrants.length === 0
+    ? '请先添加服务器授权。'
+    : poolsQuery.isSuccess && grantablePools(pools, grantedServerIds, grants).length === 0
+      ? '已授权服务器上没有其他可授权的存储池。'
+      : null;
   const isOrphan = (grant: StoragePoolGrantDto): boolean => {
     const pool = pools.find((item) => item.id === grant.poolId);
     return !pool || !grantedServerIds.has(pool.serverId);
@@ -205,7 +218,7 @@ export function PoolGrantsCard({
           ? '只能授权已有服务器授权的机器上的存储池。存储池（无服务器授权）仍会列在表中，需先补上对应服务器授权。'
           : undefined
       }
-      actions={<AddGrantButton blocked={blocked} onClick={onAdd} testId="grant-add-pool" />}
+      actions={<AddGrantButton blocked={blocked} onClick={() => setDialog('add')} testId="grant-add-pool" />}
       flush={grants.length > 0}
       testId="grant-pools"
     >
@@ -234,7 +247,7 @@ export function PoolGrantsCard({
                   <TableCell><PhaseBadge phase={expiryPhase(grant.expiresAt)} /></TableCell>
                   <TableCell className="text-right">
                     <GrantRowActions
-                      onEdit={() => onEdit(grant)}
+                      onEdit={() => setDialog(grant)}
                       onDelete={() => onDelete({
                         resource: 'storage-pool-grants',
                         id: grant.poolId,
@@ -248,29 +261,38 @@ export function PoolGrantsCard({
           </TableBody>
         </Table>
       )}
+      {dialog ? (
+        <PoolGrantDialog
+          subject={subject}
+          grant={dialog === 'add' ? undefined : dialog}
+          onClose={() => setDialog(null)}
+        />
+      ) : null}
     </SectionCard>
   );
 }
 
 export function BackendGrantsCard({
-  grants,
-  backends,
-  blocked,
-  onAdd,
-  onEdit,
+  subject,
   onDelete,
 }: {
-  grants: SharedBackendGrantDto[];
-  backends: SharedBackendDto[];
-  blocked: string | null;
-  onAdd: () => void;
-  onEdit: (grant: SharedBackendGrantDto) => void;
+  subject: GrantSubject;
   onDelete: (target: DeleteTarget) => void;
 }) {
+  const backendsQuery = useGrantBackends();
+  const backends = backendsQuery.data ?? [];
+  const grants = useSubjectGrants(subject, 'backends').data ?? [];
+  const [dialog, setDialog] = useState<'add' | SharedBackendGrantDto | null>(null);
+  const grantedIds = new Set(grants.map((row) => row.sharedBackendId));
+  const blocked = !backendsQuery.isSuccess
+    ? null
+    : backends.length === 0
+      ? '还没有登记共享存储。'
+      : backends.every((backend) => grantedIds.has(backend.id)) ? '所有共享存储都已授权。' : null;
   return (
     <SectionCard
       title="共享存储授权"
-      actions={<AddGrantButton blocked={blocked} onClick={onAdd} testId="grant-add-backend" />}
+      actions={<AddGrantButton blocked={blocked} onClick={() => setDialog('add')} testId="grant-add-backend" />}
       flush={grants.length > 0}
       testId="grant-backends"
     >
@@ -294,7 +316,7 @@ export function BackendGrantsCard({
                 <TableCell><PhaseBadge phase={expiryPhase(grant.expiresAt)} /></TableCell>
                 <TableCell className="text-right">
                   <GrantRowActions
-                    onEdit={() => onEdit(grant)}
+                    onEdit={() => setDialog(grant)}
                     onDelete={() => onDelete({
                       resource: 'shared-backend-grants',
                       id: grant.sharedBackendId,
@@ -307,6 +329,13 @@ export function BackendGrantsCard({
           </TableBody>
         </Table>
       )}
+      {dialog ? (
+        <BackendGrantDialog
+          subject={subject}
+          grant={dialog === 'add' ? undefined : dialog}
+          onClose={() => setDialog(null)}
+        />
+      ) : null}
     </SectionCard>
   );
 }
