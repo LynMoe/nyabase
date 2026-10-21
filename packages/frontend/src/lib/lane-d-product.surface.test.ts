@@ -41,7 +41,7 @@ describe('lane D product UI copy', () => {
     const src = [
       read('pages/server-detail-page.tsx'),
       read('components/gpu/gpu-sections.tsx'),
-      read('components/gpu/gpu-support.tsx'),
+      read('components/gpu/gpu-picker.tsx'),
     ].join('\n');
     expect(src).not.toMatch(/@nyabase\/[a-z0-9-]+-web/);
     expect(src).toMatch(/gpu\.support/);
@@ -74,7 +74,7 @@ describe('lane D product UI copy', () => {
   it('shows typed volume attachments and a layout cert expiry banner', () => {
     const page = read('pages/volumes-page.tsx');
     const table = read('components/storage/local-volume-table.tsx');
-    const dialog = read('components/storage/local-volume-detail-dialog.tsx');
+    const dialog = read('components/storage/local-volume-table.tsx');
     const volumes = [page, table, dialog].join('\n');
     expect(volumes).toMatch(/volume\.attachments/);
     expect(volumes).toMatch(/挂载于/);
@@ -85,7 +85,7 @@ describe('lane D product UI copy', () => {
     expect(volumes).not.toMatch(/volumeAttachments\(/);
     expect(page).toMatch(/volume-server-table/);
     expect(page).not.toMatch(/\/admin\//);
-    const identity = read('components/servers/client-identity-card.tsx');
+    const identity = read('components/servers/connect-card.tsx');
     expect(identity).toMatch(/\/admin\/system-settings\/incus-client-identity/);
     expect(identity).not.toMatch(/rotate|轮换/);
     expect(read('components/layout/app-layout.tsx')).not.toMatch(/Cert/);
@@ -140,7 +140,7 @@ describe('lane D product UI copy', () => {
     ].join('\n');
     expect(page).toMatch(/\/shared-volumes\?scope=all/);
     expect(page).toMatch(/ManageSharedVolumes/);
-    expect(page).toMatch(/enabled: tab === 'volumes' && canManageSharedVolumes/);
+    expect(page).toMatch(/enabled: canManageVolumes,/);
   });
 
   it('volume remount waits for attachment after 202 and blocks quota-ineffective create', () => {
@@ -166,17 +166,17 @@ describe('lane D product UI copy', () => {
     const volumes = [
       read('pages/volumes-page.tsx'),
       read('components/storage/local-volume-table.tsx'),
-      read('components/storage/local-volume-detail-dialog.tsx'),
+      read('components/storage/local-volume-table.tsx'),
     ].join('\n');
     const shared = [
       read('pages/shared-volumes-page.tsx'),
       read('components/storage/shared-volume-table.tsx'),
-      read('components/storage/shared-volume-detail-dialog.tsx'),
+      read('components/storage/shared-volume-table.tsx'),
     ].join('\n');
     const localForm = read('components/storage/local-volume-form-dialog.tsx');
     const sharedForm = [
       read('components/storage/shared-volume-form-dialog.tsx'),
-      read('lib/shared-backend-executor.ts'),
+      read('lib/storage-shrink.ts'),
     ].join('\n');
     const storage = read('components/containers/storage-panel.tsx');
     const inspect = read('components/storage/shared-volume-catalog-inspect.tsx');
@@ -185,9 +185,9 @@ describe('lane D product UI copy', () => {
       read('pages/shared-backends-page.tsx'),
       read('pages/shared-backend-detail-page.tsx'),
       read('components/storage/shared-volume-table.tsx'),
-      read('components/storage/shared-volume-detail-dialog.tsx'),
+      read('components/storage/shared-volume-table.tsx'),
     ].join('\n');
-    const detail = read('pages/container-detail-page.tsx');
+    const detail = [read('pages/container-detail-page.tsx'), read('components/containers/storage-panel.tsx')].join('\n');
     expect(read('pages/volumes-page.tsx')).toMatch(/testId="volumes"/);
     expect(read('pages/volumes-page.tsx')).toMatch(/LocalVolumeTable/);
     expect(read('pages/shared-volumes-page.tsx')).toMatch(/testId="shared-volumes"/);
@@ -229,7 +229,7 @@ describe('lane D product UI copy', () => {
     expect(backends).not.toMatch(/\/manage\/shared-volumes/);
     expect(backends).toMatch(/ManageSharedVolumes/);
     expect(backends).toMatch(/\/shared-volumes\?scope=all/);
-    expect(backends).toMatch(/enabled: tab === 'volumes' && canManageSharedVolumes/);
+    expect(backends).toMatch(/enabled: canManageVolumes,/);
     expect(backends).not.toMatch(/api\.get<SharedVolumeDto\[\]>\('\/shared-volumes'\)/);
     expect(sharedForm).toMatch(/backendLacksOnlineExecutor/);
     expect(sharedForm).toMatch(/hasOnlineExecutor/);
@@ -240,8 +240,8 @@ describe('lane D product UI copy', () => {
     expect(read('pages/shared-backend-detail-page.tsx')).toMatch(/shared-backend-executors/);
     expect(read('pages/shared-backends-page.tsx')).toMatch(/to: '\/shared-backends\/\$id'/);
     expect(read('pages/image-detail-page.tsx')).toMatch(/image-fingerprint-assignment/);
-    expect(read('lib/image-detail.ts')).toMatch(/parseImageDetailTab/);
-    expect(read('lib/shared-backend-detail.ts')).toMatch(/parseSharedBackendDetailTab/);
+    expect(read('lib/detail-tabs.ts')).toMatch(/parseImageDetailTab/);
+    expect(read('lib/detail-tabs.ts')).toMatch(/parseSharedBackendDetailTab/);
     expect(read('routes/shared-backends/$id.tsx')).toMatch(/parseSharedBackendDetailTab/);
     expect(read('pages/users-page.tsx')).toMatch(/to="\/users\/\$id"/);
     expect(read('pages/users-page.tsx')).not.toMatch(/CanonicalGrantPanel/);
@@ -262,8 +262,8 @@ describe('lane D product UI copy', () => {
     expect(read('pages/profile-page.tsx')).toMatch(/ssh-key-add/);
     expect(read('pages/profile-page.tsx')).toMatch(/添加公钥/);
     expect(read('pages/group-detail-page.tsx')).toMatch(/to="\/users\/\$id"/);
-    expect(read('lib/user-detail.ts')).toMatch(/parseUserDetailTab/);
-    expect(read('lib/group-detail.ts')).toMatch(/parseGroupDetailTab/);
+    expect(read('lib/detail-tabs.ts')).toMatch(/parseUserDetailTab/);
+    expect(read('lib/detail-tabs.ts')).toMatch(/parseGroupDetailTab/);
     expect(read('routes/users/$id.tsx')).toMatch(/parseUserDetailTab/);
     expect(read('routes/groups/$id.tsx')).toMatch(/parseGroupDetailTab/);
     expect(read('components/servers/pools-card.tsx')).not.toMatch(/sharedBackendId:/);
@@ -350,7 +350,7 @@ describe('lane D product UI copy', () => {
     expect(ops).toMatch(/加载更多/);
     expect(ops).toMatch(/useInfiniteQuery/);
     expect(ops).not.toMatch(/机器状态/);
-    expect(ops).toMatch(/useState<StatusSegment>\('all'\)/);
+    expect(ops).toMatch(/useState<IntentFilterState>\(\{ segment: 'all' \}\)/);
     expect(ops).not.toMatch(/enabled: segment != null/);
     expect(ops).not.toMatch(/选择『全部』『进行中』或『失败』加载意图/);
     expect(ops).not.toMatch(/默认不加载/);

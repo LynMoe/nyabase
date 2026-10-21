@@ -22,7 +22,7 @@ import {
 } from '../ui/sheet.js';
 import { TooltipProvider } from '../ui/tooltip.js';
 import { usePublicSettings } from '../../hooks/use-public-settings.js';
-import { terminateBrowserSession } from '../../lib/session-termination.js';
+import { terminateBrowserSession } from '../../lib/auth-session.js';
 import { activeNavPath, visibleNavSections, type NavSection } from '../../lib/navigation.js';
 
 const THEME_OPTIONS: Array<{ value: ThemeMode; label: string; icon: typeof Sun }> = [

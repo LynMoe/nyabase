@@ -64,9 +64,9 @@ async function loadApp() {
       import('../store/auth.js'),
       import('./api.js'),
       import('./auth-session.js'),
-      import('./session-termination.js'),
+      import('./auth-session.js'),
       import('./query-client.js'),
-      import('./pending-login-reason.js'),
+      import('./auth-session.js'),
     ]);
   useAuthStore.setState({ accessToken: null, user: null, epoch: 0, status: 'checking', authError: null });
   return {

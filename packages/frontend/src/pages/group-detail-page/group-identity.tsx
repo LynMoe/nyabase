@@ -1,6 +1,7 @@
 import { useState } from 'react';
-import { useMutation } from '@tanstack/react-query';
-import { Pencil } from 'lucide-react';
+import { useMutation, useQueryClient } from '@tanstack/react-query';
+import { useNavigate } from '@tanstack/react-router';
+import { Pencil, Trash2 } from 'lucide-react';
 import { Capability, type GroupDto, type UpdateGroupRequest } from '@nyabase/common';
 import { api } from '../../lib/api.js';
 import { errorMessage } from '../../lib/api-error.js';
@@ -8,18 +9,25 @@ import { Badge } from '../../components/ui/badge.js';
 import { Button } from '../../components/ui/button.js';
 import { Checkbox } from '../../components/ui/checkbox.js';
 import { Input } from '../../components/ui/input.js';
-import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '../../components/ui/dialog.js';
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from '../../components/ui/dialog.js';
 import { ConfirmDialog } from '../../components/layout/confirm-dialog.js';
-import { Field } from '../../components/layout/field.js';
-import { FormField } from '../../components/layout/form-field.js';
+import { Field, FormField } from '../../components/layout/form-field.js';
 import { SectionCard } from '../../components/layout/section-card.js';
+import { MoreActions } from '../../components/layout/more-actions.js';
 import { toast } from '../../hooks/use-toast.js';
+import { queryKeys } from '../../lib/query-keys.js';
+import { useGroupMembers, useInvalidateGroup } from '../../lib/group-queries.js';
+import { useAuthStore } from '../../store/auth.js';
 import { capabilityLabel } from '../../lib/display-labels.js';
 import { relativeTime } from '../../lib/utils.js';
-import {
-  buildMinimalGroupEditPayload,
-  type GroupEditFormState,
-} from '../../lib/group-edit-form.js';
+import { buildMinimalGroupEditPayload, type GroupEditFormState } from '../../lib/group-edit-form.js';
 
 function GroupIdentityFields({ group }: { group: GroupDto }) {
   return (
@@ -59,7 +67,7 @@ function capabilitiesChanged(left: readonly Capability[], right: readonly Capabi
   return left.some((capability) => !rightSet.has(capability));
 }
 
-export function GroupIdentityReadOnly({ group }: { group: GroupDto }) {
+function GroupIdentityReadOnly({ group }: { group: GroupDto }) {
   return (
     <>
       <SectionCard title="身份">
@@ -158,7 +166,8 @@ function useGroupEdit(group: GroupDto, onSaved: () => void, onClosed: () => void
   };
 }
 
-export function GroupIdentityCard({ group, onSaved }: { group: GroupDto; onSaved: () => void }) {
+function GroupIdentityCard({ group }: { group: GroupDto }) {
+  const onSaved = useInvalidateGroup(group.id);
   const [identityOpen, setIdentityOpen] = useState(false);
   const [capabilitiesOpen, setCapabilitiesOpen] = useState(false);
   const edit = useGroupEdit(group, onSaved, () => {
@@ -269,6 +278,55 @@ export function GroupIdentityCard({ group, onSaved }: { group: GroupDto; onSaved
         pending={edit.pending}
         onConfirm={() => edit.submit(true)}
         onOpenChange={(open) => { if (!open) edit.setConfirmRemoval(null); }}
+      />
+    </>
+  );
+}
+
+/** Identity and capabilities of the group; editable with the 管理用户组 capability. */
+export function GroupOverviewTab({ group }: { group: GroupDto }) {
+  const canManage = useAuthStore(
+    (state) => state.user?.capabilities.includes(Capability.ManageGroups) ?? false,
+  );
+  const members = useGroupMembers(group.id, canManage).data;
+  const viewed = {
+    ...group,
+    members: members ?? group.members ?? [],
+    memberCount: members?.length ?? group.memberCount ?? group.members?.length ?? 0,
+  };
+  return canManage
+    ? <GroupIdentityCard key={`${viewed.id}:${viewed.revision}`} group={viewed} />
+    : <GroupIdentityReadOnly group={viewed} />;
+}
+
+/** Header menu entry that deletes a custom group after a confirmation. */
+export function DeleteGroupAction({ groupId }: { groupId: string }) {
+  const [open, setOpen] = useState(false);
+  const navigate = useNavigate({ from: '/groups/$id' });
+  const queryClient = useQueryClient();
+  const removeGroup = useMutation({
+    mutationFn: () => api.delete<unknown>(`/admin/groups/${groupId}`),
+    onSuccess: () => {
+      toast({ title: '用户组已删除' });
+      setOpen(false);
+      void queryClient.invalidateQueries({ queryKey: queryKeys.groups.admin });
+      void queryClient.invalidateQueries({ queryKey: queryKeys.users.admin });
+      void navigate({ to: '/groups' });
+    },
+    onError: (error) => toast({ title: '删除用户组失败', description: errorMessage(error), variant: 'destructive' }),
+  });
+  return (
+    <>
+      <MoreActions actions={[{ label: '删除用户组', icon: Trash2, destructive: true, onSelect: () => setOpen(true) }]} />
+      <ConfirmDialog
+        open={open}
+        title="删除用户组？"
+        description="系统组不可删除。删除后成员关系与资源授权会一并清理，且不可恢复。"
+        confirmLabel="确认删除"
+        pendingLabel="确认删除"
+        pending={removeGroup.isPending}
+        onConfirm={() => removeGroup.mutate()}
+        onOpenChange={setOpen}
       />
     </>
   );

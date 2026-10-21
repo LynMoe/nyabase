@@ -1,34 +1,23 @@
 import { useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { getRouteApi, useNavigate } from '@tanstack/react-router';
-import { Gauge, HardDrive, Server, Trash2 } from 'lucide-react';
-import {
-  Capability,
-  type SharedBackendDto,
-  type SharedVolumeDto,
-} from '@nyabase/common';
+import { Gauge, HardDrive, Server } from 'lucide-react';
+import { Capability, type SharedBackendDto } from '@nyabase/common';
 import { api } from '../lib/api.js';
-import { Page } from '../components/layout/page.js';
-import { PageHeader } from '../components/layout/page-header.js';
+import { Page, PageHeader } from '../components/layout/page-header.js';
 import { QueryView } from '../components/layout/query-view.js';
-import { MoreActions } from '../components/layout/more-actions.js';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '../components/ui/tabs.js';
 import { FsidConflictAlert } from '../components/storage/fsid-conflict-alert.js';
-import { SharedVolumeCatalogInspectDialog } from '../components/storage/shared-volume-catalog-inspect.js';
-import { volumeInProgress } from '../lib/in-progress.js';
 import { queryKeys } from '../lib/query-keys.js';
-import { refetchWhileInProgress } from '../lib/query-lifecycle.js';
 import { type SharedBackendFsidConflict } from '../lib/storage-shrink.js';
-import { type SharedBackendDetailTab } from '../lib/shared-backend-detail.js';
+import { type SharedBackendDetailTab } from '../lib/detail-tabs.js';
 import { useAuthStore } from '../store/auth.js';
-import { DeleteBackendDialog, EditBackendDialog } from './shared-backend-detail-page/backend-dialogs.js';
+import { DeleteBackendAction } from './shared-backend-detail-page/backend-tabs.js';
 import {
   BackendExecutorsTab,
   BackendOverviewTab,
   BackendVolumesTab,
 } from './shared-backend-detail-page/backend-tabs.js';
-import { useBackendEditForm } from './shared-backend-detail-page/use-backend-edit-form.js';
-import { useBackendMutations } from './shared-backend-detail-page/use-backend-mutations.js';
 
 const routeApi = getRouteApi('/shared-backends/$id');
 
@@ -42,41 +31,15 @@ export default function SharedBackendDetailPage() {
   const { id } = routeApi.useParams();
   const { tab } = routeApi.useSearch();
   const navigate = useNavigate({ from: '/shared-backends/$id' });
-  const capabilities = useAuthStore((state) => state.user?.capabilities ?? []);
-  const canManageSharedBackends = capabilities.includes(Capability.ManageSharedBackends);
-  const canManageSharedVolumes = capabilities.includes(Capability.ManageSharedVolumes);
-  const [deleteOpen, setDeleteOpen] = useState(false);
-  const [inspectTarget, setInspectTarget] = useState<SharedVolumeDto | null>(null);
-  const [pageConflict, setPageConflict] = useState<SharedBackendFsidConflict | null>(null);
-  const [identityOpen, setIdentityOpen] = useState(false);
-
-  const selectTab = (next: SharedBackendDetailTab) => {
-    void navigate({ search: (prev) => ({ ...prev, tab: next }) });
-  };
-
+  const canManageSharedBackends = useAuthStore(
+    (state) => state.user?.capabilities.includes(Capability.ManageSharedBackends) ?? false,
+  );
+  const [conflict, setConflict] = useState<SharedBackendFsidConflict | null>(null);
   const backendQuery = useQuery({
     queryKey: queryKeys.sharedBackends.detail(id),
     queryFn: () => api.get<SharedBackendDto>(`/shared-backends/${id}?scope=all`),
   });
-  const volumesQuery = useQuery({
-    queryKey: queryKeys.sharedVolumes.admin,
-    queryFn: () => api.get<SharedVolumeDto[]>('/shared-volumes?scope=all'),
-    enabled: tab === 'volumes' && canManageSharedVolumes,
-    refetchInterval: (query) => refetchWhileInProgress(query.state, {
-      steadyIntervalMs: 5_000,
-      isSettled: (volumes) => volumes.every((volume) => !volumeInProgress(volume)),
-    }),
-  });
-
-  const { patchBackend, patchExecutor, discoverExecutors, deleteBackend } = useBackendMutations({
-    id,
-    onConflict: setPageConflict,
-    onIdentitySaved: () => setIdentityOpen(false),
-    onDeleted: () => setDeleteOpen(false),
-  });
-
   const backend = backendQuery.data;
-  const edit = useBackendEditForm(backend, patchBackend);
   const title = backend?.displayName ?? backend?.name ?? '共享存储';
 
   return (
@@ -89,13 +52,11 @@ export default function SharedBackendDetailPage() {
         ]}
         actions={
           backend && canManageSharedBackends ? (
-            <MoreActions actions={[{ label: '删除后端', icon: Trash2, destructive: true, onSelect: () => setDeleteOpen(true) }]} />
+            <DeleteBackendAction backend={backend} onConflict={setConflict} />
           ) : undefined
         }
       />
-      {pageConflict && (
-        <FsidConflictAlert conflict={pageConflict} onDismiss={() => setPageConflict(null)} />
-      )}
+      {conflict && <FsidConflictAlert conflict={conflict} onDismiss={() => setConflict(null)} />}
       <QueryView
         query={backendQuery}
         resourceName="共享后端"
@@ -105,7 +66,9 @@ export default function SharedBackendDetailPage() {
         {(loaded) => (
           <Tabs
             value={tab}
-            onValueChange={(value) => selectTab(value as SharedBackendDetailTab)}
+            onValueChange={(value) => {
+              void navigate({ search: (prev) => ({ ...prev, tab: value as SharedBackendDetailTab }) });
+            }}
             data-testid="shared-backend-detail-tabs"
           >
             <TabsList>
@@ -116,59 +79,17 @@ export default function SharedBackendDetailPage() {
               ))}
             </TabsList>
             <TabsContent value="overview" className="space-y-6">
-              <BackendOverviewTab
-                backend={loaded}
-                canManage={canManageSharedBackends}
-                onEdit={() => {
-                  edit.reset(loaded);
-                  setIdentityOpen(true);
-                }}
-              />
+              <BackendOverviewTab backend={loaded} onConflict={setConflict} />
             </TabsContent>
             <TabsContent value="executors" className="space-y-6">
-              <BackendExecutorsTab
-                executors={loaded.executors ?? []}
-                canManage={canManageSharedBackends}
-                discoverExecutors={discoverExecutors}
-                patchExecutor={patchExecutor}
-              />
+              <BackendExecutorsTab backend={loaded} onConflict={setConflict} />
             </TabsContent>
             <TabsContent value="volumes">
-              <BackendVolumesTab
-                canManageVolumes={canManageSharedVolumes}
-                loaded={volumesQuery.data !== undefined}
-                failed={volumesQuery.isError}
-                volumes={(volumesQuery.data ?? []).filter((volume) => volume.sharedBackendId === loaded.id)}
-                onInspect={setInspectTarget}
-              />
+              <BackendVolumesTab backendId={loaded.id} />
             </TabsContent>
           </Tabs>
         )}
       </QueryView>
-      {identityOpen ? (
-        <EditBackendDialog
-          backend={backend}
-          displayName={edit.displayName}
-          overcommitRatio={edit.overcommitRatio}
-          pending={patchBackend.isPending}
-          onDisplayNameChange={edit.setDisplayName}
-          onOvercommitChange={edit.setOvercommitRatio}
-          onSave={edit.save}
-          onClose={() => setIdentityOpen(false)}
-        />
-      ) : null}
-      <SharedVolumeCatalogInspectDialog
-        volume={inspectTarget}
-        open={Boolean(inspectTarget)}
-        onOpenChange={(open) => { if (!open) setInspectTarget(null); }}
-      />
-      <DeleteBackendDialog
-        backend={backend}
-        open={deleteOpen}
-        pending={deleteBackend.isPending}
-        onConfirm={() => deleteBackend.mutate()}
-        onClose={() => setDeleteOpen(false)}
-      />
     </Page>
   );
 }

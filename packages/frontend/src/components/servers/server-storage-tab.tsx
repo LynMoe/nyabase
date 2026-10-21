@@ -1,6 +1,6 @@
 import { useState, type ReactNode } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { Capability, type StoragePoolDto, type VolumeDto } from '@nyabase/common';
+import { Capability, type VolumeDto } from '@nyabase/common';
 import { api } from '../../lib/api.js';
 import { errorMessage } from '../../lib/api-error.js';
 import { ConfirmDialog } from '../layout/confirm-dialog.js';
@@ -19,7 +19,6 @@ export function ServerStorageTab({
   children,
 }: {
   serverId: string;
-  pools: StoragePoolDto[];
   children: ReactNode;
 }) {
   const queryClient = useQueryClient();

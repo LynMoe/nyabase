@@ -1,7 +1,12 @@
-import type { StorageDiscoverIssueDto, StoragePoolCapabilityDto } from '@nyabase/common';
-import { FailureCode } from '@nyabase/common';
+import {
+  FailureCode,
+  type SharedBackendDto,
+  type StorageDiscoverIssueDto,
+  type StoragePoolCapabilityDto,
+  StoragePoolDriver,
+} from '@nyabase/common';
 import { ApiError, apiErrorDetails } from './api-error.js';
-import { formatBytes, formatGib } from './utils.js';
+import { formatBytes, formatGib, GIB } from './utils.js';
 
 export type ShrinkPath = 'grow' | 'unchanged' | 'online' | 'requires_stop' | 'never';
 
@@ -209,4 +214,56 @@ export function formatDetachProgress(
     return `已卸载 ${succeeded}/${total}`;
   }
   return `卸载成功 ${succeeded} 个，第 ${failureIndex + 1} 个失败${failureMessage ? `：${failureMessage}` : ''}`;
+}
+
+export function backendLacksOnlineExecutor(
+  backend: Pick<SharedBackendDto, 'hasOnlineExecutor'>,
+): boolean {
+  return backend.hasOnlineExecutor !== true;
+}
+
+export function storagePoolSourceKind(driver: StoragePoolDriver): '挂载点' | '设备' {
+  return driver === StoragePoolDriver.Dir ? '挂载点' : '设备';
+}
+
+/** Belt helper: leaked executor DTOs must still be rejected as local. */
+export function isLocalStoragePool(pool: {
+  shareable: boolean;
+  driver: string;
+  sharedBackendId: string | null;
+}): boolean {
+  return pool.shareable === false
+    && pool.driver !== StoragePoolDriver.CephFs
+    && pool.sharedBackendId === null;
+}
+
+/** One-line shrink capability of a volume, for detail dialogs. */
+export function shrinkLabel(volume: { capability: StoragePoolCapabilityDto }): string {
+  if (volume.capability.shrinkNever) return '不可缩容';
+  if (volume.capability.shrinkRequiresStop) return '缩容需卸载';
+  if (volume.capability.shrinkOnline) return '可在线缩容';
+  return '缩容受用量约束';
+}
+
+/**
+ * What a typed GiB size means for an existing volume (or for a new one when
+ * `editing` is undefined): the byte size, the kind of change, the usage-floor
+ * problem and whether the pool cannot enforce quotas for a resize.
+ */
+export function deriveSizeChange(
+  editing: { capability: StoragePoolCapabilityDto; sizeBytes: number; usedBytes: number | null } | undefined,
+  sizeGiB: string,
+) {
+  const parsedGiB = Number(sizeGiB);
+  const nextSize = Number.isFinite(parsedGiB) && parsedGiB > 0 ? Math.round(parsedGiB * GIB) : NaN;
+  const path = editing && Number.isFinite(nextSize)
+    ? classifySizeChange(editing.capability, editing.sizeBytes, nextSize)
+    : 'unchanged';
+  const floorError = editing && (path === 'online' || path === 'requires_stop')
+    ? validateShrinkFloor(editing.capability, nextSize, editing.usedBytes, editing.sizeBytes)
+    : null;
+  const editQuotaBlocked = editing != null
+    && path !== 'unchanged'
+    && isQuotaIneffectiveCapability(editing.capability);
+  return { nextSize, path, floorError, editQuotaBlocked };
 }

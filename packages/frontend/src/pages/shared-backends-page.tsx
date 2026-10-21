@@ -3,38 +3,34 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Link, useNavigate } from '@tanstack/react-router';
 import { Plus, RefreshCw } from 'lucide-react';
 import {
-  zCreateSharedBackendRequest,
   type CreateSharedBackendRequest,
   type SharedBackendDto,
+  zCreateSharedBackendRequest,
 } from '@nyabase/common';
 import { api } from '../lib/api.js';
 import { errorMessage } from '../lib/api-error.js';
 import { Button } from '../components/ui/button.js';
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '../components/ui/table.js';
 import {
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableHeader,
-  TableRow,
-} from '../components/ui/table.js';
-import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '../components/ui/dialog.js';
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from '../components/ui/dialog.js';
 import { Input } from '../components/ui/input.js';
 import { FormField } from '../components/layout/form-field.js';
 import { EmptyState } from '../components/layout/empty-state.js';
-import { Page } from '../components/layout/page.js';
-import { PageHeader } from '../components/layout/page-header.js';
+import { Page, PageHeader } from '../components/layout/page-header.js';
 import { QueryView } from '../components/layout/query-view.js';
 import { SectionCard } from '../components/layout/section-card.js';
 import { TechnicalId } from '../components/refs/technical-id.js';
 import { FsidConflictAlert } from '../components/storage/fsid-conflict-alert.js';
-import { formatPercent, sharedBackendAvailableBytes, formatGib } from '../lib/utils.js';
+import { formatGib, formatPercent, sharedBackendAvailableBytes } from '../lib/utils.js';
 import { toast } from '../hooks/use-toast.js';
 import { queryKeys } from '../lib/query-keys.js';
-import {
-  parseSharedBackendFsidConflict,
-  type SharedBackendFsidConflict,
-} from '../lib/storage-shrink.js';
+import { parseSharedBackendFsidConflict, type SharedBackendFsidConflict } from '../lib/storage-shrink.js';
 
 export default function SharedBackendsPage() {
   const queryClient = useQueryClient();

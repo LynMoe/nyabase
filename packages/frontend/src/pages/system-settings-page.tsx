@@ -1,15 +1,17 @@
 import { useQuery } from '@tanstack/react-query';
 import { RefreshCw, Save } from 'lucide-react';
-import { type SystemSettingsDto } from '@nyabase/common';
+import type { SystemSettingsDto } from '@nyabase/common';
 import { api } from '../lib/api.js';
 import { Button } from '../components/ui/button.js';
-import { Page } from '../components/layout/page.js';
-import { PageHeader } from '../components/layout/page-header.js';
+import { Page, PageHeader } from '../components/layout/page-header.js';
 import { QueryView } from '../components/layout/query-view.js';
 import { TechnicalId } from '../components/refs/technical-id.js';
 import { queryKeys } from '../lib/query-keys.js';
-import { EditableSettingsSection, EffectiveSettingsSection } from './system-settings-page/settings-sections.js';
-import { useSettingsDraft } from './system-settings-page/use-settings-draft.js';
+import {
+  EditableSettingsSection,
+  EffectiveSettingsSection,
+} from './system-settings-page/settings-sections.js';
+import { useSettingsDraft } from './system-settings-page/settings-sections.js';
 
 export default function SystemSettingsPage() {
   const settingsQuery = useQuery({

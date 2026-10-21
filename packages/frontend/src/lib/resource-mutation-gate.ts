@@ -1,3 +1,5 @@
+import { useSyncExternalStore } from 'react';
+
 /** A synchronous per-resource gate; React render timing cannot admit a second mutation. */
 export interface ResourceMutationGate {
   begin(resourceId: string): boolean;
@@ -71,4 +73,16 @@ export async function runGatedMutation(
   } finally {
     resourceMutationGate.end(id);
   }
+}
+
+function subscribe(onStoreChange: () => void): () => void {
+  return resourceMutationGate.subscribe(onStoreChange);
+}
+
+export function useResourceMutationPending(id: string): boolean {
+  return useSyncExternalStore(
+    subscribe,
+    () => resourceMutationGate.has(id),
+    () => resourceMutationGate.has(id),
+  );
 }

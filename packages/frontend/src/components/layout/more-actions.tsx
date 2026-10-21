@@ -1,5 +1,4 @@
-import type { LucideIcon } from 'lucide-react';
-import { MoreHorizontal } from 'lucide-react';
+import { type LucideIcon, MoreHorizontal } from 'lucide-react';
 import { Button } from '../ui/button.js';
 import {
   DropdownMenu,

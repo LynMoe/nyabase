@@ -14,20 +14,18 @@ import {
 } from '../components/ui/table.js';
 import { ConfirmDialog } from '../components/layout/confirm-dialog.js';
 import { EmptyState } from '../components/layout/empty-state.js';
-import { Page } from '../components/layout/page.js';
-import { PageHeader } from '../components/layout/page-header.js';
+import { Page, PageHeader } from '../components/layout/page-header.js';
 import { QueryView } from '../components/layout/query-view.js';
 import { SectionCard } from '../components/layout/section-card.js';
 import { queryKeys } from '../lib/query-keys.js';
 import { toast } from '../hooks/use-toast.js';
 import { emptyIfNotFound, httpProxyErrorMessage } from '../lib/http-proxy.js';
-import { BindingFormDialog } from './http-proxy-page/binding-form-dialog.js';
-import { BindingRow } from './http-proxy-page/binding-row.js';
+import { BindingFormDialog, BindingRow } from './http-proxy-page/binding-parts.js';
 
 export default function HttpProxyPage() {
   const queryClient = useQueryClient();
   const [createOpen, setCreateOpen] = useState(false);
-  const [editTarget, setEditTarget] = useState<HttpProxyBindingDto | null>(null);
+  const [editTarget, setEditTarget] = useState<{ binding: HttpProxyBindingDto; open: boolean } | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<HttpProxyBindingDto | null>(null);
   const bindingsQuery = useQuery({
     queryKey: queryKeys.httpProxy.bindings,
@@ -107,7 +105,7 @@ export default function HttpProxyPage() {
                 <BindingRow
                   key={binding.id}
                   binding={binding}
-                  onEdit={() => setEditTarget(binding)}
+                  onEdit={() => setEditTarget({ binding, open: true })}
                   onDelete={() => setDeleteTarget(binding)}
                 />
               ))}
@@ -119,10 +117,10 @@ export default function HttpProxyPage() {
       <BindingFormDialog pools={pools} open={createOpen} onOpenChange={setCreateOpen} />
       {editTarget && (
         <BindingFormDialog
-          binding={editTarget}
+          binding={editTarget.binding}
           pools={pools}
-          open
-          onOpenChange={(open) => { if (!open) setEditTarget(null); }}
+          open={editTarget.open}
+          onOpenChange={(open) => setEditTarget({ ...editTarget, open })}
         />
       )}
       <ConfirmDialog

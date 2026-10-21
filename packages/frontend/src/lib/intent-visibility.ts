@@ -127,3 +127,10 @@ export async function lookupLatestIntentFailure(listPath: string): Promise<strin
     return null;
   }
 }
+
+/** Badge colour of an intent status. */
+export function statusBadgeVariant(status: string) {
+  if (status === IntentStatus.Succeeded) return 'success' as const;
+  if (status === IntentStatus.Failed) return 'destructive' as const;
+  return 'warning' as const;
+}

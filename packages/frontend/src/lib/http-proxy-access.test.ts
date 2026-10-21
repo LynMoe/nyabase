@@ -4,7 +4,7 @@ import {
   HTTP_PROXY_STATUS_CAPABILITIES,
   canManageHttpProxyPools,
   canViewHttpProxyStatus,
-} from './http-proxy-access.js';
+} from './proxy-access.js';
 
 describe('HTTP proxy page access', () => {
   it.each([

@@ -1,14 +1,14 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { Link, useNavigate } from '@tanstack/react-router';
-import {
-  type ListScope,
-  type PerformanceAdminUsageResponse,
-  type PerformanceMultiSeriesResponse,
-  type PerformanceHostSnapshot,
-  type PerformancePersonRow,
-  type PerformanceRange,
-  type PerformanceUsageResponse,
+import type {
+  ListScope,
+  PerformanceAdminUsageResponse,
+  PerformanceHostSnapshot,
+  PerformanceMultiSeriesResponse,
+  PerformancePersonRow,
+  PerformanceRange,
+  PerformanceUsageResponse,
 } from '@nyabase/common';
 import { api } from '../lib/api.js';
 import { queryKeys } from '../lib/query-keys.js';
@@ -16,8 +16,7 @@ import { queryPollInterval } from '../lib/query-lifecycle.js';
 import { scopedPath } from '../lib/scoped-paths.js';
 import { formatBytesCompact, formatPercent, formatRate, relativeTime } from '../lib/utils.js';
 import { containerStatusLabel, lifecyclePhaseLabel } from '../lib/status-labels.js';
-import { Page } from '../components/layout/page.js';
-import { PageHeader } from '../components/layout/page-header.js';
+import { Page, PageHeader } from '../components/layout/page-header.js';
 import { QueryView } from '../components/layout/query-view.js';
 import { QueryErrorState } from '../components/query-state.js';
 import { SectionCard } from '../components/layout/section-card.js';
@@ -26,7 +25,7 @@ import { Progress } from '../components/ui/progress.js';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '../components/ui/select.js';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '../components/ui/table.js';
 import { LinkedCharts } from '../components/performance/linked-charts.js';
-import { useGpuNames } from '../components/performance/gpu-names.js';
+import { useGpuNames } from '../components/performance/host-occupancy.js';
 
 const RANGES: Array<{ id: PerformanceRange; label: string }> = [
   { id: '15m', label: '15分钟' },

@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { runSessionTermination } from './session-termination.js';
+import { runSessionTermination } from './auth-session.js';
 
 describe('browser session termination orchestration', () => {
   it('revokes exactly the session captured before local cleanup', async () => {

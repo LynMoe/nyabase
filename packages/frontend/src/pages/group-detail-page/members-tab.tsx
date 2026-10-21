@@ -1,7 +1,8 @@
 import { useState } from 'react';
 import { Link } from '@tanstack/react-router';
 import { Plus } from 'lucide-react';
-import type { GroupMemberDto } from '@nyabase/common';
+import { useMutation } from '@tanstack/react-query';
+import { Capability, type GroupMemberDto } from '@nyabase/common';
 import { Button } from '../../components/ui/button.js';
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from '../../components/ui/dialog.js';
 import {
@@ -21,26 +22,36 @@ import {
 } from '../../components/ui/table.js';
 import { FormField } from '../../components/layout/form-field.js';
 import { SectionCard } from '../../components/layout/section-card.js';
+import { ConfirmDialog } from '../../components/layout/confirm-dialog.js';
+import { toast } from '../../hooks/use-toast.js';
+import { api } from '../../lib/api.js';
+import { errorMessage } from '../../lib/api-error.js';
+import { useCatalogUsers, useGroupMembers, useInvalidateGroup } from '../../lib/group-queries.js';
+import { useAuthStore } from '../../store/auth.js';
 
-export type CatalogUser = {
-  id: string;
-  username: string;
-  displayName: string;
-  status: string;
-};
-
-export function GroupMembersTab({
-  members,
-  canManage,
-  onAdd,
-  onRemove,
-}: {
-  members: GroupMemberDto[];
-  canManage: boolean;
-  onAdd: () => void;
-  onRemove: (member: { userId: string; label: string }) => void;
-}) {
+export function GroupMembersTab({ groupId, memberFallback }: { groupId: string; memberFallback: GroupMemberDto[] }) {
+  const canManage = useAuthStore(
+    (state) => state.user?.capabilities.includes(Capability.ManageGroups) ?? false,
+  );
+  const [addOpen, setAddOpen] = useState(false);
+  const [removeTarget, setRemoveTarget] = useState<{ userId: string; label: string } | null>(null);
+  const members = useGroupMembers(groupId, canManage).data ?? memberFallback;
+  const invalidate = useInvalidateGroup(groupId);
+  const removeMember = useMutation({
+    mutationFn: (userId: string) => api.delete<void>(`/admin/groups/${groupId}/members/${userId}`),
+    onSuccess: () => {
+      toast({ title: '已移除成员' });
+      setRemoveTarget(null);
+      invalidate();
+    },
+    onError: (error) => toast({ title: '移除成员失败', description: errorMessage(error), variant: 'destructive' }),
+  });
+  // Warm the user list so the add dialog opens already filled.
+  useCatalogUsers(canManage);
+  const onAdd = () => setAddOpen(true);
+  const onRemove = setRemoveTarget;
   return (
+    <>
     <SectionCard
       title="成员"
       description={
@@ -103,22 +114,50 @@ export function GroupMembersTab({
         </Table>
       )}
     </SectionCard>
+    {addOpen ? (
+      <AddGroupMemberDialog
+        groupId={groupId}
+        memberIds={new Set(members.map((member) => member.userId))}
+        onClose={() => setAddOpen(false)}
+      />
+    ) : null}
+    <ConfirmDialog
+      open={Boolean(removeTarget)}
+      title="移除成员？"
+      description={`将把「${removeTarget?.label}」移出本组。该用户将立即失去本组带来的授权（若仍有其他授权则不受影响）。`}
+      confirmLabel="确认移除"
+      pendingLabel="移除中..."
+      pending={removeMember.isPending}
+      onConfirm={() => { if (removeTarget) removeMember.mutate(removeTarget.userId); }}
+      onOpenChange={(open) => { if (!open) setRemoveTarget(null); }}
+    />
+    </>
   );
 }
 
-export function AddGroupMemberDialog({
-  candidates,
-  usersQuery,
-  pending,
-  onSubmit,
-  onOpenChange,
+function AddGroupMemberDialog({
+  groupId,
+  memberIds,
+  onClose,
 }: {
-  candidates: CatalogUser[];
-  usersQuery: { isLoading: boolean; isError: boolean; refetch: () => void };
-  pending: boolean;
-  onSubmit: (userId: string) => void;
-  onOpenChange: (open: boolean) => void;
+  groupId: string;
+  memberIds: ReadonlySet<string>;
+  onClose: () => void;
 }) {
+  const usersQuery = useCatalogUsers(true);
+  const invalidate = useInvalidateGroup(groupId);
+  const addMember = useMutation({
+    mutationFn: (userId: string) => api.post<{ changed: boolean }>(`/admin/groups/${groupId}/members`, { userId }),
+    onSuccess: () => {
+      toast({ title: '已添加成员' });
+      onClose();
+      invalidate();
+    },
+    onError: (error) => toast({ title: '添加成员失败', description: errorMessage(error), variant: 'destructive' }),
+  });
+  const pending = addMember.isPending;
+  const candidates = (usersQuery.data ?? []).filter((user) => !memberIds.has(user.id));
+  const onOpenChange = (open: boolean) => { if (!open) onClose(); };
   const [memberUserId, setMemberUserId] = useState('');
   const canChoose = !usersQuery.isLoading && !usersQuery.isError && candidates.length > 0;
   return (
@@ -135,7 +174,7 @@ export function AddGroupMemberDialog({
             <button
               type="button"
               className="ml-2 underline"
-              onClick={() => { usersQuery.refetch(); }}
+              onClick={() => { void usersQuery.refetch(); }}
             >
               重试
             </button>
@@ -167,7 +206,7 @@ export function AddGroupMemberDialog({
           <Button variant="outline" onClick={() => onOpenChange(false)}>{canChoose ? '取消' : '关闭'}</Button>
           {canChoose ? (
             <Button
-              onClick={() => onSubmit(memberUserId)}
+              onClick={() => addMember.mutate(memberUserId)}
               disabled={!memberUserId || pending}
             >
               {pending ? '添加中...' : '添加'}

@@ -2,17 +2,20 @@ import { useEffect, useMemo, useRef } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import {
   canonicalPciAddress,
+  type GpuDevicesResponseDto,
   gpuDisplayLabel,
+  type GpuGrant,
+  type GpuSupportCheckDto,
+  type GpuSupportDto,
+  type ListScope,
   nextDefaultGpuSelection,
   permittedGpus,
-  type GpuDevicesResponseDto,
-  type GpuGrant,
-  type ListScope,
 } from '@nyabase/common';
 import { api } from '../../lib/api.js';
 import { queryKeys } from '../../lib/query-keys.js';
 import { scopedPath } from '../../lib/scoped-paths.js';
 import { Checkbox } from '../ui/checkbox.js';
+import { Badge } from '../ui/badge.js';
 
 /** `scope=all` is the full inventory; `scope=mine` is filtered by the caller's grant. */
 export function gpuDevicesPath(serverId: string, scope: ListScope): string {
@@ -142,6 +145,40 @@ export function GpuPicker({
           </div>
         </div>
       )}
+    </div>
+  );
+}
+
+function summary(supported: boolean | null): { label: string; variant: 'success' | 'destructive' | 'secondary' } {
+  if (supported === true) return { label: '可启用', variant: 'success' };
+  if (supported === false) return { label: '条件不足', variant: 'destructive' };
+  return { label: '无法检测', variant: 'secondary' };
+}
+
+function checkStatus(status: GpuSupportCheckDto['status']): string {
+  if (status === 'pass') return '通过';
+  if (status === 'fail') return '未通过';
+  return '未知';
+}
+
+export function ServerGpuSupport({ support }: { support: GpuSupportDto }) {
+  const badge = summary(support.supported);
+  return (
+    <div className="space-y-1.5" data-testid="server-gpu-support">
+      <div className="flex items-center gap-2">
+        <p className="text-xs text-muted-foreground">本机检测</p>
+        <Badge variant={badge.variant} data-testid="server-gpu-support-status">
+          {badge.label}
+        </Badge>
+      </div>
+      <ul className="space-y-0.5 text-xs text-muted-foreground">
+        {support.checks.map((check) => (
+          <li key={check.id} data-check-id={check.id} data-check-status={check.status}>
+            {check.label} · {checkStatus(check.status)}
+            {check.detail ? ` · ${check.detail}` : ''}
+          </li>
+        ))}
+      </ul>
     </div>
   );
 }

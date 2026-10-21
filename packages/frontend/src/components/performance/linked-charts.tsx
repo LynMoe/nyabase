@@ -1,20 +1,16 @@
-import {
-  Area,
-  AreaChart,
-  CartesianGrid,
-  ResponsiveContainer,
-  Tooltip,
-  XAxis,
-  YAxis,
-} from 'recharts';
-import type { PerformanceChartSeries, PerformanceGpuChartSeries, PerformanceMultiSeriesResponse, PerformanceSeriesLine } from '@nyabase/common';
-import { formatBytesCompact, formatPercent, formatRate } from '../../lib/utils.js';
+import { Area, AreaChart, CartesianGrid, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts';
+import type {
+  PerformanceChartSeries,
+  PerformanceGpuChartSeries,
+  PerformanceMultiSeriesResponse,
+  PerformanceSeriesLine,
+} from '@nyabase/common';
 import { ChartLine } from 'lucide-react';
+import { formatBytesCompact, formatPercent, formatRate } from '../../lib/utils.js';
 import { EmptyState } from '../layout/empty-state.js';
 import { SectionCard } from '../layout/section-card.js';
-import { formatChartAxis } from './chart-format.js';
-import { ChartHover } from './chart-hover.js';
-import { gpuChartTitle } from './gpu-names.js';
+import { ChartHover, formatChartAxis } from './chart-hover.js';
+import { gpuChartTitle } from './host-occupancy.js';
 
 const COLORS = [
   'hsl(221 83% 53%)',

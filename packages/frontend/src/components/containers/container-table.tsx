@@ -1,22 +1,23 @@
 import { Link } from '@tanstack/react-router';
 import { TriangleAlert } from 'lucide-react';
 import type { ContainerDto } from '@nyabase/common';
+import { useState } from 'react';
 import { ContainerActionBar, type ContainerBarAction } from './container-action-bar.js';
 import { StatusBadge } from '../layout/status-badge.js';
-import {
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableHeader,
-  TableRow,
-} from '../ui/table.js';
-import { useResourceMutationPending } from '../../hooks/use-resource-mutation-gate.js';
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '../ui/table.js';
+import { useResourceMutationPending } from '../../lib/resource-mutation-gate.js';
 import { containerLifecyclePending, containerStatusPending } from '../../lib/in-progress.js';
 import { formatBytes, formatCpu } from '../../lib/utils.js';
 import { containerStatusLabel, lifecyclePhaseLabel } from '../../lib/status-labels.js';
 import { ResourceRef } from '../refs/resource-ref.js';
-import { useIsNarrow } from '../../hooks/use-media-query.js';
+import { useIsNarrow } from '../../hooks/use-dom-state.js';
+import { SectionCard } from '../layout/section-card.js';
+import { ListSearch, SegmentedFilter } from '../layout/list-search.js';
+import {
+  type ContainerStatusFilter,
+  containerStatusOptions,
+  filterContainers,
+} from '../../lib/container-filter.js';
 
 export function ContainerTable({
   containers,
@@ -199,5 +200,49 @@ function ContainerCard({
         {formatCpu(container.cpuMillis)} / {formatBytes(container.memBytes)}
       </p>
     </li>
+  );
+}
+
+/** Container table with search and a status segment, shared by the user and admin lists. */
+export function ContainerList({
+  containers,
+  admin = false,
+  onAction,
+}: {
+  containers: ContainerDto[];
+  admin?: boolean;
+  onAction: (action: ContainerBarAction, container: ContainerDto) => void | Promise<void>;
+}) {
+  const [query, setQuery] = useState('');
+  const [status, setStatus] = useState<ContainerStatusFilter>('all');
+  const visible = filterContainers(containers, query, status);
+  const filtered = query.trim() !== '' || status !== 'all';
+  return (
+    <SectionCard
+      flush
+      toolbar={(
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <SegmentedFilter
+            label="按状态筛选"
+            value={status}
+            onChange={setStatus}
+            options={containerStatusOptions(containers)}
+          />
+          <ListSearch
+            value={query}
+            onChange={setQuery}
+            placeholder={admin ? '搜索名称、所有者、服务器、IP' : '搜索名称、服务器、IP'}
+          />
+        </div>
+      )}
+    >
+      <ContainerTable
+        containers={visible}
+        admin={admin}
+        showServerColumn
+        emptyLabel={filtered ? '没有符合条件的容器' : '暂无容器'}
+        onAction={onAction}
+      />
+    </SectionCard>
   );
 }

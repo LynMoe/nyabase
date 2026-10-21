@@ -9,7 +9,7 @@ import { Button } from '../ui/button.js';
 import { Select, SelectContent, SelectItem, SelectSeparator, SelectTrigger, SelectValue } from '../ui/select.js';
 import { QueryErrorState } from '../query-state.js';
 import { LinkedCharts } from './linked-charts.js';
-import { useGpuNames } from './gpu-names.js';
+import { useGpuNames } from './host-occupancy.js';
 
 const RANGES: Array<{ id: PerformanceRange; label: string }> = [
   { id: '15m', label: '15分钟' },

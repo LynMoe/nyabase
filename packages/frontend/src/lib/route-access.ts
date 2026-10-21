@@ -1,6 +1,5 @@
 import { ADMIN_INTENT_CAPABILITIES, Capability } from '@nyabase/common';
-import { HTTP_PROXY_STATUS_CAPABILITIES } from './http-proxy-access.js';
-import { SSH_PROXY_STATUS_CAPABILITIES } from './ssh-proxy-access.js';
+import { HTTP_PROXY_STATUS_CAPABILITIES, SSH_PROXY_STATUS_CAPABILITIES } from './proxy-access.js';
 
 /**
  * Who may open each admin surface: any one of the listed capabilities.

@@ -1,34 +1,35 @@
-import { useState, type ReactNode } from 'react';
-import type {
-  ServerDto,
-  ServerGrantDto,
-  SharedBackendDto,
-  SharedBackendGrantDto,
-  StoragePoolDto,
-  StoragePoolGrantDto,
-} from '@nyabase/common';
+import { type ReactNode, useState } from 'react';
+import type { ServerGrantDto, SharedBackendGrantDto, StoragePoolGrantDto } from '@nyabase/common';
 import { formatGibInput, formatVcpuInput } from '../../lib/utils.js';
 import { api } from '../../lib/api.js';
 import { useActionMutation } from '../../hooks/use-action-mutation.js';
-import { FormField } from '../layout/form-field.js';
-import { SelectField } from '../layout/select-field.js';
+import { FormField, SelectField } from '../layout/form-field.js';
 import { QueryLoadingState } from '../query-state.js';
 import { Button } from '../ui/button.js';
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from '../ui/dialog.js';
 import { Input } from '../ui/input.js';
 import { Switch } from '../ui/switch.js';
 import { ServerGrantGpu } from '../gpu/gpu-sections.js';
-import { truncateId } from '../refs/truncate-id.js';
+import { grantSubjectPath } from '../../lib/scoped-paths.js';
 import {
+  backendName,
   coresToMillis,
   defaultExpiryLocal,
   expirySummary,
   gibHint,
   gibToBytes,
+  grantablePools,
+  type GrantSubject,
   initialExpiry,
   isoOrNull,
+  poolName,
   serverName,
-} from './grant-format.js';
+  useGrantBackends,
+  useGrantPools,
+  useGrantServers,
+  useInvalidateGrants,
+  useSubjectGrants,
+} from './use-grant-panel-data.js';
 
 function ChoiceUnavailable({
   loading,
@@ -146,24 +147,21 @@ function GrantDialog({
   );
 }
 
-export type ChoiceState = { loading?: boolean; error?: boolean; onRetry?: () => void };
-
+/** Add (no `grant`) or edit one server grant of the subject. */
 export function ServerGrantDialog({
-  prefix,
+  subject,
   grant,
-  servers,
-  choice,
-  onSaved,
-  onOpenChange,
+  onClose,
 }: {
-  prefix: string;
-  /** Present when editing; absent when adding. */
+  subject: GrantSubject;
   grant?: ServerGrantDto;
-  servers: ServerDto[];
-  choice?: ChoiceState;
-  onSaved: () => void;
-  onOpenChange: (open: boolean) => void;
+  onClose: () => void;
 }) {
+  const serversQuery = useGrantServers();
+  const grantedIds = new Set((useSubjectGrants(subject, 'servers').data ?? []).map((row) => row.serverId));
+  const invalidate = useInvalidateGrants(subject);
+  const allServers = serversQuery.data ?? [];
+  const servers = grant ? allServers : allServers.filter((server) => !grantedIds.has(server.id));
   const [cpuCores, setCpuCores] = useState(() => grant?.cpuMillis == null ? '' : formatVcpuInput(grant.cpuMillis));
   const [memGib, setMemGib] = useState(() => grant?.memBytes == null ? '' : formatGibInput(grant.memBytes));
   const [diskGib, setDiskGib] = useState(() => grant?.diskBytes == null ? '' : formatGibInput(grant.diskBytes));
@@ -177,25 +175,27 @@ export function ServerGrantDialog({
       idPrefix={idPrefix}
       wide
       target={grant
-        ? { mode: 'edit', id: grant.serverId, name: servers.find((item) => item.id === grant.serverId)?.name ?? truncateId(grant.serverId) }
+        ? { mode: 'edit', id: grant.serverId, name: serverName(grant.serverId, allServers) }
         : {
           mode: 'create',
           label: '服务器',
           placeholder: '选择服务器',
           options: servers.map((server) => [server.id, server.name]),
           empty: '没有可添加的服务器。',
-          ...choice,
+          loading: serversQuery.isLoading,
+          error: serversQuery.isError,
+          onRetry: () => { void serversQuery.refetch(); },
         }}
       onTargetChange={() => setGpuPciAddresses([])}
-      save={(serverId) => api.put<ServerGrantDto>(`${prefix}/server-grants/${serverId}`, {
+      save={(serverId) => api.put<ServerGrantDto>(`${grantSubjectPath(subject.kind, subject.id)}/server-grants/${serverId}`, {
         cpuMillis: coresToMillis(cpuCores),
         memBytes: gibToBytes(memGib),
         diskBytes: gibToBytes(diskGib),
         gpuPciAddresses,
         expiresAt: isoOrNull(expiresAt),
       })}
-      onSaved={onSaved}
-      onOpenChange={onOpenChange}
+      onSaved={() => { onClose(); invalidate(); }}
+      onOpenChange={(open) => { if (!open) onClose(); }}
     >
       {(serverId) => (
         <>
@@ -207,7 +207,7 @@ export function ServerGrantDialog({
           {serverId ? (
             <ServerGrantGpu
               serverId={serverId}
-              gpuEnabled={servers.find((server) => server.id === serverId)?.gpuEnabled === true}
+              gpuEnabled={allServers.find((server) => server.id === serverId)?.gpuEnabled === true}
               value={gpuPciAddresses}
               onChange={setGpuPciAddresses}
             />
@@ -219,27 +219,25 @@ export function ServerGrantDialog({
   );
 }
 
+/** Add (no `grant`) or edit one storage pool grant of the subject. */
 export function PoolGrantDialog({
-  prefix,
+  subject,
   grant,
-  title,
-  pools,
-  servers,
-  hasServerGrants,
-  choice,
-  onSaved,
-  onOpenChange,
+  onClose,
 }: {
-  prefix: string;
+  subject: GrantSubject;
   grant?: StoragePoolGrantDto;
-  title?: string;
-  pools: StoragePoolDto[];
-  servers: ServerDto[];
-  hasServerGrants?: boolean;
-  choice?: ChoiceState;
-  onSaved: () => void;
-  onOpenChange: (open: boolean) => void;
+  onClose: () => void;
 }) {
+  const serversQuery = useGrantServers();
+  const poolsQuery = useGrantPools();
+  const serverGrants = useSubjectGrants(subject, 'servers').data ?? [];
+  const poolGrants = useSubjectGrants(subject, 'pools').data ?? [];
+  const invalidate = useInvalidateGrants(subject);
+  const servers = serversQuery.data ?? [];
+  const allPools = poolsQuery.data ?? [];
+  const grantedServerIds = new Set(serverGrants.map((row) => row.serverId));
+  const pools = grant ? allPools : grantablePools(allPools, grantedServerIds, poolGrants);
   const [expiresAt, setExpiresAt] = useState(() => initialExpiry(grant?.expiresAt));
   const idPrefix = grant ? `grant-pool-${grant.poolId}` : 'grant-pool';
   return (
@@ -247,7 +245,7 @@ export function PoolGrantDialog({
       noun="存储池授权"
       idPrefix={idPrefix}
       target={grant
-        ? { mode: 'edit', id: grant.poolId, name: title ?? truncateId(grant.poolId) }
+        ? { mode: 'edit', id: grant.poolId, name: poolName(grant.poolId, allPools, servers) }
         : {
           mode: 'create',
           label: '存储池',
@@ -256,37 +254,41 @@ export function PoolGrantDialog({
             pool.id,
             `${pool.displayName ?? pool.incusName} · ${serverName(pool.serverId, servers)}`,
           ]),
-          empty: hasServerGrants ? '没有可添加的存储池。' : '请先添加服务器授权。',
-          ...choice,
+          empty: grantedServerIds.size > 0 ? '没有可添加的存储池。' : '请先添加服务器授权。',
+          loading: serversQuery.isLoading || poolsQuery.isLoading,
+          error: serversQuery.isError || poolsQuery.isError,
+          onRetry: () => {
+            void serversQuery.refetch();
+            void poolsQuery.refetch();
+          },
         }}
-      save={(poolId) => api.put<StoragePoolGrantDto>(`${prefix}/storage-pool-grants/${poolId}`, {
-        expiresAt: isoOrNull(expiresAt),
-      })}
-      onSaved={onSaved}
-      onOpenChange={onOpenChange}
+      save={(poolId) => api.put<StoragePoolGrantDto>(
+        `${grantSubjectPath(subject.kind, subject.id)}/storage-pool-grants/${poolId}`,
+        { expiresAt: isoOrNull(expiresAt) },
+      )}
+      onSaved={() => { onClose(); invalidate(); }}
+      onOpenChange={(open) => { if (!open) onClose(); }}
     >
       {() => <GrantExpiryInput id={`${idPrefix}-expires-at`} value={expiresAt} onChange={setExpiresAt} />}
     </GrantDialog>
   );
 }
 
+/** Add (no `grant`) or edit one shared storage grant of the subject. */
 export function BackendGrantDialog({
-  prefix,
+  subject,
   grant,
-  title,
-  backends,
-  choice,
-  onSaved,
-  onOpenChange,
+  onClose,
 }: {
-  prefix: string;
+  subject: GrantSubject;
   grant?: SharedBackendGrantDto;
-  title?: string;
-  backends: SharedBackendDto[];
-  choice?: ChoiceState;
-  onSaved: () => void;
-  onOpenChange: (open: boolean) => void;
+  onClose: () => void;
 }) {
+  const backendsQuery = useGrantBackends();
+  const grantedIds = new Set((useSubjectGrants(subject, 'backends').data ?? []).map((row) => row.sharedBackendId));
+  const invalidate = useInvalidateGrants(subject);
+  const allBackends = backendsQuery.data ?? [];
+  const backends = grant ? allBackends : allBackends.filter((backend) => !grantedIds.has(backend.id));
   const [sharedLimitGib, setSharedLimitGib] = useState(() => (grant ? formatGibInput(grant.limitBytes) : ''));
   const [expiresAt, setExpiresAt] = useState(() => initialExpiry(grant?.expiresAt));
   const idPrefix = grant ? `grant-backend-${grant.sharedBackendId}` : 'grant-backend';
@@ -296,25 +298,27 @@ export function BackendGrantDialog({
       idPrefix={idPrefix}
       canSave={Boolean(sharedLimitGib)}
       target={grant
-        ? { mode: 'edit', id: grant.sharedBackendId, name: title ?? truncateId(grant.sharedBackendId) }
+        ? { mode: 'edit', id: grant.sharedBackendId, name: backendName(grant.sharedBackendId, allBackends) }
         : {
           mode: 'create',
           label: '共享存储',
           placeholder: '选择共享存储',
           options: backends.map((backend) => [backend.id, backend.displayName ?? backend.name]),
           empty: '没有可添加的共享存储。',
-          ...choice,
+          loading: backendsQuery.isLoading,
+          error: backendsQuery.isError,
+          onRetry: () => { void backendsQuery.refetch(); },
         }}
       save={(backendId) => {
         const limitBytes = gibToBytes(sharedLimitGib);
         if (limitBytes === null) return Promise.reject(new Error('请填写额度'));
-        return api.put<SharedBackendGrantDto>(`${prefix}/shared-backend-grants/${backendId}`, {
-          limitBytes,
-          expiresAt: isoOrNull(expiresAt),
-        });
+        return api.put<SharedBackendGrantDto>(
+          `${grantSubjectPath(subject.kind, subject.id)}/shared-backend-grants/${backendId}`,
+          { limitBytes, expiresAt: isoOrNull(expiresAt) },
+        );
       }}
-      onSaved={onSaved}
-      onOpenChange={onOpenChange}
+      onSaved={() => { onClose(); invalidate(); }}
+      onOpenChange={(open) => { if (!open) onClose(); }}
     >
       {() => (
         <>
@@ -326,7 +330,7 @@ export function BackendGrantDialog({
   );
 }
 
-export function GrantExpiryInput({ id, value, onChange }: { id: string; value: string; onChange: (value: string) => void }) {
+function GrantExpiryInput({ id, value, onChange }: { id: string; value: string; onChange: (value: string) => void }) {
   const enabled = value.length > 0;
   return (
     <div className="space-y-2">
@@ -356,7 +360,7 @@ export function GrantExpiryInput({ id, value, onChange }: { id: string; value: s
   );
 }
 
-export function NumberField({
+function NumberField({
   id,
   label,
   value,

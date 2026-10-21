@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { sanitizeInternalRedirect } from './internal-redirect.js';
+import { sanitizeInternalRedirect } from './auth-session.js';
 
 describe('sanitizeInternalRedirect', () => {
   it('preserves a valid deep link with search and hash', () => {

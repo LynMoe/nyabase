@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { cleanup, render, screen } from '@testing-library/react';
-import { Page } from './page.js';
+import { Page } from './page-header.js';
 
 afterEach(() => {
   cleanup();

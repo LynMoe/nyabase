@@ -1,12 +1,21 @@
 import { useState } from 'react';
-import { CircleAlert, RefreshCw } from 'lucide-react';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { useNavigate } from '@tanstack/react-router';
+import { CircleAlert, RefreshCw, Trash2 } from 'lucide-react';
 import {
   IntentResourceType,
   type AdminImageDto,
   type ImageAssignmentDto,
+  type IntentAcceptedDto,
   type ServerDto,
 } from '@nyabase/common';
 import { resourceIntentsPath } from '../../lib/intent-visibility.js';
+import { api } from '../../lib/api.js';
+import { errorMessage } from '../../lib/api-error.js';
+import { queryKeys } from '../../lib/query-keys.js';
+import { toast } from '../../hooks/use-toast.js';
+import { ConfirmDialog } from '../../components/layout/confirm-dialog.js';
+import { MoreActions } from '../../components/layout/more-actions.js';
 import { Button } from '../../components/ui/button.js';
 import { StatusBadge } from '../../components/layout/status-badge.js';
 import { TechnicalId } from '../../components/refs/technical-id.js';
@@ -27,12 +36,11 @@ import {
   TableRow,
 } from '../../components/ui/table.js';
 import { SectionCard } from '../../components/layout/section-card.js';
-import { Field } from '../../components/layout/field.js';
+import { Field } from '../../components/layout/form-field.js';
 import { ResourceIntentFailures, ResourceIntentHistory } from '../../components/intents/resource-intent-failures.js';
 import { formatBytes, relativeTime } from '../../lib/utils.js';
 import { assignmentInProgress, imageInProgress } from '../../lib/in-progress.js';
 import { lifecyclePhaseLabel } from '../../lib/display-labels.js';
-import type { ImageMutations } from './use-image-mutations.js';
 
 export function ImageOverviewTab({ image }: { image: AdminImageDto }) {
   return (
@@ -77,16 +85,91 @@ export function ImageOverviewTab({ image }: { image: AdminImageDto }) {
   );
 }
 
-export function ImageAssignmentsTab({
-  image,
-  servers,
-  mutations,
-}: {
-  image: AdminImageDto;
-  servers: ServerDto[];
-  mutations: ImageMutations;
-}) {
-  const { assign, unassign } = mutations;
+type AssignmentResponse = {
+  assignment: ImageAssignmentDto;
+  intent?: IntentAcceptedDto;
+};
+
+/** Refresh the image, the image list and its operation history after a change. */
+function useInvalidateImage(id: string) {
+  const queryClient = useQueryClient();
+  return () => {
+    void queryClient.invalidateQueries({ queryKey: queryKeys.images.detail(id) });
+    void queryClient.invalidateQueries({ queryKey: queryKeys.images.admin });
+    void queryClient.invalidateQueries({ queryKey: ['resource-intent-failures'] });
+  };
+}
+
+/** Re-pull and remove, in the page header. */
+export function ImageHeaderActions({ image }: { image: AdminImageDto }) {
+  const [deleteOpen, setDeleteOpen] = useState(false);
+  const navigate = useNavigate({ from: '/images/$id' });
+  const invalidate = useInvalidateImage(image.id);
+  const repullImage = useMutation({
+    mutationFn: () => api.post<unknown>(`/images/${image.id}/repull`),
+    onSuccess: () => {
+      toast({ title: '已从镜像源重新拉取' });
+      invalidate();
+    },
+    onError: (error) => toast({ title: '重新拉取失败', description: errorMessage(error), variant: 'destructive' }),
+  });
+  const deleteImage = useMutation({
+    mutationFn: () => api.delete<unknown>(`/images/${image.id}`),
+    onSuccess: () => {
+      toast({ title: '已开始移除镜像' });
+      setDeleteOpen(false);
+      invalidate();
+      void navigate({ to: '/images' });
+    },
+    onError: (error) => toast({ title: '删除失败', description: errorMessage(error), variant: 'destructive' }),
+  });
+  return (
+    <>
+      <Button variant="outline" onClick={() => repullImage.mutate()} disabled={repullImage.isPending}>
+        <RefreshCw className="h-4 w-4" />重新拉取
+      </Button>
+      <MoreActions actions={[{ label: '移除镜像', icon: Trash2, destructive: true, onSelect: () => setDeleteOpen(true) }]} />
+      <ConfirmDialog
+        open={deleteOpen}
+        title="移除镜像？"
+        description="移除会先去掉各服务器上的指纹分配；仍被容器引用的镜像会由后端拒绝。"
+        confirmLabel="确认移除"
+        pendingLabel="提交中..."
+        pending={deleteImage.isPending}
+        onConfirm={() => deleteImage.mutate()}
+        onOpenChange={setDeleteOpen}
+      />
+    </>
+  );
+}
+
+export function ImageAssignmentsTab({ image }: { image: AdminImageDto }) {
+  const servers = useQuery({
+    queryKey: queryKeys.servers.admin,
+    queryFn: () => api.get<ServerDto[]>('/servers?scope=all'),
+  }).data ?? [];
+  const invalidate = useInvalidateImage(image.id);
+  const assign = useMutation({
+    mutationFn: ({ serverId, expectedRevision }: { serverId: string; expectedRevision?: number }) =>
+      api.put<AssignmentResponse>(
+        `/images/${image.id}/assignments/${serverId}`,
+        expectedRevision ? { expectedRevision } : {},
+      ),
+    onSuccess: (result) => {
+      toast({ title: '已开始分配镜像', description: result.intent ? `操作 ${result.intent.intentId.slice(0, 8)}` : undefined });
+      invalidate();
+    },
+    onError: (error) => toast({ title: '镜像分配失败', description: errorMessage(error), variant: 'destructive' }),
+  });
+  const unassign = useMutation({
+    mutationFn: ({ serverId, revision }: { serverId: string; revision: number }) =>
+      api.delete<AssignmentResponse>(`/images/${image.id}/assignments/${serverId}?expectedRevision=${revision}`),
+    onSuccess: () => {
+      toast({ title: '已开始取消分配镜像' });
+      invalidate();
+    },
+    onError: (error) => toast({ title: '取消分配失败', description: errorMessage(error), variant: 'destructive' }),
+  });
   const assignments = image.assignments ?? [];
   const busy = assign.isPending || unassign.isPending;
   // Never fetched while the image has no assignments.

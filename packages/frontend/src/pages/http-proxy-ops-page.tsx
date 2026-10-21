@@ -6,25 +6,24 @@ import { api } from '../lib/api.js';
 import { ApiError } from '../lib/api-error.js';
 import { Button } from '../components/ui/button.js';
 import { ConfirmDialog } from '../components/layout/confirm-dialog.js';
-import { Page } from '../components/layout/page.js';
-import { PageHeader } from '../components/layout/page-header.js';
+import { Page, PageHeader } from '../components/layout/page-header.js';
 import { QueryView } from '../components/layout/query-view.js';
 import { toast } from '../hooks/use-toast.js';
 import { useAuthStore } from '../store/auth.js';
 import { queryKeys } from '../lib/query-keys.js';
 import { queryPollInterval } from '../lib/query-lifecycle.js';
-import {
-  canManageHttpProxyPools,
-  canViewHttpProxyStatus,
-} from '../lib/http-proxy-access.js';
+import { canManageHttpProxyPools, canViewHttpProxyStatus } from '../lib/proxy-access.js';
 import { emptyIfNotFound, httpProxyErrorMessage } from '../lib/http-proxy.js';
-import { DomainPoolFormDialog } from './http-proxy-ops-page/domain-pool-form-dialog.js';
-import { AllBindingsCard, DomainPoolsCard } from './http-proxy-ops-page/domain-pools-section.js';
 import {
-  HttpStatusSections,
+  AllBindingsCard,
+  DomainPoolFormDialog,
+  DomainPoolsCard,
+} from './http-proxy-ops-page/domain-pools-section.js';
+import {
   emptyStatus,
   formatTime,
   type HttpProxyAdminStatus,
+  HttpStatusSections,
 } from './http-proxy-ops-page/status-sections.js';
 
 export default function HttpProxyOpsPage() {

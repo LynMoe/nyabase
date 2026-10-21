@@ -1,46 +1,61 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { Activity, Pencil } from 'lucide-react';
-import { NodeMetricsStatus, type ServerDto } from '@nyabase/common';
+import { NodeMetricsStatus, type ServerDto, zNodeMetricsPatchConfig } from '@nyabase/common';
 import { ConfirmDialog } from '../layout/confirm-dialog.js';
-import { FormField } from '../layout/form-field.js';
+import { Field, FormField } from '../layout/form-field.js';
 import { Badge } from '../ui/badge.js';
 import { Button } from '../ui/button.js';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '../ui/card.js';
-import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '../ui/dialog.js';
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from '../ui/dialog.js';
 import { Input } from '../ui/input.js';
 import { nodeMetricsStatusZh } from '../../lib/display-labels.js';
 import { relativeTime } from '../../lib/utils.js';
+import { useUpdateServer } from '../../lib/server-queries.js';
+import { toast } from '../../hooks/use-toast.js';
 import { TechnicalId } from '../refs/technical-id.js';
-import { Field } from '../layout/field.js';
 
-export function NodeMetricsCard({
-  server,
-  endpoint,
-  certFingerprint,
-  token,
-  updatePending,
-  clearOpen,
-  onEndpointChange,
-  onCertFingerprintChange,
-  onTokenChange,
-  onSave,
-  onClear,
-  onClearOpenChange,
-}: {
-  server: ServerDto;
-  endpoint: string;
-  certFingerprint: string;
-  token: string;
-  updatePending: boolean;
-  clearOpen: boolean;
-  onEndpointChange: (value: string) => void;
-  onCertFingerprintChange: (value: string) => void;
-  onTokenChange: (value: string) => void;
-  onSave: () => void;
-  onClear: () => void;
-  onClearOpenChange: (open: boolean) => void;
-}) {
+export function NodeMetricsCard({ server }: { server: ServerDto }) {
   const [open, setOpen] = useState(false);
+  const [clearOpen, setClearOpen] = useState(false);
+  const [endpoint, setEndpoint] = useState('');
+  const [certFingerprint, setCertFingerprint] = useState('');
+  const [token, setToken] = useState('');
+  const update = useUpdateServer(server.id, () => setClearOpen(false));
+
+  // The fields follow the server record (and reset the token) whenever it changes.
+  useEffect(() => {
+    setEndpoint(server.nodeMetrics.endpoint ?? '');
+    setCertFingerprint(server.nodeMetrics.serverCertFingerprint ?? '');
+    setToken('');
+  }, [server.id, server.revision]);
+
+  const fail = (title: string, description: string) => toast({ title, description, variant: 'destructive' });
+  const save = () => {
+    const trimmedToken = token.trim();
+    if (!endpoint.trim() || !certFingerprint.trim()) {
+      return fail('node-exporter 配置不完整', 'endpoint 和证书 pin 都是必填项。');
+    }
+    if (!server.nodeMetrics.tokenFingerprint && trimmedToken.length === 0) {
+      return fail('需要首次配置 token', '首次配置必须输入 token；已配置时留空可保持原 token。');
+    }
+    const parsed = zNodeMetricsPatchConfig.safeParse({
+      endpoint: endpoint.trim(),
+      serverCertFingerprint: certFingerprint.trim(),
+      ...(trimmedToken.length > 0 ? { token: trimmedToken } : {}),
+    });
+    if (!parsed.success) {
+      return fail('node-exporter 配置无效', parsed.error.issues[0]?.message ?? '请检查 endpoint、证书 pin 和 token。');
+    }
+    update.mutate({ expectedRevision: server.revision, nodeMetrics: parsed.data });
+  };
+  const updatePending = update.isPending;
   return (
     <Card data-testid="server-node-metrics">
       <CardHeader>
@@ -82,7 +97,7 @@ export function NodeMetricsCard({
           variant="outline"
           size="sm"
           disabled={updatePending || server.nodeMetrics.health.status === NodeMetricsStatus.Unconfigured}
-          onClick={() => onClearOpenChange(true)}
+          onClick={() => setClearOpen(true)}
         >
           清除指标配置
         </Button>
@@ -100,7 +115,7 @@ export function NodeMetricsCard({
                 value={endpoint}
                 placeholder="https://node.example:9100/metrics"
                 className="font-mono"
-                onChange={(event) => onEndpointChange(event.target.value)}
+                onChange={(event) => setEndpoint(event.target.value)}
               />
             </FormField>
             <FormField id="node-metrics-cert-fingerprint" label="证书 pin（SHA-256）">
@@ -109,7 +124,7 @@ export function NodeMetricsCard({
                 value={certFingerprint}
                 placeholder="64 位十六进制指纹"
                 className="font-mono"
-                onChange={(event) => onCertFingerprintChange(event.target.value)}
+                onChange={(event) => setCertFingerprint(event.target.value)}
               />
             </FormField>
             <FormField
@@ -125,14 +140,14 @@ export function NodeMetricsCard({
                 autoComplete="new-password"
                 value={token}
                 placeholder={server.nodeMetrics.tokenFingerprint ? '已配置；留空保持原 token' : '首次配置请输入 token'}
-                onChange={(event) => onTokenChange(event.target.value)}
+                onChange={(event) => setToken(event.target.value)}
               />
             </FormField>
             <DialogFooter>
               <Button variant="outline" onClick={() => setOpen(false)}>取消</Button>
               <Button
                 onClick={() => {
-                  onSave();
+                  save();
                   setOpen(false);
                 }}
                 disabled={updatePending}
@@ -145,20 +160,20 @@ export function NodeMetricsCard({
       ) : null}
       <ConfirmDialog
         open={clearOpen}
-        onOpenChange={onClearOpenChange}
+        onOpenChange={setClearOpen}
         title="清除指标配置？"
         description="将移除该服务器的 node-exporter 指标采集配置（endpoint、证书 pin 与 token）。确认后需重新填写才能恢复监控。"
         confirmLabel="确认清除"
         pendingLabel="确认清除"
         pending={updatePending}
-        onConfirm={onClear}
+        onConfirm={() => update.mutate({ expectedRevision: server.revision, nodeMetrics: null })}
       />
     </Card>
   );
 }
 
 function NodeMetricsHealthView({ health }: { health: ServerDto['nodeMetrics']['health'] }) {
-  const statusLabel = nodeMetricsStatusLabel(health.status);
+  const statusLabel = nodeMetricsStatusZh(health.status);
   return (
     <div className="space-y-1 text-right">
       <Badge variant={health.status === NodeMetricsStatus.Online ? 'success' : health.status === NodeMetricsStatus.Unreachable ? 'destructive' : 'secondary'}>
@@ -175,8 +190,4 @@ function NodeMetricsHealthView({ health }: { health: ServerDto['nodeMetrics']['h
       {health.lastError && <p className="max-w-[24rem] break-all text-xs text-destructive">{health.lastError}</p>}
     </div>
   );
-}
-
-function nodeMetricsStatusLabel(status: NodeMetricsStatus): string {
-  return nodeMetricsStatusZh(status);
 }

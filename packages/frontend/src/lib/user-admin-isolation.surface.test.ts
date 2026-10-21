@@ -47,7 +47,7 @@ describe('user panel pages stay on scope=mine', () => {
   it('local-volume-table gates admin links behind scope === all', () => {
     const src = [
       readSrc('components/storage/local-volume-table.tsx'),
-      readSrc('components/storage/local-volume-detail-dialog.tsx'),
+      readSrc('components/storage/local-volume-table.tsx'),
     ].join('\n');
     expect(src).not.toMatch(/['`]\/admin\//);
     assertScopeAllOnly(src, /\/manage\/containers/);
@@ -57,7 +57,7 @@ describe('user panel pages stay on scope=mine', () => {
   });
 
   it('local-volume-form-dialog uses one volumes route and gates scope=all by scope', () => {
-    const src = readSrc('components/storage/local-volume-form-dialog.tsx');
+    const src = [readSrc('components/storage/local-volume-form-dialog.tsx')].join('\n');
     expect(src).not.toMatch(/['`]\/admin\//);
     assertScopeAllOnly(src, /\?scope=all/);
     expect(src).not.toMatch(/api\.post<unknown>\('\/volumes\?/);
@@ -90,7 +90,7 @@ describe('user panel pages stay on scope=mine', () => {
     expect(detail).toMatch(/api\.get<SharedVolumeDto\[\]>\('\/shared-volumes\?scope=all'\)/);
     expect(detail).not.toMatch(/api\.get<SharedVolumeDto\[\]>\('\/shared-volumes'\)/);
     expect(detail).toMatch(/SharedVolumeCatalogInspectDialog/);
-    expect(detail).toMatch(/enabled: tab === 'volumes' && canManageSharedVolumes/);
+    expect(detail).toMatch(/enabled: canManageVolumes,/);
   });
 
   it('dashboard performance stays on the user usage API', () => {

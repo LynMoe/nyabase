@@ -1,17 +1,16 @@
 import { createFileRoute } from '@tanstack/react-router';
 import { useEffect, useState } from 'react';
-import { api } from '../lib/api.js';
-import { loginFailureMessage } from '../lib/login-form-error.js';
-import { useAuthStore } from '../store/auth.js';
 import { TriangleAlert } from 'lucide-react';
+import { zLoginRequest } from '@nyabase/common';
+import { api } from '../lib/api.js';
+import { loginFailureMessage, sanitizeInternalRedirect } from '../lib/auth-session.js';
+import { useAuthStore } from '../store/auth.js';
 import { Alert, AlertDescription } from '../components/ui/alert.js';
 import { Button } from '../components/ui/button.js';
 import { Input } from '../components/ui/input.js';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '../components/ui/card.js';
 import { FormField } from '../components/layout/form-field.js';
-import { zLoginRequest } from '@nyabase/common';
 import { usePublicSettings } from '../hooks/use-public-settings.js';
-import { sanitizeInternalRedirect } from '../lib/internal-redirect.js';
 
 function loginReasonBanner(reason: string | undefined): string | null {
   switch (reason) {

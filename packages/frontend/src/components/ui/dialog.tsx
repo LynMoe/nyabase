@@ -2,7 +2,7 @@ import * as React from 'react';
 import * as DialogPrimitive from '@radix-ui/react-dialog';
 import { X } from 'lucide-react';
 import { cn } from '../../lib/utils.js';
-import { useScrollOverflow } from '../../hooks/use-scroll-overflow.js';
+import { useScrollOverflow } from '../../hooks/use-dom-state.js';
 
 const Dialog = DialogPrimitive.Root;
 const DialogTrigger = DialogPrimitive.Trigger;

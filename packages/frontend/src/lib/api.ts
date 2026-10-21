@@ -4,17 +4,17 @@ import { ApiError } from './api-error.js';
 import {
   announceLogin,
   AuthSessionCoordinationError,
+  type CapturedSession,
   clearLocalSession,
   discardPendingRefreshRequestId,
+  isRuntimeUserDto,
   pendingRefreshRequestId,
+  setPendingLoginReason,
   settleRefreshRequestId,
   shouldClearPrincipalState,
   withCrossTabRefreshLock,
-  type CapturedSession,
 } from './auth-session.js';
-import { isRuntimeUserDto } from './auth-state-validation.js';
 import { clearPrincipalQueryState } from './query-client.js';
-import { setPendingLoginReason } from './pending-login-reason.js';
 
 const BASE_URL = '/api';
 /** Required by the Backend on cookie endpoints; forces a CORS preflight cross-site. */

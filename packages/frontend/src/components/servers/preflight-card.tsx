@@ -1,6 +1,14 @@
 import { useState } from 'react';
 import { Play, ShieldCheck } from 'lucide-react';
-import { PreflightStatus, type PreflightReport, type StoragePoolDto } from '@nyabase/common';
+import { useMutation, useQuery } from '@tanstack/react-query';
+import {
+  PreflightStatus,
+  type IntentAcceptedDto,
+  type PreflightReport,
+  type RunPreflightRequest,
+  type ServerDto,
+  type ServerPreflightDto,
+} from '@nyabase/common';
 import { Badge } from '../ui/badge.js';
 import { Button } from '../ui/button.js';
 import { Card, CardContent, CardHeader, CardTitle } from '../ui/card.js';
@@ -21,28 +29,44 @@ import {
   preflightStatusLabel,
 } from '../../lib/display-labels.js';
 import { preflightPending as preflightStatusPending } from '../../lib/in-progress.js';
+import { api } from '../../lib/api.js';
+import { errorMessage } from '../../lib/api-error.js';
+import { queryKeys } from '../../lib/query-keys.js';
+import { refetchWhileInProgress } from '../../lib/query-lifecycle.js';
+import { useInvalidateServer, useServerPools } from '../../lib/server-queries.js';
+import { toast } from '../../hooks/use-toast.js';
 
-export function PreflightCard({
-  pools,
-  selectedPoolId,
-  probeAddress,
-  preflightPending,
-  status,
-  report,
-  onSelectedPoolIdChange,
-  onProbeAddressChange,
-  onRunPreflight,
-}: {
-  pools: StoragePoolDto[];
-  selectedPoolId: string;
-  probeAddress: string;
-  preflightPending: boolean;
-  status: PreflightStatus;
-  report: PreflightReport | null;
-  onSelectedPoolIdChange: (value: string) => void;
-  onProbeAddressChange: (value: string) => void;
-  onRunPreflight: () => void;
-}) {
+export function PreflightCard({ server }: { server: ServerDto }) {
+  const serverId = server.id;
+  const [selectedPoolId, setSelectedPoolId] = useState('');
+  const [probeAddress, setProbeAddress] = useState('');
+  const pools = useServerPools(serverId).data ?? [];
+  const invalidate = useInvalidateServer(serverId);
+  const preflightQuery = useQuery({
+    queryKey: queryKeys.servers.preflight(serverId),
+    queryFn: () => api.get<ServerPreflightDto>(`/servers/${serverId}/preflight`),
+    refetchInterval: (query) => refetchWhileInProgress(query.state, {
+      steadyIntervalMs: false,
+      isSettled: (report) => !preflightStatusPending(report.status),
+    }),
+  });
+  const status = preflightQuery.data?.status ?? server.preflightStatus;
+  const report = preflightQuery.data?.report ?? server.preflightReport;
+  const runPreflight = useMutation({
+    mutationFn: () => {
+      const body: RunPreflightRequest = {
+        expectedServerRevision: server.revision,
+        poolId: selectedPoolId,
+        probeAddress: probeAddress.trim(),
+      };
+      return api.post<IntentAcceptedDto>(`/servers/${serverId}/preflight`, body);
+    },
+    onSuccess: (intent) => {
+      toast({ title: '前置检查已开始', description: `操作 ${intent.intentId.slice(0, 8)} 正在执行。` });
+      invalidate();
+    },
+    onError: (error) => toast({ title: '前置检查失败', description: errorMessage(error), variant: 'destructive' }),
+  });
   const [open, setOpen] = useState(false);
   return (
     <Card>
@@ -66,7 +90,7 @@ export function PreflightCard({
             <FormField id="preflight-pool" label="探针存储池">
               <Select
                 value={selectedPoolId || undefined}
-                onValueChange={onSelectedPoolIdChange}
+                onValueChange={setSelectedPoolId}
               >
                 <SelectTrigger id="preflight-pool">
                   <SelectValue placeholder="选择存储池" />
@@ -79,19 +103,19 @@ export function PreflightCard({
               </Select>
             </FormField>
             <FormField id="preflight-address" label="探针地址">
-              <Input id="preflight-address" value={probeAddress} onChange={(event) => onProbeAddressChange(event.target.value)} placeholder="10.20.0.10" />
+              <Input id="preflight-address" value={probeAddress} onChange={(event) => setProbeAddress(event.target.value)} placeholder="10.20.0.10" />
             </FormField>
             <DialogFooter>
               <Button variant="outline" onClick={() => setOpen(false)}>取消</Button>
               <Button
                 data-testid="server-preflight"
                 onClick={() => {
-                  onRunPreflight();
+                  runPreflight.mutate();
                   setOpen(false);
                 }}
-                disabled={preflightPending || !selectedPoolId || !probeAddress.trim()}
+                disabled={runPreflight.isPending || !selectedPoolId || !probeAddress.trim()}
               >
-                {preflightPending ? '检查中...' : '运行前置检查'}
+                {runPreflight.isPending ? '检查中...' : '运行前置检查'}
               </Button>
             </DialogFooter>
           </DialogContent>

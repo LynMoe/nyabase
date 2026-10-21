@@ -1,7 +1,7 @@
 import { createFileRoute, lazyRouteComponent } from '@tanstack/react-router';
 import { RequireAccess } from '../../components/require-capability.js';
 import { ACCESS } from '../../lib/route-access.js';
-import { parseSharedBackendDetailTab } from '../../lib/shared-backend-detail.js';
+import { parseSharedBackendDetailTab } from '../../lib/detail-tabs.js';
 
 export const Route = createFileRoute('/shared-backends/$id')({
   component: SharedBackendDetailRoute,

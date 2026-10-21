@@ -3,7 +3,7 @@ import { Capability } from '@nyabase/common';
 import {
   SSH_PROXY_STATUS_CAPABILITIES,
   canViewSshProxyStatus,
-} from './ssh-proxy-access.js';
+} from './proxy-access.js';
 
 describe('SSH proxy page access', () => {
   it.each([
