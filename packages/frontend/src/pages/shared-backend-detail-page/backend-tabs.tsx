@@ -8,7 +8,7 @@ import type {
 } from '@nyabase/common';
 import { Button } from '../../components/ui/button.js';
 import { Card, CardContent, CardHeader, CardTitle } from '../../components/ui/card.js';
-import { Field } from '../../components/layout/field.js';
+import { Field } from '../../components/layout/form-field.js';
 import { SectionCard } from '../../components/layout/section-card.js';
 import {
   Table,

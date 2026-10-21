@@ -12,7 +12,7 @@ import { Input } from '../components/ui/input.js';
 import { ConfirmDialog } from '../components/layout/confirm-dialog.js';
 import { FormField } from '../components/layout/form-field.js';
 import { EmptyState } from '../components/layout/empty-state.js';
-import { Page } from '../components/layout/page.js';
+import { Page } from '../components/layout/page-header.js';
 import { PageHeader } from '../components/layout/page-header.js';
 import { QueryView } from '../components/layout/query-view.js';
 import { SectionCard } from '../components/layout/section-card.js';

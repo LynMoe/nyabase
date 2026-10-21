@@ -10,7 +10,7 @@ import { Checkbox } from '../../components/ui/checkbox.js';
 import { Input } from '../../components/ui/input.js';
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '../../components/ui/dialog.js';
 import { ConfirmDialog } from '../../components/layout/confirm-dialog.js';
-import { Field } from '../../components/layout/field.js';
+import { Field } from '../../components/layout/form-field.js';
 import { FormField } from '../../components/layout/form-field.js';
 import { SectionCard } from '../../components/layout/section-card.js';
 import { toast } from '../../hooks/use-toast.js';

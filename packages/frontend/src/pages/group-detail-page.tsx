@@ -5,7 +5,7 @@ import { Gauge, ShieldCheck, Trash2, Users } from 'lucide-react';
 import { Capability, type GroupDto, type GroupMemberDto } from '@nyabase/common';
 import { api } from '../lib/api.js';
 import { ConfirmDialog } from '../components/layout/confirm-dialog.js';
-import { Page } from '../components/layout/page.js';
+import { Page } from '../components/layout/page-header.js';
 import { PageHeader } from '../components/layout/page-header.js';
 import { QueryView } from '../components/layout/query-view.js';
 import { MoreActions } from '../components/layout/more-actions.js';

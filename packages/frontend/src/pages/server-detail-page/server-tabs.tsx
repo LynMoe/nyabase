@@ -13,7 +13,7 @@ import { ResourceIntentFailures } from '../../components/intents/resource-intent
 import { ServerGpuCard } from '../../components/gpu/gpu-sections.js';
 import type { useNodeMetricsForm } from './use-server-detail.js';
 import type { useServerActions } from './use-server-detail.js';
-import { Field } from '../../components/layout/field.js';
+import { Field } from '../../components/layout/form-field.js';
 import { ConnectCard } from '../../components/servers/connect-card.js';
 import { TechnicalId } from '../../components/refs/technical-id.js';
 import { preflightStatusLabel, storageOvercommitLabel } from '../../lib/display-labels.js';

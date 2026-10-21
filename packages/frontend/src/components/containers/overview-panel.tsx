@@ -16,7 +16,7 @@ import { SshLoginCard } from './ssh-login.js';
 import { useSshLogin } from './ssh-login.js';
 import { Button } from '../ui/button.js';
 import { SectionCard } from '../layout/section-card.js';
-import { Field, FieldGrid } from '../layout/field.js';
+import { Field, FieldGrid } from '../layout/form-field.js';
 import { TechnicalId } from '../refs/technical-id.js';
 import { formatBytesCompact, formatCpu, formatRate } from '../../lib/utils.js';
 import { ContainerOverviewGpu } from '../gpu/gpu-sections.js';

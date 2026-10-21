@@ -4,7 +4,7 @@ import { Gauge, Terminal, TriangleAlert } from 'lucide-react';
 import type { ContainerAction, ListScope, VolumeAttachmentDto } from '@nyabase/common';
 import { Alert, AlertDescription } from '../components/ui/alert.js';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '../components/ui/tabs.js';
-import { Page } from '../components/layout/page.js';
+import { Page } from '../components/layout/page-header.js';
 import { QueryView } from '../components/layout/query-view.js';
 import { ContainerConsole } from '../components/containers/container-console.js';
 import { RootShrinkOrchestrationDialog } from '../components/storage/root-shrink-orchestration-dialog.js';

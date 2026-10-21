@@ -16,7 +16,7 @@ import {
   useCreateContainerForm,
 } from './use-create-container-form.js';
 import { Checkbox } from '../ui/checkbox.js';
-import { SelectField } from '../layout/select-field.js';
+import { SelectField } from '../layout/form-field.js';
 import { ContainerCreateGpu } from '../gpu/gpu-sections.js';
 import { cn } from '../../lib/utils.js';
 import { bytesText, cpuText } from './use-create-container-form.js';

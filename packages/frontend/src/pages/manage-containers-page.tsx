@@ -8,7 +8,7 @@ import { api } from '../lib/api.js';
 import { useActionMutation } from '../hooks/use-action-mutation.js';
 import { ContainerList } from '../components/containers/container-table.js';
 import { EmptyState } from '../components/layout/empty-state.js';
-import { Page } from '../components/layout/page.js';
+import { Page } from '../components/layout/page-header.js';
 import { PageHeader } from '../components/layout/page-header.js';
 import { QueryView } from '../components/layout/query-view.js';
 import { queryKeys } from '../lib/query-keys.js';

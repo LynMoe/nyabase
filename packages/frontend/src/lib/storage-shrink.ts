@@ -236,3 +236,11 @@ export function isLocalStoragePool(pool: {
     && pool.driver !== StoragePoolDriver.CephFs
     && pool.sharedBackendId === null;
 }
+
+/** One-line shrink capability of a volume, for detail dialogs. */
+export function shrinkLabel(volume: { capability: StoragePoolCapabilityDto }): string {
+  if (volume.capability.shrinkNever) return '不可缩容';
+  if (volume.capability.shrinkRequiresStop) return '缩容需卸载';
+  if (volume.capability.shrinkOnline) return '可在线缩容';
+  return '缩容受用量约束';
+}

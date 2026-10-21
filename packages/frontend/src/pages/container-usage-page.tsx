@@ -7,7 +7,7 @@ import { queryKeys } from '../lib/query-keys.js';
 import { queryPollInterval } from '../lib/query-lifecycle.js';
 import { scopedPath } from '../lib/scoped-paths.js';
 import { useAuthStore } from '../store/auth.js';
-import { Page } from '../components/layout/page.js';
+import { Page } from '../components/layout/page-header.js';
 import { PageHeader } from '../components/layout/page-header.js';
 import { Button } from '../components/ui/button.js';
 import { LinkedCharts } from '../components/performance/linked-charts.js';

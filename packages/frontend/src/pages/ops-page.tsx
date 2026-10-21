@@ -12,7 +12,7 @@ import { Activity } from 'lucide-react';
 import { api } from '../lib/api.js';
 import { Button } from '../components/ui/button.js';
 import { IntentDetailDialog } from '../components/intents/intent-detail-dialog.js';
-import { Page } from '../components/layout/page.js';
+import { Page } from '../components/layout/page-header.js';
 import { PageHeader } from '../components/layout/page-header.js';
 import { QueryView } from '../components/layout/query-view.js';
 import { SectionCard } from '../components/layout/section-card.js';

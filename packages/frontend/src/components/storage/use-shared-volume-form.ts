@@ -1,4 +1,5 @@
 import { useState } from 'react';
+import { formatGibInput, GIB } from '../../lib/utils.js';
 import {
   type CreateSharedVolumeRequest,
   type EffectiveAccessDto,
@@ -19,7 +20,6 @@ import {
   shrinkNeverTooltip,
   validateShrinkFloor,
 } from '../../lib/storage-shrink.js';
-import { bytesToGiBInput, GIB } from './volume-form-fields.js';
 import { api } from '../../lib/api.js';
 import { errorMessage } from '../../lib/api-error.js';
 import { queryKeys } from '../../lib/query-keys.js';
@@ -36,7 +36,7 @@ export interface SharedVolumeFormProps {
 export function useSharedVolumeForm({ sharedVolume, open, onOpenChange }: SharedVolumeFormProps) {
   const editing = sharedVolume;
   const [name, setName] = useState(editing?.name ?? '');
-  const [sizeGiB, setSizeGiB] = useState(editing ? bytesToGiBInput(editing.sizeBytes) : '10');
+  const [sizeGiB, setSizeGiB] = useState(editing ? formatGibInput(editing.sizeBytes) : '10');
   const [sharedBackendId, setSharedBackendId] = useState(sharedVolume?.sharedBackendId ?? '');
   const [error, setError] = useState<string | null>(null);
   const data = useSharedVolumeData({

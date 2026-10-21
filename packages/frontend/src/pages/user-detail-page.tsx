@@ -4,7 +4,7 @@ import { getRouteApi, useNavigate } from '@tanstack/react-router';
 import { Capability, UserStatus, type UserDto } from '@nyabase/common';
 import { api } from '../lib/api.js';
 import { ConfirmDialog } from '../components/layout/confirm-dialog.js';
-import { Page } from '../components/layout/page.js';
+import { Page } from '../components/layout/page-header.js';
 import { PageHeader } from '../components/layout/page-header.js';
 import { QueryView } from '../components/layout/query-view.js';
 import { userDeleting } from '../lib/in-progress.js';

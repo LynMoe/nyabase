@@ -11,7 +11,7 @@ import { Input } from '../ui/input.js';
 import { nodeMetricsStatusZh } from '../../lib/display-labels.js';
 import { relativeTime } from '../../lib/utils.js';
 import { TechnicalId } from '../refs/technical-id.js';
-import { Field } from '../layout/field.js';
+import { Field } from '../layout/form-field.js';
 
 export function NodeMetricsCard({
   server,
@@ -158,7 +158,7 @@ export function NodeMetricsCard({
 }
 
 function NodeMetricsHealthView({ health }: { health: ServerDto['nodeMetrics']['health'] }) {
-  const statusLabel = nodeMetricsStatusLabel(health.status);
+  const statusLabel = nodeMetricsStatusZh(health.status);
   return (
     <div className="space-y-1 text-right">
       <Badge variant={health.status === NodeMetricsStatus.Online ? 'success' : health.status === NodeMetricsStatus.Unreachable ? 'destructive' : 'secondary'}>
@@ -177,6 +177,3 @@ function NodeMetricsHealthView({ health }: { health: ServerDto['nodeMetrics']['h
   );
 }
 
-function nodeMetricsStatusLabel(status: NodeMetricsStatus): string {
-  return nodeMetricsStatusZh(status);
-}

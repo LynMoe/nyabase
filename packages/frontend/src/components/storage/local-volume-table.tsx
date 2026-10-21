@@ -3,6 +3,7 @@ import { Link } from '@tanstack/react-router';
 import { Pencil, Trash2 } from 'lucide-react';
 import { IntentResourceType, type ListScope, type VolumeDto } from '@nyabase/common';
 import { Button } from '../ui/button.js';
+import { shrinkLabel } from '../../lib/storage-shrink.js';
 import { StatusBadge } from '../layout/status-badge.js';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '../ui/table.js';
 import { ResourceRef } from '../refs/resource-ref.js';
@@ -19,7 +20,7 @@ import {
 } from '../ui/dialog.js';
 import { ResourceIntentFailures, ResourceIntentHistory } from '../intents/resource-intent-failures.js';
 import { resourceIntentsPath } from '../../lib/intent-visibility.js';
-import { Field } from '../layout/field.js';
+import { Field } from '../layout/form-field.js';
 
 function adminContainerDetailTo(scope: ListScope) {
   if (scope === 'all') return '/manage/containers/$containerId' as const;
@@ -258,13 +259,6 @@ function VolumeAttachmentsCell({
   }
 
   return null;
-}
-
-function shrinkLabel(volume: VolumeDto): string {
-  if (volume.capability.shrinkNever) return '不可缩容';
-  if (volume.capability.shrinkRequiresStop) return '缩容需卸载';
-  if (volume.capability.shrinkOnline) return '可在线缩容';
-  return '缩容受用量约束';
 }
 
 export function LocalVolumeDetailDialog({

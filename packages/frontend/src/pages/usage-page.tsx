@@ -16,7 +16,7 @@ import { queryPollInterval } from '../lib/query-lifecycle.js';
 import { scopedPath } from '../lib/scoped-paths.js';
 import { formatBytesCompact, formatPercent, formatRate, relativeTime } from '../lib/utils.js';
 import { containerStatusLabel, lifecyclePhaseLabel } from '../lib/status-labels.js';
-import { Page } from '../components/layout/page.js';
+import { Page } from '../components/layout/page-header.js';
 import { PageHeader } from '../components/layout/page-header.js';
 import { QueryView } from '../components/layout/query-view.js';
 import { QueryErrorState } from '../components/query-state.js';

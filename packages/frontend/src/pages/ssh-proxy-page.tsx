@@ -5,7 +5,7 @@ import { Capability, type SshProxyHostKeySummaryDto } from '@nyabase/common';
 import { api } from '../lib/api.js';
 import { Button } from '../components/ui/button.js';
 import { ConfirmDialog } from '../components/layout/confirm-dialog.js';
-import { Page } from '../components/layout/page.js';
+import { Page } from '../components/layout/page-header.js';
 import { PageHeader } from '../components/layout/page-header.js';
 import { QueryView } from '../components/layout/query-view.js';
 import { useAuthStore } from '../store/auth.js';

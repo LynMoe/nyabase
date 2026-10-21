@@ -17,7 +17,7 @@ import { Switch } from '../ui/switch.js';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '../ui/card.js';
 import { TechnicalId } from '../refs/technical-id.js';
 import { GpuPicker, useGpuDevices } from './gpu-picker.js';
-import { ServerGpuSupport } from './gpu-support.js';
+import { ServerGpuSupport } from './gpu-picker.js';
 
 /** GPU picker inside the create-container dialog; hidden while the server has GPU off. */
 export function ContainerCreateGpu({

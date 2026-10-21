@@ -5,7 +5,7 @@ import { StatusBadge } from '../layout/status-badge.js';
 import { Button } from '../ui/button.js';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '../ui/table.js';
 import { ResourceRef } from '../refs/resource-ref.js';
-import { formatObservedUsage } from '../../lib/storage-shrink.js';
+import { formatObservedUsage, shrinkLabel } from '../../lib/storage-shrink.js';
 import { formatGib, relativeTime } from '../../lib/utils.js';
 import { volumeInProgress } from '../../lib/in-progress.js';
 import { failureCodeLabel, volumeAttentionHint, volumeLifecycleLabel } from '../../lib/status-labels.js';
@@ -19,7 +19,7 @@ import {
 } from '../ui/dialog.js';
 import { ResourceIntentFailures, ResourceIntentHistory } from '../intents/resource-intent-failures.js';
 import { resourceIntentsPath } from '../../lib/intent-visibility.js';
-import { Field } from '../layout/field.js';
+import { Field } from '../layout/form-field.js';
 
 export function SharedVolumeTable({
   volumes,
@@ -179,13 +179,6 @@ function SharedVolumeRow({
       ) : null}
     </TableRow>
   );
-}
-
-function shrinkLabel(volume: SharedVolumeDto): string {
-  if (volume.capability.shrinkNever) return '不可缩容';
-  if (volume.capability.shrinkRequiresStop) return '缩容需卸载';
-  if (volume.capability.shrinkOnline) return '可在线缩容';
-  return '缩容受用量约束';
 }
 
 export function SharedVolumeDetailDialog({

@@ -20,7 +20,7 @@ import {
 } from '../../components/ui/table.js';
 import { TechnicalId } from '../../components/refs/technical-id.js';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '../../components/ui/select.js';
-import { Field } from '../../components/layout/field.js';
+import { Field } from '../../components/layout/form-field.js';
 import { cn } from '../../lib/utils.js';
 import { auditActionLabel, auditResourceTypeLabel } from '../../lib/audit-labels.js';
 

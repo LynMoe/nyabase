@@ -6,7 +6,7 @@ import { api } from '../lib/api.js';
 import { ApiError } from '../lib/api-error.js';
 import { Button } from '../components/ui/button.js';
 import { ConfirmDialog } from '../components/layout/confirm-dialog.js';
-import { Page } from '../components/layout/page.js';
+import { Page } from '../components/layout/page-header.js';
 import { PageHeader } from '../components/layout/page-header.js';
 import { QueryView } from '../components/layout/query-view.js';
 import { toast } from '../hooks/use-toast.js';

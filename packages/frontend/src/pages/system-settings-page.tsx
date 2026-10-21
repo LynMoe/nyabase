@@ -3,7 +3,7 @@ import { RefreshCw, Save } from 'lucide-react';
 import { type SystemSettingsDto } from '@nyabase/common';
 import { api } from '../lib/api.js';
 import { Button } from '../components/ui/button.js';
-import { Page } from '../components/layout/page.js';
+import { Page } from '../components/layout/page-header.js';
 import { PageHeader } from '../components/layout/page-header.js';
 import { QueryView } from '../components/layout/query-view.js';
 import { TechnicalId } from '../components/refs/technical-id.js';

@@ -7,7 +7,7 @@ import type { UserDetailTab } from '../../lib/detail-tabs.js';
 import { Button } from '../../components/ui/button.js';
 import { MoreActions } from '../../components/layout/more-actions.js';
 import { Badge } from '../../components/ui/badge.js';
-import { Field } from '../../components/layout/field.js';
+import { Field } from '../../components/layout/form-field.js';
 import { SectionCard } from '../../components/layout/section-card.js';
 import { StatusBadge } from '../../components/layout/status-badge.js';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '../../components/ui/table.js';

@@ -11,7 +11,7 @@ import { formatGibInput, formatVcpuInput } from '../../lib/utils.js';
 import { api } from '../../lib/api.js';
 import { useActionMutation } from '../../hooks/use-action-mutation.js';
 import { FormField } from '../layout/form-field.js';
-import { SelectField } from '../layout/select-field.js';
+import { SelectField } from '../layout/form-field.js';
 import { QueryLoadingState } from '../query-state.js';
 import { Button } from '../ui/button.js';
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from '../ui/dialog.js';

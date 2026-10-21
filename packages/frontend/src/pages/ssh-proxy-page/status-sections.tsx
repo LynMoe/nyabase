@@ -1,11 +1,10 @@
-import type { ComponentType } from 'react';
 import { Activity, Gauge, PlugZap, RefreshCw, RotateCcw, Wifi } from 'lucide-react';
 import type { SshProxyHostKeySummaryDto, SshProxyStatusReport } from '@nyabase/common';
 import type { UseQueryResult } from '@tanstack/react-query';
 import { formatBytes, formatRate } from '../../lib/utils.js';
 import { Badge } from '../../components/ui/badge.js';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '../../components/ui/table.js';
-import { SectionCard } from '../../components/layout/section-card.js';
+import { MetricTile, SectionCard } from '../../components/layout/section-card.js';
 import { TechnicalId } from '../../components/refs/technical-id.js';
 import { Button } from '../../components/ui/button.js';
 import { QueryView } from '../../components/layout/query-view.js';
@@ -140,29 +139,6 @@ export function SshStatusSections({ status }: { status: SshProxyAdminStatus }) {
             </TableBody>
           </Table>
       </SectionCard>
-    </div>
-  );
-}
-
-function MetricTile({
-  icon: Icon,
-  label,
-  value,
-  sub,
-}: {
-  icon: ComponentType<{ className?: string }>;
-  label: string;
-  value: string;
-  sub: string;
-}) {
-  return (
-    <div className="rounded-lg border border-border bg-card p-4">
-      <div className="flex items-center justify-between gap-3">
-        <p className="text-sm text-muted-foreground">{label}</p>
-        <Icon className="h-4 w-4 text-muted-foreground" />
-      </div>
-      <p className="mt-2 text-xl font-semibold text-foreground break-words">{value}</p>
-      <p className="mt-1 text-xs text-muted-foreground">{sub}</p>
     </div>
   );
 }

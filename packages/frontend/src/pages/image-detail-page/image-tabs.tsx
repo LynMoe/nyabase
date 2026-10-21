@@ -27,7 +27,7 @@ import {
   TableRow,
 } from '../../components/ui/table.js';
 import { SectionCard } from '../../components/layout/section-card.js';
-import { Field } from '../../components/layout/field.js';
+import { Field } from '../../components/layout/form-field.js';
 import { ResourceIntentFailures, ResourceIntentHistory } from '../../components/intents/resource-intent-failures.js';
 import { formatBytes, relativeTime } from '../../lib/utils.js';
 import { assignmentInProgress, imageInProgress } from '../../lib/in-progress.js';

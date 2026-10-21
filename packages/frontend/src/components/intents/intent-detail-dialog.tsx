@@ -3,7 +3,6 @@ import { Link } from '@tanstack/react-router';
 import {
   Capability,
   IntentResourceType,
-  IntentStatus,
   type IntentDto,
   type SharedVolumeDto,
   type VolumeDto,
@@ -18,6 +17,7 @@ import {
   formatIntentAttempt,
   isRetryableIntent,
   retryIntent,
+  statusBadgeVariant,
 } from '../../lib/intent-visibility.js';
 import {
   failureCodeLabel,
@@ -37,7 +37,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from '../ui/dialog.js';
-import { Field } from '../layout/field.js';
+import { Field } from '../layout/form-field.js';
 
 function intentImageId(intent: IntentDto): string {
   const fromSummary = intent.requestSummary.imageId;
@@ -112,12 +112,6 @@ function JsonBlock({ value }: { value: unknown }) {
       {JSON.stringify(value, null, 2)}
     </pre>
   );
-}
-
-function statusBadgeVariant(status: string) {
-  if (status === IntentStatus.Succeeded) return 'success' as const;
-  if (status === IntentStatus.Failed) return 'destructive' as const;
-  return 'warning' as const;
 }
 
 export function IntentDetailDialog({

@@ -16,7 +16,7 @@ import {
 import { VolumeShrinkOrchestrationDialog } from './volume-shrink-orchestration-dialog.js';
 import { FormField } from '../layout/form-field.js';
 import { Input } from '../ui/input.js';
-import { SelectField } from './volume-form-fields.js';
+import { SelectField } from '../layout/form-field.js';
 import { approxGibHint, formatGib, grantAvailableLabel } from '../../lib/utils.js';
 import { formatGrantBytes } from '../../lib/grant-quota.js';
 

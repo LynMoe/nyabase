@@ -1,4 +1,4 @@
-import { IntentStatus, type IntentDto } from '@nyabase/common';
+import { type IntentDto } from '@nyabase/common';
 import {
   Table,
   TableBody,
@@ -17,13 +17,7 @@ import {
   intentResourceTypeLabel,
   intentStatusLabel,
 } from '../../lib/status-labels.js';
-import { formatIntentAttempt } from '../../lib/intent-visibility.js';
-
-function statusBadgeVariant(status: string) {
-  if (status === IntentStatus.Succeeded) return 'success' as const;
-  if (status === IntentStatus.Failed) return 'destructive' as const;
-  return 'warning' as const;
-}
+import { formatIntentAttempt, statusBadgeVariant } from '../../lib/intent-visibility.js';
 
 export function IntentsTable({
   items,

@@ -41,7 +41,7 @@ describe('lane D product UI copy', () => {
     const src = [
       read('pages/server-detail-page.tsx'),
       read('components/gpu/gpu-sections.tsx'),
-      read('components/gpu/gpu-support.tsx'),
+      read('components/gpu/gpu-picker.tsx'),
     ].join('\n');
     expect(src).not.toMatch(/@nyabase\/[a-z0-9-]+-web/);
     expect(src).toMatch(/gpu\.support/);
@@ -85,7 +85,7 @@ describe('lane D product UI copy', () => {
     expect(volumes).not.toMatch(/volumeAttachments\(/);
     expect(page).toMatch(/volume-server-table/);
     expect(page).not.toMatch(/\/admin\//);
-    const identity = read('components/servers/client-identity-card.tsx');
+    const identity = read('components/servers/connect-card.tsx');
     expect(identity).toMatch(/\/admin\/system-settings\/incus-client-identity/);
     expect(identity).not.toMatch(/rotate|轮换/);
     expect(read('components/layout/app-layout.tsx')).not.toMatch(/Cert/);

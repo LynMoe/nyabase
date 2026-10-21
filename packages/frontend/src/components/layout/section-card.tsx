@@ -1,4 +1,5 @@
 import * as React from 'react';
+import type { ComponentType } from 'react';
 import { cn } from '../../lib/utils.js';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '../ui/card.js';
 
@@ -51,5 +52,29 @@ export function SectionCard({
       </CardContent>
       {footer ? <div className="border-t px-6 py-3">{footer}</div> : null}
     </Card>
+  );
+}
+
+/** Small bordered stat: label and icon on top, a big value, a muted sub line. */
+export function MetricTile({
+  icon: Icon,
+  label,
+  value,
+  sub,
+}: {
+  icon: ComponentType<{ className?: string }>;
+  label: string;
+  value: string;
+  sub: string;
+}) {
+  return (
+    <div className="rounded-lg border border-border bg-card p-4">
+      <div className="flex items-center justify-between gap-3">
+        <p className="text-sm text-muted-foreground">{label}</p>
+        <Icon className="h-4 w-4 text-muted-foreground" />
+      </div>
+      <p className="mt-2 text-xl font-semibold text-foreground break-words">{value}</p>
+      <p className="mt-1 text-xs text-muted-foreground">{sub}</p>
+    </div>
   );
 }

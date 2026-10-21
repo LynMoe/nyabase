@@ -15,7 +15,7 @@ import {
 } from './use-shared-volume-form.js';
 import { FormField } from '../layout/form-field.js';
 import { Input } from '../ui/input.js';
-import { SelectField } from './volume-form-fields.js';
+import { SelectField } from '../layout/form-field.js';
 import { approxGibHint } from '../../lib/utils.js';
 import { formatGrantBytes, formatRemainingBytes } from '../../lib/grant-quota.js';
 

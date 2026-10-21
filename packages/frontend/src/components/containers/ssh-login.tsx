@@ -3,7 +3,7 @@ import { type ContainerDto, formatSshProxyJumpLogin } from '@nyabase/common';
 import { Button } from '../ui/button.js';
 import { Hint } from '../ui/hint.js';
 import { SectionCard } from '../layout/section-card.js';
-import { Field, FieldGrid } from '../layout/field.js';
+import { Field, FieldGrid } from '../layout/form-field.js';
 import { StatusBadge } from '../layout/status-badge.js';
 import { sshStatusLabel } from '../../lib/status-labels.js';
 import { SshKeyNotice } from '../ssh/ssh-key-notice.js';

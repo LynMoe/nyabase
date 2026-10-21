@@ -4,7 +4,6 @@ import { Link, useNavigate } from '@tanstack/react-router';
 import { Plus, RefreshCw, Server, Wifi, WifiOff } from 'lucide-react';
 import {
   Capability,
-  NodeMetricsStatus,
   zCreateServerRequest,
   zNodeMetricsCreateConfig,
   type CreateServerRequest,
@@ -28,12 +27,12 @@ import {
   TableRow,
 } from '../components/ui/table.js';
 import { EmptyState } from '../components/layout/empty-state.js';
-import { Page } from '../components/layout/page.js';
+import { Page } from '../components/layout/page-header.js';
 import { PageHeader } from '../components/layout/page-header.js';
 import { QueryView } from '../components/layout/query-view.js';
 import { SectionCard } from '../components/layout/section-card.js';
 import { TechnicalId } from '../components/refs/technical-id.js';
-import { ClientIdentityCard } from '../components/servers/client-identity-card.js';
+import { ClientIdentityCard } from '../components/servers/connect-card.js';
 import {
   nodeMetricsStatusZh,
   serverStatusLabel,
@@ -190,7 +189,7 @@ function ServerRow({
       </TableCell>
       <TableCell>{server.incusVersion ?? '未连接'}</TableCell>
       <TableCell className="whitespace-normal">
-        {nodeMetricsStatusLabel(server.nodeMetrics.health.status)}
+        {nodeMetricsStatusZh(server.nodeMetrics.health.status)}
         {server.nodeMetrics.health.outageSince ? (
           <p className="mt-1 text-xs text-destructive">
             中断自 {new Date(server.nodeMetrics.health.outageSince).toLocaleString()}
@@ -376,6 +375,3 @@ function splitList(value: string): string[] {
   return value.split(',').map((item) => item.trim()).filter((item) => item.length > 0);
 }
 
-function nodeMetricsStatusLabel(status: NodeMetricsStatus): string {
-  return nodeMetricsStatusZh(status);
-}

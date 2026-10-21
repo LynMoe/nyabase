@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { formatGibInput, GIB } from '../../lib/utils.js';
 import {
   type CreateVolumeRequest,
   type IntentAcceptedDto,
@@ -22,7 +23,6 @@ import {
   shrinkNeverTooltip,
   validateShrinkFloor,
 } from '../../lib/storage-shrink.js';
-import { bytesToGiBInput, GIB } from './volume-form-fields.js';
 import { api } from '../../lib/api.js';
 import { errorMessage } from '../../lib/api-error.js';
 import { queryKeys } from '../../lib/query-keys.js';
@@ -52,7 +52,7 @@ export function useLocalVolumeForm({
 }: LocalVolumeFormProps) {
   const editing = volume;
   const [name, setName] = useState(editing?.name ?? '');
-  const [sizeGiB, setSizeGiB] = useState(editing ? bytesToGiBInput(editing.sizeBytes) : '10');
+  const [sizeGiB, setSizeGiB] = useState(editing ? formatGibInput(editing.sizeBytes) : '10');
   const [serverId, setServerId] = useState(volume?.serverId ?? lockedServerId ?? '');
   const [poolId, setPoolId] = useState(volume?.poolId ?? lockedPoolId ?? '');
   const [error, setError] = useState<string | null>(null);
@@ -61,7 +61,7 @@ export function useLocalVolumeForm({
   useEffect(() => {
     if (!open) return;
     setName(volume?.name ?? '');
-    setSizeGiB(volume ? bytesToGiBInput(volume.sizeBytes) : '10');
+    setSizeGiB(volume ? formatGibInput(volume.sizeBytes) : '10');
     setServerId(volume?.serverId ?? lockedServerId ?? '');
     setPoolId(volume?.poolId ?? lockedPoolId ?? '');
     setError(null);

@@ -6,7 +6,7 @@ import type { AuditListResponse, AuditLogDto } from '@nyabase/common';
 import { api } from '../lib/api.js';
 import { Button } from '../components/ui/button.js';
 import { Pagination } from '../components/ui/pagination.js';
-import { Page } from '../components/layout/page.js';
+import { Page } from '../components/layout/page-header.js';
 import { SectionCard } from '../components/layout/section-card.js';
 import { PageHeader } from '../components/layout/page-header.js';
 import { QueryView } from '../components/layout/query-view.js';
