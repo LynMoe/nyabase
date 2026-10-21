@@ -38,28 +38,21 @@ import { TableCell, TableRow } from '../../components/ui/table.js';
 
 type BindingBody = { hostname: string; containerId: string; targetPort: number };
 
-/** Create (no `binding`) or edit one HTTP binding; mounted only while open. */
-export function BindingFormDialog({
-  binding,
-  pools,
-  onClose,
-}: {
-  binding?: HttpProxyBindingDto;
-  pools: HttpDomainPoolPublicDto[];
-  onClose: () => void;
-}) {
+function previewHostname(prefix: string, wildcardDomain: string): string | undefined {
+  try {
+    return isHttpProxyPrefixLabel(prefix) ? composeHttpProxyHostname(prefix, wildcardDomain) : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** Create or update the binding; success closes the dialog. */
+function useBindingSave(
+  binding: HttpProxyBindingDto | undefined,
+  onClose: () => void,
+  setError: (message: string) => void,
+) {
   const queryClient = useQueryClient();
-  const split = binding ? splitHttpProxyHostname(binding.hostname, pools) : null;
-  const [prefix, setPrefix] = useState(split?.prefix ?? '');
-  const [poolId, setPoolId] = useState(split?.poolId ?? pools[0]?.id ?? '');
-  const [containerId, setContainerId] = useState(binding?.containerId ?? '');
-  const [targetPort, setTargetPort] = useState(binding ? String(binding.targetPort) : '80');
-  const [error, setError] = useState<string | null>(null);
-  const containersQuery = useQuery({
-    queryKey: queryKeys.containers.userList,
-    queryFn: () => api.get<ContainerDto[]>('/containers'),
-  });
-  const containers = containersQuery.data ?? [];
   const saved = (title: string) => {
     toast({ title });
     void queryClient.invalidateQueries({ queryKey: queryKeys.httpProxy.bindings });
@@ -72,16 +65,34 @@ export function BindingFormDialog({
     onSuccess: () => saved(binding ? '发布已更新' : '发布已创建'),
     onError: (mutationError) => setError(httpProxyErrorMessage(mutationError)),
   });
+  return save;
+}
+
+/** Create (no `binding`) or edit one HTTP binding; mounted only while open. */
+export function BindingFormDialog({
+  binding,
+  pools,
+  onClose,
+}: {
+  binding?: HttpProxyBindingDto;
+  pools: HttpDomainPoolPublicDto[];
+  onClose: () => void;
+}) {
+  const split = binding ? splitHttpProxyHostname(binding.hostname, pools) : null;
+  const [prefix, setPrefix] = useState(split?.prefix ?? '');
+  const [poolId, setPoolId] = useState(split?.poolId ?? pools[0]?.id ?? '');
+  const [containerId, setContainerId] = useState(binding?.containerId ?? '');
+  const [targetPort, setTargetPort] = useState(binding ? String(binding.targetPort) : '80');
+  const [error, setError] = useState<string | null>(null);
+  const containersQuery = useQuery({
+    queryKey: queryKeys.containers.userList,
+    queryFn: () => api.get<ContainerDto[]>('/containers'),
+  });
+  const containers = containersQuery.data ?? [];
+  const save = useBindingSave(binding, onClose, setError);
   const selectedPool = pools.find((pool) => pool.id === poolId) ?? pools[0];
   const suffix = selectedPool ? httpProxyWildcardSuffix(selectedPool.wildcardDomain) : '';
-  let hostnamePreview: string | undefined;
-  try {
-    if (selectedPool && isHttpProxyPrefixLabel(prefix)) {
-      hostnamePreview = composeHttpProxyHostname(prefix, selectedPool.wildcardDomain);
-    }
-  } catch {
-    hostnamePreview = undefined;
-  }
+  const hostnamePreview = selectedPool ? previewHostname(prefix, selectedPool.wildcardDomain) : undefined;
   /** Wraps a setter so that typing clears the previous error. */
   const edit = (setter: (value: string) => void) => (value: string) => {
     setter(value);

@@ -42,34 +42,13 @@ export function SharedVolumeFormDialog(props: SharedVolumeFormProps) {
   return props.open ? <SharedVolumeFormBody {...props} /> : null;
 }
 
-function SharedVolumeFormBody({ sharedVolume: editing, onOpenChange }: SharedVolumeFormProps) {
+/** The create and edit requests of the shared volume form; success closes the dialog. */
+function useSharedVolumeSave(
+  editing: SharedVolumeDto | undefined,
+  onOpenChange: (open: boolean) => void,
+  setError: (message: string) => void,
+) {
   const queryClient = useQueryClient();
-  const [name, setName] = useState(editing?.name ?? '');
-  const [sizeGiB, setSizeGiB] = useState(editing ? formatGibInput(editing.sizeBytes) : '10');
-  const [sharedBackendId, setSharedBackendId] = useState(editing?.sharedBackendId ?? '');
-  const [error, setError] = useState<string | null>(null);
-
-  const backends = useQuery({
-    queryKey: queryKeys.sharedBackends.user,
-    queryFn: () => api.get<SharedBackendDto[]>('/shared-backends'),
-    enabled: !editing,
-  }).data ?? [];
-  const access = useQuery({
-    queryKey: queryKeys.meAccess,
-    queryFn: () => api.get<EffectiveAccessDto>('/me/access'),
-  }).data;
-  const selectedBackend = backends.find((backend) => backend.id === sharedBackendId);
-  const liveSharedAccess = (access?.sharedBackends ?? []).find((item) => item.sharedBackendId === sharedBackendId);
-  const noOnlineExecutor = editing
-    ? false
-    : selectedBackend
-      ? backendLacksOnlineExecutor(selectedBackend)
-      : backends.length > 0 && backends.every((backend) => backendLacksOnlineExecutor(backend));
-  const { nextSize, path, floorError, editQuotaBlocked } = deriveSizeChange(editing, sizeGiB);
-  const shrinkBlocked = path === 'never';
-  const quotaError = editQuotaBlocked ? quotaIneffectiveResizeHint() : null;
-  const description = !editing ? null : editQuotaBlocked ? quotaError : shrinkBlocked ? shrinkNeverTooltip() : null;
-
   const refreshLists = () => {
     void queryClient.invalidateQueries({ queryKey: queryKeys.sharedVolumes.all });
   };
@@ -105,6 +84,37 @@ function SharedVolumeFormBody({ sharedVolume: editing, onOpenChange }: SharedVol
       void queryClient.invalidateQueries({ queryKey: ['resource-intent-failures'] });
     },
   });
+  return { createShared, patch };
+}
+
+function SharedVolumeFormBody({ sharedVolume: editing, onOpenChange }: SharedVolumeFormProps) {
+  const [name, setName] = useState(editing?.name ?? '');
+  const [sizeGiB, setSizeGiB] = useState(editing ? formatGibInput(editing.sizeBytes) : '10');
+  const [sharedBackendId, setSharedBackendId] = useState(editing?.sharedBackendId ?? '');
+  const [error, setError] = useState<string | null>(null);
+
+  const backends = useQuery({
+    queryKey: queryKeys.sharedBackends.user,
+    queryFn: () => api.get<SharedBackendDto[]>('/shared-backends'),
+    enabled: !editing,
+  }).data ?? [];
+  const access = useQuery({
+    queryKey: queryKeys.meAccess,
+    queryFn: () => api.get<EffectiveAccessDto>('/me/access'),
+  }).data;
+  const selectedBackend = backends.find((backend) => backend.id === sharedBackendId);
+  const liveSharedAccess = (access?.sharedBackends ?? []).find((item) => item.sharedBackendId === sharedBackendId);
+  const noOnlineExecutor = editing
+    ? false
+    : selectedBackend
+      ? backendLacksOnlineExecutor(selectedBackend)
+      : backends.length > 0 && backends.every((backend) => backendLacksOnlineExecutor(backend));
+  const { nextSize, path, floorError, editQuotaBlocked } = deriveSizeChange(editing, sizeGiB);
+  const shrinkBlocked = path === 'never';
+  const quotaError = editQuotaBlocked ? quotaIneffectiveResizeHint() : null;
+  const description = !editing ? null : editQuotaBlocked ? quotaError : shrinkBlocked ? shrinkNeverTooltip() : null;
+
+  const { createShared, patch } = useSharedVolumeSave(editing, onOpenChange, setError);
   const pending = createShared.isPending || patch.isPending;
 
   const submit = () => {

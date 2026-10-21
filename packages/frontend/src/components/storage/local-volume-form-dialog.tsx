@@ -64,33 +64,14 @@ function useLocalPools(scope: ListScope, serverId: string, enabled: boolean) {
   });
 }
 
-function LocalVolumeFormBody({
-  volume: editing,
-  onOpenChange,
-  scope = 'mine',
-  lockedServerId,
-  lockedPoolId,
-}: LocalVolumeFormProps) {
+/** The create and edit requests of the local volume form; success closes the dialog. */
+function useLocalVolumeSave(
+  editing: VolumeDto | undefined,
+  scope: ListScope,
+  onOpenChange: (open: boolean) => void,
+  setError: (message: string) => void,
+) {
   const queryClient = useQueryClient();
-  const [name, setName] = useState(editing?.name ?? '');
-  const [sizeGiB, setSizeGiB] = useState(editing ? formatGibInput(editing.sizeBytes) : '10');
-  const [serverId, setServerId] = useState(editing?.serverId ?? lockedServerId ?? '');
-  const [poolId, setPoolId] = useState(editing?.poolId ?? lockedPoolId ?? '');
-  const [error, setError] = useState<string | null>(null);
-  const [orchestrate, setOrchestrate] = useState(false);
-
-  const pools = useLocalPools(scope, serverId, !editing).data ?? [];
-  const selectedPool = pools.filter((pool) => pool.registered).find((pool) => pool.id === poolId);
-  const { nextSize, path, floorError, editQuotaBlocked } = deriveSizeChange(editing, sizeGiB);
-  const createQuotaBlocked = !editing && selectedPool != null && selectedPool.quotaEffective !== true;
-  const quotaError = createQuotaBlocked
-    ? quotaIneffectiveCreateHint()
-    : editQuotaBlocked ? quotaIneffectiveResizeHint() : null;
-  const description = !editing
-    ? quotaError
-    : editQuotaBlocked ? quotaError : path === 'never' ? shrinkNeverTooltip() : null;
-  const shrinkBlocked = path === 'never';
-
   const invalidateVolumeLists = () => {
     void queryClient.invalidateQueries({ queryKey: scope === 'all' ? queryKeys.volumes.admin : queryKeys.volumes.user });
     void queryClient.invalidateQueries({ queryKey: ['resource-intent-failures'] });
@@ -122,6 +103,36 @@ function LocalVolumeFormBody({
       invalidateVolumeLists();
     },
   });
+  return { createLocal, patch, invalidateVolumeLists };
+}
+
+function LocalVolumeFormBody({
+  volume: editing,
+  onOpenChange,
+  scope = 'mine',
+  lockedServerId,
+  lockedPoolId,
+}: LocalVolumeFormProps) {
+  const [name, setName] = useState(editing?.name ?? '');
+  const [sizeGiB, setSizeGiB] = useState(editing ? formatGibInput(editing.sizeBytes) : '10');
+  const [serverId, setServerId] = useState(editing?.serverId ?? lockedServerId ?? '');
+  const [poolId, setPoolId] = useState(editing?.poolId ?? lockedPoolId ?? '');
+  const [error, setError] = useState<string | null>(null);
+  const [orchestrate, setOrchestrate] = useState(false);
+
+  const pools = useLocalPools(scope, serverId, !editing).data ?? [];
+  const selectedPool = pools.filter((pool) => pool.registered).find((pool) => pool.id === poolId);
+  const { nextSize, path, floorError, editQuotaBlocked } = deriveSizeChange(editing, sizeGiB);
+  const createQuotaBlocked = !editing && selectedPool != null && selectedPool.quotaEffective !== true;
+  const quotaError = createQuotaBlocked
+    ? quotaIneffectiveCreateHint()
+    : editQuotaBlocked ? quotaIneffectiveResizeHint() : null;
+  const description = !editing
+    ? quotaError
+    : editQuotaBlocked ? quotaError : path === 'never' ? shrinkNeverTooltip() : null;
+  const shrinkBlocked = path === 'never';
+
+  const { createLocal, patch, invalidateVolumeLists } = useLocalVolumeSave(editing, scope, onOpenChange, setError);
   const pending = createLocal.isPending || patch.isPending;
 
   const submit = () => {
