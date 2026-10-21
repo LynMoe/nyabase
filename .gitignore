@@ -17,11 +17,11 @@ packages/common/src/**/*.js.map
 packages/common/src/**/*.d.ts
 packages/common/src/**/*.d.ts.map
 
-# Local-only trees: harness, plans, docs, lab inventory, legacy e2e runtime
+# Local-only trees: harness, plans, docs, lab inventory
 .local/
 
-# Per-run e2e state holds private keys, passwords, and Agent tokens.
-tests/e2e/.runtime/
+# Per-machine e2e lab inputs (copied from lab.env.example).
+tests/e2e/lab.env
 
 # Local visual QA screenshots (Playwright, not product e2e)
 packages/frontend/visual/shots/

@@ -173,7 +173,7 @@ export class IntentsController {
       if (!allowed) throw new ForbiddenException('The actor does not hold the required capabilities');
       return this.intents.list(options);
     }
-    // The old GET /admin/servers/:id/intents: ManageServers sees every intent on
+    // `?serverId=` with ManageServers: every intent on
     // that server, whatever its resource type.
     if (options.serverId && actor.capabilities.has(Capability.ManageServers)) {
       const page = await this.intents.list(options);

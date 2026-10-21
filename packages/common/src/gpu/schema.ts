@@ -54,7 +54,7 @@ export const zPatchContainerGpusRequest = z.object({
   pciAddresses: zGpuPciAddresses,
 }).strict();
 
-/** Body of `PATCH /admin/servers/:serverId/gpu`. */
+/** Body of `PATCH /servers/:serverId/gpu`. */
 export const zPatchServerGpuRequest = z.object({
   enabled: z.boolean(),
 }).strict();

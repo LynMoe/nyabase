@@ -24,7 +24,7 @@ export interface GpuGrant {
   pciAddresses: string[];
 }
 
-/** `GET/PATCH /admin/servers/:serverId/gpu`. */
+/** `GET/PATCH /servers/:serverId/gpu`. */
 export interface ServerGpuDto {
   enabled: boolean;
   health: GpuHealthDto;
@@ -32,7 +32,7 @@ export interface ServerGpuDto {
   support: GpuSupportDto;
 }
 
-/** `GET /servers/:serverId/gpus` and `GET /admin/servers/:serverId/gpus`. */
+/** `GET /servers/:serverId/gpus` (`?scope=all` for the admin view). */
 export interface GpuDevicesResponseDto {
   items: GpuDeviceDto[];
   enabled: boolean;

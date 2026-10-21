@@ -18,9 +18,7 @@ node_modules
 **/.env.*
 !**/.env.example
 
-# Per-run CPU E2E state contains private keys, passwords, and Agent tokens.
-tests/e2e/.runtime
-.local/e2e/.runtime
+tests/e2e/lab.env
 
 *.db
 *.db-shm
