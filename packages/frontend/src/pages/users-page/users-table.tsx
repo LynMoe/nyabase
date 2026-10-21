@@ -1,6 +1,8 @@
+import { useState } from 'react';
+import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { Link } from '@tanstack/react-router';
 import { Trash2 } from 'lucide-react';
-import type { UserDto } from '@nyabase/common';
+import { Capability, type UserDto } from '@nyabase/common';
 import { Badge } from '../../components/ui/badge.js';
 import { Button } from '../../components/ui/button.js';
 import { StatusBadge } from '../../components/layout/status-badge.js';
@@ -14,19 +16,29 @@ import {
 } from '../../components/ui/table.js';
 import { userStatusLabel } from '../../lib/display-labels.js';
 import { userDeleting } from '../../lib/in-progress.js';
+import { ConfirmDialog } from '../../components/layout/confirm-dialog.js';
+import { api } from '../../lib/api.js';
+import { errorMessage } from '../../lib/api-error.js';
+import { queryKeys } from '../../lib/query-keys.js';
+import { toast } from '../../hooks/use-toast.js';
+import { useAuthStore } from '../../store/auth.js';
 
-export function UsersTable({
-  users: visibleUsers,
-  canManage,
-  currentUserId,
-  onDelete,
-}: {
-  users: UserDto[];
-  canManage: boolean;
-  currentUserId: string | undefined;
-  onDelete: (user: UserDto) => void;
-}) {
+export function UsersTable({ users: visibleUsers }: { users: UserDto[] }) {
+  const currentUserId = useAuthStore((state) => state.user?.id);
+  const canManage = useAuthStore((state) => state.user?.capabilities.includes(Capability.ManageUsers) ?? false);
+  const queryClient = useQueryClient();
+  const [deleteUser, setDeleteUser] = useState<UserDto | null>(null);
+  const remove = useMutation({
+    mutationFn: (id: string) => api.delete<unknown>(`/users/${id}`),
+    onSuccess: () => {
+      toast({ title: '用户已删除' });
+      setDeleteUser(null);
+      void queryClient.invalidateQueries({ queryKey: queryKeys.users.admin });
+    },
+    onError: (error) => toast({ title: '删除用户失败', description: errorMessage(error), variant: 'destructive' }),
+  });
   return (
+    <>
       <Table className="min-w-[720px]">
         <TableHeader>
           <TableRow>
@@ -83,7 +95,7 @@ export function UsersTable({
               {canManage ? (
                 <TableCell className="text-right">
                   {user.id !== currentUserId ? (
-                    <Button size="sm" variant="ghost-destructive" onClick={() => onDelete(user)}>
+                    <Button size="sm" variant="ghost-destructive" onClick={() => setDeleteUser(user)}>
                       <Trash2 className="h-4 w-4" />删除
                     </Button>
                   ) : null}
@@ -93,5 +105,17 @@ export function UsersTable({
           ))}
         </TableBody>
       </Table>
+
+      <ConfirmDialog
+        open={Boolean(deleteUser)}
+        title="删除用户？"
+        description={`将永久删除用户「${deleteUser?.displayName}」。其登录会话会被终止，组关系与资源授权会一并清理，且不可恢复。`}
+        confirmLabel="确认删除"
+        pendingLabel="删除中..."
+        pending={remove.isPending}
+        onConfirm={() => { if (deleteUser) remove.mutate(deleteUser.id); }}
+        onOpenChange={(open) => { if (!open) setDeleteUser(null); }}
+      />
+    </>
   );
 }

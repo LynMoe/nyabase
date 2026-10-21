@@ -1,3 +1,4 @@
+import { useQuery } from '@tanstack/react-query';
 import { IntentKind, IntentResourceType, type ServerDto } from '@nyabase/common';
 import { Button } from '../../components/ui/button.js';
 import {
@@ -7,6 +8,8 @@ import {
   SelectTrigger,
   SelectValue,
 } from '../../components/ui/select.js';
+import { api } from '../../lib/api.js';
+import { queryKeys } from '../../lib/query-keys.js';
 import { intentKindLabel, intentResourceTypeLabel } from '../../lib/status-labels.js';
 
 const ALL = '__all__';
@@ -18,29 +21,27 @@ export const SEGMENTS = [
 
 export type StatusSegment = (typeof SEGMENTS)[number]['id'];
 
+export interface IntentFilterState {
+  segment: StatusSegment;
+  kind?: IntentKind;
+  resourceType?: IntentResourceType;
+  serverId?: string;
+}
+
 export function IntentFilters({
-  segment,
-  onSegment,
-  kind,
-  onKind,
-  resourceType,
-  onResourceType,
-  serverId,
-  onServerId,
-  servers,
+  filters: { segment, kind, resourceType, serverId },
+  onChange,
   showServerFilter,
 }: {
-  segment: StatusSegment;
-  onSegment: (value: StatusSegment) => void;
-  kind: IntentKind | undefined;
-  onKind: (value: IntentKind | undefined) => void;
-  resourceType: IntentResourceType | undefined;
-  onResourceType: (value: IntentResourceType | undefined) => void;
-  serverId: string | undefined;
-  onServerId: (value: string | undefined) => void;
-  servers: ServerDto[];
+  filters: IntentFilterState;
+  onChange: (change: Partial<IntentFilterState>) => void;
   showServerFilter: boolean;
 }) {
+  const servers = useQuery({
+    queryKey: queryKeys.servers.admin,
+    queryFn: () => api.get<ServerDto[]>('/servers?scope=all'),
+    enabled: showServerFilter,
+  }).data ?? [];
   return (
     <div className="flex flex-wrap items-center gap-2">
       <div className="flex flex-wrap rounded-md bg-muted p-1">
@@ -51,7 +52,7 @@ export function IntentFilters({
             size="sm"
             variant={segment === item.id ? 'secondary' : 'ghost'}
             className="h-8"
-            onClick={() => onSegment(item.id)}
+            onClick={() => onChange({ segment: item.id })}
           >
             {item.label}
           </Button>
@@ -59,7 +60,7 @@ export function IntentFilters({
       </div>
       <Select
         value={kind ?? ALL}
-        onValueChange={(value) => onKind(value === ALL ? undefined : value as IntentKind)}
+        onValueChange={(value) => onChange({ kind: value === ALL ? undefined : value as IntentKind })}
       >
         <SelectTrigger className="h-9 w-[160px]" aria-label="操作类型">
           <SelectValue placeholder="全部类型" />
@@ -73,7 +74,7 @@ export function IntentFilters({
       </Select>
       <Select
         value={resourceType ?? ALL}
-        onValueChange={(value) => onResourceType(value === ALL ? undefined : value as IntentResourceType)}
+        onValueChange={(value) => onChange({ resourceType: value === ALL ? undefined : value as IntentResourceType })}
       >
         <SelectTrigger className="h-9 w-[160px]" aria-label="资源类型">
           <SelectValue placeholder="全部资源" />
@@ -88,7 +89,7 @@ export function IntentFilters({
       {showServerFilter && (
         <Select
           value={serverId ?? ALL}
-          onValueChange={(value) => onServerId(value === ALL ? undefined : value)}
+          onValueChange={(value) => onChange({ serverId: value === ALL ? undefined : value })}
         >
           <SelectTrigger className="h-9 w-[180px]" aria-label="服务器">
             <SelectValue placeholder="全部服务器" />

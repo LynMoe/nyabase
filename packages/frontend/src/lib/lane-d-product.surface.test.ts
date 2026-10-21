@@ -350,7 +350,7 @@ describe('lane D product UI copy', () => {
     expect(ops).toMatch(/加载更多/);
     expect(ops).toMatch(/useInfiniteQuery/);
     expect(ops).not.toMatch(/机器状态/);
-    expect(ops).toMatch(/useState<StatusSegment>\('all'\)/);
+    expect(ops).toMatch(/useState<IntentFilterState>\(\{ segment: 'all' \}\)/);
     expect(ops).not.toMatch(/enabled: segment != null/);
     expect(ops).not.toMatch(/选择『全部』『进行中』或『失败』加载意图/);
     expect(ops).not.toMatch(/默认不加载/);

@@ -1,26 +1,24 @@
 import { useState } from 'react';
-import { useInfiniteQuery, useQuery } from '@tanstack/react-query';
+import { useInfiniteQuery } from '@tanstack/react-query';
 import {
   Capability,
   type IntentKind,
   type IntentResourceType,
   type CursorPaginatedResponse,
   type IntentDto,
-  type ServerDto,
 } from '@nyabase/common';
 import { Activity } from 'lucide-react';
 import { api } from '../lib/api.js';
 import { Button } from '../components/ui/button.js';
 import { IntentDetailDialog } from '../components/intents/intent-detail-dialog.js';
-import { Page } from '../components/layout/page-header.js';
-import { PageHeader } from '../components/layout/page-header.js';
+import { Page, PageHeader } from '../components/layout/page-header.js';
 import { QueryView } from '../components/layout/query-view.js';
 import { SectionCard } from '../components/layout/section-card.js';
 import { useAuthStore } from '../store/auth.js';
 import { intentPending } from '../lib/in-progress.js';
 import { queryKeys } from '../lib/query-keys.js';
 import { refetchWhileInProgress } from '../lib/query-lifecycle.js';
-import { IntentFilters, type StatusSegment } from './ops-page/intent-filters.js';
+import { IntentFilters, type IntentFilterState, type StatusSegment } from './ops-page/intent-filters.js';
 import { IntentsTable } from './ops-page/intents-table.js';
 
 const PAGE_SIZE = 50;
@@ -46,29 +44,23 @@ function adminIntentsPath(filters: {
 export default function OpsPage() {
   const user = useAuthStore((state) => state.user);
   const canManageServers = user?.capabilities.includes(Capability.ManageServers) ?? false;
-  const [segment, setSegment] = useState<StatusSegment>('all');
-  const [kind, setKind] = useState<IntentKind | undefined>(undefined);
-  const [resourceType, setResourceType] = useState<IntentResourceType | undefined>(undefined);
-  const [serverId, setServerId] = useState<string | undefined>(undefined);
+  const [filters, setFilters] = useState<IntentFilterState>({ segment: 'all' });
   const [selected, setSelected] = useState<IntentDto | null>(null);
+  const { segment, kind, resourceType } = filters;
+  const serverId = canManageServers ? filters.serverId : undefined;
 
-  const serversQuery = useQuery({
-    queryKey: queryKeys.servers.admin,
-    queryFn: () => api.get<ServerDto[]>('/servers?scope=all'),
-    enabled: canManageServers,
-  });
   const intentsQuery = useInfiniteQuery({
     queryKey: queryKeys.adminIntents({
       status: segment === 'all' ? undefined : segment,
       kind,
       resourceType,
-      serverId: canManageServers ? serverId : undefined,
+      serverId,
     }),
     queryFn: ({ pageParam }) => api.get<CursorPaginatedResponse<IntentDto>>(adminIntentsPath({
       segment,
       kind,
       resourceType,
-      serverId: canManageServers ? serverId : undefined,
+      serverId,
       cursor: pageParam,
     })),
     initialPageParam: undefined as string | undefined,
@@ -86,15 +78,8 @@ export default function OpsPage() {
       <SectionCard
         toolbar={
           <IntentFilters
-            segment={segment}
-            onSegment={setSegment}
-            kind={kind}
-            onKind={setKind}
-            resourceType={resourceType}
-            onResourceType={setResourceType}
-            serverId={serverId}
-            onServerId={setServerId}
-            servers={serversQuery.data ?? []}
+            filters={filters}
+            onChange={(change) => setFilters((current) => ({ ...current, ...change }))}
             showServerFilter={canManageServers}
           />
         }
