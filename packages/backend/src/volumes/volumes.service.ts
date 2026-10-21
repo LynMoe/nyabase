@@ -34,7 +34,6 @@ import type { NyabaseDatabase } from '../platform/persistence-pg/database.types.
 import { PgTransactionManager } from '../platform/persistence-pg/transaction.js';
 import { IntentRepository } from '../reconcile/intent.repository.js';
 import { createVolumeIntent } from './volume-intents.js';
-import { ReconcileWakeService } from '../reconcile/reconcile-wake.service.js';
 import { isoDate, lifecyclePhase, numberValue, deterministicName, poolLabel } from '../platform/domain-utils.js';
 import { acceptedIntent } from '../reconcile/accepted-intent.js';
 import { StoragePoolsRepository } from '../storage-pools/storage-pools.repository.js';
@@ -43,26 +42,15 @@ import { VolumesRepository, type VolumeExecutor } from './volumes.repository.js'
 import { AuditService } from '../iam/audit.service.js';
 import { assertListScope, isSystemActor, type Actor } from '../iam/actor.js';
 import {
-  classifyGrantExpiry,
-  compareGrantCandidates,
-  liveExpiry,
-  selectLiveGrantCandidate,
-  type GrantWinnerCandidate,
-} from '../iam/grant-expiry.js';
+  resolvePoolAccess,
+  resolveServerAccess,
+  resolveSharedBackendAccess,
+} from '../iam/effective-access.js';
 import { listEligibleDestroyExecutors } from './eligible-destroy-executors.js';
 import { occupancyForCatalogItem } from './shared-volume-inspect.js';
 import { INCUS_CLIENT_FACTORY, type IncusClientFactory } from '../incus/incus-client.factory.js';
 import { IncusError } from '../incus/index.js';
 import { normalizeObservedVolumeUsage } from './volume-reconciler.service.js';
-
-type GrantRow = {
-  disk_bytes: string | number | null;
-  expires_at: Date | string | null;
-  user_id: string | null;
-  group_id: string | null;
-  group_priority: number | null;
-  id: string;
-};
 
 type VolumeAccess = 'owner' | 'admin';
 
@@ -90,27 +78,6 @@ export function isIntentAccepted(
   result: VolumeDto | SharedVolumeDto | IntentAcceptedDto,
 ): result is IntentAcceptedDto {
   return 'intentId' in result;
-}
-
-function activeExpiry(value: Date | string | null): boolean {
-  return classifyGrantExpiry(value) !== 'lost';
-}
-
-function asWinnerCandidate(
-  ownerId: string,
-  row: {
-    user_id: string | null;
-    group_priority: number | null;
-    id: string;
-    expires_at: Date | string | null;
-  },
-): GrantWinnerCandidate {
-  return {
-    scopeRank: row.user_id === ownerId ? 0 : 1,
-    priority: row.group_priority ?? 0,
-    tieBreaker: row.id,
-    expiresAt: row.expires_at,
-  };
 }
 
 function isUniqueViolation(error: unknown): boolean {
@@ -259,7 +226,6 @@ export class VolumesService {
     private readonly pools: StoragePoolsRepository,
     private readonly transactions: PgTransactionManager,
     private readonly intents: IntentRepository,
-    private readonly wake: ReconcileWakeService,
     @Inject(PG_DATABASE) private readonly database: Kysely<NyabaseDatabase>,
     private readonly audit: AuditService,
     @Inject(INCUS_CLIENT_FACTORY) private readonly clients: IncusClientFactory,
@@ -334,8 +300,7 @@ export class VolumesService {
   }
 
   private async ownerCapacity(ownerId: string, serverId: string): Promise<StorageCapacityDto> {
-    await this.assertServerGrant(ownerId, serverId);
-    const grant = await this.effectiveServerGrant(ownerId, serverId);
+    const grant = await this.requireServerAccess(ownerId, serverId);
     const pools = (await this.pools.list(serverId)).filter(isLocalPoolRow);
     const overcommitRatio = await this.serverOvercommit(serverId);
     const poolDtos = [];
@@ -369,11 +334,7 @@ export class VolumesService {
         ),
       });
     }
-    const limit = grant?.disk_bytes === null
-      || grant?.disk_bytes === undefined
-      || numberValue(grant.disk_bytes) === 0
-      ? null
-      : numberValue(grant.disk_bytes);
+    const limit = grant.diskBytes;
     return {
       grantLimitBytes: limit,
       usedByRootDisksBytes: usedRoot,
@@ -591,12 +552,6 @@ export class VolumesService {
       }
       throw error;
     }
-    this.wake.wake({
-      resourceType: IntentResourceType.Volume,
-      resourceId: created.row.id,
-      serverId: created.intent.serverId,
-      reason: 'intent',
-    });
     return acceptedIntent(created.intent);
   }
 
@@ -817,12 +772,6 @@ export class VolumesService {
       );
       return { row, intent };
     }, { isolationLevel: 'serializable', maxAttempts: 5 });
-    this.wake.wake({
-      resourceType: IntentResourceType.Volume,
-      resourceId: id,
-      serverId: changed.intent.serverId,
-      reason: 'intent',
-    });
     return acceptedIntent(changed.intent);
   }
 
@@ -1022,14 +971,6 @@ export class VolumesService {
     if (!changed.intent) {
       const [dto] = await this.toSharedDtos([changed.row]);
       return dto!;
-    }
-    for (const serverId of changed.serverIds.length > 0 ? changed.serverIds : [changed.intent.serverId]) {
-      this.wake.wake({
-        resourceType: IntentResourceType.Volume,
-        resourceId: id,
-        serverId,
-        reason: 'intent',
-      });
     }
     return acceptedIntent(changed.intent);
   }
@@ -1271,12 +1212,6 @@ export class VolumesService {
       await this.audit.append(transaction, actorId, AuditAction.DeleteVolume, id, 'volume');
       return { row, intent, deleted: false as const };
     }, { isolationLevel: 'serializable', maxAttempts: 5 });
-    this.wake.wake({
-      resourceType: IntentResourceType.Volume,
-      resourceId: id,
-      serverId: result.intent.serverId,
-      reason: 'intent',
-    });
     return acceptedIntent(result.intent);
   }
 
@@ -1376,12 +1311,6 @@ export class VolumesService {
       }
       throw error;
     });
-    this.wake.wake({
-      resourceType: IntentResourceType.Container,
-      resourceId: containerId,
-      serverId: result.intent.serverId,
-      reason: 'intent',
-    });
     return acceptedIntent(result.intent);
   }
 
@@ -1415,8 +1344,14 @@ export class VolumesService {
         details: { volumeId: volume.id, lifecyclePhase: volume.lifecycle_phase },
       });
     }
-    if (volume.shared_backend_id !== null && access === 'owner') {
-      await this.assertSharedGrant(volume.owner_id, volume.shared_backend_id, transaction);
+    if (access === 'owner') {
+      // Attaching is denied without current coverage of every resource involved.
+      await this.assertServerGrant(container.owner_id, container.server_id, transaction);
+      if (volume.shared_backend_id !== null) {
+        await this.assertSharedGrant(volume.owner_id, volume.shared_backend_id, transaction);
+      } else if (volume.pool_id !== null) {
+        await this.assertPoolGrant(volume.owner_id, volume.pool_id, transaction);
+      }
     }
     if (volume.server_id !== null && volume.server_id !== container.server_id) {
       throw new ConflictException({
@@ -1575,12 +1510,6 @@ export class VolumesService {
       );
       return intent;
     }, { isolationLevel: 'serializable', maxAttempts: 5 });
-    this.wake.wake({
-      resourceType: IntentResourceType.Container,
-      resourceId: expectedContainerId,
-      serverId: result.serverId,
-      reason: 'intent',
-    });
     return acceptedIntent(result);
   }
 
@@ -1711,21 +1640,16 @@ export class VolumesService {
       return;
     }
     if (!serverId) throw new BadRequestException('Local capacity requires a server');
-    const grant = await this.effectiveServerGrant(ownerId, serverId, transaction);
-    if (!grant || !liveExpiry(grant.expires_at)) {
-      throw new ForbiddenException('Server storage access is not granted');
-    }
+    const grant = await this.requireServerAccess(ownerId, serverId, transaction);
     const sums = await this.ownerServerCommittedBytes(ownerId, serverId, undefined, transaction);
-    if (grant.disk_bytes !== null && grant.disk_bytes !== undefined
-      && numberValue(grant.disk_bytes) > 0
-      && sums.root + sums.local + delta > numberValue(grant.disk_bytes)) {
+    if (grant.diskBytes !== null && sums.root + sums.local + delta > grant.diskBytes) {
       throw new ConflictException({
         code: FailureCode.StorageGrantExceeded,
         message: 'Server storage grant exceeded',
         details: {
           requestedBytes: delta,
-          availableBytes: Math.max(0, numberValue(grant.disk_bytes) - sums.root - sums.local),
-          grantLimitBytes: numberValue(grant.disk_bytes),
+          availableBytes: Math.max(0, grant.diskBytes - sums.root - sums.local),
+          grantLimitBytes: grant.diskBytes,
         },
       });
     }
@@ -1896,37 +1820,15 @@ export class VolumesService {
     }
   }
 
-  private async effectiveServerGrant(
+  /** The owner's current server coverage; throws 403 when absent or expired. */
+  private async requireServerAccess(
     ownerId: string,
     serverId: string,
     executor: VolumeExecutor = this.database,
-  ): Promise<GrantRow | null> {
-    const rows = await executor.selectFrom('iam.server_grants as grant')
-      .leftJoin('iam.group_members as member', 'member.group_id', 'grant.group_id')
-      .leftJoin('iam.groups as group', 'group.id', 'grant.group_id')
-      .select([
-        'grant.disk_bytes',
-        'grant.expires_at',
-        'grant.user_id',
-        'grant.group_id',
-        'grant.id',
-        'group.priority as group_priority',
-      ])
-      .where('grant.server_id', '=', serverId)
-      .where((expression) => expression.or([
-        expression('grant.user_id', '=', ownerId),
-        expression('member.user_id', '=', ownerId),
-      ]))
-      .forUpdate('grant')
-      .execute();
-    const active = rows.filter((row) => activeExpiry(row.expires_at));
-    const now = new Date();
-    active.sort((left, right) => compareGrantCandidates(
-      asWinnerCandidate(ownerId, left),
-      asWinnerCandidate(ownerId, right),
-      now,
-    ));
-    return (active[0] ?? null) as GrantRow | null;
+  ) {
+    const access = await resolveServerAccess(executor, ownerId, serverId);
+    if (!access) throw new ForbiddenException('Server storage access is not granted');
+    return access;
   }
 
   private async assertServerGrant(
@@ -1934,23 +1836,11 @@ export class VolumesService {
     serverId: string,
     executor: VolumeExecutor = this.database,
   ): Promise<void> {
-    const grant = await this.effectiveServerGrant(ownerId, serverId, executor);
-    if (!grant || !liveExpiry(grant.expires_at)) {
-      throw new ForbiddenException('Server storage access is not granted');
-    }
+    await this.requireServerAccess(ownerId, serverId, executor);
   }
 
   private async assertPoolGrant(ownerId: string, poolId: string, executor: VolumeExecutor) {
-    const rows = await executor.selectFrom('iam.storage_pool_grants as grant')
-      .leftJoin('iam.group_members as member', 'member.group_id', 'grant.group_id')
-      .select(['grant.id', 'grant.expires_at'])
-      .where('grant.pool_id', '=', poolId)
-      .where((expression) => expression.or([
-        expression('grant.user_id', '=', ownerId),
-        expression('member.user_id', '=', ownerId),
-      ]))
-      .execute();
-    if (!rows.some((row) => liveExpiry(row.expires_at))) {
+    if (!await resolvePoolAccess(executor, ownerId, poolId)) {
       throw new ForbiddenException('Storage pool access is not granted');
     }
   }
@@ -1960,35 +1850,14 @@ export class VolumesService {
     if (row === undefined) throw new ForbiddenException('Shared backend access is not granted');
   }
 
+  /** Capacity limit of the owner's current backend coverage: null = unlimited, undefined = none. */
   private async effectiveSharedGrant(
     ownerId: string,
     backendId: string,
     executor: VolumeExecutor = this.database,
   ): Promise<number | null | undefined> {
-    const rows = await executor.selectFrom('iam.shared_backend_grants as grant')
-      .leftJoin('iam.group_members as member', 'member.group_id', 'grant.group_id')
-      .leftJoin('iam.groups as group', 'group.id', 'grant.group_id')
-      .select([
-        'grant.limit_bytes',
-        'grant.expires_at',
-        'grant.user_id',
-        'grant.group_id',
-        'grant.id',
-        'group.priority as group_priority',
-      ])
-      .where('grant.shared_backend_id', '=', backendId)
-      .where((expression) => expression.or([
-        expression('grant.user_id', '=', ownerId),
-        expression('member.user_id', '=', ownerId),
-      ]))
-      .forUpdate('grant')
-      .execute();
-    const winner = selectLiveGrantCandidate(rows.map((row) => ({
-      ...asWinnerCandidate(ownerId, row),
-      limit_bytes: row.limit_bytes,
-    })));
-    if (!winner) return undefined;
-    return numberValue(winner.limit_bytes) === 0 ? null : numberValue(winner.limit_bytes);
+    const access = await resolveSharedBackendAccess(executor, ownerId, backendId);
+    return access ? access.limitBytes : undefined;
   }
 
   private async committedPoolBytes(

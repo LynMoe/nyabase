@@ -55,7 +55,6 @@ function userValues(id: string, numericId = 1) {
     display_name: 'Shared Volume User',
     status: 'active' as const,
     auth_version: 0,
-    authz_version: 0,
   };
 }
 
@@ -65,7 +64,6 @@ function makeService(database: Kysely<NyabaseDatabase>, clients?: IncusClientFac
     new StoragePoolsRepository(database),
     new PgTransactionManager(database),
     new IntentRepository(database, noopWake()),
-    { wake: vi.fn() } as never,
     database,
     { append: vi.fn().mockResolvedValue(undefined) } as never,
     clients ?? ({ get: vi.fn().mockRejectedValue(new Error('Incus is unavailable in this test')), listServerIds: vi.fn() } as never),

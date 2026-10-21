@@ -10,7 +10,6 @@ export interface AuthUser {
   displayName: string;
   status: UserStatus;
   authVersion: number;
-  authzVersion?: string;
   createdAt: Date;
   updatedAt: Date;
 }

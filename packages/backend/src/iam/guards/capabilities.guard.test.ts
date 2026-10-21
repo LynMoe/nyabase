@@ -35,7 +35,7 @@ describe('CapabilitiesGuard', () => {
 
     await expect(guard.canActivate(context)).resolves.toBe(true);
 
-    expect(accessResolver.userCapabilitiesCurrent).toHaveBeenCalledTimes(1);
+    expect(accessResolver.userCapabilities).toHaveBeenCalledTimes(1);
     expect(request.actor).toEqual({
       userId: 'user-a',
       capabilities: userCaps,
@@ -52,7 +52,7 @@ describe('CapabilitiesGuard', () => {
 
     await guard.canActivate(context);
 
-    expect(accessResolver.userCapabilitiesCurrent).toHaveBeenCalledTimes(1);
+    expect(accessResolver.userCapabilities).toHaveBeenCalledTimes(1);
     expect(request.actor).toMatchObject({
       userId: 'user-a',
       authKind: 'api-token',
@@ -63,7 +63,7 @@ describe('CapabilitiesGuard', () => {
   it('refuses an /admin route without capability metadata before resolving anything', async () => {
     const { guard, accessResolver } = makeGuardWithResolver({});
     await expect(guard.canActivate(makeContext('/api/admin/users'))).rejects.toBeInstanceOf(ForbiddenException);
-    expect(accessResolver.userCapabilitiesCurrent).not.toHaveBeenCalled();
+    expect(accessResolver.userCapabilities).not.toHaveBeenCalled();
   });
 
   it('denies admin routes when capability metadata is missing', async () => {
@@ -138,7 +138,7 @@ function makeGuardWithResolver(
     public?: boolean;
     userCaps?: Set<Capability>;
   },
-): { guard: CapabilitiesGuard; accessResolver: { userCapabilitiesCurrent: ReturnType<typeof vi.fn> } } {
+): { guard: CapabilitiesGuard; accessResolver: { userCapabilities: ReturnType<typeof vi.fn> } } {
   const reflector = {
     getAllAndOverride: vi.fn((key: string) => {
       if (key === IS_PUBLIC_KEY) return options?.public;
@@ -146,7 +146,7 @@ function makeGuardWithResolver(
     }),
   } as unknown as Reflector;
   const accessResolver = {
-    userCapabilitiesCurrent: vi.fn().mockResolvedValue(options?.userCaps ?? new Set<Capability>()),
+    userCapabilities: vi.fn().mockResolvedValue(options?.userCaps ?? new Set<Capability>()),
   };
   return { guard: new CapabilitiesGuard(reflector, accessResolver as never), accessResolver };
 }

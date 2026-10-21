@@ -19,7 +19,7 @@ import {
 } from '../containers/container-control.repository.js';
 import { NyabaseConfigService } from '../platform/config/nyabase-config.service.js';
 import { PgTransactionManager } from '../platform/persistence-pg/transaction.js';
-import { loadUsableServerAccessKeys } from '../iam/usable-server-access.js';
+import { loadServerAccessKeys } from '../iam/effective-access.js';
 import { SshIdentityService } from './ssh-identity.service.js';
 
 function normalizeRouteRuntimeStatus(value: string | null | undefined): ContainerStatus {
@@ -70,7 +70,7 @@ export class SshProxySnapshotService {
             .execute(),
           this.containers.list({}, transaction),
           this.containers.listRoutes({}, transaction),
-          loadUsableServerAccessKeys(transaction),
+          loadServerAccessKeys(transaction),
         ]);
       const publicKeysByUser = new Map<string, string[]>();
       for (const key of publicKeys) {

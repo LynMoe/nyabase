@@ -16,7 +16,6 @@ import { ReconcileClaimRepository } from '../reconcile/reconcile-claim.repositor
 import { VOLUME_DESTROY_PLACEMENT_ID } from '../reconcile/reconcile-claim.repository.js';
 import { listEligibleDestroyExecutors } from '../volumes/eligible-destroy-executors.js';
 import { VolumesRepository } from '../volumes/volumes.repository.js';
-import { AccessResolverService } from '../iam/access-resolver.service.js';
 import { isSystemActor, type Actor } from '../iam/actor.js';
 
 const OPERATOR_PURGE_AUDIT_ACTION = 'user.server.purge_resources' as AuditAction;
@@ -37,7 +36,6 @@ export class UserServerResourcePurgeService {
     private readonly volumes: VolumesRepository,
     private readonly intents: IntentRepository,
     private readonly reconcileClaims: ReconcileClaimRepository,
-    private readonly access: AccessResolverService,
     private readonly audit: AuditService,
   ) {}
 
@@ -86,7 +84,6 @@ export class UserServerResourcePurgeService {
         },
       );
     });
-    await this.access.authorizationCommitted([userId]);
     return {
       intentIds,
       containerIds,
@@ -123,7 +120,6 @@ export class UserServerResourcePurgeService {
           },
         );
       });
-      await this.access.authorizationCommitted([userId]);
     }
     return {
       intentIds: [...result.intentIds, ...result.containerIntentIds],
@@ -159,7 +155,6 @@ export class UserServerResourcePurgeService {
           },
         );
       });
-      await this.access.authorizationCommitted([userId]);
     }
     return {
       intentIds: [...result.intentIds, ...result.containerIntentIds],
@@ -224,7 +219,6 @@ export class UserServerResourcePurgeService {
           { serverId, intentIds },
         );
       });
-      await this.access.authorizationCommitted([userId]);
     }
     return { intentIds };
   }
@@ -296,7 +290,6 @@ export class UserServerResourcePurgeService {
           { ...resource, intentIds },
         );
       });
-      await this.access.authorizationCommitted([userId]);
     }
     return { intentIds };
   }

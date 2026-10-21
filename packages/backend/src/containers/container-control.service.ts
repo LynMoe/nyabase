@@ -33,14 +33,14 @@ import {
 import type { NyabaseDatabase } from '../platform/persistence-pg/database.types.js';
 import { PG_DATABASE } from '../platform/persistence-pg/tokens.js';
 import { PgTransactionManager } from '../platform/persistence-pg/transaction.js';
-import { AccessResolverService, type ResolvedServerGrant } from '../iam/access-resolver.service.js';
+import { AccessResolverService } from '../iam/access-resolver.service.js';
+import type { ServerAccess } from '../iam/effective-access.js';
 import { assertListScope, isSystemActor, type Actor } from '../iam/actor.js';
 import { AuditService } from '../iam/audit.service.js';
 import { isoDate, nullableNumber, numberValue, poolLabel } from '../platform/domain-utils.js';
 import { acceptedIntent } from '../reconcile/accepted-intent.js';
 import { IntentRepository } from '../reconcile/intent.repository.js';
 import { createContainerIntent } from './container-intents.js';
-import { ReconcileWakeService } from '../reconcile/reconcile-wake.service.js';
 import { ConsoleSessionService } from './console-session.service.js';
 import { ContainerSshConvergenceService } from './container-ssh-convergence.service.js';
 import {
@@ -219,7 +219,6 @@ export class ContainerControlService {
     private readonly repository: ContainerControlRepository,
     private readonly access: AccessResolverService,
     private readonly intents: IntentRepository,
-    private readonly wake: ReconcileWakeService,
     private readonly consoleSessions: ConsoleSessionService,
     private readonly audit: AuditService,
     private readonly actions: ContainerActionPolicyService,
@@ -300,7 +299,14 @@ export class ContainerControlService {
         request.serverId,
         request.imageId,
       );
-      if (!access?.imageAvailable) {
+      if (!access) {
+        throw new ForbiddenException({
+          code: FailureCode.PermissionDenied,
+          message: 'The user has no current access to this server',
+          details: { serverId: request.serverId },
+        });
+      }
+      if (!access.imageAvailable) {
         throw new ForbiddenException({
           code: FailureCode.ImageNotAvailable,
           message: 'The image has no active assignment on this server',
@@ -323,12 +329,6 @@ export class ContainerControlService {
             serverId: request.serverId,
             expectedFingerprint: image.fingerprint,
           },
-        });
-      }
-      if (access.grant.accessPhase !== 'live') {
-        throw new ForbiddenException({
-          code: FailureCode.PermissionDenied,
-          message: 'Server access is in expiry grace',
         });
       }
       this.assertComputeGrant(access.grant, request.cpuMillis, request.memBytes);
@@ -498,12 +498,6 @@ export class ContainerControlService {
       });
       return { row, intent };
     }, { isolationLevel: 'serializable', maxAttempts: 5 });
-    this.wake.wake({
-      resourceType: IntentResourceType.Container,
-      resourceId: result.row.id,
-      serverId: result.row.server_id,
-      reason: 'intent',
-    });
     return acceptedIntent(result.intent);
   }
 
@@ -706,15 +700,7 @@ export class ContainerControlService {
         mutated.requestSummary,
       );
       return { intent, serverId: current.server_id };
-    }, { isolationLevel: 'serializable', maxAttempts: 5 }).then((result) => {
-      this.wake.wake({
-        resourceType: IntentResourceType.Container,
-        resourceId: containerId,
-        serverId: result.serverId,
-        reason: 'intent',
-      });
-      return acceptedIntent(result.intent);
-    });
+    }, { isolationLevel: 'serializable', maxAttempts: 5 }).then((result) => acceptedIntent(result.intent));
   }
 
   /** Attachments of a container the caller was already authorised to see. */
@@ -791,6 +777,13 @@ export class ContainerControlService {
       if (!current) throw new NotFoundException('Container not found');
       const access = this.assertCanAccess(actor, current);
       await this.enforceInTransaction(transaction, actor, current, access);
+      if (access === 'owner' && (action === 'start' || action === 'restart')) {
+        await this.access.assertAttachedStorageCoveredInTransaction(
+          transaction,
+          current.owner_id,
+          containerId,
+        );
+      }
       if (action !== 'delete' && current.lifecycle_phase === ContainerPhase.Deleting) {
         throw new ConflictException({
           code: FailureCode.InstanceBusy,
@@ -866,12 +859,6 @@ export class ContainerControlService {
       isolationLevel: isSystemActor(actor) ? 'read committed' : 'serializable',
       maxAttempts: 5,
     });
-    this.wake.wake({
-      resourceType: IntentResourceType.Container,
-      resourceId: containerId,
-      serverId: result.serverId,
-      reason: 'intent',
-    });
     return acceptedIntent(result.intent);
   }
 
@@ -885,7 +872,7 @@ export class ContainerControlService {
       transaction: Transaction<NyabaseDatabase>,
       current: ContainerRow,
       /** The owner's live server grant; null for administrators and the system. */
-      grant: ResolvedServerGrant | null,
+      grant: ServerAccess | null,
     ) => Promise<void>,
   ): Promise<IntentAcceptedDto> {
     const result = await this.transactions.run(async (transaction) => {
@@ -923,12 +910,6 @@ export class ContainerControlService {
       await this.audit.append(transaction, actor.userId, action, containerId, 'container', request);
       return { intent, serverId: current.server_id };
     }, { isolationLevel: 'serializable', maxAttempts: 5 });
-    this.wake.wake({
-      resourceType: IntentResourceType.Container,
-      resourceId: containerId,
-      serverId: result.serverId,
-      reason: 'intent',
-    });
     return acceptedIntent(result.intent);
   }
 
@@ -964,19 +945,18 @@ export class ContainerControlService {
     );
   }
 
+  /** The owner must hold current coverage of the container's server. */
   private async requireLiveGrant(
     transaction: Transaction<NyabaseDatabase>,
     actor: Actor,
     container: { server_id: string },
-  ): Promise<ResolvedServerGrant> {
+  ): Promise<ServerAccess> {
     const grant = await this.access.resolveServerInTransaction(
       transaction,
       actor.userId,
       container.server_id,
     );
-    if (!grant || grant.accessPhase !== 'live') {
-      throw new ForbiddenException('Server access was revoked');
-    }
+    if (!grant) throw new ForbiddenException('Server access was revoked');
     return grant;
   }
 
@@ -989,7 +969,7 @@ export class ContainerControlService {
     actor: Actor,
     container: { server_id: string },
     access: ContainerAccess,
-  ): Promise<ResolvedServerGrant | null> {
+  ): Promise<ServerAccess | null> {
     if (access === 'admin') await this.assertAdminInTransaction(transaction, actor);
     if (access === 'owner') return this.requireLiveGrant(transaction, actor, container);
     return null;

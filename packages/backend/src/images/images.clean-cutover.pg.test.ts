@@ -32,7 +32,6 @@ describePg('clean Incus image assignment contract', () => {
         { assertActorCapabilitiesInTransaction: vi.fn() } as never,
         { append: vi.fn() } as never,
         { ensurePending: vi.fn() } as never,
-        { wake: vi.fn() } as never,
         new InfrastructureRepository(database),
         {} as never,
       );
@@ -134,7 +133,6 @@ describePg('clean Incus image assignment contract', () => {
         { assertActorCapabilitiesInTransaction: vi.fn() } as never,
         { append: vi.fn() } as never,
         intents as never,
-        { wake: vi.fn() } as never,
         new InfrastructureRepository(database),
         {} as never,
       );
@@ -256,7 +254,6 @@ describePg('clean Incus image assignment contract', () => {
         { assertActorCapabilitiesInTransaction: vi.fn() } as never,
         { append: vi.fn() } as never,
         intents as never,
-        { wake: vi.fn() } as never,
         new InfrastructureRepository(database),
         {} as never,
       );

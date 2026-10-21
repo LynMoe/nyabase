@@ -57,16 +57,16 @@ function createService(
   };
   const committedQuery = createCommittedQuery(committedRows);
   const grantsQuery = {
-    leftJoin: vi.fn().mockReturnThis(),
     select: vi.fn().mockReturnThis(),
     where: vi.fn().mockReturnThis(),
+    orderBy: vi.fn().mockReturnThis(),
     execute: vi.fn().mockResolvedValue([
-      { shared_backend_id: baseRow.id, expires_at: null },
+      { shared_backend_id: baseRow.id, limit_bytes: null, expires_at: null },
     ]),
   };
   const database = {
     selectFrom: vi.fn().mockImplementation((table: string) => {
-      if (table === 'iam.shared_backend_grants as grant') return grantsQuery;
+      if (table === 'iam.effective_shared_backend_access') return grantsQuery;
       return committedQuery;
     }),
   };

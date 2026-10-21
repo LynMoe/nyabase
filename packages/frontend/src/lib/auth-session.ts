@@ -122,7 +122,7 @@ function userAuthorizationFingerprint(user: UserDto | null): string {
   if (!user) return '';
   const capabilities = [...user.capabilities].sort();
   const groups = [...user.groups]
-    .map((group) => `${group.id}:${group.name}:${group.priority}:${group.isSystem}`)
+    .map((group) => `${group.id}:${group.name}:${group.isSystem}`)
     .sort();
   return JSON.stringify([user.id, user.status, capabilities, groups]);
 }

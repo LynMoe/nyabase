@@ -23,18 +23,18 @@ describePg('UsersService terminal user states', () => {
     });
   });
 
-  it('keeps disabled users reversible and invalidates access on recovery', async () => {
+  it('keeps disabled users reversible and signals the access-lapse processor', async () => {
     await withPostgresTestDatabase(async (fixture) => {
       const context = await usersPgFixture(fixture, {
         seedActor: false,
         targetStatus: UserStatus.Disabled,
       });
-      const committed = vi.spyOn(context.access, 'authorizationCommitted')
-        .mockResolvedValue(undefined);
+      const signalled = vi.fn();
+      context.changes.onChange(signalled);
       await expect(context.users.updateUser(context.userId, {
         status: UserStatus.Active,
       })).resolves.toMatchObject({ status: UserStatus.Active });
-      expect(committed).toHaveBeenCalledWith([context.userId]);
+      expect(signalled).toHaveBeenCalledTimes(1);
     });
   });
 });

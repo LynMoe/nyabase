@@ -145,7 +145,7 @@ export class GpuService {
   /** Devices the caller's server grant allows; unavailable while GPU is disabled. */
   private async listGrantedDevices(userId: string, serverId: string): Promise<GpuDevicesResponseDto> {
     const grant = await this.access.resolveServer(userId, serverId);
-    if (!grant || grant.accessPhase !== 'live') {
+    if (!grant) {
       throw new NotFoundException('Server not found');
     }
     if (!(await this.claims.isEnabled(serverId))) {

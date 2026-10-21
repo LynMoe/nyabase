@@ -3,6 +3,7 @@ import { useState, type ReactNode } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Plus } from 'lucide-react';
 import {
+  GRANT_EXPIRY_GRACE_DAYS,
   formatGpuGrantSummary,
   type EffectiveAccessDto,
   type GrantExpiryPhase,
@@ -46,6 +47,8 @@ import {
 import { ServerGrantGpu } from '../gpu/gpu-sections.js';
 import { ResourceRef } from '../refs/resource-ref.js';
 import { truncateId } from '../refs/truncate-id.js';
+
+const GRANT_MERGE_NOTE = '多条授权逐项取最大：同一用户在同一资源上的直接授权与所属各用户组的授权合并，额度取最大值（任一为不限则不限），GPU 白名单取并集，到期取最晚（任一不设期限则不过期）。';
 
 type Subject = UserDto | GroupDto;
 type SubjectKind = 'users' | 'groups';
@@ -114,6 +117,8 @@ export function CanonicalGrantPanel({ subject, kind }: { subject: Subject; kind:
     : poolsQuery.isSuccess && grantablePools.length === 0
       ? '已授权服务器上没有其他可授权的存储池。'
       : null;
+  const lapsedServers = (effectiveAccessQuery.data?.servers ?? [])
+    .filter((access) => access.accessPhase === 'grace');
   const backendBlocked = !backendsQuery.isSuccess
     ? null
     : backends.length === 0
@@ -160,8 +165,26 @@ export function CanonicalGrantPanel({ subject, kind }: { subject: Subject; kind:
 
   return (
     <div className="space-y-6" data-testid="canonical-grants">
+      {lapsedServers.length > 0 ? (
+        <SectionCard title="宽限中的服务器" testId="grant-grace">
+          <ul className="space-y-1 text-sm">
+            {lapsedServers.map((lapse) => (
+              <li key={lapse.serverId}>
+                <ResourceRef
+                  kind="server"
+                  id={lapse.serverId}
+                  name={servers.find((item) => item.id === lapse.serverId)?.name}
+                />
+                {' '}已失去访问覆盖，容器已停止；{lapse.purgeAt ? expiryLabel(lapse.purgeAt) : '宽限期满'} 起清除其容器与数据卷。重新授权可取消清除（已停止的容器不会自动启动）。
+              </li>
+            ))}
+          </ul>
+        </SectionCard>
+      ) : null}
+
       <SectionCard
         title="服务器授权"
+        description={GRANT_MERGE_NOTE}
         actions={(
           <AddGrantButton blocked={serverBlocked} onClick={() => setCreateKind('server')} testId="grant-add-server" />
         )}
@@ -185,10 +208,7 @@ export function CanonicalGrantPanel({ subject, kind }: { subject: Subject; kind:
               {serverGrants.map((grant) => {
                 const server = servers.find((item) => item.id === grant.serverId);
                 const quotaLine = formatGrantQuotaLine(grant, formatGpuGrantSummary(grant.gpuPciAddresses));
-                const phase = expiryPhase(
-                  grant.expiresAt,
-                  effectiveAccessQuery.data?.servers.find((item) => item.serverId === grant.serverId)?.accessPhase,
-                );
+                const phase = expiryPhase(grant.expiresAt);
                 return (
                   <TableRow key={grant.id}>
                     <TableCell className="whitespace-normal">
@@ -460,7 +480,7 @@ export function CanonicalGrantPanel({ subject, kind }: { subject: Subject; kind:
       <ConfirmDialog
         open={Boolean(deleteTarget)}
         title="删除授权？"
-        description={`将删除「${deleteTarget?.label}」。删除后该主体将立即失去对应资源访问权（若仍在宽限期内，以服务端状态为准）。`}
+        description={`将删除「${deleteTarget?.label}」。若删除后${kind === 'groups' ? '组内成员' : '该用户'}在该资源上不再被任何授权覆盖，将立即进入 ${GRANT_EXPIRY_GRACE_DAYS} 天宽限期（正在运行的容器会被停止），期满后其在该资源上的容器与数据卷将被清除。`}
         confirmLabel="确认删除"
         pendingLabel="删除中..."
         pending={remove.isPending}
@@ -900,12 +920,12 @@ function backendName(id: string, backends: SharedBackendDto[]): string {
   return backendDisplayName(id, backends) ?? truncateId(id);
 }
 
-function expiryPhase(value: string | null, effective?: GrantExpiryPhase): GrantExpiryPhase {
-  if (effective) return effective;
+/** Phase of one grant by its own expiry; the access a user actually has is the merge of all of them. */
+export function expiryPhase(value: string | null): GrantExpiryPhase {
   if (!value) return 'live';
   const timestamp = new Date(value).getTime();
   if (!Number.isFinite(timestamp) || timestamp > Date.now()) return 'live';
-  return 'lost';
+  return Date.now() < timestamp + GRANT_EXPIRY_GRACE_DAYS * 86_400_000 ? 'grace' : 'lost';
 }
 
 function expiryLabel(value: string | null): string {

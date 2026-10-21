@@ -15,7 +15,6 @@ describePg('Admin user bulk projection', () => {
         id: groupId,
         name: 'Projection group',
         description: null,
-        priority: 7,
         is_system: false,
         system_key: null,
         capabilities: [Capability.ManageUsers],
@@ -36,6 +35,7 @@ describePg('Admin user bulk projection', () => {
 
       const service = new UsersService(
         fixture.database,
+        undefined as never,
         undefined as never,
         undefined as never,
         undefined as never,

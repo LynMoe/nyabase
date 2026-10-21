@@ -48,18 +48,6 @@ COMMENT ON COLUMN audit.events.actor_snapshot IS
 COMMENT ON COLUMN audit.events.detail IS
   'Sanitized event detail; credential-like fields are redacted before insertion';
 
-CREATE TABLE iam.policy_state (
-    singleton boolean DEFAULT true NOT NULL,
-    policy_epoch bigint DEFAULT 0 NOT NULL,
-    updated_at timestamp with time zone DEFAULT clock_timestamp() NOT NULL,
-    CONSTRAINT policy_state_singleton_check CHECK (singleton),
-    CONSTRAINT policy_state_policy_epoch_check CHECK (policy_epoch >= 0),
-    PRIMARY KEY (singleton)
-);
-
-COMMENT ON TABLE iam.policy_state IS
-  'Singleton serialization point for monotonic authorization policy epochs';
-
 CREATE TABLE iam.users (
     id uuid NOT NULL,
     numeric_id integer NOT NULL,
@@ -68,7 +56,6 @@ CREATE TABLE iam.users (
     display_name text NOT NULL,
     status text DEFAULT 'active'::text NOT NULL,
     auth_version integer DEFAULT 0 NOT NULL,
-    authz_version bigint DEFAULT 0 NOT NULL,
     created_at timestamp with time zone DEFAULT clock_timestamp() NOT NULL,
     updated_at timestamp with time zone DEFAULT clock_timestamp() NOT NULL,
     CONSTRAINT users_numeric_id_check CHECK (numeric_id BETWEEN 1 AND 4096),
@@ -79,20 +66,16 @@ CREATE TABLE iam.users (
     CONSTRAINT users_status_check
         CHECK (status = ANY (ARRAY['active', 'disabled', 'deleting', 'deleted'])),
     CONSTRAINT users_auth_version_check CHECK (auth_version >= 0),
-    CONSTRAINT users_authz_version_check CHECK (authz_version >= 0),
     PRIMARY KEY (id)
 );
 
 COMMENT ON COLUMN iam.users.auth_version IS
   'Browser-session generation embedded in access JWTs';
-COMMENT ON COLUMN iam.users.authz_version IS
-  'Monotonic authorization snapshot version incremented with policy changes';
 
 CREATE TABLE iam.groups (
     id uuid NOT NULL,
     name text NOT NULL,
     description text,
-    priority integer DEFAULT 0 NOT NULL,
     is_system boolean DEFAULT false NOT NULL,
     system_key text,
     capabilities text[] DEFAULT ARRAY[]::text[] NOT NULL,
@@ -641,39 +624,21 @@ CREATE TABLE control.container_ssh_routes (
         CHECK (ssh_status = ANY (ARRAY['disabled', 'container_stopped', 'running', 'error', 'unknown']))
 );
 
-CREATE TABLE control.authorization_dependencies (
-    id uuid NOT NULL,
-    dependency_kind text NOT NULL,
-    dependency_id uuid NOT NULL,
-    user_id uuid NOT NULL REFERENCES iam.users(id) ON DELETE RESTRICT,
-    server_id uuid REFERENCES infra.servers(id) ON DELETE RESTRICT,
-    pool_id uuid REFERENCES infra.storage_pools(id) ON DELETE RESTRICT,
-    shared_backend_id uuid REFERENCES infra.shared_backends(id) ON DELETE RESTRICT,
-    created_at timestamp with time zone DEFAULT clock_timestamp() NOT NULL,
-    CONSTRAINT authorization_dependencies_kind_check
-        CHECK (dependency_kind = ANY (ARRAY['container', 'volume', 'volume_attachment'])),
-    CONSTRAINT authorization_dependencies_shape_check
-        CHECK ((dependency_kind = 'container'
-                AND server_id IS NOT NULL AND pool_id IS NULL AND shared_backend_id IS NULL)
-            OR (dependency_kind IN ('volume', 'volume_attachment')
-                AND ((server_id IS NOT NULL AND pool_id IS NOT NULL AND shared_backend_id IS NULL)
-                    OR (server_id IS NULL AND pool_id IS NULL AND shared_backend_id IS NOT NULL)))
-));
-
-COMMENT ON TABLE control.authorization_dependencies IS
-  'Transactional projection used to reject grant revocation while resources remain retained';
-
-CREATE TABLE control.grant_expiry_enforcement (
+CREATE TABLE control.access_lapses (
     user_id uuid NOT NULL REFERENCES iam.users(id) ON DELETE CASCADE,
-    server_id uuid NOT NULL REFERENCES infra.servers(id) ON DELETE CASCADE,
-    covering_expires_at timestamp with time zone NOT NULL,
-    grace_stopped_at timestamp with time zone,
+    resource_kind text NOT NULL,
+    resource_id uuid NOT NULL,
+    lapsed_at timestamp with time zone NOT NULL,
+    stopped_at timestamp with time zone,
     purged_at timestamp with time zone,
-    updated_at timestamp with time zone DEFAULT clock_timestamp() NOT NULL
+    CONSTRAINT access_lapses_kind_check
+        CHECK (resource_kind = ANY (ARRAY['server', 'storage_pool', 'shared_backend'])),
+    PRIMARY KEY (user_id, resource_kind, resource_id)
 );
 
-COMMENT ON TABLE control.grant_expiry_enforcement IS
-  'Idempotent grant-expiry completion ledger; in-flight ownership is a reconcile_claims lease (resource_type grant_expiry)';
+COMMENT ON TABLE control.access_lapses IS
+  'Grace ledger: a user owns resources on a server, pool or shared backend without current coverage. '
+  'lapsed_at is fixed when the row is created; in-flight ownership is a reconcile_claims lease (resource_type access_lapse)';
 
 CREATE TABLE control.intents (
     id uuid NOT NULL,
@@ -764,7 +729,7 @@ CREATE TABLE control.reconcile_claims (
             'volume',
             'image_assignment',
             'server',
-            'grant_expiry'
+            'access_lapse'
         ])),
     CONSTRAINT reconcile_claims_worker_check CHECK (length(btrim(worker_id)) > 0),
     CONSTRAINT reconcile_claims_placement_shape_check
@@ -772,14 +737,17 @@ CREATE TABLE control.reconcile_claims (
             (placement_server_id = '00000000-0000-4000-8000-000000000001'
                 AND server_id IS NULL
                 AND resource_type = 'volume')
-            OR (placement_server_id <> '00000000-0000-4000-8000-000000000001'
+            OR (resource_type = 'access_lapse'
+                AND server_id IS NULL)
+            OR (resource_type <> 'access_lapse'
+                AND placement_server_id <> '00000000-0000-4000-8000-000000000001'
                 AND server_id = placement_server_id)
         ),
     PRIMARY KEY (resource_type, resource_id, placement_server_id)
 );
 
 COMMENT ON COLUMN control.reconcile_claims.placement_server_id IS
-  'Incus catalog/server for the claim; volume.destroy uses …0001; grant_expiry uses the granted server';
+  'Incus catalog/server for the claim; volume.destroy uses …0001; access_lapse uses the lapsed resource id (server, pool or shared backend)';
 
 CREATE TABLE system.settings (
     singleton boolean DEFAULT true NOT NULL,
@@ -965,12 +933,6 @@ ALTER TABLE control.container_network_claims ADD CONSTRAINT container_network_cl
     UNIQUE (network_key, address);
 ALTER TABLE control.container_ssh_routes ADD CONSTRAINT container_ssh_routes_pkey
     PRIMARY KEY (container_id);
-ALTER TABLE control.authorization_dependencies ADD CONSTRAINT authorization_dependencies_pkey
-    PRIMARY KEY (id);
-ALTER TABLE control.authorization_dependencies ADD CONSTRAINT authorization_dependencies_unique
-    UNIQUE (dependency_kind, dependency_id, user_id);
-ALTER TABLE control.grant_expiry_enforcement ADD CONSTRAINT grant_expiry_enforcement_pkey
-    PRIMARY KEY (user_id, server_id, covering_expires_at);
 ALTER TABLE control.intents ADD CONSTRAINT intents_pkey PRIMARY KEY (id);
 
 ALTER TABLE system.settings ADD CONSTRAINT settings_pkey PRIMARY KEY (singleton);
@@ -1089,28 +1051,6 @@ CREATE INDEX container_ssh_routes_ip_idx
     ON control.container_ssh_routes (routed_ip);
 CREATE INDEX container_ssh_routes_server_idx
     ON control.container_ssh_routes (server_id);
-CREATE INDEX authorization_dependencies_server_idx
-    ON control.authorization_dependencies (user_id, server_id)
-    WHERE server_id IS NOT NULL;
-CREATE INDEX authorization_dependencies_pool_idx
-    ON control.authorization_dependencies (user_id, pool_id)
-    WHERE pool_id IS NOT NULL;
-CREATE INDEX authorization_dependencies_backend_idx
-    ON control.authorization_dependencies (user_id, shared_backend_id)
-    WHERE shared_backend_id IS NOT NULL;
-CREATE INDEX authorization_dependencies_server_fk_idx
-    ON control.authorization_dependencies (server_id);
-CREATE INDEX authorization_dependencies_pool_fk_idx
-    ON control.authorization_dependencies (pool_id);
-CREATE INDEX authorization_dependencies_backend_fk_idx
-    ON control.authorization_dependencies (shared_backend_id);
-CREATE INDEX authorization_dependencies_user_fk_idx
-    ON control.authorization_dependencies (user_id);
-CREATE INDEX grant_expiry_enforcement_pending_idx
-    ON control.grant_expiry_enforcement (user_id, server_id)
-    WHERE grace_stopped_at IS NULL OR purged_at IS NULL;
-CREATE INDEX grant_expiry_enforcement_server_idx
-    ON control.grant_expiry_enforcement (server_id);
 CREATE INDEX intents_pending_ready_idx
     ON control.intents ((COALESCE(next_attempt_at, created_at)) ASC, created_at ASC, id ASC)
     WHERE status = 'pending';
@@ -1126,13 +1066,13 @@ CREATE INDEX intents_server_fk_idx ON control.intents (server_id);
 CREATE INDEX intents_requested_by_idx ON control.intents (requested_by);
 CREATE INDEX intents_retention_idx
     ON control.intents (created_at, id) WHERE status <> 'pending';
+CREATE INDEX access_lapses_resource_idx ON control.access_lapses (resource_kind, resource_id);
 CREATE INDEX reconcile_claims_lease_idx ON control.reconcile_claims (lease_expires_at);
 CREATE INDEX reconcile_claims_server_idx ON control.reconcile_claims (server_id);
 
 CREATE INDEX iam_api_tokens_user_created_idx
     ON iam.api_tokens (user_id, created_at DESC, id);
 CREATE INDEX iam_group_members_user_idx ON iam.group_members (user_id, group_id);
-CREATE INDEX iam_groups_priority_name_idx ON iam.groups (priority DESC, name);
 CREATE INDEX refresh_tokens_expiry_idx ON iam.refresh_tokens (expires_at);
 CREATE INDEX refresh_tokens_revoked_idx ON iam.refresh_tokens (id) WHERE revoked;
 CREATE INDEX iam_refresh_tokens_user_active_idx
@@ -1159,6 +1099,109 @@ CREATE INDEX http_proxy_bindings_owner_idx
 CREATE INDEX http_proxy_bindings_pool_idx
     ON interaction.http_proxy_bindings (domain_pool_id, id);
 
+-- Effective access: direct grants plus grants inherited through group_members,
+-- merged per (user, resource) and restricted to active users.
+--   * Only grants that are current (expires_at IS NULL OR expires_at > now()) contribute.
+--     When none is current, the expired ones are merged instead so that the latest
+--     past expires_at stays visible to the lapse processor; consumers must treat
+--     "current coverage" as expires_at IS NULL OR expires_at > now().
+--   * Quotas are merged by maximum; NULL means unlimited and wins over any number
+--     (disk_bytes and shared-backend limit_bytes also treat 0 as unlimited).
+--   * GPU PCI addresses are the distinct, sorted union.
+--   * expires_at is the latest one; NULL (never expires) wins over any date.
+CREATE VIEW iam.effective_server_access AS
+WITH inherited AS (
+    SELECT grants.user_id, grants.server_id, grants.cpu_millis, grants.mem_bytes,
+           grants.disk_bytes, grants.gpu_pci_addresses, grants.expires_at
+    FROM iam.server_grants AS grants
+    WHERE grants.user_id IS NOT NULL
+    UNION ALL
+    SELECT members.user_id, grants.server_id, grants.cpu_millis, grants.mem_bytes,
+           grants.disk_bytes, grants.gpu_pci_addresses, grants.expires_at
+    FROM iam.server_grants AS grants
+    JOIN iam.group_members AS members ON members.group_id = grants.group_id
+), scoped AS (
+    SELECT inherited.*,
+           (inherited.expires_at IS NULL OR inherited.expires_at > now()) AS is_current,
+           bool_or(inherited.expires_at IS NULL OR inherited.expires_at > now())
+               OVER (PARTITION BY inherited.user_id, inherited.server_id) AS any_current
+    FROM inherited
+    JOIN iam.users AS users ON users.id = inherited.user_id AND users.status = 'active'
+), merged AS (
+    SELECT * FROM scoped WHERE is_current OR NOT any_current
+), gpus AS (
+    SELECT merged.user_id, merged.server_id,
+           array_agg(DISTINCT address ORDER BY address) AS gpu_pci_addresses
+    FROM merged, LATERAL unnest(merged.gpu_pci_addresses) AS address
+    GROUP BY merged.user_id, merged.server_id
+)
+SELECT merged.user_id,
+       merged.server_id,
+       CASE WHEN bool_or(merged.cpu_millis IS NULL) THEN NULL
+            ELSE max(merged.cpu_millis) END AS cpu_millis,
+       CASE WHEN bool_or(merged.mem_bytes IS NULL) THEN NULL
+            ELSE max(merged.mem_bytes) END AS mem_bytes,
+       CASE WHEN bool_or(merged.disk_bytes IS NULL OR merged.disk_bytes = 0) THEN NULL
+            ELSE max(merged.disk_bytes) END AS disk_bytes,
+       coalesce(max(gpus.gpu_pci_addresses), ARRAY[]::text[]) AS gpu_pci_addresses,
+       CASE WHEN bool_or(merged.expires_at IS NULL) THEN NULL
+            ELSE max(merged.expires_at) END AS expires_at
+FROM merged
+LEFT JOIN gpus ON gpus.user_id = merged.user_id AND gpus.server_id = merged.server_id
+GROUP BY merged.user_id, merged.server_id;
+
+CREATE VIEW iam.effective_pool_access AS
+WITH inherited AS (
+    SELECT grants.user_id, grants.pool_id, grants.expires_at
+    FROM iam.storage_pool_grants AS grants
+    WHERE grants.user_id IS NOT NULL
+    UNION ALL
+    SELECT members.user_id, grants.pool_id, grants.expires_at
+    FROM iam.storage_pool_grants AS grants
+    JOIN iam.group_members AS members ON members.group_id = grants.group_id
+), scoped AS (
+    SELECT inherited.*,
+           (inherited.expires_at IS NULL OR inherited.expires_at > now()) AS is_current,
+           bool_or(inherited.expires_at IS NULL OR inherited.expires_at > now())
+               OVER (PARTITION BY inherited.user_id, inherited.pool_id) AS any_current
+    FROM inherited
+    JOIN iam.users AS users ON users.id = inherited.user_id AND users.status = 'active'
+)
+SELECT scoped.user_id,
+       scoped.pool_id,
+       CASE WHEN bool_or(scoped.expires_at IS NULL) THEN NULL
+            ELSE max(scoped.expires_at) END AS expires_at
+FROM scoped
+WHERE scoped.is_current OR NOT scoped.any_current
+GROUP BY scoped.user_id, scoped.pool_id;
+
+CREATE VIEW iam.effective_shared_backend_access AS
+WITH inherited AS (
+    SELECT grants.user_id, grants.shared_backend_id, grants.limit_bytes, grants.expires_at
+    FROM iam.shared_backend_grants AS grants
+    WHERE grants.user_id IS NOT NULL
+    UNION ALL
+    SELECT members.user_id, grants.shared_backend_id, grants.limit_bytes, grants.expires_at
+    FROM iam.shared_backend_grants AS grants
+    JOIN iam.group_members AS members ON members.group_id = grants.group_id
+), scoped AS (
+    SELECT inherited.*,
+           (inherited.expires_at IS NULL OR inherited.expires_at > now()) AS is_current,
+           bool_or(inherited.expires_at IS NULL OR inherited.expires_at > now())
+               OVER (PARTITION BY inherited.user_id, inherited.shared_backend_id) AS any_current
+    FROM inherited
+    JOIN iam.users AS users ON users.id = inherited.user_id AND users.status = 'active'
+)
+SELECT scoped.user_id,
+       scoped.shared_backend_id,
+       CASE WHEN bool_or(scoped.limit_bytes = 0) THEN NULL
+            ELSE max(scoped.limit_bytes) END AS limit_bytes,
+       CASE WHEN bool_or(scoped.expires_at IS NULL) THEN NULL
+            ELSE max(scoped.expires_at) END AS expires_at
+FROM scoped
+WHERE scoped.is_current OR NOT scoped.any_current
+GROUP BY scoped.user_id, scoped.shared_backend_id;
+
 CREATE FUNCTION audit.reject_event_update() RETURNS trigger
     LANGUAGE plpgsql
     AS $$
@@ -1168,104 +1211,30 @@ BEGIN
 END;
 $$;
 
-CREATE FUNCTION iam.bump_policy_epoch() RETURNS bigint
-    LANGUAGE sql
-    AS $$
-  UPDATE iam.policy_state
-  SET policy_epoch = policy_epoch + 1,
-      updated_at = clock_timestamp()
-  WHERE singleton
-  RETURNING policy_epoch
-$$;
-
-COMMENT ON FUNCTION iam.bump_policy_epoch() IS
-  'Durable authorization cache fence; external publication is only a wake-up optimization';
-
-CREATE FUNCTION iam.lock_policy_state_before_mutation() RETURNS trigger
+CREATE FUNCTION iam.bump_auth_version_for_group_capabilities() RETURNS trigger
     LANGUAGE plpgsql
     AS $$
 BEGIN
-  PERFORM 1 FROM iam.policy_state WHERE singleton = true FOR UPDATE;
-  RETURN NULL;
-END;
-$$;
-
-CREATE FUNCTION iam.touch_authorization_subjects() RETURNS trigger
-    LANGUAGE plpgsql
-    AS $$
-BEGIN
-  IF TG_OP <> 'INSERT' THEN
-    IF OLD.user_id IS NOT NULL THEN
-      UPDATE iam.users
-      SET authz_version = authz_version + 1, updated_at = clock_timestamp()
-      WHERE id = OLD.user_id;
-    END IF;
-    IF OLD.group_id IS NOT NULL THEN
-      UPDATE iam.users AS users
-      SET authz_version = users.authz_version + 1, updated_at = clock_timestamp()
-      FROM iam.group_members AS members
-      WHERE members.group_id = OLD.group_id AND members.user_id = users.id;
-    END IF;
-  END IF;
-
-  IF TG_OP <> 'DELETE' THEN
-    IF NEW.user_id IS NOT NULL THEN
-      UPDATE iam.users
-      SET authz_version = authz_version + 1, updated_at = clock_timestamp()
-      WHERE id = NEW.user_id;
-    END IF;
-    IF NEW.group_id IS NOT NULL THEN
-      UPDATE iam.users AS users
-      SET authz_version = users.authz_version + 1, updated_at = clock_timestamp()
-      FROM iam.group_members AS members
-      WHERE members.group_id = NEW.group_id AND members.user_id = users.id;
-    END IF;
-  END IF;
-
-  PERFORM iam.bump_policy_epoch();
-  IF TG_OP = 'DELETE' THEN
-    RETURN OLD;
-  END IF;
-  RETURN NEW;
-END;
-$$;
-
-CREATE FUNCTION iam.touch_group_authorization() RETURNS trigger
-    LANGUAGE plpgsql
-    AS $$
-BEGIN
-  IF OLD.capabilities IS DISTINCT FROM NEW.capabilities
-    OR OLD.priority IS DISTINCT FROM NEW.priority
-  THEN
+  IF OLD.capabilities IS DISTINCT FROM NEW.capabilities THEN
     UPDATE iam.users AS users
     SET auth_version = users.auth_version + 1,
-        authz_version = users.authz_version + 1,
         updated_at = clock_timestamp()
     FROM iam.group_members AS members
     WHERE members.group_id = NEW.id AND members.user_id = users.id;
-    PERFORM iam.bump_policy_epoch();
   END IF;
   RETURN NEW;
 END;
 $$;
 
-CREATE FUNCTION iam.touch_membership_authorization() RETURNS trigger
+CREATE FUNCTION iam.bump_auth_version_for_membership() RETURNS trigger
     LANGUAGE plpgsql
     AS $$
-DECLARE
-  affected_user_id uuid;
 BEGIN
-  affected_user_id := CASE WHEN TG_OP = 'DELETE' THEN OLD.user_id ELSE NEW.user_id END;
   UPDATE iam.users
   SET auth_version = auth_version + 1,
-      authz_version = authz_version + 1,
       updated_at = clock_timestamp()
-  WHERE id = affected_user_id;
-  PERFORM iam.bump_policy_epoch();
-  IF TG_OP = 'DELETE' THEN
-    RETURN OLD;
-  END IF;
-  RETURN NEW;
+  WHERE id = CASE WHEN TG_OP = 'DELETE' THEN OLD.user_id ELSE NEW.user_id END;
+  RETURN NULL;
 END;
 $$;
 
@@ -1379,99 +1348,6 @@ BEGIN
     RAISE EXCEPTION 'container identity is immutable'
       USING ERRCODE = '23514', CONSTRAINT = 'containers_identity_immutable';
   END IF;
-  RETURN NEW;
-END;
-$$;
-
-CREATE FUNCTION control.sync_container_authorization_dependency() RETURNS trigger
-    LANGUAGE plpgsql
-    AS $$
-BEGIN
-  IF TG_OP = 'DELETE' THEN
-    DELETE FROM control.authorization_dependencies
-    WHERE dependency_kind = 'container'
-      AND dependency_id = OLD.id
-      AND user_id = OLD.owner_id;
-    RETURN OLD;
-  END IF;
-
-  INSERT INTO control.authorization_dependencies (
-    id, dependency_kind, dependency_id, user_id, server_id, pool_id, shared_backend_id
-  ) VALUES (
-    gen_random_uuid(), 'container', NEW.id, NEW.owner_id, NEW.server_id, NULL, NULL
-  )
-  ON CONFLICT (dependency_kind, dependency_id, user_id)
-  DO UPDATE SET server_id = EXCLUDED.server_id, pool_id = NULL, shared_backend_id = NULL;
-  RETURN NEW;
-END;
-$$;
-
-CREATE FUNCTION control.sync_volume_authorization_dependency() RETURNS trigger
-    LANGUAGE plpgsql
-    AS $$
-BEGIN
-  IF TG_OP = 'DELETE' THEN
-    DELETE FROM control.authorization_dependencies
-    WHERE dependency_kind = 'volume'
-      AND dependency_id = OLD.id
-      AND user_id = OLD.owner_id;
-    RETURN OLD;
-  END IF;
-
-  INSERT INTO control.authorization_dependencies (
-    id, dependency_kind, dependency_id, user_id, server_id, pool_id, shared_backend_id
-  ) VALUES (
-    gen_random_uuid(), 'volume', NEW.id, NEW.owner_id, NEW.server_id,
-    CASE WHEN NEW.server_id IS NOT NULL THEN NEW.pool_id ELSE NULL END,
-    NEW.shared_backend_id
-  )
-  ON CONFLICT (dependency_kind, dependency_id, user_id)
-  DO UPDATE SET
-    server_id = EXCLUDED.server_id,
-    pool_id = EXCLUDED.pool_id,
-    shared_backend_id = EXCLUDED.shared_backend_id;
-  RETURN NEW;
-END;
-$$;
-
-CREATE FUNCTION control.sync_volume_attachment_authorization_dependency() RETURNS trigger
-    LANGUAGE plpgsql
-    AS $$
-DECLARE
-  attachment_user_id uuid;
-  attachment_server_id uuid;
-  volume_server_id uuid;
-  attachment_pool_id uuid;
-  attachment_backend_id uuid;
-BEGIN
-  IF TG_OP = 'DELETE' THEN
-    DELETE FROM control.authorization_dependencies
-    WHERE dependency_kind = 'volume_attachment' AND dependency_id = OLD.id;
-    RETURN OLD;
-  END IF;
-
-  SELECT containers.owner_id, containers.server_id,
-         volumes.server_id, volumes.pool_id, volumes.shared_backend_id
-  INTO attachment_user_id, attachment_server_id, volume_server_id,
-       attachment_pool_id, attachment_backend_id
-  FROM control.volume_attachments AS attachments
-  JOIN control.containers AS containers ON containers.id = attachments.container_id
-  JOIN control.volumes AS volumes ON volumes.id = attachments.volume_id
-  WHERE attachments.id = NEW.id;
-
-  INSERT INTO control.authorization_dependencies (
-    id, dependency_kind, dependency_id, user_id, server_id, pool_id, shared_backend_id
-  ) VALUES (
-    gen_random_uuid(), 'volume_attachment', NEW.id, attachment_user_id,
-    CASE WHEN attachment_backend_id IS NULL THEN attachment_server_id ELSE NULL END,
-    CASE WHEN attachment_backend_id IS NULL THEN attachment_pool_id ELSE NULL END,
-    attachment_backend_id
-  )
-  ON CONFLICT (dependency_kind, dependency_id, user_id)
-  DO UPDATE SET
-    server_id = EXCLUDED.server_id,
-    pool_id = EXCLUDED.pool_id,
-    shared_backend_id = EXCLUDED.shared_backend_id;
   RETURN NEW;
 END;
 $$;
@@ -1721,40 +1597,12 @@ CREATE TRIGGER audit_events_reject_update
 BEFORE UPDATE ON audit.events
 FOR EACH ROW EXECUTE FUNCTION audit.reject_event_update();
 
-CREATE TRIGGER users_authorization_barrier
-BEFORE INSERT OR DELETE OR UPDATE OR TRUNCATE ON iam.users
-FOR EACH STATEMENT EXECUTE FUNCTION iam.lock_policy_state_before_mutation();
-CREATE TRIGGER groups_authorization_barrier
-BEFORE INSERT OR DELETE OR UPDATE OR TRUNCATE ON iam.groups
-FOR EACH STATEMENT EXECUTE FUNCTION iam.lock_policy_state_before_mutation();
-CREATE TRIGGER group_members_authorization_barrier
-BEFORE INSERT OR DELETE OR UPDATE OR TRUNCATE ON iam.group_members
-FOR EACH STATEMENT EXECUTE FUNCTION iam.lock_policy_state_before_mutation();
-CREATE TRIGGER server_grants_authorization_barrier
-BEFORE INSERT OR DELETE OR UPDATE OR TRUNCATE ON iam.server_grants
-FOR EACH STATEMENT EXECUTE FUNCTION iam.lock_policy_state_before_mutation();
-CREATE TRIGGER storage_pool_grants_authorization_barrier
-BEFORE INSERT OR DELETE OR UPDATE OR TRUNCATE ON iam.storage_pool_grants
-FOR EACH STATEMENT EXECUTE FUNCTION iam.lock_policy_state_before_mutation();
-CREATE TRIGGER shared_backend_grants_authorization_barrier
-BEFORE INSERT OR DELETE OR UPDATE OR TRUNCATE ON iam.shared_backend_grants
-FOR EACH STATEMENT EXECUTE FUNCTION iam.lock_policy_state_before_mutation();
-
-CREATE TRIGGER groups_authorization_touch
-AFTER UPDATE OF capabilities, priority ON iam.groups
-FOR EACH ROW EXECUTE FUNCTION iam.touch_group_authorization();
-CREATE TRIGGER group_members_authorization_touch
+CREATE TRIGGER groups_bump_auth_version
+AFTER UPDATE OF capabilities ON iam.groups
+FOR EACH ROW EXECUTE FUNCTION iam.bump_auth_version_for_group_capabilities();
+CREATE TRIGGER group_members_bump_auth_version
 AFTER INSERT OR DELETE ON iam.group_members
-FOR EACH ROW EXECUTE FUNCTION iam.touch_membership_authorization();
-CREATE TRIGGER server_grants_authorization_touch
-AFTER INSERT OR DELETE OR UPDATE ON iam.server_grants
-FOR EACH ROW EXECUTE FUNCTION iam.touch_authorization_subjects();
-CREATE TRIGGER storage_pool_grants_authorization_touch
-AFTER INSERT OR DELETE OR UPDATE ON iam.storage_pool_grants
-FOR EACH ROW EXECUTE FUNCTION iam.touch_authorization_subjects();
-CREATE TRIGGER shared_backend_grants_authorization_touch
-AFTER INSERT OR DELETE OR UPDATE ON iam.shared_backend_grants
-FOR EACH ROW EXECUTE FUNCTION iam.touch_authorization_subjects();
+FOR EACH ROW EXECUTE FUNCTION iam.bump_auth_version_for_membership();
 
 CREATE TRIGGER iam_groups_touch_updated_at
 BEFORE UPDATE ON iam.groups
@@ -1825,21 +1673,6 @@ FOR EACH ROW EXECUTE FUNCTION control.touch_updated_at();
 CREATE TRIGGER container_network_claims_drain_window
 BEFORE INSERT OR UPDATE OF state, reusable_at ON control.container_network_claims
 FOR EACH ROW EXECUTE FUNCTION control.set_network_claim_drain();
-CREATE TRIGGER grant_expiry_enforcement_touch_updated_at
-BEFORE UPDATE ON control.grant_expiry_enforcement
-FOR EACH ROW EXECUTE FUNCTION control.touch_updated_at();
-
-CREATE TRIGGER containers_authorization_dependency
-AFTER INSERT OR DELETE OR UPDATE OF owner_id, server_id ON control.containers
-FOR EACH ROW EXECUTE FUNCTION control.sync_container_authorization_dependency();
-CREATE TRIGGER volumes_authorization_dependency
-AFTER INSERT OR DELETE OR UPDATE OF owner_id, server_id, pool_id, shared_backend_id
-ON control.volumes
-FOR EACH ROW EXECUTE FUNCTION control.sync_volume_authorization_dependency();
-CREATE TRIGGER volume_attachments_authorization_dependency
-AFTER INSERT OR DELETE OR UPDATE OF container_id, volume_id
-ON control.volume_attachments
-FOR EACH ROW EXECUTE FUNCTION control.sync_volume_attachment_authorization_dependency();
 
 CREATE CONSTRAINT TRIGGER servers_system_pool_scope
 AFTER INSERT OR UPDATE OF id, system_pool_id ON infra.servers

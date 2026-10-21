@@ -35,7 +35,7 @@ import { PgTransactionManager } from '../platform/persistence-pg/transaction.js'
 import { sql, type Kysely, type Transaction } from 'kysely';
 import type { NyabaseDatabase } from '../platform/persistence-pg/database.types.js';
 import { PG_DATABASE } from '../platform/persistence-pg/tokens.js';
-import { classifyGrantExpiry } from '../iam/grant-expiry.js';
+import { listPoolAccess, listServerAccess } from '../iam/effective-access.js';
 import { assertListScope, type Actor } from '../iam/actor.js';
 
 /**
@@ -351,30 +351,12 @@ export class StoragePoolsService {
   /** Pools the user may use: granted servers' pools, or individually granted pools. */
   async listVisible(userId: string, serverId?: string): Promise<StoragePoolDto[]> {
     const rows = await this.repository.list(serverId);
-    const [serverGrants, poolGrants] = await Promise.all([
-      this.database.selectFrom('iam.server_grants as grant')
-        .leftJoin('iam.group_members as member', 'member.group_id', 'grant.group_id')
-        .select(['grant.server_id', 'grant.expires_at'])
-        .where((expression) => expression.or([
-          expression('grant.user_id', '=', userId),
-          expression('member.user_id', '=', userId),
-        ]))
-        .execute(),
-      this.database.selectFrom('iam.storage_pool_grants as grant')
-        .leftJoin('iam.group_members as member', 'member.group_id', 'grant.group_id')
-        .select(['grant.pool_id', 'grant.expires_at'])
-        .where((expression) => expression.or([
-          expression('grant.user_id', '=', userId),
-          expression('member.user_id', '=', userId),
-        ]))
-        .execute(),
+    const [servers, pools] = await Promise.all([
+      listServerAccess(this.database, userId),
+      listPoolAccess(this.database, userId),
     ]);
-    const serverIds = new Set(serverGrants
-      .filter((grant) => classifyGrantExpiry(grant.expires_at) !== 'lost')
-      .map((grant) => grant.server_id));
-    const poolIds = new Set(poolGrants
-      .filter((grant) => classifyGrantExpiry(grant.expires_at) !== 'lost')
-      .map((grant) => grant.pool_id));
+    const serverIds = new Set(servers.map((access) => access.serverId));
+    const poolIds = new Set(pools.map((access) => access.poolId));
     return rows
       .filter((row) => serverIds.has(row.server_id) && poolIds.has(row.id))
       .map((row) => this.toUserDto(row))

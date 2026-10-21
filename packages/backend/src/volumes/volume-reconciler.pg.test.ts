@@ -387,7 +387,6 @@ async function seedSharedVolume(
     display_name: 'v',
     status: 'active',
     auth_version: 0,
-    authz_version: 0,
   }).execute();
   await database.insertInto('infra.servers').values([
     serverValues(serverA, `a-${ownerId.slice(0, 6)}`),

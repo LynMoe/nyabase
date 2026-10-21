@@ -255,18 +255,16 @@ DELETE FROM iam.storage_pool_grants
 WHERE pool_id IN (
   SELECT id FROM infra.storage_pools WHERE server_id = :'server_id'::uuid
 );
-DELETE FROM control.authorization_dependencies
-WHERE server_id = :'server_id'::uuid
-   OR pool_id IN (
+DELETE FROM control.access_lapses
+WHERE (resource_kind = 'server' AND resource_id = :'server_id'::uuid)
+   OR (resource_kind = 'storage_pool' AND resource_id IN (
      SELECT id FROM infra.storage_pools WHERE server_id = :'server_id'::uuid
-   );
+   ));
 DELETE FROM iam.server_grants
 WHERE server_id = :'server_id'::uuid;
 DELETE FROM control.intents
 WHERE server_id = :'server_id'::uuid;
 DELETE FROM control.reconcile_claims
-WHERE server_id = :'server_id'::uuid;
-DELETE FROM control.grant_expiry_enforcement
 WHERE server_id = :'server_id'::uuid;
 UPDATE infra.servers
 SET system_pool_id = NULL

@@ -46,7 +46,7 @@ const user = {
   status: 'active',
   createdAt: ISO,
   capabilities: CAPS,
-  groups: [{ id: 'grp-admins', name: 'administrators', priority: 0, isSystem: true }],
+  groups: [{ id: 'grp-admins', name: 'administrators', isSystem: true }],
 };
 
 const otherUser = {
@@ -56,7 +56,7 @@ const otherUser = {
   status: 'active',
   createdAt: ISO,
   capabilities: [],
-  groups: [{ id: 'grp-users', name: 'users', priority: 10, isSystem: true }],
+  groups: [{ id: 'grp-users', name: 'users', isSystem: true }],
 };
 
 const server = {
@@ -223,7 +223,6 @@ const group = {
   id: 'grp-users',
   name: 'users',
   description: '普通用户组',
-  priority: 10,
   isSystem: true,
   capabilities: [],
   revision: 1,

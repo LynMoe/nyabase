@@ -423,7 +423,6 @@ function GroupIdentityCard({ group, onSaved }: { group: GroupDto; onSaved: () =>
     const form: GroupEditFormState = {
       name: group.name,
       description,
-      priority: String(group.priority),
       capabilities,
     };
     const dirty = new Set<(keyof GroupEditFormState)>();
@@ -443,7 +442,6 @@ function GroupIdentityCard({ group, onSaved }: { group: GroupDto; onSaved: () =>
     const payload = buildMinimalGroupEditPayload(form, dirty, {
       isSystem: group.isSystem,
       canEditMetadata: true,
-      canEditPriority: false,
     });
     if (!payload.success) {
       setError(payload.error);
@@ -578,7 +576,6 @@ function GroupIdentityFields({ group }: { group: GroupDto }) {
     <div className="grid gap-3 text-sm sm:grid-cols-2">
       <Field label="名称" value={group.name} />
       <Field label="类型" value={group.isSystem ? '系统组' : '自定义组'} />
-      <Field label="优先级" value={String(group.priority)} />
       <Field label="成员" value={`${group.memberCount ?? group.members?.length ?? 0} 人`} />
       <Field label="创建时间" value={relativeTime(group.createdAt)} />
       <Field label="最近更新" value={relativeTime(group.updatedAt)} />

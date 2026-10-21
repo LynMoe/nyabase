@@ -31,7 +31,6 @@ import { AuditService } from '../iam/audit.service.js';
 import { assertListScope, type Actor } from '../iam/actor.js';
 import { InfrastructureRepository } from '../infrastructure/infrastructure.repository.js';
 import { IntentRepository } from '../reconcile/intent.repository.js';
-import { ReconcileWakeService } from '../reconcile/reconcile-wake.service.js';
 import { isoDate, numberValue } from '../platform/domain-utils.js';
 import { acceptedIntent } from '../reconcile/accepted-intent.js';
 import { ImageCatalogService } from './image-catalog.js';
@@ -59,7 +58,6 @@ export class ImagesService {
     private readonly access: AccessResolverService,
     private readonly audit: AuditService,
     private readonly intents: IntentRepository,
-    private readonly wake: ReconcileWakeService,
     private readonly infrastructure: InfrastructureRepository,
     private readonly catalog: ImageCatalogService,
   ) {}
@@ -175,15 +173,6 @@ export class ImagesService {
       });
       return { image: updated, intents };
     });
-    for (const intent of result.intents) {
-      if (!intent.serverId) continue;
-      this.wake.wake({
-        resourceType: IntentResourceType.ImageAssignment,
-        resourceId: intent.resourceId,
-        serverId: intent.serverId,
-        reason: 'intent',
-      });
-    }
     return {
       image: await this.toAdminDto(result.image),
       intents: result.intents,
@@ -414,14 +403,6 @@ export class ImagesService {
       await this.audit.append(transaction, actorId, AuditAction.DeleteImage, id, 'image');
       return { updated, intents };
     });
-    for (const intent of result.intents) {
-      this.wake.wake({
-        resourceType: IntentResourceType.ImageAssignment,
-        resourceId: intent.resourceId,
-        serverId: intent.serverId,
-        reason: 'intent',
-      });
-    }
     return result.intents.length > 0
       ? result.intents.map((intent) => acceptedIntent(intent))
       : this.toDto(result.updated);
@@ -559,12 +540,6 @@ export class ImagesService {
       );
       return { assignment, intent };
     });
-    this.wake.wake({
-      resourceType: IntentResourceType.ImageAssignment,
-      resourceId: result.assignment.id,
-      serverId,
-      reason: 'intent',
-    });
     return {
       assignment: this.assignmentDto(result.assignment),
       intent: result.intent,
@@ -627,14 +602,6 @@ export class ImagesService {
       );
       return { assignment: current, intents };
     });
-    if (result.assignment) {
-      this.wake.wake({
-        resourceType: IntentResourceType.ImageAssignment,
-        resourceId: result.assignment.id,
-        serverId,
-        reason: 'intent',
-      });
-    }
     return {
       assignment: result.assignment ? this.assignmentDto(result.assignment) : null,
       intents: result.intents,

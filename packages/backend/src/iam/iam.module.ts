@@ -3,9 +3,8 @@ import { APP_GUARD } from '@nestjs/core';
 import { JwtModule, type JwtSignOptions } from '@nestjs/jwt';
 import { PassportModule } from '@nestjs/passport';
 import { NyabaseConfigService } from '../platform/config/nyabase-config.service.js';
-import { AccessCacheEpochService } from './access-cache-epoch.service.js';
+import { AccessChangeNotifier } from './access-change-notifier.js';
 import { AccessResolverService } from './access-resolver.service.js';
-import { AccessRevocationGuardService } from './access-revocation-guard.service.js';
 import { AuditRepository } from './audit.repository.js';
 import { AuditService } from './audit.service.js';
 import { AuditSnapshotResolver } from './audit-snapshot.resolver.js';
@@ -39,9 +38,8 @@ import { JwtStrategy } from './jwt.strategy.js';
     IamAuthRepository,
     AuthService,
     JwtStrategy,
-    AccessCacheEpochService,
+    AccessChangeNotifier,
     AccessResolverService,
-    AccessRevocationGuardService,
     AuditRepository,
     AuditSnapshotResolver,
     AuditService,
@@ -54,9 +52,8 @@ import { JwtStrategy } from './jwt.strategy.js';
   controllers: [AuthController],
   exports: [
     AuthService,
-    AccessCacheEpochService,
+    AccessChangeNotifier,
     AccessResolverService,
-    AccessRevocationGuardService,
     AuditRepository,
     AuditService,
   ],

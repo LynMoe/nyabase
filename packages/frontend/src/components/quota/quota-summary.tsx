@@ -74,7 +74,7 @@ export function QuotaSummary() {
 function QuotaBody({
   servers,
   containers,
-  grants,
+  grants: effective,
   sharedBackends,
   backends,
 }: {
@@ -84,7 +84,9 @@ function QuotaBody({
   sharedBackends: EffectiveSharedBackendAccessDto[];
   backends: SharedBackendDto[];
 }) {
-  const empty = grants.length === 0 && sharedBackends.length === 0;
+  const grants = effective.filter((grant) => grant.accessPhase === 'live');
+  const lapsed = effective.filter((grant) => grant.accessPhase === 'grace');
+  const empty = grants.length === 0 && sharedBackends.length === 0 && lapsed.length === 0;
   const serverName = new Map(servers.map((server) => [server.id, server.name]));
   return (
     <SectionCard
@@ -96,6 +98,16 @@ function QuotaBody({
         <p className="text-sm text-muted-foreground">
           还没有可用的资源额度。管理员为你分配服务器或共享存储后，额度会显示在这里。
         </p>
+      ) : null}
+      {lapsed.length > 0 ? (
+        <div data-testid="quota-grace" className="space-y-1 border-b px-4 py-3 text-sm">
+          {lapsed.map((grant) => (
+            <p key={grant.serverId} className="text-muted-foreground">
+              {serverName.get(grant.serverId) ?? grant.serverId} 的访问授权已失效，容器已停止；
+              {grant.purgeAt ? new Date(grant.purgeAt).toLocaleString('zh-CN') : '宽限期满'} 起将清除该服务器上的容器与数据卷。
+            </p>
+          ))}
+        </div>
       ) : null}
       {grants.length > 0 ? (
         <div data-testid="quota-servers">

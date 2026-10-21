@@ -67,7 +67,6 @@ function userValues(id: string) {
     display_name: 'Volume Test User',
     status: 'active' as const,
     auth_version: 0,
-    authz_version: 0,
   };
 }
 
@@ -100,7 +99,6 @@ function makeService(database: Kysely<NyabaseDatabase>) {
     new StoragePoolsRepository(database),
     new PgTransactionManager(database),
     new IntentRepository(database, noopWake()),
-    { wake: vi.fn() } as never,
     database,
     { append: vi.fn().mockResolvedValue(undefined) } as never,
     { get: vi.fn().mockRejectedValue(new Error('Incus is unavailable in this test')), listServerIds: vi.fn() } as never,
@@ -560,13 +558,11 @@ describePg('volume capacity locking and scope exclusions', () => {
         new StoragePoolsRepository(database),
         transactionManager,
         new IntentRepository(database, noopWake()),
-        { wake: vi.fn() } as never,
         database,
         { append: vi.fn().mockResolvedValue(undefined) } as never,
         { get: vi.fn().mockRejectedValue(new Error('Incus is unavailable in this test')), listServerIds: vi.fn() } as never,
       );
       const containerIntents = new IntentRepository(database, noopWake());
-      const containerWake = { wake: vi.fn() } as never;
       const containerService = new ContainerControlService(
         database,
         transactionManager,
@@ -574,7 +570,6 @@ describePg('volume capacity locking and scope exclusions', () => {
         {
           resolveContainerCreateAccessInTransaction: vi.fn().mockResolvedValue({
             grant: {
-              accessPhase: 'live',
               cpuMillis: 10_000,
               memBytes: 10_000,
               diskBytes: 10_000,
@@ -585,7 +580,6 @@ describePg('volume capacity locking and scope exclusions', () => {
           assertActorCapabilitiesInTransaction: vi.fn(),
         } as never,
         containerIntents,
-        containerWake,
         {} as never,
         { append: vi.fn().mockResolvedValue(undefined) } as never,
         new ContainerActionPolicyService(),
@@ -594,7 +588,6 @@ describePg('volume capacity locking and scope exclusions', () => {
         new ContainerSshConvergenceService(
           database,
           containerIntents,
-          containerWake,
         ),
         volumeService,
         new GpuClaimsRepository(database),
@@ -685,7 +678,6 @@ describePg('volume capacity locking and scope exclusions', () => {
         new StoragePoolsRepository(database),
         transactionManager,
         new IntentRepository(database, noopWake()),
-        { wake: vi.fn() } as never,
         database,
         { append: vi.fn().mockResolvedValue(undefined) } as never,
         { get: vi.fn().mockRejectedValue(new Error('Incus is unavailable in this test')), listServerIds: vi.fn() } as never,

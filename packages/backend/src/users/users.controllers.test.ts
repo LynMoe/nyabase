@@ -2,17 +2,13 @@ import { ForbiddenException } from '@nestjs/common';
 import { describe, expect, it, vi } from 'vitest';
 import { Capability, UserStatus } from '@nyabase/common';
 import { testActor } from '../iam/actor.test-helper.js';
-import type { GroupsService } from '../groups/groups.service.js';
 import { UsersController } from './users.controller.js';
 import type { UsersService } from './users.service.js';
 
 const toDto = (value: unknown) => value;
 
 function controllerWith(service: Record<string, unknown>) {
-  return new UsersController(
-    { toDto, ...service } as unknown as UsersService,
-    {} as unknown as GroupsService,
-  );
+  return new UsersController({ toDto, ...service } as unknown as UsersService);
 }
 
 describe('user update controller boundaries', () => {

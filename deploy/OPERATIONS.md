@@ -559,6 +559,25 @@ from the product SLO and measured baseline, not from this example deployment.
 - Add a VictoriaMetrics auth proxy only when telemetry endpoints cross a trust
   boundary.
 
+## 授权失效与 14 天宽限
+
+资源授权（服务器、数据盘池、共享后端）可授给用户或用户组，同一用户对同一资源可同时有多条授权。数据库视图
+`iam.effective_server_access` / `iam.effective_pool_access` / `iam.effective_shared_backend_access` 按 (用户, 资源) 合并：
+配额逐项取最大（任一为 NULL 即不限；磁盘与共享后端额度的 0 也按不限），GPU 白名单取并集，到期取最晚（任一不设期限则不过期），
+只包含状态为 `active` 的用户。所有授权判断只读这些视图，没有授权缓存。
+
+用户失去覆盖（授权到期、删除授权、移出组、删除组、用户被禁用）后立即进入同一条 14 天宽限流程，撤销不会被拒绝：
+
+- 台账 `control.access_lapses`（`user_id, resource_kind, resource_id, lapsed_at, stopped_at, purged_at`）记录宽限。
+  `lapsed_at` 创建时确定、之后不再变化：已过期取过去的 `expires_at`，撤销则取检测时刻。
+- 宽限内：停止该用户在该资源上运行中的容器（一次，写 `stopped_at`），不能新建、启动、挂载。
+- 宽限期满：清除该用户在该资源上的容器与卷（写 `purged_at`）；服务器 = 容器 + 本地卷，数据盘池 = 池上的卷及挂载它们的容器，
+  共享后端 = 后端上的卷及挂载它们的容器。清除后该用户在该资源上已无资源，台账行即被删除。
+- 宽限内覆盖恢复：台账行被删除，宽限取消；已停机的容器不会自动启动。
+- 处理器每分钟运行一次，并在 IAM 写操作提交后立即唤醒；每个 (用户, 资源) 用 `reconcile_claims`
+  租约（`resource_type = access_lapse`）串行，多副本安全。
+- 管理员仍可对某用户在某服务器上的资源手动清除：`POST /api/users/:userId/servers/:serverId/purge-resources`。
+
 ## Incus 客户端证书（首次启动自动生成，不轮换）
 
 控制平面使用一张**共享**的 Incus 客户端证书，以 mTLS 调用每台 Incus。

@@ -25,7 +25,6 @@ export class CatalogPersistence {
     return this.database
       .selectFrom('iam.groups')
       .select(['id', 'name', 'is_system'])
-      .orderBy('priority', 'desc')
       .orderBy('name')
       .orderBy('id')
       .execute();

@@ -101,7 +101,7 @@ export interface IntentTable {
 }
 
 export interface ReconcileClaimTable {
-  resource_type: 'container' | 'volume' | 'image_assignment' | 'server' | 'grant_expiry';
+  resource_type: 'container' | 'volume' | 'image_assignment' | 'server' | 'access_lapse';
   resource_id: string;
   placement_server_id: string;
   server_id: string | null;

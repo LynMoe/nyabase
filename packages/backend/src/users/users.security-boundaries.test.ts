@@ -29,7 +29,6 @@ describePg('UsersService authorization boundaries', () => {
         id: privilegedGroup,
         name: `Privileged ${privilegedGroup.slice(0, 8)}`,
         description: null,
-        priority: 1,
         is_system: false,
         system_key: null,
         capabilities: [Capability.ManageGroups],

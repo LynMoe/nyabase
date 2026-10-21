@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { Capability, UserStatus } from '@nyabase/common';
 import { vi, type Mock } from 'vitest';
-import { AccessCacheEpochService } from '../iam/access-cache-epoch.service.js';
+import { AccessChangeNotifier } from '../iam/access-change-notifier.js';
 import { AccessResolverService } from '../iam/access-resolver.service.js';
 import type { PostgresTestDatabase } from '../platform/persistence-pg/postgres-test-harness.js';
 import { PgTransactionManager } from '../platform/persistence-pg/transaction.js';
@@ -11,6 +11,7 @@ export interface UsersPgFixture {
   users: UsersService;
   transactions: PgTransactionManager;
   access: AccessResolverService;
+  changes: AccessChangeNotifier;
   auth: Record<string, Mock>;
   audit: Record<string, Mock>;
   proxySnapshots: Record<string, Mock>;
@@ -30,11 +31,8 @@ export async function usersPgFixture(
   } = {},
 ): Promise<UsersPgFixture> {
   const transactions = new PgTransactionManager(fixture.database);
-  const access = new AccessResolverService(
-    fixture.database,
-    transactions,
-    new AccessCacheEpochService(fixture.database),
-  );
+  const access = new AccessResolverService(fixture.database, transactions);
+  const changes = new AccessChangeNotifier();
   const actorId = randomUUID();
   const userId = randomUUID();
   const actorGroupId = randomUUID();
@@ -58,6 +56,7 @@ export async function usersPgFixture(
     proxySnapshots as never,
     { get: vi.fn((key: string) => key === 'runtime.nodeEnv' ? 'test' : 'admin123') } as never,
     audit as never,
+    changes,
   );
 
   const userRows = [];
@@ -75,7 +74,6 @@ export async function usersPgFixture(
       id: actorGroupId,
       name: `Managers ${actorGroupId.slice(0, 8)}`,
       description: null,
-      priority: 1,
       is_system: false,
       system_key: null,
       capabilities: options.actorCapabilities ?? [Capability.ManageUsers],
@@ -87,14 +85,11 @@ export async function usersPgFixture(
       user_id: actorId,
     }).execute();
   }
-  await fixture.database.insertInto('iam.policy_state')
-    .values({ singleton: true, policy_epoch: 0 })
-    .onConflict((conflict) => conflict.column('singleton').doNothing())
-    .execute();
   return {
     users,
     transactions,
     access,
+    changes,
     auth,
     audit,
     proxySnapshots,
@@ -119,6 +114,5 @@ export function userRow(
     display_name: username,
     status,
     auth_version: 0,
-    authz_version: 0,
   };
 }

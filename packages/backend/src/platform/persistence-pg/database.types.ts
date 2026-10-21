@@ -23,12 +23,6 @@ export interface SchemaMigrationTable {
   execution_ms: number;
 }
 
-export interface IamPolicyStateTable {
-  singleton: boolean;
-  policy_epoch: BigIntColumn;
-  updated_at: GeneratedTimestamp;
-}
-
 export interface IamUserTable {
   id: string;
   numeric_id: number;
@@ -37,7 +31,6 @@ export interface IamUserTable {
   display_name: string;
   status: string;
   auth_version: number;
-  authz_version: BigIntColumn;
   created_at: GeneratedTimestamp;
   updated_at: GeneratedTimestamp;
 }
@@ -46,7 +39,6 @@ export interface IamGroupTable {
   id: string;
   name: string;
   description: string | null;
-  priority: number;
   is_system: boolean;
   system_key: string | null;
   capabilities: string[];
@@ -109,7 +101,6 @@ export interface NyabaseDatabase
     HttpProxyDatabase,
     SystemSettingsDatabase {
   'system.schema_migrations': SchemaMigrationTable;
-  'iam.policy_state': IamPolicyStateTable;
   'iam.users': IamUserTable;
   'iam.groups': IamGroupTable;
   'iam.group_members': IamGroupMemberTable;

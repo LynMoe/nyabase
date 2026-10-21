@@ -186,7 +186,6 @@ function makeVolumesService(overrides: {
     pools as never,
     { run: vi.fn(async (work: (value: unknown) => Promise<unknown>) => work(transaction)) } as never,
     intents as never,
-    { wake: vi.fn() } as never,
     {} as never,
     { append: vi.fn() } as never,
     { get: vi.fn().mockRejectedValue(new Error('Incus is unavailable in this test')), listServerIds: vi.fn() } as never,
@@ -255,17 +254,17 @@ describe('volume API placement paths', () => {
         lifecycle_phase: 'active',
         revision: 4,
         pool_id: null,
-      });
-    query.execute
-      .mockResolvedValueOnce([{
-        limit_bytes: 0,
+      })
+      // Current coverage: the server (merged view row), then the shared backend.
+      .mockResolvedValueOnce({
+        cpu_millis: null,
+        mem_bytes: null,
+        disk_bytes: null,
+        gpu_pci_addresses: [],
         expires_at: null,
-        user_id: actorId,
-        group_id: null,
-        group_priority: null,
-        id: 'grant-1',
-      }])
-      .mockResolvedValueOnce([{ id: poolId }]);
+      })
+      .mockResolvedValueOnce({ limit_bytes: null, expires_at: null });
+    query.execute.mockResolvedValueOnce([{ id: poolId }]);
     const transaction = {
       selectFrom: vi.fn(() => query),
       updateTable: vi.fn(() => ({

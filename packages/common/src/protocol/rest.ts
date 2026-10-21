@@ -114,7 +114,6 @@ export interface UserAdministrationAvailabilityDto {
 
 export interface GroupAdministrationAvailabilityDto {
   canEditMetadata: ActionAvailabilityDto;
-  canEditPriority: ActionAvailabilityDto;
   canManageMembers: ActionAvailabilityDto;
   canRemoveMembers: Record<string, ActionAvailabilityDto>;
   canDelete: ActionAvailabilityDto;
@@ -150,7 +149,6 @@ export interface PublicSettingsDto {
 export interface GroupSummaryDto {
   id: string;
   name: string;
-  priority: number;
   isSystem: boolean;
 }
 
@@ -158,7 +156,6 @@ export interface GroupDto {
   id: string;
   name: string;
   description: string | null;
-  priority: number;
   isSystem: boolean;
   capabilities: Capability[];
   revision: number;

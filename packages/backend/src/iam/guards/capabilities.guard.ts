@@ -43,7 +43,7 @@ export class CapabilitiesGuard implements CanActivate {
     }
 
     // Resolved once per request; services read it back through @CurrentActor().
-    const capabilities = await this.accessResolver.userCapabilitiesCurrent(user.id);
+    const capabilities = await this.accessResolver.userCapabilities(user.id);
     const authContext = request.authContext as RequestAuthContext | undefined;
     const actor: Actor = {
       userId: user.id,

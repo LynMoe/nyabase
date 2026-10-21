@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { Capability, SystemGroupKey, UserStatus } from '@nyabase/common';
-import { projectAdministrationActions } from './administration-availability.js';
+import { projectAdministrationActions } from './administration.js';
 
 describe('authoritative administration action projection', () => {
   const groups = [
@@ -64,7 +64,7 @@ describe('authoritative administration action projection', () => {
     expect(projected.assignableGroupCapabilities).toEqual([Capability.ManageUsers]);
   });
 
-  it('keeps non-resource group metadata editable while protecting priority and membership', () => {
+  it('keeps non-resource group metadata editable while protecting resource-bearing membership', () => {
     const projected = projectAdministrationActions({
       actorId: 'actor',
       actorCapabilities: new Set([Capability.ManageGroups, Capability.ViewAudit]),
@@ -72,11 +72,10 @@ describe('authoritative administration action projection', () => {
       users: [],
     });
     expect(projected.groups.powerful?.canEditMetadata.allowed).toBe(true);
-    expect(projected.groups.powerful?.canEditPriority).toMatchObject({
+    expect(projected.groups.powerful?.canManageMembers).toMatchObject({
       allowed: false,
       missingCapabilities: [Capability.ManageGrants],
     });
-    expect(projected.groups.powerful?.canManageMembers.allowed).toBe(false);
     expect(projected.groups.users?.canDelete).toMatchObject({ allowed: false, reason: '内置用户组不可删除' });
   });
 

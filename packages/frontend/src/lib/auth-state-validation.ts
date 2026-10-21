@@ -27,6 +27,5 @@ export function isRuntimeUserDto(value: unknown): value is UserDto {
   return value.groups.every((group) => isRecord(group)
     && isBoundedString(group.id, 128)
     && isBoundedString(group.name, 128)
-    && Number.isSafeInteger(group.priority)
     && typeof group.isSystem === 'boolean');
 }

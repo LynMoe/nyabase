@@ -26,6 +26,17 @@ import { noopWake } from '../reconcile/reconcile-wake.test-helper.js';
 import { testActor } from '../iam/actor.test-helper.js';
 import { InfrastructureRepository } from '../infrastructure/infrastructure.repository.js';
 import { IncusContainerSshStateAdapter } from './container-ssh-state.adapter.js';
+import { AccessResolverService } from '../iam/access-resolver.service.js';
+import {
+  addMember,
+  days,
+  grantPool,
+  grantServer,
+  seedAttachment,
+  seedGroup,
+  seedUser,
+  seedVolume,
+} from '../iam/access.pg-test-helper.js';
 
 const describePg = process.env.NYABASE_TEST_DATABASE_URL ? describe : describe.skip;
 const IMAGE_FINGERPRINT = 'a'.repeat(64);
@@ -252,7 +263,6 @@ describePg('PostgreSQL container create admission and capacity', () => {
         { assertActorCapabilitiesInTransaction: vi.fn() } as never,
         { append: vi.fn().mockResolvedValue(undefined) } as never,
         imageIntents as never,
-        { wake: vi.fn() } as never,
         new InfrastructureRepository(database),
         {} as never,
       );
@@ -524,6 +534,143 @@ describePg('PostgreSQL container actor authorization', () => {
 });
 
 
+/** Admission with the real effective-access views instead of a faked resolver. */
+describePg('PostgreSQL container admission needs current coverage', () => {
+  function coveredService(database: Kysely<NyabaseDatabase>): ContainerControlService {
+    const transactions = new PgTransactionManager(database);
+    const intents = new IntentRepository(database, noopWake());
+    return new ContainerControlService(
+      database,
+      transactions,
+      new ContainerControlRepository(database),
+      new AccessResolverService(database, transactions),
+      intents,
+      {} as never,
+      { append: vi.fn().mockResolvedValue(undefined) } as never,
+      new ContainerActionPolicyService(),
+      new IpPoolsRepository(database),
+      { get: vi.fn().mockReturnValue(null) } as never,
+      new ContainerSshConvergenceService(database, intents),
+      {} as never,
+      new GpuClaimsRepository(database),
+    );
+  }
+
+  it('denies create without a grant or after the merged coverage expired, and admits it again', async () => {
+    await withPostgresTestDatabase(async ({ database }) => {
+      const fixture = await seedFixture(database);
+      const service = coveredService(database);
+      const owner = testActor(fixture.userId);
+
+      await expectCode(
+        service.create(owner, request(fixture, 'no-grant')),
+        FailureCode.PermissionDenied,
+      );
+      await grantServer(database, { user: fixture.userId }, fixture.serverId, { expiresAt: days(-1) });
+      await expectCode(
+        service.create(owner, request(fixture, 'expired')),
+        FailureCode.PermissionDenied,
+      );
+      expect(await database.selectFrom('control.containers').select('id').execute()).toEqual([]);
+
+      await database.updateTable('iam.server_grants')
+        .set({ expires_at: days(3) })
+        .where('user_id', '=', fixture.userId)
+        .execute();
+      await expect(service.create(owner, request(fixture, 'covered'))).resolves.toMatchObject({
+        resourceType: 'container',
+      });
+    });
+  });
+
+  it('enforces the merged ceiling: the larger of a direct and a group grant applies', async () => {
+    await withPostgresTestDatabase(async ({ database }) => {
+      const fixture = await seedFixture(database);
+      const service = coveredService(database);
+      const owner = testActor(fixture.userId);
+      const group = randomUUID();
+      await database.insertInto('iam.groups').values({
+        id: group, name: `merge-${group.slice(0, 8)}`, description: null, is_system: false,
+        system_key: null, capabilities: [], revision: 1,
+      }).execute();
+      await database.insertInto('iam.group_members')
+        .values({ id: randomUUID(), group_id: group, user_id: fixture.userId }).execute();
+      await grantServer(database, { user: fixture.userId }, fixture.serverId, {
+        cpuMillis: 250, memBytes: 1_000,
+      });
+      await grantServer(database, { group }, fixture.serverId, { cpuMillis: 1_000, memBytes: 400 });
+
+      await expectCode(
+        service.create(owner, request(fixture, 'cpu-too-big', { cpuMillis: 1_500, memBytes: 100 })),
+        FailureCode.PermissionDenied,
+      );
+      await expectCode(
+        service.create(owner, request(fixture, 'mem-too-big', { cpuMillis: 100, memBytes: 2_000 })),
+        FailureCode.PermissionDenied,
+      );
+      // CPU from the group grant, memory from the direct grant.
+      await expect(service.create(owner, request(fixture, 'merged', {
+        cpuMillis: 900, memBytes: 900,
+      }))).resolves.toBeDefined();
+    });
+  });
+
+  it('denies owner start and restart without coverage, still lets an operator, and allows it after coverage returns', async () => {
+    await withPostgresTestDatabase(async ({ database }) => {
+      const fixture = await seedFixture(database);
+      const service = coveredService(database);
+      const owner = testActor(fixture.userId);
+      const operatorId = await seedUser(database);
+      await addMember(
+        database,
+        await seedGroup(database, { capabilities: [Capability.ManageContainersAny] }),
+        operatorId,
+      );
+      const operator = testActor(operatorId, Capability.ManageContainersAny);
+      await grantServer(database, { user: fixture.userId }, fixture.serverId);
+      const { resourceId: containerId } = await service.create(owner, request(fixture, 'lapse'));
+
+      await database.deleteFrom('iam.server_grants').where('user_id', '=', fixture.userId).execute();
+      await expect(service.action(owner, containerId, 'start')).rejects.toMatchObject({ status: 403 });
+      await expect(service.action(owner, containerId, 'restart')).rejects.toMatchObject({ status: 403 });
+      await expect(service.action(operator, containerId, 'start')).resolves.toBeDefined();
+      await database.updateTable('control.containers')
+        .set({ power_intent: 'stopped' })
+        .where('id', '=', containerId)
+        .execute();
+
+      await grantServer(database, { user: fixture.userId }, fixture.serverId);
+      await expect(service.action(owner, containerId, 'start')).resolves.toBeDefined();
+    });
+  });
+
+  it('denies start while a mounted volume\'s storage pool is no longer covered', async () => {
+    await withPostgresTestDatabase(async ({ database }) => {
+      const fixture = await seedFixture(database);
+      const service = coveredService(database);
+      const owner = testActor(fixture.userId);
+      await grantServer(database, { user: fixture.userId }, fixture.serverId);
+      await grantPool(database, { user: fixture.userId }, fixture.poolId, days(-1));
+      const { resourceId: containerId } = await service.create(owner, request(fixture, 'mounted'));
+      const volumeId = await seedVolume(database, {
+        ownerId: fixture.userId, poolId: fixture.poolId, serverId: fixture.serverId,
+      });
+      await seedAttachment(database, containerId, volumeId);
+
+      await expect(service.action(owner, containerId, 'start')).rejects.toMatchObject({
+        response: expect.anything(),
+        status: 403,
+      });
+      // Stopping is always allowed with server coverage; starting is not.
+      await database.updateTable('iam.storage_pool_grants')
+        .set({ expires_at: null })
+        .where('user_id', '=', fixture.userId)
+        .execute();
+      await expect(service.action(owner, containerId, 'start')).resolves.toBeDefined();
+    });
+  });
+});
+
 function containerService(
   database: Kysely<NyabaseDatabase>,
   options: GrantOptions,
@@ -548,20 +695,18 @@ function containerService(
     assertActorCapabilitiesInTransaction: vi.fn(),
   };
   const intents = new IntentRepository(database, noopWake());
-  const wake = { wake: vi.fn() } as never;
   const service = new ContainerControlService(
     database,
     new PgTransactionManager(database),
     new ContainerControlRepository(database),
     access as never,
     intents,
-    wake,
     {} as never,
     { append: vi.fn().mockResolvedValue(undefined) } as never,
     new ContainerActionPolicyService(),
     new IpPoolsRepository(database),
     { get: vi.fn().mockReturnValue(null) } as never,
-    new ContainerSshConvergenceService(database, intents, wake),
+    new ContainerSshConvergenceService(database, intents),
     {} as never,
     gpuClaims ?? new GpuClaimsRepository(database),
   );
@@ -586,14 +731,12 @@ async function enableGpu(
 }
 
 function grant(options: GrantOptions): {
-  accessPhase: 'live';
   cpuMillis: number;
   memBytes: number;
   diskBytes: number | null;
   gpuPciAddresses: string[];
 } {
   return {
-    accessPhase: 'live',
     cpuMillis: 10_000,
     memBytes: 10_000,
     diskBytes: options.diskBytes,
@@ -645,7 +788,6 @@ async function seedFixture(
     display_name: 'Container Test User',
     status: UserStatus.Active,
     auth_version: 1,
-    authz_version: 1,
   }).execute();
   await database.insertInto('infra.servers').values({
     id: serverId,

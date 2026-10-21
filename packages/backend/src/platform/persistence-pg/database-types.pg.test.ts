@@ -74,13 +74,18 @@ describePg('PostgreSQL runtime/type schema contract', () => {
         table_name: string;
         column_name: string;
         is_nullable: 'YES' | 'NO';
+        is_view: boolean;
       }>`
         SELECT
-          table_schema || '.' || table_name AS table_name,
-          column_name,
-          is_nullable
-        FROM information_schema.columns
-        WHERE table_schema IN (
+          columns.table_schema || '.' || columns.table_name AS table_name,
+          columns.column_name,
+          columns.is_nullable,
+          tables.table_type = 'VIEW' AS is_view
+        FROM information_schema.columns AS columns
+        JOIN information_schema.tables AS tables
+          ON tables.table_schema = columns.table_schema
+         AND tables.table_name = columns.table_name
+        WHERE columns.table_schema IN (
           'audit',
           'control',
           'iam',
@@ -90,12 +95,14 @@ describePg('PostgreSQL runtime/type schema contract', () => {
         )
         ORDER BY table_name, column_name
       `.execute(database);
+      const views = new Set(catalog.rows.filter((row) => row.is_view).map((row) => row.table_name));
       const actual = new Map<string, ColumnContract[]>();
       for (const row of catalog.rows) {
         const columns = actual.get(row.table_name) ?? [];
         columns.push({
           column: row.column_name,
-          nullable: row.is_nullable === 'YES',
+          // information_schema reports every view column as nullable.
+          nullable: row.is_view ? false : row.is_nullable === 'YES',
         });
         actual.set(row.table_name, columns);
       }
@@ -108,7 +115,11 @@ describePg('PostgreSQL runtime/type schema contract', () => {
         expect(
           columns,
           `${table} columns/nullability drifted from its Kysely table type`,
-        ).toEqual(expected.get(table));
+        ).toEqual(
+          views.has(table)
+            ? expected.get(table)?.map(({ column }) => ({ column, nullable: false }))
+            : expected.get(table),
+        );
       }
     });
   });
@@ -220,12 +231,12 @@ describePg('PostgreSQL runtime/type schema contract', () => {
             'volumes_scope_check',
             'intents_settled_shape_check',
             'intents_failure_shape_check',
-            'authorization_dependencies_shape_check'
+            'access_lapses_kind_check'
           )
         ORDER BY constraint_name
       `.execute(database);
       expect(requiredChecks.rows.map((row) => row.constraint_name)).toEqual([
-        'authorization_dependencies_shape_check',
+        'access_lapses_kind_check',
         'intents_failure_shape_check',
         'intents_settled_shape_check',
         'storage_pools_filesystem_check',

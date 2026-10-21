@@ -194,7 +194,6 @@ export enum FailureCode {
   InstanceBusy = 'INSTANCE_BUSY',
   PreflightCleanupFailed = 'PREFLIGHT_CLEANUP_FAILED',
   PreflightFailed = 'PREFLIGHT_FAILED',
-  GrantRevocationBlocked = 'GRANT_REVOCATION_BLOCKED',
   PermissionDenied = 'PERMISSION_DENIED',
   NotFound = 'NOT_FOUND',
   InvalidInput = 'INVALID_INPUT',

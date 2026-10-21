@@ -311,7 +311,6 @@ async function seedActor(
       display_name: 'Settings Admin',
       status: 'active',
       auth_version: 1,
-      authz_version: 1,
     })
     .executeTakeFirstOrThrow();
   return id;

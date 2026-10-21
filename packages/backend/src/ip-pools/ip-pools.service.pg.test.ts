@@ -85,7 +85,6 @@ async function seedUser(database: Kysely<NyabaseDatabase>, id: string): Promise<
     display_name: 'IP Pool Actor',
     status: UserStatus.Active,
     auth_version: 1,
-    authz_version: 1,
   }).execute();
 }
 

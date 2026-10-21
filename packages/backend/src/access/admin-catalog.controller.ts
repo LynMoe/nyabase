@@ -24,7 +24,7 @@ export class AdminCatalogController {
     Capability.ManageGroups,
   )
   administrationActions(@CurrentUser() actor: UserRecord) {
-    return this.accessResolver.administrationActionsCurrent(actor.id);
+    return this.accessResolver.administrationActions(actor.id);
   }
 
   @Get('users')

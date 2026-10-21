@@ -54,7 +54,6 @@ function userValues(id: string, numericId: number) {
     display_name: 'Attachment Test User',
     status: 'active' as const,
     auth_version: 0,
-    authz_version: 0,
   };
 }
 
@@ -90,6 +89,21 @@ async function insertContainer(
   name: string,
 ) {
   const id = randomUUID();
+  // Attaching needs current coverage of the container's server (and the volume's pool).
+  await database.insertInto('iam.server_grants').values({
+    id: randomUUID(),
+    user_id: ownerId,
+    group_id: null,
+    server_id: serverId,
+    cpu_millis: null,
+    mem_bytes: null,
+    disk_bytes: null,
+    gpu_pci_addresses: [],
+    expires_at: null,
+  }).onConflict((conflict) => conflict
+    .columns(['user_id', 'server_id'])
+    .where('user_id', 'is not', null)
+    .doNothing()).execute();
   await database.insertInto('control.containers').values({
     id,
     server_id: serverId,
@@ -127,6 +141,18 @@ async function insertVolume(
   name: string,
 ) {
   const id = randomUUID();
+  if (poolId && !sharedBackendId) {
+    await database.insertInto('iam.storage_pool_grants').values({
+      id: randomUUID(),
+      user_id: ownerId,
+      group_id: null,
+      pool_id: poolId,
+      expires_at: null,
+    }).onConflict((conflict) => conflict
+      .columns(['user_id', 'pool_id'])
+      .where('user_id', 'is not', null)
+      .doNothing()).execute();
+  }
   await database.insertInto('control.volumes').values({
     id,
     owner_id: ownerId,
@@ -166,7 +192,6 @@ function makeService(database: Kysely<NyabaseDatabase>) {
     new StoragePoolsRepository(database),
     new PgTransactionManager(database),
     new IntentRepository(database, noopWake()),
-    { wake: vi.fn() } as never,
     database,
     { append: vi.fn().mockResolvedValue(undefined) } as never,
     { get: vi.fn().mockRejectedValue(new Error('Incus is unavailable in this test')), listServerIds: vi.fn() } as never,

@@ -27,10 +27,18 @@ import { PG_DATABASE } from '../platform/persistence-pg/tokens.js';
 import { PgTransactionManager } from '../platform/persistence-pg/transaction.js';
 import { AuthService } from '../iam/auth.service.js';
 import { AccessResolverService } from '../iam/access-resolver.service.js';
+import type { Actor } from '../iam/actor.js';
 import { ContainerSshConvergenceService } from '../containers/container-ssh-convergence.service.js';
 import { NyabaseConfigService } from '../platform/config/nyabase-config.service.js';
 import { ProxySnapshotNotifierService } from '../proxy-snapshots/proxy-snapshot-notifier.service.js';
 import { AuditService } from '../iam/audit.service.js';
+import { AccessChangeNotifier } from '../iam/access-change-notifier.js';
+import {
+  assertNotLastAdministrator,
+  groupHoldsResourceGrants,
+  lockIamPolicy,
+} from '../iam/administration.js';
+import { afterCommit } from '../platform/post-commit.js';
 
 export const MAX_LIFETIME_USERS = 4_096;
 
@@ -57,7 +65,6 @@ export interface IamUser {
   displayName: string;
   status: UserStatus;
   authVersion: number;
-  authzVersion: string;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -85,6 +92,7 @@ export class UsersService {
     private readonly proxySnapshots: ProxySnapshotNotifierService,
     private readonly config: NyabaseConfigService,
     private readonly auditService: AuditService,
+    private readonly changes: AccessChangeNotifier,
   ) {}
 
   async createUser(
@@ -107,11 +115,7 @@ export class UsersService {
     const user = await this.transactions.run(async (transaction) => {
       // One durable row serializes capacity and numeric identity allocation
       // across API replicas without broad SERIALIZABLE transactions.
-      await transaction.selectFrom('iam.policy_state')
-        .select(['singleton'])
-        .where('singleton', '=', true)
-        .forUpdate()
-        .executeTakeFirstOrThrow();
+      await lockIamPolicy(transaction);
       const occupied = await transaction.selectFrom('iam.users')
         .select('numeric_id')
         .execute();
@@ -159,14 +163,9 @@ export class UsersService {
         display_name: displayName,
         status: UserStatus.Active,
         auth_version: 0,
-        authz_version: 0,
         created_at: now,
         updated_at: now,
       }).returningAll().executeTakeFirstOrThrow();
-      await transaction.updateTable('iam.policy_state').set({
-        policy_epoch: sql`policy_epoch + 1`,
-        updated_at: now,
-      }).where('singleton', '=', true).executeTakeFirstOrThrow();
       if (options.systemGroupKey) {
         const group = await transaction.selectFrom('iam.groups')
           .select(['id', 'capabilities'])
@@ -179,23 +178,14 @@ export class UsersService {
             message: `Required built-in group is unavailable: ${options.systemGroupKey}`,
           });
         }
-        const grantCounts = await Promise.all([
-          transaction.selectFrom('iam.server_grants').select('id')
-            .where('group_id', '=', group.id).execute(),
-          transaction.selectFrom('iam.storage_pool_grants').select('id')
-            .where('group_id', '=', group.id).execute(),
-          transaction.selectFrom('iam.shared_backend_grants').select('id')
-            .where('group_id', '=', group.id).execute(),
-        ]);
+        const groupHoldsGrants = await groupHoldsResourceGrants(transaction, group.id);
         if (typeof options.actorId === 'string') {
           await this.accessResolver.assertActorCapabilitiesInTransaction(
             transaction,
             options.actorId,
             [
               ...(group.capabilities as Capability[]),
-              ...(grantCounts.some((rows) => rows.length > 0)
-                ? [Capability.ManageGrants]
-                : []),
+              ...(groupHoldsGrants ? [Capability.ManageGrants] : []),
             ],
           );
         }
@@ -222,7 +212,6 @@ export class UsersService {
       }
       return user;
     });
-    await this.accessResolver.authorizationCommitted([user.id]);
     return user;
   }
 
@@ -247,9 +236,7 @@ export class UsersService {
   }
 
   /**
-   * Administrative collection projection. Keep this separate from `toDto`:
-   * detail reads may profit from the full authorization cache, while a list
-   * must never fill that cache once per user.
+   * Administrative collection projection: one query per table, never a per-user lookup.
    */
   async listDtos(): Promise<UserDto[]> {
     const [users, memberships] = await Promise.all([
@@ -265,15 +252,14 @@ export class UsersService {
           'membership.user_id',
           'group.id',
           'group.name',
-          'group.priority',
           'group.is_system',
           'group.capabilities',
         ])
         .innerJoin('iam.users as user', 'user.id', 'membership.user_id')
         .where('user.status', '=', UserStatus.Active)
         .orderBy('membership.user_id')
-        .orderBy('group.priority', 'desc')
-        .orderBy('group.id', 'desc')
+        .orderBy('group.name')
+        .orderBy('group.id')
         .execute(),
     ]);
     const groupsByUser = new Map<string, UserDto['groups']>();
@@ -283,7 +269,6 @@ export class UsersService {
       groups.push({
         id: membership.id,
         name: membership.name,
-        priority: membership.priority,
         isSystem: membership.is_system,
       });
       groupsByUser.set(membership.user_id, groups);
@@ -363,11 +348,7 @@ export class UsersService {
         );
       }
       if (dto.status === UserStatus.Active && user.status !== UserStatus.Active) {
-        await transaction.selectFrom('iam.policy_state')
-          .select('policy_epoch')
-          .where('singleton', '=', true)
-          .forUpdate()
-          .executeTakeFirstOrThrow();
+        await lockIamPolicy(transaction);
         const active = await transaction.selectFrom('iam.users')
           .select(sql<number>`count(*)::integer`.as('count'))
           .where('status', '=', UserStatus.Active)
@@ -391,8 +372,8 @@ export class UsersService {
         ...(securityChanged ? { auth_version: user.auth_version + 1 } : {}),
         updated_at: new Date(),
       }).where('id', '=', id).returningAll().executeTakeFirstOrThrow();
-      if (securityChanged) {
-        await sql`SELECT iam.bump_policy_epoch()`.execute(transaction);
+      if (dto.status !== undefined && dto.status !== user.status) {
+        afterCommit(transaction, () => this.changes.notify());
       }
       const saved = this.toUser(updated);
       if (actorId !== undefined) {
@@ -411,11 +392,68 @@ export class UsersService {
       }
       return saved;
     });
-    if (dto.status !== undefined || passwordHash !== undefined) {
-      await this.accessResolver.authorizationCommitted([id]);
-    }
     await this.notifyProxySnapshotsChanged('user-updated');
     return saved;
+  }
+
+  /**
+   * Permanent deletion. The user must own no containers or volumes (delete or
+   * purge them first); the credentials, group memberships and grants go with
+   * the account, and the final active administrator is protected.
+   */
+  async deleteUserPermanently(actor: Actor, userId: string): Promise<{ deleted: boolean }> {
+    await this.transactions.run(async (transaction) => {
+      await this.accessResolver.assertActorMayAdministerUserInTransaction(
+        transaction,
+        actor.userId,
+        userId,
+      );
+      const user = await transaction.selectFrom('iam.users')
+        .select(['id', 'status'])
+        .where('id', '=', userId)
+        .forUpdate()
+        .executeTakeFirst();
+      if (!user || user.status === UserStatus.Deleted) throw new NotFoundException('User not found');
+      await assertNotLastAdministrator(transaction, userId);
+      const container = await transaction.selectFrom('control.containers')
+        .select('id')
+        .where('owner_id', '=', userId)
+        .executeTakeFirst();
+      const volume = container ? undefined : await transaction.selectFrom('control.volumes')
+        .select('id')
+        .where('owner_id', '=', userId)
+        .executeTakeFirst();
+      const owned = container
+        ? { resourceKind: 'container', resourceId: container.id }
+        : volume ? { resourceKind: 'volume', resourceId: volume.id } : null;
+      if (owned) {
+        throw new ConflictException({
+          code: 'USER_HAS_RESOURCES',
+          message: 'Delete the user resources before deleting the account',
+          ...owned,
+        });
+      }
+      await transaction.deleteFrom('iam.refresh_tokens').where('user_id', '=', userId).execute();
+      await transaction.deleteFrom('iam.api_tokens').where('user_id', '=', userId).execute();
+      await transaction.deleteFrom('iam.ssh_public_keys').where('user_id', '=', userId).execute();
+      await transaction.deleteFrom('iam.group_members').where('user_id', '=', userId).execute();
+      await transaction.deleteFrom('iam.server_grants').where('user_id', '=', userId).execute();
+      await transaction.deleteFrom('iam.storage_pool_grants').where('user_id', '=', userId).execute();
+      await transaction.deleteFrom('iam.shared_backend_grants').where('user_id', '=', userId).execute();
+      await transaction.deleteFrom('control.access_lapses').where('user_id', '=', userId).execute();
+      await transaction.updateTable('iam.users')
+        .set({ status: UserStatus.Deleted })
+        .where('id', '=', userId)
+        .execute();
+      await this.auditService.append(
+        transaction,
+        actor.userId,
+        AuditAction.DeleteUser,
+        userId,
+        'user',
+      );
+    });
+    return { deleted: true };
   }
 
   async updateSelf(
@@ -465,9 +503,6 @@ export class UsersService {
         } : {}),
         updated_at: new Date(),
       }).where('id', '=', id).returningAll().executeTakeFirstOrThrow();
-      if (passwordHash !== undefined) {
-        await sql`SELECT iam.bump_policy_epoch()`.execute(transaction);
-      }
       const saved = this.toUser(updated);
       await this.auditService.append(
         transaction,
@@ -483,7 +518,6 @@ export class UsersService {
       );
       return saved;
     });
-    if (passwordHash !== undefined) await this.accessResolver.authorizationCommitted([id]);
     await this.notifyProxySnapshotsChanged('user-updated');
     return saved;
   }
@@ -769,7 +803,6 @@ export class UsersService {
     display_name: string;
     status: string;
     auth_version: number;
-    authz_version: string;
     created_at: Date;
     updated_at: Date;
   }): IamUser {
@@ -781,7 +814,6 @@ export class UsersService {
       displayName: row.display_name,
       status: row.status as UserStatus,
       authVersion: row.auth_version,
-      authzVersion: String(row.authz_version),
       createdAt: row.created_at,
       updatedAt: row.updated_at,
     };

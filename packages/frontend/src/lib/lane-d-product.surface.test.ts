@@ -353,8 +353,8 @@ describe('lane D product UI copy', () => {
     expect(ops).not.toMatch(/WebSocket|useWebSocket/);
     const dialog = read('components/intents/intent-detail-dialog.tsx');
     expect(dialog).toMatch(/sm:max-w-3xl/);
-    const groups = readFileSync(join(root, '../../backend/src/groups/groups.service.ts'), 'utf8');
-    const operatorsBlock = groups.match(/SystemGroupKey\.Operators,[\s\S]*?\],\s*\)/)?.[0] ?? '';
+    const groups = readFileSync(join(root, '../../backend/src/groups/system-groups.service.ts'), 'utf8');
+    const operatorsBlock = groups.match(/OPERATOR_CAPABILITIES = \[[\s\S]*?\];/)?.[0] ?? '';
     expect(operatorsBlock).toMatch(/Capability\.ManageServers/);
     expect(operatorsBlock).toMatch(/Capability\.ManageContainersAny/);
     expect(operatorsBlock).not.toMatch(/ManageVolumes/);

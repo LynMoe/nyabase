@@ -2,12 +2,10 @@ import { JwtService } from '@nestjs/jwt';
 import { SystemGroupKey, UserStatus } from '@nyabase/common';
 import type { Kysely } from 'kysely';
 import { describe, expect, it } from 'vitest';
-import { AccessCacheEpochService } from '../iam/access-cache-epoch.service.js';
+import { AccessChangeNotifier } from '../iam/access-change-notifier.js';
 import { AccessResolverService } from '../iam/access-resolver.service.js';
-import { AccessRevocationGuardService } from '../iam/access-revocation-guard.service.js';
 import { AuthService } from '../iam/auth.service.js';
-import { GpuClaimsRepository } from '../gpu/gpu-claims.repository.js';
-import { GroupsService } from '../groups/groups.service.js';
+import { SystemGroupsService } from '../groups/system-groups.service.js';
 import { IamAuthRepository } from '../iam/iam-auth.repository.js';
 import type { NyabaseDatabase } from '../platform/persistence-pg/database.types.js';
 import { PgTransactionManager } from '../platform/persistence-pg/transaction.js';
@@ -75,11 +73,7 @@ function createBootstrapContext(
   auth: AuthService;
 } {
   const transactions = new PgTransactionManager(database);
-  const access = new AccessResolverService(
-    database,
-    transactions,
-    new AccessCacheEpochService(database),
-  );
+  const access = new AccessResolverService(database, transactions);
   const audit = {
     append: async (..._args: unknown[]) => undefined,
   };
@@ -113,16 +107,9 @@ function createBootstrapContext(
     { notify: async () => undefined } as never,
     config as never,
     audit as never,
+    new AccessChangeNotifier(),
   );
-  const groups = new GroupsService(
-    database,
-    transactions,
-    access,
-    audit as never,
-    new AccessRevocationGuardService(),
-    new GpuClaimsRepository(database),
-  );
-  const app = new IamBootstrapService(groups, users);
+  const app = new IamBootstrapService(new SystemGroupsService(database, transactions), users);
   return { app, auth };
 }
 

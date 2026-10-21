@@ -59,8 +59,8 @@ function makeHarness() {
 
   };
   const access = {
+    assertAttachedStorageCoveredInTransaction: vi.fn().mockResolvedValue(undefined),
     resolveServerInTransaction: vi.fn().mockResolvedValue({
-      accessPhase: 'live',
       cpuMillis: 2_000,
       memBytes: 4_000_000_000,
       diskBytes: 8_000_000_000,
@@ -81,7 +81,6 @@ function makeHarness() {
     createPending: vi.fn().mockResolvedValue(intent),
   };
   const audit = { append: vi.fn() };
-  const wake = { wake: vi.fn() };
   const transactions = {
     run: vi.fn(async (work: (value: unknown) => Promise<unknown>) => work(transaction)),
   };
@@ -115,7 +114,6 @@ function makeHarness() {
     repository as never,
     access as never,
     intents as never,
-    wake as never,
     consoleSessions as never,
     audit as never,
     {} as never,
@@ -138,7 +136,6 @@ function makeHarness() {
     access,
     intents,
     audit,
-    wake,
     consoleSessions,
   };
 }
@@ -206,12 +203,6 @@ describe('ContainerControlService intent boundary', () => {
       'container',
       { operation: 'limits' },
     );
-    expect(harness.wake.wake).toHaveBeenCalledWith({
-      resourceType: IntentResourceType.Container,
-      resourceId: containerId,
-      serverId,
-      reason: 'intent',
-    });
     expect(result).toMatchObject({
       intentId: 'intent-1',
       targetRevision: 2,
@@ -219,11 +210,9 @@ describe('ContainerControlService intent boundary', () => {
     });
   });
 
-  it('rejects mutations after server access enters grace without writing desired state', async () => {
+  it('rejects mutations once the owner has no current server coverage without writing desired state', async () => {
     const harness = makeHarness();
-    harness.access.resolveServerInTransaction.mockResolvedValueOnce({
-      accessPhase: 'grace',
-    });
+    harness.access.resolveServerInTransaction.mockResolvedValueOnce(null);
 
     await expect(harness.service.updateLimits(owner, containerId, {
       cpuMillis: 750,
@@ -231,7 +220,6 @@ describe('ContainerControlService intent boundary', () => {
     })).rejects.toThrow('Server access was revoked');
     expect(harness.repository.updateDesired).not.toHaveBeenCalled();
     expect(harness.intents.createPending).not.toHaveBeenCalled();
-    expect(harness.wake.wake).not.toHaveBeenCalled();
   });
 
   it('stores the observed started_at baseline for restart without calling Incus', async () => {
@@ -361,7 +349,6 @@ describe('ContainerControlService intent boundary', () => {
     });
     expect(harness.repository.updateDesired).not.toHaveBeenCalled();
     expect(harness.intents.createPending).not.toHaveBeenCalled();
-    expect(harness.wake.wake).not.toHaveBeenCalled();
   });
 
   it('rejects quota-online root shrink below observed usage without writing desired state', async () => {

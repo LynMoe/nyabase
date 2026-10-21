@@ -94,9 +94,9 @@ export async function deleteServerGrant(
   serverId: string,
 ): Promise<void> {
   const response = await adminApi.delete(`/api/users/${userId}/server-grants/${serverId}`);
-  // 409 GRANT_REVOCATION_BLOCKED when the user still owns resources — caller should
-  // delete resources first; allow 409 here so finally blocks stay best-effort.
-  expect([200, 204, 404, 409]).toContain(response.status());
+  // Revoking never refuses: the user enters the 14-day grace and the access-lapse
+  // processor stops, then purges, what they own on the server.
+  expect([200, 204, 404]).toContain(response.status());
 }
 
 export async function deleteStoragePoolGrant(

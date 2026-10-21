@@ -37,7 +37,6 @@ export class InMemoryAuthPersistenceTestAdapter implements AuthPersistence {
       displayName: input.username,
       status: UserStatus.Active,
       authVersion: 0,
-      authzVersion: '0',
       createdAt: now,
       updatedAt: now,
       ...input,

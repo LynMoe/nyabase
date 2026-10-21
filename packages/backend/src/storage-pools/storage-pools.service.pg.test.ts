@@ -304,7 +304,6 @@ describePg('storage pool registration and shared mapping', () => {
         display_name: 'Pool User',
         status: 'active',
         auth_version: 0,
-        authz_version: 0,
       }).execute();
       const client = incusClient([
         { name: 'dir-a', driver: 'dir', config: { source: '/data1/nyabase/incus' } },

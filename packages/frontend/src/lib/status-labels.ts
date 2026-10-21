@@ -83,7 +83,6 @@ const FAILURE_CODE_ZH: Partial<Record<string, string>> = {
   [FailureCode.InstanceBusy]: '实例忙碌，请稍后重试',
   [FailureCode.PreflightCleanupFailed]: '预检清理失败',
   [FailureCode.PreflightFailed]: '预检失败',
-  [FailureCode.GrantRevocationBlocked]: '仍有资源在使用，暂时无法收回授权',
   [FailureCode.PermissionDenied]: '权限不足',
   [FailureCode.NotFound]: '资源不存在',
   [FailureCode.InvalidInput]: '参数无效',

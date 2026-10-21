@@ -39,6 +39,18 @@ Vite 通过 alias 将 `@nyabase/common` 指向 `src/index.ts`，但 `index.ts` �
 - intents 只有 `GET /intents`、`GET /intents/:id`、`POST /intents/:id/retry` 一个 controller；
   某个资源的操作历史用 `?resourceType=&resourceId=`（多个 id 用逗号分隔，例如镜像的所有分配）。
 
+## 授权模型（`iam/`、`groups/`、`access/`）
+
+- capability 只经组获得（Administrators 全部 / Operators 运维子集 / Users 无）。资源授权（服务器、数据盘池、共享后端）可授给用户或组，
+  同一用户对同一资源可有多条；`iam.effective_*_access` 视图按 (用户, 资源) 合并：配额逐项取最大（NULL = 不限）、GPU 并集、到期取最晚。
+  所有授权判断只读这些视图（`iam/effective-access.ts` 每类资源一个解析函数，只返回"当前有效"覆盖）；没有授权缓存、epoch 或 `authz_version`。
+- 管理层级（只能管理能力 ⊆ 自己的用户；目标持有资源授权需 `ManageGrants`）与"最后一个活跃管理员"保护只在 `iam/administration.ts`。
+  所有 IAM 写操作用 `lockIamPolicy`（advisory lock）串行化。
+- 撤销 = 立即到期：删除授权 / 移出组 / 删除组 / 禁用用户都不会被拒绝，IAM 写操作在 `afterCommit` 里通知 `AccessChangeNotifier`，
+  `access/access-lapse.processor.ts` 按台账 `control.access_lapses` 走同一条 14 天宽限 → 停机 → 清除流程（租约 `access_lapse`，
+  停机/清除复用 `UserServerResourcePurgeService` 的 system actor 路径）。
+- 宽限中（无当前覆盖）的用户不能新建、启动、挂载；已停机的容器在覆盖恢复后不会自动启动。
+
 ## 后端结构规则（`packages/backend/src`）
 
 `app-module-graph.test.ts`、`scripts/check.sh` 和相关结构测试固定这些规则，改动前先读它们。

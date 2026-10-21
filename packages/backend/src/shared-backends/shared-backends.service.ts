@@ -20,7 +20,7 @@ import { sql, type Kysely } from 'kysely';
 import type { NyabaseDatabase } from '../platform/persistence-pg/database.types.js';
 import { PG_DATABASE } from '../platform/persistence-pg/tokens.js';
 import { PgTransactionManager } from '../platform/persistence-pg/transaction.js';
-import { classifyGrantExpiry } from '../iam/grant-expiry.js';
+import { listSharedBackendAccess } from '../iam/effective-access.js';
 import { assertListScope, type Actor } from '../iam/actor.js';
 
 function normalizedIdentity(value: string): string {
@@ -108,18 +108,8 @@ export class SharedBackendsService {
   }
 
   private async listGranted(userId: string): Promise<SharedBackendDto[]> {
-    const grants = await this.database
-      .selectFrom('iam.shared_backend_grants as grant')
-      .leftJoin('iam.group_members as member', 'member.group_id', 'grant.group_id')
-      .select(['grant.shared_backend_id', 'grant.expires_at'])
-      .where((expression) => expression.or([
-        expression('grant.user_id', '=', userId),
-        expression('member.user_id', '=', userId),
-      ]))
-      .execute();
-    const ids = new Set(grants
-      .filter((grant) => classifyGrantExpiry(grant.expires_at) !== 'lost')
-      .map((grant) => grant.shared_backend_id));
+    const ids = new Set((await listSharedBackendAccess(this.database, userId))
+      .map((access) => access.sharedBackendId));
     const rows = await this.repository.list();
     const committed = await this.committedUsedByBackendIds(rows.map((row) => row.id));
     return rows

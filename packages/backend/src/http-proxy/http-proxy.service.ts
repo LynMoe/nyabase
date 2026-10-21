@@ -50,7 +50,7 @@ import {
   type HttpProxyWarningReason,
 } from '@nyabase/common';
 import { AccessResolverService } from '../iam/access-resolver.service.js';
-import { loadUsableServerAccessKeys } from '../iam/usable-server-access.js';
+import { loadServerAccessKeys } from '../iam/effective-access.js';
 import { NyabaseConfigService } from '../platform/config/nyabase-config.service.js';
 import type { ContainerControlTable } from '../platform/persistence-pg/container-control-database.types.js';
 import type { InfrastructureServerTable } from '../platform/persistence-pg/infrastructure-database.types.js';
@@ -537,7 +537,7 @@ export class HttpProxyService {
           .selectAll()
           .where('state', '=', 'active')
           .execute(),
-        loadUsableServerAccessKeys(transaction),
+        loadServerAccessKeys(transaction),
       ]);
       const poolsById = new Map(pools.map((row) => [row.id, row]));
       const containersById = new Map(

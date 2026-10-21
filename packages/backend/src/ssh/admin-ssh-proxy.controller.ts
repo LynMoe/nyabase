@@ -38,7 +38,7 @@ export class AdminSshProxyController {
     Capability.ManageSystemSettings,
   )
   async status(@CurrentUser() actor: UserRecord) {
-    const capabilities = await this.accessResolver.userCapabilitiesCurrent(actor.id);
+    const capabilities = await this.accessResolver.userCapabilities(actor.id);
     if (![
       Capability.ViewMetricsAll,
       Capability.ViewAudit,

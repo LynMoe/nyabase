@@ -1,78 +1,68 @@
-import { randomUUID } from 'node:crypto';
-import { ConflictException, ForbiddenException } from '@nestjs/common';
-import type { Kysely } from 'kysely';
-import { Capability, ServerStatus, UserStatus } from '@nyabase/common';
+import { ForbiddenException } from '@nestjs/common';
+import { Capability, SystemGroupKey } from '@nyabase/common';
 import { describe, expect, it } from 'vitest';
-import type { NyabaseDatabase } from '../platform/persistence-pg/database.types.js';
+import { GpuClaimsRepository } from '../gpu/gpu-claims.repository.js';
+import { GrantsService } from '../groups/grants.service.js';
+import { testActor } from './actor.test-helper.js';
+import { AccessChangeNotifier } from './access-change-notifier.js';
+import { AccessResolverService } from './access-resolver.service.js';
 import { withPostgresTestDatabase } from '../platform/persistence-pg/postgres-test-harness.js';
 import { PgTransactionManager } from '../platform/persistence-pg/transaction.js';
-import { AccessCacheEpochService } from './access-cache-epoch.service.js';
-import { AccessResolverService } from './access-resolver.service.js';
-import { GpuClaimsRepository } from '../gpu/gpu-claims.repository.js';
-import { AccessRevocationGuardService } from './access-revocation-guard.service.js';
-import { GroupsService } from '../groups/groups.service.js';
+import {
+  addMember,
+  grantServer,
+  seedGroup,
+  seedServer,
+  seedUser,
+} from './access.pg-test-helper.js';
 
 const describePg = process.env.NYABASE_TEST_DATABASE_URL ? describe : describe.skip;
 
 describePg('PostgreSQL canonical authorization', () => {
-  it('selects a direct winner before inherited group access', async () => {
-    await withPostgresTestDatabase(async ({ database }) => {
-      await seedPolicyState(database);
-      const userId = await seedUser(database, 'winner-user');
-      const groupId = randomUUID();
-      const serverId = await seedServer(database, 'winner-server');
-      await database.insertInto('iam.groups').values({
-        id: groupId,
-        name: `Winner group ${groupId.slice(0, 8)}`,
-        description: null,
-        priority: 100,
-        is_system: false,
-        system_key: null,
-        capabilities: [],
-        revision: 1,
-      }).execute();
-      await database.insertInto('iam.group_members').values({
-        id: randomUUID(),
-        group_id: groupId,
-        user_id: userId,
-      }).execute();
-      await database.insertInto('iam.server_grants').values([
-        grant({ user_id: userId, server_id: serverId, disk_bytes: 10 }),
-        grant({ group_id: groupId, server_id: serverId, disk_bytes: 20 }),
-      ]).execute();
+  function services(database: Parameters<typeof seedUser>[0]) {
+    const transactions = new PgTransactionManager(database);
+    const access = new AccessResolverService(database, transactions);
+    const changes = new AccessChangeNotifier();
+    const grants = new GrantsService(
+      database,
+      transactions,
+      access,
+      { append: async () => undefined } as never,
+      new GpuClaimsRepository(database),
+      changes,
+    );
+    return { access, grants, changes };
+  }
 
-      const resolver = newResolver(database);
-      await expect(resolver.resolveServer(userId, serverId)).resolves.toMatchObject({
-        diskBytes: 10,
-        accessPhase: 'live',
-      });
+  async function grantManager(database: Parameters<typeof seedUser>[0]): Promise<string> {
+    const actor = await seedUser(database);
+    const group = await seedGroup(database, { capabilities: [Capability.ManageGrants] });
+    await addMember(database, group, actor);
+    return actor;
+  }
+
+  it('merges a direct grant with group grants instead of picking a winner', async () => {
+    await withPostgresTestDatabase(async ({ database }) => {
+      const userId = await seedUser(database);
+      const groupId = await seedGroup(database);
+      const serverId = await seedServer(database);
+      await addMember(database, groupId, userId);
+      await grantServer(database, { user: userId }, serverId, { diskBytes: 10 });
+      await grantServer(database, { group: groupId }, serverId, { diskBytes: 20 });
+
+      await expect(services(database).access.resolveServer(userId, serverId))
+        .resolves.toMatchObject({ diskBytes: 20 });
     });
   });
 
   it('rejects an actor that lacks the capability being exercised', async () => {
     await withPostgresTestDatabase(async ({ database }) => {
-      await seedPolicyState(database);
-      const actorId = await seedUser(database, 'boundary-actor');
-      const groupId = randomUUID();
-      await database.insertInto('iam.groups').values({
-        id: groupId,
-        name: `Boundary group ${groupId.slice(0, 8)}`,
-        description: null,
-        priority: 1,
-        is_system: false,
-        system_key: null,
-        capabilities: [Capability.ManageUsers],
-        revision: 1,
-      }).execute();
-      await database.insertInto('iam.group_members').values({
-        id: randomUUID(),
-        group_id: groupId,
-        user_id: actorId,
-      }).execute();
+      const actorId = await seedUser(database);
+      const groupId = await seedGroup(database, { capabilities: [Capability.ManageUsers] });
+      await addMember(database, groupId, actorId);
 
-      const resolver = newResolver(database);
       await expect(database.transaction().execute((transaction) =>
-        resolver.assertActorCapabilitiesInTransaction(
+        services(database).access.assertActorCapabilitiesInTransaction(
           transaction,
           actorId,
           [Capability.ManageGrants],
@@ -80,57 +70,12 @@ describePg('PostgreSQL canonical authorization', () => {
     });
   });
 
-  it('rolls back a server-grant revoke when a local dependency remains', async () => {
-    await withPostgresTestDatabase(async ({ database }) => {
-      await seedPolicyState(database);
-      const userId = await seedUser(database, 'rollback-user');
-      const serverId = await seedServer(database, 'rollback-server');
-      await database.insertInto('iam.server_grants').values(
-        grant({ user_id: userId, server_id: serverId, disk_bytes: 10 }),
-      ).execute();
-      await database.insertInto('control.authorization_dependencies').values({
-        id: randomUUID(),
-        dependency_kind: 'container',
-        dependency_id: randomUUID(),
-        user_id: userId,
-        server_id: serverId,
-        pool_id: null,
-        shared_backend_id: null,
-      }).execute();
-
-      const guard = new AccessRevocationGuardService();
-      await expect(database.transaction().execute(async (transaction) => {
-        await transaction.deleteFrom('iam.server_grants')
-          .where('user_id', '=', userId)
-          .where('server_id', '=', serverId)
-          .execute();
-        await guard.assertServerAccessRevocationSafe(transaction, [{ userId, serverId }]);
-      })).rejects.toBeInstanceOf(ConflictException);
-
-      await expect(database.selectFrom('iam.server_grants')
-        .select('id')
-        .where('user_id', '=', userId)
-        .where('server_id', '=', serverId)
-        .executeTakeFirst()).resolves.toBeDefined();
-    });
-  });
-
   it('uses one canonical row for repeated user-grant PUTs', async () => {
     await withPostgresTestDatabase(async ({ database }) => {
-      await seedPolicyState(database);
-      const userId = await seedUser(database, 'upsert-user');
-      const serverId = await seedServer(database, 'upsert-server');
-      const transactions = new PgTransactionManager(database);
-      const access = newResolver(database);
-      const audit = { append: async () => undefined };
-      const groups = new GroupsService(
-        database,
-        transactions,
-        access,
-        audit as never,
-        new AccessRevocationGuardService(),
-        new GpuClaimsRepository(database),
-      );
+      const { grants } = services(database);
+      const actor = testActor(await grantManager(database));
+      const userId = await seedUser(database);
+      const serverId = await seedServer(database);
       const input = {
         cpuMillis: null,
         memBytes: null,
@@ -139,8 +84,8 @@ describePg('PostgreSQL canonical authorization', () => {
         expiresAt: null,
       };
 
-      const first = await groups.upsertUserServerGrant(userId, serverId, input);
-      const second = await groups.upsertUserServerGrant(userId, serverId, {
+      const first = await grants.putServerGrant(actor, { kind: 'user', id: userId }, serverId, input);
+      const second = await grants.putServerGrant(actor, { kind: 'user', id: userId }, serverId, {
         ...input,
         diskBytes: 20,
       });
@@ -152,89 +97,104 @@ describePg('PostgreSQL canonical authorization', () => {
         .execute()).toEqual([{ id: first.id, disk_bytes: '20' }]);
     });
   });
+
+  it('serves users and groups through the same grant functions', async () => {
+    await withPostgresTestDatabase(async ({ database }) => {
+      const { grants } = services(database);
+      const actor = testActor(await grantManager(database));
+      const userId = await seedUser(database);
+      const groupId = await seedGroup(database);
+      const serverId = await seedServer(database);
+      const input = {
+        cpuMillis: 1_000, memBytes: null, diskBytes: null, gpuPciAddresses: [], expiresAt: null,
+      };
+
+      await grants.putServerGrant(actor, { kind: 'group', id: groupId }, serverId, input);
+      await grants.putServerGrant(actor, { kind: 'user', id: userId }, serverId, input);
+      await expect(grants.listServerGrants({ kind: 'group', id: groupId }))
+        .resolves.toMatchObject([{ scope: 'group', scopeId: groupId, serverId }]);
+      await expect(grants.listServerGrants({ kind: 'user', id: userId }))
+        .resolves.toMatchObject([{ scope: 'user', scopeId: userId, serverId }]);
+
+      await grants.deleteServerGrant(actor, { kind: 'group', id: groupId }, serverId);
+      await expect(grants.listServerGrants({ kind: 'group', id: groupId })).resolves.toEqual([]);
+      await expect(grants.listServerGrants({ kind: 'user', id: userId })).resolves.toHaveLength(1);
+    });
+  });
+
+  it('refuses grant mutations from an actor without ManageGrants and for unknown holders', async () => {
+    await withPostgresTestDatabase(async ({ database }) => {
+      const { grants } = services(database);
+      const plain = testActor(await seedUser(database));
+      const manager = testActor(await grantManager(database));
+      const serverId = await seedServer(database);
+      const userId = await seedUser(database);
+      const input = {
+        cpuMillis: null, memBytes: null, diskBytes: null, gpuPciAddresses: [], expiresAt: null,
+      };
+
+      await expect(grants.putServerGrant(plain, { kind: 'user', id: userId }, serverId, input))
+        .rejects.toMatchObject({ response: { code: 'PRIVILEGE_ESCALATION_DENIED' } });
+      await expect(grants.deleteServerGrant(plain, { kind: 'user', id: userId }, serverId))
+        .rejects.toMatchObject({ response: { code: 'PRIVILEGE_ESCALATION_DENIED' } });
+      await expect(grants.putServerGrant(
+        manager,
+        { kind: 'group', id: '00000000-0000-4000-8000-0000000000aa' },
+        serverId,
+        input,
+      )).rejects.toMatchObject({ status: 404 });
+    });
+  });
+
+  it('signals the access-lapse processor after a grant commits, not on failure', async () => {
+    await withPostgresTestDatabase(async ({ database }) => {
+      const { grants, changes } = services(database);
+      const actor = testActor(await grantManager(database));
+      const userId = await seedUser(database);
+      const serverId = await seedServer(database);
+      let signals = 0;
+      changes.onChange(() => { signals += 1; });
+      const input = {
+        cpuMillis: null, memBytes: null, diskBytes: null, gpuPciAddresses: [], expiresAt: null,
+      };
+
+      await expect(grants.putServerGrant(
+        actor,
+        { kind: 'user', id: userId },
+        '00000000-0000-4000-8000-0000000000bb',
+        input,
+      )).rejects.toMatchObject({ status: 404 });
+      expect(signals).toBe(0);
+
+      await grants.putServerGrant(actor, { kind: 'user', id: userId }, serverId, input);
+      expect(signals).toBe(1);
+      await grants.deleteServerGrant(actor, { kind: 'user', id: userId }, serverId);
+      expect(signals).toBe(2);
+      // Deleting a grant that does not exist changes nothing.
+      await grants.deleteServerGrant(actor, { kind: 'user', id: userId }, serverId);
+      expect(signals).toBe(2);
+    });
+  });
+
+  it('does not keep Administrators special in grant authorization', async () => {
+    await withPostgresTestDatabase(async ({ database }) => {
+      const { grants } = services(database);
+      const adminGroup = await seedGroup(database, {
+        name: 'Administrators',
+        system: SystemGroupKey.Administrators,
+        capabilities: Object.values(Capability),
+      });
+      const admin = await seedUser(database);
+      await addMember(database, adminGroup, admin);
+      const serverId = await seedServer(database);
+      const userId = await seedUser(database);
+
+      await expect(grants.putServerGrant(
+        testActor(admin),
+        { kind: 'user', id: userId },
+        serverId,
+        { cpuMillis: null, memBytes: null, diskBytes: null, gpuPciAddresses: [], expiresAt: null },
+      )).resolves.toMatchObject({ serverId });
+    });
+  });
 });
-
-function newResolver(database: Kysely<NyabaseDatabase>): AccessResolverService {
-  const transactions = new PgTransactionManager(database);
-  return new AccessResolverService(
-    database,
-    transactions,
-    new AccessCacheEpochService(database),
-  );
-}
-
-let nextNumericId = 1;
-
-async function seedPolicyState(database: Kysely<NyabaseDatabase>): Promise<void> {
-  await database.insertInto('iam.policy_state')
-    .values({ singleton: true, policy_epoch: 0 })
-    .onConflict((conflict) => conflict.column('singleton').doNothing())
-    .execute();
-}
-
-async function seedUser(database: Kysely<NyabaseDatabase>, username: string): Promise<string> {
-  const id = randomUUID();
-  await database.insertInto('iam.users').values({
-    id,
-    numeric_id: nextNumericId++,
-    username,
-    password_hash: 'unused',
-    display_name: username,
-    status: UserStatus.Active,
-    auth_version: 1,
-    authz_version: 1,
-  }).execute();
-  return id;
-}
-
-async function seedServer(database: Kysely<NyabaseDatabase>, name: string): Promise<string> {
-  const id = randomUUID();
-  await database.insertInto('infra.servers').values({
-    id,
-    name,
-    slug: `${name}-${id.slice(0, 8)}`,
-    api_endpoint: 'https://incus.example.test:8443',
-    server_cert_fingerprint: null,
-    incus_version: null,
-    api_extensions: [],
-    system_pool_id: null,
-    storage_overcommit_ratio: 1,
-    parent_interface: 'eth0',
-    dns_servers: ['10.20.0.1'],
-    status: ServerStatus.Unknown,
-    last_seen_at: null,
-    last_error: null,
-    revision: 1,
-    node_metrics_endpoint: null,
-    node_metrics_server_cert_fingerprint: null,
-    node_metrics_token_ciphertext: null,
-    node_metrics_token_fingerprint: null,
-    node_metrics_status: 'unconfigured',
-    node_metrics_last_success_at: null,
-    node_metrics_outage_since: null,
-    node_metrics_last_error: null,
-    preflight_status: 'not_run',
-    preflight_checked_at: null,
-    preflight_report: null,
-  }).execute();
-  return id;
-}
-
-function grant(input: {
-  user_id?: string;
-  group_id?: string;
-  server_id: string;
-  disk_bytes: number;
-}) {
-  return {
-    id: randomUUID(),
-    user_id: input.user_id ?? null,
-    group_id: input.group_id ?? null,
-    server_id: input.server_id,
-    cpu_millis: null,
-    mem_bytes: null,
-    disk_bytes: input.disk_bytes,
-    gpu_pci_addresses: [],
-    expires_at: null,
-  };
-}

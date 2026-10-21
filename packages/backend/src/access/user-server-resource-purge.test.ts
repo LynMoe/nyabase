@@ -43,9 +43,6 @@ function createService() {
     }),
     release: vi.fn().mockResolvedValue(true),
   };
-  const access = {
-    authorizationCommitted: vi.fn(),
-  };
   const audit = {
     append: vi.fn(),
   };
@@ -56,7 +53,6 @@ function createService() {
     volumes as never,
     intents as never,
     reconcileClaims as never,
-    access as never,
     audit as never,
   );
   return {
@@ -67,7 +63,6 @@ function createService() {
     volumes,
     intents,
     reconcileClaims,
-    access,
     audit,
   };
 }
@@ -117,7 +112,6 @@ describe('UserServerResourcePurgeService grant expiry actions', () => {
         intentIds: ['stop-intent'],
       },
     );
-    expect(fixture.access.authorizationCommitted).toHaveBeenCalledWith(['user-1']);
     expect(fixture.intents.ensurePending).not.toHaveBeenCalled();
     expect(fixture.reconcileClaims.claim).toHaveBeenCalledWith({
       resourceType: 'container',
@@ -274,7 +268,6 @@ describe('UserServerResourcePurgeService grant expiry actions', () => {
         volumeIds: ['volume-1'],
       }),
     );
-    expect(fixture.access.authorizationCommitted).toHaveBeenCalledWith(['user-1']);
     expect(fixture.containers.action.mock.invocationCallOrder[0])
       .toBeLessThan(fixture.intents.ensurePending.mock.invocationCallOrder[0]);
   });

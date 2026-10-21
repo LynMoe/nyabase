@@ -6,7 +6,6 @@ import { PG_DATABASE } from '../platform/persistence-pg/tokens.js';
 import { retryPgTransaction } from '../platform/persistence-pg/transaction.js';
 import { executeWithPostCommit } from '../platform/post-commit.js';
 import { IntentRepository } from '../reconcile/intent.repository.js';
-import { ReconcileWakeService } from '../reconcile/reconcile-wake.service.js';
 
 type SshSyncOperation = 'sync_user_ssh_keys' | 'repair_ssh';
 
@@ -15,7 +14,6 @@ export class ContainerSshConvergenceService {
   constructor(
     @Inject(PG_DATABASE) private readonly database: Kysely<NyabaseDatabase>,
     private readonly intents: IntentRepository,
-    private readonly wake: ReconcileWakeService,
   ) {}
 
   async reconcileUser(userId: string): Promise<void> {
@@ -84,12 +82,6 @@ export class ContainerSshConvergenceService {
     if (!result) {
       return false;
     }
-    this.wake.wake({
-      resourceType: IntentResourceType.Container,
-      resourceId: result.containerId,
-      serverId: result.serverId,
-      reason: 'intent',
-    });
     return true;
   }
 }

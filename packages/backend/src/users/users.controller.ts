@@ -14,7 +14,6 @@ import { UsersService } from './users.service.js';
 import { RequireAnyCaps, RequireCaps } from '../iam/decorators/require-caps.decorator.js';
 import { CurrentActor } from '../iam/decorators/current-actor.decorator.js';
 import { holdsAny, type Actor } from '../iam/actor.js';
-import { GroupsService } from '../groups/groups.service.js';
 import {
   Capability,
   SystemGroupKey,
@@ -34,7 +33,6 @@ const VIEW_USERS = [Capability.ManageUsers, Capability.ManageGrants] as const;
 export class UsersController {
   constructor(
     private usersService: UsersService,
-    private groupsService: GroupsService,
   ) {}
 
   @Get()
@@ -88,7 +86,7 @@ export class UsersController {
   @HttpCode(200)
   async deleteUser(@Param('id') id: string, @CurrentActor() actor: Actor) {
     if (actor.userId === id) throw new ForbiddenException("Can't delete yourself");
-    return this.groupsService.deleteUserPermanently(id, actor.userId);
+    return this.usersService.deleteUserPermanently(actor, id);
   }
 
   // SSH keys

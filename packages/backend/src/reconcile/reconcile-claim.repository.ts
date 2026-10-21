@@ -15,9 +15,9 @@ export const VOLUME_DESTROY_PLACEMENT_ID = '00000000-0000-4000-8000-000000000001
 
 /**
  * Everything that can hold a lease: each intent resource type, plus the
- * grant-expiry worker, which leases one (user, server) pair per pass.
+ * access-lapse processor, which leases one (user, resource) pair at a time.
  */
-export type ClaimResource = IntentResource | 'grant_expiry';
+export type ClaimResource = IntentResource | 'access_lapse';
 
 export interface ClaimInput {
   readonly resourceType: ClaimResource;
@@ -323,6 +323,6 @@ export class ReconcileClaimRepository {
 }
 
 export function isReconcileResourceType(value: string): value is ClaimResource {
-  return value === 'grant_expiry' || (Object.values(IntentResourceType) as string[]).includes(value);
+  return value === 'access_lapse' || (Object.values(IntentResourceType) as string[]).includes(value);
 }
 

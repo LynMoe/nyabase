@@ -16,7 +16,6 @@ import {
   ADMIN_INTENT_LIST_MAX,
   MAX_CONSOLE_COMMAND_ARGUMENT_BYTES,
   MAX_CONSOLE_COMMAND_ARGUMENTS,
-  MAX_GROUP_PRIORITY,
   MAX_INTENT_LIST_PAGE_SIZE,
   MAX_PLATFORM_SERVERS,
   MAX_RESOURCE_BYTES,
@@ -631,7 +630,6 @@ export const zErrorResponse = z.object({
 export const zCreateGroupRequest = z.object({
   name: zName,
   description: z.string().max(4_096).optional(),
-  priority: z.number().int().nonnegative().safe().max(MAX_GROUP_PRIORITY).optional(),
   capabilities: z.array(zCapability)
     .max(Object.values(Capability).length)
     .refine((values) => new Set(values).size === values.length, 'Capabilities must be unique')
@@ -641,7 +639,6 @@ export const zCreateGroupRequest = z.object({
 export const zUpdateGroupRequest = z.object({
   name: zName.optional(),
   description: z.string().max(4_096).nullable().optional(),
-  priority: z.number().int().nonnegative().safe().max(MAX_GROUP_PRIORITY).optional(),
   capabilities: z.array(zCapability)
     .max(Object.values(Capability).length)
     .refine((values) => new Set(values).size === values.length, 'Capabilities must be unique')
@@ -652,7 +649,6 @@ export const zPatchAdminGroupRequest = z.object({
   expectedRevision: zExpectedRevision,
   name: zName.optional(),
   description: z.string().max(4_096).nullable().optional(),
-  priority: z.number().int().nonnegative().safe().max(MAX_GROUP_PRIORITY).optional(),
   capabilities: z.array(zCapability)
     .max(Object.values(Capability).length)
     .refine((values) => new Set(values).size === values.length, 'Capabilities must be unique')

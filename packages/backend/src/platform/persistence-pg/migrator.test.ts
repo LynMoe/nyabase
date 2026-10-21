@@ -48,7 +48,8 @@ describe('SQL migration discovery', () => {
     expect(initial.sql).toContain('storage_pools_shared_backend_server_unique');
     expect(initial.sql).toContain('volume_attachments_backend_visibility');
     expect(initial.sql).toContain('intents_settled_shape_check');
-    expect(initial.sql).toContain('lock_policy_state_before_mutation');
+    expect(initial.sql).toContain('CREATE VIEW iam.effective_server_access');
+    expect(initial.sql).not.toMatch(/policy_state|authz_version|CREATE TRIGGER \w+_authorization_(barrier|touch)/);
     expect(initial.sql).not.toMatch(/\bCREATE\s+SCHEMA\s+workflow\b/i);
     expect(initial.sql).not.toMatch(/\bworkflow\./i);
     expect(initial.sql).not.toMatch(/\b(agent|docker|macvlan|xfs|quarantine)\b/i);

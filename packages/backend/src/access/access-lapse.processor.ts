@@ -1,0 +1,277 @@
+import {
+  Inject,
+  Injectable,
+  Logger,
+  type OnModuleDestroy,
+  type OnModuleInit,
+} from '@nestjs/common';
+import { randomUUID } from 'node:crypto';
+import { AuditAction } from '@nyabase/common';
+import { AccessChangeNotifier } from '../iam/access-change-notifier.js';
+import { systemActor, type Actor } from '../iam/actor.js';
+import { AuditService } from '../iam/audit.service.js';
+import { SYSTEM_ACTOR_USERNAME } from '../iam/system-actor.js';
+import { ReconcileClaimRepository } from '../reconcile/reconcile-claim.repository.js';
+import {
+  AccessLapseRepository,
+  lapseWork,
+  type LapseCandidate,
+} from './access-lapse.repository.js';
+import { UserServerResourcePurgeService } from './user-server-resource-purge.service.js';
+import type { Kysely } from 'kysely';
+import type { NyabaseDatabase } from '../platform/persistence-pg/database.types.js';
+import { PG_DATABASE } from '../platform/persistence-pg/tokens.js';
+import { ProxySnapshotNotifierService } from '../proxy-snapshots/proxy-snapshot-notifier.service.js';
+
+const SCAN_INTERVAL_MS = 60_000;
+const SCAN_INTERVAL_JITTER_MS = 15_000;
+const MAX_PAIRS_PER_PASS = 128;
+
+/**
+ * Enforces access lapses. A user who owns containers or volumes on a server,
+ * storage pool or shared backend without current coverage (grant expired,
+ * revoked, removed from the group, group deleted, user disabled) is in a
+ * 14-day grace that starts at `lapsed_at`:
+ *
+ *  - no ledger row yet: open it (`lapsed_at` = the past expiry, or now for a
+ *    revocation; never moved afterwards);
+ *  - in grace and not stopped: stop the user's running containers there;
+ *  - grace over and not purged: purge the user's containers and volumes there;
+ *  - coverage back: delete the row (stopped containers are not restarted).
+ *
+ * Runs every minute and right after IAM writes commit (`AccessChangeNotifier`).
+ * Each pair is leased through `ReconcileClaimRepository` (resource_type
+ * `access_lapse`), so replicas never work on the same pair; stop and purge go
+ * through the same system-actor code as the operator purge.
+ */
+@Injectable()
+export class AccessLapseProcessor implements OnModuleInit, OnModuleDestroy {
+  private readonly logger = new Logger(AccessLapseProcessor.name);
+  private readonly workerId = `access-lapse:${randomUUID()}`;
+  private timer: ReturnType<typeof setTimeout> | null = null;
+  private wakeTimer: ReturnType<typeof setImmediate> | null = null;
+  private processing: Promise<number> | null = null;
+  private stopped = false;
+  private unsubscribe: (() => void) | null = null;
+
+  constructor(
+    @Inject(PG_DATABASE) private readonly database: Kysely<NyabaseDatabase>,
+    private readonly lapses: AccessLapseRepository,
+    private readonly claims: ReconcileClaimRepository,
+    private readonly purge: UserServerResourcePurgeService,
+    private readonly audit: AuditService,
+    private readonly changes: AccessChangeNotifier,
+    private readonly proxySnapshots: ProxySnapshotNotifierService,
+  ) {}
+
+  onModuleInit(): void {
+    this.stopped = false;
+    this.unsubscribe = this.changes.onChange(() => this.wake());
+    this.scheduleNext();
+    this.wake();
+  }
+
+  async onModuleDestroy(): Promise<void> {
+    this.stopped = true;
+    this.unsubscribe?.();
+    this.unsubscribe = null;
+    if (this.timer) clearTimeout(this.timer);
+    if (this.wakeTimer) clearImmediate(this.wakeTimer);
+    this.timer = null;
+    this.wakeTimer = null;
+    await this.processing;
+  }
+
+  wake(): void {
+    if (this.stopped || this.wakeTimer) return;
+    this.wakeTimer = setImmediate(() => {
+      this.wakeTimer = null;
+      if (!this.stopped) void this.process();
+    });
+  }
+
+  /** One pass; returns the number of pairs it acted on. Concurrent calls share a pass. */
+  async process(): Promise<number> {
+    if (this.stopped) return 0;
+    if (this.processing) return this.processing;
+    const processing = this.pass();
+    this.processing = processing;
+    try {
+      return await processing;
+    } finally {
+      if (this.processing === processing) this.processing = null;
+    }
+  }
+
+  private scheduleNext(): void {
+    if (this.stopped) return;
+    if (this.timer) clearTimeout(this.timer);
+    const jitter = Math.floor((Math.random() * 2 - 1) * SCAN_INTERVAL_JITTER_MS);
+    this.timer = setTimeout(() => {
+      this.timer = null;
+      this.wake();
+      this.scheduleNext();
+    }, Math.max(5_000, SCAN_INTERVAL_MS + jitter));
+    this.timer.unref?.();
+  }
+
+  private async pass(): Promise<number> {
+    try {
+      const actorId = await this.systemActorId();
+      if (!actorId) {
+        this.logger.warn('Access lapse processor skipped: nyabase-system actor is missing');
+        return 0;
+      }
+      await this.lapses.deleteStale();
+      let handled = 0;
+      for (const candidate of await this.lapses.scan()) {
+        if (this.stopped || handled >= MAX_PAIRS_PER_PASS) break;
+        if (lapseWork(candidate) === 'none') continue;
+        if (await this.handle(candidate, systemActor(actorId))) handled += 1;
+      }
+      // SSH/HTTP proxies admit only covered (user, server) pairs; refresh them now.
+      if (handled > 0) await this.proxySnapshots.notify('access-lapse');
+      return handled;
+    } catch (error) {
+      this.logger.error(
+        `Access lapse pass failed: ${error instanceof Error ? error.message : String(error)}`,
+      );
+      return 0;
+    }
+  }
+
+  private async systemActorId(): Promise<string | null> {
+    const row = await this.database.selectFrom('iam.users')
+      .select('id')
+      .where('username', '=', SYSTEM_ACTOR_USERNAME)
+      .executeTakeFirst();
+    return row?.id ?? null;
+  }
+
+  /** Leases the pair, re-reads it, and does the one thing it is due for. */
+  private async handle(scanned: LapseCandidate, actor: Actor): Promise<boolean> {
+    const claim = await this.claims.claim({
+      resourceType: 'access_lapse',
+      resourceId: scanned.userId,
+      placementServerId: scanned.resourceId,
+      workerId: this.workerId,
+    });
+    if (!claim) return false;
+    const lease = this.claims.startLeaseGuard(claim);
+    try {
+      const current = await this.lapses.inspect(scanned);
+      if (!current) return false;
+      switch (lapseWork(current)) {
+        case 'clear':
+          return await this.lapses.clear(current);
+        case 'lapse':
+          return await this.lapseAndAct(current, actor, lease.assertOwned.bind(lease));
+        case 'stop':
+          return await this.stopContainers(current, actor, lease.assertOwned.bind(lease));
+        case 'purge':
+          return await this.purgeResources(current, actor, lease.assertOwned.bind(lease));
+        case 'none':
+          return false;
+      }
+    } catch (error) {
+      this.logger.error(
+        `Access lapse ${scanned.kind} ${scanned.resourceId} of ${scanned.userId} failed: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+      return false;
+    } finally {
+      lease.stop();
+      await this.claims.release({
+        resourceType: claim.resourceType,
+        resourceId: claim.resourceId,
+        placementServerId: claim.placementServerId,
+        workerId: claim.workerId,
+      }).catch((error: unknown) => {
+        this.logger.warn(`Access lapse lease release failed: ${String(error)}`);
+      });
+    }
+  }
+
+  /** Opens the grace and acts at once when it is already due (an old expiry). */
+  private async lapseAndAct(
+    candidate: LapseCandidate,
+    actor: Actor,
+    assertOwned: () => void,
+  ): Promise<boolean> {
+    const lapse = await this.lapses.openLapse(candidate);
+    if (!lapse) return false;
+    assertOwned();
+    const opened = { ...candidate, lapse };
+    const work = lapseWork(opened);
+    if (work === 'stop') return this.stopContainers(opened, actor, assertOwned);
+    if (work === 'purge') return this.purgeResources(opened, actor, assertOwned);
+    return true;
+  }
+
+  private async stopContainers(
+    candidate: LapseCandidate,
+    actor: Actor,
+    assertOwned: () => void,
+  ): Promise<boolean> {
+    switch (candidate.kind) {
+      case 'server':
+        await this.purge.stopRunningContainersForGraceEntry(
+          actor,
+          candidate.userId,
+          candidate.resourceId,
+        );
+        break;
+      case 'storage_pool':
+        await this.purge.stopRunningContainersForStoragePool(
+          actor,
+          candidate.userId,
+          candidate.resourceId,
+          this.workerId,
+        );
+        break;
+      case 'shared_backend':
+        await this.purge.stopRunningContainersForSharedBackend(
+          actor,
+          candidate.userId,
+          candidate.resourceId,
+          this.workerId,
+        );
+        break;
+    }
+    assertOwned();
+    return this.lapses.markStopped(candidate, (transaction) => this.audit.append(
+      transaction,
+      actor.userId,
+      AuditAction.GrantExpired,
+      candidate.userId,
+      'user',
+      {
+        resourceKind: candidate.kind,
+        resourceId: candidate.resourceId,
+        lapsedAt: candidate.lapse?.lapsedAt.toISOString(),
+      },
+    ));
+  }
+
+  private async purgeResources(
+    candidate: LapseCandidate,
+    actor: Actor,
+    assertOwned: () => void,
+  ): Promise<boolean> {
+    switch (candidate.kind) {
+      case 'server':
+        await this.purge.purge(actor, candidate.userId, candidate.resourceId);
+        break;
+      case 'storage_pool':
+        await this.purge.purgeStoragePoolVolumes(actor, candidate.userId, candidate.resourceId);
+        break;
+      case 'shared_backend':
+        await this.purge.purgeSharedBackendVolumes(actor, candidate.userId, candidate.resourceId);
+        break;
+    }
+    assertOwned();
+    // The purge audit rows are written by the purge itself.
+    return this.lapses.markPurged(candidate, async () => undefined);
+  }
+}

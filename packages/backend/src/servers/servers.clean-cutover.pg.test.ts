@@ -189,7 +189,6 @@ describePg('clean Incus server contract', () => {
         display_name: 'cascade',
         status: 'active',
         auth_version: 0,
-        authz_version: 0,
       }).execute();
       await database.insertInto('infra.servers').values([
         {
@@ -571,7 +570,6 @@ describePg('clean Incus server contract', () => {
         display_name: 'never-mounted',
         status: 'active',
         auth_version: 0,
-        authz_version: 0,
       }).execute();
       await database.insertInto('infra.servers').values([
         {

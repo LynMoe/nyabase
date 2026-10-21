@@ -14,22 +14,24 @@ import {
   type EffectiveAccessDto,
 } from '@nyabase/common';
 import { RequireCaps } from '../iam/decorators/require-caps.decorator.js';
-import { CurrentUser } from '../iam/decorators/current-user.decorator.js';
-import type { UserRecord } from '../iam/user-record.js';
+import { CurrentActor } from '../iam/decorators/current-actor.decorator.js';
+import type { Actor } from '../iam/actor.js';
 import { AccessResolverService } from '../iam/access-resolver.service.js';
-import { GroupsService } from './groups.service.js';
+import { GrantsService, type GrantSubject } from './grants.service.js';
+
+const subject = (id: string): GrantSubject => ({ kind: 'user', id });
 
 @Controller('users/:userId')
 export class UserGrantsController {
   constructor(
-    private readonly groups: GroupsService,
+    private readonly grants: GrantsService,
     private readonly access: AccessResolverService,
   ) {}
 
   @Get('server-grants')
   @RequireCaps(Capability.ManageGrants)
   listServerGrants(@Param('userId') userId: string) {
-    return this.groups.listUserServerGrants(userId);
+    return this.grants.listServerGrants(subject(userId));
   }
 
   @Put('server-grants/:serverId')
@@ -38,26 +40,25 @@ export class UserGrantsController {
     @Param('userId') userId: string,
     @Param('serverId') serverId: string,
     @Body() body: unknown,
-    @CurrentUser() actor: UserRecord,
+    @CurrentActor() actor: Actor,
   ) {
-    return this.groups.upsertUserServerGrant(
-      userId,
-      serverId,
-      zPutServerGrantRequest.parse(body),
-      actor.id,
-    );
+    return this.grants.putServerGrant(actor, subject(userId), serverId, zPutServerGrantRequest.parse(body));
   }
 
   @Delete('server-grants/:serverId')
   @RequireCaps(Capability.ManageGrants)
-  deleteServerGrant(@Param('userId') userId: string, @Param('serverId') serverId: string, @CurrentUser() actor: UserRecord) {
-    return this.groups.deleteUserServerGrant(userId, serverId, actor.id);
+  deleteServerGrant(
+    @Param('userId') userId: string,
+    @Param('serverId') serverId: string,
+    @CurrentActor() actor: Actor,
+  ) {
+    return this.grants.deleteServerGrant(actor, subject(userId), serverId);
   }
 
   @Get('storage-pool-grants')
   @RequireCaps(Capability.ManageGrants)
   listStoragePoolGrants(@Param('userId') userId: string) {
-    return this.groups.listUserStoragePoolGrants(userId);
+    return this.grants.listStoragePoolGrants(subject(userId));
   }
 
   @Put('storage-pool-grants/:poolId')
@@ -66,26 +67,30 @@ export class UserGrantsController {
     @Param('userId') userId: string,
     @Param('poolId') poolId: string,
     @Body() body: unknown,
-    @CurrentUser() actor: UserRecord,
+    @CurrentActor() actor: Actor,
   ) {
-    return this.groups.upsertUserStoragePoolGrant(
-      userId,
+    return this.grants.putStoragePoolGrant(
+      actor,
+      subject(userId),
       poolId,
       zPutStoragePoolGrantRequest.parse(body).expiresAt,
-      actor.id,
     );
   }
 
   @Delete('storage-pool-grants/:poolId')
   @RequireCaps(Capability.ManageGrants)
-  deleteStoragePoolGrant(@Param('userId') userId: string, @Param('poolId') poolId: string, @CurrentUser() actor: UserRecord) {
-    return this.groups.deleteUserStoragePoolGrant(userId, poolId, actor.id);
+  deleteStoragePoolGrant(
+    @Param('userId') userId: string,
+    @Param('poolId') poolId: string,
+    @CurrentActor() actor: Actor,
+  ) {
+    return this.grants.deleteStoragePoolGrant(actor, subject(userId), poolId);
   }
 
   @Get('shared-backend-grants')
   @RequireCaps(Capability.ManageGrants)
   listSharedBackendGrants(@Param('userId') userId: string) {
-    return this.groups.listUserSharedBackendGrants(userId);
+    return this.grants.listSharedBackendGrants(subject(userId));
   }
 
   @Put('shared-backend-grants/:backendId')
@@ -94,26 +99,30 @@ export class UserGrantsController {
     @Param('userId') userId: string,
     @Param('backendId') backendId: string,
     @Body() body: unknown,
-    @CurrentUser() actor: UserRecord,
+    @CurrentActor() actor: Actor,
   ) {
-    return this.groups.upsertUserSharedBackendGrant(
-      userId,
+    return this.grants.putSharedBackendGrant(
+      actor,
+      subject(userId),
       backendId,
       zPutSharedBackendGrantRequest.parse(body),
-      actor.id,
     );
   }
 
   @Delete('shared-backend-grants/:backendId')
   @RequireCaps(Capability.ManageGrants)
-  deleteSharedBackendGrant(@Param('userId') userId: string, @Param('backendId') backendId: string, @CurrentUser() actor: UserRecord) {
-    return this.groups.deleteUserSharedBackendGrant(userId, backendId, actor.id);
+  deleteSharedBackendGrant(
+    @Param('userId') userId: string,
+    @Param('backendId') backendId: string,
+    @CurrentActor() actor: Actor,
+  ) {
+    return this.grants.deleteSharedBackendGrant(actor, subject(userId), backendId);
   }
 
   @Get('effective-access')
   @RequireCaps(Capability.ManageGrants)
   async effectiveAccess(@Param('userId') userId: string): Promise<EffectiveAccessDto> {
-    await this.groups.assertUserScopeExists(userId);
+    await this.grants.assertSubjectExists(subject(userId));
     return {
       servers: await this.access.getEffectiveAccess(userId),
       sharedBackends: await this.access.getEffectiveSharedAccess(userId),

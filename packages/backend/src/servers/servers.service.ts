@@ -426,8 +426,20 @@ export class ServersService {
       });
     }
     await transaction
-      .deleteFrom('control.authorization_dependencies')
-      .where('server_id', '=', serverId)
+      .deleteFrom('control.access_lapses')
+      .where((expression) => expression.or([
+        expression.and([
+          expression('resource_kind', '=', 'server'),
+          expression('resource_id', '=', serverId),
+        ]),
+        expression.and([
+          expression('resource_kind', '=', 'storage_pool'),
+          expression('resource_id', 'in', transaction
+            .selectFrom('infra.storage_pools')
+            .select('id')
+            .where('server_id', '=', serverId)),
+        ]),
+      ]))
       .execute();
     await transaction.deleteFrom('iam.server_grants').where('server_id', '=', serverId).execute();
     await transaction
@@ -440,7 +452,6 @@ export class ServersService {
     await transaction.deleteFrom('infra.image_server_assignments').where('server_id', '=', serverId).execute();
     await transaction.deleteFrom('control.container_network_claims').where('server_id', '=', serverId).execute();
     await transaction.deleteFrom('infra.ip_pool_servers').where('server_id', '=', serverId).execute();
-    await transaction.deleteFrom('control.grant_expiry_enforcement').where('server_id', '=', serverId).execute();
     await transaction
       .updateTable('infra.servers')
       .set({ system_pool_id: null })

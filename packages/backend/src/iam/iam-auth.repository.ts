@@ -26,7 +26,6 @@ interface UserRow {
   display_name: string;
   status: string;
   auth_version: number;
-  authz_version: string;
   created_at: Date;
   updated_at: Date;
 }
@@ -143,7 +142,6 @@ export class IamAuthRepository implements AuthPersistence {
           'user.display_name',
           'user.status',
           'user.auth_version',
-          'user.authz_version',
           'user.created_at',
           'user.updated_at',
         ])
@@ -167,7 +165,6 @@ export class IamAuthRepository implements AuthPersistence {
             'user.display_name',
             'user.status',
             'user.auth_version',
-            'user.authz_version',
             'user.created_at',
             'user.updated_at',
           ])
@@ -272,7 +269,6 @@ export class IamAuthRepository implements AuthPersistence {
           'user.display_name',
           'user.status',
           'user.auth_version',
-          'user.authz_version',
           'user.created_at',
           'user.updated_at',
         ])
@@ -462,7 +458,6 @@ export class IamAuthRepository implements AuthPersistence {
       displayName: row.display_name,
       status: row.status as UserStatus,
       authVersion: row.auth_version,
-      authzVersion: String(row.authz_version),
       createdAt: row.created_at,
       updatedAt: row.updated_at,
     };

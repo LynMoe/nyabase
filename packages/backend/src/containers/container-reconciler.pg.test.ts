@@ -57,7 +57,6 @@ describePg('ContainerReconciler PostgreSQL status', () => {
         display_name: 'Busy Strike User',
         status: UserStatus.Active,
         auth_version: 1,
-        authz_version: 1,
       }).execute();
       await database.insertInto('infra.servers').values(serverValues(serverId, 'online')).execute();
       await database.insertInto('infra.storage_pools').values({

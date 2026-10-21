@@ -7,7 +7,6 @@ describe('ContainerSshConvergenceService', () => {
     const containerId = '11111111-1111-4111-8111-111111111111';
     const serverId = '22222222-2222-4222-8222-222222222222';
     const createPending = vi.fn().mockResolvedValue({ id: 'intent-1' });
-    const wake = vi.fn();
     const forUpdate = {
       executeTakeFirst: vi.fn().mockResolvedValue({
         id: containerId,
@@ -65,7 +64,6 @@ describe('ContainerSshConvergenceService', () => {
     const service = new ContainerSshConvergenceService(
       database as never,
       { createPending } as never,
-      { wake } as never,
     );
 
     await service.reconcileUser('33333333-3333-4333-8333-333333333333');
@@ -81,19 +79,12 @@ describe('ContainerSshConvergenceService', () => {
       }),
       transaction,
     );
-    expect(wake).toHaveBeenCalledWith(expect.objectContaining({
-      resourceType: IntentResourceType.Container,
-      resourceId: containerId,
-      serverId,
-      reason: 'intent',
-    }));
   });
 
   it('repair bumps revision instead of wake-only', async () => {
     const containerId = '11111111-1111-4111-8111-111111111111';
     const serverId = '22222222-2222-4222-8222-222222222222';
     const createPending = vi.fn().mockResolvedValue({ id: 'intent-2' });
-    const wake = vi.fn();
     const transaction = {
       selectFrom: vi.fn().mockReturnValue({
         select: vi.fn().mockReturnValue({
@@ -136,7 +127,6 @@ describe('ContainerSshConvergenceService', () => {
     const service = new ContainerSshConvergenceService(
       database as never,
       { createPending } as never,
-      { wake } as never,
     );
 
     await expect(service.repairContainer(containerId)).resolves.toEqual({ woken: true });
