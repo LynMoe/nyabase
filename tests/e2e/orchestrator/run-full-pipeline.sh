@@ -49,20 +49,6 @@ sleep 1
 echo "=== BUILD $(date -u +%FT%TZ) RUN=$RUN_ID base=${E2E_BASE_URL:-missing} ==="
 bash tests/e2e/orchestrator/e2e.sh build "$RUN_ID" full
 
-# Extra workers must trust the active CP client before seed assignment.
-if [[ -n "${E2E_DATABASE_URL:-}" && -n "${E2E_INCUS_KEY_ENCRYPTION_SECRET:-}" ]]; then
-  echo "=== PRE-UP WORKER RETRUST $(date -u +%FT%TZ) ==="
-  while read -r peer_id; do
-    [[ -z "$peer_id" ]] && continue
-    python3 "$ROOT/tests/e2e/orchestrator/peer-retrust-active.py" \
-      --database-url "$E2E_DATABASE_URL" \
-      --secret "$E2E_INCUS_KEY_ENCRYPTION_SECRET" \
-      --peer-server-id "$peer_id" \
-      || echo "WARN: retrust failed for $peer_id"
-  done < <(psql "$E2E_DATABASE_URL" -At -c \
-    "SELECT id FROM infra.servers WHERE api_endpoint NOT LIKE '%127.0.0.1%' ORDER BY slug;")
-fi
-
 echo "=== UP $(date -u +%FT%TZ) ==="
 bash tests/e2e/orchestrator/e2e.sh up "$RUN_ID" full
 RT="$ROOT/tests/e2e/.runtime/$RUN_ID"
@@ -70,26 +56,6 @@ set -a
 # shellcheck disable=SC1090
 source "$RT/context.env"
 set +a
-
-# Peer Incus can drift off the active CP client cert; re-admit it before the API run.
-if [[ -z "${E2E_GPU_PEER_SERVER_ID:-}" && -f "$RT/seed-state.json" ]]; then
-  E2E_GPU_PEER_SERVER_ID="$(python3 - <<PY
-import json
-from pathlib import Path
-data = json.loads(Path("$RT/seed-state.json").read_text())
-print((data.get("gpuServer") or {}).get("id") or "")
-PY
-)"
-  export E2E_GPU_PEER_SERVER_ID
-fi
-if [[ -n "${E2E_DATABASE_URL:-}" && -n "${E2E_INCUS_KEY_ENCRYPTION_SECRET:-}" && -n "${E2E_GPU_PEER_SERVER_ID:-}" ]]; then
-  echo "=== PEER RETRUST $(date -u +%FT%TZ) ==="
-  python3 "$ROOT/tests/e2e/orchestrator/peer-retrust-active.py" \
-    --database-url "$E2E_DATABASE_URL" \
-    --secret "$E2E_INCUS_KEY_ENCRYPTION_SECRET" \
-    --peer-server-id "$E2E_GPU_PEER_SERVER_ID" \
-    || echo "WARN: peer retrust failed; cert rotation may hang"
-fi
 
 echo "=== SSH PROXY ON INCUS HOST $(date -u +%FT%TZ) ==="
 # After the vmbr cutover the Incus host can TCP to guest :22.

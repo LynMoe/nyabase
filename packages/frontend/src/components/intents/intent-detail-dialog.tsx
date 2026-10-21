@@ -78,10 +78,6 @@ export function IntentResourceName({ intent }: { intent: IntentDto }) {
       return <ResourceRef kind="image" id={intentImageId(intent)} />;
     case IntentResourceType.Server:
       return <ResourceRef kind="server" id={intent.resourceId} />;
-    case IntentResourceType.CertificateRotation:
-      return intent.serverId
-        ? <ResourceRef kind="server" id={intent.serverId} />
-        : '—';
     default:
       return '—';
   }

@@ -2,7 +2,6 @@ import { randomUUID } from 'node:crypto';
 import { ConflictException } from '@nestjs/common';
 import { ServerStatus, UserStatus } from '@nyabase/common';
 import { describe, expect, it } from 'vitest';
-import { InfrastructureRepository } from '../infrastructure/infrastructure.repository.js';
 import type { NyabaseDatabase } from '../platform/persistence-pg/database.types.js';
 import { withPostgresTestDatabase } from '../platform/persistence-pg/postgres-test-harness.js';
 import { AccessRevocationGuardService } from './access-revocation-guard.service.js';
@@ -86,7 +85,7 @@ async function seedUser(database: import('kysely').Kysely<NyabaseDatabase>, user
 
 async function seedServer(database: import('kysely').Kysely<NyabaseDatabase>): Promise<string> {
   const id = randomUUID();
-  await new InfrastructureRepository(database).insertServer({
+  await database.insertInto('infra.servers').values({
     id,
     name: `Guard server ${id.slice(0, 8)}`,
     slug: `guard-${id.slice(0, 8)}`,
@@ -113,6 +112,6 @@ async function seedServer(database: import('kysely').Kysely<NyabaseDatabase>): P
     preflight_status: 'not_run',
     preflight_checked_at: null,
     preflight_report: null,
-  });
+  }).execute();
   return id;
 }

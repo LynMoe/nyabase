@@ -680,10 +680,6 @@ export class UsersService {
     }
   }
 
-  async getUserSshKeyTexts(userId: string): Promise<string[]> {
-    return (await this.listSshKeys(userId)).map((key) => key.keyText);
-  }
-
   async toDto(user: IamUser): Promise<UserDto> {
     const [capabilities, groups] = await Promise.all([
       this.accessResolver.userCapabilities(user.id),

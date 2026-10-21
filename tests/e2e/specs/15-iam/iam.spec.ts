@@ -248,7 +248,6 @@ test(
     const conflict = await adminApi.patch('/api/admin/system-settings', {
       data: {
         expectedRevision: settings.revision,
-        expectedSnapshotToken: settings.snapshotToken ?? settings.expectedSnapshotToken ?? '',
         values: { missing_key_for_boundary: true },
       },
     });

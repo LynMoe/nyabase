@@ -83,16 +83,6 @@ export class SshIdentityService {
     return this.withPrivateKey(winner);
   }
 
-  async getProxyHostKey(
-    executor: Kysely<NyabaseDatabase> | SshIdentityTransaction = this.database,
-  ): Promise<DecryptedSshProxyHostKey> {
-    const key = await this.selectHostKey(executor);
-    if (!key) {
-      throw new ConflictException('SSH proxy host key invariant is missing');
-    }
-    return this.withPrivateKey(key);
-  }
-
   async getProxyHostKeySummary(
     authorize?: (transaction: SshIdentityTransaction) => Promise<void>,
   ): Promise<{

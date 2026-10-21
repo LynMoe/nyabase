@@ -2,7 +2,6 @@ import { Module } from '@nestjs/common';
 import { ContainersModule } from '../containers/containers.module.js';
 import { ProxySnapshotNotifierModule } from '../proxy-snapshots/proxy-snapshot-notifier.module.js';
 import { AdminSshProxyController } from './admin-ssh-proxy.controller.js';
-import { ContainerSshRouteService } from './container-ssh-route.service.js';
 import { SshIdentityService } from './ssh-identity.service.js';
 import { SshKeyCryptoService } from './ssh-key-crypto.service.js';
 import { SshKeygenService } from './ssh-keygen.service.js';
@@ -17,14 +16,12 @@ import { SshProxySnapshotService } from './ssh-proxy-snapshot.service.js';
     SshKeygenService,
     SshProxyGateway,
     SshProxySnapshotService,
-    ContainerSshRouteService,
   ],
   controllers: [AdminSshProxyController],
   exports: [
     SshIdentityService,
     SshProxyGateway,
     SshProxySnapshotService,
-    ContainerSshRouteService,
     SshKeyCryptoService,
     SshKeygenService,
   ],

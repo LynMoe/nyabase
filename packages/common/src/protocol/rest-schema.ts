@@ -1,10 +1,6 @@
 import { z } from 'zod';
 import {
   Capability,
-  CertificateRotationStatus,
-  CertificateState,
-  CertificateTrustState,
-  ContainerPhase,
   ContainerPowerIntent,
   FailureCode,
   IntentKind,
@@ -12,10 +8,6 @@ import {
   IntentStatus,
   NodeMetricsStatus,
   PreflightStatus,
-  ResourceLifecyclePhase,
-  ServerStatus,
-  StoragePoolDriver,
-  StoragePoolResizeFamily,
   UserStatus,
 } from '../enums.js';
 import {
@@ -51,26 +43,8 @@ const LOGIN_USER_RE = /^[a-z_][a-z0-9_-]{0,31}$/;
 const SHA256_RE = /^[0-9a-f]{64}$/;
 const FINGERPRINT_RE = /^[0-9A-Fa-f:]{32,95}$/;
 
-export const zUserStatus = z.nativeEnum(UserStatus);
-export const zServerStatus = z.nativeEnum(ServerStatus);
-export const zContainerPhase = z.nativeEnum(ContainerPhase);
-export const zContainerPowerIntent = z.nativeEnum(ContainerPowerIntent);
-export const zIntentStatus = z.nativeEnum(IntentStatus);
-export const zIntentKind = z.nativeEnum(IntentKind);
-export const zIntentResourceType = z.nativeEnum(IntentResourceType);
-export const zResourceLifecyclePhase = z.nativeEnum(ResourceLifecyclePhase);
-export const zNodeMetricsStatus = z.nativeEnum(NodeMetricsStatus);
-export const zPreflightStatus = z.nativeEnum(PreflightStatus);
-export const zCertificateState = z.nativeEnum(CertificateState);
-export const zCertificateTrustState = z.nativeEnum(CertificateTrustState);
-export const zCertificateRotationStatus = z.nativeEnum(CertificateRotationStatus);
-export const zStoragePoolDriver = z.nativeEnum(StoragePoolDriver);
-export const zStoragePoolResizeFamily = z.nativeEnum(StoragePoolResizeFamily);
 export const zCapability = z.nativeEnum(Capability);
-export const zFailureCode = z.nativeEnum(FailureCode);
-
 export const zExpectedRevision = z.number().int().positive().safe();
-export const zConfigSnapshotToken = z.string().length(64).regex(SHA256_RE);
 export const zResourceIdentity = z.string()
   .min(1)
   .max(128)
@@ -354,32 +328,6 @@ export const zDiscoverSharedExecutorsRequest = z.object({
   serverId: zUuid.optional(),
 }).strict();
 
-export const zStorageDiscoverIssueDto = z.object({
-  code: z.enum([
-    FailureCode.SharedBackendIdentityConflict,
-    FailureCode.StoragePoolInUse,
-    FailureCode.ServerUnreachable,
-  ]),
-  message: z.string(),
-  identityKey: z.string().nullable(),
-  expectedFsid: z.string().nullable(),
-  discoveredFsid: z.string().nullable(),
-  existingIdentityKey: z.string().nullable(),
-  serverId: z.string().nullable(),
-  incusName: z.string().nullable(),
-  poolId: z.string().nullable(),
-}).strict();
-
-export const zStoragePoolDiscoverResult = z.object({
-  pools: z.array(z.record(z.unknown())),
-  identityConflicts: z.array(zStorageDiscoverIssueDto),
-}).strict();
-
-export const zSharedBackendExecutorDiscoverResult = z.object({
-  executors: z.array(z.record(z.unknown())),
-  identityConflicts: z.array(zStorageDiscoverIssueDto),
-}).strict();
-
 export const zCreateSharedBackendRequest = z.object({
   name: zName,
   displayName: zOptionalText(128),
@@ -599,7 +547,7 @@ export const zPutSharedBackendGrantRequest = z.object({
   expiresAt: zIsoDateTime.nullable(),
 }).strict();
 
-// Intents, errors, certificates, and preflight reports.
+// Intents, errors, and preflight reports.
 export const zIntentListQuery = z.object({
   scope: zListScope,
   limit: z.coerce.number().int().min(1).max(ADMIN_INTENT_LIST_MAX).optional(),
@@ -632,14 +580,6 @@ export const zNodeMetricsHealth = z.object({
   outageSince: zIsoDateTime.nullable(),
   lastError: z.string().max(4_096).nullable(),
 }).strict();
-export const zNodeMetricsHealthDto = zNodeMetricsHealth;
-
-export const zIntentFailureDto = z.object({
-  code: z.string().min(1).max(128),
-  message: z.string().min(1).max(4_096),
-  details: z.record(z.unknown()),
-}).strict();
-
 export const zIntentAcceptedDto = z.object({
   intentId: zResourceIdentity,
   resourceType: z.nativeEnum(IntentResourceType),
@@ -648,30 +588,6 @@ export const zIntentAcceptedDto = z.object({
   targetRevision: zExpectedRevision,
   status: z.literal(IntentStatus.Pending),
   createdAt: zIsoDateTime,
-}).strict();
-
-export const zIntentBatchAcceptedDto = z.object({
-  intents: z.array(zIntentAcceptedDto),
-}).strict();
-
-export const zIntentDto = z.object({
-  id: zResourceIdentity,
-  kind: z.nativeEnum(IntentKind),
-  resourceType: z.nativeEnum(IntentResourceType),
-  resourceId: zResourceIdentity,
-  serverId: zResourceIdentity.nullable(),
-  requestedBy: zResourceIdentity.nullable(),
-  requestSummary: z.record(z.unknown()),
-  targetRevision: zExpectedRevision,
-  baseline: z.record(z.unknown()).nullable(),
-  status: z.nativeEnum(IntentStatus),
-  failureCode: z.string().max(128).nullable(),
-  failure: zIntentFailureDto.nullable(),
-  attemptCount: z.number().int().nonnegative().safe(),
-  nextAttemptAt: zIsoDateTime.nullable(),
-  createdAt: zIsoDateTime,
-  settledAt: zIsoDateTime.nullable(),
-  blockedByIntentId: zResourceIdentity.nullable().optional(),
 }).strict();
 
 export const zPreflightReport = z.object({
@@ -702,34 +618,6 @@ export const zPreflightReport = z.object({
     });
   }
 });
-
-export const zCertificateTrust = z.object({
-  serverId: zResourceIdentity,
-  trustState: z.nativeEnum(CertificateTrustState),
-  observedAt: zIsoDateTime.nullable(),
-  lastError: z.string().max(4_096).nullable(),
-}).strict();
-
-export const zIncusClientCertificateDto = z.object({
-  generation: z.number().int().positive().safe(),
-  fingerprint: zServerCertFingerprint,
-  notBefore: zIsoDateTime,
-  notAfter: zIsoDateTime,
-  state: z.nativeEnum(CertificateState),
-  servers: z.array(zCertificateTrust),
-}).strict();
-
-export const zRotateIncusClientCertificateRequest = z.object({
-  expectedGeneration: zExpectedRevision,
-}).strict();
-
-export const zCertificateRotationDto = z.object({
-  rotationId: zResourceIdentity,
-  generation: z.number().int().positive().safe(),
-  status: z.nativeEnum(CertificateRotationStatus),
-  certificate: zIncusClientCertificateDto,
-  failureCode: z.string().max(128).nullable(),
-}).strict();
 
 export const zErrorResponse = z.object({
   statusCode: z.number().int().min(400).max(599),
@@ -780,7 +668,6 @@ export const zAddGroupMemberRequest = z.object({
 
 export const zPatchSystemSettingsRequest = z.object({
   expectedRevision: zExpectedRevision,
-  expectedSnapshotToken: zConfigSnapshotToken,
   values: z.record(z.unknown())
     .refine((values) => Object.keys(values).length > 0, 'At least one setting is required')
     .refine((values) => Object.keys(values).length <= 64, 'At most 64 settings may be updated at once'),
@@ -812,7 +699,6 @@ export type VolumeScope = z.infer<typeof zVolumeScope>;
 export type CreateVolumeRequest = z.infer<typeof zCreateVolumeRequest>;
 export type CreateSharedVolumeRequest = z.infer<typeof zCreateSharedVolumeRequest>;
 export type ListSharedVolumesQuery = z.infer<typeof zListSharedVolumesQuery>;
-export type ListVolumesQuery = z.infer<typeof zListVolumesQuery>;
 export type PatchVolumeRequest = z.infer<typeof zPatchVolumeRequest>;
 export type AttachVolumeRequest = z.infer<typeof zAttachVolumeRequest>;
 export type CreateContainerRequest = z.infer<typeof zCreateContainerRequest>;
@@ -831,8 +717,6 @@ export type ListScope = z.infer<typeof zListScope>;
 export type RetryIntentRequest = z.infer<typeof zRetryIntentRequest>;
 export type NodeMetricsHealth = z.infer<typeof zNodeMetricsHealth>;
 export type PreflightReport = z.infer<typeof zPreflightReport>;
-export type CertificateTrust = z.infer<typeof zCertificateTrust>;
-export type RotateIncusClientCertificateRequest = z.infer<typeof zRotateIncusClientCertificateRequest>;
 export type ErrorResponse = z.infer<typeof zErrorResponse>;
 export type CreateGroupRequest = z.infer<typeof zCreateGroupRequest>;
 export type UpdateGroupRequest = z.infer<typeof zUpdateGroupRequest>;

@@ -5,7 +5,6 @@ import { ContainerReconciler } from './containers/container-reconciler.service.j
 import { ContainersModule } from './containers/containers.module.js';
 import { ImageAssignmentReconciler } from './images/image-assignment-reconciler.service.js';
 import { ImagesModule } from './images/images.module.js';
-import { CertificateRotationReconciler } from './servers/certificate-rotation-reconciler.service.js';
 import { ServerHealthService } from './servers/server-health.service.js';
 import { ServerPreflightReconciler } from './servers/server-preflight-reconciler.service.js';
 import { ServersModule } from './servers/servers.module.js';
@@ -96,7 +95,6 @@ describe('domain reconciler registration', () => {
     ['VolumesModule', VolumesModule, VolumeReconciler],
     ['ImagesModule', ImagesModule, ImageAssignmentReconciler],
     ['ServersModule', ServersModule, ServerPreflightReconciler],
-    ['ServersModule', ServersModule, CertificateRotationReconciler],
     ['ServersModule', ServersModule, ServerHealthService],
   ])('%s provides %s', (_name, module, provider) => {
     expect(providersOf(module)).toContain(provider);

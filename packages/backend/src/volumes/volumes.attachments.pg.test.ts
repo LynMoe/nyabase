@@ -461,7 +461,7 @@ describePg('volume attachment ownership, visibility, and drain guards', () => {
     });
   });
 
-  it('attaches a shared volume without blocked_by ensure and keeps the placement row after detach', async () => {
+  it('attaches a shared volume without a volume.ensure and keeps the placement row after detach', async () => {
     await withPostgresTestDatabase(async ({ database }) => {
       const userId = randomUUID();
       const serverId = randomUUID();
@@ -539,7 +539,7 @@ describePg('volume attachment ownership, visibility, and drain guards', () => {
         .selectAll()
         .where('id', '=', accepted.intentId)
         .executeTakeFirstOrThrow();
-      expect(update.blocked_by_intent_id).toBeNull();
+      expect(update.kind).toBe('container.update');
       expect(await database.selectFrom('control.intents')
         .select('id')
         .where('kind', '=', 'volume.ensure')

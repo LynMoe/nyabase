@@ -53,11 +53,3 @@ export function SectionCard({
     </Card>
   );
 }
-
-export function MetaChip({ children }: { children: React.ReactNode }) {
-  return (
-    <span className="inline-flex items-center rounded-md border bg-muted/40 px-2.5 py-1 text-sm text-muted-foreground">
-      {children}
-    </span>
-  );
-}

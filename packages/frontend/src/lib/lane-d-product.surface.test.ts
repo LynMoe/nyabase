@@ -12,16 +12,13 @@ function read(rel: string): string {
 }
 
 describe('lane D product UI copy', () => {
-  it('gates pool register and cert rotate without expanding Operator caps', () => {
+  it('gates pool register without expanding Operator caps', () => {
     const src = [
       read('pages/server-detail-page.tsx'),
       read('components/servers/pools-card.tsx'),
-      read('components/servers/certificate-card.tsx'),
     ].join('\n');
     expect(src).toMatch(/ManageStoragePools/);
-    expect(src).toMatch(/ManageCertificates/);
     expect(src).toMatch(/可以查看存储池，但登记、取消登记与编辑备注需要「管理存储池」权限/);
-    expect(src).toMatch(/可以查看证书状态，但轮换需要「管理证书」权限/);
     expect(src).toMatch(/更改系统盘池只影响之后新建的容器，不会改动已有容器/);
     expect(read('components/servers/pools-card.tsx')).toMatch(/位置/);
     expect(read('components/servers/pools-card.tsx')).toMatch(/备注/);
@@ -33,8 +30,6 @@ describe('lane D product UI copy', () => {
     expect(read('components/servers/pools-card.tsx')).not.toMatch(/config\.source/);
     expect(read('components/servers/pools-card.tsx')).not.toMatch(/cephfs\.path/);
     expect(read('components/servers/pools-card.tsx')).not.toMatch(/@nyabase\/nvidia-gpu/);
-    expect(src).toMatch(/信任新证书/);
-    expect(src).toMatch(/撤销旧证书/);
   });
 
   it('renders GPU support checks on the server GPU tab', () => {
@@ -85,14 +80,10 @@ describe('lane D product UI copy', () => {
     expect(volumes).not.toMatch(/volumeAttachments\(/);
     expect(page).toMatch(/volume-server-table/);
     expect(page).not.toMatch(/\/admin\//);
-    const layout = read('components/layout/app-layout.tsx');
-    const banner = read('components/layout/cert-expiry-banner.tsx');
-    expect(layout).toMatch(/CertExpiryBanner/);
-    expect(layout).toMatch(/ManageCertificates/);
-    expect(banner).toMatch(/cert-expiry-banner/);
-    expect(banner).toMatch(/certExpiryBannerText/);
-    expect(banner).toMatch(/去轮换/);
-    expect(banner).toMatch(/client-certificate/);
+    const identity = read('components/servers/client-identity-card.tsx');
+    expect(identity).toMatch(/\/admin\/system-settings\/incus-client-identity/);
+    expect(identity).not.toMatch(/rotate|轮换/);
+    expect(read('components/layout/app-layout.tsx')).not.toMatch(/Cert/);
   });
 
   it('console waits for protocol ready/error instead of websocket open', () => {
@@ -303,9 +294,8 @@ describe('lane D product UI copy', () => {
 
   it('renders grant quotas as one scroll with nested pools and GPU summaries', () => {
     const grants = read('components/grants/canonical-grant-panel.tsx');
-    const summary = read('components/grants/subject-grant-summary.tsx');
     const quota = read('lib/grant-quota.ts');
-    const coreGrant = [grants, summary, quota].join('\n');
+    const coreGrant = [grants, quota].join('\n');
     expect(grants).not.toMatch(/\bTabs(Trigger|List|Content)?\b/);
     expect(grants).not.toMatch(/from '\.\.\/ui\/tabs/);
     expect(grants).toMatch(/formatGrantQuotaLine/);
@@ -327,26 +317,21 @@ describe('lane D product UI copy', () => {
     expect(grants).not.toMatch(/\btoolbar=/);
     expect(grants).not.toMatch(/aria-expanded/);
     expect(grants).not.toMatch(/isLocalStoragePool/);
-    expect(summary).toMatch(/formatGrantQuotaLine/);
-    expect(summary).toMatch(/formatGpuGrantSummary/);
-    expect(summary).toMatch(/池：/);
-    expect(summary).toMatch(/存储池 /);
     expect(quota).toMatch(/formatConsumedQuotaParts/);
     expect(coreGrant).not.toMatch(/nvidia-gpu/);
     expect(coreGrant).not.toMatch(/pciAddresses/);
     expect(coreGrant).not.toMatch(/GpuGrantMode/);
   });
 
-  it('gates /ops with the six admin intent capabilities and does not expand Operators', () => {
+  it('gates /ops with the five admin intent capabilities and does not expand Operators', () => {
     expect([...ADMIN_INTENT_CAPABILITIES]).toEqual([
       Capability.ManageContainersAny,
       Capability.ManageVolumes,
       Capability.ManageSharedVolumes,
       Capability.ManageServers,
       Capability.ManageImages,
-      Capability.ManageCertificates,
     ]);
-    expect(ADMIN_INTENT_CAPABILITIES).toHaveLength(6);
+    expect(ADMIN_INTENT_CAPABILITIES).toHaveLength(5);
     const nav = read('lib/navigation.ts');
     expect(nav).toMatch(/to: '\/ops'/);
     expect(nav).toMatch(/操作记录/);

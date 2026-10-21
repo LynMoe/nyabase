@@ -1,6 +1,3 @@
-/** Incus GET /1.0/resources metadata. Parsed inside the gpu feature. */
-export type IncusResourcesMetadata = unknown;
-
 export interface GpuClaimsPort {
   /** Replace this container's claimed PCI addresses (container-scoped ports only). */
   replace(pciAddresses: readonly string[]): Promise<void>;

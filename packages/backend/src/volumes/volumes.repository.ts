@@ -14,17 +14,6 @@ export class VolumesRepository {
     private readonly database: Kysely<NyabaseDatabase>,
   ) {}
 
-  async findOwnership(
-    volumeId: string,
-    executor: VolumeExecutor = this.database,
-  ): Promise<{ ownerId: string; shared: boolean } | null> {
-    const row = await executor.selectFrom('control.volumes')
-      .select(['owner_id', 'shared_backend_id'])
-      .where('id', '=', volumeId)
-      .executeTakeFirst();
-    return row ? { ownerId: row.owner_id, shared: row.shared_backend_id !== null } : null;
-  }
-
   list(ownerId?: string, executor: VolumeExecutor = this.database) {
     let query = executor.selectFrom('control.volumes').selectAll().orderBy('created_at', 'desc');
     if (ownerId) query = query.where('owner_id', '=', ownerId);
@@ -125,14 +114,6 @@ export class VolumesRepository {
     return query.execute();
   }
 
-  findAttachment(id: string, executor: VolumeExecutor = this.database) {
-    return executor
-      .selectFrom('control.volume_attachments')
-      .selectAll()
-      .where('id', '=', id)
-      .executeTakeFirst();
-  }
-
   insertAttachment(input: {
     id: string;
     containerId: string;
@@ -170,14 +151,6 @@ export class VolumesRepository {
       .executeTakeFirst();
   }
 
-  deleteAttachment(id: string, executor: VolumeExecutor) {
-    return executor
-      .deleteFrom('control.volume_attachments')
-      .where('id', '=', id)
-      .returningAll()
-      .executeTakeFirst();
-  }
-
   async hasAttachments(volumeId: string, executor: VolumeExecutor = this.database) {
     const row = await executor.selectFrom('control.volume_attachments')
       .select('id')
@@ -191,13 +164,6 @@ export class VolumesRepository {
     return executor.selectFrom('control.volume_placements')
       .selectAll()
       .where('volume_id', '=', volumeId)
-      .execute();
-  }
-
-  listPlacementsOnServer(serverId: string, executor: VolumeExecutor = this.database) {
-    return executor.selectFrom('control.volume_placements')
-      .selectAll()
-      .where('server_id', '=', serverId)
       .execute();
   }
 
@@ -235,40 +201,6 @@ export class VolumesRepository {
         .doUpdateSet({
           pool_id: input.poolId,
         }))
-      .execute();
-  }
-
-  async setCatalogState(
-    volumeId: string,
-    serverId: string,
-    catalogState: VolumeCatalogState,
-    executor: VolumeExecutor,
-  ): Promise<void> {
-    await executor.updateTable('control.volume_placements')
-      .set({ catalog_state: catalogState })
-      .where('volume_id', '=', volumeId)
-      .where('server_id', '=', serverId)
-      .execute();
-  }
-
-  async writePlacementObserved(
-    input: {
-      volumeId: string;
-      serverId: string;
-      catalogState: VolumeCatalogState;
-      observedRevision?: number | null;
-    },
-    executor: VolumeExecutor = this.database,
-  ): Promise<void> {
-    await executor.updateTable('control.volume_placements')
-      .set({
-        catalog_state: input.catalogState,
-        ...(input.observedRevision === undefined
-          ? {}
-          : { observed_revision: input.observedRevision }),
-      })
-      .where('volume_id', '=', input.volumeId)
-      .where('server_id', '=', input.serverId)
       .execute();
   }
 

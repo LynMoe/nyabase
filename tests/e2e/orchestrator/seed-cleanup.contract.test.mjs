@@ -471,79 +471,37 @@ test('storage-pool registration re-reads after a revision conflict and avoids du
   assert.deepEqual(result, [current]);
 });
 
-test('up preserves the trusted bootstrap identity before backend startup', () => {
-  const upSource = readFileSync(join(import.meta.dirname, 'up.sh'), 'utf8');
-  assert.match(upSource, /bootstrap_client_cert="\$E2E_INCUS_CLIENT_CERT"/);
-  assert.match(upSource, /bootstrap_client_key="\$E2E_INCUS_CLIENT_KEY"/);
-  assert.match(upSource, /export E2E_INCUS_CONNECT_CLIENT_CERT="\$\{connect_client_paths\[0\]\}"/);
-  assert.match(upSource, /export E2E_INCUS_CONNECT_CLIENT_KEY="\$\{connect_client_paths\[1\]\}"/);
-  assert.doesNotMatch(upSource, /export E2E_INCUS_CLIENT_CERT="\$\{connect_client_paths/);
-  assert.doesNotMatch(upSource, /export E2E_INCUS_CLIENT_KEY="\$\{connect_client_paths/);
-  const connectAssignment = upSource.indexOf('export E2E_INCUS_CONNECT_CLIENT_CERT=');
-  const backendStartup = upSource.lastIndexOf('export_control_plane_environment "$profile"');
-  assert.ok(connectAssignment >= 0 && connectAssignment < backendStartup);
+test('the backend generates its own Incus client identity instead of receiving one', () => {
+  const dir = import.meta.dirname;
+  for (const file of ['up.sh', 'common.sh', 'seed.mjs']) {
+    const source = readFileSync(join(dir, file), 'utf8');
+    assert.doesNotMatch(source, /INCUS_CLIENT_(CERT|KEY)_(FILE|PEM)=/, file);
+    assert.doesNotMatch(source, /E2E_INCUS_CONNECT_CLIENT/, file);
+    assert.doesNotMatch(source, /incus_client_certificate/, file);
+  }
 });
 
-test('seed scopes the disposable certificate to the active fixture', () => {
-  const seedSource = readFileSync(join(import.meta.dirname, 'seed.mjs'), 'utf8');
-  assert.match(seedSource, /'E2E_INCUS_CONNECT_CLIENT_CERT'/);
-  assert.match(seedSource, /'E2E_INCUS_CONNECT_CLIENT_KEY'/);
-  assert.match(
-    seedSource,
-    /const connectCertificatePem = readRegularFile\('E2E_INCUS_CONNECT_CLIENT_CERT'\)/,
-  );
-  assert.match(
-    seedSource,
-    /const connectMetadata = certificateMetadata\(\s*connectCertificatePem,\s*connectPrivateKeyPem\s*\)/,
-  );
-  assert.match(
-    seedSource,
-    /installCertificateFixture\(\s*connectCertificatePem,\s*connectPrivateKeyPem,\s*connectMetadata,\s*'pending',\s*\)/,
-  );
-});
-
-test('seed cuts over to the disposable identity before its single connect intent', () => {
+test('seed registers, connects once with the trust token, and then reads the generated identity', () => {
   const seedSource = readFileSync(join(import.meta.dirname, 'seed.mjs'), 'utf8');
   assert.match(seedSource, /const bootstrapIncusTls = \{/);
   assert.match(seedSource, /\.\.\.bootstrapIncusTls,/);
-  const firstConnect = seedSource.indexOf('const connectResult =');
-  const bootstrapFixture = seedSource.indexOf(
-    'installCertificateFixture(\n  bootstrapCertificatePem,',
-  );
   const identityQuery = seedSource.indexOf(
     'const actualServerName = await resolveIncusServerName(incusRequest);',
   );
   const registration = seedSource.indexOf(
     'const registration = createServerRegistrationConfig(process.env, runId, actualServerName);',
   );
-  const finalFixture = seedSource.indexOf('installCertificateFixture(\n  connectCertificatePem,');
+  const firstConnect = seedSource.indexOf('const connectResult =');
+  const generatedIdentity = seedSource.indexOf('/api/admin/system-settings/incus-client-identity');
   const discovery = seedSource.indexOf(
     'await discoverStoragePools(jsonRequest, server.id, token);',
   );
   const pools = seedSource.indexOf('const pools = validateStoragePoolDtos(');
   const preflight = seedSource.indexOf('const preflight = await ensurePreflight');
-  assert.ok(bootstrapFixture >= 0 && bootstrapFixture < firstConnect);
-  assert.ok(bootstrapFixture < identityQuery && identityQuery < registration);
-  assert.ok(finalFixture > bootstrapFixture && finalFixture < firstConnect);
-  assert.match(seedSource, /bootstrapMetadata,\s*'verified',\s*\)/);
-  assert.match(seedSource, /connectMetadata,\s*'pending',\s*\)/);
+  assert.ok(identityQuery >= 0 && identityQuery < registration && registration < firstConnect);
+  assert.ok(firstConnect < generatedIdentity);
   assert.ok(firstConnect < discovery && discovery < pools && pools < preflight);
   assert.equal((seedSource.match(/const connectResult =/g) ?? []).length, 1);
-  assert.doesNotMatch(
-    seedSource,
-    /first connect intent runs with the trusted bootstrap certificate/,
-  );
-});
-
-test('run-owned disposable certificate material is validated and cleaned', () => {
-  const commonSource = readFileSync(join(import.meta.dirname, 'common.sh'), 'utf8');
-  const downSource = readFileSync(join(import.meta.dirname, 'down.sh'), 'utf8');
-  assert.match(commonSource, /cleanup_run_owned_incus_connect_client\(\)/);
-  assert.match(commonSource, /Incus connect certificate is not owned by this run/);
-  assert.match(
-    downSource,
-    /cleanup_run_owned_incus_connect_client "\$E2E_RUNTIME_ROOT" "\$run_id"/,
-  );
 });
 
 function registrationEnv(overrides = {}) {

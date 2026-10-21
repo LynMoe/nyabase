@@ -22,7 +22,6 @@ const capabilityInputs: Partial<Record<TopologyCapability, string[]>> = {
     'E2E_INCUS_CA_FILE',
   ],
   'trust-token-onboarding': ['E2E_INCUS_TRUST_TOKEN'],
-  'certificate-rotation': ['E2E_EDGE_CA_FILE'],
   'storage-dir-quota-online': ['E2E_INCUS_DIR_POOL'],
   'storage-lvm-block-backed': ['E2E_INCUS_LVM_POOL'],
   'lan-bridge': [
@@ -66,7 +65,6 @@ const capabilityDetails: Record<TopologyCapability, string> = {
   postgresql: 'E2E_DATABASE_URL and a healthy PostgreSQL endpoint are required',
   'incus-https-mtls': 'Incus HTTPS, the server fingerprint, and the client certificate/key are required',
   'trust-token-onboarding': 'A one-use Incus trust token must be supplied only at onboarding time',
-  'certificate-rotation': 'The edge CA and the rotation endpoint must be configured',
   'storage-dir-quota-online': 'A verified dir pool with quota= true and online resize is required',
   'storage-lvm-block-backed': 'A verified LVM pool with block-backed volumes is required',
   'lan-bridge': 'The unmanaged LAN bridge (vmbr) and LAN subnet must be verified',

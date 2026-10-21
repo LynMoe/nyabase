@@ -41,8 +41,6 @@ function typeCapability(resourceType: IntentRecord['resourceType']): Capability 
       return Capability.ManageServers;
     case IntentResourceType.ImageAssignment:
       return Capability.ManageImages;
-    case IntentResourceType.CertificateRotation:
-      return Capability.ManageCertificates;
     default:
       return null;
   }

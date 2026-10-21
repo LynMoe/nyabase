@@ -56,10 +56,6 @@ function readConfigFile(path: string): { raw: string | null; identity: ConfigFil
   }
 }
 
-export function readConfigFileIdentity(path: string): ConfigFileIdentity {
-  return readConfigFile(path).identity;
-}
-
 function parseYamlFile(path: string, raw: string | null): Record<string, unknown> {
   if (raw === null) return {};
   if (!raw.trim()) return {};

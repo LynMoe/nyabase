@@ -362,34 +362,6 @@ export const controlPlaneConfigDefinitions = [
     description: 'HTTPS simplestreams source used for managed image pulls. Empty falls back to the preflight source.',
   }),
   field({
-    key: 'incus.clientCertificateFile',
-    yamlPath: 'incus.clientCertificateFile',
-    env: 'INCUS_CLIENT_CERT_FILE',
-    defaultValue: '/run/secrets/incus_client_cert',
-    schema: nonEmptyString.max(4_096),
-    valueKind: 'string',
-    secret: false,
-    editable: false,
-    restartRequired: true,
-    public: false,
-    label: 'Incus client certificate file',
-    description: 'Read-only PEM file injected into the backend for Incus mTLS bootstrap.',
-  }),
-  field({
-    key: 'incus.clientPrivateKeyFile',
-    yamlPath: 'incus.clientPrivateKeyFile',
-    env: 'INCUS_CLIENT_KEY_FILE',
-    defaultValue: '/run/secrets/incus_client_key',
-    schema: nonEmptyString.max(4_096),
-    valueKind: 'string',
-    secret: false,
-    editable: false,
-    restartRequired: true,
-    public: false,
-    label: 'Incus client private key file',
-    description: 'Read-only PEM file injected into the backend for first-time Incus mTLS bootstrap.',
-  }),
-  field({
     key: 'incus.caFile',
     yamlPath: 'incus.caFile',
     env: 'INCUS_CA_FILE',
@@ -402,34 +374,6 @@ export const controlPlaneConfigDefinitions = [
     public: false,
     label: 'Incus server CA file',
     description: 'PEM CA bundle or self-signed Incus server certificate used with TLS verification.',
-  }),
-  field({
-    key: 'incus.clientCertificatePem',
-    yamlPath: 'incus.clientCertificatePem',
-    env: 'INCUS_CLIENT_CERT_PEM',
-    defaultValue: '',
-    schema: optionalString.max(128 * 1024),
-    valueKind: 'string',
-    secret: true,
-    editable: false,
-    restartRequired: true,
-    public: false,
-    label: 'Incus client certificate PEM',
-    description: 'Optional inline bootstrap certificate; the injected file remains the deployment default.',
-  }),
-  field({
-    key: 'incus.clientPrivateKeyPem',
-    yamlPath: 'incus.clientPrivateKeyPem',
-    env: 'INCUS_CLIENT_KEY_PEM',
-    defaultValue: '',
-    schema: optionalString.max(128 * 1024),
-    valueKind: 'string',
-    secret: true,
-    editable: false,
-    restartRequired: true,
-    public: false,
-    label: 'Incus client private key PEM',
-    description: 'Optional inline bootstrap private key; the injected file remains the deployment default.',
   }),
   field({
     key: 'incus.caPem',
@@ -689,8 +633,6 @@ export const controlPlaneConfigDefinitions = [
 
 export type ControlPlaneConfigDefinition = (typeof controlPlaneConfigDefinitions)[number];
 export type ControlPlaneConfigKey = ControlPlaneConfigDefinition['key'];
-export type ControlPlaneConfigValue = z.infer<ControlPlaneConfigDefinition['schema']>;
-
 export const controlPlaneConfigManifest = controlPlaneConfigDefinitions.map((definition) => ({
   key: definition.key,
   yamlPath: definition.yamlPath,

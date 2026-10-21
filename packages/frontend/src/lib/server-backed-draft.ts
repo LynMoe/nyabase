@@ -10,7 +10,6 @@ export interface ServerBackedDraft<T extends object> {
  * merge effect may not have run yet. */
 export interface RevisionedServerBackedDraft<T extends object> extends ServerBackedDraft<T> {
   revision: number;
-  snapshotToken: string | null;
 }
 
 function sameValue(left: unknown, right: unknown): boolean {
@@ -35,9 +34,8 @@ export function createServerBackedDraft<T extends object>(
 export function createRevisionedServerBackedDraft<T extends object>(
   serverValues: T,
   revision: number,
-  snapshotToken: string | null = null,
 ): RevisionedServerBackedDraft<T> {
-  return { ...createServerBackedDraft(serverValues), revision, snapshotToken };
+  return { ...createServerBackedDraft(serverValues), revision };
 }
 
 export function editServerBackedDraft<T extends object, K extends keyof T>(
@@ -65,7 +63,6 @@ export function editRevisionedServerBackedDraft<T extends object, K extends keyo
   return {
     ...editServerBackedDraft(draft, field, value),
     revision: draft.revision,
-    snapshotToken: draft.snapshotToken,
   };
 }
 
@@ -103,13 +100,11 @@ export function mergeRevisionedServerBackedDraft<T extends object>(
   draft: RevisionedServerBackedDraft<T>,
   incoming: T,
   incomingRevision: number,
-  incomingSnapshotToken: string | null = draft.snapshotToken,
 ): RevisionedServerBackedDraft<T> {
   if (incomingRevision < draft.revision) return draft;
   return {
     ...mergeServerBackedDraft(draft, incoming),
     revision: incomingRevision,
-    snapshotToken: incomingSnapshotToken,
   };
 }
 
@@ -121,12 +116,10 @@ export function mergeAuthoritativeRevisionedServerBackedDraft<T extends object>(
   draft: RevisionedServerBackedDraft<T>,
   incoming: T,
   incomingRevision: number,
-  incomingSnapshotToken: string | null = draft.snapshotToken,
 ): RevisionedServerBackedDraft<T> {
   return {
     ...mergeServerBackedDraft(draft, incoming),
     revision: incomingRevision,
-    snapshotToken: incomingSnapshotToken,
   };
 }
 
@@ -152,6 +145,5 @@ export function resolveRevisionedDraftConflicts<T extends object>(
   return {
     ...resolveDraftConflicts(draft, resolution),
     revision: draft.revision,
-    snapshotToken: draft.snapshotToken,
   };
 }

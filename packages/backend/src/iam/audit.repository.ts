@@ -1,7 +1,6 @@
 import { Inject, Injectable } from '@nestjs/common';
 import type {
   Kysely,
-  RawBuilder,
   Selectable,
   Transaction,
 } from 'kysely';
@@ -83,23 +82,6 @@ export class AuditRepository {
     executor: AuditExecutor,
     event: AppendAuditEvent,
   ): Promise<AuditEvent> {
-    return this.insert(executor, event, sql<Date>`clock_timestamp()`);
-  }
-
-  /** Test-only deterministic clock override; production callers use append(). */
-  appendAtForTest(
-    executor: AuditExecutor,
-    event: AppendAuditEvent,
-    occurredAt: Date,
-  ): Promise<AuditEvent> {
-    return this.insert(executor, event, occurredAt);
-  }
-
-  private async insert(
-    executor: AuditExecutor,
-    event: AppendAuditEvent,
-    occurredAt: Date | RawBuilder<Date>,
-  ): Promise<AuditEvent> {
     const row = await executor
       .insertInto('audit.events')
       .values({
@@ -115,7 +97,7 @@ export class AuditRepository {
         target_snapshot: json(event.targetSnapshot),
         related: json(event.related)!,
         detail: json(event.payload),
-        occurred_at: occurredAt,
+        occurred_at: sql<Date>`clock_timestamp()`,
       })
       .returningAll()
       .executeTakeFirstOrThrow();
@@ -169,7 +151,7 @@ export class AuditRepository {
   }
 
   enforceRetention(options: AuditRetentionOptions): Promise<void> {
-    return this.enforceRetentionWithClock(options);
+    return this.enforceRetentionWith(options);
   }
 
   /**
@@ -180,29 +162,11 @@ export class AuditRepository {
     transaction: Transaction<NyabaseDatabase>,
     options: AuditRetentionOptions,
   ): Promise<void> {
-    return this.enforceRetentionWithClock(options, undefined, transaction);
+    return this.enforceRetentionWith(options, transaction);
   }
 
-  /** Test-only deterministic clock override; production uses PostgreSQL time. */
-  enforceRetentionAtForTest(
+  private enforceRetentionWith(
     options: AuditRetentionOptions,
-    now: Date,
-  ): Promise<void> {
-    return this.enforceRetentionWithClock(options, now);
-  }
-
-  /** Test-only deterministic clock override for a caller-owned transaction. */
-  enforceRetentionInTransactionAtForTest(
-    transaction: Transaction<NyabaseDatabase>,
-    options: AuditRetentionOptions,
-    now: Date,
-  ): Promise<void> {
-    return this.enforceRetentionWithClock(options, now, transaction);
-  }
-
-  private enforceRetentionWithClock(
-    options: AuditRetentionOptions,
-    nowOverride?: Date,
     existingTransaction?: Transaction<NyabaseDatabase>,
   ): Promise<void> {
     const work = async (transaction: Transaction<NyabaseDatabase>): Promise<void> => {
@@ -211,7 +175,7 @@ export class AuditRepository {
         ${RETENTION_ADVISORY_KEY}
       )`.execute(transaction);
 
-      const now = nowOverride ?? await this.databaseClock(transaction);
+      const now = await this.databaseClock(transaction);
       let remainingBatch = RETENTION_BATCH_SIZE;
       if (options.enforceAge && options.retentionDays > 0) {
         const cutoff = new Date(

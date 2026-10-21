@@ -144,10 +144,6 @@ export class ServersService {
       .execute();
   }
 
-  async findDtosByIds(ids: string[]): Promise<ServerDto[]> {
-    return this.toDtos(await this.findByIds(ids));
-  }
-
   async findUserDtosByIds(ids: string[]): Promise<UserServerDto[]> {
     return this.toUserDtos(await this.findByIds(ids));
   }
@@ -304,7 +300,7 @@ export class ServersService {
         name: server.name,
       });
     });
-    this.proxySnapshots.forgetServer(id, 'server_deleted');
+    this.proxySnapshots.invalidate('server_deleted');
   }
 
   private async purgeServerControlPlane(
@@ -444,7 +440,6 @@ export class ServersService {
     await transaction.deleteFrom('infra.image_server_assignments').where('server_id', '=', serverId).execute();
     await transaction.deleteFrom('control.container_network_claims').where('server_id', '=', serverId).execute();
     await transaction.deleteFrom('infra.ip_pool_servers').where('server_id', '=', serverId).execute();
-    await transaction.deleteFrom('system.incus_client_certificate_trusts').where('server_id', '=', serverId).execute();
     await transaction.deleteFrom('control.grant_expiry_enforcement').where('server_id', '=', serverId).execute();
     await transaction
       .updateTable('infra.servers')
@@ -453,97 +448,6 @@ export class ServersService {
       .execute();
     await transaction.deleteFrom('infra.storage_pools').where('server_id', '=', serverId).execute();
     await transaction.deleteFrom('infra.servers').where('id', '=', serverId).execute();
-  }
-
-  private async serverReferences(
-    serverId: string,
-    transaction: Transaction<NyabaseDatabase>,
-  ): Promise<string[]> {
-    const [
-      authorizationDependency,
-      serverGrant,
-      storagePool,
-      imageAssignment,
-      containerNetworkClaim,
-      gpuClaim,
-      containerSshRoute,
-      intent,
-      certificateTrust,
-      ipPoolMembership,
-    ] = await Promise.all([
-      transaction
-        .selectFrom('control.authorization_dependencies')
-        .select('id')
-        .where('server_id', '=', serverId)
-        .limit(1)
-        .executeTakeFirst(),
-      transaction
-        .selectFrom('iam.server_grants')
-        .select('id')
-        .where('server_id', '=', serverId)
-        .limit(1)
-        .executeTakeFirst(),
-      transaction
-        .selectFrom('infra.storage_pools')
-        .select('id')
-        .where('server_id', '=', serverId)
-        .limit(1)
-        .executeTakeFirst(),
-      transaction
-        .selectFrom('infra.image_server_assignments')
-        .select('id')
-        .where('server_id', '=', serverId)
-        .limit(1)
-        .executeTakeFirst(),
-      transaction
-        .selectFrom('control.container_network_claims')
-        .select('id')
-        .where('server_id', '=', serverId)
-        .limit(1)
-        .executeTakeFirst(),
-      transaction
-        .selectFrom('control.container_gpu_claims')
-        .select('container_id')
-        .where('server_id', '=', serverId)
-        .limit(1)
-        .executeTakeFirst(),
-      transaction
-        .selectFrom('control.container_ssh_routes')
-        .select('container_id')
-        .where('server_id', '=', serverId)
-        .limit(1)
-        .executeTakeFirst(),
-      transaction
-        .selectFrom('control.intents')
-        .select('id')
-        .where('server_id', '=', serverId)
-        .limit(1)
-        .executeTakeFirst(),
-      transaction
-        .selectFrom('system.incus_client_certificate_trusts')
-        .select('certificate_id')
-        .where('server_id', '=', serverId)
-        .limit(1)
-        .executeTakeFirst(),
-      transaction
-        .selectFrom('infra.ip_pool_servers')
-        .select('pool_id')
-        .where('server_id', '=', serverId)
-        .limit(1)
-        .executeTakeFirst(),
-    ]);
-    return [
-      authorizationDependency && 'authorization_dependencies',
-      serverGrant && 'server_grants',
-      storagePool && 'storage_pools',
-      imageAssignment && 'image_server_assignments',
-      containerNetworkClaim && 'container_network_claims',
-      gpuClaim && 'container_gpu_claims',
-      containerSshRoute && 'container_ssh_routes',
-      intent && 'intents',
-      certificateTrust && 'incus_client_certificate_trusts',
-      ipPoolMembership && 'ip_pool_servers',
-    ].filter((value): value is string => Boolean(value));
   }
 
   private encryptNodeMetricsToken(token: string): string {

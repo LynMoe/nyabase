@@ -1,7 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { GIB } from './utils.js';
 import {
-  formatAllocatedCpuMem,
   formatConsumedQuotaParts,
   formatGrantBytes,
   formatGrantQuotaLine,
@@ -74,20 +73,6 @@ describe('formatGrantBytes', () => {
     expect(formatGrantBytes(0)).toBe('不限');
     expect(formatGrantBytes(null)).toBe('不限');
     expect(formatGrantBytes(100 * GIB)).toBe('100 GiB');
-  });
-});
-
-describe('formatAllocatedCpuMem', () => {
-  it('prints an empty container list as 0 核 / 0 GiB, never 不限', () => {
-    expect(formatAllocatedCpuMem([])).toBe('0 核 / 0 GiB');
-    expect(formatAllocatedCpuMem([])).not.toMatch(/不限/);
-  });
-
-  it('sums allocated spec across containers', () => {
-    expect(formatAllocatedCpuMem([
-      { cpuMillis: 500, memBytes: GIB },
-      { cpuMillis: 500, memBytes: GIB },
-    ])).toBe('1 核 / 2 GiB');
   });
 });
 

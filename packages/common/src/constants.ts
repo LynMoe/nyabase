@@ -6,11 +6,6 @@ export const INCUS_USER_KEYS = {
   preflight: 'user.nyabase.preflight',
 } as const;
 
-export const INCUS_INSTANCE_NAME_PREFIX = 'nyc-';
-export const INCUS_VOLUME_NAME_PREFIX = 'nyv-';
-export const INCUS_DEVICE_NAME_PREFIX = 'nyd-';
-export const INCUS_DEFAULT_PROJECT = 'default';
-export const INCUS_API_DEFAULT_PORT = 8_443;
 export const DEFAULT_IMAGE_SOURCE_SERVER =
   'https://nyabase-images.nyabase-lxc-images.workers.dev';
 
@@ -19,12 +14,6 @@ export const MAX_SERVER_CONCURRENCY = 8;
 export const MAX_PLATFORM_ACTIVE_USERS = 128;
 export const MAX_PLATFORM_SERVERS = 16;
 export const MAX_PLATFORM_IMAGES = 256;
-export const MAX_PLATFORM_GROUPS = 256;
-export const MAX_GROUP_MEMBERS = 64;
-export const MAX_STORAGE_POOLS_PER_SERVER = 64;
-export const MAX_SHARED_BACKENDS = 256;
-export const MAX_VOLUMES_PER_USER = 1_024;
-export const MAX_VOLUME_ATTACHMENTS = 64;
 export const MAX_SSH_PUBLIC_KEYS_PER_USER = 4;
 export const MAX_SSH_PUBLIC_KEY_TEXT_LENGTH = 1_024;
 
@@ -97,27 +86,14 @@ export const NODE_METRIC_NAMES = [
   'nyabase_storage_pool_size_bytes',
 ] as const;
 
-export const INCUS_CONNECT_TIMEOUT_MS = 500;
-export const INCUS_RESPONSE_HEADER_TIMEOUT_MS = 1_000;
 export const INCUS_REQUEST_TIMEOUT_MS = 10_000;
 export const INCUS_OPERATION_WAIT_TIMEOUT_MS = 120_000;
-export const INCUS_EVENT_RECONNECT_DELAY_MS = 1_000;
-export const INCUS_BUSY_ATTENTION_RETRY_COUNT = 5;
-export const INCUS_BUSY_ATTENTION_WINDOW_MS = 5 * 60_000;
-
-export const INTENT_CLAIM_LEASE_MS = 60_000;
-export const INTENT_CLAIM_RENEW_INTERVAL_MS = 20_000;
-export const INTENT_MAX_FAILURE_DETAILS_BYTES = 16 * 1024;
-export const INTENT_MAX_REQUEST_SUMMARY_BYTES = 16 * 1024;
 export const MAX_INTENT_LIST_PAGE_SIZE = 100;
 export const ADMIN_INTENT_LIST_MAX = 500;
 export const MAX_CONSOLE_COMMAND_ARGUMENTS = 32;
 export const MAX_CONSOLE_COMMAND_ARGUMENT_BYTES = 4_096;
 export const CONSOLE_DEFAULT_COLS = 100;
 export const CONSOLE_DEFAULT_ROWS = 30;
-export const CONSOLE_UNCLAIMED_TTL_MS = 60_000;
-export const CONSOLE_CLAIMED_IDLE_TTL_MS = 30 * 60_000;
-
 export const SSH_PROXY_SNAPSHOT_STALE_MIN_MS = 120_000;
 export const SSH_PROXY_SNAPSHOT_STALE_MAX_MS = 300_000;
 export const PROXY_SNAPSHOT_MAX_CLOCK_SKEW_MS = 30_000;

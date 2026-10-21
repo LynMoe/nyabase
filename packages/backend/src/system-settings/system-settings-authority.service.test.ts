@@ -17,48 +17,29 @@ describe('fillMissingOnlineEditableDefaults', () => {
   });
 });
 
-describe('SystemSettingsAuthorityService lifecycle', () => {
-  it('drains an in-flight refresh without applying or broadcasting after shutdown starts', async () => {
-    let resolveLoad!: (snapshot: AuthoritativeSystemSettingsSnapshot) => void;
-    const load = new Promise<AuthoritativeSystemSettingsSnapshot>((resolve) => {
-      resolveLoad = resolve;
-    });
+describe('SystemSettingsAuthorityService.committed', () => {
+  it('applies a committed snapshot and refreshes the SSH proxy only for a newer revision', async () => {
     const applyAuthoritativeSnapshot = vi.fn().mockReturnValue(true);
     const broadcastSnapshot = vi.fn().mockResolvedValue(undefined);
+    let revision = 1;
     const authority = new SystemSettingsAuthorityService(
       {} as never,
       {
-        revision: vi.fn().mockReturnValue(1),
-        applyAuthoritativeSnapshot,
+        revision: () => revision,
+        applyAuthoritativeSnapshot: (snapshot: AuthoritativeSystemSettingsSnapshot) => {
+          revision = snapshot.revision;
+          return applyAuthoritativeSnapshot(snapshot);
+        },
       } as never,
       {} as never,
       { broadcastSnapshot } as never,
     );
-    (authority as unknown as {
-      load: () => Promise<AuthoritativeSystemSettingsSnapshot>;
-    }).load = vi.fn(() => load);
 
-    const refresh = authority.refreshFromPostgres('deferred-test');
-    let shutdownFinished = false;
-    const shutdown = authority.onApplicationShutdown().then(() => {
-      shutdownFinished = true;
-    });
-    await Promise.resolve();
-    expect(shutdownFinished).toBe(false);
-    await expect(authority.refreshFromPostgres('after-stop-during-drain'))
-      .rejects.toThrow('System settings authority is stopped');
+    await authority.committed({ revision: 2, values: {} });
+    expect(applyAuthoritativeSnapshot).toHaveBeenCalledTimes(1);
+    expect(broadcastSnapshot).toHaveBeenCalledTimes(1);
 
-    resolveLoad({
-      revision: 2,
-      snapshotToken: 'a'.repeat(64),
-      values: {},
-    });
-    await expect(refresh).resolves.toMatchObject({ revision: 2 });
-    await shutdown;
-
-    expect(applyAuthoritativeSnapshot).not.toHaveBeenCalled();
-    expect(broadcastSnapshot).not.toHaveBeenCalled();
-    await expect(authority.refreshFromPostgres('after-stop'))
-      .rejects.toThrow('System settings authority is stopped');
+    await authority.committed({ revision: 2, values: {} });
+    expect(broadcastSnapshot).toHaveBeenCalledTimes(1);
   });
 });

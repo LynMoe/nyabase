@@ -17,7 +17,6 @@ const HIDDEN_SECRET = '********';
 
 export interface AuthoritativeSystemSettingsSnapshot {
   revision: number;
-  snapshotToken: string;
   values: Record<string, unknown>;
 }
 
@@ -30,11 +29,9 @@ export interface AuthoritativeSystemSettingsSnapshot {
 export class NyabaseConfigService implements OnModuleInit {
   private snapshot: LoadedNyabaseConfig;
   private authoritative: AuthoritativeSystemSettingsSnapshot | null = null;
-  private snapshotTokenValue: string;
 
   constructor() {
     this.snapshot = loadNyabaseConfig();
-    this.snapshotTokenValue = '0'.repeat(64);
   }
 
   onModuleInit(): void {
@@ -58,10 +55,6 @@ export class NyabaseConfigService implements OnModuleInit {
 
   revision(): number {
     return this.authoritative?.revision ?? 1;
-  }
-
-  snapshotToken(): string {
-    return this.authoritative?.snapshotToken ?? this.snapshotTokenValue;
   }
 
   field<T = unknown>(key: ControlPlaneConfigKey): ResolvedConfigField<T> {
@@ -152,7 +145,6 @@ export class NyabaseConfigService implements OnModuleInit {
     if (
       !Number.isSafeInteger(authoritative.revision)
       || authoritative.revision < 1
-      || !/^[a-f0-9]{64}$/.test(authoritative.snapshotToken)
     ) {
       throw new Error('Invalid PostgreSQL system settings snapshot');
     }
@@ -165,11 +157,8 @@ export class NyabaseConfigService implements OnModuleInit {
     if (
       this.authoritative
       && authoritative.revision === this.authoritative.revision
-      && (
-        authoritative.snapshotToken !== this.authoritative.snapshotToken
-        || JSON.stringify(authoritative.values)
-          !== JSON.stringify(this.authoritative.values)
-      )
+      && JSON.stringify(authoritative.values)
+        !== JSON.stringify(this.authoritative.values)
     ) {
       throw new Error(
         `Conflicting PostgreSQL system settings snapshot at revision ${
@@ -217,10 +206,8 @@ export class NyabaseConfigService implements OnModuleInit {
     };
     this.authoritative = {
       revision: authoritative.revision,
-      snapshotToken: authoritative.snapshotToken,
       values: { ...authoritative.values },
     };
-    this.snapshotTokenValue = authoritative.snapshotToken;
     return true;
   }
 

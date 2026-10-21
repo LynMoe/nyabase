@@ -9,6 +9,7 @@ import {
 } from '@nyabase/common';
 import type { NyabaseDatabase } from '../platform/persistence-pg/database.types.js';
 import { retryPgTransaction } from '../platform/persistence-pg/transaction.js';
+import { afterCommit, executeWithPostCommit } from '../platform/post-commit.js';
 import { PG_DATABASE } from '../platform/persistence-pg/tokens.js';
 import { ReconcileWakeService } from './reconcile-wake.service.js';
 
@@ -40,7 +41,6 @@ export interface IntentRecord {
   readonly nextAttemptAt: string | null;
   readonly createdAt: string;
   readonly settledAt: string | null;
-  readonly blockedByIntentId?: string | null;
 }
 
 export interface CreatePendingIntentInput {
@@ -54,19 +54,6 @@ export interface CreatePendingIntentInput {
   readonly targetRevision: number;
   readonly baseline?: Record<string, unknown> | null;
   readonly nextAttemptAt?: Date | string | null;
-  readonly blockedByIntentId?: string | null;
-}
-
-export interface RetryIntentInput {
-  readonly sourceIntentId: string;
-  readonly kind: TypedIntentKind;
-  readonly resourceType: IntentResource;
-  readonly resourceId: string;
-  readonly serverId?: string | null;
-  readonly requestedBy?: string | null;
-  readonly request?: Record<string, unknown> | null;
-  readonly targetRevision: number;
-  readonly baseline?: Record<string, unknown> | null;
 }
 
 export type EnsurePendingIntentInput = CreatePendingIntentInput & {
@@ -128,7 +115,6 @@ const KIND_RESOURCES: Readonly<Record<TypedIntentKind, readonly IntentResource[]
   [IntentKind.ImageAssignmentDelete]: [IntentResourceType.ImageAssignment],
   [IntentKind.ServerConnect]: [IntentResourceType.Server],
   [IntentKind.ServerPreflight]: [IntentResourceType.Server],
-  [IntentKind.CertificateRotate]: [IntentResourceType.CertificateRotation],
 };
 
 const MAX_PAGE_SIZE = ADMIN_INTENT_LIST_MAX;
@@ -307,7 +293,6 @@ function mapRow(row: {
   next_attempt_at: Date | string | null;
   created_at: Date | string;
   settled_at: Date | string | null;
-  blocked_by_intent_id?: string | null;
 }): IntentRecord {
   return {
     id: row.id,
@@ -326,7 +311,6 @@ function mapRow(row: {
     nextAttemptAt: asDate(row.next_attempt_at)?.toISOString() ?? null,
     createdAt: asDate(row.created_at)?.toISOString() ?? new Date(0).toISOString(),
     settledAt: asDate(row.settled_at)?.toISOString() ?? null,
-    blockedByIntentId: row.blocked_by_intent_id ?? null,
   };
 }
 
@@ -345,12 +329,6 @@ export class IntentRepository {
     assertResourceType(input.resourceType);
     assertUuidLike(input.resourceId, 'Intent resource id');
     if (input.serverId) assertUuidLike(input.serverId, 'Intent server id');
-    if (input.blockedByIntentId) {
-      assertUuidLike(input.blockedByIntentId, 'Blocked-by intent id');
-      if (input.blockedByIntentId === (input.id ?? '')) {
-        throw new Error('An intent cannot block on itself');
-      }
-    }
     assertRevision(input.targetRevision);
     const id = input.id ?? randomUUID();
     assertUuidLike(id, 'Intent id');
@@ -373,42 +351,17 @@ export class IntentRepository {
         failure_json: null,
         attempt_count: 0,
         next_attempt_at: input.nextAttemptAt ?? null,
-        blocked_by_intent_id: input.blockedByIntentId ?? null,
         settled_at: null,
       })
       .returningAll()
       .executeTakeFirstOrThrow();
-    await this.notifyReconcile(executor, {
-      resourceType: input.resourceType,
-      resourceId: input.resourceId,
-      serverId: input.serverId ?? null,
-    });
-    this.wake.wake({
+    afterCommit(executor, () => this.wake.wake({
       resourceType: input.resourceType,
       resourceId: input.resourceId,
       serverId: input.serverId ?? null,
       reason: 'intent',
-    });
+    }));
     return mapRow(row);
-  }
-
-  createRetry(
-    input: RetryIntentInput,
-    executor: IntentExecutor = this.database,
-  ): Promise<IntentRecord> {
-    assertUuidLike(input.sourceIntentId, 'Source intent id');
-    return this.assertRetryable(input.sourceIntentId, executor).then(async () => {
-      await this.releaseAttention(input.resourceType, input.resourceId, executor);
-      await this.restoreVolumeResizeSize(input.kind, input.resourceId, input.request, executor);
-      return this.createPending({
-        ...input,
-        id: randomUUID(),
-        request: {
-          ...(input.request ?? {}),
-          retryOf: input.sourceIntentId,
-        },
-      }, executor);
-    });
   }
 
   async retry(
@@ -601,17 +554,6 @@ export class IntentRepository {
     return row ? mapRow(row) : null;
   }
 
-  listForResource(
-    resourceType: IntentResource,
-    resourceId: string,
-    options: Omit<IntentListOptions, 'resourceType' | 'resourceId'> = {},
-    executor: IntentExecutor = this.database,
-  ): Promise<IntentPage> {
-    assertResourceType(resourceType);
-    assertUuidLike(resourceId, 'Intent resource id');
-    return this.list({ ...options, resourceType, resourceId }, executor);
-  }
-
   async listPending(
     options: Omit<IntentListOptions, 'status'> = {},
     executor: IntentExecutor = this.database,
@@ -634,14 +576,6 @@ export class IntentRepository {
       .selectFrom('control.intents')
       .selectAll()
       .where('status', '=', IntentStatus.Pending)
-      .where((expression) => expression.or([
-        expression('blocked_by_intent_id', 'is', null),
-        sql<boolean>`exists (
-          select 1 from control.intents as pred
-          where pred.id = control.intents.blocked_by_intent_id
-            and pred.status = ${IntentStatus.Succeeded}
-        )`,
-      ]))
       .orderBy(sql`coalesce(next_attempt_at, created_at)`, 'asc')
       .orderBy('created_at', 'asc')
       .orderBy('id', 'asc')
@@ -676,10 +610,10 @@ export class IntentRepository {
   ): Promise<IntentRecord> {
     if (!executor) {
       return retryPgTransaction(
-        () => this.database
-          .transaction()
-          .setIsolationLevel('serializable')
-          .execute((transaction) => this.ensurePending(input, transaction)),
+        () => executeWithPostCommit(
+          this.database.transaction().setIsolationLevel('serializable'),
+          (transaction) => this.ensurePending(input, transaction),
+        ),
         { maxAttempts: 5, retryBaseDelayMs: 5 },
       );
     }
@@ -813,7 +747,6 @@ export class IntentRepository {
     let succeeded = 0;
     let failed = 0;
     let superseded = 0;
-    const settledIds: string[] = [];
     for (const row of rows) {
       if (options.keep?.({ kind: row.kind, request: objectValue(row.request_json) })) {
         continue;
@@ -845,13 +778,11 @@ export class IntentRepository {
         .where('id', '=', row.id)
         .where('status', '=', IntentStatus.Pending)
         .execute();
-      settledIds.push(row.id);
       if (status === IntentStatus.Succeeded && isCurrentRevision) succeeded += 1;
       else if (status === IntentStatus.Succeeded) superseded += 1;
       else if (isCurrentRevision) failed += 1;
       else superseded += 1;
     }
-    await this.cascadeBlockedBy(executor, settledIds, settlement);
     return { succeeded, failed, superseded };
   }
 
@@ -883,91 +814,6 @@ export class IntentRepository {
       .where('status', '=', IntentStatus.Pending)
       .returning('id')
       .executeTakeFirst();
-    if (result) {
-      await this.cascadeBlockedBy(executor, [intentId], settlement);
-    }
     return result !== undefined;
   }
-
-  private async cascadeBlockedBy(
-    executor: IntentExecutor,
-    predecessorIds: readonly string[],
-    settlement: PhysicalSettlement,
-  ): Promise<void> {
-    if (predecessorIds.length === 0) return;
-    const dependents = await executor
-      .selectFrom('control.intents')
-      .select(['id', 'resource_type', 'resource_id', 'server_id'])
-      .where('blocked_by_intent_id', 'in', [...predecessorIds])
-      .where('status', '=', IntentStatus.Pending)
-      .forUpdate()
-      .execute();
-    if (dependents.length === 0) return;
-    if (settlement.outcome === 'failed') {
-      const cascadeFailure = boundedFailure({
-        code: 'VOLUME_PLACEMENT_FAILED',
-        message: 'A required volume placement failed before this intent could run',
-        details: { blockedByIntentIds: [...predecessorIds] },
-      });
-      for (const dependent of dependents) {
-        await executor
-          .updateTable('control.intents')
-          .set({
-            status: IntentStatus.Failed,
-            failure_code: cascadeFailure.code,
-            failure_json: JSON.stringify(cascadeFailure),
-            next_attempt_at: null,
-            settled_at: sql<Date>`clock_timestamp()`,
-          })
-          .where('id', '=', dependent.id)
-          .where('status', '=', IntentStatus.Pending)
-          .execute();
-      }
-    }
-    const seen = new Set<string>();
-    for (const dependent of dependents) {
-      const key = `${dependent.resource_type}:${dependent.resource_id}:${dependent.server_id ?? ''}`;
-      if (seen.has(key)) continue;
-      seen.add(key);
-      const payload = {
-        resourceType: dependent.resource_type,
-        resourceId: dependent.resource_id,
-        serverId: dependent.server_id,
-      };
-      await this.notifyReconcile(executor, payload);
-      this.wake.wake({
-        ...payload,
-        reason: 'intent',
-      });
-    }
-  }
-
-  private async notifyReconcile(
-    executor: IntentExecutor,
-    payload: { resourceType: IntentResource; resourceId: string; serverId: string | null },
-  ): Promise<void> {
-    await sql`SELECT pg_notify(
-      'nyabase_reconcile',
-      ${JSON.stringify(payload).slice(0, 1800)}
-    )`.execute(executor);
-  }
-
-  private async assertRetryable(
-    sourceIntentId: string,
-    executor: IntentExecutor,
-  ): Promise<void> {
-    const source = await executor
-      .selectFrom('control.intents')
-      .select(['id', 'status'])
-      .where('id', '=', sourceIntentId)
-      .executeTakeFirst();
-    if (!source) throw new Error('Intent to retry was not found');
-    if (source.status !== IntentStatus.Failed) {
-      throw new Error('Only failed intents can be retried');
-    }
-  }
-}
-
-export function intentKindResources(): Readonly<Record<TypedIntentKind, readonly IntentResource[]>> {
-  return KIND_RESOURCES;
 }

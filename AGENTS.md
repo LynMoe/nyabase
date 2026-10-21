@@ -27,7 +27,7 @@ Vite 通过 alias 将 `@nyabase/common` 指向 `src/index.ts`，但 `index.ts` �
 ## API 表面：每个资源只有一套路由
 
 - 同一资源不再有 `/x` 与 `/admin/x` 两套 controller。`/admin/` 前缀只留给没有用户版本的运维资源
-  （groups、ip-pools、catalog、metrics、ssh-proxy、incus-client-certificate、system-settings）；
+  （groups、ip-pools、catalog、metrics、ssh-proxy、system-settings）；
   `http-api-duplicate-routes.contract.test.ts` 断言不存在同名资源同时挂在两处。
 - 鉴权在 service 里：`@CurrentActor()`（`iam/actor.ts`）给出 `{ userId, capabilities, authKind, authVersion }`，
   `CapabilitiesGuard` 每个请求只解析一次 capability。service 方法签名是 `method(actor, ...)`，
@@ -56,6 +56,14 @@ Vite 通过 alias 将 `@nyabase/common` 指向 `src/index.ts`，但 `index.ts` �
 6. 生产必需依赖不得 `@Optional()`（当前全仓为 0）。
 7. controller 不直接使用 Kysely，调用 service / repository。service 可以直接用 Kysely，
    只有被多个 service 共享的查询才抽成 repository。
+
+8. 单进程：不使用 `LISTEN/NOTIFY` 或轮询来同步状态。reconcile 唤醒走进程内 `ReconcileWakeService`；在事务里创建 intent
+   时用 `platform/post-commit.ts` 的 `afterCommit(executor, …)` 登记唤醒，事务必须经 `PgTransactionManager.run`（或
+   `executeWithPostCommit`）开启，提交后才触发，回滚/重试丢弃。worker 的周期全量扫描是兜底。系统设置只用 revision CAS
+   （冲突返回 409 + 当前值），没有内容 token 和定时轮询。
+9. Incus mTLS 客户端身份只有一张：首次使用时由 `incus/incus-client-identity.service.ts` 生成（10 年，私钥用
+   `ssh.keyEncryptionSecret` 加密），存 `system.incus_client_identity` 单行表，不轮换、没有证书管理 API；
+   只读指纹见 `GET /admin/system-settings/incus-client-identity`。
 
 GPU 是平台内置功能（`gpu/` 模块、`common/src/gpu/`、node-exporter 的 `gpu-collector`），不存在扩展框架。
 

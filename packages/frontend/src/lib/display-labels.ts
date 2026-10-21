@@ -46,8 +46,6 @@ export function capabilityLabel(capability: string): string {
       return '管理全部容器';
     case Capability.ManagePreflight:
       return '管理前置检查';
-    case Capability.ManageCertificates:
-      return '管理证书';
     case Capability.ViewAudit:
       return '查看审计';
     case Capability.ViewMetricsAll:

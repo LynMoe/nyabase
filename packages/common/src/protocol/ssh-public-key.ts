@@ -42,10 +42,6 @@ export function normalizeOpenSshPublicKey(input: string): string | null {
   return `${keyType} ${keyBlob}`;
 }
 
-export function isOpenSshPublicKey(input: string): boolean {
-  return normalizeOpenSshPublicKey(input) !== null;
-}
-
 function isValidBase64(input: string): boolean {
   if (input.length === 0 || input.length % 4 === 1 || !BASE64_RE.test(input)) {
     return false;

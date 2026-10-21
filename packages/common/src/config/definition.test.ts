@@ -101,13 +101,10 @@ describe('Incus transport and preflight configuration', () => {
       .toBe(false);
   });
 
-  it('provides injected mTLS file defaults and keeps inline PEM values secret', () => {
-    expect(definition('incus.clientCertificateFile')?.defaultValue)
-      .toBe('/run/secrets/incus_client_cert');
-    expect(definition('incus.clientPrivateKeyFile')?.defaultValue)
-      .toBe('/run/secrets/incus_client_key');
+  it('keeps only the Incus server CA as deployment input; the client identity is generated', () => {
     expect(definition('incus.caFile')?.defaultValue).toBe('/run/secrets/incus_ca');
-    expect(definition('incus.clientPrivateKeyPem')?.secret).toBe(true);
     expect(definition('incus.caPem')?.secret).toBe(true);
+    expect(definition('incus.clientCertificateFile')).toBeUndefined();
+    expect(definition('incus.clientPrivateKeyPem')).toBeUndefined();
   });
 });

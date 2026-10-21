@@ -35,6 +35,3 @@ export const zConsoleToBrowser = z.discriminatedUnion('type', [
     message: z.string().min(1).max(4_096),
   }).strict(),
 ]);
-
-export type BrowserToConsole = z.infer<typeof zBrowserToConsole>;
-export type ConsoleToBrowser = z.infer<typeof zConsoleToBrowser>;

@@ -1,1 +1,0 @@
-export const VOLUME_ADOPT_FAIL_AFTER_ATTEMPTS = 8;

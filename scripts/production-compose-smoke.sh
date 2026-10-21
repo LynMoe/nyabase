@@ -48,23 +48,18 @@ cleanup_smoke() {
 }
 trap cleanup_smoke EXIT
 
-incus_client_cert="$smoke_root/incus-client-cert.pem"
-incus_client_key="$smoke_root/incus-client-key.pem"
 incus_ca="$smoke_root/incus-ca.pem"
 openssl req -x509 -newkey rsa:2048 -nodes -days 1 \
   -subj "/CN=nyabase-smoke-incus" \
-  -keyout "$incus_client_key" \
-  -out "$incus_client_cert" >/dev/null 2>&1
-cp -f "$incus_client_cert" "$incus_ca"
-chmod 0600 "$incus_client_cert" "$incus_client_key" "$incus_ca"
+  -keyout "$smoke_root/incus-ca.key" \
+  -out "$incus_ca" >/dev/null 2>&1
+chmod 0600 "$incus_ca"
 
 {
   echo 'POSTGRES_DB=nyabase'
   echo 'POSTGRES_USER=nyabase'
   echo 'POSTGRES_PASSWORD=smoke-postgres-password'
   echo 'DATABASE_URL=postgresql://nyabase:smoke-postgres-password@postgres:5432/nyabase'
-  echo "INCUS_CLIENT_CERT_SOURCE=$incus_client_cert"
-  echo "INCUS_CLIENT_KEY_SOURCE=$incus_client_key"
   echo "INCUS_CA_SOURCE=$incus_ca"
   echo 'DB_POOL_MAX=4'
   echo 'PG_CONNECTION_TIMEOUT_MS=30000'

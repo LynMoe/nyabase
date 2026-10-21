@@ -299,13 +299,6 @@ export class AuthService {
     await this.persistence.revokeBrowserSessions(manager, userId);
   }
 
-  async deleteUserCredentialsInTransaction(manager: unknown, userId: string): Promise<void> {
-    if (!isPgIamTransaction(manager)) {
-      throw new Error('IAM credential deletion requires a PostgreSQL/Kysely transaction');
-    }
-    await this.persistence.deleteUserCredentials(manager, userId);
-  }
-
   private async issueRefreshSession(
     userId: string,
     credentialSnapshot?: {

@@ -6,6 +6,7 @@ import type {
 } from 'kysely';
 import type { NyabaseDatabase } from './database.types.js';
 import { PG_DATABASE } from './tokens.js';
+import { executeWithPostCommit } from '../post-commit.js';
 
 const RETRYABLE_TRANSACTION_CODES = new Set(['40001', '40P01']);
 
@@ -97,10 +98,12 @@ export class PgTransactionManager {
   ): Promise<T> {
     const callerOnRetry = options.onRetry;
     return retryPgTransaction(
-      () => this.database
-        .transaction()
-        .setIsolationLevel(options.isolationLevel ?? 'read committed')
-        .execute(work),
+      () => executeWithPostCommit(
+        this.database
+          .transaction()
+          .setIsolationLevel(options.isolationLevel ?? 'read committed'),
+        work,
+      ),
       {
         ...options,
         onRetry: (event) => {

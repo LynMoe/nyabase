@@ -59,17 +59,6 @@ export function formatGrantBytes(bytes: number | null): string {
   return formatGrantNumber(bytes, formatCompactBytes);
 }
 
-/** Allocated CPU/mem. Empty list → 0 核 / 0 GiB, never 不限. */
-export function formatAllocatedCpuMem(
-  containers: readonly { cpuMillis: number; memBytes: number }[],
-): string {
-  return formatConsumedQuotaParts({
-    cpuMillis: containers.reduce((sum, item) => sum + item.cpuMillis, 0),
-    memBytes: containers.reduce((sum, item) => sum + item.memBytes, 0),
-    diskBytes: null,
-  }).join(' / ');
-}
-
 function remainingOf(grant: number | null, used: number, kind: 'cpu' | 'bytes'): string {
   if (grant === null || grant === 0) return UNLIMITED;
   const left = Math.max(0, grant - used);

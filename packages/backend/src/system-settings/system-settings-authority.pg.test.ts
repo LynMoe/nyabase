@@ -42,14 +42,12 @@ describePg('System settings PostgreSQL authority', () => {
           actorId,
           { 'branding.title': 'Writer A' },
           initial.revision,
-          initial.snapshotToken,
         )),
         database.transaction().execute((transaction) => authority.update(
           transaction,
           actorId,
           { 'branding.title': 'Writer B' },
           initial.revision,
-          initial.snapshotToken,
         )),
       ]);
 
@@ -106,16 +104,12 @@ describePg('System settings PostgreSQL authority', () => {
           actorId,
           { 'branding.title': 'Must roll back' },
           initial.revision,
-          initial.snapshotToken,
         ))).rejects.toThrow('audit storage failed');
 
       await expect(database
         .selectFrom('system.settings')
-        .select(['revision', 'snapshot_token'])
-        .executeTakeFirstOrThrow()).resolves.toMatchObject({
-        revision: '1',
-        snapshot_token: initial.snapshotToken,
-      });
+        .select(['revision'])
+        .executeTakeFirstOrThrow()).resolves.toMatchObject({ revision: '1' });
       await expect(database
         .selectFrom('audit.events')
         .select((expression) => expression.fn.countAll<string>().as('count'))
@@ -123,29 +117,39 @@ describePg('System settings PostgreSQL authority', () => {
     });
   });
 
-  it('converges a second authority by PostgreSQL polling after a commit it did not observe', async () => {
+  it('rejects a stale revision with the committed value so the client can resolve it', async () => {
     await withPostgresTestDatabase(async ({ database }) => {
       const actorId = await seedActor(database);
-      const apiConfig = makeConfig();
-      const workerConfig = makeConfig();
-      const api = makeAuthority(database, apiConfig, databaseAudit());
-      const worker = makeAuthority(database, workerConfig, databaseAudit());
-      const initial = await api.initialize();
-      await worker.initialize();
+      const authority = makeAuthority(database, makeConfig(), databaseAudit());
+      const initial = await authority.initialize();
       const next = await database.transaction().execute((transaction) =>
-        api.update(
+        authority.update(
           transaction,
           actorId,
           { 'audit.retentionDays': 45 },
           initial.revision,
-          initial.snapshotToken,
         ));
-      await api.committed(next);
+      await authority.committed(next);
 
-      expect(workerConfig.revision()).toBe(1);
-      await worker.refreshFromPostgres('poll-recovery');
-      expect(workerConfig.revision()).toBe(2);
-      expect(workerConfig.get('audit.retentionDays')).toBe(45);
+      const error = await database.transaction().execute((transaction) =>
+        authority.update(
+          transaction,
+          actorId,
+          { 'audit.retentionDays': 90 },
+          initial.revision,
+        )).then(
+        () => null,
+        (reason: unknown) => reason,
+      );
+      expect(error).toBeInstanceOf(SystemSettingsRevisionConflictError);
+      const conflict = error as SystemSettingsRevisionConflictError;
+      expect(conflict.currentRevision).toBe(2);
+      expect(conflict.current.values['audit.retentionDays']).toBe(45);
+      const row = await database
+        .selectFrom('system.settings')
+        .select('revision')
+        .executeTakeFirstOrThrow();
+      expect(row.revision).toBe('2');
     });
   });
 
@@ -180,8 +184,7 @@ describePg('System settings PostgreSQL authority', () => {
             actorId,
             { 'branding.title': 'Persisted database title' },
             initial.revision,
-            initial.snapshotToken,
-          ));
+            ));
         await first.committed(updated);
 
         const restartedConfig = new NyabaseConfigService();

@@ -331,4 +331,3 @@ export const api = {
 };
 
 export { ApiError, apiErrorCurrent } from './api-error.js';
-export const authApiTestables = { tryRefresh, login, runBootstrap };

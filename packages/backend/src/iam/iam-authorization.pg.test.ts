@@ -3,7 +3,6 @@ import { ConflictException, ForbiddenException } from '@nestjs/common';
 import type { Kysely } from 'kysely';
 import { Capability, ServerStatus, UserStatus } from '@nyabase/common';
 import { describe, expect, it } from 'vitest';
-import { InfrastructureRepository } from '../infrastructure/infrastructure.repository.js';
 import type { NyabaseDatabase } from '../platform/persistence-pg/database.types.js';
 import { withPostgresTestDatabase } from '../platform/persistence-pg/postgres-test-harness.js';
 import { PgTransactionManager } from '../platform/persistence-pg/transaction.js';
@@ -190,7 +189,7 @@ async function seedUser(database: Kysely<NyabaseDatabase>, username: string): Pr
 
 async function seedServer(database: Kysely<NyabaseDatabase>, name: string): Promise<string> {
   const id = randomUUID();
-  await new InfrastructureRepository(database).insertServer({
+  await database.insertInto('infra.servers').values({
     id,
     name,
     slug: `${name}-${id.slice(0, 8)}`,
@@ -217,7 +216,7 @@ async function seedServer(database: Kysely<NyabaseDatabase>, name: string): Prom
     preflight_status: 'not_run',
     preflight_checked_at: null,
     preflight_report: null,
-  });
+  }).execute();
   return id;
 }
 

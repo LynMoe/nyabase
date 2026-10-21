@@ -4,6 +4,7 @@ import type { Kysely } from 'kysely';
 import type { NyabaseDatabase } from '../platform/persistence-pg/database.types.js';
 import { PG_DATABASE } from '../platform/persistence-pg/tokens.js';
 import { retryPgTransaction } from '../platform/persistence-pg/transaction.js';
+import { executeWithPostCommit } from '../platform/post-commit.js';
 import { IntentRepository } from '../reconcile/intent.repository.js';
 import { ReconcileWakeService } from '../reconcile/reconcile-wake.service.js';
 
@@ -43,10 +44,9 @@ export class ContainerSshConvergenceService {
     operation: SshSyncOperation,
   ): Promise<boolean> {
     const result = await retryPgTransaction(async () => {
-      return this.database
-        .transaction()
-        .setIsolationLevel('serializable')
-        .execute(async (transaction) => {
+      return executeWithPostCommit(
+        this.database.transaction().setIsolationLevel('serializable'),
+        async (transaction) => {
           const container = await transaction.selectFrom('control.containers')
             .select(['id', 'server_id', 'revision', 'lifecycle_phase'])
             .where('id', '=', containerId)

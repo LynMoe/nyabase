@@ -141,8 +141,7 @@ describePg('PostgreSQL runtime/type schema contract', () => {
           ('control', 'reconcile_claims'),
           ('iam', 'storage_pool_grants'),
           ('iam', 'shared_backend_grants'),
-          ('system', 'incus_client_certificates'),
-          ('system', 'incus_client_certificate_trusts')
+          ('system', 'incus_client_identity')
         )
         ORDER BY table_name
       `.execute(database);
@@ -160,8 +159,7 @@ describePg('PostgreSQL runtime/type schema contract', () => {
         'infra.servers',
         'infra.shared_backends',
         'infra.storage_pools',
-        'system.incus_client_certificate_trusts',
-        'system.incus_client_certificates',
+        'system.incus_client_identity',
       ]);
 
       const foreignKeyTypes = await sql<{ constraint_name: string }>`
@@ -191,7 +189,6 @@ describePg('PostgreSQL runtime/type schema contract', () => {
           AND indexname IN (
             'storage_pools_shared_backend_server_unique',
             'volumes_incus_name_key',
-            'incus_client_certificates_active_unique',
             'server_grants_user_unique',
             'server_grants_group_unique',
             'storage_pool_grants_user_unique',
@@ -202,7 +199,6 @@ describePg('PostgreSQL runtime/type schema contract', () => {
         ORDER BY index_name
       `.execute(database);
       expect(requiredIndexes.rows.map((row) => row.index_name)).toEqual([
-        'incus_client_certificates_active_unique',
         'server_grants_group_unique',
         'server_grants_user_unique',
         'shared_backend_grants_group_unique',

@@ -1078,7 +1078,6 @@ function context(client: unknown, intentOverrides: Partial<IntentRecord> = {}): 
     request: { source: 'test' },
     targetRevision: 3,
     baseline: null,
-    blockedByIntentId: null,
     status: IntentStatus.Pending,
     failureCode: null,
     failure: null,

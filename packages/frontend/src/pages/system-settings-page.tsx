@@ -212,13 +212,8 @@ export default function SystemSettingsPage() {
     if (!data) return;
     const incoming = Object.fromEntries(editableFields.map((field) => [field.key, editableInputValue(field)]));
     setDraftState((current) => current
-      ? mergeRevisionedServerBackedDraft(
-          current,
-          incoming,
-          data.revision,
-          data.snapshotToken,
-        )
-      : createRevisionedServerBackedDraft(incoming, data.revision, data.snapshotToken));
+      ? mergeRevisionedServerBackedDraft(current, incoming, data.revision)
+      : createRevisionedServerBackedDraft(incoming, data.revision));
   }, [data, editableFields]);
 
   const parsedChanges = useMemo(() => {
@@ -238,14 +233,12 @@ export default function SystemSettingsPage() {
   const changedValues = parsedChanges.values;
 
   const saveSettings = useMutation({
-    mutationFn: ({ values, expectedRevision, expectedSnapshotToken }: {
+    mutationFn: ({ values, expectedRevision }: {
       values: Record<string, unknown>;
       expectedRevision: number;
-      expectedSnapshotToken: string;
     }) => api.patch<SystemSettingsDto>('/admin/system-settings', {
       values,
       expectedRevision,
-      expectedSnapshotToken,
     }),
     onSuccess: (updated) => {
       qc.setQueryData(queryKeys.systemSettings, updated);
@@ -254,11 +247,7 @@ export default function SystemSettingsPage() {
           .filter((field) => !field.restartRequired)
           .map((field) => [field.key, editableInputValue(field)]),
       );
-      setDraftState(createRevisionedServerBackedDraft(
-        incoming,
-        updated.revision,
-        updated.snapshotToken,
-      ));
+      setDraftState(createRevisionedServerBackedDraft(incoming, updated.revision));
       qc.invalidateQueries({ queryKey: queryKeys.publicSettings });
       toast({ title: '系统设置已保存' });
     },
@@ -277,17 +266,8 @@ export default function SystemSettingsPage() {
               .map((field) => [field.key, editableInputValue(field)]),
           );
           setDraftState((draft) => draft
-            ? mergeAuthoritativeRevisionedServerBackedDraft(
-                draft,
-                incoming,
-                current.revision,
-                current.snapshotToken,
-              )
-            : createRevisionedServerBackedDraft(
-                incoming,
-                current.revision,
-                current.snapshotToken,
-              ));
+            ? mergeAuthoritativeRevisionedServerBackedDraft(draft, incoming, current.revision)
+            : createRevisionedServerBackedDraft(incoming, current.revision));
         } else {
           await qc.refetchQueries({ queryKey: queryKeys.systemSettings, type: 'active' });
         }
@@ -368,11 +348,9 @@ export default function SystemSettingsPage() {
           onSubmit={(event) => {
             event.preventDefault();
             if (data && draftState && hasChanges && !hasValidationErrors && !hasConflicts && !saveSettings.isPending) {
-              if (!draftState.snapshotToken) return;
               saveSettings.mutate({
                 values: changedValues,
                 expectedRevision: draftState.revision,
-                expectedSnapshotToken: draftState.snapshotToken,
               });
             }
           }}

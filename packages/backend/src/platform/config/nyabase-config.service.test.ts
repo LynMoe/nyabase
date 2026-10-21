@@ -88,7 +88,6 @@ describe('read-only deployment configuration', () => {
 
     service.applyAuthoritativeSnapshot({
       revision: 7,
-      snapshotToken: 'a'.repeat(64),
       values: {
         ...bootstrap,
         'branding.title': 'Database title',
@@ -115,7 +114,6 @@ describe('read-only deployment configuration', () => {
     const service = new NyabaseConfigService();
     service.applyAuthoritativeSnapshot({
       revision: 2,
-      snapshotToken: 'b'.repeat(64),
       values: {
         ...service.bootstrapEditableValues(),
         'branding.title': 'Database title',
@@ -130,12 +128,10 @@ describe('read-only deployment configuration', () => {
     const values = service.bootstrapEditableValues();
     service.applyAuthoritativeSnapshot({
       revision: 2,
-      snapshotToken: 'c'.repeat(64),
       values,
     });
     expect(() => service.applyAuthoritativeSnapshot({
       revision: 2,
-      snapshotToken: 'd'.repeat(64),
       values: { ...values, 'branding.title': 'divergent' },
     })).toThrow(/Conflicting PostgreSQL system settings snapshot/);
   });

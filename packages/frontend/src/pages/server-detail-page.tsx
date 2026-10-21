@@ -125,7 +125,6 @@ export default function ServerDetailPage() {
     void queryClient.invalidateQueries({ queryKey: queryKeys.servers.detail(id) });
     void queryClient.invalidateQueries({ queryKey: queryKeys.servers.pools(id, 'all') });
     void queryClient.invalidateQueries({ queryKey: queryKeys.servers.preflight(id) });
-    void queryClient.invalidateQueries({ queryKey: queryKeys.certificate });
     void queryClient.invalidateQueries({ queryKey: queryKeys.sharedBackends.admin });
   };
 
@@ -339,9 +338,9 @@ export default function ServerDetailPage() {
                   <CardHeader>
                     <CardTitle className="text-base">客户端证书</CardTitle>
                     <CardDescription>
-                      所有服务器共用一张 Incus 客户端证书，在
-                      <Link to="/servers" hash="client-certificate" className="mx-1 underline underline-offset-4">服务器列表</Link>
-                      统一查看与轮换。
+                      所有服务器共用一张自动生成的 Incus 客户端证书，在
+                      <Link to="/servers" hash="client-identity" className="mx-1 underline underline-offset-4">服务器列表</Link>
+                      查看指纹。
                     </CardDescription>
                   </CardHeader>
                 </Card>

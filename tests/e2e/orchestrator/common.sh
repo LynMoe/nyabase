@@ -94,36 +94,6 @@ maybe_source_cephfs_fixture() {
   fi
 }
 
-cleanup_run_owned_incus_connect_client() {
-  local runtime_root="$1"
-  local run_id="$2"
-  local ownership="$runtime_root/incus-connect-client-ownership"
-  local certificate="$runtime_root/incus-connect-client.crt"
-  local private_key="$runtime_root/incus-connect-client.key"
-
-  if [[ ! -e "$ownership" && ! -L "$ownership" \
-    && ! -e "$certificate" && ! -L "$certificate" \
-    && ! -e "$private_key" && ! -L "$private_key" ]]; then
-    return 0
-  fi
-  [[ -f "$ownership" && ! -L "$ownership" && -r "$ownership" ]] \
-    || die "Incus connect certificate ownership metadata is invalid"
-  [[ -f "$certificate" && ! -L "$certificate" \
-    && -f "$private_key" && ! -L "$private_key" ]] \
-    || die "Incus connect certificate files are invalid"
-
-  local owner_run_id owner_certificate owner_private_key
-  owner_run_id="$(awk -F= '$1 == "run_id" { print $2; exit }' "$ownership")"
-  owner_certificate="$(awk -F= '$1 == "client_cert" { print $2; exit }' "$ownership")"
-  owner_private_key="$(awk -F= '$1 == "client_key" { print $2; exit }' "$ownership")"
-  [[ "$owner_run_id" == "$run_id" \
-    && "$owner_certificate" == "$certificate" \
-    && "$owner_private_key" == "$private_key" ]] \
-    || die "Incus connect certificate is not owned by this run"
-
-  rm -f -- "$certificate" "$private_key" "$ownership"
-}
-
 require_fingerprint() {
   local name="$1"
   local value="${!name:-}"
@@ -228,21 +198,14 @@ export_control_plane_environment() {
   local profile="${1:-${E2E_PROFILE:-smoke}}"
   require_control_plane_inputs "$profile"
 
-  local client_cert_pem client_key_pem ca_pem
-  client_cert_pem="$(<"$E2E_INCUS_CLIENT_CERT")"
-  client_key_pem="$(<"$E2E_INCUS_CLIENT_KEY")"
+  local ca_pem
   ca_pem="$(<"$E2E_INCUS_CA_FILE")"
-  [[ -n "$client_cert_pem" && -n "$client_key_pem" && -n "$ca_pem" ]] \
-    || die "Incus client certificate, key, and CA files must not be empty"
+  [[ -n "$ca_pem" ]] || die "Incus CA file must not be empty"
 
   export DATABASE_URL="$E2E_DATABASE_URL"
   export NYABASE_CONFIG_FILE
   export ADMIN_INIT_PASSWORD="$E2E_ADMIN_PASSWORD"
-  export INCUS_CLIENT_CERT_FILE="$E2E_INCUS_CLIENT_CERT"
-  export INCUS_CLIENT_KEY_FILE="$E2E_INCUS_CLIENT_KEY"
   export INCUS_CA_FILE="$E2E_INCUS_CA_FILE"
-  export INCUS_CLIENT_CERT_PEM="$client_cert_pem"
-  export INCUS_CLIENT_KEY_PEM="$client_key_pem"
   export INCUS_CA_PEM="$ca_pem"
   export INCUS_SERVER_CERT_FINGERPRINT="$E2E_INCUS_SERVER_CERT_FINGERPRINT"
   export INCUS_IMAGE_ALIAS="$E2E_INCUS_IMAGE_ALIAS"
@@ -392,7 +355,6 @@ write_context() {
       E2E_CEPHFS_INCUS_POOL \
       E2E_CEPHFS_IDENTITY_KEY \
       E2E_CEPHFS_KEY \
-      E2E_INCUS_KEY_ENCRYPTION_SECRET \
       E2E_SSH_PRIVATE_KEY_FILE \
       E2E_SSH_KNOWN_HOSTS \
       E2E_SSH_USER \
@@ -481,7 +443,6 @@ load_context() {
     E2E_CEPHFS_INCUS_POOL \
     E2E_CEPHFS_IDENTITY_KEY \
     E2E_CEPHFS_KEY \
-    E2E_INCUS_KEY_ENCRYPTION_SECRET \
     E2E_SSH_PRIVATE_KEY_FILE \
     E2E_SSH_KNOWN_HOSTS \
     E2E_SSH_USER \

@@ -2,7 +2,6 @@ import { describe, expect, it, vi } from 'vitest';
 import { IncusError } from '../incus/index.js';
 import type { ReconcileRunContext } from '../reconcile/managed-reconciler.js';
 import {
-  capacityScope,
   decideVolumeResize,
   normalizeObservedVolumeUsage,
   VolumeReconciler,
@@ -190,17 +189,6 @@ describe('volume reconciliation policy', () => {
       attached: false,
       allConsumersStopped: true,
     })).toEqual({ action: 'shrink' });
-  });
-
-  it('charges shared volume capacity to the shared backend', () => {
-    expect(capacityScope({
-      server_id: null,
-      shared_backend_id: 'shared-backend',
-    })).toEqual({ kind: 'shared_backend', id: 'shared-backend' });
-    expect(capacityScope({
-      server_id: 'server',
-      shared_backend_id: null,
-    })).toEqual({ kind: 'server', id: 'server' });
   });
 });
 

@@ -7,7 +7,6 @@ import type {
   PerformancePersonRow,
   PerformanceQuantity,
   PerformanceSeriesLine,
-  PerformanceSeriesPoint,
   PerformanceUsageResponse,
   PerformanceVolumeUsage,
 } from '@nyabase/common';
@@ -701,8 +700,4 @@ function lastValue(timeline: readonly number[], read: (ts: number) => number | n
     if (value !== null) return value;
   }
   return null;
-}
-
-export function seriesPoints(lines: PerformanceSeriesLine[]): PerformanceSeriesPoint[] {
-  return lines[0]?.points ?? [];
 }

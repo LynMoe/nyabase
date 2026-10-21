@@ -1,14 +1,5 @@
 import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import {
-  createCipheriv,
-  createHash,
-  createPrivateKey,
-  createPublicKey,
-  randomBytes,
-  randomUUID,
-  timingSafeEqual,
-  X509Certificate,
-} from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { execFile } from 'node:child_process';
 import { request } from 'node:https';
 import { join } from 'node:path';
@@ -55,8 +46,6 @@ const required = [
   'E2E_INCUS_SERVER_CERT_FINGERPRINT',
   'E2E_INCUS_CLIENT_CERT',
   'E2E_INCUS_CLIENT_KEY',
-  'E2E_INCUS_CONNECT_CLIENT_CERT',
-  'E2E_INCUS_CONNECT_CLIENT_KEY',
   'E2E_INCUS_CA_FILE',
   'E2E_INCUS_TRUST_TOKEN',
   'E2E_INCUS_PARENT_INTERFACE',
@@ -168,96 +157,6 @@ function requireImageFingerprint(name) {
     blocked(`${name} must be a 64-character image fingerprint`);
   }
   return value.toLowerCase();
-}
-
-function certificateMetadata(certificatePem, privateKeyPem) {
-  let certificate;
-  let privateKey;
-  try {
-    certificate = new X509Certificate(certificatePem);
-    privateKey = createPrivateKey(privateKeyPem);
-  } catch {
-    blocked('Incus client certificate/key is not valid PEM');
-  }
-  const certificatePublicKey = certificate.publicKey.export({ type: 'spki', format: 'der' });
-  const privatePublicKey = createPublicKey(privateKey).export({ type: 'spki', format: 'der' });
-  if (
-    certificatePublicKey.byteLength !== privatePublicKey.byteLength ||
-    !timingSafeEqual(certificatePublicKey, privatePublicKey)
-  ) {
-    blocked('Incus client certificate and private key do not match');
-  }
-  const notBefore = new Date(certificate.validFrom);
-  const notAfter = new Date(certificate.validTo);
-  if (
-    !certificate.fingerprint256 ||
-    !Number.isFinite(notBefore.getTime()) ||
-    !Number.isFinite(notAfter.getTime()) ||
-    notAfter <= notBefore
-  ) {
-    blocked('Incus client certificate validity is not usable');
-  }
-  return {
-    fingerprint: certificate.fingerprint256,
-    notBefore,
-    notAfter,
-  };
-}
-
-function encryptionKey(secret) {
-  if (!secret || secret.length < 16) {
-    blocked(
-      'NYABASE_CONFIG_FILE does not contain a usable ssh.keyEncryptionSecret or auth.jwtSecret',
-    );
-  }
-  return createHash('sha256').update(secret, 'utf8').digest();
-}
-
-function encryptPrivateKey(privateKeyPem, secret) {
-  const iv = randomBytes(12);
-  const cipher = createCipheriv('aes-256-gcm', encryptionKey(secret), iv);
-  const ciphertext = Buffer.concat([cipher.update(privateKeyPem, 'utf8'), cipher.final()]);
-  return [
-    'incus-v1',
-    iv.toString('base64url'),
-    cipher.getAuthTag().toString('base64url'),
-    ciphertext.toString('base64url'),
-  ].join('.');
-}
-
-function readEncryptionSecret() {
-  let configText;
-  try {
-    configText = readFileSync(process.env.NYABASE_CONFIG_FILE, 'utf8');
-  } catch {
-    blocked('NYABASE_CONFIG_FILE cannot be read');
-  }
-  const yamlScalar = (section, key) => {
-    let inSection = false;
-    for (const line of configText.split(/\r?\n/)) {
-      const topLevel = line.match(/^([^\s#][^:]*):\s*$/);
-      if (topLevel) {
-        inSection = topLevel[1] === section;
-        continue;
-      }
-      if (!inSection) continue;
-      const valueMatch = line.match(new RegExp(`^\\s{2}${key}:\\s*(.*?)\\s*$`));
-      if (valueMatch) {
-        const value = valueMatch[1].replace(/^(['"])(.*)\1$/, '$2');
-        return value && !value.startsWith('#') ? value : undefined;
-      }
-      if (line.trim() && !line.startsWith(' ')) break;
-    }
-    return undefined;
-  };
-  const secret =
-    process.env.E2E_INCUS_KEY_ENCRYPTION_SECRET ||
-    yamlScalar('ssh', 'keyEncryptionSecret') ||
-    yamlScalar('auth', 'jwtSecret');
-  if (!secret || secret.length < 16) {
-    blocked('NYABASE_CONFIG_FILE does not contain a usable certificate encryption secret');
-  }
-  return secret;
 }
 
 /** The Backend returns the refresh secret only as the HttpOnly nyabase_refresh cookie. */
@@ -589,9 +488,8 @@ const edgeTls = {
   cert: readOptionalFile('E2E_EDGE_CLIENT_CERT'),
   key: readOptionalFile('E2E_EDGE_CLIENT_KEY'),
 };
-// Direct Incus probes use the trusted bootstrap identity. The disposable
-// connect identity is reserved for the active certificate fixture and the
-// connect onboarding path.
+// Direct Incus probes use the operator's own trusted client identity, not the
+// control plane's generated one.
 const bootstrapIncusTls = {
   ca: readRegularFile('E2E_INCUS_CA_FILE'),
   cert: readRegularFile('E2E_INCUS_CLIENT_CERT'),
@@ -823,52 +721,6 @@ async function runPsql(sql, variables) {
   }
 }
 
-async function generateStagedCertificate() {
-  const directory = join(runtimeRoot, `certificate-${randomUUID()}`);
-  mkdirSync(directory, { recursive: true, mode: 0o700 });
-  const certPath = join(directory, 'client.crt');
-  const keyPath = join(directory, 'client.key');
-  try {
-    await execFileAsync(
-      'openssl',
-      [
-        'req',
-        '-x509',
-        '-newkey',
-        'rsa:3072',
-        '-nodes',
-        '-days',
-        '3650',
-        '-subj',
-        '/CN=nyabase-e2e-staged-client',
-        '-keyout',
-        keyPath,
-        '-out',
-        certPath,
-      ],
-      { timeout: 30_000, maxBuffer: 32 * 1024 },
-    );
-    const certificatePem = readFileSync(certPath);
-    const privateKeyPem = readFileSync(keyPath);
-    const metadata = certificateMetadata(certificatePem, privateKeyPem);
-    return {
-      certificatePem,
-      privateKeyPem,
-      metadata,
-    };
-  } catch (error) {
-    blocked(`unable to generate a staged client certificate: ${error.message}`);
-  } finally {
-    rmSync(directory, { recursive: true, force: true });
-  }
-}
-
-const bootstrapCertificatePem = readRegularFile('E2E_INCUS_CLIENT_CERT');
-const bootstrapPrivateKeyPem = readRegularFile('E2E_INCUS_CLIENT_KEY');
-const bootstrapMetadata = certificateMetadata(bootstrapCertificatePem, bootstrapPrivateKeyPem);
-const connectCertificatePem = readRegularFile('E2E_INCUS_CONNECT_CLIENT_CERT');
-const connectPrivateKeyPem = readRegularFile('E2E_INCUS_CONNECT_CLIENT_KEY');
-const connectMetadata = certificateMetadata(connectCertificatePem, connectPrivateKeyPem);
 const expectedServerFingerprint = requireFingerprint('E2E_INCUS_SERVER_CERT_FINGERPRINT');
 const expectedImageFingerprint = requireImageFingerprint('E2E_INCUS_IMAGE_FINGERPRINT');
 const expectedPreflightFingerprint = requireImageFingerprint(
@@ -883,9 +735,7 @@ if (!process.env.E2E_INCUS_PREFLIGHT_EGRESS_URL.startsWith('https://')) {
   blocked('preflight egress URL must use HTTPS');
 }
 
-const encryptionSecret = readEncryptionSecret();
 const previousSeedState = readPreviousSeedState();
-const staged = await generateStagedCertificate();
 let adminRefreshCookie = null;
 const session = await jsonRequest('/api/auth/login', {
   method: 'POST',
@@ -899,97 +749,6 @@ if (!session?.accessToken || !session.user?.id) {
   blocked('admin login did not return a usable session');
 }
 const token = session.accessToken;
-
-const certificatesSql = `
-BEGIN;
-UPDATE system.incus_client_certificates
-SET state = 'retired', retired_at = COALESCE(retired_at, clock_timestamp())
-WHERE state = 'active';
-UPDATE system.incus_client_certificates
-SET state = 'failed'
-WHERE state = 'staged';
-WITH next_generation AS (
-  SELECT COALESCE(MAX(generation), 0) + 1 AS generation
-  FROM system.incus_client_certificates
-),
-active_insert AS (
-  INSERT INTO system.incus_client_certificates (
-    id, generation, certificate_pem, encrypted_private_key, fingerprint,
-    not_before, not_after, state, created_by, activated_at, retired_at
-  )
-  SELECT :'active_id'::uuid, generation, :'active_cert', :'active_key', :'active_fp',
-    :'active_not_before'::timestamptz, :'active_not_after'::timestamptz,
-    'active', :'user_id'::uuid, clock_timestamp(), NULL
-  FROM next_generation
-  RETURNING id, generation
-)
-INSERT INTO system.incus_client_certificates (
-  id, generation, certificate_pem, encrypted_private_key, fingerprint,
-  not_before, not_after, state, created_by, activated_at, retired_at
-)
-SELECT :'staged_id'::uuid, generation + 1, :'staged_cert', :'staged_key', :'staged_fp',
-  :'staged_not_before'::timestamptz, :'staged_not_after'::timestamptz,
-  'staged', :'user_id'::uuid, NULL, NULL
-FROM active_insert;
-INSERT INTO system.incus_client_certificate_trusts (
-  certificate_id, server_id, state, last_error, observed_at
-)
-SELECT :'active_id'::uuid, id, :'active_trust_state', NULL,
-  CASE WHEN :'active_trust_state' = 'verified' THEN clock_timestamp() ELSE NULL END
-FROM infra.servers
-ON CONFLICT (certificate_id, server_id) DO UPDATE
-SET state = :'active_trust_state',
-    last_error = NULL,
-    observed_at = CASE
-      WHEN :'active_trust_state' = 'verified' THEN clock_timestamp()
-      ELSE NULL
-    END;
-INSERT INTO system.incus_client_certificate_trusts (
-  certificate_id, server_id, state, last_error, observed_at
-)
-SELECT :'staged_id'::uuid, id, 'pending', NULL, NULL
-FROM infra.servers
-ON CONFLICT (certificate_id, server_id) DO UPDATE
-SET state = 'pending', last_error = NULL, observed_at = NULL;
-COMMIT;
-`;
-
-async function installCertificateFixture(
-  certificatePem,
-  privateKeyPem,
-  metadata,
-  activeTrustState = 'verified',
-) {
-  if (activeTrustState !== 'pending' && activeTrustState !== 'verified') {
-    blocked(`unsupported active certificate trust state: ${activeTrustState}`);
-  }
-  await runPsql(certificatesSql, {
-    active_id: randomUUID(),
-    staged_id: randomUUID(),
-    active_cert: certificatePem.toString(),
-    active_key: encryptPrivateKey(privateKeyPem.toString(), encryptionSecret),
-    active_fp: metadata.fingerprint,
-    active_not_before: metadata.notBefore.toISOString(),
-    active_not_after: metadata.notAfter.toISOString(),
-    staged_cert: staged.certificatePem.toString(),
-    staged_key: encryptPrivateKey(staged.privateKeyPem.toString(), encryptionSecret),
-    staged_fp: staged.metadata.fingerprint,
-    staged_not_before: staged.metadata.notBefore.toISOString(),
-    staged_not_after: staged.metadata.notAfter.toISOString(),
-    user_id: session.user.id,
-    active_trust_state: activeTrustState,
-  });
-}
-
-// Seed the trusted bootstrap identity before any server registration. This
-// keeps background scans on a trusted client while connect onboarding is
-// still pending.
-await installCertificateFixture(
-  bootstrapCertificatePem,
-  bootstrapPrivateKeyPem,
-  bootstrapMetadata,
-  'verified',
-);
 
 const actualServerName = await resolveIncusServerName(incusRequest);
 const registration = createServerRegistrationConfig(process.env, runId, actualServerName);
@@ -1071,16 +830,8 @@ if (peerServerId && peerServerId !== server.id) {
   }
 }
 
-// Switch the active control-plane identity before submitting the one-time
-// onboarding intent. The backend will use this run-scoped certificate for the
-// trust-token side effect and every subsequent server operation.
-await installCertificateFixture(
-  connectCertificatePem,
-  connectPrivateKeyPem,
-  connectMetadata,
-  'pending',
-);
-
+// The backend generated its own client identity on first use. The one-time
+// trust token below is what makes this lab Incus trust that identity.
 let currentServer = await jsonRequest(`/api/servers/${server.id}?scope=all`, { token });
 const connectResult = await jsonRequest(`/api/servers/${server.id}/connect`, {
   method: 'POST',
@@ -1258,39 +1009,9 @@ if (!privatePreflightInfo.stdout.toLowerCase().includes(expectedPreflightFingerp
 }
 const preflight = await ensurePreflight(token, currentServer, registeredDir.id);
 
-const verification = await runPsql(
-  `
-SELECT COALESCE((
-  SELECT t.state
-  FROM system.incus_client_certificate_trusts t
-  JOIN system.incus_client_certificates c ON c.id = t.certificate_id
-  WHERE c.state = 'active' AND t.server_id = :'server_id'::uuid
-), 'missing') || '|' ||
-  COUNT(*) FILTER (WHERE state = 'active') || '|' ||
-  COUNT(*) FILTER (WHERE state = 'staged') || '|' ||
-  (SELECT COUNT(*) FROM system.incus_client_certificate_trusts t
-    JOIN system.incus_client_certificates c ON c.id = t.certificate_id
-    WHERE c.state = 'active' AND t.server_id = :'server_id'::uuid
-      AND t.state IN ('trusted', 'verified')) || '|' ||
-  (SELECT COUNT(*) FROM system.incus_client_certificate_trusts t
-    JOIN system.incus_client_certificates c ON c.id = t.certificate_id
-    WHERE c.state = 'staged' AND t.server_id = :'server_id'::uuid
-      AND t.state = 'pending')
-FROM system.incus_client_certificates;
-`,
-  { server_id: server.id },
-);
-const [activeTrustState, activeCount, stagedCount, trustedCount, pendingCount] = verification.stdout
-  .trim()
-  .split('|');
-if (
-  activeTrustState !== 'verified' ||
-  activeCount !== '1' ||
-  stagedCount !== '1' ||
-  trustedCount !== '1' ||
-  pendingCount !== '1'
-) {
-  blocked('certificate fixture verification did not observe the active trust transition');
+const clientIdentity = await jsonRequest('/api/admin/system-settings/incus-client-identity', { token });
+if (!clientIdentity?.fingerprint || 'privateKeyPem' in clientIdentity) {
+  blocked('the generated control-plane client identity is not readable');
 }
 
 // Admin inventory is authoritative for fixture binding; the user-facing list is

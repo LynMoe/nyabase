@@ -128,32 +128,15 @@ test(
 );
 
 test(
-  'rotates the control-plane certificate and observes its intent',
-  { ...coverageCase('server-certificate-rotation', 'server-certificate-rotation-live') },
+  'shows the generated control-plane client identity read-only',
+  { ...coverageCase('server-client-identity', 'server-client-identity-live') },
   async ({ adminApi }) => {
-    const active = await expectJson<JsonRecord>(
-      await adminApi.get('/api/admin/incus-client-certificate'),
+    const identity = await expectJson<JsonRecord>(
+      await adminApi.get('/api/admin/system-settings/incus-client-identity'),
     );
-    expect(Number(active.generation)).toBeGreaterThanOrEqual(1);
-
-    const rotation = await expectJson<JsonRecord>(
-      await adminApi.post('/api/admin/incus-client-certificate/rotate', {
-        data: { expectedGeneration: active.generation },
-      }),
-    );
-    expect(rotation.rotationId).toBeTruthy();
-    const result = await eventually(
-      async () => expectJson<JsonRecord>(
-        await adminApi.get(
-          `/api/admin/incus-client-certificate/rotations/${rotation.rotationId}`,
-        ),
-      ),
-      (entry) => entry.status === 'succeeded',
-      180_000,
-      500,
-      'certificate rotation intent',
-    );
-    expect(Number(result.generation)).toBeGreaterThan(Number(active.generation));
+    expect(String(identity.fingerprint)).toMatch(/^[0-9A-Fa-f:]{32,95}$/);
+    expect(new Date(String(identity.notAfter)).getTime()).toBeGreaterThan(Date.now());
+    expect(identity).not.toHaveProperty('privateKeyPem');
   },
 );
 

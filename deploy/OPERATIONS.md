@@ -308,8 +308,8 @@ rebuilding vmbr.
 - VictoriaMetrics data lives in `vm-data`. Its outage must not block control-plane
   writes or Incus reconciliation.
 
-After a Backend restart, validate that durable intents converge through
-PostgreSQL polling. During a VictoriaMetrics outage, PostgreSQL control
+After a Backend restart, validate that durable intents converge through the
+worker's periodic full scan. During a VictoriaMetrics outage, PostgreSQL control
 mutations and Incus reconciliation must remain responsive; metric ingestion is
 bounded and lossy until VictoriaMetrics returns.
 
@@ -559,35 +559,25 @@ from the product SLO and measured baseline, not from this example deployment.
 - Add a VictoriaMetrics auth proxy only when telemetry endpoints cross a trust
   boundary.
 
-## Incus 客户端证书（10 年寿命与自动轮换）
+## Incus 客户端证书（首次启动自动生成，不轮换）
 
 控制平面使用一张**共享**的 Incus 客户端证书，以 mTLS 调用每台 Incus。
-`openssl req -x509` 签发时使用 `-days 3650`（约 10 年）。不要把这张证
-书当成短期工作负载身份。
+首次需要它时（通常是第一次连接服务器）后端用 `openssl req -x509 -days 3650`
+自动生成（约 10 年），私钥以 `ssh.keyEncryptionSecret` 加密，存入单行表
+`system.incus_client_identity`（`certificate_pem`、`encrypted_private_key`、
+`fingerprint`、`not_after`、`created_at`）。并发首启动是安全的：生成方
+`INSERT … ON CONFLICT DO NOTHING` 后重读，最终只有一行。
 
-### 90 天持续告警
-
-自 `notAfter` 剩余寿命 ≤ 90 天起，管理面**每一处**管理员布局都持续展示
-告警横幅，而不是只在打开某台服务器详情时才提示。服务器详情仍显示
-`notAfter`，以及暂存轮换向导状态：信任新证书 → 切换生效 → 吊销旧证书。
-
-### 自动与手动轮换
-
-- 自动：约每 60 秒（带抖动）检查一次。进入 90 天窗口、没有暂存证书、也没有 pending `certificate.rotate` 意图时，以登录禁用的 `nyabase-system` 身份入队；找不到该用户则本轮跳过并记日志，不得冒充人类管理员。
-- 手动：具备 `ManageCertificates` 的管理员调用
-  `POST /api/admin/incus-client-certificate/rotate`（需 `expectedGeneration`）。
-  当前生效证书见 `GET /api/admin/incus-client-certificate`（`ManageCertificates` 或 `ManageServers` 只读）；轮换进度见
-  `GET /api/admin/incus-client-certificate/rotations/:id`。
-
-顺序必须是：**持久化暂存证书 → 在可达服务器上信任新证书 → 切换为生效行
-→ 吊销旧证书**（Incus `DELETE /1.0/certificates/{fingerprint}`）。信任行
-状态包含 `pending` / `trusted` / `verified` / `revoked` / `cleanup_failed`。
-Incus HTTP（信任 / 校验 / 吊销）必须在 `lockServerOnboarding` 事务之外执行，
-否则会撞上 `PG_IDLE_IN_TRANSACTION_TIMEOUT_MS`（30s）。
-
-从未上线、未知或不可达的服务器**不得**无限期阻塞整集群切换。对非在线主机
-最多重试 3 次，标记 `needs_attention`，一旦**当前在线**的每台服务器都已验证候选
-证书即可激活。吊销失败不回滚激活，后续调和再试，直到成功或 `cleanup_failed`。
+- 不提供轮换、导入或配置项；`incus.clientCertificate*` / `incus.clientPrivateKey*`
+  与 Compose secrets `incus_client_cert` / `incus_client_key` 已删除。
+  部署只需提供 Incus 服务器 CA（`INCUS_CA_FILE` / `incus_ca`）。
+- 只读查看指纹与过期时间：`GET /api/admin/system-settings/incus-client-identity`
+  （`ManageSystemSettings` 或 `ManageServers`），前端在服务器列表页展示。
+- 连接服务器时，一次性 trust token 把这张证书加入 Incus 信任。后端是否已被信任
+  由 Incus 自己回答（`GET /1.0` 的 `auth=trusted`），重试不再需要 token。
+- 10 年到期前需要人工处理：备份并清空 `system.incus_client_identity` 行后重启，
+  重新生成，再在每台 Incus 上用新的 trust token 重新信任（`incus config trust list`
+  查看旧指纹并清理）。这是极低频的运维动作，没有自动化。
 
 ### 控制平面被锁在外面时的恢复
 
@@ -595,20 +585,11 @@ Incus HTTP（信任 / 校验 / 吊销）必须在 `lockServerOnboarding` 事务�
 
 ```bash
 incus config trust list
-incus config trust add /path/to/new-nyabase-client.crt
+incus config trust add /path/to/nyabase-client.crt
 ```
 
-先确认新客户端证书已作为受信任的 root 客户端加入，再让控制平面用新身份
-重试。不要在未把新证书加入 trust store 的情况下吊销旧指纹。
-
-### 引导 PEM 与数据库生效行
-
-`INCUS_CLIENT_CERT_FILE` / `INCUS_CLIENT_KEY_FILE`（以及 Compose secrets
-`incus_client_cert` / `incus_client_key`）只用于**引导第 1 代**：
-`DatabaseIncusClientFactory` 在库中尚无 `state=active` 行时读取这些文件，
-插入 `generation=1` 的加密私钥行。第 1 代之后，运行时客户端**只**使用数据
-库中的生效行；轮换不会回写引导 PEM。不要假设磁盘上的 bootstrap 文件仍与
-当前客户端身份一致。
+从 `system.incus_client_identity.certificate_pem` 导出证书，确认已作为受信任的
+root 客户端加入后再让控制平面重试。
 
 ## 在每台 Incus 主机安装 node-exporter
 

@@ -227,7 +227,7 @@ describe('volume API placement paths', () => {
     expect(accepted).toMatchObject({ intentId: 'intent-1', resourceId: volumeId, status: 'pending' });
   });
 
-  it('attaches a shared volume without volume.ensure or blocked_by', async () => {
+  it('attaches a shared volume without volume.ensure', async () => {
     const containerId = 'dddddddd-dddd-4ddd-8ddd-dddddddddddd';
     const backendId = 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee';
     const query = {
@@ -297,7 +297,6 @@ describe('volume API placement paths', () => {
     expect(intents.ensurePending).not.toHaveBeenCalled();
     expect(intents.createPending).toHaveBeenCalledWith(expect.objectContaining({
       kind: IntentKind.ContainerUpdate,
-      blockedByIntentId: null,
       request: expect.objectContaining({ operation: 'attach_volume' }),
     }), transaction);
   });

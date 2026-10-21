@@ -1,8 +1,5 @@
 import {
   Capability,
-  CertificateRotationStatus,
-  CertificateState,
-  CertificateTrustState,
   ContainerPhase,
   ContainerPowerIntent,
   ContainerStatus,
@@ -68,7 +65,6 @@ export type {
   PutSharedBackendGrantRequest,
   PutStoragePoolGrantRequest,
   RetryIntentRequest,
-  RotateIncusClientCertificateRequest,
   RotateRefreshTokenRequest,
   RunPreflightRequest,
   ServerNetworkFields,
@@ -84,13 +80,6 @@ export interface ExecSessionResponse {
   expiresAt: string;
 }
 
-export interface PaginatedResponse<T> {
-  items: T[];
-  total: number;
-  page: number;
-  pageSize: number;
-}
-
 export interface CursorPaginatedResponse<T> {
   items: T[];
   nextCursor: string | null;
@@ -98,11 +87,6 @@ export interface CursorPaginatedResponse<T> {
 
 /** The refresh secret travels only in the HttpOnly `nyabase_refresh` cookie. */
 export interface LoginResponse {
-  accessToken: string;
-  user: UserDto;
-}
-
-export interface RefreshTokenResponse {
   accessToken: string;
   user: UserDto;
 }
@@ -150,18 +134,6 @@ export interface SshPublicKeyDto {
   name: string;
   keyText: string;
   createdAt: string;
-}
-
-export interface ApiTokenDto {
-  id: string;
-  name: string;
-  lastUsedAt: string | null;
-  createdAt: string;
-}
-
-export interface CreateApiTokenResponse {
-  token: ApiTokenDto;
-  secret: string;
 }
 
 export interface PublicSettingsDto {
@@ -226,7 +198,6 @@ export interface SystemSettingFieldDto {
 
 export interface SystemSettingsDto {
   revision: number;
-  snapshotToken: string;
   configFile: string;
   fields: SystemSettingFieldDto[];
   editable: SystemSettingFieldDto[];
@@ -308,15 +279,6 @@ export interface UserServerDto {
   lastSeenAt: string | null;
   preflightStatus: PreflightStatus;
   gpuEnabled: boolean;
-}
-
-export interface ServerConnectionDto {
-  serverId: string;
-  status: ServerStatus;
-  incusVersion: string | null;
-  apiExtensions: string[];
-  serverCertFingerprint: string | null;
-  connectedAt: string | null;
 }
 
 export interface NodeMetricsConfigDto {
@@ -772,10 +734,6 @@ export interface IntentAcceptedDto {
   createdAt: string;
 }
 
-export interface IntentBatchAcceptedDto {
-  intents: IntentAcceptedDto[];
-}
-
 export interface IntentDto {
   id: string;
   kind: IntentKind;
@@ -793,103 +751,13 @@ export interface IntentDto {
   nextAttemptAt: string | null;
   createdAt: string;
   settledAt: string | null;
-  blockedByIntentId?: string | null;
 }
 
-export interface IncusClientCertificateDto {
-  generation: number;
+export interface IncusClientIdentityDto {
   fingerprint: string;
-  notBefore: string;
   notAfter: string;
-  state: CertificateState;
-  servers: Array<{
-    serverId: string;
-    trustState: CertificateTrustState;
-    observedAt: string | null;
-    lastError: string | null;
-  }>;
+  createdAt: string;
 }
-
-export interface CertificateRotationDto {
-  rotationId: string;
-  generation: number;
-  status: CertificateRotationStatus;
-  certificate: IncusClientCertificateDto;
-  failureCode: string | null;
-}
-
-export interface MetricSeries {
-  step: number;
-  points: Array<{ t: number; v: number | null }>;
-}
-
-export interface HostDiskMetrics {
-  deviceId: string;
-  displayName: string;
-  used: MetricSeries;
-  total: MetricSeries;
-  readBytes: MetricSeries;
-  writeBytes: MetricSeries;
-  readSeconds: MetricSeries;
-  writeSeconds: MetricSeries;
-  smartHealth: MetricSeries;
-}
-
-export interface HostMetricsDto {
-  source: NodeMetricsHealthDto;
-  cpu: MetricSeries;
-  memoryUsed: MetricSeries;
-  memoryTotal: MetricSeries;
-  load1: MetricSeries;
-  cpuPsi: Record<'some' | 'full', Record<'10' | '60' | '300', MetricSeries>>;
-  disks: HostDiskMetrics[];
-}
-
-export interface UserMetrics {
-  userId: string;
-  username: string;
-  displayName: string;
-  cpu: MetricSeries;
-  memoryUsed: MetricSeries;
-  diskBytesPerSecond: MetricSeries;
-  networkBytesPerSecond: MetricSeries;
-}
-
-export interface UserMetricsDto {
-  users: UserMetrics[];
-}
-
-export interface ContainerMetrics {
-  containerId: string;
-  name: string;
-  ownerId: string;
-  cpu: MetricSeries;
-  memoryUsed: MetricSeries;
-  diskBytesPerSecond: MetricSeries;
-  networkBytesPerSecond: MetricSeries;
-}
-
-export interface ContainerMetricsDto {
-  containers: ContainerMetrics[];
-}
-
-export interface PhysicalResultSucceeded {
-  kind: 'succeeded';
-}
-
-export interface PhysicalResultFailed {
-  kind: 'failed';
-  code: string;
-  details: Record<string, unknown>;
-}
-
-export interface PhysicalResultRetry {
-  kind: 'retry';
-  code: string;
-  details: Record<string, unknown>;
-}
-
-export type PhysicalResult = PhysicalResultSucceeded | PhysicalResultFailed | PhysicalResultRetry;
 
 export interface ServerPreflightDto {
   status: PreflightStatus;

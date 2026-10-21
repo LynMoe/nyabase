@@ -241,7 +241,6 @@ describePg('volume reconciler equal-node destroy', () => {
         failure_json: null,
         attempt_count: 0,
         next_attempt_at: null,
-        blocked_by_intent_id: null,
         settled_at: null,
       }).execute();
       const get = vi.fn();

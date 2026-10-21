@@ -13,13 +13,8 @@ function deferred<T>() {
   return { promise, resolve };
 }
 
-function database(
-  selectResult?: unknown,
-  trustState: 'pending' | 'trusted' | 'verified' | null = 'pending',
-) {
+function database(selectResult?: unknown) {
   const updates: Array<Record<string, unknown>> = [];
-  const trustWrites: Array<Record<string, unknown>> = [];
-  let currentTrustState = trustState;
   const builder = (table: string) => {
     const query: Record<string, ReturnType<typeof vi.fn>> = {};
     for (const method of ['select', 'selectAll', 'where', 'forUpdate', 'orderBy', 'innerJoin']) {
@@ -28,15 +23,9 @@ function database(
     query.executeTakeFirst = vi
       .fn()
       .mockResolvedValue(
-        table === 'system.incus_client_certificates'
-          ? { id: '00000000-0000-4000-8000-000000000010' }
-          : table === 'system.incus_client_certificate_trusts'
-            ? currentTrustState === null
-              ? undefined
-              : { state: currentTrustState }
-            : String(table).includes('ip_pool')
-              ? { gateway: '192.0.2.1', cidr: '192.0.2.0/24' }
-              : selectResult,
+        String(table).includes('ip_pool')
+          ? { gateway: '192.0.2.1', cidr: '192.0.2.0/24' }
+          : selectResult,
       );
     query.execute = vi.fn().mockResolvedValue(
       String(table).includes('ip_pool')
@@ -60,22 +49,7 @@ function database(
       }),
     })),
     selectFrom: vi.fn((table: string) => builder(table)),
-    insertInto: vi.fn(() => {
-      const query: Record<string, ReturnType<typeof vi.fn>> = {};
-      query.values = vi.fn((values: Record<string, unknown>) => {
-        trustWrites.push(values);
-        currentTrustState = values.state as typeof currentTrustState;
-        return query;
-      });
-      query.onConflict = vi.fn(() => query);
-      query.execute = vi.fn().mockResolvedValue(undefined);
-      return query;
-    }),
     updates,
-    trustWrites,
-    setTrustState: (state: typeof trustState) => {
-      currentTrustState = state;
-    },
   };
   const transaction = {
     ...database,
@@ -91,6 +65,14 @@ function database(
     ),
   }));
   return database;
+}
+
+function untrustedResponse() {
+  return {
+    metadata: { auth: 'untrusted', api_extensions: [] },
+    status: 200,
+    envelope: { type: 'sync' },
+  };
 }
 
 function passingLanNetwork() {
@@ -364,7 +346,7 @@ describe('ServerPreflightReconciler', () => {
     expect(db.transaction).toHaveBeenCalled();
   });
 
-  it('persists trusted before a delayed read and verifies after the read succeeds', async () => {
+  it('retries the post-trust read through trust propagation and then projects online state', async () => {
     const fixture = database();
     const trustTokens = {
       storeTrustToken: vi.fn(),
@@ -391,6 +373,7 @@ describe('ServerPreflightReconciler', () => {
       trustClientCertificate: vi.fn().mockResolvedValue(response),
       getServer: vi
         .fn()
+        .mockResolvedValueOnce(untrustedResponse())
         .mockRejectedValueOnce(new IncusError('TLS_ERROR', 'retry'))
         .mockImplementation(async () => {
           readStarted.resolve(undefined);
@@ -398,7 +381,6 @@ describe('ServerPreflightReconciler', () => {
           return response;
         }),
     };
-    const trustWrites = fixture.trustWrites as Array<Record<string, unknown>>;
     const connectWithTrustToken = (
       instance as unknown as {
         connectWithTrustToken: (
@@ -422,17 +404,15 @@ describe('ServerPreflightReconciler', () => {
       new AbortController().signal,
     );
     await readStarted.promise;
-    expect(trustWrites[0]).toMatchObject({ state: 'trusted' });
     expect(trustTokens.consumeClaimedTrustToken).toHaveBeenCalledOnce();
     releaseRead.resolve(undefined);
     await pending;
 
-    expect(trustWrites.map((write) => write.state)).toEqual(['trusted', 'verified']);
     expect(fixture.updates).toContainEqual(expect.objectContaining({ status: 'online' }));
     expect(trustTokens.releaseClaimedTrustToken).not.toHaveBeenCalled();
   });
 
-  it('persists trusted after a completed asynchronous trust operation', async () => {
+  it('waits for a completed asynchronous trust operation', async () => {
     const fixture = database();
     const trustTokens = {
       storeTrustToken: vi.fn(),
@@ -491,12 +471,7 @@ describe('ServerPreflightReconciler', () => {
     );
 
     expect(client.getOperationWait).toHaveBeenCalledOnce();
-    expect(fixture.trustWrites).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({ state: 'trusted' }),
-        expect.objectContaining({ state: 'verified' }),
-      ]),
-    );
+    expect(fixture.updates).toContainEqual(expect.objectContaining({ status: 'online' }));
   });
 
   it('fails the connect intent with TRUST_TOKEN_MISSING when the token was lost or expired', async () => {
@@ -536,7 +511,7 @@ describe('ServerPreflightReconciler', () => {
     expect(trustTokens.releaseClaimedTrustToken).not.toHaveBeenCalled();
   });
 
-  it('skips the token after a trusted side effect when the first read fails', async () => {
+  it('skips the token on retry when the first attempt already trusted the identity', async () => {
     const fixture = database();
     const firstAttempt = new AbortController();
     const trustTokens = {
@@ -546,8 +521,9 @@ describe('ServerPreflightReconciler', () => {
       releaseClaimedTrustToken: vi.fn().mockReturnValue(true),
     };
     const instance = reconciler(fixture, trustTokens);
-    const response = {
+    const trusted = {
       metadata: {
+        auth: 'trusted',
         environment: {
           server_name: 'test-server',
           certificate_fingerprint: 'aa'.repeat(32),
@@ -559,13 +535,16 @@ describe('ServerPreflightReconciler', () => {
     };
     const getServer = vi
       .fn()
+      // attempt 1: trust probe says untrusted, then the post-trust read fails
+      .mockResolvedValueOnce(untrustedResponse())
       .mockImplementationOnce(async () => {
         firstAttempt.abort();
         throw new IncusError('TLS_ERROR', 'retry');
       })
-      .mockResolvedValue(response);
+      // attempt 2: the server now reports the identity as trusted
+      .mockResolvedValue(trusted);
     const client = {
-      trustClientCertificate: vi.fn().mockResolvedValue(response),
+      trustClientCertificate: vi.fn().mockResolvedValue(trusted),
       getServer,
     };
     const connectWithTrustToken = (
@@ -606,60 +585,6 @@ describe('ServerPreflightReconciler', () => {
     expect(client.trustClientCertificate).toHaveBeenCalledOnce();
     expect(trustTokens.consumeClaimedTrustToken).toHaveBeenCalledOnce();
     expect(trustTokens.releaseClaimedTrustToken).not.toHaveBeenCalled();
-  });
-
-  it('claims and records trust when the active certificate row is absent', async () => {
-    const fixture = database(undefined, null);
-    const trustTokens = {
-      storeTrustToken: vi.fn(),
-      claimTrustToken: vi.fn().mockReturnValue('one-time-secret'),
-      consumeClaimedTrustToken: vi.fn().mockReturnValue(true),
-      releaseClaimedTrustToken: vi.fn().mockReturnValue(true),
-    };
-    const instance = reconciler(fixture, trustTokens);
-    const response = {
-      metadata: {
-        environment: {
-          server_name: 'test-server',
-          certificate_fingerprint: 'aa'.repeat(32),
-        },
-        api_extensions: [],
-      },
-      status: 200,
-      envelope: { type: 'sync' },
-    };
-    const client = {
-      trustClientCertificate: vi.fn().mockResolvedValue(response),
-      getServer: vi.fn().mockResolvedValue(response),
-    };
-    await (
-      instance as unknown as {
-        connectWithTrustToken: (
-          client: unknown,
-          server: unknown,
-          intent: unknown,
-          signal: AbortSignal,
-        ) => Promise<void>;
-      }
-    ).connectWithTrustToken(
-      client,
-      server(),
-      {
-        request: {
-          trustTokenRef: '00000000-0000-4000-8000-000000000002',
-        },
-      } as never,
-      new AbortController().signal,
-    );
-
-    expect(trustTokens.claimTrustToken).toHaveBeenCalledOnce();
-    expect(client.trustClientCertificate).toHaveBeenCalledOnce();
-    expect(fixture.trustWrites).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({ state: 'trusted' }),
-        expect.objectContaining({ state: 'verified' }),
-      ]),
-    );
   });
 
   it('keeps concurrent connect intents isolated by fingerprint and trust token', async () => {
@@ -786,7 +711,8 @@ describe('ServerPreflightReconciler', () => {
       '00000000-0000-4000-8000-000000000002',
       expect.any(String),
     );
-    expect(client.getServer).not.toHaveBeenCalled();
+    // Only the trust probe read; no post-trust connect read happened.
+    expect(client.getServer).toHaveBeenCalledTimes(1);
   });
 
   it('cleans up a stale managed probe after stopping it and verifies absence', async () => {

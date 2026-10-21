@@ -47,9 +47,10 @@ function serverValues(id: string) {
   };
 }
 
-function response() {
+function response(auth: 'trusted' | 'untrusted' = 'trusted') {
   return {
     metadata: {
+      auth,
       environment: {
         server_name: 'pg-connect-node',
         certificate_fingerprint: 'aa'.repeat(32),
@@ -59,6 +60,19 @@ function response() {
     },
     status: 200,
     envelope: { type: 'sync' },
+  };
+}
+
+/** An Incus server that reports `untrusted` until the trust call completed. */
+function incusServer(onTrust?: () => Promise<void>) {
+  let trusted = false;
+  return {
+    trustClientCertificate: vi.fn(async () => {
+      await onTrust?.();
+      trusted = true;
+      return response();
+    }),
+    getServer: vi.fn(async () => response(trusted ? 'trusted' : 'untrusted')),
   };
 }
 
@@ -101,93 +115,33 @@ function reconciler(database: unknown, trustTokens: unknown): ServerPreflightRec
   );
 }
 
-describePg('server connect trust projection', () => {
-  it('commits trusted before a delayed read and projects verified online state', async () => {
+const serverRow = (serverId: string) => ({
+  id: serverId,
+  name: 'pg-connect-node',
+  server_cert_fingerprint: 'aa'.repeat(32),
+  status: 'unknown',
+  revision: 1,
+});
+
+function tokens() {
+  return {
+    claimTrustToken: vi.fn().mockReturnValue('one-time-secret'),
+    consumeClaimedTrustToken: vi.fn().mockReturnValue(true),
+    releaseClaimedTrustToken: vi.fn().mockReturnValue(true),
+  };
+}
+
+describePg('server connect trust', () => {
+  it('trusts the client identity with the one-time token and projects online state', async () => {
     await withPostgresTestDatabase(async ({ database }) => {
       const serverId = randomUUID();
-      const certificateId = randomUUID();
       await database.insertInto('infra.servers').values(serverValues(serverId)).execute();
-      await database
-        .insertInto('system.incus_client_certificates')
-        .values({
-          id: certificateId,
-          generation: 1,
-          certificate_pem: 'active-certificate',
-          encrypted_private_key: 'active-private-key',
-          fingerprint: 'bb'.repeat(32),
-          not_before: new Date('2026-01-01T00:00:00Z'),
-          not_after: new Date('2027-01-01T00:00:00Z'),
-          state: 'active',
-          created_by: null,
-          activated_at: new Date('2026-01-01T00:00:00Z'),
-          retired_at: null,
-        })
-        .execute();
-      await database
-        .insertInto('system.incus_client_certificate_trusts')
-        .values({
-          certificate_id: certificateId,
-          server_id: serverId,
-          state: 'pending',
-          last_error: null,
-          observed_at: null,
-        })
-        .execute();
+      const trustTokens = tokens();
+      const client = incusServer();
 
-      const trustTokens = {
-        claimTrustToken: vi.fn().mockReturnValue('one-time-secret'),
-        consumeClaimedTrustToken: vi.fn().mockReturnValue(true),
-        releaseClaimedTrustToken: vi.fn().mockReturnValue(true),
-      };
-      const readStarted = deferred<void>();
-      const releaseRead = deferred<void>();
-      const clientResponse = response();
-      const client = {
-        trustClientCertificate: vi.fn().mockResolvedValue(clientResponse),
-        getServer: vi.fn(async () => {
-          readStarted.resolve(undefined);
-          await releaseRead.promise;
-          await expect(
-            database
-              .selectFrom('system.incus_client_certificate_trusts')
-              .select('state')
-              .where('certificate_id', '=', certificateId)
-              .where('server_id', '=', serverId)
-              .executeTakeFirstOrThrow(),
-          ).resolves.toEqual({ state: 'trusted' });
-          return clientResponse;
-        }),
-      };
-      const service = reconciler(database, trustTokens);
+      await connect(reconciler(database, trustTokens), client, serverRow(serverId), randomUUID());
 
-      const pending = connect(
-        service,
-        client,
-        {
-          id: serverId,
-          name: 'pg-connect-node',
-          server_cert_fingerprint: 'aa'.repeat(32),
-          status: 'unknown',
-          revision: 1,
-        },
-        randomUUID(),
-      );
-      await readStarted.promise;
-      releaseRead.resolve(undefined);
-      await pending;
-
-      await expect(
-        database
-          .selectFrom('system.incus_client_certificate_trusts')
-          .select(['state', 'last_error', 'observed_at'])
-          .where('certificate_id', '=', certificateId)
-          .where('server_id', '=', serverId)
-          .executeTakeFirstOrThrow(),
-      ).resolves.toMatchObject({
-        state: 'verified',
-        last_error: null,
-        observed_at: expect.any(Date),
-      });
+      expect(client.trustClientCertificate).toHaveBeenCalledOnce();
       await expect(
         database
           .selectFrom('infra.servers')
@@ -201,81 +155,46 @@ describePg('server connect trust projection', () => {
     });
   });
 
-  it('serializes concurrent connects so only the first pending flow uses the token', async () => {
+  it('does not need a token when the server already trusts the client identity', async () => {
     await withPostgresTestDatabase(async ({ database }) => {
       const serverId = randomUUID();
-      const certificateId = randomUUID();
       await database.insertInto('infra.servers').values(serverValues(serverId)).execute();
-      await database
-        .insertInto('system.incus_client_certificates')
-        .values({
-          id: certificateId,
-          generation: 1,
-          certificate_pem: 'active-certificate',
-          encrypted_private_key: 'active-private-key',
-          fingerprint: 'cc'.repeat(32),
-          not_before: new Date('2026-01-01T00:00:00Z'),
-          not_after: new Date('2027-01-01T00:00:00Z'),
-          state: 'active',
-          created_by: null,
-          activated_at: new Date('2026-01-01T00:00:00Z'),
-          retired_at: null,
-        })
-        .execute();
-      await database
-        .insertInto('system.incus_client_certificate_trusts')
-        .values({
-          certificate_id: certificateId,
-          server_id: serverId,
-          state: 'pending',
-          last_error: null,
-          observed_at: null,
-        })
-        .execute();
+      const trustTokens = tokens();
+      const client = {
+        trustClientCertificate: vi.fn(),
+        getServer: vi.fn().mockResolvedValue(response('trusted')),
+      };
 
+      await connect(reconciler(database, trustTokens), client, serverRow(serverId), randomUUID());
+
+      expect(client.trustClientCertificate).not.toHaveBeenCalled();
+      expect(trustTokens.claimTrustToken).not.toHaveBeenCalled();
+      await expect(
+        database
+          .selectFrom('infra.servers')
+          .select('status')
+          .where('id', '=', serverId)
+          .executeTakeFirstOrThrow(),
+      ).resolves.toEqual({ status: 'online' });
+    });
+  });
+
+  it('serializes concurrent connects so only the first flow uses the token', async () => {
+    await withPostgresTestDatabase(async ({ database }) => {
+      const serverId = randomUUID();
+      await database.insertInto('infra.servers').values(serverValues(serverId)).execute();
       const trustStarted = deferred<void>();
       const releaseTrust = deferred<void>();
-      const clientResponse = response();
-      const client = {
-        trustClientCertificate: vi.fn(async () => {
-          trustStarted.resolve(undefined);
-          await releaseTrust.promise;
-          return clientResponse;
-        }),
-        getServer: vi.fn().mockResolvedValue(clientResponse),
-      };
-      const trustTokens = {
-        claimTrustToken: vi.fn().mockReturnValue('one-time-secret'),
-        consumeClaimedTrustToken: vi.fn().mockReturnValue(true),
-        releaseClaimedTrustToken: vi.fn().mockReturnValue(true),
-      };
+      const client = incusServer(async () => {
+        trustStarted.resolve(undefined);
+        await releaseTrust.promise;
+      });
+      const trustTokens = tokens();
       const service = reconciler(database, trustTokens);
-      const first = connect(
-        service,
-        client,
-        {
-          id: serverId,
-          name: 'pg-connect-node',
-          server_cert_fingerprint: 'aa'.repeat(32),
-          status: 'unknown',
-          revision: 1,
-        },
-        randomUUID(),
-      );
+      const first = connect(service, client, serverRow(serverId), randomUUID());
       await trustStarted.promise;
 
-      const second = connect(
-        service,
-        client,
-        {
-          id: serverId,
-          name: 'pg-connect-node',
-          server_cert_fingerprint: 'aa'.repeat(32),
-          status: 'unknown',
-          revision: 1,
-        },
-        randomUUID(),
-      );
+      const second = connect(service, client, serverRow(serverId), randomUUID());
       await new Promise((resolve) => setImmediate(resolve));
       expect(trustTokens.claimTrustToken).toHaveBeenCalledOnce();
       expect(client.trustClientCertificate).toHaveBeenCalledOnce();
@@ -285,14 +204,6 @@ describePg('server connect trust projection', () => {
       expect(trustTokens.claimTrustToken).toHaveBeenCalledOnce();
       expect(client.trustClientCertificate).toHaveBeenCalledOnce();
       expect(trustTokens.consumeClaimedTrustToken).toHaveBeenCalledOnce();
-      await expect(
-        database
-          .selectFrom('system.incus_client_certificate_trusts')
-          .select('state')
-          .where('certificate_id', '=', certificateId)
-          .where('server_id', '=', serverId)
-          .executeTakeFirstOrThrow(),
-      ).resolves.toEqual({ state: 'verified' });
     });
   });
 });

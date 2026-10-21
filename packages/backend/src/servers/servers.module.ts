@@ -9,10 +9,6 @@ import { SshModule } from '../ssh/ssh.module.js';
 import { StoragePoolsModule } from '../storage-pools/storage-pools.module.js';
 import { UsersModule } from '../users/users.module.js';
 import { VolumesModule } from '../volumes/volumes.module.js';
-import { AdminIncusClientCertificateController } from './admin-incus-client-certificate.controller.js';
-import { CertificateAutoRotationWorker } from './certificate-auto-rotation.worker.js';
-import { CertificateRotationReconciler } from './certificate-rotation-reconciler.service.js';
-import { IncusClientCertificateService } from './incus-client-certificate.service.js';
 import { IncusPreflightChecksAdapter } from './preflight-checks.adapter.js';
 import { ServerConnectIntentService } from './server-connect-intent.service.js';
 import { ServerHealthService } from './server-health.service.js';
@@ -36,19 +32,13 @@ import { ServersService } from './servers.service.js';
   ],
   providers: [
     ServersService,
-    IncusClientCertificateService,
-    CertificateAutoRotationWorker,
-    CertificateRotationReconciler,
     ServerPreflightReconciler,
     ServerHealthService,
     IncusPreflightChecksAdapter,
     ServerConnectIntentService,
     ServerPreflightIntentService,
   ],
-  controllers: [
-    ServersController,
-    AdminIncusClientCertificateController,
-  ],
+  controllers: [ServersController],
   exports: [ServersService],
 })
 export class ServersModule {}

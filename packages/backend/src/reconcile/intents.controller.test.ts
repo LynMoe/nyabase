@@ -32,7 +32,6 @@ function intent(overrides: Partial<IntentRecord> = {}): IntentRecord {
     nextAttemptAt: null,
     createdAt: '2026-08-13T00:00:00.000Z',
     settledAt: '2026-08-13T00:00:01.000Z',
-    blockedByIntentId: null,
     ...overrides,
   };
 }

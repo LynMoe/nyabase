@@ -5,7 +5,6 @@ import { SystemSettingsRevisionConflictError } from './system-settings-authority
 
 function makeController() {
   let revision = 1;
-  let snapshotToken = 'a'.repeat(64);
   const config = {
     allFields: vi.fn(() => [{
       key: 'branding.title',
@@ -26,7 +25,6 @@ function makeController() {
     }]),
     configFile: vi.fn(() => '/etc/nyabase/config.yaml'),
     revision: vi.fn(() => revision),
-    snapshotToken: vi.fn(() => snapshotToken),
     publicSettings: vi.fn(() => ({
       branding: { title: 'nyabase', description: 'dev' },
       sshProxy: null,
@@ -34,7 +32,6 @@ function makeController() {
   };
   const committedSnapshot = {
     revision: 2,
-    snapshotToken: 'b'.repeat(64),
     values: { 'branding.title': 'Lab Console' },
   };
   const authority = {
@@ -42,11 +39,9 @@ function makeController() {
     update: vi.fn().mockResolvedValue(committedSnapshot),
     committed: vi.fn(async () => {
       revision = 2;
-      snapshotToken = 'b'.repeat(64);
     }),
     acceptConflict: vi.fn((current: typeof committedSnapshot) => {
       revision = current.revision;
-      snapshotToken = current.snapshotToken;
     }),
   };
   const accessResolver = {
@@ -60,6 +55,7 @@ function makeController() {
     config as never,
     accessResolver as never,
     authority as never,
+    { describe: vi.fn() } as never,
   );
   return { controller, config, authority, accessResolver };
 }
@@ -69,7 +65,6 @@ describe('SystemSettingsController', () => {
     const { controller, authority, accessResolver } = makeController();
     const result = await controller.patchSettings({ id: 'actor-a' } as never, {
       expectedRevision: 1,
-      expectedSnapshotToken: 'a'.repeat(64),
       values: { 'branding.title': 'Lab Console' },
     });
     expect(accessResolver.runWithActorCapabilities).toHaveBeenCalledWith(
@@ -82,12 +77,10 @@ describe('SystemSettingsController', () => {
       'actor-a',
       { 'branding.title': 'Lab Console' },
       1,
-      'a'.repeat(64),
     );
     expect(authority.committed).toHaveBeenCalledOnce();
     expect(result).toMatchObject({
       revision: 2,
-      snapshotToken: 'b'.repeat(64),
       configFile: '/etc/nyabase/config.yaml',
     });
   });
@@ -99,7 +92,6 @@ describe('SystemSettingsController', () => {
     );
     await expect(controller.patchSettings({ id: 'actor-a' } as never, {
       expectedRevision: 1,
-      expectedSnapshotToken: 'a'.repeat(64),
       values: { 'branding.title': 'Unauthorized' },
     })).rejects.toThrow('authority revoked');
     expect(authority.update).not.toHaveBeenCalled();
@@ -110,7 +102,6 @@ describe('SystemSettingsController', () => {
     const { controller, authority } = makeController();
     const current = {
       revision: 3,
-      snapshotToken: 'c'.repeat(64),
       values: { 'branding.title': 'Current' },
     };
     authority.update.mockRejectedValueOnce(
@@ -120,7 +111,6 @@ describe('SystemSettingsController', () => {
     try {
       await controller.patchSettings({ id: 'actor-a' } as never, {
         expectedRevision: 1,
-        expectedSnapshotToken: 'a'.repeat(64),
         values: { 'branding.title': 'Stale' },
       });
     } catch (error) {
@@ -130,17 +120,15 @@ describe('SystemSettingsController', () => {
     expect(authority.committed).not.toHaveBeenCalled();
     expect(response).toMatchObject({
       code: 'SYSTEM_SETTINGS_REVISION_CONFLICT',
-      current: {
-        revision: 3,
-        snapshotToken: 'c'.repeat(64),
-      },
+      current: { revision: 3 },
     });
     expect(response).not.toHaveProperty('current.values');
   });
 
-  it('refreshes PostgreSQL before returning the admin settings snapshot', async () => {
+  it('serves the admin settings snapshot from the live in-process config', () => {
     const { controller, authority } = makeController();
-    await controller.getSettings();
-    expect(authority.refreshFromPostgres).toHaveBeenCalledWith('admin-read');
+    expect(controller.getSettings()).toMatchObject({ revision: 1 });
+    expect(authority.refreshFromPostgres).not.toHaveBeenCalled();
+    expect(controller.getSettings()).not.toHaveProperty('snapshotToken');
   });
 });

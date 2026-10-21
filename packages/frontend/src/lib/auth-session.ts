@@ -153,15 +153,3 @@ export async function withCrossTabRefreshLock<T>(callback: () => Promise<T>): Pr
   // race one rotation, and the loser re-authenticates.
   return callback();
 }
-
-export const authSessionTestables = {
-  userAuthorizationFingerprint,
-  isRefreshRequestId,
-  pendingRefreshRequestKey: PENDING_REFRESH_REQUEST_KEY,
-  resetForTests: () => {
-    memoryPendingRequestId = null;
-    initialized = false;
-    channel?.close();
-    channel = null;
-  },
-};

@@ -1,6 +1,4 @@
 import {
-  Capability,
-  type GroupDto,
   type SystemSettingFieldDto,
   type SystemSettingsDto,
 } from '@nyabase/common';
@@ -36,28 +34,9 @@ export function isSystemSettingsDto(value: unknown): value is SystemSettingsDto 
   const dto = record(value);
   return Boolean(dto
     && positiveRevision(dto.revision)
-    && typeof dto.snapshotToken === 'string'
-    && dto.snapshotToken.length > 0
     && typeof dto.configFile === 'string'
     && Array.isArray(dto.fields) && dto.fields.every(isSystemSettingField)
     && Array.isArray(dto.editable) && dto.editable.every(isSystemSettingField)
     && Array.isArray(dto.readOnly) && dto.readOnly.every(isSystemSettingField)
     && record(dto.publicSettings));
-}
-
-const CAPABILITIES = new Set<string>(Object.values(Capability));
-
-export function isGroupDto(value: unknown): value is GroupDto {
-  const dto = record(value);
-  return Boolean(dto
-    && typeof dto.id === 'string'
-    && typeof dto.name === 'string'
-    && (dto.description === null || typeof dto.description === 'string')
-    && Number.isInteger(dto.priority) && (dto.priority as number) >= 0
-    && typeof dto.isSystem === 'boolean'
-    && Array.isArray(dto.capabilities)
-    && dto.capabilities.every((capability) => typeof capability === 'string' && CAPABILITIES.has(capability))
-    && positiveRevision(dto.revision)
-    && typeof dto.createdAt === 'string'
-    && typeof dto.updatedAt === 'string');
 }

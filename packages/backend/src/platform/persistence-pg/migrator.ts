@@ -189,22 +189,6 @@ async function loadAppliedReadOnly(
   return loadApplied(client, options);
 }
 
-/**
- * Read-only, exact image/database compatibility check.
- *
- * Unlike migrationStatus(), this function never creates the migration ledger.
- * It is therefore safe for startup/readiness when migration mutation is
- * disabled.
- */
-export async function assertSqlMigrationCompatibility(
-  pool: Pool,
-  directory: string,
-  options: MigrationCompatibilityOptions = {},
-): Promise<MigrationStatus> {
-  const migrations = await discoverSqlMigrations(directory);
-  return assertSqlMigrationManifestCompatibility(pool, migrations, options);
-}
-
 export async function assertSqlMigrationManifestCompatibility(
   pool: Pool,
   migrations: SqlMigration[],

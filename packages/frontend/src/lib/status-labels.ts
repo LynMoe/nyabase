@@ -169,7 +169,6 @@ const INTENT_KIND_ZH: Record<string, string> = {
   'image_assignment.delete': '取消镜像分配',
   'server.connect': '连接服务器',
   'server.preflight': '服务器预检',
-  'certificate.rotate': '轮换证书',
 };
 
 const INTENT_RESOURCE_TYPE_ZH: Record<string, string> = {
@@ -177,7 +176,6 @@ const INTENT_RESOURCE_TYPE_ZH: Record<string, string> = {
   volume: '数据卷',
   image_assignment: '镜像分配',
   server: '服务器',
-  certificate_rotation: '证书轮换',
 };
 
 export function intentStatusLabel(status: string): string {

@@ -26,8 +26,6 @@ export interface ManagedFieldFailure {
   readonly error: IncusError;
 }
 
-export type ManagedDiffError = ManagedFieldFailure;
-
 export interface ManagedFieldsDiff {
   readonly kind: 'empty' | 'diff' | 'managed_failure';
   readonly empty: boolean;

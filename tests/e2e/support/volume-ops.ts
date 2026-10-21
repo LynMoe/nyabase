@@ -591,7 +591,7 @@ async function sshOnLab(
 }
 
 async function forgetControlPlaneCertOnLab(api: ApiClient, ssh: string): Promise<void> {
-  const active = await api.get('/api/admin/incus-client-certificate')
+  const active = await api.get('/api/admin/system-settings/incus-client-identity')
     .then(async (response) => (response.status() === 200 ? await response.json() as JsonRecord : null))
     .catch(() => null);
   const fingerprint = typeof active?.fingerprint === 'string'

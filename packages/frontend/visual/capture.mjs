@@ -17,7 +17,7 @@ const shotsRoot = process.env.VISUAL_SHOTS_DIR
   : path.join(here, 'shots');
 const THEME = process.env.VISUAL_THEME === 'dark' ? 'dark' : 'light';
 const BASE = process.env.VISUAL_BASE_URL ?? 'http://127.0.0.1:5173';
-// Relative to the capture time so "最近观测" and the certificate banner read like a healthy lab.
+// Relative to the capture time so "最近观测" read like a healthy lab.
 const NOW = Date.now();
 const ISO = new Date(NOW - 10 * 60_000).toISOString();
 const CERT_EXPIRY = new Date(NOW + 30 * 86_400_000).toISOString();
@@ -28,7 +28,7 @@ const CAPS = [
   'manage_users', 'manage_groups', 'manage_servers', 'manage_images',
   'manage_storage_pools', 'manage_ip_pools', 'manage_shared_backends',
   'manage_volumes', 'manage_grants', 'manage_containers_any',
-  'manage_preflight', 'manage_certificates', 'view_audit',
+  'manage_preflight', 'view_audit',
   'view_metrics_all', 'manage_system_settings',
 ];
 
@@ -388,7 +388,7 @@ function mockApi(urlString, method) {
     id: 'int-1', kind: 'container.create', resourceType: 'container', resourceId: 'ctr-1',
     serverId: 'srv-1', requestedBy: 'admin', requestSummary: { name: 'dev-workspace' },
     targetRevision: 1, baseline: null, status: 'succeeded', failureCode: null, failure: null,
-    attemptCount: 1, nextAttemptAt: null, createdAt: ISO, settledAt: ISO, blockedByIntentId: null,
+    attemptCount: 1, nextAttemptAt: null, createdAt: ISO, settledAt: ISO,
   }], nextCursor: null });
 
   if (p === '/volumes') return json([volume]);
@@ -418,15 +418,8 @@ function mockApi(urlString, method) {
   if (p === '/http-proxy/bindings') return json([binding]);
   if (p === '/http-proxy/domain-pools') return json([domainPool]);
 
-  if (p === '/admin/incus-client-certificate') {
-    return json({
-      generation: 2,
-      fingerprint: 'sha256:certfp',
-      notBefore: '2026-01-01T00:00:00.000Z',
-      notAfter: CERT_EXPIRY,
-      state: 'active',
-      servers: [{ serverId: 'srv-1', trustState: 'trusted', observedAt: ISO, lastError: null }],
-    });
+  if (p === '/admin/system-settings/incus-client-identity') {
+    return json({ fingerprint: 'sha256:certfp', notAfter: CERT_EXPIRY, createdAt: ISO });
   }
 
   if (p === '/admin/ssh-proxy/status') {
@@ -491,7 +484,7 @@ function mockApi(urlString, method) {
       field('ssh.enabled', '启用 SSH 代理', 'boolean', true),
     ];
     return json({
-      revision: 4, snapshotToken: 'snap-1', configFile: '/etc/nyabase.yaml',
+      revision: 4, configFile: '/etc/nyabase.yaml',
       fields, editable: fields, readOnly: [],
       publicSettings: { branding: { title: 'nyabase', description: '开发容器管理平台' }, sshProxy: null },
     });

@@ -1,6 +1,8 @@
 import { randomUUID } from 'node:crypto';
 import { AuditAction } from '@nyabase/common';
+import type { Kysely } from 'kysely';
 import { describe, expect, it } from 'vitest';
+import type { NyabaseDatabase } from '../platform/persistence-pg/database.types.js';
 import { withPostgresTestDatabase } from '../platform/persistence-pg/postgres-test-harness.js';
 import { PgTransactionManager } from '../platform/persistence-pg/transaction.js';
 import {
@@ -17,79 +19,70 @@ const describePg = process.env.NYABASE_TEST_DATABASE_URL
   : describe.skip;
 
 describePg('Audit retention PostgreSQL boundaries', () => {
-  it('keeps the exact age and count boundaries while deleting strict overflow', async () => {
+  it('keeps the age and count boundaries while deleting strict overflow', async () => {
     await withPostgresTestDatabase(async ({ database }) => {
       const repository = new AuditRepository(
         database,
         new PgTransactionManager(database),
       );
-      const now = new Date('2026-08-07T00:00:00.000Z');
-      const cutoff = new Date(now.getTime() - 7 * DAY_MS);
+      const now = Date.now();
       const oldId = randomUUID();
-      const exactCutoffId = randomUUID();
+      const insideCutoffId = randomUUID();
       const recentId = randomUUID();
       const countBoundaryId = randomUUID();
       const overflowId = randomUUID();
 
-      await repository.appendAtForTest(
+      await insertAuditRow(database, auditEvent(oldId, 'old'), new Date(now - 7 * DAY_MS - 60_000));
+      await insertAuditRow(
         database,
-        auditEvent(oldId, 'old'),
-        new Date(cutoff.getTime() - 1),
+        auditEvent(insideCutoffId, 'inside-cutoff'),
+        new Date(now - 7 * DAY_MS + 60_000),
       );
-      await repository.appendAtForTest(
-        database,
-        auditEvent(exactCutoffId, 'exact-cutoff'),
-        cutoff,
-      );
-      await repository.appendAtForTest(
-        database,
-        auditEvent(recentId, 'recent'),
-        new Date(now.getTime() - 2 * 60 * 60 * 1_000),
-      );
+      await insertAuditRow(database, auditEvent(recentId, 'recent'), new Date(now - 2 * 60 * 60 * 1_000));
 
-      await repository.enforceRetentionAtForTest({
+      await repository.enforceRetention({
         retentionDays: 7,
         maxEntries: 3,
         enforceAge: true,
         enforceCount: true,
-      }, now);
+      });
 
       await expect(repository.findById(oldId)).resolves.toBeNull();
-      await expect(repository.findById(exactCutoffId)).resolves.toBeDefined();
+      await expect(repository.findById(insideCutoffId)).resolves.toBeDefined();
       expect((await repository.list(10, 0)).total).toBe(2);
 
-      await repository.appendAtForTest(
+      await insertAuditRow(
         database,
         auditEvent(countBoundaryId, 'count-boundary'),
-        new Date(now.getTime() - 60 * 60 * 1_000),
+        new Date(now - 60 * 60 * 1_000),
       );
-      await repository.enforceRetentionAtForTest({
+      await repository.enforceRetention({
         retentionDays: 0,
         maxEntries: 3,
         enforceAge: false,
         enforceCount: true,
-      }, now);
+      });
       expect((await repository.list(10, 0)).total).toBe(3);
-      await expect(repository.findById(exactCutoffId)).resolves.toBeDefined();
+      await expect(repository.findById(insideCutoffId)).resolves.toBeDefined();
 
-      await repository.appendAtForTest(
+      await insertAuditRow(
         database,
         auditEvent(overflowId, 'overflow'),
-        new Date(now.getTime() - 30 * 60 * 1_000),
+        new Date(now - 30 * 60 * 1_000),
       );
-      await repository.enforceRetentionAtForTest({
+      await repository.enforceRetention({
         retentionDays: 0,
         maxEntries: 3,
         enforceAge: false,
         enforceCount: true,
-      }, now);
+      });
 
       const remaining = await repository.list(10, 0);
       expect(remaining.total).toBe(3);
       expect(new Set(remaining.items.map((item) => item.id))).toEqual(
         new Set([recentId, countBoundaryId, overflowId]),
       );
-      await expect(repository.findById(exactCutoffId)).resolves.toBeNull();
+      await expect(repository.findById(insideCutoffId)).resolves.toBeNull();
     });
   });
 
@@ -100,11 +93,7 @@ describePg('Audit retention PostgreSQL boundaries', () => {
       const service = auditService(repository, transactions, 0, 1);
       const retainedId = randomUUID();
 
-      await repository.appendAtForTest(
-        database,
-        auditEvent(retainedId, 'retained'),
-        new Date('2026-08-07T00:00:00.000Z'),
-      );
+      await insertAuditRow(database, auditEvent(retainedId, 'retained'), new Date('2026-08-07T00:00:00.000Z'));
 
       await expect(transactions.run(async (transaction) => {
         await service.append(
@@ -147,7 +136,7 @@ describePg('Audit retention PostgreSQL boundaries', () => {
       const repository = new AuditRepository(database, transactions);
       const service = auditService(repository, transactions, 0, 1);
 
-      await repository.appendAtForTest(
+      await insertAuditRow(
         database,
         auditEvent(randomUUID(), 'before-log'),
         new Date('2026-08-07T00:00:00.000Z'),
@@ -188,6 +177,29 @@ function auditService(
     new AuditSnapshotResolver(),
     { now: () => 0 } as MonotonicClock,
   );
+}
+
+/** Deterministic timestamps need a direct insert; AuditRepository.append always uses the DB clock. */
+async function insertAuditRow(
+  database: Kysely<NyabaseDatabase>,
+  event: AppendAuditEvent,
+  occurredAt: Date,
+): Promise<void> {
+  await database.insertInto('audit.events').values({
+    id: event.id,
+    actor_id: event.actorId,
+    actor_name: event.actorName,
+    actor_username: event.actorUsername,
+    actor_snapshot: null,
+    action: event.action,
+    target_id: event.targetId,
+    target_type: event.targetType,
+    target_name: event.targetName,
+    target_snapshot: null,
+    related: '[]',
+    detail: null,
+    occurred_at: occurredAt,
+  }).execute();
 }
 
 function auditEvent(id: string, targetId: string): AppendAuditEvent {

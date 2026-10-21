@@ -4,10 +4,8 @@ import { IntentRepository, isUserRetryIntent } from './intent.repository.js';
 import { noopWake } from './reconcile-wake.test-helper.js';
 
 const volumeId = '11111111-1111-4111-8111-111111111111';
-const containerId = '22222222-2222-4222-8222-222222222222';
 const serverId = '33333333-3333-4333-8333-333333333333';
 const ensureId = '44444444-4444-4444-8444-444444444444';
-const updateId = '55555555-5555-4555-8555-555555555555';
 const olderId = '66666666-6666-4666-8666-666666666666';
 const newerId = '77777777-7777-4777-8777-777777777777';
 const retryId = '88888888-8888-4888-8888-888888888888';
@@ -38,7 +36,6 @@ type IntentRow = {
   next_attempt_at: Date | null;
   created_at: Date;
   settled_at: Date | null;
-  blocked_by_intent_id: string | null;
 };
 
 function row(overrides: Partial<IntentRow>): IntentRow {
@@ -59,7 +56,6 @@ function row(overrides: Partial<IntentRow>): IntentRow {
     next_attempt_at: null,
     created_at: new Date('2026-01-01T00:00:02.000Z'),
     settled_at: null,
-    blocked_by_intent_id: null,
     ...overrides,
   };
 }
@@ -92,8 +88,7 @@ function makeExecutor(seed: IntentRow[]) {
       limit?: number;
       values?: Record<string, unknown>;
       setValues?: Record<string, unknown>;
-      skipBlocked: boolean;
-    } = { filters: [], orders: [], skipBlocked: false };
+    } = { filters: [], orders: [] };
     const query: Record<string, unknown> = {};
     const applyWhere = (col: unknown, op?: unknown, val?: unknown) => {
       if (typeof col === 'function') {
@@ -105,19 +100,12 @@ function makeExecutor(seed: IntentRow[]) {
             val: value,
           }),
           {
-            or: (parts: unknown[]) => {
-              const blocked = parts.some((part) => part && typeof part === 'object' && 'sql' in (part as object));
-              if (blocked) state.skipBlocked = true;
-              return { type: 'or', parts };
-            },
+            or: (parts: unknown[]) => ({ type: 'or', parts }),
           },
         );
         const result = col(expression) as { type?: string; col?: string; op?: string; val?: unknown };
         if (result?.type === 'or') {
-          const readyAt = (result as { parts?: Array<{ col?: string }> }).parts
-            ?.some((part) => part.col === 'next_attempt_at');
-          if (readyAt) state.filters.push(result);
-          else state.skipBlocked = true;
+          state.filters.push(result);
         } else if (result?.col) {
           state.filters.push(result);
         }
@@ -153,13 +141,6 @@ function makeExecutor(seed: IntentRow[]) {
     query.returning = () => query;
     const selected = () => {
       let rows = store.intents.filter((item) => state.filters.every((filter) => matchesFilter(item, filter)));
-      if (state.skipBlocked) {
-        rows = rows.filter((item) => {
-          if (!item.blocked_by_intent_id) return true;
-          const pred = store.intents.find((candidate) => candidate.id === item.blocked_by_intent_id);
-          return pred?.status === IntentStatus.Succeeded;
-        });
-      }
       if (state.orders.some((order) => order.col === 'ready_at')) {
         rows = [...rows].sort((left, right) => {
           const leftReady = (left.next_attempt_at ?? left.created_at).getTime();
@@ -204,7 +185,6 @@ function makeExecutor(seed: IntentRow[]) {
           target_revision: Number(state.values.target_revision),
           status: String(state.values.status),
           created_at: new Date(),
-          blocked_by_intent_id: (state.values.blocked_by_intent_id as string | null) ?? null,
         });
         store.intents.push(inserted);
         return [inserted];
@@ -238,8 +218,8 @@ function makeExecutor(seed: IntentRow[]) {
   };
 }
 
-describe('intent pending queue and settle wake', () => {
-  it('lists HTTP history newest-first and worker pending FIFO, skipping unfinished blocked_by', async () => {
+describe('intent pending queue', () => {
+  it('lists HTTP history newest-first and worker pending FIFO by readiness', async () => {
     const ready = new Date('2026-01-01T00:00:10.000Z');
     const { db } = makeExecutor([
       row({
@@ -256,14 +236,6 @@ describe('intent pending queue and settle wake', () => {
         next_attempt_at: new Date('2026-01-01T00:00:04.000Z'),
       }),
       row({
-        id: updateId,
-        kind: IntentKind.ContainerUpdate,
-        resource_type: IntentResourceType.Container,
-        resource_id: containerId,
-        created_at: new Date('2026-01-01T00:00:02.000Z'),
-        blocked_by_intent_id: ensureId,
-      }),
-      row({
         id: ensureId,
         created_at: new Date('2026-01-01T00:00:02.000Z'),
         status: IntentStatus.Pending,
@@ -273,7 +245,6 @@ describe('intent pending queue and settle wake', () => {
     const history = await repository.list({ limit: 10 });
     expect(history.items.map((item) => item.id)).toEqual([
       newerId,
-      updateId,
       ensureId,
       olderId,
       retryId,
@@ -281,45 +252,6 @@ describe('intent pending queue and settle wake', () => {
 
     const pending = await repository.listPending({ limit: 10, readyAt: ready });
     expect(pending.items.map((item) => item.id)).toEqual([olderId, ensureId, newerId, retryId]);
-    expect(pending.items.some((item) => item.id === updateId)).toBe(false);
-  });
-
-  it('wakes the blocked container when a volume ensure settles succeeded', async () => {
-    const wake = { wake: vi.fn() };
-    const { db } = makeExecutor([
-      row({
-        id: ensureId,
-        kind: IntentKind.VolumeEnsure,
-        resource_type: IntentResourceType.Volume,
-        resource_id: volumeId,
-        status: IntentStatus.Pending,
-        target_revision: 1,
-      }),
-      row({
-        id: updateId,
-        kind: IntentKind.ContainerUpdate,
-        resource_type: IntentResourceType.Container,
-        resource_id: containerId,
-        server_id: serverId,
-        status: IntentStatus.Pending,
-        blocked_by_intent_id: ensureId,
-        target_revision: 2,
-      }),
-    ]);
-    const repository = new IntentRepository(db as never, wake as never);
-    const result = await repository.settleForObservedRevision(
-      IntentResourceType.Volume,
-      volumeId,
-      1,
-      { outcome: 'succeeded', placementServerId: serverId },
-    );
-    expect(result).toEqual({ succeeded: 1, failed: 0, superseded: 0 });
-    expect(wake.wake).toHaveBeenCalledWith({
-      resourceType: IntentResourceType.Container,
-      resourceId: containerId,
-      serverId,
-      reason: 'intent',
-    });
   });
 
   it('ensurePending matches kind and idempotencyKey, not a sibling resize', async () => {

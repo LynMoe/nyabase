@@ -205,12 +205,6 @@ else
   block "Incus CLI cannot reach the local daemon"
 fi
 
-if [[ -f "${E2E_EDGE_CA_FILE:-}" && ! -L "$E2E_EDGE_CA_FILE" ]]; then
-  pass certificate-rotation "edge CA is available for certificate rotation evidence"
-else
-  block "E2E_EDGE_CA_FILE is not a readable CA file"
-fi
-
 dir_pool="${E2E_INCUS_DIR_POOL:-}"
 lvm_pool="${E2E_INCUS_LVM_POOL:-}"
 dir_info="$(incus storage show "$dir_pool" 2>/dev/null || true)"

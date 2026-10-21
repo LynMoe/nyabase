@@ -2,7 +2,6 @@ export const topologyCapabilities = [
   'postgresql',
   'incus-https-mtls',
   'trust-token-onboarding',
-  'certificate-rotation',
   'storage-dir-quota-online',
   'storage-lvm-block-backed',
   'lan-bridge',

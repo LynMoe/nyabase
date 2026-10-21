@@ -202,14 +202,6 @@ export class IpPoolsRepository {
       });
   }
 
-  removeServers(poolId: string, serverIds: readonly string[], executor: IpPoolExecutor) {
-    if (serverIds.length === 0) return Promise.resolve();
-    return executor.deleteFrom('infra.ip_pool_servers')
-      .where('pool_id', '=', poolId)
-      .where('server_id', 'in', [...serverIds])
-      .execute();
-  }
-
   countClaimsForNetwork(
     networkKey: string,
     executor: IpPoolExecutor = this.database,

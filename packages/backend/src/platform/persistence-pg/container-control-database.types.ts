@@ -82,7 +82,7 @@ export interface ContainerSshRouteTable {
 export interface IntentTable {
   id: string;
   kind: string;
-  resource_type: 'container' | 'volume' | 'image_assignment' | 'server' | 'certificate_rotation';
+  resource_type: 'container' | 'volume' | 'image_assignment' | 'server';
   resource_id: string;
   server_id: string | null;
   requested_by: string | null;
@@ -96,13 +96,12 @@ export interface IntentTable {
   busy_attempts: ColumnType<number, number | undefined, number>;
   busy_since: ColumnType<Date | null, Date | string | null | undefined, Date | string | null>;
   next_attempt_at: ContainerTimestamp | null;
-  blocked_by_intent_id: string | null;
   created_at: ContainerGeneratedTimestamp;
   settled_at: ContainerTimestamp | null;
 }
 
 export interface ReconcileClaimTable {
-  resource_type: 'container' | 'volume' | 'image_assignment' | 'server' | 'certificate_rotation' | 'grant_expiry';
+  resource_type: 'container' | 'volume' | 'image_assignment' | 'server' | 'grant_expiry';
   resource_id: string;
   placement_server_id: string;
   server_id: string | null;

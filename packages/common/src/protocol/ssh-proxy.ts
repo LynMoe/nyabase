@@ -173,19 +173,10 @@ export const zSshProxyDisconnectAllResult = z.object({
 
 export type SshProxyEndpoint = z.infer<typeof zSshProxyEndpoint>;
 export type SshProxyHostKey = z.infer<typeof zSshProxyHostKey>;
-export type SshProxyUserSnapshot = z.infer<typeof zSshProxyUserSnapshot>;
-export type SshProxyServerSnapshot = z.infer<typeof zSshProxyServerSnapshot>;
-export type SshProxyImageSnapshot = z.infer<typeof zSshProxyImageSnapshot>;
-export type SshProxyContainerSnapshot = z.infer<typeof zSshProxyContainerSnapshot>;
 export type SshProxyInstanceRouteSnapshot = z.infer<typeof zSshProxyInstanceRouteSnapshot>;
 export type SshProxySnapshot = z.infer<typeof zSshProxySnapshot>;
-export type SshProxyClientAck = z.infer<typeof zSshProxyClientAck>;
-export type SshProxyMetric = z.infer<typeof zSshProxyMetric>;
-export type SshProxyAuditEvent = z.infer<typeof zSshProxyAuditEvent>;
-export type SshProxyConnectionInfo = z.infer<typeof zSshProxyConnectionInfo>;
 export type SshProxyStatusReport = z.infer<typeof zSshProxyStatusReport>;
 export type SshProxyDisconnectAllCommand = z.infer<typeof zSshProxyDisconnectAllCommand>;
-export type SshProxyDisconnectAllResult = z.infer<typeof zSshProxyDisconnectAllResult>;
 export type SshProxyPauseAdmitCommand = z.infer<typeof zSshProxyPauseAdmitCommand>;
 
 export type SshProxyBackendMessage =
@@ -193,117 +184,6 @@ export type SshProxyBackendMessage =
   | { kind: 'update'; payload: SshProxySnapshot }
   | { kind: 'disconnectAll'; payload: SshProxyDisconnectAllCommand }
   | { kind: 'pauseAdmit'; payload: SshProxyPauseAdmitCommand };
-
-export type SshProxyClientMessage =
-  | { kind: 'ack'; payload: SshProxyClientAck }
-  | { kind: 'metrics'; payload: { metrics: SshProxyMetric[] } }
-  | { kind: 'audit'; payload: SshProxyAuditEvent }
-  | { kind: 'status'; payload: SshProxyStatusReport }
-  | { kind: 'disconnectAllResult'; payload: SshProxyDisconnectAllResult };
-
-export interface ParsedSshProxyLogin {
-  username: string;
-  serverSlug: string | null;
-  containerName: string;
-}
-
-export type SshProxyRouteResolution =
-  | {
-    ok: true;
-    login: ParsedSshProxyLogin;
-    user: SshProxyUserSnapshot;
-    server: SshProxyServerSnapshot;
-    container: SshProxyContainerSnapshot;
-    route: SshProxyInstanceRouteSnapshot;
-  }
-  | {
-    ok: false;
-    login: ParsedSshProxyLogin | null;
-    reason: 'invalid_login' | 'user_not_found' | 'user_disabled' | 'server_not_found'
-      | 'route_not_found' | 'ambiguous_container';
-    candidates?: Array<{ serverSlug: string; containerName: string }>;
-  };
-
-export function parseSshProxyLogin(value: string): ParsedSshProxyLogin | null {
-  const parts = value.trim().toLowerCase().split('.').filter((part) => part.length > 0);
-  if (parts.length === 2) {
-    return { username: parts[0]!, serverSlug: null, containerName: parts[1]! };
-  }
-  if (parts.length === 3) {
-    return { username: parts[0]!, serverSlug: parts[1]!, containerName: parts[2]! };
-  }
-  return null;
-}
-
-export function resolveSshProxyRoute(
-  snapshot: Pick<SshProxySnapshot, 'users' | 'servers' | 'images' | 'containers' | 'routes'>,
-  loginValue: string,
-): SshProxyRouteResolution {
-  const login = parseSshProxyLogin(loginValue);
-  if (!login) return { ok: false, login, reason: 'invalid_login' };
-
-  const user = snapshot.users.find((row) => row.username.toLowerCase() === login.username);
-  if (!user) return { ok: false, login, reason: 'user_not_found' };
-  if (user.status !== UserStatus.Active) return { ok: false, login, reason: 'user_disabled' };
-
-  const serversById = new Map(snapshot.servers.map((row) => [row.id, row]));
-  const imagesById = new Map(snapshot.images.map((row) => [row.id, row]));
-  const routesByContainerId = new Map(snapshot.routes.map((row) => [row.containerId, row]));
-
-  const active = snapshot.containers
-    .filter((container) => container.ownerId === user.id)
-    .filter((container) => container.name.toLowerCase() === login.containerName)
-    .filter((container) => imagesById.get(container.imageId)?.sshEnabled === true)
-    .map((container) => {
-      const server = serversById.get(container.serverId);
-      const route = routesByContainerId.get(container.id);
-      return server
-        && server.status === ServerStatus.Online
-        && route
-        && route.serverId === container.serverId
-        && route.instanceName === container.instanceName
-        && isActiveSshProxyRoute(route)
-        ? { container, server, route }
-        : null;
-    })
-    .filter((entry): entry is NonNullable<typeof entry> => entry !== null);
-
-  const candidates = login.serverSlug
-    ? active.filter((entry) => entry.server.slug.toLowerCase() === login.serverSlug)
-    : active;
-
-  if (login.serverSlug && !snapshot.servers.some((row) => row.slug.toLowerCase() === login.serverSlug)) {
-    return { ok: false, login, reason: 'server_not_found' };
-  }
-  if (candidates.length === 0) return { ok: false, login, reason: 'route_not_found' };
-  if (!login.serverSlug && candidates.length > 1) {
-    return {
-      ok: false,
-      login,
-      reason: 'ambiguous_container',
-      candidates: candidates.map((entry) => ({
-        serverSlug: entry.server.slug,
-        containerName: entry.container.name,
-      })),
-    };
-  }
-
-  const selected = candidates[0]!;
-  return {
-    ok: true,
-    login,
-    user,
-    server: selected.server,
-    container: selected.container,
-    route: selected.route,
-  };
-}
-
-export function isActiveSshProxyRoute(route: SshProxyInstanceRouteSnapshot): boolean {
-  return Boolean(route.instanceName && route.routedIp)
-    && route.status === ContainerStatus.Running
-    && route.sshStatus === 'running';
-}
 
 /** Jump destination helpers for client UX (ProxyJump). */
 export function formatSshProxyJumpLogin(input: {

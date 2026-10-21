@@ -79,28 +79,12 @@ export class SharedBackendsRepository {
       .executeTakeFirst();
   }
 
-  findByIdentity(identityKey: string, executor: SharedBackendExecutor = this.database) {
-    return executor
-      .selectFrom('infra.shared_backends')
-      .selectAll()
-      .where('identity_key', '=', identityKey)
-      .executeTakeFirst();
-  }
-
   findByIdentityForUpdate(identityKey: string, executor: SharedBackendExecutor) {
     return executor
       .selectFrom('infra.shared_backends')
       .selectAll()
       .where('identity_key', '=', identityKey)
       .forUpdate()
-      .executeTakeFirst();
-  }
-
-  findByFsid(fsid: string, executor: SharedBackendExecutor = this.database) {
-    return executor
-      .selectFrom('infra.shared_backends')
-      .selectAll()
-      .where(sql<boolean>`lower(ceph_fsid) = ${fsid.toLowerCase()}`)
       .executeTakeFirst();
   }
 

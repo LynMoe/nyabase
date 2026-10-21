@@ -35,7 +35,6 @@ bash "$SCRIPT_DIR/stop-control-plane.sh" "$run_id"
 
 node "$SCRIPT_DIR/leftover-inventory.mjs"
 
-cleanup_run_owned_incus_connect_client "$E2E_RUNTIME_ROOT" "$run_id"
 record_phase "$run_id" down passed "run resources removed and owned control plane stopped"
 trap - EXIT INT TERM HUP
 log "down passed for $run_id"

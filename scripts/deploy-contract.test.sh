@@ -32,21 +32,14 @@ done
 contract_root="$(mktemp -d)"
 trap 'rm -rf "$contract_root"' EXIT
 rendered="$contract_root/compose.json"
-incus_client_cert_source="$contract_root/incus-client-cert"
-incus_client_key_source="$contract_root/incus-client-key"
 incus_ca_source="$contract_root/incus-ca"
-for secret_source in \
-  "$incus_client_cert_source" \
-  "$incus_client_key_source" \
-  "$incus_ca_source"; do
+for secret_source in "$incus_ca_source"; do
   : >"$secret_source"
   chmod 600 "$secret_source"
 done
 
 POSTGRES_PASSWORD=contract-test \
 DATABASE_URL=postgresql://nyabase:contract-test@postgres:5432/nyabase \
-INCUS_CLIENT_CERT_SOURCE="$incus_client_cert_source" \
-INCUS_CLIENT_KEY_SOURCE="$incus_client_key_source" \
 INCUS_CA_SOURCE="$incus_ca_source" \
   docker compose -f deploy/docker-compose.yml config --format json >"$rendered"
 

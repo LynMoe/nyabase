@@ -61,7 +61,6 @@
     "postgresql",
     "incus-https-mtls",
     "trust-token-onboarding",
-    "certificate-rotation",
     "lan-bridge",
     "bridge-ipv4-filter",
     "image-catalog",

@@ -10,10 +10,3 @@ export async function copyOneTimeSecret(
     return false;
   }
 }
-
-export function canDismissOneTimeSecret(
-  secret: string | null | undefined,
-  acknowledged: boolean,
-): boolean {
-  return !secret || acknowledged;
-}

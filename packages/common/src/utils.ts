@@ -1,13 +1,5 @@
-import {
-  INCUS_DEVICE_NAME_PREFIX,
-  INCUS_INSTANCE_NAME_PREFIX,
-  INCUS_VOLUME_NAME_PREFIX,
-} from './constants.js';
-
 const IPV4_REGEX = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/;
 const CIDR_REGEX = /^(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})\/(\d{1,2})$/;
-const MAX_MATERIALIZED_CIDR_HOSTS = 65_534;
-const UUID32_REGEX = /^[0-9a-f]{32}$/;
 
 export function ipToNum(ip: string): number {
   const match = IPV4_REGEX.exec(ip);
@@ -74,47 +66,6 @@ export function ipv4CidrContains(outer: string, inner: string): boolean {
     && innerBounds.broadcastAddr <= outerBounds.broadcastAddr;
 }
 
-export function cidrToIps(cidr: string, reservedIps: string[] = []): string[] {
-  const { base, prefixLen } = parseCidr(cidr);
-  const { networkAddr, broadcastAddr, usableHosts } = cidrBounds(base, prefixLen);
-  if (usableHosts === 0) return [];
-  if (usableHosts > MAX_MATERIALIZED_CIDR_HOSTS) {
-    throw new Error(`CIDR is too large to materialize safely: ${cidr}`);
-  }
-
-  const reserved = new Set<string>();
-  for (const ip of reservedIps) {
-    const canonical = canonicalIpv4Address(ip);
-    reserved.add(canonical);
-  }
-
-  const ips: string[] = [];
-  for (let value = networkAddr + 1; value < broadcastAddr; value += 1) {
-    const ip = numToIp(value);
-    if (!reserved.has(ip)) ips.push(ip);
-  }
-  return ips;
-}
-
-export function allocateNextIp(
-  cidr: string,
-  usedIps: Set<string>,
-  reservedIps: string[] = [],
-): string | null {
-  const { base, prefixLen } = parseCidr(cidr);
-  const { networkAddr, broadcastAddr, usableHosts } = cidrBounds(base, prefixLen);
-  if (usableHosts > MAX_MATERIALIZED_CIDR_HOSTS) {
-    throw new Error(`CIDR is too large for bounded allocation: ${cidr}`);
-  }
-  const reserved = new Set(reservedIps.map(canonicalIpv4Address));
-  const used = new Set([...usedIps].map(canonicalIpv4Address));
-  for (let value = networkAddr + 1; value < broadcastAddr; value += 1) {
-    const ip = numToIp(value);
-    if (!reserved.has(ip) && !used.has(ip)) return ip;
-  }
-  return null;
-}
-
 export function isUsableHostInCidr(cidr: string, ip: string): boolean {
   try {
     const { base, prefixLen } = parseCidr(cidr);
@@ -124,30 +75,6 @@ export function isUsableHostInCidr(cidr: string, ip: string): boolean {
   } catch {
     return false;
   }
-}
-
-export function deriveIncusInstanceName(resourceId: string): string {
-  return `${INCUS_INSTANCE_NAME_PREFIX}${uuid32(resourceId)}`;
-}
-
-export function deriveIncusVolumeName(resourceId: string): string {
-  return `${INCUS_VOLUME_NAME_PREFIX}${uuid32(resourceId)}`;
-}
-
-export function deriveIncusDeviceName(resourceId: string): string {
-  return `${INCUS_DEVICE_NAME_PREFIX}${uuid32(resourceId)}`;
-}
-
-export function isIncusInstanceName(value: string): boolean {
-  return /^nyc-[0-9a-f]{32}$/.test(value);
-}
-
-export function isIncusVolumeName(value: string): boolean {
-  return /^nyv-[0-9a-f]{32}$/.test(value);
-}
-
-export function isIncusDeviceName(value: string): boolean {
-  return /^nyd-[0-9a-f]{32}$/.test(value);
 }
 
 export function canonicalJson(value: unknown): string {
@@ -178,14 +105,6 @@ export function generateToken(byteLength = 16): string {
   const bytes = new Uint8Array(byteLength);
   globalThis.crypto.getRandomValues(bytes);
   return Array.from(bytes, (byte) => byte.toString(16).padStart(2, '0')).join('');
-}
-
-function uuid32(value: string): string {
-  const compact = value.replaceAll('-', '').toLowerCase();
-  if (!UUID32_REGEX.test(compact)) {
-    throw new Error('Expected a UUID resource identity');
-  }
-  return compact;
 }
 
 function cidrBounds(base: string, prefixLen: number): {

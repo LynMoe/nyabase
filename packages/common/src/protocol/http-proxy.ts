@@ -129,13 +129,8 @@ export const zPatchHttpDomainPoolRequest = z.object({
 
 export type HttpProxyWarningReason = z.infer<typeof zHttpProxyWarningReason>;
 export type HttpProxyBindingStatus = z.infer<typeof zHttpProxyBindingStatus>;
-export type HttpProxyDomainPoolSnapshot = z.infer<typeof zHttpProxyDomainPoolSnapshot>;
-export type HttpProxyRouteSnapshot = z.infer<typeof zHttpProxyRouteSnapshot>;
 export type HttpProxySnapshot = z.infer<typeof zHttpProxySnapshot>;
 export type HttpProxyStatusReport = z.infer<typeof zHttpProxyStatusReport>;
-export type HttpProxyClientAck = z.infer<typeof zHttpProxyClientAck>;
-export type CreateHttpProxyBindingRequest = z.infer<typeof zCreateHttpProxyBindingRequest>;
-export type PatchHttpProxyBindingRequest = z.infer<typeof zPatchHttpProxyBindingRequest>;
 export type CreateHttpDomainPoolRequest = z.infer<typeof zCreateHttpDomainPoolRequest>;
 export type PatchHttpDomainPoolRequest = z.infer<typeof zPatchHttpDomainPoolRequest>;
 
@@ -181,10 +176,6 @@ export type HttpProxyBackendMessage =
   | { kind: 'snapshot'; payload: HttpProxySnapshot }
   | { kind: 'update'; payload: HttpProxySnapshot };
 
-export type HttpProxyClientMessage =
-  | { kind: 'ack'; payload: HttpProxyClientAck }
-  | { kind: 'status'; payload: HttpProxyStatusReport };
-
 export function normalizeHttpProxyHostname(value: string): string {
   const normalized = value.trim().replace(/\.$/, '').toLowerCase();
   if (!isValidAsciiDnsName(normalized)) throw new Error('Invalid ASCII DNS hostname');
@@ -216,20 +207,6 @@ export function hostnameMatchesHttpProxyWildcard(hostname: string, wildcardDomai
   if (!host.endsWith(suffix)) return false;
   const prefix = host.slice(0, -suffix.length);
   return prefix.length > 0 && !prefix.includes('.');
-}
-
-export function resolveHttpProxyRoute(
-  snapshot: Pick<HttpProxySnapshot, 'routes'>,
-  hostHeader: string | null | undefined,
-): HttpProxyRouteSnapshot | null {
-  if (!hostHeader) return null;
-  let hostname: string;
-  try {
-    hostname = normalizeHttpProxyHostname(hostHeader.split(':')[0] ?? '');
-  } catch {
-    return null;
-  }
-  return hostname ? snapshot.routes.find((route) => route.hostname === hostname) ?? null : null;
 }
 
 export function isValidAsciiDnsName(value: string): boolean {

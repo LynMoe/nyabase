@@ -51,7 +51,7 @@ describePg('clean Incus server contract', () => {
         {} as never,
         { keyEncryptionSecret: () => 'test-key-secret' } as never,
         new InfrastructureRepository(database),
-        { forgetServer: vi.fn() } as never,
+        { invalidate: vi.fn() } as never,
       );
 
       await expect(service.prepareConnection(serverId, 'aa'.repeat(32))).resolves.toBe(1);
@@ -141,7 +141,7 @@ describePg('clean Incus server contract', () => {
         { append: vi.fn() } as never,
         { keyEncryptionSecret: () => 'test-key-secret' } as never,
         new InfrastructureRepository(database),
-        { forgetServer: vi.fn() } as never,
+        { invalidate: vi.fn() } as never,
       );
 
       await expect(service.delete('actor-1', serverId, 2)).rejects.toMatchObject({
@@ -507,7 +507,7 @@ describePg('clean Incus server contract', () => {
         worker_id: 'destroy-worker',
         lease_expires_at: new Date('2099-01-01T00:00:00.000Z'),
       }).execute();
-      const forgetServer = vi.fn();
+      const invalidate = vi.fn();
       const service = new ServersService(
         database,
         new PgTransactionManager(database),
@@ -515,11 +515,11 @@ describePg('clean Incus server contract', () => {
         { append: vi.fn() } as never,
         { keyEncryptionSecret: () => 'test-key-secret' } as never,
         new InfrastructureRepository(database),
-        { forgetServer } as never,
+        { invalidate } as never,
       );
 
       await expect(service.delete('actor-1', serverS, 4)).resolves.toBeUndefined();
-      expect(forgetServer).toHaveBeenCalledWith(serverS, 'server_deleted');
+      expect(invalidate).toHaveBeenCalledWith('server_deleted');
       expect(
         await database.selectFrom('infra.servers').select('id').where('id', '=', serverS).executeTakeFirst(),
       ).toBeUndefined();
@@ -704,7 +704,7 @@ describePg('clean Incus server contract', () => {
         { append: vi.fn() } as never,
         { keyEncryptionSecret: () => 'test-key-secret' } as never,
         new InfrastructureRepository(database),
-        { forgetServer: vi.fn() } as never,
+        { invalidate: vi.fn() } as never,
       );
 
       await expect(service.delete('actor-1', unrelated, 1)).resolves.toBeUndefined();

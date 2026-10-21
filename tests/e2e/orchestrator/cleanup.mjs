@@ -268,8 +268,6 @@ DELETE FROM control.reconcile_claims
 WHERE server_id = :'server_id'::uuid;
 DELETE FROM control.grant_expiry_enforcement
 WHERE server_id = :'server_id'::uuid;
-DELETE FROM system.incus_client_certificate_trusts
-WHERE server_id = :'server_id'::uuid;
 UPDATE infra.servers
 SET system_pool_id = NULL
 WHERE id = :'server_id'::uuid;

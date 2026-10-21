@@ -67,14 +67,6 @@ export class ContainerControlRepository {
     return query.execute();
   }
 
-  async findOwnerId(id: string, executor: ContainerExecutor = this.database): Promise<string | null> {
-    const row = await executor.selectFrom('control.containers')
-      .select('owner_id')
-      .where('id', '=', id)
-      .executeTakeFirst();
-    return row?.owner_id ?? null;
-  }
-
   find(id: string, executor: ContainerExecutor = this.database) {
     return executor.selectFrom('control.containers')
       .selectAll()
@@ -290,39 +282,6 @@ export class ContainerControlRepository {
     return query.execute().then((rows) => rows.map((row) => this.route(row)));
   }
 
-  async replaceServerRoutes(
-    serverId: string,
-    routes: readonly ContainerSshRouteRecord[],
-    executor: ContainerExecutor,
-  ): Promise<void> {
-    await executor.deleteFrom('control.container_ssh_routes')
-      .where('server_id', '=', serverId)
-      .execute();
-    if (routes.length === 0) return;
-    await executor.insertInto('control.container_ssh_routes')
-      .values(routes.map((route) => ({
-        container_id: route.containerId,
-        server_id: route.serverId,
-        instance_name: route.instanceName,
-        routed_ip: route.routedIp,
-        instance_status: route.runtimeStatus,
-        ssh_status: route.sshStatus,
-        last_error: route.lastError,
-        observed_at: route.observedAt,
-      })))
-      .execute();
-  }
-
-  async deleteRoutes(
-    options: { serverId?: string; containerId?: string } = {},
-    executor: ContainerExecutor = this.database,
-  ): Promise<void> {
-    let query = executor.deleteFrom('control.container_ssh_routes');
-    if (options.serverId) query = query.where('server_id', '=', options.serverId);
-    if (options.containerId) query = query.where('container_id', '=', options.containerId);
-    await query.execute();
-  }
-
   activeNetworkClaims(
     filter: { addresses?: readonly string[]; serverId?: string } = {},
     executor: ContainerExecutor = this.database,
@@ -345,15 +304,6 @@ export class ContainerControlRepository {
       ownerKind: row.owner_kind,
       ownerId: row.owner_id,
     })));
-  }
-
-  countOnServer(serverId: string, executor: ContainerExecutor = this.database) {
-    return executor.selectFrom('control.containers')
-      .select(sql<number>`count(*)`.as('count'))
-      .where('server_id', '=', serverId)
-      .where('lifecycle_phase', 'not in', ['failed', 'deleting'])
-      .executeTakeFirstOrThrow()
-      .then((row) => Number(row.count));
   }
 
   private route(row: {

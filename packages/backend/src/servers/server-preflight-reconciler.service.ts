@@ -3,15 +3,13 @@ import { createHash, randomUUID } from 'node:crypto';
 import { isIP } from 'node:net';
 import {
   Capability,
-  CertificateState,
-  CertificateTrustState,
   FailureCode,
   PreflightStatus,
   isUsableHostInCidr,
   type NodeMetricSample,
   type PreflightReport,
 } from '@nyabase/common';
-import { Kysely, sql, type Transaction } from 'kysely';
+import { Kysely, sql } from 'kysely';
 import type { NyabaseDatabase } from '../platform/persistence-pg/database.types.js';
 import { PG_DATABASE } from '../platform/persistence-pg/tokens.js';
 import {
@@ -59,13 +57,6 @@ interface ServerRow {
   revision: string | number | bigint;
 }
 
-interface ActiveCertificateTrust {
-  certificateId: string;
-  state: CertificateTrustState | null;
-}
-
-type ServerPreflightExecutor = Kysely<NyabaseDatabase> | Transaction<NyabaseDatabase>;
-
 interface PreflightOptions {
   readonly probeImageAlias: string;
   readonly probeImageFingerprint: string;
@@ -93,12 +84,6 @@ function probeHardwareId(serverId: string): string {
     .update(`nyabase-preflight:${normalized(serverId)}`, 'utf8')
     .digest('hex')
     .slice(0, 32);
-}
-
-function isTrustedCertificateState(
-  state: CertificateTrustState | null,
-): state is CertificateTrustState.Trusted | CertificateTrustState.Verified {
-  return state === CertificateTrustState.Trusted || state === CertificateTrustState.Verified;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -312,45 +297,38 @@ export class ServerPreflightReconciler implements ManagedReconciler, OnModuleIni
     let claimed = false;
     let trustMutationSucceeded = false;
     let claimConsumed = false;
-    let certificateId: string | undefined;
     try {
-      const preparation = await this.database.transaction().execute(async (transaction) => {
-        await lockServerOnboarding(transaction);
-        const activeTrust = await this.readActiveCertificateTrust(server.id, transaction);
-        if (!activeTrust) {
-          throw new IncusError('TLS_ERROR', 'retry', {
-            serverId: server.id,
-            reason: 'active_certificate_missing',
-          });
-        }
-        if (isTrustedCertificateState(activeTrust.state)) {
-          return { certificateId: activeTrust.certificateId, trustToken: null as string | null };
-        }
-        if (!reference) {
-          throw new IncusError('TRUST_TOKEN_MISSING', 'managed_failure', {
-            reason: 'trust_token_reference_missing',
-          });
-        }
+      // Trust is a property of the Incus server, not of local state: a client
+      // that is already trusted (for example a retry after the trust call
+      // succeeded but the token commit was lost) needs no token.
+      const alreadyTrusted = await this.isClientTrusted(client, signal);
+      const trustToken = alreadyTrusted
+        ? null
+        : await this.database.transaction().execute(async (transaction) => {
+          await lockServerOnboarding(transaction);
+          if (!reference) {
+            throw new IncusError('TRUST_TOKEN_MISSING', 'managed_failure', {
+              reason: 'trust_token_reference_missing',
+            });
+          }
+          const token = this.ephemeral.claimTrustToken(server.id, reference, claimId);
+          claimed = token !== null;
+          if (!token) {
+            throw new IncusError('TRUST_TOKEN_MISSING', 'managed_failure', {
+              reason: 'trust_token_expired_or_lost_on_restart',
+            });
+          }
+          return token;
+        });
 
-        const trustToken = this.ephemeral.claimTrustToken(server.id, reference, claimId);
-        claimed = trustToken !== null;
-        if (!trustToken) {
-          throw new IncusError('TRUST_TOKEN_MISSING', 'managed_failure', {
-            reason: 'trust_token_expired_or_lost_on_restart',
-          });
-        }
-        return { certificateId: activeTrust.certificateId, trustToken };
-      });
-
-      certificateId = preparation.certificateId;
-      if (preparation.trustToken) {
+      if (trustToken) {
         try {
           await readAfterTimeout(
             () =>
               requestAndWait(
                 client,
                 (options) =>
-                  client.trustClientCertificate(preparation.trustToken!, `nyabase-${normalized(server.id)}`, {
+                  client.trustClientCertificate(trustToken, `nyabase-${normalized(server.id)}`, {
                     ...options,
                     signal,
                   }),
@@ -365,16 +343,6 @@ export class ServerPreflightReconciler implements ManagedReconciler, OnModuleIni
           throw this.classifyTrustMutationFailure(error);
         }
         trustMutationSucceeded = true;
-        await this.database.transaction().execute(async (transaction) => {
-          await lockServerOnboarding(transaction);
-          await this.markTrustState(
-            transaction,
-            preparation.certificateId,
-            server.id,
-            CertificateTrustState.Trusted,
-          );
-        });
-
         const consumed = this.ephemeral.consumeClaimedTrustToken(
           server.id,
           reference!,
@@ -399,7 +367,6 @@ export class ServerPreflightReconciler implements ManagedReconciler, OnModuleIni
         revisionNumber(server.revision),
         signal,
       );
-      await this.persistVerifiedTrust(certificateId, server.id);
     } finally {
       if (claimed && !claimConsumed && !trustMutationSucceeded && reference) {
         this.ephemeral.releaseClaimedTrustToken(server.id, reference, claimId);
@@ -528,74 +495,16 @@ export class ServerPreflightReconciler implements ManagedReconciler, OnModuleIni
     });
   }
 
-  private async readActiveCertificateTrust(
-    serverId: string,
-    executor: ServerPreflightExecutor,
-  ): Promise<ActiveCertificateTrust | null> {
-    const certificate = await executor
-      .selectFrom('system.incus_client_certificates')
-      .select('id')
-      .where('state', '=', CertificateState.Active)
-      .forUpdate()
-      .executeTakeFirst();
-    if (!certificate) return null;
-    const trust = await executor
-      .selectFrom('system.incus_client_certificate_trusts')
-      .select('state')
-      .where('certificate_id', '=', certificate.id)
-      .where('server_id', '=', serverId)
-      .forUpdate()
-      .executeTakeFirst();
-    return {
-      certificateId: certificate.id,
-      state: (trust?.state as CertificateTrustState | undefined) ?? null,
-    };
-  }
-
-  private async markTrustState(
-    executor: ServerPreflightExecutor,
-    certificateId: string,
-    serverId: string,
-    state: CertificateTrustState,
-  ): Promise<void> {
-    await executor
-      .insertInto('system.incus_client_certificate_trusts')
-      .values({
-        certificate_id: certificateId,
-        server_id: serverId,
-        state,
-        last_error: null,
-        observed_at: state === CertificateTrustState.Verified ? new Date() : null,
-      })
-      .onConflict((conflict) =>
-        conflict.columns(['certificate_id', 'server_id']).doUpdateSet({
-          state,
-          last_error: null,
-          observed_at: state === CertificateTrustState.Verified ? new Date() : null,
-        }),
-      )
-      .execute();
-  }
-
-  private async persistVerifiedTrust(
-    certificateId: string | undefined,
-    serverId: string,
-  ): Promise<void> {
-    if (!certificateId) {
-      throw new IncusError('TLS_ERROR', 'retry', {
-        serverId,
-        reason: 'active_certificate_id_missing',
-      });
+  private async isClientTrusted(
+    client: IncusClientPort,
+    signal: AbortSignal,
+  ): Promise<boolean> {
+    try {
+      const response = await client.getServer({ signal });
+      return response.metadata.auth === 'trusted';
+    } catch {
+      return false;
     }
-    await this.database.transaction().execute(async (transaction) => {
-      await lockServerOnboarding(transaction);
-      await this.markTrustState(
-        transaction,
-        certificateId,
-        serverId,
-        CertificateTrustState.Verified,
-      );
-    });
   }
 
   private classifyTrustMutationFailure(error: unknown): unknown {

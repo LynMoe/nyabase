@@ -59,9 +59,6 @@ export const zPatchServerGpuRequest = z.object({
   enabled: z.boolean(),
 }).strict();
 
-export type PatchContainerGpusRequest = z.infer<typeof zPatchContainerGpusRequest>;
-export type PatchServerGpuRequest = z.infer<typeof zPatchServerGpuRequest>;
-
 export function parseContainerState(state: unknown): GpuContainerState | null {
   if (state === undefined || state === null) return null;
   if (typeof state !== 'object' || Array.isArray(state)) return null;

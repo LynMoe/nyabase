@@ -1,7 +1,5 @@
 import { describe, it, expect } from 'vitest';
 import {
-  cidrToIps,
-  allocateNextIp,
   ipToNum,
   numToIp,
   canonicalIpv4Address,
@@ -69,74 +67,6 @@ describe('parseCidr', () => {
     expect(() => parseCidr('10.0.0.0')).toThrow();
     expect(() => parseCidr('10.0.0.0/33')).toThrow();
     expect(() => parseCidr('garbage/24')).toThrow();
-  });
-});
-
-describe('cidrToIps', () => {
-  it('returns correct count for /30 (2 usable hosts)', () => {
-    expect(cidrToIps('10.0.0.0/30')).toEqual(['10.0.0.1', '10.0.0.2']);
-  });
-
-  it('excludes reserved IPs', () => {
-    const ips = cidrToIps('10.0.0.0/29', ['10.0.0.1', '10.0.0.3']);
-    expect(ips).not.toContain('10.0.0.1');
-    expect(ips).not.toContain('10.0.0.3');
-    expect(ips).toContain('10.0.0.2');
-    expect(ips).toContain('10.0.0.4');
-  });
-
-  it('returns empty for /31 (no usable host addresses)', () => {
-    expect(cidrToIps('10.0.0.0/31')).toHaveLength(0);
-  });
-
-  it('returns empty for /32', () => {
-    expect(cidrToIps('10.0.0.5/32')).toHaveLength(0);
-  });
-
-  it('handles /24 correctly (254 usable hosts)', () => {
-    const ips = cidrToIps('192.168.1.0/24');
-    expect(ips).toHaveLength(254);
-    expect(ips[0]).toBe('192.168.1.1');
-    expect(ips[253]).toBe('192.168.1.254');
-  });
-
-  it('throws on malformed CIDR', () => {
-    expect(() => cidrToIps('bogus')).toThrow();
-  });
-
-  it('rejects huge materialization and invalid reservations without allocating', () => {
-    expect(() => cidrToIps('0.0.0.0/0')).toThrow('too large');
-    expect(() => cidrToIps('10.0.0.0/30', ['not-an-ip'])).toThrow('Invalid IPv4');
-  });
-});
-
-describe('allocateNextIp', () => {
-  it('returns first available IP', () => {
-    const used = new Set(['192.168.1.1', '192.168.1.2']);
-    expect(allocateNextIp('192.168.1.0/24', used)).toBe('192.168.1.3');
-  });
-
-  it('returns null when all IPs are used', () => {
-    const ips = cidrToIps('10.0.0.0/30');
-    expect(allocateNextIp('10.0.0.0/30', new Set(ips))).toBeNull();
-  });
-
-  it('skips reserved IPs', () => {
-    expect(allocateNextIp('10.0.0.0/29', new Set(), ['10.0.0.1'])).toBe('10.0.0.2');
-  });
-
-  it('skips both the gateway and configured reservations supplied by the caller', () => {
-    expect(
-      allocateNextIp(
-        '172.29.240.0/29',
-        new Set(),
-        ['172.29.240.1', '172.29.240.2'],
-      ),
-    ).toBe('172.29.240.3');
-  });
-
-  it('rejects an unbounded allocation range', () => {
-    expect(() => allocateNextIp('0.0.0.0/0', new Set())).toThrow('too large');
   });
 });
 

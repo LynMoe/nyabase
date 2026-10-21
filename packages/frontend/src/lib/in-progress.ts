@@ -1,6 +1,4 @@
 import {
-  CertificateState,
-  CertificateTrustState,
   ContainerPhase,
   ContainerStatus,
   IntentStatus,
@@ -104,14 +102,6 @@ export function intentListSettled(items: readonly IntentDto[]): boolean {
 
 export function preflightPending(status: PreflightStatus | string): boolean {
   return status === PreflightStatus.Running;
-}
-
-export function certificateStatePending(state: CertificateState | string): boolean {
-  return state === CertificateState.Staged;
-}
-
-export function certificateTrustPending(state: CertificateTrustState | string): boolean {
-  return state === CertificateTrustState.Pending;
 }
 
 export function userDeleting(status: UserStatus | string): boolean {

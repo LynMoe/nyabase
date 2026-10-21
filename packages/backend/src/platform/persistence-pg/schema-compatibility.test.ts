@@ -4,9 +4,18 @@ import { join } from 'node:path';
 import type { Pool } from 'pg';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
-  assertSqlMigrationCompatibility,
+  assertSqlMigrationManifestCompatibility,
   discoverSqlMigrations,
 } from './migrator.js';
+
+/** Production passes a pre-discovered manifest; tests start from a migrations directory. */
+async function assertSqlMigrationCompatibility(
+  pool: Pool,
+  directory: string,
+  options?: Parameters<typeof assertSqlMigrationManifestCompatibility>[2],
+) {
+  return assertSqlMigrationManifestCompatibility(pool, await discoverSqlMigrations(directory), options);
+}
 
 const roots: string[] = [];
 

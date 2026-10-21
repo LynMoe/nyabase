@@ -33,7 +33,7 @@ import { PageHeader } from '../components/layout/page-header.js';
 import { QueryView } from '../components/layout/query-view.js';
 import { SectionCard } from '../components/layout/section-card.js';
 import { TechnicalId } from '../components/refs/technical-id.js';
-import { ClientCertificatePanel } from '../components/servers/client-certificate-panel.js';
+import { ClientIdentityCard } from '../components/servers/client-identity-card.js';
 import {
   nodeMetricsStatusZh,
   serverStatusLabel,
@@ -131,11 +131,7 @@ export default function ServersPage() {
           </SectionCard>
         )}
       </QueryView>
-      {serversQuery.data && serversQuery.data.length > 0 ? (
-        <ClientCertificatePanel
-          serverNames={new Map(serversQuery.data.map((server) => [server.id, server.name]))}
-        />
-      ) : null}
+      {serversQuery.data && serversQuery.data.length > 0 ? <ClientIdentityCard /> : null}
       <ServerOnboardingDialog
         open={onboardingOpen}
         onOpenChange={setOnboardingOpen}

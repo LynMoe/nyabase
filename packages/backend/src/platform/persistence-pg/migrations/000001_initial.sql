@@ -692,7 +692,6 @@ CREATE TABLE control.intents (
     busy_attempts integer DEFAULT 0 NOT NULL,
     busy_since timestamp with time zone,
     next_attempt_at timestamp with time zone,
-    blocked_by_intent_id uuid,
     created_at timestamp with time zone DEFAULT clock_timestamp() NOT NULL,
     settled_at timestamp with time zone,
     CONSTRAINT intents_kind_check
@@ -707,32 +706,26 @@ CREATE TABLE control.intents (
             'image_assignment.ensure',
             'image_assignment.delete',
             'server.connect',
-            'server.preflight',
-            'certificate.rotate'
+            'server.preflight'
         ])),
     CONSTRAINT intents_resource_type_check
         CHECK (resource_type = ANY (ARRAY[
             'container',
             'volume',
             'image_assignment',
-            'server',
-            'certificate_rotation'
+            'server'
         ])),
     CONSTRAINT intents_kind_resource_check
         CHECK ((kind LIKE 'container.%' AND resource_type = 'container')
             OR (kind LIKE 'volume.%' AND resource_type = 'volume')
             OR (kind LIKE 'image_assignment.%' AND resource_type = 'image_assignment')
-            OR (kind LIKE 'server.%' AND resource_type = 'server')
-            OR (kind = 'certificate.rotate' AND resource_type = 'certificate_rotation')),
+            OR (kind LIKE 'server.%' AND resource_type = 'server')),
     CONSTRAINT intents_resource_shape_check
         CHECK ((resource_type IN ('container', 'image_assignment', 'server')
                 AND server_id IS NOT NULL)
             OR (resource_type = 'volume' AND kind IN ('volume.ensure', 'volume.resize')
                 AND server_id IS NOT NULL)
-            OR (resource_type = 'volume' AND kind = 'volume.destroy' AND server_id IS NULL)
-            OR (resource_type = 'certificate_rotation' AND server_id IS NULL)),
-    CONSTRAINT intents_blocked_by_check
-        CHECK (blocked_by_intent_id IS NULL OR blocked_by_intent_id <> id),
+            OR (resource_type = 'volume' AND kind = 'volume.destroy' AND server_id IS NULL)),
     CONSTRAINT intents_target_revision_check CHECK (target_revision > 0),
     CONSTRAINT intents_status_check
         CHECK (status = ANY (ARRAY['pending', 'succeeded', 'failed'])),
@@ -771,87 +764,56 @@ CREATE TABLE control.reconcile_claims (
             'volume',
             'image_assignment',
             'server',
-            'certificate_rotation',
             'grant_expiry'
         ])),
     CONSTRAINT reconcile_claims_worker_check CHECK (length(btrim(worker_id)) > 0),
     CONSTRAINT reconcile_claims_placement_shape_check
         CHECK (
-            (placement_server_id = '00000000-0000-4000-8000-000000000000'
-                AND server_id IS NULL
-                AND resource_type = 'certificate_rotation')
-            OR (placement_server_id = '00000000-0000-4000-8000-000000000001'
+            (placement_server_id = '00000000-0000-4000-8000-000000000001'
                 AND server_id IS NULL
                 AND resource_type = 'volume')
-            OR (placement_server_id <> '00000000-0000-4000-8000-000000000000'
-                AND placement_server_id <> '00000000-0000-4000-8000-000000000001'
+            OR (placement_server_id <> '00000000-0000-4000-8000-000000000001'
                 AND server_id = placement_server_id)
         ),
     PRIMARY KEY (resource_type, resource_id, placement_server_id)
 );
 
 COMMENT ON COLUMN control.reconcile_claims.placement_server_id IS
-  'Incus catalog/server for the claim; certificate_rotation uses …0000, volume.destroy uses …0001; grant_expiry uses the granted server';
+  'Incus catalog/server for the claim; volume.destroy uses …0001; grant_expiry uses the granted server';
 
 CREATE TABLE system.settings (
     singleton boolean DEFAULT true NOT NULL,
     revision bigint NOT NULL,
-    snapshot_token character(64) NOT NULL,
     "values" jsonb NOT NULL,
     updated_by uuid REFERENCES iam.users(id) ON DELETE SET NULL,
     updated_at timestamp with time zone DEFAULT clock_timestamp() NOT NULL,
     CONSTRAINT settings_singleton_check CHECK (singleton),
     CONSTRAINT settings_revision_check CHECK (revision BETWEEN 1 AND 9007199254740991),
-    CONSTRAINT settings_snapshot_token_check CHECK (snapshot_token ~ '^[a-f0-9]{64}$'),
     CONSTRAINT settings_values_check CHECK (jsonb_typeof("values") = 'object')
 );
 
 COMMENT ON TABLE system.settings IS
   'PostgreSQL authority for the complete online-editable control-plane settings snapshot';
 COMMENT ON COLUMN system.settings.revision IS
-  'Absolute monotonic CAS version consumed by every API, gateway, and worker process';
-COMMENT ON COLUMN system.settings.snapshot_token IS
-  'Stable content identity paired with revision for stale-client conflict detection';
+  'Absolute monotonic CAS version; updates must present the revision they read';
 COMMENT ON COLUMN system.settings."values" IS
   'Complete validated online-editable values; deployment YAML is bootstrap/read-only only';
 
-CREATE TABLE system.incus_client_certificates (
-    id uuid NOT NULL,
-    generation bigint NOT NULL,
+CREATE TABLE system.incus_client_identity (
+    singleton boolean DEFAULT true NOT NULL,
     certificate_pem text NOT NULL,
     encrypted_private_key text NOT NULL,
     fingerprint text NOT NULL,
-    not_before timestamp with time zone NOT NULL,
     not_after timestamp with time zone NOT NULL,
-    state text NOT NULL,
-    created_by uuid REFERENCES iam.users(id) ON DELETE SET NULL,
     created_at timestamp with time zone DEFAULT clock_timestamp() NOT NULL,
-    activated_at timestamp with time zone,
-    retired_at timestamp with time zone,
-    CONSTRAINT incus_client_certificates_generation_check CHECK (generation > 0),
-    CONSTRAINT incus_client_certificates_fingerprint_check
+    CONSTRAINT incus_client_identity_singleton_check CHECK (singleton),
+    CONSTRAINT incus_client_identity_fingerprint_check
         CHECK (fingerprint ~ '^[0-9A-Fa-f:]{32,95}$'),
-    CONSTRAINT incus_client_certificates_validity_check CHECK (not_after > not_before),
-    CONSTRAINT incus_client_certificates_state_check
-        CHECK (state = ANY (ARRAY['staged', 'active', 'retired', 'failed'])),
-    CONSTRAINT incus_client_certificates_state_shape_check
-        CHECK ((state = 'active' AND activated_at IS NOT NULL AND retired_at IS NULL)
-            OR (state = 'retired' AND retired_at IS NOT NULL)
-            OR (state IN ('staged', 'failed'))),
-    PRIMARY KEY (id)
+    PRIMARY KEY (singleton)
 );
 
-CREATE TABLE system.incus_client_certificate_trusts (
-    certificate_id uuid NOT NULL
-        REFERENCES system.incus_client_certificates(id) ON DELETE CASCADE,
-    server_id uuid NOT NULL REFERENCES infra.servers(id) ON DELETE CASCADE,
-    state text DEFAULT 'pending'::text NOT NULL,
-    last_error text,
-    observed_at timestamp with time zone,
-    CONSTRAINT incus_client_certificate_trusts_state_check
-        CHECK (state = ANY (ARRAY['pending', 'trusted', 'verified', 'revoked', 'cleanup_failed'])),
-    PRIMARY KEY (certificate_id, server_id)
-);
+COMMENT ON TABLE system.incus_client_identity IS
+  'Single control-plane mTLS client identity, generated on first use; private key encrypted with ssh.keyEncryptionSecret';
 
 CREATE TABLE interaction.http_domain_pools (
     id uuid NOT NULL,
@@ -1010,8 +972,6 @@ ALTER TABLE control.authorization_dependencies ADD CONSTRAINT authorization_depe
 ALTER TABLE control.grant_expiry_enforcement ADD CONSTRAINT grant_expiry_enforcement_pkey
     PRIMARY KEY (user_id, server_id, covering_expires_at);
 ALTER TABLE control.intents ADD CONSTRAINT intents_pkey PRIMARY KEY (id);
-ALTER TABLE control.intents ADD CONSTRAINT intents_blocked_by_intent_id_fkey
-    FOREIGN KEY (blocked_by_intent_id) REFERENCES control.intents(id) ON DELETE SET NULL;
 
 ALTER TABLE system.settings ADD CONSTRAINT settings_pkey PRIMARY KEY (singleton);
 ALTER TABLE interaction.http_domain_pools ADD CONSTRAINT http_domain_pools_wildcard_domain_key
@@ -1157,8 +1117,6 @@ CREATE INDEX intents_pending_ready_idx
 CREATE INDEX intents_pending_resource_idx
     ON control.intents (resource_type, resource_id, target_revision, created_at ASC, id ASC)
     WHERE status = 'pending';
-CREATE INDEX intents_blocked_by_idx
-    ON control.intents (blocked_by_intent_id);
 CREATE INDEX intents_history_idx
     ON control.intents (resource_type, resource_id, created_at DESC, id DESC);
 CREATE INDEX intents_server_idx
@@ -1186,14 +1144,6 @@ CREATE INDEX iam_ssh_public_keys_user_idx
     ON iam.ssh_public_keys (user_id, created_at, id);
 CREATE INDEX iam_users_status_idx ON iam.users (status, username);
 
-CREATE UNIQUE INDEX incus_client_certificates_generation_unique
-    ON system.incus_client_certificates (generation);
-CREATE UNIQUE INDEX incus_client_certificates_active_unique
-    ON system.incus_client_certificates (state) WHERE state = 'active';
-CREATE INDEX incus_client_certificates_created_by_idx
-    ON system.incus_client_certificates (created_by);
-CREATE INDEX incus_client_certificate_trusts_server_idx
-    ON system.incus_client_certificate_trusts (server_id, state);
 CREATE INDEX settings_updated_by_idx ON system.settings (updated_by);
 CREATE UNIQUE INDEX http_hostname_active_binding_idx
     ON interaction.http_hostname_reservations (binding_id) WHERE state = 'active';

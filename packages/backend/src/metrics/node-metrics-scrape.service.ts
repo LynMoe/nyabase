@@ -119,32 +119,6 @@ export class NodeMetricsScrapeService implements OnModuleInit, OnModuleDestroy {
     }
   }
 
-  scrapeServerNow(serverId: string): Promise<void> {
-    if (this.shuttingDown) return Promise.resolve();
-    return this.trackRun(this.runScrapeServerNow(serverId));
-  }
-
-  private async runScrapeServerNow(serverId: string): Promise<void> {
-    try {
-      const server = await this.database
-        .selectFrom('infra.servers')
-        .select([
-          'id',
-          'revision',
-          'node_metrics_endpoint',
-          'node_metrics_token_ciphertext',
-          'node_metrics_token_fingerprint',
-          'node_metrics_status',
-          'node_metrics_last_success_at',
-        ])
-        .where('id', '=', serverId)
-        .executeTakeFirst();
-      if (server) await this.scrapeServer(server);
-    } catch (error) {
-      this.logScrapeFailure(`load server ${serverId}`, error);
-    }
-  }
-
   private scrapeServer(server: NodeMetricsServerRow): Promise<void> {
     if (
       this.shuttingDown

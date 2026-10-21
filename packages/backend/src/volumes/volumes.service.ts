@@ -1355,7 +1355,6 @@ export class VolumesService {
         serverId: container.server_id,
         requestedBy: actorId,
         targetRevision: revision,
-        blockedByIntentId: null,
         request: { operation: 'attach_volume', volumeId: input.volumeId, attachmentId: attachment.id },
       }, transaction);
       await this.audit.append(
@@ -2292,19 +2291,6 @@ export class VolumesService {
       kind,
       catalogState: row.catalog_state,
     }));
-  }
-
-  private async namesForVolumeIds(volumeIds: readonly string[]): Promise<Map<string, string>> {
-    const ids = [...new Set(volumeIds)];
-    const result = new Map<string, string>();
-    if (ids.length === 0) return result;
-    const rows = await this.database
-      .selectFrom('control.volumes')
-      .select(['id', 'name'])
-      .where('id', 'in', ids)
-      .execute();
-    for (const row of rows) result.set(row.id, row.name);
-    return result;
   }
 
   private async toDtos(rows: readonly VolumeRow[]): Promise<VolumeDto[]> {

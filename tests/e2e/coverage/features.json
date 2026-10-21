@@ -68,8 +68,7 @@
     "image_assignment.ensure",
     "image_assignment.delete",
     "server.connect",
-    "server.preflight",
-    "certificate.rotate"
+    "server.preflight"
   ],
   "websocketPaths": [
     "/ws/console",
@@ -77,12 +76,12 @@
     "/ws/http-proxy"
   ],
   "inventory": {
-    "controllerFileCount": 25,
-    "httpDecoratorCount": 150,
-    "httpSurfaceCount": 150,
-    "intentKindCount": 12,
+    "controllerFileCount": 24,
+    "httpDecoratorCount": 148,
+    "httpSurfaceCount": 148,
+    "intentKindCount": 11,
     "websocketPathCount": 3,
-    "canonicalHttpSurfaceCount": 150,
+    "canonicalHttpSurfaceCount": 148,
     "maxUnmapped": 2
   },
   "features": [
@@ -122,7 +121,7 @@
     },
     {
       "featureId": "servers-images",
-      "title": "Incus onboarding, preflight, certificate rotation, and image assignment",
+      "title": "Incus onboarding, preflight, client identity, and image assignment",
       "cases": [
         {
           "caseId": "server-mtls-trust-onboarding",
@@ -141,7 +140,7 @@
           ]
         },
         {
-          "caseId": "server-certificate-rotation",
+          "caseId": "server-client-identity",
           "kind": "behavioral",
           "persona": "administrator",
           "status": "implemented",
@@ -150,9 +149,7 @@
             "full"
           ],
           "httpSurfaces": [
-            "GET|/api/admin/incus-client-certificate",
-            "POST|/api/admin/incus-client-certificate/rotate",
-            "GET|/api/admin/incus-client-certificate/rotations/:id"
+            "GET|/api/admin/system-settings/incus-client-identity"
           ]
         },
         {

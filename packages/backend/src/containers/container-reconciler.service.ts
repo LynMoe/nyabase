@@ -64,7 +64,7 @@ import type {
 import { ReconcilerRegistry } from '../reconcile/reconciler-registry.service.js';
 import { ProxySnapshotNotifierService } from '../proxy-snapshots/proxy-snapshot-notifier.service.js';
 import { ensureSharedCatalogOnServer } from '../volumes/shared-catalog.js';
-import { VOLUME_ADOPT_FAIL_AFTER_ATTEMPTS } from '../volumes/volume-placement.js';
+import { VOLUME_ADOPT_FAIL_AFTER_ATTEMPTS } from '../volumes/volume-reconciler.service.js';
 
 type InstanceFull = IncusSchema<'InstanceFull'>;
 type InstanceState = IncusSchema<'InstanceState'>;

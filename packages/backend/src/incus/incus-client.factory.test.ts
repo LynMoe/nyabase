@@ -1,15 +1,10 @@
 import { describe, expect, it, vi } from 'vitest';
-import { encryptPrivateKey } from './incus-credentials.js';
 import { DatabaseIncusClientFactory } from './incus-client.factory.js';
 
 function config() {
   const values: Record<string, unknown> = {
     'incus.caFile': '',
     'incus.caPem': 'self-signed-incus-server-certificate',
-    'incus.clientCertificateFile': '',
-    'incus.clientCertificatePem': '',
-    'incus.clientPrivateKeyFile': '',
-    'incus.clientPrivateKeyPem': '',
     'incus.requestTimeoutMs': 11_000,
     'incus.operationWaitTimeoutMs': 42_000,
     'ssh.keyEncryptionSecret': 'test-encryption-secret',
@@ -21,81 +16,60 @@ function config() {
   };
 }
 
-function database() {
-  let activeIndex = 0;
-  const active = [
-    {
-      id: '00000000-0000-4000-8000-000000000010',
-      generation: '1',
-      certificate_pem: 'client-certificate-one',
-      encrypted_private_key: encryptPrivateKey('client-key-one', 'test-encryption-secret'),
-      fingerprint: 'aa'.repeat(32),
-      not_before: new Date('2026-01-01T00:00:00Z'),
-      not_after: new Date('2027-01-01T00:00:00Z'),
-      state: 'active',
-      created_by: null,
-      created_at: new Date('2026-01-01T00:00:00Z'),
-      activated_at: new Date('2026-01-01T00:00:00Z'),
-      retired_at: null,
-    },
-    {
-      id: '00000000-0000-4000-8000-000000000011',
-      generation: '2',
-      certificate_pem: 'client-certificate-two',
-      encrypted_private_key: encryptPrivateKey('client-key-two', 'test-encryption-secret'),
-      fingerprint: 'bb'.repeat(32),
-      not_before: new Date('2026-02-01T00:00:00Z'),
-      not_after: new Date('2027-02-01T00:00:00Z'),
-      state: 'active',
-      created_by: null,
-      created_at: new Date('2026-02-01T00:00:00Z'),
-      activated_at: new Date('2026-02-01T00:00:00Z'),
-      retired_at: null,
-    },
-  ];
-  const server = {
-    id: '00000000-0000-4000-8000-000000000001',
-    api_endpoint: 'https://incus.example.test:8443',
-    server_cert_fingerprint: 'cc'.repeat(32),
-  };
-  const database = {
+const SERVER_ID = '00000000-0000-4000-8000-000000000001';
+
+function database(server: Record<string, unknown>) {
+  return {
     selectFrom: vi.fn((table: string) => {
       const builder = {
         select: vi.fn(() => builder),
-        selectAll: vi.fn(() => builder),
         where: vi.fn(() => builder),
-        orderBy: vi.fn(() => builder),
-        executeTakeFirst: vi.fn(async () => {
-          if (table === 'infra.servers') return server;
-          if (table === 'system.incus_client_certificates') return active[activeIndex];
-          return undefined;
-        }),
+        executeTakeFirst: vi.fn(async () => (table === 'infra.servers' ? server : undefined)),
         execute: vi.fn(async () => []),
       };
       return builder;
     }),
   };
+}
+
+const identity = {
+  certificatePem: 'client-certificate',
+  privateKeyPem: 'client-key',
+  fingerprint: 'aa'.repeat(32),
+  notAfter: new Date('2036-01-01T00:00:00Z'),
+  createdAt: new Date('2026-01-01T00:00:00Z'),
+};
+
+function factory(server: Record<string, unknown>) {
+  const identityService = { get: vi.fn(async () => identity) };
   return {
-    database,
-    advance: () => {
-      activeIndex = 1;
-    },
+    identityService,
+    factory: new DatabaseIncusClientFactory(
+      database(server) as never,
+      config() as never,
+      identityService as never,
+    ),
   };
 }
 
 describe('DatabaseIncusClientFactory', () => {
-  it('reloads the active encrypted certificate after generation changes', async () => {
-    const fixture = database();
-    const factory = new DatabaseIncusClientFactory(
-      fixture.database as never,
-      config() as never,
-    );
+  const server = {
+    id: SERVER_ID,
+    api_endpoint: 'https://incus.example.test:8443',
+    server_cert_fingerprint: 'cc'.repeat(32),
+  };
 
-    const first = await factory.get('00000000-0000-4000-8000-000000000001');
-    expect(await factory.get('00000000-0000-4000-8000-000000000001')).toBe(first);
+  it('reuses one client per server and presents the generated client identity', async () => {
+    const { factory: instance, identityService } = factory(server);
+    const first = await instance.get(SERVER_ID);
+    expect(await instance.get(SERVER_ID)).toBe(first);
+    expect(identityService.get).toHaveBeenCalledOnce();
+  });
 
-    fixture.advance();
-    const rotated = await factory.get('00000000-0000-4000-8000-000000000001');
-    expect(rotated).not.toBe(first);
+  it('builds a new client when the expected server fingerprint changes', async () => {
+    const { factory: instance } = factory(server);
+    const first = await instance.get(SERVER_ID);
+    const repinned = await instance.get(SERVER_ID, { expectedFingerprint: 'dd'.repeat(32) });
+    expect(repinned).not.toBe(first);
   });
 });

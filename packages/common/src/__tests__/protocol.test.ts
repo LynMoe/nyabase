@@ -34,7 +34,6 @@ import {
   zSshProxyInstanceRouteSnapshot,
   zSshProxyPauseAdmitCommand,
   formatSshProxyJumpLogin,
-  isActiveSshProxyRoute,
   zSharedVolumeScope,
   zVolumeScope,
   ADMIN_INTENT_LIST_MAX,
@@ -206,7 +205,7 @@ describe('canonical container and volume contracts', () => {
     }).success).toBe(false);
   });
 
-  it('formats jump login and accepts an active route', () => {
+  it('formats the jump login', () => {
     expect(formatSshProxyJumpLogin({
       username: 'Alice',
       containerName: 'Work',
@@ -216,15 +215,6 @@ describe('canonical container and volume contracts', () => {
       containerName: 'work',
       serverSlug: 'cpu-a',
     })).toBe('alice.cpu-a.work');
-    expect(isActiveSshProxyRoute({
-      containerId: id,
-      serverId,
-      instanceName: 'nyc-11111111111141118111111111111111',
-      routedIp: '192.0.2.10',
-      status: ContainerStatus.Running,
-      sshStatus: 'running',
-      observedAt: '2026-08-07T00:00:00.000Z',
-    })).toBe(true);
   });
 
   it('uses local or shared storage scopes without source aliases', () => {

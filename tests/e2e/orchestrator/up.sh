@@ -62,34 +62,9 @@ require_env NYABASE_CONFIG_FILE
 require_env E2E_DATABASE_URL
 require_env E2E_BASE_URL
 require_control_plane_inputs "$profile"
-bootstrap_client_cert="$E2E_INCUS_CLIENT_CERT"
-bootstrap_client_key="$E2E_INCUS_CLIENT_KEY"
-connect_client_paths_file="$runtime_dir/incus-connect-client.paths"
-if ! node "$SCRIPT_DIR/prepare-incus-connect-client.mjs" \
-  "$runtime_dir" "$run_id" "$E2E_INCUS_SERVER_CERT_FINGERPRINT" \
-  > "$connect_client_paths_file"; then
-  rm -f "$connect_client_paths_file"
-  die "failed to prepare the run-scoped Incus connect certificate"
-fi
-mapfile -t connect_client_paths < "$connect_client_paths_file"
-rm -f "$connect_client_paths_file"
-[[ "${#connect_client_paths[@]}" -eq 2 \
-  && -f "${connect_client_paths[0]}" && ! -L "${connect_client_paths[0]}" \
-  && -f "${connect_client_paths[1]}" && ! -L "${connect_client_paths[1]}" ]] \
-  || die "Incus connect certificate helper returned invalid paths"
-export E2E_INCUS_CONNECT_CLIENT_CERT="${connect_client_paths[0]}"
-export E2E_INCUS_CONNECT_CLIENT_KEY="${connect_client_paths[1]}"
-[[ "$E2E_INCUS_CLIENT_CERT" == "$bootstrap_client_cert" \
-  && "$E2E_INCUS_CLIENT_KEY" == "$bootstrap_client_key" ]] \
-  || die "Incus bootstrap certificate variables were changed while preparing connect material"
-
 printf '%s\n' \
   'DATABASE_URL=E2E_DATABASE_URL' \
-  'INCUS_CLIENT_CERT_FILE=E2E_INCUS_CLIENT_CERT' \
-  'INCUS_CLIENT_KEY_FILE=E2E_INCUS_CLIENT_KEY' \
   'INCUS_CA_FILE=E2E_INCUS_CA_FILE' \
-  'INCUS_CLIENT_CERT_PEM=E2E_INCUS_CLIENT_CERT contents' \
-  'INCUS_CLIENT_KEY_PEM=E2E_INCUS_CLIENT_KEY contents' \
   'INCUS_CA_PEM=E2E_INCUS_CA_FILE contents' \
   'INCUS_SERVER_CERT_FINGERPRINT=E2E_INCUS_SERVER_CERT_FINGERPRINT' \
   'INCUS_IMAGE_ALIAS=E2E_INCUS_IMAGE_ALIAS' \

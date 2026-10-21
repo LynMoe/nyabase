@@ -43,7 +43,6 @@ export enum IntentResourceType {
   Volume = 'volume',
   ImageAssignment = 'image_assignment',
   Server = 'server',
-  CertificateRotation = 'certificate_rotation',
 }
 
 export enum IntentKind {
@@ -58,7 +57,6 @@ export enum IntentKind {
   ImageAssignmentDelete = 'image_assignment.delete',
   ServerConnect = 'server.connect',
   ServerPreflight = 'server.preflight',
-  CertificateRotate = 'certificate.rotate',
 }
 
 export enum StoragePoolDriver {
@@ -116,27 +114,6 @@ export enum PreflightStatus {
   Failed = 'failed',
 }
 
-export enum CertificateState {
-  Staged = 'staged',
-  Active = 'active',
-  Retired = 'retired',
-  Failed = 'failed',
-}
-
-export enum CertificateTrustState {
-  Pending = 'pending',
-  Trusted = 'trusted',
-  Verified = 'verified',
-  Revoked = 'revoked',
-  CleanupFailed = 'cleanup_failed',
-}
-
-export enum CertificateRotationStatus {
-  Pending = 'pending',
-  Succeeded = 'succeeded',
-  Failed = 'failed',
-}
-
 export enum Capability {
   ManageUsers = 'manage_users',
   ManageGroups = 'manage_groups',
@@ -150,7 +127,6 @@ export enum Capability {
   ManageGrants = 'manage_grants',
   ManageContainersAny = 'manage_containers_any',
   ManagePreflight = 'manage_preflight',
-  ManageCertificates = 'manage_certificates',
   ViewAudit = 'view_audit',
   ViewMetricsAll = 'view_metrics_all',
   ManageSystemSettings = 'manage_system_settings',
@@ -163,7 +139,6 @@ export const ADMIN_INTENT_CAPABILITIES = [
   Capability.ManageSharedVolumes,
   Capability.ManageServers,
   Capability.ManageImages,
-  Capability.ManageCertificates,
 ] as const satisfies readonly Capability[];
 
 export enum SystemGroupKey {
@@ -270,7 +245,6 @@ export enum AuditAction {
   GrantExpired = 'grant.expired',
   ExpiryStopContainers = 'grant.expiry.stop_containers',
   ExpiryPurgeResources = 'grant.expiry.purge_resources',
-  RotateIncusClientCertificate = 'certificate.rotate',
   IncusMutate = 'incus.mutate',
   UpdateSystemSettings = 'system_settings.update',
   CreateUser = 'user.create',

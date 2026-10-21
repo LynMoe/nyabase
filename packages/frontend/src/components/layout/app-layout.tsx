@@ -1,7 +1,6 @@
 import { Link, useRouterState } from '@tanstack/react-router';
 import { useState, type ReactNode } from 'react';
 import { ChevronsUpDown, Laptop, LogOut, Menu, Moon, Sun, UserCircle } from 'lucide-react';
-import { Capability } from '@nyabase/common';
 import { cn } from '../../lib/utils.js';
 import { useAuthStore } from '../../store/auth.js';
 import { useThemeStore, type ThemeMode } from '../../store/theme.js';
@@ -25,7 +24,6 @@ import { TooltipProvider } from '../ui/tooltip.js';
 import { usePublicSettings } from '../../hooks/use-public-settings.js';
 import { terminateBrowserSession } from '../../lib/session-termination.js';
 import { activeNavPath, visibleNavSections, type NavSection } from '../../lib/navigation.js';
-import { CertExpiryBanner } from './cert-expiry-banner.js';
 
 const THEME_OPTIONS: Array<{ value: ThemeMode; label: string; icon: typeof Sun }> = [
   { value: 'light', label: '浅色', icon: Sun },
@@ -191,7 +189,6 @@ export function AppLayout({ children }: { children: ReactNode }) {
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
 
   const sections = visibleNavSections(user?.capabilities);
-  const canManageCertificates = user?.capabilities.includes(Capability.ManageCertificates) ?? false;
 
   const sidebarProps = {
     brandTitle: settings.branding.title,
@@ -235,7 +232,6 @@ export function AppLayout({ children }: { children: ReactNode }) {
           </header>
 
           <main className="flex-1 overflow-auto">
-            <CertExpiryBanner enabled={canManageCertificates} />
             {children}
           </main>
         </div>

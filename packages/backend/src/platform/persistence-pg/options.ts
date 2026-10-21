@@ -33,18 +33,6 @@ function positiveInteger(
   return value;
 }
 
-function booleanValue(
-  env: NodeJS.ProcessEnv,
-  key: string,
-  fallback: boolean,
-): boolean {
-  const raw = env[key]?.trim().toLowerCase();
-  if (!raw) return fallback;
-  if (raw === 'true' || raw === '1') return true;
-  if (raw === 'false' || raw === '0') return false;
-  throw new Error(`${key} must be true, false, 1, or 0`);
-}
-
 function validatedConnectionString(rawValue: string | undefined): string {
   if (rawValue && /[\u0000-\u001f\u007f]/.test(rawValue)) {
     throw new Error('DATABASE_URL must not contain control characters');
@@ -110,10 +98,6 @@ function validatedConnectionString(rawValue: string | undefined): string {
   return value;
 }
 
-function connectionString(env: NodeJS.ProcessEnv): string {
-  return validatedConnectionString(env.DATABASE_URL);
-}
-
 function optionalTlsCa(env: NodeJS.ProcessEnv): string | undefined {
   const path = env.PG_SSL_CA_FILE?.trim();
   if (!path) return undefined;
@@ -156,32 +140,6 @@ function sslOptions(env: NodeJS.ProcessEnv): PgPersistenceOptions['ssl'] {
     default:
       throw new Error('PG_SSL_MODE must be disable, require, or verify-full');
   }
-}
-
-export function loadPgPersistenceOptions(
-  env: NodeJS.ProcessEnv = process.env,
-): PgPersistenceOptions {
-  return {
-    connectionString: connectionString(env),
-    applicationName: env.PG_APPLICATION_NAME?.trim() || 'nyabase-backend',
-    poolMax: positiveInteger(env, 'DB_POOL_MAX', 20),
-    connectionTimeoutMs: positiveInteger(env, 'PG_CONNECTION_TIMEOUT_MS', 5_000),
-    idleTimeoutMs: positiveInteger(env, 'DB_IDLE_TIMEOUT_MS', 30_000),
-    statementTimeoutMs: positiveInteger(env, 'DB_STATEMENT_TIMEOUT_MS', 30_000),
-    lockTimeoutMs: positiveInteger(env, 'PG_LOCK_TIMEOUT_MS', 5_000),
-    idleInTransactionTimeoutMs: positiveInteger(
-      env,
-      'PG_IDLE_IN_TRANSACTION_TIMEOUT_MS',
-      30_000,
-    ),
-    readinessTimeoutMs: positiveInteger(
-      env,
-      'PG_READINESS_TIMEOUT_MS',
-      5_000,
-    ),
-    ssl: sslOptions(env),
-    runMigrationsOnStart: booleanValue(env, 'DB_MIGRATIONS_RUN', false),
-  };
 }
 
 export function pgPersistenceOptionsFromConfig(

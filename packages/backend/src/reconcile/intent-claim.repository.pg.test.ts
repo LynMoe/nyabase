@@ -71,15 +71,7 @@ describePg('Incus reconciliation intent and lease repositories', () => {
           },
         },
       );
-      const retried = await repository.createRetry({
-        sourceIntentId: first.id,
-        kind: IntentKind.ContainerUpdate,
-        resourceType: IntentResourceType.Container,
-        resourceId,
-        serverId,
-        targetRevision: 2,
-        request: { safe: true },
-      });
+      const retried = await repository.retry(first.id);
       expect(retried.id).not.toBe(first.id);
       const latest = await repository.createPending({
         kind: IntentKind.ContainerUpdate,
@@ -91,18 +83,19 @@ describePg('Incus reconciliation intent and lease repositories', () => {
       });
       expect(latest.id).not.toBe(retried.id);
 
-      const page = await repository.listForResource(
-        IntentResourceType.Container,
+      const page = await repository.list({
+        resourceType: IntentResourceType.Container,
         resourceId,
-        { limit: 1 },
-      );
+        limit: 1,
+      });
       expect(page.items).toHaveLength(1);
       expect(page.nextCursor).not.toBeNull();
-      const nextPage = await repository.listForResource(
-        IntentResourceType.Container,
+      const nextPage = await repository.list({
+        resourceType: IntentResourceType.Container,
         resourceId,
-        { limit: 1, cursor: page.nextCursor! },
-      );
+        limit: 1,
+        cursor: page.nextCursor!,
+      });
       expect(nextPage.items).toHaveLength(1);
 
       const result = await repository.settleForObservedRevision(

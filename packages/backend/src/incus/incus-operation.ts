@@ -31,11 +31,6 @@ export interface IncusSynchronousResult<T> {
 
 export type IncusCompletedResult<T> = IncusSynchronousResult<T> | IncusOperationWaitResult;
 
-export interface IncusOperationRequest {
-  readonly response: IncusResponse<unknown>;
-  readonly operationId: string;
-}
-
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
@@ -236,22 +231,4 @@ export async function requestAndWait<T>(
     return { kind: 'synchronous', response };
   }
   return waitForIncusOperation(client, response as IncusResponse<unknown>, options);
-}
-
-export class IncusOperationHelper {
-  constructor(private readonly client: Pick<IncusClientPort, 'getOperationWait'>) {}
-
-  wait(
-    response: IncusResponse<unknown>,
-    options?: IncusOperationWaitOptions,
-  ): Promise<IncusOperationWaitResult> {
-    return waitForIncusOperation(this.client, response, options);
-  }
-
-  requestAndWait<T>(
-    request: (options?: Pick<IncusRequestOptions, 'signal'>) => Promise<IncusResponse<T>>,
-    options?: IncusOperationWaitOptions,
-  ): Promise<IncusCompletedResult<T>> {
-    return requestAndWait(this.client, request, options);
-  }
 }

@@ -452,14 +452,6 @@ export class GroupsService {
     await this.addMember(group.id, userId);
   }
 
-  async ensureUserNotInSystemGroup(systemKey: SystemGroupKey, userId: string): Promise<void> {
-    const group = await this.database.selectFrom('iam.groups')
-      .select('id')
-      .where('system_key', '=', systemKey)
-      .executeTakeFirst();
-    if (group) await this.removeMember(group.id, userId);
-  }
-
   async deleteUserPermanently(userId: string, actorId: string): Promise<{ deleted: boolean }> {
     const result = await this.transactions.run(async (transaction) => {
       await this.access.assertActorMayAdministerUserInTransaction(transaction, actorId, userId);

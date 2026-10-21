@@ -1,15 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { UserStatus, type UserDto } from '@nyabase/common';
-import { useAuthStore } from '../store/auth.js';
-import { api, authApiTestables } from './api.js';
-import {
-  authSessionTestables,
-  clearLocalSession,
-  initializeAuthSync,
-} from './auth-session.js';
-import { terminateBrowserSession } from './session-termination.js';
-import { queryClient } from './query-client.js';
-import { takePendingLoginReason } from './pending-login-reason.js';
 
 class MemoryStorage implements Storage {
   private readonly values = new Map<string, string>();
@@ -63,8 +53,73 @@ function stubBrowser() {
   vi.stubGlobal('BroadcastChannel', FakeChannel);
 }
 
+type App = Awaited<ReturnType<typeof loadApp>>;
+let app: App;
+
+/** A fresh module graph is a fresh browser tab: module state never leaks between tests. */
+async function loadApp() {
+  vi.resetModules();
+  const [{ useAuthStore }, { api, bootstrapAuthSession }, session, { terminateBrowserSession }, { queryClient }, { takePendingLoginReason }] =
+    await Promise.all([
+      import('../store/auth.js'),
+      import('./api.js'),
+      import('./auth-session.js'),
+      import('./session-termination.js'),
+      import('./query-client.js'),
+      import('./pending-login-reason.js'),
+    ]);
+  useAuthStore.setState({ accessToken: null, user: null, epoch: 0, status: 'checking', authError: null });
+  return {
+    useAuthStore,
+    api,
+    bootstrapAuthSession,
+    clearLocalSession: session.clearLocalSession,
+    initializeAuthSync: session.initializeAuthSync,
+    terminateBrowserSession,
+    queryClient,
+    takePendingLoginReason,
+  };
+}
+
 function signIn(user = alice, accessToken = 'A1') {
-  useAuthStore.getState().setAuth(accessToken, user);
+  app.useAuthStore.getState().setAuth(accessToken, user);
+}
+
+type RefreshResult = { status?: number; body?: unknown } | Error;
+
+/**
+ * A fake backend: /auth/refresh answers from a queue and any other path is 401
+ * until the caller presents the access token the last refresh handed out.
+ */
+function authServer(refreshResults: RefreshResult[]) {
+  let validToken: string | null = null;
+  const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
+    if (url === '/api/auth/refresh') {
+      const next = refreshResults.shift();
+      if (!next) throw new Error('unexpected refresh');
+      if (next instanceof Error) throw next;
+      const accessToken = (next.body as { accessToken?: string } | undefined)?.accessToken;
+      if ((next.status ?? 200) === 200 && accessToken) validToken = accessToken;
+      return json(next.body ?? {}, next.status ?? 200);
+    }
+    const authorization = (init?.headers as Record<string, string> | undefined)?.Authorization;
+    return authorization === `Bearer ${validToken}`
+      ? json({ ok: true })
+      : json({ message: 'expired' }, 401);
+  });
+  return {
+    fetchMock,
+    refreshCalls: () => fetchMock.mock.calls.filter(([url]) => url === '/api/auth/refresh'),
+  };
+}
+
+/** The only value the auth layer persists is the pending refresh request id. */
+function pendingRefreshRequestId(): string | null {
+  for (let index = 0; index < storage.length; index += 1) {
+    const value = storage.getItem(storage.key(index)!);
+    if (value && /^[0-9a-f]{64}$/.test(value)) return value;
+  }
+  return null;
 }
 
 function body(call: unknown[] | undefined) {
@@ -76,27 +131,26 @@ function headers(call: unknown[] | undefined) {
 }
 
 describe('cookie-backed auth session', () => {
-  beforeEach(() => {
+  beforeEach(async () => {
     stubBrowser();
-    authSessionTestables.resetForTests();
-    useAuthStore.setState({ accessToken: null, user: null, epoch: 0, status: 'checking', authError: null });
+    app = await loadApp();
   });
 
   afterEach(() => {
     vi.restoreAllMocks();
     vi.unstubAllGlobals();
-    queryClient.clear();
+    app.queryClient.clear();
   });
 
   it('logs in with the intent header and keeps no credential in storage', async () => {
-    initializeAuthSync({ onPeerLogin: vi.fn() });
+    app.initializeAuthSync({ onPeerLogin: vi.fn() });
     const fetchMock = vi.fn().mockResolvedValue(json({ accessToken: 'A1', user: alice }));
     vi.stubGlobal('fetch', fetchMock);
 
-    await api.login({ username: 'alice', password: 'pw' });
+    await app.api.login({ username: 'alice', password: 'pw' });
 
     expect(headers(fetchMock.mock.calls[0])['X-Nyabase-Auth']).toBe('1');
-    expect(useAuthStore.getState()).toMatchObject({ accessToken: 'A1', user: alice, status: 'authenticated' });
+    expect(app.useAuthStore.getState()).toMatchObject({ accessToken: 'A1', user: alice, status: 'authenticated' });
     for (let index = 0; index < storage.length; index += 1) {
       expect(storage.getItem(storage.key(index)!)).not.toContain('A1');
     }
@@ -104,42 +158,47 @@ describe('cookie-backed auth session', () => {
   });
 
   it('clears cached principal data before installing a login', async () => {
-    queryClient.setQueryData(['containers'], ['old-principal-row']);
+    app.queryClient.setQueryData(['containers'], ['old-principal-row']);
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue(json({ accessToken: 'A1', user: alice })));
-    await api.login({ username: 'alice', password: 'pw' });
-    expect(queryClient.getQueryData(['containers'])).toBeUndefined();
+    await app.api.login({ username: 'alice', password: 'pw' });
+    expect(app.queryClient.getQueryData(['containers'])).toBeUndefined();
   });
 
   it('rotates through the cookie under the cross-tab lock, sending only a request id', async () => {
     signIn();
-    const fetchMock = vi.fn().mockResolvedValue(json({ accessToken: 'A2', user: alice }));
-    vi.stubGlobal('fetch', fetchMock);
+    const server = authServer([{ body: { accessToken: 'A2', user: alice } }]);
+    vi.stubGlobal('fetch', server.fetchMock);
 
-    await expect(authApiTestables.tryRefresh()).resolves.toBe('A2');
+    await expect(app.api.get('/ping')).resolves.toEqual({ ok: true });
 
-    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    const [url, init] = server.refreshCalls()[0] as [string, RequestInit];
     expect(url).toBe('/api/auth/refresh');
     expect(init.credentials).toBe('same-origin');
     expect((init.headers as Record<string, string>)['X-Nyabase-Auth']).toBe('1');
-    expect(Object.keys(body(fetchMock.mock.calls[0]))).toEqual(['requestId']);
+    expect(Object.keys(body(server.refreshCalls()[0]))).toEqual(['requestId']);
     expect(lockRequests).toEqual(['nyabase-auth-refresh']);
-    expect(useAuthStore.getState()).toMatchObject({ accessToken: 'A2', status: 'authenticated' });
+    expect(app.useAuthStore.getState()).toMatchObject({ accessToken: 'A2', status: 'authenticated' });
   });
 
   it('retries a lost refresh response with the identical request id, then starts a new one', async () => {
     signIn();
-    const fetchMock = vi.fn()
-      .mockRejectedValueOnce(new TypeError('response lost'))
-      .mockResolvedValueOnce(json({ accessToken: 'A2', user: alice }))
-      .mockResolvedValueOnce(json({ accessToken: 'A3', user: alice }));
-    vi.stubGlobal('fetch', fetchMock);
+    const server = authServer([
+      new TypeError('response lost'),
+      { body: { accessToken: 'A2', user: alice } },
+      { body: { accessToken: 'A3', user: alice } },
+    ]);
+    vi.stubGlobal('fetch', server.fetchMock);
 
-    await expect(authApiTestables.tryRefresh()).rejects.toMatchObject({ code: 'NETWORK_ERROR' });
-    expect(useAuthStore.getState().status).toBe('error');
-    await expect(authApiTestables.tryRefresh()).resolves.toBe('A2');
-    await expect(authApiTestables.tryRefresh()).resolves.toBe('A3');
+    await expect(app.api.get('/ping')).rejects.toMatchObject({ code: 'NETWORK_ERROR' });
+    expect(app.useAuthStore.getState().status).toBe('error');
+    await expect(app.api.get('/ping')).resolves.toEqual({ ok: true });
+    expect(app.useAuthStore.getState().accessToken).toBe('A2');
+    // A2 is now the valid token; presenting a stale one forces the next rotation.
+    signIn(alice, 'stale');
+    await expect(app.api.get('/ping')).resolves.toEqual({ ok: true });
+    expect(app.useAuthStore.getState().accessToken).toBe('A3');
 
-    const [first, retry, next] = fetchMock.mock.calls.map((call) => body(call).requestId);
+    const [first, retry, next] = server.refreshCalls().map((call) => body(call).requestId);
     expect(first).toMatch(/^[0-9a-f]{64}$/);
     expect(retry).toBe(first);
     expect(next).not.toBe(first);
@@ -147,55 +206,60 @@ describe('cookie-backed auth session', () => {
 
   it('shares the pending request id with other tabs through storage', async () => {
     signIn();
-    vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new TypeError('offline')));
-    await expect(authApiTestables.tryRefresh()).rejects.toMatchObject({ code: 'NETWORK_ERROR' });
-    const pending = storage.getItem(authSessionTestables.pendingRefreshRequestKey);
+    vi.stubGlobal('fetch', vi.fn(async (url: string) => {
+      if (url === '/api/auth/refresh') throw new TypeError('offline');
+      return json({ message: 'expired' }, 401);
+    }));
+    await expect(app.api.get('/ping')).rejects.toMatchObject({ code: 'NETWORK_ERROR' });
+    const pending = pendingRefreshRequestId();
     expect(pending).toMatch(/^[0-9a-f]{64}$/);
 
-    // Another tab (same storage, fresh memory) recovers with the same id.
-    authSessionTestables.resetForTests();
-    const fetchMock = vi.fn().mockResolvedValue(json({ accessToken: 'A2', user: alice }));
-    vi.stubGlobal('fetch', fetchMock);
-    useAuthStore.setState({ status: 'authenticated', authError: null });
-    await authApiTestables.tryRefresh();
-    expect(body(fetchMock.mock.calls[0]).requestId).toBe(pending);
+    // Another tab (same storage, fresh modules) recovers with the same id.
+    app = await loadApp();
+    signIn();
+    const server = authServer([{ body: { accessToken: 'A2', user: alice } }]);
+    vi.stubGlobal('fetch', server.fetchMock);
+    await app.api.get('/ping');
+    expect(body(server.refreshCalls()[0]).requestId).toBe(pending);
   });
 
   it('keeps the request id when a successful refresh has no usable payload', async () => {
     signIn();
-    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(json({ accessToken: 'A2' })));
-    await expect(authApiTestables.tryRefresh()).rejects.toMatchObject({ code: 'INVALID_REFRESH_RESPONSE' });
-    expect(useAuthStore.getState()).toMatchObject({ accessToken: 'A1', status: 'error' });
+    const server = authServer([{ body: { accessToken: 'A2' } }]);
+    vi.stubGlobal('fetch', server.fetchMock);
+    await expect(app.api.get('/ping')).rejects.toMatchObject({ code: 'INVALID_REFRESH_RESPONSE' });
+    expect(app.useAuthStore.getState()).toMatchObject({ accessToken: 'A1', status: 'error' });
   });
 
   it('signs out with a session-expired reason when the cookie is rejected', async () => {
     signIn();
-    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(json({ message: 'Invalid refresh token' }, 401)));
+    const server = authServer([{ status: 401, body: { message: 'Invalid refresh token' } }]);
+    vi.stubGlobal('fetch', server.fetchMock);
 
-    await expect(authApiTestables.tryRefresh()).resolves.toBeNull();
+    await expect(app.api.get('/ping')).rejects.toMatchObject({ code: 'UNAUTHORIZED' });
 
-    expect(useAuthStore.getState()).toMatchObject({ accessToken: null, user: null, status: 'anonymous' });
-    expect(takePendingLoginReason()).toBe('session-expired');
-    expect(storage.getItem(authSessionTestables.pendingRefreshRequestKey)).toBeNull();
+    expect(app.useAuthStore.getState()).toMatchObject({ accessToken: null, user: null, status: 'anonymous' });
+    expect(app.takePendingLoginReason()).toBe('session-expired');
+    expect(pendingRefreshRequestId()).toBeNull();
   });
 
   it('treats a cold load without a cookie as anonymous, not expired', async () => {
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue(json({ message: 'Invalid refresh token' }, 401)));
-    await authApiTestables.runBootstrap();
-    expect(useAuthStore.getState().status).toBe('anonymous');
-    expect(takePendingLoginReason()).toBeUndefined();
+    await app.bootstrapAuthSession();
+    expect(app.useAuthStore.getState().status).toBe('anonymous');
+    expect(app.takePendingLoginReason()).toBeUndefined();
   });
 
   it('does not report an expired session for an anonymous request', async () => {
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue(json({ message: 'Unauthorized' }, 401)));
-    await expect(api.get('/public/thing')).rejects.toMatchObject({ code: 'UNAUTHORIZED' });
-    expect(takePendingLoginReason()).toBeUndefined();
+    await expect(app.api.get('/public/thing')).rejects.toMatchObject({ code: 'UNAUTHORIZED' });
+    expect(app.takePendingLoginReason()).toBeUndefined();
   });
 
   it('recovers the session from the cookie on a cold load', async () => {
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue(json({ accessToken: 'A9', user: alice })));
-    await authApiTestables.runBootstrap();
-    expect(useAuthStore.getState()).toMatchObject({ accessToken: 'A9', user: alice, status: 'authenticated' });
+    await app.bootstrapAuthSession();
+    expect(app.useAuthStore.getState()).toMatchObject({ accessToken: 'A9', user: alice, status: 'authenticated' });
   });
 
   it('revalidates an in-memory session with /me instead of rotating the cookie', async () => {
@@ -203,9 +267,9 @@ describe('cookie-backed auth session', () => {
     const promoted = { ...alice, capabilities: ['manage_users'] } as UserDto;
     const fetchMock = vi.fn().mockResolvedValue(json(promoted));
     vi.stubGlobal('fetch', fetchMock);
-    await authApiTestables.runBootstrap();
+    await app.bootstrapAuthSession();
     expect(fetchMock.mock.calls.map(([url]) => url)).toEqual(['/api/auth/me']);
-    expect(useAuthStore.getState().user?.capabilities).toEqual(['manage_users']);
+    expect(app.useAuthStore.getState().user?.capabilities).toEqual(['manage_users']);
   });
 
   it('never replays an old-principal request after a new login changes the auth epoch', async () => {
@@ -216,33 +280,40 @@ describe('cookie-backed auth session', () => {
     });
     vi.stubGlobal('fetch', fetchMock);
 
-    await expect(api.get('/containers')).rejects.toMatchObject({ code: 'SESSION_CHANGED' });
+    await expect(app.api.get('/containers')).rejects.toMatchObject({ code: 'SESSION_CHANGED' });
     expect(fetchMock).toHaveBeenCalledTimes(1);
-    expect(useAuthStore.getState().user?.id).toBe('u2');
+    expect(app.useAuthStore.getState().user?.id).toBe('u2');
   });
 
   it('does not reuse an in-flight refresh after the session is replaced', async () => {
     signIn(alice, 'A-alice');
     let releaseFirst!: (response: Response) => void;
-    const fetchMock = vi.fn()
-      .mockImplementationOnce(() => new Promise<Response>((resolve) => { releaseFirst = resolve; }))
-      .mockResolvedValueOnce(json({ accessToken: 'A-bob-2', user: bob }));
+    const refreshResponses = [
+      new Promise<Response>((resolve) => { releaseFirst = resolve; }),
+      Promise.resolve(json({ accessToken: 'A-bob-2', user: bob })),
+    ];
+    const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
+      if (url === '/api/auth/refresh') return refreshResponses.shift()!;
+      const authorization = (init?.headers as Record<string, string> | undefined)?.Authorization;
+      return authorization === 'Bearer A-bob-2' ? json({ ok: true }) : json({ message: 'expired' }, 401);
+    });
     vi.stubGlobal('fetch', fetchMock);
 
-    const first = authApiTestables.tryRefresh();
-    await Promise.resolve();
+    const first = app.api.get('/ping');
+    await vi.waitFor(() => expect(fetchMock.mock.calls.some(([url]) => url === '/api/auth/refresh')).toBe(true));
     signIn(bob, 'A-bob');
-    const second = authApiTestables.tryRefresh();
+    const second = app.api.get('/ping');
     releaseFirst(json({ accessToken: 'A-alice-2', user: alice }));
 
-    await expect(first).resolves.toBe('A-bob');
-    await expect(second).resolves.toBe('A-bob-2');
-    expect(useAuthStore.getState()).toMatchObject({ accessToken: 'A-bob-2', user: bob });
+    // The old principal's request is never replayed under the new session.
+    await expect(first).rejects.toMatchObject({ code: 'SESSION_CHANGED' });
+    await expect(second).resolves.toEqual({ ok: true });
+    expect(app.useAuthStore.getState()).toMatchObject({ accessToken: 'A-bob-2', user: bob });
   });
 
   it('drops this tab when another tab logs out, and re-derives on a peer login', () => {
     const onPeerLogin = vi.fn();
-    initializeAuthSync({ onPeerLogin });
+    app.initializeAuthSync({ onPeerLogin });
     signIn();
     const channel = FakeChannel.instances[0];
 
@@ -250,19 +321,19 @@ describe('cookie-backed auth session', () => {
     expect(onPeerLogin).toHaveBeenCalledOnce();
 
     channel.deliver({ type: 'logout', source: 'other-tab' });
-    expect(useAuthStore.getState()).toMatchObject({ accessToken: null, status: 'anonymous' });
+    expect(app.useAuthStore.getState()).toMatchObject({ accessToken: null, status: 'anonymous' });
     expect(channel.posted).toEqual([]);
   });
 
   it('broadcasts logout and revokes through the cookie endpoint', async () => {
-    initializeAuthSync({ onPeerLogin: vi.fn() });
+    app.initializeAuthSync({ onPeerLogin: vi.fn() });
     signIn();
     const fetchMock = vi.fn().mockResolvedValue(new Response(null, { status: 204 }));
     vi.stubGlobal('fetch', fetchMock);
 
-    await terminateBrowserSession();
+    await app.terminateBrowserSession();
 
-    expect(useAuthStore.getState().status).toBe('anonymous');
+    expect(app.useAuthStore.getState().status).toBe('anonymous');
     expect(FakeChannel.instances[0].posted).toContainEqual(expect.objectContaining({ type: 'logout' }));
     const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
     expect(url).toBe('/api/auth/logout');
@@ -272,6 +343,6 @@ describe('cookie-backed auth session', () => {
 
   it('returns the captured access token when clearing locally', () => {
     signIn(alice, 'A-captured');
-    expect(clearLocalSession(false)).toEqual({ accessToken: 'A-captured' });
+    expect(app.clearLocalSession(false)).toEqual({ accessToken: 'A-captured' });
   });
 });

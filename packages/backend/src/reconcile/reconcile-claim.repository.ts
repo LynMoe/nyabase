@@ -8,7 +8,6 @@ import type { IntentResource } from './intent.repository.js';
 
 export type ClaimExecutor = Kysely<NyabaseDatabase> | Transaction<NyabaseDatabase>;
 
-export const RECONCILE_LEASE_MS = 60_000;
 export const RECONCILE_RENEWAL_MS = 20_000;
 export const MAX_ACTIVE_CLAIMS_PER_SERVER = 8;
 export const NO_PLACEMENT_SERVER_ID = '00000000-0000-4000-8000-000000000000';

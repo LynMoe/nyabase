@@ -62,55 +62,29 @@ describe('server-backed draft', () => {
 
   it('keeps a settings save on R1 until the R2 values and revision merge atomically', () => {
     let draft = createRevisionedServerBackedDraft(
-      { title: 'R1', description: 'before' }, 1, 'token-r1',
+      { title: 'R1', description: 'before' }, 1,
     );
     draft = editRevisionedServerBackedDraft(draft, 'title', 'local');
 
     // React has rendered an R2 query prop, but its merge effect has not run.
-    // The only safe submission token remains the one bound to this R1 draft.
+    // The only safe submission revision remains the one bound to this R1 draft.
     expect({
       values: draft.values,
       expectedRevision: draft.revision,
-      expectedSnapshotToken: draft.snapshotToken,
     }).toEqual({
       values: { title: 'local', description: 'before' },
       expectedRevision: 1,
-      expectedSnapshotToken: 'token-r1',
     });
 
     draft = mergeRevisionedServerBackedDraft(
       draft,
       { title: 'R1', description: 'R2 remote' },
       2,
-      'token-r2',
     );
     expect(draft).toMatchObject({
       values: { title: 'local', description: 'R2 remote' },
       revision: 2,
-      snapshotToken: 'token-r2',
     });
-  });
-
-  it('advances a settings snapshot token when external edits keep the same revision', () => {
-    let draft = createRevisionedServerBackedDraft(
-      { title: 'R1', description: 'before' }, 1, 'token-before',
-    );
-    draft = editRevisionedServerBackedDraft(draft, 'title', 'local');
-
-    draft = mergeRevisionedServerBackedDraft(
-      draft,
-      { title: 'R1', description: 'external edit' },
-      1,
-      'token-after',
-    );
-
-    expect(draft).toMatchObject({
-      values: { title: 'local', description: 'external edit' },
-      revision: 1,
-      snapshotToken: 'token-after',
-    });
-    expect(draft.dirtyFields).toEqual(new Set(['title']));
-    expect(draft.conflictFields.size).toBe(0);
   });
 
   it('accepts a validated conflict response as authoritative even if its revision is lower', () => {
@@ -120,11 +94,9 @@ describe('server-backed draft', () => {
       draft,
       { name: 'externally replaced', description: 'remote' },
       1,
-      'replacement-token',
     );
     expect(draft).toMatchObject({
       revision: 1,
-      snapshotToken: 'replacement-token',
       values: { name: 'externally replaced', description: 'local' },
     });
     expect(draft.conflictFields).toEqual(new Set(['description']));

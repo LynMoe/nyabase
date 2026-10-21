@@ -24,21 +24,4 @@ describe('ProxySnapshotNotifierService', () => {
     unregister();
     expect(() => service.register('ssh', vi.fn())).not.toThrow();
   });
-
-  it('blocks routes without fencing the recovery session', () => {
-    const service = new ProxySnapshotNotifierService();
-    const invalidate = vi.fn().mockResolvedValue(undefined);
-    const fenceSession = vi.fn();
-    service.register('http', invalidate);
-    service.registerServerBlockListener(fenceSession);
-
-    const epoch = service.blockServerRoutes('server-a', 'safety recovery pending');
-
-    expect(service.isServerBlocked('server-a')).toBe(true);
-    expect(invalidate).toHaveBeenCalledWith('safety recovery pending');
-    expect(fenceSession).not.toHaveBeenCalled();
-    expect(service.unblockServerIfEpoch('server-a', epoch + 1, 'stale report')).toBe(false);
-    expect(service.unblockServerIfEpoch('server-a', epoch, 'recovered')).toBe(true);
-    expect(service.isServerBlocked('server-a')).toBe(false);
-  });
 });

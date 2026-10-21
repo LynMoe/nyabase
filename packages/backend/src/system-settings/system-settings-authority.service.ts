@@ -4,9 +4,7 @@ import {
   Injectable,
   Logger,
   OnApplicationBootstrap,
-  OnApplicationShutdown,
 } from '@nestjs/common';
-import { createHash } from 'node:crypto';
 import type { Kysely, Transaction } from 'kysely';
 import {
   AuditAction,
@@ -22,7 +20,6 @@ import type { NyabaseDatabase } from '../platform/persistence-pg/database.types.
 import { PG_DATABASE } from '../platform/persistence-pg/tokens.js';
 import { SshProxyGateway } from '../ssh/ssh-proxy-gateway.js';
 
-const POLL_INTERVAL_MS = 2_000;
 const MAX_SAFE_REVISION = BigInt(Number.MAX_SAFE_INTEGER);
 
 export class SystemSettingsRevisionConflictError extends Error {
@@ -36,19 +33,16 @@ export class SystemSettingsRevisionConflictError extends Error {
   get currentRevision(): number {
     return this.current.revision;
   }
-
-  get currentSnapshotToken(): string {
-    return this.current.snapshotToken;
-  }
 }
 
+/**
+ * PostgreSQL holds the durable settings row; this single process applies it to
+ * the in-memory config at startup and after each committed update. Concurrent
+ * edits are resolved only by the revision CAS in update().
+ */
 @Injectable()
-export class SystemSettingsAuthorityService
-implements OnApplicationBootstrap, OnApplicationShutdown {
+export class SystemSettingsAuthorityService implements OnApplicationBootstrap {
   private readonly logger = new Logger(SystemSettingsAuthorityService.name);
-  private pollTimer: NodeJS.Timeout | null = null;
-  private refreshTail: Promise<AuthoritativeSystemSettingsSnapshot> | null = null;
-  private shuttingDown = false;
 
   constructor(
     @Inject(PG_DATABASE)
@@ -60,33 +54,12 @@ implements OnApplicationBootstrap, OnApplicationShutdown {
 
   async onApplicationBootstrap(): Promise<void> {
     await this.initialize();
-    if (this.shuttingDown) return;
-    this.pollTimer = setInterval(() => {
-      void this.refreshFromPostgres('poll').catch((error: unknown) => {
-        this.logger.warn(`System settings polling refresh failed: ${message(error)}`);
-      });
-    }, POLL_INTERVAL_MS);
-    this.pollTimer.unref?.();
-  }
-
-  async onApplicationShutdown(): Promise<void> {
-    this.shuttingDown = true;
-    if (this.pollTimer) clearInterval(this.pollTimer);
-    this.pollTimer = null;
-    // A PostgreSQL read may already have started from a poll. Drain that
-    // exact coalesced tail so no continuation survives Nest shutdown.
-    try {
-      await this.refreshTail;
-    } catch (error) {
-      this.logger.warn(`System settings shutdown refresh failed: ${message(error)}`);
-    }
   }
 
   async initialize(): Promise<AuthoritativeSystemSettingsSnapshot> {
     const bootstrapValues = this.config.bootstrapEditableValues();
     const bootstrap: AuthoritativeSystemSettingsSnapshot = {
       revision: 1,
-      snapshotToken: settingsSnapshotToken(1, bootstrapValues),
       values: bootstrapValues,
     };
     await this.database
@@ -94,20 +67,19 @@ implements OnApplicationBootstrap, OnApplicationShutdown {
       .values({
         singleton: true,
         revision: bootstrap.revision,
-        snapshot_token: bootstrap.snapshotToken,
         values: bootstrap.values,
         updated_by: null,
       })
       .onConflict((conflict) => conflict.column('singleton').doNothing())
       .execute();
     await this.backfillMissingEditableDefaults();
-    return this.refreshFromPostgres('startup');
+    return this.refreshFromPostgres();
   }
 
   /**
    * Additive config keys (for example incus.imageSourceServer) must not fail
    * closed on an existing snapshot. Fill missing online-editable defaults and
-   * persist a new revision so the snapshot token stays canonical.
+   * persist a new revision.
    */
   private async backfillMissingEditableDefaults(): Promise<void> {
     const row = await this.database
@@ -120,12 +92,10 @@ implements OnApplicationBootstrap, OnApplicationShutdown {
     if (filled.length === 0) return;
     const currentRevision = Number(row.revision);
     const revision = currentRevision + 1;
-    const snapshotToken = settingsSnapshotToken(revision, values);
     const updated = await this.database
       .updateTable('system.settings')
       .set({
         revision,
-        snapshot_token: snapshotToken,
         values,
       })
       .where('singleton', '=', true)
@@ -140,32 +110,14 @@ implements OnApplicationBootstrap, OnApplicationShutdown {
     );
   }
 
-  async refreshFromPostgres(
-    reason = 'explicit',
-  ): Promise<AuthoritativeSystemSettingsSnapshot> {
-    if (this.shuttingDown) {
-      throw new Error('System settings authority is stopped');
+  async refreshFromPostgres(): Promise<AuthoritativeSystemSettingsSnapshot> {
+    const snapshot = await loadSnapshot(this.database);
+    const previous = this.config.revision();
+    const applied = this.config.applyAuthoritativeSnapshot(snapshot);
+    if (applied && snapshot.revision > previous) {
+      await this.broadcastSshSnapshot('refresh');
     }
-    if (this.refreshTail) return this.refreshTail;
-    const refresh = this.load()
-      .then(async (snapshot) => {
-        if (this.shuttingDown) return snapshot;
-        const previous = this.config.revision();
-        const applied = this.config.applyAuthoritativeSnapshot(snapshot);
-        if (
-          !this.shuttingDown
-          && applied
-          && snapshot.revision > previous
-        ) {
-          await this.broadcastSshSnapshot(reason);
-        }
-        return snapshot;
-      })
-      .finally(() => {
-        if (this.refreshTail === refresh) this.refreshTail = null;
-      });
-    this.refreshTail = refresh;
-    return refresh;
+    return snapshot;
   }
 
   async update(
@@ -173,7 +125,6 @@ implements OnApplicationBootstrap, OnApplicationShutdown {
     actorId: string,
     values: Record<string, unknown>,
     expectedRevision: number,
-    expectedSnapshotToken: string,
   ): Promise<AuthoritativeSystemSettingsSnapshot> {
     if (Object.keys(values).length === 0) {
       throw new BadRequestException('At least one setting is required');
@@ -184,10 +135,7 @@ implements OnApplicationBootstrap, OnApplicationShutdown {
       );
     }
     const current = await loadSnapshot(transaction);
-    if (
-      current.revision !== expectedRevision
-      || current.snapshotToken !== expectedSnapshotToken
-    ) {
+    if (current.revision !== expectedRevision) {
       throw new SystemSettingsRevisionConflictError(current);
     }
     if (BigInt(current.revision) >= MAX_SAFE_REVISION) {
@@ -229,21 +177,18 @@ implements OnApplicationBootstrap, OnApplicationShutdown {
     const nextRevision = current.revision + 1;
     const next: AuthoritativeSystemSettingsSnapshot = {
       revision: nextRevision,
-      snapshotToken: settingsSnapshotToken(nextRevision, nextValues),
       values: nextValues,
     };
     const updated = await transaction
       .updateTable('system.settings')
       .set({
         revision: next.revision,
-        snapshot_token: next.snapshotToken,
         values: next.values,
         updated_by: actorId,
         updated_at: new Date(),
       })
       .where('singleton', '=', true)
       .where('revision', '=', String(expectedRevision))
-      .where('snapshot_token', '=', expectedSnapshotToken)
       .returning('revision')
       .executeTakeFirst();
     if (!updated) {
@@ -268,11 +213,10 @@ implements OnApplicationBootstrap, OnApplicationShutdown {
 
   /**
    * Called only after the caller-owned PostgreSQL transaction commits.
-   * PostgreSQL is already durable; the live proxy refresh is a disposable
-   * observer and can be recovered by absolute-version polling.
+   * PostgreSQL is already durable; applying it to memory and notifying the SSH
+   * proxy is a best-effort follow-up.
    */
   async committed(snapshot: AuthoritativeSystemSettingsSnapshot): Promise<void> {
-    if (this.shuttingDown) return;
     const previous = this.config.revision();
     const applied = this.config.applyAuthoritativeSnapshot(snapshot);
     if (applied && snapshot.revision > previous) {
@@ -280,16 +224,12 @@ implements OnApplicationBootstrap, OnApplicationShutdown {
     }
   }
 
+  /** Adopt the value a CAS conflict reported so the 409 body is the stored one. */
   acceptConflict(snapshot: AuthoritativeSystemSettingsSnapshot): void {
     this.config.applyAuthoritativeSnapshot(snapshot);
   }
 
-  private async load(): Promise<AuthoritativeSystemSettingsSnapshot> {
-    return loadSnapshot(this.database);
-  }
-
   private async broadcastSshSnapshot(reason: string): Promise<void> {
-    if (this.shuttingDown) return;
     try {
       await this.sshProxyGateway.broadcastSnapshot();
     } catch (error) {
@@ -309,22 +249,17 @@ async function loadSnapshot(
 ): Promise<AuthoritativeSystemSettingsSnapshot> {
   const row = await executor
     .selectFrom('system.settings')
-    .select(['revision', 'snapshot_token', 'values'])
+    .select(['revision', 'values'])
     .where('singleton', '=', true)
     .executeTakeFirstOrThrow();
   const revision = Number(row.revision);
   const values = parseValues(row.values);
   validateCompleteValues(values);
-  if (
-    !Number.isSafeInteger(revision)
-    || revision < 1
-    || settingsSnapshotToken(revision, values) !== row.snapshot_token.trim()
-  ) {
+  if (!Number.isSafeInteger(revision) || revision < 1) {
     throw new Error('Invalid PostgreSQL system settings authority row');
   }
   return {
     revision,
-    snapshotToken: row.snapshot_token.trim(),
     values,
   };
 }
@@ -376,25 +311,6 @@ function validateCompleteValues(values: Record<string, unknown>): void {
       );
     }
   }
-}
-
-export function settingsSnapshotToken(
-  revision: number,
-  values: Record<string, unknown>,
-): string {
-  return createHash('sha256')
-    .update(JSON.stringify(canonicalize({ revision, values })))
-    .digest('hex');
-}
-
-function canonicalize(value: unknown): unknown {
-  if (Array.isArray(value)) return value.map(canonicalize);
-  if (!value || typeof value !== 'object') return value;
-  return Object.fromEntries(
-    Object.entries(value as Record<string, unknown>)
-      .sort(([left], [right]) => left.localeCompare(right))
-      .map(([key, child]) => [key, canonicalize(child)]),
-  );
 }
 
 function message(error: unknown): string {

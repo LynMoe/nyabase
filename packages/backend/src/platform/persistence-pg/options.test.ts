@@ -3,16 +3,28 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
-  loadPgPersistenceOptions,
   pgPersistenceOptionsFromConfig,
   redactDatabaseUrl,
 } from './options.js';
 import type { NyabaseConfigService } from '../config/nyabase-config.service.js';
 
+/** The production path reads database.* from the config service and TLS/timeouts from env. */
+function optionsFromEnv(env: NodeJS.ProcessEnv) {
+  const values = new Map<string, unknown>([
+    ['database.url', env.DATABASE_URL],
+    ['database.poolMax', env.DB_POOL_MAX ? Number(env.DB_POOL_MAX) : 20],
+    ['database.idleTimeoutMs', 30_000],
+    ['database.statementTimeoutMs', 30_000],
+    ['database.migrationsRun', env.DB_MIGRATIONS_RUN === '1' || env.DB_MIGRATIONS_RUN === 'true'],
+  ]);
+  const config = { get: (key: string) => values.get(key) } as unknown as NyabaseConfigService;
+  return pgPersistenceOptionsFromConfig(config, env);
+}
+
 describe('PostgreSQL persistence options', () => {
   it('requires an explicit PostgreSQL URL and never accepts a SQLite path', () => {
-    expect(() => loadPgPersistenceOptions({})).toThrow('is required');
-    expect(() => loadPgPersistenceOptions({
+    expect(() => optionsFromEnv({})).toThrow('is required');
+    expect(() => optionsFromEnv({
       DATABASE_URL: 'file:./nyabase.db',
     })).toThrow('postgresql://');
   });
@@ -32,11 +44,11 @@ describe('PostgreSQL persistence options', () => {
       'query parameter statement_timeout is not supported',
     ],
   ])('rejects non-canonical database URL %j', (url, message) => {
-    expect(() => loadPgPersistenceOptions({ DATABASE_URL: url })).toThrow(message);
+    expect(() => optionsFromEnv({ DATABASE_URL: url })).toThrow(message);
   });
 
   it('loads bounded pool and timeout settings', () => {
-    const options = loadPgPersistenceOptions({
+    const options = optionsFromEnv({
       DATABASE_URL: 'postgresql://nyabase:secret@db.internal/nyabase',
       DB_POOL_MAX: '12',
       PG_LOCK_TIMEOUT_MS: '2500',
@@ -59,7 +71,7 @@ describe('PostgreSQL persistence options', () => {
     const caFile = join(directory, 'root.pem');
     writeFileSync(caFile, 'test-private-ca\n');
     try {
-      const options = loadPgPersistenceOptions({
+      const options = optionsFromEnv({
         DATABASE_URL: 'postgresql://nyabase:secret@db.internal/nyabase',
         PG_SSL_MODE: 'verify-full',
         PG_SSL_CA_FILE: caFile,
@@ -76,19 +88,19 @@ describe('PostgreSQL persistence options', () => {
   });
 
   it('fails closed for unreadable CA files, ignored TLS settings, and URL overrides', () => {
-    expect(() => loadPgPersistenceOptions({
+    expect(() => optionsFromEnv({
       DATABASE_URL: 'postgresql://nyabase:secret@db.internal/nyabase',
       PG_SSL_MODE: 'verify-full',
       PG_SSL_CA_FILE: '/definitely/missing/nyabase-ca.pem',
     })).toThrow('PG_SSL_CA_FILE could not be read');
 
-    expect(() => loadPgPersistenceOptions({
+    expect(() => optionsFromEnv({
       DATABASE_URL: 'postgresql://nyabase:secret@db.internal/nyabase',
       PG_SSL_MODE: 'require',
       PG_SSL_SERVERNAME: 'postgres.service.internal',
     })).toThrow('require PG_SSL_MODE=verify-full');
 
-    expect(() => loadPgPersistenceOptions({
+    expect(() => optionsFromEnv({
       DATABASE_URL:
         'postgresql://nyabase:secret@db.internal/nyabase?sslmode=disable',
       PG_SSL_MODE: 'verify-full',

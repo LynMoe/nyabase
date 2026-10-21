@@ -40,14 +40,13 @@ describe('SQL migration discovery', () => {
     expect(initial.sql).toContain('CREATE TABLE infra.storage_pools');
     expect(initial.sql).toContain('CREATE TABLE infra.shared_backends');
     expect(initial.sql).toContain('CREATE TABLE infra.image_server_assignments');
-    expect(initial.sql).toContain('CREATE TABLE system.incus_client_certificates');
-    expect(initial.sql).toContain('CREATE TABLE system.incus_client_certificate_trusts');
+    expect(initial.sql).toContain('CREATE TABLE system.incus_client_identity');
+    expect(initial.sql).not.toMatch(/incus_client_certificate|blocked_by_intent_id|certificate_rotation|snapshot_token/);
     expect(initial.sql).toContain('CREATE TABLE interaction.ssh_proxy_host_keys');
     expect(initial.sql).toContain('CREATE TABLE interaction.http_proxy_bindings');
     expect(initial.sql).toContain('CREATE TABLE system.settings');
     expect(initial.sql).toContain('storage_pools_shared_backend_server_unique');
     expect(initial.sql).toContain('volume_attachments_backend_visibility');
-    expect(initial.sql).toContain('incus_client_certificates_active_unique');
     expect(initial.sql).toContain('intents_settled_shape_check');
     expect(initial.sql).toContain('lock_policy_state_before_mutation');
     expect(initial.sql).not.toMatch(/\bCREATE\s+SCHEMA\s+workflow\b/i);

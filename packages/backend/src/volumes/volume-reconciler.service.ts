@@ -22,7 +22,6 @@ import type {
 } from '../reconcile/managed-reconciler.js';
 import { ReconcilerRegistry } from '../reconcile/reconciler-registry.service.js';
 import { INCUS_CLIENT_FACTORY, type IncusClientFactory } from '../incus/incus-client.factory.js';
-import { VOLUME_ADOPT_FAIL_AFTER_ATTEMPTS } from './volume-placement.js';
 import { listEligibleDestroyExecutors } from './eligible-destroy-executors.js';
 import { ensureSharedCatalogOnServer } from './shared-catalog.js';
 
@@ -101,16 +100,6 @@ export function normalizeObservedVolumeUsage(input: {
     return null;
   }
   return input.usedBytes;
-}
-
-export function capacityScope(
-  volume: Pick<{ server_id: string | null; shared_backend_id: string | null }, 'server_id' | 'shared_backend_id'>,
-): { readonly kind: 'server' | 'shared_backend'; readonly id: string } {
-  if (volume.shared_backend_id) {
-    return { kind: 'shared_backend', id: volume.shared_backend_id };
-  }
-  if (!volume.server_id) throw new Error('A local volume must have a server id');
-  return { kind: 'server', id: volume.server_id };
 }
 
 interface VolumeRecord {
@@ -221,6 +210,9 @@ async function auditIncusMutate(
     },
   );
 }
+
+/** Attempts after which a volume adoption that keeps failing is given up on. */
+export const VOLUME_ADOPT_FAIL_AFTER_ATTEMPTS = 8;
 
 @Injectable()
 export class VolumeReconciler implements ManagedReconciler, OnModuleInit {

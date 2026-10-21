@@ -8,11 +8,13 @@ import {
 import {
   Capability,
   zPatchSystemSettingsRequest,
+  type IncusClientIdentityDto,
   type PublicSettingsDto,
   type SystemSettingsDto,
 } from '@nyabase/common';
 import { Public } from '../iam/decorators/public.decorator.js';
-import { RequireCaps } from '../iam/decorators/require-caps.decorator.js';
+import { RequireAnyCaps, RequireCaps } from '../iam/decorators/require-caps.decorator.js';
+import { IncusClientIdentityService } from '../incus/incus-client-identity.service.js';
 import { NyabaseConfigService } from '../platform/config/nyabase-config.service.js';
 import { CurrentUser } from '../iam/decorators/current-user.decorator.js';
 import type { UserRecord } from '../iam/user-record.js';
@@ -28,6 +30,7 @@ export class SystemSettingsController {
     private config: NyabaseConfigService,
     private accessResolver: AccessResolverService,
     private authority: SystemSettingsAuthorityService,
+    private incusIdentity: IncusClientIdentityService,
   ) {}
 
   @Public()
@@ -38,9 +41,15 @@ export class SystemSettingsController {
 
   @Get('admin/system-settings')
   @RequireCaps(Capability.ManageSystemSettings)
-  async getSettings(): Promise<SystemSettingsDto> {
-    await this.authority.refreshFromPostgres('admin-read');
+  getSettings(): SystemSettingsDto {
     return this.systemSettingsDto();
+  }
+
+  /** Read-only: the certificate fingerprint operators see in Incus's trust list. */
+  @Get('admin/system-settings/incus-client-identity')
+  @RequireAnyCaps(Capability.ManageSystemSettings, Capability.ManageServers)
+  getIncusClientIdentity(): Promise<IncusClientIdentityDto> {
+    return this.incusIdentity.describe();
   }
 
   @Patch('admin/system-settings')
@@ -49,7 +58,7 @@ export class SystemSettingsController {
     @CurrentUser() actor: UserRecord,
     @Body() body: unknown,
   ): Promise<SystemSettingsDto> {
-    const { values, expectedRevision, expectedSnapshotToken } = zPatchSystemSettingsRequest.parse(body);
+    const { values, expectedRevision } = zPatchSystemSettingsRequest.parse(body);
     try {
       const committed = await this.accessResolver.runWithActorCapabilities(
         actor.id,
@@ -59,7 +68,6 @@ export class SystemSettingsController {
           actor.id,
           values,
           expectedRevision,
-          expectedSnapshotToken,
         ),
       );
       await this.authority.committed(committed);
@@ -81,7 +89,6 @@ export class SystemSettingsController {
     const fields = this.config.allFields();
     return {
       revision: this.config.revision(),
-      snapshotToken: this.config.snapshotToken(),
       configFile: this.config.configFile(),
       fields,
       editable: fields.filter((field) => field.editable),

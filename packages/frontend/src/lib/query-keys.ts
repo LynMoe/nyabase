@@ -8,7 +8,7 @@ type GrantSlice = 'servers' | 'pools' | 'backends' | 'effective-access';
 export const queryKeys = {
   publicSettings: ['public-settings'] as const,
   meAccess: ['me', 'access'] as const,
-  certificate: ['incus-client-certificate'] as const,
+  clientIdentity: ['incus-client-identity'] as const,
   systemSettings: ['system-settings'] as const,
   catalog: { users: ['catalog', 'users'] as const },
   sshKeys: (userId: string) => ['ssh-keys', userId] as const,

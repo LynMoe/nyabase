@@ -54,7 +54,7 @@ describe('queryKeys catalog', () => {
     expect(queryKeys.grants.subject('users', 'abc')).toEqual(['grants', 'users', 'abc']);
     expect(queryKeys.meAccess).toEqual(['me', 'access']);
     expect(queryKeys.publicSettings).toEqual(['public-settings']);
-    expect(queryKeys.certificate).toEqual(['incus-client-certificate']);
+    expect(queryKeys.clientIdentity).toEqual(['incus-client-identity']);
     expect(queryKeys.systemSettings).toEqual(['system-settings']);
     expect(queryKeys.catalog.users).toEqual(['catalog', 'users']);
     expect(queryKeys.sshProxy.status).toEqual(['ssh-proxy-status']);

@@ -25,6 +25,5 @@ export function toDto(intent: IntentRecord): IntentDto {
     nextAttemptAt: intent.nextAttemptAt,
     createdAt: intent.createdAt,
     settledAt: intent.settledAt,
-    blockedByIntentId: intent.blockedByIntentId ?? null,
   };
 }

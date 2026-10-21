@@ -43,7 +43,6 @@ describe('HTTP API route uniqueness', () => {
     expect([...adminResources].sort()).toEqual([
       'catalog',
       'groups',
-      'incus-client-certificate',
       'ip-pools',
       'metrics',
       'ssh-proxy',
