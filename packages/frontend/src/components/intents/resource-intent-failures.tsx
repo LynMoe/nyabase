@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { useMutation, useQuery } from '@tanstack/react-query';
-import { IntentStatus, type CursorPaginatedResponse, type IntentDto } from '@nyabase/common';
+import { IntentStatus, type CursorPaginatedResponse, type IntentDto, type ListScope } from '@nyabase/common';
 import { ChevronDown, ChevronRight, History } from 'lucide-react';
 import { api } from '../../lib/api.js';
 import { errorMessage } from '../../lib/api-error.js';
@@ -22,17 +22,17 @@ import { refetchWhileInProgress } from '../../lib/query-lifecycle.js';
 
 export function ResourceIntentHistory({
   listPath,
-  admin,
+  scope,
   enabled = true,
   defaultOpen = false,
 }: {
   listPath: string;
-  admin: boolean;
+  scope: ListScope;
   enabled?: boolean;
   defaultOpen?: boolean;
 }) {
   const query = useQuery({
-    queryKey: queryKeys.resourceIntentFailures(admin ? 'admin' : 'user', listPath, 50),
+    queryKey: queryKeys.resourceIntentFailures(listPath, 50),
     queryFn: () => api.get<CursorPaginatedResponse<IntentDto>>(
       `${listPath}${listPath.includes('?') ? '&' : '?'}limit=50`,
     ),
@@ -74,7 +74,7 @@ export function ResourceIntentHistory({
       {open && (
         <IntentsPanel
           intents={items}
-          admin={admin}
+          scope={scope}
           embedded
           onRetry={() => { void query.refetch(); }}
         />
@@ -85,15 +85,13 @@ export function ResourceIntentHistory({
 
 export function ResourceIntentFailures({
   listPath,
-  admin,
   enabled = true,
 }: {
   listPath: string;
-  admin: boolean;
   enabled?: boolean;
 }) {
   const query = useQuery({
-    queryKey: queryKeys.resourceIntentFailures(admin ? 'admin' : 'user', listPath, 20),
+    queryKey: queryKeys.resourceIntentFailures(listPath, 20),
     queryFn: () => api.get<CursorPaginatedResponse<IntentDto>>(
       `${listPath}${listPath.includes('?') ? '&' : '?'}limit=20`,
     ),
@@ -104,7 +102,7 @@ export function ResourceIntentFailures({
     }),
   });
   const retry = useMutation({
-    mutationFn: (intentId: string) => retryIntent(intentId, admin),
+    mutationFn: (intentId: string) => retryIntent(intentId),
     onSuccess: () => {
       toast({ title: '已提交重试' });
       void query.refetch();

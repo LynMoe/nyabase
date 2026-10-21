@@ -8,21 +8,21 @@ test(
   'HTTP proxy status, domain pools, and bindings are reachable',
   { ...coverageCase('http-proxy-api', 'http-proxy-api-live') },
   async ({ adminApi }) => {
-    await expectJson(await adminApi.get('/api/admin/http-proxy/status'));
-    await expectJson(await adminApi.get('/api/admin/http-proxy/bindings'));
-    await expectJson(await adminApi.get('/api/admin/http-proxy/domain-pools'));
+    await expectJson(await adminApi.get('/api/http-proxy/status'));
+    await expectJson(await adminApi.get('/api/http-proxy/bindings?scope=all'));
+    await expectJson(await adminApi.get('/api/http-proxy/domain-pools?scope=all'));
     await expectJson(await adminApi.get('/api/http-proxy/bindings'));
     await expectJson(await adminApi.get('/api/http-proxy/domain-pools'));
 
     const wildcard = `*.e2e-${Date.now().toString(36)}.example.test`;
     const pool = await expectJson<JsonRecord>(
-      await adminApi.post('/api/admin/http-proxy/domain-pools', {
+      await adminApi.post('/api/http-proxy/domain-pools', {
         data: { wildcardDomain: wildcard, enabled: true, httpsEnabled: false },
       }),
       [200, 201],
     );
     const patched = await expectJson<JsonRecord>(
-      await adminApi.patch(`/api/admin/http-proxy/domain-pools/${pool.id}`, {
+      await adminApi.patch(`/api/http-proxy/domain-pools/${pool.id}`, {
         data: { enabled: false },
       }),
     );
@@ -42,7 +42,7 @@ test(
     expect(patchBinding.status()).toBeGreaterThanOrEqual(400);
     const deleteBinding = await adminApi.delete(`/api/http-proxy/bindings/${missingBinding}`);
     expect(deleteBinding.status()).toBeGreaterThanOrEqual(400);
-    const deleted = await adminApi.delete(`/api/admin/http-proxy/domain-pools/${pool.id}`);
+    const deleted = await adminApi.delete(`/api/http-proxy/domain-pools/${pool.id}`);
     expect([200, 204]).toContain(deleted.status());
   },
 );

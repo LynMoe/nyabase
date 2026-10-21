@@ -81,7 +81,7 @@ describe('lane D product UI copy', () => {
     expect(volumes).toMatch(/未挂载/);
     expect(volumes).toMatch(/ResourceIntentFailures/);
     expect(volumes).toMatch(/ResourceIntentHistory/);
-    expect(volumes).toMatch(/\/volumes\/\$\{volume\.id\}\/intents/);
+    expect(volumes).toMatch(/resourceIntentsPath\(scope, IntentResourceType\.Volume, volume\.id\)/);
     expect(volumes).not.toMatch(/volumeAttachments\(/);
     expect(page).toMatch(/volume-server-table/);
     expect(page).not.toMatch(/\/admin\//);
@@ -112,7 +112,7 @@ describe('lane D product UI copy', () => {
     const detail = read('pages/image-detail-page.tsx');
     expect(page).toMatch(/ImageCatalogDialog/);
     expect(page).not.toMatch(/ImageFormDialog/);
-    expect(catalog).toMatch(/\/admin\/images\/catalog/);
+    expect(catalog).toMatch(/'\/images\/catalog'/);
     expect(catalog).toMatch(/\{ alias \}/);
     expect(catalog).not.toMatch(/loginUser/);
     expect(list).toMatch(/重新拉取/);
@@ -129,7 +129,7 @@ describe('lane D product UI copy', () => {
     expect(layout).not.toMatch(/to: '\/manage\/volumes'/);
     const storageTab = read('components/servers/server-storage-tab.tsx');
     expect(storageTab).toMatch(/ManageVolumes/);
-    expect(storageTab).toMatch(/\/admin\/volumes\?serverId=/);
+    expect(storageTab).toMatch(/\/volumes\?scope=all&serverId=/);
     expect(storageTab).toMatch(/server-volume-table/);
   });
 
@@ -142,7 +142,7 @@ describe('lane D product UI copy', () => {
       read('pages/shared-backends-page.tsx'),
       read('pages/shared-backend-detail-page.tsx'),
     ].join('\n');
-    expect(page).toMatch(/\/admin\/shared-volumes/);
+    expect(page).toMatch(/\/shared-volumes\?scope=all/);
     expect(page).toMatch(/ManageSharedVolumes/);
     expect(page).toMatch(/enabled: tab === 'volumes' && canManageSharedVolumes/);
   });
@@ -199,7 +199,7 @@ describe('lane D product UI copy', () => {
     expect(volumes).toMatch(/ResourceIntentHistory/);
     expect(shared).toMatch(/SharedVolumeFormDialog/);
     expect(shared).toMatch(/ResourceIntentHistory/);
-    expect(shared).toMatch(/\/shared-volumes\/\$\{volume\.id\}\/intents/);
+    expect(shared).toMatch(/resourceIntentsPath\(scope, IntentResourceType\.Volume, volume\.id\)/);
     expect(shared).toMatch(/formatObservedUsage/);
     expect(shared).not.toMatch(/usedBytes \?\? 0/);
     expect(backends).toMatch(/formatObservedUsage/);
@@ -232,7 +232,7 @@ describe('lane D product UI copy', () => {
     expect(backends).not.toMatch(/查看 catalog/);
     expect(backends).not.toMatch(/\/manage\/shared-volumes/);
     expect(backends).toMatch(/ManageSharedVolumes/);
-    expect(backends).toMatch(/\/admin\/shared-volumes/);
+    expect(backends).toMatch(/\/shared-volumes\?scope=all/);
     expect(backends).toMatch(/enabled: tab === 'volumes' && canManageSharedVolumes/);
     expect(backends).not.toMatch(/api\.get<SharedVolumeDto\[\]>\('\/shared-volumes'\)/);
     expect(sharedForm).toMatch(/backendLacksOnlineExecutor/);

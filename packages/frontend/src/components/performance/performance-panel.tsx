@@ -8,6 +8,7 @@ import {
   HardDrive,
 } from 'lucide-react';
 import {
+  type ListScope,
   type PerformanceAdminUsageResponse,
   type PerformanceContainerRow,
   type PerformanceMetric,
@@ -18,6 +19,7 @@ import {
 } from '@nyabase/common';
 import { api } from '../../lib/api.js';
 import { queryKeys } from '../../lib/query-keys.js';
+import { scopedPath } from '../../lib/scoped-paths.js';
 import { queryPollInterval } from '../../lib/query-lifecycle.js';
 import { formatBytesCompact, formatPercent, formatRate, relativeTime, usedTotalLabel } from '../../lib/utils.js';
 import { ChartHover } from './chart-hover.js';
@@ -44,7 +46,6 @@ import {
 } from '../ui/table.js';
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '../ui/tooltip.js';
 
-type Mode = 'user' | 'admin';
 type SortKey = 'cpu' | 'memory' | 'gpu' | 'disk';
 
 const METRICS: Array<{ id: PerformanceMetric; label: string }> = [
@@ -63,10 +64,10 @@ const RANGES: Array<{ id: PerformanceRange; label: string }> = [
 const COLORS = ['#0f766e', '#b45309', '#1d4ed8', '#be123c', '#4338ca', '#047857', '#0369a1', '#a16207', '#64748b'];
 
 export function PerformancePanel({
-  mode,
+  scope,
   serverId,
 }: {
-  mode: Mode;
+  scope: ListScope;
   serverId?: string;
 }) {
   const [serverFilter, setServerFilter] = useState(serverId ?? 'all');
@@ -77,28 +78,26 @@ export function PerformancePanel({
   const [selectedContainerId, setSelectedContainerId] = useState<string | null>(null);
   const lockedServer = serverId ?? (serverFilter === 'all' ? undefined : serverFilter);
   const serverKey = lockedServer ?? 'all';
-  const usagePath = mode === 'admin' ? '/admin/performance/usage' : '/performance/usage';
-  const seriesPath = mode === 'admin' ? '/admin/performance/series' : '/performance/series';
   const usageQuery = useQuery({
-    queryKey: mode === 'admin' ? queryKeys.performance.admin(serverKey) : queryKeys.performance.user(serverKey),
+    queryKey: queryKeys.performance.usage(scope, serverKey),
     queryFn: () => api.get<PerformanceUsageResponse | PerformanceAdminUsageResponse>(
-      withQuery(usagePath, { serverId: lockedServer }),
+      scopedPath('/performance/usage', scope, { serverId: lockedServer }),
     ),
     refetchInterval: (query) => queryPollInterval(query.state, { activeIntervalMs: 15_000 }),
   });
   const seriesQuery = useQuery({
     queryKey: queryKeys.performance.series(
-      mode,
+      scope,
       serverKey,
       userFilter,
       chartBy === 'container' && selectedContainerId ? selectedContainerId : 'all',
       metric,
       range,
     ),
-    queryFn: () => api.get<PerformanceSeriesResponse>(withQuery(seriesPath, {
+    queryFn: () => api.get<PerformanceSeriesResponse>(scopedPath('/performance/series', scope, {
       serverId: lockedServer,
       userId: userFilter === 'all' ? undefined : userFilter,
-      containerId: mode === 'admin' && chartBy === 'container' ? selectedContainerId ?? undefined : undefined,
+      containerId: scope === 'all' && chartBy === 'container' ? selectedContainerId ?? undefined : undefined,
       metric,
       range,
     })),
@@ -109,7 +108,7 @@ export function PerformancePanel({
     <QueryView query={usageQuery} resourceName="性能" loadingLabel="加载性能...">
       {(usage) => (
         <PerformanceView
-          mode={mode}
+          scope={scope}
           usage={usage}
           series={seriesQuery.data}
           serverId={serverId}
@@ -140,7 +139,7 @@ export function PerformancePanel({
 }
 
 export function PerformanceView({
-  mode,
+  scope,
   usage,
   series,
   serverId,
@@ -157,7 +156,7 @@ export function PerformanceView({
   onChartBy,
   onSelectContainer,
 }: {
-  mode: Mode;
+  scope: ListScope;
   usage: PerformanceUsageResponse | PerformanceAdminUsageResponse;
   series?: PerformanceSeriesResponse;
   serverId?: string;
@@ -178,7 +177,7 @@ export function PerformanceView({
     server.people
       .filter((person) => userFilter === 'all' || person.userId === userFilter)
       .map((person) => ({ ...person, serverId: server.serverId, serverName: server.serverName, stale: server.stale, sampledAt: server.sampledAt })));
-  const containers = mode === 'admin'
+  const containers = scope === 'all'
     ? (usage as PerformanceAdminUsageResponse).servers.flatMap((server) =>
       server.containers
         .filter((container) => userFilter === 'all' || container.userId === userFilter)
@@ -190,7 +189,7 @@ export function PerformanceView({
   const empty = emptyCopy(usage, people);
 
   return (
-    <section className="space-y-4" data-testid={mode === 'admin' ? 'admin-performance' : 'user-performance'}>
+    <section className="space-y-4" data-testid={scope === 'all' ? 'admin-performance' : 'user-performance'}>
       <div className="flex flex-wrap items-center gap-2">
         {serverId ? null : (
           <FilterSelect label="服务器" value={serverFilter} onChange={onServerFilter} options={[
@@ -221,7 +220,7 @@ export function PerformanceView({
             </Button>
           ))}
         </div>
-        {mode === 'admin' && selectedContainerId ? (
+        {scope === 'all' && selectedContainerId ? (
           <div className="flex gap-1">
             <Button type="button" size="sm" variant={chartBy === 'person' ? 'secondary' : 'ghost'} onClick={() => onChartBy('person')}>按人</Button>
             <Button type="button" size="sm" variant={chartBy === 'container' ? 'secondary' : 'ghost'} onClick={() => onChartBy('container')}>按容器</Button>
@@ -245,7 +244,7 @@ export function PerformanceView({
       )}
 
       <PersonTable rows={people} />
-      {mode === 'admin' ? (
+      {scope === 'all' ? (
         <ContainerTable rows={containers} selectedId={selectedContainerId} onSelect={onSelectContainer} />
       ) : null}
       {usage.servers.some((server) => server.stale) && !empty ? null : null}
@@ -626,13 +625,4 @@ function sum(values: Array<number | null>): number | null {
   const present = values.filter((value): value is number => value !== null && Number.isFinite(value));
   if (present.length === 0) return null;
   return present.reduce((total, value) => total + value, 0);
-}
-
-function withQuery(path: string, query: Record<string, string | undefined>): string {
-  const params = new URLSearchParams();
-  for (const [key, value] of Object.entries(query)) {
-    if (value) params.set(key, value);
-  }
-  const text = params.toString();
-  return text ? `${path}?${text}` : path;
 }

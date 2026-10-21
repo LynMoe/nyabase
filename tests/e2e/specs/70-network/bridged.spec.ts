@@ -148,7 +148,7 @@ test(
     expect(cleanupComplete).toBe(true);
 
     const server = await expectJson<Record<string, any>>(
-      await adminApi.get(`/api/admin/servers/${seedState.server.id}`),
+      await adminApi.get(`/api/servers/${seedState.server.id}?scope=all`),
     );
     expect(server.parentInterface).toBe(parent);
     const pools = await expectJson<Array<Record<string, any>>>(
@@ -190,7 +190,7 @@ test(
     const deletedPool = await adminApi.delete(`/api/admin/ip-pools/${missingPool}`);
     expect(deletedPool.status()).toBeGreaterThanOrEqual(400);
     await expectJson<Record<string, unknown>>(
-      await adminApi.get(`/api/admin/servers/${seedState.server.id}/storage-capacity`),
+      await adminApi.get(`/api/servers/${seedState.server.id}/storage-capacity?scope=all`),
     );
 
     const instances = await runIncus(['list', '--format', 'json']);

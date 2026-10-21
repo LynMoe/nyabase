@@ -12,6 +12,7 @@ import {
   provisionGrantedUser,
   requireSucceededIntent,
   waitForUserContainerPower,
+  resourceIntentsPath,
 } from '../../support/persona.js';
 
 type JsonRecord = Record<string, any>;
@@ -59,7 +60,7 @@ test(
       );
       expect(Number(after.cpuMillis)).toBe(nextCpu);
       expect(Number(after.memBytes)).toBe(nextMem);
-      await assertNoActiveIntents(userApi, `/api/containers/${containerId}/intents`);
+      await assertNoActiveIntents(userApi, resourceIntentsPath('container', containerId, 'mine'));
     } finally {
       await deleteUserContainer(userApi ?? adminApi, adminApi, containerId);
       if (refreshToken) {
@@ -165,7 +166,7 @@ test(
       const rootSize = await runIncus(['config', 'device', 'get', instanceName, 'root', 'size']);
       expect(rootSize.code, rootSize.stderr).toBe(0);
       expect(parseByteSize(rootSize.stdout.trim())).toBe(grownRoot);
-      await assertNoActiveIntents(userApi, `/api/containers/${containerId}/intents`);
+      await assertNoActiveIntents(userApi, resourceIntentsPath('container', containerId, 'mine'));
     } finally {
       await deleteUserContainer(userApi ?? adminApi, adminApi, containerId);
       if (refreshToken) {
@@ -208,7 +209,7 @@ test(
         const accepted = await expectJson<JsonRecord>(tooSmall, 202);
         const intent = await eventually(
           async () => expectJson<JsonRecord>(
-            await adminApi.get(`/api/admin/intents/${accepted.intentId}`),
+            await adminApi.get(`/api/intents/${accepted.intentId}`),
           ),
           (value) => value.status === 'succeeded' || value.status === 'failed',
           180_000,
@@ -318,7 +319,7 @@ test(
       );
       expect(finalState.powerIntent).toBe('running');
       expect(finalState.actual?.status).toBe('running');
-      await assertNoActiveIntents(userApi, `/api/containers/${containerId}/intents`);
+      await assertNoActiveIntents(userApi, resourceIntentsPath('container', containerId, 'mine'));
     } finally {
       await deleteUserContainer(userApi ?? adminApi, adminApi, containerId);
       if (refreshToken) {

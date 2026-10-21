@@ -1,4 +1,7 @@
-type Plane = 'admin' | 'user';
+import type { ListScope } from '@nyabase/common';
+
+/** Which rows a cached response holds: the caller's own (`mine`) or everyone's (`all`). */
+type Scope = ListScope;
 type GrantKind = 'users' | 'groups';
 type GrantSlice = 'servers' | 'pools' | 'backends' | 'effective-access';
 
@@ -22,11 +25,11 @@ export const queryKeys = {
     admin: ['servers', 'admin'] as const,
     user: ['servers', 'user'] as const,
     detail: (serverId: string) => ['server', serverId] as const,
-    pools: (serverId: string, admin: boolean) => ['storage-pools', admin ? 'admin' : 'user', serverId] as const,
+    pools: (serverId: string, scope: ListScope) => ['storage-pools', scope, serverId] as const,
     preflight: (serverId: string) => ['server-preflight', serverId] as const,
   },
   gpu: {
-    devices: (serverId: string, admin: boolean) => ['gpu-devices', admin ? 'admin' : 'user', serverId] as const,
+    devices: (serverId: string, scope: ListScope) => ['gpu-devices', scope, serverId] as const,
     server: (serverId: string) => ['server-gpu', 'admin', serverId] as const,
   },
   images: {
@@ -47,17 +50,16 @@ export const queryKeys = {
   containers: {
     adminList: ['containers', 'admin'] as const,
     userList: ['containers', 'user'] as const,
-    detail: (plane: Plane, containerId: string) => ['container', plane, containerId] as const,
-    stats: (plane: Plane, containerId: string) => ['container', plane, containerId, 'stats'] as const,
-    intents: (plane: Plane, containerId: string) => ['container-intents', plane, containerId] as const,
-    attachments: (plane: Plane, containerId: string) =>
-      ['container-attachments', plane, containerId] as const,
+    detail: (scope: Scope, containerId: string) => ['container', scope, containerId] as const,
+    stats: (scope: Scope, containerId: string) => ['container', scope, containerId, 'stats'] as const,
+    intents: (scope: Scope, containerId: string) => ['container-intents', scope, containerId] as const,
+    attachments: (scope: Scope, containerId: string) =>
+      ['container-attachments', scope, containerId] as const,
   },
   volumes: {
     user: ['volumes', 'user'] as const,
     admin: ['volumes', 'admin'] as const,
     adminByServer: (serverId: string) => ['volumes', 'admin', serverId] as const,
-    intents: (volumeId: string, admin: boolean) => ['volume-intents', admin ? 'admin' : 'user', volumeId] as const,
   },
   sharedVolumes: {
     all: ['shared-volumes'] as const,
@@ -85,26 +87,25 @@ export const queryKeys = {
     adminBindings: ['http-proxy', 'admin', 'bindings'] as const,
   },
   performance: {
-    user: (serverId: string) => ['performance', 'user', serverId] as const,
-    admin: (serverId: string) => ['performance', 'admin', serverId] as const,
-    servers: (mode: Plane) => ['performance', 'servers', mode] as const,
-    scoped: (mode: Plane, serverId: string) => ['performance', 'scoped', mode, serverId] as const,
-    spark: (mode: Plane) => ['performance', 'spark', mode] as const,
-    self: (mode: Plane, containerId: string) => ['performance', 'self', mode, containerId] as const,
-    multi: (mode: Plane, serverId: string, containerId: string, range: string) =>
-      ['performance', 'multi', mode, serverId, containerId, range] as const,
+    usage: (scope: Scope, serverId: string) => ['performance', 'usage', scope, serverId] as const,
+    servers: (scope: Scope) => ['performance', 'servers', scope] as const,
+    scoped: (scope: Scope, serverId: string) => ['performance', 'scoped', scope, serverId] as const,
+    spark: (scope: Scope) => ['performance', 'spark', scope] as const,
+    self: (scope: Scope, containerId: string) => ['performance', 'self', scope, containerId] as const,
+    multi: (scope: Scope, serverId: string, containerId: string, range: string) =>
+      ['performance', 'multi', scope, serverId, containerId, range] as const,
     series: (
-      mode: Plane,
+      scope: Scope,
       serverId: string,
       userId: string,
       containerId: string,
       metric: string,
       range: string,
-    ) => ['performance', 'series', mode, serverId, userId, containerId, metric, range] as const,
+    ) => ['performance', 'series', scope, serverId, userId, containerId, metric, range] as const,
   },
   storageCapacity: (serverId: string) => ['storage-capacity', serverId] as const,
-  resourceIntentFailures: (plane: Plane, listPath: string, limit: number) =>
-    ['resource-intent-failures', plane, listPath, limit] as const,
+  resourceIntentFailures: (listPath: string, limit: number) =>
+    ['resource-intent-failures', listPath, limit] as const,
   adminIntents: (filters: {
     status?: string;
     kind?: string;

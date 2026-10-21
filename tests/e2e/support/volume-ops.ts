@@ -6,6 +6,7 @@ import { runCommand, runIncus } from './incus-control.js';
 import {
   createUserContainer,
   createUserSharedVolume,
+  resourceIntentsPath,
 } from './persona.js';
 import { eventually } from './poll.js';
 import { currentRunId, requireRuntimeEnv } from './runtime-env.js';
@@ -18,23 +19,21 @@ export type LabServer = NonNullable<SeedState['labServers']>[number];
 
 export type VolumeKind = 'local' | 'shared';
 
-export function adminContainerVolumesPath(
+/** One route for owners and administrators; who may call it is decided server-side. */
+export function containerVolumesPath(
   containerId: string,
   kind: VolumeKind = 'local',
-  actor: 'admin' | 'user' = 'admin',
 ): string {
-  const root = actor === 'user'
-    ? `/api/containers/${containerId}`
-    : `/api/admin/containers/${containerId}`;
+  const root = `/api/containers/${containerId}`;
   return kind === 'shared'
     ? `${root}/shared-volumes`
     : `${root}/volumes`;
 }
 
-export function adminVolumePath(volumeId: string, kind: VolumeKind = 'local'): string {
+export function volumePath(volumeId: string, kind: VolumeKind = 'local'): string {
   return kind === 'shared'
-    ? `/api/admin/shared-volumes/${volumeId}`
-    : `/api/admin/volumes/${volumeId}`;
+    ? `/api/shared-volumes/${volumeId}`
+    : `/api/volumes/${volumeId}`;
 }
 
 export async function waitForIntent(
@@ -44,11 +43,7 @@ export async function waitForIntent(
 ): Promise<JsonRecord> {
   return eventually(
     async () => {
-      const admin = await api.get(`/api/admin/intents/${intentId}`);
-      if (admin.status() === 403 || admin.status() === 401) {
-        return expectJson<JsonRecord>(await api.get(`/api/intents/${intentId}`));
-      }
-      return expectJson<JsonRecord>(admin);
+      return expectJson<JsonRecord>(await api.get(`/api/intents/${intentId}`));
     },
     (intent) => intent.status === 'succeeded' || intent.status === 'failed',
     timeoutMs,
@@ -81,7 +76,7 @@ export async function listSharedExecutors(
   backendId: string,
 ): Promise<JsonRecord[]> {
   return expectJson<JsonRecord[]>(
-    await api.get(`/api/admin/shared-backends/${backendId}/executors`),
+    await api.get(`/api/shared-backends/${backendId}/executors`),
   );
 }
 
@@ -138,7 +133,7 @@ export async function execInContainer(
   ssh?: string,
 ): Promise<string> {
   const container = await expectJson<JsonRecord>(
-    await api.get(`/api/admin/containers/${containerId}`),
+    await api.get(`/api/containers/${containerId}`),
   );
   const instanceName = container.instanceName as string;
   expect(instanceName, JSON.stringify(container)).toBeTruthy();
@@ -176,10 +171,10 @@ export async function deleteContainer(
 ): Promise<void> {
   if (!containerId) return;
   const deletion = await api.post(
-    `/api/admin/containers/${containerId}/actions/delete`,
+    `/api/containers/${containerId}/actions/delete`,
   ).catch(() => undefined);
   if (deletion?.status() === 202) {
-    await waitForGone(api, `/api/admin/containers/${containerId}`);
+    await waitForGone(api, `/api/containers/${containerId}`);
   }
 }
 
@@ -188,17 +183,17 @@ export async function stopContainer(
   containerId: string,
 ): Promise<void> {
   const current = await expectJson<JsonRecord>(
-    await api.get(`/api/admin/containers/${containerId}`),
+    await api.get(`/api/containers/${containerId}`),
   );
   if (current.actual?.status === 'stopped' && current.powerIntent === 'stopped') return;
   const accepted = await expectJson<JsonRecord>(
-    await api.post(`/api/admin/containers/${containerId}/actions/stop`),
+    await api.post(`/api/containers/${containerId}/actions/stop`),
     202,
   );
   await requireSucceededIntent(api, accepted.intentId, 'container.power.stop');
   await eventually(
     async () => expectJson<JsonRecord>(
-      await api.get(`/api/admin/containers/${containerId}`),
+      await api.get(`/api/containers/${containerId}`),
     ),
     (value) => value.actual?.status === 'stopped' && value.powerIntent === 'stopped',
     180_000,
@@ -212,13 +207,13 @@ export async function startContainer(
   containerId: string,
 ): Promise<void> {
   const accepted = await expectJson<JsonRecord>(
-    await api.post(`/api/admin/containers/${containerId}/actions/start`),
+    await api.post(`/api/containers/${containerId}/actions/start`),
     202,
   );
   await requireSucceededIntent(api, accepted.intentId, 'container.power.start');
   await eventually(
     async () => expectJson<JsonRecord>(
-      await api.get(`/api/admin/containers/${containerId}`),
+      await api.get(`/api/containers/${containerId}`),
     ),
     (value) => value.lifecyclePhase === 'active' && value.actual?.status === 'running',
     180_000,
@@ -231,10 +226,9 @@ export async function listContainerVolumes(
   api: ApiClient,
   containerId: string,
   kind: VolumeKind = 'local',
-  actor: 'admin' | 'user' = 'admin',
 ): Promise<JsonRecord[]> {
   return expectJson<JsonRecord[]>(
-    await api.get(adminContainerVolumesPath(containerId, kind, actor)),
+    await api.get(containerVolumesPath(containerId, kind)),
   );
 }
 
@@ -291,16 +285,16 @@ async function settleVolumeDeletion(
   if (!response) return false;
   const status = response.status();
   if (status === 200 || status === 204) {
-    const gone = await api.get(adminVolumePath(volumeId, kind));
-    if (gone.status() !== 404) await waitForGone(api, adminVolumePath(volumeId, kind));
+    const gone = await api.get(volumePath(volumeId, kind));
+    if (gone.status() !== 404) await waitForGone(api, volumePath(volumeId, kind));
     return true;
   }
   if (status === 202) {
-    await waitForGone(api, adminVolumePath(volumeId, kind));
+    await waitForGone(api, volumePath(volumeId, kind));
     return true;
   }
   if (status === 404) {
-    const exists = await api.get(adminVolumePath(volumeId, kind));
+    const exists = await api.get(volumePath(volumeId, kind));
     return exists.status() === 404;
   }
   return false;
@@ -311,13 +305,13 @@ export async function deleteVolume(
   volumeId: string | undefined,
 ): Promise<void> {
   if (!volumeId) return;
-  const localExists = (await api.get(adminVolumePath(volumeId, 'local')).catch(() => undefined))
+  const localExists = (await api.get(volumePath(volumeId, 'local')).catch(() => undefined))
     ?.status() === 200;
-  const sharedExists = (await api.get(adminVolumePath(volumeId, 'shared')).catch(() => undefined))
+  const sharedExists = (await api.get(volumePath(volumeId, 'shared')).catch(() => undefined))
     ?.status() === 200;
   if (!localExists && !sharedExists) return;
   const kind: VolumeKind = localExists ? 'local' : 'shared';
-  const deletion = await api.delete(adminVolumePath(volumeId, kind)).catch(() => undefined);
+  const deletion = await api.delete(volumePath(volumeId, kind)).catch(() => undefined);
   const settled = await settleVolumeDeletion(api, volumeId, kind, deletion);
   if (settled) return;
   const status = deletion?.status();
@@ -335,7 +329,6 @@ export async function attachVolume(
   volumeId: string,
   containerPath: string,
   kind: VolumeKind = 'local',
-  actor: 'admin' | 'user' = 'admin',
 ): Promise<{
   attachmentId: string;
   intentId: string;
@@ -343,7 +336,7 @@ export async function attachVolume(
   onlineCancelAllowed?: boolean;
 }> {
   const accepted = await expectJson<JsonRecord>(
-    await api.post(adminContainerVolumesPath(containerId, kind, actor), {
+    await api.post(containerVolumesPath(containerId, kind), {
       data: {
         volumeId,
         containerPath,
@@ -353,7 +346,7 @@ export async function attachVolume(
     202,
   );
   await requireSucceededIntent(api, accepted.intentId, 'volume.attach');
-  const attachments = await listContainerVolumes(api, containerId, kind, actor);
+  const attachments = await listContainerVolumes(api, containerId, kind);
   const attachment = attachments.find((entry) => entry.volumeId === volumeId
     && entry.containerPath === containerPath);
   expect(attachment?.id, JSON.stringify(attachments)).toBeTruthy();
@@ -370,10 +363,9 @@ export async function detachVolume(
   containerId: string,
   attachmentId: string,
   kind: VolumeKind = 'local',
-  actor: 'admin' | 'user' = 'admin',
 ): Promise<void> {
   const response = await api.delete(
-    `${adminContainerVolumesPath(containerId, kind, actor)}/${attachmentId}`,
+    `${containerVolumesPath(containerId, kind)}/${attachmentId}`,
   );
   if (response.status() === 409) {
     const body = await response.json();
@@ -395,10 +387,9 @@ export async function expectDetachRequiresStop(
   containerId: string,
   attachmentId: string,
   kind: VolumeKind = 'local',
-  actor: 'admin' | 'user' = 'admin',
 ): Promise<void> {
   const response = await api.delete(
-    `${adminContainerVolumesPath(containerId, kind, actor)}/${attachmentId}`,
+    `${containerVolumesPath(containerId, kind)}/${attachmentId}`,
   );
   expect(response.status()).toBe(409);
   expect(conflictCode(await response.json())).toBe('VOLUME_DETACH_REQUIRES_STOP');
@@ -408,7 +399,7 @@ export async function expectStartBusyWhileDetaching(
   api: ApiClient,
   containerId: string,
 ): Promise<void> {
-  const response = await api.post(`/api/admin/containers/${containerId}/actions/start`);
+  const response = await api.post(`/api/containers/${containerId}/actions/start`);
   expect(response.status()).toBe(409);
   expect(conflictCode(await response.json())).toBe('INSTANCE_BUSY');
 }
@@ -629,12 +620,12 @@ export async function restoreLabServer(
   const trustRaw = await sshOnLab(server.ssh, `incus config trust add ${tokenName}`);
   expect(trustRaw.code, trustRaw.stderr).toBe(0);
   const trustToken = parseTrustToken(`${trustRaw.stdout}\n${trustRaw.stderr}`);
-  const listed = await expectJson<JsonRecord[]>(await api.get('/api/admin/servers'));
+  const listed = await expectJson<JsonRecord[]>(await api.get('/api/servers?scope=all'));
   const existing = listed.find((row) => row.apiEndpoint === server.endpoint || row.slug === labServerSlug(server));
   let serverId = existing?.id as string | undefined;
   if (!serverId) {
     const created = await expectJson<JsonRecord>(
-      await api.post('/api/admin/servers', {
+      await api.post('/api/servers', {
         data: {
           name,
           slug: labServerSlug(server),
@@ -652,7 +643,7 @@ export async function restoreLabServer(
   }
   expect(serverId).toBeTruthy();
   const connected = await expectJson<JsonRecord>(
-    await api.post(`/api/admin/servers/${serverId}/connect`, {
+    await api.post(`/api/servers/${serverId}/connect`, {
       data: {
         trustToken,
         expectedServerCertFingerprint: server.certificateFingerprint,
@@ -662,7 +653,7 @@ export async function restoreLabServer(
   );
   await requireSucceededIntent(api, connected.intentId, `restore connect ${name}`);
   await eventually(
-    async () => expectJson<JsonRecord>(await api.get(`/api/admin/servers/${serverId}`)),
+    async () => expectJson<JsonRecord>(await api.get(`/api/servers/${serverId}?scope=all`)),
     (row) => row.status === 'online',
     90_000,
     1_000,
@@ -670,7 +661,7 @@ export async function restoreLabServer(
   );
   const assigned = await expectJson<JsonRecord>(
     await api.put(
-      `/api/admin/images/${seedState.image.id}/assignments/${serverId}`,
+      `/api/images/${seedState.image.id}/assignments/${serverId}`,
       { data: {} },
     ),
     202,
@@ -679,16 +670,16 @@ export async function restoreLabServer(
   if (assignmentIntentId) {
     await requireSucceededIntent(api, assignmentIntentId, `restore image assignment ${name}`);
   }
-  await api.post(`/api/admin/servers/${serverId}/storage-pools/discover`);
+  await api.post(`/api/servers/${serverId}/storage-pools/discover`);
   const pools = await expectJson<JsonRecord[]>(
-    await api.get(`/api/admin/servers/${serverId}/storage-pools`),
+    await api.get(`/api/servers/${serverId}/storage-pools?scope=all`),
   );
   const dirPool = pools.find((pool) => pool.id === server.dirPoolId)
     ?? pools.find((pool) => pool.driver === 'dir' && pool.resizeFamily === 'quota_online');
   const lvmPool = pools.find((pool) => pool.driver === 'lvm');
   for (const pool of [dirPool, lvmPool]) {
     if (!pool || pool.registered) continue;
-    await api.patch(`/api/admin/storage-pools/${pool.id}`, {
+    await api.patch(`/api/servers/${serverId}/storage-pools/${pool.id}`, {
       data: {
         expectedRevision: pool.revision,
         registered: true,
@@ -698,7 +689,7 @@ export async function restoreLabServer(
   let cephExecutor: JsonRecord | undefined;
   if (seedState.sharedBackendId) {
     await api.post(
-      `/api/admin/shared-backends/${seedState.sharedBackendId}/executors/discover`,
+      `/api/shared-backends/${seedState.sharedBackendId}/executors/discover`,
       { data: { serverId } },
     );
     const executors = await listSharedExecutors(api, seedState.sharedBackendId);
@@ -720,7 +711,7 @@ export async function restoreLabServer(
   });
   await ensureLabServerReady(api, seedState, serverId!, dirPool?.id as string | undefined);
   await eventually(
-    async () => expectJson<JsonRecord>(await api.get(`/api/admin/servers/${serverId}`)),
+    async () => expectJson<JsonRecord>(await api.get(`/api/servers/${serverId}?scope=all`)),
     (row) => row.status === 'online',
     90_000,
     1_000,
@@ -785,14 +776,14 @@ async function ensureWorkerNodeMetrics(
 ): Promise<void> {
   const token = process.env.E2E_NODE_EXPORTER_TOKEN?.trim();
   if (!token) return;
-  let server = await expectJson<JsonRecord>(await api.get(`/api/admin/servers/${serverId}`));
+  let server = await expectJson<JsonRecord>(await api.get(`/api/servers/${serverId}?scope=all`));
   const host = new URL(endpoint).hostname;
   const metricsUrl = `https://${host}:19181/metrics`;
   const fingerprint = await fingerprintHttps(host, '19181')
     ?? process.env.E2E_NODE_EXPORTER_SERVER_CERT_FINGERPRINT;
   if (!fingerprint) return;
   if (server.nodeMetrics?.endpoint === metricsUrl) return;
-  await api.patch(`/api/admin/servers/${serverId}`, {
+  await api.patch(`/api/servers/${serverId}`, {
     data: {
       expectedRevision: server.revision,
       nodeMetrics: {
@@ -825,25 +816,25 @@ export async function ensureLabServerReady(
   dirPoolId?: string,
 ): Promise<void> {
   await ensureIpPoolBinding(api, serverId);
-  let server = await expectJson<JsonRecord>(await api.get(`/api/admin/servers/${serverId}`));
+  let server = await expectJson<JsonRecord>(await api.get(`/api/servers/${serverId}?scope=all`));
   await ensureWorkerNodeMetrics(api, serverId, server.apiEndpoint ?? '');
-  server = await expectJson<JsonRecord>(await api.get(`/api/admin/servers/${serverId}`));
+  server = await expectJson<JsonRecord>(await api.get(`/api/servers/${serverId}?scope=all`));
   if (dirPoolId && server.systemPoolId !== dirPoolId) {
     await expectJson(
-      await api.patch(`/api/admin/servers/${serverId}`, {
+      await api.patch(`/api/servers/${serverId}`, {
         data: { expectedRevision: server.revision, systemPoolId: dirPoolId },
       }),
     );
-    server = await expectJson<JsonRecord>(await api.get(`/api/admin/servers/${serverId}`));
+    server = await expectJson<JsonRecord>(await api.get(`/api/servers/${serverId}?scope=all`));
   }
   const preflight = await expectJson<JsonRecord>(
-    await api.get(`/api/admin/servers/${serverId}/preflight`),
+    await api.get(`/api/servers/${serverId}/preflight`),
   );
   if (preflight.status !== 'passed') {
     const poolId = dirPoolId ?? server.systemPoolId;
     expect(poolId, `system pool missing for ${serverId}`).toBeTruthy();
     const accepted = await expectJson<JsonRecord>(
-      await api.post(`/api/admin/servers/${serverId}/preflight`, {
+      await api.post(`/api/servers/${serverId}/preflight`, {
         data: {
           expectedServerRevision: server.revision,
           poolId,
@@ -863,7 +854,7 @@ export async function ensureImageAssignment(
   serverId: string,
 ): Promise<void> {
   const assignments = await expectJson<JsonRecord[]>(
-    await api.get(`/api/admin/images/${seedState.image.id}/assignments`),
+    await api.get(`/api/images/${seedState.image.id}/assignments`),
   );
   const current = assignments.find((entry) => (
     entry.serverId === serverId || entry.server_id === serverId
@@ -880,14 +871,14 @@ export async function ensureImageAssignment(
   ) {
     return;
   }
-  let put = await api.put(`/api/admin/images/${seedState.image.id}/assignments/${serverId}`, {
+  let put = await api.put(`/api/images/${seedState.image.id}/assignments/${serverId}`, {
     data: current ? { expectedRevision: current.revision } : {},
   });
   if (put.status() === 409 || put.status() === 400) {
-    await api.delete(`/api/admin/images/${seedState.image.id}/assignments/${serverId}`);
+    await api.delete(`/api/images/${seedState.image.id}/assignments/${serverId}`);
     await eventually(
       async () => expectJson<JsonRecord[]>(
-        await api.get(`/api/admin/images/${seedState.image.id}/assignments`),
+        await api.get(`/api/images/${seedState.image.id}/assignments`),
       ),
       (rows) => !rows.some((entry) => (
         entry.serverId === serverId && entry.lifecyclePhase !== 'deleted'
@@ -896,7 +887,7 @@ export async function ensureImageAssignment(
       1_000,
       `stale image assignment gone on ${serverId}`,
     );
-    put = await api.put(`/api/admin/images/${seedState.image.id}/assignments/${serverId}`, {
+    put = await api.put(`/api/images/${seedState.image.id}/assignments/${serverId}`, {
       data: {},
     });
   }
@@ -906,7 +897,7 @@ export async function ensureImageAssignment(
   await requireSucceededIntent(api, intentId, `image assignment ${serverId}`);
   await eventually(
     async () => expectJson<JsonRecord[]>(
-      await api.get(`/api/admin/images/${seedState.image.id}/assignments`),
+      await api.get(`/api/images/${seedState.image.id}/assignments`),
     ),
     (rows) => rows.some((entry) => (
       (entry.serverId === serverId || entry.server_id === serverId)
@@ -926,16 +917,16 @@ export async function liveLabServer(
   seedState: SeedState,
   server: LabServer,
 ): Promise<LabServer> {
-  const existing = await api.get(`/api/admin/servers/${server.id}`);
+  const existing = await api.get(`/api/servers/${server.id}?scope=all`);
   if (existing.status() === 200) {
     await ensureLabServerReady(api, seedState, server.id, server.dirPoolId);
     return server;
   }
-  const listed = await expectJson<JsonRecord[]>(await api.get('/api/admin/servers'));
+  const listed = await expectJson<JsonRecord[]>(await api.get('/api/servers?scope=all'));
   const match = listed.find((row) => row.apiEndpoint === server.endpoint);
   expect(match?.id, `lab server missing for ${server.endpoint}`).toBeTruthy();
   const pools = await expectJson<JsonRecord[]>(
-    await api.get(`/api/admin/servers/${match!.id}/storage-pools`),
+    await api.get(`/api/servers/${match!.id}/storage-pools?scope=all`),
   );
   const dirPool = pools.find((pool) => pool.driver === 'dir' && pool.registered === true);
   let cephExecutor: JsonRecord | undefined;
@@ -962,7 +953,7 @@ export async function pickPreflightReadyWorker(
   expect(workers.length).toBeGreaterThanOrEqual(1);
   for (const worker of workers) {
     const live = await liveLabServer(api, seedState, worker);
-    const preflight = await api.get(`/api/admin/servers/${live.id}/preflight`);
+    const preflight = await api.get(`/api/servers/${live.id}/preflight`);
     if (preflight.status() !== 200) continue;
     const body = await preflight.json() as JsonRecord;
     if (body.status === 'passed') {
@@ -989,12 +980,13 @@ export async function listShareableCephPools(
 
 export async function patchPoolRegistered(
   api: ApiClient,
+  serverId: string,
   poolId: string,
   expectedRevision: number,
   registered: boolean,
 ): Promise<JsonRecord> {
   return expectJson<JsonRecord>(
-    await api.patch(`/api/admin/storage-pools/${poolId}`, {
+    await api.patch(`/api/servers/${serverId}/storage-pools/${poolId}`, {
       data: { expectedRevision, registered },
     }),
     200,
@@ -1009,7 +1001,7 @@ export async function patchExecutorRegistered(
   registered: boolean,
 ): Promise<JsonRecord> {
   return expectJson<JsonRecord>(
-    await api.patch(`/api/admin/shared-backends/${backendId}/executors/${executorId}`, {
+    await api.patch(`/api/shared-backends/${backendId}/executors/${executorId}`, {
       data: { expectedRevision, registered },
     }),
     200,
@@ -1096,7 +1088,7 @@ export async function waitForSharedResizeIntents(
   volumeId: string,
 ): Promise<void> {
   const page = await expectJson<{ items: JsonRecord[] }>(
-    await api.get(`/api/admin/shared-volumes/${volumeId}/intents`),
+    await api.get(resourceIntentsPath('volume', volumeId, 'all')),
   );
   const pending = page.items.filter(
     (intent) => intent.kind === 'volume.resize' && intent.status === 'pending',

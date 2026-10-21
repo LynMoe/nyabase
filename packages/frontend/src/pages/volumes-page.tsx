@@ -153,7 +153,7 @@ function VolumeList({
     <SectionCard flush>
       <LocalVolumeTable
         volumes={volumes}
-        plane="user"
+        scope="mine"
         showPoolColumn
         showServerColumn
         serverNameById={serverNameById}

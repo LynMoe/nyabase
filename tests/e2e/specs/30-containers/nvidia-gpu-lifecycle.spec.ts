@@ -57,7 +57,7 @@ async function enableNvidiaGpu(
   serverId: string,
 ): Promise<JsonRecord> {
   const enablement = await expectJson<JsonRecord>(
-    await adminApi.patch(`/api/admin/servers/${serverId}/gpu`, {
+    await adminApi.patch(`/api/servers/${serverId}/gpu`, {
       data: { enabled: true },
     }),
   );
@@ -74,7 +74,7 @@ async function enableNvidiaGpu(
 
 async function disableNvidiaGpu(adminApi: ApiClient, serverId: string): Promise<JsonRecord> {
   return expectJson<JsonRecord>(
-    await adminApi.patch(`/api/admin/servers/${serverId}/gpu`, {
+    await adminApi.patch(`/api/servers/${serverId}/gpu`, {
       data: { enabled: false },
     }),
   );
@@ -84,7 +84,7 @@ async function gpuStatus(
   adminApi: ApiClient,
   serverId: string,
 ): Promise<JsonRecord> {
-  return expectJson<JsonRecord>(await adminApi.get(`/api/admin/servers/${serverId}/gpu`));
+  return expectJson<JsonRecord>(await adminApi.get(`/api/servers/${serverId}/gpu`));
 }
 
 async function waitStatus(
@@ -93,7 +93,7 @@ async function waitStatus(
   status: 'running' | 'stopped' | 'frozen',
 ): Promise<JsonRecord> {
   return eventually(
-    async () => expectJson<JsonRecord>(await adminApi.get(`/api/admin/containers/${containerId}`)),
+    async () => expectJson<JsonRecord>(await adminApi.get(`/api/containers/${containerId}`)),
     (value) => value.lifecyclePhase === 'active' && value.actual?.status === status,
     180_000,
     500,
@@ -124,11 +124,11 @@ async function createAdminContainer(
 
 async function stopAdminContainer(adminApi: ApiClient, containerId: string): Promise<JsonRecord> {
   const current = await expectJson<JsonRecord>(
-    await adminApi.get(`/api/admin/containers/${containerId}`),
+    await adminApi.get(`/api/containers/${containerId}`),
   );
   if (current.actual?.status === 'stopped' && current.powerIntent === 'stopped') return current;
   const accepted = await expectJson<JsonRecord>(
-    await adminApi.post(`/api/admin/containers/${containerId}/actions/stop`),
+    await adminApi.post(`/api/containers/${containerId}/actions/stop`),
     202,
   );
   await requireSucceededIntent(adminApi, accepted.intentId, 'nvidia-gpu.container.stop');
@@ -137,7 +137,7 @@ async function stopAdminContainer(adminApi: ApiClient, containerId: string): Pro
 
 async function startAdminContainer(adminApi: ApiClient, containerId: string): Promise<JsonRecord> {
   const accepted = await expectJson<JsonRecord>(
-    await adminApi.post(`/api/admin/containers/${containerId}/actions/start`),
+    await adminApi.post(`/api/containers/${containerId}/actions/start`),
     202,
   );
   await requireSucceededIntent(adminApi, accepted.intentId, 'nvidia-gpu.container.start');
@@ -162,7 +162,7 @@ async function deleteAdminContainer(
   containerId: string | undefined,
 ): Promise<void> {
   if (!containerId) return;
-  const stop = await adminApi.post(`/api/admin/containers/${containerId}/actions/stop`)
+  const stop = await adminApi.post(`/api/containers/${containerId}/actions/stop`)
     .catch(() => undefined);
   if (stop?.status() === 202) {
     const body = await stop.json() as JsonRecord;
@@ -171,10 +171,10 @@ async function deleteAdminContainer(
         .catch(() => undefined);
     }
   }
-  const deletion = await adminApi.post(`/api/admin/containers/${containerId}/actions/delete`)
+  const deletion = await adminApi.post(`/api/containers/${containerId}/actions/delete`)
     .catch(() => undefined);
   if (deletion?.status() === 202) {
-    await waitForGone(adminApi, `/api/admin/containers/${containerId}`);
+    await waitForGone(adminApi, `/api/containers/${containerId}`);
   }
 }
 
@@ -228,7 +228,7 @@ test(
       expect((await gpuStatus(adminApi, gpuServer.id)).occupiedDeviceCount).toBeGreaterThan(0);
 
       const occupied = await readErrorBody(
-        await adminApi.patch(`/api/admin/servers/${gpuServer.id}/gpu`, {
+        await adminApi.patch(`/api/servers/${gpuServer.id}/gpu`, {
           data: { enabled: false },
         }),
       );
@@ -237,11 +237,11 @@ test(
 
       await patchNvidiaGpu(
         adminApi,
-        `/api/admin/containers/${containerId}/gpus`,
+        `/api/containers/${containerId}/gpus`,
         [],
       );
       const cleared = await expectJson<JsonRecord>(
-        await adminApi.get(`/api/admin/containers/${containerId}`),
+        await adminApi.get(`/api/containers/${containerId}`),
       );
       expect(nvidiaState(cleared).nvidiaRuntime).toBe(true);
       expect(claimedPci(cleared)).toEqual([]);
@@ -251,7 +251,7 @@ test(
       expect(disabled.enabled).toBe(false);
     } finally {
       await deleteAdminContainer(adminApi, containerId);
-      await adminApi.patch(`/api/admin/servers/${gpuServer.id}/gpu`, {
+      await adminApi.patch(`/api/servers/${gpuServer.id}/gpu`, {
         data: { enabled: true },
       }).catch(() => undefined);
     }
@@ -281,11 +281,11 @@ test(
       await stopAdminContainer(adminApi, containerId);
       await patchNvidiaGpu(
         adminApi,
-        `/api/admin/containers/${containerId}/gpus`,
+        `/api/containers/${containerId}/gpus`,
         [pci],
       );
       const patched = await expectJson<JsonRecord>(
-        await adminApi.get(`/api/admin/containers/${containerId}`),
+        await adminApi.get(`/api/containers/${containerId}`),
       );
       expect(nvidiaState(patched).nvidiaRuntime).toBe(true);
       expect(pciMatches(patched, pci)).toBe(true);
@@ -328,7 +328,7 @@ test(
       const session = await loginPersona(adminApi, persona);
       const userApi = await authedApiFactory(session.accessToken);
 
-      const userEnable = await userApi.patch(`/api/admin/servers/${gpuServer.id}/gpu`,
+      const userEnable = await userApi.patch(`/api/servers/${gpuServer.id}/gpu`,
         { data: { enabled: true } },
       );
       expect([401, 403, 404]).toContain(userEnable.status());
@@ -413,7 +413,7 @@ test(
       expect(created.container.gpu ?? null).toBeNull();
 
       const patchDenied = await readErrorBody(
-        await adminApi.patch(`/api/admin/containers/${containerId}/gpus`, {
+        await adminApi.patch(`/api/containers/${containerId}/gpus`, {
           data: { pciAddresses: ['0000:41:00.0'] },
         }),
       );
@@ -447,7 +447,7 @@ test(
       expect(instanceName).toBeTruthy();
 
       const runningDenied = await readErrorBody(
-        await adminApi.patch(`/api/admin/containers/${containerId}/gpus`, {
+        await adminApi.patch(`/api/containers/${containerId}/gpus`, {
           data: { pciAddresses: [pci] },
         }),
       );
@@ -460,13 +460,13 @@ test(
       const paused = await peerIncus(gpuServer.ssh, ['pause', instanceName]);
       expect(paused.code, `${paused.stdout}\n${paused.stderr}`).toBe(0);
       const stop = await expectJson<JsonRecord>(
-        await adminApi.post(`/api/admin/containers/${containerId}/actions/stop`),
+        await adminApi.post(`/api/containers/${containerId}/actions/stop`),
         202,
       );
       await requireSucceededIntent(adminApi, stop.intentId, 'nvidia-gpu.freeze.stop');
       const frozen = await eventually(
         async () => expectJson<JsonRecord>(
-          await adminApi.get(`/api/admin/containers/${containerId}`),
+          await adminApi.get(`/api/containers/${containerId}`),
         ),
         (value) => value.lifecyclePhase === 'active'
           && value.powerIntent === 'stopped'
@@ -481,7 +481,7 @@ test(
       ).toBe('frozen');
 
       const frozenDenied = await readErrorBody(
-        await adminApi.patch(`/api/admin/containers/${containerId}/gpus`, {
+        await adminApi.patch(`/api/containers/${containerId}/gpus`, {
           data: { pciAddresses: [pci] },
         }),
       );

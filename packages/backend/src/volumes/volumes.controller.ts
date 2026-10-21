@@ -12,35 +12,35 @@ import {
   Query,
 } from '@nestjs/common';
 import {
-  Capability,
   FailureCode,
   zAttachVolumeRequest,
   zCreateVolumeRequest,
+  zListScope,
   zListVolumesQuery,
   zPatchVolumeRequest,
 } from '@nyabase/common';
-import { RequireCaps } from '../iam/decorators/require-caps.decorator.js';
-import { CurrentUser } from '../iam/decorators/current-user.decorator.js';
-import type { UserRecord } from '../iam/user-record.js';
+import { CurrentActor } from '../iam/decorators/current-actor.decorator.js';
+import type { Actor } from '../iam/actor.js';
 import { VolumesService } from './volumes.service.js';
 
+/** Local volumes: owners and `ManageVolumes` holders share one surface. */
 @Controller('volumes')
 export class VolumesController {
   constructor(private readonly service: VolumesService) {}
 
   @Get()
-  list(@CurrentUser() user: UserRecord) {
-    return this.service.listForUser(user.id);
+  list(@CurrentActor() actor: Actor, @Query() query: Record<string, unknown>) {
+    return this.service.list(actor, zListVolumesQuery.parse(query));
   }
 
   @Get(':id')
-  get(@Param('id') id: string, @CurrentUser() user: UserRecord) {
-    return this.service.getForUser(id, user.id);
+  get(@Param('id') id: string, @CurrentActor() actor: Actor) {
+    return this.service.get(actor, id);
   }
 
   @Post()
   @HttpCode(HttpStatus.ACCEPTED)
-  create(@CurrentUser() user: UserRecord, @Body() body: unknown) {
+  create(@CurrentActor() actor: Actor, @Body() body: unknown) {
     const kind = (body as { scope?: { kind?: string } } | null)?.scope?.kind;
     if (kind === 'shared') {
       throw new BadRequestException({
@@ -49,23 +49,23 @@ export class VolumesController {
       });
     }
     const input = zCreateVolumeRequest.parse(body);
-    return this.service.createForUser(user.id, input);
+    return this.service.create(actor, input);
   }
 
   @Patch(':id')
   @HttpCode(HttpStatus.ACCEPTED)
   patch(
     @Param('id') id: string,
-    @CurrentUser() user: UserRecord,
+    @CurrentActor() actor: Actor,
     @Body() body: unknown,
   ) {
-    return this.service.patchForUser(user.id, id, zPatchVolumeRequest.parse(body));
+    return this.service.patch(actor, id, zPatchVolumeRequest.parse(body));
   }
 
   @Delete(':id')
   @HttpCode(HttpStatus.ACCEPTED)
-  delete(@Param('id') id: string, @CurrentUser() user: UserRecord) {
-    return this.service.deleteForUser(user.id, id);
+  delete(@Param('id') id: string, @CurrentActor() actor: Actor) {
+    return this.service.delete(actor, id);
   }
 }
 
@@ -73,9 +73,14 @@ export class VolumesController {
 export class StorageCapacityController {
   constructor(private readonly service: VolumesService) {}
 
+  /** `scope=mine` is the caller's grant view; `scope=all` is server-wide (`ManageServers`). */
   @Get()
-  get(@Param('serverId') serverId: string, @CurrentUser() user: UserRecord) {
-    return this.service.capacityForUser(user.id, serverId);
+  get(
+    @Param('serverId') serverId: string,
+    @CurrentActor() actor: Actor,
+    @Query('scope') scope?: string,
+  ) {
+    return this.service.capacity(actor, serverId, zListScope.parse(scope));
   }
 }
 
@@ -87,15 +92,10 @@ export class ContainerVolumesController {
   @HttpCode(HttpStatus.ACCEPTED)
   attach(
     @Param('containerId') containerId: string,
-    @CurrentUser() user: UserRecord,
+    @CurrentActor() actor: Actor,
     @Body() body: unknown,
   ) {
-    return this.service.attachForUser(
-      user.id,
-      containerId,
-      zAttachVolumeRequest.parse(body),
-      'local',
-    );
+    return this.service.attach(actor, containerId, zAttachVolumeRequest.parse(body), 'local');
   }
 
   @Delete(':attachmentId')
@@ -103,68 +103,8 @@ export class ContainerVolumesController {
   detach(
     @Param('containerId') containerId: string,
     @Param('attachmentId') attachmentId: string,
-    @CurrentUser() user: UserRecord,
+    @CurrentActor() actor: Actor,
   ) {
-    return this.service.detachForUser(user.id, attachmentId, containerId, 'local');
-  }
-}
-
-@Controller('admin/containers/:containerId/volumes')
-@RequireCaps(Capability.ManageVolumes)
-export class AdminContainerVolumesController {
-  constructor(private readonly service: VolumesService) {}
-
-  @Post()
-  @HttpCode(HttpStatus.ACCEPTED)
-  attach(
-    @Param('containerId') containerId: string,
-    @CurrentUser() user: UserRecord,
-    @Body() body: unknown,
-  ) {
-    return this.service.attachForAdmin(
-      user.id,
-      containerId,
-      zAttachVolumeRequest.parse(body),
-      'local',
-    );
-  }
-
-  @Delete(':attachmentId')
-  @HttpCode(HttpStatus.ACCEPTED)
-  detach(
-    @Param('containerId') containerId: string,
-    @Param('attachmentId') attachmentId: string,
-    @CurrentUser() user: UserRecord,
-  ) {
-    return this.service.detachForAdmin(user.id, attachmentId, containerId, 'local');
-  }
-}
-
-@Controller('admin/volumes')
-@RequireCaps(Capability.ManageVolumes)
-export class AdminVolumesController {
-  constructor(private readonly service: VolumesService) {}
-
-  @Get()
-  list(@Query() query: Record<string, unknown>) {
-    const parsed = zListVolumesQuery.parse(query);
-    return this.service.listForAdmin(parsed.serverId);
-  }
-
-  @Get(':id')
-  get(@Param('id') id: string) {
-    return this.service.getForAdmin(id);
-  }
-
-  @Patch(':id')
-  @HttpCode(HttpStatus.ACCEPTED)
-  patch(@Param('id') id: string, @CurrentUser() user: UserRecord, @Body() body: unknown) {
-    return this.service.patchForAdmin(user.id, id, zPatchVolumeRequest.parse(body));
-  }
-
-  @Delete(':id')
-  @HttpCode(HttpStatus.ACCEPTED)
-  delete(@Param('id') id: string, @CurrentUser() user: UserRecord) {
-    return this.service.deleteForAdmin(user.id, id);
+    return this.service.detach(actor, attachmentId, containerId, 'local');
   }
 }

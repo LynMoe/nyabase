@@ -3,6 +3,7 @@ import { useQuery } from '@tanstack/react-query';
 import type { PerformanceAdminUsageResponse, PerformanceMultiSeriesResponse, PerformanceRange } from '@nyabase/common';
 import { api } from '../../lib/api.js';
 import { queryKeys } from '../../lib/query-keys.js';
+import { scopedPath } from '../../lib/scoped-paths.js';
 import { queryPollInterval } from '../../lib/query-lifecycle.js';
 import { Button } from '../ui/button.js';
 import { Select, SelectContent, SelectItem, SelectSeparator, SelectTrigger, SelectValue } from '../ui/select.js';
@@ -21,21 +22,24 @@ const METRICS = 'cpu,memory,disk,gpu,network';
 export function ServerMetricsPanel({ serverId }: { serverId: string }) {
   const [range, setRange] = useState<PerformanceRange>('1h');
   const [subject, setSubject] = useState('all');
-  const gpuNames = useGpuNames(serverId, true);
+  const gpuNames = useGpuNames(serverId, 'all');
   const usageQuery = useQuery({
-    queryKey: queryKeys.performance.scoped('admin', serverId),
-    queryFn: () => api.get<PerformanceAdminUsageResponse>(`/admin/performance/usage?serverId=${serverId}`),
+    queryKey: queryKeys.performance.scoped('all', serverId),
+    queryFn: () => api.get<PerformanceAdminUsageResponse>(scopedPath('/performance/usage', 'all', { serverId })),
     refetchInterval: (query) => queryPollInterval(query.state, { activeIntervalMs: 15_000 }),
   });
   const userId = subject.startsWith('user:') ? subject.slice(5) : '';
   const containerId = subject.startsWith('container:') ? subject.slice(10) : '';
   const seriesQuery = useQuery({
-    queryKey: queryKeys.performance.multi('admin', serverId, subject, range),
+    queryKey: queryKeys.performance.multi('all', serverId, subject, range),
     queryFn: () => {
-      const params = new URLSearchParams({ serverId, metrics: METRICS, range });
-      if (userId) params.set('userId', userId);
-      if (containerId) params.set('containerId', containerId);
-      return api.get<PerformanceMultiSeriesResponse>(`/admin/performance/series?${params.toString()}`);
+      return api.get<PerformanceMultiSeriesResponse>(scopedPath('/performance/series', 'all', {
+        serverId,
+        metrics: METRICS,
+        range,
+        userId: userId || undefined,
+        containerId: containerId || undefined,
+      }));
     },
     refetchInterval: (query) => queryPollInterval(query.state, { activeIntervalMs: 15_000 }),
   });

@@ -1,46 +1,48 @@
+import { ForbiddenException } from '@nestjs/common';
 import { describe, expect, it, vi } from 'vitest';
-import { UserStatus } from '@nyabase/common';
-import type { UserRecord } from '../iam/user-record.js';
+import { Capability, UserStatus } from '@nyabase/common';
+import { testActor } from '../iam/actor.test-helper.js';
 import type { GroupsService } from '../groups/groups.service.js';
-import { AdminUsersController } from './admin-users.controller.js';
 import { UsersController } from './users.controller.js';
 import type { UsersService } from './users.service.js';
+
+const toDto = (value: unknown) => value;
+
+function controllerWith(service: Record<string, unknown>) {
+  return new UsersController(
+    { toDto, ...service } as unknown as UsersService,
+    {} as unknown as GroupsService,
+  );
+}
 
 describe('user update controller boundaries', () => {
   it('rejects status changes on the self-service route', async () => {
     const updateSelf = vi.fn();
-    const controller = new UsersController({ updateSelf } as unknown as UsersService);
-    const user = { id: 'user-a' } as UserRecord;
+    const controller = controllerWith({ updateSelf });
 
     await expect(controller.updateUser('user-a', {
       status: UserStatus.Disabled,
-    }, user)).rejects.toThrow('status cannot be changed through the self-service route');
+    }, testActor('user-a'))).rejects.toThrow('status cannot be changed through the self-service route');
     expect(updateSelf).not.toHaveBeenCalled();
   });
 
   it('rejects self-service password proof on the administrator route', async () => {
     const updateUser = vi.fn();
-    const controller = new AdminUsersController(
-      { updateUser } as unknown as UsersService,
-      {} as unknown as GroupsService,
-    );
-    const actor = { id: 'admin-a' } as UserRecord;
+    const controller = controllerWith({ updateUser });
 
     await expect(controller.updateUser('user-a', {
       displayName: 'Alice',
       currentPassword: 'old-password',
-    }, actor)).rejects.toThrow('currentPassword is only valid for self-service updates');
+    }, testActor('admin-a', Capability.ManageUsers)))
+      .rejects.toThrow('currentPassword is only valid for self-service updates');
     expect(updateUser).not.toHaveBeenCalled();
   });
 
   it('attributes self-service SSH key mutations to the authenticated actor', async () => {
     const addSshKey = vi.fn().mockResolvedValue({ id: 'key-a' });
     const deleteSshKey = vi.fn().mockResolvedValue(undefined);
-    const controller = new UsersController({
-      addSshKey,
-      deleteSshKey,
-    } as unknown as UsersService);
-    const user = { id: 'user-a' } as UserRecord;
+    const controller = controllerWith({ addSshKey, deleteSshKey });
+    const user = testActor('user-a');
     const keyText = 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAFd/vaXN2I0jY5BiWgFdcK4lc66lU/wUQqmKHUgQzt3';
 
     await controller.addSshKey('user-a', { name: 'laptop', keyText }, user);
@@ -48,5 +50,56 @@ describe('user update controller boundaries', () => {
 
     expect(addSshKey).toHaveBeenCalledWith('user-a', 'laptop', keyText, 'user-a');
     expect(deleteSshKey).toHaveBeenCalledWith('user-a', 'key-a', 'user-a');
+  });
+});
+
+describe('user routes: self, administrator, everyone else', () => {
+  it('lets a user read and update only themselves', async () => {
+    const findById = vi.fn().mockResolvedValue({ id: 'user-a' });
+    const updateSelf = vi.fn().mockResolvedValue({ id: 'user-a' });
+    const controller = controllerWith({ findById, updateSelf });
+    const user = testActor('user-a');
+
+    await expect(controller.getUser('user-a', user)).resolves.toEqual({ id: 'user-a' });
+    await controller.updateUser('user-a', { displayName: 'A' }, user);
+    expect(updateSelf).toHaveBeenCalledWith('user-a', { displayName: 'A' }, undefined);
+
+    await expect(controller.getUser('user-b', user)).rejects.toBeInstanceOf(ForbiddenException);
+    await expect(controller.updateUser('user-b', { displayName: 'B' }, user))
+      .rejects.toBeInstanceOf(ForbiddenException);
+    await expect(controller.listSshKeys('user-b', user)).rejects.toBeInstanceOf(ForbiddenException);
+    await expect(controller.deleteSshKey('user-b', 'key', user)).rejects.toBeInstanceOf(ForbiddenException);
+    await expect(controller.addSshKey('user-b', {}, user)).rejects.toBeInstanceOf(ForbiddenException);
+  });
+
+  it('lets ManageUsers and ManageGrants read others, but only ManageUsers change them', async () => {
+    const findById = vi.fn().mockResolvedValue({ id: 'user-b' });
+    const updateUser = vi.fn().mockResolvedValue({ id: 'user-b' });
+    const listSshKeys = vi.fn().mockResolvedValue([]);
+    const controller = controllerWith({ findById, updateUser, listSshKeys });
+    const manager = testActor('admin-a', Capability.ManageUsers);
+    const granter = testActor('admin-g', Capability.ManageGrants);
+
+    await expect(controller.getUser('user-b', manager)).resolves.toBeDefined();
+    await expect(controller.getUser('user-b', granter)).resolves.toBeDefined();
+    await controller.updateUser('user-b', { displayName: 'B' }, manager);
+    expect(updateUser).toHaveBeenCalledWith('user-b', { displayName: 'B' }, 'admin-a');
+    await expect(controller.updateUser('user-b', { displayName: 'B' }, granter))
+      .rejects.toBeInstanceOf(ForbiddenException);
+    await expect(controller.listSshKeys('user-b', manager)).resolves.toEqual([]);
+    await expect(controller.listSshKeys('user-b', granter)).rejects.toBeInstanceOf(ForbiddenException);
+  });
+
+  it('treats an administrator-shaped change to your own record as administration', async () => {
+    const updateUser = vi.fn().mockResolvedValue({ id: 'admin-a' });
+    const updateSelf = vi.fn().mockResolvedValue({ id: 'admin-a' });
+    const controller = controllerWith({ updateUser, updateSelf });
+    const manager = testActor('admin-a', Capability.ManageUsers);
+
+    await controller.updateUser('admin-a', { password: 'new-password-1' }, manager);
+    expect(updateUser).toHaveBeenCalledTimes(1);
+    await controller.updateUser('admin-a', { password: 'new-password-1', currentPassword: 'old' }, manager);
+    await controller.updateUser('admin-a', { displayName: 'Me' }, manager);
+    expect(updateSelf).toHaveBeenCalledTimes(2);
   });
 });

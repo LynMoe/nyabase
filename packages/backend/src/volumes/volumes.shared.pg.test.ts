@@ -1,7 +1,8 @@
 import type { Kysely } from 'kysely';
 import { randomUUID } from 'node:crypto';
 import { describe, expect, it, vi } from 'vitest';
-import { FailureCode } from '@nyabase/common';
+import { testActor } from '../iam/actor.test-helper.js';
+import { Capability, FailureCode } from '@nyabase/common';
 import type { NyabaseDatabase } from '../platform/persistence-pg/database.types.js';
 import { withPostgresTestDatabase } from '../platform/persistence-pg/postgres-test-harness.js';
 import { PgTransactionManager } from '../platform/persistence-pg/transaction.js';
@@ -133,7 +134,7 @@ describePg('shared volume quota reservations', () => {
     await withPostgresTestDatabase(async ({ database }) => {
       const { userId, backendId } = await seedSharedBackend(database);
       const service = makeService(database);
-      const created = await service.createSharedForUser(userId, {
+      const created = await service.createShared(testActor(userId), {
         name: 'quota-only',
         sizeBytes: 100,
         scope: { kind: 'shared', sharedBackendId: backendId },
@@ -172,21 +173,21 @@ describePg('shared volume quota reservations', () => {
     await withPostgresTestDatabase(async ({ database }) => {
       const { userId, backendId } = await seedSharedBackend(database);
       const service = makeService(database);
-      const created = await service.createSharedForUser(userId, {
+      const created = await service.createShared(testActor(userId), {
         name: 'hidden-from-local',
         sizeBytes: 100,
         scope: { kind: 'shared', sharedBackendId: backendId },
       });
-      expect(await service.listForUser(userId)).toEqual([]);
-      await expect(service.getForUser(created.id, userId)).rejects.toMatchObject({
+      expect(await service.list(testActor(userId))).toEqual([]);
+      await expect(service.get(testActor(userId), created.id)).rejects.toMatchObject({
         message: 'Volume not found',
       });
-      await expect(service.getForAdmin(created.id)).rejects.toMatchObject({
+      await expect(service.get(testActor(randomUUID(), Capability.ManageVolumes), created.id)).rejects.toMatchObject({
         message: 'Volume not found',
       });
-      const listed = await service.listSharedForUser(userId);
+      const listed = await service.listShared(testActor(userId));
       expect(listed.map((row) => row.id)).toEqual([created.id]);
-      await expect(service.getSharedForUser(created.id, userId)).resolves.toMatchObject({
+      await expect(service.getShared(testActor(userId), created.id)).resolves.toMatchObject({
         id: created.id,
         dirEnsured: false,
       });
@@ -197,12 +198,12 @@ describePg('shared volume quota reservations', () => {
     await withPostgresTestDatabase(async ({ database }) => {
       const { userId, backendId } = await seedSharedBackend(database);
       const service = makeService(database);
-      const created = await service.createSharedForUser(userId, {
+      const created = await service.createShared(testActor(userId), {
         name: 'never-mounted',
         sizeBytes: 100,
         scope: { kind: 'shared', sharedBackendId: backendId },
       });
-      await service.deleteSharedForUser(userId, created.id);
+      await service.deleteShared(testActor(userId), created.id);
       expect(await database.selectFrom('control.volumes')
         .select('id')
         .where('id', '=', created.id)
@@ -219,12 +220,12 @@ describePg('shared volume quota reservations', () => {
     await withPostgresTestDatabase(async ({ database }) => {
       const { userId, backendId } = await seedSharedBackend(database);
       const service = makeService(database);
-      const created = await service.createSharedForUser(userId, {
+      const created = await service.createShared(testActor(userId), {
         name: 'resize-me',
         sizeBytes: 100,
         scope: { kind: 'shared', sharedBackendId: backendId },
       });
-      const patched = await service.patchSharedForUser(userId, created.id, {
+      const patched = await service.patchShared(testActor(userId), created.id, {
         expectedRevision: created.revision,
         sizeBytes: 200,
       });
@@ -313,7 +314,7 @@ describePg('shared volume quota reservations', () => {
         expires_at: null,
       }).execute();
       const service = makeService(database);
-      await expect(service.createSharedForUser(userId, {
+      await expect(service.createShared(testActor(userId), {
         name: 'no-backend-grant',
         sizeBytes: 100,
         scope: { kind: 'shared', sharedBackendId: backendId },
@@ -327,7 +328,7 @@ describePg('shared volume quota reservations', () => {
         limit_bytes: 1_000,
         expires_at: null,
       }).execute();
-      await expect(service.createSharedForUser(userId, {
+      await expect(service.createShared(testActor(userId), {
         name: 'with-backend-grant',
         sizeBytes: 100,
         scope: { kind: 'shared', sharedBackendId: backendId },
@@ -339,7 +340,7 @@ describePg('shared volume quota reservations', () => {
     await withPostgresTestDatabase(async ({ database }) => {
       const { userId, backendId } = await seedSharedBackend(database);
       const service = makeService(database);
-      const created = await service.createSharedForUser(userId, {
+      const created = await service.createShared(testActor(userId), {
         name: 'expired-grant',
         sizeBytes: 100,
         scope: { kind: 'shared', sharedBackendId: backendId },
@@ -348,14 +349,14 @@ describePg('shared volume quota reservations', () => {
         .set({ expires_at: new Date(Date.now() - 60_000) })
         .where('shared_backend_id', '=', backendId)
         .execute();
-      await expect(service.getSharedForUser(created.id, userId)).resolves.toMatchObject({
+      await expect(service.getShared(testActor(userId), created.id)).resolves.toMatchObject({
         id: created.id,
       });
-      await expect(service.patchSharedForUser(userId, created.id, {
+      await expect(service.patchShared(testActor(userId), created.id, {
         expectedRevision: created.revision,
         sizeBytes: 200,
       })).rejects.toThrow(/Shared backend access is not granted/);
-      await service.deleteSharedForUser(userId, created.id);
+      await service.deleteShared(testActor(userId), created.id);
       expect(await database.selectFrom('control.volumes')
         .select('id')
         .where('id', '=', created.id)
@@ -368,7 +369,7 @@ describePg('shared volume quota reservations', () => {
       const ownerId = randomUUID();
       await database.insertInto('iam.users').values(userValues(ownerId)).execute();
       const service = makeService(database);
-      await expect(service.createSharedForUser(ownerId, {
+      await expect(service.createShared(testActor(ownerId), {
         name: 'missing-backend',
         sizeBytes: 100,
         scope: { kind: 'shared', sharedBackendId: randomUUID() },
@@ -401,7 +402,7 @@ describePg('shared volume quota reservations', () => {
         expires_at: null,
       }).execute();
       const service = makeService(database);
-      await expect(service.createSharedForUser(ownerId, {
+      await expect(service.createShared(testActor(ownerId), {
         name: 'no-pool',
         sizeBytes: 100,
         scope: { kind: 'shared', sharedBackendId: backendId },
@@ -423,18 +424,18 @@ describePg('shared volume quota reservations', () => {
       const service = makeService(database, {
         get: vi.fn(async () => ({ getStorageVolumeState, getStorageVolume })),
       } as never);
-      const created = await service.createSharedForUser(userId, {
+      const created = await service.createShared(testActor(userId), {
         name: 'never-mounted-shrink',
         sizeBytes: 100,
         scope: { kind: 'shared', sharedBackendId: backendId },
       });
-      await expect(service.patchSharedForUser(userId, created.id, {
+      await expect(service.patchShared(testActor(userId), created.id, {
         expectedRevision: created.revision,
         sizeBytes: 50,
       })).rejects.toMatchObject({
         response: { code: FailureCode.VolumeUsageUnknown },
       });
-      const grown = await service.patchSharedForUser(userId, created.id, {
+      const grown = await service.patchShared(testActor(userId), created.id, {
         expectedRevision: created.revision,
         sizeBytes: 200,
       });
@@ -461,7 +462,7 @@ describePg('shared volume quota reservations', () => {
       const service = makeService(database, {
         get: vi.fn(async () => ({ getStorageVolumeState, getStorageVolume })),
       } as never);
-      const created = await service.createSharedForUser(userId, {
+      const created = await service.createShared(testActor(userId), {
         name: 'phantom-shrink',
         sizeBytes: 100,
         scope: { kind: 'shared', sharedBackendId: backendId },
@@ -477,7 +478,7 @@ describePg('shared volume quota reservations', () => {
         catalog_state: 'present',
         observed_revision: 1,
       }).execute();
-      await expect(service.patchSharedForUser(userId, created.id, {
+      await expect(service.patchShared(testActor(userId), created.id, {
         expectedRevision: created.revision,
         sizeBytes: 50,
       })).rejects.toMatchObject({
@@ -509,7 +510,7 @@ describePg('shared volume quota reservations', () => {
       const service = makeService(database, {
         get: vi.fn(async () => ({ getStorageVolumeState })),
       } as never);
-      const created = await service.createSharedForUser(userId, {
+      const created = await service.createShared(testActor(userId), {
         name: 'below-usage',
         sizeBytes: 100,
         scope: { kind: 'shared', sharedBackendId: backendId },
@@ -525,7 +526,7 @@ describePg('shared volume quota reservations', () => {
         catalog_state: 'ensuring',
         observed_revision: null,
       }).execute();
-      await expect(service.patchSharedForUser(userId, created.id, {
+      await expect(service.patchShared(testActor(userId), created.id, {
         expectedRevision: created.revision,
         sizeBytes: 50,
       })).rejects.toMatchObject({
@@ -554,7 +555,7 @@ describePg('shared volume quota reservations', () => {
       const service = makeService(database, {
         get: vi.fn(async () => ({ getStorageVolumeState })),
       } as never);
-      const created = await service.createSharedForUser(userId, {
+      const created = await service.createShared(testActor(userId), {
         name: 'trusted-used',
         sizeBytes: 100,
         scope: { kind: 'shared', sharedBackendId: backendId },
@@ -570,7 +571,7 @@ describePg('shared volume quota reservations', () => {
         catalog_state: 'present',
         observed_revision: 1,
       }).execute();
-      const patched = await service.patchSharedForUser(userId, created.id, {
+      const patched = await service.patchShared(testActor(userId), created.id, {
         expectedRevision: created.revision,
         sizeBytes: 50,
       });
@@ -600,7 +601,7 @@ describePg('shared volume quota reservations', () => {
       const service = makeService(database, {
         get: vi.fn(async () => ({ getStorageVolumeState })),
       } as never);
-      const created = await service.createSharedForUser(userId, {
+      const created = await service.createShared(testActor(userId), {
         name: 'get-fail',
         sizeBytes: 100,
         scope: { kind: 'shared', sharedBackendId: backendId },
@@ -616,7 +617,7 @@ describePg('shared volume quota reservations', () => {
         catalog_state: 'present',
         observed_revision: 1,
       }).execute();
-      await expect(service.patchSharedForUser(userId, created.id, {
+      await expect(service.patchShared(testActor(userId), created.id, {
         expectedRevision: created.revision,
         sizeBytes: 50,
       })).rejects.toMatchObject({
@@ -640,7 +641,7 @@ describePg('shared volume quota reservations', () => {
         serverStatus: 'online',
       });
       const service = makeService(database);
-      const created = await service.createSharedForUser(userId, {
+      const created = await service.createShared(testActor(userId), {
         name: 'no-factory',
         sizeBytes: 100,
         scope: { kind: 'shared', sharedBackendId: backendId },
@@ -656,7 +657,7 @@ describePg('shared volume quota reservations', () => {
         catalog_state: 'present',
         observed_revision: 1,
       }).execute();
-      await expect(service.patchSharedForUser(userId, created.id, {
+      await expect(service.patchShared(testActor(userId), created.id, {
         expectedRevision: created.revision,
         sizeBytes: 50,
       })).rejects.toMatchObject({
@@ -667,6 +668,48 @@ describePg('shared volume quota reservations', () => {
         .where('id', '=', created.id)
         .executeTakeFirstOrThrow();
       expect(Number(row.used_bytes)).toBe(0);
+    });
+  });
+});
+
+describePg('shared volume actor scope', () => {
+  it('shows a shared volume to its owner and ManageSharedVolumes, never to others or ManageVolumes', async () => {
+    await withPostgresTestDatabase(async ({ database }) => {
+      const { userId, backendId } = await seedSharedBackend(database);
+      const otherId = randomUUID();
+      await database.insertInto('iam.users').values(userValues(otherId, 2)).execute();
+      const service = makeService(database);
+      const owner = testActor(userId);
+      const other = testActor(otherId);
+      const sharedAdmin = testActor(randomUUID(), Capability.ManageSharedVolumes);
+      const localAdmin = testActor(randomUUID(), Capability.ManageVolumes);
+      const created = await service.createShared(owner, {
+        name: 'scoped',
+        sizeBytes: 100,
+        scope: { kind: 'shared', sharedBackendId: backendId },
+      });
+
+      expect((await service.listShared(owner, {})).map((row) => row.id)).toEqual([created.id]);
+      expect(await service.listShared(other, {})).toEqual([]);
+      expect(await service.listShared(sharedAdmin, {})).toEqual([]);
+      expect((await service.listShared(sharedAdmin, { scope: 'all' })).map((row) => row.id))
+        .toEqual([created.id]);
+      await expect(service.listShared(owner, { scope: 'all' })).rejects.toMatchObject({ status: 403 });
+      await expect(service.listShared(localAdmin, { scope: 'all' })).rejects.toMatchObject({ status: 403 });
+
+      await expect(service.getShared(sharedAdmin, created.id)).resolves.toMatchObject({ id: created.id });
+      await expect(service.getShared(other, created.id)).rejects.toMatchObject({ status: 404 });
+      await expect(service.getShared(localAdmin, created.id)).rejects.toMatchObject({ status: 404 });
+      await expect(service.patchShared(other, created.id, { expectedRevision: 1, name: 'nope' }))
+        .rejects.toMatchObject({ status: 404 });
+      await expect(service.deleteShared(localAdmin, created.id)).rejects.toMatchObject({ status: 404 });
+
+      // the administrator renames it without holding a backend grant
+      const renamed = await service.patchShared(sharedAdmin, created.id, {
+        expectedRevision: created.revision,
+        name: 'renamed-by-admin',
+      });
+      expect(renamed).toMatchObject({ name: 'renamed-by-admin' });
     });
   });
 });

@@ -13,14 +13,7 @@ import {
   zIntentAcceptedDto,
 } from '@nyabase/common';
 import { describe, expect, it } from 'vitest';
-import {
-  AdminContainersController,
-} from './admin-containers.controller.js';
 import { ContainersController } from './containers.controller.js';
-import {
-  AdminContainerIntentsController,
-  ContainerIntentsController,
-} from './container-intents.controller.js';
 import {
   assertContainerName,
   containerStatus,
@@ -67,7 +60,7 @@ describe('container API contract', () => {
     expect(containerStatus(null, ContainerPowerIntent.Stopped)).toBe(ContainerStatus.Stopped);
   });
 
-  it('exposes canonical user and admin routes', () => {
+  it('exposes one canonical route set for owners and administrators', () => {
     const methodPath = (prototype: object, method: string) => {
       const descriptor = Object.getOwnPropertyDescriptor(prototype, method);
       return Reflect.getMetadata(PATH_METADATA, descriptor?.value);
@@ -90,19 +83,9 @@ describe('container API contract', () => {
     };
     for (const [method, path] of Object.entries(shared)) {
       expect(methodPath(ContainersController.prototype, method)).toBe(path);
-      expect(methodPath(AdminContainersController.prototype, method)).toBe(path);
     }
     expect(methodPath(ContainersController.prototype, 'create')).toBe('/');
-    expect(Object.getOwnPropertyDescriptor(AdminContainersController.prototype, 'create'))
-      .toBeUndefined();
     expect(Reflect.getMetadata(PATH_METADATA, ContainersController)).toBe('containers');
-    expect(Reflect.getMetadata(PATH_METADATA, AdminContainersController)).toBe('admin/containers');
-    expect(Reflect.getMetadata(PATH_METADATA, ContainerIntentsController))
-      .toBe('containers/:containerId/intents');
-    expect(Reflect.getMetadata(PATH_METADATA, AdminContainerIntentsController))
-      .toBe('admin/containers/:containerId/intents');
-    expect(methodPath(ContainerIntentsController.prototype, 'list')).toBe('/');
-    expect(methodPath(AdminContainerIntentsController.prototype, 'list')).toBe('/');
     expect(Object.values(shared).some((path) => path.includes('/v2'))).toBe(false);
   });
 

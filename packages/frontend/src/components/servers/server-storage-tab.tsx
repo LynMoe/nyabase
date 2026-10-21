@@ -32,7 +32,7 @@ export function ServerStorageTab({
 
   const volumesQuery = useQuery({
     queryKey: queryKeys.volumes.adminByServer(serverId),
-    queryFn: () => api.get<VolumeDto[]>(`/admin/volumes?serverId=${serverId}`),
+    queryFn: () => api.get<VolumeDto[]>(`/volumes?scope=all&serverId=${serverId}`),
     enabled: canManageVolumes,
     refetchInterval: (query) => refetchWhileInProgress(query.state, {
       steadyIntervalMs: 5_000,
@@ -41,7 +41,7 @@ export function ServerStorageTab({
   });
 
   const deleteVolume = useMutation({
-    mutationFn: (volumeId: string) => api.delete<unknown>(`/admin/volumes/${volumeId}`),
+    mutationFn: (volumeId: string) => api.delete<unknown>(`/volumes/${volumeId}`),
     onSuccess: () => {
       toast({ title: '删除已提交' });
       setDeleteTarget(null);
@@ -76,7 +76,7 @@ export function ServerStorageTab({
         <SectionCard title="本机数据卷" flush>
           <LocalVolumeTable
             volumes={volumesQuery.data}
-            plane="admin"
+            scope="all"
             showPoolColumn
             canManageContainersAny={canManageContainersAny}
             onEdit={openEdit}
@@ -94,7 +94,7 @@ export function ServerStorageTab({
             setFormVolume(undefined);
           }
         }}
-        plane="admin"
+        scope="all"
         lockedServerId={serverId}
       />
       <ConfirmDialog

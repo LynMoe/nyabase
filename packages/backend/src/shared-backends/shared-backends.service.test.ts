@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
-import { ConflictException } from '@nestjs/common';
-import { FailureCode } from '@nyabase/common';
+import { ConflictException, ForbiddenException } from '@nestjs/common';
+import { Capability, FailureCode } from '@nyabase/common';
+import { testActor } from '../iam/actor.test-helper.js';
 import { SharedBackendsService } from './shared-backends.service.js';
 
 const baseRow = {
@@ -92,20 +93,32 @@ function createService(
   };
 }
 
+const manager = testActor('99999999-9999-4999-8999-999999999999', Capability.ManageSharedBackends);
+
 describe('SharedBackendsService registration guards', () => {
+  it('refuses scope=all without a shared-backend capability and accepts ManageGrants for lists', async () => {
+    const { service } = createService();
+    const user = testActor('44444444-4444-4444-8444-444444444444');
+    await expect(service.list(user, 'all')).rejects.toBeInstanceOf(ForbiddenException);
+    await expect(service.get(user, baseRow.id, 'all')).rejects.toBeInstanceOf(ForbiddenException);
+    await expect(service.list(testActor('g', Capability.ManageGrants), 'all')).resolves.toBeDefined();
+    await expect(service.get(testActor('g', Capability.ManageGrants), baseRow.id, 'all'))
+      .rejects.toBeInstanceOf(ForbiddenException);
+  });
+
   it('maps hasOnlineExecutor from the list aggregate', async () => {
     const { service } = createService({
       list: vi.fn().mockResolvedValue([
         { ...baseRow, server_ids: ['22222222-2222-4222-8222-222222222222'], has_online_executor: true },
       ]),
     });
-    const [online] = await service.list();
+    const [online] = await service.list(manager, 'all');
     expect(online?.hasOnlineExecutor).toBe(true);
 
     const offline = createService({
       list: vi.fn().mockResolvedValue([{ ...baseRow, server_ids: [], has_online_executor: false }]),
     });
-    const [empty] = await offline.service.list();
+    const [empty] = await offline.service.list(manager, 'all');
     expect(empty?.hasOnlineExecutor).toBe(false);
   });
 
@@ -132,14 +145,14 @@ describe('SharedBackendsService registration guards', () => {
         ),
       },
     );
-    const [admin] = await service.list();
+    const [admin] = await service.list(manager, 'all');
     expect(admin?.executors).toEqual([executor]);
     expect(storagePools.listExecutorsByBackendIds).toHaveBeenCalled();
 
-    const userListed = await service.listForUser('44444444-4444-4444-8444-444444444444');
+    const userListed = await service.list(testActor('44444444-4444-4444-8444-444444444444'), 'mine');
     expect(userListed).toHaveLength(1);
     expect(userListed[0] && 'executors' in userListed[0]).toBe(false);
-    const userGot = await service.getForUser(baseRow.id, '44444444-4444-4444-8444-444444444444');
+    const userGot = await service.get(testActor('44444444-4444-4444-8444-444444444444'), baseRow.id, 'mine');
     expect('executors' in userGot).toBe(false);
   });
 
@@ -198,16 +211,16 @@ describe('SharedBackendsService registration guards', () => {
       [{ shared_backend_id: baseRow.id, used: '4294967296' }],
     );
 
-    const listed = await service.list();
+    const listed = await service.list(manager, 'all');
     expect(listed[0]?.usedBytes).toBe(4_294_967_296);
 
-    const got = await service.get(baseRow.id);
+    const got = await service.get(manager, baseRow.id, 'all');
     expect(got.usedBytes).toBe(4_294_967_296);
   });
 
   it('returns zero usedBytes when no active volumes commit capacity', async () => {
     const { service } = createService();
-    const listed = await service.list();
+    const listed = await service.list(manager, 'all');
     expect(listed[0]?.usedBytes).toBe(0);
   });
 

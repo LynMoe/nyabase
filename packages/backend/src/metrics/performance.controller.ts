@@ -1,12 +1,13 @@
 import { Controller, Get, Query } from '@nestjs/common';
 import { z } from 'zod';
 import { BadRequestException } from '@nestjs/common';
-import type { PerformanceMetric, PerformanceRange } from '@nyabase/common';
-import { CurrentUser } from '../iam/decorators/current-user.decorator.js';
-import type { UserRecord } from '../iam/user-record.js';
+import { zListScope, type PerformanceMetric, type PerformanceRange } from '@nyabase/common';
+import { CurrentActor } from '../iam/decorators/current-actor.decorator.js';
+import type { Actor } from '../iam/actor.js';
 import { PerformanceQueryService } from './performance-query.service.js';
 
 const zUsageQuery = z.object({
+  scope: zListScope,
   serverId: z.string().optional(),
   userId: z.string().optional(),
   containerId: z.string().optional(),
@@ -19,25 +20,29 @@ const zSeriesQuery = zUsageQuery.extend({
   range: z.enum(['15m', '1h', '6h', '24h']).optional(),
 });
 
+/** `scope=mine` (default) is the caller's own usage; `scope=all` needs `ViewMetricsAll`. */
 @Controller('performance')
 export class PerformanceController {
   constructor(private readonly performance: PerformanceQueryService) {}
 
   @Get('usage')
-  usage(@CurrentUser() user: UserRecord, @Query() query: Record<string, unknown>) {
-    return this.performance.userUsage(user.id, parseQuery(zUsageQuery, query));
+  usage(@CurrentActor() actor: Actor, @Query() query: Record<string, unknown>) {
+    const { scope, ...filters } = parseQuery(zUsageQuery, query);
+    return this.performance.usage(actor, filters, scope);
   }
 
   @Get('series')
-  series(@CurrentUser() user: UserRecord, @Query() query: Record<string, unknown>) {
-    return this.performance.userSeries(user.id, parseQuery(zSeriesQuery, query));
+  series(@CurrentActor() actor: Actor, @Query() query: Record<string, unknown>) {
+    const { scope, ...filters } = parseQuery(zSeriesQuery, query);
+    return this.performance.series(actor, filters, scope);
   }
 }
 
-export function parseQuery<T extends z.ZodTypeAny>(
+function parseQuery<T extends z.ZodTypeAny>(
   schema: T,
   query: Record<string, unknown>,
 ): {
+  scope: 'mine' | 'all';
   serverId?: string;
   userId?: string;
   containerId?: string;

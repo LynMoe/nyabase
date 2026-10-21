@@ -15,6 +15,7 @@ import {
   provisionGrantedUser,
   readErrorBody,
   upsertServerGrant,
+  resourceIntentsPath,
 } from '../../support/persona.js';
 
 type JsonRecord = Record<string, any>;
@@ -88,7 +89,7 @@ test(
       // Worker should stop the existing container during grace (interval ~60s).
       await eventually(
         async () => expectJson<JsonRecord>(
-          await adminApi.get(`/api/admin/containers/${containerId}`),
+          await adminApi.get(`/api/containers/${containerId}`),
         ),
         (value) => value.powerIntent === 'stopped'
           || value.actual?.status === 'stopped'
@@ -101,7 +102,7 @@ test(
       await eventually(
         async () => {
           const intents = await expectJson<JsonRecord[] | { items?: JsonRecord[] }>(
-            await adminApi.get(`/api/admin/containers/${containerId}/intents`),
+            await adminApi.get(resourceIntentsPath('container', containerId!, 'all')),
           );
           return Array.isArray(intents) ? intents : (intents.items ?? []);
         },
@@ -112,7 +113,7 @@ test(
         1_000,
         'grant-expiry stop intent settled',
       );
-      await assertNoActiveIntents(adminApi, `/api/admin/containers/${containerId}/intents`);
+      await assertNoActiveIntents(adminApi, resourceIntentsPath('container', containerId, 'all'));
 
       // Revoking a server grant is blocked while the user still owns resources.
       await deleteUserContainer(userApi, adminApi, containerId);

@@ -1,6 +1,6 @@
 import { Module } from '@nestjs/common';
 import { IncusModule } from '../incus/incus.module.js';
-import { AdminIntentsController, IntentsController } from './intents.controller.js';
+import { IntentsController } from './intents.controller.js';
 import { IntentRepository } from './intent.repository.js';
 import { ReconcileClaimRepository } from './reconcile-claim.repository.js';
 import { ReconcileWakeService } from './reconcile-wake.service.js';
@@ -20,7 +20,7 @@ import { ReconcilerRegistry } from './reconciler-registry.service.js';
     ReconcilerRegistry,
     ReconcileWorkerService,
   ],
-  controllers: [AdminIntentsController, IntentsController],
+  controllers: [IntentsController],
   exports: [
     IntentRepository,
     ReconcileClaimRepository,

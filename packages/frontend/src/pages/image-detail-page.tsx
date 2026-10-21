@@ -2,7 +2,14 @@ import { useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { getRouteApi, useNavigate } from '@tanstack/react-router';
 import { CircleAlert, Gauge, RefreshCw, Server, Trash2 } from 'lucide-react';
-import type { AdminImageDto, ImageAssignmentDto, IntentAcceptedDto, ServerDto } from '@nyabase/common';
+import {
+  IntentResourceType,
+  type AdminImageDto,
+  type ImageAssignmentDto,
+  type IntentAcceptedDto,
+  type ServerDto,
+} from '@nyabase/common';
+import { resourceIntentsPath } from '../lib/intent-visibility.js';
 import { api } from '../lib/api.js';
 import { errorMessage } from '../lib/api-error.js';
 import { Button } from '../components/ui/button.js';
@@ -66,7 +73,7 @@ export default function ImageDetailPage() {
 
   const imageQuery = useQuery({
     queryKey: queryKeys.images.detail(id),
-    queryFn: () => api.get<AdminImageDto>(`/admin/images/${id}`),
+    queryFn: () => api.get<AdminImageDto>(`/images/${id}?scope=all`),
     refetchInterval: (query) => refetchWhileInProgress(query.state, {
       steadyIntervalMs: false,
       isSettled: (image) => !imageInProgress(image)
@@ -75,24 +82,19 @@ export default function ImageDetailPage() {
   });
   const serversQuery = useQuery({
     queryKey: queryKeys.servers.admin,
-    queryFn: () => api.get<ServerDto[]>('/admin/servers'),
+    queryFn: () => api.get<ServerDto[]>('/servers?scope=all'),
     enabled: tab === 'assignments',
   });
 
   const invalidate = () => {
     void queryClient.invalidateQueries({ queryKey: queryKeys.images.detail(id) });
     void queryClient.invalidateQueries({ queryKey: queryKeys.images.admin });
-    void queryClient.invalidateQueries({
-      queryKey: queryKeys.resourceIntentFailures('admin', `/admin/images/${id}/intents`, 20),
-    });
-    void queryClient.invalidateQueries({
-      queryKey: queryKeys.resourceIntentFailures('admin', `/admin/images/${id}/intents`, 50),
-    });
+    void queryClient.invalidateQueries({ queryKey: ['resource-intent-failures'] });
   };
 
   const assign = useMutation({
     mutationFn: ({ serverId, expectedRevision }: { serverId: string; expectedRevision?: number }) =>
-      api.put<AssignmentResponse>(`/admin/images/${id}/assignments/${serverId}`, expectedRevision ? { expectedRevision } : {}),
+      api.put<AssignmentResponse>(`/images/${id}/assignments/${serverId}`, expectedRevision ? { expectedRevision } : {}),
     onSuccess: (result) => {
       toast({ title: '已开始分配镜像', description: result.intent ? `操作 ${result.intent.intentId.slice(0, 8)}` : undefined });
       invalidate();
@@ -101,7 +103,7 @@ export default function ImageDetailPage() {
   });
   const unassign = useMutation({
     mutationFn: ({ serverId, revision }: { serverId: string; revision: number }) =>
-      api.delete<AssignmentResponse>(`/admin/images/${id}/assignments/${serverId}?expectedRevision=${revision}`),
+      api.delete<AssignmentResponse>(`/images/${id}/assignments/${serverId}?expectedRevision=${revision}`),
     onSuccess: () => {
       toast({ title: '已开始取消分配镜像' });
       invalidate();
@@ -109,7 +111,7 @@ export default function ImageDetailPage() {
     onError: (error) => toast({ title: '取消分配失败', description: errorMessage(error), variant: 'destructive' }),
   });
   const repullImage = useMutation({
-    mutationFn: () => api.post<unknown>(`/admin/images/${id}/repull`),
+    mutationFn: () => api.post<unknown>(`/images/${id}/repull`),
     onSuccess: () => {
       toast({ title: '已从镜像源重新拉取' });
       invalidate();
@@ -117,7 +119,7 @@ export default function ImageDetailPage() {
     onError: (error) => toast({ title: '重新拉取失败', description: errorMessage(error), variant: 'destructive' }),
   });
   const deleteImage = useMutation({
-    mutationFn: () => api.delete<unknown>(`/admin/images/${id}`),
+    mutationFn: () => api.delete<unknown>(`/images/${id}`),
     onSuccess: () => {
       toast({ title: '已开始移除镜像' });
       setDeleteOpen(false);
@@ -157,6 +159,12 @@ export default function ImageDetailPage() {
       >
         {(loaded) => {
           const assignments = loaded.assignments ?? [];
+          // Never fetched while the image has no assignments.
+          const assignmentIntentsPath = resourceIntentsPath(
+            'all',
+            IntentResourceType.ImageAssignment,
+            assignments.length > 0 ? assignments.map((assignment) => assignment.id) : 'none',
+          );
           return (
             <Tabs
               value={tab}
@@ -264,8 +272,15 @@ export default function ImageDetailPage() {
                     <CardTitle className="text-base">操作历史</CardTitle>
                   </CardHeader>
                   <CardContent>
-                    <ResourceIntentFailures listPath={`/admin/images/${loaded.id}/intents`} admin />
-                    <ResourceIntentHistory listPath={`/admin/images/${loaded.id}/intents`} admin />
+                    <ResourceIntentFailures
+                      listPath={assignmentIntentsPath}
+                      enabled={loaded.assignments.length > 0}
+                    />
+                    <ResourceIntentHistory
+                      listPath={assignmentIntentsPath}
+                      scope="all"
+                      enabled={loaded.assignments.length > 0}
+                    />
                   </CardContent>
                 </Card>
               </TabsContent>

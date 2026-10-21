@@ -11,6 +11,7 @@ import {
   type GpuDevicesResponseDto,
   type GpuGrant,
   type GpuHealthDto,
+  type ListScope,
   type GpuSupportDto,
   type NodeMetricSample,
   type ServerGpuDto,
@@ -21,6 +22,7 @@ import { PG_DATABASE } from '../platform/persistence-pg/tokens.js';
 import { PgTransactionManager } from '../platform/persistence-pg/transaction.js';
 import { AccessResolverService } from '../iam/access-resolver.service.js';
 import { AuditService } from '../iam/audit.service.js';
+import { assertListScope, type Actor } from '../iam/actor.js';
 import { INCUS_CLIENT_FACTORY, type IncusClientFactory } from '../incus/incus-client.factory.js';
 import { AuthenticatedNodeMetricsPullAdapter } from '../metrics/node-metrics-pull.adapter.js';
 import { assertGpuCanDisable, gpuOccupiedError, isGpuOccupiedSqlError } from './enablement.js';
@@ -123,7 +125,15 @@ export class GpuService {
     return this.getServerGpu(serverId);
   }
 
-  async listDevicesForAdmin(serverId: string): Promise<GpuDevicesResponseDto> {
+  /** `scope=mine`: devices the caller's grant allows; `scope=all`: the full inventory (`ManageServers`/`ManageGrants`). */
+  async listDevices(actor: Actor, serverId: string, scope: ListScope): Promise<GpuDevicesResponseDto> {
+    assertListScope(actor, scope, Capability.ManageServers, Capability.ManageGrants);
+    return scope === 'all'
+      ? this.listAllDevices(serverId)
+      : this.listGrantedDevices(actor.userId, serverId);
+  }
+
+  private async listAllDevices(serverId: string): Promise<GpuDevicesResponseDto> {
     const server = await this.requireServer(serverId);
     const { resources, metricSamples } = await this.loadInventory(serverId);
     return {
@@ -133,7 +143,7 @@ export class GpuService {
   }
 
   /** Devices the caller's server grant allows; unavailable while GPU is disabled. */
-  async listDevicesForUser(userId: string, serverId: string): Promise<GpuDevicesResponseDto> {
+  private async listGrantedDevices(userId: string, serverId: string): Promise<GpuDevicesResponseDto> {
     const grant = await this.access.resolveServer(userId, serverId);
     if (!grant || grant.accessPhase !== 'live') {
       throw new NotFoundException('Server not found');

@@ -17,11 +17,11 @@ test(
     );
     expect([200, 403, 404]).toContain(userDevices.status());
     const adminGpu = await expectJson<JsonRecord>(
-      await adminApi.get(`/api/admin/servers/${seedState.server.id}/gpu`),
+      await adminApi.get(`/api/servers/${seedState.server.id}/gpu`),
     );
     expect(typeof adminGpu.enabled).toBe('boolean');
     const adminDevices = await expectJson<JsonRecord>(
-      await adminApi.get(`/api/admin/servers/${seedState.server.id}/gpus`),
+      await adminApi.get(`/api/servers/${seedState.server.id}/gpus?scope=all`),
     );
     expect(adminDevices.items ?? adminDevices).toBeDefined();
     const pool = await adminApi.get(
@@ -29,12 +29,12 @@ test(
     );
     expect([200, 403, 404]).toContain(pool.status());
 
-    const adminServers = await expectJson<JsonRecord[]>(await adminApi.get('/api/admin/servers'));
+    const adminServers = await expectJson<JsonRecord[]>(await adminApi.get('/api/servers?scope=all'));
     expect(adminServers.some((server) => server.id === seedState.server.id)).toBe(true);
-    const created = await adminApi.post('/api/admin/servers', { data: {} });
+    const created = await adminApi.post('/api/servers', { data: {} });
     expect(created.status()).toBeGreaterThanOrEqual(400);
     const connect = await adminApi.post(
-      '/api/admin/servers/00000000-0000-4000-8000-0000000000aa/connect',
+      '/api/servers/00000000-0000-4000-8000-0000000000aa/connect',
       { data: {} },
     );
     expect(connect.status()).toBeGreaterThanOrEqual(400);
@@ -46,10 +46,10 @@ test(
   { ...coverageCase('admin-server-image-mutate', 'admin-server-image-mutate-live') },
   async ({ adminApi, seedState }) => {
     const server = await expectJson<JsonRecord>(
-      await adminApi.get(`/api/admin/servers/${seedState.server.id}`),
+      await adminApi.get(`/api/servers/${seedState.server.id}?scope=all`),
     );
     const patched = await expectJson<JsonRecord>(
-      await adminApi.patch(`/api/admin/servers/${seedState.server.id}`, {
+      await adminApi.patch(`/api/servers/${seedState.server.id}`, {
         data: {
           expectedRevision: server.revision,
           name: server.name,
@@ -58,18 +58,18 @@ test(
     );
     expect(patched.id).toBe(seedState.server.id);
     const missing = await adminApi.delete(
-      '/api/admin/servers/00000000-0000-4000-8000-0000000000aa',
+      '/api/servers/00000000-0000-4000-8000-0000000000aa',
     );
     expect(missing.status()).toBe(404);
 
     const created = await expectJson<JsonRecord>(
-      await adminApi.post('/api/admin/images', {
+      await adminApi.post('/api/images', {
         data: { alias: 'ubuntu/22.04' },
       }),
       [200, 201],
     );
     const updated = await expectJson<JsonRecord>(
-      await adminApi.patch(`/api/admin/images/${created.id}`, {
+      await adminApi.patch(`/api/images/${created.id}`, {
         data: {
           expectedRevision: created.revision,
           description: 'e2e',
@@ -77,7 +77,7 @@ test(
       }),
     );
     expect(updated.id).toBe(created.id);
-    const deleted = await adminApi.delete(`/api/admin/images/${created.id}`);
+    const deleted = await adminApi.delete(`/api/images/${created.id}`);
     expect([200, 204]).toContain(deleted.status());
   },
 );

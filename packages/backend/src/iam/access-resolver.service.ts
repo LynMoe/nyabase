@@ -287,7 +287,7 @@ export class AccessResolverService {
     return cache.imageAssignments.get(serverId) ?? new Set();
   }
 
-  async isImageAccessibleForUser(userId: string, imageId: string): Promise<boolean> {
+  async isImageAccessible(userId: string, imageId: string): Promise<boolean> {
     const cache = await this.userCache(userId);
     for (const [serverId, imageIds] of cache.imageAssignments) {
       if (cache.servers.has(serverId) && imageIds.has(imageId)) return true;

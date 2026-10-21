@@ -5,16 +5,11 @@ import { IpPoolsModule } from '../ip-pools/ip-pools.module.js';
 import { ProxySnapshotNotifierModule } from '../proxy-snapshots/proxy-snapshot-notifier.module.js';
 import { ReconcileModule } from '../reconcile/reconcile.module.js';
 import { VolumesModule } from '../volumes/volumes.module.js';
-import { AdminContainersController } from './admin-containers.controller.js';
 import { ConsoleBridgeGateway } from './console-bridge.gateway.js';
 import { ConsoleSessionService } from './console-session.service.js';
 import { ContainerActionPolicyService } from './container-action-policy.service.js';
 import { ContainerControlRepository } from './container-control.repository.js';
 import { ContainerControlService } from './container-control.service.js';
-import {
-  AdminContainerIntentsController,
-  ContainerIntentsController,
-} from './container-intents.controller.js';
 import { ContainerReconciler } from './container-reconciler.service.js';
 import { ContainerSshConvergenceService } from './container-ssh-convergence.service.js';
 import { IncusContainerSshStateAdapter } from './container-ssh-state.adapter.js';
@@ -43,9 +38,6 @@ import { IncusConsoleBridgeAdapter } from './incus-console-bridge.adapter.js';
   ],
   controllers: [
     ContainersController,
-    AdminContainersController,
-    ContainerIntentsController,
-    AdminContainerIntentsController,
   ],
   exports: [
     ContainerActionPolicyService,

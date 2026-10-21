@@ -1,6 +1,6 @@
 import type { ReactNode } from 'react';
 import { useMutation } from '@tanstack/react-query';
-import { IntentStatus, type IntentDto, type UserDto } from '@nyabase/common';
+import { IntentStatus, type IntentDto, type ListScope, type UserDto } from '@nyabase/common';
 import { errorMessage } from '../../lib/api-error.js';
 import { Button } from '../ui/button.js';
 import { Card, CardContent, CardHeader, CardTitle } from '../ui/card.js';
@@ -21,11 +21,11 @@ import { truncateId } from '../refs/truncate-id.js';
 
 function requestedByLabel(
   requestedBy: string | null,
-  admin: boolean,
+  scope: ListScope,
   currentUser: UserDto | null,
 ): ReactNode {
   if (!requestedBy) return '系统';
-  if (admin) return <ResourceRef kind="user" id={requestedBy} />;
+  if (scope === 'all') return <ResourceRef kind="user" id={requestedBy} />;
   if (currentUser?.id === requestedBy) {
     return (
       <ResourceRef
@@ -40,7 +40,7 @@ function requestedByLabel(
 
 export function IntentRow({
   intent,
-  admin,
+  scope,
   onRetried,
   showRequestSummary = false,
   resourceLabel,
@@ -48,7 +48,8 @@ export function IntentRow({
   retryable = false,
 }: {
   intent: IntentDto;
-  admin: boolean;
+  /** `all` resolves who requested the operation (administrators only). */
+  scope: ListScope;
   onRetried: () => void;
   showRequestSummary?: boolean;
   resourceLabel?: string;
@@ -57,7 +58,7 @@ export function IntentRow({
 }) {
   const currentUser = useAuthStore((state) => state.user);
   const retry = useMutation({
-    mutationFn: (intentId: string) => retryIntent(intentId, admin),
+    mutationFn: (intentId: string) => retryIntent(intentId),
     onSuccess: () => {
       toast({ title: '已提交重试' });
       onRetried();
@@ -69,7 +70,7 @@ export function IntentRow({
     }),
   });
   const failure = formatIntentFailureMessage(intent);
-  const requestedBy = requestedByLabel(intent.requestedBy, admin, currentUser);
+  const requestedBy = requestedByLabel(intent.requestedBy, scope, currentUser);
   const meta = [
     resourceLabel,
     serverLabel,
@@ -118,12 +119,12 @@ export function IntentRow({
 
 export function IntentsPanel({
   intents,
-  admin,
+  scope,
   onRetry,
   embedded = false,
 }: {
   intents: IntentDto[];
-  admin: boolean;
+  scope: ListScope;
   onRetry: () => void;
   embedded?: boolean;
 }) {
@@ -136,7 +137,7 @@ export function IntentsPanel({
         <IntentRow
           key={intent.id}
           intent={intent}
-          admin={admin}
+          scope={scope}
           onRetried={onRetry}
           showRequestSummary
           retryable={retryableIds.has(intent.id)}

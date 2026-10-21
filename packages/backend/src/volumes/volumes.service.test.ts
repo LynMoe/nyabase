@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
+import { testActor } from '../iam/actor.test-helper.js';
 import {
   FailureCode,
   IntentKind,
@@ -196,7 +197,7 @@ function makeVolumesService(overrides: {
 describe('volume API placement paths', () => {
   it('rejects shared create on the local volume API', async () => {
     const { service } = makeVolumesService({});
-    await expect(service.createForUser(actorId, {
+    await expect(service.create(testActor(actorId), {
       name: 'data',
       sizeBytes: 100,
       scope: { kind: 'shared', sharedBackendId: 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee' } as never,
@@ -215,7 +216,7 @@ describe('volume API placement paths', () => {
       })),
     };
     const { service, repository, intents } = makeVolumesService({ transaction });
-    const accepted = await service.deleteForUser(actorId, volumeId);
+    const accepted = await service.delete(testActor(actorId), volumeId);
     expect(repository.deleteVolumeRow).toHaveBeenCalledWith(volumeId, transaction);
     expect(intents.createPending).toHaveBeenCalledWith(expect.objectContaining({
       kind: IntentKind.VolumeDestroy,
@@ -288,7 +289,7 @@ describe('volume API placement paths', () => {
         }),
       },
     });
-    await service.attachForUser(actorId, containerId, {
+    await service.attach(testActor(actorId), containerId, {
       volumeId,
       containerPath: '/data',
       readOnly: false,
@@ -376,7 +377,7 @@ describe('volume API placement paths', () => {
         }),
       },
     });
-    await service.detachForUser(actorId, attachmentId, containerId, 'shared');
+    await service.detach(testActor(actorId), attachmentId, containerId, 'shared');
     expect(repository.setAttachmentBindState).toHaveBeenCalledWith(
       attachmentId,
       'detaching',
@@ -392,7 +393,7 @@ describe('volume API placement paths', () => {
     const { service, repository, intents } = makeVolumesService({
       repository: { hasAttachments: vi.fn().mockResolvedValue(true) },
     });
-    await expect(service.deleteForUser(actorId, volumeId)).rejects.toMatchObject({
+    await expect(service.delete(testActor(actorId), volumeId)).rejects.toMatchObject({
       response: { code: FailureCode.VolumeRequiresUnbind },
     });
     expect(repository.deleteVolumeRow).not.toHaveBeenCalled();
@@ -418,7 +419,7 @@ describe('volume API placement paths', () => {
         listPlacements: vi.fn().mockResolvedValue([{ server_id: homeServer }]),
       },
     });
-    await expect(service.deleteForUser(actorId, volumeId)).rejects.toMatchObject({
+    await expect(service.delete(testActor(actorId), volumeId)).rejects.toMatchObject({
       response: expect.objectContaining({
         code: FailureCode.ServerUnreachable,
         details: { serverId: homeServer, serverName: 'home' },
@@ -456,7 +457,7 @@ describe('volume API placement paths', () => {
         listPlacements: vi.fn().mockResolvedValue([{ server_id: homeServer }]),
       },
     });
-    await expect(service.deleteSharedForUser(actorId, volumeId)).resolves.toMatchObject({
+    await expect(service.deleteShared(testActor(actorId), volumeId)).resolves.toMatchObject({
       intentId: 'intent-1',
       status: 'pending',
     });
@@ -488,7 +489,7 @@ describe('volume API placement paths', () => {
         })),
       },
     });
-    await service.deleteSharedForUser(actorId, volumeId);
+    await service.deleteShared(testActor(actorId), volumeId);
     expect(pools.lockSharedBackends).toHaveBeenCalledWith([backendId], transaction);
     expect(pools.lockCapacityScope).not.toHaveBeenCalled();
     expect(intents.settleOne).toHaveBeenCalledWith(leftover.id, { outcome: 'succeeded' }, transaction);
@@ -533,7 +534,7 @@ describe('volume API placement paths', () => {
         setAttachmentBindState: vi.fn(),
       },
     });
-    await expect(service.detachForUser(actorId, attachmentId, containerId, 'local'))
+    await expect(service.detach(testActor(actorId), attachmentId, containerId, 'local'))
       .rejects.toMatchObject({
         response: { code: FailureCode.VolumeDetachRequiresStop },
       });
@@ -565,7 +566,7 @@ describe('volume API placement paths', () => {
         listPlacements: vi.fn().mockResolvedValue([{ server_id: homeServer }]),
       },
     });
-    await expect(service.deleteSharedForUser(actorId, volumeId)).rejects.toMatchObject({
+    await expect(service.deleteShared(testActor(actorId), volumeId)).rejects.toMatchObject({
       response: expect.objectContaining({
         code: FailureCode.VolumeDeleteBackendUnreachable,
         details: { sharedBackendId: backendId },

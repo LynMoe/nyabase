@@ -58,7 +58,7 @@ test(
       let pendingCreate404s = 0;
       const container = await waitForContainerSshReady(
         async () => {
-          const response = await adminApi.get(`/api/admin/containers/${containerId}`);
+          const response = await adminApi.get(`/api/containers/${containerId}`);
           if (response.status() === 404) {
             if (createLanded) {
               throw new Error(
@@ -91,13 +91,13 @@ test(
       expect(container.ssh?.status).toBe('running');
 
       const repair = await expectJson<{ woken: boolean }>(
-        await adminApi.post(`/api/admin/containers/${containerId}/actions/repair-ssh`),
+        await adminApi.post(`/api/containers/${containerId}/actions/repair-ssh`),
         202,
       );
       expect(repair.woken).toBe(true);
 
       const session = await expectJson<JsonRecord>(
-        await adminApi.post(`/api/admin/containers/${containerId}/exec-sessions`, {
+        await adminApi.post(`/api/containers/${containerId}/exec-sessions`, {
           data: {
             command: ['/bin/sh', '-lc', 'printf incus-e2e'],
             tty: false,
@@ -140,10 +140,10 @@ test(
     } finally {
       if (containerId) {
         const deletion = await adminApi.post(
-          `/api/admin/containers/${containerId}/actions/delete`,
+          `/api/containers/${containerId}/actions/delete`,
         ).catch(() => undefined);
         if (deletion?.status() === 202) {
-          await waitForGone(adminApi, `/api/admin/containers/${containerId}`);
+          await waitForGone(adminApi, `/api/containers/${containerId}`);
         }
       }
     }
@@ -155,7 +155,7 @@ test(
   { ...coverageCase('container-gpu-absent-reject', 'container-gpu-absent-reject-live') },
   async ({ adminApi, seedState }) => {
     const servers = await expectJson<JsonRecord[]>(
-      await adminApi.get('/api/admin/servers'),
+      await adminApi.get('/api/servers?scope=all'),
     );
     const seedServer = servers.find((server) => server.id === seedState.server.id);
     expect(seedServer, 'seed server missing from control plane').toBeTruthy();

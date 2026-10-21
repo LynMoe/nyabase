@@ -350,9 +350,9 @@ describePg('storage pool registration and shared mapping', () => {
         pool_id: dir!.id,
         expires_at: null,
       }).execute();
-      const listed = await service.listForUser(userId, serverId);
+      const listed = await service.listVisible(userId, serverId);
       expect(listed.find((pool) => pool.id === dir!.id)?.source).toBeNull();
-      const got = await service.getForUser(dir!.id, userId, serverId);
+      const got = await service.getVisible(dir!.id, userId, serverId);
       expect(got.source).toBeNull();
 
       client.listStoragePools.mockResolvedValue({

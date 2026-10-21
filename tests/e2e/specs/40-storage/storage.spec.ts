@@ -11,6 +11,7 @@ import { waitForGone } from '../../support/wait-for-gone.js';
 import {
   loginPersona,
   provisionMultiServerUser,
+  resourceIntentsPath,
 } from '../../support/persona.js';
 import { ensureImageAssignment } from '../../support/volume-ops.js';
 import {
@@ -32,7 +33,7 @@ async function waitForIntent(
 ): Promise<JsonRecord> {
   return eventually(
     async () => {
-      const admin = await api.get(`/api/admin/intents/${intentId}`);
+      const admin = await api.get(`/api/intents/${intentId}`);
       if (admin.status() === 403 || admin.status() === 401) {
         return expectJson<JsonRecord>(await api.get(`/api/intents/${intentId}`));
       }
@@ -128,7 +129,7 @@ async function execInContainer(
   command: string,
 ): Promise<string> {
   const container = await expectJson<JsonRecord>(
-    await api.get(`/api/admin/containers/${containerId}`),
+    await api.get(`/api/containers/${containerId}`),
   );
   const instanceName = container.instanceName as string;
   expect(instanceName, JSON.stringify(container)).toBeTruthy();
@@ -146,7 +147,7 @@ async function peerExecInContainer(
   command: string,
 ): Promise<string> {
   const container = await expectJson<JsonRecord>(
-    await api.get(`/api/admin/containers/${containerId}`),
+    await api.get(`/api/containers/${containerId}`),
   );
   const instanceName = container.instanceName as string;
   expect(instanceName, JSON.stringify(container)).toBeTruthy();
@@ -179,7 +180,7 @@ async function peerExecInContainer(
 
   const ready = await waitForContainerSshReady(
     async () => expectJson<JsonRecord>(
-      await api.get(`/api/admin/containers/${containerId}`),
+      await api.get(`/api/containers/${containerId}`),
     ),
   );
   const result = await runCommand('ssh', [
@@ -208,10 +209,10 @@ async function deleteContainer(
 ): Promise<void> {
   if (!containerId) return;
   const deletion = await api.post(
-    `/api/admin/containers/${containerId}/actions/delete`,
+    `/api/containers/${containerId}/actions/delete`,
   ).catch(() => undefined);
   if (deletion?.status() === 202) {
-    await waitForGone(api, `/api/admin/containers/${containerId}`);
+    await waitForGone(api, `/api/containers/${containerId}`);
   }
 }
 
@@ -258,7 +259,7 @@ async function attachVolume(
   containerPath: string,
 ): Promise<{ attachmentId: string; intentId: string }> {
   const accepted = await expectJson<JsonRecord>(
-    await api.post(`/api/admin/containers/${containerId}/volumes`, {
+    await api.post(`/api/containers/${containerId}/volumes`, {
       data: {
         volumeId,
         containerPath,
@@ -269,7 +270,7 @@ async function attachVolume(
   );
   await requireSucceededIntent(api, accepted.intentId, 'volume.attach');
   const attachments = await expectJson<JsonRecord[]>(
-    await api.get(`/api/admin/containers/${containerId}/volumes`),
+    await api.get(`/api/containers/${containerId}/volumes`),
   );
   const attachment = attachments.find((entry) => entry.volumeId === volumeId
     && entry.containerPath === containerPath);
@@ -283,7 +284,7 @@ async function detachVolume(
   attachmentId: string,
 ): Promise<void> {
   const response = await api.delete(
-    `/api/admin/containers/${containerId}/volumes/${attachmentId}`,
+    `/api/containers/${containerId}/volumes/${attachmentId}`,
   );
   if (response.status() === 409) {
     const body = await response.json();
@@ -301,17 +302,17 @@ async function stopContainer(
   containerId: string,
 ): Promise<void> {
   const current = await expectJson<JsonRecord>(
-    await api.get(`/api/admin/containers/${containerId}`),
+    await api.get(`/api/containers/${containerId}`),
   );
   if (current.actual?.status === 'stopped' && current.powerIntent === 'stopped') return;
   const accepted = await expectJson<JsonRecord>(
-    await api.post(`/api/admin/containers/${containerId}/actions/stop`),
+    await api.post(`/api/containers/${containerId}/actions/stop`),
     202,
   );
   await requireSucceededIntent(api, accepted.intentId, 'container.power.stop');
   await eventually(
     async () => expectJson<JsonRecord>(
-      await api.get(`/api/admin/containers/${containerId}`),
+      await api.get(`/api/containers/${containerId}`),
     ),
     (value) => value.actual?.status === 'stopped' && value.powerIntent === 'stopped',
     180_000,
@@ -325,7 +326,7 @@ test(
   { ...coverageCase('storage-capability-families', 'storage-families-live') },
   async ({ adminApi, seedState }) => {
     const pools = await expectJson<JsonRecord[]>(
-      await adminApi.get(`/api/admin/servers/${seedState.server.id}/storage-pools`),
+      await adminApi.get(`/api/servers/${seedState.server.id}/storage-pools?scope=all`),
     );
     expect(pools.some((pool) => pool.id === seedState.storagePools.dirQuotaOnline.id
       && pool.driver === 'dir')).toBe(true);
@@ -334,7 +335,7 @@ test(
     expect(pools.every((pool) => pool.driver !== 'cephfs' && pool.shareable !== true)).toBe(true);
 
     const capacity = await expectJson<JsonRecord>(
-      await adminApi.get(`/api/admin/servers/${seedState.server.id}/storage-capacity`),
+      await adminApi.get(`/api/servers/${seedState.server.id}/storage-capacity?scope=all`),
     );
     expect(capacity).toBeDefined();
     await expectJson(
@@ -344,11 +345,11 @@ test(
       await adminApi.get(`/api/servers/${seedState.server.id}/storage-capacity`),
     );
     const allLocalVolumes = await expectJson<JsonRecord[]>(
-      await adminApi.get('/api/admin/volumes'),
+      await adminApi.get('/api/volumes?scope=all'),
     );
     expect(Array.isArray(allLocalVolumes)).toBe(true);
     const seedServerVolumes = await expectJson<JsonRecord[]>(
-      await adminApi.get(`/api/admin/volumes?serverId=${seedState.server.id}`),
+      await adminApi.get(`/api/volumes?serverId=${seedState.server.id}&scope=all`),
     );
     expect(seedServerVolumes.every((volume) => volume.serverId === seedState.server.id)).toBe(true);
     expect(seedServerVolumes.every((volume) => volume.scope?.kind === 'local')).toBe(true);
@@ -359,16 +360,16 @@ test(
         .sort(),
     );
     const sharedVolumes = await expectJson<JsonRecord[]>(
-      await adminApi.get('/api/admin/shared-volumes'),
+      await adminApi.get('/api/shared-volumes?scope=all'),
     );
     const sharedIds = new Set(sharedVolumes.map((volume) => volume.id));
     expect(seedServerVolumes.every((volume) => !sharedIds.has(volume.id))).toBe(true);
     const extraQuery = await adminApi.get(
-      `/api/admin/volumes?serverId=${seedState.server.id}&foo=bar`,
+      `/api/volumes?serverId=${seedState.server.id}&foo=bar&scope=all`,
     );
     expect(extraQuery.status()).toBe(400);
     const discovered = await expectJson<JsonRecord>(
-      await adminApi.post(`/api/admin/servers/${seedState.server.id}/storage-pools/discover`),
+      await adminApi.post(`/api/servers/${seedState.server.id}/storage-pools/discover`),
     );
     expect(Array.isArray(discovered.pools)).toBe(true);
     expect(Array.isArray(discovered.identityConflicts)).toBe(true);
@@ -378,7 +379,7 @@ test(
       ),
     ).toBe(true);
     const missingPool = await adminApi.patch(
-      '/api/admin/storage-pools/00000000-0000-4000-8000-0000000000aa',
+      `/api/servers/${seedState.server.id}/storage-pools/00000000-0000-4000-8000-0000000000aa`,
       { data: { expectedRevision: 1, registered: true } },
     );
     expect(missingPool.status()).toBeGreaterThanOrEqual(400);
@@ -408,14 +409,14 @@ test(
         volumeIds.push(volumeId);
         await waitForIntent(adminApi, accepted.intentId);
 
-        await expectJson(await adminApi.get(`/api/admin/volumes/${volumeId}/intents`));
+        await expectJson(await adminApi.get(resourceIntentsPath('volume', volumeId, 'all')));
         const volume = await expectJson<JsonRecord>(
-          await adminApi.get(`/api/admin/volumes/${volumeId}`),
+          await adminApi.get(`/api/volumes/${volumeId}`),
         );
         // Omitting expectedRevision yields 400 INVALID_INPUT.
         expect(volume.revision).toEqual(expect.any(Number));
         const resized = await expectJson<JsonRecord>(
-          await adminApi.patch(`/api/admin/volumes/${volumeId}`, {
+          await adminApi.patch(`/api/volumes/${volumeId}`, {
             data: {
               expectedRevision: volume.revision,
               sizeBytes: 192 * 1024 * 1024,
@@ -425,7 +426,7 @@ test(
         );
         await waitForIntent(adminApi, resized.intentId);
         const updated = await expectJson<JsonRecord>(
-          await adminApi.get(`/api/admin/volumes/${volumeId}`),
+          await adminApi.get(`/api/volumes/${volumeId}`),
         );
         expect(Number(updated.sizeBytes)).toBe(192 * 1024 * 1024);
       }
@@ -461,7 +462,7 @@ test(
         seedState.storagePools.lvmBlockBacked.id,
       );
       const created = await expectJson<JsonRecord>(
-        await adminApi.get(`/api/admin/volumes/${volumeId}`),
+        await adminApi.get(`/api/volumes/${volumeId}`),
       );
       expect(Number(created.sizeBytes)).toBe(initialSize);
       const capability = created.capability ?? {};
@@ -480,9 +481,9 @@ test(
       );
 
       const attachedVolume = await expectJson<JsonRecord>(
-        await adminApi.get(`/api/admin/volumes/${volumeId}`),
+        await adminApi.get(`/api/volumes/${volumeId}`),
       );
-      const attachedShrink = await adminApi.patch(`/api/admin/volumes/${volumeId}`, {
+      const attachedShrink = await adminApi.patch(`/api/volumes/${volumeId}`, {
         data: {
           expectedRevision: attachedVolume.revision,
           sizeBytes: targetSize,
@@ -496,10 +497,10 @@ test(
       await detachVolume(adminApi, containerId, attachmentId);
 
       const detached = await expectJson<JsonRecord>(
-        await adminApi.get(`/api/admin/volumes/${volumeId}`),
+        await adminApi.get(`/api/volumes/${volumeId}`),
       );
       const shrunk = await expectJson<JsonRecord>(
-        await adminApi.patch(`/api/admin/volumes/${volumeId}`, {
+        await adminApi.patch(`/api/volumes/${volumeId}`, {
           data: {
             expectedRevision: detached.revision,
             sizeBytes: targetSize,
@@ -509,7 +510,7 @@ test(
       );
       await requireSucceededIntent(adminApi, shrunk.intentId, 'volume.resize.lvm-shrink');
       const updated = await expectJson<JsonRecord>(
-        await adminApi.get(`/api/admin/volumes/${volumeId}`),
+        await adminApi.get(`/api/volumes/${volumeId}`),
       );
       expect(Number(updated.sizeBytes)).toBe(targetSize);
       expect(Number(updated.sizeBytes)).toBeLessThan(initialSize);
@@ -564,7 +565,7 @@ test(
       if (containerId) {
         await stopContainer(adminApi, containerId).catch(() => undefined);
         const attachments = await expectJson<JsonRecord[]>(
-          await adminApi.get(`/api/admin/containers/${containerId}/volumes`),
+          await adminApi.get(`/api/containers/${containerId}/volumes`),
         ).catch(() => []);
         for (const row of attachments) {
           await detachVolume(adminApi, containerId, row.id as string).catch(() => undefined);
@@ -588,7 +589,7 @@ test(
     let volumeId: string | undefined;
     try {
       const pools = await expectJson<JsonRecord[]>(
-        await adminApi.get(`/api/admin/servers/${seedState.server.id}/storage-pools`),
+        await adminApi.get(`/api/servers/${seedState.server.id}/storage-pools?scope=all`),
       );
       const dirPool = pools.find((pool) => pool.id === seedState.storagePools.dirQuotaOnline.id);
       expect(dirPool?.quotaEffective, JSON.stringify(dirPool)).toBe(true);
@@ -612,7 +613,7 @@ test(
       );
 
       const observed = await eventually(
-        async () => expectJson<JsonRecord>(await adminApi.get(`/api/admin/volumes/${volumeId}`)),
+        async () => expectJson<JsonRecord>(await adminApi.get(`/api/volumes/${volumeId}`)),
         (volume) => typeof volume.usedBytes === 'number' && volume.usedBytes >= fillBytes * 0.5,
         90_000,
         1_000,
@@ -621,7 +622,7 @@ test(
       expect(Number(observed.usedBytes)).toBeGreaterThanOrEqual(fillBytes * 0.5);
       expect(Number(observed.usedBytes)).toBeLessThanOrEqual(quotaBytes);
 
-      const tooSmall = await adminApi.patch(`/api/admin/volumes/${volumeId}`, {
+      const tooSmall = await adminApi.patch(`/api/volumes/${volumeId}`, {
         data: {
           expectedRevision: observed.revision,
           sizeBytes: Math.max(1024 * 1024, Math.floor(Number(observed.usedBytes) / 2)),
@@ -644,7 +645,7 @@ test(
       if (containerId) {
         await stopContainer(adminApi, containerId).catch(() => undefined);
         const attachments = await expectJson<JsonRecord[]>(
-          await adminApi.get(`/api/admin/containers/${containerId}/volumes`),
+          await adminApi.get(`/api/containers/${containerId}/volumes`),
         ).catch(() => []);
         for (const row of attachments) {
           await detachVolume(adminApi, containerId, row.id as string).catch(() => undefined);
@@ -687,7 +688,7 @@ test(
         `dd if=/dev/zero of=${mount}/fill bs=${fillBytes} count=1 conv=fsync oflag=sync`,
       );
       const observed = await eventually(
-        async () => expectJson<JsonRecord>(await adminApi.get(`/api/admin/volumes/${volumeId}`)),
+        async () => expectJson<JsonRecord>(await adminApi.get(`/api/volumes/${volumeId}`)),
         (volume) => typeof volume.usedBytes === 'number' && volume.usedBytes >= fillBytes * 0.5,
         90_000,
         1_000,
@@ -698,12 +699,12 @@ test(
 
       await setVolumeUsedBytes(volumeId as string, 4096);
       const stale = await expectJson<JsonRecord>(
-        await adminApi.get(`/api/admin/volumes/${volumeId}`),
+        await adminApi.get(`/api/volumes/${volumeId}`),
       );
       expect(Number(stale.usedBytes)).toBe(4096);
 
       const accepted = await expectJson<JsonRecord>(
-        await adminApi.patch(`/api/admin/volumes/${volumeId}`, {
+        await adminApi.patch(`/api/volumes/${volumeId}`, {
           data: {
             expectedRevision: stale.revision,
             sizeBytes: tooSmallBytes,
@@ -720,7 +721,7 @@ test(
       expect(failed.status).toBe('failed');
 
       const afterFail = await expectJson<JsonRecord>(
-        await adminApi.get(`/api/admin/volumes/${volumeId}`),
+        await adminApi.get(`/api/volumes/${volumeId}`),
       );
       expect(Number(afterFail.sizeBytes)).toBe(originalSize);
       expect(afterFail.needsAttention).toBe(true);
@@ -728,13 +729,13 @@ test(
       expect(Number(afterFail.usedBytes)).toBeGreaterThanOrEqual(fillBytes * 0.5);
 
       const history = await expectJson<{ items: JsonRecord[] }>(
-        await adminApi.get(`/api/admin/volumes/${volumeId}/intents?limit=20`),
+        await adminApi.get(resourceIntentsPath('volume', volumeId, 'all', 'limit=20')),
       );
       expect(history.items.some((intent) => intent.id === accepted.intentId && intent.status === 'failed')).toBe(true);
       expect(history.items.filter((intent) => intent.status === 'pending')).toEqual([]);
 
       const retried = await expectJson<JsonRecord>(
-        await adminApi.post(`/api/admin/intents/${accepted.intentId}/retry`, { data: {} }),
+        await adminApi.post(`/api/intents/${accepted.intentId}/retry`, { data: {} }),
         [200, 201],
       );
       expect(retried.id).toBeTruthy();
@@ -748,11 +749,11 @@ test(
       expect(retrySettled.status).toBe('failed');
 
       const afterRetry = await expectJson<JsonRecord>(
-        await adminApi.get(`/api/admin/volumes/${volumeId}`),
+        await adminApi.get(`/api/volumes/${volumeId}`),
       );
       expect(Number(afterRetry.sizeBytes)).toBe(originalSize);
       const afterRetryHistory = await expectJson<{ items: JsonRecord[] }>(
-        await adminApi.get(`/api/admin/volumes/${volumeId}/intents?limit=20`),
+        await adminApi.get(resourceIntentsPath('volume', volumeId, 'all', 'limit=20')),
       );
       expect(afterRetryHistory.items.filter((intent) => intent.status === 'pending')).toEqual([]);
 
@@ -771,11 +772,11 @@ test(
       expect(overflowExit, overflowOut.slice(0, 800)).not.toBe(0);
 
       const beforePhantom = await expectJson<JsonRecord>(
-        await adminApi.get(`/api/admin/volumes/${volumeId}`),
+        await adminApi.get(`/api/volumes/${volumeId}`),
       );
       await setVolumeUsedBytes(volumeId as string, 4096);
       const phantomShrink = await expectJson<JsonRecord>(
-        await adminApi.patch(`/api/admin/volumes/${volumeId}`, {
+        await adminApi.patch(`/api/volumes/${volumeId}`, {
           data: {
             expectedRevision: beforePhantom.revision,
             sizeBytes: tooSmallBytes,
@@ -790,7 +791,7 @@ test(
         /VOLUME_SHRINK_BELOW_USAGE/,
       );
       const afterPhantom = await expectJson<JsonRecord>(
-        await adminApi.get(`/api/admin/volumes/${volumeId}`),
+        await adminApi.get(`/api/volumes/${volumeId}`),
       );
       expect(Number(afterPhantom.sizeBytes), JSON.stringify({
         overflowOut: overflowOut.slice(0, 400),
@@ -800,7 +801,7 @@ test(
       if (containerId) {
         await stopContainer(adminApi, containerId).catch(() => undefined);
         const attachments = await expectJson<JsonRecord[]>(
-          await adminApi.get(`/api/admin/containers/${containerId}/volumes`),
+          await adminApi.get(`/api/containers/${containerId}/volumes`),
         ).catch(() => []);
         for (const row of attachments) {
           await detachVolume(adminApi, containerId, row.id as string).catch(() => undefined);
@@ -839,7 +840,7 @@ test(
       );
 
       const attachments = await expectJson<JsonRecord[]>(
-        await adminApi.get(`/api/admin/containers/${containerA}/volumes`),
+        await adminApi.get(`/api/containers/${containerA}/volumes`),
       );
       expect(attachments.some((entry) => entry.id === attachmentId
         && entry.volumeId === volumeId
@@ -852,7 +853,7 @@ test(
       );
       expect(proof.trim()).toBe('proof');
 
-      const deleteWhileAttached = await adminApi.delete(`/api/admin/volumes/${volumeId}`);
+      const deleteWhileAttached = await adminApi.delete(`/api/volumes/${volumeId}`);
       expect(deleteWhileAttached.status()).toBe(409);
       const deleteBody = await deleteWhileAttached.json();
       expect(JSON.stringify(deleteBody)).toMatch(
@@ -863,7 +864,7 @@ test(
       await stopContainer(adminApi, containerA);
       await detachVolume(adminApi, containerA, attachmentId);
       const afterDetach = await expectJson<JsonRecord[]>(
-        await adminApi.get(`/api/admin/containers/${containerA}/volumes`),
+        await adminApi.get(`/api/containers/${containerA}/volumes`),
       );
       expect(afterDetach.some((entry) => entry.id === attachmentId)).toBe(false);
 
@@ -874,25 +875,25 @@ test(
         96 * 1024 * 1024,
       );
       const raceVolume = await expectJson<JsonRecord>(
-        await adminApi.get(`/api/admin/volumes/${raceVolumeId}`),
+        await adminApi.get(`/api/volumes/${raceVolumeId}`),
       );
 
       const [attachRaceA, attachRaceB, resizeRace] = await Promise.all([
-        adminApi.post(`/api/admin/containers/${containerA}/volumes`, {
+        adminApi.post(`/api/containers/${containerA}/volumes`, {
           data: {
             volumeId: raceVolumeId,
             containerPath: '/mnt/e2e-race-a',
             readOnly: false,
           },
         }),
-        adminApi.post(`/api/admin/containers/${containerB}/volumes`, {
+        adminApi.post(`/api/containers/${containerB}/volumes`, {
           data: {
             volumeId: raceVolumeId,
             containerPath: '/mnt/e2e-race-b',
             readOnly: false,
           },
         }),
-        adminApi.patch(`/api/admin/volumes/${raceVolumeId}`, {
+        adminApi.patch(`/api/volumes/${raceVolumeId}`, {
           data: {
             expectedRevision: raceVolume.revision,
             sizeBytes: 160 * 1024 * 1024,
@@ -915,7 +916,7 @@ test(
       for (const containerId of [containerA, containerB]) {
         await stopContainer(adminApi, containerId);
         const listed = await expectJson<JsonRecord[]>(
-          await adminApi.get(`/api/admin/containers/${containerId}/volumes`),
+          await adminApi.get(`/api/containers/${containerId}/volumes`),
         );
         for (const attachment of listed.filter((entry) => entry.volumeId === raceVolumeId)) {
           await detachVolume(adminApi, containerId, attachment.id);
@@ -945,7 +946,7 @@ test(
     expect(Array.isArray(shared)).toBe(true);
 
     const adminShared = await expectJson<JsonRecord[]>(
-      await adminApi.get('/api/admin/shared-backends'),
+      await adminApi.get('/api/shared-backends?scope=all'),
     );
     expect(Array.isArray(adminShared)).toBe(true);
 
@@ -954,7 +955,7 @@ test(
       // User-facing GET filters by grants; admin list/detail remain authoritative
       // for seeded backends even when no grant is currently attached.
       const detail = await expectJson<JsonRecord>(
-        await adminApi.get(`/api/admin/shared-backends/${seedState.sharedBackendId}`),
+        await adminApi.get(`/api/shared-backends/${seedState.sharedBackendId}?scope=all`),
       );
       expect(detail.id).toBe(seedState.sharedBackendId);
       expect(adminShared.some((entry) => entry.id === seedState.sharedBackendId)).toBe(true);
@@ -965,12 +966,12 @@ test(
         expect('executors' in userBody).toBe(false);
       }
       const executors = await expectJson<JsonRecord[]>(
-        await adminApi.get(`/api/admin/shared-backends/${seedState.sharedBackendId}/executors`),
+        await adminApi.get(`/api/shared-backends/${seedState.sharedBackendId}/executors`),
       );
       expect(Array.isArray(executors)).toBe(true);
       const discovered = await expectJson<JsonRecord>(
         await adminApi.post(
-          `/api/admin/shared-backends/${seedState.sharedBackendId}/executors/discover`,
+          `/api/shared-backends/${seedState.sharedBackendId}/executors/discover`,
           { data: {} },
         ),
       );
@@ -982,7 +983,7 @@ test(
       if (!target) throw new Error('shared backend executor is missing');
       const patchedExecutor = await expectJson<JsonRecord>(
         await adminApi.patch(
-          `/api/admin/shared-backends/${seedState.sharedBackendId}/executors/${target.id}`,
+          `/api/shared-backends/${seedState.sharedBackendId}/executors/${target.id}`,
           {
             data: {
               expectedRevision: target.revision,
@@ -998,19 +999,19 @@ test(
       expect(shared).toHaveLength(0);
       const userMissing = await adminApi.get(`/api/shared-backends/${missing}`);
       expect(userMissing.status()).toBeGreaterThanOrEqual(400);
-      const adminMissing = await adminApi.get(`/api/admin/shared-backends/${missing}`);
+      const adminMissing = await adminApi.get(`/api/shared-backends/${missing}?scope=all`);
       expect(adminMissing.status()).toBeGreaterThanOrEqual(400);
-      await adminApi.get(`/api/admin/shared-backends/${missing}/executors`);
-      await adminApi.post(`/api/admin/shared-backends/${missing}/executors/discover`, { data: {} });
-      await adminApi.patch(`/api/admin/shared-backends/${missing}/executors/${missing}`, {
+      await adminApi.get(`/api/shared-backends/${missing}/executors`);
+      await adminApi.post(`/api/shared-backends/${missing}/executors/discover`, { data: {} });
+      await adminApi.patch(`/api/shared-backends/${missing}/executors/${missing}`, {
         data: { expectedRevision: 1, registered: true },
       });
     }
-    const patched = await adminApi.patch(`/api/admin/shared-backends/${missing}`, {
+    const patched = await adminApi.patch(`/api/shared-backends/${missing}`, {
       data: { expectedRevision: 1, displayName: 'e2e' },
     });
     expect(patched.status()).toBeGreaterThanOrEqual(400);
-    const deleted = await adminApi.delete(`/api/admin/shared-backends/${missing}`);
+    const deleted = await adminApi.delete(`/api/shared-backends/${missing}`);
     expect(deleted.status()).toBeGreaterThanOrEqual(400);
 
     if (seedState.blocked.cephfs.startsWith('BLOCKED:')) {
@@ -1028,7 +1029,7 @@ test(
       expect(seedState.blocked.cephfs.startsWith('BLOCKED:')).toBe(true);
       expect(seedState.sharedBackendId ?? '').toBe('');
     }
-    const created = await adminApi.post('/api/admin/shared-backends', {
+    const created = await adminApi.post('/api/shared-backends', {
       data: {
         name: `e2e-ceph-absent-${seedState.runId}`,
         kind: 'cephfs',
@@ -1061,11 +1062,11 @@ test(
     const userApi = await authedApiFactory(session.accessToken);
 
     const primaryPools = await expectJson<JsonRecord[]>(
-      await adminApi.get(`/api/admin/servers/${seedState.server.id}/storage-pools`),
+      await adminApi.get(`/api/servers/${seedState.server.id}/storage-pools?scope=all`),
     );
     expect(primaryPools.every((pool) => pool.driver !== 'cephfs' && pool.shareable !== true)).toBe(true);
     const executors = await expectJson<JsonRecord[]>(
-      await adminApi.get(`/api/admin/shared-backends/${seedState.sharedBackendId}/executors`),
+      await adminApi.get(`/api/shared-backends/${seedState.sharedBackendId}/executors`),
     );
     const cephPool = executors.find(
       (row) => row.serverId === seedState.server.id && row.registered === true,
@@ -1084,16 +1085,16 @@ test(
         seedState,
         `e2e-ceph-${Date.now().toString(36)}`,
       );
-      await expectJson(await adminApi.get('/api/admin/shared-volumes'));
-      await expectJson(await adminApi.get(`/api/admin/shared-volumes/${volumeId}`));
-      await expectJson(await adminApi.get(`/api/admin/shared-volumes/${volumeId}/catalogs`));
-      await expectJson(await adminApi.get(`/api/admin/shared-volumes/${volumeId}/intents`));
+      await expectJson(await adminApi.get('/api/shared-volumes?scope=all'));
+      await expectJson(await adminApi.get(`/api/shared-volumes/${volumeId}`));
+      await expectJson(await adminApi.get(`/api/shared-volumes/${volumeId}/catalogs`));
+      await expectJson(await adminApi.get(resourceIntentsPath('volume', volumeId, 'all')));
       await expectJson(
-        await adminApi.get(`/api/admin/shared-backends/${seedState.sharedBackendId}/catalog-inspect`),
+        await adminApi.get(`/api/shared-backends/${seedState.sharedBackendId}/catalog-inspect`),
       );
       await adminApi.get('/api/shared-volumes');
       await adminApi.get(`/api/shared-volumes/${volumeId}`);
-      await adminApi.get(`/api/shared-volumes/${volumeId}/intents`);
+      await adminApi.get(resourceIntentsPath('volume', volumeId, 'all'));
       const coverageUserCreate = await expectJson<JsonRecord>(
         await adminApi.post('/api/shared-volumes', {
           data: {
@@ -1112,9 +1113,9 @@ test(
       });
       await adminApi.delete('/api/shared-volumes/00000000-0000-4000-8000-000000000099');
       const createdForPatch = await expectJson<JsonRecord>(
-        await adminApi.get(`/api/admin/shared-volumes/${volumeId}`),
+        await adminApi.get(`/api/shared-volumes/${volumeId}`),
       );
-      await adminApi.patch(`/api/admin/shared-volumes/${volumeId}`, {
+      await adminApi.patch(`/api/shared-volumes/${volumeId}`, {
         data: {
           expectedRevision: createdForPatch.revision,
           name: createdForPatch.name,
@@ -1139,8 +1140,8 @@ test(
         'e2e-ceph-b',
         worker.id,
       );
-      await attachSharedVolume(userApi, primaryContainer, userVolumeId, '/mnt/shared', 'shared', 'user');
-      await attachSharedVolume(userApi, workerContainer, userVolumeId, '/mnt/shared', 'shared', 'user');
+      await attachSharedVolume(userApi, primaryContainer, userVolumeId, '/mnt/shared', 'shared');
+      await attachSharedVolume(userApi, workerContainer, userVolumeId, '/mnt/shared', 'shared');
       await adminApi.get(`/api/containers/${primaryContainer}/shared-volumes`);
       await adminApi.post(`/api/containers/${primaryContainer}/shared-volumes`, {
         data: { volumeId, containerPath: '/mnt/dup', readOnly: false },
@@ -1158,7 +1159,7 @@ test(
       expect(written).toContain(marker);
 
       const workerRow = await expectJson<JsonRecord>(
-        await adminApi.get(`/api/admin/containers/${workerContainer}`),
+        await adminApi.get(`/api/containers/${workerContainer}`),
       );
       const instanceName = workerRow.instanceName as string;
       expect(instanceName).toBeTruthy();
@@ -1184,16 +1185,16 @@ test(
       expect(remote.stdout).toContain(marker);
 
       const volume = await expectJson<JsonRecord>(
-        await adminApi.get(`/api/admin/shared-volumes/${userVolumeId}`),
+        await adminApi.get(`/api/shared-volumes/${userVolumeId}`),
       );
       const incusName = volume.incusName as string;
       expect(incusName).toMatch(/^nyv-/);
       const workerPools = await expectJson<JsonRecord[]>(
-        await adminApi.get(`/api/admin/servers/${worker.id}/storage-pools`),
+        await adminApi.get(`/api/servers/${worker.id}/storage-pools?scope=all`),
       );
       expect(workerPools.every((pool) => pool.driver !== 'cephfs')).toBe(true);
       const workerExecutors = await expectJson<JsonRecord[]>(
-        await adminApi.get(`/api/admin/shared-backends/${seedState.sharedBackendId}/executors`),
+        await adminApi.get(`/api/shared-backends/${seedState.sharedBackendId}/executors`),
       );
       const workerCeph = workerExecutors.find(
         (row) => row.serverId === worker.id && row.registered === true,
@@ -1201,7 +1202,7 @@ test(
       expect(workerCeph?.incusName, 'worker CephFS executor').toBeTruthy();
 
       const workerAttachments = await expectJson<JsonRecord[]>(
-        await adminApi.get(`/api/admin/containers/${workerContainer}/shared-volumes`),
+        await adminApi.get(`/api/containers/${workerContainer}/shared-volumes`),
       );
       const workerAttachment = workerAttachments.find((entry) => entry.volumeId === userVolumeId);
       expect(workerAttachment?.id).toBeTruthy();
@@ -1209,11 +1210,9 @@ test(
         userApi,
         workerContainer,
         workerAttachment!.id as string,
-        'shared',
-        'user',
-      );
+        'shared');
       await stopSharedContainer(adminApi, workerContainer);
-      await detachSharedVolume(userApi, workerContainer, workerAttachment!.id as string, 'shared', 'user');
+      await detachSharedVolume(userApi, workerContainer, workerAttachment!.id as string, 'shared');
 
       const stillOnPrimary = await execInContainer(
         adminApi,
@@ -1234,7 +1233,7 @@ test(
       ]);
       expect(workerCatalogAfterDetach.code, workerCatalogAfterDetach.stderr).toBe(0);
 
-      const deleteWhileAttached = await adminApi.delete(`/api/admin/shared-volumes/${userVolumeId}`);
+      const deleteWhileAttached = await adminApi.delete(`/api/shared-volumes/${userVolumeId}`);
       expect(deleteWhileAttached.status()).toBe(409);
       const deleteBody = await deleteWhileAttached.json();
       expect(JSON.stringify(deleteBody)).toMatch(
@@ -1273,7 +1272,7 @@ test(
     const lvmId = seedState.storagePools.lvmBlockBacked.id;
     const serverId = seedState.server.id;
     const listed = await expectJson<JsonRecord[]>(
-      await adminApi.get(`/api/admin/servers/${serverId}/storage-pools`),
+      await adminApi.get(`/api/servers/${serverId}/storage-pools?scope=all`),
     );
     const dir = listed.find((pool) => pool.id === dirId);
     const lvm = listed.find((pool) => pool.id === lvmId);
@@ -1285,7 +1284,7 @@ test(
     const remark = `e2e-remark-${Date.now().toString(36)}`;
     try {
       const patched = await expectJson<JsonRecord>(
-        await adminApi.patch(`/api/admin/storage-pools/${dirId}`, {
+        await adminApi.patch(`/api/servers/${serverId}/storage-pools/${dirId}`, {
           data: {
             expectedRevision: dir!.revision,
             displayName: remark,
@@ -1297,10 +1296,10 @@ test(
       expect(patched.source).toBe(dir!.source);
 
       await expectJson<JsonRecord>(
-        await adminApi.post(`/api/admin/servers/${serverId}/storage-pools/discover`),
+        await adminApi.post(`/api/servers/${serverId}/storage-pools/discover`),
       );
       const afterDiscover = await expectJson<JsonRecord[]>(
-        await adminApi.get(`/api/admin/servers/${serverId}/storage-pools`),
+        await adminApi.get(`/api/servers/${serverId}/storage-pools?scope=all`),
       );
       const discovered = afterDiscover.find((pool) => pool.id === dirId);
       expect(discovered?.displayName).toBe(remark);
@@ -1326,11 +1325,11 @@ test(
       expect(userOne.source).toBeNull();
     } finally {
       const current = await expectJson<JsonRecord[]>(
-        await adminApi.get(`/api/admin/servers/${serverId}/storage-pools`),
+        await adminApi.get(`/api/servers/${serverId}/storage-pools?scope=all`),
       );
       const latest = current.find((pool) => pool.id === dirId);
       if (latest) {
-        await adminApi.patch(`/api/admin/storage-pools/${dirId}`, {
+        await adminApi.patch(`/api/servers/${serverId}/storage-pools/${dirId}`, {
           data: {
             expectedRevision: latest.revision,
             displayName: previousName,

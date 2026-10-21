@@ -15,7 +15,7 @@ test(
     const labServers = seedState.labServers ?? [];
     expect(labServers.length, 'seeded extra Incus workers').toBeGreaterThanOrEqual(1);
 
-    const listed = await expectJson<JsonRecord[]>(await adminApi.get('/api/admin/servers'));
+    const listed = await expectJson<JsonRecord[]>(await adminApi.get('/api/servers?scope=all'));
     expect(listed.some((server) => server.id === seedState.server.id)).toBe(true);
     for (const worker of labServers) {
       const row = listed.find((server) => server.id === worker.id);
@@ -23,7 +23,7 @@ test(
       expect(row?.status).toBe('online');
       expect(row?.apiEndpoint).toBe(worker.endpoint);
       const detail = await expectJson<JsonRecord>(
-        await adminApi.get(`/api/admin/servers/${worker.id}`),
+        await adminApi.get(`/api/servers/${worker.id}?scope=all`),
       );
       expect(detail.status).toBe('online');
       expect(detail.parentInterface).toBe(worker.parentInterface);
@@ -49,7 +49,7 @@ test(
     try {
       await eventually(
         async () => expectJson<JsonRecord>(
-          await adminApi.get(`/api/admin/intents/${accepted.intentId}`),
+          await adminApi.get(`/api/intents/${accepted.intentId}`),
         ),
         (intent) => intent.status === 'succeeded',
         300_000,
@@ -58,7 +58,7 @@ test(
       );
       const container = await eventually(
         async () => expectJson<JsonRecord>(
-          await adminApi.get(`/api/admin/containers/${containerId}`),
+          await adminApi.get(`/api/containers/${containerId}`),
         ),
         (value) => value.lifecyclePhase === 'active' && value.actual?.status === 'running',
         300_000,
@@ -68,10 +68,10 @@ test(
       expect(container.serverId).toBe(worker.id);
     } finally {
       const deletion = await adminApi.post(
-        `/api/admin/containers/${containerId}/actions/delete`,
+        `/api/containers/${containerId}/actions/delete`,
       ).catch(() => undefined);
       if (deletion?.status() === 202) {
-        await waitForGone(adminApi, `/api/admin/containers/${containerId}`);
+        await waitForGone(adminApi, `/api/containers/${containerId}`);
       }
     }
   },

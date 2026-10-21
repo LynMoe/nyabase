@@ -201,7 +201,7 @@ function StoragePoolRow({
   const [remarkOpen, setRemarkOpen] = useState(false);
   const [remark, setRemark] = useState(pool.displayName ?? '');
   const patch = useMutation({
-    mutationFn: (registered: boolean) => api.patch<StoragePoolDto>(`/admin/storage-pools/${pool.id}`, {
+    mutationFn: (registered: boolean) => api.patch<StoragePoolDto>(`/servers/${pool.serverId}/storage-pools/${pool.id}`, {
       expectedRevision: pool.revision,
       registered,
     }),
@@ -212,7 +212,7 @@ function StoragePoolRow({
     onError: (error) => toast({ title: '存储池更新失败', description: errorMessage(error), variant: 'destructive' }),
   });
   const saveRemark = useMutation({
-    mutationFn: () => api.patch<StoragePoolDto>(`/admin/storage-pools/${pool.id}`, {
+    mutationFn: () => api.patch<StoragePoolDto>(`/servers/${pool.serverId}/storage-pools/${pool.id}`, {
       expectedRevision: pool.revision,
       displayName: remark.trim() || null,
     }),

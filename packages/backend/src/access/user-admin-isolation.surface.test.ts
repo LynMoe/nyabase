@@ -7,68 +7,45 @@ function readSrc(relativeFromBackendSrc: string): string {
 }
 
 /**
- * Regression gate: user/admin privilege must not be selected via public
- * `admin` / `includeAll` boolean parameters on volume/container facades.
+ * Regression gate: privilege is decided from the `Actor` the guard resolved,
+ * never from a public `admin` / `includeAll` flag or a ForUser/ForAdmin pair.
  */
-describe('user/admin isolation API surface', () => {
-  it('VolumesService exposes ForUser/ForAdmin without public includeAll/admin flags', () => {
+describe('actor-scoped API surface', () => {
+  it('VolumesService methods take the actor first and expose no admin flags or wrappers', () => {
     const src = readSrc('volumes/volumes.service.ts');
-    expect(src).toMatch(/async listForUser\(/);
-    expect(src).toMatch(/async listForAdmin\(/);
-    expect(src).toMatch(/async listSharedForUser\(/);
-    expect(src).toMatch(/async listSharedForAdmin\(/);
-    expect(src).toMatch(/async createForUser\(/);
-    expect(src).not.toMatch(/async createForAdmin\(/);
-    expect(src).toMatch(/async createSharedForUser\(/);
-    expect(src).not.toMatch(/async createSharedForAdmin\(/);
+    expect(src).not.toMatch(/For(User|Admin|System)\(/);
+    expect(src).not.toMatch(/'user'\s*\|\s*'admin'/);
+    for (const method of ['list', 'listShared', 'get', 'getShared', 'create', 'createShared',
+      'patch', 'patchShared', 'delete', 'deleteShared', 'attach', 'detach', 'capacity']) {
+      expect(src).toMatch(new RegExp(`async ${method}\\(\\s*actor: Actor`));
+    }
     expect(src).not.toMatch(/includeAll\s*=/);
     expect(src).not.toMatch(/async\s+\w+\([^)]*\badmin\s*=\s*false/);
     expect(src).not.toMatch(/async\s+\w+\([^)]*\bincludeAll\b/);
   });
 
-  it('ContainerControlService create/limits/root/gpus/listVolumes use ForUser/ForAdmin', () => {
+  it('ContainerControlService methods take the actor first and expose no admin flags or wrappers', () => {
     const src = readSrc('containers/container-control.service.ts');
-    expect(src).toMatch(/async createForUser\(/);
-    expect(src).not.toMatch(/async createForAdmin\(/);
-    expect(src).toMatch(/async updateLimitsForUser\(/);
-    expect(src).toMatch(/async updateLimitsForAdmin\(/);
-    expect(src).toMatch(/async resizeRootForUser\(/);
-    expect(src).toMatch(/async resizeRootForAdmin\(/);
-    expect(src).toMatch(/async mutateGpusForUser\(/);
-    expect(src).toMatch(/async mutateGpusForAdmin\(/);
-    expect(src).toMatch(/async listVolumesForUser\(/);
-    expect(src).toMatch(/async listVolumesForAdmin\(/);
+    expect(src).not.toMatch(/For(User|Admin|System)\(/);
+    for (const method of ['list', 'get', 'create', 'action', 'repairSsh', 'updateLimits',
+      'resizeRoot', 'mutateGpus', 'listVolumes', 'listSharedVolumes', 'getStats',
+      'createExecSession']) {
+      expect(src).toMatch(new RegExp(`async ${method}\\(\\s*actor: Actor`));
+    }
     expect(src).not.toMatch(/async create\([\s\S]*?admin\s*=\s*false/);
     expect(src).not.toMatch(/async updateLimits\([\s\S]*?admin\s*=\s*false/);
-    expect(src).not.toMatch(/async resizeRoot\([\s\S]*?admin\s*=\s*false/);
-    expect(src).not.toMatch(/async mutateGpus\([\s\S]*?admin\s*=\s*false/);
-    expect(src).not.toMatch(/async listVolumes\([\s\S]*?admin\s*=\s*false/);
   });
 
-  it('controllers call matching facades only', () => {
-    const volumesController = readSrc('volumes/volumes.controller.ts');
-    expect(volumesController).toMatch(/listForUser/);
-    expect(volumesController).toMatch(/createForUser/);
-    expect(volumesController).not.toMatch(/createForAdmin/);
-    expect(volumesController).not.toMatch(/createShared/);
-    expect(volumesController).not.toMatch(/\.create\([^)]+,\s*true\s*\)/);
-    expect(volumesController).not.toMatch(/\.list\([^)]+,\s*true\s*\)/);
-
-    const sharedVolumesController = readSrc('volumes/shared-volumes.controller.ts');
-    expect(sharedVolumesController).toMatch(/ManageSharedVolumes/);
-    expect(sharedVolumesController).toMatch(/createSharedForUser/);
-    expect(sharedVolumesController).not.toMatch(/createSharedForAdmin/);
-    expect(sharedVolumesController).toMatch(/listSharedForUser/);
-    expect(sharedVolumesController).not.toMatch(/RequireCaps\(Capability\.ManageVolumes\)/);
-
-    const adminContainers = readSrc('containers/admin-containers.controller.ts');
-    expect(adminContainers).not.toMatch(/createForAdmin/);
-    expect(adminContainers).not.toMatch(/async create\(/);
-    expect(adminContainers).not.toMatch(/\.create\([^)]+,\s*true\s*\)/);
-    expect(adminContainers).not.toMatch(/listVolumes\([^)]+,\s*true\s*\)/);
-
-    const userContainers = readSrc('containers/containers.controller.ts');
-    expect(userContainers).toMatch(/createForUser/);
-    expect(userContainers).toMatch(/updateLimitsForUser/);
+  it('there is a single controller per resource and it resolves the actor', () => {
+    for (const file of ['volumes/volumes.controller.ts', 'volumes/shared-volumes.controller.ts',
+      'containers/containers.controller.ts', 'reconcile/intents.controller.ts']) {
+      const src = readSrc(file);
+      expect(src).toMatch(/@CurrentActor\(\)/);
+      expect(src).not.toMatch(/@Controller\('admin\//);
+      expect(src).not.toMatch(/\.(create|list)\([^)]+,\s*true\s*\)/);
+    }
+    expect(readSrc('volumes/shared-volumes.controller.ts')).toMatch(/ManageSharedVolumes/);
+    expect(readSrc('volumes/shared-volumes.controller.ts'))
+      .not.toMatch(/RequireCaps\(Capability\.ManageVolumes\)/);
   });
 });

@@ -43,7 +43,7 @@ export function SharedVolumeCatalogInspectDialog({
 }) {
   const query = useQuery({
     queryKey: queryKeys.sharedVolumes.catalogs(volume?.id ?? ''),
-    queryFn: () => api.get<SharedVolumeCatalogInspectDto>(`/admin/shared-volumes/${volume!.id}/catalogs`),
+    queryFn: () => api.get<SharedVolumeCatalogInspectDto>(`/shared-volumes/${volume!.id}/catalogs`),
     enabled: open && Boolean(volume),
     refetchInterval: (queryState) => refetchWhileInProgress(queryState.state, {
       steadyIntervalMs: false,

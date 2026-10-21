@@ -1,4 +1,5 @@
 import { fileURLToPath } from 'node:url';
+import { resourceIntentsPath } from '../../support/persona.js';
 import { test, expect } from '../../fixtures/live-stack.js';
 import { coverageCase } from '../../support/coverage-marker.js';
 import { expectJson } from '../../support/http.js';
@@ -25,27 +26,36 @@ test(
       await adminApi.get('/api/health/ready'),
     );
     const server = await expectJson<Record<string, any>>(
-      await adminApi.get(`/api/admin/servers/${seedState.server.id}`),
+      await adminApi.get(`/api/servers/${seedState.server.id}?scope=all`),
     );
     expect(['online', 'ready']).toContain(server.status);
 
-    const imageIntentPage = await expectJson<{
-      items: Record<string, unknown>[];
-      nextCursor?: string | null;
-    }>(
-      await adminApi.get(`/api/admin/images/${seedState.image.id}/intents`),
+    const imageAssignments = await expectJson<Record<string, any>[]>(
+      await adminApi.get(`/api/images/${seedState.image.id}/assignments`),
     );
-    expect(Array.isArray(imageIntentPage.items)).toBe(true);
+    if (imageAssignments.length > 0) {
+      const imageIntentPage = await expectJson<{
+        items: Record<string, unknown>[];
+        nextCursor?: string | null;
+      }>(
+        await adminApi.get(resourceIntentsPath(
+          'image_assignment',
+          imageAssignments.map((assignment) => assignment.id as string),
+          'all',
+        )),
+      );
+      expect(Array.isArray(imageIntentPage.items)).toBe(true);
+    }
 
     const containers = await expectJson<Record<string, any>[]>(
-      await adminApi.get('/api/admin/containers'),
+      await adminApi.get('/api/containers?scope=all'),
     );
     if (containers.length > 0) {
       const intentPage = await expectJson<{
         items: Record<string, unknown>[];
         nextCursor?: string | null;
       }>(
-        await adminApi.get(`/api/admin/containers/${containers[0].id}/intents`),
+        await adminApi.get(resourceIntentsPath('container', containers[0].id, 'all')),
       );
       expect(Array.isArray(intentPage.items)).toBe(true);
     }
@@ -110,7 +120,7 @@ test(
       );
 
       const volume = await expectJson<Record<string, any>>(
-        await adminApi.get(`/api/admin/shared-volumes/${volumeId}`),
+        await adminApi.get(`/api/shared-volumes/${volumeId}`),
       );
       expect(volume.id).toBe(volumeId);
       expect(volume.attachments?.length).toBeGreaterThan(0);

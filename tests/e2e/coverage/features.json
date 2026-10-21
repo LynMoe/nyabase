@@ -77,13 +77,13 @@
     "/ws/http-proxy"
   ],
   "inventory": {
-    "controllerFileCount": 29,
-    "httpDecoratorCount": 200,
-    "httpSurfaceCount": 200,
+    "controllerFileCount": 25,
+    "httpDecoratorCount": 150,
+    "httpSurfaceCount": 150,
     "intentKindCount": 12,
     "websocketPathCount": 3,
-    "canonicalHttpSurfaceCount": 200,
-    "maxUnmapped": 0
+    "canonicalHttpSurfaceCount": 150,
+    "maxUnmapped": 2
   },
   "features": [
     {
@@ -134,10 +134,10 @@
             "full"
           ],
           "httpSurfaces": [
-            "GET|/api/admin/servers/:id",
-            "GET|/api/admin/servers/:id/preflight",
-            "POST|/api/admin/servers/:id/preflight",
-            "GET|/api/admin/servers/:serverId/intents"
+            "GET|/api/servers/:id",
+            "GET|/api/servers/:id/preflight",
+            "POST|/api/servers/:id/preflight",
+            "GET|/api/intents"
           ]
         },
         {
@@ -165,19 +165,15 @@
             "full"
           ],
           "httpSurfaces": [
-            "GET|/api/admin/images",
-            "GET|/api/admin/images/catalog",
-            "GET|/api/admin/images/:id",
-            "GET|/api/admin/images/:id/status",
-            "GET|/api/admin/images/:id/assignments",
-            "GET|/api/admin/images/:id/assignments/status",
-            "GET|/api/admin/images/:imageId/intents",
-            "GET|/api/admin/images/:imageId/assignments/:serverId/intents",
-            "PUT|/api/admin/images/:id/assignments/:serverId",
-            "DELETE|/api/admin/images/:id/assignments/:serverId",
-            "POST|/api/admin/images/:id/repull",
             "GET|/api/images",
-            "GET|/api/images/:id"
+            "GET|/api/images/catalog",
+            "GET|/api/images/:id",
+            "GET|/api/images/:id/status",
+            "GET|/api/images/:id/assignments",
+            "GET|/api/images/:id/assignments/status",
+            "PUT|/api/images/:id/assignments/:serverId",
+            "DELETE|/api/images/:id/assignments/:serverId",
+            "POST|/api/images/:id/repull"
           ]
         },
         {
@@ -207,10 +203,10 @@
             "full"
           ],
           "httpSurfaces": [
-            "GET|/api/admin/containers/:containerId",
-            "POST|/api/admin/containers/:containerId/actions/repair-ssh",
-            "POST|/api/admin/containers/:containerId/actions/delete",
-            "POST|/api/admin/containers/:containerId/exec-sessions",
+            "GET|/api/containers/:containerId",
+            "POST|/api/containers/:containerId/actions/repair-ssh",
+            "POST|/api/containers/:containerId/actions/delete",
+            "POST|/api/containers/:containerId/exec-sessions",
             "GET|/api/intents/:intentId"
           ]
         },
@@ -236,7 +232,7 @@
             "full"
           ],
           "httpSurfaces": [
-            "PATCH|/api/admin/servers/:serverId/gpu"
+            "PATCH|/api/servers/:serverId/gpu"
           ]
         },
         {
@@ -315,18 +311,14 @@
             "full"
           ],
           "httpSurfaces": [
-            "GET|/api/admin/servers/:id/storage-pools",
-            "POST|/api/admin/servers/:id/storage-pools/discover",
-            "PATCH|/api/admin/storage-pools/:id",
             "GET|/api/servers/:serverId/storage-pools",
-            "GET|/api/admin/servers/:id/storage-capacity",
+            "POST|/api/servers/:serverId/storage-pools/discover",
+            "PATCH|/api/servers/:serverId/storage-pools/:id",
             "GET|/api/servers/:serverId/storage-capacity",
-            "GET|/api/admin/volumes",
-            "GET|/api/admin/volumes/:id",
-            "PATCH|/api/admin/volumes/:id",
-            "DELETE|/api/admin/volumes/:id",
-            "GET|/api/admin/intents/:intentId",
-            "GET|/api/admin/volumes/:volumeId/intents"
+            "GET|/api/volumes",
+            "GET|/api/volumes/:id",
+            "PATCH|/api/volumes/:id",
+            "DELETE|/api/volumes/:id"
           ]
         },
         {
@@ -339,10 +331,6 @@
             "full"
           ],
           "httpSurfaces": [
-            "GET|/api/admin/servers/:id/storage-pools",
-            "POST|/api/admin/servers/:id/storage-pools/discover",
-            "PATCH|/api/admin/storage-pools/:id",
-            "GET|/api/servers/:serverId/storage-pools",
             "GET|/api/servers/:serverId/storage-pools/:id"
           ]
         },
@@ -415,8 +403,8 @@
             "full"
           ],
           "httpSurfaces": [
-            "POST|/api/admin/containers/:containerId/volumes",
-            "DELETE|/api/admin/containers/:containerId/volumes/:attachmentId"
+            "POST|/api/containers/:containerId/volumes",
+            "DELETE|/api/containers/:containerId/volumes/:attachmentId"
           ]
         },
         {
@@ -431,13 +419,11 @@
           "httpSurfaces": [
             "GET|/api/shared-backends",
             "GET|/api/shared-backends/:id",
-            "GET|/api/admin/shared-backends",
-            "GET|/api/admin/shared-backends/:id",
-            "PATCH|/api/admin/shared-backends/:id",
-            "DELETE|/api/admin/shared-backends/:id",
-            "GET|/api/admin/shared-backends/:id/executors",
-            "POST|/api/admin/shared-backends/:id/executors/discover",
-            "PATCH|/api/admin/shared-backends/:id/executors/:executorId"
+            "PATCH|/api/shared-backends/:id",
+            "DELETE|/api/shared-backends/:id",
+            "GET|/api/shared-backends/:id/executors",
+            "POST|/api/shared-backends/:id/executors/discover",
+            "PATCH|/api/shared-backends/:id/executors/:executorId"
           ]
         },
         {
@@ -450,7 +436,7 @@
             "full"
           ],
           "httpSurfaces": [
-            "POST|/api/admin/shared-backends"
+            "POST|/api/shared-backends"
           ]
         },
         {
@@ -468,20 +454,11 @@
             "GET|/api/shared-volumes/:id",
             "PATCH|/api/shared-volumes/:id",
             "DELETE|/api/shared-volumes/:id",
-            "GET|/api/admin/shared-volumes",
-            "GET|/api/admin/shared-volumes/:id",
-            "GET|/api/admin/shared-volumes/:id/catalogs",
-            "PATCH|/api/admin/shared-volumes/:id",
-            "DELETE|/api/admin/shared-volumes/:id",
-            "GET|/api/admin/shared-backends/:id/catalog-inspect",
-            "GET|/api/shared-volumes/:volumeId/intents",
-            "GET|/api/admin/shared-volumes/:volumeId/intents",
+            "GET|/api/shared-volumes/:id/catalogs",
+            "GET|/api/shared-backends/:id/catalog-inspect",
             "GET|/api/containers/:containerId/shared-volumes",
             "POST|/api/containers/:containerId/shared-volumes",
-            "DELETE|/api/containers/:containerId/shared-volumes/:attachmentId",
-            "GET|/api/admin/containers/:containerId/shared-volumes",
-            "POST|/api/admin/containers/:containerId/shared-volumes",
-            "DELETE|/api/admin/containers/:containerId/shared-volumes/:attachmentId"
+            "DELETE|/api/containers/:containerId/shared-volumes/:attachmentId"
           ]
         },
         {
@@ -692,16 +669,16 @@
             "full"
           ],
           "httpSurfaces": [
-            "GET|/api/admin/users/:userId/server-grants",
-            "PUT|/api/admin/users/:userId/server-grants/:serverId",
-            "DELETE|/api/admin/users/:userId/server-grants/:serverId",
-            "GET|/api/admin/users/:userId/storage-pool-grants",
-            "PUT|/api/admin/users/:userId/storage-pool-grants/:poolId",
-            "DELETE|/api/admin/users/:userId/storage-pool-grants/:poolId",
-            "GET|/api/admin/users/:userId/shared-backend-grants",
-            "PUT|/api/admin/users/:userId/shared-backend-grants/:backendId",
-            "DELETE|/api/admin/users/:userId/shared-backend-grants/:backendId",
-            "GET|/api/admin/users/:userId/effective-access"
+            "GET|/api/users/:userId/server-grants",
+            "PUT|/api/users/:userId/server-grants/:serverId",
+            "DELETE|/api/users/:userId/server-grants/:serverId",
+            "GET|/api/users/:userId/storage-pool-grants",
+            "PUT|/api/users/:userId/storage-pool-grants/:poolId",
+            "DELETE|/api/users/:userId/storage-pool-grants/:poolId",
+            "GET|/api/users/:userId/shared-backend-grants",
+            "PUT|/api/users/:userId/shared-backend-grants/:backendId",
+            "DELETE|/api/users/:userId/shared-backend-grants/:backendId",
+            "GET|/api/users/:userId/effective-access"
           ]
         },
         {
@@ -745,13 +722,10 @@
           "httpSurfaces": [
             "POST|/api/auth/login",
             "POST|/api/auth/logout",
-            "POST|/api/admin/users",
-            "DELETE|/api/admin/users/:id",
+            "POST|/api/users",
+            "DELETE|/api/users/:id",
             "GET|/api/me/access",
-            "POST|/api/containers",
-            "GET|/api/containers/:containerId",
-            "POST|/api/containers/:containerId/actions/delete",
-            "GET|/api/containers/:containerId/intents"
+            "POST|/api/containers"
           ]
         },
         {
@@ -852,10 +826,7 @@
             "full"
           ],
           "httpSurfaces": [
-            "POST|/api/volumes",
-            "GET|/api/volumes/:id",
-            "PATCH|/api/volumes/:id",
-            "GET|/api/volumes/:volumeId/intents"
+            "POST|/api/volumes"
           ]
         },
         {
@@ -929,10 +900,7 @@
             "full"
           ],
           "httpSurfaces": [
-            "GET|/api/containers/:containerId/volumes",
-            "POST|/api/containers/:containerId/volumes",
-            "DELETE|/api/containers/:containerId/volumes/:attachmentId",
-            "DELETE|/api/volumes/:id"
+            "GET|/api/containers/:containerId/volumes"
           ]
         },
         {
@@ -947,8 +915,7 @@
           "httpSurfaces": [
             "POST|/api/containers/:containerId/actions/start",
             "POST|/api/containers/:containerId/actions/stop",
-            "POST|/api/containers/:containerId/actions/restart",
-            "POST|/api/containers/:containerId/actions/repair-ssh"
+            "POST|/api/containers/:containerId/actions/restart"
           ]
         },
         {
@@ -995,8 +962,7 @@
             "full"
           ],
           "httpSurfaces": [
-            "GET|/api/containers",
-            "GET|/api/volumes"
+            "GET|/api/containers"
           ]
         }
       ]
@@ -1103,11 +1069,11 @@
             "full"
           ],
           "httpSurfaces": [
-            "GET|/api/admin/users",
-            "GET|/api/admin/users/:id",
-            "PATCH|/api/admin/users/:id",
-            "GET|/api/admin/users/:id/ssh-keys",
-            "DELETE|/api/admin/users/:id/ssh-keys/:keyId"
+            "GET|/api/users",
+            "GET|/api/users/:id",
+            "PATCH|/api/users/:id",
+            "GET|/api/users/:id/ssh-keys",
+            "DELETE|/api/users/:id/ssh-keys/:keyId"
           ]
         },
         {
@@ -1122,11 +1088,7 @@
             "full"
           ],
           "httpSurfaces": [
-            "GET|/api/users/:id",
-            "PATCH|/api/users/:id",
-            "GET|/api/users/:id/ssh-keys",
-            "POST|/api/users/:id/ssh-keys",
-            "DELETE|/api/users/:id/ssh-keys/:keyId"
+            "POST|/api/users/:id/ssh-keys"
           ]
         },
         {
@@ -1224,7 +1186,7 @@
             "full"
           ],
           "httpSurfaces": [
-            "POST|/api/admin/users/:userId/servers/:serverId/purge-resources"
+            "POST|/api/users/:userId/servers/:serverId/purge-resources"
           ]
         },
         {
@@ -1271,14 +1233,10 @@
           ],
           "httpSurfaces": [
             "GET|/api/servers",
-            "GET|/api/servers/:id",
             "GET|/api/servers/:serverId/gpus",
-            "GET|/api/admin/servers/:serverId/gpu",
-            "GET|/api/admin/servers/:serverId/gpus",
-            "GET|/api/servers/:serverId/storage-pools/:id",
-            "POST|/api/admin/servers",
-            "GET|/api/admin/servers",
-            "POST|/api/admin/servers/:id/connect"
+            "GET|/api/servers/:serverId/gpu",
+            "POST|/api/servers",
+            "POST|/api/servers/:id/connect"
           ]
         },
         {
@@ -1292,11 +1250,11 @@
             "full"
           ],
           "httpSurfaces": [
-            "PATCH|/api/admin/servers/:id",
-            "DELETE|/api/admin/servers/:id",
-            "POST|/api/admin/images",
-            "PATCH|/api/admin/images/:id",
-            "DELETE|/api/admin/images/:id"
+            "PATCH|/api/servers/:id",
+            "DELETE|/api/servers/:id",
+            "POST|/api/images",
+            "PATCH|/api/images/:id",
+            "DELETE|/api/images/:id"
           ]
         }
       ]
@@ -1315,10 +1273,7 @@
             "core",
             "full"
           ],
-          "httpSurfaces": [
-            "GET|/api/admin/intents",
-            "POST|/api/admin/intents/:intentId/retry"
-          ]
+          "httpSurfaces": []
         }
       ]
     },
@@ -1338,18 +1293,7 @@
           ],
           "httpSurfaces": [
             "GET|/api/containers/:containerId/stats",
-            "PATCH|/api/containers/:containerId/gpus",
-            "POST|/api/containers/:containerId/exec-sessions",
-            "GET|/api/admin/containers",
-            "POST|/api/admin/containers/:containerId/actions/start",
-            "POST|/api/admin/containers/:containerId/actions/stop",
-            "POST|/api/admin/containers/:containerId/actions/restart",
-            "PATCH|/api/admin/containers/:containerId/limits",
-            "PATCH|/api/admin/containers/:containerId/root-size",
-            "PATCH|/api/admin/containers/:containerId/gpus",
-            "GET|/api/admin/containers/:containerId/volumes",
-            "GET|/api/admin/containers/:containerId/stats",
-            "GET|/api/admin/containers/:containerId/intents"
+            "PATCH|/api/containers/:containerId/gpus"
           ]
         }
       ]
@@ -1369,17 +1313,15 @@
             "full"
           ],
           "httpSurfaces": [
-            "GET|/api/admin/http-proxy/status",
-            "GET|/api/admin/http-proxy/bindings",
-            "GET|/api/admin/http-proxy/domain-pools",
-            "POST|/api/admin/http-proxy/domain-pools",
-            "PATCH|/api/admin/http-proxy/domain-pools/:id",
-            "DELETE|/api/admin/http-proxy/domain-pools/:id",
+            "GET|/api/http-proxy/status",
             "GET|/api/http-proxy/bindings",
+            "GET|/api/http-proxy/domain-pools",
+            "POST|/api/http-proxy/domain-pools",
+            "PATCH|/api/http-proxy/domain-pools/:id",
+            "DELETE|/api/http-proxy/domain-pools/:id",
             "POST|/api/http-proxy/bindings",
             "PATCH|/api/http-proxy/bindings/:id",
-            "DELETE|/api/http-proxy/bindings/:id",
-            "GET|/api/http-proxy/domain-pools"
+            "DELETE|/api/http-proxy/bindings/:id"
           ]
         },
         {

@@ -1,6 +1,8 @@
 import type { Kysely } from 'kysely';
 import { randomUUID } from 'node:crypto';
 import { describe, expect, it, vi } from 'vitest';
+import { Capability } from '@nyabase/common';
+import { testActor } from '../iam/actor.test-helper.js';
 import type { NyabaseDatabase } from '../platform/persistence-pg/database.types.js';
 import { withPostgresTestDatabase } from '../platform/persistence-pg/postgres-test-harness.js';
 import { PgTransactionManager } from '../platform/persistence-pg/transaction.js';
@@ -43,10 +45,10 @@ function serverValues(id: string, suffix: string) {
   };
 }
 
-function userValues(id: string) {
+function userValues(id: string, numericId = 1) {
   return {
     id,
-    numeric_id: 1,
+    numeric_id: numericId,
     username: `list-vol-${id.slice(0, 8)}`,
     password_hash: 'test-password-hash',
     display_name: 'Volume List Test User',
@@ -120,6 +122,8 @@ async function insertVolume(
   return id;
 }
 
+const volumeAdmin = testActor(randomUUID(), Capability.ManageVolumes);
+
 describePg('admin local volume list filter', () => {
   it('filters by server, excludes shared and other servers, and unfiltered still returns all local', async () => {
     await withPostgresTestDatabase(async ({ database }) => {
@@ -153,15 +157,49 @@ describePg('admin local volume list filter', () => {
       );
 
       const service = makeService(database);
-      const filtered = await service.listForAdmin(serverA);
+      const filtered = await service.list(volumeAdmin, { scope: 'all', serverId: serverA });
       expect(filtered.map((row) => row.id)).toEqual([volumeA]);
       expect(filtered.every((row) => row.serverId === serverA)).toBe(true);
       expect(filtered.every((row) => row.scope.kind === 'local')).toBe(true);
 
-      const unfiltered = await service.listForAdmin();
+      const unfiltered = await service.list(volumeAdmin, { scope: 'all' });
       expect(unfiltered.map((row) => row.id).sort()).toEqual([volumeA, volumeB].sort());
       expect(unfiltered.some((row) => row.id === sharedVolume)).toBe(false);
       expect(unfiltered.every((row) => row.scope.kind === 'local')).toBe(true);
+    });
+  });
+});
+
+describePg('local volume actor scope', () => {
+  it('scopes lists and reads to owner, other user and ManageVolumes holder', async () => {
+    await withPostgresTestDatabase(async ({ database }) => {
+      const ownerId = randomUUID();
+      const otherId = randomUUID();
+      const serverA = randomUUID();
+      await database.insertInto('iam.users').values(userValues(ownerId)).execute();
+      await database.insertInto('iam.users').values(userValues(otherId, 2)).execute();
+      await database.insertInto('infra.servers').values(serverValues(serverA, `${serverA.slice(0, 8)}-a`)).execute();
+      const poolA = await insertLocalPool(database, serverA);
+      const volumeId = await insertVolume(database, ownerId, poolA, serverA, null, 'owned');
+      const service = makeService(database);
+      const owner = testActor(ownerId);
+      const other = testActor(otherId);
+
+      expect((await service.list(owner, {})).map((row) => row.id)).toEqual([volumeId]);
+      expect(await service.list(other, {})).toEqual([]);
+      expect((await service.list(volumeAdmin, { scope: 'all' })).map((row) => row.id)).toEqual([volumeId]);
+      expect(await service.list(volumeAdmin, {})).toEqual([]);
+      await expect(service.list(owner, { scope: 'all' })).rejects.toMatchObject({ status: 403 });
+      // ManageSharedVolumes is not enough for local volumes
+      await expect(service.list(testActor(randomUUID(), Capability.ManageSharedVolumes), { scope: 'all' }))
+        .rejects.toMatchObject({ status: 403 });
+
+      await expect(service.get(owner, volumeId)).resolves.toMatchObject({ id: volumeId });
+      await expect(service.get(volumeAdmin, volumeId)).resolves.toMatchObject({ id: volumeId });
+      await expect(service.get(other, volumeId)).rejects.toMatchObject({ status: 404 });
+      await expect(service.delete(other, volumeId)).rejects.toMatchObject({ status: 404 });
+      await expect(service.patch(other, volumeId, { expectedRevision: 1, name: 'x' }))
+        .rejects.toMatchObject({ status: 404 });
     });
   });
 });

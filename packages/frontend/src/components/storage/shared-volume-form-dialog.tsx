@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
+  IntentResourceType,
   zCreateSharedVolumeRequest,
   zPatchVolumeRequest,
   type CreateSharedVolumeRequest,
@@ -22,7 +23,7 @@ import { formatGrantBytes, formatRemainingBytes } from '../../lib/grant-quota.js
 import { queryKeys } from '../../lib/query-keys.js';
 import { backendLacksOnlineExecutor } from '../../lib/shared-backend-executor.js';
 import { toast } from '../../hooks/use-toast.js';
-import { isIntentAccepted, waitForResourceIntent } from '../../lib/intent-visibility.js';
+import { isIntentAccepted, resourceIntentsPath, waitForResourceIntent } from '../../lib/intent-visibility.js';
 import {
   classifySizeChange,
   isQuotaIneffectiveCapability,
@@ -75,7 +76,10 @@ export function SharedVolumeFormDialog({
         body,
       );
       if (isIntentAccepted(accepted)) {
-        await waitForResourceIntent(`/shared-volumes/${volumeId}/intents`, accepted.intentId);
+        await waitForResourceIntent(
+          resourceIntentsPath('mine', IntentResourceType.Volume, volumeId),
+          accepted.intentId,
+        );
       }
     },
     onSuccess: () => {

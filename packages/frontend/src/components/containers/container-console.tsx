@@ -9,13 +9,7 @@ import { Badge } from '../ui/badge.js';
 
 type ConsoleStatus = 'idle' | 'connecting' | 'connected' | 'closed' | 'error';
 
-export function ContainerConsole({
-  container,
-  admin = false,
-}: {
-  container: ContainerDto;
-  admin?: boolean;
-}) {
+export function ContainerConsole({ container }: { container: ContainerDto }) {
   const mountRef = useRef<HTMLDivElement | null>(null);
   const socketRef = useRef<WebSocket | null>(null);
   const terminalRef = useRef<import('@xterm/xterm').Terminal | null>(null);
@@ -70,8 +64,7 @@ export function ContainerConsole({
         terminalRef.current = terminal;
         fitRef.current = fit;
         terminal.writeln('\x1b[90m正在连接控制台...\x1b[0m');
-        const base = admin ? `/admin/containers/${container.id}` : `/containers/${container.id}`;
-        const session = await api.post<ExecSessionResponse>(`${base}/exec-sessions`, { tty: true, cols: terminal.cols || 100, rows: terminal.rows || 30 });
+        const session = await api.post<ExecSessionResponse>(`/containers/${container.id}/exec-sessions`, { tty: true, cols: terminal.cols || 100, rows: terminal.rows || 30 });
         if (cancelled) return;
         const resolved = new URL(session.consoleUrl, window.location.href);
         if (resolved.protocol === 'http:') resolved.protocol = 'ws:';
@@ -135,7 +128,7 @@ export function ContainerConsole({
     };
     void connect();
     return () => { cancelled = true; cleanup(); };
-  }, [admin, cleanup, container.actions.console, container.id, reload, token]);
+  }, [cleanup, container.actions.console, container.id, reload, token]);
 
   const statusLabel: Record<ConsoleStatus, string> = {
     idle: '未连接',

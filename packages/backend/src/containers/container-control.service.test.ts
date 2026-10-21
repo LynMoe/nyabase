@@ -1,3 +1,4 @@
+import { ForbiddenException, NotFoundException } from '@nestjs/common';
 import { describe, expect, it, vi } from 'vitest';
 import {
   AuditAction,
@@ -11,10 +12,15 @@ import {
   StoragePoolResizeFamily,
 } from '@nyabase/common';
 import { checkRootResize, ContainerControlService } from './container-control.service.js';
+import { systemActor } from '../iam/actor.js';
+import { testActor } from '../iam/actor.test-helper.js';
 
 const containerId = 'container-1';
 const serverId = 'server-1';
 const actorId = 'user-1';
+const owner = testActor(actorId);
+const operator = testActor('operator-1', Capability.ManageContainersAny);
+const stranger = testActor('stranger-1');
 
 function makeHarness() {
   const transaction: {
@@ -172,7 +178,7 @@ describe('checkRootResize', () => {
 describe('ContainerControlService intent boundary', () => {
   it('updates limits online and creates the intent atomically', async () => {
     const harness = makeHarness();
-    const result = await harness.service.updateLimitsForUser(containerId, actorId, {
+    const result = await harness.service.updateLimits(owner, containerId, {
       cpuMillis: 750,
       memBytes: 2_000_000_000,
     });
@@ -219,7 +225,7 @@ describe('ContainerControlService intent boundary', () => {
       accessPhase: 'grace',
     });
 
-    await expect(harness.service.updateLimitsForUser(containerId, actorId, {
+    await expect(harness.service.updateLimits(owner, containerId, {
       cpuMillis: 750,
       memBytes: 2_000_000_000,
     })).rejects.toThrow('Server access was revoked');
@@ -230,7 +236,7 @@ describe('ContainerControlService intent boundary', () => {
 
   it('stores the observed started_at baseline for restart without calling Incus', async () => {
     const harness = makeHarness();
-    const result = await harness.service.action(containerId, 'restart', actorId);
+    const result = await harness.service.action(owner, containerId, 'restart');
 
     expect(harness.repository.updateDesired).toHaveBeenCalledWith(
       containerId,
@@ -261,10 +267,10 @@ describe('ContainerControlService intent boundary', () => {
     };
     attachmentQuery.executeTakeFirst.mockResolvedValue({ id: 'att-1' });
 
-    await expect(harness.service.action(containerId, 'start', actorId)).rejects.toMatchObject({
+    await expect(harness.service.action(owner, containerId, 'start')).rejects.toMatchObject({
       response: { code: 'INSTANCE_BUSY' },
     });
-    await expect(harness.service.action(containerId, 'restart', actorId)).rejects.toMatchObject({
+    await expect(harness.service.action(owner, containerId, 'restart')).rejects.toMatchObject({
       response: { code: 'INSTANCE_BUSY' },
     });
     expect(harness.repository.updateDesired).not.toHaveBeenCalled();
@@ -273,7 +279,7 @@ describe('ContainerControlService intent boundary', () => {
 
   it('lets nyabase-system stop a container without ManageContainersAny', async () => {
     const harness = makeHarness();
-    await harness.service.actionForSystem(containerId, 'stop', 'system-actor');
+    await harness.service.action(systemActor('system-actor'), containerId, 'stop');
     expect(harness.access.assertActorCapabilitiesInTransaction).not.toHaveBeenCalled();
     expect(harness.repository.updateDesired).toHaveBeenCalledWith(
       containerId,
@@ -290,19 +296,20 @@ describe('ContainerControlService intent boundary', () => {
 
   it('still requires ManageContainersAny for operator admin stop', async () => {
     const harness = makeHarness();
-    await harness.service.actionForAdmin(containerId, 'stop', actorId);
+    await harness.service.action(operator, containerId, 'stop');
     expect(harness.access.assertActorCapabilitiesInTransaction).toHaveBeenCalledWith(
       harness.transaction,
-      actorId,
+      'operator-1',
       [Capability.ManageContainersAny],
     );
+    expect(harness.access.resolveServerInTransaction).not.toHaveBeenCalled();
   });
 
   it('blocks root changes while a quota application is pending', async () => {
     const harness = makeHarness();
     Object.assign(harness.row, { root_size_pending_bytes: '2147483648' });
 
-    await expect(harness.service.resizeRootForUser(containerId, actorId, {
+    await expect(harness.service.resizeRoot(owner, containerId, {
       sizeBytes: 3_221_225_472,
     })).rejects.toMatchObject({
       response: { code: 'ROOT_QUOTA_PENDING' },
@@ -347,7 +354,7 @@ describe('ContainerControlService intent boundary', () => {
     });
     Object.assign(harness.transaction, { selectFrom });
 
-    await expect(harness.service.resizeRootForUser(containerId, actorId, {
+    await expect(harness.service.resizeRoot(owner, containerId, {
       sizeBytes: 5_368_709_120,
     })).rejects.toMatchObject({
       response: { code: 'ROOT_SHRINK_REQUIRES_STOP' },
@@ -389,7 +396,7 @@ describe('ContainerControlService intent boundary', () => {
     });
     Object.assign(harness.transaction, { selectFrom });
 
-    await expect(harness.service.resizeRootForUser(containerId, actorId, {
+    await expect(harness.service.resizeRoot(owner, containerId, {
       sizeBytes: 67_108_864,
     })).rejects.toMatchObject({
       response: { code: FailureCode.RootShrinkBelowUsage },
@@ -427,7 +434,7 @@ describe('ContainerControlService intent boundary', () => {
     });
     Object.assign(harness.transaction, { selectFrom });
 
-    await expect(harness.service.resizeRootForUser(containerId, actorId, {
+    await expect(harness.service.resizeRoot(owner, containerId, {
       sizeBytes: 67_108_864,
     })).rejects.toMatchObject({
       response: { code: FailureCode.RootUsageUnknown },
@@ -438,7 +445,7 @@ describe('ContainerControlService intent boundary', () => {
   it('authorizes exec through the current server grant and never audits the command', async () => {
     const harness = makeHarness();
     const secret = 'not-for-audit';
-    const result = await harness.service.createExecSession(containerId, actorId, 4, {
+    const result = await harness.service.createExecSession(owner, containerId, {
       command: ['/bin/sh', '-c', secret],
       tty: true,
       cols: 80,
@@ -454,12 +461,71 @@ describe('ContainerControlService intent boundary', () => {
 
   it('rejects exec for a different owner before creating a console session', async () => {
     const harness = makeHarness();
-    await expect(harness.service.createExecSession(containerId, 'other-user', 4, {
+    await expect(harness.service.createExecSession(testActor('other-user'), containerId, {
       command: ['/bin/sh'],
       tty: true,
       cols: 80,
       rows: 24,
     })).rejects.toThrow();
+    expect(harness.consoleSessions.create).not.toHaveBeenCalled();
+  });
+});
+
+describe('ContainerControlService actor authorization', () => {
+  it('lets the owner act under a live server grant', async () => {
+    const harness = makeHarness();
+    await harness.service.action(owner, containerId, 'stop');
+    expect(harness.access.resolveServerInTransaction).toHaveBeenCalled();
+    expect(harness.access.assertActorCapabilitiesInTransaction).not.toHaveBeenCalled();
+  });
+
+  it('refuses another user without the capability, with the owner-only route statuses', async () => {
+    const harness = makeHarness();
+    // reads and power actions were 403
+    await expect(harness.service.get(stranger, containerId)).rejects.toBeInstanceOf(ForbiddenException);
+    await expect(harness.service.action(stranger, containerId, 'stop'))
+      .rejects.toBeInstanceOf(ForbiddenException);
+    await expect(harness.service.repairSsh(stranger, containerId))
+      .rejects.toBeInstanceOf(ForbiddenException);
+    await expect(harness.service.getStats(stranger, containerId))
+      .rejects.toBeInstanceOf(ForbiddenException);
+    // desired-state edits and GPU changes hid the row with a 404
+    await expect(harness.service.updateLimits(stranger, containerId, { cpuMillis: 1, memBytes: 1 }))
+      .rejects.toBeInstanceOf(NotFoundException);
+    await expect(harness.service.resizeRoot(stranger, containerId, { sizeBytes: 2_147_483_648 }))
+      .rejects.toBeInstanceOf(NotFoundException);
+    await expect(harness.service.mutateGpus(stranger, containerId, {}))
+      .rejects.toBeInstanceOf(NotFoundException);
+    expect(harness.repository.updateDesired).not.toHaveBeenCalled();
+    expect(harness.intents.createPending).not.toHaveBeenCalled();
+  });
+
+  it('lets a ManageContainersAny holder act on someone else\'s container without a grant', async () => {
+    const harness = makeHarness();
+    await expect(harness.service.repairSsh(operator, containerId)).resolves.toEqual({ woken: true });
+    await harness.service.updateLimits(operator, containerId, { cpuMillis: 99_000, memBytes: 99_000_000_000 });
+    expect(harness.access.resolveServerInTransaction).not.toHaveBeenCalled();
+    expect(harness.repository.updateDesired).toHaveBeenCalled();
+  });
+
+  it('rejects scope=all lists without the capability and scopes mine to the caller', async () => {
+    const harness = makeHarness();
+    await expect(harness.service.list(owner, { scope: 'all' })).rejects.toBeInstanceOf(ForbiddenException);
+    const list = vi.fn().mockResolvedValue([]);
+    Object.assign(harness.repository, { list });
+    await harness.service.list(owner, {});
+    expect(list).toHaveBeenLastCalledWith({ ownerId: actorId, serverId: undefined });
+    await harness.service.list(operator, { scope: 'all', serverId: 'server-9' });
+    expect(list).toHaveBeenLastCalledWith({ ownerId: undefined, serverId: 'server-9' });
+  });
+
+  it('requires a browser JWT for console admission', async () => {
+    const harness = makeHarness();
+    await expect(harness.service.createExecSession(
+      { ...owner, authKind: 'api-token' },
+      containerId,
+      { command: ['/bin/sh'], tty: true, cols: 80, rows: 24 },
+    )).rejects.toBeInstanceOf(ForbiddenException);
     expect(harness.consoleSessions.create).not.toHaveBeenCalled();
   });
 });

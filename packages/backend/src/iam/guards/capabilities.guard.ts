@@ -5,6 +5,8 @@ import { ANY_CAPS_KEY, CAPS_KEY } from '../decorators/require-caps.decorator.js'
 import { AccessResolverService } from '../access-resolver.service.js';
 import { Capability } from '@nyabase/common';
 import type { UserRecord } from '../user-record.js';
+import type { Actor } from '../actor.js';
+import type { RequestAuthContext } from './jwt-auth.guard.js';
 
 @Injectable()
 export class CapabilitiesGuard implements CanActivate {
@@ -35,31 +37,31 @@ export class CapabilitiesGuard implements CanActivate {
     const user: UserRecord = request.user;
     if (!user) return false;
 
-    if (!requiredCaps?.length && !anyCaps?.length) {
-      if (this.isAdminRequest(request)) {
-        throw new ForbiddenException('Admin route is missing required capabilities');
-      }
-      return true;
+    // Fail-safe: a route under the /admin namespace must say who may call it.
+    if (!requiredCaps?.length && !anyCaps?.length && isAdminNamespace(request)) {
+      throw new ForbiddenException('Admin route is missing required capabilities');
     }
 
-    const userCaps = await this.accessResolver.userCapabilitiesCurrent(user.id);
-    const allSatisfied = !requiredCaps?.length || requiredCaps.every((c) => userCaps.has(c));
-    const anySatisfied = !anyCaps?.length || anyCaps.some((c) => userCaps.has(c));
-    const ok = allSatisfied && anySatisfied;
-    if (!ok) throw new ForbiddenException();
+    // Resolved once per request; services read it back through @CurrentActor().
+    const capabilities = await this.accessResolver.userCapabilitiesCurrent(user.id);
+    const authContext = request.authContext as RequestAuthContext | undefined;
+    const actor: Actor = {
+      userId: user.id,
+      capabilities,
+      authKind: authContext?.kind === 'api-token' ? 'api-token' : 'jwt',
+      authVersion: authContext?.kind === 'jwt' ? authContext.authVersion : user.authVersion,
+    };
+    request.actor = actor;
+
+    const allSatisfied = !requiredCaps?.length || requiredCaps.every((c) => capabilities.has(c));
+    const anySatisfied = !anyCaps?.length || anyCaps.some((c) => capabilities.has(c));
+    if (!(allSatisfied && anySatisfied)) throw new ForbiddenException();
     return true;
   }
+}
 
-  private isAdminRequest(request: { originalUrl?: string; url?: string; path?: string; route?: { path?: string } }): boolean {
-    const candidates = [
-      request.originalUrl,
-      request.url,
-      request.path,
-      request.route?.path,
-    ].filter((value): value is string => typeof value === 'string');
-    return candidates.some((value) => {
-      const path = value.split('?')[0];
-      return path === '/admin' || path.startsWith('/admin/') || path === '/api/admin' || path.startsWith('/api/admin/');
-    });
-  }
+function isAdminNamespace(request: { originalUrl?: string; url?: string }): boolean {
+  const path = (request.originalUrl ?? request.url ?? '').split('?')[0];
+  return path === '/admin' || path.startsWith('/admin/')
+    || path === '/api/admin' || path.startsWith('/api/admin/');
 }

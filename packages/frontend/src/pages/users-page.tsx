@@ -43,7 +43,7 @@ export default function UsersPage() {
   const [query, setQuery] = useState('');
   const usersQuery = useQuery({
     queryKey: queryKeys.users.admin,
-    queryFn: () => api.get<UserDto[]>('/admin/users'),
+    queryFn: () => api.get<UserDto[]>('/users'),
     retry: (count, error) => !isPermanentQueryError(error) && count < 1,
     refetchInterval: (query) => refetchWhileInProgress(query.state, {
       steadyIntervalMs: false,
@@ -51,7 +51,7 @@ export default function UsersPage() {
     }),
   });
   const remove = useMutation({
-    mutationFn: (id: string) => api.delete<unknown>(`/admin/users/${id}`),
+    mutationFn: (id: string) => api.delete<unknown>(`/users/${id}`),
     onSuccess: () => {
       toast({ title: '用户已删除' });
       setDeleteUser(null);
@@ -192,7 +192,7 @@ function CreateUserDialog({ open, onOpenChange }: { open: boolean; onOpenChange:
   const [error, setError] = useState<string | null>(null);
   const [createdCreds, setCreatedCreds] = useState<{ username: string; password: string } | null>(null);
   const create = useMutation({
-    mutationFn: (body: CreateUserRequest) => api.post<UserDto>('/admin/users', body),
+    mutationFn: (body: CreateUserRequest) => api.post<UserDto>('/users', body),
     onSuccess: (_user, variables) => {
       toast({ title: '用户已创建' });
       void queryClient.invalidateQueries({ queryKey: queryKeys.users.admin });

@@ -11,6 +11,7 @@ import {
   loginPersona, logoutPersona,
   provisionGrantedUser,
   readErrorBody,
+  resourceIntentsPath,
 } from '../../support/persona.js';
 
 type JsonRecord = Record<string, any>;
@@ -52,7 +53,7 @@ test(
       expect(errorCode(stale.body)).toBe('REVISION_CONFLICT');
 
       const adminStale = await readErrorBody(
-        await adminApi.patch(`/api/admin/volumes/${volumeId}`, {
+        await adminApi.patch(`/api/volumes/${volumeId}`, {
           data: {
             expectedRevision: revision + 100,
             sizeBytes: 256 * 1024 * 1024,
@@ -88,7 +89,7 @@ test(
       expect(Number(after.revision)).toBe(revision);
       expect(Number(after.sizeBytes)).toBe(Number(before.sizeBytes));
       expect(after.name).toBe(before.name);
-      await assertNoActiveIntents(adminApi, `/api/admin/volumes/${volumeId}/intents`);
+      await assertNoActiveIntents(adminApi, resourceIntentsPath('volume', volumeId, 'all'));
     } finally {
       await deleteUserVolume(userApi ?? adminApi, adminApi, volumeId);
       if (refreshToken) {

@@ -42,7 +42,7 @@ export async function createPersonaUser(
   const password = `E2ePass_${Date.now().toString(36)}_9`;
   const displayName = `E2E ${label}`;
   const created = await expectJson<JsonRecord>(
-    await adminApi.post('/api/admin/users', {
+    await adminApi.post('/api/users', {
       data: { username, password, displayName },
     }),
     [200, 201],
@@ -63,7 +63,7 @@ export async function upsertServerGrant(
   grant: ServerGrantInput = DEFAULT_GRANT,
 ): Promise<JsonRecord> {
   return expectJson<JsonRecord>(
-    await adminApi.put(`/api/admin/users/${userId}/server-grants/${serverId}`, {
+    await adminApi.put(`/api/users/${userId}/server-grants/${serverId}`, {
       data: {
         cpuMillis: grant.cpuMillis,
         memBytes: grant.memBytes,
@@ -82,7 +82,7 @@ export async function upsertStoragePoolGrant(
   expiresAt: string | null = null,
 ): Promise<JsonRecord> {
   return expectJson<JsonRecord>(
-    await adminApi.put(`/api/admin/users/${userId}/storage-pool-grants/${poolId}`, {
+    await adminApi.put(`/api/users/${userId}/storage-pool-grants/${poolId}`, {
       data: { expiresAt },
     }),
   );
@@ -93,7 +93,7 @@ export async function deleteServerGrant(
   userId: string,
   serverId: string,
 ): Promise<void> {
-  const response = await adminApi.delete(`/api/admin/users/${userId}/server-grants/${serverId}`);
+  const response = await adminApi.delete(`/api/users/${userId}/server-grants/${serverId}`);
   // 409 GRANT_REVOCATION_BLOCKED when the user still owns resources — caller should
   // delete resources first; allow 409 here so finally blocks stay best-effort.
   expect([200, 204, 404, 409]).toContain(response.status());
@@ -104,7 +104,7 @@ export async function deleteStoragePoolGrant(
   userId: string,
   poolId: string,
 ): Promise<void> {
-  const response = await adminApi.delete(`/api/admin/users/${userId}/storage-pool-grants/${poolId}`);
+  const response = await adminApi.delete(`/api/users/${userId}/storage-pool-grants/${poolId}`);
   expect([200, 204, 404, 409]).toContain(response.status());
 }
 
@@ -115,7 +115,7 @@ export async function upsertSharedBackendGrant(
   grant: { limitBytes: number; expiresAt?: string | null } = { limitBytes: 1024 * 1024 * 1024 },
 ): Promise<JsonRecord> {
   return expectJson<JsonRecord>(
-    await adminApi.put(`/api/admin/users/${userId}/shared-backend-grants/${backendId}`, {
+    await adminApi.put(`/api/users/${userId}/shared-backend-grants/${backendId}`, {
       data: {
         limitBytes: grant.limitBytes,
         expiresAt: grant.expiresAt === undefined ? null : grant.expiresAt,
@@ -130,7 +130,7 @@ export async function deleteSharedBackendGrant(
   backendId: string,
 ): Promise<void> {
   const response = await adminApi.delete(
-    `/api/admin/users/${userId}/shared-backend-grants/${backendId}`,
+    `/api/users/${userId}/shared-backend-grants/${backendId}`,
   );
   expect([200, 204, 404, 409]).toContain(response.status());
 }
@@ -321,38 +321,37 @@ export async function deleteUserSharedVolume(
   volumeId: string | undefined,
 ): Promise<void> {
   if (!volumeId) return;
-  const userPath = `/api/shared-volumes/${volumeId}`;
-  const adminPath = `/api/admin/shared-volumes/${volumeId}`;
-  const userExists = await resourceExists(api, userPath);
-  const adminExists = await resourceExists(adminApi, adminPath);
+  const resourcePath = `/api/shared-volumes/${volumeId}`;
+  const userExists = await resourceExists(api, resourcePath);
+  const adminExists = await resourceExists(adminApi, resourcePath);
   if (!userExists && !adminExists) return;
 
   if (userExists) {
-    const userDelete = await api.delete(userPath).catch(() => undefined);
+    const userDelete = await api.delete(resourcePath).catch(() => undefined);
     const status = userDelete?.status();
     if (status === 202) {
-      await waitForGone(api, userPath).catch(async () => {
-        await waitForGone(adminApi, adminPath);
+      await waitForGone(api, resourcePath).catch(async () => {
+        await waitForGone(adminApi, resourcePath);
       });
     } else if (status === 200 || status === 204) {
       // PG-only delete
     }
-    if (!(await resourceExists(adminApi, adminPath))
-      && !(await resourceExists(api, userPath))) {
+    if (!(await resourceExists(adminApi, resourcePath))
+      && !(await resourceExists(api, resourcePath))) {
       return;
     }
   }
 
-  const stillAdmin = await resourceExists(adminApi, adminPath);
-  if (!stillAdmin && !(await resourceExists(api, userPath))) return;
-  const adminDelete = await adminApi.delete(adminPath).catch(() => undefined);
+  const stillAdmin = await resourceExists(adminApi, resourcePath);
+  if (!stillAdmin && !(await resourceExists(api, resourcePath))) return;
+  const adminDelete = await adminApi.delete(resourcePath).catch(() => undefined);
   const adminStatus = adminDelete?.status();
   if (adminStatus === 202) {
-    await waitForGone(adminApi, adminPath);
+    await waitForGone(adminApi, resourcePath);
     return;
   }
   if (adminStatus === 200 || adminStatus === 204 || adminStatus === 404) {
-    if (!(await resourceExists(adminApi, adminPath))) return;
+    if (!(await resourceExists(adminApi, resourcePath))) return;
   }
   throw new Error(`failed to delete shared volume ${volumeId}`);
 }
@@ -406,23 +405,22 @@ export async function deleteUserContainer(
   containerId: string | undefined,
 ): Promise<void> {
   if (!containerId) return;
-  const userPath = `/api/containers/${containerId}`;
-  const adminPath = `/api/admin/containers/${containerId}`;
+  const resourcePath = `/api/containers/${containerId}`;
   if (
-    !(await resourceExists(api, userPath))
-    && !(await resourceExists(adminApi, adminPath))
+    !(await resourceExists(api, resourcePath))
+    && !(await resourceExists(adminApi, resourcePath))
   ) {
     return;
   }
 
-  const stop = await adminApi.post(`${adminPath}/actions/stop`).catch(() => undefined);
+  const stop = await adminApi.post(`${resourcePath}/actions/stop`).catch(() => undefined);
   if (stop?.status() === 202) {
     const body = await stop.json() as JsonRecord;
     if (typeof body.intentId === 'string') {
       await requireSucceededIntent(adminApi, body.intentId, 'cleanup.stop').catch(() => undefined);
     }
   }
-  for (const kindPath of [`${adminPath}/volumes`, `${adminPath}/shared-volumes`]) {
+  for (const kindPath of [`${resourcePath}/volumes`, `${resourcePath}/shared-volumes`]) {
     const listed = await adminApi.get(kindPath)
       .then(async (response) => (response.status() === 200
         ? await response.json() as JsonRecord[]
@@ -442,19 +440,19 @@ export async function deleteUserContainer(
   }
 
   const gone = await settleDelete(
-    await api.post(`${userPath}/actions/delete`).catch(() => undefined),
+    await api.post(`${resourcePath}/actions/delete`).catch(() => undefined),
     async () => {
-      await waitForGone(api, userPath).catch(async () => {
-        await waitForGone(adminApi, adminPath);
+      await waitForGone(api, resourcePath).catch(async () => {
+        await waitForGone(adminApi, resourcePath);
       });
     },
   ) || await settleDelete(
-    await adminApi.post(`${adminPath}/actions/delete`).catch(() => undefined),
-    async () => waitForGone(adminApi, adminPath),
+    await adminApi.post(`${resourcePath}/actions/delete`).catch(() => undefined),
+    async () => waitForGone(adminApi, resourcePath),
   );
   if (
     gone
-    || (!(await resourceExists(api, userPath)) && !(await resourceExists(adminApi, adminPath)))
+    || (!(await resourceExists(api, resourcePath)) && !(await resourceExists(adminApi, resourcePath)))
   ) {
     return;
   }
@@ -467,28 +465,27 @@ export async function deleteUserVolume(
   volumeId: string | undefined,
 ): Promise<void> {
   if (!volumeId) return;
-  const userPath = `/api/volumes/${volumeId}`;
-  const adminPath = `/api/admin/volumes/${volumeId}`;
+  const resourcePath = `/api/volumes/${volumeId}`;
   if (
-    !(await resourceExists(api, userPath))
-    && !(await resourceExists(adminApi, adminPath))
+    !(await resourceExists(api, resourcePath))
+    && !(await resourceExists(adminApi, resourcePath))
   ) {
     return;
   }
   const gone = await settleDelete(
-    await api.delete(userPath).catch(() => undefined),
+    await api.delete(resourcePath).catch(() => undefined),
     async () => {
-      await waitForGone(api, userPath).catch(async () => {
-        await waitForGone(adminApi, adminPath);
+      await waitForGone(api, resourcePath).catch(async () => {
+        await waitForGone(adminApi, resourcePath);
       });
     },
   ) || await settleDelete(
-    await adminApi.delete(adminPath).catch(() => undefined),
-    async () => waitForGone(adminApi, adminPath),
+    await adminApi.delete(resourcePath).catch(() => undefined),
+    async () => waitForGone(adminApi, resourcePath),
   );
   if (
     gone
-    || (!(await resourceExists(api, userPath)) && !(await resourceExists(adminApi, adminPath)))
+    || (!(await resourceExists(api, resourcePath)) && !(await resourceExists(adminApi, resourcePath)))
   ) {
     return;
   }
@@ -500,11 +497,26 @@ export async function deletePersonaUser(
   userId: string | undefined,
 ): Promise<void> {
   if (!userId) return;
-  const response = await adminApi.delete(`/api/admin/users/${userId}`);
+  const response = await adminApi.delete(`/api/users/${userId}`);
   expect(
     [200, 204, 404, 409].includes(response.status()),
     `delete user ${userId} returned ${response.status()}`,
   ).toBe(true);
+}
+
+/**
+ * `GET /api/intents` for one resource. `scope=mine` is the owner's view,
+ * `scope=all` an administrator looking at someone else's resource.
+ */
+export function resourceIntentsPath(
+  resourceType: 'container' | 'volume' | 'image_assignment' | 'server',
+  resourceId: string | readonly string[],
+  scope: 'mine' | 'all' = 'mine',
+  query = '',
+): string {
+  const ids = typeof resourceId === 'string' ? resourceId : resourceId.join(',');
+  return `/api/intents?${scope === 'all' ? 'scope=all&' : ''}resourceType=${resourceType}`
+    + `&resourceId=${ids}${query ? `&${query}` : ''}`;
 }
 
 export async function assertNoActiveIntents(

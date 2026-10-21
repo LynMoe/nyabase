@@ -44,7 +44,7 @@ export type {
   ErrorResponse,
   CreateExecSessionRequest,
   IntentListQuery,
-  AdminIntentListQuery,
+  ListScope,
   ListSharedVolumesQuery,
   LocalVolumeScope,
   LoginRequest,

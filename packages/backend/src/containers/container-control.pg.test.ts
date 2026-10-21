@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import type { Kysely } from 'kysely';
 import {
+  Capability,
   ContainerPowerIntent,
   FailureCode,
   ServerStatus,
@@ -22,6 +23,7 @@ import { ContainerSshConvergenceService } from './container-ssh-convergence.serv
 import { isGpuOccupiedSqlError } from '../gpu/enablement.js';
 import { GpuClaimsRepository } from '../gpu/gpu-claims.repository.js';
 import { noopWake } from '../reconcile/reconcile-wake.test-helper.js';
+import { testActor } from '../iam/actor.test-helper.js';
 import { InfrastructureRepository } from '../infrastructure/infrastructure.repository.js';
 import { IncusContainerSshStateAdapter } from './container-ssh-state.adapter.js';
 
@@ -61,7 +63,7 @@ describePg('PostgreSQL container create admission and capacity', () => {
       });
       const service = containerService(database, { diskBytes: 10_000 });
       await expectCode(
-        service.service.createForUser(fixture.userId, request(fixture, 'below-min-root', {
+        service.service.create(testActor(fixture.userId), request(fixture, 'below-min-root', {
           rootSizeBytes: 400,
         })),
         FailureCode.RootSizeBelowImageMinimum,
@@ -82,7 +84,7 @@ describePg('PostgreSQL container create admission and capacity', () => {
         .execute();
 
       await expectCode(
-        service.service.createForUser(fixture.userId, request(fixture, 'inactive-assignment')),
+        service.service.create(testActor(fixture.userId), request(fixture, 'inactive-assignment')),
         FailureCode.ImageAssignmentFingerprintMismatch,
       );
       await database.updateTable('infra.image_server_assignments')
@@ -92,7 +94,7 @@ describePg('PostgreSQL container create admission and capacity', () => {
         .execute();
 
       await expectCode(
-        service.service.createForUser(fixture.userId, request(fixture, 'fingerprint-mismatch')),
+        service.service.create(testActor(fixture.userId), request(fixture, 'fingerprint-mismatch')),
         FailureCode.ImageAssignmentFingerprintMismatch,
       );
       expect(await database.selectFrom('control.containers').select('id').execute()).toEqual([]);
@@ -106,7 +108,7 @@ describePg('PostgreSQL container create admission and capacity', () => {
       const service = containerService(database, { diskBytes: 10_000 });
 
       await expectCode(
-        service.service.createForUser(fixture.userId, request(fixture, 'preflight-failed')),
+        service.service.create(testActor(fixture.userId), request(fixture, 'preflight-failed')),
         FailureCode.PreflightFailed,
       );
 
@@ -115,7 +117,7 @@ describePg('PostgreSQL container create admission and capacity', () => {
         .where('id', '=', fixture.serverId)
         .execute();
       await expectCode(
-        service.service.createForUser(fixture.userId, request(fixture, 'system-pool-missing')),
+        service.service.create(testActor(fixture.userId), request(fixture, 'system-pool-missing')),
         FailureCode.StoragePoolExhausted,
       );
       expect(await database.selectFrom('control.containers').select('id').execute()).toEqual([]);
@@ -126,8 +128,8 @@ describePg('PostgreSQL container create admission and capacity', () => {
     await withPostgresTestDatabase(async ({ database }) => {
       const fixture = await seedFixture(database);
       const service = containerService(database, { diskBytes: 10_000 });
-      const created = await service.service.createForUser(
-        fixture.userId,
+      const created = await service.service.create(
+        testActor(fixture.userId),
         request(fixture, 'scan-idempotent'),
       );
       const intents = new IntentRepository(database, noopWake());
@@ -166,11 +168,11 @@ describePg('PostgreSQL container create admission and capacity', () => {
         minimumRootSizeBytes: 1,
       });
       const service = containerService(database, { diskBytes: 150 });
-      await service.service.createForUser(fixture.userId, request(fixture, 'quota-first', {
+      await service.service.create(testActor(fixture.userId), request(fixture, 'quota-first', {
         rootSizeBytes: 100,
       }));
       await expectCode(
-        service.service.createForUser(fixture.userId, request(fixture, 'quota-second', {
+        service.service.create(testActor(fixture.userId), request(fixture, 'quota-second', {
           rootSizeBytes: 60,
         })),
         FailureCode.StorageGrantExceeded,
@@ -183,11 +185,11 @@ describePg('PostgreSQL container create admission and capacity', () => {
         minimumRootSizeBytes: 1,
       });
       const service = containerService(database, { diskBytes: 10_000 });
-      await service.service.createForUser(fixture.userId, request(fixture, 'pool-first', {
+      await service.service.create(testActor(fixture.userId), request(fixture, 'pool-first', {
         rootSizeBytes: 100,
       }));
       await expectCode(
-        service.service.createForUser(fixture.userId, request(fixture, 'pool-second', {
+        service.service.create(testActor(fixture.userId), request(fixture, 'pool-second', {
           rootSizeBytes: 60,
         })),
         FailureCode.StoragePoolExhausted,
@@ -204,8 +206,8 @@ describePg('PostgreSQL container create admission and capacity', () => {
       });
       const service = containerService(database, { diskBytes: 10_000 });
       const results = await Promise.allSettled([
-        service.service.createForUser(fixture.userId, request(fixture, 'concurrent-a', { rootSizeBytes: 100 })),
-        service.service.createForUser(fixture.userId, request(fixture, 'concurrent-b', { rootSizeBytes: 100 })),
+        service.service.create(testActor(fixture.userId), request(fixture, 'concurrent-a', { rootSizeBytes: 100 })),
+        service.service.create(testActor(fixture.userId), request(fixture, 'concurrent-b', { rootSizeBytes: 100 })),
       ]);
 
       expect(results.filter((result) => result.status === 'fulfilled')).toHaveLength(1);
@@ -260,7 +262,7 @@ describePg('PostgreSQL container create admission and capacity', () => {
           (value) => ({ status: 'fulfilled' as const, value }),
           (reason) => ({ status: 'rejected' as const, reason }),
         ),
-        containerState.service.createForUser(fixture.userId, request(fixture, 'image-delete-race')).then(
+        containerState.service.create(testActor(fixture.userId), request(fixture, 'image-delete-race')).then(
           (value) => ({ status: 'fulfilled' as const, value }),
           (reason) => ({ status: 'rejected' as const, reason }),
         ),
@@ -298,8 +300,8 @@ describePg('PostgreSQL container create admission and capacity', () => {
       });
       const serviceState = containerService(database, { diskBytes: 10_000 });
 
-      const first = await serviceState.service.createForUser(
-        fixture.userId,
+      const first = await serviceState.service.create(
+        testActor(fixture.userId),
         request(fixture, 'pending-larger', { rootSizeBytes: 100 }),
       );
       await database.updateTable('control.containers')
@@ -307,8 +309,8 @@ describePg('PostgreSQL container create admission and capacity', () => {
         .where('id', '=', first.resourceId)
         .execute();
 
-      const second = await serviceState.service.createForUser(
-        fixture.userId,
+      const second = await serviceState.service.create(
+        testActor(fixture.userId),
         request(fixture, 'pending-smaller', { rootSizeBytes: 500 }),
       );
       await database.updateTable('control.containers')
@@ -322,8 +324,8 @@ describePg('PostgreSQL container create admission and capacity', () => {
         imageAvailable: true,
       });
 
-      const third = await serviceState.service.createForUser(
-        fixture.userId,
+      const third = await serviceState.service.create(
+        testActor(fixture.userId),
         request(fixture, 'max-and-shared-excluded', { rootSizeBytes: 100 }),
       );
       expect(third.status).toBe('pending');
@@ -344,8 +346,8 @@ describePg('PostgreSQL GPU claims', () => {
       const harness = gpuHarness(database, { diskBytes: 10_000, gpuPciAddresses: [GPU_A, GPU_B] });
       await enableGpu(database, fixture);
 
-      const first = await harness.service.createForUser(
-        fixture.userId,
+      const first = await harness.service.create(
+        testActor(fixture.userId),
         request(fixture, 'claim-first', { gpuPciAddresses: [GPU_A] }),
       );
       const container = await database.selectFrom('control.containers')
@@ -366,8 +368,8 @@ describePg('PostgreSQL GPU claims', () => {
       });
 
       await expectCode(
-        harness.service.createForUser(
-          fixture.userId,
+        harness.service.create(
+          testActor(fixture.userId),
           request(fixture, 'claim-collision', { gpuPciAddresses: [GPU_A] }),
         ),
         FailureCode.GpuDeviceClaimed,
@@ -381,16 +383,16 @@ describePg('PostgreSQL GPU claims', () => {
       const harness = gpuHarness(database, { diskBytes: 10_000, gpuPciAddresses: [GPU_A, GPU_B] });
 
       await expectCode(
-        harness.service.createForUser(
-          fixture.userId,
+        harness.service.create(
+          testActor(fixture.userId),
           request(fixture, 'not-enabled', { gpuPciAddresses: [GPU_A] }),
         ),
         FailureCode.GpuNotEnabled,
       );
 
       await enableGpu(database, fixture);
-      const created = await harness.service.createForUser(
-        fixture.userId,
+      const created = await harness.service.create(
+        testActor(fixture.userId),
         request(fixture, 'occupied-disable', { gpuPciAddresses: [GPU_B] }),
       );
       expect(created.resourceId).toBeTruthy();
@@ -413,8 +415,8 @@ describePg('PostgreSQL GPU claims', () => {
       await enableGpu(database, fixture);
 
       await expectCode(
-        harness.service.createForUser(
-          fixture.userId,
+        harness.service.create(
+          testActor(fixture.userId),
           request(fixture, 'outside-grant', { gpuPciAddresses: [GPU_B] }),
         ),
         FailureCode.PermissionDenied,
@@ -428,8 +430,8 @@ describePg('PostgreSQL GPU claims', () => {
       const harness = gpuHarness(database, { diskBytes: 10_000, gpuPciAddresses: [GPU_A] });
       await enableGpu(database, fixture);
 
-      const first = await harness.service.createForUser(
-        fixture.userId,
+      const first = await harness.service.create(
+        testActor(fixture.userId),
         request(fixture, 'failed-release', { gpuPciAddresses: [GPU_A] }),
       );
       await database.updateTable('control.containers')
@@ -443,8 +445,8 @@ describePg('PostgreSQL GPU claims', () => {
           .execute(),
       ).toEqual([]);
 
-      const reused = await harness.service.createForUser(
-        fixture.userId,
+      const reused = await harness.service.create(
+        testActor(fixture.userId),
         request(fixture, 'failed-reuse', { gpuPciAddresses: [GPU_A] }),
       );
       const claims = await database.selectFrom('control.container_gpu_claims')
@@ -461,8 +463,8 @@ describePg('PostgreSQL GPU claims', () => {
       const harness = gpuHarness(database, { diskBytes: 10_000 });
       await enableGpu(database, fixture);
 
-      const created = await harness.service.createForUser(
-        fixture.userId,
+      const created = await harness.service.create(
+        testActor(fixture.userId),
         request(fixture, 'mutate-later'),
       );
       await database.updateTable('control.container_ssh_routes')
@@ -470,9 +472,9 @@ describePg('PostgreSQL GPU claims', () => {
         .where('container_id', '=', created.resourceId)
         .execute();
 
-      await harness.service.mutateGpusForAdmin(
+      await harness.service.mutateGpus(
+        testActor(fixture.userId, Capability.ManageContainersAny),
         created.resourceId,
-        fixture.userId,
         { pciAddresses: [GPU_B] },
       );
       const claims = await database.selectFrom('control.container_gpu_claims')
@@ -491,6 +493,36 @@ describePg('PostgreSQL GPU claims', () => {
     });
   });
 });
+
+describePg('PostgreSQL container actor authorization', () => {
+  it('shows a container to its owner and to ManageContainersAny, and hides it from others', async () => {
+    await withPostgresTestDatabase(async ({ database }) => {
+      const fixture = await seedFixture(database);
+      const { service } = containerService(database, { diskBytes: 10_000 });
+      const created = await service.create(testActor(fixture.userId), request(fixture, 'authz'));
+      const containerId = created.resourceId;
+      const owner = testActor(fixture.userId);
+      const operator = testActor(cryptoId(), Capability.ManageContainersAny);
+      const stranger = testActor(cryptoId());
+
+      await expect(service.get(owner, containerId)).resolves.toMatchObject({ id: containerId });
+      await expect(service.get(operator, containerId)).resolves.toMatchObject({ id: containerId });
+      await expect(service.get(stranger, containerId)).rejects.toMatchObject({ status: 403 });
+      await expect(service.action(stranger, containerId, 'stop')).rejects.toMatchObject({ status: 403 });
+      await expect(service.updateLimits(stranger, containerId, { cpuMillis: 1, memBytes: 1 }))
+        .rejects.toMatchObject({ status: 404 });
+
+      // scope=mine only returns the caller's rows; scope=all needs the capability.
+      expect((await service.list(owner, {})).map((row) => row.id)).toEqual([containerId]);
+      expect(await service.list(stranger, {})).toEqual([]);
+      expect((await service.list(operator, { scope: 'all' })).map((row) => row.id))
+        .toEqual([containerId]);
+      expect(await service.list(operator, {})).toEqual([]);
+      await expect(service.list(stranger, { scope: 'all' })).rejects.toMatchObject({ status: 403 });
+    });
+  });
+});
+
 
 function containerService(
   database: Kysely<NyabaseDatabase>,

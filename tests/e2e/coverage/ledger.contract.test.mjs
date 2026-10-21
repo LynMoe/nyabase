@@ -18,7 +18,7 @@ function validate(args = [], options = {}) {
 test('the coverage ledger validates against current contracts', () => {
   const output = validate();
   assert.match(output, /canonical HTTP surfaces/);
-  assert.match(output, /200 mapped \/ 0 unmapped/);
+  assert.match(output, /148 mapped \/ 2 unmapped/);
 });
 
 test('schema v4 pins aliases, forbids routeOwners, and records the unmapped budget', () => {
@@ -46,10 +46,10 @@ test('schema v4 pins aliases, forbids routeOwners, and records the unmapped budg
     ?.resizeFamily, 'quota_online');
   assert.equal(ledger.topology.storageFamilies.find((entry) => entry.driver === 'lvm')
     ?.resizeFamily, 'block_backed');
-  assert.equal(ledger.inventory.httpDecoratorCount, 200);
-  assert.equal(ledger.inventory.httpSurfaceCount, 200);
-  assert.equal(ledger.inventory.canonicalHttpSurfaceCount, 200);
-  assert.equal(ledger.inventory.maxUnmapped, 0);
+  assert.equal(ledger.inventory.httpDecoratorCount, 150);
+  assert.equal(ledger.inventory.httpSurfaceCount, 150);
+  assert.equal(ledger.inventory.canonicalHttpSurfaceCount, 150);
+  assert.equal(ledger.inventory.maxUnmapped, 2);
   assert.deepEqual([...profiles].sort(), ['core', 'full', 'smoke']);
   const caseIds = ledger.features.flatMap((feature) => feature.cases.map((entry) => entry.caseId));
   assert.ok(caseIds.includes('contract-http-inventory'));

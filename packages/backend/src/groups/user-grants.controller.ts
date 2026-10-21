@@ -19,7 +19,7 @@ import type { UserRecord } from '../iam/user-record.js';
 import { AccessResolverService } from '../iam/access-resolver.service.js';
 import { GroupsService } from './groups.service.js';
 
-@Controller('admin/users/:userId')
+@Controller('users/:userId')
 export class UserGrantsController {
   constructor(
     private readonly groups: GroupsService,

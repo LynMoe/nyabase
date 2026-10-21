@@ -153,7 +153,7 @@ export function validateRegisteredStoragePoolDto(
 async function readPersistedStoragePools(request, serverId, token, label) {
   let response;
   try {
-    response = await request(`/api/admin/servers/${encodeURIComponent(serverId)}/storage-pools`, {
+    response = await request(`/api/servers/${encodeURIComponent(serverId)}/storage-pools?scope=all`, {
       token,
     });
   } catch {
@@ -169,7 +169,7 @@ async function registerStoragePool(request, serverId, token, pool) {
 
   let response;
   try {
-    response = await request(`/api/admin/storage-pools/${encodeURIComponent(pool.id)}`, {
+    response = await request(`/api/servers/${encodeURIComponent(serverId)}/storage-pools/${encodeURIComponent(pool.id)}`, {
       method: 'PATCH',
       token,
       body: {
@@ -223,7 +223,7 @@ export async function discoverStoragePools(request, serverId, token) {
   }
   let response;
   try {
-    response = await request(`/api/admin/servers/${serverId}/storage-pools/discover`, {
+    response = await request(`/api/servers/${serverId}/storage-pools/discover`, {
       method: 'POST',
       token,
     });
@@ -240,7 +240,7 @@ export async function listSharedExecutors(request, backendId, token) {
   let response;
   try {
     response = await request(
-      `/api/admin/shared-backends/${encodeURIComponent(backendId)}/executors`,
+      `/api/shared-backends/${encodeURIComponent(backendId)}/executors`,
       { token },
     );
   } catch {
@@ -259,7 +259,7 @@ export async function discoverSharedExecutors(request, backendId, token, serverI
   let response;
   try {
     response = await request(
-      `/api/admin/shared-backends/${encodeURIComponent(backendId)}/executors/discover`,
+      `/api/shared-backends/${encodeURIComponent(backendId)}/executors/discover`,
       {
         method: 'POST',
         token,
@@ -286,7 +286,7 @@ export async function registerSharedExecutor(request, backendId, executor, token
   let response;
   try {
     response = await request(
-      `/api/admin/shared-backends/${encodeURIComponent(backendId)}/executors/${encodeURIComponent(executor.id)}`,
+      `/api/shared-backends/${encodeURIComponent(backendId)}/executors/${encodeURIComponent(executor.id)}`,
       {
         method: 'PATCH',
         token,

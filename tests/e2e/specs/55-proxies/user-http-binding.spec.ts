@@ -36,7 +36,7 @@ test(
       containerId = created.containerId;
 
       const pool = await expectJson<JsonRecord>(
-        await adminApi.post('/api/admin/http-proxy/domain-pools', {
+        await adminApi.post('/api/http-proxy/domain-pools', {
           data: { wildcardDomain: wildcard, enabled: true, httpsEnabled: false },
         }),
         [200, 201],
@@ -78,7 +78,7 @@ test(
         await ownerApi.delete(`/api/http-proxy/bindings/${bindingId}`).catch(() => undefined);
       }
       if (poolId) {
-        await adminApi.delete(`/api/admin/http-proxy/domain-pools/${poolId}`).catch(() => undefined);
+        await adminApi.delete(`/api/http-proxy/domain-pools/${poolId}`).catch(() => undefined);
       }
       await deleteUserContainer(ownerApi ?? adminApi, adminApi, containerId);
       await deletePersonaUser(adminApi, stranger.userId);

@@ -16,6 +16,7 @@ import {
   readErrorBody,
   requireSucceededIntent,
   waitForIntent,
+  resourceIntentsPath,
 } from '../../support/persona.js';
 
 type JsonRecord = Record<string, any>;
@@ -61,7 +62,7 @@ test(
         const intent = await waitForIntent(userApi, body.intentId as string);
         expect(['succeeded', 'failed']).toContain(intent.status);
       }
-      await assertNoActiveIntents(userApi, `/api/containers/${containerId}/intents`);
+      await assertNoActiveIntents(userApi, resourceIntentsPath('container', containerId, 'mine'));
 
       const restart = await expectJson<JsonRecord>(
         await userApi.post(`/api/containers/${containerId}/actions/start`),
@@ -108,7 +109,7 @@ test(
         await userApi.get(`/api/containers/${containerId}/volumes`),
       );
       expect(stillAttached.some((entry) => entry.volumeId === volumeId)).toBe(true);
-      await assertNoActiveIntents(userApi, `/api/containers/${containerId}/intents`);
+      await assertNoActiveIntents(userApi, resourceIntentsPath('container', containerId, 'mine'));
 
       const [deleteA, deleteB] = await Promise.all([
         userApi.post(`/api/containers/${containerId}/actions/delete`),
@@ -128,12 +129,12 @@ test(
         const intent = await waitForIntent(adminApi, body.intentId as string);
         expect(['succeeded', 'failed']).toContain(intent.status);
       }
-      await waitForGone(adminApi, `/api/admin/containers/${containerId}`);
+      await waitForGone(adminApi, `/api/containers/${containerId}`);
       containerId = undefined;
       attachmentId = undefined;
 
       // Volume should remain after container delete (detached by delete path or still listed).
-      const volumeAfter = await adminApi.get(`/api/admin/volumes/${volumeId}`);
+      const volumeAfter = await adminApi.get(`/api/volumes/${volumeId}`);
       if (volumeAfter.status() === 200) {
         await deleteUserVolume(userApi, adminApi, volumeId);
         volumeId = undefined;

@@ -93,19 +93,19 @@ export default function ServerDetailPage() {
 
   const serverQuery = useQuery({
     queryKey: queryKeys.servers.detail(id),
-    queryFn: () => api.get<ServerDto>(`/admin/servers/${id}`),
+    queryFn: () => api.get<ServerDto>(`/servers/${id}?scope=all`),
     refetchInterval: (query) => refetchWhileInProgress(query.state, {
       steadyIntervalMs: false,
       isSettled: (server) => !preflightPending(server.preflightStatus),
     }),
   });
   const poolsQuery = useQuery({
-    queryKey: queryKeys.servers.pools(id, true),
-    queryFn: () => api.get<StoragePoolDto[]>(`/admin/servers/${id}/storage-pools`),
+    queryKey: queryKeys.servers.pools(id, 'all'),
+    queryFn: () => api.get<StoragePoolDto[]>(`/servers/${id}/storage-pools?scope=all`),
   });
   const preflightQuery = useQuery({
     queryKey: queryKeys.servers.preflight(id),
-    queryFn: () => api.get<ServerPreflightDto>(`/admin/servers/${id}/preflight`),
+    queryFn: () => api.get<ServerPreflightDto>(`/servers/${id}/preflight`),
     enabled: tab === 'preflight',
     refetchInterval: (query) => refetchWhileInProgress(query.state, {
       steadyIntervalMs: false,
@@ -123,7 +123,7 @@ export default function ServerDetailPage() {
 
   const invalidateServer = () => {
     void queryClient.invalidateQueries({ queryKey: queryKeys.servers.detail(id) });
-    void queryClient.invalidateQueries({ queryKey: queryKeys.servers.pools(id, true) });
+    void queryClient.invalidateQueries({ queryKey: queryKeys.servers.pools(id, 'all') });
     void queryClient.invalidateQueries({ queryKey: queryKeys.servers.preflight(id) });
     void queryClient.invalidateQueries({ queryKey: queryKeys.certificate });
     void queryClient.invalidateQueries({ queryKey: queryKeys.sharedBackends.admin });
@@ -135,7 +135,7 @@ export default function ServerDetailPage() {
         trustToken: trustToken.trim(),
         expectedServerCertFingerprint: (expectedFingerprint || server?.serverCertFingerprint || '').trim(),
       };
-      return api.post<IntentAcceptedDto>(`/admin/servers/${id}/connect`, body);
+      return api.post<IntentAcceptedDto>(`/servers/${id}/connect`, body);
     },
     onSuccess: (intent) => {
       toast({ title: '已开始连接服务器', description: `操作 ${intent.intentId.slice(0, 8)} 正在执行。` });
@@ -152,7 +152,7 @@ export default function ServerDetailPage() {
         poolId: selectedPoolId,
         probeAddress: probeAddress.trim(),
       };
-      return api.post<IntentAcceptedDto>(`/admin/servers/${id}/preflight`, body);
+      return api.post<IntentAcceptedDto>(`/servers/${id}/preflight`, body);
     },
     onSuccess: (intent) => {
       toast({ title: '前置检查已开始', description: `操作 ${intent.intentId.slice(0, 8)} 正在执行。` });
@@ -162,7 +162,7 @@ export default function ServerDetailPage() {
   });
 
   const discoverPools = useMutation({
-    mutationFn: () => api.post<StoragePoolDiscoverResult>(`/admin/servers/${id}/storage-pools/discover`),
+    mutationFn: () => api.post<StoragePoolDiscoverResult>(`/servers/${id}/storage-pools/discover`),
     onSuccess: (result) => {
       toast({ title: '存储池已刷新', description: `发现 ${result.pools.length} 个本地池。` });
       invalidateServer();
@@ -173,7 +173,7 @@ export default function ServerDetailPage() {
   });
 
   const updateServer = useMutation({
-    mutationFn: (body: PatchServerRequest) => api.patch<ServerDto>(`/admin/servers/${id}`, body),
+    mutationFn: (body: PatchServerRequest) => api.patch<ServerDto>(`/servers/${id}`, body),
     onSuccess: () => {
       setClearMetricsOpen(false);
       toast({ title: '服务器设置已更新' });
@@ -229,7 +229,7 @@ export default function ServerDetailPage() {
   };
 
   const deleteServer = useMutation({
-    mutationFn: () => api.delete<void>(`/admin/servers/${id}?expectedRevision=${server?.revision ?? 0}`),
+    mutationFn: () => api.delete<void>(`/servers/${id}?expectedRevision=${server?.revision ?? 0}`),
     onSuccess: () => {
       setDeleteOpen(false);
       toast({ title: '服务器已从控制面移除' });
@@ -417,8 +417,7 @@ export default function ServerDetailPage() {
             </TabsContent>
             <TabsContent value="activity">
               <ResourceIntentFailures
-                listPath={`/admin/servers/${id}/intents`}
-                admin
+                listPath={`/intents?scope=all&serverId=${id}`}
                 enabled={tab === 'activity'}
               />
             </TabsContent>

@@ -1,3 +1,4 @@
+import { grantSubjectPath } from '../../lib/grant-paths.js';
 import { useQueries, useQuery } from '@tanstack/react-query';
 import {
   formatGpuGrantSummary,
@@ -46,21 +47,21 @@ export function SubjectGrantSummary({
   kind: SubjectKind;
   subjectId: string;
 }) {
-  const prefix = `/admin/${kind}/${subjectId}`;
+  const prefix = grantSubjectPath(kind, subjectId);
   const serversQuery = useQuery({
     queryKey: queryKeys.servers.admin,
-    queryFn: () => api.get<ServerDto[]>('/admin/servers'),
+    queryFn: () => api.get<ServerDto[]>('/servers?scope=all'),
   });
   const backendsQuery = useQuery({
     queryKey: queryKeys.sharedBackends.admin,
-    queryFn: () => api.get<SharedBackendDto[]>('/admin/shared-backends'),
+    queryFn: () => api.get<SharedBackendDto[]>('/shared-backends?scope=all'),
   });
   const poolsQuery = useQuery({
     queryKey: queryKeys.grants.targets.pools,
     queryFn: async () => {
       const servers = serversQuery.data ?? [];
       const rows = await Promise.all(
-        servers.map((server) => api.get<StoragePoolDto[]>(`/admin/servers/${server.id}/storage-pools`)),
+        servers.map((server) => api.get<StoragePoolDto[]>(`/servers/${server.id}/storage-pools?scope=all`)),
       );
       return rows.flat();
     },

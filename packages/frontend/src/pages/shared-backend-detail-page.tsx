@@ -83,11 +83,11 @@ export default function SharedBackendDetailPage() {
 
   const backendQuery = useQuery({
     queryKey: queryKeys.sharedBackends.detail(id),
-    queryFn: () => api.get<SharedBackendDto>(`/admin/shared-backends/${id}`),
+    queryFn: () => api.get<SharedBackendDto>(`/shared-backends/${id}?scope=all`),
   });
   const volumesQuery = useQuery({
     queryKey: queryKeys.sharedVolumes.admin,
-    queryFn: () => api.get<SharedVolumeDto[]>('/admin/shared-volumes'),
+    queryFn: () => api.get<SharedVolumeDto[]>('/shared-volumes?scope=all'),
     enabled: tab === 'volumes' && canManageSharedVolumes,
     refetchInterval: (query) => refetchWhileInProgress(query.state, {
       steadyIntervalMs: 5_000,
@@ -109,7 +109,7 @@ export default function SharedBackendDetailPage() {
 
   const patchBackend = useMutation({
     mutationFn: (body: { expectedRevision: number; displayName?: string | null; overcommitRatio?: number }) =>
-      api.patch<SharedBackendDto>(`/admin/shared-backends/${id}`, body),
+      api.patch<SharedBackendDto>(`/shared-backends/${id}`, body),
     onSuccess: () => {
       toast({ title: '共享后端已更新' });
       setIdentityOpen(false);
@@ -130,7 +130,7 @@ export default function SharedBackendDetailPage() {
       registered: boolean;
     }) =>
       api.patch<SharedBackendExecutorDto>(
-        `/admin/shared-backends/${id}/executors/${executor.id}`,
+        `/shared-backends/${id}/executors/${executor.id}`,
         { expectedRevision: executor.revision, registered },
       ),
     onSuccess: (_data, variables) => {
@@ -142,7 +142,7 @@ export default function SharedBackendDetailPage() {
   const discoverExecutors = useMutation({
     mutationFn: () =>
       api.post<SharedBackendExecutorDiscoverResult>(
-        `/admin/shared-backends/${id}/executors/discover`,
+        `/shared-backends/${id}/executors/discover`,
         {},
       ),
     onSuccess: (result) => {
@@ -175,7 +175,7 @@ export default function SharedBackendDetailPage() {
     },
   });
   const deleteBackend = useMutation({
-    mutationFn: () => api.delete<void>(`/admin/shared-backends/${id}`),
+    mutationFn: () => api.delete<void>(`/shared-backends/${id}`),
     onSuccess: () => {
       toast({ title: '共享后端已删除' });
       setDeleteOpen(false);
@@ -370,7 +370,7 @@ export default function SharedBackendDetailPage() {
                   <SectionCard title="租户共享卷" flush testId="shared-backend-tenant-volumes">
                     <SharedVolumeTable
                       volumes={volumes}
-                      plane="admin"
+                      scope="all"
                       onInspect={setInspectTarget}
                     />
                   </SectionCard>

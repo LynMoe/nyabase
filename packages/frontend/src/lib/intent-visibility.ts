@@ -1,10 +1,30 @@
-import { IntentStatus, type CursorPaginatedResponse, type IntentAcceptedDto, type IntentDto } from '@nyabase/common';
+import {
+  IntentStatus,
+  type CursorPaginatedResponse,
+  type IntentAcceptedDto,
+  type IntentDto,
+  type IntentResourceType,
+  type ListScope,
+} from '@nyabase/common';
 import { api } from './api.js';
 import { waitUntil } from './storage-shrink.js';
 import { failureCodeLabel } from './status-labels.js';
 
-export function retryIntentPath(intentId: string, admin: boolean): string {
-  return admin ? `/admin/intents/${intentId}/retry` : `/intents/${intentId}/retry`;
+export function retryIntentPath(intentId: string): string {
+  return `/intents/${intentId}/retry`;
+}
+
+/**
+ * `GET /intents` for one resource (or several, e.g. every assignment of an
+ * image). `scope=all` is for administrators looking at someone else's resource.
+ */
+export function resourceIntentsPath(
+  scope: ListScope,
+  resourceType: IntentResourceType,
+  resourceId: string | readonly string[],
+): string {
+  const ids = typeof resourceId === 'string' ? resourceId : resourceId.join(',');
+  return `/intents?${scope === 'all' ? 'scope=all&' : ''}resourceType=${resourceType}&resourceId=${ids}`;
 }
 
 export function isRetryableIntent(intent: Pick<IntentDto, 'status'>): boolean {
@@ -59,8 +79,8 @@ export function latestIntentsByResource(items: readonly IntentDto[]): IntentDto[
   return latest;
 }
 
-export async function retryIntent(intentId: string, admin: boolean): Promise<IntentDto> {
-  return api.post<IntentDto>(retryIntentPath(intentId, admin), {});
+export async function retryIntent(intentId: string): Promise<IntentDto> {
+  return api.post<IntentDto>(retryIntentPath(intentId), {});
 }
 
 export function isIntentAccepted(value: unknown): value is IntentAcceptedDto {

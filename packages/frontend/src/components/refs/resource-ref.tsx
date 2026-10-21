@@ -111,12 +111,12 @@ function UserRef({ id, name }: { id: string; name?: string }) {
   });
   const usersQuery = useQuery({
     queryKey: queryKeys.users.admin,
-    queryFn: () => api.get<UserDto[]>('/admin/users'),
+    queryFn: () => api.get<UserDto[]>('/users'),
     enabled: Boolean(id) && !skipFetch && !hasCatalog && hasUsersList,
   });
   const containersQuery = useQuery({
     queryKey: queryKeys.containers.adminList,
-    queryFn: () => api.get<ContainerDto[]>('/admin/containers'),
+    queryFn: () => api.get<ContainerDto[]>('/containers?scope=all'),
     enabled: false,
   });
 
@@ -168,12 +168,12 @@ function ServerRef({ id, name }: { id: string; name?: string }) {
   const explicit = providedName(name);
   const listQuery = useQuery({
     queryKey: queryKeys.servers.admin,
-    queryFn: () => api.get<ServerDto[]>('/admin/servers'),
+    queryFn: () => api.get<ServerDto[]>('/servers?scope=all'),
     enabled: Boolean(id) && !explicit && hasAny(caps, Capability.ManageServers),
   });
   const grantTargetsQuery = useQuery({
     queryKey: queryKeys.grants.targets.servers,
-    queryFn: () => api.get<ServerDto[]>('/admin/servers'),
+    queryFn: () => api.get<ServerDto[]>('/servers?scope=all'),
     enabled: false,
   });
   const row = listQuery.data?.find((item) => item.id === id)
@@ -186,7 +186,7 @@ function ContainerRef({ id, name }: { id: string; name?: string }) {
   const explicit = providedName(name);
   const query = useQuery({
     queryKey: queryKeys.containers.adminList,
-    queryFn: () => api.get<ContainerDto[]>('/admin/containers'),
+    queryFn: () => api.get<ContainerDto[]>('/containers?scope=all'),
     enabled: Boolean(id) && !explicit && hasAny(caps, Capability.ManageContainersAny),
   });
   return <RefLabel id={id} name={explicit ?? query.data?.find((row) => row.id === id)?.name} />;
@@ -197,7 +197,7 @@ function VolumeRef({ id, name }: { id: string; name?: string }) {
   const explicit = providedName(name);
   const query = useQuery({
     queryKey: queryKeys.volumes.admin,
-    queryFn: () => api.get<VolumeDto[]>('/admin/volumes'),
+    queryFn: () => api.get<VolumeDto[]>('/volumes?scope=all'),
     enabled: Boolean(id) && !explicit && hasAny(caps, Capability.ManageVolumes),
   });
   return <RefLabel id={id} name={explicit ?? query.data?.find((row) => row.id === id)?.name} />;
@@ -208,7 +208,7 @@ function SharedVolumeRef({ id, name }: { id: string; name?: string }) {
   const explicit = providedName(name);
   const query = useQuery({
     queryKey: queryKeys.sharedVolumes.admin,
-    queryFn: () => api.get<SharedVolumeDto[]>('/admin/shared-volumes'),
+    queryFn: () => api.get<SharedVolumeDto[]>('/shared-volumes?scope=all'),
     enabled: Boolean(id) && !explicit && hasAny(caps, Capability.ManageSharedVolumes),
   });
   return <RefLabel id={id} name={explicit ?? query.data?.find((row) => row.id === id)?.name} />;
@@ -219,7 +219,7 @@ function ImageRef({ id, name }: { id: string; name?: string }) {
   const explicit = providedName(name);
   const query = useQuery({
     queryKey: queryKeys.images.admin,
-    queryFn: () => api.get<AdminImageDto[]>('/admin/images'),
+    queryFn: () => api.get<AdminImageDto[]>('/images?scope=all'),
     enabled: Boolean(id) && !explicit && hasAny(caps, Capability.ManageImages),
   });
   return <RefLabel id={id} name={explicit ?? query.data?.find((row) => row.id === id)?.alias} />;
@@ -253,12 +253,12 @@ function SharedBackendRef({ id, name }: { id: string; name?: string }) {
   const explicit = providedName(name);
   const listQuery = useQuery({
     queryKey: queryKeys.sharedBackends.admin,
-    queryFn: () => api.get<SharedBackendDto[]>('/admin/shared-backends'),
+    queryFn: () => api.get<SharedBackendDto[]>('/shared-backends?scope=all'),
     enabled: Boolean(id) && !explicit && hasAny(caps, Capability.ManageSharedBackends, Capability.ManageGrants),
   });
   const grantTargetsQuery = useQuery({
     queryKey: queryKeys.grants.targets.backends,
-    queryFn: () => api.get<SharedBackendDto[]>('/admin/shared-backends'),
+    queryFn: () => api.get<SharedBackendDto[]>('/shared-backends?scope=all'),
     enabled: false,
   });
   const row = listQuery.data?.find((item) => item.id === id)

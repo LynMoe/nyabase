@@ -46,7 +46,7 @@ export default function DashboardPage() {
     refetchInterval: (query) => queryPollInterval(query.state, { activeIntervalMs: 30_000 }),
   });
   const usageQuery = useQuery({
-    queryKey: queryKeys.performance.servers('user'),
+    queryKey: queryKeys.performance.servers('mine'),
     queryFn: () => api.get<PerformanceUsageResponse>('/performance/usage'),
     refetchInterval: (query) => queryPollInterval(query.state, { activeIntervalMs: 15_000 }),
   });

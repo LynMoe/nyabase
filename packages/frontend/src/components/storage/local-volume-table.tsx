@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { Link } from '@tanstack/react-router';
 import { Pencil, Trash2 } from 'lucide-react';
-import type { VolumeDto } from '@nyabase/common';
+import type { ListScope, VolumeDto } from '@nyabase/common';
 import { Button } from '../ui/button.js';
 import { StatusBadge } from '../layout/status-badge.js';
 import {
@@ -18,14 +18,14 @@ import { formatGib } from '../../lib/utils.js';
 import { volumeInProgress } from '../../lib/in-progress.js';
 import { failureCodeLabel, volumeAttentionHint, volumeLifecycleLabel } from '../../lib/status-labels.js';
 
-function adminContainerDetailTo(plane: 'user' | 'admin') {
-  if (plane === 'admin') return '/manage/containers/$containerId' as const;
+function adminContainerDetailTo(scope: ListScope) {
+  if (scope === 'all') return '/manage/containers/$containerId' as const;
   return null;
 }
 
 export function LocalVolumeTable({
   volumes,
-  plane,
+  scope,
   showPoolColumn,
   showServerColumn = false,
   serverNameById,
@@ -36,7 +36,7 @@ export function LocalVolumeTable({
   poolId,
 }: {
   volumes: VolumeDto[];
-  plane: 'user' | 'admin';
+  scope: ListScope;
   showPoolColumn: boolean;
   showServerColumn?: boolean;
   serverNameById?: ReadonlyMap<string, string>;
@@ -49,7 +49,7 @@ export function LocalVolumeTable({
   const [detail, setDetail] = useState<VolumeDto | null>(null);
   const showActions = Boolean(onEdit || onDelete);
   const columnCount = 5
-    + (plane === 'admin' ? 1 : 0)
+    + (scope === 'all' ? 1 : 0)
     + (showServerColumn ? 1 : 0)
     + (showPoolColumn ? 1 : 0)
     + (showActions ? 1 : 0);
@@ -60,7 +60,7 @@ export function LocalVolumeTable({
       <TableHeader>
         <TableRow>
           <TableHead>名称</TableHead>
-          {plane === 'admin' ? <TableHead>所有者</TableHead> : null}
+          {scope === 'all' ? <TableHead>所有者</TableHead> : null}
           {showServerColumn ? <TableHead>服务器</TableHead> : null}
           {showPoolColumn ? <TableHead>存储池</TableHead> : null}
           <TableHead>容量</TableHead>
@@ -74,14 +74,14 @@ export function LocalVolumeTable({
         {volumes.length === 0 ? (
           <TableRow>
             <TableCell colSpan={columnCount} className="py-6 text-center text-muted-foreground">
-              {plane === 'user' ? '暂无本地数据卷' : '暂无本地数据卷'}
+              {scope === 'mine' ? '暂无本地数据卷' : '暂无本地数据卷'}
             </TableCell>
           </TableRow>
         ) : volumes.map((volume) => (
           <VolumeRow
             key={volume.id}
             volume={volume}
-            plane={plane}
+            scope={scope}
             showPoolColumn={showPoolColumn}
             showServerColumn={showServerColumn}
             serverName={serverNameById?.get(volume.serverId) ?? '未知服务器'}
@@ -96,7 +96,7 @@ export function LocalVolumeTable({
     </Table>
     <LocalVolumeDetailDialog
       volume={detail}
-      plane={plane}
+      scope={scope}
       open={Boolean(detail)}
       onOpenChange={(open) => { if (!open) setDetail(null); }}
     />
@@ -106,7 +106,7 @@ export function LocalVolumeTable({
 
 function VolumeRow({
   volume,
-  plane,
+  scope,
   showPoolColumn,
   showServerColumn,
   serverName,
@@ -117,7 +117,7 @@ function VolumeRow({
   onDelete,
 }: {
   volume: VolumeDto;
-  plane: 'user' | 'admin';
+  scope: ListScope;
   showPoolColumn: boolean;
   showServerColumn: boolean;
   serverName: string;
@@ -138,7 +138,7 @@ function VolumeRow({
           {volume.name}
         </button>
       </TableCell>
-      {plane === 'admin' ? (
+      {scope === 'all' ? (
         <TableCell onClick={(event) => event.stopPropagation()}>
           <ResourceRef kind="user" id={volume.ownerId} />
         </TableCell>
@@ -150,7 +150,7 @@ function VolumeRow({
       <TableCell className="max-w-[16rem] whitespace-normal">
         <VolumeAttachmentsCell
           volume={volume}
-          plane={plane}
+          scope={scope}
           canManageContainersAny={canManageContainersAny}
         />
       </TableCell>
@@ -191,18 +191,18 @@ function VolumeRow({
 
 function VolumeAttachmentsCell({
   volume,
-  plane,
+  scope,
   canManageContainersAny,
 }: {
   volume: VolumeDto;
-  plane: 'user' | 'admin';
+  scope: ListScope;
   canManageContainersAny: boolean;
 }) {
-  if (plane === 'admin') {
+  if (scope === 'all') {
     if (volume.attachments.length === 0) {
       return <span className="text-muted-foreground">未挂载</span>;
     }
-    const adminTo = adminContainerDetailTo(plane);
+    const adminTo = adminContainerDetailTo(scope);
     return (
       <span data-testid="volume-attachments">
         挂载于{' '}
@@ -228,7 +228,7 @@ function VolumeAttachmentsCell({
     );
   }
 
-  if (plane === 'user') {
+  if (scope === 'mine') {
     if (volume.attachments.length === 0) {
       return <span className="text-muted-foreground">未挂载</span>;
     }

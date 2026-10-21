@@ -33,14 +33,17 @@ export function isCurrentPrincipalAccessQuery(queryKey: readonly unknown[]): boo
   const a = queryKey[1];
   const b = queryKey[2];
   if (root === 'me' && a === 'access') return true;
+  // Keys that carry the caller's own rows: `user` labels the named list keys,
+  // `mine` is the `scope` of the scope-parameterised ones.
   if (
     (root === 'servers' || root === 'images' || root === 'containers'
       || root === 'container' || root === 'volumes' || root === 'shared-backends'
       || root === 'storage-pools' || root === 'container-intents'
-      || root === 'container-attachments' || root === 'resource-intent-failures'
-      || root === 'volume-intents' || root === 'gpu-devices')
-    && a === 'user'
+      || root === 'container-attachments' || root === 'gpu-devices')
+    && (a === 'user' || a === 'mine')
   ) return true;
+  // Resource intent lists embed their request path; only scope=all ones are everyone's.
+  if (root === 'resource-intent-failures') return !String(a ?? '').includes('scope=all');
   if (root === 'http-proxy' && b === 'user') return true;
   return false;
 }

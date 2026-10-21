@@ -1,9 +1,5 @@
-import {
-  zAdminIntentListQuery,
-  zIntentListQuery,
-  type IntentDto,
-} from '@nyabase/common';
-import type { IntentListOptions, IntentRecord } from './intent.repository.js';
+import type { IntentDto } from '@nyabase/common';
+import type { IntentRecord } from './intent.repository.js';
 
 export function toDto(intent: IntentRecord): IntentDto {
   return {
@@ -30,29 +26,5 @@ export function toDto(intent: IntentRecord): IntentDto {
     createdAt: intent.createdAt,
     settledAt: intent.settledAt,
     blockedByIntentId: intent.blockedByIntentId ?? null,
-  };
-}
-
-export function listOptions(
-  query: Record<string, unknown>,
-): Pick<IntentListOptions, 'limit' | 'cursor' | 'status' | 'kind'> {
-  const parsed = zIntentListQuery.parse(query);
-  return {
-    limit: parsed.limit,
-    cursor: parsed.cursor,
-    status: parsed.status as IntentListOptions['status'],
-    kind: parsed.kind as IntentListOptions['kind'],
-  };
-}
-
-export function adminIntentListOptions(query: Record<string, unknown>): IntentListOptions {
-  const parsed = zAdminIntentListQuery.parse(query);
-  return {
-    limit: parsed.limit,
-    cursor: parsed.cursor,
-    status: parsed.status as IntentListOptions['status'],
-    kind: parsed.kind as IntentListOptions['kind'],
-    resourceType: parsed.resourceType,
-    serverId: parsed.serverId,
   };
 }

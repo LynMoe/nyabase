@@ -25,7 +25,7 @@ test(
   async ({ adminApi, seedState }) => {
     const persona = await createPersonaUser(adminApi, 'grant');
     const expiresAt = new Date(Date.now() + 15 * 60_000).toISOString();
-    const base = `/api/admin/users/${persona.userId}`;
+    const base = `/api/users/${persona.userId}`;
     try {
       const serverGrant = await expectJson<JsonRecord>(
         await adminApi.put(`${base}/server-grants/${seedState.server.id}`, {

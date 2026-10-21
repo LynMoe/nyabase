@@ -11,6 +11,7 @@ import {
   deleteUserVolume,
   loginPersona, logoutPersona,
   provisionGrantedUser,
+  resourceIntentsPath,
 } from '../../support/persona.js';
 
 type JsonRecord = Record<string, any>;
@@ -63,7 +64,7 @@ test(
       );
       expect(volumeDto.id).toBe(volumeId);
 
-      await assertNoActiveIntents(userApi, `/api/containers/${containerId}/intents`);
+      await assertNoActiveIntents(userApi, resourceIntentsPath('container', containerId, 'mine'));
     } finally {
       if (userApi) {
         await deleteUserVolume(userApi, adminApi, volumeId);
@@ -93,13 +94,13 @@ test(
       {
         label: 'anonymous admin stop container',
         run: () => anonymousApi.post(
-          '/api/admin/containers/00000000-0000-4000-8000-000000000001/actions/stop',
+          '/api/containers/00000000-0000-4000-8000-000000000001/actions/stop',
         ),
       },
       {
         label: 'forged admin stop container',
         run: () => forged.post(
-          '/api/admin/containers/00000000-0000-4000-8000-000000000001/actions/stop',
+          '/api/containers/00000000-0000-4000-8000-000000000001/actions/stop',
         ),
       },
       {
@@ -119,7 +120,7 @@ test(
       {
         label: 'forged grant upsert',
         run: () => forged.put(
-          `/api/admin/users/${seedState.adminUserId}/server-grants/${seedState.server.id}`,
+          `/api/users/${seedState.adminUserId}/server-grants/${seedState.server.id}`,
           {
             data: {
               cpuMillis: 100,
@@ -133,7 +134,7 @@ test(
       },
       {
         label: 'anonymous delete volume',
-        run: () => anonymousApi.delete(`/api/admin/volumes/${seedState.storagePools.dirQuotaOnline.id}`),
+        run: () => anonymousApi.delete(`/api/volumes/${seedState.storagePools.dirQuotaOnline.id}`),
       },
       {
         label: 'forged get intent',
@@ -159,11 +160,11 @@ test(
         extraHTTPHeaders: { authorization: `Bearer ${session.accessToken}` },
       });
       const adminBlocked = await userApi.post(
-        '/api/admin/containers/00000000-0000-4000-8000-000000000001/actions/start',
+        '/api/containers/00000000-0000-4000-8000-000000000001/actions/start',
       );
       expect([403, 404]).toContain(adminBlocked.status());
       const grantBlocked = await userApi.put(
-        `/api/admin/users/${seedState.adminUserId}/server-grants/${seedState.server.id}`,
+        `/api/users/${seedState.adminUserId}/server-grants/${seedState.server.id}`,
         {
           data: {
             cpuMillis: 100,

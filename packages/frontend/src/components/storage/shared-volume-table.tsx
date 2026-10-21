@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { Pencil, Search, Trash2 } from 'lucide-react';
-import type { SharedVolumeDto } from '@nyabase/common';
+import type { ListScope, SharedVolumeDto } from '@nyabase/common';
 import { StatusBadge } from '../layout/status-badge.js';
 import { Button } from '../ui/button.js';
 import {
@@ -20,7 +20,7 @@ import { failureCodeLabel, volumeAttentionHint, volumeLifecycleLabel } from '../
 
 export function SharedVolumeTable({
   volumes,
-  plane,
+  scope,
   showBackendColumn,
   onEdit,
   onDelete,
@@ -29,7 +29,7 @@ export function SharedVolumeTable({
   emptyLabel,
 }: {
   volumes: SharedVolumeDto[];
-  plane: 'user' | 'admin';
+  scope: ListScope;
   showBackendColumn?: boolean;
   onEdit?: (volume: SharedVolumeDto) => void;
   onDelete?: (volume: SharedVolumeDto) => void;
@@ -40,7 +40,7 @@ export function SharedVolumeTable({
   const [detail, setDetail] = useState<SharedVolumeDto | null>(null);
   const showActions = Boolean(onEdit || onDelete || onInspect);
   const columnCount = 5
-    + (plane === 'admin' ? 1 : 0)
+    + (scope === 'all' ? 1 : 0)
     + (showBackendColumn ? 1 : 0)
     + (showActions ? 1 : 0);
 
@@ -50,7 +50,7 @@ export function SharedVolumeTable({
         <TableHeader>
           <TableRow>
             <TableHead>名称</TableHead>
-            {plane === 'admin' ? <TableHead>所有者</TableHead> : null}
+            {scope === 'all' ? <TableHead>所有者</TableHead> : null}
             {showBackendColumn ? <TableHead>后端</TableHead> : null}
             <TableHead>容量</TableHead>
             <TableHead>已用</TableHead>
@@ -63,14 +63,14 @@ export function SharedVolumeTable({
           {volumes.length === 0 ? (
             <TableRow>
               <TableCell colSpan={columnCount} className="py-6 text-center text-muted-foreground">
-                {emptyLabel ?? (plane === 'admin' ? '暂无租户共享卷' : '暂无共享卷')}
+                {emptyLabel ?? (scope === 'all' ? '暂无租户共享卷' : '暂无共享卷')}
               </TableCell>
             </TableRow>
           ) : volumes.map((volume) => (
             <SharedVolumeRow
               key={volume.id}
               volume={volume}
-              plane={plane}
+              scope={scope}
               showBackendColumn={Boolean(showBackendColumn)}
               showActions={showActions}
               onOpenDetail={() => setDetail(volume)}
@@ -83,7 +83,7 @@ export function SharedVolumeTable({
       </Table>
       <SharedVolumeDetailDialog
         volume={detail}
-        plane={plane}
+        scope={scope}
         open={Boolean(detail)}
         onOpenChange={(open) => { if (!open) setDetail(null); }}
       />
@@ -93,7 +93,7 @@ export function SharedVolumeTable({
 
 function SharedVolumeRow({
   volume,
-  plane,
+  scope,
   showBackendColumn,
   showActions,
   onOpenDetail,
@@ -102,7 +102,7 @@ function SharedVolumeRow({
   onInspect,
 }: {
   volume: SharedVolumeDto;
-  plane: 'user' | 'admin';
+  scope: ListScope;
   showBackendColumn: boolean;
   showActions: boolean;
   onOpenDetail: () => void;
@@ -121,7 +121,7 @@ function SharedVolumeRow({
           {volume.name}
         </button>
       </TableCell>
-      {plane === 'admin' ? (
+      {scope === 'all' ? (
         <TableCell onClick={(event) => event.stopPropagation()}>
           <ResourceRef kind="user" id={volume.ownerId} />
         </TableCell>

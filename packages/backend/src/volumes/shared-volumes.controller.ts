@@ -19,105 +19,63 @@ import {
   zPatchVolumeRequest,
 } from '@nyabase/common';
 import { RequireCaps } from '../iam/decorators/require-caps.decorator.js';
-import { CurrentUser } from '../iam/decorators/current-user.decorator.js';
-import type { UserRecord } from '../iam/user-record.js';
+import { CurrentActor } from '../iam/decorators/current-actor.decorator.js';
+import type { Actor } from '../iam/actor.js';
 import { isIntentAccepted, VolumesService } from './volumes.service.js';
 
+/** Shared volumes: owners and `ManageSharedVolumes` holders share one surface. */
 @Controller('shared-volumes')
 export class SharedVolumesController {
   constructor(private readonly service: VolumesService) {}
 
   @Get()
-  list(@CurrentUser() user: UserRecord, @Query() query: Record<string, unknown>) {
-    const parsed = zListSharedVolumesQuery.parse(query);
-    return this.service.listSharedForUser(user.id, parsed.attachableOnServerId);
-  }
-
-  @Get(':id')
-  get(@Param('id') id: string, @CurrentUser() user: UserRecord) {
-    return this.service.getSharedForUser(id, user.id);
-  }
-
-  @Post()
-  @HttpCode(HttpStatus.CREATED)
-  create(@CurrentUser() user: UserRecord, @Body() body: unknown) {
-    const input = zCreateSharedVolumeRequest.parse(body);
-    return this.service.createSharedForUser(user.id, input);
-  }
-
-  @Patch(':id')
-  async patch(
-    @Param('id') id: string,
-    @CurrentUser() user: UserRecord,
-    @Body() body: unknown,
-    @Res({ passthrough: true }) response: { status: (code: number) => void },
-  ) {
-    const result = await this.service.patchSharedForUser(
-      user.id,
-      id,
-      zPatchVolumeRequest.parse(body),
-    );
-    if (isIntentAccepted(result)) response.status(HttpStatus.ACCEPTED);
-    return result;
-  }
-
-  @Delete(':id')
-  @HttpCode(HttpStatus.ACCEPTED)
-  delete(@Param('id') id: string, @CurrentUser() user: UserRecord) {
-    return this.service.deleteSharedForUser(user.id, id);
-  }
-}
-
-@Controller('admin/shared-volumes')
-@RequireCaps(Capability.ManageSharedVolumes)
-export class AdminSharedVolumesController {
-  constructor(private readonly service: VolumesService) {}
-
-  @Get()
-  list(@Query() query: Record<string, unknown>) {
-    const parsed = zListSharedVolumesQuery.parse(query);
-    return this.service.listSharedForAdmin(parsed.attachableOnServerId);
+  list(@CurrentActor() actor: Actor, @Query() query: Record<string, unknown>) {
+    return this.service.listShared(actor, zListSharedVolumesQuery.parse(query));
   }
 
   @Get(':id/catalogs')
+  @RequireCaps(Capability.ManageSharedVolumes)
   inspect(@Param('id') id: string) {
     return this.service.inspectSharedVolumeCatalogs(id);
   }
 
   @Get(':id')
-  get(@Param('id') id: string) {
-    return this.service.getSharedForAdmin(id);
+  get(@Param('id') id: string, @CurrentActor() actor: Actor) {
+    return this.service.getShared(actor, id);
+  }
+
+  @Post()
+  @HttpCode(HttpStatus.CREATED)
+  create(@CurrentActor() actor: Actor, @Body() body: unknown) {
+    const input = zCreateSharedVolumeRequest.parse(body);
+    return this.service.createShared(actor, input);
   }
 
   @Patch(':id')
   async patch(
     @Param('id') id: string,
-    @CurrentUser() user: UserRecord,
+    @CurrentActor() actor: Actor,
     @Body() body: unknown,
     @Res({ passthrough: true }) response: { status: (code: number) => void },
   ) {
-    const result = await this.service.patchSharedForAdmin(
-      user.id,
-      id,
-      zPatchVolumeRequest.parse(body),
-    );
+    const result = await this.service.patchShared(actor, id, zPatchVolumeRequest.parse(body));
     if (isIntentAccepted(result)) response.status(HttpStatus.ACCEPTED);
     return result;
   }
 
   @Delete(':id')
   @HttpCode(HttpStatus.ACCEPTED)
-  delete(@Param('id') id: string, @CurrentUser() user: UserRecord) {
-    return this.service.deleteSharedForAdmin(user.id, id);
+  delete(@Param('id') id: string, @CurrentActor() actor: Actor) {
+    return this.service.deleteShared(actor, id);
   }
 }
 
-@Controller('admin/shared-backends')
-@RequireCaps(Capability.ManageSharedVolumes)
-export class AdminSharedBackendCatalogInspectController {
+@Controller('shared-backends')
+export class SharedBackendCatalogInspectController {
   constructor(private readonly service: VolumesService) {}
 
   @Get(':id/catalog-inspect')
+  @RequireCaps(Capability.ManageSharedVolumes)
   inspect(@Param('id') id: string) {
     return this.service.inspectSharedBackendCatalogs(id);
   }
@@ -131,15 +89,10 @@ export class ContainerSharedVolumesController {
   @HttpCode(HttpStatus.ACCEPTED)
   attach(
     @Param('containerId') containerId: string,
-    @CurrentUser() user: UserRecord,
+    @CurrentActor() actor: Actor,
     @Body() body: unknown,
   ) {
-    return this.service.attachForUser(
-      user.id,
-      containerId,
-      zAttachVolumeRequest.parse(body),
-      'shared',
-    );
+    return this.service.attach(actor, containerId, zAttachVolumeRequest.parse(body), 'shared');
   }
 
   @Delete(':attachmentId')
@@ -147,39 +100,8 @@ export class ContainerSharedVolumesController {
   detach(
     @Param('containerId') containerId: string,
     @Param('attachmentId') attachmentId: string,
-    @CurrentUser() user: UserRecord,
+    @CurrentActor() actor: Actor,
   ) {
-    return this.service.detachForUser(user.id, attachmentId, containerId, 'shared');
-  }
-}
-
-@Controller('admin/containers/:containerId/shared-volumes')
-@RequireCaps(Capability.ManageSharedVolumes)
-export class AdminContainerSharedVolumesController {
-  constructor(private readonly service: VolumesService) {}
-
-  @Post()
-  @HttpCode(HttpStatus.ACCEPTED)
-  attach(
-    @Param('containerId') containerId: string,
-    @CurrentUser() user: UserRecord,
-    @Body() body: unknown,
-  ) {
-    return this.service.attachForAdmin(
-      user.id,
-      containerId,
-      zAttachVolumeRequest.parse(body),
-      'shared',
-    );
-  }
-
-  @Delete(':attachmentId')
-  @HttpCode(HttpStatus.ACCEPTED)
-  detach(
-    @Param('containerId') containerId: string,
-    @Param('attachmentId') attachmentId: string,
-    @CurrentUser() user: UserRecord,
-  ) {
-    return this.service.detachForAdmin(user.id, attachmentId, containerId, 'shared');
+    return this.service.detach(actor, attachmentId, containerId, 'shared');
   }
 }

@@ -196,7 +196,7 @@ function assertNoSeedAdminGrantMutation(method: string, pathname: string, status
   if (status < 200 || status >= 300) return;
   const adminUserId = readSeedState().adminUserId;
   const pattern = new RegExp(
-    `^/api/admin/users/${escapeRegExp(adminUserId)}/(server-grants|storage-pool-grants|shared-backend-grants)/`,
+    `^/api/users/${escapeRegExp(adminUserId)}/(server-grants|storage-pool-grants|shared-backend-grants)/`,
   );
   if (pattern.test(pathname)) {
     throw new Error(

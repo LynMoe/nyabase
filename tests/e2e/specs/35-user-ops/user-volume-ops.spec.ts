@@ -16,6 +16,7 @@ import {
   readErrorBody,
   requireSucceededIntent,
   stopUserContainer,
+  resourceIntentsPath,
 } from '../../support/persona.js';
 
 type JsonRecord = Record<string, any>;
@@ -63,7 +64,7 @@ test(
       const after = await expectJson<JsonRecord>(await userApi.get(`/api/volumes/${volumeId}`));
       expect(Number(after.sizeBytes)).toBe(grownSize);
       expect(Number(after.revision)).toBeGreaterThan(revision);
-      await assertNoActiveIntents(userApi, `/api/volumes/${volumeId}/intents`);
+      await assertNoActiveIntents(userApi, resourceIntentsPath('volume', volumeId, 'mine'));
     } finally {
       await deleteUserVolume(userApi ?? adminApi, adminApi, volumeId);
       if (refreshToken) {
@@ -147,7 +148,7 @@ test(
         const after = await expectJson<JsonRecord>(await api.get(`/api/volumes/${volumeId}`));
         expect(Number(after.sizeBytes)).toBe(initialSize);
       }
-      await assertNoActiveIntents(api, `/api/volumes/${volumeId}/intents`);
+      await assertNoActiveIntents(api, resourceIntentsPath('volume', volumeId, 'mine'));
     } finally {
       await deleteUserVolume(userApi ?? adminApi, adminApi, volumeId);
       if (refreshToken) {
@@ -232,7 +233,7 @@ test(
       await requireSucceededIntent(userApi, deleted.intentId, 'user.volume.delete.after.detach');
       volumeId = undefined;
 
-      await assertNoActiveIntents(userApi, `/api/containers/${containerId}/intents`);
+      await assertNoActiveIntents(userApi, resourceIntentsPath('container', containerId, 'mine'));
     } finally {
       if (containerId && userApi) {
         await stopUserContainer(userApi, containerId).catch(() => undefined);

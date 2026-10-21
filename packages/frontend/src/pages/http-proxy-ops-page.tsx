@@ -77,7 +77,7 @@ export default function HttpProxyOpsPage() {
 
   const statusQuery = useQuery({
     queryKey: queryKeys.httpProxy.adminStatus,
-    queryFn: () => api.get<HttpProxyAdminStatus>('/admin/http-proxy/status'),
+    queryFn: () => api.get<HttpProxyAdminStatus>('/http-proxy/status'),
     refetchInterval: (query) => queryPollInterval(query.state, {
       activeIntervalMs: 1_000,
       transientBaseIntervalMs: 2_000,
@@ -87,19 +87,19 @@ export default function HttpProxyOpsPage() {
   });
   const poolsQuery = useQuery({
     queryKey: queryKeys.httpProxy.adminDomainPools,
-    queryFn: () => api.get<HttpDomainPoolDto[]>('/admin/http-proxy/domain-pools'),
+    queryFn: () => api.get<HttpDomainPoolDto[]>('/http-proxy/domain-pools?scope=all'),
     enabled: canManagePools,
   });
   const bindingsQuery = useQuery({
     queryKey: queryKeys.httpProxy.adminBindings,
-    queryFn: () => api.get<HttpProxyBindingDto[]>('/admin/http-proxy/bindings')
+    queryFn: () => api.get<HttpProxyBindingDto[]>('/http-proxy/bindings?scope=all')
       .catch(emptyIfNotFound<HttpProxyBindingDto[] | null>(null)),
     enabled: canManagePools,
     retry: (count, error) => (error instanceof ApiError && error.status === 404 ? false : count < 2),
   });
 
   const removePool = useMutation({
-    mutationFn: (id: string) => api.delete<unknown>(`/admin/http-proxy/domain-pools/${id}`),
+    mutationFn: (id: string) => api.delete<unknown>(`/http-proxy/domain-pools/${id}`),
     onSuccess: () => {
       toast({ title: '域名池已删除' });
       setDeletePool(null);
@@ -334,7 +334,7 @@ function DomainPoolFormDialog({
   const [privateKeyPem, setPrivateKeyPem] = useState('');
   const [error, setError] = useState<string | null>(null);
   const create = useMutation({
-    mutationFn: (body: CreateHttpDomainPoolRequest) => api.post<HttpDomainPoolDto>('/admin/http-proxy/domain-pools', body),
+    mutationFn: (body: CreateHttpDomainPoolRequest) => api.post<HttpDomainPoolDto>('/http-proxy/domain-pools', body),
     onSuccess: () => {
       toast({ title: '域名池已创建' });
       void queryClient.invalidateQueries({ queryKey: queryKeys.httpProxy.adminDomainPools });
@@ -343,7 +343,7 @@ function DomainPoolFormDialog({
     onError: (mutationError) => setError(httpProxyErrorMessage(mutationError)),
   });
   const patch = useMutation({
-    mutationFn: (body: PatchHttpDomainPoolRequest) => api.patch<HttpDomainPoolDto>(`/admin/http-proxy/domain-pools/${pool?.id ?? ''}`, body),
+    mutationFn: (body: PatchHttpDomainPoolRequest) => api.patch<HttpDomainPoolDto>(`/http-proxy/domain-pools/${pool?.id ?? ''}`, body),
     onSuccess: () => {
       toast({ title: '域名池已更新' });
       void queryClient.invalidateQueries({ queryKey: queryKeys.httpProxy.adminDomainPools });

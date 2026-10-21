@@ -15,6 +15,7 @@ import {
   readErrorBody,
   refreshCookieFrom,
   refreshPersona,
+  resourceIntentsPath,
 } from '../../support/persona.js';
 
 type JsonRecord = Record<string, any>;
@@ -117,7 +118,7 @@ test(
         /Only failed intents can be retried/i,
       );
 
-      await assertNoActiveIntents(ownerApi, `/api/containers/${containerId}/intents`);
+      await assertNoActiveIntents(ownerApi, resourceIntentsPath('container', containerId, 'mine'));
     } finally {
       if (ownerApi) {
         await deleteUserContainer(ownerApi, adminApi, containerId);

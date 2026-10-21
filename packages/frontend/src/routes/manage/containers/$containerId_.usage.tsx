@@ -11,7 +11,7 @@ function ManageContainerUsageRoute() {
   const { containerId } = Route.useParams();
   return (
     <RequireAccess rule={ACCESS.manageContainers}>
-      <ContainerUsagePage containerId={containerId} admin />
+      <ContainerUsagePage containerId={containerId} scope="all" />
     </RequireAccess>
   );
 }

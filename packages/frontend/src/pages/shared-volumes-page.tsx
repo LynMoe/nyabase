@@ -72,7 +72,7 @@ export default function SharedVolumesPage() {
           <SectionCard flush>
             <SharedVolumeTable
               volumes={volumes}
-              plane="user"
+              scope="mine"
               showBackendColumn
               onEdit={setEditTarget}
               onDelete={setDeleteTarget}

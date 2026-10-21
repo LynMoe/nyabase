@@ -10,5 +10,5 @@ export const Route = createFileRoute('/usage/')({
 
 function UsageRoute() {
   const { serverId } = Route.useSearch();
-  return <UsagePage mode="user" initialServerId={serverId} />;
+  return <UsagePage scope="mine" initialServerId={serverId} />;
 }

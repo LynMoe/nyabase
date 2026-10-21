@@ -11,11 +11,13 @@ import { sql, type Kysely, type Transaction } from 'kysely';
 import {
   FailureCode,
   AuditAction,
+  Capability,
   IntentKind,
   IntentResourceType,
   StoragePoolResizeFamily,
   type AttachVolumeRequest,
   type CreateSharedVolumeRequest,
+  type ListScope,
   type LocalVolumeScope,
   type SharedBackendCatalogInspectDto,
   type SharedVolumeCatalogInspectDto,
@@ -39,6 +41,7 @@ import { StoragePoolsRepository } from '../storage-pools/storage-pools.repositor
 import { isLocalPoolRow, storagePoolCapability } from '../storage-pools/storage-pools.service.js';
 import { VolumesRepository, type VolumeExecutor } from './volumes.repository.js';
 import { AuditService } from '../iam/audit.service.js';
+import { assertListScope, isSystemActor, type Actor } from '../iam/actor.js';
 import {
   classifyGrantExpiry,
   compareGrantCandidates,
@@ -60,6 +63,8 @@ type GrantRow = {
   group_priority: number | null;
   id: string;
 };
+
+type VolumeAccess = 'owner' | 'admin';
 
 type VolumeRow = {
   id: string;
@@ -272,60 +277,63 @@ export class VolumesService {
     await this.pools.lockSharedBackends([volume.shared_backend_id], transaction);
   }
 
-  async listForUser(ownerId: string): Promise<VolumeDto[]> {
-    const rows = await this.repository.listByKind('local', { ownerId });
+  async list(
+    actor: Actor,
+    filters: { scope?: ListScope; serverId?: string } = {},
+  ): Promise<VolumeDto[]> {
+    const scope = filters.scope ?? 'mine';
+    assertListScope(actor, scope, Capability.ManageVolumes);
+    const rows = await this.repository.listByKind(
+      'local',
+      scope === 'mine' ? { ownerId: actor.userId } : { serverId: filters.serverId },
+    );
     return this.toDtos(rows);
   }
 
-  async listForAdmin(serverId?: string): Promise<VolumeDto[]> {
-    return this.toDtos(await this.repository.listByKind('local', { serverId }));
-  }
-
-  async listSharedForUser(ownerId: string, attachableOnServerId?: string): Promise<SharedVolumeDto[]> {
-    const rows = await this.repository.listByKind('shared', { ownerId });
-    const filtered = attachableOnServerId
-      ? await this.filterAttachableShared(rows, attachableOnServerId)
+  async listShared(
+    actor: Actor,
+    filters: { scope?: ListScope; attachableOnServerId?: string } = {},
+  ): Promise<SharedVolumeDto[]> {
+    const scope = filters.scope ?? 'mine';
+    assertListScope(actor, scope, Capability.ManageSharedVolumes);
+    const rows = await this.repository.listByKind(
+      'shared',
+      scope === 'mine' ? { ownerId: actor.userId } : {},
+    );
+    const filtered = filters.attachableOnServerId
+      ? await this.filterAttachableShared(rows, filters.attachableOnServerId)
       : rows;
     return this.toSharedDtos(filtered);
   }
 
-  async listSharedForAdmin(attachableOnServerId?: string): Promise<SharedVolumeDto[]> {
-    const rows = await this.repository.listByKind('shared', {});
-    const filtered = attachableOnServerId
-      ? await this.filterAttachableShared(rows, attachableOnServerId)
-      : rows;
-    return this.toSharedDtos(filtered);
-  }
-
-  async getForUser(id: string, actorId: string): Promise<VolumeDto> {
-    const row = await this.repository.findById(id);
-    this.requireLocal(row, actorId, 'user');
-    const [dto] = await this.toDtos([row!]);
+  async get(actor: Actor, id: string): Promise<VolumeDto> {
+    const { row } = this.assertCanAccess(actor, await this.repository.findById(id), 'local');
+    const [dto] = await this.toDtos([row]);
     return dto!;
   }
 
-  async getForAdmin(id: string): Promise<VolumeDto> {
-    const row = await this.repository.findById(id);
-    this.requireLocal(row, undefined, 'admin');
-    const [dto] = await this.toDtos([row!]);
+  async getShared(actor: Actor, id: string): Promise<SharedVolumeDto> {
+    const { row } = this.assertCanAccess(actor, await this.repository.findById(id), 'shared');
+    const [dto] = await this.toSharedDtos([row]);
     return dto!;
   }
 
-  async getSharedForUser(id: string, actorId: string): Promise<SharedVolumeDto> {
-    const row = await this.repository.findById(id);
-    this.requireShared(row, actorId, 'user');
-    const [dto] = await this.toSharedDtos([row!]);
-    return dto!;
+  /**
+   * `scope=mine`: the caller's own storage on a server they hold a grant for.
+   * `scope=all`: the server-wide view for `ManageServers`.
+   */
+  async capacity(
+    actor: Actor,
+    serverId: string,
+    scope: ListScope = 'mine',
+  ): Promise<StorageCapacityDto> {
+    assertListScope(actor, scope, Capability.ManageServers);
+    return scope === 'all'
+      ? this.serverWideCapacity(serverId)
+      : this.ownerCapacity(actor.userId, serverId);
   }
 
-  async getSharedForAdmin(id: string): Promise<SharedVolumeDto> {
-    const row = await this.repository.findById(id);
-    this.requireShared(row, undefined, 'admin');
-    const [dto] = await this.toSharedDtos([row!]);
-    return dto!;
-  }
-
-  async capacityForUser(ownerId: string, serverId: string): Promise<StorageCapacityDto> {
+  private async ownerCapacity(ownerId: string, serverId: string): Promise<StorageCapacityDto> {
     await this.assertServerGrant(ownerId, serverId);
     const grant = await this.effectiveServerGrant(ownerId, serverId);
     const pools = (await this.pools.list(serverId)).filter(isLocalPoolRow);
@@ -375,7 +383,7 @@ export class VolumesService {
     };
   }
 
-  async capacityForAdmin(serverId: string): Promise<StorageCapacityDto> {
+  private async serverWideCapacity(serverId: string): Promise<StorageCapacityDto> {
     const pools = (await this.pools.list(serverId)).filter(isLocalPoolRow);
     const overcommitRatio = await this.serverOvercommit(serverId);
     const poolDtos = [];
@@ -410,8 +418,8 @@ export class VolumesService {
     };
   }
 
-  async createForUser(
-    actorId: string,
+  async create(
+    actor: Actor,
     input: {
       name: string;
       sizeBytes: number;
@@ -424,14 +432,14 @@ export class VolumesService {
         message: 'Shared volumes must be created via /shared-volumes',
       });
     }
-    return this.createVolume(actorId, actorId, input);
+    return this.createVolume(actor.userId, actor.userId, input);
   }
 
-  async createSharedForUser(
-    actorId: string,
+  async createShared(
+    actor: Actor,
     input: CreateSharedVolumeRequest,
   ): Promise<SharedVolumeDto> {
-    return this.createSharedVolume(actorId, actorId, input);
+    return this.createSharedVolume(actor.userId, actor.userId, input);
   }
 
   private async createSharedVolume(
@@ -458,7 +466,7 @@ export class VolumesService {
           await this.assertSharedGrant(ownerId, input.scope.sharedBackendId, transaction);
           await this.pools.lockSharedBackends([input.scope.sharedBackendId], transaction);
           await this.assertSharedCreateHealth(input.scope.sharedBackendId, transaction);
-          await this.assertSharedCapacityForDeltaForUser(
+          await this.assertSharedCapacityWithinGrants(
             transaction,
             ownerId,
             input.scope.sharedBackendId,
@@ -523,8 +531,8 @@ export class VolumesService {
     try {
       created = await this.transactions.run(
         async (transaction) => {
-          const scope = await this.resolveScopeForUser(transaction, ownerId, input.scope);
-          await this.assertCapacityForDeltaForUser(
+          const scope = await this.resolveOwnerScope(transaction, ownerId, input.scope);
+          await this.assertCapacityWithinGrants(
             transaction,
             ownerId,
             scope.serverId,
@@ -592,46 +600,33 @@ export class VolumesService {
     return acceptedIntent(created.intent);
   }
 
-  async patchForUser(
-    actorId: string,
+  async patch(
+    actor: Actor,
     id: string,
     input: { expectedRevision: number; name?: string; sizeBytes?: number },
   ): Promise<VolumeDto | IntentAcceptedDto> {
-    return this.patchVolume(actorId, id, input, 'user');
+    return this.patchVolume(actor, id, input);
   }
 
-  async patchForAdmin(
-    actorId: string,
-    id: string,
-    input: { expectedRevision: number; name?: string; sizeBytes?: number },
-  ): Promise<VolumeDto | IntentAcceptedDto> {
-    return this.patchVolume(actorId, id, input, 'admin');
-  }
-
-  async patchSharedForUser(
-    actorId: string,
+  async patchShared(
+    actor: Actor,
     id: string,
     input: { expectedRevision: number; name?: string; sizeBytes?: number },
   ): Promise<SharedVolumeDto | IntentAcceptedDto> {
-    return this.patchSharedVolume(actorId, id, input, 'user');
-  }
-
-  async patchSharedForAdmin(
-    actorId: string,
-    id: string,
-    input: { expectedRevision: number; name?: string; sizeBytes?: number },
-  ): Promise<SharedVolumeDto | IntentAcceptedDto> {
-    return this.patchSharedVolume(actorId, id, input, 'admin');
+    return this.patchSharedVolume(actor, id, input);
   }
 
   private async patchVolume(
-    actorId: string,
+    actor: Actor,
     id: string,
     input: { expectedRevision: number; name?: string; sizeBytes?: number },
-    access: 'user' | 'admin',
   ): Promise<VolumeDto | IntentAcceptedDto> {
-    const current = await this.repository.findById(id);
-    this.requireLocal(current, actorId, access);
+    const actorId = actor.userId;
+    const { row: current, access } = this.assertCanAccess(
+      actor,
+      await this.repository.findById(id),
+      'local',
+    );
     if (current.revision !== input.expectedRevision) {
       throw new ConflictException({ code: FailureCode.RevisionConflict });
     }
@@ -763,7 +758,7 @@ export class VolumesService {
       }
       if (lockedDelta > 0) {
         if (access === 'admin') {
-          await this.assertCapacityForDeltaForAdmin(
+          await this.assertCapacityPhysical(
             transaction,
             locked.server_id,
             representativePoolId,
@@ -771,7 +766,7 @@ export class VolumesService {
             lockedDelta,
           );
         } else {
-          await this.assertCapacityForDeltaForUser(
+          await this.assertCapacityWithinGrants(
             transaction,
             locked.owner_id,
             locked.server_id,
@@ -832,13 +827,16 @@ export class VolumesService {
   }
 
   private async patchSharedVolume(
-    actorId: string,
+    actor: Actor,
     id: string,
     input: { expectedRevision: number; name?: string; sizeBytes?: number },
-    access: 'user' | 'admin',
   ): Promise<SharedVolumeDto | IntentAcceptedDto> {
-    const current = await this.repository.findById(id);
-    this.requireShared(current, actorId, access);
+    const actorId = actor.userId;
+    const { row: current, access } = this.assertCanAccess(
+      actor,
+      await this.repository.findById(id),
+      'shared',
+    );
     if (current.revision !== input.expectedRevision) {
       throw new ConflictException({ code: FailureCode.RevisionConflict });
     }
@@ -864,8 +862,11 @@ export class VolumesService {
         return dto!;
       }
       const updated = await this.transactions.run(async (transaction) => {
-        const locked = await this.repository.findById(id, transaction);
-        this.requireShared(locked, actorId, access);
+        const { row: locked } = this.assertCanAccess(
+          actor,
+          await this.repository.findById(id, transaction),
+          'shared',
+        );
         if (locked.revision !== input.expectedRevision) {
           throw new ConflictException({ code: FailureCode.RevisionConflict });
         }
@@ -923,12 +924,15 @@ export class VolumesService {
       if (usedNumber !== null) liveUsedBytes = usedNumber;
     }
     const changed = await this.transactions.run(async (transaction) => {
-      const locked = await this.repository.findById(id, transaction);
-      this.requireShared(locked, actorId, access);
+      const { row: locked } = this.assertCanAccess(
+        actor,
+        await this.repository.findById(id, transaction),
+        'shared',
+      );
       if (locked.revision !== input.expectedRevision) {
         throw new ConflictException({ code: FailureCode.RevisionConflict });
       }
-      if (access === 'user') {
+      if (access === 'owner') {
         await this.assertSharedGrant(locked.owner_id, locked.shared_backend_id!, transaction);
       }
       const lockedDelta = input.sizeBytes! - numberValue(locked.size_bytes);
@@ -956,13 +960,13 @@ export class VolumesService {
       }
       if (lockedDelta > 0) {
         if (access === 'admin') {
-          await this.assertSharedCapacityForDeltaForAdmin(
+          await this.assertSharedCapacityPhysical(
             transaction,
             locked.shared_backend_id!,
             lockedDelta,
           );
         } else {
-          await this.assertSharedCapacityForDeltaForUser(
+          await this.assertSharedCapacityWithinGrants(
             transaction,
             locked.owner_id,
             locked.shared_backend_id!,
@@ -1143,32 +1147,26 @@ export class VolumesService {
     }
   }
 
-  async deleteForUser(actorId: string, id: string) {
-    return this.deleteVolume(actorId, id, 'user', 'local');
+  async delete(actor: Actor, id: string) {
+    return this.deleteVolume(actor, id, 'local');
   }
 
-  async deleteForAdmin(actorId: string, id: string) {
-    return this.deleteVolume(actorId, id, 'admin', 'local');
-  }
-
-  async deleteSharedForUser(actorId: string, id: string) {
-    return this.deleteVolume(actorId, id, 'user', 'shared');
-  }
-
-  async deleteSharedForAdmin(actorId: string, id: string) {
-    return this.deleteVolume(actorId, id, 'admin', 'shared');
+  async deleteShared(actor: Actor, id: string) {
+    return this.deleteVolume(actor, id, 'shared');
   }
 
   private async deleteVolume(
-    actorId: string,
+    actor: Actor,
     id: string,
-    access: 'user' | 'admin',
     kind: 'local' | 'shared',
   ) {
+    const actorId = actor.userId;
     const result = await this.transactions.run(async (transaction) => {
-      const current = await this.repository.findById(id, transaction);
-      if (kind === 'local') this.requireLocal(current, actorId, access);
-      else this.requireShared(current, actorId, access);
+      const { row: current } = this.assertCanAccess(
+        actor,
+        await this.repository.findById(id, transaction),
+        kind,
+      );
       if (current.lifecycle_phase === 'deleting') {
         throw new ConflictException({
           code: FailureCode.InvalidInput,
@@ -1298,22 +1296,8 @@ export class VolumesService {
     }
   }
 
-  async listAttachmentsForUser(
-    actorId: string,
-    containerId: string,
-    kind: 'local' | 'shared',
-  ): Promise<VolumeAttachmentDto[]> {
-    const container = await this.database.selectFrom('control.containers')
-      .select(['id', 'owner_id', 'server_id'])
-      .where('id', '=', containerId)
-      .executeTakeFirst();
-    if (!container || container.owner_id !== actorId) {
-      throw new NotFoundException('Container not found');
-    }
-    return this.listAttachmentDtos(containerId, container.server_id, kind);
-  }
-
-  async listAttachmentsForAdmin(
+  /** Attachments of a container the caller has already been authorised to see. */
+  async listContainerAttachments(
     containerId: string,
     kind: 'local' | 'shared',
   ): Promise<VolumeAttachmentDto[]> {
@@ -1327,48 +1311,29 @@ export class VolumesService {
     return this.listAttachmentDtos(containerId, container.server_id, kind);
   }
 
-  async attachForUser(
-    actorId: string,
-    containerId: string,
-    input: AttachVolumeRequest,
-    kind: 'local' | 'shared',
-  ): Promise<IntentAcceptedDto> {
-    return this.attachVolume(actorId, containerId, input, 'user', kind);
-  }
-
-  async attachForAdmin(
-    actorId: string,
-    containerId: string,
-    input: AttachVolumeRequest,
-    kind: 'local' | 'shared',
-  ): Promise<IntentAcceptedDto> {
-    return this.attachVolume(actorId, containerId, input, 'admin', kind);
-  }
-
   async bindCreateTimeVolumes(
     transaction: Transaction<NyabaseDatabase>,
-    actorId: string,
+    actor: Actor,
     container: { id: string; owner_id: string; server_id: string },
     volumes: readonly AttachVolumeRequest[],
   ): Promise<void> {
     for (const input of volumes) {
-      await this.bindAttachmentRow(transaction, actorId, 'user', container, input, null);
+      await this.bindAttachmentRow(transaction, actor.userId, 'owner', container, input, null);
     }
   }
 
-  private async attachVolume(
-    actorId: string,
+  async attach(
+    actor: Actor,
     containerId: string,
     input: AttachVolumeRequest,
-    access: 'user' | 'admin',
     kind: 'local' | 'shared',
   ): Promise<IntentAcceptedDto> {
+    const actorId = actor.userId;
     const result = await this.transactions.run(async (transaction) => {
       const container = await transaction.selectFrom('control.containers').selectAll()
         .where('id', '=', containerId).forUpdate().executeTakeFirst();
-      if (!container || (access === 'user' && container.owner_id !== actorId)) {
-        throw new NotFoundException('Container not found');
-      }
+      if (!container) throw new NotFoundException('Container not found');
+      const access = this.assertCanAttach(actor, container, kind);
       const revision = Number(container.revision) + 1;
       await transaction.updateTable('control.containers')
         .set({ revision, needs_attention: false })
@@ -1424,7 +1389,7 @@ export class VolumesService {
   private async bindAttachmentRow(
     transaction: Transaction<NyabaseDatabase>,
     actorId: string,
-    access: 'user' | 'admin',
+    access: 'owner' | 'admin',
     container: { id: string; owner_id: string; server_id: string },
     input: AttachVolumeRequest,
     expectedKind: 'local' | 'shared' | null,
@@ -1436,7 +1401,7 @@ export class VolumesService {
       : volume.shared_backend_id !== null ? 'shared' : 'local';
     if (
       !volume
-      || (access === 'user' && volume.owner_id !== actorId)
+      || (access === 'owner' && volume.owner_id !== actorId)
       || (expectedKind !== null && volumeKind !== expectedKind)
     ) {
       throw new NotFoundException('Volume not found');
@@ -1451,7 +1416,7 @@ export class VolumesService {
         details: { volumeId: volume.id, lifecyclePhase: volume.lifecycle_phase },
       });
     }
-    if (volume.shared_backend_id !== null && access === 'user') {
+    if (volume.shared_backend_id !== null && access === 'owner') {
       await this.assertSharedGrant(volume.owner_id, volume.shared_backend_id, transaction);
     }
     if (volume.server_id !== null && volume.server_id !== container.server_id) {
@@ -1531,31 +1496,13 @@ export class VolumesService {
     return attachment;
   }
 
-  async detachForUser(
-    actorId: string,
+  async detach(
+    actor: Actor,
     attachmentId: string,
     expectedContainerId: string,
     kind: 'local' | 'shared',
   ): Promise<unknown> {
-    return this.detachVolume(actorId, attachmentId, 'user', expectedContainerId, kind);
-  }
-
-  async detachForAdmin(
-    actorId: string,
-    attachmentId: string,
-    expectedContainerId: string,
-    kind: 'local' | 'shared',
-  ): Promise<unknown> {
-    return this.detachVolume(actorId, attachmentId, 'admin', expectedContainerId, kind);
-  }
-
-  private async detachVolume(
-    actorId: string,
-    attachmentId: string,
-    access: 'user' | 'admin',
-    expectedContainerId: string,
-    kind: 'local' | 'shared',
-  ): Promise<unknown> {
+    const actorId = actor.userId;
     const result = await this.transactions.run(async (transaction) => {
       const attachment = await transaction
         .selectFrom('control.volume_attachments as a')
@@ -1574,9 +1521,8 @@ export class VolumesService {
       }
       const container = await transaction.selectFrom('control.containers').selectAll()
         .where('id', '=', attachment.container_id).forUpdate().executeTakeFirst();
-      if (!container || (access === 'user' && container.owner_id !== actorId)) {
-        throw new NotFoundException('Container not found');
-      }
+      if (!container) throw new NotFoundException('Container not found');
+      this.assertCanAttach(actor, container, kind);
       const placement = await this.repository.findPlacement(
         attachment.volume_id,
         container.server_id,
@@ -1639,7 +1585,7 @@ export class VolumesService {
     return acceptedIntent(result);
   }
 
-  private async resolveScopeForUser(
+  private async resolveOwnerScope(
     transaction: Transaction<NyabaseDatabase>,
     ownerId: string,
     scope: LocalVolumeScope,
@@ -1716,7 +1662,7 @@ export class VolumesService {
     };
   }
 
-  private async assertCapacityForDeltaForUser(
+  private async assertCapacityWithinGrants(
     transaction: Transaction<NyabaseDatabase>,
     ownerId: string,
     serverId: string | null,
@@ -1787,7 +1733,7 @@ export class VolumesService {
     await this.assertLocalPoolPhysicalCapacity(pool, poolId, serverId, delta, transaction);
   }
 
-  private async assertCapacityForDeltaForAdmin(
+  private async assertCapacityPhysical(
     transaction: Transaction<NyabaseDatabase>,
     serverId: string | null,
     poolId: string,
@@ -1840,7 +1786,7 @@ export class VolumesService {
     }
   }
 
-  private async assertSharedCapacityForDeltaForUser(
+  private async assertSharedCapacityWithinGrants(
     transaction: Transaction<NyabaseDatabase>,
     ownerId: string,
     sharedBackendId: string,
@@ -1879,7 +1825,7 @@ export class VolumesService {
     await this.assertSharedBackendPhysicalCapacity(backend, sharedBackendId, delta, transaction);
   }
 
-  private async assertSharedCapacityForDeltaForAdmin(
+  private async assertSharedCapacityPhysical(
     transaction: Transaction<NyabaseDatabase>,
     sharedBackendId: string,
     delta: number,
@@ -2161,7 +2107,7 @@ export class VolumesService {
 
   async inspectSharedVolumeCatalogs(volumeId: string): Promise<SharedVolumeCatalogInspectDto> {
     const volume = await this.repository.findById(volumeId);
-    this.requireShared(volume, undefined, 'admin');
+    this.assertSharedExists(volume);
     const pools = await this.database
       .selectFrom('infra.storage_pools as p')
       .innerJoin('infra.servers as s', 's.id', 'p.server_id')
@@ -2408,33 +2354,52 @@ export class VolumesService {
     return result;
   }
 
-  private requireLocal(
+  /**
+   * The one volume authorisation rule: a holder of the kind's administrator
+   * capability (`ManageVolumes` / `ManageSharedVolumes`) gets the administrator
+   * rules (no per-user grant limits, as the old /admin routes); otherwise the
+   * owner gets the owner rules. Everything else, including a row of the other
+   * kind, is a 404.
+   */
+  private assertCanAccess(
+    actor: Actor,
     row: VolumeRow | undefined,
-    actorId: string | undefined,
-    access: 'user' | 'admin',
-  ): asserts row is VolumeRow {
-    if (
-      !row
-      || (access === 'user' && row.owner_id !== actorId)
-      || row.shared_backend_id !== null
-      || row.server_id === null
-      || row.pool_id === null
-    ) {
-      throw new NotFoundException('Volume not found');
-    }
+    kind: 'local' | 'shared',
+  ): { row: VolumeRow; access: VolumeAccess } {
+    const rightKind = row !== undefined && (kind === 'local'
+      ? row.shared_backend_id === null && row.server_id !== null && row.pool_id !== null
+      : row.shared_backend_id !== null && row.server_id === null);
+    if (!rightKind) throw new NotFoundException('Volume not found');
+    return { row, access: this.accessOf(actor, row.owner_id, kind, 'Volume not found') };
   }
 
-  private requireShared(
-    row: VolumeRow | undefined,
-    actorId: string | undefined,
-    access: 'user' | 'admin',
-  ): asserts row is VolumeRow {
+  /** Attaching needs the container's owner, or the kind's volume capability. */
+  private assertCanAttach(
+    actor: Actor,
+    container: { owner_id: string },
+    kind: 'local' | 'shared',
+  ): VolumeAccess {
+    return this.accessOf(actor, container.owner_id, kind, 'Container not found');
+  }
+
+  private accessOf(
+    actor: Actor,
+    ownerId: string,
+    kind: 'local' | 'shared',
+    notFound: string,
+  ): VolumeAccess {
     if (
-      !row
-      || (access === 'user' && row.owner_id !== actorId)
-      || row.shared_backend_id === null
-      || row.server_id !== null
+      isSystemActor(actor)
+      || actor.capabilities.has(kind === 'local' ? Capability.ManageVolumes : Capability.ManageSharedVolumes)
     ) {
+      return 'admin';
+    }
+    if (ownerId === actor.userId) return 'owner';
+    throw new NotFoundException(notFound);
+  }
+
+  private assertSharedExists(row: VolumeRow | undefined): asserts row is VolumeRow {
+    if (!row || row.shared_backend_id === null || row.server_id !== null) {
       throw new NotFoundException('Volume not found');
     }
   }

@@ -8,6 +8,7 @@ import {
   isOutstandingIntent,
   isRetryableIntent,
   latestIntentsByResource,
+  resourceIntentsPath,
   retryIntentPath,
 } from './intent-visibility.js';
 
@@ -38,10 +39,9 @@ function intent(overrides: Partial<IntentDto> = {}): IntentDto {
 }
 
 describe('intent visibility helpers', () => {
-  it('routes retry to admin or user APIs and formats failure plus attempts', () => {
+  it('retries through the one intents API and formats failure plus attempts', () => {
     const failed = intent();
-    expect(retryIntentPath(failed.id, true)).toBe(`/admin/intents/${failed.id}/retry`);
-    expect(retryIntentPath(failed.id, false)).toBe(`/intents/${failed.id}/retry`);
+    expect(retryIntentPath(failed.id)).toBe(`/intents/${failed.id}/retry`);
     expect(isRetryableIntent(failed)).toBe(true);
     expect(isOutstandingIntent(failed)).toBe(true);
     expect(formatIntentFailureMessage(failed)).toBe(
@@ -49,6 +49,13 @@ describe('intent visibility helpers', () => {
     );
     expect(formatIntentAttempt(failed)).toMatch(/已尝试 3 次/);
     expect(isRetryableIntent(intent({ status: IntentStatus.Pending }))).toBe(false);
+  });
+
+  it('builds one resource-intents path per scope, with several ids for an image', () => {
+    expect(resourceIntentsPath('mine', IntentResourceType.Volume, 'v1'))
+      .toBe('/intents?resourceType=volume&resourceId=v1');
+    expect(resourceIntentsPath('all', IntentResourceType.ImageAssignment, ['a1', 'a2']))
+      .toBe('/intents?scope=all&resourceType=image_assignment&resourceId=a1,a2');
   });
 
   it('detects an accepted intent payload', () => {

@@ -464,13 +464,29 @@ export const zCreateSharedVolumeRequest = z.object({
   scope: zSharedVolumeScope,
 }).strict();
 
+/**
+ * Which rows a list endpoint returns: `mine` (default) is the caller's own;
+ * `all` is every row and requires the resource's administrator capability.
+ */
+export const zListScope = z.enum(['mine', 'all']).default('mine');
+
 export const zListSharedVolumesQuery = z.object({
+  scope: zListScope,
   attachableOnServerId: zResourceIdentity.optional(),
 }).strict();
 
 export const zListVolumesQuery = z.object({
+  scope: zListScope,
   serverId: zResourceIdentity.optional(),
-}).strict();
+}).strict().refine(
+  (value) => value.serverId === undefined || value.scope === 'all',
+  { message: 'serverId is only available with scope=all', path: ['serverId'] },
+);
+
+export const zListContainersQuery = z.object({
+  scope: zListScope,
+  serverId: zResourceIdentity.optional(),
+});
 
 export const zPatchVolumeRequest = z.object({
   expectedRevision: zExpectedRevision,
@@ -585,17 +601,28 @@ export const zPutSharedBackendGrantRequest = z.object({
 
 // Intents, errors, certificates, and preflight reports.
 export const zIntentListQuery = z.object({
-  limit: z.coerce.number().int().min(1).max(MAX_INTENT_LIST_PAGE_SIZE).default(50),
+  scope: zListScope,
+  limit: z.coerce.number().int().min(1).max(ADMIN_INTENT_LIST_MAX).optional(),
   cursor: z.string().min(1).max(512).optional(),
   status: z.nativeEnum(IntentStatus).optional(),
   kind: z.nativeEnum(IntentKind).optional(),
   resourceType: z.nativeEnum(IntentResourceType).optional(),
+  /** One resource id, or several separated by commas (e.g. every assignment of an image). */
+  resourceId: z.string().max(4_096)
+    .regex(/^[A-Za-z0-9][A-Za-z0-9._:-]*(,[A-Za-z0-9][A-Za-z0-9._:-]*)*$/)
+    .optional(),
   serverId: zResourceIdentity.optional(),
-}).strict();
-
-export const zAdminIntentListQuery = zIntentListQuery.extend({
-  limit: z.coerce.number().int().min(1).max(ADMIN_INTENT_LIST_MAX).default(ADMIN_INTENT_LIST_MAX),
-}).strict();
+}).strict().superRefine((value, ctx) => {
+  if (value.scope === 'mine' && value.limit !== undefined && value.limit > MAX_INTENT_LIST_PAGE_SIZE) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.too_big,
+      type: 'number',
+      maximum: MAX_INTENT_LIST_PAGE_SIZE,
+      inclusive: true,
+      path: ['limit'],
+    });
+  }
+});
 
 export const zRetryIntentRequest = zEmptyRequest;
 
@@ -800,7 +827,7 @@ export type PutServerGrantRequest = z.infer<typeof zPutServerGrantRequest>;
 export type PutStoragePoolGrantRequest = z.infer<typeof zPutStoragePoolGrantRequest>;
 export type PutSharedBackendGrantRequest = z.infer<typeof zPutSharedBackendGrantRequest>;
 export type IntentListQuery = z.infer<typeof zIntentListQuery>;
-export type AdminIntentListQuery = z.infer<typeof zAdminIntentListQuery>;
+export type ListScope = z.infer<typeof zListScope>;
 export type RetryIntentRequest = z.infer<typeof zRetryIntentRequest>;
 export type NodeMetricsHealth = z.infer<typeof zNodeMetricsHealth>;
 export type PreflightReport = z.infer<typeof zPreflightReport>;

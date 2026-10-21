@@ -303,7 +303,7 @@ test('storage-pool discovery uses the authenticated public admin endpoint', asyn
   );
 
   assert.deepEqual(calls, [{
-    path: '/api/admin/servers/server-1/storage-pools/discover',
+    path: '/api/servers/server-1/storage-pools/discover',
     method: 'POST',
     token: 'admin-token',
   }]);
@@ -364,13 +364,13 @@ test('storage-pool registration uses the authenticated public PATCH contract and
 
   assert.deepEqual(calls, [
     {
-      path: '/api/admin/storage-pools/dir-pool',
+      path: '/api/servers/server-1/storage-pools/dir-pool',
       method: 'PATCH',
       token: 'admin-token',
       body: { expectedRevision: 4, registered: true },
     },
     {
-      path: '/api/admin/storage-pools/pool-2',
+      path: '/api/servers/server-1/storage-pools/pool-2',
       method: 'PATCH',
       token: 'admin-token',
       body: { expectedRevision: 9, registered: true },
@@ -449,7 +449,7 @@ test('storage-pool registration re-reads after a revision conflict and avoids du
   let listCalls = 0;
   const result = await registerStoragePools(
     async (path, options) => {
-      if (path === '/api/admin/storage-pools/pool-1') {
+      if (path === '/api/servers/server-1/storage-pools/pool-1') {
         patchCalls += 1;
         assert.deepEqual(options.body, { expectedRevision: 3, registered: true });
         const error = new Error('revision conflict');
@@ -457,7 +457,7 @@ test('storage-pool registration re-reads after a revision conflict and avoids du
         throw error;
       }
       listCalls += 1;
-      assert.equal(path, '/api/admin/servers/server-1/storage-pools');
+      assert.equal(path, '/api/servers/server-1/storage-pools?scope=all');
       assert.deepEqual(options, { token: 'admin-token' });
       return [current];
     },
@@ -780,15 +780,15 @@ test('cleanup reads PEM contents and deletes only a run-owned server', async () 
     );
     assert.deepEqual(calls, [
       {
-        path: '/api/admin/images/image-1/assignments/server-1',
+        path: '/api/images/image-1/assignments/server-1',
         method: 'DELETE',
       },
       {
-        path: '/api/admin/images/image-1/assignments',
+        path: '/api/images/image-1/assignments',
         method: 'GET',
       },
       {
-        path: '/api/admin/servers/server-1',
+        path: '/api/servers/server-1',
         method: 'DELETE',
       },
     ]);
@@ -838,8 +838,10 @@ test('cleanup removes run-owned assignment and image without deleting a reused i
       ownedCalls.push({ path, method: options.method ?? 'GET' });
       if (path.endsWith('/assignments')) return [];
       if (
-        path === '/api/admin/images/image-1'
-        || path === '/api/admin/servers/server-1'
+        path === '/api/images/image-1'
+        || path === '/api/servers/server-1'
+        || path === '/api/images/image-1?scope=all'
+        || path === '/api/servers/server-1?scope=all'
       ) {
         if ((options.method ?? 'GET') === 'GET') {
           const error = new Error('not found');
@@ -860,27 +862,27 @@ test('cleanup removes run-owned assignment and image without deleting a reused i
   assert.deepEqual(databaseCleanup, ['server-1']);
   assert.deepEqual(ownedCalls, [
     {
-      path: '/api/admin/images/image-1/assignments/server-1',
+      path: '/api/images/image-1/assignments/server-1',
       method: 'DELETE',
     },
     {
-      path: '/api/admin/images/image-1/assignments',
+      path: '/api/images/image-1/assignments',
       method: 'GET',
     },
     {
-      path: '/api/admin/images/image-1',
+      path: '/api/images/image-1',
       method: 'DELETE',
     },
     {
-      path: '/api/admin/images/image-1',
+      path: '/api/images/image-1?scope=all',
       method: 'GET',
     },
     {
-      path: '/api/admin/servers/server-1',
+      path: '/api/servers/server-1',
       method: 'DELETE',
     },
     {
-      path: '/api/admin/servers/server-1',
+      path: '/api/servers/server-1?scope=all',
       method: 'GET',
     },
   ]);
@@ -909,11 +911,11 @@ test('cleanup removes run-owned assignment and image without deleting a reused i
   );
   assert.deepEqual(reusedCalls, [
     {
-      path: '/api/admin/images/image-1/assignments/server-1',
+      path: '/api/images/image-1/assignments/server-1',
       method: 'DELETE',
     },
     {
-      path: '/api/admin/images/image-1/assignments',
+      path: '/api/images/image-1/assignments',
       method: 'GET',
     },
   ]);

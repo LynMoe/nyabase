@@ -18,24 +18,24 @@ test(
   'admin user list, get, patch, and ssh-key delete observe the admin user API',
   { ...coverageCase('iam-admin-users', 'iam-admin-users-live') },
   async ({ adminApi, seedState }) => {
-    const users = await expectJson<JsonRecord[]>(await adminApi.get('/api/admin/users'));
+    const users = await expectJson<JsonRecord[]>(await adminApi.get('/api/users'));
     expect(Array.isArray(users)).toBe(true);
     const self = await expectJson<JsonRecord>(
-      await adminApi.get(`/api/admin/users/${seedState.adminUserId}`),
+      await adminApi.get(`/api/users/${seedState.adminUserId}`),
     );
     expect(self.id).toBe(seedState.adminUserId);
     const patched = await expectJson<JsonRecord>(
-      await adminApi.patch(`/api/admin/users/${seedState.adminUserId}`, {
+      await adminApi.patch(`/api/users/${seedState.adminUserId}`, {
         data: { displayName: self.displayName },
       }),
     );
     expect(patched.id).toBe(seedState.adminUserId);
     const keys = await expectJson<JsonRecord[]>(
-      await adminApi.get(`/api/admin/users/${seedState.adminUserId}/ssh-keys`),
+      await adminApi.get(`/api/users/${seedState.adminUserId}/ssh-keys`),
     );
     expect(Array.isArray(keys)).toBe(true);
     const missing = await adminApi.delete(
-      `/api/admin/users/${seedState.adminUserId}/ssh-keys/00000000-0000-4000-8000-000000000001`,
+      `/api/users/${seedState.adminUserId}/ssh-keys/00000000-0000-4000-8000-000000000001`,
     );
     expect([404, 204]).toContain(missing.status());
   },
@@ -281,7 +281,7 @@ test(
     const persona = await createPersonaUser(adminApi, 'purg');
     try {
       const response = await adminApi.post(
-        `/api/admin/users/${persona.userId}/servers/${seedState.server.id}/purge-resources`,
+        `/api/users/${persona.userId}/servers/${seedState.server.id}/purge-resources`,
       );
       expect(response.status()).toBeLessThan(500);
     } finally {
@@ -301,7 +301,7 @@ test(
       await expectJson(await userApi.get(`/api/users/${persona.userId}`));
 
       const disabled = await expectJson<JsonRecord>(
-        await adminApi.patch(`/api/admin/users/${persona.userId}`, {
+        await adminApi.patch(`/api/users/${persona.userId}`, {
           data: { status: 'disabled' },
         }),
       );
@@ -319,7 +319,7 @@ test(
       expect(staleSession.status()).toBe(401);
 
       const enabled = await expectJson<JsonRecord>(
-        await adminApi.patch(`/api/admin/users/${persona.userId}`, {
+        await adminApi.patch(`/api/users/${persona.userId}`, {
           data: { status: 'active' },
         }),
       );

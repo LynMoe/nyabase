@@ -89,6 +89,7 @@ export interface IntentListOptions {
   readonly resourceId?: string;
   readonly resourceIds?: readonly string[];
   readonly serverId?: string;
+  readonly requestedBy?: string;
   readonly readyAt?: Date;
 }
 
@@ -560,6 +561,7 @@ export class IntentRepository {
       query = query.where('resource_id', 'in', [...options.resourceIds]);
     }
     if (options.serverId) query = query.where('server_id', '=', options.serverId);
+    if (options.requestedBy) query = query.where('requested_by', '=', options.requestedBy);
     if (options.readyAt) {
       query = query.where((expression) => expression.or([
         expression('next_attempt_at', 'is', null),

@@ -1,37 +1,138 @@
 import {
+  Body,
+  BadRequestException,
   Controller,
+  Delete,
   Get,
+  HttpCode,
+  HttpStatus,
   Param,
-  NotFoundException,
+  Patch,
+  Post,
+  Query,
 } from '@nestjs/common';
-import { CurrentUser } from '../iam/decorators/current-user.decorator.js';
-import type { UserRecord } from '../iam/user-record.js';
-import { AccessResolverService } from '../iam/access-resolver.service.js';
+import {
+  Capability,
+  zConnectServerRequest,
+  zCreateServerRequest,
+  zListScope,
+  zPatchServerRequest,
+  zRunPreflightRequest,
+} from '@nyabase/common';
+import { RequireCaps } from '../iam/decorators/require-caps.decorator.js';
+import { CurrentActor } from '../iam/decorators/current-actor.decorator.js';
+import type { Actor } from '../iam/actor.js';
 import { ServersService } from './servers.service.js';
+import { ServerConnectIntentService } from './server-connect-intent.service.js';
+import { ServerPreflightIntentService } from './server-preflight-intent.service.js';
+import { acceptedIntent } from '../reconcile/accepted-intent.js';
 
+/**
+ * Servers: `scope=mine` (default) is the user view of granted servers;
+ * `scope=all` and every lifecycle operation need `ManageServers`.
+ */
 @Controller('servers')
 export class ServersController {
   constructor(
     private readonly servers: ServersService,
-    private readonly access: AccessResolverService,
+    private readonly serverConnect: ServerConnectIntentService,
+    private readonly serverPreflight: ServerPreflightIntentService,
   ) {}
 
   @Get()
-  async list(@CurrentUser() user: UserRecord) {
-    return this.servers.findUserDtosByIds(
-      await this.access.listAccessibleServers(user.id),
-    );
+  list(@CurrentActor() actor: Actor, @Query('scope') scope?: string) {
+    return this.servers.list(actor, zListScope.parse(scope));
+  }
+
+  @Post()
+  @RequireCaps(Capability.ManageServers)
+  create(@CurrentActor() actor: Actor, @Body() body: unknown) {
+    return this.servers.create(actor.userId, zCreateServerRequest.parse(body));
   }
 
   @Get(':id')
-  async get(@Param('id') id: string, @CurrentUser() user: UserRecord) {
-    await this.requireAccess(user.id, id);
-    return this.servers.findUserDtoById(id);
+  get(
+    @Param('id') id: string,
+    @CurrentActor() actor: Actor,
+    @Query('scope') scope?: string,
+  ) {
+    return this.servers.get(actor, id, zListScope.parse(scope));
   }
 
-  private async requireAccess(userId: string, serverId: string): Promise<void> {
-    if (!(await this.access.listAccessibleServers(userId)).includes(serverId)) {
-      throw new NotFoundException('Server not found');
+  @Post(':id/connect')
+  @RequireCaps(Capability.ManageServers)
+  @HttpCode(HttpStatus.ACCEPTED)
+  async connect(
+    @Param('id') id: string,
+    @CurrentActor() actor: Actor,
+    @Body() body: unknown,
+  ) {
+    const input = zConnectServerRequest.parse(body);
+    const targetRevision = await this.servers.prepareConnection(
+      id,
+      input.expectedServerCertFingerprint,
+    );
+    const intent = await this.serverConnect.create({
+      serverId: id,
+      trustToken: input.trustToken,
+      expectedServerCertFingerprint: input.expectedServerCertFingerprint,
+      targetRevision,
+      requestedBy: actor.userId,
+    });
+    return acceptedIntent(intent);
+  }
+
+  @Get(':id/preflight')
+  @RequireCaps(Capability.ManageServers)
+  preflight(@Param('id') id: string) {
+    return this.servers.findDtoById(id).then((server) => ({
+      status: server.preflightStatus,
+      report: server.preflightReport,
+      checkedAt: server.preflightCheckedAt,
+    }));
+  }
+
+  @Post(':id/preflight')
+  @RequireCaps(Capability.ManageServers)
+  @HttpCode(HttpStatus.ACCEPTED)
+  async preflightRun(
+    @Param('id') id: string,
+    @CurrentActor() actor: Actor,
+    @Body() body: unknown,
+  ) {
+    const input = zRunPreflightRequest.parse(body);
+    const intent = await this.serverPreflight.create(
+      id,
+      actor.userId,
+      input.expectedServerRevision,
+      input.poolId,
+      input.probeAddress,
+    );
+    return acceptedIntent(intent);
+  }
+
+  @Patch(':id')
+  @RequireCaps(Capability.ManageServers)
+  update(
+    @Param('id') id: string,
+    @CurrentActor() actor: Actor,
+    @Body() body: unknown,
+  ) {
+    return this.servers.update(actor.userId, id, zPatchServerRequest.parse(body));
+  }
+
+  @Delete(':id')
+  @RequireCaps(Capability.ManageServers)
+  delete(
+    @Param('id') id: string,
+    @CurrentActor() actor: Actor,
+    @Query('expectedRevision') expectedRevision?: string,
+  ) {
+    if (expectedRevision === undefined) return this.servers.delete(actor.userId, id);
+    const revision = Number(expectedRevision);
+    if (!Number.isSafeInteger(revision) || revision < 1) {
+      throw new BadRequestException('expectedRevision must be a positive integer');
     }
+    return this.servers.delete(actor.userId, id, revision);
   }
 }

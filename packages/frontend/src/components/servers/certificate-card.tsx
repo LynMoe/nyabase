@@ -172,10 +172,7 @@ function CertificateDetails({
         </p>
       )}
       {showIntentFailures && (
-        <ResourceIntentFailures
-          listPath="/admin/intents?kind=certificate.rotate"
-          admin
-        />
+        <ResourceIntentFailures listPath="/intents?scope=all&kind=certificate.rotate" />
       )}
       <div className="grid gap-2 sm:grid-cols-2">
         {certificate.servers.map((trust) => (

@@ -66,7 +66,7 @@ export default function UserDetailPage() {
 
   const userQuery = useQuery({
     queryKey: queryKeys.users.detail(id),
-    queryFn: () => api.get<UserDto>(`/admin/users/${id}`),
+    queryFn: () => api.get<UserDto>(`/users/${id}`),
     refetchInterval: (query) => refetchWhileInProgress(query.state, {
       steadyIntervalMs: false,
       isSettled: (loaded) => !userDeleting(loaded.status),
@@ -79,7 +79,7 @@ export default function UserDetailPage() {
   };
 
   const patchUser = useMutation({
-    mutationFn: (body: UpdateUserRequest) => api.patch<UserDto>(`/admin/users/${id}`, body),
+    mutationFn: (body: UpdateUserRequest) => api.patch<UserDto>(`/users/${id}`, body),
     onSuccess: (_user, body) => {
       invalidate();
       if (body.status === UserStatus.Disabled) {
@@ -95,7 +95,7 @@ export default function UserDetailPage() {
     onError: (error) => toast({ title: '更新用户失败', description: errorMessage(error), variant: 'destructive' }),
   });
   const remove = useMutation({
-    mutationFn: () => api.delete<unknown>(`/admin/users/${id}`),
+    mutationFn: () => api.delete<unknown>(`/users/${id}`),
     onSuccess: () => {
       toast({ title: '用户已删除' });
       setDeleteOpen(false);

@@ -703,12 +703,12 @@ VictoriaMetrics，并更新 `nodeMetrics.health`（`online` /
 ### GPU 直通（NVIDIA）
 
 GPU 是平台内置功能，不是插件。管理员在服务器详情的 GPU 标签页（或
-`PATCH /api/admin/servers/:serverId/gpu`，body `{"enabled": true}`）为单台服务器
-启用；`GET /api/admin/servers/:serverId/gpu` 返回开关、预检健康
+`PATCH /api/servers/:serverId/gpu`，body `{"enabled": true}`）为单台服务器
+启用；`GET /api/servers/:serverId/gpu` 返回开关、预检健康
 （`runtimeReady` / `nvidiaCardCount`）、占用数与本机前置条件检测（Incus 资源、NVIDIA
 卡、驱动、Container Toolkit），检测不通过不会阻止启用。持有 GPU 的容器存在时无法关闭
-（`GPU_OCCUPIED`）。卡清单来自 `GET /api/servers/:serverId/gpus`（用户，按服务器授权过滤）与
-`GET /api/admin/servers/:serverId/gpus`（管理员，全部卡）；容器通过创建请求的
+（`GPU_OCCUPIED`）。卡清单来自 `GET /api/servers/:serverId/gpus`（默认 `scope=mine`，按服务器授权过滤）与
+`GET /api/servers/:serverId/gpus?scope=all`（管理员，全部卡）；容器通过创建请求的
 `gpuPciAddresses` 或 `PATCH /api/containers/:id/gpus` 绑定，改动 GPU 需先停止容器。
 授权用服务器授权的 `gpuPciAddresses`（空数组表示无 GPU 权限）。
 

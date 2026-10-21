@@ -458,13 +458,13 @@ async function seedLabServer(token, definition, image, selectedShared, routedNet
     dnsServers,
   };
   const registrationResult = await ensureServerRegistration({
-    listServers: () => jsonRequest('/api/admin/servers', { token }),
-    createServer: (body) => jsonRequest('/api/admin/servers', {
+    listServers: () => jsonRequest('/api/servers?scope=all', { token }),
+    createServer: (body) => jsonRequest('/api/servers', {
       method: 'POST',
       token,
       body,
     }),
-    patchServer: (server, body) => jsonRequest(`/api/admin/servers/${server.id}`, {
+    patchServer: (server, body) => jsonRequest(`/api/servers/${server.id}`, {
       method: 'PATCH',
       token,
       body,
@@ -489,7 +489,7 @@ async function seedLabServer(token, definition, image, selectedShared, routedNet
     serverSlug: definition.slug,
     network: routedNetwork,
   });
-  const labConnect = await jsonRequest(`/api/admin/servers/${extra.id}/connect`, {
+  const labConnect = await jsonRequest(`/api/servers/${extra.id}/connect`, {
     method: 'POST',
     token,
     body: {
@@ -498,13 +498,13 @@ async function seedLabServer(token, definition, image, selectedShared, routedNet
     },
   });
   await waitForIntent(token, parseConnectIntentId(labConnect), `lab server connect ${definition.slug}`);
-  let current = await jsonRequest(`/api/admin/servers/${extra.id}`, { token });
+  let current = await jsonRequest(`/api/servers/${extra.id}?scope=all`, { token });
   if (current.status !== 'online') {
     blocked(`lab server ${definition.slug} connected without becoming online: ${current.status}`);
   }
   await discoverStoragePools(jsonRequest, extra.id, token);
   const labPools = validateStoragePoolDtos(
-    await jsonRequest(`/api/admin/servers/${extra.id}/storage-pools`, { token }),
+    await jsonRequest(`/api/servers/${extra.id}/storage-pools?scope=all`, { token }),
     extra.id,
     `lab ${definition.slug} storage pool listing`,
   );
@@ -557,7 +557,7 @@ WHERE id = :'server_id'::uuid;
       server_id: extra.id,
     },
   );
-  current = await jsonRequest(`/api/admin/servers/${extra.id}`, { token });
+  current = await jsonRequest(`/api/servers/${extra.id}?scope=all`, { token });
   await ensureAssignment(token, image, extra.id, previousSeedState?.image);
   const preflightAlias = process.env.E2E_INCUS_PREFLIGHT_IMAGE_ALIAS;
   const preflightRemote = process.env.E2E_INCUS_IMAGE_REMOTE;
@@ -654,7 +654,7 @@ async function ensureNodeMetrics(token, server, metrics = {}) {
     return server;
   }
   try {
-    return await jsonRequest(`/api/admin/servers/${server.id}`, {
+    return await jsonRequest(`/api/servers/${server.id}`, {
       method: 'PATCH',
       token,
       body: {
@@ -664,7 +664,7 @@ async function ensureNodeMetrics(token, server, metrics = {}) {
     });
   } catch (error) {
     if (error?.statusCode !== 409) throw error;
-    const current = await jsonRequest(`/api/admin/servers/${server.id}`, { token });
+    const current = await jsonRequest(`/api/servers/${server.id}?scope=all`, { token });
     if (
       current.nodeMetrics?.endpoint === desired.endpoint &&
       normalizeFingerprint(current.nodeMetrics.serverCertFingerprint) ===
@@ -678,7 +678,7 @@ async function ensureNodeMetrics(token, server, metrics = {}) {
 }
 
 async function ensureAssignment(token, image, serverId, priorImage) {
-  const assignments = await jsonRequest(`/api/admin/images/${image.id}/assignments`, { token });
+  const assignments = await jsonRequest(`/api/images/${image.id}/assignments`, { token });
   let current = assignments.find((entry) => entry.serverId === serverId);
   if (
     current
@@ -691,7 +691,7 @@ async function ensureAssignment(token, image, serverId, priorImage) {
     let deleted;
     try {
       deleted = await jsonRequest(
-        `/api/admin/images/${image.id}/assignments/${serverId}`,
+        `/api/images/${image.id}/assignments/${serverId}`,
         { method: 'DELETE', token },
       );
     } catch (error) {
@@ -708,7 +708,7 @@ async function ensureAssignment(token, image, serverId, priorImage) {
     const deadline = Date.now() + 180_000;
     while (Date.now() < deadline) {
       const remaining = await jsonRequest(
-        `/api/admin/images/${image.id}/assignments`,
+        `/api/images/${image.id}/assignments`,
         { token },
       );
       current = remaining.find((entry) => entry.serverId === serverId);
@@ -728,7 +728,7 @@ async function ensureAssignment(token, image, serverId, priorImage) {
     && priorImage.id === image.id
   );
   const body = current ? { expectedRevision: current.revision } : {};
-  const result = await jsonRequest(`/api/admin/images/${image.id}/assignments/${serverId}`, {
+  const result = await jsonRequest(`/api/images/${image.id}/assignments/${serverId}`, {
     method: 'PUT',
     token,
     body,
@@ -737,7 +737,7 @@ async function ensureAssignment(token, image, serverId, priorImage) {
     blocked('image assignment response did not include an intent id');
   }
   await waitForIntent(token, result.intent.intentId, 'image assignment');
-  const settled = await jsonRequest(`/api/admin/images/${image.id}/assignments`, { token });
+  const settled = await jsonRequest(`/api/images/${image.id}/assignments`, { token });
   const assignment = settled.find((entry) => entry.serverId === serverId);
   if (
     !assignment ||
@@ -753,7 +753,7 @@ async function ensureAssignment(token, image, serverId, priorImage) {
 }
 
 async function ensurePreflight(token, server, poolId) {
-  const result = await jsonRequest(`/api/admin/servers/${server.id}/preflight`, {
+  const result = await jsonRequest(`/api/servers/${server.id}/preflight`, {
     method: 'POST',
     token,
     body: {
@@ -766,7 +766,7 @@ async function ensurePreflight(token, server, poolId) {
     blocked('preflight response did not include an intent id');
   }
   await waitForIntent(token, result.intentId, 'server preflight');
-  const report = await jsonRequest(`/api/admin/servers/${server.id}/preflight`, { token });
+  const report = await jsonRequest(`/api/servers/${server.id}/preflight`, { token });
   if (
     report?.status !== 'passed' ||
     report.report?.status !== 'passed' ||
@@ -995,14 +995,14 @@ const actualServerName = await resolveIncusServerName(incusRequest);
 const registration = createServerRegistrationConfig(process.env, runId, actualServerName);
 const routedNetwork = createRoutedNetworkConfig(process.env);
 const registrationResult = await ensureServerRegistration({
-  listServers: () => jsonRequest('/api/admin/servers', { token }),
+  listServers: () => jsonRequest('/api/servers?scope=all', { token }),
   createServer: (body) =>
-    jsonRequest('/api/admin/servers', {
+    jsonRequest('/api/servers', {
       method: 'POST',
       token,
       body,
     }),
-  patchServer: (server, body) => jsonRequest(`/api/admin/servers/${server.id}`, {
+  patchServer: (server, body) => jsonRequest(`/api/servers/${server.id}`, {
     method: 'PATCH',
     token,
     body,
@@ -1048,7 +1048,7 @@ const ipPool = await ensureIpPoolForServer({
 });
 const peerServerId = process.env.E2E_GPU_PEER_SERVER_ID?.trim();
 if (peerServerId && peerServerId !== server.id) {
-  const servers = await jsonRequest('/api/admin/servers', { token });
+  const servers = await jsonRequest('/api/servers?scope=all', { token });
   if (Array.isArray(servers) && servers.some((entry) => entry.id === peerServerId)) {
     await ensureIpPoolForServer({
       listPools: () => jsonRequest('/api/admin/ip-pools', { token }),
@@ -1081,8 +1081,8 @@ await installCertificateFixture(
   'pending',
 );
 
-let currentServer = await jsonRequest(`/api/admin/servers/${server.id}`, { token });
-const connectResult = await jsonRequest(`/api/admin/servers/${server.id}/connect`, {
+let currentServer = await jsonRequest(`/api/servers/${server.id}?scope=all`, { token });
+const connectResult = await jsonRequest(`/api/servers/${server.id}/connect`, {
   method: 'POST',
   token,
   body: {
@@ -1092,7 +1092,7 @@ const connectResult = await jsonRequest(`/api/admin/servers/${server.id}/connect
 });
 const connectIntentId = parseConnectIntentId(connectResult);
 await waitForIntent(token, connectIntentId, 'server connect');
-currentServer = await jsonRequest(`/api/admin/servers/${server.id}`, { token });
+currentServer = await jsonRequest(`/api/servers/${server.id}?scope=all`, { token });
 if (currentServer.status !== 'online') {
   blocked(`server connect intent settled without an online server: ${currentServer.status}`);
 }
@@ -1104,7 +1104,7 @@ if (
 }
 await discoverStoragePools(jsonRequest, server.id, token);
 const pools = validateStoragePoolDtos(
-  await jsonRequest(`/api/admin/servers/${server.id}/storage-pools`, { token }),
+  await jsonRequest(`/api/servers/${server.id}/storage-pools?scope=all`, { token }),
   server.id,
   'persisted storage pool listing',
 );
@@ -1130,7 +1130,7 @@ if (process.env.E2E_INCUS_PREFLIGHT_POOL_NAME !== dir.incusName) {
 
 await registerStoragePools(jsonRequest, server.id, token, [dir, lvm]);
 const registeredPools = validateStoragePoolDtos(
-  await jsonRequest(`/api/admin/servers/${server.id}/storage-pools`, { token }),
+  await jsonRequest(`/api/servers/${server.id}/storage-pools?scope=all`, { token }),
   server.id,
   'persisted registered storage pool listing',
 );
@@ -1157,14 +1157,14 @@ WHERE id = :'server_id'::uuid;
     server_id: server.id,
   },
 );
-currentServer = await jsonRequest(`/api/admin/servers/${server.id}`, { token });
+currentServer = await jsonRequest(`/api/servers/${server.id}?scope=all`, { token });
 if (currentServer.systemPoolId !== registeredDir.id) {
   blocked('server system_pool_id fixture was not persisted');
 }
 
 const imageRegistration = await ensureImageRegistration({
-  listImages: (authToken) => jsonRequest('/api/admin/images', { token: authToken }),
-  createImage: (body, authToken) => jsonRequest('/api/admin/images', {
+  listImages: (authToken) => jsonRequest('/api/images?scope=all', { token: authToken }),
+  createImage: (body, authToken) => jsonRequest('/api/images', {
     method: 'POST',
     token: authToken,
     body,
@@ -1203,7 +1203,7 @@ WHERE id = :'image_id'::uuid
     image_id: image.id,
   },
 );
-const pinnedImage = await jsonRequest(`/api/admin/images/${image.id}`, { token });
+const pinnedImage = await jsonRequest(`/api/images/${image.id}?scope=all`, { token });
 if (pinnedImage.fingerprint?.toLowerCase() !== workloadFingerprint) {
   blocked('image fingerprint fixture was not persisted');
 }
@@ -1295,7 +1295,7 @@ if (
 
 // Admin inventory is authoritative for fixture binding; the user-facing list is
 // grant-filtered and would hide an ungranted seeded backend.
-const sharedBackends = await jsonRequest('/api/admin/shared-backends', { token });
+const sharedBackends = await jsonRequest('/api/shared-backends?scope=all', { token });
 const fixtureFsid = process.env.E2E_CEPHFS_FSID?.trim();
 const fixtureIdentity = process.env.E2E_CEPHFS_IDENTITY_KEY?.trim();
 let selectedShared = process.env.E2E_SHARED_BACKEND_ID
@@ -1305,7 +1305,7 @@ if (!selectedShared && fixtureIdentity) {
   selectedShared = sharedBackends.find((entry) => entry.identityKey === fixtureIdentity);
 }
 if (!selectedShared && fixtureFsid && fixtureIdentity) {
-  selectedShared = await jsonRequest('/api/admin/shared-backends', {
+  selectedShared = await jsonRequest('/api/shared-backends', {
     method: 'POST',
     token,
     body: {
@@ -1404,13 +1404,13 @@ if (!alreadyRegistered) {
 const gpuPci = process.env.E2E_GPU_PCI_ADDRESS?.trim() ?? '';
 for (const extra of [{ id: server.id, role: undefined }, ...labServers]) {
   if (extra.role === 'gpu' && gpuPci) {
-    await jsonRequest(`/api/admin/servers/${extra.id}/gpu`, {
+    await jsonRequest(`/api/servers/${extra.id}/gpu`, {
       method: 'PATCH',
       token,
       body: { enabled: true },
     });
   }
-  await jsonRequest(`/api/admin/users/${session.user.id}/server-grants/${extra.id}`, {
+  await jsonRequest(`/api/users/${session.user.id}/server-grants/${extra.id}`, {
     method: 'PUT',
     token,
     body: {
@@ -1424,7 +1424,7 @@ for (const extra of [{ id: server.id, role: undefined }, ...labServers]) {
 }
 if (selectedShared?.id) {
   await jsonRequest(
-    `/api/admin/users/${session.user.id}/shared-backend-grants/${selectedShared.id}`,
+    `/api/users/${session.user.id}/shared-backend-grants/${selectedShared.id}`,
     {
       method: 'PUT',
       token,
@@ -1443,7 +1443,7 @@ for (const extra of labServers) {
 }
 for (const poolId of dirPoolIds) {
   await jsonRequest(
-    `/api/admin/users/${session.user.id}/storage-pool-grants/${poolId}`,
+    `/api/users/${session.user.id}/storage-pool-grants/${poolId}`,
     {
       method: 'PUT',
       token,

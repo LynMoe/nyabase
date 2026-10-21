@@ -52,12 +52,12 @@ function VolumeIntentRef({ id }: { id: string }) {
   const hasShared = caps.includes(Capability.ManageSharedVolumes);
   const local = useQuery({
     queryKey: queryKeys.volumes.admin,
-    queryFn: () => api.get<VolumeDto[]>('/admin/volumes'),
+    queryFn: () => api.get<VolumeDto[]>('/volumes?scope=all'),
     enabled: Boolean(id) && hasLocal,
   });
   const shared = useQuery({
     queryKey: queryKeys.sharedVolumes.admin,
-    queryFn: () => api.get<SharedVolumeDto[]>('/admin/shared-volumes'),
+    queryFn: () => api.get<SharedVolumeDto[]>('/shared-volumes?scope=all'),
     enabled: Boolean(id) && hasShared,
   });
   const localName = local.data?.find((row) => row.id === id)?.name;
@@ -142,7 +142,7 @@ export function IntentDetailDialog({
     queryKey: queryKeys.adminIntent(intent?.id ?? ''),
     queryFn: () => {
       if (!intent) throw new Error('intent required');
-      return api.get<IntentDto>(`/admin/intents/${intent.id}`);
+      return api.get<IntentDto>(`/intents/${intent.id}`);
     },
     enabled: open && Boolean(intent?.id),
     refetchInterval: (query) => refetchWhileInProgress(query.state, {
@@ -152,7 +152,7 @@ export function IntentDetailDialog({
   });
   const view = detailQuery.data ?? intent;
   const retry = useMutation({
-    mutationFn: (intentId: string) => retryIntent(intentId, true),
+    mutationFn: (intentId: string) => retryIntent(intentId),
     onSuccess: () => {
       toast({ title: '已提交重试' });
       onRetried();

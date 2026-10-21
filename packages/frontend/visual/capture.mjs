@@ -314,6 +314,8 @@ function mockApi(urlString, method) {
   const url = new URL(urlString);
   const p = url.pathname.replace(/^\/api/, '') || '/';
   const m = method.toUpperCase();
+  // One route per resource: ?scope=all is the administrator view of the same path.
+  const all = url.searchParams.get('scope') === 'all';
 
   if (p === '/public/settings') {
     return json({ branding: { title: 'nyabase', description: '开发容器管理平台' }, sshProxy: { host: 'ssh.example.test', port: 2222 } });
@@ -330,13 +332,13 @@ function mockApi(urlString, method) {
   if (p === '/auth/refresh' && m === 'POST') {
     return json({ accessToken: 'access-token', user });
   }
-  if (p === '/performance/usage') {
+  if (p === '/performance/usage' && !all) {
     if (url.searchParams.get('containerId')) {
       return json({ sampledAt: ISO, stale: false, serverId: 'srv-1', container: ownContainerUsage });
     }
     return json({ sampledAt: ISO, servers: [serverUsage], ownContainers: [ownContainerUsage] });
   }
-  if (p === '/admin/performance/usage') {
+  if (p === '/performance/usage' && all) {
     if (url.searchParams.get('containerId')) {
       return json({ sampledAt: ISO, stale: false, serverId: 'srv-1', container: ownContainerUsage });
     }
@@ -358,19 +360,16 @@ function mockApi(urlString, method) {
     return json({ range: '1h', serverId: 'srv-1', t: [], charts: { cpu: chart, memory: chart, disk: chart, network: chart }, gpus: [] });
   }
 
-  if (p === '/servers') return json([userServer]);
-  if (p === '/servers/srv-1') return json(userServer);
-  if (p === '/admin/servers') return json([server]);
-  if (p === '/admin/servers/srv-1') return json(server);
-  if (p === '/admin/servers/srv-1/storage-pools') return json([pool]);
-  if (p === '/servers/srv-1/storage-pools') return json([{ ...pool, source: null }]);
-  if (p === '/admin/servers/srv-1/preflight') {
+  if (p === '/servers') return json(all ? [server] : [userServer]);
+  if (p === '/servers/srv-1') return json(all ? server : userServer);
+  if (p === '/servers/srv-1/storage-pools') return json(all ? [pool] : [{ ...pool, source: null }]);
+  if (p === '/servers/srv-1/preflight') {
     return json({
       serverId: 'srv-1', status: 'passed', checkedAt: ISO,
       report: { controlReady: true, checks: { incus: 'pass', bridge: 'pass' }, failureCode: null },
     });
   }
-  if (p === '/admin/servers/srv-1/gpu') {
+  if (p === '/servers/srv-1/gpu') {
     return json({
       enabled: true,
       health: { runtimeReady: true },
@@ -378,24 +377,24 @@ function mockApi(urlString, method) {
       support: { supported: true, checks: [] },
     });
   }
-  if (p === '/admin/servers/srv-1/gpus' || p === '/servers/srv-1/gpus') {
+  if (p === '/servers/srv-1/gpus') {
     return json({ items: [{ pciAddress: '0000:01:00.0', index: 0, model: 'RTX 4090' }], enabled: true });
   }
 
-  if (p === '/containers' || p === '/admin/containers') return json([container]);
-  if (p === '/containers/ctr-1' || p === '/admin/containers/ctr-1') return json(container);
+  if (p === '/containers') return json([container]);
+  if (p === '/containers/ctr-1') return json(container);
   if (p.endsWith('/containers/ctr-1/volumes')) return json(container.volumes);
-  if (p.endsWith('/containers/ctr-1/intents')) return json({ items: [{
+  if (p === '/intents' && url.searchParams.get('resourceId') === 'ctr-1') return json({ items: [{
     id: 'int-1', kind: 'container.create', resourceType: 'container', resourceId: 'ctr-1',
     serverId: 'srv-1', requestedBy: 'admin', requestSummary: { name: 'dev-workspace' },
     targetRevision: 1, baseline: null, status: 'succeeded', failureCode: null, failure: null,
     attemptCount: 1, nextAttemptAt: null, createdAt: ISO, settledAt: ISO, blockedByIntentId: null,
   }], nextCursor: null });
 
-  if (p === '/volumes' || p === '/admin/volumes') return json([volume]);
-  if (p === '/images' || p === '/admin/images') return json([image]);
-  if (p === '/admin/images/img-1') return json(image);
-  if (p === '/admin/images/catalog') return json([{
+  if (p === '/volumes') return json([volume]);
+  if (p === '/images') return json([image]);
+  if (p === '/images/img-1') return json(image);
+  if (p === '/images/catalog') return json([{
     alias: 'ubuntu/24.04',
     aliases: ['ubuntu/24.04', 'ubuntu/noble'],
     fingerprint: 'b'.repeat(64),
@@ -407,17 +406,17 @@ function mockApi(urlString, method) {
     description: 'Ubuntu 24.04 default v1',
     added: false,
   }]);
-  if (p === '/admin/users') return json([user, otherUser]);
-  if (p === '/admin/users/user-admin') return json(user);
-  if (p === '/admin/users/user-alice') return json(otherUser);
+  if (p === '/users') return json([user, otherUser]);
+  if (p === '/users/user-admin') return json(user);
+  if (p === '/users/user-alice') return json(otherUser);
   if (p === '/admin/catalog/users') return json([user, otherUser]);
   if (p === '/admin/groups') return json([group]);
   if (p === '/admin/groups/grp-users') return json(group);
-  if (p === '/admin/shared-backends' || p === '/shared-backends') return json([backend]);
-  if (p === '/admin/shared-backends/be-1') return json(backend);
+  if (p === '/shared-backends') return json([backend]);
+  if (p === '/shared-backends/be-1') return json(backend);
   if (p === '/admin/ip-pools') return json([ipPool]);
-  if (p === '/http-proxy/bindings' || p === '/admin/http-proxy/bindings') return json([binding]);
-  if (p === '/http-proxy/domain-pools' || p === '/admin/http-proxy/domain-pools') return json([domainPool]);
+  if (p === '/http-proxy/bindings') return json([binding]);
+  if (p === '/http-proxy/domain-pools') return json([domainPool]);
 
   if (p === '/admin/incus-client-certificate') {
     return json({
@@ -447,7 +446,7 @@ function mockApi(urlString, method) {
   if (p === '/admin/ssh-proxy/host-key') {
     return json({ fingerprint: 'SHA256:hostkey', algorithm: 'ed25519', updatedAt: ISO });
   }
-  if (p === '/admin/http-proxy/status') {
+  if (p === '/http-proxy/status') {
     return json({
       connectedProxies: 1, activeConnections: 3, totalRequests: 900,
       totalRejectedRequests: 2, updatedAt: ISO,

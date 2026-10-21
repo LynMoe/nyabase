@@ -5,6 +5,7 @@ import {
   type GpuContainerState,
   type GpuDeviceDto,
   type GpuGrant,
+  type ListScope,
   type ServerGpuDto,
 } from '@nyabase/common';
 import { api } from '../../lib/api.js';
@@ -50,7 +51,7 @@ export function ContainerCreateGpu({
 export function ContainerSpecGpu({
   serverId,
   gpuEnabled,
-  admin,
+  scope,
   observedStatus,
   grant,
   value,
@@ -60,7 +61,7 @@ export function ContainerSpecGpu({
 }: {
   serverId: string;
   gpuEnabled: boolean;
-  admin: boolean;
+  scope: ListScope;
   observedStatus: string;
   grant: GpuGrant | null;
   value: string[];
@@ -74,7 +75,7 @@ export function ContainerSpecGpu({
     <div className="space-y-3 border-t pt-4">
       <GpuPicker
         serverId={serverId}
-        admin={admin}
+        scope={scope}
         grant={grant}
         value={value}
         onChange={onChange}
@@ -96,14 +97,14 @@ export function ContainerSpecGpu({
 export function ContainerOverviewGpu({
   gpu,
   serverId,
-  admin,
+  scope,
 }: {
   gpu: GpuContainerState | null;
   serverId: string;
-  admin: boolean;
+  scope: ListScope;
 }) {
   const current = gpu?.pciAddresses ?? [];
-  const query = useGpuDevices(serverId, admin, current.length > 0);
+  const query = useGpuDevices(serverId, scope, current.length > 0);
   if (!gpu) return null;
   const inventory = Array.isArray(query.data?.items) ? query.data.items : [];
   const groups = query.data ? gpuModelGroups(current, inventory) : [];
@@ -178,7 +179,7 @@ export function ServerGrantGpu({
   return (
     <GpuPicker
       serverId={serverId}
-      admin
+      scope="all"
       value={value}
       onChange={onChange}
       idPrefix="grant-gpu"
@@ -196,11 +197,11 @@ export function ServerGpuCard({ serverId, active }: { serverId: string; active: 
   const queryClient = useQueryClient();
   const query = useQuery({
     queryKey: queryKeys.gpu.server(serverId),
-    queryFn: () => api.get<ServerGpuDto>(`/admin/servers/${serverId}/gpu`),
+    queryFn: () => api.get<ServerGpuDto>(`/servers/${serverId}/gpu`),
     enabled: active,
   });
   const toggle = useMutation({
-    mutationFn: (enabled: boolean) => api.patch<ServerGpuDto>(`/admin/servers/${serverId}/gpu`, { enabled }),
+    mutationFn: (enabled: boolean) => api.patch<ServerGpuDto>(`/servers/${serverId}/gpu`, { enabled }),
     onSuccess: (result) => {
       void queryClient.invalidateQueries({ queryKey: queryKeys.gpu.server(serverId) });
       void queryClient.invalidateQueries({ queryKey: queryKeys.servers.detail(serverId) });

@@ -1,7 +1,8 @@
 import { useQuery } from '@tanstack/react-query';
-import { Capability } from '@nyabase/common';
+import { Capability, type ListScope } from '@nyabase/common';
 import { api } from '../../lib/api.js';
 import { queryKeys } from '../../lib/query-keys.js';
+import { scopedPath } from '../../lib/scoped-paths.js';
 import { useAuthStore } from '../../store/auth.js';
 
 interface GpuDevice {
@@ -9,19 +10,19 @@ interface GpuDevice {
   model: string;
 }
 
-export function useGpuNames(serverId: string | undefined, admin: boolean): ReadonlyMap<string, string> {
+export function useGpuNames(serverId: string | undefined, scope: ListScope): ReadonlyMap<string, string> {
   const privileged = useAuthStore((state) => {
     const caps = state.user?.capabilities ?? [];
-    return admin
+    return scope === 'all'
       || caps.includes(Capability.ManageServers)
       || caps.includes(Capability.ManageGrants);
   });
   const query = useQuery({
-    queryKey: queryKeys.gpu.devices(serverId ?? '', privileged),
+    queryKey: queryKeys.gpu.devices(serverId ?? '', privileged ? 'all' : 'mine'),
     enabled: Boolean(serverId),
     staleTime: 60_000,
     queryFn: () => api.get<{ items: GpuDevice[] }>(
-      `${privileged ? '/admin' : ''}/servers/${serverId}/gpus`,
+      scopedPath(`/servers/${serverId}/gpus`, privileged ? 'all' : 'mine'),
     ),
   });
   const names = new Map<string, string>();

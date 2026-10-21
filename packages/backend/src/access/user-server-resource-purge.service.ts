@@ -17,6 +17,7 @@ import { VOLUME_DESTROY_PLACEMENT_ID } from '../reconcile/reconcile-claim.reposi
 import { listEligibleDestroyExecutors } from '../volumes/eligible-destroy-executors.js';
 import { VolumesRepository } from '../volumes/volumes.repository.js';
 import { AccessResolverService } from '../iam/access-resolver.service.js';
+import { isSystemActor, type Actor } from '../iam/actor.js';
 
 const OPERATOR_PURGE_AUDIT_ACTION = 'user.server.purge_resources' as AuditAction;
 
@@ -40,27 +41,31 @@ export class UserServerResourcePurgeService {
     private readonly audit: AuditService,
   ) {}
 
+  /**
+   * Deletes a user's containers and local volumes on one server. An operator
+   * (`ManageGrants` + `ManageContainersAny`) purges as themselves; grant expiry
+   * purges as the system.
+   */
   async purge(
+    actor: Actor,
     userId: string,
     serverId: string,
-    actorId: string,
-    reason: 'admin' | 'expiry' = 'admin',
   ): Promise<PurgeUserServerResourcesResult> {
+    const actorId = actor.userId;
+    const reason = isSystemActor(actor) ? 'expiry' : 'admin';
     const owned = await this.containerRepository.list({ ownerId: userId, serverId });
     const intentIds: string[] = [];
     const containerIds: string[] = [];
     for (const container of owned) {
       if (container.lifecycle_phase === ContainerPhase.Deleting) continue;
-      const accepted = reason === 'expiry'
-        ? await this.containers.actionForSystem(container.id, 'delete', actorId)
-        : await this.containers.actionForAdmin(container.id, 'delete', actorId);
+      const accepted = await this.containers.action(actor, container.id, 'delete');
       intentIds.push(accepted.intentId);
       containerIds.push(container.id);
     }
     const volumeResult = await this.purgeVolumes(
       userId,
       (volume) => volume.server_id === serverId && volume.shared_backend_id === null,
-      actorId,
+      actor,
     );
     await this.transactions.run(async (transaction) => {
       await this.audit.append(
@@ -91,14 +96,15 @@ export class UserServerResourcePurgeService {
   }
 
   async purgeStoragePoolVolumes(
+    actor: Actor,
     userId: string,
     poolId: string,
-    actorId: string,
   ): Promise<{ intentIds: string[]; volumeIds: string[] }> {
+    const actorId = actor.userId;
     const result = await this.purgeVolumes(
       userId,
       (volume) => volume.pool_id === poolId && volume.shared_backend_id === null,
-      actorId,
+      actor,
       true,
     );
     if (result.volumeIds.length > 0) {
@@ -126,14 +132,15 @@ export class UserServerResourcePurgeService {
   }
 
   async purgeSharedBackendVolumes(
+    actor: Actor,
     userId: string,
     sharedBackendId: string,
-    actorId: string,
   ): Promise<{ intentIds: string[]; volumeIds: string[] }> {
+    const actorId = actor.userId;
     const result = await this.purgeVolumes(
       userId,
       (volume) => volume.shared_backend_id === sharedBackendId,
-      actorId,
+      actor,
       true,
     );
     if (result.volumeIds.length > 0) {
@@ -161,40 +168,41 @@ export class UserServerResourcePurgeService {
   }
 
   async stopRunningContainersForStoragePool(
+    actor: Actor,
     userId: string,
     poolId: string,
-    actorId: string,
-    workerId = actorId,
+    workerId = actor.userId,
   ): Promise<{ intentIds: string[] }> {
     return this.stopRunningContainersForResource(
       userId,
       (volume) => volume.pool_id === poolId && volume.shared_backend_id === null,
-      actorId,
+      actor,
       { resourceKind: 'storage_pool', resourceId: poolId },
       workerId,
     );
   }
 
   async stopRunningContainersForSharedBackend(
+    actor: Actor,
     userId: string,
     sharedBackendId: string,
-    actorId: string,
-    workerId = actorId,
+    workerId = actor.userId,
   ): Promise<{ intentIds: string[] }> {
     return this.stopRunningContainersForResource(
       userId,
       (volume) => volume.shared_backend_id === sharedBackendId,
-      actorId,
+      actor,
       { resourceKind: 'shared_backend', resourceId: sharedBackendId },
       workerId,
     );
   }
 
   async stopRunningContainersForGraceEntry(
+    actor: Actor,
     userId: string,
     serverId: string,
-    actorId: string,
   ): Promise<{ intentIds: string[] }> {
+    const actorId = actor.userId;
     const owned = await this.containerRepository.list({ ownerId: userId, serverId });
     const intentIds: string[] = [];
     for (const container of owned) {
@@ -202,7 +210,7 @@ export class UserServerResourcePurgeService {
         container.lifecycle_phase !== ContainerPhase.Active
         || container.power_intent !== ContainerPowerIntent.Running
       ) continue;
-      const accepted = await this.containers.actionForSystem(container.id, 'stop', actorId);
+      const accepted = await this.containers.action(actor, container.id, 'stop');
       intentIds.push(accepted.intentId);
     }
     if (intentIds.length > 0) {
@@ -230,10 +238,11 @@ export class UserServerResourcePurgeService {
       server_id: string | null;
       shared_backend_id: string | null;
     }) => boolean,
-    actorId: string,
+    actor: Actor,
     resource: { resourceKind: string; resourceId: string },
     workerId: string,
   ): Promise<{ intentIds: string[] }> {
+    const actorId = actor.userId;
     const volumes = (await this.volumes.list(userId)).filter(matches);
     const containerIds = new Set<string>();
     for (const volume of volumes) {
@@ -265,7 +274,7 @@ export class UserServerResourcePurgeService {
           || current.power_intent !== ContainerPowerIntent.Running
         ) continue;
         // The desired power state and pending intent are the completion marker.
-        const accepted = await this.containers.actionForSystem(containerId, 'stop', actorId);
+        const accepted = await this.containers.action(actor, containerId, 'stop');
         intentIds.push(accepted.intentId);
       } finally {
         await this.reconcileClaims.release({
@@ -301,9 +310,10 @@ export class UserServerResourcePurgeService {
       server_id: string | null;
       shared_backend_id: string | null;
     }) => boolean,
-    actorId: string,
+    actor: Actor,
     deleteAttachedContainers = false,
   ): Promise<{ intentIds: string[]; containerIntentIds: string[]; volumeIds: string[] }> {
+    const actorId = actor.userId;
     const owned = (await this.volumes.list(userId)).filter(matches);
     const containerIds = new Set<string>();
     for (const volume of owned) {
@@ -316,7 +326,7 @@ export class UserServerResourcePurgeService {
       for (const containerId of containerIds) {
         const container = await this.containerRepository.find(containerId);
         if (!container || container.lifecycle_phase === ContainerPhase.Deleting) continue;
-        const accepted = await this.containers.actionForSystem(containerId, 'delete', actorId);
+        const accepted = await this.containers.action(actor, containerId, 'delete');
         containerIntentIds.push(accepted.intentId);
       }
     }

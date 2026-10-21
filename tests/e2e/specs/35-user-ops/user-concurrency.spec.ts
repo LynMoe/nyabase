@@ -15,6 +15,7 @@ import {
   requireSucceededIntent,
   settleAcceptedIntent,
   stopUserContainer,
+  resourceIntentsPath,
 } from '../../support/persona.js';
 
 type JsonRecord = Record<string, any>;
@@ -88,9 +89,9 @@ test(
         await settleAcceptedIntent(userApi, response, 'user.attach-resize.race');
       }
 
-      await assertNoActiveIntents(userApi, `/api/volumes/${volumeId}/intents`);
-      await assertNoActiveIntents(userApi, `/api/containers/${containerA}/intents`);
-      await assertNoActiveIntents(userApi, `/api/containers/${containerB}/intents`);
+      await assertNoActiveIntents(userApi, resourceIntentsPath('volume', volumeId, 'mine'));
+      await assertNoActiveIntents(userApi, resourceIntentsPath('container', containerA, 'mine'));
+      await assertNoActiveIntents(userApi, resourceIntentsPath('container', containerB, 'mine'));
 
       const after = await expectJson<JsonRecord>(await userApi.get(`/api/volumes/${volumeId}`));
       const size = Number(after.sizeBytes);
@@ -206,7 +207,7 @@ test(
       expect(
         (cpu === 600 && mem === 640 * MiB) || (cpu === 700 && mem === 704 * MiB),
       ).toBe(true);
-      await assertNoActiveIntents(userApi, `/api/containers/${containerId}/intents`);
+      await assertNoActiveIntents(userApi, resourceIntentsPath('container', containerId, 'mine'));
 
       const [resizeA, resizeB] = await Promise.all([
         userApi.patch(`/api/volumes/${volumeId}`, {
@@ -234,7 +235,7 @@ test(
         await userApi.get(`/api/volumes/${volumeId}`),
       );
       expect(Number(volumeAfter.sizeBytes)).toBe(winnerSize);
-      await assertNoActiveIntents(userApi, `/api/volumes/${volumeId}/intents`);
+      await assertNoActiveIntents(userApi, resourceIntentsPath('volume', volumeId, 'mine'));
     } finally {
       await deleteUserContainer(userApi ?? adminApi, adminApi, containerId);
       await deleteUserVolume(userApi ?? adminApi, adminApi, volumeId);

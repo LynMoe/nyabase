@@ -5,6 +5,8 @@ import { Gauge, History, Terminal, TriangleAlert } from 'lucide-react';
 import {
   Capability,
   ContainerStatus,
+  IntentResourceType,
+  type ListScope,
   type AttachVolumeRequest,
   type ContainerAction,
   type ContainerDto,
@@ -46,6 +48,8 @@ import {
   intentListSettled,
 } from '../lib/in-progress.js';
 import { queryKeys } from '../lib/query-keys.js';
+import { resourceIntentsPath } from '../lib/intent-visibility.js';
+import { scopedPath } from '../lib/scoped-paths.js';
 import { queryPollInterval, refetchWhileInProgress } from '../lib/query-lifecycle.js';
 import { runGatedMutation } from '../lib/resource-mutation-gate.js';
 import { useResourceMutationPending } from '../hooks/use-resource-mutation-gate.js';
@@ -72,24 +76,25 @@ export function parseDetailTab(value: unknown): DetailTab {
 export default function ContainerDetailPage() {
   const { containerId } = userRouteApi.useParams();
   const { tab } = userRouteApi.useSearch();
-  return <ContainerDetailContent containerId={containerId} admin={false} tab={tab} />;
+  return <ContainerDetailContent containerId={containerId} scope="mine" tab={tab} />;
 }
 
 export function AdminContainerDetailPage() {
   const { containerId } = adminRouteApi.useParams();
   const { tab } = adminRouteApi.useSearch();
-  return <ContainerDetailContent containerId={containerId} admin tab={tab} />;
+  return <ContainerDetailContent containerId={containerId} scope="all" tab={tab} />;
 }
 
 function ContainerDetailContent({
   containerId,
-  admin,
+  scope,
   tab,
 }: {
   containerId: string;
-  admin: boolean;
+  scope: ListScope;
   tab: DetailTab;
 }) {
+  const admin = scope === 'all';
   const queryClient = useQueryClient();
   const navigate = useNavigate({ from: admin ? '/manage/containers/$containerId' : '/containers/$containerId' });
   const [rootOrchestrateSize, setRootOrchestrateSize] = useState<number | null>(null);
@@ -102,40 +107,42 @@ function ContainerDetailContent({
   const actionPending = useResourceMutationPending(containerId);
   const volumesEnabled = tab === 'overview' && (!admin || canManageVolumes || canManageSharedVolumes);
 
-  const base = admin ? `/admin/containers/${containerId}` : `/containers/${containerId}`;
+  const base = `/containers/${containerId}`;
   const containerQuery = useQuery({
-    queryKey: queryKeys.containers.detail(admin ? 'admin' : 'user', containerId),
+    queryKey: queryKeys.containers.detail(scope, containerId),
     queryFn: () => api.get<ContainerDto>(base),
     refetchInterval: (query) => queryPollInterval(query.state, { activeIntervalMs: 5_000 }),
   });
   const occupancyQuery = useQuery({
-    queryKey: queryKeys.performance.self(admin ? 'admin' : 'user', containerId),
+    queryKey: queryKeys.performance.self(scope, containerId),
     queryFn: () => api.get<PerformanceSelfResponse>(
-      `${admin ? '/admin/performance/usage' : '/performance/usage'}?containerId=${containerId}`,
+      scopedPath('/performance/usage', scope, { containerId }),
     ),
     enabled: !admin || canViewMetrics,
     refetchInterval: (query) => queryPollInterval(query.state, { activeIntervalMs: 15_000 }),
   });
   const volumesQuery = useQuery({
     queryKey: admin ? queryKeys.volumes.admin : queryKeys.volumes.user,
-    queryFn: () => api.get<VolumeDto[]>(admin ? '/admin/volumes' : '/volumes'),
+    queryFn: () => api.get<VolumeDto[]>(scopedPath('/volumes', scope)),
     enabled: volumesEnabled && (!admin || canManageVolumes),
   });
   const sharedVolumesQuery = useQuery({
     queryKey: [
       ...queryKeys.sharedVolumes.attachable(containerQuery.data?.serverId ?? ''),
-      admin ? 'admin' : 'user',
+      scope,
     ],
     queryFn: () => api.get<SharedVolumeDto[]>(
-      `${admin ? '/admin/shared-volumes' : '/shared-volumes'}?attachableOnServerId=${containerQuery.data!.serverId}`,
+      scopedPath('/shared-volumes', scope, { attachableOnServerId: containerQuery.data!.serverId }),
     ),
     enabled: volumesEnabled
       && Boolean(containerQuery.data?.serverId)
       && (!admin || canManageSharedVolumes),
   });
   const intentsQuery = useQuery({
-    queryKey: queryKeys.containers.intents(admin ? 'admin' : 'user', containerId),
-    queryFn: () => api.get<CursorPaginatedResponse<IntentDto>>(`${base}/intents?limit=50`),
+    queryKey: queryKeys.containers.intents(scope, containerId),
+    queryFn: () => api.get<CursorPaginatedResponse<IntentDto>>(
+      `${resourceIntentsPath(scope, IntentResourceType.Container, containerId)}&limit=50`,
+    ),
     enabled: intentsOpen,
     refetchInterval: (query) => refetchWhileInProgress(query.state, {
       steadyIntervalMs: false,
@@ -143,7 +150,7 @@ function ContainerDetailContent({
     }),
   });
   const attachmentsQuery = useQuery({
-    queryKey: queryKeys.containers.attachments(admin ? 'admin' : 'user', containerId),
+    queryKey: queryKeys.containers.attachments(scope, containerId),
     queryFn: async () => {
       const [local, shared] = await Promise.all([
         api.get<VolumeAttachmentDto[]>(`${base}/volumes`),
@@ -159,10 +166,8 @@ function ContainerDetailContent({
   });
   const serverQuery = useQuery({
     queryKey: queryKeys.servers.detail(containerQuery.data?.serverId ?? ''),
-    queryFn: () => (
-      admin
-        ? api.get<UserServerDto>(`/admin/servers/${containerQuery.data!.serverId}`)
-        : api.get<UserServerDto>(`/servers/${containerQuery.data!.serverId}`)
+    queryFn: () => api.get<UserServerDto>(
+      scopedPath(`/servers/${containerQuery.data!.serverId}`, scope),
     ),
     enabled: Boolean(containerQuery.data?.serverId),
   });
@@ -182,10 +187,10 @@ function ContainerDetailContent({
   };
 
   const invalidate = () => {
-    void queryClient.invalidateQueries({ queryKey: queryKeys.containers.detail(admin ? 'admin' : 'user', containerId) });
+    void queryClient.invalidateQueries({ queryKey: queryKeys.containers.detail(scope, containerId) });
     void queryClient.invalidateQueries({ queryKey: admin ? queryKeys.containers.adminList : queryKeys.containers.userList });
-    void queryClient.invalidateQueries({ queryKey: queryKeys.containers.attachments(admin ? 'admin' : 'user', containerId) });
-    void queryClient.invalidateQueries({ queryKey: queryKeys.containers.intents(admin ? 'admin' : 'user', containerId) });
+    void queryClient.invalidateQueries({ queryKey: queryKeys.containers.attachments(scope, containerId) });
+    void queryClient.invalidateQueries({ queryKey: queryKeys.containers.intents(scope, containerId) });
   };
 
   const action = useActionMutation({
@@ -388,7 +393,7 @@ function ContainerDetailContent({
               <TabsContent value="overview" className="space-y-3">
                 <OverviewPanel
                   container={container}
-                  admin={admin}
+                  scope={scope}
                   gpuEnabled={serverQuery.data?.gpuEnabled ?? false}
                   gpuGrant={gpuGrant}
                   onRepairSsh={() => repairSsh.mutate()}
@@ -421,13 +426,13 @@ function ContainerDetailContent({
                 </QueryView>
               </TabsContent>
               <TabsContent value="console">
-                <ContainerConsole container={container} admin={admin} />
+                <ContainerConsole container={container} />
               </TabsContent>
             </Tabs>
 
             {rootOrchestrateSize !== null && (
               <RootShrinkOrchestrationDialog
-                admin={admin}
+                scope={scope}
                 container={container}
                 sizeBytes={rootOrchestrateSize}
                 open
@@ -449,7 +454,7 @@ function ContainerDetailContent({
                   {(page) => (
                     <IntentsPanel
                       intents={page.items}
-                      admin={admin}
+                      scope={scope}
                       embedded
                       onRetry={() => { void intentsQuery.refetch(); }}
                     />

@@ -17,9 +17,11 @@ import {
 } from 'crypto';
 import type { Kysely, Selectable, Transaction } from 'kysely';
 import { sql } from 'kysely';
+import { assertListScope, type Actor } from '../iam/actor.js';
 import {
   AuditAction,
   Capability,
+  type ListScope,
   ContainerPhase,
   ContainerPowerIntent,
   ContainerStatus,
@@ -89,35 +91,26 @@ export class HttpProxyService {
     private readonly audit: AuditService,
   ) {}
 
+  /** `scope=mine`: the caller's bindings; `scope=all`: every binding (`ManageSystemSettings`). */
   async listBindings(
-    requesterId: string,
+    actor: Actor,
+    scope: ListScope,
     proxyOnline: boolean,
   ): Promise<HttpProxyBindingDto[]> {
-    const bindings = await this.database
+    assertListScope(actor, scope, Capability.ManageSystemSettings);
+    let query = this.database
       .selectFrom('interaction.http_proxy_bindings')
       .selectAll()
-      .where('owner_id', '=', requesterId)
-      .orderBy('hostname')
-      .execute();
-    return this.bindingDtos(bindings, requesterId, proxyOnline, this.database);
-  }
-
-  async listBindingsForAdmin(
-    requesterId: string,
-    proxyOnline: boolean,
-  ): Promise<HttpProxyBindingDto[]> {
-    const bindings = await this.database
-      .selectFrom('interaction.http_proxy_bindings')
-      .selectAll()
-      .orderBy('hostname')
-      .execute();
-    return this.bindingDtos(bindings, requesterId, proxyOnline, this.database);
+      .orderBy('hostname');
+    if (scope === 'mine') query = query.where('owner_id', '=', actor.userId);
+    return this.bindingDtos(await query.execute(), actor.userId, proxyOnline, this.database);
   }
 
   async createBinding(
-    requesterId: string,
+    actor: Actor,
     input: unknown,
   ): Promise<HttpProxyBindingDto> {
+    const requesterId = actor.userId;
     const dto = zCreateHttpProxyBindingRequest.parse(input);
     const hostname = parseHttpProxyHostname(dto.hostname);
     const binding = await this.runSerializable(async (transaction) => {
@@ -175,10 +168,11 @@ export class HttpProxyService {
   }
 
   async updateBinding(
-    requesterId: string,
+    actor: Actor,
     id: string,
     input: unknown,
   ): Promise<HttpProxyBindingDto> {
+    const requesterId = actor.userId;
     const dto = zPatchHttpProxyBindingRequest.parse(input);
     const saved = await this.runSerializable(async (transaction) => {
       const binding = await transaction
@@ -248,7 +242,8 @@ export class HttpProxyService {
     return (await this.bindingDtos([saved], requesterId, false, this.database))[0]!;
   }
 
-  async deleteBinding(requesterId: string, id: string): Promise<void> {
+  async deleteBinding(actor: Actor, id: string): Promise<void> {
+    const requesterId = actor.userId;
     await this.runSerializable(async (transaction) => {
       const binding = await transaction
         .selectFrom('interaction.http_proxy_bindings')
@@ -276,7 +271,16 @@ export class HttpProxyService {
     });
   }
 
-  async listDomainPools(): Promise<HttpDomainPoolDto[]> {
+  /**
+   * `scope=mine`: the enabled pools bindings may use (no certificate material).
+   * `scope=all`: every pool, including disabled ones (`ManageSystemSettings`).
+   */
+  async listPools(actor: Actor, scope: ListScope): Promise<HttpDomainPoolDto[] | HttpDomainPoolPublicDto[]> {
+    assertListScope(actor, scope, Capability.ManageSystemSettings);
+    return scope === 'all' ? this.listDomainPools() : this.listEnabledDomainPools();
+  }
+
+  private async listDomainPools(): Promise<HttpDomainPoolDto[]> {
     const rows = await this.database
       .selectFrom('interaction.http_domain_pools')
       .selectAll()
@@ -285,7 +289,7 @@ export class HttpProxyService {
     return rows.map((row) => this.domainPoolDto(row));
   }
 
-  async listEnabledDomainPools(): Promise<HttpDomainPoolPublicDto[]> {
+  private async listEnabledDomainPools(): Promise<HttpDomainPoolPublicDto[]> {
     // User-facing catalog for binding UI: enabled pools only, never certificate PEMs.
     const rows = await this.database
       .selectFrom('interaction.http_domain_pools')

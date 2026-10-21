@@ -66,7 +66,7 @@ describe('PerformanceView', () => {
   it('shows people and disk in user mode without a container id column', () => {
     render(
       <PerformanceView
-        mode="user"
+        scope="mine"
         usage={usage}
         serverFilter="all"
         userFilter="all"
@@ -86,7 +86,7 @@ describe('PerformanceView', () => {
   it('shows read and write columns in admin mode', () => {
     render(
       <PerformanceView
-        mode="admin"
+        scope="all"
         usage={usage}
         serverFilter="all"
         userFilter="all"

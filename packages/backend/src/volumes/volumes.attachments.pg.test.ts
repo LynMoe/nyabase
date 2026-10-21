@@ -1,7 +1,8 @@
 import type { Kysely } from 'kysely';
 import { randomUUID } from 'node:crypto';
 import { describe, expect, it, vi } from 'vitest';
-import { FailureCode } from '@nyabase/common';
+import { testActor } from '../iam/actor.test-helper.js';
+import { Capability, FailureCode } from '@nyabase/common';
 import type { NyabaseDatabase } from '../platform/persistence-pg/database.types.js';
 import { withPostgresTestDatabase } from '../platform/persistence-pg/postgres-test-harness.js';
 import { PgTransactionManager } from '../platform/persistence-pg/transaction.js';
@@ -213,12 +214,12 @@ describePg('volume attachment ownership, visibility, and drain guards', () => {
       const volumeId = await insertVolume(database, userId, poolId, serverId, null, 'attached');
       const service = makeService(database);
 
-      await service.attachForUser(userId, containerOne, {
+      await service.attach(testActor(userId), containerOne, {
         volumeId,
         containerPath: '/data',
         readOnly: false,
       }, 'local');
-      await expect(service.deleteForUser(userId, volumeId)).rejects.toMatchObject({
+      await expect(service.delete(testActor(userId), volumeId)).rejects.toMatchObject({
         response: expect.objectContaining({ code: FailureCode.VolumeRequiresUnbind }),
       });
       const attachment = await database.selectFrom('control.volume_attachments')
@@ -226,7 +227,7 @@ describePg('volume attachment ownership, visibility, and drain guards', () => {
         .where('volume_id', '=', volumeId)
         .executeTakeFirstOrThrow();
 
-      await service.detachForUser(userId, attachment.id, containerOne, 'local');
+      await service.detach(testActor(userId), attachment.id, containerOne, 'local');
       const detaching = await database.selectFrom('control.volume_attachments')
         .select(['bind_state', 'container_id'])
         .where('volume_id', '=', volumeId)
@@ -234,21 +235,75 @@ describePg('volume attachment ownership, visibility, and drain guards', () => {
       expect(detaching.bind_state).toBe('detaching');
       expect(detaching.container_id).toBe(containerOne);
 
-      await expect(service.deleteForUser(userId, volumeId)).rejects.toMatchObject({
+      await expect(service.delete(testActor(userId), volumeId)).rejects.toMatchObject({
         response: expect.objectContaining({ code: FailureCode.VolumeRequiresUnbind }),
       });
-      await expect(service.attachForUser(userId, containerTwo, {
+      await expect(service.attach(testActor(userId), containerTwo, {
         volumeId,
         containerPath: '/data',
         readOnly: false,
       }, 'local')).resolves.toMatchObject({ intentId: expect.any(String) });
-      await expect(service.attachForUser(userId, containerOne, {
+      await expect(service.attach(testActor(userId), containerOne, {
         volumeId,
         containerPath: '/data',
         readOnly: false,
       }, 'local')).rejects.toMatchObject({
         response: expect.objectContaining({ code: FailureCode.InvalidInput }),
       });
+    });
+  });
+
+  it('lets the container owner or the kind\'s volume administrator attach, and nobody else', async () => {
+    await withPostgresTestDatabase(async ({ database }) => {
+      const userId = randomUUID();
+      const otherId = randomUUID();
+      const serverId = randomUUID();
+      const imageId = randomUUID();
+      await database.insertInto('iam.users').values(userValues(userId, 1)).execute();
+      const adminId = randomUUID();
+      await database.insertInto('iam.users').values(userValues(otherId, 2)).execute();
+      await database.insertInto('iam.users').values(userValues(adminId, 3)).execute();
+      await database.insertInto('infra.servers').values(serverValues(serverId, 'one')).execute();
+      const poolId = await insertPool(database, serverId, `pool-${serverId.slice(0, 8)}`);
+      await database.insertInto('infra.images').values({
+        id: imageId,
+        alias: 'base',
+        fingerprint: null,
+        description: null,
+        login_user: 'root',
+        min_root_size_bytes: null,
+        network_managed_externally: false,
+        is_active: true,
+        deleting: false,
+        cleanup_generation: 0,
+        revision: 1,
+      }).execute();
+      const container = await insertContainer(database, userId, serverId, poolId, imageId, 'c-authz');
+      const volumeId = await insertVolume(database, userId, poolId, serverId, null, 'v-authz');
+      const service = makeService(database);
+      const input = { volumeId, containerPath: '/data', readOnly: false };
+
+      await expect(service.attach(testActor(otherId), container, input, 'local'))
+        .rejects.toMatchObject({ status: 404 });
+      // ManageSharedVolumes does not grant local attachments
+      await expect(service.attach(
+        testActor(randomUUID(), Capability.ManageSharedVolumes),
+        container,
+        input,
+        'local',
+      )).rejects.toMatchObject({ status: 404 });
+      await expect(service.attach(
+        testActor(adminId, Capability.ManageVolumes),
+        container,
+        input,
+        'local',
+      )).resolves.toMatchObject({ intentId: expect.any(String) });
+      const attachment = await database.selectFrom('control.volume_attachments')
+        .selectAll()
+        .where('volume_id', '=', volumeId)
+        .executeTakeFirstOrThrow();
+      await expect(service.detach(testActor(otherId), attachment.id, container, 'local'))
+        .rejects.toMatchObject({ status: 404 });
     });
   });
 
@@ -335,7 +390,7 @@ describePg('volume attachment ownership, visibility, and drain guards', () => {
       }).execute();
       const service = makeService(database);
 
-      await expect(service.attachForUser(userId, container, {
+      await expect(service.attach(testActor(userId), container, {
         volumeId,
         containerPath: '/shared',
         readOnly: false,
@@ -384,12 +439,12 @@ describePg('volume attachment ownership, visibility, and drain guards', () => {
       );
       const volumeId = await insertVolume(database, userId, poolId, serverId, null, 'dto-vol');
       const service = makeService(database);
-      await service.attachForUser(userId, containerId, {
+      await service.attach(testActor(userId), containerId, {
         volumeId,
         containerPath: '/data',
         readOnly: false,
       }, 'local');
-      const listed = await service.listForUser(userId);
+      const listed = await service.list(testActor(userId));
       const volume = listed.find((item) => item.id === volumeId);
       expect(volume?.usedBytes).toBe(0);
       expect(volume?.poolName).toMatch(/^pool-dto-/);
@@ -401,7 +456,7 @@ describePg('volume attachment ownership, visibility, and drain guards', () => {
           containerPath: '/data',
         }),
       ]);
-      const fetched = await service.getForUser(volumeId, userId);
+      const fetched = await service.get(testActor(userId), volumeId);
       expect(fetched.attachments[0]?.containerName).toBe('web-app');
     });
   });
@@ -475,7 +530,7 @@ describePg('volume attachment ownership, visibility, and drain guards', () => {
         expires_at: null,
       }).execute();
       const service = makeService(database);
-      const accepted = await service.attachForUser(userId, containerId, {
+      const accepted = await service.attach(testActor(userId), containerId, {
         volumeId,
         containerPath: '/shared',
         readOnly: false,
@@ -496,7 +551,7 @@ describePg('volume attachment ownership, visibility, and drain guards', () => {
         .where('volume_id', '=', volumeId)
         .executeTakeFirstOrThrow();
       await insertStoppedRoute(database, containerId, serverId);
-      await service.detachForUser(userId, attachment.id, containerId, 'shared');
+      await service.detach(testActor(userId), attachment.id, containerId, 'shared');
       const placement = await database.selectFrom('control.volume_placements')
         .select(['catalog_state', 'server_id'])
         .where('volume_id', '=', volumeId)
@@ -601,7 +656,7 @@ describePg('volume attachment ownership, visibility, and drain guards', () => {
         expires_at: null,
       }).execute();
       const service = makeService(database);
-      await service.attachForUser(userId, containerId, {
+      await service.attach(testActor(userId), containerId, {
         volumeId,
         containerPath: '/shared',
         readOnly: false,
@@ -610,7 +665,7 @@ describePg('volume attachment ownership, visibility, and drain guards', () => {
         .select('id')
         .where('volume_id', '=', volumeId)
         .executeTakeFirstOrThrow();
-      await service.detachForUser(userId, attachment.id, containerId, 'shared');
+      await service.detach(testActor(userId), attachment.id, containerId, 'shared');
       const peerPlacement = await database.selectFrom('control.volume_placements')
         .select(['catalog_state', 'server_id'])
         .where('volume_id', '=', volumeId)

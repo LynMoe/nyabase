@@ -1,5 +1,6 @@
 import {
   ConflictException,
+  ForbiddenException,
   Inject,
   Injectable,
   NotFoundException,
@@ -18,6 +19,7 @@ import {
   type CreateImageRequest,
   type ImageAssignmentDto,
   type ImageDto,
+  type ListScope,
   type PatchImageRequest,
   type ResourceLifecyclePhase,
 } from '@nyabase/common';
@@ -26,6 +28,7 @@ import { PG_DATABASE } from '../platform/persistence-pg/tokens.js';
 import { PgTransactionManager } from '../platform/persistence-pg/transaction.js';
 import { AccessResolverService } from '../iam/access-resolver.service.js';
 import { AuditService } from '../iam/audit.service.js';
+import { assertListScope, type Actor } from '../iam/actor.js';
 import { InfrastructureRepository } from '../infrastructure/infrastructure.repository.js';
 import { IntentRepository } from '../reconcile/intent.repository.js';
 import { ReconcileWakeService } from '../reconcile/reconcile-wake.service.js';
@@ -237,14 +240,37 @@ export class ImagesService {
     return this.toAdminDto(row);
   }
 
-  async findAllAdmin(activeOnly = false): Promise<AdminImageDto[]> {
+  /** `scope=mine`: images the caller may create containers from; `scope=all`: the full catalog (`ManageImages`). */
+  async list(
+    actor: Actor,
+    scope: ListScope,
+    activeOnly = false,
+  ): Promise<ImageDto[] | AdminImageDto[]> {
+    assertListScope(actor, scope, Capability.ManageImages);
+    return scope === 'all'
+      ? this.listAll(activeOnly)
+      : this.listAccessible(actor.userId, activeOnly);
+  }
+
+  /** `scope=mine` is the user view of an image the caller may use; `scope=all` adds assignments (`ManageImages`). */
+  async get(actor: Actor, id: string, scope: ListScope): Promise<ImageDto | AdminImageDto> {
+    assertListScope(actor, scope, Capability.ManageImages);
+    if (scope === 'all') return this.findAdminDtoById(id);
+    const image = await this.findById(id);
+    if (!await this.access.isImageAccessible(actor.userId, image.id) || image.deleting) {
+      throw new ForbiddenException();
+    }
+    return this.toDto(image);
+  }
+
+  private async listAll(activeOnly: boolean): Promise<AdminImageDto[]> {
     let query = this.database.selectFrom('infra.images').selectAll().orderBy('alias');
     if (activeOnly) query = query.where('is_active', '=', true);
     const rows = await query.execute();
     return Promise.all(rows.map((row) => this.toAdminDto(row)));
   }
 
-  async findAccessibleForUser(userId: string, activeOnly: boolean): Promise<ImageDto[]> {
+  private async listAccessible(userId: string, activeOnly: boolean): Promise<ImageDto[]> {
     const access = await this.access.getEffectiveAccess(userId);
     const allowed = new Set(access.flatMap((server) => server.allowedImageIds));
     if (allowed.size === 0) return [];
@@ -276,25 +302,6 @@ export class ImagesService {
       .executeTakeFirst();
     if (!row) throw new NotFoundException('Image not found');
     return row;
-  }
-
-  async findAssignmentId(imageId: string, serverId: string): Promise<string | null> {
-    const row = await this.database.selectFrom('infra.image_server_assignments')
-      .select('id')
-      .where('image_id', '=', imageId)
-      .where('server_id', '=', serverId)
-      .executeTakeFirst();
-    return row?.id ?? null;
-  }
-
-  /** Throws 404 when the image itself does not exist. */
-  async listAssignmentIds(imageId: string): Promise<string[]> {
-    await this.findById(imageId);
-    const rows = await this.database.selectFrom('infra.image_server_assignments')
-      .select('id')
-      .where('image_id', '=', imageId)
-      .execute();
-    return rows.map((row) => row.id);
   }
 
   async findAdminDtoById(id: string): Promise<AdminImageDto> {

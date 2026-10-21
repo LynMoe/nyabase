@@ -23,7 +23,7 @@ export default function ImagesPage() {
   const [deleteTarget, setDeleteTarget] = useState<AdminImageDto | null>(null);
   const imagesQuery = useQuery({
     queryKey: queryKeys.images.admin,
-    queryFn: () => api.get<AdminImageDto[]>('/admin/images'),
+    queryFn: () => api.get<AdminImageDto[]>('/images?scope=all'),
     refetchInterval: (query) => refetchWhileInProgress(query.state, {
       steadyIntervalMs: false,
       isSettled: (images) => images.every((image) => !imageInProgress(image)
@@ -35,7 +35,7 @@ export default function ImagesPage() {
     void queryClient.invalidateQueries({ queryKey: queryKeys.images.catalog });
   };
   const repullImage = useMutation({
-    mutationFn: (imageId: string) => api.post<unknown>(`/admin/images/${imageId}/repull`),
+    mutationFn: (imageId: string) => api.post<unknown>(`/images/${imageId}/repull`),
     onSuccess: () => {
       toast({ title: '已从镜像源重新拉取' });
       invalidate();
@@ -43,7 +43,7 @@ export default function ImagesPage() {
     onError: (error) => toast({ title: '重新拉取失败', description: errorMessage(error), variant: 'destructive' }),
   });
   const deleteImage = useMutation({
-    mutationFn: (imageId: string) => api.delete<unknown>(`/admin/images/${imageId}`),
+    mutationFn: (imageId: string) => api.delete<unknown>(`/images/${imageId}`),
     onSuccess: () => {
       toast({ title: '已开始移除镜像' });
       setDeleteTarget(null);

@@ -1,13 +1,15 @@
 import { useState } from 'react';
 import {
   ContainerStatus,
+  IntentResourceType,
   type ContainerDto,
   type IntentAcceptedDto,
+  type ListScope,
   type PatchContainerRootSizeRequest,
 } from '@nyabase/common';
 import { api } from '../../lib/api.js';
 import { waitUntil } from '../../lib/storage-shrink.js';
-import { lookupLatestIntentFailure } from '../../lib/intent-visibility.js';
+import { lookupLatestIntentFailure, resourceIntentsPath } from '../../lib/intent-visibility.js';
 import { formatBytes } from '../../lib/utils.js';
 import { Button } from '../ui/button.js';
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '../ui/dialog.js';
@@ -16,14 +18,14 @@ type Phase = 'confirm' | 'stopping' | 'shrinking' | 'offer_start' | 'done' | 'fa
 type FailureStage = 'run' | 'offer_start' | null;
 
 export function RootShrinkOrchestrationDialog({
-  admin,
+  scope,
   container,
   sizeBytes,
   open,
   onOpenChange,
   onComplete,
 }: {
-  admin: boolean;
+  scope: ListScope;
   container: ContainerDto;
   sizeBytes: number;
   open: boolean;
@@ -35,7 +37,7 @@ export function RootShrinkOrchestrationDialog({
   const [progress, setProgress] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
-  const base = admin ? `/admin/containers/${container.id}` : `/containers/${container.id}`;
+  const base = `/containers/${container.id}`;
 
   const run = async () => {
     setBusy(true);
@@ -53,7 +55,7 @@ export function RootShrinkOrchestrationDialog({
         }, {
           label: '等待容器停止',
           timeoutMs: 120_000,
-          onTimeout: () => lookupLatestIntentFailure(`${base}/intents`),
+          onTimeout: () => lookupLatestIntentFailure(resourceIntentsPath(scope, IntentResourceType.Container, container.id)),
         });
         setProgress('容器已停止');
       }
@@ -66,14 +68,14 @@ export function RootShrinkOrchestrationDialog({
         const latest = await api.get<ContainerDto>(base);
         if (latest.rootSizeBytes === sizeBytes || latest.rootSizePendingBytes === sizeBytes) return true;
         if (latest.needsAttention) {
-          const failure = await lookupLatestIntentFailure(`${base}/intents`);
+          const failure = await lookupLatestIntentFailure(resourceIntentsPath(scope, IntentResourceType.Container, container.id));
           throw new Error(failure ?? latest.failureReason ?? latest.failureCode ?? '系统盘缩容失败');
         }
         return false;
       }, {
         label: '等待系统盘缩容',
         timeoutMs: 120_000,
-        onTimeout: () => lookupLatestIntentFailure(`${base}/intents`),
+        onTimeout: () => lookupLatestIntentFailure(resourceIntentsPath(scope, IntentResourceType.Container, container.id)),
       });
       setProgress(null);
       setPhase('offer_start');

@@ -20,12 +20,12 @@ export default function ManageContainersPage() {
   const queryClient = useQueryClient();
   const containersQuery = useQuery({
     queryKey: queryKeys.containers.adminList,
-    queryFn: () => api.get<ContainerDto[]>('/admin/containers'),
+    queryFn: () => api.get<ContainerDto[]>('/containers?scope=all'),
     refetchInterval: (query) => queryPollInterval(query.state, { activeIntervalMs: 5_000 }),
   });
   const action = useActionMutation({
     mutationFn: ({ actionName, containerId }: { actionName: Extract<ContainerAction, 'start' | 'stop' | 'restart'>; containerId: string }) =>
-      api.post<IntentAcceptedDto>(`/admin/containers/${containerId}/actions/${actionName}`),
+      api.post<IntentAcceptedDto>(`/containers/${containerId}/actions/${actionName}`),
     successTitle: ({ actionName }) => containerActionSubmittedTitle(actionName),
     errorTitle: '容器操作失败',
     onSuccess: () => { void queryClient.invalidateQueries({ queryKey: queryKeys.containers.adminList }); },

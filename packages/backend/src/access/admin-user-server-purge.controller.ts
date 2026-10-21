@@ -1,12 +1,12 @@
 import { Controller, Param, Post } from '@nestjs/common';
 import { Capability } from '@nyabase/common';
 import { RequireCaps } from '../iam/decorators/require-caps.decorator.js';
-import { CurrentUser } from '../iam/decorators/current-user.decorator.js';
-import type { UserRecord } from '../iam/user-record.js';
+import { CurrentActor } from '../iam/decorators/current-actor.decorator.js';
+import type { Actor } from '../iam/actor.js';
 import { GroupsService } from '../groups/groups.service.js';
 import { UserServerResourcePurgeService } from './user-server-resource-purge.service.js';
 
-@Controller('admin/users/:userId')
+@Controller('users/:userId')
 export class AdminUserServerPurgeController {
   constructor(
     private readonly groupsService: GroupsService,
@@ -18,9 +18,9 @@ export class AdminUserServerPurgeController {
   async purgeUserServerResources(
     @Param('userId') userId: string,
     @Param('serverId') serverId: string,
-    @CurrentUser() actor: UserRecord,
+    @CurrentActor() actor: Actor,
   ) {
     await this.groupsService.assertUserScopeExists(userId);
-    return this.purgeResources.purge(userId, serverId, actor.id, 'admin');
+    return this.purgeResources.purge(actor, userId, serverId);
   }
 }

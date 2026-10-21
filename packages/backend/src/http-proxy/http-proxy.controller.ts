@@ -1,9 +1,22 @@
-import { Body, Controller, Delete, Get, HttpCode, Param, Patch, Post } from '@nestjs/common';
-import { CurrentUser } from '../iam/decorators/current-user.decorator.js';
-import type { UserRecord } from '../iam/user-record.js';
+import {
+  Body,
+  Controller,
+  Delete,
+  Get,
+  HttpCode,
+  Param,
+  Patch,
+  Post,
+  Query,
+} from '@nestjs/common';
+import { Capability, zListScope } from '@nyabase/common';
+import { CurrentActor } from '../iam/decorators/current-actor.decorator.js';
+import { RequireAnyCaps, RequireCaps } from '../iam/decorators/require-caps.decorator.js';
+import type { Actor } from '../iam/actor.js';
 import { HttpProxyGateway } from './http-proxy-gateway.js';
 import { HttpProxyService } from './http-proxy.service.js';
 
+/** HTTP proxy bindings: owners manage their own; `scope=all` lists everyone's (`ManageSystemSettings`). */
 @Controller('http-proxy/bindings')
 export class HttpProxyController {
   constructor(
@@ -12,38 +25,85 @@ export class HttpProxyController {
   ) {}
 
   @Get()
-  list(@CurrentUser() user: UserRecord) {
-    return this.service.listBindings(user.id, this.gateway.isOnline());
+  list(@CurrentActor() actor: Actor, @Query('scope') scope?: string) {
+    return this.service.listBindings(actor, zListScope.parse(scope), this.gateway.isOnline());
   }
 
   @Post()
-  async create(@CurrentUser() user: UserRecord, @Body() body: unknown) {
-    const result = await this.service.createBinding(user.id, body);
+  async create(@CurrentActor() actor: Actor, @Body() body: unknown) {
+    const result = await this.service.createBinding(actor, body);
     this.gateway.scheduleBroadcast('binding_created');
     return result;
   }
 
   @Patch(':id')
-  async update(@CurrentUser() user: UserRecord, @Param('id') id: string, @Body() body: unknown) {
-    const result = await this.service.updateBinding(user.id, id, body);
+  async update(@CurrentActor() actor: Actor, @Param('id') id: string, @Body() body: unknown) {
+    const result = await this.service.updateBinding(actor, id, body);
     this.gateway.scheduleBroadcast('binding_updated');
     return result;
   }
 
   @Delete(':id')
   @HttpCode(204)
-  async delete(@CurrentUser() user: UserRecord, @Param('id') id: string) {
-    await this.service.deleteBinding(user.id, id);
+  async delete(@CurrentActor() actor: Actor, @Param('id') id: string) {
+    await this.service.deleteBinding(actor, id);
     this.gateway.scheduleBroadcast('binding_deleted');
   }
 }
 
+/** Domain pools: enabled ones for everyone (`scope=mine`); management is `ManageSystemSettings`. */
 @Controller('http-proxy/domain-pools')
 export class HttpProxyDomainPoolsController {
-  constructor(private service: HttpProxyService) {}
+  constructor(
+    private service: HttpProxyService,
+    private gateway: HttpProxyGateway,
+  ) {}
 
   @Get()
-  listEnabled() {
-    return this.service.listEnabledDomainPools();
+  list(@CurrentActor() actor: Actor, @Query('scope') scope?: string) {
+    return this.service.listPools(actor, zListScope.parse(scope));
+  }
+
+  @Post()
+  @RequireCaps(Capability.ManageSystemSettings)
+  async create(@CurrentActor() actor: Actor, @Body() body: unknown) {
+    const result = await this.service.createDomainPool(actor.userId, body);
+    this.gateway.scheduleBroadcast('domain_pool_created');
+    return result;
+  }
+
+  @Patch(':id')
+  @RequireCaps(Capability.ManageSystemSettings)
+  async update(
+    @CurrentActor() actor: Actor,
+    @Param('id') id: string,
+    @Body() body: unknown,
+  ) {
+    const result = await this.service.updateDomainPool(actor.userId, id, body);
+    this.gateway.scheduleBroadcast('domain_pool_updated');
+    return result;
+  }
+
+  @Delete(':id')
+  @HttpCode(204)
+  @RequireCaps(Capability.ManageSystemSettings)
+  async remove(@CurrentActor() actor: Actor, @Param('id') id: string) {
+    await this.service.deleteDomainPool(actor.userId, id);
+    this.gateway.scheduleBroadcast('domain_pool_deleted');
+  }
+}
+
+@Controller('http-proxy/status')
+export class HttpProxyStatusController {
+  constructor(private gateway: HttpProxyGateway) {}
+
+  @Get()
+  @RequireAnyCaps(
+    Capability.ViewMetricsAll,
+    Capability.ViewAudit,
+    Capability.ManageSystemSettings,
+  )
+  status() {
+    return this.gateway.getStatus();
   }
 }

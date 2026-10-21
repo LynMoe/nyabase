@@ -2,6 +2,7 @@ import { useState } from 'react';
 import type {
   ContainerDto,
   GpuGrant,
+  ListScope,
   PatchContainerLimitsRequest,
   StoragePoolCapabilityDto,
 } from '@nyabase/common';
@@ -21,7 +22,7 @@ import { toast } from '../../hooks/use-toast.js';
 
 export function LimitsDialog({
   container,
-  admin,
+  scope,
   gpuEnabled,
   gpuGrant,
   pending,
@@ -31,7 +32,7 @@ export function LimitsDialog({
   onOpenChange,
 }: {
   container: ContainerDto;
-  admin: boolean;
+  scope: ListScope;
   gpuEnabled: boolean;
   gpuGrant: GpuGrant | null;
   pending: boolean;
@@ -79,7 +80,7 @@ export function LimitsDialog({
         <ContainerSpecGpu
           serverId={container.serverId}
           gpuEnabled={gpuEnabled}
-          admin={admin}
+          scope={scope}
           observedStatus={container.actual.status}
           grant={gpuGrant}
           value={gpuSelection}

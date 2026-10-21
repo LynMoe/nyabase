@@ -19,11 +19,11 @@ export function ImageCatalogDialog({
   const queryClient = useQueryClient();
   const catalogQuery = useQuery({
     queryKey: queryKeys.images.catalog,
-    queryFn: () => api.get<CatalogImageDto[]>('/admin/images/catalog'),
+    queryFn: () => api.get<CatalogImageDto[]>('/images/catalog'),
     enabled: open,
   });
   const addImage = useMutation({
-    mutationFn: (alias: string) => api.post<unknown>('/admin/images', { alias }),
+    mutationFn: (alias: string) => api.post<unknown>('/images', { alias }),
     onSuccess: (_, alias) => {
       toast({ title: '镜像已添加', description: alias });
       void queryClient.invalidateQueries({ queryKey: queryKeys.images.admin });

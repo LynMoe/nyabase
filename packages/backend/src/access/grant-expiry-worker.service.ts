@@ -24,6 +24,7 @@ import {
 } from './grant-expiry-enforcement.repository.js';
 import { UserServerResourcePurgeService } from './user-server-resource-purge.service.js';
 import { SYSTEM_ACTOR_USERNAME } from '../iam/system-actor.js';
+import { systemActor } from '../iam/actor.js';
 
 const EXPIRY_INTERVAL_MS = 60_000;
 const EXPIRY_INTERVAL_JITTER_MS = 15_000;
@@ -361,7 +362,7 @@ export class GrantExpiryWorkerService implements OnModuleInit, OnModuleDestroy {
     );
     if (!claim) return false;
     try {
-      await this.purge.stopRunningContainersForGraceEntry(userId, serverId, actorId);
+      await this.purge.stopRunningContainersForGraceEntry(systemActor(actorId), userId, serverId);
       claim.lease.assertOwned();
       return await this.transactions.run(async (transaction) => {
         const won = await this.enforcement.completeGraceInTransaction(transaction, claim);
@@ -405,7 +406,7 @@ export class GrantExpiryWorkerService implements OnModuleInit, OnModuleDestroy {
     try {
       const remaining = await this.hasLocalRuntimeResources(userId, serverId);
       if (remaining) {
-        await this.purge.purge(userId, serverId, actorId, 'expiry');
+        await this.purge.purge(systemActor(actorId), userId, serverId);
       }
       if (await this.hasLocalRuntimeResources(userId, serverId)) {
         return false;
@@ -560,8 +561,8 @@ export class GrantExpiryWorkerService implements OnModuleInit, OnModuleDestroy {
     actorId: string,
   ): Promise<boolean> {
     const result = pair.kind === 'storage_pool'
-      ? await this.purge.purgeStoragePoolVolumes(pair.userId, pair.resourceId, actorId)
-      : await this.purge.purgeSharedBackendVolumes(pair.userId, pair.resourceId, actorId);
+      ? await this.purge.purgeStoragePoolVolumes(systemActor(actorId), pair.userId, pair.resourceId)
+      : await this.purge.purgeSharedBackendVolumes(systemActor(actorId), pair.userId, pair.resourceId);
     return result.volumeIds.length > 0;
   }
 
@@ -571,15 +572,15 @@ export class GrantExpiryWorkerService implements OnModuleInit, OnModuleDestroy {
   ): Promise<boolean> {
     const result = pair.kind === 'storage_pool'
       ? await this.purge.stopRunningContainersForStoragePool(
+        systemActor(actorId),
         pair.userId,
         pair.resourceId,
-        actorId,
         this.workerId,
       )
       : await this.purge.stopRunningContainersForSharedBackend(
+        systemActor(actorId),
         pair.userId,
         pair.resourceId,
-        actorId,
         this.workerId,
       );
     return result.intentIds.length > 0;

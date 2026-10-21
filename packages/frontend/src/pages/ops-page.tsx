@@ -67,7 +67,7 @@ function adminIntentsPath(filters: {
   serverId?: string;
   cursor?: string;
 }): string {
-  const params = new URLSearchParams();
+  const params = new URLSearchParams({ scope: 'all' });
   params.set('limit', String(PAGE_SIZE));
   if (filters.segment === 'pending') params.set('status', 'pending');
   if (filters.segment === 'failed') params.set('status', 'failed');
@@ -75,7 +75,7 @@ function adminIntentsPath(filters: {
   if (filters.resourceType) params.set('resourceType', filters.resourceType);
   if (filters.serverId) params.set('serverId', filters.serverId);
   if (filters.cursor) params.set('cursor', filters.cursor);
-  return `/admin/intents?${params.toString()}`;
+  return `/intents?${params.toString()}`;
 }
 
 function statusBadgeVariant(status: string) {
@@ -95,7 +95,7 @@ export default function OpsPage() {
 
   const serversQuery = useQuery({
     queryKey: queryKeys.servers.admin,
-    queryFn: () => api.get<ServerDto[]>('/admin/servers'),
+    queryFn: () => api.get<ServerDto[]>('/servers?scope=all'),
     enabled: canManageServers,
   });
   const intentsQuery = useInfiniteQuery({

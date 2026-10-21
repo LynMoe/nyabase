@@ -67,7 +67,7 @@ test(
         64 * 1024 * 1024,
       );
       const created = await expectJson<JsonRecord>(
-        await adminApi.get(`/api/admin/shared-volumes/${volumeId}`),
+        await adminApi.get(`/api/shared-volumes/${volumeId}`),
       );
       expect(created.dirEnsured).toBe(false);
       expect(created.lifecyclePhase).toBe('active');
@@ -76,7 +76,7 @@ test(
       await assertNoCephCatalog(incusName, cephServers);
 
       const resized = await expectJson<JsonRecord>(
-        await adminApi.patch(`/api/admin/shared-volumes/${volumeId}`, {
+        await adminApi.patch(`/api/shared-volumes/${volumeId}`, {
           data: {
             expectedRevision: created.revision,
             sizeBytes: 96 * 1024 * 1024,
@@ -89,13 +89,13 @@ test(
       expect(resized.dirEnsured).toBe(false);
       await assertNoCephCatalog(incusName, cephServers);
 
-      const deleted = await adminApi.delete(`/api/admin/shared-volumes/${volumeId}`);
+      const deleted = await adminApi.delete(`/api/shared-volumes/${volumeId}`);
       expect([200, 202, 204]).toContain(deleted.status());
       if (deleted.status() === 202) {
         const body = await expectJson<JsonRecord>(deleted, 202);
         if (typeof body.intentId === 'string') await waitForIntent(adminApi, body.intentId);
       }
-      expect((await adminApi.get(`/api/admin/shared-volumes/${volumeId}`)).status()).toBe(404);
+      expect((await adminApi.get(`/api/shared-volumes/${volumeId}`)).status()).toBe(404);
       volumeId = undefined;
       await assertNoCephCatalog(incusName, cephServers);
     } finally {
@@ -136,7 +136,7 @@ test(
         `printf '%s\\n' '${marker}' > /mnt/shared/marker && cat /mnt/shared/marker`,
       );
       const volume = await expectJson<JsonRecord>(
-        await adminApi.get(`/api/admin/shared-volumes/${volumeId}`),
+        await adminApi.get(`/api/shared-volumes/${volumeId}`),
       );
       const incusName = volume.incusName as string;
       expect(await incusCustomVolumeExists(String(primaryPool.incusName), incusName)).toBe(true);
@@ -156,11 +156,11 @@ test(
         `e2e-f2c-${Date.now().toString(36)}`,
       );
       const cancelVolume = await expectJson<JsonRecord>(
-        await adminApi.get(`/api/admin/shared-volumes/${cancelVolumeId}`),
+        await adminApi.get(`/api/shared-volumes/${cancelVolumeId}`),
       );
       const cancelIncusName = cancelVolume.incusName as string;
       const attaching = await expectJson<JsonRecord>(
-        await adminApi.post(`/api/admin/containers/${containerId}/shared-volumes`, {
+        await adminApi.post(`/api/containers/${containerId}/shared-volumes`, {
           data: { volumeId: cancelVolumeId, containerPath: '/mnt/cancel', readOnly: false },
         }),
         202,
@@ -175,7 +175,7 @@ test(
       if (oracle.onlineCancel) {
         const cancelled = await expectJson<JsonRecord>(
           await adminApi.delete(
-            `/api/admin/containers/${containerId}/shared-volumes/${oracle.row.id}`,
+            `/api/containers/${containerId}/shared-volumes/${oracle.row.id}`,
           ),
           202,
         );
@@ -183,7 +183,7 @@ test(
         await waitForIntent(adminApi, attaching.intentId);
       } else {
         const blocked = await adminApi.delete(
-          `/api/admin/containers/${containerId}/shared-volumes/${oracle.row.id}`,
+          `/api/containers/${containerId}/shared-volumes/${oracle.row.id}`,
         );
         expect(blocked.status()).toBe(409);
         expect(conflictCode(await blocked.json())).toBe('VOLUME_DETACH_REQUIRES_STOP');
@@ -226,7 +226,7 @@ test(
         `e2e-legal-${Date.now().toString(36)}`,
       );
       const created = await expectJson<JsonRecord>(
-        await adminApi.get(`/api/admin/shared-volumes/${volumeId}`),
+        await adminApi.get(`/api/shared-volumes/${volumeId}`),
       );
       expect(created.dirEnsured).toBe(false);
       const incusName = created.incusName as string;
@@ -241,11 +241,11 @@ test(
       await attachVolume(adminApi, primaryContainer, volumeId, '/mnt/shared', 'shared');
       expect(await incusCustomExists(primaryPool, incusName)).toBe(true);
       const afterAttach = await expectJson<JsonRecord>(
-        await adminApi.get(`/api/admin/shared-volumes/${volumeId}`),
+        await adminApi.get(`/api/shared-volumes/${volumeId}`),
       );
       expect(afterAttach.dirEnsured).toBe(true);
 
-      const occupancyAttached = await adminApi.delete(`/api/admin/shared-volumes/${volumeId}`);
+      const occupancyAttached = await adminApi.delete(`/api/shared-volumes/${volumeId}`);
       expect(occupancyAttached.status()).toBe(409);
       expect(conflictCode(await occupancyAttached.json())).toMatch(/VOLUME_REQUIRES_UNBIND/);
 
@@ -273,10 +273,10 @@ test(
       expect(fromWorker).toContain(marker);
 
       const beforeGrow = await expectJson<JsonRecord>(
-        await adminApi.get(`/api/admin/shared-volumes/${volumeId}`),
+        await adminApi.get(`/api/shared-volumes/${volumeId}`),
       );
       const grown = await expectJson<JsonRecord>(
-        await adminApi.patch(`/api/admin/shared-volumes/${volumeId}`, {
+        await adminApi.patch(`/api/shared-volumes/${volumeId}`, {
           data: {
             expectedRevision: beforeGrow.revision,
             sizeBytes: 96 * 1024 * 1024,
@@ -286,7 +286,7 @@ test(
       );
       await requireSucceededIntent(adminApi, grown.intentId, 'shared volume.grow');
       const afterGrow = await expectJson<JsonRecord>(
-        await adminApi.get(`/api/admin/shared-volumes/${volumeId}`),
+        await adminApi.get(`/api/shared-volumes/${volumeId}`),
       );
       expect(Number(afterGrow.sizeBytes)).toBe(96 * 1024 * 1024);
 
@@ -304,7 +304,7 @@ test(
       expect(workerAttachment?.id).toBeTruthy();
       const detaching = await expectJson<JsonRecord>(
         await adminApi.delete(
-          `/api/admin/containers/${workerContainer}/shared-volumes/${workerAttachment!.id}`,
+          `/api/containers/${workerContainer}/shared-volumes/${workerAttachment!.id}`,
         ),
         202,
       );
@@ -375,10 +375,10 @@ test(
       );
 
       const [attachA, attachB] = await Promise.all([
-        adminApi.post(`/api/admin/containers/${primaryContainer}/shared-volumes`, {
+        adminApi.post(`/api/containers/${primaryContainer}/shared-volumes`, {
           data: { volumeId, containerPath: '/mnt/shared', readOnly: false },
         }),
-        adminApi.post(`/api/admin/containers/${workerContainer}/shared-volumes`, {
+        adminApi.post(`/api/containers/${workerContainer}/shared-volumes`, {
           data: { volumeId, containerPath: '/mnt/shared', readOnly: false },
         }),
       ]);
@@ -389,15 +389,15 @@ test(
       await requireSucceededIntent(adminApi, acceptedA.intentId, 'concurrent attach A');
       await requireSucceededIntent(adminApi, acceptedB.intentId, 'concurrent attach B');
 
-      const dup = await adminApi.post(`/api/admin/containers/${primaryContainer}/shared-volumes`, {
+      const dup = await adminApi.post(`/api/containers/${primaryContainer}/shared-volumes`, {
         data: { volumeId, containerPath: '/mnt/shared', readOnly: false },
       });
       expect(dup.status()).toBe(409);
       expect(conflictCode(await dup.json())).toMatch(/INVALID_INPUT|already attached|path is in use/i);
 
       const [deleteWhileMountedA, deleteWhileMountedB] = await Promise.all([
-        adminApi.delete(`/api/admin/shared-volumes/${volumeId}`),
-        adminApi.delete(`/api/admin/shared-volumes/${volumeId}`),
+        adminApi.delete(`/api/shared-volumes/${volumeId}`),
+        adminApi.delete(`/api/shared-volumes/${volumeId}`),
       ]);
       expect(deleteWhileMountedA.status()).toBe(409);
       expect(deleteWhileMountedB.status()).toBe(409);
@@ -413,8 +413,8 @@ test(
       expect(idA && idB).toBeTruthy();
 
       const [detachA, detachB] = await Promise.all([
-        adminApi.delete(`/api/admin/containers/${primaryContainer}/shared-volumes/${idA}`),
-        adminApi.delete(`/api/admin/containers/${workerContainer}/shared-volumes/${idB}`),
+        adminApi.delete(`/api/containers/${primaryContainer}/shared-volumes/${idA}`),
+        adminApi.delete(`/api/containers/${workerContainer}/shared-volumes/${idB}`),
       ]);
       expect(detachA.status()).toBe(202);
       expect(detachB.status()).toBe(202);
@@ -430,8 +430,8 @@ test(
       );
 
       const [firstDelete, secondDelete] = await Promise.all([
-        adminApi.delete(`/api/admin/shared-volumes/${volumeId}`),
-        adminApi.delete(`/api/admin/shared-volumes/${volumeId}`),
+        adminApi.delete(`/api/shared-volumes/${volumeId}`),
+        adminApi.delete(`/api/shared-volumes/${volumeId}`),
       ]);
       const deleteStatuses = [firstDelete.status(), secondDelete.status()].sort();
       expect(deleteStatuses[0]).toBe(202);
@@ -442,7 +442,7 @@ test(
         await waitForIntent(adminApi, body.intentId);
       }
       await eventually(
-        async () => adminApi.get(`/api/admin/shared-volumes/${volumeId}`),
+        async () => adminApi.get(`/api/shared-volumes/${volumeId}`),
         (response) => response.status() === 404,
         180_000,
         500,
@@ -471,13 +471,13 @@ test(
         `e2e-inflight-${Date.now().toString(36)}`,
       );
       const volume = await expectJson<JsonRecord>(
-        await adminApi.get(`/api/admin/shared-volumes/${volumeId}`),
+        await adminApi.get(`/api/shared-volumes/${volumeId}`),
       );
       const incusName = volume.incusName as string;
       const primaryPool = await registeredCephPool(adminApi, seedState, seedState.server.id);
       containerId = await createRunningContainer(adminApi, seedState, 'e2e-inflight');
       const attaching = await expectJson<JsonRecord>(
-        await adminApi.post(`/api/admin/containers/${containerId}/shared-volumes`, {
+        await adminApi.post(`/api/containers/${containerId}/shared-volumes`, {
           data: { volumeId, containerPath: '/mnt/shared', readOnly: false },
         }),
         202,
@@ -491,19 +491,19 @@ test(
       );
       expect(['attaching', 'attached']).toContain(oracle.row.bindState);
 
-      const blocked = await adminApi.delete(`/api/admin/shared-volumes/${volumeId}`);
+      const blocked = await adminApi.delete(`/api/shared-volumes/${volumeId}`);
       expect(blocked.status()).toBe(409);
       expect(conflictCode(await blocked.json())).toMatch(/VOLUME_REQUIRES_UNBIND/);
 
       const cancel = await adminApi.delete(
-        `/api/admin/containers/${containerId}/shared-volumes/${oracle.row.id}`,
+        `/api/containers/${containerId}/shared-volumes/${oracle.row.id}`,
       );
       if (oracle.onlineCancel) {
         const detaching = await expectJson<JsonRecord>(cancel, 202);
         const mid = await listContainerVolumes(adminApi, containerId, 'shared');
         const midRow = mid.find((entry) => entry.id === oracle.row.id);
         if (midRow) expect(midRow.bindState).toBe('detaching');
-        const stillBlocked = await adminApi.delete(`/api/admin/shared-volumes/${volumeId}`);
+        const stillBlocked = await adminApi.delete(`/api/shared-volumes/${volumeId}`);
         expect(stillBlocked.status()).toBe(409);
         expect(conflictCode(await stillBlocked.json())).toMatch(/VOLUME_REQUIRES_UNBIND/);
         await requireSucceededIntent(adminApi, detaching.intentId, 'inflight online cancel');
@@ -518,14 +518,14 @@ test(
         expect(still?.onlineCancelAllowed).toBe(false);
         const detaching = await expectJson<JsonRecord>(
           await adminApi.delete(
-            `/api/admin/containers/${containerId}/shared-volumes/${still!.id}`,
+            `/api/containers/${containerId}/shared-volumes/${still!.id}`,
           ),
           202,
         );
         const mid = await listContainerVolumes(adminApi, containerId, 'shared');
         const midRow = mid.find((entry) => entry.id === still!.id);
         if (midRow) expect(midRow.bindState).toBe('detaching');
-        const stillBlocked = await adminApi.delete(`/api/admin/shared-volumes/${volumeId}`);
+        const stillBlocked = await adminApi.delete(`/api/shared-volumes/${volumeId}`);
         expect(stillBlocked.status()).toBe(409);
         expect(conflictCode(await stillBlocked.json())).toMatch(/VOLUME_REQUIRES_UNBIND/);
         await expectStartBusyWhileDetaching(adminApi, containerId);
@@ -563,7 +563,7 @@ test(
         `e2e-scan-${Date.now().toString(36)}`,
       );
       const volume = await expectJson<JsonRecord>(
-        await adminApi.get(`/api/admin/shared-volumes/${volumeId}`),
+        await adminApi.get(`/api/shared-volumes/${volumeId}`),
       );
       const incusName = volume.incusName as string;
       expect(volume.dirEnsured).toBe(false);
@@ -573,7 +573,7 @@ test(
       containerId = await createRunningContainer(adminApi, seedState, 'e2e-scan');
       await attachVolume(adminApi, containerId, volumeId, '/mnt/shared', 'shared');
       const afterAttach = await expectJson<JsonRecord>(
-        await adminApi.get(`/api/admin/shared-volumes/${volumeId}`),
+        await adminApi.get(`/api/shared-volumes/${volumeId}`),
       );
       expect(afterAttach.dirEnsured).toBe(true);
       expect(await incusCustomExists(primaryPool, incusName)).toBe(true);
@@ -621,7 +621,7 @@ test(
         `e2e-off-${Date.now().toString(36)}`,
       );
       const volume = await expectJson<JsonRecord>(
-        await adminApi.get(`/api/admin/shared-volumes/${volumeId}`),
+        await adminApi.get(`/api/shared-volumes/${volumeId}`),
       );
       const incusName = volume.incusName as string;
       containerId = await createRunningContainer(adminApi, seedState, 'e2e-off', worker.id);
@@ -637,7 +637,7 @@ test(
       expect(await incusCustomExists(workerPool, incusName, worker.ssh)).toBe(true);
 
       const primaryBefore = await expectJson<JsonRecord>(
-        await adminApi.get(`/api/admin/servers/${seedState.server.id}`),
+        await adminApi.get(`/api/servers/${seedState.server.id}?scope=all`),
       );
       expect(primaryBefore.status).toBe('online');
 
@@ -653,7 +653,7 @@ test(
         dummyIntentId = dummy.intentId;
         const unreachable = await eventually(
           async () => expectJson<JsonRecord>(
-            await adminApi.get(`/api/admin/servers/${worker.id}`),
+            await adminApi.get(`/api/servers/${worker.id}?scope=all`),
           ),
           (server) => server.status === 'unreachable',
           90_000,
@@ -662,11 +662,11 @@ test(
         );
         expect(unreachable.status).toBe('unreachable');
         const stillPrimary = await expectJson<JsonRecord>(
-          await adminApi.get(`/api/admin/servers/${seedState.server.id}`),
+          await adminApi.get(`/api/servers/${seedState.server.id}?scope=all`),
         );
         expect(stillPrimary.status).toBe('online');
         const deleted = await expectJson<JsonRecord>(
-          await adminApi.delete(`/api/admin/shared-volumes/${volumeId}`),
+          await adminApi.delete(`/api/shared-volumes/${volumeId}`),
           202,
         );
         await waitForIntent(adminApi, deleted.intentId);
@@ -675,7 +675,7 @@ test(
       if (dummyIntentId) await waitForIntent(adminApi, dummyIntentId);
       const recovered = await eventually(
         async () => expectJson<JsonRecord>(
-          await adminApi.get(`/api/admin/servers/${worker.id}`),
+          await adminApi.get(`/api/servers/${worker.id}?scope=all`),
         ),
         (server) => server.status === 'online',
         90_000,
@@ -691,11 +691,11 @@ test(
         );
         await requireSucceededIntent(adminApi, kick.intentId, 'offline recovery kick');
         await deleteVolume(adminApi, kick.volumeId);
-        return expectJson<JsonRecord>(await adminApi.get(`/api/admin/servers/${worker.id}`));
+        return expectJson<JsonRecord>(await adminApi.get(`/api/servers/${worker.id}?scope=all`));
       });
       expect(recovered.status).toBe('online');
       await eventually(
-        async () => adminApi.get(`/api/admin/shared-volumes/${volumeId}`),
+        async () => adminApi.get(`/api/shared-volumes/${volumeId}`),
         (response) => response.status() === 404,
         180_000,
         500,
@@ -740,7 +740,7 @@ test(
         `e2e-keep-${Date.now().toString(36)}`,
       );
       remainName = (await expectJson<JsonRecord>(
-        await adminApi.get(`/api/admin/shared-volumes/${remainId}`),
+        await adminApi.get(`/api/shared-volumes/${remainId}`),
       )).incusName as string;
       onlyCascadeId = await createSharedVolume(
         adminApi,
@@ -748,7 +748,7 @@ test(
         `e2e-drop-${Date.now().toString(36)}`,
       );
       onlyName = (await expectJson<JsonRecord>(
-        await adminApi.get(`/api/admin/shared-volumes/${onlyCascadeId}`),
+        await adminApi.get(`/api/shared-volumes/${onlyCascadeId}`),
       )).incusName as string;
       neverMountedId = await createSharedVolume(
         adminApi,
@@ -807,25 +807,25 @@ test(
       containerId = undefined;
 
       const before = await expectJson<JsonRecord>(
-        await adminApi.get(`/api/admin/servers/${cascade.id}`),
+        await adminApi.get(`/api/servers/${cascade.id}?scope=all`),
       );
       const deleted = await adminApi.delete(
-        `/api/admin/servers/${cascade.id}?expectedRevision=${before.revision}`,
+        `/api/servers/${cascade.id}?expectedRevision=${before.revision}`,
       );
       expect([200, 204]).toContain(deleted.status());
       serverDeleted = true;
-      expect((await adminApi.get(`/api/admin/servers/${cascade.id}`)).status()).toBe(404);
+      expect((await adminApi.get(`/api/servers/${cascade.id}?scope=all`)).status()).toBe(404);
 
-      expect((await adminApi.get(`/api/admin/shared-volumes/${onlyCascadeId}`)).status()).toBe(404);
+      expect((await adminApi.get(`/api/shared-volumes/${onlyCascadeId}`)).status()).toBe(404);
       onlyCascadeId = undefined;
       const remaining = await expectJson<JsonRecord>(
-        await adminApi.get(`/api/admin/shared-volumes/${remainId}`),
+        await adminApi.get(`/api/shared-volumes/${remainId}`),
       );
       expect(remaining.id).toBe(remainId);
       expect(await incusCustomExists(primaryPool, remainName)).toBe(true);
       expect(await incusCustomExists(cascadePool, onlyName!, cascade.ssh)).toBe(true);
       const neverMounted = await expectJson<JsonRecord>(
-        await adminApi.get(`/api/admin/shared-volumes/${neverMountedId}`),
+        await adminApi.get(`/api/shared-volumes/${neverMountedId}`),
       );
       expect(neverMounted.id).toBe(neverMountedId);
       expect(neverMounted.dirEnsured).toBe(false);
@@ -867,7 +867,7 @@ test(
         const restoredId = await restoreLabServer(adminApi, seedState, cascade);
         await eventually(
           async () => expectJson<JsonRecord>(
-            await adminApi.get(`/api/admin/servers/${restoredId}`),
+            await adminApi.get(`/api/servers/${restoredId}?scope=all`),
           ),
           (row) => row.status === 'online',
           90_000,
@@ -909,12 +909,12 @@ test(
         `dd if=/dev/zero of=/mnt/shared/fill bs=${fillBytes} count=1 conv=fsync oflag=sync`,
       );
       let observed = await expectJson<JsonRecord>(
-        await adminApi.get(`/api/admin/shared-volumes/${volumeId}`),
+        await adminApi.get(`/api/shared-volumes/${volumeId}`),
       );
       try {
         observed = await eventually(
           async () => expectJson<JsonRecord>(
-            await adminApi.get(`/api/admin/shared-volumes/${volumeId}`),
+            await adminApi.get(`/api/shared-volumes/${volumeId}`),
           ),
           (volume) => typeof volume.usedBytes === 'number' && volume.usedBytes >= fillBytes * 0.5,
           20_000,
@@ -923,12 +923,12 @@ test(
         );
       } catch {
         observed = await expectJson<JsonRecord>(
-          await adminApi.get(`/api/admin/shared-volumes/${volumeId}`),
+          await adminApi.get(`/api/shared-volumes/${volumeId}`),
         );
       }
       const used = Number(observed.usedBytes);
       const canAssertFloor = Number.isFinite(used) && used >= fillBytes * 0.5;
-      const tooSmall = await adminApi.patch(`/api/admin/shared-volumes/${volumeId}`, {
+      const tooSmall = await adminApi.patch(`/api/shared-volumes/${volumeId}`, {
         data: {
           expectedRevision: observed.revision,
           sizeBytes: canAssertFloor
@@ -942,7 +942,7 @@ test(
           /VOLUME_SHRINK_BELOW_USAGE|VOLUME_USAGE_UNKNOWN/,
         );
         const after = await expectJson<JsonRecord>(
-          await adminApi.get(`/api/admin/shared-volumes/${volumeId}`),
+          await adminApi.get(`/api/shared-volumes/${volumeId}`),
         );
         expect(Number(after.sizeBytes)).toBe(quotaBytes);
       } else {
@@ -1001,7 +1001,7 @@ test(
         'e2e-quota-a',
         seedState.server.id,
       );
-      await attachVolume(userApi, primaryContainer, volumeId, '/mnt/shared', 'shared', 'user');
+      await attachVolume(userApi, primaryContainer, volumeId, '/mnt/shared', 'shared');
 
       const dfBefore = parseQuotaProbe(await execInContainer(
         adminApi,
@@ -1021,7 +1021,7 @@ test(
         'e2e-quota-b',
         worker.id,
       );
-      await attachVolume(userApi, workerContainer, volumeId, '/mnt/shared', 'shared', 'user');
+      await attachVolume(userApi, workerContainer, volumeId, '/mnt/shared', 'shared');
       await execInContainer(adminApi, primaryContainer, 'rm -f /mnt/shared/fill-a');
 
       const [fromA, fromB] = await Promise.all([
@@ -1112,8 +1112,8 @@ test(
         'e2e-rsync-b',
         worker.id,
       );
-      await attachVolume(userApi, primaryContainer, volumeId, '/mnt/shared', 'shared', 'user');
-      await attachVolume(userApi, workerContainer, volumeId, '/mnt/shared', 'shared', 'user');
+      await attachVolume(userApi, primaryContainer, volumeId, '/mnt/shared', 'shared');
+      await attachVolume(userApi, workerContainer, volumeId, '/mnt/shared', 'shared');
       await execInContainer(
         adminApi,
         primaryContainer,
@@ -1121,10 +1121,10 @@ test(
       );
 
       const beforeGrow = await expectJson<JsonRecord>(
-        await adminApi.get(`/api/admin/shared-volumes/${volumeId}`),
+        await adminApi.get(`/api/shared-volumes/${volumeId}`),
       );
       const growBoth = await expectJson<JsonRecord>(
-        await adminApi.patch(`/api/admin/shared-volumes/${volumeId}`, {
+        await adminApi.patch(`/api/shared-volumes/${volumeId}`, {
           data: { expectedRevision: beforeGrow.revision, sizeBytes: 96 * 1024 * 1024 },
         }),
         202,
@@ -1142,17 +1142,17 @@ test(
       expect(incusSizeMatches(grownWorker, 96 * 1024 * 1024)).toBe(true);
 
       await stopContainer(adminApi, workerContainer);
-      const workerAttachment = (await listContainerVolumes(userApi, workerContainer, 'shared', 'user'))
+      const workerAttachment = (await listContainerVolumes(userApi, workerContainer, 'shared'))
         .find((entry) => entry.volumeId === volumeId);
       expect(workerAttachment?.id).toBeTruthy();
-      await detachVolume(userApi, workerContainer, workerAttachment!.id as string, 'shared', 'user');
+      await detachVolume(userApi, workerContainer, workerAttachment!.id as string, 'shared');
       expect(await incusCustomVolumeExists(workerName, incusName, worker.ssh)).toBe(true);
 
       const afterUnbind = await expectJson<JsonRecord>(
-        await adminApi.get(`/api/admin/shared-volumes/${volumeId}`),
+        await adminApi.get(`/api/shared-volumes/${volumeId}`),
       );
       const growSticky = await expectJson<JsonRecord>(
-        await adminApi.patch(`/api/admin/shared-volumes/${volumeId}`, {
+        await adminApi.patch(`/api/shared-volumes/${volumeId}`, {
           data: { expectedRevision: afterUnbind.revision, sizeBytes: 128 * 1024 * 1024 },
         }),
         202,
@@ -1163,13 +1163,13 @@ test(
       await waitForIncusVolumeSize(workerName, incusName, 128 * 1024 * 1024, worker.ssh);
 
       const afterGrowSticky = await expectJson<JsonRecord>(
-        await adminApi.get(`/api/admin/shared-volumes/${volumeId}`),
+        await adminApi.get(`/api/shared-volumes/${volumeId}`),
       );
       const canShrink = afterGrowSticky.usedBytes != null;
       let stickyBytes = 128 * 1024 * 1024;
       if (canShrink) {
         const shrunk = await expectJson<JsonRecord>(
-          await adminApi.patch(`/api/admin/shared-volumes/${volumeId}`, {
+          await adminApi.patch(`/api/shared-volumes/${volumeId}`, {
             data: { expectedRevision: afterGrowSticky.revision, sizeBytes: 80 * 1024 * 1024 },
           }),
           202,
@@ -1184,11 +1184,11 @@ test(
         .toContain('rsync');
 
       const beforeOutage = await expectJson<JsonRecord>(
-        await adminApi.get(`/api/admin/shared-volumes/${volumeId}`),
+        await adminApi.get(`/api/shared-volumes/${volumeId}`),
       );
       const outageTarget = stickyBytes + 32 * 1024 * 1024;
       await withBlockedIncusHttps(worker.endpoint, async () => {
-        const grownOffline = await adminApi.patch(`/api/admin/shared-volumes/${volumeId}`, {
+        const grownOffline = await adminApi.patch(`/api/shared-volumes/${volumeId}`, {
           data: { expectedRevision: beforeOutage.revision, sizeBytes: outageTarget },
         });
         expect(grownOffline.status()).toBe(202);
@@ -1235,10 +1235,10 @@ test(
         64 * 1024 * 1024,
       );
       const created = await expectJson<JsonRecord>(
-        await adminApi.get(`/api/admin/shared-volumes/${volumeId}`),
+        await adminApi.get(`/api/shared-volumes/${volumeId}`),
       );
       const resized = await expectJson<JsonRecord>(
-        await adminApi.patch(`/api/admin/shared-volumes/${volumeId}`, {
+        await adminApi.patch(`/api/shared-volumes/${volumeId}`, {
           data: { expectedRevision: created.revision, sizeBytes: 96 * 1024 * 1024 },
         }),
         200,
@@ -1254,7 +1254,7 @@ test(
       );
       expect(size.toLowerCase()).toMatch(/96\s*mib|100663296|96mib/);
       const after = await expectJson<JsonRecord>(
-        await adminApi.get(`/api/admin/shared-volumes/${volumeId}`),
+        await adminApi.get(`/api/shared-volumes/${volumeId}`),
       );
       expect(after.dirEnsured).toBe(true);
       expect(Number(after.sizeBytes)).toBe(96 * 1024 * 1024);
@@ -1287,12 +1287,12 @@ test(
         `e2e-born-${Date.now().toString(36)}`,
       );
       const created = await expectJson<JsonRecord>(
-        await adminApi.get(`/api/admin/shared-volumes/${volumeId}`),
+        await adminApi.get(`/api/shared-volumes/${volumeId}`),
       );
       expect(created.dirEnsured).toBe(false);
       const attachable = await expectJson<JsonRecord[]>(
         await adminApi.get(
-          `/api/admin/shared-volumes?attachableOnServerId=${seedState.server.id}`,
+          `/api/shared-volumes?attachableOnServerId=${seedState.server.id}&scope=all`,
         ),
       );
       expect(attachable.some((row) => row.id === volumeId)).toBe(true);
@@ -1314,7 +1314,7 @@ test(
         created.incusName as string,
       )).toBe(true);
       const after = await expectJson<JsonRecord>(
-        await adminApi.get(`/api/admin/shared-volumes/${volumeId}`),
+        await adminApi.get(`/api/shared-volumes/${volumeId}`),
       );
       expect(after.dirEnsured).toBe(true);
       const attachments = await listContainerVolumes(adminApi, containerId, 'shared');
@@ -1407,24 +1407,24 @@ test(
       );
       await ensureImageAssignment(adminApi, seedState, live.id);
       containerId = await createRunningContainer(userApi, seedState, 'e2e-unreach', live.id);
-      const attached = await attachVolume(userApi, containerId, volumeId, '/mnt/shared', 'shared', 'user');
+      const attached = await attachVolume(userApi, containerId, volumeId, '/mnt/shared', 'shared');
       await stopContainer(adminApi, containerId);
-      await detachVolume(userApi, containerId, attached.attachmentId, 'shared', 'user');
+      await detachVolume(userApi, containerId, attached.attachmentId, 'shared');
       await deleteContainer(adminApi, containerId);
       containerId = undefined;
       const ensured = await expectJson<JsonRecord>(
-        await adminApi.get(`/api/admin/shared-volumes/${volumeId}`),
+        await adminApi.get(`/api/shared-volumes/${volumeId}`),
       );
       expect(ensured.dirEnsured).toBe(true);
 
       const pools = await listShareableCephPools(adminApi, seedState);
       expect(pools.some((pool) => pool.registered === true)).toBe(true);
       await withCephPoolsUnregistered(adminApi, pools, async () => {
-        const blocked = await adminApi.delete(`/api/admin/shared-volumes/${volumeId}`);
+        const blocked = await adminApi.delete(`/api/shared-volumes/${volumeId}`);
         expect(blocked.status()).toBe(409);
         expect(conflictCode(await blocked.json())).toBe('VOLUME_DELETE_BACKEND_UNREACHABLE');
         const still = await expectJson<JsonRecord>(
-          await adminApi.get(`/api/admin/shared-volumes/${volumeId}`),
+          await adminApi.get(`/api/shared-volumes/${volumeId}`),
         );
         expect(still.id).toBe(volumeId);
         expect(still.dirEnsured).toBe(true);
@@ -1453,14 +1453,14 @@ test(
         `e2e-insp-${Date.now().toString(36)}`,
       );
       const empty = await expectJson<JsonRecord>(
-        await adminApi.get(`/api/admin/shared-volumes/${volumeId}/catalogs`),
+        await adminApi.get(`/api/shared-volumes/${volumeId}/catalogs`),
       );
       expect(empty.items).toEqual([]);
 
       containerId = await createRunningContainer(adminApi, seedState, 'e2e-insp');
       await attachVolume(adminApi, containerId, volumeId, '/mnt/shared', 'shared');
       const attachedInspect = await expectJson<JsonRecord>(
-        await adminApi.get(`/api/admin/shared-volumes/${volumeId}/catalogs`),
+        await adminApi.get(`/api/shared-volumes/${volumeId}/catalogs`),
       );
       const inUse = (attachedInspect.items as JsonRecord[])
         .filter((item) => item.occupancy === 'in_use');
@@ -1475,7 +1475,7 @@ test(
       const attachments = await listContainerVolumes(adminApi, containerId, 'shared');
       await detachVolume(adminApi, containerId, attachments[0]!.id as string, 'shared');
       const cacheInspect = await expectJson<JsonRecord>(
-        await adminApi.get(`/api/admin/shared-volumes/${volumeId}/catalogs`),
+        await adminApi.get(`/api/shared-volumes/${volumeId}/catalogs`),
       );
       const cache = (cacheInspect.items as JsonRecord[])
         .filter((item) => item.occupancy === 'cache');
@@ -1521,7 +1521,7 @@ test(
         `printf '%s\\n' '${marker}' > /mnt/shared/twin && cat /mnt/shared/twin`,
       );
       expect(await execInContainer(adminApi, secondId, 'cat /mnt/shared/twin')).toContain(marker);
-      const blocked = await adminApi.delete(`/api/admin/shared-volumes/${volumeId}`);
+      const blocked = await adminApi.delete(`/api/shared-volumes/${volumeId}`);
       expect(blocked.status()).toBe(409);
       expect(conflictCode(await blocked.json())).toBe('VOLUME_REQUIRES_UNBIND');
     } finally {

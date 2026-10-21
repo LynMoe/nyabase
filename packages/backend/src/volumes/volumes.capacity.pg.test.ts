@@ -1,6 +1,7 @@
 import type { Kysely } from 'kysely';
 import { randomUUID } from 'node:crypto';
 import { describe, expect, it, vi } from 'vitest';
+import { testActor } from '../iam/actor.test-helper.js';
 import {
   ContainerPowerIntent,
   FailureCode,
@@ -223,7 +224,7 @@ describePg('volume capacity locking and scope exclusions', () => {
         },
       ]).execute();
 
-      const capacity = await makeService(database).capacityForUser(userId, serverId);
+      const capacity = await makeService(database).capacity(testActor(userId), serverId);
       expect(capacity.usedByLocalVolumesBytes).toBe(100);
       expect(capacity.usedByRootDisksBytes).toBe(0);
       expect(capacity.pools).toHaveLength(1);
@@ -261,7 +262,7 @@ describePg('volume capacity locking and scope exclusions', () => {
         .set({ pool_id: null })
         .where('id', '=', sharedVolumeId)
         .execute();
-      const afterNullPool = await makeService(database).capacityForUser(userId, serverId);
+      const afterNullPool = await makeService(database).capacity(testActor(userId), serverId);
       expect(afterNullPool.usedByLocalVolumesBytes).toBe(100);
       expect(afterNullPool.pools[0]!.committedBytes).toBe(100);
     });
@@ -292,8 +293,7 @@ describePg('volume capacity locking and scope exclusions', () => {
         expires_at: null,
       }).execute();
       const service = makeService(database);
-      const results = await Promise.allSettled([1, 2].map((index) => service.createForUser(
-        userId,
+      const results = await Promise.allSettled([1, 2].map((index) => service.create(testActor(userId),
         {
           name: `race-${index}`,
           sizeBytes: 600,
@@ -350,7 +350,7 @@ describePg('volume capacity locking and scope exclusions', () => {
       }).execute();
 
       const service = makeService(database);
-      const existing = await service.createForUser(userId, {
+      const existing = await service.create(testActor(userId), {
         name: 'overcommit-existing',
         sizeBytes: 1_500,
         scope: { kind: 'local', serverId, poolId },
@@ -371,14 +371,14 @@ describePg('volume capacity locking and scope exclusions', () => {
         lifecycle_phase: 'provisioning',
       });
 
-      await expect(service.createForUser(userId, {
+      await expect(service.create(testActor(userId), {
         name: 'overcommit-new',
         sizeBytes: 100,
         scope: { kind: 'local', serverId, poolId },
       })).rejects.toMatchObject({
         response: { code: FailureCode.StoragePoolExhausted },
       });
-      await expect(service.patchForUser(userId, existing.resourceId, {
+      await expect(service.patch(testActor(userId), existing.resourceId, {
         expectedRevision: 1,
         sizeBytes: 1_600,
       })).rejects.toMatchObject({
@@ -449,8 +449,7 @@ describePg('volume capacity locking and scope exclusions', () => {
       }))).execute();
 
       const service = makeService(database);
-      const results = await Promise.allSettled(volumeIds.map((id) => service.patchForUser(
-        userId,
+      const results = await Promise.allSettled(volumeIds.map((id) => service.patch(testActor(userId),
         id,
         { expectedRevision: 1, sizeBytes: 600 },
       )));
@@ -602,7 +601,7 @@ describePg('volume capacity locking and scope exclusions', () => {
       );
 
       const results = await Promise.allSettled([
-        containerService.createForUser(userId, {
+        containerService.create(testActor(userId), {
           serverId,
           imageId,
           name: 'cross-capacity-container',
@@ -611,7 +610,7 @@ describePg('volume capacity locking and scope exclusions', () => {
           memBytes: 100,
           powerIntent: ContainerPowerIntent.Stopped,
         }),
-        volumeService.createForUser(userId, {
+        volumeService.create(testActor(userId), {
           name: 'cross-capacity-volume',
           sizeBytes: 600,
           scope: { kind: 'local', serverId, poolId },
@@ -699,7 +698,7 @@ describePg('volume capacity locking and scope exclusions', () => {
       );
 
       const results = await Promise.allSettled([
-        volumeService.createSharedForUser(userId, {
+        volumeService.createShared(testActor(userId), {
           name: 'shared-lock-order-volume',
           sizeBytes: 600,
           scope: { kind: 'shared', sharedBackendId: backendId },
@@ -727,7 +726,7 @@ describePg('volume capacity locking and scope exclusions', () => {
     });
   });
 
-  it('createForUser requires server grant', async () => {
+  it('create requires server grant', async () => {
     await withPostgresTestDatabase(async ({ database }) => {
       const ownerId = randomUUID();
       const serverId = randomUUID();
@@ -736,7 +735,7 @@ describePg('volume capacity locking and scope exclusions', () => {
       const poolId = await insertLocalPool(database, serverId);
       const service = makeService(database);
 
-      await expect(service.createForUser(ownerId, {
+      await expect(service.create(testActor(ownerId), {
         name: 'user-no-grant',
         sizeBytes: 100,
         scope: { kind: 'local', serverId, poolId },

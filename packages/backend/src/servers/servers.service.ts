@@ -9,6 +9,7 @@ import {
   PreflightStatus,
   ServerStatus,
   type CreateServerRequest,
+  type ListScope,
   type PatchServerRequest,
   type ServerDto,
   type UserServerDto,
@@ -19,6 +20,7 @@ import { PG_DATABASE } from '../platform/persistence-pg/tokens.js';
 import { PgTransactionManager } from '../platform/persistence-pg/transaction.js';
 import { AccessResolverService } from '../iam/access-resolver.service.js';
 import { AuditService } from '../iam/audit.service.js';
+import { assertListScope, type Actor } from '../iam/actor.js';
 import { NyabaseConfigService } from '../platform/config/nyabase-config.service.js';
 import { numberValue, isoDate, poolLabel } from '../platform/domain-utils.js';
 import { InfrastructureRepository } from '../infrastructure/infrastructure.repository.js';
@@ -102,6 +104,26 @@ export class ServersService {
       return server;
     });
     return (await this.toDtos([row]))[0]!;
+  }
+
+  /**
+   * `scope=mine`: the servers the caller holds a grant for, as user DTOs.
+   * `scope=all`: every server, as full DTOs (`ManageServers` or `ManageGrants`).
+   */
+  async list(actor: Actor, scope: ListScope): Promise<ServerDto[] | UserServerDto[]> {
+    assertListScope(actor, scope, Capability.ManageServers, Capability.ManageGrants);
+    if (scope === 'all') return this.findAllDtos();
+    return this.findUserDtosByIds(await this.access.listAccessibleServers(actor.userId));
+  }
+
+  /** `scope=mine` needs a grant (404 otherwise); `scope=all` needs `ManageServers`. */
+  async get(actor: Actor, id: string, scope: ListScope): Promise<ServerDto | UserServerDto> {
+    assertListScope(actor, scope, Capability.ManageServers);
+    if (scope === 'all') return this.findDtoById(id);
+    if (!(await this.access.listAccessibleServers(actor.userId)).includes(id)) {
+      throw new NotFoundException('Server not found');
+    }
+    return this.findUserDtoById(id);
   }
 
   async findAll(): Promise<ServerRow[]> {

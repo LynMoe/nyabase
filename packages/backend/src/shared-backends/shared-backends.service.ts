@@ -7,7 +7,9 @@ import {
 } from '@nestjs/common';
 import { randomUUID } from 'node:crypto';
 import {
+  Capability,
   FailureCode,
+  type ListScope,
   type SharedBackendDto,
   type SharedBackendExecutorDto,
 } from '@nyabase/common';
@@ -19,6 +21,7 @@ import type { NyabaseDatabase } from '../platform/persistence-pg/database.types.
 import { PG_DATABASE } from '../platform/persistence-pg/tokens.js';
 import { PgTransactionManager } from '../platform/persistence-pg/transaction.js';
 import { classifyGrantExpiry } from '../iam/grant-expiry.js';
+import { assertListScope, type Actor } from '../iam/actor.js';
 
 function normalizedIdentity(value: string): string {
   const identity = value.trim();
@@ -65,14 +68,32 @@ export class SharedBackendsService {
     private readonly storagePools: StoragePoolsService,
   ) {}
 
-  async list(): Promise<SharedBackendDto[]> {
+  /**
+   * `scope=mine`: backends the caller holds a live grant for.
+   * `scope=all`: every backend (`ManageSharedBackends` or `ManageGrants`).
+   */
+  async list(actor: Actor, scope: ListScope): Promise<SharedBackendDto[]> {
+    assertListScope(actor, scope, Capability.ManageSharedBackends, Capability.ManageGrants);
+    return scope === 'all' ? this.listAll() : this.listGranted(actor.userId);
+  }
+
+  /** `scope=mine` needs a grant (404 otherwise); `scope=all` needs `ManageSharedBackends`. */
+  async get(actor: Actor, id: string, scope: ListScope): Promise<SharedBackendDto> {
+    assertListScope(actor, scope, Capability.ManageSharedBackends);
+    if (scope === 'all') return this.getAny(id);
+    const backend = (await this.listGranted(actor.userId)).find((item) => item.id === id);
+    if (!backend) throw new NotFoundException('Shared backend not found');
+    return backend;
+  }
+
+  private async listAll(): Promise<SharedBackendDto[]> {
     const rows = await this.repository.list();
     const committed = await this.committedUsedByBackendIds(rows.map((row) => row.id));
     const executors = await this.storagePools.listExecutorsByBackendIds(rows.map((row) => row.id));
     return rows.map((row) => this.toDto(row, committed.get(row.id) ?? 0, executors.get(row.id) ?? []));
   }
 
-  async get(id: string): Promise<SharedBackendDto> {
+  private async getAny(id: string): Promise<SharedBackendDto> {
     const row = await this.repository.findById(id);
     if (!row) throw new NotFoundException('Shared backend not found');
     const pools = await this.repository.list();
@@ -86,7 +107,7 @@ export class SharedBackendsService {
     }, committed.get(id) ?? 0, executors.get(id) ?? []);
   }
 
-  async listForUser(userId: string): Promise<SharedBackendDto[]> {
+  private async listGranted(userId: string): Promise<SharedBackendDto[]> {
     const grants = await this.database
       .selectFrom('iam.shared_backend_grants as grant')
       .leftJoin('iam.group_members as member', 'member.group_id', 'grant.group_id')
@@ -120,12 +141,6 @@ export class SharedBackendsService {
     input: { expectedRevision: number; registered: boolean },
   ) {
     return this.storagePools.patchExecutor(backendId, executorId, input);
-  }
-
-  async getForUser(id: string, userId: string): Promise<SharedBackendDto> {
-    const backend = (await this.listForUser(userId)).find((item) => item.id === id);
-    if (!backend) throw new NotFoundException('Shared backend not found');
-    return backend;
   }
 
   async create(input: {
@@ -199,7 +214,7 @@ export class SharedBackendsService {
         [],
       );
     }
-    return this.get(result.row.id);
+    return this.getAny(result.row.id);
   }
 
   async patch(
@@ -252,7 +267,7 @@ export class SharedBackendsService {
       },
       { isolationLevel: 'serializable', maxAttempts: 5 },
     );
-    return this.get(updated.id);
+    return this.getAny(updated.id);
   }
 
   async delete(id: string): Promise<void> {

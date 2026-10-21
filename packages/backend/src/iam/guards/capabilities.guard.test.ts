@@ -1,4 +1,4 @@
-import { ForbiddenException } from '@nestjs/common';
+import { ForbiddenException, type ExecutionContext } from '@nestjs/common';
 import { Reflector } from '@nestjs/core';
 import { Capability } from '@nyabase/common';
 import { describe, expect, it, vi } from 'vitest';
@@ -21,6 +21,49 @@ describe('CapabilitiesGuard', () => {
     const guard = makeGuard(undefined);
 
     await expect(guard.canActivate(makeContext('/api/containers'))).resolves.toBe(true);
+  });
+
+  it('resolves capabilities once and stashes them as the request actor', async () => {
+    const userCaps = new Set([Capability.ManageContainersAny]);
+    const { guard, accessResolver } = makeGuardWithResolver({
+      all: [Capability.ManageContainersAny],
+      userCaps,
+    });
+    const context = makeContext('/api/containers');
+    const request = context.switchToHttp().getRequest();
+    request.authContext = { kind: 'jwt', authVersion: 7 };
+
+    await expect(guard.canActivate(context)).resolves.toBe(true);
+
+    expect(accessResolver.userCapabilitiesCurrent).toHaveBeenCalledTimes(1);
+    expect(request.actor).toEqual({
+      userId: 'user-a',
+      capabilities: userCaps,
+      authKind: 'jwt',
+      authVersion: 7,
+    });
+  });
+
+  it('builds the actor for routes with no capability metadata and for API tokens', async () => {
+    const { guard, accessResolver } = makeGuardWithResolver({ userCaps: new Set([Capability.ViewAudit]) });
+    const context = makeContext('/api/containers');
+    const request = context.switchToHttp().getRequest();
+    request.authContext = { kind: 'api-token' };
+
+    await guard.canActivate(context);
+
+    expect(accessResolver.userCapabilitiesCurrent).toHaveBeenCalledTimes(1);
+    expect(request.actor).toMatchObject({
+      userId: 'user-a',
+      authKind: 'api-token',
+      capabilities: new Set([Capability.ViewAudit]),
+    });
+  });
+
+  it('refuses an /admin route without capability metadata before resolving anything', async () => {
+    const { guard, accessResolver } = makeGuardWithResolver({});
+    await expect(guard.canActivate(makeContext('/api/admin/users'))).rejects.toBeInstanceOf(ForbiddenException);
+    expect(accessResolver.userCapabilitiesCurrent).not.toHaveBeenCalled();
   });
 
   it('denies admin routes when capability metadata is missing', async () => {
@@ -85,6 +128,17 @@ function makeGuard(
     userCaps?: Set<Capability>;
   },
 ): CapabilitiesGuard {
+  return makeGuardWithResolver(options).guard;
+}
+
+function makeGuardWithResolver(
+  options?: {
+    all?: Capability[];
+    any?: Capability[];
+    public?: boolean;
+    userCaps?: Set<Capability>;
+  },
+): { guard: CapabilitiesGuard; accessResolver: { userCapabilitiesCurrent: ReturnType<typeof vi.fn> } } {
   const reflector = {
     getAllAndOverride: vi.fn((key: string) => {
       if (key === IS_PUBLIC_KEY) return options?.public;
@@ -94,14 +148,14 @@ function makeGuard(
   const accessResolver = {
     userCapabilitiesCurrent: vi.fn().mockResolvedValue(options?.userCaps ?? new Set<Capability>()),
   };
-  return new CapabilitiesGuard(reflector, accessResolver as never);
+  return { guard: new CapabilitiesGuard(reflector, accessResolver as never), accessResolver };
 }
 
 function makeContext(url: string) {
   const request = {
     originalUrl: url,
     headers: {},
-    user: { id: 'user-a' },
+    user: { id: 'user-a', authVersion: 3 },
   };
   return {
     getHandler: () => function handler() {},
@@ -109,5 +163,5 @@ function makeContext(url: string) {
     switchToHttp: () => ({
       getRequest: () => request,
     }),
-  } as never;
+  } as unknown as ExecutionContext;
 }

@@ -3,6 +3,7 @@ import { request as httpsRequest } from 'node:https';
 import { test, expect } from '../../fixtures/live-stack.js';
 import { coverageCase } from '../../support/coverage-marker.js';
 import { expectJson } from '../../support/http.js';
+import { resourceIntentsPath } from '../../support/persona.js';
 import { eventually } from '../../support/poll.js';
 import { requireRuntimeEnv } from '../../support/runtime-env.js';
 
@@ -32,7 +33,7 @@ test(
   { ...coverageCase('server-mtls-trust-onboarding', 'server-onboarding-live') },
   async ({ adminApi, seedState }) => {
     const server = await expectJson<JsonRecord>(
-      await adminApi.get(`/api/admin/servers/${seedState.server.id}`),
+      await adminApi.get(`/api/servers/${seedState.server.id}?scope=all`),
     );
     expect(server.apiEndpoint ?? server.endpoint).toMatch(/^https:\/\//);
     expect(server.certificateFingerprint ?? server.serverCertFingerprint)
@@ -43,10 +44,14 @@ test(
     let connectIntent: JsonRecord | undefined;
     let cursor: string | undefined;
     for (let pageIndex = 0; pageIndex < 20 && !connectIntent; pageIndex += 1) {
-      const query = new URLSearchParams({ limit: '100' });
+      const query = new URLSearchParams({
+        scope: 'all',
+        serverId: seedState.server.id,
+        limit: '100',
+      });
       if (cursor) query.set('cursor', cursor);
       const intentPage = await expectJson<{ items: JsonRecord[]; nextCursor?: string | null }>(
-        await adminApi.get(`/api/admin/servers/${seedState.server.id}/intents?${query}`),
+        await adminApi.get(`/api/intents?${query}`),
       );
       connectIntent = intentPage.items.find(
         (intent) => intent.kind === 'server.connect' && intent.status === 'succeeded',
@@ -66,10 +71,10 @@ test(
     expect(connectIntent?.requestSummary).not.toHaveProperty('trustToken');
 
     const current = await expectJson<JsonRecord>(
-      await adminApi.get(`/api/admin/servers/${seedState.server.id}`),
+      await adminApi.get(`/api/servers/${seedState.server.id}?scope=all`),
     );
     const preflight = await expectJson<JsonRecord>(
-      await adminApi.post(`/api/admin/servers/${seedState.server.id}/preflight`, {
+      await adminApi.post(`/api/servers/${seedState.server.id}/preflight`, {
         data: {
           expectedServerRevision: current.revision,
           poolId: seedState.storagePools.dirQuotaOnline.id,
@@ -91,7 +96,7 @@ test(
     expect(preflightIntent.kind).toBe('server.preflight');
 
     const report = await expectJson<JsonRecord>(
-      await adminApi.get(`/api/admin/servers/${seedState.server.id}/preflight`),
+      await adminApi.get(`/api/servers/${seedState.server.id}/preflight`),
     );
     expect(report).toMatchObject({
       status: 'passed',
@@ -156,10 +161,10 @@ test(
   'assigns the immutable simplestreams image fingerprint to the server',
   { ...coverageCase('image-assignment-fingerprint', 'image-assignment-live') },
   async ({ adminApi, seedState }) => {
-    const catalog = await expectJson<JsonRecord[]>(await adminApi.get('/api/admin/images'));
+    const catalog = await expectJson<JsonRecord[]>(await adminApi.get('/api/images?scope=all'));
     expect(catalog.some((entry) => entry.id === seedState.image.id)).toBe(true);
     const sourceCatalog = await expectJson<JsonRecord[]>(
-      await adminApi.get('/api/admin/images/catalog'),
+      await adminApi.get('/api/images/catalog'),
     );
     expect(Array.isArray(sourceCatalog)).toBe(true);
     expect(sourceCatalog.some((entry) => (
@@ -167,7 +172,7 @@ test(
       || (Array.isArray(entry.aliases) && entry.aliases.includes(seedState.image.alias))
     ))).toBe(true);
     const missingRepull = await adminApi.post(
-      '/api/admin/images/00000000-0000-4000-8000-0000000000aa/repull',
+      '/api/images/00000000-0000-4000-8000-0000000000aa/repull',
       { data: {} },
     );
     expect(missingRepull.status()).toBeGreaterThanOrEqual(400);
@@ -179,23 +184,27 @@ test(
       const body = await userImage.json() as JsonRecord;
       expect(body.id).toBe(seedState.image.id);
     }
-    await expectJson(await adminApi.get(`/api/admin/images/${seedState.image.id}/status`));
+    await expectJson(await adminApi.get(`/api/images/${seedState.image.id}/status`));
     await expectJson(
-      await adminApi.get(`/api/admin/images/${seedState.image.id}/assignments/status`),
+      await adminApi.get(`/api/images/${seedState.image.id}/assignments/status`),
     );
-    await expectJson(await adminApi.get(`/api/admin/images/${seedState.image.id}/intents`));
-    await expectJson(
-      await adminApi.get(
-        `/api/admin/images/${seedState.image.id}/assignments/${seedState.server.id}/intents`,
-      ),
+    const imageAssignments = await expectJson<JsonRecord[]>(
+      await adminApi.get(`/api/images/${seedState.image.id}/assignments`),
     );
+    if (imageAssignments.length > 0) {
+      await expectJson(await adminApi.get(resourceIntentsPath(
+        'image_assignment',
+        imageAssignments.map((assignment) => assignment.id as string),
+        'all',
+      )));
+    }
     const missingAssignment = await adminApi.delete(
-      `/api/admin/images/${seedState.image.id}/assignments/00000000-0000-4000-8000-0000000000aa`,
+      `/api/images/${seedState.image.id}/assignments/00000000-0000-4000-8000-0000000000aa`,
     );
     expect([202, 400, 404, 409]).toContain(missingAssignment.status());
 
     const image = await expectJson<JsonRecord>(
-      await adminApi.get(`/api/admin/images/${seedState.image.id}`),
+      await adminApi.get(`/api/images/${seedState.image.id}?scope=all`),
     );
     const fingerprint = image.fingerprint ?? image.sourceFingerprint ?? image.managedFingerprint;
     expect(fingerprint).toBe(seedState.image.fingerprint);
@@ -203,7 +212,7 @@ test(
 
     const assignment = await expectJson<JsonRecord>(
       await adminApi.put(
-        `/api/admin/images/${seedState.image.id}/assignments/${seedState.server.id}`,
+        `/api/images/${seedState.image.id}/assignments/${seedState.server.id}`,
         { data: {} },
       ),
       202,
@@ -223,7 +232,7 @@ test(
 
     const assignments = await eventually(
       async () => expectJson<JsonRecord[]>(
-        await adminApi.get(`/api/admin/images/${seedState.image.id}/assignments`),
+        await adminApi.get(`/api/images/${seedState.image.id}/assignments`),
       ),
       (entries) => entries.some((entry) => (
         entry.serverId === seedState.server.id

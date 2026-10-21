@@ -18,7 +18,7 @@ describe('image catalog UI', () => {
     const detail = read('pages/image-detail-page.tsx');
     expect(page).toMatch(/ImageCatalogDialog/);
     expect(page).not.toMatch(/ImageFormDialog/);
-    expect(catalog).toMatch(/\/admin\/images\/catalog/);
+    expect(catalog).toMatch(/'\/images\/catalog'/);
     expect(catalog).toMatch(/\{ alias \}/);
     expect(catalog).not.toMatch(/loginUser/);
     expect(list).toMatch(/重新拉取/);
@@ -29,7 +29,7 @@ describe('image catalog UI', () => {
     expect(detail).not.toMatch(/loaded\.name/);
     expect(detail).toMatch(/loaded\.alias/);
     expect(detail).toMatch(/重新拉取/);
-    expect(detail).toMatch(/\/admin\/images\/\$\{loaded\.id\}\/intents/);
+    expect(detail).toMatch(/IntentResourceType\.ImageAssignment/);
     expect(detail).toMatch(/已开始移除镜像/);
     expect(detail).not.toMatch(/镜像删除意图已提交/);
   });
@@ -40,10 +40,10 @@ describe('image catalog UI', () => {
     expect(intents).toMatch(/query\.isError/);
     expect(intents).toMatch(/limit=20/);
     expect(intents).toMatch(/limit=50/);
-    expect(intents).toMatch(/resourceIntentFailures\(admin \? 'admin' : 'user', listPath, 20\)/);
-    expect(intents).toMatch(/resourceIntentFailures\(admin \? 'admin' : 'user', listPath, 50\)/);
+    expect(intents).toMatch(/resourceIntentFailures\(listPath, 20\)/);
+    expect(intents).toMatch(/resourceIntentFailures\(listPath, 50\)/);
     expect(intents).toMatch(/currentOutstandingIntents/);
     expect(intents).not.toMatch(/latestIntentsByResource/);
-    expect(keys).toMatch(/resourceIntentFailures: \(plane: Plane, listPath: string, limit: number\)/);
+    expect(keys).toMatch(/resourceIntentFailures: \(listPath: string, limit: number\)/);
   });
 });

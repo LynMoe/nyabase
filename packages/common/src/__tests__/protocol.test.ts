@@ -22,7 +22,8 @@ import {
   zErrorResponse,
   zCreateExecSessionRequest,
   zIntentAcceptedDto,
-  zAdminIntentListQuery,
+  zListContainersQuery,
+  zListScope,
   zIntentListQuery,
   zListVolumesQuery,
   zPatchImageRequest,
@@ -653,7 +654,6 @@ describe('intent list query', () => {
       resourceType: IntentResourceType.Volume,
       serverId,
     })).toMatchObject({
-      limit: 50,
       resourceType: IntentResourceType.Volume,
       serverId,
     });
@@ -674,31 +674,53 @@ describe('intent list query', () => {
     }).success).toBe(false);
   });
 
-  it('keeps resource-scoped max at 100 and admin global max at 500', () => {
+  it('keeps scope=mine max at 100 and scope=all max at 500', () => {
     expect(MAX_INTENT_LIST_PAGE_SIZE).toBe(100);
     expect(ADMIN_INTENT_LIST_MAX).toBe(500);
-    expect(zIntentListQuery.parse({}).limit).toBe(50);
+    expect(zIntentListQuery.parse({}).scope).toBe('mine');
+    expect(zIntentListQuery.parse({}).limit).toBeUndefined();
     expect(zIntentListQuery.safeParse({ limit: 100 }).success).toBe(true);
     expect(zIntentListQuery.safeParse({ limit: 500 }).success).toBe(false);
-    expect(zAdminIntentListQuery.parse({}).limit).toBe(500);
-    expect(zAdminIntentListQuery.safeParse({ limit: 50 }).success).toBe(true);
-    expect(zAdminIntentListQuery.safeParse({ limit: 500 }).success).toBe(true);
-    expect(zAdminIntentListQuery.safeParse({ limit: 501 }).success).toBe(false);
+    expect(zIntentListQuery.safeParse({ scope: 'all', limit: 50 }).success).toBe(true);
+    expect(zIntentListQuery.safeParse({ scope: 'all', limit: 500 }).success).toBe(true);
+    expect(zIntentListQuery.safeParse({ scope: 'all', limit: 501 }).success).toBe(false);
+  });
+
+  it('accepts a resourceId filter and only the mine/all scopes', () => {
+    expect(zIntentListQuery.parse({ resourceType: IntentResourceType.Container, resourceId: serverId }))
+      .toMatchObject({ scope: 'mine', resourceId: serverId });
+    expect(zListScope.parse(undefined)).toBe('mine');
+    expect(zListScope.safeParse('admin').success).toBe(false);
   });
 });
 
-describe('admin local volume list query', () => {
-  it('accepts an empty object and a resource identity serverId', () => {
-    expect(zListVolumesQuery.parse({})).toEqual({});
-    expect(zListVolumesQuery.parse({ serverId: 'srv-1' })).toEqual({ serverId: 'srv-1' });
-    expect(zListVolumesQuery.parse({ serverId: 'not-a-uuid' })).toEqual({ serverId: 'not-a-uuid' });
-    expect(zListVolumesQuery.parse({ serverId })).toEqual({ serverId });
+describe('local volume list query', () => {
+  it('defaults to scope=mine and accepts a resource identity serverId only with scope=all', () => {
+    expect(zListVolumesQuery.parse({})).toEqual({ scope: 'mine' });
+    expect(zListVolumesQuery.parse({ scope: 'all' })).toEqual({ scope: 'all' });
+    expect(zListVolumesQuery.parse({ scope: 'all', serverId: 'srv-1' }))
+      .toEqual({ scope: 'all', serverId: 'srv-1' });
+    expect(zListVolumesQuery.parse({ scope: 'all', serverId })).toEqual({ scope: 'all', serverId });
+    expect(zListVolumesQuery.safeParse({ serverId: 'srv-1' }).success).toBe(false);
+    expect(zListVolumesQuery.safeParse({ scope: 'mine', serverId }).success).toBe(false);
   });
 
-  it('rejects extra keys and empty serverId', () => {
-    expect(zListVolumesQuery.safeParse({ serverId: 'srv-1', extra: 'x' }).success).toBe(false);
+  it('rejects extra keys, an unknown scope and empty serverId', () => {
+    expect(zListVolumesQuery.safeParse({ scope: 'all', serverId: 'srv-1', extra: 'x' }).success).toBe(false);
     expect(zListVolumesQuery.safeParse({ foo: 'bar' }).success).toBe(false);
-    expect(zListVolumesQuery.safeParse({ serverId: '' }).success).toBe(false);
-    expect(zListVolumesQuery.safeParse({ serverId: 'not a uuid' }).success).toBe(false);
+    expect(zListVolumesQuery.safeParse({ scope: 'admin' }).success).toBe(false);
+    expect(zListVolumesQuery.safeParse({ scope: 'all', serverId: '' }).success).toBe(false);
+    expect(zListVolumesQuery.safeParse({ scope: 'all', serverId: 'not a uuid' }).success).toBe(false);
+  });
+});
+
+describe('container list query', () => {
+  it('defaults to scope=mine, keeps serverId for both scopes, and ignores unknown keys', () => {
+    expect(zListContainersQuery.parse({})).toEqual({ scope: 'mine' });
+    expect(zListContainersQuery.parse({ serverId: 'srv-1' })).toEqual({ scope: 'mine', serverId: 'srv-1' });
+    expect(zListContainersQuery.parse({ scope: 'all', serverId: 'srv-1' }))
+      .toEqual({ scope: 'all', serverId: 'srv-1' });
+    expect(zListContainersQuery.parse({ cacheBust: '1' })).toEqual({ scope: 'mine' });
+    expect(zListContainersQuery.safeParse({ scope: 'everyone' }).success).toBe(false);
   });
 });

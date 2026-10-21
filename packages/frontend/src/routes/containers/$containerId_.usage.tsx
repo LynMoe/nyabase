@@ -7,5 +7,5 @@ export const Route = createFileRoute('/containers/$containerId_/usage')({
 
 function ContainerUsageRoute() {
   const { containerId } = Route.useParams();
-  return <ContainerUsagePage containerId={containerId} admin={false} />;
+  return <ContainerUsagePage containerId={containerId} scope="mine" />;
 }

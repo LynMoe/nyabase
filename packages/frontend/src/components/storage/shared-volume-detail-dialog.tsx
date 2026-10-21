@@ -1,4 +1,4 @@
-import type { SharedVolumeDto } from '@nyabase/common';
+import { IntentResourceType, type ListScope, type SharedVolumeDto } from '@nyabase/common';
 import { StatusBadge } from '../layout/status-badge.js';
 import { Button } from '../ui/button.js';
 import {
@@ -13,6 +13,7 @@ import { ResourceIntentFailures, ResourceIntentHistory } from '../intents/resour
 import { ResourceRef } from '../refs/resource-ref.js';
 import { formatObservedUsage } from '../../lib/storage-shrink.js';
 import { relativeTime, formatGib } from '../../lib/utils.js';
+import { resourceIntentsPath } from '../../lib/intent-visibility.js';
 import { volumeInProgress } from '../../lib/in-progress.js';
 import { failureCodeLabel, volumeAttentionHint, volumeLifecycleLabel } from '../../lib/status-labels.js';
 import { Field } from '../layout/field.js';
@@ -26,19 +27,17 @@ function shrinkLabel(volume: SharedVolumeDto): string {
 
 export function SharedVolumeDetailDialog({
   volume,
-  plane,
+  scope,
   open,
   onOpenChange,
 }: {
   volume: SharedVolumeDto | null;
-  plane: 'user' | 'admin';
+  scope: ListScope;
   open: boolean;
   onOpenChange: (open: boolean) => void;
 }) {
   if (!volume) return null;
-  const intentPath = plane === 'admin'
-    ? `/admin/shared-volumes/${volume.id}/intents`
-    : `/shared-volumes/${volume.id}/intents`;
+  const intentPath = resourceIntentsPath(scope, IntentResourceType.Volume, volume.id);
   const phaseLabel = volume.needsAttention
     ? '需要关注'
     : volumeLifecycleLabel(volume.lifecyclePhase);
@@ -55,7 +54,7 @@ export function SharedVolumeDetailDialog({
           </DialogDescription>
         </DialogHeader>
         <div className="grid gap-3 text-sm sm:grid-cols-2">
-          {plane === 'admin' ? (
+          {scope === 'all' ? (
             <Field label="所有者" value={<ResourceRef kind="user" id={volume.ownerId} />} />
           ) : null}
           <Field label="共享后端" value={volume.sharedBackendName} />
@@ -95,8 +94,8 @@ export function SharedVolumeDetailDialog({
             </p>
           </div>
         </div>
-        {plane === 'user' ? <ResourceIntentFailures listPath={intentPath} admin={false} /> : null}
-        <ResourceIntentHistory listPath={intentPath} admin={plane === 'admin'} defaultOpen />
+        {scope === 'mine' ? <ResourceIntentFailures listPath={intentPath} /> : null}
+        <ResourceIntentHistory listPath={intentPath} scope={scope} defaultOpen />
         <DialogFooter>
           <Button variant="outline" onClick={() => onOpenChange(false)}>关闭</Button>
         </DialogFooter>

@@ -24,6 +24,7 @@ import {
   type AttachVolumeRequest,
   type CreateContainerRequest,
   type CreateExecSessionRequest,
+  type ListScope,
   type IntentAcceptedDto,
   type PatchContainerLimitsRequest,
   type PatchContainerRootSizeRequest,
@@ -32,7 +33,8 @@ import {
 import type { NyabaseDatabase } from '../platform/persistence-pg/database.types.js';
 import { PG_DATABASE } from '../platform/persistence-pg/tokens.js';
 import { PgTransactionManager } from '../platform/persistence-pg/transaction.js';
-import { AccessResolverService } from '../iam/access-resolver.service.js';
+import { AccessResolverService, type ResolvedServerGrant } from '../iam/access-resolver.service.js';
+import { assertListScope, isSystemActor, type Actor } from '../iam/actor.js';
 import { AuditService } from '../iam/audit.service.js';
 import { isoDate, nullableNumber, numberValue, poolLabel } from '../platform/domain-utils.js';
 import { acceptedIntent } from '../reconcile/accepted-intent.js';
@@ -58,6 +60,7 @@ import { admitGpuCreate, mutateGpuContainer } from '../gpu/admit.js';
 import { GpuClaimsRepository } from '../gpu/gpu-claims.repository.js';
 
 type ContainerAction = 'start' | 'stop' | 'restart' | 'delete';
+type ContainerAccess = 'owner' | 'admin' | 'system';
 
 export interface RootResizeCheckInput {
   readonly containerId: string;
@@ -227,36 +230,30 @@ export class ContainerControlService {
     private readonly gpuClaims: GpuClaimsRepository,
   ) {}
 
-  async list(userId: string, filters: { serverId?: string } = {}): Promise<ContainerDto[]> {
-    const rows = await this.repository.list({ ownerId: userId, serverId: filters.serverId });
+  async list(
+    actor: Actor,
+    filters: { scope?: ListScope; serverId?: string } = {},
+  ): Promise<ContainerDto[]> {
+    const scope = filters.scope ?? 'mine';
+    assertListScope(actor, scope, Capability.ManageContainersAny);
+    const rows = await this.repository.list({
+      ownerId: scope === 'mine' ? actor.userId : undefined,
+      serverId: filters.serverId,
+    });
     return this.toDtos(rows);
   }
 
-  async listForAdmin(filters: { serverId?: string } = {}): Promise<ContainerDto[]> {
-    return this.toDtos(await this.repository.list(filters));
-  }
-
-  async get(containerId: string, userId: string): Promise<ContainerDto> {
+  async get(actor: Actor, containerId: string): Promise<ContainerDto> {
     const row = await this.requireContainer(containerId);
-    if (row.owner_id !== userId) throw new ForbiddenException('Container is not owned by current user');
+    this.assertCanAccess(actor, row);
     return (await this.toDtos([row]))[0]!;
   }
 
-  async getForAdmin(containerId: string, _actorId: string): Promise<ContainerDto> {
-    return (await this.toDtos([await this.requireContainer(containerId)]))[0]!;
-  }
-
-  async createForUser(
-    userId: string,
+  async create(
+    actor: Actor,
     request: CreateContainerRequest,
   ): Promise<IntentAcceptedDto> {
-    return this.createInternal(userId, request);
-  }
-
-  private async createInternal(
-    userId: string,
-    request: CreateContainerRequest,
-  ): Promise<IntentAcceptedDto> {
+    const userId = actor.userId;
     assertContainerName(request.name);
     assertCreateNumbers(request);
     const ownerId = userId;
@@ -481,7 +478,7 @@ export class ContainerControlService {
       if (request.volumes && request.volumes.length > 0) {
         await this.volumes.bindCreateTimeVolumes(
           transaction,
-          userId,
+          actor,
           { id: row.id, owner_id: row.owner_id, server_id: row.server_id },
           request.volumes as AttachVolumeRequest[],
         );
@@ -510,24 +507,9 @@ export class ContainerControlService {
     return acceptedIntent(result.intent);
   }
 
-  action(containerId: string, action: ContainerAction, userId: string): Promise<IntentAcceptedDto> {
-    return this.actionInternal(containerId, action, userId, false);
-  }
-
-  actionForAdmin(containerId: string, action: ContainerAction, actorId: string): Promise<IntentAcceptedDto> {
-    return this.actionInternal(containerId, action, actorId, true);
-  }
-
-  /** nyabase-system worker mutations. Skips ManageContainersAny. */
-  actionForSystem(containerId: string, action: ContainerAction, actorId: string): Promise<IntentAcceptedDto> {
-    return this.actionInternal(containerId, action, actorId, true, false);
-  }
-
-  async repairSsh(containerId: string, userId: string): Promise<{ woken: boolean }> {
+  async repairSsh(actor: Actor, containerId: string): Promise<{ woken: boolean }> {
     const row = await this.requireContainer(containerId);
-    if (row.owner_id !== userId) {
-      throw new ForbiddenException('Container not found');
-    }
+    this.assertCanAccess(actor, row);
     if (row.lifecycle_phase !== 'active') {
       throw new ConflictException({
         code: FailureCode.InvalidInput,
@@ -537,38 +519,10 @@ export class ContainerControlService {
     return this.sshConvergence.repairContainer(containerId);
   }
 
-  async repairSshForAdmin(containerId: string, _actorId: string): Promise<{ woken: boolean }> {
-    const row = await this.requireContainer(containerId);
-    if (row.lifecycle_phase !== 'active') {
-      throw new ConflictException({
-        code: FailureCode.InvalidInput,
-        message: 'SSH repair requires an active container',
-      });
-    }
-    return this.sshConvergence.repairContainer(containerId);
-  }
-
-  async updateLimitsForUser(
+  async updateLimits(
+    actor: Actor,
     containerId: string,
-    actorId: string,
     input: PatchContainerLimitsRequest,
-  ): Promise<IntentAcceptedDto> {
-    return this.updateLimitsInternal(containerId, actorId, input, false);
-  }
-
-  async updateLimitsForAdmin(
-    containerId: string,
-    actorId: string,
-    input: PatchContainerLimitsRequest,
-  ): Promise<IntentAcceptedDto> {
-    return this.updateLimitsInternal(containerId, actorId, input, true);
-  }
-
-  private async updateLimitsInternal(
-    containerId: string,
-    actorId: string,
-    input: PatchContainerLimitsRequest,
-    admin: boolean,
   ): Promise<IntentAcceptedDto> {
     if (!Number.isSafeInteger(input.cpuMillis) || input.cpuMillis < 0
       || !Number.isSafeInteger(input.memBytes) || input.memBytes < 0) {
@@ -577,38 +531,18 @@ export class ContainerControlService {
         message: 'Container limits must be non-negative safe integers',
       });
     }
-    return this.updateDesired(containerId, actorId, admin, {
+    return this.updateDesired(actor, containerId, {
       cpu_millis: input.cpuMillis,
       mem_bytes: input.memBytes,
-    }, { operation: 'limits' }, AuditAction.UpdateContainerLimits, async (transaction, current) => {
-      if (admin) return;
-      const grant = await this.access.resolveServerInTransaction(transaction, actorId, current.server_id);
-      if (!grant || grant.accessPhase !== 'live') throw new ForbiddenException('Server access was revoked');
-      this.assertComputeGrant(grant, input.cpuMillis, input.memBytes);
+    }, { operation: 'limits' }, AuditAction.UpdateContainerLimits, async (_transaction, _current, grant) => {
+      if (grant) this.assertComputeGrant(grant, input.cpuMillis, input.memBytes);
     });
   }
 
-  async resizeRootForUser(
+  async resizeRoot(
+    actor: Actor,
     containerId: string,
-    actorId: string,
     input: PatchContainerRootSizeRequest,
-  ): Promise<IntentAcceptedDto> {
-    return this.resizeRootInternal(containerId, actorId, input, false);
-  }
-
-  async resizeRootForAdmin(
-    containerId: string,
-    actorId: string,
-    input: PatchContainerRootSizeRequest,
-  ): Promise<IntentAcceptedDto> {
-    return this.resizeRootInternal(containerId, actorId, input, true);
-  }
-
-  private async resizeRootInternal(
-    containerId: string,
-    actorId: string,
-    input: PatchContainerRootSizeRequest,
-    admin: boolean,
   ): Promise<IntentAcceptedDto> {
     const size = input.sizeBytes;
     if (!Number.isSafeInteger(size) || size <= 0) {
@@ -618,13 +552,12 @@ export class ContainerControlService {
       });
     }
     return this.updateDesired(
+      actor,
       containerId,
-      actorId,
-      admin,
       { root_size_bytes: size, root_size_pending_bytes: null },
       { operation: 'root_resize', sizeBytes: size },
       AuditAction.ResizeContainerRoot,
-      async (transaction, locked) => {
+      async (transaction, locked, grant) => {
         if (locked.root_size_pending_bytes !== null) {
           throw new ConflictException({
             code: FailureCode.RootQuotaPending,
@@ -650,19 +583,13 @@ export class ContainerControlService {
         const current = numberValue(locked.root_size_bytes);
         if (size >= current) {
           if (size === current) return;
-          const resolvedGrant = admin
-            ? null
-            : await this.access.resolveServerInTransaction(transaction, actorId, locked.server_id);
-          if (!admin && (!resolvedGrant || resolvedGrant.accessPhase !== 'live')) {
-            throw new ForbiddenException('Server access was revoked');
-          }
           await this.assertRootCapacity(
             transaction,
             locked.owner_id,
             locked.server_id,
             locked.root_pool_id,
             size - current,
-            resolvedGrant?.diskBytes ?? null,
+            grant?.diskBytes ?? null,
           );
           return;
         }
@@ -703,44 +630,22 @@ export class ContainerControlService {
     );
   }
 
-  async mutateGpusForUser(
+  async mutateGpus(
+    actor: Actor,
     containerId: string,
-    actorId: string,
     payload: unknown,
-  ): Promise<IntentAcceptedDto> {
-    return this.mutateGpusInternal(containerId, actorId, payload, false);
-  }
-
-  async mutateGpusForAdmin(
-    containerId: string,
-    actorId: string,
-    payload: unknown,
-  ): Promise<IntentAcceptedDto> {
-    return this.mutateGpusInternal(containerId, actorId, payload, true);
-  }
-
-  private async mutateGpusInternal(
-    containerId: string,
-    actorId: string,
-    payload: unknown,
-    admin: boolean,
   ): Promise<IntentAcceptedDto> {
     return this.transactions.run(async (transaction) => {
       const current = await this.repository.lock(containerId, transaction);
-      if (!current || (!admin && current.owner_id !== actorId)) throw new NotFoundException('Container not found');
+      if (!current) throw new NotFoundException('Container not found');
+      const access = this.assertCanAccess(actor, current, 'not-found');
       if (current.lifecycle_phase === ContainerPhase.Deleting) {
         throw new ConflictException({
           code: FailureCode.InstanceBusy,
           message: 'A deleting container cannot be modified',
         });
       }
-      if (admin) {
-        await this.access.assertActorCapabilitiesInTransaction(
-          transaction,
-          actorId,
-          [Capability.ManageContainersAny],
-        );
-      }
+      if (access === 'admin') await this.assertAdminInTransaction(transaction, actor);
       const enabled = await this.gpuClaims.isEnabled(current.server_id, transaction);
       if (!enabled) {
         throw new ConflictException({
@@ -754,16 +659,15 @@ export class ContainerControlService {
         current.power_intent as ContainerPowerIntent,
       );
       let grantPciAddresses: readonly string[] = [];
-      if (!admin) {
-        const grant = await this.access.resolveServerInTransaction(transaction, actorId, current.server_id);
-        if (!grant || grant.accessPhase !== 'live') throw new ForbiddenException('Server access was revoked');
+      if (access === 'owner') {
+        const grant = await this.requireLiveGrant(transaction, actor, current);
         grantPciAddresses = grant.gpuPciAddresses;
       }
       let mutated;
       try {
         mutated = await mutateGpuContainer({
           serverId: current.server_id,
-          actor: { userId: actorId, admin },
+          actor: { userId: actor.userId, admin: access !== 'owner' },
           grantPciAddresses,
           claims: this.gpuClaims.forContainer(current.server_id, containerId, transaction),
           health: this.gpuClaims.health(current.server_id, transaction),
@@ -789,13 +693,13 @@ export class ContainerControlService {
         resourceType: IntentResourceType.Container,
         resourceId: containerId,
         serverId: current.server_id,
-        requestedBy: actorId,
+        requestedBy: actor.userId,
         targetRevision: updated.revision,
         request: mutated.requestSummary,
       }, transaction);
       await this.audit.append(
         transaction,
-        actorId,
+        actor.userId,
         AuditAction.UpdateContainerGpu,
         containerId,
         'container',
@@ -813,80 +717,39 @@ export class ContainerControlService {
     });
   }
 
-  async listVolumesForUser(containerId: string, actorId: string): Promise<VolumeAttachmentDto[]> {
+  /** Attachments of a container the caller was already authorised to see. */
+  async listVolumes(actor: Actor, containerId: string): Promise<VolumeAttachmentDto[]> {
+    this.assertCanAccess(actor, await this.requireContainer(containerId));
+    return this.volumes.listContainerAttachments(containerId, 'local');
+  }
+
+  async listSharedVolumes(actor: Actor, containerId: string): Promise<VolumeAttachmentDto[]> {
+    this.assertCanAccess(actor, await this.requireContainer(containerId));
+    return this.volumes.listContainerAttachments(containerId, 'shared');
+  }
+
+  async getStats(actor: Actor, containerId: string) {
     const row = await this.requireContainer(containerId);
-    if (row.owner_id !== actorId) throw new ForbiddenException();
-    return this.volumes.listAttachmentsForUser(actorId, containerId, 'local');
-  }
-
-  async listVolumesForAdmin(containerId: string): Promise<VolumeAttachmentDto[]> {
-    await this.requireContainer(containerId);
-    return this.volumes.listAttachmentsForAdmin(containerId, 'local');
-  }
-
-  async listSharedVolumesForUser(containerId: string, actorId: string): Promise<VolumeAttachmentDto[]> {
-    const row = await this.requireContainer(containerId);
-    if (row.owner_id !== actorId) throw new ForbiddenException();
-    return this.volumes.listAttachmentsForUser(actorId, containerId, 'shared');
-  }
-
-  async listSharedVolumesForAdmin(containerId: string): Promise<VolumeAttachmentDto[]> {
-    await this.requireContainer(containerId);
-    return this.volumes.listAttachmentsForAdmin(containerId, 'shared');
-  }
-
-  async getStats(containerId: string, userId: string) {
-    const row = await this.requireContainer(containerId);
-    if (row.owner_id !== userId) throw new ForbiddenException();
+    this.assertCanAccess(actor, row);
     return this.stats(row);
   }
 
-  async getStatsForAdmin(containerId: string, _actorId: string) {
-    return this.stats(await this.requireContainer(containerId));
-  }
-
   async createExecSession(
+    actor: Actor,
     containerId: string,
-    userId: string,
-    _authVersion: number,
-    request: CreateExecSessionRequest,
-  ) {
-    return this.execSession(containerId, userId, _authVersion, false, request);
-  }
-
-  async createExecSessionForAdmin(
-    containerId: string,
-    actorId: string,
-    _authVersion: number,
-    request: CreateExecSessionRequest,
-  ) {
-    return this.execSession(containerId, actorId, _authVersion, true, request);
-  }
-
-  private async execSession(
-    containerId: string,
-    actorId: string,
-    authVersion: number,
-    admin: boolean,
     request: CreateExecSessionRequest,
   ): Promise<{ sessionId: string; consoleUrl: string; expiresAt: string }> {
+    if (actor.authKind !== 'jwt') {
+      throw new ForbiddenException('Container console admission requires a browser JWT');
+    }
     const row = await this.requireContainer(containerId);
-    if (!admin && row.owner_id !== actorId) throw new ForbiddenException();
+    this.assertCanAccess(actor, row);
+    let access: ContainerAccess = 'owner';
     await this.transactions.run(async (transaction) => {
       const current = await this.repository.lock(containerId, transaction);
-      if (!current || (!admin && current.owner_id !== actorId)) {
-        throw new NotFoundException('Container not found');
-      }
-      if (admin) {
-        await this.access.assertActorCapabilitiesInTransaction(
-          transaction,
-          actorId,
-          [Capability.ManageContainersAny],
-        );
-      } else {
-        const grant = await this.access.resolveServerInTransaction(transaction, actorId, current.server_id);
-        if (!grant || grant.accessPhase !== 'live') throw new ForbiddenException();
-      }
+      if (!current) throw new NotFoundException('Container not found');
+      access = this.assertCanAccess(actor, current, 'not-found');
+      await this.enforceInTransaction(transaction, actor, current, access);
       const currentRoute = await this.repository.currentRoute(containerId, transaction);
       if (
         containerStatus(currentRoute?.instance_status, current.power_intent as ContainerPowerIntent)
@@ -897,15 +760,15 @@ export class ContainerControlService {
       return currentRoute;
     });
     const session = await this.consoleSessions.create(
-      actorId,
-      authVersion,
+      actor.userId,
+      actor.authVersion,
       containerId,
       request,
-      admin,
+      access !== 'owner',
     );
     try {
       await this.transactions.run(async (transaction) => {
-        await this.audit.append(transaction, actorId, AuditAction.CreateExecSession, containerId, 'container', {
+        await this.audit.append(transaction, actor.userId, AuditAction.CreateExecSession, containerId, 'container', {
           tty: request.tty,
           cols: request.cols,
           rows: request.rows,
@@ -918,29 +781,16 @@ export class ContainerControlService {
     return session;
   }
 
-  private async actionInternal(
+  async action(
+    actor: Actor,
     containerId: string,
     action: ContainerAction,
-    actorId: string,
-    admin: boolean,
-    requireCapability = admin,
   ): Promise<IntentAcceptedDto> {
     const result = await this.transactions.run(async (transaction) => {
       const current = await this.repository.lock(containerId, transaction);
       if (!current) throw new NotFoundException('Container not found');
-      if (!admin && current.owner_id !== actorId) throw new ForbiddenException();
-      if (admin && requireCapability) {
-        await this.access.assertActorCapabilitiesInTransaction(
-          transaction,
-          actorId,
-          [Capability.ManageContainersAny],
-        );
-      } else if (!admin) {
-        const grant = await this.access.resolveServerInTransaction(transaction, actorId, current.server_id);
-        if (!grant || grant.accessPhase !== 'live') {
-          throw new ForbiddenException('Server access was revoked');
-        }
-      }
+      const access = this.assertCanAccess(actor, current);
+      await this.enforceInTransaction(transaction, actor, current, access);
       if (action !== 'delete' && current.lifecycle_phase === ContainerPhase.Deleting) {
         throw new ConflictException({
           code: FailureCode.InstanceBusy,
@@ -998,7 +848,7 @@ export class ContainerControlService {
         resourceType: IntentResourceType.Container,
         resourceId: containerId,
         serverId: current.server_id,
-        requestedBy: actorId,
+        requestedBy: actor.userId,
         targetRevision: updated.revision,
         baseline: action === 'restart'
           ? {
@@ -1009,11 +859,11 @@ export class ContainerControlService {
           : undefined,
         request: { action, operation: action },
       }, transaction);
-      await this.audit.append(transaction, actorId, this.auditAction(action), containerId, 'container');
+      await this.audit.append(transaction, actor.userId, this.auditAction(action), containerId, 'container');
       return { intent, serverId: current.server_id };
     }, {
       // Expiry/system stops must not lose to concurrent reconcile observation writes.
-      isolationLevel: requireCapability ? 'serializable' : 'read committed',
+      isolationLevel: isSystemActor(actor) ? 'read committed' : 'serializable',
       maxAttempts: 5,
     });
     this.wake.wake({
@@ -1026,39 +876,30 @@ export class ContainerControlService {
   }
 
   private async updateDesired(
+    actor: Actor,
     containerId: string,
-    actorId: string,
-    admin: boolean,
     values: Parameters<ContainerControlRepository['updateDesired']>[2],
     request: Record<string, unknown>,
     action: AuditAction,
     validate?: (
       transaction: Transaction<NyabaseDatabase>,
       current: ContainerRow,
+      /** The owner's live server grant; null for administrators and the system. */
+      grant: ResolvedServerGrant | null,
     ) => Promise<void>,
   ): Promise<IntentAcceptedDto> {
     const result = await this.transactions.run(async (transaction) => {
       const current = await this.repository.lock(containerId, transaction);
-      if (!current || (!admin && current.owner_id !== actorId)) throw new NotFoundException('Container not found');
+      if (!current) throw new NotFoundException('Container not found');
+      const access = this.assertCanAccess(actor, current, 'not-found');
       if (current.lifecycle_phase === ContainerPhase.Deleting) {
         throw new ConflictException({
           code: FailureCode.InstanceBusy,
           message: 'A deleting container cannot be modified',
         });
       }
-      if (admin) {
-        await this.access.assertActorCapabilitiesInTransaction(
-          transaction,
-          actorId,
-          [Capability.ManageContainersAny],
-        );
-      } else {
-        const grant = await this.access.resolveServerInTransaction(transaction, actorId, current.server_id);
-        if (!grant || grant.accessPhase !== 'live') {
-          throw new ForbiddenException('Server access was revoked');
-        }
-      }
-      await validate?.(transaction, current);
+      const grant = await this.enforceInTransaction(transaction, actor, current, access);
+      await validate?.(transaction, current, grant);
       const updated = await this.repository.updateDesired(
         containerId,
         current.revision,
@@ -1075,11 +916,11 @@ export class ContainerControlService {
         resourceType: IntentResourceType.Container,
         resourceId: containerId,
         serverId: current.server_id,
-        requestedBy: actorId,
+        requestedBy: actor.userId,
         targetRevision: updated.revision,
         request,
       }, transaction);
-      await this.audit.append(transaction, actorId, action, containerId, 'container', request);
+      await this.audit.append(transaction, actor.userId, action, containerId, 'container', request);
       return { intent, serverId: current.server_id };
     }, { isolationLevel: 'serializable', maxAttempts: 5 });
     this.wake.wake({
@@ -1089,6 +930,69 @@ export class ContainerControlService {
       reason: 'intent',
     });
     return acceptedIntent(result.intent);
+  }
+
+  /**
+   * The one container authorisation rule: a holder of `ManageContainersAny`
+   * (administrator rules: no server-grant limits), else the owner (owner rules:
+   * live server grant and its limits), or the system. Everyone else is refused
+   * with the status the owner-only route always used (403 for reads and power
+   * actions, 404 where the row is hidden). A holder who also owns the row keeps
+   * the administrator rules, as the old /admin route gave them.
+   */
+  private assertCanAccess(
+    actor: Actor,
+    row: { owner_id: string },
+    denied: 'forbidden' | 'not-found' = 'forbidden',
+  ): ContainerAccess {
+    if (isSystemActor(actor)) return 'system';
+    if (actor.capabilities.has(Capability.ManageContainersAny)) return 'admin';
+    if (row.owner_id === actor.userId) return 'owner';
+    if (denied === 'not-found') throw new NotFoundException('Container not found');
+    throw new ForbiddenException('Container is not owned by current user');
+  }
+
+  /** Re-checks `ManageContainersAny` against the database inside the transaction. */
+  private async assertAdminInTransaction(
+    transaction: Transaction<NyabaseDatabase>,
+    actor: Actor,
+  ): Promise<void> {
+    await this.access.assertActorCapabilitiesInTransaction(
+      transaction,
+      actor.userId,
+      [Capability.ManageContainersAny],
+    );
+  }
+
+  private async requireLiveGrant(
+    transaction: Transaction<NyabaseDatabase>,
+    actor: Actor,
+    container: { server_id: string },
+  ): Promise<ResolvedServerGrant> {
+    const grant = await this.access.resolveServerInTransaction(
+      transaction,
+      actor.userId,
+      container.server_id,
+    );
+    if (!grant || grant.accessPhase !== 'live') {
+      throw new ForbiddenException('Server access was revoked');
+    }
+    return grant;
+  }
+
+  /**
+   * Owners must still hold a live server grant, administrators must still hold
+   * the capability; the system needs neither. Returns the owner's grant.
+   */
+  private async enforceInTransaction(
+    transaction: Transaction<NyabaseDatabase>,
+    actor: Actor,
+    container: { server_id: string },
+    access: ContainerAccess,
+  ): Promise<ResolvedServerGrant | null> {
+    if (access === 'admin') await this.assertAdminInTransaction(transaction, actor);
+    if (access === 'owner') return this.requireLiveGrant(transaction, actor, container);
+    return null;
   }
 
   private async assertRootCapacity(

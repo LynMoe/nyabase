@@ -58,19 +58,19 @@ test(
     expect(inventory.code, `${inventory.stdout}\n${inventory.stderr}`).toBe(0);
     expect(inventory.stdout.trim()).toBe('');
 
-    const containers = asItems(await expectJson(await adminApi.get('/api/admin/containers')));
+    const containers = asItems(await expectJson(await adminApi.get('/api/containers?scope=all')));
     expect(
       containers
         .filter((entry) => leftoverApiName(entry.name) || leftoverApiName(entry.instanceName))
         .map((entry) => entry.name ?? entry.instanceName),
     ).toEqual([]);
-    const volumes = asItems(await expectJson(await adminApi.get('/api/admin/volumes')));
+    const volumes = asItems(await expectJson(await adminApi.get('/api/volumes?scope=all')));
     expect(
       volumes
         .filter((entry) => leftoverApiName(entry.name) || leftoverApiName(entry.volumeName))
         .map((entry) => entry.name ?? entry.volumeName),
     ).toEqual([]);
-    const sharedVolumes = asItems(await expectJson(await adminApi.get('/api/admin/shared-volumes')));
+    const sharedVolumes = asItems(await expectJson(await adminApi.get('/api/shared-volumes?scope=all')));
     expect(
       sharedVolumes
         .filter((entry) => leftoverApiName(entry.name) || leftoverApiName(entry.volumeName))

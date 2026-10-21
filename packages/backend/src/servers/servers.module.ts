@@ -10,14 +10,12 @@ import { StoragePoolsModule } from '../storage-pools/storage-pools.module.js';
 import { UsersModule } from '../users/users.module.js';
 import { VolumesModule } from '../volumes/volumes.module.js';
 import { AdminIncusClientCertificateController } from './admin-incus-client-certificate.controller.js';
-import { AdminServersController } from './admin-servers.controller.js';
 import { CertificateAutoRotationWorker } from './certificate-auto-rotation.worker.js';
 import { CertificateRotationReconciler } from './certificate-rotation-reconciler.service.js';
 import { IncusClientCertificateService } from './incus-client-certificate.service.js';
 import { IncusPreflightChecksAdapter } from './preflight-checks.adapter.js';
 import { ServerConnectIntentService } from './server-connect-intent.service.js';
 import { ServerHealthService } from './server-health.service.js';
-import { AdminServerIntentsController } from './server-intents.controller.js';
 import { ServerPreflightIntentService } from './server-preflight-intent.service.js';
 import { ServerPreflightReconciler } from './server-preflight-reconciler.service.js';
 import { ServersController } from './servers.controller.js';
@@ -49,9 +47,7 @@ import { ServersService } from './servers.service.js';
   ],
   controllers: [
     ServersController,
-    AdminServersController,
     AdminIncusClientCertificateController,
-    AdminServerIntentsController,
   ],
   exports: [ServersService],
 })

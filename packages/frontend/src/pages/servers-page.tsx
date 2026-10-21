@@ -49,15 +49,15 @@ export default function ServersPage() {
   const navigate = useNavigate();
   const canViewMetrics = useAuthStore((state) => state.user?.capabilities.includes(Capability.ViewMetricsAll) ?? false);
   const usageQuery = useQuery({
-    queryKey: queryKeys.performance.servers('admin'),
-    queryFn: () => api.get<PerformanceAdminUsageResponse>('/admin/performance/usage'),
+    queryKey: queryKeys.performance.servers('all'),
+    queryFn: () => api.get<PerformanceAdminUsageResponse>('/performance/usage?scope=all'),
     enabled: canViewMetrics,
     refetchInterval: (query) => queryPollInterval(query.state, { activeIntervalMs: 15_000 }),
   });
   const [onboardingOpen, setOnboardingOpen] = useState(false);
   const serversQuery = useQuery({
     queryKey: queryKeys.servers.admin,
-    queryFn: () => api.get<ServerDto[]>('/admin/servers'),
+    queryFn: () => api.get<ServerDto[]>('/servers?scope=all'),
     refetchInterval: (query) => refetchWhileInProgress(query.state, {
       steadyIntervalMs: false,
       isSettled: (servers) => servers.every((server) => !preflightPending(server.preflightStatus)),
@@ -240,7 +240,7 @@ function ServerOnboardingDialog({
   const [form, setForm] = useState<OnboardingForm>(emptyOnboardingForm);
   const [error, setError] = useState<string | null>(null);
   const create = useMutation({
-    mutationFn: (body: CreateServerRequest) => api.post<ServerDto>('/admin/servers', body),
+    mutationFn: (body: CreateServerRequest) => api.post<ServerDto>('/servers', body),
     onSuccess: (server) => {
       toast({ title: '服务器已登记' });
       setForm(emptyOnboardingForm);

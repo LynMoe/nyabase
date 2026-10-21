@@ -33,7 +33,7 @@ function claimedPci(container: JsonRecord): string[] {
 
 async function waitRunning(adminApi: ApiClient, containerId: string): Promise<JsonRecord> {
   return eventually(
-    async () => expectJson<JsonRecord>(await adminApi.get(`/api/admin/containers/${containerId}`)),
+    async () => expectJson<JsonRecord>(await adminApi.get(`/api/containers/${containerId}`)),
     (value) => value.lifecyclePhase === 'active' && value.actual?.status === 'running',
     180_000,
     500,
@@ -70,12 +70,12 @@ test(
     const pci = gpuServer.pciAddress;
 
     await expectJson(
-      await adminApi.patch(`/api/admin/servers/${gpuServer.id}/gpu`, {
+      await adminApi.patch(`/api/servers/${gpuServer.id}/gpu`, {
         data: { enabled: true },
       }),
     );
     const devices = await expectJson<{ items?: JsonRecord[]; enabled?: boolean }>(
-      await adminApi.get(`/api/admin/servers/${gpuServer.id}/gpus`),
+      await adminApi.get(`/api/servers/${gpuServer.id}/gpus?scope=all`),
     );
     const items = devices.items ?? [];
     expect(
@@ -161,7 +161,7 @@ test(
       expect([403, 409]).toContain(denied.status);
 
       await adminApi.put(
-        `/api/admin/users/${persona.userId}/server-grants/${gpuServer.id}`,
+        `/api/users/${persona.userId}/server-grants/${gpuServer.id}`,
         {
           data: {
             cpuMillis: 1_000,
@@ -173,9 +173,9 @@ test(
         },
       );
 
-      const deletion = await adminApi.post(`/api/admin/containers/${adminContainer}/actions/delete`);
+      const deletion = await adminApi.post(`/api/containers/${adminContainer}/actions/delete`);
       expect(deletion.status()).toBe(202);
-      await waitForGone(adminApi, `/api/admin/containers/${adminContainer}`);
+      await waitForGone(adminApi, `/api/containers/${adminContainer}`);
       adminContainer = undefined;
 
       const userCreate = await expectJson<JsonRecord>(
@@ -197,9 +197,9 @@ test(
       await requireSucceededIntent(userApi, userCreate.intentId, 'user.gpu.container.create');
     } finally {
       if (adminContainer) {
-        const deletion = await adminApi.post(`/api/admin/containers/${adminContainer}/actions/delete`);
+        const deletion = await adminApi.post(`/api/containers/${adminContainer}/actions/delete`);
         if (deletion.status() === 202) {
-          await waitForGone(adminApi, `/api/admin/containers/${adminContainer}`);
+          await waitForGone(adminApi, `/api/containers/${adminContainer}`);
         }
       }
       await deleteUserContainer(adminApi, adminApi, userContainer);

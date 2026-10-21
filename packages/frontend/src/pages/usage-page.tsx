@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { Link, useNavigate } from '@tanstack/react-router';
 import {
+  type ListScope,
   type PerformanceAdminUsageResponse,
   type PerformanceMultiSeriesResponse,
   type PerformanceHostSnapshot,
@@ -12,6 +13,7 @@ import {
 import { api } from '../lib/api.js';
 import { queryKeys } from '../lib/query-keys.js';
 import { queryPollInterval } from '../lib/query-lifecycle.js';
+import { scopedPath } from '../lib/scoped-paths.js';
 import { formatBytesCompact, formatPercent, formatRate, relativeTime } from '../lib/utils.js';
 import { containerStatusLabel, lifecyclePhaseLabel } from '../lib/status-labels.js';
 import { Page } from '../components/layout/page.js';
@@ -39,21 +41,20 @@ const VIEWS = [
 const METRICS = 'cpu,memory,disk,gpu,network';
 
 export default function UsagePage({
-  mode,
+  scope,
   initialServerId,
 }: {
-  mode: 'user' | 'admin';
+  scope: ListScope;
   initialServerId?: string;
 }) {
   const navigate = useNavigate();
-  const storageKey = mode === 'admin' ? 'nyabase.adminUsage.serverId' : 'nyabase.usage.serverId';
+  const storageKey = scope === 'all' ? 'nyabase.adminUsage.serverId' : 'nyabase.usage.serverId';
   const [serverId, setServerId] = useState(initialServerId ?? '');
   const [range, setRange] = useState<PerformanceRange>('1h');
   const [view, setView] = useState<'chart' | 'table'>('chart');
-  const listPath = mode === 'admin' ? '/admin/performance/usage' : '/performance/usage';
   const listQuery = useQuery({
-    queryKey: queryKeys.performance.servers(mode),
-    queryFn: () => api.get<PerformanceUsageResponse>(listPath),
+    queryKey: queryKeys.performance.servers(scope),
+    queryFn: () => api.get<PerformanceUsageResponse>(scopedPath('/performance/usage', scope)),
     refetchInterval: (query) => queryPollInterval(query.state, { activeIntervalMs: 30_000 }),
   });
   const servers = listQuery.data?.servers ?? [];
@@ -70,20 +71,22 @@ export default function UsagePage({
   }, [serverId, storageKey]);
   const chosen = servers.some((server) => server.serverId === serverId);
   const snapshotQuery = useQuery({
-    queryKey: queryKeys.performance.scoped(mode, serverId),
-    queryFn: () => api.get<PerformanceUsageResponse | PerformanceAdminUsageResponse>(`${listPath}?serverId=${serverId}`),
+    queryKey: queryKeys.performance.scoped(scope, serverId),
+    queryFn: () => api.get<PerformanceUsageResponse | PerformanceAdminUsageResponse>(
+      scopedPath('/performance/usage', scope, { serverId }),
+    ),
     enabled: chosen,
     refetchInterval: (query) => queryPollInterval(query.state, { activeIntervalMs: 15_000 }),
   });
   const seriesQuery = useQuery({
-    queryKey: queryKeys.performance.multi(mode, serverId, 'all', range),
+    queryKey: queryKeys.performance.multi(scope, serverId, 'all', range),
     queryFn: () => api.get<PerformanceMultiSeriesResponse>(
-      `${mode === 'admin' ? '/admin/performance/series' : '/performance/series'}?serverId=${serverId}&metrics=${METRICS}&range=${range}`,
+      scopedPath('/performance/series', scope, { serverId, metrics: METRICS, range }),
     ),
     enabled: chosen && view === 'chart',
     refetchInterval: (query) => queryPollInterval(query.state, { activeIntervalMs: 15_000 }),
   });
-  const gpuNames = useGpuNames(serverId || undefined, mode === 'admin');
+  const gpuNames = useGpuNames(serverId || undefined, scope);
   const snapshot = snapshotQuery.data?.servers[0];
   const noServers = !listQuery.isLoading && servers.length === 0;
   const tableEmpty = snapshot
@@ -91,8 +94,8 @@ export default function UsagePage({
     : false;
 
   return (
-    <Page testId={mode === 'admin' ? 'admin-usage' : 'user-usage'}>
-      <PageHeader title={mode === 'admin' ? '全平台用量' : '使用情况'} />
+    <Page testId={scope === 'all' ? 'admin-usage' : 'user-usage'}>
+      <PageHeader title={scope === 'all' ? '全平台用量' : '使用情况'} />
       <div className="flex flex-wrap items-center gap-2">
         <Select value={serverId || undefined} onValueChange={(value) => { setServerId(value); void navigate({ search: { serverId: value } as never }); }}>
           <SelectTrigger className="h-8 w-auto min-w-32 text-sm" aria-label="服务器">
@@ -121,7 +124,7 @@ export default function UsagePage({
               : <p className="text-sm text-muted-foreground">加载图表...</p>
           : tableEmpty
             ? <p className="text-sm text-muted-foreground">这台服务器上还没有容器</p>
-            : mode === 'admin'
+            : scope === 'all'
               ? <AdminUsageTable usage={snapshotQuery.data as PerformanceAdminUsageResponse | undefined} />
               : <UserUsageTable people={snapshot?.people ?? []} host={snapshot?.host} />}
       </QueryView>

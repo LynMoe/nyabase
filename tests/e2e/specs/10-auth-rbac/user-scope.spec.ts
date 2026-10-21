@@ -45,7 +45,7 @@ test(
       expect([403, 404]).toContain(created.status);
 
       const selfGrant = await userApi.put(
-        `/api/admin/users/${persona.userId}/server-grants/${seedState.server.id}`,
+        `/api/users/${persona.userId}/server-grants/${seedState.server.id}`,
         {
           data: {
             cpuMillis: 500,

@@ -5,6 +5,7 @@ import {
   formatSshProxyJumpLogin,
   type ContainerDto,
   type GpuGrant,
+  type ListScope,
   type PerformanceSelfResponse,
   type PatchContainerLimitsRequest,
 } from '@nyabase/common';
@@ -28,7 +29,7 @@ import { LimitsDialog } from './spec-panel.js';
 
 export function OverviewPanel({
   container,
-  admin,
+  scope,
   gpuEnabled,
   gpuGrant,
   onRepairSsh,
@@ -41,7 +42,7 @@ export function OverviewPanel({
   occupancyDenied,
 }: {
   container: ContainerDto;
-  admin: boolean;
+  scope: ListScope;
   gpuEnabled: boolean;
   gpuGrant: GpuGrant | null;
   onRepairSsh: () => void;
@@ -57,6 +58,7 @@ export function OverviewPanel({
   const [configOpen, setConfigOpen] = useState(false);
   const { settings } = usePublicSettings();
   const authUser = useAuthStore((state) => state.user);
+  const admin = scope === 'all';
   const ownContainer = !admin || (authUser !== null && container.ownerId === authUser.id);
   const sshKeys = useMySshKeys(ownContainer);
   const username = container.ownerName ?? authUser?.username ?? '<username>';
@@ -193,7 +195,7 @@ export function OverviewPanel({
             <Field label="内存" value={formatBytesCompact(container.memBytes)} />
             <Field label="系统盘" value={formatBytesCompact(container.rootSizeBytes)} />
             <Field label="实例名" value={container.instanceName ?? '创建中'} mono />
-            <ContainerOverviewGpu gpu={container.gpu} serverId={container.serverId} admin={admin} />
+            <ContainerOverviewGpu gpu={container.gpu} serverId={container.serverId} scope={scope} />
           </FieldGrid>
         </SectionCard>
 
@@ -239,7 +241,7 @@ export function OverviewPanel({
       {limitsOpen ? (
         <LimitsDialog
           container={container}
-          admin={admin}
+          scope={scope}
           gpuEnabled={gpuEnabled}
           gpuGrant={gpuGrant}
           pending={limitsPending}

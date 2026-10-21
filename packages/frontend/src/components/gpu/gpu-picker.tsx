@@ -7,20 +7,22 @@ import {
   permittedGpus,
   type GpuDevicesResponseDto,
   type GpuGrant,
+  type ListScope,
 } from '@nyabase/common';
 import { api } from '../../lib/api.js';
 import { queryKeys } from '../../lib/query-keys.js';
+import { scopedPath } from '../../lib/scoped-paths.js';
 import { Checkbox } from '../ui/checkbox.js';
 
-/** Admin and user views read different, grant-filtered lists. */
-export function gpuDevicesPath(serverId: string, admin: boolean): string {
-  return `${admin ? '/admin' : ''}/servers/${serverId}/gpus`;
+/** `scope=all` is the full inventory; `scope=mine` is filtered by the caller's grant. */
+export function gpuDevicesPath(serverId: string, scope: ListScope): string {
+  return scopedPath(`/servers/${serverId}/gpus`, scope);
 }
 
-export function useGpuDevices(serverId: string, admin: boolean, enabled = true) {
+export function useGpuDevices(serverId: string, scope: ListScope, enabled = true) {
   return useQuery({
-    queryKey: queryKeys.gpu.devices(serverId, admin),
-    queryFn: () => api.get<GpuDevicesResponseDto>(gpuDevicesPath(serverId, admin)),
+    queryKey: queryKeys.gpu.devices(serverId, scope),
+    queryFn: () => api.get<GpuDevicesResponseDto>(gpuDevicesPath(serverId, scope)),
     enabled: Boolean(serverId) && enabled,
   });
 }
@@ -31,7 +33,7 @@ function normalizePci(value: string): string {
 
 export function GpuPicker({
   serverId,
-  admin = false,
+  scope = 'mine',
   value,
   onChange,
   grant,
@@ -41,7 +43,7 @@ export function GpuPicker({
   defaultAll = false,
 }: {
   serverId: string;
-  admin?: boolean;
+  scope?: ListScope;
   value: string[];
   onChange: (pciAddresses: string[]) => void;
   grant?: GpuGrant | null;
@@ -50,7 +52,7 @@ export function GpuPicker({
   label?: string;
   defaultAll?: boolean;
 }) {
-  const query = useGpuDevices(serverId, admin);
+  const query = useGpuDevices(serverId, scope);
   const inventory = Array.isArray(query.data?.items) ? query.data.items : [];
   const loading = query.isPending;
   const error = query.isError;

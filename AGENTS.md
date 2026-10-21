@@ -23,3 +23,18 @@ Vite 通过 alias 将 `@nyabase/common` 指向 `src/index.ts`，但 `index.ts` �
 - `packages/common/src` 下不得出现任何编译产物（`.js` / `.js.map` / `.d.ts`），`scripts/check.sh` 对此有断言。
   手动检查：`find packages/common/src -name "*.js" | sort`
 - 前端 dev 模式下 Vite alias 直接读取 `.ts` 源文件，`dist/` 对前端无效，无需同步。
+
+## API 表面：每个资源只有一套路由
+
+- 同一资源不再有 `/x` 与 `/admin/x` 两套 controller。`/admin/` 前缀只留给没有用户版本的运维资源
+  （groups、ip-pools、catalog、metrics、ssh-proxy、incus-client-certificate、system-settings）；
+  `http-api-duplicate-routes.contract.test.ts` 断言不存在同名资源同时挂在两处。
+- 鉴权在 service 里：`@CurrentActor()`（`iam/actor.ts`）给出 `{ userId, capabilities, authKind, authVersion }`，
+  `CapabilitiesGuard` 每个请求只解析一次 capability。service 方法签名是 `method(actor, ...)`，
+  每个 service 只有一个私有的 `assertCanAccess(actor, row)`；不要再写 `ForUser/ForAdmin/ForSystem`
+  包装或 `'user' | 'admin'` 参数。内部调用方（授权到期等）用 `systemActor(systemUserId)`（`SYSTEM_ACTOR`）。
+- 列表默认 `?scope=mine`；`?scope=all` 需要对应 capability（否则 403），管理员专属过滤参数只在 `scope=all` 下可用。
+  DTO 形状不同的详情（servers、images、shared-backends）同样用 `?scope=all` 取管理员视图。
+- 只有管理员能做的操作在方法上声明 `@RequireCaps(...)`；`http-api-capabilities.contract.test.ts` 固定这些声明。
+- intents 只有 `GET /intents`、`GET /intents/:id`、`POST /intents/:id/retry` 一个 controller；
+  某个资源的操作历史用 `?resourceType=&resourceId=`（多个 id 用逗号分隔，例如镜像的所有分配）。

@@ -13,6 +13,7 @@ import {
   logoutPersona,
   provisionGrantedUser,
   readErrorBody,
+  resourceIntentsPath,
 } from '../../support/persona.js';
 
 type JsonRecord = Record<string, any>;
@@ -111,7 +112,7 @@ test(
       );
       expect(after.revision).toBe(before.revision);
       expect(after.powerIntent).toBe(before.powerIntent);
-      await assertNoActiveIntents(ownerApi, `/api/containers/${containerId}/intents`);
+      await assertNoActiveIntents(ownerApi, resourceIntentsPath('container', containerId, 'mine'));
     } finally {
       if (ownerApi) {
         await deleteUserVolume(ownerApi, adminApi, volumeId);

@@ -1,3 +1,4 @@
+import { grantSubjectPath } from '../../lib/grant-paths.js';
 import { useState, type ReactNode } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Plus } from 'lucide-react';
@@ -51,18 +52,18 @@ type SubjectKind = 'users' | 'groups';
 
 export function CanonicalGrantPanel({ subject, kind }: { subject: Subject; kind: SubjectKind }) {
   const queryClient = useQueryClient();
-  const prefix = `/admin/${kind}/${subject.id}`;
-  const serversQuery = useQuery({ queryKey: queryKeys.grants.targets.servers, queryFn: () => api.get<ServerDto[]>('/admin/servers') });
+  const prefix = grantSubjectPath(kind, subject.id);
+  const serversQuery = useQuery({ queryKey: queryKeys.grants.targets.servers, queryFn: () => api.get<ServerDto[]>('/servers?scope=all') });
   const poolsQuery = useQuery({
     queryKey: queryKeys.grants.targets.pools,
     queryFn: async () => {
       const servers = serversQuery.data ?? [];
-      const rows = await Promise.all(servers.map(async (server) => api.get<StoragePoolDto[]>(`/admin/servers/${server.id}/storage-pools`)));
+      const rows = await Promise.all(servers.map(async (server) => api.get<StoragePoolDto[]>(`/servers/${server.id}/storage-pools?scope=all`)));
       return rows.flat();
     },
     enabled: serversQuery.isSuccess,
   });
-  const backendsQuery = useQuery({ queryKey: queryKeys.grants.targets.backends, queryFn: () => api.get<SharedBackendDto[]>('/admin/shared-backends') });
+  const backendsQuery = useQuery({ queryKey: queryKeys.grants.targets.backends, queryFn: () => api.get<SharedBackendDto[]>('/shared-backends?scope=all') });
   const serverGrantsQuery = useQuery({ queryKey: queryKeys.grants.subjectList(kind, subject.id, 'servers'), queryFn: () => api.get<ServerGrantDto[]>(`${prefix}/server-grants`) });
   const poolGrantsQuery = useQuery({ queryKey: queryKeys.grants.subjectList(kind, subject.id, 'pools'), queryFn: () => api.get<StoragePoolGrantDto[]>(`${prefix}/storage-pool-grants`) });
   const backendGrantsQuery = useQuery({ queryKey: queryKeys.grants.subjectList(kind, subject.id, 'backends'), queryFn: () => api.get<SharedBackendGrantDto[]>(`${prefix}/shared-backend-grants`) });

@@ -3,8 +3,10 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   zCreateVolumeRequest,
   zPatchVolumeRequest,
+  IntentResourceType,
   type CreateVolumeRequest,
   type IntentAcceptedDto,
+  type ListScope,
   type PatchVolumeRequest,
   type ServerDto,
   type StorageCapacityDto,
@@ -24,7 +26,7 @@ import { approxGibHint, grantAvailableLabel, formatGib } from '../../lib/utils.j
 import { formatGrantBytes } from '../../lib/grant-quota.js';
 import { queryKeys } from '../../lib/query-keys.js';
 import { toast } from '../../hooks/use-toast.js';
-import { isIntentAccepted, waitForResourceIntent } from '../../lib/intent-visibility.js';
+import { isIntentAccepted, resourceIntentsPath, waitForResourceIntent } from '../../lib/intent-visibility.js';
 import {
   classifySizeChange,
   isQuotaIneffectiveCapability,
@@ -34,38 +36,26 @@ import {
   validateShrinkFloor,
 } from '../../lib/storage-shrink.js';
 
-function volumeItemPath(plane: 'user' | 'admin', volumeId: string): string {
-  if (plane === 'admin') return `/admin/volumes/${volumeId}`;
-  return `/volumes/${volumeId}`;
+function storagePoolsPath(scope: ListScope, serverId: string): string {
+  return `/servers/${serverId}/storage-pools${scope === 'all' ? '?scope=all' : ''}`;
 }
 
-function volumeIntentsPath(plane: 'user' | 'admin', volumeId: string): string {
-  if (plane === 'admin') return `/admin/volumes/${volumeId}/intents`;
-  return `/volumes/${volumeId}/intents`;
-}
-
-function storagePoolsPath(plane: 'user' | 'admin', serverId: string): string {
-  if (plane === 'admin') return `/admin/servers/${serverId}/storage-pools`;
-  return `/servers/${serverId}/storage-pools`;
-}
-
-function storageCapacityPath(plane: 'user' | 'admin', serverId: string): string {
-  if (plane === 'admin') return `/admin/servers/${serverId}/storage-capacity`;
-  return `/servers/${serverId}/storage-capacity`;
+function storageCapacityPath(scope: ListScope, serverId: string): string {
+  return `/servers/${serverId}/storage-capacity${scope === 'all' ? '?scope=all' : ''}`;
 }
 
 export function LocalVolumeFormDialog({
   volume,
   open,
   onOpenChange,
-  plane = 'user',
+  scope = 'mine',
   lockedServerId,
   lockedPoolId,
 }: {
   volume?: VolumeDto;
   open: boolean;
   onOpenChange: (open: boolean) => void;
-  plane?: 'user' | 'admin';
+  scope?: ListScope;
   lockedServerId?: string;
   lockedPoolId?: string;
 }) {
@@ -89,7 +79,7 @@ export function LocalVolumeFormDialog({
   }, [open, volume, lockedServerId, lockedPoolId]);
 
   const invalidateVolumeLists = () => {
-    if (plane === 'admin') {
+    if (scope === 'all') {
       void queryClient.invalidateQueries({ queryKey: queryKeys.volumes.admin });
     } else {
       void queryClient.invalidateQueries({ queryKey: queryKeys.volumes.user });
@@ -100,20 +90,20 @@ export function LocalVolumeFormDialog({
   const serversQuery = useQuery({
     queryKey: queryKeys.volumeForm.servers,
     queryFn: () => api.get<Array<ServerDto | UserServerDto>>('/servers'),
-    enabled: open && !editing && plane !== 'admin',
+    enabled: open && !editing && scope !== 'all',
   });
   const poolsQuery = useQuery({
-    queryKey: plane === 'admin'
-      ? queryKeys.servers.pools(serverId, true)
+    queryKey: scope === 'all'
+      ? queryKeys.servers.pools(serverId, 'all')
       : queryKeys.volumeForm.pools(serverId),
-    queryFn: () => api.get<StoragePoolDto[]>(storagePoolsPath(plane, serverId)),
+    queryFn: () => api.get<StoragePoolDto[]>(storagePoolsPath(scope, serverId)),
     enabled: open && !editing && serverId.length > 0,
   });
   const capacityQuery = useQuery({
-    queryKey: plane === 'admin'
+    queryKey: scope === 'all'
       ? (['storage-capacity', 'admin', serverId] as const)
       : queryKeys.storageCapacity(serverId),
-    queryFn: () => api.get<StorageCapacityDto>(storageCapacityPath(plane, serverId)),
+    queryFn: () => api.get<StorageCapacityDto>(storageCapacityPath(scope, serverId)),
     enabled: open && serverId.length > 0,
   });
   const createLocal = useMutation({
@@ -128,9 +118,9 @@ export function LocalVolumeFormDialog({
   const patch = useMutation({
     mutationFn: async (body: PatchVolumeRequest) => {
       const volumeId = volume?.id ?? '';
-      const accepted = await api.patch<IntentAcceptedDto | VolumeDto>(volumeItemPath(plane, volumeId), body);
+      const accepted = await api.patch<IntentAcceptedDto | VolumeDto>(`/volumes/${volumeId}`, body);
       if (isIntentAccepted(accepted)) {
-        await waitForResourceIntent(volumeIntentsPath(plane, volumeId), accepted.intentId);
+        await waitForResourceIntent(resourceIntentsPath(scope, IntentResourceType.Volume, volumeId), accepted.intentId);
       }
     },
     onSuccess: () => {
@@ -211,7 +201,7 @@ export function LocalVolumeFormDialog({
       patch.mutate(parsed.data);
       return;
     }
-    if (plane === 'admin') return;
+    if (scope === 'all') return;
     if (!poolId) {
       setError('请选择存储池');
       return;
@@ -264,7 +254,7 @@ export function LocalVolumeFormDialog({
                   ? approxGibHint(nextSize)
                   : '请输入正数 GiB'}
               </p>
-              {plane === 'admin' ? (
+              {scope === 'all' ? (
                 <div className="space-y-1">
                   <p className="text-xs text-muted-foreground">
                     池剩余（物理，含超分；不是该用户的磁盘额度）。

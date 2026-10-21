@@ -43,7 +43,7 @@ export default function SharedBackendsPage() {
   const [pageConflict, setPageConflict] = useState<SharedBackendFsidConflict | null>(null);
   const backendsQuery = useQuery({
     queryKey: queryKeys.sharedBackends.admin,
-    queryFn: () => api.get<SharedBackendDto[]>('/admin/shared-backends'),
+    queryFn: () => api.get<SharedBackendDto[]>('/shared-backends?scope=all'),
   });
 
   return (
@@ -166,7 +166,7 @@ function CreateSharedBackendDialog({
   const [error, setError] = useState<string | null>(null);
   const [conflict, setConflict] = useState<SharedBackendFsidConflict | null>(null);
   const create = useMutation({
-    mutationFn: (body: CreateSharedBackendRequest) => api.post<SharedBackendDto>('/admin/shared-backends', body),
+    mutationFn: (body: CreateSharedBackendRequest) => api.post<SharedBackendDto>('/shared-backends', body),
     onSuccess: (backend) => {
       toast({ title: '共享后端已登记' });
       setConflict(null);

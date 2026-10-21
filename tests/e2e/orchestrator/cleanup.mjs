@@ -299,12 +299,12 @@ export async function removeRunOwnedServer(
   if (serverOwned || assignmentOwned) {
     try {
       await jsonRequest(
-        `/api/admin/images/${encodeURIComponent(imageId)}/assignments/${encodeURIComponent(serverId)}`,
+        `/api/images/${encodeURIComponent(imageId)}/assignments/${encodeURIComponent(serverId)}`,
         { method: 'DELETE', token },
       );
       await waitAssignmentGone(
         jsonRequest,
-        `/api/admin/images/${encodeURIComponent(imageId)}/assignments`,
+        `/api/images/${encodeURIComponent(imageId)}/assignments`,
         serverId,
         token,
       );
@@ -315,7 +315,7 @@ export async function removeRunOwnedServer(
 
   if (imageOwned) {
     try {
-      await jsonRequest(`/api/admin/images/${encodeURIComponent(imageId)}`, {
+      await jsonRequest(`/api/images/${encodeURIComponent(imageId)}`, {
         method: 'DELETE',
         token,
       });
@@ -324,7 +324,7 @@ export async function removeRunOwnedServer(
     }
     await waitGone(
       jsonRequest,
-      `/api/admin/images/${encodeURIComponent(imageId)}`,
+      `/api/images/${encodeURIComponent(imageId)}?scope=all`,
       token,
     );
   }
@@ -332,7 +332,7 @@ export async function removeRunOwnedServer(
   if (!serverOwned) return;
   await cleanupDatabase(serverId);
   try {
-    await jsonRequest(`/api/admin/servers/${encodeURIComponent(serverId)}`, {
+    await jsonRequest(`/api/servers/${encodeURIComponent(serverId)}`, {
       method: 'DELETE',
       token,
     });
@@ -342,14 +342,14 @@ export async function removeRunOwnedServer(
   }
   await waitGone(
     jsonRequest,
-    `/api/admin/servers/${encodeURIComponent(serverId)}`,
+    `/api/servers/${encodeURIComponent(serverId)}?scope=all`,
     token,
   );
   for (const extra of labServersToDelete(seedState, runId)) {
     if (imageId) {
       try {
         await jsonRequest(
-          `/api/admin/images/${encodeURIComponent(imageId)}/assignments/${encodeURIComponent(extra.id)}`,
+          `/api/images/${encodeURIComponent(imageId)}/assignments/${encodeURIComponent(extra.id)}`,
           { method: 'DELETE', token },
         );
       } catch (error) {
@@ -358,7 +358,7 @@ export async function removeRunOwnedServer(
     }
     await cleanupDatabase(extra.id);
     try {
-      await jsonRequest(`/api/admin/servers/${encodeURIComponent(extra.id)}`, {
+      await jsonRequest(`/api/servers/${encodeURIComponent(extra.id)}`, {
         method: 'DELETE',
         token,
       });
@@ -368,7 +368,7 @@ export async function removeRunOwnedServer(
     }
     await waitGone(
       jsonRequest,
-      `/api/admin/servers/${encodeURIComponent(extra.id)}`,
+      `/api/servers/${encodeURIComponent(extra.id)}?scope=all`,
       token,
     );
   }
@@ -393,29 +393,29 @@ async function main() {
     },
   });
   const token = session.accessToken;
-  const containers = await jsonRequest('/api/admin/containers', { token });
+  const containers = await jsonRequest('/api/containers?scope=all', { token });
   for (const container of containers.filter((entry) => isE2eResourceName(entry.name, runId))) {
-    await jsonRequest(`/api/admin/containers/${container.id}/actions/delete`, {
+    await jsonRequest(`/api/containers/${container.id}/actions/delete`, {
       method: 'POST',
       token,
     });
-    await waitGone(jsonRequest, `/api/admin/containers/${container.id}`, token);
+    await waitGone(jsonRequest, `/api/containers/${container.id}`, token);
   }
-  const volumes = await jsonRequest('/api/admin/volumes', { token });
+  const volumes = await jsonRequest('/api/volumes?scope=all', { token });
   for (const volume of volumes.filter((entry) => isE2eResourceName(entry.name, runId))) {
-    await jsonRequest(`/api/admin/volumes/${volume.id}`, {
+    await jsonRequest(`/api/volumes/${volume.id}`, {
       method: 'DELETE',
       token,
     });
-    await waitGone(jsonRequest, `/api/admin/volumes/${volume.id}`, token);
+    await waitGone(jsonRequest, `/api/volumes/${volume.id}`, token);
   }
-  const sharedVolumes = await jsonRequest('/api/admin/shared-volumes', { token });
+  const sharedVolumes = await jsonRequest('/api/shared-volumes?scope=all', { token });
   for (const volume of sharedVolumes.filter((entry) => isE2eResourceName(entry.name, runId))) {
-    await jsonRequest(`/api/admin/shared-volumes/${volume.id}`, {
+    await jsonRequest(`/api/shared-volumes/${volume.id}`, {
       method: 'DELETE',
       token,
     });
-    await waitGone(jsonRequest, `/api/admin/shared-volumes/${volume.id}`, token);
+    await waitGone(jsonRequest, `/api/shared-volumes/${volume.id}`, token);
   }
   await removeRunOwnedServer(
     jsonRequest,

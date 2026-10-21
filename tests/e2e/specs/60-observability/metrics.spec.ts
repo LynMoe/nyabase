@@ -26,7 +26,7 @@ test(
 
     const healthyServer = await eventually(
       async () => expectJson<Record<string, any>>(
-        await adminApi.get(`/api/admin/servers/${seedState.server.id}`),
+        await adminApi.get(`/api/servers/${seedState.server.id}?scope=all`),
       ),
       (server) => server.nodeMetrics?.health?.status === 'online',
       60_000,
@@ -70,7 +70,7 @@ test(
       expect([0, 502, 503, 504]).toContain(outage.status);
       const unreachable = await eventually(
         async () => expectJson<Record<string, any>>(
-          await adminApi.get(`/api/admin/servers/${seedState.server.id}`),
+          await adminApi.get(`/api/servers/${seedState.server.id}?scope=all`),
         ),
         (server) => server.nodeMetrics?.health?.status === 'unreachable',
         120_000,
@@ -84,7 +84,7 @@ test(
     }
     const recovered = await eventually(
       async () => expectJson<Record<string, any>>(
-        await adminApi.get(`/api/admin/servers/${seedState.server.id}`),
+        await adminApi.get(`/api/servers/${seedState.server.id}?scope=all`),
       ),
       (server) => server.nodeMetrics?.health?.status === 'online',
       120_000,

@@ -8,10 +8,12 @@ import {
 } from '@nestjs/common';
 import { randomUUID } from 'node:crypto';
 import {
+  Capability,
   FailureCode,
   ServerStatus,
   StoragePoolDriver,
   StoragePoolResizeFamily,
+  type ListScope,
   type SharedBackendExecutorDiscoverResult,
   type SharedBackendExecutorDto,
   type StorageDiscoverIssueDto,
@@ -34,6 +36,7 @@ import { sql, type Kysely, type Transaction } from 'kysely';
 import type { NyabaseDatabase } from '../platform/persistence-pg/database.types.js';
 import { PG_DATABASE } from '../platform/persistence-pg/tokens.js';
 import { classifyGrantExpiry } from '../iam/grant-expiry.js';
+import { assertListScope, type Actor } from '../iam/actor.js';
 
 /**
  * Dir-pool project quota is effective only when Incus reports `usage.used`.
@@ -329,12 +332,24 @@ export class StoragePoolsService {
     }
   }
 
+  /**
+   * `scope=mine`: pools the caller may use, as user DTOs. `scope=all`: every
+   * pool of the server including unregistered ones (`ManageServers` or `ManageGrants`).
+   */
+  async listForServer(actor: Actor, serverId: string, scope: ListScope): Promise<StoragePoolDto[]> {
+    assertListScope(actor, scope, Capability.ManageServers, Capability.ManageGrants);
+    return scope === 'all'
+      ? this.list(serverId, true)
+      : this.listVisible(actor.userId, serverId);
+  }
+
   async list(serverId?: string, includeUnregistered = false): Promise<StoragePoolDto[]> {
     const rows = await this.repository.list(serverId, includeUnregistered);
     return rows.map((row) => this.toAdminDto(row)).filter(isLocalPoolDto);
   }
 
-  async listForUser(userId: string, serverId?: string): Promise<StoragePoolDto[]> {
+  /** Pools the user may use: granted servers' pools, or individually granted pools. */
+  async listVisible(userId: string, serverId?: string): Promise<StoragePoolDto[]> {
     const rows = await this.repository.list(serverId);
     const [serverGrants, poolGrants] = await Promise.all([
       this.database.selectFrom('iam.server_grants as grant')
@@ -374,7 +389,7 @@ export class StoragePoolsService {
     return this.toAdminDto(row);
   }
 
-  async getForUser(
+  async getVisible(
     id: string,
     userId: string,
     serverId?: string,
@@ -388,7 +403,7 @@ export class StoragePoolsService {
     ) {
       throw new NotFoundException('Storage pool not found');
     }
-    const visible = (await this.listForUser(userId, row.server_id))
+    const visible = (await this.listVisible(userId, row.server_id))
       .some((pool) => pool.id === id);
     if (!visible) throw new NotFoundException('Storage pool not found');
     return this.toUserDto(row);
@@ -483,11 +498,15 @@ export class StoragePoolsService {
     };
   }
 
-  async patch(id: string, input: PatchStoragePoolRequest): Promise<StoragePoolDto> {
+  async patch(id: string, input: PatchStoragePoolRequest, serverId?: string): Promise<StoragePoolDto> {
     const result = await this.transactions.run(
       async (transaction) => {
         const observed = await this.repository.findById(id, transaction);
-        if (!observed || !isLocalPoolRow(observed)) {
+        if (
+          !observed
+          || !isLocalPoolRow(observed)
+          || (serverId !== undefined && observed.server_id !== serverId)
+        ) {
           throw new NotFoundException('Storage pool not found');
         }
         await this.repository.lockCapacityScope(id, observed.server_id, [], transaction);

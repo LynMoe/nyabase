@@ -1,10 +1,11 @@
 import { useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { Link } from '@tanstack/react-router';
-import { Capability, type PerformanceMultiSeriesResponse, type PerformanceRange, type PerformanceSelfResponse } from '@nyabase/common';
+import { Capability, type ListScope, type PerformanceMultiSeriesResponse, type PerformanceRange, type PerformanceSelfResponse } from '@nyabase/common';
 import { api } from '../lib/api.js';
 import { queryKeys } from '../lib/query-keys.js';
 import { queryPollInterval } from '../lib/query-lifecycle.js';
+import { scopedPath } from '../lib/scoped-paths.js';
 import { useAuthStore } from '../store/auth.js';
 import { Page } from '../components/layout/page.js';
 import { PageHeader } from '../components/layout/page-header.js';
@@ -22,27 +23,31 @@ const RANGES: Array<{ id: PerformanceRange; label: string }> = [
 
 export default function ContainerUsagePage({
   containerId,
-  admin,
+  scope,
 }: {
   containerId: string;
-  admin: boolean;
+  scope: ListScope;
 }) {
+  const admin = scope === 'all';
   const canView = useAuthStore((state) => state.user?.capabilities.includes(Capability.ViewMetricsAll) ?? false);
   const [range, setRange] = useState<PerformanceRange>('1h');
-  const usagePath = admin ? '/admin/performance/usage' : '/performance/usage';
-  const seriesPath = admin ? '/admin/performance/series' : '/performance/series';
   const selfQuery = useQuery({
-    queryKey: queryKeys.performance.self(admin ? 'admin' : 'user', containerId),
-    queryFn: () => api.get<PerformanceSelfResponse>(`${usagePath}?containerId=${containerId}`),
+    queryKey: queryKeys.performance.self(scope, containerId),
+    queryFn: () => api.get<PerformanceSelfResponse>(scopedPath('/performance/usage', scope, { containerId })),
     enabled: !admin || canView,
     refetchInterval: (query) => queryPollInterval(query.state, { activeIntervalMs: 15_000 }),
   });
   const serverId = selfQuery.data?.serverId;
-  const gpuNames = useGpuNames(serverId, admin);
+  const gpuNames = useGpuNames(serverId, scope);
   const seriesQuery = useQuery({
-    queryKey: queryKeys.performance.multi(admin ? 'admin' : 'user', serverId ?? '', containerId, range),
+    queryKey: queryKeys.performance.multi(scope, serverId ?? '', containerId, range),
     queryFn: () => api.get<PerformanceMultiSeriesResponse>(
-      `${seriesPath}?serverId=${serverId}&containerId=${containerId}&metrics=cpu,memory,disk,gpu,network&range=${range}`,
+      scopedPath('/performance/series', scope, {
+        serverId,
+        containerId,
+        metrics: 'cpu,memory,disk,gpu,network',
+        range,
+      }),
     ),
     enabled: Boolean(serverId) && (!admin || canView),
     refetchInterval: (query) => queryPollInterval(query.state, { activeIntervalMs: 15_000 }),

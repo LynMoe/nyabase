@@ -64,7 +64,7 @@ test(
       attachmentId = attachment!.id as string;
 
       const container = await expectJson<JsonRecord>(
-        await adminApi.get(`/api/admin/containers/${containerId}`),
+        await adminApi.get(`/api/containers/${containerId}`),
       );
       const instanceName = container.instanceName as string;
       expect(instanceName).toBeTruthy();

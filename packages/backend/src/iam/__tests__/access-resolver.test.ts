@@ -41,7 +41,7 @@ describe('AccessResolverService effective access projections', () => {
       .resolves.toEqual(new Set(['image-a']));
     await expect(resolver.resolveAllowedImages('user-a', 'server-b'))
       .resolves.toEqual(new Set());
-    await expect(resolver.isImageAccessibleForUser('user-a', 'image-a'))
+    await expect(resolver.isImageAccessible('user-a', 'image-a'))
       .resolves.toBe(true);
   });
 

@@ -5,7 +5,11 @@ import {
   ContainerPowerIntent,
   IntentKind,
 } from '@nyabase/common';
+import { systemActor } from '../iam/actor.js';
+import { testActor } from '../iam/actor.test-helper.js';
 import { UserServerResourcePurgeService } from './user-server-resource-purge.service.js';
+
+const SYSTEM = systemActor('system-actor');
 
 function createService() {
   const transactions = {
@@ -16,8 +20,7 @@ function createService() {
     find: vi.fn(),
   };
   const containers = {
-    actionForAdmin: vi.fn(),
-    actionForSystem: vi.fn(),
+    action: vi.fn(),
   };
   const volumes = {
     list: vi.fn(),
@@ -88,19 +91,19 @@ describe('UserServerResourcePurgeService grant expiry actions', () => {
       lifecycle_phase: ContainerPhase.Active,
       power_intent: ContainerPowerIntent.Running,
     });
-    fixture.containers.actionForSystem.mockResolvedValue({ intentId: 'stop-intent' });
+    fixture.containers.action.mockResolvedValue({ intentId: 'stop-intent' });
 
     const result = await fixture.service.stopRunningContainersForSharedBackend(
+      SYSTEM,
       'user-1',
       'backend-1',
-      'system-actor',
     );
 
     expect(result).toEqual({ intentIds: ['stop-intent'] });
-    expect(fixture.containers.actionForSystem).toHaveBeenCalledWith(
+    expect(fixture.containers.action).toHaveBeenCalledWith(
+      SYSTEM,
       'container-1',
       'stop',
-      'system-actor',
     );
     expect(fixture.audit.append).toHaveBeenCalledWith(
       {},
@@ -159,33 +162,33 @@ describe('UserServerResourcePurgeService grant expiry actions', () => {
         serverId: 'server-1',
         workerId: 'worker-1',
       });
-    fixture.containers.actionForSystem.mockImplementation(async () => {
+    fixture.containers.action.mockImplementation(async () => {
       powerIntent = ContainerPowerIntent.Stopped;
       return { intentId: 'stop-intent' };
     });
 
     await expect(fixture.service.stopRunningContainersForSharedBackend(
+      SYSTEM,
       'user-1',
       'backend-1',
-      'system-actor',
       'worker-1',
     )).resolves.toEqual({ intentIds: [] });
     await expect(fixture.service.stopRunningContainersForSharedBackend(
+      SYSTEM,
       'user-1',
       'backend-1',
-      'system-actor',
       'worker-1',
     )).resolves.toEqual({ intentIds: ['stop-intent'] });
     await expect(fixture.service.stopRunningContainersForSharedBackend(
+      SYSTEM,
       'user-1',
       'backend-1',
-      'system-actor',
       'worker-1',
     )).resolves.toEqual({ intentIds: [] });
 
     expect(fixture.reconcileClaims.claim).toHaveBeenCalledTimes(2);
     expect(fixture.reconcileClaims.release).toHaveBeenCalledTimes(1);
-    expect(fixture.containers.actionForSystem).toHaveBeenCalledTimes(1);
+    expect(fixture.containers.action).toHaveBeenCalledTimes(1);
   });
 
   it('purges lost local volumes through desired-state intents without tasks', async () => {
@@ -231,12 +234,12 @@ describe('UserServerResourcePurgeService grant expiry actions', () => {
       lifecycle_phase: ContainerPhase.Active,
       power_intent: ContainerPowerIntent.Stopped,
     });
-    fixture.containers.actionForSystem.mockResolvedValue({ intentId: 'container-delete-intent' });
+    fixture.containers.action.mockResolvedValue({ intentId: 'container-delete-intent' });
 
     const result = await fixture.service.purgeStoragePoolVolumes(
+      SYSTEM,
       'user-1',
       'pool-1',
-      'system-actor',
     );
 
     expect(result).toEqual({
@@ -255,10 +258,10 @@ describe('UserServerResourcePurgeService grant expiry actions', () => {
       }),
       transaction,
     );
-    expect(fixture.containers.actionForSystem).toHaveBeenCalledWith(
+    expect(fixture.containers.action).toHaveBeenCalledWith(
+      SYSTEM,
       'container-1',
       'delete',
-      'system-actor',
     );
     expect(fixture.audit.append).toHaveBeenCalledWith(
       transaction,
@@ -272,7 +275,7 @@ describe('UserServerResourcePurgeService grant expiry actions', () => {
       }),
     );
     expect(fixture.access.authorizationCommitted).toHaveBeenCalledWith(['user-1']);
-    expect(fixture.containers.actionForSystem.mock.invocationCallOrder[0])
+    expect(fixture.containers.action.mock.invocationCallOrder[0])
       .toBeLessThan(fixture.intents.ensurePending.mock.invocationCallOrder[0]);
   });
 
@@ -321,23 +324,23 @@ describe('UserServerResourcePurgeService grant expiry actions', () => {
       lifecycle_phase: ContainerPhase.Active,
       power_intent: ContainerPowerIntent.Stopped,
     });
-    fixture.containers.actionForSystem.mockResolvedValue({ intentId: 'container-delete-intent' });
+    fixture.containers.action.mockResolvedValue({ intentId: 'container-delete-intent' });
 
     const result = await fixture.service.purgeSharedBackendVolumes(
+      SYSTEM,
       'user-1',
       'backend-1',
-      'system-actor',
     );
 
     expect(result.volumeIds).toEqual(['volume-1']);
     expect(fixture.volumes.deleteVolumeRow).not.toHaveBeenCalled();
     expect(fixture.intents.ensurePending).toHaveBeenCalled();
-    expect(fixture.containers.actionForSystem).toHaveBeenCalledWith(
+    expect(fixture.containers.action).toHaveBeenCalledWith(
+      SYSTEM,
       'container-1',
       'delete',
-      'system-actor',
     );
-    expect(fixture.containers.actionForSystem.mock.invocationCallOrder[0])
+    expect(fixture.containers.action.mock.invocationCallOrder[0])
       .toBeLessThan(fixture.intents.ensurePending.mock.invocationCallOrder[0]);
   });
 
@@ -346,7 +349,7 @@ describe('UserServerResourcePurgeService grant expiry actions', () => {
     adminFixture.containerRepository.list.mockResolvedValue([]);
     adminFixture.volumes.list.mockResolvedValue([]);
 
-    await adminFixture.service.purge('user-1', 'server-1', 'operator-1', 'admin');
+    await adminFixture.service.purge(testActor('operator-1'), 'user-1', 'server-1');
 
     expect(adminFixture.audit.append).toHaveBeenCalledWith(
       {},
@@ -361,7 +364,7 @@ describe('UserServerResourcePurgeService grant expiry actions', () => {
     expiryFixture.containerRepository.list.mockResolvedValue([]);
     expiryFixture.volumes.list.mockResolvedValue([]);
 
-    await expiryFixture.service.purge('user-1', 'server-1', 'operator-1', 'expiry');
+    await expiryFixture.service.purge(systemActor('operator-1'), 'user-1', 'server-1');
 
     expect(expiryFixture.audit.append).toHaveBeenCalledWith(
       {},
@@ -405,9 +408,9 @@ describe('UserServerResourcePurgeService grant expiry actions', () => {
       });
       fixture.intents.ensurePending.mockResolvedValue({ id: 'destroy-1' });
       const result = await fixture.service.purgeSharedBackendVolumes(
+        SYSTEM,
         'user-1',
         'backend-1',
-        'system-actor',
       );
       return { fixture, result };
     }

@@ -14,7 +14,7 @@ function AdminUsageRoute() {
   const { serverId } = Route.useSearch();
   return (
     <RequireAccess rule={ACCESS.adminUsage}>
-      <UsagePage mode="admin" initialServerId={serverId} />
+      <UsagePage scope="all" initialServerId={serverId} />
     </RequireAccess>
   );
 }

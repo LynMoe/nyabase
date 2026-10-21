@@ -1,6 +1,8 @@
 import { BadRequestException, Inject, Injectable, Logger, NotFoundException } from '@nestjs/common';
 import {
+  Capability,
   canonicalPciAddress,
+  type ListScope,
   type PerformanceAdminUsageResponse,
   type PerformanceMetric,
   type PerformanceRange,
@@ -14,6 +16,7 @@ import { NyabaseConfigService } from '../platform/config/nyabase-config.service.
 import type { NyabaseDatabase } from '../platform/persistence-pg/database.types.js';
 import { PG_DATABASE } from '../platform/persistence-pg/tokens.js';
 import { AccessResolverService } from '../iam/access-resolver.service.js';
+import { assertListScope, type Actor } from '../iam/actor.js';
 import { isLocalPoolDto, StoragePoolsService } from '../storage-pools/storage-pools.service.js';
 import {
   absoluteChart,
@@ -82,9 +85,35 @@ export class PerformanceQueryService {
     private readonly storagePools: StoragePoolsService,
   ) {}
 
-  async userUsage(userId: string, query: PerformanceQuery): Promise<PerformanceUsageResponse | PerformanceSelfResponse> {
-    if (query.containerId) return this.selfUsage(userId, query.containerId, false);
-    const admin = await this.adminUsage(userId, query, false);
+  /**
+   * `scope=mine`: the caller's own containers on granted servers.
+   * `scope=all`: every server, container and person (`ViewMetricsAll`).
+   */
+  async usage(
+    actor: Actor,
+    query: PerformanceQuery,
+    scope: ListScope,
+  ): Promise<PerformanceUsageResponse | PerformanceAdminUsageResponse | PerformanceSelfResponse> {
+    assertListScope(actor, scope, Capability.ViewMetricsAll);
+    return scope === 'all'
+      ? this.scopedUsage(actor.userId, query, 'all')
+      : this.ownUsage(actor.userId, query);
+  }
+
+  async series(
+    actor: Actor,
+    query: PerformanceQuery,
+    scope: ListScope,
+  ): Promise<PerformanceSeriesResponse | PerformanceMultiSeriesResponse> {
+    assertListScope(actor, scope, Capability.ViewMetricsAll);
+    return scope === 'all'
+      ? this.scopedSeries(actor.userId, query, 'all')
+      : this.ownSeries(actor.userId, query);
+  }
+
+  private async ownUsage(userId: string, query: PerformanceQuery): Promise<PerformanceUsageResponse | PerformanceSelfResponse> {
+    if (query.containerId) return this.selfUsage(userId, query.containerId, 'mine');
+    const admin = await this.scopedUsage(userId, query, 'mine');
     if (!('servers' in admin)) return admin;
     const usage = toUserUsage(admin);
     usage.ownContainers = admin.servers.flatMap((server) =>
@@ -103,9 +132,10 @@ export class PerformanceQueryService {
     return usage;
   }
 
-  async adminUsage(actorId: string, query: PerformanceQuery, admin = true): Promise<PerformanceAdminUsageResponse | PerformanceSelfResponse> {
-    if (query.containerId) return this.selfUsage(actorId, query.containerId, admin);
-    const servers = await this.resolveServers(actorId, query.serverId, admin);
+  private async scopedUsage(actorId: string, query: PerformanceQuery, scope: ListScope): Promise<PerformanceAdminUsageResponse | PerformanceSelfResponse> {
+    const admin = scope === 'all';
+    if (query.containerId) return this.selfUsage(actorId, query.containerId, scope);
+    const servers = await this.resolveServers(actorId, query.serverId, scope);
     const userId = optionalUuid(query.userId, 'userId');
     if (servers.length === 0) {
       return { sampledAt: null, truncated: false, servers: [] };
@@ -139,10 +169,10 @@ export class PerformanceQueryService {
     return usage;
   }
 
-  async userSeries(userId: string, query: PerformanceQuery): Promise<PerformanceSeriesResponse | PerformanceMultiSeriesResponse> {
-    if (query.metrics) return this.multiSeries(userId, query, false);
+  private async ownSeries(userId: string, query: PerformanceQuery): Promise<PerformanceSeriesResponse | PerformanceMultiSeriesResponse> {
+    if (query.metrics) return this.multiSeries(userId, query, 'mine');
     if (query.containerId) throw new BadRequestException('containerId is not available');
-    const series = await this.adminSeries(userId, query, false);
+    const series = await this.scopedSeries(userId, query, 'mine');
     if (!('lines' in series)) return series;
     return {
       ...series,
@@ -150,15 +180,15 @@ export class PerformanceQueryService {
     };
   }
 
-  async adminSeries(actorId: string, query: PerformanceQuery, admin = true): Promise<PerformanceSeriesResponse | PerformanceMultiSeriesResponse> {
-    if (query.metrics) return this.multiSeries(actorId, query, admin);
+  private async scopedSeries(actorId: string, query: PerformanceQuery, scope: ListScope): Promise<PerformanceSeriesResponse | PerformanceMultiSeriesResponse> {
+    if (query.metrics) return this.multiSeries(actorId, query, scope);
     const metric = query.metric ?? 'cpu';
     const range = query.range ?? '1h';
     if (!SERIES_FAMILIES[metric] || !RANGES[range]) {
       throw new BadRequestException('metric or range is invalid');
     }
     const containerId = optionalUuid(query.containerId, 'containerId');
-    const servers = await this.resolveServers(actorId, query.serverId, admin);
+    const servers = await this.resolveServers(actorId, query.serverId, scope);
     const userId = optionalUuid(query.userId, 'userId');
     const containers = (await this.loadContainers(servers)).filter((container) =>
       (!userId || container.ownerId === userId)
@@ -182,7 +212,8 @@ export class PerformanceQueryService {
     };
   }
 
-  private async selfUsage(actorId: string, containerId: string, admin: boolean): Promise<PerformanceSelfResponse> {
+  private async selfUsage(actorId: string, containerId: string, scope: ListScope): Promise<PerformanceSelfResponse> {
+    const admin = scope === 'all';
     const row = await this.database
       .selectFrom('control.containers')
       .select(['id', 'server_id', 'owner_id', 'lifecycle_phase'])
@@ -190,7 +221,7 @@ export class PerformanceQueryService {
       .executeTakeFirst();
     if (!row || row.lifecycle_phase === 'deleting') throw new NotFoundException('Container not found');
     if (!admin && row.owner_id !== actorId) throw new NotFoundException('Container not found');
-    const servers = await this.resolveServers(actorId, row.server_id, admin);
+    const servers = await this.resolveServers(actorId, row.server_id, scope);
     const containers = (await this.loadContainers(servers)).filter((container) => container.id === containerId);
     const samples = await this.queryInstant(servers.map((server) => server.id));
     const scrapeUp = await this.queryScrapeUp(servers.map((server) => server.id));
@@ -223,8 +254,9 @@ export class PerformanceQueryService {
   private async multiSeries(
     actorId: string,
     query: PerformanceQuery,
-    admin: boolean,
+    scope: ListScope,
   ): Promise<PerformanceMultiSeriesResponse> {
+    const admin = scope === 'all';
     if (query.metric) throw new BadRequestException('metric or range is invalid');
     const requested = (query.metrics ?? '').split(',').filter(Boolean);
     const metrics: PerformanceMetric[] = ['cpu', 'memory', 'disk', 'gpu', 'network'];
@@ -234,7 +266,7 @@ export class PerformanceQueryService {
     if (!RANGES[range]) throw new BadRequestException('metric or range is invalid');
     const containerId = optionalUuid(query.containerId, 'containerId');
     const userId = optionalUuid(query.userId, 'userId');
-    const servers = await this.resolveServers(actorId, query.serverId, admin);
+    const servers = await this.resolveServers(actorId, query.serverId, scope);
     let containers = await this.loadContainers(servers);
     if (userId) containers = containers.filter((container) => container.ownerId === userId);
     if (containerId) {
@@ -337,7 +369,7 @@ export class PerformanceQueryService {
     if (serverIds.length === 0) return;
     const selector = selectorFor(serverIds);
     const pools = userId
-      ? await this.storagePools.listForUser(userId)
+      ? await this.storagePools.listVisible(userId)
       : (await this.storagePools.list()).filter(isLocalPoolDto);
     const [cpu, cpuCount, memUsed, memTotal, poolUsed, poolSize, gpuUsed, gpuTotal, gpuIndex] = selector
       ? await Promise.all([
@@ -430,10 +462,10 @@ export class PerformanceQueryService {
   private async resolveServers(
     actorId: string,
     serverId: string | undefined,
-    admin: boolean,
+    scope: ListScope,
   ): Promise<Array<{ id: string; name: string }>> {
     const requested = optionalUuid(serverId, 'serverId');
-    if (admin) {
+    if (scope === 'all') {
       const rows = await this.database.selectFrom('infra.servers').select(['id', 'name']).execute();
       if (!requested) return rows;
       const found = rows.find((row) => row.id === requested);

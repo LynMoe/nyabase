@@ -3,22 +3,12 @@ import { IncusModule } from '../incus/incus.module.js';
 import { ReconcileModule } from '../reconcile/reconcile.module.js';
 import { StoragePoolsModule } from '../storage-pools/storage-pools.module.js';
 import {
-  AdminContainerSharedVolumesController,
-  AdminSharedBackendCatalogInspectController,
-  AdminSharedVolumesController,
   ContainerSharedVolumesController,
+  SharedBackendCatalogInspectController,
   SharedVolumesController,
 } from './shared-volumes.controller.js';
-import {
-  AdminSharedVolumeIntentsController,
-  AdminVolumeIntentsController,
-  SharedVolumeIntentsController,
-  VolumeIntentsController,
-} from './volume-intents.controller.js';
 import { VolumeReconciler } from './volume-reconciler.service.js';
 import {
-  AdminVolumesController,
-  AdminContainerVolumesController,
   ContainerVolumesController,
   StorageCapacityController,
   VolumesController,
@@ -34,16 +24,8 @@ import { VolumesService } from './volumes.service.js';
     SharedVolumesController,
     ContainerVolumesController,
     ContainerSharedVolumesController,
-    AdminContainerVolumesController,
-    AdminContainerSharedVolumesController,
-    AdminVolumesController,
-    AdminSharedVolumesController,
-    AdminSharedBackendCatalogInspectController,
+    SharedBackendCatalogInspectController,
     StorageCapacityController,
-    VolumeIntentsController,
-    SharedVolumeIntentsController,
-    AdminVolumeIntentsController,
-    AdminSharedVolumeIntentsController,
   ],
   exports: [VolumesRepository, VolumesService],
 })

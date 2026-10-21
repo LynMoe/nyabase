@@ -49,7 +49,7 @@ export default function IpPoolsPage() {
   });
   const serversQuery = useQuery({
     queryKey: queryKeys.servers.admin,
-    queryFn: () => api.get<ServerDto[]>('/admin/servers'),
+    queryFn: () => api.get<ServerDto[]>('/servers?scope=all'),
   });
   const deletePool = useMutation({
     mutationFn: (id: string) => api.delete<void>(`/admin/ip-pools/${id}`),
