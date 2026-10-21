@@ -46,9 +46,11 @@ Vite 通过 alias 将 `@nyabase/common` 指向 `src/index.ts`，但 `index.ts` �
   所有授权判断只读这些视图（`iam/effective-access.ts` 每类资源一个解析函数，只返回"当前有效"覆盖）；没有授权缓存、epoch 或 `authz_version`。
 - 管理层级（只能管理能力 ⊆ 自己的用户；目标持有资源授权需 `ManageGrants`）与"最后一个活跃管理员"保护只在 `iam/administration.ts`。
   所有 IAM 写操作用 `lockIamPolicy`（advisory lock）串行化。
-- 撤销 = 立即到期：删除授权 / 移出组 / 删除组 / 禁用用户都不会被拒绝，IAM 写操作在 `afterCommit` 里通知 `AccessChangeNotifier`，
+- 撤销 = 立即到期：删除授权 / 移出组 / 删除组都不会被拒绝，IAM 写操作在 `afterCommit` 里通知 `AccessChangeNotifier`，
   `access/access-lapse.processor.ts` 按台账 `control.access_lapses` 走同一条 14 天宽限 → 停机 → 清除流程（租约 `access_lapse`，
   停机/清除复用 `UserServerResourcePurgeService` 的 system actor 路径）。
+- 禁用用户：视图与准入仍只认 active 用户，但禁用不开宽限、不清除——处理器只停止其运行中的容器，资源无限期保留（覆盖按授权计算，
+  `iam.merged_*_access` 不带状态过滤，`iam.effective_*_access` 在其上只加 active 过滤）；已有的到期/撤销台账行照常推进并清除。
 - 宽限中（无当前覆盖）的用户不能新建、启动、挂载；已停机的容器在覆盖恢复后不会自动启动。
 
 ## 后端结构规则（`packages/backend/src`）

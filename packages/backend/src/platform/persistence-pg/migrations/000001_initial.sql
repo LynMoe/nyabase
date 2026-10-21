@@ -1099,8 +1099,9 @@ CREATE INDEX http_proxy_bindings_owner_idx
 CREATE INDEX http_proxy_bindings_pool_idx
     ON interaction.http_proxy_bindings (domain_pool_id, id);
 
--- Effective access: direct grants plus grants inherited through group_members,
--- merged per (user, resource) and restricted to active users.
+-- Merged access: direct grants plus grants inherited through group_members,
+-- merged per (user, resource), whatever the user's status (coverage by grants).
+-- iam.effective_*_access below add the only access filter: active users.
 --   * Only grants that are current (expires_at IS NULL OR expires_at > now()) contribute.
 --     When none is current, the expired ones are merged instead so that the latest
 --     past expires_at stays visible to the lapse processor; consumers must treat
@@ -1109,7 +1110,7 @@ CREATE INDEX http_proxy_bindings_pool_idx
 --     (disk_bytes and shared-backend limit_bytes also treat 0 as unlimited).
 --   * GPU PCI addresses are the distinct, sorted union.
 --   * expires_at is the latest one; NULL (never expires) wins over any date.
-CREATE VIEW iam.effective_server_access AS
+CREATE VIEW iam.merged_server_access AS
 WITH inherited AS (
     SELECT grants.user_id, grants.server_id, grants.cpu_millis, grants.mem_bytes,
            grants.disk_bytes, grants.gpu_pci_addresses, grants.expires_at
@@ -1126,7 +1127,6 @@ WITH inherited AS (
            bool_or(inherited.expires_at IS NULL OR inherited.expires_at > now())
                OVER (PARTITION BY inherited.user_id, inherited.server_id) AS any_current
     FROM inherited
-    JOIN iam.users AS users ON users.id = inherited.user_id AND users.status = 'active'
 ), merged AS (
     SELECT * FROM scoped WHERE is_current OR NOT any_current
 ), gpus AS (
@@ -1150,7 +1150,7 @@ FROM merged
 LEFT JOIN gpus ON gpus.user_id = merged.user_id AND gpus.server_id = merged.server_id
 GROUP BY merged.user_id, merged.server_id;
 
-CREATE VIEW iam.effective_pool_access AS
+CREATE VIEW iam.merged_pool_access AS
 WITH inherited AS (
     SELECT grants.user_id, grants.pool_id, grants.expires_at
     FROM iam.storage_pool_grants AS grants
@@ -1165,7 +1165,6 @@ WITH inherited AS (
            bool_or(inherited.expires_at IS NULL OR inherited.expires_at > now())
                OVER (PARTITION BY inherited.user_id, inherited.pool_id) AS any_current
     FROM inherited
-    JOIN iam.users AS users ON users.id = inherited.user_id AND users.status = 'active'
 )
 SELECT scoped.user_id,
        scoped.pool_id,
@@ -1175,7 +1174,7 @@ FROM scoped
 WHERE scoped.is_current OR NOT scoped.any_current
 GROUP BY scoped.user_id, scoped.pool_id;
 
-CREATE VIEW iam.effective_shared_backend_access AS
+CREATE VIEW iam.merged_shared_backend_access AS
 WITH inherited AS (
     SELECT grants.user_id, grants.shared_backend_id, grants.limit_bytes, grants.expires_at
     FROM iam.shared_backend_grants AS grants
@@ -1190,7 +1189,6 @@ WITH inherited AS (
            bool_or(inherited.expires_at IS NULL OR inherited.expires_at > now())
                OVER (PARTITION BY inherited.user_id, inherited.shared_backend_id) AS any_current
     FROM inherited
-    JOIN iam.users AS users ON users.id = inherited.user_id AND users.status = 'active'
 )
 SELECT scoped.user_id,
        scoped.shared_backend_id,
@@ -1201,6 +1199,18 @@ SELECT scoped.user_id,
 FROM scoped
 WHERE scoped.is_current OR NOT scoped.any_current
 GROUP BY scoped.user_id, scoped.shared_backend_id;
+
+CREATE VIEW iam.effective_server_access AS
+SELECT merged.* FROM iam.merged_server_access AS merged
+JOIN iam.users AS users ON users.id = merged.user_id AND users.status = 'active';
+
+CREATE VIEW iam.effective_pool_access AS
+SELECT merged.* FROM iam.merged_pool_access AS merged
+JOIN iam.users AS users ON users.id = merged.user_id AND users.status = 'active';
+
+CREATE VIEW iam.effective_shared_backend_access AS
+SELECT merged.* FROM iam.merged_shared_backend_access AS merged
+JOIN iam.users AS users ON users.id = merged.user_id AND users.status = 'active';
 
 CREATE FUNCTION audit.reject_event_update() RETURNS trigger
     LANGUAGE plpgsql

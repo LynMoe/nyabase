@@ -30,8 +30,9 @@ const MAX_PAIRS_PER_PASS = 128;
 /**
  * Enforces access lapses. A user who owns containers or volumes on a server,
  * storage pool or shared backend without current coverage (grant expired,
- * revoked, removed from the group, group deleted, user disabled) is in a
- * 14-day grace that starts at `lapsed_at`:
+ * revoked, removed from the group, group deleted) is in a
+ * 14-day grace that starts at `lapsed_at` (coverage is by grants only: a disabled
+ * user is never lapsed for that reason; its running containers are just stopped):
  *
  *  - no ledger row yet: open it (`lapsed_at` = the past expiry, or now for a
  *    revocation; never moved afterwards);
@@ -123,7 +124,7 @@ export class AccessLapseProcessor implements OnModuleInit, OnModuleDestroy {
         return 0;
       }
       await this.lapses.deleteStale();
-      let handled = 0;
+      let handled = await this.stopInactiveUsersContainers(systemActor(actorId));
       for (const candidate of await this.lapses.scan()) {
         if (this.stopped || handled >= MAX_PAIRS_PER_PASS) break;
         if (lapseWork(candidate) === 'none') continue;
@@ -138,6 +139,51 @@ export class AccessLapseProcessor implements OnModuleInit, OnModuleDestroy {
       );
       return 0;
     }
+  }
+
+  /**
+   * A user who is not active (disabled) keeps every resource but runs nothing:
+   * stop what still runs, per (user, server). Idempotent, since a stopped
+   * container no longer matches; nothing is purged and nothing is restarted.
+   */
+  private async stopInactiveUsersContainers(actor: Actor): Promise<number> {
+    const pairs = await this.database.selectFrom('control.containers as container')
+      .innerJoin('iam.users as user', 'user.id', 'container.owner_id')
+      .select(['container.owner_id', 'container.server_id'])
+      .where('user.status', '!=', 'active')
+      .where('container.lifecycle_phase', '=', 'active')
+      .where('container.power_intent', '=', 'running')
+      .distinct()
+      .execute();
+    let handled = 0;
+    for (const pair of pairs) {
+      if (this.stopped || handled >= MAX_PAIRS_PER_PASS) break;
+      const claim = await this.claims.claim({
+        resourceType: 'access_lapse',
+        resourceId: pair.owner_id,
+        placementServerId: pair.server_id,
+        workerId: this.workerId,
+      });
+      if (!claim) continue;
+      try {
+        const { intentIds } = await this.purge.stopRunningContainersForGraceEntry(
+          actor,
+          pair.owner_id,
+          pair.server_id,
+        );
+        if (intentIds.length > 0) handled += 1;
+      } catch (error) {
+        this.logger.error(`Stopping containers of inactive user ${pair.owner_id} failed: ${String(error)}`);
+      } finally {
+        await this.claims.release({
+          resourceType: claim.resourceType,
+          resourceId: claim.resourceId,
+          placementServerId: claim.placementServerId,
+          workerId: claim.workerId,
+        }).catch(() => undefined);
+      }
+    }
+    return handled;
   }
 
   private async systemActorId(): Promise<string | null> {

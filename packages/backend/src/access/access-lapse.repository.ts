@@ -6,11 +6,7 @@ import type { AccessLapseResourceKind } from '../platform/persistence-pg/iam-aut
 import { PG_DATABASE } from '../platform/persistence-pg/tokens.js';
 import { PgTransactionManager } from '../platform/persistence-pg/transaction.js';
 import { lockIamPolicy } from '../iam/administration.js';
-import {
-  resolvePoolAccess,
-  resolveServerAccess,
-  resolveSharedBackendAccess,
-} from '../iam/effective-access.js';
+import { hasGrantCoverage } from '../iam/effective-access.js';
 
 export const ACCESS_LAPSE_GRACE_MS = GRANT_EXPIRY_GRACE_DAYS * 24 * 60 * 60 * 1000;
 
@@ -124,12 +120,12 @@ export class AccessLapseRepository {
     const result = await sql<CandidateRow>`
       WITH coverage AS (
         SELECT user_id, 'server' AS kind, server_id AS resource_id, expires_at
-        FROM iam.effective_server_access
+        FROM iam.merged_server_access
         UNION ALL
         SELECT user_id, 'storage_pool', pool_id, expires_at FROM iam.effective_pool_access
         UNION ALL
         SELECT user_id, 'shared_backend', shared_backend_id, expires_at
-        FROM iam.effective_shared_backend_access
+        FROM iam.merged_shared_backend_access
       ), candidate AS (
         SELECT owned.user_id, owned.kind, owned.resource_id,
                (coverage.user_id IS NOT NULL
@@ -244,14 +240,8 @@ export class AccessLapseRepository {
     });
   }
 
-  private async isCovered(transaction: Transaction<NyabaseDatabase>, key: LapseKey): Promise<boolean> {
-    switch (key.kind) {
-      case 'server':
-        return await resolveServerAccess(transaction, key.userId, key.resourceId) !== null;
-      case 'storage_pool':
-        return await resolvePoolAccess(transaction, key.userId, key.resourceId) !== null;
-      case 'shared_backend':
-        return await resolveSharedBackendAccess(transaction, key.userId, key.resourceId) !== null;
-    }
+  /** Coverage by grants, whatever the user's status: disabling never opens a lapse. */
+  private isCovered(transaction: Transaction<NyabaseDatabase>, key: LapseKey): Promise<boolean> {
+    return hasGrantCoverage(transaction, key);
   }
 }

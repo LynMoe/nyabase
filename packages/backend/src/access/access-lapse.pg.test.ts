@@ -233,23 +233,98 @@ describePg('access lapse processor', () => {
     });
   });
 
-  it('lapses a disabled user and cancels the grace when the user is enabled again', async () => {
+  it('stops a disabled user\'s running containers but opens no lapse and never purges', async () => {
     await withPostgresTestDatabase(async ({ database }) => {
       const { processor, actions } = await fixture(database);
       const { userId, serverId, poolId, imageId } = await world(database);
       await grantServer(database, { user: userId }, serverId);
-      await seedContainer(database, { ownerId: userId, serverId, poolId, imageId, running: true });
+      await grantPool(database, { user: userId }, poolId);
+      const running = await seedContainer(database, {
+        ownerId: userId, serverId, poolId, imageId, running: true,
+      });
+      const volume = await seedVolume(database, { ownerId: userId, poolId, serverId });
 
       await database.updateTable('iam.users').set({ status: UserStatus.Disabled })
         .where('id', '=', userId).execute();
-      await processor.process();
-      expect(await ledger(database, userId)).toHaveLength(1);
+      await expect(processor.process()).resolves.toBe(1);
+
+      expect(actions).toEqual([{ id: running, action: 'stop', actorIsSystem: true }]);
+      expect(await ledger(database)).toEqual([]);
+      // Idempotent once the container is no longer wanted running.
+      await database.updateTable('control.containers').set({ power_intent: 'stopped' }).execute();
+      await expect(processor.process()).resolves.toBe(0);
       expect(actions).toHaveLength(1);
+      expect(await ledger(database)).toEqual([]);
+      expect((await database.selectFrom('control.volumes').select('id').execute()).map((r) => r.id))
+        .toEqual([volume]);
+      expect(await database.selectFrom('control.containers').select('id').execute()).toHaveLength(1);
+    });
+  });
+
+  it('keeps a disabled user\'s resources past 14 days: no lapse row, no purge', async () => {
+    await withPostgresTestDatabase(async ({ database }) => {
+      const { processor, actions } = await fixture(database);
+      const { userId, serverId, poolId, imageId } = await world(database);
+      await grantServer(database, { user: userId }, serverId);
+      await seedContainer(database, { ownerId: userId, serverId, poolId, imageId });
+      await database.updateTable('iam.users').set({ status: UserStatus.Disabled })
+        .where('id', '=', userId).execute();
+
+      for (let pass = 0; pass < 3; pass += 1) await processor.process();
+      expect(await ledger(database)).toEqual([]);
+      expect(actions).toEqual([]);
+      // Even a ledger-less "old" disabled user is never purged for being disabled.
+      await database.updateTable('iam.users')
+        .set({ updated_at: new Date(Date.now() - 30 * DAY_MS) }).execute();
+      await processor.process();
+      expect(await ledger(database)).toEqual([]);
+      expect(actions).toEqual([]);
+    });
+  });
+
+  it('keeps processing a real expiry lapse while the user is disabled, purge included', async () => {
+    await withPostgresTestDatabase(async ({ database }) => {
+      const { processor, actions } = await fixture(database);
+      const { userId, serverId, poolId, imageId } = await world(database);
+      await grantServer(database, { user: userId }, serverId, {
+        expiresAt: new Date(Date.now() - (GRANT_EXPIRY_GRACE_DAYS + 1) * DAY_MS),
+      });
+      const container = await seedContainer(database, { ownerId: userId, serverId, poolId, imageId });
+      await database.updateTable('iam.users').set({ status: UserStatus.Disabled })
+        .where('id', '=', userId).execute();
+
+      await processor.process();
+
+      expect(actions).toEqual([{ id: container, action: 'delete', actorIsSystem: true }]);
+      expect((await ledger(database, userId))[0]!.purged_at).not.toBeNull();
+    });
+  });
+
+  it('does not restart anything when a disabled user is enabled again', async () => {
+    await withPostgresTestDatabase(async ({ database }) => {
+      const { processor, actions } = await fixture(database);
+      const { userId, serverId, poolId, imageId } = await world(database);
+      await grantServer(database, { user: userId }, serverId);
+      const container = await seedContainer(database, {
+        ownerId: userId, serverId, poolId, imageId, running: true,
+      });
+      await database.updateTable('iam.users').set({ status: UserStatus.Disabled })
+        .where('id', '=', userId).execute();
+      await processor.process();
+      // The stop intent lands: the container is stopped.
+      await database.updateTable('control.containers').set({ power_intent: 'stopped' })
+        .where('id', '=', container).execute();
+      actions.length = 0;
 
       await database.updateTable('iam.users').set({ status: UserStatus.Active })
         .where('id', '=', userId).execute();
       await processor.process();
-      expect(await ledger(database, userId)).toEqual([]);
+      await processor.process();
+
+      expect(actions).toEqual([]);
+      expect((await database.selectFrom('control.containers').select('power_intent')
+        .executeTakeFirstOrThrow()).power_intent).toBe('stopped');
+      expect(await ledger(database)).toEqual([]);
     });
   });
 

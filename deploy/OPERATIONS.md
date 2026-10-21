@@ -564,9 +564,9 @@ from the product SLO and measured baseline, not from this example deployment.
 资源授权（服务器、数据盘池、共享后端）可授给用户或用户组，同一用户对同一资源可同时有多条授权。数据库视图
 `iam.effective_server_access` / `iam.effective_pool_access` / `iam.effective_shared_backend_access` 按 (用户, 资源) 合并：
 配额逐项取最大（任一为 NULL 即不限；磁盘与共享后端额度的 0 也按不限），GPU 白名单取并集，到期取最晚（任一不设期限则不过期），
-只包含状态为 `active` 的用户。所有授权判断只读这些视图，没有授权缓存。
+合并视图 `iam.merged_*_access` 不看用户状态（仅供失效台账判断“有无覆盖”），`iam.effective_*_access` 在其上只增加 active 用户过滤。所有授权判断只读 effective 视图，没有授权缓存。
 
-用户失去覆盖（授权到期、删除授权、移出组、删除组、用户被禁用）后立即进入同一条 14 天宽限流程，撤销不会被拒绝：
+用户失去覆盖（授权到期、删除授权、移出组、删除组）后立即进入同一条 14 天宽限流程，撤销不会被拒绝：
 
 - 台账 `control.access_lapses`（`user_id, resource_kind, resource_id, lapsed_at, stopped_at, purged_at`）记录宽限。
   `lapsed_at` 创建时确定、之后不再变化：已过期取过去的 `expires_at`，撤销则取检测时刻。
@@ -576,6 +576,8 @@ from the product SLO and measured baseline, not from this example deployment.
 - 宽限内覆盖恢复：台账行被删除，宽限取消；已停机的容器不会自动启动。
 - 处理器每分钟运行一次，并在 IAM 写操作提交后立即唤醒；每个 (用户, 资源) 用 `reconcile_claims`
   租约（`resource_type = access_lapse`）串行，多副本安全。
+- 用户被禁用不算失去覆盖：不开宽限、不清除，处理器只停止其运行中的容器，资源无限期保留；重新启用不会自动启动容器。
+  已存在的到期/撤销台账行在用户被禁用期间照常推进并清除。删除账号仍要求其名下没有任何资源。
 - 管理员仍可对某用户在某服务器上的资源手动清除：`POST /api/users/:userId/servers/:serverId/purge-resources`。
 
 ## Incus 客户端证书（首次启动自动生成，不轮换）

@@ -163,3 +163,26 @@ export async function loadServerAccessKeys(executor: AccessExecutor): Promise<Se
     .execute();
   return new Set(rows.map((row) => `${row.user_id}\0${row.server_id}`));
 }
+
+/**
+ * Current coverage by grants alone (iam.merged_*), ignoring the user's status.
+ * Only the access-lapse ledger uses it: a disabled user has no access, but
+ * disabling never starts a lapse.
+ */
+export async function hasGrantCoverage(
+  executor: AccessExecutor,
+  key: { userId: string; kind: 'server' | 'storage_pool' | 'shared_backend'; resourceId: string },
+): Promise<boolean> {
+  const row = key.kind === 'server'
+    ? await executor.selectFrom('iam.merged_server_access').select('user_id')
+      .where('user_id', '=', key.userId).where('server_id', '=', key.resourceId)
+      .where(notExpired).executeTakeFirst()
+    : key.kind === 'storage_pool'
+      ? await executor.selectFrom('iam.merged_pool_access').select('user_id')
+        .where('user_id', '=', key.userId).where('pool_id', '=', key.resourceId)
+        .where(notExpired).executeTakeFirst()
+      : await executor.selectFrom('iam.merged_shared_backend_access').select('user_id')
+        .where('user_id', '=', key.userId).where('shared_backend_id', '=', key.resourceId)
+        .where(notExpired).executeTakeFirst();
+  return row !== undefined;
+}

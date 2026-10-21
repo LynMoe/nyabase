@@ -15,6 +15,7 @@ import {
   seedUser,
 } from './access.pg-test-helper.js';
 import {
+  hasGrantCoverage,
   listServerAccess,
   loadServerAccessKeys,
   resolvePoolAccess,
@@ -174,6 +175,10 @@ describePg('iam.effective_server_access', () => {
         .execute();
       await expect(resolveServerAccess(database, active, serverId)).resolves.toBeNull();
 
+      // Grant coverage (the lapse ledger's view) ignores user status; access does not.
+      await expect(hasGrantCoverage(database, {
+        userId: disabled, kind: 'server', resourceId: serverId,
+      })).resolves.toBe(true);
       await database.updateTable('iam.users')
         .set({ status: UserStatus.Active })
         .where('id', '=', disabled)
