@@ -242,7 +242,7 @@ unique matching interface`.
 `EBUSY` on `ip link set <uplink> master vmbr0` is usually one of:
 
 - A **macvlan/macvtap child still exists**, including in another netns
-  (leftover e2e `e2e-sshproxy` / `mv-sshproxy@eth0`). `ip link show type
+  (a leftover test `mv-sshproxy@eth0`). `ip link show type
   macvlan` in the host ns is not enough; check `ip netns exec <ns> ip
   link`. Delete leftovers before enslaving. A parent with macvlan
   children cannot join a Linux bridge.
@@ -616,9 +616,7 @@ root 客户端加入后再让控制平面重试。
 
 node-exporter 是独立进程（`packages/node-exporter`），**不是** Backend
 的一部分。它只提供只读 HTTPS `/metrics`，没有 Incus 变更能力。仓库
-单元文件为 `deploy/nyabase-node-exporter.service`（e2e 停机演练使用
-`E2E_NODE_EXPORTER_UNIT`；与单元名对齐：
-`E2E_NODE_EXPORTER_UNIT=nyabase-node-exporter.service`）。
+单元文件为 `deploy/nyabase-node-exporter.service`。
 
 ### 构建与安装
 
@@ -714,9 +712,6 @@ GPU 是平台内置功能，不是插件。管理员在服务器详情的 GPU �
 `gpuPciAddresses` 或 `PATCH /api/containers/:id/gpus` 绑定，改动 GPU 需先停止容器。
 授权用服务器授权的 `gpuPciAddresses`（空数组表示无 GPU 权限）。
 
-e2e 停机演练：`systemctl stop/start "$E2E_NODE_EXPORTER_UNIT"`。把该变量
-设为 `nyabase-node-exporter.service`。
-
 ## Workload images
 
 `incus.imageSourceServer` 指向 Nyabase 烘焙 catalog（`ubuntu/24.04` 不是
@@ -733,3 +728,24 @@ linuxcontainers 原样盘）。添加镜像只提交 `{ alias }`；控制面写�
 
 catalog DTO 的 version 字符串是 bake serial（`v20260921_nb01`），不是项目
 `version: 2`。回滚发更新日期的新 `bake.serial`，不要复用更旧的 YYYYMMDD 键。
+
+## Live lab e2e
+
+`tests/e2e/` holds the live scenario tests (not run in CI; CI runs
+`pnpm e2e:check`). They start their own control plane, never the production one:
+
+- `pnpm e2e:up` builds the Backend and both proxies, creates a fresh database
+  `nyabase_e2e_<run id>` on the PostgreSQL given in `tests/e2e/lab.env`, generates
+  the four boot secrets and starts a single-process Backend (clean environment,
+  `NYABASE_CONFIG_FILE` pointing at a missing file) plus the two Rust proxies on the
+  configured ports, then registers the lab Incus servers through the trust-token
+  connect flow and writes `state.json` in the run directory.
+- `pnpm e2e:run [word...]` runs the `scenarios/*.test.ts` files (all, or those whose
+  name contains one of the words).
+- `pnpm e2e:down` stops the processes and, on each lab host, deletes only instances
+  labelled with the run's server ids, volumes the run's database recorded, and the
+  trust entry with the run's Incus client fingerprint; then drops the database and
+  removes the run directory. It is safe to repeat after a partial `up`.
+
+Inputs are documented in `tests/e2e/lab.env.example`; the full description is in
+`tests/e2e/README.md`.

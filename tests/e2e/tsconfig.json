@@ -5,13 +5,9 @@
     "moduleResolution": "NodeNext",
     "strict": true,
     "noEmit": true,
+    "noUncheckedIndexedAccess": true,
     "types": ["node"],
     "skipLibCheck": true
   },
-  "include": [
-    "fixtures/**/*.ts",
-    "support/**/*.ts",
-    "specs/**/*.ts",
-    "topology/**/*.ts"
-  ]
+  "include": ["client/**/*.ts", "lib/**/*.ts", "scenarios/**/*.ts"]
 }
