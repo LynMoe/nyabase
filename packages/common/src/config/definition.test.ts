@@ -65,21 +65,6 @@ describe('PostgreSQL and metrics configuration', () => {
       expect(field?.schema.safeParse(value).success, value).toBe(false);
     }
   });
-
-  it('accepts only an exact credential-free Console owner WebSocket URL', () => {
-    const schema = definition('runtime.consolePublicUrl')?.schema;
-    expect(schema?.safeParse('').success).toBe(true);
-    expect(schema?.safeParse('wss://gateway-b.example/ws/console').success).toBe(true);
-    expect(schema?.safeParse('ws://127.0.0.1:3001/ws/console').success).toBe(true);
-    expect(schema?.safeParse('/ws/console').success).toBe(false);
-    expect(schema?.safeParse('https://gateway-b.example/ws/console').success).toBe(false);
-    expect(schema?.safeParse('wss://user:secret@gateway-b.example/ws/console').success).toBe(false);
-    expect(schema?.safeParse('wss://gateway-b.example/ws/console?target=a').success).toBe(false);
-    expect(schema?.safeParse('wss://gateway-b.example/ws/console/extra').success).toBe(false);
-    expect(schema?.safeParse(
-      `wss://${'a'.repeat(2_048)}.example/ws/console`,
-    ).success).toBe(false);
-  });
 });
 
 describe('Incus transport and preflight configuration', () => {

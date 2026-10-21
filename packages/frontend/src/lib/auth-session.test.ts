@@ -110,20 +110,6 @@ describe('cookie-backed auth session', () => {
     expect(queryClient.getQueryData(['containers'])).toBeUndefined();
   });
 
-  it('purges refresh secrets persisted by pre-cookie releases', () => {
-    storage.setItem('nyabase-auth', JSON.stringify({ state: { refreshToken: 'legacy-secret' } }));
-    storage.setItem('nyabase-auth-session-sync', '{"refreshToken":"legacy-secret"}');
-    storage.setItem('nyabase-auth-login-preflight:x:y', 'z');
-    storage.setItem('nyabase.theme', 'dark');
-
-    initializeAuthSync({ onPeerLogin: vi.fn() });
-
-    expect(storage.getItem('nyabase-auth')).toBeNull();
-    expect(storage.getItem('nyabase-auth-session-sync')).toBeNull();
-    expect(storage.getItem('nyabase-auth-login-preflight:x:y')).toBeNull();
-    expect(storage.getItem('nyabase.theme')).toBe('dark');
-  });
-
   it('rotates through the cookie under the cross-tab lock, sending only a request id', async () => {
     signIn();
     const fetchMock = vi.fn().mockResolvedValue(json({ accessToken: 'A2', user: alice }));

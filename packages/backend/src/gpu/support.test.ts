@@ -62,14 +62,14 @@ describe('probeGpuSupport', () => {
     expect(byId(result.checks, 'nvidia-driver')?.status).toBe('fail');
   });
 
-  it('treats legacy GPU metric samples as driver evidence', () => {
+  it('does not infer driver presence from other GPU samples', () => {
     const result = probeGpuSupport({
       resources: nvidiaResources,
       metricSamples: [
         { name: NVIDIA_GPU_SMI_INDEX_METRIC, labels: { gpu_pci: '00000000:41:00.0' }, value: 0 },
       ],
     });
-    expect(byId(result.checks, 'nvidia-driver')?.status).toBe('pass');
+    expect(byId(result.checks, 'nvidia-driver')?.status).toBe('unknown');
     expect(byId(result.checks, 'nvidia-container-toolkit')?.status).toBe('unknown');
     expect(result.supported).toBeNull();
   });

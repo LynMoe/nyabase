@@ -242,7 +242,7 @@ unique matching interface`.
 `EBUSY` on `ip link set <uplink> master vmbr0` is usually one of:
 
 - A **macvlan/macvtap child still exists**, including in another netns
-  (legacy e2e `e2e-sshproxy` / `mv-sshproxy@eth0`). `ip link show type
+  (leftover e2e `e2e-sshproxy` / `mv-sshproxy@eth0`). `ip link show type
   macvlan` in the host ns is not enough; check `ip netns exec <ns> ip
   link`. Delete leftovers before enslaving. A parent with macvlan
   children cannot join a Linux bridge.

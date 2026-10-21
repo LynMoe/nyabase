@@ -29,7 +29,7 @@ export type DecryptedSshProxyHostKey = SshProxyHostKey & {
  * PostgreSQL-owned proxy host identity.
  *
  * Keeping the proxy singleton here makes its external key generation/CAS
- * boundary explicit without retaining a legacy persistence transaction bridge.
+ * boundary explicit.
  */
 @Injectable()
 export class SshIdentityService {

@@ -69,25 +69,6 @@ const postgresUrl = z.string().trim().refine(
   'Expected a PostgreSQL connection URL',
 );
 
-const consolePublicUrl = z.string().trim()
-  .refine(
-    (value) => new TextEncoder().encode(value).byteLength <= 2_048,
-    'Expected at most 2048 UTF-8 bytes',
-  )
-  .refine((value) => {
-    if (value === '') return true;
-    try {
-      const parsed = new URL(value);
-      return (parsed.protocol === 'ws:' || parsed.protocol === 'wss:')
-        && parsed.username === ''
-        && parsed.password === ''
-        && parsed.search === ''
-        && parsed.hash === ''
-        && parsed.pathname === '/ws/console';
-    } catch {
-      return false;
-    }
-  }, 'Expected an empty value or an absolute ws(s) URL ending in /ws/console');
 const booleanLike = z.union([z.boolean(), z.string(), z.number()]).transform((value, ctx) => {
   if (typeof value === 'boolean') return value;
   if (typeof value === 'number') {
@@ -290,20 +271,6 @@ export const controlPlaneConfigDefinitions = [
     public: false,
     label: 'Initial admin password',
     description: 'Password used only when bootstrapping the first admin account.',
-  }),
-  field({
-    key: 'runtime.consolePublicUrl',
-    yamlPath: 'runtime.consolePublicUrl',
-    env: 'NYABASE_CONSOLE_PUBLIC_URL',
-    defaultValue: '',
-    valueKind: 'string',
-    schema: consolePublicUrl,
-    secret: false,
-    editable: false,
-    restartRequired: true,
-    public: false,
-    label: 'Console public URL',
-    description: 'Browser-reachable ws(s) URL for the console bridge; empty keeps the same-origin relative URL.',
   }),
   field({
     key: 'incus.preflightImageAlias',

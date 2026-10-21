@@ -255,17 +255,8 @@ cleanup_network() {
     || die "network ownership metadata is missing or unsafe"
   local owner_run_id
   owner_run_id="$(read_owned_value "$ownership" run_id)"
-  if [[ -z "$owner_run_id" ]]; then
-    [[ "$(read_owned_value "$ownership" parent_interface)" == "${E2E_INCUS_PARENT_INTERFACE:-vmbr0}" ]] \
-      || die "legacy network ownership metadata does not match the configured parent"
-    [[ "$(read_owned_value "$ownership" routed_subnet)" == "${E2E_INCUS_ROUTED_SUBNET:-}" ]] \
-      || die "legacy network ownership metadata does not match the configured subnet"
-    [[ "$(read_owned_value "$ownership" probe_address)" == "${E2E_INCUS_PROBE_ADDRESS:-}" ]] \
-      || die "legacy network ownership metadata does not match the configured probe"
-  else
-    [[ "$owner_run_id" == "$run_id" ]] \
-      || die "network ownership metadata belongs to another run"
-  fi
+  [[ "$owner_run_id" == "$run_id" ]] \
+    || die "network ownership metadata belongs to another run"
   [[ "$(read_owned_value "$ownership" nft_table)" == "$table" ]] \
     || die "network ownership table does not match the run"
   state="$(read_owned_value "$ownership" state)"

@@ -1,7 +1,5 @@
 runtime:
   nodeEnv: production
-  # Run the HTTP control plane and the Incus reconciliation worker together.
-  role: all
 
 incus:
   # Nyabase workload alias from nyabase-images (baked Ubuntu, not vanilla LXC).

@@ -30,14 +30,6 @@ function driverStatus(samples: readonly NodeMetricSample[]): GpuSupportCheckDto 
       detail: 'nvidia-smi 不可用',
     };
   }
-  const legacyGpuSample = samples.some((sample) => (
-    sample.name.startsWith('nyabase_node_gpu_')
-    && sample.name !== NVIDIA_GPU_DRIVER_PRESENT_METRIC
-    && sample.name !== NVIDIA_GPU_TOOLKIT_PRESENT_METRIC
-  ));
-  if (legacyGpuSample) {
-    return { id: 'nvidia-driver', label: 'NVIDIA 驱动 (nvidia-smi)', status: 'pass' };
-  }
   return {
     id: 'nvidia-driver',
     label: 'NVIDIA 驱动 (nvidia-smi)',

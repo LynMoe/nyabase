@@ -59,7 +59,6 @@ export const NODE_METRICS_PARSE_TIMEOUT_MS = 250;
 export const NODE_METRICS_SCRAPE_INTERVAL_MS = 15_000;
 export const NODE_METRICS_FRESHNESS_MS = 45_000;
 export const NODE_METRICS_FAILURE_THRESHOLD = 3;
-export const ECMASCRIPT_DATE_MAX_EPOCH_MS = 8_640_000_000_000_000;
 export const NODE_METRIC_NAMES = [
   'nyabase_node_cpu_usage_ratio',
   'nyabase_node_cpu_psi_ratio',

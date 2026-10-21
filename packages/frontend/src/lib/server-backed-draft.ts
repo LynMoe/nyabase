@@ -115,8 +115,8 @@ export function mergeRevisionedServerBackedDraft<T extends object>(
 
 /** Merge a server snapshot carried by the rejection of this draft's own CAS
  * write. Unlike an asynchronously cached query result, that `current` value is
- * authoritative for the failed admission even if a legacy server reports a
- * lower revision. */
+ * authoritative for the failed admission, so it is applied even when its
+ * revision is lower than the draft's. */
 export function mergeAuthoritativeRevisionedServerBackedDraft<T extends object>(
   draft: RevisionedServerBackedDraft<T>,
   incoming: T,

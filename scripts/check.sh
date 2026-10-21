@@ -54,6 +54,9 @@ assert_clean_cutover_architecture() {
     packages/backend/src/remote-fs \
     packages/backend/src/quota \
     packages/backend/src/runtime \
+    packages/backend/src/server-card-extensions \
+    packages/frontend/src/extensions \
+    extensions \
     packages/backend/src/database \
     packages/backend/src/storage \
     packages/backend/src/domain; do

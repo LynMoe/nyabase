@@ -17,14 +17,6 @@ import { useAuthStore } from '../store/auth.js';
 const CHANNEL_NAME = 'nyabase-auth-session';
 const REFRESH_LOCK_NAME = 'nyabase-auth-refresh';
 const PENDING_REFRESH_REQUEST_KEY = 'nyabase-auth-refresh-request';
-/** Pre-cookie releases persisted refresh secrets under these keys. */
-const LEGACY_STORAGE_KEYS = [
-  'nyabase-auth',
-  'nyabase-auth-session-sync',
-  'nyabase-auth-access-sync',
-  'nyabase-auth-refresh-lock',
-];
-const LEGACY_STORAGE_PREFIXES = ['nyabase-auth-login-preflight:'];
 
 type SessionMessage = { type: 'login' | 'logout'; source: string };
 
@@ -105,24 +97,9 @@ export function discardPendingRefreshRequestId(): void {
   try { window.localStorage.removeItem(PENDING_REFRESH_REQUEST_KEY); } catch { /* nothing to discard */ }
 }
 
-function purgeLegacyStorage(): void {
-  try {
-    for (const key of LEGACY_STORAGE_KEYS) window.localStorage.removeItem(key);
-    for (let index = window.localStorage.length - 1; index >= 0; index -= 1) {
-      const key = window.localStorage.key(index);
-      if (key && LEGACY_STORAGE_PREFIXES.some((prefix) => key.startsWith(prefix))) {
-        window.localStorage.removeItem(key);
-      }
-    }
-  } catch {
-    // Nothing readable means nothing to leak.
-  }
-}
-
 export function initializeAuthSync(handlers: AuthSyncHandlers): void {
   if (initialized || typeof window === 'undefined') return;
   initialized = true;
-  purgeLegacyStorage();
   if (typeof BroadcastChannel === 'undefined') return;
   channel = new BroadcastChannel(CHANNEL_NAME);
   channel.addEventListener('message', (event: MessageEvent<unknown>) => {
@@ -181,8 +158,6 @@ export const authSessionTestables = {
   userAuthorizationFingerprint,
   isRefreshRequestId,
   pendingRefreshRequestKey: PENDING_REFRESH_REQUEST_KEY,
-  legacyStorageKeys: LEGACY_STORAGE_KEYS,
-  purgeLegacyStorage,
   resetForTests: () => {
     memoryPendingRequestId = null;
     initialized = false;

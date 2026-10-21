@@ -38,3 +38,41 @@ Vite 通过 alias 将 `@nyabase/common` 指向 `src/index.ts`，但 `index.ts` �
 - 只有管理员能做的操作在方法上声明 `@RequireCaps(...)`；`http-api-capabilities.contract.test.ts` 固定这些声明。
 - intents 只有 `GET /intents`、`GET /intents/:id`、`POST /intents/:id/retry` 一个 controller；
   某个资源的操作历史用 `?resourceType=&resourceId=`（多个 id 用逗号分隔，例如镜像的所有分配）。
+
+## 后端结构规则（`packages/backend/src`）
+
+`app-module-graph.test.ts`、`scripts/check.sh` 和相关结构测试固定这些规则，改动前先读它们。
+
+1. 不使用 `forwardRef`。出现环时，把双方共享的小块（只读查询或常量）下沉到更低层。
+2. `reconcile/` 不 import 任何领域模块。引擎只认识 `ManagedReconciler` 接口：各领域 reconciler 在 `onModuleInit`
+   中 `ReconcilerRegistry.register(this)`，资源状态（`needsAttention` / `markSucceeded` / `markFailure`）由 reconciler 自己写，
+   worker 在 `onApplicationBootstrap` 启动。服务器清点、健康标记等通过 servers / storage-pools 提供的服务调用。
+3. 领域模块只单向依赖 `platform/`、`iam/`、`reconcile/`、`incus/`，领域之间允许单向依赖，不允许环。
+   `JwtAuthGuard` + `CapabilitiesGuard` 以 `APP_GUARD` 全局注册，公开路由用 `@Public()`；模块不必为 `@UseGuards` 导入 IAM。
+4. 不保留空壳目录：`runtime`、`database`、`storage`、`domain`、`catalog`、`common`、`filters`、
+   `server-card-extensions`（以及仓库根 `extensions`、前端 `extensions`）已删除，`scripts/check.sh` 断言它们不会回流。
+5. 不为单一实现建 DI Symbol 端口，直接注入类，测试用 `overrideProvider(Class)` 或 `new Class(fake)`。
+   保留的 token 只有 `PG_DATABASE` / `PG_POOL` / `PG_OPTIONS` 和 `INCUS_CLIENT_FACTORY`（外部边界）。
+6. 生产必需依赖不得 `@Optional()`（当前全仓为 0）。
+7. controller 不直接使用 Kysely，调用 service / repository。service 可以直接用 Kysely，
+   只有被多个 service 共享的查询才抽成 repository。
+
+GPU 是平台内置功能（`gpu/` 模块、`common/src/gpu/`、node-exporter 的 `gpu-collector`），不存在扩展框架。
+
+## Schema 规则（上线前）
+
+只有一个迁移 `packages/backend/src/platform/persistence-pg/migrations/000001_initial.sql`。
+产品尚未上线，改 schema 时**直接编辑它**，不要新增增量迁移，也不要写兼容旧数据的代码；
+启动时会精确校验迁移清单。上线之后才改为只追加迁移。
+
+## 本地开发后端
+
+```bash
+pnpm --filter @nyabase/backend dev
+```
+
+`packages/backend/scripts/dev.mjs` 运行 `tsc -b --watch`（含 `common` 的 project reference），首次编译完成后启动
+`node --watch dist/main.js`，并把 SQL 迁移同步到 `dist/`。不要改回 `tsx watch`：esbuild 不产出
+`emitDecoratorMetadata`，Nest 的构造函数按类型注入会得到 `undefined dependency`（在 `c24b801` 上已复现）。
+配置仍走环境变量 / YAML，至少需要 `DATABASE_URL`、`JWT_SECRET`、`SSH_KEY_ENCRYPTION_SECRET`、
+`SSH_PROXY_TOKEN`、`HTTP_PROXY_TOKEN`；端口用 `PORT`，仅本机监听用 `LISTEN_ADDRESS=127.0.0.1`。
