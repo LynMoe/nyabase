@@ -175,6 +175,12 @@ export class IntentsController {
       if (!allowed) throw new ForbiddenException('The actor does not hold the required capabilities');
       return this.intents.list(options);
     }
+    // The old GET /admin/servers/:id/intents: ManageServers sees every intent on
+    // that server, whatever its resource type.
+    if (options.serverId && actor.capabilities.has(Capability.ManageServers)) {
+      const page = await this.intents.list(options);
+      return { items: page.items, nextCursor: page.nextCursor };
+    }
     const allowedTypes = (Object.values(IntentResourceType) as IntentRecord['resourceType'][])
       .filter((type) => {
         if (type === IntentResourceType.Volume) {

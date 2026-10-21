@@ -313,3 +313,65 @@ describe('IntentsController GET /intents/:id and retry', () => {
     expect(revoked.intents.retry).not.toHaveBeenCalled();
   });
 });
+
+describe('IntentsController server-scoped visibility (old /admin/servers/:id/intents)', () => {
+  const serverId = '00000000-0000-4000-8000-000000000003';
+  const onServer = [
+    intent({ id: '00000000-0000-4000-8000-0000000000c1', resourceType: IntentResourceType.Container }),
+    intent({ id: '00000000-0000-4000-8000-0000000000c2', resourceType: IntentResourceType.Volume }),
+    intent({ id: '00000000-0000-4000-8000-0000000000c3', resourceType: IntentResourceType.ImageAssignment }),
+  ];
+
+  it('lets ManageServers see every resource type on the server, with no type filter', async () => {
+    const { controller: c, intents } = controller({
+      list: vi.fn().mockResolvedValue({ items: onServer, nextCursor: null }),
+      authority: { ownerId: null, adminCapability: Capability.ManageVolumes },
+    });
+    const result = await c.list(testActor(USER_ID, Capability.ManageServers), { scope: 'all', serverId });
+    expect(result.items.map((item) => item.resourceType)).toEqual([
+      IntentResourceType.Container,
+      IntentResourceType.Volume,
+      IntentResourceType.ImageAssignment,
+    ]);
+    expect(intents.list).toHaveBeenCalledWith(expect.objectContaining({ serverId, limit: 500 }));
+    expect(intents.list.mock.calls[0]![0]).not.toHaveProperty('resourceTypes');
+  });
+
+  it('without serverId a ManageServers-only actor keeps the old /admin/intents type filter', async () => {
+    const { controller: c, intents } = controller({});
+    await c.list(testActor(USER_ID, Capability.ManageServers), { scope: 'all' });
+    expect(intents.list).toHaveBeenCalledWith(expect.objectContaining({
+      resourceTypes: [IntentResourceType.Server],
+    }));
+  });
+
+  it('serverId does not widen access for actors without ManageServers', async () => {
+    const { controller: c, intents } = controller({});
+    await c.list(testActor(USER_ID, Capability.ManageContainersAny), { scope: 'all', serverId });
+    expect(intents.list).toHaveBeenCalledWith(expect.objectContaining({
+      serverId,
+      resourceTypes: [IntentResourceType.Container],
+    }));
+    await expect(c.list(testActor(USER_ID), { scope: 'all', serverId }))
+      .rejects.toBeInstanceOf(ForbiddenException);
+  });
+
+  it('per-resource scope=all lists match the old controllers: capability by kind, no more', async () => {
+    const volume = controller({ authority: { ownerId: null, adminCapability: Capability.ManageVolumes } });
+    await volume.controller.list(testActor(USER_ID, Capability.ManageVolumes), {
+      scope: 'all', resourceType: IntentResourceType.Volume, resourceId: 'v1',
+    });
+    await expect(volume.controller.list(testActor(USER_ID, Capability.ManageSharedVolumes), {
+      scope: 'all', resourceType: IntentResourceType.Volume, resourceId: 'v1',
+    })).rejects.toBeInstanceOf(ForbiddenException);
+    const container = controller({ authority: { ownerId: null, adminCapability: Capability.ManageContainersAny } });
+    await expect(container.controller.list(testActor(USER_ID, Capability.ManageServers), {
+      scope: 'all', resourceType: IntentResourceType.Container, resourceId: 'c1',
+    })).rejects.toBeInstanceOf(ForbiddenException);
+    const image = controller({ authority: { ownerId: null, adminCapability: Capability.ManageImages } });
+    await image.controller.list(testActor(USER_ID, Capability.ManageImages), {
+      scope: 'all', resourceType: IntentResourceType.ImageAssignment, resourceId: 'a1,a2',
+    });
+    expect(image.intents.list).toHaveBeenCalledOnce();
+  });
+});
