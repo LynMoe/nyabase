@@ -5,7 +5,7 @@ import { api } from '../lib/api.js';
 import { Page, PageHeader } from '../components/layout/page-header.js';
 import { QueryView } from '../components/layout/query-view.js';
 import { userDeleting } from '../lib/in-progress.js';
-import { UserHeaderActions } from './user-detail-page/user-dialogs.js';
+import { UserHeaderActions } from './user-detail-page/user-detail-tabs.js';
 import { UserDetailTabs } from './user-detail-page/user-detail-tabs.js';
 import { queryKeys } from '../lib/query-keys.js';
 import { refetchWhileInProgress } from '../lib/query-lifecycle.js';

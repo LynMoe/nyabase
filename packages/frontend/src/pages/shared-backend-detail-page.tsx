@@ -12,7 +12,7 @@ import { queryKeys } from '../lib/query-keys.js';
 import { type SharedBackendFsidConflict } from '../lib/storage-shrink.js';
 import { type SharedBackendDetailTab } from '../lib/detail-tabs.js';
 import { useAuthStore } from '../store/auth.js';
-import { DeleteBackendAction } from './shared-backend-detail-page/backend-dialogs.js';
+import { DeleteBackendAction } from './shared-backend-detail-page/backend-tabs.js';
 import {
   BackendExecutorsTab,
   BackendOverviewTab,

@@ -18,8 +18,8 @@ import { useAuthStore } from '../store/auth.js';
 import { intentPending } from '../lib/in-progress.js';
 import { queryKeys } from '../lib/query-keys.js';
 import { refetchWhileInProgress } from '../lib/query-lifecycle.js';
-import { IntentFilters, type IntentFilterState, type StatusSegment } from './ops-page/intent-filters.js';
-import { IntentsTable } from './ops-page/intents-table.js';
+import { IntentFilters, type IntentFilterState, type StatusSegment } from './ops-page/ops-parts.js';
+import { IntentsTable } from './ops-page/ops-parts.js';
 
 const PAGE_SIZE = 50;
 

@@ -11,7 +11,7 @@ import {
   EditableSettingsSection,
   EffectiveSettingsSection,
 } from './system-settings-page/settings-sections.js';
-import { useSettingsDraft } from './system-settings-page/use-settings-draft.js';
+import { useSettingsDraft } from './system-settings-page/settings-sections.js';
 
 export default function SystemSettingsPage() {
   const settingsQuery = useQuery({
