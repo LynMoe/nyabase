@@ -6,15 +6,14 @@
     "module": "CommonJS",
     "moduleResolution": "Node",
     "strictPropertyInitialization": false,
-    "skipLibCheck": true,
-    "paths": {
-      "@nyabase/common": ["../common/dist/index"]
-    }
+    "skipLibCheck": true
   },
-  "include": ["src"],
-  "ts-node": {
-    "transpileOnly": true,
-    "experimentalResolver": true,
-    "require": ["tsconfig-paths/register"]
-  }
+  "include": [
+    "src"
+  ],
+  "references": [
+    {
+      "path": "../common"
+    }
+  ]
 }

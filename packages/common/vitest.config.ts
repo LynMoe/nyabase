@@ -4,11 +4,11 @@ import { defineConfig } from 'vitest/config';
 export default defineConfig({
   test: {
     include: ['src/**/*.test.ts'],
-    exclude: ['dist/**', 'dist-esm/**'],
+    exclude: ['dist/**'],
   },
   resolve: {
     // Force `@nyabase/common` to resolve to the live TS sources during tests,
-    // bypassing the `dist`/`dist-esm` build artifacts published via package.exports.
+    // bypassing the `dist` build output.
     alias: {
       '@nyabase/common': path.resolve(__dirname, 'src/index.ts'),
     },

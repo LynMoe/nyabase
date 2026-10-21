@@ -8,14 +8,13 @@
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
-      "import": "./dist-esm/index.js",
-      "require": "./dist/index.js"
+      "default": "./dist/index.js"
     }
   },
   "scripts": {
-    "build": "rm -rf dist dist-esm tsconfig.tsbuildinfo && tsc -p tsconfig.json && tsc -p tsconfig.esm.json",
+    "build": "tsc -b",
     "dev": "tsc -p tsconfig.json --watch",
-    "typecheck": "tsc --noEmit",
+    "typecheck": "tsc -b",
     "test": "vitest run"
   },
   "dependencies": {

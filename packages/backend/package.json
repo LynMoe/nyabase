@@ -3,10 +3,10 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
-    "build": "rm -rf dist && tsc -p tsconfig.json && mkdir -p dist/persistence-pg && cp -R src/persistence-pg/migrations dist/persistence-pg/migrations",
+    "build": "tsc -b && rm -rf dist/persistence-pg/migrations && mkdir -p dist/persistence-pg && cp -R src/persistence-pg/migrations dist/persistence-pg/migrations",
     "dev": "tsx watch src/main.ts",
-    "start": "node -r tsconfig-paths/register dist/main.js",
-    "typecheck": "tsc --noEmit",
+    "start": "node dist/main.js",
+    "typecheck": "tsc -b",
     "test": "vitest run --maxWorkers=4",
     "migration:run": "tsx src/persistence-pg/cli.ts migrate",
     "migration:status": "tsx src/persistence-pg/cli.ts status",
@@ -46,8 +46,6 @@
     "dotenv": "^17.4.2",
     "openapi-typescript": "^7.13.0",
     "swagger2openapi": "^7.0.8",
-    "ts-node-dev": "^2.0.0",
-    "tsconfig-paths": "^4.2.0",
     "tsx": "^4.21.0"
   }
 }

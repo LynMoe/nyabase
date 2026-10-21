@@ -12,7 +12,14 @@ Vite 通过 alias 将 `@nyabase/common` 指向 `src/index.ts`，但 `index.ts` �
 
 **修复**：删除 `packages/common/src/` 下所有 `.js` / `.js.map` / `.d.ts` 编译产物，重启 Vite。
 
+**构建事实（现状）**：
+- `common` 只产出一份 CommonJS `dist/`（`tsc -b`，`composite`），`main`/`types` 指向 `dist`；没有 ESM 产物，`exports` 里也没有 `import` 条件。
+- backend / node-exporter 通过 TypeScript project references（`references: [{ "path": "../common" }]`）依赖 common，
+  `tsc -b` 会自动先构建 `packages/common/dist`；运行时 Node 经 workspace 软链 + `package.json#main` 解析，不使用 tsconfig `paths` 映射，也不需要运行时路径注册钩子。
+- 前端与 backend 的 vitest 仍用 Vite alias 直接指向 `packages/common/src`（前端唯一的解析方式）。
+
 **预防**：
-- `common` 包的 `tsconfig.json` 的 `outDir` 必须指向 `dist/` 或 `dist-esm/`，**绝不能**指向 `src/`。
-- 如需在 `src/` 下检查是否有残留产物：`find packages/common/src -name "*.js" | sort`
-- 前端 dev 模式下 Vite alias 直接读取 `.ts` 源文件，`dist/` 与 `dist-esm/` 对前端无效，无需同步。
+- `common` 包的 `tsconfig.json` 的 `outDir` 必须指向 `dist/`，**绝不能**指向 `src/`。
+- `packages/common/src` 下不得出现任何编译产物（`.js` / `.js.map` / `.d.ts`），`scripts/check.sh` 对此有断言。
+  手动检查：`find packages/common/src -name "*.js" | sort`
+- 前端 dev 模式下 Vite alias 直接读取 `.ts` 源文件，`dist/` 对前端无效，无需同步。
