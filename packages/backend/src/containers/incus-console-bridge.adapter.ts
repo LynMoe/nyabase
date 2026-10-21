@@ -2,7 +2,7 @@ import { Injectable } from '@nestjs/common';
 import type {
   IncusClientPort,
   IncusExecWebSocketSession,
-} from '../incus/incus-client.js';
+} from '../incus/index.js';
 
 /**
  * The Incus exec websocket bridge is the only supported console boundary;

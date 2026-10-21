@@ -10,8 +10,7 @@ import {
   Query,
 } from '@nestjs/common';
 import { Capability, zListScope } from '@nyabase/common';
-import { CurrentActor } from '../iam/decorators/current-actor.decorator.js';
-import { RequireAnyCaps, RequireCaps } from '../iam/decorators/require-caps.decorator.js';
+import { CurrentActor, RequireAnyCaps, RequireCaps } from '../iam/decorators.js';
 import type { Actor } from '../iam/actor.js';
 import { HttpProxyGateway } from './http-proxy-gateway.js';
 import { HttpDomainPoolsService } from './http-domain-pools.service.js';

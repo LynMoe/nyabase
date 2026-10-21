@@ -19,8 +19,7 @@ import {
   zPatchImageRequest,
   zPutImageAssignmentRequest,
 } from '@nyabase/common';
-import { RequireCaps } from '../iam/decorators/require-caps.decorator.js';
-import { CurrentActor } from '../iam/decorators/current-actor.decorator.js';
+import { RequireCaps, CurrentActor } from '../iam/decorators.js';
 import type { Actor } from '../iam/actor.js';
 import { acceptedIntent } from '../reconcile/accepted-intent.js';
 import { ImagesService } from './images.service.js';

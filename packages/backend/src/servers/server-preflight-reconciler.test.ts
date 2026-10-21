@@ -1,8 +1,10 @@
 import { createHash } from 'node:crypto';
 import { describe, expect, it, vi } from 'vitest';
 import { deriveInstanceHwaddr, IncusError } from '../incus/index.js';
+import { ServerConnector } from './server-connector.js';
+import { ServerPreflightStore } from './server-preflight.store.js';
 import { ServerPreflightReconciler } from './server-preflight-reconciler.service.js';
-import { evaluateLanBridge } from './server-preflight-network.js';
+import { evaluateLanBridge } from './preflight-checks.adapter.js';
 import { cleanupStaleProbe } from './server-preflight-probe.js';
 
 const serverId = '00000000-0000-4000-8000-000000000001';
@@ -73,7 +75,7 @@ function database(selectResult?: unknown) {
 function partsOf(instance: ServerPreflightReconciler) {
   return instance as unknown as {
     connector: { connect: unknown };
-    runner: { runPreflight: unknown };
+    runPreflight: unknown;
     store: { readServer: unknown };
     checks: unknown;
     nodeMetrics: unknown;
@@ -85,7 +87,7 @@ function connectorOf(instance: ServerPreflightReconciler): object {
 }
 
 function runnerOf(instance: ServerPreflightReconciler): object {
-  return partsOf(instance).runner as object;
+  return instance;
 }
 
 /** One object exposing the replaceable steps under their old names. */
@@ -95,7 +97,7 @@ function internalsOf(instance: ServerPreflightReconciler): object {
     get checks() { return parts.checks; },
     get nodeMetrics() { return parts.nodeMetrics; },
     set connect(value: unknown) { parts.connector.connect = value; },
-    set runPreflight(value: unknown) { parts.runner.runPreflight = value; },
+    set runPreflight(value: unknown) { parts.runPreflight = value; },
     set readServer(value: unknown) { parts.store.readServer = value; },
   };
 }
@@ -182,8 +184,10 @@ function reconciler(
     releaseClaimedTrustToken: vi.fn().mockReturnValue(true),
   },
 ) {
+  const store = new ServerPreflightStore(db as never);
   return new ServerPreflightReconciler(
-    db as never,
+    store,
+    new ServerConnector(store, trustTokens as never),
     {
       pull: vi.fn(),
     } as never,
@@ -192,7 +196,6 @@ function reconciler(
       checkEgress: vi.fn(),
       checkGuestCanReachHost: vi.fn(),
     } as never,
-    trustTokens as never,
     {
       get: vi.fn(
         (key: string) =>

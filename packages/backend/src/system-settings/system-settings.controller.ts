@@ -12,12 +12,10 @@ import {
   type PublicSettingsDto,
   type SystemSettingsDto,
 } from '@nyabase/common';
-import { Public } from '../iam/decorators/public.decorator.js';
-import { RequireAnyCaps, RequireCaps } from '../iam/decorators/require-caps.decorator.js';
+import { Public, RequireAnyCaps, RequireCaps, CurrentUser } from '../iam/decorators.js';
 import { IncusClientIdentityService } from '../incus/incus-client-identity.service.js';
 import { NyabaseConfigService } from '../platform/config/nyabase-config.service.js';
-import { CurrentUser } from '../iam/decorators/current-user.decorator.js';
-import type { UserRecord } from '../iam/user-record.js';
+import type { UserRecord } from '../iam/auth-persistence.js';
 import { AccessResolverService } from '../iam/access-resolver.service.js';
 import {
   SystemSettingsAuthorityService,

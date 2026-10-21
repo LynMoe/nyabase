@@ -5,13 +5,14 @@ import type {
   IncusResponse,
   IncusRequestOptions,
   IncusSchema,
-} from './incus-client.js';
+} from './incus-client-types.js';
 import {
   IncusError,
   mapIncusOperationFailure,
   type IncusErrorDetailValue,
   type IncusErrorDetails,
 } from './incus-errors.js';
+import { isRecord } from '../platform/domain-utils.js';
 
 export interface IncusOperationWaitResult {
   readonly kind: 'completed';
@@ -30,10 +31,6 @@ export interface IncusSynchronousResult<T> {
 }
 
 export type IncusCompletedResult<T> = IncusSynchronousResult<T> | IncusOperationWaitResult;
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
-}
 
 function boundedText(value: unknown, maxLength: number): string | undefined {
   return typeof value === 'string' && value.length > 0 ? value.slice(0, maxLength) : undefined;
@@ -231,4 +228,88 @@ export async function requestAndWait<T>(
     return { kind: 'synchronous', response };
   }
   return waitForIncusOperation(client, response as IncusResponse<unknown>, options);
+}
+
+export function operationIdFromEnvelope(envelope: IncusEnvelope<unknown>): string {
+  const operation = envelope.operation;
+  if (typeof operation !== 'string' || operation.length === 0) {
+    throw new IncusError('INCUS_INVALID_RESPONSE', 'managed_failure', {
+      reason: 'missing_operation',
+    });
+  }
+
+  let parsed: URL;
+  try {
+    parsed = new URL(operation, 'https://incus.invalid');
+  } catch {
+    throw new IncusError('INCUS_INVALID_RESPONSE', 'managed_failure', {
+      reason: 'invalid_operation',
+    });
+  }
+  if (
+    parsed.origin !== 'https://incus.invalid' ||
+    parsed.search ||
+    parsed.hash ||
+    !/^\/1\.0\/operations\/[^/]+$/.test(parsed.pathname)
+  ) {
+    throw new IncusError('INCUS_INVALID_RESPONSE', 'managed_failure', {
+      reason: 'invalid_operation',
+    });
+  }
+  const encodedId = parsed.pathname.slice('/1.0/operations/'.length);
+  let id: string;
+  try {
+    id = decodeURIComponent(encodedId);
+  } catch {
+    throw new IncusError('INCUS_INVALID_RESPONSE', 'managed_failure', {
+      reason: 'invalid_operation',
+    });
+  }
+  if (!id || /[\u0000-\u001f\u007f/\\]/.test(id)) {
+    throw new IncusError('INCUS_INVALID_RESPONSE', 'managed_failure', {
+      reason: 'invalid_operation',
+    });
+  }
+  return id;
+}
+
+function isTimeoutError(error: unknown): error is IncusError {
+  return error instanceof IncusError && error.code === 'INCUS_TIMEOUT';
+}
+
+/**
+ * Operation wait 404 means Incus dropped the operation record, not that the
+ * mutated resource is absent. Callers must re-read the actual object instead of
+ * mapping this to INCUS_NOT_FOUND for the instance/volume/image.
+ */
+export function isOperationWaitNotFound(error: unknown): error is IncusError {
+  if (!(error instanceof IncusError) || error.code !== 'INCUS_NOT_FOUND') {
+    return false;
+  }
+  const path = error.details.path;
+  return typeof path === 'string' && /^\/1\.0\/operations\/[^/]+\/wait(?:\?|$)/.test(path);
+}
+
+/**
+ * A mutation timeout or operation-wait 404 leaves the physical outcome unknown.
+ * Callers must read the authoritative state once before deciding whether another
+ * mutation is needed. A failed follow-up read rethrows the original wait error
+ * so wait-404 is never converted into instance INCUS_NOT_FOUND by itself.
+ */
+export async function readAfterTimeout<T>(
+  mutate: () => Promise<T>,
+  read: () => Promise<T>,
+): Promise<T> {
+  try {
+    return await mutate();
+  } catch (error) {
+    if (!isTimeoutError(error) && !isOperationWaitNotFound(error)) {
+      throw error;
+    }
+    try {
+      return await read();
+    } catch {
+      throw error;
+    }
+  }
 }

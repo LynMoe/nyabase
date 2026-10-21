@@ -17,8 +17,7 @@ import {
   zPutSharedBackendGrantRequest,
   zPutStoragePoolGrantRequest,
 } from '@nyabase/common';
-import { RequireAnyCaps, RequireCaps } from '../iam/decorators/require-caps.decorator.js';
-import { CurrentActor } from '../iam/decorators/current-actor.decorator.js';
+import { RequireAnyCaps, RequireCaps, CurrentActor } from '../iam/decorators.js';
 import type { Actor } from '../iam/actor.js';
 import { GrantsService, type GrantSubject } from './grants.service.js';
 import { GroupsService } from './groups.service.js';

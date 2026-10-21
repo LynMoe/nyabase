@@ -1,3 +1,4 @@
+import { Injectable } from '@nestjs/common';
 import { randomUUID } from 'node:crypto';
 import { sql } from 'kysely';
 import {
@@ -9,17 +10,25 @@ import {
   type IncusResponse,
   type IncusSchema,
 } from '../incus/index.js';
-import type { EphemeralStore } from '../platform/ephemeral-store.js';
+import { EphemeralStore } from '../platform/ephemeral-store.js';
 import type { IntentRecord } from '../reconcile/intent.repository.js';
-import type { ServerPreflightStore } from './server-preflight.store.js';
 import {
   ServerRevisionChangedError,
-  TRUST_PROPAGATION_RETRY_DELAYS_MS,
   normalized,
   revisionNumber,
-  trustTokenReference,
+  ServerPreflightStore,
   type ServerRow,
-} from './server-preflight-support.js';
+} from './server-preflight.store.js';
+
+const TRUST_PROPAGATION_RETRY_DELAYS_MS = [100, 250, 500, 1_000] as const;
+
+function trustTokenReference(request: Record<string, unknown> | null): string | null {
+  const reference = request?.trustTokenRef;
+  return typeof reference === 'string' &&
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(reference)
+    ? reference.toLowerCase()
+    : null;
+}
 
 function classifyTrustMutationFailure(error: unknown): unknown {
   if (
@@ -79,6 +88,7 @@ async function waitForTrustPropagation(delayMs: number, signal: AbortSignal): Pr
  * server: trusting our client certificate with a one-time token, pinning the
  * server identity and recording the server as online.
  */
+@Injectable()
 export class ServerConnector {
   constructor(
     private readonly store: ServerPreflightStore,

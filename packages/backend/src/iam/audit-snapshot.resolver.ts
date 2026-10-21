@@ -1,6 +1,7 @@
 import { Injectable } from '@nestjs/common';
 import type { AuditResourceSnapshotDto } from '@nyabase/common';
 import type { AuditExecutor } from './audit.repository.js';
+import { isRecord } from '../platform/domain-utils.js';
 
 @Injectable()
 export class AuditSnapshotResolver {
@@ -169,6 +170,3 @@ export function fallbackNameFromPayload(payload: unknown): string | null {
   return null;
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return Boolean(value && typeof value === 'object' && !Array.isArray(value));
-}

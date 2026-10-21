@@ -10,19 +10,20 @@ import fileMetadata from './fixtures/file-metadata.json';
 import instanceFullResponse from './fixtures/instance-full.json';
 import operationAcceptedResponse from './fixtures/operation-accepted.json';
 import serverResponse from './fixtures/server.json';
+import { IncusClient } from './incus-client.js';
+import type {
+  IncusClientOptions,
+  IncusRequestFactory,
+  IncusRequestLike,
+  IncusWebSocketFactory,
+  IncusWebSocketLike,
+} from './incus-client-types.js';
+import { isOperationWaitNotFound, readAfterTimeout } from './incus-operation.js';
 import {
-  IncusClient,
-  encodeImageAliasName,
-  type IncusClientOptions,
-  type IncusRequestFactory,
-  type IncusRequestLike,
-  type IncusWebSocketFactory,
-  type IncusWebSocketLike,
   assertLeafCertificateFingerprint,
+  encodeImageAliasName,
   leafCertificateFingerprint,
-  isOperationWaitNotFound,
-  readAfterTimeout,
-} from './incus-client.js';
+} from './incus-transport.js';
 import { IncusError } from './incus-errors.js';
 
 const leafCertificate = Buffer.from('incus-test-leaf');

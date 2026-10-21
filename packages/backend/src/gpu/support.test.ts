@@ -5,7 +5,7 @@ import {
   NVIDIA_GPU_TOOLKIT_PRESENT_METRIC,
   type GpuSupportCheckDto,
 } from '@nyabase/common';
-import { probeGpuSupport } from './support.js';
+import { probeGpuSupport } from './inventory.js';
 
 function byId(checks: readonly GpuSupportCheckDto[], id: string) {
   return checks.find((check) => check.id === id);

@@ -1,10 +1,8 @@
 import { describe, expect, it, vi } from 'vitest';
 import { IncusError } from '../incus/incus-errors.js';
-import {
-  canDeleteManagedImage,
-  ImageAssignmentReconciler,
-  selectImageForAssignment,
-} from './image-assignment-reconciler.service.js';
+import { canDeleteManagedImage, selectImageForAssignment } from './image-assignment-ops.js';
+import { ImageReconcileStore } from './image-reconcile.store.js';
+import { ImageAssignmentReconciler } from './image-assignment-reconciler.service.js';
 import { DEFAULT_IMAGE_SOURCE_SERVER } from '@nyabase/common';
 
 describe('image assignment reconciliation policy', () => {
@@ -93,7 +91,7 @@ describe('image assignment reconciliation policy', () => {
       createImage,
     };
     const reconciler = new ImageAssignmentReconciler(
-      database as never,
+      new ImageReconcileStore(database as never),
       { get: (key: string) => (key === 'incus.preflightSourceServer' ? DEFAULT_IMAGE_SOURCE_SERVER : '') } as never,
       {} as never,
       { log: vi.fn().mockResolvedValue(undefined) } as never,
@@ -191,7 +189,7 @@ describe('image assignment reconciliation policy', () => {
       return { metadata: imageB };
     });
     const reconciler = new ImageAssignmentReconciler(
-      database as never,
+      new ImageReconcileStore(database as never),
       { get: (key: string) => (key === 'incus.preflightSourceServer' ? DEFAULT_IMAGE_SOURCE_SERVER : '') } as never,
       {} as never,
       { log: vi.fn().mockResolvedValue(undefined) } as never,
@@ -273,7 +271,7 @@ describe('image assignment reconciliation policy', () => {
       listImages: vi.fn().mockResolvedValue({ metadata: [] }),
     };
     const reconciler = new ImageAssignmentReconciler(
-      database as never,
+      new ImageReconcileStore(database as never),
       { get: (key: string) => (key === 'incus.preflightSourceServer' ? DEFAULT_IMAGE_SOURCE_SERVER : '') } as never,
       {} as never,
       { log: vi.fn().mockResolvedValue(undefined) } as never,
@@ -339,7 +337,7 @@ describe('image assignment reconciliation policy', () => {
       createImageAlias: vi.fn(),
     };
     const reconciler = new ImageAssignmentReconciler(
-      database as never,
+      new ImageReconcileStore(database as never),
       { get: (key: string) => (key === 'incus.preflightSourceServer' ? DEFAULT_IMAGE_SOURCE_SERVER : '') } as never,
       {} as never,
       { log: vi.fn().mockResolvedValue(undefined) } as never,
@@ -421,7 +419,7 @@ describe('image assignment reconciliation policy', () => {
         .mockResolvedValueOnce({ metadata: [] }),
     };
     const reconciler = new ImageAssignmentReconciler(
-      database as never,
+      new ImageReconcileStore(database as never),
       { get: (key: string) => (key === 'incus.preflightSourceServer' ? DEFAULT_IMAGE_SOURCE_SERVER : '') } as never,
       intents as never,
       { log: vi.fn().mockResolvedValue(undefined) } as never,

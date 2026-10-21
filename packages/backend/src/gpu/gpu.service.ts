@@ -25,11 +25,9 @@ import { AuditService } from '../iam/audit.service.js';
 import { assertListScope, type Actor } from '../iam/actor.js';
 import { INCUS_CLIENT_FACTORY, type IncusClientFactory } from '../incus/incus-client.factory.js';
 import { AuthenticatedNodeMetricsPullAdapter } from '../metrics/node-metrics-pull.adapter.js';
-import { assertGpuCanDisable, gpuOccupiedError, isGpuOccupiedSqlError } from './enablement.js';
+import { assertGpuCanDisable, gpuOccupiedError, isGpuOccupiedSqlError } from './admit.js';
 import { GpuClaimsRepository } from './gpu-claims.repository.js';
-import { listGpuDevices } from './inventory.js';
-import { refreshGpuHealth } from './preflight.js';
-import { probeGpuSupport } from './support.js';
+import { listGpuDevices, refreshGpuHealth, probeGpuSupport } from './inventory.js';
 
 const FAILED_HOST_PROBE: GpuSupportDto = {
   supported: null,

@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import * as https from 'node:https';
 import { checkServerIdentity } from 'node:tls';
 import type { RequestOptions } from 'node:https';
@@ -20,16 +21,116 @@ import type {
   IncusWebSocketLike,
 } from './incus-client-types.js';
 import { sendExchange, type ExchangeHost, type ExchangeResult } from './incus-http-exchange.js';
-import {
-  DEFAULT_MAX_BODY_BYTES,
-  DEFAULT_TIMEOUTS,
-  assertHeaderValue,
-  assertLeafCertificateFingerprint,
-  boundedTimeout,
-  leafCertificateFingerprint,
-  mutableCa,
-  normalizeTimeouts,
-} from './incus-request-util.js';
+
+const DEFAULT_TIMEOUTS: IncusTimeouts = {
+  connectMs: 5_000,
+  headersMs: 10_000,
+  bodyMs: 10_000,
+  totalMs: 30_000,
+};
+
+const MAX_TIMEOUT_MS = 600_000;
+const DEFAULT_MAX_BODY_BYTES = 16 * 1024 * 1024;
+
+export function boundedTimeout(value: number | undefined, fallback: number): number {
+  const timeout = value ?? fallback;
+  if (!Number.isSafeInteger(timeout) || timeout <= 0 || timeout > MAX_TIMEOUT_MS) {
+    throw new IncusError('INCUS_TIMEOUT', 'managed_failure', { phase: 'configuration' });
+  }
+  return timeout;
+}
+
+function normalizeTimeouts(input?: Partial<IncusTimeouts>): IncusTimeouts {
+  return {
+    connectMs: boundedTimeout(input?.connectMs, DEFAULT_TIMEOUTS.connectMs),
+    headersMs: boundedTimeout(input?.headersMs, DEFAULT_TIMEOUTS.headersMs),
+    bodyMs: boundedTimeout(input?.bodyMs, DEFAULT_TIMEOUTS.bodyMs),
+    totalMs: boundedTimeout(input?.totalMs, DEFAULT_TIMEOUTS.totalMs),
+  };
+}
+
+function assertHeaderValue(value: string, name: string): void {
+  if (/[\r\n]/.test(value)) {
+    throw new IncusError('INCUS_BAD_REQUEST', 'managed_failure', { reason: name });
+  }
+}
+
+export function encodeSegment(value: string, label: string): string {
+  if (!value || value === '.' || value === '..' || /[\u0000-\u001f\u007f/\\]/.test(value)) {
+    throw new IncusError('INCUS_BAD_REQUEST', 'managed_failure', { reason: label });
+  }
+  return encodeURIComponent(value);
+}
+
+/** Image alias names may contain `/` (e.g. ubuntu/24.04). Do not use encodeSegment. */
+export function encodeImageAliasName(value: string): string {
+  if (
+    !value
+    || value === '.'
+    || value === '..'
+    || value.includes('//')
+    || value.startsWith('/')
+    || value.endsWith('/')
+    || /[\u0000-\u001f\u007f\\]/.test(value)
+  ) {
+    throw new IncusError('INCUS_BAD_REQUEST', 'managed_failure', { reason: 'image_alias' });
+  }
+  return encodeURIComponent(value);
+}
+
+export function appendQuery(
+  path: string,
+  values: Readonly<Record<string, string | number | undefined>>,
+): string {
+  const query = new URLSearchParams();
+  for (const [key, value] of Object.entries(values)) {
+    if (value !== undefined) {
+      query.set(key, String(value));
+    }
+  }
+  const queryString = query.toString();
+  return queryString ? `${path}${path.includes('?') ? '&' : '?'}${queryString}` : path;
+}
+
+function mutableCa(
+  ca: string | Buffer | readonly (string | Buffer)[] | undefined,
+): string | Buffer | (string | Buffer)[] | undefined {
+  if (Array.isArray(ca)) {
+    return Array.from(ca) as (string | Buffer)[];
+  }
+  return ca as string | Buffer | undefined;
+}
+
+export function encodeCertificateForPost(certificatePem: string): string {
+  const match = /^-----BEGIN CERTIFICATE-----\s*([\s\S]*?)\s*-----END CERTIFICATE-----\s*$/.exec(
+    certificatePem.trim(),
+  );
+  const encoded = match?.[1]?.replace(/\s/g, '');
+  if (!encoded || encoded.length % 4 !== 0 || !/^[A-Za-z0-9+/]+={0,2}$/.test(encoded)) {
+    throw new IncusError('INCUS_BAD_REQUEST', 'managed_failure', {
+      reason: 'invalid_certificate_pem',
+    });
+  }
+  const der = Buffer.from(encoded, 'base64');
+  if (der.byteLength === 0) {
+    throw new IncusError('INCUS_BAD_REQUEST', 'managed_failure', {
+      reason: 'invalid_certificate_pem',
+    });
+  }
+  return der.toString('base64');
+}
+
+export function leafCertificateFingerprint(raw: Buffer): string {
+  return createHash('sha256').update(raw).digest('hex');
+}
+
+export function assertLeafCertificateFingerprint(raw: Buffer, expected: string): string {
+  const actual = leafCertificateFingerprint(raw);
+  if (actual !== normalizeCertificateFingerprint(expected)) {
+    throw new IncusError('TLS_PIN_MISMATCH', 'managed_failure');
+  }
+  return actual;
+}
 
 /**
  * Connection handling shared by every Incus endpoint: endpoint allow-listing,
@@ -39,17 +140,16 @@ import {
 export class IncusTransport implements ExchangeHost {
   readonly endpoint: string;
 
-  protected readonly baseUrl: URL;
+  private readonly baseUrl: URL;
   readonly tlsOptions: IncusTlsOptions;
-  protected readonly allowedHosts: ReadonlySet<string>;
+  private readonly allowedHosts: ReadonlySet<string>;
   readonly timeouts: IncusTimeouts;
-  protected readonly operationWaitTimeoutMs: number;
+  readonly operationWaitTimeoutMs: number;
   readonly maxBodyBytes: number;
   readonly requestFactory: IncusRequestFactory;
-  protected readonly websocketFactory: IncusWebSocketFactory;
+  private readonly websocketFactory: IncusWebSocketFactory;
   serverFingerprint?: string;
   private firstFingerprintPromise?: Promise<void>;
-
 
   constructor(options: IncusClientOptions) {
     this.baseUrl = this.validateEndpoint(options.endpoint, options.allowedHosts);
@@ -122,11 +222,11 @@ export class IncusTransport implements ExchangeHost {
     return response.value;
   }
 
-  protected tlsPin(): string | undefined {
+  private tlsPin(): string | undefined {
     return this.serverFingerprint ?? this.tlsOptions.expectedFingerprint;
   }
 
-  protected pinnedTlsSocketOptions(): {
+  private pinnedTlsSocketOptions(): {
     readonly ca: string | Buffer | Array<string | Buffer> | undefined;
     readonly rejectUnauthorized: boolean;
   } {
@@ -240,7 +340,7 @@ export class IncusTransport implements ExchangeHost {
     });
   }
 
-  protected validateEndpoint(endpoint: string, allowedHosts: readonly string[]): URL {
+  private validateEndpoint(endpoint: string, allowedHosts: readonly string[]): URL {
     let url: URL;
     try {
       url = new URL(endpoint);
@@ -266,7 +366,7 @@ export class IncusTransport implements ExchangeHost {
     return url;
   }
 
-  protected urlForPath(path: string): URL {
+  private urlForPath(path: string): URL {
     const rawPath = path.split(/[?#]/, 1)[0];
     if (
       !path.startsWith('/') ||
@@ -322,7 +422,7 @@ export class IncusTransport implements ExchangeHost {
   }
 
   /** Execute one HTTPS request and return the parsed JSON or raw response. */
-  protected executeRequest(
+  executeRequest(
     method: IncusHttpMethod,
     path: string,
     options: IncusRequestOptions,

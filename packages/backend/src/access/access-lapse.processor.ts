@@ -7,10 +7,9 @@ import {
 } from '@nestjs/common';
 import { randomUUID } from 'node:crypto';
 import { AuditAction } from '@nyabase/common';
-import { AccessChangeNotifier } from '../iam/access-change-notifier.js';
-import { systemActor, type Actor } from '../iam/actor.js';
+import { AccessChangeNotifier } from '../iam/access-resolver.service.js';
+import { systemActor, type Actor, SYSTEM_ACTOR_USERNAME } from '../iam/actor.js';
 import { AuditService } from '../iam/audit.service.js';
-import { SYSTEM_ACTOR_USERNAME } from '../iam/system-actor.js';
 import { ReconcileClaimRepository } from '../reconcile/reconcile-claim.repository.js';
 import {
   AccessLapseRepository,

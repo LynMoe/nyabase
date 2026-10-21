@@ -14,6 +14,9 @@ export interface AuthUser {
   updatedAt: Date;
 }
 
+/** The authenticated principal attached to a request (service-facing camelCase contract). */
+export type UserRecord = AuthUser;
+
 export interface AuthApiToken {
   id: string;
   userId: string;

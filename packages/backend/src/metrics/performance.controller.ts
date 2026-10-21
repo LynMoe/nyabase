@@ -2,7 +2,7 @@ import { Controller, Get, Query } from '@nestjs/common';
 import { z } from 'zod';
 import { BadRequestException } from '@nestjs/common';
 import { zListScope, type PerformanceMetric, type PerformanceRange } from '@nyabase/common';
-import { CurrentActor } from '../iam/decorators/current-actor.decorator.js';
+import { CurrentActor } from '../iam/decorators.js';
 import type { Actor } from '../iam/actor.js';
 import { PerformanceQueryService } from './performance-query.service.js';
 

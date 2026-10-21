@@ -6,8 +6,6 @@ import {
   observeRootQuotaPending,
   type ManagedFieldOwnership,
   type ManagedInstanceDocument,
-} from './compare-managed-fields.js';
-import {
   buildDesiredInstanceSpec,
   type DesiredInstanceSpec,
   type InstanceSpecInput,

@@ -1,7 +1,7 @@
 import { Controller, Get, Inject } from '@nestjs/common';
 import { Capability } from '@nyabase/common';
 import type { Pool } from 'pg';
-import { RequireCaps } from '../iam/decorators/require-caps.decorator.js';
+import { RequireCaps } from '../iam/decorators.js';
 import { PG_POOL } from '../platform/persistence-pg/tokens.js';
 import { MetricsWriter } from './metrics-writer.js';
 

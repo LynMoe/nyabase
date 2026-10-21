@@ -1,7 +1,7 @@
 import { Controller, Get } from '@nestjs/common';
-import { CurrentUser } from '../iam/decorators/current-user.decorator.js';
+import { CurrentUser } from '../iam/decorators.js';
 import { AccessResolverService } from '../iam/access-resolver.service.js';
-import type { UserRecord } from '../iam/user-record.js';
+import type { UserRecord } from '../iam/auth-persistence.js';
 import { EffectiveAccessDto } from '@nyabase/common';
 
 @Controller('me')

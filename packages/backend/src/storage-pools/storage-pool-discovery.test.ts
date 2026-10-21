@@ -4,7 +4,7 @@ import {
   deriveSharedBackendIdentity,
   dirQuotaEffectiveFromVolumeState,
   normalizeObservedStoragePoolSource,
-} from './storage-pool-discovery.js';
+} from './storage-pool-discovery.service.js';
 import { storagePoolCapability } from './storage-pool-capability.js';
 import { StoragePoolResizeFamily } from '@nyabase/common';
 

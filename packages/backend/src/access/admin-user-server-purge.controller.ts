@@ -1,7 +1,6 @@
 import { Controller, Param, Post } from '@nestjs/common';
 import { Capability } from '@nyabase/common';
-import { RequireCaps } from '../iam/decorators/require-caps.decorator.js';
-import { CurrentActor } from '../iam/decorators/current-actor.decorator.js';
+import { RequireCaps, CurrentActor } from '../iam/decorators.js';
 import type { Actor } from '../iam/actor.js';
 import { GrantsService } from '../groups/grants.service.js';
 import { UserServerResourcePurgeService } from './user-server-resource-purge.service.js';

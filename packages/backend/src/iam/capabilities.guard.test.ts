@@ -2,8 +2,8 @@ import { ForbiddenException, type ExecutionContext } from '@nestjs/common';
 import { Reflector } from '@nestjs/core';
 import { Capability } from '@nyabase/common';
 import { describe, expect, it, vi } from 'vitest';
-import { IS_PUBLIC_KEY } from '../decorators/public.decorator.js';
-import { CapabilitiesGuard } from './capabilities.guard.js';
+import { IS_PUBLIC_KEY } from './decorators.js';
+import { CapabilitiesGuard } from './guards.js';
 
 describe('CapabilitiesGuard', () => {
   it('skips routes marked @Public()', async () => {

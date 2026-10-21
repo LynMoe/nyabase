@@ -1,5 +1,5 @@
 import { Controller, Get, ServiceUnavailableException } from '@nestjs/common';
-import { Public } from '../iam/decorators/public.decorator.js';
+import { Public } from '../iam/decorators.js';
 import { PgSchemaReadiness } from '../platform/persistence-pg/persistence-pg.module.js';
 import { RuntimeLifecycleService } from './runtime-lifecycle.service.js';
 

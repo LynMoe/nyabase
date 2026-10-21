@@ -7,8 +7,7 @@ import {
   Query,
 } from '@nestjs/common';
 import { Capability, zListScope } from '@nyabase/common';
-import { CurrentActor } from '../iam/decorators/current-actor.decorator.js';
-import { RequireCaps } from '../iam/decorators/require-caps.decorator.js';
+import { CurrentActor, RequireCaps } from '../iam/decorators.js';
 import type { Actor } from '../iam/actor.js';
 import { GpuService } from './gpu.service.js';
 

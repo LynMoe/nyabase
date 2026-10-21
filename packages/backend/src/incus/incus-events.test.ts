@@ -2,7 +2,7 @@ import { EventEmitter } from 'node:events';
 import { describe, expect, it } from 'vitest';
 import lifecycleEvent from './fixtures/event-lifecycle.json';
 import { subscribeIncusEvents, type IncusEventWakeStream } from './incus-events.js';
-import type { IncusWebSocketLike } from './incus-client.js';
+import type { IncusWebSocketLike } from './incus-client-types.js';
 
 class EventSocket extends EventEmitter {
   closed = false;

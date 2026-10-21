@@ -19,7 +19,7 @@ import {
   zListVolumesQuery,
   zPatchVolumeRequest,
 } from '@nyabase/common';
-import { CurrentActor } from '../iam/decorators/current-actor.decorator.js';
+import { CurrentActor } from '../iam/decorators.js';
 import type { Actor } from '../iam/actor.js';
 import { LocalVolumesService } from './local-volumes.service.js';
 import { VolumeAttachmentsService } from './volume-attachments.service.js';

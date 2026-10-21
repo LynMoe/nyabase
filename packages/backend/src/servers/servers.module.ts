@@ -9,9 +9,10 @@ import { StoragePoolsModule } from '../storage-pools/storage-pools.module.js';
 import { UsersModule } from '../users/users.module.js';
 import { VolumesModule } from '../volumes/volumes.module.js';
 import { IncusPreflightChecksAdapter } from './preflight-checks.adapter.js';
-import { ServerConnectIntentService } from './server-connect-intent.service.js';
+import { ServerConnectIntentService, ServerPreflightIntentService } from './server-intents.service.js';
+import { ServerConnector } from './server-connector.js';
+import { ServerPreflightStore } from './server-preflight.store.js';
 import { ServerHealthService } from './server-health.service.js';
-import { ServerPreflightIntentService } from './server-preflight-intent.service.js';
 import { ServerPreflightReconciler } from './server-preflight-reconciler.service.js';
 import { ServersController } from './servers.controller.js';
 import { ServersService } from './servers.service.js';
@@ -31,6 +32,8 @@ import { ServersService } from './servers.service.js';
   providers: [
     ServersService,
     ServerPreflightReconciler,
+    ServerPreflightStore,
+    ServerConnector,
     ServerHealthService,
     IncusPreflightChecksAdapter,
     ServerConnectIntentService,

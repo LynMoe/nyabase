@@ -19,8 +19,7 @@ import type { NyabaseDatabase } from '../platform/persistence-pg/database.types.
 import { PG_DATABASE } from '../platform/persistence-pg/tokens.js';
 import { PgTransactionManager } from '../platform/persistence-pg/transaction.js';
 import { afterCommit } from '../platform/post-commit.js';
-import { AccessChangeNotifier } from '../iam/access-change-notifier.js';
-import { AccessResolverService } from '../iam/access-resolver.service.js';
+import { AccessChangeNotifier, AccessResolverService } from '../iam/access-resolver.service.js';
 import type { Actor } from '../iam/actor.js';
 import { AuditService } from '../iam/audit.service.js';
 import { GpuClaimsRepository } from '../gpu/gpu-claims.repository.js';

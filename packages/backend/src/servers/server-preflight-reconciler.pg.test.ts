@@ -1,6 +1,8 @@
 import { randomUUID } from 'node:crypto';
 import { describe, expect, it, vi } from 'vitest';
 import { withPostgresTestDatabase } from '../platform/persistence-pg/postgres-test-harness.js';
+import { ServerConnector } from './server-connector.js';
+import { ServerPreflightStore } from './server-preflight.store.js';
 import { ServerPreflightReconciler } from './server-preflight-reconciler.service.js';
 
 const describePg = process.env.NYABASE_TEST_DATABASE_URL ? describe : describe.skip;
@@ -105,11 +107,12 @@ function connect(
 }
 
 function reconciler(database: unknown, trustTokens: unknown): ServerPreflightReconciler {
+  const store = new ServerPreflightStore(database as never);
   return new ServerPreflightReconciler(
-    database as never,
+    store,
+    new ServerConnector(store, trustTokens as never),
     {} as never,
     {} as never,
-    trustTokens as never,
     { get: vi.fn() } as never,
     { register: vi.fn() } as never,
   );

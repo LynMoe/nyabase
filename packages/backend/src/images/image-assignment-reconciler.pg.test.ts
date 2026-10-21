@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { IncusError } from '../incus/index.js';
 import { withPostgresTestDatabase } from '../platform/persistence-pg/postgres-test-harness.js';
 import { IntentRepository } from '../reconcile/intent.repository.js';
+import { ImageReconcileStore } from './image-reconcile.store.js';
 import { ImageAssignmentReconciler } from './image-assignment-reconciler.service.js';
 import { noopWake } from '../reconcile/reconcile-wake.test-helper.js';
 import { DEFAULT_IMAGE_SOURCE_SERVER } from '@nyabase/common';
@@ -109,7 +110,7 @@ describePg('PostgreSQL image assignment cleanup and scan idempotency', () => {
       };
       const intents = new IntentRepository(database, noopWake());
       const reconciler = new ImageAssignmentReconciler(
-        database,
+        new ImageReconcileStore(database),
         { get: (key: string) => (key === 'incus.preflightSourceServer' ? DEFAULT_IMAGE_SOURCE_SERVER : '') } as never,
         intents,
         { log: vi.fn().mockResolvedValue(undefined) } as never,
@@ -212,7 +213,7 @@ describePg('PostgreSQL image assignment cleanup and scan idempotency', () => {
 
       const intents = new IntentRepository(database, noopWake());
       const reconciler = new ImageAssignmentReconciler(
-        database,
+        new ImageReconcileStore(database),
         { get: (key: string) => (key === 'incus.preflightSourceServer' ? DEFAULT_IMAGE_SOURCE_SERVER : '') } as never,
         intents,
         { log: vi.fn().mockResolvedValue(undefined) } as never,

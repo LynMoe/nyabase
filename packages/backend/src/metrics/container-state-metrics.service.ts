@@ -17,7 +17,7 @@ import {
 } from '@nyabase/common';
 import type { Kysely } from 'kysely';
 import { NyabaseConfigService } from '../platform/config/nyabase-config.service.js';
-import type { IncusClientPort } from '../incus/incus-client.js';
+import type { IncusClientPort } from '../incus/index.js';
 import { isLocalPoolRow } from '../storage-pools/storage-pool-capability.js';
 import type { NyabaseDatabase } from '../platform/persistence-pg/database.types.js';
 import { PG_DATABASE } from '../platform/persistence-pg/tokens.js';

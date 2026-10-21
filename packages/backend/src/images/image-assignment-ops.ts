@@ -1,21 +1,113 @@
+import { AuditAction } from '@nyabase/common';
 import {
+  IncusError,
   readAfterTimeout,
   requestAndWait,
   type IncusClientPort,
+  type IncusSchema,
 } from '../incus/index.js';
+import type { AuditService } from '../iam/audit.service.js';
 import type { IntentRecord } from '../reconcile/intent.repository.js';
-import type { ImageReconcileDeps } from './image-reconcile-deps.js';
-import {
-  ImagePullNotConfirmedError,
-  auditIncusMutate,
-  imageFingerprint,
-  imageHasAlias,
-  isNotFound,
-  sameFingerprint,
-  selectImageForAssignment,
-  type Image,
-  type ImageAssignmentSource,
-} from './image-reconcile-support.js';
+
+export type Image = IncusSchema<'Image'>;
+
+export interface ImageAssignmentSource {
+  readonly alias: string;
+  readonly fingerprint: string | null;
+  readonly sourceServer: string;
+  readonly imageType?: string;
+}
+
+export async function auditIncusMutate(
+  audit: AuditService,
+  intent: IntentRecord,
+  detail: {
+    readonly method: string;
+    readonly path: string;
+    readonly instanceName?: string;
+  },
+): Promise<void> {
+  await audit.log(
+    intent.requestedBy,
+    AuditAction.IncusMutate,
+    intent.resourceId,
+    intent.resourceType,
+    {
+      method: detail.method,
+      path: detail.path,
+      instanceName: detail.instanceName,
+      serverId: intent.serverId,
+      intentId: intent.id,
+    },
+  );
+}
+
+export class ImagePullNotConfirmedError extends Error {
+  readonly code: 'IMAGE_ASSIGNMENT_FINGERPRINT_MISMATCH' | 'IMAGE_NOT_AVAILABLE';
+  readonly details: Record<string, unknown>;
+
+  constructor(desired: ImageAssignmentSource) {
+    const pinned = desired.fingerprint !== null && desired.fingerprint !== undefined;
+    super(
+      pinned
+        ? 'The pulled image did not have the pinned fingerprint'
+        : 'The pulled image alias was not present after the pull',
+    );
+    this.name = 'ImagePullNotConfirmedError';
+    this.code = pinned ? 'IMAGE_ASSIGNMENT_FINGERPRINT_MISMATCH' : 'IMAGE_NOT_AVAILABLE';
+    this.details = pinned
+      ? { desiredFingerprint: desired.fingerprint }
+      : { alias: desired.alias };
+  }
+}
+export function isNotFound(error: unknown): boolean {
+  return error instanceof IncusError && error.code === 'INCUS_NOT_FOUND';
+}
+
+export function imageFingerprint(image: Image | undefined): string | null {
+  return image?.fingerprint ?? null;
+}
+
+export function imageHasAlias(image: Image, alias: string): boolean {
+  return (image.aliases ?? []).some((item) => item.name === alias);
+}
+
+export function sameFingerprint(
+  actual: string | null | undefined,
+  desired: string | null | undefined,
+): boolean {
+  return actual !== null
+    && actual !== undefined
+    && desired !== null
+    && desired !== undefined
+    && actual.toLowerCase() === desired.toLowerCase();
+}
+
+export function selectImageForAssignment(
+  images: readonly Image[],
+  desired: Pick<ImageAssignmentSource, 'alias' | 'fingerprint'>,
+): Image | undefined {
+  if (desired.fingerprint !== null && desired.fingerprint !== undefined) {
+    return images.find((image) => sameFingerprint(imageFingerprint(image), desired.fingerprint));
+  }
+  return images.find((image) => imageHasAlias(image, desired.alias));
+}
+
+export function canDeleteManagedImage(input: {
+  readonly managedFingerprint: string | null;
+  readonly actualFingerprint: string | null;
+  readonly otherAssignment: boolean;
+  readonly pinned: boolean;
+  readonly usedBy: boolean;
+}): boolean {
+  return Boolean(
+    input.managedFingerprint
+    && sameFingerprint(input.actualFingerprint, input.managedFingerprint)
+    && !input.otherAssignment
+    && !input.pinned
+    && !input.usedBy,
+  );
+}
 
 /** Fingerprints of the Incus resources using the image. */
 export function imageUsedBy(image: Image): string[] {
@@ -49,12 +141,12 @@ async function assertImageGone(client: IncusClientPort, fingerprint: string): Pr
 
 /** Delete a managed image from the server. */
 export async function deleteManagedImage(
-  deps: ImageReconcileDeps,
+  audit: AuditService,
   client: IncusClientPort,
   fingerprint: string,
   intent: IntentRecord,
 ): Promise<void> {
-  await auditIncusMutate(deps.audit, intent, {
+  await auditIncusMutate(audit, intent, {
     method: 'DELETE',
     path: `/1.0/images/${fingerprint}`,
     instanceName: fingerprint,
@@ -65,7 +157,7 @@ export async function deleteManagedImage(
 
 /** Point the alias at the fingerprint, replacing any other target. */
 export async function ensureAliasOnFingerprint(
-  deps: ImageReconcileDeps,
+  audit: AuditService,
   client: IncusClientPort,
   images: readonly Image[],
   alias: string,
@@ -74,13 +166,13 @@ export async function ensureAliasOnFingerprint(
 ): Promise<void> {
   const target = images.find((image) => sameFingerprint(imageFingerprint(image), fingerprint));
   if (target && imageHasAlias(target, alias)) return;
-  await auditIncusMutate(deps.audit, intent, {
+  await auditIncusMutate(audit, intent, {
     method: 'DELETE',
     path: `/1.0/images/aliases/${alias}`,
     instanceName: fingerprint,
   });
   await client.deleteImageAlias(alias);
-  await auditIncusMutate(deps.audit, intent, {
+  await auditIncusMutate(audit, intent, {
     method: 'POST',
     path: '/1.0/images/aliases',
     instanceName: fingerprint,
@@ -94,7 +186,7 @@ export async function ensureAliasOnFingerprint(
 
 /** Remove the superseded image; true when something still uses it and it must stay. */
 export async function deletePreviousImageIfUnused(
-  deps: ImageReconcileDeps,
+  audit: AuditService,
   client: IncusClientPort,
   previous: string | null,
   desiredFingerprint: string,
@@ -109,7 +201,7 @@ export async function deletePreviousImageIfUnused(
     throw error;
   }
   if (imageUsedBy(image).length > 0) return true;
-  await auditIncusMutate(deps.audit, intent, {
+  await auditIncusMutate(audit, intent, {
     method: 'DELETE',
     path: `/1.0/images/${previous}`,
     instanceName: previous,
@@ -123,7 +215,7 @@ export async function deletePreviousImageIfUnused(
  * intents for the same image (`pulls` is the reconciler's in-flight map).
  */
 export async function ensurePulled(
-  deps: ImageReconcileDeps,
+  audit: AuditService,
   pulls: Map<string, Promise<void>>,
   client: IncusClientPort,
   desired: ImageAssignmentSource,
@@ -137,7 +229,7 @@ export async function ensurePulled(
     return;
   }
   const pull: Promise<void> = (async () => {
-    await auditIncusMutate(deps.audit, intent, {
+    await auditIncusMutate(audit, intent, {
       method: 'POST',
       path: '/1.0/images',
       instanceName: desired.fingerprint ?? desired.alias,

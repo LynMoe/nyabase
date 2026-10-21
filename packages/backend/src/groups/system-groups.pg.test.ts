@@ -1,6 +1,6 @@
 import { Capability, SystemGroupKey, UserStatus } from '@nyabase/common';
 import { describe, expect, it } from 'vitest';
-import { SYSTEM_ACTOR_USERNAME } from '../iam/system-actor.js';
+import { SYSTEM_ACTOR_USERNAME } from '../iam/actor.js';
 import { addMember, seedUser } from '../iam/access.pg-test-helper.js';
 import { withPostgresTestDatabase } from '../platform/persistence-pg/postgres-test-harness.js';
 import { PgTransactionManager } from '../platform/persistence-pg/transaction.js';

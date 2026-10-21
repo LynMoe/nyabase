@@ -1,4 +1,5 @@
-import type { IncusClientPort, IncusSchema, IncusWebSocketLike } from './incus-client.js';
+import type { IncusClientPort, IncusSchema, IncusWebSocketLike } from './incus-client-types.js';
+import { isRecord } from '../platform/domain-utils.js';
 
 export interface IncusEventWake {
   readonly kind: 'wake';
@@ -16,10 +17,6 @@ export interface IncusEventSubscriptionOptions {
 
 interface PendingNext {
   readonly resolve: (result: IteratorResult<IncusEventWake>) => void;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
 function parseEvent(value: unknown): IncusSchema<'Event'> | undefined {

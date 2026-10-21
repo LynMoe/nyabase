@@ -6,7 +6,7 @@ import {
   Param,
   Query,
 } from '@nestjs/common';
-import { RequireCaps } from '../iam/decorators/require-caps.decorator.js';
+import { RequireCaps } from '../iam/decorators.js';
 import {
   AuditAction,
   Capability,

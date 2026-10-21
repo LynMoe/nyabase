@@ -1,4 +1,4 @@
-import type { IncomingMessage } from 'node:http';
+import type { IncomingHttpHeaders, IncomingMessage } from 'node:http';
 import type { RequestOptions } from 'node:https';
 import { IncusError, mapIncusApiFailure, mapIncusTransportError, normalizeCertificateFingerprint } from './incus-errors.js';
 import type {
@@ -11,7 +11,23 @@ import type {
   IncusTimeouts,
   IncusTlsOptions,
 } from './incus-client-types.js';
-import { headerValue, parseNumberHeader } from './incus-request-util.js';
+
+export function headerValue(headers: IncomingHttpHeaders, name: string): string | undefined {
+  const value = headers[name.toLowerCase()];
+  if (Array.isArray(value)) {
+    return value[0];
+  }
+  return value;
+}
+
+export function parseNumberHeader(headers: IncomingHttpHeaders, name: string): number | undefined {
+  const value = headerValue(headers, name);
+  if (!value || !/^\d+$/.test(value)) {
+    return undefined;
+  }
+  const number = Number(value);
+  return Number.isSafeInteger(number) ? number : undefined;
+}
 
 export type ExchangeResult =
   | { readonly kind: 'json'; readonly value: IncusResponse<unknown> }

@@ -6,7 +6,7 @@ import type { NyabaseDatabase } from '../platform/persistence-pg/database.types.
 import { PG_DATABASE } from '../platform/persistence-pg/tokens.js';
 import { PgTransactionManager } from '../platform/persistence-pg/transaction.js';
 import { lockIamPolicy } from '../iam/administration.js';
-import { SYSTEM_ACTOR_USERNAME } from '../iam/system-actor.js';
+import { SYSTEM_ACTOR_USERNAME } from '../iam/actor.js';
 import { toIamGroup, type IamGroup } from './groups.service.js';
 
 export const SYSTEM_ACTOR_DISPLAY_NAME = 'Nyabase System';
