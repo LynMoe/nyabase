@@ -1,10 +1,13 @@
 import { useState } from 'react';
+import { useQuery } from '@tanstack/react-query';
 import type {
   ContainerDto,
-  GpuGrant,
+  EffectiveAccessDto,
+  IntentAcceptedDto,
   ListScope,
   PatchContainerLimitsRequest,
-  StoragePoolCapabilityDto,
+  PatchContainerRootSizeRequest,
+  UserServerDto,
 } from '@nyabase/common';
 import { Button } from '../ui/button.js';
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '../ui/dialog.js';
@@ -19,28 +22,49 @@ import {
 } from '../../lib/storage-shrink.js';
 import { ContainerSpecGpu } from '../gpu/gpu-sections.js';
 import { toast } from '../../hooks/use-toast.js';
+import { useActionMutation } from '../../hooks/use-action-mutation.js';
+import { api } from '../../lib/api.js';
+import { useInvalidateContainer } from '../../lib/container-queries.js';
+import { queryKeys } from '../../lib/query-keys.js';
+import { scopedPath } from '../../lib/scoped-paths.js';
 
 export function LimitsDialog({
   container,
   scope,
-  gpuEnabled,
-  gpuGrant,
-  pending,
-  gpuPending,
-  onLimits,
-  onGpuSubmit,
   onOpenChange,
 }: {
   container: ContainerDto;
   scope: ListScope;
-  gpuEnabled: boolean;
-  gpuGrant: GpuGrant | null;
-  pending: boolean;
-  gpuPending: boolean;
-  onLimits: (body: PatchContainerLimitsRequest) => Promise<unknown>;
-  onGpuSubmit: (pciAddresses: string[]) => Promise<unknown>;
   onOpenChange: (open: boolean) => void;
 }) {
+  const admin = scope === 'all';
+  const base = `/containers/${container.id}`;
+  const invalidate = useInvalidateContainer(scope, container.id);
+  const serverQuery = useQuery({
+    queryKey: queryKeys.servers.detail(container.serverId),
+    queryFn: () => api.get<UserServerDto>(scopedPath(`/servers/${container.serverId}`, scope)),
+    enabled: Boolean(container.serverId),
+  });
+  const accessQuery = useQuery({
+    queryKey: queryKeys.meAccess,
+    queryFn: () => api.get<EffectiveAccessDto>('/me/access'),
+    enabled: !admin && Boolean(container.serverId),
+  });
+  const gpuPciAddresses = admin
+    ? null
+    : accessQuery.data?.servers.find((row) => row.serverId === container.serverId)?.gpuPciAddresses ?? null;
+  const updateLimits = useActionMutation({
+    mutationFn: (body: PatchContainerLimitsRequest) => api.patch<IntentAcceptedDto>(`${base}/limits`, body),
+    successTitle: '已提交规格更新，正在生效',
+    errorTitle: '规格更新失败',
+    onSuccess: invalidate,
+  });
+  const updateGpus = useActionMutation({
+    mutationFn: (pciAddresses: string[]) => api.patch<IntentAcceptedDto>(`${base}/gpus`, { pciAddresses }),
+    successTitle: '已提交 GPU 更新，正在生效',
+    errorTitle: 'GPU 更新失败',
+    onSuccess: invalidate,
+  });
   const [cpuVcpus, setCpuVcpus] = useState(formatVcpuInput(container.cpuMillis));
   const [memGib, setMemGib] = useState(formatGibInput(container.memBytes));
   const [gpuSelection, setGpuSelection] = useState<string[]>(container.gpu?.pciAddresses ?? []);
@@ -70,23 +94,23 @@ export function LimitsDialog({
                 toast({ title: '请输入有效的 CPU / 内存', variant: 'destructive' });
                 return;
               }
-              void onLimits({ cpuMillis, memBytes });
+              updateLimits.mutate({ cpuMillis, memBytes });
             }}
-            disabled={pending}
+            disabled={updateLimits.isPending}
           >
-            {pending ? '提交中...' : '应用 CPU / 内存'}
+            {updateLimits.isPending ? '提交中...' : '应用 CPU / 内存'}
           </Button>
         </div>
         <ContainerSpecGpu
           serverId={container.serverId}
-          gpuEnabled={gpuEnabled}
+          gpuEnabled={serverQuery.data?.gpuEnabled ?? false}
           scope={scope}
           observedStatus={container.actual.status}
-          grant={gpuGrant}
+          grant={gpuPciAddresses ? { pciAddresses: gpuPciAddresses } : null}
           value={gpuSelection}
           onChange={setGpuSelection}
-          onSubmit={(pciAddresses) => { void onGpuSubmit(pciAddresses); }}
-          pending={gpuPending}
+          onSubmit={(pciAddresses) => updateGpus.mutate(pciAddresses)}
+          pending={updateGpus.isPending}
         />
         <DialogFooter>
           <Button variant="outline" onClick={() => onOpenChange(false)}>关闭</Button>
@@ -98,19 +122,25 @@ export function LimitsDialog({
 
 export function RootSizeDialog({
   container,
-  rootCapability,
-  pending,
-  onApply,
+  scope,
   onRequiresStop,
   onOpenChange,
 }: {
   container: ContainerDto;
-  rootCapability: StoragePoolCapabilityDto;
-  pending: boolean;
-  onApply: (sizeBytes: number) => Promise<unknown>;
+  scope: ListScope;
   onRequiresStop: (sizeBytes: number) => void;
   onOpenChange: (open: boolean) => void;
 }) {
+  const rootCapability = container.rootCapability;
+  const invalidate = useInvalidateContainer(scope, container.id);
+  const resizeRoot = useActionMutation({
+    mutationFn: (body: PatchContainerRootSizeRequest) =>
+      api.patch<IntentAcceptedDto>(`/containers/${container.id}/root-size`, body),
+    successTitle: '已提交系统盘调整，正在生效',
+    errorTitle: '系统盘调整失败',
+    onSuccess: invalidate,
+  });
+  const pending = resizeRoot.isPending;
   const [rootSizeGib, setRootSizeGib] = useState(formatGibInput(container.rootSizeBytes));
   const rootSizeBytes = Number.isFinite(Number(rootSizeGib)) ? gibToBytes(Number(rootSizeGib)) : NaN;
   const path = Number.isFinite(rootSizeBytes)
@@ -155,10 +185,7 @@ export function RootSizeDialog({
                 onOpenChange(false);
                 return;
               }
-              void onApply(rootSizeBytes).then(
-                () => onOpenChange(false),
-                () => undefined,
-              );
+              resizeRoot.mutate({ sizeBytes: rootSizeBytes }, { onSuccess: () => onOpenChange(false) });
             }}
             disabled={pending || shrinkBlocked}
             title={shrinkBlocked ? shrinkNeverTooltip() : undefined}

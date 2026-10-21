@@ -1,96 +1,35 @@
 import { useState } from 'react';
-import type {
-  ContainerDto,
-  GpuGrant,
-  ListScope,
-  PatchContainerLimitsRequest,
-  PerformanceSelfResponse,
-} from '@nyabase/common';
+import { useQuery } from '@tanstack/react-query';
+import { Capability, type ContainerDto, type ListScope, type PerformanceSelfResponse } from '@nyabase/common';
 import { Link } from '@tanstack/react-router';
 import { ChartLine, Pencil } from 'lucide-react';
 import { useAuthStore } from '../../store/auth.js';
-import { useMySshKeys } from '../../hooks/use-my-ssh-keys.js';
 import { LimitsDialog } from './spec-panel.js';
-import { SshConfigDialog } from './ssh-login.js';
 import { SshLoginCard } from './ssh-login.js';
-import { useSshLogin } from './ssh-login.js';
 import { Button } from '../ui/button.js';
 import { SectionCard } from '../layout/section-card.js';
 import { Field, FieldGrid } from '../layout/form-field.js';
 import { TechnicalId } from '../refs/technical-id.js';
+import { api } from '../../lib/api.js';
+import { queryKeys } from '../../lib/query-keys.js';
+import { queryPollInterval } from '../../lib/query-lifecycle.js';
+import { scopedPath } from '../../lib/scoped-paths.js';
 import { formatBytesCompact, formatCpu, formatRate } from '../../lib/utils.js';
 import { ContainerOverviewGpu } from '../gpu/gpu-sections.js';
 
-export function OverviewPanel({
-  container,
-  scope,
-  gpuEnabled,
-  gpuGrant,
-  onRepairSsh,
-  repairPending,
-  onLimits,
-  limitsPending,
-  onGpuSubmit,
-  gpuPending,
-  occupancy,
-  occupancyDenied,
-}: {
-  container: ContainerDto;
-  scope: ListScope;
-  gpuEnabled: boolean;
-  gpuGrant: GpuGrant | null;
-  onRepairSsh: () => void;
-  repairPending: boolean;
-  onLimits: (body: PatchContainerLimitsRequest) => Promise<unknown>;
-  limitsPending: boolean;
-  onGpuSubmit: (pciAddresses: string[]) => Promise<unknown>;
-  gpuPending: boolean;
-  occupancy?: PerformanceSelfResponse;
-  occupancyDenied?: boolean;
-}) {
+export function OverviewPanel({ container, scope }: { container: ContainerDto; scope: ListScope }) {
   const [limitsOpen, setLimitsOpen] = useState(false);
-  const [configOpen, setConfigOpen] = useState(false);
-  const authUser = useAuthStore((state) => state.user);
-  const admin = scope === 'all';
-  const ownContainer = !admin || (authUser !== null && container.ownerId === authUser.id);
-  const sshKeys = useMySshKeys(ownContainer);
-  const login = useSshLogin(container);
-
   return (
     <div className="space-y-4" data-testid="container-overview">
-      <SshLoginCard
-        container={container}
-        login={login}
-        showKeyNotice={ownContainer && sshKeys.missing}
-        repairPending={repairPending}
-        onRepairSsh={onRepairSsh}
-        onShowConfig={() => setConfigOpen(true)}
-      />
+      <SshLoginCard container={container} scope={scope} />
       <div className="grid items-start gap-4 lg:grid-cols-2">
         <SpecCard container={container} scope={scope} onEdit={() => setLimitsOpen(true)} />
-        <UsageCard
-          containerId={container.id}
-          admin={admin}
-          occupancy={occupancy}
-          occupancyDenied={occupancyDenied}
-        />
+        <UsageCard containerId={container.id} scope={scope} />
       </div>
-      <SshConfigDialog
-        open={configOpen}
-        onOpenChange={setConfigOpen}
-        containerName={container.name}
-        login={login}
-      />
       {limitsOpen ? (
         <LimitsDialog
           container={container}
           scope={scope}
-          gpuEnabled={gpuEnabled}
-          gpuGrant={gpuGrant}
-          pending={limitsPending}
-          gpuPending={gpuPending}
-          onLimits={onLimits}
-          onGpuSubmit={onGpuSubmit}
           onOpenChange={(open) => { if (!open) setLimitsOpen(false); }}
         />
       ) : null}
@@ -102,7 +41,7 @@ function rate(value: number | null): string {
   return value === null ? '—' : formatRate(value);
 }
 
-export function SpecCard({
+function SpecCard({
   container,
   scope,
   onEdit,
@@ -145,17 +84,16 @@ export function SpecCard({
   );
 }
 
-export function UsageCard({
-  containerId,
-  admin,
-  occupancy,
-  occupancyDenied,
-}: {
-  containerId: string;
-  admin: boolean;
-  occupancy?: PerformanceSelfResponse;
-  occupancyDenied?: boolean;
-}) {
+function UsageCard({ containerId, scope }: { containerId: string; scope: ListScope }) {
+  const admin = scope === 'all';
+  const canViewMetrics = useAuthStore((state) => state.user?.capabilities.includes(Capability.ViewMetricsAll) ?? false);
+  const occupancyDenied = admin && !canViewMetrics;
+  const { data: occupancy } = useQuery({
+    queryKey: queryKeys.performance.self(scope, containerId),
+    queryFn: () => api.get<PerformanceSelfResponse>(scopedPath('/performance/usage', scope, { containerId })),
+    enabled: !occupancyDenied,
+    refetchInterval: (query) => queryPollInterval(query.state, { activeIntervalMs: 15_000 }),
+  });
   const usage = occupancy?.container;
   const gpuUsed = usage?.gpu.usedBytes ?? null;
   const gpuText = usage && (usage.gpu.pciAddresses.length > 0 || gpuUsed !== null) && gpuUsed !== null

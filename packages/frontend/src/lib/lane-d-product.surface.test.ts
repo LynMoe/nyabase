@@ -187,7 +187,7 @@ describe('lane D product UI copy', () => {
       read('components/storage/shared-volume-table.tsx'),
       read('components/storage/shared-volume-table.tsx'),
     ].join('\n');
-    const detail = read('pages/container-detail-page.tsx');
+    const detail = [read('pages/container-detail-page.tsx'), read('components/containers/storage-panel.tsx')].join('\n');
     expect(read('pages/volumes-page.tsx')).toMatch(/testId="volumes"/);
     expect(read('pages/volumes-page.tsx')).toMatch(/LocalVolumeTable/);
     expect(read('pages/shared-volumes-page.tsx')).toMatch(/testId="shared-volumes"/);

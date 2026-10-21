@@ -1,5 +1,6 @@
+import { useState } from 'react';
 import { Copy, FileCode, KeyRound } from 'lucide-react';
-import { type ContainerDto, formatSshProxyJumpLogin } from '@nyabase/common';
+import { type ContainerDto, type ListScope, formatSshProxyJumpLogin } from '@nyabase/common';
 import { Button } from '../ui/button.js';
 import { Hint } from '../ui/hint.js';
 import { SectionCard } from '../layout/section-card.js';
@@ -12,23 +13,26 @@ import { usePublicSettings } from '../../hooks/use-public-settings.js';
 import { toast } from '../../hooks/use-toast.js';
 import { copyOneTimeSecret } from '../../lib/one-time-secret.js';
 import { useAuthStore } from '../../store/auth.js';
+import { useActionMutation } from '../../hooks/use-action-mutation.js';
+import { useMySshKeys } from '../../hooks/use-my-ssh-keys.js';
+import { api } from '../../lib/api.js';
+import { useInvalidateContainer } from '../../lib/container-queries.js';
 
 /** How to log in over the jump host, the SSH state and the repair action. */
-export function SshLoginCard({
-  container,
-  login,
-  showKeyNotice,
-  repairPending,
-  onRepairSsh,
-  onShowConfig,
-}: {
-  container: ContainerDto;
-  login: SshLogin;
-  showKeyNotice: boolean;
-  repairPending: boolean;
-  onRepairSsh: () => void;
-  onShowConfig: () => void;
-}) {
+export function SshLoginCard({ container, scope }: { container: ContainerDto; scope: ListScope }) {
+  const [configOpen, setConfigOpen] = useState(false);
+  const authUser = useAuthStore((state) => state.user);
+  const ownContainer = scope !== 'all' || (authUser !== null && container.ownerId === authUser.id);
+  const sshKeys = useMySshKeys(ownContainer);
+  const login = useSshLogin(container);
+  const invalidate = useInvalidateContainer(scope, container.id);
+  const repairSsh = useActionMutation({
+    mutationFn: () => api.post<{ woken: boolean }>(`/containers/${container.id}/actions/repair-ssh`),
+    successTitle: '已提交 SSH 修复',
+    errorTitle: 'SSH 修复失败',
+    onSuccess: invalidate,
+  });
+  const repairPending = repairSsh.isPending;
   const { proxyHost, jumpCommand, configSnippet, copyText } = login;
   const sshReady = container.ssh.ready;
   const repairDisabled = repairPending || container.lifecyclePhase !== 'active';
@@ -46,7 +50,7 @@ export function SshLoginCard({
       )}
     >
       <div className="space-y-4">
-        {showKeyNotice ? <SshKeyNotice variant="inline" /> : null}
+        {ownContainer && sshKeys.missing ? <SshKeyNotice variant="inline" /> : null}
         {jumpCommand ? (
           <div className="flex items-stretch gap-2">
             <pre
@@ -75,24 +79,30 @@ export function SshLoginCard({
         </FieldGrid>
         {container.ssh.lastError ? <p className="break-all text-xs text-destructive">{container.ssh.lastError}</p> : null}
         <div className="flex flex-wrap gap-2">
-          <Button size="sm" variant="ghost" disabled={!configSnippet} onClick={onShowConfig}>
+          <Button size="sm" variant="ghost" disabled={!configSnippet} onClick={() => setConfigOpen(true)}>
             <FileCode className="h-4 w-4" />~/.ssh/config 片段
           </Button>
           <Hint
             content={repairDisabled && !repairPending ? '容器处于创建或删除过程中，暂时无法修复。' : '重新下发你的 SSH 公钥并检查 sshd，适用于登录被拒绝时。'}
             disabled={repairDisabled}
           >
-            <Button size="sm" variant="ghost" onClick={onRepairSsh} disabled={repairDisabled} data-testid="repair-ssh">
+            <Button size="sm" variant="ghost" onClick={() => repairSsh.mutate()} disabled={repairDisabled} data-testid="repair-ssh">
               <KeyRound className="h-4 w-4" />{repairPending ? '修复中…' : '修复 SSH'}
             </Button>
           </Hint>
         </div>
       </div>
+      <SshConfigDialog
+        open={configOpen}
+        onOpenChange={setConfigOpen}
+        containerName={container.name}
+        login={login}
+      />
     </SectionCard>
   );
 }
 
-export function SshConfigDialog({
+function SshConfigDialog({
   open,
   onOpenChange,
   containerName,
