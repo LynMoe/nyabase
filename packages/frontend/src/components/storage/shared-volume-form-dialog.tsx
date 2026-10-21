@@ -27,6 +27,7 @@ import {
   quotaIneffectiveResizeHint,
   shrinkNeverTooltip,
 } from '../../lib/storage-shrink.js';
+import { useOpenSession } from '../../hooks/use-dom-state.js';
 import { approxGibHint, formatGibInput } from '../../lib/utils.js';
 
 export interface SharedVolumeFormProps {
@@ -37,12 +38,10 @@ export interface SharedVolumeFormProps {
 
 const NO_ONLINE_EXECUTOR_HINT = '现在还不能挂载或销毁已有目录';
 
-/** Create / edit a shared volume. */
 export function SharedVolumeFormDialog(props: SharedVolumeFormProps) {
-  return props.open ? <SharedVolumeFormBody {...props} /> : null;
+  return <SharedVolumeFormBody key={useOpenSession(props.open)} {...props} />;
 }
 
-/** The create and edit requests of the shared volume form; success closes the dialog. */
 function useSharedVolumeSave(
   editing: SharedVolumeDto | undefined,
   onOpenChange: (open: boolean) => void,
@@ -87,7 +86,7 @@ function useSharedVolumeSave(
   return { createShared, patch };
 }
 
-function SharedVolumeFormBody({ sharedVolume: editing, onOpenChange }: SharedVolumeFormProps) {
+function SharedVolumeFormBody({ sharedVolume: editing, open, onOpenChange }: SharedVolumeFormProps) {
   const [name, setName] = useState(editing?.name ?? '');
   const [sizeGiB, setSizeGiB] = useState(editing ? formatGibInput(editing.sizeBytes) : '10');
   const [sharedBackendId, setSharedBackendId] = useState(editing?.sharedBackendId ?? '');
@@ -96,11 +95,12 @@ function SharedVolumeFormBody({ sharedVolume: editing, onOpenChange }: SharedVol
   const backends = useQuery({
     queryKey: queryKeys.sharedBackends.user,
     queryFn: () => api.get<SharedBackendDto[]>('/shared-backends'),
-    enabled: !editing,
+    enabled: open && !editing,
   }).data ?? [];
   const access = useQuery({
     queryKey: queryKeys.meAccess,
     queryFn: () => api.get<EffectiveAccessDto>('/me/access'),
+    enabled: open,
   }).data;
   const selectedBackend = backends.find((backend) => backend.id === sharedBackendId);
   const liveSharedAccess = (access?.sharedBackends ?? []).find((item) => item.sharedBackendId === sharedBackendId);
@@ -145,7 +145,7 @@ function SharedVolumeFormBody({ sharedVolume: editing, onOpenChange }: SharedVol
   };
 
   return (
-    <Dialog open onOpenChange={onOpenChange}>
+    <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent data-testid="shared-volume-form">
         <DialogHeader>
           <DialogTitle>{editing ? '编辑共享卷' : '新建共享卷'}</DialogTitle>

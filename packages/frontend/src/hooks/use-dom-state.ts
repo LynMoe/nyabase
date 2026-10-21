@@ -58,3 +58,14 @@ export function useScrollOverflow(axis: 'x' | 'y'): [React.RefObject<HTMLDivElem
 
   return [ref, state];
 }
+
+/** Grows each time a dialog opens; as the body `key` it resets form state but keeps the exit animation. */
+export function useOpenSession(open: boolean): number {
+  const [session, setSession] = React.useState(0);
+  const [wasOpen, setWasOpen] = React.useState(open);
+  if (open !== wasOpen) {
+    setWasOpen(open);
+    if (open) setSession((current) => current + 1);
+  }
+  return session;
+}

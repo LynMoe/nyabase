@@ -22,6 +22,7 @@ import {
 } from '../ui/dialog.js';
 import { Input } from '../ui/input.js';
 import { FormField, SelectField } from '../layout/form-field.js';
+import { useOpenSession } from '../../hooks/use-dom-state.js';
 import { useMySshKeys } from '../../hooks/use-my-ssh-keys.js';
 import { SshKeyNotice } from '../ssh/ssh-key-notice.js';
 import { Checkbox } from '../ui/checkbox.js';
@@ -41,15 +42,15 @@ interface CreateContainerDialogProps {
 }
 
 export function CreateContainerDialog(props: CreateContainerDialogProps) {
-  return props.open ? <CreateContainerBody {...props} /> : null;
+  return <CreateContainerBody key={useOpenSession(props.open)} {...props} />;
 }
 
-function CreateContainerBody({ onOpenChange, defaultServerId }: CreateContainerDialogProps) {
-  const form = useCreateContainerForm({ onOpenChange, defaultServerId });
-  const sshKeys = useMySshKeys(true);
+function CreateContainerBody({ open, onOpenChange, defaultServerId }: CreateContainerDialogProps) {
+  const form = useCreateContainerForm({ open, onOpenChange, defaultServerId });
+  const sshKeys = useMySshKeys(open);
 
   return (
-    <Dialog open onOpenChange={onOpenChange}>
+    <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent data-testid="container-create-canonical">
         <DialogHeader>
           <DialogTitle>新建容器</DialogTitle>
@@ -246,9 +247,11 @@ function GpuAndStartFields({ form }: { form: CreateContainerForm }) {
 
 /** State, defaults, quota checks and submission of the create-container form. */
 function useCreateContainerForm({
+  open,
   onOpenChange,
   defaultServerId,
 }: {
+  open: boolean;
   onOpenChange: (open: boolean) => void;
   defaultServerId?: string;
 }) {
@@ -257,22 +260,22 @@ function useCreateContainerForm({
   const [gpuPciAddresses, setGpuPciAddresses] = useState<string[] | undefined>(undefined);
   const [errors, setErrors] = useState<FieldErrors>({});
   const [submitError, setSubmitError] = useState<string | null>(null);
-  const data = useCreateContainerData(form.serverId);
+  const data = useCreateContainerData(open, form.serverId);
   const { servers, images, selectedAccess } = data;
   const selected = servers.find((server) => server.id === form.serverId);
   const noImagesForServer = Boolean(form.serverId) && !data.imagesQuery.isLoading && images.length === 0;
 
   // The common case is one server and one image: pick them instead of asking.
   useEffect(() => {
-    if (!form.serverId && servers.length === 1 && servers[0]) {
+    if (open && !form.serverId && servers.length === 1 && servers[0]) {
       setForm((current) => ({ ...current, serverId: servers[0]!.id, imageId: '' }));
     }
-  }, [form.serverId, servers]);
+  }, [open, form.serverId, servers]);
   useEffect(() => {
-    if (form.serverId && !form.imageId && images.length === 1 && images[0]) {
+    if (open && form.serverId && !form.imageId && images.length === 1 && images[0]) {
       setForm((current) => ({ ...current, imageId: images[0]!.id }));
     }
-  }, [form.serverId, form.imageId, images]);
+  }, [open, form.serverId, form.imageId, images]);
 
   const cpuNumber = positiveNumber(form.cpuVcpus);
   const memNumber = positiveNumber(form.memGib);
@@ -364,18 +367,19 @@ type CreateContainerForm = ReturnType<typeof useCreateContainerForm>;
  * What the create form can choose from: servers the user currently has access
  * to, the images allowed on the chosen server, and the quota left there.
  */
-function useCreateContainerData(serverId: string) {
-  const serversQuery = useQuery({ queryKey: queryKeys.servers.user, queryFn: () => api.get<UserServerDto[]>('/servers'), });
-  const imagesQuery = useQuery({ queryKey: queryKeys.images.userActive, queryFn: () => api.get<ImageDto[]>('/images?activeOnly=true'), });
-  const accessQuery = useQuery({ queryKey: queryKeys.meAccess, queryFn: () => api.get<EffectiveAccessDto>('/me/access'), });
+function useCreateContainerData(open: boolean, serverId: string) {
+  const serversQuery = useQuery({ queryKey: queryKeys.servers.user, queryFn: () => api.get<UserServerDto[]>('/servers'), enabled: open });
+  const imagesQuery = useQuery({ queryKey: queryKeys.images.userActive, queryFn: () => api.get<ImageDto[]>('/images?activeOnly=true'), enabled: open });
+  const accessQuery = useQuery({ queryKey: queryKeys.meAccess, queryFn: () => api.get<EffectiveAccessDto>('/me/access'), enabled: open });
   const containersQuery = useQuery({
     queryKey: queryKeys.containers.userList,
     queryFn: () => api.get<ContainerDto[]>('/containers'),
+    enabled: open,
   });
   const capacityQuery = useQuery({
     queryKey: queryKeys.storageCapacity(serverId),
     queryFn: () => api.get<StorageCapacityDto>(`/servers/${serverId}/storage-capacity`),
-    enabled: serverId.length > 0,
+    enabled: open && serverId.length > 0,
   });
 
   const liveServerIds = useMemo(() => new Set(
@@ -398,7 +402,7 @@ function useCreateContainerData(serverId: string) {
     servers,
     images,
     selectedAccess,
-    serversLoading: serversQuery.isLoading || accessQuery.isLoading,
+    serversLoading: open && (serversQuery.isLoading || accessQuery.isLoading),
   };
 }
 

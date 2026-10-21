@@ -30,6 +30,7 @@ import {
   quotaIneffectiveResizeHint,
   shrinkNeverTooltip,
 } from '../../lib/storage-shrink.js';
+import { useOpenSession } from '../../hooks/use-dom-state.js';
 import { approxGibHint, formatGib, formatGibInput, grantAvailableLabel } from '../../lib/utils.js';
 import { VolumeShrinkOrchestrationDialog } from './volume-shrink-orchestration-dialog.js';
 
@@ -42,12 +43,9 @@ export interface LocalVolumeFormProps {
   lockedPoolId?: string;
 }
 
-/**
- * Create / edit a local volume. Editing a shrink that needs the volume
- * detached hands over to the orchestration dialog.
- */
+/** Create / edit a local volume; a shrink that needs it detached hands over to the orchestration dialog. */
 export function LocalVolumeFormDialog(props: LocalVolumeFormProps) {
-  return props.open ? <LocalVolumeFormBody {...props} /> : null;
+  return <LocalVolumeFormBody key={useOpenSession(props.open)} {...props} />;
 }
 
 function storageSuffix(scope: ListScope): string {
@@ -108,6 +106,7 @@ function useLocalVolumeSave(
 
 function LocalVolumeFormBody({
   volume: editing,
+  open,
   onOpenChange,
   scope = 'mine',
   lockedServerId,
@@ -120,7 +119,7 @@ function LocalVolumeFormBody({
   const [error, setError] = useState<string | null>(null);
   const [orchestrate, setOrchestrate] = useState(false);
 
-  const pools = useLocalPools(scope, serverId, !editing).data ?? [];
+  const pools = useLocalPools(scope, serverId, open && !editing).data ?? [];
   const selectedPool = pools.filter((pool) => pool.registered).find((pool) => pool.id === poolId);
   const { nextSize, path, floorError, editQuotaBlocked } = deriveSizeChange(editing, sizeGiB);
   const createQuotaBlocked = !editing && selectedPool != null && selectedPool.quotaEffective !== true;
@@ -166,7 +165,7 @@ function LocalVolumeFormBody({
 
   return (
     <>
-      <Dialog open={!orchestrate} onOpenChange={onOpenChange}>
+      <Dialog open={open && !orchestrate} onOpenChange={onOpenChange}>
         <DialogContent data-testid="volume-form">
           <DialogHeader>
             <DialogTitle>{editing ? '编辑数据卷' : '新建数据卷'}</DialogTitle>

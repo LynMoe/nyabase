@@ -25,7 +25,7 @@ import { BindingFormDialog, BindingRow } from './http-proxy-page/binding-parts.j
 export default function HttpProxyPage() {
   const queryClient = useQueryClient();
   const [createOpen, setCreateOpen] = useState(false);
-  const [editTarget, setEditTarget] = useState<HttpProxyBindingDto | null>(null);
+  const [editTarget, setEditTarget] = useState<{ binding: HttpProxyBindingDto; open: boolean } | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<HttpProxyBindingDto | null>(null);
   const bindingsQuery = useQuery({
     queryKey: queryKeys.httpProxy.bindings,
@@ -105,7 +105,7 @@ export default function HttpProxyPage() {
                 <BindingRow
                   key={binding.id}
                   binding={binding}
-                  onEdit={() => setEditTarget(binding)}
+                  onEdit={() => setEditTarget({ binding, open: true })}
                   onDelete={() => setDeleteTarget(binding)}
                 />
               ))}
@@ -114,9 +114,14 @@ export default function HttpProxyPage() {
           </SectionCard>
         )}
       </QueryView>
-      {createOpen && <BindingFormDialog pools={pools} onClose={() => setCreateOpen(false)} />}
+      <BindingFormDialog pools={pools} open={createOpen} onOpenChange={setCreateOpen} />
       {editTarget && (
-        <BindingFormDialog binding={editTarget} pools={pools} onClose={() => setEditTarget(null)} />
+        <BindingFormDialog
+          binding={editTarget.binding}
+          pools={pools}
+          open={editTarget.open}
+          onOpenChange={(open) => setEditTarget({ ...editTarget, open })}
+        />
       )}
       <ConfirmDialog
         open={Boolean(deleteTarget)}

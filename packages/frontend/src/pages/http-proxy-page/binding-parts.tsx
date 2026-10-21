@@ -21,6 +21,7 @@ import {
 import { Input } from '../../components/ui/input.js';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '../../components/ui/select.js';
 import { FormField } from '../../components/layout/form-field.js';
+import { useOpenSession } from '../../hooks/use-dom-state.js';
 import { toast } from '../../hooks/use-toast.js';
 import { api } from '../../lib/api.js';
 import { queryKeys } from '../../lib/query-keys.js';
@@ -68,16 +69,18 @@ function useBindingSave(
   return save;
 }
 
-/** Create (no `binding`) or edit one HTTP binding; mounted only while open. */
-export function BindingFormDialog({
-  binding,
-  pools,
-  onClose,
-}: {
+interface BindingFormDialogProps {
   binding?: HttpProxyBindingDto;
   pools: HttpDomainPoolPublicDto[];
-  onClose: () => void;
-}) {
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+}
+
+export function BindingFormDialog(props: BindingFormDialogProps) {
+  return <BindingFormBody key={useOpenSession(props.open)} {...props} />;
+}
+
+function BindingFormBody({ binding, pools, open, onOpenChange }: BindingFormDialogProps) {
   const split = binding ? splitHttpProxyHostname(binding.hostname, pools) : null;
   const [prefix, setPrefix] = useState(split?.prefix ?? '');
   const [poolId, setPoolId] = useState(split?.poolId ?? pools[0]?.id ?? '');
@@ -87,13 +90,13 @@ export function BindingFormDialog({
   const containersQuery = useQuery({
     queryKey: queryKeys.containers.userList,
     queryFn: () => api.get<ContainerDto[]>('/containers'),
+    enabled: open,
   });
   const containers = containersQuery.data ?? [];
-  const save = useBindingSave(binding, onClose, setError);
+  const save = useBindingSave(binding, () => onOpenChange(false), setError);
   const selectedPool = pools.find((pool) => pool.id === poolId) ?? pools[0];
   const suffix = selectedPool ? httpProxyWildcardSuffix(selectedPool.wildcardDomain) : '';
   const hostnamePreview = selectedPool ? previewHostname(prefix, selectedPool.wildcardDomain) : undefined;
-  /** Wraps a setter so that typing clears the previous error. */
   const edit = (setter: (value: string) => void) => (value: string) => {
     setter(value);
     setError(null);
@@ -120,7 +123,7 @@ export function BindingFormDialog({
   const pending = save.isPending;
 
   return (
-    <Dialog open onOpenChange={(open) => { if (!open) onClose(); }}>
+    <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent data-testid="http-proxy-binding-form">
         <DialogHeader>
           <DialogTitle>{binding ? '编辑 HTTP 发布' : '新建 HTTP 发布'}</DialogTitle>
@@ -200,7 +203,7 @@ export function BindingFormDialog({
           {error && <p className="text-sm text-destructive">{error}</p>}
         </div>
         <DialogFooter>
-          <Button variant="outline" onClick={onClose}>取消</Button>
+          <Button variant="outline" onClick={() => onOpenChange(false)}>取消</Button>
           <Button onClick={submit} disabled={pending || pools.length === 0}>
             {pending ? '提交中...' : '保存'}
           </Button>
