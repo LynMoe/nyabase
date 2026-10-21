@@ -1,5 +1,13 @@
+import { useState } from 'react';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Link } from '@tanstack/react-router';
-import type { HttpDomainPoolPublicDto, HttpProxyBindingDto } from '@nyabase/common';
+import {
+  httpProxyWildcardSuffix,
+  zCreateHttpProxyBindingRequest,
+  type ContainerDto,
+  type HttpDomainPoolPublicDto,
+  type HttpProxyBindingDto,
+} from '@nyabase/common';
 import { Pencil, Trash2 } from 'lucide-react';
 import { Button } from '../../components/ui/button.js';
 import {
@@ -13,32 +21,95 @@ import {
 import { Input } from '../../components/ui/input.js';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '../../components/ui/select.js';
 import { FormField } from '../../components/layout/form-field.js';
+import { toast } from '../../hooks/use-toast.js';
+import { api } from '../../lib/api.js';
+import { queryKeys } from '../../lib/query-keys.js';
 import {
+  composeHttpProxyHostname,
   httpProxyBindingStatusLabel,
   httpProxyDomainRootLabel,
+  httpProxyErrorMessage,
   httpProxyWarningLabel,
+  isHttpProxyPrefixLabel,
+  splitHttpProxyHostname,
 } from '../../lib/http-proxy.js';
-import { useBindingForm } from './use-binding-form.js';
 import { Badge } from '../../components/ui/badge.js';
 import { TableCell, TableRow } from '../../components/ui/table.js';
 
+type BindingBody = { hostname: string; containerId: string; targetPort: number };
+
+/** Create (no `binding`) or edit one HTTP binding; mounted only while open. */
 export function BindingFormDialog({
   binding,
   pools,
-  open,
-  onOpenChange,
+  onClose,
 }: {
   binding?: HttpProxyBindingDto;
   pools: HttpDomainPoolPublicDto[];
-  open: boolean;
-  onOpenChange: (open: boolean) => void;
+  onClose: () => void;
 }) {
-  const form = useBindingForm({ binding, pools, open, onOpenChange });
-  const containers = form.containersQuery.data ?? [];
-  const { selectedPool } = form;
+  const queryClient = useQueryClient();
+  const split = binding ? splitHttpProxyHostname(binding.hostname, pools) : null;
+  const [prefix, setPrefix] = useState(split?.prefix ?? '');
+  const [poolId, setPoolId] = useState(split?.poolId ?? pools[0]?.id ?? '');
+  const [containerId, setContainerId] = useState(binding?.containerId ?? '');
+  const [targetPort, setTargetPort] = useState(binding ? String(binding.targetPort) : '80');
+  const [error, setError] = useState<string | null>(null);
+  const containersQuery = useQuery({
+    queryKey: queryKeys.containers.userList,
+    queryFn: () => api.get<ContainerDto[]>('/containers'),
+  });
+  const containers = containersQuery.data ?? [];
+  const saved = (title: string) => {
+    toast({ title });
+    void queryClient.invalidateQueries({ queryKey: queryKeys.httpProxy.bindings });
+    onClose();
+  };
+  const save = useMutation({
+    mutationFn: (body: BindingBody) => (binding
+      ? api.patch<HttpProxyBindingDto>(`/http-proxy/bindings/${binding.id}`, body)
+      : api.post<HttpProxyBindingDto>('/http-proxy/bindings', body)),
+    onSuccess: () => saved(binding ? '发布已更新' : '发布已创建'),
+    onError: (mutationError) => setError(httpProxyErrorMessage(mutationError)),
+  });
+  const selectedPool = pools.find((pool) => pool.id === poolId) ?? pools[0];
+  const suffix = selectedPool ? httpProxyWildcardSuffix(selectedPool.wildcardDomain) : '';
+  let hostnamePreview: string | undefined;
+  try {
+    if (selectedPool && isHttpProxyPrefixLabel(prefix)) {
+      hostnamePreview = composeHttpProxyHostname(prefix, selectedPool.wildcardDomain);
+    }
+  } catch {
+    hostnamePreview = undefined;
+  }
+  /** Wraps a setter so that typing clears the previous error. */
+  const edit = (setter: (value: string) => void) => (value: string) => {
+    setter(value);
+    setError(null);
+  };
+
+  const submit = () => {
+    setError(null);
+    const port = Number(targetPort);
+    const fail = (message: string) => setError(message);
+    if (!selectedPool) return fail('管理员尚未配置通配域名');
+    if (!isHttpProxyPrefixLabel(prefix)) return fail('请填写单节主机前缀，例如 app');
+    if (!containerId) return fail('请选择容器');
+    if (!Number.isInteger(port) || port < 1 || port > 65535) return fail('目标端口必须是 1 到 65535 的整数');
+    let hostname: string;
+    try {
+      hostname = composeHttpProxyHostname(prefix, selectedPool.wildcardDomain);
+    } catch {
+      return fail('前缀与域名根无法组成有效主机名');
+    }
+    const parsed = zCreateHttpProxyBindingRequest.safeParse({ hostname, containerId, targetPort: port });
+    if (!parsed.success) return fail(parsed.error.issues[0]?.message ?? '请检查发布参数');
+    save.mutate(parsed.data);
+  };
+  const pending = save.isPending;
 
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
+    <Dialog open onOpenChange={(open) => { if (!open) onClose(); }}>
       <DialogContent data-testid="http-proxy-binding-form">
         <DialogHeader>
           <DialogTitle>{binding ? '编辑 HTTP 发布' : '新建 HTTP 发布'}</DialogTitle>
@@ -54,7 +125,7 @@ export function BindingFormDialog({
           ) : (
             <>
               <FormField id="http-proxy-domain-root" label="域名根">
-                <Select value={selectedPool?.id} onValueChange={form.setPoolId}>
+                <Select value={selectedPool?.id} onValueChange={edit(setPoolId)}>
                   <SelectTrigger id="http-proxy-domain-root">
                     <SelectValue placeholder="选择域名根" />
                   </SelectTrigger>
@@ -70,26 +141,26 @@ export function BindingFormDialog({
               <FormField
                 id="http-proxy-prefix"
                 label="主机前缀"
-                hint={form.hostnamePreview ? `完整主机名 ${form.hostnamePreview}` : undefined}
+                hint={hostnamePreview ? `完整主机名 ${hostnamePreview}` : undefined}
               >
                 <div className="flex items-center gap-2">
                   <Input
                     id="http-proxy-prefix"
                     className="font-mono"
-                    value={form.prefix}
+                    value={prefix}
                     placeholder="app"
                     autoComplete="off"
-                    onChange={(event) => form.setPrefix(event.target.value.toLowerCase().replace(/[^a-z0-9-]/g, ''))}
+                    onChange={(event) => edit(setPrefix)(event.target.value.toLowerCase().replace(/[^a-z0-9-]/g, ''))}
                   />
-                  <span className="shrink-0 font-mono text-sm text-muted-foreground">{form.suffix}</span>
+                  <span className="shrink-0 font-mono text-sm text-muted-foreground">{suffix}</span>
                 </div>
               </FormField>
             </>
           )}
           <FormField id="http-proxy-container" label="容器">
-            <Select value={form.containerId || undefined} onValueChange={form.setContainerId}>
+            <Select value={containerId || undefined} onValueChange={edit(setContainerId)}>
               <SelectTrigger id="http-proxy-container">
-                <SelectValue placeholder={form.containersQuery.isLoading ? '加载容器…' : '选择容器'} />
+                <SelectValue placeholder={containersQuery.isLoading ? '加载容器…' : '选择容器'} />
               </SelectTrigger>
               <SelectContent>
                 {containers.map((container) => (
@@ -99,7 +170,7 @@ export function BindingFormDialog({
                 ))}
               </SelectContent>
             </Select>
-            {!form.containersQuery.isLoading && containers.length === 0 && (
+            {!containersQuery.isLoading && containers.length === 0 && (
               <p className="text-xs text-muted-foreground">
                 还没有容器。<Link to="/containers" className="underline">去创建容器</Link>
               </p>
@@ -111,16 +182,16 @@ export function BindingFormDialog({
               type="number"
               min="1"
               max="65535"
-              value={form.targetPort}
-              onChange={(event) => form.setTargetPort(event.target.value)}
+              value={targetPort}
+              onChange={(event) => edit(setTargetPort)(event.target.value)}
             />
           </FormField>
-          {form.error && <p className="text-sm text-destructive">{form.error}</p>}
+          {error && <p className="text-sm text-destructive">{error}</p>}
         </div>
         <DialogFooter>
-          <Button variant="outline" onClick={() => onOpenChange(false)}>取消</Button>
-          <Button onClick={form.submit} disabled={form.pending || pools.length === 0}>
-            {form.pending ? '提交中...' : '保存'}
+          <Button variant="outline" onClick={onClose}>取消</Button>
+          <Button onClick={submit} disabled={pending || pools.length === 0}>
+            {pending ? '提交中...' : '保存'}
           </Button>
         </DialogFooter>
       </DialogContent>

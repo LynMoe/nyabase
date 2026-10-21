@@ -14,15 +14,13 @@ import {
 } from '../components/ui/table.js';
 import { ConfirmDialog } from '../components/layout/confirm-dialog.js';
 import { EmptyState } from '../components/layout/empty-state.js';
-import { Page } from '../components/layout/page-header.js';
-import { PageHeader } from '../components/layout/page-header.js';
+import { Page, PageHeader } from '../components/layout/page-header.js';
 import { QueryView } from '../components/layout/query-view.js';
 import { SectionCard } from '../components/layout/section-card.js';
 import { queryKeys } from '../lib/query-keys.js';
 import { toast } from '../hooks/use-toast.js';
 import { emptyIfNotFound, httpProxyErrorMessage } from '../lib/http-proxy.js';
-import { BindingFormDialog } from './http-proxy-page/binding-parts.js';
-import { BindingRow } from './http-proxy-page/binding-parts.js';
+import { BindingFormDialog, BindingRow } from './http-proxy-page/binding-parts.js';
 
 export default function HttpProxyPage() {
   const queryClient = useQueryClient();
@@ -116,14 +114,9 @@ export default function HttpProxyPage() {
           </SectionCard>
         )}
       </QueryView>
-      <BindingFormDialog pools={pools} open={createOpen} onOpenChange={setCreateOpen} />
+      {createOpen && <BindingFormDialog pools={pools} onClose={() => setCreateOpen(false)} />}
       {editTarget && (
-        <BindingFormDialog
-          binding={editTarget}
-          pools={pools}
-          open
-          onOpenChange={(open) => { if (!open) setEditTarget(null); }}
-        />
+        <BindingFormDialog binding={editTarget} pools={pools} onClose={() => setEditTarget(null)} />
       )}
       <ConfirmDialog
         open={Boolean(deleteTarget)}
