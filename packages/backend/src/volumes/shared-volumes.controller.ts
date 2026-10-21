@@ -21,7 +21,7 @@ import {
 import { RequireCaps } from '../iam/decorators/require-caps.decorator.js';
 import { CurrentActor } from '../iam/decorators/current-actor.decorator.js';
 import type { Actor } from '../iam/actor.js';
-import { SharedVolumeCatalogInspectService } from './shared-volume-catalog-inspect.service.js';
+import { SharedVolumeCatalogInspectService } from './shared-volume-catalog.service.js';
 import { SharedVolumesService } from './shared-volumes.service.js';
 import { VolumeAttachmentsService } from './volume-attachments.service.js';
 import { isIntentAccepted } from './volume-dtos.js';

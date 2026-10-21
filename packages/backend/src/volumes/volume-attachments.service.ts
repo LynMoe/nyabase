@@ -25,12 +25,20 @@ import { PG_DATABASE } from '../platform/persistence-pg/tokens.js';
 import { acceptedIntent } from '../reconcile/accepted-intent.js';
 import { IntentRepository } from '../reconcile/intent.repository.js';
 import { StoragePoolsRepository } from '../storage-pools/storage-pools.repository.js';
-import { assertCanAttach, type VolumeAccess, type VolumeKind } from './volume-access.js';
-import type { VolumeRow } from './volume-dtos.js';
-import { assertPoolGrant, assertSharedGrant, requireServerAccess } from './volume-grants.js';
-import { VOLUME_TX, isUniqueViolation } from './volume-lifecycle.js';
-import { listAttachmentDtos, type VolumeDeps } from './volume-read-model.js';
-import { VolumesRepository } from './volumes.repository.js';
+import { VolumeDtoAssembler, type VolumeRow } from './volume-dtos.js';
+import {
+  VOLUME_TX,
+  assertCanAttach,
+  isUniqueViolation,
+  type VolumeAccess,
+  type VolumeKind,
+} from './volume-rules.js';
+import {
+  VolumesRepository,
+  assertPoolGrant,
+  assertSharedGrant,
+  requireServerAccess,
+} from './volumes.repository.js';
 
 type Tx = Transaction<NyabaseDatabase>;
 type ContainerRef = { id: string; owner_id: string; server_id: string };
@@ -40,7 +48,7 @@ const ALREADY_ATTACHED = 'The volume is already attached to this container or th
 /** Attaching and detaching volumes (local and shared) on containers. */
 @Injectable()
 export class VolumeAttachmentsService {
-  private readonly deps: VolumeDeps;
+  private readonly dtos: VolumeDtoAssembler;
 
   constructor(
     private readonly repository: VolumesRepository,
@@ -50,7 +58,7 @@ export class VolumeAttachmentsService {
     @Inject(PG_DATABASE) private readonly database: Kysely<NyabaseDatabase>,
     private readonly audit: AuditService,
   ) {
-    this.deps = { database, repository, pools };
+    this.dtos = new VolumeDtoAssembler(database, repository, pools);
   }
 
   /** Attachments of a container the caller has already been authorised to see. */
@@ -62,7 +70,7 @@ export class VolumeAttachmentsService {
     if (!container) {
       throw new NotFoundException('Container not found');
     }
-    return listAttachmentDtos(this.deps, containerId, container.server_id, kind);
+    return this.dtos.listAttachmentDtos(containerId, container.server_id, kind);
   }
 
   async bindCreateTimeVolumes(

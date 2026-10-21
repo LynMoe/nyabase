@@ -11,7 +11,6 @@ import { WebSocket, WebSocketServer, type RawData } from 'ws';
 import { AuthService } from '../iam/auth.service.js';
 import { INCUS_CLIENT_FACTORY, type IncusClientFactory } from '../incus/incus-client.factory.js';
 import type { IncusExecWebSocketSession } from '../incus/incus-client.js';
-import { IncusConsoleBridgeAdapter } from './incus-console-bridge.adapter.js';
 import { ConsoleSessionService, type ConsoleSession } from './console-session.service.js';
 
 const MAX_CONSOLE_FRAME_BYTES = 256 * 1024;
@@ -27,7 +26,6 @@ export class ConsoleBridgeGateway implements OnModuleInit, OnModuleDestroy {
     private readonly auth: AuthService,
     private readonly sessions: ConsoleSessionService,
     @Inject(INCUS_CLIENT_FACTORY) private readonly clients: IncusClientFactory,
-    private readonly bridge: IncusConsoleBridgeAdapter,
   ) {}
 
   onModuleInit(): void {}
@@ -82,7 +80,7 @@ export class ConsoleBridgeGateway implements OnModuleInit, OnModuleDestroy {
     let physical: IncusExecWebSocketSession | undefined;
     try {
       const client = await this.clients.get(session.serverId);
-      physical = await this.bridge.open(client, session.instanceName, session.command, {
+      physical = await this.sessions.openExec(client, session.instanceName, session.command, {
         width: session.cols,
         height: session.rows,
         tty: session.tty,

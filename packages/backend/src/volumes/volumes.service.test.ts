@@ -6,7 +6,7 @@ import {
   IntentResourceType,
   StoragePoolResizeFamily,
 } from '@nyabase/common';
-import { checkVolumeResize, effectiveUsageForShrinkFloor } from './volume-resize-policy.js';
+import { checkVolumeResize, effectiveUsageForShrinkFloor } from './volume-rules.js';
 import { makeVolumeServices } from './volume-services.test-helper.js';
 
 const base = {

@@ -14,8 +14,7 @@ import { PgTransactionManager } from '../platform/persistence-pg/transaction.js'
 import { IntentRepository } from '../reconcile/intent.repository.js';
 import { ReconcileClaimRepository } from '../reconcile/reconcile-claim.repository.js';
 import { VOLUME_DESTROY_PLACEMENT_ID } from '../reconcile/reconcile-claim.repository.js';
-import { listEligibleDestroyExecutors } from '../volumes/eligible-destroy-executors.js';
-import { VolumesRepository } from '../volumes/volumes.repository.js';
+import { listEligibleDestroyExecutors, VolumesRepository } from '../volumes/volumes.repository.js';
 import { isSystemActor, type Actor } from '../iam/actor.js';
 
 const OPERATOR_PURGE_AUDIT_ACTION = 'user.server.purge_resources' as AuditAction;

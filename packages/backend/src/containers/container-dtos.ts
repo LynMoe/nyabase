@@ -16,18 +16,13 @@ import {
   missingStoragePoolCapability,
   storagePoolCapability,
 } from '../storage-pools/storage-pool-capability.js';
-import type { ContainerActionPolicyService } from './container-action-policy.service.js';
-import type { ContainerControlRepository, ContainerRow } from './container-control.repository.js';
-import type { ImageRow, ServerRow } from './container-create.js';
-import { containerStatus } from './container-rules.js';
-
-/** What the container read model needs to turn rows into DTOs. */
-export interface ContainerDtoDeps {
-  readonly database: Kysely<NyabaseDatabase>;
-  readonly repository: ContainerControlRepository;
-  readonly config: NyabaseConfigService;
-  readonly actions: ContainerActionPolicyService;
-}
+import type {
+  ContainerControlRepository,
+  ContainerRow,
+  ImageRow,
+  ServerRow,
+} from './container-control.repository.js';
+import { containerActionAvailability, containerStatus } from './container-rules.js';
 
 type RouteRecord = Awaited<ReturnType<ContainerControlRepository['routes']>>[number];
 
@@ -87,178 +82,183 @@ function toAttachmentDto(
   };
 }
 
-async function loadAttachmentDtos(
-  deps: ContainerDtoDeps,
-  containerIds: readonly string[],
-): Promise<Pick<DtoContext, 'localVolumes' | 'sharedVolumes'>> {
-  const attachments = await deps.database.selectFrom('control.volume_attachments as attachment')
-    .innerJoin('control.volumes as volume', 'volume.id', 'attachment.volume_id')
-    .leftJoin('control.containers as container', 'container.id', 'attachment.container_id')
-    .leftJoin('control.volume_placements as placement', (join) => join
-      .onRef('placement.volume_id', '=', 'attachment.volume_id')
-      .onRef('placement.server_id', '=', 'container.server_id'))
-    .selectAll('attachment')
-    .select([
-      'volume.name as volume_name',
-      'volume.shared_backend_id as shared_backend_id',
-      'placement.catalog_state as catalog_state',
-    ])
-    .where('attachment.container_id', 'in', [...containerIds])
-    .orderBy('attachment.created_at')
-    .execute();
-  const localVolumes = new Map<string, VolumeAttachmentDto[]>();
-  const sharedVolumes = new Map<string, VolumeAttachmentDto[]>();
-  for (const attachment of attachments) {
-    const kind = attachment.shared_backend_id !== null ? 'shared' : 'local';
-    const dto = toAttachmentDto(attachment, attachment.volume_name, {
-      kind,
-      catalogState: attachment.catalog_state,
-    });
-    const target = kind === 'shared' ? sharedVolumes : localVolumes;
-    const list = target.get(attachment.container_id) ?? [];
-    list.push(dto);
-    target.set(attachment.container_id, list);
-  }
-  return { localVolumes, sharedVolumes };
-}
+/** Turns container rows into DTOs, loading the servers, images, routes, pools and volumes they reference. */
+export class ContainerDtoAssembler {
+  constructor(
+    private readonly database: Kysely<NyabaseDatabase>,
+    private readonly repository: ContainerControlRepository,
+    private readonly config: NyabaseConfigService,
+  ) {}
 
-async function loadContext(
-  deps: ContainerDtoDeps,
-  rows: readonly ContainerRow[],
-): Promise<DtoContext> {
-  const ids = rows.map((row) => row.id);
-  const serverIds = [...new Set(rows.map((row) => row.server_id))];
-  const imageIds = [...new Set(rows.map((row) => row.image_id))];
-  const ownerIds = [...new Set(rows.map((row) => row.owner_id))];
-  const poolIds = [...new Set(rows.map((row) => row.root_pool_id))];
-  const [serverRows, imageRows, routeRows] = await Promise.all([
-    deps.database.selectFrom('infra.servers').selectAll().where('id', 'in', serverIds).execute(),
-    deps.database.selectFrom('infra.images').selectAll().where('id', 'in', imageIds).execute(),
-    deps.repository.routes(ids),
-  ]);
-  const pendingRows = await deps.database.selectFrom('control.intents')
-    .select('resource_id')
-    .where('resource_type', '=', IntentResourceType.Container)
-    .where('resource_id', 'in', ids)
-    .where('status', '=', 'pending')
-    .execute();
-  const { localVolumes, sharedVolumes } = await loadAttachmentDtos(deps, ids);
-  const owners = new Map<string, string>();
-  if (ownerIds.length > 0) {
-    const ownerRows = await deps.database.selectFrom('iam.users')
-      .select(['id', 'username'])
-      .where('id', 'in', ownerIds)
-      .execute();
-    for (const owner of ownerRows) owners.set(owner.id, owner.username);
-  }
-  const poolRows = poolIds.length === 0
-    ? []
-    : await deps.database.selectFrom('infra.storage_pools')
+  private async loadAttachmentDtos(
+    containerIds: readonly string[],
+  ): Promise<Pick<DtoContext, 'localVolumes' | 'sharedVolumes'>> {
+    const attachments = await this.database.selectFrom('control.volume_attachments as attachment')
+      .innerJoin('control.volumes as volume', 'volume.id', 'attachment.volume_id')
+      .leftJoin('control.containers as container', 'container.id', 'attachment.container_id')
+      .leftJoin('control.volume_placements as placement', (join) => join
+        .onRef('placement.volume_id', '=', 'attachment.volume_id')
+        .onRef('placement.server_id', '=', 'container.server_id'))
+      .selectAll('attachment')
       .select([
-        'id',
-        'display_name',
-        'incus_name',
-        'resize_family',
-        'quota_effective',
-        'block_filesystem',
+        'volume.name as volume_name',
+        'volume.shared_backend_id as shared_backend_id',
+        'placement.catalog_state as catalog_state',
       ])
-      .where('id', 'in', poolIds)
+      .where('attachment.container_id', 'in', [...containerIds])
+      .orderBy('attachment.created_at')
       .execute();
-  return {
-    servers: new Map(serverRows.map((server) => [server.id, server])),
-    images: new Map(imageRows.map((image) => [image.id, image])),
-    routes: new Map(routeRows.map((route) => [route.containerId, route])),
-    pools: new Map(poolRows.map((pool) => [pool.id, pool])),
-    owners,
-    pending: new Set(pendingRows.map((item) => item.resource_id)),
-    localVolumes,
-    sharedVolumes,
-  };
-}
+    const localVolumes = new Map<string, VolumeAttachmentDto[]>();
+    const sharedVolumes = new Map<string, VolumeAttachmentDto[]>();
+    for (const attachment of attachments) {
+      const kind = attachment.shared_backend_id !== null ? 'shared' : 'local';
+      const dto = toAttachmentDto(attachment, attachment.volume_name, {
+        kind,
+        catalogState: attachment.catalog_state,
+      });
+      const target = kind === 'shared' ? sharedVolumes : localVolumes;
+      const list = target.get(attachment.container_id) ?? [];
+      list.push(dto);
+      target.set(attachment.container_id, list);
+    }
+    return { localVolumes, sharedVolumes };
+  }
 
-function toContainerDto(
-  deps: ContainerDtoDeps,
-  context: DtoContext,
-  row: ContainerRow,
-): ContainerDto {
-  const server = context.servers.get(row.server_id);
-  const image = context.images.get(row.image_id);
-  const route = context.routes.get(row.id);
-  const pool = context.pools.get(row.root_pool_id);
-  const actualStatus = containerStatus(route?.runtimeStatus, row.power_intent as ContainerPowerIntent);
-  const proxyHost = deps.config.get<string>('ssh.proxyPublicHost')?.trim() || null;
-  const proxyPort = deps.config.get<number>('ssh.proxyPublicPort') || null;
-  return {
-    id: row.id,
-    serverId: row.server_id,
-    serverName: server?.name ?? row.server_id,
-    ownerId: row.owner_id,
-    ownerName: context.owners.get(row.owner_id),
-    name: row.name,
-    instanceName: route?.instanceName ?? row.instance_name,
-    imageId: row.image_id,
-    imageName: image?.alias,
-    imageFingerprint: row.image_fingerprint,
-    rootPoolId: row.root_pool_id,
-    rootPoolName: pool ? poolLabel(pool.display_name, pool.incus_name) : row.root_pool_id,
-    rootSizeBytes: numberValue(row.root_size_bytes),
-    rootSizePendingBytes: row.root_size_pending_bytes === null
-      ? null
-      : numberValue(row.root_size_pending_bytes),
-    rootUsedBytes: nullableNumber(row.root_used_bytes),
-    rootCapability: pool
-      ? storagePoolCapability(
-        pool.resize_family as StoragePoolResizeFamily,
-        pool.quota_effective,
-        pool.block_filesystem,
-      )
-      : missingStoragePoolCapability(),
-    cpuMillis: row.cpu_millis,
-    memBytes: numberValue(row.mem_bytes),
-    gpu: parseContainerState(row.gpu_state),
-    powerIntent: row.power_intent as ContainerPowerIntent,
-    lifecyclePhase: phase(row.lifecycle_phase),
-    routedIp: route?.routedIp ?? null,
-    actual: {
+  private async loadContext(
+    rows: readonly ContainerRow[],
+  ): Promise<DtoContext> {
+    const ids = rows.map((row) => row.id);
+    const serverIds = [...new Set(rows.map((row) => row.server_id))];
+    const imageIds = [...new Set(rows.map((row) => row.image_id))];
+    const ownerIds = [...new Set(rows.map((row) => row.owner_id))];
+    const poolIds = [...new Set(rows.map((row) => row.root_pool_id))];
+    const [serverRows, imageRows, routeRows] = await Promise.all([
+      this.database.selectFrom('infra.servers').selectAll().where('id', 'in', serverIds).execute(),
+      this.database.selectFrom('infra.images').selectAll().where('id', 'in', imageIds).execute(),
+      this.repository.routes(ids),
+    ]);
+    const pendingRows = await this.database.selectFrom('control.intents')
+      .select('resource_id')
+      .where('resource_type', '=', IntentResourceType.Container)
+      .where('resource_id', 'in', ids)
+      .where('status', '=', 'pending')
+      .execute();
+    const { localVolumes, sharedVolumes } = await this.loadAttachmentDtos(ids);
+    const owners = new Map<string, string>();
+    if (ownerIds.length > 0) {
+      const ownerRows = await this.database.selectFrom('iam.users')
+        .select(['id', 'username'])
+        .where('id', 'in', ownerIds)
+        .execute();
+      for (const owner of ownerRows) owners.set(owner.id, owner.username);
+    }
+    const poolRows = poolIds.length === 0
+      ? []
+      : await this.database.selectFrom('infra.storage_pools')
+        .select([
+          'id',
+          'display_name',
+          'incus_name',
+          'resize_family',
+          'quota_effective',
+          'block_filesystem',
+        ])
+        .where('id', 'in', poolIds)
+        .execute();
+    return {
+      servers: new Map(serverRows.map((server) => [server.id, server])),
+      images: new Map(imageRows.map((image) => [image.id, image])),
+      routes: new Map(routeRows.map((route) => [route.containerId, route])),
+      pools: new Map(poolRows.map((pool) => [pool.id, pool])),
+      owners,
+      pending: new Set(pendingRows.map((item) => item.resource_id)),
+      localVolumes,
+      sharedVolumes,
+    };
+  }
+
+  private toContainerDto(
+    context: DtoContext,
+    row: ContainerRow,
+  ): ContainerDto {
+    const server = context.servers.get(row.server_id);
+    const image = context.images.get(row.image_id);
+    const route = context.routes.get(row.id);
+    const pool = context.pools.get(row.root_pool_id);
+    const actualStatus = containerStatus(route?.runtimeStatus, row.power_intent as ContainerPowerIntent);
+    const proxyHost = this.config.get<string>('ssh.proxyPublicHost')?.trim() || null;
+    const proxyPort = this.config.get<number>('ssh.proxyPublicPort') || null;
+    return {
+      id: row.id,
+      serverId: row.server_id,
+      serverName: server?.name ?? row.server_id,
+      ownerId: row.owner_id,
+      ownerName: context.owners.get(row.owner_id),
+      name: row.name,
       instanceName: route?.instanceName ?? row.instance_name,
-      status: actualStatus,
+      imageId: row.image_id,
+      imageName: image?.alias,
+      imageFingerprint: row.image_fingerprint,
+      rootPoolId: row.root_pool_id,
+      rootPoolName: pool ? poolLabel(pool.display_name, pool.incus_name) : row.root_pool_id,
+      rootSizeBytes: numberValue(row.root_size_bytes),
+      rootSizePendingBytes: row.root_size_pending_bytes === null
+        ? null
+        : numberValue(row.root_size_pending_bytes),
+      rootUsedBytes: nullableNumber(row.root_used_bytes),
+      rootCapability: pool
+        ? storagePoolCapability(
+          pool.resize_family as StoragePoolResizeFamily,
+          pool.quota_effective,
+          pool.block_filesystem,
+        )
+        : missingStoragePoolCapability(),
+      cpuMillis: row.cpu_millis,
+      memBytes: numberValue(row.mem_bytes),
+      gpu: parseContainerState(row.gpu_state),
+      powerIntent: row.power_intent as ContainerPowerIntent,
+      lifecyclePhase: phase(row.lifecycle_phase),
       routedIp: route?.routedIp ?? null,
-      observedAt: isoDate(route?.observedAt),
-    },
-    ssh: {
-      enabled: true,
-      status: route?.sshStatus ?? 'unknown',
-      ready: route?.sshStatus === 'running' && actualStatus === ContainerStatus.Running,
-      loginUser: image?.login_user ?? 'root',
-      proxyHost,
-      proxyPort,
-      observedAt: isoDate(route?.observedAt),
-      lastError: route?.lastError ?? null,
-    },
-    volumes: context.localVolumes.get(row.id) ?? [],
-    sharedVolumes: context.sharedVolumes.get(row.id) ?? [],
-    needsAttention: row.needs_attention,
-    failureCode: row.failure_code,
-    failureReason: row.failure_reason,
-    revision: row.revision,
-    observedRevision: row.observed_revision,
-    actions: deps.actions.forContainer({
-      phase: phase(row.lifecycle_phase),
-      runtimeStatus: actualStatus,
-      runtimeReady: server?.status === 'online',
-      intentPending: context.pending.has(row.id),
-      sshEnabled: true,
-    }),
-    createdAt: new Date(row.created_at).toISOString(),
-    updatedAt: new Date(row.updated_at).toISOString(),
-  };
-}
+      actual: {
+        instanceName: route?.instanceName ?? row.instance_name,
+        status: actualStatus,
+        routedIp: route?.routedIp ?? null,
+        observedAt: isoDate(route?.observedAt),
+      },
+      ssh: {
+        enabled: true,
+        status: route?.sshStatus ?? 'unknown',
+        ready: route?.sshStatus === 'running' && actualStatus === ContainerStatus.Running,
+        loginUser: image?.login_user ?? 'root',
+        proxyHost,
+        proxyPort,
+        observedAt: isoDate(route?.observedAt),
+        lastError: route?.lastError ?? null,
+      },
+      volumes: context.localVolumes.get(row.id) ?? [],
+      sharedVolumes: context.sharedVolumes.get(row.id) ?? [],
+      needsAttention: row.needs_attention,
+      failureCode: row.failure_code,
+      failureReason: row.failure_reason,
+      revision: row.revision,
+      observedRevision: row.observed_revision,
+      actions: containerActionAvailability({
+        phase: phase(row.lifecycle_phase),
+        runtimeStatus: actualStatus,
+        runtimeReady: server?.status === 'online',
+        intentPending: context.pending.has(row.id),
+        sshEnabled: true,
+      }),
+      createdAt: new Date(row.created_at).toISOString(),
+      updatedAt: new Date(row.updated_at).toISOString(),
+    };
+  }
 
-export async function toContainerDtos(
-  deps: ContainerDtoDeps,
-  rows: readonly ContainerRow[],
-): Promise<ContainerDto[]> {
-  if (rows.length === 0) return [];
-  const context = await loadContext(deps, rows);
-  return rows.map((row) => toContainerDto(deps, context, row));
+  async toContainerDtos(
+    rows: readonly ContainerRow[],
+  ): Promise<ContainerDto[]> {
+    if (rows.length === 0) return [];
+    const context = await this.loadContext(rows);
+    return rows.map((row) => this.toContainerDto(context, row));
+  }
 }

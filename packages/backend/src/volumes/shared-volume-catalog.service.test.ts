@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { occupancyForCatalogItem } from './shared-volume-inspect.js';
+import { occupancyForCatalogItem } from './shared-volume-catalog.service.js';
 
 describe('shared catalog occupancy matcher', () => {
   it('emits the six occupancies and skips never-seen nodes', () => {

@@ -7,14 +7,11 @@ import { ReconcileModule } from '../reconcile/reconcile.module.js';
 import { VolumesModule } from '../volumes/volumes.module.js';
 import { ConsoleBridgeGateway } from './console-bridge.gateway.js';
 import { ConsoleSessionService } from './console-session.service.js';
-import { ContainerActionPolicyService } from './container-action-policy.service.js';
 import { ContainerControlRepository } from './container-control.repository.js';
 import { ContainerControlService } from './container-control.service.js';
 import { ContainerReconciler } from './container-reconciler.service.js';
-import { ContainerSshConvergenceService } from './container-ssh-convergence.service.js';
-import { IncusContainerSshStateAdapter } from './container-ssh-state.adapter.js';
+import { ContainerSshConvergenceService, IncusContainerSshStateAdapter } from './container-ssh.js';
 import { ContainersController } from './containers.controller.js';
-import { IncusConsoleBridgeAdapter } from './incus-console-bridge.adapter.js';
 
 @Module({
   imports: [
@@ -26,7 +23,6 @@ import { IncusConsoleBridgeAdapter } from './incus-console-bridge.adapter.js';
     ProxySnapshotNotifierModule,
   ],
   providers: [
-    ContainerActionPolicyService,
     ContainerControlService,
     ContainerControlRepository,
     ContainerSshConvergenceService,
@@ -34,13 +30,11 @@ import { IncusConsoleBridgeAdapter } from './incus-console-bridge.adapter.js';
     IncusContainerSshStateAdapter,
     ConsoleSessionService,
     ConsoleBridgeGateway,
-    IncusConsoleBridgeAdapter,
   ],
   controllers: [
     ContainersController,
   ],
   exports: [
-    ContainerActionPolicyService,
     ContainerControlService,
     ContainerControlRepository,
     ContainerSshConvergenceService,

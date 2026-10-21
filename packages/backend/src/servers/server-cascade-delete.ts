@@ -3,7 +3,7 @@ import { sql, type Transaction } from 'kysely';
 import type { AuditService } from '../iam/audit.service.js';
 import type { NyabaseDatabase } from '../platform/persistence-pg/database.types.js';
 import { VOLUME_DESTROY_PLACEMENT_ID } from '../reconcile/reconcile-claim.repository.js';
-import { listEligibleDestroyExecutors } from '../volumes/eligible-destroy-executors.js';
+import { listEligibleDestroyExecutors } from '../volumes/volumes.repository.js';
 
 type Tx = Transaction<NyabaseDatabase>;
 

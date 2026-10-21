@@ -15,7 +15,7 @@ import {
 } from './volumes.controller.js';
 import { VolumesRepository } from './volumes.repository.js';
 import { LocalVolumesService } from './local-volumes.service.js';
-import { SharedVolumeCatalogInspectService } from './shared-volume-catalog-inspect.service.js';
+import { SharedVolumeCatalogInspectService } from './shared-volume-catalog.service.js';
 import { SharedVolumesService } from './shared-volumes.service.js';
 import { VolumeAttachmentsService } from './volume-attachments.service.js';
 

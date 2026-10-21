@@ -107,7 +107,6 @@ function makeHarness() {
     intents as never,
     consoleSessions as never,
     audit as never,
-    {} as never,
     { listForServer: vi.fn().mockResolvedValue([]) } as never,
     { get: vi.fn().mockReturnValue(null) } as never,
     sshConvergence as never,

@@ -10,18 +10,20 @@ import {
 } from '../incus/index.js';
 import { ContainerReconciler } from './container-reconciler.service.js';
 import {
-  decideRootShrink,
   managedContainerIdentity,
   observedDiskUsageBytes,
   powerTransition,
   restartTransition,
+} from './container-instance-ops.js';
+import { decideRootShrink } from './container-rules.js';
+import type { IntentRecord } from '../reconcile/intent.repository.js';
+import type { ReconcileRunContext } from '../reconcile/managed-reconciler.js';
+import {
+  IncusContainerSshStateAdapter,
   sshFileMetadataMatches,
   sshFileNeedsReconcile,
   sshObservation,
-} from './container-reconcile-support.js';
-import type { IntentRecord } from '../reconcile/intent.repository.js';
-import type { ReconcileRunContext } from '../reconcile/managed-reconciler.js';
-import { IncusContainerSshStateAdapter } from './container-ssh-state.adapter.js';
+} from './container-ssh.js';
 
 /** The reconciler's private SQL store, where the tests intercept data access. */
 function storeOf(reconciler: ContainerReconciler): object {

@@ -5,14 +5,48 @@ import { IncusError } from '../incus/index.js';
 import type { NyabaseDatabase } from '../platform/persistence-pg/database.types.js';
 import type { IntentFailure, IntentRepository } from '../reconcile/intent.repository.js';
 import type { ResourceAuthority } from '../reconcile/managed-reconciler.js';
-import { listEligibleDestroyExecutors } from './eligible-destroy-executors.js';
-import { ensureVolumeIntent } from './volume-intents.js';
-import type {
-  CatalogRow,
-  VolumeAttachmentRow,
-  VolumeRecord,
-  VolumeRow,
-} from './volume-reconcile-support.js';
+import type { VolumeDriver } from './volume-rules.js';
+import { ensureVolumeIntent, listEligibleDestroyExecutors } from './volumes.repository.js';
+
+export interface VolumeRecord {
+  id: string;
+  pool_id: string | null;
+  server_id: string | null;
+  shared_backend_id: string | null;
+  incus_name: string;
+  size_bytes: string;
+  used_bytes: string | null;
+  revision: number;
+  lifecycle_phase: 'provisioning' | 'active' | 'deleting' | 'failed';
+  needs_attention: boolean;
+  dir_ensured: boolean;
+  remove_all_committed: boolean;
+  remove_all_server_id: string | null;
+}
+
+export interface VolumeRow extends VolumeRecord {
+  driver: VolumeDriver;
+  resize_family: 'quota_online' | 'block_backed';
+  block_filesystem: string | null;
+  target_server_id: string;
+  catalog_state: 'ensuring' | 'present';
+  placement_pool_id: string;
+  placement_pool_name: string;
+}
+
+export interface VolumeAttachmentRow {
+  id: string;
+  container_id: string;
+  power_intent: 'running' | 'stopped';
+}
+
+export interface CatalogRow {
+  server_id: string;
+  pool_id: string;
+  pool_name: string;
+  catalog_state: 'ensuring' | 'present';
+  server_status: 'online' | 'unreachable' | 'unknown';
+}
 
 /** Every SQL statement the volume reconciler issues; the Incus-facing logic never touches Kysely. */
 export class VolumeReconcileStore {

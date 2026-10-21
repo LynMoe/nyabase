@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { IncusError } from '../incus/index.js';
 import type { ReconcileRunContext } from '../reconcile/managed-reconciler.js';
 import { VolumeReconciler } from './volume-reconciler.service.js';
-import { decideVolumeResize, normalizeObservedVolumeUsage } from './volume-usage.js';
+import { decideVolumeResize, normalizeObservedVolumeUsage } from './volume-rules.js';
 
 /** The reconciler's private SQL store, where the tests intercept data access. */
 function storeOf(reconciler: VolumeReconciler): object {

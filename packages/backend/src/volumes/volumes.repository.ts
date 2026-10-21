@@ -1,8 +1,21 @@
-import { Inject, Injectable } from '@nestjs/common';
+import { ForbiddenException, Inject, Injectable } from '@nestjs/common';
+import { IntentKind, IntentResourceType } from '@nyabase/common';
 import { sql, type Kysely, type Transaction } from 'kysely';
 import type { NyabaseDatabase } from '../platform/persistence-pg/database.types.js';
 import { PG_DATABASE } from '../platform/persistence-pg/tokens.js';
+import {
+  resolvePoolAccess,
+  resolveServerAccess,
+  resolveSharedBackendAccess,
+} from '../iam/effective-access.js';
 import { numberValue } from '../platform/domain-utils.js';
+import type {
+  CreatePendingIntentInput,
+  EnsurePendingIntentInput,
+  IntentExecutor,
+  IntentRecord,
+  IntentRepository,
+} from '../reconcile/intent.repository.js';
 
 export type VolumeExecutor = Kysely<NyabaseDatabase> | Transaction<NyabaseDatabase>;
 export type VolumeCatalogState = 'ensuring' | 'present';
@@ -418,4 +431,149 @@ export class VolumesRepository {
       .execute();
     return rows.map((row) => row.id);
   }
+}
+
+// --- eligible destroy executors -------------------------------------------------
+
+export type EligibleDestroyExecutor = {
+  server_id: string;
+  server_name: string;
+  pool_id: string;
+  pool_name: string;
+};
+
+export async function listEligibleDestroyExecutors(
+  executor: VolumeExecutor,
+  sharedBackendId: string,
+  options: { excludeServerId?: string } = {},
+): Promise<EligibleDestroyExecutor[]> {
+  let query = executor
+    .selectFrom('infra.servers as s')
+    .innerJoin('infra.storage_pools as p', 'p.server_id', 's.id')
+    .select([
+      's.id as server_id',
+      's.name as server_name',
+      'p.id as pool_id',
+      'p.incus_name as pool_name',
+    ])
+    .where('s.status', '=', 'online')
+    .where('p.registered', '=', true)
+    .where('p.shareable', '=', true)
+    .where('p.driver', '=', 'cephfs')
+    .where('p.shared_backend_id', '=', sharedBackendId)
+    .orderBy('s.id', 'asc')
+    .orderBy('p.id', 'asc');
+  if (options.excludeServerId) {
+    query = query.where('s.id', '!=', options.excludeServerId);
+  }
+  const rows = await query.execute();
+  const firstPoolByServer = new Map<string, EligibleDestroyExecutor>();
+  for (const row of rows) {
+    if (!firstPoolByServer.has(row.server_id)) {
+      firstPoolByServer.set(row.server_id, row);
+    }
+  }
+  return [...firstPoolByServer.values()];
+}
+
+// --- owner grants (current coverage, resolved from the effective-access views) ---
+
+/** The owner's current server coverage; throws 403 when absent or expired. */
+export async function requireServerAccess(
+  executor: VolumeExecutor,
+  ownerId: string,
+  serverId: string,
+) {
+  const access = await resolveServerAccess(executor, ownerId, serverId);
+  if (!access) throw new ForbiddenException('Server storage access is not granted');
+  return access;
+}
+
+export async function assertPoolGrant(
+  executor: VolumeExecutor,
+  ownerId: string,
+  poolId: string,
+): Promise<void> {
+  if (!await resolvePoolAccess(executor, ownerId, poolId)) {
+    throw new ForbiddenException('Storage pool access is not granted');
+  }
+}
+
+/** Capacity limit of the owner's current backend coverage: null = unlimited, undefined = none. */
+export async function effectiveSharedGrant(
+  executor: VolumeExecutor,
+  ownerId: string,
+  backendId: string,
+): Promise<number | null | undefined> {
+  const access = await resolveSharedBackendAccess(executor, ownerId, backendId);
+  return access ? access.limitBytes : undefined;
+}
+
+export async function assertSharedGrant(
+  executor: VolumeExecutor,
+  ownerId: string,
+  backendId: string,
+): Promise<void> {
+  const row = await effectiveSharedGrant(executor, ownerId, backendId);
+  if (row === undefined) throw new ForbiddenException('Shared backend access is not granted');
+}
+
+// --- intent creation with target validation -------------------------------------
+
+/**
+ * Volume intents run against one Incus server: a local volume's own server, or
+ * a registered placement of a shared volume. destroy is the exception and is
+ * not bound to a server. Anything else is rejected before it is queued.
+ */
+export async function assertVolumeIntentTarget(
+  input: Pick<CreatePendingIntentInput, 'kind' | 'resourceId' | 'serverId'>,
+  executor: IntentExecutor,
+): Promise<void> {
+  if (input.kind === IntentKind.VolumeDestroy) {
+    if (input.serverId) throw new Error('Volume destroy intents cannot carry a server id');
+    return;
+  }
+  if (!input.serverId) throw new Error('Volume intents require a server id');
+  const volume = await executor
+    .selectFrom('control.volumes')
+    .select(['server_id', 'shared_backend_id'])
+    .where('id', '=', input.resourceId)
+    .executeTakeFirst();
+  if (volume?.shared_backend_id && input.kind === IntentKind.VolumeEnsure) {
+    throw new Error('Shared volumes cannot enqueue volume.ensure');
+  }
+  if (volume && !volume.shared_backend_id && input.serverId !== volume.server_id) {
+    throw new Error('Local volume intent server does not match the volume');
+  }
+  if (volume?.shared_backend_id) {
+    const placement = await executor
+      .selectFrom('control.volume_placements')
+      .select('server_id')
+      .where('volume_id', '=', input.resourceId)
+      .where('server_id', '=', input.serverId)
+      .executeTakeFirst();
+    if (!placement) {
+      throw new Error('Shared volume intent server does not match a placement');
+    }
+  }
+}
+
+export async function createVolumeIntent(
+  intents: Pick<IntentRepository, 'createPending'>,
+  input: CreatePendingIntentInput,
+  executor: IntentExecutor,
+): Promise<IntentRecord> {
+  if (input.resourceType === IntentResourceType.Volume) {
+    await assertVolumeIntentTarget(input, executor);
+  }
+  return intents.createPending(input, executor);
+}
+
+export async function ensureVolumeIntent(
+  intents: Pick<IntentRepository, 'ensurePending'>,
+  input: EnsurePendingIntentInput,
+  executor: IntentExecutor,
+): Promise<IntentRecord> {
+  await assertVolumeIntentTarget(input, executor);
+  return intents.ensurePending(input);
 }

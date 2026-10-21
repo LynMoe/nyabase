@@ -1,11 +1,24 @@
-import { BadRequestException, ConflictException, ForbiddenException } from '@nestjs/common';
+import { BadRequestException, ConflictException, ForbiddenException, NotFoundException } from '@nestjs/common';
 import {
+  Capability,
+  ContainerPhase,
   ContainerPowerIntent,
   ContainerStatus,
   FailureCode,
+  IntentKind,
   StoragePoolResizeFamily,
+  type ActionAvailability,
+  type ContainerAction,
   type CreateContainerRequest,
 } from '@nyabase/common';
+import { isSystemActor, type Actor } from '../iam/actor.js';
+import type {
+  CreatePendingIntentInput,
+  IntentExecutor,
+  IntentRecord,
+  IntentRepository,
+  PhysicalSettlement,
+} from '../reconcile/intent.repository.js';
 
 export interface RootResizeCheckInput {
   readonly containerId: string;
@@ -146,4 +159,192 @@ export function assertComputeGrant(
       details: { requestedMemBytes: memBytes, grantMemBytes: grant.memBytes },
     });
   }
+}
+
+// --- authorisation ------------------------------------------------------------
+
+export type ContainerAccess = 'owner' | 'admin' | 'system';
+
+/**
+ * The one container authorisation rule: a holder of `ManageContainersAny`
+ * (administrator rules: no server-grant limits), else the owner (owner rules:
+ * live server grant and its limits), or the system. Everyone else is refused
+ * with the status the owner-only route always used (403 for reads and power
+ * actions, 404 where the row is hidden). A holder who also owns the row keeps
+ * the administrator rules, as the old /admin route gave them.
+ */
+export function assertCanAccess(
+  actor: Actor,
+  row: { owner_id: string },
+  denied: 'forbidden' | 'not-found' = 'forbidden',
+): ContainerAccess {
+  if (isSystemActor(actor)) return 'system';
+  if (actor.capabilities.has(Capability.ManageContainersAny)) return 'admin';
+  if (row.owner_id === actor.userId) return 'owner';
+  if (denied === 'not-found') throw new NotFoundException('Container not found');
+  throw new ForbiddenException('Container is not owned by current user');
+}
+
+
+// --- root shrink (reconciler guard) -------------------------------------------
+
+export type RootShrinkBlock = 'usage_unknown' | 'usage_floor' | 'requires_stop';
+
+export function decideRootShrink(input: {
+  readonly resizeFamily: 'quota_online' | 'block_backed';
+  readonly actualRootBytes: bigint;
+  readonly desiredRootBytes: bigint;
+  readonly usedBytes: bigint | null;
+  readonly running: boolean;
+}): 'allow' | RootShrinkBlock {
+  if (input.desiredRootBytes >= input.actualRootBytes) return 'allow';
+  if (input.resizeFamily === 'block_backed' && input.running) return 'requires_stop';
+  if (input.resizeFamily === 'quota_online' && (input.usedBytes === null || input.usedBytes <= 0n)) {
+    return 'usage_unknown';
+  }
+  if (input.usedBytes !== null && input.desiredRootBytes < input.usedBytes) return 'usage_floor';
+  return 'allow';
+}
+
+
+// --- intents ------------------------------------------------------------------
+
+export function isRestartIntent(
+  kind: string,
+  request: Record<string, unknown> | null | undefined,
+): boolean {
+  return kind === IntentKind.ContainerPower && request?.action === 'restart';
+}
+
+/**
+ * A restart is proven by the instance start time moving past the baseline
+ * recorded at request time, so a restart must carry exactly that baseline and
+ * no other container intent may carry one.
+ */
+export function assertContainerIntentBaseline(
+  input: Pick<CreatePendingIntentInput, 'kind' | 'request' | 'baseline'>,
+): void {
+  if (!isRestartIntent(input.kind, input.request)) {
+    if (input.baseline) throw new Error('Only restart intents may carry a baseline');
+    return;
+  }
+  const baseline = input.baseline;
+  if (
+    !baseline
+    || Object.keys(baseline).some((key) => key !== 'startedAt')
+    || !Object.prototype.hasOwnProperty.call(baseline, 'startedAt')
+    || (baseline.startedAt !== null && typeof baseline.startedAt !== 'string')
+  ) {
+    throw new Error('Restart intents require a startedAt baseline');
+  }
+}
+
+export async function createContainerIntent(
+  intents: Pick<IntentRepository, 'createPending'>,
+  input: CreatePendingIntentInput,
+  executor?: IntentExecutor,
+): Promise<IntentRecord> {
+  assertContainerIntentBaseline(input);
+  return intents.createPending(input, executor);
+}
+
+/**
+ * Settles a finished container intent. A restart settles only itself (and its
+ * success settles the older desired-state intents it covers); a later
+ * desired-state revision that succeeds must never settle a pending restart,
+ * because only the restart's own start-time proof can.
+ */
+export async function settleContainerIntent(
+  intents: Pick<IntentRepository, 'settleOne' | 'settleForObservedRevision'>,
+  intent: IntentRecord,
+  observedRevision: number,
+  settlement: PhysicalSettlement,
+): Promise<void> {
+  if (isRestartIntent(intent.kind, intent.request)) {
+    await intents.settleOne(intent.id, settlement);
+    if (settlement.outcome !== 'succeeded') return;
+  }
+  await intents.settleForObservedRevision(
+    intent.resourceType,
+    intent.resourceId,
+    observedRevision,
+    settlement,
+    undefined,
+    { keep: (candidate) => isRestartIntent(candidate.kind, candidate.request) },
+  );
+}
+
+// --- action availability --------------------------------------------------------
+
+export interface ContainerActionPolicyInput {
+  phase: ContainerPhase;
+  runtimeStatus: ContainerStatus | null;
+  runtimeReady: boolean;
+  intentPending: boolean;
+  sshEnabled: boolean;
+}
+
+const DISABLED_ACTIONS: readonly ContainerAction[] = [
+  'start',
+  'stop',
+  'restart',
+  'delete',
+  'stats',
+  'console',
+];
+
+function actionDisabled(
+  reason: ActionAvailability['reason'],
+  message: string,
+): ActionAvailability {
+  return { enabled: false, reason, message };
+}
+
+function allActionsDisabled(
+  reason: ActionAvailability['reason'],
+  message: string,
+): Record<ContainerAction, ActionAvailability> {
+  return Object.fromEntries(
+    DISABLED_ACTIONS.map((action) => [action, actionDisabled(reason, message)]),
+  ) as Record<ContainerAction, ActionAvailability>;
+}
+
+/** Which of the container's actions the UI may offer, from its phase and observed runtime. */
+export function containerActionAvailability(
+  input: ContainerActionPolicyInput,
+): Record<ContainerAction, ActionAvailability> {
+  const enabled: ActionAvailability = { enabled: true };
+  if (input.intentPending) {
+    return {
+      ...allActionsDisabled('intent_pending', 'Another durable intent is pending'),
+      delete: enabled,
+    };
+  }
+  if (!input.runtimeReady) {
+    return allActionsDisabled('server_unreachable', 'Server runtime is not ready');
+  }
+  if (input.phase === ContainerPhase.Deleting) {
+    return allActionsDisabled('phase_not_active', 'Container is being deleted');
+  }
+  if (input.phase === ContainerPhase.Provisioning) {
+    return allActionsDisabled('phase_not_active', 'Container is not active yet');
+  }
+  if (input.phase === ContainerPhase.Failed) {
+    return {
+      ...allActionsDisabled('phase_not_active', 'Container is failed'),
+      delete: enabled,
+    };
+  }
+  const running = input.runtimeStatus === ContainerStatus.Running;
+  const stopped = input.runtimeStatus === ContainerStatus.Stopped;
+  return {
+    start: stopped ? enabled : actionDisabled('phase_not_active', 'Container is not stopped'),
+    stop: running ? enabled : actionDisabled('phase_not_active', 'Container is not running'),
+    restart: running ? enabled : actionDisabled('phase_not_active', 'Container is not running'),
+    delete: enabled,
+    stats: running ? enabled : actionDisabled('phase_not_active', 'Container is not running'),
+    console: running && input.sshEnabled
+      ? enabled
+      : actionDisabled('phase_not_active', 'Container console is not ready'),
+  };
 }

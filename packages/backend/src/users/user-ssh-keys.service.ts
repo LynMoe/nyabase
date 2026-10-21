@@ -22,7 +22,7 @@ import { PG_DATABASE } from '../platform/persistence-pg/tokens.js';
 import { PgTransactionManager } from '../platform/persistence-pg/transaction.js';
 import { AccessResolverService } from '../iam/access-resolver.service.js';
 import { AuditService } from '../iam/audit.service.js';
-import { ContainerSshConvergenceService } from '../containers/container-ssh-convergence.service.js';
+import { ContainerSshConvergenceService } from '../containers/container-ssh.js';
 import { ProxySnapshotNotifierService } from '../proxy-snapshots/proxy-snapshot-notifier.service.js';
 
 export interface IamSshPublicKey {

@@ -1,7 +1,7 @@
 import { EventEmitter } from 'node:events';
 import { describe, expect, it, vi } from 'vitest';
 import { ConsoleBridgeGateway } from '../containers/console-bridge.gateway.js';
-import { IncusConsoleBridgeAdapter } from '../containers/incus-console-bridge.adapter.js';
+import { ConsoleSessionService } from '../containers/console-session.service.js';
 
 class FakeSocket extends EventEmitter {
   readonly readyState = 1;
@@ -12,7 +12,6 @@ class FakeSocket extends EventEmitter {
 describe('Incus console bridge contract', () => {
   it('accepts the one authentication frame without logging or forwarding the secret', async () => {
     const gateway = new ConsoleBridgeGateway(
-      {} as never,
       {} as never,
       {} as never,
       {} as never,
@@ -37,9 +36,9 @@ describe('Incus console bridge contract', () => {
       sockets: {},
       close: vi.fn(),
     });
-    const adapter = new IncusConsoleBridgeAdapter();
+    const sessions = new ConsoleSessionService({} as never, {} as never);
 
-    await adapter.open(
+    await sessions.openExec(
       { openExecWebSockets } as never,
       'nyc-container-1',
       ['bash'],

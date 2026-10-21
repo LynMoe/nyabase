@@ -28,6 +28,7 @@ import {
 } from '@nyabase/common';
 import type { NyabaseDatabase } from '../platform/persistence-pg/database.types.js';
 import { PG_DATABASE } from '../platform/persistence-pg/tokens.js';
+import { nullableNumber, numberValue } from '../platform/domain-utils.js';
 import { PgTransactionManager } from '../platform/persistence-pg/transaction.js';
 import { AccessResolverService } from '../iam/access-resolver.service.js';
 import type { ServerAccess } from '../iam/effective-access.js';
@@ -35,36 +36,30 @@ import { assertListScope, isSystemActor, type Actor } from '../iam/actor.js';
 import { AuditService } from '../iam/audit.service.js';
 import { acceptedIntent } from '../reconcile/accepted-intent.js';
 import { IntentRepository } from '../reconcile/intent.repository.js';
-import { createContainerIntent } from './container-intents.js';
 import { ConsoleSessionService } from './console-session.service.js';
-import { ContainerSshConvergenceService } from './container-ssh-convergence.service.js';
+import { ContainerSshConvergenceService } from './container-ssh.js';
 import {
   ContainerControlRepository,
   type ContainerRow,
 } from './container-control.repository.js';
-import { ContainerActionPolicyService } from './container-action-policy.service.js';
 import { IpPoolsRepository } from '../ip-pools/ip-pools.repository.js';
 import { NyabaseConfigService } from '../platform/config/nyabase-config.service.js';
 import { VolumeAttachmentsService } from '../volumes/volume-attachments.service.js';
 import { mutateGpuContainer } from '../gpu/admit.js';
 import { GpuClaimsRepository } from '../gpu/gpu-claims.repository.js';
+import { assertRootCapacity, ContainerCreateService } from './container-create.service.js';
+import { ContainerDtoAssembler } from './container-dtos.js';
 import {
-  assertAdminInTransaction,
   assertCanAccess,
-  enforceInTransaction,
-  requireLiveGrant,
-  type ContainerAccess,
-} from './container-access.js';
-import { admitContainer, type ContainerCreateDeps } from './container-create.js';
-import { toContainerDtos, type ContainerDtoDeps } from './container-dtos.js';
-import { validateRootResize } from './container-root-resize.js';
-import {
   assertComputeGrant,
   assertContainerName,
   assertCreateNumbers,
+  checkRootResize,
   containerStatus,
+  createContainerIntent,
   gpuDeviceClaimed,
   isUniqueViolation,
+  type ContainerAccess,
 } from './container-rules.js';
 
 type ContainerAction = 'start' | 'stop' | 'restart' | 'delete';
@@ -79,13 +74,14 @@ function auditActionFor(action: ContainerAction): AuditAction {
 }
 
 /**
- * Container API operations. Admission and DTO assembly live in
- * container-create / container-dtos; authorisation in container-access.
+ * Container API operations: the user-facing commands, authorised per actor.
+ * Admission lives in ContainerCreateService and DTO assembly in
+ * ContainerDtoAssembler (both built from the same collaborators).
  */
 @Injectable()
 export class ContainerControlService {
-  private readonly dtoDeps: ContainerDtoDeps;
-  private readonly createDeps: ContainerCreateDeps;
+  private readonly dtos: ContainerDtoAssembler;
+  private readonly creator: ContainerCreateService;
 
   constructor(
     @Inject(PG_DATABASE) database: Kysely<NyabaseDatabase>,
@@ -95,15 +91,22 @@ export class ContainerControlService {
     private readonly intents: IntentRepository,
     private readonly consoleSessions: ConsoleSessionService,
     private readonly audit: AuditService,
-    actions: ContainerActionPolicyService,
     ipPools: IpPoolsRepository,
     config: NyabaseConfigService,
     private readonly sshConvergence: ContainerSshConvergenceService,
     private readonly volumes: VolumeAttachmentsService,
     private readonly gpuClaims: GpuClaimsRepository,
   ) {
-    this.dtoDeps = { database, repository, config, actions };
-    this.createDeps = { repository, access, intents, audit, ipPools, volumes, gpuClaims };
+    this.dtos = new ContainerDtoAssembler(database, repository, config);
+    this.creator = new ContainerCreateService(
+      repository,
+      access,
+      intents,
+      audit,
+      ipPools,
+      volumes,
+      gpuClaims,
+    );
   }
 
   async list(
@@ -116,13 +119,13 @@ export class ContainerControlService {
       ownerId: scope === 'mine' ? actor.userId : undefined,
       serverId: filters.serverId,
     });
-    return toContainerDtos(this.dtoDeps, rows);
+    return this.dtos.toContainerDtos(rows);
   }
 
   async get(actor: Actor, containerId: string): Promise<ContainerDto> {
     const row = await this.requireContainer(containerId);
     assertCanAccess(actor, row);
-    return (await toContainerDtos(this.dtoDeps, [row]))[0]!;
+    return (await this.dtos.toContainerDtos([row]))[0]!;
   }
 
   async create(
@@ -133,7 +136,7 @@ export class ContainerControlService {
     assertCreateNumbers(request);
     const id = randomUUID();
     const result = await this.transactions.run(
-      (transaction) => admitContainer(this.createDeps, transaction, actor, request, id),
+      (transaction) => this.creator.admit(transaction, actor, request, id),
       { isolationLevel: 'serializable', maxAttempts: 5 },
     );
     return acceptedIntent(result.intent);
@@ -189,13 +192,7 @@ export class ContainerControlService {
       { root_size_bytes: size, root_size_pending_bytes: null },
       { operation: 'root_resize', sizeBytes: size },
       AuditAction.ResizeContainerRoot,
-      (transaction, locked, grant) => validateRootResize(
-        this.repository,
-        transaction,
-        locked,
-        size,
-        grant,
-      ),
+      (transaction, locked, grant) => this.validateRootResize(transaction, locked, size, grant),
     );
   }
 
@@ -214,7 +211,7 @@ export class ContainerControlService {
           message: 'A deleting container cannot be modified',
         });
       }
-      if (access === 'admin') await assertAdminInTransaction(this.access, transaction, actor);
+      if (access === 'admin') await this.assertAdminInTransaction(transaction, actor);
       const enabled = await this.gpuClaims.isEnabled(current.server_id, transaction);
       if (!enabled) {
         throw new ConflictException({
@@ -229,7 +226,7 @@ export class ContainerControlService {
       );
       let grantPciAddresses: readonly string[] = [];
       if (access === 'owner') {
-        const grant = await requireLiveGrant(this.access, transaction, actor, current);
+        const grant = await this.requireLiveGrant(transaction, actor, current);
         grantPciAddresses = grant.gpuPciAddresses;
       }
       let mutated;
@@ -310,7 +307,7 @@ export class ContainerControlService {
       const current = await this.repository.lock(containerId, transaction);
       if (!current) throw new NotFoundException('Container not found');
       access = assertCanAccess(actor, current, 'not-found');
-      await enforceInTransaction(this.access, transaction, actor, current, access);
+      await this.enforceInTransaction(transaction, actor, current, access);
       const currentRoute = await this.repository.currentRoute(containerId, transaction);
       if (
         containerStatus(currentRoute?.instance_status, current.power_intent as ContainerPowerIntent)
@@ -351,7 +348,7 @@ export class ContainerControlService {
       const current = await this.repository.lock(containerId, transaction);
       if (!current) throw new NotFoundException('Container not found');
       const access = assertCanAccess(actor, current);
-      await enforceInTransaction(this.access, transaction, actor, current, access);
+      await this.enforceInTransaction(transaction, actor, current, access);
       if (access === 'owner' && (action === 'start' || action === 'restart')) {
         await this.access.assertAttachedStorageCoveredInTransaction(
           transaction,
@@ -456,7 +453,7 @@ export class ContainerControlService {
           message: 'A deleting container cannot be modified',
         });
       }
-      const grant = await enforceInTransaction(this.access, transaction, actor, current, access);
+      const grant = await this.enforceInTransaction(transaction, actor, current, access);
       await validate?.(transaction, current, grant);
       const updated = await this.repository.updateDesired(
         containerId,
@@ -484,6 +481,134 @@ export class ContainerControlService {
     return acceptedIntent(result.intent);
   }
 
+
+  /** Re-checks `ManageContainersAny` against the database inside the transaction. */
+  private async assertAdminInTransaction(
+    transaction: Transaction<NyabaseDatabase>,
+    actor: Actor,
+  ): Promise<void> {
+    await this.access.assertActorCapabilitiesInTransaction(
+      transaction,
+      actor.userId,
+      [Capability.ManageContainersAny],
+    );
+  }
+
+  /** The owner must hold current coverage of the container's server. */
+  private async requireLiveGrant(
+    transaction: Transaction<NyabaseDatabase>,
+    actor: Actor,
+    container: { server_id: string },
+  ): Promise<ServerAccess> {
+    const grant = await this.access.resolveServerInTransaction(
+      transaction,
+      actor.userId,
+      container.server_id,
+    );
+    if (!grant) throw new ForbiddenException('Server access was revoked');
+    return grant;
+  }
+
+  /**
+   * Owners must still hold a live server grant, administrators must still hold
+   * the capability; the system needs neither. Returns the owner's grant.
+   */
+  private async enforceInTransaction(
+    transaction: Transaction<NyabaseDatabase>,
+    actor: Actor,
+    container: { server_id: string },
+    level: ContainerAccess,
+  ): Promise<ServerAccess | null> {
+    if (level === 'admin') await this.assertAdminInTransaction(transaction, actor);
+    if (level === 'owner') return this.requireLiveGrant(transaction, actor, container);
+    return null;
+  }
+
+  /**
+   * Validate a root-disk resize against the image minimum, the storage grant,
+   * pool capacity (growth) or the shrink safety rules (shrink), under the
+   * container row lock the caller already holds.
+   */
+  private async validateRootResize(
+    transaction: Transaction<NyabaseDatabase>,
+    locked: ContainerRow,
+    size: number,
+    grant: ServerAccess | null,
+  ): Promise<void> {
+    if (locked.root_size_pending_bytes !== null) {
+      throw new ConflictException({
+        code: FailureCode.RootQuotaPending,
+        message: 'A previous root quota change is still pending',
+        details: { containerId: locked.id },
+      });
+    }
+    const image = await transaction.selectFrom('infra.images')
+      .select('min_root_size_bytes')
+      .where('id', '=', locked.image_id)
+      .forUpdate()
+      .executeTakeFirst();
+    const minimum = image?.min_root_size_bytes === null || image?.min_root_size_bytes === undefined
+      ? 0
+      : numberValue(image.min_root_size_bytes);
+    if (size < minimum) {
+      throw new ConflictException({
+        code: FailureCode.RootSizeBelowImageMinimum,
+        message: 'Root size is below the image minimum',
+        details: {
+          imageId: locked.image_id,
+          requestedBytes: size,
+          minimumBytes: minimum,
+        },
+      });
+    }
+    const current = numberValue(locked.root_size_bytes);
+    if (size === current) return;
+    if (size > current) {
+      await assertRootCapacity(
+        this.repository,
+        transaction,
+        locked.owner_id,
+        locked.server_id,
+        locked.root_pool_id,
+        size - current,
+        grant?.diskBytes ?? null,
+      );
+      return;
+    }
+    const pool = await transaction.selectFrom('infra.storage_pools')
+      .select(['resize_family', 'quota_effective'])
+      .where('id', '=', locked.root_pool_id)
+      .where('registered', '=', true)
+      .forUpdate()
+      .executeTakeFirst();
+    if (!pool) {
+      throw new ConflictException({
+        code: FailureCode.StoragePoolExhausted,
+        message: 'The root storage pool is no longer usable',
+        details: { poolId: locked.root_pool_id },
+      });
+    }
+    if (pool.resize_family === 'quota_online' && pool.quota_effective !== true) {
+      throw new ConflictException({
+        code: FailureCode.StoragePoolQuotaIneffective,
+        message: 'The root storage pool cannot enforce root quotas',
+        details: { poolId: locked.root_pool_id },
+      });
+    }
+    const route = await this.repository.currentRoute(locked.id, transaction);
+    const failure = checkRootResize({
+      containerId: locked.id,
+      requestedBytes: size,
+      currentBytes: current,
+      usedBytes: nullableNumber(locked.root_used_bytes),
+      resizeFamily: pool.resize_family,
+      observedStatus: containerStatus(
+        route?.instance_status,
+        locked.power_intent as ContainerPowerIntent,
+      ),
+    });
+    if (failure) throw new ConflictException(failure);
+  }
 
   private async requireContainer(id: string): Promise<ContainerRow> {
     const row = await this.repository.find(id);

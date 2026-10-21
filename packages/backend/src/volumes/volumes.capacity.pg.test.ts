@@ -14,13 +14,12 @@ import { PgTransactionManager } from '../platform/persistence-pg/transaction.js'
 import { IntentRepository } from '../reconcile/intent.repository.js';
 import { VolumeReconciler } from './volume-reconciler.service.js';
 import { StoragePoolsRepository } from '../storage-pools/storage-pools.repository.js';
-import { ContainerActionPolicyService } from '../containers/container-action-policy.service.js';
 import { ContainerControlRepository } from '../containers/container-control.repository.js';
 import { ContainerControlService } from '../containers/container-control.service.js';
 import { IpPoolsRepository } from '../ip-pools/ip-pools.repository.js';
 import { SharedBackendExecutorsService } from '../storage-pools/shared-backend-executors.service.js';
 import { StoragePoolDiscoveryService } from '../storage-pools/storage-pool-discovery.service.js';
-import { ContainerSshConvergenceService } from '../containers/container-ssh-convergence.service.js';
+import { ContainerSshConvergenceService } from '../containers/container-ssh.js';
 import { VolumesRepository } from './volumes.repository.js';
 import { makeVolumeServices } from './volume-services.test-helper.js';
 import { GpuClaimsRepository } from '../gpu/gpu-claims.repository.js';
@@ -583,7 +582,6 @@ describePg('volume capacity locking and scope exclusions', () => {
         containerIntents,
         {} as never,
         { append: vi.fn().mockResolvedValue(undefined) } as never,
-        new ContainerActionPolicyService(),
         new IpPoolsRepository(database),
         { get: vi.fn().mockReturnValue(null) } as never,
         new ContainerSshConvergenceService(
