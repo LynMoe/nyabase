@@ -4,6 +4,7 @@ import { IncusError } from '../incus/index.js';
 import { withPostgresTestDatabase } from '../platform/persistence-pg/postgres-test-harness.js';
 import { IntentRepository } from '../reconcile/intent.repository.js';
 import { VolumeReconciler } from './volume-reconciler.service.js';
+import { VolumeReconcileStore } from './volume-reconcile.store.js';
 import { noopWake } from '../reconcile/reconcile-wake.test-helper.js';
 
 const describePg = process.env.NYABASE_TEST_DATABASE_URL ? describe : describe.skip;
@@ -104,9 +105,7 @@ describePg('volume reconciler equal-node destroy', () => {
       const present = new Set([fixture.serverA, fixture.serverB]);
       const clientA = catalogClient(fixture.serverA, present, fixture.incusName);
       const clientB = catalogClient(fixture.serverB, present, fixture.incusName);
-      const reconciler = new VolumeReconciler(
-        database,
-        new IntentRepository(database, noopWake()),
+      const reconciler = new VolumeReconciler(new VolumeReconcileStore(database, new IntentRepository(database, noopWake())),
         { log: vi.fn().mockResolvedValue(undefined) } as never,
         {
           get: vi.fn(async (id: string) => (id === fixture.serverA ? clientA : clientB)),
@@ -145,9 +144,7 @@ describePg('volume reconciler equal-node destroy', () => {
       const present = new Set([fixture.serverA]);
       const clientA = catalogClient(fixture.serverA, present, fixture.incusName);
       const clientB = catalogClient(fixture.serverB, present, fixture.incusName);
-      const reconciler = new VolumeReconciler(
-        database,
-        new IntentRepository(database, noopWake()),
+      const reconciler = new VolumeReconciler(new VolumeReconcileStore(database, new IntentRepository(database, noopWake())),
         { log: vi.fn().mockResolvedValue(undefined) } as never,
         {
           get: vi.fn(async (id: string) => (id === fixture.serverA ? clientA : clientB)),
@@ -181,9 +178,7 @@ describePg('volume reconciler equal-node destroy', () => {
       const clientA = catalogClient(fixture.serverA, present, fixture.incusName);
       clientA.getStorageVolume.mockRejectedValue(new IncusError('INCUS_TIMEOUT', 'retry'));
       const clientB = catalogClient(fixture.serverB, present, fixture.incusName);
-      const reconciler = new VolumeReconciler(
-        database,
-        new IntentRepository(database, noopWake()),
+      const reconciler = new VolumeReconciler(new VolumeReconcileStore(database, new IntentRepository(database, noopWake())),
         { log: vi.fn().mockResolvedValue(undefined) } as never,
         {
           get: vi.fn(async (id: string) => (id === fixture.serverA ? clientA : clientB)),
@@ -244,9 +239,7 @@ describePg('volume reconciler equal-node destroy', () => {
         settled_at: null,
       }).execute();
       const get = vi.fn();
-      const reconciler = new VolumeReconciler(
-        database,
-        new IntentRepository(database, noopWake()),
+      const reconciler = new VolumeReconciler(new VolumeReconcileStore(database, new IntentRepository(database, noopWake())),
         { log: vi.fn().mockResolvedValue(undefined) } as never,
         { get } as never,
         { register: vi.fn() } as never,
@@ -280,9 +273,7 @@ describePg('volume reconciler equal-node destroy', () => {
       });
       const deleteStorageVolume = vi.fn();
       const getStorageVolume = vi.fn();
-      const reconciler = new VolumeReconciler(
-        database,
-        new IntentRepository(database, noopWake()),
+      const reconciler = new VolumeReconciler(new VolumeReconcileStore(database, new IntentRepository(database, noopWake())),
         { log: vi.fn().mockResolvedValue(undefined) } as never,
         { get: vi.fn() } as never,
         { register: vi.fn() } as never,
@@ -328,9 +319,7 @@ describePg('volume reconciler equal-node destroy', () => {
         .execute();
       const ensurePending = vi.fn().mockResolvedValue({ id: 'intent' });
       const deleteStorageVolume = vi.fn();
-      const reconciler = new VolumeReconciler(
-        database,
-        { ensurePending } as never,
+      const reconciler = new VolumeReconciler(new VolumeReconcileStore(database, { ensurePending } as never),
         { log: vi.fn().mockResolvedValue(undefined) } as never,
         { get: vi.fn().mockResolvedValue(undefined), listServerIds: vi.fn() } as never,
         { register: vi.fn() } as never,

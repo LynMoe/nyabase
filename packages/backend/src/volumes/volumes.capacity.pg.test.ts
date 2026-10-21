@@ -13,14 +13,14 @@ import { withPostgresTestDatabase } from '../platform/persistence-pg/postgres-te
 import { PgTransactionManager } from '../platform/persistence-pg/transaction.js';
 import { IntentRepository } from '../reconcile/intent.repository.js';
 import { VolumeReconciler } from './volume-reconciler.service.js';
+import { VolumeReconcileStore } from './volume-reconcile.store.js';
 import { StoragePoolsRepository } from '../storage-pools/storage-pools.repository.js';
-import { ContainerActionPolicyService } from '../containers/container-action-policy.service.js';
 import { ContainerControlRepository } from '../containers/container-control.repository.js';
-import { ContainerControlService } from '../containers/container-control.service.js';
+import { makeContainerControlService } from '../containers/container-services.test-helper.js';
 import { IpPoolsRepository } from '../ip-pools/ip-pools.repository.js';
 import { SharedBackendExecutorsService } from '../storage-pools/shared-backend-executors.service.js';
 import { StoragePoolDiscoveryService } from '../storage-pools/storage-pool-discovery.service.js';
-import { ContainerSshConvergenceService } from '../containers/container-ssh-convergence.service.js';
+import { ContainerSshConvergenceService } from '../containers/container-ssh.js';
 import { VolumesRepository } from './volumes.repository.js';
 import { makeVolumeServices } from './volume-services.test-helper.js';
 import { GpuClaimsRepository } from '../gpu/gpu-claims.repository.js';
@@ -231,9 +231,7 @@ describePg('volume capacity locking and scope exclusions', () => {
       expect(capacity.pools[0]!.committedBytes).toBe(100);
 
       const intents = new IntentRepository(database, noopWake());
-      const reconciler = new VolumeReconciler(
-        database,
-        intents,
+      const reconciler = new VolumeReconciler(new VolumeReconcileStore(database, intents),
         { log: vi.fn().mockResolvedValue(undefined) } as never,
         { get: vi.fn().mockResolvedValue(undefined), listServerIds: vi.fn() } as never,
         { register: vi.fn() } as never,
@@ -564,7 +562,7 @@ describePg('volume capacity locking and scope exclusions', () => {
         { get: vi.fn().mockRejectedValue(new Error('Incus is unavailable in this test')), listServerIds: vi.fn() } as never,
       );
       const containerIntents = new IntentRepository(database, noopWake());
-      const containerService = new ContainerControlService(
+      const containerService = makeContainerControlService(
         database,
         transactionManager,
         new ContainerControlRepository(database),
@@ -583,7 +581,6 @@ describePg('volume capacity locking and scope exclusions', () => {
         containerIntents,
         {} as never,
         { append: vi.fn().mockResolvedValue(undefined) } as never,
-        new ContainerActionPolicyService(),
         new IpPoolsRepository(database),
         { get: vi.fn().mockReturnValue(null) } as never,
         new ContainerSshConvergenceService(

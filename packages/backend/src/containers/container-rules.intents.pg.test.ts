@@ -5,7 +5,7 @@ import { withPostgresTestDatabase } from '../platform/persistence-pg/postgres-te
 import { IntentRepository } from '../reconcile/intent.repository.js';
 import { noopWake } from '../reconcile/reconcile-wake.test-helper.js';
 import { insertServerFixture } from '../reconcile/server-fixture.test-helper.js';
-import { createContainerIntent, settleContainerIntent } from './container-intents.js';
+import { createContainerIntent, settleContainerIntent } from './container-rules.js';
 
 const describePg = process.env.NYABASE_TEST_DATABASE_URL ? describe : describe.skip;
 

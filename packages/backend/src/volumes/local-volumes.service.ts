@@ -1,12 +1,11 @@
 import {
   BadRequestException,
   ConflictException,
-  Inject,
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
 import { randomUUID } from 'node:crypto';
-import type { Kysely, Transaction } from 'kysely';
+import type { Transaction } from 'kysely';
 import {
   AuditAction,
   Capability,
@@ -25,35 +24,23 @@ import { AuditService } from '../iam/audit.service.js';
 import { deterministicName, numberValue } from '../platform/domain-utils.js';
 import type { NyabaseDatabase } from '../platform/persistence-pg/database.types.js';
 import { PgTransactionManager } from '../platform/persistence-pg/transaction.js';
-import { PG_DATABASE } from '../platform/persistence-pg/tokens.js';
 import { acceptedIntent } from '../reconcile/accepted-intent.js';
 import { IntentRepository } from '../reconcile/intent.repository.js';
 import { StoragePoolsRepository } from '../storage-pools/storage-pools.repository.js';
-import { assertCanAccess, type VolumeAccess } from './volume-access.js';
-import {
-  assertCapacityPhysical,
-  assertCapacityWithinGrants,
-  lockVolumeQuota,
-} from './volume-capacity.js';
-import { ownerCapacity, serverWideCapacity } from './volume-capacity-report.js';
-import type { VolumeRow } from './volume-dtos.js';
+import { VolumeCapacityService } from './volume-capacity.service.js';
+import { VolumeDtoAssembler, type VolumeRow } from './volume-dtos.js';
+import { VolumeLifecycleService } from './volume-lifecycle.service.js';
 import {
   VOLUME_TX,
-  applyResize,
+  assertCanAccess,
   assertPatchable,
   assertValidVolumeSize,
-  beginVolumeDestroy,
-  destroyUntrackedVolume,
+  checkVolumeResize,
   isUniqueViolation,
   nameTakenConflict,
-  renameVolume,
-  type VolumeLifecycleDeps,
-} from './volume-lifecycle.js';
-import { createVolumeIntent } from './volume-intents.js';
-import { toVolumeDtos, type VolumeDeps } from './volume-read-model.js';
-import { checkVolumeResize } from './volume-resize-policy.js';
-import { resolveOwnerScope } from './volume-scope.js';
-import { VolumesRepository } from './volumes.repository.js';
+  type VolumeAccess,
+} from './volume-rules.js';
+import { VolumesRepository, createVolumeIntent } from './volumes.repository.js';
 
 type PatchInput = { expectedRevision: number; name?: string; sizeBytes?: number };
 type Tx = Transaction<NyabaseDatabase>;
@@ -61,18 +48,16 @@ type Tx = Transaction<NyabaseDatabase>;
 /** Per-server (local pool) custom volumes: list, create, resize/rename, delete and capacity. */
 @Injectable()
 export class LocalVolumesService {
-  private readonly deps: VolumeDeps & VolumeLifecycleDeps;
-
   constructor(
     private readonly repository: VolumesRepository,
     private readonly pools: StoragePoolsRepository,
     private readonly transactions: PgTransactionManager,
     private readonly intents: IntentRepository,
-    @Inject(PG_DATABASE) private readonly database: Kysely<NyabaseDatabase>,
     private readonly audit: AuditService,
-  ) {
-    this.deps = { database, repository, pools, intents, audit };
-  }
+    private readonly dtos: VolumeDtoAssembler,
+    private readonly capacityRules: VolumeCapacityService,
+    private readonly lifecycle: VolumeLifecycleService,
+  ) {}
 
   async list(
     actor: Actor,
@@ -84,12 +69,12 @@ export class LocalVolumesService {
       'local',
       scope === 'mine' ? { ownerId: actor.userId } : { serverId: filters.serverId },
     );
-    return toVolumeDtos(this.deps, rows);
+    return this.dtos.toVolumeDtos(rows);
   }
 
   async get(actor: Actor, id: string): Promise<VolumeDto> {
     const { row } = assertCanAccess(actor, await this.repository.findById(id), 'local');
-    const [dto] = await toVolumeDtos(this.deps, [row]);
+    const [dto] = await this.dtos.toVolumeDtos([row]);
     return dto!;
   }
 
@@ -104,8 +89,8 @@ export class LocalVolumesService {
   ): Promise<StorageCapacityDto> {
     assertListScope(actor, scope, Capability.ManageServers);
     return scope === 'all'
-      ? serverWideCapacity(this.deps, serverId)
-      : ownerCapacity(this.deps, actor.userId, serverId);
+      ? this.capacityRules.serverWideCapacity(serverId)
+      : this.capacityRules.ownerCapacity(actor.userId, serverId);
   }
 
   async create(
@@ -126,9 +111,8 @@ export class LocalVolumesService {
     let created;
     try {
       created = await this.transactions.run(async (transaction) => {
-        const scope = await resolveOwnerScope(this.deps, transaction, ownerId, input.scope);
-        await assertCapacityWithinGrants(
-          this.deps,
+        const scope = await this.capacityRules.resolveOwnerScope(transaction, ownerId, input.scope);
+        await this.capacityRules.assertCapacityWithinGrants(
           transaction,
           ownerId,
           scope.serverId,
@@ -209,7 +193,7 @@ export class LocalVolumesService {
     input: PatchInput,
   ): Promise<VolumeDto> {
     if (input.name === undefined || input.name === current.name) {
-      const [dto] = await toVolumeDtos(this.deps, [current]);
+      const [dto] = await this.dtos.toVolumeDtos([current]);
       return dto!;
     }
     const updated = await this.transactions.run(async (transaction) => {
@@ -217,9 +201,9 @@ export class LocalVolumesService {
       if (!locked || locked.revision !== input.expectedRevision) {
         throw new ConflictException({ code: FailureCode.RevisionConflict });
       }
-      return renameVolume(this.deps, transaction, actorId, locked, input.name!);
+      return this.lifecycle.renameVolume(transaction, actorId, locked, input.name!);
     }, VOLUME_TX);
-    const [dto] = await toVolumeDtos(this.deps, [updated]);
+    const [dto] = await this.dtos.toVolumeDtos([updated]);
     return dto!;
   }
 
@@ -268,7 +252,7 @@ export class LocalVolumesService {
       throw new ConflictException({ code: FailureCode.RevisionConflict });
     }
     const lockedDelta = input.sizeBytes - numberValue(locked.size_bytes);
-    await lockVolumeQuota(this.pools, locked, transaction);
+    await this.capacityRules.lockVolumeQuota(locked, transaction);
     const noRegistration = () => new ConflictException({
       code: FailureCode.InvalidInput,
       message: 'A volume with no catalog registration cannot be resized',
@@ -308,8 +292,7 @@ export class LocalVolumesService {
     if (lockedFailure) throw new ConflictException(lockedFailure);
     if (lockedDelta > 0) {
       if (access === 'admin') {
-        await assertCapacityPhysical(
-          this.deps,
+        await this.capacityRules.assertCapacityPhysical(
           transaction,
           locked.server_id,
           representativePoolId,
@@ -317,8 +300,7 @@ export class LocalVolumesService {
           lockedDelta,
         );
       } else {
-        await assertCapacityWithinGrants(
-          this.deps,
+        await this.capacityRules.assertCapacityWithinGrants(
           transaction,
           locked.owner_id,
           locked.server_id,
@@ -330,7 +312,7 @@ export class LocalVolumesService {
     }
     const placements = await this.repository.listPlacements(id, transaction);
     if (placements.length === 0) throw noRegistration();
-    const { intents } = await applyResize(this.deps, transaction, actorId, locked, input, placements);
+    const { intents } = await this.lifecycle.applyResize(transaction, actorId, locked, input, placements);
     return { intent: intents[0]! };
   }
 
@@ -349,7 +331,7 @@ export class LocalVolumesService {
           details: { volumeId: id },
         });
       }
-      await lockVolumeQuota(this.pools, current, transaction);
+      await this.capacityRules.lockVolumeQuota(current, transaction);
       if (await this.repository.hasAttachments(id, transaction)) {
         throw new ConflictException({
           code: FailureCode.VolumeRequiresUnbind,
@@ -358,10 +340,10 @@ export class LocalVolumesService {
       }
       const placements = await this.repository.listPlacements(id, transaction);
       if (placements.length === 0) {
-        return destroyUntrackedVolume(this.deps, transaction, actorId, current, 'empty_tracking');
+        return this.lifecycle.destroyUntrackedVolume(transaction, actorId, current, 'empty_tracking');
       }
       await this.assertServerOnline(transaction, current);
-      return beginVolumeDestroy(this.deps, transaction, actorId, current);
+      return this.lifecycle.beginVolumeDestroy(transaction, actorId, current);
     }, VOLUME_TX);
     return acceptedIntent(result.intent);
   }

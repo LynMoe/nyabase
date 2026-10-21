@@ -11,6 +11,27 @@ import { numberValue } from '../platform/domain-utils.js';
 export type ContainerExecutor = Kysely<NyabaseDatabase> | Transaction<NyabaseDatabase>;
 export type ContainerRow = Selectable<ContainerControlTable>;
 
+export interface ImageRow {
+  id: string;
+  alias: string;
+  fingerprint: string | null;
+  login_user: string;
+  min_root_size_bytes: string | number | null;
+  network_managed_externally: boolean;
+  is_active: boolean;
+  deleting: boolean;
+}
+
+export interface ServerRow {
+  id: string;
+  name: string;
+  slug: string;
+  status: string;
+  system_pool_id: string | null;
+  parent_interface: string | null;
+  preflight_status: string;
+}
+
 export interface NewContainerInput {
   id: string;
   serverId: string;

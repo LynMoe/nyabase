@@ -1,34 +1,158 @@
 import {
+  applyManagedFields,
+  buildDesiredInstanceSpec,
+  compareManagedFields,
+  CORE_MANAGED_FIELD_OWNERSHIP,
   IncusError,
   isMissingCustomVolumeError,
+  mergeInstanceSpecContributions,
   readAfterTimeout,
   requestAndWait,
   type DesiredInstanceSpec,
   type IncusClientPort,
+  type IncusSchema,
+  type InstanceSpecAttachmentInput,
+  type ManagedFieldOwnership,
+  type ManagedInstanceDocument,
 } from '../incus/index.js';
-import type { IntentRecord } from '../reconcile/intent.repository.js';
-import type { ContainerReconcileDeps } from './container-reconcile-deps.js';
-import {
-  auditIncusMutate,
-  bytes,
-  isNotFound,
-  managedContainerIdentity,
-  normalized,
-  running,
-  type ActualInstance,
-  type ContainerRow,
-  type InstanceFull,
-  type InstanceState,
-} from './container-reconcile-support.js';
+import { GPU_CONFIG_PREFIXES, GPU_DEVICE_PREFIXES, gpuInstanceSpec } from '../gpu/instance-spec.js';
+import type { ContainerAttachment, ContainerRow } from './container-reconcile.store.js';
+
+/*
+ * Plain functions over one Incus instance: observation helpers, the desired
+ * spec, and the mutations the container reconciler performs. Auditing,
+ * logging and SQL stay in the reconciler; these take `client` and explicit values.
+ */
+
+export type InstanceFull = IncusSchema<'InstanceFull'>;
+export type InstanceState = IncusSchema<'InstanceState'>;
+
+export interface ActualInstance {
+  readonly name: string;
+  readonly document: InstanceFull;
+}
+
+/** Managed Incus fields: core plus the NVIDIA GPU config and device prefixes. */
+export const MANAGED_FIELD_OWNERSHIP: ManagedFieldOwnership = {
+  configPrefixes: [...CORE_MANAGED_FIELD_OWNERSHIP.configPrefixes, ...GPU_CONFIG_PREFIXES],
+  deviceNames: CORE_MANAGED_FIELD_OWNERSHIP.deviceNames,
+  devicePrefixes: [...CORE_MANAGED_FIELD_OWNERSHIP.devicePrefixes, ...GPU_DEVICE_PREFIXES],
+};
+
+const MANAGED_KEY = 'user.nyabase.managed';
+const CONTAINER_ID_KEY = 'user.nyabase.container_id';
+const SERVER_ID_KEY = 'user.nyabase.server_id';
+
+export function isNotFound(error: unknown): boolean {
+  return error instanceof IncusError && error.code === 'INCUS_NOT_FOUND';
+}
+
+export function normalized(value: unknown): string {
+  return typeof value === 'string' ? value.replaceAll('-', '').toLowerCase() : '';
+}
+
+export function managedContainerIdentity(document: InstanceFull): {
+  readonly managed: boolean;
+  readonly containerId: string;
+  readonly serverId: string;
+} {
+  const config = document.config ?? {};
+  return {
+    managed: config[MANAGED_KEY] === 'true',
+    containerId: normalized(config[CONTAINER_ID_KEY]),
+    serverId: normalized(config[SERVER_ID_KEY]),
+  };
+}
+
+export function running(state: InstanceState | undefined): boolean {
+  return state?.status?.toLowerCase() === 'running';
+}
+
+export function powerTransition(
+  currentStatus: string | undefined,
+  desired: 'running' | 'stopped',
+): 'start' | 'stop' | 'none' {
+  const current = currentStatus?.toLowerCase();
+  if (desired === 'running') return current === 'running' ? 'none' : 'start';
+  return current === 'running' ? 'stop' : 'none';
+}
+
+export function restartTransition(
+  currentStartedAt: string | null | undefined,
+  baselineStartedAt: string | null | undefined,
+  currentStatus: string | undefined,
+): 'restart' | 'proven' {
+  if (
+    currentStatus?.toLowerCase() === 'running'
+    && currentStartedAt !== baselineStartedAt
+  ) {
+    return 'proven';
+  }
+  return 'restart';
+}
+
+export function observedDiskUsageBytes(value: unknown): bigint | null {
+  if (typeof value === 'number' && Number.isSafeInteger(value) && value >= 0) {
+    return BigInt(value);
+  }
+  if (typeof value === 'string' && /^\d+$/.test(value)) return BigInt(value);
+  return null;
+}
+
+// --- desired spec -------------------------------------------------------------
+
+export function toSpecAttachments(
+  attachments: readonly ContainerAttachment[],
+): InstanceSpecAttachmentInput[] {
+  return attachments.map<InstanceSpecAttachmentInput>((attachment) => ({
+    id: attachment.id,
+    containerPath: attachment.container_path,
+    readOnly: attachment.read_only,
+    volume: {
+      id: attachment.volume_id,
+      incusName: attachment.incus_name,
+      poolName: attachment.pool_name,
+    },
+  }));
+}
+
+/** The Incus instance document the platform wants for this container. */
+export function buildContainerSpec(
+  row: ContainerRow,
+  attachments: readonly InstanceSpecAttachmentInput[],
+): DesiredInstanceSpec {
+  const base = buildDesiredInstanceSpec({
+    container: {
+      id: row.id,
+      serverId: row.server_id,
+      revision: row.revision,
+      imageFingerprint: row.image_fingerprint,
+      cpuMillis: row.cpu_millis,
+      memBytes: row.mem_bytes,
+      nesting: row.nesting,
+      syscallIntercept: row.syscall_intercept,
+      rootPool: row.root_pool_name,
+      rootSizeBytes: row.root_size_bytes,
+      routedIp: row.routed_ip ?? '',
+    },
+    server: {
+      id: row.server_id,
+      parentInterface: row.parent_interface ?? '',
+    },
+    attachments,
+  });
+  // GPU contributes only while the server has it enabled.
+  const contributions = row.gpu_enabled ? [gpuInstanceSpec(row.gpu_state)] : [];
+  return mergeInstanceSpecContributions(base, contributions);
+}
+
+// --- reading ------------------------------------------------------------------
 
 export async function readRequired(client: IncusClientPort, name: string): Promise<ActualInstance> {
   return { name, document: (await client.getInstanceFull(name)).metadata };
 }
 
-export async function readState(
-  client: IncusClientPort,
-  name: string,
-): Promise<InstanceState> {
+export async function readState(client: IncusClientPort, name: string): Promise<InstanceState> {
   // Always refresh from /state. InstanceFull.state can lag behind power transitions
   // (create starts stopped; reconcilePower then starts), and reusing it marks SSH as
   // container_stopped while the instance is already Running.
@@ -37,17 +161,16 @@ export async function readState(
 
 /** Root filesystem usage from the instance state, falling back to the instance volume. */
 export async function observeRootUsage(
-  client: IncusClientPort | undefined,
+  client: IncusClientPort,
   poolName: string,
   instanceName: string,
   state: InstanceState,
 ): Promise<bigint | null> {
-  const fromState = bytes(state.disk?.root?.usage);
+  const fromState = observedDiskUsageBytes(state.disk?.root?.usage);
   if (fromState !== null && fromState > 0n) return fromState;
-  if (!client) return fromState;
   try {
     const volumeState = await client.getStorageVolumeState(poolName, 'container', instanceName);
-    const fromVolume = bytes(volumeState.metadata.usage?.used);
+    const fromVolume = observedDiskUsageBytes(volumeState.metadata.usage?.used);
     if (fromVolume !== null && fromVolume > 0n) return fromVolume;
   } catch {
     // Best-effort: missing instance-volume usage still blocks quota-online shrink.
@@ -68,55 +191,56 @@ export async function verifyAbsent(client: IncusClientPort, name: string): Promi
   });
 }
 
-/** The instance under its expected name, or (renamed / moved) the one carrying our identity. */
+/**
+ * The instance under its expected name, or (renamed / moved) the one carrying
+ * the container's identity. `foreignServer` flags an identity match that
+ * belongs to another server, which callers must never modify.
+ */
 export async function findExpectedOrIdentity(
-  deps: ContainerReconcileDeps,
   client: IncusClientPort,
   expectedName: string,
-  row: ContainerRow,
-): Promise<ActualInstance | undefined> {
+  container: { readonly id: string; readonly server_id: string },
+): Promise<{ actual: ActualInstance | undefined; foreignServer: boolean }> {
   try {
-    return { name: expectedName, document: (await client.getInstanceFull(expectedName)).metadata };
+    const document = (await client.getInstanceFull(expectedName)).metadata;
+    return { actual: { name: expectedName, document }, foreignServer: false };
   } catch (error) {
     if (!isNotFound(error)) throw error;
   }
   const listed = await client.listInstances(2);
   for (const item of listed.metadata as InstanceFull[]) {
-    const itemIdentity = managedContainerIdentity(item);
-    if (
-      itemIdentity.managed
-      && itemIdentity.containerId === normalized(row.id)
-      && itemIdentity.serverId === normalized(row.server_id)
-    ) {
-      return { name: item.name ?? expectedName, document: item };
-    }
-    if (
-      itemIdentity.managed
-      && itemIdentity.containerId === normalized(row.id)
-      && itemIdentity.serverId !== normalized(row.server_id)
-    ) {
-      deps.logger.warn(
-        `Found container ${row.id} on a different server; refusing cross-server deletion`,
-      );
-      return { name: item.name ?? expectedName, document: item };
-    }
+    const identity = managedContainerIdentity(item);
+    if (!identity.managed || identity.containerId !== normalized(container.id)) continue;
+    return {
+      actual: { name: item.name ?? expectedName, document: item },
+      foreignServer: identity.serverId !== normalized(container.server_id),
+    };
   }
-  return undefined;
+  return { actual: undefined, foreignServer: false };
 }
 
+/** Managed instances of this server whose container id is not in `knownContainerIds`. */
+export function orphanInstances(
+  documents: readonly InstanceFull[],
+  serverId: string,
+  knownContainerIds: ReadonlySet<string>,
+): InstanceFull[] {
+  return documents.filter((document) => {
+    const identity = managedContainerIdentity(document);
+    return identity.managed
+      && identity.serverId === normalized(serverId)
+      && !knownContainerIds.has(identity.containerId)
+      && Boolean(document.name);
+  });
+}
+
+// --- mutations ----------------------------------------------------------------
+
 export async function createInstance(
-  deps: ContainerReconcileDeps,
   client: IncusClientPort,
   desired: DesiredInstanceSpec,
   expectedName: string,
-  row: ContainerRow,
-  intent: IntentRecord,
 ): Promise<void> {
-  await auditIncusMutate(deps.audit, intent, {
-    method: 'POST',
-    path: '/1.0/instances',
-    instanceName: expectedName,
-  });
   const create = async (): Promise<void> => {
     try {
       await requestAndWait(
@@ -142,19 +266,18 @@ export async function createInstance(
       await client.getInstanceFull(expectedName);
     },
   );
-  await deps.store.setInstanceName(row.id, expectedName);
 }
 
 export async function renameInstance(
   client: IncusClientPort,
-  actual: ActualInstance,
+  actualName: string,
   expectedName: string,
 ): Promise<void> {
-  if (actual.name === expectedName) return;
+  if (actualName === expectedName) return;
   await readAfterTimeout(
     () => requestAndWait(
       client,
-      (options) => client.renameInstance(actual.name, { name: expectedName }, options),
+      (options) => client.renameInstance(actualName, { name: expectedName }, options),
     ),
     async () => {
       await client.getInstanceFull(expectedName);
@@ -164,20 +287,8 @@ export async function renameInstance(
 }
 
 /** Stop (if running) and delete one instance, confirmed by a GET 404. */
-export async function deletePhysicalInstance(
-  deps: ContainerReconcileDeps,
-  client: IncusClientPort,
-  name: string,
-  intent?: IntentRecord,
-): Promise<void> {
+export async function deletePhysicalInstance(client: IncusClientPort, name: string): Promise<void> {
   if (!name) return;
-  if (intent) {
-    await auditIncusMutate(deps.audit, intent, {
-      method: 'DELETE',
-      path: `/1.0/instances/${name}`,
-      instanceName: name,
-    });
-  }
   const state = await readState(client, name);
   if (running(state)) {
     await readAfterTimeout(
@@ -207,45 +318,113 @@ export async function deletePhysicalInstance(
   await verifyAbsent(client, name);
 }
 
-/** Delete the container's own instance, but only when it is ours and on this server. */
-export async function deleteDesiredInstance(
-  deps: ContainerReconcileDeps,
+/** PUT the managed fields onto the instance and wait until the comparator sees no difference. */
+export async function putManagedFields(
   client: IncusClientPort,
-  actual: ActualInstance | undefined,
-  row: ContainerRow,
-  intent: IntentRecord,
-): Promise<boolean> {
-  if (!actual) return false;
-  const actualIdentity = managedContainerIdentity(actual.document);
-  if (!actualIdentity.managed) return false;
-  if (actualIdentity.serverId !== normalized(row.server_id)) {
-    deps.logger.warn(`Refusing to delete cross-server instance ${actual.name}`);
-    return false;
+  expectedName: string,
+  desired: DesiredInstanceSpec,
+  hasAttachments: boolean,
+): Promise<void> {
+  try {
+    await readAfterTimeout(
+      () => requestAndWait(
+        client,
+        (options) => client.readModifyWriteInstance(
+          expectedName,
+          (document) => {
+            const merged = applyManagedFields(
+              document as ManagedInstanceDocument,
+              desired,
+              MANAGED_FIELD_OWNERSHIP,
+            );
+            document.config = merged.config;
+            document.devices = merged.devices;
+            return document;
+          },
+          options,
+        ),
+      ),
+      async () => {
+        const after = await readRequired(client, expectedName);
+        const afterDiff = compareManagedFields(after.document, desired, MANAGED_FIELD_OWNERSHIP);
+        if (afterDiff.kind !== 'empty') {
+          throw new Error('INSTANCE_UPDATE_NOT_CONFIRMED');
+        }
+        return undefined;
+      },
+    );
+  } catch (error) {
+    if (isMissingCustomVolumeError(error) && hasAttachments) {
+      throw new IncusError('VOLUME_PLACEMENT_PENDING', 'retry', {
+        reason: 'put_toctou',
+      });
+    }
+    throw error;
   }
-  await deletePhysicalInstance(deps, client, actual.name, intent);
-  return true;
 }
 
-/** Remove managed instances on the server that no live container row owns. */
-export async function deleteManagedOrphans(
-  deps: ContainerReconcileDeps,
+/** Start or stop the instance and wait until the state is confirmed. */
+export async function setPowerState(
   client: IncusClientPort,
-  row: ContainerRow,
-  intent: IntentRecord,
+  name: string,
+  transition: 'start' | 'stop',
 ): Promise<void> {
-  const known = new Set(
-    (await deps.store.listLiveContainerIds(row.server_id)).map((id) => normalized(id)),
+  await readAfterTimeout(
+    () => requestAndWait(
+      client,
+      (options) => client.updateInstanceState(
+        name,
+        { action: transition, force: transition === 'stop' },
+        options,
+      ),
+    ),
+    async () => {
+      const afterRunning = running((await client.getInstanceState(name)).metadata);
+      if ((transition === 'start' && afterRunning) || (transition === 'stop' && !afterRunning)) {
+        return undefined;
+      }
+      throw new Error('INSTANCE_POWER_NOT_CONFIRMED');
+    },
   );
-  const instances = await client.listInstances(2);
-  for (const document of instances.metadata as InstanceFull[]) {
-    const itemIdentity = managedContainerIdentity(document);
-    if (
-      itemIdentity.managed
-      && itemIdentity.serverId === normalized(row.server_id)
-      && !known.has(itemIdentity.containerId)
-      && document.name
-    ) {
-      await deletePhysicalInstance(deps, client, document.name, intent);
-    }
+}
+
+/** Force-restart and require a `started_at` newer than the baseline as proof. */
+export async function restartWithProof(
+  client: IncusClientPort,
+  name: string,
+  baselineStartedAt: string | null,
+): Promise<void> {
+  await readAfterTimeout(
+    () => requestAndWait(
+      client,
+      (options) => client.updateInstanceState(
+        name,
+        { action: 'restart', force: true },
+        options,
+      ),
+    ),
+    async () => {
+      const after = (await client.getInstanceState(name)).metadata;
+      if (
+        running(after)
+        && after.started_at
+        && after.started_at !== baselineStartedAt
+      ) {
+        return undefined;
+      }
+      throw new Error('INSTANCE_RESTART_NOT_CONFIRMED');
+    },
+  );
+  const verified = await client.getInstanceState(name);
+  const nextStartedAt = verified.metadata.started_at ?? null;
+  if (
+    !running(verified.metadata)
+    || nextStartedAt === null
+    || nextStartedAt === baselineStartedAt
+  ) {
+    throw new IncusError('RESTART_PROOF_MISSING', 'managed_failure', {
+      baselineStartedAt: baselineStartedAt ?? '',
+      observedStartedAt: nextStartedAt ?? '',
+    });
   }
 }

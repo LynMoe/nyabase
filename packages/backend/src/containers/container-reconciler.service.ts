@@ -1,22 +1,19 @@
-import { Inject, Injectable, Logger, OnModuleInit } from '@nestjs/common';
-import { FailureCode } from '@nyabase/common';
-import type { Kysely } from 'kysely';
-import type { NyabaseDatabase } from '../platform/persistence-pg/database.types.js';
-import { PG_DATABASE } from '../platform/persistence-pg/tokens.js';
+import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
+import { AuditAction, FailureCode } from '@nyabase/common';
 import { AuditService } from '../iam/audit.service.js';
 import {
   compareManagedFields,
   deriveInstanceName,
   IncusError,
+  isMissingCustomVolumeError,
   observeRootQuotaPending,
   type DesiredInstanceSpec,
   type IncusClientPort,
 } from '../incus/index.js';
-import {
-  IntentRepository,
-  type IntentFailure,
-  type IntentRecord,
-  type PhysicalSettlement,
+import type {
+  IntentFailure,
+  IntentRecord,
+  PhysicalSettlement,
 } from '../reconcile/intent.repository.js';
 import type {
   ManagedReconciler,
@@ -27,70 +24,77 @@ import type {
 import { ReconcilerRegistry } from '../reconcile/reconciler-registry.service.js';
 import { ProxySnapshotNotifierService } from '../proxy-snapshots/proxy-snapshot-notifier.service.js';
 import { gpuRequiresStop } from '../gpu/instance-spec.js';
-import { applyGuestNetwork, parseCidrPrefix } from './guest-network.adapter.js';
-import { IncusContainerSshStateAdapter } from './container-ssh-state.adapter.js';
-import { settleContainerIntent } from './container-intents.js';
-import { guardRootShrink, putManagedFields } from './container-apply.js';
-import { buildContainerSpec, toSpecAttachments } from './container-desired-spec.js';
 import {
+  VOLUME_ADOPT_FAIL_AFTER_ATTEMPTS,
+  ensureSharedCatalogOnServer,
+} from '../volumes/shared-volume-catalog.service.js';
+import { applyGuestNetwork, parseCidrPrefix } from './guest-network.adapter.js';
+import {
+  buildContainerSpec,
   createInstance,
-  deleteDesiredInstance,
-  deleteManagedOrphans,
+  deletePhysicalInstance,
   findExpectedOrIdentity,
+  isNotFound,
+  MANAGED_FIELD_OWNERSHIP,
+  managedContainerIdentity,
+  normalized,
+  observedDiskUsageBytes,
   observeRootUsage,
+  orphanInstances,
+  powerTransition,
+  putManagedFields,
   readRequired,
   readState,
   renameInstance,
-  verifyAbsent,
-} from './container-instance-ops.js';
-import { reconcilePower, reconcileRestart } from './container-power.js';
-import type { ContainerReconcileDeps } from './container-reconcile-deps.js';
-import { ContainerReconcileStore } from './container-reconcile.store.js';
-import {
-  MANAGED_FIELD_OWNERSHIP,
-  auditIncusMutate,
-  failure,
-  managedContainerIdentity,
-  normalized,
+  restartTransition,
+  restartWithProof,
   running,
+  setPowerState,
+  toSpecAttachments,
+  verifyAbsent,
   type ActualInstance,
-  type ContainerAttachment,
-  type ContainerRow,
   type InstanceFull,
   type InstanceState,
+} from './container-instance-ops.js';
+import {
+  ContainerReconcileStore,
+  type ContainerAttachment,
+  type ContainerRow,
   type SshFileObservation,
-} from './container-reconcile-support.js';
-import { scanServerContainers } from './container-scan.js';
-import { reconcileSshFile } from './container-ssh-file.js';
-import { ensureDesiredCatalogs } from './container-volume-catalogs.js';
+} from './container-reconcile.store.js';
+import { decideRootShrink } from './container-rules.js';
+import { IncusContainerSshStateAdapter, reconcileSshFile } from './container-ssh.js';
 
 type Loaded =
   | { readonly outcome: ReconcileOutcome }
   | { readonly row: ContainerRow; readonly prefixLength: number };
 
+function failure(code: string, message: string, details: Record<string, unknown> = {}): IntentFailure {
+  return { code, message, details };
+}
+
+function failed(code: string, message: string, details: Record<string, unknown> = {}): ReconcileOutcome {
+  return { outcome: 'failed', failure: failure(code, message, details) };
+}
+
 /**
  * Drives container intents against Incus: converge the instance (create,
  * rename, managed fields, power, guest network, SSH key) or delete it. The
- * steps live in the container-* modules; all SQL is in the store.
+ * steps are private methods; the Incus operations are plain functions in
+ * container-instance-ops and all SQL is in the store.
  */
 @Injectable()
 export class ContainerReconciler implements ManagedReconciler, OnModuleInit {
   readonly resourceType = 'container' as const;
   private readonly logger = new Logger(ContainerReconciler.name);
-  private readonly store: ContainerReconcileStore;
-  private readonly deps: ContainerReconcileDeps;
 
   constructor(
-    @Inject(PG_DATABASE) database: Kysely<NyabaseDatabase>,
-    private readonly intents: IntentRepository,
-    sshState: IncusContainerSshStateAdapter,
+    private readonly store: ContainerReconcileStore,
+    private readonly sshState: IncusContainerSshStateAdapter,
     private readonly proxySnapshots: ProxySnapshotNotifierService,
-    audit: AuditService,
+    private readonly audit: AuditService,
     private readonly registry: ReconcilerRegistry,
-  ) {
-    this.store = new ContainerReconcileStore(database, intents);
-    this.deps = { store: this.store, audit, logger: this.logger, sshState };
-  }
+  ) {}
 
   onModuleInit(): void {
     this.registry.register(this);
@@ -117,181 +121,11 @@ export class ContainerReconciler implements ManagedReconciler, OnModuleInit {
     observedRevision: number,
     settlement: PhysicalSettlement,
   ): Promise<void> {
-    return settleContainerIntent(this.intents, intent, observedRevision, settlement);
+    return this.store.settleIntent(intent, observedRevision, settlement);
   }
 
   resourceAuthorities(containerIds: readonly string[]): Promise<Map<string, ResourceAuthority>> {
     return this.store.resourceAuthorities(containerIds);
-  }
-
-  scan(serverId: string, client: IncusClientPort, signal: AbortSignal): Promise<void> {
-    return scanServerContainers(this.deps, serverId, client, signal);
-  }
-
-  /** Load the desired container and refuse intents that cannot be applied to it. */
-  private async load(context: ReconcileRunContext): Promise<Loaded> {
-    const row = await this.store.readContainer(context.intent.resourceId);
-    if (!row) {
-      return {
-        outcome: {
-          outcome: 'failed',
-          failure: failure('CONTAINER_NOT_FOUND', 'The desired container no longer exists'),
-        },
-      };
-    }
-    if (row.server_id !== context.intent.serverId) {
-      return {
-        outcome: {
-          outcome: 'failed',
-          failure: failure('CONTAINER_SERVER_MISMATCH', 'The intent server does not own the container'),
-        },
-      };
-    }
-    if (context.intent.targetRevision < row.revision) {
-      return {
-        outcome: { outcome: 'succeeded', observedRevision: context.intent.targetRevision },
-      };
-    }
-    if (!row.parent_interface || !row.routed_ip || !row.network_key || !row.gateway) {
-      return {
-        outcome: {
-          outcome: 'failed',
-          failure: failure(
-            'MISSING_MANAGED_NETWORK_ADDRESS',
-            'The container has no LAN bridge / claim / gateway',
-          ),
-        },
-      };
-    }
-    const prefixLength = parseCidrPrefix(row.network_key);
-    if (prefixLength === undefined) {
-      return {
-        outcome: {
-          outcome: 'failed',
-          failure: failure(
-            'MISSING_MANAGED_NETWORK_ADDRESS',
-            'The container network claim CIDR is invalid',
-          ),
-        },
-      };
-    }
-    return { row, prefixLength };
-  }
-
-  /**
-   * The attachments the instance must carry, with their catalogs present on the
-   * server. Undefined `attachments` means the intent became stale or an outcome
-   * must be returned instead.
-   */
-  private async prepareAttachments(
-    context: ReconcileRunContext,
-    row: ContainerRow,
-  ): Promise<{ outcome: ReconcileOutcome } | { attachments: ContainerAttachment[] }> {
-    const beforeMkdir = await this.store.rereadDesired(
-      row.id,
-      row.server_id,
-      context.intent.targetRevision,
-    );
-    if (beforeMkdir.stale) {
-      return {
-        outcome: { outcome: 'succeeded', observedRevision: context.intent.targetRevision },
-      };
-    }
-    const catalogOutcome = await ensureDesiredCatalogs(
-      this.deps,
-      context,
-      beforeMkdir.desired,
-      row.server_id,
-    );
-    if (catalogOutcome) return { outcome: catalogOutcome };
-    const beforePut = await this.store.rereadDesired(
-      row.id,
-      row.server_id,
-      context.intent.targetRevision,
-    );
-    return { attachments: beforePut.desired };
-  }
-
-  private async reconcileDelete(
-    context: ReconcileRunContext,
-    client: IncusClientPort,
-    row: ContainerRow,
-    expectedName: string,
-  ): Promise<ReconcileOutcome> {
-    const actual = await findExpectedOrIdentity(this.deps, client, expectedName, row);
-    const deleted = await deleteDesiredInstance(this.deps, client, actual, row, context.intent);
-    if (!deleted && actual) {
-      return {
-        outcome: 'failed',
-        failure: failure(
-          'INSTANCE_DELETE_IDENTITY_MISMATCH',
-          'The managed instance could not be safely deleted due to its identity',
-        ),
-      };
-    }
-    await verifyAbsent(client, expectedName);
-    await this.store.releaseContainerState(row);
-    return { outcome: 'succeeded', observedRevision: row.revision };
-  }
-
-  /** The instance under its expected name: created or renamed into place first. */
-  private async ensureInstance(
-    context: ReconcileRunContext,
-    client: IncusClientPort,
-    row: ContainerRow,
-    desired: DesiredInstanceSpec,
-    expectedName: string,
-  ): Promise<ActualInstance> {
-    const actual = await findExpectedOrIdentity(this.deps, client, expectedName, row);
-    if (!actual) {
-      await deleteManagedOrphans(this.deps, client, row, context.intent);
-      await createInstance(this.deps, client, desired, expectedName, row, context.intent);
-      return readRequired(client, expectedName);
-    }
-    if (actual.name !== expectedName) {
-      await renameInstance(client, actual, expectedName);
-      return readRequired(client, expectedName);
-    }
-    return actual;
-  }
-
-  /** Never touch an instance that is not ours or that belongs to another container/server. */
-  private checkIdentity(
-    actual: ActualInstance,
-    row: ContainerRow,
-    expectedName: string,
-  ): ReconcileOutcome | null {
-    const actualIdentity = managedContainerIdentity(actual.document);
-    if (!actualIdentity.managed) {
-      return {
-        outcome: 'failed',
-        failure: failure(
-          'UNMANAGED_INSTANCE_NAME_COLLISION',
-          `Incus instance ${expectedName} is not managed by nyabase`,
-        ),
-      };
-    }
-    if (
-      actualIdentity.containerId !== normalized(row.id)
-      || actualIdentity.serverId !== normalized(row.server_id)
-    ) {
-      this.logger.warn(
-        `Refusing to modify instance ${actual.name} with identity `
-        + `${actualIdentity.containerId}/${actualIdentity.serverId}`,
-      );
-      return {
-        outcome: 'failed',
-        failure: failure(
-          'MANAGED_INSTANCE_IDENTITY_MISMATCH',
-          'The managed instance identity does not match the desired container',
-          {
-            actualContainerId: actualIdentity.containerId,
-            actualServerId: actualIdentity.serverId,
-          },
-        ),
-      };
-    }
-    return null;
   }
 
   async reconcile(context: ReconcileRunContext): Promise<ReconcileOutcome> {
@@ -306,7 +140,7 @@ export class ContainerReconciler implements ManagedReconciler, OnModuleInit {
     if (row.lifecycle_phase === 'deleting' || context.intent.kind === 'container.delete') {
       return this.reconcileDelete(context, client, row, expectedName);
     }
-    const prepared = await this.prepareAttachments(context, row);
+    const prepared = await this.prepareAttachments(context, client, row);
     if ('outcome' in prepared) return prepared.outcome;
     const desiredAttachments = prepared.attachments;
     const desired = buildContainerSpec(row, toSpecAttachments(desiredAttachments));
@@ -330,29 +164,28 @@ export class ContainerReconciler implements ManagedReconciler, OnModuleInit {
       };
     }
     const usedBytes = await observeRootUsage(client, row.root_pool_name, expectedName, state);
-    await guardRootShrink(this.deps, row, actual, desired, state, usedBytes);
+    await this.guardRootShrink(row, actual, desired, state, usedBytes);
     if (!diff.empty) {
       if (running(state) && gpuRequiresStop(diff)) {
-        return {
-          outcome: 'failed',
-          failure: failure(
+        return failed(
             FailureCode.GpuMutationRequiresStop,
             'GPU assignment changes require a stopped instance',
-          ),
-        };
+          );
       }
-      await putManagedFields(this.deps, context, expectedName, desired, desiredAttachments.length > 0);
+      await this.auditMutate(context.intent, 'PUT', `/1.0/instances/${expectedName}`, expectedName);
+      await putManagedFields(client, expectedName, desired, desiredAttachments.length > 0);
     }
 
-    await reconcilePower(context, row, expectedName, state);
-    await reconcileRestart(context, expectedName, state);
+    await this.reconcilePower(context, client, row, expectedName, state);
+    await this.reconcileRestart(context, client, expectedName, state);
     const sshState = await readState(client, expectedName);
     if (running(sshState)) {
-      await auditIncusMutate(this.deps.audit, context.intent, {
-        method: 'POST',
-        path: `/1.0/instances/${expectedName}/exec`,
-        instanceName: expectedName,
-      });
+      await this.auditMutate(
+        context.intent,
+        'POST',
+        `/1.0/instances/${expectedName}/exec`,
+        expectedName,
+      );
       await applyGuestNetwork(
         client,
         expectedName,
@@ -366,19 +199,382 @@ export class ContainerReconciler implements ManagedReconciler, OnModuleInit {
       );
     }
     const ssh = await reconcileSshFile(
-      this.deps.sshState,
+      this.sshState,
       client,
       row,
       expectedName,
-      sshState,
+      running(sshState),
       context.signal,
     );
-    return this.verifyAndSettle(context, client, row, desired, expectedName, ssh);
+    return this.verifyAndSettle(client, row, desired, expectedName, ssh);
   }
+
+  // --- loading and preparation ---------------------------------------------------
+
+  /** Load the desired container and refuse intents that cannot be applied to it. */
+  private async load(context: ReconcileRunContext): Promise<Loaded> {
+    const row = await this.store.readContainer(context.intent.resourceId);
+    if (!row) {
+      return {
+        outcome: failed('CONTAINER_NOT_FOUND', 'The desired container no longer exists'),
+      };
+    }
+    if (row.server_id !== context.intent.serverId) {
+      return {
+        outcome: failed('CONTAINER_SERVER_MISMATCH', 'The intent server does not own the container'),
+      };
+    }
+    if (context.intent.targetRevision < row.revision) {
+      return {
+        outcome: { outcome: 'succeeded', observedRevision: context.intent.targetRevision },
+      };
+    }
+    if (!row.parent_interface || !row.routed_ip || !row.network_key || !row.gateway) {
+      return {
+        outcome: failed(
+            'MISSING_MANAGED_NETWORK_ADDRESS',
+            'The container has no LAN bridge / claim / gateway',
+          ),
+      };
+    }
+    const prefixLength = parseCidrPrefix(row.network_key);
+    if (prefixLength === undefined) {
+      return {
+        outcome: failed(
+            'MISSING_MANAGED_NETWORK_ADDRESS',
+            'The container network claim CIDR is invalid',
+          ),
+      };
+    }
+    return { row, prefixLength };
+  }
+
+  /**
+   * The attachments the instance must carry, with their catalogs present on the
+   * server. An outcome means the intent became stale or must end here.
+   */
+  private async prepareAttachments(
+    context: ReconcileRunContext,
+    client: IncusClientPort,
+    row: ContainerRow,
+  ): Promise<{ outcome: ReconcileOutcome } | { attachments: ContainerAttachment[] }> {
+    const beforeMkdir = await this.store.rereadDesired(
+      row.id,
+      row.server_id,
+      context.intent.targetRevision,
+    );
+    if (beforeMkdir.stale) {
+      return {
+        outcome: { outcome: 'succeeded', observedRevision: context.intent.targetRevision },
+      };
+    }
+    const catalogOutcome = await this.ensureDesiredCatalogs(
+      context,
+      client,
+      beforeMkdir.desired,
+      row.server_id,
+    );
+    if (catalogOutcome) return { outcome: catalogOutcome };
+    const beforePut = await this.store.rereadDesired(
+      row.id,
+      row.server_id,
+      context.intent.targetRevision,
+    );
+    return { attachments: beforePut.desired };
+  }
+
+  /**
+   * Every volume the instance mounts must already exist in this daemon's Incus
+   * catalog before the instance PUT, or Incus rejects the device.
+   */
+  private async ensureDesiredCatalogs(
+    context: ReconcileRunContext,
+    client: IncusClientPort,
+    attachments: readonly ContainerAttachment[],
+    serverId: string,
+  ): Promise<ReconcileOutcome | undefined> {
+    for (const attachment of attachments) {
+      if (!attachment.pool_name) {
+        throw new IncusError(
+          attachment.shared ? 'VOLUME_PLACEMENT_PENDING' : 'MISSING_STORAGE_POOL',
+          attachment.shared ? 'retry' : 'managed_failure',
+          { volumeId: attachment.volume_id, serverId },
+        );
+      }
+      if (attachment.shared) {
+        const result = await ensureSharedCatalogOnServer(client, {
+          poolName: attachment.pool_name,
+          incusName: attachment.incus_name,
+          sizeBytes: attachment.size_bytes,
+        });
+        if (result === 'missing') {
+          if (context.intent.attemptCount >= VOLUME_ADOPT_FAIL_AFTER_ATTEMPTS) {
+            return failed(
+                'VOLUME_CATALOG_ADOPT_FAILED',
+                'Incus did not adopt the existing CephFS directory into this daemon catalog',
+                { volumeId: attachment.volume_id, serverId },
+              );
+          }
+          throw new IncusError('VOLUME_CATALOG_ADOPT_PENDING', 'retry', {
+            volumeId: attachment.volume_id,
+            serverId,
+          });
+        }
+        await this.store.markCatalogPresent(attachment.volume_id, serverId);
+        this.logger.log(
+          `container=${context.intent.resourceId} ensure shared catalog volume=${attachment.volume_id} `
+          + `server=${serverId} result=${result}`,
+        );
+        continue;
+      }
+      try {
+        await client.getStorageVolume(attachment.pool_name, 'custom', attachment.incus_name);
+        await this.store.markCatalogPresent(attachment.volume_id, serverId);
+      } catch (error) {
+        if (error instanceof IncusError && error.code === 'MISSING_STORAGE_POOL') {
+          throw error;
+        }
+        if (isNotFound(error) || isMissingCustomVolumeError(error)) {
+          this.logger.log(
+            `Custom volume ${attachment.incus_name} is not present on ${serverId}`,
+          );
+          throw new IncusError('VOLUME_PLACEMENT_PENDING', 'retry', {
+            volumeId: attachment.volume_id,
+            reason: 'preflight',
+          });
+        }
+        throw error;
+      }
+    }
+    return undefined;
+  }
+
+  // --- instance lifecycle --------------------------------------------------------
+
+  private async reconcileDelete(
+    context: ReconcileRunContext,
+    client: IncusClientPort,
+    row: ContainerRow,
+    expectedName: string,
+  ): Promise<ReconcileOutcome> {
+    const actual = await this.findInstance(client, expectedName, row);
+    const deleted = await this.deleteDesiredInstance(client, actual, row, context.intent);
+    if (!deleted && actual) {
+      return failed(
+          'INSTANCE_DELETE_IDENTITY_MISMATCH',
+          'The managed instance could not be safely deleted due to its identity',
+        );
+    }
+    await verifyAbsent(client, expectedName);
+    await this.store.releaseContainerState(row);
+    return { outcome: 'succeeded', observedRevision: row.revision };
+  }
+
+  /** The instance under its expected name: created or renamed into place first. */
+  private async ensureInstance(
+    context: ReconcileRunContext,
+    client: IncusClientPort,
+    row: ContainerRow,
+    desired: DesiredInstanceSpec,
+    expectedName: string,
+  ): Promise<ActualInstance> {
+    const actual = await this.findInstance(client, expectedName, row);
+    if (!actual) {
+      await this.deleteManagedOrphans(client, row, context.intent);
+      await this.auditMutate(context.intent, 'POST', '/1.0/instances', expectedName);
+      await createInstance(client, desired, expectedName);
+      await this.store.setInstanceName(row.id, expectedName);
+      return readRequired(client, expectedName);
+    }
+    if (actual.name !== expectedName) {
+      await renameInstance(client, actual.name, expectedName);
+      return readRequired(client, expectedName);
+    }
+    return actual;
+  }
+
+  private async findInstance(
+    client: IncusClientPort,
+    expectedName: string,
+    row: ContainerRow,
+  ): Promise<ActualInstance | undefined> {
+    const { actual, foreignServer } = await findExpectedOrIdentity(client, expectedName, row);
+    if (foreignServer) {
+      this.logger.warn(
+        `Found container ${row.id} on a different server; refusing cross-server deletion`,
+      );
+    }
+    return actual;
+  }
+
+  /** Never touch an instance that is not ours or that belongs to another container/server. */
+  private checkIdentity(
+    actual: ActualInstance,
+    row: ContainerRow,
+    expectedName: string,
+  ): ReconcileOutcome | null {
+    const actualIdentity = managedContainerIdentity(actual.document);
+    if (!actualIdentity.managed) {
+      return failed(
+          'UNMANAGED_INSTANCE_NAME_COLLISION',
+          `Incus instance ${expectedName} is not managed by nyabase`,
+        );
+    }
+    if (
+      actualIdentity.containerId !== normalized(row.id)
+      || actualIdentity.serverId !== normalized(row.server_id)
+    ) {
+      this.logger.warn(
+        `Refusing to modify instance ${actual.name} with identity `
+        + `${actualIdentity.containerId}/${actualIdentity.serverId}`,
+      );
+      return failed(
+          'MANAGED_INSTANCE_IDENTITY_MISMATCH',
+          'The managed instance identity does not match the desired container',
+          {
+            actualContainerId: actualIdentity.containerId,
+            actualServerId: actualIdentity.serverId,
+          },
+        );
+    }
+    return null;
+  }
+
+  /** Stop (if running) and delete one instance; audited when an intent drives it. */
+  private async deleteInstance(
+    client: IncusClientPort,
+    name: string,
+    intent?: IntentRecord,
+  ): Promise<void> {
+    if (!name) return;
+    if (intent) {
+      await this.auditMutate(intent, 'DELETE', `/1.0/instances/${name}`, name);
+    }
+    await deletePhysicalInstance(client, name);
+  }
+
+  /** Delete the container's own instance, but only when it is ours and on this server. */
+  private async deleteDesiredInstance(
+    client: IncusClientPort,
+    actual: ActualInstance | undefined,
+    row: ContainerRow,
+    intent: IntentRecord,
+  ): Promise<boolean> {
+    if (!actual) return false;
+    const actualIdentity = managedContainerIdentity(actual.document);
+    if (!actualIdentity.managed) return false;
+    if (actualIdentity.serverId !== normalized(row.server_id)) {
+      this.logger.warn(`Refusing to delete cross-server instance ${actual.name}`);
+      return false;
+    }
+    await this.deleteInstance(client, actual.name, intent);
+    return true;
+  }
+
+  /** Remove managed instances on the server that no live container row owns. */
+  private async deleteManagedOrphans(
+    client: IncusClientPort,
+    row: ContainerRow,
+    intent: IntentRecord,
+  ): Promise<void> {
+    const known = new Set(
+      (await this.store.listLiveContainerIds(row.server_id)).map((id) => normalized(id)),
+    );
+    const instances = await client.listInstances(2);
+    for (const document of orphanInstances(
+      instances.metadata as InstanceFull[],
+      row.server_id,
+      known,
+    )) {
+      await this.deleteInstance(client, document.name!, intent);
+    }
+  }
+
+  // --- root disk, power ------------------------------------------------------------
+
+  /**
+   * Refuse a root-disk shrink that would lose data (or cannot be judged), and
+   * revert the desired size so the container stops asking for it.
+   */
+  private async guardRootShrink(
+    row: ContainerRow,
+    actual: ActualInstance,
+    desired: DesiredInstanceSpec,
+    state: InstanceState,
+    usedBytes: bigint | null,
+  ): Promise<void> {
+    const actualRoot = observedDiskUsageBytes(
+      (actual.document.devices?.root as Record<string, unknown> | undefined)?.size,
+    );
+    const desiredRoot = observedDiskUsageBytes(
+      (desired.devices?.root as Record<string, unknown> | undefined)?.size,
+    );
+    if (actualRoot === null || desiredRoot === null) return;
+    const decision = decideRootShrink({
+      resizeFamily: row.root_resize_family,
+      actualRootBytes: actualRoot,
+      desiredRootBytes: desiredRoot,
+      usedBytes,
+      running: running(state),
+    });
+    if (decision === 'allow') return;
+    const code = decision === 'requires_stop'
+      ? 'ROOT_SHRINK_REQUIRES_STOP'
+      : decision === 'usage_unknown'
+        ? 'ROOT_USAGE_UNKNOWN'
+        : 'ROOT_SHRINK_BELOW_USAGE';
+    if (decision === 'usage_floor' || decision === 'usage_unknown') {
+      await this.store.revertImpossibleRootShrink(row.id, actualRoot, usedBytes, code);
+    }
+    throw new IncusError(code, 'managed_failure', {
+      containerId: row.id,
+      requestedBytes: desiredRoot.toString(),
+      usedBytes: usedBytes?.toString() ?? null,
+    });
+  }
+
+  /** Start or stop the instance so its power state matches the desired power intent. */
+  private async reconcilePower(
+    context: ReconcileRunContext,
+    client: IncusClientPort,
+    row: ContainerRow,
+    name: string,
+    currentState: InstanceState,
+  ): Promise<void> {
+    if (context.intent.kind === 'container.power' && context.intent.request?.action === 'restart') {
+      return;
+    }
+    const transition = powerTransition(currentState.status, row.power_intent);
+    if (transition === 'none') return;
+    await setPowerState(client, name, transition);
+  }
+
+  /** Restart, proven by a changed `started_at` against the baseline recorded at request time. */
+  private async reconcileRestart(
+    context: ReconcileRunContext,
+    client: IncusClientPort,
+    name: string,
+    currentState: InstanceState,
+  ): Promise<void> {
+    if (context.intent.kind !== 'container.power' || context.intent.request?.action !== 'restart') {
+      return;
+    }
+    const baseline = context.intent.baseline;
+    if (!baseline || !Object.prototype.hasOwnProperty.call(baseline, 'startedAt')) {
+      throw new IncusError('RESTART_BASELINE_MISSING', 'managed_failure');
+    }
+    const baselineStartedAt = baseline.startedAt === null ? null : String(baseline.startedAt);
+    const currentStartedAt = currentState.started_at ?? null;
+    if (restartTransition(currentStartedAt, baselineStartedAt, currentState.status) === 'proven') {
+      return;
+    }
+    await restartWithProof(client, name, baselineStartedAt);
+  }
+
+  // --- verification and observation ----------------------------------------------
 
   /** Re-read the instance, check it matches the spec, record the observation and pick the outcome. */
   private async verifyAndSettle(
-    context: ReconcileRunContext,
     client: IncusClientPort,
     row: ContainerRow,
     desired: DesiredInstanceSpec,
@@ -393,17 +589,14 @@ export class ContainerReconciler implements ManagedReconciler, OnModuleInit {
       MANAGED_FIELD_OWNERSHIP,
     );
     if (verificationDiff.kind !== 'empty') {
-      return {
-        outcome: 'failed',
-        failure: failure(
+      return failed(
           'INSTANCE_VERIFY_FAILED',
           'The instance did not match the managed specification after reconciliation',
           {
             config: verificationDiff.config,
             devices: verificationDiff.devices,
           },
-        ),
-      };
+        );
     }
     const quota = observeRootQuotaPending(verified.document, row.root_size_bytes);
     const observedUsage = await observeRootUsage(
@@ -475,5 +668,85 @@ export class ContainerReconciler implements ManagedReconciler, OnModuleInit {
     if (state.status?.toLowerCase() === 'error') {
       this.logger.warn(`Container ${row.id} is in Incus error state`);
     }
+  }
+
+  private async auditMutate(
+    intent: IntentRecord,
+    method: string,
+    path: string,
+    instanceName: string,
+  ): Promise<void> {
+    await this.audit.log(
+      intent.requestedBy,
+      AuditAction.IncusMutate,
+      intent.resourceId,
+      intent.resourceType,
+      { method, path, instanceName, serverId: intent.serverId, intentId: intent.id },
+    );
+  }
+
+  // --- full scan -------------------------------------------------------------------
+
+  /** Full scan: queue update/delete intents for drifted containers and remove orphaned instances. */
+  async scan(serverId: string, client: IncusClientPort, signal: AbortSignal): Promise<void> {
+    const rows = await this.store.listScanContainers(serverId);
+    const known = new Set(
+      rows
+        .filter((row) => row.lifecycle_phase !== 'deleting')
+        .map((row) => normalized(row.id)),
+    );
+    const instances = await client.listInstances(2, { signal });
+    const documents = instances.metadata as InstanceFull[];
+    const byContainerId = new Map<string, ActualInstance>();
+    for (const document of documents) {
+      const identity = managedContainerIdentity(document);
+      if (identity.managed && identity.serverId === normalized(serverId) && identity.containerId) {
+        byContainerId.set(identity.containerId, { name: document.name ?? '', document });
+      }
+    }
+    for (const desired of rows) {
+      if (desired.needs_attention || desired.lifecycle_phase === 'failed') continue;
+      if (desired.lifecycle_phase === 'deleting') {
+        await this.store.enqueueScanIntent(desired, 'container.delete');
+        continue;
+      }
+      const actual = byContainerId.get(normalized(desired.id));
+      const usage = observedDiskUsageBytes(actual?.document.state?.disk?.root?.usage);
+      if (usage !== null) {
+        await this.store.recordRootUsage(desired.id, usage);
+      }
+      if (await this.scanNeedsUpdate(desired, deriveInstanceName(desired.id), actual)) {
+        await this.store.enqueueScanIntent(desired, 'container.update');
+      }
+    }
+    for (const document of orphanInstances(documents, serverId, known)) {
+      await this.deleteInstance(client, document.name!);
+    }
+  }
+
+  /** Does the live instance differ from what the platform wants (name, power, managed fields)? */
+  private async scanNeedsUpdate(
+    row: {
+      readonly id: string;
+      readonly server_id: string;
+      readonly power_intent: 'running' | 'stopped';
+    },
+    expectedName: string,
+    actual: ActualInstance | undefined,
+  ): Promise<boolean> {
+    if (!actual) return true;
+    if (actual.name !== expectedName) return true;
+    const status = actual.document.state?.status ?? actual.document.status;
+    if (powerTransition(status, row.power_intent) !== 'none') return true;
+    const full = await this.store.readContainer(row.id);
+    if (!full?.parent_interface || !full.routed_ip || !full.network_key || !full.gateway) {
+      return true;
+    }
+    const attachments = await this.store.readAttachments(row.id, row.server_id);
+    const desired = buildContainerSpec(
+      full,
+      toSpecAttachments(attachments.filter((attachment) => attachment.bind_state !== 'detaching')),
+    );
+    return compareManagedFields(actual.document, desired, MANAGED_FIELD_OWNERSHIP).kind !== 'empty';
   }
 }

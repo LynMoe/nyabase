@@ -4,7 +4,7 @@ import {
   assertVolumeIntentTarget,
   createVolumeIntent,
   ensureVolumeIntent,
-} from './volume-intents.js';
+} from './volumes.repository.js';
 
 const volumeId = '11111111-1111-4111-8111-111111111111';
 const serverId = '33333333-3333-4333-8333-333333333333';

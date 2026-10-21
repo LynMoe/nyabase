@@ -14,17 +14,17 @@ import { withPostgresTestDatabase } from '../platform/persistence-pg/postgres-te
 import { PgTransactionManager } from '../platform/persistence-pg/transaction.js';
 import { IntentRepository } from '../reconcile/intent.repository.js';
 import { ContainerReconciler } from './container-reconciler.service.js';
-import { ContainerActionPolicyService } from './container-action-policy.service.js';
+import { ContainerReconcileStore } from './container-reconcile.store.js';
 import { ContainerControlRepository } from './container-control.repository.js';
 import { ContainerControlService } from './container-control.service.js';
+import { makeContainerControlService } from './container-services.test-helper.js';
 import { ImagesService } from '../images/images.service.js';
 import { IpPoolsRepository } from '../ip-pools/ip-pools.repository.js';
-import { ContainerSshConvergenceService } from './container-ssh-convergence.service.js';
 import { isGpuOccupiedSqlError } from '../gpu/admit.js';
 import { GpuClaimsRepository } from '../gpu/gpu-claims.repository.js';
 import { noopWake } from '../reconcile/reconcile-wake.test-helper.js';
 import { testActor } from '../iam/actor.test-helper.js';
-import { IncusContainerSshStateAdapter } from './container-ssh-state.adapter.js';
+import { ContainerSshConvergenceService, IncusContainerSshStateAdapter } from './container-ssh.js';
 import { AccessResolverService } from '../iam/access-resolver.service.js';
 import {
   addMember,
@@ -149,9 +149,7 @@ describePg('PostgreSQL container create admission and capacity', () => {
         1,
         { outcome: 'succeeded', placementServerId: fixture.serverId },
       );
-      const reconciler = new ContainerReconciler(
-        database,
-        intents,
+      const reconciler = new ContainerReconciler(new ContainerReconcileStore(database, intents),
         new IncusContainerSshStateAdapter(),
         { notify: vi.fn() } as never,
         { log: vi.fn() } as never,
@@ -537,7 +535,7 @@ describePg('PostgreSQL container admission needs current coverage', () => {
   function coveredService(database: Kysely<NyabaseDatabase>): ContainerControlService {
     const transactions = new PgTransactionManager(database);
     const intents = new IntentRepository(database, noopWake());
-    return new ContainerControlService(
+    return makeContainerControlService(
       database,
       transactions,
       new ContainerControlRepository(database),
@@ -545,7 +543,6 @@ describePg('PostgreSQL container admission needs current coverage', () => {
       intents,
       {} as never,
       { append: vi.fn().mockResolvedValue(undefined) } as never,
-      new ContainerActionPolicyService(),
       new IpPoolsRepository(database),
       { get: vi.fn().mockReturnValue(null) } as never,
       new ContainerSshConvergenceService(database, intents),
@@ -693,7 +690,7 @@ function containerService(
     assertActorCapabilitiesInTransaction: vi.fn(),
   };
   const intents = new IntentRepository(database, noopWake());
-  const service = new ContainerControlService(
+  const service = makeContainerControlService(
     database,
     new PgTransactionManager(database),
     new ContainerControlRepository(database),
@@ -701,7 +698,6 @@ function containerService(
     intents,
     {} as never,
     { append: vi.fn().mockResolvedValue(undefined) } as never,
-    new ContainerActionPolicyService(),
     new IpPoolsRepository(database),
     { get: vi.fn().mockReturnValue(null) } as never,
     new ContainerSshConvergenceService(database, intents),

@@ -26,7 +26,7 @@ import { numberValue, isoDate, poolLabel } from '../platform/domain-utils.js';
 import { lockServerOnboarding } from '../platform/persistence-pg/advisory-locks.js';
 import { ProxySnapshotNotifierService } from '../proxy-snapshots/proxy-snapshot-notifier.service.js';
 import { VOLUME_DESTROY_PLACEMENT_ID } from '../reconcile/reconcile-claim.repository.js';
-import { listEligibleDestroyExecutors } from '../volumes/eligible-destroy-executors.js';
+import { listEligibleDestroyExecutors } from '../volumes/volumes.repository.js';
 
 type ServerRow = Selectable<InfrastructureServerTable>;
 

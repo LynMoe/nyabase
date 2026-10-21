@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { IncusContainerSshStateAdapter } from './container-ssh-state.adapter.js';
+import { IncusContainerSshStateAdapter } from './container-ssh.js';
 
 const instanceName = 'nyc-11111111111141118111111111111111';
 

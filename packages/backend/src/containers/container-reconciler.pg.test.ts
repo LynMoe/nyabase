@@ -3,6 +3,7 @@ import { UserStatus } from '@nyabase/common';
 import { describe, expect, it, vi } from 'vitest';
 import { withPostgresTestDatabase } from '../platform/persistence-pg/postgres-test-harness.js';
 import { ContainerReconciler } from './container-reconciler.service.js';
+import { ContainerReconcileStore } from './container-reconcile.store.js';
 
 const describePg = process.env.NYABASE_TEST_DATABASE_URL ? describe : describe.skip;
 
@@ -117,9 +118,7 @@ describePg('ContainerReconciler PostgreSQL status', () => {
         last_transition_at: new Date(),
       }).execute();
 
-      const reconciler = new ContainerReconciler(
-        database,
-        {} as never,
+      const reconciler = new ContainerReconciler(new ContainerReconcileStore(database, {} as never),
         {} as never,
         {} as never,
         {} as never,

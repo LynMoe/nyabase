@@ -1,9 +1,18 @@
+import type { Kysely } from 'kysely';
+import type { AuditService } from '../iam/audit.service.js';
+import type { IncusClientFactory } from '../incus/incus-client.factory.js';
+import type { NyabaseDatabase } from '../platform/persistence-pg/database.types.js';
+import type { PgTransactionManager } from '../platform/persistence-pg/transaction.js';
+import type { IntentRepository } from '../reconcile/intent.repository.js';
+import type { StoragePoolsRepository } from '../storage-pools/storage-pools.repository.js';
 import { LocalVolumesService } from './local-volumes.service.js';
+import { SharedVolumeCatalogInspectService } from './shared-volume-catalog.service.js';
 import { SharedVolumesService } from './shared-volumes.service.js';
 import { VolumeAttachmentsService } from './volume-attachments.service.js';
-
-type LocalArgs = ConstructorParameters<typeof LocalVolumesService>;
-type SharedArgs = ConstructorParameters<typeof SharedVolumesService>;
+import { VolumeCapacityService } from './volume-capacity.service.js';
+import { VolumeDtoAssembler } from './volume-dtos.js';
+import { VolumeLifecycleService } from './volume-lifecycle.service.js';
+import type { VolumesRepository } from './volumes.repository.js';
 
 /**
  * Builds the three volume services over the same collaborators and exposes
@@ -11,23 +20,36 @@ type SharedArgs = ConstructorParameters<typeof SharedVolumesService>;
  * (create, attach, resize, delete) without wiring each service by hand.
  */
 export function makeVolumeServices(
-  repository: LocalArgs[0],
-  pools: LocalArgs[1],
-  transactions: LocalArgs[2],
-  intents: LocalArgs[3],
-  database: LocalArgs[4],
-  audit: LocalArgs[5],
-  clients: SharedArgs[6],
+  repository: VolumesRepository,
+  pools: StoragePoolsRepository,
+  transactions: PgTransactionManager,
+  intents: IntentRepository,
+  database: Kysely<NyabaseDatabase>,
+  audit: AuditService,
+  clients: IncusClientFactory,
 ) {
-  const local = new LocalVolumesService(repository, pools, transactions, intents, database, audit);
-  const shared = new SharedVolumesService(
+  const dtos = new VolumeDtoAssembler(database, repository, pools);
+  const capacity = new VolumeCapacityService(database, repository, pools);
+  const lifecycle = new VolumeLifecycleService(repository, intents, audit);
+  const local = new LocalVolumesService(
     repository,
     pools,
     transactions,
     intents,
-    database,
     audit,
-    clients,
+    dtos,
+    capacity,
+    lifecycle,
+  );
+  const shared = new SharedVolumesService(
+    repository,
+    pools,
+    transactions,
+    audit,
+    dtos,
+    capacity,
+    lifecycle,
+    new SharedVolumeCatalogInspectService(repository, database, clients),
   );
   const attachments = new VolumeAttachmentsService(
     repository,
@@ -36,6 +58,7 @@ export function makeVolumeServices(
     intents,
     database,
     audit,
+    dtos,
   );
   return {
     local,

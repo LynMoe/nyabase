@@ -2,7 +2,8 @@ import { describe, expect, it, vi } from 'vitest';
 import { IncusError } from '../incus/index.js';
 import type { ReconcileRunContext } from '../reconcile/managed-reconciler.js';
 import { VolumeReconciler } from './volume-reconciler.service.js';
-import { decideVolumeResize, normalizeObservedVolumeUsage } from './volume-usage.js';
+import { VolumeReconcileStore } from './volume-reconcile.store.js';
+import { decideVolumeResize, normalizeObservedVolumeUsage } from './volume-rules.js';
 
 /** The reconciler's private SQL store, where the tests intercept data access. */
 function storeOf(reconciler: VolumeReconciler): object {
@@ -209,9 +210,7 @@ describe('volume reconciler scan and shifted policy', () => {
         { volume_id: presentId, server_id: serverId, catalog_state: 'present', pool_id: 'pool-1' },
       ],
     });
-    const reconciler = new VolumeReconciler(
-      db as never,
-      { ensurePending } as never,
+    const reconciler = new VolumeReconciler(new VolumeReconcileStore(db as never, { ensurePending } as never),
       { log: vi.fn().mockResolvedValue(undefined) } as never,
       { get: vi.fn().mockResolvedValue(undefined), listServerIds: vi.fn() } as never,
       { register: vi.fn() } as never,
@@ -255,9 +254,7 @@ describe('volume reconciler scan and shifted policy', () => {
         { volume_id: volumeId, server_id: serverId, catalog_state: 'present', pool_id: 'pool-1' },
       ],
     });
-    const reconciler = new VolumeReconciler(
-      db as never,
-      { ensurePending } as never,
+    const reconciler = new VolumeReconciler(new VolumeReconcileStore(db as never, { ensurePending } as never),
       { log: vi.fn().mockResolvedValue(undefined) } as never,
       { get: vi.fn().mockResolvedValue(undefined), listServerIds: vi.fn() } as never,
       { register: vi.fn() } as never,
@@ -296,9 +293,7 @@ describe('volume reconciler scan and shifted policy', () => {
         { volume_id: deletingId, server_id: serverId, catalog_state: 'present', pool_id: 'pool-1' },
       ],
     });
-    const reconciler = new VolumeReconciler(
-      db as never,
-      { ensurePending } as never,
+    const reconciler = new VolumeReconciler(new VolumeReconcileStore(db as never, { ensurePending } as never),
       { log: vi.fn().mockResolvedValue(undefined) } as never,
       { get: vi.fn().mockResolvedValue(undefined), listServerIds: vi.fn() } as never,
       { register: vi.fn() } as never,
@@ -383,9 +378,7 @@ describe('volume reconciler scan and shifted policy', () => {
       placements: [],
     });
     const deleteStorageVolume = vi.fn();
-    const reconciler = new VolumeReconciler(
-      db as never,
-      { ensurePending } as never,
+    const reconciler = new VolumeReconciler(new VolumeReconcileStore(db as never, { ensurePending } as never),
       { log: vi.fn().mockResolvedValue(undefined) } as never,
       { get: vi.fn().mockResolvedValue(undefined), listServerIds: vi.fn() } as never,
       { register: vi.fn() } as never,
@@ -433,9 +426,7 @@ describe('volume reconciler scan and shifted policy', () => {
       ],
     });
     const deleteStorageVolume = vi.fn();
-    const reconciler = new VolumeReconciler(
-      db as never,
-      { ensurePending } as never,
+    const reconciler = new VolumeReconciler(new VolumeReconcileStore(db as never, { ensurePending } as never),
       { log: vi.fn().mockResolvedValue(undefined) } as never,
       { get: vi.fn().mockResolvedValue(undefined), listServerIds: vi.fn() } as never,
       { register: vi.fn() } as never,
@@ -478,9 +469,7 @@ describe('volume reconciler scan and shifted policy', () => {
       }],
       placements: [],
     });
-    const reconciler = new VolumeReconciler(
-      db as never,
-      { ensurePending } as never,
+    const reconciler = new VolumeReconciler(new VolumeReconcileStore(db as never, { ensurePending } as never),
       { log: vi.fn().mockResolvedValue(undefined) } as never,
       { get: vi.fn().mockResolvedValue(undefined), listServerIds: vi.fn() } as never,
       { register: vi.fn() } as never,
@@ -500,8 +489,7 @@ describe('volume reconciler scan and shifted policy', () => {
     const ensurePending = vi.fn().mockResolvedValue({ id: 'intent' });
     const listedName = `nyv-${'a'.repeat(32)}`;
     const alignedName = `nyv-${'b'.repeat(32)}`;
-    const reconciler = new VolumeReconciler(
-      selectDb({
+    const reconciler = new VolumeReconciler(new VolumeReconcileStore(selectDb({
       volumes: [
         localVolume({ id: volumeId, serverId, incusName: listedName, size_bytes: 20 }),
         localVolume({ id: alignedId, serverId, incusName: alignedName, size_bytes: 10 }),
@@ -511,8 +499,7 @@ describe('volume reconciler scan and shifted policy', () => {
         { volume_id: volumeId, server_id: serverId, catalog_state: 'present', pool_id: 'pool-1' },
         { volume_id: alignedId, server_id: serverId, catalog_state: 'present', pool_id: 'pool-1' },
       ],
-    }) as never,
-      { ensurePending } as never,
+    }) as never, { ensurePending } as never),
       { log: vi.fn().mockResolvedValue(undefined) } as never,
       { get: vi.fn().mockResolvedValue(undefined), listServerIds: vi.fn() } as never,
       { register: vi.fn() } as never,
@@ -561,9 +548,7 @@ describe('volume reconciler scan and shifted policy', () => {
         { volume_id: volumeId, server_id: serverId, catalog_state: 'present', pool_id: 'pool-t' },
       ],
     });
-    const reconciler = new VolumeReconciler(
-      db as never,
-      { ensurePending } as never,
+    const reconciler = new VolumeReconciler(new VolumeReconcileStore(db as never, { ensurePending } as never),
       { log: vi.fn().mockResolvedValue(undefined) } as never,
       { get: vi.fn().mockResolvedValue(undefined), listServerIds: vi.fn() } as never,
       { register: vi.fn() } as never,
@@ -610,9 +595,7 @@ describe('volume reconciler scan and shifted policy', () => {
         { volume_id: volumeId, server_id: serverId, catalog_state: 'present', pool_id: 'pool-t' },
       ],
     });
-    const reconciler = new VolumeReconciler(
-      db as never,
-      { ensurePending } as never,
+    const reconciler = new VolumeReconciler(new VolumeReconcileStore(db as never, { ensurePending } as never),
       { log: vi.fn().mockResolvedValue(undefined) } as never,
       { get: vi.fn().mockResolvedValue(undefined), listServerIds: vi.fn() } as never,
       { register: vi.fn() } as never,
@@ -635,8 +618,7 @@ describe('volume reconciler scan and shifted policy', () => {
     const listedName = `nyv-${'a'.repeat(32)}`;
     const ensurePending = vi.fn();
     const createStorageVolume = vi.fn();
-    const reconciler = new VolumeReconciler(
-      selectDb({
+    const reconciler = new VolumeReconciler(new VolumeReconcileStore(selectDb({
       volumes: [{
         id: volumeId,
         revision: 2,
@@ -660,8 +642,7 @@ describe('volume reconciler scan and shifted policy', () => {
       placements: [
         { volume_id: volumeId, server_id: serverId, catalog_state: 'ensuring', pool_id: 'pool-t' },
       ],
-    }) as never,
-      { ensurePending } as never,
+    }) as never, { ensurePending } as never),
       { log: vi.fn().mockResolvedValue(undefined) } as never,
       { get: vi.fn().mockResolvedValue(undefined), listServerIds: vi.fn() } as never,
       { register: vi.fn() } as never,
@@ -676,9 +657,7 @@ describe('volume reconciler scan and shifted policy', () => {
   });
 
   it('fails closed when an in-use volume is missing security.shifted', async () => {
-    const reconciler = new VolumeReconciler(
-      volumeExistsDb() as never,
-      {} as never,
+    const reconciler = new VolumeReconciler(new VolumeReconcileStore(volumeExistsDb() as never, {} as never),
       { log: vi.fn().mockResolvedValue(undefined) } as never,
       { get: vi.fn().mockResolvedValue(undefined), listServerIds: vi.fn() } as never,
       { register: vi.fn() } as never,
@@ -720,9 +699,7 @@ describe('volume reconciler scan and shifted policy', () => {
 
   it('reverts desired size and fails when shrink is below observed usage', async () => {
     const db = volumeExistsDb();
-    const reconciler = new VolumeReconciler(
-      db as never,
-      {} as never,
+    const reconciler = new VolumeReconciler(new VolumeReconcileStore(db as never, {} as never),
       { log: vi.fn().mockResolvedValue(undefined) } as never,
       { get: vi.fn().mockResolvedValue(undefined), listServerIds: vi.fn() } as never,
       { register: vi.fn() } as never,
@@ -775,9 +752,7 @@ describe('volume reconciler scan and shifted policy', () => {
 
   it('reverts desired size and writes used_bytes NULL when CephFS usage is phantom', async () => {
     const db = volumeExistsDb();
-    const reconciler = new VolumeReconciler(
-      db as never,
-      {} as never,
+    const reconciler = new VolumeReconciler(new VolumeReconcileStore(db as never, {} as never),
       { log: vi.fn().mockResolvedValue(undefined) } as never,
       { get: vi.fn().mockResolvedValue(undefined), listServerIds: vi.fn() } as never,
       { register: vi.fn() } as never,
@@ -832,9 +807,7 @@ describe('volume reconciler scan and shifted policy', () => {
 
   it('does not revert desired size when block-backed shrink needs detach', async () => {
     const db = volumeExistsDb();
-    const reconciler = new VolumeReconciler(
-      db as never,
-      {} as never,
+    const reconciler = new VolumeReconciler(new VolumeReconcileStore(db as never, {} as never),
       { log: vi.fn().mockResolvedValue(undefined) } as never,
       { get: vi.fn().mockResolvedValue(undefined), listServerIds: vi.fn() } as never,
       { register: vi.fn() } as never,
@@ -888,9 +861,7 @@ describe('volume reconciler scan and shifted policy', () => {
   });
 
   it('fails adopt on the 8th GET 404 and retries earlier attempts', async () => {
-    const reconciler = new VolumeReconciler(
-      volumeExistsDb() as never,
-      {} as never,
+    const reconciler = new VolumeReconciler(new VolumeReconcileStore(volumeExistsDb() as never, {} as never),
       { log: vi.fn().mockResolvedValue(undefined) } as never,
       { get: vi.fn().mockResolvedValue(undefined), listServerIds: vi.fn() } as never,
       { register: vi.fn() } as never,
@@ -927,9 +898,7 @@ describe('volume reconciler scan and shifted policy', () => {
   it('retries volume.ensure on a deleting volume with zero deleteStorageVolume', async () => {
     const deleteStorageVolume = vi.fn();
     const getStorageVolume = vi.fn();
-    const reconciler = new VolumeReconciler(
-      volumeExistsDb({ lifecycle_phase: 'deleting' }) as never,
-      {} as never,
+    const reconciler = new VolumeReconciler(new VolumeReconcileStore(volumeExistsDb({ lifecycle_phase: 'deleting' }) as never, {} as never),
       { log: vi.fn().mockResolvedValue(undefined) } as never,
       { get: vi.fn().mockResolvedValue(undefined), listServerIds: vi.fn() } as never,
       { register: vi.fn() } as never,
@@ -963,9 +932,7 @@ describe('volume.destroy eligible-node D', () => {
         { server_id: serverA, pool_name: 'cephfs-a' },
       ],
     });
-    const reconciler = new VolumeReconciler(
-      volumeExistsDb({ lifecycle_phase: 'deleting' }) as never,
-      {} as never,
+    const reconciler = new VolumeReconciler(new VolumeReconcileStore(volumeExistsDb({ lifecycle_phase: 'deleting' }) as never, {} as never),
       { log: vi.fn().mockResolvedValue(undefined) } as never,
       { get: vi.fn(async (id: string) => (id === serverA ? clientA : clientB)) } as never,
       { register: vi.fn() } as never,
@@ -995,9 +962,7 @@ describe('volume.destroy eligible-node D', () => {
         catalog(serverA, 'cephfs-a', 'present'),
       ],
     });
-    const reconciler = new VolumeReconciler(
-      volumeExistsDb({ lifecycle_phase: 'deleting' }) as never,
-      {} as never,
+    const reconciler = new VolumeReconciler(new VolumeReconcileStore(volumeExistsDb({ lifecycle_phase: 'deleting' }) as never, {} as never),
       { log: vi.fn().mockResolvedValue(undefined) } as never,
       { get: vi.fn(async (id: string) => (id === serverA ? clientA : clientB)) } as never,
       { register: vi.fn() } as never,
@@ -1032,9 +997,7 @@ describe('volume.destroy eligible-node D', () => {
         { server_id: serverA, pool_name: 'cephfs-a' },
       ],
     });
-    const reconciler = new VolumeReconciler(
-      volumeExistsDb({ lifecycle_phase: 'deleting' }) as never,
-      {} as never,
+    const reconciler = new VolumeReconciler(new VolumeReconcileStore(volumeExistsDb({ lifecycle_phase: 'deleting' }) as never, {} as never),
       { log: vi.fn().mockResolvedValue(undefined) } as never,
       { get: vi.fn(async (id: string) => (id === serverA ? clientA : clientB)) } as never,
       { register: vi.fn() } as never,
@@ -1066,9 +1029,7 @@ describe('volume.destroy eligible-node D', () => {
         { server_id: serverA, pool_name: 'cephfs-a' },
       ],
     });
-    const reconciler = new VolumeReconciler(
-      volumeExistsDb({ lifecycle_phase: 'deleting' }) as never,
-      {} as never,
+    const reconciler = new VolumeReconciler(new VolumeReconcileStore(volumeExistsDb({ lifecycle_phase: 'deleting' }) as never, {} as never),
       { log: vi.fn().mockResolvedValue(undefined) } as never,
       { get: vi.fn(async (id: string) => (id === serverA ? clientA : clientB)) } as never,
       { register: vi.fn() } as never,
@@ -1103,9 +1064,7 @@ describe('volume.destroy eligible-node D', () => {
         { server_id: serverB, pool_name: 'cephfs-b' },
       ],
     });
-    const reconciler = new VolumeReconciler(
-      volumeExistsDb({ lifecycle_phase: 'deleting' }) as never,
-      {} as never,
+    const reconciler = new VolumeReconciler(new VolumeReconcileStore(volumeExistsDb({ lifecycle_phase: 'deleting' }) as never, {} as never),
       { log: vi.fn().mockResolvedValue(undefined) } as never,
       { get: vi.fn(async (id: string) => (id === serverA ? clientA : clientB)) } as never,
       { register: vi.fn() } as never,
@@ -1123,9 +1082,7 @@ describe('volume.destroy eligible-node D', () => {
 
   it('succeeds without Incus when the volume row is already gone', async () => {
     const get = vi.fn();
-    const reconciler = new VolumeReconciler(
-      volumeExistsDb() as never,
-      {} as never,
+    const reconciler = new VolumeReconciler(new VolumeReconcileStore(volumeExistsDb() as never, {} as never),
       { log: vi.fn().mockResolvedValue(undefined) } as never,
       { get } as never,
       { register: vi.fn() } as never,
@@ -1145,9 +1102,7 @@ describe('volume.destroy eligible-node D', () => {
       attachments: true,
       catalogs: [catalog(serverA, 'cephfs-a', 'present')],
     });
-    const reconciler = new VolumeReconciler(
-      volumeExistsDb({ lifecycle_phase: 'deleting' }) as never,
-      {} as never,
+    const reconciler = new VolumeReconciler(new VolumeReconcileStore(volumeExistsDb({ lifecycle_phase: 'deleting' }) as never, {} as never),
       { log: vi.fn().mockResolvedValue(undefined) } as never,
       {
         get: vi.fn(async () => ({
@@ -1169,9 +1124,7 @@ describe('volume.destroy eligible-node D', () => {
   it('finishes empty tracking without requiring an Incus client', async () => {
     const get = vi.fn();
     const state = destroyState({ catalogs: [] });
-    const reconciler = new VolumeReconciler(
-      volumeExistsDb({ lifecycle_phase: 'deleting' }) as never,
-      {} as never,
+    const reconciler = new VolumeReconciler(new VolumeReconcileStore(volumeExistsDb({ lifecycle_phase: 'deleting' }) as never, {} as never),
       { log: vi.fn().mockResolvedValue(undefined) } as never,
       { get } as never,
       { register: vi.fn() } as never,
@@ -1193,9 +1146,7 @@ describe('volume.destroy eligible-node D', () => {
       catalogs: [catalog(serverA, 'cephfs-a', 'present', 'unreachable')],
       eligible: [{ server_id: serverB, pool_name: 'cephfs-b' }],
     });
-    const reconciler = new VolumeReconciler(
-      volumeExistsDb({ lifecycle_phase: 'deleting' }) as never,
-      {} as never,
+    const reconciler = new VolumeReconciler(new VolumeReconcileStore(volumeExistsDb({ lifecycle_phase: 'deleting' }) as never, {} as never),
       { log: vi.fn().mockResolvedValue(undefined) } as never,
       { get: vi.fn(async (id: string) => (id === serverA ? clientA : clientB)) } as never,
       { register: vi.fn() } as never,
@@ -1227,9 +1178,7 @@ describe('volume.destroy eligible-node D', () => {
         { server_id: serverB, pool_name: 'cephfs-b' },
       ],
     });
-    const reconciler = new VolumeReconciler(
-      volumeExistsDb({ lifecycle_phase: 'deleting' }) as never,
-      {} as never,
+    const reconciler = new VolumeReconciler(new VolumeReconcileStore(volumeExistsDb({ lifecycle_phase: 'deleting' }) as never, {} as never),
       { log: vi.fn().mockResolvedValue(undefined) } as never,
       { get: vi.fn(async (id: string) => (id === serverA ? clientA : clientB)) } as never,
       { register: vi.fn() } as never,
@@ -1253,9 +1202,7 @@ describe('volume.destroy eligible-node D', () => {
       catalogs: [],
       eligible: [{ server_id: serverB, pool_name: 'cephfs-b' }],
     });
-    const reconciler = new VolumeReconciler(
-      volumeExistsDb({ lifecycle_phase: 'deleting' }) as never,
-      {} as never,
+    const reconciler = new VolumeReconciler(new VolumeReconcileStore(volumeExistsDb({ lifecycle_phase: 'deleting' }) as never, {} as never),
       { log: vi.fn().mockResolvedValue(undefined) } as never,
       { get: vi.fn(async () => clientB) } as never,
       { register: vi.fn() } as never,
@@ -1275,9 +1222,7 @@ describe('volume.destroy eligible-node D', () => {
       catalogs: [catalog(serverA, 'cephfs-a', 'present', 'unreachable')],
       eligible: [],
     });
-    const reconciler = new VolumeReconciler(
-      volumeExistsDb({ lifecycle_phase: 'deleting' }) as never,
-      {} as never,
+    const reconciler = new VolumeReconciler(new VolumeReconcileStore(volumeExistsDb({ lifecycle_phase: 'deleting' }) as never, {} as never),
       { log: vi.fn().mockResolvedValue(undefined) } as never,
       { get: vi.fn(async () => ({ deleteStorageVolume })) } as never,
       { register: vi.fn() } as never,
@@ -1620,8 +1565,7 @@ function chain(): Record<string, unknown> {
 describe('VolumeReconciler resource status', () => {
   function statusReconciler(phase: string | undefined, sets: Record<string, unknown>[]) {
     const where: () => unknown = () => ({ where, execute: vi.fn().mockResolvedValue(undefined) });
-    return new VolumeReconciler(
-      {
+    return new VolumeReconciler(new VolumeReconcileStore({
         selectFrom: vi.fn(() => ({
           select: vi.fn(() => ({
             where: vi.fn(() => ({
@@ -1637,8 +1581,7 @@ describe('VolumeReconciler resource status', () => {
             return { where };
           }),
         })),
-      } as never,
-      {} as never,
+      } as never, {} as never),
       { log: vi.fn() } as never,
       { get: vi.fn() } as never,
       { register: vi.fn() } as never,

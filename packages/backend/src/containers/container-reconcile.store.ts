@@ -1,26 +1,95 @@
+import { Inject, Injectable } from '@nestjs/common';
 import { Capability } from '@nyabase/common';
 import { sql, type Kysely } from 'kysely';
-import { deriveInstanceName, IncusError } from '../incus/index.js';
+import { deriveInstanceName, IncusError, type IncusSchema } from '../incus/index.js';
 import type { NyabaseDatabase } from '../platform/persistence-pg/database.types.js';
-import type { IntentFailure, IntentRepository } from '../reconcile/intent.repository.js';
-import type { ResourceAuthority } from '../reconcile/managed-reconciler.js';
+import { PG_DATABASE } from '../platform/persistence-pg/tokens.js';
 import {
-  composeAuthorizedKeys,
-  type ContainerAttachment,
-  type ContainerRow,
-  type InstanceFull,
-  type InstanceState,
-  type SshFileObservation,
-} from './container-reconcile-support.js';
+  IntentRepository,
+  type IntentFailure,
+  type IntentRecord,
+  type PhysicalSettlement,
+} from '../reconcile/intent.repository.js';
+import type { ResourceAuthority } from '../reconcile/managed-reconciler.js';
+import { settleContainerIntent } from './container-rules.js';
+
+/** The desired container joined with its server, root pool, image and network claim. */
+export interface ContainerRow {
+  id: string;
+  server_id: string;
+  owner_id: string;
+  image_id: string;
+  revision: number;
+  image_fingerprint: string;
+  root_size_bytes: string | number;
+  cpu_millis: number;
+  mem_bytes: string | number;
+  gpu_enabled: boolean;
+  gpu_state: unknown;
+  nesting: boolean;
+  syscall_intercept: boolean;
+  power_intent: 'running' | 'stopped';
+  lifecycle_phase: 'provisioning' | 'active' | 'deleting' | 'failed';
+  root_pool_name: string;
+  root_resize_family: 'quota_online' | 'block_backed';
+  parent_interface: string | null;
+  routed_ip: string | null;
+  network_key: string | null;
+  gateway: string | null;
+  dns_servers: string[];
+  login_user: string;
+  ssh_public_key: string | null;
+}
+export interface ContainerAttachment {
+  id: string;
+  container_path: string;
+  read_only: boolean;
+  volume_id: string;
+  incus_name: string;
+  pool_name: string;
+  size_bytes: string;
+  shared: boolean;
+  bind_state: 'attaching' | 'attached' | 'detaching';
+}
+
+export interface SshFileObservation {
+  readonly status: 'disabled' | 'container_stopped' | 'running' | 'error' | 'unknown';
+  readonly lastError: string | null;
+}
+
+/** Build guest authorized_keys from platform user public keys only (T3 jump). */
+function composeAuthorizedKeys(
+  userKeys: string | null | undefined,
+): string | null {
+  if (!userKeys) return null;
+  const lines: string[] = [];
+  const seen = new Set<string>();
+  for (const line of userKeys.split('\n')) {
+    const key = line.trim();
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    lines.push(key);
+  }
+  return lines.length > 0 ? lines.join('\n') : null;
+}
 
 /** Every SQL statement the container reconciler issues; the Incus-facing logic never touches Kysely. */
+@Injectable()
 export class ContainerReconcileStore {
   constructor(
-    private readonly database: Kysely<NyabaseDatabase>,
+    @Inject(PG_DATABASE) private readonly database: Kysely<NyabaseDatabase>,
     private readonly intents: IntentRepository,
   ) {}
 
   // --- ManagedReconciler state -------------------------------------------------
+
+  settleIntent(
+    intent: IntentRecord,
+    observedRevision: number,
+    settlement: PhysicalSettlement,
+  ): Promise<void> {
+    return settleContainerIntent(this.intents, intent, observedRevision, settlement);
+  }
 
   async needsAttention(containerId: string): Promise<boolean> {
     const row = await this.database
@@ -267,7 +336,7 @@ export class ContainerReconcileStore {
   // --- observation -------------------------------------------------------------
 
   /** Attachments that finished binding become `attached`; finished unbinds disappear. */
-  async settleVolumeBinds(containerId: string, document: InstanceFull): Promise<void> {
+  async settleVolumeBinds(containerId: string, document: IncusSchema<'InstanceFull'>): Promise<void> {
     const devices = document.devices ?? {};
     const rows = await this.database
       .selectFrom('control.volume_attachments')
@@ -323,8 +392,8 @@ export class ContainerReconcileStore {
   /** Record what Incus reported after a successful reconcile pass. */
   async recordObservation(
     row: ContainerRow,
-    actual: InstanceFull,
-    state: InstanceState,
+    actual: IncusSchema<'InstanceFull'>,
+    state: IncusSchema<'InstanceState'>,
     quotaPending: boolean,
     ssh: SshFileObservation,
     usedBytes: bigint | null,

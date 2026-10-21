@@ -1,6 +1,6 @@
-import { ConflictException, Inject, Injectable } from '@nestjs/common';
+import { ConflictException, Injectable } from '@nestjs/common';
 import { randomUUID } from 'node:crypto';
-import type { Kysely, Transaction } from 'kysely';
+import type { Transaction } from 'kysely';
 import {
   AuditAction,
   Capability,
@@ -13,41 +13,31 @@ import {
 } from '@nyabase/common';
 import { assertListScope, type Actor } from '../iam/actor.js';
 import { AuditService } from '../iam/audit.service.js';
-import type { IncusClientFactory } from '../incus/incus-client.factory.js';
-import { INCUS_CLIENT_FACTORY } from '../incus/incus-client.factory.js';
 import { deterministicName, numberValue } from '../platform/domain-utils.js';
 import type { NyabaseDatabase } from '../platform/persistence-pg/database.types.js';
 import { PgTransactionManager } from '../platform/persistence-pg/transaction.js';
-import { PG_DATABASE } from '../platform/persistence-pg/tokens.js';
 import { acceptedIntent } from '../reconcile/accepted-intent.js';
-import { IntentRepository } from '../reconcile/intent.repository.js';
 import { StoragePoolsRepository } from '../storage-pools/storage-pools.repository.js';
-import { listEligibleDestroyExecutors } from './eligible-destroy-executors.js';
-import { assertCanAccess, type VolumeAccess } from './volume-access.js';
-import {
-  assertSharedCapacityPhysical,
-  assertSharedCapacityWithinGrants,
-  assertSharedCreateHealth,
-  lockVolumeQuota,
-} from './volume-capacity.js';
-import type { VolumeRow } from './volume-dtos.js';
-import { assertSharedGrant } from './volume-grants.js';
+import { SharedVolumeCatalogInspectService } from './shared-volume-catalog.service.js';
+import { VolumeCapacityService } from './volume-capacity.service.js';
+import { VolumeDtoAssembler, type VolumeRow } from './volume-dtos.js';
+import { VolumeLifecycleService } from './volume-lifecycle.service.js';
 import {
   VOLUME_TX,
-  applyResize,
+  assertCanAccess,
   assertPatchable,
   assertValidVolumeSize,
-  beginVolumeDestroy,
-  destroyUntrackedVolume,
+  checkVolumeResize,
   isUniqueViolation,
   nameTakenConflict,
-  renameVolume,
-  type VolumeLifecycleDeps,
-} from './volume-lifecycle.js';
-import { toSharedVolumeDtos, type VolumeDeps } from './volume-read-model.js';
-import { checkVolumeResize, volumeUsageUnknownFailure } from './volume-resize-policy.js';
-import { observeSharedVolumeUsage } from './volume-usage-probe.js';
-import { VolumesRepository } from './volumes.repository.js';
+  volumeUsageUnknownFailure,
+  type VolumeAccess,
+} from './volume-rules.js';
+import {
+  VolumesRepository,
+  assertSharedGrant,
+  listEligibleDestroyExecutors,
+} from './volumes.repository.js';
 
 type PatchInput = { expectedRevision: number; name?: string; sizeBytes?: number };
 type Tx = Transaction<NyabaseDatabase>;
@@ -55,19 +45,16 @@ type Tx = Transaction<NyabaseDatabase>;
 /** CephFS-backed volumes shared across servers: list, create, resize/rename and delete. */
 @Injectable()
 export class SharedVolumesService {
-  private readonly deps: VolumeDeps & VolumeLifecycleDeps;
-
   constructor(
     private readonly repository: VolumesRepository,
     private readonly pools: StoragePoolsRepository,
     private readonly transactions: PgTransactionManager,
-    private readonly intents: IntentRepository,
-    @Inject(PG_DATABASE) private readonly database: Kysely<NyabaseDatabase>,
     private readonly audit: AuditService,
-    @Inject(INCUS_CLIENT_FACTORY) private readonly clients: IncusClientFactory,
-  ) {
-    this.deps = { database, repository, pools, intents, audit };
-  }
+    private readonly dtos: VolumeDtoAssembler,
+    private readonly capacityRules: VolumeCapacityService,
+    private readonly lifecycle: VolumeLifecycleService,
+    private readonly catalog: SharedVolumeCatalogInspectService,
+  ) {}
 
   async list(
     actor: Actor,
@@ -82,12 +69,12 @@ export class SharedVolumesService {
     const filtered = filters.attachableOnServerId
       ? await this.filterAttachable(rows, filters.attachableOnServerId)
       : rows;
-    return toSharedVolumeDtos(this.deps, filtered);
+    return this.dtos.toSharedVolumeDtos(filtered);
   }
 
   async get(actor: Actor, id: string): Promise<SharedVolumeDto> {
     const { row } = assertCanAccess(actor, await this.repository.findById(id), 'shared');
-    const [dto] = await toSharedVolumeDtos(this.deps, [row]);
+    const [dto] = await this.dtos.toSharedVolumeDtos([row]);
     return dto!;
   }
 
@@ -120,9 +107,8 @@ export class SharedVolumesService {
       row = await this.transactions.run(async (transaction) => {
         await assertSharedGrant(transaction, ownerId, input.scope.sharedBackendId);
         await this.pools.lockSharedBackends([input.scope.sharedBackendId], transaction);
-        await assertSharedCreateHealth(this.deps, input.scope.sharedBackendId, transaction);
-        await assertSharedCapacityWithinGrants(
-          this.deps,
+        await this.capacityRules.assertSharedCreateHealth(input.scope.sharedBackendId, transaction);
+        await this.capacityRules.assertSharedCapacityWithinGrants(
           transaction,
           ownerId,
           input.scope.sharedBackendId,
@@ -154,7 +140,7 @@ export class SharedVolumesService {
       if (isUniqueViolation(error)) throw nameTakenConflict(input.name);
       throw error;
     }
-    const [dto] = await toSharedVolumeDtos(this.deps, [row]);
+    const [dto] = await this.dtos.toSharedVolumeDtos([row]);
     return dto!;
   }
 
@@ -181,7 +167,7 @@ export class SharedVolumesService {
       VOLUME_TX,
     );
     if (!changed.intent) {
-      const [dto] = await toSharedVolumeDtos(this.deps, [changed.row]);
+      const [dto] = await this.dtos.toSharedVolumeDtos([changed.row]);
       return dto!;
     }
     return acceptedIntent(changed.intent);
@@ -193,7 +179,7 @@ export class SharedVolumesService {
     input: PatchInput,
   ): Promise<SharedVolumeDto> {
     if (input.name === undefined || input.name === current.name) {
-      const [dto] = await toSharedVolumeDtos(this.deps, [current]);
+      const [dto] = await this.dtos.toSharedVolumeDtos([current]);
       return dto!;
     }
     const updated = await this.transactions.run(async (transaction) => {
@@ -205,9 +191,9 @@ export class SharedVolumesService {
       if (locked.revision !== input.expectedRevision) {
         throw new ConflictException({ code: FailureCode.RevisionConflict });
       }
-      return renameVolume(this.deps, transaction, actor.userId, locked, input.name!);
+      return this.lifecycle.renameVolume(transaction, actor.userId, locked, input.name!);
     }, VOLUME_TX);
-    const [dto] = await toSharedVolumeDtos(this.deps, [updated]);
+    const [dto] = await this.dtos.toSharedVolumeDtos([updated]);
     return dto!;
   }
 
@@ -227,10 +213,7 @@ export class SharedVolumesService {
       ? await this.pools.findById(placements[0].pool_id)
       : null;
     const quotaEffective = previewPool?.quota_effective ?? true;
-    const observed = await observeSharedVolumeUsage(
-      { database: this.database, repository: this.repository, clients: this.clients },
-      current,
-    );
+    const observed = await this.catalog.observeUsage(current);
     if (observed.status === 'unavailable') {
       throw new ConflictException(volumeUsageUnknownFailure(current.id, requestedSize));
     }
@@ -272,7 +255,7 @@ export class SharedVolumesService {
       await assertSharedGrant(transaction, locked.owner_id, locked.shared_backend_id!);
     }
     const lockedDelta = input.sizeBytes - numberValue(locked.size_bytes);
-    await lockVolumeQuota(this.pools, locked, transaction);
+    await this.capacityRules.lockVolumeQuota(locked, transaction);
     const placements = await this.repository.listPlacements(id, transaction);
     const representativePoolId = placements[0]?.pool_id ?? null;
     const lockedPool = representativePoolId
@@ -294,15 +277,13 @@ export class SharedVolumesService {
     if (precheckFailure && quotaEffective) throw new ConflictException(precheckFailure);
     if (lockedDelta > 0) {
       if (access === 'admin') {
-        await assertSharedCapacityPhysical(
-          this.deps,
+        await this.capacityRules.assertSharedCapacityPhysical(
           transaction,
           locked.shared_backend_id!,
           lockedDelta,
         );
       } else {
-        await assertSharedCapacityWithinGrants(
-          this.deps,
+        await this.capacityRules.assertSharedCapacityWithinGrants(
           transaction,
           locked.owner_id,
           locked.shared_backend_id!,
@@ -310,8 +291,7 @@ export class SharedVolumesService {
         );
       }
     }
-    const { row, intents } = await applyResize(
-      this.deps,
+    const { row, intents } = await this.lifecycle.applyResize(
       transaction,
       actor.userId,
       locked,
@@ -336,7 +316,7 @@ export class SharedVolumesService {
           details: { volumeId: id },
         });
       }
-      await lockVolumeQuota(this.pools, current, transaction);
+      await this.capacityRules.lockVolumeQuota(current, transaction);
       if (await this.repository.hasAttachments(id, transaction)) {
         throw new ConflictException({
           code: FailureCode.VolumeRequiresUnbind,
@@ -345,10 +325,10 @@ export class SharedVolumesService {
       }
       const placements = await this.repository.listPlacements(id, transaction);
       if (!current.dir_ensured && placements.length === 0) {
-        return destroyUntrackedVolume(this.deps, transaction, actorId, current, 'never_mounted');
+        return this.lifecycle.destroyUntrackedVolume(transaction, actorId, current, 'never_mounted');
       }
       await this.assertBackendReachable(transaction, current);
-      return beginVolumeDestroy(this.deps, transaction, actorId, current);
+      return this.lifecycle.beginVolumeDestroy(transaction, actorId, current);
     }, VOLUME_TX);
     return acceptedIntent(result.intent);
   }

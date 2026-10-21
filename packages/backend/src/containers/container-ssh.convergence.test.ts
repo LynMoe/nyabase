@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { IntentKind, IntentResourceType } from '@nyabase/common';
-import { ContainerSshConvergenceService } from './container-ssh-convergence.service.js';
+import { ContainerSshConvergenceService } from './container-ssh.js';
 
 describe('ContainerSshConvergenceService', () => {
   it('bumps revision and creates container.update when syncing user keys', async () => {
