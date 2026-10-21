@@ -19,12 +19,8 @@ if [[ -z "$cargo_bin" || ! -x "$cargo_bin" ]]; then
   exit 1
 fi
 
-for crate in tools/ssh-proxy tools/http-proxy; do
-  (
-    cd "$crate"
-    "$cargo_bin" fmt --check
-    "$cargo_bin" test --locked
-    "$cargo_bin" clippy --locked -- -D warnings
-    "$cargo_bin" build --release --locked
-  )
-done
+cd "$(dirname "${BASH_SOURCE[0]}")/../tools"
+"$cargo_bin" fmt --all --check
+"$cargo_bin" test --workspace --locked
+"$cargo_bin" clippy --workspace --all-targets --locked -- -D warnings
+"$cargo_bin" build --release --locked

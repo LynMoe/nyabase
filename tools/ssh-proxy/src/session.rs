@@ -1,0 +1,677 @@
+use crate::bridge::{emit_audit, emit_metric, spawn_tcp_bridge};
+use crate::config::ProxyConfig;
+use crate::control::ControlPlane;
+use crate::protocol::{SshProxyAuditEvent, TelemetrySender};
+use crate::runtime::{lock, ConnectionState, MAX_CHANNELS_PER_CONNECTION};
+use crate::snapshot::{RejectReason, RouteResolution, RoutingSnapshot, SnapshotStore};
+use anyhow::{Context, Result};
+use proxy_common::clock::now_ms;
+use russh::keys::PublicKey;
+use russh::server::{Auth, Msg as ServerMsg, Session};
+use russh::{Channel, ChannelId, Disconnect, Pty};
+use std::net::SocketAddr;
+use std::sync::atomic::Ordering;
+use std::sync::Arc;
+use tokio::net::TcpStream;
+use tracing::{debug, info, warn};
+
+pub(crate) const SSH_PROXY_PAUSE_REJECT_DESCRIPTION: &str = "Nyabase jump unavailable";
+
+pub(crate) struct ProxySshSession {
+    pub(crate) store: Arc<SnapshotStore>,
+    pub(crate) control: Arc<ControlPlane>,
+    pub(crate) config: ProxyConfig,
+    pub(crate) peer: SocketAddr,
+    pub(crate) telemetry: TelemetrySender,
+    pub(crate) connection: Arc<ConnectionState>,
+    pub(crate) reject_paused: bool,
+    pub(crate) authenticated_login: Option<String>,
+    pub(crate) authenticated_public_key: Option<PublicKey>,
+    pub(crate) resolved_route: Option<OwnedResolvedRoute>,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct OwnedResolvedRoute {
+    pub(crate) user_id: String,
+    pub(crate) username: String,
+    pub(crate) server_id: String,
+    pub(crate) server_slug: String,
+    pub(crate) container_id: String,
+    pub(crate) container_name: String,
+    pub(crate) instance_name: String,
+    pub(crate) routed_ip: String,
+}
+
+impl OwnedResolvedRoute {
+    pub(crate) fn same_authority(&self, other: &Self) -> bool {
+        self.user_id == other.user_id
+            && self.username == other.username
+            && self.server_id == other.server_id
+            && self.server_slug == other.server_slug
+            && self.container_id == other.container_id
+            && self.container_name == other.container_name
+            && self.instance_name == other.instance_name
+            && self.routed_ip == other.routed_ip
+    }
+}
+
+pub(crate) fn resolve_owned_route(
+    snapshot: &RoutingSnapshot,
+    login: &str,
+) -> Result<OwnedResolvedRoute, RejectReason> {
+    match snapshot.resolve_login(login) {
+        RouteResolution::Accepted(route) => Ok(OwnedResolvedRoute {
+            user_id: route.user.id.clone(),
+            username: route.user.username.clone(),
+            server_id: route.server.id.clone(),
+            server_slug: route.server.slug.clone(),
+            container_id: route.container.id.clone(),
+            container_name: route.container.name.clone(),
+            instance_name: route.route.instance_name.clone(),
+            routed_ip: route.route.routed_ip.clone().unwrap_or_default(),
+        }),
+        RouteResolution::Rejected(reason) => Err(reason),
+    }
+}
+
+impl ProxySshSession {
+    pub(crate) fn new(
+        store: Arc<SnapshotStore>,
+        control: Arc<ControlPlane>,
+        config: ProxyConfig,
+        peer: SocketAddr,
+        telemetry: TelemetrySender,
+        connection: Arc<ConnectionState>,
+        reject_paused: bool,
+    ) -> Self {
+        Self {
+            store,
+            control,
+            config,
+            peer,
+            telemetry,
+            connection,
+            reject_paused,
+            authenticated_login: None,
+            authenticated_public_key: None,
+            resolved_route: None,
+        }
+    }
+
+    pub(crate) fn latest_snapshot(&self) -> Option<Arc<RoutingSnapshot>> {
+        if !self.control.admit() {
+            return None;
+        }
+        self.store.load().filter(|snapshot| snapshot.is_fresh())
+    }
+
+    pub(crate) fn held_snapshot(&self) -> Option<Arc<RoutingSnapshot>> {
+        self.store.load()
+    }
+
+    pub(crate) fn pause_rejecting(&self) -> bool {
+        self.reject_paused || !self.control.admit() && self.held_snapshot().is_some()
+    }
+
+    pub(crate) fn authorized_user_id(&self) -> Result<String> {
+        let public_key = self
+            .authenticated_public_key
+            .as_ref()
+            .context("SSH proxy session has no authenticated public key")?;
+        let expected_user_id = lock(&self.connection.authenticated_user_id)
+            .clone()
+            .context("SSH proxy session has no authenticated user")?;
+        let snapshot = self
+            .held_snapshot()
+            .context("no SSH proxy snapshot is installed")?;
+        let user = snapshot
+            .find_active_user_by_public_key(public_key)
+            .map_err(|reason| anyhow::anyhow!(reason.to_string()))?;
+        if user.id != expected_user_id {
+            anyhow::bail!("SSH proxy user authorization changed");
+        }
+        Ok(user.id.clone())
+    }
+
+    pub(crate) fn authorized_route_for_target(
+        &self,
+        routed_ip: &str,
+    ) -> Result<OwnedResolvedRoute> {
+        let user_id = self.authorized_user_id()?;
+        let snapshot = self
+            .held_snapshot()
+            .context("no SSH proxy snapshot is installed")?;
+        snapshot
+            .resolve_owned_route_for_user_ip(&user_id, routed_ip)
+            .map_err(|reason| anyhow::anyhow!(reason.to_string()))
+    }
+
+    pub(crate) fn emit_login_audit(
+        &self,
+        login: &str,
+        username: Option<&str>,
+        route: Option<&OwnedResolvedRoute>,
+        ok: bool,
+        reason: Option<&str>,
+    ) {
+        emit_audit(
+            &self.telemetry,
+            SshProxyAuditEvent {
+                user_id: route
+                    .map(|route| route.user_id.clone())
+                    .or_else(|| lock(&self.connection.authenticated_user_id).clone()),
+                username: Some(
+                    route
+                        .map(|route| route.username.clone())
+                        .or_else(|| username.map(str::to_string))
+                        .unwrap_or_else(|| login.to_string()),
+                ),
+                container_id: route.map(|route| route.container_id.clone()),
+                server_id: route.map(|route| route.server_id.clone()),
+                action: "login".to_string(),
+                ok,
+                reason: reason.map(ToOwned::to_owned),
+                ts: now_ms(),
+            },
+        );
+    }
+}
+
+impl russh::server::Handler for ProxySshSession {
+    type Error = anyhow::Error;
+
+    async fn auth_succeeded(&mut self, session: &mut Session) -> Result<(), Self::Error> {
+        if self.pause_rejecting() {
+            session.disconnect(
+                Disconnect::ServiceNotAvailable,
+                SSH_PROXY_PAUSE_REJECT_DESCRIPTION,
+                "en",
+            )?;
+            return Ok(());
+        }
+        let current = self.held_snapshot();
+        if !self.connection.authorization_matches(current.as_deref()) {
+            anyhow::bail!("SSH proxy authorization changed during authentication");
+        }
+        Ok(())
+    }
+
+    async fn auth_none(&mut self, _user: &str) -> Result<Auth, Self::Error> {
+        Ok(Auth::reject())
+    }
+
+    async fn auth_password(&mut self, _user: &str, _password: &str) -> Result<Auth, Self::Error> {
+        Ok(Auth::reject())
+    }
+
+    async fn auth_publickey_offered(
+        &mut self,
+        user: &str,
+        public_key: &PublicKey,
+    ) -> Result<Auth, Self::Error> {
+        if self.pause_rejecting() {
+            return Ok(Auth::Accept);
+        }
+        if self
+            .latest_snapshot()
+            .is_some_and(|snapshot| snapshot.public_key_allowed(user, public_key))
+        {
+            Ok(Auth::Accept)
+        } else {
+            Ok(Auth::reject())
+        }
+    }
+
+    async fn auth_publickey(
+        &mut self,
+        user: &str,
+        public_key: &PublicKey,
+    ) -> Result<Auth, Self::Error> {
+        if self.pause_rejecting() {
+            return Ok(Auth::Accept);
+        }
+        let Some(snapshot) = self.latest_snapshot() else {
+            self.emit_login_audit(user, None, None, false, Some("snapshot_unavailable"));
+            return Ok(Auth::reject());
+        };
+        let user_row = match snapshot.find_active_user_by_public_key(public_key) {
+            Ok(user_row) => user_row,
+            Err(reason) => {
+                warn!(peer = %self.peer, login = user, %reason, "SSH proxy public key rejected");
+                self.emit_login_audit(user, None, None, false, Some(reason.code()));
+                return Ok(Auth::reject());
+            }
+        };
+        // Prefer a jump-format login that resolves to a container owned by the
+        // key holder; otherwise accept any SSH username and bind the route later
+        // on direct-tcpip using the target IP.
+        let pinned_route = resolve_owned_route(&snapshot, user)
+            .ok()
+            .filter(|route| route.user_id == user_row.id);
+        info!(
+            peer = %self.peer,
+            login = user,
+            username = %user_row.username,
+            container_id = pinned_route
+                .as_ref()
+                .map(|route| route.container_id.as_str())
+                .unwrap_or("-"),
+            "SSH proxy login authenticated"
+        );
+        self.emit_login_audit(
+            user,
+            Some(&user_row.username),
+            pinned_route.as_ref(),
+            true,
+            None,
+        );
+        self.connection.set_authenticated(
+            user,
+            public_key,
+            &user_row.id,
+            &user_row.username,
+            pinned_route.as_ref(),
+        );
+        emit_metric(
+            &self.telemetry,
+            "ssh_proxy_logins_total",
+            vec![
+                ("result", "accepted".to_string()),
+                (
+                    "server_slug",
+                    pinned_route
+                        .as_ref()
+                        .map(|route| route.server_slug.clone())
+                        .unwrap_or_else(|| "unbound".to_string()),
+                ),
+            ],
+            1.0,
+        );
+        self.authenticated_login = Some(user.to_string());
+        self.authenticated_public_key = Some(public_key.clone());
+        self.resolved_route = pinned_route;
+        Ok(Auth::Accept)
+    }
+
+    async fn channel_open_session(
+        &mut self,
+        _channel: Channel<ServerMsg>,
+        _session: &mut Session,
+    ) -> Result<bool, Self::Error> {
+        if self.pause_rejecting() {
+            return Ok(false);
+        }
+        emit_metric(
+            &self.telemetry,
+            "ssh_proxy_channels_total",
+            vec![
+                ("kind", "session".to_string()),
+                ("result", "rejected".to_string()),
+            ],
+            1.0,
+        );
+        Ok(false)
+    }
+
+    async fn pty_request(
+        &mut self,
+        channel: ChannelId,
+        _term: &str,
+        _col_width: u32,
+        _row_height: u32,
+        _pix_width: u32,
+        _pix_height: u32,
+        _modes: &[(Pty, u32)],
+        session: &mut Session,
+    ) -> Result<(), Self::Error> {
+        session.channel_failure(channel)?;
+        Ok(())
+    }
+
+    async fn env_request(
+        &mut self,
+        channel: ChannelId,
+        _variable_name: &str,
+        _variable_value: &str,
+        session: &mut Session,
+    ) -> Result<(), Self::Error> {
+        session.channel_failure(channel)?;
+        Ok(())
+    }
+
+    async fn shell_request(
+        &mut self,
+        channel: ChannelId,
+        session: &mut Session,
+    ) -> Result<(), Self::Error> {
+        session.channel_failure(channel)?;
+        Ok(())
+    }
+
+    async fn exec_request(
+        &mut self,
+        channel: ChannelId,
+        _data: &[u8],
+        session: &mut Session,
+    ) -> Result<(), Self::Error> {
+        session.channel_failure(channel)?;
+        Ok(())
+    }
+
+    async fn subsystem_request(
+        &mut self,
+        channel: ChannelId,
+        _name: &str,
+        session: &mut Session,
+    ) -> Result<(), Self::Error> {
+        session.channel_failure(channel)?;
+        Ok(())
+    }
+
+    async fn window_change_request(
+        &mut self,
+        _channel: ChannelId,
+        _col_width: u32,
+        _row_height: u32,
+        _pix_width: u32,
+        _pix_height: u32,
+        _session: &mut Session,
+    ) -> Result<(), Self::Error> {
+        Ok(())
+    }
+
+    async fn agent_request(
+        &mut self,
+        channel: ChannelId,
+        session: &mut Session,
+    ) -> Result<bool, Self::Error> {
+        session.channel_failure(channel)?;
+        Ok(false)
+    }
+
+    async fn data(
+        &mut self,
+        _channel: ChannelId,
+        _data: &[u8],
+        _session: &mut Session,
+    ) -> Result<(), Self::Error> {
+        Ok(())
+    }
+
+    async fn extended_data(
+        &mut self,
+        _channel: ChannelId,
+        _code: u32,
+        _data: &[u8],
+        _session: &mut Session,
+    ) -> Result<(), Self::Error> {
+        Ok(())
+    }
+
+    async fn channel_eof(
+        &mut self,
+        _channel: ChannelId,
+        _session: &mut Session,
+    ) -> Result<(), Self::Error> {
+        Ok(())
+    }
+
+    async fn channel_close(
+        &mut self,
+        _channel: ChannelId,
+        _session: &mut Session,
+    ) -> Result<(), Self::Error> {
+        Ok(())
+    }
+
+    async fn channel_open_direct_tcpip(
+        &mut self,
+        channel: Channel<ServerMsg>,
+        host_to_connect: &str,
+        port_to_connect: u32,
+        originator_address: &str,
+        originator_port: u32,
+        _session: &mut Session,
+    ) -> Result<bool, Self::Error> {
+        if self.pause_rejecting() {
+            return Ok(false);
+        }
+        let peer = self.peer;
+        if port_to_connect != 22 {
+            warn!(
+                %peer,
+                target = %format!("{host_to_connect}:{port_to_connect}"),
+                "direct-tcpip target outside PermitOpen"
+            );
+            emit_metric(
+                &self.telemetry,
+                "ssh_proxy_channels_total",
+                vec![
+                    ("kind", "direct_tcpip".to_string()),
+                    ("result", "rejected_permit".to_string()),
+                ],
+                1.0,
+            );
+            let _ = channel.close().await;
+            return Ok(false);
+        }
+
+        let route = match self.authorized_route_for_target(host_to_connect) {
+            Ok(route) => route,
+            Err(error) => {
+                warn!(%peer, %error, target = %host_to_connect, "direct-tcpip rejected: unauthorized");
+                emit_metric(
+                    &self.telemetry,
+                    "ssh_proxy_channels_total",
+                    vec![
+                        ("kind", "direct_tcpip".to_string()),
+                        ("result", "rejected_unauthorized".to_string()),
+                    ],
+                    1.0,
+                );
+                let _ = channel.close().await;
+                return Ok(false);
+            }
+        };
+        self.connection.set_route(&route);
+        self.resolved_route = Some(route.clone());
+
+        if host_to_connect != route.routed_ip {
+            warn!(
+                %peer,
+                target = %format!("{host_to_connect}:{port_to_connect}"),
+                permitted = %format!("{}:22", route.routed_ip),
+                originator = %format!("{originator_address}:{originator_port}"),
+                "direct-tcpip target outside PermitOpen"
+            );
+            emit_metric(
+                &self.telemetry,
+                "ssh_proxy_channels_total",
+                vec![
+                    ("kind", "direct_tcpip".to_string()),
+                    ("result", "rejected_permit".to_string()),
+                ],
+                1.0,
+            );
+            let _ = channel.close().await;
+            return Ok(false);
+        }
+
+        if self.connection.channels.load(Ordering::Relaxed) >= MAX_CHANNELS_PER_CONNECTION {
+            warn!(%peer, "SSH direct-tcpip channel limit reached");
+            emit_metric(
+                &self.telemetry,
+                "ssh_proxy_channels_total",
+                vec![
+                    ("kind", "direct_tcpip".to_string()),
+                    ("result", "rejected_limit".to_string()),
+                ],
+                1.0,
+            );
+            let _ = channel.close().await;
+            return Ok(false);
+        }
+
+        let Some(bridge_permit) = self.connection.try_reserve_child_task() else {
+            warn!(%peer, "SSH direct-tcpip child task limit reached");
+            emit_metric(
+                &self.telemetry,
+                "ssh_proxy_channels_total",
+                vec![
+                    ("kind", "direct_tcpip".to_string()),
+                    ("result", "rejected_child_limit".to_string()),
+                ],
+                1.0,
+            );
+            let _ = channel.close().await;
+            return Ok(false);
+        };
+
+        let address = format!("{}:22", route.routed_ip);
+        let stream = match tokio::time::timeout(
+            self.config.route_connect_timeout,
+            TcpStream::connect(&address),
+        )
+        .await
+        {
+            Ok(Ok(stream)) => stream,
+            Ok(Err(error)) => {
+                warn!(
+                    %peer,
+                    target = %address,
+                    originator = %format!("{originator_address}:{originator_port}"),
+                    %error,
+                    "direct-tcpip TCP connect failed"
+                );
+                emit_metric(
+                    &self.telemetry,
+                    "ssh_proxy_channels_total",
+                    vec![
+                        ("kind", "direct_tcpip".to_string()),
+                        ("result", "connect_failed".to_string()),
+                    ],
+                    1.0,
+                );
+                let _ = channel.close().await;
+                return Ok(false);
+            }
+            Err(_) => {
+                warn!(
+                    %peer,
+                    target = %address,
+                    originator = %format!("{originator_address}:{originator_port}"),
+                    "direct-tcpip TCP connect timed out"
+                );
+                emit_metric(
+                    &self.telemetry,
+                    "ssh_proxy_channels_total",
+                    vec![
+                        ("kind", "direct_tcpip".to_string()),
+                        ("result", "connect_timeout".to_string()),
+                    ],
+                    1.0,
+                );
+                let _ = channel.close().await;
+                return Ok(false);
+            }
+        };
+
+        if !self
+            .authorized_route_for_target(&route.routed_ip)?
+            .same_authority(&route)
+        {
+            warn!(
+                %peer,
+                target = %address,
+                "direct-tcpip rejected: route authorization changed during connect"
+            );
+            emit_metric(
+                &self.telemetry,
+                "ssh_proxy_channels_total",
+                vec![
+                    ("kind", "direct_tcpip".to_string()),
+                    ("result", "rejected_revoked".to_string()),
+                ],
+                1.0,
+            );
+            let _ = channel.close().await;
+            return Ok(false);
+        }
+
+        emit_metric(
+            &self.telemetry,
+            "ssh_proxy_channels_total",
+            vec![
+                ("kind", "direct_tcpip".to_string()),
+                ("result", "opened".to_string()),
+            ],
+            1.0,
+        );
+        debug!(
+            %peer,
+            target = %address,
+            originator = %format!("{originator_address}:{originator_port}"),
+            container_id = %route.container_id,
+            "opened direct-tcpip TCP bridge"
+        );
+        spawn_tcp_bridge(
+            bridge_permit,
+            peer,
+            channel,
+            stream,
+            self.connection.clone(),
+        );
+        Ok(true)
+    }
+
+    async fn tcpip_forward(
+        &mut self,
+        address: &str,
+        _port: &mut u32,
+        _session: &mut Session,
+    ) -> Result<bool, Self::Error> {
+        warn!(
+            peer = %self.peer,
+            %address,
+            "SSH remote tcpip forward rejected in jump-host mode"
+        );
+        emit_metric(
+            &self.telemetry,
+            "ssh_proxy_forwards_total",
+            vec![
+                ("kind", "remote_tcpip".to_string()),
+                ("result", "rejected".to_string()),
+            ],
+            1.0,
+        );
+        Ok(false)
+    }
+
+    async fn cancel_tcpip_forward(
+        &mut self,
+        address: &str,
+        port: u32,
+        _session: &mut Session,
+    ) -> Result<bool, Self::Error> {
+        warn!(
+            peer = %self.peer,
+            %address,
+            port,
+            "SSH cancel tcpip forward rejected in jump-host mode"
+        );
+        emit_metric(
+            &self.telemetry,
+            "ssh_proxy_forwards_total",
+            vec![
+                ("kind", "remote_tcpip".to_string()),
+                ("result", "rejected".to_string()),
+            ],
+            1.0,
+        );
+        Ok(false)
+    }
+}
+
+#[cfg(test)]
+#[path = "session_tests.rs"]
+mod tests;

@@ -123,7 +123,7 @@ nohup env \
   NYABASE_SSH_LISTEN=0.0.0.0:2222 \
   SSH_PROXY_TOKEN="$TOKEN" \
   NYABASE_SSH_PROXY_ID="e2e-${RUN_ID}-ssh-proxy" \
-  "$ROOT/tools/ssh-proxy/target/release/nyabase-ssh-proxy" \
+  "$ROOT/tools/target/release/nyabase-ssh-proxy" \
   >"$RT/ssh-proxy.log" 2>&1 &
 PROXY_PID="$!"
 echo "$PROXY_PID" >"$RT/ssh-proxy.pid"

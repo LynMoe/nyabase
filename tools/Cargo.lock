@@ -1208,6 +1208,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "nyabase-http-proxy"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "base64",
+ "futures-util",
+ "pretty_assertions",
+ "proxy-common",
+ "rustls",
+ "rustls-pemfile",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-rustls",
+ "tokio-tungstenite",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "nyabase-ssh-proxy"
 version = "0.1.0"
 dependencies = [
@@ -1215,12 +1235,11 @@ dependencies = [
  "arc-swap",
  "base64",
  "futures-util",
- "libc",
  "pretty_assertions",
+ "proxy-common",
  "russh",
  "russh-sftp",
  "rustls",
- "rustls-pemfile",
  "serde",
  "serde_json",
  "thiserror",
@@ -1473,6 +1492,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8fd00f0bb2e90d81d1044c2b32617f68fcb9fa3bb7640c23e9c748e53fb30934"
 dependencies = [
  "unicode-ident",
+]
+
+[[package]]
+name = "proxy-common"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "libc",
+ "rustls",
+ "rustls-pemfile",
+ "tokio",
+ "tokio-tungstenite",
 ]
 
 [[package]]
