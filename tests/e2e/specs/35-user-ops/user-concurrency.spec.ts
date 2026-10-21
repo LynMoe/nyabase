@@ -74,7 +74,7 @@ test(
         }),
         userApi.patch(`/api/volumes/${volumeId}`, {
           data: {
-            expectedRevision: before.generation,
+            expectedRevision: before.revision,
             sizeBytes: 160 * MiB,
           },
         }),
@@ -175,7 +175,7 @@ test(
       const volumeBefore = await expectJson<JsonRecord>(
         await userApi.get(`/api/volumes/${volumeId}`),
       );
-      const generation = Number(volumeBefore.generation);
+      const revision = Number(volumeBefore.revision);
 
       const [limitsA, limitsB] = await Promise.all([
         userApi.patch(`/api/containers/${containerId}/limits`, {
@@ -210,10 +210,10 @@ test(
 
       const [resizeA, resizeB] = await Promise.all([
         userApi.patch(`/api/volumes/${volumeId}`, {
-          data: { expectedRevision: generation, sizeBytes: 160 * MiB },
+          data: { expectedRevision: revision, sizeBytes: 160 * MiB },
         }),
         userApi.patch(`/api/volumes/${volumeId}`, {
-          data: { expectedRevision: generation, sizeBytes: 176 * MiB },
+          data: { expectedRevision: revision, sizeBytes: 176 * MiB },
         }),
       ]);
       const resizeStatuses = [resizeA.status(), resizeB.status()];

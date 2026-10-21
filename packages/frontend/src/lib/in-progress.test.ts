@@ -19,8 +19,8 @@ const baseContainer = {
   lifecyclePhase: ContainerPhase.Active,
   actual: { status: ContainerStatus.Running },
   rootSizePendingBytes: null as number | null,
-  observedGeneration: 1 as number | null,
-  generation: 1,
+  observedRevision: 1 as number | null,
+  revision: 1,
 };
 
 describe('container progress', () => {
@@ -29,14 +29,14 @@ describe('container progress', () => {
       ...baseContainer,
       lifecyclePhase: ContainerPhase.Provisioning,
       actual: { status: ContainerStatus.Unknown },
-      observedGeneration: null,
+      observedRevision: null,
     };
     expect(containerLifecyclePending(container)).toBe(true);
     expect(containerStatusPending(container)).toBe(true);
   });
 
-  it('does not spin an active row whose generation has not been observed', () => {
-    const container = { ...baseContainer, observedGeneration: null, rootSizePendingBytes: null };
+  it('does not spin an active row whose revision has not been observed', () => {
+    const container = { ...baseContainer, observedRevision: null, rootSizePendingBytes: null };
     expect(containerLifecyclePending(container)).toBe(false);
     expect(containerStatusPending(container)).toBe(false);
   });
@@ -57,20 +57,20 @@ describe('container progress', () => {
     expect(containerStatusPending(container)).toBe(false);
   });
 
-  it('spins the actual-status badge when a non-null generation has not caught up', () => {
-    const container = { ...baseContainer, observedGeneration: 1, generation: 2 };
+  it('spins the actual-status badge when a non-null revision has not caught up', () => {
+    const container = { ...baseContainer, observedRevision: 1, revision: 2 };
     expect(containerStatusPending(container)).toBe(true);
     expect(containerLifecyclePending(container)).toBe(false);
   });
 });
 
 describe('other resource progress', () => {
-  it('does not treat a null generation on an active volume as in progress', () => {
+  it('does not treat a null revision on an active volume as in progress', () => {
     expect(volumeInProgress({
       needsAttention: false,
       lifecyclePhase: ResourceLifecyclePhase.Active,
-      observedGeneration: null,
-      generation: 1,
+      observedRevision: null,
+      revision: 1,
     })).toBe(false);
   });
 

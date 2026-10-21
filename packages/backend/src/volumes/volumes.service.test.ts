@@ -124,7 +124,7 @@ function volumeRow(overrides: Record<string, unknown> = {}) {
     server_id: homeServer,
     shared_backend_id: null,
     name: 'data',
-    generation: 1,
+    revision: 1,
     lifecycle_phase: 'active',
     dir_ensured: false,
     ...overrides,
@@ -151,7 +151,7 @@ function makeVolumesService(overrides: {
       resourceType: IntentResourceType.Volume,
       resourceId: volumeId,
       serverId: homeServer,
-      targetGeneration: 1,
+      targetRevision: 1,
       createdAt: '2026-01-01T00:00:00.000Z',
     }),
     settleOne: vi.fn().mockResolvedValue(true),
@@ -165,7 +165,7 @@ function makeVolumesService(overrides: {
     findById: vi.fn().mockResolvedValue(volumeRow()),
     hasAttachments: vi.fn().mockResolvedValue(false),
     listPlacements: vi.fn().mockResolvedValue([]),
-    updateDesired: vi.fn().mockResolvedValue(volumeRow({ lifecycle_phase: 'deleting', generation: 2 })),
+    updateDesired: vi.fn().mockResolvedValue(volumeRow({ lifecycle_phase: 'deleting', revision: 2 })),
     deleteVolumeRow: vi.fn(),
     insertAttachment: vi.fn().mockResolvedValue({ id: 'att-1' }),
     upsertPlacement: vi.fn(),
@@ -244,7 +244,7 @@ describe('volume API placement paths', () => {
         id: containerId,
         owner_id: actorId,
         server_id: peerServer,
-        generation: 1,
+        revision: 1,
       })
       .mockResolvedValueOnce({
         id: volumeId,
@@ -252,7 +252,7 @@ describe('volume API placement paths', () => {
         server_id: null,
         shared_backend_id: backendId,
         lifecycle_phase: 'active',
-        generation: 4,
+        revision: 4,
         pool_id: null,
       });
     query.execute
@@ -283,7 +283,7 @@ describe('volume API placement paths', () => {
           resourceType: IntentResourceType.Container,
           resourceId: containerId,
           serverId: peerServer,
-          targetGeneration: 2,
+          targetRevision: 2,
           createdAt: '2026-01-01T00:00:00.000Z',
         }),
       },
@@ -331,7 +331,7 @@ describe('volume API placement paths', () => {
         id: containerId,
         owner_id: actorId,
         server_id: peerServer,
-        generation: 1,
+        revision: 1,
         power_intent: 'running',
       })
       .mockResolvedValueOnce({ instance_status: 'Running' });
@@ -371,7 +371,7 @@ describe('volume API placement paths', () => {
           resourceType: IntentResourceType.Container,
           resourceId: containerId,
           serverId: peerServer,
-          targetGeneration: 2,
+          targetRevision: 2,
           createdAt: '2026-01-01T00:00:00.000Z',
         }),
       },
@@ -518,7 +518,7 @@ describe('volume API placement paths', () => {
         id: containerId,
         owner_id: actorId,
         server_id: homeServer,
-        generation: 4,
+        revision: 4,
         power_intent: 'running',
       })
       .mockResolvedValueOnce({ instance_status: 'Running' });

@@ -1,6 +1,11 @@
 import type { Capability } from '@nyabase/common';
 import type { IncusClientPort } from '../incus/index.js';
-import type { IntentFailure, IntentRecord, IntentResource } from './intent.repository.js';
+import type {
+  IntentFailure,
+  IntentRecord,
+  IntentResource,
+  PhysicalSettlement,
+} from './intent.repository.js';
 import type { LeaseGuard, ReconcileClaim } from './reconcile-claim.repository.js';
 
 export interface ReconcileRunContext {
@@ -13,7 +18,7 @@ export interface ReconcileRunContext {
 
 export interface ReconcileOutcome {
   readonly outcome: 'succeeded' | 'retry' | 'failed';
-  readonly observedGeneration?: number;
+  readonly observedRevision?: number;
   readonly failure?: IntentFailure;
   readonly retryAfterMs?: number;
   readonly stale?: boolean;
@@ -36,9 +41,19 @@ export interface ManagedReconciler {
   scan?(serverId: string, client: IncusClientPort, signal: AbortSignal): Promise<void>;
   /** True when the resource is parked until a user retry. */
   needsAttention(resourceId: string): Promise<boolean>;
-  markSucceeded(resourceId: string, generation: number): Promise<void>;
+  markSucceeded(resourceId: string, revision: number): Promise<void>;
   /** `attention` parks the resource; otherwise the failure is only recorded. */
   markFailure(resourceId: string, failure: IntentFailure, attention: boolean): Promise<void>;
+  /**
+   * Optional override of how a finished intent is settled. The default settles
+   * every pending intent of the resource up to the observed revision; a domain
+   * overrides it when some of its intents need their own completion proof.
+   */
+  settle?(
+    intent: IntentRecord,
+    observedRevision: number,
+    settlement: PhysicalSettlement,
+  ): Promise<void>;
   /** Answers every requested id, using the type's default capability for missing resources. */
   resourceAuthorities(resourceIds: readonly string[]): Promise<Map<string, ResourceAuthority>>;
 }

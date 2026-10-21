@@ -48,7 +48,13 @@ import {
   applyGuestNetwork,
   parseCidrPrefix,
 } from './guest-network.adapter.js';
-import { IntentRepository, type IntentFailure, type IntentRecord } from '../reconcile/intent.repository.js';
+import {
+  IntentRepository,
+  type IntentFailure,
+  type IntentRecord,
+  type PhysicalSettlement,
+} from '../reconcile/intent.repository.js';
+import { settleContainerIntent } from './container-intents.js';
 import type {
   ManagedReconciler,
   ReconcileOutcome,
@@ -72,7 +78,7 @@ interface ContainerRow {
   server_id: string;
   owner_id: string;
   image_id: string;
-  generation: number;
+  revision: number;
   image_fingerprint: string;
   root_size_bytes: string | number;
   cpu_millis: number;
@@ -299,11 +305,11 @@ export class ContainerReconciler implements ManagedReconciler, OnModuleInit {
     return row?.needs_attention === true;
   }
 
-  async markSucceeded(containerId: string, generation: number): Promise<void> {
+  async markSucceeded(containerId: string, revision: number): Promise<void> {
     await this.database
       .updateTable('control.containers')
       .set({
-        observed_generation: generation,
+        observed_revision: revision,
         needs_attention: false,
         failure_code: null,
         failure_reason: null,
@@ -328,6 +334,14 @@ export class ContainerReconciler implements ManagedReconciler, OnModuleInit {
       })
       .where('id', '=', containerId)
       .execute();
+  }
+
+  settle(
+    intent: IntentRecord,
+    observedRevision: number,
+    settlement: PhysicalSettlement,
+  ): Promise<void> {
+    return settleContainerIntent(this.intents, intent, observedRevision, settlement);
   }
 
   async resourceAuthorities(
@@ -359,7 +373,7 @@ export class ContainerReconciler implements ManagedReconciler, OnModuleInit {
       container: {
         id: row.id,
         serverId: row.server_id,
-        generation: row.generation,
+        revision: row.revision,
         imageFingerprint: row.image_fingerprint,
         cpuMillis: row.cpu_millis,
         memBytes: row.mem_bytes,
@@ -401,10 +415,10 @@ export class ContainerReconciler implements ManagedReconciler, OnModuleInit {
         failure: failure('CONTAINER_SERVER_MISMATCH', 'The intent server does not own the container'),
       };
     }
-    if (context.intent.targetGeneration < row.generation) {
+    if (context.intent.targetRevision < row.revision) {
       return {
         outcome: 'succeeded',
-        observedGeneration: context.intent.targetGeneration,
+        observedRevision: context.intent.targetRevision,
       };
     }
     if (!row.parent_interface || !row.routed_ip || !row.network_key || !row.gateway) {
@@ -434,12 +448,12 @@ export class ContainerReconciler implements ManagedReconciler, OnModuleInit {
       const beforeMkdir = await this.rereadDesired(
         row.id,
         row.server_id,
-        context.intent.targetGeneration,
+        context.intent.targetRevision,
       );
       if (beforeMkdir.stale) {
         return {
           outcome: 'succeeded',
-          observedGeneration: context.intent.targetGeneration,
+          observedRevision: context.intent.targetRevision,
         };
       }
       const catalogOutcome = await this.ensureDesiredCatalogs(
@@ -451,7 +465,7 @@ export class ContainerReconciler implements ManagedReconciler, OnModuleInit {
       const beforePut = await this.rereadDesired(
         row.id,
         row.server_id,
-        context.intent.targetGeneration,
+        context.intent.targetRevision,
       );
       desiredAttachments = beforePut.desired;
     }
@@ -483,7 +497,7 @@ export class ContainerReconciler implements ManagedReconciler, OnModuleInit {
       }
       await this.verifyAbsent(context.client, expectedName);
       await this.releaseContainerState(row);
-      return { outcome: 'succeeded', observedGeneration: row.generation };
+      return { outcome: 'succeeded', observedRevision: row.revision };
     }
 
     if (!actual) {
@@ -727,7 +741,7 @@ export class ContainerReconciler implements ManagedReconciler, OnModuleInit {
       };
     }
     await this.settleVolumeBinds(row.id, expectedName, verified.document);
-    return { outcome: 'succeeded', observedGeneration: row.generation };
+    return { outcome: 'succeeded', observedRevision: row.revision };
   }
 
   async scan(serverId: string, client: IncusClientPort, signal: AbortSignal): Promise<void> {
@@ -735,7 +749,7 @@ export class ContainerReconciler implements ManagedReconciler, OnModuleInit {
       .selectFrom('control.containers')
       .select([
         'id',
-        'generation',
+        'revision',
         'server_id',
         'lifecycle_phase',
         'needs_attention',
@@ -801,7 +815,7 @@ export class ContainerReconciler implements ManagedReconciler, OnModuleInit {
   private async enqueueScanIntent(
     desired: {
       readonly id: string;
-      readonly generation: number;
+      readonly revision: number;
       readonly server_id: string;
     },
     kind: 'container.delete' | 'container.update',
@@ -811,7 +825,7 @@ export class ContainerReconciler implements ManagedReconciler, OnModuleInit {
       resourceType: 'container',
       resourceId: desired.id,
       serverId: desired.server_id,
-      targetGeneration: desired.generation,
+      targetRevision: desired.revision,
       reuseSettled: false,
       request: { source: 'full_scan', idempotencyKey: 'physical:scan' },
     });
@@ -868,7 +882,7 @@ export class ContainerReconciler implements ManagedReconciler, OnModuleInit {
         'c.server_id as server_id',
         'c.owner_id as owner_id',
         'c.image_id as image_id',
-        'c.generation as generation',
+        'c.revision as revision',
         'c.image_fingerprint as image_fingerprint',
         'c.root_size_bytes as root_size_bytes',
         'c.cpu_millis as cpu_millis',
@@ -973,17 +987,17 @@ export class ContainerReconciler implements ManagedReconciler, OnModuleInit {
   private async rereadDesired(
     containerId: string,
     serverId: string,
-    targetGeneration: number,
+    targetRevision: number,
   ): Promise<{ stale: boolean; desired: ContainerAttachment[] }> {
     const current = await this.database
       .selectFrom('control.containers')
-      .select('generation')
+      .select('revision')
       .where('id', '=', containerId)
       .executeTakeFirst();
     const attachments = await this.readAttachments(containerId, serverId);
     const desired = attachments.filter((attachment) => attachment.bind_state !== 'detaching');
     return {
-      stale: (current?.generation ?? targetGeneration) > targetGeneration,
+      stale: (current?.revision ?? targetRevision) > targetRevision,
       desired,
     };
   }
@@ -1601,7 +1615,7 @@ export class ContainerReconciler implements ManagedReconciler, OnModuleInit {
       .updateTable('control.containers')
       .set({
         instance_name: actual.name ?? deriveInstanceName(row.id),
-        observed_generation: row.generation,
+        observed_revision: row.revision,
         root_size_pending_bytes: quotaPending ? String(row.root_size_bytes) : null,
         failure_code: null,
         failure_reason: null,

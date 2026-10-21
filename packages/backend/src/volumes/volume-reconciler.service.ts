@@ -13,6 +13,7 @@ import {
   type IncusSchema,
 } from '../incus/index.js';
 import { IntentRepository, type IntentFailure, type IntentRecord } from '../reconcile/intent.repository.js';
+import { ensureVolumeIntent } from './volume-intents.js';
 import type {
   ManagedReconciler,
   ReconcileOutcome,
@@ -120,7 +121,7 @@ interface VolumeRecord {
   incus_name: string;
   size_bytes: string;
   used_bytes: string | null;
-  generation: number;
+  revision: number;
   lifecycle_phase: 'provisioning' | 'active' | 'deleting' | 'failed';
   needs_attention: boolean;
   dir_ensured: boolean;
@@ -251,11 +252,11 @@ export class VolumeReconciler implements ManagedReconciler, OnModuleInit {
     return row?.needs_attention === true && row.lifecycle_phase !== 'deleting';
   }
 
-  async markSucceeded(volumeId: string, generation: number): Promise<void> {
+  async markSucceeded(volumeId: string, revision: number): Promise<void> {
     await this.database
       .updateTable('control.volumes')
       .set({
-        observed_generation: generation,
+        observed_revision: revision,
         needs_attention: false,
         failure_code: null,
       })
@@ -284,19 +285,13 @@ export class VolumeReconciler implements ManagedReconciler, OnModuleInit {
         .execute();
       return;
     }
-    const values = attention
-      ? {
-        needs_attention: true,
-        failure_code: code,
-        lifecycle_phase: 'failed' as const,
-      }
-      : {
-        // Shrink/ensure failures must surface on the volume card. Leaving
-        // needs_attention false made failed resizes look "active" while scan
-        // kept retrying the already-written desired size.
-        needs_attention: true,
-        failure_code: code,
-      };
+    // A failed shrink/ensure must surface on the volume card too, so the
+    // resource is flagged either way; only a parked failure also fails the phase.
+    const values = {
+      needs_attention: true,
+      failure_code: code,
+      ...(attention ? { lifecycle_phase: 'failed' as const } : {}),
+    };
     await this.database
       .updateTable('control.volumes')
       .set(values)
@@ -344,7 +339,7 @@ export class VolumeReconciler implements ManagedReconciler, OnModuleInit {
       .selectFrom('control.volumes as v')
       .select([
         'v.id as id',
-        'v.generation as generation',
+        'v.revision as revision',
         'v.server_id as server_id',
         'v.shared_backend_id as shared_backend_id',
         'v.lifecycle_phase as lifecycle_phase',
@@ -506,7 +501,7 @@ export class VolumeReconciler implements ManagedReconciler, OnModuleInit {
 
     if (!actual) {
       if (context.intent.kind === 'volume.resize' && row.shared_backend_id) {
-        return { outcome: 'succeeded', observedGeneration: row.generation };
+        return { outcome: 'succeeded', observedRevision: row.revision };
       }
       actual = await this.adoptOrCreate(context, row);
       if (!actual) {
@@ -537,10 +532,10 @@ export class VolumeReconciler implements ManagedReconciler, OnModuleInit {
   private async reconcileDestroy(context: ReconcileRunContext): Promise<ReconcileOutcome> {
     const volume = await this.readVolumeRow(context.intent.resourceId);
     if (!volume) {
-      return { outcome: 'succeeded', observedGeneration: context.intent.targetGeneration };
+      return { outcome: 'succeeded', observedRevision: context.intent.targetRevision };
     }
     if (volume.lifecycle_phase !== 'deleting') {
-      return { outcome: 'succeeded', observedGeneration: volume.generation };
+      return { outcome: 'succeeded', observedRevision: volume.revision };
     }
     if (await this.hasAnyAttachments(volume.id)) {
       return destroyRetry(
@@ -554,14 +549,14 @@ export class VolumeReconciler implements ManagedReconciler, OnModuleInit {
     const catalogs = await this.listCatalogs(volume.id);
     if (!volume.dir_ensured && catalogs.length === 0) {
       await this.finishEmptyTracking(volume.id, 'never_mounted');
-      return { outcome: 'succeeded', observedGeneration: volume.generation };
+      return { outcome: 'succeeded', observedRevision: volume.revision };
     }
 
     const eligible = await this.listDestroyExecutors(volume);
     if (eligible.length === 0) {
       await this.dropAllPlacements(volume.id);
       await this.finishEmptyTracking(volume.id, 'destroy_executor_gone');
-      return { outcome: 'succeeded', observedGeneration: volume.generation };
+      return { outcome: 'succeeded', observedRevision: volume.revision };
     }
 
     if (!volume.remove_all_committed) {
@@ -700,7 +695,7 @@ export class VolumeReconciler implements ManagedReconciler, OnModuleInit {
     if (stale) return stale;
     await this.dropAllPlacements(volume.id);
     await this.finishEmptyTracking(volume.id);
-    return { outcome: 'succeeded', observedGeneration: volume.generation };
+    return { outcome: 'succeeded', observedRevision: volume.revision };
   }
 
   private async adoptOrCreate(
@@ -894,7 +889,7 @@ export class VolumeReconciler implements ManagedReconciler, OnModuleInit {
       .updateTable('control.volume_placements')
       .set({
         catalog_state: 'present',
-        observed_generation: row.generation,
+        observed_revision: row.revision,
       })
       .where('volume_id', '=', row.id)
       .where('server_id', '=', row.target_server_id)
@@ -910,15 +905,15 @@ export class VolumeReconciler implements ManagedReconciler, OnModuleInit {
       .where('volume_id', '=', row.id)
       .where((expression) => expression.or([
         expression('catalog_state', '!=', 'present'),
-        expression('observed_generation', 'is', null),
-        expression('observed_generation', '!=', row.generation),
+        expression('observed_revision', 'is', null),
+        expression('observed_revision', '!=', row.revision),
       ]))
       .executeTakeFirst();
     if (!lagging) {
       await this.database
         .updateTable('control.volumes')
         .set({
-          observed_generation: row.generation,
+          observed_revision: row.revision,
           lifecycle_phase: row.lifecycle_phase === 'provisioning' ? 'active' : row.lifecycle_phase,
           ...(usedBytes === null
             ? {}
@@ -932,7 +927,7 @@ export class VolumeReconciler implements ManagedReconciler, OnModuleInit {
           needs_attention: false,
         })
         .where('id', '=', row.id)
-        .where('generation', '=', row.generation)
+        .where('revision', '=', row.revision)
         .where('lifecycle_phase', 'not in', ['deleting', 'failed'])
         .execute();
     } else if (usedBytes !== null) {
@@ -948,7 +943,7 @@ export class VolumeReconciler implements ManagedReconciler, OnModuleInit {
         .where('lifecycle_phase', 'not in', ['deleting', 'failed'])
         .execute();
     }
-    return { outcome: 'succeeded', observedGeneration: row.generation };
+    return { outcome: 'succeeded', observedRevision: row.revision };
   }
 
   private async readVolumeRow(volumeId: string): Promise<VolumeRecord | undefined> {
@@ -962,7 +957,7 @@ export class VolumeReconciler implements ManagedReconciler, OnModuleInit {
         'incus_name',
         'size_bytes',
         'used_bytes',
-        'generation',
+        'revision',
         'lifecycle_phase',
         'needs_attention',
         'dir_ensured',
@@ -1390,57 +1385,57 @@ export class VolumeReconciler implements ManagedReconciler, OnModuleInit {
   }
 
   private async enqueueResize(
-    row: { id: string; generation: number },
+    row: { id: string; revision: number },
     serverId: string,
   ): Promise<void> {
-    await this.intents.ensurePending({
+    await ensureVolumeIntent(this.intents, {
       kind: 'volume.resize',
       resourceType: 'volume',
       resourceId: row.id,
       serverId,
-      targetGeneration: row.generation,
+      targetRevision: row.revision,
       reuseSettled: false,
       request: {
         source: 'full_scan',
         operation: 'resize',
         idempotencyKey: 'resize',
       },
-    });
+    }, this.database);
   }
 
   private async enqueueEnsure(
-    row: { id: string; generation: number },
+    row: { id: string; revision: number },
     serverId: string,
     operation: 'create' | 'ensure_attachment',
   ): Promise<void> {
-    await this.intents.ensurePending({
+    await ensureVolumeIntent(this.intents, {
       kind: 'volume.ensure',
       resourceType: 'volume',
       resourceId: row.id,
       serverId,
-      targetGeneration: row.generation,
+      targetRevision: row.revision,
       reuseSettled: false,
       request: {
         source: 'full_scan',
         operation,
         idempotencyKey: operation,
       },
-    });
+    }, this.database);
   }
 
-  private async enqueueDestroy(row: { id: string; generation: number }): Promise<void> {
-    await this.intents.ensurePending({
+  private async enqueueDestroy(row: { id: string; revision: number }): Promise<void> {
+    await ensureVolumeIntent(this.intents, {
       kind: 'volume.destroy',
       resourceType: 'volume',
       resourceId: row.id,
-      targetGeneration: row.generation,
+      targetRevision: row.revision,
       reuseSettled: false,
       request: {
         source: 'full_scan',
         operation: 'destroy',
         idempotencyKey: 'destroy',
       },
-    });
+    }, this.database);
   }
 }
 

@@ -37,7 +37,7 @@ export class ServerHealthService implements ServerHealthPort, OnModuleInit {
       .select('revision')
       .where('id', '=', intent.serverId)
       .executeTakeFirst();
-    return server !== undefined && Number(server.revision) === intent.targetGeneration;
+    return server !== undefined && Number(server.revision) === intent.targetRevision;
   }
 
   async markServer(

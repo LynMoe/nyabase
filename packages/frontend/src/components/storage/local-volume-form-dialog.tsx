@@ -200,7 +200,7 @@ export function LocalVolumeFormDialog({
         return;
       }
       const parsed = zPatchVolumeRequest.safeParse({
-        expectedRevision: editing.generation,
+        expectedRevision: editing.revision,
         name: name.trim(),
         sizeBytes: nextSize,
       });

@@ -63,7 +63,7 @@ describe('image assignment reconciliation policy', () => {
       id: 'assignment-1',
       image_id: 'image-1',
       server_id: 'server-1',
-      generation: 4,
+      revision: 4,
       observed_fingerprint: image.fingerprint,
       managed_fingerprint: image.fingerprint,
       lifecycle_phase: 'active',
@@ -113,11 +113,11 @@ describe('image assignment reconciliation policy', () => {
 
     await expect(reconciler.reconcile(context as never)).resolves.toEqual({
       outcome: 'succeeded',
-      observedGeneration: 4,
+      observedRevision: 4,
     });
     await expect(reconciler.reconcile(context as never)).resolves.toEqual({
       outcome: 'succeeded',
-      observedGeneration: 4,
+      observedRevision: 4,
     });
 
     expect(createImage).not.toHaveBeenCalled();
@@ -133,7 +133,7 @@ describe('image assignment reconciliation policy', () => {
       id: 'assignment-1',
       image_id: 'image-1',
       server_id: 'server-1',
-      generation: 2,
+      revision: 2,
       observed_fingerprint: fingerprintA,
       managed_fingerprint: fingerprintA,
       lifecycle_phase: 'active',
@@ -210,7 +210,7 @@ describe('image assignment reconciliation policy', () => {
     };
     await expect(reconciler.reconcile(context as never)).resolves.toEqual({
       outcome: 'succeeded',
-      observedGeneration: 2,
+      observedRevision: 2,
     });
     expect(client.createImage).toHaveBeenCalledWith(
       expect.objectContaining({ aliases: [] }),
@@ -228,7 +228,7 @@ describe('image assignment reconciliation policy', () => {
     client.deleteImage.mockClear();
     await expect(reconciler.reconcile(context as never)).resolves.toEqual({
       outcome: 'succeeded',
-      observedGeneration: 2,
+      observedRevision: 2,
     });
     expect(client.deleteImage).not.toHaveBeenCalled();
   });
@@ -240,7 +240,7 @@ describe('image assignment reconciliation policy', () => {
       id: 'assignment-1',
       image_id: 'image-1',
       server_id: 'server-1',
-      generation: 2,
+      revision: 2,
       observed_fingerprint: fingerprintA,
       managed_fingerprint: fingerprintA,
       lifecycle_phase: 'active',
@@ -303,7 +303,7 @@ describe('image assignment reconciliation policy', () => {
       id: 'assignment-1',
       image_id: 'image-1',
       server_id: 'server-1',
-      generation: 2,
+      revision: 2,
       observed_fingerprint: fingerprintB,
       managed_fingerprint: fingerprintB,
       lifecycle_phase: 'active',
@@ -357,7 +357,7 @@ describe('image assignment reconciliation policy', () => {
       signal: new AbortController().signal,
     } as never)).resolves.toEqual({
       outcome: 'succeeded',
-      observedGeneration: 2,
+      observedRevision: 2,
     });
     expect(whereClauses).toContainEqual(['image_id', '=', 'image-1']);
     expect(client.deleteImage).not.toHaveBeenCalled();
@@ -372,7 +372,7 @@ describe('image assignment reconciliation policy', () => {
       id: assignmentId,
       image_id: imageId,
       server_id: serverId,
-      generation: 2,
+      revision: 2,
       observed_fingerprint: image.fingerprint,
       managed_fingerprint: image.fingerprint,
       lifecycle_phase: 'active',

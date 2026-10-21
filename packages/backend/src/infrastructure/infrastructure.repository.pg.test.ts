@@ -135,7 +135,7 @@ describePg('clean Incus infrastructure repository', () => {
         id: assignmentId,
         image_id: imageId,
         server_id: serverId,
-        generation: 1,
+        revision: 1,
         observed_fingerprint: null,
         managed_fingerprint: null,
         lifecycle_phase: 'provisioning',
@@ -150,7 +150,7 @@ describePg('clean Incus infrastructure repository', () => {
           id: assignmentId,
           image_id: imageId,
           server_id: serverId,
-          generation: 1,
+          revision: 1,
         });
     });
   });

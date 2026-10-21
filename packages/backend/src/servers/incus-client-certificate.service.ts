@@ -193,7 +193,7 @@ export class IncusClientCertificateService {
         resourceType: IntentResourceType.CertificateRotation,
         resourceId: randomUUID(),
         requestedBy: actorId,
-        targetGeneration: nextGeneration,
+        targetRevision: nextGeneration,
         request: {
           operation: 'rotate',
           expectedGeneration: generation,
@@ -205,7 +205,7 @@ export class IncusClientCertificateService {
         AuditAction.RotateIncusClientCertificate,
         intent.id,
         'certificate_rotation',
-        { expectedGeneration: generation, targetGeneration: nextGeneration },
+        { expectedGeneration: generation, targetRevision: nextGeneration },
       );
       return {
         intent,
@@ -215,7 +215,7 @@ export class IncusClientCertificateService {
     if (!result) return null;
     return {
       rotationId: result.intent.id,
-      generation: result.intent.targetGeneration,
+      generation: result.intent.targetRevision,
       status: CertificateRotationStatus.Pending,
       certificate: await this.toDto(result.certificate, this.database),
       failureCode: null,
@@ -233,7 +233,7 @@ export class IncusClientCertificateService {
     const certificate = await this.database
       .selectFrom('system.incus_client_certificates')
       .selectAll()
-      .where('generation', '=', String(intent.targetGeneration))
+      .where('generation', '=', String(intent.targetRevision))
       .executeTakeFirst()
       ?? await this.database
         .selectFrom('system.incus_client_certificates')
@@ -245,7 +245,7 @@ export class IncusClientCertificateService {
     }
     return {
       rotationId: intent.id,
-      generation: intent.targetGeneration,
+      generation: intent.targetRevision,
       status: intent.status === IntentStatus.Succeeded
         ? CertificateRotationStatus.Succeeded
         : intent.status === IntentStatus.Failed

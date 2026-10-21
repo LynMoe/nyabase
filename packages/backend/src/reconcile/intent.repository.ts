@@ -31,7 +31,7 @@ export interface IntentRecord {
   readonly serverId: string | null;
   readonly requestedBy: string | null;
   readonly request: Record<string, unknown> | null;
-  readonly targetGeneration: number;
+  readonly targetRevision: number;
   readonly baseline: Record<string, unknown> | null;
   readonly status: IntentState;
   readonly failureCode: string | null;
@@ -51,7 +51,7 @@ export interface CreatePendingIntentInput {
   readonly serverId?: string | null;
   readonly requestedBy?: string | null;
   readonly request?: Record<string, unknown> | null;
-  readonly targetGeneration: number;
+  readonly targetRevision: number;
   readonly baseline?: Record<string, unknown> | null;
   readonly nextAttemptAt?: Date | string | null;
   readonly blockedByIntentId?: string | null;
@@ -65,7 +65,7 @@ export interface RetryIntentInput {
   readonly serverId?: string | null;
   readonly requestedBy?: string | null;
   readonly request?: Record<string, unknown> | null;
-  readonly targetGeneration: number;
+  readonly targetRevision: number;
   readonly baseline?: Record<string, unknown> | null;
 }
 
@@ -98,6 +98,17 @@ export interface IntentSettleResult {
   readonly superseded: number;
 }
 
+export interface SettleOptions {
+  /**
+   * Pending intents this sweep must leave alone because their domain settles
+   * them individually (for example a restart, which needs its own proof).
+   */
+  readonly keep?: (intent: {
+    readonly kind: string;
+    readonly request: Record<string, unknown> | null;
+  }) => boolean;
+}
+
 export interface PhysicalSettlement {
   readonly outcome: 'succeeded' | 'failed';
   readonly failure?: IntentFailure;
@@ -124,13 +135,6 @@ const MAX_JSON_BYTES = 8 * 1024;
 const MAX_JSON_DEPTH = 5;
 const MAX_JSON_KEYS = 64;
 
-export function isRestartIntent(
-  kind: TypedIntentKind | string,
-  request: Record<string, unknown> | null | undefined,
-): boolean {
-  return kind === IntentKind.ContainerPower && request?.action === 'restart';
-}
-
 export function isUserRetryIntent(
   request: Record<string, unknown> | null | undefined,
 ): boolean {
@@ -152,9 +156,9 @@ function assertResourceType(resourceType: IntentResource): void {
   }
 }
 
-function assertGeneration(generation: number): void {
-  if (!Number.isSafeInteger(generation) || generation < 1) {
-    throw new Error('Intent target generation must be a positive safe integer');
+function assertRevision(revision: number): void {
+  if (!Number.isSafeInteger(revision) || revision < 1) {
+    throw new Error('Intent target revision must be a positive safe integer');
   }
 }
 
@@ -203,17 +207,6 @@ function boundedJsonObject(
     truncated: true,
     preview: text.slice(0, MAX_JSON_BYTES - 64),
   };
-}
-
-function containsTrustToken(value: unknown): boolean {
-  if (Array.isArray(value)) return value.some(containsTrustToken);
-  if (!value || typeof value !== 'object') return false;
-  return Object.entries(value).some(([key, child]) => {
-    if (key === 'trustTokenRef') return false;
-    const normalizedKey = key.replaceAll('_', '').replaceAll('-', '').toLowerCase();
-    if (normalizedKey === 'token' || normalizedKey.includes('trusttoken')) return true;
-    return containsTrustToken(child);
-  });
 }
 
 function boundedFailure(failure: IntentFailure): IntentFailure {
@@ -270,7 +263,7 @@ function objectValue(value: unknown): Record<string, unknown> | null {
   return value as Record<string, unknown>;
 }
 
-function intentIdempotencyKey(targetGeneration: number, request: unknown): string {
+function intentIdempotencyKey(targetRevision: number, request: unknown): string {
   const object = objectValue(request);
   const explicit = object?.idempotencyKey;
   if (typeof explicit === 'string' && explicit.length > 0) {
@@ -280,7 +273,7 @@ function intentIdempotencyKey(targetGeneration: number, request: unknown): strin
   if (typeof desiredHash === 'string' && desiredHash.length > 0) {
     return `hash:${desiredHash}`;
   }
-  return `generation:${targetGeneration}`;
+  return `revision:${targetRevision}`;
 }
 
 function mapFailure(
@@ -304,7 +297,7 @@ function mapRow(row: {
   server_id: string | null;
   requested_by: string | null;
   request_json: unknown;
-  target_generation: number;
+  target_revision: number;
   baseline_json: unknown;
   status: IntentState;
   failure_code: string | null;
@@ -323,7 +316,7 @@ function mapRow(row: {
     serverId: row.server_id,
     requestedBy: row.requested_by,
     request: objectValue(row.request_json),
-    targetGeneration: row.target_generation,
+    targetRevision: row.target_revision,
     baseline: objectValue(row.baseline_json),
     status: row.status,
     failureCode: row.failure_code,
@@ -351,90 +344,17 @@ export class IntentRepository {
     assertResourceType(input.resourceType);
     assertUuidLike(input.resourceId, 'Intent resource id');
     if (input.serverId) assertUuidLike(input.serverId, 'Intent server id');
-    if (
-      (input.resourceType === IntentResourceType.Container
-        || input.resourceType === IntentResourceType.ImageAssignment
-        || input.resourceType === IntentResourceType.Server)
-      && !input.serverId
-    ) {
-      throw new Error(`${input.resourceType} intents require a server id`);
-    }
-    if (input.resourceType === IntentResourceType.CertificateRotation && input.serverId) {
-      throw new Error('Certificate rotation intents cannot carry a server id');
-    }
-    if (input.resourceType === IntentResourceType.Volume) {
-      if (input.kind === IntentKind.VolumeDestroy) {
-        if (input.serverId) {
-          throw new Error('Volume destroy intents cannot carry a server id');
-        }
-      } else {
-        if (!input.serverId) {
-          throw new Error('Volume intents require a server id');
-        }
-        const volume = await executor
-          .selectFrom('control.volumes')
-          .select(['server_id', 'shared_backend_id'])
-          .where('id', '=', input.resourceId)
-          .executeTakeFirst();
-        if (volume?.shared_backend_id && input.kind === IntentKind.VolumeEnsure) {
-          throw new Error('Shared volumes cannot enqueue volume.ensure');
-        }
-        if (volume && !volume.shared_backend_id && input.serverId !== volume.server_id) {
-          throw new Error('Local volume intent server does not match the volume');
-        }
-        if (volume?.shared_backend_id) {
-          const placement = await executor
-            .selectFrom('control.volume_placements')
-            .select('server_id')
-            .where('volume_id', '=', input.resourceId)
-            .where('server_id', '=', input.serverId)
-            .executeTakeFirst();
-          if (!placement) {
-            throw new Error('Shared volume intent server does not match a placement');
-          }
-        }
-      }
-    }
     if (input.blockedByIntentId) {
       assertUuidLike(input.blockedByIntentId, 'Blocked-by intent id');
       if (input.blockedByIntentId === (input.id ?? '')) {
         throw new Error('An intent cannot block on itself');
       }
     }
-    assertGeneration(input.targetGeneration);
+    assertRevision(input.targetRevision);
     const id = input.id ?? randomUUID();
     assertUuidLike(id, 'Intent id');
     const request = boundedJsonObject(input.request);
     const baseline = boundedJsonObject(input.baseline);
-    if (input.kind === IntentKind.ServerConnect) {
-      const reference = input.request?.trustTokenRef;
-      if (
-        typeof reference !== 'string'
-        || !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(reference)
-        || request?.trustTokenRef !== reference
-      ) {
-        throw new Error('Server connect intents require a persistable trust-token reference');
-      }
-      if (containsTrustToken(input.request)) {
-        throw new Error('Server connect intents cannot persist a trust token');
-      }
-    }
-    const isRestart = isRestartIntent(input.kind, input.request);
-    if (isRestart) {
-      if (
-        !input.baseline
-        || Object.keys(input.baseline).some((key) => key !== 'startedAt')
-        || !Object.prototype.hasOwnProperty.call(input.baseline, 'startedAt')
-        || (
-          input.baseline.startedAt !== null
-          && typeof input.baseline.startedAt !== 'string'
-        )
-      ) {
-        throw new Error('Restart intents require a startedAt baseline');
-      }
-    } else if (input.baseline) {
-      throw new Error('Only restart intents may carry a baseline');
-    }
     const row = await executor
       .insertInto('control.intents')
       .values({
@@ -445,7 +365,7 @@ export class IntentRepository {
         server_id: input.serverId ?? null,
         requested_by: input.requestedBy ?? null,
         request_json: request ? JSON.stringify(request) : null,
-        target_generation: input.targetGeneration,
+        target_revision: input.targetRevision,
         baseline_json: baseline ? JSON.stringify(baseline) : null,
         status: IntentStatus.Pending,
         failure_code: null,
@@ -507,8 +427,8 @@ export class IntentRepository {
     if (source.kind === IntentKind.ServerConnect) {
       throw new Error('Server connect retries require a fresh trust-token reference');
     }
-    const targetGeneration = await this.currentGeneration(source.resource_type, source.resource_id, executor)
-      ?? source.target_generation;
+    const targetRevision = await this.currentRevision(source.resource_type, source.resource_id, executor)
+      ?? source.target_revision;
     const request = objectValue(source.request_json) ?? {};
     await this.releaseAttention(source.resource_type, source.resource_id, executor);
     await this.restoreVolumeResizeSize(source.kind, source.resource_id, request, executor);
@@ -522,7 +442,7 @@ export class IntentRepository {
         ...request,
         retryOf: sourceIntentId,
       },
-      targetGeneration,
+      targetRevision,
       baseline: objectValue(source.baseline_json),
     }, executor);
   }
@@ -577,25 +497,25 @@ export class IntentRepository {
     }
   }
 
-  private async currentGeneration(
+  private async currentRevision(
     resourceType: string,
     resourceId: string,
     executor: IntentExecutor,
   ): Promise<number | null> {
     if (resourceType === IntentResourceType.Container) {
       const row = await executor.selectFrom('control.containers')
-        .select('generation').where('id', '=', resourceId).executeTakeFirst();
-      return row?.generation ?? null;
+        .select('revision').where('id', '=', resourceId).executeTakeFirst();
+      return row?.revision ?? null;
     }
     if (resourceType === IntentResourceType.Volume) {
       const row = await executor.selectFrom('control.volumes')
-        .select('generation').where('id', '=', resourceId).executeTakeFirst();
-      return row?.generation ?? null;
+        .select('revision').where('id', '=', resourceId).executeTakeFirst();
+      return row?.revision ?? null;
     }
     if (resourceType === IntentResourceType.ImageAssignment) {
       const row = await executor.selectFrom('infra.image_server_assignments')
-        .select('generation').where('id', '=', resourceId).executeTakeFirst();
-      return row?.generation ?? null;
+        .select('revision').where('id', '=', resourceId).executeTakeFirst();
+      return row?.revision ?? null;
     }
     if (resourceType === IntentResourceType.Server) {
       const row = await executor.selectFrom('infra.servers')
@@ -776,7 +696,7 @@ export class IntentRepository {
       .where('kind', '=', input.kind)
       .where('resource_type', '=', input.resourceType)
       .where('resource_id', '=', input.resourceId)
-      .where('target_generation', '=', input.targetGeneration)
+      .where('target_revision', '=', input.targetRevision)
       .where('status', 'in', reuseStatuses)
       .orderBy('created_at', 'desc')
       .orderBy('id', 'desc');
@@ -786,9 +706,9 @@ export class IntentRepository {
       existingQuery = existingQuery.where('server_id', 'is', null);
     }
     const existingRows = await existingQuery.execute();
-    const desiredIdempotencyKey = intentIdempotencyKey(input.targetGeneration, input.request);
+    const desiredIdempotencyKey = intentIdempotencyKey(input.targetRevision, input.request);
     const matches = existingRows.filter((row) =>
-      intentIdempotencyKey(row.target_generation, row.request_json) === desiredIdempotencyKey);
+      intentIdempotencyKey(row.target_revision, row.request_json) === desiredIdempotencyKey);
     const existing = matches.find((row) => row.status === IntentStatus.Pending)
       ?? (reuseSettled
         ? matches.find((row) => row.status === IntentStatus.Succeeded)
@@ -819,27 +739,71 @@ export class IntentRepository {
     return result !== undefined;
   }
 
-  async settleForObservedGeneration(
+  /**
+   * Counts one INSTANCE_BUSY failure on the intent. A streak older than
+   * `windowMs` restarts at one. Returns the attempts inside the current window.
+   */
+  async recordBusyAttempt(
+    intentId: string,
+    windowMs: number,
+    executor: IntentExecutor = this.database,
+  ): Promise<number> {
+    assertUuidLike(intentId, 'Intent id');
+    const row = await executor
+      .updateTable('control.intents')
+      .set({
+        busy_attempts: sql<number>`CASE
+          WHEN busy_since IS NOT NULL
+            AND busy_since > clock_timestamp() - ${windowMs} * interval '1 millisecond'
+          THEN busy_attempts + 1 ELSE 1 END`,
+        busy_since: sql<Date>`CASE
+          WHEN busy_since IS NOT NULL
+            AND busy_since > clock_timestamp() - ${windowMs} * interval '1 millisecond'
+          THEN busy_since ELSE clock_timestamp() END`,
+      })
+      .where('id', '=', intentId)
+      .where('status', '=', IntentStatus.Pending)
+      .returning('busy_attempts')
+      .executeTakeFirst();
+    return row?.busy_attempts ?? 0;
+  }
+
+  /** Ends a busy streak: the intent was retried for a reason other than a busy instance. */
+  async resetBusyAttempts(
+    intentId: string,
+    executor: IntentExecutor = this.database,
+  ): Promise<void> {
+    assertUuidLike(intentId, 'Intent id');
+    await executor
+      .updateTable('control.intents')
+      .set({ busy_attempts: 0, busy_since: null })
+      .where('id', '=', intentId)
+      .where('busy_attempts', '>', 0)
+      .execute();
+  }
+
+  async settleForObservedRevision(
     resourceType: IntentResource,
     resourceId: string,
-    observedGeneration: number,
+    observedRevision: number,
     settlement: PhysicalSettlement,
     executor: IntentExecutor = this.database,
+    options: SettleOptions = {},
   ): Promise<IntentSettleResult> {
     assertResourceType(resourceType);
     assertUuidLike(resourceId, 'Intent resource id');
-    assertGeneration(observedGeneration);
+    assertRevision(observedRevision);
     if (settlement.outcome === 'failed' && !settlement.failure) {
       throw new Error('A failed settlement must include a failure');
     }
     const failure = settlement.failure ? boundedFailure(settlement.failure) : null;
     let pendingQuery = executor
       .selectFrom('control.intents')
-      .select(['id', 'kind', 'request_json', 'target_generation'])
+      .select(['id', 'kind', 'request_json', 'target_revision'])
       .where('resource_type', '=', resourceType)
       .where('resource_id', '=', resourceId)
       .where('status', '=', IntentStatus.Pending)
-      .where('target_generation', '<=', observedGeneration);
+      .where('target_revision', '<=', observedRevision);
     pendingQuery = settlement.placementServerId
       ? pendingQuery.where('server_id', '=', settlement.placementServerId)
       : pendingQuery.where('server_id', 'is', null);
@@ -849,20 +813,20 @@ export class IntentRepository {
     let superseded = 0;
     const settledIds: string[] = [];
     for (const row of rows) {
-      if (isRestartIntent(row.kind, objectValue(row.request_json))) {
+      if (options.keep?.({ kind: row.kind, request: objectValue(row.request_json) })) {
         continue;
       }
-      const isCurrentGeneration = row.target_generation === observedGeneration;
+      const isCurrentRevision = row.target_revision === observedRevision;
       const status = settlement.outcome === 'succeeded'
         ? IntentStatus.Succeeded
         : IntentStatus.Failed;
-      const rowFailure = settlement.outcome === 'failed' && isCurrentGeneration
+      const rowFailure = settlement.outcome === 'failed' && isCurrentRevision
         ? failure
         : settlement.outcome === 'failed'
           ? {
-            code: 'SUPERSEDED_BY_FAILED_GENERATION',
-            message: `Generation ${observedGeneration} failed before target generation ${row.target_generation} settled`,
-            details: { observedGeneration, targetGeneration: row.target_generation },
+            code: 'SUPERSEDED_BY_FAILED_REVISION',
+            message: `Revision ${observedRevision} failed before target revision ${row.target_revision} settled`,
+            details: { observedRevision, targetRevision: row.target_revision },
           }
           : null;
       await executor
@@ -880,9 +844,9 @@ export class IntentRepository {
         .where('status', '=', IntentStatus.Pending)
         .execute();
       settledIds.push(row.id);
-      if (status === IntentStatus.Succeeded && isCurrentGeneration) succeeded += 1;
+      if (status === IntentStatus.Succeeded && isCurrentRevision) succeeded += 1;
       else if (status === IntentStatus.Succeeded) superseded += 1;
-      else if (isCurrentGeneration) failed += 1;
+      else if (isCurrentRevision) failed += 1;
       else superseded += 1;
     }
     await this.cascadeBlockedBy(executor, settledIds, settlement);

@@ -14,8 +14,14 @@ export const MAX_ACTIVE_CLAIMS_PER_SERVER = 8;
 export const NO_PLACEMENT_SERVER_ID = '00000000-0000-4000-8000-000000000000';
 export const VOLUME_DESTROY_PLACEMENT_ID = '00000000-0000-4000-8000-000000000001';
 
+/**
+ * Everything that can hold a lease: each intent resource type, plus the
+ * grant-expiry worker, which leases one (user, server) pair per pass.
+ */
+export type ClaimResource = IntentResource | 'grant_expiry';
+
 export interface ClaimInput {
-  readonly resourceType: IntentResource;
+  readonly resourceType: ClaimResource;
   readonly resourceId: string;
   readonly placementServerId: string;
   readonly serverId?: string | null;
@@ -23,7 +29,7 @@ export interface ClaimInput {
 }
 
 export interface ReconcileClaim {
-  readonly resourceType: IntentResource;
+  readonly resourceType: ClaimResource;
   readonly resourceId: string;
   readonly placementServerId: string;
   readonly serverId: string | null;
@@ -50,7 +56,7 @@ function assertUuid(value: string, label: string): void {
 }
 
 function mapClaim(row: {
-  resource_type: IntentResource;
+  resource_type: ClaimResource;
   resource_id: string;
   placement_server_id: string;
   server_id: string | null;
@@ -317,7 +323,7 @@ export class ReconcileClaimRepository {
   }
 }
 
-export function isReconcileResourceType(value: string): value is IntentResource {
-  return (Object.values(IntentResourceType) as string[]).includes(value);
+export function isReconcileResourceType(value: string): value is ClaimResource {
+  return value === 'grant_expiry' || (Object.values(IntentResourceType) as string[]).includes(value);
 }
 

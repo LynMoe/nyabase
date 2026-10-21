@@ -881,7 +881,7 @@ export async function ensureImageAssignment(
     return;
   }
   let put = await api.put(`/api/admin/images/${seedState.image.id}/assignments/${serverId}`, {
-    data: current ? { expectedGeneration: current.generation } : {},
+    data: current ? { expectedRevision: current.revision } : {},
   });
   if (put.status() === 409 || put.status() === 400) {
     await api.delete(`/api/admin/images/${seedState.image.id}/assignments/${serverId}`);

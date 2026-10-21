@@ -20,6 +20,7 @@ import {
 } from '../iam/grant-expiry.js';
 import {
   GrantExpiryEnforcementRepository,
+  type GrantExpiryClaim,
 } from './grant-expiry-enforcement.repository.js';
 import { UserServerResourcePurgeService } from './user-server-resource-purge.service.js';
 import { SYSTEM_ACTOR_USERNAME } from '../iam/system-actor.js';
@@ -77,8 +78,8 @@ interface ResourceExpiryPair {
  * - shared-backend/pool grace grants: lease per-container stop intents using retained volumes
  * - lost shared-backend/pool grants: idempotent desired-state volume cleanup
  *
- * Multi-replica safety comes from PostgreSQL claim_token leases, not from
- * single-process assumptions.
+ * Multi-replica safety comes from `reconcile_claims` leases (resource_type
+ * grant_expiry), not from single-process assumptions.
  */
 @Injectable()
 export class GrantExpiryWorkerService implements OnModuleInit, OnModuleDestroy {
@@ -323,17 +324,17 @@ export class GrantExpiryWorkerService implements OnModuleInit, OnModuleDestroy {
       if (pair.phase === 'grace') {
         out.push({
           ...pair,
-          needsWork: GrantExpiryEnforcementRepository.isDueForWork('grace', row, now),
+          needsWork: GrantExpiryEnforcementRepository.isDueForWork('grace', row),
         });
         continue;
       }
       if (row?.purged_at != null) continue;
       const remaining = localResourceKeys.has(`${pair.userId}\0${pair.serverId}`);
-      const due = GrantExpiryEnforcementRepository.isDueForWork('lost', row, now);
+      const due = GrantExpiryEnforcementRepository.isDueForWork('lost', row);
       out.push({
         ...pair,
-        // Finish empty lost only when a prior claim exists (crash after deletes).
-        needsWork: due && (remaining || row?.claim_token != null),
+        // Finish empty lost only when a prior claim created the row (crash after deletes).
+        needsWork: due && (remaining || row !== undefined),
       });
     }
 
@@ -361,7 +362,8 @@ export class GrantExpiryWorkerService implements OnModuleInit, OnModuleDestroy {
     if (!claim) return false;
     try {
       await this.purge.stopRunningContainersForGraceEntry(userId, serverId, actorId);
-      const completed = await this.transactions.run(async (transaction) => {
+      claim.lease.assertOwned();
+      return await this.transactions.run(async (transaction) => {
         const won = await this.enforcement.completeGraceInTransaction(transaction, claim);
         if (!won) return false;
         await this.audit.append(
@@ -374,21 +376,15 @@ export class GrantExpiryWorkerService implements OnModuleInit, OnModuleDestroy {
         );
         return true;
       });
-      return completed;
     } catch (error) {
       this.logger.error(
         `Grace stop failed for ${userId}/${serverId}: ${
           error instanceof Error ? error.message : String(error)
         }`,
       );
-      await this.enforcement.release(claim).catch((releaseError) => {
-        this.logger.warn(
-          `Grace stop lease release failed for ${userId}/${serverId}: ${
-            releaseError instanceof Error ? releaseError.message : String(releaseError)
-          }`,
-        );
-      });
       return false;
+    } finally {
+      await this.releaseClaim(claim, 'Grace stop', userId, serverId);
     }
   }
 
@@ -414,23 +410,33 @@ export class GrantExpiryWorkerService implements OnModuleInit, OnModuleDestroy {
       if (await this.hasLocalRuntimeResources(userId, serverId)) {
         return false;
       }
-      const completed = await this.enforcement.completeLost(claim);
-      return completed;
+      claim.lease.assertOwned();
+      return await this.enforcement.completeLost(claim);
     } catch (error) {
       this.logger.error(
         `Lost purge failed for ${userId}/${serverId}: ${
           error instanceof Error ? error.message : String(error)
         }`,
       );
-      await this.enforcement.release(claim).catch((releaseError) => {
-        this.logger.warn(
-          `Lost purge lease release failed for ${userId}/${serverId}: ${
-            releaseError instanceof Error ? releaseError.message : String(releaseError)
-          }`,
-        );
-      });
       return false;
+    } finally {
+      await this.releaseClaim(claim, 'Lost purge', userId, serverId);
     }
+  }
+
+  private async releaseClaim(
+    claim: GrantExpiryClaim,
+    label: string,
+    userId: string,
+    serverId: string,
+  ): Promise<void> {
+    await this.enforcement.release(claim).catch((releaseError) => {
+      this.logger.warn(
+        `${label} lease release failed for ${userId}/${serverId}: ${
+          releaseError instanceof Error ? releaseError.message : String(releaseError)
+        }`,
+      );
+    });
   }
 
   private async scanResourceGrantPhases(): Promise<ResourceExpiryPair[]> {

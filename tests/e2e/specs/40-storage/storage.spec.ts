@@ -412,12 +412,12 @@ test(
         const volume = await expectJson<JsonRecord>(
           await adminApi.get(`/api/admin/volumes/${volumeId}`),
         );
-        // VolumeDto uses generation (not revision); omitting expectedRevision yields 400 INVALID_INPUT.
-        expect(volume.generation).toEqual(expect.any(Number));
+        // Omitting expectedRevision yields 400 INVALID_INPUT.
+        expect(volume.revision).toEqual(expect.any(Number));
         const resized = await expectJson<JsonRecord>(
           await adminApi.patch(`/api/admin/volumes/${volumeId}`, {
             data: {
-              expectedRevision: volume.generation,
+              expectedRevision: volume.revision,
               sizeBytes: 192 * 1024 * 1024,
             },
           }),
@@ -484,7 +484,7 @@ test(
       );
       const attachedShrink = await adminApi.patch(`/api/admin/volumes/${volumeId}`, {
         data: {
-          expectedRevision: attachedVolume.generation,
+          expectedRevision: attachedVolume.revision,
           sizeBytes: targetSize,
         },
       });
@@ -501,7 +501,7 @@ test(
       const shrunk = await expectJson<JsonRecord>(
         await adminApi.patch(`/api/admin/volumes/${volumeId}`, {
           data: {
-            expectedRevision: detached.generation,
+            expectedRevision: detached.revision,
             sizeBytes: targetSize,
           },
         }),
@@ -623,7 +623,7 @@ test(
 
       const tooSmall = await adminApi.patch(`/api/admin/volumes/${volumeId}`, {
         data: {
-          expectedRevision: observed.generation,
+          expectedRevision: observed.revision,
           sizeBytes: Math.max(1024 * 1024, Math.floor(Number(observed.usedBytes) / 2)),
         },
       });
@@ -705,7 +705,7 @@ test(
       const accepted = await expectJson<JsonRecord>(
         await adminApi.patch(`/api/admin/volumes/${volumeId}`, {
           data: {
-            expectedRevision: stale.generation,
+            expectedRevision: stale.revision,
             sizeBytes: tooSmallBytes,
           },
         }),
@@ -777,7 +777,7 @@ test(
       const phantomShrink = await expectJson<JsonRecord>(
         await adminApi.patch(`/api/admin/volumes/${volumeId}`, {
           data: {
-            expectedRevision: beforePhantom.generation,
+            expectedRevision: beforePhantom.revision,
             sizeBytes: tooSmallBytes,
           },
         }),
@@ -894,7 +894,7 @@ test(
         }),
         adminApi.patch(`/api/admin/volumes/${raceVolumeId}`, {
           data: {
-            expectedRevision: raceVolume.generation,
+            expectedRevision: raceVolume.revision,
             sizeBytes: 160 * 1024 * 1024,
           },
         }),
@@ -1116,7 +1116,7 @@ test(
       );
       await adminApi.patch(`/api/admin/shared-volumes/${volumeId}`, {
         data: {
-          expectedRevision: createdForPatch.generation,
+          expectedRevision: createdForPatch.revision,
           name: createdForPatch.name,
         },
       });

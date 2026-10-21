@@ -41,7 +41,7 @@ export class ServerPreflightIntentService {
       resourceId: serverId,
       serverId,
       requestedBy: actorId,
-      targetGeneration: expectedRevision,
+      targetRevision: expectedRevision,
       request: {
         preflight: {
           probePoolName: pool.incus_name,

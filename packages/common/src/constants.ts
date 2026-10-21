@@ -2,7 +2,7 @@ export const INCUS_USER_KEYS = {
   managed: 'user.nyabase.managed',
   containerId: 'user.nyabase.container_id',
   serverId: 'user.nyabase.server_id',
-  generation: 'user.nyabase.generation',
+  revision: 'user.nyabase.revision',
   preflight: 'user.nyabase.preflight',
 } as const;
 

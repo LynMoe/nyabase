@@ -197,7 +197,7 @@ export class ServerPreflightReconciler implements ManagedReconciler, OnModuleIni
         failure: preflightFailure('SERVER_NOT_FOUND', 'The desired server no longer exists'),
       };
     }
-    const expectedRevision = context.intent.targetGeneration;
+    const expectedRevision = context.intent.targetRevision;
     const currentRevision = revisionNumber(server.revision);
     if (currentRevision !== undefined && currentRevision !== expectedRevision) {
       return this.staleOutcome(context.intent);
@@ -211,7 +211,7 @@ export class ServerPreflightReconciler implements ManagedReconciler, OnModuleIni
         }
         throw error;
       }
-      return { outcome: 'succeeded', observedGeneration: context.intent.targetGeneration };
+      return { outcome: 'succeeded', observedRevision: context.intent.targetRevision };
     }
     const options = this.options(context.intent.request);
     if (
@@ -236,7 +236,7 @@ export class ServerPreflightReconciler implements ManagedReconciler, OnModuleIni
       ) {
         return this.staleOutcome(context.intent);
       }
-      return { outcome: 'succeeded', observedGeneration: context.intent.targetGeneration };
+      return { outcome: 'succeeded', observedRevision: context.intent.targetRevision };
     } catch (error) {
       if (error instanceof ServerRevisionChangedError) {
         return this.staleOutcome(context.intent);
@@ -1175,7 +1175,7 @@ export class ServerPreflightReconciler implements ManagedReconciler, OnModuleIni
   private staleOutcome(intent: IntentRecord): ReconcileOutcome {
     return {
       outcome: 'succeeded',
-      observedGeneration: intent.targetGeneration,
+      observedRevision: intent.targetRevision,
       stale: true,
     };
   }

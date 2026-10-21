@@ -122,7 +122,8 @@ export interface InfrastructureImageServerAssignmentTable {
   id: string;
   image_id: string;
   server_id: string;
-  generation: number;
+  revision: number;
+  observed_revision: number | null;
   observed_fingerprint: string | null;
   managed_fingerprint: string | null;
   lifecycle_phase: 'provisioning' | 'active' | 'deleting' | 'failed';

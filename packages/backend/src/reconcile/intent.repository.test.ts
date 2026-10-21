@@ -1,16 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { IntentKind, IntentResourceType, IntentStatus } from '@nyabase/common';
-import { IntentRepository, isRestartIntent, isUserRetryIntent } from './intent.repository.js';
+import { IntentRepository, isUserRetryIntent } from './intent.repository.js';
 import { noopWake } from './reconcile-wake.test-helper.js';
-
-describe('isRestartIntent', () => {
-  it('is only container.power with action restart', () => {
-    expect(isRestartIntent(IntentKind.ContainerPower, { action: 'restart' })).toBe(true);
-    expect(isRestartIntent(IntentKind.ContainerPower, { action: 'start' })).toBe(false);
-    expect(isRestartIntent(IntentKind.ContainerUpdate, { action: 'restart' })).toBe(false);
-    expect(isRestartIntent(IntentKind.ContainerPower, null)).toBe(false);
-  });
-});
 
 const volumeId = '11111111-1111-4111-8111-111111111111';
 const containerId = '22222222-2222-4222-8222-222222222222';
@@ -38,7 +29,7 @@ type IntentRow = {
   server_id: string | null;
   requested_by: string | null;
   request_json: Record<string, unknown> | null;
-  target_generation: number;
+  target_revision: number;
   baseline_json: Record<string, unknown> | null;
   status: string;
   failure_code: string | null;
@@ -59,7 +50,7 @@ function row(overrides: Partial<IntentRow>): IntentRow {
     server_id: serverId,
     requested_by: null,
     request_json: { operation: 'ensure_attachment', idempotencyKey: 'ensure_attachment' },
-    target_generation: 1,
+    target_revision: 1,
     baseline_json: null,
     status: IntentStatus.Pending,
     failure_code: null,
@@ -86,7 +77,7 @@ function matchesFilter(
   if (filter.op === 'is') return filter.val === null ? value === null : value === filter.val;
   if (filter.op === 'in') return Array.isArray(filter.val) && filter.val.includes(value);
   if (filter.op === '<=') {
-    if (filter.col === 'target_generation') return Number(value) <= Number(filter.val);
+    if (filter.col === 'target_revision') return Number(value) <= Number(filter.val);
     if (value instanceof Date && filter.val instanceof Date) return value.getTime() <= filter.val.getTime();
   }
   return true;
@@ -210,7 +201,7 @@ function makeExecutor(seed: IntentRow[]) {
           request_json: state.values.request_json
             ? JSON.parse(String(state.values.request_json)) as Record<string, unknown>
             : null,
-          target_generation: Number(state.values.target_generation),
+          target_revision: Number(state.values.target_revision),
           status: String(state.values.status),
           created_at: new Date(),
           blocked_by_intent_id: (state.values.blocked_by_intent_id as string | null) ?? null,
@@ -302,7 +293,7 @@ describe('intent pending queue and settle wake', () => {
         resource_type: IntentResourceType.Volume,
         resource_id: volumeId,
         status: IntentStatus.Pending,
-        target_generation: 1,
+        target_revision: 1,
       }),
       row({
         id: updateId,
@@ -312,11 +303,11 @@ describe('intent pending queue and settle wake', () => {
         server_id: serverId,
         status: IntentStatus.Pending,
         blocked_by_intent_id: ensureId,
-        target_generation: 2,
+        target_revision: 2,
       }),
     ]);
     const repository = new IntentRepository(db as never, wake as never);
-    const result = await repository.settleForObservedGeneration(
+    const result = await repository.settleForObservedRevision(
       IntentResourceType.Volume,
       volumeId,
       1,
@@ -346,7 +337,7 @@ describe('intent pending queue and settle wake', () => {
       resourceType: IntentResourceType.Volume,
       resourceId: volumeId,
       serverId,
-      targetGeneration: 1,
+      targetRevision: 1,
       reuseSettled: false,
       request: { operation: 'ensure_attachment', idempotencyKey: 'ensure_attachment' },
     }, db as never);
@@ -357,7 +348,7 @@ describe('intent pending queue and settle wake', () => {
       resourceType: IntentResourceType.Volume,
       resourceId: volumeId,
       serverId,
-      targetGeneration: 1,
+      targetRevision: 1,
       reuseSettled: false,
       request: { operation: 'ensure_attachment', idempotencyKey: 'ensure_attachment' },
     }, db as never);
@@ -381,7 +372,7 @@ describe('intent pending queue and settle wake', () => {
       resourceType: IntentResourceType.ImageAssignment,
       resourceId: volumeId,
       serverId,
-      targetGeneration: 1,
+      targetRevision: 1,
       reuseFailed: true,
       request: { source: 'full_scan', idempotencyKey: 'image-scan:missing' },
     }, db as never);

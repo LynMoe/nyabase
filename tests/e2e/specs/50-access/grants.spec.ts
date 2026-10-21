@@ -167,7 +167,7 @@ test(
       );
       const patched = await backendApi.patch(`/api/shared-volumes/${expiredVolumeId}`, {
         data: {
-          expectedRevision: expiredVolume.generation,
+          expectedRevision: expiredVolume.revision,
           sizeBytes: 96 * 1024 * 1024,
         },
       });

@@ -64,9 +64,6 @@ export interface GrantExpiryEnforcementTable {
   covering_expires_at: Date;
   grace_stopped_at: IamNullableTimestamp;
   purged_at: IamNullableTimestamp;
-  claim_token: string | null;
-  claimed_by: string | null;
-  lease_expires_at: IamNullableTimestamp;
   updated_at: IamGeneratedTimestamp;
 }
 

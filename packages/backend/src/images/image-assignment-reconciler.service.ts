@@ -33,7 +33,7 @@ interface AssignmentRow {
   id: string;
   image_id: string;
   server_id: string;
-  generation: number;
+  revision: number;
   observed_fingerprint: string | null;
   managed_fingerprint: string | null;
   lifecycle_phase: 'provisioning' | 'active' | 'deleting' | 'failed';
@@ -205,20 +205,13 @@ export class ImageAssignmentReconciler implements ManagedReconciler, OnModuleIni
     failure: IntentFailure,
     attention: boolean,
   ): Promise<void> {
-    const values = attention
-      ? {
-        needs_attention: true,
-        failure_code: failure.code.slice(0, 128),
-        failure_reason: failure.message.slice(0, 4096),
-        lifecycle_phase: 'failed' as const,
-        last_observed_at: sql<Date>`clock_timestamp()`,
-      }
-      : {
-        needs_attention: false,
-        failure_code: failure.code.slice(0, 128),
-        failure_reason: failure.message.slice(0, 4096),
-        last_observed_at: sql<Date>`clock_timestamp()`,
-      };
+    const values = {
+      needs_attention: attention,
+      failure_code: failure.code.slice(0, 128),
+      failure_reason: failure.message.slice(0, 4096),
+      last_observed_at: sql<Date>`clock_timestamp()`,
+      ...(attention ? { lifecycle_phase: 'failed' as const } : {}),
+    };
     await this.database
       .updateTable('infra.image_server_assignments')
       .set(values)
@@ -247,7 +240,7 @@ export class ImageAssignmentReconciler implements ManagedReconciler, OnModuleIni
         'a.id as id',
         'a.image_id as image_id',
         'a.server_id as server_id',
-        'a.generation as generation',
+        'a.revision as revision',
         'a.observed_fingerprint as observed_fingerprint',
         'a.managed_fingerprint as managed_fingerprint',
         'a.lifecycle_phase as lifecycle_phase',
@@ -274,7 +267,7 @@ export class ImageAssignmentReconciler implements ManagedReconciler, OnModuleIni
         ? [
           'image-scan',
           row.lifecycle_phase,
-          row.generation,
+          row.revision,
           desired.fingerprint ?? desired.alias,
           imageFingerprint(observed) ?? 'missing',
         ].join(':')
@@ -286,7 +279,7 @@ export class ImageAssignmentReconciler implements ManagedReconciler, OnModuleIni
         resourceType: 'image_assignment',
         resourceId: row.id,
         serverId,
-        targetGeneration: row.generation,
+        targetRevision: row.revision,
         reuseFailed: true,
         request: {
           source: 'full_scan',
@@ -313,18 +306,18 @@ export class ImageAssignmentReconciler implements ManagedReconciler, OnModuleIni
     if (cleanupOwner?.id === serverId) {
       for (const image of imageRows) {
         if (assignedImageIds.has(image.id)) continue;
-        const generation = Math.max(1, image.cleanup_generation);
+        const revision = Math.max(1, image.cleanup_generation);
         await this.intents.ensurePending({
           kind: 'image_assignment.delete',
           resourceType: 'image_assignment',
           resourceId: image.id,
           serverId,
-          targetGeneration: generation,
+          targetRevision: revision,
           request: {
             operation: 'cleanup_image',
             imageId: image.id,
             source: 'full_scan',
-            idempotencyKey: `image-cleanup:${generation}`,
+            idempotencyKey: `image-cleanup:${revision}`,
           },
         });
       }
@@ -502,7 +495,7 @@ export class ImageAssignmentReconciler implements ManagedReconciler, OnModuleIni
       .set({ fingerprint })
       .where('id', '=', assignment.image_id)
       .execute();
-    return { outcome: 'succeeded', observedGeneration: assignment.generation };
+    return { outcome: 'succeeded', observedRevision: assignment.revision };
   }
 
   private desiredSource(assignment: AssignmentRow): ImageAssignmentSource {
@@ -521,7 +514,7 @@ export class ImageAssignmentReconciler implements ManagedReconciler, OnModuleIni
     if (!image) {
       return {
         outcome: 'succeeded',
-        observedGeneration: context.intent.targetGeneration,
+        observedRevision: context.intent.targetRevision,
       };
     }
     if (
@@ -624,7 +617,7 @@ export class ImageAssignmentReconciler implements ManagedReconciler, OnModuleIni
       .execute();
     return {
       outcome: 'succeeded',
-      observedGeneration: context.intent.targetGeneration,
+      observedRevision: context.intent.targetRevision,
     };
   }
 
@@ -790,7 +783,7 @@ export class ImageAssignmentReconciler implements ManagedReconciler, OnModuleIni
     const managed = assignment.managed_fingerprint;
     if (!managed) {
       await this.markAssignmentDeleted(assignment, !selected);
-      return { outcome: 'succeeded', observedGeneration: assignment.generation };
+      return { outcome: 'succeeded', observedRevision: assignment.revision };
     }
     if (selected && !sameFingerprint(imageFingerprint(selected), managed)) {
       const managedImage = images.find((candidate) => sameFingerprint(
@@ -799,7 +792,7 @@ export class ImageAssignmentReconciler implements ManagedReconciler, OnModuleIni
       ));
       if (!managedImage) {
         await this.markAssignmentDeleted(assignment, true);
-        return { outcome: 'succeeded', observedGeneration: assignment.generation };
+        return { outcome: 'succeeded', observedRevision: assignment.revision };
       }
       const usedBy = (managedImage as Image & { used_by?: string[] }).used_by ?? [];
       if (usedBy.length > 0) {
@@ -816,7 +809,7 @@ export class ImageAssignmentReconciler implements ManagedReconciler, OnModuleIni
     const image = images.find((candidate) => sameFingerprint(imageFingerprint(candidate), managed));
     if (!image) {
       await this.markAssignmentDeleted(assignment, true);
-      return { outcome: 'succeeded', observedGeneration: assignment.generation };
+      return { outcome: 'succeeded', observedRevision: assignment.revision };
     }
     const otherAssignment = await this.database
       .selectFrom('infra.image_server_assignments')
@@ -845,7 +838,7 @@ export class ImageAssignmentReconciler implements ManagedReconciler, OnModuleIni
       usedBy: usedBy.length > 0,
     })) {
       await this.markAssignmentDeleted(assignment, false);
-      return { outcome: 'succeeded', observedGeneration: assignment.generation };
+      return { outcome: 'succeeded', observedRevision: assignment.revision };
     }
     await auditIncusMutate(this.audit, intent, {
       method: 'DELETE',
@@ -875,7 +868,7 @@ export class ImageAssignmentReconciler implements ManagedReconciler, OnModuleIni
       .where('id', '=', assignment.image_id)
       .execute();
     await this.markAssignmentDeleted(assignment, true);
-    return { outcome: 'succeeded', observedGeneration: assignment.generation };
+    return { outcome: 'succeeded', observedRevision: assignment.revision };
   }
 
   private async markAssignmentDeleted(
@@ -923,7 +916,7 @@ export class ImageAssignmentReconciler implements ManagedReconciler, OnModuleIni
         'a.id as id',
         'a.image_id as image_id',
         'a.server_id as server_id',
-        'a.generation as generation',
+        'a.revision as revision',
         'a.observed_fingerprint as observed_fingerprint',
         'a.managed_fingerprint as managed_fingerprint',
         'a.lifecycle_phase as lifecycle_phase',

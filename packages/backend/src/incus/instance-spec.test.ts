@@ -23,7 +23,7 @@ function input(overrides: Partial<InstanceSpecInput['container']> = {}): Instanc
     container: {
       id: containerId,
       serverId,
-      generation: 7,
+      revision: 7,
       imageFingerprint: 'a'.repeat(64),
       imageSource: {
         server: 'https://images.example.test',
@@ -86,7 +86,7 @@ describe('buildDesiredInstanceSpec', () => {
         'user.nyabase.managed': 'true',
         'user.nyabase.container_id': containerId.replaceAll('-', ''),
         'user.nyabase.server_id': serverId.replaceAll('-', ''),
-        'user.nyabase.generation': '7',
+        'user.nyabase.revision': '7',
       },
       devices: {
         eth0: {

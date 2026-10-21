@@ -5,9 +5,6 @@ import {
   OnApplicationBootstrap,
   OnModuleDestroy,
 } from '@nestjs/common';
-import type { Kysely } from 'kysely';
-import type { NyabaseDatabase } from '../platform/persistence-pg/database.types.js';
-import { PG_DATABASE } from '../platform/persistence-pg/tokens.js';
 import {
   IncusError,
   matchBusyInstanceError,
@@ -18,10 +15,8 @@ import {
 import { INCUS_CLIENT_FACTORY, type IncusClientFactory } from '../incus/incus-client.factory.js';
 import {
   IntentRepository,
-  isRestartIntent,
   isUserRetryIntent,
   type IntentRecord,
-  type IntentResource,
   type IntentFailure,
   type PhysicalSettlement,
 } from './intent.repository.js';
@@ -123,8 +118,6 @@ export class ReconcileWorkerService implements OnApplicationBootstrap, OnModuleD
     @Inject(INCUS_CLIENT_FACTORY)
     private readonly clients: IncusClientFactory,
     private readonly wake: ReconcileWakeService,
-    @Inject(PG_DATABASE)
-    private readonly database: Kysely<NyabaseDatabase>,
   ) {}
 
   // Starts after every module's onModuleInit has registered its reconciler.
@@ -260,7 +253,7 @@ export class ReconcileWorkerService implements OnApplicationBootstrap, OnModuleD
     ) {
       return;
     }
-    const serverId = await this.claimServerId(intent);
+    const serverId = intent.serverId;
     const placementServerId = intent.kind === 'volume.destroy'
       ? VOLUME_DESTROY_PLACEMENT_ID
       : (intent.serverId ?? NO_PLACEMENT_SERVER_ID);
@@ -328,12 +321,8 @@ export class ReconcileWorkerService implements OnApplicationBootstrap, OnModuleD
     serverId: string | null,
   ): Promise<void> {
     if (outcome.stale) {
-      await this.clearBusyStrikes(intent.resourceType, intent.resourceId);
-      await this.settlePhysical(intent, intent.targetGeneration, { outcome: 'succeeded' });
+      await this.settlePhysical(intent, intent.targetRevision, { outcome: 'succeeded' });
       return;
-    }
-    if (outcome.outcome !== 'retry') {
-      await this.clearBusyStrikes(intent.resourceType, intent.resourceId);
     }
     if (outcome.outcome === 'retry') {
       await this.retryOrNeedsAttention(
@@ -356,18 +345,18 @@ export class ReconcileWorkerService implements OnApplicationBootstrap, OnModuleD
       await this.markResourceFailure(intent, failure, false);
       await this.settlePhysical(
         intent,
-        outcome.observedGeneration ?? intent.targetGeneration,
+        outcome.observedRevision ?? intent.targetRevision,
         { outcome: 'failed', failure },
       );
       return;
     }
     await this.registry.forResource(intent.resourceType)?.markSucceeded(
       intent.resourceId,
-      outcome.observedGeneration ?? intent.targetGeneration,
+      outcome.observedRevision ?? intent.targetRevision,
     );
     await this.settlePhysical(
       intent,
-      outcome.observedGeneration ?? intent.targetGeneration,
+      outcome.observedRevision ?? intent.targetRevision,
       { outcome: 'succeeded' },
     );
     if (serverId && intent.resourceType !== 'server') {
@@ -390,7 +379,7 @@ export class ReconcileWorkerService implements OnApplicationBootstrap, OnModuleD
           serverId,
           'unreachable',
           failure.message,
-          intent.resourceType === 'server' ? intent.targetGeneration : undefined,
+          intent.resourceType === 'server' ? intent.targetRevision : undefined,
         );
       }
       await this.retryOrNeedsAttention(intent, failure, 30_000, false);
@@ -402,11 +391,11 @@ export class ReconcileWorkerService implements OnApplicationBootstrap, OnModuleD
           serverId,
           'unknown',
           failure.message,
-          intent.resourceType === 'server' ? intent.targetGeneration : undefined,
+          intent.resourceType === 'server' ? intent.targetRevision : undefined,
         );
       }
       await this.markResourceFailure(intent, failure, false);
-      await this.settlePhysical(intent, intent.targetGeneration, { outcome: 'failed', failure });
+      await this.settlePhysical(intent, intent.targetRevision, { outcome: 'failed', failure });
       return;
     }
     if (isIncusError(error, 'TLS_ERROR')) {
@@ -415,7 +404,7 @@ export class ReconcileWorkerService implements OnApplicationBootstrap, OnModuleD
           serverId,
           'unknown',
           failure.message,
-          intent.resourceType === 'server' ? intent.targetGeneration : undefined,
+          intent.resourceType === 'server' ? intent.targetRevision : undefined,
         );
       }
       await this.retryOrNeedsAttention(intent, failure, 30_000, false);
@@ -434,7 +423,7 @@ export class ReconcileWorkerService implements OnApplicationBootstrap, OnModuleD
       return;
     }
     await this.markResourceFailure(intent, failure, false);
-    await this.settlePhysical(intent, intent.targetGeneration, { outcome: 'failed', failure });
+    await this.settlePhysical(intent, intent.targetRevision, { outcome: 'failed', failure });
   }
 
   private async retryOrNeedsAttention(
@@ -443,8 +432,11 @@ export class ReconcileWorkerService implements OnApplicationBootstrap, OnModuleD
     retryAfterMs?: number,
     countBusy = true,
   ): Promise<void> {
+    if (countBusy && !isIncusInstanceLockBusy(failure)) {
+      await this.intents.resetBusyAttempts(intent.id);
+    }
     if (countBusy && isIncusInstanceLockBusy(failure)) {
-      const strikeCount = await this.recordBusyStrike(intent.resourceType, intent.resourceId);
+      const strikeCount = await this.intents.recordBusyAttempt(intent.id, BUSY_STRIKE_WINDOW_MS);
       if (strikeCount >= BUSY_STRIKE_LIMIT) {
         const attention: IntentFailure = {
           code: 'RESOURCE_NEEDS_ATTENTION',
@@ -452,7 +444,7 @@ export class ReconcileWorkerService implements OnApplicationBootstrap, OnModuleD
           details: { busyAttempts: strikeCount },
         };
         await this.markResourceFailure(intent, attention, true);
-        await this.settlePhysical(intent, intent.targetGeneration, {
+        await this.settlePhysical(intent, intent.targetRevision, {
           outcome: 'failed',
           failure: attention,
         });
@@ -467,7 +459,7 @@ export class ReconcileWorkerService implements OnApplicationBootstrap, OnModuleD
 
   private async settleFailure(intent: IntentRecord, failure: IntentFailure): Promise<void> {
     await this.markResourceFailure(intent, failure, false);
-    await this.settlePhysical(intent, intent.targetGeneration, { outcome: 'failed', failure });
+    await this.settlePhysical(intent, intent.targetRevision, { outcome: 'failed', failure });
   }
 
   private async markResourceFailure(
@@ -480,44 +472,33 @@ export class ReconcileWorkerService implements OnApplicationBootstrap, OnModuleD
   }
 
   private async settleStaleIntent(intent: IntentRecord): Promise<void> {
-    await this.settlePhysical(intent, intent.targetGeneration, { outcome: 'succeeded' });
+    await this.settlePhysical(intent, intent.targetRevision, { outcome: 'succeeded' });
   }
 
   private async settlePhysical(
     intent: IntentRecord,
-    generation: number,
+    revision: number,
     settlement: PhysicalSettlement,
   ): Promise<void> {
     const scoped = {
       ...settlement,
       placementServerId: intent.serverId ?? null,
     };
-    if (isRestartIntent(intent.kind, intent.request)) {
-      await this.intents.settleOne(intent.id, settlement);
-      if (settlement.outcome === 'succeeded') {
-        await this.intents.settleForObservedGeneration(
-          intent.resourceType,
-          intent.resourceId,
-          generation,
-          scoped,
-        );
-      }
+    const reconciler = this.registry.forResource(intent.resourceType);
+    if (reconciler?.settle) {
+      await reconciler.settle(intent, revision, scoped);
       return;
     }
-    await this.intents.settleForObservedGeneration(
+    await this.intents.settleForObservedRevision(
       intent.resourceType,
       intent.resourceId,
-      generation,
+      revision,
       scoped,
     );
   }
 
   private isCurrentServerIntent(intent: IntentRecord): Promise<boolean> {
     return this.registry.serverHealth().isCurrentServerIntent(intent);
-  }
-
-  private async claimServerId(intent: IntentRecord): Promise<string | null> {
-    return intent.serverId;
   }
 
   private markServer(
@@ -695,41 +676,6 @@ export class ReconcileWorkerService implements OnApplicationBootstrap, OnModuleD
       timer.unref?.();
       this.controller.signal.addEventListener('abort', finish, { once: true });
     });
-  }
-
-  private async recordBusyStrike(
-    resourceType: IntentResource,
-    resourceId: string,
-  ): Promise<number> {
-    const observedAt = new Date();
-    await this.database
-      .insertInto('control.reconcile_busy_strikes')
-      .values({
-        resource_type: resourceType,
-        resource_id: resourceId,
-        observed_at: observedAt,
-      })
-      .execute();
-    const cutoff = new Date(observedAt.getTime() - BUSY_STRIKE_WINDOW_MS);
-    const rows = await this.database
-      .selectFrom('control.reconcile_busy_strikes')
-      .select('observed_at')
-      .where('resource_type', '=', resourceType)
-      .where('resource_id', '=', resourceId)
-      .where('observed_at', '>=', cutoff)
-      .execute();
-    return rows.length;
-  }
-
-  private async clearBusyStrikes(
-    resourceType: IntentResource,
-    resourceId: string,
-  ): Promise<void> {
-    await this.database
-      .deleteFrom('control.reconcile_busy_strikes')
-      .where('resource_type', '=', resourceType)
-      .where('resource_id', '=', resourceId)
-      .execute();
   }
 
   private isShutdownOrDriverClose(error: unknown): boolean {

@@ -14,7 +14,7 @@ export interface InstanceImageSourceInput {
 export interface InstanceSpecContainerInput {
   readonly id: string;
   readonly serverId: string;
-  readonly generation: number;
+  readonly revision: number;
   readonly imageFingerprint: string;
   readonly imageSource?: InstanceImageSourceInput;
   readonly cpuMillis: number;
@@ -218,7 +218,7 @@ export function buildDesiredInstanceSpec(input: InstanceSpecInput): DesiredInsta
   if (container.serverId.replace(/-/g, '').toLowerCase() !== serverId) {
     fail('INVALID_INSTANCE_SPEC', 'container_server_mismatch');
   }
-  const generation = nonNegativeInteger(container.generation, 'generation');
+  const revision = nonNegativeInteger(container.revision, 'revision');
   const rootSizeBytes = positiveInteger(
     container.rootSizeBytes,
     'INVALID_INSTANCE_SPEC',
@@ -241,7 +241,7 @@ export function buildDesiredInstanceSpec(input: InstanceSpecInput): DesiredInsta
     'user.nyabase.managed': 'true',
     'user.nyabase.container_id': containerId,
     'user.nyabase.server_id': serverId,
-    'user.nyabase.generation': String(generation),
+    'user.nyabase.revision': String(revision),
   };
   const devices: Record<string, Record<string, string>> = {
     root: {

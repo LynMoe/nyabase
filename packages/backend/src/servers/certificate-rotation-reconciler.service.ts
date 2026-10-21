@@ -143,8 +143,8 @@ export class CertificateRotationReconciler implements ManagedReconciler, OnModul
     }
 
     const clients = this.clients;
-    const targetGeneration = context.intent.targetGeneration;
-    const snapshot = await this.snapshot(targetGeneration);
+    const targetRevision = context.intent.targetRevision;
+    const snapshot = await this.snapshot(targetRevision);
     if (!snapshot.active) {
       return {
         outcome: 'failed',
@@ -155,7 +155,7 @@ export class CertificateRotationReconciler implements ManagedReconciler, OnModul
       };
     }
 
-    if (generation(snapshot.active.generation) >= targetGeneration) {
+    if (generation(snapshot.active.generation) >= targetRevision) {
       const revoke = await this.revokeRetired(snapshot, clients, context.intent);
       if (revoke.retry) {
         return {
@@ -170,7 +170,7 @@ export class CertificateRotationReconciler implements ManagedReconciler, OnModul
       }
       return {
         outcome: 'succeeded',
-        observedGeneration: targetGeneration,
+        observedRevision: targetRevision,
       };
     }
 
@@ -180,7 +180,7 @@ export class CertificateRotationReconciler implements ManagedReconciler, OnModul
         failure: rotationFailure(
           'CERTIFICATE_ROTATION_CANDIDATE_MISSING',
           'The next Incus client certificate has not been staged',
-          { targetGeneration },
+          { targetRevision },
         ),
         retryAfterMs: 30_000,
       };
@@ -201,7 +201,7 @@ export class CertificateRotationReconciler implements ManagedReconciler, OnModul
     }
 
     clients.invalidate?.();
-    const after = await this.snapshot(targetGeneration);
+    const after = await this.snapshot(targetRevision);
     const revoke = await this.revokeRetired(after, clients, context.intent);
     if (revoke.retry) {
       return {
@@ -216,7 +216,7 @@ export class CertificateRotationReconciler implements ManagedReconciler, OnModul
     }
     return {
       outcome: 'succeeded',
-      observedGeneration: targetGeneration,
+      observedRevision: targetRevision,
     };
   }
 
@@ -224,7 +224,7 @@ export class CertificateRotationReconciler implements ManagedReconciler, OnModul
    * Short transaction: advisory lock, read active/candidate/retired plus
    * server status, commit. Callers must not perform Incus HTTP here.
    */
-  private async snapshot(targetGeneration: number): Promise<RotationSnapshot> {
+  private async snapshot(targetRevision: number): Promise<RotationSnapshot> {
     return this.database.transaction().execute(async (transaction) => {
       await lockServerOnboarding(transaction);
       const active = await transaction
@@ -241,7 +241,7 @@ export class CertificateRotationReconciler implements ManagedReconciler, OnModul
       const candidate = await transaction
         .selectFrom('system.incus_client_certificates')
         .selectAll()
-        .where('generation', '=', String(targetGeneration))
+        .where('generation', '=', String(targetRevision))
         .where('state', '=', CertificateState.Staged)
         .forUpdate()
         .executeTakeFirst();

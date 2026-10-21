@@ -131,7 +131,7 @@ describePg('PostgreSQL container create admission and capacity', () => {
         request(fixture, 'scan-idempotent'),
       );
       const intents = new IntentRepository(database, noopWake());
-      await intents.settleForObservedGeneration(
+      await intents.settleForObservedRevision(
         'container',
         created.resourceId,
         1,
@@ -223,7 +223,7 @@ describePg('PostgreSQL container create admission and capacity', () => {
         ensurePending: vi.fn(async (input: {
           resourceId: string;
           serverId: string;
-          targetGeneration: number;
+          targetRevision: number;
           kind: string;
         }) => ({
           id: randomUUID(),
@@ -233,7 +233,7 @@ describePg('PostgreSQL container create admission and capacity', () => {
           serverId: input.serverId,
           requestedBy: fixture.userId,
           request: null,
-          targetGeneration: input.targetGeneration,
+          targetRevision: input.targetRevision,
           baseline: null,
           status: 'pending' as const,
           failureCode: null,
@@ -696,7 +696,7 @@ async function seedFixture(
     id: cryptoId(),
     image_id: imageId,
     server_id: serverId,
-    generation: 1,
+    revision: 1,
     observed_fingerprint: fingerprint,
     managed_fingerprint: fingerprint,
     lifecycle_phase: 'active',
@@ -755,8 +755,8 @@ async function seedSharedVolume(
     incus_name: `nyv-${volumeId.replaceAll('-', '')}`,
     size_bytes: sizeBytes,
     used_bytes: null,
-    generation: 1,
-    observed_generation: null,
+    revision: 1,
+    observed_revision: null,
     lifecycle_phase: 'active',
     needs_attention: false,
     failure_code: null,

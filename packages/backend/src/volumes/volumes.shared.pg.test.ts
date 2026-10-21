@@ -225,7 +225,7 @@ describePg('shared volume quota reservations', () => {
         scope: { kind: 'shared', sharedBackendId: backendId },
       });
       const patched = await service.patchSharedForUser(userId, created.id, {
-        expectedRevision: created.generation,
+        expectedRevision: created.revision,
         sizeBytes: 200,
       });
       expect('intentId' in patched).toBe(false);
@@ -352,7 +352,7 @@ describePg('shared volume quota reservations', () => {
         id: created.id,
       });
       await expect(service.patchSharedForUser(userId, created.id, {
-        expectedRevision: created.generation,
+        expectedRevision: created.revision,
         sizeBytes: 200,
       })).rejects.toThrow(/Shared backend access is not granted/);
       await service.deleteSharedForUser(userId, created.id);
@@ -429,13 +429,13 @@ describePg('shared volume quota reservations', () => {
         scope: { kind: 'shared', sharedBackendId: backendId },
       });
       await expect(service.patchSharedForUser(userId, created.id, {
-        expectedRevision: created.generation,
+        expectedRevision: created.revision,
         sizeBytes: 50,
       })).rejects.toMatchObject({
         response: { code: FailureCode.VolumeUsageUnknown },
       });
       const grown = await service.patchSharedForUser(userId, created.id, {
-        expectedRevision: created.generation,
+        expectedRevision: created.revision,
         sizeBytes: 200,
       });
       expect('intentId' in grown).toBe(false);
@@ -475,10 +475,10 @@ describePg('shared volume quota reservations', () => {
         server_id: serverId,
         pool_id: poolId,
         catalog_state: 'present',
-        observed_generation: 1,
+        observed_revision: 1,
       }).execute();
       await expect(service.patchSharedForUser(userId, created.id, {
-        expectedRevision: created.generation,
+        expectedRevision: created.revision,
         sizeBytes: 50,
       })).rejects.toMatchObject({
         response: { code: FailureCode.VolumeUsageUnknown },
@@ -523,10 +523,10 @@ describePg('shared volume quota reservations', () => {
         server_id: serverId,
         pool_id: poolId,
         catalog_state: 'ensuring',
-        observed_generation: null,
+        observed_revision: null,
       }).execute();
       await expect(service.patchSharedForUser(userId, created.id, {
-        expectedRevision: created.generation,
+        expectedRevision: created.revision,
         sizeBytes: 50,
       })).rejects.toMatchObject({
         response: { code: FailureCode.VolumeShrinkBelowUsage },
@@ -568,10 +568,10 @@ describePg('shared volume quota reservations', () => {
         server_id: serverId,
         pool_id: poolId,
         catalog_state: 'present',
-        observed_generation: 1,
+        observed_revision: 1,
       }).execute();
       const patched = await service.patchSharedForUser(userId, created.id, {
-        expectedRevision: created.generation,
+        expectedRevision: created.revision,
         sizeBytes: 50,
       });
       expect('intentId' in patched).toBe(true);
@@ -614,10 +614,10 @@ describePg('shared volume quota reservations', () => {
         server_id: serverId,
         pool_id: poolId,
         catalog_state: 'present',
-        observed_generation: 1,
+        observed_revision: 1,
       }).execute();
       await expect(service.patchSharedForUser(userId, created.id, {
-        expectedRevision: created.generation,
+        expectedRevision: created.revision,
         sizeBytes: 50,
       })).rejects.toMatchObject({
         response: { code: FailureCode.VolumeUsageUnknown },
@@ -654,10 +654,10 @@ describePg('shared volume quota reservations', () => {
         server_id: serverId,
         pool_id: poolId,
         catalog_state: 'present',
-        observed_generation: 1,
+        observed_revision: 1,
       }).execute();
       await expect(service.patchSharedForUser(userId, created.id, {
-        expectedRevision: created.generation,
+        expectedRevision: created.revision,
         sizeBytes: 50,
       })).rejects.toMatchObject({
         response: { code: FailureCode.VolumeUsageUnknown },

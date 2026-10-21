@@ -34,9 +34,9 @@ export class ContainerSshConvergenceService {
   }
 
   /**
-   * SSH key content is not part of the Incus instance document generation gate.
+   * SSH key content is not part of the Incus instance document revision gate.
    * Wake alone only drains existing pending intents — it never rewrites authorized_keys.
-   * Bump generation + create container.update so reconcileSshFile runs with fresh keys.
+   * Bump revision + create container.update so reconcileSshFile runs with fresh keys.
    */
   private async enqueueContainerSshSync(
     containerId: string,
@@ -48,29 +48,29 @@ export class ContainerSshConvergenceService {
         .setIsolationLevel('serializable')
         .execute(async (transaction) => {
           const container = await transaction.selectFrom('control.containers')
-            .select(['id', 'server_id', 'generation', 'lifecycle_phase'])
+            .select(['id', 'server_id', 'revision', 'lifecycle_phase'])
             .where('id', '=', containerId)
             .forUpdate()
             .executeTakeFirst();
           if (!container || container.lifecycle_phase !== 'active') {
             return null;
           }
-          const generation = Number(container.generation) + 1;
+          const revision = Number(container.revision) + 1;
           const updated = await transaction.updateTable('control.containers')
-            .set({ generation })
+            .set({ revision })
             .where('id', '=', containerId)
-            .where('generation', '=', container.generation)
-            .returning(['id', 'server_id', 'generation'])
+            .where('revision', '=', container.revision)
+            .returning(['id', 'server_id', 'revision'])
             .executeTakeFirst();
           if (!updated) {
-            throw new Error('CONTAINER_GENERATION_CONFLICT');
+            throw new Error('CONTAINER_REVISION_CONFLICT');
           }
           const intent = await this.intents.createPending({
             kind: IntentKind.ContainerUpdate,
             resourceType: IntentResourceType.Container,
             resourceId: containerId,
             serverId: updated.server_id,
-            targetGeneration: updated.generation,
+            targetRevision: updated.revision,
             request: { operation },
           }, transaction);
           return {

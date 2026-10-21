@@ -349,7 +349,7 @@ export class UserServerResourcePurgeService {
           if (locked.lifecycle_phase !== 'deleting') {
             const updated = await this.volumes.updateDesired(
               locked.id,
-              locked.generation,
+              locked.revision,
               {
                 lifecycle_phase: 'deleting',
                 failure_code: null,
@@ -365,7 +365,7 @@ export class UserServerResourcePurgeService {
             resourceType: IntentResourceType.Volume,
             resourceId: desired.id,
             requestedBy: actorId,
-            targetGeneration: desired.generation,
+            targetRevision: desired.revision,
             request: {
               operation: 'destroy',
               idempotencyKey: 'destroy',
@@ -406,7 +406,7 @@ export class UserServerResourcePurgeService {
         if (locked.lifecycle_phase !== 'deleting') {
           const updated = await this.volumes.updateDesired(
             locked.id,
-            locked.generation,
+            locked.revision,
             {
               lifecycle_phase: 'deleting',
               failure_code: null,
@@ -422,7 +422,7 @@ export class UserServerResourcePurgeService {
           resourceType: IntentResourceType.Volume,
           resourceId: desired.id,
           requestedBy: actorId,
-          targetGeneration: desired.generation,
+          targetRevision: desired.revision,
           request: {
             operation: 'destroy',
             idempotencyKey: 'destroy',

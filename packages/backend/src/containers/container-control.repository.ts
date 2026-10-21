@@ -100,8 +100,7 @@ export class ContainerControlRepository {
         created_by: input.createdBy,
         name: input.name,
         revision: 1,
-        generation: 1,
-        observed_generation: null,
+        observed_revision: null,
         image_alias: input.imageAlias,
         image_fingerprint: input.imageFingerprint,
         root_pool_id: input.rootPoolId,
@@ -169,7 +168,7 @@ export class ContainerControlRepository {
 
   updateDesired(
     id: string,
-    generation: number,
+    revision: number,
     values: {
       cpu_millis?: number;
       mem_bytes?: number;
@@ -187,20 +186,19 @@ export class ContainerControlRepository {
     return executor.updateTable('control.containers')
       .set({
         ...values,
-        revision: sql`revision + 1`,
-        generation: generation + 1,
+        revision: revision + 1,
         last_transition_at: sql`clock_timestamp()`,
         needs_attention: false,
       })
       .where('id', '=', id)
-      .where('generation', '=', generation)
+      .where('revision', '=', revision)
       .returningAll()
       .executeTakeFirst();
   }
 
   transition(
     id: string,
-    generation: number,
+    revision: number,
     values: {
       lifecycle_phase?: 'provisioning' | 'active' | 'deleting' | 'failed';
       power_intent?: 'running' | 'stopped';
@@ -210,7 +208,7 @@ export class ContainerControlRepository {
     },
     executor: ContainerExecutor,
   ) {
-    return this.updateDesired(id, generation, values, executor);
+    return this.updateDesired(id, revision, values, executor);
   }
 
   async findAvailableAddress(

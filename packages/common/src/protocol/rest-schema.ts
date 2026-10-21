@@ -70,7 +70,6 @@ export const zCapability = z.nativeEnum(Capability);
 export const zFailureCode = z.nativeEnum(FailureCode);
 
 export const zExpectedRevision = z.number().int().positive().safe();
-export const zExpectedGeneration = z.number().int().positive().safe();
 export const zConfigSnapshotToken = z.string().length(64).regex(SHA256_RE);
 export const zResourceIdentity = z.string()
   .min(1)
@@ -560,7 +559,7 @@ export const zPatchImageRequest = z.object({
 );
 
 export const zPutImageAssignmentRequest = z.object({
-  expectedGeneration: zExpectedGeneration.optional(),
+  expectedRevision: zExpectedRevision.optional(),
 }).strict();
 
 // Grant mutations use complete canonical bodies and PCI identity.
@@ -619,7 +618,7 @@ export const zIntentAcceptedDto = z.object({
   resourceType: z.nativeEnum(IntentResourceType),
   resourceId: zResourceIdentity,
   serverId: zResourceIdentity.nullable(),
-  targetGeneration: zExpectedGeneration,
+  targetRevision: zExpectedRevision,
   status: z.literal(IntentStatus.Pending),
   createdAt: zIsoDateTime,
 }).strict();
@@ -636,7 +635,7 @@ export const zIntentDto = z.object({
   serverId: zResourceIdentity.nullable(),
   requestedBy: zResourceIdentity.nullable(),
   requestSummary: z.record(z.unknown()),
-  targetGeneration: zExpectedGeneration,
+  targetRevision: zExpectedRevision,
   baseline: z.record(z.unknown()).nullable(),
   status: z.nativeEnum(IntentStatus),
   failureCode: z.string().max(128).nullable(),
@@ -694,7 +693,7 @@ export const zIncusClientCertificateDto = z.object({
 }).strict();
 
 export const zRotateIncusClientCertificateRequest = z.object({
-  expectedGeneration: zExpectedGeneration,
+  expectedGeneration: zExpectedRevision,
 }).strict();
 
 export const zCertificateRotationDto = z.object({

@@ -64,7 +64,7 @@ export class AdminServersController {
     @Body() body: unknown,
   ) {
     const input = zConnectServerRequest.parse(body);
-    const targetGeneration = await this.servers.prepareConnection(
+    const targetRevision = await this.servers.prepareConnection(
       id,
       input.expectedServerCertFingerprint,
     );
@@ -72,7 +72,7 @@ export class AdminServersController {
       serverId: id,
       trustToken: input.trustToken,
       expectedServerCertFingerprint: input.expectedServerCertFingerprint,
-      targetGeneration,
+      targetRevision,
       requestedBy: actor.id,
     });
     return acceptedIntent(intent);

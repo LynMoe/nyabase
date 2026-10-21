@@ -78,7 +78,7 @@ test(
       const resized = await expectJson<JsonRecord>(
         await adminApi.patch(`/api/admin/shared-volumes/${volumeId}`, {
           data: {
-            expectedRevision: created.generation,
+            expectedRevision: created.revision,
             sizeBytes: 96 * 1024 * 1024,
           },
         }),
@@ -278,7 +278,7 @@ test(
       const grown = await expectJson<JsonRecord>(
         await adminApi.patch(`/api/admin/shared-volumes/${volumeId}`, {
           data: {
-            expectedRevision: beforeGrow.generation,
+            expectedRevision: beforeGrow.revision,
             sizeBytes: 96 * 1024 * 1024,
           },
         }),
@@ -930,7 +930,7 @@ test(
       const canAssertFloor = Number.isFinite(used) && used >= fillBytes * 0.5;
       const tooSmall = await adminApi.patch(`/api/admin/shared-volumes/${volumeId}`, {
         data: {
-          expectedRevision: observed.generation,
+          expectedRevision: observed.revision,
           sizeBytes: canAssertFloor
             ? Math.max(1024 * 1024, Math.floor(used / 2))
             : 8 * 1024 * 1024,
@@ -1125,7 +1125,7 @@ test(
       );
       const growBoth = await expectJson<JsonRecord>(
         await adminApi.patch(`/api/admin/shared-volumes/${volumeId}`, {
-          data: { expectedRevision: beforeGrow.generation, sizeBytes: 96 * 1024 * 1024 },
+          data: { expectedRevision: beforeGrow.revision, sizeBytes: 96 * 1024 * 1024 },
         }),
         202,
       );
@@ -1153,7 +1153,7 @@ test(
       );
       const growSticky = await expectJson<JsonRecord>(
         await adminApi.patch(`/api/admin/shared-volumes/${volumeId}`, {
-          data: { expectedRevision: afterUnbind.generation, sizeBytes: 128 * 1024 * 1024 },
+          data: { expectedRevision: afterUnbind.revision, sizeBytes: 128 * 1024 * 1024 },
         }),
         202,
       );
@@ -1170,7 +1170,7 @@ test(
       if (canShrink) {
         const shrunk = await expectJson<JsonRecord>(
           await adminApi.patch(`/api/admin/shared-volumes/${volumeId}`, {
-            data: { expectedRevision: afterGrowSticky.generation, sizeBytes: 80 * 1024 * 1024 },
+            data: { expectedRevision: afterGrowSticky.revision, sizeBytes: 80 * 1024 * 1024 },
           }),
           202,
         );
@@ -1189,7 +1189,7 @@ test(
       const outageTarget = stickyBytes + 32 * 1024 * 1024;
       await withBlockedIncusHttps(worker.endpoint, async () => {
         const grownOffline = await adminApi.patch(`/api/admin/shared-volumes/${volumeId}`, {
-          data: { expectedRevision: beforeOutage.generation, sizeBytes: outageTarget },
+          data: { expectedRevision: beforeOutage.revision, sizeBytes: outageTarget },
         });
         expect(grownOffline.status()).toBe(202);
         await waitForIncusVolumeSize(primaryName, incusName, outageTarget);
@@ -1239,7 +1239,7 @@ test(
       );
       const resized = await expectJson<JsonRecord>(
         await adminApi.patch(`/api/admin/shared-volumes/${volumeId}`, {
-          data: { expectedRevision: created.generation, sizeBytes: 96 * 1024 * 1024 },
+          data: { expectedRevision: created.revision, sizeBytes: 96 * 1024 * 1024 },
         }),
         200,
       );

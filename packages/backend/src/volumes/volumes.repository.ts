@@ -77,8 +77,8 @@ export class VolumesRepository {
         incus_name: input.incusName,
         size_bytes: input.sizeBytes,
         used_bytes: null,
-        generation: 1,
-        observed_generation: null,
+        revision: 1,
+        observed_revision: null,
         lifecycle_phase: input.lifecyclePhase ?? 'provisioning',
         needs_attention: false,
         failure_code: null,
@@ -92,7 +92,7 @@ export class VolumesRepository {
 
   updateDesired(
     id: string,
-    generation: number,
+    revision: number,
     values: {
       name?: string;
       size_bytes?: number;
@@ -106,11 +106,11 @@ export class VolumesRepository {
       .updateTable('control.volumes')
       .set({
         ...values,
-        generation: generation + 1,
+        revision: revision + 1,
         needs_attention: false,
       })
       .where('id', '=', id)
-      .where('generation', '=', generation)
+      .where('revision', '=', revision)
       .returningAll()
       .executeTakeFirst();
   }
@@ -228,7 +228,7 @@ export class VolumesRepository {
         server_id: input.serverId,
         pool_id: input.poolId,
         catalog_state: input.catalogState,
-        observed_generation: null,
+        observed_revision: null,
       })
       .onConflict((conflict) => conflict
         .columns(['volume_id', 'server_id'])
@@ -256,16 +256,16 @@ export class VolumesRepository {
       volumeId: string;
       serverId: string;
       catalogState: VolumeCatalogState;
-      observedGeneration?: number | null;
+      observedRevision?: number | null;
     },
     executor: VolumeExecutor = this.database,
   ): Promise<void> {
     await executor.updateTable('control.volume_placements')
       .set({
         catalog_state: input.catalogState,
-        ...(input.observedGeneration === undefined
+        ...(input.observedRevision === undefined
           ? {}
-          : { observed_generation: input.observedGeneration }),
+          : { observed_revision: input.observedRevision }),
       })
       .where('volume_id', '=', input.volumeId)
       .where('server_id', '=', input.serverId)

@@ -35,7 +35,7 @@ const baseInput: InstanceSpecInput = {
   container: {
     id: '11111111-1111-4111-8111-111111111111',
     serverId: '22222222-2222-4222-8222-222222222222',
-    generation: 3,
+    revision: 3,
     imageFingerprint: 'b'.repeat(64),
     cpuMillis: 2000,
     memBytes: 1073741824n,

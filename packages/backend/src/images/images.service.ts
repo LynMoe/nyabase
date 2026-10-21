@@ -144,7 +144,7 @@ export class ImagesService {
         const next = await transaction
           .updateTable('infra.image_server_assignments')
           .set({
-            generation: assignment.generation + 1,
+            revision: assignment.revision + 1,
             lifecycle_phase: 'provisioning',
             needs_attention: false,
             failure_code: null,
@@ -152,7 +152,7 @@ export class ImagesService {
             updated_at: new Date(),
           })
           .where('id', '=', assignment.id)
-          .where('generation', '=', assignment.generation)
+          .where('revision', '=', assignment.revision)
           .returningAll()
           .executeTakeFirstOrThrow();
         intents.push(await this.intents.ensurePending({
@@ -161,7 +161,7 @@ export class ImagesService {
           resourceId: next.id,
           serverId: next.server_id,
           requestedBy: actorId,
-          targetGeneration: next.generation,
+          targetRevision: next.revision,
           request: { operation: 'repull', imageId, serverId: next.server_id },
         }, transaction));
       }
@@ -444,7 +444,7 @@ export class ImagesService {
     actorId: string,
     imageId: string,
     serverId: string,
-    expectedGeneration?: number,
+    expectedRevision?: number,
   ): Promise<{
     assignment: ImageAssignmentDto;
     intent: Awaited<ReturnType<IntentRepository['ensurePending']>>;
@@ -476,10 +476,10 @@ export class ImagesService {
         .executeTakeFirst();
       if (
         current
-        && expectedGeneration !== undefined
-        && current.generation !== expectedGeneration
+        && expectedRevision !== undefined
+        && current.revision !== expectedRevision
       ) {
-        throw new ConflictException({ code: 'GENERATION_CONFLICT' });
+        throw new ConflictException({ code: 'REVISION_CONFLICT' });
       }
       let assignment: ImageAssignmentRow;
       if (!current) {
@@ -489,7 +489,7 @@ export class ImagesService {
             id: randomUUID(),
             image_id: imageId,
             server_id: serverId,
-            generation: 1,
+            revision: 1,
             observed_fingerprint: null,
             managed_fingerprint: null,
             lifecycle_phase: 'provisioning',
@@ -521,7 +521,7 @@ export class ImagesService {
         assignment = await transaction
           .updateTable('infra.image_server_assignments')
           .set({
-            generation: current.generation + 1,
+            revision: current.revision + 1,
             lifecycle_phase: 'provisioning',
             needs_attention: false,
             failure_code: null,
@@ -529,7 +529,7 @@ export class ImagesService {
             updated_at: new Date(),
           })
           .where('id', '=', current.id)
-          .where('generation', '=', current.generation)
+          .where('revision', '=', current.revision)
           .returningAll()
           .executeTakeFirstOrThrow();
       }
@@ -539,7 +539,7 @@ export class ImagesService {
         resourceId: assignment.id,
         serverId,
         requestedBy: actorId,
-        targetGeneration: assignment.generation,
+        targetRevision: assignment.revision,
         request: { operation: 'ensure', imageId, serverId },
       }, transaction);
       await this.audit.append(
@@ -548,7 +548,7 @@ export class ImagesService {
         AuditAction.EnsureImageAssignment,
         assignment.id,
         'image_assignment',
-        { imageId, serverId, generation: assignment.generation },
+        { imageId, serverId, revision: assignment.revision },
       );
       return { assignment, intent };
     });
@@ -568,7 +568,7 @@ export class ImagesService {
     actorId: string,
     imageId: string,
     serverId: string,
-    expectedGeneration?: number,
+    expectedRevision?: number,
   ): Promise<{
     assignment: ImageAssignmentDto | null;
     intents: Array<Awaited<ReturnType<IntentRepository['ensurePending']>>>;
@@ -589,10 +589,10 @@ export class ImagesService {
         .executeTakeFirst();
       if (!assignment) return { assignment: null, intents: [] };
       if (
-        expectedGeneration !== undefined
-        && assignment.generation !== expectedGeneration
+        expectedRevision !== undefined
+        && assignment.revision !== expectedRevision
       ) {
-        throw new ConflictException({ code: 'GENERATION_CONFLICT' });
+        throw new ConflictException({ code: 'REVISION_CONFLICT' });
       }
       const intents = await this.scheduleAssignmentDelete(
         transaction,
@@ -614,7 +614,7 @@ export class ImagesService {
         {
           imageId,
           serverId,
-          generation: current.generation,
+          revision: current.revision,
           imageDeleting: image.deleting,
         },
       );
@@ -658,7 +658,7 @@ export class ImagesService {
       id: row.id,
       imageId: row.image_id,
       serverId: row.server_id,
-      generation: row.generation,
+      revision: row.revision,
       observedFingerprint: row.observed_fingerprint,
       managedFingerprint: row.managed_fingerprint,
       lifecyclePhase: row.lifecycle_phase as ResourceLifecyclePhase,
@@ -695,12 +695,12 @@ export class ImagesService {
     imageId: string,
     assignment: ImageAssignmentRow,
   ): Promise<Array<Awaited<ReturnType<IntentRepository['ensurePending']>>>> {
-    let generation = assignment.generation;
+    let revision = assignment.revision;
     if (assignment.lifecycle_phase !== 'deleting') {
       const updated = await transaction
         .updateTable('infra.image_server_assignments')
         .set({
-          generation: assignment.generation + 1,
+          revision: assignment.revision + 1,
           lifecycle_phase: 'deleting',
           needs_attention: false,
           failure_code: null,
@@ -708,10 +708,10 @@ export class ImagesService {
           updated_at: new Date(),
         })
         .where('id', '=', assignment.id)
-        .where('generation', '=', assignment.generation)
-        .returning('generation')
+        .where('revision', '=', assignment.revision)
+        .returning('revision')
         .executeTakeFirstOrThrow();
-      generation = updated.generation;
+      revision = updated.revision;
     }
     const intent = await this.intents.ensurePending({
       kind: IntentKind.ImageAssignmentDelete,
@@ -719,7 +719,7 @@ export class ImagesService {
       resourceId: assignment.id,
       serverId: assignment.server_id,
       requestedBy: actorId,
-      targetGeneration: generation,
+      targetRevision: revision,
       request: { operation: 'delete', imageId },
     }, transaction);
     return [intent];

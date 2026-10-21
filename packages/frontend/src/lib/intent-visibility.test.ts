@@ -20,7 +20,7 @@ function intent(overrides: Partial<IntentDto> = {}): IntentDto {
     serverId: null,
     requestedBy: null,
     requestSummary: {},
-    targetGeneration: 2,
+    targetRevision: 2,
     baseline: null,
     status: IntentStatus.Failed,
     failureCode: 'VOLUME_SHRINK_BELOW_USAGE',

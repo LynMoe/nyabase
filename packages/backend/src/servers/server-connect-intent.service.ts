@@ -5,12 +5,13 @@ import {
   type IntentRecord,
 } from '../reconcile/intent.repository.js';
 import { EphemeralStore } from '../platform/ephemeral-store.js';
+import { assertPersistableConnectRequest } from './server-connect-request.js';
 
 export interface CreateServerConnectIntentInput {
   readonly serverId: string;
   readonly trustToken: string;
   readonly expectedServerCertFingerprint?: string;
-  readonly targetGeneration: number;
+  readonly targetRevision: number;
   readonly requestedBy?: string | null;
 }
 
@@ -26,19 +27,21 @@ export class ServerConnectIntentService {
       input.serverId,
       input.trustToken,
     );
+    const request = {
+      trustTokenRef: reference,
+      ...(input.expectedServerCertFingerprint
+        ? { expectedServerCertFingerprint: input.expectedServerCertFingerprint }
+        : {}),
+    };
+    assertPersistableConnectRequest(request);
     return this.intents.createPending({
       kind: IntentKind.ServerConnect,
       resourceType: IntentResourceType.Server,
       resourceId: input.serverId,
       serverId: input.serverId,
       requestedBy: input.requestedBy,
-      targetGeneration: input.targetGeneration,
-      request: {
-        trustTokenRef: reference,
-        ...(input.expectedServerCertFingerprint
-          ? { expectedServerCertFingerprint: input.expectedServerCertFingerprint }
-          : {}),
-      },
+      targetRevision: input.targetRevision,
+      request,
     });
   }
 }

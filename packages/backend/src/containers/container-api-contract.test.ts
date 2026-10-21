@@ -112,7 +112,7 @@ describe('container API contract', () => {
       resourceType: IntentResourceType.Container,
       resourceId: 'container-1',
       serverId: 'server-1',
-      targetGeneration: 2,
+      targetRevision: 2,
       status: IntentStatus.Pending,
       createdAt: '2026-08-07T00:00:00.000Z',
     };

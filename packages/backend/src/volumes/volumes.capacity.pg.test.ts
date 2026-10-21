@@ -183,8 +183,8 @@ describePg('volume capacity locking and scope exclusions', () => {
           incus_name: `nyv-${localVolumeId.replaceAll('-', '')}`,
           size_bytes: 100,
           used_bytes: 10,
-          generation: 1,
-          observed_generation: 1,
+          revision: 1,
+          observed_revision: 1,
           lifecycle_phase: 'active',
           needs_attention: false,
           failure_code: null,
@@ -199,8 +199,8 @@ describePg('volume capacity locking and scope exclusions', () => {
           incus_name: `nyv-${sharedVolumeId.replaceAll('-', '')}`,
           size_bytes: 900,
           used_bytes: 10,
-          generation: 1,
-          observed_generation: 1,
+          revision: 1,
+          observed_revision: 1,
           lifecycle_phase: 'active',
           needs_attention: false,
           failure_code: null,
@@ -212,14 +212,14 @@ describePg('volume capacity locking and scope exclusions', () => {
           server_id: serverId,
           pool_id: recreatedLocalPoolId,
           catalog_state: 'present' as const,
-          observed_generation: 1,
+          observed_revision: 1,
         },
         {
           volume_id: sharedVolumeId,
           server_id: serverId,
           pool_id: sharedPoolId,
           catalog_state: 'present' as const,
-          observed_generation: 1,
+          observed_revision: 1,
         },
       ]).execute();
 
@@ -243,7 +243,7 @@ describePg('volume capacity locking and scope exclusions', () => {
         resourceType: 'volume',
         resourceId: localVolumeId,
       });
-      await intents.settleForObservedGeneration(
+      await intents.settleForObservedRevision(
         'volume',
         localVolumeId,
         1,
@@ -390,11 +390,11 @@ describePg('volume capacity locking and scope exclusions', () => {
         .where('pool_id', '=', poolId)
         .execute()).toHaveLength(1);
       expect(await database.selectFrom('control.volumes')
-        .select(['size_bytes', 'generation'])
+        .select(['size_bytes', 'revision'])
         .where('id', '=', existing.resourceId)
         .executeTakeFirstOrThrow()).toMatchObject({
         size_bytes: '1500',
-        generation: 1,
+        revision: 1,
       });
     });
   });
@@ -434,8 +434,8 @@ describePg('volume capacity locking and scope exclusions', () => {
         incus_name: `nyv-${id.replaceAll('-', '')}`,
         size_bytes: 400,
         used_bytes: 0,
-        generation: 1,
-        observed_generation: 1,
+        revision: 1,
+        observed_revision: 1,
         lifecycle_phase: 'active' as const,
         needs_attention: false,
         failure_code: null,
@@ -445,7 +445,7 @@ describePg('volume capacity locking and scope exclusions', () => {
         server_id: serverId,
         pool_id: poolId,
         catalog_state: 'present' as const,
-        observed_generation: 1,
+        observed_revision: 1,
       }))).execute();
 
       const service = makeService(database);
@@ -461,12 +461,12 @@ describePg('volume capacity locking and scope exclusions', () => {
         expect(rejected.reason.response.code).toBe(FailureCode.StoragePoolExhausted);
       }
       const rows = await database.selectFrom('control.volumes')
-        .select(['size_bytes', 'generation'])
+        .select(['size_bytes', 'revision'])
         .where('pool_id', '=', poolId)
         .orderBy('id')
         .execute();
       expect(rows.map((row) => Number(row.size_bytes)).sort()).toEqual([400, 600]);
-      expect(rows.map((row) => row.generation).sort()).toEqual([1, 2]);
+      expect(rows.map((row) => row.revision).sort()).toEqual([1, 2]);
     });
   });
 
@@ -518,7 +518,7 @@ describePg('volume capacity locking and scope exclusions', () => {
         id: randomUUID(),
         image_id: imageId,
         server_id: serverId,
-        generation: 1,
+        revision: 1,
         observed_fingerprint: 'a'.repeat(64),
         managed_fingerprint: 'a'.repeat(64),
         lifecycle_phase: 'active',

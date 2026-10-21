@@ -164,11 +164,11 @@ describePg('ServerHealthService PostgreSQL inventory and status', () => {
         {} as never,
         { registerServerHealth: vi.fn() } as never,
       );
-      const intent = (targetGeneration: number) => ({
+      const intent = (targetRevision: number) => ({
         resourceType: 'server',
         kind: 'server.preflight',
         serverId,
-        targetGeneration,
+        targetRevision,
       }) as never;
 
       await expect(health.isCurrentServerIntent(intent(1))).resolves.toBe(true);

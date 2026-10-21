@@ -97,8 +97,7 @@ async function insertContainer(
     created_by: ownerId,
     name,
     revision: 1,
-    generation: 1,
-    observed_generation: null,
+    observed_revision: null,
     image_alias: 'base',
     image_fingerprint: 'a'.repeat(64),
     root_pool_id: poolId,
@@ -137,8 +136,8 @@ async function insertVolume(
     incus_name: `nyv-${id.replaceAll('-', '')}`,
     size_bytes: 100,
     used_bytes: 0,
-    generation: 1,
-    observed_generation: 1,
+    revision: 1,
+    observed_revision: 1,
     lifecycle_phase: 'active',
     needs_attention: false,
     failure_code: null,
@@ -348,9 +347,9 @@ describePg('volume attachment ownership, visibility, and drain guards', () => {
         .where('volume_id', '=', volumeId)
         .execute()).toHaveLength(0);
       expect((await database.selectFrom('control.containers')
-        .select('generation')
+        .select('revision')
         .where('id', '=', container)
-        .executeTakeFirstOrThrow()).generation).toBe(1);
+        .executeTakeFirstOrThrow()).revision).toBe(1);
     });
   });
 

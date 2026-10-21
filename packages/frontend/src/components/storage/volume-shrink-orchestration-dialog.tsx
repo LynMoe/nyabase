@@ -113,7 +113,7 @@ export function VolumeShrinkOrchestrationDialog({
       setPhase('shrinking');
       setProgress('正在提交缩容…');
       const body: PatchVolumeRequest = {
-        expectedRevision: volume.generation,
+        expectedRevision: volume.revision,
         sizeBytes,
       };
       try {

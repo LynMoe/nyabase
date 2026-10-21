@@ -108,7 +108,7 @@ describePg('clean Incus image assignment contract', () => {
         ensurePending: vi.fn(async (input: {
           kind: 'image_assignment.ensure' | 'image_assignment.delete';
           resourceId: string;
-          targetGeneration: number;
+          targetRevision: number;
         }) => ({
           id: randomUUID(),
           kind: input.kind,
@@ -117,7 +117,7 @@ describePg('clean Incus image assignment contract', () => {
           serverId,
           requestedBy: 'actor-1',
           request: null,
-          targetGeneration: input.targetGeneration,
+          targetRevision: input.targetRevision,
           baseline: null,
           status: 'pending' as const,
           failureCode: null,
@@ -144,12 +144,12 @@ describePg('clean Incus image assignment contract', () => {
       expect(first.assignment).toMatchObject({
         imageId,
         serverId,
-        generation: 1,
+        revision: 1,
         lifecyclePhase: 'provisioning',
       });
       expect(second.assignment).toMatchObject({
         id: first.assignment.id,
-        generation: 1,
+        revision: 1,
         lifecyclePhase: 'provisioning',
       });
       await expect(database
@@ -171,7 +171,7 @@ describePg('clean Incus image assignment contract', () => {
       const deleted = await service.deleteAssignment('actor-1', imageId, serverId, 1);
       expect(deleted.assignment).toMatchObject({
         id: first.assignment.id,
-        generation: 2,
+        revision: 2,
         lifecyclePhase: 'deleting',
         managedFingerprint: 'a'.repeat(64),
       });
@@ -230,7 +230,7 @@ describePg('clean Incus image assignment contract', () => {
         ensurePending: vi.fn(async (input: {
           kind: string;
           resourceId: string;
-          targetGeneration: number;
+          targetRevision: number;
         }) => ({
           id: randomUUID(),
           kind: input.kind,
@@ -239,7 +239,7 @@ describePg('clean Incus image assignment contract', () => {
           serverId,
           requestedBy: 'actor-1',
           request: null,
-          targetGeneration: input.targetGeneration,
+          targetRevision: input.targetRevision,
           baseline: null,
           status: 'pending' as const,
           failureCode: null,

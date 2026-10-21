@@ -74,7 +74,7 @@ function destroyIntent(volumeId: string) {
     serverId: null,
     request: { operation: 'destroy', idempotencyKey: 'destroy' },
     attemptCount: 0,
-    targetGeneration: 2,
+    targetRevision: 2,
   };
 }
 
@@ -234,7 +234,7 @@ describePg('volume reconciler equal-node destroy', () => {
         server_id: fixture.serverA,
         requested_by: fixture.ownerId,
         request_json: JSON.stringify({ operation: 'create', idempotencyKey: 'create' }),
-        target_generation: 1,
+        target_revision: 1,
         baseline_json: null,
         status: 'pending',
         failure_code: null,
@@ -298,7 +298,7 @@ describePg('volume reconciler equal-node destroy', () => {
           serverId: fixture.serverA,
           request: { operation: 'create' },
           attemptCount: 0,
-          targetGeneration: 2,
+          targetRevision: 2,
         } as never,
         client: { getStorageVolume, deleteStorageVolume } as never,
         claim: {} as never,
@@ -419,8 +419,8 @@ async function seedSharedVolume(
     incus_name: incusName,
     size_bytes: 100,
     used_bytes: 0,
-    generation: 2,
-    observed_generation: 1,
+    revision: 2,
+    observed_revision: 1,
     lifecycle_phase: options.lifecyclePhase ?? 'deleting',
     needs_attention: false,
     failure_code: null,
@@ -433,14 +433,14 @@ async function seedSharedVolume(
       server_id: serverA,
       pool_id: poolA,
       catalog_state: options.aState,
-      observed_generation: options.aState === 'present' ? 2 : null,
+      observed_revision: options.aState === 'present' ? 2 : null,
     },
     {
       volume_id: volumeId,
       server_id: serverB,
       pool_id: poolB,
       catalog_state: options.bState,
-      observed_generation: options.bState === 'present' ? 2 : null,
+      observed_revision: options.bState === 'present' ? 2 : null,
     },
   ]).execute();
   return { ownerId, serverA, serverB, poolA, poolB, volumeId, incusName };

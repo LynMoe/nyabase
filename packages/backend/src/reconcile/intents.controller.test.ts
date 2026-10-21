@@ -35,7 +35,7 @@ function intent(overrides: Partial<IntentRecord> = {}): IntentRecord {
     serverId: '00000000-0000-4000-8000-000000000003',
     requestedBy: actor.id,
     request: {},
-    targetGeneration: 1,
+    targetRevision: 1,
     baseline: null,
     status: IntentStatus.Failed,
     failureCode: 'VOLUME_ENSURE_FAILED',

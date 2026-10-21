@@ -15,7 +15,7 @@ describe('ServerConnectIntentService', () => {
     await expect(service.create({
       serverId: '00000000-0000-4000-8000-000000000002',
       trustToken: 'one-time-secret',
-      targetGeneration: 1,
+      targetRevision: 1,
     })).resolves.toEqual({ id: 'intent-id' });
 
     expect(storeTrustToken).toHaveBeenCalledWith(
@@ -28,9 +28,23 @@ describe('ServerConnectIntentService', () => {
       resourceId: '00000000-0000-4000-8000-000000000002',
       serverId: '00000000-0000-4000-8000-000000000002',
       requestedBy: undefined,
-      targetGeneration: 1,
+      targetRevision: 1,
       request: { trustTokenRef: '00000000-0000-4000-8000-000000000001' },
     });
     expect(JSON.stringify(createPending.mock.calls[0]?.[0])).not.toContain('one-time-secret');
+  });
+
+  it('refuses to queue a connect intent whose reference is not persistable', async () => {
+    const createPending = vi.fn();
+    const service = new ServerConnectIntentService(
+      { createPending } as never,
+      { storeTrustToken: vi.fn().mockReturnValue('one-time-secret') } as never,
+    );
+    await expect(service.create({
+      serverId: '00000000-0000-4000-8000-000000000002',
+      trustToken: 'one-time-secret',
+      targetRevision: 1,
+    })).rejects.toThrow('persistable trust-token reference');
+    expect(createPending).not.toHaveBeenCalled();
   });
 });

@@ -2,7 +2,7 @@ export type GroupAuthorityRefreshPhase = 'pending' | 'succeeded' | 'failed';
 
 export interface GroupAuthorityRefreshState {
   context: string;
-  generation: number;
+  epoch: number;
   groups: GroupAuthorityRefreshPhase;
   actions: GroupAuthorityRefreshPhase;
 }
@@ -10,7 +10,7 @@ export interface GroupAuthorityRefreshState {
 export function createGroupAuthorityRefreshState(context: string): GroupAuthorityRefreshState {
   return {
     context,
-    generation: 1,
+    epoch: 1,
     groups: 'pending',
     actions: 'pending',
   };
@@ -25,7 +25,7 @@ export function changeGroupAuthorityContext(
   if (state.context === context) return state;
   return {
     context,
-    generation: state.generation + 1,
+    epoch: state.epoch + 1,
     groups: 'pending',
     actions: 'pending',
   };
@@ -37,7 +37,7 @@ export function beginGroupAuthorityRefresh(
 ): GroupAuthorityRefreshState {
   return {
     context: state.context,
-    generation: state.generation + 1,
+    epoch: state.epoch + 1,
     groups: 'pending',
     actions: 'pending',
   };
@@ -46,27 +46,27 @@ export function beginGroupAuthorityRefresh(
 export function acceptGroupAuthorityGroups(
   state: GroupAuthorityRefreshState,
   context: string,
-  generation: number,
+  epoch: number,
 ): GroupAuthorityRefreshState {
-  if (context !== state.context || generation !== state.generation) return state;
+  if (context !== state.context || epoch !== state.epoch) return state;
   return { ...state, groups: 'succeeded' };
 }
 
 export function rejectGroupAuthorityGroups(
   state: GroupAuthorityRefreshState,
   context: string,
-  generation: number,
+  epoch: number,
 ): GroupAuthorityRefreshState {
-  if (context !== state.context || generation !== state.generation) return state;
+  if (context !== state.context || epoch !== state.epoch) return state;
   return { ...state, groups: 'failed', actions: 'pending' };
 }
 
 export function acceptGroupAuthorityActions(
   state: GroupAuthorityRefreshState,
   context: string,
-  generation: number,
+  epoch: number,
 ): GroupAuthorityRefreshState {
-  if (context !== state.context || generation !== state.generation
+  if (context !== state.context || epoch !== state.epoch
     || state.groups !== 'succeeded') return state;
   return { ...state, actions: 'succeeded' };
 }
@@ -74,9 +74,9 @@ export function acceptGroupAuthorityActions(
 export function rejectGroupAuthorityActions(
   state: GroupAuthorityRefreshState,
   context: string,
-  generation: number,
+  epoch: number,
 ): GroupAuthorityRefreshState {
-  if (context !== state.context || generation !== state.generation
+  if (context !== state.context || epoch !== state.epoch
     || state.groups !== 'succeeded') return state;
   return { ...state, actions: 'failed' };
 }

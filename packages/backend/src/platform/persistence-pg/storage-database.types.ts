@@ -17,8 +17,8 @@ export interface VolumeTable {
   incus_name: string;
   size_bytes: StorageBigInt;
   used_bytes: StorageBigInt | null;
-  generation: number;
-  observed_generation: number | null;
+  revision: number;
+  observed_revision: number | null;
   lifecycle_phase: 'provisioning' | 'active' | 'deleting' | 'failed';
   needs_attention: boolean;
   failure_code: string | null;
@@ -50,7 +50,7 @@ export interface VolumePlacementTable {
   server_id: string;
   pool_id: string;
   catalog_state: 'ensuring' | 'present';
-  observed_generation: number | null;
+  observed_revision: number | null;
   created_at: StorageGeneratedTimestamp;
   updated_at: StorageGeneratedTimestamp;
 }

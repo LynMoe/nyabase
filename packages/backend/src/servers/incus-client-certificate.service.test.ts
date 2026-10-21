@@ -88,7 +88,7 @@ describe('IncusClientCertificateService', () => {
     const intents = {
       createPending: vi.fn().mockResolvedValue({
         id: '00000000-0000-4000-8000-000000000099',
-        targetGeneration: 2,
+        targetRevision: 2,
       }),
     };
     const config = {

@@ -8,7 +8,7 @@ const certificateIntent = {
   resourceId: '00000000-0000-4000-8000-000000000002',
   serverId: null,
   requestedBy: null,
-  targetGeneration: 2,
+  targetRevision: 2,
 };
 
 interface CertRow {
@@ -268,7 +268,7 @@ describe('CertificateRotationReconciler', () => {
 
     await expect(reconciler.reconcile(reconcileContext())).resolves.toEqual({
       outcome: 'succeeded',
-      observedGeneration: 2,
+      observedRevision: 2,
     });
   });
 
@@ -330,7 +330,7 @@ describe('CertificateRotationReconciler', () => {
 
     await expect(reconciler.reconcile(reconcileContext())).resolves.toEqual({
       outcome: 'succeeded',
-      observedGeneration: 2,
+      observedRevision: 2,
     });
 
     expect(activeClient.trustCertificate).toHaveBeenCalledWith(
@@ -446,7 +446,7 @@ describe('CertificateRotationReconciler', () => {
 
     await expect(reconciler.reconcile(reconcileContext())).resolves.toEqual({
       outcome: 'succeeded',
-      observedGeneration: 2,
+      observedRevision: 2,
     });
     expect(clients.getForCertificate).toHaveBeenCalledWith(onlineId, candidate.id);
     expect(clients.getForCertificate).not.toHaveBeenCalledWith(unknownId, candidate.id);
@@ -564,7 +564,7 @@ describe('CertificateRotationReconciler', () => {
 
     await expect(reconciler.reconcile(reconcileContext())).resolves.toEqual({
       outcome: 'succeeded',
-      observedGeneration: 2,
+      observedRevision: 2,
     });
     expect(activeClient.deleteClientCertificate).toHaveBeenCalledWith('55'.repeat(32));
     expect(harness.trusts.some((trust) => (

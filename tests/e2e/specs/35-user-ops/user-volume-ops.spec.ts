@@ -44,15 +44,15 @@ test(
       );
       volumeId = created.volumeId;
       const before = await expectJson<JsonRecord>(await userApi.get(`/api/volumes/${volumeId}`));
-      const generation = Number(before.generation);
+      const revision = Number(before.revision);
       expect(Number(before.sizeBytes)).toBe(128 * MiB);
-      expect(Number.isFinite(generation)).toBe(true);
+      expect(Number.isFinite(revision)).toBe(true);
 
       const grownSize = 192 * MiB;
       const accepted = await expectJson<JsonRecord>(
         await userApi.patch(`/api/volumes/${volumeId}`, {
           data: {
-            expectedRevision: generation,
+            expectedRevision: revision,
             sizeBytes: grownSize,
           },
         }),
@@ -62,7 +62,7 @@ test(
 
       const after = await expectJson<JsonRecord>(await userApi.get(`/api/volumes/${volumeId}`));
       expect(Number(after.sizeBytes)).toBe(grownSize);
-      expect(Number(after.generation)).toBeGreaterThan(generation);
+      expect(Number(after.revision)).toBeGreaterThan(revision);
       await assertNoActiveIntents(userApi, `/api/volumes/${volumeId}/intents`);
     } finally {
       await deleteUserVolume(userApi ?? adminApi, adminApi, volumeId);
@@ -99,7 +99,7 @@ test(
       );
       volumeId = created.volumeId;
       const before = await expectJson<JsonRecord>(await api.get(`/api/volumes/${volumeId}`));
-      const generation = Number(before.generation);
+      const revision = Number(before.revision);
       const capability = before.capability ?? {};
       expect(Number(before.sizeBytes)).toBe(initialSize);
 
@@ -114,7 +114,7 @@ test(
         const accepted = await expectJson<JsonRecord>(
           await api.patch(`/api/volumes/${volumeId}`, {
             data: {
-              expectedRevision: observed.generation,
+              expectedRevision: observed.revision,
               sizeBytes: targetSize,
             },
           }),
@@ -123,12 +123,12 @@ test(
         await requireSucceededIntent(api, accepted.intentId, 'user.volume.resize.shrink');
         const after = await expectJson<JsonRecord>(await api.get(`/api/volumes/${volumeId}`));
         expect(Number(after.sizeBytes)).toBe(targetSize);
-        expect(Number(after.generation)).toBeGreaterThan(generation);
+        expect(Number(after.revision)).toBeGreaterThan(revision);
       } else {
         // Prefer not hanging: product must reject online shrink clearly when unsupported.
         const response = await api.patch(`/api/volumes/${volumeId}`, {
           data: {
-            expectedRevision: generation,
+            expectedRevision: revision,
             sizeBytes: targetSize,
           },
         });

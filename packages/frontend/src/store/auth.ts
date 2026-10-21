@@ -11,7 +11,7 @@ export type AuthStatus = 'checking' | 'authenticated' | 'anonymous' | 'error';
 export interface AuthState {
   accessToken: string | null;
   user: UserDto | null;
-  /** Monotonic, tab-local generation used to reject late refresh commits. */
+  /** Monotonic, tab-local epoch used to reject late refresh commits. */
   epoch: number;
   status: AuthStatus;
   authError: string | null;

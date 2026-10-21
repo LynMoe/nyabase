@@ -17,9 +17,8 @@ export interface ContainerControlTable {
   image_id: string;
   created_by: string;
   name: string;
-  revision: ContainerBigInt;
-  generation: number;
-  observed_generation: number | null;
+  revision: number;
+  observed_revision: number | null;
   image_alias: string;
   image_fingerprint: string;
   root_pool_id: string;
@@ -88,12 +87,14 @@ export interface IntentTable {
   server_id: string | null;
   requested_by: string | null;
   request_json: ContainerJson<Record<string, unknown>> | null;
-  target_generation: number;
+  target_revision: number;
   baseline_json: ContainerJson<Record<string, unknown>> | null;
   status: 'pending' | 'succeeded' | 'failed';
   failure_code: string | null;
   failure_json: ContainerJson<Record<string, unknown>> | null;
   attempt_count: number;
+  busy_attempts: ColumnType<number, number | undefined, number>;
+  busy_since: ColumnType<Date | null, Date | string | null | undefined, Date | string | null>;
   next_attempt_at: ContainerTimestamp | null;
   blocked_by_intent_id: string | null;
   created_at: ContainerGeneratedTimestamp;
@@ -101,7 +102,7 @@ export interface IntentTable {
 }
 
 export interface ReconcileClaimTable {
-  resource_type: 'container' | 'volume' | 'image_assignment' | 'server' | 'certificate_rotation';
+  resource_type: 'container' | 'volume' | 'image_assignment' | 'server' | 'certificate_rotation' | 'grant_expiry';
   resource_id: string;
   placement_server_id: string;
   server_id: string | null;

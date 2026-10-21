@@ -372,7 +372,7 @@ describe('volume reconciler scan and shifted policy', () => {
     const db = selectDb({
       volumes: [{
         id: volumeId,
-        generation: 2,
+        revision: 2,
         server_id: null,
         shared_backend_id: backendId,
         lifecycle_phase: 'active',
@@ -420,7 +420,7 @@ describe('volume reconciler scan and shifted policy', () => {
     const db = selectDb({
       volumes: [{
         id: volumeId,
-        generation: 2,
+        revision: 2,
         server_id: null,
         shared_backend_id: backendId,
         lifecycle_phase: 'active',
@@ -468,7 +468,7 @@ describe('volume reconciler scan and shifted policy', () => {
     const db = selectDb({
       volumes: [{
         id: volumeId,
-        generation: 2,
+        revision: 2,
         server_id: null,
         shared_backend_id: backendId,
         lifecycle_phase: 'failed',
@@ -549,7 +549,7 @@ describe('volume reconciler scan and shifted policy', () => {
     const db = selectDb({
       volumes: [{
         id: volumeId,
-        generation: 2,
+        revision: 2,
         server_id: null,
         shared_backend_id: backendId,
         lifecycle_phase: 'active',
@@ -597,7 +597,7 @@ describe('volume reconciler scan and shifted policy', () => {
     const db = selectDb({
       volumes: [{
         id: volumeId,
-        generation: 2,
+        revision: 2,
         server_id: serverId,
         shared_backend_id: null,
         lifecycle_phase: 'active',
@@ -649,7 +649,7 @@ describe('volume reconciler scan and shifted policy', () => {
       selectDb({
       volumes: [{
         id: volumeId,
-        generation: 2,
+        revision: 2,
         server_id: null,
         shared_backend_id: backendId,
         lifecycle_phase: 'active',
@@ -1349,7 +1349,7 @@ function destroyState(input: {
       incus_name: incusName,
       size_bytes: '10',
       used_bytes: null,
-      generation: 2,
+      revision: 2,
       lifecycle_phase: 'deleting' as const,
       needs_attention: false,
       dir_ensured: input.dirEnsured ?? false,
@@ -1430,7 +1430,7 @@ function ensureRow() {
     incus_name: `nyv-${'e'.repeat(32)}`,
     size_bytes: '10',
     used_bytes: null,
-    generation: 2,
+    revision: 2,
     lifecycle_phase: 'active',
     catalog_state: 'present',
     resize_family: 'quota_online',
@@ -1457,7 +1457,7 @@ function runContext(overrides: {
       serverId: overrides.serverId === undefined ? serverId : overrides.serverId,
       request: {},
       attemptCount: overrides.attemptCount ?? 0,
-      targetGeneration: 2,
+      targetRevision: 2,
     } as never,
     client: overrides.client as never,
     claim: {} as never,
@@ -1498,7 +1498,7 @@ function localVolume(input: {
 }) {
   return {
     id: input.id,
-    generation: 2,
+    revision: 2,
     server_id: input.serverId,
     shared_backend_id: null,
     lifecycle_phase: input.lifecycle_phase ?? 'active',
@@ -1523,7 +1523,7 @@ function volumeExistsDb(row: { lifecycle_phase?: string } = {}) {
             remove_all_server_id: null,
             size_bytes: '10',
             used_bytes: null,
-            generation: 2,
+            revision: 2,
             needs_attention: false,
             incus_name: incusName,
             pool_id: 'pool-1',

@@ -14,7 +14,7 @@ export function toDto(intent: IntentRecord): IntentDto {
     serverId: intent.serverId,
     requestedBy: intent.requestedBy,
     requestSummary: intent.request ?? {},
-    targetGeneration: intent.targetGeneration,
+    targetRevision: intent.targetRevision,
     baseline: intent.baseline,
     status: intent.status as IntentDto['status'],
     failureCode: intent.failureCode,

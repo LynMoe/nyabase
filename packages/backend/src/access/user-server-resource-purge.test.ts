@@ -196,10 +196,10 @@ describe('UserServerResourcePurgeService grant expiry actions', () => {
       pool_id: 'pool-1',
       server_id: 'server-1',
       shared_backend_id: null,
-      generation: 1,
+      revision: 1,
       lifecycle_phase: 'active',
     };
-    const updatedVolume = { ...volume, generation: 2, lifecycle_phase: 'deleting' };
+    const updatedVolume = { ...volume, revision: 2, lifecycle_phase: 'deleting' };
     const transaction = {
       selectFrom: vi.fn((table: string) => ({
         selectAll: vi.fn().mockReturnThis(),
@@ -247,7 +247,7 @@ describe('UserServerResourcePurgeService grant expiry actions', () => {
       expect.objectContaining({
         kind: IntentKind.VolumeDestroy,
         resourceId: 'volume-1',
-        targetGeneration: 2,
+        targetRevision: 2,
         request: {
           operation: 'destroy',
           idempotencyKey: 'destroy',
@@ -284,7 +284,7 @@ describe('UserServerResourcePurgeService grant expiry actions', () => {
       pool_id: null,
       server_id: null,
       shared_backend_id: 'backend-1',
-      generation: 1,
+      revision: 1,
       lifecycle_phase: 'active',
       dir_ensured: false,
     };
@@ -312,7 +312,7 @@ describe('UserServerResourcePurgeService grant expiry actions', () => {
     fixture.volumes.listPlacements.mockResolvedValue([]);
     fixture.volumes.updateDesired.mockResolvedValue({
       ...volume,
-      generation: 2,
+      revision: 2,
       lifecycle_phase: 'deleting',
     });
     fixture.intents.ensurePending.mockResolvedValue({ id: 'destroy-1' });
@@ -400,7 +400,7 @@ describe('UserServerResourcePurgeService grant expiry actions', () => {
       fixture.volumes.listPlacements.mockResolvedValue([]);
       fixture.volumes.updateDesired.mockResolvedValue({
         ...volume,
-        generation: 2,
+        revision: 2,
         lifecycle_phase: 'deleting',
       });
       fixture.intents.ensurePending.mockResolvedValue({ id: 'destroy-1' });
@@ -418,7 +418,7 @@ describe('UserServerResourcePurgeService grant expiry actions', () => {
       pool_id: null,
       server_id: null,
       shared_backend_id: 'backend-1',
-      generation: 1,
+      revision: 1,
       lifecycle_phase: 'active',
       dir_ensured: false,
     }, true);
@@ -431,7 +431,7 @@ describe('UserServerResourcePurgeService grant expiry actions', () => {
       pool_id: null,
       server_id: null,
       shared_backend_id: 'backend-1',
-      generation: 1,
+      revision: 1,
       lifecycle_phase: 'active',
       dir_ensured: true,
     }, true);
@@ -446,7 +446,7 @@ describe('UserServerResourcePurgeService grant expiry actions', () => {
       pool_id: null,
       server_id: null,
       shared_backend_id: 'backend-1',
-      generation: 1,
+      revision: 1,
       lifecycle_phase: 'active',
       dir_ensured: true,
     }, false);

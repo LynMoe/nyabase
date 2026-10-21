@@ -7,7 +7,7 @@ export function acceptedIntent(intent: IntentRecord): IntentAcceptedDto {
     resourceType: intent.resourceType as IntentAcceptedDto['resourceType'],
     resourceId: intent.resourceId,
     serverId: intent.serverId,
-    targetGeneration: intent.targetGeneration,
+    targetRevision: intent.targetRevision,
     status: 'pending' as IntentStatus.Pending,
     createdAt: intent.createdAt,
   };

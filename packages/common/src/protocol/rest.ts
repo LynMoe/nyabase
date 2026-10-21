@@ -471,8 +471,8 @@ export interface VolumeDto {
   /** Pool capability descriptor; UI must not hardcode driver tables. */
   capability: StoragePoolCapabilityDto;
   lifecyclePhase: ResourceLifecyclePhase;
-  generation: number;
-  observedGeneration: number | null;
+  revision: number;
+  observedRevision: number | null;
   needsAttention: boolean;
   failureCode: string | null;
   createdAt: string;
@@ -492,8 +492,8 @@ export interface SharedVolumeDto {
   usedBytes: number | null;
   capability: StoragePoolCapabilityDto;
   lifecyclePhase: ResourceLifecyclePhase;
-  generation: number;
-  observedGeneration: number | null;
+  revision: number;
+  observedRevision: number | null;
   needsAttention: boolean;
   failureCode: string | null;
   dirEnsured: boolean;
@@ -587,7 +587,7 @@ export interface ImageAssignmentDto {
   id: string;
   imageId: string;
   serverId: string;
-  generation: number;
+  revision: number;
   observedFingerprint: string | null;
   managedFingerprint: string | null;
   lifecyclePhase: ResourceLifecyclePhase;
@@ -749,8 +749,8 @@ export interface ContainerDto {
   needsAttention: boolean;
   failureCode: string | null;
   failureReason: string | null;
-  generation: number;
-  observedGeneration: number | null;
+  revision: number;
+  observedRevision: number | null;
   actions: Record<ContainerAction, ActionAvailability>;
   createdAt: string;
   updatedAt: string;
@@ -767,7 +767,7 @@ export interface IntentAcceptedDto {
   resourceType: IntentResourceType;
   resourceId: string;
   serverId: string | null;
-  targetGeneration: number;
+  targetRevision: number;
   status: IntentStatus.Pending;
   createdAt: string;
 }
@@ -784,7 +784,7 @@ export interface IntentDto {
   serverId: string | null;
   requestedBy: string | null;
   requestSummary: Record<string, unknown>;
-  targetGeneration: number;
+  targetRevision: number;
   baseline: Record<string, unknown> | null;
   status: IntentStatus;
   failureCode: string | null;

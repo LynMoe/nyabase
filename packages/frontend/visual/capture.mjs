@@ -160,8 +160,8 @@ const container = {
   needsAttention: false,
   failureCode: null,
   failureReason: null,
-  generation: 4,
-  observedGeneration: 4,
+  revision: 4,
+  observedRevision: 4,
   actions: {
     start: actionOff, stop: actionOn, restart: actionOn, delete: actionOn,
     stats: actionOn, console: actionOn,
@@ -184,8 +184,8 @@ const volume = {
   scope: { kind: 'local', serverId: 'srv-1', poolId: 'pool-1' },
   capability,
   lifecyclePhase: 'active',
-  generation: 2,
-  observedGeneration: 2,
+  revision: 2,
+  observedRevision: 2,
   needsAttention: false,
   failureCode: null,
   createdAt: ISO,
@@ -212,7 +212,7 @@ const image = {
   createdAt: ISO,
   updatedAt: ISO,
   assignments: [{
-    id: 'asg-1', imageId: 'img-1', serverId: 'srv-1', generation: 1,
+    id: 'asg-1', imageId: 'img-1', serverId: 'srv-1', revision: 1,
     observedFingerprint: 'sha256:abcd1234ffff', managedFingerprint: 'sha256:abcd1234ffff',
     lifecyclePhase: 'active', needsAttention: false, failureCode: null,
     failureReason: null, lastObservedAt: ISO, createdAt: ISO, updatedAt: ISO,
@@ -388,7 +388,7 @@ function mockApi(urlString, method) {
   if (p.endsWith('/containers/ctr-1/intents')) return json({ items: [{
     id: 'int-1', kind: 'container.create', resourceType: 'container', resourceId: 'ctr-1',
     serverId: 'srv-1', requestedBy: 'admin', requestSummary: { name: 'dev-workspace' },
-    targetGeneration: 1, baseline: null, status: 'succeeded', failureCode: null, failure: null,
+    targetRevision: 1, baseline: null, status: 'succeeded', failureCode: null, failure: null,
     attemptCount: 1, nextAttemptAt: null, createdAt: ISO, settledAt: ISO, blockedByIntentId: null,
   }], nextCursor: null });
 

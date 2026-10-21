@@ -71,7 +71,7 @@ export class AdminImagesController {
         id: row.id,
         imageId: row.image_id,
         serverId: row.server_id,
-        generation: row.generation,
+        revision: row.revision,
         observedFingerprint: row.observed_fingerprint,
         managedFingerprint: row.managed_fingerprint,
         lifecyclePhase: row.lifecycle_phase,
@@ -105,7 +105,7 @@ export class AdminImagesController {
       actor.id,
       id,
       serverId,
-      input.expectedGeneration,
+      input.expectedRevision,
     );
     return {
       assignment: result.assignment,
@@ -119,22 +119,22 @@ export class AdminImagesController {
     @Param('id') id: string,
     @Param('serverId') serverId: string,
     @CurrentUser() actor: UserRecord,
-    @Query('expectedGeneration') expectedGeneration?: string,
+    @Query('expectedRevision') expectedRevision?: string,
   ) {
-    const generation = expectedGeneration === undefined
+    const revision = expectedRevision === undefined
       ? undefined
-      : Number(expectedGeneration);
+      : Number(expectedRevision);
     if (
-      generation !== undefined
-      && (!Number.isSafeInteger(generation) || generation < 1)
+      revision !== undefined
+      && (!Number.isSafeInteger(revision) || revision < 1)
     ) {
-      throw new BadRequestException('expectedGeneration must be a positive integer');
+      throw new BadRequestException('expectedRevision must be a positive integer');
     }
     const result = await this.images.deleteAssignment(
       actor.id,
       id,
       serverId,
-      generation,
+      revision,
     );
     return {
       assignment: result.assignment,

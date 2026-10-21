@@ -358,7 +358,8 @@ CREATE TABLE infra.image_server_assignments (
     id uuid NOT NULL,
     image_id uuid NOT NULL REFERENCES infra.images(id) ON DELETE CASCADE,
     server_id uuid NOT NULL REFERENCES infra.servers(id) ON DELETE CASCADE,
-    generation integer DEFAULT 1 NOT NULL,
+    revision integer DEFAULT 1 NOT NULL,
+    observed_revision integer,
     observed_fingerprint text,
     managed_fingerprint text,
     lifecycle_phase text DEFAULT 'provisioning'::text NOT NULL,
@@ -368,7 +369,9 @@ CREATE TABLE infra.image_server_assignments (
     last_observed_at timestamp with time zone,
     created_at timestamp with time zone DEFAULT clock_timestamp() NOT NULL,
     updated_at timestamp with time zone DEFAULT clock_timestamp() NOT NULL,
-    CONSTRAINT image_assignments_generation_check CHECK (generation > 0),
+    CONSTRAINT image_assignments_revision_check CHECK (revision > 0),
+    CONSTRAINT image_assignments_observed_revision_check
+        CHECK (observed_revision IS NULL OR observed_revision > 0),
     CONSTRAINT image_assignment_observed_fingerprint_check
         CHECK (observed_fingerprint IS NULL OR observed_fingerprint ~ '^[0-9a-f]{64}$'),
     CONSTRAINT image_assignment_managed_fingerprint_check
@@ -434,9 +437,8 @@ CREATE TABLE control.containers (
     image_id uuid NOT NULL REFERENCES infra.images(id) ON DELETE RESTRICT,
     created_by uuid NOT NULL REFERENCES iam.users(id) ON DELETE RESTRICT,
     name text NOT NULL,
-    revision bigint DEFAULT 1 NOT NULL,
-    generation integer DEFAULT 1 NOT NULL,
-    observed_generation integer,
+    revision integer DEFAULT 1 NOT NULL,
+    observed_revision integer,
     image_alias text NOT NULL,
     image_fingerprint text NOT NULL,
     root_pool_id uuid NOT NULL REFERENCES infra.storage_pools(id) ON DELETE RESTRICT,
@@ -461,9 +463,8 @@ CREATE TABLE control.containers (
     CONSTRAINT containers_name_check
         CHECK (length(name) BETWEEN 1 AND 63 AND name ~ '^[A-Za-z0-9][A-Za-z0-9-]*$'),
     CONSTRAINT containers_revision_check CHECK (revision > 0),
-    CONSTRAINT containers_generation_check CHECK (generation > 0),
-    CONSTRAINT containers_observed_generation_check
-        CHECK (observed_generation IS NULL OR observed_generation > 0),
+    CONSTRAINT containers_observed_revision_check
+        CHECK (observed_revision IS NULL OR observed_revision > 0),
     CONSTRAINT containers_image_fingerprint_check CHECK (image_fingerprint ~ '^[0-9a-f]{64}$'),
     CONSTRAINT containers_root_size_check CHECK (root_size_bytes > 0),
     CONSTRAINT containers_root_size_pending_check
@@ -505,8 +506,8 @@ CREATE TABLE control.volumes (
     incus_name text NOT NULL,
     size_bytes bigint NOT NULL,
     used_bytes bigint,
-    generation integer DEFAULT 1 NOT NULL,
-    observed_generation integer,
+    revision integer DEFAULT 1 NOT NULL,
+    observed_revision integer,
     lifecycle_phase text DEFAULT 'provisioning'::text NOT NULL,
     needs_attention boolean DEFAULT false NOT NULL,
     failure_code text,
@@ -519,9 +520,9 @@ CREATE TABLE control.volumes (
     CONSTRAINT volumes_incus_name_check CHECK (incus_name ~ '^nyv-[0-9a-f]{32}$'),
     CONSTRAINT volumes_size_check CHECK (size_bytes > 0),
     CONSTRAINT volumes_used_bytes_check CHECK (used_bytes IS NULL OR used_bytes >= 0),
-    CONSTRAINT volumes_generation_check CHECK (generation > 0),
-    CONSTRAINT volumes_observed_generation_check
-        CHECK (observed_generation IS NULL OR observed_generation > 0),
+    CONSTRAINT volumes_revision_check CHECK (revision > 0),
+    CONSTRAINT volumes_observed_revision_check
+        CHECK (observed_revision IS NULL OR observed_revision > 0),
     CONSTRAINT volumes_lifecycle_check
         CHECK (lifecycle_phase = ANY (ARRAY['provisioning', 'active', 'deleting', 'failed'])),
     CONSTRAINT volumes_scope_check
@@ -562,14 +563,14 @@ CREATE TABLE control.volume_placements (
     server_id uuid NOT NULL REFERENCES infra.servers(id) ON DELETE RESTRICT,
     pool_id uuid NOT NULL REFERENCES infra.storage_pools(id) ON DELETE RESTRICT,
     catalog_state text NOT NULL,
-    observed_generation integer,
+    observed_revision integer,
     created_at timestamp with time zone DEFAULT clock_timestamp() NOT NULL,
     updated_at timestamp with time zone DEFAULT clock_timestamp() NOT NULL,
     PRIMARY KEY (volume_id, server_id),
     CONSTRAINT volume_placements_state_check
         CHECK (catalog_state = ANY (ARRAY['ensuring', 'present'])),
-    CONSTRAINT volume_placements_observed_generation_check
-        CHECK (observed_generation IS NULL OR observed_generation > 0)
+    CONSTRAINT volume_placements_observed_revision_check
+        CHECK (observed_revision IS NULL OR observed_revision > 0)
 );
 
 COMMENT ON TABLE control.volume_placements IS
@@ -668,17 +669,11 @@ CREATE TABLE control.grant_expiry_enforcement (
     covering_expires_at timestamp with time zone NOT NULL,
     grace_stopped_at timestamp with time zone,
     purged_at timestamp with time zone,
-    claim_token uuid,
-    claimed_by text,
-    lease_expires_at timestamp with time zone,
-    updated_at timestamp with time zone DEFAULT clock_timestamp() NOT NULL,
-    CONSTRAINT grant_expiry_enforcement_claim_shape_check
-        CHECK ((claim_token IS NULL AND claimed_by IS NULL AND lease_expires_at IS NULL)
-            OR (claim_token IS NOT NULL AND claimed_by IS NOT NULL AND lease_expires_at IS NOT NULL))
+    updated_at timestamp with time zone DEFAULT clock_timestamp() NOT NULL
 );
 
 COMMENT ON TABLE control.grant_expiry_enforcement IS
-  'Idempotent grant-expiry worker ledger for grace stop and resource cleanup';
+  'Idempotent grant-expiry completion ledger; in-flight ownership is a reconcile_claims lease (resource_type grant_expiry)';
 
 CREATE TABLE control.intents (
     id uuid NOT NULL,
@@ -688,12 +683,14 @@ CREATE TABLE control.intents (
     server_id uuid REFERENCES infra.servers(id) ON DELETE RESTRICT,
     requested_by uuid REFERENCES iam.users(id) ON DELETE SET NULL,
     request_json jsonb,
-    target_generation integer NOT NULL,
+    target_revision integer NOT NULL,
     baseline_json jsonb,
     status text DEFAULT 'pending'::text NOT NULL,
     failure_code text,
     failure_json jsonb,
     attempt_count integer DEFAULT 0 NOT NULL,
+    busy_attempts integer DEFAULT 0 NOT NULL,
+    busy_since timestamp with time zone,
     next_attempt_at timestamp with time zone,
     blocked_by_intent_id uuid,
     created_at timestamp with time zone DEFAULT clock_timestamp() NOT NULL,
@@ -736,7 +733,7 @@ CREATE TABLE control.intents (
             OR (resource_type = 'certificate_rotation' AND server_id IS NULL)),
     CONSTRAINT intents_blocked_by_check
         CHECK (blocked_by_intent_id IS NULL OR blocked_by_intent_id <> id),
-    CONSTRAINT intents_target_generation_check CHECK (target_generation > 0),
+    CONSTRAINT intents_target_revision_check CHECK (target_revision > 0),
     CONSTRAINT intents_status_check
         CHECK (status = ANY (ARRAY['pending', 'succeeded', 'failed'])),
     CONSTRAINT intents_settled_shape_check
@@ -755,7 +752,9 @@ CREATE TABLE control.intents (
                 AND failure_json ? 'code'
                 AND failure_json ? 'message'
                 AND failure_json ? 'details')),
-    CONSTRAINT intents_attempt_count_check CHECK (attempt_count >= 0)
+    CONSTRAINT intents_attempt_count_check CHECK (attempt_count >= 0),
+    CONSTRAINT intents_busy_shape_check
+        CHECK (busy_attempts >= 0 AND (busy_attempts = 0) = (busy_since IS NULL))
 );
 
 CREATE TABLE control.reconcile_claims (
@@ -772,7 +771,8 @@ CREATE TABLE control.reconcile_claims (
             'volume',
             'image_assignment',
             'server',
-            'certificate_rotation'
+            'certificate_rotation',
+            'grant_expiry'
         ])),
     CONSTRAINT reconcile_claims_worker_check CHECK (length(btrim(worker_id)) > 0),
     CONSTRAINT reconcile_claims_placement_shape_check
@@ -791,27 +791,7 @@ CREATE TABLE control.reconcile_claims (
 );
 
 COMMENT ON COLUMN control.reconcile_claims.placement_server_id IS
-  'Incus catalog/server for the claim; certificate_rotation uses …0000, volume.destroy uses …0001';
-
-CREATE TABLE control.reconcile_busy_strikes (
-    resource_type text NOT NULL,
-    resource_id uuid NOT NULL,
-    observed_at timestamp with time zone DEFAULT clock_timestamp() NOT NULL,
-    CONSTRAINT reconcile_busy_strikes_resource_type_check
-        CHECK (resource_type = ANY (ARRAY[
-            'container',
-            'volume',
-            'image_assignment',
-            'server',
-            'certificate_rotation'
-        ]))
-);
-
-COMMENT ON TABLE control.reconcile_busy_strikes IS
-  'INSTANCE_BUSY observations used to trip needs_attention after five strikes in five minutes';
-
-CREATE INDEX reconcile_busy_strikes_resource_observed_idx
-    ON control.reconcile_busy_strikes (resource_type, resource_id, observed_at DESC);
+  'Incus catalog/server for the claim; certificate_rotation uses …0000, volume.destroy uses …0001; grant_expiry uses the granted server';
 
 CREATE TABLE system.settings (
     singleton boolean DEFAULT true NOT NULL,
@@ -1169,16 +1149,13 @@ CREATE INDEX authorization_dependencies_user_fk_idx
 CREATE INDEX grant_expiry_enforcement_pending_idx
     ON control.grant_expiry_enforcement (user_id, server_id)
     WHERE grace_stopped_at IS NULL OR purged_at IS NULL;
-CREATE INDEX grant_expiry_enforcement_lease_idx
-    ON control.grant_expiry_enforcement (lease_expires_at)
-    WHERE claim_token IS NOT NULL;
 CREATE INDEX grant_expiry_enforcement_server_idx
     ON control.grant_expiry_enforcement (server_id);
 CREATE INDEX intents_pending_ready_idx
     ON control.intents ((COALESCE(next_attempt_at, created_at)) ASC, created_at ASC, id ASC)
     WHERE status = 'pending';
 CREATE INDEX intents_pending_resource_idx
-    ON control.intents (resource_type, resource_id, target_generation, created_at ASC, id ASC)
+    ON control.intents (resource_type, resource_id, target_revision, created_at ASC, id ASC)
     WHERE status = 'pending';
 CREATE INDEX intents_blocked_by_idx
     ON control.intents (blocked_by_intent_id);

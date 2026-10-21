@@ -3,7 +3,7 @@ import { IntentKind, IntentResourceType } from '@nyabase/common';
 import { ContainerSshConvergenceService } from './container-ssh-convergence.service.js';
 
 describe('ContainerSshConvergenceService', () => {
-  it('bumps generation and creates container.update when syncing user keys', async () => {
+  it('bumps revision and creates container.update when syncing user keys', async () => {
     const containerId = '11111111-1111-4111-8111-111111111111';
     const serverId = '22222222-2222-4222-8222-222222222222';
     const createPending = vi.fn().mockResolvedValue({ id: 'intent-1' });
@@ -12,7 +12,7 @@ describe('ContainerSshConvergenceService', () => {
       executeTakeFirst: vi.fn().mockResolvedValue({
         id: containerId,
         server_id: serverId,
-        generation: 3,
+        revision: 3,
         lifecycle_phase: 'active',
       }),
     };
@@ -20,14 +20,14 @@ describe('ContainerSshConvergenceService', () => {
       executeTakeFirst: vi.fn().mockResolvedValue({
         id: containerId,
         server_id: serverId,
-        generation: 4,
+        revision: 4,
       }),
     };
-    const whereGeneration = {
+    const whereRevision = {
       returning: vi.fn().mockReturnValue(returning),
     };
     const updateWhereId = {
-      where: vi.fn().mockReturnValue(whereGeneration),
+      where: vi.fn().mockReturnValue(whereRevision),
     };
     const updateSet = {
       where: vi.fn().mockReturnValue(updateWhereId),
@@ -76,7 +76,7 @@ describe('ContainerSshConvergenceService', () => {
         resourceType: IntentResourceType.Container,
         resourceId: containerId,
         serverId,
-        targetGeneration: 4,
+        targetRevision: 4,
         request: { operation: 'sync_user_ssh_keys' },
       }),
       transaction,
@@ -89,7 +89,7 @@ describe('ContainerSshConvergenceService', () => {
     }));
   });
 
-  it('repair bumps generation instead of wake-only', async () => {
+  it('repair bumps revision instead of wake-only', async () => {
     const containerId = '11111111-1111-4111-8111-111111111111';
     const serverId = '22222222-2222-4222-8222-222222222222';
     const createPending = vi.fn().mockResolvedValue({ id: 'intent-2' });
@@ -102,7 +102,7 @@ describe('ContainerSshConvergenceService', () => {
               executeTakeFirst: vi.fn().mockResolvedValue({
                 id: containerId,
                 server_id: serverId,
-                generation: 1,
+                revision: 1,
                 lifecycle_phase: 'active',
               }),
             }),
@@ -117,7 +117,7 @@ describe('ContainerSshConvergenceService', () => {
                 executeTakeFirst: vi.fn().mockResolvedValue({
                   id: containerId,
                   server_id: serverId,
-                  generation: 2,
+                  revision: 2,
                 }),
               }),
             }),
@@ -143,7 +143,7 @@ describe('ContainerSshConvergenceService', () => {
     expect(createPending).toHaveBeenCalledWith(
       expect.objectContaining({
         request: { operation: 'repair_ssh' },
-        targetGeneration: 2,
+        targetRevision: 2,
       }),
       transaction,
     );

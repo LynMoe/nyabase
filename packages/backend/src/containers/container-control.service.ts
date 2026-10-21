@@ -37,6 +37,7 @@ import { AuditService } from '../iam/audit.service.js';
 import { isoDate, nullableNumber, numberValue, poolLabel } from '../platform/domain-utils.js';
 import { acceptedIntent } from '../reconcile/accepted-intent.js';
 import { IntentRepository } from '../reconcile/intent.repository.js';
+import { createContainerIntent } from './container-intents.js';
 import { ReconcileWakeService } from '../reconcile/reconcile-wake.service.js';
 import { ConsoleSessionService } from './console-session.service.js';
 import { ContainerSshConvergenceService } from './container-ssh-convergence.service.js';
@@ -485,13 +486,13 @@ export class ContainerControlService {
           request.volumes as AttachVolumeRequest[],
         );
       }
-      const intent = await this.intents.createPending({
+      const intent = await createContainerIntent(this.intents, {
         kind: IntentKind.ContainerCreate,
         resourceType: IntentResourceType.Container,
         resourceId: row.id,
         serverId: row.server_id,
         requestedBy: userId,
-        targetGeneration: row.generation,
+        targetRevision: row.revision,
         request: { operation: 'create' },
       }, transaction);
       await this.audit.append(transaction, userId, AuditAction.CreateContainer, row.id, 'container', {
@@ -778,18 +779,18 @@ export class ContainerControlService {
       }
       const updated = await this.repository.updateDesired(
         containerId,
-        current.generation,
+        current.revision,
         { gpu_state: mutated.state },
         transaction,
       );
       if (!updated) throw new ConflictException({ code: FailureCode.RevisionConflict });
-      const intent = await this.intents.createPending({
+      const intent = await createContainerIntent(this.intents, {
         kind: IntentKind.ContainerUpdate,
         resourceType: IntentResourceType.Container,
         resourceId: containerId,
         serverId: current.server_id,
         requestedBy: actorId,
-        targetGeneration: updated.generation,
+        targetRevision: updated.revision,
         request: mutated.requestSummary,
       }, transaction);
       await this.audit.append(
@@ -979,7 +980,7 @@ export class ContainerControlService {
           : ContainerPowerIntent.Stopped;
       const updated = await this.repository.updateDesired(
         containerId,
-        Number(current.generation),
+        Number(current.revision),
         { lifecycle_phase: nextPhase, power_intent: nextPower, failure_code: null, failure_reason: null },
         transaction,
       );
@@ -992,13 +993,13 @@ export class ContainerControlService {
         : action === 'restart' || action === 'start' || action === 'stop'
           ? IntentKind.ContainerPower
           : IntentKind.ContainerUpdate;
-      const intent = await this.intents.createPending({
+      const intent = await createContainerIntent(this.intents, {
         kind,
         resourceType: IntentResourceType.Container,
         resourceId: containerId,
         serverId: current.server_id,
         requestedBy: actorId,
-        targetGeneration: updated.generation,
+        targetRevision: updated.revision,
         baseline: action === 'restart'
           ? {
             startedAt: route?.instance_started_at
@@ -1060,7 +1061,7 @@ export class ContainerControlService {
       await validate?.(transaction, current);
       const updated = await this.repository.updateDesired(
         containerId,
-        current.generation,
+        current.revision,
         values,
         transaction,
       );
@@ -1069,13 +1070,13 @@ export class ContainerControlService {
         || values.lifecycle_phase === ContainerPhase.Failed) {
         await this.gpuClaims.releaseContainerClaims(containerId, transaction);
       }
-      const intent = await this.intents.createPending({
+      const intent = await createContainerIntent(this.intents, {
         kind: IntentKind.ContainerUpdate,
         resourceType: IntentResourceType.Container,
         resourceId: containerId,
         serverId: current.server_id,
         requestedBy: actorId,
-        targetGeneration: updated.generation,
+        targetRevision: updated.revision,
         request,
       }, transaction);
       await this.audit.append(transaction, actorId, action, containerId, 'container', request);
@@ -1335,8 +1336,8 @@ export class ContainerControlService {
         needsAttention: row.needs_attention,
         failureCode: row.failure_code,
         failureReason: row.failure_reason,
-        generation: row.generation,
-        observedGeneration: row.observed_generation,
+        revision: row.revision,
+        observedRevision: row.observed_revision,
         actions: this.actions.forContainer({
           phase: phase(row.lifecycle_phase),
           runtimeStatus: actualStatus,

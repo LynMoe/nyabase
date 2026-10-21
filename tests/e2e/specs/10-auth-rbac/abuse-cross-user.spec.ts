@@ -82,7 +82,7 @@ test(
         await attackerApi.patch(`/api/volumes/${volumeId}`, {
           data: {
             // Positive revision so Zod accepts the body; ownership must still deny.
-            expectedRevision: Number(volumeBefore.generation ?? 1),
+            expectedRevision: Number(volumeBefore.revision ?? 1),
             sizeBytes: Number(volumeBefore.sizeBytes) + 64 * 1024 * 1024,
           },
         }),
@@ -92,7 +92,7 @@ test(
       const volumeAfter = await expectJson<JsonRecord>(
         await ownerApi.get(`/api/volumes/${volumeId}`),
       );
-      expect(Number(volumeAfter.generation)).toBe(Number(volumeBefore.generation));
+      expect(Number(volumeAfter.revision)).toBe(Number(volumeBefore.revision));
       expect(Number(volumeAfter.sizeBytes)).toBe(Number(volumeBefore.sizeBytes));
 
       const intentDenied = await readErrorBody(
@@ -109,7 +109,7 @@ test(
       const after = await expectJson<JsonRecord>(
         await ownerApi.get(`/api/containers/${containerId}`),
       );
-      expect(after.generation ?? after.revision).toBe(before.generation ?? before.revision);
+      expect(after.revision).toBe(before.revision);
       expect(after.powerIntent).toBe(before.powerIntent);
       await assertNoActiveIntents(ownerApi, `/api/containers/${containerId}/intents`);
     } finally {

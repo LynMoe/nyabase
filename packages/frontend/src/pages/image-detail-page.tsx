@@ -91,8 +91,8 @@ export default function ImageDetailPage() {
   };
 
   const assign = useMutation({
-    mutationFn: ({ serverId, expectedGeneration }: { serverId: string; expectedGeneration?: number }) =>
-      api.put<AssignmentResponse>(`/admin/images/${id}/assignments/${serverId}`, expectedGeneration ? { expectedGeneration } : {}),
+    mutationFn: ({ serverId, expectedRevision }: { serverId: string; expectedRevision?: number }) =>
+      api.put<AssignmentResponse>(`/admin/images/${id}/assignments/${serverId}`, expectedRevision ? { expectedRevision } : {}),
     onSuccess: (result) => {
       toast({ title: '已开始分配镜像', description: result.intent ? `操作 ${result.intent.intentId.slice(0, 8)}` : undefined });
       invalidate();
@@ -100,8 +100,8 @@ export default function ImageDetailPage() {
     onError: (error) => toast({ title: '镜像分配失败', description: errorMessage(error), variant: 'destructive' }),
   });
   const unassign = useMutation({
-    mutationFn: ({ serverId, generation }: { serverId: string; generation: number }) =>
-      api.delete<AssignmentResponse>(`/admin/images/${id}/assignments/${serverId}?expectedGeneration=${generation}`),
+    mutationFn: ({ serverId, revision }: { serverId: string; revision: number }) =>
+      api.delete<AssignmentResponse>(`/admin/images/${id}/assignments/${serverId}?expectedRevision=${revision}`),
     onSuccess: () => {
       toast({ title: '已开始取消分配镜像' });
       invalidate();
@@ -245,11 +245,11 @@ export default function ImageDetailPage() {
                               serverName={servers.find((server) => server.id === assignment.serverId)?.name ?? assignment.serverId}
                               onEnsure={() => assign.mutate({
                                 serverId: assignment.serverId,
-                                expectedGeneration: assignment.generation,
+                                expectedRevision: assignment.revision,
                               })}
                               onDelete={() => unassign.mutate({
                                 serverId: assignment.serverId,
-                                generation: assignment.generation,
+                                revision: assignment.revision,
                               })}
                               busy={assign.isPending || unassign.isPending}
                             />

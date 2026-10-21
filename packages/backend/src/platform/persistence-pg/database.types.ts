@@ -100,12 +100,6 @@ export interface InteractionSshProxyHostKeyTable {
   rotated_at: Timestamp;
 }
 
-export interface ReconcileBusyStrikeTable {
-  resource_type: string;
-  resource_id: string;
-  observed_at: GeneratedTimestamp;
-}
-
 export interface NyabaseDatabase
   extends AuditDatabase,
     IamAuthorizationDatabase,
@@ -123,5 +117,4 @@ export interface NyabaseDatabase
   'iam.api_tokens': IamApiTokenTable;
   'iam.ssh_public_keys': IamSshPublicKeyTable;
   'interaction.ssh_proxy_host_keys': InteractionSshProxyHostKeyTable;
-  'control.reconcile_busy_strikes': ReconcileBusyStrikeTable;
 }

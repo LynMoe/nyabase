@@ -34,7 +34,7 @@ function makeHarness() {
     id: containerId,
     owner_id: actorId,
     server_id: serverId,
-    generation: 1,
+    revision: 1,
     lifecycle_phase: ContainerPhase.Active,
     power_intent: ContainerPowerIntent.Stopped,
     root_size_bytes: '1073741824',
@@ -49,7 +49,7 @@ function makeHarness() {
       instance_status: 'Running',
       instance_started_at: new Date('2026-08-07T03:00:00.000Z'),
     }),
-    updateDesired: vi.fn().mockResolvedValue({ ...row, generation: 2 }),
+    updateDesired: vi.fn().mockResolvedValue({ ...row, revision: 2 }),
 
   };
   const access = {
@@ -68,7 +68,7 @@ function makeHarness() {
     resourceType: IntentResourceType.Container,
     resourceId: containerId,
     serverId,
-    targetGeneration: 2,
+    targetRevision: 2,
     createdAt: '2026-08-07T03:00:00.000Z',
   };
   const intents = {
@@ -187,7 +187,7 @@ describe('ContainerControlService intent boundary', () => {
       expect.objectContaining({
         kind: IntentKind.ContainerUpdate,
         resourceType: IntentResourceType.Container,
-        targetGeneration: 2,
+        targetRevision: 2,
         request: { operation: 'limits' },
       }),
       harness.transaction,
@@ -208,7 +208,7 @@ describe('ContainerControlService intent boundary', () => {
     });
     expect(result).toMatchObject({
       intentId: 'intent-1',
-      targetGeneration: 2,
+      targetRevision: 2,
       status: 'pending',
     });
   });

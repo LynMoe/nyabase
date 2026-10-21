@@ -85,7 +85,7 @@ describePg('PostgreSQL image assignment cleanup and scan idempotency', () => {
         id: assignmentId,
         image_id: imageId,
         server_id: serverId,
-        generation: 1,
+        revision: 1,
         observed_fingerprint: fingerprint,
         managed_fingerprint: fingerprint,
         lifecycle_phase: 'active',
@@ -121,7 +121,7 @@ describePg('PostgreSQL image assignment cleanup and scan idempotency', () => {
         resourceType: 'image_assignment',
         resourceId: assignmentId,
       });
-      await intents.settleForObservedGeneration(
+      await intents.settleForObservedRevision(
         'image_assignment',
         assignmentId,
         1,
@@ -137,7 +137,7 @@ describePg('PostgreSQL image assignment cleanup and scan idempotency', () => {
 
       await database.updateTable('infra.image_server_assignments')
         .set({
-          generation: 2,
+          revision: 2,
           lifecycle_phase: 'deleting',
         })
         .where('id', '=', assignmentId)
@@ -151,7 +151,7 @@ describePg('PostgreSQL image assignment cleanup and scan idempotency', () => {
         resourceType: 'image_assignment',
         resourceId: assignmentId,
         serverId,
-        targetGeneration: 2,
+        targetRevision: 2,
         request: { operation: 'delete', imageId },
       });
       await expect(reconciler.reconcile({
@@ -162,9 +162,9 @@ describePg('PostgreSQL image assignment cleanup and scan idempotency', () => {
         signal: new AbortController().signal,
       })).resolves.toMatchObject({
         outcome: 'succeeded',
-        observedGeneration: 2,
+        observedRevision: 2,
       });
-      await intents.settleForObservedGeneration(
+      await intents.settleForObservedRevision(
         'image_assignment',
         assignmentId,
         2,
@@ -241,9 +241,9 @@ describePg('PostgreSQL image assignment cleanup and scan idempotency', () => {
         signal: new AbortController().signal,
       })).resolves.toMatchObject({
         outcome: 'succeeded',
-        observedGeneration: 1,
+        observedRevision: 1,
       });
-      await intents.settleForObservedGeneration(
+      await intents.settleForObservedRevision(
         'image_assignment',
         imageId,
         1,

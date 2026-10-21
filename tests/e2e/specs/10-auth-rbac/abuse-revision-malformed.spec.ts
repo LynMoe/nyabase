@@ -37,13 +37,13 @@ test(
       );
       volumeId = created.volumeId;
       const before = await expectJson<JsonRecord>(await userApi.get(`/api/volumes/${volumeId}`));
-      const generation = Number(before.generation ?? before.revision ?? 0);
-      expect(Number.isFinite(generation)).toBe(true);
+      const revision = Number(before.revision ?? 0);
+      expect(Number.isFinite(revision)).toBe(true);
 
       const stale = await readErrorBody(
         await userApi.patch(`/api/volumes/${volumeId}`, {
           data: {
-            expectedRevision: generation + 100,
+            expectedRevision: revision + 100,
             name: `stale-${Date.now().toString(36)}`,
           },
         }),
@@ -54,7 +54,7 @@ test(
       const adminStale = await readErrorBody(
         await adminApi.patch(`/api/admin/volumes/${volumeId}`, {
           data: {
-            expectedRevision: generation + 100,
+            expectedRevision: revision + 100,
             sizeBytes: 256 * 1024 * 1024,
           },
         }),
@@ -65,7 +65,7 @@ test(
       const malformed = await readErrorBody(
         await userApi.patch(`/api/volumes/${volumeId}`, {
           data: {
-            expectedRevision: generation,
+            expectedRevision: revision,
           },
         }),
       );
@@ -85,7 +85,7 @@ test(
       expect(omitRevision.status).toBe(400);
 
       const after = await expectJson<JsonRecord>(await userApi.get(`/api/volumes/${volumeId}`));
-      expect(Number(after.generation ?? after.revision)).toBe(generation);
+      expect(Number(after.revision)).toBe(revision);
       expect(Number(after.sizeBytes)).toBe(Number(before.sizeBytes));
       expect(after.name).toBe(before.name);
       await assertNoActiveIntents(adminApi, `/api/admin/volumes/${volumeId}/intents`);

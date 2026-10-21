@@ -22,13 +22,13 @@ type ContainerProgress = {
   lifecyclePhase: ContainerDto['lifecyclePhase'];
   actual: { status: ContainerDto['actual']['status'] };
   rootSizePendingBytes: number | null;
-  observedGeneration: number | null;
-  generation: number;
+  observedRevision: number | null;
+  revision: number;
 };
 
 type VolumeProgress = Pick<
   VolumeDto | SharedVolumeDto,
-  'needsAttention' | 'lifecyclePhase' | 'observedGeneration' | 'generation'
+  'needsAttention' | 'lifecyclePhase' | 'observedRevision' | 'revision'
 >;
 
 function containerBlocked(container: Pick<ContainerProgress, 'needsAttention' | 'lifecyclePhase' | 'actual'>): boolean {
@@ -54,19 +54,19 @@ export function containerStatusPending(container: ContainerProgress): boolean {
     || container.lifecyclePhase === ContainerPhase.Provisioning
     || container.lifecyclePhase === ContainerPhase.Deleting
     || container.rootSizePendingBytes !== null
-    || (container.observedGeneration !== null && container.observedGeneration !== container.generation);
+    || (container.observedRevision !== null && container.observedRevision !== container.revision);
 }
 
 export function containerInProgress(container: ContainerProgress): boolean {
   return containerLifecyclePending(container) || containerStatusPending(container);
 }
 
-/** Volumes have no root-size field. A null generation on an active row is not in progress. */
+/** Volumes have no root-size field. A null revision on an active row is not in progress. */
 export function volumeInProgress(volume: VolumeProgress): boolean {
   if (volume.needsAttention || volume.lifecyclePhase === ResourceLifecyclePhase.Failed) return false;
   return volume.lifecyclePhase === ResourceLifecyclePhase.Provisioning
     || volume.lifecyclePhase === ResourceLifecyclePhase.Deleting
-    || (volume.observedGeneration !== null && volume.observedGeneration !== volume.generation);
+    || (volume.observedRevision !== null && volume.observedRevision !== volume.revision);
 }
 
 /** A null fingerprint is an empty state, not a phase that polling can finish. */

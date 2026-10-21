@@ -143,7 +143,7 @@ describePg('certificate rotation server admission serialization', () => {
             resourceType: 'certificate_rotation',
             resourceId: randomUUID(),
             serverId: null,
-            targetGeneration: 2,
+            targetRevision: 2,
           } as never,
           claim: {} as never,
           lease: {} as never,
@@ -182,7 +182,7 @@ describePg('certificate rotation server admission serialization', () => {
       const rotation = await rotationPromise;
       expect(rotation).toMatchObject({
         outcome: 'succeeded',
-        observedGeneration: 2,
+        observedRevision: 2,
       });
       expect(events).toEqual(['server-created', 'rotation-finished']);
       expect(activeClient.deleteClientCertificate).toHaveBeenCalledWith('11'.repeat(32));
@@ -254,7 +254,7 @@ describePg('certificate rotation server admission serialization', () => {
             resourceType: 'certificate_rotation',
             resourceId: randomUUID(),
             serverId: null,
-            targetGeneration: 2,
+            targetRevision: 2,
           } as never,
           claim: {} as never,
           lease: {} as never,
@@ -362,7 +362,7 @@ describePg('certificate rotation server admission serialization', () => {
             resourceType: 'certificate_rotation',
             resourceId: randomUUID(),
             serverId: null,
-            targetGeneration: 2,
+            targetRevision: 2,
           } as never,
           claim: {} as never,
           lease: {} as never,
@@ -370,7 +370,7 @@ describePg('certificate rotation server admission serialization', () => {
         }),
       ).resolves.toMatchObject({
         outcome: 'succeeded',
-        observedGeneration: 2,
+        observedRevision: 2,
       });
 
       await expect(

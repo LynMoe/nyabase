@@ -131,7 +131,7 @@ describe('container reconciler §15.1 fixture-driven Incus mocks', () => {
     });
 
     const outcome = await reconciler.reconcile(context(client));
-    expect(outcome).toEqual({ outcome: 'succeeded', observedGeneration: 3 });
+    expect(outcome).toEqual({ outcome: 'succeeded', observedRevision: 3 });
     expect(client.readModifyWriteInstance).not.toHaveBeenCalled();
     expect(client.updateInstance).not.toHaveBeenCalled();
     expect(client.createInstance).not.toHaveBeenCalled();
@@ -162,7 +162,7 @@ describe('container reconciler §15.1 fixture-driven Incus mocks', () => {
     });
 
     const outcome = await reconciler.reconcile(context(client));
-    expect(outcome).toEqual({ outcome: 'succeeded', observedGeneration: 3 });
+    expect(outcome).toEqual({ outcome: 'succeeded', observedRevision: 3 });
     expect(client.readModifyWriteInstance).toHaveBeenCalledTimes(1);
     expect(putBodies).toHaveLength(1);
     const put = putBodies[0]!;
@@ -205,7 +205,7 @@ describe('container reconciler §15.1 fixture-driven Incus mocks', () => {
     });
 
     const outcome = await reconciler.reconcile(context(client));
-    expect(outcome).toEqual({ outcome: 'succeeded', observedGeneration: 3 });
+    expect(outcome).toEqual({ outcome: 'succeeded', observedRevision: 3 });
     expect(client.readModifyWriteInstance).toHaveBeenCalledTimes(1);
     const put = putBodies[0]!;
     expect(put.devices[removeName]).toBeUndefined();
@@ -275,7 +275,7 @@ describe('container reconciler §15.1 fixture-driven Incus mocks', () => {
       .mockResolvedValue(syncResponse({ name: 'volume' }));
 
     const outcome = await reconciler.reconcile(context(client));
-    expect(outcome).toEqual({ outcome: 'succeeded', observedGeneration: 3 });
+    expect(outcome).toEqual({ outcome: 'succeeded', observedRevision: 3 });
     expect(client.createStorageVolume).toHaveBeenCalledWith(
       ROOT_POOL,
       expect.objectContaining({
@@ -298,7 +298,7 @@ describe('container reconciler §15.1 fixture-driven Incus mocks', () => {
       powerIntent: 'running',
       attachments: rows,
     });
-    let generation = 3;
+    let revision = 3;
     vi.spyOn(
       reconciler as unknown as { readContainer: () => Promise<unknown> },
       'readContainer',
@@ -313,19 +313,19 @@ describe('container reconciler §15.1 fixture-driven Incus mocks', () => {
       const desired = rows
         .filter((item) => item.bindState !== 'detaching')
         .map((item) => attachmentRows([item])[0]);
-      return { stale: generation > 3, desired };
+      return { stale: revision > 3, desired };
     });
     client.getStorageVolume.mockRejectedValueOnce(
       new IncusError('INCUS_NOT_FOUND', 'managed_failure'),
     );
     client.createStorageVolume.mockImplementation(async () => {
       rows[0] = { ...rows[0]!, bindState: 'detaching' };
-      generation = 4;
+      revision = 4;
       return syncResponse({});
     });
 
     const outcome = await reconciler.reconcile(context(client));
-    expect(outcome).toEqual({ outcome: 'succeeded', observedGeneration: 3 });
+    expect(outcome).toEqual({ outcome: 'succeeded', observedRevision: 3 });
     expect(client.createStorageVolume).toHaveBeenCalled();
     const nydPuts = putBodies.filter((body) => body.devices[addName]);
     expect(nydPuts).toHaveLength(0);
@@ -362,7 +362,7 @@ describe('container reconciler §15.1 fixture-driven Incus mocks', () => {
       new IncusError('INCUS_NOT_FOUND', 'managed_failure'),
     );
     const outcome = await detaching.reconciler.reconcile(context(detaching.client));
-    expect(outcome).toEqual({ outcome: 'succeeded', observedGeneration: 3 });
+    expect(outcome).toEqual({ outcome: 'succeeded', observedRevision: 3 });
     expect(detaching.client.readModifyWriteInstance).toHaveBeenCalledTimes(1);
     expect(detaching.putBodies[0]!.devices[removeName]).toBeUndefined();
     expect(detaching.putBodies[0]!.devices[addName]).toBeUndefined();
@@ -374,8 +374,8 @@ describe('container reconciler §15.1 fixture-driven Incus mocks', () => {
       powerIntent: 'stopped',
       attachments: [attachment(ATTACH_ADD, VOLUME_ADD, '/data/add', 'attaching')],
     });
-    const outcome = await reconciler.reconcile(context(client, { targetGeneration: 2 }));
-    expect(outcome).toEqual({ outcome: 'succeeded', observedGeneration: 2 });
+    const outcome = await reconciler.reconcile(context(client, { targetRevision: 2 }));
+    expect(outcome).toEqual({ outcome: 'succeeded', observedRevision: 2 });
     expect(client.readModifyWriteInstance).not.toHaveBeenCalled();
     expect(client.getStorageVolume).not.toHaveBeenCalled();
   });
@@ -403,7 +403,7 @@ describe('container reconciler §15.1 fixture-driven Incus mocks', () => {
     });
 
     const outcome = await reconciler.reconcile(context(client));
-    expect(outcome).toEqual({ outcome: 'succeeded', observedGeneration: 3 });
+    expect(outcome).toEqual({ outcome: 'succeeded', observedRevision: 3 });
     expect(putBodies[0]!.devices[addName]).toMatchObject({
       type: 'disk',
       path: '/data/add',
@@ -422,8 +422,8 @@ describe('container reconciler §15.1 fixture-driven Incus mocks', () => {
 
     const first = await reconciler.reconcile(context(client));
     const second = await reconciler.reconcile(context(client));
-    expect(first).toEqual({ outcome: 'succeeded', observedGeneration: 3 });
-    expect(second).toEqual({ outcome: 'succeeded', observedGeneration: 3 });
+    expect(first).toEqual({ outcome: 'succeeded', observedRevision: 3 });
+    expect(second).toEqual({ outcome: 'succeeded', observedRevision: 3 });
     expect(client.createInstance).not.toHaveBeenCalled();
     expect(client.getInstanceFull).toHaveBeenCalledWith(expectedName);
     expect(client.listInstances).not.toHaveBeenCalled();
@@ -523,7 +523,7 @@ describe('container reconciler §15.1 fixture-driven Incus mocks', () => {
     });
 
     const outcome = await reconciler.reconcile(context(client));
-    expect(outcome).toEqual({ outcome: 'succeeded', observedGeneration: 3 });
+    expect(outcome).toEqual({ outcome: 'succeeded', observedRevision: 3 });
     expect(client.readModifyWriteInstance).toHaveBeenCalled();
     expect(putBodies.length).toBeGreaterThan(0);
     expect(putBodies[0]?.devices.eth0).toMatchObject({
@@ -621,7 +621,7 @@ describe('container reconciler §15.1 fixture-driven Incus mocks', () => {
     });
 
     const outcome = await reconciler.reconcile(context(client));
-    expect(outcome).toEqual({ outcome: 'succeeded', observedGeneration: 3 });
+    expect(outcome).toEqual({ outcome: 'succeeded', observedRevision: 3 });
     expect(client.createInstance).toHaveBeenCalledOnce();
     expect(audit.log).toHaveBeenCalledWith(
       null,
@@ -733,7 +733,7 @@ function containerRow(options: HarnessOptions) {
     server_id: SERVER_ID,
     owner_id: '33333333-3333-4333-8333-333333333333',
     image_id: '44444444-4444-4444-8444-444444444444',
-    generation: 3,
+    revision: 3,
     image_fingerprint: IMAGE_FINGERPRINT,
     root_size_bytes: String(options.rootSizeBytes ?? 10_737_418_240),
     cpu_millis: 2000,
@@ -773,7 +773,7 @@ function desiredFrom(options: HarnessOptions): DesiredInstanceSpec {
     container: {
       id: CONTAINER_ID,
       serverId: SERVER_ID,
-      generation: 3,
+      revision: 3,
       imageFingerprint: IMAGE_FINGERPRINT,
       cpuMillis: 2000,
       memBytes: 1_073_741_824,
@@ -1017,7 +1017,7 @@ function scanHarness(options: {
   });
   const rows = [{
     id: CONTAINER_ID,
-    generation: 3,
+    revision: 3,
     server_id: SERVER_ID,
     lifecycle_phase: options.lifecyclePhase,
     needs_attention: options.needsAttention,
@@ -1076,7 +1076,7 @@ function context(client: unknown, intentOverrides: Partial<IntentRecord> = {}): 
     serverId: SERVER_ID,
     requestedBy: null,
     request: { source: 'test' },
-    targetGeneration: 3,
+    targetRevision: 3,
     baseline: null,
     blockedByIntentId: null,
     status: IntentStatus.Pending,
@@ -1139,5 +1139,34 @@ describe('ContainerReconciler resource status', () => {
     const sets: Record<string, unknown>[] = [];
     await statusReconciler(sets).markFailure(CONTAINER_ID, { code: 'X', message: 'm' }, false);
     expect(sets[0]).toMatchObject({ needs_attention: false, failure_code: 'X' });
+  });
+});
+
+describe('ContainerReconciler settlement', () => {
+  it('settles a restart by id so a later desired-state success cannot cover it', async () => {
+    const settleOne = vi.fn().mockResolvedValue(true);
+    const settleForObservedRevision = vi.fn().mockResolvedValue({});
+    const reconciler = new ContainerReconciler(
+      {} as never,
+      { settleOne, settleForObservedRevision } as never,
+      new IncusContainerSshStateAdapter(),
+      { notify: vi.fn() } as never,
+      { log: vi.fn() } as never,
+      { register: vi.fn() } as never,
+    );
+    const restart = {
+      id: '55555555-5555-4555-8555-555555555555',
+      kind: IntentKind.ContainerPower,
+      resourceType: IntentResourceType.Container,
+      resourceId: CONTAINER_ID,
+      serverId: SERVER_ID,
+      request: { action: 'restart' },
+    } as unknown as IntentRecord;
+    await reconciler.settle(restart, 4, { outcome: 'succeeded', placementServerId: SERVER_ID });
+    expect(settleOne).toHaveBeenCalledWith(restart.id, expect.objectContaining({ outcome: 'succeeded' }));
+    const options = settleForObservedRevision.mock.calls[0]![5] as {
+      keep: (candidate: { kind: string; request: Record<string, unknown> | null }) => boolean;
+    };
+    expect(options.keep({ kind: IntentKind.ContainerPower, request: { action: 'restart' } })).toBe(true);
   });
 });

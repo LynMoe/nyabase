@@ -31,6 +31,7 @@ import { PG_DATABASE } from '../platform/persistence-pg/tokens.js';
 import type { NyabaseDatabase } from '../platform/persistence-pg/database.types.js';
 import { PgTransactionManager } from '../platform/persistence-pg/transaction.js';
 import { IntentRepository } from '../reconcile/intent.repository.js';
+import { createVolumeIntent } from './volume-intents.js';
 import { ReconcileWakeService } from '../reconcile/reconcile-wake.service.js';
 import { isoDate, lifecyclePhase, numberValue, deterministicName, poolLabel } from '../platform/domain-utils.js';
 import { acceptedIntent } from '../reconcile/accepted-intent.js';
@@ -70,8 +71,8 @@ type VolumeRow = {
   incus_name: string;
   size_bytes: string | number;
   used_bytes: string | number | null;
-  generation: number;
-  observed_generation: number | null;
+  revision: number;
+  observed_revision: number | null;
   lifecycle_phase: string;
   needs_attention: boolean;
   failure_code: string | null;
@@ -547,13 +548,13 @@ export class VolumesService {
             poolId: scope.poolId,
             catalogState: 'ensuring',
           }, transaction);
-          const intent = await this.intents.createPending({
+          const intent = await createVolumeIntent(this.intents, {
             kind: IntentKind.VolumeEnsure,
             resourceType: IntentResourceType.Volume,
             resourceId: row.id,
             serverId: scope.anchorServerId,
             requestedBy: actorId,
-            targetGeneration: row.generation,
+            targetRevision: row.revision,
             request: {
               operation: 'create',
               idempotencyKey: 'create',
@@ -631,7 +632,7 @@ export class VolumesService {
   ): Promise<VolumeDto | IntentAcceptedDto> {
     const current = await this.repository.findById(id);
     this.requireLocal(current, actorId, access);
-    if (current.generation !== input.expectedRevision) {
+    if (current.revision !== input.expectedRevision) {
       throw new ConflictException({ code: FailureCode.RevisionConflict });
     }
     if (current.lifecycle_phase === 'deleting') {
@@ -657,12 +658,12 @@ export class VolumesService {
       }
       const updated = await this.transactions.run(async (transaction) => {
         const locked = await this.repository.findById(id, transaction);
-        if (!locked || locked.generation !== input.expectedRevision) {
+        if (!locked || locked.revision !== input.expectedRevision) {
           throw new ConflictException({ code: FailureCode.RevisionConflict });
         }
         const row = await this.repository.updateDesired(
           id,
-          locked.generation,
+          locked.revision,
           { name: input.name },
           transaction,
         );
@@ -708,7 +709,7 @@ export class VolumesService {
     }
     const changed = await this.transactions.run(async (transaction) => {
       const locked = await this.repository.findById(id, transaction);
-      if (!locked || locked.generation !== input.expectedRevision) {
+      if (!locked || locked.revision !== input.expectedRevision) {
         throw new ConflictException({ code: FailureCode.RevisionConflict });
       }
       const lockedDelta = input.sizeBytes! - numberValue(locked.size_bytes);
@@ -782,7 +783,7 @@ export class VolumesService {
       }
       const row = await this.repository.updateDesired(
         id,
-        locked.generation,
+        locked.revision,
         { ...(input.name === undefined ? {} : { name: input.name }), size_bytes: input.sizeBytes },
         transaction,
       );
@@ -796,13 +797,13 @@ export class VolumesService {
       }
       const intents = [];
       for (const placement of placements) {
-        intents.push(await this.intents.createPending({
+        intents.push(await createVolumeIntent(this.intents, {
           kind: IntentKind.VolumeResize,
           resourceType: IntentResourceType.Volume,
           resourceId: id,
           serverId: placement.server_id,
           requestedBy: actorId,
-          targetGeneration: row.generation,
+          targetRevision: row.revision,
           request: {
             operation: 'resize',
             idempotencyKey: 'resize',
@@ -838,7 +839,7 @@ export class VolumesService {
   ): Promise<SharedVolumeDto | IntentAcceptedDto> {
     const current = await this.repository.findById(id);
     this.requireShared(current, actorId, access);
-    if (current.generation !== input.expectedRevision) {
+    if (current.revision !== input.expectedRevision) {
       throw new ConflictException({ code: FailureCode.RevisionConflict });
     }
     if (current.lifecycle_phase === 'deleting') {
@@ -865,12 +866,12 @@ export class VolumesService {
       const updated = await this.transactions.run(async (transaction) => {
         const locked = await this.repository.findById(id, transaction);
         this.requireShared(locked, actorId, access);
-        if (locked.generation !== input.expectedRevision) {
+        if (locked.revision !== input.expectedRevision) {
           throw new ConflictException({ code: FailureCode.RevisionConflict });
         }
         const row = await this.repository.updateDesired(
           id,
-          locked.generation,
+          locked.revision,
           { name: input.name },
           transaction,
         );
@@ -924,7 +925,7 @@ export class VolumesService {
     const changed = await this.transactions.run(async (transaction) => {
       const locked = await this.repository.findById(id, transaction);
       this.requireShared(locked, actorId, access);
-      if (locked.generation !== input.expectedRevision) {
+      if (locked.revision !== input.expectedRevision) {
         throw new ConflictException({ code: FailureCode.RevisionConflict });
       }
       if (access === 'user') {
@@ -971,7 +972,7 @@ export class VolumesService {
       }
       const row = await this.repository.updateDesired(
         id,
-        locked.generation,
+        locked.revision,
         { ...(input.name === undefined ? {} : { name: input.name }), size_bytes: input.sizeBytes },
         transaction,
       );
@@ -989,13 +990,13 @@ export class VolumesService {
       }
       const intents = [];
       for (const placement of placements) {
-        intents.push(await this.intents.createPending({
+        intents.push(await createVolumeIntent(this.intents, {
           kind: IntentKind.VolumeResize,
           resourceType: IntentResourceType.Volume,
           resourceId: id,
           serverId: placement.server_id,
           requestedBy: actorId,
-          targetGeneration: row.generation,
+          targetRevision: row.revision,
           request: {
             operation: 'resize',
             idempotencyKey: 'resize',
@@ -1204,12 +1205,12 @@ export class VolumesService {
         if (!current.dir_ensured && placements.length === 0) {
           await this.settlePendingVolumeIntents(id, transaction);
           await this.repository.deleteVolumeRow(id, transaction);
-          const intent = await this.intents.createPending({
+          const intent = await createVolumeIntent(this.intents, {
             kind: IntentKind.VolumeDestroy,
             resourceType: IntentResourceType.Volume,
             resourceId: id,
             requestedBy: actorId,
-            targetGeneration: current.generation,
+            targetRevision: current.revision,
             request: {
               operation: 'destroy',
               idempotencyKey: 'destroy',
@@ -1236,12 +1237,12 @@ export class VolumesService {
       if (kind === 'local' && placements.length === 0) {
         await this.settlePendingVolumeIntents(id, transaction);
         await this.repository.deleteVolumeRow(id, transaction);
-        const intent = await this.intents.createPending({
+        const intent = await createVolumeIntent(this.intents, {
           kind: IntentKind.VolumeDestroy,
           resourceType: IntentResourceType.Volume,
           resourceId: id,
           requestedBy: actorId,
-          targetGeneration: current.generation,
+          targetRevision: current.revision,
           request: {
             operation: 'destroy',
             idempotencyKey: 'destroy',
@@ -1256,17 +1257,17 @@ export class VolumesService {
       }
       const row = await this.repository.updateDesired(
         id,
-        current.generation,
+        current.revision,
         { lifecycle_phase: 'deleting', needs_attention: false, failure_code: null },
         transaction,
       );
       if (!row) throw new ConflictException({ code: FailureCode.RevisionConflict });
-      const intent = await this.intents.createPending({
+      const intent = await createVolumeIntent(this.intents, {
         kind: IntentKind.VolumeDestroy,
         resourceType: IntentResourceType.Volume,
         resourceId: id,
         requestedBy: actorId,
-        targetGeneration: row.generation,
+        targetRevision: row.revision,
         request: { operation: 'destroy', idempotencyKey: 'destroy' },
       }, transaction);
       await this.audit.append(transaction, actorId, AuditAction.DeleteVolume, id, 'volume');
@@ -1368,11 +1369,11 @@ export class VolumesService {
       if (!container || (access === 'user' && container.owner_id !== actorId)) {
         throw new NotFoundException('Container not found');
       }
-      const generation = Number(container.generation) + 1;
+      const revision = Number(container.revision) + 1;
       await transaction.updateTable('control.containers')
-        .set({ generation, needs_attention: false })
+        .set({ revision, needs_attention: false })
         .where('id', '=', containerId)
-        .where('generation', '=', container.generation)
+        .where('revision', '=', container.revision)
         .executeTakeFirstOrThrow();
       const attachment = await this.bindAttachmentRow(
         transaction,
@@ -1388,7 +1389,7 @@ export class VolumesService {
         resourceId: containerId,
         serverId: container.server_id,
         requestedBy: actorId,
-        targetGeneration: generation,
+        targetRevision: revision,
         blockedByIntentId: null,
         request: { operation: 'attach_volume', volumeId: input.volumeId, attachmentId: attachment.id },
       }, transaction);
@@ -1598,13 +1599,13 @@ export class VolumesService {
         });
       }
       await this.repository.setAttachmentBindState(attachmentId, 'detaching', transaction);
-      const generation = Number(container.generation) + 1;
+      const revision = Number(container.revision) + 1;
       const updated = await transaction.updateTable('control.containers').set({
-        generation,
+        revision,
         needs_attention: false,
       })
         .where('id', '=', container.id)
-        .where('generation', '=', container.generation)
+        .where('revision', '=', container.revision)
         .returning('id')
         .executeTakeFirst();
       if (!updated) {
@@ -1616,7 +1617,7 @@ export class VolumesService {
         resourceId: container.id,
         serverId: container.server_id,
         requestedBy: actorId,
-        targetGeneration: generation,
+        targetRevision: revision,
         request: { operation: 'detach_volume', attachmentId },
       }, transaction);
       await this.audit.append(
@@ -2533,8 +2534,8 @@ export class VolumesService {
         true,
       ),
       lifecyclePhase: lifecyclePhase(row.lifecycle_phase),
-      generation: row.generation,
-      observedGeneration: row.observed_generation,
+      revision: row.revision,
+      observedRevision: row.observed_revision,
       needsAttention: row.needs_attention,
       failureCode: row.failure_code,
       dirEnsured: row.dir_ensured,
@@ -2568,8 +2569,8 @@ export class VolumesService {
         enforceUsageFloor: false,
       },
       lifecyclePhase: lifecyclePhase(row.lifecycle_phase),
-      generation: row.generation,
-      observedGeneration: row.observed_generation,
+      revision: row.revision,
+      observedRevision: row.observed_revision,
       needsAttention: row.needs_attention,
       failureCode: row.failure_code,
       createdAt: isoDate(row.created_at) ?? new Date(0).toISOString(),

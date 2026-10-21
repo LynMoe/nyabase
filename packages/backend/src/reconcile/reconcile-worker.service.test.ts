@@ -23,7 +23,7 @@ function intent() {
     resourceType: 'container',
     resourceId,
     serverId,
-    targetGeneration: 1,
+    targetRevision: 1,
     status: 'pending',
     attemptCount: 0,
     readyAt: new Date(),
@@ -43,12 +43,6 @@ function claim() {
   } as never;
 }
 
-type BusyStrike = {
-  resource_type: string;
-  resource_id: string;
-  observed_at: Date;
-};
-
 function stubIncusClient(extra: Record<string, unknown> = {}) {
   return {
     getResources: vi.fn().mockResolvedValue({ metadata: {} }),
@@ -56,59 +50,22 @@ function stubIncusClient(extra: Record<string, unknown> = {}) {
   };
 }
 
-/** Only the busy-strike table is the engine's own; everything else is a domain port. */
-function database() {
-  const strikes: BusyStrike[] = [];
-  const selectBuilder = () => {
-    const filters: Array<{ column: string; operator: string; value: unknown }> = [];
-    const builder = {
-      select: vi.fn(() => builder),
-      where: vi.fn((column: string, operator: string, value: unknown) => {
-        filters.push({ column, operator, value });
-        return builder;
-      }),
-      execute: vi.fn(async () => strikes.filter((row) => filters.every((filter) => {
-        const actual = row[filter.column as keyof BusyStrike];
-        if (filter.operator === '>=' && actual instanceof Date && filter.value instanceof Date) {
-          return actual.getTime() >= filter.value.getTime();
-        }
-        return actual === filter.value;
-      }))),
-    };
-    return builder;
-  };
+/**
+ * Busy streaks live on the intent row, so two workers share them through the
+ * repository. This stand-in keeps one streak per intent id the same way.
+ */
+function busyLedger() {
+  const attempts = new Map<string, number>();
   return {
-    strikes,
-    insertInto: vi.fn(() => ({
-      values: vi.fn((value: BusyStrike) => ({
-        execute: vi.fn(async () => {
-          strikes.push({
-            resource_type: value.resource_type,
-            resource_id: value.resource_id,
-            observed_at: value.observed_at instanceof Date
-              ? value.observed_at
-              : new Date(value.observed_at),
-          });
-        }),
-      })),
-    })),
-    deleteFrom: vi.fn(() => {
-      const filters: Array<{ column: string; value: unknown }> = [];
-      const builder = {
-        where: vi.fn((column: string, _operator: string, value: unknown) => {
-          filters.push({ column, value });
-          return builder;
-        }),
-        execute: vi.fn(async () => {
-          const remaining = strikes.filter((row) => !filters.every((filter) => (
-            String(row[filter.column as keyof BusyStrike]) === String(filter.value)
-          )));
-          strikes.splice(0, strikes.length, ...remaining);
-        }),
-      };
-      return builder;
+    attempts,
+    recordBusyAttempt: vi.fn(async (intentId: string) => {
+      const next = (attempts.get(intentId) ?? 0) + 1;
+      attempts.set(intentId, next);
+      return next;
     }),
-    selectFrom: vi.fn(() => selectBuilder()),
+    resetBusyAttempts: vi.fn(async (intentId: string) => {
+      attempts.delete(intentId);
+    }),
   };
 }
 
@@ -122,7 +79,7 @@ function reconcilerFake(overrides: {
     supports: () => true,
     reconcile: overrides.reconcile ?? vi.fn().mockResolvedValue({
       outcome: 'succeeded',
-      observedGeneration: 1,
+      observedRevision: 1,
     }),
     ...(overrides.scan ? { scan: overrides.scan } : {}),
     needsAttention: vi.fn().mockResolvedValue(overrides.needsAttention ?? false),
@@ -150,7 +107,7 @@ function makeWorker(overrides: {
   reconcile?: () => Promise<unknown>;
   scan?: () => Promise<void>;
   wake?: { onWake: (listener: (payload: { reason: string }) => void) => () => void; wake: () => void };
-  database?: ReturnType<typeof database>;
+  busy?: ReturnType<typeof busyLedger>;
   clients?: { get: ReturnType<typeof vi.fn>; listServerIds: ReturnType<typeof vi.fn> };
   reconciler?: ReturnType<typeof reconcilerFake>;
   serverHealth?: ReturnType<typeof serverHealthFake>;
@@ -160,10 +117,13 @@ function makeWorker(overrides: {
     items: [intent()],
     nextCursor: null,
   });
+  const busy = overrides.busy ?? busyLedger();
   const intents = {
     listPending,
+    recordBusyAttempt: busy.recordBusyAttempt,
+    resetBusyAttempts: busy.resetBusyAttempts,
     scheduleRetry: vi.fn().mockResolvedValue(undefined),
-    settleForObservedGeneration: vi.fn().mockResolvedValue(undefined),
+    settleForObservedRevision: vi.fn().mockResolvedValue(undefined),
     settleOne: vi.fn().mockResolvedValue(true),
   };
   const withLease = vi.fn(async (
@@ -217,10 +177,10 @@ function makeWorker(overrides: {
     registry as never,
     clients as never,
     wake as never,
-    (overrides.database ?? database()) as never,
   );
   return {
     worker,
+    busy,
     intents,
     claims,
     reconciler,
@@ -237,29 +197,33 @@ describe('ReconcileWorkerService', () => {
   });
 
   it('persists five busy strikes and trips the breaker on a fresh worker', async () => {
-    const db = database();
+    const busy = busyLedger();
     const reconciler = reconcilerFake({
       reconcile: vi.fn().mockRejectedValue(new IncusError('INSTANCE_BUSY', 'retry', { action: 'start' })),
     });
-    const first = makeWorker({ reconciler, database: db });
+    const first = makeWorker({ reconciler, busy });
 
     for (let attempt = 0; attempt < 4; attempt += 1) {
       await first.worker.runOnce();
     }
     expect(reconciler.markFailure).not.toHaveBeenCalled();
-    expect(db.strikes).toHaveLength(4);
+    expect([...busy.attempts.values()]).toEqual([4]);
 
-    const second = makeWorker({ reconciler, database: db });
+    const second = makeWorker({ reconciler, busy });
     await second.worker.runOnce();
 
-    expect(db.strikes).toHaveLength(5);
+    expect([...busy.attempts.values()]).toEqual([5]);
+    expect(busy.recordBusyAttempt).toHaveBeenCalledWith(
+      '00000000-0000-4000-8000-000000000003',
+      300_000,
+    );
     expect(reconciler.markFailure).toHaveBeenCalledOnce();
     expect(reconciler.markFailure).toHaveBeenCalledWith(
       resourceId,
       expect.objectContaining({ code: 'RESOURCE_NEEDS_ATTENTION' }),
       true,
     );
-    expect(second.intents.settleForObservedGeneration).toHaveBeenCalledWith(
+    expect(second.intents.settleForObservedRevision).toHaveBeenCalledWith(
       'container',
       resourceId,
       1,
@@ -270,6 +234,65 @@ describe('ReconcileWorkerService', () => {
     );
     expect(first.intents.scheduleRetry).toHaveBeenCalledTimes(4);
     expect(second.intents.scheduleRetry).not.toHaveBeenCalled();
+  });
+
+  it('ends the busy streak when the intent is retried for another reason', async () => {
+    const busy = new IncusError('INSTANCE_BUSY', 'retry', { action: 'start' });
+    const reconcile = vi.fn()
+      .mockRejectedValueOnce(busy)
+      .mockRejectedValueOnce(busy)
+      .mockRejectedValueOnce(busy)
+      .mockRejectedValueOnce(new IncusError('GUEST_NOT_READY', 'retry', {}))
+      .mockRejectedValue(busy);
+    const reconciler = reconcilerFake({ reconcile });
+    const setup = makeWorker({ reconciler });
+    for (let attempt = 0; attempt < 8; attempt += 1) {
+      await setup.worker.runOnce();
+    }
+    // 3 busy, reset, 4 busy: five busy strikes in total but never five in a row.
+    expect(setup.busy.resetBusyAttempts).toHaveBeenCalledOnce();
+    expect([...setup.busy.attempts.values()]).toEqual([4]);
+    expect(reconciler.markFailure).not.toHaveBeenCalled();
+    expect(setup.intents.scheduleRetry).toHaveBeenCalledTimes(8);
+  });
+
+  it.each(['SERVER_UNREACHABLE', 'TLS_ERROR'] as const)(
+    'does not count or reset on %s',
+    async (code) => {
+      const busy = new IncusError('INSTANCE_BUSY', 'retry', { action: 'start' });
+      const reconcile = vi.fn()
+        .mockRejectedValueOnce(busy)
+        .mockRejectedValueOnce(busy)
+        .mockRejectedValueOnce(new IncusError(code, 'retry', {}))
+        .mockRejectedValue(busy);
+      const reconciler = reconcilerFake({ reconcile });
+      const setup = makeWorker({ reconciler });
+      for (let attempt = 0; attempt < 6; attempt += 1) {
+        await setup.worker.runOnce();
+      }
+      expect(setup.busy.recordBusyAttempt).toHaveBeenCalledTimes(5);
+      expect(setup.busy.resetBusyAttempts).not.toHaveBeenCalled();
+      // Five busy strikes around one unreachable attempt trip the breaker on the sixth run.
+      expect(reconciler.markFailure).toHaveBeenCalledOnce();
+      expect(reconciler.markFailure).toHaveBeenCalledWith(
+        resourceId,
+        expect.objectContaining({ code: 'RESOURCE_NEEDS_ATTENTION' }),
+        true,
+      );
+    },
+  );
+
+  it('lets a reconciler settle its own intents instead of the default sweep', async () => {
+    const settle = vi.fn().mockResolvedValue(undefined);
+    const reconciler = { ...reconcilerFake(), settle };
+    const setup = makeWorker({ reconciler: reconciler as never });
+    await setup.worker.runOnce();
+    expect(settle).toHaveBeenCalledWith(
+      expect.objectContaining({ id: '00000000-0000-4000-8000-000000000003' }),
+      1,
+      expect.objectContaining({ outcome: 'succeeded', placementServerId: serverId }),
+    );
+    expect(setup.intents.settleForObservedRevision).not.toHaveBeenCalled();
   });
 
   it('does not claim or hit Incus when the resource needs attention', async () => {
@@ -299,16 +322,15 @@ describe('ReconcileWorkerService', () => {
   it.each(['SSH_DAEMON_PENDING', 'GUEST_NOT_READY'] as const)(
     'does not count %s as Incus lock busy strikes',
     async (code) => {
-      const db = database();
       const reconciler = reconcilerFake({
         reconcile: vi.fn().mockRejectedValue(new IncusError(code, 'retry', {})),
       });
-      const setup = makeWorker({ reconciler, database: db });
+      const setup = makeWorker({ reconciler });
       for (let attempt = 0; attempt < 5; attempt += 1) {
         await setup.worker.runOnce();
       }
       expect(reconciler.markFailure).not.toHaveBeenCalled();
-      expect(db.strikes).toHaveLength(0);
+      expect(setup.busy.recordBusyAttempt).not.toHaveBeenCalled();
       expect(setup.intents.scheduleRetry).toHaveBeenCalledTimes(5);
     },
   );
@@ -360,7 +382,7 @@ describe('ReconcileWorkerService', () => {
     const setup = makeWorker({ serverHealth });
     await setup.worker.runOnce();
     expect(setup.reconciler.reconcile).not.toHaveBeenCalled();
-    expect(setup.intents.settleForObservedGeneration).toHaveBeenCalledWith(
+    expect(setup.intents.settleForObservedRevision).toHaveBeenCalledWith(
       'container',
       resourceId,
       1,
@@ -368,30 +390,11 @@ describe('ReconcileWorkerService', () => {
     );
   });
 
-  it('does not settle restart intents by id on a desired-state success', async () => {
+  it('sweeps every pending intent up to the observed revision by default', async () => {
     const setup = makeWorker();
     await setup.worker.runOnce();
-    expect(setup.intents.settleForObservedGeneration).toHaveBeenCalledOnce();
+    expect(setup.intents.settleForObservedRevision).toHaveBeenCalledOnce();
     expect(setup.intents.settleOne).not.toHaveBeenCalled();
-  });
-
-  it('settles a restart intent by id and then coalesces desired-state intents', async () => {
-    const restart = {
-      ...intent(),
-      kind: 'container.power',
-      request: { action: 'restart' },
-      baseline: { startedAt: '2026-01-01T00:00:00.000Z' },
-    };
-    const setup = makeWorker();
-    setup.listPending.mockResolvedValue({ items: [restart], nextCursor: null });
-    await setup.worker.runOnce();
-    expect(setup.intents.settleOne).toHaveBeenCalledWith(restart.id, { outcome: 'succeeded' });
-    expect(setup.intents.settleForObservedGeneration).toHaveBeenCalledWith(
-      'container',
-      resourceId,
-      1,
-      { outcome: 'succeeded', placementServerId: serverId },
-    );
   });
 
   it.each(['SERVER_UNREACHABLE', 'INCUS_TIMEOUT'] as const)(

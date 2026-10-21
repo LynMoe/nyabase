@@ -727,7 +727,7 @@ async function ensureAssignment(token, image, serverId, priorImage) {
     && priorImage.assignmentId === current?.id
     && priorImage.id === image.id
   );
-  const body = current ? { expectedGeneration: current.generation } : {};
+  const body = current ? { expectedRevision: current.revision } : {};
   const result = await jsonRequest(`/api/admin/images/${image.id}/assignments/${serverId}`, {
     method: 'PUT',
     token,

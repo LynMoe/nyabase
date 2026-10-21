@@ -1,12 +1,13 @@
 import { Inject, Injectable } from '@nestjs/common';
-import { randomUUID } from 'node:crypto';
 import { sql, type Kysely, type Transaction } from 'kysely';
 import type { NyabaseDatabase } from '../platform/persistence-pg/database.types.js';
 import { PG_DATABASE } from '../platform/persistence-pg/tokens.js';
 import { PgTransactionManager } from '../platform/persistence-pg/transaction.js';
-
-/** Lease long enough for stop/purge enqueue, not full container drain. */
-export const GRANT_EXPIRY_CLAIM_LEASE_MS = 3 * 60_000;
+import {
+  ReconcileClaimRepository,
+  type LeaseGuard,
+  type ReconcileClaim,
+} from '../reconcile/reconcile-claim.repository.js';
 
 export type GrantExpiryClaimPhase = 'grace' | 'lost';
 
@@ -14,13 +15,15 @@ export interface GrantExpiryClaim {
   userId: string;
   serverId: string;
   coveringExpiresAt: Date;
-  claimToken: string;
   phase: GrantExpiryClaimPhase;
+  lease: LeaseGuard;
 }
 
 /**
- * Multi-replica-safe lease claims for grant-expiry one-shot work.
- * Matches the outbox/finalizer pattern: claim_token + claimed_by + lease_expires_at.
+ * Completion ledger for grant-expiry one-shot work. In-flight ownership is a
+ * `reconcile_claims` lease (resource_type grant_expiry, resource_id user,
+ * placement server), the same single-owner, expiring, renewable mechanism the
+ * reconcile engine uses, so a crashed worker's claim simply expires.
  */
 @Injectable()
 export class GrantExpiryEnforcementRepository {
@@ -28,6 +31,7 @@ export class GrantExpiryEnforcementRepository {
     @Inject(PG_DATABASE)
     private readonly database: Kysely<NyabaseDatabase>,
     private readonly transactions: PgTransactionManager,
+    private readonly claims: ReconcileClaimRepository,
   ) {}
 
   async ensureRow(
@@ -46,8 +50,8 @@ export class GrantExpiryEnforcementRepository {
   }
 
   /**
-   * Atomically reserve in-flight work. Returns null when already completed or
-   * another worker holds an unexpired lease.
+   * Reserve in-flight work for one (user, server) pair. Returns null when the
+   * phase already completed or another worker holds an unexpired lease.
    */
   async claim(
     phase: GrantExpiryClaimPhase,
@@ -55,105 +59,73 @@ export class GrantExpiryEnforcementRepository {
     serverId: string,
     coveringExpiresAt: Date,
     workerId: string,
-    leaseMs = GRANT_EXPIRY_CLAIM_LEASE_MS,
   ): Promise<GrantExpiryClaim | null> {
     await this.ensureRow(userId, serverId, coveringExpiresAt);
-    const claimToken = randomUUID();
-    const row = phase === 'grace'
-      ? await sql<{ claim_token: string; covering_expires_at: Date }>`
-          UPDATE control.grant_expiry_enforcement
-          SET
-            claim_token = ${claimToken}::uuid,
-            claimed_by = ${workerId},
-            lease_expires_at = clock_timestamp() + (${leaseMs} * interval '1 millisecond'),
-            updated_at = clock_timestamp()
-          WHERE user_id = ${userId}::uuid
-            AND server_id = ${serverId}
-            AND covering_expires_at = ${coveringExpiresAt}
-            AND grace_stopped_at IS NULL
-            AND (
-              claim_token IS NULL
-              OR lease_expires_at <= clock_timestamp()
-            )
-          RETURNING claim_token, covering_expires_at
-        `.execute(this.database)
-      : await sql<{ claim_token: string; covering_expires_at: Date }>`
-          UPDATE control.grant_expiry_enforcement
-          SET
-            claim_token = ${claimToken}::uuid,
-            claimed_by = ${workerId},
-            lease_expires_at = clock_timestamp() + (${leaseMs} * interval '1 millisecond'),
-            updated_at = clock_timestamp()
-          WHERE user_id = ${userId}::uuid
-            AND server_id = ${serverId}
-            AND covering_expires_at = ${coveringExpiresAt}
-            AND purged_at IS NULL
-            AND (
-              claim_token IS NULL
-              OR lease_expires_at <= clock_timestamp()
-            )
-          RETURNING claim_token, covering_expires_at
-        `.execute(this.database);
-    const claimed = row.rows[0];
-    if (!claimed) return null;
-    return {
+    const lease = await this.claims.claim({
+      resourceType: 'grant_expiry',
+      resourceId: userId,
+      placementServerId: serverId,
+      serverId,
+      workerId,
+    });
+    if (!lease) return null;
+    const claim: GrantExpiryClaim = {
       userId,
       serverId,
-      coveringExpiresAt: claimed.covering_expires_at,
-      claimToken: claimed.claim_token,
+      coveringExpiresAt,
       phase,
+      lease: this.claims.startLeaseGuard(lease),
     };
+    const row = await this.database
+      .selectFrom('control.grant_expiry_enforcement')
+      .select(['grace_stopped_at', 'purged_at'])
+      .where('user_id', '=', userId)
+      .where('server_id', '=', serverId)
+      .where('covering_expires_at', '=', coveringExpiresAt)
+      .executeTakeFirst();
+    if (!GrantExpiryEnforcementRepository.isDueForWork(phase, row)) {
+      await this.release(claim);
+      return null;
+    }
+    return claim;
+  }
+
+  /** True while this worker still owns the unexpired lease; the row is locked until commit. */
+  private async holdsLease(
+    transaction: Transaction<NyabaseDatabase>,
+    claim: GrantExpiryClaim,
+  ): Promise<boolean> {
+    const current = claim.lease.claim;
+    const row = await transaction
+      .selectFrom('control.reconcile_claims')
+      .select('worker_id')
+      .where('resource_type', '=', current.resourceType)
+      .where('resource_id', '=', current.resourceId)
+      .where('placement_server_id', '=', current.placementServerId)
+      .where('worker_id', '=', current.workerId)
+      .where('lease_expires_at', '>', sql<Date>`clock_timestamp()`)
+      .forUpdate()
+      .executeTakeFirst();
+    return row !== undefined;
   }
 
   /**
-   * Complete grace stop while holding claim_token. Returns true when this
-   * claim won completion (caller should write GrantExpired in the same TX).
+   * Complete grace stop while holding the lease. Returns true when this claim
+   * won completion (caller should write GrantExpired in the same TX).
    */
   async completeGraceInTransaction(
     transaction: Transaction<NyabaseDatabase>,
     claim: GrantExpiryClaim,
   ): Promise<boolean> {
-    const result = await transaction
-      .updateTable('control.grant_expiry_enforcement')
-      .set({
-        grace_stopped_at: sql`clock_timestamp()`,
-        claim_token: null,
-        claimed_by: null,
-        lease_expires_at: null,
-        updated_at: sql`clock_timestamp()`,
-      })
-      .where('user_id', '=', claim.userId)
-      .where('server_id', '=', claim.serverId)
-      .where('covering_expires_at', '=', claim.coveringExpiresAt)
-      .where('claim_token', '=', claim.claimToken)
-      .where('grace_stopped_at', 'is', null)
-      .executeTakeFirst();
-    return Number(result.numUpdatedRows) === 1;
+    return this.complete(transaction, claim, 'grace_stopped_at');
   }
 
-  /**
-   * Complete lost purge while holding claim_token.
-   */
+  /** Complete lost purge while holding the lease. */
   async completeLostInTransaction(
     transaction: Transaction<NyabaseDatabase>,
     claim: GrantExpiryClaim,
   ): Promise<boolean> {
-    const result = await transaction
-      .updateTable('control.grant_expiry_enforcement')
-      .set({
-        purged_at: sql`clock_timestamp()`,
-        claim_token: null,
-        claimed_by: null,
-        lease_expires_at: null,
-        updated_at: sql`clock_timestamp()`,
-      })
-      .where('user_id', '=', claim.userId)
-      .where('server_id', '=', claim.serverId)
-      .where('covering_expires_at', '=', claim.coveringExpiresAt)
-      .where('claim_token', '=', claim.claimToken)
-      .where('purged_at', 'is', null)
-      .executeTakeFirst();
-    return Number(result.numUpdatedRows) === 1;
+    return this.complete(transaction, claim, 'purged_at');
   }
 
   async completeLost(claim: GrantExpiryClaim): Promise<boolean> {
@@ -161,42 +133,48 @@ export class GrantExpiryEnforcementRepository {
       this.completeLostInTransaction(transaction, claim));
   }
 
-  /** Drop an in-flight lease so a failed attempt can be retried on the next pass. */
-  async release(claim: GrantExpiryClaim): Promise<void> {
-    await this.database
+  private async complete(
+    transaction: Transaction<NyabaseDatabase>,
+    claim: GrantExpiryClaim,
+    column: 'grace_stopped_at' | 'purged_at',
+  ): Promise<boolean> {
+    if (!await this.holdsLease(transaction, claim)) return false;
+    const result = await transaction
       .updateTable('control.grant_expiry_enforcement')
       .set({
-        claim_token: null,
-        claimed_by: null,
-        lease_expires_at: null,
+        [column]: sql`clock_timestamp()`,
         updated_at: sql`clock_timestamp()`,
       })
       .where('user_id', '=', claim.userId)
       .where('server_id', '=', claim.serverId)
       .where('covering_expires_at', '=', claim.coveringExpiresAt)
-      .where('claim_token', '=', claim.claimToken)
-      .execute();
+      .where(column, 'is', null)
+      .executeTakeFirst();
+    return Number(result.numUpdatedRows) === 1;
   }
 
-  /** True when incomplete and no unexpired foreign lease is held. */
+  /** Stop renewing and drop the lease so a failed attempt can be retried on the next pass. */
+  async release(claim: GrantExpiryClaim): Promise<void> {
+    claim.lease.stop();
+    const current: ReconcileClaim = claim.lease.claim;
+    await this.claims.release({
+      resourceType: current.resourceType,
+      resourceId: current.resourceId,
+      placementServerId: current.placementServerId,
+      workerId: current.workerId,
+    });
+  }
+
+  /** True while the phase has not been completed for this covering grant. */
   static isDueForWork(
     phase: GrantExpiryClaimPhase,
     row: {
       grace_stopped_at: Date | null;
       purged_at: Date | null;
-      claim_token: string | null;
-      lease_expires_at: Date | null;
     } | undefined,
-    now: Date,
   ): boolean {
-    if (phase === 'grace') {
-      if (row?.grace_stopped_at != null) return false;
-    } else if (row?.purged_at != null) {
-      return false;
-    }
-    if (row?.claim_token == null) return true;
-    const lease = row.lease_expires_at;
-    if (lease == null) return true;
-    return lease.getTime() <= now.getTime();
+    return phase === 'grace'
+      ? row?.grace_stopped_at == null
+      : row?.purged_at == null;
   }
 }

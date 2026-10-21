@@ -525,7 +525,7 @@ export class InfrastructureRepository {
 
   updateImageAssignment(
     id: string,
-    expectedGeneration: number,
+    expectedRevision: number,
     patch: Updateable<InfrastructureImageServerAssignmentTable>,
     executor: InfrastructureExecutor = this.database,
   ) {
@@ -533,11 +533,11 @@ export class InfrastructureRepository {
       .updateTable('infra.image_server_assignments')
       .set({
         ...patch,
-        generation: expectedGeneration + 1,
+        revision: expectedRevision + 1,
         updated_at: new Date(),
       })
       .where('id', '=', id)
-      .where('generation', '=', expectedGeneration)
+      .where('revision', '=', expectedRevision)
       .returningAll()
       .executeTakeFirst();
   }
