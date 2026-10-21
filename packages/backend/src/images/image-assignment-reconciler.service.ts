@@ -1,12 +1,10 @@
-import { Inject, Injectable, OnModuleInit } from '@nestjs/common';
+import { Injectable, OnModuleInit } from '@nestjs/common';
 import { Capability } from '@nyabase/common';
-import type { Kysely } from 'kysely';
-import type { NyabaseDatabase } from '../platform/persistence-pg/database.types.js';
-import { PG_DATABASE } from '../platform/persistence-pg/tokens.js';
 import { AuditService } from '../iam/audit.service.js';
 import { NyabaseConfigService } from '../platform/config/nyabase-config.service.js';
 import { IncusError, type IncusClientPort } from '../incus/index.js';
 import { IntentRepository, type IntentFailure, type IntentRecord } from '../reconcile/intent.repository.js';
+import { intentFailure } from '../reconcile/intent-model.js';
 import type {
   ManagedReconciler,
   ReconcileOutcome,
@@ -33,14 +31,6 @@ import {
 
 const CLEANUP_RETRY_MS = 5_000;
 
-function imageFailure(
-  code: string,
-  message: string,
-  details: Record<string, unknown> = {},
-): IntentFailure {
-  return { code, message, details };
-}
-
 /**
  * Keeps each server's copy of a catalog image in line with the desired
  * fingerprint: pull, alias, supersede the previous copy, and remove copies
@@ -51,10 +41,9 @@ export class ImageAssignmentReconciler implements ManagedReconciler, OnModuleIni
   readonly resourceType = 'image_assignment' as const;
   private readonly source: ImageAssignmentSource;
   private readonly pulls = new Map<string, Promise<void>>();
-  private readonly store: ImageReconcileStore;
 
   constructor(
-    @Inject(PG_DATABASE) database: Kysely<NyabaseDatabase>,
+    private readonly store: ImageReconcileStore,
     config: NyabaseConfigService,
     private readonly intents: IntentRepository,
     private readonly audit: AuditService,
@@ -66,7 +55,6 @@ export class ImageAssignmentReconciler implements ManagedReconciler, OnModuleIni
       fingerprint: null,
       sourceServer: dedicated || config.get<string>('incus.preflightSourceServer'),
     };
-    this.store = new ImageReconcileStore(database);
   }
 
   onModuleInit(): void {
@@ -178,7 +166,7 @@ export class ImageAssignmentReconciler implements ManagedReconciler, OnModuleIni
       }
       return {
         outcome: 'failed',
-        failure: imageFailure(
+        failure: intentFailure(
           'IMAGE_ASSIGNMENT_NOT_FOUND',
           'The image assignment no longer exists',
         ),
@@ -187,7 +175,7 @@ export class ImageAssignmentReconciler implements ManagedReconciler, OnModuleIni
     if (context.intent.serverId && context.intent.serverId !== assignment.server_id) {
       return {
         outcome: 'failed',
-        failure: imageFailure(
+        failure: intentFailure(
           'IMAGE_ASSIGNMENT_SERVER_MISMATCH',
           'The image assignment intent targets another server',
         ),
@@ -230,7 +218,7 @@ export class ImageAssignmentReconciler implements ManagedReconciler, OnModuleIni
     if (leftover) {
       return {
         outcome: 'failed',
-        failure: imageFailure(
+        failure: intentFailure(
           'IMAGE_IN_USE',
           'Stop and delete instances still pinned to the previous image fingerprint',
           {
@@ -247,7 +235,7 @@ export class ImageAssignmentReconciler implements ManagedReconciler, OnModuleIni
     if (!fingerprint) {
       return {
         outcome: 'failed',
-        failure: imageFailure('IMAGE_FINGERPRINT_MISSING', 'Incus returned an image without a fingerprint'),
+        failure: intentFailure('IMAGE_FINGERPRINT_MISSING', 'Incus returned an image without a fingerprint'),
       };
     }
     if (
@@ -257,7 +245,7 @@ export class ImageAssignmentReconciler implements ManagedReconciler, OnModuleIni
     ) {
       return {
         outcome: 'failed',
-        failure: imageFailure(
+        failure: intentFailure(
           'IMAGE_ASSIGNMENT_FINGERPRINT_MISMATCH',
           'The server image does not match the desired fingerprint',
           { desiredFingerprint: desired.fingerprint, observedFingerprint: fingerprint },
@@ -284,7 +272,7 @@ export class ImageAssignmentReconciler implements ManagedReconciler, OnModuleIni
     if (previousInUse) {
       return {
         outcome: 'failed',
-        failure: imageFailure(
+        failure: intentFailure(
           'IMAGE_IN_USE',
           'Stop and delete instances still using the previous image fingerprint',
           {
@@ -311,7 +299,7 @@ export class ImageAssignmentReconciler implements ManagedReconciler, OnModuleIni
       if (isNotFound(error)) {
         return {
           outcome: 'failed',
-          failure: imageFailure(
+          failure: intentFailure(
             'IMAGE_NOT_AVAILABLE',
             `The image alias ${desired.alias} is not available from the image server`,
           ),
@@ -320,7 +308,7 @@ export class ImageAssignmentReconciler implements ManagedReconciler, OnModuleIni
       if (error instanceof ImagePullNotConfirmedError) {
         return {
           outcome: 'failed',
-          failure: imageFailure(error.code, error.message, error.details),
+          failure: intentFailure(error.code, error.message, error.details),
         };
       }
       throw error;
@@ -331,12 +319,12 @@ export class ImageAssignmentReconciler implements ManagedReconciler, OnModuleIni
     return {
       outcome: 'failed',
       failure: desired.fingerprint !== null && desired.fingerprint !== undefined
-        ? imageFailure(
+        ? intentFailure(
           'IMAGE_ASSIGNMENT_FINGERPRINT_MISMATCH',
           'The server image did not match the pinned fingerprint after the pull',
           { desiredFingerprint: desired.fingerprint },
         )
-        : imageFailure(
+        : intentFailure(
           'IMAGE_NOT_AVAILABLE',
           `The image alias ${desired.alias} was not present after the pull`,
         ),
@@ -384,7 +372,7 @@ export class ImageAssignmentReconciler implements ManagedReconciler, OnModuleIni
       if (imageUsedBy(managedImage).length > 0) {
         return {
           outcome: 'failed',
-          failure: imageFailure(
+          failure: intentFailure(
             'IMAGE_IN_USE',
             'Stop and delete instances still using the managed image fingerprint',
             { managedFingerprint: managed, observedFingerprint: imageFingerprint(selected) },
@@ -436,7 +424,7 @@ export class ImageAssignmentReconciler implements ManagedReconciler, OnModuleIni
     ) {
       return {
         outcome: 'failed',
-        failure: imageFailure(
+        failure: intentFailure(
           'IMAGE_ASSIGNMENT_NOT_FOUND',
           'The image assignment no longer exists',
         ),
@@ -447,7 +435,7 @@ export class ImageAssignmentReconciler implements ManagedReconciler, OnModuleIni
       return {
         outcome: 'retry',
         retryAfterMs: CLEANUP_RETRY_MS,
-        failure: imageFailure(
+        failure: intentFailure(
           'IMAGE_CLEANUP_ASSIGNMENTS_PRESENT',
           'The image still has server assignments to clean up',
           { assignmentCount: assignments.length },
@@ -459,7 +447,7 @@ export class ImageAssignmentReconciler implements ManagedReconciler, OnModuleIni
       return {
         outcome: 'retry',
         retryAfterMs: CLEANUP_RETRY_MS,
-        failure: imageFailure(
+        failure: intentFailure(
           'IMAGE_CLEANUP_CONTAINER_PRESENT',
           'The inactive image is still referenced by a container',
           { containerId: retainedContainer.id },
@@ -495,7 +483,7 @@ export class ImageAssignmentReconciler implements ManagedReconciler, OnModuleIni
       return {
         outcome: 'retry',
         retryAfterMs: CLEANUP_RETRY_MS,
-        failure: imageFailure(
+        failure: intentFailure(
           'IMAGE_CLEANUP_BLOCKED',
           'The inactive image is still used by an Incus resource',
           { fingerprint, usedBy },

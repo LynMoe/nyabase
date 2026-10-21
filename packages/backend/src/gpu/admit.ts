@@ -13,6 +13,7 @@ import {
   zPatchContainerGpusRequest,
   type GpuContainerState,
 } from '@nyabase/common';
+import { isRecord } from '../platform/domain-utils.js';
 
 export interface GpuClaimsPort {
   /** Replace this container's claimed PCI addresses (container-scoped ports only). */
@@ -106,10 +107,6 @@ export function parsePciAddressList(value: unknown): string[] {
     throw gpuBadRequest(FailureCode.GpuInvalidPci, 'Too many GPU PCI addresses');
   }
   return result;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
 /** Parse the body of `PATCH /containers/:id/gpus`. */

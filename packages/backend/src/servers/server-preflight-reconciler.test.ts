@@ -1,6 +1,8 @@
 import { createHash } from 'node:crypto';
 import { describe, expect, it, vi } from 'vitest';
 import { deriveInstanceHwaddr, IncusError } from '../incus/index.js';
+import { ServerConnector } from './server-connector.js';
+import { ServerPreflightStore } from './server-preflight.store.js';
 import { ServerPreflightReconciler } from './server-preflight-reconciler.service.js';
 import { evaluateLanBridge } from './preflight-checks.adapter.js';
 import { cleanupStaleProbe } from './server-preflight-probe.js';
@@ -182,8 +184,10 @@ function reconciler(
     releaseClaimedTrustToken: vi.fn().mockReturnValue(true),
   },
 ) {
+  const store = new ServerPreflightStore(db as never);
   return new ServerPreflightReconciler(
-    db as never,
+    store,
+    new ServerConnector(store, trustTokens as never),
     {
       pull: vi.fn(),
     } as never,
@@ -192,7 +196,6 @@ function reconciler(
       checkEgress: vi.fn(),
       checkGuestCanReachHost: vi.fn(),
     } as never,
-    trustTokens as never,
     {
       get: vi.fn(
         (key: string) =>

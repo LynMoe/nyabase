@@ -1,4 +1,6 @@
+import { Inject, Injectable } from '@nestjs/common';
 import { sql, type Kysely } from 'kysely';
+import { PG_DATABASE } from '../platform/persistence-pg/tokens.js';
 import type { NyabaseDatabase } from '../platform/persistence-pg/database.types.js';
 import type { IntentFailure } from '../reconcile/intent.repository.js';
 import { sameFingerprint } from './image-assignment-ops.js';
@@ -38,8 +40,9 @@ const ASSIGNMENT_COLUMNS = [
 ] as const;
 
 /** Every SQL statement the image assignment reconciler issues. */
+@Injectable()
 export class ImageReconcileStore {
-  constructor(private readonly database: Kysely<NyabaseDatabase>) {}
+  constructor(@Inject(PG_DATABASE) private readonly database: Kysely<NyabaseDatabase>) {}
 
   // --- ManagedReconciler state -------------------------------------------------
 

@@ -191,6 +191,14 @@ export function boundedJsonObject(
   };
 }
 
+export function intentFailure(
+  code: string,
+  message: string,
+  details: Record<string, unknown> = {},
+): IntentFailure {
+  return { code, message, details };
+}
+
 export function boundedFailure(failure: IntentFailure): IntentFailure {
   const code = String(failure.code).slice(0, 128);
   const message = String(failure.message).slice(0, 4096);

@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import { isIP } from 'node:net';
 import type { IncusSchema } from './incus-client-types.js';
 import { IncusError, type IncusErrorDetails, type IncusFailureCode } from './incus-errors.js';
+import { isRecord } from '../platform/domain-utils.js';
 
 export type InstanceSpecInteger = string | number | bigint;
 
@@ -352,10 +353,6 @@ const MEMORY_UNITS: Readonly<Record<string, bigint>> = {
   tb: 1000n ** 4n,
   tib: 1024n ** 4n,
 };
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
-}
 
 function copyStringMap(value: unknown): ManagedStringMap {
   if (!isRecord(value)) return {};

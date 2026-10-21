@@ -1,4 +1,4 @@
-import { Inject, Injectable, OnModuleInit } from '@nestjs/common';
+import { Injectable, OnModuleInit } from '@nestjs/common';
 import {
   Capability,
   FailureCode,
@@ -6,13 +6,11 @@ import {
   type NodeMetricSample,
   type PreflightReport,
 } from '@nyabase/common';
-import { Kysely, sql } from 'kysely';
-import type { NyabaseDatabase } from '../platform/persistence-pg/database.types.js';
-import { PG_DATABASE } from '../platform/persistence-pg/tokens.js';
+import { sql } from 'kysely';
 import { IncusError, type IncusClientPort, type IncusSchema } from '../incus/index.js';
-import { EphemeralStore } from '../platform/ephemeral-store.js';
 import { NyabaseConfigService } from '../platform/config/nyabase-config.service.js';
-import type { IntentFailure, IntentRecord } from '../reconcile/intent.repository.js';
+import type { IntentRecord } from '../reconcile/intent.repository.js';
+import { intentFailure } from '../reconcile/intent-model.js';
 import type {
   ManagedReconciler,
   ReconcileOutcome,
@@ -39,6 +37,7 @@ import {
   type ServerRow,
 } from './server-preflight.store.js';
 import { gpuPreflight } from '../gpu/inventory.js';
+import { isRecord } from '../platform/domain-utils.js';
 
 /** The first node-metrics pull: its outcome, or the failure that downgrades the check to a warning. */
 interface MetricsEvidence {
@@ -51,18 +50,6 @@ interface NodeMetricsPull {
   readonly report?: Record<string, unknown> & {
     readonly samples?: readonly NodeMetricSample[];
   };
-}
-
-function preflightFailure(
-  code: string,
-  message: string,
-  details: Record<string, unknown> = {},
-): IntentFailure {
-  return { code, message, details };
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
 function successReport(checks: ReportChecks, gpu?: Record<string, unknown>): PreflightReport {
@@ -125,20 +112,15 @@ function staleOutcome(intent: IntentRecord): ReconcileOutcome {
 @Injectable()
 export class ServerPreflightReconciler implements ManagedReconciler, OnModuleInit {
   readonly resourceType = 'server' as const;
-  private readonly store: ServerPreflightStore;
-  private readonly connector: ServerConnector;
 
   constructor(
-    @Inject(PG_DATABASE) database: Kysely<NyabaseDatabase>,
+    private readonly store: ServerPreflightStore,
+    private readonly connector: ServerConnector,
     private readonly nodeMetrics: AuthenticatedNodeMetricsPullAdapter,
     private readonly checks: IncusPreflightChecksAdapter,
-    ephemeral: EphemeralStore,
     private readonly config: NyabaseConfigService,
     private readonly registry: ReconcilerRegistry,
-  ) {
-    this.store = new ServerPreflightStore(database);
-    this.connector = new ServerConnector(this.store, ephemeral);
-  }
+  ) {}
 
   onModuleInit(): void {
     this.registry.register(this);
@@ -174,7 +156,7 @@ export class ServerPreflightReconciler implements ManagedReconciler, OnModuleIni
     if (!server) {
       return {
         outcome: 'failed',
-        failure: preflightFailure('SERVER_NOT_FOUND', 'The desired server no longer exists'),
+        failure: intentFailure('SERVER_NOT_FOUND', 'The desired server no longer exists'),
       };
     }
     const expectedRevision = context.intent.targetRevision;
@@ -242,8 +224,8 @@ export class ServerPreflightReconciler implements ManagedReconciler, OnModuleIni
       }
       const failure =
         error instanceof IncusError
-          ? preflightFailure(error.code, error.message, error.details as Record<string, unknown>)
-          : preflightFailure(
+          ? intentFailure(error.code, error.message, error.details as Record<string, unknown>)
+          : intentFailure(
               'PREFLIGHT_FAILED',
               error instanceof Error ? error.message : String(error),
             );

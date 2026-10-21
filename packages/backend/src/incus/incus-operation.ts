@@ -12,6 +12,7 @@ import {
   type IncusErrorDetailValue,
   type IncusErrorDetails,
 } from './incus-errors.js';
+import { isRecord } from '../platform/domain-utils.js';
 
 export interface IncusOperationWaitResult {
   readonly kind: 'completed';
@@ -30,10 +31,6 @@ export interface IncusSynchronousResult<T> {
 }
 
 export type IncusCompletedResult<T> = IncusSynchronousResult<T> | IncusOperationWaitResult;
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
-}
 
 function boundedText(value: unknown, maxLength: number): string | undefined {
   return typeof value === 'string' && value.length > 0 ? value.slice(0, maxLength) : undefined;

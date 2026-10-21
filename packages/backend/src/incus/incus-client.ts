@@ -26,6 +26,7 @@ import {
   encodeImageAliasName,
   encodeSegment,
 } from './incus-transport.js';
+import { isRecord } from '../platform/domain-utils.js';
 
 /**
  * The Incus REST client: every endpoint is declared here and issued through an
@@ -705,10 +706,6 @@ export function encodeModeHeader(mode: number): string {
     throw new IncusError('INCUS_BAD_REQUEST', 'managed_failure', { reason: 'invalid_file_mode' });
   }
   return `0${mode.toString(8)}`;
-}
-
-export function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
 export function extractExecFileDescriptors(

@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest';
 import { AppModule } from './app.module.js';
 import { ContainerReconciler } from './containers/container-reconciler.service.js';
 import { ContainersModule } from './containers/containers.module.js';
+import { ImageReconcileStore } from './images/image-reconcile.store.js';
 import { ImageAssignmentReconciler } from './images/image-assignment-reconciler.service.js';
 import { ImagesModule } from './images/images.module.js';
 import { ServerHealthService } from './servers/server-health.service.js';
@@ -104,7 +105,7 @@ describe('domain reconciler registration', () => {
 describe('ImageAssignmentReconciler source', () => {
   const sourceOf = (config: Record<string, string>) => {
     const reconciler = new ImageAssignmentReconciler(
-      {} as never,
+      new ImageReconcileStore({} as never),
       { get: (key: string) => config[key] ?? '' } as never,
       {} as never,
       {} as never,

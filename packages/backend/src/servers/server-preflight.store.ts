@@ -1,5 +1,7 @@
+import { Inject, Injectable } from '@nestjs/common';
 import { Kysely, sql } from 'kysely';
 import { parseCidrPrefix } from '../containers/guest-network.adapter.js';
+import { PG_DATABASE } from '../platform/persistence-pg/tokens.js';
 import type { NyabaseDatabase } from '../platform/persistence-pg/database.types.js';
 import {
   INFRASTRUCTURE_ADVISORY_NAMESPACE,
@@ -45,8 +47,9 @@ export function revisionNumber(value: string | number | bigint | undefined): num
 }
 
 /** Every SQL statement the server preflight/connect reconciler issues. */
+@Injectable()
 export class ServerPreflightStore {
-  constructor(private readonly database: Kysely<NyabaseDatabase>) {}
+  constructor(@Inject(PG_DATABASE) private readonly database: Kysely<NyabaseDatabase>) {}
 
   readServer(id: string): Promise<ServerRow | undefined> {
     return this.database

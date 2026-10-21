@@ -16,7 +16,7 @@ import { PG_DATABASE } from '../platform/persistence-pg/tokens.js';
 import { PgTransactionManager } from '../platform/persistence-pg/transaction.js';
 import { isLocalPoolDto, isLocalPoolRow } from './storage-pool-capability.js';
 import { StoragePoolDiscoveryService } from './storage-pool-discovery.service.js';
-import { optionalByteCount } from './storage-pool-discovery.js';
+import { optionalByteCount } from './storage-pool-discovery.service.js';
 import { toAdminPoolDto, toUserPoolDto } from './storage-pool-dtos.js';
 import { StoragePoolsRepository } from './storage-pools.repository.js';
 

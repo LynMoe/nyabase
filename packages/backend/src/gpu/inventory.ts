@@ -11,14 +11,11 @@ import {
   type NodeMetricSample,
 } from '@nyabase/common';
 import type { GpuHealthPort } from './admit.js';
+import { isRecord } from '../platform/domain-utils.js';
 
 export interface GpuInventoryCard {
   readonly pciAddress: string;
   readonly model: string;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
 /**

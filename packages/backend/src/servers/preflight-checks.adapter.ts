@@ -12,6 +12,7 @@ import {
   type IncusSchema,
 } from '../incus/index.js';
 import type { IpPoolNetwork } from './server-preflight.store.js';
+import { isRecord } from '../platform/domain-utils.js';
 
 const NETWORK_METRICS = {
   isBridge: 'nyabase_node_network_is_bridge',
@@ -192,10 +193,6 @@ export class IncusPreflightChecksAdapter {
       hostAddress,
     };
   }
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
 function operationReturnCode(value: unknown): number | undefined {

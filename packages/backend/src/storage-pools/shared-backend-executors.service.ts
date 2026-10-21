@@ -13,8 +13,7 @@ import {
   type StorageDiscoverIssueDto,
 } from '@nyabase/common';
 import { PgTransactionManager } from '../platform/persistence-pg/transaction.js';
-import { StoragePoolDiscoveryService } from './storage-pool-discovery.service.js';
-import { toDiscoverIssue } from './storage-pool-discovery.js';
+import { StoragePoolDiscoveryService, toDiscoverIssue } from './storage-pool-discovery.service.js';
 import { toExecutorDto } from './storage-pool-dtos.js';
 import { StoragePoolsRepository } from './storage-pools.repository.js';
 

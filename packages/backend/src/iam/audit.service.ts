@@ -18,6 +18,7 @@ import {
   fallbackNameFromPayload,
   normalizeResourceType,
 } from './audit-snapshot.resolver.js';
+import { isRecord } from '../platform/domain-utils.js';
 
 const CLEANUP_INTERVAL_MS = 60_000;
 const SENSITIVE_KEY_PATTERN =
@@ -255,10 +256,6 @@ function refsFromPayload(
   }
 
   return refs;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return Boolean(value && typeof value === 'object' && !Array.isArray(value));
 }
 
 function stringValue(value: unknown): string | null {

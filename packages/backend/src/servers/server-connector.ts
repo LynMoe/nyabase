@@ -1,3 +1,4 @@
+import { Injectable } from '@nestjs/common';
 import { randomUUID } from 'node:crypto';
 import { sql } from 'kysely';
 import {
@@ -9,13 +10,13 @@ import {
   type IncusResponse,
   type IncusSchema,
 } from '../incus/index.js';
-import type { EphemeralStore } from '../platform/ephemeral-store.js';
+import { EphemeralStore } from '../platform/ephemeral-store.js';
 import type { IntentRecord } from '../reconcile/intent.repository.js';
 import {
   ServerRevisionChangedError,
   normalized,
   revisionNumber,
-  type ServerPreflightStore,
+  ServerPreflightStore,
   type ServerRow,
 } from './server-preflight.store.js';
 
@@ -87,6 +88,7 @@ async function waitForTrustPropagation(delayMs: number, signal: AbortSignal): Pr
  * server: trusting our client certificate with a one-time token, pinning the
  * server identity and recording the server as online.
  */
+@Injectable()
 export class ServerConnector {
   constructor(
     private readonly store: ServerPreflightStore,
