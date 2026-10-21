@@ -144,12 +144,12 @@ describe('lane D product UI copy', () => {
   });
 
   it('volume remount waits for attachment after 202 and blocks quota-ineffective create', () => {
-    const remount = [read('components/storage/volume-shrink-orchestration-dialog.tsx'), read('components/storage/use-volume-shrink-flow.ts')].join('\n');
+    const remount = read('components/storage/volume-shrink-orchestration-dialog.tsx');
     expect(remount).toMatch(/等待挂回/);
     expect(remount).toMatch(/lookupLatestIntentFailure/);
     const volumes = [
       read('pages/volumes-page.tsx'),
-      [read('components/storage/local-volume-form-dialog.tsx'), read('components/storage/use-local-volume-form.ts')].join('\n'),
+      read('components/storage/local-volume-form-dialog.tsx'),
     ].join('\n');
     expect(volumes).toMatch(/quotaEffective !== true/);
     expect(volumes).toMatch(/quotaIneffectiveCreateHint/);
@@ -173,9 +173,9 @@ describe('lane D product UI copy', () => {
       read('components/storage/shared-volume-table.tsx'),
       read('components/storage/shared-volume-table.tsx'),
     ].join('\n');
-    const localForm = [read('components/storage/local-volume-form-dialog.tsx'), read('components/storage/use-local-volume-form.ts')].join('\n');
+    const localForm = read('components/storage/local-volume-form-dialog.tsx');
     const sharedForm = [
-      [read('components/storage/shared-volume-form-dialog.tsx'), read('components/storage/use-shared-volume-form.ts')].join('\n'),
+      read('components/storage/shared-volume-form-dialog.tsx'),
       read('lib/storage-shrink.ts'),
     ].join('\n');
     const storage = read('components/containers/storage-panel.tsx');
@@ -371,8 +371,8 @@ describe('lane D product UI copy', () => {
     const quotaPage = read('components/quota/quota-summary.tsx');
     const dashboard = read('pages/dashboard-page.tsx');
     const create = [read('components/containers/create-container-dialog.tsx'), read('components/containers/use-create-container-form.ts')].join('\n');
-    const local = [read('components/storage/local-volume-form-dialog.tsx'), read('components/storage/use-local-volume-form.ts')].join('\n');
-    const shared = [read('components/storage/shared-volume-form-dialog.tsx'), read('components/storage/use-shared-volume-form.ts')].join('\n');
+    const local = read('components/storage/local-volume-form-dialog.tsx');
+    const shared = read('components/storage/shared-volume-form-dialog.tsx');
     const volumes = read('pages/volumes-page.tsx');
     const sharedPage = read('pages/shared-volumes-page.tsx');
     // 配额 is a section of 概览, not a separate destination.

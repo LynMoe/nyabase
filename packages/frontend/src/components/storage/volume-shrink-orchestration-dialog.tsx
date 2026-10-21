@@ -1,19 +1,27 @@
-import type { VolumeDto } from '@nyabase/common';
+import { useEffect, useState } from 'react';
+import {
+  type AttachVolumeRequest,
+  FailureCode,
+  type IntentAcceptedDto,
+  type PatchVolumeRequest,
+  type VolumeDto,
+} from '@nyabase/common';
+import { api } from '../../lib/api.js';
+import { ApiError, errorMessage } from '../../lib/api-error.js';
+import { lookupLatestIntentFailure } from '../../lib/intent-visibility.js';
+import {
+  formatDetachProgress,
+  parseVolumeShrinkAttachments,
+  type VolumeShrinkAttachmentRef,
+  waitUntil,
+} from '../../lib/storage-shrink.js';
 import { formatBytes } from '../../lib/utils.js';
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from '../ui/dialog.js';
-import {
-  useVolumeShrinkFlow,
-  type VolumeShrinkFlow,
-} from './use-volume-shrink-flow.js';
-import type { VolumeShrinkAttachmentRef } from '../../lib/storage-shrink.js';
 import { Button } from '../ui/button.js';
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '../ui/dialog.js';
+
+type ShrinkPhase = 'list' | 'detaching' | 'shrinking' | 'remount' | 'done' | 'failed';
+type ShrinkFailureStage = 'load' | 'detach_partial' | 'shrink' | 'remount' | null;
+type VolumeShrinkFlow = ReturnType<typeof useVolumeShrinkFlow>;
 
 /** Shrinking an attached volume: unmount it everywhere, shrink, offer to mount it back. */
 export function VolumeShrinkOrchestrationDialog({
@@ -50,7 +58,7 @@ const attachmentLabel = (attachment: VolumeShrinkAttachmentRef) =>
   attachment.containerName?.trim() || attachment.containerId;
 
 /** The attachment list, progress, error and the explanation of the current stage. */
-export function ShrinkDialogBody({ flow }: { flow: VolumeShrinkFlow }) {
+function ShrinkDialogBody({ flow }: { flow: VolumeShrinkFlow }) {
   const { phase, failureStage, attachments, busy, progress, error, detached, shrinkSubmitted } = flow;
   return (
     <div className="space-y-3">
@@ -98,7 +106,7 @@ export function ShrinkDialogBody({ flow }: { flow: VolumeShrinkFlow }) {
 }
 
 /** The buttons that fit the current stage. */
-export function ShrinkDialogFooter({
+function ShrinkDialogFooter({
   flow,
   onClose,
 }: {
@@ -189,4 +197,280 @@ export function ShrinkDialogFooter({
       )}
     </DialogFooter>
   );
+}
+
+interface ShrinkState {
+  phase: ShrinkPhase;
+  failureStage: ShrinkFailureStage;
+  attachments: VolumeShrinkAttachmentRef[];
+  progress: string | null;
+  error: string | null;
+  detached: VolumeShrinkAttachmentRef[];
+  pendingRemount: VolumeShrinkAttachmentRef[];
+  busy: boolean;
+  shrinkSubmitted: boolean;
+}
+
+/** What the workflow steps read, and how they report into the state. */
+interface ShrinkContext {
+  readonly volume: VolumeDto;
+  readonly sizeBytes: number;
+  readonly attachments: VolumeShrinkAttachmentRef[];
+  readonly patch: (change: Partial<ShrinkState>) => void;
+}
+
+/**
+ * The shrink workflow for a volume that is still attached: unmount it from
+ * every container, submit the shrink, then offer to mount it back. Failures
+ * leave the dialog in a stage that says exactly what can be retried.
+ */
+function useVolumeShrinkFlow({
+  volume,
+  sizeBytes,
+  open,
+  onComplete,
+}: {
+  volume: VolumeDto;
+  sizeBytes: number;
+  open: boolean;
+  onComplete: () => void;
+}) {
+  const [state, setState] = useState<ShrinkState>({
+    phase: 'list',
+    failureStage: null,
+    attachments: [],
+    progress: null,
+    error: null,
+    detached: [],
+    pendingRemount: [],
+    busy: false,
+    shrinkSubmitted: false,
+  });
+  const patch = (change: Partial<ShrinkState>) => setState((current) => ({ ...current, ...change }));
+  const { attachments, detached, shrinkSubmitted } = state;
+  const ctx: ShrinkContext = { volume, sizeBytes, attachments, patch };
+
+  /** Load the volume's attachments; on failure the dialog offers a reload. */
+  const loadAttachments = async () => {
+    try {
+      patch({ attachments: await loadAttachmentsForVolume(volume.id) });
+      return true;
+    } catch (loadError) {
+      patch({ error: errorMessage(loadError), failureStage: 'load', phase: 'failed' });
+      return false;
+    } finally {
+      patch({ busy: false });
+    }
+  };
+
+  useEffect(() => {
+    if (!open) return;
+    patch({
+      phase: 'list',
+      failureStage: null,
+      progress: null,
+      error: null,
+      detached: [],
+      pendingRemount: [],
+      shrinkSubmitted: false,
+      busy: true,
+    });
+    void loadAttachments();
+  }, [open, volume.id]);
+
+  const reload = () => {
+    patch({ busy: true, error: null });
+    void loadAttachments().then((loaded) => {
+      if (loaded) patch({ failureStage: null, phase: 'list' });
+    });
+  };
+
+  const remainingAttachments = attachments.filter(
+    (item) => !detached.some((done) => done.attachmentId === item.attachmentId),
+  );
+
+  const runDetachAndShrink = async (targets: VolumeShrinkAttachmentRef[]) => {
+    patch({ busy: true, error: null, failureStage: null, phase: 'detaching' });
+    const succeeded = [...detached];
+    try {
+      if (!await detachAll(ctx, targets, succeeded)) return;
+      patch({ detached: succeeded, phase: 'shrinking', progress: '正在提交缩容…' });
+      if (!await submitShrink(ctx, succeeded)) return;
+      patch({
+        pendingRemount: succeeded,
+        shrinkSubmitted: true,
+        phase: succeeded.length > 0 ? 'remount' : 'done',
+        progress: null,
+      });
+      onComplete();
+    } catch (runError) {
+      patch({ error: errorMessage(runError), failureStage: 'shrink', phase: 'failed' });
+    } finally {
+      patch({ busy: false });
+    }
+  };
+
+  const remount = async (targets: VolumeShrinkAttachmentRef[]) => {
+    patch({ busy: true, error: null, progress: null });
+    // Keep failureStage until remount fully succeeds so abort remounts stay honest.
+    const abortingWithoutShrink = !shrinkSubmitted;
+    try {
+      patch({ phase: 'remount' });
+      if (!await remountAll(ctx, [...targets])) return;
+      patch({ pendingRemount: [], failureStage: null, phase: 'done' });
+      if (!abortingWithoutShrink) onComplete();
+    } finally {
+      patch({ busy: false });
+    }
+  };
+
+  return {
+    ...state,
+    remainingAttachments,
+    setPhase: (phase: ShrinkPhase) => patch({ phase }),
+    runDetachAndShrink,
+    remount,
+    reload,
+  };
+}
+
+async function loadAttachmentsForVolume(volumeId: string): Promise<VolumeShrinkAttachmentRef[]> {
+  const latest = await api.get<VolumeDto>(`/volumes/${volumeId}`);
+  return latest.attachments.map((attachment) => ({
+    attachmentId: attachment.attachmentId,
+    containerId: attachment.containerId,
+    containerPath: attachment.containerPath,
+    containerName: attachment.containerName,
+  }));
+}
+
+/** Detach the targets one by one; false when one failed (the failure state is already set). */
+async function detachAll(
+  ctx: ShrinkContext,
+  targets: VolumeShrinkAttachmentRef[],
+  succeeded: VolumeShrinkAttachmentRef[],
+): Promise<boolean> {
+  const { patch, attachments, volume } = ctx;
+  for (let index = 0; index < targets.length; index += 1) {
+    const attachment = targets[index]!;
+    patch({ progress: formatDetachProgress(succeeded.length, attachments.length, null, null) });
+    try {
+      await api.delete<IntentAcceptedDto>(
+        `/containers/${attachment.containerId}/volumes/${attachment.attachmentId}`,
+      );
+      await waitUntil(async () => {
+        const remaining = await loadAttachmentsForVolume(volume.id);
+        return !remaining.some((item) => item.attachmentId === attachment.attachmentId);
+      }, {
+        label: '等待卸载',
+        timeoutMs: 90_000,
+        onTimeout: () => lookupLatestIntentFailure(`/containers/${attachment.containerId}/intents`),
+      });
+      succeeded.push(attachment);
+      patch({
+        detached: [...succeeded],
+        progress: formatDetachProgress(succeeded.length, attachments.length, null, null),
+      });
+    } catch (detachError) {
+      const message = errorMessage(detachError);
+      patch({
+        progress: formatDetachProgress(succeeded.length, attachments.length, index, message),
+        error: message,
+        detached: succeeded,
+        failureStage: 'detach_partial',
+        phase: 'failed',
+        busy: false,
+      });
+      return false;
+    }
+  }
+  return true;
+}
+
+/** Submit the shrink and wait for it; false when it did not complete (state already set). */
+async function submitShrink(
+  ctx: ShrinkContext,
+  succeeded: VolumeShrinkAttachmentRef[],
+): Promise<boolean> {
+  const { patch, volume, sizeBytes } = ctx;
+  const body: PatchVolumeRequest = { expectedRevision: volume.revision, sizeBytes };
+  try {
+    await api.patch(`/volumes/${volume.id}`, body);
+    await waitUntil(async () => {
+      const latest = await api.get<VolumeDto>(`/volumes/${volume.id}`);
+      if (latest.sizeBytes === sizeBytes) return true;
+      if (latest.needsAttention) {
+        const failure = await lookupLatestIntentFailure(`/volumes/${volume.id}/intents`);
+        throw new Error(failure ?? latest.failureCode ?? '缩容失败');
+      }
+      return false;
+    }, {
+      label: '等待缩容',
+      timeoutMs: 90_000,
+      onTimeout: () => lookupLatestIntentFailure(`/volumes/${volume.id}/intents`),
+    });
+    return true;
+  } catch (shrinkError) {
+    if (shrinkError instanceof ApiError && shrinkError.code === FailureCode.VolumeShrinkRequiresDetach) {
+      const leftover = parseVolumeShrinkAttachments(shrinkError);
+      patch({
+        attachments: leftover.length > 0 ? leftover : ctx.attachments,
+        detached: [],
+        error: '仍有挂载未清理，请重试一键卸载',
+        failureStage: null,
+        phase: 'list',
+        busy: false,
+      });
+    } else {
+      patch({
+        detached: succeeded,
+        error: errorMessage(shrinkError),
+        failureStage: 'shrink',
+        phase: 'failed',
+        busy: false,
+      });
+    }
+    return false;
+  }
+}
+
+/** Mount the targets back one by one; returns whether all succeeded (state is set on failure). */
+async function remountAll(ctx: ShrinkContext, queue: VolumeShrinkAttachmentRef[]): Promise<boolean> {
+  const { patch, volume } = ctx;
+  const remounted: VolumeShrinkAttachmentRef[] = [];
+  for (let index = 0; index < queue.length; index += 1) {
+    const attachment = queue[index]!;
+    try {
+      const body: AttachVolumeRequest = {
+        volumeId: volume.id,
+        containerPath: attachment.containerPath,
+        readOnly: attachment.readOnly ?? false,
+      };
+      await api.post<IntentAcceptedDto>(`/containers/${attachment.containerId}/volumes`, body);
+      await waitUntil(async () => {
+        const listed = await loadAttachmentsForVolume(volume.id);
+        return listed.some((item) =>
+          item.containerId === attachment.containerId
+          && item.containerPath === attachment.containerPath
+        );
+      }, {
+        label: '等待挂回',
+        timeoutMs: 90_000,
+        onTimeout: () => lookupLatestIntentFailure(`/containers/${attachment.containerId}/intents`),
+      });
+      remounted.push(attachment);
+      patch({ progress: `已挂回 ${remounted.length}/${queue.length}` });
+    } catch (attachError) {
+      patch({
+        pendingRemount: queue.slice(index),
+        progress: `挂回成功 ${remounted.length} 个，第 ${index + 1} 个失败：${errorMessage(attachError)}`,
+        error: errorMessage(attachError),
+        failureStage: 'remount',
+        phase: 'failed',
+        busy: false,
+      });
+      return false;
+    }
+  }
+  return true;
 }

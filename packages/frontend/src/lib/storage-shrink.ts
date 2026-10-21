@@ -6,7 +6,7 @@ import {
   StoragePoolDriver,
 } from '@nyabase/common';
 import { ApiError, apiErrorDetails } from './api-error.js';
-import { formatBytes, formatGib } from './utils.js';
+import { formatBytes, formatGib, GIB } from './utils.js';
 
 export type ShrinkPath = 'grow' | 'unchanged' | 'online' | 'requires_stop' | 'never';
 
@@ -243,4 +243,27 @@ export function shrinkLabel(volume: { capability: StoragePoolCapabilityDto }): s
   if (volume.capability.shrinkRequiresStop) return '缩容需卸载';
   if (volume.capability.shrinkOnline) return '可在线缩容';
   return '缩容受用量约束';
+}
+
+/**
+ * What a typed GiB size means for an existing volume (or for a new one when
+ * `editing` is undefined): the byte size, the kind of change, the usage-floor
+ * problem and whether the pool cannot enforce quotas for a resize.
+ */
+export function deriveSizeChange(
+  editing: { capability: StoragePoolCapabilityDto; sizeBytes: number; usedBytes: number | null } | undefined,
+  sizeGiB: string,
+) {
+  const parsedGiB = Number(sizeGiB);
+  const nextSize = Number.isFinite(parsedGiB) && parsedGiB > 0 ? Math.round(parsedGiB * GIB) : NaN;
+  const path = editing && Number.isFinite(nextSize)
+    ? classifySizeChange(editing.capability, editing.sizeBytes, nextSize)
+    : 'unchanged';
+  const floorError = editing && (path === 'online' || path === 'requires_stop')
+    ? validateShrinkFloor(editing.capability, nextSize, editing.usedBytes, editing.sizeBytes)
+    : null;
+  const editQuotaBlocked = editing != null
+    && path !== 'unchanged'
+    && isQuotaIneffectiveCapability(editing.capability);
+  return { nextSize, path, floorError, editQuotaBlocked };
 }

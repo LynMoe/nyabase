@@ -57,7 +57,7 @@ describe('user panel pages stay on scope=mine', () => {
   });
 
   it('local-volume-form-dialog uses one volumes route and gates scope=all by scope', () => {
-    const src = [readSrc('components/storage/local-volume-form-dialog.tsx'), readSrc('components/storage/use-local-volume-form.ts')].join('\n');
+    const src = [readSrc('components/storage/local-volume-form-dialog.tsx')].join('\n');
     expect(src).not.toMatch(/['`]\/admin\//);
     assertScopeAllOnly(src, /\?scope=all/);
     expect(src).not.toMatch(/api\.post<unknown>\('\/volumes\?/);
