@@ -61,13 +61,22 @@ async function main(): Promise<void> {
     const prefix = `E2E_SERVER_${index}_`;
     const ssh = need(`${prefix}SSH`);
     const slug = `e2e-${runId}-s${index}`;
+    // The backend checks the registered name against the Incus server_name.
+    const serverName = (JSON.parse(await incus(ssh, ['query', '/1.0'])) as {
+      environment?: { server_name?: string };
+    }).environment?.server_name;
+    if (!serverName) throw new Error(`incus on ${ssh} reported no server_name`);
     const create: CreateServerRequest = {
-      name: slug,
+      name: serverName,
       slug,
       apiEndpoint: need(`${prefix}API`),
       parentInterface: need(`${prefix}PARENT`),
       dnsServers: list(opt(`${prefix}DNS`)),
-      nodeMetrics: null,
+      nodeMetrics: {
+        endpoint: need(`${prefix}NODE_ENDPOINT`),
+        serverCertFingerprint: need(`${prefix}NODE_FINGERPRINT`),
+        token: need(`${prefix}NODE_TOKEN`),
+      },
     };
     let server = await api.post<ServerDto>('/servers', create);
     console.log(`server ${slug} registered as ${server.id}`);

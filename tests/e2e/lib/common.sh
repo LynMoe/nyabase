@@ -59,6 +59,16 @@ lab_bash() {
   fi
 }
 
+# Runs one shell command line on a lab host; stdin passes through.
+lab_sh() {
+  local target="$1"
+  if [[ "$target" == local ]]; then
+    bash -c "$2"
+  else
+    ssh -o BatchMode=yes -o ConnectTimeout=10 "$target" "$2"
+  fi
+}
+
 # True when $1 is a pid file of a process that belongs to this run.
 run_owns_pid() {
   local pidfile="$1" pid

@@ -28,6 +28,57 @@ fetch_server_certs() {
   done
 }
 
+# A self-contained node-exporter tree: its dist plus @nyabase/common and zod.
+bundle_node_exporter() {
+  local out="$RUN_DIR/node-exporter" common="$REPO_ROOT/packages/common" zod
+  zod="$(cd "$common" && node -p 'require("path").dirname(require.resolve("zod/package.json"))')"
+  mkdir -p "$out/node_modules/@nyabase/common"
+  cp -R "$REPO_ROOT/packages/node-exporter/dist" "$REPO_ROOT/packages/node-exporter/package.json" "$out/"
+  cp -R "$common/dist" "$common/package.json" "$out/node_modules/@nyabase/common/"
+  cp -RL "$zod" "$out/node_modules/zod"
+}
+
+# Preflight reads the host network facts from node-exporter, so every lab host
+# gets a run-scoped one: a transient systemd unit named nyabase-e2e-node-<run>-s<n>,
+# files in /var/tmp/<that name>, a fresh TLS certificate (pinned) and token.
+# `down` stops the unit and removes the directory (lib/lab-sweep.sh).
+start_node_exporters() {
+  local idx var target host parent name port token fp san i
+  port="${E2E_NODE_EXPORTER_PORT:-19109}"
+  bundle_node_exporter
+  for idx in $E2E_SERVERS; do
+    var="E2E_SERVER_${idx}_SSH"; target="${!var:-}"
+    [[ -n "$target" ]] || die "$var is required in lab.env"
+    var="E2E_SERVER_${idx}_API"; host="$(api_host "${!var}")"
+    var="E2E_SERVER_${idx}_PARENT"; parent="${!var:-}"
+    name="nyabase-e2e-node-$RUN_ID-s$idx"
+    [[ "$host" =~ ^[0-9.]+$ ]] && san="IP:$host" || san="DNS:$host"
+    openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -days 7 \
+      -subj "/CN=$host" -addext "subjectAltName=$san" \
+      -keyout "$RUN_DIR/certs/node-s$idx.key" -out "$RUN_DIR/certs/node-s$idx.crt" 2>/dev/null \
+      || die "cannot create the node-exporter certificate for $host"
+    fp="$(openssl x509 -in "$RUN_DIR/certs/node-s$idx.crt" -noout -fingerprint -sha256 | cut -d= -f2)"
+    token="$(openssl rand -hex 32)"
+    printf 'NODE_EXPORTER_TOKEN=%s\nNODE_EXPORTER_TLS_KEY=/var/tmp/%s/certs/node-s%s.key\nNODE_EXPORTER_TLS_CERT=/var/tmp/%s/certs/node-s%s.crt\nNODE_EXPORTER_HOST=0.0.0.0\nNODE_EXPORTER_PORT=%s\nNODE_EXPORTER_PARENT_INTERFACE=%s\n' \
+      "$token" "$name" "$idx" "$name" "$idx" "$port" "$parent" >"$RUN_DIR/node-s$idx.env"
+    chmod 600 "$RUN_DIR/node-s$idx.env"
+    log "starting node-exporter on $target ($host:$port)"
+    tar -C "$RUN_DIR" -cz node-exporter "certs/node-s$idx.key" "certs/node-s$idx.crt" "node-s$idx.env" \
+      | lab_sh "$target" "rm -rf /var/tmp/$name && mkdir -m 700 /var/tmp/$name && tar -xz -C /var/tmp/$name \
+          && systemd-run --quiet --collect --unit=$name --property=WorkingDirectory=/var/tmp/$name/node-exporter \
+             --property=EnvironmentFile=/var/tmp/$name/node-s$idx.env /usr/bin/env node dist/main.js" \
+      || die "cannot start node-exporter on $target"
+    for i in $(seq 1 30); do
+      curl --silent --insecure --max-time 3 -o /dev/null -H "Authorization: Bearer $token" \
+        "https://$host:$port/metrics" && break
+      [[ $i -eq 30 ]] && die "node-exporter on $host:$port did not come up (journalctl -u $name on $target)"
+      sleep 1
+    done
+    printf 'export E2E_SERVER_%s_NODE_ENDPOINT=%q E2E_SERVER_%s_NODE_FINGERPRINT=%q E2E_SERVER_%s_NODE_TOKEN=%q\n' \
+      "$idx" "https://$host:$port/metrics" "$idx" "$fp" "$idx" "$token" >>"$RUN_DIR/run.env"
+  done
+}
+
 # <name> VAR=value... <command...>: detached, with a clean environment and its pid in <name>.pid.
 start_detached() {
   local name="$1"; shift
@@ -71,12 +122,14 @@ cmd_up() {
   if [[ "${E2E_SKIP_BUILD:-0}" != 1 ]]; then
     log "building backend (tsc -b with @nyabase/common) and the Rust proxies"
     (cd "$REPO_ROOT" && pnpm --filter @nyabase/backend build \
+      && pnpm --filter @nyabase/node-exporter build \
       && cargo build --release --locked --manifest-path tools/Cargo.toml)
     (cd "$E2E_DIR" && pnpm install --frozen-lockfile --ignore-workspace >/dev/null)
   fi
   local ssh_proxy="$REPO_ROOT/tools/target/release/nyabase-ssh-proxy"
   local http_proxy="$REPO_ROOT/tools/target/release/nyabase-http-proxy"
-  [[ -x "$ssh_proxy" && -x "$http_proxy" && -f "$REPO_ROOT/packages/backend/dist/main.js" ]] \
+  [[ -x "$ssh_proxy" && -x "$http_proxy" && -f "$REPO_ROOT/packages/backend/dist/main.js" \
+    && -f "$REPO_ROOT/packages/node-exporter/dist/main.js" ]] \
     || die "build outputs are missing (set E2E_SKIP_BUILD=0)"
 
   log "creating database $DB_NAME"
@@ -105,6 +158,7 @@ cmd_up() {
   } >"$RUN_DIR/run.env"
   chmod 600 "$RUN_DIR/run.env"
   fetch_server_certs
+  start_node_exporters
 
   log "starting the backend on $E2E_LISTEN_HOST:$E2E_BACKEND_PORT"
   # NYABASE_CONFIG_FILE points at a file that does not exist so the host's own
@@ -125,10 +179,10 @@ cmd_up() {
   wait_ready "http://$E2E_LISTEN_HOST:$E2E_BACKEND_PORT/api/health/ready"
 
   log "starting ssh-proxy on :$E2E_SSH_PROXY_PORT and http-proxy on :$E2E_HTTP_PROXY_PORT"
-  start_detached ssh-proxy \
+  start_detached ssh-proxy RUST_LOG=info \
     NYABASE_BACKEND_WS="ws://$E2E_LISTEN_HOST:$E2E_BACKEND_PORT/ws/ssh-proxy" SSH_PROXY_TOKEN="$ssh_token" \
     NYABASE_SSH_LISTEN="$E2E_LISTEN_HOST:$E2E_SSH_PROXY_PORT" "$ssh_proxy"
-  start_detached http-proxy \
+  start_detached http-proxy RUST_LOG=info \
     NYABASE_BACKEND_WS="ws://$E2E_LISTEN_HOST:$E2E_BACKEND_PORT/ws/http-proxy" HTTP_PROXY_TOKEN="$http_token" \
     NYABASE_HTTP_LISTEN="$E2E_LISTEN_HOST:$E2E_HTTP_PROXY_PORT" "$http_proxy"
 

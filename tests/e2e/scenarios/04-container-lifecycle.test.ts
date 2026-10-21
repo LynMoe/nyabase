@@ -84,7 +84,9 @@ describe('container lifecycle and SSH through the ssh-proxy', () => {
 
   it('repairs SSH and opens a console session only for browser logins', async () => {
     const api = owner.session.api;
-    await waitIntent(api, await api.post<IntentAcceptedDto>(`/containers/${container.id}/actions/repair-ssh`));
+    // Repair wakes the SSH convergence; it is not an intent.
+    const repaired = await api.post<{ woken: boolean }>(`/containers/${container.id}/actions/repair-ssh`);
+    assert.equal(typeof repaired.woken, 'boolean');
     const stats = await api.get<unknown>(`/containers/${container.id}/stats`);
     assert.ok(stats && typeof stats === 'object');
 

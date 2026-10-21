@@ -19,18 +19,23 @@ guest LAN (the proxies dial guests). Only one run exists at a time (fixed ports)
 ## What `up` does
 
 1. Creates `$E2E_RUN_ROOT/<run id>/` (mode 700) and points `$E2E_RUN_ROOT/current` at it.
-2. Builds `@nyabase/backend` (`tsc -b`, including `@nyabase/common`) and the Rust
+2. Builds `@nyabase/backend` and `@nyabase/node-exporter` (`tsc -b`, including `@nyabase/common`) and the Rust
    proxies (`cargo build --release --locked`), then installs this package's deps.
 3. Creates the database `nyabase_e2e_<run id>` on `E2E_PG_URL`.
 4. Generates the JWT, key-encryption, ssh-proxy, http-proxy secrets and the admin
    password into `run.env` (mode 600).
 5. Reads each lab server's TLS certificate (`openssl s_client`), pins its sha256
    fingerprint and writes the bundle the backend uses as its Incus CA.
-6. Starts the built backend (`dist/main.js`, one process, clean environment,
+6. Starts a run-scoped node-exporter on every lab host (preflight reads the host
+   network facts from it): the built `packages/node-exporter` plus `@nyabase/common`
+   and `zod` are copied to `/var/tmp/nyabase-e2e-node-<run id>-s<n>/` and started
+   as the transient systemd unit of the same name, with a fresh TLS certificate
+   (pinned on the server) and token, on `E2E_NODE_EXPORTER_PORT` (default 19109).
+7. Starts the built backend (`dist/main.js`, one process, clean environment,
    `NYABASE_CONFIG_FILE` pointing at a missing file so the host's own config is never
    read) and waits for `/api/health/ready`; the first boot creates `admin`.
-7. Starts `nyabase-ssh-proxy` and `nyabase-http-proxy` on the configured ports.
-8. `lib/bootstrap.ts`: logs in as admin, then per server registers it, mints a trust
+8. Starts `nyabase-ssh-proxy` and `nyabase-http-proxy` on the configured ports.
+9. `lib/bootstrap.ts`: logs in as admin, then per server registers it under its Incus `server_name`, mints a trust
    token with `incus config trust add` over ssh, connects it (`POST /servers/:id/connect`),
    discovers and registers the configured pool and makes it the system pool; creates
    one IP pool for all servers; creates the shared backend and registers its
@@ -52,8 +57,8 @@ Idempotent; safe after a failed or partial `up`, and safe to repeat.
    instances (`nyc-*`, `nyabase-preflight-*`) whose Incus config
    `user.nyabase.server_id` is one of this run's server ids; custom volumes named
    exactly as the run's database recorded (`nyv-<32 hex>`); the trust entry whose
-   fingerprint is this run's Incus client certificate; and the run's unused
-   one-time trust token. Cached images and everything unlabelled stay.
+   fingerprint is this run's Incus client certificate; the run's unused
+   one-time trust token; and the run's node-exporter unit and directory. Cached images and everything unlabelled stay.
 4. Only if every host was swept: drops the database and removes the run directory.
    Otherwise it exits non-zero and keeps both so you can re-run `down`.
 

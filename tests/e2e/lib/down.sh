@@ -64,7 +64,7 @@ cmd_down() {
       sid="00000000-0000-0000-0000-000000000000"
     fi
     log "sweeping $target (server $slug ${sid})"
-    if ! lab_bash "$target" "$sid" "${fp:--}" "$token" "${instances:--}" "${volumes:--}" <"$E2E_DIR/lib/lab-sweep.sh"; then
+    if ! lab_bash "$target" "$sid" "${fp:--}" "$token" "${instances:--}" "${volumes:--}" "nyabase-e2e-node-$RUN_ID-s$idx" <"$E2E_DIR/lib/lab-sweep.sh"; then
       log "sweep of $target failed; resources stay recorded in $RUN_DIR/resources.tsv"
       failed=1
     fi

@@ -48,7 +48,7 @@ describe('HTTP proxy binding', () => {
       httpsEnabled: false,
     });
     h.defer('delete domain pool', () => h.api.delete(`/http-proxy/domain-pools/${pool.id}`));
-    hostname = `web.${h.state.runId}.nyabase-e2e.test`;
+    hostname = `web-${Date.now().toString(36)}.${h.state.runId}.nyabase-e2e.test`;
     await h.ssh(user, container, [
       'mkdir -p /tmp/www',
       `echo ${marker} > /tmp/www/index.html`,

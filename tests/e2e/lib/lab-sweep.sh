@@ -7,13 +7,21 @@
 #     every nyc-* / nyabase-preflight-* instance currently on the host;
 #   * custom volumes named exactly as the run's DB recorded them;
 #   * the trust entry with the run's Incus client certificate fingerprint, and
-#     the run's still-unused one-time trust token.
+#     the run's still-unused one-time trust token;
+#   * the run's node-exporter unit and its /var/tmp directory.
 # Anything else on the host is left alone.
 # Args: <server ids, comma separated> <client fingerprint or -> <trust token name>
 #       <instances, comma separated or -> <pool/volume pairs, comma separated or ->
+#       <node-exporter unit name>
 set -uo pipefail
-sids_csv="$1"; fingerprint="$2"; token_name="$3"; instances_csv="$4"; volumes_csv="$5"
+sids_csv="$1"; fingerprint="$2"; token_name="$3"; instances_csv="$4"; volumes_csv="$5"; node_unit="$6"
 rc=0
+
+if [[ "$node_unit" =~ ^nyabase-e2e-node-[0-9]{14}-[0-9a-f]{4}-s[0-9]+$ ]]; then
+  systemctl stop "$node_unit" >/dev/null 2>&1 || true
+  systemctl reset-failed "$node_unit" >/dev/null 2>&1 || true
+  rm -rf "/var/tmp/$node_unit" || rc=1
+fi
 
 declare -A owners=() candidates=()
 IFS=',' read -ra sids <<<"$sids_csv"
