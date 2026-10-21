@@ -5,19 +5,11 @@ import type { IpPoolDto, ServerDto } from '@nyabase/common';
 import { api } from '../lib/api.js';
 import { errorMessage } from '../lib/api-error.js';
 import { Button } from '../components/ui/button.js';
-import {
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableHeader,
-  TableRow,
-} from '../components/ui/table.js';
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '../components/ui/table.js';
 import { ConfirmDialog } from '../components/layout/confirm-dialog.js';
 import { SectionCard } from '../components/layout/section-card.js';
 import { EmptyState } from '../components/layout/empty-state.js';
-import { Page } from '../components/layout/page-header.js';
-import { PageHeader } from '../components/layout/page-header.js';
+import { Page, PageHeader } from '../components/layout/page-header.js';
 import { QueryView } from '../components/layout/query-view.js';
 import { TechnicalId } from '../components/refs/technical-id.js';
 import { toast } from '../hooks/use-toast.js';

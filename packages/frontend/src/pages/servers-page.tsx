@@ -4,39 +4,28 @@ import { Link, useNavigate } from '@tanstack/react-router';
 import { Plus, RefreshCw, Server, Wifi, WifiOff } from 'lucide-react';
 import {
   Capability,
+  type CreateServerRequest,
+  type PerformanceAdminUsageResponse,
+  type ServerDto,
   zCreateServerRequest,
   zNodeMetricsCreateConfig,
-  type CreateServerRequest,
-  type ServerDto,
 } from '@nyabase/common';
 import { useAuthStore } from '../store/auth.js';
 import { hostOccupancy } from '../components/performance/host-occupancy.js';
-import type { PerformanceAdminUsageResponse } from '@nyabase/common';
 import { api } from '../lib/api.js';
 import { Button } from '../components/ui/button.js';
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from '../components/ui/dialog.js';
 import { Input } from '../components/ui/input.js';
 import { Label } from '../components/ui/label.js';
 import { Badge } from '../components/ui/badge.js';
-import {
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableHeader,
-  TableRow,
-} from '../components/ui/table.js';
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '../components/ui/table.js';
 import { EmptyState } from '../components/layout/empty-state.js';
-import { Page } from '../components/layout/page-header.js';
-import { PageHeader } from '../components/layout/page-header.js';
+import { Page, PageHeader } from '../components/layout/page-header.js';
 import { QueryView } from '../components/layout/query-view.js';
 import { SectionCard } from '../components/layout/section-card.js';
 import { TechnicalId } from '../components/refs/technical-id.js';
 import { ClientIdentityCard } from '../components/servers/connect-card.js';
-import {
-  nodeMetricsStatusZh,
-  serverStatusLabel,
-} from '../lib/display-labels.js';
+import { nodeMetricsStatusZh, serverStatusLabel } from '../lib/display-labels.js';
 import { preflightPending } from '../lib/in-progress.js';
 import { queryKeys } from '../lib/query-keys.js';
 import { queryPollInterval, refetchWhileInProgress } from '../lib/query-lifecycle.js';
@@ -374,4 +363,3 @@ function ServerOnboardingDialog({
 function splitList(value: string): string[] {
   return value.split(',').map((item) => item.trim()).filter((item) => item.length > 0);
 }
-

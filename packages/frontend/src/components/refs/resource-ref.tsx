@@ -1,8 +1,8 @@
 import { useEffect } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import {
-  Capability,
   type AdminImageDto,
+  Capability,
   type ContainerDto,
   type GroupDto,
   type ServerDto,
@@ -15,8 +15,7 @@ import {
 import { api } from '../../lib/api.js';
 import { queryKeys } from '../../lib/query-keys.js';
 import { useAuthStore } from '../../store/auth.js';
-import { TechnicalId } from './technical-id.js';
-import type { ResourceRefProps } from './technical-id.js';
+import { type ResourceRefProps, TechnicalId } from './technical-id.js';
 
 type CatalogUser = {
   id: string;

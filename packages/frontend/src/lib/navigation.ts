@@ -1,4 +1,3 @@
-import type { LucideIcon } from 'lucide-react';
 import {
   Activity,
   Box,
@@ -12,6 +11,7 @@ import {
   ImageIcon,
   LayoutDashboard,
   ListChecks,
+  type LucideIcon,
   Network,
   ScrollText,
   Server,
@@ -20,7 +20,7 @@ import {
   Users,
   Waypoints,
 } from 'lucide-react';
-import { ACCESS, canAccess, type AccessRule } from './route-access.js';
+import { ACCESS, type AccessRule, canAccess } from './route-access.js';
 
 export type NavItem = {
   to: string;

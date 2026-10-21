@@ -9,8 +9,7 @@ import { toast } from '../hooks/use-toast.js';
 import { Badge } from '../components/ui/badge.js';
 import { MoreActions } from '../components/layout/more-actions.js';
 import { ConfirmDialog } from '../components/layout/confirm-dialog.js';
-import { Page } from '../components/layout/page-header.js';
-import { PageHeader } from '../components/layout/page-header.js';
+import { Page, PageHeader } from '../components/layout/page-header.js';
 import { QueryView } from '../components/layout/query-view.js';
 import { serverStatusLabel } from '../lib/display-labels.js';
 import { preflightPending } from '../lib/in-progress.js';
@@ -18,9 +17,9 @@ import { queryKeys } from '../lib/query-keys.js';
 import { refetchWhileInProgress } from '../lib/query-lifecycle.js';
 import { useAuthStore } from '../store/auth.js';
 import {
-  ServerDetailTabs,
   SERVER_DETAIL_TABS,
   type ServerDetailTab,
+  ServerDetailTabs,
 } from './server-detail-page/server-tabs.js';
 
 const routeApi = getRouteApi('/servers/$id');

@@ -9,10 +9,16 @@ import { Badge } from '../../components/ui/badge.js';
 import { Button } from '../../components/ui/button.js';
 import { Checkbox } from '../../components/ui/checkbox.js';
 import { Input } from '../../components/ui/input.js';
-import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '../../components/ui/dialog.js';
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from '../../components/ui/dialog.js';
 import { ConfirmDialog } from '../../components/layout/confirm-dialog.js';
-import { Field } from '../../components/layout/form-field.js';
-import { FormField } from '../../components/layout/form-field.js';
+import { Field, FormField } from '../../components/layout/form-field.js';
 import { SectionCard } from '../../components/layout/section-card.js';
 import { MoreActions } from '../../components/layout/more-actions.js';
 import { toast } from '../../hooks/use-toast.js';
@@ -21,10 +27,7 @@ import { useGroupMembers, useInvalidateGroup } from '../../lib/group-queries.js'
 import { useAuthStore } from '../../store/auth.js';
 import { capabilityLabel } from '../../lib/display-labels.js';
 import { relativeTime } from '../../lib/utils.js';
-import {
-  buildMinimalGroupEditPayload,
-  type GroupEditFormState,
-} from '../../lib/group-edit-form.js';
+import { buildMinimalGroupEditPayload, type GroupEditFormState } from '../../lib/group-edit-form.js';
 
 function GroupIdentityFields({ group }: { group: GroupDto }) {
   return (

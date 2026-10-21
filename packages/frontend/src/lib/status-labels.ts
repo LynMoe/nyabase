@@ -1,5 +1,4 @@
-import type { ContainerPhase, ContainerStatus, ServerStatus } from '@nyabase/common';
-import { FailureCode } from '@nyabase/common';
+import { type ContainerPhase, type ContainerStatus, FailureCode, type ServerStatus } from '@nyabase/common';
 
 type ContainerSshStatus =
   | 'disabled'

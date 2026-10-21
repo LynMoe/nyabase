@@ -1,14 +1,19 @@
 import { useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { Link } from '@tanstack/react-router';
-import { Capability, type ListScope, type PerformanceMultiSeriesResponse, type PerformanceRange, type PerformanceSelfResponse } from '@nyabase/common';
+import {
+  Capability,
+  type ListScope,
+  type PerformanceMultiSeriesResponse,
+  type PerformanceRange,
+  type PerformanceSelfResponse,
+} from '@nyabase/common';
 import { api } from '../lib/api.js';
 import { queryKeys } from '../lib/query-keys.js';
 import { queryPollInterval } from '../lib/query-lifecycle.js';
 import { scopedPath } from '../lib/scoped-paths.js';
 import { useAuthStore } from '../store/auth.js';
-import { Page } from '../components/layout/page-header.js';
-import { PageHeader } from '../components/layout/page-header.js';
+import { Page, PageHeader } from '../components/layout/page-header.js';
 import { Button } from '../components/ui/button.js';
 import { LinkedCharts } from '../components/performance/linked-charts.js';
 import { useGpuNames } from '../components/performance/host-occupancy.js';

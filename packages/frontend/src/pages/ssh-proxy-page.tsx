@@ -5,20 +5,19 @@ import { Capability, type SshProxyHostKeySummaryDto } from '@nyabase/common';
 import { api } from '../lib/api.js';
 import { Button } from '../components/ui/button.js';
 import { ConfirmDialog } from '../components/layout/confirm-dialog.js';
-import { Page } from '../components/layout/page-header.js';
-import { PageHeader } from '../components/layout/page-header.js';
+import { Page, PageHeader } from '../components/layout/page-header.js';
 import { QueryView } from '../components/layout/query-view.js';
 import { useAuthStore } from '../store/auth.js';
 import { canViewSshProxyStatus } from '../lib/proxy-access.js';
 import { queryPollInterval } from '../lib/query-lifecycle.js';
 import { queryKeys } from '../lib/query-keys.js';
 import { useSshProxyMutations } from './ssh-proxy-page/use-ssh-proxy-mutations.js';
-import { HostKeySection } from './ssh-proxy-page/status-sections.js';
 import {
-  SshStatusSections,
   emptyStatus,
   formatTime,
+  HostKeySection,
   type SshProxyAdminStatus,
+  SshStatusSections,
 } from './ssh-proxy-page/status-sections.js';
 
 export default function SshProxyPage() {
