@@ -946,6 +946,8 @@ ALTER TABLE interaction.http_proxy_bindings ADD CONSTRAINT http_proxy_bindings_h
     UNIQUE (hostname);
 ALTER TABLE interaction.http_proxy_snapshot_state ADD CONSTRAINT http_proxy_snapshot_state_pkey
     PRIMARY KEY (singleton);
+-- The snapshot builder locks and advances this one row; it must exist from the start.
+INSERT INTO interaction.http_proxy_snapshot_state DEFAULT VALUES;
 
 CREATE UNIQUE INDEX image_server_assignments_unique
     ON infra.image_server_assignments (image_id, server_id);

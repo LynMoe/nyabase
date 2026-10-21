@@ -416,7 +416,8 @@ export class ContainerReconcileStore {
       .updateTable('control.container_ssh_routes')
       .set({
         instance_name: actual.name ?? deriveInstanceName(row.id),
-        instance_status: state.status ?? 'unknown',
+        // Incus reports `Running`; routes store the ContainerStatus form (`running`).
+        instance_status: (state.status ?? 'unknown').toLowerCase(),
         instance_started_at: state.started_at ?? null,
         ssh_status: ssh.status,
         last_error: ssh.lastError,

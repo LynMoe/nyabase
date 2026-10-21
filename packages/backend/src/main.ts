@@ -6,7 +6,7 @@ import { existsSync } from 'fs';
 import { join } from 'path';
 import { AppModule } from './app.module.js';
 import { NyabaseConfigService } from './platform/config/nyabase-config.service.js';
-import { SpaFallbackFilter, ZodExceptionFilter } from './platform/http-filters.js';
+import { RouteIdPipe, SpaFallbackFilter, ZodExceptionFilter } from './platform/http-filters.js';
 import { securityHeaders, trustProxySetting } from './platform/http-security.js';
 import { RuntimeLifecycleService } from './health/runtime-lifecycle.service.js';
 import { ConsoleBridgeGateway } from './containers/console-bridge.gateway.js';
@@ -41,6 +41,7 @@ async function bootstrap() {
   // Note: most request DTOs are validated via zod (see Body() handlers); the
   // ValidationPipe is the safety net for class-validator-decorated DTOs.
   app.useGlobalPipes(
+    new RouteIdPipe(),
     new ValidationPipe({
       whitelist: true,
       transform: true,

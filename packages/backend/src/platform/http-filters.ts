@@ -1,4 +1,11 @@
-import { ExceptionFilter, Catch, ArgumentsHost, NotFoundException } from '@nestjs/common';
+import {
+  ExceptionFilter,
+  Catch,
+  ArgumentsHost,
+  NotFoundException,
+  type ArgumentMetadata,
+  type PipeTransform,
+} from '@nestjs/common';
 import { ZodError } from 'zod';
 
 /**
@@ -58,5 +65,18 @@ export class SpaFallbackFilter implements ExceptionFilter {
     } else {
       response.sendFile(this.indexPath);
     }
+  }
+}
+
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * Every route path parameter names a resource by UUID. A malformed one cannot
+ * name anything, so it is a 404 here instead of a PostgreSQL cast error (500).
+ */
+export class RouteIdPipe implements PipeTransform {
+  transform(value: unknown, metadata: ArgumentMetadata): unknown {
+    if (metadata.type !== 'param' || typeof value !== 'string' || UUID.test(value)) return value;
+    throw new NotFoundException(`No resource has the id ${JSON.stringify(value.slice(0, 64))}`);
   }
 }
