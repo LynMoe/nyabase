@@ -117,3 +117,16 @@ pnpm --filter @nyabase/backend dev
 `emitDecoratorMetadata`，Nest 的构造函数按类型注入会得到 `undefined dependency`（在 `c24b801` 上已复现）。
 配置仍走环境变量 / YAML，至少需要 `DATABASE_URL`、`JWT_SECRET`、`SSH_KEY_ENCRYPTION_SECRET`、
 `SSH_PROXY_TOKEN`、`HTTP_PROXY_TOKEN`；端口用 `PORT`，仅本机监听用 `LISTEN_ADDRESS=127.0.0.1`。
+
+## Live e2e（`tests/e2e/`）
+
+lab 场景 API 测试，不在 CI 里跑；CI 只跑 `pnpm e2e:check`（e2e 包 `tsc --noEmit`、所有 `.sh` 的 `bash -n`、
+`node --test --test-name-pattern=__none__` 只加载场景文件不执行）。入口 `pnpm e2e:up | e2e:run [word...] | e2e:down`，
+即 `tests/e2e/e2e.sh up|run|down`；输入见 `tests/e2e/lab.env.example`（复制为被忽略的 `tests/e2e/lab.env`），说明见 `tests/e2e/README.md`。
+
+- `up` 在独立运行目录里建新 PG 库、生成 secrets，启动单进程 Backend（`dist`）和两个 Rust 代理，
+  经 trust token 注册 lab 服务器，写 `state.json`；`down` 只删除本次运行创建的东西：带本次 server id 标签的实例、
+  本次库里记录的卷、以本次 Incus 客户端证书指纹匹配的 trust 条目，然后删库、删运行目录。
+- 场景是 `scenarios/*.test.ts`（`node --test` + `tsx`），用 `client/` 里很薄的类型化 API 客户端，请求/响应类型来自
+  `@nyabase/common`；每个场景自建自清。过期/清除通过把 `control.access_lapses.lapsed_at` 写成过去时间来驱动，
+  **不得**为测试加生产开关。改了路由或 DTO，先让 `pnpm e2e:check` 的类型检查通过。
