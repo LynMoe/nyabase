@@ -27,8 +27,8 @@ import {
   BackendOverviewTab,
   BackendVolumesTab,
 } from './shared-backend-detail-page/backend-tabs.js';
-import { useBackendEditForm } from './shared-backend-detail-page/use-backend-edit-form.js';
-import { useBackendMutations } from './shared-backend-detail-page/use-backend-mutations.js';
+import { useBackendEditForm } from './shared-backend-detail-page/use-backend-detail.js';
+import { useBackendMutations } from './shared-backend-detail-page/use-backend-detail.js';
 
 const routeApi = getRouteApi('/shared-backends/$id');
 

@@ -18,7 +18,7 @@ import {
   canViewHttpProxyStatus,
 } from '../lib/http-proxy-access.js';
 import { emptyIfNotFound, httpProxyErrorMessage } from '../lib/http-proxy.js';
-import { DomainPoolFormDialog } from './http-proxy-ops-page/domain-pool-form-dialog.js';
+import { DomainPoolFormDialog } from './http-proxy-ops-page/domain-pools-section.js';
 import { AllBindingsCard, DomainPoolsCard } from './http-proxy-ops-page/domain-pools-section.js';
 import {
   HttpStatusSections,

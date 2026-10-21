@@ -13,7 +13,7 @@ import {
 } from '../../lib/server-backed-draft.js';
 import { isSystemSettingsDto } from '../../lib/conflict-snapshots.js';
 import { queryKeys } from '../../lib/query-keys.js';
-import { editableInputValue } from './field-labels.js';
+import { editableInputValue } from './settings-sections.js';
 
 type Draft = RevisionedServerBackedDraft<Record<string, string>>;
 

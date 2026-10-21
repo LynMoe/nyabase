@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { GRANT_EXPIRY_GRACE_DAYS } from '@nyabase/common';
-import { expiryPhase, toDatetimeLocalValue } from './grant-format.js';
+import { expiryPhase, toDatetimeLocalValue } from './use-grant-panel-data.js';
 
 describe('toDatetimeLocalValue', () => {
   it('formats local calendar time without seconds or timezone', () => {

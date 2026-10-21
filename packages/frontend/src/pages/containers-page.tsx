@@ -5,7 +5,7 @@ import type { ContainerAction, ContainerDto, IntentAcceptedDto } from '@nyabase/
 import { api } from '../lib/api.js';
 import { useActionMutation } from '../hooks/use-action-mutation.js';
 import { Button } from '../components/ui/button.js';
-import { ContainerList } from '../components/containers/container-list.js';
+import { ContainerList } from '../components/containers/container-table.js';
 import { CreateContainerDialog } from '../components/containers/create-container-dialog.js';
 import { EmptyState } from '../components/layout/empty-state.js';
 import { Page } from '../components/layout/page.js';

@@ -1,11 +1,14 @@
-import { useMutation, useQueryClient } from '@tanstack/react-query';
-import { useNavigate } from '@tanstack/react-router';
+import { useEffect, useState } from 'react';
+import { useMutation, type UseMutationResult, useQueryClient } from '@tanstack/react-query';
 import {
   FailureCode,
   type SharedBackendDto,
   type SharedBackendExecutorDiscoverResult,
   type SharedBackendExecutorDto,
+  zPatchSharedBackendRequest,
 } from '@nyabase/common';
+import { useNavigate } from '@tanstack/react-router';
+import { toast } from '../../hooks/use-toast.js';
 import { api } from '../../lib/api.js';
 import { errorMessage } from '../../lib/api-error.js';
 import { queryKeys } from '../../lib/query-keys.js';
@@ -15,7 +18,50 @@ import {
   parseSharedBackendFsidConflict,
   type SharedBackendFsidConflict,
 } from '../../lib/storage-shrink.js';
-import { toast } from '../../hooks/use-toast.js';
+
+type PatchBackend = UseMutationResult<
+  SharedBackendDto,
+  Error,
+  { expectedRevision: number; displayName?: string | null; overcommitRatio?: number }
+>;
+
+/** The identity edit form of a shared backend; its fields follow the loaded backend. */
+export function useBackendEditForm(
+  backend: SharedBackendDto | undefined,
+  patchBackend: PatchBackend,
+) {
+  const [displayName, setDisplayName] = useState('');
+  const [overcommitRatio, setOvercommitRatio] = useState('');
+
+  const reset = (from: SharedBackendDto) => {
+    setDisplayName(from.displayName ?? '');
+    setOvercommitRatio(String(from.overcommitRatio));
+  };
+
+  useEffect(() => {
+    if (backend) reset(backend);
+  }, [backend]);
+
+  const save = () => {
+    if (!backend) return;
+    const parsed = zPatchSharedBackendRequest.safeParse({
+      expectedRevision: backend.revision,
+      displayName: displayName.trim() || null,
+      overcommitRatio: Number(overcommitRatio),
+    });
+    if (!parsed.success) {
+      toast({
+        title: '请检查参数',
+        description: parsed.error.issues[0]?.message ?? '显示名称或超分比例无效',
+        variant: 'destructive',
+      });
+      return;
+    }
+    patchBackend.mutate(parsed.data);
+  };
+
+  return { displayName, overcommitRatio, setDisplayName, setOvercommitRatio, reset, save };
+}
 
 /**
  * The mutations on one shared backend. An FSID identity conflict reported by

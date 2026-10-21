@@ -26,8 +26,8 @@ import {
   type ServerDetailTab,
   type ServerFormState,
 } from './server-detail-page/server-tabs.js';
-import { useNodeMetricsForm } from './server-detail-page/use-node-metrics-form.js';
-import { useServerActions } from './server-detail-page/use-server-actions.js';
+import { useNodeMetricsForm } from './server-detail-page/use-server-detail.js';
+import { useServerActions } from './server-detail-page/use-server-detail.js';
 
 const routeApi = getRouteApi('/servers/$id');
 

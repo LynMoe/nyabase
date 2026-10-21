@@ -21,8 +21,8 @@ import { SectionCard } from '../components/layout/section-card.js';
 import { queryKeys } from '../lib/query-keys.js';
 import { toast } from '../hooks/use-toast.js';
 import { emptyIfNotFound, httpProxyErrorMessage } from '../lib/http-proxy.js';
-import { BindingFormDialog } from './http-proxy-page/binding-form-dialog.js';
-import { BindingRow } from './http-proxy-page/binding-row.js';
+import { BindingFormDialog } from './http-proxy-page/binding-parts.js';
+import { BindingRow } from './http-proxy-page/binding-parts.js';
 
 export default function HttpProxyPage() {
   const queryClient = useQueryClient();

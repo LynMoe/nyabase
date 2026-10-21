@@ -1,18 +1,26 @@
 import { Link } from '@tanstack/react-router';
 import type { HttpDomainPoolPublicDto, HttpProxyBindingDto } from '@nyabase/common';
+import { Pencil, Trash2 } from 'lucide-react';
 import { Button } from '../../components/ui/button.js';
-import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '../../components/ui/dialog.js';
-import { Input } from '../../components/ui/input.js';
 import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from '../../components/ui/select.js';
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from '../../components/ui/dialog.js';
+import { Input } from '../../components/ui/input.js';
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '../../components/ui/select.js';
 import { FormField } from '../../components/layout/form-field.js';
-import { httpProxyDomainRootLabel } from '../../lib/http-proxy.js';
+import {
+  httpProxyBindingStatusLabel,
+  httpProxyDomainRootLabel,
+  httpProxyWarningLabel,
+} from '../../lib/http-proxy.js';
 import { useBindingForm } from './use-binding-form.js';
+import { Badge } from '../../components/ui/badge.js';
+import { TableCell, TableRow } from '../../components/ui/table.js';
 
 export function BindingFormDialog({
   binding,
@@ -117,5 +125,40 @@ export function BindingFormDialog({
         </DialogFooter>
       </DialogContent>
     </Dialog>
+  );
+}
+
+export function BindingRow({
+  binding,
+  onEdit,
+  onDelete,
+}: {
+  binding: HttpProxyBindingDto;
+  onEdit: () => void;
+  onDelete: () => void;
+}) {
+  const warning = httpProxyWarningLabel(binding.warningReasons);
+  return (
+    <TableRow className="cursor-pointer" onClick={onEdit}>
+      <TableCell className="font-mono">{binding.hostname}</TableCell>
+      <TableCell className="whitespace-normal">
+        <Badge variant={binding.status === 'ready' ? 'success' : binding.status === 'warning' ? 'warning' : 'secondary'}>
+          {httpProxyBindingStatusLabel(binding.status)}
+        </Badge>
+        {(warning || binding.warningMessage) ? (
+          <p className="mt-1 text-xs text-destructive">{warning || binding.warningMessage}</p>
+        ) : null}
+      </TableCell>
+      <TableCell>{binding.containerName ?? binding.containerId}</TableCell>
+      <TableCell>{binding.targetPort}</TableCell>
+      <TableCell>{binding.entryHttpsEnabled ? '已启用' : '未启用'}</TableCell>
+      <TableCell className="font-mono">{binding.domainPool}</TableCell>
+      <TableCell className="text-right" onClick={(event) => event.stopPropagation()}>
+        <div className="flex justify-end gap-2">
+          <Button size="sm" variant="outline" onClick={onEdit}><Pencil className="h-3.5 w-3.5" />编辑</Button>
+          <Button size="sm" variant="ghost-destructive" onClick={onDelete}><Trash2 className="h-3.5 w-3.5" />删除</Button>
+        </div>
+      </TableCell>
+    </TableRow>
   );
 }

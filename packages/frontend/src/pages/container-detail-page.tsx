@@ -10,12 +10,12 @@ import { ContainerConsole } from '../components/containers/container-console.js'
 import { RootShrinkOrchestrationDialog } from '../components/storage/root-shrink-orchestration-dialog.js';
 import { runGatedMutation } from '../lib/resource-mutation-gate.js';
 import { useResourceMutationPending } from '../hooks/use-resource-mutation-gate.js';
-import { ContainerDetailHeader } from './container-detail-page/detail-header.js';
+import { ContainerDetailHeader } from './container-detail-page/detail-sections.js';
 import { DetachVolumeDialog, IntentHistoryDialog } from './container-detail-page/detail-dialogs.js';
-import { ContainerOverviewTab } from './container-detail-page/overview-tab.js';
-import { parseDetailTab, type DetailTab } from './container-detail-page/tabs.js';
-import { useContainerDetailActions } from './container-detail-page/use-container-detail-actions.js';
-import { useContainerDetailData } from './container-detail-page/use-container-detail-data.js';
+import { ContainerOverviewTab } from './container-detail-page/detail-sections.js';
+import { parseDetailTab, type DetailTab } from './container-detail-page/use-container-detail.js';
+import { useContainerDetailActions } from './container-detail-page/use-container-detail.js';
+import { useContainerDetailData } from './container-detail-page/use-container-detail.js';
 
 export { parseDetailTab, type DetailTab };
 

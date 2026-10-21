@@ -13,7 +13,7 @@ import { canViewSshProxyStatus } from '../lib/ssh-proxy-access.js';
 import { queryPollInterval } from '../lib/query-lifecycle.js';
 import { queryKeys } from '../lib/query-keys.js';
 import { useSshProxyMutations } from './ssh-proxy-page/use-ssh-proxy-mutations.js';
-import { HostKeySection } from './ssh-proxy-page/host-key-section.js';
+import { HostKeySection } from './ssh-proxy-page/status-sections.js';
 import {
   SshStatusSections,
   emptyStatus,

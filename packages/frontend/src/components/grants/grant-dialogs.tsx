@@ -28,7 +28,7 @@ import {
   initialExpiry,
   isoOrNull,
   serverName,
-} from './grant-format.js';
+} from './use-grant-panel-data.js';
 
 function ChoiceUnavailable({
   loading,

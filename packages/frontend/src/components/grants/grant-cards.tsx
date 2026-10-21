@@ -32,7 +32,7 @@ import {
   expiryPhase,
   poolName,
   serverName,
-} from './grant-format.js';
+} from './use-grant-panel-data.js';
 
 export const GRANT_MERGE_NOTE = '多条授权逐项取最大：同一用户在同一资源上的直接授权与所属各用户组的授权合并，额度取最大值（任一为不限则不限），GPU 白名单取并集，到期取最晚（任一不设期限则不过期）。';
 
