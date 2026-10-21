@@ -95,7 +95,6 @@ function createWorker(options: { systemActorId: string | null }) {
       executeQuery,
     } as never,
     { run: vi.fn() } as never,
-    { runsWorker: () => true } as never,
     {} as never,
     {} as never,
     { append: vi.fn() } as never,

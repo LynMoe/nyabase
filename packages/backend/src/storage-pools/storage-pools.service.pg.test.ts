@@ -362,8 +362,8 @@ describePg('storage pool registration and shared mapping', () => {
           { name: 'dir-bad', driver: 'dir', config: { source: '/bad\npath' } },
         ],
       });
-      const rediscovered = await service.discover(serverId);
-      const moved = rediscovered.pools.find((pool) => pool.incusName === 'dir-a');
+      const discoveredAgain = await service.discover(serverId);
+      const moved = discoveredAgain.pools.find((pool) => pool.incusName === 'dir-a');
       expect(moved?.source).toBe('/data1/moved');
       expect(moved?.displayName).toBe('系统盘');
       expect(moved?.registered).toBe(true);

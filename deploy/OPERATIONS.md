@@ -1,10 +1,11 @@
 # Nyabase production control plane
 
-The default deployment uses PostgreSQL as the authoritative control-plane
-database, Redis for disposable acceleration and wake state, and VictoriaMetrics
-Single behind vmagent's bounded persistent queue. Workloads run as Incus system
-containers; Compose is only the control-plane infrastructure and smoke-test
-boundary.
+The deployment is one Backend process (HTTP API, `/ws/*` gateways and
+background workers) over PostgreSQL as the authoritative control-plane database
+and VictoriaMetrics Single for metrics. Short-lived state (server trust tokens,
+console sessions) lives in Backend memory and is lost on restart. Workloads run
+as Incus system containers; Compose is only the control-plane infrastructure and
+smoke-test boundary.
 
 The Backend connects directly to each Incus server over HTTPS with mutual TLS.
 Each server also exposes the read-only node-exporter metrics endpoint. The
@@ -25,8 +26,7 @@ sudo chmod 0400 config.yaml
 
 Replace every `CHANGE_ME` value in `.env` (and keep matching passwords in the
 YAML connection URLs). `POSTGRES_PASSWORD` must match the password in
-`DATABASE_URL`; `REDIS_PASSWORD` must match the password in `REDIS_URL`.
-Percent-encode reserved URI characters in connection URLs.
+`DATABASE_URL`. Percent-encode reserved URI characters in connection URLs.
 `config.example.yaml` does **not** use `CHANGE_ME` for boot secrets:
 `auth.jwtSecret`, `ssh.keyEncryptionSecret`, `http.proxyToken`, and
 `ssh.proxyToken` are empty strings. Empty values fail closed at production
@@ -49,13 +49,12 @@ docker compose --env-file .env ps
 ```
 
 The application remains available on port `3001`. VictoriaMetrics keeps its
-existing loopback-only endpoint on `127.0.0.1:8428`. PostgreSQL, Redis and
-vmagent have no host-published ports.
+existing loopback-only endpoint on `127.0.0.1:8428`. PostgreSQL has no
+host-published port.
 
-The default `runtime.role=all` Backend starts after healthy PostgreSQL and
-treats Redis as optional acceleration. Redis, VictoriaMetrics and vmagent
-retain service healthchecks; vmagent starts independently of VictoriaMetrics so
-its bounded disk queue can accept samples while the remote store is unavailable.
+The Backend starts after healthy PostgreSQL. PostgreSQL and VictoriaMetrics
+retain service healthchecks; the Backend does not wait for VictoriaMetrics and
+buffers unsent samples in a bounded in-memory queue.
 
 Useful probes:
 
@@ -63,8 +62,6 @@ Useful probes:
 curl --fail http://127.0.0.1:3001/api/health/live
 curl --fail http://127.0.0.1:3001/api/health/ready
 curl --fail http://127.0.0.1:8428/health
-docker compose --env-file .env exec vmagent \
-  wget --spider --quiet http://127.0.0.1:8429/health
 ```
 
 `/api/health/live` proves only that the Backend process is alive.
@@ -73,7 +70,7 @@ failure must not make the Backend unready; metric queries degrade independently.
 Readiness is held closed until the control-plane process is accepting traffic
 and is closed again before dependency shutdown. Authenticated administrators
 with `ViewMetricsAll` can query `/api/admin/metrics/runtime` for aggregate
-PostgreSQL pool pressure, Redis readiness, and bounded telemetry queue health;
+PostgreSQL pool pressure and bounded telemetry queue health;
 the response intentionally contains no SQL, keys, identities, or raw errors.
 
 ## Boot secrets, Incus reachability, and proxies
@@ -297,34 +294,28 @@ rebuilding vmbr.
 ## Data ownership and failure behavior
 
 - PostgreSQL is the sole source of truth. A PostgreSQL outage must stop new
-  control mutations and reconciliation instead of falling back to Redis.
-- Redis persistence is intentionally disabled. Keys are bounded and
-  reconstructable; durable intents and reconciliation claims remain in PostgreSQL.
-  Redis loss must not change authorization or intent outcomes. Disposable wake
-  and acceleration state becomes unavailable until Redis recovers.
-- Redis uses `noeviction`: memory pressure fails writes instead of silently
-  evicting live login-limit windows. The process-local limiter remains active
-  as defense in depth. Alert on `used_memory/maxmemory`, rejected commands and
-  readiness before reaching the configured bound.
-- vmagent stores unsent metrics in `vmagent-data`, up to
-  `VMAGENT_MAX_DISK_USAGE_PER_URL`. It drops the oldest buffered metrics after
-  the bound is reached.
+  control mutations and reconciliation.
+- Server trust tokens and console sessions are held only in Backend memory.
+  Durable intents and reconciliation claims remain in PostgreSQL. A Backend
+  restart discards unconsumed trust tokens: the affected `server.connect`
+  intent fails with `TRUST_TOKEN_MISSING` and the operator resubmits the
+  connect request. Open console sessions end with the process.
+- Login rate limits are per Backend process and reset on restart.
+- Metrics samples queue in Backend memory (bounded by point and byte limits)
+  and are written directly to VictoriaMetrics. When VictoriaMetrics is down or
+  the queue is full, the oldest batches are dropped and counted in the
+  `droppedBatches` telemetry field; there is no on-disk buffer.
 - VictoriaMetrics data lives in `vm-data`. Its outage must not block control-plane
   writes or Incus reconciliation.
 
-After Redis loss, flush, or restart, validate local login limiting and durable
-intent convergence through PostgreSQL polling. The control plane must remain
-available while disposable wake state recovers.
-During a VictoriaMetrics outage, monitor
-`vm_persistentqueue_bytes_pending` on vmagent: it should grow and then decrease
-after VictoriaMetrics returns. During a vmagent outage, PostgreSQL control
+After a Backend restart, validate that durable intents converge through
+PostgreSQL polling. During a VictoriaMetrics outage, PostgreSQL control
 mutations and Incus reconciliation must remain responsive; metric ingestion is
-bounded and lossy until vmagent returns.
+bounded and lossy until VictoriaMetrics returns.
 
-Do not place PostgreSQL, VictoriaMetrics and vmagent data in the same host
-filesystem quota. PostgreSQL needs low-latency durable storage; VictoriaMetrics
-needs sustained sequential I/O; vmagent needs enough space for the chosen
-outage window.
+Do not place PostgreSQL and VictoriaMetrics data in the same host filesystem
+quota. PostgreSQL needs low-latency durable storage; VictoriaMetrics needs
+sustained sequential I/O.
 
 ## Capacity
 
@@ -334,14 +325,9 @@ example limits as universal:
 ```text
 samples_per_second =
   servers * average_active_series_per_server / collection_interval_seconds
-
-vmagent_queue_bytes =
-  measured_compressed_write_bytes_per_second * outage_window_seconds * 1.5
 ```
 
-Keep at least 20% of the VictoriaMetrics filesystem free. Increase the
-vmagent queue only after verifying that replay traffic will not overload
-VictoriaMetrics. Prefer vertical scaling of VictoriaMetrics Single; move to a
+Keep at least 20% of the VictoriaMetrics filesystem free. Prefer vertical scaling of VictoriaMetrics Single; move to a
 cluster only when a single instance cannot meet measured capacity or the
 metrics availability SLO requires instance-level failover.
 
@@ -362,9 +348,7 @@ node scripts/http-load-gate.mjs \
 The load gate requires every bounded request to return the expected status and
 prints p50/p95/p99/max latency. `HTTP_LOAD_REQUEST_TIMEOUT_MS` is a hard
 per-request ceiling; a release latency threshold must still come from the
-product SLO and stored baseline. Set `REDIS_MEMORY_LIMIT` above
-`REDIS_MAXMEMORY` so allocator/client overhead cannot make the container OOM
-before Redis's explicit no-eviction boundary.
+product SLO and stored baseline.
 
 ## Backup and restore contract
 
@@ -470,24 +454,19 @@ operator=
 
 VictoriaMetrics backup must use `vmbackup` against an instant snapshot and copy
 it to object storage or another host. `vmrestore` is an offline operation:
-stop VictoriaMetrics, restore into its data path, start it, then allow vmagent
-to replay its pending queue.
-
-Redis has no backup. After replacement, validate cache rebuilding, shared
-limiting, addressed RPC and PostgreSQL-driven worker convergence.
+stop VictoriaMetrics, restore into its data path, then start it.
 
 ## Upgrades
 
 - Pin PostgreSQL to the current PostgreSQL 18 minor after staging its release
   notes and restore test.
-- Keep VictoriaMetrics and vmagent on exactly the same explicit release.
 - Upgrade one data service at a time. Take and verify backups before PostgreSQL
   or VictoriaMetrics changes.
 - Production and CI images are pinned as readable tags plus immutable
   `sha256` manifests. Refresh a pin only after reviewing the upstream release,
   scanning/staging that exact digest, and rerunning the full Compose smoke;
   never update a tag while retaining an unrelated old digest.
-- Never lower VictoriaMetrics retention or queue disk limits without checking
+- Never lower VictoriaMetrics retention or disk limits without checking
   current disk use and the resulting data-loss window.
 
 Run the read-only PostgreSQL preflight before a major upgrade:
@@ -513,8 +492,7 @@ restore/reconciliation is required rather than a blind version rollback.
 Do not call the deployment “optimal” without workload-specific measurements.
 CI provides bounded regression gates, not a synthetic capacity claim:
 
-- Backend tests run with at most four Vitest workers against PostgreSQL 18 and
-  a real Redis 8.2 service.
+- Backend tests run with at most four Vitest workers against PostgreSQL 18.
 - A catalog test rejects foreign keys without a valid, non-partial leading
   index.
 - Heartbeat tests prove high socket-heartbeat volume is coalesced into one
@@ -526,7 +504,7 @@ CI provides bounded regression gates, not a synthetic capacity claim:
   through the built image and rejects any timeout or non-200 response.
 
 For release sizing, capture representative `EXPLAIN (ANALYZE, BUFFERS)` output,
-pool wait time, transaction latency, WAL bytes/second, Redis command latency,
+pool wait time, transaction latency, WAL bytes/second,
 and end-to-end request percentiles at the expected concurrency. Store the raw
 plans and workload description with the release record; thresholds must come
 from the product SLO and measured baseline, not from this example deployment.
@@ -565,9 +543,7 @@ from the product SLO and measured baseline, not from this example deployment.
   `no-new-privileges` is enabled, and `/tmp` is a bounded `noexec` tmpfs owned
   by `10001:10001`. The configuration bind mount must remain readable without
   weakening those controls.
-- Never publish PostgreSQL, Redis or vmagent ports.
-- Compose disables Redis's default user and grants the `nyabase` ACL user only
-  the configured key/channel prefix and required command categories.
+- Never publish the PostgreSQL port.
 - Rotate `.env` and `config.yaml` credentials through the deployment secret
   mechanism used by the target environment; do not commit either file.
 - Keep PostgreSQL TLS policy out of `DATABASE_URL`: URL-level `ssl`,
@@ -580,16 +556,8 @@ from the product SLO and measured baseline, not from this example deployment.
   `DATABASE_URL`, so that hostname must still be accepted by the endpoint's TLS
   router. `PG_SSL_MODE=require` encrypts without authenticating the server and
   is reserved for explicitly trusted networks.
-- If Redis moves across hosts, terminate TLS at Redis/its managed endpoint and
-  use a `rediss://nyabase:...` URL. For a private CA, mount its PEM bundle
-  read-only into the Backend and set `REDIS_TLS_CA_FILE`; set
-  `REDIS_TLS_SERVERNAME` when endpoint discovery uses a name different from the
-  certificate identity. Verification is always enabled; there is no insecure
-  skip-verify option. Do not downgrade to plaintext on a routed network.
-- The Compose Redis is single-node and is not HA. Production deployments that
-  require HA must use a managed endpoint or tested Sentinel/failover setup,
-  with reconnect/readiness alarms and a failover drill. Add a VictoriaMetrics
-  auth proxy only when telemetry endpoints cross a trust boundary.
+- Add a VictoriaMetrics auth proxy only when telemetry endpoints cross a trust
+  boundary.
 
 ## Incus 客户端证书（10 年寿命与自动轮换）
 
@@ -605,7 +573,7 @@ from the product SLO and measured baseline, not from this example deployment.
 
 ### 自动与手动轮换
 
-- 自动：`runtime.role=all|worker` 约每 60 秒（带抖动）检查一次。进入 90 天窗口、没有暂存证书、也没有 pending `certificate.rotate` 意图时，以登录禁用的 `nyabase-system` 身份入队；找不到该用户则本轮跳过并记日志，不得冒充人类管理员。
+- 自动：约每 60 秒（带抖动）检查一次。进入 90 天窗口、没有暂存证书、也没有 pending `certificate.rotate` 意图时，以登录禁用的 `nyabase-system` 身份入队；找不到该用户则本轮跳过并记日志，不得冒充人类管理员。
 - 手动：具备 `ManageCertificates` 的管理员调用
   `POST /api/admin/incus-client-certificate/rotate`（需 `expectedGeneration`）。
   当前生效证书见 `GET /api/admin/incus-client-certificate`（`ManageCertificates` 或 `ManageServers` 只读）；轮换进度见
@@ -644,8 +612,8 @@ incus config trust add /path/to/new-nyabase-client.crt
 
 ## 在每台 Incus 主机安装 node-exporter
 
-node-exporter 是独立进程（`packages/node-exporter`），**不是** Nest
-`runtime.role`。它只提供只读 HTTPS `/metrics`，没有 Incus 变更能力。仓库
+node-exporter 是独立进程（`packages/node-exporter`），**不是** Backend
+的一部分。它只提供只读 HTTPS `/metrics`，没有 Incus 变更能力。仓库
 单元文件为 `deploy/nyabase-node-exporter.service`（e2e 停机演练使用
 `E2E_NODE_EXPORTER_UNIT`；与单元名对齐：
 `E2E_NODE_EXPORTER_UNIT=nyabase-node-exporter.service`）。
@@ -725,7 +693,7 @@ sudo systemctl status nyabase-node-exporter.service
   API 只回 `tokenFingerprint`。
 - `nodeMetrics.serverCertFingerprint`：exporter 叶子证书指纹（TLS pin）。
 
-`runtime.role` 为 `all` 或 `worker` 的 Backend 由 `NodeMetricsScrapeService`
+Backend 由 `NodeMetricsScrapeService`
 每隔 15 秒（`NODE_METRICS_SCRAPE_INTERVAL_MS`）通过
 `AuthenticatedNodeMetricsPullAdapter` 拉取：HTTPS Bearer + 证书钉扎，写入
 VictoriaMetrics，并更新 `nodeMetrics.health`（`online` /

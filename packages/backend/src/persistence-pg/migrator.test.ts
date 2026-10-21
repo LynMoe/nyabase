@@ -26,11 +26,6 @@ describe('SQL migration discovery', () => {
     const migrations = await discoverSqlMigrations(resolve(__dirname, 'migrations'));
     expect(migrations.map(({ version, name }) => ({ version, name }))).toEqual([
       { version: '000001', name: 'initial' },
-      { version: '000002', name: 'reconcile-busy-strikes' },
-      { version: '000003', name: 'container-root-used-bytes' },
-      { version: '000004', name: 'drop-image-name' },
-      { version: '000005', name: 'add-storage-pool-source' },
-      { version: '000006', name: 'server-extensions-enabled-by-index' },
     ]);
     const [initial] = migrations;
     expect(initial.sql).toContain('CREATE TABLE iam.users');

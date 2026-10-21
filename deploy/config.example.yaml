@@ -59,22 +59,10 @@ database:
   statementTimeoutMs: 15000
   migrationsRun: true
 
-redis:
-  # PostgreSQL remains canonical. Redis is disposable acceleration and wake
-  # state; use rediss:// with a managed endpoint outside this example.
-  # REDIS_URL takes precedence in the Compose deployment.
-  url: "redis://nyabase:CHANGE_ME@redis:6379/0"
-  keyPrefix: "nyabase:"
-  # Mount this PEM bundle read-only into the Backend container when a private
-  # CA signs the rediss:// endpoint. Leave both values empty for local Compose.
-  tlsCaFile: ""
-  tlsServername: ""
-
 metrics:
-  # Reads go directly to VictoriaMetrics; writes go through vmagent so its
-  # bounded on-disk queue can absorb a VictoriaMetrics outage.
+  # Backend writes samples to and queries VictoriaMetrics directly. Unsent
+  # samples wait in a bounded in-memory queue and are dropped when it overflows.
   victoriaMetricsUrl: http://victoriametrics:8428
-  vmagentUrl: http://vmagent:8429
 
 http:
   # Required. Empty fails closed. Generate independently with:

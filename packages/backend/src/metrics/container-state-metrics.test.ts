@@ -108,7 +108,6 @@ describe('container state samples', () => {
       database as never,
       clients as never,
       { writeBatch: async (serverId: string) => { writes.push(serverId); } } as never,
-      { runsWorker: () => false } as never,
       { get: () => true } as never,
     );
     const done = publisher.publishAvailableServers();

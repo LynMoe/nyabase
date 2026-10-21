@@ -161,10 +161,10 @@ function server() {
 function reconciler(
   db: ReturnType<typeof database>,
   trustTokens = {
-    storeTrustToken: vi.fn().mockResolvedValue('reference'),
-    claimTrustToken: vi.fn().mockResolvedValue('one-time-secret'),
-    consumeClaimedTrustToken: vi.fn().mockResolvedValue(true),
-    releaseClaimedTrustToken: vi.fn().mockResolvedValue(true),
+    storeTrustToken: vi.fn().mockReturnValue('reference'),
+    claimTrustToken: vi.fn().mockReturnValue('one-time-secret'),
+    consumeClaimedTrustToken: vi.fn().mockReturnValue(true),
+    releaseClaimedTrustToken: vi.fn().mockReturnValue(true),
   },
 ) {
   return new ServerPreflightReconciler(
@@ -177,7 +177,7 @@ function reconciler(
       checkEgress: vi.fn(),
       checkGuestCanReachHost: vi.fn(),
     } as never,
-    trustTokens,
+    trustTokens as never,
     {
       get: vi.fn(
         (key: string) =>
@@ -215,13 +215,13 @@ function revisionRaceDatabase() {
 }
 
 describe('ServerPreflightReconciler', () => {
-  it('consumes a Redis reference and sends the secret only to Incus trust setup', async () => {
+  it('consumes a ephemeral-store reference and sends the secret only to Incus trust setup', async () => {
     const db = database();
     const trustTokens = {
-      storeTrustToken: vi.fn().mockResolvedValue('reference'),
-      claimTrustToken: vi.fn().mockResolvedValue('one-time-secret'),
-      consumeClaimedTrustToken: vi.fn().mockResolvedValue(true),
-      releaseClaimedTrustToken: vi.fn().mockResolvedValue(true),
+      storeTrustToken: vi.fn().mockReturnValue('reference'),
+      claimTrustToken: vi.fn().mockReturnValue('one-time-secret'),
+      consumeClaimedTrustToken: vi.fn().mockReturnValue(true),
+      releaseClaimedTrustToken: vi.fn().mockReturnValue(true),
     };
     const instance = reconciler(db, trustTokens);
     const client = {
@@ -304,10 +304,10 @@ describe('ServerPreflightReconciler', () => {
       }),
     }));
     const trustTokens = {
-      storeTrustToken: vi.fn().mockResolvedValue('reference'),
-      claimTrustToken: vi.fn().mockResolvedValue('one-time-secret'),
-      consumeClaimedTrustToken: vi.fn().mockResolvedValue(true),
-      releaseClaimedTrustToken: vi.fn().mockResolvedValue(true),
+      storeTrustToken: vi.fn().mockReturnValue('reference'),
+      claimTrustToken: vi.fn().mockReturnValue('one-time-secret'),
+      consumeClaimedTrustToken: vi.fn().mockReturnValue(true),
+      releaseClaimedTrustToken: vi.fn().mockReturnValue(true),
     };
     const instance = reconciler(db, trustTokens);
     const response = {
@@ -367,9 +367,9 @@ describe('ServerPreflightReconciler', () => {
     const fixture = database();
     const trustTokens = {
       storeTrustToken: vi.fn(),
-      claimTrustToken: vi.fn().mockResolvedValue('one-time-secret'),
-      consumeClaimedTrustToken: vi.fn().mockResolvedValue(true),
-      releaseClaimedTrustToken: vi.fn().mockResolvedValue(true),
+      claimTrustToken: vi.fn().mockReturnValue('one-time-secret'),
+      consumeClaimedTrustToken: vi.fn().mockReturnValue(true),
+      releaseClaimedTrustToken: vi.fn().mockReturnValue(true),
     };
     const instance = reconciler(fixture, trustTokens);
     const response = {
@@ -435,9 +435,9 @@ describe('ServerPreflightReconciler', () => {
     const fixture = database();
     const trustTokens = {
       storeTrustToken: vi.fn(),
-      claimTrustToken: vi.fn().mockResolvedValue('one-time-secret'),
-      consumeClaimedTrustToken: vi.fn().mockResolvedValue(true),
-      releaseClaimedTrustToken: vi.fn().mockResolvedValue(true),
+      claimTrustToken: vi.fn().mockReturnValue('one-time-secret'),
+      consumeClaimedTrustToken: vi.fn().mockReturnValue(true),
+      releaseClaimedTrustToken: vi.fn().mockReturnValue(true),
     };
     const instance = reconciler(fixture, trustTokens);
     const response = {
@@ -498,14 +498,51 @@ describe('ServerPreflightReconciler', () => {
     );
   });
 
+  it('fails the connect intent with TRUST_TOKEN_MISSING when the token was lost or expired', async () => {
+    const fixture = database();
+    const trustTokens = {
+      storeTrustToken: vi.fn(),
+      claimTrustToken: vi.fn().mockReturnValue(null),
+      consumeClaimedTrustToken: vi.fn(),
+      releaseClaimedTrustToken: vi.fn(),
+    };
+    const instance = reconciler(fixture, trustTokens);
+    const client = { trustClientCertificate: vi.fn(), getServer: vi.fn() };
+    const connectWithTrustToken = (
+      instance as unknown as {
+        connectWithTrustToken: (
+          client: unknown,
+          server: unknown,
+          intent: unknown,
+          signal: AbortSignal,
+        ) => Promise<void>;
+      }
+    ).connectWithTrustToken;
+
+    await expect(
+      connectWithTrustToken.call(
+        instance,
+        client,
+        server(),
+        { request: { trustTokenRef: '00000000-0000-4000-8000-000000000002' } } as never,
+        new AbortController().signal,
+      ),
+    ).rejects.toMatchObject({
+      code: 'TRUST_TOKEN_MISSING',
+      disposition: 'managed_failure',
+    });
+    expect(client.trustClientCertificate).not.toHaveBeenCalled();
+    expect(trustTokens.releaseClaimedTrustToken).not.toHaveBeenCalled();
+  });
+
   it('skips the token after a trusted side effect when the first read fails', async () => {
     const fixture = database();
     const firstAttempt = new AbortController();
     const trustTokens = {
       storeTrustToken: vi.fn(),
-      claimTrustToken: vi.fn().mockResolvedValue('one-time-secret'),
-      consumeClaimedTrustToken: vi.fn().mockResolvedValue(true),
-      releaseClaimedTrustToken: vi.fn().mockResolvedValue(true),
+      claimTrustToken: vi.fn().mockReturnValue('one-time-secret'),
+      consumeClaimedTrustToken: vi.fn().mockReturnValue(true),
+      releaseClaimedTrustToken: vi.fn().mockReturnValue(true),
     };
     const instance = reconciler(fixture, trustTokens);
     const response = {
@@ -574,9 +611,9 @@ describe('ServerPreflightReconciler', () => {
     const fixture = database(undefined, null);
     const trustTokens = {
       storeTrustToken: vi.fn(),
-      claimTrustToken: vi.fn().mockResolvedValue('one-time-secret'),
-      consumeClaimedTrustToken: vi.fn().mockResolvedValue(true),
-      releaseClaimedTrustToken: vi.fn().mockResolvedValue(true),
+      claimTrustToken: vi.fn().mockReturnValue('one-time-secret'),
+      consumeClaimedTrustToken: vi.fn().mockReturnValue(true),
+      releaseClaimedTrustToken: vi.fn().mockReturnValue(true),
     };
     const instance = reconciler(fixture, trustTokens);
     const response = {
@@ -628,11 +665,11 @@ describe('ServerPreflightReconciler', () => {
     const db = database();
     const trustTokens = {
       storeTrustToken: vi.fn(),
-      claimTrustToken: vi.fn(async (_server: string, reference: string) =>
+      claimTrustToken: vi.fn((_server: string, reference: string) =>
         reference.endsWith('002') ? 'token-two' : 'token-one',
       ),
-      consumeClaimedTrustToken: vi.fn().mockResolvedValue(true),
-      releaseClaimedTrustToken: vi.fn().mockResolvedValue(true),
+      consumeClaimedTrustToken: vi.fn().mockReturnValue(true),
+      releaseClaimedTrustToken: vi.fn().mockReturnValue(true),
     };
     const instance = reconciler(db, trustTokens);
     const response = {
@@ -707,10 +744,10 @@ describe('ServerPreflightReconciler', () => {
   it('releases a claimed trust token when the Incus side effect is retryable', async () => {
     const db = database();
     const trustTokens = {
-      storeTrustToken: vi.fn().mockResolvedValue('reference'),
-      claimTrustToken: vi.fn().mockResolvedValue('one-time-secret'),
-      consumeClaimedTrustToken: vi.fn().mockResolvedValue(true),
-      releaseClaimedTrustToken: vi.fn().mockResolvedValue(true),
+      storeTrustToken: vi.fn().mockReturnValue('reference'),
+      claimTrustToken: vi.fn().mockReturnValue('one-time-secret'),
+      consumeClaimedTrustToken: vi.fn().mockReturnValue(true),
+      releaseClaimedTrustToken: vi.fn().mockReturnValue(true),
     };
     const instance = reconciler(db, trustTokens);
     const client = {

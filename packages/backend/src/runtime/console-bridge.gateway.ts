@@ -80,7 +80,7 @@ export class ConsoleBridgeGateway implements OnModuleInit, OnModuleDestroy {
       return;
     }
     if (this.destroyed) {
-      await this.sessions.release(sessionId);
+      this.sessions.release(sessionId);
       socket.close(1012);
       return;
     }
@@ -100,7 +100,7 @@ export class ConsoleBridgeGateway implements OnModuleInit, OnModuleDestroy {
       });
     } finally {
       physical?.close();
-      await this.sessions.release(sessionId);
+      this.sessions.release(sessionId);
     }
   }
 

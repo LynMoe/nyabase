@@ -29,7 +29,6 @@ import {
   configuredProxyTokenDigest,
   hasValidBearerToken,
 } from '../common/proxy-bearer-auth.js';
-import { RuntimeRoleService } from '../runtime/runtime-role.service.js';
 
 export const MAX_SSH_PROXY_BUFFERED_BYTES = MAX_SSH_PROXY_SNAPSHOT_BYTES;
 export const MAX_SSH_PROXY_CLIENTS = 4;
@@ -98,7 +97,6 @@ export class SshProxyGateway implements OnModuleInit, OnModuleDestroy {
     private snapshots: SshProxySnapshotService,
     private config: NyabaseConfigService,
     private proxySnapshots: ProxySnapshotNotifierService,
-    private readonly runtimeRole?: RuntimeRoleService,
   ) {
     this.expectedTokenDigest = configuredProxyTokenDigest(
       config.get<string>('ssh.proxyToken'),
@@ -107,7 +105,6 @@ export class SshProxyGateway implements OnModuleInit, OnModuleDestroy {
   }
 
   onModuleInit(): void {
-    if (this.runtimeRole && !this.runtimeRole.servesProxySockets()) return;
     this.unregisterSnapshotListener = this.proxySnapshots.register(
       'ssh',
       () => this.broadcastSnapshot(),

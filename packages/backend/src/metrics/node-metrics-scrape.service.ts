@@ -23,7 +23,6 @@ import {
   type NodeMetricsPullPort,
 } from '../runtime/server-preflight-reconciler.service.js';
 import { NyabaseConfigService } from '../config/nyabase-config.service.js';
-import { RuntimeRoleService } from '../runtime/runtime-role.service.js';
 import {
   type MetricPoint,
   type MetricsWriteOptions,
@@ -68,12 +67,11 @@ export class NodeMetricsScrapeService implements OnModuleInit, OnModuleDestroy {
     @Inject(PG_DATABASE) private readonly database: Kysely<NyabaseDatabase>,
     @Inject(NODE_METRICS_PULL) private readonly nodeMetrics: NodeMetricsPullPort,
     private readonly metricsWriter: MetricsWriter,
-    private readonly runtimeRole: RuntimeRoleService,
     @Optional() private readonly config?: NyabaseConfigService,
   ) {}
 
   onModuleInit(): void {
-    if (!this.runtimeRole.runsWorker() || this.shuttingDown || this.timer) return;
+    if (this.shuttingDown || this.timer) return;
     this.timer = setInterval(() => this.startBackgroundScrape(), NODE_METRICS_SCRAPE_INTERVAL_MS);
     this.timer.unref?.();
     this.startBackgroundScrape();

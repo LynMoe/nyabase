@@ -22,7 +22,6 @@ import {
   GrantExpiryEnforcementRepository,
 } from './grant-expiry-enforcement.repository.js';
 import { UserServerResourcePurgeService } from './user-server-resource-purge.service.js';
-import { RuntimeRoleService } from '../runtime/runtime-role.service.js';
 import { SYSTEM_ACTOR_USERNAME } from '../groups/groups.service.js';
 
 const EXPIRY_INTERVAL_MS = 60_000;
@@ -94,14 +93,12 @@ export class GrantExpiryWorkerService implements OnModuleInit, OnModuleDestroy {
     @Inject(PG_DATABASE)
     private readonly database: Kysely<NyabaseDatabase>,
     private readonly transactions: PgTransactionManager,
-    private readonly runtimeRole: RuntimeRoleService,
     private readonly enforcement: GrantExpiryEnforcementRepository,
     private readonly purge: UserServerResourcePurgeService,
     private readonly audit: AuditService,
   ) {}
 
   onModuleInit(): void {
-    if (!this.runtimeRole.runsWorker()) return;
     this.stopped = false;
     this.scheduleNext();
     this.wake();
@@ -117,7 +114,7 @@ export class GrantExpiryWorkerService implements OnModuleInit, OnModuleDestroy {
   }
 
   wake(): void {
-    if (this.stopped || !this.runtimeRole.runsWorker() || this.wakeTimer) return;
+    if (this.stopped || this.wakeTimer) return;
     this.wakeTimer = setImmediate(() => {
       this.wakeTimer = null;
       if (!this.stopped) void this.process();
@@ -125,7 +122,7 @@ export class GrantExpiryWorkerService implements OnModuleInit, OnModuleDestroy {
   }
 
   async process(): Promise<void> {
-    if (this.stopped || !this.runtimeRole.runsWorker()) return;
+    if (this.stopped) return;
     if (this.processing) return this.processing;
     const processing = this.processPass();
     this.processing = processing;
@@ -137,7 +134,7 @@ export class GrantExpiryWorkerService implements OnModuleInit, OnModuleDestroy {
   }
 
   private scheduleNext(): void {
-    if (this.stopped || !this.runtimeRole.runsWorker()) return;
+    if (this.stopped) return;
     if (this.timer) clearTimeout(this.timer);
     const jitter = Math.floor(
       (Math.random() * 2 - 1) * EXPIRY_INTERVAL_JITTER_MS,

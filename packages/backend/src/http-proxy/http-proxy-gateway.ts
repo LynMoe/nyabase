@@ -18,7 +18,6 @@ import {
   configuredProxyTokenDigest,
   hasValidBearerToken,
 } from '../common/proxy-bearer-auth.js';
-import { RuntimeRoleService } from '../runtime/runtime-role.service.js';
 
 const DEBOUNCE_MS = 500;
 const MAX_WAIT_MS = 2_000;
@@ -63,7 +62,6 @@ export class HttpProxyGateway implements OnModuleInit, OnModuleDestroy {
     private service: HttpProxyService,
     config: NyabaseConfigService,
     private snapshotNotifier: ProxySnapshotNotifierService,
-    private readonly runtimeRole?: RuntimeRoleService,
   ) {
     this.expectedTokenDigest = configuredProxyTokenDigest(
       config.get<string>('http.proxyToken'),
@@ -72,18 +70,14 @@ export class HttpProxyGateway implements OnModuleInit, OnModuleDestroy {
     if (SNAPSHOT_RENEWAL_MS >= HTTP_PROXY_SNAPSHOT_STALE_AFTER_MS / 2) {
       throw new Error('HTTP proxy snapshot renewal interval must be less than half the lease TTL');
     }
-    this.snapshotRenewalTimer = null;
-    if (!this.runtimeRole || this.runtimeRole.servesProxySockets()) {
-      this.snapshotRenewalTimer = setInterval(() => {
-        if (this.destroyed || this.clients.size === 0) return;
-        this.requestLeaseRenewal();
-      }, SNAPSHOT_RENEWAL_MS);
-      this.snapshotRenewalTimer.unref();
-    }
+    this.snapshotRenewalTimer = setInterval(() => {
+      if (this.destroyed || this.clients.size === 0) return;
+      this.requestLeaseRenewal();
+    }, SNAPSHOT_RENEWAL_MS);
+    this.snapshotRenewalTimer.unref();
   }
 
   onModuleInit(): void {
-    if (this.runtimeRole && !this.runtimeRole.servesProxySockets()) return;
     this.unregisterSnapshotNotifier = this.snapshotNotifier.register(
       'http',
       () => this.broadcastSnapshot(),

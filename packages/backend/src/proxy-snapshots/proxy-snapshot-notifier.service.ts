@@ -1,11 +1,4 @@
-import {
-  Injectable,
-  Logger,
-  OnModuleDestroy,
-  OnModuleInit,
-  Optional,
-} from '@nestjs/common';
-import { RedisDisposableAdapter } from '../runtime/redis-disposable.adapter.js';
+import { Injectable, Logger } from '@nestjs/common';
 
 export type ProxySnapshotChannel = 'http' | 'ssh';
 type SnapshotListener = (reason: string) => Promise<void>;
@@ -19,50 +12,13 @@ type ServerBlockListener = (serverId: string, reason: string) => void;
  * and never rewrites an already committed intent outcome.
  */
 @Injectable()
-export class ProxySnapshotNotifierService implements OnModuleInit, OnModuleDestroy {
+export class ProxySnapshotNotifierService {
   private readonly logger = new Logger(ProxySnapshotNotifierService.name);
   private readonly listeners = new Map<ProxySnapshotChannel, SnapshotListener>();
   private readonly blockedServerIds = new Set<string>();
   private readonly serverBlockListeners = new Set<ServerBlockListener>();
   private readonly blockEpochByServerId = new Map<string, number>();
   private nextBlockEpoch = 1;
-  private unsubscribeRedis: (() => Promise<void>) | null = null;
-  private redisSubscription: Promise<void> | null = null;
-  private destroyed = false;
-
-  constructor(
-    @Optional()
-    private readonly redis?: RedisDisposableAdapter,
-  ) {}
-
-  onModuleInit(): void {
-    if (!this.redis) return;
-    this.redisSubscription = this.redis.subscribe('proxy-snapshot', (payload) => {
-      if (this.destroyed) return;
-      const event = parseSnapshotEvent(payload);
-      if (!event || event.origin === this.redis?.gatewayId) return;
-      this.invalidateLocal(`redis:${event.reason}`);
-    }).then(async (unsubscribe) => {
-      if (this.destroyed) {
-        await unsubscribe();
-        return;
-      }
-      this.unsubscribeRedis = unsubscribe;
-    }).catch((error) => {
-      this.logger.warn(
-        `Proxy snapshot Redis subscription unavailable: ${this.errorMessage(error)}`,
-      );
-    }).finally(() => {
-      this.redisSubscription = null;
-    });
-  }
-
-  async onModuleDestroy(): Promise<void> {
-    this.destroyed = true;
-    await this.redisSubscription;
-    await this.unsubscribeRedis?.();
-    this.unsubscribeRedis = null;
-  }
 
   register(channel: ProxySnapshotChannel, listener: SnapshotListener): () => void {
     if (this.listeners.has(channel)) {
@@ -90,7 +46,6 @@ export class ProxySnapshotNotifierService implements OnModuleInit, OnModuleDestr
         `${channel} proxy snapshot notification failed after commit (${reason}): ${this.errorMessage(outcome.reason)}`,
       );
     }
-    this.publishRedis(reason);
   }
 
   registerServerBlockListener(listener: ServerBlockListener): () => void {
@@ -106,11 +61,6 @@ export class ProxySnapshotNotifierService implements OnModuleInit, OnModuleDestr
    * destructive address reuse has a durable drain gate.
    */
   invalidate(reason: string): void {
-    this.invalidateLocal(reason);
-    this.publishRedis(reason);
-  }
-
-  private invalidateLocal(reason: string): void {
     for (const [channel, listener] of this.listeners) {
       void listener(reason).catch((error: unknown) => {
         this.logger.warn(
@@ -176,27 +126,5 @@ export class ProxySnapshotNotifierService implements OnModuleInit, OnModuleDestr
 
   private errorMessage(error: unknown): string {
     return error instanceof Error ? error.message : String(error);
-  }
-
-  private publishRedis(reason: string): void {
-    if (!this.redis) return;
-    void this.redis.publish('proxy-snapshot', JSON.stringify({
-      origin: this.redis.gatewayId,
-      reason,
-    }));
-  }
-}
-
-function parseSnapshotEvent(
-  payload: string,
-): { origin: string; reason: string } | null {
-  try {
-    const event = JSON.parse(payload) as Record<string, unknown>;
-    if (typeof event.origin !== 'string' || typeof event.reason !== 'string') {
-      return null;
-    }
-    return { origin: event.origin, reason: event.reason };
-  } catch {
-    return null;
   }
 }

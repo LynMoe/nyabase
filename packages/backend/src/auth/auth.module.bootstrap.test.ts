@@ -33,10 +33,8 @@ describeBootstrap('AppModule capability guard bootstrap', () => {
       const previousEnvironment = new Map<string, string | undefined>([
         ['NYABASE_CONFIG_FILE', process.env.NYABASE_CONFIG_FILE],
         ['NODE_ENV', process.env.NODE_ENV],
-        ['NYABASE_RUNTIME_ROLE', process.env.NYABASE_RUNTIME_ROLE],
         ['DATABASE_URL', process.env.DATABASE_URL],
         ['DB_MIGRATIONS_RUN', process.env.DB_MIGRATIONS_RUN],
-        ['REDIS_URL', process.env.REDIS_URL],
         ['JWT_SECRET', process.env.JWT_SECRET],
         ['HTTP_PROXY_TOKEN', process.env.HTTP_PROXY_TOKEN],
         ['SSH_PROXY_TOKEN', process.env.SSH_PROXY_TOKEN],
@@ -44,10 +42,8 @@ describeBootstrap('AppModule capability guard bootstrap', () => {
       ]);
       process.env.NYABASE_CONFIG_FILE = configPath;
       process.env.NODE_ENV = 'test';
-      process.env.NYABASE_RUNTIME_ROLE = 'api';
       process.env.DATABASE_URL = connectionString;
       process.env.DB_MIGRATIONS_RUN = 'false';
-      process.env.REDIS_URL = 'redis://127.0.0.1:1/0';
       process.env.JWT_SECRET = 'bootstrap-test-jwt-secret-bootstrap-test-jwt-secret';
       delete process.env.HTTP_PROXY_TOKEN;
       delete process.env.SSH_PROXY_TOKEN;

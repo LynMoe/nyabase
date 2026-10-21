@@ -22,10 +22,6 @@ import type {
 } from './auth-persistence.js';
 import { isPgIamTransaction } from './auth-persistence.js';
 import { IAM_AUTH_PERSISTENCE } from './auth.tokens.js';
-import {
-  RedisDisposableAdapter,
-  type RateLimitReservation,
-} from '../runtime/redis-disposable.adapter.js';
 import { AuditService } from '../audit/audit.service.js';
 
 export interface JwtPayload {
@@ -56,20 +52,10 @@ interface LoginAttemptEntry {
   lastSeenAt: number;
 }
 
-interface LocalLoginAttemptReservation {
-  kind: 'local';
+interface LoginAttemptReservation {
   key: string;
   entry: LoginAttemptEntry;
 }
-
-interface RedisLoginAttemptReservation {
-  kind: 'redis';
-  reservation: RateLimitReservation;
-}
-
-type LoginAttemptReservation =
-  | LocalLoginAttemptReservation
-  | RedisLoginAttemptReservation;
 
 @Injectable()
 export class AuthService {
@@ -82,8 +68,6 @@ export class AuthService {
     private jwtService: JwtService,
     private config: NyabaseConfigService,
     private readonly audit: AuditService,
-    @Optional()
-    private readonly redis?: RedisDisposableAdapter,
     @Optional()
     @Inject(AUTH_MONOTONIC_CLOCK)
     private readonly monotonicNow?: () => number,
@@ -114,7 +98,7 @@ export class AuthService {
    * old password cannot win a race with reset/disable.
    */
   async authenticateAndLogin(username: string, password: string, clientIp: string) {
-    const reservations = await this.consumeLoginAttempt(clientIp, username);
+    const reservations = this.consumeLoginAttempt(clientIp, username);
     const snapshot = await this.validateUser(username, password);
     const issued = await this.issueRefreshSession(snapshot.id, {
       id: snapshot.id,
@@ -131,7 +115,7 @@ export class AuthService {
     // success is not abuse, so release only this call's exact reservations.
     // Entry identity fences concurrent failures and a replacement time window:
     // neither may be decremented by an older successful call.
-    await this.releaseSuccessfulLoginReservations(reservations);
+    this.releaseSuccessfulLoginReservations(reservations);
     return result;
   }
 
@@ -396,10 +380,10 @@ export class AuthService {
     }
   }
 
-  private async consumeLoginAttempt(
+  private consumeLoginAttempt(
     clientIp: string,
     username: string,
-  ): Promise<LoginAttemptReservation[]> {
+  ): LoginAttemptReservation[] {
     const now = this.localLimiterNow();
     this.pruneLoginAttempts(now);
     const normalizedIp = clientIp.trim() || 'unknown';
@@ -407,12 +391,10 @@ export class AuthService {
     const attempts = [
       {
         localKey: `ip:${normalizedIp}`,
-        remoteScope: this.loginLimitScope('ip', normalizedIp),
         limit: MAX_LOGIN_ATTEMPTS_PER_IP,
       },
       {
         localKey: `principal:${normalizedUsername}`,
-        remoteScope: this.loginLimitScope('principal', normalizedUsername),
         limit: MAX_LOGIN_ATTEMPTS_PER_PRINCIPAL,
       },
     ];
@@ -430,51 +412,19 @@ export class AuthService {
       if (entry.count >= attempt.limit) {
         throw this.tooManyRequests('Too many login attempts');
       }
-      // Every attempt consumes the process-local defense first, including a
-      // request rejected by the shared Redis bucket. If Redis is then lost,
-      // this process cannot grant a fresh local window.
       entry.count += 1;
       entry.lastSeenAt = now;
       this.loginAttempts.delete(attempt.localKey);
       this.loginAttempts.set(attempt.localKey, entry);
-      reservations.push({ kind: 'local', key: attempt.localKey, entry });
-
-      if (this.redis) {
-        const result = await this.redis.consumeRateLimit(
-          attempt.remoteScope,
-          attempt.limit,
-          LOGIN_ATTEMPT_WINDOW_MS,
-        );
-        if (!result.available) {
-          throw this.limiterUnavailable();
-        }
-        if (!result.allowed) {
-          throw this.tooManyRequests('Too many login attempts');
-        }
-        if (result.reservation) {
-          reservations.push({
-            kind: 'redis',
-            reservation: result.reservation,
-          });
-        }
-      }
+      reservations.push({ key: attempt.localKey, entry });
     }
     return reservations;
   }
 
-  private async releaseSuccessfulLoginReservations(
+  private releaseSuccessfulLoginReservations(
     reservations: readonly LoginAttemptReservation[],
-  ): Promise<void> {
-    const remoteReleases: Promise<boolean>[] = [];
+  ): void {
     for (const reservation of reservations) {
-      if (reservation.kind === 'redis') {
-        if (this.redis) {
-          remoteReleases.push(
-            this.redis.releaseRateLimit(reservation.reservation),
-          );
-        }
-        continue;
-      }
       const { key, entry } = reservation;
       if (this.loginAttempts.get(key) !== entry) continue;
       if (entry.count <= 0) continue;
@@ -483,20 +433,6 @@ export class AuthService {
         this.loginAttempts.delete(key);
       }
     }
-    await Promise.all(remoteReleases);
-  }
-
-  private loginLimitScope(kind: 'ip' | 'principal', value: string): string {
-    const identity = createHmac(
-      'sha256',
-      this.config.get<string>('auth.jwtSecret'),
-    )
-      .update('nyabase-login-limit-v1\0')
-      .update(kind)
-      .update('\0')
-      .update(value)
-      .digest('hex');
-    return `login:${kind}:${identity}`;
   }
 
   private pruneLoginAttempts(now: number): void {
@@ -513,15 +449,5 @@ export class AuthService {
 
   private tooManyRequests(message: string): HttpException {
     return new HttpException({ code: 'AUTH_RATE_LIMITED', message }, HttpStatus.TOO_MANY_REQUESTS);
-  }
-
-  private limiterUnavailable(): HttpException {
-    return new HttpException(
-      {
-        code: 'AUTH_LIMITER_UNAVAILABLE',
-        message: 'Login limiter is temporarily unavailable',
-      },
-      HttpStatus.SERVICE_UNAVAILABLE,
-    );
   }
 }

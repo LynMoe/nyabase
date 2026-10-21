@@ -45,8 +45,6 @@ done
 
 POSTGRES_PASSWORD=contract-test \
 DATABASE_URL=postgresql://nyabase:contract-test@postgres:5432/nyabase \
-REDIS_PASSWORD=contract-test \
-REDIS_URL=redis://nyabase:contract-test@redis:6379/0 \
 INCUS_CLIENT_CERT_SOURCE="$incus_client_cert_source" \
 INCUS_CLIENT_KEY_SOURCE="$incus_client_key_source" \
 INCUS_CA_SOURCE="$incus_ca_source" \
@@ -58,7 +56,7 @@ const config = JSON.parse(readFileSync(process.argv[2], 'utf8'));
 const backend = config.services?.backend;
 if (!backend) throw new Error('rendered Compose config has no backend service');
 const serviceNames = Object.keys(config.services ?? {}).sort();
-const expectedServices = ['backend', 'postgres', 'redis', 'victoriametrics', 'vmagent'];
+const expectedServices = ['backend', 'postgres', 'victoriametrics'];
 if (JSON.stringify(serviceNames) !== JSON.stringify(expectedServices)) {
   throw new Error(
     `Compose services must be exactly ${expectedServices.join(', ')}, got ${serviceNames.join(', ')}`,
@@ -84,29 +82,13 @@ for (const forbidden of [
 if (/(^|[^a-z0-9_])agent([^a-z0-9_]|$)/i.test(renderedText)) {
   throw new Error('Compose still contains the retired host control process');
 }
-for (const serviceName of ['postgres', 'redis', 'victoriametrics', 'vmagent']) {
+for (const serviceName of ['postgres', 'victoriametrics']) {
   const image = config.services?.[serviceName]?.image ?? '';
   if (!/^[^@\s]+@sha256:[0-9a-f]{64}$/.test(image)) {
     throw new Error(`${serviceName} image is not pinned by digest`);
   }
 }
-const redisCommand = (config.services?.redis?.command ?? []).join(' ');
-for (const required of [
-  '--user default off',
-  '--user nyabase on',
-  '+auth',
-  '+ping',
-  '+eval',
-  '+hdel',
-]) {
-  if (!redisCommand.includes(required)) throw new Error(`Redis ACL is missing ${required}`);
-}
-for (const forbidden of ['+client', '+acl', '+config', '+shutdown', '+@all']) {
-  if (redisCommand.split(/\s+/).includes(forbidden)) {
-    throw new Error(`Redis ACL grants forbidden command/category ${forbidden}`);
-  }
-}
-for (const serviceName of ['postgres', 'redis', 'victoriametrics', 'vmagent', 'backend']) {
+for (const serviceName of ['postgres', 'victoriametrics', 'backend']) {
   const service = config.services?.[serviceName];
   if (!(service?.cpus > 0) || !(service?.mem_limit > 0) || !(service?.pids_limit > 0)) {
     throw new Error(`${serviceName} resource limits are incomplete`);
@@ -154,9 +136,7 @@ if rg -n 'packages/agent|dockerd|dockerRoot|nyabase-agent' deploy/Dockerfile.bac
   echo "Backend image still contains the retired host runtime" >&2
   exit 1
 fi
-rg -q 'disableClientInfo:[[:space:]]*true' packages/backend/src/runtime/redis-runtime.module.ts
 rg -q 'image: postgres:18\.4-bookworm@sha256:[0-9a-f]{64}' .github/workflows/ci.yml
-rg -q 'image: redis:8\.2-bookworm@sha256:[0-9a-f]{64}' .github/workflows/ci.yml
 for deployment_file in \
   deploy/docker-compose.yml \
   deploy/Dockerfile.backend \

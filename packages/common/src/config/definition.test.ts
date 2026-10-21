@@ -28,7 +28,7 @@ describe('proxy token configuration', () => {
   });
 });
 
-describe('PostgreSQL, Redis, and metrics configuration', () => {
+describe('PostgreSQL and metrics configuration', () => {
   function definition(key: string) {
     return controlPlaneConfigDefinitions.find((item) => item.key === key);
   }
@@ -41,40 +41,9 @@ describe('PostgreSQL, Redis, and metrics configuration', () => {
     expect(schema?.safeParse('sqlite:///data/nyabase.db').success).toBe(false);
   });
 
-  it('keeps Redis disposable and separates metric reads from writes in the manifest', () => {
-    expect(definition('redis.url')?.defaultValue).toBe('redis://redis:6379/0');
+  it('uses one VictoriaMetrics URL for metric ingestion and queries', () => {
+    expect(definition('metrics.victoriaMetricsUrl')?.description).toContain('ingestion');
     expect(definition('metrics.victoriaMetricsUrl')?.description).toContain('queries');
-    expect(definition('metrics.vmagentUrl')?.description).toContain('ingestion');
-  });
-
-  it('accepts only the bounded canonical Redis URL subset used by the runtime', () => {
-    const schema = definition('redis.url')?.schema;
-    for (const value of [
-      'redis://redis:6379/0',
-      'rediss://nyabase:p%40ss@redis.internal:6380/15',
-      'redis://:password@[::1]:6379/2147483647',
-    ]) {
-      expect(schema?.safeParse(value).success, value).toBe(true);
-    }
-
-    for (const value of [
-      'redis:///0',
-      'redis://redis',
-      'redis://redis/',
-      'redis://redis/-1',
-      'redis://redis/01',
-      'redis://redis/2147483648',
-      'redis://redis/0/extra',
-      'redis://user@redis/0',
-      'redis://user name:password@redis/0',
-      `redis://user:${'p'.repeat(1_025)}@redis/0`,
-      'redis://redis/0?tls=true',
-      'rediss://redis/0?rejectUnauthorized=false',
-      'redis://redis/0#fragment',
-      'http://redis/0',
-    ]) {
-      expect(schema?.safeParse(value).success, value).toBe(false);
-    }
   });
 
   it('keeps the HTTP listen address off the public settings surface', () => {
@@ -94,17 +63,6 @@ describe('PostgreSQL, Redis, and metrics configuration', () => {
     }
     for (const value of ['true', '*', 'proxy.local', '10.0.0.0/33', '300.1.1.1', 'loopback,']) {
       expect(field?.schema.safeParse(value).success, value).toBe(false);
-    }
-  });
-
-  it('supports a simple all-in-one default and independently scalable process roles', () => {
-    const schema = definition('runtime.role')?.schema;
-    expect(definition('runtime.role')?.defaultValue).toBe('all');
-    for (const role of ['all', 'api', 'worker']) {
-      expect(schema?.safeParse(role).success).toBe(true);
-    }
-    for (const role of ['gateway', 'node-exporter', 'ssh-proxy', 'http-proxy']) {
-      expect(schema?.safeParse(role).success).toBe(false);
     }
   });
 

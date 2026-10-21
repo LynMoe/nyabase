@@ -112,7 +112,7 @@ export class AccessResolverService {
   }
 
   async authorizationCommitted(userIds?: Iterable<string>): Promise<void> {
-    await this.cacheEpoch.refreshAndPublish();
+    await this.cacheEpoch.refresh();
     if (userIds) {
       for (const id of userIds) this.cache.delete(id);
     } else {

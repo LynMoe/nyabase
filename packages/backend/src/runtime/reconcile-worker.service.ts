@@ -19,7 +19,6 @@ import {
   type IncusFailureCode,
 } from '../incus/index.js';
 import { ServerCardExtensionsService } from '../server-card-extensions/server-extensions.service.js';
-import { RuntimeRoleService } from './runtime-role.service.js';
 import {
   IntentRepository,
   isRestartIntent,
@@ -372,7 +371,6 @@ export class ReconcileWorkerService implements OnModuleInit, OnModuleDestroy {
   private eventWatchers: Promise<void>[] = [];
 
   constructor(
-    private readonly role: RuntimeRoleService,
     private readonly intents: IntentRepository,
     private readonly claims: ReconcileClaimRepository,
     @Inject(RECONCILER_REGISTRY)
@@ -390,7 +388,7 @@ export class ReconcileWorkerService implements OnModuleInit, OnModuleDestroy {
   ) {}
 
   onModuleInit(): void {
-    if (!this.role.runsWorker() || this.started || this.stopping) return;
+    if (this.started || this.stopping) return;
     this.started = true;
     this.unsubscribeWake = this.wake?.onWake((payload) => {
       if (payload.reason === 'event' || payload.reason === 'reconnect') {
@@ -430,7 +428,7 @@ export class ReconcileWorkerService implements OnModuleInit, OnModuleDestroy {
   }
 
   runOnce(): Promise<void> {
-    if (!this.role.runsWorker() || this.controller.signal.aborted) return Promise.resolve();
+    if (this.controller.signal.aborted) return Promise.resolve();
     if (this.runPromise) return this.runPromise;
     this.running = true;
     const operation = this.trackOperation(this.executeRunOnce());

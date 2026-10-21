@@ -2,9 +2,9 @@ import { describe, expect, it, vi } from 'vitest';
 import { ServerConnectIntentService } from './server-connect-intent.service.js';
 
 describe('ServerConnectIntentService', () => {
-  it('stores the secret in Redis before persisting only its reference', async () => {
+  it('stores the secret in the ephemeral store before persisting only its reference', async () => {
     const createPending = vi.fn().mockResolvedValue({ id: 'intent-id' });
-    const storeTrustToken = vi.fn().mockResolvedValue(
+    const storeTrustToken = vi.fn().mockReturnValue(
       '00000000-0000-4000-8000-000000000001',
     );
     const service = new ServerConnectIntentService(

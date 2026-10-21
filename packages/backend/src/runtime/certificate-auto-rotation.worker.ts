@@ -15,7 +15,6 @@ import {
 } from '@nyabase/common';
 import type { NyabaseDatabase } from '../persistence-pg/database.types.js';
 import { PG_DATABASE } from '../persistence-pg/tokens.js';
-import { RuntimeRoleService } from './runtime-role.service.js';
 import { IncusClientCertificateService } from '../servers/incus-client-certificate.service.js';
 
 export const CERTIFICATE_AUTO_ROTATION_CLOCK = Symbol('CERTIFICATE_AUTO_ROTATION_CLOCK');
@@ -43,7 +42,6 @@ export class CertificateAutoRotationWorker implements OnModuleInit, OnModuleDest
 
   constructor(
     @Inject(PG_DATABASE) private readonly database: Kysely<NyabaseDatabase>,
-    private readonly runtimeRole: RuntimeRoleService,
     private readonly moduleRef: ModuleRef,
     @Optional()
     @Inject(CERTIFICATE_AUTO_ROTATION_CLOCK)
@@ -53,7 +51,6 @@ export class CertificateAutoRotationWorker implements OnModuleInit, OnModuleDest
   ) {}
 
   onModuleInit(): void {
-    if (!this.runtimeRole.runsWorker()) return;
     this.stopped = false;
     this.scheduleNext();
   }
@@ -66,7 +63,7 @@ export class CertificateAutoRotationWorker implements OnModuleInit, OnModuleDest
   }
 
   async tick(): Promise<void> {
-    if (this.stopped || !this.runtimeRole.runsWorker()) return;
+    if (this.stopped) return;
     if (this.processing) return this.processing;
     const processing = this.processPass();
     this.processing = processing;
@@ -82,7 +79,7 @@ export class CertificateAutoRotationWorker implements OnModuleInit, OnModuleDest
   }
 
   private scheduleNext(): void {
-    if (this.stopped || !this.runtimeRole.runsWorker()) return;
+    if (this.stopped) return;
     if (this.timer) clearTimeout(this.timer);
     const jitter = Math.floor((Math.random() * 2 - 1) * ROTATION_INTERVAL_JITTER_MS);
     const delay = Math.max(5_000, ROTATION_INTERVAL_MS + jitter);

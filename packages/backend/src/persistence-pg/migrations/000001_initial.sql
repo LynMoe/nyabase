@@ -297,6 +297,7 @@ CREATE TABLE infra.storage_pools (
     used_bytes bigint,
     quota_effective boolean,
     display_name text,
+    source text,
     registered boolean DEFAULT false NOT NULL,
     last_observed_at timestamp with time zone,
     revision bigint DEFAULT 1 NOT NULL,
@@ -304,6 +305,10 @@ CREATE TABLE infra.storage_pools (
     updated_at timestamp with time zone DEFAULT clock_timestamp() NOT NULL,
     CONSTRAINT storage_pools_incus_name_check
         CHECK (length(btrim(incus_name)) > 0 AND incus_name !~ '[\000\r\n/]'),
+    CONSTRAINT storage_pools_source_check
+        CHECK (source IS NULL
+            OR (length(btrim(source)) BETWEEN 1 AND 1024
+                AND source !~ '[\000\r\n]')),
     CONSTRAINT storage_pools_driver_check
         CHECK (driver = ANY (ARRAY['dir', 'btrfs', 'zfs', 'lvm', 'lvmcluster', 'ceph', 'cephfs'])),
     CONSTRAINT storage_pools_resize_family_check
@@ -328,9 +333,11 @@ ALTER TABLE infra.servers
     ADD CONSTRAINT servers_system_pool_fkey
     FOREIGN KEY (system_pool_id) REFERENCES infra.storage_pools(id) ON DELETE RESTRICT;
 
+COMMENT ON COLUMN infra.storage_pools.source IS
+  'Last observed Incus config.source (dir mount, VG/device, pool name); null until discover has seen it';
+
 CREATE TABLE infra.images (
     id uuid NOT NULL,
-    name text NOT NULL,
     alias text NOT NULL,
     fingerprint text,
     description text,
@@ -343,7 +350,6 @@ CREATE TABLE infra.images (
     revision bigint DEFAULT 1 NOT NULL,
     created_at timestamp with time zone DEFAULT clock_timestamp() NOT NULL,
     updated_at timestamp with time zone DEFAULT clock_timestamp() NOT NULL,
-    CONSTRAINT images_name_check CHECK (length(btrim(name)) > 0),
     CONSTRAINT images_alias_check CHECK (length(btrim(alias)) > 0),
     CONSTRAINT images_fingerprint_check
         CHECK (fingerprint IS NULL OR fingerprint ~ '^[0-9a-f]{64}$'),
@@ -450,6 +456,7 @@ CREATE TABLE control.containers (
     power_intent text DEFAULT 'running'::text NOT NULL,
     lifecycle_phase text DEFAULT 'provisioning'::text NOT NULL,
     instance_name text,
+    root_used_bytes bigint,
     needs_attention boolean DEFAULT false NOT NULL,
     failure_code text,
     failure_reason text,
@@ -468,6 +475,8 @@ CREATE TABLE control.containers (
         CHECK (root_size_pending_bytes IS NULL OR root_size_pending_bytes > 0),
     CONSTRAINT containers_cpu_millis_check CHECK (cpu_millis >= 0),
     CONSTRAINT containers_mem_bytes_check CHECK (mem_bytes >= 0),
+    CONSTRAINT containers_root_used_bytes_check
+        CHECK (root_used_bytes IS NULL OR root_used_bytes >= 0),
     CONSTRAINT containers_extensions_object
         CHECK (jsonb_typeof(extensions) = 'object'),
     CONSTRAINT containers_power_intent_check
@@ -483,6 +492,9 @@ CREATE TABLE control.containers (
 
 COMMENT ON TABLE control.containers IS
   'Canonical container desired state, Incus identity, lifecycle, and capacity reservation';
+
+COMMENT ON COLUMN control.containers.root_used_bytes IS
+  'Last observed Incus root disk usage; null until reconcile has seen instance state';
 
 CREATE TABLE control.volumes (
     id uuid NOT NULL,
@@ -788,6 +800,26 @@ CREATE TABLE control.reconcile_claims (
 COMMENT ON COLUMN control.reconcile_claims.placement_server_id IS
   'Incus catalog/server for the claim; certificate_rotation uses …0000, volume.destroy uses …0001';
 
+CREATE TABLE control.reconcile_busy_strikes (
+    resource_type text NOT NULL,
+    resource_id uuid NOT NULL,
+    observed_at timestamp with time zone DEFAULT clock_timestamp() NOT NULL,
+    CONSTRAINT reconcile_busy_strikes_resource_type_check
+        CHECK (resource_type = ANY (ARRAY[
+            'container',
+            'volume',
+            'image_assignment',
+            'server',
+            'certificate_rotation'
+        ]))
+);
+
+COMMENT ON TABLE control.reconcile_busy_strikes IS
+  'INSTANCE_BUSY observations used to trip needs_attention after five strikes in five minutes';
+
+CREATE INDEX reconcile_busy_strikes_resource_observed_idx
+    ON control.reconcile_busy_strikes (resource_type, resource_id, observed_at DESC);
+
 CREATE TABLE system.settings (
     singleton boolean DEFAULT true NOT NULL,
     revision bigint NOT NULL,
@@ -980,7 +1012,6 @@ ALTER TABLE infra.servers ADD CONSTRAINT servers_slug_key UNIQUE (slug);
 ALTER TABLE infra.ip_pools ADD CONSTRAINT ip_pools_cidr_key UNIQUE (cidr);
 ALTER TABLE infra.ip_pools ADD CONSTRAINT ip_pools_name_key UNIQUE (name);
 CREATE INDEX ip_pool_servers_server_idx ON infra.ip_pool_servers (server_id, pool_id);
-ALTER TABLE infra.images ADD CONSTRAINT images_name_key UNIQUE (name);
 ALTER TABLE infra.images ADD CONSTRAINT images_alias_key UNIQUE (alias);
 ALTER TABLE infra.image_server_assignments ADD CONSTRAINT image_server_assignments_pkey
     PRIMARY KEY (id);
@@ -1026,7 +1057,7 @@ CREATE UNIQUE INDEX image_server_assignments_unique
 CREATE INDEX image_server_assignments_server_phase_idx
     ON infra.image_server_assignments (server_id, lifecycle_phase);
 CREATE INDEX images_catalog_idx
-    ON infra.images (is_active, deleting, name, id);
+    ON infra.images (is_active, deleting, alias, id);
 CREATE UNIQUE INDEX storage_pools_server_name_unique
     ON infra.storage_pools (server_id, incus_name);
 CREATE UNIQUE INDEX storage_pools_shared_backend_server_unique
@@ -1126,6 +1157,8 @@ CREATE INDEX extension_device_claims_container_idx
 CREATE INDEX server_extensions_enabled_idx
     ON infra.server_extensions (extension_id)
     WHERE enabled;
+CREATE INDEX server_extensions_enabled_by_idx
+    ON infra.server_extensions (enabled_by);
 CREATE INDEX container_ssh_routes_ip_idx
     ON control.container_ssh_routes (routed_ip);
 CREATE INDEX container_ssh_routes_server_idx

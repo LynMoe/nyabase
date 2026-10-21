@@ -134,9 +134,9 @@ describePg('server connect trust projection', () => {
         .execute();
 
       const trustTokens = {
-        claimTrustToken: vi.fn().mockResolvedValue('one-time-secret'),
-        consumeClaimedTrustToken: vi.fn().mockResolvedValue(true),
-        releaseClaimedTrustToken: vi.fn().mockResolvedValue(true),
+        claimTrustToken: vi.fn().mockReturnValue('one-time-secret'),
+        consumeClaimedTrustToken: vi.fn().mockReturnValue(true),
+        releaseClaimedTrustToken: vi.fn().mockReturnValue(true),
       };
       const readStarted = deferred<void>();
       const releaseRead = deferred<void>();
@@ -244,9 +244,9 @@ describePg('server connect trust projection', () => {
         getServer: vi.fn().mockResolvedValue(clientResponse),
       };
       const trustTokens = {
-        claimTrustToken: vi.fn().mockResolvedValue('one-time-secret'),
-        consumeClaimedTrustToken: vi.fn().mockResolvedValue(true),
-        releaseClaimedTrustToken: vi.fn().mockResolvedValue(true),
+        claimTrustToken: vi.fn().mockReturnValue('one-time-secret'),
+        consumeClaimedTrustToken: vi.fn().mockReturnValue(true),
+        releaseClaimedTrustToken: vi.fn().mockReturnValue(true),
       };
       const service = reconciler(database, trustTokens);
       const first = connect(

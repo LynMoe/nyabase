@@ -1,66 +1,40 @@
 import { describe, expect, it, vi } from 'vitest';
 import { AccessCacheEpochService } from './access-cache-epoch.service.js';
 
+function databaseWithEpoch(policyEpoch: string | number) {
+  const executeTakeFirstOrThrow = vi.fn(async () => ({ policy_epoch: policyEpoch }));
+  const chain = {
+    select: vi.fn().mockReturnThis(),
+    where: vi.fn().mockReturnThis(),
+    executeTakeFirstOrThrow,
+  };
+  return { selectFrom: vi.fn(() => chain), executeTakeFirstOrThrow };
+}
+
 describe('AccessCacheEpochService', () => {
   it('advances monotonically for post-commit invalidation fences', () => {
-    const epoch = new AccessCacheEpochService();
+    const epoch = new AccessCacheEpochService(undefined as never);
     expect(epoch.current()).toBe(0);
     expect(epoch.bump()).toBe(1);
     expect(epoch.bump()).toBe(2);
     expect(epoch.current()).toBe(2);
   });
 
-  it('publishes invalidation and applies only remote Redis hints', async () => {
-    let subscribed: ((payload: string) => void) | undefined;
-    const redis = {
-      gatewayId: 'process-a',
-      publish: vi.fn().mockResolvedValue(true),
-      subscribe: vi.fn(async (_topic: string, handler: (payload: string) => void) => {
-        subscribed = handler;
-        return async () => undefined;
-      }),
-    };
-    const epoch = new AccessCacheEpochService(undefined as never, redis as never);
-    epoch.onModuleInit();
-    await Promise.resolve();
+  it('adopts a higher durable epoch and never moves backwards', async () => {
+    const database = databaseWithEpoch('7');
+    const epoch = new AccessCacheEpochService(database as never);
+    await expect(epoch.refresh()).resolves.toBe(7);
 
-    expect(epoch.bump()).toBe(1);
-    expect(redis.publish).toHaveBeenCalledWith('cache-invalidation', 'access:process-a');
-    subscribed?.('access:process-a');
-    expect(epoch.current()).toBe(1);
-    subscribed?.('access:process-b');
-    expect(epoch.current()).toBe(2);
-    await epoch.onModuleDestroy();
+    database.executeTakeFirstOrThrow.mockResolvedValueOnce({ policy_epoch: '3' });
+    epoch.bump();
+    await expect(epoch.refresh()).resolves.toBe(8);
+    expect(epoch.current()).toBe(8);
   });
 
-  it('unsubscribes a Redis handler that resolves after destroy', async () => {
-    let resolveSubscribe!: (unsubscribe: () => Promise<void>) => void;
-    const unsubscribe = vi.fn().mockResolvedValue(undefined);
-    const redis = {
-      subscribe: vi.fn(
-        () => new Promise<() => Promise<void>>((resolve) => {
-          resolveSubscribe = resolve;
-        }),
-      ),
-    };
-    const epoch = new AccessCacheEpochService(undefined as never, redis as never);
-    epoch.onModuleInit();
-
-    const destroyed = epoch.onModuleDestroy();
-    resolveSubscribe(unsubscribe);
-    await destroyed;
-
-    expect(unsubscribe).toHaveBeenCalledOnce();
-    expect((epoch as unknown as { unsubscribeRedis: unknown }).unsubscribeRedis).toBeNull();
-  });
-
-  it('contains a rejected Redis subscription', async () => {
-    const redis = {
-      subscribe: vi.fn().mockRejectedValue(new Error('redis unavailable')),
-    };
-    const epoch = new AccessCacheEpochService(undefined as never, redis as never);
-    epoch.onModuleInit();
-    await epoch.onModuleDestroy();
-    expect(redis.subscribe).toHaveBeenCalledOnce();
+  it('rejects a durable epoch outside the safe integer range', async () => {
+    const epoch = new AccessCacheEpochService(
+      databaseWithEpoch('9007199254740993') as never,
+    );
+    await expect(epoch.refresh()).rejects.toThrow('safe application range');
   });
 });

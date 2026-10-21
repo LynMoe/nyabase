@@ -29,7 +29,7 @@ import {
   type IncusSchema,
 } from '../incus/index.js';
 import { applyGuestNetwork, parseCidrPrefix } from './guest-network.adapter.js';
-import { RedisEphemeralStateUnavailableError } from './redis-disposable.adapter.js';
+import { EphemeralStore } from '../platform/ephemeral-store.js';
 import { NyabaseConfigService } from '../config/nyabase-config.service.js';
 import type { IntentFailure, IntentRecord } from './intent.repository.js';
 import type {
@@ -42,7 +42,6 @@ import { ServerCardExtensionRegistry } from '../server-card-extensions/registry.
 
 export const NODE_METRICS_PULL = Symbol('NODE_METRICS_PULL');
 export const PREFLIGHT_CHECKS = Symbol('PREFLIGHT_CHECKS');
-export const SERVER_TRUST_TOKEN = Symbol('SERVER_TRUST_TOKEN');
 
 export interface NodeMetricsPullPort {
   pull(
@@ -76,13 +75,6 @@ export interface PreflightChecksPort {
     hostAddress: string,
     signal?: AbortSignal,
   ): Promise<Record<string, unknown>>;
-}
-
-export interface ServerTrustTokenPort {
-  storeTrustToken(serverId: string, token: string): Promise<string>;
-  claimTrustToken(serverId: string, reference: string, claimId: string): Promise<string | null>;
-  consumeClaimedTrustToken(serverId: string, reference: string, claimId: string): Promise<boolean>;
-  releaseClaimedTrustToken(serverId: string, reference: string, claimId: string): Promise<boolean>;
 }
 
 interface ServerRow {
@@ -193,7 +185,7 @@ export class ServerPreflightReconciler implements ManagedReconciler {
     @Inject(PG_DATABASE) private readonly database: Kysely<NyabaseDatabase>,
     @Inject(NODE_METRICS_PULL) private readonly nodeMetrics: NodeMetricsPullPort,
     @Inject(PREFLIGHT_CHECKS) private readonly checks: PreflightChecksPort,
-    @Inject(SERVER_TRUST_TOKEN) private readonly trustTokens: ServerTrustTokenPort,
+    private readonly ephemeral: EphemeralStore,
     private readonly config: NyabaseConfigService,
     @Optional() private readonly extensions?: ServerCardExtensionRegistry,
     @Optional() private readonly extensionClaims?: ExtensionDeviceClaimsRepository,
@@ -349,21 +341,11 @@ export class ServerPreflightReconciler implements ManagedReconciler {
           });
         }
 
-        let trustToken: string | null;
-        try {
-          trustToken = await this.trustTokens.claimTrustToken(server.id, reference, claimId);
-          claimed = trustToken !== null;
-        } catch (error) {
-          if (error instanceof RedisEphemeralStateUnavailableError) {
-            throw new IncusError('TRUST_TOKEN_UNAVAILABLE', 'retry', {
-              reason: 'redis_ephemeral_store_unavailable',
-            });
-          }
-          throw error;
-        }
+        const trustToken = this.ephemeral.claimTrustToken(server.id, reference, claimId);
+        claimed = trustToken !== null;
         if (!trustToken) {
           throw new IncusError('TRUST_TOKEN_MISSING', 'managed_failure', {
-            reason: 'trust_token_expired_or_already_consumed',
+            reason: 'trust_token_expired_or_lost_on_restart',
           });
         }
         return { certificateId: activeTrust.certificateId, trustToken };
@@ -402,21 +384,11 @@ export class ServerPreflightReconciler implements ManagedReconciler {
           );
         });
 
-        let consumed: boolean;
-        try {
-          consumed = await this.trustTokens.consumeClaimedTrustToken(
-            server.id,
-            reference!,
-            claimId,
-          );
-        } catch (error) {
-          if (error instanceof RedisEphemeralStateUnavailableError) {
-            throw new IncusError('TRUST_TOKEN_UNAVAILABLE', 'retry', {
-              reason: 'redis_ephemeral_store_unavailable_after_trust',
-            });
-          }
-          throw error;
-        }
+        const consumed = this.ephemeral.consumeClaimedTrustToken(
+          server.id,
+          reference!,
+          claimId,
+        );
         if (!consumed) {
           throw new IncusError('TRUST_TOKEN_UNAVAILABLE', 'retry', {
             reason: 'trust_token_commit_lost_after_trust',
@@ -438,14 +410,8 @@ export class ServerPreflightReconciler implements ManagedReconciler {
       );
       await this.persistVerifiedTrust(certificateId, server.id);
     } finally {
-      if (claimed && !claimConsumed && !trustMutationSucceeded) {
-        try {
-          if (reference) {
-            await this.trustTokens.releaseClaimedTrustToken(server.id, reference, claimId);
-          }
-        } catch {
-          // The short Redis claim lease makes a failed release retryable.
-        }
+      if (claimed && !claimConsumed && !trustMutationSucceeded && reference) {
+        this.ephemeral.releaseClaimedTrustToken(server.id, reference, claimId);
       }
     }
   }

@@ -1018,7 +1018,7 @@ export class ContainerControlService {
         });
       });
     } catch (error) {
-      await this.consoleSessions.release(session.sessionId);
+      this.consoleSessions.release(session.sessionId);
       throw error;
     }
     return session;

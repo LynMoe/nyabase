@@ -38,38 +38,6 @@ services:
       start_period: 20s
     stop_grace_period: 1m
 
-  redis:
-    <<: *service-defaults
-    image: redis:8.2-bookworm@sha256:616bb446d5db225ddf786052834279e7c7222c48694d4451e8af22b8f5953b28
-    environment:
-      REDIS_PASSWORD: ${REDIS_PASSWORD:?set REDIS_PASSWORD in deploy/.env}
-      REDIS_KEY_PREFIX: ${REDIS_KEY_PREFIX:-nyabase:}
-    command:
-      - /bin/sh
-      - -ec
-      - >-
-        exec redis-server
-        --save ''
-        --appendonly no
-        --maxmemory ${REDIS_MAXMEMORY:-512mb}
-        --maxmemory-policy noeviction
-        --user default off
-        --user nyabase on ">$${REDIS_PASSWORD}" "~$${REDIS_KEY_PREFIX}*" "&$${REDIS_KEY_PREFIX}*" +auth +ping +select +get +set +del +publish +subscribe +unsubscribe +eval +hget +hmget +hset +hdel +hincrby +pttl +pexpire
-    cpus: ${REDIS_CPUS:-2.0}
-    mem_limit: ${REDIS_MEMORY_LIMIT:-768m}
-    pids_limit: ${REDIS_PIDS_LIMIT:-256}
-    networks:
-      - control-plane
-    healthcheck:
-      test:
-        - CMD-SHELL
-        - redis-cli -h 127.0.0.1 --user nyabase --pass "$${REDIS_PASSWORD}" --no-auth-warning ping | grep -qx PONG
-      interval: 5s
-      timeout: 3s
-      retries: 12
-      start_period: 5s
-    stop_grace_period: 30s
-
   victoriametrics:
     <<: *service-defaults
     image: victoriametrics/victoria-metrics:v1.148.0@sha256:407013e902f9a0ba1d4b2d4c077c47bbaf917c893c52ff39b19efe83a654afda
@@ -94,34 +62,6 @@ services:
         - --spider
         - --quiet
         - http://127.0.0.1:8428/health
-      interval: 10s
-      timeout: 5s
-      retries: 12
-      start_period: 10s
-    stop_grace_period: 1m
-
-  vmagent:
-    <<: *service-defaults
-    image: victoriametrics/vmagent:v1.148.0@sha256:7da85e2d2fc24452979d0ff19b957901ba14e50217e7cc1de1146d3d5e698ab4
-    command:
-      - -httpListenAddr=:8429
-      - -remoteWrite.url=http://victoriametrics:8428/api/v1/write
-      - -remoteWrite.tmpDataPath=/vmagent-data
-      - -remoteWrite.maxDiskUsagePerURL=${VMAGENT_MAX_DISK_USAGE_PER_URL:-4GiB}
-    volumes:
-      - vmagent-data:/vmagent-data
-    cpus: ${VMAGENT_CPUS:-2.0}
-    mem_limit: ${VMAGENT_MEMORY_LIMIT:-1g}
-    pids_limit: ${VMAGENT_PIDS_LIMIT:-256}
-    networks:
-      - telemetry
-    healthcheck:
-      test:
-        - CMD
-        - wget
-        - --spider
-        - --quiet
-        - http://127.0.0.1:8429/health
       interval: 10s
       timeout: 5s
       retries: 12
@@ -160,12 +100,7 @@ services:
       INCUS_CLIENT_CERT_FILE: ${INCUS_CLIENT_CERT_FILE:-/run/secrets/incus_client_cert}
       INCUS_CLIENT_KEY_FILE: ${INCUS_CLIENT_KEY_FILE:-/run/secrets/incus_client_key}
       INCUS_CA_FILE: ${INCUS_CA_FILE:-/run/secrets/incus_ca}
-      REDIS_URL: ${REDIS_URL:?set REDIS_URL in deploy/.env}
-      REDIS_KEY_PREFIX: ${REDIS_KEY_PREFIX:-nyabase:}
-      REDIS_TLS_CA_FILE: ${REDIS_TLS_CA_FILE:-}
-      REDIS_TLS_SERVERNAME: ${REDIS_TLS_SERVERNAME:-}
       VICTORIA_METRICS_URL: http://victoriametrics:8428
-      VMAGENT_URL: http://vmagent:8429
     volumes:
       # Copy config.example.yaml to config.yaml and set production secrets first.
       # Compose cannot chmod a host bind-mount; set host mode 0400 (see OPERATIONS.md).
@@ -190,8 +125,6 @@ services:
       - telemetry
     depends_on:
       postgres:
-        condition: service_healthy
-      redis:
         condition: service_healthy
     healthcheck:
       test:
@@ -220,7 +153,6 @@ networks:
 volumes:
   postgres-data:
   vm-data:
-  vmagent-data:
 
 secrets:
   incus_client_cert:

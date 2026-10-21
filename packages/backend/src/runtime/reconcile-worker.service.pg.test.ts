@@ -65,7 +65,6 @@ describePg('ReconcileWorkerService PostgreSQL server admission guard', () => {
         listServerIds: vi.fn().mockResolvedValue([]),
       };
       const worker = new ReconcileWorkerService(
-        { runsWorker: () => true } as never,
         {
           listPending: vi.fn().mockResolvedValue({ items: [], nextCursor: null }),
         } as never,
@@ -106,7 +105,6 @@ describePg('ReconcileWorkerService PostgreSQL busy breaker and inventory', () =>
       };
       const retry = vi.fn().mockRejectedValue(new IncusError('INSTANCE_BUSY', 'retry', { action: 'start' }));
       const make = () => new ReconcileWorkerService(
-        { runsWorker: () => true } as never,
         {
           listPending: vi.fn().mockResolvedValue({
             items: [{
@@ -298,7 +296,6 @@ describePg('ReconcileWorkerService PostgreSQL busy breaker and inventory', () =>
         metadata: { space: { used: 250, total: 4000 } },
       });
       const worker = new ReconcileWorkerService(
-        { runsWorker: () => true } as never,
         {
           listPending: vi.fn().mockResolvedValue({ items: [], nextCursor: null }),
         } as never,

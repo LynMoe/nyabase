@@ -55,13 +55,11 @@ function service(
   database: ReturnType<typeof makeDatabase>['database'],
   pull: ReturnType<typeof vi.fn>,
   writeBatch = vi.fn().mockResolvedValue(undefined),
-  runsWorker = false,
 ) {
   return new NodeMetricsScrapeService(
     database as never,
     { pull } as never,
     { writeBatch } as never,
-    { runsWorker: () => runsWorker } as never,
   );
 }
 
@@ -320,7 +318,7 @@ describe('NodeMetricsScrapeService', () => {
       node_metrics_status: NodeMetricsStatus.Unknown,
       node_metrics_last_success_at: null,
     });
-    const scraper = service(db.database, pull, undefined, true);
+    const scraper = service(db.database, pull);
     const scrape = scraper.scrapeAll();
     await vi.waitFor(() => expect(pull).toHaveBeenCalledTimes(1));
 

@@ -12,7 +12,6 @@ import {
 } from '@nyabase/common';
 import { NODE_METRIC_CATALOG } from '../server-card-extensions/types.js';
 import { NyabaseConfigService } from '../config/nyabase-config.service.js';
-import { RuntimeRoleService } from '../runtime/runtime-role.service.js';
 
 export interface MetricPoint {
   name: string;
@@ -82,17 +81,14 @@ export class MetricsWriter implements OnModuleDestroy {
 
   constructor(
     config: NyabaseConfigService,
-    runtimeRole?: RuntimeRoleService,
     @Optional() @Inject(NODE_METRIC_CATALOG) catalog?: NodeMetricCatalog,
   ) {
     this.catalog = catalog ?? CORE_NODE_METRIC_CATALOG;
-    this.vmUrl = config.get<string>('metrics.vmagentUrl');
-    if (!runtimeRole || runtimeRole.servesProxySockets()) {
-      this.timer = setInterval(() => {
-        void this.flush();
-      }, DEFAULT_FLUSH_INTERVAL_MS);
-      this.timer.unref?.();
-    }
+    this.vmUrl = config.get<string>('metrics.victoriaMetricsUrl');
+    this.timer = setInterval(() => {
+      void this.flush();
+    }, DEFAULT_FLUSH_INTERVAL_MS);
+    this.timer.unref?.();
   }
 
   async writeBatch(

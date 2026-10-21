@@ -10,7 +10,6 @@ import { SpaFallbackFilter } from './filters/spa-fallback.filter.js';
 import { securityHeaders, trustProxySetting } from './common/http-security.js';
 import { ZodExceptionFilter } from './filters/zod-exception.filter.js';
 import { PackageHttpErrorFilter } from './server-card-extensions/package-http-error.filter.js';
-import { RuntimeRoleService } from './runtime/runtime-role.service.js';
 import { RuntimeLifecycleService } from './health/runtime-lifecycle.service.js';
 import { ConsoleBridgeGateway } from './runtime/console-bridge.gateway.js';
 import { SshProxyGateway } from './ssh/ssh-proxy-gateway.js';
@@ -34,27 +33,10 @@ async function bootstrap() {
   app.enableShutdownHooks(['SIGTERM', 'SIGINT']);
   const config = app.get(NyabaseConfigService);
   app.useLogger(logLevelsUpTo(config.get<LogLevel>('server.logLevel')));
-  const runtimeRole = app.get(RuntimeRoleService);
 
   app.setGlobalPrefix('api');
   app.set('trust proxy', trustProxySetting(config.get<string>('server.trustedProxies')));
   app.use(securityHeaders());
-  app.use((
-    request: { path: string },
-    response: {
-      status: (code: number) => { json: (body: unknown) => unknown };
-    },
-    next: () => void,
-  ) => {
-    if (runtimeRole.allowsHttpPath(request.path)) {
-      next();
-      return;
-    }
-    response.status(404).json({
-      statusCode: 404,
-      message: 'Not Found',
-    });
-  });
   app.useGlobalFilters(new ZodExceptionFilter(), new PackageHttpErrorFilter());
   // forbidNonWhitelisted: throw 400 on extra properties so clients learn
   // about typos / dropped fields instead of silently having them ignored.
@@ -83,7 +65,7 @@ async function bootstrap() {
   const publicDir = join(process.cwd(), 'public');
   const indexPath = join(publicDir, 'index.html');
   const hasStaticFrontend = existsSync(indexPath);
-  if (hasStaticFrontend && runtimeRole.servesApi()) {
+  if (hasStaticFrontend) {
     app.useStaticAssets(publicDir);
     // Intercept NestJS 404s so that SPA client-side routes (e.g. /dashboard) receive
     // index.html instead of a JSON 404. API paths still get the standard JSON response.
@@ -108,9 +90,7 @@ async function bootstrap() {
   });
 
   app.get(RuntimeLifecycleService).markReady();
-  logger.log(
-    `Backend role=${runtimeRole.role} listening on ${listenAddress || '*'}:${port}`,
-  );
+  logger.log(`Backend listening on ${listenAddress || '*'}:${port}`);
 }
 
 bootstrap().catch((error: unknown) => {

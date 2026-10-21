@@ -12,7 +12,7 @@ const point = {
 function makeWriter(fetchMock: ReturnType<typeof vi.fn>): MetricsWriter {
   vi.stubGlobal('fetch', fetchMock);
   return new MetricsWriter({
-    get: vi.fn().mockReturnValue('http://vmagent'),
+    get: vi.fn().mockReturnValue('http://victoriametrics'),
   } as never);
 }
 
@@ -23,6 +23,22 @@ afterEach(() => {
 });
 
 describe('MetricsWriter lifecycle', () => {
+  it('imports directly into VictoriaMetrics using metrics.victoriaMetricsUrl', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true });
+    vi.stubGlobal('fetch', fetchMock);
+    const get = vi.fn().mockReturnValue('http://victoriametrics:8428');
+    const writer = new MetricsWriter({ get } as never);
+
+    await writer.writeBatch(serverId, [point]);
+    await writer.onModuleDestroy();
+
+    expect(get).toHaveBeenCalledWith('metrics.victoriaMetricsUrl');
+    expect(fetchMock).toHaveBeenCalledWith(
+      'http://victoriametrics:8428/api/v1/import/prometheus',
+      expect.objectContaining({ method: 'POST' }),
+    );
+  });
+
   it('waits for an already-started flush during shutdown', async () => {
     let releaseFetch!: (response: { ok: true }) => void;
     const fetchMock = vi.fn(() => new Promise((resolve) => {

@@ -19,8 +19,8 @@ const describePg = process.env.NYABASE_TEST_DATABASE_URL ? describe : describe.s
 describePg('API IAM bootstrap', () => {
   it('creates login-ready IAM state, is idempotent, and converges concurrent API replicas', async () => {
     await withPostgresTestDatabase(async ({ database }) => {
-      const first = createBootstrapContext(database, 'api');
-      const second = createBootstrapContext(database, 'api');
+      const first = createBootstrapContext(database);
+      const second = createBootstrapContext(database);
 
       await Promise.all([
         first.app.onApplicationBootstrap(),
@@ -64,22 +64,10 @@ describePg('API IAM bootstrap', () => {
       expect(after).toEqual(before);
     });
   });
-
-  it('does not seed IAM state in the worker role', async () => {
-    await withPostgresTestDatabase(async ({ database }) => {
-      const worker = createBootstrapContext(database, 'worker');
-
-      await worker.app.onApplicationBootstrap();
-
-      await expect(database.selectFrom('iam.users').select('id').execute()).resolves.toHaveLength(0);
-      await expect(database.selectFrom('iam.groups').select('id').execute()).resolves.toHaveLength(0);
-    });
-  });
 });
 
 function createBootstrapContext(
   database: Kysely<NyabaseDatabase>,
-  role: 'api' | 'worker',
 ): {
   app: AppService;
   auth: AuthService;
@@ -130,13 +118,7 @@ function createBootstrapContext(
     audit as never,
     new AccessRevocationGuardService(),
   );
-  const app = new AppService(
-    {
-      servesApi: () => role === 'api',
-    } as never,
-    groups,
-    users,
-  );
+  const app = new AppService(groups, users);
   return { app, auth };
 }
 

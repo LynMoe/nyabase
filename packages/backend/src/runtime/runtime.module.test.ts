@@ -1,16 +1,15 @@
 import { describe, expect, it } from 'vitest';
 import { NyabaseConfigService } from '../config/nyabase-config.service.js';
 import { IMAGE_ASSIGNMENT_SOURCE } from './image-assignment-reconciler.service.js';
-import { NODE_METRICS_PULL, PREFLIGHT_CHECKS, SERVER_TRUST_TOKEN } from './server-preflight-reconciler.service.js';
+import { NODE_METRICS_PULL, PREFLIGHT_CHECKS } from './server-preflight-reconciler.service.js';
 import { AuthenticatedNodeMetricsPullAdapter } from './node-metrics-pull.adapter.js';
 import { IncusPreflightChecksAdapter } from './preflight-checks.adapter.js';
-import { RedisDisposableAdapter } from './redis-disposable.adapter.js';
 import { RuntimeModule } from './runtime.module.js';
 import { CertificateRotationReconciler } from './certificate-rotation-reconciler.service.js';
 import { RECONCILER_REGISTRY } from './reconcile-worker.service.js';
 
 describe('RuntimeModule production port wiring', () => {
-  it('binds metrics, preflight checks, and trust tokens to concrete adapters', () => {
+  it('binds metrics and preflight checks to concrete adapters', () => {
     const providers = Reflect.getMetadata('providers', RuntimeModule) as Array<{
       provide?: unknown;
       useExisting?: unknown;
@@ -24,10 +23,6 @@ describe('RuntimeModule production port wiring', () => {
       {
         provide: PREFLIGHT_CHECKS,
         useExisting: IncusPreflightChecksAdapter,
-      },
-      {
-        provide: SERVER_TRUST_TOKEN,
-        useExisting: RedisDisposableAdapter,
       },
     ]));
   });

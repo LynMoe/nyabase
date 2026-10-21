@@ -418,7 +418,7 @@ export class IntentRepository {
         || !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(reference)
         || request?.trustTokenRef !== reference
       ) {
-        throw new Error('Server connect intents require a persistable Redis trust-token reference');
+        throw new Error('Server connect intents require a persistable trust-token reference');
       }
       if (containsTrustToken(input.request)) {
         throw new Error('Server connect intents cannot persist a trust token');
@@ -510,7 +510,7 @@ export class IntentRepository {
       throw new Error('Only failed intents can be retried');
     }
     if (source.kind === IntentKind.ServerConnect) {
-      throw new Error('Server connect retries require a fresh Redis trust-token reference');
+      throw new Error('Server connect retries require a fresh trust-token reference');
     }
     const targetGeneration = await this.currentGeneration(source.resource_type, source.resource_id, executor)
       ?? source.target_generation;

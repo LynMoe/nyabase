@@ -21,7 +21,6 @@ function worker(options: {
   systemUser?: Record<string, unknown> | null;
   now: Date;
   rotateAsSystem?: ReturnType<typeof vi.fn>;
-  runsWorker?: boolean;
 }) {
   let certificateReads = 0;
   const database = {
@@ -42,7 +41,6 @@ function worker(options: {
   const rotateAsSystem = options.rotateAsSystem ?? vi.fn().mockResolvedValue({ status: 'pending' });
   const instance = new CertificateAutoRotationWorker(
     database as never,
-    { runsWorker: () => options.runsWorker ?? true } as never,
     { get: vi.fn() } as never,
     { now: () => options.now },
     { rotateAsSystem } as never,
@@ -99,21 +97,6 @@ describe('CertificateAutoRotationWorker', () => {
     await instance.tick();
 
     expect(database.selectFrom).toHaveBeenCalledWith('iam.users');
-    expect(rotateAsSystem).not.toHaveBeenCalled();
-  });
-
-  it('does not start when the process is not a worker role', async () => {
-    const { instance, rotateAsSystem } = worker({
-      now,
-      runsWorker: false,
-      active: {
-        generation: '1',
-        state: 'active',
-        not_after: now,
-      },
-    });
-
-    await instance.tick();
     expect(rotateAsSystem).not.toHaveBeenCalled();
   });
 });

@@ -23,7 +23,6 @@ import { isLocalPoolRow } from '../storage-pools/storage-pools.service.js';
 import type { NyabaseDatabase } from '../persistence-pg/database.types.js';
 import { PG_DATABASE } from '../persistence-pg/tokens.js';
 import { INCUS_CLIENT_FACTORY, type IncusClientFactory } from '../runtime/reconcile-worker.service.js';
-import { RuntimeRoleService } from '../runtime/runtime-role.service.js';
 import { type MetricPoint, type MetricsWriteOptions, MetricsWriter } from './metrics-writer.js';
 
 const PUBLISH_TIMEOUT_MS = 3_000;
@@ -119,12 +118,11 @@ export class ContainerStateMetricsPublisher implements OnModuleInit, OnModuleDes
     @Inject(PG_DATABASE) private readonly database: Kysely<NyabaseDatabase>,
     @Optional() @Inject(INCUS_CLIENT_FACTORY) private readonly clients: IncusClientFactory | null,
     private readonly metricsWriter: MetricsWriter,
-    private readonly runtimeRole: RuntimeRoleService,
     private readonly config: NyabaseConfigService,
   ) {}
 
   onModuleInit(): void {
-    if (!this.runtimeRole.runsWorker() || !this.enabled() || this.timer) return;
+    if (!this.enabled() || this.timer) return;
     this.timer = setInterval(() => {
       void this.publishAvailableServers();
     }, NODE_METRICS_SCRAPE_INTERVAL_MS);

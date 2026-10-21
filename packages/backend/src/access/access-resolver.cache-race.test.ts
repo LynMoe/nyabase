@@ -25,7 +25,7 @@ describe('AccessResolverService cache invalidation fences', () => {
 
   it('clears all cached users after a committed authorization mutation', async () => {
     const cacheEpoch = {
-      refreshAndPublish: vi.fn().mockResolvedValue(3),
+      refresh: vi.fn().mockResolvedValue(3),
     };
     const resolver = new AccessResolverService(
       undefined as never,
@@ -40,7 +40,7 @@ describe('AccessResolverService cache invalidation fences', () => {
 
     await resolver.authorizationCommitted();
 
-    expect(cacheEpoch.refreshAndPublish).toHaveBeenCalledOnce();
+    expect(cacheEpoch.refresh).toHaveBeenCalledOnce();
     expect(cache.size).toBe(0);
   });
 

@@ -51,7 +51,6 @@ const GROUP_LABELS: Record<string, string> = {
   branding: '品牌',
   auth: '认证',
   database: '数据库',
-  redis: 'Redis 实时优化层',
   audit: '审计',
   metrics: '监控',
   ssh: 'SSH 代理',
@@ -61,10 +60,6 @@ const FIELD_LABELS: Record<string, { label: string; description: string }> = {
   'runtime.nodeEnv': {
     label: 'Node 运行环境',
     description: '用于生产环境安全检查的运行环境。',
-  },
-  'runtime.role': {
-    label: '运行职责',
-    description: '当前进程承担控制面 API 或后台 Worker 职责。',
   },
   'server.port': {
     label: 'HTTP 端口',
@@ -122,14 +117,6 @@ const FIELD_LABELS: Record<string, { label: string; description: string }> = {
     label: '启动时执行迁移',
     description: '持有 PostgreSQL advisory lock 时执行待运行的 SQL migration。',
   },
-  'redis.url': {
-    label: 'Redis 连接地址',
-    description: '仅用于可重建的 presence、缓存、唤醒和限流数据。',
-  },
-  'redis.keyPrefix': {
-    label: 'Redis 键前缀',
-    description: '隔离当前部署所有临时 Redis 键和频道的命名空间。',
-  },
   'audit.retentionDays': {
     label: '审计保留天数',
     description: '审计日志保留天数；设为 0 表示不按时间清理。',
@@ -140,11 +127,7 @@ const FIELD_LABELS: Record<string, { label: string; description: string }> = {
   },
   'metrics.victoriaMetricsUrl': {
     label: 'VictoriaMetrics 地址',
-    description: '指标查询使用的 VictoriaMetrics 地址。',
-  },
-  'metrics.vmagentUrl': {
-    label: 'vmagent 地址',
-    description: '指标写入使用的 vmagent 地址；持久缓冲和重试由 vmagent 负责。',
+    description: '指标写入和查询使用的 VictoriaMetrics 地址。',
   },
   'ssh.enabled': {
     label: '启用 SSH 代理',

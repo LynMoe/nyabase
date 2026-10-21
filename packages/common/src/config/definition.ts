@@ -69,95 +69,6 @@ const postgresUrl = z.string().trim().refine(
   'Expected a PostgreSQL connection URL',
 );
 
-const MAX_REDIS_URL_BYTES = 2_048;
-const MAX_REDIS_USERNAME_BYTES = 128;
-const MAX_REDIS_PASSWORD_BYTES = 1_024;
-const MAX_REDIS_DATABASE = 2_147_483_647;
-
-/**
- * Parses the exact Redis URL subset supported by Nyabase.
- *
- * TLS is selected only by the scheme and its verification settings live in
- * dedicated config fields, so query parameters cannot weaken or conflict with
- * the transport policy. Redis ACL credentials remain supported while malformed
- * or unbounded user-info is rejected before it reaches node-redis.
- */
-export function parseRedisConnectionUrl(value: string): URL {
-  if (
-    value !== value.trim()
-    || new TextEncoder().encode(value).byteLength > MAX_REDIS_URL_BYTES
-  ) {
-    throw new Error('Invalid Redis connection URL');
-  }
-
-  let parsed: URL;
-  try {
-    parsed = new URL(value);
-  } catch {
-    throw new Error('Invalid Redis connection URL');
-  }
-
-  if (
-    (parsed.protocol !== 'redis:' && parsed.protocol !== 'rediss:')
-    || parsed.hostname === ''
-    || parsed.search !== ''
-    || parsed.hash !== ''
-    || !/^\/(?:0|[1-9]\d*)$/.test(parsed.pathname)
-  ) {
-    throw new Error('Invalid Redis connection URL');
-  }
-
-  const database = Number(parsed.pathname.slice(1));
-  if (!Number.isSafeInteger(database) || database > MAX_REDIS_DATABASE) {
-    throw new Error('Invalid Redis connection URL');
-  }
-
-  if (parsed.port !== '') {
-    const port = Number(parsed.port);
-    if (!Number.isInteger(port) || port < 1 || port > 65_535) {
-      throw new Error('Invalid Redis connection URL');
-    }
-  }
-
-  let username: string;
-  let password: string;
-  try {
-    username = decodeURIComponent(parsed.username);
-    password = decodeURIComponent(parsed.password);
-  } catch {
-    throw new Error('Invalid Redis connection URL');
-  }
-
-  if (
-    (username !== '' && password === '')
-    || (username !== '' && !/^[A-Za-z0-9._-]+$/.test(username))
-    || credentialByteLength(username) > MAX_REDIS_USERNAME_BYTES
-    || credentialByteLength(password) > MAX_REDIS_PASSWORD_BYTES
-    || /[\u0000-\u001f\u007f]/.test(password)
-  ) {
-    throw new Error('Invalid Redis connection URL');
-  }
-
-  return parsed;
-}
-
-function isRedisConnectionUrl(value: string): boolean {
-  try {
-    parseRedisConnectionUrl(value);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-function credentialByteLength(value: string): number {
-  return new TextEncoder().encode(value).byteLength;
-}
-
-const redisUrl = z.string().trim().refine(
-  isRedisConnectionUrl,
-  'Expected a canonical redis(s) URL with a hostname, /<database> path, optional bounded credentials, and no query or fragment',
-);
 const consolePublicUrl = z.string().trim()
   .refine(
     (value) => new TextEncoder().encode(value).byteLength <= 2_048,
@@ -379,20 +290,6 @@ export const controlPlaneConfigDefinitions = [
     public: false,
     label: 'Initial admin password',
     description: 'Password used only when bootstrapping the first admin account.',
-  }),
-  field({
-    key: 'runtime.role',
-    yamlPath: 'runtime.role',
-    env: 'NYABASE_RUNTIME_ROLE',
-    defaultValue: 'all',
-    valueKind: 'enum',
-    schema: z.enum(['all', 'api', 'worker']),
-    secret: false,
-    editable: false,
-    restartRequired: true,
-    public: false,
-    label: 'Runtime role',
-    description: 'Process role to run: all-in-one, API, or control worker. Node-exporter is a separate process.',
   }),
   field({
     key: 'runtime.consolePublicUrl',
@@ -680,65 +577,6 @@ export const controlPlaneConfigDefinitions = [
     description: 'Runs pending SQL-first PostgreSQL migrations while holding the migration advisory lock.',
   }),
   field({
-    key: 'redis.url',
-    yamlPath: 'redis.url',
-    env: 'REDIS_URL',
-    defaultValue: 'redis://redis:6379/0',
-    schema: redisUrl,
-    valueKind: 'string',
-    secret: true,
-    editable: false,
-    restartRequired: true,
-    public: false,
-    label: 'Redis URL',
-    description: 'Redis connection URL for addressed split-role RPC, disposable cache/wakes, and shared rate limits. Use rediss:// in production across hosts.',
-  }),
-  field({
-    key: 'redis.keyPrefix',
-    yamlPath: 'redis.keyPrefix',
-    env: 'REDIS_KEY_PREFIX',
-    defaultValue: 'nyabase:',
-    schema: z.string().trim().regex(/^[A-Za-z0-9:_-]{1,64}$/),
-    valueKind: 'string',
-    secret: false,
-    editable: false,
-    restartRequired: true,
-    public: false,
-    label: 'Redis key prefix',
-    description: 'Namespace prefix applied to every disposable Redis key and channel.',
-  }),
-  field({
-    key: 'redis.tlsCaFile',
-    yamlPath: 'redis.tlsCaFile',
-    env: 'REDIS_TLS_CA_FILE',
-    defaultValue: '',
-    schema: optionalString,
-    valueKind: 'string',
-    secret: false,
-    editable: false,
-    restartRequired: true,
-    public: false,
-    label: 'Redis TLS CA file',
-    description: 'Optional PEM CA bundle for a rediss:// private-CA endpoint. Certificate verification cannot be disabled.',
-  }),
-  field({
-    key: 'redis.tlsServername',
-    yamlPath: 'redis.tlsServername',
-    env: 'REDIS_TLS_SERVERNAME',
-    defaultValue: '',
-    schema: optionalString.max(253).refine(
-      (value) => value === '' || /^[A-Za-z0-9.-]+$/.test(value),
-      'Expected an empty value or a DNS server name',
-    ),
-    valueKind: 'string',
-    secret: false,
-    editable: false,
-    restartRequired: true,
-    public: false,
-    label: 'Redis TLS server name',
-    description: 'Optional certificate server name override for a rediss:// endpoint.',
-  }),
-  field({
     key: 'audit.retentionDays',
     yamlPath: 'audit.retentionDays',
     env: 'AUDIT_RETENTION_DAYS',
@@ -778,21 +616,7 @@ export const controlPlaneConfigDefinitions = [
     restartRequired: true,
     public: false,
     label: 'VictoriaMetrics URL',
-    description: 'Base URL used only for VictoriaMetrics queries.',
-  }),
-  field({
-    key: 'metrics.vmagentUrl',
-    yamlPath: 'metrics.vmagentUrl',
-    env: 'VMAGENT_URL',
-    defaultValue: 'http://vmagent:8429',
-    schema: nonEmptyString,
-    valueKind: 'string',
-    secret: false,
-    editable: true,
-    restartRequired: true,
-    public: false,
-    label: 'vmagent URL',
-    description: 'Base URL used only for metrics ingestion through the vmagent durable queue.',
+    description: 'Base URL of VictoriaMetrics, used for metric ingestion (/api/v1/import/prometheus) and queries.',
   }),
   field({
     key: 'metrics.containerSeriesEnabled',

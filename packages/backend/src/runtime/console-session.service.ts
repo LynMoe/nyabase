@@ -9,7 +9,7 @@ import type { Kysely } from 'kysely';
 import type { CreateExecSessionRequest, ExecSessionResponse } from '@nyabase/common';
 import { PG_DATABASE } from '../persistence-pg/tokens.js';
 import type { NyabaseDatabase } from '../persistence-pg/database.types.js';
-import { RedisDisposableAdapter } from './redis-disposable.adapter.js';
+import { EphemeralStore } from '../platform/ephemeral-store.js';
 
 const UNCLAIMED_TTL_MS = 60_000;
 const CLAIMED_TTL_MS = 30 * 60_000;
@@ -34,7 +34,7 @@ export interface ConsoleSession {
 export class ConsoleSessionService {
   constructor(
     @Inject(PG_DATABASE) private readonly database: Kysely<NyabaseDatabase>,
-    private readonly redis: RedisDisposableAdapter,
+    private readonly ephemeral: EphemeralStore,
   ) {}
 
   async create(
@@ -83,14 +83,14 @@ export class ConsoleSessionService {
       state: 'unclaimed',
       expiresAt,
     };
-    if (!await this.redis.setEphemeral(
+    if (!this.ephemeral.set(
       `console-session:${sessionId}`,
       JSON.stringify(session),
       UNCLAIMED_TTL_MS,
     )) {
       throw new ServiceUnavailableException({
         code: 'CONSOLE_SESSION_UNAVAILABLE',
-        message: 'Console session storage is unavailable',
+        message: 'Console session storage is full',
       });
     }
     return {
@@ -105,13 +105,13 @@ export class ConsoleSessionService {
     actorId: string,
     authVersion: number,
   ): Promise<ConsoleSession | null> {
-    const raw = await this.redis.getEphemeral(`console-session:${sessionId}`);
+    const raw = this.ephemeral.get(`console-session:${sessionId}`);
     if (!raw) return null;
     let session: ConsoleSession;
     try {
       session = JSON.parse(raw) as ConsoleSession;
     } catch {
-      await this.release(sessionId);
+      this.release(sessionId);
       return null;
     }
     if (
@@ -120,7 +120,7 @@ export class ConsoleSessionService {
       || session.authVersion !== authVersion
       || session.state !== 'unclaimed'
     ) return null;
-    if (!await this.redis.setEphemeral(
+    if (!this.ephemeral.set(
       `console-claim:${sessionId}`,
       actorId,
       CLAIMED_TTL_MS,
@@ -128,12 +128,12 @@ export class ConsoleSessionService {
     )) return null;
     session.state = 'claimed';
     session.expiresAt = new Date(Date.now() + CLAIMED_TTL_MS).toISOString();
-    if (!await this.redis.setEphemeral(
+    if (!this.ephemeral.set(
       `console-session:${sessionId}`,
       JSON.stringify(session),
       CLAIMED_TTL_MS,
     )) {
-      await this.release(sessionId);
+      this.release(sessionId);
       return null;
     }
     const current = await this.database
@@ -155,16 +155,14 @@ export class ConsoleSessionService {
       || current.instance_name !== session.instanceName
       || current.instance_status.toLowerCase() !== 'running'
     ) {
-      await this.release(sessionId);
+      this.release(sessionId);
       return null;
     }
     return session;
   }
 
-  async release(sessionId: string): Promise<void> {
-    await Promise.all([
-      this.redis.deleteEphemeral(`console-session:${sessionId}`),
-      this.redis.deleteEphemeral(`console-claim:${sessionId}`),
-    ]);
+  release(sessionId: string): void {
+    this.ephemeral.delete(`console-session:${sessionId}`);
+    this.ephemeral.delete(`console-claim:${sessionId}`);
   }
 }

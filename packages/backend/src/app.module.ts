@@ -4,7 +4,7 @@ import { MetricsModule } from './metrics/metrics.module.js';
 import { AppService } from './app.service.js';
 import { NyabaseConfigModule } from './config/nyabase-config.module.js';
 import { HealthController } from './health/health.controller.js';
-import { RedisRuntimeModule } from './runtime/redis-runtime.module.js';
+import { EphemeralStoreModule } from './platform/ephemeral-store.module.js';
 import { RuntimeModule } from './runtime/runtime.module.js';
 import { RuntimeLifecycleService } from './health/runtime-lifecycle.service.js';
 import { AccessModule } from './access/access.module.js';
@@ -34,7 +34,7 @@ import { createNvidiaGpuExtension } from '@nyabase/nvidia-gpu';
   imports: [
     NyabaseConfigModule,
     ServerCardExtensionsModule.register([createNvidiaGpuExtension()]),
-    RedisRuntimeModule,
+    EphemeralStoreModule,
     RuntimeModule,
     DatabaseModule,
     MetricsModule,

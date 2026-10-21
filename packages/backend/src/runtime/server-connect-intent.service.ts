@@ -1,13 +1,10 @@
-import { Inject, Injectable } from '@nestjs/common';
+import { Injectable } from '@nestjs/common';
 import { IntentKind, IntentResourceType } from '@nyabase/common';
 import {
   IntentRepository,
   type IntentRecord,
 } from './intent.repository.js';
-import {
-  SERVER_TRUST_TOKEN,
-  type ServerTrustTokenPort,
-} from './server-preflight-reconciler.service.js';
+import { EphemeralStore } from '../platform/ephemeral-store.js';
 
 export interface CreateServerConnectIntentInput {
   readonly serverId: string;
@@ -21,11 +18,11 @@ export interface CreateServerConnectIntentInput {
 export class ServerConnectIntentService {
   constructor(
     private readonly intents: IntentRepository,
-    @Inject(SERVER_TRUST_TOKEN) private readonly trustTokens: ServerTrustTokenPort,
+    private readonly ephemeral: EphemeralStore,
   ) {}
 
   async create(input: CreateServerConnectIntentInput): Promise<IntentRecord> {
-    const reference = await this.trustTokens.storeTrustToken(
+    const reference = this.ephemeral.storeTrustToken(
       input.serverId,
       input.trustToken,
     );

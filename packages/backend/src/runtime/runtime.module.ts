@@ -1,7 +1,6 @@
 import { Module } from '@nestjs/common';
 import { DatabaseModule } from '../database/database.module.js';
 import { NyabaseConfigService } from '../config/nyabase-config.service.js';
-import { RedisRuntimeModule } from './redis-runtime.module.js';
 import { AuditModule } from '../audit/audit.module.js';
 import { ContainerReconciler } from './container-reconciler.service.js';
 import {
@@ -22,12 +21,10 @@ import { ServerPreflightReconciler } from './server-preflight-reconciler.service
 import {
   NODE_METRICS_PULL,
   PREFLIGHT_CHECKS,
-  SERVER_TRUST_TOKEN,
 } from './server-preflight-reconciler.service.js';
 import { VolumeReconciler } from './volume-reconciler.service.js';
 import { DatabaseIncusClientFactory } from './incus-client.factory.js';
 import { INCUS_CLIENT_FACTORY } from './reconcile-worker.service.js';
-import { RedisDisposableAdapter } from './redis-disposable.adapter.js';
 import { AuthenticatedNodeMetricsPullAdapter } from './node-metrics-pull.adapter.js';
 import { IncusPreflightChecksAdapter } from './preflight-checks.adapter.js';
 import { ServerConnectIntentService } from './server-connect-intent.service.js';
@@ -60,7 +57,7 @@ import {
 } from './container-ssh-state.adapter.js';
 
 @Module({
-  imports: [DatabaseModule, RedisRuntimeModule, AuthModule, AccessModule, ProxySnapshotNotifierModule, AuditModule],
+  imports: [DatabaseModule, AuthModule, AccessModule, ProxySnapshotNotifierModule, AuditModule],
   providers: [
     ReconcileWakeService,
     DatabaseIncusClientFactory,
@@ -77,10 +74,6 @@ import {
     {
       provide: PREFLIGHT_CHECKS,
       useExisting: IncusPreflightChecksAdapter,
-    },
-    {
-      provide: SERVER_TRUST_TOKEN,
-      useExisting: RedisDisposableAdapter,
     },
     {
       provide: INCUS_CLIENT_FACTORY,

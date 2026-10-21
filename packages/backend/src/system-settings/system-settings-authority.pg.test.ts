@@ -123,66 +123,13 @@ describePg('System settings PostgreSQL authority', () => {
     });
   });
 
-  it('reloads a second role by absolute version from a disposable Redis wake', async () => {
+  it('converges a second authority by PostgreSQL polling after a commit it did not observe', async () => {
     await withPostgresTestDatabase(async ({ database }) => {
       const actorId = await seedActor(database);
-      const redis = new LocalWakeBus();
-      const apiConfig = makeConfig();
-      const gatewayConfig = makeConfig();
-      const api = makeAuthority(database, apiConfig, databaseAudit(), redis);
-      const gateway = makeAuthority(
-        database,
-        gatewayConfig,
-        databaseAudit(),
-        redis,
-      );
-      await api.onApplicationBootstrap();
-      await gateway.onApplicationBootstrap();
-      try {
-        const initial = await api.refreshFromPostgres();
-        const next = await database.transaction().execute((transaction) =>
-          api.update(
-            transaction,
-            actorId,
-            { 'ssh.proxyPublicHost': 'ssh.roles.example' },
-            initial.revision,
-            initial.snapshotToken,
-          ));
-        await api.committed(next);
-
-        expect(gatewayConfig.revision()).toBe(2);
-        expect(gatewayConfig.get('ssh.proxyPublicHost'))
-          .toBe('ssh.roles.example');
-        expect(redis.publishedVersions).toEqual([2]);
-      } finally {
-        await api.onApplicationShutdown();
-        await gateway.onApplicationShutdown();
-      }
-    });
-  });
-
-  it('converges by PostgreSQL polling when Redis publish and delivery are unavailable', async () => {
-    await withPostgresTestDatabase(async ({ database }) => {
-      const actorId = await seedActor(database);
-      const unavailableRedis = {
-        gatewayId: 'redis-unavailable',
-        subscribe: vi.fn(async () => async () => undefined),
-        publish: vi.fn(async () => false),
-      };
       const apiConfig = makeConfig();
       const workerConfig = makeConfig();
-      const api = makeAuthority(
-        database,
-        apiConfig,
-        databaseAudit(),
-        unavailableRedis,
-      );
-      const worker = makeAuthority(
-        database,
-        workerConfig,
-        databaseAudit(),
-        unavailableRedis,
-      );
+      const api = makeAuthority(database, apiConfig, databaseAudit());
+      const worker = makeAuthority(database, workerConfig, databaseAudit());
       const initial = await api.initialize();
       await worker.initialize();
       const next = await database.transaction().execute((transaction) =>
@@ -195,7 +142,6 @@ describePg('System settings PostgreSQL authority', () => {
         ));
       await api.committed(next);
 
-      expect(unavailableRedis.publish).toHaveBeenCalled();
       expect(workerConfig.revision()).toBe(1);
       await worker.refreshFromPostgres('poll-recovery');
       expect(workerConfig.revision()).toBe(2);
@@ -272,10 +218,7 @@ describePg('System settings PostgreSQL authority', () => {
           'auth.jwtSecret',
           'auth.adminInitPassword',
           'database.url',
-          'redis.url',
-          'runtime.role',
           'server.port',
-          'metrics.vmagentUrl',
         ]));
       } finally {
         chmodSync(path, 0o644);
@@ -294,14 +237,12 @@ function makeAuthority(
   database: Kysely<NyabaseDatabase>,
   config: NyabaseConfigService,
   audit: AuditAppender,
-  redis?: object,
 ): SystemSettingsAuthorityService {
   return new SystemSettingsAuthorityService(
     database,
     config,
     audit as never,
     { broadcastSnapshot: vi.fn().mockResolvedValue(undefined) } as never,
-    redis as never,
   );
 }
 
@@ -371,27 +312,4 @@ async function seedActor(
     })
     .executeTakeFirstOrThrow();
   return id;
-}
-
-class LocalWakeBus {
-  readonly gatewayId = 'settings-test-bus';
-  readonly handlers = new Set<(payload: string) => void | Promise<void>>();
-  readonly publishedVersions: number[] = [];
-
-  async subscribe(
-    _topic: string,
-    handler: (payload: string) => void | Promise<void>,
-  ): Promise<() => Promise<void>> {
-    this.handlers.add(handler);
-    return async () => {
-      this.handlers.delete(handler);
-    };
-  }
-
-  async publish(_topic: string, payload: string): Promise<boolean> {
-    const version = (JSON.parse(payload) as { version: number }).version;
-    this.publishedVersions.push(version);
-    await Promise.all([...this.handlers].map((handler) => handler(payload)));
-    return true;
-  }
 }

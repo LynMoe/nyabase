@@ -5,7 +5,6 @@ import {
   Logger,
   OnApplicationBootstrap,
   OnApplicationShutdown,
-  Optional,
 } from '@nestjs/common';
 import { createHash } from 'node:crypto';
 import type { Kysely, Transaction } from 'kysely';
@@ -21,7 +20,6 @@ import {
 } from '../config/nyabase-config.service.js';
 import type { NyabaseDatabase } from '../persistence-pg/database.types.js';
 import { PG_DATABASE } from '../persistence-pg/tokens.js';
-import { RedisDisposableAdapter } from '../runtime/redis-disposable.adapter.js';
 import { SshProxyGateway } from '../ssh/ssh-proxy-gateway.js';
 
 const POLL_INTERVAL_MS = 2_000;
@@ -49,7 +47,6 @@ export class SystemSettingsAuthorityService
 implements OnApplicationBootstrap, OnApplicationShutdown {
   private readonly logger = new Logger(SystemSettingsAuthorityService.name);
   private pollTimer: NodeJS.Timeout | null = null;
-  private unsubscribeRedis: (() => Promise<void>) | null = null;
   private refreshTail: Promise<AuthoritativeSystemSettingsSnapshot> | null = null;
   private shuttingDown = false;
 
@@ -59,31 +56,11 @@ implements OnApplicationBootstrap, OnApplicationShutdown {
     private readonly config: NyabaseConfigService,
     private readonly audit: AuditService,
     private readonly sshProxyGateway: SshProxyGateway,
-    @Optional()
-    private readonly redis?: RedisDisposableAdapter,
   ) {}
 
   async onApplicationBootstrap(): Promise<void> {
     await this.initialize();
     if (this.shuttingDown) return;
-    if (this.redis) {
-      const unsubscribe = await this.redis.subscribe(
-        'system-settings',
-        async (payload) => {
-          if (this.shuttingDown) return;
-          const version = parseWakeVersion(payload);
-          if (version !== null && version <= this.config.revision()) return;
-          await this.refreshFromPostgres('redis-wake').catch((error: unknown) => {
-            this.logger.warn(`System settings wake refresh failed: ${message(error)}`);
-          });
-        },
-      );
-      if (this.shuttingDown) {
-        await unsubscribe();
-        return;
-      }
-      this.unsubscribeRedis = unsubscribe;
-    }
     this.pollTimer = setInterval(() => {
       void this.refreshFromPostgres('poll').catch((error: unknown) => {
         this.logger.warn(`System settings polling refresh failed: ${message(error)}`);
@@ -96,24 +73,12 @@ implements OnApplicationBootstrap, OnApplicationShutdown {
     this.shuttingDown = true;
     if (this.pollTimer) clearInterval(this.pollTimer);
     this.pollTimer = null;
-    const unsubscribe = this.unsubscribeRedis;
-    this.unsubscribeRedis = null;
-    // A PostgreSQL read may already have started from a poll/wake. Drain that
+    // A PostgreSQL read may already have started from a poll. Drain that
     // exact coalesced tail so no continuation survives Nest shutdown.
-    const refresh = this.refreshTail;
-    const [unsubscribeResult, refreshResult] = await Promise.allSettled([
-      unsubscribe?.(),
-      refresh,
-    ]);
-    if (unsubscribeResult.status === 'rejected') {
-      this.logger.warn(
-        `System settings shutdown unsubscribe failed: ${message(unsubscribeResult.reason)}`,
-      );
-    }
-    if (refreshResult.status === 'rejected') {
-      this.logger.warn(
-        `System settings shutdown refresh failed: ${message(refreshResult.reason)}`,
-      );
+    try {
+      await this.refreshTail;
+    } catch (error) {
+      this.logger.warn(`System settings shutdown refresh failed: ${message(error)}`);
     }
   }
 
@@ -303,8 +268,8 @@ implements OnApplicationBootstrap, OnApplicationShutdown {
 
   /**
    * Called only after the caller-owned PostgreSQL transaction commits.
-   * PostgreSQL is already durable; Redis and live proxy refresh are disposable
-   * observers and can be recovered by absolute-version polling.
+   * PostgreSQL is already durable; the live proxy refresh is a disposable
+   * observer and can be recovered by absolute-version polling.
    */
   async committed(snapshot: AuthoritativeSystemSettingsSnapshot): Promise<void> {
     if (this.shuttingDown) return;
@@ -312,12 +277,6 @@ implements OnApplicationBootstrap, OnApplicationShutdown {
     const applied = this.config.applyAuthoritativeSnapshot(snapshot);
     if (applied && snapshot.revision > previous) {
       await this.broadcastSshSnapshot('local-commit');
-    }
-    if (this.redis) {
-      await this.redis.publish(
-        'system-settings',
-        JSON.stringify({ version: snapshot.revision }),
-      );
     }
   }
 
@@ -436,17 +395,6 @@ function canonicalize(value: unknown): unknown {
       .sort(([left], [right]) => left.localeCompare(right))
       .map(([key, child]) => [key, canonicalize(child)]),
   );
-}
-
-function parseWakeVersion(payload: string): number | null {
-  try {
-    const parsed = JSON.parse(payload) as { version?: unknown };
-    return Number.isSafeInteger(parsed.version) && Number(parsed.version) >= 1
-      ? Number(parsed.version)
-      : null;
-  } catch {
-    return null;
-  }
 }
 
 function message(error: unknown): string {

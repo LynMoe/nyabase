@@ -241,7 +241,6 @@ function makeWorker(overrides: {
     claim: vi.fn().mockResolvedValue(claim()),
     withLease,
   };
-  const role = { runsWorker: () => true } as never;
   const reconciler = {
     supports: () => true,
     reconcile: overrides.reconcile ?? vi.fn().mockResolvedValue({
@@ -268,7 +267,6 @@ function makeWorker(overrides: {
     markSucceeded: vi.fn().mockResolvedValue(undefined),
   };
   const worker = new ReconcileWorkerService(
-    role,
     intents as never,
     claims as never,
     [reconciler] as never,
@@ -617,6 +615,14 @@ describe('ReconcileWorkerService', () => {
       serverId,
       { expectedFingerprint: secondFingerprint },
     );
+  });
+
+  it('starts the reconciliation loop on init and cleans it up on destroy', async () => {
+    const setup = makeWorker({});
+    setup.worker.onModuleInit();
+    expect((setup.worker as unknown as { scanTimer?: unknown }).scanTimer).toBeDefined();
+    await setup.worker.onModuleDestroy();
+    expect((setup.worker as unknown as { scanTimer?: unknown }).scanTimer).toBeUndefined();
   });
 
   it('wakes immediately for Incus events and still runs a periodic full scan', async () => {
