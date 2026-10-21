@@ -12,6 +12,8 @@ import {
   PROXY_SNAPSHOT_MAX_CLOCK_SKEW_MS,
 } from '@nyabase/common';
 
+import type { DomainPoolRow } from './http-proxy-state.js';
+
 const KEY_VERSION = 'v1';
 
 export interface CertificateFields {
@@ -129,4 +131,16 @@ export function certificateFields(
     certificate_fingerprint: cert.fingerprint256,
     certificate_not_after: new Date(cert.validTo),
   };
+}
+
+/** TLS material that stays valid for longer than a snapshot lease can be in flight. */
+export function poolHasSafeTlsLease(pool: DomainPoolRow, now: number): boolean {
+  return Boolean(
+    pool.certificate_pem
+    && pool.encrypted_private_key_pem
+    && pool.certificate_not_after
+    && pool.certificate_not_after.getTime() > now
+      + HTTP_PROXY_SNAPSHOT_STALE_AFTER_MS
+      + PROXY_SNAPSHOT_MAX_CLOCK_SKEW_MS,
+  );
 }

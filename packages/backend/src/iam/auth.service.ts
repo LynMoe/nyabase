@@ -13,11 +13,7 @@ import { v4 as uuidv4 } from 'uuid';
 import { createHash, createHmac, randomBytes } from 'crypto';
 import { AuditAction, UserStatus } from '@nyabase/common';
 import { NyabaseConfigService } from '../platform/config/nyabase-config.service.js';
-import type {
-  AuthApiToken,
-  AuthUser,
-} from './auth-persistence.js';
-import { isPgIamTransaction } from './auth-persistence.js';
+import { type AuthApiToken, type AuthUser, isPgIamTransaction } from './auth-persistence.js';
 import { IamAuthRepository } from './iam-auth.repository.js';
 import { MonotonicClock } from '../platform/monotonic-clock.js';
 import { AuditService } from './audit.service.js';

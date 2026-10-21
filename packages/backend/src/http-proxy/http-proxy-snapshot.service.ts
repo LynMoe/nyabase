@@ -1,8 +1,9 @@
 import { Injectable } from '@nestjs/common';
 import { createHash } from 'crypto';
-import type { Transaction } from 'kysely';
+import { sql, type Transaction } from 'kysely';
 import {
   ContainerStatus,
+  ServerStatus,
   HTTP_PROXY_SNAPSHOT_STALE_AFTER_MS,
   MAX_HTTP_PROXY_SNAPSHOT_BYTES,
   UserStatus,
@@ -14,18 +15,35 @@ import { loadServerAccessKeys } from '../iam/effective-access.js';
 import { NyabaseConfigService } from '../platform/config/nyabase-config.service.js';
 import type { NyabaseDatabase } from '../platform/persistence-pg/database.types.js';
 import { PgTransactionManager } from '../platform/persistence-pg/transaction.js';
-import { decryptPrivateKey } from './http-proxy-certificates.js';
+import { decryptPrivateKey, poolHasSafeTlsLease } from './http-proxy-certificates.js';
 import {
   ROUTE_STALE_MS,
-  databaseNow,
-  poolHasSafeTlsLease,
   routeMatchesContainer,
   runSerializable,
-  safeGeneration,
-  serverCanProxy,
-} from './http-proxy-support.js';
+  type HttpExecutor,
+} from './http-proxy-state.js';
 
 type Tx = Transaction<NyabaseDatabase>;
+
+async function databaseNow(executor: HttpExecutor): Promise<Date> {
+  const result = await sql<{ now: Date }>`
+    select clock_timestamp() as now
+  `.execute(executor);
+  return result.rows[0]!.now;
+}
+
+function serverCanProxy(server: { status: string; parent_interface: string | null }): boolean {
+  return server.status === ServerStatus.Online
+    && Boolean(server.parent_interface);
+}
+
+function safeGeneration(value: string | number | bigint): number {
+  const generation = Number(value);
+  if (!Number.isSafeInteger(generation) || generation < 0) {
+    throw new Error('HTTP proxy snapshot generation exceeds the safe application range');
+  }
+  return generation;
+}
 
 /** Everything one snapshot is derived from, read inside a single transaction. */
 async function loadSnapshotInputs(transaction: Tx) {

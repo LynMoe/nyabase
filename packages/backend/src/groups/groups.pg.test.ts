@@ -1,7 +1,6 @@
 import { Capability, SystemGroupKey } from '@nyabase/common';
 import { describe, expect, it } from 'vitest';
-import { AccessChangeNotifier } from '../iam/access-change-notifier.js';
-import { AccessResolverService } from '../iam/access-resolver.service.js';
+import { AccessChangeNotifier, AccessResolverService } from '../iam/access-resolver.service.js';
 import { testActor } from '../iam/actor.test-helper.js';
 import {
   addMember,

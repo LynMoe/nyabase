@@ -38,7 +38,7 @@ import {
   type IpPoolNetwork,
   type ServerRow,
 } from './server-preflight.store.js';
-import { gpuPreflight } from '../gpu/preflight.js';
+import { gpuPreflight } from '../gpu/inventory.js';
 
 /** The first node-metrics pull: its outcome, or the failure that downgrades the check to a warning. */
 interface MetricsEvidence {

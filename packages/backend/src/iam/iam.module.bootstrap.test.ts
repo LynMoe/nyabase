@@ -82,8 +82,8 @@ import { NestFactory } from '@nestjs/core';
 import { Capability } from '@nyabase/common';
 import { AccessResolverService } from './dist/iam/access-resolver.service.js';
 import { AppModule } from './dist/app.module.js';
-import { CAPS_KEY } from './dist/iam/decorators/require-caps.decorator.js';
-import { CapabilitiesGuard } from './dist/iam/guards/capabilities.guard.js';
+import { CAPS_KEY } from './dist/iam/decorators.js';
+import { CapabilitiesGuard } from './dist/iam/guards.js';
 
 const app = await NestFactory.createApplicationContext(AppModule, {
   abortOnError: false,

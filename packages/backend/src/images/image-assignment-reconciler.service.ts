@@ -14,37 +14,37 @@ import type {
   ResourceAuthority,
 } from '../reconcile/managed-reconciler.js';
 import { ReconcilerRegistry } from '../reconcile/reconciler-registry.service.js';
-import { reconcileDeletion, reconcileImageCleanup } from './image-assignment-deletion.js';
+import { ImageReconcileStore, type AssignmentRow } from './image-reconcile.store.js';
 import {
+  ImagePullNotConfirmedError,
+  deleteManagedImage,
   deletePreviousImageIfUnused,
   ensureAliasOnFingerprint,
   ensurePulled,
-} from './image-physical.js';
-import type { ImageReconcileDeps } from './image-reconcile-deps.js';
-import { ImageReconcileStore } from './image-reconcile.store.js';
-import {
-  ImagePullNotConfirmedError,
-  imageFailure,
+  canDeleteManagedImage,
   imageFingerprint,
+  imageUsedBy,
   isNotFound,
   sameFingerprint,
   selectImageForAssignment,
-  type AssignmentRow,
   type Image,
   type ImageAssignmentSource,
-} from './image-reconcile-support.js';
+} from './image-assignment-ops.js';
 
-export {
-  canDeleteManagedImage,
-  selectImageForAssignment,
-  type ImageAssignmentSource,
-} from './image-reconcile-support.js';
+const CLEANUP_RETRY_MS = 5_000;
+
+function imageFailure(
+  code: string,
+  message: string,
+  details: Record<string, unknown> = {},
+): IntentFailure {
+  return { code, message, details };
+}
 
 /**
  * Keeps each server's copy of a catalog image in line with the desired
  * fingerprint: pull, alias, supersede the previous copy, and remove copies
- * nothing needs. The Incus steps live in image-physical / image-assignment-deletion;
- * all SQL is in the store.
+ * nothing needs. The Incus steps live in image-assignment-ops; all SQL is in the store.
  */
 @Injectable()
 export class ImageAssignmentReconciler implements ManagedReconciler, OnModuleInit {
@@ -52,13 +52,12 @@ export class ImageAssignmentReconciler implements ManagedReconciler, OnModuleIni
   private readonly source: ImageAssignmentSource;
   private readonly pulls = new Map<string, Promise<void>>();
   private readonly store: ImageReconcileStore;
-  private readonly deps: ImageReconcileDeps;
 
   constructor(
     @Inject(PG_DATABASE) database: Kysely<NyabaseDatabase>,
     config: NyabaseConfigService,
     private readonly intents: IntentRepository,
-    audit: AuditService,
+    private readonly audit: AuditService,
     private readonly registry: ReconcilerRegistry,
   ) {
     const dedicated = config.get<string>('incus.imageSourceServer');
@@ -68,7 +67,6 @@ export class ImageAssignmentReconciler implements ManagedReconciler, OnModuleIni
       sourceServer: dedicated || config.get<string>('incus.preflightSourceServer'),
     };
     this.store = new ImageReconcileStore(database);
-    this.deps = { store: this.store, audit };
   }
 
   onModuleInit(): void {
@@ -176,7 +174,7 @@ export class ImageAssignmentReconciler implements ManagedReconciler, OnModuleIni
     const assignment = await this.store.readAssignment(context.intent.resourceId);
     if (!assignment) {
       if (context.intent.kind === 'image_assignment.delete') {
-        return reconcileImageCleanup(this.deps, context);
+        return this.reconcileImageCleanup(context);
       }
       return {
         outcome: 'failed',
@@ -205,8 +203,7 @@ export class ImageAssignmentReconciler implements ManagedReconciler, OnModuleIni
           assignment.managed_fingerprint,
         ))
         : undefined;
-      return reconcileDeletion(
-        this.deps,
+      return this.reconcileDeletion(
         context.client,
         assignment,
         images,
@@ -270,7 +267,7 @@ export class ImageAssignmentReconciler implements ManagedReconciler, OnModuleIni
     const previous = assignment.managed_fingerprint;
     const imagesForAlias = (await client.listImages(1)).metadata;
     await ensureAliasOnFingerprint(
-      this.deps,
+      this.audit,
       client,
       imagesForAlias,
       desired.alias,
@@ -278,7 +275,7 @@ export class ImageAssignmentReconciler implements ManagedReconciler, OnModuleIni
       context.intent,
     );
     const previousInUse = await deletePreviousImageIfUnused(
-      this.deps,
+      this.audit,
       client,
       previous,
       fingerprint,
@@ -309,7 +306,7 @@ export class ImageAssignmentReconciler implements ManagedReconciler, OnModuleIni
     desired: ImageAssignmentSource,
   ): Promise<Image | ReconcileOutcome> {
     try {
-      await ensurePulled(this.deps, this.pulls, client, desired, assignment.server_id, context.intent);
+      await ensurePulled(this.audit, this.pulls, client, desired, assignment.server_id, context.intent);
     } catch (error) {
       if (isNotFound(error)) {
         return {
@@ -353,5 +350,159 @@ export class ImageAssignmentReconciler implements ManagedReconciler, OnModuleIni
       sourceServer: this.source.sourceServer,
       imageType: this.source.imageType,
     };
+  }
+
+  /**
+   * Remove an assignment: delete the managed image from the server unless
+   * something else still holds or uses it, then drop the assignment row.
+   */
+  private async reconcileDeletion(
+    client: IncusClientPort,
+    assignment: AssignmentRow,
+    images: readonly Image[],
+    selected: Image | undefined,
+    intent: IntentRecord,
+  ): Promise<ReconcileOutcome> {
+    const done = (): ReconcileOutcome => ({
+      outcome: 'succeeded',
+      observedRevision: assignment.revision,
+    });
+    const managed = assignment.managed_fingerprint;
+    if (!managed) {
+      await this.store.markAssignmentDeleted(assignment, !selected);
+      return done();
+    }
+    if (selected && !sameFingerprint(imageFingerprint(selected), managed)) {
+      const managedImage = images.find((candidate) => sameFingerprint(
+        imageFingerprint(candidate),
+        managed,
+      ));
+      if (!managedImage) {
+        await this.store.markAssignmentDeleted(assignment, true);
+        return done();
+      }
+      if (imageUsedBy(managedImage).length > 0) {
+        return {
+          outcome: 'failed',
+          failure: imageFailure(
+            'IMAGE_IN_USE',
+            'Stop and delete instances still using the managed image fingerprint',
+            { managedFingerprint: managed, observedFingerprint: imageFingerprint(selected) },
+          ),
+        };
+      }
+    }
+    const image = images.find((candidate) => sameFingerprint(imageFingerprint(candidate), managed));
+    if (!image) {
+      await this.store.markAssignmentDeleted(assignment, true);
+      return done();
+    }
+    const otherAssignment = await this.store.findOtherAssignmentHolding(assignment, managed);
+    const pinned = await this.store.findContainerPinnedTo(assignment.server_id, managed);
+    if (!canDeleteManagedImage({
+      managedFingerprint: managed,
+      actualFingerprint: imageFingerprint(image),
+      otherAssignment: Boolean(otherAssignment),
+      pinned: Boolean(pinned),
+      usedBy: imageUsedBy(image).length > 0,
+    })) {
+      await this.store.markAssignmentDeleted(assignment, false);
+      return done();
+    }
+    await deleteManagedImage(this.audit, client, managed, intent);
+    await this.store.bumpCleanupGeneration(assignment.image_id);
+    await this.store.markAssignmentDeleted(assignment, true);
+    return done();
+  }
+
+  /**
+   * Remove an inactive image no server holds any more: refuse while assignments
+   * or containers remain, delete the physical copy on the cleanup owner, then drop the row.
+   */
+  private async reconcileImageCleanup(
+    context: ReconcileRunContext,
+  ): Promise<ReconcileOutcome> {
+    const image = await this.store.readImage(context.intent.resourceId);
+    if (!image) {
+      return {
+        outcome: 'succeeded',
+        observedRevision: context.intent.targetRevision,
+      };
+    }
+    if (
+      context.intent.request?.operation !== 'cleanup_image'
+      || image.is_active
+      || !image.deleting
+    ) {
+      return {
+        outcome: 'failed',
+        failure: imageFailure(
+          'IMAGE_ASSIGNMENT_NOT_FOUND',
+          'The image assignment no longer exists',
+        ),
+      };
+    }
+    const assignments = await this.store.listAssignmentIdsOfImage(image.id);
+    if (assignments.length > 0) {
+      return {
+        outcome: 'retry',
+        retryAfterMs: CLEANUP_RETRY_MS,
+        failure: imageFailure(
+          'IMAGE_CLEANUP_ASSIGNMENTS_PRESENT',
+          'The image still has server assignments to clean up',
+          { assignmentCount: assignments.length },
+        ),
+      };
+    }
+    const retainedContainer = await this.store.findContainerOfImage(image.id);
+    if (retainedContainer) {
+      return {
+        outcome: 'retry',
+        retryAfterMs: CLEANUP_RETRY_MS,
+        failure: imageFailure(
+          'IMAGE_CLEANUP_CONTAINER_PRESENT',
+          'The inactive image is still referenced by a container',
+          { containerId: retainedContainer.id },
+        ),
+      };
+    }
+    if (!context.client) {
+      throw new IncusError('SERVER_UNREACHABLE', 'retry', { reason: 'missing_client' });
+    }
+    if (image.fingerprint) {
+      const blocked = await this.deletePhysicalCopy(context, context.client, image.fingerprint);
+      if (blocked) return blocked;
+    }
+    await this.store.deleteInactiveImage(image.id);
+    return {
+      outcome: 'succeeded',
+      observedRevision: context.intent.targetRevision,
+    };
+  }
+
+  /** Delete the server's copy of an inactive image; returns a retry outcome while Incus still uses it. */
+  private async deletePhysicalCopy(
+    context: ReconcileRunContext,
+    client: IncusClientPort,
+    fingerprint: string,
+  ): Promise<ReconcileOutcome | null> {
+    const images = (await client.listImages(1, { signal: context.signal })).metadata;
+    const physical = images.find((candidate) =>
+      sameFingerprint(imageFingerprint(candidate), fingerprint));
+    if (!physical) return null;
+    const usedBy = imageUsedBy(physical);
+    if (usedBy.length > 0) {
+      return {
+        outcome: 'retry',
+        retryAfterMs: CLEANUP_RETRY_MS,
+        failure: imageFailure(
+          'IMAGE_CLEANUP_BLOCKED',
+          'The inactive image is still used by an Incus resource',
+          { fingerprint, usedBy },
+        ),
+      };
+    }
+    await deleteManagedImage(this.audit, client, fingerprint, context.intent);
+    return null;
   }
 }

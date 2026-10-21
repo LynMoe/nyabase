@@ -12,9 +12,8 @@ import {
   zCreateIpPoolRequest,
   zPatchIpPoolRequest,
 } from '@nyabase/common';
-import { RequireCaps } from '../iam/decorators/require-caps.decorator.js';
-import { CurrentUser } from '../iam/decorators/current-user.decorator.js';
-import type { UserRecord } from '../iam/user-record.js';
+import { RequireCaps, CurrentUser } from '../iam/decorators.js';
+import type { UserRecord } from '../iam/auth-persistence.js';
 import { IpPoolsService } from './ip-pools.service.js';
 
 @Controller('admin/ip-pools')

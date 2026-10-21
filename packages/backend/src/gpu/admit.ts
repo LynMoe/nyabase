@@ -1,12 +1,150 @@
 import {
+  BadRequestException,
+  ConflictException,
+  ForbiddenException,
+  HttpException,
+} from '@nestjs/common';
+import {
   FailureCode,
+  MAX_GPU_DEVICES,
   canonicalPciAddress,
+  isWildcardPciAddress,
   parseContainerState,
+  zPatchContainerGpusRequest,
   type GpuContainerState,
 } from '@nyabase/common';
-import { gpuConflict, gpuForbidden } from './gpu-errors.js';
-import { parseMutatePciAddresses, parsePciAddressList } from './pci-input.js';
-import type { GpuContext } from './types.js';
+
+export interface GpuClaimsPort {
+  /** Replace this container's claimed PCI addresses (container-scoped ports only). */
+  replace(pciAddresses: readonly string[]): Promise<void>;
+  /** PCI addresses claimed on the server by other containers. */
+  listOccupied(excludeContainerId?: string): Promise<string[]>;
+  count(): Promise<number>;
+}
+
+export interface GpuHealthPort {
+  /** Persisted health; may omit runtimeReady. */
+  read(): Promise<Record<string, unknown>>;
+  write(health: Record<string, unknown>): Promise<void>;
+}
+
+export interface GpuActor {
+  readonly userId: string;
+  readonly admin: boolean;
+}
+
+export interface GpuContext {
+  readonly serverId: string;
+  readonly actor: GpuActor;
+  /** Canonical PCI addresses allowed by the actor's server grant; empty means none. */
+  readonly grantPciAddresses: readonly string[];
+  readonly claims: GpuClaimsPort;
+  readonly health: GpuHealthPort;
+}
+
+type Details = Record<string, unknown>;
+
+function body(code: string, message: string, details?: Details) {
+  return details ? { code, message, details } : { code, message };
+}
+
+export function gpuBadRequest(code: string, message: string, details?: Details): BadRequestException {
+  return new BadRequestException(body(code, message, details));
+}
+
+export function gpuForbidden(code: string, message: string, details?: Details): ForbiddenException {
+  return new ForbiddenException(body(code, message, details));
+}
+
+export function gpuConflict(code: string, message: string, details?: Details): ConflictException {
+  return new ConflictException(body(code, message, details));
+}
+
+/** `{ code, message, details }` body of a Nest HTTP exception, for assertions and logging. */
+export function gpuErrorBody(error: unknown): { code?: string; message?: string; details?: Details } | null {
+  if (!(error instanceof HttpException)) return null;
+  const response = error.getResponse();
+  return typeof response === 'object' && response !== null ? response as never : null;
+}
+
+/**
+ * Validate a client-supplied PCI list and return canonical, unique addresses.
+ * Throws 400 with a GPU_* code that tells the caller what was wrong.
+ */
+export function parsePciAddressList(value: unknown): string[] {
+  if (!Array.isArray(value)) {
+    throw gpuBadRequest(FailureCode.GpuInvalidPci, 'GPU PCI addresses are invalid');
+  }
+  const seen = new Set<string>();
+  const result: string[] = [];
+  for (const item of value) {
+    if (typeof item !== 'string') {
+      throw gpuBadRequest(FailureCode.GpuInvalidPci, 'GPU PCI address is invalid');
+    }
+    if (isWildcardPciAddress(item)) {
+      throw gpuBadRequest(
+        FailureCode.GpuWildcardForbidden,
+        'Wildcard PCI selectors are forbidden',
+        { pciAddress: item },
+      );
+    }
+    const canonical = canonicalPciAddress(item);
+    if (!canonical) {
+      throw gpuBadRequest(FailureCode.GpuInvalidPci, 'GPU PCI address is invalid', { pciAddress: item });
+    }
+    if (seen.has(canonical)) {
+      throw gpuBadRequest(
+        FailureCode.GpuDuplicatePci,
+        'GPU PCI addresses must be unique',
+        { pciAddress: canonical },
+      );
+    }
+    seen.add(canonical);
+    result.push(canonical);
+  }
+  if (result.length > MAX_GPU_DEVICES) {
+    throw gpuBadRequest(FailureCode.GpuInvalidPci, 'Too many GPU PCI addresses');
+  }
+  return result;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+/** Parse the body of `PATCH /containers/:id/gpus`. */
+export function parseMutatePciAddresses(body: unknown): string[] {
+  const parsed = zPatchContainerGpusRequest.safeParse(body);
+  if (parsed.success) return parsed.data.pciAddresses;
+  if (isRecord(body) && 'pciAddresses' in body) {
+    parsePciAddressList(body.pciAddresses);
+  }
+  throw gpuBadRequest(FailureCode.InvalidInput, 'GPU request body is invalid');
+}
+
+export function gpuOccupiedError() {
+  return gpuConflict(FailureCode.GpuOccupied, 'The server still has GPU claims');
+}
+
+/** GPU cannot be switched off while any container holds a card. */
+export async function assertGpuCanDisable(claims: Pick<GpuClaimsPort, 'count'>): Promise<void> {
+  if (await claims.count() > 0) throw gpuOccupiedError();
+}
+
+/** Postgres raises P0001 with this HINT when the disable trigger fires. */
+export function isGpuOccupiedSqlError(error: unknown): boolean {
+  let current: unknown = error;
+  const visited = new Set<unknown>();
+  while (current && typeof current === 'object' && !visited.has(current)) {
+    visited.add(current);
+    const record = current as { code?: unknown; hint?: unknown; cause?: unknown };
+    if (record.code === 'P0001' && String(record.hint ?? '') === FailureCode.GpuOccupied) {
+      return true;
+    }
+    current = record.cause;
+  }
+  return false;
+}
 
 function runtimeReadyFromHealth(health: Record<string, unknown>): boolean | null {
   if (!('runtimeReady' in health) || health.runtimeReady === undefined || health.runtimeReady === null) {

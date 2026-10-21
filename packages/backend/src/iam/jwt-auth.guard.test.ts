@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { Reflector } from '@nestjs/core';
-import { IS_PUBLIC_KEY } from '../decorators/public.decorator.js';
-import { JwtAuthGuard } from './jwt-auth.guard.js';
+import { IS_PUBLIC_KEY } from './decorators.js';
+import { JwtAuthGuard } from './guards.js';
 
 describe('JwtAuthGuard query token handling', () => {
   it('lets @Public() routes through without authenticating', async () => {

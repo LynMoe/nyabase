@@ -18,8 +18,7 @@ import {
   zListSharedVolumesQuery,
   zPatchVolumeRequest,
 } from '@nyabase/common';
-import { RequireCaps } from '../iam/decorators/require-caps.decorator.js';
-import { CurrentActor } from '../iam/decorators/current-actor.decorator.js';
+import { RequireCaps, CurrentActor } from '../iam/decorators.js';
 import type { Actor } from '../iam/actor.js';
 import { SharedVolumeCatalogInspectService } from './shared-volume-catalog-inspect.service.js';
 import { SharedVolumesService } from './shared-volumes.service.js';

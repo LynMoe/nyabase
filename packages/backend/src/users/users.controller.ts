@@ -12,8 +12,7 @@ import {
 } from '@nestjs/common';
 import { UsersService } from './users.service.js';
 import { UserSshKeysService } from './user-ssh-keys.service.js';
-import { RequireAnyCaps, RequireCaps } from '../iam/decorators/require-caps.decorator.js';
-import { CurrentActor } from '../iam/decorators/current-actor.decorator.js';
+import { RequireAnyCaps, RequireCaps, CurrentActor } from '../iam/decorators.js';
 import { holdsAny, type Actor } from '../iam/actor.js';
 import {
   Capability,

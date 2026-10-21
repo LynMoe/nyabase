@@ -7,12 +7,11 @@ import {
 } from '@nestjs/common';
 import { randomBytes } from 'node:crypto';
 import { AuditAction, Capability } from '@nyabase/common';
-import { RequireAnyCaps, RequireCaps } from '../iam/decorators/require-caps.decorator.js';
+import { RequireAnyCaps, RequireCaps, CurrentUser } from '../iam/decorators.js';
 import { postCommitBestEffort } from '../platform/post-commit.js';
 import { SshIdentityService } from './ssh-identity.service.js';
 import { SshProxyGateway } from './ssh-proxy-gateway.js';
-import { CurrentUser } from '../iam/decorators/current-user.decorator.js';
-import type { UserRecord } from '../iam/user-record.js';
+import type { UserRecord } from '../iam/auth-persistence.js';
 import { AuditService } from '../iam/audit.service.js';
 import { AccessResolverService } from '../iam/access-resolver.service.js';
 

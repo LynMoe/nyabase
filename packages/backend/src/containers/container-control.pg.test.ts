@@ -20,7 +20,7 @@ import { ContainerControlService } from './container-control.service.js';
 import { ImagesService } from '../images/images.service.js';
 import { IpPoolsRepository } from '../ip-pools/ip-pools.repository.js';
 import { ContainerSshConvergenceService } from './container-ssh-convergence.service.js';
-import { isGpuOccupiedSqlError } from '../gpu/enablement.js';
+import { isGpuOccupiedSqlError } from '../gpu/admit.js';
 import { GpuClaimsRepository } from '../gpu/gpu-claims.repository.js';
 import { noopWake } from '../reconcile/reconcile-wake.test-helper.js';
 import { testActor } from '../iam/actor.test-helper.js';

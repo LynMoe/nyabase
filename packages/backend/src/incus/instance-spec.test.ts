@@ -6,8 +6,6 @@ import {
   deriveInstanceName,
   deriveVolumeName,
   type InstanceSpecInput,
-} from './instance-spec.js';
-import {
   applyManagedFields,
   compareManagedFields,
   CORE_MANAGED_FIELD_OWNERSHIP,

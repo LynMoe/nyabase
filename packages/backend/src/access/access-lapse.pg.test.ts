@@ -3,7 +3,7 @@ import type { Kysely } from 'kysely';
 import { AuditAction, GRANT_EXPIRY_GRACE_DAYS, UserStatus } from '@nyabase/common';
 import { describe, expect, it, vi } from 'vitest';
 import { ContainerControlRepository } from '../containers/container-control.repository.js';
-import { AccessChangeNotifier } from '../iam/access-change-notifier.js';
+import { AccessChangeNotifier } from '../iam/access-resolver.service.js';
 import {
   addMember,
   days,
@@ -21,7 +21,7 @@ import {
   seedUser,
   seedVolume,
 } from '../iam/access.pg-test-helper.js';
-import { SYSTEM_ACTOR_USERNAME } from '../iam/system-actor.js';
+import { SYSTEM_ACTOR_USERNAME } from '../iam/actor.js';
 import type { NyabaseDatabase } from '../platform/persistence-pg/database.types.js';
 import { withPostgresTestDatabase } from '../platform/persistence-pg/postgres-test-harness.js';
 import { PgTransactionManager } from '../platform/persistence-pg/transaction.js';

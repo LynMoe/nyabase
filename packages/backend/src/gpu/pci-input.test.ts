@@ -1,7 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { FailureCode } from '@nyabase/common';
-import { gpuErrorBody } from './gpu-errors.js';
-import { parseMutatePciAddresses, parsePciAddressList } from './pci-input.js';
+import { gpuErrorBody, parseMutatePciAddresses, parsePciAddressList } from './admit.js';
 
 function codeOf(run: () => unknown): string | undefined {
   try {

@@ -1,8 +1,13 @@
 import { describe, expect, it } from 'vitest';
 import { FailureCode } from '@nyabase/common';
-import { admitGpuCreate, mutateGpuContainer } from './admit.js';
-import { gpuErrorBody } from './gpu-errors.js';
-import type { GpuClaimsPort, GpuContext, GpuHealthPort } from './types.js';
+import {
+  admitGpuCreate,
+  mutateGpuContainer,
+  gpuErrorBody,
+  type GpuClaimsPort,
+  type GpuContext,
+  type GpuHealthPort,
+} from './admit.js';
 
 function createClaims(occupied: string[] = []): GpuClaimsPort & { keys: string[] } {
   const keys = [...occupied];

@@ -12,6 +12,7 @@ import {
   AuditAction,
   Capability,
   MAX_HTTP_PROXY_DOMAIN_POOLS,
+  normalizeHttpProxyWildcardDomain,
   zCreateHttpDomainPoolRequest,
   zPatchHttpDomainPoolRequest,
   type HttpDomainPoolDto,
@@ -27,14 +28,30 @@ import { PgTransactionManager } from '../platform/persistence-pg/transaction.js'
 import { certificateFields, validateCertificate } from './http-proxy-certificates.js';
 import {
   DOMAIN_POOL_MUTATION_LOCK,
-  duplicateDomainPoolConflict,
   isUniqueConstraintViolation,
   lockHttpProxy,
-  parseHttpProxyWildcardDomain,
   runSerializable,
   type DomainPoolRow,
   type HttpExecutor,
-} from './http-proxy-support.js';
+} from './http-proxy-state.js';
+
+function parseHttpProxyWildcardDomain(value: string): string {
+  try {
+    return normalizeHttpProxyWildcardDomain(value);
+  } catch {
+    throw new BadRequestException({
+      code: 'INVALID_HTTP_PROXY_WILDCARD_DOMAIN',
+      message: 'wildcardDomain must be a valid ASCII DNS wildcard domain',
+    });
+  }
+}
+
+function duplicateDomainPoolConflict(): ConflictException {
+  return new ConflictException({
+    code: 'HTTP_PROXY_DOMAIN_POOL_EXISTS',
+    message: 'A domain pool already owns this wildcard domain',
+  });
+}
 
 /** Wildcard domain pools: which hostnames bindings may use, and their TLS certificates. */
 @Injectable()

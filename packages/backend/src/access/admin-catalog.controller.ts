@@ -1,8 +1,7 @@
 import { Controller, Get } from '@nestjs/common';
 import { Capability } from '@nyabase/common';
-import { RequireAnyCaps, RequireCaps } from '../iam/decorators/require-caps.decorator.js';
-import type { UserRecord } from '../iam/user-record.js';
-import { CurrentUser } from '../iam/decorators/current-user.decorator.js';
+import { RequireAnyCaps, RequireCaps, CurrentUser } from '../iam/decorators.js';
+import type { UserRecord } from '../iam/auth-persistence.js';
 import { AccessResolverService } from '../iam/access-resolver.service.js';
 import { CatalogPersistence } from './catalog.persistence.js';
 

@@ -8,7 +8,7 @@ import {
   MAX_LOGIN_ATTEMPTS_PER_PRINCIPAL,
 } from './auth.service.js';
 import { InMemoryAuthPersistenceTestAdapter } from './in-memory-auth-persistence.test-helper.js';
-import { SYSTEM_ACTOR_USERNAME } from './system-actor.js';
+import { SYSTEM_ACTOR_USERNAME } from './actor.js';
 
 describe('AuthService login limiter', () => {
   it('returns 429 once a principal exhausts its fixed window', () => {

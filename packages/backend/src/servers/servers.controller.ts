@@ -19,8 +19,7 @@ import {
   zPatchServerRequest,
   zRunPreflightRequest,
 } from '@nyabase/common';
-import { RequireCaps } from '../iam/decorators/require-caps.decorator.js';
-import { CurrentActor } from '../iam/decorators/current-actor.decorator.js';
+import { RequireCaps, CurrentActor } from '../iam/decorators.js';
 import type { Actor } from '../iam/actor.js';
 import { ServersService } from './servers.service.js';
 import { ServerConnectIntentService, ServerPreflightIntentService } from './server-intents.service.js';

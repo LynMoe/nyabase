@@ -4,8 +4,7 @@ import { describe, expect, it } from 'vitest';
 import { GpuClaimsRepository } from '../gpu/gpu-claims.repository.js';
 import { GrantsService } from '../groups/grants.service.js';
 import { testActor } from './actor.test-helper.js';
-import { AccessChangeNotifier } from './access-change-notifier.js';
-import { AccessResolverService } from './access-resolver.service.js';
+import { AccessChangeNotifier, AccessResolverService } from './access-resolver.service.js';
 import { withPostgresTestDatabase } from '../platform/persistence-pg/postgres-test-harness.js';
 import { PgTransactionManager } from '../platform/persistence-pg/transaction.js';
 import {

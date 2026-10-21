@@ -17,13 +17,40 @@ import {
   IntentStatus,
   zIntentListQuery,
   zRetryIntentRequest,
+  type IntentDto,
 } from '@nyabase/common';
-import { CurrentActor } from '../iam/decorators/current-actor.decorator.js';
+import { CurrentActor } from '../iam/decorators.js';
 import { holdsAny, type Actor } from '../iam/actor.js';
 import { AccessResolverService } from '../iam/access-resolver.service.js';
-import { toDto } from './intent-dto.js';
 import { IntentRepository, type IntentListOptions, type IntentRecord } from './intent.repository.js';
 import { ReconcilerRegistry } from './reconciler-registry.service.js';
+
+function toDto(intent: IntentRecord): IntentDto {
+  return {
+    id: intent.id,
+    kind: intent.kind as IntentDto['kind'],
+    resourceType: intent.resourceType as IntentDto['resourceType'],
+    resourceId: intent.resourceId,
+    serverId: intent.serverId,
+    requestedBy: intent.requestedBy,
+    requestSummary: intent.request ?? {},
+    targetRevision: intent.targetRevision,
+    baseline: intent.baseline,
+    status: intent.status as IntentDto['status'],
+    failureCode: intent.failureCode,
+    failure: intent.failure
+      ? {
+        code: intent.failure.code,
+        message: intent.failure.message,
+        details: intent.failure.details ?? {},
+      }
+      : null,
+    attemptCount: intent.attemptCount,
+    nextAttemptAt: intent.nextAttemptAt,
+    createdAt: intent.createdAt,
+    settledAt: intent.settledAt,
+  };
+}
 
 /**
  * The capability that governs a resource type regardless of which row it is.

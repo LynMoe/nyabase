@@ -1,11 +1,28 @@
 import { sql, type Kysely } from 'kysely';
 import type { NyabaseDatabase } from '../platform/persistence-pg/database.types.js';
 import type { IntentFailure } from '../reconcile/intent.repository.js';
-import {
-  sameFingerprint,
-  type AssignmentRow,
-  type ImageCleanupRow,
-} from './image-reconcile-support.js';
+import { sameFingerprint } from './image-assignment-ops.js';
+
+export interface AssignmentRow {
+  id: string;
+  image_id: string;
+  server_id: string;
+  revision: number;
+  observed_fingerprint: string | null;
+  managed_fingerprint: string | null;
+  lifecycle_phase: 'provisioning' | 'active' | 'deleting' | 'failed';
+  alias: string;
+  desired_fingerprint: string | null;
+  cleanup_generation: number;
+}
+
+export interface ImageCleanupRow {
+  id: string;
+  fingerprint: string | null;
+  is_active: boolean;
+  deleting: boolean;
+  cleanup_generation: number;
+}
 
 const ASSIGNMENT_COLUMNS = [
   'a.id as id',

@@ -1,8 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { Capability, UserStatus } from '@nyabase/common';
 import { vi, type Mock } from 'vitest';
-import { AccessChangeNotifier } from '../iam/access-change-notifier.js';
-import { AccessResolverService } from '../iam/access-resolver.service.js';
+import { AccessChangeNotifier, AccessResolverService } from '../iam/access-resolver.service.js';
 import type { PostgresTestDatabase } from '../platform/persistence-pg/postgres-test-harness.js';
 import { PgTransactionManager } from '../platform/persistence-pg/transaction.js';
 import { UserSshKeysService } from './user-ssh-keys.service.js';

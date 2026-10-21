@@ -2,7 +2,7 @@ import { Inject, Injectable } from '@nestjs/common';
 import type { Kysely, Transaction } from 'kysely';
 import type { NyabaseDatabase } from '../platform/persistence-pg/database.types.js';
 import { PG_DATABASE } from '../platform/persistence-pg/tokens.js';
-import type { GpuClaimsPort, GpuHealthPort } from './types.js';
+import type { GpuClaimsPort, GpuHealthPort } from './admit.js';
 
 function asHealthObject(value: unknown): Record<string, unknown> {
   if (typeof value === 'string') {

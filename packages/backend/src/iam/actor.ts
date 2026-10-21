@@ -1,6 +1,8 @@
 import { ForbiddenException } from '@nestjs/common';
 import type { Capability } from '@nyabase/common';
 
+export const SYSTEM_ACTOR_USERNAME = 'nyabase-system';
+
 export type ActorAuthKind = 'jwt' | 'api-token' | 'system';
 
 /**

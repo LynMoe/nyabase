@@ -17,7 +17,7 @@ import {
   zPatchContainerLimitsRequest,
   zPatchContainerRootSizeRequest,
 } from '@nyabase/common';
-import { CurrentActor } from '../iam/decorators/current-actor.decorator.js';
+import { CurrentActor } from '../iam/decorators.js';
 import type { Actor } from '../iam/actor.js';
 import { ContainerControlService } from './container-control.service.js';
 

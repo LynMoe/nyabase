@@ -1,11 +1,14 @@
 import { describe, expect, it } from 'vitest';
 import { FailureCode } from '@nyabase/common';
-import { assertGpuCanDisable, isGpuOccupiedSqlError } from './enablement.js';
-import { gpuErrorBody } from './gpu-errors.js';
-import { gpuPreflight, refreshGpuHealth } from './preflight.js';
-import { probeGpuSupport } from './support.js';
+import {
+  assertGpuCanDisable,
+  isGpuOccupiedSqlError,
+  gpuErrorBody,
+  type GpuClaimsPort,
+  type GpuHealthPort,
+} from './admit.js';
+import { gpuPreflight, refreshGpuHealth, probeGpuSupport } from './inventory.js';
 import { GPU_CONFIG_PREFIXES, GPU_DEVICE_PREFIXES } from './instance-spec.js';
-import type { GpuClaimsPort, GpuHealthPort } from './types.js';
 
 function createClaims(count = 0): GpuClaimsPort {
   let keys = Array.from({ length: count }, (_, index) => `00000000:41:0${index}.0`);

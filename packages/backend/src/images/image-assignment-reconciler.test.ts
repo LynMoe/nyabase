@@ -1,10 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { IncusError } from '../incus/incus-errors.js';
-import {
-  canDeleteManagedImage,
-  ImageAssignmentReconciler,
-  selectImageForAssignment,
-} from './image-assignment-reconciler.service.js';
+import { canDeleteManagedImage, selectImageForAssignment } from './image-assignment-ops.js';
+import { ImageAssignmentReconciler } from './image-assignment-reconciler.service.js';
 import { DEFAULT_IMAGE_SOURCE_SERVER } from '@nyabase/common';
 
 describe('image assignment reconciliation policy', () => {

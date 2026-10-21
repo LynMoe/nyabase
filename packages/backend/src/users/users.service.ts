@@ -22,12 +22,11 @@ import type { NyabaseDatabase } from '../platform/persistence-pg/database.types.
 import { PG_DATABASE } from '../platform/persistence-pg/tokens.js';
 import { PgTransactionManager } from '../platform/persistence-pg/transaction.js';
 import { AuthService } from '../iam/auth.service.js';
-import { AccessResolverService } from '../iam/access-resolver.service.js';
+import { AccessResolverService, AccessChangeNotifier } from '../iam/access-resolver.service.js';
 import type { Actor } from '../iam/actor.js';
 import { NyabaseConfigService } from '../platform/config/nyabase-config.service.js';
 import { ProxySnapshotNotifierService } from '../proxy-snapshots/proxy-snapshot-notifier.service.js';
 import { AuditService } from '../iam/audit.service.js';
-import { AccessChangeNotifier } from '../iam/access-change-notifier.js';
 import {
   assertNotLastAdministrator,
   groupHoldsResourceGrants,
