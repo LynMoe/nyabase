@@ -9,6 +9,7 @@ const user = {
   username: 'alice',
   displayName: 'Alice',
   status: 'active',
+  role: 'operator',
   createdAt: new Date('2026-01-01T00:00:00Z'),
 };
 
@@ -20,7 +21,6 @@ function harness(options: { cookieSecure?: boolean } = {}) {
     refreshCookieMaxAgeMs: vi.fn(() => 7 * 86_400_000),
   };
   const access = {
-    userCapabilities: vi.fn(async () => new Set(['view_own'])),
     getUserGroupSummaries: vi.fn(async () => []),
   };
   const config = { get: vi.fn(() => options.cookieSecure ?? true) };
@@ -40,6 +40,8 @@ describe('AuthController refresh cookie transport', () => {
 
     expect(body).not.toHaveProperty('refreshToken');
     expect(body.accessToken).toBe('access-1');
+    expect(body.user).toMatchObject({ role: 'operator' });
+    expect(body.user).not.toHaveProperty('capabilities');
     expect(response.cookie).toHaveBeenCalledWith(REFRESH_COOKIE_NAME, 'r1', {
       httpOnly: true,
       secure: true,

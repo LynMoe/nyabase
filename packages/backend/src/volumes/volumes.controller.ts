@@ -24,7 +24,7 @@ import type { Actor } from '../iam/actor.js';
 import { LocalVolumesService } from './local-volumes.service.js';
 import { VolumeAttachmentsService } from './volume-attachments.service.js';
 
-/** Local volumes: owners and `ManageVolumes` holders share one surface. */
+/** Local volumes: owners and admins share one surface; admins act on others' rows with `?scope=all`. */
 @Controller('volumes')
 export class VolumesController {
   constructor(private readonly service: LocalVolumesService) {}
@@ -35,8 +35,8 @@ export class VolumesController {
   }
 
   @Get(':id')
-  get(@Param('id') id: string, @CurrentActor() actor: Actor) {
-    return this.service.get(actor, id);
+  get(@Param('id') id: string, @CurrentActor() actor: Actor, @Query('scope') scope?: string) {
+    return this.service.get(actor, id, zListScope.parse(scope));
   }
 
   @Post()
@@ -59,14 +59,15 @@ export class VolumesController {
     @Param('id') id: string,
     @CurrentActor() actor: Actor,
     @Body() body: unknown,
+    @Query('scope') scope?: string,
   ) {
-    return this.service.patch(actor, id, zPatchVolumeRequest.parse(body));
+    return this.service.patch(actor, id, zPatchVolumeRequest.parse(body), zListScope.parse(scope));
   }
 
   @Delete(':id')
   @HttpCode(HttpStatus.ACCEPTED)
-  delete(@Param('id') id: string, @CurrentActor() actor: Actor) {
-    return this.service.delete(actor, id);
+  delete(@Param('id') id: string, @CurrentActor() actor: Actor, @Query('scope') scope?: string) {
+    return this.service.delete(actor, id, zListScope.parse(scope));
   }
 }
 
@@ -74,7 +75,7 @@ export class VolumesController {
 export class StorageCapacityController {
   constructor(private readonly service: LocalVolumesService) {}
 
-  /** `scope=mine` is the caller's grant view; `scope=all` is server-wide (`ManageServers`). */
+  /** `scope=mine` is the caller's grant view; `scope=all` is server-wide (operator). */
   @Get()
   get(
     @Param('serverId') serverId: string,
@@ -95,8 +96,15 @@ export class ContainerVolumesController {
     @Param('containerId') containerId: string,
     @CurrentActor() actor: Actor,
     @Body() body: unknown,
+    @Query('scope') scope?: string,
   ) {
-    return this.service.attach(actor, containerId, zAttachVolumeRequest.parse(body), 'local');
+    return this.service.attach(
+      actor,
+      containerId,
+      zAttachVolumeRequest.parse(body),
+      'local',
+      zListScope.parse(scope),
+    );
   }
 
   @Delete(':attachmentId')
@@ -105,7 +113,8 @@ export class ContainerVolumesController {
     @Param('containerId') containerId: string,
     @Param('attachmentId') attachmentId: string,
     @CurrentActor() actor: Actor,
+    @Query('scope') scope?: string,
   ) {
-    return this.service.detach(actor, attachmentId, containerId, 'local');
+    return this.service.detach(actor, attachmentId, containerId, 'local', zListScope.parse(scope));
   }
 }

@@ -11,6 +11,7 @@ import { PG_DATABASE } from '../platform/persistence-pg/tokens.js';
 import type { NyabaseDatabase } from '../platform/persistence-pg/database.types.js';
 import type { IncusClientPort, IncusExecWebSocketSession } from '../incus/index.js';
 import { EphemeralStore } from '../platform/ephemeral-store.js';
+import { SessionRevocationService } from '../iam/session-revocation.service.js';
 
 const UNCLAIMED_TTL_MS = 60_000;
 const CLAIMED_TTL_MS = 30 * 60_000;
@@ -27,6 +28,8 @@ export interface ConsoleSession {
   cols: number;
   rows: number;
   admin: boolean;
+  /** `SessionRevocationService` generation of the actor when the session was created. */
+  revocationGeneration: number;
   state: 'unclaimed' | 'claimed';
   expiresAt: string;
 }
@@ -36,6 +39,7 @@ export class ConsoleSessionService {
   constructor(
     @Inject(PG_DATABASE) private readonly database: Kysely<NyabaseDatabase>,
     private readonly ephemeral: EphemeralStore,
+    private readonly revocations: SessionRevocationService,
   ) {}
 
   async create(
@@ -81,6 +85,7 @@ export class ConsoleSessionService {
       cols: request.cols,
       rows: request.rows,
       admin,
+      revocationGeneration: this.revocations.generation(actorId),
       state: 'unclaimed',
       expiresAt,
     };
@@ -119,6 +124,7 @@ export class ConsoleSessionService {
       session.sessionId !== sessionId
       || session.actorId !== actorId
       || session.authVersion !== authVersion
+      || this.isRevoked(session)
       || session.state !== 'unclaimed'
     ) return null;
     if (!this.ephemeral.set(
@@ -160,6 +166,11 @@ export class ConsoleSessionService {
       return null;
     }
     return session;
+  }
+
+  /** The actor was disabled, deleted, re-roled or re-keyed since the session was created. */
+  isRevoked(session: Pick<ConsoleSession, 'actorId' | 'revocationGeneration'>): boolean {
+    return this.revocations.generation(session.actorId) !== session.revocationGeneration;
   }
 
   release(sessionId: string): void {

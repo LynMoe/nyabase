@@ -19,7 +19,7 @@ const zProxyTimestampMs = zSafeCounter.refine(
   'Proxy timestamp exceeds the allowed clock-skew window',
 );
 
-export const HTTP_PROXY_SNAPSHOT_STALE_AFTER_MS = 120_000;
+export const HTTP_PROXY_SNAPSHOT_STALE_AFTER_MS = 300_000;
 export const HTTP_PROXY_SNAPSHOT_MAX_STALE_AFTER_MS = 300_000;
 
 export const HTTP_PROXY_WARNING_REASONS = [

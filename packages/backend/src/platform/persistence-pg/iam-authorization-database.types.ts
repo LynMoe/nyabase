@@ -41,13 +41,13 @@ export interface IamSharedBackendGrantTable {
   user_id: string | null;
   group_id: string | null;
   shared_backend_id: string;
-  limit_bytes: IamBigInt;
+  limit_bytes: IamBigInt | null;
   expires_at: IamNullableTimestamp;
   created_at: IamGeneratedTimestamp;
   updated_at: IamGeneratedTimestamp;
 }
 
-/** Read-only view (also the shape of iam.merged_*, which skips the active-user filter): merged direct + group-inherited server grants (see 000001_initial.sql). */
+/** Read-only view: merged direct + group-inherited server grants (see 000001_initial.sql). */
 export interface IamEffectiveServerAccessView {
   user_id: string;
   server_id: string;
@@ -90,9 +90,6 @@ export interface IamAuthorizationDatabase {
   'iam.storage_pool_grants': IamStoragePoolGrantTable;
   'iam.shared_backend_grants': IamSharedBackendGrantTable;
   'iam.effective_server_access': IamEffectiveServerAccessView;
-  'iam.merged_server_access': IamEffectiveServerAccessView;
-  'iam.merged_pool_access': IamEffectivePoolAccessView;
-  'iam.merged_shared_backend_access': IamEffectiveSharedBackendAccessView;
   'iam.effective_pool_access': IamEffectivePoolAccessView;
   'iam.effective_shared_backend_access': IamEffectiveSharedBackendAccessView;
   'control.access_lapses': AccessLapseTable;

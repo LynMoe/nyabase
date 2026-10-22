@@ -108,7 +108,7 @@ export function GraceCard({ subject }: { subject: GrantSubject }) {
               id={lapse.serverId}
               name={servers.find((item) => item.id === lapse.serverId)?.name}
             />
-            {' '}已失去访问覆盖，容器已停止；{lapse.purgeAt ? expiryLabel(lapse.purgeAt) : '宽限期满'} 起清除其容器与数据卷。重新授权可取消清除（已停止的容器不会自动启动）。
+            {' '}宽限中 · 将于 {expiryLabel(lapse.purgeAt)} 清除其容器与数据卷（容器已停止）。重新授权可取消清除（已停止的容器不会自动启动）。
           </li>
         ))}
       </ul>

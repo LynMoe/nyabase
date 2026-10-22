@@ -2,6 +2,7 @@
 
 use std::fs::OpenOptions;
 use std::io::{BufReader, Read};
+use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -10,16 +11,37 @@ use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 
 const MAX_BACKEND_CA_PEM_BYTES: u64 = 1024 * 1024;
 
+/// The control link carries the proxy bearer token and every routing
+/// snapshot (including TLS private keys), so it must be encrypted unless the
+/// Backend is reached over loopback (same host, or an `ssh -R` tunnel).
 pub fn validate_backend_ws_url(value: &str, has_custom_ca: bool) -> Result<()> {
     let request = value
         .into_client_request()
         .context("NYABASE_BACKEND_WS is not a valid WebSocket URL")?;
-    match request.uri().scheme_str() {
+    let uri = request.uri();
+    match uri.scheme_str() {
         Some("wss") => Ok(()),
-        Some("ws") if !has_custom_ca => Ok(()),
-        Some("ws") => anyhow::bail!("NYABASE_BACKEND_CA_FILE requires a wss:// Backend URL"),
-        _ => anyhow::bail!("NYABASE_BACKEND_WS must use ws:// or wss://"),
+        Some("ws") if has_custom_ca => {
+            anyhow::bail!("NYABASE_BACKEND_CA_FILE requires a wss:// Backend URL")
+        }
+        Some("ws") if uri.host().is_some_and(is_loopback_host) => Ok(()),
+        Some("ws") => {
+            anyhow::bail!("NYABASE_BACKEND_WS must use wss:// unless the Backend host is loopback")
+        }
+        _ => anyhow::bail!("NYABASE_BACKEND_WS must use wss:// (or ws:// to a loopback host)"),
     }
+}
+
+/// `localhost`, `127.0.0.0/8` or `::1` (bracketed or not).
+pub fn is_loopback_host(host: &str) -> bool {
+    let host = host
+        .strip_prefix('[')
+        .and_then(|inner| inner.strip_suffix(']'))
+        .unwrap_or(host);
+    if host.eq_ignore_ascii_case("localhost") {
+        return true;
+    }
+    host.parse::<IpAddr>().is_ok_and(|ip| ip.is_loopback())
 }
 
 pub fn backend_tls_config_from_env(name: &str) -> Result<Option<Arc<rustls::ClientConfig>>> {
@@ -93,11 +115,35 @@ mod tests {
     use super::*;
 
     #[test]
-    fn backend_ca_is_explicit_and_plain_ws_remains_compatible_without_it() {
+    fn plain_ws_is_only_allowed_to_a_loopback_backend() {
+        for allowed in [
+            "ws://127.0.0.1:3000/ws/ssh-proxy",
+            "ws://127.8.9.10:3001/ws/http-proxy",
+            "ws://localhost:3000/ws/ssh-proxy",
+            "ws://LOCALHOST/ws/ssh-proxy",
+            "ws://[::1]:3000/ws/http-proxy",
+        ] {
+            assert!(validate_backend_ws_url(allowed, false).is_ok(), "{allowed}");
+        }
+        for rejected in [
+            "ws://backend.example/ws/ssh-proxy",
+            "ws://10.0.0.5:3001/ws/ssh-proxy",
+            "ws://[::2]:3000/ws/http-proxy",
+            "ws://localhost.evil.example/ws/ssh-proxy",
+            "ws://127.0.0.1.nip.io/ws/ssh-proxy",
+            "ws://0.0.0.0:3000/ws/ssh-proxy",
+        ] {
+            let error = validate_backend_ws_url(rejected, false).unwrap_err();
+            assert!(error.to_string().contains("wss://"), "{rejected}: {error}");
+        }
+        // A custom CA only makes sense with TLS, even on loopback.
+        assert!(validate_backend_ws_url("ws://127.0.0.1:3000/ws/ssh-proxy", true).is_err());
+    }
+
+    #[test]
+    fn backend_ca_is_explicit() {
         assert!(validate_backend_ws_url("wss://backend.example/ws/ssh-proxy", false).is_ok());
         assert!(validate_backend_ws_url("wss://backend.example/ws/ssh-proxy", true).is_ok());
-        assert!(validate_backend_ws_url("ws://backend.example/ws/ssh-proxy", false).is_ok());
-        assert!(validate_backend_ws_url("ws://backend.example/ws/ssh-proxy", true).is_err());
         assert!(validate_backend_ws_url("http://backend.example/ws/ssh-proxy", false).is_err());
         assert!(backend_tls_config_from_pem(
             "NYABASE_BACKEND_CA_FILE",

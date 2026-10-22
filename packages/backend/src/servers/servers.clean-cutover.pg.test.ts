@@ -1,8 +1,9 @@
 import { randomUUID } from 'node:crypto';
 import { describe, expect, it, vi } from 'vitest';
-import { ServerStatus, parseAgentSecret } from '@nyabase/common';
+import { Role, ServerStatus, UserStatus, parseAgentSecret } from '@nyabase/common';
 import { AgentCredentialVerifier, agentSecretDigest } from '../incus/agent-credentials.js';
 import { withPostgresTestDatabase } from '../platform/persistence-pg/postgres-test-harness.js';
+import { seedUser } from '../iam/access.pg-test-helper.js';
 import { PgTransactionManager } from '../platform/persistence-pg/transaction.js';
 import { VOLUME_DESTROY_PLACEMENT_ID } from '../reconcile/reconcile-claim.repository.js';
 import { ServersService } from './servers.service.js';
@@ -14,13 +15,12 @@ describePg('server agent onboarding and removal', () => {
   it('issues a one-time enrollment token and trades it for the agent credential exactly once', async () => {
     await withPostgresTestDatabase(async ({ database }) => {
       const transactions = new PgTransactionManager(database);
-      const access = { assertActorCapabilitiesInTransaction: vi.fn() };
+      const access = {};
       const audit = { append: vi.fn() };
       const agents = { disconnect: vi.fn(), isConnected: vi.fn(() => false) };
       const enrollment = new AgentEnrollmentService(
         database,
         transactions,
-        access as never,
         audit as never,
         agents as never,
       );
@@ -34,7 +34,8 @@ describePg('server agent onboarding and removal', () => {
         enrollment,
         { wake: vi.fn() } as never,
       );
-      const created = await service.create(randomUUID(), {
+      const operatorId = await seedUser(database, undefined, UserStatus.Active, Role.Operator);
+      const created = await service.create(operatorId, {
         name: 'agent node',
         slug: `agent-${randomUUID().slice(0, 8)}`,
         parentInterface: 'vmbr0',
@@ -62,7 +63,7 @@ describePg('server agent onboarding and removal', () => {
       await expect(enrollment.enroll({ enrollmentToken: token, hostname: 'worker-1' }))
         .rejects.toMatchObject({ status: 401 });
 
-      const rotated = await enrollment.rotate(randomUUID(), created.id, 1);
+      const rotated = await enrollment.rotate(operatorId, created.id, 1);
       await database
         .updateTable('infra.servers')
         .set({ agent_enrollment_expires_at: new Date(Date.now() - 1_000) })
@@ -78,6 +79,7 @@ describePg('server agent onboarding and removal', () => {
 
   it('rejects stale revision and control-plane-cascades referenced servers', async () => {
     await withPostgresTestDatabase(async ({ database }) => {
+      const actor = await seedUser(database, undefined, UserStatus.Active, Role.Operator);
       const serverId = randomUUID();
       await database
         .insertInto('infra.servers')
@@ -130,7 +132,7 @@ describePg('server agent onboarding and removal', () => {
       const service = new ServersService(
         database,
         new PgTransactionManager(database),
-        { assertActorCapabilitiesInTransaction: vi.fn() } as never,
+        {} as never,
         { append: vi.fn() } as never,
         { invalidate: vi.fn() } as never,
         { disconnect: vi.fn(), isConnected: vi.fn(() => false) } as never,
@@ -138,10 +140,10 @@ describePg('server agent onboarding and removal', () => {
         { wake: vi.fn() } as never,
       );
 
-      await expect(service.delete('actor-1', serverId, 2)).rejects.toMatchObject({
+      await expect(service.delete(actor, serverId, 2)).rejects.toMatchObject({
         response: { code: 'REVISION_CONFLICT' },
       });
-      await expect(service.delete('actor-1', serverId, 3)).resolves.toBeUndefined();
+      await expect(service.delete(actor, serverId, 3)).resolves.toBeUndefined();
       await expect(
         database
           .selectFrom('infra.servers')
@@ -161,6 +163,7 @@ describePg('server agent onboarding and removal', () => {
 
   it('control-plane-cascades a referenced server without Incus and preserves peer shared catalogs', async () => {
     await withPostgresTestDatabase(async ({ database }) => {
+      const actor = await seedUser(database, undefined, UserStatus.Active, Role.Operator);
       const ownerId = randomUUID();
       const serverS = randomUUID();
       const serverT = randomUUID();
@@ -491,7 +494,7 @@ describePg('server agent onboarding and removal', () => {
       const service = new ServersService(
         database,
         new PgTransactionManager(database),
-        { assertActorCapabilitiesInTransaction: vi.fn() } as never,
+        {} as never,
         { append: vi.fn() } as never,
         { invalidate } as never,
         { disconnect: vi.fn(), isConnected: vi.fn(() => false) } as never,
@@ -499,7 +502,7 @@ describePg('server agent onboarding and removal', () => {
         { wake: vi.fn() } as never,
       );
 
-      await expect(service.delete('actor-1', serverS, 4)).resolves.toBeUndefined();
+      await expect(service.delete(actor, serverS, 4)).resolves.toBeUndefined();
       expect(invalidate).toHaveBeenCalledWith('server_deleted');
       expect(
         await database.selectFrom('infra.servers').select('id').where('id', '=', serverS).executeTakeFirst(),
@@ -537,6 +540,7 @@ describePg('server agent onboarding and removal', () => {
 
   it('does not GC a never-mounted shared volume when deleting an unrelated server', async () => {
     await withPostgresTestDatabase(async ({ database }) => {
+      const actor = await seedUser(database, undefined, UserStatus.Active, Role.Operator);
       const ownerId = randomUUID();
       const unrelated = randomUUID();
       const peer = randomUUID();
@@ -668,7 +672,7 @@ describePg('server agent onboarding and removal', () => {
       const service = new ServersService(
         database,
         new PgTransactionManager(database),
-        { assertActorCapabilitiesInTransaction: vi.fn() } as never,
+        {} as never,
         { append: vi.fn() } as never,
         { invalidate: vi.fn() } as never,
         { disconnect: vi.fn(), isConnected: vi.fn(() => false) } as never,
@@ -676,7 +680,7 @@ describePg('server agent onboarding and removal', () => {
         { wake: vi.fn() } as never,
       );
 
-      await expect(service.delete('actor-1', unrelated, 1)).resolves.toBeUndefined();
+      await expect(service.delete(actor, unrelated, 1)).resolves.toBeUndefined();
       expect(
         await database.selectFrom('control.volumes').select(['id', 'dir_ensured'])
           .where('id', '=', volumeId).executeTakeFirst(),

@@ -1,12 +1,12 @@
 import { randomUUID } from 'node:crypto';
 import type { Kysely } from 'kysely';
 import {
-  Capability,
   ContainerPowerIntent,
   FailureCode,
   ServerStatus,
   UserStatus,
   type CreateContainerRequest,
+  Role,
 } from '@nyabase/common';
 import { describe, expect, it, vi } from 'vitest';
 import type { NyabaseDatabase } from '../platform/persistence-pg/database.types.js';
@@ -27,12 +27,10 @@ import { testActor } from '../iam/actor.test-helper.js';
 import { ContainerSshConvergenceService, IncusContainerSshStateAdapter } from './container-ssh.js';
 import { AccessResolverService } from '../iam/access-resolver.service.js';
 import {
-  addMember,
   days,
   grantPool,
   grantServer,
   seedAttachment,
-  seedGroup,
   seedUser,
   seedVolume,
 } from '../iam/access.pg-test-helper.js';
@@ -232,6 +230,7 @@ describePg('PostgreSQL container create admission and capacity', () => {
   it('serializes image deletion with container creation on the image row', async () => {
     await withPostgresTestDatabase(async ({ database }) => {
       const fixture = await seedFixture(database);
+      const operatorId = await seedUser(database, undefined, UserStatus.Active, Role.Operator);
       const containerState = containerService(database, { diskBytes: 10_000 });
       const imageIntents = {
         ensurePending: vi.fn(async (input: {
@@ -261,14 +260,14 @@ describePg('PostgreSQL container create admission and capacity', () => {
       const images = new ImagesService(
         database,
         new PgTransactionManager(database),
-        { assertActorCapabilitiesInTransaction: vi.fn() } as never,
+        {} as never,
         { append: vi.fn().mockResolvedValue(undefined) } as never,
         imageIntents as never,
         {} as never,
       );
 
       const [deleteResult, createResult] = await Promise.all([
-        images.delete(fixture.userId, fixture.imageId).then(
+        images.delete(operatorId, fixture.imageId).then(
           (value) => ({ status: 'fulfilled' as const, value }),
           (reason) => ({ status: 'rejected' as const, reason }),
         ),
@@ -482,10 +481,13 @@ describePg('PostgreSQL GPU claims', () => {
         .where('container_id', '=', created.resourceId)
         .execute();
 
+      await database.updateTable('iam.users').set({ role: Role.Operator })
+        .where('id', '=', fixture.userId).execute();
       await harness.service.mutateGpus(
-        testActor(fixture.userId, Capability.ManageContainersAny),
+        testActor(fixture.userId, Role.Operator),
         created.resourceId,
         { pciAddresses: [GPU_B] },
+        'all',
       );
       const claims = await database.selectFrom('control.container_gpu_claims')
         .select(['container_id', 'pci_address'])
@@ -505,24 +507,27 @@ describePg('PostgreSQL GPU claims', () => {
 });
 
 describePg('PostgreSQL container actor authorization', () => {
-  it('shows a container to its owner and to ManageContainersAny, and hides it from others', async () => {
+  it('shows a container to its owner, to an operator only with scope=all, and hides it from others', async () => {
     await withPostgresTestDatabase(async ({ database }) => {
       const fixture = await seedFixture(database);
       const { service } = containerService(database, { diskBytes: 10_000 });
       const created = await service.create(testActor(fixture.userId), request(fixture, 'authz'));
       const containerId = created.resourceId;
       const owner = testActor(fixture.userId);
-      const operator = testActor(cryptoId(), Capability.ManageContainersAny);
+      const operator = testActor(cryptoId(), Role.Operator);
       const stranger = testActor(cryptoId());
 
       await expect(service.get(owner, containerId)).resolves.toMatchObject({ id: containerId });
-      await expect(service.get(operator, containerId)).resolves.toMatchObject({ id: containerId });
-      await expect(service.get(stranger, containerId)).rejects.toMatchObject({ status: 403 });
-      await expect(service.action(stranger, containerId, 'stop')).rejects.toMatchObject({ status: 403 });
+      await expect(service.get(operator, containerId, 'all')).resolves.toMatchObject({ id: containerId });
+      await expect(service.get(operator, containerId)).rejects.toMatchObject({ status: 404 });
+      await expect(service.get(stranger, containerId)).rejects.toMatchObject({ status: 404 });
+      await expect(service.get(stranger, containerId, 'all')).rejects.toMatchObject({ status: 403 });
+      await expect(service.action(stranger, containerId, 'stop')).rejects.toMatchObject({ status: 404 });
+      await expect(service.action(operator, containerId, 'stop')).rejects.toMatchObject({ status: 404 });
       await expect(service.updateLimits(stranger, containerId, { memBytes: 1 }))
         .rejects.toMatchObject({ status: 404 });
 
-      // scope=mine only returns the caller's rows; scope=all needs the capability.
+      // scope=mine only returns the caller's rows; scope=all needs the operator role.
       expect((await service.list(owner, {})).map((row) => row.id)).toEqual([containerId]);
       expect(await service.list(stranger, {})).toEqual([]);
       expect((await service.list(operator, { scope: 'all' })).map((row) => row.id))
@@ -589,8 +594,7 @@ describePg('PostgreSQL container admission needs current coverage', () => {
       const owner = testActor(fixture.userId);
       const group = randomUUID();
       await database.insertInto('iam.groups').values({
-        id: group, name: `merge-${group.slice(0, 8)}`, description: null, is_system: false,
-        system_key: null, capabilities: [], revision: 1,
+        id: group, name: `merge-${group.slice(0, 8)}`, description: null, revision: 1,
       }).execute();
       await database.insertInto('iam.group_members')
         .values({ id: randomUUID(), group_id: group, user_id: fixture.userId }).execute();
@@ -600,16 +604,17 @@ describePg('PostgreSQL container admission needs current coverage', () => {
       await grantServer(database, { group }, fixture.serverId, { cpuCores: 4, memBytes: 400 });
 
       await expectCode(
-        service.create(owner, request(fixture, 'mem-too-big', { memBytes: 2_000 })),
-        FailureCode.PermissionDenied,
+        service.create(owner, request(fixture, 'mem-too-big', { memBytes: 2_000, powerIntent: ContainerPowerIntent.Running })),
+        FailureCode.MemoryGrantExceeded,
       );
-      // Memory comes from the larger (direct) grant and is a total across the user's containers.
-      await expect(service.create(owner, request(fixture, 'first', { memBytes: 600 }))).resolves.toBeDefined();
+      // Memory comes from the larger (direct) grant and is a total across the user's running containers.
+      const running = { powerIntent: ContainerPowerIntent.Running };
+      await expect(service.create(owner, request(fixture, 'first', { memBytes: 600, ...running }))).resolves.toBeDefined();
       await expectCode(
-        service.create(owner, request(fixture, 'second', { memBytes: 500 })),
-        FailureCode.PermissionDenied,
+        service.create(owner, request(fixture, 'second', { memBytes: 500, ...running })),
+        FailureCode.MemoryGrantExceeded,
       );
-      await expect(service.create(owner, request(fixture, 'third', { memBytes: 400 }))).resolves.toBeDefined();
+      await expect(service.create(owner, request(fixture, 'third', { memBytes: 400, ...running }))).resolves.toBeDefined();
     });
   });
 
@@ -618,20 +623,15 @@ describePg('PostgreSQL container admission needs current coverage', () => {
       const fixture = await seedFixture(database);
       const service = coveredService(database);
       const owner = testActor(fixture.userId);
-      const operatorId = await seedUser(database);
-      await addMember(
-        database,
-        await seedGroup(database, { capabilities: [Capability.ManageContainersAny] }),
-        operatorId,
-      );
-      const operator = testActor(operatorId, Capability.ManageContainersAny);
+      const operatorId = await seedUser(database, undefined, undefined, Role.Operator);
+      const operator = testActor(operatorId, Role.Operator);
       await grantServer(database, { user: fixture.userId }, fixture.serverId);
       const { resourceId: containerId } = await service.create(owner, request(fixture, 'lapse'));
 
       await database.deleteFrom('iam.server_grants').where('user_id', '=', fixture.userId).execute();
       await expect(service.action(owner, containerId, 'start')).rejects.toMatchObject({ status: 403 });
       await expect(service.action(owner, containerId, 'restart')).rejects.toMatchObject({ status: 403 });
-      await expect(service.action(operator, containerId, 'start')).resolves.toBeDefined();
+      await expect(service.action(operator, containerId, 'start', 'all')).resolves.toBeDefined();
       await database.updateTable('control.containers')
         .set({ power_intent: 'stopped' })
         .where('id', '=', containerId)
@@ -690,7 +690,6 @@ function containerService(
         imageAvailable: true,
       },
     ),
-    assertActorCapabilitiesInTransaction: vi.fn(),
   };
   const intents = new IntentRepository(database, noopWake());
   const service = makeContainerControlService(
@@ -930,3 +929,178 @@ async function seedSharedVolume(
 function cryptoId(): string {
   return randomUUID();
 }
+
+describePg('PostgreSQL running-memory and GPU admission', () => {
+  const RUNNING = { powerIntent: ContainerPowerIntent.Running };
+  const GPU = '00000000:01:00.0';
+
+  function quotaService(database: Kysely<NyabaseDatabase>): ContainerControlService {
+    const transactions = new PgTransactionManager(database);
+    const intents = new IntentRepository(database, noopWake());
+    return makeContainerControlService(
+      database,
+      transactions,
+      new ContainerControlRepository(database),
+      new AccessResolverService(database, transactions),
+      intents,
+      {} as never,
+      { append: vi.fn().mockResolvedValue(undefined) } as never,
+      new IpPoolsRepository(database),
+      { get: vi.fn().mockReturnValue(null) } as never,
+      new ContainerSshConvergenceService(database, intents),
+      {} as never,
+      new GpuClaimsRepository(database),
+    );
+  }
+
+  async function seed(database: Kysely<NyabaseDatabase>, memBytes: number | null, gpu: string[] = []) {
+    const fixture = await seedFixture(database);
+    await grantServer(database, { user: fixture.userId }, fixture.serverId, { memBytes, gpu });
+    return { fixture, service: quotaService(database), owner: testActor(fixture.userId) };
+  }
+
+  async function setPower(database: Kysely<NyabaseDatabase>, id: string, power: 'running' | 'stopped') {
+    await database.updateTable('control.containers').set({ power_intent: power }).where('id', '=', id).execute();
+  }
+
+  it('counts only running containers on start', async () => {
+    await withPostgresTestDatabase(async ({ database }) => {
+      const { fixture, service, owner } = await seed(database, 1_000);
+      const a = await service.create(owner, request(fixture, 'a', { memBytes: 600, ...RUNNING }));
+      const b = await service.create(owner, request(fixture, 'b', { memBytes: 600 }));
+      await expectCode(service.action(owner, b.resourceId, 'start'), FailureCode.MemoryGrantExceeded);
+      await setPower(database, a.resourceId, 'stopped');
+      await expect(service.action(owner, b.resourceId, 'start')).resolves.toBeDefined();
+    });
+  });
+
+  it('counts failed containers that intend to run, not deleting ones', async () => {
+    await withPostgresTestDatabase(async ({ database }) => {
+      const { fixture, service, owner } = await seed(database, 1_000);
+      const a = await service.create(owner, request(fixture, 'a', { memBytes: 600, ...RUNNING }));
+      const b = await service.create(owner, request(fixture, 'b', { memBytes: 600 }));
+      await database.updateTable('control.containers').set({ lifecycle_phase: 'failed', failure_code: 'INSTANCE_CREATE_FAILED', failure_reason: 'boom' })
+        .where('id', '=', a.resourceId).execute();
+      // An intent retry could bring the failed container back, so it still counts.
+      await expectCode(service.action(owner, b.resourceId, 'start'), FailureCode.MemoryGrantExceeded);
+      await database.updateTable('control.containers').set({ lifecycle_phase: 'deleting' })
+        .where('id', '=', a.resourceId).execute();
+      await expect(service.action(owner, b.resourceId, 'start')).resolves.toBeDefined();
+    });
+  });
+
+  it('gives an operator the owner rules on their own container; scope=all is the override', async () => {
+    await withPostgresTestDatabase(async ({ database }) => {
+      const { fixture, service } = await seed(database, 1_000);
+      await database.updateTable('iam.users').set({ role: Role.Operator })
+        .where('id', '=', fixture.userId).execute();
+      const operator = testActor(fixture.userId, Role.Operator);
+      const created = await service.create(operator, request(fixture, 'op-own', { memBytes: 5_000 }));
+      await expectCode(service.action(operator, created.resourceId, 'start'), FailureCode.MemoryGrantExceeded);
+      await expect(service.action(operator, created.resourceId, 'start', 'all')).resolves.toBeDefined();
+    });
+  });
+
+  it('checks create only when it starts running', async () => {
+    await withPostgresTestDatabase(async ({ database }) => {
+      const { fixture, service, owner } = await seed(database, 1_000);
+      await expect(service.create(owner, request(fixture, 'stopped', { memBytes: 5_000 }))).resolves.toBeDefined();
+      await expectCode(
+        service.create(owner, request(fixture, 'running', { memBytes: 5_000, ...RUNNING })),
+        FailureCode.MemoryGrantExceeded,
+      );
+    });
+  });
+
+  it('checks limit increases only on running containers', async () => {
+    await withPostgresTestDatabase(async ({ database }) => {
+      const { fixture, service, owner } = await seed(database, 1_000);
+      const stopped = await service.create(owner, request(fixture, 'stopped', { memBytes: 500 }));
+      const running = await service.create(owner, request(fixture, 'running', { memBytes: 500, ...RUNNING }));
+      await expect(service.updateLimits(owner, stopped.resourceId, { memBytes: 5_000 })).resolves.toBeDefined();
+      await expectCode(
+        service.updateLimits(owner, running.resourceId, { memBytes: 1_500 }),
+        FailureCode.MemoryGrantExceeded,
+      );
+      await expect(service.updateLimits(owner, running.resourceId, { memBytes: 1_000 })).resolves.toBeDefined();
+      await expect(service.updateLimits(owner, running.resourceId, { memBytes: 100 })).resolves.toBeDefined();
+    });
+  });
+
+  it('lets restart and admin start through after the grant shrank', async () => {
+    await withPostgresTestDatabase(async ({ database }) => {
+      const { fixture, service, owner } = await seed(database, 1_000);
+      const operatorId = await seedUser(database, undefined, undefined, Role.Operator);
+      const operator = testActor(operatorId, Role.Operator);
+      const running = await service.create(owner, request(fixture, 'running', { memBytes: 800, ...RUNNING }));
+      const stopped = await service.create(owner, request(fixture, 'stopped', { memBytes: 800 }));
+      await database.updateTable('iam.server_grants').set({ mem_bytes: 100 })
+        .where('user_id', '=', fixture.userId).execute();
+      await database.updateTable('control.container_ssh_routes')
+        .set({ instance_status: 'Running' }).where('container_id', '=', running.resourceId).execute();
+      await expect(service.action(owner, running.resourceId, 'restart')).resolves.toBeDefined();
+      await expectCode(service.action(owner, stopped.resourceId, 'start'), FailureCode.MemoryGrantExceeded);
+      await expect(service.action(operator, stopped.resourceId, 'start', 'all')).resolves.toBeDefined();
+    });
+  });
+
+  it('admits a restart that revives a stop not yet observed like a start', async () => {
+    await withPostgresTestDatabase(async ({ database }) => {
+      const { fixture, service, owner } = await seed(database, 1_000);
+      const a = await service.create(owner, request(fixture, 'a', { memBytes: 600, ...RUNNING }));
+      await database.updateTable('control.container_ssh_routes')
+        .set({ instance_status: 'Running' }).where('container_id', '=', a.resourceId).execute();
+      // Stop A, fill the quota with B, then restart A before its stop is observed.
+      await service.action(owner, a.resourceId, 'stop');
+      const b = await service.create(owner, request(fixture, 'b', { memBytes: 600, ...RUNNING }));
+      await expectCode(service.action(owner, a.resourceId, 'restart'), FailureCode.MemoryGrantExceeded);
+      const row = await database.selectFrom('control.containers').select('power_intent')
+        .where('id', '=', a.resourceId).executeTakeFirstOrThrow();
+      expect(row.power_intent).toBe(ContainerPowerIntent.Stopped);
+      await setPower(database, b.resourceId, 'stopped');
+      await expect(service.action(owner, a.resourceId, 'restart')).resolves.toBeDefined();
+    });
+  });
+
+  it('rejects a reviving restart while a claimed GPU is outside the grant', async () => {
+    await withPostgresTestDatabase(async ({ database }) => {
+      const { fixture, service, owner } = await seed(database, null);
+      const created = await service.create(owner, request(fixture, 'gpu', RUNNING));
+      await database.updateTable('control.container_ssh_routes')
+        .set({ instance_status: 'Running' }).where('container_id', '=', created.resourceId).execute();
+      await database.insertInto('control.container_gpu_claims').values({
+        container_id: created.resourceId, server_id: fixture.serverId, pci_address: GPU,
+      }).execute();
+      await service.action(owner, created.resourceId, 'stop');
+      await expectCode(service.action(owner, created.resourceId, 'restart'), FailureCode.GpuNotGranted);
+    });
+  });
+
+  it('admits exactly one of two concurrent starts that only fit alone', async () => {
+    await withPostgresTestDatabase(async ({ database }) => {
+      const { fixture, service, owner } = await seed(database, 1_000);
+      const a = await service.create(owner, request(fixture, 'a', { memBytes: 600 }));
+      const b = await service.create(owner, request(fixture, 'b', { memBytes: 600 }));
+      const results = await Promise.allSettled([
+        service.action(owner, a.resourceId, 'start'),
+        service.action(owner, b.resourceId, 'start'),
+      ]);
+      expect(results.filter((result) => result.status === 'fulfilled')).toHaveLength(1);
+      expect(results.filter((result) => result.status === 'rejected')).toHaveLength(1);
+    });
+  });
+
+  it('rejects start while a claimed GPU is outside the grant and allows it once re-granted', async () => {
+    await withPostgresTestDatabase(async ({ database }) => {
+      const { fixture, service, owner } = await seed(database, null);
+      const created = await service.create(owner, request(fixture, 'gpu'));
+      await database.insertInto('control.container_gpu_claims').values({
+        container_id: created.resourceId, server_id: fixture.serverId, pci_address: GPU,
+      }).execute();
+      await expectCode(service.action(owner, created.resourceId, 'start'), FailureCode.GpuNotGranted);
+      await database.updateTable('iam.server_grants').set({ gpu_pci_addresses: [GPU] })
+        .where('user_id', '=', fixture.userId).execute();
+      await expect(service.action(owner, created.resourceId, 'start')).resolves.toBeDefined();
+    });
+  });
+});

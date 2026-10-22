@@ -71,29 +71,33 @@ describe('cross-user isolation', () => {
   });
   after(async () => h?.cleanup());
 
-  it('forbids (or hides) touching another user\'s container', async () => {
+  it('hides another user\'s container (404), and scope=all is not for ordinary users (403)', async () => {
     const c = `/containers/${container.id}`;
     await expectStatuses(b.session.api, [
-      ['GET', c, 403],
-      ['GET', `${c}/volumes`, 403],
-      ['GET', `${c}/shared-volumes`, 403],
-      ['GET', `${c}/stats`, 403],
-      ['POST', `${c}/actions/start`, 403],
-      ['POST', `${c}/actions/stop`, 403],
-      ['POST', `${c}/actions/restart`, 403],
-      ['POST', `${c}/actions/repair-ssh`, 403],
-      ['POST', `${c}/actions/delete`, 403],
-      // Desired-state edits (limits, root size, GPUs) do not reveal that the container exists.
+      ['GET', c, 404],
+      ['GET', `${c}/volumes`, 404],
+      ['GET', `${c}/shared-volumes`, 404],
+      ['GET', `${c}/stats`, 404],
+      ['POST', `${c}/actions/start`, 404],
+      ['POST', `${c}/actions/stop`, 404],
+      ['POST', `${c}/actions/restart`, 404],
+      ['POST', `${c}/actions/repair-ssh`, 404],
+      ['POST', `${c}/actions/delete`, 404],
       ['PATCH', `${c}/limits`, 404, { memBytes: GIB }],
       ['PATCH', `${c}/root-size`, 404, { sizeBytes: 20 * GIB }],
       ['PATCH', `${c}/gpus`, 404, { pciAddresses: [] }],
-      ['POST', `${c}/exec-sessions`, 403, {}],
+      ['POST', `${c}/exec-sessions`, 404, {}],
       ['GET', '/containers?scope=all', 403],
+      // The explicit administrator override needs the role, on reads and on every mutation.
+      ['GET', `${c}?scope=all`, 403],
+      ['POST', `${c}/actions/stop?scope=all`, 403],
+      ['PATCH', `${c}/limits?scope=all`, 403, { memBytes: GIB }],
     ]);
     assert.deepEqual(await b.session.api.get<ContainerDto[]>('/containers'), []);
     const own = await a.session.api.get<ContainerDto[]>('/containers');
     assert.deepEqual(own.map((entry) => entry.id), [container.id]);
-    assert.equal((await h.api.get<ContainerDto>(c)).id, container.id, 'administrators see everything');
+    assert.equal((await h.api.get<ContainerDto>(c, { scope: 'all' })).id, container.id, 'administrators see everything with scope=all');
+    assert.equal(await h.api.status('GET', c), 404, 'the role alone does not reach another user\'s container');
   });
 
   it('answers 404 for volumes and unknown ids, and for attaching foreign volumes', async () => {
@@ -108,13 +112,15 @@ describe('cross-user isolation', () => {
       ['GET', `/volumes/${randomUUID()}`, 404],
     ]);
     assert.deepEqual(await b.session.api.get<VolumeDto[]>('/volumes'), []);
-    assert.equal((await h.api.get<VolumeDto>(v)).id, volumeId);
+    assert.equal((await h.api.get<VolumeDto>(v, { scope: 'all' })).id, volumeId);
+    assert.equal(await h.api.status('GET', v), 404, 'the role alone does not reach another user\'s volume');
+    assert.equal(await b.session.api.status('GET', `${v}?scope=all`), 403);
   });
 
   it('hides intents and bindings of other users', async () => {
     await expectStatuses(b.session.api, [
-      ['GET', `/intents/${intentId}`, 403],
-      ['POST', `/intents/${intentId}/retry`, 403, {}],
+      ['GET', `/intents/${intentId}`, 404],
+      ['POST', `/intents/${intentId}/retry`, 404, {}],
       ['GET', '/intents?scope=all', 403],
       ['GET', `/intents?resourceType=container&resourceId=${container.id}`, 404],
       ['GET', '/http-proxy/bindings?scope=all', 403],

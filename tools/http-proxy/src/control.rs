@@ -25,19 +25,14 @@ pub(crate) async fn control_loop(
     mut status_rx: mpsc::Receiver<String>,
 ) -> Result<()> {
     loop {
-        // Backend restart resets snapshot generations. A connection epoch is
-        // therefore the monotonicity boundary, and losing control must remove
-        // all routes immediately rather than serve stale authorization state.
-        store.clear_epoch();
-        runtime.last_snapshot_generation.store(0, Ordering::Relaxed);
-        runtime.last_snapshot_at.store(0, Ordering::Relaxed);
         match connect_control(&config, &store, &runtime, &mut status_rx).await {
             Ok(()) => warn!("HTTP proxy control connection closed"),
             Err(error) => warn!(%error, "HTTP proxy control connection failed"),
         }
-        store.clear_epoch();
-        runtime.last_snapshot_generation.store(0, Ordering::Relaxed);
-        runtime.last_snapshot_at.store(0, Ordering::Relaxed);
+        // A Backend restart or network blip must not take every site down.
+        // Keep serving the last snapshot for the hold window (bounded by the
+        // snapshot's own lease, so revocation latency stays bounded too).
+        store.hold_after_disconnect(config.control_hold);
         time::sleep(config.reconnect_delay).await;
     }
 }
@@ -55,6 +50,11 @@ pub(crate) async fn connect_control(
         .insert("Authorization", format!("Bearer {}", config.token).parse()?);
     let connector = config.backend_tls.clone().map(Connector::Rustls);
     let (ws, _) = connect_async_tls_with_config(request, None, false, connector).await?;
+    // Backend restart resets snapshot generations, so each connection is its
+    // own monotonicity epoch; its first snapshot replaces the held one.
+    store.begin_control_epoch();
+    runtime.last_snapshot_generation.store(0, Ordering::Relaxed);
+    runtime.last_snapshot_at.store(0, Ordering::Relaxed);
     runtime.connected_at.store(now_ms(), Ordering::Relaxed);
     let (mut write, mut read) = ws.split();
     loop {
@@ -71,8 +71,7 @@ pub(crate) async fn connect_control(
                     if let Some(generation) = install_snapshot(store, snapshot)? {
                         runtime.last_snapshot_generation.store(generation, Ordering::Relaxed);
                         runtime.last_snapshot_at.store(now_ms(), Ordering::Relaxed);
-                        control_write_or_revoke(
-                            store,
+                        control_write_with_deadline(
                             CONTROL_WRITE_DEADLINE,
                             write.send(Message::Text(control_ack_message(generation).into())),
                         ).await?;
@@ -83,8 +82,7 @@ pub(crate) async fn connect_control(
                 let Some(status) = status else {
                     return Err(anyhow!("HTTP proxy status producer exited"));
                 };
-                control_write_or_revoke(
-                    store,
+                control_write_with_deadline(
                     CONTROL_WRITE_DEADLINE,
                     write.send(Message::Text(status.into())),
                 ).await?;
@@ -144,21 +142,6 @@ where
         Ok(result) => result.context("HTTP proxy control write failed"),
         Err(_) => Err(anyhow!("HTTP proxy control write deadline exceeded")),
     }
-}
-
-pub(crate) async fn control_write_or_revoke<F>(
-    store: &SnapshotStore,
-    deadline: Duration,
-    write: F,
-) -> Result<()>
-where
-    F: Future<Output = std::result::Result<(), WebSocketError>>,
-{
-    let result = control_write_with_deadline(deadline, write).await;
-    if result.is_err() {
-        store.clear_epoch();
-    }
-    result
 }
 
 pub(crate) async fn status_loop(

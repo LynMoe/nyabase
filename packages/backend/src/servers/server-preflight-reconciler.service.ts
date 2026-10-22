@@ -1,6 +1,5 @@
 import { Injectable, OnModuleInit } from '@nestjs/common';
 import {
-  Capability,
   FailureCode,
   PreflightStatus,
   type NodeMetricSample,
@@ -144,7 +143,6 @@ export class ServerPreflightReconciler implements ManagedReconciler, OnModuleIni
   ): Promise<Map<string, ResourceAuthority>> {
     return new Map(resourceIds.map((id) => [id, {
       ownerId: null,
-      adminCapability: Capability.ManageServers,
     }]));
   }
 

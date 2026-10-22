@@ -9,14 +9,15 @@ import {
   Post,
   Query,
 } from '@nestjs/common';
-import { Capability, zListScope } from '@nyabase/common';
-import { CurrentActor, RequireAnyCaps, RequireCaps } from '../iam/decorators.js';
+import { Role, zListScope } from '@nyabase/common';
+import { CurrentActor, RequireRole } from '../iam/decorators.js';
 import type { Actor } from '../iam/actor.js';
 import { HttpProxyGateway } from './http-proxy-gateway.js';
 import { HttpDomainPoolsService } from './http-domain-pools.service.js';
 import { HttpProxyBindingsService } from './http-proxy-bindings.service.js';
+import { requireUserId } from '../iam/actor.js';
 
-/** HTTP proxy bindings: owners manage their own; `scope=all` lists everyone's (`ManageSystemSettings`). */
+/** HTTP proxy bindings: owners manage their own; `scope=all` lists everyone's (operator). */
 @Controller('http-proxy/bindings')
 export class HttpProxyController {
   constructor(
@@ -51,7 +52,7 @@ export class HttpProxyController {
   }
 }
 
-/** Domain pools: enabled ones for everyone (`scope=mine`); management is `ManageSystemSettings`. */
+/** Domain pools: enabled ones for everyone (`scope=mine`); management is operator-only. */
 @Controller('http-proxy/domain-pools')
 export class HttpProxyDomainPoolsController {
   constructor(
@@ -65,30 +66,30 @@ export class HttpProxyDomainPoolsController {
   }
 
   @Post()
-  @RequireCaps(Capability.ManageSystemSettings)
+  @RequireRole(Role.Operator)
   async create(@CurrentActor() actor: Actor, @Body() body: unknown) {
-    const result = await this.service.createDomainPool(actor.userId, body);
+    const result = await this.service.createDomainPool(requireUserId(actor), body);
     this.gateway.scheduleBroadcast('domain_pool_created');
     return result;
   }
 
   @Patch(':id')
-  @RequireCaps(Capability.ManageSystemSettings)
+  @RequireRole(Role.Operator)
   async update(
     @CurrentActor() actor: Actor,
     @Param('id') id: string,
     @Body() body: unknown,
   ) {
-    const result = await this.service.updateDomainPool(actor.userId, id, body);
+    const result = await this.service.updateDomainPool(requireUserId(actor), id, body);
     this.gateway.scheduleBroadcast('domain_pool_updated');
     return result;
   }
 
   @Delete(':id')
   @HttpCode(204)
-  @RequireCaps(Capability.ManageSystemSettings)
+  @RequireRole(Role.Operator)
   async remove(@CurrentActor() actor: Actor, @Param('id') id: string) {
-    await this.service.deleteDomainPool(actor.userId, id);
+    await this.service.deleteDomainPool(requireUserId(actor), id);
     this.gateway.scheduleBroadcast('domain_pool_deleted');
   }
 }
@@ -98,11 +99,7 @@ export class HttpProxyStatusController {
   constructor(private gateway: HttpProxyGateway) {}
 
   @Get()
-  @RequireAnyCaps(
-    Capability.ViewMetricsAll,
-    Capability.ViewAudit,
-    Capability.ManageSystemSettings,
-  )
+  @RequireRole(Role.Operator)
   status() {
     return this.gateway.getStatus();
   }

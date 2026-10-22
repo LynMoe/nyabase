@@ -188,7 +188,7 @@ export function AppLayout({ children }: { children: ReactNode }) {
   const { settings } = usePublicSettings();
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
 
-  const sections = visibleNavSections(user?.capabilities);
+  const sections = visibleNavSections(user?.role);
 
   const sidebarProps = {
     brandTitle: settings.branding.title,

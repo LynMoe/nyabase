@@ -46,7 +46,7 @@ export function grantAvailableLabel(
   availableBytes: number | null,
   grantLimitBytes: number | null,
 ): string {
-  const unlimited = grantLimitBytes === null || grantLimitBytes === 0;
+  const unlimited = grantLimitBytes === null;
   if (availableBytes === null && unlimited) return '不限';
   if (availableBytes === null) return '未知';
   return approxGibHint(availableBytes).replace(/^约 /, '');

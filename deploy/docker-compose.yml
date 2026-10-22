@@ -74,8 +74,9 @@ services:
       context: ..
       dockerfile: deploy/Dockerfile.backend
     ports:
-      # Public control-plane HTTP and WebSocket entrypoint.
-      - "3001:3001"
+      # Loopback only: a TLS-terminating reverse proxy on this host is the
+      # public entrypoint for the panel, /api and /ws/* (see OPERATIONS.md).
+      - "127.0.0.1:3001:3001"
     environment:
       NYABASE_CONFIG_FILE: /etc/nyabase/config.yaml
       DATABASE_URL: ${DATABASE_URL:?set DATABASE_URL in deploy/.env}

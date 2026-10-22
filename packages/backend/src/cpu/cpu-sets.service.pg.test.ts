@@ -1,5 +1,7 @@
+import { UserStatus } from '@nyabase/common';
 import { describe, expect, it } from 'vitest';
 import {
+  days,
   grantServer,
   seedContainer,
   seedImage,
@@ -78,6 +80,54 @@ describePg('CpuSetService', () => {
       const pinned = await service.resolve(serverId, revoked);
       await database.deleteFrom('iam.server_grants').where('user_id', '=', revoked).execute();
       expect(await service.resolve(serverId, revoked)).toEqual(pinned);
+    });
+  });
+
+  it('treats an expired grant like a revoked one: the user keeps the pinned set', async () => {
+    await withPostgresTestDatabase(async ({ database }) => {
+      const { serverId, poolId, imageId } = await seed(database, [0, 4]);
+      const service = new CpuSetService(database, new PgTransactionManager(database));
+      const user = await seedUser(database);
+      await grantServer(database, { user }, serverId, { cpuCores: 2, expiresAt: days(5) });
+      await seedContainer(database, { ownerId: user, serverId, poolId, imageId });
+      const pinned = await service.resolve(serverId, user);
+      expect(pinned).toHaveLength(2);
+
+      // The grant expires: the effective view has no row for it any more.
+      await database.updateTable('iam.server_grants').set({ expires_at: days(-1) }).execute();
+      expect(await service.preview(serverId, user)).toEqual(pinned);
+      expect(await service.resolve(serverId, user)).toEqual(pinned);
+      expect(await storedSets(database, serverId)).toEqual([{ user_id: user, cpus: pinned }]);
+    });
+  });
+
+  it('keeps a disabled user pinned: with no effective grant row the existing set stays', async () => {
+    await withPostgresTestDatabase(async ({ database }) => {
+      const { serverId, poolId, imageId } = await seed(database, [0, 4]);
+      const service = new CpuSetService(database, new PgTransactionManager(database));
+      const user = await seedUser(database);
+      await grantServer(database, { user }, serverId, { cpuCores: 2 });
+      await seedContainer(database, { ownerId: user, serverId, poolId, imageId });
+      const pinned = await service.resolve(serverId, user);
+      expect(pinned).toHaveLength(2);
+
+      await database.updateTable('iam.users').set({ status: UserStatus.Disabled })
+        .where('id', '=', user).execute();
+      expect(await service.preview(serverId, user)).toEqual(pinned);
+      expect(await service.resolve(serverId, user)).toEqual(pinned);
+      expect(await storedSets(database, serverId)).toEqual([{ user_id: user, cpus: pinned }]);
+    });
+  });
+
+  it('gives a user with no grant and no pinned set every unreserved CPU, expired grant or not', async () => {
+    await withPostgresTestDatabase(async ({ database }) => {
+      const { serverId } = await seed(database, [0, 4]);
+      const service = new CpuSetService(database, new PgTransactionManager(database));
+      const user = await seedUser(database);
+      await grantServer(database, { user }, serverId, { cpuCores: 2, expiresAt: days(-1) });
+
+      expect(await service.resolve(serverId, user)).toEqual([1, 2, 3, 5, 6, 7]);
+      expect(await storedSets(database, serverId)).toEqual([]);
     });
   });
 

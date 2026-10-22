@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import type { Kysely } from 'kysely';
-import { Capability, UserStatus } from '@nyabase/common';
+import { Role, UserStatus } from '@nyabase/common';
 import type { NyabaseDatabase } from '../platform/persistence-pg/database.types.js';
 
 /** Row seeders for PostgreSQL tests of the authorization model. */
@@ -13,6 +13,7 @@ export async function seedUser(
   database: Db,
   username = `user-${nextName++}`,
   status: UserStatus = UserStatus.Active,
+  role: Role = Role.User,
 ): Promise<string> {
   const id = randomUUID();
   await database.insertInto('iam.users').values({
@@ -22,6 +23,7 @@ export async function seedUser(
     password_hash: 'unused',
     display_name: username,
     status,
+    role,
     auth_version: 0,
   }).execute();
   return id;
@@ -29,20 +31,13 @@ export async function seedUser(
 
 export async function seedGroup(
   database: Db,
-  options: {
-    name?: string;
-    capabilities?: Capability[];
-    system?: 'administrators' | 'operators' | 'users';
-  } = {},
+  options: { name?: string } = {},
 ): Promise<string> {
   const id = randomUUID();
   await database.insertInto('iam.groups').values({
     id,
     name: options.name ?? `group-${nextName++}`,
     description: null,
-    is_system: options.system !== undefined,
-    system_key: options.system ?? null,
-    capabilities: options.capabilities ?? [],
     revision: 1,
   }).execute();
   return id;
@@ -257,7 +252,7 @@ export async function grantBackend(
   database: Db,
   who: Subject,
   backendId: string,
-  limitBytes: number,
+  limitBytes: number | null,
   expiresAt: Date | null = null,
 ): Promise<void> {
   await database.insertInto('iam.shared_backend_grants').values({

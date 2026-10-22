@@ -1,7 +1,8 @@
 import { useState } from 'react';
 import { useInfiniteQuery } from '@tanstack/react-query';
 import {
-  Capability,
+  roleAtLeast,
+  Role,
   type IntentKind,
   type IntentResourceType,
   type CursorPaginatedResponse,
@@ -43,7 +44,7 @@ function adminIntentsPath(filters: {
 
 export default function OpsPage() {
   const user = useAuthStore((state) => state.user);
-  const canManageServers = user?.capabilities.includes(Capability.ManageServers) ?? false;
+  const canManageServers = user ? roleAtLeast(user.role, Role.Operator) : false;
   const [filters, setFilters] = useState<IntentFilterState>({ segment: 'all' });
   const [selected, setSelected] = useState<IntentDto | null>(null);
   const { segment, kind, resourceType } = filters;

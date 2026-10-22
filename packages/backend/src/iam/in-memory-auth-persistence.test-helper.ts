@@ -1,4 +1,4 @@
-import { UserStatus } from '@nyabase/common';
+import { UserStatus, Role } from '@nyabase/common';
 import type { Transaction } from 'kysely';
 import type { NyabaseDatabase } from '../platform/persistence-pg/database.types.js';
 import type {
@@ -37,6 +37,7 @@ export class InMemoryAuthPersistenceTestAdapter implements AuthPersistence {
       displayName: input.username,
       status: UserStatus.Active,
       authVersion: 0,
+      role: Role.User,
       createdAt: now,
       updatedAt: now,
       ...input,
@@ -188,10 +189,13 @@ export class InMemoryAuthPersistenceTestAdapter implements AuthPersistence {
     userId: string,
     token: AuthApiToken,
     maximumTokens: number,
+    credentialSnapshot: LoginCredentialSnapshot,
   ): Promise<'created' | 'inactive-user' | 'capacity'> {
     return this.serialized(async () => {
       const user = this.users.get(userId);
-      if (!user || user.status !== UserStatus.Active) return 'inactive-user';
+      if (!user || user.status !== UserStatus.Active
+        || user.passwordHash !== credentialSnapshot.passwordHash
+        || user.authVersion !== credentialSnapshot.authVersion) return 'inactive-user';
       if ([...this.apiTokens.values()].filter((item) => item.userId === userId).length
         >= maximumTokens) return 'capacity';
       this.apiTokens.set(token.id, token);

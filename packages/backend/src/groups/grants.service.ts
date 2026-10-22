@@ -8,22 +8,24 @@ import type { Kysely, Transaction } from 'kysely';
 import { randomUUID } from 'node:crypto';
 import {
   AuditAction,
-  Capability,
   FailureCode,
   UserStatus,
   type ServerGrantDto,
   type SharedBackendGrantDto,
   type StoragePoolGrantDto,
+  Role,
 } from '@nyabase/common';
 import type { NyabaseDatabase } from '../platform/persistence-pg/database.types.js';
 import { PG_DATABASE } from '../platform/persistence-pg/tokens.js';
 import { PgTransactionManager } from '../platform/persistence-pg/transaction.js';
 import { afterCommit } from '../platform/post-commit.js';
-import { AccessChangeNotifier, AccessResolverService } from '../iam/access-resolver.service.js';
+import { AccessChangeNotifier } from '../iam/access-resolver.service.js';
 import type { Actor } from '../iam/actor.js';
 import { AuditService } from '../iam/audit.service.js';
 import { GpuClaimsRepository } from '../gpu/gpu-claims.repository.js';
 import { isLocalPoolRow } from '../storage-pools/storage-pool-capability.js';
+import { assertActorRole } from '../iam/administration.js';
+import { requireUserId } from '../iam/actor.js';
 
 /** A grant is held by one subject: a user, or a group whose members inherit it. */
 export interface GrantSubject {
@@ -67,7 +69,6 @@ export class GrantsService {
   constructor(
     @Inject(PG_DATABASE) private readonly database: Kysely<NyabaseDatabase>,
     private readonly transactions: PgTransactionManager,
-    private readonly access: AccessResolverService,
     private readonly audit: AuditService,
     private readonly gpuClaims: GpuClaimsRepository,
     private readonly changes: AccessChangeNotifier,
@@ -248,7 +249,7 @@ export class GrantsService {
     actor: Actor,
     subject: GrantSubject,
     backendId: string,
-    input: { limitBytes: number; expiresAt: string | null },
+    input: { limitBytes: number | null; expiresAt: string | null },
   ): Promise<SharedBackendGrantDto> {
     const row = await this.transactions.run(async (transaction) => {
       await this.beginMutation(transaction, actor, subject);
@@ -317,17 +318,13 @@ export class GrantsService {
 
   // Shared helpers -----------------------------------------------------------
 
-  /** Every grant mutation needs `ManageGrants` (re-read in the transaction) and an existing holder. */
+  /** Every grant mutation needs the operator role (re-read in the transaction) and an existing holder. */
   private async beginMutation(
     transaction: Transaction<NyabaseDatabase>,
     actor: Actor,
     subject: GrantSubject,
   ): Promise<void> {
-    await this.access.assertActorCapabilitiesInTransaction(
-      transaction,
-      actor.userId,
-      [Capability.ManageGrants],
-    );
+    await assertActorRole(transaction, requireUserId(actor), Role.Operator);
     await this.requireSubject(transaction, subject);
   }
 
@@ -402,7 +399,7 @@ export class GrantsService {
     row: {
       id: string;
       shared_backend_id: string;
-      limit_bytes: string | number;
+      limit_bytes: string | number | null;
       expires_at: Date | string | null;
       created_at: Date;
       updated_at: Date;
@@ -413,7 +410,7 @@ export class GrantsService {
       scope: subject.kind,
       scopeId: subject.id,
       sharedBackendId: row.shared_backend_id,
-      limitBytes: Number(row.limit_bytes),
+      limitBytes: row.limit_bytes === null ? null : Number(row.limit_bytes),
       expiresAt: iso(row.expires_at),
       createdAt: row.created_at.toISOString(),
       updatedAt: row.updated_at.toISOString(),

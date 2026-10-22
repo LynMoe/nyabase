@@ -4,6 +4,8 @@ target/
 .env
 .env.local
 *.env
+# Filled-in deployment config (secrets); deploy/config.example.yaml is the template.
+deploy/config.yaml
 *.tsbuildinfo
 **/.tanstack/tmp/
 *.db

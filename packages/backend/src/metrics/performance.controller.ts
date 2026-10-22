@@ -20,7 +20,7 @@ const zSeriesQuery = zUsageQuery.extend({
   range: z.enum(['15m', '1h', '6h', '24h']).optional(),
 });
 
-/** `scope=mine` (default) is the caller's own usage; `scope=all` needs `ViewMetricsAll`. */
+/** `scope=mine` (default) is the caller's own usage; `scope=all` needs the operator role. */
 @Controller('performance')
 export class PerformanceController {
   constructor(private readonly performance: PerformanceQueryService) {}

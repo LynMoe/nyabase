@@ -134,7 +134,7 @@ export function AuditDetailDialog({
               <Field label="时间" value={new Date(log.ts).toLocaleString('zh-CN')} />
               <Field label="操作" value={auditActionLabel(log.action)} />
               <Field label="操作者" value={actorLabel(log)} />
-              <Field label="操作者 ID" value={log.actorId ?? 'system'} mono />
+              <Field label="操作者 ID" value={log.actorId ?? '系统'} mono />
               <Field label="目标" value={targetLabel(log)} />
               <Field label="目标 ID" value={log.targetId ?? '无'} mono />
             </section>
@@ -247,7 +247,7 @@ function SnapshotPanel({
 }
 
 export function actorLabel(log: AuditLogDto): string {
-  return log.actorName ?? log.actorUsername ?? (log.actorId ? `用户 ${shortId(log.actorId)}` : 'system');
+  return log.actorName ?? log.actorUsername ?? (log.actorId ? `用户 ${shortId(log.actorId)}` : '系统');
 }
 
 export function targetLabel(log: AuditLogDto): string {

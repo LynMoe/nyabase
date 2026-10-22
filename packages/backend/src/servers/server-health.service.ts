@@ -10,6 +10,7 @@ import type { IntentRecord } from '../reconcile/intent.repository.js';
 import type { ServerHealthPort } from '../reconcile/managed-reconciler.js';
 import { ReconcilerRegistry } from '../reconcile/reconciler-registry.service.js';
 import { StoragePoolsService } from '../storage-pools/storage-pools.service.js';
+import { ServerRecoveryService } from './server-recovery.service.js';
 
 /** The reconcile engine's window onto `infra.servers` and observed inventory. */
 @Injectable()
@@ -19,6 +20,7 @@ export class ServerHealthService implements ServerHealthPort, OnModuleInit {
     private readonly gpu: GpuService,
     private readonly storagePools: StoragePoolsService,
     private readonly registry: ReconcilerRegistry,
+    private readonly recovery: ServerRecoveryService,
   ) {}
 
   onModuleInit(): void {
@@ -61,6 +63,8 @@ export class ServerHealthService implements ServerHealthPort, OnModuleInit {
           expression('revision', '=', String(expectedRevision)),
         ]))
       .execute();
+    // With the agent still connected no reconnect will restore the server.
+    if (status === 'unreachable') this.recovery.watch(serverId);
   }
 
   async isServerOnline(serverId: string): Promise<boolean> {

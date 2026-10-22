@@ -3,11 +3,10 @@ import { Reflector } from '@nestjs/core';
 import { AuthGuard, PassportStrategy } from '@nestjs/passport';
 import { ExtractJwt, Strategy } from 'passport-jwt';
 import { NyabaseConfigService } from '../platform/config/nyabase-config.service.js';
-import { Capability } from '@nyabase/common';
+import { roleAtLeast, type Role } from '@nyabase/common';
 import type { Actor } from './actor.js';
-import { AccessResolverService } from './access-resolver.service.js';
 import type { UserRecord } from './auth-persistence.js';
-import { ANY_CAPS_KEY, CAPS_KEY, IS_PUBLIC_KEY } from './decorators.js';
+import { IS_PUBLIC_KEY, ROLE_KEY } from './decorators.js';
 import { AuthService, type JwtPayload } from './auth.service.js';
 
 @Injectable()
@@ -65,26 +64,17 @@ export type RequestAuthContext =
   | { kind: 'api-token' };
 
 @Injectable()
-export class CapabilitiesGuard implements CanActivate {
-  constructor(
-    private reflector: Reflector,
-    private accessResolver: AccessResolverService,
-  ) {}
+export class RolesGuard implements CanActivate {
+  constructor(private reflector: Reflector) {}
 
-  async canActivate(context: ExecutionContext): Promise<boolean> {
+  canActivate(context: ExecutionContext): boolean {
     if (this.reflector.getAllAndOverride<boolean | undefined>(IS_PUBLIC_KEY, [
       context.getHandler(),
       context.getClass(),
     ])) {
       return true;
     }
-    // Method-level @RequireCaps() (including an empty list) overrides class CAPS_KEY
-    // so allSatisfied is true and method-level @RequireAnyCaps can authorize catalog GETs.
-    const requiredCaps = this.reflector.getAllAndOverride<Capability[]>(CAPS_KEY, [
-      context.getHandler(),
-      context.getClass(),
-    ]);
-    const anyCaps = this.reflector.getAllAndOverride<Capability[]>(ANY_CAPS_KEY, [
+    const minimum = this.reflector.getAllAndOverride<Role | undefined>(ROLE_KEY, [
       context.getHandler(),
       context.getClass(),
     ]);
@@ -94,24 +84,22 @@ export class CapabilitiesGuard implements CanActivate {
     if (!user) return false;
 
     // Fail-safe: a route under the /admin namespace must say who may call it.
-    if (!requiredCaps?.length && !anyCaps?.length && isAdminNamespace(request)) {
-      throw new ForbiddenException('Admin route is missing required capabilities');
+    if (!minimum && isAdminNamespace(request)) {
+      throw new ForbiddenException('Admin route is missing a required role');
     }
 
-    // Resolved once per request; services read it back through @CurrentActor().
-    const capabilities = await this.accessResolver.userCapabilities(user.id);
+    // The role is on the user row JwtAuthGuard already loaded, so a role change
+    // applies to the next request; services read the actor via @CurrentActor().
     const authContext = request.authContext as RequestAuthContext | undefined;
     const actor: Actor = {
       userId: user.id,
-      capabilities,
+      role: user.role,
       authKind: authContext?.kind === 'api-token' ? 'api-token' : 'jwt',
       authVersion: authContext?.kind === 'jwt' ? authContext.authVersion : user.authVersion,
     };
     request.actor = actor;
 
-    const allSatisfied = !requiredCaps?.length || requiredCaps.every((c) => capabilities.has(c));
-    const anySatisfied = !anyCaps?.length || anyCaps.some((c) => capabilities.has(c));
-    if (!(allSatisfied && anySatisfied)) throw new ForbiddenException();
+    if (minimum && !roleAtLeast(user.role, minimum)) throw new ForbiddenException();
     return true;
   }
 }

@@ -232,7 +232,7 @@ describePg('System settings PostgreSQL authority', () => {
 });
 
 function makeConfig(): NyabaseConfigService {
-  vi.stubEnv('NYABASE_CONFIG_FILE', '/tmp/nyabase-system-settings-missing.yaml');
+  vi.stubEnv('NYABASE_CONFIG_FILE', '/tmp/nyabase-settings-missing.yaml');
   return new NyabaseConfigService();
 }
 

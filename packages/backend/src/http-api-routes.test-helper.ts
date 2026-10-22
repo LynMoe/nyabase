@@ -41,10 +41,8 @@ export interface DeclaredRoute {
   key: string;
   pattern: string;
   owner: string;
-  /** Capabilities that must all be held (class- or method-level @RequireCaps). */
-  allOf: string[];
-  /** Capabilities of which one must be held (@RequireAnyCaps). */
-  anyOf: string[];
+  /** Minimum role declared by the method- or class-level @RequireRole; null = none. */
+  minRole: string | null;
 }
 
 export async function declaredRoutes(): Promise<DeclaredRoute[]> {
@@ -76,10 +74,8 @@ export async function declaredRoutes(): Promise<DeclaredRoute[]> {
                 key: `${METHOD_NAMES[method] ?? method} ${pattern}`,
                 pattern,
                 owner: `${file}:${exportName}.${methodName}`,
-                allOf: [...(Reflect.getMetadata('required_capabilities', handler)
-                  ?? Reflect.getMetadata('required_capabilities', value) ?? [])],
-                anyOf: [...(Reflect.getMetadata('required_any_capability', handler)
-                  ?? Reflect.getMetadata('required_any_capability', value) ?? [])],
+                minRole: Reflect.getMetadata('required_role', handler)
+                  ?? Reflect.getMetadata('required_role', value) ?? null,
               });
             }
           }

@@ -10,7 +10,7 @@ use std::collections::HashMap;
 use std::io::BufReader;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use tokio::sync::watch;
 use tracing::{info, warn};
 
@@ -160,6 +160,45 @@ impl SnapshotStore {
             );
         }
         should_expire
+    }
+
+    /// A new control connection is a new generation epoch: a restarted
+    /// Backend may legitimately start again from generation 1. The held
+    /// snapshot keeps serving until the new epoch's first snapshot replaces it.
+    pub(crate) fn begin_control_epoch(&self) {
+        let mut state = self.lock_state();
+        state.generation_high_water = None;
+        state.control_epoch = Arc::new(());
+        drop(state);
+        self.signal_change();
+    }
+
+    /// The control connection is gone. Keep routing on the last snapshot for
+    /// at most `hold`, and never past that snapshot's own lease. Repeated
+    /// calls (one per failed reconnect) can only shorten the deadline.
+    pub(crate) fn hold_after_disconnect(&self, hold: Duration) {
+        if hold.is_zero() {
+            self.clear_epoch();
+            return;
+        }
+        let now = Instant::now();
+        let mut state = self.lock_state();
+        let held = state.current.as_ref().and_then(|current| {
+            let deadline = now.checked_add(hold)?;
+            (deadline < current.deadline).then(|| {
+                let mut held = RoutingSnapshot::clone(current);
+                held.deadline = deadline;
+                Arc::new(held)
+            })
+        });
+        let changed = held.is_some();
+        if let Some(held) = held {
+            state.current = Some(held);
+        }
+        drop(state);
+        if changed {
+            self.signal_change();
+        }
     }
 
     pub(crate) fn clear_epoch(&self) {

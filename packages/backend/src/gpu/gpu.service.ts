@@ -5,7 +5,6 @@ import {
 } from '@nestjs/common';
 import {
   AuditAction,
-  Capability,
   FailureCode,
   zPatchServerGpuRequest,
   type GpuDevicesResponseDto,
@@ -15,19 +14,21 @@ import {
   type GpuSupportDto,
   type NodeMetricSample,
   type ServerGpuDto,
+  Role,
 } from '@nyabase/common';
 import type { Kysely } from 'kysely';
 import type { NyabaseDatabase } from '../platform/persistence-pg/database.types.js';
 import { PG_DATABASE } from '../platform/persistence-pg/tokens.js';
 import { PgTransactionManager } from '../platform/persistence-pg/transaction.js';
-import { AccessResolverService } from '../iam/access-resolver.service.js';
+import { resolveServerAccess } from '../iam/effective-access.js';
 import { AuditService } from '../iam/audit.service.js';
-import { assertListScope, type Actor } from '../iam/actor.js';
+import { assertListScope, type Actor, requireUserId } from '../iam/actor.js';
 import { INCUS_CLIENT_FACTORY, type IncusClientFactory } from '../incus/incus-client.factory.js';
 import { AgentNodeMetricsPullAdapter } from '../metrics/node-metrics-pull.adapter.js';
 import { assertGpuCanDisable, gpuOccupiedError, isGpuOccupiedSqlError } from './admit.js';
 import { GpuClaimsRepository } from './gpu-claims.repository.js';
 import { listGpuDevices, refreshGpuHealth, probeGpuSupport } from './inventory.js';
+import { assertActorRole } from '../iam/administration.js';
 
 const FAILED_HOST_PROBE: GpuSupportDto = {
   supported: null,
@@ -45,7 +46,6 @@ export class GpuService {
     @Inject(PG_DATABASE) private readonly database: Kysely<NyabaseDatabase>,
     private readonly transactions: PgTransactionManager,
     private readonly claims: GpuClaimsRepository,
-    private readonly access: AccessResolverService,
     private readonly audit: AuditService,
     @Inject(INCUS_CLIENT_FACTORY) private readonly clients: IncusClientFactory,
     private readonly nodeMetrics: AgentNodeMetricsPullAdapter,
@@ -69,9 +69,7 @@ export class GpuService {
     await this.requireServer(serverId);
     if (input.enabled) {
       await this.transactions.run(async (transaction) => {
-        await this.access.assertActorCapabilitiesInTransaction(transaction, actorId, [
-          Capability.ManageServers,
-        ]);
+        await assertActorRole(transaction, actorId, Role.Operator);
         await transaction
           .updateTable('infra.servers')
           .set({ gpu_enabled: true, gpu_enabled_by: actorId })
@@ -95,9 +93,7 @@ export class GpuService {
     } else {
       try {
         await this.transactions.run(async (transaction) => {
-          await this.access.assertActorCapabilitiesInTransaction(transaction, actorId, [
-            Capability.ManageServers,
-          ]);
+          await assertActorRole(transaction, actorId, Role.Operator);
           await assertGpuCanDisable({
             count: () => this.claims.countForServer(serverId, transaction),
           });
@@ -125,10 +121,10 @@ export class GpuService {
 
   /** `scope=mine`: devices the caller's grant allows; `scope=all`: the full inventory (`ManageServers`/`ManageGrants`). */
   async listDevices(actor: Actor, serverId: string, scope: ListScope): Promise<GpuDevicesResponseDto> {
-    assertListScope(actor, scope, Capability.ManageServers, Capability.ManageGrants);
+    assertListScope(actor, scope, Role.Operator);
     return scope === 'all'
       ? this.listAllDevices(serverId)
-      : this.listGrantedDevices(actor.userId, serverId);
+      : this.listGrantedDevices(requireUserId(actor), serverId);
   }
 
   private async listAllDevices(serverId: string): Promise<GpuDevicesResponseDto> {
@@ -142,7 +138,7 @@ export class GpuService {
 
   /** Devices the caller's server grant allows; unavailable while GPU is disabled. */
   private async listGrantedDevices(userId: string, serverId: string): Promise<GpuDevicesResponseDto> {
-    const grant = await this.access.resolveServer(userId, serverId);
+    const grant = await resolveServerAccess(this.database, userId, serverId);
     if (!grant) {
       throw new NotFoundException('Server not found');
     }

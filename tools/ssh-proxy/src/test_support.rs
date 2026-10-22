@@ -227,6 +227,8 @@ pub(crate) fn test_config() -> ProxyConfig {
         token: "a".repeat(32),
         listen: "127.0.0.1:2222".to_string(),
         max_connections: 8,
+        max_connections_per_ip: 8,
+        auth_timeout: Duration::from_secs(30),
         reconnect_delay: Duration::from_secs(1),
         route_connect_timeout: Duration::from_secs(1),
         status_interval: Duration::from_secs(1),

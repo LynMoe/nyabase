@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it } from 'vitest';
-import { UserStatus, type UserDto } from '@nyabase/common';
+import { Role, UserStatus, type UserDto } from '@nyabase/common';
 import { useAuthStore } from './auth.js';
 
 const user: UserDto = {
@@ -8,7 +8,7 @@ const user: UserDto = {
   displayName: 'One',
   status: UserStatus.Active,
   createdAt: '2026-01-01T00:00:00.000Z',
-  capabilities: [],
+  role: Role.User,
   groups: [],
 };
 

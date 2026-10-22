@@ -1,5 +1,4 @@
 import {
-  Capability,
   ContainerPhase,
   ContainerPowerIntent,
   ContainerStatus,
@@ -9,6 +8,7 @@ import {
   IntentStatus,
   PreflightStatus,
   ResourceLifecyclePhase,
+  Role,
   ServerStatus,
   StoragePoolDriver,
   StoragePoolResizeFamily,
@@ -95,35 +95,8 @@ export interface UserDto {
   displayName: string;
   status: UserStatus;
   createdAt: string;
-  capabilities: Capability[];
+  role: Role;
   groups: GroupSummaryDto[];
-}
-
-export interface ActionAvailabilityDto {
-  allowed: boolean;
-  reason: string | null;
-  missingCapabilities: Capability[];
-}
-
-export interface UserAdministrationAvailabilityDto {
-  canAdminister: ActionAvailabilityDto;
-  canDelete: ActionAvailabilityDto;
-}
-
-export interface GroupAdministrationAvailabilityDto {
-  canEditMetadata: ActionAvailabilityDto;
-  canManageMembers: ActionAvailabilityDto;
-  canRemoveMembers: Record<string, ActionAvailabilityDto>;
-  canDelete: ActionAvailabilityDto;
-}
-
-export interface AdministrationActionsDto {
-  actorCapabilities: Capability[];
-  assignableGroupCapabilities: Capability[];
-  createUser: ActionAvailabilityDto;
-  createGroup: ActionAvailabilityDto;
-  users: Record<string, UserAdministrationAvailabilityDto>;
-  groups: Record<string, GroupAdministrationAvailabilityDto>;
 }
 
 export interface SshPublicKeyDto {
@@ -147,15 +120,12 @@ export interface PublicSettingsDto {
 export interface GroupSummaryDto {
   id: string;
   name: string;
-  isSystem: boolean;
 }
 
 export interface GroupDto {
   id: string;
   name: string;
   description: string | null;
-  isSystem: boolean;
-  capabilities: Capability[];
   revision: number;
   createdAt: string;
   updatedAt: string;
@@ -629,7 +599,8 @@ export interface SharedBackendGrantDto {
   scope: 'group' | 'user';
   scopeId: string;
   sharedBackendId: string;
-  limitBytes: number;
+  /** null = unlimited. */
+  limitBytes: number | null;
   expiresAt: string | null;
   createdAt: string;
   updatedAt: string;
@@ -637,7 +608,9 @@ export interface SharedBackendGrantDto {
 
 export type GrantExpiryPhase = 'live' | 'grace' | 'lost';
 
-export interface EffectiveServerAccessDto {
+/** Current coverage of a server: the merged quotas of the user's current grants. */
+export interface LiveServerAccessDto {
+  accessPhase: 'live';
   serverId: string;
   /** Whole logical CPUs pinned for the user; null = every unreserved CPU. */
   cpuCores: number | null;
@@ -646,14 +619,23 @@ export interface EffectiveServerAccessDto {
   /** PCI addresses the grant allows; empty means no GPU access. */
   gpuPciAddresses: string[];
   expiresAt: string | null;
-  purgeAt: string | null;
-  accessPhase: 'live' | 'grace';
   allowedImageIds: string[];
 }
 
+/** Coverage lapsed; the user's resources are kept until `purgeAt`. No quotas apply. */
+export interface GraceServerAccessDto {
+  accessPhase: 'grace';
+  serverId: string;
+  /** When coverage lapsed (the grace started). */
+  expiresAt: string;
+  purgeAt: string;
+}
+
+export type EffectiveServerAccessDto = LiveServerAccessDto | GraceServerAccessDto;
+
 export interface EffectiveSharedBackendAccessDto {
   sharedBackendId: string;
-  /** null = unlimited (effectiveSharedGrant folds 0 into null). */
+  /** null = unlimited. */
   limitBytes: number | null;
   /** Committed sum(size_bytes); 0 = nothing booked, not unlimited. */
   usedBytes: number;

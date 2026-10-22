@@ -3,6 +3,7 @@ import { useState } from 'react';
 import { KeyRound, Plus, RefreshCw, ShieldCheck, Trash2, UserCircle } from 'lucide-react';
 import { type SshPublicKeyDto, zAddSshKeyRequest, zUpdateUserRequest } from '@nyabase/common';
 import { api } from '../lib/api.js';
+import { ApiError } from '../lib/api-error.js';
 import { queryKeys } from '../lib/query-keys.js';
 import { useAuthStore } from '../store/auth.js';
 import { Button } from '../components/ui/button.js';
@@ -22,6 +23,7 @@ import { Page, PageHeader } from '../components/layout/page-header.js';
 import { TechnicalId } from '../components/refs/technical-id.js';
 import { toast } from '../hooks/use-toast.js';
 import { setPendingLoginReason, terminateBrowserSession } from '../lib/auth-session.js';
+import { ApiTokensPanel } from './profile-page/api-tokens-panel.js';
 
 type PasswordErrors = Partial<Record<'currentPassword' | 'newPassword' | 'confirmPassword', string>>;
 type SshKeyErrors = Partial<Record<'name' | 'keyText', string>>;
@@ -49,6 +51,9 @@ export default function ProfilePage() {
       <div className="grid grid-cols-1 items-start gap-4 xl:grid-cols-[minmax(0,0.9fr)_minmax(0,1.4fr)]">
         <PasswordPanel userId={user.id} />
         <SshKeysPanel userId={user.id} />
+        <div className="xl:col-span-2">
+          <ApiTokensPanel userId={user.id} />
+        </div>
       </div>
     </Page>
   );
@@ -63,7 +68,7 @@ function PasswordPanel({ userId }: { userId: string }) {
           <ShieldCheck className="h-4 w-4 text-primary mt-1 shrink-0" />
           <div>
             <h2 className="text-base font-semibold text-foreground">登录密码</h2>
-            <p className="text-xs text-muted-foreground mt-0.5">修改后需要使用新密码重新登录。</p>
+            <p className="text-xs text-muted-foreground mt-0.5">修改后需要使用新密码重新登录，全部 API 令牌也会被吊销。</p>
           </div>
         </div>
         <Button size="sm" variant="outline" onClick={() => setOpen(true)} data-testid="change-password">
@@ -124,7 +129,13 @@ function ChangePasswordDialog({
         window.location.replace('/login?reason=password-changed');
       });
     },
-    onError: (e) => toast({ title: '修改失败', description: e.message, variant: 'destructive' }),
+    onError: (e) => {
+      if (e instanceof ApiError && e.code === 'CURRENT_PASSWORD_INCORRECT') {
+        setErrors({ currentPassword: '当前密码不正确' });
+        return;
+      }
+      toast({ title: '修改失败', description: e.message, variant: 'destructive' });
+    },
   });
 
   return (
@@ -132,7 +143,7 @@ function ChangePasswordDialog({
       <DialogContent>
         <DialogHeader>
           <DialogTitle>修改密码</DialogTitle>
-          <DialogDescription>修改当前账号密码需要验证旧密码。成功后会退出并要求重新登录。</DialogDescription>
+          <DialogDescription>修改当前账号密码需要验证旧密码。成功后会退出并要求重新登录，全部 API 令牌会被吊销。</DialogDescription>
         </DialogHeader>
         <div className="space-y-3">
           <FormField id={curId} label="当前密码" error={errors.currentPassword}>

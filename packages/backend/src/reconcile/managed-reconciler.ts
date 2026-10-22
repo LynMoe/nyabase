@@ -1,4 +1,3 @@
-import type { Capability } from '@nyabase/common';
 import type { IncusClientPort } from '../incus/index.js';
 import type {
   IntentFailure,
@@ -34,10 +33,9 @@ export function failedOutcome(
   return { outcome: 'failed', failure: intentFailure(code, message, details) };
 }
 
-/** Who owns a resource and which administrator capability governs its intents. */
+/** Who owns a resource (null: nobody, operator-only). */
 export interface ResourceAuthority {
   readonly ownerId: string | null;
-  readonly adminCapability: Capability | null;
 }
 
 /**
@@ -64,7 +62,7 @@ export interface ManagedReconciler {
     observedRevision: number,
     settlement: PhysicalSettlement,
   ): Promise<void>;
-  /** Answers every requested id, using the type's default capability for missing resources. */
+  /** Answers every requested id; missing resources have no owner. */
   resourceAuthorities(resourceIds: readonly string[]): Promise<Map<string, ResourceAuthority>>;
 }
 

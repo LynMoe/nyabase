@@ -29,7 +29,7 @@ function service(existing: { id: string; deleting: boolean } | undefined) {
   return new ImagesService(
     database as never,
     { run: vi.fn() } as never,
-    { assertActorCapabilitiesInTransaction: vi.fn() } as never,
+    {} as never,
     { append: vi.fn() } as never,
     { ensurePending: vi.fn() } as never,
     catalog as never,

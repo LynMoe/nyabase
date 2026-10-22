@@ -61,7 +61,7 @@ describe('user panel pages stay on scope=mine', () => {
     expect(src).not.toMatch(/['`]\/admin\//);
     assertScopeAllOnly(src, /\?scope=all/);
     expect(src).not.toMatch(/api\.post<unknown>\('\/volumes\?/);
-    expect(src).toMatch(/api\.patch<IntentAcceptedDto \| VolumeDto>\(`\/volumes\/\$\{volumeId\}`/);
+    expect(src).toMatch(/api\.patch<IntentAcceptedDto \| VolumeDto>\(scopedPath\(`\/volumes\/\$\{volumeId\}`, scope\)/);
     expect(src).not.toMatch(/ownerId/);
     expect(src).not.toMatch(/所有者 UUID/);
   });
@@ -103,7 +103,7 @@ describe('user panel pages stay on scope=mine', () => {
   it('servers page mounts the scope=all performance view', () => {
     const src = readPage('servers-page.tsx');
     expect(src).toMatch(/\/performance\/usage\?scope=all'/);
-    expect(src).toMatch(/ViewMetricsAll/);
+    expect(src).toMatch(/useHasRole\(Role\.Operator\)/);
     expect(src).not.toMatch(/PerformancePanel/);
   });
 

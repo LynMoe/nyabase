@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { UserStatus, type UserDto } from '@nyabase/common';
+import { Role, UserStatus, type UserDto } from '@nyabase/common';
 
 class MemoryStorage implements Storage {
   private readonly values = new Map<string, string>();
@@ -24,7 +24,7 @@ class FakeChannel {
 
 const alice: UserDto = {
   id: 'u1', username: 'alice', displayName: 'Alice', status: UserStatus.Active,
-  createdAt: '2026-01-01T00:00:00.000Z', capabilities: [], groups: [],
+  createdAt: '2026-01-01T00:00:00.000Z', role: Role.User, groups: [],
 };
 const bob: UserDto = { ...alice, id: 'u2', username: 'bob', displayName: 'Bob' };
 
@@ -264,12 +264,12 @@ describe('cookie-backed auth session', () => {
 
   it('revalidates an in-memory session with /me instead of rotating the cookie', async () => {
     signIn();
-    const promoted = { ...alice, capabilities: ['manage_users'] } as UserDto;
+    const promoted: UserDto = { ...alice, role: Role.Operator };
     const fetchMock = vi.fn().mockResolvedValue(json(promoted));
     vi.stubGlobal('fetch', fetchMock);
     await app.bootstrapAuthSession();
     expect(fetchMock.mock.calls.map(([url]) => url)).toEqual(['/api/auth/me']);
-    expect(app.useAuthStore.getState().user?.capabilities).toEqual(['manage_users']);
+    expect(app.useAuthStore.getState().user?.role).toBe(Role.Operator);
   });
 
   it('never replays an old-principal request after a new login changes the auth epoch', async () => {

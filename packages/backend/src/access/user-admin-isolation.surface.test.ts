@@ -50,8 +50,8 @@ describe('actor-scoped API surface', () => {
       expect(src).not.toMatch(/@Controller\('admin\//);
       expect(src).not.toMatch(/\.(create|list)\([^)]+,\s*true\s*\)/);
     }
-    expect(readSrc('volumes/shared-volumes.controller.ts')).toMatch(/ManageSharedVolumes/);
+    expect(readSrc('volumes/shared-volumes.controller.ts')).toMatch(/RequireRole\(Role\.Admin\)/);
     expect(readSrc('volumes/shared-volumes.controller.ts'))
-      .not.toMatch(/RequireCaps\(Capability\.ManageVolumes\)/);
+      .not.toMatch(/RequireRole\(Role\.Operator\)/);
   });
 });

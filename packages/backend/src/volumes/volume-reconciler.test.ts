@@ -1215,7 +1215,28 @@ describe('volume.destroy eligible-node D', () => {
     expect(clientB.deleteStorageVolume).toHaveBeenCalledTimes(1);
   });
 
-  it('finishes with destroy_executor_gone when E is empty', async () => {
+  it('retries instead of dropping the row while the only executor is offline', async () => {
+    const deleteStorageVolume = vi.fn();
+    const state = destroyState({
+      dirEnsured: true,
+      catalogs: [catalog(serverA, 'cephfs-a', 'present', 'unreachable')],
+      eligible: [],
+      offlineExecutor: true,
+    });
+    const reconciler = new VolumeReconciler(new VolumeReconcileStore(volumeExistsDb({ lifecycle_phase: 'deleting' }) as never, {} as never),
+      { log: vi.fn().mockResolvedValue(undefined) } as never,
+      { get: vi.fn(async () => ({ deleteStorageVolume })) } as never,
+      { register: vi.fn() } as never,
+    );
+    const spies = installDestroySpies(reconciler, state);
+    const outcome = await reconciler.reconcile(destroyContext());
+    expect(outcome).toMatchObject({ outcome: 'retry', failure: { code: 'SERVER_UNREACHABLE' } });
+    expect(deleteStorageVolume).not.toHaveBeenCalled();
+    expect(spies.dropAll).not.toHaveBeenCalled();
+    expect(spies.finish).not.toHaveBeenCalled();
+  });
+
+  it('finishes with destroy_executor_gone when no executor exists any more', async () => {
     const deleteStorageVolume = vi.fn();
     const state = destroyState({
       dirEnsured: true,
@@ -1274,6 +1295,8 @@ function destroyState(input: {
   removeAllServerId?: string | null;
   dirEnsured?: boolean;
   eligible?: Array<{ server_id: string; pool_name: string }>;
+  /** An executor exists but is not online. */
+  offlineExecutor?: boolean;
 }) {
   return {
     volume: {
@@ -1297,6 +1320,7 @@ function destroyState(input: {
       pool_name: row.pool_name,
     })),
     attachments: input.attachments === true,
+    offlineExecutor: input.offlineExecutor === true,
   };
 }
 
@@ -1320,6 +1344,10 @@ function installDestroySpies(
     storeOf(reconciler) as unknown as { listDestroyExecutors: () => Promise<unknown> },
     'listDestroyExecutors',
   ).mockImplementation(async () => [...state.eligible]);
+  vi.spyOn(
+    storeOf(reconciler) as unknown as { hasAnyDestroyExecutor: () => Promise<boolean> },
+    'hasAnyDestroyExecutor',
+  ).mockImplementation(async () => state.eligible.length > 0 || state.offlineExecutor);
   const pin = vi.spyOn(
     storeOf(reconciler) as unknown as { pinRemoveAllServer: (id: string, serverId: string) => Promise<void> },
     'pinRemoveAllServer',

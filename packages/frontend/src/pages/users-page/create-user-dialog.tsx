@@ -1,20 +1,21 @@
 import { useState } from 'react';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { Copy } from 'lucide-react';
-import { zCreateUserRequest, type CreateUserRequest, type UserDto } from '@nyabase/common';
+import { Role, zCreateUserRequest, type CreateUserRequest, type UserDto } from '@nyabase/common';
 import { api } from '../../lib/api.js';
 import { errorMessage } from '../../lib/api-error.js';
 import { Button } from '../../components/ui/button.js';
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '../../components/ui/dialog.js';
 import { Input } from '../../components/ui/input.js';
-import { FormField } from '../../components/layout/form-field.js';
+import { FormField, SelectField } from '../../components/layout/form-field.js';
+import { ROLE_OPTIONS } from '../../lib/display-labels.js';
 import { queryKeys } from '../../lib/query-keys.js';
 import { toast } from '../../hooks/use-toast.js';
 import { copyOneTimeSecret } from '../../lib/one-time-secret.js';
 
 export function CreateUserDialog({ open, onOpenChange }: { open: boolean; onOpenChange: (open: boolean) => void }) {
   const queryClient = useQueryClient();
-  const [form, setForm] = useState({ username: '', displayName: '', password: '' });
+  const [form, setForm] = useState({ username: '', displayName: '', password: '', role: Role.User as Role });
   const [error, setError] = useState<string | null>(null);
   const [createdCreds, setCreatedCreds] = useState<{ username: string; password: string } | null>(null);
   const create = useMutation({
@@ -23,7 +24,7 @@ export function CreateUserDialog({ open, onOpenChange }: { open: boolean; onOpen
       toast({ title: '用户已创建' });
       void queryClient.invalidateQueries({ queryKey: queryKeys.users.admin });
       setCreatedCreds({ username: variables.username, password: variables.password });
-      setForm({ username: '', displayName: '', password: '' });
+      setForm({ username: '', displayName: '', password: '', role: Role.User });
       setError(null);
     },
     onError: (mutationError) => setError(errorMessage(mutationError)),
@@ -39,7 +40,7 @@ export function CreateUserDialog({ open, onOpenChange }: { open: boolean; onOpen
   const handleOpenChange = (next: boolean) => {
     if (!next) {
       setCreatedCreds(null);
-      setForm({ username: '', displayName: '', password: '' });
+      setForm({ username: '', displayName: '', password: '', role: Role.User });
       setError(null);
     }
     onOpenChange(next);
@@ -104,6 +105,13 @@ export function CreateUserDialog({ open, onOpenChange }: { open: boolean; onOpen
                   </FormField>
                 );
               })}
+              <SelectField
+                id="new-user-role"
+                label="角色"
+                value={form.role}
+                onChange={(value) => setForm((current) => ({ ...current, role: value as Role }))}
+                options={ROLE_OPTIONS}
+              />
               {error && <p className="text-sm text-destructive">{error}</p>}
             </div>
             <DialogFooter>

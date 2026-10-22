@@ -4,14 +4,13 @@ import type { Kysely, Transaction } from 'kysely';
 import {
   AGENT_ENROLLMENT_TTL_MS,
   AuditAction,
-  Capability,
   formatAgentSecret,
   parseAgentSecret,
   type AgentEnrollRequest,
   type AgentEnrollResponse,
   type ServerEnrollmentDto,
+  Role,
 } from '@nyabase/common';
-import { AccessResolverService } from '../iam/access-resolver.service.js';
 import { AuditService } from '../iam/audit.service.js';
 import { agentSecretDigest, digestsEqual } from '../incus/agent-credentials.js';
 import { AgentRegistry } from '../incus/agent-registry.service.js';
@@ -19,6 +18,7 @@ import type { NyabaseDatabase } from '../platform/persistence-pg/database.types.
 import { PG_DATABASE } from '../platform/persistence-pg/tokens.js';
 import { afterCommit } from '../platform/post-commit.js';
 import { PgTransactionManager } from '../platform/persistence-pg/transaction.js';
+import { assertActorRole } from '../iam/administration.js';
 
 type Tx = Transaction<NyabaseDatabase>;
 
@@ -37,7 +37,6 @@ export class AgentEnrollmentService {
   constructor(
     @Inject(PG_DATABASE) private readonly database: Kysely<NyabaseDatabase>,
     private readonly transactions: PgTransactionManager,
-    private readonly access: AccessResolverService,
     private readonly audit: AuditService,
     private readonly agents: AgentRegistry,
   ) {}
@@ -56,7 +55,7 @@ export class AgentEnrollmentService {
 
   rotate(actorId: string, serverId: string, expectedRevision: number): Promise<ServerEnrollmentDto> {
     return this.transactions.run(async (transaction) => {
-      await this.access.assertActorCapabilitiesInTransaction(transaction, actorId, [Capability.ManageServers]);
+      await assertActorRole(transaction, actorId, Role.Operator);
       const server = await transaction
         .selectFrom('infra.servers')
         .select(['id', 'revision'])

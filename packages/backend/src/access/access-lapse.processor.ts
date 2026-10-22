@@ -1,5 +1,4 @@
 import {
-  Inject,
   Injectable,
   Logger,
   type OnModuleDestroy,
@@ -8,7 +7,7 @@ import {
 import { randomUUID } from 'node:crypto';
 import { AuditAction } from '@nyabase/common';
 import { AccessChangeNotifier } from '../iam/access-resolver.service.js';
-import { systemActor, type Actor, SYSTEM_ACTOR_USERNAME } from '../iam/actor.js';
+import { SYSTEM_ACTOR, type Actor } from '../iam/actor.js';
 import { AuditService } from '../iam/audit.service.js';
 import { ReconcileClaimRepository } from '../reconcile/reconcile-claim.repository.js';
 import {
@@ -17,9 +16,6 @@ import {
   type LapseCandidate,
 } from './access-lapse.repository.js';
 import { UserServerResourcePurgeService } from './user-server-resource-purge.service.js';
-import type { Kysely } from 'kysely';
-import type { NyabaseDatabase } from '../platform/persistence-pg/database.types.js';
-import { PG_DATABASE } from '../platform/persistence-pg/tokens.js';
 import { ProxySnapshotNotifierService } from '../proxy-snapshots/proxy-snapshot-notifier.service.js';
 
 const SCAN_INTERVAL_MS = 60_000;
@@ -29,20 +25,23 @@ const MAX_PAIRS_PER_PASS = 128;
 /**
  * Enforces access lapses. A user who owns containers or volumes on a server,
  * storage pool or shared backend without current coverage (grant expired,
- * revoked, removed from the group, group deleted) is in a
- * 14-day grace that starts at `lapsed_at` (coverage is by grants only: a disabled
- * user is never lapsed for that reason; its running containers are just stopped):
+ * revoked, removed from the group, group deleted, or the user disabled: coverage
+ * is a current grant held by an active user) is in a 14-day grace that starts
+ * at `lapsed_at`:
  *
- *  - no ledger row yet: open it (`lapsed_at` = the past expiry, or now for a
- *    revocation; never moved afterwards);
- *  - in grace and not stopped: stop the user's running containers there;
+ *  - no ledger row yet: open it (`lapsed_at` = the detection time; never
+ *    moved afterwards);
+ *  - in grace and not stopped, or with a container running again (an
+ *    administrator started it during the grace): stop the user's running
+ *    containers there (`stopped_at` keeps the first stop time);
  *  - grace over and not purged: purge the user's containers and volumes there;
  *  - coverage back: delete the row (stopped containers are not restarted).
  *
  * Runs every minute and right after IAM writes commit (`AccessChangeNotifier`).
  * Each pair is leased through `ReconcileClaimRepository` (resource_type
  * `access_lapse`), so replicas never work on the same pair; stop and purge go
- * through the same system-actor code as the operator purge.
+ * through the same code as the operator purge, as `SYSTEM_ACTOR` (NULL
+ * attribution in audit rows and intents).
  */
 @Injectable()
 export class AccessLapseProcessor implements OnModuleInit, OnModuleDestroy {
@@ -55,7 +54,6 @@ export class AccessLapseProcessor implements OnModuleInit, OnModuleDestroy {
   private unsubscribe: (() => void) | null = null;
 
   constructor(
-    @Inject(PG_DATABASE) private readonly database: Kysely<NyabaseDatabase>,
     private readonly lapses: AccessLapseRepository,
     private readonly claims: ReconcileClaimRepository,
     private readonly purge: UserServerResourcePurgeService,
@@ -117,17 +115,12 @@ export class AccessLapseProcessor implements OnModuleInit, OnModuleDestroy {
 
   private async pass(): Promise<number> {
     try {
-      const actorId = await this.systemActorId();
-      if (!actorId) {
-        this.logger.warn('Access lapse processor skipped: nyabase-system actor is missing');
-        return 0;
-      }
       await this.lapses.deleteStale();
-      let handled = await this.stopInactiveUsersContainers(systemActor(actorId));
+      let handled = 0;
       for (const candidate of await this.lapses.scan()) {
         if (this.stopped || handled >= MAX_PAIRS_PER_PASS) break;
         if (lapseWork(candidate) === 'none') continue;
-        if (await this.handle(candidate, systemActor(actorId))) handled += 1;
+        if (await this.handle(candidate, SYSTEM_ACTOR)) handled += 1;
       }
       // SSH/HTTP proxies admit only covered (user, server) pairs; refresh them now.
       if (handled > 0) await this.proxySnapshots.notify('access-lapse');
@@ -138,59 +131,6 @@ export class AccessLapseProcessor implements OnModuleInit, OnModuleDestroy {
       );
       return 0;
     }
-  }
-
-  /**
-   * A user who is not active (disabled) keeps every resource but runs nothing:
-   * stop what still runs, per (user, server). Idempotent, since a stopped
-   * container no longer matches; nothing is purged and nothing is restarted.
-   */
-  private async stopInactiveUsersContainers(actor: Actor): Promise<number> {
-    const pairs = await this.database.selectFrom('control.containers as container')
-      .innerJoin('iam.users as user', 'user.id', 'container.owner_id')
-      .select(['container.owner_id', 'container.server_id'])
-      .where('user.status', '!=', 'active')
-      .where('container.lifecycle_phase', '=', 'active')
-      .where('container.power_intent', '=', 'running')
-      .distinct()
-      .execute();
-    let handled = 0;
-    for (const pair of pairs) {
-      if (this.stopped || handled >= MAX_PAIRS_PER_PASS) break;
-      const claim = await this.claims.claim({
-        resourceType: 'access_lapse',
-        resourceId: pair.owner_id,
-        placementServerId: pair.server_id,
-        workerId: this.workerId,
-      });
-      if (!claim) continue;
-      try {
-        const { intentIds } = await this.purge.stopRunningContainersForGraceEntry(
-          actor,
-          pair.owner_id,
-          pair.server_id,
-        );
-        if (intentIds.length > 0) handled += 1;
-      } catch (error) {
-        this.logger.error(`Stopping containers of inactive user ${pair.owner_id} failed: ${String(error)}`);
-      } finally {
-        await this.claims.release({
-          resourceType: claim.resourceType,
-          resourceId: claim.resourceId,
-          placementServerId: claim.placementServerId,
-          workerId: claim.workerId,
-        }).catch(() => undefined);
-      }
-    }
-    return handled;
-  }
-
-  private async systemActorId(): Promise<string | null> {
-    const row = await this.database.selectFrom('iam.users')
-      .select('id')
-      .where('username', '=', SYSTEM_ACTOR_USERNAME)
-      .executeTakeFirst();
-    return row?.id ?? null;
   }
 
   /** Leases the pair, re-reads it, and does the one thing it is due for. */
@@ -238,7 +178,7 @@ export class AccessLapseProcessor implements OnModuleInit, OnModuleDestroy {
     }
   }
 
-  /** Opens the grace and acts at once when it is already due (an old expiry). */
+  /** Opens the grace and acts at once when it is already due. */
   private async lapseAndAct(
     candidate: LapseCandidate,
     actor: Actor,

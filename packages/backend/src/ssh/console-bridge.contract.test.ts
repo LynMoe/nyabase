@@ -15,6 +15,7 @@ describe('Incus console bridge contract', () => {
       {} as never,
       {} as never,
       {} as never,
+      {} as never,
     );
     const socket = new FakeSocket();
     const firstAuthFrame = (gateway as unknown as {
@@ -36,7 +37,7 @@ describe('Incus console bridge contract', () => {
       sockets: {},
       close: vi.fn(),
     });
-    const sessions = new ConsoleSessionService({} as never, {} as never);
+    const sessions = new ConsoleSessionService({} as never, {} as never, {} as never);
 
     await sessions.openExec(
       { openExecWebSockets } as never,

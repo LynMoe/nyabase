@@ -2,10 +2,9 @@ import { useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Link } from '@tanstack/react-router';
 import { Plus, Trash2 } from 'lucide-react';
-import { Capability, type CreateGroupRequest, type GroupDto, zCreateGroupRequest } from '@nyabase/common';
+import { Role, type CreateGroupRequest, type GroupDto, zCreateGroupRequest } from '@nyabase/common';
 import { api } from '../lib/api.js';
 import { errorMessage } from '../lib/api-error.js';
-import { Badge } from '../components/ui/badge.js';
 import { Button } from '../components/ui/button.js';
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from '../components/ui/dialog.js';
 import { Input } from '../components/ui/input.js';
@@ -16,14 +15,13 @@ import { Page, PageHeader } from '../components/layout/page-header.js';
 import { QueryView } from '../components/layout/query-view.js';
 import { SectionCard } from '../components/layout/section-card.js';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '../components/ui/table.js';
-import { capabilityLabel } from '../lib/display-labels.js';
 import { queryKeys } from '../lib/query-keys.js';
 import { toast } from '../hooks/use-toast.js';
-import { useAuthStore } from '../store/auth.js';
+import { useHasRole } from '../lib/use-role.js';
 import { isPermanentQueryError } from '../lib/query-lifecycle.js';
 
 export default function GroupsPage() {
-  const canManageGroups = useAuthStore((state) => state.user?.capabilities.includes(Capability.ManageGroups) ?? false);
+  const canManageGroups = useHasRole(Role.Admin);
   const queryClient = useQueryClient();
   const [createOpen, setCreateOpen] = useState(false);
   const [deleteGroup, setDeleteGroup] = useState<GroupDto | null>(null);
@@ -79,7 +77,6 @@ export default function GroupsPage() {
                 <TableRow>
                   <TableHead>名称</TableHead>
                   <TableHead>成员</TableHead>
-                  <TableHead>能力</TableHead>
                   {canManageGroups ? <TableHead className="text-right">操作</TableHead> : null}
                 </TableRow>
               </TableHeader>
@@ -95,23 +92,14 @@ export default function GroupsPage() {
                       >
                         <p className="font-medium">{group.name}</p>
                         <p className="mt-0.5 text-xs text-muted-foreground">
-                          {group.isSystem ? '系统组' : group.description ?? '无描述'}
+                          {group.description ?? '无描述'}
                         </p>
                       </Link>
                     </TableCell>
                     <TableCell>{group.memberCount ?? group.members?.length ?? 0}</TableCell>
-                    <TableCell className="whitespace-normal">
-                      <div className="flex flex-wrap gap-1">
-                        {group.capabilities.length === 0
-                          ? <span className="text-muted-foreground">无</span>
-                          : group.capabilities.map((capability) => (
-                            <Badge key={capability} variant="outline">{capabilityLabel(capability)}</Badge>
-                          ))}
-                      </div>
-                    </TableCell>
                     {canManageGroups ? (
                       <TableCell className="text-right">
-                        <Button size="sm" variant="ghost-destructive" disabled={group.isSystem} onClick={() => setDeleteGroup(group)}>
+                        <Button size="sm" variant="ghost-destructive" onClick={() => setDeleteGroup(group)}>
                           <Trash2 className="h-4 w-4" />删除
                         </Button>
                       </TableCell>
@@ -127,7 +115,7 @@ export default function GroupsPage() {
       <ConfirmDialog
         open={Boolean(deleteGroup)}
         title="删除用户组？"
-        description="系统组不可删除。删除后成员关系与资源授权会一并清理，且不可恢复。"
+        description="删除后成员关系与资源授权会一并清理，且不可恢复。"
         confirmLabel="确认删除"
         pendingLabel="确认删除"
         pending={remove.isPending}

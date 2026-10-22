@@ -5,14 +5,16 @@ use crate::protocol::TelemetrySender;
 use crate::runtime::{ConnectionCleanup, ConnectionState, ProxyRuntime};
 use crate::session::ProxySshSession;
 use crate::snapshot::SnapshotStore;
-use anyhow::{Context, Result};
+use anyhow::{anyhow, Context, Result};
 use futures_util::future::Abortable;
+use proxy_common::conn_limit::{ConnectionLimiter, ConnectionPermit, LimitRejection};
 use russh::{MethodKind, MethodSet};
+use std::future::Future;
 use std::net::{Shutdown, SocketAddr};
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::Semaphore;
 use tracing::{debug, info, warn};
 
 pub(crate) async fn run_public_listener(
@@ -23,20 +25,36 @@ pub(crate) async fn run_public_listener(
     telemetry: TelemetrySender,
 ) -> Result<()> {
     let listener = TcpListener::bind(&config.listen).await?;
-    let limit = Arc::new(Semaphore::new(config.max_connections));
     info!(listen = %config.listen, "SSH proxy listener started");
+    serve_public(listener, config, store, runtime, control, telemetry).await
+}
 
+pub(crate) async fn serve_public(
+    listener: TcpListener,
+    config: ProxyConfig,
+    store: Arc<SnapshotStore>,
+    runtime: Arc<ProxyRuntime>,
+    control: Arc<ControlPlane>,
+    telemetry: TelemetrySender,
+) -> Result<()> {
+    let limiter = ConnectionLimiter::new(config.max_connections, config.max_connections_per_ip);
     loop {
         let (stream, peer) = listener.accept().await?;
-        let permit = match limit.clone().try_acquire_owned() {
+        // The permit is held by the connection task until the session ends,
+        // so one address cannot exhaust the pool before authenticating.
+        let permit = match limiter.try_acquire(peer.ip()) {
             Ok(permit) => permit,
-            Err(_) => {
-                warn!(%peer, "connection rejected by global concurrency limit");
+            Err(limit) => {
+                warn!(%peer, limit = limit.as_str(), "connection rejected by concurrency limit");
                 runtime.record_rejected_connection();
+                let result = match limit {
+                    LimitRejection::Global => "rejected_limit",
+                    LimitRejection::PerClient => "rejected_client_limit",
+                };
                 emit_metric(
                     &telemetry,
                     "ssh_proxy_connections_total",
-                    vec![("result", "rejected_limit".to_string())],
+                    vec![("result", result.to_string())],
                     1.0,
                 );
                 continue;
@@ -56,87 +74,135 @@ pub(crate) async fn run_public_listener(
                 .map(|socket| socket.shutdown(Shutdown::Both));
             continue;
         }
-        let store = store.clone();
-        let control = control.clone();
-        let config = config.clone();
-        let runtime = runtime.clone();
-        let telemetry = telemetry.clone();
         let admit = control.admit();
-        tokio::spawn(async move {
-            let _permit = permit;
-            if admit {
-                let (connection, abort_registration) = runtime.register_connection(peer);
-                let _cleanup = ConnectionCleanup {
-                    runtime: runtime.clone(),
-                    id: connection.id.clone(),
-                };
+        tokio::spawn(serve_connection(
+            stream,
+            peer,
+            permit,
+            admit,
+            store.clone(),
+            control.clone(),
+            config.clone(),
+            runtime.clone(),
+            telemetry.clone(),
+        ));
+    }
+}
+
+// Mirrors handle_ssh_connection's explicit per-connection state.
+#[allow(clippy::too_many_arguments)]
+async fn serve_connection(
+    stream: TcpStream,
+    peer: SocketAddr,
+    _permit: ConnectionPermit,
+    admit: bool,
+    store: Arc<SnapshotStore>,
+    control: Arc<ControlPlane>,
+    config: ProxyConfig,
+    runtime: Arc<ProxyRuntime>,
+    telemetry: TelemetrySender,
+) {
+    let auth_timeout = config.auth_timeout;
+    if admit {
+        let (connection, abort_registration) = runtime.register_connection(peer);
+        let _cleanup = ConnectionCleanup {
+            runtime: runtime.clone(),
+            id: connection.id.clone(),
+        };
+        emit_metric(
+            &telemetry,
+            "ssh_proxy_connections_total",
+            vec![("result", "accepted".to_string())],
+            1.0,
+        );
+        let connection_result = Abortable::new(
+            with_auth_deadline(
+                handle_ssh_connection(
+                    stream,
+                    peer,
+                    store,
+                    control,
+                    config,
+                    telemetry.clone(),
+                    connection.clone(),
+                    false,
+                ),
+                &connection,
+                auth_timeout,
+            ),
+            abort_registration,
+        )
+        .await;
+        match connection_result {
+            Ok(Err(error)) => {
+                debug!(%peer, %error, "SSH connection closed");
                 emit_metric(
                     &telemetry,
                     "ssh_proxy_connections_total",
-                    vec![("result", "accepted".to_string())],
+                    vec![("result", "closed_error".to_string())],
                     1.0,
                 );
-                let connection_result = Abortable::new(
-                    handle_ssh_connection(
-                        stream,
-                        peer,
-                        store,
-                        control,
-                        config,
-                        telemetry.clone(),
-                        connection.clone(),
-                        false,
-                    ),
-                    abort_registration,
-                )
-                .await;
-                match connection_result {
-                    Ok(Err(error)) => {
-                        debug!(%peer, %error, "SSH connection closed");
-                        emit_metric(
-                            &telemetry,
-                            "ssh_proxy_connections_total",
-                            vec![("result", "closed_error".to_string())],
-                            1.0,
-                        );
-                    }
-                    Err(_) => debug!(%peer, "SSH connection was revoked and aborted"),
-                    Ok(Ok(())) => {}
-                }
-                return;
             }
-            runtime.record_rejected_connection();
-            let (connection, _abort_registration) = ConnectionState::new(0, peer);
-            let connection = Arc::new(connection);
-            match handle_ssh_connection(
-                stream,
-                peer,
-                store,
-                control,
-                config,
-                telemetry.clone(),
-                connection,
-                true,
-            )
-            .await
-            {
-                Ok(()) => emit_metric(
-                    &telemetry,
-                    "ssh_proxy_connections_total",
-                    vec![("result", "rejected_paused".to_string())],
-                    1.0,
-                ),
-                Err(error) => {
-                    debug!(%peer, %error, "paused SSH reject path closed");
-                    emit_metric(
-                        &telemetry,
-                        "ssh_proxy_connections_total",
-                        vec![("result", "rejected_paused".to_string())],
-                        1.0,
-                    );
-                }
-            }
-        });
+            Err(_) => debug!(%peer, "SSH connection was revoked and aborted"),
+            Ok(Ok(())) => {}
+        }
+        return;
+    }
+    runtime.record_rejected_connection();
+    let (connection, _abort_registration) = ConnectionState::new(0, peer);
+    let connection = Arc::new(connection);
+    // The paused reject path never yields an authenticated session, so the
+    // whole exchange is bounded by the authentication deadline.
+    let result = tokio::time::timeout(
+        auth_timeout,
+        handle_ssh_connection(
+            stream,
+            peer,
+            store,
+            control,
+            config,
+            telemetry.clone(),
+            connection,
+            true,
+        ),
+    )
+    .await;
+    match result {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => debug!(%peer, %error, "paused SSH reject path closed"),
+        Err(_) => debug!(%peer, "paused SSH reject path hit the authentication deadline"),
+    }
+    emit_metric(
+        &telemetry,
+        "ssh_proxy_connections_total",
+        vec![("result", "rejected_paused".to_string())],
+        1.0,
+    );
+}
+
+/// Closes the session if public-key authentication has not succeeded within
+/// `deadline` of accept. This is independent of (and much shorter than) the
+/// session inactivity timeout, so idle pre-auth sockets cannot pin slots.
+pub(crate) async fn with_auth_deadline<F>(
+    session: F,
+    connection: &ConnectionState,
+    deadline: Duration,
+) -> Result<()>
+where
+    F: Future<Output = Result<()>>,
+{
+    tokio::select! {
+        result = session => result,
+        _ = auth_deadline_elapsed(connection, deadline) => {
+            Err(anyhow!("SSH authentication deadline exceeded"))
+        }
+    }
+}
+
+async fn auth_deadline_elapsed(connection: &ConnectionState, deadline: Duration) {
+    tokio::time::sleep(deadline).await;
+    if connection.authenticated_at.load(Ordering::Acquire) != 0 {
+        std::future::pending::<()>().await;
     }
 }
 

@@ -1,15 +1,15 @@
 import { ConflictException, Inject, Injectable, NotFoundException } from '@nestjs/common';
 import {
-  Capability,
   FailureCode,
   type ListScope,
   type PatchStoragePoolRequest,
   type StoragePoolDiscoverResult,
   type StoragePoolDto,
+  Role,
 } from '@nyabase/common';
 import type { Kysely } from 'kysely';
 import { listPoolAccess, listServerAccess } from '../iam/effective-access.js';
-import { assertListScope, type Actor } from '../iam/actor.js';
+import { assertListScope, type Actor, requireUserId } from '../iam/actor.js';
 import type { IncusClientPort } from '../incus/index.js';
 import type { NyabaseDatabase } from '../platform/persistence-pg/database.types.js';
 import { PG_DATABASE } from '../platform/persistence-pg/tokens.js';
@@ -49,13 +49,13 @@ export class StoragePoolsService {
 
   /**
    * `scope=mine`: pools the caller may use, as user DTOs. `scope=all`: every
-   * pool of the server including unregistered ones (`ManageServers` or `ManageGrants`).
+   * pool of the server including unregistered ones (operator).
    */
   async listForServer(actor: Actor, serverId: string, scope: ListScope): Promise<StoragePoolDto[]> {
-    assertListScope(actor, scope, Capability.ManageServers, Capability.ManageGrants);
+    assertListScope(actor, scope, Role.Operator);
     return scope === 'all'
       ? this.list(serverId, true)
-      : this.listVisible(actor.userId, serverId);
+      : this.listVisible(requireUserId(actor), serverId);
   }
 
   async list(serverId?: string, includeUnregistered = false): Promise<StoragePoolDto[]> {

@@ -57,6 +57,7 @@ describePg('ServerHealthService PostgreSQL server admission guard', () => {
         {} as never,
         {} as never,
         { registerServerHealth: vi.fn() } as never,
+        { watch: vi.fn() } as never,
       );
 
       await expect(health.listOnlineServerIds()).resolves.toEqual([onlineServerId]);
@@ -106,6 +107,7 @@ describePg('ServerHealthService PostgreSQL inventory and status', () => {
           {} as never,
         ),
         { registerServerHealth: vi.fn() } as never,
+        { watch: vi.fn() } as never,
       );
 
       await health.refreshInventory(
@@ -128,11 +130,13 @@ describePg('ServerHealthService PostgreSQL inventory and status', () => {
     await withPostgresTestDatabase(async ({ database }) => {
       const serverId = randomUUID();
       await database.insertInto('infra.servers').values(serverValues(serverId, 'unknown')).execute();
+      const recovery = { watch: vi.fn() };
       const health = new ServerHealthService(
         database,
         {} as never,
         {} as never,
         { registerServerHealth: vi.fn() } as never,
+        recovery as never,
       );
 
       await health.markServer(serverId, 'online', undefined, 2);
@@ -145,6 +149,8 @@ describePg('ServerHealthService PostgreSQL inventory and status', () => {
         .where('id', '=', serverId)
         .executeTakeFirstOrThrow();
       expect(row).toEqual({ status: 'unreachable', last_error: 'down' });
+      // Only the unreachable mark asks for a recovery probe.
+      expect(recovery.watch.mock.calls).toEqual([[serverId]]);
     });
   });
 
@@ -157,6 +163,7 @@ describePg('ServerHealthService PostgreSQL inventory and status', () => {
         {} as never,
         {} as never,
         { registerServerHealth: vi.fn() } as never,
+        { watch: vi.fn() } as never,
       );
       const intent = (targetRevision: number) => ({
         resourceType: 'server',

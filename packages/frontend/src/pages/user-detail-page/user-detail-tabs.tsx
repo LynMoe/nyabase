@@ -1,21 +1,21 @@
 import { useState } from 'react';
 import { Copy, Gauge, KeyRound, Pencil, ShieldCheck, Trash2 } from 'lucide-react';
-import { Capability, type UpdateUserRequest, type UserDto, UserStatus } from '@nyabase/common';
+import { Role, type UpdateUserRequest, type UserDto, UserStatus } from '@nyabase/common';
 import { Link, useNavigate } from '@tanstack/react-router';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '../../components/ui/tabs.js';
 import { CanonicalGrantPanel } from '../../components/grants/canonical-grant-panel.js';
 import type { UserDetailTab } from '../../lib/detail-tabs.js';
 import { Button } from '../../components/ui/button.js';
-import { Badge } from '../../components/ui/badge.js';
-import { Field, FormField } from '../../components/layout/form-field.js';
+import { Field, FormField, SelectField } from '../../components/layout/form-field.js';
 import { SectionCard } from '../../components/layout/section-card.js';
 import { StatusBadge } from '../../components/layout/status-badge.js';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '../../components/ui/table.js';
-import { capabilityLabel, userStatusLabel } from '../../lib/display-labels.js';
+import { ROLE_OPTIONS, roleLabel, userStatusLabel } from '../../lib/display-labels.js';
 import { userDeleting } from '../../lib/in-progress.js';
 import { relativeTime } from '../../lib/utils.js';
-import { useAuthStore } from '../../store/auth.js';
+import { useHasRole } from '../../lib/use-role.js';
+import { useUserAvailability } from '../../lib/use-user-availability.js';
 import {
   Dialog,
   DialogContent,
@@ -47,9 +47,7 @@ export function UserDetailTabs({
   user: UserDto;
   onTab: (tab: UserDetailTab) => void;
 }) {
-  const canManageGrants = useAuthStore(
-    (state) => state.user?.capabilities.includes(Capability.ManageGrants) ?? false,
-  );
+  const canManageGrants = useHasRole(Role.Operator);
   return (
     <Tabs
       value={tab}
@@ -70,18 +68,16 @@ export function UserDetailTabs({
         {canManageGrants ? (
           <CanonicalGrantPanel subject={user} kind="users" />
         ) : (
-          <p className="text-sm text-muted-foreground">查看与编辑授权需要「管理授权」权限。</p>
+          <p className="text-sm text-muted-foreground">查看与编辑授权需要运维及以上角色。</p>
         )}
       </TabsContent>
     </Tabs>
   );
 }
 
-/** Identity, group membership and effective capabilities of a user. */
+/** Identity, role and group membership of a user. */
 function UserOverviewTab({ user }: { user: UserDto }) {
-  const canManageUsers = useAuthStore(
-    (state) => state.user?.capabilities.includes(Capability.ManageUsers) ?? false,
-  );
+  const canManageUsers = useHasRole(Role.Admin);
   const [identityOpen, setIdentityOpen] = useState(false);
   return (
     <>
@@ -106,6 +102,7 @@ function UserOverviewTab({ user }: { user: UserDto }) {
               />
             </div>
           </div>
+          <Field label="角色" value={roleLabel(user.role)} />
           <Field label="创建时间" value={relativeTime(user.createdAt)} />
         </div>
       </SectionCard>
@@ -120,7 +117,6 @@ function UserOverviewTab({ user }: { user: UserDto }) {
             <TableHeader>
               <TableRow>
                 <TableHead>名称</TableHead>
-                <TableHead>类型</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
@@ -136,22 +132,10 @@ function UserOverviewTab({ user }: { user: UserDto }) {
                       {group.name}
                     </Link>
                   </TableCell>
-                  <TableCell>{group.isSystem ? '系统组' : '自定义组'}</TableCell>
                 </TableRow>
               ))}
             </TableBody>
           </Table>
-        )}
-      </SectionCard>
-      <SectionCard title="能力">
-        {user.capabilities.length === 0 ? (
-          <p className="text-sm text-muted-foreground">无。</p>
-        ) : (
-          <div className="flex flex-wrap gap-1">
-            {user.capabilities.map((capability) => (
-              <Badge key={capability} variant="outline">{capabilityLabel(capability)}</Badge>
-            ))}
-          </div>
         )}
       </SectionCard>
       {identityOpen ? <UserIdentityDialog user={user} onClose={() => setIdentityOpen(false)} /> : null}
@@ -161,16 +145,21 @@ function UserOverviewTab({ user }: { user: UserDto }) {
 
 export function UserIdentityDialog({ user, onClose }: { user: UserDto; onClose: () => void }) {
   const patchUser = useUserPatch(user.id);
+  const roleAvailability = useUserAvailability(user).changeRole;
+  const [role, setRole] = useState<Role>(user.role);
   const submit = (next: string) => {
     if (!next) {
       toast({ title: '显示名称不能为空', variant: 'destructive' });
       return;
     }
-    if (next === user.displayName) {
+    const body: UpdateUserRequest = {};
+    if (next !== user.displayName) body.displayName = next;
+    if (role !== user.role) body.role = role;
+    if (Object.keys(body).length === 0) {
       toast({ title: '没有需要保存的更改' });
       return;
     }
-    patchUser.mutate({ displayName: next }, { onSuccess: onClose });
+    patchUser.mutate(body, { onSuccess: onClose });
   };
   const pending = patchUser.isPending;
   const onOpenChange = (open: boolean) => { if (!open) onClose(); };
@@ -180,7 +169,7 @@ export function UserIdentityDialog({ user, onClose }: { user: UserDto; onClose: 
       <DialogContent>
         <DialogHeader>
           <DialogTitle>编辑用户</DialogTitle>
-          <DialogDescription>修改显示名称。用户名创建后不可更改。</DialogDescription>
+          <DialogDescription>修改显示名称与角色。用户名创建后不可更改。</DialogDescription>
         </DialogHeader>
         <FormField id="user-display-name" label="显示名称">
           <Input
@@ -189,6 +178,15 @@ export function UserIdentityDialog({ user, onClose }: { user: UserDto; onClose: 
             onChange={(event) => setValue(event.target.value)}
           />
         </FormField>
+        <SelectField
+          id="user-role"
+          label="角色"
+          value={role}
+          onChange={(next) => setRole(next as Role)}
+          options={ROLE_OPTIONS}
+          disabled={!roleAvailability.allowed}
+          hint={roleAvailability.reason ?? '运维可管理服务器、镜像与授权；管理员可管理用户、用户组与存储。'}
+        />
         <DialogFooter>
           <Button variant="outline" onClick={() => onOpenChange(false)}>取消</Button>
           <Button onClick={() => submit(value.trim())} disabled={pending}>
@@ -301,7 +299,7 @@ export function useUserPatch(id: string) {
       void queryClient.invalidateQueries({ queryKey: queryKeys.groups.admin });
       if (body.status === UserStatus.Disabled) toast({ title: '用户已停用' });
       else if (body.status === UserStatus.Active) toast({ title: '用户已启用' });
-      else if (body.displayName) toast({ title: '用户已更新' });
+      else if (body.displayName || body.role) toast({ title: '用户已更新' });
     },
     onError: (error) => toast({ title: '更新用户失败', description: errorMessage(error), variant: 'destructive' }),
   });
@@ -316,6 +314,7 @@ export function UserHeaderActions({ user }: { user: UserDto }) {
   const [resetOpen, setResetOpen] = useState(false);
   const [resetSecret, setResetSecret] = useState<string | null>(null);
   const patchUser = useUserPatch(user.id);
+  const availability = useUserAvailability(user);
   const remove = useMutation({
     mutationFn: () => api.delete<unknown>(`/users/${user.id}`),
     onSuccess: () => {
@@ -339,16 +338,30 @@ export function UserHeaderActions({ user }: { user: UserDto }) {
           启用
         </Button>
       ) : (
-        <Button variant="outline" onClick={() => setDisableOpen(true)}>停用</Button>
+        <Button
+          variant="outline"
+          disabled={!availability.disable.allowed}
+          title={availability.disable.reason ?? undefined}
+          onClick={() => setDisableOpen(true)}
+        >
+          停用
+        </Button>
       )}
       <Button variant="outline" onClick={() => { setResetSecret(null); setResetOpen(true); }}>
         <KeyRound className="h-4 w-4" />重置密码
       </Button>
-      <MoreActions actions={[{ label: '删除用户', icon: Trash2, destructive: true, onSelect: () => setDeleteOpen(true) }]} />
+      <MoreActions actions={[{
+        label: '删除用户',
+        icon: Trash2,
+        destructive: true,
+        disabled: !availability.delete.allowed,
+        description: availability.delete.reason ?? undefined,
+        onSelect: () => setDeleteOpen(true),
+      }]} />
       <ConfirmDialog
         open={disableOpen}
         title="停用用户？"
-        description={`将停用「${user.displayName}」。该账号将无法登录，已有会话会被终止。`}
+        description={`将停用「${user.displayName}」。该账号将无法登录，已有会话会被终止，其容器会立即停止；14 天后其容器和数据卷将被清除。期间重新启用可保留资源（容器不会自动启动）。`}
         confirmLabel="确认停用"
         pendingLabel="处理中..."
         pending={patchUser.isPending}

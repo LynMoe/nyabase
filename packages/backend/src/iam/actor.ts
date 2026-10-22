@@ -1,59 +1,63 @@
 import { ForbiddenException } from '@nestjs/common';
-import type { Capability } from '@nyabase/common';
+import { Role, roleAtLeast } from '@nyabase/common';
 
-export const SYSTEM_ACTOR_USERNAME = 'nyabase-system';
+export type UserActorAuthKind = 'jwt' | 'api-token';
+export type ActorAuthKind = UserActorAuthKind | 'system';
 
-export type ActorAuthKind = 'jwt' | 'api-token' | 'system';
-
-/**
- * Who is performing an operation. HTTP requests get theirs from
- * `CapabilitiesGuard` (resolved once per request); internal workers use
- * `SYSTEM_ACTOR`.
- */
-export interface Actor {
+/** A request authenticated as a user (from `RolesGuard`). */
+export interface UserActor {
   readonly userId: string;
-  readonly capabilities: ReadonlySet<Capability>;
-  readonly authKind: ActorAuthKind;
+  readonly role: Role;
+  readonly authKind: UserActorAuthKind;
   readonly authVersion: number;
 }
 
 /**
- * Internal workers (grant expiry, ...) act with this identity. It carries no
- * capabilities: services recognise `authKind === 'system'` and skip owner and
- * capability checks. `userId` is empty because the `nyabase-system` user id is
- * generated per database; callers that persist attribution use
- * `systemActor(id)`.
+ * Internal workers (grant expiry, ...) act as this actor. It has no user row:
+ * `userId` is null, so everything it persists carries NULL attribution (audit
+ * `actor_id`, intent `requested_by`, ...). Its role is the lowest one:
+ * services recognise `authKind === 'system'` and skip owner and role checks
+ * (`hasRole` is always true for it).
  */
-export const SYSTEM_ACTOR: Actor = Object.freeze({
-  userId: '',
-  capabilities: new Set<Capability>(),
+export interface SystemActor {
+  readonly userId: null;
+  readonly role: Role;
+  readonly authKind: 'system';
+  readonly authVersion: number;
+}
+
+/**
+ * Who is performing an operation. HTTP requests get theirs from `RolesGuard`
+ * (built once per request from the user row); internal workers use
+ * `SYSTEM_ACTOR`.
+ */
+export type Actor = UserActor | SystemActor;
+
+export const SYSTEM_ACTOR: SystemActor = Object.freeze({
+  userId: null,
+  role: Role.User,
   authKind: 'system',
   authVersion: 0,
 });
 
-/** `SYSTEM_ACTOR` attributed to the database id of the `nyabase-system` user. */
-export function systemActor(userId: string): Actor {
-  return Object.freeze({ ...SYSTEM_ACTOR, userId });
-}
-
-export function isSystemActor(actor: Actor): boolean {
+export function isSystemActor(actor: Actor): actor is SystemActor {
   return actor.authKind === 'system';
 }
 
-export function holdsAny(actor: Actor, capabilities: readonly Capability[]): boolean {
-  return capabilities.some((capability) => actor.capabilities.has(capability));
+/** The acting user's id for operations that only a real user can perform (owning, creating). */
+export function requireUserId(actor: Actor): string {
+  if (actor.userId === null) throw new ForbiddenException('This operation needs a user');
+  return actor.userId;
 }
 
-/**
- * `?scope=all` is only for capability holders. `scope=mine` never needs one.
- * Pass several capabilities when any one of them suffices.
- */
-export function assertListScope(
-  actor: Actor,
-  scope: 'mine' | 'all',
-  ...anyOf: Capability[]
-): void {
-  if (scope === 'all' && !isSystemActor(actor) && !holdsAny(actor, anyOf)) {
-    throw new ForbiddenException('scope=all requires an administrator capability');
+/** The actor holds `minimum` or a higher role; the system actor always does. */
+export function hasRole(actor: Actor, minimum: Role): boolean {
+  return isSystemActor(actor) || roleAtLeast(actor.role, minimum);
+}
+
+/** `?scope=all` is only for callers holding `minimum`. `scope=mine` never needs one. */
+export function assertListScope(actor: Actor, scope: 'mine' | 'all', minimum: Role): void {
+  if (scope === 'all' && !hasRole(actor, minimum)) {
+    throw new ForbiddenException(`scope=all requires the ${minimum} role`);
   }
 }

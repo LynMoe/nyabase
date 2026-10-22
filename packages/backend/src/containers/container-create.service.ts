@@ -1,6 +1,7 @@
 import { ConflictException, ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
 import {
   AuditAction,
+  ContainerPowerIntent,
   FailureCode,
   IntentKind,
   IntentResourceType,
@@ -31,6 +32,7 @@ import {
   isUniqueViolation,
   stringArray,
 } from './container-rules.js';
+import { requireUserId } from '../iam/actor.js';
 
 type Tx = Transaction<NyabaseDatabase>;
 
@@ -72,7 +74,7 @@ export async function assertRootCapacity(
   };
   const used = await repository.sumLiveRootBytes({ ownerId, serverId }, transaction)
     + await sumVolumes({ ownerId, serverId });
-  if (grantLimit !== null && grantLimit > 0 && used + delta > grantLimit) {
+  if (grantLimit !== null && used + delta > grantLimit) {
     throw new ConflictException({
       code: FailureCode.StorageGrantExceeded,
       message: 'Server storage grant exceeded',
@@ -340,16 +342,18 @@ export class ContainerCreateService {
     request: CreateContainerRequest,
     id: string,
   ) {
-    const userId = actor.userId;
+    const userId = requireUserId(actor);
     const ownerId = userId;
     const { server, image } = await this.lockCreateTargets(transaction, request);
     const access = await this.resolveCreateAccess(transaction, userId, request, image);
     await lockOwnerServerQuota(transaction, ownerId, request.serverId);
-    assertMemoryGrant(
-      access.grant,
-      request.memBytes,
-      await this.repository.sumLiveMemBytes({ ownerId, serverId: request.serverId }, transaction),
-    );
+    if (request.powerIntent === ContainerPowerIntent.Running) {
+      assertMemoryGrant(
+        access.grant,
+        request.memBytes,
+        await this.repository.sumRunningMemBytes({ ownerId, serverId: request.serverId }, transaction),
+      );
+    }
     this.assertServerReady(server);
     const pools = await this.ipPools.listForServer(request.serverId, transaction);
     if (pools.length === 0) {

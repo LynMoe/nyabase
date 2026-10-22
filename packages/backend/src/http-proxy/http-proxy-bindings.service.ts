@@ -8,10 +8,9 @@ import {
 } from '@nestjs/common';
 import { randomUUID } from 'crypto';
 import { sql, type Kysely, type Transaction } from 'kysely';
-import { assertListScope, type Actor } from '../iam/actor.js';
+import { assertListScope, type Actor, requireUserId } from '../iam/actor.js';
 import {
   AuditAction,
-  Capability,
   ContainerStatus,
   UserStatus,
   zCreateHttpProxyBindingRequest,
@@ -25,6 +24,7 @@ import {
   type HttpProxyBindingStatus,
   type HttpProxyWarningReason,
   type ListScope,
+  Role,
 } from '@nyabase/common';
 import { AuditService } from '../iam/audit.service.js';
 import type { NyabaseDatabase } from '../platform/persistence-pg/database.types.js';
@@ -173,26 +173,26 @@ export class HttpProxyBindingsService {
     private readonly audit: AuditService,
   ) {}
 
-  /** `scope=mine`: the caller's bindings; `scope=all`: every binding (`ManageSystemSettings`). */
+  /** `scope=mine`: the caller's bindings; `scope=all`: every binding (operator). */
   async listBindings(
     actor: Actor,
     scope: ListScope,
     proxyOnline: boolean,
   ): Promise<HttpProxyBindingDto[]> {
-    assertListScope(actor, scope, Capability.ManageSystemSettings);
+    assertListScope(actor, scope, Role.Operator);
     let query = this.database
       .selectFrom('interaction.http_proxy_bindings')
       .selectAll()
       .orderBy('hostname');
     if (scope === 'mine') query = query.where('owner_id', '=', actor.userId);
-    return this.bindingDtos(await query.execute(), actor.userId, proxyOnline, this.database);
+    return this.bindingDtos(await query.execute(), requireUserId(actor), proxyOnline, this.database);
   }
 
   async createBinding(
     actor: Actor,
     input: unknown,
   ): Promise<HttpProxyBindingDto> {
-    const requesterId = actor.userId;
+    const requesterId = requireUserId(actor);
     const dto = zCreateHttpProxyBindingRequest.parse(input);
     const hostname = parseHttpProxyHostname(dto.hostname);
     const binding = await runSerializable(this.transactions, async (transaction) => {
@@ -254,7 +254,7 @@ export class HttpProxyBindingsService {
     id: string,
     input: unknown,
   ): Promise<HttpProxyBindingDto> {
-    const requesterId = actor.userId;
+    const requesterId = requireUserId(actor);
     const dto = zPatchHttpProxyBindingRequest.parse(input);
     const saved = await runSerializable(this.transactions, async (transaction) => {
       const binding = await transaction
@@ -325,7 +325,7 @@ export class HttpProxyBindingsService {
   }
 
   async deleteBinding(actor: Actor, id: string): Promise<void> {
-    const requesterId = actor.userId;
+    const requesterId = requireUserId(actor);
     await runSerializable(this.transactions, async (transaction) => {
       const binding = await transaction
         .selectFrom('interaction.http_proxy_bindings')

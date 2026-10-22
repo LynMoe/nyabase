@@ -1,7 +1,7 @@
 import { Controller, Get, Inject } from '@nestjs/common';
-import { Capability } from '@nyabase/common';
+import { Role } from '@nyabase/common';
 import type { Pool } from 'pg';
-import { RequireCaps } from '../iam/decorators.js';
+import { RequireRole } from '../iam/decorators.js';
 import { PG_POOL } from '../platform/persistence-pg/tokens.js';
 import { MetricsWriter } from './metrics-writer.js';
 
@@ -28,7 +28,7 @@ export interface RuntimeDependencyMetrics {
  * connection strings, server/user IDs, SQL text, and raw errors.
  */
 @Controller('admin/metrics')
-@RequireCaps(Capability.ViewMetricsAll)
+@RequireRole(Role.Operator)
 export class AdminRuntimeMetricsController {
   constructor(
     @Inject(PG_POOL) private readonly pool: Pool,

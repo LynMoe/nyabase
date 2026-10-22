@@ -11,16 +11,16 @@ import {
   Query,
 } from '@nestjs/common';
 import {
-  ADMIN_INTENT_CAPABILITIES,
-  Capability,
   IntentResourceType,
   IntentStatus,
+  Role,
   zIntentListQuery,
+  zListScope,
   zRetryIntentRequest,
   type IntentDto,
 } from '@nyabase/common';
 import { CurrentActor } from '../iam/decorators.js';
-import { holdsAny, type Actor } from '../iam/actor.js';
+import { hasRole, type Actor, requireUserId } from '../iam/actor.js';
 import { AccessResolverService } from '../iam/access-resolver.service.js';
 import { IntentRepository, type IntentListOptions, type IntentRecord } from './intent.repository.js';
 import { ReconcilerRegistry } from './reconciler-registry.service.js';
@@ -52,22 +52,17 @@ function toDto(intent: IntentRecord): IntentDto {
   };
 }
 
-/**
- * The capability that governs a resource type regardless of which row it is.
- * Volumes are the only type whose governing capability depends on the row
- * (shared volumes use `ManageSharedVolumes`); `resourceAuthorities` answers
- * that precisely.
- */
-function typeCapability(resourceType: IntentRecord['resourceType']): Capability | null {
+/** The minimum role that governs a resource type's intents. */
+function typeRole(resourceType: IntentRecord['resourceType']): Role | null {
   switch (resourceType) {
     case IntentResourceType.Container:
-      return Capability.ManageContainersAny;
+      return Role.Operator;
     case IntentResourceType.Volume:
-      return Capability.ManageVolumes;
+      return Role.Admin;
     case IntentResourceType.Server:
-      return Capability.ManageServers;
+      return Role.Operator;
     case IntentResourceType.ImageAssignment:
-      return Capability.ManageImages;
+      return Role.Operator;
     default:
       return null;
   }
@@ -76,10 +71,10 @@ function typeCapability(resourceType: IntentRecord['resourceType']): Capability 
 const DEFAULT_PAGE_SIZE = 50;
 
 /**
- * The only intents surface. Visibility of an intent:
- *  - it is yours: you requested it, or you own its resource; or
- *  - you hold the capability that governs its resource type.
- * `GET /intents?scope=mine` (default) lists the former, `scope=all` the latter.
+ * The only intents surface. By default (`scope=mine`) an intent is visible and
+ * retryable only if you requested it or own its resource, whatever your role;
+ * `?scope=all` is the explicit override and needs the role that governs the
+ * intent's resource type.
  */
 @Controller('intents')
 export class IntentsController {
@@ -112,10 +107,14 @@ export class IntentsController {
   }
 
   @Get(':intentId')
-  async get(@Param('intentId') intentId: string, @CurrentActor() actor: Actor) {
+  async get(
+    @Param('intentId') intentId: string,
+    @CurrentActor() actor: Actor,
+    @Query('scope') scope?: string,
+  ) {
     const intent = await this.intents.findById(intentId);
     if (!intent) throw new NotFoundException('Intent not found');
-    await this.assertVisible(actor, intent);
+    await this.basis(actor, intent, zListScope.parse(scope));
     return toDto(intent);
   }
 
@@ -124,35 +123,32 @@ export class IntentsController {
     @Param('intentId') intentId: string,
     @CurrentActor() actor: Actor,
     @Body() body: unknown,
+    @Query('scope') scope?: string,
   ) {
     zRetryIntentRequest.parse(body);
     const intent = await this.intents.findById(intentId);
     if (!intent) throw new NotFoundException('Intent not found');
-    const basis = await this.visibility(actor, intent);
+    const basis = await this.basis(actor, intent, zListScope.parse(scope));
     if (basis === 'own') {
       if (intent.status !== IntentStatus.Failed) {
         throw new ConflictException('Only failed intents can be retried');
       }
       return toDto(await this.intents.retry(intentId));
     }
-    if (basis === 'none') throw new ForbiddenException('Intent is not owned by current user');
     return this.retryAsAdministrator(actor, intent);
   }
 
-  /** Capability holders retry under a transaction that re-checks the capability. */
+  /** `scope=all` retries run under a transaction that re-checks the role. */
   private async retryAsAdministrator(actor: Actor, intent: IntentRecord) {
-    const required = await this.administratorCapability(intent);
+    const required = typeRole(intent.resourceType);
     if (!required) throw new NotFoundException('Intent not found');
     try {
-      return await this.access.runWithActorCapabilities(
-        actor.userId,
-        [required],
+      return await this.access.runWithActorRole(
+        requireUserId(actor),
+        required,
         async (transaction) => {
           const current = await this.intents.findById(intent.id, transaction);
           if (!current) throw new NotFoundException('Intent not found');
-          if (await this.administratorCapability(current) !== required) {
-            throw new NotFoundException('Intent not found');
-          }
           if (current.status !== IntentStatus.Failed) {
             throw new ConflictException('Only failed intents can be retried');
           }
@@ -171,7 +167,7 @@ export class IntentsController {
     resourceIds: string[] | undefined,
   ) {
     if (!resourceIds) {
-      return this.intents.list({ ...options, requestedBy: actor.userId });
+      return this.intents.list({ ...options, requestedBy: requireUserId(actor) });
     }
     const authorities = await this.registry.forResource(options.resourceType!)
       ?.resourceAuthorities(resourceIds);
@@ -186,34 +182,26 @@ export class IntentsController {
     options: IntentListOptions,
     resourceIds: string[] | undefined,
   ) {
-    if (!holdsAny(actor, ADMIN_INTENT_CAPABILITIES)) {
-      throw new ForbiddenException('scope=all requires an administrator capability');
+    if (!hasRole(actor, Role.Operator)) {
+      throw new ForbiddenException('scope=all requires the operator role');
     }
     if (resourceIds) {
-      const authorities = await this.registry.forResource(options.resourceType!)
-        ?.resourceAuthorities(resourceIds);
-      const fallback = typeCapability(options.resourceType!);
-      const allowed = resourceIds.every((id) => {
-        const required = authorities?.get(id)?.adminCapability ?? fallback;
-        return required != null && actor.capabilities.has(required);
-      });
-      if (!allowed) throw new ForbiddenException('The actor does not hold the required capabilities');
+      const required = typeRole(options.resourceType!);
+      if (required == null || !hasRole(actor, required)) {
+        throw new ForbiddenException('The actor does not hold the required role');
+      }
       return this.intents.list(options);
     }
-    // `?serverId=` with ManageServers: every intent on
-    // that server, whatever its resource type.
-    if (options.serverId && actor.capabilities.has(Capability.ManageServers)) {
+    // `?serverId=` for an operator: every intent on that server, whatever its
+    // resource type.
+    if (options.serverId && hasRole(actor, Role.Operator)) {
       const page = await this.intents.list(options);
       return { items: page.items, nextCursor: page.nextCursor };
     }
     const allowedTypes = (Object.values(IntentResourceType) as IntentRecord['resourceType'][])
       .filter((type) => {
-        if (type === IntentResourceType.Volume) {
-          return actor.capabilities.has(Capability.ManageVolumes)
-            || actor.capabilities.has(Capability.ManageSharedVolumes);
-        }
-        const required = typeCapability(type);
-        return required != null && actor.capabilities.has(required);
+        const required = typeRole(type);
+        return required != null && hasRole(actor, required);
       });
     if (options.resourceType && !allowedTypes.includes(options.resourceType)) {
       return { items: [], nextCursor: null };
@@ -222,62 +210,31 @@ export class IntentsController {
       ...options,
       resourceTypes: options.resourceType ? undefined : allowedTypes,
     });
-    return { items: await this.filterVolumeIntents(actor, page.items), nextCursor: page.nextCursor };
-  }
-
-  private async assertVisible(actor: Actor, intent: IntentRecord): Promise<void> {
-    if (await this.visibility(actor, intent) === 'none') {
-      throw new ForbiddenException('Intent is not owned by current user');
-    }
+    return page;
   }
 
   /**
-   * `own`: requested by the actor, owned by the actor, or governed by the
-   * type-level capability. `administrator`: only the row-specific capability
-   * (a shared volume's `ManageSharedVolumes`) grants access.
+   * Why the actor may see or retry the intent. `own`: they requested it or own
+   * its resource (any role). `administrator`: `scope=all` with the role that
+   * governs the resource type (403 without it). Anything else is a 404.
    */
-  private async visibility(
+  private async basis(
     actor: Actor,
     intent: IntentRecord,
-  ): Promise<'own' | 'administrator' | 'none'> {
+    scope: 'mine' | 'all',
+  ): Promise<'own' | 'administrator'> {
+    if (scope === 'all') {
+      const required = typeRole(intent.resourceType);
+      if (required == null || !hasRole(actor, required)) {
+        throw new ForbiddenException('The actor does not hold the required role');
+      }
+      return 'administrator';
+    }
     if (intent.requestedBy === actor.userId) return 'own';
-    const fallback = typeCapability(intent.resourceType);
-    if (fallback && actor.capabilities.has(fallback)) return 'own';
     const authority = (await this.registry.forResource(intent.resourceType)
       ?.resourceAuthorities([intent.resourceId]))?.get(intent.resourceId);
     if (authority?.ownerId === actor.userId) return 'own';
-    if (authority?.adminCapability && actor.capabilities.has(authority.adminCapability)) {
-      return 'administrator';
-    }
-    return 'none';
-  }
-
-  private async administratorCapability(intent: IntentRecord): Promise<Capability | null> {
-    if (intent.resourceType !== IntentResourceType.Volume) {
-      return typeCapability(intent.resourceType);
-    }
-    const authorities = await this.registry.forResource(intent.resourceType)
-      ?.resourceAuthorities([intent.resourceId]);
-    return authorities?.get(intent.resourceId)?.adminCapability
-      ?? typeCapability(intent.resourceType);
-  }
-
-  private async filterVolumeIntents(
-    actor: Actor,
-    items: readonly IntentRecord[],
-  ): Promise<IntentRecord[]> {
-    const volumeIds = items
-      .filter((item) => item.resourceType === IntentResourceType.Volume)
-      .map((item) => item.resourceId);
-    if (volumeIds.length === 0) return [...items];
-    const authorities = await this.registry.forResource(IntentResourceType.Volume)
-      ?.resourceAuthorities(volumeIds);
-    return items.filter((item) => {
-      if (item.resourceType !== IntentResourceType.Volume) return true;
-      const required = authorities?.get(item.resourceId)?.adminCapability
-        ?? Capability.ManageVolumes;
-      return actor.capabilities.has(required);
-    });
+    throw new NotFoundException('Intent not found');
   }
 }
 

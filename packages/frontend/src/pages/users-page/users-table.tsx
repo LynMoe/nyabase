@@ -2,7 +2,7 @@ import { useState } from 'react';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { Link } from '@tanstack/react-router';
 import { Trash2 } from 'lucide-react';
-import { Capability, type UserDto } from '@nyabase/common';
+import { Role, type UserDto } from '@nyabase/common';
 import { Badge } from '../../components/ui/badge.js';
 import { Button } from '../../components/ui/button.js';
 import { StatusBadge } from '../../components/layout/status-badge.js';
@@ -14,7 +14,7 @@ import {
   TableHeader,
   TableRow,
 } from '../../components/ui/table.js';
-import { userStatusLabel } from '../../lib/display-labels.js';
+import { roleLabel, userStatusLabel } from '../../lib/display-labels.js';
 import { userDeleting } from '../../lib/in-progress.js';
 import { ConfirmDialog } from '../../components/layout/confirm-dialog.js';
 import { api } from '../../lib/api.js';
@@ -22,10 +22,27 @@ import { errorMessage } from '../../lib/api-error.js';
 import { queryKeys } from '../../lib/query-keys.js';
 import { toast } from '../../hooks/use-toast.js';
 import { useAuthStore } from '../../store/auth.js';
+import { useHasRole } from '../../lib/use-role.js';
+import { type ActionAvailability, userActionAvailability } from '../../lib/user-administration.js';
 
-export function UsersTable({ users: visibleUsers }: { users: UserDto[] }) {
-  const currentUserId = useAuthStore((state) => state.user?.id);
-  const canManage = useAuthStore((state) => state.user?.capabilities.includes(Capability.ManageUsers) ?? false);
+function DeleteUserButton({ availability, onDelete }: { availability: ActionAvailability; onDelete: () => void }) {
+  return (
+    <Button
+      size="sm"
+      variant="ghost-destructive"
+      disabled={!availability.allowed}
+      title={availability.reason ?? undefined}
+      onClick={onDelete}
+    >
+      <Trash2 className="h-4 w-4" />删除
+    </Button>
+  );
+}
+
+/** `users` are the rows to show; `allUsers` is the full list the last-admin rule is evaluated against. */
+export function UsersTable({ users: visibleUsers, allUsers }: { users: UserDto[]; allUsers: UserDto[] }) {
+  const viewer = useAuthStore((state) => state.user);
+  const canManage = useHasRole(Role.Admin);
   const queryClient = useQueryClient();
   const [deleteUser, setDeleteUser] = useState<UserDto | null>(null);
   const remove = useMutation({
@@ -43,6 +60,7 @@ export function UsersTable({ users: visibleUsers }: { users: UserDto[] }) {
         <TableHeader>
           <TableRow>
             <TableHead>用户</TableHead>
+            <TableHead>角色</TableHead>
             <TableHead>状态</TableHead>
             <TableHead>用户组</TableHead>
             {canManage ? <TableHead className="text-right">操作</TableHead> : null}
@@ -51,7 +69,7 @@ export function UsersTable({ users: visibleUsers }: { users: UserDto[] }) {
         <TableBody>
           {visibleUsers.length === 0 ? (
             <TableRow>
-              <TableCell colSpan={canManage ? 4 : 3} className="py-8 text-center text-muted-foreground">
+              <TableCell colSpan={canManage ? 5 : 4} className="py-8 text-center text-muted-foreground">
                 没有符合条件的用户
               </TableCell>
             </TableRow>
@@ -69,6 +87,7 @@ export function UsersTable({ users: visibleUsers }: { users: UserDto[] }) {
                   <p className="mt-0.5 font-mono text-xs text-muted-foreground">@{user.username}</p>
                 </Link>
               </TableCell>
+              <TableCell>{roleLabel(user.role)}</TableCell>
               <TableCell>
                 <StatusBadge
                   label={userStatusLabel(user.status)}
@@ -94,10 +113,11 @@ export function UsersTable({ users: visibleUsers }: { users: UserDto[] }) {
               </TableCell>
               {canManage ? (
                 <TableCell className="text-right">
-                  {user.id !== currentUserId ? (
-                    <Button size="sm" variant="ghost-destructive" onClick={() => setDeleteUser(user)}>
-                      <Trash2 className="h-4 w-4" />删除
-                    </Button>
+                  {user.id !== viewer?.id ? (
+                    <DeleteUserButton
+                      availability={userActionAvailability(viewer, user, allUsers).delete}
+                      onDelete={() => setDeleteUser(user)}
+                    />
                   ) : null}
                 </TableCell>
               ) : null}

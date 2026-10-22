@@ -28,6 +28,7 @@ import { api } from '../../lib/api.js';
 import { useInvalidateContainer } from '../../lib/container-queries.js';
 import { queryKeys } from '../../lib/query-keys.js';
 import { scopedPath } from '../../lib/scoped-paths.js';
+import { liveServerAccess } from '../../lib/effective-access.js';
 
 export function LimitsDialog({
   container,
@@ -51,16 +52,16 @@ export function LimitsDialog({
     queryFn: () => api.get<EffectiveAccessDto>('/me/access'),
     enabled: !admin && Boolean(container.serverId),
   });
-  const serverAccess = admin ? undefined : accessQuery.data?.servers.find((row) => row.serverId === container.serverId);
+  const serverAccess = admin ? undefined : liveServerAccess(accessQuery.data?.servers).find((row) => row.serverId === container.serverId);
   const gpuPciAddresses = serverAccess?.gpuPciAddresses ?? null;
   const updateLimits = useActionMutation({
-    mutationFn: (body: PatchContainerLimitsRequest) => api.patch<IntentAcceptedDto>(`${base}/limits`, body),
+    mutationFn: (body: PatchContainerLimitsRequest) => api.patch<IntentAcceptedDto>(scopedPath(`${base}/limits`, scope), body),
     successTitle: '已提交规格更新，正在生效',
     errorTitle: '规格更新失败',
     onSuccess: invalidate,
   });
   const updateGpus = useActionMutation({
-    mutationFn: (pciAddresses: string[]) => api.patch<IntentAcceptedDto>(`${base}/gpus`, { pciAddresses }),
+    mutationFn: (pciAddresses: string[]) => api.patch<IntentAcceptedDto>(scopedPath(`${base}/gpus`, scope), { pciAddresses }),
     successTitle: '已提交 GPU 更新，正在生效',
     errorTitle: 'GPU 更新失败',
     onSuccess: invalidate,
@@ -91,7 +92,7 @@ export function LimitsDialog({
             value={memGib}
             onChange={setMemGib}
             hint={Number.isFinite(memBytes)
-              ? `${approxGibHint(memBytes)}；内存额度按你在这台服务器上所有容器的合计计算`
+              ? `${approxGibHint(memBytes)}；内存额度按你在这台服务器上运行中容器的合计计算，增加运行中容器的内存时检查`
               : undefined}
           />
           <Button
@@ -141,7 +142,7 @@ export function RootSizeDialog({
   const invalidate = useInvalidateContainer(scope, container.id);
   const resizeRoot = useActionMutation({
     mutationFn: (body: PatchContainerRootSizeRequest) =>
-      api.patch<IntentAcceptedDto>(`/containers/${container.id}/root-size`, body),
+      api.patch<IntentAcceptedDto>(scopedPath(`/containers/${container.id}/root-size`, scope), body),
     successTitle: '已提交系统盘调整，正在生效',
     errorTitle: '系统盘调整失败',
     onSuccess: invalidate,

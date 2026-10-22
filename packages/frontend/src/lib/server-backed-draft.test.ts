@@ -48,16 +48,16 @@ describe('server-backed draft', () => {
   });
 
   it('compares primitive arrays structurally across refreshed snapshots', () => {
-    let draft = createServerBackedDraft({ capabilities: ['a'], description: 'old' });
+    let draft = createServerBackedDraft({ tags: ['a'], description: 'old' });
     draft = editServerBackedDraft(draft, 'description', 'local');
-    draft = mergeServerBackedDraft(draft, { capabilities: ['a'], description: 'old' });
+    draft = mergeServerBackedDraft(draft, { tags: ['a'], description: 'old' });
     expect(draft.dirtyFields).toEqual(new Set(['description']));
     expect(draft.conflictFields.size).toBe(0);
 
-    draft = editServerBackedDraft(draft, 'capabilities', ['a', 'b']);
-    draft = mergeServerBackedDraft(draft, { capabilities: ['a', 'c'], description: 'old' });
-    expect(draft.values.capabilities).toEqual(['a', 'b']);
-    expect(draft.conflictFields).toEqual(new Set(['capabilities']));
+    draft = editServerBackedDraft(draft, 'tags', ['a', 'b']);
+    draft = mergeServerBackedDraft(draft, { tags: ['a', 'c'], description: 'old' });
+    expect(draft.values.tags).toEqual(['a', 'b']);
+    expect(draft.conflictFields).toEqual(new Set(['tags']));
   });
 
   it('keeps a settings save on R1 until the R2 values and revision merge atomically', () => {

@@ -4,12 +4,13 @@ import {
   ContainerPhase,
   ContainerPowerIntent,
   IntentKind,
+  Role,
 } from '@nyabase/common';
-import { systemActor } from '../iam/actor.js';
+import { SYSTEM_ACTOR } from '../iam/actor.js';
 import { testActor } from '../iam/actor.test-helper.js';
 import { UserServerResourcePurgeService } from './user-server-resource-purge.service.js';
 
-const SYSTEM = systemActor('system-actor');
+const SYSTEM = SYSTEM_ACTOR;
 
 function createService() {
   const transactions = {
@@ -39,7 +40,7 @@ function createService() {
       resourceId: 'container-1',
       placementServerId: 'server-1',
       serverId: 'server-1',
-      workerId: 'system-actor',
+      workerId: 'access-lapse',
     }),
     release: vi.fn().mockResolvedValue(true),
   };
@@ -99,10 +100,11 @@ describe('UserServerResourcePurgeService grant expiry actions', () => {
       SYSTEM,
       'container-1',
       'stop',
+      'all',
     );
     expect(fixture.audit.append).toHaveBeenCalledWith(
       {},
-      'system-actor',
+      null,
       AuditAction.ExpiryStopContainers,
       'user-1',
       'user',
@@ -118,13 +120,13 @@ describe('UserServerResourcePurgeService grant expiry actions', () => {
       resourceId: 'container-1',
       placementServerId: 'server-1',
       serverId: 'server-1',
-      workerId: 'system-actor',
+      workerId: 'access-lapse',
     });
     expect(fixture.reconcileClaims.release).toHaveBeenCalledWith({
       resourceType: 'container',
       resourceId: 'container-1',
       placementServerId: 'server-1',
-      workerId: 'system-actor',
+      workerId: 'access-lapse',
     });
   });
 
@@ -256,10 +258,11 @@ describe('UserServerResourcePurgeService grant expiry actions', () => {
       SYSTEM,
       'container-1',
       'delete',
+      'all',
     );
     expect(fixture.audit.append).toHaveBeenCalledWith(
       transaction,
-      'system-actor',
+      null,
       AuditAction.ExpiryPurgeResources,
       'pool-1',
       'storage_pool',
@@ -332,21 +335,22 @@ describe('UserServerResourcePurgeService grant expiry actions', () => {
       SYSTEM,
       'container-1',
       'delete',
+      'all',
     );
     expect(fixture.containers.action.mock.invocationCallOrder[0])
       .toBeLessThan(fixture.intents.ensurePending.mock.invocationCallOrder[0]);
   });
 
-  it('audits operator purges separately from expiry cleanup', async () => {
+  it('audits administrator purges separately from expiry cleanup', async () => {
     const adminFixture = createService();
     adminFixture.containerRepository.list.mockResolvedValue([]);
     adminFixture.volumes.list.mockResolvedValue([]);
 
-    await adminFixture.service.purge(testActor('operator-1'), 'user-1', 'server-1');
+    await adminFixture.service.purge(testActor('admin-1', Role.Admin), 'user-1', 'server-1');
 
     expect(adminFixture.audit.append).toHaveBeenCalledWith(
       {},
-      'operator-1',
+      'admin-1',
       'user.server.purge_resources',
       'user-1',
       'user',
@@ -357,11 +361,11 @@ describe('UserServerResourcePurgeService grant expiry actions', () => {
     expiryFixture.containerRepository.list.mockResolvedValue([]);
     expiryFixture.volumes.list.mockResolvedValue([]);
 
-    await expiryFixture.service.purge(systemActor('operator-1'), 'user-1', 'server-1');
+    await expiryFixture.service.purge(SYSTEM, 'user-1', 'server-1');
 
     expect(expiryFixture.audit.append).toHaveBeenCalledWith(
       {},
-      'operator-1',
+      null,
       AuditAction.ExpiryPurgeResources,
       'user-1',
       'user',
@@ -450,7 +454,7 @@ describe('UserServerResourcePurgeService grant expiry actions', () => {
     expect(leaked.fixture.intents.ensurePending).not.toHaveBeenCalled();
     expect(leaked.fixture.audit.append).toHaveBeenCalledWith(
       expect.anything(),
-      'system-actor',
+      null,
       AuditAction.DeleteVolume,
       'volume-3',
       'volume',

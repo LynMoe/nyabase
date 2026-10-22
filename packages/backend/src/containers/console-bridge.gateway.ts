@@ -9,26 +9,38 @@ import * as http from 'node:http';
 import { URL } from 'node:url';
 import { WebSocket, WebSocketServer, type RawData } from 'ws';
 import { AuthService } from '../iam/auth.service.js';
+import { SessionRevocationService } from '../iam/session-revocation.service.js';
 import { INCUS_CLIENT_FACTORY, type IncusClientFactory } from '../incus/incus-client.factory.js';
 import type { IncusExecWebSocketSession } from '../incus/index.js';
 import { ConsoleSessionService, type ConsoleSession } from './console-session.service.js';
 
 const MAX_CONSOLE_FRAME_BYTES = 256 * 1024;
 const AUTH_TIMEOUT_MS = 10_000;
+/**
+ * Close code sent when the user's sessions were revoked (disabled, deleted,
+ * role changed, password changed or reset) while the console was open.
+ */
+export const CONSOLE_CLOSE_SESSION_REVOKED = 4401;
 
 @Injectable()
 export class ConsoleBridgeGateway implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(ConsoleBridgeGateway.name);
   private wss: WebSocketServer | null = null;
   private destroyed = false;
+  /** Open (claimed) console sockets by user, closed on revocation. */
+  private readonly openByUser = new Map<string, Set<WebSocket>>();
+  private unsubscribe: (() => void) | null = null;
 
   constructor(
     private readonly auth: AuthService,
     private readonly sessions: ConsoleSessionService,
     @Inject(INCUS_CLIENT_FACTORY) private readonly clients: IncusClientFactory,
+    private readonly revocations: SessionRevocationService,
   ) {}
 
-  onModuleInit(): void {}
+  onModuleInit(): void {
+    this.unsubscribe = this.revocations.subscribe((userId) => this.closeForUser(userId));
+  }
 
   attachToHttpServer(server: http.Server): void {
     this.wss = new WebSocketServer({
@@ -54,6 +66,8 @@ export class ConsoleBridgeGateway implements OnModuleInit, OnModuleDestroy {
 
   onModuleDestroy(): void {
     this.destroyed = true;
+    this.unsubscribe?.();
+    this.unsubscribe = null;
     this.wss?.close();
     this.wss = null;
   }
@@ -77,23 +91,59 @@ export class ConsoleBridgeGateway implements OnModuleInit, OnModuleDestroy {
       socket.close(1012);
       return;
     }
+    // Armed before any further await so an early close is never missed.
+    const closed = new Promise<void>((resolve) => {
+      if (socket.readyState === WebSocket.CLOSED) resolve();
+      else socket.once('close', () => resolve());
+    });
+    this.register(user.id, socket);
     let physical: IncusExecWebSocketSession | undefined;
     try {
+      // A revocation between session creation and registration was missed by
+      // the listener; the generation recorded at creation catches it.
+      if (this.sessions.isRevoked(session)) {
+        this.closeRevoked(socket);
+        return;
+      }
       const client = await this.clients.get(session.serverId);
       physical = await this.sessions.openExec(client, session.instanceName, session.command, {
         width: session.cols,
         height: session.rows,
         tty: session.tty,
       });
+      if (socket.readyState !== WebSocket.OPEN) return;
       socket.send(JSON.stringify({ type: 'ready' }));
       this.pipePhysical(socket, physical, session);
       socket.on('message', (raw) => this.handleBrowserFrame(socket, physical!, raw));
-      await new Promise<void>((resolve) => {
-        socket.once('close', () => resolve());
-      });
+      await closed;
     } finally {
       physical?.close();
+      this.unregister(user.id, socket);
       this.sessions.release(sessionId);
+    }
+  }
+
+  private register(userId: string, socket: WebSocket): void {
+    const sockets = this.openByUser.get(userId) ?? new Set<WebSocket>();
+    sockets.add(socket);
+    this.openByUser.set(userId, sockets);
+  }
+
+  private unregister(userId: string, socket: WebSocket): void {
+    const sockets = this.openByUser.get(userId);
+    if (!sockets) return;
+    sockets.delete(socket);
+    if (sockets.size === 0) this.openByUser.delete(userId);
+  }
+
+  private closeForUser(userId: string): void {
+    for (const socket of this.openByUser.get(userId) ?? []) this.closeRevoked(socket);
+  }
+
+  private closeRevoked(socket: WebSocket): void {
+    this.sendError(socket, 'CONSOLE_SESSION_REVOKED', new Error('The session was revoked'));
+    if (socket.readyState === WebSocket.OPEN || socket.readyState === WebSocket.CONNECTING) {
+      socket.close(CONSOLE_CLOSE_SESSION_REVOKED, 'session revoked');
     }
   }
 

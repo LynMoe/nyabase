@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { Capability, UserStatus } from '@nyabase/common';
+import { Role, UserStatus } from '@nyabase/common';
 import { describe, expect, it } from 'vitest';
 import { withPostgresTestDatabase } from '../platform/persistence-pg/postgres-test-harness.js';
 import { UsersService } from './users.service.js';
@@ -15,13 +15,10 @@ describePg('Admin user bulk projection', () => {
         id: groupId,
         name: 'Projection group',
         description: null,
-        is_system: false,
-        system_key: null,
-        capabilities: [Capability.ManageUsers],
         revision: 1,
       }).execute();
       const rows = [
-        userRow(randomUUID(), 1001, 'listed-active', UserStatus.Active),
+        userRow(randomUUID(), 1001, 'listed-active', UserStatus.Active, Role.Operator),
         userRow(randomUUID(), 1002, 'listed-disabled', UserStatus.Disabled),
         userRow(randomUUID(), 1003, 'listed-deleting', UserStatus.Deleting),
         userRow(randomUUID(), 1004, 'listed-deleted', UserStatus.Deleted),
@@ -42,6 +39,7 @@ describePg('Admin user bulk projection', () => {
         undefined as never,
         undefined as never,
         undefined as never,
+        undefined as never,
       );
       const listed = await service.listDtos();
       expect(listed.map((user) => user.username)).toEqual([
@@ -50,8 +48,10 @@ describePg('Admin user bulk projection', () => {
         'listed-disabled',
       ]);
       expect(listed.some((user) => user.status === UserStatus.Deleted)).toBe(false);
-      expect(listed.find((user) => user.username === 'listed-active')?.capabilities)
-        .toEqual([Capability.ManageUsers]);
+      const active = listed.find((user) => user.username === 'listed-active');
+      expect(active?.role).toBe(Role.Operator);
+      expect(active?.groups).toEqual([{ id: groupId, name: 'Projection group' }]);
+      expect(listed.find((user) => user.username === 'listed-disabled')?.role).toBe(Role.User);
     });
   });
 });

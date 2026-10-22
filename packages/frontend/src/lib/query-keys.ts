@@ -11,6 +11,7 @@ export const queryKeys = {
   systemSettings: ['system-settings'] as const,
   catalog: { users: ['catalog', 'users'] as const },
   sshKeys: (userId: string) => ['ssh-keys', userId] as const,
+  apiTokens: (userId: string) => ['api-tokens', userId] as const,
   audit: {
     list: (pageSize: number, offset: number, filter: { action?: string; targetType?: string } = {}) =>
       ['audit', pageSize, offset, filter.action ?? null, filter.targetType ?? null] as const,

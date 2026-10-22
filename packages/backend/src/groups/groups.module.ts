@@ -4,13 +4,12 @@ import { GrantsService } from './grants.service.js';
 import { GroupsController } from './groups.controller.js';
 import { GroupsService } from './groups.service.js';
 import { MeAccessController } from './me-access.controller.js';
-import { SystemGroupsService } from './system-groups.service.js';
 import { UserGrantsController } from './user-grants.controller.js';
 
 @Module({
   imports: [GpuModule],
-  providers: [GroupsService, GrantsService, SystemGroupsService],
+  providers: [GroupsService, GrantsService],
   controllers: [GroupsController, UserGrantsController, MeAccessController],
-  exports: [GroupsService, GrantsService, SystemGroupsService],
+  exports: [GroupsService, GrantsService],
 })
 export class GroupsModule {}

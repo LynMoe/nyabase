@@ -1,16 +1,18 @@
 use anyhow::Result;
 use proxy_common::clock::now_ms;
+use proxy_common::conn_limit::ConnectionLimiter;
 use proxy_common::supervise::{spawn_supervised, supervise_until_shutdown};
 use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
 use std::time::Instant;
-use tokio::sync::{mpsc, Semaphore};
+use tokio::sync::mpsc;
 use tokio::task::JoinSet;
 
 mod config;
 mod control;
 mod listener;
 mod protocol;
+mod relay;
 mod request;
 mod runtime;
 mod snapshot;
@@ -41,6 +43,7 @@ async fn main() -> Result<()> {
         http_listen: config.http_listen.clone(),
         https_listen: config.https_listen.clone(),
         started_at: Instant::now(),
+        limits: config.limits,
         connected_at: AtomicU64::new(0),
         last_snapshot_generation: AtomicU64::new(0),
         last_snapshot_at: AtomicU64::new(0),
@@ -49,7 +52,9 @@ async fn main() -> Result<()> {
         total_rejected_requests: AtomicU64::new(0),
     });
     let (status_tx, status_rx) = mpsc::channel(32);
-    let connection_slots = Arc::new(Semaphore::new(config.max_connections));
+    // HTTP and HTTPS listeners share one pool so the caps are per process.
+    let connection_slots =
+        ConnectionLimiter::new(config.max_connections, config.max_connections_per_ip);
     let mut tasks = JoinSet::new();
 
     spawn_supervised(

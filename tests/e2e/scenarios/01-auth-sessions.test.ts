@@ -1,7 +1,7 @@
 // Login, refresh rotation, logout, API tokens and account lifecycle.
 import assert from 'node:assert/strict';
 import { after, before, describe, it } from 'node:test';
-import { UserStatus, type UserDto } from '@nyabase/common';
+import { Role, UserStatus, type CreateApiTokenRequest, type UserDto } from '@nyabase/common';
 import { Api, ApiError, login, refresh } from '../client/api.js';
 import { Harness, type TestUser } from '../client/harness.js';
 
@@ -43,7 +43,7 @@ describe('auth and sessions', () => {
     const me = await h.api.get<UserDto>('/auth/me');
     assert.equal(me.username, h.state.admin.username);
     assert.equal(me.status, UserStatus.Active);
-    assert.ok(me.capabilities.length > 0, 'admin holds capabilities');
+    assert.equal(me.role, Role.Admin);
   });
 
   it('rotates the refresh cookie and invalidates it on logout', async () => {
@@ -64,9 +64,19 @@ describe('auth and sessions', () => {
 
   it('issues, uses and revokes an API token', async () => {
     const api = user.session.api;
-    const created = await api.post<{ token: { id: string }; secret: string }>('/auth/tokens', { name: 'e2e' });
+    assert.equal(await api.status('POST', '/auth/tokens', { name: 'e2e' }), 400,
+      'minting a token needs the current password');
+    assert.equal(await api.status('POST', '/auth/tokens', {
+      name: 'e2e', currentPassword: 'definitely-wrong',
+    } satisfies CreateApiTokenRequest), 403, 'a wrong current password is not a session failure');
+    const created = await api.post<{ token: { id: string }; secret: string }>('/auth/tokens', {
+      name: 'e2e', currentPassword: user.password,
+    } satisfies CreateApiTokenRequest);
     const viaToken = new Api(h.state.baseUrl, created.secret);
     assert.equal((await viaToken.get<UserDto>('/auth/me')).id, user.id);
+    assert.equal(await viaToken.status('POST', '/auth/tokens', {
+      name: 'e2e-child', currentPassword: user.password,
+    } satisfies CreateApiTokenRequest), 403, 'an API token cannot mint another one');
     const listed = await api.get<{ id: string }[]>('/auth/tokens');
     assert.ok(listed.some((token) => token.id === created.token.id));
     await api.delete(`/auth/tokens/${created.token.id}`);
@@ -83,12 +93,42 @@ describe('auth and sessions', () => {
     assert.equal(await api.status('GET', '/servers?scope=all'), 403);
   });
 
+  it('keeps role changes and the last active admin guarded', async () => {
+    const operator = await h.newUser('operator', Role.Operator);
+    assert.equal((await h.api.get<UserDto>(`/users/${operator.id}`)).role, Role.Operator);
+    assert.equal(await operator.session.api.status('GET', '/users'), 200, 'operators may list users');
+    assert.equal(await operator.session.api.status('GET', '/admin/groups'), 200, 'operators may view groups');
+    assert.equal(await operator.session.api.status('POST', '/users', {
+      username: 'nope-nope', password: 'password-123', displayName: 'x',
+    }), 403, 'only admins create users');
+    assert.equal(await operator.session.api.status('PATCH', `/users/${user.id}`, { role: Role.Admin }), 403);
+    assert.equal(await user.session.api.status('PATCH', `/users/${user.id}`, { role: Role.Admin }), 403,
+      'nobody promotes themselves');
+
+    await h.api.patch(`/users/${operator.id}`, { role: Role.User });
+    assert.equal(await operator.session.api.status('GET', '/users'), 403, 'a demotion applies to the next request');
+
+    const me = await h.api.get<UserDto>('/auth/me');
+    const admins = (await h.api.get<UserDto[]>('/users'))
+      .filter((entry) => entry.role === Role.Admin && entry.status === UserStatus.Active);
+    if (admins.length === 1) {
+      assert.equal(await h.api.status('PATCH', `/users/${me.id}`, { role: Role.User }), 403,
+        'the last active admin cannot be demoted');
+      assert.equal(await h.api.status('DELETE', `/users/${me.id}`), 403, 'nor deleted');
+    }
+  });
+
   it('changes a password with the current one and locks out a disabled user', async () => {
     const next = `${user.password}-next`;
     const api = user.session.api;
+    const token = await api.post<{ secret: string }>('/auth/tokens', {
+      name: 'before-password-change', currentPassword: user.password,
+    } satisfies CreateApiTokenRequest);
     assert.equal(await api.status('PATCH', `/users/${user.id}`, { password: next }), 400,
       'a password change without currentPassword is refused');
     await api.patch(`/users/${user.id}`, { password: next, currentPassword: user.password });
+    assert.equal(await new Api(h.state.baseUrl, token.secret).status('GET', '/auth/me'), 401,
+      'a password change deletes the API tokens');
     assert.equal((await failure(login(h.state.baseUrl, user.username, user.password))).status, 401);
     const session = await login(h.state.baseUrl, user.username, next);
 

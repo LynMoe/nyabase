@@ -1,5 +1,4 @@
 import { Inject, Injectable } from '@nestjs/common';
-import { Capability } from '@nyabase/common';
 import { sql, type Kysely } from 'kysely';
 import { deriveInstanceName, IncusError, type IncusSchema } from '../incus/index.js';
 import type { NyabaseDatabase } from '../platform/persistence-pg/database.types.js';
@@ -141,7 +140,6 @@ export class ContainerReconcileStore {
     const owners = new Map(rows.map((row) => [row.id, row.owner_id]));
     return new Map(containerIds.map((id) => [id, {
       ownerId: owners.get(id) ?? null,
-      adminCapability: Capability.ManageContainersAny,
     }]));
   }
 

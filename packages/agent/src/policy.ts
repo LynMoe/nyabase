@@ -6,6 +6,24 @@ import {
   MANAGED_VOLUME_NAME_PATTERN,
   type AgentIncusHttpMethod,
 } from '@nyabase/common';
+import {
+  IMAGE_ALIAS_FIELDS,
+  IMAGE_PULL_FIELDS,
+  IMAGE_SOURCE_FIELDS,
+  INSTANCE_CREATE_FIELDS,
+  INSTANCE_EXEC_FIELDS,
+  INSTANCE_RENAME_FIELDS,
+  INSTANCE_SOURCE_FIELDS,
+  INSTANCE_STATE_FIELDS,
+  INSTANCE_UPDATE_FIELDS,
+  VOLUME_CREATE_FIELDS,
+  VOLUME_UPDATE_FIELDS,
+  fieldsProblem,
+  isRecord,
+  jsonBody,
+  serialize,
+  type FieldSchema,
+} from './policy-body.js';
 
 /*
  * What the Backend may ask the local Incus to do. The agent is the boundary:
@@ -17,7 +35,11 @@ import {
 export type PolicyVerdict =
   | {
     readonly allowed: true;
-    /** The body to send instead: volatile.* keys forced back to what Incus holds. */
+    /**
+     * The only body the agent forwards; absent means none. JSON bodies are
+     * re-serialized from the checked object (see policy-body.ts), with
+     * volatile.* keys forced back to what Incus holds.
+     */
     readonly body?: Buffer;
   }
   | { readonly allowed: false; readonly reason: string };
@@ -33,6 +55,7 @@ export type CurrentDocumentReader = (path: string) => Promise<Record<string, unk
 
 const ALLOW: PolicyVerdict = { allowed: true };
 const deny = (reason: string): PolicyVerdict => ({ allowed: false, reason });
+const forward = (body: Record<string, unknown>): PolicyVerdict => ({ allowed: true, body: serialize(body) });
 
 const PROBE_INSTANCE_PATTERN = /^nyabase-preflight-[0-9a-f]{32}$/;
 const IMAGE_FINGERPRINT_PATTERN = /^[0-9a-f]{64}$/;
@@ -47,11 +70,16 @@ interface ParsedPath {
   readonly query: URLSearchParams;
 }
 
-/** Split and decode an Incus API path; refuses traversal and encoded separators outside aliases. */
+/**
+ * Split and decode an Incus API path; refuses traversal and encoded separators
+ * outside aliases. The agent forwards the path as given, so a second `?`
+ * (whose tail Incus would read as query but a split here would drop) is refused.
+ */
 export function parseIncusPath(path: string): ParsedPath | undefined {
-  const [rawPath, rawQuery = ''] = path.split('?', 2) as [string, string?];
+  const [rawPath = '', rawQuery = '', ...extra] = path.split('?');
   if (
-    !rawPath.startsWith('/1.0')
+    extra.length > 0
+    || !rawPath.startsWith('/1.0')
     || /[\u0000-\u001f\u007f\\#]/.test(path)
     || /%2e|%5c|%00/i.test(rawPath)
     || rawPath.split('/').some((segment) => segment === '.' || segment === '..')
@@ -136,16 +164,7 @@ async function checkInstances(
   if (rest.length === 0) {
     if (method === 'GET') return ALLOW;
     if (method !== 'POST') return deny('instance collection only supports list and create');
-    const body = jsonBody(request.body);
-    if (!body) return deny('instance create needs a JSON body');
-    if (!isManagedInstance(stringField(body, 'name'))) return deny('only nyabase instances may be created');
-    if (body.type !== undefined && body.type !== 'container') return deny('only containers may be created');
-    const source = body.source;
-    if (!isRecord(source) || source.type !== 'image') return deny('instances may only be created from an image');
-    if (isRecord(body.config) && Object.keys(body.config).some((key) => key.startsWith('volatile.'))) {
-      return deny('volatile keys may not be set on create');
-    }
-    return checkInstanceDocument(body, { full: true });
+    return checkInstanceCreate(request.body);
   }
   const [name, leaf, ...tail] = rest;
   if (!isManagedInstance(name)) return deny('only nyabase instances are reachable');
@@ -153,14 +172,16 @@ async function checkInstances(
   const instancePath = `/1.0/instances/${encodeURIComponent(name!)}`;
   if (leaf === undefined) {
     if (method === 'GET' || method === 'DELETE') return ALLOW;
+    if (method === 'POST') {
+      return checkJson(request.body, INSTANCE_RENAME_FIELDS, 'instance rename', (body) =>
+        isManagedInstance(stringField(body, 'name'))
+          ? forward(body)
+          : deny('instances may only be renamed to another nyabase name'));
+    }
     const body = jsonBody(request.body);
     if (!body) return deny('instance update needs a JSON body');
-    if (method === 'POST') {
-      if (body.migration === true || body.live === true) return deny('instance migration is refused');
-      return isManagedInstance(stringField(body, 'name')) && Object.keys(body).every((key) => key === 'name')
-        ? ALLOW
-        : deny('instances may only be renamed to another nyabase name');
-    }
+    const problem = fieldsProblem(body, INSTANCE_UPDATE_FIELDS, 'instance');
+    if (problem) return deny(problem);
     const current = await readCurrent(instancePath);
     if (!current) return deny('instance to update does not exist');
     const verdict = checkInstanceDocument(body, { full: method === 'PUT' });
@@ -171,16 +192,52 @@ async function checkInstances(
     case 'state':
       if (method === 'GET') return ALLOW;
       if (method !== 'PUT') return deny('instance state only supports read and change');
-      return POWER_ACTIONS.has(String(jsonBody(request.body)?.action)) ? ALLOW : deny('unknown power action');
+      return checkJson(request.body, INSTANCE_STATE_FIELDS, 'instance state', (body) =>
+        POWER_ACTIONS.has(String(body.action)) ? forward(body) : deny('unknown power action'));
     case 'exec':
-      return method === 'POST' ? ALLOW : deny('exec only supports POST');
+      if (method !== 'POST') return deny('exec only supports POST');
+      return checkJson(request.body, INSTANCE_EXEC_FIELDS, 'exec', (body) =>
+        body.command === undefined ? deny('exec needs a command') : forward(body));
     case 'files':
-      return method === 'GET' || method === 'POST' || method === 'DELETE'
-        ? ALLOW
+      if (method === 'GET' || method === 'DELETE') return ALLOW;
+      // File content is opaque bytes for Incus, not a document it decodes.
+      return method === 'POST'
+        ? { allowed: true, body: request.body }
         : deny('instance files support read, write and delete');
     default:
       return deny(`instance ${leaf} is not reachable through the agent`);
   }
+}
+
+function checkInstanceCreate(raw: Buffer | undefined): PolicyVerdict {
+  const body = jsonBody(raw);
+  if (!body) return deny('instance create needs a JSON body');
+  const problem = fieldsProblem(body, INSTANCE_CREATE_FIELDS, 'instance');
+  if (problem) return deny(problem);
+  if (!isManagedInstance(stringField(body, 'name'))) return deny('only nyabase instances may be created');
+  if (body.type !== undefined && body.type !== 'container') return deny('only containers may be created');
+  const source = body.source;
+  if (!isRecord(source) || source.type !== 'image') return deny('instances may only be created from an image');
+  const sourceProblem = fieldsProblem(source, INSTANCE_SOURCE_FIELDS, 'instance source');
+  if (sourceProblem) return deny(sourceProblem);
+  if (isRecord(body.config) && Object.keys(body.config).some((key) => key.startsWith('volatile.'))) {
+    return deny('volatile keys may not be set on create');
+  }
+  const verdict = checkInstanceDocument(body, { full: true });
+  return verdict.allowed ? forward(body) : verdict;
+}
+
+/** Parse a JSON body, hold it to `schema`, then let `check` decide on the parsed object. */
+function checkJson(
+  raw: Buffer | undefined,
+  schema: FieldSchema,
+  label: string,
+  check: (body: Record<string, unknown>) => PolicyVerdict,
+): PolicyVerdict {
+  const body = jsonBody(raw);
+  if (!body) return deny(`${label} needs a JSON body`);
+  const problem = fieldsProblem(body, schema, label);
+  return problem ? deny(problem) : check(body);
 }
 
 interface DocumentCheckOptions {
@@ -197,13 +254,14 @@ function withCurrentVolatile(
   body: Record<string, unknown>,
   current: Readonly<Record<string, string>>,
 ): PolicyVerdict {
-  if (!isRecord(body.config)) return ALLOW;
-  const config: Record<string, unknown> = {};
-  for (const [key, value] of Object.entries(body.config)) {
-    if (!key.startsWith('volatile.')) config[key] = value;
-    else if (current[key] !== undefined) config[key] = current[key];
-  }
-  return { allowed: true, body: Buffer.from(JSON.stringify({ ...body, config })) };
+  if (!isRecord(body.config)) return forward(body);
+  const config = Object.fromEntries(
+    Object.entries(body.config).flatMap(([key, value]): [string, unknown][] => {
+      if (!key.startsWith('volatile.')) return [[key, value]];
+      return Object.hasOwn(current, key) ? [[key, current[key]]] : [];
+    }),
+  );
+  return forward({ ...body, config });
 }
 
 export function checkInstanceDocument(
@@ -216,6 +274,7 @@ export function checkInstanceDocument(
     }
   }
   if (body.ephemeral === true) return deny('ephemeral instances are refused');
+  if (body.stateful === true) return deny('stateful instances are refused');
   if (body.config !== undefined || options.full) {
     if (!isRecord(body.config)) return deny('instance config must be an object');
     const verdict = checkInstanceConfig(body.config, options);
@@ -344,16 +403,18 @@ async function checkStoragePools(
     if (method !== 'POST') return deny('volume collection only supports create');
     const body = jsonBody(request.body);
     if (!body) return deny('volume create needs a JSON body');
+    const problem = fieldsProblem(body, VOLUME_CREATE_FIELDS, 'volume');
+    if (problem) return deny(problem);
     if (!MANAGED_VOLUME_NAME_PATTERN.test(stringField(body, 'name') ?? '')) {
       return deny('only nyabase volumes may be created');
     }
     if ((body.type ?? 'custom') !== 'custom') return deny('only custom volumes may be created');
     if ((body.content_type ?? 'filesystem') !== 'filesystem') return deny('only filesystem volumes may be created');
-    if (body.source !== undefined) return deny('volumes may not be copied or imported');
     if (isRecord(body.config) && Object.keys(body.config).some((key) => key.startsWith('volatile.'))) {
       return deny('volatile keys may not be set on create');
     }
-    return checkVolumeConfig(body.config ?? {});
+    const verdict = checkVolumeConfig(body.config ?? {});
+    return verdict.allowed ? forward(body) : verdict;
   }
   if (type !== 'custom' || !MANAGED_VOLUME_NAME_PATTERN.test(name ?? '')) {
     return deny('only nyabase custom volumes are writable');
@@ -362,6 +423,8 @@ async function checkStoragePools(
   if (method !== 'PUT' && method !== 'PATCH') return deny('volumes support update and delete');
   const body = jsonBody(request.body);
   if (!body) return deny('volume update needs a JSON body');
+  const problem = fieldsProblem(body, VOLUME_UPDATE_FIELDS, 'volume');
+  if (problem) return deny(problem);
   const current = await readCurrent(
     `/1.0/storage-pools/${encodeURIComponent(pool)}/volumes/custom/${encodeURIComponent(name!)}`,
   );
@@ -390,23 +453,27 @@ function checkImages(request: PolicyRequest, rest: readonly string[]): PolicyVer
   const { method } = request;
   if (method === 'GET') return ALLOW;
   if (rest[0] === 'aliases') {
-    return rest.length <= 2 ? ALLOW : deny('image alias path is too deep');
-  }
-  const body = method === 'DELETE' ? undefined : jsonBody(request.body);
-  if (rest.length === 0) {
-    if (method !== 'POST' || !body) return deny('image collection only supports remote pulls');
-    const source = body.source;
-    if (!isRecord(source) || source.type !== 'image' || typeof source.server !== 'string') {
-      return deny('images may only be pulled from a remote image server');
+    if (rest.length === 1 && method === 'POST') {
+      return checkJson(request.body, IMAGE_ALIAS_FIELDS, 'image alias', (body) =>
+        typeof body.name === 'string' && typeof body.target === 'string'
+          ? forward(body)
+          : deny('an image alias needs a name and a target'));
     }
-    return body.public === true ? deny('images must stay private') : ALLOW;
+    return rest.length === 2 && method === 'DELETE' ? ALLOW : deny('image aliases support create and delete');
+  }
+  if (rest.length === 0) {
+    if (method !== 'POST') return deny('image collection only supports remote pulls');
+    return checkJson(request.body, IMAGE_PULL_FIELDS, 'image', (body) => {
+      const source = body.source;
+      if (!isRecord(source) || source.type !== 'image' || typeof source.server !== 'string') {
+        return deny('images may only be pulled from a remote image server');
+      }
+      const problem = fieldsProblem(source, IMAGE_SOURCE_FIELDS, 'image source');
+      return problem ? deny(problem) : forward(body);
+    });
   }
   if (rest.length !== 1 || !IMAGE_FINGERPRINT_PATTERN.test(rest[0]!)) return deny('image path is malformed');
-  if (method === 'DELETE') return ALLOW;
-  if ((method === 'PUT' || method === 'PATCH') && body) {
-    return body.public === true ? deny('images must stay private') : ALLOW;
-  }
-  return deny('image update needs a JSON body');
+  return method === 'DELETE' ? ALLOW : deny('images support read and delete');
 }
 
 function checkOperations(method: AgentIncusHttpMethod, rest: readonly string[]): PolicyVerdict {
@@ -421,20 +488,6 @@ function checkOperations(method: AgentIncusHttpMethod, rest: readonly string[]):
     return ALLOW;
   }
   return deny('operations support read, wait and cancel');
-}
-
-function jsonBody(body: Buffer | undefined): Record<string, unknown> | undefined {
-  if (!body || body.byteLength === 0) return undefined;
-  try {
-    const parsed: unknown = JSON.parse(body.toString('utf8'));
-    return isRecord(parsed) ? parsed : undefined;
-  } catch {
-    return undefined;
-  }
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
 function stringField(record: Record<string, unknown>, key: string): string | undefined {

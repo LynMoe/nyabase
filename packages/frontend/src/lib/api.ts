@@ -238,7 +238,7 @@ async function runBootstrap(): Promise<void> {
     return;
   }
 
-  // Revalidate the in-memory principal (capabilities may have changed).
+  // Revalidate the in-memory principal (the role may have changed).
   const expectedEpoch = initial.epoch;
   const expectedAccessToken = initial.accessToken;
   let res: Response;
@@ -289,7 +289,7 @@ async function runBootstrap(): Promise<void> {
   if (isCurrent()) useAuthStore.getState().markCheckFailed(error.message);
 }
 
-/** Recover the session from the refresh cookie and refresh the current user's capability snapshot. */
+/** Recover the session from the refresh cookie and refresh the current user's role snapshot. */
 export function bootstrapAuthSession(): Promise<void> {
   if (bootstrapPromise) {
     bootstrapQueued = true;

@@ -11,7 +11,8 @@ import {
   UnauthorizedException,
 } from '@nestjs/common';
 import { AuthService } from './auth.service.js';
-import { CurrentUser, Public } from './decorators.js';
+import { CurrentActor, CurrentUser, Public } from './decorators.js';
+import type { Actor } from './actor.js';
 import type { UserRecord } from './auth-persistence.js';
 import { AccessResolverService } from './access-resolver.service.js';
 import { NyabaseConfigService } from '../platform/config/nyabase-config.service.js';
@@ -43,19 +44,16 @@ export class AuthController {
   }
 
   private async userToDto(
-    user: Pick<UserRecord, 'id' | 'username' | 'displayName' | 'status' | 'createdAt'>,
+    user: Pick<UserRecord, 'id' | 'username' | 'displayName' | 'status' | 'createdAt' | 'role'>,
   ): Promise<UserDto> {
-    const [capabilities, groups] = await Promise.all([
-      this.accessResolver.userCapabilities(user.id),
-      this.accessResolver.getUserGroupSummaries(user.id),
-    ]);
+    const groups = await this.accessResolver.getUserGroupSummaries(user.id);
     return {
       id: user.id,
       username: user.username,
       displayName: user.displayName,
       status: user.status,
       createdAt: user.createdAt.toISOString(),
-      capabilities: Array.from(capabilities),
+      role: user.role,
       groups,
     };
   }
@@ -140,9 +138,9 @@ export class AuthController {
   }
 
   @Post('tokens')
-  async createToken(@CurrentUser() user: UserRecord, @Body() body: unknown) {
-    const { name } = zCreateApiTokenRequest.parse(body);
-    const { entity, secret } = await this.authService.createApiToken(user.id, name);
+  async createToken(@CurrentActor() actor: Actor, @Body() body: unknown) {
+    const { name, currentPassword } = zCreateApiTokenRequest.parse(body);
+    const { entity, secret } = await this.authService.createApiToken(actor, name, currentPassword);
     return {
       token: { id: entity.id, name: entity.name, lastUsedAt: entity.lastUsedAt, createdAt: entity.createdAt },
       secret,

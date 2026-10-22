@@ -3,6 +3,7 @@ use crate::control::install_snapshot;
 use crate::request::read_request_head;
 use crate::snapshot::{SnapshotCertResolver, SnapshotStore};
 use crate::test_support::*;
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -105,4 +106,81 @@ async fn snapshot_expiry_interrupts_an_established_slow_request() {
         .to_string()
         .contains("authorization was revoked"));
     upstream.abort();
+}
+
+async fn connect_from(source: &str, target: std::net::SocketAddr) -> tokio::net::TcpStream {
+    let socket = tokio::net::TcpSocket::new_v4().unwrap();
+    socket.bind(format!("{source}:0").parse().unwrap()).unwrap();
+    socket.connect(target).await.unwrap()
+}
+
+async fn closed_without_reply(stream: &mut tokio::net::TcpStream) -> bool {
+    let mut byte = [0_u8; 1];
+    matches!(
+        time::timeout(Duration::from_secs(1), stream.read(&mut byte)).await,
+        Ok(Ok(0)) | Ok(Err(_))
+    )
+}
+
+#[tokio::test]
+async fn one_client_ip_cannot_take_more_than_its_share_of_connections() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let store = Arc::new(SnapshotStore::default());
+    let runtime = test_runtime();
+    let limiter = proxy_common::conn_limit::ConnectionLimiter::new(16, 2);
+    let server = tokio::spawn(serve_http(
+        listener,
+        store,
+        runtime.clone(),
+        limiter.clone(),
+        false,
+    ));
+
+    let first = connect_from("127.0.0.1", address).await;
+    let _second = connect_from("127.0.0.1", address).await;
+    time::timeout(Duration::from_secs(1), async {
+        while limiter.active_for("127.0.0.1".parse().unwrap()) < 2 {
+            time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap();
+
+    let mut third = connect_from("127.0.0.1", address).await;
+    assert!(closed_without_reply(&mut third).await);
+    assert!(runtime.total_rejected_requests.load(Ordering::Relaxed) >= 1);
+
+    // Another client address is still served.
+    let mut other = connect_from("127.0.0.2", address).await;
+    other
+        .write_all(b"GET / HTTP/1.1\r\nHost: unknown.example.test\r\n\r\n")
+        .await
+        .unwrap();
+    let mut response = Vec::new();
+    other.read_to_end(&mut response).await.unwrap();
+    assert!(String::from_utf8(response)
+        .unwrap()
+        .starts_with("HTTP/1.1 404 Not Found"));
+
+    // Closing a connection frees the slot for that address again.
+    drop(first);
+    time::timeout(Duration::from_secs(1), async {
+        while limiter.active_for("127.0.0.1".parse().unwrap()) >= 2 {
+            time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap();
+    let mut again = connect_from("127.0.0.1", address).await;
+    again
+        .write_all(b"GET / HTTP/1.1\r\nHost: unknown.example.test\r\n\r\n")
+        .await
+        .unwrap();
+    let mut response = Vec::new();
+    again.read_to_end(&mut response).await.unwrap();
+    assert!(String::from_utf8(response)
+        .unwrap()
+        .starts_with("HTTP/1.1 404 Not Found"));
+    server.abort();
 }

@@ -1,5 +1,4 @@
 import { Inject, Injectable, Logger } from '@nestjs/common';
-import { Capability } from '@nyabase/common';
 import { sql, type Kysely } from 'kysely';
 import { IncusError } from '../incus/index.js';
 import type { NyabaseDatabase } from '../platform/persistence-pg/database.types.js';
@@ -121,7 +120,7 @@ export class VolumeReconcileStore {
       ? []
       : await this.database
         .selectFrom('control.volumes')
-        .select(['id', 'owner_id', 'shared_backend_id'])
+        .select(['id', 'owner_id'])
         .where('id', 'in', volumeIds)
         .execute();
     const byId = new Map(rows.map((row) => [row.id, row]));
@@ -129,9 +128,6 @@ export class VolumeReconcileStore {
       const row = byId.get(id);
       return [id, {
         ownerId: row?.owner_id ?? null,
-        adminCapability: row?.shared_backend_id != null
-          ? Capability.ManageSharedVolumes
-          : Capability.ManageVolumes,
       }];
     }));
   }
@@ -497,6 +493,28 @@ export class VolumeReconcileStore {
       : undefined;
     if (!pool) return [];
     return [{ server_id: volume.server_id, pool_name: pool.incus_name }];
+  }
+
+  /**
+   * Whether anything could still destroy the data, online or not: the shared
+   * backend still has an executor pool, or the local volume's server and pool
+   * still exist. Only when nothing does is the destroy executor gone.
+   */
+  async hasAnyDestroyExecutor(volume: VolumeRecord): Promise<boolean> {
+    if (volume.shared_backend_id) {
+      const rows = await listEligibleDestroyExecutors(this.database, volume.shared_backend_id, {
+        includeOffline: true,
+      });
+      return rows.length > 0;
+    }
+    if (!volume.server_id || !volume.pool_id) return false;
+    const pool = await this.database
+      .selectFrom('infra.storage_pools')
+      .select('id')
+      .where('id', '=', volume.pool_id)
+      .where('server_id', '=', volume.server_id)
+      .executeTakeFirst();
+    return pool !== undefined;
   }
 
   /** Drop the logical volume once nothing tracks it any more, settling leftover intents. */

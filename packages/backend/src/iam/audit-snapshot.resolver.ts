@@ -44,12 +44,11 @@ export class AuditSnapshotResolver {
 
   private async group(executor: AuditExecutor, id: string) {
     const row = await executor.selectFrom('iam.groups')
-      .select(['name', 'description', 'is_system'])
+      .select(['name', 'description'])
       .where('id', '=', id)
       .executeTakeFirst();
     return row ? snapshot(id, 'group', row.name, {
       description: row.description,
-      isSystem: row.is_system,
     }) : null;
   }
 

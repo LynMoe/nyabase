@@ -1,0 +1,47 @@
+[Unit]
+Description=Nyabase SSH jump proxy (ssh -J into containers)
+Documentation=file:/opt/nyabase/deploy/OPERATIONS.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Users, keys, routes and the host key come from the Backend over the control
+# WebSocket (NYABASE_BACKEND_WS, wss:// unless the Backend is on loopback); the
+# proxy keeps no local state. A transient unprivileged user with no
+# capabilities: the default listen port 2222 needs none.
+DynamicUser=true
+User=nyabase-ssh-proxy
+EnvironmentFile=/etc/nyabase/ssh-proxy.env
+ExecStart=/usr/local/bin/nyabase-ssh-proxy
+# Restarting drops every live Jump session; see OPERATIONS.md before replacing
+# the binary.
+Restart=always
+RestartSec=2s
+# Each Jump session holds the client socket plus the guest socket.
+LimitNOFILE=65536
+NoNewPrivileges=true
+AmbientCapabilities=
+CapabilityBoundingSet=
+PrivateTmp=true
+PrivateDevices=true
+ProtectHome=true
+ProtectSystem=strict
+ProtectClock=true
+ProtectHostname=true
+ProtectKernelLogs=true
+ProtectKernelModules=true
+ProtectKernelTunables=true
+ProtectControlGroups=true
+ProtectProc=invisible
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+SystemCallArchitectures=native
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

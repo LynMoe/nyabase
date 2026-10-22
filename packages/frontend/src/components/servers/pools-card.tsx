@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { Pencil, RefreshCw, Server } from 'lucide-react';
 import {
-  Capability,
+  Role,
   type ServerDto,
   type StoragePoolDiscoverResult,
   type StoragePoolDto,
@@ -28,7 +28,7 @@ import { Input } from '../ui/input.js';
 import { FormField } from '../layout/form-field.js';
 import { toast } from '../../hooks/use-toast.js';
 import { useInvalidateServer, useServerPools, useUpdateServer } from '../../lib/server-queries.js';
-import { useAuthStore } from '../../store/auth.js';
+import { useHasRole } from '../../lib/use-role.js';
 import { usedTotalLabel } from '../../lib/utils.js';
 import { Label } from '../ui/label.js';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '../ui/select.js';
@@ -38,9 +38,7 @@ function poolLabel(pool: StoragePoolDto): string {
 }
 
 export function PoolsCard({ server }: { server: ServerDto }) {
-  const canManageStoragePools = useAuthStore(
-    (state) => state.user?.capabilities.includes(Capability.ManageStoragePools) ?? false,
-  );
+  const canManageStoragePools = useHasRole(Role.Admin);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const poolsQuery = useServerPools(server.id);
   const pools = poolsQuery.data ?? [];

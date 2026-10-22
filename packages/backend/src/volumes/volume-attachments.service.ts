@@ -14,6 +14,7 @@ import {
   IntentResourceType,
   type AttachVolumeRequest,
   type IntentAcceptedDto,
+  type ListScope,
   type VolumeAttachmentDto,
 } from '@nyabase/common';
 import type { Actor } from '../iam/actor.js';
@@ -39,6 +40,7 @@ import {
   assertSharedGrant,
   requireServerAccess,
 } from './volumes.repository.js';
+import { requireUserId } from '../iam/actor.js';
 
 type Tx = Transaction<NyabaseDatabase>;
 type ContainerRef = { id: string; owner_id: string; server_id: string };
@@ -77,7 +79,7 @@ export class VolumeAttachmentsService {
     volumes: readonly AttachVolumeRequest[],
   ): Promise<void> {
     for (const input of volumes) {
-      await this.bindAttachmentRow(transaction, actor.userId, 'owner', container, input, null);
+      await this.bindAttachmentRow(transaction, requireUserId(actor), 'owner', container, input, null);
     }
   }
 
@@ -86,13 +88,14 @@ export class VolumeAttachmentsService {
     containerId: string,
     input: AttachVolumeRequest,
     kind: VolumeKind,
+    scope: ListScope = 'mine',
   ): Promise<IntentAcceptedDto> {
-    const actorId = actor.userId;
+    const actorId = requireUserId(actor);
     const result = await this.transactions.run(async (transaction) => {
       const container = await transaction.selectFrom('control.containers').selectAll()
         .where('id', '=', containerId).forUpdate().executeTakeFirst();
       if (!container) throw new NotFoundException('Container not found');
-      const access = assertCanAttach(actor, container, kind);
+      const access = assertCanAttach(actor, container, scope);
       const revision = Number(container.revision) + 1;
       await transaction.updateTable('control.containers')
         .set({ revision, needs_attention: false })
@@ -282,8 +285,9 @@ export class VolumeAttachmentsService {
     attachmentId: string,
     expectedContainerId: string,
     kind: VolumeKind,
+    scope: ListScope = 'mine',
   ): Promise<unknown> {
-    const actorId = actor.userId;
+    const actorId = requireUserId(actor);
     const result = await this.transactions.run(async (transaction) => {
       const attachment = await this.repository.findAttachmentForUpdate(attachmentId, transaction);
       if (!attachment || attachment.container_id !== expectedContainerId) {
@@ -296,7 +300,7 @@ export class VolumeAttachmentsService {
       const container = await transaction.selectFrom('control.containers').selectAll()
         .where('id', '=', attachment.container_id).forUpdate().executeTakeFirst();
       if (!container) throw new NotFoundException('Container not found');
-      assertCanAttach(actor, container, kind);
+      assertCanAttach(actor, container, scope);
       await this.assertDetachableNow(transaction, attachment, container);
       await this.repository.setAttachmentBindState(attachmentId, 'detaching', transaction);
       const revision = Number(container.revision) + 1;

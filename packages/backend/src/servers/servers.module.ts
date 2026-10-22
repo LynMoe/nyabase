@@ -16,6 +16,7 @@ import { AgentPresenceService } from './agent-presence.service.js';
 import { ServerConnector } from './server-connector.js';
 import { ServerPreflightStore } from './server-preflight.store.js';
 import { ServerHealthService } from './server-health.service.js';
+import { ServerRecoveryService } from './server-recovery.service.js';
 import { ServerPreflightReconciler } from './server-preflight-reconciler.service.js';
 import { ServersController } from './servers.controller.js';
 import { ServersService } from './servers.service.js';
@@ -38,6 +39,7 @@ import { ServersService } from './servers.service.js';
     ServerPreflightStore,
     ServerConnector,
     ServerHealthService,
+    ServerRecoveryService,
     IncusPreflightChecksAdapter,
     ServerPreflightIntentService,
     AgentEnrollmentService,

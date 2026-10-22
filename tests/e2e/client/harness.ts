@@ -12,6 +12,7 @@ import {
   type CreateContainerRequest,
   type IntentAcceptedDto,
   type PutServerGrantRequest,
+  type Role,
   type SshPublicKeyDto,
   type UserDto,
 } from '@nyabase/common';
@@ -83,13 +84,15 @@ export class Harness {
     rmSync(this.dir, { recursive: true, force: true });
   }
 
-  async newUser(label: string): Promise<TestUser> {
+  /** Creates a user (role `user` unless given); deleted again on cleanup. */
+  async newUser(label: string, role?: Role): Promise<TestUser> {
     const username = this.name(label);
     const password = `pw-${randomBytes(9).toString('hex')}`;
     const created = await this.api.post<UserDto>('/users', {
       username,
       password,
       displayName: `e2e ${label}`,
+      ...(role ? { role } : {}),
     });
     this.defer(`delete user ${username}`, () => this.api.delete(`/users/${created.id}`));
     return { id: created.id, username, password, session: await login(this.state.baseUrl, username, password) };
@@ -169,6 +172,15 @@ export class Harness {
     }, { timeoutMs: 420_000, what: `container ${body.name} to become ready` });
   }
 
+  /**
+   * `?scope=all` is the explicit administrator override for acting on someone
+   * else's resource; the harness's own (administrator) client always sends it,
+   * users' clients never do.
+   */
+  private scoped(api: Api, path: string): string {
+    return api === this.api ? `${path}${path.includes('?') ? '&' : '?'}scope=all` : path;
+  }
+
   /** Polls the container until `predicate` holds; a failed container aborts the wait. */
   async waitContainer(
     api: Api,
@@ -178,7 +190,7 @@ export class Harness {
     timeoutMs = 300_000,
   ): Promise<ContainerDto> {
     return pollUntil(async () => {
-      const container = await api.get<ContainerDto>(`/containers/${id}`);
+      const container = await api.get<ContainerDto>(this.scoped(api, `/containers/${id}`));
       if (container.lifecyclePhase === ContainerPhase.Failed) {
         throw new PollAbort(new Error(`container ${id} failed: ${container.failureCode} ${container.failureReason}`));
       }
@@ -193,7 +205,7 @@ export class Harness {
     action: 'start' | 'stop' | 'restart',
     user?: Pick<TestUser, 'keyFile'>,
   ): Promise<ContainerDto> {
-    const accepted = await api.post<IntentAcceptedDto>(`/containers/${id}/actions/${action}`);
+    const accepted = await api.post<IntentAcceptedDto>(this.scoped(api, `/containers/${id}/actions/${action}`));
     await waitIntent(api, accepted);
     const status = action === 'stop' ? ContainerStatus.Stopped : ContainerStatus.Running;
     return this.waitContainer(api, id, (c) => c.actual.status === status
@@ -203,7 +215,7 @@ export class Harness {
   async deleteContainer(api: Api, id: string): Promise<void> {
     let accepted: IntentAcceptedDto;
     try {
-      accepted = await api.post<IntentAcceptedDto>(`/containers/${id}/actions/delete`);
+      accepted = await api.post<IntentAcceptedDto>(this.scoped(api, `/containers/${id}/actions/delete`));
     } catch (error) {
       if (error instanceof ApiError && error.status === 404) return;
       throw error;
@@ -211,7 +223,7 @@ export class Harness {
     await waitIntent(api, accepted);
     await pollUntil(async () => {
       try {
-        await api.get(`/containers/${id}`);
+        await api.get(this.scoped(api, `/containers/${id}`));
         return undefined;
       } catch (error) {
         if (error instanceof ApiError && error.status === 404) return true;
@@ -224,7 +236,7 @@ export class Harness {
   async deleteVolume(api: Api, id: string, collection: 'volumes' | 'shared-volumes' = 'volumes'): Promise<void> {
     let accepted: IntentAcceptedDto;
     try {
-      accepted = await api.delete<IntentAcceptedDto>(`/${collection}/${id}`);
+      accepted = await api.delete<IntentAcceptedDto>(this.scoped(api, `/${collection}/${id}`));
     } catch (error) {
       if (error instanceof ApiError && error.status === 404) return;
       throw error;
@@ -232,7 +244,7 @@ export class Harness {
     await waitIntent(api, accepted);
     await pollUntil(async () => {
       try {
-        await api.get(`/${collection}/${id}`);
+        await api.get(this.scoped(api, `/${collection}/${id}`));
         return undefined;
       } catch (error) {
         if (error instanceof ApiError && error.status === 404) return true;

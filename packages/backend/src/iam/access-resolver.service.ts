@@ -2,8 +2,7 @@ import { ForbiddenException, Inject, Injectable } from '@nestjs/common';
 import { sql, type Kysely, type Transaction } from 'kysely';
 import {
   GRANT_EXPIRY_GRACE_DAYS,
-  Capability,
-  type AdministrationActionsDto,
+  type Role,
   type EffectiveServerAccessDto,
   type EffectiveSharedBackendAccessDto,
   type GroupSummaryDto,
@@ -12,13 +11,7 @@ import { numberValue } from '../platform/domain-utils.js';
 import type { NyabaseDatabase } from '../platform/persistence-pg/database.types.js';
 import { PG_DATABASE } from '../platform/persistence-pg/tokens.js';
 import { PgTransactionManager } from '../platform/persistence-pg/transaction.js';
-import {
-  assertActorHolds,
-  assertActorMayAdminister,
-  assertNotLastAdministrator,
-  loadAdministrationActions,
-  loadCapabilities,
-} from './administration.js';
+import { assertActorRole } from './administration.js';
 import {
   listServerAccess,
   listSharedBackendAccess,
@@ -55,59 +48,16 @@ export class AccessResolverService {
     private readonly transactions: PgTransactionManager,
   ) {}
 
-  userCapabilities(userId: string): Promise<Set<Capability>> {
-    return loadCapabilities(this.database, userId, true);
-  }
-
-  assertActorCapabilitiesInTransaction(
-    executor: unknown,
+  /** Runs `work` in a transaction after re-checking, under the IAM lock, that the actor still holds `minimum`. */
+  async runWithActorRole<T>(
     actorId: string,
-    required: Iterable<Capability>,
-  ): Promise<Set<Capability>> {
-    return assertActorHolds(transactionOf(executor), actorId, required);
-  }
-
-  assertActorMayAdministerUserInTransaction(
-    executor: unknown,
-    actorId: string,
-    targetUserId: string,
-  ): Promise<void> {
-    return assertActorMayAdminister(transactionOf(executor), actorId, targetUserId);
-  }
-
-  assertNotFinalActiveAdministratorInTransaction(
-    executor: unknown,
-    userId: string,
-  ): Promise<void> {
-    return assertNotLastAdministrator(transactionOf(executor), userId);
-  }
-
-  administrationActions(actorId: string): Promise<AdministrationActionsDto> {
-    return this.transactions.run((transaction) => loadAdministrationActions(transaction, actorId));
-  }
-
-  async runWithActorCapabilities<T>(
-    actorId: string,
-    required: Iterable<Capability>,
+    minimum: Role,
     work: (transaction: IamTransaction) => Promise<T>,
   ): Promise<T> {
     return this.transactions.run(async (transaction) => {
-      await assertActorHolds(transaction, actorId, required);
+      await assertActorRole(transaction, actorId, minimum);
       return work(transaction);
     });
-  }
-
-  /** Current server coverage of one user, or null when absent or expired. */
-  resolveServer(userId: string, serverId: string): Promise<ServerAccess | null> {
-    return resolveServerAccess(this.database, userId, serverId);
-  }
-
-  resolveServerInTransaction(
-    executor: unknown,
-    userId: string,
-    serverId: string,
-  ): Promise<ServerAccess | null> {
-    return resolveServerAccess(transactionOf(executor), userId, serverId);
   }
 
   /** Server coverage plus whether the image is active on that server (R8). */
@@ -165,7 +115,6 @@ export class AccessResolverService {
       .innerJoin('iam.effective_server_access as access', 'access.server_id', 'assignment.server_id')
       .select('assignment.id')
       .where('access.user_id', '=', userId)
-      .where(sql<boolean>`(access.expires_at IS NULL OR access.expires_at > now())`)
       .where('assignment.image_id', '=', imageId)
       .where('assignment.lifecycle_phase', '=', 'active')
       .where('assignment.needs_attention', '=', false)
@@ -183,19 +132,19 @@ export class AccessResolverService {
     const rows = await this.database.selectFrom('iam.group_members as member')
       .innerJoin('iam.groups as group', 'group.id', 'member.group_id')
       .innerJoin('iam.users as user', 'user.id', 'member.user_id')
-      .select(['group.id', 'group.name', 'group.is_system'])
+      .select(['group.id', 'group.name'])
       .where('member.user_id', '=', userId)
       .where('user.status', '=', 'active')
       .orderBy('group.name')
       .orderBy('group.id')
       .execute();
-    return rows.map((row) => ({ id: row.id, name: row.name, isSystem: row.is_system }));
+    return rows.map((row) => ({ id: row.id, name: row.name }));
   }
 
   /**
    * Servers the user is covered on (`live`) plus servers on which coverage
    * lapsed and the 14-day grace has not ended (`grace`, read from the lapse
-   * ledger; quotas are only known while an expired grant still exists).
+   * ledger, without quotas; a disabled user lapses like a revoked one).
    */
   async getEffectiveAccess(userId: string): Promise<EffectiveServerAccessDto[]> {
     const live = await listServerAccess(this.database, userId);
@@ -206,22 +155,13 @@ export class AccessResolverService {
       .where('resource_kind', '=', 'server')
       .where('purged_at', 'is', null)
       .execute()).filter((lapse) => !liveIds.has(lapse.resource_id));
-    const expired = lapses.length === 0
-      ? []
-      : await this.database.selectFrom('iam.effective_server_access')
-        .select(['server_id', 'cpu_cores', 'mem_bytes', 'disk_bytes', 'gpu_pci_addresses'])
-        .where('user_id', '=', userId)
-        .where('server_id', 'in', lapses.map((lapse) => lapse.resource_id))
-        .execute();
-    const expiredByServer = new Map(expired.map((row) => [row.server_id, row]));
 
-    const serverIds = [...liveIds, ...lapses.map((lapse) => lapse.resource_id)];
-    const imageRows = serverIds.length === 0
+    const imageRows = live.length === 0
       ? []
       : await this.database.selectFrom('infra.image_server_assignments as assignment')
         .innerJoin('infra.images as image', 'image.id', 'assignment.image_id')
         .select(['assignment.image_id', 'assignment.server_id'])
-        .where('assignment.server_id', 'in', serverIds)
+        .where('assignment.server_id', 'in', [...liveIds])
         .where('assignment.lifecycle_phase', '=', 'active')
         .where('assignment.needs_attention', '=', false)
         .where('image.is_active', '=', true)
@@ -242,28 +182,15 @@ export class AccessResolverService {
         diskBytes: access.diskBytes,
         gpuPciAddresses: access.gpuPciAddresses,
         expiresAt: access.expiresAt?.toISOString() ?? null,
-        purgeAt: null,
         accessPhase: 'live',
         allowedImageIds: imagesByServer.get(access.serverId) ?? [],
       })),
-      ...lapses.map((lapse): EffectiveServerAccessDto => {
-        const quotas = expiredByServer.get(lapse.resource_id);
-        return {
-          serverId: lapse.resource_id,
-          cpuCores: quotas?.cpu_cores ?? null,
-          memBytes: quotas?.mem_bytes === undefined || quotas.mem_bytes === null
-            ? null
-            : numberValue(quotas.mem_bytes),
-          diskBytes: quotas?.disk_bytes === undefined || quotas.disk_bytes === null
-            ? null
-            : numberValue(quotas.disk_bytes),
-          gpuPciAddresses: quotas?.gpu_pci_addresses ?? [],
-          expiresAt: lapse.lapsed_at.toISOString(),
-          purgeAt: new Date(lapse.lapsed_at.getTime() + GRACE_MS).toISOString(),
-          accessPhase: 'grace',
-          allowedImageIds: [],
-        };
-      }),
+      ...lapses.map((lapse): EffectiveServerAccessDto => ({
+        accessPhase: 'grace',
+        serverId: lapse.resource_id,
+        expiresAt: lapse.lapsed_at.toISOString(),
+        purgeAt: new Date(lapse.lapsed_at.getTime() + GRACE_MS).toISOString(),
+      })),
     ];
   }
 

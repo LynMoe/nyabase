@@ -8,7 +8,6 @@ import { randomUUID } from 'node:crypto';
 import type { Transaction } from 'kysely';
 import {
   AuditAction,
-  Capability,
   FailureCode,
   IntentKind,
   IntentResourceType,
@@ -18,8 +17,9 @@ import {
   type LocalVolumeScope,
   type StorageCapacityDto,
   type VolumeDto,
+  Role,
 } from '@nyabase/common';
-import { assertListScope, type Actor } from '../iam/actor.js';
+import { assertListScope, type Actor, requireUserId } from '../iam/actor.js';
 import { AuditService } from '../iam/audit.service.js';
 import { deterministicName, numberValue } from '../platform/domain-utils.js';
 import type { NyabaseDatabase } from '../platform/persistence-pg/database.types.js';
@@ -64,33 +64,33 @@ export class LocalVolumesService {
     filters: { scope?: ListScope; serverId?: string } = {},
   ): Promise<VolumeDto[]> {
     const scope = filters.scope ?? 'mine';
-    assertListScope(actor, scope, Capability.ManageVolumes);
+    assertListScope(actor, scope, Role.Admin);
     const rows = await this.repository.listByKind(
       'local',
-      scope === 'mine' ? { ownerId: actor.userId } : { serverId: filters.serverId },
+      scope === 'mine' ? { ownerId: requireUserId(actor) } : { serverId: filters.serverId },
     );
     return this.dtos.toVolumeDtos(rows);
   }
 
-  async get(actor: Actor, id: string): Promise<VolumeDto> {
-    const { row } = assertCanAccess(actor, await this.repository.findById(id), 'local');
+  async get(actor: Actor, id: string, scope: ListScope = 'mine'): Promise<VolumeDto> {
+    const { row } = assertCanAccess(actor, await this.repository.findById(id), 'local', scope);
     const [dto] = await this.dtos.toVolumeDtos([row]);
     return dto!;
   }
 
   /**
    * `scope=mine`: the caller's own storage on a server they hold a grant for.
-   * `scope=all`: the server-wide view for `ManageServers`.
+   * `scope=all`: the server-wide view for operators.
    */
   async capacity(
     actor: Actor,
     serverId: string,
     scope: ListScope = 'mine',
   ): Promise<StorageCapacityDto> {
-    assertListScope(actor, scope, Capability.ManageServers);
+    assertListScope(actor, scope, Role.Operator);
     return scope === 'all'
       ? this.capacityRules.serverWideCapacity(serverId)
-      : this.capacityRules.ownerCapacity(actor.userId, serverId);
+      : this.capacityRules.ownerCapacity(requireUserId(actor), serverId);
   }
 
   async create(
@@ -104,8 +104,8 @@ export class LocalVolumesService {
       });
     }
     assertValidVolumeSize(input.sizeBytes);
-    const actorId = actor.userId;
-    const ownerId = actor.userId;
+    const actorId = requireUserId(actor);
+    const ownerId = requireUserId(actor);
     const id = randomUUID();
     const incusName = deterministicName('nyv', id);
     let created;
@@ -166,19 +166,21 @@ export class LocalVolumesService {
     actor: Actor,
     id: string,
     input: PatchInput,
+    scope: ListScope = 'mine',
   ): Promise<VolumeDto | IntentAcceptedDto> {
     const { row: current, access } = assertCanAccess(
       actor,
       await this.repository.findById(id),
       'local',
+      scope,
     );
     assertPatchable(current, input);
     if (input.sizeBytes === undefined || input.sizeBytes === numberValue(current.size_bytes)) {
-      return this.renameOnly(actor.userId, current, input);
+      return this.renameOnly(requireUserId(actor), current, input);
     }
     await this.precheckResize(current, input.sizeBytes);
     const changed = await this.transactions.run(
-      (transaction) => this.resizeInTransaction(transaction, actor.userId, access, id, {
+      (transaction) => this.resizeInTransaction(transaction, requireUserId(actor), access, id, {
         ...input,
         sizeBytes: input.sizeBytes!,
       }),
@@ -316,13 +318,14 @@ export class LocalVolumesService {
     return { intent: intents[0]! };
   }
 
-  async delete(actor: Actor, id: string) {
-    const actorId = actor.userId;
+  async delete(actor: Actor, id: string, scope: ListScope = 'mine') {
+    const actorId = requireUserId(actor);
     const result = await this.transactions.run(async (transaction) => {
       const { row: current } = assertCanAccess(
         actor,
         await this.repository.findById(id, transaction),
         'local',
+        scope,
       );
       if (current.lifecycle_phase === 'deleting') {
         throw new ConflictException({

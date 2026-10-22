@@ -2,7 +2,7 @@ import type { Kysely } from 'kysely';
 import { randomUUID } from 'node:crypto';
 import { describe, expect, it, vi } from 'vitest';
 import { testActor } from '../iam/actor.test-helper.js';
-import { Capability, FailureCode } from '@nyabase/common';
+import { FailureCode, Role } from '@nyabase/common';
 import type { NyabaseDatabase } from '../platform/persistence-pg/database.types.js';
 import { withPostgresTestDatabase } from '../platform/persistence-pg/postgres-test-harness.js';
 import { PgTransactionManager } from '../platform/persistence-pg/transaction.js';
@@ -114,7 +114,7 @@ async function seedSharedBackend(
       user_id: userId,
       group_id: null,
       shared_backend_id: backendId,
-      limit_bytes: options?.grantLimit ?? 0,
+      limit_bytes: options?.grantLimit ?? null,
       expires_at: options?.expiresAt ?? null,
     }).execute();
   }
@@ -174,7 +174,7 @@ describePg('shared volume quota reservations', () => {
       await expect(service.get(testActor(userId), created.id)).rejects.toMatchObject({
         message: 'Volume not found',
       });
-      await expect(service.get(testActor(randomUUID(), Capability.ManageVolumes), created.id)).rejects.toMatchObject({
+      await expect(service.get(testActor(randomUUID(), Role.Admin), created.id)).rejects.toMatchObject({
         message: 'Volume not found',
       });
       const listed = await service.listShared(testActor(userId));
@@ -390,7 +390,7 @@ describePg('shared volume quota reservations', () => {
         user_id: ownerId,
         group_id: null,
         shared_backend_id: backendId,
-        limit_bytes: 0,
+        limit_bytes: null,
         expires_at: null,
       }).execute();
       const service = makeService(database);
@@ -439,6 +439,29 @@ describePg('shared volume quota reservations', () => {
         .select('id')
         .where('resource_id', '=', created.id)
         .execute()).toHaveLength(0);
+    });
+  });
+
+  it('gives an admin the owner rules on their own shared volume; scope=all is the override', async () => {
+    await withPostgresTestDatabase(async ({ database }) => {
+      const { userId, backendId } = await seedSharedBackend(database);
+      const service = makeService(database);
+      const admin = testActor(userId, Role.Admin);
+      const created = await service.createShared(admin, {
+        name: 'admin-own',
+        sizeBytes: 100,
+        scope: { kind: 'shared', sharedBackendId: backendId },
+      });
+      await database.deleteFrom('iam.shared_backend_grants').execute();
+
+      await expect(service.patchShared(admin, created.id, {
+        expectedRevision: created.revision,
+        sizeBytes: 200,
+      })).rejects.toMatchObject({ status: 403 });
+      await expect(service.patchShared(admin, created.id, {
+        expectedRevision: created.revision,
+        sizeBytes: 200,
+      }, 'all')).resolves.toMatchObject({ id: created.id, sizeBytes: 200 });
     });
   });
 
@@ -665,7 +688,7 @@ describePg('shared volume quota reservations', () => {
 });
 
 describePg('shared volume actor scope', () => {
-  it('shows a shared volume to its owner and ManageSharedVolumes, never to others or ManageVolumes', async () => {
+  it('shows a shared volume to its owner and an admin, never to others or an operator', async () => {
     await withPostgresTestDatabase(async ({ database }) => {
       const { userId, backendId } = await seedSharedBackend(database);
       const otherId = randomUUID();
@@ -673,8 +696,8 @@ describePg('shared volume actor scope', () => {
       const service = makeService(database);
       const owner = testActor(userId);
       const other = testActor(otherId);
-      const sharedAdmin = testActor(randomUUID(), Capability.ManageSharedVolumes);
-      const localAdmin = testActor(randomUUID(), Capability.ManageVolumes);
+      const sharedAdmin = testActor(randomUUID(), Role.Admin);
+      const operator = testActor(randomUUID(), Role.Operator);
       const created = await service.createShared(owner, {
         name: 'scoped',
         sizeBytes: 100,
@@ -687,20 +710,26 @@ describePg('shared volume actor scope', () => {
       expect((await service.listShared(sharedAdmin, { scope: 'all' })).map((row) => row.id))
         .toEqual([created.id]);
       await expect(service.listShared(owner, { scope: 'all' })).rejects.toMatchObject({ status: 403 });
-      await expect(service.listShared(localAdmin, { scope: 'all' })).rejects.toMatchObject({ status: 403 });
+      await expect(service.listShared(operator, { scope: 'all' })).rejects.toMatchObject({ status: 403 });
 
-      await expect(service.getShared(sharedAdmin, created.id)).resolves.toMatchObject({ id: created.id });
+      await expect(service.getShared(sharedAdmin, created.id, 'all')).resolves.toMatchObject({ id: created.id });
+      await expect(service.getShared(sharedAdmin, created.id)).rejects.toMatchObject({ status: 404 });
+      await expect(service.getShared(other, created.id, 'all')).rejects.toMatchObject({ status: 403 });
       await expect(service.getShared(other, created.id)).rejects.toMatchObject({ status: 404 });
-      await expect(service.getShared(localAdmin, created.id)).rejects.toMatchObject({ status: 404 });
+      await expect(service.getShared(operator, created.id)).rejects.toMatchObject({ status: 404 });
       await expect(service.patchShared(other, created.id, { expectedRevision: 1, name: 'nope' }))
         .rejects.toMatchObject({ status: 404 });
-      await expect(service.deleteShared(localAdmin, created.id)).rejects.toMatchObject({ status: 404 });
+      await expect(service.deleteShared(operator, created.id)).rejects.toMatchObject({ status: 404 });
 
       // the administrator renames it without holding a backend grant
+      await expect(service.patchShared(sharedAdmin, created.id, {
+        expectedRevision: created.revision,
+        name: 'renamed-by-admin',
+      })).rejects.toMatchObject({ status: 404 });
       const renamed = await service.patchShared(sharedAdmin, created.id, {
         expectedRevision: created.revision,
         name: 'renamed-by-admin',
-      });
+      }, 'all');
       expect(renamed).toMatchObject({ name: 'renamed-by-admin' });
     });
   });

@@ -1,7 +1,7 @@
 import { Inject, Injectable } from '@nestjs/common';
 import type { Kysely, Transaction } from 'kysely';
 import { sql } from 'kysely';
-import type { UserStatus } from '@nyabase/common';
+import type { Role, UserStatus } from '@nyabase/common';
 import type { NyabaseDatabase } from '../platform/persistence-pg/database.types.js';
 import { PG_DATABASE } from '../platform/persistence-pg/tokens.js';
 import { PgTransactionManager } from '../platform/persistence-pg/transaction.js';
@@ -26,6 +26,7 @@ interface UserRow {
   display_name: string;
   status: string;
   auth_version: number;
+  role: string;
   created_at: Date;
   updated_at: Date;
 }
@@ -142,6 +143,7 @@ export class IamAuthRepository implements AuthPersistence {
           'user.display_name',
           'user.status',
           'user.auth_version',
+          'user.role',
           'user.created_at',
           'user.updated_at',
         ])
@@ -165,6 +167,7 @@ export class IamAuthRepository implements AuthPersistence {
             'user.display_name',
             'user.status',
             'user.auth_version',
+            'user.role',
             'user.created_at',
             'user.updated_at',
           ])
@@ -269,6 +272,7 @@ export class IamAuthRepository implements AuthPersistence {
           'user.display_name',
           'user.status',
           'user.auth_version',
+          'user.role',
           'user.created_at',
           'user.updated_at',
         ])
@@ -295,16 +299,25 @@ export class IamAuthRepository implements AuthPersistence {
     userId: string,
     token: AuthApiToken,
     maximumTokens: number,
+    credentialSnapshot: LoginCredentialSnapshot,
     onCreated?: AuthTransactionHook<AuthApiToken>,
   ): Promise<'created' | 'inactive-user' | 'capacity'> {
     return this.transactions.run(async (transaction) => {
       const user = await transaction
         .selectFrom('iam.users')
-        .select(['id', 'status'])
+        .select(['id', 'status', 'password_hash', 'auth_version'])
         .where('id', '=', userId)
         .forUpdate()
         .executeTakeFirst();
-      if (!user || user.status !== 'active') return 'inactive-user';
+      // The password was verified against this exact credential generation;
+      // a concurrent password change/reset/disable must not let it through.
+      if (
+        !user
+        || user.status !== 'active'
+        || user.id !== credentialSnapshot.id
+        || user.password_hash !== credentialSnapshot.passwordHash
+        || user.auth_version !== credentialSnapshot.authVersion
+      ) return 'inactive-user';
       const count = await transaction
         .selectFrom('iam.api_tokens')
         .select(sql<number>`count(*)::integer`.as('count'))
@@ -458,6 +471,7 @@ export class IamAuthRepository implements AuthPersistence {
       displayName: row.display_name,
       status: row.status as UserStatus,
       authVersion: row.auth_version,
+      role: row.role as Role,
       createdAt: row.created_at,
       updatedAt: row.updated_at,
     };

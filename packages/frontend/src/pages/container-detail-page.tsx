@@ -35,6 +35,7 @@ import {
 import { resourceIntentsPath } from '../lib/intent-visibility.js';
 import { queryKeys } from '../lib/query-keys.js';
 import { queryPollInterval, refetchWhileInProgress } from '../lib/query-lifecycle.js';
+import { scopedPath } from '../lib/scoped-paths.js';
 import { runGatedMutation, useResourceMutationPending } from '../lib/resource-mutation-gate.js';
 import {
   containerActionSubmittedTitle,
@@ -82,7 +83,7 @@ function ContainerDetailContent({
   const navigate = useNavigate({ from: admin ? '/manage/containers/$containerId' : '/containers/$containerId' });
   const containerQuery = useQuery({
     queryKey: queryKeys.containers.detail(scope, containerId),
-    queryFn: () => api.get<ContainerDto>(`/containers/${containerId}`),
+    queryFn: () => api.get<ContainerDto>(scopedPath(`/containers/${containerId}`, scope)),
     refetchInterval: (query) => queryPollInterval(query.state, { activeIntervalMs: 5_000 }),
   });
 
@@ -124,7 +125,7 @@ function ContainerDetailContent({
                 <StoragePanel container={container} scope={scope} />
               </TabsContent>
               <TabsContent value="console">
-                <ContainerConsole container={container} />
+                <ContainerConsole container={container} scope={scope} />
               </TabsContent>
             </Tabs>
           </>
@@ -143,7 +144,7 @@ function ContainerDetailHeader({ container: c, scope }: { container: ContainerDt
   const invalidate = useInvalidateContainer(scope, containerId);
   const action = useActionMutation({
     mutationFn: (name: Extract<ContainerAction, 'start' | 'stop' | 'restart' | 'delete'>) =>
-      api.post<IntentAcceptedDto>(`/containers/${containerId}/actions/${name}`),
+      api.post<IntentAcceptedDto>(scopedPath(`/containers/${containerId}/actions/${name}`, scope)),
     successTitle: (name) => containerActionSubmittedTitle(name),
     errorTitle: '容器操作失败',
     onSuccess: invalidate,

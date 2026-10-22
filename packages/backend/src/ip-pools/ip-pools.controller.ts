@@ -7,17 +7,13 @@ import {
   Patch,
   Post,
 } from '@nestjs/common';
-import {
-  Capability,
-  zCreateIpPoolRequest,
-  zPatchIpPoolRequest,
-} from '@nyabase/common';
-import { RequireCaps, CurrentUser } from '../iam/decorators.js';
+import { zCreateIpPoolRequest, zPatchIpPoolRequest, Role } from '@nyabase/common';
+import { RequireRole, CurrentUser } from '../iam/decorators.js';
 import type { UserRecord } from '../iam/auth-persistence.js';
 import { IpPoolsService } from './ip-pools.service.js';
 
 @Controller('admin/ip-pools')
-@RequireCaps(Capability.ManageIpPools)
+@RequireRole(Role.Admin)
 export class AdminIpPoolsController {
   constructor(private readonly service: IpPoolsService) {}
 

@@ -1,5 +1,6 @@
 use anyhow::{anyhow, Result};
 use proxy_common::backend_tls::{backend_tls_config_from_env, validate_backend_ws_url};
+use proxy_common::conn_limit::validate_limit;
 use proxy_common::control_token::required_control_token;
 use proxy_common::env::{env_u64, env_usize, validate_status_interval_ms};
 use std::sync::Arc;
@@ -25,10 +26,47 @@ pub(crate) const TLS_HANDSHAKE_DEADLINE: Duration = Duration::from_secs(10);
 
 pub(crate) const MAX_SNAPSHOT_STALE_AFTER_MS: u64 = 300_000;
 
-// A request may retain up to 16 MiB of body data. Keep the fixed global
-// connection cap deliberately small so the worst-case resident set remains
-// finite and operationally reasonable without another buffering subsystem.
-pub(crate) const MAX_ACTIVE_CONNECTIONS: usize = 32;
+// Request bodies are streamed to the upstream rather than buffered, so a
+// connection costs bounded memory (header buffer + copy buffers) and the cap
+// is about file descriptors, not resident set. Each proxied connection holds
+// two sockets; size the service's open-file limit accordingly.
+pub(crate) const MAX_CONNECTIONS_LIMIT: usize = 65_536;
+
+pub(crate) const DEFAULT_MAX_CONNECTIONS: usize = 4_096;
+
+pub(crate) const DEFAULT_MAX_CONNECTIONS_PER_IP: usize = 64;
+
+pub(crate) const DEFAULT_BODY_DEADLINE_MS: u64 = 30_000;
+
+pub(crate) const MIN_BODY_DEADLINE_MS: u64 = 1_000;
+
+pub(crate) const DEFAULT_UPGRADED_IDLE_MS: u64 = 3_600_000;
+
+pub(crate) const MIN_UPGRADED_IDLE_MS: u64 = 1_000;
+
+pub(crate) const MAX_UPGRADED_IDLE_MS: u64 = 86_400_000;
+
+pub(crate) const DEFAULT_CONTROL_HOLD_MS: u64 = 300_000;
+
+pub(crate) const MAX_CONTROL_HOLD_MS: u64 = 600_000;
+
+/// Per-connection timing limits that the listener and relays consult.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct ConnectionLimits {
+    /// Whole-body budget, measured from the end of the request head.
+    pub(crate) body_deadline: Duration,
+    /// An upgraded tunnel with no bytes in either direction for this long is closed.
+    pub(crate) upgraded_idle: Duration,
+}
+
+impl Default for ConnectionLimits {
+    fn default() -> Self {
+        Self {
+            body_deadline: Duration::from_millis(DEFAULT_BODY_DEADLINE_MS),
+            upgraded_idle: Duration::from_millis(DEFAULT_UPGRADED_IDLE_MS),
+        }
+    }
+}
 
 #[derive(Clone)]
 pub(crate) struct Config {
@@ -38,8 +76,11 @@ pub(crate) struct Config {
     pub(crate) http_listen: String,
     pub(crate) https_listen: Option<String>,
     pub(crate) max_connections: usize,
+    pub(crate) max_connections_per_ip: usize,
+    pub(crate) limits: ConnectionLimits,
     pub(crate) reconnect_delay: Duration,
     pub(crate) status_interval: Duration,
+    pub(crate) control_hold: Duration,
 }
 
 impl Config {
@@ -54,10 +95,41 @@ impl Config {
         let https_listen = std::env::var("NYABASE_HTTPS_LISTEN")
             .ok()
             .filter(|value| !value.trim().is_empty());
-        let max_connections = validate_connection_cap(env_usize(
+        let max_connections = validate_limit(
             "NYABASE_HTTP_MAX_CONNECTIONS",
-            MAX_ACTIVE_CONNECTIONS,
-        )?)?;
+            env_usize("NYABASE_HTTP_MAX_CONNECTIONS", DEFAULT_MAX_CONNECTIONS)?,
+            1,
+            MAX_CONNECTIONS_LIMIT,
+        )?;
+        let max_connections_per_ip = validate_limit(
+            "NYABASE_HTTP_MAX_CONNECTIONS_PER_IP",
+            env_usize(
+                "NYABASE_HTTP_MAX_CONNECTIONS_PER_IP",
+                DEFAULT_MAX_CONNECTIONS_PER_IP,
+            )?,
+            1,
+            MAX_CONNECTIONS_LIMIT,
+        )?;
+        let limits = ConnectionLimits {
+            body_deadline: Duration::from_millis(validate_ms(
+                "NYABASE_HTTP_BODY_DEADLINE_MS",
+                env_u64("NYABASE_HTTP_BODY_DEADLINE_MS", DEFAULT_BODY_DEADLINE_MS)?,
+                MIN_BODY_DEADLINE_MS,
+                REQUEST_LIFETIME_DEADLINE.as_millis() as u64,
+            )?),
+            upgraded_idle: Duration::from_millis(validate_ms(
+                "NYABASE_HTTP_UPGRADED_IDLE_MS",
+                env_u64("NYABASE_HTTP_UPGRADED_IDLE_MS", DEFAULT_UPGRADED_IDLE_MS)?,
+                MIN_UPGRADED_IDLE_MS,
+                MAX_UPGRADED_IDLE_MS,
+            )?),
+        };
+        let control_hold = Duration::from_millis(validate_ms(
+            "NYABASE_HTTP_CONTROL_HOLD_MS",
+            env_u64("NYABASE_HTTP_CONTROL_HOLD_MS", DEFAULT_CONTROL_HOLD_MS)?,
+            0,
+            MAX_CONTROL_HOLD_MS,
+        )?);
         let reconnect_delay =
             Duration::from_millis(env_u64("NYABASE_BACKEND_RECONNECT_MS", 2_000)?);
         let status_interval = Duration::from_millis(validate_status_interval_ms(
@@ -71,17 +143,18 @@ impl Config {
             http_listen,
             https_listen,
             max_connections,
+            max_connections_per_ip,
+            limits,
             reconnect_delay,
             status_interval,
+            control_hold,
         })
     }
 }
 
-pub(crate) fn validate_connection_cap(value: usize) -> Result<usize> {
-    if !(1..=MAX_ACTIVE_CONNECTIONS).contains(&value) {
-        return Err(anyhow!(
-            "NYABASE_HTTP_MAX_CONNECTIONS must be in 1..={MAX_ACTIVE_CONNECTIONS}"
-        ));
+pub(crate) fn validate_ms(name: &str, value: u64, min: u64, max: u64) -> Result<u64> {
+    if !(min..=max).contains(&value) {
+        return Err(anyhow!("{name} must be in {min}..={max}"));
     }
     Ok(value)
 }

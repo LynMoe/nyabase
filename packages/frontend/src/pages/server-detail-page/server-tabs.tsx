@@ -1,5 +1,5 @@
 import { Activity, Cpu, Gauge, HardDrive, History, KeyRound, ListChecks } from 'lucide-react';
-import { Capability, type ServerDto } from '@nyabase/common';
+import { Role, type ServerDto } from '@nyabase/common';
 import { Link } from '@tanstack/react-router';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '../../components/ui/card.js';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '../../components/ui/tabs.js';
@@ -15,7 +15,7 @@ import { AgentCard, agentStateLabel } from '../../components/servers/agent-card.
 import { ReservedCpusCard } from '../../components/servers/reserved-cpus-card.js';
 import { TechnicalId } from '../../components/refs/technical-id.js';
 import { useServerPools } from '../../lib/server-queries.js';
-import { useAuthStore } from '../../store/auth.js';
+import { useHasRole } from '../../lib/use-role.js';
 import { preflightStatusLabel, storageOvercommitLabel } from '../../lib/display-labels.js';
 
 export const SERVER_DETAIL_TABS = [
@@ -43,7 +43,7 @@ export function ServerDetailTabs({
   onSelectTab: (tab: ServerDetailTab) => void;
 }) {
   const serverId = server.id;
-  const capabilities = useAuthStore((state) => state.user?.capabilities ?? []);
+  const isOperator = useHasRole(Role.Operator);
   return (
     <Tabs
       value={tab}
@@ -72,11 +72,11 @@ export function ServerDetailTabs({
         <PreflightCard server={server} />
       </TabsContent>
       <TabsContent value="metrics" className="space-y-6">
-        {capabilities.includes(Capability.ViewMetricsAll) ? <ServerMetricsPanel serverId={serverId} /> : null}
+        {isOperator ? <ServerMetricsPanel serverId={serverId} /> : null}
         <NodeMetricsCard server={server} />
       </TabsContent>
       <TabsContent value="gpu">
-        {capabilities.includes(Capability.ManageServers) ? (
+        {isOperator ? (
           <ServerGpuCard serverId={serverId} active={tab === 'gpu'} />
         ) : (
           <Card>
@@ -90,6 +90,7 @@ export function ServerDetailTabs({
       <TabsContent value="activity">
         <ResourceIntentFailures
           listPath={`/intents?scope=all&serverId=${serverId}`}
+          scope="all"
           enabled={tab === 'activity'}
         />
       </TabsContent>

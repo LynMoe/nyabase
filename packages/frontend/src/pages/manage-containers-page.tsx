@@ -8,6 +8,7 @@ import { Page, PageHeader } from '../components/layout/page-header.js';
 import { QueryView } from '../components/layout/query-view.js';
 import { queryKeys } from '../lib/query-keys.js';
 import { queryPollInterval } from '../lib/query-lifecycle.js';
+import { scopedPath } from '../lib/scoped-paths.js';
 import { runGatedMutation } from '../lib/resource-mutation-gate.js';
 import { containerActionSubmittedTitle } from '../lib/status-labels.js';
 
@@ -20,7 +21,7 @@ export default function ManageContainersPage() {
   });
   const action = useActionMutation({
     mutationFn: ({ actionName, containerId }: { actionName: Extract<ContainerAction, 'start' | 'stop' | 'restart'>; containerId: string }) =>
-      api.post<IntentAcceptedDto>(`/containers/${containerId}/actions/${actionName}`),
+      api.post<IntentAcceptedDto>(scopedPath(`/containers/${containerId}/actions/${actionName}`, 'all')),
     successTitle: ({ actionName }) => containerActionSubmittedTitle(actionName),
     errorTitle: '容器操作失败',
     onSuccess: () => { void queryClient.invalidateQueries({ queryKey: queryKeys.containers.adminList }); },

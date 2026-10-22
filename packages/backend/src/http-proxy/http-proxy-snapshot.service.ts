@@ -3,7 +3,6 @@ import { createHash } from 'crypto';
 import { sql, type Transaction } from 'kysely';
 import {
   ContainerStatus,
-  ServerStatus,
   HTTP_PROXY_SNAPSHOT_STALE_AFTER_MS,
   MAX_HTTP_PROXY_SNAPSHOT_BYTES,
   UserStatus,
@@ -17,7 +16,6 @@ import type { NyabaseDatabase } from '../platform/persistence-pg/database.types.
 import { PgTransactionManager } from '../platform/persistence-pg/transaction.js';
 import { decryptPrivateKey, poolHasSafeTlsLease } from './http-proxy-certificates.js';
 import {
-  ROUTE_STALE_MS,
   routeMatchesContainer,
   runSerializable,
   type HttpExecutor,
@@ -32,9 +30,14 @@ async function databaseNow(executor: HttpExecutor): Promise<Date> {
   return result.rows[0]!.now;
 }
 
-function serverCanProxy(server: { status: string; parent_interface: string | null }): boolean {
-  return server.status === ServerStatus.Online
-    && Boolean(server.parent_interface);
+/**
+ * Deliberately independent of the server's agent status: the proxy dials the
+ * container's routed IP directly, so an agent restart or a Backend restart
+ * (which marks every server unreachable until its agent dials back) must not
+ * take sites down. A truly dead host just answers 503 at connect time.
+ */
+function serverCanProxy(server: { parent_interface: string | null }): boolean {
+  return Boolean(server.parent_interface);
 }
 
 function safeGeneration(value: string | number | bigint): number {
@@ -75,14 +78,23 @@ async function loadSnapshotInputs(transaction: Tx) {
   return { bindings, pools, containers, routes, users, servers, addressClaims, usableAccess };
 }
 
-type SnapshotInputs = Awaited<ReturnType<typeof loadSnapshotInputs>>;
+export type SnapshotInputs = Awaited<ReturnType<typeof loadSnapshotInputs>>;
 
 /**
- * The bindings that can be served right now: enabled pool, active owner,
- * running container on an online server, a fresh route whose address is claimed
- * by exactly this container, and a hostname the pool actually covers.
+ * The bindings that can be served right now: enabled pool, active owner with
+ * current server access, a container wanted running whose last observation was
+ * running, a route whose address is claimed by exactly this container, and a
+ * hostname the pool actually covers.
+ *
+ * Tenant isolation rests on the address claim, not on how fresh the
+ * observation is: a container's address stays an active claim until the
+ * reconciler has seen the instance deleted, and is then quarantined for
+ * longer than any snapshot lease before reuse. So a route kept through an
+ * agent outage can reach this container or nothing — never another tenant.
+ * Stopping, deleting, releasing the claim or removing the binding still drops
+ * the route on the next snapshot.
  */
-function routableBindings(inputs: SnapshotInputs, nowMs: number) {
+export function routableBindings(inputs: SnapshotInputs) {
   const { bindings, pools, containers, routes, users, servers, addressClaims, usableAccess } = inputs;
   const poolsById = new Map(pools.map((row) => [row.id, row]));
   const containersById = new Map(
@@ -132,8 +144,6 @@ function routableBindings(inputs: SnapshotInputs, nowMs: number) {
       && claim.owner_id === container.id
       && claim.server_id === container.server_id);
     if (claimsForAddress.length !== 1 || !exactClaim) return [];
-    const routeAge = nowMs - route.observed_at.getTime();
-    if (routeAge < 0 || routeAge > ROUTE_STALE_MS) return [];
     return [{
       bindingId: binding.id,
       hostname: binding.hostname,
@@ -174,7 +184,7 @@ export class HttpProxySnapshotService {
         createdAt: now.toISOString(),
         staleAfterMs: HTTP_PROXY_SNAPSHOT_STALE_AFTER_MS,
         validUntil: createdAtMs + HTTP_PROXY_SNAPSHOT_STALE_AFTER_MS,
-        routes: routableBindings(inputs, createdAtMs),
+        routes: routableBindings(inputs),
         domainPools: inputs.pools
           .filter((pool) =>
             pool.enabled

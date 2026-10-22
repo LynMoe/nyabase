@@ -2,7 +2,7 @@ import { useState } from 'react';
 import { Link } from '@tanstack/react-router';
 import { Plus } from 'lucide-react';
 import { useMutation } from '@tanstack/react-query';
-import { Capability, type GroupMemberDto } from '@nyabase/common';
+import { Role, type GroupMemberDto } from '@nyabase/common';
 import { Button } from '../../components/ui/button.js';
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from '../../components/ui/dialog.js';
 import {
@@ -27,12 +27,10 @@ import { toast } from '../../hooks/use-toast.js';
 import { api } from '../../lib/api.js';
 import { errorMessage } from '../../lib/api-error.js';
 import { useCatalogUsers, useGroupMembers, useInvalidateGroup } from '../../lib/group-queries.js';
-import { useAuthStore } from '../../store/auth.js';
+import { useHasRole } from '../../lib/use-role.js';
 
 export function GroupMembersTab({ groupId, memberFallback }: { groupId: string; memberFallback: GroupMemberDto[] }) {
-  const canManage = useAuthStore(
-    (state) => state.user?.capabilities.includes(Capability.ManageGroups) ?? false,
-  );
+  const canManage = useHasRole(Role.Admin);
   const [addOpen, setAddOpen] = useState(false);
   const [removeTarget, setRemoveTarget] = useState<{ userId: string; label: string } | null>(null);
   const members = useGroupMembers(groupId, canManage).data ?? memberFallback;

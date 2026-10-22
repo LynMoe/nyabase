@@ -56,6 +56,7 @@ CREATE TABLE iam.users (
     display_name text NOT NULL,
     status text DEFAULT 'active'::text NOT NULL,
     auth_version integer DEFAULT 0 NOT NULL,
+    role text DEFAULT 'user'::text NOT NULL,
     created_at timestamp with time zone DEFAULT clock_timestamp() NOT NULL,
     updated_at timestamp with time zone DEFAULT clock_timestamp() NOT NULL,
     CONSTRAINT users_numeric_id_check CHECK (numeric_id BETWEEN 1 AND 4096),
@@ -66,26 +67,24 @@ CREATE TABLE iam.users (
     CONSTRAINT users_status_check
         CHECK (status = ANY (ARRAY['active', 'disabled', 'deleting', 'deleted'])),
     CONSTRAINT users_auth_version_check CHECK (auth_version >= 0),
+    CONSTRAINT users_role_check CHECK (role = ANY (ARRAY['user', 'operator', 'admin'])),
     PRIMARY KEY (id)
 );
 
 COMMENT ON COLUMN iam.users.auth_version IS
   'Browser-session generation embedded in access JWTs';
+COMMENT ON COLUMN iam.users.role IS
+  'Platform role (user < operator < admin); read on every request, so a change is immediate';
 
 CREATE TABLE iam.groups (
     id uuid NOT NULL,
     name text NOT NULL,
     description text,
-    is_system boolean DEFAULT false NOT NULL,
-    system_key text,
-    capabilities text[] DEFAULT ARRAY[]::text[] NOT NULL,
     revision bigint DEFAULT 1 NOT NULL,
     created_at timestamp with time zone DEFAULT clock_timestamp() NOT NULL,
     updated_at timestamp with time zone DEFAULT clock_timestamp() NOT NULL,
     CONSTRAINT groups_name_check CHECK (length(btrim(name)) BETWEEN 1 AND 128),
     CONSTRAINT groups_revision_check CHECK (revision >= 1),
-    CONSTRAINT groups_system_identity_check
-        CHECK ((is_system AND system_key IS NOT NULL) OR (NOT is_system AND system_key IS NULL)),
     PRIMARY KEY (id)
 );
 
@@ -384,8 +383,8 @@ CREATE TABLE iam.server_grants (
     CONSTRAINT server_grants_scope_check
         CHECK ((user_id IS NOT NULL)::integer + (group_id IS NOT NULL)::integer = 1),
     CONSTRAINT server_grants_cpu_cores_check CHECK (cpu_cores IS NULL OR cpu_cores > 0),
-    CONSTRAINT server_grants_mem_bytes_check CHECK (mem_bytes IS NULL OR mem_bytes >= 0),
-    CONSTRAINT server_grants_disk_bytes_check CHECK (disk_bytes IS NULL OR disk_bytes >= 0),
+    CONSTRAINT server_grants_mem_bytes_check CHECK (mem_bytes IS NULL OR mem_bytes > 0),
+    CONSTRAINT server_grants_disk_bytes_check CHECK (disk_bytes IS NULL OR disk_bytes > 0),
     CONSTRAINT server_grants_gpu_pci_addresses_check
         CHECK (array_position(gpu_pci_addresses, NULL::text) IS NULL
                AND array_to_string(gpu_pci_addresses, ',') !~ '[^0-9a-f:.,]')
@@ -408,13 +407,14 @@ CREATE TABLE iam.shared_backend_grants (
     user_id uuid REFERENCES iam.users(id) ON DELETE CASCADE,
     group_id uuid REFERENCES iam.groups(id) ON DELETE CASCADE,
     shared_backend_id uuid NOT NULL REFERENCES infra.shared_backends(id) ON DELETE RESTRICT,
-    limit_bytes bigint DEFAULT 0 NOT NULL,
+    -- NULL = unlimited.
+    limit_bytes bigint,
     expires_at timestamp with time zone,
     created_at timestamp with time zone DEFAULT clock_timestamp() NOT NULL,
     updated_at timestamp with time zone DEFAULT clock_timestamp() NOT NULL,
     CONSTRAINT shared_backend_grants_scope_check
         CHECK ((user_id IS NOT NULL)::integer + (group_id IS NOT NULL)::integer = 1),
-    CONSTRAINT shared_backend_grants_limit_check CHECK (limit_bytes >= 0)
+    CONSTRAINT shared_backend_grants_limit_check CHECK (limit_bytes IS NULL OR limit_bytes > 0)
 );
 
 CREATE TABLE control.containers (
@@ -901,7 +901,6 @@ CREATE INDEX audit_events_target_id_idx
 ALTER TABLE iam.users ADD CONSTRAINT users_numeric_id_key UNIQUE (numeric_id);
 ALTER TABLE iam.users ADD CONSTRAINT users_username_key UNIQUE (username);
 ALTER TABLE iam.groups ADD CONSTRAINT groups_name_key UNIQUE (name);
-ALTER TABLE iam.groups ADD CONSTRAINT groups_system_key_key UNIQUE (system_key);
 ALTER TABLE iam.group_members ADD CONSTRAINT group_members_pkey PRIMARY KEY (id);
 ALTER TABLE iam.group_members ADD CONSTRAINT group_members_group_id_user_id_key
     UNIQUE (group_id, user_id);
@@ -910,8 +909,9 @@ ALTER TABLE iam.refresh_tokens ADD CONSTRAINT refresh_tokens_hash_key UNIQUE (ha
 ALTER TABLE iam.api_tokens ADD CONSTRAINT api_tokens_pkey PRIMARY KEY (id);
 ALTER TABLE iam.api_tokens ADD CONSTRAINT api_tokens_hash_key UNIQUE (hash);
 ALTER TABLE iam.ssh_public_keys ADD CONSTRAINT ssh_public_keys_pkey PRIMARY KEY (id);
-ALTER TABLE iam.ssh_public_keys ADD CONSTRAINT ssh_public_keys_user_id_fingerprint_key
-    UNIQUE (user_id, fingerprint);
+-- A public key belongs to one user: the SSH proxy resolves the user from the key.
+ALTER TABLE iam.ssh_public_keys ADD CONSTRAINT ssh_public_keys_fingerprint_key
+    UNIQUE (fingerprint);
 
 ALTER TABLE infra.shared_backends ADD CONSTRAINT shared_backends_identity_key_key
     UNIQUE (identity_key);
@@ -1107,36 +1107,27 @@ CREATE INDEX http_proxy_bindings_owner_idx
 CREATE INDEX http_proxy_bindings_pool_idx
     ON interaction.http_proxy_bindings (domain_pool_id, id);
 
--- Merged access: direct grants plus grants inherited through group_members,
--- merged per (user, resource), whatever the user's status (coverage by grants).
--- iam.effective_*_access below add the only access filter: active users.
---   * Only grants that are current (expires_at IS NULL OR expires_at > now()) contribute.
---     When none is current, the expired ones are merged instead so that the latest
---     past expires_at stays visible to the lapse processor; consumers must treat
---     "current coverage" as expires_at IS NULL OR expires_at > now().
---   * Quotas are merged by maximum; NULL means unlimited and wins over any number
---     (disk_bytes and shared-backend limit_bytes also treat 0 as unlimited).
+-- Effective access: current direct grants plus current grants inherited through
+-- group_members, merged per (user, resource), for active users only. A pair
+-- with no current grant, or whose user is not active, has no row: disabling a
+-- user loses coverage like an expired or revoked grant (the lapse ledger reads
+-- the raw grant tables for past expiries).
+--   * Quotas are merged by maximum; NULL means unlimited and wins over any number.
 --   * GPU PCI addresses are the distinct, sorted union.
 --   * expires_at is the latest one; NULL (never expires) wins over any date.
-CREATE VIEW iam.merged_server_access AS
-WITH inherited AS (
+CREATE VIEW iam.effective_server_access AS
+WITH merged AS (
     SELECT grants.user_id, grants.server_id, grants.cpu_cores, grants.mem_bytes,
            grants.disk_bytes, grants.gpu_pci_addresses, grants.expires_at
     FROM iam.server_grants AS grants
     WHERE grants.user_id IS NOT NULL
+      AND (grants.expires_at IS NULL OR grants.expires_at > now())
     UNION ALL
     SELECT members.user_id, grants.server_id, grants.cpu_cores, grants.mem_bytes,
            grants.disk_bytes, grants.gpu_pci_addresses, grants.expires_at
     FROM iam.server_grants AS grants
     JOIN iam.group_members AS members ON members.group_id = grants.group_id
-), scoped AS (
-    SELECT inherited.*,
-           (inherited.expires_at IS NULL OR inherited.expires_at > now()) AS is_current,
-           bool_or(inherited.expires_at IS NULL OR inherited.expires_at > now())
-               OVER (PARTITION BY inherited.user_id, inherited.server_id) AS any_current
-    FROM inherited
-), merged AS (
-    SELECT * FROM scoped WHERE is_current OR NOT any_current
+    WHERE grants.expires_at IS NULL OR grants.expires_at > now()
 ), gpus AS (
     SELECT merged.user_id, merged.server_id,
            array_agg(DISTINCT address ORDER BY address) AS gpu_pci_addresses
@@ -1149,76 +1140,57 @@ SELECT merged.user_id,
             ELSE max(merged.cpu_cores) END AS cpu_cores,
        CASE WHEN bool_or(merged.mem_bytes IS NULL) THEN NULL
             ELSE max(merged.mem_bytes) END AS mem_bytes,
-       CASE WHEN bool_or(merged.disk_bytes IS NULL OR merged.disk_bytes = 0) THEN NULL
+       CASE WHEN bool_or(merged.disk_bytes IS NULL) THEN NULL
             ELSE max(merged.disk_bytes) END AS disk_bytes,
        coalesce(max(gpus.gpu_pci_addresses), ARRAY[]::text[]) AS gpu_pci_addresses,
        CASE WHEN bool_or(merged.expires_at IS NULL) THEN NULL
             ELSE max(merged.expires_at) END AS expires_at
 FROM merged
 LEFT JOIN gpus ON gpus.user_id = merged.user_id AND gpus.server_id = merged.server_id
+JOIN iam.users AS users ON users.id = merged.user_id AND users.status = 'active'
 GROUP BY merged.user_id, merged.server_id;
 
-CREATE VIEW iam.merged_pool_access AS
-WITH inherited AS (
+CREATE VIEW iam.effective_pool_access AS
+WITH current_grants AS (
     SELECT grants.user_id, grants.pool_id, grants.expires_at
     FROM iam.storage_pool_grants AS grants
     WHERE grants.user_id IS NOT NULL
+      AND (grants.expires_at IS NULL OR grants.expires_at > now())
     UNION ALL
     SELECT members.user_id, grants.pool_id, grants.expires_at
     FROM iam.storage_pool_grants AS grants
     JOIN iam.group_members AS members ON members.group_id = grants.group_id
-), scoped AS (
-    SELECT inherited.*,
-           (inherited.expires_at IS NULL OR inherited.expires_at > now()) AS is_current,
-           bool_or(inherited.expires_at IS NULL OR inherited.expires_at > now())
-               OVER (PARTITION BY inherited.user_id, inherited.pool_id) AS any_current
-    FROM inherited
+    WHERE grants.expires_at IS NULL OR grants.expires_at > now()
 )
-SELECT scoped.user_id,
-       scoped.pool_id,
-       CASE WHEN bool_or(scoped.expires_at IS NULL) THEN NULL
-            ELSE max(scoped.expires_at) END AS expires_at
-FROM scoped
-WHERE scoped.is_current OR NOT scoped.any_current
-GROUP BY scoped.user_id, scoped.pool_id;
+SELECT current_grants.user_id,
+       current_grants.pool_id,
+       CASE WHEN bool_or(current_grants.expires_at IS NULL) THEN NULL
+            ELSE max(current_grants.expires_at) END AS expires_at
+FROM current_grants
+JOIN iam.users AS users ON users.id = current_grants.user_id AND users.status = 'active'
+GROUP BY current_grants.user_id, current_grants.pool_id;
 
-CREATE VIEW iam.merged_shared_backend_access AS
-WITH inherited AS (
+CREATE VIEW iam.effective_shared_backend_access AS
+WITH current_grants AS (
     SELECT grants.user_id, grants.shared_backend_id, grants.limit_bytes, grants.expires_at
     FROM iam.shared_backend_grants AS grants
     WHERE grants.user_id IS NOT NULL
+      AND (grants.expires_at IS NULL OR grants.expires_at > now())
     UNION ALL
     SELECT members.user_id, grants.shared_backend_id, grants.limit_bytes, grants.expires_at
     FROM iam.shared_backend_grants AS grants
     JOIN iam.group_members AS members ON members.group_id = grants.group_id
-), scoped AS (
-    SELECT inherited.*,
-           (inherited.expires_at IS NULL OR inherited.expires_at > now()) AS is_current,
-           bool_or(inherited.expires_at IS NULL OR inherited.expires_at > now())
-               OVER (PARTITION BY inherited.user_id, inherited.shared_backend_id) AS any_current
-    FROM inherited
+    WHERE grants.expires_at IS NULL OR grants.expires_at > now()
 )
-SELECT scoped.user_id,
-       scoped.shared_backend_id,
-       CASE WHEN bool_or(scoped.limit_bytes = 0) THEN NULL
-            ELSE max(scoped.limit_bytes) END AS limit_bytes,
-       CASE WHEN bool_or(scoped.expires_at IS NULL) THEN NULL
-            ELSE max(scoped.expires_at) END AS expires_at
-FROM scoped
-WHERE scoped.is_current OR NOT scoped.any_current
-GROUP BY scoped.user_id, scoped.shared_backend_id;
-
-CREATE VIEW iam.effective_server_access AS
-SELECT merged.* FROM iam.merged_server_access AS merged
-JOIN iam.users AS users ON users.id = merged.user_id AND users.status = 'active';
-
-CREATE VIEW iam.effective_pool_access AS
-SELECT merged.* FROM iam.merged_pool_access AS merged
-JOIN iam.users AS users ON users.id = merged.user_id AND users.status = 'active';
-
-CREATE VIEW iam.effective_shared_backend_access AS
-SELECT merged.* FROM iam.merged_shared_backend_access AS merged
-JOIN iam.users AS users ON users.id = merged.user_id AND users.status = 'active';
+SELECT current_grants.user_id,
+       current_grants.shared_backend_id,
+       CASE WHEN bool_or(current_grants.limit_bytes IS NULL) THEN NULL
+            ELSE max(current_grants.limit_bytes) END AS limit_bytes,
+       CASE WHEN bool_or(current_grants.expires_at IS NULL) THEN NULL
+            ELSE max(current_grants.expires_at) END AS expires_at
+FROM current_grants
+JOIN iam.users AS users ON users.id = current_grants.user_id AND users.status = 'active'
+GROUP BY current_grants.user_id, current_grants.shared_backend_id;
 
 CREATE FUNCTION audit.reject_event_update() RETURNS trigger
     LANGUAGE plpgsql
@@ -1226,33 +1198,6 @@ CREATE FUNCTION audit.reject_event_update() RETURNS trigger
 BEGIN
   RAISE EXCEPTION 'audit events are append-only'
     USING ERRCODE = '55000';
-END;
-$$;
-
-CREATE FUNCTION iam.bump_auth_version_for_group_capabilities() RETURNS trigger
-    LANGUAGE plpgsql
-    AS $$
-BEGIN
-  IF OLD.capabilities IS DISTINCT FROM NEW.capabilities THEN
-    UPDATE iam.users AS users
-    SET auth_version = users.auth_version + 1,
-        updated_at = clock_timestamp()
-    FROM iam.group_members AS members
-    WHERE members.group_id = NEW.id AND members.user_id = users.id;
-  END IF;
-  RETURN NEW;
-END;
-$$;
-
-CREATE FUNCTION iam.bump_auth_version_for_membership() RETURNS trigger
-    LANGUAGE plpgsql
-    AS $$
-BEGIN
-  UPDATE iam.users
-  SET auth_version = auth_version + 1,
-      updated_at = clock_timestamp()
-  WHERE id = CASE WHEN TG_OP = 'DELETE' THEN OLD.user_id ELSE NEW.user_id END;
-  RETURN NULL;
 END;
 $$;
 
@@ -1614,13 +1559,6 @@ $$;
 CREATE TRIGGER audit_events_reject_update
 BEFORE UPDATE ON audit.events
 FOR EACH ROW EXECUTE FUNCTION audit.reject_event_update();
-
-CREATE TRIGGER groups_bump_auth_version
-AFTER UPDATE OF capabilities ON iam.groups
-FOR EACH ROW EXECUTE FUNCTION iam.bump_auth_version_for_group_capabilities();
-CREATE TRIGGER group_members_bump_auth_version
-AFTER INSERT OR DELETE ON iam.group_members
-FOR EACH ROW EXECUTE FUNCTION iam.bump_auth_version_for_membership();
 
 CREATE TRIGGER iam_groups_touch_updated_at
 BEFORE UPDATE ON iam.groups

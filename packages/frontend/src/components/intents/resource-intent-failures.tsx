@@ -83,11 +83,14 @@ export function ResourceIntentHistory({
   );
 }
 
+/** Failed intents of a resource with a retry button; `scope=all` retries someone else's (administrators). */
 export function ResourceIntentFailures({
   listPath,
+  scope = 'mine',
   enabled = true,
 }: {
   listPath: string;
+  scope?: ListScope;
   enabled?: boolean;
 }) {
   const query = useQuery({
@@ -102,7 +105,7 @@ export function ResourceIntentFailures({
     }),
   });
   const retry = useMutation({
-    mutationFn: (intentId: string) => retryIntent(intentId),
+    mutationFn: (intentId: string) => retryIntent(intentId, scope),
     onSuccess: () => {
       toast({ title: '已提交重试' });
       void query.refetch();

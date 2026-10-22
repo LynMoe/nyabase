@@ -1,3 +1,4 @@
+use crate::config::ConnectionLimits;
 use crate::protocol::ProxySnapshot;
 use crate::runtime::Runtime;
 use crate::snapshot::Route;
@@ -42,6 +43,7 @@ pub(crate) fn test_runtime() -> Arc<Runtime> {
         http_listen: "127.0.0.1:0".into(),
         https_listen: None,
         started_at: Instant::now(),
+        limits: ConnectionLimits::default(),
         connected_at: AtomicU64::new(0),
         last_snapshot_generation: AtomicU64::new(0),
         last_snapshot_at: AtomicU64::new(0),

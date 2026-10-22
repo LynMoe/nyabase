@@ -94,7 +94,10 @@ export const controlPlaneConfigDefinitions = [
     key: 'runtime.nodeEnv',
     yamlPath: 'runtime.nodeEnv',
     env: 'NODE_ENV',
-    defaultValue: 'development',
+    // Fail closed: the insecure development fallbacks (JWT secret
+    // `change-me-in-production`, bootstrap password `admin123`, key encryption
+    // falling back to the JWT secret) need an explicit development/test.
+    defaultValue: 'production',
     schema: z.enum(['development', 'test', 'production']),
     valueKind: 'enum',
     secret: false,
@@ -102,7 +105,7 @@ export const controlPlaneConfigDefinitions = [
     restartRequired: true,
     public: false,
     label: 'Node environment',
-    description: 'Runtime environment used for production safety checks.',
+    description: 'Runtime environment used for production safety checks. Defaults to production; only an explicit development or test allows the insecure development defaults.',
   }),
   field({
     key: 'server.port',

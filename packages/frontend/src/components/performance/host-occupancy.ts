@@ -1,10 +1,10 @@
-import { Capability, type ListScope, type PerformanceHostSnapshot } from '@nyabase/common';
+import { Role, type ListScope, type PerformanceHostSnapshot } from '@nyabase/common';
 import { useQuery } from '@tanstack/react-query';
 import { formatBytesCompact, formatPercent, formatRate } from '../../lib/utils.js';
 import { api } from '../../lib/api.js';
 import { queryKeys } from '../../lib/query-keys.js';
 import { scopedPath } from '../../lib/scoped-paths.js';
-import { useAuthStore } from '../../store/auth.js';
+import { useHasRole } from '../../lib/use-role.js';
 
 export function hostOccupancy(host: PerformanceHostSnapshot): {
   cpu: string;
@@ -65,12 +65,8 @@ interface GpuDevice {
 }
 
 export function useGpuNames(serverId: string | undefined, scope: ListScope): ReadonlyMap<string, string> {
-  const privileged = useAuthStore((state) => {
-    const caps = state.user?.capabilities ?? [];
-    return scope === 'all'
-      || caps.includes(Capability.ManageServers)
-      || caps.includes(Capability.ManageGrants);
-  });
+  const operator = useHasRole(Role.Operator);
+  const privileged = scope === 'all' || operator;
   const query = useQuery({
     queryKey: queryKeys.gpu.devices(serverId ?? '', privileged ? 'all' : 'mine'),
     enabled: Boolean(serverId),

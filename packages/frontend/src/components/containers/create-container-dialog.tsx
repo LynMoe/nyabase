@@ -34,7 +34,8 @@ import { errorMessage } from '../../lib/api-error.js';
 import { queryKeys } from '../../lib/query-keys.js';
 import { toast } from '../../hooks/use-toast.js';
 import { containerActionSubmittedTitle } from '../../lib/status-labels.js';
-import { formatConsumedQuotaParts } from '../../lib/grant-quota.js';
+import { formatConsumedQuotaParts, runningMemBytes } from '../../lib/grant-quota.js';
+import { liveServerAccess } from '../../lib/effective-access.js';
 
 interface CreateContainerDialogProps {
   open: boolean;
@@ -285,11 +286,12 @@ function useCreateContainerForm({
     ? (containersQuery.data ?? []).filter((container) => container.serverId === form.serverId)
     : null;
   const memLeft = selectedAccess && onServer
-    ? remaining(selectedAccess.memBytes, onServer.reduce((sum, item) => sum + item.memBytes, 0))
+    ? remaining(selectedAccess.memBytes, runningMemBytes(onServer))
     : null;
   const diskLeft = data.capacityQuery.data?.availableBytes ?? null;
 
-  const memOver = memLeft !== null && memBytes !== null && memBytes > memLeft;
+  // A stopped create needs no memory headroom; it is checked when the container starts.
+  const memOver = form.startAfterCreate && memLeft !== null && memBytes !== null && memBytes > memLeft;
   const diskOver = diskLeft !== null && rootSizeBytes !== null && rootSizeBytes > diskLeft;
   const overQuota = memOver || diskOver;
 
@@ -372,13 +374,13 @@ function useCreateContainerData(open: boolean, serverId: string) {
   });
 
   const liveServerIds = useMemo(() => new Set(
-    (accessQuery.data?.servers ?? []).filter((server) => server.accessPhase === 'live').map((server) => server.serverId),
+    liveServerAccess(accessQuery.data?.servers).map((server) => server.serverId),
   ), [accessQuery.data]);
   const servers = useMemo(
     () => (serversQuery.data ?? []).filter((server) => server.status === 'online' && liveServerIds.has(server.id)),
     [serversQuery.data, liveServerIds],
   );
-  const selectedAccess = accessQuery.data?.servers.find((server) => server.serverId === serverId);
+  const selectedAccess = liveServerAccess(accessQuery.data?.servers).find((server) => server.serverId === serverId);
   const images = useMemo(() => {
     const allowed = new Set(selectedAccess?.allowedImageIds ?? []);
     return (imagesQuery.data ?? []).filter((image) => allowed.has(image.id));

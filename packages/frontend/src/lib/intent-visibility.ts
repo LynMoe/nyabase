@@ -7,11 +7,13 @@ import {
   type ListScope,
 } from '@nyabase/common';
 import { api } from './api.js';
+import { scopedPath } from './scoped-paths.js';
 import { waitUntil } from './storage-shrink.js';
 import { failureCodeLabel } from './status-labels.js';
 
-export function retryIntentPath(intentId: string): string {
-  return `/intents/${intentId}/retry`;
+/** `scope=all` is the administrator override for retrying someone else's intent. */
+export function retryIntentPath(intentId: string, scope: ListScope = 'mine'): string {
+  return scopedPath(`/intents/${intentId}/retry`, scope);
 }
 
 /**
@@ -79,8 +81,8 @@ export function latestIntentsByResource(items: readonly IntentDto[]): IntentDto[
   return latest;
 }
 
-export async function retryIntent(intentId: string): Promise<IntentDto> {
-  return api.post<IntentDto>(retryIntentPath(intentId), {});
+export async function retryIntent(intentId: string, scope: ListScope = 'mine'): Promise<IntentDto> {
+  return api.post<IntentDto>(retryIntentPath(intentId, scope), {});
 }
 
 export function isIntentAccepted(value: unknown): value is IntentAcceptedDto {

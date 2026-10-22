@@ -6,14 +6,14 @@ import {
   Param,
   Query,
 } from '@nestjs/common';
-import { RequireCaps } from '../iam/decorators.js';
+import { RequireRole } from '../iam/decorators.js';
 import {
   AuditAction,
-  Capability,
   zResourceIdentity,
   type AuditListResponse,
   type AuditLogDto,
   type AuditResourceSnapshotDto,
+  Role,
 } from '@nyabase/common';
 import {
   AuditRepository,
@@ -23,7 +23,7 @@ import {
 } from '../iam/audit.repository.js';
 
 @Controller('audit')
-@RequireCaps(Capability.ViewAudit)
+@RequireRole(Role.Operator)
 export class AuditController {
   constructor(private readonly repository: AuditRepository) {}
 

@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { describe, expect, it, vi } from 'vitest';
-import { ServerStatus } from '@nyabase/common';
+import { Role, ServerStatus, UserStatus } from '@nyabase/common';
+import { seedUser } from '../iam/access.pg-test-helper.js';
 import { PgTransactionManager } from '../platform/persistence-pg/transaction.js';
 import { withPostgresTestDatabase } from '../platform/persistence-pg/postgres-test-harness.js';
 import { ImagesService } from './images.service.js';
@@ -10,6 +11,7 @@ const describePg = process.env.NYABASE_TEST_DATABASE_URL ? describe : describe.s
 describePg('clean Incus image assignment contract', () => {
   it('allows admins to fill min_root_size_bytes when automatic discovery is unavailable', async () => {
     await withPostgresTestDatabase(async ({ database }) => {
+      const actor = await seedUser(database, undefined, UserStatus.Active, Role.Operator);
       const imageId = randomUUID();
       await database.insertInto('infra.images').values({
         id: imageId,
@@ -28,13 +30,13 @@ describePg('clean Incus image assignment contract', () => {
       const service = new ImagesService(
         database,
         new PgTransactionManager(database),
-        { assertActorCapabilitiesInTransaction: vi.fn() } as never,
+        {} as never,
         { append: vi.fn() } as never,
         { ensurePending: vi.fn() } as never,
         {} as never,
       );
 
-      const updated = await service.update('actor-1', imageId, {
+      const updated = await service.update(actor, imageId, {
         expectedRevision: 1,
         minRootSizeBytes: 2_147_483_648,
       });
@@ -57,6 +59,7 @@ describePg('clean Incus image assignment contract', () => {
 
   it('keeps assignment PUT idempotent and schedules fingerprint-safe cleanup', async () => {
     await withPostgresTestDatabase(async ({ database }) => {
+      const actor = await seedUser(database, undefined, UserStatus.Active, Role.Operator);
       const imageId = randomUUID();
       const serverId = randomUUID();
       await database.insertInto('infra.images').values({
@@ -122,14 +125,14 @@ describePg('clean Incus image assignment contract', () => {
       const service = new ImagesService(
         database,
         new PgTransactionManager(database),
-        { assertActorCapabilitiesInTransaction: vi.fn() } as never,
+        {} as never,
         { append: vi.fn() } as never,
         intents as never,
         {} as never,
       );
 
-      const first = await service.ensureAssignment('actor-1', imageId, serverId);
-      const second = await service.ensureAssignment('actor-1', imageId, serverId, 1);
+      const first = await service.ensureAssignment(actor, imageId, serverId);
+      const second = await service.ensureAssignment(actor, imageId, serverId, 1);
       expect(first.assignment).toMatchObject({
         imageId,
         serverId,
@@ -157,7 +160,7 @@ describePg('clean Incus image assignment contract', () => {
         })
         .where('id', '=', first.assignment.id)
         .execute();
-      const deleted = await service.deleteAssignment('actor-1', imageId, serverId, 1);
+      const deleted = await service.deleteAssignment(actor, imageId, serverId, 1);
       expect(deleted.assignment).toMatchObject({
         id: first.assignment.id,
         revision: 2,
@@ -171,6 +174,7 @@ describePg('clean Incus image assignment contract', () => {
 
   it('serializes image deletion with assignment creation on the image row', async () => {
     await withPostgresTestDatabase(async ({ database }) => {
+      const actor = await seedUser(database, undefined, UserStatus.Active, Role.Operator);
       const imageId = randomUUID();
       const serverId = randomUUID();
       await database.insertInto('infra.images').values({
@@ -236,15 +240,15 @@ describePg('clean Incus image assignment contract', () => {
       const service = new ImagesService(
         database,
         new PgTransactionManager(database),
-        { assertActorCapabilitiesInTransaction: vi.fn() } as never,
+        {} as never,
         { append: vi.fn() } as never,
         intents as never,
         {} as never,
       );
 
       const results = await Promise.allSettled([
-        service.delete('actor-1', imageId),
-        service.ensureAssignment('actor-1', imageId, serverId),
+        service.delete(actor, imageId),
+        service.ensureAssignment(actor, imageId, serverId),
       ]);
       expect(results[0]?.status).toBe('fulfilled');
       if (results[1]?.status === 'rejected') {

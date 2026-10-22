@@ -1,4 +1,4 @@
-import { Capability, type UserDto, UserStatus } from '@nyabase/common';
+import { Role, type UserDto, UserStatus } from '@nyabase/common';
 import { clearPrincipalQueryState } from './query-client.js';
 import { useAuthStore } from '../store/auth.js';
 import { api } from './api.js';
@@ -122,11 +122,10 @@ export function announceLogin(): void {
 
 function userAuthorizationFingerprint(user: UserDto | null): string {
   if (!user) return '';
-  const capabilities = [...user.capabilities].sort();
   const groups = [...user.groups]
-    .map((group) => `${group.id}:${group.name}:${group.isSystem}`)
+    .map((group) => `${group.id}:${group.name}`)
     .sort();
-  return JSON.stringify([user.id, user.status, capabilities, groups]);
+  return JSON.stringify([user.id, user.status, user.role, groups]);
 }
 
 export function shouldClearPrincipalState(previous: UserDto | null, next: UserDto | null): boolean {
@@ -216,7 +215,7 @@ export function takePendingLoginReason(): PendingLoginReason | undefined {
 }
 
 const USER_STATUSES = new Set<string>(Object.values(UserStatus));
-const CAPABILITIES = new Set<string>(Object.values(Capability));
+const ROLES = new Set<string>(Object.values(Role));
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value && typeof value === 'object' && !Array.isArray(value));
@@ -234,15 +233,13 @@ export function isRuntimeUserDto(value: unknown): value is UserDto {
     || !isBoundedString(value.createdAt, 64)
     || typeof value.status !== 'string'
     || !USER_STATUSES.has(value.status)
-    || !Array.isArray(value.capabilities)
-    || value.capabilities.length > CAPABILITIES.size
-    || value.capabilities.some((capability) => typeof capability !== 'string' || !CAPABILITIES.has(capability))
+    || typeof value.role !== 'string'
+    || !ROLES.has(value.role)
     || !Array.isArray(value.groups)
     || value.groups.length > 10_000) return false;
   return value.groups.every((group) => isRecord(group)
     && isBoundedString(group.id, 128)
-    && isBoundedString(group.name, 128)
-    && typeof group.isSystem === 'boolean');
+    && isBoundedString(group.name, 128));
 }
 
 const DISABLED_ACCOUNT_RE = /disabled|user_disabled|account_disabled|停用/i;
