@@ -1,5 +1,5 @@
 {
-  "name": "@nyabase/node-exporter",
+  "name": "@nyabase/agent",
   "version": "0.1.0",
   "private": true,
   "main": "./dist/main.js",
@@ -19,12 +19,14 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "@nyabase/common": "workspace:*"
+    "@nyabase/common": "workspace:*",
+    "ws": "^8.18.2"
   },
   "devDependencies": {
     "@types/node": "^22.15.3",
     "tsx": "^4.21.0",
     "typescript": "^5.8.3",
-    "vitest": "^4.1.5"
+    "vitest": "^4.1.5",
+    "@types/ws": "^8.5.14"
   }
 }

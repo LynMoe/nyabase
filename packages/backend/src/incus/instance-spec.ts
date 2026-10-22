@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import { isIP } from 'node:net';
+import { GUEST_IPV6_DISABLE_SYSCTLS, MANAGED_NIC_HOST_NAME_PREFIX } from '@nyabase/common';
 import type { IncusSchema } from './incus-client-types.js';
 import { IncusError, type IncusErrorDetails, type IncusFailureCode } from './incus-errors.js';
 import { isRecord } from '../platform/domain-utils.js';
@@ -18,13 +19,23 @@ export interface InstanceSpecContainerInput {
   readonly revision: number;
   readonly imageFingerprint: string;
   readonly imageSource?: InstanceImageSourceInput;
-  readonly cpuMillis: number;
+  /** Logical CPUs the instance is pinned to (the owner's CPU set). */
+  readonly cpus: readonly number[];
   readonly memBytes: InstanceSpecInteger;
   readonly nesting?: boolean;
   readonly syscallIntercept?: boolean;
   readonly rootPool: string;
   readonly rootSizeBytes: InstanceSpecInteger;
   readonly routedIp: string;
+}
+
+/** The platform-wide per-container limits (system settings). */
+export interface ContainerRuntimeLimits {
+  readonly processes: number;
+  readonly networkIngressMbit: number;
+  readonly networkEgressMbit: number;
+  readonly diskReadMBps: number;
+  readonly diskWriteMBps: number;
 }
 
 export interface InstanceSpecServerInput {
@@ -37,6 +48,8 @@ export interface InstanceSpecVolumeInput {
   readonly id: string;
   readonly incusName: string;
   readonly poolName: string;
+  /** False for network filesystems (CephFS), which cgroup I/O limits cannot reach. */
+  readonly throttled: boolean;
 }
 
 export interface InstanceSpecAttachmentInput {
@@ -50,6 +63,7 @@ export interface InstanceSpecInput {
   readonly container: InstanceSpecContainerInput;
   readonly server: InstanceSpecServerInput;
   readonly attachments: readonly InstanceSpecAttachmentInput[];
+  readonly limits: ContainerRuntimeLimits;
 }
 
 export type DesiredInstanceSpec = IncusSchema<'InstancesPost'>;
@@ -109,29 +123,41 @@ function validateIpv4(value: string, label: string): string {
   return value;
 }
 
-/**
- * Map product millicores onto Incus 6 CPU limits.
- *
- * Incus rejects fractional `limits.cpu` (integer count / cpuset only). A bare
- * `limits.cpu.allowance` percentage is relative to *all host CPUs*, which would
- * silently over-grant millicores on multi-core hosts. Bind an integer core
- * count and apply a CFS time-slice allowance for the fractional remainder:
- * 500 → cpu=1 + 500ms/1000ms; 2500 → cpu=3 + 2500ms/3000ms; 2000 → cpu=2.
- */
-function cpuConfig(cpuMillis: number): Record<string, string> {
-  const millis = nonNegativeInteger(cpuMillis, 'cpu_millis');
-  if (millis === 0) {
-    return {};
+/** Incus `limits.cpu` for an explicit set: ranges only, so a single CPU is never read as a count. */
+export function formatCpuSet(cpus: readonly number[]): string {
+  const sorted = [...new Set(cpus)].sort((left, right) => left - right);
+  if (sorted.length === 0 || sorted.some((cpu) => !Number.isSafeInteger(cpu) || cpu < 0)) {
+    fail('INVALID_INSTANCE_SPEC', 'cpu_set');
   }
-  const wholeCores = Math.trunc(millis / 1000);
-  const remainder = millis % 1000;
-  if (remainder === 0) {
-    return { 'limits.cpu': String(wholeCores) };
+  const ranges: string[] = [];
+  let start = sorted[0]!;
+  let previous = start;
+  for (const cpu of sorted.slice(1)) {
+    if (cpu === previous + 1) {
+      previous = cpu;
+      continue;
+    }
+    ranges.push(`${start}-${previous}`);
+    start = cpu;
+    previous = cpu;
   }
-  const cores = wholeCores + 1;
+  ranges.push(`${start}-${previous}`);
+  return ranges.join(',');
+}
+
+/** The sysctls that keep guest IPv6 off; the host's nft guard is what enforces it. */
+export const GUEST_IPV6_SYSCTL_CONFIG: Readonly<Record<string, string>> = Object.fromEntries(
+  GUEST_IPV6_DISABLE_SYSCTLS.map((key) => [key, '1']),
+);
+
+function limitsConfig(limits: ContainerRuntimeLimits): Record<string, string> {
+  return { 'limits.processes': String(nonNegativeInteger(limits.processes, 'limits_processes')) };
+}
+
+function diskLimits(limits: ContainerRuntimeLimits): Record<string, string> {
   return {
-    'limits.cpu': String(cores),
-    'limits.cpu.allowance': `${millis}ms/${cores * 1000}ms`,
+    'limits.read': `${nonNegativeInteger(limits.diskReadMBps, 'disk_read')}MB`,
+    'limits.write': `${nonNegativeInteger(limits.diskWriteMBps, 'disk_write')}MB`,
   };
 }
 
@@ -171,6 +197,12 @@ export function deriveVolumeName(volumeId: string): string {
 
 export function deriveAttachmentDeviceName(attachmentId: string): string {
   return `nyd-${uuid32(attachmentId, 'attachment_id')}`;
+}
+
+/** Host-side veth name of the instance NIC; the agent's IPv6 guard matches its prefix. */
+export function deriveNicHostName(instanceId: string): string {
+  const digest = createHash('sha256').update(uuid32(instanceId, 'instance_id'), 'utf8').digest('hex');
+  return `${MANAGED_NIC_HOST_NAME_PREFIX}${digest.slice(0, 12)}`;
 }
 
 export function deriveInstanceHwaddr(containerId: string): string {
@@ -233,9 +265,12 @@ export function buildDesiredInstanceSpec(input: InstanceSpecInput): DesiredInsta
   const routedIp = validateIpv4(container.routedIp, 'routed_ip');
   const name = `nyc-${containerId}`;
   const config: Record<string, string> = {
-    ...cpuConfig(container.cpuMillis),
+    'limits.cpu': formatCpuSet(container.cpus),
     'limits.memory': memBytes,
+    ...limitsConfig(input.limits),
     'security.privileged': 'false',
+    'security.idmap.isolated': 'true',
+    ...GUEST_IPV6_SYSCTL_CONFIG,
     'security.nesting': String(container.nesting ?? true),
     'security.syscalls.intercept.mknod': String(container.syscallIntercept ?? true),
     'security.syscalls.intercept.setxattr': String(container.syscallIntercept ?? true),
@@ -250,6 +285,7 @@ export function buildDesiredInstanceSpec(input: InstanceSpecInput): DesiredInsta
       path: '/',
       pool: rootPool,
       size: rootSizeBytes,
+      ...diskLimits(input.limits),
     },
     eth0: {
       type: 'nic',
@@ -257,9 +293,13 @@ export function buildDesiredInstanceSpec(input: InstanceSpecInput): DesiredInsta
       parent: parentInterface,
       name: 'eth0',
       hwaddr: deriveInstanceHwaddr(containerId),
+      host_name: deriveNicHostName(containerId),
       'ipv4.address': routedIp,
       'security.ipv4_filtering': 'true',
       'security.mac_filtering': 'true',
+      'security.port_isolation': 'true',
+      'limits.ingress': `${nonNegativeInteger(input.limits.networkIngressMbit, 'network_ingress')}Mbit`,
+      'limits.egress': `${nonNegativeInteger(input.limits.networkEgressMbit, 'network_egress')}Mbit`,
     },
   };
 
@@ -291,6 +331,9 @@ export function buildDesiredInstanceSpec(input: InstanceSpecInput): DesiredInsta
     if (attachment.readOnly) {
       device.readonly = 'true';
     }
+    if (attachment.volume.throttled) {
+      Object.assign(device, diskLimits(input.limits));
+    }
     devices[`nyd-${attachmentId}`] = device;
   }
 
@@ -310,6 +353,7 @@ export type ManagedDeviceMap = Readonly<Record<string, ManagedStringMap>>;
 export interface ManagedInstanceDocument {
   readonly config?: ManagedStringMap;
   readonly devices?: ManagedDeviceMap;
+  readonly profiles?: readonly string[];
 }
 
 export interface ManagedValueDiff {
@@ -333,6 +377,8 @@ export interface ManagedFieldsDiff {
   readonly empty: boolean;
   readonly config: Readonly<Record<string, ManagedValueDiff>>;
   readonly devices: Readonly<Record<string, ManagedDeviceDiff>>;
+  /** True when the instance picked up a profile; the platform never uses profiles. */
+  readonly profiles?: boolean;
   readonly error?: ManagedFieldFailure;
 }
 
@@ -440,50 +486,28 @@ function canonicalCpu(value: string): string | undefined {
   return ranges.join(',');
 }
 
-function canonicalCpuAllowance(value: string): string | undefined {
-  const trimmed = value.trim().toLowerCase();
-  if (trimmed.endsWith('%')) {
-    const percent = canonicalDecimal(trimmed.slice(0, -1));
-    return percent === undefined ? undefined : `${percent}%`;
-  }
-  // Time-slice form: <limit>ms/<period>ms (e.g. 50ms/100ms)
-  const slice = /^([0-9]+(?:\.[0-9]+)?)ms\/([0-9]+(?:\.[0-9]+)?)ms$/.exec(trimmed);
-  if (!slice) return undefined;
-  const limit = canonicalDecimal(slice[1]);
-  const period = canonicalDecimal(slice[2]);
-  if (limit === undefined || period === undefined) return undefined;
-  return `${limit}ms/${period}ms`;
-}
-
 export function normalizeManagedValue(key: string, value: string | undefined): string | undefined {
   if (value === undefined) return undefined;
   if (key === 'limits.memory') return parseMemoryBytes(value) ?? value.trim();
   if (key === 'limits.cpu') return canonicalCpu(value) ?? value.trim();
-  if (key === 'limits.cpu.allowance') return canonicalCpuAllowance(value) ?? value.trim();
   return value;
 }
 
+/**
+ * Which parts of an instance document the platform owns. Everything is owned
+ * except config Incus maintains itself (volatile state, image metadata):
+ * an unknown config key, an extra device or a profile is drift to remove.
+ */
 export interface ManagedFieldOwnership {
-  readonly configPrefixes: readonly string[];
-  readonly deviceNames: readonly string[];
-  readonly devicePrefixes: readonly string[];
+  readonly unmanagedConfigPrefixes: readonly string[];
 }
 
 export const CORE_MANAGED_FIELD_OWNERSHIP: ManagedFieldOwnership = {
-  configPrefixes: ['limits.', 'security.', 'user.nyabase.'],
-  deviceNames: ['root', 'eth0'],
-  devicePrefixes: ['nyd-'],
+  unmanagedConfigPrefixes: ['volatile.', 'image.'],
 };
 
 function isManagedConfigKey(key: string, ownership: ManagedFieldOwnership): boolean {
-  return ownership.configPrefixes.some((prefix) => key.startsWith(prefix));
-}
-
-function isManagedDeviceName(name: string, ownership: ManagedFieldOwnership): boolean {
-  return (
-    ownership.deviceNames.includes(name)
-    || ownership.devicePrefixes.some((prefix) => name.startsWith(prefix))
-  );
+  return !ownership.unmanagedConfigPrefixes.some((prefix) => key.startsWith(prefix));
 }
 
 function managedFailure(code: IncusFailureCode, details: IncusErrorDetails): ManagedFieldsDiff {
@@ -525,8 +549,9 @@ function deviceMatches(
   desired: ManagedStringMap | undefined,
 ): boolean {
   if (!actual || !desired) return actual === desired;
-  for (const [key, expected] of Object.entries(desired)) {
-    if (actual[key] !== expected) return false;
+  const keys = new Set([...Object.keys(actual), ...Object.keys(desired)]);
+  for (const key of keys) {
+    if (actual[key] !== desired[key]) return false;
   }
   return true;
 }
@@ -534,15 +559,8 @@ function deviceMatches(
 function compareDevices(
   actual: ManagedDeviceMap,
   desired: ManagedDeviceMap,
-  ownership: ManagedFieldOwnership,
 ): Readonly<Record<string, ManagedDeviceDiff>> {
-  const names = new Set<string>();
-  for (const name of Object.keys(actual)) {
-    if (isManagedDeviceName(name, ownership)) names.add(name);
-  }
-  for (const name of Object.keys(desired)) {
-    if (isManagedDeviceName(name, ownership)) names.add(name);
-  }
+  const names = new Set([...Object.keys(actual), ...Object.keys(desired)]);
   const result: Record<string, ManagedDeviceDiff> = {};
   for (const name of [...names].sort()) {
     const actualDevice = actual[name];
@@ -640,52 +658,37 @@ export function compareManagedFields(
   if (desiredNetworkFailure) return desiredNetworkFailure;
 
   const config = compareConfig(actual.config, expectedDocument.config, ownership);
-  const devices = compareDevices(actual.devices, expectedDocument.devices, ownership);
-  const empty = Object.keys(config).length === 0 && Object.keys(devices).length === 0;
+  const devices = compareDevices(actual.devices, expectedDocument.devices);
+  const profiles = (actualInput.profiles ?? []).length > 0;
+  const empty = Object.keys(config).length === 0 && Object.keys(devices).length === 0 && !profiles;
   return {
     kind: empty ? 'empty' : 'diff',
     empty,
     config,
     devices,
+    profiles,
   };
 }
 
+/** The document to PUT: Incus-owned config kept, everything else exactly as desired, no profiles. */
 export function applyManagedFields(
   actualInput: ManagedInstanceDocument,
   desired: DesiredInstanceSpec,
   ownership: ManagedFieldOwnership,
 ): ManagedInstanceDocument {
   const actual = asManagedDocument(actualInput);
-  const expected = asManagedDocument({
-    config: copyStringMap(desired.config),
-    devices: copyDeviceMap(desired.devices),
-  });
-  const config: Record<string, string> = { ...actual.config };
-  for (const key of Object.keys(config)) {
-    if (isManagedConfigKey(key, ownership) && expected.config[key] === undefined) {
-      delete config[key];
-    }
+  const config: Record<string, string> = {};
+  for (const [key, value] of Object.entries(actual.config)) {
+    if (!isManagedConfigKey(key, ownership)) config[key] = value;
   }
-  for (const [key, value] of Object.entries(expected.config)) {
+  for (const [key, value] of Object.entries(copyStringMap(desired.config))) {
     if (isManagedConfigKey(key, ownership)) config[key] = value;
   }
-
   const devices: Record<string, ManagedStringMap> = {};
-  for (const [name, device] of Object.entries(actual.devices)) {
-    if (!isManagedDeviceName(name, ownership)) {
-      devices[name] = device;
-    }
+  for (const [name, device] of Object.entries(copyDeviceMap(desired.devices))) {
+    devices[name] = { ...device };
   }
-  for (const [name, device] of Object.entries(expected.devices)) {
-    if (isManagedDeviceName(name, ownership)) {
-      // Replace eth0 wholesale so filter identity is complete and extra keys
-      // cannot survive a merge. Other managed devices still merge.
-      devices[name] = name === 'eth0'
-        ? { ...device }
-        : { ...actual.devices[name], ...device };
-    }
-  }
-  return { config, devices };
+  return { config, devices, profiles: [] };
 }
 
 export function observeRootQuotaPending(

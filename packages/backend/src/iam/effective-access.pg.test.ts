@@ -35,17 +35,17 @@ describePg('iam.effective_server_access', () => {
       await addMember(database, groupA, userId);
       await addMember(database, groupB, userId);
       await grantServer(database, { user: userId }, serverId, {
-        cpuMillis: 2_000, memBytes: 8, diskBytes: 100,
+        cpuCores: 2, memBytes: 8, diskBytes: 100,
       });
       await grantServer(database, { group: groupA }, serverId, {
-        cpuMillis: 4_000, memBytes: 4, diskBytes: 300,
+        cpuCores: 4, memBytes: 4, diskBytes: 300,
       });
       await grantServer(database, { group: groupB }, serverId, {
-        cpuMillis: 1_000, memBytes: 16, diskBytes: 200,
+        cpuCores: 1, memBytes: 16, diskBytes: 200,
       });
 
       await expect(resolveServerAccess(database, userId, serverId)).resolves.toMatchObject({
-        cpuMillis: 4_000,
+        cpuCores: 4,
         memBytes: 16,
         diskBytes: 300,
         gpuPciAddresses: [],
@@ -61,14 +61,14 @@ describePg('iam.effective_server_access', () => {
       const group = await seedGroup(database);
       await addMember(database, group, userId);
       await grantServer(database, { user: userId }, serverId, {
-        cpuMillis: null, memBytes: 8, diskBytes: 100,
+        cpuCores: null, memBytes: 8, diskBytes: 100,
       });
       await grantServer(database, { group }, serverId, {
-        cpuMillis: 4_000, memBytes: null, diskBytes: 0,
+        cpuCores: 4, memBytes: null, diskBytes: 0,
       });
 
       await expect(resolveServerAccess(database, userId, serverId)).resolves.toMatchObject({
-        cpuMillis: null,
+        cpuCores: null,
         memBytes: null,
         diskBytes: null,
       });
@@ -120,14 +120,14 @@ describePg('iam.effective_server_access', () => {
       const group = await seedGroup(database);
       await addMember(database, group, userId);
       await grantServer(database, { user: userId }, serverId, {
-        cpuMillis: 64_000, diskBytes: 9_999, gpu: ['0000:01:00.0'], expiresAt: days(-1),
+        cpuCores: 64, diskBytes: 9_999, gpu: ['0000:01:00.0'], expiresAt: days(-1),
       });
       await grantServer(database, { group }, serverId, {
-        cpuMillis: 2_000, diskBytes: 100, gpu: ['0000:02:00.0'], expiresAt: days(5),
+        cpuCores: 2, diskBytes: 100, gpu: ['0000:02:00.0'], expiresAt: days(5),
       });
 
       const access = await resolveServerAccess(database, userId, serverId);
-      expect(access).toMatchObject({ cpuMillis: 2_000, diskBytes: 100 });
+      expect(access).toMatchObject({ cpuCores: 2, diskBytes: 100 });
       expect(access?.gpuPciAddresses).toEqual(['0000:02:00.0']);
     });
   });
@@ -193,12 +193,12 @@ describePg('iam.effective_server_access', () => {
       const b = await seedUser(database);
       const one = await seedServer(database);
       const two = await seedServer(database);
-      await grantServer(database, { user: a }, one, { cpuMillis: 1 });
-      await grantServer(database, { user: b }, two, { cpuMillis: 2 });
+      await grantServer(database, { user: a }, one, { cpuCores: 1 });
+      await grantServer(database, { user: b }, two, { cpuCores: 2 });
 
       await expect(resolveServerAccess(database, a, two)).resolves.toBeNull();
       await expect(resolveServerAccess(database, b, one)).resolves.toBeNull();
-      expect((await resolveServerAccess(database, a, one))?.cpuMillis).toBe(1);
+      expect((await resolveServerAccess(database, a, one))?.cpuCores).toBe(1);
     });
   });
 });

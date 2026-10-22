@@ -32,15 +32,8 @@ done
 contract_root="$(mktemp -d)"
 trap 'rm -rf "$contract_root"' EXIT
 rendered="$contract_root/compose.json"
-incus_ca_source="$contract_root/incus-ca"
-for secret_source in "$incus_ca_source"; do
-  : >"$secret_source"
-  chmod 600 "$secret_source"
-done
-
 POSTGRES_PASSWORD=contract-test \
 DATABASE_URL=postgresql://nyabase:contract-test@postgres:5432/nyabase \
-INCUS_CA_SOURCE="$incus_ca_source" \
   docker compose -f deploy/docker-compose.yml config --format json >"$rendered"
 
 node - "$rendered" <<'NODE'
@@ -108,6 +101,10 @@ for (const envName of [
 ]) {
   if (!(envName in backend.environment)) throw new Error(`backend is missing ${envName}`);
 }
+// Host agents dial the Backend; it holds no Incus TLS material.
+if ('INCUS_CA_FILE' in backend.environment || backend.secrets?.length || config.secrets) {
+  throw new Error('backend must not be given Incus TLS secrets');
+}
 if (backend.read_only !== true) throw new Error('backend root filesystem is not read-only');
 if (!backend.cap_drop?.includes('ALL')) throw new Error('backend does not drop all capabilities');
 if (!backend.security_opt?.some((entry) => entry.startsWith('no-new-privileges'))) {
@@ -139,7 +136,7 @@ for deployment_file in \
   # Host network routing (netplan `via: <GATEWAY>`, networkd `Gateway=`) is not
   # the retired Backend gateway module.
   if rg -n -i \
-    '(^|[^[:alnum:]_])agent([^[:alnum:]_]|$)|(^|[^[:alnum:]_])gateway([^[:alnum:]_]|$)|dockerd|dockerRoot|remote[-_]fs|data[-_]dir|workflow|agent[-_]task' \
+    '(^|[^[:alnum:]_])gateway([^[:alnum:]_]|$)|dockerd|dockerRoot|remote[-_]fs|data[-_]dir|workflow|agent[-_]task' \
     "$deployment_file" \
     | rg -v '<GATEWAY>|Gateway=' ; then
     echo "obsolete runtime terminology remains in $deployment_file" >&2

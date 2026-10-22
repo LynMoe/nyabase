@@ -17,7 +17,7 @@ export interface IamServerGrantTable {
   user_id: string | null;
   group_id: string | null;
   server_id: string;
-  cpu_millis: number | null;
+  cpu_cores: number | null;
   mem_bytes: IamBigInt | null;
   disk_bytes: IamBigInt | null;
   gpu_pci_addresses: ColumnType<string[], string[] | undefined, string[]>;
@@ -52,7 +52,7 @@ export interface IamEffectiveServerAccessView {
   user_id: string;
   server_id: string;
   /** NULL = unlimited. */
-  cpu_millis: number | null;
+  cpu_cores: number | null;
   mem_bytes: string | null;
   disk_bytes: string | null;
   gpu_pci_addresses: string[];

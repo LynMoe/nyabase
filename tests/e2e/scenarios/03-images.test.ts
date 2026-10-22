@@ -95,7 +95,6 @@ describe('image assignment and visibility', () => {
         imageId: h.state.image.id,
         name: h.name('noimg'),
         rootSizeBytes: h.state.rootSizeBytes,
-        cpuMillis: 1000,
         memBytes: GIB,
         powerIntent: 'stopped',
       }),

@@ -1,0 +1,454 @@
+import {
+  GUEST_IPV6_DISABLE_SYSCTLS,
+  MANAGED_ATTACHMENT_DEVICE_PATTERN,
+  MANAGED_INSTANCE_NAME_PATTERN,
+  MANAGED_NIC_HOST_NAME_PATTERN,
+  MANAGED_VOLUME_NAME_PATTERN,
+  type AgentIncusHttpMethod,
+} from '@nyabase/common';
+
+/*
+ * What the Backend may ask the local Incus to do. The agent is the boundary:
+ * even a compromised Backend can only manage nyabase instances and volumes as
+ * unprivileged, uid-isolated, profile-free containers without host paths,
+ * raw LXC config or IPv6. Anything not listed here is refused.
+ */
+
+export type PolicyVerdict =
+  | {
+    readonly allowed: true;
+    /** The body to send instead: volatile.* keys forced back to what Incus holds. */
+    readonly body?: Buffer;
+  }
+  | { readonly allowed: false; readonly reason: string };
+
+export interface PolicyRequest {
+  readonly method: AgentIncusHttpMethod;
+  readonly path: string;
+  readonly body?: Buffer;
+}
+
+/** Reads the current Incus document (instance, volume) for volatile-key comparison. */
+export type CurrentDocumentReader = (path: string) => Promise<Record<string, unknown> | undefined>;
+
+const ALLOW: PolicyVerdict = { allowed: true };
+const deny = (reason: string): PolicyVerdict => ({ allowed: false, reason });
+
+const PROBE_INSTANCE_PATTERN = /^nyabase-preflight-[0-9a-f]{32}$/;
+const IMAGE_FINGERPRINT_PATTERN = /^[0-9a-f]{64}$/;
+const OPERATION_ID_PATTERN = /^[0-9a-f-]{36}$/;
+const ALLOWED_QUERY_KEYS = new Set(['recursion', 'path', 'timeout', 'secret', 'project']);
+const POWER_ACTIONS = new Set(['start', 'stop', 'restart', 'freeze', 'unfreeze']);
+const CPUSET_PATTERN = /^\d+-\d+(?:,\d+-\d+)*$|^\d+(?:-\d+)?(?:,\d+(?:-\d+)?)+$/;
+const BOOLEAN_VALUES = new Set(['true', 'false']);
+
+interface ParsedPath {
+  readonly segments: readonly string[];
+  readonly query: URLSearchParams;
+}
+
+/** Split and decode an Incus API path; refuses traversal and encoded separators outside aliases. */
+export function parseIncusPath(path: string): ParsedPath | undefined {
+  const [rawPath, rawQuery = ''] = path.split('?', 2) as [string, string?];
+  if (
+    !rawPath.startsWith('/1.0')
+    || /[\u0000-\u001f\u007f\\#]/.test(path)
+    || /%2e|%5c|%00/i.test(rawPath)
+    || rawPath.split('/').some((segment) => segment === '.' || segment === '..')
+    || rawPath.includes('//')
+  ) {
+    return undefined;
+  }
+  let segments: string[];
+  try {
+    segments = rawPath.split('/').slice(1).map((segment) => decodeURIComponent(segment));
+  } catch {
+    return undefined;
+  }
+  const query = new URLSearchParams(rawQuery);
+  for (const [key, value] of query) {
+    if (!ALLOWED_QUERY_KEYS.has(key)) return undefined;
+    if (key === 'project' && value !== 'default') return undefined;
+  }
+  return { segments, query };
+}
+
+function isManagedInstance(name: string | undefined): boolean {
+  return name !== undefined && (MANAGED_INSTANCE_NAME_PATTERN.test(name) || PROBE_INSTANCE_PATTERN.test(name));
+}
+
+export async function checkIncusHttp(
+  request: PolicyRequest,
+  readCurrent: CurrentDocumentReader,
+): Promise<PolicyVerdict> {
+  const parsed = parseIncusPath(request.path);
+  if (!parsed) return deny('path is malformed or uses a refused query parameter');
+  const [, collection, ...rest] = parsed.segments;
+  if (parsed.segments[0] !== '1.0') return deny('only the 1.0 API is reachable');
+  if (collection === undefined) {
+    return request.method === 'GET' ? ALLOW : deny('server configuration is read-only');
+  }
+  switch (collection) {
+    case 'resources':
+      return request.method === 'GET' && rest.length === 0 ? ALLOW : deny('resources are read-only');
+    case 'networks':
+      return request.method === 'GET' && rest.length <= 2 && (rest.length < 2 || rest[1] === 'state')
+        ? ALLOW
+        : deny('networks are read-only');
+    case 'instances':
+      return checkInstances(request, rest, readCurrent);
+    case 'storage-pools':
+      return checkStoragePools(request, rest, readCurrent);
+    case 'images':
+      return checkImages(request, rest);
+    case 'operations':
+      return checkOperations(request.method, rest);
+    default:
+      return deny(`/1.0/${collection} is not reachable through the agent`);
+  }
+}
+
+/** Incus WebSockets the Backend may open: the event stream and operation channels. */
+export function checkIncusWebSocket(path: string): PolicyVerdict {
+  const parsed = parseIncusPath(path);
+  if (!parsed) return deny('path is malformed');
+  const [version, collection, id, leaf] = parsed.segments;
+  if (version !== '1.0') return deny('only the 1.0 API is reachable');
+  if (collection === 'events' && parsed.segments.length === 2) return ALLOW;
+  if (
+    collection === 'operations'
+    && OPERATION_ID_PATTERN.test(id ?? '')
+    && leaf === 'websocket'
+    && parsed.segments.length === 4
+    && parsed.query.has('secret')
+  ) {
+    return ALLOW;
+  }
+  return deny('only events and operation websockets are reachable');
+}
+
+async function checkInstances(
+  request: PolicyRequest,
+  rest: readonly string[],
+  readCurrent: CurrentDocumentReader,
+): Promise<PolicyVerdict> {
+  const { method } = request;
+  if (rest.length === 0) {
+    if (method === 'GET') return ALLOW;
+    if (method !== 'POST') return deny('instance collection only supports list and create');
+    const body = jsonBody(request.body);
+    if (!body) return deny('instance create needs a JSON body');
+    if (!isManagedInstance(stringField(body, 'name'))) return deny('only nyabase instances may be created');
+    if (body.type !== undefined && body.type !== 'container') return deny('only containers may be created');
+    const source = body.source;
+    if (!isRecord(source) || source.type !== 'image') return deny('instances may only be created from an image');
+    if (isRecord(body.config) && Object.keys(body.config).some((key) => key.startsWith('volatile.'))) {
+      return deny('volatile keys may not be set on create');
+    }
+    return checkInstanceDocument(body, { full: true });
+  }
+  const [name, leaf, ...tail] = rest;
+  if (!isManagedInstance(name)) return deny('only nyabase instances are reachable');
+  if (tail.length > 0) return deny('instance path is too deep');
+  const instancePath = `/1.0/instances/${encodeURIComponent(name!)}`;
+  if (leaf === undefined) {
+    if (method === 'GET' || method === 'DELETE') return ALLOW;
+    const body = jsonBody(request.body);
+    if (!body) return deny('instance update needs a JSON body');
+    if (method === 'POST') {
+      if (body.migration === true || body.live === true) return deny('instance migration is refused');
+      return isManagedInstance(stringField(body, 'name')) && Object.keys(body).every((key) => key === 'name')
+        ? ALLOW
+        : deny('instances may only be renamed to another nyabase name');
+    }
+    const current = await readCurrent(instancePath);
+    if (!current) return deny('instance to update does not exist');
+    const verdict = checkInstanceDocument(body, { full: method === 'PUT' });
+    if (!verdict.allowed) return verdict;
+    return withCurrentVolatile(body, stringMap(current.config));
+  }
+  switch (leaf) {
+    case 'state':
+      if (method === 'GET') return ALLOW;
+      if (method !== 'PUT') return deny('instance state only supports read and change');
+      return POWER_ACTIONS.has(String(jsonBody(request.body)?.action)) ? ALLOW : deny('unknown power action');
+    case 'exec':
+      return method === 'POST' ? ALLOW : deny('exec only supports POST');
+    case 'files':
+      return method === 'GET' || method === 'POST' || method === 'DELETE'
+        ? ALLOW
+        : deny('instance files support read, write and delete');
+    default:
+      return deny(`instance ${leaf} is not reachable through the agent`);
+  }
+}
+
+interface DocumentCheckOptions {
+  /** POST / PUT carry the whole document; PATCH carries a fragment. */
+  readonly full: boolean;
+}
+
+/**
+ * volatile.* belongs to Incus (idmaps, MACs, last state). An update may echo
+ * it, but whatever it says is replaced with what Incus currently holds, so it
+ * can never remap the container. A concurrent change still fails on the ETag.
+ */
+function withCurrentVolatile(
+  body: Record<string, unknown>,
+  current: Readonly<Record<string, string>>,
+): PolicyVerdict {
+  if (!isRecord(body.config)) return ALLOW;
+  const config: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(body.config)) {
+    if (!key.startsWith('volatile.')) config[key] = value;
+    else if (current[key] !== undefined) config[key] = current[key];
+  }
+  return { allowed: true, body: Buffer.from(JSON.stringify({ ...body, config })) };
+}
+
+export function checkInstanceDocument(
+  body: Record<string, unknown>,
+  options: DocumentCheckOptions,
+): PolicyVerdict {
+  if (body.profiles !== undefined || options.full) {
+    if (!Array.isArray(body.profiles) || body.profiles.length !== 0) {
+      return deny('instances must not use profiles');
+    }
+  }
+  if (body.ephemeral === true) return deny('ephemeral instances are refused');
+  if (body.config !== undefined || options.full) {
+    if (!isRecord(body.config)) return deny('instance config must be an object');
+    const verdict = checkInstanceConfig(body.config, options);
+    if (!verdict.allowed) return verdict;
+  }
+  if (body.devices !== undefined || options.full) {
+    if (!isRecord(body.devices)) return deny('instance devices must be an object');
+    for (const [name, device] of Object.entries(body.devices)) {
+      const verdict = checkDevice(name, device);
+      if (!verdict.allowed) return verdict;
+    }
+  }
+  return ALLOW;
+}
+
+function checkInstanceConfig(
+  config: Record<string, unknown>,
+  options: DocumentCheckOptions,
+): PolicyVerdict {
+  for (const [key, value] of Object.entries(config)) {
+    if (typeof value !== 'string') return deny(`config ${key} must be a string`);
+    const verdict = checkConfigEntry(key, value);
+    if (!verdict.allowed) return verdict;
+  }
+  if (options.full) {
+    if (config['security.idmap.isolated'] !== 'true') return deny('security.idmap.isolated must be true');
+    if (config['security.privileged'] !== undefined && config['security.privileged'] !== 'false') {
+      return deny('privileged containers are refused');
+    }
+  }
+  return ALLOW;
+}
+
+function checkConfigEntry(key: string, value: string): PolicyVerdict {
+  if (key.startsWith('volatile.')) return ALLOW;
+  if (key.startsWith('user.nyabase.') || key.startsWith('image.')) return ALLOW;
+  switch (key) {
+    case 'limits.cpu':
+      return CPUSET_PATTERN.test(value) ? ALLOW : deny('limits.cpu must be an explicit CPU set');
+    case 'limits.memory':
+    case 'limits.processes':
+      return /^[0-9]+(?:[KMGT]i?B)?$/.test(value) ? ALLOW : deny(`${key} is malformed`);
+    case 'security.privileged':
+      return value === 'false' ? ALLOW : deny('privileged containers are refused');
+    case 'security.idmap.isolated':
+      return value === 'true' ? ALLOW : deny('security.idmap.isolated must be true');
+    case 'security.nesting':
+    case 'security.syscalls.intercept.mknod':
+    case 'security.syscalls.intercept.setxattr':
+    case 'nvidia.runtime':
+      return BOOLEAN_VALUES.has(value) ? ALLOW : deny(`${key} must be a boolean`);
+    default:
+      if ((GUEST_IPV6_DISABLE_SYSCTLS as readonly string[]).includes(key)) {
+        return value === '1' ? ALLOW : deny(`${key} must be 1`);
+      }
+      return deny(`config ${key} is not allowed`);
+  }
+}
+
+const DISK_KEYS = new Set(['type', 'path', 'pool', 'source', 'size', 'readonly', 'limits.read', 'limits.write']);
+const NIC_KEYS = new Set([
+  'type', 'nictype', 'parent', 'name', 'hwaddr', 'host_name', 'ipv4.address',
+  'security.ipv4_filtering', 'security.mac_filtering', 'security.port_isolation',
+  'limits.ingress', 'limits.egress',
+]);
+const GPU_KEYS = new Set(['type', 'gputype', 'pci']);
+
+export function checkDevice(name: string, device: unknown): PolicyVerdict {
+  if (!isRecord(device)) return deny(`device ${name} must be an object`);
+  const entries = stringMap(device);
+  if (Object.keys(entries).length !== Object.keys(device).length) {
+    return deny(`device ${name} values must be strings`);
+  }
+  switch (entries.type) {
+    case 'disk':
+      return checkDisk(name, entries);
+    case 'nic':
+      return checkNic(name, entries);
+    case 'gpu':
+      if (!/^gpu[0-9]+$/.test(name)) return deny(`gpu device ${name} is misnamed`);
+      if (!onlyKeys(entries, GPU_KEYS)) return deny(`gpu device ${name} has refused keys`);
+      return entries.gputype === 'physical' && /^[0-9a-f:.]{7,16}$/i.test(entries.pci ?? '')
+        ? ALLOW
+        : deny(`gpu device ${name} must be a physical card by PCI address`);
+    default:
+      return deny(`device ${name} of type ${entries.type ?? 'none'} is not allowed`);
+  }
+}
+
+function checkDisk(name: string, device: Readonly<Record<string, string>>): PolicyVerdict {
+  if (!onlyKeys(device, DISK_KEYS)) return deny(`disk ${name} has refused keys`);
+  if (!device.pool) return deny(`disk ${name} must live in a storage pool`);
+  if (name === 'root') {
+    return device.path === '/' && device.source === undefined ? ALLOW : deny('root disk is malformed');
+  }
+  if (!MANAGED_ATTACHMENT_DEVICE_PATTERN.test(name)) return deny(`disk ${name} is not a nyabase attachment`);
+  if (!MANAGED_VOLUME_NAME_PATTERN.test(device.source ?? '')) return deny(`disk ${name} must mount a nyabase volume`);
+  if (!device.path?.startsWith('/') || device.path === '/') return deny(`disk ${name} path is malformed`);
+  return ALLOW;
+}
+
+function checkNic(name: string, device: Readonly<Record<string, string>>): PolicyVerdict {
+  if (name !== 'eth0') return deny('the only NIC is eth0');
+  if (!onlyKeys(device, NIC_KEYS)) return deny('eth0 has refused keys');
+  if (device.nictype !== 'bridged' || !device.parent) return deny('eth0 must be a bridged NIC');
+  if (!MANAGED_NIC_HOST_NAME_PATTERN.test(device.host_name ?? '')) {
+    return deny('eth0 host_name must carry the IPv6 guard prefix');
+  }
+  if (device['security.ipv4_filtering'] !== 'true' || device['security.mac_filtering'] !== 'true') {
+    return deny('eth0 must filter IPv4 and MAC spoofing');
+  }
+  if (!device['ipv4.address']) return deny('eth0 needs its IPv4 filter identity');
+  return ALLOW;
+}
+
+async function checkStoragePools(
+  request: PolicyRequest,
+  rest: readonly string[],
+  readCurrent: CurrentDocumentReader,
+): Promise<PolicyVerdict> {
+  const { method } = request;
+  if (method === 'GET') return rest.length <= 5 ? ALLOW : deny('storage path is too deep');
+  const [pool, volumes, type, name, ...tail] = rest;
+  if (!pool || volumes !== 'volumes' || tail.length > 0) return deny('storage pools are read-only');
+  if (type === undefined || (type === 'custom' && name === undefined)) {
+    if (method !== 'POST') return deny('volume collection only supports create');
+    const body = jsonBody(request.body);
+    if (!body) return deny('volume create needs a JSON body');
+    if (!MANAGED_VOLUME_NAME_PATTERN.test(stringField(body, 'name') ?? '')) {
+      return deny('only nyabase volumes may be created');
+    }
+    if ((body.type ?? 'custom') !== 'custom') return deny('only custom volumes may be created');
+    if ((body.content_type ?? 'filesystem') !== 'filesystem') return deny('only filesystem volumes may be created');
+    if (body.source !== undefined) return deny('volumes may not be copied or imported');
+    if (isRecord(body.config) && Object.keys(body.config).some((key) => key.startsWith('volatile.'))) {
+      return deny('volatile keys may not be set on create');
+    }
+    return checkVolumeConfig(body.config ?? {});
+  }
+  if (type !== 'custom' || !MANAGED_VOLUME_NAME_PATTERN.test(name ?? '')) {
+    return deny('only nyabase custom volumes are writable');
+  }
+  if (method === 'DELETE') return ALLOW;
+  if (method !== 'PUT' && method !== 'PATCH') return deny('volumes support update and delete');
+  const body = jsonBody(request.body);
+  if (!body) return deny('volume update needs a JSON body');
+  const current = await readCurrent(
+    `/1.0/storage-pools/${encodeURIComponent(pool)}/volumes/custom/${encodeURIComponent(name!)}`,
+  );
+  if (!current) return deny('volume to update does not exist');
+  const verdict = checkVolumeConfig(body.config ?? {});
+  if (!verdict.allowed) return verdict;
+  return withCurrentVolatile(body, stringMap(current.config));
+}
+
+function checkVolumeConfig(config: unknown): PolicyVerdict {
+  if (!isRecord(config)) return deny('volume config must be an object');
+  for (const [key, value] of Object.entries(config)) {
+    if (typeof value !== 'string') return deny(`volume config ${key} must be a string`);
+    if (key.startsWith('volatile.')) continue;
+    if (key === 'security.shifted') {
+      if (value !== 'true') return deny('volumes must stay shifted');
+      continue;
+    }
+    if (key === 'size' || key.startsWith('block.') || key.startsWith('initial.')) continue;
+    return deny(`volume config ${key} is not allowed`);
+  }
+  return ALLOW;
+}
+
+function checkImages(request: PolicyRequest, rest: readonly string[]): PolicyVerdict {
+  const { method } = request;
+  if (method === 'GET') return ALLOW;
+  if (rest[0] === 'aliases') {
+    return rest.length <= 2 ? ALLOW : deny('image alias path is too deep');
+  }
+  const body = method === 'DELETE' ? undefined : jsonBody(request.body);
+  if (rest.length === 0) {
+    if (method !== 'POST' || !body) return deny('image collection only supports remote pulls');
+    const source = body.source;
+    if (!isRecord(source) || source.type !== 'image' || typeof source.server !== 'string') {
+      return deny('images may only be pulled from a remote image server');
+    }
+    return body.public === true ? deny('images must stay private') : ALLOW;
+  }
+  if (rest.length !== 1 || !IMAGE_FINGERPRINT_PATTERN.test(rest[0]!)) return deny('image path is malformed');
+  if (method === 'DELETE') return ALLOW;
+  if ((method === 'PUT' || method === 'PATCH') && body) {
+    return body.public === true ? deny('images must stay private') : ALLOW;
+  }
+  return deny('image update needs a JSON body');
+}
+
+function checkOperations(method: AgentIncusHttpMethod, rest: readonly string[]): PolicyVerdict {
+  const [id, leaf, ...tail] = rest;
+  if (method === 'GET') {
+    if (id === undefined) return ALLOW;
+    return OPERATION_ID_PATTERN.test(id) && (leaf === undefined || leaf === 'wait') && tail.length === 0
+      ? ALLOW
+      : deny('operation path is malformed');
+  }
+  if (method === 'DELETE' && id !== undefined && OPERATION_ID_PATTERN.test(id) && leaf === undefined) {
+    return ALLOW;
+  }
+  return deny('operations support read, wait and cancel');
+}
+
+function jsonBody(body: Buffer | undefined): Record<string, unknown> | undefined {
+  if (!body || body.byteLength === 0) return undefined;
+  try {
+    const parsed: unknown = JSON.parse(body.toString('utf8'));
+    return isRecord(parsed) ? parsed : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function stringField(record: Record<string, unknown>, key: string): string | undefined {
+  const value = record[key];
+  return typeof value === 'string' ? value : undefined;
+}
+
+function stringMap(value: unknown): Record<string, string> {
+  if (!isRecord(value)) return {};
+  return Object.fromEntries(
+    Object.entries(value).filter((entry): entry is [string, string] => typeof entry[1] === 'string'),
+  );
+}
+
+function onlyKeys(record: Readonly<Record<string, string>>, allowed: ReadonlySet<string>): boolean {
+  return Object.keys(record).every((key) => allowed.has(key));
+}

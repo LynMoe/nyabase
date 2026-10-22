@@ -1,6 +1,6 @@
 import { ConflictException, Inject, Injectable, NotFoundException } from '@nestjs/common';
 import { sql, type Kysely, type Selectable, type Transaction } from 'kysely';
-import { createCipheriv, createHash, randomBytes, randomUUID } from 'node:crypto';
+import { randomUUID } from 'node:crypto';
 import {
   AuditAction,
   Capability,
@@ -9,11 +9,17 @@ import {
   PreflightStatus,
   ServerStatus,
   type CreateServerRequest,
+  type CreatedServerDto,
   type ListScope,
   type PatchServerRequest,
   type ServerDto,
   type UserServerDto,
 } from '@nyabase/common';
+import { allocatableCpus } from '../cpu/cpu-allocation.js';
+import { AgentRegistry } from '../incus/agent-registry.service.js';
+import { afterCommit } from '../platform/post-commit.js';
+import { ReconcileWakeService } from '../reconcile/reconcile-wake.service.js';
+import { AgentEnrollmentService } from './agent-enrollment.service.js';
 import type { InfrastructureServerTable } from '../platform/persistence-pg/infrastructure-database.types.js';
 import type { NyabaseDatabase } from '../platform/persistence-pg/database.types.js';
 import { PG_DATABASE } from '../platform/persistence-pg/tokens.js';
@@ -21,7 +27,6 @@ import { PgTransactionManager } from '../platform/persistence-pg/transaction.js'
 import { AccessResolverService } from '../iam/access-resolver.service.js';
 import { AuditService } from '../iam/audit.service.js';
 import { assertListScope, type Actor } from '../iam/actor.js';
-import { NyabaseConfigService } from '../platform/config/nyabase-config.service.js';
 import { numberValue, isoDate, poolLabel } from '../platform/domain-utils.js';
 import { lockServerOnboarding } from '../platform/persistence-pg/advisory-locks.js';
 import { ProxySnapshotNotifierService } from '../proxy-snapshots/proxy-snapshot-notifier.service.js';
@@ -37,12 +42,14 @@ export class ServersService {
     private readonly transactions: PgTransactionManager,
     private readonly access: AccessResolverService,
     private readonly audit: AuditService,
-    private readonly config: NyabaseConfigService,
     private readonly proxySnapshots: ProxySnapshotNotifierService,
+    private readonly agents: AgentRegistry,
+    private readonly enrollment: AgentEnrollmentService,
+    private readonly wake: ReconcileWakeService,
   ) {}
 
-  async create(actorId: string, input: CreateServerRequest): Promise<ServerDto> {
-    const row = await this.transactions.run(async (transaction) => {
+  async create(actorId: string, input: CreateServerRequest): Promise<CreatedServerDto> {
+    const { row, enrollment } = await this.transactions.run(async (transaction) => {
       await this.access.assertActorCapabilitiesInTransaction(transaction, actorId, [
         Capability.ManageServers,
       ]);
@@ -60,8 +67,6 @@ export class ServersService {
           id: randomUUID(),
           name: input.name,
           slug: input.slug,
-          api_endpoint: input.apiEndpoint,
-          server_cert_fingerprint: null,
           incus_version: null,
           api_extensions: [],
           system_pool_id: null,
@@ -72,17 +77,15 @@ export class ServersService {
           last_seen_at: null,
           last_error: null,
           revision: 1,
-          node_metrics_endpoint: input.nodeMetrics?.endpoint ?? null,
-          node_metrics_server_cert_fingerprint: input.nodeMetrics?.serverCertFingerprint ?? null,
-          node_metrics_token_ciphertext: input.nodeMetrics
-            ? this.encryptNodeMetricsToken(input.nodeMetrics.token)
-            : null,
-          node_metrics_token_fingerprint: input.nodeMetrics
-            ? this.nodeMetricsTokenFingerprint(input.nodeMetrics.token)
-            : null,
-          node_metrics_status: input.nodeMetrics
-            ? NodeMetricsStatus.Unknown
-            : NodeMetricsStatus.Unconfigured,
+          agent_credential_hash: null,
+          agent_enrollment_token_hash: null,
+          agent_enrollment_expires_at: null,
+          agent_version: null,
+          agent_hostname: null,
+          agent_connected_at: null,
+          reserved_cpus: input.reservedCpus,
+          cpu_topology: null,
+          node_metrics_status: NodeMetricsStatus.Unknown,
           node_metrics_last_success_at: null,
           node_metrics_outage_since: null,
           node_metrics_last_error: null,
@@ -98,10 +101,11 @@ export class ServersService {
       await this.audit.append(transaction, actorId, AuditAction.CreateServer, server.id, 'server', {
         name: server.name,
         slug: server.slug,
+        reservedCpus: input.reservedCpus,
       });
-      return server;
+      return { row: server, enrollment: await this.enrollment.issueInTransaction(transaction, server.id) };
     });
-    return (await this.toDtos([row]))[0]!;
+    return { ...(await this.toDtos([row]))[0]!, enrollment };
   }
 
   /**
@@ -163,33 +167,6 @@ export class ServersService {
     return (await this.toDtos([await this.findById(id)]))[0]!;
   }
 
-  async prepareConnection(serverId: string, expectedFingerprint: string): Promise<number> {
-    const normalized = expectedFingerprint.replace(/[:-\s]/g, '').toLowerCase();
-    const row = await this.transactions.run(async (transaction) => {
-      const server = await transaction
-        .selectFrom('infra.servers')
-        .select(['server_cert_fingerprint', 'revision'])
-        .where('id', '=', serverId)
-        .forUpdate()
-        .executeTakeFirst();
-      if (!server) throw new NotFoundException('Server not found');
-      if (
-        server.server_cert_fingerprint &&
-        server.server_cert_fingerprint.replace(/[:-\s]/g, '').toLowerCase() !== normalized
-      ) {
-        throw new ConflictException({
-          code: 'PREFLIGHT_IDENTITY_MISMATCH',
-          message: 'Expected server certificate fingerprint does not match the registered server',
-        });
-      }
-      if (server.server_cert_fingerprint) return numberValue(server.revision);
-      // The expected fingerprint is an admission hint, not a TOFU pin.
-      // Only the mTLS transport may persist the fingerprint it observes.
-      return numberValue(server.revision);
-    });
-    return numberValue(row);
-  }
-
   async findUserDtoById(id: string): Promise<UserServerDto> {
     return (await this.toUserDtos([await this.findById(id)]))[0]!;
   }
@@ -206,49 +183,7 @@ export class ServersService {
         .forUpdate()
         .executeTakeFirst();
       if (!current) throw new NotFoundException('Server not found');
-      const nodeMetrics = input.nodeMetrics;
-      const nodeMetricsPatch =
-        nodeMetrics === undefined
-          ? {}
-          : nodeMetrics === null
-            ? {
-                node_metrics_endpoint: null,
-                node_metrics_server_cert_fingerprint: null,
-                node_metrics_token_ciphertext: null,
-                node_metrics_token_fingerprint: null,
-                node_metrics_status: NodeMetricsStatus.Unconfigured,
-                node_metrics_last_success_at: null,
-                node_metrics_outage_since: null,
-                node_metrics_last_error: null,
-              }
-            : {
-                node_metrics_endpoint: nodeMetrics.endpoint,
-                node_metrics_server_cert_fingerprint: nodeMetrics.serverCertFingerprint,
-                ...(nodeMetrics.token === undefined
-                  ? current.node_metrics_token_ciphertext
-                    ? {
-                        node_metrics_token_ciphertext: current.node_metrics_token_ciphertext,
-                        node_metrics_token_fingerprint: current.node_metrics_token_fingerprint,
-                      }
-                    : (() => {
-                        throw new ConflictException({
-                          code: 'NODE_METRICS_TOKEN_REQUIRED',
-                          message: 'A node metrics token is required for first-time configuration',
-                        });
-                      })()
-                  : {
-                      node_metrics_token_ciphertext: this.encryptNodeMetricsToken(
-                        nodeMetrics.token,
-                      ),
-                      node_metrics_token_fingerprint: this.nodeMetricsTokenFingerprint(
-                        nodeMetrics.token,
-                      ),
-                    }),
-                node_metrics_status: NodeMetricsStatus.Unknown,
-                node_metrics_last_success_at: null,
-                node_metrics_outage_since: null,
-                node_metrics_last_error: null,
-              };
+      if (input.reservedCpus !== undefined) assertReservedCpus(current, input.reservedCpus);
       const updated = await transaction
         .updateTable('infra.servers')
         .set({
@@ -262,7 +197,7 @@ export class ServersService {
           ...(input.storageOvercommitRatio === undefined
             ? {}
             : { storage_overcommit_ratio: input.storageOvercommitRatio }),
-          ...nodeMetricsPatch,
+          ...(input.reservedCpus === undefined ? {} : { reserved_cpus: input.reservedCpus }),
           revision: Number(input.expectedRevision) + 1,
           updated_at: new Date(),
         })
@@ -277,8 +212,10 @@ export class ServersService {
         AuditAction.UpdateServer,
         id,
         'server',
-        auditServerPatch(input),
+        input,
       );
+      // Containers on this server move off newly reserved CPUs (and onto freed ones).
+      if (input.reservedCpus !== undefined) afterCommit(transaction, () => this.wake.wake({ reason: 'scan' }));
       return updated;
     });
     return (await this.toDtos([row]))[0]!;
@@ -298,27 +235,8 @@ export class ServersService {
         name: server.name,
       });
     });
+    this.agents.disconnect(id, undefined, 'server deleted');
     this.proxySnapshots.invalidate('server_deleted');
-  }
-
-  private encryptNodeMetricsToken(token: string): string {
-    const iv = randomBytes(12);
-    const cipher = createCipheriv('aes-256-gcm', this.nodeMetricsKey(), iv);
-    const ciphertext = Buffer.concat([cipher.update(token, 'utf8'), cipher.final()]);
-    return [
-      'rfs-v1',
-      iv.toString('base64url'),
-      cipher.getAuthTag().toString('base64url'),
-      ciphertext.toString('base64url'),
-    ].join('.');
-  }
-
-  private nodeMetricsTokenFingerprint(token: string): string {
-    return createHash('sha256').update(token, 'utf8').digest('hex');
-  }
-
-  private nodeMetricsKey(): Buffer {
-    return createHash('sha256').update(this.config.keyEncryptionSecret()).digest();
   }
 
   private async toDtos(rows: ServerRow[]): Promise<ServerDto[]> {
@@ -352,8 +270,6 @@ export class ServersService {
       id: row.id,
       name: row.name,
       slug: row.slug,
-      apiEndpoint: row.api_endpoint,
-      serverCertFingerprint: row.server_cert_fingerprint,
       incusVersion: row.incus_version,
       apiExtensions: row.api_extensions,
       systemPoolId: row.system_pool_id,
@@ -370,17 +286,22 @@ export class ServersService {
       preflightStatus: row.preflight_status as PreflightStatus,
       preflightCheckedAt: isoDate(row.preflight_checked_at),
       preflightReport: row.preflight_report as ServerDto['preflightReport'],
-      nodeMetrics: {
-        endpoint: row.node_metrics_endpoint,
-        serverCertFingerprint: row.node_metrics_server_cert_fingerprint,
-        tokenFingerprint: row.node_metrics_token_fingerprint,
-        health: {
-          status: row.node_metrics_status as NodeMetricsStatus,
-          lastSuccessAt: isoDate(row.node_metrics_last_success_at),
-          outageSince: isoDate(row.node_metrics_outage_since),
-          lastError: row.node_metrics_last_error,
-        },
+      agent: {
+        connected: this.agents.isConnected(row.id),
+        enrolled: row.agent_credential_hash !== null,
+        version: row.agent_version,
+        hostname: row.agent_hostname,
+        connectedAt: isoDate(row.agent_connected_at),
+        enrollmentExpiresAt: isoDate(row.agent_enrollment_expires_at),
       },
+      metricsHealth: {
+        status: row.node_metrics_status as NodeMetricsStatus,
+        lastSuccessAt: isoDate(row.node_metrics_last_success_at),
+        outageSince: isoDate(row.node_metrics_outage_since),
+        lastError: row.node_metrics_last_error,
+      },
+      reservedCpus: [...row.reserved_cpus].sort((left, right) => left - right),
+      cpuTopology: row.cpu_topology,
       createdAt: new Date(row.created_at).toISOString(),
       updatedAt: new Date(row.updated_at).toISOString(),
     };
@@ -403,20 +324,25 @@ export class ServersService {
   }
 }
 
-function auditServerPatch(input: PatchServerRequest): Record<string, unknown> {
-  const { nodeMetrics, ...rest } = input;
-  if (nodeMetrics === undefined) return rest;
-  return {
-    ...rest,
-    nodeMetrics:
-      nodeMetrics === null
-        ? null
-        : {
-            endpoint: nodeMetrics.endpoint,
-            serverCertFingerprint: nodeMetrics.serverCertFingerprint,
-            ...(nodeMetrics.token === undefined ? {} : { tokenConfigured: true }),
-          },
-  };
+/** Reserved CPUs must exist (once the topology is known) and leave at least one CPU for containers. */
+function assertReservedCpus(server: ServerRow, reserved: readonly number[]): void {
+  const topology = server.cpu_topology;
+  if (!topology || topology.length === 0) return;
+  const known = new Set(topology.map((entry) => entry.id));
+  const unknown = reserved.filter((cpu) => !known.has(cpu));
+  if (unknown.length > 0) {
+    throw new ConflictException({
+      code: 'RESERVED_CPU_UNKNOWN',
+      message: 'Reserved CPUs must exist on the server',
+      details: { unknown },
+    });
+  }
+  if (allocatableCpus(topology, reserved).length === 0) {
+    throw new ConflictException({
+      code: 'RESERVED_CPUS_EXHAUST_SERVER',
+      message: 'At least one CPU must stay available to containers',
+    });
+  }
 }
 
 type Tx = Transaction<NyabaseDatabase>;

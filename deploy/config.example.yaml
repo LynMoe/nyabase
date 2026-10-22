@@ -12,10 +12,8 @@ incus:
   preflightSourceServer: https://nyabase-images.nyabase-lxc-images.workers.dev
   # Dedicated simplestreams source for managed image assignment. Empty uses preflightSourceServer.
   imageSourceServer: https://nyabase-images.nyabase-lxc-images.workers.dev
-  # Docker Compose injects this PEM file as a read-only secret. The CA file
-  # may contain the self-signed Incus server certificate. The mTLS client
-  # certificate is generated on first start and stored in PostgreSQL.
-  caFile: /run/secrets/incus_ca
+  # The Backend never dials Incus: each server's nyabase-agent connects to the
+  # Backend (wss://<backend>/ws/agent) and carries every Incus call over that link.
   requestTimeoutMs: 10000
   operationWaitTimeoutMs: 120000
 

@@ -27,7 +27,8 @@ import { useMySshKeys } from '../../hooks/use-my-ssh-keys.js';
 import { SshKeyNotice } from '../ssh/ssh-key-notice.js';
 import { Checkbox } from '../ui/checkbox.js';
 import { ContainerCreateGpu } from '../gpu/gpu-sections.js';
-import { cn, gibToBytes, vcpuToMillis } from '../../lib/utils.js';
+import { cn, gibToBytes } from '../../lib/utils.js';
+import { cpuCoresLabel } from '../../lib/cpu-set.js';
 import { api } from '../../lib/api.js';
 import { errorMessage } from '../../lib/api-error.js';
 import { queryKeys } from '../../lib/query-keys.js';
@@ -176,21 +177,13 @@ function PlacementFields({ form }: { form: CreateContainerForm }) {
   );
 }
 
-/** CPU / memory / root disk inputs and the quota left on the chosen server. */
+/** Memory / root disk inputs, the shared CPU set and the quota left on the chosen server. */
 function SpecFields({ form }: { form: CreateContainerForm }) {
-  const { cpuLeft, memLeft, diskLeft, cpuOver, memOver, diskOver, onServer } = form;
+  const { memLeft, diskLeft, memOver, diskOver, onServer } = form;
   const { selectedAccess, capacityQuery } = form.data;
   return (
     <>
-      <div className="grid gap-3 sm:grid-cols-3">
-        <UnitField
-          id="container-cpu"
-          label="CPU（核）"
-          value={form.form.cpuVcpus}
-          onChange={(value) => form.update('cpuVcpus', value)}
-          step="0.5"
-          error={form.errors.cpuVcpus ?? (cpuOver && cpuLeft !== null ? `超出剩余额度 ${cpuText(cpuLeft)}` : undefined)}
-        />
+      <div className="grid gap-3 sm:grid-cols-2">
         <UnitField
           id="container-memory"
           label="内存（GiB）"
@@ -209,8 +202,6 @@ function SpecFields({ form }: { form: CreateContainerForm }) {
       {selectedAccess ? (
         <p className="text-xs text-muted-foreground" data-testid="create-remaining">
           这台服务器上你还剩：
-          <RemainingPart label="CPU" value={cpuLeft === null ? (onServer ? '不限' : '…') : cpuText(cpuLeft)} over={cpuOver} />
-          {' · '}
           <RemainingPart label="内存" value={memLeft === null ? (onServer ? '不限' : '…') : bytesText(memLeft)} over={memOver} />
           {' · '}
           <RemainingPart
@@ -218,6 +209,13 @@ function SpecFields({ form }: { form: CreateContainerForm }) {
             value={capacityQuery.isError ? '暂不可知' : diskLeft === null ? (capacityQuery.data ? '不限' : '…') : bytesText(diskLeft)}
             over={diskOver}
           />
+        </p>
+      ) : null}
+      {selectedAccess ? (
+        <p className="text-xs text-muted-foreground" data-testid="create-cpu-set">
+          CPU：与你在这台服务器上的其他容器共享同一组 CPU（
+          {selectedAccess.cpuCores === null ? '不限，使用全部未保留 CPU' : `${cpuCoresLabel(selectedAccess.cpuCores)}，按整核绑定`}
+          ）；内存额度按所有容器合计。
         </p>
       ) : null}
     </>
@@ -277,10 +275,8 @@ function useCreateContainerForm({
     }
   }, [open, form.serverId, form.imageId, images]);
 
-  const cpuNumber = positiveNumber(form.cpuVcpus);
   const memNumber = positiveNumber(form.memGib);
   const rootNumber = positiveNumber(form.rootSizeGib);
-  const cpuMillis = cpuNumber === null ? null : vcpuToMillis(cpuNumber);
   const memBytes = memNumber === null ? null : gibToBytes(memNumber);
   const rootSizeBytes = rootNumber === null ? null : gibToBytes(rootNumber);
 
@@ -288,18 +284,14 @@ function useCreateContainerForm({
   const onServer = containersQuery.isSuccess
     ? (containersQuery.data ?? []).filter((container) => container.serverId === form.serverId)
     : null;
-  const cpuLeft = selectedAccess && onServer
-    ? remaining(selectedAccess.cpuMillis, onServer.reduce((sum, item) => sum + item.cpuMillis, 0))
-    : null;
   const memLeft = selectedAccess && onServer
     ? remaining(selectedAccess.memBytes, onServer.reduce((sum, item) => sum + item.memBytes, 0))
     : null;
   const diskLeft = data.capacityQuery.data?.availableBytes ?? null;
 
-  const cpuOver = cpuLeft !== null && cpuMillis !== null && cpuMillis > cpuLeft;
   const memOver = memLeft !== null && memBytes !== null && memBytes > memLeft;
   const diskOver = diskLeft !== null && rootSizeBytes !== null && rootSizeBytes > diskLeft;
-  const overQuota = cpuOver || memOver || diskOver;
+  const overQuota = memOver || diskOver;
 
   const create = useMutation({
     mutationFn: (body: CreateContainerRequest) => api.post<IntentAcceptedDto>('/containers', body),
@@ -326,7 +318,6 @@ function useCreateContainerForm({
       imageId: form.imageId,
       name: form.name.trim(),
       rootSizeBytes,
-      cpuMillis,
       memBytes,
       gpuPciAddresses: selected?.gpuEnabled ? gpuPciAddresses : undefined,
       powerIntent: form.startAfterCreate ? ContainerPowerIntent.Running : ContainerPowerIntent.Stopped,
@@ -346,10 +337,8 @@ function useCreateContainerForm({
     selected,
     noImagesForServer,
     onServer,
-    cpuLeft,
     memLeft,
     diskLeft,
-    cpuOver,
     memOver,
     diskOver,
     overQuota,
@@ -411,19 +400,17 @@ type FormState = {
   imageId: string;
   name: string;
   rootSizeGib: string;
-  cpuVcpus: string;
   memGib: string;
   startAfterCreate: boolean;
 };
 
-type FieldErrors = Partial<Record<'name' | 'serverId' | 'imageId' | 'rootSizeGib' | 'cpuVcpus' | 'memGib', string>>;
+type FieldErrors = Partial<Record<'name' | 'serverId' | 'imageId' | 'rootSizeGib' | 'memGib', string>>;
 
 const emptyForm: FormState = {
   serverId: '',
   imageId: '',
   name: '',
   rootSizeGib: '20',
-  cpuVcpus: '1',
   memGib: '2',
   startAfterCreate: true,
 };
@@ -436,12 +423,8 @@ function remaining(limit: number | null, used: number): number | null {
   return Math.max(0, limit - used);
 }
 
-function cpuText(millis: number): string {
-  return formatConsumedQuotaParts({ cpuMillis: millis, memBytes: null, diskBytes: null })[0] ?? '';
-}
-
 function bytesText(bytes: number): string {
-  return formatConsumedQuotaParts({ cpuMillis: null, memBytes: bytes, diskBytes: null })[0] ?? '';
+  return formatConsumedQuotaParts({ cpuCores: null, memBytes: bytes, diskBytes: null })[0] ?? '';
 }
 
 function positiveNumber(value: string): number | null {
@@ -459,7 +442,6 @@ function validateForm(form: FormState): FieldErrors {
   if (!form.serverId) next.serverId = '请选择服务器';
   if (!form.imageId) next.imageId = '请选择镜像';
   if (positiveNumber(form.rootSizeGib) === null) next.rootSizeGib = '请输入大于 0 的容量';
-  if (positiveNumber(form.cpuVcpus) === null) next.cpuVcpus = '请输入大于 0 的核数';
   if (positiveNumber(form.memGib) === null) next.memGib = '请输入大于 0 的内存';
   return next;
 }

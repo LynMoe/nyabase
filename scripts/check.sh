@@ -30,8 +30,8 @@ assert_clean_cutover_architecture() {
     packages/backend/src/incus \
     packages/backend/src/reconcile/intent.repository.ts \
     packages/backend/src/reconcile/reconcile-worker.service.ts \
-    packages/node-exporter/package.json \
-    packages/node-exporter/src; do
+    packages/agent/package.json \
+    packages/agent/src/policy.ts; do
     [[ -e "$required_path" ]] || {
       echo "clean-cutover architecture path is missing: $required_path" >&2
       exit 1
@@ -46,7 +46,9 @@ assert_clean_cutover_architecture() {
 
   local retired_path
   for retired_path in \
-    packages/agent \
+    packages/node-exporter \
+    deploy/nyabase-node-exporter.service \
+    packages/backend/src/incus/incus-client-identity.service.ts \
     packages/backend/src/agent-tasks \
     packages/backend/src/gateway \
     packages/backend/src/datadirs \
@@ -83,11 +85,17 @@ assert_clean_cutover_architecture() {
     echo "the reconcile engine must not import domain modules" >&2
     exit 1
   fi
-  rg -q 'node' packages/node-exporter/src \
+  rg -q 'checkIncusHttp' packages/agent/src \
     || {
-      echo "node-exporter sources are missing" >&2
+      echo "agent policy sources are missing" >&2
       exit 1
     }
+  # The Backend reaches Incus only through host agents: no outbound HTTPS, mTLS or trust API.
+  if rg -n "from 'node:https'|require\('https'\)|/1\.0/certificates" packages/backend/src/incus \
+    -g '!*.test.ts' -g '!api-types.ts'; then
+    echo "the Backend must not connect to Incus directly" >&2
+    exit 1
+  fi
 }
 
 assert_no_common_src_artifacts

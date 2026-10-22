@@ -1,17 +1,16 @@
 import { GIB, formatBytesCompact } from './utils.js';
 
 export type CpuMemDisk = {
-  cpuMillis: number | null;
+  /** Whole logical CPUs; null on a grant = every unreserved CPU. */
+  cpuCores: number | null;
   memBytes: number | null;
   diskBytes: number | null;
 };
 
 const UNLIMITED = '不限';
 
-function formatCompactCpu(millis: number): string {
-  const cores = millis / 1000;
-  const label = Number.isInteger(cores) ? String(cores) : parseFloat(cores.toFixed(3)).toString();
-  return `${label} 核`;
+function formatCompactCpu(cores: number): string {
+  return `${cores} 核`;
 }
 
 function formatCompactBytes(bytes: number): string {
@@ -32,7 +31,7 @@ function formatGrantNumber(value: number | null, fmt: (n: number) => string): st
 /** Grant ceilings only. null/0 → 不限. Never pass consumed sums here. */
 export function formatGrantQuotaParts(grant: CpuMemDisk): string[] {
   return [
-    formatGrantNumber(grant.cpuMillis, formatCompactCpu),
+    formatGrantNumber(grant.cpuCores, formatCompactCpu),
     formatGrantNumber(grant.memBytes, formatCompactBytes),
     formatGrantNumber(grant.diskBytes, formatCompactBytes),
   ];
@@ -48,7 +47,7 @@ export function formatGrantQuotaLine(
 /** Allocated/committed usage. 0 → 0 核 / 0 GiB. null = no observation (omit the dim). */
 export function formatConsumedQuotaParts(consumed: CpuMemDisk): string[] {
   const parts: string[] = [];
-  if (consumed.cpuMillis !== null) parts.push(formatCompactCpu(consumed.cpuMillis));
+  if (consumed.cpuCores !== null) parts.push(formatCompactCpu(consumed.cpuCores));
   if (consumed.memBytes !== null) parts.push(formatCompactBytes(consumed.memBytes));
   if (consumed.diskBytes !== null) parts.push(formatCompactBytes(consumed.diskBytes));
   return parts;
@@ -59,38 +58,23 @@ export function formatGrantBytes(bytes: number | null): string {
   return formatGrantNumber(bytes, formatCompactBytes);
 }
 
-function remainingOf(grant: number | null, used: number, kind: 'cpu' | 'bytes'): string {
-  if (grant === null || grant === 0) return UNLIMITED;
-  const left = Math.max(0, grant - used);
-  const parts = kind === 'cpu'
-    ? formatConsumedQuotaParts({ cpuMillis: left, memBytes: null, diskBytes: null })
-    : formatConsumedQuotaParts({ cpuMillis: null, memBytes: left, diskBytes: null });
-  return parts[0] ?? UNLIMITED;
-}
-
-/** Remaining of a CPU grant. Unlimited grant → 不限; else consumed formatter. */
-export function formatRemainingCpu(grantMillis: number | null, usedMillis: number): string {
-  return remainingOf(grantMillis, usedMillis, 'cpu');
-}
-
 /** Remaining of a byte grant. Unlimited grant → 不限; else consumed formatter. */
 export function formatRemainingBytes(grantBytes: number | null, usedBytes: number): string {
-  return remainingOf(grantBytes, usedBytes, 'bytes');
+  if (grantBytes === null || grantBytes === 0) return UNLIMITED;
+  return formatCompactBytes(Math.max(0, grantBytes - usedBytes));
 }
 
+/**
+ * used / limit / remaining of a byte grant (memory, disk, shared storage).
+ * CPU is not a budget split across containers: each user gets one pinned CPU set per server.
+ */
 export function formatQuotaDimension(
   grant: number | null,
   used: number,
-  kind: 'cpu' | 'bytes',
 ): { used: string; limit: string; remaining: string } {
-  const usedLabel = kind === 'cpu'
-    ? (formatConsumedQuotaParts({ cpuMillis: used, memBytes: null, diskBytes: null })[0] ?? '0 核')
-    : (formatConsumedQuotaParts({ cpuMillis: null, memBytes: used, diskBytes: null })[0] ?? '0 GiB');
   return {
-    used: usedLabel,
-    limit: kind === 'cpu'
-      ? (formatGrantQuotaParts({ cpuMillis: grant, memBytes: null, diskBytes: null })[0] ?? '不限')
-      : formatGrantBytes(grant),
-    remaining: kind === 'cpu' ? formatRemainingCpu(grant, used) : formatRemainingBytes(grant, used),
+    used: formatCompactBytes(used),
+    limit: formatGrantBytes(grant),
+    remaining: formatRemainingBytes(grant, used),
   };
 }

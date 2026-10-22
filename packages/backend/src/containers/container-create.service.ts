@@ -17,6 +17,7 @@ import { IpPoolsRepository } from '../ip-pools/ip-pools.repository.js';
 import { numberValue } from '../platform/domain-utils.js';
 import type { NyabaseDatabase } from '../platform/persistence-pg/database.types.js';
 import { IntentRepository } from '../reconcile/intent.repository.js';
+import { lockOwnerServerQuota } from '../platform/persistence-pg/advisory-locks.js';
 import { VolumeAttachmentsService } from '../volumes/volume-attachments.service.js';
 import {
   ContainerControlRepository,
@@ -24,7 +25,7 @@ import {
   type ServerRow,
 } from './container-control.repository.js';
 import {
-  assertComputeGrant,
+  assertMemoryGrant,
   createContainerIntent,
   gpuDeviceClaimed,
   isUniqueViolation,
@@ -343,7 +344,12 @@ export class ContainerCreateService {
     const ownerId = userId;
     const { server, image } = await this.lockCreateTargets(transaction, request);
     const access = await this.resolveCreateAccess(transaction, userId, request, image);
-    assertComputeGrant(access.grant, request.cpuMillis, request.memBytes);
+    await lockOwnerServerQuota(transaction, ownerId, request.serverId);
+    assertMemoryGrant(
+      access.grant,
+      request.memBytes,
+      await this.repository.sumLiveMemBytes({ ownerId, serverId: request.serverId }, transaction),
+    );
     this.assertServerReady(server);
     const pools = await this.ipPools.listForServer(request.serverId, transaction);
     if (pools.length === 0) {
@@ -380,7 +386,6 @@ export class ContainerCreateService {
       imageFingerprint: image.fingerprint,
       rootPoolId,
       rootSizeBytes: request.rootSizeBytes,
-      cpuMillis: request.cpuMillis,
       memBytes: request.memBytes,
       powerIntent: request.powerIntent,
       networkKey,

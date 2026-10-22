@@ -35,9 +35,9 @@ const baseInput: InstanceSpecInput = {
     serverId: '22222222-2222-4222-8222-222222222222',
     revision: 3,
     imageFingerprint: 'b'.repeat(64),
-    cpuMillis: 2000,
+    cpus: [0, 1],
     memBytes: 1073741824n,
-            rootPool: 'default',
+    rootPool: 'default',
     rootSizeBytes: 10737418240n,
     routedIp: '198.51.100.10',
   },
@@ -46,6 +46,13 @@ const baseInput: InstanceSpecInput = {
     parentInterface: 'ens3',
   },
   attachments: [],
+  limits: {
+    processes: 4096,
+    networkIngressMbit: 1000,
+    networkEgressMbit: 1000,
+    diskReadMBps: 500,
+    diskWriteMBps: 500,
+  },
 };
 
 function desired() {
@@ -72,35 +79,51 @@ describe('compareManagedFields', () => {
     expect(result.devices).toEqual({});
   });
 
-  it('ignores volatile, image, and operator-owned config fields', () => {
+  it('ignores only the config Incus maintains itself', () => {
     const result = compareManagedFields(
-      actualWith(
-        {
-          'volatile.eth0.hwaddr': '02:aa:bb:cc:dd:ee',
-          'image.os': 'ubuntu',
-          'operator.note': 'keep',
-        },
-      ),
+      actualWith({
+        'volatile.eth0.hwaddr': '02:aa:bb:cc:dd:ee',
+        'volatile.idmap.next': '[]',
+        'image.os': 'ubuntu',
+      }),
       desired(),
     );
     expect(result.empty).toBe(true);
   });
 
-  it('ignores extra unmanaged devices so write-back can preserve them', () => {
-    const operatorDisk = {
-      type: 'disk',
-      source: 'operator-volume',
-      path: '/operator',
-    };
+  it('treats any other config key as drift, raw.lxc included', () => {
     const result = compareManagedFields(
-      actualWith({}, { operatorDisk }),
+      actualWith({ 'raw.lxc': 'lxc.apparmor.profile=unconfined', 'operator.note': 'x' }),
       desired(),
     );
-    expect(result.empty).toBe(true);
-    expect(result.devices).toEqual({});
+    expect(result.kind).toBe('diff');
+    expect(result.config).toEqual({
+      'operator.note': { actual: 'x', desired: undefined },
+      'raw.lxc': { actual: 'lxc.apparmor.profile=unconfined', desired: undefined },
+    });
   });
 
-  it('reports only exact managed configuration and device differences', () => {
+  it('treats an extra device as drift', () => {
+    const hostDisk = { type: 'disk', source: '/', path: '/host' };
+    const result = compareManagedFields(actualWith({}, { hostDisk }), desired());
+    expect(result.devices).toEqual({ hostDisk: { actual: hostDisk, desired: undefined } });
+  });
+
+  it('compares device keys both ways', () => {
+    const result = compareManagedFields(
+      actualWith({}, { eth0: { ...desired().devices?.eth0, 'ipv4.routes': '0.0.0.0/0' } }),
+      desired(),
+    );
+    expect(Object.keys(result.devices)).toEqual(['eth0']);
+  });
+
+  it('treats a profile as drift', () => {
+    const result = compareManagedFields({ ...actualWith(), profiles: ['default'] }, desired());
+    expect(result.kind).toBe('diff');
+    expect(result.profiles).toBe(true);
+  });
+
+  it('reports exact configuration and device differences', () => {
     const result = compareManagedFields(
       actualWith(
         {
@@ -118,7 +141,7 @@ describe('compareManagedFields', () => {
     );
     expect(result.kind).toBe('diff');
     expect(result.config).toEqual({
-      'limits.cpu': { actual: '4', desired: '2' },
+      'limits.cpu': { actual: '4', desired: '0-1' },
       'security.nesting': { actual: 'false', desired: 'true' },
     });
     expect(result.devices).toEqual({
@@ -136,7 +159,7 @@ describe('compareManagedFields', () => {
     const result = compareManagedFields(
       actualWith({
         'limits.memory': '1GiB',
-        'limits.cpu': '2',
+        'limits.cpu': '0,1',
       }),
       desired(),
     );
@@ -278,42 +301,31 @@ describe('compareManagedFields', () => {
     expect(desiredFilterOmit.error?.code).toBe('INVALID_MANAGED_FILTER_IDENTITY');
   });
 
-  it('applies managed fields, preserves operator config, and preserves unmanaged devices', () => {
+  it('writes back exactly the desired document, keeping only Incus-owned config', () => {
     const spec = desired();
-    const actual = actualWith(
-      {
-        'volatile.eth0.hwaddr': '02:aa:bb:cc:dd:ee',
-        'operator.note': 'preserve',
-        'limits.processes': '100',
-      },
-      {
-        ext0: {
-          type: 'unix-char',
-          path: '/dev/ext0',
+    const actual = {
+      ...actualWith(
+        {
+          'volatile.eth0.hwaddr': '02:aa:bb:cc:dd:ee',
+          'image.os': 'ubuntu',
+          'operator.note': 'drop',
+          'raw.idmap': 'both 0 0',
         },
-        operatorDisk: {
-          type: 'disk',
-          source: 'operator-volume',
-          path: '/operator',
+        {
+          ext0: { type: 'unix-char', path: '/dev/ext0' },
+          root: { ...spec.devices?.root, 'limits.read': '1MB', extra: 'x' },
         },
-      },
-    );
-    const updated = applyManagedFields(actual, spec, {
-      ...CORE_MANAGED_FIELD_OWNERSHIP,
-      devicePrefixes: [...CORE_MANAGED_FIELD_OWNERSHIP.devicePrefixes, 'ext'],
-    });
+      ),
+      profiles: ['default'],
+    };
+    const updated = applyManagedFields(actual, spec);
     expect(updated.config?.['volatile.eth0.hwaddr']).toBe('02:aa:bb:cc:dd:ee');
-    expect(updated.config?.['operator.note']).toBe('preserve');
-    expect(updated.config?.['limits.processes']).toBeUndefined();
-    expect(updated.config?.['security.privileged']).toBe('false');
-    expect(updated.devices?.operatorDisk).toEqual({
-      type: 'disk',
-      source: 'operator-volume',
-      path: '/operator',
-    });
-    expect(updated.devices?.ext0).toBeUndefined();
-    expect(updated.devices?.root).toEqual(spec.devices?.root);
-    expect(updated.devices?.eth0).toEqual(spec.devices?.eth0);
+    expect(updated.config?.['image.os']).toBe('ubuntu');
+    expect(updated.config?.['operator.note']).toBeUndefined();
+    expect(updated.config?.['raw.idmap']).toBeUndefined();
+    expect(updated.devices).toEqual(spec.devices);
+    expect(updated.profiles).toEqual([]);
+    expect(compareManagedFields(updated, spec).empty).toBe(true);
   });
 
   it('observes root quota application independently of managed diff', () => {
@@ -327,46 +339,5 @@ describe('compareManagedFields', () => {
       pendingSizeBytes: '21474836480',
     });
     expect(observeRootQuotaPending(actualWith(), 1n).pending).toBe(false);
-  });
-
-  it('requires ownership prefixes to treat card config and devices as managed', () => {
-    const spec = desired();
-    const owned: ManagedFieldOwnership = {
-      configPrefixes: [...CORE_MANAGED_FIELD_OWNERSHIP.configPrefixes, 'example.'],
-      deviceNames: CORE_MANAGED_FIELD_OWNERSHIP.deviceNames,
-      devicePrefixes: [...CORE_MANAGED_FIELD_OWNERSHIP.devicePrefixes, 'ext'],
-    };
-    const actual = actualWith(
-      { 'example.runtime': 'true' },
-      {
-        ext0: {
-          type: 'unix-char',
-          path: '/dev/example',
-        },
-      },
-    );
-
-    const unmanaged = compareManagedFields(actual, spec, CORE_MANAGED_FIELD_OWNERSHIP);
-    expect(unmanaged.empty).toBe(true);
-    const preserved = applyManagedFields(actual, spec, CORE_MANAGED_FIELD_OWNERSHIP);
-    expect(preserved.config?.['example.runtime']).toBe('true');
-    expect(preserved.devices?.ext0).toEqual({
-      type: 'unix-char',
-      path: '/dev/example',
-    });
-
-    const managed = compareManagedFields(actual, spec, owned);
-    expect(managed.empty).toBe(false);
-    expect(managed.config['example.runtime']).toEqual({
-      actual: 'true',
-      desired: spec.config?.['example.runtime'],
-    });
-    expect(managed.devices.ext0?.actual).toEqual({
-      type: 'unix-char',
-      path: '/dev/example',
-    });
-    const stripped = applyManagedFields(actual, spec, owned);
-    expect(stripped.config?.['example.runtime']).toBe(spec.config?.['example.runtime']);
-    expect(stripped.devices?.ext0).toBeUndefined();
   });
 });

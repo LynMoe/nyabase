@@ -120,7 +120,7 @@ function driverStatus(samples: readonly NodeMetricSample[]): GpuSupportCheckDto 
     id: 'nvidia-driver',
     label: 'NVIDIA 驱动 (nvidia-smi)',
     status: 'unknown',
-    detail: '未采集到 node-exporter 指标',
+    detail: '未采集到主机 Agent 指标',
   };
 }
 
@@ -145,7 +145,7 @@ function toolkitStatus(samples: readonly NodeMetricSample[]): GpuSupportCheckDto
     id: 'nvidia-container-toolkit',
     label: 'NVIDIA Container Toolkit',
     status: 'unknown',
-    detail: '未采集到 node-exporter 指标',
+    detail: '未采集到主机 Agent 指标',
   };
 }
 

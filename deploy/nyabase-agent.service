@@ -1,0 +1,35 @@
+[Unit]
+Description=Nyabase host agent (dials the Backend, fronts the local Incus)
+Documentation=file:/opt/nyabase/deploy/OPERATIONS.md
+After=network-online.target incus.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Dedicated user in the incus-admin group: it reaches Incus only through
+# /var/lib/incus/unix.socket and keeps its credential in /var/lib/nyabase-agent.
+# CAP_NET_ADMIN maintains the `bridge nyabase_guard` nft table (guest IPv6 drop)
+# and reads `bridge incus`. Every Incus request is checked against the agent's
+# policy before it reaches the socket (packages/agent/src/policy.ts).
+User=nyabase-agent
+Group=nyabase-agent
+SupplementaryGroups=incus-admin
+EnvironmentFile=/etc/nyabase/agent.env
+WorkingDirectory=/opt/nyabase/agent
+StateDirectory=nyabase-agent
+StateDirectoryMode=0700
+Environment=NYABASE_AGENT_STATE_DIR=/var/lib/nyabase-agent
+# Documented package start command: `node dist/main.js` (Node.js 20+).
+ExecStart=/usr/bin/env node dist/main.js
+Restart=always
+RestartSec=5s
+NoNewPrivileges=true
+AmbientCapabilities=CAP_NET_ADMIN
+CapabilityBoundingSet=CAP_NET_ADMIN
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ReadOnlyPaths=/etc/nyabase/agent.env
+
+[Install]
+WantedBy=multi-user.target

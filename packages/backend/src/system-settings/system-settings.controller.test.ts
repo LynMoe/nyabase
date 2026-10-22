@@ -55,7 +55,6 @@ function makeController() {
     config as never,
     accessResolver as never,
     authority as never,
-    { describe: vi.fn() } as never,
   );
   return { controller, config, authority, accessResolver };
 }

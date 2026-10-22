@@ -108,7 +108,6 @@ export const KIND_RESOURCES: Readonly<Record<TypedIntentKind, readonly IntentRes
   [IntentKind.VolumeDestroy]: [IntentResourceType.Volume],
   [IntentKind.ImageAssignmentEnsure]: [IntentResourceType.ImageAssignment],
   [IntentKind.ImageAssignmentDelete]: [IntentResourceType.ImageAssignment],
-  [IntentKind.ServerConnect]: [IntentResourceType.Server],
   [IntentKind.ServerPreflight]: [IntentResourceType.Server],
 };
 

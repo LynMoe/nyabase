@@ -24,3 +24,29 @@ export async function lockImageCapacity(executor: AdvisoryLockExecutor): Promise
     ${IMAGE_CAPACITY_ADVISORY_KEY}
   )`.execute(executor);
 }
+
+/** Namespace for per-server CPU set allocation; the second key is hashtext(server id). */
+export const CPU_SET_ADVISORY_NAMESPACE = 1_856_214_886;
+
+/** Transaction-scoped lock serializing CPU set allocation on one server. */
+export async function lockServerCpuSets(executor: AdvisoryLockExecutor, serverId: string): Promise<void> {
+  await sql`select pg_advisory_xact_lock(
+    ${CPU_SET_ADVISORY_NAMESPACE},
+    hashtext(${serverId}::text)
+  )`.execute(executor);
+}
+
+/** Namespace for per-(owner, server) quota admission; the second key hashes both ids. */
+export const OWNER_SERVER_QUOTA_ADVISORY_NAMESPACE = 1_856_214_887;
+
+/** Transaction-scoped lock serializing a user's quota checks on one server. */
+export async function lockOwnerServerQuota(
+  executor: AdvisoryLockExecutor,
+  ownerId: string,
+  serverId: string,
+): Promise<void> {
+  await sql`select pg_advisory_xact_lock(
+    ${OWNER_SERVER_QUOTA_ADVISORY_NAMESPACE},
+    hashtext(${ownerId}::text || ':' || ${serverId}::text)
+  )`.execute(executor);
+}

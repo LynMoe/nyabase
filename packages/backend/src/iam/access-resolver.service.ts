@@ -209,7 +209,7 @@ export class AccessResolverService {
     const expired = lapses.length === 0
       ? []
       : await this.database.selectFrom('iam.effective_server_access')
-        .select(['server_id', 'cpu_millis', 'mem_bytes', 'disk_bytes', 'gpu_pci_addresses'])
+        .select(['server_id', 'cpu_cores', 'mem_bytes', 'disk_bytes', 'gpu_pci_addresses'])
         .where('user_id', '=', userId)
         .where('server_id', 'in', lapses.map((lapse) => lapse.resource_id))
         .execute();
@@ -237,7 +237,7 @@ export class AccessResolverService {
     return [
       ...live.map((access): EffectiveServerAccessDto => ({
         serverId: access.serverId,
-        cpuMillis: access.cpuMillis,
+        cpuCores: access.cpuCores,
         memBytes: access.memBytes,
         diskBytes: access.diskBytes,
         gpuPciAddresses: access.gpuPciAddresses,
@@ -250,7 +250,7 @@ export class AccessResolverService {
         const quotas = expiredByServer.get(lapse.resource_id);
         return {
           serverId: lapse.resource_id,
-          cpuMillis: quotas?.cpu_millis ?? null,
+          cpuCores: quotas?.cpu_cores ?? null,
           memBytes: quotas?.mem_bytes === undefined || quotas.mem_bytes === null
             ? null
             : numberValue(quotas.mem_bytes),

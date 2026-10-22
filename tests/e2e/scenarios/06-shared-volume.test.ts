@@ -101,6 +101,19 @@ describe('shared volume across two servers', { skip }, () => {
     assert.equal(seen.trim(), marker);
   });
 
+  it('keeps file ownership identical across containers with isolated uid maps', async () => {
+    const [writer, reader] = containers as [ContainerDto, ContainerDto];
+    const owner = (await h.ssh(user, writer, 'id -u; umask 077; echo private > /mnt/shared/owned && stat -c %u /mnt/shared/owned'))
+      .trim().split(/\s+/);
+    assert.equal(owner[0], owner[1], 'the file belongs to the writing user inside the guest');
+    const seen = await pollUntil(async () => {
+      const out = (await h.ssh(user, reader, 'id -u; stat -c %u /mnt/shared/owned 2>/dev/null && cat /mnt/shared/owned')).trim();
+      return out.endsWith('private') ? out.split(/\s+/) : undefined;
+    }, { what: 'the private file to be readable from the other container', timeoutMs: 90_000, intervalMs: 3_000 });
+    assert.equal(seen[0], owner[0], 'the reader runs as the same guest uid');
+    assert.equal(seen[1], owner[0], 'and sees the same owner, not a shifted host uid');
+  });
+
   it('lets only the owner and administrators see it', async () => {
     const other = await h.newUser('sharedother');
     assert.equal(await other.session.api.status('GET', `/shared-volumes/${volumeId}`), 404);

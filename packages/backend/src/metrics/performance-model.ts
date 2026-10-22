@@ -25,7 +25,8 @@ export interface InventoryContainer {
   name: string;
   lifecyclePhase: string;
   powerIntent: string;
-  cpuMillis: number;
+  /** CPU set the instance is pinned to; null until reconciled. */
+  cpuSet: number[] | null;
   createdAt: number;
   pciAddresses: string[];
   volumes: Array<{ volumeId: string; name: string; shared: boolean }>;
@@ -54,10 +55,23 @@ interface Reading {
   ts: number;
 }
 
-export function cpuLimitCores(cpuMillis: number, kernelCores: number | null): number | null {
-  if (cpuMillis > 0) return cpuMillis / 1000;
+export function cpuLimitCores(cpuSet: readonly number[] | null, kernelCores: number | null): number | null {
+  if (cpuSet && cpuSet.length > 0) return cpuSet.length;
   if (kernelCores !== null && kernelCores > 0) return kernelCores;
   return null;
+}
+
+/**
+ * CPUs a group of containers can use together. A user's containers on a
+ * server share one CPU set, so the bound is the union, not the sum.
+ */
+export function sharedCpuLimit(containers: readonly InventoryContainer[]): number | null {
+  const cpus = new Set<string>();
+  for (const container of containers) {
+    if (!container.cpuSet || container.cpuSet.length === 0) return null;
+    for (const cpu of container.cpuSet) cpus.add(`${container.serverId}:${cpu}`);
+  }
+  return cpus.size > 0 ? cpus.size : null;
 }
 
 export function buildUsage(input: {
@@ -319,10 +333,10 @@ function personRow(
   const gpus = containers.map((container) => gpuFor(container, samples, unattributed));
   const disks = containers.map((container) => diskFor(container, samples));
   const networks = containers.map((container) => networkFor(container.id, samples));
-  const cpuUnlimited = containers.some((container) => container.cpuMillis <= 0);
+  const sharedCpus = sharedCpuLimit(containers);
   const memoryUnlimited = memories.some((memory) => memory.limitBytes === null || memory.limitBytes === 0);
   const usageCores = sumNullable(cpus.map((cpu) => cpu.usageCores));
-  const limitCores = cpuUnlimited ? null : sumNullable(cpus.map((cpu) => cpu.limitCores));
+  const limitCores = sharedCpus;
   const usedMemory = sumNullable(memories.map((memory) => memory.usedBytes));
   const limitMemory = memoryUnlimited ? null : sumNullable(memories.map((memory) => memory.limitBytes));
   const gpuUsed = sumNullable(gpus.map((gpu) => gpu.usedBytes));
@@ -364,7 +378,7 @@ function cpuFor(
 ): PerformanceCpu {
   const usage = one(samples, 'cpu_usage_cores', container.id);
   const kernel = one(samples, 'cpu_limit_cores', container.id);
-  const limitCores = cpuLimitCores(container.cpuMillis, kernel?.value ?? null);
+  const limitCores = cpuLimitCores(container.cpuSet, kernel?.value ?? null);
   return {
     usageCores: usage?.value ?? null,
     limitCores,
@@ -587,9 +601,8 @@ function metricAt(
   }
   if (metric === 'cpu') {
     const usage = sumAt(series.get('cpu_usage_cores') ?? [], containers, ts);
-    if (containers.some((container) => container.cpuMillis <= 0)) return null;
-    const limit = containers.reduce((sum, container) => sum + container.cpuMillis / 1000, 0);
-    return usage !== null && limit > 0 ? usage / limit : null;
+    const limit = sharedCpuLimit(containers);
+    return usage !== null && limit !== null ? usage / limit : null;
   }
   if (metric === 'memory') {
     const limits = series.get('mem_limit_bytes') ?? [];

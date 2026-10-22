@@ -126,8 +126,6 @@ export function nodeMetricsStatusZh(status: string): string {
       return '不可达';
     case 'unknown':
       return '未知';
-    case 'unconfigured':
-      return '未配置';
     default:
       return status;
   }

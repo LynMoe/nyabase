@@ -1,6 +1,7 @@
 import { Module } from '@nestjs/common';
 import { GpuModule } from '../gpu/gpu.module.js';
 import { IncusModule } from '../incus/incus.module.js';
+import { CpuModule } from '../cpu/cpu.module.js';
 import { IpPoolsModule } from '../ip-pools/ip-pools.module.js';
 import { ProxySnapshotNotifierModule } from '../proxy-snapshots/proxy-snapshot-notifier.module.js';
 import { ReconcileModule } from '../reconcile/reconcile.module.js';
@@ -20,6 +21,7 @@ import { ContainersController } from './containers.controller.js';
   imports: [
     ReconcileModule,
     IncusModule,
+    CpuModule,
     IpPoolsModule,
     VolumesModule,
     GpuModule,

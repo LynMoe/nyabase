@@ -1,77 +1,78 @@
 import { randomUUID } from 'node:crypto';
 import { describe, expect, it, vi } from 'vitest';
-import { ServerStatus } from '@nyabase/common';
+import { ServerStatus, parseAgentSecret } from '@nyabase/common';
+import { AgentCredentialVerifier, agentSecretDigest } from '../incus/agent-credentials.js';
 import { withPostgresTestDatabase } from '../platform/persistence-pg/postgres-test-harness.js';
 import { PgTransactionManager } from '../platform/persistence-pg/transaction.js';
 import { VOLUME_DESTROY_PLACEMENT_ID } from '../reconcile/reconcile-claim.repository.js';
 import { ServersService } from './servers.service.js';
+import { AgentEnrollmentService } from './agent-enrollment.service.js';
 
 const describePg = process.env.NYABASE_TEST_DATABASE_URL ? describe : describe.skip;
 
-describePg('clean Incus server contract', () => {
-  it('does not persist an expected fingerprint before transport TOFU observes it', async () => {
+describePg('server agent onboarding and removal', () => {
+  it('issues a one-time enrollment token and trades it for the agent credential exactly once', async () => {
     await withPostgresTestDatabase(async ({ database }) => {
-      const serverId = randomUUID();
-      await database
-        .insertInto('infra.servers')
-        .values({
-          id: serverId,
-          name: 'TOFU node',
-          slug: `tofu-${serverId.slice(0, 8)}`,
-          api_endpoint: 'https://incus.example.test:8443',
-          server_cert_fingerprint: null,
-          incus_version: null,
-          api_extensions: [],
-          system_pool_id: null,
-          storage_overcommit_ratio: 1,
-          parent_interface: 'eth0',
-          dns_servers: ['10.20.0.1'],
-          status: ServerStatus.Unknown,
-          last_seen_at: null,
-          last_error: null,
-          revision: 1,
-          node_metrics_endpoint: null,
-          node_metrics_server_cert_fingerprint: null,
-          node_metrics_token_ciphertext: null,
-          node_metrics_token_fingerprint: null,
-          node_metrics_status: 'unconfigured',
-          node_metrics_last_success_at: null,
-          node_metrics_outage_since: null,
-          node_metrics_last_error: null,
-          preflight_status: 'not_run',
-          preflight_checked_at: null,
-          preflight_report: null,
-        })
-        .execute();
+      const transactions = new PgTransactionManager(database);
+      const access = { assertActorCapabilitiesInTransaction: vi.fn() };
+      const audit = { append: vi.fn() };
+      const agents = { disconnect: vi.fn(), isConnected: vi.fn(() => false) };
+      const enrollment = new AgentEnrollmentService(
+        database,
+        transactions,
+        access as never,
+        audit as never,
+        agents as never,
+      );
       const service = new ServersService(
         database,
-        new PgTransactionManager(database),
-        {} as never,
-        {} as never,
-        { keyEncryptionSecret: () => 'test-key-secret' } as never,
+        transactions,
+        access as never,
+        audit as never,
         { invalidate: vi.fn() } as never,
+        agents as never,
+        enrollment,
+        { wake: vi.fn() } as never,
       );
-
-      await expect(service.prepareConnection(serverId, 'aa'.repeat(32))).resolves.toBe(1);
-      await expect(
-        database
-          .selectFrom('infra.servers')
-          .select(['server_cert_fingerprint', 'revision'])
-          .where('id', '=', serverId)
-          .executeTakeFirstOrThrow(),
-      ).resolves.toMatchObject({
-        server_cert_fingerprint: null,
-        revision: '1',
+      const created = await service.create(randomUUID(), {
+        name: 'agent node',
+        slug: `agent-${randomUUID().slice(0, 8)}`,
+        parentInterface: 'vmbr0',
+        dnsServers: [],
+        reservedCpus: [0],
       });
+      expect(created.reservedCpus).toEqual([0]);
+      expect(created.agent).toMatchObject({ connected: false, enrolled: false });
+      const token = created.enrollment.enrollmentToken;
+      expect(parseAgentSecret('enrollment', token)?.serverId).toBe(created.id);
+      const stored = await database
+        .selectFrom('infra.servers')
+        .select(['agent_enrollment_token_hash', 'agent_credential_hash'])
+        .where('id', '=', created.id)
+        .executeTakeFirstOrThrow();
+      expect(stored.agent_enrollment_token_hash).toBe(agentSecretDigest(token));
+      expect(stored.agent_credential_hash).toBeNull();
 
+      const enrolled = await enrollment.enroll({ enrollmentToken: token, hostname: 'worker-1' });
+      expect(enrolled.serverId).toBe(created.id);
+      await expect(new AgentCredentialVerifier(database).authenticate(`Bearer ${enrolled.credential}`))
+        .resolves.toBe(created.id);
+      await expect(new AgentCredentialVerifier(database).authenticate('Bearer nyak.x.y')).resolves.toBeUndefined();
+      expect(agents.disconnect).toHaveBeenCalledWith(created.id);
+      await expect(enrollment.enroll({ enrollmentToken: token, hostname: 'worker-1' }))
+        .rejects.toMatchObject({ status: 401 });
+
+      const rotated = await enrollment.rotate(randomUUID(), created.id, 1);
       await database
         .updateTable('infra.servers')
-        .set({ server_cert_fingerprint: 'aa'.repeat(32) })
-        .where('id', '=', serverId)
+        .set({ agent_enrollment_expires_at: new Date(Date.now() - 1_000) })
+        .where('id', '=', created.id)
         .execute();
-      await expect(service.prepareConnection(serverId, 'bb'.repeat(32))).rejects.toMatchObject({
-        response: { code: 'PREFLIGHT_IDENTITY_MISMATCH' },
-      });
+      await expect(enrollment.enroll({ enrollmentToken: rotated.enrollmentToken, hostname: 'worker-1' }))
+        .rejects.toMatchObject({ status: 401 });
+      // The running agent's credential survives an unused rotation.
+      await expect(new AgentCredentialVerifier(database).authenticate(`Bearer ${enrolled.credential}`))
+        .resolves.toBe(created.id);
     });
   });
 
@@ -84,8 +85,6 @@ describePg('clean Incus server contract', () => {
           id: serverId,
           name: 'Guarded node',
           slug: `guarded-${serverId.slice(0, 8)}`,
-          api_endpoint: 'https://incus.example.test:8443',
-          server_cert_fingerprint: null,
           incus_version: null,
           api_extensions: [],
           system_pool_id: null,
@@ -96,11 +95,7 @@ describePg('clean Incus server contract', () => {
           last_seen_at: null,
           last_error: null,
           revision: 3,
-          node_metrics_endpoint: null,
-          node_metrics_server_cert_fingerprint: null,
-          node_metrics_token_ciphertext: null,
-          node_metrics_token_fingerprint: null,
-          node_metrics_status: 'unconfigured',
+          node_metrics_status: 'unknown',
           node_metrics_last_success_at: null,
           node_metrics_outage_since: null,
           node_metrics_last_error: null,
@@ -137,8 +132,10 @@ describePg('clean Incus server contract', () => {
         new PgTransactionManager(database),
         { assertActorCapabilitiesInTransaction: vi.fn() } as never,
         { append: vi.fn() } as never,
-        { keyEncryptionSecret: () => 'test-key-secret' } as never,
         { invalidate: vi.fn() } as never,
+        { disconnect: vi.fn(), isConnected: vi.fn(() => false) } as never,
+        {} as never,
+        { wake: vi.fn() } as never,
       );
 
       await expect(service.delete('actor-1', serverId, 2)).rejects.toMatchObject({
@@ -192,8 +189,6 @@ describePg('clean Incus server contract', () => {
           id: serverS,
           name: 'cascade-s',
           slug: `cascade-s-${serverS.slice(0, 8)}`,
-          api_endpoint: 'https://incus-s.example.test:8443',
-          server_cert_fingerprint: null,
           incus_version: null,
           api_extensions: [],
           system_pool_id: null,
@@ -204,11 +199,7 @@ describePg('clean Incus server contract', () => {
           last_seen_at: null,
           last_error: null,
           revision: 4,
-          node_metrics_endpoint: null,
-          node_metrics_server_cert_fingerprint: null,
-          node_metrics_token_ciphertext: null,
-          node_metrics_token_fingerprint: null,
-          node_metrics_status: 'unconfigured',
+          node_metrics_status: 'unknown',
           node_metrics_last_success_at: null,
           node_metrics_outage_since: null,
           node_metrics_last_error: null,
@@ -220,8 +211,6 @@ describePg('clean Incus server contract', () => {
           id: serverT,
           name: 'cascade-t',
           slug: `cascade-t-${serverT.slice(0, 8)}`,
-          api_endpoint: 'https://incus-t.example.test:8443',
-          server_cert_fingerprint: null,
           incus_version: null,
           api_extensions: [],
           system_pool_id: null,
@@ -232,11 +221,7 @@ describePg('clean Incus server contract', () => {
           last_seen_at: null,
           last_error: null,
           revision: 1,
-          node_metrics_endpoint: null,
-          node_metrics_server_cert_fingerprint: null,
-          node_metrics_token_ciphertext: null,
-          node_metrics_token_fingerprint: null,
-          node_metrics_status: 'unconfigured',
+          node_metrics_status: 'unknown',
           node_metrics_last_success_at: null,
           node_metrics_outage_since: null,
           node_metrics_last_error: null,
@@ -363,8 +348,7 @@ describePg('clean Incus server contract', () => {
         root_pool_id: poolS,
         root_size_bytes: 100,
         root_size_pending_bytes: null,
-        cpu_millis: 0,
-        mem_bytes: 0,
+        mem_bytes: 1_073_741_824,
         nesting: true,
         syscall_intercept: true,
         power_intent: 'stopped',
@@ -509,8 +493,10 @@ describePg('clean Incus server contract', () => {
         new PgTransactionManager(database),
         { assertActorCapabilitiesInTransaction: vi.fn() } as never,
         { append: vi.fn() } as never,
-        { keyEncryptionSecret: () => 'test-key-secret' } as never,
         { invalidate } as never,
+        { disconnect: vi.fn(), isConnected: vi.fn(() => false) } as never,
+        {} as never,
+        { wake: vi.fn() } as never,
       );
 
       await expect(service.delete('actor-1', serverS, 4)).resolves.toBeUndefined();
@@ -572,8 +558,6 @@ describePg('clean Incus server contract', () => {
           id: unrelated,
           name: 'unrelated',
           slug: `unrelated-${unrelated.slice(0, 8)}`,
-          api_endpoint: 'https://incus-u.example.test:8443',
-          server_cert_fingerprint: null,
           incus_version: null,
           api_extensions: [],
           system_pool_id: null,
@@ -584,11 +568,7 @@ describePg('clean Incus server contract', () => {
           last_seen_at: null,
           last_error: null,
           revision: 1,
-          node_metrics_endpoint: null,
-          node_metrics_server_cert_fingerprint: null,
-          node_metrics_token_ciphertext: null,
-          node_metrics_token_fingerprint: null,
-          node_metrics_status: 'unconfigured',
+          node_metrics_status: 'unknown',
           node_metrics_last_success_at: null,
           node_metrics_outage_since: null,
           node_metrics_last_error: null,
@@ -600,8 +580,6 @@ describePg('clean Incus server contract', () => {
           id: peer,
           name: 'peer-backend',
           slug: `peer-${peer.slice(0, 8)}`,
-          api_endpoint: 'https://incus-p.example.test:8443',
-          server_cert_fingerprint: null,
           incus_version: null,
           api_extensions: [],
           system_pool_id: null,
@@ -612,11 +590,7 @@ describePg('clean Incus server contract', () => {
           last_seen_at: null,
           last_error: null,
           revision: 1,
-          node_metrics_endpoint: null,
-          node_metrics_server_cert_fingerprint: null,
-          node_metrics_token_ciphertext: null,
-          node_metrics_token_fingerprint: null,
-          node_metrics_status: 'unconfigured',
+          node_metrics_status: 'unknown',
           node_metrics_last_success_at: null,
           node_metrics_outage_since: null,
           node_metrics_last_error: null,
@@ -696,8 +670,10 @@ describePg('clean Incus server contract', () => {
         new PgTransactionManager(database),
         { assertActorCapabilitiesInTransaction: vi.fn() } as never,
         { append: vi.fn() } as never,
-        { keyEncryptionSecret: () => 'test-key-secret' } as never,
         { invalidate: vi.fn() } as never,
+        { disconnect: vi.fn(), isConnected: vi.fn(() => false) } as never,
+        {} as never,
+        { wake: vi.fn() } as never,
       );
 
       await expect(service.delete('actor-1', unrelated, 1)).resolves.toBeUndefined();

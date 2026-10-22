@@ -165,7 +165,6 @@ const INTENT_KIND_ZH: Record<string, string> = {
   'volume.destroy': '销毁数据卷',
   'image_assignment.ensure': '分配镜像',
   'image_assignment.delete': '取消镜像分配',
-  'server.connect': '连接服务器',
   'server.preflight': '服务器预检',
 };
 

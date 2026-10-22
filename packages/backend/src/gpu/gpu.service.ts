@@ -24,7 +24,7 @@ import { AccessResolverService } from '../iam/access-resolver.service.js';
 import { AuditService } from '../iam/audit.service.js';
 import { assertListScope, type Actor } from '../iam/actor.js';
 import { INCUS_CLIENT_FACTORY, type IncusClientFactory } from '../incus/incus-client.factory.js';
-import { AuthenticatedNodeMetricsPullAdapter } from '../metrics/node-metrics-pull.adapter.js';
+import { AgentNodeMetricsPullAdapter } from '../metrics/node-metrics-pull.adapter.js';
 import { assertGpuCanDisable, gpuOccupiedError, isGpuOccupiedSqlError } from './admit.js';
 import { GpuClaimsRepository } from './gpu-claims.repository.js';
 import { listGpuDevices, refreshGpuHealth, probeGpuSupport } from './inventory.js';
@@ -48,7 +48,7 @@ export class GpuService {
     private readonly access: AccessResolverService,
     private readonly audit: AuditService,
     @Inject(INCUS_CLIENT_FACTORY) private readonly clients: IncusClientFactory,
-    private readonly nodeMetrics: AuthenticatedNodeMetricsPullAdapter,
+    private readonly nodeMetrics: AgentNodeMetricsPullAdapter,
   ) {}
 
   /** Admin view: switch, operational health, claim count, and host prerequisites. */
@@ -203,23 +203,12 @@ export class GpuService {
     } catch {
       resources = null;
     }
-    const server = await this.database
-      .selectFrom('infra.servers')
-      .select(['node_metrics_endpoint', 'node_metrics_token_ciphertext'])
-      .where('id', '=', serverId)
-      .executeTakeFirst();
     let metricSamples: NodeMetricSample[] = [];
-    if (server?.node_metrics_endpoint && server.node_metrics_token_ciphertext) {
-      try {
-        const pulled = await this.nodeMetrics.pull(
-          serverId,
-          server.node_metrics_endpoint,
-          server.node_metrics_token_ciphertext,
-        );
-        metricSamples = [...(pulled.report?.samples ?? [])];
-      } catch {
-        metricSamples = [];
-      }
+    try {
+      const pulled = await this.nodeMetrics.pull(serverId);
+      metricSamples = [...(pulled.report?.samples ?? [])];
+    } catch {
+      metricSamples = [];
     }
     return { resources, metricSamples };
   }

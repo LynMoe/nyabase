@@ -43,7 +43,6 @@ export interface NewContainerInput {
   imageFingerprint: string;
   rootPoolId: string;
   rootSizeBytes: number;
-  cpuMillis: number;
   memBytes: number;
   powerIntent: 'running' | 'stopped';
   networkKey: string;
@@ -114,6 +113,22 @@ export class ContainerControlRepository {
    * Root-disk bytes committed by containers that are neither failed nor being
    * deleted; a pending quota change counts at its larger size.
    */
+  /** Memory of the owner's other containers on the server that still hold their reservation. */
+  async sumLiveMemBytes(
+    filter: { ownerId: string; serverId: string; excludeContainerId?: string },
+    executor: ContainerExecutor = this.database,
+  ): Promise<number> {
+    let query = executor
+      .selectFrom('control.containers')
+      .select(sql<string>`coalesce(sum(mem_bytes), 0)`.as('bytes'))
+      .where('owner_id', '=', filter.ownerId)
+      .where('server_id', '=', filter.serverId)
+      .where('lifecycle_phase', 'not in', ['failed', 'deleting']);
+    if (filter.excludeContainerId !== undefined) query = query.where('id', '<>', filter.excludeContainerId);
+    const row = await query.executeTakeFirstOrThrow();
+    return numberValue(row.bytes);
+  }
+
   async sumLiveRootBytes(
     filter: { ownerId?: string; serverId?: string; poolId?: string },
     executor: ContainerExecutor = this.database,
@@ -159,8 +174,8 @@ export class ContainerControlRepository {
         root_size_bytes: input.rootSizeBytes,
         root_size_pending_bytes: null,
         root_used_bytes: null,
-        cpu_millis: input.cpuMillis,
         mem_bytes: input.memBytes,
+        cpu_set: null,
         gpu_state: null,
         nesting: true,
         syscall_intercept: true,
@@ -222,7 +237,6 @@ export class ContainerControlRepository {
     id: string,
     revision: number,
     values: {
-      cpu_millis?: number;
       mem_bytes?: number;
       root_size_bytes?: number;
       root_size_pending_bytes?: number | null;

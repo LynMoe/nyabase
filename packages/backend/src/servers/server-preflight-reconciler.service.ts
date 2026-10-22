@@ -18,7 +18,7 @@ import type {
   ResourceAuthority,
 } from '../reconcile/managed-reconciler.js';
 import { ReconcilerRegistry } from '../reconcile/reconciler-registry.service.js';
-import { AuthenticatedNodeMetricsPullAdapter } from '../metrics/node-metrics-pull.adapter.js';
+import { AgentNodeMetricsPullAdapter } from '../metrics/node-metrics-pull.adapter.js';
 import {
   evaluateLanBridge,
   listHostLanAddresses,
@@ -27,6 +27,7 @@ import {
   IncusPreflightChecksAdapter,
 } from './preflight-checks.adapter.js';
 import { ServerConnector } from './server-connector.js';
+import { allocatableCpus, parseCpuTopology } from '../cpu/cpu-allocation.js';
 import { runProbe, type PreflightOptions, type ProbeRun, type ReportChecks } from './server-preflight-probe.js';
 import {
   ServerPreflightStore,
@@ -104,8 +105,7 @@ function staleOutcome(intent: IntentRecord): ReconcileOutcome {
 }
 
 /**
- * Drives `server.connect` (trust + pin the Incus server, see ServerConnector)
- * and `server.preflight` (prove the host can run guests): API identity, storage
+ * Drives `server.preflight` (prove the host can run guests): agent reachability, storage
  * pool, node metrics, LAN bridge, GPU inventory and a throwaway probe container
  * that proves guest networking. Server state is written by the reconcile flow itself.
  */
@@ -116,7 +116,7 @@ export class ServerPreflightReconciler implements ManagedReconciler, OnModuleIni
   constructor(
     private readonly store: ServerPreflightStore,
     private readonly connector: ServerConnector,
-    private readonly nodeMetrics: AuthenticatedNodeMetricsPullAdapter,
+    private readonly nodeMetrics: AgentNodeMetricsPullAdapter,
     private readonly checks: IncusPreflightChecksAdapter,
     private readonly config: NyabaseConfigService,
     private readonly registry: ReconcilerRegistry,
@@ -163,22 +163,6 @@ export class ServerPreflightReconciler implements ManagedReconciler, OnModuleIni
     const currentRevision = revisionNumber(server.revision);
     if (currentRevision !== undefined && currentRevision !== expectedRevision) {
       return staleOutcome(context.intent);
-    }
-    if (context.intent.kind === 'server.connect') {
-      try {
-        await this.connector.connectWithTrustToken(
-          context.client,
-          server,
-          context.intent,
-          context.signal,
-        );
-      } catch (error) {
-        if (error instanceof ServerRevisionChangedError) {
-          return staleOutcome(context.intent);
-        }
-        throw error;
-      }
-      return { outcome: 'succeeded', observedRevision: context.intent.targetRevision };
     }
     return this.reconcilePreflight(context, server, expectedRevision);
   }
@@ -270,6 +254,23 @@ export class ServerPreflightReconciler implements ManagedReconciler, OnModuleIni
   }
 
   /** The system pool must be registered on this server and exist in Incus. */
+  /** Containers are pinned to unreserved CPUs; reserved CPUs must exist and leave some over. */
+  private async requireUnreservedCpus(serverId: string, resources: unknown): Promise<void> {
+    const topology = parseCpuTopology(resources);
+    const reserved = await this.store.readReservedCpus(serverId);
+    const known = new Set(topology.map((entry) => entry.id));
+    const unknown = reserved.filter((cpu) => !known.has(cpu));
+    if (topology.length === 0 || unknown.length > 0 || allocatableCpus(topology, reserved).length === 0) {
+      throw new IncusError('PREFLIGHT_FAILED', 'managed_failure', {
+        reason: topology.length === 0 ? 'cpu_topology_unknown' : unknown.length > 0
+          ? 'reserved_cpu_unknown'
+          : 'no_unreserved_cpus',
+        serverId,
+        reservedCpus: reserved,
+      });
+    }
+  }
+
   private async requireSystemPool(
     server: ServerRow,
     pools: readonly IncusSchema<'StoragePool'>[],
@@ -394,9 +395,10 @@ export class ServerPreflightReconciler implements ManagedReconciler, OnModuleIni
     signal: AbortSignal,
   ): Promise<PreflightReport> {
     const expectedRevision = revisionNumber(server.revision);
-    await this.connector.connect(client, server, undefined, expectedRevision, signal);
+    await this.connector.connect(client, server, expectedRevision, signal);
     const pools = await client.listStoragePools(1, { signal });
     const resources = await client.getResources({ signal });
+    await this.requireUnreservedCpus(server.id, resources.metadata);
     const systemPool = await this.requireSystemPool(server, pools.metadata);
     const metrics = await this.collectMetrics(server, signal, expectedRevision);
     const metricEvidence = metrics.failure ? undefined : metrics.pull.report;
@@ -442,7 +444,7 @@ export class ServerPreflightReconciler implements ManagedReconciler, OnModuleIni
     return successReport(checks, gpu.evidence);
   }
 
-  /** Pull the server's node-exporter metrics and record the pull outcome on the server. */
+  /** Collect the server's metrics through its agent and record the pull outcome on the server. */
   private async pullNodeMetrics(
     server: ServerRow,
     signal: AbortSignal,
@@ -453,22 +455,8 @@ export class ServerPreflightReconciler implements ManagedReconciler, OnModuleIni
         throw new ServerRevisionChangedError();
       }
     };
-    if (!server.node_metrics_endpoint || !server.node_metrics_token_ciphertext) {
-      await project({
-        node_metrics_status: 'unconfigured',
-        node_metrics_last_error: 'Node metrics endpoint or token is not configured',
-      });
-      throw new IncusError('PREFLIGHT_FAILED', 'managed_failure', {
-        reason: 'node_metrics_pull_unconfigured',
-      });
-    }
     try {
-      const result = await this.nodeMetrics.pull(
-        server.id,
-        server.node_metrics_endpoint,
-        server.node_metrics_token_ciphertext,
-        signal,
-      );
+      const result = await this.nodeMetrics.pull(server.id, signal);
       if (result.status !== 'online') {
         await project({
           node_metrics_status: result.status,
@@ -514,18 +502,8 @@ export class ServerPreflightReconciler implements ManagedReconciler, OnModuleIni
     server: ServerRow,
     signal: AbortSignal,
   ): Promise<NodeMetricsPull> {
-    if (!server.node_metrics_endpoint || !server.node_metrics_token_ciphertext) {
-      throw new IncusError('PREFLIGHT_FAILED', 'managed_failure', {
-        reason: 'preflight_nft_unavailable',
-      });
-    }
     try {
-      const result = await this.nodeMetrics.pull(
-        server.id,
-        server.node_metrics_endpoint,
-        server.node_metrics_token_ciphertext,
-        signal,
-      );
+      const result = await this.nodeMetrics.pull(server.id, signal);
       if (result.status !== 'online') {
         throw new IncusError('PREFLIGHT_FAILED', 'managed_failure', {
           reason: 'preflight_nft_unavailable',

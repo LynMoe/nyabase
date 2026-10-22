@@ -215,6 +215,9 @@ export class VolumeReconciler implements ManagedReconciler, OnModuleInit {
       }
       config['security.shifted'] = 'true';
     }
+    // An unmapped volume bypasses the uid shift every attached container relies on.
+    const unmapped = config['security.unmapped'] !== undefined;
+    delete config['security.unmapped'];
     const currentSize = asBytes(config.size);
     const desiredSize = BigInt(row.size_bytes);
     if (currentSize === null) {
@@ -250,7 +253,11 @@ export class VolumeReconciler implements ManagedReconciler, OnModuleInit {
       }
       return { outcome: 'failed', failure };
     }
-    if (decision.action !== 'none' || config['security.shifted'] !== actual.config?.['security.shifted']) {
+    if (
+      decision.action !== 'none'
+      || unmapped
+      || config['security.shifted'] !== actual.config?.['security.shifted']
+    ) {
       await this.auditMutate(
         context.intent,
         'PUT',

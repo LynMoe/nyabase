@@ -17,7 +17,7 @@ function container(overrides: Partial<InventoryContainer> = {}): InventoryContai
     name: 'box',
     lifecyclePhase: 'active',
     powerIntent: 'running',
-    cpuMillis: 2500,
+    cpuSet: [0, 1, 2],
     createdAt: 0,
     pciAddresses: ['00000000:81:00.0'],
     volumes: [],
@@ -46,9 +46,9 @@ describe('performance model', () => {
     expect(chart.lines[0]?.points.map((point) => point.v)).toEqual([null, 0, 0]);
   });
 
-  it('uses cpu_millis / 1000 instead of the kernel quota', () => {
-    expect(cpuLimitCores(2500, 2500000 / 3000000)).toBe(2.5);
-    expect(cpuLimitCores(0, 0)).toBeNull();
+  it('uses the pinned CPU set size instead of the kernel quota', () => {
+    expect(cpuLimitCores([0, 1, 2], 2500000 / 3000000)).toBe(3);
+    expect(cpuLimitCores(null, 0)).toBeNull();
     const usage = buildUsage({
       containers: [container()],
       samples: [{
@@ -63,8 +63,8 @@ describe('performance model', () => {
     });
     expect(usage.servers[0]?.people[0]?.cpu).toEqual({
       usageCores: 0.833,
-      limitCores: 2.5,
-      ratio: 0.833 / 2.5,
+      limitCores: 3,
+      ratio: 0.833 / 3,
     });
     expect(JSON.stringify(toUserUsage(usage))).not.toContain('containerId');
   });
@@ -72,8 +72,9 @@ describe('performance model', () => {
   it('sums one owner and keeps unattributed GPU off the user payload', () => {
     const usage = buildUsage({
       containers: [
-        container({ cpuMillis: 1000 }),
-        container({ id: otherId, name: 'box-2', cpuMillis: 1000 }),
+        // Both containers share the owner's two pinned CPUs: the bound is 2, not 4.
+        container({ cpuSet: [4, 5] }),
+        container({ id: otherId, name: 'box-2', cpuSet: [4, 5] }),
       ],
       samples: [
         { family: 'cpu_usage_cores', labels: { container_id: containerId, server_id: serverId }, value: 0.4, ts: 1 },
@@ -144,7 +145,7 @@ describe('performance model', () => {
   it('does not put container ids on user series', () => {
     const lines = buildSeries({
       metric: 'cpu',
-      containers: [container({ cpuMillis: 1000 })],
+      containers: [container({ cpuSet: [7] })],
       series: new Map([['cpu_usage_cores', [
         { ts: 1_000, labels: { container_id: containerId }, value: 0.5 },
       ]]]),

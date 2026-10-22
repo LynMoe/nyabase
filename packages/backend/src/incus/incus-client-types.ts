@@ -1,6 +1,4 @@
-import type { IncomingHttpHeaders, IncomingMessage } from 'node:http';
-import type { RequestOptions } from 'node:https';
-import type { ClientOptions as WebSocketClientOptions } from 'ws';
+import type { IncomingHttpHeaders } from 'node:http';
 import type { components } from './api-types.js';
 
 export type IncusSchema<Name extends keyof components['schemas']> = components['schemas'][Name];
@@ -44,39 +42,34 @@ export interface IncusTimeouts {
   readonly totalMs: number;
 }
 
-export interface IncusTlsOptions {
-  readonly cert: string | Buffer;
-  readonly key: string | Buffer;
-  readonly ca?: string | Buffer | readonly (string | Buffer)[];
-  readonly fingerprint?: string;
-  readonly expectedFingerprint?: string;
-  readonly onFirstFingerprint?: (fingerprint: string) => void | Promise<void>;
+/** One Incus HTTP exchange, carried to the server by its host agent. */
+export interface IncusTunnelRequest {
+  readonly method: IncusHttpMethod;
+  readonly path: string;
+  readonly headers: Readonly<Record<string, string>>;
+  readonly body?: Buffer;
+  readonly timeoutMs: number;
+  readonly signal?: AbortSignal;
+}
+
+export interface IncusTunnelResponse {
+  readonly status: number;
+  readonly headers: Readonly<Record<string, string>>;
+  readonly body: Buffer;
+}
+
+/** The only way the Backend reaches Incus: through the server's agent. */
+export interface IncusTunnel {
+  request(request: IncusTunnelRequest): Promise<IncusTunnelResponse>;
+  openWebSocket(path: string, signal?: AbortSignal): Promise<IncusWebSocketLike>;
 }
 
 export interface IncusClientOptions {
-  readonly endpoint: string;
-  readonly allowedHosts: readonly string[];
-  readonly tls: IncusTlsOptions;
+  readonly tunnel: IncusTunnel;
   readonly timeouts?: Partial<IncusTimeouts>;
   readonly operationWaitTimeoutMs?: number;
   readonly maxBodyBytes?: number;
-  readonly requestFactory?: IncusRequestFactory;
-  readonly websocketFactory?: IncusWebSocketFactory;
 }
-
-export interface IncusRequestLike {
-  on(event: string, listener: (...args: unknown[]) => void): this;
-  once(event: string, listener: (...args: unknown[]) => void): this;
-  setTimeout(timeout: number, callback?: () => void): this;
-  write(chunk: string | Buffer): boolean;
-  end(): void;
-  destroy(error?: Error): this;
-}
-
-export type IncusRequestFactory = (
-  options: RequestOptions,
-  callback: (response: IncomingMessage) => void,
-) => IncusRequestLike;
 
 export interface IncusWebSocketLike {
   on(event: string, listener: (...args: unknown[]) => void): this;
@@ -88,11 +81,6 @@ export interface IncusWebSocketLike {
   readonly readyState?: number;
 }
 
-export type IncusWebSocketFactory = (
-  url: string,
-  options: WebSocketClientOptions,
-) => IncusWebSocketLike;
-
 export interface IncusRequestOptions {
   readonly body?: unknown;
   readonly headers?: Readonly<Record<string, string>>;
@@ -100,10 +88,6 @@ export interface IncusRequestOptions {
   readonly signal?: AbortSignal;
   readonly timeoutMs?: number;
   readonly responseType?: 'json' | 'raw';
-}
-
-export interface IncusTrustCertificateOptions extends IncusRequestOptions {
-  readonly certificatePem?: string;
 }
 
 export interface IncusFileWriteOptions {
@@ -135,7 +119,6 @@ export interface IncusOperationWaitOptions {
 }
 
 export interface IncusClientPort {
-  readonly endpoint: string;
   requestJson<T>(
     method: IncusHttpMethod,
     path: string,
@@ -147,28 +130,6 @@ export interface IncusClientPort {
     options?: IncusRequestOptions,
   ): Promise<IncusFileResponse>;
   getServer(options?: IncusRequestOptions): Promise<IncusResponse<IncusSchema<'Server'>>>;
-  trustClientCertificate(
-    trustToken: string,
-    name: string,
-    options?: IncusTrustCertificateOptions,
-  ): Promise<IncusResponse<unknown>>;
-  trustCertificate(
-    certificatePem: string,
-    name: string,
-    options?: IncusRequestOptions,
-  ): Promise<IncusResponse<unknown>>;
-  deleteClientCertificate(
-    fingerprint: string,
-    options?: IncusRequestOptions,
-  ): Promise<IncusResponse<unknown>>;
-  updateServer(
-    document: IncusSchema<'ServerPut'>,
-    options?: IncusRequestOptions,
-  ): Promise<IncusResponse<unknown>>;
-  patchServer(
-    document: Partial<IncusSchema<'ServerPut'>>,
-    options?: IncusRequestOptions,
-  ): Promise<IncusResponse<unknown>>;
   getResources(options?: IncusRequestOptions): Promise<IncusResponse<IncusSchema<'Resources'>>>;
   getNetwork(
     name: string,

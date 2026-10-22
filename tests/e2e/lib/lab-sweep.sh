@@ -6,21 +6,21 @@
 #     with it), looked up among the instance names the run's DB recorded plus
 #     every nyc-* / nyabase-preflight-* instance currently on the host;
 #   * custom volumes named exactly as the run's DB recorded them;
-#   * the trust entry with the run's Incus client certificate fingerprint, and
-#     the run's still-unused one-time trust token;
-#   * the run's node-exporter unit and its /var/tmp directory.
+#   * the run's agent unit and its /var/tmp directory (state, credential);
+#   * the agent's `bridge nyabase_guard` nft table, once no other nyabase agent
+#     runs on the host.
 # Anything else on the host is left alone.
-# Args: <server ids, comma separated> <client fingerprint or -> <trust token name>
-#       <instances, comma separated or -> <pool/volume pairs, comma separated or ->
-#       <node-exporter unit name>
+# Args: <server ids, comma separated> <instances, comma separated or ->
+#       <pool/volume pairs, comma separated or -> <agent unit name>
 set -uo pipefail
-sids_csv="$1"; fingerprint="$2"; token_name="$3"; instances_csv="$4"; volumes_csv="$5"; node_unit="$6"
+sids_csv="$1"; instances_csv="$2"; volumes_csv="$3"; agent_unit="$4"
 rc=0
 
-if [[ "$node_unit" =~ ^nyabase-e2e-node-[0-9]{14}-[0-9a-f]{4}-s[0-9]+$ ]]; then
-  systemctl stop "$node_unit" >/dev/null 2>&1 || true
-  systemctl reset-failed "$node_unit" >/dev/null 2>&1 || true
-  rm -rf "/var/tmp/$node_unit" || rc=1
+# Stop the agent first so nothing re-creates what is deleted below.
+if [[ "$agent_unit" =~ ^nyabase-e2e-agent-[0-9]{14}-[0-9a-f]{4}-s[0-9]+$ ]]; then
+  systemctl stop "$agent_unit" >/dev/null 2>&1 || true
+  systemctl reset-failed "$agent_unit" >/dev/null 2>&1 || true
+  rm -rf "/var/tmp/$agent_unit" || rc=1
 fi
 
 declare -A owners=() candidates=()
@@ -59,9 +59,11 @@ if [[ "$volumes_csv" != "-" ]]; then
   done
 fi
 
-if [[ "$fingerprint" =~ ^[0-9a-f]{64}$ ]] && incus config trust show "$fingerprint" >/dev/null 2>&1; then
-  echo "remove trust entry $fingerprint"
-  incus config trust remove "$fingerprint" || rc=1
+# The guard only drops IPv6 on nyabase veths; keep it while any other agent runs here.
+others="$(systemctl list-units --type=service --state=active --no-legend --plain 'nyabase-*agent*' 2>/dev/null \
+  | awk '{ print $1 }' | grep -v "^$agent_unit\.service$" || true)"
+if [[ -z "$others" ]] && nft list table bridge nyabase_guard >/dev/null 2>&1; then
+  echo "remove nft table bridge nyabase_guard"
+  nft delete table bridge nyabase_guard || rc=1
 fi
-incus config trust revoke-token "$token_name" >/dev/null 2>&1 || true
 exit "$rc"

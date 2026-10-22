@@ -84,7 +84,7 @@ describe('cross-user isolation', () => {
       ['POST', `${c}/actions/repair-ssh`, 403],
       ['POST', `${c}/actions/delete`, 403],
       // Desired-state edits (limits, root size, GPUs) do not reveal that the container exists.
-      ['PATCH', `${c}/limits`, 404, { cpuMillis: 1000, memBytes: GIB }],
+      ['PATCH', `${c}/limits`, 404, { memBytes: GIB }],
       ['PATCH', `${c}/root-size`, 404, { sizeBytes: 20 * GIB }],
       ['PATCH', `${c}/gpus`, 404, { pciAddresses: [] }],
       ['POST', `${c}/exec-sessions`, 403, {}],
@@ -137,7 +137,7 @@ describe('cross-user isolation', () => {
       ['DELETE', `/users/${a.id}`, 403],
       ['GET', `/users/${a.id}/effective-access`, 403],
       ['PUT', `/users/${b.id}/server-grants/${h.server.id}`, 403, {
-        cpuMillis: null, memBytes: null, diskBytes: null, gpuPciAddresses: [], expiresAt: null,
+        cpuCores: null, memBytes: null, diskBytes: null, gpuPciAddresses: [], expiresAt: null,
       }],
       ['GET', `/servers/${h.server.id}?scope=all`, 403],
       ['GET', `/images/${h.state.image.id}?scope=all`, 403],

@@ -102,7 +102,7 @@ export class Harness {
     overrides: Partial<PutServerGrantRequest> = {},
   ): Promise<void> {
     const body: PutServerGrantRequest = {
-      cpuMillis: 4000,
+      cpuCores: 2,
       memBytes: 8 * GIB,
       diskBytes: 64 * GIB,
       gpuPciAddresses: [],
@@ -145,7 +145,6 @@ export class Harness {
       imageId: this.state.image.id,
       name: this.name('c'),
       rootSizeBytes: this.state.rootSizeBytes,
-      cpuMillis: 1000,
       memBytes: GIB,
       powerIntent: ContainerPowerIntent.Running,
       ...overrides,
@@ -242,6 +241,24 @@ export class Harness {
     }, { timeoutMs: 300_000, what: `volume ${id} to disappear` });
   }
 
+  /** Runs `incus <args>` on the lab host of `server` (over ssh unless it is this machine). */
+  async incus(server: RunServer, args: readonly string[]): Promise<string> {
+    const [file, argv] = server.ssh === 'local'
+      ? ['incus', [...args]]
+      : ['ssh', ['-o', 'BatchMode=yes', '-o', 'ConnectTimeout=10', server.ssh, 'incus', ...args.map(shellWord)]];
+    const { stdout } = await execFileAsync(file, argv, { timeout: 60_000 });
+    return stdout;
+  }
+
+  /** Runs a root shell command line on the lab host of `server`. */
+  async onHost(server: RunServer, command: string): Promise<string> {
+    const [file, argv] = server.ssh === 'local'
+      ? ['bash', ['-c', command]]
+      : ['ssh', ['-o', 'BatchMode=yes', '-o', 'ConnectTimeout=10', server.ssh, command]];
+    const { stdout } = await execFileAsync(file, argv, { timeout: 60_000 });
+    return stdout;
+  }
+
   /**
    * Runs `command` in the guest through the ssh-proxy jump host, as the
    * container owner. Resolves with stdout; rejects when ssh fails.
@@ -275,4 +292,9 @@ export class Harness {
     const { stdout } = await execFileAsync('ssh', ['-F', config, 'guest', command], { timeout: 60_000 });
     return stdout;
   }
+}
+
+/** Quotes one argument for the remote shell ssh runs it in. */
+function shellWord(value: string): string {
+  return /^[A-Za-z0-9_./:=@,+-]+$/.test(value) ? value : `'${value.replaceAll("'", "'\\''")}'`;
 }

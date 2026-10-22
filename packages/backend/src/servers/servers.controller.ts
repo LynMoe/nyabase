@@ -13,16 +13,17 @@ import {
 } from '@nestjs/common';
 import {
   Capability,
-  zConnectServerRequest,
   zCreateServerRequest,
   zListScope,
   zPatchServerRequest,
+  zRotateServerEnrollmentRequest,
   zRunPreflightRequest,
 } from '@nyabase/common';
 import { RequireCaps, CurrentActor } from '../iam/decorators.js';
 import type { Actor } from '../iam/actor.js';
 import { ServersService } from './servers.service.js';
-import { ServerConnectIntentService, ServerPreflightIntentService } from './server-intents.service.js';
+import { ServerPreflightIntentService } from './server-intents.service.js';
+import { AgentEnrollmentService } from './agent-enrollment.service.js';
 import { acceptedIntent } from '../reconcile/accepted-intent.js';
 
 /**
@@ -33,8 +34,8 @@ import { acceptedIntent } from '../reconcile/accepted-intent.js';
 export class ServersController {
   constructor(
     private readonly servers: ServersService,
-    private readonly serverConnect: ServerConnectIntentService,
     private readonly serverPreflight: ServerPreflightIntentService,
+    private readonly enrollment: AgentEnrollmentService,
   ) {}
 
   @Get()
@@ -57,27 +58,16 @@ export class ServersController {
     return this.servers.get(actor, id, zListScope.parse(scope));
   }
 
-  @Post(':id/connect')
+  /** Issue a fresh one-time agent enrollment token (shown once). */
+  @Post(':id/agent-enrollment')
   @RequireCaps(Capability.ManageServers)
-  @HttpCode(HttpStatus.ACCEPTED)
-  async connect(
+  rotateEnrollment(
     @Param('id') id: string,
     @CurrentActor() actor: Actor,
     @Body() body: unknown,
   ) {
-    const input = zConnectServerRequest.parse(body);
-    const targetRevision = await this.servers.prepareConnection(
-      id,
-      input.expectedServerCertFingerprint,
-    );
-    const intent = await this.serverConnect.create({
-      serverId: id,
-      trustToken: input.trustToken,
-      expectedServerCertFingerprint: input.expectedServerCertFingerprint,
-      targetRevision,
-      requestedBy: actor.userId,
-    });
-    return acceptedIntent(intent);
+    const input = zRotateServerEnrollmentRequest.parse(body);
+    return this.enrollment.rotate(actor.userId, id, input.expectedRevision);
   }
 
   @Get(':id/preflight')

@@ -7,31 +7,30 @@ import {
   formatGrantQuotaParts,
   formatQuotaDimension,
   formatRemainingBytes,
-  formatRemainingCpu,
 } from './grant-quota.js';
 
 describe('formatGrantQuotaParts', () => {
   it('maps null and 0 grant ceilings to 不限', () => {
-    expect(formatGrantQuotaParts({ cpuMillis: null, memBytes: null, diskBytes: null })).toEqual([
+    expect(formatGrantQuotaParts({ cpuCores: null, memBytes: null, diskBytes: null })).toEqual([
       '不限',
       '不限',
       '不限',
     ]);
-    expect(formatGrantQuotaParts({ cpuMillis: 0, memBytes: 0, diskBytes: 0 })).toEqual([
+    expect(formatGrantQuotaParts({ cpuCores: 0, memBytes: 0, diskBytes: 0 })).toEqual([
       '不限',
       '不限',
       '不限',
     ]);
   });
 
-  it('formats 1000ms + 2GiB + 100GiB as 1 核 / 2 GiB / 100 GiB', () => {
+  it('formats 1 core + 2GiB + 100GiB as 1 核 / 2 GiB / 100 GiB', () => {
     expect(formatGrantQuotaLine({
-      cpuMillis: 1000,
+      cpuCores: 1,
       memBytes: 2 * GIB,
       diskBytes: 100 * GIB,
     })).toBe('1 核 / 2 GiB / 100 GiB');
     expect(formatGrantQuotaParts({
-      cpuMillis: 1000,
+      cpuCores: 1,
       memBytes: 2 * GIB,
       diskBytes: 100 * GIB,
     })).toEqual(['1 核', '2 GiB', '100 GiB']);
@@ -40,13 +39,13 @@ describe('formatGrantQuotaParts', () => {
 
 describe('formatGrantQuotaLine', () => {
   it('omits the GPU summary by default', () => {
-    expect(formatGrantQuotaLine({ cpuMillis: 2000, memBytes: 2 * GIB, diskBytes: 100 * GIB }))
+    expect(formatGrantQuotaLine({ cpuCores: 2, memBytes: 2 * GIB, diskBytes: 100 * GIB }))
       .toBe('2 核 / 2 GiB / 100 GiB');
   });
 
   it('appends the GPU summary', () => {
     expect(formatGrantQuotaLine(
-      { cpuMillis: 2000, memBytes: 2 * GIB, diskBytes: 100 * GIB },
+      { cpuCores: 2, memBytes: 2 * GIB, diskBytes: 100 * GIB },
       '2 张 GPU',
     )).toBe('2 核 / 2 GiB / 100 GiB / 2 张 GPU');
   });
@@ -54,16 +53,16 @@ describe('formatGrantQuotaLine', () => {
 
 describe('formatConsumedQuotaParts', () => {
   it('prints zeros as 0 核 / 0 GiB, never 不限', () => {
-    expect(formatConsumedQuotaParts({ cpuMillis: 0, memBytes: 0, diskBytes: 0 }))
+    expect(formatConsumedQuotaParts({ cpuCores: 0, memBytes: 0, diskBytes: 0 }))
       .toEqual(['0 核', '0 GiB', '0 GiB']);
-    expect(formatConsumedQuotaParts({ cpuMillis: 0, memBytes: 0, diskBytes: 0 }).join(' / '))
+    expect(formatConsumedQuotaParts({ cpuCores: 0, memBytes: 0, diskBytes: 0 }).join(' / '))
       .toBe('0 核 / 0 GiB / 0 GiB');
-    expect(formatConsumedQuotaParts({ cpuMillis: 0, memBytes: 0, diskBytes: 0 }).join(' / '))
+    expect(formatConsumedQuotaParts({ cpuCores: 0, memBytes: 0, diskBytes: 0 }).join(' / '))
       .not.toMatch(/不限/);
   });
 
   it('omits null consumed dimensions', () => {
-    expect(formatConsumedQuotaParts({ cpuMillis: null, memBytes: 0, diskBytes: null }))
+    expect(formatConsumedQuotaParts({ cpuCores: null, memBytes: 0, diskBytes: null }))
       .toEqual(['0 GiB']);
   });
 });
@@ -76,32 +75,24 @@ describe('formatGrantBytes', () => {
   });
 });
 
-describe('formatRemainingCpu / formatRemainingBytes', () => {
+describe('formatRemainingBytes', () => {
   it('prints 不限 for unlimited grants and consumed zeros otherwise', () => {
-    expect(formatRemainingCpu(null, 0)).toBe('不限');
-    expect(formatRemainingCpu(0, 0)).toBe('不限');
     expect(formatRemainingBytes(null, 0)).toBe('不限');
     expect(formatRemainingBytes(0, 0)).toBe('不限');
     expect(formatRemainingBytes(100 * GIB, 0)).toBe('100 GiB');
     expect(formatRemainingBytes(100 * GIB, 20 * GIB)).toBe('80 GiB');
     expect(formatRemainingBytes(100 * GIB, 200 * GIB)).toBe('0 GiB');
-    expect(formatRemainingCpu(2000, 0)).toBe('2 核');
   });
 });
 
 describe('formatQuotaDimension', () => {
-  it('pairs used / limit / remaining for cpu and bytes', () => {
-    expect(formatQuotaDimension(4000, 1000, 'cpu')).toEqual({
-      used: '1 核',
-      limit: '4 核',
-      remaining: '3 核',
-    });
-    expect(formatQuotaDimension(100 * GIB, 20 * GIB, 'bytes')).toEqual({
+  it('pairs used / limit / remaining for byte grants', () => {
+    expect(formatQuotaDimension(100 * GIB, 20 * GIB)).toEqual({
       used: '20 GiB',
       limit: '100 GiB',
       remaining: '80 GiB',
     });
-    expect(formatQuotaDimension(null, 20 * GIB, 'bytes')).toEqual({
+    expect(formatQuotaDimension(null, 20 * GIB)).toEqual({
       used: '20 GiB',
       limit: '不限',
       remaining: '不限',

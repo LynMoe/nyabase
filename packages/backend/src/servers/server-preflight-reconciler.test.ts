@@ -8,14 +8,10 @@ import { evaluateLanBridge } from './preflight-checks.adapter.js';
 import { cleanupStaleProbe } from './server-preflight-probe.js';
 
 const serverId = '00000000-0000-4000-8000-000000000001';
+const TWO_CPUS = {
+  sockets: [{ socket: 0, cores: [{ core: 0, threads: [{ id: 0, numa_node: 0, online: true }, { id: 1, numa_node: 0, online: true }] }] }],
+};
 
-function deferred<T>() {
-  let resolve!: (value: T | PromiseLike<T>) => void;
-  const promise = new Promise<T>((resolvePromise) => {
-    resolve = resolvePromise;
-  });
-  return { promise, resolve };
-}
 
 function database(selectResult?: unknown) {
   const updates: Array<Record<string, unknown>> = [];
@@ -82,9 +78,6 @@ function partsOf(instance: ServerPreflightReconciler) {
   };
 }
 
-function connectorOf(instance: ServerPreflightReconciler): object {
-  return partsOf(instance).connector as object;
-}
 
 function runnerOf(instance: ServerPreflightReconciler): object {
   return instance;
@@ -102,13 +95,6 @@ function internalsOf(instance: ServerPreflightReconciler): object {
   };
 }
 
-function untrustedResponse() {
-  return {
-    metadata: { auth: 'untrusted', api_extensions: [] },
-    status: 200,
-    envelope: { type: 'sync' },
-  };
-}
 
 function passingLanNetwork() {
   return {
@@ -134,6 +120,7 @@ function lanSamples(probeAddress = '169.254.255.254') {
       value: 1,
     },
     { name: 'nyabase_node_network_nft_available', labels: {}, value: 1 },
+    { name: 'nyabase_node_ipv6_guard_present', labels: {}, value: 1 },
     {
       name: 'nyabase_node_network_bridge_filter_address',
       labels: { address: probeAddress },
@@ -165,9 +152,6 @@ function server() {
     id: serverId,
     name: 'test-server',
     parent_interface: 'eth0',
-    server_cert_fingerprint: null,
-    node_metrics_endpoint: null,
-    node_metrics_token_ciphertext: null,
     status: 'unknown',
     system_pool_id: null,
     preflight_status: 'not_run',
@@ -175,19 +159,11 @@ function server() {
   };
 }
 
-function reconciler(
-  db: ReturnType<typeof database>,
-  trustTokens = {
-    storeTrustToken: vi.fn().mockReturnValue('reference'),
-    claimTrustToken: vi.fn().mockReturnValue('one-time-secret'),
-    consumeClaimedTrustToken: vi.fn().mockReturnValue(true),
-    releaseClaimedTrustToken: vi.fn().mockReturnValue(true),
-  },
-) {
+function reconciler(db: ReturnType<typeof database>) {
   const store = new ServerPreflightStore(db as never);
   return new ServerPreflightReconciler(
     store,
-    new ServerConnector(store, trustTokens as never),
+    new ServerConnector(store),
     {
       pull: vi.fn(),
     } as never,
@@ -234,521 +210,16 @@ function revisionRaceDatabase() {
 }
 
 describe('ServerPreflightReconciler', () => {
-  it('consumes a ephemeral-store reference and sends the secret only to Incus trust setup', async () => {
-    const db = database();
-    const trustTokens = {
-      storeTrustToken: vi.fn().mockReturnValue('reference'),
-      claimTrustToken: vi.fn().mockReturnValue('one-time-secret'),
-      consumeClaimedTrustToken: vi.fn().mockReturnValue(true),
-      releaseClaimedTrustToken: vi.fn().mockReturnValue(true),
-    };
-    const instance = reconciler(db, trustTokens);
-    const client = {
-      trustClientCertificate: vi.fn().mockResolvedValue({
-        status: 201,
-        envelope: {
-          type: 'sync',
-          status: 'Success',
-          status_code: 200,
-          operation: '',
-          error_code: 0,
-          error: '',
-          metadata: null,
-        },
-        metadata: null,
-      }),
-      getOperationWait: vi.fn(),
-      getServer: vi.fn().mockResolvedValue({
-        metadata: {
-          environment: {
-            server_name: 'test-server',
-            certificate_fingerprint: 'aa'.repeat(32),
-            server_version: '6.0',
-          },
-          api_extensions: ['resources_v2'],
-        },
-        status: 200,
-        envelope: { type: 'sync' },
-      }),
-    };
-    const intent = {
-      request: {
-        trustTokenRef: '00000000-0000-4000-8000-000000000002',
-      },
-    } as never;
-
-    await (
-      connectorOf(instance) as unknown as {
-        connectWithTrustToken: (
-          client: unknown,
-          server: unknown,
-          intent: unknown,
-          signal: AbortSignal,
-        ) => Promise<void>;
-      }
-    ).connectWithTrustToken(client, server(), intent, new AbortController().signal);
-
-    expect(trustTokens.claimTrustToken).toHaveBeenCalledWith(
-      serverId,
-      '00000000-0000-4000-8000-000000000002',
-      expect.any(String),
-    );
-    expect(trustTokens.consumeClaimedTrustToken).toHaveBeenCalledWith(
-      serverId,
-      '00000000-0000-4000-8000-000000000002',
-      expect.any(String),
-    );
-    expect(client.trustClientCertificate).toHaveBeenCalledWith(
-      'one-time-secret',
-      `nyabase-${serverId.replaceAll('-', '')}`,
-      expect.objectContaining({ signal: expect.any(AbortSignal) }),
-    );
-    expect(client.getOperationWait).not.toHaveBeenCalled();
-  });
-
-  it('does not invoke Incus HTTP while the onboarding lock transaction is open', async () => {
-    const db = database();
-    let openTransactions = 0;
-    const originalTransaction = db.transaction as () => {
-      execute: (callback: (executor: unknown) => Promise<unknown>) => Promise<unknown>;
-    };
-    db.transaction = vi.fn(() => ({
-      execute: vi.fn(async (callback: (executor: unknown) => Promise<unknown>) => {
-        openTransactions += 1;
-        try {
-          return await originalTransaction().execute(callback);
-        } finally {
-          openTransactions -= 1;
-        }
-      }),
-    }));
-    const trustTokens = {
-      storeTrustToken: vi.fn().mockReturnValue('reference'),
-      claimTrustToken: vi.fn().mockReturnValue('one-time-secret'),
-      consumeClaimedTrustToken: vi.fn().mockReturnValue(true),
-      releaseClaimedTrustToken: vi.fn().mockReturnValue(true),
-    };
-    const instance = reconciler(db, trustTokens);
-    const response = {
-      metadata: {
-        environment: {
-          server_name: 'test-server',
-          certificate_fingerprint: 'aa'.repeat(32),
-          server_version: '6.0',
-        },
-        api_extensions: [],
-      },
-      status: 200,
-      envelope: { type: 'sync' },
-    };
-    const txnOpenDuringHttp: boolean[] = [];
-    const client = {
-      trustClientCertificate: vi.fn(async () => {
-        txnOpenDuringHttp.push(openTransactions > 0);
-        return {
-          status: 201,
-          envelope: { type: 'sync', status_code: 200 },
-          metadata: null,
-        };
-      }),
-      getServer: vi.fn(async () => {
-        txnOpenDuringHttp.push(openTransactions > 0);
-        return response;
-      }),
-    };
-
-    await (
-      connectorOf(instance) as unknown as {
-        connectWithTrustToken: (
-          client: unknown,
-          server: unknown,
-          intent: unknown,
-          signal: AbortSignal,
-        ) => Promise<void>;
-      }
-    ).connectWithTrustToken(
-      client,
-      server(),
-      {
-        request: {
-          trustTokenRef: '00000000-0000-4000-8000-000000000002',
-        },
-      } as never,
-      new AbortController().signal,
-    );
-
-    expect(txnOpenDuringHttp.length).toBeGreaterThan(0);
-    expect(txnOpenDuringHttp.every((open) => open === false)).toBe(true);
-    expect(db.transaction).toHaveBeenCalled();
-  });
-
-  it('retries the post-trust read through trust propagation and then projects online state', async () => {
-    const fixture = database();
-    const trustTokens = {
-      storeTrustToken: vi.fn(),
-      claimTrustToken: vi.fn().mockReturnValue('one-time-secret'),
-      consumeClaimedTrustToken: vi.fn().mockReturnValue(true),
-      releaseClaimedTrustToken: vi.fn().mockReturnValue(true),
-    };
-    const instance = reconciler(fixture, trustTokens);
-    const response = {
-      metadata: {
-        environment: {
-          server_name: 'test-server',
-          certificate_fingerprint: 'aa'.repeat(32),
-          server_version: '6.0',
-        },
-        api_extensions: [],
-      },
-      status: 200,
-      envelope: { type: 'sync' },
-    };
-    const readStarted = deferred<void>();
-    const releaseRead = deferred<void>();
-    const client = {
-      trustClientCertificate: vi.fn().mockResolvedValue(response),
-      getServer: vi
-        .fn()
-        .mockResolvedValueOnce(untrustedResponse())
-        .mockRejectedValueOnce(new IncusError('TLS_ERROR', 'retry'))
-        .mockImplementation(async () => {
-          readStarted.resolve(undefined);
-          await releaseRead.promise;
-          return response;
-        }),
-    };
-    const connectWithTrustToken = (
-      connectorOf(instance) as unknown as {
-        connectWithTrustToken: (
-          client: unknown,
-          server: unknown,
-          intent: unknown,
-          signal: AbortSignal,
-        ) => Promise<void>;
-      }
-    ).connectWithTrustToken;
-
-    const pending = connectWithTrustToken.call(
-      connectorOf(instance),
-      client,
-      server(),
-      {
-        request: {
-          trustTokenRef: '00000000-0000-4000-8000-000000000002',
-        },
-      } as never,
-      new AbortController().signal,
-    );
-    await readStarted.promise;
-    expect(trustTokens.consumeClaimedTrustToken).toHaveBeenCalledOnce();
-    releaseRead.resolve(undefined);
-    await pending;
-
-    expect(fixture.updates).toContainEqual(expect.objectContaining({ status: 'online' }));
-    expect(trustTokens.releaseClaimedTrustToken).not.toHaveBeenCalled();
-  });
-
-  it('waits for a completed asynchronous trust operation', async () => {
-    const fixture = database();
-    const trustTokens = {
-      storeTrustToken: vi.fn(),
-      claimTrustToken: vi.fn().mockReturnValue('one-time-secret'),
-      consumeClaimedTrustToken: vi.fn().mockReturnValue(true),
-      releaseClaimedTrustToken: vi.fn().mockReturnValue(true),
-    };
-    const instance = reconciler(fixture, trustTokens);
-    const response = {
-      metadata: null,
-      status: 202,
-      envelope: {
-        type: 'async',
-        operation: '/1.0/operations/trust-operation',
-      },
-    };
-    const serverResponse = {
-      metadata: {
-        environment: {
-          server_name: 'test-server',
-          certificate_fingerprint: 'aa'.repeat(32),
-        },
-        api_extensions: [],
-      },
-      status: 200,
-      envelope: { type: 'sync' },
-    };
-    const client = {
-      trustClientCertificate: vi.fn().mockResolvedValue(response),
-      getOperationWait: vi.fn().mockResolvedValue({
-        metadata: { status: 'Success' },
-        status: 200,
-        envelope: { type: 'sync' },
-      }),
-      getServer: vi.fn().mockResolvedValue(serverResponse),
-    };
-
-    await (
-      connectorOf(instance) as unknown as {
-        connectWithTrustToken: (
-          client: unknown,
-          server: unknown,
-          intent: unknown,
-          signal: AbortSignal,
-        ) => Promise<void>;
-      }
-    ).connectWithTrustToken(
-      client,
-      server(),
-      {
-        request: {
-          trustTokenRef: '00000000-0000-4000-8000-000000000002',
-        },
-      } as never,
-      new AbortController().signal,
-    );
-
-    expect(client.getOperationWait).toHaveBeenCalledOnce();
-    expect(fixture.updates).toContainEqual(expect.objectContaining({ status: 'online' }));
-  });
-
-  it('fails the connect intent with TRUST_TOKEN_MISSING when the token was lost or expired', async () => {
-    const fixture = database();
-    const trustTokens = {
-      storeTrustToken: vi.fn(),
-      claimTrustToken: vi.fn().mockReturnValue(null),
-      consumeClaimedTrustToken: vi.fn(),
-      releaseClaimedTrustToken: vi.fn(),
-    };
-    const instance = reconciler(fixture, trustTokens);
-    const client = { trustClientCertificate: vi.fn(), getServer: vi.fn() };
-    const connectWithTrustToken = (
-      connectorOf(instance) as unknown as {
-        connectWithTrustToken: (
-          client: unknown,
-          server: unknown,
-          intent: unknown,
-          signal: AbortSignal,
-        ) => Promise<void>;
-      }
-    ).connectWithTrustToken;
-
-    await expect(
-      connectWithTrustToken.call(
-        connectorOf(instance),
-        client,
-        server(),
-        { request: { trustTokenRef: '00000000-0000-4000-8000-000000000002' } } as never,
-        new AbortController().signal,
-      ),
-    ).rejects.toMatchObject({
-      code: 'TRUST_TOKEN_MISSING',
-      disposition: 'managed_failure',
-    });
-    expect(client.trustClientCertificate).not.toHaveBeenCalled();
-    expect(trustTokens.releaseClaimedTrustToken).not.toHaveBeenCalled();
-  });
-
-  it('skips the token on retry when the first attempt already trusted the identity', async () => {
-    const fixture = database();
-    const firstAttempt = new AbortController();
-    const trustTokens = {
-      storeTrustToken: vi.fn(),
-      claimTrustToken: vi.fn().mockReturnValue('one-time-secret'),
-      consumeClaimedTrustToken: vi.fn().mockReturnValue(true),
-      releaseClaimedTrustToken: vi.fn().mockReturnValue(true),
-    };
-    const instance = reconciler(fixture, trustTokens);
-    const trusted = {
-      metadata: {
-        auth: 'trusted',
-        environment: {
-          server_name: 'test-server',
-          certificate_fingerprint: 'aa'.repeat(32),
-        },
-        api_extensions: [],
-      },
-      status: 200,
-      envelope: { type: 'sync' },
-    };
-    const getServer = vi
-      .fn()
-      // attempt 1: trust probe says untrusted, then the post-trust read fails
-      .mockResolvedValueOnce(untrustedResponse())
-      .mockImplementationOnce(async () => {
-        firstAttempt.abort();
-        throw new IncusError('TLS_ERROR', 'retry');
-      })
-      // attempt 2: the server now reports the identity as trusted
-      .mockResolvedValue(trusted);
-    const client = {
-      trustClientCertificate: vi.fn().mockResolvedValue(trusted),
-      getServer,
-    };
-    const connectWithTrustToken = (
-      connectorOf(instance) as unknown as {
-        connectWithTrustToken: (
-          client: unknown,
-          server: unknown,
-          intent: unknown,
-          signal: AbortSignal,
-        ) => Promise<void>;
-      }
-    ).connectWithTrustToken;
-
-    await expect(
-      connectWithTrustToken.call(
-        connectorOf(instance),
-        client,
-        server(),
-        {
-          request: {
-            trustTokenRef: '00000000-0000-4000-8000-000000000002',
-          },
-        } as never,
-        firstAttempt.signal,
-      ),
-    ).rejects.toMatchObject({ code: 'INCUS_TIMEOUT' });
-    expect(trustTokens.releaseClaimedTrustToken).not.toHaveBeenCalled();
-
-    await connectWithTrustToken.call(
-      connectorOf(instance),
-      client,
-      server(),
-      { request: {} } as never,
-      new AbortController().signal,
-    );
-
-    expect(trustTokens.claimTrustToken).toHaveBeenCalledOnce();
-    expect(client.trustClientCertificate).toHaveBeenCalledOnce();
-    expect(trustTokens.consumeClaimedTrustToken).toHaveBeenCalledOnce();
-    expect(trustTokens.releaseClaimedTrustToken).not.toHaveBeenCalled();
-  });
-
-  it('keeps concurrent connect intents isolated by fingerprint and trust token', async () => {
-    const db = database();
-    const trustTokens = {
-      storeTrustToken: vi.fn(),
-      claimTrustToken: vi.fn((_server: string, reference: string) =>
-        reference.endsWith('002') ? 'token-two' : 'token-one',
-      ),
-      consumeClaimedTrustToken: vi.fn().mockReturnValue(true),
-      releaseClaimedTrustToken: vi.fn().mockReturnValue(true),
-    };
-    const instance = reconciler(db, trustTokens);
-    const response = {
-      metadata: {
-        environment: {
-          server_name: 'test-server',
-          certificate_fingerprint: 'aa'.repeat(32),
-        },
-        api_extensions: [],
-      },
-      status: 200,
-      envelope: { type: 'sync' },
-    };
-    const firstClient = {
-      trustClientCertificate: vi.fn().mockResolvedValue(response),
-      getServer: vi.fn().mockResolvedValue(response),
-    };
-    const secondClient = {
-      trustClientCertificate: vi.fn().mockResolvedValue(response),
-      getServer: vi.fn().mockResolvedValue(response),
-    };
-    const connectWithTrustToken = (
-      connectorOf(instance) as unknown as {
-        connectWithTrustToken: (
-          client: unknown,
-          server: unknown,
-          intent: unknown,
-          signal: AbortSignal,
-        ) => Promise<void>;
-      }
-    ).connectWithTrustToken;
-    const connect = (client: unknown, intent: unknown) =>
-      connectWithTrustToken.call(connectorOf(instance), client, server(), intent, new AbortController().signal);
-
-    await Promise.all([
-      connect(firstClient, {
-        request: {
-          trustTokenRef: '00000000-0000-4000-8000-000000000001',
-          expectedServerCertFingerprint: 'aa'.repeat(32),
-        },
-      } as never),
-      connect(secondClient, {
-        request: {
-          trustTokenRef: '00000000-0000-4000-8000-000000000002',
-          expectedServerCertFingerprint: 'aa'.repeat(32),
-        },
-      } as never),
-    ]);
-
-    expect(trustTokens.claimTrustToken).toHaveBeenCalledWith(
-      serverId,
-      '00000000-0000-4000-8000-000000000001',
-      expect.any(String),
-    );
-    expect(trustTokens.claimTrustToken).toHaveBeenCalledWith(
-      serverId,
-      '00000000-0000-4000-8000-000000000002',
-      expect.any(String),
-    );
-    expect(firstClient.trustClientCertificate).toHaveBeenCalledWith(
-      'token-one',
-      expect.any(String),
-      expect.anything(),
-    );
-    expect(secondClient.trustClientCertificate).toHaveBeenCalledWith(
-      'token-two',
-      expect.any(String),
-      expect.anything(),
-    );
-  });
-
-  it('releases a claimed trust token when the Incus side effect is retryable', async () => {
-    const db = database();
-    const trustTokens = {
-      storeTrustToken: vi.fn().mockReturnValue('reference'),
-      claimTrustToken: vi.fn().mockReturnValue('one-time-secret'),
-      consumeClaimedTrustToken: vi.fn().mockReturnValue(true),
-      releaseClaimedTrustToken: vi.fn().mockReturnValue(true),
-    };
-    const instance = reconciler(db, trustTokens);
-    const client = {
-      trustClientCertificate: vi
-        .fn()
-        .mockRejectedValue(new IncusError('SERVER_UNREACHABLE', 'retry')),
-      getServer: vi.fn(),
-    };
-
-    await expect(
-      (
-        connectorOf(instance) as unknown as {
-          connectWithTrustToken: (
-            client: unknown,
-            server: unknown,
-            intent: unknown,
-            signal: AbortSignal,
-          ) => Promise<void>;
-        }
-      ).connectWithTrustToken(
-        client,
-        server(),
-        {
-          request: {
-            trustTokenRef: '00000000-0000-4000-8000-000000000002',
-          },
-        } as never,
-        new AbortController().signal,
-      ),
-    ).rejects.toMatchObject({ code: 'SERVER_UNREACHABLE' });
-
-    expect(trustTokens.consumeClaimedTrustToken).not.toHaveBeenCalled();
-    expect(trustTokens.releaseClaimedTrustToken).toHaveBeenCalledWith(
-      serverId,
-      '00000000-0000-4000-8000-000000000002',
-      expect.any(String),
-    );
-    // Only the trust probe read; no post-trust connect read happened.
-    expect(client.getServer).toHaveBeenCalledTimes(1);
+  it('fails preflight unless reserved CPUs exist and leave a CPU for containers', async () => {
+    const check = (reserved: number[]) => (reconciler(database({ reserved_cpus: reserved })) as unknown as {
+      requireUnreservedCpus: (serverId: string, resources: unknown) => Promise<void>;
+    }).requireUnreservedCpus(serverId, { cpu: TWO_CPUS });
+    await expect(check([0])).resolves.toBeUndefined();
+    await expect(check([0, 1])).rejects.toMatchObject({ details: { reason: 'no_unreserved_cpus' } });
+    await expect(check([7])).rejects.toMatchObject({ details: { reason: 'reserved_cpu_unknown' } });
+    await expect((reconciler(database({ reserved_cpus: [] })) as unknown as {
+      requireUnreservedCpus: (serverId: string, resources: unknown) => Promise<void>;
+    }).requireUnreservedCpus(serverId, {})).rejects.toMatchObject({ details: { reason: 'cpu_topology_unknown' } });
   });
 
   it('cleans up a stale managed probe after stopping it and verifies absence', async () => {
@@ -914,7 +385,7 @@ describe('ServerPreflightReconciler', () => {
         metadata: [{ name: 'default' }],
       }),
       getResources: vi.fn().mockResolvedValue({
-        metadata: { gpu: { cards: [] }, storage: {}, system: {} },
+        metadata: { cpu: TWO_CPUS, gpu: { cards: [] }, storage: {}, system: {} },
       }),
       getInstanceFull,
       createInstance,
@@ -939,8 +410,6 @@ describe('ServerPreflightReconciler', () => {
       {
         ...server(),
         system_pool_id: 'pool-1',
-        node_metrics_endpoint: 'https://metrics.example.test/metrics',
-        node_metrics_token_ciphertext: 'encrypted-token',
       },
       {
         probeImageAlias: 'pinned-preflight-alias',
@@ -969,6 +438,9 @@ describe('ServerPreflightReconciler', () => {
           'user.nyabase.server_id': serverId.replaceAll('-', ''),
           'limits.memory': '256MiB',
           'security.privileged': 'false',
+          'security.idmap.isolated': 'true',
+          'linux.sysctl.net.ipv6.conf.all.disable_ipv6': '1',
+          'linux.sysctl.net.ipv6.conf.default.disable_ipv6': '1',
         },
         devices: {
           root: {
@@ -983,6 +455,7 @@ describe('ServerPreflightReconciler', () => {
             name: 'eth0',
             parent: 'eth0',
             hwaddr: probeHwaddr,
+            host_name: expect.stringMatching(/^nyh[0-9a-f]{12}$/),
             'ipv4.address': '169.254.255.254',
             'security.ipv4_filtering': 'true',
             'security.mac_filtering': 'true',
@@ -1133,7 +606,7 @@ describe('ServerPreflightReconciler', () => {
         metadata: [{ name: 'default' }],
       }),
       getResources: vi.fn().mockResolvedValue({
-        metadata: { gpu: { cards: [] }, storage: {}, system: {} },
+        metadata: { cpu: TWO_CPUS, gpu: { cards: [] }, storage: {}, system: {} },
       }),
     });
 
@@ -1152,8 +625,6 @@ describe('ServerPreflightReconciler', () => {
         {
           ...server(),
           system_pool_id: 'pool-1',
-          node_metrics_endpoint: 'https://metrics.example.test/metrics',
-          node_metrics_token_ciphertext: 'encrypted-token',
         },
         {
           probeImageAlias: '',
@@ -1205,7 +676,7 @@ describe('ServerPreflightReconciler', () => {
         metadata: [{ name: 'default' }],
       }),
       getResources: vi.fn().mockResolvedValue({
-        metadata: { gpu: { cards: [] }, storage: {}, system: {} },
+        metadata: { cpu: TWO_CPUS, gpu: { cards: [] }, storage: {}, system: {} },
       }),
     });
 
@@ -1225,8 +696,6 @@ describe('ServerPreflightReconciler', () => {
           ...server(),
           preflight_status: 'not_run',
           system_pool_id: 'pool-1',
-          node_metrics_endpoint: 'https://metrics.example.test/metrics',
-          node_metrics_token_ciphertext: 'encrypted-token',
         },
         {
           probeImageAlias: '',
@@ -1272,7 +741,7 @@ describe('ServerPreflightReconciler', () => {
         metadata: [{ name: 'default' }],
       }),
       getResources: vi.fn().mockResolvedValue({
-        metadata: { gpu: { cards: [] }, storage: {}, system: {} },
+        metadata: { cpu: TWO_CPUS, gpu: { cards: [] }, storage: {}, system: {} },
       }),
     });
     client.getNetwork.mockRejectedValue(new IncusError('INCUS_NOT_FOUND', 'managed_failure'));
@@ -1294,8 +763,6 @@ describe('ServerPreflightReconciler', () => {
         {
           ...server(),
           system_pool_id: 'pool-1',
-          node_metrics_endpoint: 'https://metrics.example.test/metrics',
-          node_metrics_token_ciphertext: 'encrypted-token',
         },
         {
           probeImageAlias: 'ubuntu/24.04',

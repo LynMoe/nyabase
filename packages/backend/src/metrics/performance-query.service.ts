@@ -491,7 +491,7 @@ export class PerformanceQueryService {
     const names = new Map(servers.map((server) => [server.id, server.name]));
     const containers = await this.database
       .selectFrom('control.containers')
-      .select(['id', 'server_id', 'owner_id', 'name', 'lifecycle_phase', 'power_intent', 'cpu_millis', 'created_at'])
+      .select(['id', 'server_id', 'owner_id', 'name', 'lifecycle_phase', 'power_intent', 'cpu_set', 'created_at'])
       .where('server_id', 'in', servers.map((server) => server.id))
       .where('lifecycle_phase', '<>', 'deleting')
       .execute();
@@ -550,7 +550,7 @@ export class PerformanceQueryService {
         name: row.name,
         lifecyclePhase: row.lifecycle_phase,
         powerIntent: row.power_intent,
-        cpuMillis: row.cpu_millis,
+        cpuSet: row.cpu_set,
         createdAt: new Date(row.created_at).getTime(),
         pciAddresses: pciByContainer.get(row.id) ?? [],
         volumes: volumesByContainer.get(row.id) ?? [],

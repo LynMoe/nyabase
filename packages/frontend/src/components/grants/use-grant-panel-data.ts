@@ -98,11 +98,12 @@ export function defaultExpiryLocal(): string {
   return toDatetimeLocalValue(new Date(Date.now() + 30 * 24 * 60 * 60 * 1000));
 }
 
-export function coresToMillis(value: string): number | null {
+/** Whole-core grant input: empty → null (不限); a positive integer → that count; anything else → undefined (invalid). */
+export function parseCoreCount(value: string): number | null | undefined {
   if (!value.trim()) return null;
   const cores = Number(value);
-  if (!Number.isFinite(cores) || cores < 0) return null;
-  return Math.round(cores * 1000);
+  if (!Number.isInteger(cores) || cores < 1) return undefined;
+  return cores;
 }
 
 export function gibToBytes(value: string): number | null {

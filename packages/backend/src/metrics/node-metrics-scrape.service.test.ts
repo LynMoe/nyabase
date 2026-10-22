@@ -10,7 +10,6 @@ function makeDatabase(
 ) {
   const row = {
     revision: 1,
-    node_metrics_token_fingerprint: 'token-fingerprint-a',
     ...server,
   };
   let currentRow = currentServer === server ? row : { ...row, ...currentServer };
@@ -69,8 +68,6 @@ describe('NodeMetricsScrapeService', () => {
     const pull = vi.fn().mockRejectedValue({ code: 'NODE_METRICS_UNREACHABLE' });
     const db = makeDatabase({
       id: serverId,
-      node_metrics_endpoint: 'https://node.example.test/metrics',
-      node_metrics_token_ciphertext: 'rfs-v1.cipher.tag',
       node_metrics_status: NodeMetricsStatus.Unknown,
       node_metrics_last_success_at: null,
     });
@@ -115,8 +112,6 @@ describe('NodeMetricsScrapeService', () => {
       .mockRejectedValueOnce({ code: 'NODE_METRICS_TIMEOUT' });
     const db = makeDatabase({
       id: serverId,
-      node_metrics_endpoint: 'https://node.example.test/metrics',
-      node_metrics_token_ciphertext: 'rfs-v1.cipher.tag',
       node_metrics_status: NodeMetricsStatus.Unknown,
       node_metrics_last_success_at: null,
     });
@@ -151,8 +146,6 @@ describe('NodeMetricsScrapeService', () => {
     const pull = vi.fn().mockRejectedValue({ code: 'NODE_METRICS_TIMEOUT' });
     const db = makeDatabase({
       id: serverId,
-      node_metrics_endpoint: 'https://node.example.test/metrics',
-      node_metrics_token_ciphertext: 'rfs-v1.cipher.tag',
       node_metrics_status: NodeMetricsStatus.Online,
       node_metrics_last_success_at: new Date(Date.now() - 1_000),
     });
@@ -172,17 +165,12 @@ describe('NodeMetricsScrapeService', () => {
     }));
     const current = {
       revision: 5,
-      node_metrics_endpoint: 'https://new.example.test/metrics',
-      node_metrics_token_ciphertext: 'new-ciphertext',
-      node_metrics_token_fingerprint: 'token-fingerprint-b',
       node_metrics_status: NodeMetricsStatus.Unknown,
       node_metrics_last_success_at: null,
     };
     const db = makeDatabase({
       id: serverId,
       revision: 4,
-      node_metrics_endpoint: 'https://old.example.test/metrics',
-      node_metrics_token_ciphertext: 'old-ciphertext',
       node_metrics_status: NodeMetricsStatus.Unknown,
       node_metrics_last_success_at: null,
     }, current);
@@ -215,16 +203,11 @@ describe('NodeMetricsScrapeService', () => {
     const oldConfiguration = {
       id: serverId,
       revision: 4,
-      node_metrics_endpoint: 'https://old.example.test/metrics',
-      node_metrics_token_ciphertext: 'old-ciphertext',
       node_metrics_status: NodeMetricsStatus.Unknown,
       node_metrics_last_success_at: null,
     };
     const newConfiguration = {
       revision: 5,
-      node_metrics_endpoint: 'https://new.example.test/metrics',
-      node_metrics_token_ciphertext: 'new-ciphertext',
-      node_metrics_token_fingerprint: 'token-fingerprint-b',
     };
     const db = makeDatabase(oldConfiguration);
     let checks = 0;
@@ -277,8 +260,6 @@ describe('NodeMetricsScrapeService', () => {
     });
     const db = makeDatabase({
       id: serverId,
-      node_metrics_endpoint: 'https://node.example.test/metrics',
-      node_metrics_token_ciphertext: 'rfs-v1.cipher.tag',
       node_metrics_status: NodeMetricsStatus.Unknown,
       node_metrics_last_success_at: null,
     });
@@ -303,8 +284,6 @@ describe('NodeMetricsScrapeService', () => {
     let aborted = false;
     const pull = vi.fn().mockImplementation((
       _serverId: string,
-      _endpoint: string,
-      _token: string,
       signal?: AbortSignal,
     ) => new Promise((_resolve, reject) => {
       signal?.addEventListener('abort', () => {
@@ -314,8 +293,6 @@ describe('NodeMetricsScrapeService', () => {
     }));
     const db = makeDatabase({
       id: serverId,
-      node_metrics_endpoint: 'https://node.example.test/metrics',
-      node_metrics_token_ciphertext: 'rfs-v1.cipher.tag',
       node_metrics_status: NodeMetricsStatus.Unknown,
       node_metrics_last_success_at: null,
     });
@@ -346,8 +323,6 @@ describe('NodeMetricsScrapeService', () => {
       });
     const db = makeDatabase({
       id: serverId,
-      node_metrics_endpoint: 'https://node.example.test/metrics',
-      node_metrics_token_ciphertext: 'rfs-v1.cipher.tag',
       node_metrics_status: NodeMetricsStatus.Unknown,
       node_metrics_last_success_at: null,
     });
@@ -392,16 +367,12 @@ describe('NodeMetricsScrapeService', () => {
     }));
     expect(db.whereClauses).toEqual(expect.arrayContaining([
       ['revision', '=', 1],
-      ['node_metrics_endpoint', '=', 'https://node.example.test/metrics'],
-      ['node_metrics_token_fingerprint', '=', 'token-fingerprint-a'],
     ]));
   });
 
   it('contains a PostgreSQL rejection during a scheduled scrape', async () => {
     const db = makeDatabase({
       id: serverId,
-      node_metrics_endpoint: 'https://node.example.test/metrics',
-      node_metrics_token_ciphertext: 'rfs-v1.cipher.tag',
     });
     db.database.selectFrom = vi.fn(() => {
       throw new Error('postgres unavailable');
@@ -423,8 +394,6 @@ describe('NodeMetricsScrapeService', () => {
     });
     const db = makeDatabase({
       id: serverId,
-      node_metrics_endpoint: 'https://node.example.test/metrics',
-      node_metrics_token_ciphertext: 'rfs-v1.cipher.tag',
       node_metrics_status: NodeMetricsStatus.Unknown,
       node_metrics_last_success_at: null,
     });

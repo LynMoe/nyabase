@@ -55,7 +55,6 @@ export enum IntentKind {
   VolumeDestroy = 'volume.destroy',
   ImageAssignmentEnsure = 'image_assignment.ensure',
   ImageAssignmentDelete = 'image_assignment.delete',
-  ServerConnect = 'server.connect',
   ServerPreflight = 'server.preflight',
 }
 
@@ -82,7 +81,6 @@ export enum ResourceLifecyclePhase {
 }
 
 export enum NodeMetricsStatus {
-  Unconfigured = 'unconfigured',
   Online = 'online',
   Unreachable = 'unreachable',
   Unknown = 'unknown',
@@ -105,6 +103,7 @@ export enum NodeMetricName {
   NetworkNftAvailable = 'nyabase_node_network_nft_available',
   NetworkBridgeFilterPresent = 'nyabase_node_network_bridge_filter_present',
   NetworkBridgeFilterAddress = 'nyabase_node_network_bridge_filter_address',
+  Ipv6GuardPresent = 'nyabase_node_ipv6_guard_present',
 }
 
 export enum PreflightStatus {
@@ -216,7 +215,8 @@ export enum AuditAction {
   UpdateServer = 'server.update',
   UpdateServerGpu = 'server.gpu.update',
   DeleteServer = 'server.delete',
-  ConnectServer = 'server.connect',
+  IssueAgentEnrollment = 'server.agent_enrollment.issue',
+  EnrollAgent = 'server.agent.enroll',
   RunServerPreflight = 'server.preflight',
   RegisterStoragePool = 'storage_pool.register',
   CreateIpPool = 'ip_pool.create',
@@ -245,6 +245,7 @@ export enum AuditAction {
   ExpiryStopContainers = 'grant.expiry.stop_containers',
   ExpiryPurgeResources = 'grant.expiry.purge_resources',
   IncusMutate = 'incus.mutate',
+  ContainerDriftCorrected = 'container.drift_corrected',
   UpdateSystemSettings = 'system_settings.update',
   CreateUser = 'user.create',
   UpdateUser = 'user.update',

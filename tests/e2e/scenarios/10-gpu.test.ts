@@ -55,7 +55,7 @@ describe('GPU', { skip }, () => {
     await h.grantServer(other, server);
     const status = await other.session.api.status('POST', '/containers', {
       serverId: server.id, imageId: h.state.image.id, name: h.name('nogpu'),
-      rootSizeBytes: h.state.rootSizeBytes, cpuMillis: 1000, memBytes: 1024 ** 3,
+      rootSizeBytes: h.state.rootSizeBytes, memBytes: 1024 ** 3,
       gpuPciAddresses: [pci], powerIntent: 'stopped',
     });
     assert.ok(status === 403 || status === 409, `create without a GPU grant gave ${status}`);
@@ -70,7 +70,7 @@ describe('GPU', { skip }, () => {
     await assert.rejects(
       user.session.api.post('/containers', {
         serverId: server.id, imageId: h.state.image.id, name: h.name('second'),
-        rootSizeBytes: h.state.rootSizeBytes, cpuMillis: 1000, memBytes: 1024 ** 3,
+        rootSizeBytes: h.state.rootSizeBytes, memBytes: 1024 ** 3,
         gpuPciAddresses: [pci], powerIntent: 'stopped',
       }),
       (error: unknown) => error instanceof ApiError && error.status === 409,

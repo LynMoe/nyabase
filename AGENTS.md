@@ -14,7 +14,7 @@ Vite 通过 alias 将 `@nyabase/common` 指向 `src/index.ts`，但 `index.ts` �
 
 **构建事实（现状）**：
 - `common` 只产出一份 CommonJS `dist/`（`tsc -b`，`composite`），`main`/`types` 指向 `dist`；没有 ESM 产物，`exports` 里也没有 `import` 条件。
-- backend / node-exporter 通过 TypeScript project references（`references: [{ "path": "../common" }]`）依赖 common，
+- backend / agent 通过 TypeScript project references（`references: [{ "path": "../common" }]`）依赖 common，
   `tsc -b` 会自动先构建 `packages/common/dist`；运行时 Node 经 workspace 软链 + `package.json#main` 解析，不使用 tsconfig `paths` 映射，也不需要运行时路径注册钩子。
 - 前端与 backend 的 vitest 仍用 Vite alias 直接指向 `packages/common/src`（前端唯一的解析方式）。
 
@@ -75,11 +75,16 @@ Vite 通过 alias 将 `@nyabase/common` 指向 `src/index.ts`，但 `index.ts` �
    时用 `platform/post-commit.ts` 的 `afterCommit(executor, …)` 登记唤醒，事务必须经 `PgTransactionManager.run`（或
    `executeWithPostCommit`）开启，提交后才触发，回滚/重试丢弃。worker 的周期全量扫描是兜底。系统设置只用 revision CAS
    （冲突返回 409 + 当前值），没有内容 token 和定时轮询。
-9. Incus mTLS 客户端身份只有一张：首次使用时由 `incus/incus-client-identity.service.ts` 生成（10 年，私钥用
-   `ssh.keyEncryptionSecret` 加密），存 `system.incus_client_identity` 单行表，不轮换、没有证书管理 API；
-   只读指纹见 `GET /admin/system-settings/incus-client-identity`。
+9. Backend 不直连 Incus，也不主动连任何主机。每台服务器的 `nyabase-agent`（`packages/agent`）主动 wss 连
+   `/ws/agent`（凭据 `nyak.<serverId>.<secret>`，库里只存 sha256），Incus 请求走 `incus.http` RPC、
+   WebSocket 由 agent 另开 `/ws/agent/stream` 回连；`IncusClient` 的传输是 `IncusTunnel`
+   （`incus/agent-registry.service.ts` 按服务器解析当前连接，重连后 client 照常可用）。接入：建服务器时签发
+   一次性令牌 `nyae.…`（24h），agent 用 `POST /api/agent/enroll` 换凭据；`servers/agent-enrollment.service.ts`。
+   agent 端 `policy.ts` 是安全边界（只许 `nyc-*`/`nyv-*`、配置白名单、禁 raw/特权/宿主路径/profiles、
+   必须 idmap.isolated、网卡 `nyh*` + 过滤，volatile 改回当前值）；backend 生成的规格必须过得了它。
+   不要再加 mTLS、trust token 或 Incus 端点字段。
 
-8. 体量上限（`scripts/check-source-size.mjs`，已接入 `scripts/check.sh`）：手写的 backend / frontend / common / node-exporter
+8. 体量上限（`scripts/check-source-size.mjs`，已接入 `scripts/check.sh`）：手写的 backend / frontend / common / agent
    源文件 ≤ 800 行，单个函数 / 方法 ≤ 150 行（`api-types.ts`、`routeTree.gen.ts`、测试文件除外）。确有理由超出时，
    在文件内或函数上方写一行 `// size-exception: <原因>`。
 9. 数据访问每个模块只选一种风格，不在同一文件里混用裸 SQL 与 repository 调用同一批表：
@@ -98,7 +103,7 @@ Vite 通过 alias 将 `@nyabase/common` 指向 `src/index.ts`，但 `index.ts` �
 前端：页面或组件超过体量时拆成与页面同名的目录（`pages/foo-page.tsx` + `pages/foo-page/*`，hooks 用 `use-*.ts`），
 读取源码文本的 surface 测试用 `lib/read-source.test-helper.ts` 的 `readSource` / `readSourceDir`。
 
-GPU 是平台内置功能（`gpu/` 模块、`common/src/gpu/`、node-exporter 的 `gpu-collector`），不存在扩展框架。
+GPU 是平台内置功能（`gpu/` 模块、`common/src/gpu/`、agent 的 `gpu-collector`），不存在扩展框架。
 
 ## Schema 规则（上线前）
 
@@ -130,3 +135,16 @@ lab 场景 API 测试，不在 CI 里跑；CI 只跑 `pnpm e2e:check`（e2e 包 
 - 场景是 `scenarios/*.test.ts`（`node --test` + `tsx`），用 `client/` 里很薄的类型化 API 客户端，请求/响应类型来自
   `@nyabase/common`；每个场景自建自清。过期/清除通过把 `control.access_lapses.lapsed_at` 写成过去时间来驱动，
   **不得**为测试加生产开关。改了路由或 DTO，先让 `pnpm e2e:check` 的类型检查通过。
+
+## 容器资源与漂移
+
+- CPU：授权只有整数 `cpu_cores`（NULL = 不限）。`cpu/cpu-sets.service.ts` 在每服务器 advisory lock 下为
+  （服务器, 用户）分配 `control.user_cpu_sets`（尽量不重叠、超线程成对、保持原有核），该用户在此服务器的
+  所有容器 `limits.cpu` = 这整组核（`formatCpuSet` 只输出范围，`5-5` 而不是 `5`）；不限核/无授权的管理员
+  绑全部未预留核；授权被撤销时保留原组。`infra.servers.reserved_cpus` 永不分配。授权或预留核变化经
+  `ReconcileWakeService.wake({ reason: 'scan' })` 触发全量扫描在线改绑；容器不再有 CPU 字段。
+- 内存按（用户, 服务器）总和准入（`lockOwnerServerQuota` + `sumLiveMemBytes`），必须 > 0。
+- 进程数 / 网卡带宽 / 磁盘读写是可在线编辑的系统设置 `containers.*`，统一作用于所有容器（CephFS 卷不限 IO）。
+- 漂移：平台拥有整份实例文档，只放过 `volatile.*`、`image.*`；未知配置键、多出的设备、设备内多出的键、
+  非空 profiles 都算漂移，写回时整份覆盖并记审计 `container.drift_corrected`。
+

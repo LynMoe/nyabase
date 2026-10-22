@@ -133,7 +133,7 @@ describe('container reconciler §15.1 fixture-driven Incus mocks', () => {
       documentExtras: {
         config: {
           'volatile.eth0.hwaddr': '02:aa:bb:cc:dd:ee',
-          'operator.note': 'preserve-me',
+          'image.os': 'ubuntu',
         },
       },
     });
@@ -148,7 +148,7 @@ describe('container reconciler §15.1 fixture-driven Incus mocks', () => {
     expect(client.getInstanceFull).toHaveBeenCalledWith(expectedName);
   });
 
-  it('PUT path preserves volatile.* and operator config while preserving unmanaged devices', async () => {
+  it('PUT path keeps Incus-owned config and strips operator config and devices', async () => {
     const { reconciler, client, putBodies, store } = await harness({
       status: 'Stopped',
       powerIntent: 'stopped',
@@ -175,22 +175,14 @@ describe('container reconciler §15.1 fixture-driven Incus mocks', () => {
     expect(putBodies).toHaveLength(1);
     const put = putBodies[0]!;
     expect(put.config['volatile.eth0.hwaddr']).toBe('02:aa:bb:cc:dd:ee');
-    expect(put.config['operator.note']).toBe('keep-operator');
+    expect(put.config['operator.note']).toBeUndefined();
     expect(put.config['image.os']).toBe('ubuntu');
-    expect(put.config['limits.cpu']).toBe('2');
-    expect(put.config['limits.cpu.allowance']).toBeUndefined();
+    expect(put.config['limits.cpu']).toBe('0-1');
     expect(put.config['security.privileged']).toBe('false');
-    expect(put.devices.operatorDisk).toEqual({
-      type: 'disk',
-      source: 'operator-volume',
-      path: '/operator',
-    });
+    expect(put.config['security.idmap.isolated']).toBe('true');
+    expect(put.devices.operatorDisk).toBeUndefined();
     expect(store.document.config?.['volatile.eth0.hwaddr']).toBe('02:aa:bb:cc:dd:ee');
-    expect(store.document.devices?.operatorDisk).toEqual({
-      type: 'disk',
-      source: 'operator-volume',
-      path: '/operator',
-    });
+    expect(store.document.devices?.operatorDisk).toBeUndefined();
   });
 
   it('applies add-device and remove-device in the same reconcile PUT', async () => {
@@ -679,6 +671,22 @@ describe('container reconciler full scan', () => {
     expect(ensurePending).not.toHaveBeenCalled();
   });
 
+  it('keeps scanning when one container cannot be specified, then releases idle CPU sets', async () => {
+    const { reconciler, client, ensurePending, cpuSets } = scanHarness({
+      needsAttention: false,
+      lifecyclePhase: 'active',
+      powerIntent: 'running',
+      status: 'Running',
+      previewError: new Error('cpu_topology_unknown'),
+    });
+
+    await expect(reconciler.scan(SERVER_ID, client as never, new AbortController().signal)).resolves.toBeUndefined();
+
+    expect(ensurePending).not.toHaveBeenCalled();
+    expect(cpuSets.preview).toHaveBeenCalled();
+    expect(cpuSets.releaseIdle).toHaveBeenCalledWith(SERVER_ID);
+  });
+
   it('skips needs_attention rows during scan enqueue', async () => {
     const { reconciler, client, ensurePending } = scanHarness({
       needsAttention: true,
@@ -744,8 +752,8 @@ function containerRow(options: HarnessOptions) {
     revision: 3,
     image_fingerprint: IMAGE_FINGERPRINT,
     root_size_bytes: String(options.rootSizeBytes ?? 10_737_418_240),
-    cpu_millis: 2000,
     mem_bytes: '1073741824',
+    cpu_set: TEST_CPUS,
     nesting: true,
     syscall_intercept: true,
     power_intent: options.powerIntent,
@@ -776,6 +784,36 @@ function attachmentRows(attachments: readonly AttachmentFixture[]) {
   }));
 }
 
+const TEST_CPUS = [0, 1];
+const TEST_LIMITS = {
+  processes: 4096,
+  networkIngressMbit: 1000,
+  networkEgressMbit: 1000,
+  diskReadMBps: 500,
+  diskWriteMBps: 500,
+};
+
+/** CPU sets, limits and the IAM change bus the reconciler needs beyond its store. */
+function runtimeDeps(): [never, never, never, never] {
+  const configValues: Record<string, number> = {
+    'containers.processLimit': TEST_LIMITS.processes,
+    'containers.networkIngressMbit': TEST_LIMITS.networkIngressMbit,
+    'containers.networkEgressMbit': TEST_LIMITS.networkEgressMbit,
+    'containers.diskReadMBps': TEST_LIMITS.diskReadMBps,
+    'containers.diskWriteMBps': TEST_LIMITS.diskWriteMBps,
+  };
+  return [
+    {
+      resolve: vi.fn().mockResolvedValue(TEST_CPUS),
+      preview: vi.fn().mockResolvedValue(TEST_CPUS),
+      releaseIdle: vi.fn().mockResolvedValue(undefined),
+    },
+    { get: (key: string) => configValues[key] },
+    { onChange: vi.fn() },
+    { wake: vi.fn() },
+  ] as [never, never, never, never];
+}
+
 function desiredFrom(options: HarnessOptions): DesiredInstanceSpec {
   return buildDesiredInstanceSpec({
     container: {
@@ -783,7 +821,7 @@ function desiredFrom(options: HarnessOptions): DesiredInstanceSpec {
       serverId: SERVER_ID,
       revision: 3,
       imageFingerprint: IMAGE_FINGERPRINT,
-      cpuMillis: 2000,
+      cpus: TEST_CPUS,
       memBytes: 1_073_741_824,
       nesting: true,
       syscallIntercept: true,
@@ -803,8 +841,10 @@ function desiredFrom(options: HarnessOptions): DesiredInstanceSpec {
         id: item.volumeId,
         incusName: deriveVolumeName(item.volumeId),
         poolName: ROOT_POOL,
+        throttled: item.shared !== true,
       },
     })),
+    limits: TEST_LIMITS,
   });
 }
 
@@ -994,6 +1034,7 @@ async function harness(options: HarnessOptions) {
     { notify: vi.fn() } as never,
     (options.audit ?? { log: vi.fn().mockResolvedValue(undefined) }) as never,
     { register: vi.fn() } as never,
+    ...runtimeDeps(),
   );
   vi.spyOn(
     storeOf(reconciler) as unknown as { readContainer: () => Promise<unknown> },
@@ -1016,6 +1057,7 @@ function scanHarness(options: {
   readonly lifecyclePhase: 'active' | 'deleting' | 'failed';
   readonly powerIntent: 'running' | 'stopped';
   readonly status: 'Running' | 'Stopped';
+  readonly previewError?: Error;
 }) {
   const document = actualDocument({
     status: options.status,
@@ -1050,6 +1092,9 @@ function scanHarness(options: {
     return query;
   };
   const ensurePending = vi.fn().mockResolvedValue({ id: 'scan-intent' });
+  const deps = runtimeDeps();
+  const cpuSets = deps[0] as unknown as { preview: ReturnType<typeof vi.fn>; releaseIdle: ReturnType<typeof vi.fn> };
+  if (options.previewError) cpuSets.preview.mockRejectedValue(options.previewError);
   const reconciler = new ContainerReconciler(new ContainerReconcileStore({
       updateTable: vi.fn(() => chain()),
       selectFrom: vi.fn(() => chain()),
@@ -1060,6 +1105,7 @@ function scanHarness(options: {
     { notify: vi.fn() } as never,
     { log: vi.fn().mockResolvedValue(undefined) } as never,
     { register: vi.fn() } as never,
+    ...deps,
   );
   const client = {
     listInstances: vi.fn(async () => syncResponse([document])),
@@ -1068,7 +1114,7 @@ function scanHarness(options: {
     deleteInstance: vi.fn(async () => syncResponse({})),
     updateInstanceState: vi.fn(async () => syncResponse({})),
   };
-  return { reconciler, client, ensurePending };
+  return { reconciler, client, ensurePending, cpuSets };
 }
 
 function context(client: unknown, intentOverrides: Partial<IntentRecord> = {}): ReconcileRunContext {
@@ -1120,6 +1166,7 @@ describe('ContainerReconciler resource status', () => {
       { notify: vi.fn() } as never,
       { log: vi.fn() } as never,
       { register: vi.fn() } as never,
+    ...runtimeDeps(),
     );
   }
 
@@ -1152,6 +1199,7 @@ describe('ContainerReconciler settlement', () => {
       { notify: vi.fn() } as never,
       { log: vi.fn() } as never,
       { register: vi.fn() } as never,
+    ...runtimeDeps(),
     );
     const restart = {
       id: '55555555-5555-4555-8555-555555555555',

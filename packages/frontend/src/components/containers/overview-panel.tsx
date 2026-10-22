@@ -14,7 +14,8 @@ import { api } from '../../lib/api.js';
 import { queryKeys } from '../../lib/query-keys.js';
 import { queryPollInterval } from '../../lib/query-lifecycle.js';
 import { scopedPath } from '../../lib/scoped-paths.js';
-import { formatBytesCompact, formatCpu, formatRate } from '../../lib/utils.js';
+import { formatBytesCompact, formatRate } from '../../lib/utils.js';
+import { cpuSetLabel } from '../../lib/cpu-set.js';
 import { ContainerOverviewGpu } from '../gpu/gpu-sections.js';
 
 export function OverviewPanel({ container, scope }: { container: ContainerDto; scope: ListScope }) {
@@ -74,7 +75,7 @@ function SpecCard({
             )
             : (container.imageName ?? '同步中')}
         />
-        <Field label="CPU" value={formatCpu(container.cpuMillis)} />
+        <Field label="CPU" value={cpuSetLabel(container.cpuSet)} title="绑定的逻辑 CPU；同一服务器上同一用户的所有容器共享这组 CPU" />
         <Field label="内存" value={formatBytesCompact(container.memBytes)} />
         <Field label="系统盘" value={formatBytesCompact(container.rootSizeBytes)} />
         <Field label="实例名" value={container.instanceName ?? '创建中'} mono />

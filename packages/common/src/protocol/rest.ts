@@ -26,7 +26,7 @@ export type {
   AddGroupMemberRequest,
   AddSshKeyRequest,
   AttachVolumeRequest,
-  ConnectServerRequest,
+  RotateServerEnrollmentRequest,
   CreateApiTokenRequest,
   CreateContainerRequest,
   CreateGroupRequest,
@@ -45,8 +45,6 @@ export type {
   ListSharedVolumesQuery,
   LocalVolumeScope,
   LoginRequest,
-  NodeMetricsCreateConfig,
-  NodeMetricsPatchConfig,
   PatchAdminGroupRequest,
   PatchContainerLimitsRequest,
   PatchContainerRootSizeRequest,
@@ -244,8 +242,6 @@ export interface ServerDto {
   id: string;
   name: string;
   slug: string;
-  apiEndpoint: string;
-  serverCertFingerprint: string | null;
   incusVersion: string | null;
   apiExtensions: string[];
   systemPoolId: string | null;
@@ -263,9 +259,43 @@ export interface ServerDto {
   preflightStatus: PreflightStatus;
   preflightCheckedAt: string | null;
   preflightReport: PreflightReport | null;
-  nodeMetrics: NodeMetricsConfigDto;
+  agent: ServerAgentDto;
+  metricsHealth: NodeMetricsHealthDto;
+  /** Logical CPUs no container is pinned to. */
+  reservedCpus: number[];
+  /** Logical CPU topology from the last inventory refresh; null until the agent reported it. */
+  cpuTopology: ServerCpuDto[] | null;
   createdAt: string;
   updatedAt: string;
+}
+
+export interface ServerAgentDto {
+  /** True while the host agent holds its control connection. */
+  connected: boolean;
+  /** True once an agent exchanged an enrollment token for its credential. */
+  enrolled: boolean;
+  version: string | null;
+  hostname: string | null;
+  connectedAt: string | null;
+  /** Expiry of the outstanding enrollment token, if one was issued and not yet used. */
+  enrollmentExpiresAt: string | null;
+}
+
+export interface ServerCpuDto {
+  id: number;
+  core: number;
+  socket: number;
+  numa: number;
+}
+
+/** A one-time agent enrollment token; shown once, only its digest is stored. */
+export interface ServerEnrollmentDto {
+  enrollmentToken: string;
+  expiresAt: string;
+}
+
+export interface CreatedServerDto extends ServerDto {
+  enrollment: ServerEnrollmentDto;
 }
 
 export interface UserServerDto {
@@ -276,13 +306,6 @@ export interface UserServerDto {
   lastSeenAt: string | null;
   preflightStatus: PreflightStatus;
   gpuEnabled: boolean;
-}
-
-export interface NodeMetricsConfigDto {
-  endpoint: string | null;
-  serverCertFingerprint: string | null;
-  tokenFingerprint: string | null;
-  health: NodeMetricsHealthDto;
 }
 
 export interface NodeMetricsHealthDto extends NodeMetricsHealth {}
@@ -580,7 +603,8 @@ export interface ServerGrantDto {
   scope: 'group' | 'user';
   scopeId: string;
   serverId: string;
-  cpuMillis: number | null;
+  /** Whole logical CPUs pinned for the user; null = every unreserved CPU. */
+  cpuCores: number | null;
   memBytes: number | null;
   diskBytes: number | null;
   /** PCI addresses the grant allows; empty means no GPU access. */
@@ -615,7 +639,8 @@ export type GrantExpiryPhase = 'live' | 'grace' | 'lost';
 
 export interface EffectiveServerAccessDto {
   serverId: string;
-  cpuMillis: number | null;
+  /** Whole logical CPUs pinned for the user; null = every unreserved CPU. */
+  cpuCores: number | null;
   memBytes: number | null;
   diskBytes: number | null;
   /** PCI addresses the grant allows; empty means no GPU access. */
@@ -694,7 +719,8 @@ export interface ContainerDto {
   rootSizePendingBytes: number | null;
   rootUsedBytes: number | null;
   rootCapability: StoragePoolCapabilityDto;
-  cpuMillis: number;
+  /** Logical CPUs the instance is pinned to as last applied; null until reconciled. */
+  cpuSet: number[] | null;
   memBytes: number;
   /** NVIDIA runtime and assigned cards; null when GPU was never configured. */
   gpu: GpuContainerState | null;
@@ -748,12 +774,6 @@ export interface IntentDto {
   nextAttemptAt: string | null;
   createdAt: string;
   settledAt: string | null;
-}
-
-export interface IncusClientIdentityDto {
-  fingerprint: string;
-  notAfter: string;
-  createdAt: string;
 }
 
 export interface ServerPreflightDto {

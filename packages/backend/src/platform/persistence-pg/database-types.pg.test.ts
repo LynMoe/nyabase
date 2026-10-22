@@ -152,7 +152,7 @@ describePg('PostgreSQL runtime/type schema contract', () => {
           ('control', 'reconcile_claims'),
           ('iam', 'storage_pool_grants'),
           ('iam', 'shared_backend_grants'),
-          ('system', 'incus_client_identity')
+          ('control', 'user_cpu_sets')
         )
         ORDER BY table_name
       `.execute(database);
@@ -160,6 +160,7 @@ describePg('PostgreSQL runtime/type schema contract', () => {
         'control.containers',
         'control.intents',
         'control.reconcile_claims',
+        'control.user_cpu_sets',
         'control.volume_attachments',
         'control.volumes',
         'iam.shared_backend_grants',
@@ -170,7 +171,6 @@ describePg('PostgreSQL runtime/type schema contract', () => {
         'infra.servers',
         'infra.shared_backends',
         'infra.storage_pools',
-        'system.incus_client_identity',
       ]);
 
       const foreignKeyTypes = await sql<{ constraint_name: string }>`

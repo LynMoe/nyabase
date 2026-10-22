@@ -87,12 +87,12 @@ describePg('AccessResolverService', () => {
       const otherServer = await seedServer(database);
       const image = await seedImage(database);
       await assign(database, image, serverId);
-      await grantServer(database, { user: userId }, serverId, { cpuMillis: 4_000, memBytes: 8 });
+      await grantServer(database, { user: userId }, serverId, { cpuCores: 4, memBytes: 8 });
       await grantServer(database, { user: await seedUser(database) }, otherServer);
 
       await expect(access.getEffectiveAccess(userId)).resolves.toEqual([{
         serverId,
-        cpuMillis: 4_000,
+        cpuCores: 4,
         memBytes: 8,
         diskBytes: null,
         gpuPciAddresses: [],
@@ -111,7 +111,7 @@ describePg('AccessResolverService', () => {
       const userId = await seedUser(database);
       const serverId = await seedServer(database);
       await grantServer(database, { user: userId }, serverId, {
-        cpuMillis: 2_000, expiresAt: days(-1),
+        cpuCores: 2, expiresAt: days(-1),
       });
       const lapsedAt = days(-1);
       await database.insertInto('control.access_lapses').values({
@@ -119,7 +119,7 @@ describePg('AccessResolverService', () => {
       }).execute();
 
       const [entry] = await access.getEffectiveAccess(userId);
-      expect(entry).toMatchObject({ serverId, accessPhase: 'grace', cpuMillis: 2_000 });
+      expect(entry).toMatchObject({ serverId, accessPhase: 'grace', cpuCores: 2 });
       expect(entry!.expiresAt).toBe(lapsedAt.toISOString());
       expect(entry!.purgeAt).toBe(
         new Date(lapsedAt.getTime() + GRANT_EXPIRY_GRACE_DAYS * 86_400_000).toISOString(),
@@ -129,7 +129,7 @@ describePg('AccessResolverService', () => {
       // A revoked grant leaves no quotas to show, only the ledger.
       await database.deleteFrom('iam.server_grants').execute();
       expect((await access.getEffectiveAccess(userId))[0]).toMatchObject({
-        accessPhase: 'grace', cpuMillis: null,
+        accessPhase: 'grace', cpuCores: null,
       });
 
       await database.updateTable('control.access_lapses').set({ purged_at: new Date() }).execute();

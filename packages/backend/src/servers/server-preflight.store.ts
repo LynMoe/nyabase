@@ -1,21 +1,14 @@
 import { Inject, Injectable } from '@nestjs/common';
-import { Kysely, sql } from 'kysely';
+import { Kysely } from 'kysely';
 import { parseCidrPrefix } from '../containers/guest-network.adapter.js';
 import { PG_DATABASE } from '../platform/persistence-pg/tokens.js';
 import type { NyabaseDatabase } from '../platform/persistence-pg/database.types.js';
-import {
-  INFRASTRUCTURE_ADVISORY_NAMESPACE,
-  lockServerOnboarding,
-} from '../platform/persistence-pg/advisory-locks.js';
 
 export interface ServerRow {
   id: string;
   name: string;
   parent_interface: string | null;
   dns_servers: string[] | null;
-  server_cert_fingerprint: string | null;
-  node_metrics_endpoint: string | null;
-  node_metrics_token_ciphertext: string | null;
   status: 'online' | 'unreachable' | 'unknown';
   system_pool_id: string | null;
   preflight_status: 'not_run' | 'running' | 'passed' | 'failed';
@@ -46,10 +39,19 @@ export function revisionNumber(value: string | number | bigint | undefined): num
   return Number.isSafeInteger(revision) && revision > 0 ? revision : undefined;
 }
 
-/** Every SQL statement the server preflight/connect reconciler issues. */
+/** Every SQL statement the server preflight reconciler issues. */
 @Injectable()
 export class ServerPreflightStore {
   constructor(@Inject(PG_DATABASE) private readonly database: Kysely<NyabaseDatabase>) {}
+
+  async readReservedCpus(id: string): Promise<number[]> {
+    const row = await this.database
+      .selectFrom('infra.servers')
+      .select('reserved_cpus')
+      .where('id', '=', id)
+      .executeTakeFirst();
+    return row?.reserved_cpus ?? [];
+  }
 
   readServer(id: string): Promise<ServerRow | undefined> {
     return this.database
@@ -59,9 +61,6 @@ export class ServerPreflightStore {
         'name',
         'parent_interface',
         'dns_servers',
-        'server_cert_fingerprint',
-        'node_metrics_endpoint',
-        'node_metrics_token_ciphertext',
         'status',
         'system_pool_id',
         'preflight_status',
@@ -158,35 +157,5 @@ export class ServerPreflightStore {
       });
     }
     return networks;
-  }
-
-  /** Run `work` inside the onboarding lock (serialises trust-token claims with server admission). */
-  inOnboardingLock<T>(work: () => Promise<T>): Promise<T> {
-    return this.database.transaction().execute(async (transaction) => {
-      await lockServerOnboarding(transaction);
-      return work();
-    });
-  }
-
-  /** Hold a session-level advisory lock per server while connecting. */
-  async withServerConnectLock<T>(serverId: string, work: () => Promise<T>): Promise<T> {
-    const acquireConnection = this.database.connection;
-    if (typeof acquireConnection !== 'function') {
-      return work();
-    }
-    return acquireConnection.call(this.database).execute(async (connection) => {
-      await sql`select pg_advisory_lock(
-        ${INFRASTRUCTURE_ADVISORY_NAMESPACE},
-        hashtext(${serverId})
-      )`.execute(connection);
-      try {
-        return await work();
-      } finally {
-        await sql`select pg_advisory_unlock(
-          ${INFRASTRUCTURE_ADVISORY_NAMESPACE},
-          hashtext(${serverId})
-        )`.execute(connection);
-      }
-    });
   }
 }

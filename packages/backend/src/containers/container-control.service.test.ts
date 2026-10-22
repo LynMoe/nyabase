@@ -16,6 +16,12 @@ import { checkRootResize } from './container-rules.js';
 import { systemActor } from '../iam/actor.js';
 import { testActor } from '../iam/actor.test-helper.js';
 
+// The quota lock is plain SQL; this harness has no database behind its transaction.
+vi.mock('../platform/persistence-pg/advisory-locks.js', async (importOriginal) => ({
+  ...await importOriginal<typeof import('../platform/persistence-pg/advisory-locks.js')>(),
+  lockOwnerServerQuota: vi.fn().mockResolvedValue(undefined),
+}));
+
 const containerId = 'container-1';
 const serverId = 'server-1';
 const actorId = 'user-1';
@@ -57,13 +63,14 @@ function makeHarness() {
       instance_started_at: new Date('2026-08-07T03:00:00.000Z'),
     }),
     updateDesired: vi.fn().mockResolvedValue({ ...row, revision: 2 }),
+    sumLiveMemBytes: vi.fn().mockResolvedValue(0),
     findDetachingAttachment: vi.fn().mockResolvedValue(undefined),
 
   };
   const access = {
     assertAttachedStorageCoveredInTransaction: vi.fn().mockResolvedValue(undefined),
     resolveServerInTransaction: vi.fn().mockResolvedValue({
-      cpuMillis: 2_000,
+      cpuCores: 2,
       memBytes: 4_000_000_000,
       diskBytes: 8_000_000_000,
       gpuPciAddresses: [],
@@ -166,14 +173,13 @@ describe('ContainerControlService intent boundary', () => {
   it('updates limits online and creates the intent atomically', async () => {
     const harness = makeHarness();
     const result = await harness.service.updateLimits(owner, containerId, {
-      cpuMillis: 750,
       memBytes: 2_000_000_000,
     });
 
     expect(harness.repository.updateDesired).toHaveBeenCalledWith(
       containerId,
       1,
-      { cpu_millis: 750, mem_bytes: 2_000_000_000 },
+      { mem_bytes: 2_000_000_000 },
       harness.transaction,
     );
     expect(harness.intents.createPending).toHaveBeenCalledWith(
@@ -205,7 +211,6 @@ describe('ContainerControlService intent boundary', () => {
     harness.access.resolveServerInTransaction.mockResolvedValueOnce(null);
 
     await expect(harness.service.updateLimits(owner, containerId, {
-      cpuMillis: 750,
       memBytes: 2_000_000_000,
     })).rejects.toThrow('Server access was revoked');
     expect(harness.repository.updateDesired).not.toHaveBeenCalled();
@@ -464,7 +469,7 @@ describe('ContainerControlService actor authorization', () => {
     await expect(harness.service.getStats(stranger, containerId))
       .rejects.toBeInstanceOf(ForbiddenException);
     // desired-state edits and GPU changes hid the row with a 404
-    await expect(harness.service.updateLimits(stranger, containerId, { cpuMillis: 1, memBytes: 1 }))
+    await expect(harness.service.updateLimits(stranger, containerId, { memBytes: 1 }))
       .rejects.toBeInstanceOf(NotFoundException);
     await expect(harness.service.resizeRoot(stranger, containerId, { sizeBytes: 2_147_483_648 }))
       .rejects.toBeInstanceOf(NotFoundException);
@@ -477,7 +482,7 @@ describe('ContainerControlService actor authorization', () => {
   it('lets a ManageContainersAny holder act on someone else\'s container without a grant', async () => {
     const harness = makeHarness();
     await expect(harness.service.repairSsh(operator, containerId)).resolves.toEqual({ woken: true });
-    await harness.service.updateLimits(operator, containerId, { cpuMillis: 99_000, memBytes: 99_000_000_000 });
+    await harness.service.updateLimits(operator, containerId, { memBytes: 99_000_000_000 });
     expect(harness.access.resolveServerInTransaction).not.toHaveBeenCalled();
     expect(harness.repository.updateDesired).toHaveBeenCalled();
   });

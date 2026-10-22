@@ -62,8 +62,6 @@ export async function seedServer(database: Db, name = `server-${nextName++}`): P
     id,
     name,
     slug: `${name}-${id.slice(0, 8)}`,
-    api_endpoint: 'https://incus.example.test:8443',
-    server_cert_fingerprint: null,
     incus_version: null,
     api_extensions: [],
     system_pool_id: null,
@@ -74,11 +72,7 @@ export async function seedServer(database: Db, name = `server-${nextName++}`): P
     last_seen_at: null,
     last_error: null,
     revision: 1,
-    node_metrics_endpoint: null,
-    node_metrics_server_cert_fingerprint: null,
-    node_metrics_token_ciphertext: null,
-    node_metrics_token_fingerprint: null,
-    node_metrics_status: 'unconfigured',
+    node_metrics_status: 'unknown',
     node_metrics_last_success_at: null,
     node_metrics_outage_since: null,
     node_metrics_last_error: null,
@@ -171,8 +165,7 @@ export async function seedContainer(
     root_pool_id: input.poolId,
     root_size_bytes: 100,
     root_size_pending_bytes: null,
-    cpu_millis: 0,
-    mem_bytes: 0,
+    mem_bytes: 1_073_741_824,
     nesting: true,
     syscall_intercept: true,
     power_intent: input.running ? 'running' : 'stopped',
@@ -227,7 +220,7 @@ export async function grantServer(
   who: Subject,
   serverId: string,
   values: {
-    cpuMillis?: number | null;
+    cpuCores?: number | null;
     memBytes?: number | null;
     diskBytes?: number | null;
     gpu?: string[];
@@ -238,7 +231,7 @@ export async function grantServer(
     id: randomUUID(),
     ...subject(who),
     server_id: serverId,
-    cpu_millis: values.cpuMillis ?? null,
+    cpu_cores: values.cpuCores ?? null,
     mem_bytes: values.memBytes ?? null,
     disk_bytes: values.diskBytes ?? null,
     gpu_pci_addresses: values.gpu ?? [],

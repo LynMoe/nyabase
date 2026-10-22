@@ -1,6 +1,5 @@
 import type { ColumnType } from 'kysely';
 
-type SettingsTimestamp = ColumnType<Date, Date | string, Date | string>;
 type SettingsGeneratedTimestamp = ColumnType<
   Date,
   Date | string | undefined,
@@ -17,16 +16,6 @@ export interface SystemSettingsTable {
   updated_at: SettingsGeneratedTimestamp;
 }
 
-export interface IncusClientIdentityTable {
-  singleton: boolean;
-  certificate_pem: string;
-  encrypted_private_key: string;
-  fingerprint: string;
-  not_after: SettingsTimestamp;
-  created_at: SettingsGeneratedTimestamp;
-}
-
 export interface SystemSettingsDatabase {
   'system.settings': SystemSettingsTable;
-  'system.incus_client_identity': IncusClientIdentityTable;
 }

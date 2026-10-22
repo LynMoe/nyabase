@@ -22,6 +22,7 @@ import {
 } from '../ui/table.js';
 import { cn } from '../../lib/utils.js';
 import { formatQuotaDimension } from '../../lib/grant-quota.js';
+import { cpuCoresLabel, formatCpuList } from '../../lib/cpu-set.js';
 import { queryKeys } from '../../lib/query-keys.js';
 import { queryPollInterval } from '../../lib/query-lifecycle.js';
 
@@ -91,7 +92,7 @@ function QuotaBody({
   return (
     <SectionCard
       title="我的额度"
-      description={empty ? undefined : '已分配 = 容器与数据卷占用的规格，不是实时用量。'}
+      description={empty ? undefined : '已分配 = 容器与数据卷占用的规格，不是实时用量。CPU 按核绑定，同一服务器上你的所有容器共享这组 CPU。'}
       flush={!empty}
     >
       {empty ? (
@@ -147,7 +148,7 @@ function QuotaBody({
               {sharedBackends.map((access) => {
                 const backend = backends.find((item) => item.id === access.sharedBackendId);
                 const name = backend?.displayName ?? backend?.name ?? access.sharedBackendId;
-                const disk = formatQuotaDimension(access.limitBytes, access.usedBytes, 'bytes');
+                const disk = formatQuotaDimension(access.limitBytes, access.usedBytes);
                 return (
                   <TableRow key={access.sharedBackendId}>
                     <TableCell className="font-medium">{name}</TableCell>
@@ -185,20 +186,24 @@ function ServerQuotaRow({
     queryFn: () => api.get<StorageCapacityDto>(`/servers/${grant.serverId}/storage-capacity`),
     refetchInterval: (query) => queryPollInterval(query.state, { activeIntervalMs: 30_000 }),
   });
-  const cpuUsed = containers.reduce((sum, item) => sum + item.cpuMillis, 0);
   const memUsed = containers.reduce((sum, item) => sum + item.memBytes, 0);
   const diskUsed = capacityQuery.data
     ? capacityQuery.data.usedByRootDisksBytes + capacityQuery.data.usedByLocalVolumesBytes
     : 0;
-  const cpu = formatQuotaDimension(grant.cpuMillis, cpuUsed, 'cpu');
-  const mem = formatQuotaDimension(grant.memBytes, memUsed, 'bytes');
-  const disk = formatQuotaDimension(grant.diskBytes, diskUsed, 'bytes');
+  const mem = formatQuotaDimension(grant.memBytes, memUsed);
+  const disk = formatQuotaDimension(grant.diskBytes, diskUsed);
+  const pinned = containers.find((item) => item.cpuSet && item.cpuSet.length > 0)?.cpuSet ?? null;
   const gpu = formatGpuGrantSummary(grant.gpuPciAddresses);
   return (
     <TableRow>
       <TableCell className="font-medium">{name}</TableCell>
       <TableCell>
-        <QuotaCell used={cpu.used} limit={cpu.limit} remaining={cpu.remaining} grant={grant.cpuMillis} consumed={cpuUsed} />
+        <div className="min-w-[7rem]" data-testid="quota-cpu">
+          <p className="text-sm">{grant.cpuCores === null ? '不限（全部未保留 CPU）' : cpuCoresLabel(grant.cpuCores)}</p>
+          <p className="mt-1 text-xs text-muted-foreground">
+            {pinned ? `绑定 CPU ${formatCpuList(pinned)} · ` : null}本服务器上你的容器共享
+          </p>
+        </div>
       </TableCell>
       <TableCell>
         <QuotaCell used={mem.used} limit={mem.limit} remaining={mem.remaining} grant={grant.memBytes} consumed={memUsed} />

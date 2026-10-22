@@ -76,7 +76,7 @@ describePg('PostgreSQL canonical authorization', () => {
       const userId = await seedUser(database);
       const serverId = await seedServer(database);
       const input = {
-        cpuMillis: null,
+        cpuCores: null,
         memBytes: null,
         diskBytes: 10,
         gpuPciAddresses: [],
@@ -105,7 +105,7 @@ describePg('PostgreSQL canonical authorization', () => {
       const groupId = await seedGroup(database);
       const serverId = await seedServer(database);
       const input = {
-        cpuMillis: 1_000, memBytes: null, diskBytes: null, gpuPciAddresses: [], expiresAt: null,
+        cpuCores: 1, memBytes: null, diskBytes: null, gpuPciAddresses: [], expiresAt: null,
       };
 
       await grants.putServerGrant(actor, { kind: 'group', id: groupId }, serverId, input);
@@ -129,7 +129,7 @@ describePg('PostgreSQL canonical authorization', () => {
       const serverId = await seedServer(database);
       const userId = await seedUser(database);
       const input = {
-        cpuMillis: null, memBytes: null, diskBytes: null, gpuPciAddresses: [], expiresAt: null,
+        cpuCores: null, memBytes: null, diskBytes: null, gpuPciAddresses: [], expiresAt: null,
       };
 
       await expect(grants.putServerGrant(plain, { kind: 'user', id: userId }, serverId, input))
@@ -154,7 +154,7 @@ describePg('PostgreSQL canonical authorization', () => {
       let signals = 0;
       changes.onChange(() => { signals += 1; });
       const input = {
-        cpuMillis: null, memBytes: null, diskBytes: null, gpuPciAddresses: [], expiresAt: null,
+        cpuCores: null, memBytes: null, diskBytes: null, gpuPciAddresses: [], expiresAt: null,
       };
 
       await expect(grants.putServerGrant(
@@ -192,7 +192,7 @@ describePg('PostgreSQL canonical authorization', () => {
         testActor(admin),
         { kind: 'user', id: userId },
         serverId,
-        { cpuMillis: null, memBytes: null, diskBytes: null, gpuPciAddresses: [], expiresAt: null },
+        { cpuCores: null, memBytes: null, diskBytes: null, gpuPciAddresses: [], expiresAt: null },
       )).resolves.toMatchObject({ serverId });
     });
   });
