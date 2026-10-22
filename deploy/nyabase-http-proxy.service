@@ -1,0 +1,46 @@
+[Unit]
+Description=Nyabase HTTP proxy (routes public HTTP/HTTPS to container web ports)
+Documentation=file:/opt/nyabase/deploy/OPERATIONS.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Routes come from the Backend over the control WebSocket (NYABASE_BACKEND_WS,
+# wss:// unless the Backend is on loopback); the proxy keeps no local state.
+# A transient unprivileged user; CAP_NET_BIND_SERVICE is the only capability
+# and exists solely to bind :80/:443.
+DynamicUser=true
+User=nyabase-http-proxy
+EnvironmentFile=/etc/nyabase/http-proxy.env
+ExecStart=/usr/local/bin/nyabase-http-proxy
+Restart=always
+RestartSec=2s
+# Each proxied connection holds two sockets; keep this above
+# 2 * NYABASE_HTTP_MAX_CONNECTIONS plus headroom.
+LimitNOFILE=65536
+NoNewPrivileges=true
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+PrivateTmp=true
+PrivateDevices=true
+ProtectHome=true
+ProtectSystem=strict
+ProtectClock=true
+ProtectHostname=true
+ProtectKernelLogs=true
+ProtectKernelModules=true
+ProtectKernelTunables=true
+ProtectControlGroups=true
+ProtectProc=invisible
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+SystemCallArchitectures=native
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

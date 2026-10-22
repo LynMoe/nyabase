@@ -110,6 +110,21 @@ if (!backend.cap_drop?.includes('ALL')) throw new Error('backend does not drop a
 if (!backend.security_opt?.some((entry) => entry.startsWith('no-new-privileges'))) {
   throw new Error('backend does not set no-new-privileges');
 }
+// The Backend is reached only through the TLS edge on the same host.
+const backendPorts = backend.ports ?? [];
+if (backendPorts.length !== 1
+  || backendPorts[0].host_ip !== '127.0.0.1'
+  || String(backendPorts[0].published) !== '3001'
+  || Number(backendPorts[0].target) !== 3001) {
+  throw new Error(`backend must publish only 127.0.0.1:3001, got ${JSON.stringify(backendPorts)}`);
+}
+for (const [serviceName, service] of Object.entries(config.services ?? {})) {
+  for (const port of service.ports ?? []) {
+    if (port.host_ip !== '127.0.0.1') {
+      throw new Error(`${serviceName} publishes a port beyond loopback: ${JSON.stringify(port)}`);
+    }
+  }
+}
 const tmpfs = Array.isArray(backend.tmpfs)
   ? backend.tmpfs
   : Object.entries(backend.tmpfs ?? {}).map(([path, options]) => `${path}:${options}`);
@@ -126,12 +141,55 @@ if rg -n 'packages/agent|dockerd|dockerRoot|nyabase-agent' deploy/Dockerfile.bac
   echo "Backend image still contains the retired host runtime" >&2
   exit 1
 fi
+for unit in nyabase-agent nyabase-http-proxy nyabase-ssh-proxy; do
+  unit_file="deploy/$unit.service"
+  [[ -f "$unit_file" ]] || { echo "missing systemd unit: $unit_file" >&2; exit 1; }
+  for directive in '^NoNewPrivileges=true$' '^ProtectSystem=strict$' '^Restart=always$'; do
+    rg -q "$directive" "$unit_file" || {
+      echo "$unit_file is missing $directive" >&2
+      exit 1
+    }
+  done
+  if rg -q '^User=root$' "$unit_file"; then
+    echo "$unit_file must not run as root" >&2
+    exit 1
+  fi
+done
+for proxy in http ssh; do
+  unit_file="deploy/nyabase-$proxy-proxy.service"
+  rg -q '^LimitNOFILE=65536$' "$unit_file"
+  rg -q "^EnvironmentFile=/etc/nyabase/$proxy-proxy.env$" "$unit_file"
+  [[ -f "deploy/$proxy-proxy.env.example" ]] || {
+    echo "missing deploy/$proxy-proxy.env.example" >&2
+    exit 1
+  }
+  # The control link must be TLS outside loopback; the examples must not teach ws://.
+  if rg -n '^NYABASE_BACKEND_WS=ws://' "deploy/$proxy-proxy.env.example"; then
+    echo "deploy/$proxy-proxy.env.example uses a plaintext Backend URL" >&2
+    exit 1
+  fi
+done
+rg -q '^AmbientCapabilities=CAP_NET_BIND_SERVICE$' deploy/nyabase-http-proxy.service
+rg -q '^CapabilityBoundingSet=CAP_NET_BIND_SERVICE$' deploy/nyabase-http-proxy.service
+rg -q '^CapabilityBoundingSet=$' deploy/nyabase-ssh-proxy.service
+if rg -n 'INCUS_CA|ws://<backend-host>' deploy/.env.example deploy/OPERATIONS.md; then
+  echo "deployment files still reference the retired Incus mTLS or plaintext Backend URL" >&2
+  exit 1
+fi
+git check-ignore -q deploy/config.yaml || {
+  echo "deploy/config.yaml must be ignored by git" >&2
+  exit 1
+}
 rg -q 'image: postgres:18\.4-bookworm@sha256:[0-9a-f]{64}' .github/workflows/ci.yml
 for deployment_file in \
   deploy/docker-compose.yml \
   deploy/Dockerfile.backend \
   deploy/config.example.yaml \
   deploy/.env.example \
+  deploy/http-proxy.env.example \
+  deploy/ssh-proxy.env.example \
+  deploy/nyabase-http-proxy.service \
+  deploy/nyabase-ssh-proxy.service \
   deploy/OPERATIONS.md; do
   # Host network routing (netplan `via: <GATEWAY>`, networkd `Gateway=`) is not
   # the retired Backend gateway module.

@@ -135,6 +135,7 @@ pnpm --filter @nyabase/backend dev
 `emitDecoratorMetadata`，Nest 的构造函数按类型注入会得到 `undefined dependency`（在 `c24b801` 上已复现）。
 配置仍走环境变量 / YAML，至少需要 `DATABASE_URL`、`JWT_SECRET`、`SSH_KEY_ENCRYPTION_SECRET`、
 `SSH_PROXY_TOKEN`、`HTTP_PROXY_TOKEN`；端口用 `PORT`，仅本机监听用 `LISTEN_ADDRESS=127.0.0.1`。
+`NODE_ENV` 未设置即按 `production` 处理（开发回退密钥/`admin123` 只在显式 `development` / `test` 下生效）；`dev.mjs` 在未设置时给子进程补 `NODE_ENV=development`。
 
 ## Live e2e（`tests/e2e/`）
 
@@ -157,8 +158,8 @@ lab 场景 API 测试，不在 CI 里跑；CI 只跑 `pnpm e2e:check`（e2e 包 
   绑全部未预留核；授权被撤销时保留原组。`infra.servers.reserved_cpus` 永不分配。授权或预留核变化经
   `ReconcileWakeService.wake({ reason: 'scan' })` 触发全量扫描在线改绑；容器不再有 CPU 字段。
 - 内存（每个容器 `mem_bytes` > 0）按用户在该服务器上期望运行（`power_intent='running'`，除 deleting 外，failed 也算：intent 重试可能让它回来）的容器之和准入；只在会增加运行内存的操作上、
-  `lockOwnerServerQuota` 下检查（`sumRunningMemBytes`）：start、running 创建、running 容器的 PATCH limits 增大；stopped 创建/PATCH、减小、restart、
-  管理员/system 操作与 reconciler 恢复期望状态都不检查。授权缩小不会停掉运行中的容器，只是不能再启动。start 时容器持有的 GPU claim 必须 ⊆ 当前授权（`GPU_NOT_GRANTED`），不自动释放。
+  `lockOwnerServerQuota` 下检查（`sumRunningMemBytes`）：start、把 `power_intent` 从非 running 改回 running 的 restart（`admitStart`）、running 创建、running 容器的 PATCH limits 增大；stopped 创建/PATCH、减小、期望已是 running 的 restart、
+  管理员/system 操作与 reconciler 恢复期望状态都不检查。授权缩小不会停掉运行中的容器，只是不能再启动。start（及上述 restart）时容器持有的 GPU claim 必须 ⊆ 当前授权（`GPU_NOT_GRANTED`），不自动释放。
 - 进程数 / 网卡带宽 / 磁盘读写是可在线编辑的系统设置 `containers.*`，统一作用于所有容器（CephFS 卷不限 IO）。
 - 漂移：平台拥有整份实例文档，只放过 `volatile.*`、`image.*`；未知配置键、多出的设备、设备内多出的键、
   非空 profiles 都算漂移，写回时整份覆盖并记审计 `container.drift_corrected`。

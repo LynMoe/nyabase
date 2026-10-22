@@ -30,8 +30,8 @@ YAML connection URLs). `POSTGRES_PASSWORD` must match the password in
 `config.example.yaml` does **not** use `CHANGE_ME` for boot secrets:
 `auth.jwtSecret`, `ssh.keyEncryptionSecret`, `http.proxyToken`, and
 `ssh.proxyToken` are empty strings. Empty values fail closed at production
-boot; copy the example and fill them before `up`. See **Boot secrets, Incus
-reachability, and proxies** below.
+boot; copy the example and fill them before `up`. See **Boot secrets, TLS
+edge, and proxies** below. `config.yaml` is listed in `.gitignore`.
 The Backend runs as UID/GID `10001:10001`; a root-owned mode-0600 bind-mounted
 configuration is unreadable to it. Keep the file owned by `10001:10001` with
 mode 0400, or use a deployment secret mechanism that presents the file
@@ -48,9 +48,9 @@ docker compose --env-file .env up -d
 docker compose --env-file .env ps
 ```
 
-The application remains available on port `3001`. VictoriaMetrics keeps its
-existing loopback-only endpoint on `127.0.0.1:8428`. PostgreSQL has no
-host-published port.
+The Backend is published only on `127.0.0.1:3001`; the public entrypoint is
+the TLS edge described below. VictoriaMetrics keeps its loopback-only endpoint
+on `127.0.0.1:8428`. PostgreSQL has no host-published port.
 
 The Backend starts after healthy PostgreSQL. PostgreSQL and VictoriaMetrics
 retain service healthchecks; the Backend does not wait for VictoriaMetrics and
@@ -68,12 +68,12 @@ curl --fail http://127.0.0.1:8428/health
 `/api/health/ready` also proves exact PostgreSQL schema readiness. VictoriaMetrics
 failure must not make the Backend unready; metric queries degrade independently.
 Readiness is held closed until the control-plane process is accepting traffic
-and is closed again before dependency shutdown. Authenticated administrators
-with `ViewMetricsAll` can query `/api/admin/metrics/runtime` for aggregate
+and is closed again before dependency shutdown. Authenticated operators and
+administrators can query `/api/admin/metrics/runtime` for aggregate
 PostgreSQL pool pressure and bounded telemetry queue health;
 the response intentionally contains no SQL, keys, identities, or raw errors.
 
-## Boot secrets, Incus reachability, and proxies
+## Boot secrets, TLS edge, and proxies
 
 ### Required YAML secrets
 
@@ -95,14 +95,92 @@ openssl rand -hex 32   # ssh.proxyToken
   letters, digits, `_`, or `-`. `openssl rand -hex 32` is valid. The HTTP and
   SSH WebSocket handlers refuse to start with an empty token.
 
-### Incus reachability
+`runtime.nodeEnv` (`NODE_ENV`) defaults to `production`: an unset value gets the
+production checks above. The insecure development fallbacks (a built-in JWT
+secret, `admin123`, key encryption reusing the JWT secret) apply only when
+`NODE_ENV` is explicitly `development` or `test`; never set either in a
+deployment.
 
-The Backend must inbound-reach every Incus API at `https://<host>:8443` over
-mTLS. NAT'd Incus servers are unsupported unless a VPN or tunnel presents a
-stable address the Backend can open. Do not use `https://127.0.0.1:8443` from a
-containerized Backend unless you have proven host routing for that path.
-`127.0.0.1` inside the container is the container itself. The Compose Backend
-service is not host-network by default.
+With `auth.adminInitPassword` empty, the first production boot creates the
+`admin` account with a random password and prints it **once** as a
+`Generated one-time admin password: …` warning in the Backend log. Sign in and
+change it immediately, then treat the log line as a leaked secret (rotate the
+log or restrict who can read it).
+
+### TLS edge
+
+The Backend speaks plain HTTP and must never be reachable from outside the
+host. A TLS-terminating reverse proxy (nginx, Caddy, HAProxy, …) is the only
+public entrypoint and forwards everything to the Backend:
+
+- the panel (`/`) and the API (`/api/*`);
+- the WebSocket paths, which need `Upgrade` forwarding and a long idle timeout:
+  `/ws/agent` and `/ws/agent/stream` (host agents), `/ws/ssh-proxy` and
+  `/ws/http-proxy` (proxy control links), and `/ws/console` (browser
+  consoles). The Backend destroys upgrades on any other path.
+
+Keep the Backend on loopback:
+
+- Compose already publishes it only on `127.0.0.1:3001`; run the reverse proxy
+  on the same host.
+- A Backend outside Compose sets `server.listenAddress` (`LISTEN_ADDRESS`) to
+  `127.0.0.1`.
+
+Set `server.trustedProxies` (`TRUSTED_PROXIES`) to the address the Backend sees
+the reverse proxy connect from. Without it every client appears to share the
+proxy's address, so one client exhausting the per-address login limit blocks
+sign-in for everyone. Use `loopback` for a non-Compose Backend on the same host.
+Under Compose, Docker forwards the loopback publish from the `edge` network, so
+the peer is the host's address on that bridge network, not `127.0.0.1`: trust
+the `edge` subnet
+(`docker network inspect nyabase_edge --format '{{(index .IPAM.Config 0).Subnet}}'`)
+and re-check it whenever the network is recreated. The proxy must overwrite,
+not append to, an inbound `X-Forwarded-For`.
+
+Minimal nginx shape (certificate handling is the operator's):
+
+```nginx
+map $http_upgrade $connection_upgrade { default upgrade; '' close; }
+
+server {
+    listen 443 ssl;
+    server_name nyabase.example.com;
+    ssl_certificate     /etc/nginx/tls/nyabase.crt;
+    ssl_certificate_key /etc/nginx/tls/nyabase.key;
+
+    location / {
+        proxy_pass http://127.0.0.1:3001;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-For $remote_addr;
+        proxy_set_header X-Forwarded-Proto https;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection $connection_upgrade;
+    }
+
+    location /ws/ {
+        proxy_pass http://127.0.0.1:3001;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-For $remote_addr;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection $connection_upgrade;
+        proxy_buffering off;
+        proxy_read_timeout 1h;
+        proxy_send_timeout 1h;
+    }
+}
+```
+
+Agents and proxies refuse to start on a plaintext Backend URL unless the
+Backend host is loopback (`localhost`, `127.0.0.0/8`, `::1`):
+
+- `nyabase-agent`: `NYABASE_BACKEND_URL` must be `https://…`.
+- SSH and HTTP proxies: `NYABASE_BACKEND_WS` must be `wss://…`.
+
+Each accepts `NYABASE_BACKEND_CA_FILE` (PEM) for a private CA, which also
+requires the TLS scheme. The Rust proxies trust only that bundle when it is set
+and the bundled public roots otherwise.
 
 ### SSH and HTTP proxies
 
@@ -114,44 +192,76 @@ to the default Compose file.
 
 ```bash
 cargo build --release --locked --manifest-path tools/Cargo.toml
-# binaries:
-#   tools/target/release/nyabase-ssh-proxy
-#   tools/target/release/nyabase-http-proxy
+sudo install -m 0755 tools/target/release/nyabase-ssh-proxy /usr/local/bin/
+sudo install -m 0755 tools/target/release/nyabase-http-proxy /usr/local/bin/
+sudo install -d -m 0700 /etc/nyabase
+sudo install -m 0600 deploy/ssh-proxy.env.example /etc/nyabase/ssh-proxy.env
+sudo install -m 0600 deploy/http-proxy.env.example /etc/nyabase/http-proxy.env
+# edit both files: NYABASE_BACKEND_WS and the proxy tokens
+sudo install -m 0644 deploy/nyabase-ssh-proxy.service deploy/nyabase-http-proxy.service \
+  /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now nyabase-ssh-proxy nyabase-http-proxy
 ```
 
-Listen addresses (env overrides):
+Both units run as a transient unprivileged user (`DynamicUser`) with
+`LimitNOFILE=65536`, `Restart=always`, and the same filesystem hardening as
+`nyabase-agent.service`. The HTTP proxy holds only `CAP_NET_BIND_SERVICE`, so it
+can listen on `:80`/`:443` without root; the SSH proxy holds no capability. If
+the TLS edge for the panel runs on the same host, give the two different
+addresses for `:443`.
 
-- SSH: `NYABASE_SSH_LISTEN`, default `0.0.0.0:2222`
-- HTTP: `NYABASE_HTTP_LISTEN`, default `0.0.0.0:8080`
-- HTTPS (optional): `NYABASE_HTTPS_LISTEN` (unset means HTTPS listen is off)
+Environment (`/etc/nyabase/*.env`; defaults in parentheses, ranges are
+enforced at start-up):
 
-After the Jump proxy binary that keeps live sessions is installed on the
-manager, `upgrade-backend` (recreate Compose `backend` only) does not drop
-established `ssh -J` sessions. New Jump connections fail closed until the
-Backend is ready again. Replacing the Jump binary is copy then restart:
-`install -m 0755` the new `nyabase-ssh-proxy` to `/usr/local/bin/` (and the
-control-plane bundle `bin/`), then `maintain.sh restart-proxies`. Restart
-alone does not install the file. That one proxy restart drops Jump.
-If Backend stays down longer than the proxy hold (default 300s), Jump
-fail-closes. Override hold with `NYABASE_SSH_CONTROL_HOLD_MS` in
-`/etc/nyabase/ssh-proxy.env` (180000–600000), then restart the proxy unit.
-This is not a YAML or panel setting.
+| Variable | Proxy | Default / range |
+| --- | --- | --- |
+| `NYABASE_BACKEND_WS` | both | `ws://127.0.0.1:3000/ws/{ssh,http}-proxy`; set `wss://<panel host>/ws/ssh-proxy` or `/ws/http-proxy` |
+| `NYABASE_BACKEND_CA_FILE` | both | unset (bundled public roots) |
+| `SSH_PROXY_TOKEN` / `SSH_PROXY_TOKEN_FILE` | SSH | required, one of the two; same value as `ssh.proxyToken` |
+| `HTTP_PROXY_TOKEN` / `HTTP_PROXY_TOKEN_FILE` | HTTP | required, one of the two; same value as `http.proxyToken` |
+| `NYABASE_SSH_LISTEN` | SSH | `0.0.0.0:2222` |
+| `NYABASE_SSH_MAX_CONNECTIONS` | SSH | `512` (1–1024) |
+| `NYABASE_SSH_MAX_CONNECTIONS_PER_IP` | SSH | `16` (1–1024) |
+| `NYABASE_SSH_AUTH_TIMEOUT_MS` | SSH | `30000` (1000–600000), accept to successful auth |
+| `NYABASE_SSH_CONTROL_HOLD_MS` | SSH | `300000` (180000–600000) |
+| `NYABASE_HTTP_LISTEN` | HTTP | `0.0.0.0:8080` (the example uses `:80`) |
+| `NYABASE_HTTPS_LISTEN` | HTTP | unset = HTTPS off (the example uses `:443`) |
+| `NYABASE_HTTP_MAX_CONNECTIONS` | HTTP | `4096` (1–65536) |
+| `NYABASE_HTTP_MAX_CONNECTIONS_PER_IP` | HTTP | `64` (1–65536) |
+| `NYABASE_HTTP_BODY_DEADLINE_MS` | HTTP | `30000` (1000–120000), whole request body |
+| `NYABASE_HTTP_UPGRADED_IDLE_MS` | HTTP | `3600000` (1000–86400000), no bytes either way |
+| `NYABASE_HTTP_CONTROL_HOLD_MS` | HTTP | `300000` (0–600000; `0` clears routes immediately) |
 
-`NYABASE_BACKEND_WS` must target Backend port **3001**, not 3000. The Rust
-defaults of `ws://127.0.0.1:3000/ws/ssh-proxy` and
-`ws://127.0.0.1:3000/ws/http-proxy` are wrong for this product:
+A token file must be a regular file (not a symlink) readable only by the
+service user; with `DynamicUser` deliver it through a `LoadCredential=` drop-in
+rather than a root-owned path. Per-IP limits bucket IPv6 clients per `/64`;
+WebSocket and other upgraded connections count against both HTTP limits. A
+connection over a limit is closed immediately. The SSH authentication deadline
+is independent of the 600 s session inactivity timeout. These are environment
+settings only, not YAML or panel settings.
 
-```bash
-# SSH proxy
-export NYABASE_BACKEND_WS='ws://<backend-host>:3001/ws/ssh-proxy'
-export SSH_PROXY_TOKEN='<same value as ssh.proxyToken>'
-export NYABASE_SSH_LISTEN='0.0.0.0:2222'
+**Backend restarts and agent outages.** After losing its control connection
+the HTTP proxy keeps serving its last snapshot for `NYABASE_HTTP_CONTROL_HOLD_MS`,
+but never past that snapshot's own lease (300 s), so the effective hold is
+at most about five minutes. The Backend renews the snapshot every 100 s, so a
+stopped or deleted container's route can linger up to that long (it answers
+503); IP and hostname reuse is drained for 360 s, longer than any lease. A snapshot from a new control connection
+replaces the held one at once. HTTP routes are gated on the platform's IP
+claims, not on how recently an agent reported, so sites stay up while a
+server's agent is disconnected; stopping or deleting the container, releasing
+its address, or removing the binding still removes the route on the next
+snapshot.
 
-# HTTP proxy
-export NYABASE_BACKEND_WS='ws://<backend-host>:3001/ws/http-proxy'
-export HTTP_PROXY_TOKEN='<same value as http.proxyToken>'
-export NYABASE_HTTP_LISTEN='0.0.0.0:8080'
-```
+Recreating only the Compose `backend` service
+(`docker compose --env-file .env up -d backend`) does not drop
+established `ssh -J` sessions; new Jump connections fail closed until the
+Backend is ready again. If the Backend stays down longer than
+`NYABASE_SSH_CONTROL_HOLD_MS`, Jump fail-closes. Replacing a proxy binary is
+copy then restart: `install -m 0755` the new binary to `/usr/local/bin/`, then
+`systemctl restart nyabase-ssh-proxy` (or `nyabase-http-proxy`). Restart alone
+does not install the file, and restarting the SSH proxy drops every Jump
+session.
 
 Product instance NICs are Incus `nictype=bridged` on an operator-owned
 unmanaged Linux bridge (`vmbr0`). SSH and HTTP proxies **may run on the
@@ -299,7 +409,21 @@ rebuilding vmbr.
   Durable intents and reconciliation claims remain in PostgreSQL. Agents
   reconnect on their own after a Backend restart; agent enrollment tokens and
   credentials are stored (as digests) in PostgreSQL.
-- Login rate limits are per Backend process and reset on restart.
+- Login rate limits are per Backend process and reset on restart. Failed
+  sign-ins are counted per (client address, username) — 10 per 5 minutes —
+  and per client address — 30 per 5 minutes, IPv6 bucketed per `/64`. There is
+  no account-wide lockout, so nobody can lock a user out by guessing from
+  elsewhere. Wrong current-password entries by a signed-in user (password
+  change, API token creation) are limited to 10 per 5 minutes per user. Client
+  addresses come from `server.trustedProxies` (see **TLS edge**).
+- Volume destroy and purge wait while the executing server is offline (normal
+  failure backoff and retry) instead of dropping the volume rows; only when the
+  server or pool no longer exists is the destroy treated as having no executor.
+  Deleting a server keeps a shared volume that is being destroyed as long as
+  another executor server for its backend exists, online or not.
+- A server marked `unreachable` while its agent stays connected recovers on
+  its own: the Backend probes Incus through the agent with backoff (15 s,
+  doubling up to 5 min), restores `online` on success and wakes a full scan.
 - Metrics samples queue in Backend memory (bounded by point and byte limits)
   and are written directly to VictoriaMetrics. When VictoriaMetrics is down or
   the queue is full, the oldest batches are dropped and counted in the
@@ -515,12 +639,25 @@ from the product SLO and measured baseline, not from this example deployment.
   query DTO is flat and `.strict()`. The remaining low esbuild advisory is
   limited to its Windows development server path and is not reachable in the
   Linux production image.
-- Behind a TLS-terminating reverse proxy, set `server.trustedProxies`
-  (`TRUSTED_PROXIES`) to that proxy's address or CIDR (`loopback` when it runs
-  on the same host). Without it every login appears to come from the proxy,
-  so one client exhausting the per-IP login limit locks out everyone. Never
-  trust a range that end users can send from directly. The proxy must
-  overwrite, not append to, an untrusted inbound `X-Forwarded-For`.
+- Behind the TLS edge, set `server.trustedProxies` (`TRUSTED_PROXIES`) to the
+  address the Backend sees the proxy connect from (see **TLS edge**; under
+  Compose that is the `edge` network, not loopback). Without it every login
+  appears to come from the proxy, so one client exhausting the per-address
+  login limit blocks sign-in for everyone. Never trust a range that end users
+  can send from directly. The proxy must overwrite, not append to, an
+  untrusted inbound `X-Forwarded-For`.
+- API tokens can only be created from a signed-in browser (JWT) session and
+  require the current password (`currentPassword`); a request authenticated
+  with an API token cannot mint another one. Changing a password, or an
+  administrator resetting it, deletes all of that user's API tokens and
+  refresh sessions in the same transaction. Disabling a user ends their browser
+  sessions and suspends their API tokens, which work again only if the user is
+  re-enabled.
+- Open browser consoles (`/ws/console`) close with WebSocket code `4401` when
+  their user is disabled or deleted, changes role, or changes (or has reset)
+  their password.
+- SSH public keys are globally unique: adding a key that any account already
+  holds fails with `409 SSH_KEY_IN_USE` without revealing the owner.
 - Browser sessions keep the refresh secret in the `nyabase_refresh` cookie
   (`HttpOnly`, `Secure`, `SameSite=Strict`, `Path=/api/auth`); the access token
   lives only in tab memory, and nothing credential-bearing is written to web
@@ -561,23 +698,25 @@ from the product SLO and measured baseline, not from this example deployment.
 ## 授权失效与 14 天宽限
 
 资源授权（服务器、数据盘池、共享后端）可授给用户或用户组，同一用户对同一资源可同时有多条授权。数据库视图
-`iam.effective_server_access` / `iam.effective_pool_access` / `iam.effective_shared_backend_access` 按 (用户, 资源) 合并：
-配额逐项取最大（任一为 NULL 即不限；磁盘与共享后端额度的 0 也按不限），GPU 白名单取并集，到期取最晚（任一不设期限则不过期），
-合并视图 `iam.merged_*_access` 不看用户状态（仅供失效台账判断“有无覆盖”），`iam.effective_*_access` 在其上只增加 active 用户过滤。所有授权判断只读 effective 视图，没有授权缓存。
+`iam.effective_server_access` / `iam.effective_pool_access` / `iam.effective_shared_backend_access` 按 (用户, 资源) 合并
+**当前有效**（未过期）的授权，且只含 active 用户：配额逐项取最大（任一为 NULL 即不限；0 不是不限，数据库 CHECK
+要求配额 `> 0`），GPU 白名单取并集，到期取最晚（任一不设期限则不过期）。所有授权判断只读这些视图，没有授权缓存。
 
-用户失去覆盖（授权到期、删除授权、移出组、删除组）后立即进入同一条 14 天宽限流程，撤销不会被拒绝：
+用户失去覆盖（授权到期、删除授权、移出组、删除组、用户被禁用）后立即进入同一条 14 天宽限流程，撤销不会被拒绝：
 
 - 台账 `control.access_lapses`（`user_id, resource_kind, resource_id, lapsed_at, stopped_at, purged_at`）记录宽限。
-  `lapsed_at` 创建时确定、之后不再变化：已过期取过去的 `expires_at`，撤销则取检测时刻。
-- 宽限内：停止该用户在该资源上运行中的容器（一次，写 `stopped_at`），不能新建、启动、挂载。
+  `lapsed_at` 恒为检测时刻（处理器开台账行的那一刻），之后不再变化，不从原授权的 `expires_at` 倒推。
+- 宽限内：停止该用户在该资源上运行中的容器（`stopped_at` 记第一次停机时间）；若之后又有期望运行的容器
+  （例如管理员用 `scope=all` 启动了它），每轮都会再次停机。不能新建、启动、挂载。
 - 宽限期满：清除该用户在该资源上的容器与卷（写 `purged_at`）；服务器 = 容器 + 本地卷，数据盘池 = 池上的卷及挂载它们的容器，
   共享后端 = 后端上的卷及挂载它们的容器。清除后该用户在该资源上已无资源，台账行即被删除。
-- 宽限内覆盖恢复：台账行被删除，宽限取消；已停机的容器不会自动启动。
-- 处理器每分钟运行一次，并在 IAM 写操作提交后立即唤醒；每个 (用户, 资源) 用 `reconcile_claims`
-  租约（`resource_type = access_lapse`）串行，多副本安全。
-- 用户被禁用不算失去覆盖：不开宽限、不清除，处理器只停止其运行中的容器，资源无限期保留；重新启用不会自动启动容器。
-  已存在的到期/撤销台账行在用户被禁用期间照常推进并清除。删除账号仍要求其名下没有任何资源。
-- 管理员仍可对某用户在某服务器上的资源手动清除：`POST /api/users/:userId/servers/:serverId/purge-resources`。
+- 宽限内覆盖恢复（重新授权或重新启用用户）：台账行被删除，宽限取消；已停机的容器不会自动启动。
+- 处理器每分钟运行一次，并在 IAM 写操作与用户状态变更提交后立即唤醒；每个 (用户, 资源) 用 `reconcile_claims`
+  租约（`resource_type = access_lapse`）串行。
+- 用户被禁用与撤销走同一条流程：其名下资源按检测时刻开宽限、立即停机，14 天后清除。删除账号仍要求其名下没有任何资源
+  （`USER_HAS_RESOURCES`）。
+- 管理员（仅 admin 角色，因为会删除卷）可对某用户在某服务器上的资源手动清除：
+  `POST /api/users/:userId/servers/:serverId/purge-resources`。
 
 ## 主机 Agent（每台 Incus 主机一个）
 
@@ -632,6 +771,10 @@ sudo systemctl daemon-reload
 sudo systemctl enable --now nyabase-agent
 ```
 
+`NYABASE_BACKEND_URL` 必须是 `https://`（经 TLS 边缘）；只有 Backend 主机为 loopback
+（`localhost`、`127.0.0.0/8`、`::1`）时才接受 `http://`，否则 agent 拒绝启动。设置
+`NYABASE_BACKEND_CA_FILE` 时也必须是 `https://`。
+
 unit 以 `nyabase-agent` 用户运行，附加 `incus-admin` 组（访问 Incus socket），
 只保留 `CAP_NET_ADMIN`（维护 `nyabase_guard`、读取 `bridge incus`）。需要 Node.js 20+。
 `nvidia-smi` 需要 `video`/`render` 组时自行追加 `SupplementaryGroups`。
@@ -641,7 +784,9 @@ unit 以 `nyabase-agent` 用户运行，附加 `incus-admin` 组（访问 Incus 
 Backend 的 `NodeMetricsScrapeService` 每 15 秒经控制连接请求一次
 `metrics.collect`（主机、cgroup、GPU、nft 与 IPv6 拦截状态），写入 VictoriaMetrics
 并更新服务器的 `metricsHealth`。agent 断开时服务器标记为 `unreachable`，重连后
-自动恢复并刷新 CPU 拓扑、GPU 与存储池清点。
+自动恢复并刷新 CPU 拓扑、GPU 与存储池清点。agent 一直连着、但 reconcile 因 Incus 超时等把服务器标成
+`unreachable` 时，Backend 经 agent 按退避（15 秒起、翻倍、最长 5 分钟）探测 Incus，成功即恢复 `online`
+并触发全量扫描，不需要人工干预。
 
 ### 容器资源约束
 
