@@ -119,8 +119,8 @@ describe('cross-user isolation', () => {
 
   it('hides intents and bindings of other users', async () => {
     await expectStatuses(b.session.api, [
-      ['GET', `/intents/${intentId}`, 403],
-      ['POST', `/intents/${intentId}/retry`, 403, {}],
+      ['GET', `/intents/${intentId}`, 404],
+      ['POST', `/intents/${intentId}/retry`, 404, {}],
       ['GET', '/intents?scope=all', 403],
       ['GET', `/intents?resourceType=container&resourceId=${container.id}`, 404],
       ['GET', '/http-proxy/bindings?scope=all', 403],
