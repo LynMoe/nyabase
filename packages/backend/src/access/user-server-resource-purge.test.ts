@@ -4,6 +4,7 @@ import {
   ContainerPhase,
   ContainerPowerIntent,
   IntentKind,
+  Role,
 } from '@nyabase/common';
 import { SYSTEM_ACTOR } from '../iam/actor.js';
 import { testActor } from '../iam/actor.test-helper.js';
@@ -99,6 +100,7 @@ describe('UserServerResourcePurgeService grant expiry actions', () => {
       SYSTEM,
       'container-1',
       'stop',
+      'all',
     );
     expect(fixture.audit.append).toHaveBeenCalledWith(
       {},
@@ -256,6 +258,7 @@ describe('UserServerResourcePurgeService grant expiry actions', () => {
       SYSTEM,
       'container-1',
       'delete',
+      'all',
     );
     expect(fixture.audit.append).toHaveBeenCalledWith(
       transaction,
@@ -332,21 +335,22 @@ describe('UserServerResourcePurgeService grant expiry actions', () => {
       SYSTEM,
       'container-1',
       'delete',
+      'all',
     );
     expect(fixture.containers.action.mock.invocationCallOrder[0])
       .toBeLessThan(fixture.intents.ensurePending.mock.invocationCallOrder[0]);
   });
 
-  it('audits operator purges separately from expiry cleanup', async () => {
+  it('audits administrator purges separately from expiry cleanup', async () => {
     const adminFixture = createService();
     adminFixture.containerRepository.list.mockResolvedValue([]);
     adminFixture.volumes.list.mockResolvedValue([]);
 
-    await adminFixture.service.purge(testActor('operator-1'), 'user-1', 'server-1');
+    await adminFixture.service.purge(testActor('admin-1', Role.Admin), 'user-1', 'server-1');
 
     expect(adminFixture.audit.append).toHaveBeenCalledWith(
       {},
-      'operator-1',
+      'admin-1',
       'user.server.purge_resources',
       'user-1',
       'user',

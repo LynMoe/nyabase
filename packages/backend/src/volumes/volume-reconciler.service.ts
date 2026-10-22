@@ -312,6 +312,15 @@ export class VolumeReconciler implements ManagedReconciler, OnModuleInit {
 
     const eligible = await store.listDestroyExecutors(volume);
     if (eligible.length === 0) {
+      // An executor that exists but is not online only delays the destroy;
+      // finishing now would drop the row, keep the data and free the quota.
+      if (await store.hasAnyDestroyExecutor(volume)) {
+        return destroyRetry(
+          'SERVER_UNREACHABLE',
+          'No server that can destroy the volume is online',
+          { volumeId: volume.id },
+        );
+      }
       await store.dropAllPlacements(volume.id);
       await store.finishEmptyTracking(volume.id, 'destroy_executor_gone');
       return { outcome: 'succeeded', observedRevision: volume.revision };

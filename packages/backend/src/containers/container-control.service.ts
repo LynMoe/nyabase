@@ -357,7 +357,10 @@ export class ContainerControlService {
       if (!current) throw new NotFoundException('Container not found');
       const access = assertCanAccess(actor, current, scope);
       const grant = await this.enforceInTransaction(transaction, actor, current, access);
-      if (grant && action === 'start' && current.power_intent !== ContainerPowerIntent.Running) {
+      // A restart of a container whose stop is not yet observed also flips the
+      // intent back to running, so it is admitted exactly like a start.
+      if (grant && (action === 'start' || action === 'restart')
+        && current.power_intent !== ContainerPowerIntent.Running) {
         await this.admitStart(transaction, current, grant);
       }
       if (access === 'owner' && (action === 'start' || action === 'restart')) {

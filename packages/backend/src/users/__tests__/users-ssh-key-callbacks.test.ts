@@ -10,7 +10,8 @@ import {
   withPostgresTestDatabase,
   type PostgresTestDatabase,
 } from '../../platform/persistence-pg/postgres-test-harness.js';
-import { usersPgFixture } from '../users.pg-test-helper.js';
+import { userRow, usersPgFixture } from '../users.pg-test-helper.js';
+import { SSH_KEY_IN_USE } from '../user-ssh-keys.service.js';
 
 const describePostgres = process.env.NYABASE_TEST_DATABASE_URL ? describe : describe.skip;
 const VALID_ED25519_KEY =
@@ -189,7 +190,30 @@ describePostgres('UsersService PostgreSQL SSH key durable hooks', () => {
         'duplicate',
         VALID_ED25519_KEY,
         context.userId,
-      )).rejects.toBeDefined();
+      )).rejects.toMatchObject({ status: 409, response: { code: SSH_KEY_IN_USE } });
+      expect(context.audit.log).not.toHaveBeenCalled();
+      expect(context.proxySnapshots.notify).not.toHaveBeenCalled();
+    });
+  });
+
+  it('keeps a public key with one user: another user cannot add it, whatever the comment', async () => {
+    await withPostgresTestDatabase(async (fixture) => {
+      const context = await usersPgFixture(fixture, { seedActor: false });
+      const otherId = randomUUID();
+      await fixture.database.insertInto('iam.users')
+        .values(userRow(otherId, 1003, 'other', UserStatus.Active)).execute();
+      await context.sshKeys.addSshKey(context.userId, 'mine', `${VALID_ED25519_KEY} victim@host`, context.userId);
+      context.audit.log.mockClear();
+      context.proxySnapshots.notify.mockClear();
+
+      const attempt = context.sshKeys.addSshKey(otherId, 'stolen', `${VALID_ED25519_KEY} attacker`, otherId);
+      await expect(attempt).rejects.toMatchObject({ status: 409, response: { code: SSH_KEY_IN_USE } });
+      // The conflict does not say who holds the key.
+      const response = JSON.stringify(await attempt.catch((error: ConflictException) => error.getResponse()));
+      expect(response).not.toContain(context.userId);
+      expect(response).not.toContain('target');
+      expect(await fixture.database.selectFrom('iam.ssh_public_keys').select('user_id').execute())
+        .toEqual([{ user_id: context.userId }]);
       expect(context.audit.log).not.toHaveBeenCalled();
       expect(context.proxySnapshots.notify).not.toHaveBeenCalled();
     });

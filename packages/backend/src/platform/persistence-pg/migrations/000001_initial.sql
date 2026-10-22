@@ -909,8 +909,9 @@ ALTER TABLE iam.refresh_tokens ADD CONSTRAINT refresh_tokens_hash_key UNIQUE (ha
 ALTER TABLE iam.api_tokens ADD CONSTRAINT api_tokens_pkey PRIMARY KEY (id);
 ALTER TABLE iam.api_tokens ADD CONSTRAINT api_tokens_hash_key UNIQUE (hash);
 ALTER TABLE iam.ssh_public_keys ADD CONSTRAINT ssh_public_keys_pkey PRIMARY KEY (id);
-ALTER TABLE iam.ssh_public_keys ADD CONSTRAINT ssh_public_keys_user_id_fingerprint_key
-    UNIQUE (user_id, fingerprint);
+-- A public key belongs to one user: the SSH proxy resolves the user from the key.
+ALTER TABLE iam.ssh_public_keys ADD CONSTRAINT ssh_public_keys_fingerprint_key
+    UNIQUE (fingerprint);
 
 ALTER TABLE infra.shared_backends ADD CONSTRAINT shared_backends_identity_key_key
     UNIQUE (identity_key);

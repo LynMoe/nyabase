@@ -345,6 +345,88 @@ describePg('volume reconciler equal-node destroy', () => {
   });
 });
 
+describePg('volume reconciler destroy while executors are offline', () => {
+  function reconcilerFor(database: Parameters<Parameters<typeof withPostgresTestDatabase>[0]>[0]['database']) {
+    const deleteStorageVolume = vi.fn();
+    const reconciler = new VolumeReconciler(new VolumeReconcileStore(database, new IntentRepository(database, noopWake())),
+      { log: vi.fn().mockResolvedValue(undefined) } as never,
+      { get: vi.fn(async () => ({ deleteStorageVolume })) } as never,
+      { register: vi.fn() } as never,
+    );
+    return { reconciler, deleteStorageVolume };
+  }
+
+  function run(reconciler: VolumeReconciler, volumeId: string) {
+    return reconciler.reconcile({
+      intent: destroyIntent(volumeId) as never,
+      claim: {} as never,
+      lease: { assertOwned: vi.fn() } as never,
+      signal: new AbortController().signal,
+    });
+  }
+
+  it('keeps a shared volume and retries while every executor is unreachable; drops it once none exists', async () => {
+    await withPostgresTestDatabase(async ({ database }) => {
+      const fixture = await seedSharedVolume(database, { aState: 'present', bState: 'present' });
+      await database.updateTable('control.volumes').set({ dir_ensured: true })
+        .where('id', '=', fixture.volumeId).execute();
+      await database.updateTable('infra.servers').set({ status: 'unreachable' })
+        .where('id', 'in', [fixture.serverA, fixture.serverB]).execute();
+      const { reconciler, deleteStorageVolume } = reconcilerFor(database);
+
+      await expect(run(reconciler, fixture.volumeId)).resolves.toMatchObject({
+        outcome: 'retry',
+        failure: { code: 'SERVER_UNREACHABLE' },
+      });
+      expect(deleteStorageVolume).not.toHaveBeenCalled();
+      expect(await database.selectFrom('control.volumes').select('id')
+        .where('id', '=', fixture.volumeId).execute()).toHaveLength(1);
+      expect(await database.selectFrom('control.volume_placements').select('server_id')
+        .where('volume_id', '=', fixture.volumeId).execute()).toHaveLength(2);
+
+      // The executors are really gone once their pools no longer reach the backend.
+      await database.updateTable('infra.storage_pools').set({ registered: false })
+        .where('id', 'in', [fixture.poolA, fixture.poolB]).execute();
+      await expect(run(reconciler, fixture.volumeId)).resolves.toMatchObject({ outcome: 'succeeded' });
+      expect(await database.selectFrom('control.volumes').select('id')
+        .where('id', '=', fixture.volumeId).execute()).toHaveLength(0);
+    });
+  });
+
+  it('keeps a local volume and retries while its server is unreachable', async () => {
+    await withPostgresTestDatabase(async ({ database }) => {
+      const fixture = await seedSharedVolume(database, { aState: 'present', bState: 'present' });
+      const localPool = randomUUID();
+      await database.insertInto('infra.storage_pools')
+        .values(poolValues(localPool, fixture.serverA, 'local-a', null)).execute();
+      await database.deleteFrom('control.volume_placements').where('volume_id', '=', fixture.volumeId).execute();
+      await database.updateTable('control.volumes')
+        .set({ shared_backend_id: null, pool_id: localPool, server_id: fixture.serverA })
+        .where('id', '=', fixture.volumeId).execute();
+      await database.insertInto('control.volume_placements').values({
+        volume_id: fixture.volumeId,
+        server_id: fixture.serverA,
+        pool_id: localPool,
+        catalog_state: 'present',
+        observed_revision: 2,
+      }).execute();
+      await database.updateTable('infra.servers').set({ status: 'unreachable' })
+        .where('id', '=', fixture.serverA).execute();
+      const { reconciler, deleteStorageVolume } = reconcilerFor(database);
+
+      await expect(run(reconciler, fixture.volumeId)).resolves.toMatchObject({
+        outcome: 'retry',
+        failure: { code: 'SERVER_UNREACHABLE' },
+      });
+      expect(deleteStorageVolume).not.toHaveBeenCalled();
+      expect(await database.selectFrom('control.volumes').select('id')
+        .where('id', '=', fixture.volumeId).execute()).toHaveLength(1);
+      expect(await database.selectFrom('control.volume_placements').select('server_id')
+        .where('volume_id', '=', fixture.volumeId).execute()).toHaveLength(1);
+    });
+  });
+});
+
 async function seedSharedVolume(
   database: Parameters<Parameters<typeof withPostgresTestDatabase>[0]>[0]['database'],
   options: {

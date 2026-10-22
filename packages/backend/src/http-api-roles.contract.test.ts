@@ -61,7 +61,6 @@ const OPERATOR_ROUTES = [
   'POST servers/:param/agent-enrollment',
   'POST servers/:param/preflight',
   'POST servers/:param/storage-pools/discover',
-  'POST users/:param/servers/:param/purge-resources',
   'PUT admin/groups/:param/server-grants/:param',
   'PUT admin/groups/:param/shared-backend-grants/:param',
   'PUT admin/groups/:param/storage-pool-grants/:param',
@@ -94,6 +93,8 @@ const ADMIN_ROUTES = [
   'POST shared-backends',
   'POST shared-backends/:param/executors/discover',
   'POST users',
+  // It deletes volumes, whose administrator override needs admin.
+  'POST users/:param/servers/:param/purge-resources',
 ];
 
 describe('HTTP API role contract', () => {

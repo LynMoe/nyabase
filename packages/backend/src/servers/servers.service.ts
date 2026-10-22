@@ -430,6 +430,8 @@ async function dropEmptiedSharedVolumes(
     const eligible = volume.shared_backend_id
       ? await listEligibleDestroyExecutors(transaction, volume.shared_backend_id, {
         excludeServerId: serverId,
+        // An unreachable server is still a way to reach the data later.
+        includeOffline: true,
       })
       : [];
     const claimed = await transaction

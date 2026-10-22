@@ -495,6 +495,28 @@ export class VolumeReconcileStore {
     return [{ server_id: volume.server_id, pool_name: pool.incus_name }];
   }
 
+  /**
+   * Whether anything could still destroy the data, online or not: the shared
+   * backend still has an executor pool, or the local volume's server and pool
+   * still exist. Only when nothing does is the destroy executor gone.
+   */
+  async hasAnyDestroyExecutor(volume: VolumeRecord): Promise<boolean> {
+    if (volume.shared_backend_id) {
+      const rows = await listEligibleDestroyExecutors(this.database, volume.shared_backend_id, {
+        includeOffline: true,
+      });
+      return rows.length > 0;
+    }
+    if (!volume.server_id || !volume.pool_id) return false;
+    const pool = await this.database
+      .selectFrom('infra.storage_pools')
+      .select('id')
+      .where('id', '=', volume.pool_id)
+      .where('server_id', '=', volume.server_id)
+      .executeTakeFirst();
+    return pool !== undefined;
+  }
+
   /** Drop the logical volume once nothing tracks it any more, settling leftover intents. */
   async finishEmptyTracking(volumeId: string, reason?: string): Promise<void> {
     await this.database.transaction().execute(async (transaction) => {

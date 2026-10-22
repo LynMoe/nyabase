@@ -36,6 +36,13 @@ export interface IamSshPublicKey {
 }
 
 
+export const SSH_KEY_IN_USE = 'SSH_KEY_IN_USE';
+
+function isFingerprintTaken(error: unknown): boolean {
+  const record = error as { code?: unknown; constraint?: unknown } | null;
+  return record?.code === '23505' && record.constraint === 'ssh_public_keys_fingerprint_key';
+}
+
 /** A user's SSH public keys: list, add and remove, with the proxy and guest follow-ups. */
 @Injectable()
 export class UserSshKeysService {
@@ -106,7 +113,17 @@ export class UserSshKeysService {
         key_text: normalizedKeyText,
         fingerprint,
         created_at: new Date(),
-      }).returningAll().executeTakeFirstOrThrow();
+      }).returningAll().executeTakeFirstOrThrow().catch((error: unknown) => {
+        // The SSH proxy resolves the user from the key, so a key belongs to
+        // exactly one user. The answer does not say whose key it is.
+        if (isFingerprintTaken(error)) {
+          throw new ConflictException({
+            code: SSH_KEY_IN_USE,
+            message: 'This SSH public key is already in use',
+          });
+        }
+        throw error;
+      });
       const saved = this.toSshKey(row);
       await this.auditService.append(
         transaction,

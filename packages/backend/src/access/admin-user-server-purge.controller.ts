@@ -13,7 +13,7 @@ export class AdminUserServerPurgeController {
   ) {}
 
   @Post('servers/:serverId/purge-resources')
-  @RequireRole(Role.Operator)
+  @RequireRole(Role.Admin)
   async purgeUserServerResources(
     @Param('userId') userId: string,
     @Param('serverId') serverId: string,

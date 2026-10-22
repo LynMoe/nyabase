@@ -442,10 +442,16 @@ export type EligibleDestroyExecutor = {
   pool_name: string;
 };
 
+/**
+ * Servers with a registered shareable CephFS pool on the backend, one pool each.
+ * Only online servers by default; `includeOffline` answers whether an executor
+ * exists at all, so a destroy waits for an unreachable one instead of treating
+ * it as gone (which would drop the row and leave the data behind).
+ */
 export async function listEligibleDestroyExecutors(
   executor: VolumeExecutor,
   sharedBackendId: string,
-  options: { excludeServerId?: string } = {},
+  options: { excludeServerId?: string; includeOffline?: boolean } = {},
 ): Promise<EligibleDestroyExecutor[]> {
   let query = executor
     .selectFrom('infra.servers as s')
@@ -456,13 +462,15 @@ export async function listEligibleDestroyExecutors(
       'p.id as pool_id',
       'p.incus_name as pool_name',
     ])
-    .where('s.status', '=', 'online')
     .where('p.registered', '=', true)
     .where('p.shareable', '=', true)
     .where('p.driver', '=', 'cephfs')
     .where('p.shared_backend_id', '=', sharedBackendId)
     .orderBy('s.id', 'asc')
     .orderBy('p.id', 'asc');
+  if (!options.includeOffline) {
+    query = query.where('s.status', '=', 'online');
+  }
   if (options.excludeServerId) {
     query = query.where('s.id', '!=', options.excludeServerId);
   }

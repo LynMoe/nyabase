@@ -1044,6 +1044,38 @@ describePg('PostgreSQL running-memory and GPU admission', () => {
     });
   });
 
+  it('admits a restart that revives a stop not yet observed like a start', async () => {
+    await withPostgresTestDatabase(async ({ database }) => {
+      const { fixture, service, owner } = await seed(database, 1_000);
+      const a = await service.create(owner, request(fixture, 'a', { memBytes: 600, ...RUNNING }));
+      await database.updateTable('control.container_ssh_routes')
+        .set({ instance_status: 'Running' }).where('container_id', '=', a.resourceId).execute();
+      // Stop A, fill the quota with B, then restart A before its stop is observed.
+      await service.action(owner, a.resourceId, 'stop');
+      const b = await service.create(owner, request(fixture, 'b', { memBytes: 600, ...RUNNING }));
+      await expectCode(service.action(owner, a.resourceId, 'restart'), FailureCode.MemoryGrantExceeded);
+      const row = await database.selectFrom('control.containers').select('power_intent')
+        .where('id', '=', a.resourceId).executeTakeFirstOrThrow();
+      expect(row.power_intent).toBe(ContainerPowerIntent.Stopped);
+      await setPower(database, b.resourceId, 'stopped');
+      await expect(service.action(owner, a.resourceId, 'restart')).resolves.toBeDefined();
+    });
+  });
+
+  it('rejects a reviving restart while a claimed GPU is outside the grant', async () => {
+    await withPostgresTestDatabase(async ({ database }) => {
+      const { fixture, service, owner } = await seed(database, null);
+      const created = await service.create(owner, request(fixture, 'gpu', RUNNING));
+      await database.updateTable('control.container_ssh_routes')
+        .set({ instance_status: 'Running' }).where('container_id', '=', created.resourceId).execute();
+      await database.insertInto('control.container_gpu_claims').values({
+        container_id: created.resourceId, server_id: fixture.serverId, pci_address: GPU,
+      }).execute();
+      await service.action(owner, created.resourceId, 'stop');
+      await expectCode(service.action(owner, created.resourceId, 'restart'), FailureCode.GpuNotGranted);
+    });
+  });
+
   it('admits exactly one of two concurrent starts that only fit alone', async () => {
     await withPostgresTestDatabase(async ({ database }) => {
       const { fixture, service, owner } = await seed(database, 1_000);
